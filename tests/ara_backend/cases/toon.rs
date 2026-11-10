@@ -170,6 +170,7 @@ fn lit_toon_original_program_native_replay_against_cpu() -> Result<()> {
                 images.insert(spec.key, image);
                 image_data.insert(spec.key, bytes);
             }
+            InputKind::StorageImage { .. } => anyhow::bail!("unexpected toon storage image"),
             InputKind::Sampler { comparison } => {
                 ensure!(!comparison, "unexpected comparison sampler")
             }
@@ -264,6 +265,9 @@ fn lit_toon_original_program_native_replay_against_cpu() -> Result<()> {
                     }),
                     InputKind::Image { .. } => Input::Image(&images[&spec.key]),
                     InputKind::Sampler { .. } => Input::Sampler(SamplerDesc::default()),
+                    InputKind::StorageImage { .. } => {
+                        anyhow::bail!("unexpected toon storage image")
+                    }
                 };
                 values.push((spec.key, input));
             }

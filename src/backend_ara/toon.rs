@@ -2,7 +2,7 @@
 use super::{
     bindings::HeapBindings,
     cache::ShaderCache,
-    graph::Graph,
+    graph::{Graph, ResourceUse},
     image::Texture,
     mesh::{MeshGeometry, mesh_state},
     post_surface::RasterDepth,
@@ -74,14 +74,14 @@ impl ToonPass {
             graph.require_initialized(Resource::Image(targets.depth.image()))?;
         }
         let mut uses = vec![
-            (Resource::Image(targets.color.image), Access::Color),
-            (Resource::Image(targets.depth.image()), Access::Depth),
+            ResourceUse::Whole(Resource::Image(targets.color.image), Access::Color),
+            ResourceUse::Whole(Resource::Image(targets.depth.image()), Access::Depth),
         ];
         for draw in draws {
             uses.extend(draw.bindings.uses());
-            uses.extend(draw.geometry.raster_uses());
+            uses.extend(draw.geometry.raster_uses().map(ResourceUse::from));
         }
-        graph.node(rec, &uses)?;
+        graph.node_uses(rec, &uses)?;
         rec.push(Command::BeginPass("ara::ToonOpaque".into()));
         rec.push(Command::BeginRendering {
             colors: vec![Attachment {

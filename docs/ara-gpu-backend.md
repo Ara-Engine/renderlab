@@ -475,3 +475,39 @@ Multi-material toon batch/load behavior is implemented but not independently rep
 
 There are 25 original entries plus display transfer,17 native replay tests, and 33
 validated SPIR-V stages. Native Vulkan remains pending for the entire cohort.
+
+
+## Conservative HZB base and mip reduction
+
+The unchanged `visibility_buffer_hzb.wgsl::base` and `reduce` entries rebuild one
+R32Float image with a complete mip chain. Base extent preserves Renderlab's
+power-of-two half-resolution dimensions. The first kernel reads the visibility
+buffer's second word as reversed-Z depth; image padding stays zero and cannot
+occlude. Reduction clamps neighbours when an axis reaches one texel.
+
+Storage-image inputs now use the same reflected packet, with exact format and
+single-mip validation. MSL selects a typed write view from Ara's storage-image
+heap; SPIR-V aliases its typed runtime arrays to binding3. Currently supported
+write formats are R32Float, RGBA16Float, RGBA32Float and R32Uint; unsupported
+storage accesses/formats fail explicitly. No new descriptor-set model is introduced.
+
+The graph registers allocation bounds when an image view is declared, inheriting
+its prior whole-resource state. It then tracks mip/layer cells, permits disjoint
+read/write views in one node, and emits one batched list of exact range barriers.
+Later whole-resource uses expand to those cells; attachment loads require every
+cell to be initialized. Buffer and old whole-image call sites retain their API.
+Invalid bounds, overlapping writes and undefined reads are rejected before graph
+or recorder mutation. `Texture::view` now carries dimension and subresource bounds
+as one native view description.
+
+Two17×11 visibility frames produce171 exact float texels across five mips each.
+Both complete rebuilds and their full-pyramid readbacks are submitted before the
+first CPU wait, covering read-after-write, overwrite-after-read and reinitialization
+of the same allocation. The native replay also checks invalid read/alias/range
+rejection. All18 replays pass with Metal API/shader validation; all35 exported
+SPIR-V stages validate. There are27 original entries plus display transfer.
+Native Vulkan, including mixed mip layouts, remains pending.
+
+The shared SPIR-V repair's independent review found no must-fix issue. Unknown
+store-pointer origins now fail explicitly, matching load handling; header and
+unsupported grouped-decoration checks also fail before rewriting.

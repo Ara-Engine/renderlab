@@ -8,6 +8,7 @@ pub mod buffer;
 pub mod cache;
 pub mod environment;
 pub mod graph;
+pub mod hzb;
 pub mod image;
 pub mod kernel;
 pub mod light_cluster;

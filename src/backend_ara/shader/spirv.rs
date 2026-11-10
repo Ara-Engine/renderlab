@@ -296,7 +296,12 @@ fn remap_heap_aliases(words: &mut [u32]) -> Result<()> {
                 .take_while(|b| *b != 0)
                 .collect();
             let name = std::str::from_utf8(&bytes)?;
-            let remap = if name == "ara_depths" {
+            let remap = if let Some(n) = name
+                .strip_prefix("ara_storage_")
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                Some((1600 + n, 3))
+            } else if name == "ara_depths" {
                 Some((11, 5))
             } else if name == "ara_volume_outputs" {
                 Some((9, 3))

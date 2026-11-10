@@ -23,6 +23,10 @@ pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
+    /// Base reversed-Z minimum depth from the visibility buffer.
+    HzbBase,
+    /// Minimum reduction from the previous image mip.
+    HzbReduce,
     /// Original sorted procedural or textured particle billboard composition.
     ParticleBillboard,
     /// Original spawn, drag/gravity integration and incident particle lighting.
@@ -81,6 +85,9 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::HzbBase | Self::HzbReduce => {
+                include_str!("../../../shaders/visibility_buffer_hzb.wgsl").into()
+            }
             Self::ParticleUpdate | Self::ParticleBillboard => format!(
                 "{}{}{}{}{}{}{}",
                 include_str!("../../../shaders/scene.wgsl"),
@@ -219,7 +226,11 @@ impl Pass {
     pub(super) fn indirect(self) -> bool {
         matches!(
             self,
-            Self::MeshToon | Self::ParticleUpdate | Self::ParticleBillboard
+            Self::MeshToon
+                | Self::ParticleUpdate
+                | Self::ParticleBillboard
+                | Self::HzbBase
+                | Self::HzbReduce
         )
     }
     pub(super) fn metal_version(self) -> (u8, u8) {
@@ -281,6 +292,8 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::HzbBase => "base",
+            Self::HzbReduce => "reduce",
             Self::ParticleBillboard => "tp_particle_fs",
             Self::ParticleUpdate => "tp_particles_update",
             Self::MeshToon => "fs_lit",

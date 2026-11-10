@@ -67,6 +67,15 @@ pub(super) fn adapt(body: &str, module: &naga::Module) -> Result<String> {
                 );
                 names.insert(input.name.as_str(), replacement);
             }
+            InputKind::StorageImage { dimension, format } => {
+                let dim = match dimension {
+                    ViewDimension::D2 => "2d",
+                    ViewDimension::D2Array => "2d_array",
+                    ViewDimension::D3 => "3d",
+                };
+                declarations.push_str(&format!("@group(0) @binding({}) var ara_storage_{i}:binding_array<texture_storage_{dim}<{},write>>;\n",1600+i,super::heap_interface::storage_wgsl(format)?));
+                names.insert(input.name.as_str(), format!("ara_storage_{i}[{slot}]"));
+            }
             InputKind::Sampler { comparison } => {
                 let name = if comparison {
                     format!("ara_comparison_{i}")

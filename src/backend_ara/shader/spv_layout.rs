@@ -26,11 +26,28 @@ fn layout(instruction: &[u32]) -> bool {
 /// physical types and bridge whole loads/stores using SPIR-V1.4 OpCopyLogical;
 /// their member types/counts stay identical, including arrays and nested structs.
 pub(super) fn repair(words: &mut Vec<u32>) -> Result<()> {
+    ensure!(
+        words.len() >= 5 && words[0] == 0x07230203,
+        "invalid SPIR-V header"
+    );
     let mut instructions = Vec::<Vec<u32>>::new();
     let mut at = 5;
     while at < words.len() {
         let n = (words[at] >> 16) as usize;
         ensure!(n > 0 && at + n <= words.len(), "invalid SPIR-V instruction");
+        let op = words[at] & 0xffff;
+        let minimum = match op {
+            28 | 32 | 61 => 4,
+            29 | 62 | 71 => 3,
+            30 => 2,
+            72 => 4,
+            _ => 1,
+        };
+        ensure!(n >= minimum, "truncated SPIR-V instruction");
+        ensure!(
+            !matches!(op, 74 | 75 | 332 | 5632 | 5633),
+            "unsupported grouped/indirect SPIR-V decoration"
+        );
         instructions.push(words[at..at + n].to_vec());
         at += n;
     }
@@ -152,9 +169,13 @@ pub(super) fn repair(words: &mut Vec<u32>) -> Result<()> {
                 continue;
             }
         } else if op == 62 {
-            let pointer = result_types.get(&i[1]).and_then(|t| pointers.get(t));
-            if let Some(&(class, pointee)) = pointer
-                && physical(class)
+            let pointer_type = result_types
+                .get(&i[1])
+                .context("store pointer origin unsupported")?;
+            let &(class, pointee) = pointers
+                .get(pointer_type)
+                .context("store pointer type missing")?;
+            if physical(class)
                 && let Some(&clone) = clones.get(&pointee)
             {
                 ensure!(

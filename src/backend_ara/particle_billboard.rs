@@ -2,7 +2,7 @@
 use super::{
     bindings::HeapBindings,
     cache::ShaderCache,
-    graph::Graph,
+    graph::{Graph, ResourceUse},
     image::Texture,
     shader::{InputKey, Pass},
 };
@@ -52,11 +52,14 @@ impl ParticleBillboard {
         ensure!(
             !draws.is_empty()
                 && target.format == self.format
-                && target.view_dimension == ViewDimension::D2
+                && target.view.dimension == ViewDimension::D2
                 && target.shape.samples == SampleCount::One,
             "invalid particle billboard target/batch"
         );
-        let mut uses = vec![(Resource::Image(target.image), Access::Color)];
+        let mut uses = vec![ResourceUse::Whole(
+            Resource::Image(target.image),
+            Access::Color,
+        )];
         for draw in draws {
             ensure!(
                 draw.inputs.pass() == Pass::ParticleBillboard
@@ -79,7 +82,7 @@ impl ParticleBillboard {
         if clear.is_none() {
             graph.require_initialized(Resource::Image(target.image))?;
         }
-        graph.node(rec, &uses)?;
+        graph.node_uses(rec, &uses)?;
         rec.push(Command::BeginPass("ara::ParticleBillboard".into()));
         rec.push(Command::BeginRendering {
             colors: vec![Attachment {

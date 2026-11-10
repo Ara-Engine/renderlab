@@ -1,7 +1,7 @@
 //! Logical WGSL inputs become one persistent heap-index packet, without native sets.
 use super::{
     buffer::StorageBuffer,
-    graph::Graph,
+    graph::{Graph, ResourceUse},
     image::Texture,
     shader::{self, InputKey, InputKind, Pass, SampleType, ShaderInput},
 };
@@ -68,7 +68,8 @@ impl<'a> HeapBindings<'a> {
                 }
                 (InputKind::Image { dimension, sample }, Input::Image(t)) => {
                     ensure!(
-                        t.view_dimension == dimension,
+                        t.view.dimension == dimension
+                            && t.shape.samples == ara_gpu::texture::SampleCount::One,
                         "image {} has the wrong view dimension",
                         required.name
                     );
@@ -90,6 +91,26 @@ impl<'a> HeapBindings<'a> {
                         required.name
                     );
                     t.sampled
+                }
+                (InputKind::StorageImage { dimension, format }, Input::Image(t)) => {
+                    ensure!(
+                        t.view.dimension == dimension
+                            && t.view.mip_count == 1
+                            && t.shape.samples == ara_gpu::texture::SampleCount::One,
+                        "storage image {} has the wrong view",
+                        required.name
+                    );
+                    ensure!(
+                        t.format == format,
+                        "storage image {} has the wrong format",
+                        required.name
+                    );
+                    t.storage.with_context(|| {
+                        format!(
+                            "storage image {} has no writable publication",
+                            required.name
+                        )
+                    })?
                 }
                 (InputKind::Sampler { comparison }, Input::Sampler(desc)) => {
                     ensure!(
@@ -136,11 +157,14 @@ impl<'a> HeapBindings<'a> {
             })
     }
     /// Every reachable input and packet use, for union with a whole raster batch.
-    pub fn uses(&self) -> Vec<(Resource, Access)> {
-        let mut uses = vec![(Resource::Buffer(self.record.buffer), Access::ShaderRead)];
+    pub fn uses(&self) -> Vec<ResourceUse> {
+        let mut uses = vec![ResourceUse::Whole(
+            Resource::Buffer(self.record.buffer),
+            Access::ShaderRead,
+        )];
         for (value, spec) in self.values.iter().zip(&self.layout) {
             match value {
-                Input::Buffer(b) => uses.push((
+                Input::Buffer(b) => uses.push(ResourceUse::Whole(
                     Resource::Buffer(b.buffer),
                     if matches!(spec.kind, InputKind::Buffer { writable: true, .. }) {
                         Access::Storage
@@ -148,7 +172,13 @@ impl<'a> HeapBindings<'a> {
                         Access::ShaderRead
                     },
                 )),
-                Input::Image(t) => uses.push((Resource::Image(t.image), Access::ShaderRead)),
+                Input::Image(t) => uses.push(t.usage(
+                    if matches!(spec.kind, InputKind::StorageImage { .. }) {
+                        Access::Storage
+                    } else {
+                        Access::ShaderRead
+                    },
+                )),
                 Input::Sampler(_) => {}
             }
         }

@@ -236,6 +236,10 @@ fn wrap(
                         "samplers"
                     }
                 ),
+                super::InputKind::StorageImage { dimension, format } => format!(
+                    "((device {}*)top.storage_images)[{slot}].texture",
+                    super::heap_interface::storage_entry(dimension, format)?
+                ),
                 super::InputKind::Image { dimension, sample } => format!(
                     "((device {}*)top.textures)[{slot}].texture",
                     super::heap_interface::image_entry(dimension, sample)?

@@ -1,4 +1,5 @@
 //! Typed image identities and publication; the caller owns device retirement.
+use super::graph::{ResourceUse, Subresources};
 use anyhow::{Result, ensure};
 use ara_gpu::{
     Device, GpuDevice, Image,
@@ -17,12 +18,102 @@ pub struct Texture {
     pub format: Format,
     /// Published view shape; all views retain the parent resource identity.
     pub shape: ImageShape,
-    /// Published dimension, including one-layer arrays.
-    pub view_dimension: ViewDimension,
+    /// Full allocation bounds for graph range accounting.
+    pub allocation: Subresources,
+    /// Published mip/layer interval, including one-layer array dimensionality.
+    pub view: ImageViewDesc,
     pub(crate) sampled: u32,
     pub(crate) storage: Option<u32>,
 }
 impl Texture {
+    /// Declare exactly the published view, retaining its parent allocation identity.
+    pub fn usage(&self, access: ara_gpu::Access) -> ResourceUse {
+        ResourceUse::Image {
+            image: self.image,
+            allocation: self.allocation,
+            view: self.view,
+            access,
+        }
+    }
+    /// Allocate one 2D mip chain and publish separate sampled/storage views per level.
+    /// Retire the returned parent exactly once; views share that allocation.
+    pub fn mip_chain(
+        gpu: &mut GpuDevice,
+        size: [u32; 2],
+        levels: u32,
+        format: Format,
+    ) -> Result<(Self, Vec<Self>)> {
+        let shape = ImageShape {
+            mip_levels: levels,
+            ..Default::default()
+        };
+        let image = gpu.create_texture(&TextureDesc {
+            image: ImageDesc {
+                size,
+                format,
+                sampled: true,
+                storage: true,
+                attachment: false,
+                copy_source: true,
+                copy_destination: true,
+            },
+            shape,
+        })?;
+        let sampled = match gpu.sampled_image(image, false) {
+            Ok(v) => v.index,
+            Err(e) => {
+                gpu.retire(ara_gpu::Resource::Image(image))?;
+                return Err(e.into());
+            }
+        };
+        let parent = Self {
+            image,
+            size,
+            format,
+            shape,
+            allocation: Subresources {
+                mips: levels,
+                layers: 1,
+            },
+            view: ImageViewDesc {
+                dimension: ViewDimension::D2,
+                base_mip: 0,
+                mip_count: levels,
+                base_layer: 0,
+                layer_count: 1,
+            },
+            sampled,
+            storage: None,
+        };
+        let result: Result<Vec<Self>> = (0..levels)
+            .map(|mip| {
+                let view = ImageViewDesc {
+                    dimension: ViewDimension::D2,
+                    base_mip: mip,
+                    mip_count: 1,
+                    base_layer: 0,
+                    layer_count: 1,
+                };
+                Ok(Self {
+                    image: parent.image,
+                    size: size.map(|n| (n >> mip).max(1)),
+                    format,
+                    shape: ImageShape::default(),
+                    allocation: parent.allocation,
+                    view,
+                    sampled: gpu.sampled_view(parent.image, view)?.index,
+                    storage: Some(gpu.storage_view(parent.image, view)?.index),
+                })
+            })
+            .collect();
+        match result {
+            Ok(views) => Ok((parent, views)),
+            Err(e) => {
+                gpu.retire(ara_gpu::Resource::Image(parent.image))?;
+                Err(e)
+            }
+        }
+    }
     /// Allocate one layered image with all mips, publishing one narrow storage view
     /// per level. Every view shares the parent identity for barriers and retirement.
     pub fn cube_chain(gpu: &mut GpuDevice, side: u32, levels: u32) -> Result<(Self, Vec<Self>)> {
@@ -54,7 +145,17 @@ impl Texture {
                     mip_levels: levels,
                     ..Default::default()
                 },
-                view_dimension: ViewDimension::D2Array,
+                allocation: Subresources {
+                    mips: levels,
+                    layers: 6,
+                },
+                view: ImageViewDesc {
+                    dimension: ViewDimension::D2Array,
+                    base_mip: 0,
+                    mip_count: levels,
+                    base_layer: 0,
+                    layer_count: 6,
+                },
                 sampled: gpu.sampled_image(image, false)?.index,
                 storage: None,
             };
@@ -76,7 +177,11 @@ impl Texture {
                         mip_levels: 1,
                         ..Default::default()
                     },
-                    view_dimension: ViewDimension::D2Array,
+                    allocation: Subresources {
+                        mips: levels,
+                        layers: 6,
+                    },
+                    view: desc,
                     sampled: gpu.sampled_view(image, desc)?.index,
                     storage: Some(gpu.storage_view(image, desc)?.index),
                 });
@@ -126,7 +231,8 @@ impl Texture {
                 size,
                 format,
                 shape,
-                view_dimension: ViewDimension::D2Array,
+                allocation: Subresources { mips: 1, layers },
+                view: desc,
                 sampled: gpu.sampled_view(image, desc)?.index,
                 storage: if storage {
                     Some(gpu.storage_view(image, desc)?.index)
@@ -221,12 +327,22 @@ impl Texture {
                 size,
                 format,
                 shape,
-                view_dimension: if shape.dimension == ara_gpu::texture::TextureDimension::D3 {
-                    ViewDimension::D3
-                } else if shape.layers > 1 {
-                    ViewDimension::D2Array
-                } else {
-                    ViewDimension::D2
+                allocation: Subresources {
+                    mips: shape.mip_levels,
+                    layers: shape.layers,
+                },
+                view: ImageViewDesc {
+                    dimension: if shape.dimension == ara_gpu::texture::TextureDimension::D3 {
+                        ViewDimension::D3
+                    } else if shape.layers > 1 {
+                        ViewDimension::D2Array
+                    } else {
+                        ViewDimension::D2
+                    },
+                    base_mip: 0,
+                    mip_count: shape.mip_levels,
+                    base_layer: 0,
+                    layer_count: shape.layers,
                 },
                 sampled,
                 storage,

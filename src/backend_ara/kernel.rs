@@ -39,7 +39,7 @@ impl Kernel {
             inputs.pass() == self.pass && extent.iter().all(|n| *n > 0),
             "invalid kernel packet or extent"
         );
-        graph.node(rec, &inputs.uses())?;
+        graph.node_uses(rec, &inputs.uses())?;
         rec.push(Command::BeginPass(format!("ara::{:?}", self.pass)));
         rec.push(Command::Pipeline(self.pipeline));
         rec.push(Command::Constants(inputs.roots()));

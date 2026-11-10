@@ -1,6 +1,6 @@
 //! Reflection shared by shader adaptation and persistent logical-input packets.
 use anyhow::{Context, Result, bail, ensure};
-use ara_gpu::texture::ViewDimension;
+use ara_gpu::{descriptors::Format, texture::ViewDimension};
 use naga::{AddressSpace, ImageClass, ImageDimension, ScalarKind, TypeInner};
 /// A logical WGSL resource key; never a native descriptor set allocation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -36,6 +36,13 @@ pub enum InputKind {
         dimension: ViewDimension,
         /// Scalar or depth interpretation.
         sample: SampleType,
+    },
+    /// Write-only storage image, with an exact portable format.
+    StorageImage {
+        /// Shader view dimension.
+        dimension: ViewDimension,
+        /// Declared storage texel format.
+        format: Format,
     },
     /// Immutable regular or comparison sampler.
     Sampler {
@@ -92,6 +99,24 @@ pub(super) fn from_module(module: &naga::Module) -> Result<Vec<ShaderInput>> {
                         (ImageDimension::D3, false) => ViewDimension::D3,
                         _ => bail!("unported image dimension for {:?}", g.name),
                     };
+                    if let ImageClass::Storage { format, access } = class {
+                        ensure!(
+                            access == naga::StorageAccess::STORE,
+                            "unported storage-image access"
+                        );
+                        inputs.push(ShaderInput {
+                            key: InputKey {
+                                group: binding.group,
+                                binding: binding.binding,
+                            },
+                            name: g.name.clone().context("resource missing name")?,
+                            kind: InputKind::StorageImage {
+                                dimension,
+                                format: storage_format(format)?,
+                            },
+                        });
+                        continue;
+                    }
                     let sample = match class {
                         ImageClass::Sampled {
                             kind: ScalarKind::Float,
@@ -204,4 +229,38 @@ pub(super) fn assert_contract(pass: super::Pass, actual: &[ShaderInput]) -> Resu
         "selected shader input contract changed during lowering"
     );
     Ok(())
+}
+
+pub(super) fn storage_format(format: naga::StorageFormat) -> Result<Format> {
+    Ok(match format {
+        naga::StorageFormat::R32Float => Format::R32Float,
+        naga::StorageFormat::Rgba16Float => Format::Rgba16Float,
+        naga::StorageFormat::Rgba32Float => Format::Rgba32Float,
+        naga::StorageFormat::R32Uint => Format::R32Uint,
+        _ => bail!("unported storage-image format {format:?}"),
+    })
+}
+pub(super) fn storage_wgsl(format: Format) -> Result<&'static str> {
+    Ok(match format {
+        Format::R32Float => "r32float",
+        Format::Rgba16Float => "rgba16float",
+        Format::Rgba32Float => "rgba32float",
+        Format::R32Uint => "r32uint",
+        _ => bail!("unported storage-image format"),
+    })
+}
+pub(super) fn storage_entry(dimension: ViewDimension, format: Format) -> Result<&'static str> {
+    Ok(match (dimension, format) {
+        (ViewDimension::D2, Format::R32Uint) => "AraWriteUintImageEntry",
+        (ViewDimension::D2, Format::R32Float | Format::Rgba16Float | Format::Rgba32Float) => {
+            "AraWriteImageEntry"
+        }
+        (ViewDimension::D2Array, Format::R32Float | Format::Rgba16Float | Format::Rgba32Float) => {
+            "AraWriteCubeImageEntry"
+        }
+        (ViewDimension::D3, Format::R32Float | Format::Rgba16Float | Format::Rgba32Float) => {
+            "AraWriteVolumeEntry"
+        }
+        _ => bail!("unported storage-image interpretation"),
+    })
 }
