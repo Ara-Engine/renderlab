@@ -780,3 +780,16 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
 - **OPEN, product defect: loading the quarry peaks at 8.0-8.5 GB of private memory.** On main it reaches 8.5 GB within 16 s of start. The P-PIPE branch hits 8.0 GB at 48 s even warm, with almost no compiling, so this isn't the shader compiler. A player's machine has to load the scene too.
   - **Short follow-up:** find whether the peak comes from scene preparation, upload staging or duplicate copies of the 13 M-triangle scan, then cut it.
   - **Until then:** full-quarry leases run with the named `--quarry-lease` runner setting. It sets a 12 GiB watchdog child cap and starts only at 14 GiB available. The 8 GiB machine floor still applies and is still what kills the lease.
+
+## M8 sky-map cost off the PC (Linux bridge thread, Radeon 760M, 2026-11-11)
+
+- **The sky-map cost reproduces on RADV, inside Renderlab's environment lookups.**
+  - Showcase on hardware RT takes 150.0 ms with a constant sky and 172.7 ms with an image map; 21.5 of the 22.7 ms difference is in the shading pass.
+  - Cube size (64, 32 or 16) changes nothing, and the bridge prepares and sets the sky once in 180 frames.
+  - The Linux thread owns the Renderlab-side investigation, working from docs/design-sky-map-cost.md. Root reviews its PR and times it on the RTX card before merging.
+- **Start-up on the Radeon at 901c1d2.** Warm time is nearly all the capture's 49 settle frames on that GPU.
+
+  | Path | Fully cold | Warm |
+  |---|---|---|
+  | RT | 30.2 s | 15.7 s |
+  | non-RT | 33.9 s | 19.6 s |
