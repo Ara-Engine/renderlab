@@ -60,6 +60,7 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
         Pass::VisibilitySoftware,
         Pass::VisibilityHardware,
         Pass::VisibilityResolve,
+        Pass::PostPrimarySurface,
         Pass::VisibilityCull,
         Pass::VisibilityFinish,
         Pass::VisibilityReset,
@@ -256,3 +257,8 @@ mod visibility_sw_reference;
 mod visibility_resolve_cases;
 #[path = "ara_backend/visibility_resolve_reference.rs"]
 mod visibility_resolve_reference;
+
+#[path = "ara_backend/cases/post_primary.rs"]
+mod post_primary_cases;
+#[path = "ara_backend/post_primary_reference.rs"]
+mod post_primary_reference;

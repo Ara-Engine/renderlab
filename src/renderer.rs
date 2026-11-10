@@ -26,7 +26,7 @@ use hardware_shadow_gpu::HardwareState;
 mod fresh_shadow_gpu;
 use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
-mod primary_ray_gpu;
+pub(crate) mod primary_ray_gpu;
 use primary_ray_gpu::temporal_reconstruction::{self, ReconstructionState};
 pub use primary_ray_gpu::temporal_reconstruction::{
     Reconstruction, ReconstructionShadowBudget, RenderScale,

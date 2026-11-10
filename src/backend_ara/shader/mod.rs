@@ -33,6 +33,8 @@ pub enum Pass {
     VisibilityHardware,
     /// Original packed visibility hit to source-triangle receiver resolution.
     VisibilityResolve,
+    /// Primary-hit rigid/skinned/sky velocity and view depth for post filters.
+    PostPrimarySurface,
     /// Non-RT cluster cut, frustum and two-phase HZB classification.
     VisibilityCull,
     /// Cull output counters to indirect raster/pyramid/cull arguments.
@@ -104,6 +106,18 @@ impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
             Self::BufferArrayProbe => include_str!("../shaders/buffer_array_probe.wgsl").into(),
+            Self::PostPrimarySurface => {
+                let [head, _] = crate::renderer::primary_ray_gpu::non_rt_heads(include_str!(
+                    "../../../shaders/scene.wgsl"
+                ))
+                .expect("embedded ray-free primary composition");
+                format!(
+                    "{head}{}{}",
+                    include_str!("../../../shaders/object_motion.wgsl"),
+                    include_str!("../../../shaders/post_surface.wgsl")
+                )
+                .into()
+            }
             Self::VisibilityResolve => crate::renderer::visibility_buffer::resolve_source(
                 include_str!("../../../shaders/scene.wgsl"),
             )
@@ -277,6 +291,7 @@ impl Pass {
             Self::BufferArrayProbe
                 | Self::VisibilitySoftware
                 | Self::VisibilityResolve
+                | Self::PostPrimarySurface
                 | Self::VisibilityHardware
                 | Self::MeshToon
                 | Self::ParticleUpdate
@@ -349,6 +364,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::PostPrimarySurface => "post_primary_surface",
             Self::VisibilityResolve => "resolve",
             Self::VisibilityHardware => "fs",
             Self::VisibilitySoftware => "raster",

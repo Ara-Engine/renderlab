@@ -661,3 +661,24 @@ regions match exactly. Adjacency/edge repair and nonzero LOD lift remain unprove
 After merging Renderlab main 7bd8b9a, all 28 focused tests pass under Metal API/shader
 validation, and all 44 exported SPIR-V stages validate with matching native entry
 metadata. Native Vulkan remains pending. There are 34 original entries plus display.
+
+## Hit-based post surface (entry 35)
+
+The unchanged `post_surface.wgsl::post_primary_surface` now runs from the original
+ray-free head plus `object_motion.wgsl`. Two crate-visibility changes expose the
+existing head composer; the wgpu pass bodies are unchanged. Current/previous models
+and three fixed buffer arrays preserve the original rigid/skinned stream ABI. The
+rigid fixture shares its current and previous buffer owner, exercising readonly
+aliases across logical inputs.
+
+Four queued submissions, with GPU-ordered updates to one parameter buffer, compare
+all 117 RGBA32Float pixels against independent f64 reconstruction/projection:
+7×5 internal hits to 13×9 output, two scattered owners, reordered corners, rigid
+model motion, skinned vertex history, sky camera motion, stale uncovered hits,
+velocity-radius clamping, history off, previous clip behind the camera and minimum
+view depth. Maximum errors are 9.54e-7 for motion and 2.39e-7 in the other variants.
+Sky depth 1e8, alpha 1 and the history-off/behind velocities match exactly.
+
+All 29 focused tests and 45 exported SPIR-V stages pass on Metal with API/shader
+validation and structural/native-entry audits. Vulkan execution is pending. There
+are 35 original entries plus display; temporal reconstruction remains a later phase.

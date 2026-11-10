@@ -63,7 +63,7 @@ pub(super) fn transparent_reflection_head(wgsl: &str) -> Result<String, Error> {
 }
 
 /// Same engine seams and material ABI, with no traversal declarations at all.
-pub(super) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
+pub(crate) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
     // Validate the affine/visibility seams even though this composition has no rays.
     crate::hardware_shadows::shader_source(wgsl, SampleCount::One)?;
     let (before, rest) = wgsl
