@@ -480,8 +480,8 @@ fn reload_gate(
         let standard_traced = r.programs[0]
             .pipelines
             .traced
-            .as_ref()
-            .map(|p| p.each_ref().map(|p| (**p).clone()));
+            .each_ref()
+            .map(|p| p.as_ref().map(|p| (**p).clone()));
         scene.frame(r, color, 0, true);
         let accepted = hdr(r);
         let visibility = counts(r);
@@ -542,8 +542,8 @@ fn reload_gate(
             r.programs[0]
                 .pipelines
                 .traced
-                .as_ref()
-                .map(|p| p.each_ref().map(|p| (**p).clone()))
+                .each_ref()
+                .map(|p| p.as_ref().map(|p| (**p).clone()))
         );
         scene.frame(r, color, 0, false);
         let before_standard = r.stats().pipelines.created;

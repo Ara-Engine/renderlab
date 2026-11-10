@@ -1,11 +1,16 @@
 //! PC1: device-owned pipeline cache and opt-in startup profiling. Descriptors and
 //! shader sources are unchanged; wgpu still validates and compiles every edit.
 //! Engine-owned shaders share one runtime-check policy; user programs stay checked.
+//! P-PIPE: the disk cache is saved during compilation, not only on drop, so a killed
+//! process keeps what it compiled.
 use sha2::{Digest, Sha256};
 use std::{
     ops::Deref,
     path::{Path, PathBuf},
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -18,11 +23,15 @@ pub struct CompilationTiming {
     pub duration: Duration,
 }
 
-const CACHE_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const CACHE_BYTES: usize = 64 * 1024 * 1024;
 
 struct Compilation {
     cache: Option<wgpu::PipelineCache>,
     path: Option<PathBuf>,
+    /// Pipeline creation time through `cache` since the last save, in nanoseconds.
+    unsaved: AtomicU64,
+    /// Held while saving; holds the last save's duration, which sets the save interval.
+    save: Mutex<Duration>,
     profile: bool,
     checked_shaders: std::sync::atomic::AtomicBool,
     timings: Mutex<Vec<CompilationTiming>>,
@@ -88,6 +97,8 @@ impl PipelineDevice {
             compilation: Arc::new(Compilation {
                 cache,
                 path,
+                unsaved: AtomicU64::new(0),
+                save: Mutex::new(Duration::ZERO),
                 profile,
                 checked_shaders: std::sync::atomic::AtomicBool::new(engine_shader_checks(checked)),
                 timings: Mutex::new(timings),
@@ -116,10 +127,14 @@ impl PipelineDevice {
         }
         let start = Instant::now();
         let result = compile();
+        self.record(kind, label, start.elapsed());
+        result
+    }
+    fn record(&self, kind: &'static str, label: Option<&str>, duration: Duration) {
         let timing = CompilationTiming {
             kind,
             label: label.unwrap_or("").into(),
-            duration: start.elapsed(),
+            duration,
         };
         eprintln!(
             "pipeline_compile kind={kind} label={:?} ms={:.3}",
@@ -130,6 +145,27 @@ impl PipelineDevice {
         // Profiling must stay bounded in a long-running editor session.
         if timings.len() < 4096 {
             timings.push(timing);
+        }
+    }
+    /// Creates a pipeline within the process-wide compile limit, then lets the shared
+    /// disk cache save if `cache` is it. Timing excludes the wait for a compile slot.
+    fn pipeline<T>(
+        &self,
+        kind: &'static str,
+        label: Option<&str>,
+        cache: Option<&wgpu::PipelineCache>,
+        compile: impl FnOnce() -> T,
+    ) -> T {
+        let slot = CompileSlot::acquire();
+        let start = Instant::now();
+        let result = compile();
+        let duration = start.elapsed();
+        drop(slot);
+        if self.compilation.profile {
+            self.record(kind, label, duration);
+        }
+        if cache.is_some() && cache == self.pipeline_cache() {
+            self.compilation.compiled(duration);
         }
         result
     }
@@ -164,7 +200,7 @@ impl PipelineDevice {
             cache: desc.cache.or(self.pipeline_cache()),
             ..desc.clone()
         };
-        self.timed("compute", desc.label, || {
+        self.pipeline("compute", desc.label, desc.cache, || {
             self.raw.create_compute_pipeline(&desc)
         })
     }
@@ -176,9 +212,48 @@ impl PipelineDevice {
             cache: desc.cache.or(self.pipeline_cache()),
             ..desc.clone()
         };
-        self.timed("render", desc.label, || {
+        self.pipeline("render", desc.label, desc.cache, || {
             self.raw.create_render_pipeline(&desc)
         })
+    }
+}
+
+/// One of the process's pipeline-compile slots, held while a driver compiles.
+///
+/// P-PIPE: every engine and reload worker in the process shares the limit, so callers
+/// that fan out one thread per pipeline (`program_gpu::in_parallel`) cannot run
+/// unbounded native compiles at once. On NVIDIA 617 each compile of a program shading
+/// kernel (~230 KB SPIR-V) holds about 4.5-5 GB of driver memory while it runs; two at
+/// once passed 8 GB and unbounded cold starts reached 18 GB private. The default of one
+/// keeps a cold start near one kernel's peak (docs/p-pipe.md) at the cost of compiling
+/// serially. `RENDERLAB_PIPELINE_COMPILES` raises it (at least 1).
+struct CompileSlot;
+static SLOTS: (Mutex<usize>, std::sync::Condvar) = (Mutex::new(0), std::sync::Condvar::new());
+impl CompileSlot {
+    fn limit() -> usize {
+        static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        *LIMIT.get_or_init(|| {
+            std::env::var("RENDERLAB_PIPELINE_COMPILES")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1usize)
+                .max(1)
+        })
+    }
+    fn acquire() -> Self {
+        let (busy, freed) = &SLOTS;
+        let mut busy = freed
+            .wait_while(busy.lock().unwrap(), |busy| *busy >= Self::limit())
+            .unwrap();
+        *busy += 1;
+        Self
+    }
+}
+impl Drop for CompileSlot {
+    fn drop(&mut self) {
+        let (busy, freed) = &SLOTS;
+        *busy.lock().unwrap() -= 1;
+        freed.notify_one();
     }
 }
 
@@ -222,9 +297,14 @@ fn cache_data(bytes: &[u8]) -> Option<&[u8]> {
     let (hash, data) = bytes.split_at_checked(32)?;
     (data.len() <= CACHE_BYTES && Sha256::digest(data).as_slice() == hash).then_some(data)
 }
-fn read_cache(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+/// Reads a file `write_cache` wrote: its checksummed payload, or `None` when the file
+/// is missing, oversize, truncated or corrupt.
+pub(crate) fn read_cache(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     use std::io::Read;
-    let file = std::fs::File::open(path)?;
+    let file = match std::fs::File::open(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        file => file?,
+    };
     if file.metadata()?.len() > CACHE_BYTES as u64 + 32 {
         return Ok(None);
     }
@@ -233,33 +313,67 @@ fn read_cache(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
     file.take(CACHE_BYTES as u64 + 33).read_to_end(&mut bytes)?;
     Ok(cache_data(&bytes).map(<[u8]>::to_vec))
 }
-impl Drop for Compilation {
-    fn drop(&mut self) {
+/// Replaces `path` with `cache`'s current data behind a checksum. Each call writes its
+/// own same-directory temporary file and renames it over `path`, so engines in one
+/// process and other processes can share a directory: readers see a whole old or a
+/// whole new file, and the last rename wins. Data over the size bound is not written.
+pub(crate) fn write_cache(path: &Path, cache: &wgpu::PipelineCache) -> std::io::Result<()> {
+    let Some(data) = cache.get_data().filter(|data| data.len() <= CACHE_BYTES) else {
+        return Ok(());
+    };
+    std::fs::create_dir_all(path.parent().unwrap())?;
+    let mut bytes = Sha256::digest(&data).to_vec();
+    bytes.extend(data);
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let sequence = NEXT.fetch_add(1, Ordering::Relaxed);
+    let temporary = path.with_extension(format!("{}-{sequence}.tmp", std::process::id()));
+    let result = std::fs::write(&temporary, bytes).and_then(|_| std::fs::rename(&temporary, path));
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result
+}
+impl Compilation {
+    /// Counts `duration` of pipeline creation through the disk cache and saves once the
+    /// unsaved time reaches 20x the last save's cost (at least 0.5 s). A killed process
+    /// then loses at most that much compile work, and saving adds at most about 5% to
+    /// compile time. A save already running on another thread is not waited for; that
+    /// save or the next one includes this pipeline.
+    fn compiled(&self, duration: Duration) {
+        if self.path.is_none() {
+            return;
+        }
+        let nanos = duration.as_nanos() as u64;
+        let unsaved = self.unsaved.fetch_add(nanos, Ordering::Relaxed) + nanos;
+        let Ok(mut last) = self.save.try_lock() else {
+            return;
+        };
+        if Duration::from_nanos(unsaved) < (*last * 20).max(Duration::from_millis(500)) {
+            return;
+        }
+        let started = Instant::now();
+        // Pipelines that finish from here on count toward the next save.
+        self.unsaved.fetch_sub(unsaved, Ordering::Relaxed);
+        self.persist();
+        *last = started.elapsed();
+        if self.profile {
+            eprintln!("pipeline_cache_saved ms={:.3}", last.as_secs_f64() * 1e3);
+        }
+    }
+    fn persist(&self) {
         let (Some(cache), Some(path)) = (&self.cache, &self.path) else {
             return;
         };
-        let Some(data) = cache.get_data().filter(|data| data.len() <= CACHE_BYTES) else {
-            return;
-        };
-        let save = || -> std::io::Result<()> {
-            std::fs::create_dir_all(path.parent().unwrap())?;
-            let mut bytes = Sha256::digest(&data).to_vec();
-            bytes.extend(data);
-            // A unique same-directory temporary file keeps concurrent engines and
-            // processes from sharing partial data. Last successful writer wins.
-            static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let sequence = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let temporary = path.with_extension(format!("{}-{sequence}.tmp", std::process::id()));
-            let result =
-                std::fs::write(&temporary, bytes).and_then(|_| std::fs::rename(&temporary, path));
-            if result.is_err() {
-                let _ = std::fs::remove_file(&temporary);
-            }
-            result
-        };
-        if let Err(error) = save() {
+        if let Err(error) = write_cache(path, cache) {
             // Cache I/O is optional acceleration, never a rendering failure.
             eprintln!("pipeline_cache_save_failed={error}");
+        }
+    }
+}
+impl Drop for Compilation {
+    fn drop(&mut self) {
+        if *self.unsaved.get_mut() > 0 {
+            self.persist();
         }
     }
 }
@@ -279,6 +393,23 @@ mod tests {
         assert_ne!(cache_path(directory, &info).unwrap(), original);
         info.backend = wgpu::Backend::Gl;
         assert!(cache_path(directory, &info).is_none());
+    }
+    #[test]
+    fn compile_slots_bound_concurrent_compiles() {
+        use std::sync::atomic::AtomicUsize;
+        let (running, peak) = (AtomicUsize::new(0), AtomicUsize::new(0));
+        std::thread::scope(|s| {
+            for _ in 0..4 * CompileSlot::limit() {
+                s.spawn(|| {
+                    let _slot = CompileSlot::acquire();
+                    let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    std::thread::sleep(Duration::from_millis(5));
+                    running.fetch_sub(1, Ordering::SeqCst);
+                });
+            }
+        });
+        assert!(peak.into_inner() <= CompileSlot::limit());
     }
     #[test]
     fn rejects_corrupt_truncated_and_oversize_cache() {
