@@ -1,6 +1,9 @@
 //! Shared WGSL-to-heap adaptation; all pass algorithms remain in Renderlab WGSL.
+mod heap_interface;
 mod mesh_interface;
 mod metal;
+mod packet_spirv;
+pub use heap_interface::{InputKey, InputKind, SampleType, ShaderInput, inputs};
 pub(crate) use mesh_interface::MeshResource;
 mod particle_interface;
 pub(crate) use particle_interface::ParticleResource;
@@ -17,8 +20,10 @@ pub const POST: &str = include_str!("../../../shaders/post.wgsl");
 /// The unchanged Renderlab fullscreen vertex and tone fragment source.
 pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pass {
+    /// Original programmable toon forward shading, with all optional resource inputs.
+    MeshToon,
     /// Opaque raster depth to transparency view-space distance, preserving misses.
     TransparencyDepth,
     /// Original indexed, instanced unlit/diagnostic mesh draw.
@@ -71,6 +76,14 @@ pub enum Pass {
 impl Pass {
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
         match self {
+            Self::MeshToon => crate::program::compose(
+                include_str!("../../../shaders/scene.wgsl"),
+                include_str!("../../../shaders/programs/toon.wgsl"),
+                crate::program::Stage::Raster,
+                true,
+            )
+            .source
+            .into(),
             Self::TransparencyDepth => format!(
                 "{}{}",
                 transparency_section("TP_FRAME"),
@@ -175,8 +188,18 @@ impl Pass {
     pub(super) fn raster(self) -> bool {
         matches!(
             self,
-            Self::Tone | Self::Display | Self::AtmosphereBackdrop | Self::MeshDiagnostic
+            Self::Tone
+                | Self::Display
+                | Self::AtmosphereBackdrop
+                | Self::MeshDiagnostic
+                | Self::MeshToon
         )
+    }
+    pub(super) fn indirect(self) -> bool {
+        matches!(self, Self::MeshToon)
+    }
+    pub(super) fn metal_version(self) -> (u8, u8) {
+        if self.indirect() { (4, 0) } else { (3, 0) }
     }
     pub(super) fn vertex(self) -> &'static str {
         if matches!(self, Self::AtmosphereBackdrop) {
@@ -228,6 +251,7 @@ impl Pass {
 
     pub(super) fn entry(self) -> &'static str {
         match self {
+            Self::MeshToon => "fs_lit",
             Self::TransparencyDepth => "tp_depth_raster",
             Self::MeshDiagnostic => "fs",
             Self::ParticleSort => "tp_particles_sort",
@@ -280,7 +304,7 @@ fn validate(module: &naga::Module) -> anyhow::Result<naga::valid::ModuleInfo> {
         naga::valid::Capabilities::all(),
     )
     .validate(module)
-    .map_err(|e| anyhow::anyhow!(e.to_string()))
+    .map_err(anyhow::Error::from)
 }
 
 /// Retain only the selected native program before output, preserving algorithms

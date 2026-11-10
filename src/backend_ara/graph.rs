@@ -21,6 +21,16 @@ impl Graph {
             self.states.push((resource, access));
         }
     }
+    /// Attachment loads require an earlier defined producer or explicit import.
+    pub fn require_initialized(&self, resource: Resource) -> Result<()> {
+        ensure!(
+            self.states
+                .iter()
+                .any(|(r, a)| *r == resource && *a != Access::Undefined),
+            "attachment load has no initialized producer"
+        );
+        Ok(())
+    }
     /// Validate a node's declared uses and batch its RAW, WAR and WAW dependencies.
     /// Simultaneous aliases are accepted only for the same read role.
     pub fn node(&mut self, recorder: &mut Recorder, uses: &[(Resource, Access)]) -> Result<()> {

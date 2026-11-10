@@ -374,3 +374,47 @@ against the scalar reference, within0.0005. Unit-illuminance LUT constructors re
 their existing behavior. The second Opus review found no blocking code defect;
 documentation now explicitly separates Metal proof from structural-only validation
 of compacted/re-emitted SPIR-V. The complete native Vulkan cohort remains required.
+
+
+## Programmable lit toon and a reflected input packet
+
+The production composer now builds the original `toon.wgsl` program on
+`scene.wgsl` and executes `vs`/`fs_lit` unchanged on Metal4. Its 22 reachable
+inputs become one persistent storage packet, sorted by original group/binding.
+Two roots name the packet and byte offset; no native per-pass sets or uniform
+buffers are introduced. `HeapBindings` validates every buffer size, image sample
+class and view dimension, and sampler comparison class before publication, and
+retains input borrows. `ToonPass` declares the union before one raster scope and
+can retain an initialized sky/depth attachment. One-layer array views remain
+explicit arrays, including depth arrays.
+
+The independent CPU raster/shading replay covers three reordered instances,
+mirroring, affine normals, varying clip-W, textured vertex color, sidedness,
+smooth/flat normals, banded direct light, ambient fill and rim lighting. All four
+outputs have exact coverage; maximum absolute color error is0.000164450 against
+a0.003 allowance. Optional shadows, clustered lighting, decals and atmosphere
+remain real source branches with valid initialized descriptors but are disabled
+in this fixture. Per-vertex interpolation is compiled/linked; this fixture does
+not independently observe the shadow receiver's three-vertex payload values.
+
+Shared adaptations added for this interface:
+
+- MSL uses reflected ordinal slots for buffers, images and both sampler heaps;
+  runtime-array lengths still come from descriptor byte metadata.
+- Naga30's Metal4 per-vertex input field is declared as `vertices` but read using
+  the containing `triangle` argument name. The adapter checks and repairs exactly
+  three `metal::vertex_index` extractions to the declared field, preserving order.
+- SPIR-V's compacted WGSL re-emission uses inferred local types because explicit
+  `frexp` result annotations use an internal type name that WGSL cannot parse.
+  Module directives are hoisted ahead of the heap declarations.
+- Fixed read-only buffer structs get distinct host block types with the original
+  member sizes. Field reads stay direct; whole-value reads reconstruct the source
+  value field by field, keeping storage layout decorations out of function-local
+  copied materials. Runtime-sized structs stay direct. Unexpected shared explicit
+  layouts fail rather than silently changing buffer offsets.
+
+There are now23 original Renderlab entry points plus display transfer. All15
+replay tests pass with Metal API/shader validation, and all30 exported stages
+pass spirv-val for Vulkan1.3. SPIR-V execution remains pending for the complete
+cohort. In addition, this lit raster path needs PC-owned Ara feature negotiation
+for `VK_KHR_fragment_shader_barycentric`; no Vulkan backend files were edited here.

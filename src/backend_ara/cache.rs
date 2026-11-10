@@ -43,7 +43,7 @@ impl ShaderCache {
         state: RenderState,
     ) -> Result<Pipeline> {
         let source = format!(
-            "{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}{}",
             pass.source(),
             include_str!("shader/metal.rs"),
             include_str!("shader/spirv.rs"),
@@ -51,6 +51,8 @@ impl ShaderCache {
             include_str!("shader/skin_interface.rs"),
             include_str!("shader/particle_interface.rs"),
             include_str!("shader/mesh_interface.rs"),
+            include_str!("shader/heap_interface.rs"),
+            include_str!("shader/packet_spirv.rs"),
             include_str!("cache.rs"),
             include_str!("../../Cargo.lock")
         );
@@ -100,7 +102,11 @@ impl ShaderCache {
             tool(
                 "metal",
                 &[
-                    "-std=metal3.0",
+                    if pass.metal_version().0 == 4 {
+                        "-std=metal4.0"
+                    } else {
+                        "-std=metal3.0"
+                    },
                     "-fno-fast-math",
                     "-ffp-contract=off",
                     "-c",

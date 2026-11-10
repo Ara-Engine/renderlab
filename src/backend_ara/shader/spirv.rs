@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 /// is aliased onto sampled binding 5 in the emitted decorations, because naga's
 /// validator rejects different typed declarations sharing one source binding.
 pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
-    let source = adapt(pass)?;
+    let source = hoist_directives(&adapt(pass)?);
     let mut module = parse(&source)?;
     super::select(&mut module, pass)?;
     let info = validate(&module)?;
@@ -69,11 +69,8 @@ fn adapt(pass: Pass) -> Result<String> {
     let mut module = parse(pass.source().as_ref())?;
     super::select(&mut module, pass)?;
     let info = validate(&module)?;
-    let source = naga::back::wgsl::write_string(
-        &module,
-        &info,
-        naga::back::wgsl::WriterFlags::EXPLICIT_TYPES,
-    )?;
+    let source =
+        naga::back::wgsl::write_string(&module, &info, naga::back::wgsl::WriterFlags::empty())?;
     let original = parse(&source)?;
     let mut body = String::new();
     let mut binding = false;
@@ -89,6 +86,9 @@ fn adapt(pass: Pass) -> Result<String> {
         }
         body.push_str(line);
         body.push('\n');
+    }
+    if pass.indirect() {
+        return super::packet_spirv::adapt(&body, &original);
     }
     if matches!(pass, Pass::MeshDiagnostic) {
         return mesh_interface(&body, &original);
@@ -235,7 +235,8 @@ struct AraLights {{values:array<Light>,}};
 
 // Naga 30 decorates internal arrays/structs with explicit layout, although Vulkan
 // forbids that on Workgroup/Function memory without its optional layout features.
-// Strip only types exclusive to internal memory; reject shared external ABI types.
+// Strip only types exclusive to internal memory. Shared explicit layouts must be
+// split by the WGSL adapter before emission; reject them rather than corrupt an ABI.
 fn repair_internal_layouts(words: &mut Vec<u32>) -> Result<()> {
     let mut types = BTreeMap::<u32, Vec<u32>>::new();
     let mut wg = Vec::new();
@@ -284,7 +285,7 @@ fn repair_internal_layouts(words: &mut Vec<u32>) -> Result<()> {
         if (array_stride || member_layout) && wg.contains(&words[at + 1]) {
             ensure!(
                 !others.contains(&words[at + 1]),
-                "internal-memory layout type also belongs to a storage/uniform ABI"
+                "explicit layout is shared by buffer and internal memory; split the source value type"
             );
             words.drain(at..at + count);
         } else {
@@ -361,6 +362,26 @@ fn remap_heap_aliases(words: &mut [u32]) -> Result<()> {
                 Some((7, 5))
             } else if name == "ara_frames" {
                 Some((8, 1))
+            } else if let Some(n) = name
+                .strip_prefix("ara_buffer_")
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                Some((400 + n, 1))
+            } else if let Some(n) = name
+                .strip_prefix("ara_image_")
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                Some((700 + n, 5))
+            } else if let Some(n) = name
+                .strip_prefix("ara_sampler_")
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                Some((1000 + n, 2))
+            } else if let Some(n) = name
+                .strip_prefix("ara_comparison_")
+                .and_then(|n| n.parse::<u32>().ok())
+            {
+                Some((1300 + n, 6))
             } else if let Some(name) = name.strip_prefix("ara_mesh_") {
                 super::MeshResource::from_name(name).map(|r| (300 + r as u32, 1))
             } else if let Some(name) = name.strip_prefix("ara_particle_") {
@@ -464,6 +485,14 @@ fn rewrite_globals<S: AsRef<str>>(
     names: &BTreeMap<&str, S>,
     original: &naga::Module,
 ) -> Result<String> {
+    rewrite_global_uses(body, names, &BTreeMap::new(), original)
+}
+pub(super) fn rewrite_global_uses<S: AsRef<str>>(
+    body: &str,
+    names: &BTreeMap<&str, S>,
+    values: &BTreeMap<&str, String>,
+    original: &naga::Module,
+) -> Result<String> {
     let globals: std::collections::BTreeSet<_> = original
         .global_variables
         .iter()
@@ -512,12 +541,17 @@ fn rewrite_globals<S: AsRef<str>>(
             let member = body[..start].trim_end().ends_with('.');
             let declaration = body[at..].trim_start().starts_with(':');
             if !member && !declaration && globals.contains(word) {
-                out.push_str(
-                    names
-                        .get(word)
-                        .expect("registered resource global")
-                        .as_ref(),
-                );
+                let field_access = body[at..].trim_start().starts_with('.');
+                if !field_access && let Some(value) = values.get(word) {
+                    out.push_str(value);
+                } else {
+                    out.push_str(
+                        names
+                            .get(word)
+                            .expect("registered resource global")
+                            .as_ref(),
+                    );
+                }
             } else {
                 out.push_str(word);
             }
@@ -672,4 +706,25 @@ struct AraNormals {{values:array<NormalTransform>,}};
 {out}
 "#
     ))
+}
+
+// Heap declarations precede the emitted body; module directives must precede both.
+fn hoist_directives(source: &str) -> String {
+    let mut directives = Vec::new();
+    let mut body = String::new();
+    for line in source.lines() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("enable ")
+            || trimmed.starts_with("requires ")
+            || trimmed.starts_with("diagnostic(")
+        {
+            if !directives.contains(&line) {
+                directives.push(line);
+            }
+        } else {
+            body.push_str(line);
+            body.push('\n');
+        }
+    }
+    directives.join("\n") + "\n" + &body
 }

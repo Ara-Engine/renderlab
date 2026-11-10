@@ -1,4 +1,4 @@
-//! Pixel-centre reference for the original scene.wgsl diagnostic mesh entries.
+//! Pixel-centre raster reference shared by diagnostic and programmable mesh shading.
 use super::reference::{Image, half, sample};
 use glam::{Mat3, Vec2, Vec4};
 use renderlab::{Mat4, Vec3, Vertex};
@@ -70,18 +70,36 @@ pub struct Rasterized {
     pub depth: Vec<f32>,
 }
 
+/// Perspective-interpolated inputs at one surviving pixel centre.
+#[derive(Clone, Copy, Debug)]
+pub struct Fragment {
+    /// World position on the rasterized triangle.
+    pub world: Vec3,
+    /// Interpolated vertex normal before fragment normalization or back-face reversal.
+    pub normal: Vec3,
+    /// Unit triangle-plane normal in the source orientation, including mirrored models.
+    pub geometric: Vec3,
+    /// Perspective-correct texture coordinates.
+    pub uv: [f32; 2],
+    /// Perspective-correct linear vertex color.
+    pub color: [f32; 4],
+    /// Whether the camera sees the source-front side, after model winding correction.
+    pub source_front: bool,
+}
+
 #[derive(Clone, Copy)]
 struct Projected {
     screen: Vec2,
     reciprocal_w: f32,
     depth: f32,
+    world: Vec3,
     normal: Vec3,
     uv: Vec2,
     color: Vec4,
 }
 
 /// Scale first to normalize finite vectors without overflowing the squared length.
-fn unit(value: Vec3) -> Vec3 {
+pub(super) fn unit(value: Vec3) -> Vec3 {
     let scale = value.abs().max_element().max(1e-30);
     let scaled = value / scale;
     scaled / scaled.length_squared().max(1e-30).sqrt()
@@ -97,13 +115,35 @@ fn inclusive(a: Vec2, b: Vec2) -> bool {
     delta.y < 0. || (delta.y == 0. && delta.x > 0.)
 }
 
-/// Rasterize unclipped triangles with perspective-correct varyings and Greater depth.
+/// Render the original diagnostic fragment modes on the shared scalar rasterizer.
+pub fn rasterize(fixture: &Fixture, mode: u32) -> Rasterized {
+    rasterize_with(fixture, |fragment| {
+        let base = sample(&fixture.base, fragment.uv);
+        let mr = sample(&fixture.mr, fragment.uv);
+        let color = match mode {
+            1 => unit(fragment.normal) * 0.5 + Vec3::splat(0.5),
+            2 => Vec3::splat(fixture.material.metallic * mr[2]),
+            3 => Vec3::splat(fixture.material.roughness * mr[1]),
+            _ => Vec3::new(
+                fixture.material.base_color[0] * fragment.color[0] * base[0],
+                fixture.material.base_color[1] * fragment.color[1] * base[1],
+                fixture.material.base_color[2] * fragment.color[2] * base[2],
+            ),
+        };
+        [color.x, color.y, color.z, 1.]
+    })
+}
+
+/// Rasterize unclipped triangles, shading pixels that pass source-face and depth tests.
 ///
 /// This bounded oracle requires all vertices inside the homogeneous clip volume;
 /// it asserts that precondition rather than silently approximating clipped polygons.
 /// Coverage uses exact pixel centres and the top-left rule, without a GPU-specific
 /// fixed-point subpixel grid. The fixed fixture keeps edges away from pixel centres.
-pub fn rasterize(fixture: &Fixture, mode: u32) -> Rasterized {
+pub fn rasterize_with(
+    fixture: &Fixture,
+    mut shade: impl FnMut(Fragment) -> [f32; 4],
+) -> Rasterized {
     let [width, height] = fixture.viewport;
     assert!(width > 0 && height > 0);
     assert!(fixture.indices.len().is_multiple_of(3));
@@ -144,6 +184,7 @@ pub fn rasterize(fixture: &Fixture, mode: u32) -> Rasterized {
                     ),
                     reciprocal_w: 1. / clip.w,
                     depth: ndc.z,
+                    world: world.truncate(),
                     normal: unit(normal_matrix * unit(Vec3::from_array(vertex.normal))),
                     uv: Vec2::from_array(vertex.uv),
                     color: Vec4::from_array(vertex.color),
@@ -162,9 +203,16 @@ pub fn rasterize(fixture: &Fixture, mode: u32) -> Rasterized {
             }
             // A CCW triangle in NDC has negative area after the viewport Y flip.
             let front = area < 0.;
-            if !fixture.material.double_sided && front != (record[12] > 0.) {
+            let source_front = front == (record[12] > 0.);
+            if !fixture.material.double_sided && !source_front {
                 continue;
             }
+            // The derivative cross has this plane's direction, with a viewport-
+            // orientation sign. Restoring source orientation also restores mirrors.
+            let geometric = unit(
+                unit(vertices[1].world - vertices[0].world)
+                    .cross(unit(vertices[2].world - vertices[0].world)),
+            ) * if record[12] > 0. { 1. } else { -1. };
             if area < 0. {
                 vertices.swap(1, 2);
             }
@@ -205,29 +253,19 @@ pub fn rasterize(fixture: &Fixture, mode: u32) -> Rasterized {
                     let sum = homogeneous.iter().sum::<f32>();
                     let weights = homogeneous.map(|weight| weight / sum);
                     let uv = a.uv * weights[0] + b.uv * weights[1] + c.uv * weights[2];
-                    let base = sample(&fixture.base, uv.to_array());
-                    let mr = sample(&fixture.mr, uv.to_array());
-                    let color = match mode {
-                        1 => {
-                            let normal = a.normal * weights[0]
-                                + b.normal * weights[1]
-                                + c.normal * weights[2];
-                            unit(normal) * 0.5 + Vec3::splat(0.5)
-                        }
-                        2 => Vec3::splat(fixture.material.metallic * mr[2]),
-                        3 => Vec3::splat(fixture.material.roughness * mr[1]),
-                        _ => {
-                            let tint =
-                                a.color * weights[0] + b.color * weights[1] + c.color * weights[2];
-                            Vec3::new(
-                                fixture.material.base_color[0] * tint.x * base[0],
-                                fixture.material.base_color[1] * tint.y * base[1],
-                                fixture.material.base_color[2] * tint.z * base[2],
-                            )
-                        }
+                    let fragment = Fragment {
+                        world: a.world * weights[0] + b.world * weights[1] + c.world * weights[2],
+                        normal: a.normal * weights[0]
+                            + b.normal * weights[1]
+                            + c.normal * weights[2],
+                        geometric,
+                        uv: uv.to_array(),
+                        color: (a.color * weights[0] + b.color * weights[1] + c.color * weights[2])
+                            .to_array(),
+                        source_front,
                     };
                     result.depth[index] = depth;
-                    result.image.pixels[index] = [color.x, color.y, color.z, 1.];
+                    result.image.pixels[index] = shade(fragment);
                 }
             }
         }
@@ -235,6 +273,7 @@ pub fn rasterize(fixture: &Fixture, mode: u32) -> Rasterized {
     result
 }
 
+/// Padded inverse-transpose columns and determinant sign for fixture uploads.
 pub fn normal_record(model: Mat4) -> [f32; 16] {
     let linear = Mat3::from_mat4(model);
     let inverse_transpose = linear.inverse().transpose();

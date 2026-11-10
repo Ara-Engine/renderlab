@@ -16,20 +16,34 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     super::select(&mut module, pass)?;
     let info = validate(&module)?;
     let mut options = msl::Options {
-        lang_version: (3, 0),
+        lang_version: pass.metal_version(),
         fake_missing_bindings: false,
         ..Default::default()
+    };
+    let indirect = if pass.indirect() {
+        Some(super::heap_interface::from_module(&module)?)
+    } else {
+        None
     };
     let mut bindings = msl::BindingMap::default();
     for (_, global) in module.global_variables.iter() {
         if let Some(binding) = global.binding {
+            let slot = if let Some(inputs) = &indirect {
+                super::heap_interface::ordinal(inputs, binding)? as u8
+            } else {
+                binding.binding as u8
+            };
             let mut target = msl::BindTarget::default();
             match module.types[global.ty].inner {
-                naga::TypeInner::Image { .. } => target.texture = Some(binding.binding as u8),
+                naga::TypeInner::Image { .. } => target.texture = Some(slot),
                 naga::TypeInner::Sampler { .. } => {
-                    target.sampler = Some(msl::BindSamplerTarget::Resource(0))
+                    target.sampler = Some(msl::BindSamplerTarget::Resource(if pass.indirect() {
+                        slot
+                    } else {
+                        0
+                    }))
                 }
-                _ => target.buffer = Some(0),
+                _ => target.buffer = Some(if pass.indirect() { slot } else { 0 }),
             }
             bindings.insert(binding, target);
         }
@@ -46,6 +60,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     }
     let (mut source, translation) =
         msl::write_string(&module, &info, &options, &msl::PipelineOptions::default())?;
+    repair_per_vertex_members(&mut source, &module)?;
     let names = translation
         .entry_point_names
         .into_iter()
@@ -59,6 +74,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     source.push_str("\nstruct AraDepthEntry {ulong unused; depth2d<float> texture; ulong metadata;};\nstruct AraDepthMsEntry {ulong unused; depth2d_ms<float> texture; ulong metadata;};\n");
     source.push_str("\nstruct AraWriteCubeImageEntry {ulong unused; texture2d_array<float, access::write> texture; ulong metadata;};\n");
     source.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
+    source.push_str("\nstruct AraReadArrayEntry {ulong unused; texture2d_array<float> texture; ulong metadata;};\nstruct AraDepthArrayEntry {ulong unused; depth2d_array<float> texture; ulong metadata;};\nstruct AraReadUintImageEntry {ulong unused; texture2d<uint> texture; ulong metadata;};\n");
     let entry = wrap(
         &mut source,
         &module,
@@ -71,7 +87,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
         .iter()
         .position(|e| e.stage == naga::ShaderStage::Vertex)
     {
-        if matches!(pass, Pass::MeshDiagnostic) {
+        if matches!(pass, Pass::MeshDiagnostic | Pass::MeshToon) {
             Some(wrap(&mut source, &module, &names[i], "vertex", pass)?)
         } else {
             Some(names[i].clone())
@@ -79,7 +95,7 @@ pub fn msl(pass: Pass) -> Result<MetalProgram> {
     } else {
         None
     };
-    if matches!(pass, Pass::MeshDiagnostic) {
+    if matches!(pass, Pass::MeshDiagnostic | Pass::MeshToon) {
         // Ara reserves attributes0..10 for the converter ABI. Explicit streams
         // map WGSL locationN to native attribute11+N on every mesh shader.
         for location in (0..16u32).rev() {
@@ -114,6 +130,11 @@ fn wrap(
     let result_type = prefix[stage_at + stage.len() + 1..].trim().to_string();
     ensure!(!result_type.is_empty(), "entry return type missing");
     let args = split_args(&source[open + 1..close]);
+    let indirect = if pass.indirect() {
+        Some(super::heap_interface::from_module(module)?)
+    } else {
+        None
+    };
     let mut plain = Vec::new();
     let mut calls = Vec::new();
     let mut builtins = Vec::new();
@@ -187,6 +208,36 @@ fn wrap(
                 "ara_position".to_owned(),
                 Some("float4 ara_position [[position]]".to_string()),
             )
+        } else if let Some(inputs) = &indirect {
+            let ordinal = ["buffer(", "texture(", "sampler("]
+                .into_iter()
+                .find_map(|kind| {
+                    attribute
+                        .split_once(kind)
+                        .and_then(|(_, tail)| tail.split_once(')'))
+                        .and_then(|(n, _)| n.parse::<usize>().ok())
+                })
+                .context("unmapped indirect argument attribute")?;
+            let input = inputs
+                .get(ordinal)
+                .context("indirect native argument out of range")?;
+            let slot = super::heap_interface::slot(ordinal);
+            let call = match input.kind {
+                super::InputKind::Buffer { .. } => buffer_at(parameter, &slot)?,
+                super::InputKind::Sampler { comparison } => format!(
+                    "top.{}[{slot}].state",
+                    if comparison {
+                        "comparison_samplers"
+                    } else {
+                        "samplers"
+                    }
+                ),
+                super::InputKind::Image { dimension, sample } => format!(
+                    "((device {}*)top.textures)[{slot}].texture",
+                    super::heap_interface::image_entry(dimension, sample)?
+                ),
+            };
+            (call, None)
         } else {
             (resource(identifier, parameter, pass)?, None)
         };
@@ -217,7 +268,12 @@ fn wrap(
                 .name
                 .as_deref()
                 .context("runtime buffer missing name")?;
-            let slot = if pass.skin() {
+            let slot = if let Some(inputs) = &indirect {
+                super::heap_interface::slot(super::heap_interface::ordinal(
+                    inputs,
+                    global.binding.context("indirect buffer binding missing")?,
+                )?)
+            } else if pass.skin() {
                 super::SkinResource::from_name(name)
                     .context("skin size buffer mapping missing")?
                     .metal_slot()
@@ -406,4 +462,73 @@ fn buffer_root(pass: Pass, name: &str) -> Result<u32> {
         (_, "settings") => Ok(5),
         _ => bail!("unmapped runtime buffer {name}"),
     }
+}
+
+// Naga30's Metal4 struct-input lowering declares the per-vertex member by its
+// field name but reads it by the containing argument name. Repair only that
+// three-vertex extraction, preserving every value and the original get order.
+fn repair_per_vertex_members(source: &mut String, module: &naga::Module) -> Result<()> {
+    for entry in module
+        .entry_points
+        .iter()
+        .filter(|e| e.stage == naga::ShaderStage::Fragment)
+    {
+        for argument in &entry.function.arguments {
+            let naga::TypeInner::Struct { members, .. } = &module.types[argument.ty].inner else {
+                continue;
+            };
+            for member in members {
+                let Some(naga::Binding::Location {
+                    location,
+                    interpolation: Some(naga::Interpolation::PerVertex),
+                    ..
+                }) = member.binding
+                else {
+                    continue;
+                };
+                let tag = format!("user(loc{location})");
+                let mut candidates = source
+                    .lines()
+                    .filter(|l| l.contains("vertex_value<") && l.contains(&tag));
+                let declaration = candidates.next().with_context(|| {
+                    format!(
+                        "per-vertex native member missing {tag}: {}",
+                        source
+                            .lines()
+                            .filter(|l| l.contains("vertex_value<"))
+                            .collect::<Vec<_>>()
+                            .join(" / ")
+                    )
+                })?;
+                ensure!(
+                    candidates.next().is_none(),
+                    "ambiguous per-vertex native member"
+                );
+                let field = declaration
+                    .split("[[")
+                    .next()
+                    .and_then(|s| s.split_whitespace().last())
+                    .context("per-vertex native field name missing")?;
+                let argument = argument
+                    .name
+                    .as_deref()
+                    .context("per-vertex source argument missing name")?;
+                let bad = format!(".{argument}.get(metal::vertex_index::");
+                let good = format!(".{field}.get(metal::vertex_index::");
+                if bad != good && source.contains(&bad) {
+                    ensure!(
+                        source.matches(&bad).count() == 3,
+                        "unexpected per-vertex extraction count"
+                    );
+                    *source = source.replace(&bad, &good);
+                } else {
+                    ensure!(
+                        source.matches(&good).count() == 3,
+                        "unrecognized per-vertex extraction"
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }

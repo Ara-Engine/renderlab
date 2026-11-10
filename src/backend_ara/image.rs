@@ -3,7 +3,7 @@ use anyhow::{Result, ensure};
 use ara_gpu::{
     Device, GpuDevice, Image,
     descriptors::{Format, ImageDesc},
-    texture::{ImageShape, TextureDesc},
+    texture::{ImageShape, ImageViewDesc, TextureDesc, ViewDimension},
 };
 
 /// One whole image with immutable heap descriptors; retire its handle after last use.
@@ -17,6 +17,8 @@ pub struct Texture {
     pub format: Format,
     /// Published view shape; all views retain the parent resource identity.
     pub shape: ImageShape,
+    /// Published dimension, including one-layer arrays.
+    pub view_dimension: ViewDimension,
     pub(crate) sampled: u32,
     pub(crate) storage: Option<u32>,
 }
@@ -52,6 +54,7 @@ impl Texture {
                     mip_levels: levels,
                     ..Default::default()
                 },
+                view_dimension: ViewDimension::D2Array,
                 sampled: gpu.sampled_image(image, false)?.index,
                 storage: None,
             };
@@ -73,11 +76,64 @@ impl Texture {
                         mip_levels: 1,
                         ..Default::default()
                     },
+                    view_dimension: ViewDimension::D2Array,
                     sampled: gpu.sampled_view(image, desc)?.index,
                     storage: Some(gpu.storage_view(image, desc)?.index),
                 });
             }
             Ok((parent, views))
+        })();
+        if result.is_err() {
+            gpu.retire(ara_gpu::Resource::Image(image))?;
+        }
+        result
+    }
+    /// Publish an explicit2D-array view, including a single-layer array.
+    pub fn array(
+        gpu: &mut GpuDevice,
+        size: [u32; 2],
+        layers: u32,
+        format: Format,
+        storage: bool,
+        attachment: bool,
+    ) -> Result<Self> {
+        let shape = ImageShape {
+            layers,
+            ..Default::default()
+        };
+        let image = gpu.create_texture(&TextureDesc {
+            image: ImageDesc {
+                size,
+                format,
+                sampled: true,
+                storage,
+                attachment,
+                copy_source: true,
+                copy_destination: true,
+            },
+            shape,
+        })?;
+        let desc = ImageViewDesc {
+            dimension: ViewDimension::D2Array,
+            base_mip: 0,
+            mip_count: 1,
+            base_layer: 0,
+            layer_count: layers,
+        };
+        let result = (|| -> Result<Self> {
+            Ok(Self {
+                image,
+                size,
+                format,
+                shape,
+                view_dimension: ViewDimension::D2Array,
+                sampled: gpu.sampled_view(image, desc)?.index,
+                storage: if storage {
+                    Some(gpu.storage_view(image, desc)?.index)
+                } else {
+                    None
+                },
+            })
         })();
         if result.is_err() {
             gpu.retire(ara_gpu::Resource::Image(image))?;
@@ -165,6 +221,13 @@ impl Texture {
                 size,
                 format,
                 shape,
+                view_dimension: if shape.dimension == ara_gpu::texture::TextureDimension::D3 {
+                    ViewDimension::D3
+                } else if shape.layers > 1 {
+                    ViewDimension::D2Array
+                } else {
+                    ViewDimension::D2
+                },
                 sampled,
                 storage,
             }),

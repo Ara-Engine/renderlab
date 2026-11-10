@@ -95,6 +95,41 @@ impl MeshGeometry {
             graph.import(Resource::Buffer(b.buffer), Access::HostWrite);
         }
     }
+    /// Model storage for programmable shader input packets.
+    pub fn models(&self) -> &StorageBuffer {
+        &self.buffers[3]
+    }
+    /// Affine normal/winding storage for programmable shader input packets.
+    pub fn normals(&self) -> &StorageBuffer {
+        &self.buffers[4]
+    }
+    pub(crate) fn raster_uses(&self) -> [(Resource, Access); 3] {
+        [
+            (Resource::Buffer(self.buffers[0].buffer), Access::Vertex),
+            (Resource::Buffer(self.buffers[1].buffer), Access::Index),
+            (Resource::Buffer(self.buffers[2].buffer), Access::Vertex),
+        ]
+    }
+    pub(crate) fn draw(&self, rec: &mut Recorder) {
+        rec.push(Command::DrawVertexBuffers {
+            vertices: vec![
+                VertexBinding {
+                    buffer: self.buffers[0].buffer,
+                    offset: 0,
+                },
+                VertexBinding {
+                    buffer: self.buffers[2].buffer,
+                    offset: 0,
+                },
+            ],
+            indices: self.buffers[1].buffer,
+            first_index: 0,
+            index_count: self.index_count,
+            vertex_offset: 0,
+            instances: self.instances,
+            first_instance: 0,
+        });
+    }
     /// Queue a bounded model/normal-table range after prior draws. Geometry,
     /// slots and heap identities remain stable while earlier frames are in flight.
     pub fn update_models(
@@ -241,55 +276,7 @@ impl DiagnosticMesh {
             gpu.sampler(&samplers[0])?.index,
             gpu.sampler(&samplers[1])?.index,
         ];
-        let state = RenderState {
-            color_formats: vec![format.vk().as_raw()],
-            depth_format: Some(Format::Depth32Float.vk().as_raw()),
-            depth_test: true,
-            depth_write: true,
-            blend: false,
-            raster: RasterState {
-                depth_compare: CompareOp::Greater,
-                vertex_layouts: vec![
-                    VertexLayout {
-                        stride: 48,
-                        step: VertexStep::Vertex,
-                        attributes: vec![
-                            VertexAttribute {
-                                location: 0,
-                                format: VertexFormat::Float32x3,
-                                offset: 0,
-                            },
-                            VertexAttribute {
-                                location: 1,
-                                format: VertexFormat::Float32x3,
-                                offset: 12,
-                            },
-                            VertexAttribute {
-                                location: 2,
-                                format: VertexFormat::Float32x2,
-                                offset: 24,
-                            },
-                            VertexAttribute {
-                                location: 3,
-                                format: VertexFormat::Float32x4,
-                                offset: 32,
-                            },
-                        ],
-                    },
-                    VertexLayout {
-                        stride: 4,
-                        step: VertexStep::Instance,
-                        attributes: vec![VertexAttribute {
-                            location: 4,
-                            format: VertexFormat::Uint32,
-                            offset: 0,
-                        }],
-                    },
-                ],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
+        let state = mesh_state(format);
         Ok(Self {
             pipeline: cache.pipeline(gpu, Pass::MeshDiagnostic, state)?,
             samplers,
@@ -410,4 +397,56 @@ fn pack_models(models: &[crate::Mat4]) -> Result<(Vec<u8>, Vec<u8>)> {
         matrices.extend(bytemuck::cast_slice::<f32, u8>(&m.to_cols_array()));
     }
     Ok((matrices, normals))
+}
+
+pub(crate) fn mesh_state(format: Format) -> RenderState {
+    RenderState {
+        color_formats: vec![format.vk().as_raw()],
+        depth_format: Some(Format::Depth32Float.vk().as_raw()),
+        depth_test: true,
+        depth_write: true,
+        blend: false,
+        raster: RasterState {
+            depth_compare: CompareOp::Greater,
+            vertex_layouts: vec![
+                VertexLayout {
+                    stride: 48,
+                    step: VertexStep::Vertex,
+                    attributes: vec![
+                        VertexAttribute {
+                            location: 0,
+                            format: VertexFormat::Float32x3,
+                            offset: 0,
+                        },
+                        VertexAttribute {
+                            location: 1,
+                            format: VertexFormat::Float32x3,
+                            offset: 12,
+                        },
+                        VertexAttribute {
+                            location: 2,
+                            format: VertexFormat::Float32x2,
+                            offset: 24,
+                        },
+                        VertexAttribute {
+                            location: 3,
+                            format: VertexFormat::Float32x4,
+                            offset: 32,
+                        },
+                    ],
+                },
+                VertexLayout {
+                    stride: 4,
+                    step: VertexStep::Instance,
+                    attributes: vec![VertexAttribute {
+                        location: 4,
+                        format: VertexFormat::Uint32,
+                        offset: 0,
+                    }],
+                },
+            ],
+            ..Default::default()
+        },
+        ..Default::default()
+    }
 }
