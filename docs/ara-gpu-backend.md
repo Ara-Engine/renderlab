@@ -2847,6 +2847,38 @@ byte-for-byte controls were still running when this was written):
 Metal is not affected: both stay as they are on the Mac. Together about 2.1 ms of the
 port's frame on the Radeon.
 
+**The RTX 4070 SUPER (PR #3, issuecomment-6800963683 and -6801129957).** The first
+RTX numbers (wgpu 22 ms, the port 42 to 49 at 484431a) were taken with the card in a
+slow state and are withdrawn; wgpu reads 10.4 to 10.7 ms. Four interleaved pairs: at
+7aaffdd the port 26.3 to 26.6 ms (2.5x), at dcc2b8b 19.7 to 20.4 (1.9x), frames byte
+for byte the same. The target pool was worth 6.7 ms a frame there against 2.4 on
+Metal: recording 3.6 to 1.2 ms, the finish 2.5 to 0.05, the GPU 1.1. With every
+non-kernel command labelled (structure builds, uploads, copies, fills, readbacks) the
+unlabelled share is 0.4 ms. One pass is most of the 9.3 ms gap: `ProgramBins` at 6.3
+ms, against 1.0 on the Radeon and 3.2 for wgpu's whole shading. Three one-variable runs
+at f6a0e06 rule out workgroup zeroing (0.00), image size tests (none beyond noise) and
+a first touch of new memory (`RENDERLAB_ARA_BINS_TWICE`: the second dispatch costs what
+the first does); `ProgramBins` sits at one of two levels a process, 6.27 or 6.68.
+
+The reading being tested: binning's indirect-argument buffer was host-visible, made so
+only to start at zero, and ara-gpu gives a host-visible buffer the first
+`HOST_VISIBLE | HOST_COHERENT` memory type, system memory on a discrete card. Three of
+each append's five atomics went to it. 0a72fc4 makes it device-local (binning clears it
+every frame anyway); 8c422ae adds `RENDERLAB_ARA_SPV=bins-root`, the binning kernel
+reading its buffers' heap indices from root words, to price the heap path apart.
+
+**Which image loads read a substituted component (for robustImageAccess2).** Every
+load whose alpha or whole vector a kernel uses, in a pass the port runs, is on a
+four-component format (the reconstruction's sample, colour, layer and hit records, the
+fresh-visibility receivers, the atmosphere's scatter volume, the panes' hit record and
+transmission map, the environment lobe table), so out of bounds it is zero in all four
+under either robust-image feature, as under naga's test. Images without alpha (the
+anchor history, the visibility and tile maps, the panes' hit depth, depth maps) are
+read only in the components they have. In game-scene frames only float stand-ins with
+alpha are loaded; the DFG table and the material defaults are only sampled. No image is
+stored to and loaded through one binding. So the port may drop its test on a device
+with `robustImageAccess2` (Ara #65 reports it).
+
 **Open items, in order.**
 1. The camera-ray kernel's 35%: read the two experiments above when they land. If no
    variant moves it and the budgets agree, the next suspects are the committed hit's
