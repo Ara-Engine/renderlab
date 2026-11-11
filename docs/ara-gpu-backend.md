@@ -2745,6 +2745,49 @@ the variable, and a variant whose frames differ is not evidence.
 `RENDERLAB_ARA_SPV` is measurement only (`shader/spirv.rs`, `Variant`); the suite's
 SPIR-V assertions fail under `fused` by design.
 
+**What the variants found, and the answer (Radeon at 9bfb255; the gate's comments of
+15:14 to 15:32 UTC).** `shadow_rays` is 256 at pose 0 and 32 after on both layers,
+pose by pose, so the fused kernel does no more work. Each variant three runs
+interleaved with three without: `fused` -0.81 ms, `image-unchecked` -1.31,
+`workgroup-unzeroed` -0.81, `loops-unbounded` -4.72, `queries-untracked` -6.42
+(the camera kernel 15.34 to 12.32 ms). My reading that both layers carry loop bounds
+and ray-query tracking was wrong. renderlab creates its engine-owned modules with
+`ShaderRuntimeChecks::unchecked()` (`pipeline_compilation::create_engine_shader_module`;
+`EngineDescriptor::checked_engine_shaders` false, `RENDERLAB_ENGINE_SHADER_CHECKS`
+unset): every kernel, the standard program's compositions and every program's cell
+shading. For those, wgpu-hal 30.0.1 writes no loop bounds, no ray-query tracking, no
+integer division checks and no bounds checks. Only compositions of another program
+(`program_gpu::module`, `engine_owned` false) keep naga's guards. Both layers use
+naga 30.0.1 (one entry in `Cargo.lock`). The port wrote naga's defaults, all three
+guards on, into every module. It now follows the renderer (`shader::Checks`, carried
+by `Program::checked` and keyed in the pipeline cache): engine code without the three
+guards; caller programs on the camera-pixel stages (traced shading, its list entry,
+glass) with them. The camera kernel loses its 5 loop counters, the tracking branches
+and the division helpers (43,280 to 40,140 bytes of SPIR-V, 51 to 43 branches); the
+cache's Setup kernel its 23 counters; the game program's list entry keeps its 32 and
+its tracking, as wgpu's checked module does. What stays only on the port: the
+`NoContraction` marks (by choice, for decisions that must not depend on fusion), the
+image size tests (ara-gpu enables no `robustImageAccess`) and the workgroup zeroing
+polyfill (ara-gpu does not enable `shaderZeroInitializeWorkgroupMemory`); the last two
+are Ara device features, about 2 ms between them on the Radeon.
+
+**Recording.** On the Mac, composing the frame's programs and taking SHA-256 of each
+composed source was 2.6 of the 3.7 ms of recording a frame. The builders now keep
+their programs for the process; recording is 1.0 ms. A steady frame still makes 87
+buffers (629 KB), 42 textures (about 130 MB of 1280x720 targets and the bloom chain)
+and 12 staging uploads; on Metal releasing and adding those allocations costs about
+1.0 ms a frame in the residency-set commit at submission, which `gpu_ms` includes.
+ara-gpu's Vulkan side sub-allocates images from 8 MB blocks and frees a block when
+it empties, so the same churn frees and allocates device memory every frame there.
+Keeping the targets in the sequence is the next step for recording if the Radeon's
+split still shows it.
+
+**The one pixel.** The RTX gives the Metal and wgpu value at (588,178) and the pixel
+below it (0.6279 against the Radeon port's 0.5566): the difference is the port's
+SPIR-V on RADV only. Next: a one-pixel trace of the resolve on the Radeon (fetch
+position, the four taps, the stored coverage, the path taken), with Metal's values as
+the reference.
+
 **Open items, in order.**
 1. The camera-ray kernel's 35%: read the two experiments above when they land. If no
    variant moves it and the budgets agree, the next suspects are the committed hit's

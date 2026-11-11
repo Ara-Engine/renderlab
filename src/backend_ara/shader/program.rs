@@ -17,6 +17,9 @@ pub struct Program {
     /// The source's digest, taken once: its key in the reflection tables and in the
     /// pipeline cache.
     digest: [u8; 32],
+    /// The runtime checks its native code carries: engine code's unless
+    /// [`checked`](Self::checked) says it holds a caller's program.
+    checks: super::Checks,
 }
 impl Program {
     /// Validate caller WGSL and reflect only the chosen entry or raster pair. The family selects
@@ -39,7 +42,22 @@ impl Program {
             threads,
             contract,
             digest,
+            checks: super::Checks::Engine,
         })
+    }
+    /// This program with the runtime checks of `program`'s composition, as the wgpu
+    /// renderer creates its module: a caller's program keeps naga's guards, the
+    /// standard program does not (`program_gpu::module`'s `engine_owned`).
+    pub fn checked(mut self, program: &str) -> Self {
+        self.checks = if program == crate::program::STANDARD_PROGRAM {
+            super::Checks::Engine
+        } else {
+            super::Checks::User
+        };
+        self
+    }
+    pub(crate) fn checks(&self) -> super::Checks {
+        self.checks
     }
     /// Ordered source keys and resource requirements for this program's packet.
     pub fn inputs(&self) -> &[ShaderInput] {
@@ -60,7 +78,7 @@ impl Program {
     }
     /// Emit SPIR-V through the shared heap adapter.
     pub fn spirv(&self) -> Result<Vec<super::SpirvStage>> {
-        super::spirv::from_source(self.pass, &self.source)
+        super::spirv::from_source(self.pass, &self.source, self.checks)
     }
     pub(crate) fn source(&self) -> &str {
         &self.source

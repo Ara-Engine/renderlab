@@ -31,7 +31,7 @@ fn traced_program_uncached(material: &str) -> Result<Program> {
         crate::SampleCount::One,
     )
     .map_err(|e| anyhow::anyhow!("hardware head: {e}"))?;
-    Program::new(
+    Ok(Program::new(
         Pass::TransparencyGlass,
         crate::renderer::transparency_gpu::glass_source(
             &head,
@@ -39,7 +39,8 @@ fn traced_program_uncached(material: &str) -> Result<Program> {
             material,
             crate::program::declares_parameters(material),
         ),
-    )
+    )?
+    .checked(material))
 }
 pub(crate) fn source(material: &str) -> String {
     crate::renderer::transparency_gpu::glass_source(

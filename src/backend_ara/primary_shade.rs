@@ -50,10 +50,11 @@ fn hardware_soft_program_uncached(material: &str) -> Result<Program> {
     let [_, head] =
         crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
     let parameters = crate::program::declares_parameters(material);
-    Program::new(
+    Ok(Program::new(
         Pass::PrimaryShadeTiles,
         crate::program::compose(&head, material, crate::program::Stage::Traced, parameters).source,
-    )
+    )?
+    .checked(material))
 }
 /// The list entry on the same hardware soft head: one program's share of a frame of
 /// several programs, shading the tiles the binning pass listed for its slot
@@ -66,9 +67,10 @@ fn list_program_uncached(material: &str) -> Result<Program> {
     let [_, head] =
         crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
     let parameters = crate::program::declares_parameters(material);
-    Program::new(
+    Ok(Program::new(
         Pass::PrimaryShadeList,
         crate::program::compose_list(&head, material, crate::program::Stage::Traced, parameters)
             .source,
-    )
+    )?
+    .checked(material))
 }

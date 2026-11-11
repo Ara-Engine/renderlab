@@ -28,7 +28,7 @@ pub(crate) use skin_interface::SkinResource;
 
 pub use metal::msl;
 pub use naga::ShaderStage;
-pub use spirv::spirv;
+pub use spirv::{Checks, spirv};
 
 /// The unchanged Renderlab filter source, including the selected bloom kernels.
 pub const POST: &str = include_str!("../../../shaders/post.wgsl");

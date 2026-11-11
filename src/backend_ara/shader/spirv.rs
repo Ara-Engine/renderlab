@@ -7,9 +7,30 @@ use std::collections::BTreeMap;
 /// is aliased onto sampled binding 5 in the emitted decorations, because naga's
 /// validator rejects different typed declarations sharing one source binding.
 pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
-    from_source(pass, pass.source().as_ref())
+    from_source(pass, pass.source().as_ref(), Checks::Engine)
 }
-pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
+/// The runtime checks naga writes into a module, as the wgpu renderer creates the same
+/// module (`pipeline_compilation::create_engine_shader_module` against
+/// `create_shader_module`).
+///
+/// The renderer creates its own kernels, the standard program's compositions and every
+/// program's cell shading with `ShaderRuntimeChecks::unchecked()`, unless
+/// `RENDERLAB_ENGINE_SHADER_CHECKS` asks otherwise, and only compositions of another
+/// program checked. Unchecked, wgpu-hal writes no loop bounds, no ray-query state
+/// tracking and no integer division checks. Bounds checks are not taken from here:
+/// indices and buffers stay unchecked in both, and image loads keep their size test
+/// because ara-gpu enables no robust image access (the renderer's device does).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum Checks {
+    /// Engine-owned code: without the three guards.
+    #[default]
+    Engine,
+    /// A caller's program composed into a camera-pixel stage: naga's guards, as wgpu
+    /// writes them for checked modules.
+    User,
+}
+pub(crate) fn from_source(pass: Pass, wgsl: &str, checks: Checks) -> Result<Vec<SpirvStage>> {
+    let user = checks == Checks::User;
     let source = hoist_directives(&adapt(pass, wgsl)?);
     let mut module = parse(&source)?;
     super::select(&mut module, pass)?;
@@ -63,8 +84,9 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
                     } else {
                         naga::back::spv::ZeroInitializeWorkgroupMemoryMode::Polyfill
                     },
-                    force_loop_bounding: !variant.loops_unbounded,
-                    ray_query_initialization_tracking: !variant.queries_untracked,
+                    force_loop_bounding: user && !variant.loops_unbounded,
+                    ray_query_initialization_tracking: user && !variant.queries_untracked,
+                    emit_int_div_checks: user,
                     ..Default::default()
                 },
                 Some(&naga::back::spv::PipelineOptions {
@@ -109,9 +131,10 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
 /// `image-unchecked` (image loads without the size test; a load outside its image is
 /// then undefined), `workgroup-unzeroed` (no zeroing of workgroup variables at entry;
 /// a kernel that reads one before writing it is then undefined), `loops-unbounded` and
-/// `queries-untracked` (naga's loop bound and ray-query state checks, which the wgpu
-/// renderer's modules also carry). A frame is evidence under a variant only if it is
-/// byte for byte the frame without it. The shader cache keys on the value.
+/// `queries-untracked` (naga's loop bounds and ray-query state tracking, which only
+/// [`Checks::User`] modules carry, as in the wgpu renderer). A frame is evidence under
+/// a variant only if it is byte for byte the frame without it. The shader cache keys
+/// on the value.
 #[derive(Clone, Copy, Default)]
 struct Variant {
     fused: bool,

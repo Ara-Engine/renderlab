@@ -106,7 +106,12 @@ impl ShaderCache {
             .borrow_mut()
             .entry(pass)
             .or_insert_with(|| shader::digest(&source));
-        self.pipeline_source(gpu, pass, source.as_ref(), digest, state)
+        self.pipeline_source(
+            gpu,
+            pass,
+            (source.as_ref(), digest, shader::Checks::Engine),
+            state,
+        )
     }
     /// Compile a caller-authored compute program through the same native cache.
     pub fn program(&self, gpu: &mut GpuDevice, program: &shader::Program) -> Result<Pipeline> {
@@ -126,8 +131,7 @@ impl ShaderCache {
         self.pipeline_source(
             gpu,
             program.pass(),
-            program.source(),
-            program.digest(),
+            (program.source(), program.digest(), program.checks()),
             state,
         )
     }
@@ -135,8 +139,7 @@ impl ShaderCache {
         &self,
         gpu: &mut GpuDevice,
         pass: Pass,
-        wgsl: &str,
-        digest: [u8; 32],
+        (wgsl, digest, checks): (&str, [u8; 32], shader::Checks),
         state: RenderState,
     ) -> Result<Pipeline> {
         // The per-vertex families' fragment stages declare barycentrics, which Vulkan
@@ -149,7 +152,7 @@ impl ShaderCache {
         // the salt the adapter's sources, the compiler and the binding layout.
         let mut key = Sha256::new();
         key.update(self.salt);
-        key.update(format!("{}:{state:?}:", pass.entry()));
+        key.update(format!("{}:{state:?}:{checks:?}:", pass.entry()));
         key.update(digest);
         let key = format!("{:x}", key.finalize());
         if let Some(kept) = self.pipelines.borrow().get(&key) {
@@ -161,7 +164,7 @@ impl ShaderCache {
                 .root
                 .join(format!(".{}-{}-{}", key, std::process::id(), next()));
             std::fs::create_dir(&scratch)?;
-            let result = self.emit(pass, wgsl, state, &scratch, &key);
+            let result = self.emit(pass, (wgsl, checks), state, &scratch, &key);
             if let Err(e) = result {
                 let _ = std::fs::remove_dir_all(&scratch);
                 return Err(e);
@@ -186,11 +189,15 @@ impl ShaderCache {
     fn emit(
         &self,
         pass: Pass,
-        wgsl: &str,
+        (wgsl, checks): (&str, shader::Checks),
         state: RenderState,
         dir: &Path,
         key: &str,
     ) -> Result<()> {
+        // The Metal path writes naga's MSL defaults whatever the checks; only the
+        // SPIR-V the Vulkan gate compares with wgpu follows them.
+        #[cfg(target_os = "macos")]
+        let _ = checks;
         #[cfg(target_os = "macos")]
         let stages = {
             use ara_gpu::cooked::CookedMetalStage;
@@ -256,7 +263,7 @@ impl ShaderCache {
             stages
         };
         #[cfg(not(target_os = "macos"))]
-        let stages = emit_spirv_source(pass, shader::spirv_source(pass, wgsl)?, dir)?;
+        let stages = emit_spirv_source(pass, shader::spirv_source(pass, wgsl, checks)?, dir)?;
         cooked::write_json(
             &dir.join("pipeline.json"),
             &CookedPipeline {
