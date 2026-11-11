@@ -2394,3 +2394,30 @@ wgpu. The cluster header's sampling word, the light records and the shading code
 the same on both sides. `ara_frame --scene game --without NAME[,NAME]` leaves one
 feature out on both layers (`gi`, `reconstruction`, `reflections`, `local-shadows`,
 `glass`, `lanterns`, `glow`) so the gate can find which one the rim belongs to.
+
+## Depth of field on NVIDIA: one level low on the flat card, not yet placed
+
+Twice on the RTX 4070 SUPER the depth-of-field test has failed on the card's pixels
+out of the blur's reach: 192 where the sharp frame shows 193. The two runs are one
+symptom. The first stopped at the first such pixel (53); the second, with one level
+allowed, counted them: 23 of 32 exact, and the 32 are 23 floor pixels and 9 card
+pixels, so every card pixel is one level low and every floor pixel exact.
+
+From the kernel: a card pixel out of the edge's reach takes 48 bilinear taps of one
+value, divides their weighted sum by the weights' sum, mixes that with the centre and
+stores a half float, where the sharp frame stores the value once. Nothing in it can
+reach the floor from there (the gather radius is the card's own 3.42 px, the nearest
+checked pixel is 5.8 px inside).
+
+From the numbers on Metal: the card's HDR value is the half float `0x3c86`, which
+displays 193, and the boundary to 192 lies between `0x3c84` and `0x3c83`. Blurred and
+sharp agree at every one of 16 brightness steps across that boundary. So on Metal the
+blur is exact to the half-float step and the card sits three steps, 0.26%, above the
+boundary. For NVIDIA to show 192 its blurred card must be at or below `0x3c83`:
+either its card is shaded a step or two lower than Metal's and the blur loses one
+step there (rounding the test should allow), or the blur loses three (a real loss of
+a quarter of a percent in a flat region, which it should not).
+`depth_of_field_keeps_a_flat_region_within_a_level_at_every_brightness` prints the
+table that tells them apart on any device: the card's half float, its sharp level and
+its blurred level at each step. The tolerance of the first test is unchanged until
+the RTX's table is in.

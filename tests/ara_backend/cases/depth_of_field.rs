@@ -21,24 +21,25 @@ fn blur_radius(focus: f64, z: f64) -> f64 {
         * 0.5
 }
 
-/// A bright card 3 m from the camera over a dark floor 4 m from it, seen from straight
-/// above, through the post chain with depth of field alone. Along the row through the
-/// card's middle, across its left edge:
-///
-/// - Focused on the floor, the card is out of focus by the thin lens's radius for its
-///   distance (3.4 px). Pixels further than that from the edge, on either side, are the
-///   sharp frame's bytes; pixels well inside it are between the floor and the card, and
-///   the row never falls from the floor's side to the card's.
-/// - Focused on the card, the floor is out of focus by the same formula and is flat, so
-///   it does not change away from the edge, and every card pixel is the sharp frame's:
-///   an in-focus foreground keeps its edge.
-/// - The mesh pass, whose surface comes from the depth target, and the traced frame,
-///   whose surface comes from the hit records, display the same image in every case.
-#[test]
-fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> Result<()> {
-    let path = root("depth-of-field");
-    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
-    let cache = ShaderCache::new(path.join("shaders"))?;
+fn camera() -> Result<Camera> {
+    Ok(Camera::look_at(
+        Vec3::new(0.03, 0.02, 4.),
+        Vec3::new(0.03, 0.02, 0.),
+        Vec3::Y,
+        55f32.to_radians(),
+        0.1,
+        100.,
+    )?)
+}
+/// The fixture's frame under a sun of `lux`: a card of albedo 0.9 a metre over a floor
+/// of albedo 0.2, through post with depth of field alone, focused at `focus` metres.
+fn fixture_frame(
+    gpu: &mut GpuDevice,
+    cache: &ShaderCache,
+    lux: f32,
+    primary: Primary,
+    focus: Option<f32>,
+) -> Result<renderlab::backend_ara::forward::ForwardImages> {
     let quad = |half: f32, z: f32| {
         [
             [-half, -half, z],
@@ -57,7 +58,7 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
     let lighting = Lighting {
         lights: vec![Light::Directional {
             travel: Vec3::new(0., 0., -1.),
-            lux: [1000.; 3],
+            lux: [lux; 3],
         }],
         environment: [0.; 3],
         exposure_stops: -8.,
@@ -66,61 +67,76 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
         split_ends: vec![8.],
         disk_angle: 0.02,
     };
-    let camera = Camera::look_at(
-        Vec3::new(0.03, 0.02, 4.),
-        Vec3::new(0.03, 0.02, 0.),
-        Vec3::Y,
-        55f32.to_radians(),
-        0.1,
-        100.,
-    )?;
-    let mut frame = |primary: Primary, focus: Option<f32>| -> Result<Vec<u8>> {
-        let objects = [(&floor, 0.2), (&card, 0.9)].map(|(vertices, base)| ForwardObject {
-            vertices,
-            indices: &[0, 1, 2, 0, 2, 3],
-            transform: Mat4::IDENTITY,
-            material: MaterialDescriptor {
-                base_color: [base, base, base, 1.],
-                metallic: 0.,
-                roughness: 1.,
-                double_sided: true,
-                ..Default::default()
-            },
-        });
-        let images = render(
-            &mut gpu,
-            &cache,
-            &ForwardScene {
-                meshes: None,
-                objects: &objects,
-                lighting: &lighting,
-                camera,
-                size: SIZE,
-                atmosphere: renderlab::Atmosphere::off(),
-                sun_shadows: Some(&shadows),
-                primary,
-                post: Some(PostSettings {
-                    bloom: 0.,
-                    motion_blur: false,
-                    vignette: 0.,
-                    depth_of_field: focus.map(|focus_distance_m| DepthOfField {
-                        focus_distance_m,
-                        focal_length_mm: FOCAL_MM,
-                        f_number: F_NUMBER,
-                        ..Default::default()
-                    }),
+    let objects = [(&floor, 0.2), (&card, 0.9)].map(|(vertices, base)| ForwardObject {
+        vertices,
+        indices: &[0, 1, 2, 0, 2, 3],
+        transform: Mat4::IDENTITY,
+        material: MaterialDescriptor {
+            base_color: [base, base, base, 1.],
+            metallic: 0.,
+            roughness: 1.,
+            double_sided: true,
+            ..Default::default()
+        },
+    });
+    render(
+        gpu,
+        cache,
+        &ForwardScene {
+            meshes: None,
+            objects: &objects,
+            lighting: &lighting,
+            camera: camera()?,
+            size: SIZE,
+            atmosphere: renderlab::Atmosphere::off(),
+            sun_shadows: Some(&shadows),
+            primary,
+            post: Some(PostSettings {
+                bloom: 0.,
+                motion_blur: false,
+                vignette: 0.,
+                depth_of_field: focus.map(|focus_distance_m| DepthOfField {
+                    focus_distance_m,
+                    focal_length_mm: FOCAL_MM,
+                    f_number: F_NUMBER,
                     ..Default::default()
                 }),
-                indirect: None,
-                reconstruction: None,
-                reflections: None,
-                textures: None,
-                local_shadows: None,
-                transparent: &[],
-                programs: None,
-            },
-        )?;
-        images.display.context("post did not run")
+                ..Default::default()
+            }),
+            indirect: None,
+            reconstruction: None,
+            reflections: None,
+            textures: None,
+            local_shadows: None,
+            transparent: &[],
+            programs: None,
+        },
+    )
+}
+
+/// A bright card 3 m from the camera over a dark floor 4 m from it, seen from straight
+/// above, through the post chain with depth of field alone. Along the row through the
+/// card's middle, across its left edge:
+///
+/// - Focused on the floor, the card is out of focus by the thin lens's radius for its
+///   distance (3.4 px). Pixels further than that from the edge, on either side, are the
+///   sharp frame's bytes; pixels well inside it are between the floor and the card, and
+///   the row never falls from the floor's side to the card's.
+/// - Focused on the card, the floor is out of focus by the same formula and is flat, so
+///   it does not change away from the edge, and every card pixel is the sharp frame's:
+///   an in-focus foreground keeps its edge.
+/// - The mesh pass, whose surface comes from the depth target, and the traced frame,
+///   whose surface comes from the hit records, display the same image in every case.
+#[test]
+fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> Result<()> {
+    let path = root("depth-of-field");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let camera = camera()?;
+    let mut frame = |primary: Primary, focus: Option<f32>| -> Result<Vec<u8>> {
+        fixture_frame(&mut gpu, &cache, 1000., primary, focus)?
+            .display
+            .context("post did not run")
     };
     // The card's left edge on the row through its middle, in pixels.
     let matrix = camera.matrix(SIZE[0], SIZE[1]);
@@ -192,6 +208,52 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
         );
     }
     eprintln!("depth of field: {report}");
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// What the blur does to a flat region, measured where a display level can see it.
+///
+/// A card pixel out of the edge's reach is a weighted mean of 48 bilinear taps of one
+/// value, mixed and stored as a half float, where the sharp frame stores that value
+/// once. The test steps the sun down by 0.05% a frame across more than one display
+/// level and prints, for one such pixel, the card's HDR half float, its sharp level
+/// and its blurred level. The step at which each column changes level places the
+/// blurred value against the sharp one in half-float steps, on whatever device runs
+/// it. It requires what the pass must give anywhere: never more than one level apart.
+#[test]
+fn depth_of_field_keeps_a_flat_region_within_a_level_at_every_brightness() -> Result<()> {
+    let path = root("depth-of-field-flat");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    // A card pixel 8 px inside its left edge, on the row through its middle.
+    let at = (48 * SIZE[0] + 56) as usize;
+    let mut table = String::new();
+    let mut apart = 0;
+    for step in 0..16 {
+        let lux = 1000. * (1. - step as f32 * 5e-4);
+        let sharp = fixture_frame(&mut gpu, &cache, lux, Primary::Raster, None)?;
+        let blurred = fixture_frame(&mut gpu, &cache, lux, Primary::Raster, Some(4.))?;
+        let hdr = u16::from_le_bytes([sharp.hdr[at * 8], sharp.hdr[at * 8 + 1]]);
+        let level = |images: &renderlab::backend_ara::forward::ForwardImages| {
+            images
+                .display
+                .as_ref()
+                .map(|d| i32::from(d[at * 4]))
+                .context("post did not run")
+        };
+        let (was, now) = (level(&sharp)?, level(&blurred)?);
+        apart += usize::from(was != now);
+        table += &format!("{hdr:#06x} {was} {now}; ");
+        ensure!(
+            (was - now).abs() <= 1,
+            "at {lux} lux the flat card is {now} blurred and {was} sharp"
+        );
+    }
+    eprintln!(
+        "depth of field, flat card (HDR half, sharp level, blurred level) per 0.05% step of the sun: {table}{apart} of 16 a level apart"
+    );
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
