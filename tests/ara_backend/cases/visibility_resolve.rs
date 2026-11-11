@@ -25,16 +25,23 @@ fn source_triangle_receiver_resolve_native_replay_against_cpu() -> Result<()> {
     let mut gpu = GpuDevice::new_raster(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
     let kernel = Kernel::new(&mut gpu, &cache, Pass::VisibilityResolve)?;
+    let frame = with_zones(&f.primary_frame);
+    let draws: Vec<_> = f
+        .batches
+        .iter()
+        .map(|b| (b.index, b.indices.len(), false))
+        .collect();
+    let placements = placement_words(&f.placements, &draws);
     let mut buffers = BTreeMap::new();
     for (key, bytes) in [
-        (key(0, 10), bytemuck::cast_slice(f.primary_frame.as_slice())),
+        (key(0, 10), bytemuck::cast_slice(frame.as_slice())),
         (key(0, 29), bytemuck::cast_slice(f.visibility.as_slice())),
         (key(0, 30), bytemuck::cast_slice(f.repair_scan.as_slice())),
         (key(0, 31), bytemuck::cast_slice(f.clusters.as_slice())),
         (key(0, 33), bytemuck::cast_slice(f.groups.as_slice())),
         (key(1, 0), bytemuck::cast_slice(f.models.as_slice())),
         (key(1, 1), bytemuck::cast_slice(f.normals.as_slice())),
-        (key(1, 5), bytemuck::cast_slice(f.placements.as_slice())),
+        (key(1, 5), bytemuck::cast_slice(placements.as_slice())),
     ] {
         buffers.insert(key, StorageBuffer::new(&mut gpu, bytes)?);
     }

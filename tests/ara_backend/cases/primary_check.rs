@@ -18,6 +18,13 @@ fn primary_geometry_check_retry_queue_native_replay() -> Result<()> {
     let mut gpu = GpuDevice::new_raster(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
     let pass = PrimaryCheck::new(&mut gpu, &cache)?;
+    // The check reads each draw's adjacency from its batch word, not its buffer's length.
+    let draws: Vec<_> = f
+        .batches
+        .iter()
+        .map(|b| (b.index, b.indices.len(), false))
+        .collect();
+    let placements = placement_words(&f.placements, &draws);
     let mut buffers = BTreeMap::new();
     for (key, bytes) in [
         (key(0, 10), bytemuck::cast_slice(f.frame.as_slice())),
@@ -25,7 +32,7 @@ fn primary_geometry_check_retry_queue_native_replay() -> Result<()> {
         (key(0, 28), bytemuck::cast_slice(f.retries.as_slice())),
         (key(1, 0), bytemuck::cast_slice(f.models.as_slice())),
         (key(1, 1), bytemuck::cast_slice(f.normals.as_slice())),
-        (key(1, 5), bytemuck::cast_slice(f.placements.as_slice())),
+        (key(1, 5), bytemuck::cast_slice(placements.as_slice())),
     ] {
         buffers.insert(key, StorageBuffer::new(&mut gpu, bytes)?);
     }

@@ -54,10 +54,23 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
     let mut staging = Vec::new();
     let mut buffers = BTreeMap::new();
     let mut images = BTreeMap::new();
-    for (key, words) in &f.buffers {
+    let draws: Vec<_> = f
+        .batches
+        .iter()
+        .map(|b| (b.index, b.indices.len(), false))
+        .collect();
+    for (at, words) in &f.buffers {
+        // The frame record gains its zones and the placements their batch words.
+        let words = if *at == key(0, 10) {
+            with_zones(words)
+        } else if *at == key(1, 5) {
+            placement_words(words, &draws)
+        } else {
+            words.clone()
+        };
         buffers.insert(
-            *key,
-            StorageBuffer::new(&mut gpu, bytemuck::cast_slice(words))?,
+            *at,
+            StorageBuffer::new(&mut gpu, bytemuck::cast_slice(&words))?,
         );
     }
     buffers.insert(

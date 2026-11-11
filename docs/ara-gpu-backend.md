@@ -2060,3 +2060,30 @@ are still unchecked (enabling those checks trips Naga bugs), where the wgpu rend
 has `robustBufferAccess2`: a read past a buffer's end is still each driver's own on
 Vulkan. The GPU-time cost of the image checks is unmeasured.
 
+## Renderlab main at 75c5639: restart zones and batch words
+
+Main gained two changes the frame mirrors, merged here together.
+
+**P-RELIT.** A changed local light now restarts only its own sphere and the restart
+shadow budget is per pixel. The decisions are in the shared planner, which the backend
+already calls; what moved is where they travel. `PrimaryFrame` grew from 144 bytes to
+336: after the reflection bands it carries TR1's restart zones (`Tr1Zones`: the moving
+caster's swept shadow volume, eight relit spheres, the counts), which the trace
+kernels now read. The frame record here is that size, zero past byte 144 unless the
+frame is reconstructed, when `Planned::zones()` is copied in as `prepare_reconstruction`
+writes it. Nothing else in the backend changed for it. **No test here changes a local
+light or moves a skinned caster**, so the zones' effect is exercised only through the
+shared planner's own tests on main.
+
+**Batch words.** After PR #30 showed the wgpu renderer reading one element's
+`arrayLength` for a whole workgroup on RADV, main stopped deciding anything from the
+length of a buffer-array element. Each draw's triangle count, adjacency flag and
+skinned flag now sit in a word per draw slot after the placement words
+(`primary_ray::placement_words`, `batch_word`), read by `primary_batch_info`. The frame
+uploads its placements through those two functions. The stand-alone replay fixtures
+(the geometry check, the trace, the hit-based post surface, programmable shading, the
+visibility resolve) build the same buffer from its description in the test harness, not
+through the crate, so the layout is checked from both sides. The adapter's `NonUniform`
+repair stays: other kernels still take lengths of heap elements, and an undecorated one
+is undefined whoever reads it.
+

@@ -23,15 +23,29 @@ fn hit_based_post_velocity_depth_and_history_native_replay() -> Result<()> {
     let mut gpu = GpuDevice::new_raster(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
     let kernel = Kernel::new(&mut gpu, &cache, Pass::PostPrimarySurface)?;
+    let frame = with_zones(&f.primary_frame);
+    // A skinned draw's previous stream has its own vertices, one padding vec4 longer.
+    let draws: Vec<_> = f
+        .batches
+        .iter()
+        .map(|b| {
+            (
+                b.index,
+                b.indices.len(),
+                b.previous_vertices.len() > b.vertices.len(),
+            )
+        })
+        .collect();
+    let placements = placement_words(&f.placements, &draws);
     let mut buffers = BTreeMap::new();
     for (key, bytes) in [
-        (key(0, 10), bytemuck::cast_slice(f.primary_frame.as_slice())),
+        (key(0, 10), bytemuck::cast_slice(frame.as_slice())),
         (
             key(0, 40),
             bytemuck::cast_slice(f.post_frames[0].as_slice()),
         ),
         (key(1, 0), bytemuck::cast_slice(f.models.as_slice())),
-        (key(1, 5), bytemuck::cast_slice(f.placements.as_slice())),
+        (key(1, 5), bytemuck::cast_slice(placements.as_slice())),
     ] {
         buffers.insert(key, StorageBuffer::new(&mut gpu, bytes)?);
     }

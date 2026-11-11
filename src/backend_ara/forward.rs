@@ -1084,7 +1084,8 @@ fn frame(
                     o.material.thin,
                 )
             }))?;
-        let mut frame = [0u8; 144];
+        // `PrimaryFrame`: 144 bytes, then TR1's restart zones (zero unless reconstructed).
+        let mut frame = [0u8; 144 + tr::ZONES_BYTES];
         frame[..64].copy_from_slice(&crate::mesh::matrix_bytes(inverse));
         frame[64..80].copy_from_slice(bytemuck::cast_slice(&[clear[0], clear[1], clear[2], 1.]));
         let sided = placements.iter().any(|p| p & (1 << 30) != 0);
@@ -1217,6 +1218,7 @@ fn frame(
             };
             frame[84..88].copy_from_slice(&rotation.to_ne_bytes());
             frame[112..128].copy_from_slice(&planned.sampling);
+            frame[144..].copy_from_slice(planned.zones());
             let record = StorageBuffer::new(gpu, &planned.frame)?;
             graph.import(Resource::Buffer(record.buffer), Access::HostWrite);
             let samples = Texture::new(gpu, size, Format::Rgba16Float, false, false)?;
@@ -1266,7 +1268,17 @@ fn frame(
         }
         let frame = StorageBuffer::new(gpu, &frame)?;
         let region_buffer = StorageBuffer::new(gpu, bytemuck::cast_slice(&region))?;
-        let placement_buffer = StorageBuffer::new(gpu, bytemuck::cast_slice(&placements))?;
+        // The placement words, then each draw's batch word (triangle count; no adjacency
+        // suffix and no skinned stream here), as `prepare_primary` uploads them.
+        let batches: Vec<u32> = scene
+            .objects
+            .iter()
+            .map(|o| crate::primary_ray::batch_word(o.indices.len() as u64, false))
+            .collect();
+        let placement_buffer = StorageBuffer::new(
+            gpu,
+            bytemuck::cast_slice(&crate::primary_ray::placement_words(&placements, &batches)),
+        )?;
         let models = StorageBuffer::new(gpu, &[matrices.as_slice(), &previous].concat())?;
         let normals = StorageBuffer::new(gpu, &normal_bytes)?;
         let absent = StorageBuffer::new(gpu, &[0; 48])?;

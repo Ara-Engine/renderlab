@@ -306,6 +306,38 @@ mod primary_shade_cases;
 #[path = "ara_backend/primary_shade_reference.rs"]
 mod primary_shade_reference;
 
+/// The placement buffer as the renderer uploads it, written here from its description
+/// and not through the crate: the placement words (one zero word when there are none),
+/// then one word per draw slot counted back from the buffer's end, draw 0 last. A draw's
+/// word is its triangle count, with bit 30 when its index buffer carries the adjacency
+/// suffix (6T + 1 words instead of 3T) and bit 31 when its previous-vertex stream is a
+/// skinned one. `batches` gives each draw's slot, index word count and skinned flag.
+fn placement_words(placements: &[u32], batches: &[(u32, usize, bool)]) -> Vec<u32> {
+    let mut words = placements.to_vec();
+    words.resize(
+        placements.len().max(1) + renderlab::TRACED_DRAWS as usize,
+        0,
+    );
+    let end = words.len();
+    for &(batch, index_words, skinned) in batches {
+        let adjacent = index_words % 3 == 1;
+        let triangles = if adjacent {
+            (index_words - 1) / 6
+        } else {
+            index_words / 3
+        };
+        words[end - 1 - batch as usize] =
+            triangles as u32 | u32::from(adjacent) << 30 | u32::from(skinned) << 31;
+    }
+    words
+}
+/// A 144-byte primary frame record followed by TR1's restart zones, all zero: three
+/// vec4s, eight relit spheres and the counts (192 bytes).
+fn with_zones(frame: &[u32]) -> Vec<u32> {
+    assert_eq!(frame.len(), 36, "the primary frame record before its zones");
+    frame.iter().copied().chain([0; 48]).collect()
+}
+
 /// Every float arithmetic result must be decorated NoContraction (42), so a Vulkan
 /// driver fuses nothing the Metal compile, which runs with contraction off, keeps
 /// apart. Returns how many results there were.

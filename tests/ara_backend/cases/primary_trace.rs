@@ -102,11 +102,21 @@ fn production_primary_trace_and_receivers_native_replay_against_cpu() -> Result<
     let normals = StorageBuffer::new(&mut gpu, bytemuck::cast_slice(&f.normals))?;
     let frames: Vec<_> = fixtures
         .iter()
-        .map(|f| StorageBuffer::new(&mut gpu, bytemuck::cast_slice(&f.frame)))
+        .map(|f| StorageBuffer::new(&mut gpu, bytemuck::cast_slice(&with_zones(&f.frame))))
         .collect::<Result<_>>()?;
     let placements: Vec<_> = fixtures
         .iter()
-        .map(|f| StorageBuffer::new(&mut gpu, bytemuck::cast_slice(&f.placements)))
+        .map(|f| {
+            let draws: Vec<_> = f
+                .batches
+                .iter()
+                .map(|b| (b.index, b.indices.len(), false))
+                .collect();
+            StorageBuffer::new(
+                &mut gpu,
+                bytemuck::cast_slice(&placement_words(&f.placements, &draws)),
+            )
+        })
         .collect::<Result<_>>()?;
     let mut images = BTreeMap::new();
     for (binding, format, size) in [
