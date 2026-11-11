@@ -408,3 +408,5 @@ mod forward_cases;
 
 #[path = "ara_backend/cases/gi_cache.rs"]
 mod gi_cache_cases;
+#[path = "ara_backend/gi_cache_reference.rs"]
+mod gi_cache_reference;

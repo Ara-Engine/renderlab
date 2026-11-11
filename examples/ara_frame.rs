@@ -370,6 +370,7 @@ fn ara_frame(
                 } else {
                     renderlab::PostSettings::default()
                 }),
+                indirect: None,
             },
         )?;
         sequence.push((pixels.hdr, pixels.display.ok_or("post did not run")?));

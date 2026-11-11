@@ -49,6 +49,32 @@ impl StorageBuffer {
             }
         }
     }
+    /// Device-local storage of `len` bytes with undefined contents: fill or update it in
+    /// a command list before anything reads it. For buffers the GPU keeps across frames.
+    pub fn device(gpu: &mut GpuDevice, len: u64) -> Result<Self> {
+        ensure!(
+            len > 0 && len.is_multiple_of(4),
+            "storage records need aligned bytes"
+        );
+        let buffer = gpu.create_buffer(
+            len,
+            vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_SRC
+                | vk::BufferUsageFlags::TRANSFER_DST,
+            false,
+        )?;
+        match gpu.storage_buffer(buffer) {
+            Ok(slot) => Ok(Self {
+                buffer,
+                len,
+                slot: slot.index,
+            }),
+            Err(error) => {
+                gpu.retire(Resource::Buffer(buffer))?;
+                Err(error.into())
+            }
+        }
+    }
     /// Retire after all lists referencing this record have been submitted.
     pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
         Ok(gpu.retire(Resource::Buffer(self.buffer))?)

@@ -13,8 +13,11 @@
 //! acceleration structures, a receiver prepass, 256-ray fresh visibility and the lit
 //! pass composed on the fresh prelude. With post settings it continues through
 //! `PostGpu::encode` and the tone stage: motion surface, tile maximum, motion blur,
-//! bloom, tone and the display transfer. [`render`] is one-shot; it owns nothing
-//! across frames, so the frame is always the first after a cut.
+//! bloom, tone and the display transfer. On a traced frame with [`ForwardScene::indirect`]
+//! the world radiance cache's sky-visibility passes run between the estimator and
+//! shading, as `GiState::encode` places them, and shading reads the cache's table.
+//! [`render`] is one-shot: its frame is always the first after a cut. [`Frames`] keeps
+//! what a sequence carries from frame to frame.
 use super::{
     acceleration::Scene,
     atmosphere::{AtmosphereParameters, AtmospherePasses, AtmosphereSun, AtmosphereTargets},
@@ -24,6 +27,7 @@ use super::{
     cache::ShaderCache,
     environment::EnvironmentPasses,
     fresh_visibility::{self, Mode, Visibility},
+    gi_cache::{Cache, CacheScene, Indirect},
     graph::Graph,
     image::Texture,
     kernel::Kernel,
@@ -81,6 +85,9 @@ pub struct ForwardScene<'a> {
     pub primary: Primary,
     /// `None` stops at the exposed HDR target. Depth of field is not assembled yet.
     pub post: Option<crate::PostSettings>,
+    /// The world radiance cache, on `Primary::Traced` frames only. `None` or disabled
+    /// settings publish it as off: programs read the unoccluded environment.
+    pub indirect: Option<Indirect>,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -111,6 +118,8 @@ pub struct ForwardImages {
     pub surface: Option<Vec<u8>>,
     /// The displayed image as RGBA8 with the display transfer applied, when post ran.
     pub display: Option<Vec<u8>>,
+    /// The cache's whole table after this frame, when `Indirect::read_table` asked.
+    pub indirect_table: Option<Vec<u32>>,
 }
 
 /// The post `Settings` record at this output height for the post frame with this
@@ -185,6 +194,8 @@ struct Shared<'a> {
     atmosphere: &'a AtmosphereParameters,
     sky: Option<&'a Sky>,
     traced: Option<&'a Traced>,
+    /// The radiance cache's table where the cache runs; otherwise a zero header binds.
+    gi_table: Option<&'a StorageBuffer>,
     buffers: &'a BTreeMap<InputKey, StorageBuffer>,
     images: &'a BTreeMap<InputKey, Texture>,
 }
@@ -220,6 +231,7 @@ impl<'a> Shared<'a> {
                 (3, 23) => &self.clusters.frame,
                 (3, 50) => &self.atmosphere.record,
                 (3, 5) if self.traced.is_some() => &self.traced.context("checked")?.records,
+                (3, 20) if self.gi_table.is_some() => self.gi_table.context("checked")?,
                 _ => &self.buffers[&spec.key],
             }),
             (InputKind::BufferArray { .. }, group, binding) => {
@@ -317,13 +329,17 @@ pub fn render(
     cache: &ShaderCache,
     scene: &ForwardScene<'_>,
 ) -> Result<ForwardImages> {
-    Frames::default().render(gpu, cache, scene)
+    let mut frames = Frames::default();
+    let images = frames.render(gpu, cache, scene);
+    frames.retire(gpu)?;
+    images
 }
 
 /// What one frame leaves for the next, kept as the wgpu renderer keeps it: post's
 /// frame serial and previous camera, the shadow planner's light orientations and the
-/// placement transforms. GPU resources are still built per frame; a family that
-/// stores data on the GPU between frames will add its resources here.
+/// placement transforms, and the radiance cache with its table on the GPU. Every other
+/// GPU resource is still built per frame. Call [`Frames::retire`] when the sequence
+/// ends, to release the cache.
 #[derive(Default)]
 pub struct Frames {
     /// Frames rendered since creation.
@@ -337,11 +353,28 @@ pub struct Frames {
     shadow_bases: Vec<Option<glam::DMat4>>,
     /// The last frame's object transforms, for traced frames' previous matrices.
     transforms: Vec<crate::Mat4>,
+    /// The radiance cache, allocated by the first frame that asks for it.
+    gi: Option<Cache>,
 }
 impl Frames {
-    /// Forgets history: the next frame is a first frame after a cut.
+    /// Forgets history: the next frame is a first frame after a cut. The cache keeps
+    /// its buffers and starts from an empty table, as `Renderer::reset_indirect`.
     pub fn cut(&mut self) {
-        *self = Self::default();
+        let mut gi = self.gi.take();
+        if let Some(cache) = &mut gi {
+            cache.reset();
+        }
+        *self = Self {
+            gi,
+            ..Self::default()
+        };
+    }
+    /// Releases what the sequence kept on the GPU.
+    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
+        match self.gi {
+            Some(cache) => cache.retire(gpu),
+            None => Ok(()),
+        }
     }
     /// The serial the next post frame's `Settings` record carries.
     pub fn next_post_serial(&self) -> u32 {
@@ -354,15 +387,24 @@ impl Frames {
         cache: &ShaderCache,
         scene: &ForwardScene<'_>,
     ) -> Result<ForwardImages> {
-        let next = frame(self, gpu, cache, scene)?;
-        *self = next.1;
-        Ok(next.0)
+        // The cache outlives a failed frame: its planner has already moved on.
+        let mut gi = self.gi.take();
+        let next = frame(self, &mut gi, gpu, cache, scene);
+        self.gi = gi;
+        let (images, left) = next?;
+        *self = Self {
+            gi: self.gi.take(),
+            ..left
+        };
+        Ok(images)
     }
 }
 
-/// One frame from `history`; returns its images and the history it leaves.
+/// One frame from `history` and the cache; returns its images and the history it
+/// leaves (without the cache, which the caller keeps).
 fn frame(
     history: &Frames,
+    gi: &mut Option<Cache>,
     gpu: &mut GpuDevice,
     cache: &ShaderCache,
     scene: &ForwardScene<'_>,
@@ -373,6 +415,7 @@ fn frame(
         post_camera: None,
         shadow_bases: Vec::new(),
         transforms: scene.objects.iter().map(|o| o.transform).collect(),
+        gi: None,
     };
     ensure!(!scene.objects.is_empty(), "forward frame needs an object");
     ensure!(
@@ -393,6 +436,12 @@ fn frame(
             || (scene.sun_shadows.is_some()
                 && scene.post.is_none_or(|p| !p.enabled || !p.motion_blur)),
         "a traced frame needs sun shadows, and its post runs without motion blur for now"
+    );
+    // `prepare_cache_and_post`: only traced frames feed the cache.
+    let indirect = scene.indirect.filter(|i| i.settings.enabled);
+    ensure!(
+        indirect.is_none() || deferred_path,
+        "the radiance cache runs on traced frames"
     );
     let program = if deferred_path {
         primary_shade::hardware_soft_program(crate::program::STANDARD_PROGRAM)?
@@ -506,6 +555,22 @@ fn frame(
             uniform[32..].copy_from_slice(bytemuck::cast_slice(&[1f32, 0., 1., 5.]));
         }
     }
+    // What `update_procedural_environment` keys the procedural map's content on, and
+    // the environment uniform's rotation words: the cache re-integrates when they change.
+    let field = settings.active() && settings.environment;
+    let environment_digest: [u8; 32] = {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        if field {
+            let altitude = ((eye.y - settings.medium.ground_height) * 1e-3).clamp(
+                1e-3,
+                settings.medium.top_radius_km - settings.medium.ground_radius_km - 1e-3,
+            );
+            h.update(format!("{:?}", (sun, settings.medium, altitude)).as_bytes());
+        }
+        h.update(&uniform[32..40]);
+        h.finalize().into()
+    };
     let mut frame = lc::header(&scene.camera, size, packed.count, true, &[]);
     frame[100..104].copy_from_slice(&crate::LocalShadows::default().near.to_ne_bytes());
     let cluster_inputs = ClusterInputs {
@@ -713,6 +778,7 @@ fn frame(
         .map(|v| (f64::from(v) * f64::from(packed.exposure)).min(65504.0) as f32);
     // `Renderer::prepare_primary`: the frame and region records, the placement table,
     // the placement transforms and the targets of a traced frame.
+    let mut gi_frame = None;
     let deferred = if deferred_path {
         let trace_program = primary_trace::Entry::Receivers.program()?;
         let fresh_program = fresh_visibility::traced_program()?;
@@ -758,6 +824,38 @@ fn frame(
         } else {
             matrices.clone()
         };
+        // `prepare_gi`, after `prepare_primary`: allocate on the first frame that asks.
+        if let Some(indirect) = indirect {
+            ensure!(
+                gi.as_ref()
+                    .is_none_or(|c| c.settings() == indirect.settings),
+                "indirect settings changed within a sequence, which is not assembled yet"
+            );
+            if gi.is_none() {
+                *gi = Some(Cache::new(gpu, cache, indirect.settings, packed.count)?);
+            }
+            gi_frame = Some(
+                gi.as_mut().context("allocated above")?.prepare(
+                    gpu,
+                    &mut graph,
+                    &mut rec,
+                    CacheScene {
+                        camera: scene.camera,
+                        size,
+                        bounds: bounds
+                            .iter()
+                            .map(|b| [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z])
+                            .collect(),
+                        region: rect,
+                        models: &matrices,
+                        normals: &normal_bytes,
+                        environment: environment_digest,
+                        field,
+                        lights: packed.count,
+                    },
+                )?,
+            );
+        }
         let frame = StorageBuffer::new(gpu, &frame)?;
         let region_buffer = StorageBuffer::new(gpu, bytemuck::cast_slice(&region))?;
         let placement_buffer = StorageBuffer::new(gpu, bytemuck::cast_slice(&placements))?;
@@ -805,7 +903,14 @@ fn frame(
         None
     };
 
+    // The cache as this frame's passes and shading see it.
+    let gi = gi.as_ref().zip(gi_frame.as_ref());
     let mut specs = program.inputs().to_vec();
+    if let Some((cache, _)) = gi {
+        for stage in cache.programs() {
+            specs.extend(stage.inputs().iter().cloned());
+        }
+    }
     if let Some(traced) = &traced {
         specs.extend(shader::inputs(Pass::ReceiverRaster)?);
         specs.extend(traced.program.inputs().iter().cloned());
@@ -833,6 +938,9 @@ fn frame(
                     || (spec.key == key(3, 5) && traced.is_some())
                     || (deferred.is_some()
                         && [key(0, 10), key(0, 22), key(1, 5)].contains(&spec.key))
+                    || (gi.is_some()
+                        && (spec.key == key(3, 20)
+                            || (spec.key.group == 0 && (30..=37).contains(&spec.key.binding))))
                     || buffers.contains_key(&spec.key)
                 {
                     continue;
@@ -963,6 +1071,7 @@ fn frame(
         atmosphere: &atmosphere,
         sky: sky.as_ref(),
         traced: traced.as_ref(),
+        gi_table: gi.map(|(cache, _)| cache.table()),
         buffers: &buffers,
         images: &inputs,
     };
@@ -1002,6 +1111,28 @@ fn frame(
         shadow_packets.push(packet);
     }
 
+    // One packet per cache entry: the cache's own buffers, the rest from the frame.
+    let mut gi_packets = Vec::new();
+    if let Some((cache, records)) = gi {
+        for stage in cache.programs() {
+            let values = stage
+                .inputs()
+                .iter()
+                .map(|spec| {
+                    Ok((
+                        spec.key,
+                        match cache.input(records, spec.key) {
+                            Some(buffer) => Input::Buffer(buffer),
+                            None => shared.input(spec, None)?,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let packet = HeapBindings::for_program(gpu, stage, &values)?;
+            packet.import(&mut graph);
+            gi_packets.push(packet);
+        }
+    }
     // The traced frame's three packets: none of them belongs to one object.
     let mut deferred_packets = Vec::new();
     if let Some(deferred) = &deferred {
@@ -1015,7 +1146,8 @@ fn frame(
             packet.import(&mut graph);
             deferred_packets.push(packet);
         }
-        // `encode_primary_visibility`, `encode_primary_fresh`, `encode_primary_shading`.
+        // `encode_primary_visibility`, `encode_primary_fresh`, the cache's passes
+        // (`GiState::encode`), then `encode_primary_shading`.
         let threads = [
             deferred.trace_program.threads()?,
             deferred.fresh_program.threads()?,
@@ -1028,6 +1160,9 @@ fn frame(
                 .zip(deferred.groups)
                 .zip(threads)
         {
+            if let (Some((cache, records)), true) = (gi, std::ptr::eq(kernel, &deferred.shade)) {
+                cache.record(&mut graph, &mut rec, records, &gi_packets)?;
+            }
             kernel.record(
                 &mut graph,
                 &mut rec,
@@ -1098,6 +1233,17 @@ fn frame(
         output.image,
         u64::from(size[0]) * u64::from(size[1]) * 8,
     )?;
+    let table_read = match gi.filter(|_| indirect.is_some_and(|i| i.read_table)) {
+        Some((cache, _)) => Some(transfer::readback_buffer(
+            gpu,
+            &mut graph,
+            &mut rec,
+            cache.table().buffer,
+            0,
+            cache.table().len,
+        )?),
+        None => None,
+    };
 
     // The post tail, in `PostGpu::encode` order. Each stage reads the one before it.
     let mut post_images = Vec::new();
@@ -1231,6 +1377,14 @@ fn frame(
         hdr: gpu.read(read).context("HDR readback")?,
         surface: reads[0].map(|b| gpu.read(b)).transpose()?,
         display: reads[1].map(|b| gpu.read(b)).transpose()?,
+        indirect_table: table_read.map(|b| gpu.read(b)).transpose()?.map(|bytes| {
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|w| u32::from_le_bytes(*w))
+                .collect()
+        }),
     };
 
     if let Some((passes, bloom, surface)) = tail {
@@ -1248,8 +1402,12 @@ fn frame(
         .into_iter()
         .chain(shadow_packets)
         .chain(deferred_packets)
+        .chain(gi_packets)
     {
         packet.retire(gpu, &mut graph)?;
+    }
+    if let Some(records) = gi_frame {
+        records.retire(gpu)?;
     }
     if let Some(deferred) = deferred {
         for kernel in [deferred.trace, deferred.fresh, deferred.shade] {
@@ -1325,6 +1483,7 @@ fn frame(
         .into_iter()
         .chain(post_buffers)
         .chain(reads.into_iter().flatten())
+        .chain(table_read)
         .chain([read])
     {
         gpu.retire(Resource::Buffer(buffer))?;

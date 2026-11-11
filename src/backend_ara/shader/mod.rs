@@ -162,7 +162,9 @@ impl Pass {
             )
             .into(),
             Self::ShadowRaster => include_str!("../../../shaders/scene.wgsl").into(),
-            Self::GiCache(_) => crate::backend_ara::gi_cache::source()
+            Self::GiCache(_) => crate::backend_ara::gi_cache::source(
+                crate::IndirectSettings::default().directions,
+            )
                 .expect("embedded radiance cache composition")
                 .into(),
             Self::FreshVisibility => crate::backend_ara::fresh_visibility::source(

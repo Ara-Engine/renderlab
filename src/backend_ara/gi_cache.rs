@@ -3,10 +3,21 @@
 //! Sky visibility first (`IndirectSettings` with bounce and the filter off): visible
 //! pixels request cells, claims insert them, a scan refreshes the rest on a rotation,
 //! hardware rays resolve each cell's direction bits and an integration turns the bits
-//! into the occluded sky's SH. Nothing here records or replays yet; this is the
-//! interface the adapter reflects.
-use super::shader::{Pass, Program};
-use anyhow::{Result, ensure};
+//! into the occluded sky's SH. [`Cache`] is what a frame sequence keeps: the table and
+//! work buffers on the GPU, and the wgpu renderer's own planner for what each frame runs.
+use super::{
+    bindings::HeapBindings,
+    buffer::StorageBuffer,
+    cache::ShaderCache,
+    graph::Graph,
+    kernel::Kernel,
+    shader::{InputKey, Pass, Program},
+};
+use crate::renderer::gi_cache::{
+    self as shared, FrameInputs, Plan, PlanConfig, Planner, Sizes, WorkLayout,
+};
+use anyhow::{Context, Result, ensure};
+use ara_gpu::{Access, GpuDevice, Resource, commands::Command, commands::Recorder};
 
 /// The sky-visibility entries, in `GiState::encode` order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -59,7 +70,11 @@ impl Entry {
     /// The hardware-ray kernel module with the default direction count, and this
     /// entry selected.
     pub fn program(self) -> Result<Program> {
-        Program::new(Pass::GiCache(self), source()?)
+        self.program_for(crate::IndirectSettings::default().directions)
+    }
+    /// The same for `directions` fixed directions per cell (64 or 128).
+    pub fn program_for(self, directions: u32) -> Result<Program> {
+        Program::new(Pass::GiCache(self), source(directions)?)
     }
 }
 
@@ -67,11 +82,8 @@ impl Entry {
 /// replaced by a fetch from the module's own per-draw vertex and index arrays (the
 /// hit's placement names its draw, as `gi_receiver` already resolves it), and the
 /// vertex-return qualifiers dropped. Traversal and everything else are unchanged.
-pub(crate) fn source() -> Result<String> {
-    let original = crate::renderer::gi_cache::kernel_source(
-        false,
-        crate::IndirectSettings::default().directions,
-    );
+pub(crate) fn source(directions: u32) -> Result<String> {
+    let original = shared::kernel_source(false, directions);
     ensure!(
         original
             .matches("getCommittedHitVertexPositions(&query)")
@@ -105,3 +117,339 @@ const FETCH: &str = "fn gi_hit_vertices(batch:u32,primitive:u32)->array<vec3<f32
         gi_vertices[batch].data[gi_indices[batch].data[i+2u]*3u].xyz);
 }
 ";
+
+/// What a frame sequence asks of the cache.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Indirect {
+    /// Sky visibility on hardware rays: enabled, with bounce and the filter off.
+    pub settings: crate::IndirectSettings,
+    /// Copy the whole table out after each frame, as `Renderer::indirect_table` does.
+    pub read_table: bool,
+}
+
+/// What the planner needs from one frame's scene.
+pub(crate) struct CacheScene<'a> {
+    pub camera: crate::Camera,
+    pub size: [u32; 2],
+    /// Every placement's world bounds, in draw order.
+    pub bounds: Vec<[f32; 6]>,
+    /// `scene_pixels`: the scene's pixel rectangle.
+    pub region: [u32; 4],
+    /// Placement model matrices, then their normal transforms, as the traced tables
+    /// publish them.
+    pub models: &'a [u8],
+    pub normals: &'a [u8],
+    /// A digest that changes exactly when the environment's content or rotation does.
+    pub environment: [u8; 32],
+    /// An environment map is selected.
+    pub field: bool,
+    pub lights: u32,
+}
+
+/// One frame's records and its plan; the packets borrow the records.
+pub(crate) struct CacheFrame {
+    record: StorageBuffer,
+    draws: StorageBuffer,
+    models: StorageBuffer,
+    /// None: the cache is idle this frame and no pass runs.
+    plan: Option<Plan>,
+}
+impl CacheFrame {
+    pub(crate) fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
+        for buffer in [self.record, self.draws, self.models] {
+            buffer.retire(gpu)?;
+        }
+        Ok(())
+    }
+}
+
+/// The cache across frames: `GiState`'s table, work words, outgoing radiance and
+/// filter sources (the last two unused until bounce and the filter are assembled), the
+/// planner's history and the nine kernels.
+pub struct Cache {
+    settings: crate::IndirectSettings,
+    slots: u32,
+    sizes: Sizes,
+    table: StorageBuffer,
+    work: StorageBuffer,
+    outgoing: StorageBuffer,
+    raw: StorageBuffer,
+    /// wgpu zero-initialises its buffers; these are filled on their first frame.
+    zeroed: bool,
+    planner: Planner,
+    stages: Vec<(Entry, Program, Kernel)>,
+}
+impl Cache {
+    /// Allocates the table for `1 << slots_log2` slots (no device limit shrinks it
+    /// here) and a light bitset for `lights`, and compiles the kernels.
+    pub fn new(
+        gpu: &mut GpuDevice,
+        cache: &ShaderCache,
+        settings: crate::IndirectSettings,
+        lights: u32,
+    ) -> Result<Self> {
+        settings
+            .validate()
+            .map_err(|e| anyhow::anyhow!("indirect settings: {e}"))?;
+        ensure!(
+            settings.enabled
+                && !settings.bounce
+                && settings.filter == 0
+                && !settings.force_software,
+            "the cache is assembled for sky visibility on hardware rays: bounce, the filter \
+             and software rays are not yet"
+        );
+        ensure!(
+            crate::program::uses_indirect(crate::program::STANDARD_PROGRAM),
+            "the standard program no longer reads the cache"
+        );
+        let slots = 1u32 << settings.slots_log2;
+        let sizes = Sizes::of(slots, lights, &settings);
+        let stages = Entry::ALL
+            .into_iter()
+            .map(|entry| {
+                let program = entry.program_for(settings.directions)?;
+                let kernel = Kernel::from_program(gpu, cache, &program)?;
+                Ok((entry, program, kernel))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            settings,
+            slots,
+            table: StorageBuffer::device(gpu, sizes.table)?,
+            work: StorageBuffer::device(gpu, sizes.work)?,
+            outgoing: StorageBuffer::device(gpu, sizes.outgoing)?,
+            raw: StorageBuffer::device(gpu, sizes.raw)?,
+            sizes,
+            zeroed: false,
+            planner: Planner::default(),
+            stages,
+        })
+    }
+    pub(crate) fn settings(&self) -> crate::IndirectSettings {
+        self.settings
+    }
+    /// The table, for shading (lighting binding 20) and for reading back.
+    pub(crate) fn table(&self) -> &StorageBuffer {
+        &self.table
+    }
+    /// `Renderer::reset_indirect`: the next frame starts from an empty table.
+    pub fn reset(&mut self) {
+        self.planner.reset();
+    }
+    /// `prepare_gi` for a traced frame: plans it, writes the table header and uploads
+    /// the frame's records. The fills and the header update are recorded into `rec`.
+    pub(crate) fn prepare(
+        &mut self,
+        gpu: &mut GpuDevice,
+        graph: &mut Graph,
+        rec: &mut Recorder,
+        scene: CacheScene<'_>,
+    ) -> Result<CacheFrame> {
+        ensure!(
+            Sizes::of(self.slots, scene.lights, &self.settings).cold_words <= self.sizes.cold_words,
+            "more lights than the cache's light bitset was allocated for"
+        );
+        let config = PlanConfig {
+            settings: self.settings,
+            slots: self.slots,
+            misses: self.sizes.misses,
+            cold_words: self.sizes.cold_words,
+            raw_slots: self.sizes.raw_slots,
+            software: false,
+            field: scene.field,
+            profiling: false,
+            near_bins: 0,
+            eye: scene.camera.view().inverse().w_axis.truncate(),
+            fov_y: scene.camera.fov_y(),
+            size: scene.size,
+        };
+        let begun = self.planner.begin(&config, true, false);
+        // The buffers are idle between frames: every frame waits for its submission.
+        for buffer in [&self.table, &self.work, &self.outgoing, &self.raw] {
+            graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+            if !self.zeroed {
+                fill(graph, rec, buffer, 0, buffer.len)?;
+            }
+        }
+        self.zeroed = true;
+        graph.node(
+            rec,
+            &[(Resource::Buffer(self.table.buffer), Access::CopyDestination)],
+        )?;
+        rec.push(Command::UpdateBuffer {
+            destination: self.table.buffer,
+            offset: 0,
+            bytes: begun.header.iter().flat_map(|w| w.to_le_bytes()).collect(),
+        });
+        // One instance per object; ids are the objects' indices plus one, as the
+        // renderer's first frame numbers its (mesh, material) pairs.
+        let objects = scene.bounds.len();
+        let table = shared::draw_table(objects, (0..objects as u32).map(|b| [b + 1, 1, 0]));
+        let draws = StorageBuffer::new(gpu, bytemuck::cast_slice(&table))?;
+        let models = StorageBuffer::new(gpu, scene.models)?;
+        let finished = self.planner.finish(
+            &config,
+            &begun,
+            false,
+            FrameInputs {
+                bounds: scene.bounds,
+                poses: vec![None; objects],
+                environment: scene.environment,
+                light_key: None,
+                region: scene.region,
+                still_matrix: crate::mesh::matrix_bytes(
+                    scene
+                        .camera
+                        .unjittered()
+                        .matrix(scene.size[0], scene.size[1]),
+                ),
+                still_extent: scene.size.map(u32::to_le_bytes).concat(),
+                instances: &[scene.models, scene.normals].concat(),
+                skin_revisions: vec![],
+            },
+        );
+        let record = StorageBuffer::new(gpu, &finished.frame)?;
+        for buffer in [&draws, &models, &record] {
+            graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+        }
+        if let Some(plan) = &finished.plan {
+            self.planner.advance(&begun, plan.environment_only);
+        }
+        Ok(CacheFrame {
+            record,
+            draws,
+            models,
+            plan: finished.plan,
+        })
+    }
+    /// The cache's own buffer for a kernel input, or None where the frame supplies it.
+    pub(crate) fn input<'a>(
+        &'a self,
+        frame: &'a CacheFrame,
+        key: InputKey,
+    ) -> Option<&'a StorageBuffer> {
+        Some(match (key.group, key.binding) {
+            (0, 30) => &self.table,
+            (0, 31) => &self.work,
+            (0, 32) => &frame.record,
+            (0, 33) => &self.outgoing,
+            (0, 36) => &frame.draws,
+            (0, 37) => &self.raw,
+            (1, 0) => &frame.models,
+            _ => return None,
+        })
+    }
+    /// The entries' programs in encode order, to build one packet each.
+    pub(crate) fn programs(&self) -> impl Iterator<Item = &Program> {
+        self.stages.iter().map(|(_, program, _)| program)
+    }
+    /// `GiState::encode` without bounce, the filter or profiling: the clears, then the
+    /// passes this frame's plan runs. `packets` are in `programs` order.
+    pub(crate) fn record(
+        &self,
+        graph: &mut Graph,
+        rec: &mut Recorder,
+        frame: &CacheFrame,
+        packets: &[HeapBindings<'_>],
+    ) -> Result<()> {
+        let Some(plan) = &frame.plan else {
+            return Ok(());
+        };
+        ensure!(
+            packets.len() == self.stages.len() && !plan.bounce && !plan.filter,
+            "cache packets or plan do not match the sky-visibility passes"
+        );
+        let layout = WorkLayout::of_counts(self.slots, self.sizes.misses);
+        let header = shared::HEADER_WORDS * 4;
+        if plan.clear {
+            fill(graph, rec, &self.table, header, self.table.len - header)?;
+            fill(graph, rec, &self.outgoing, 0, self.outgoing.len)?;
+            for at in layout.queues {
+                fill(graph, rec, &self.work, u64::from(at) * 4, 4)?;
+            }
+        }
+        fill(graph, rec, &self.work, 0, shared::COUNTER_WORDS * 4)?;
+        // The staged ray bits, after the ray items.
+        fill(
+            graph,
+            rec,
+            &self.work,
+            u64::from(layout.items + shared::RAY_ITEMS) * 4,
+            u64::from(shared::RAY_ITEMS / 32) * 4,
+        )?;
+        let mut pass = |entry: Entry, groups: [u32; 2]| -> Result<()> {
+            let at = Entry::ALL
+                .iter()
+                .position(|e| *e == entry)
+                .context("unknown cache entry")?;
+            let (_, program, kernel) = &self.stages[at];
+            let threads = program.threads()?;
+            kernel.record(
+                graph,
+                rec,
+                &packets[at],
+                [groups[0] * threads[0], groups[1] * threads[1], 1],
+            )
+        };
+        let traced = !plan.environment_only;
+        if traced {
+            pass(Entry::Probe, plan.groups)?;
+            for round in 0..shared::CLAIM_ROUNDS {
+                pass(Entry::Claim, [shared::CLAIM_GROUPS, 1])?;
+                let last = round + 1 == shared::CLAIM_ROUNDS;
+                pass(
+                    if last {
+                        Entry::ResolveLast
+                    } else {
+                        Entry::Resolve
+                    },
+                    [shared::CLAIM_GROUPS, 1],
+                )?;
+            }
+        }
+        if plan.scan {
+            pass(Entry::Scan, [plan.scan_groups, 1])?;
+        }
+        if traced {
+            pass(Entry::Setup, [shared::SETUP_GROUPS, 1])?;
+            pass(Entry::Rays, [shared::RAY_GROUPS, 1])?;
+            pass(Entry::Finish, [shared::CELL_GROUPS, 1])?;
+        }
+        if plan.integrate {
+            pass(Entry::Integrate, [shared::CELL_GROUPS, 1])?;
+        }
+        Ok(())
+    }
+    /// Retire after every list that names the cache has been submitted.
+    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
+        for (_, _, kernel) in self.stages {
+            kernel.retire(gpu)?;
+        }
+        for buffer in [self.table, self.work, self.outgoing, self.raw] {
+            buffer.retire(gpu)?;
+        }
+        Ok(())
+    }
+}
+
+/// `encoder.clear_buffer` for a word range.
+fn fill(
+    graph: &mut Graph,
+    rec: &mut Recorder,
+    buffer: &StorageBuffer,
+    offset: u64,
+    size: u64,
+) -> Result<()> {
+    graph.node(
+        rec,
+        &[(Resource::Buffer(buffer.buffer), Access::CopyDestination)],
+    )?;
+    rec.push(Command::FillBuffer {
+        destination: buffer.buffer,
+        offset,
+        size,
+        value: 0,
+    });
+    Ok(())
+}
