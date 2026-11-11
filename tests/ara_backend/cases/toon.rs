@@ -26,7 +26,7 @@ fn lit_toon_original_program_native_replay_against_cpu() -> Result<()> {
     let pass = ToonPass::new(&mut gpu, &cache, Format::Rgba32Float)?;
     let layout = renderlab::backend_ara::shader::inputs(Pass::MeshToon)?;
     ensure!(
-        layout.len() == 22,
+        layout.len() == 23,
         "unexpected original toon interface: {layout:?}"
     );
     let geometry = MeshGeometry::new(
@@ -169,6 +169,9 @@ fn lit_toon_original_program_native_replay_against_cpu() -> Result<()> {
                     )?,
                     ViewDimension::D3 => {
                         Texture::volume_shape(&mut gpu, [size[0], size[1], layers], format, false)?
+                    }
+                    ViewDimension::CubeArray => {
+                        Texture::cubes(&mut gpu, size[0], layers / 6, format)?
                     }
                 };
                 images.insert(spec.key, image);

@@ -149,14 +149,27 @@ impl Texture {
                     mips: levels,
                     layers: 6,
                 },
+                // Shading samples the chain as one cube of a cube array; the levels below
+                // are written through 2D-array views of the same layers.
                 view: ImageViewDesc {
-                    dimension: ViewDimension::D2Array,
+                    dimension: ViewDimension::CubeArray,
                     base_mip: 0,
                     mip_count: levels,
                     base_layer: 0,
                     layer_count: 6,
                 },
-                sampled: gpu.sampled_image(image, false)?.index,
+                sampled: gpu
+                    .sampled_view(
+                        image,
+                        ImageViewDesc {
+                            dimension: ViewDimension::CubeArray,
+                            base_mip: 0,
+                            mip_count: levels,
+                            base_layer: 0,
+                            layer_count: 6,
+                        },
+                    )?
+                    .index,
                 storage: None,
             };
             let mut views = Vec::new();
@@ -192,6 +205,50 @@ impl Texture {
             gpu.retire(ara_gpu::Resource::Image(image))?;
         }
         result
+    }
+    /// Whole cubes of `side` texels, six layers each (+X, -X, +Y, -Y, +Z, -Z), sampled
+    /// as a cube array and filled by upload.
+    pub fn cubes(gpu: &mut GpuDevice, side: u32, cubes: u32, format: Format) -> Result<Self> {
+        let layers = cubes * 6;
+        let shape = ImageShape {
+            layers,
+            ..Default::default()
+        };
+        let image = gpu.create_texture(&TextureDesc {
+            image: ImageDesc {
+                size: [side; 2],
+                format,
+                sampled: true,
+                storage: false,
+                attachment: false,
+                copy_source: true,
+                copy_destination: true,
+            },
+            shape,
+        })?;
+        let desc = ImageViewDesc {
+            dimension: ViewDimension::CubeArray,
+            base_mip: 0,
+            mip_count: 1,
+            base_layer: 0,
+            layer_count: layers,
+        };
+        match gpu.sampled_view(image, desc) {
+            Ok(slot) => Ok(Self {
+                image,
+                size: [side; 2],
+                format,
+                shape,
+                allocation: Subresources { mips: 1, layers },
+                view: desc,
+                sampled: slot.index,
+                storage: None,
+            }),
+            Err(error) => {
+                gpu.retire(ara_gpu::Resource::Image(image))?;
+                Err(error.into())
+            }
+        }
     }
     /// Publish an explicit 2D-array view, including a single-layer array.
     pub fn array(

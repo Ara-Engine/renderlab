@@ -164,6 +164,7 @@ pub(super) fn from_module(module: &naga::Module) -> Result<Vec<ShaderInput>> {
                             (ImageDimension::D2, false) => ViewDimension::D2,
                             (ImageDimension::D2, true) => ViewDimension::D2Array,
                             (ImageDimension::D3, false) => ViewDimension::D3,
+                            (ImageDimension::Cube, true) => ViewDimension::CubeArray,
                             _ => bail!("unported image dimension for {:?}", g.name),
                         };
                         if let ImageClass::Storage { format, access } = class {
@@ -273,6 +274,7 @@ pub(super) fn image_entry(dimension: ViewDimension, sample: SampleType) -> Resul
         (ViewDimension::D2Array, SampleType::Float) => "AraReadArrayEntry",
         (ViewDimension::D2Array, SampleType::Depth) => "AraDepthArrayEntry",
         (ViewDimension::D3, SampleType::Float) => "AraVolumeEntry",
+        (ViewDimension::CubeArray, SampleType::Float) => "AraCubeArrayEntry",
         _ => bail!("unported sampled-image interpretation"),
     })
 }

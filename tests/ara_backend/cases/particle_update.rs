@@ -45,7 +45,7 @@ fn particle_update_native_replay_against_cpu() -> Result<()> {
         ),
     ];
     let shadow = Texture::new(&mut gpu, [1, 1], Format::Depth32Float, false, false)?;
-    let diffuse = Texture::array(&mut gpu, [1, 1], 6, Format::Rgba16Float, false, false)?;
+    let diffuse = Texture::cubes(&mut gpu, 1, 1, Format::Rgba16Float)?;
     let transmission = Texture::array(&mut gpu, [1, 1], 1, Format::Rgba16Float, false, false)?;
     let sampler = SamplerDesc {
         compare: Some(CompareOp::LessEqual),
@@ -59,10 +59,11 @@ fn particle_update_native_replay_against_cpu() -> Result<()> {
         (key(0, 34), Input::Image(&shadow)),
         (key(0, 35), Input::Sampler(sampler)),
         (key(3, 6), Input::Image(&diffuse)),
+        (key(3, 11), Input::Sampler(SamplerDesc::default())),
         (key(3, 27), Input::Image(&transmission)),
     ]);
     ensure!(
-        renderlab::backend_ara::shader::inputs(Pass::ParticleUpdate)?.len() == 10,
+        renderlab::backend_ara::shader::inputs(Pass::ParticleUpdate)?.len() == 11,
         "update interface changed"
     );
     let inputs = HeapBindings::new(&mut gpu, Pass::ParticleUpdate, &values)?;

@@ -137,7 +137,7 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
                 } else {
                     (
                         [1, 1],
-                        if dimension == ViewDimension::D2Array {
+                        if matches!(dimension, ViewDimension::D2Array | ViewDimension::CubeArray) {
                             6
                         } else {
                             1
@@ -150,6 +150,7 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
                         Texture::array(&mut gpu, size, layers, format, false, false)?
                     }
                     ViewDimension::D3 => Texture::volume(&mut gpu, 1, format)?,
+                    ViewDimension::CubeArray => Texture::cubes(&mut gpu, 1, 1, format)?,
                 };
                 let bytes = if spec.key == key(0, 7) {
                     bytemuck::cast_slice(&f.hit).to_vec()

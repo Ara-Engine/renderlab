@@ -1652,6 +1652,28 @@ kernels and the budget. (3) Render scale.
 17 inputs, emits MSL and SPIR-V that validates, and compiles natively
 (`temporal_resolve_reflects_validates_and_compiles`). No adapter gap.
 
+## Cube-array environment lookups (Renderlab main's P-SKY)
+
+Renderlab main turned the three environment maps into `texture_cube_array<f32>`
+sampled with a filtering sampler (lighting binding 11), in the prelude every lit
+program includes. ara-gpu had no cube views, so this needed
+[ara#45](https://github.com/Ara-Engine/ara/pull/45) (`ViewDimension::CubeArray`);
+this branch is pinned to its head until it merges.
+
+In the backend: reflection maps an arrayed cube image to that view dimension; the MSL
+path reads it through a `texturecube_array` table entry and the SPIR-V path declares
+`texture_cube_array<f32>` in its heap arrays; the procedural environment chain is
+published as one cube of a cube array while its levels are still written through
+2D-array storage views of the same layers; an absent environment binds one black
+cube; and the environment sampler is bilinear with nearest mips.
+
+With main merged, all 59 tests pass under Metal validation, the atmosphere frame's
+sky-lit checks included, and M5-A at the cache's default level differs from the same
+frame before the merge by at most 0.10% in HDR (mean 0.0003%) and one display level:
+hardware cube filtering against the manual bilinear lookup it replaced. **Not run:**
+the Vulkan side of cube arrays, in ara-gpu or here; its first run is this suite on
+the gate.
+
 ## First Vulkan run (Radeon 760M, RADV, validation on)
 
 At 65119b7 the Linux gate ran the suite on Vulkan for the first time: 38 passed and

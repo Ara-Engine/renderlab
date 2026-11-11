@@ -50,7 +50,7 @@ use ara_gpu::{
     acceleration::{AccelerationDesc, AccelerationInstance},
     commands::Command,
     descriptors::Format,
-    sampler::SamplerDesc,
+    sampler::{Filter, SamplerDesc},
     texture::{SampleCount, ViewDimension},
 };
 use std::collections::BTreeMap;
@@ -263,6 +263,11 @@ impl<'a> Shared<'a> {
                         .with_context(|| format!("forward frame cannot supply {}", spec.name))?,
                 })
             }
+            // `environment_sampler`: bilinear within a level, exact integer levels.
+            (InputKind::Sampler { .. }, 3, 11) => Input::Sampler(SamplerDesc {
+                mip: Filter::Nearest,
+                ..SamplerDesc::default()
+            }),
             (InputKind::Sampler { .. }, ..) => Input::Sampler(SamplerDesc::default()),
         })
     }
@@ -994,6 +999,10 @@ fn frame(
                         [crate::lighting::DFG_SIZE, crate::lighting::DFG_SIZE, 1],
                         crate::lighting::DFG.to_vec(),
                     ),
+                    // An absent environment: one black cube, as the renderer's fallback.
+                    _ if dimension == ViewDimension::CubeArray => {
+                        (format, [1, 1, 6], vec![0; texel * 6])
+                    }
                     _ => {
                         let layers = if dimension == ViewDimension::D2 { 1 } else { 6 };
                         (format, [1, 1, layers], vec![0; texel * layers as usize])
@@ -1011,6 +1020,7 @@ fn frame(
                         sample == SampleType::Depth,
                     )?,
                     ViewDimension::D3 => Texture::volume_shape(gpu, extent, format, false)?,
+                    ViewDimension::CubeArray => Texture::cubes(gpu, 1, 1, format)?,
                 };
                 staging.push(transfer::upload(
                     gpu,

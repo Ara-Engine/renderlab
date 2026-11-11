@@ -119,6 +119,7 @@ fn lower(
                     ViewDimension::D2 => "2d",
                     ViewDimension::D2Array => "2d_array",
                     ViewDimension::D3 => "3d",
+                    ViewDimension::CubeArray => anyhow::bail!("cube arrays are sampled only"),
                 };
                 declarations.push_str(&format!("@group(0) @binding({}) var ara_storage_{i}:binding_array<texture_storage_{dim}<{},write>>;\n",1600+i,super::heap_interface::storage_wgsl(format)?));
                 names.insert(input.name.as_str(), format!("ara_storage_{i}[{slot}]"));
@@ -152,6 +153,7 @@ fn lower(
                     ViewDimension::D2 => "2d",
                     ViewDimension::D2Array => "2d_array",
                     ViewDimension::D3 => "3d",
+                    ViewDimension::CubeArray => "cube_array",
                 };
                 let ty = if sample == SampleType::Depth {
                     format!("texture_depth_{dim}")
