@@ -94,15 +94,12 @@ pub(crate) fn exact_virtual_settings(m: &serde_json::Value) -> crate::VirtualSha
 
 #[test]
 fn virtual_manifest_lookup_defaults_and_overrides() {
-    assert_eq!(
-        crate::VirtualLookup::default(),
-        crate::VirtualLookup::Surface
-    );
+    assert_eq!(crate::VirtualLookup::default(), crate::VirtualLookup::Disk);
     assert_eq!(
         virtual_settings(&serde_json::json!({"virtual": {}}))
             .unwrap()
             .lookup,
-        crate::VirtualLookup::Surface
+        crate::VirtualLookup::Disk
     );
     assert_eq!(
         exact_virtual_settings(&serde_json::json!({})).lookup,

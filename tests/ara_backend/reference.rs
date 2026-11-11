@@ -1,0 +1,407 @@
+//! Scalar reference; every bloom store rounds through f16 like its GPU target.
+use half::f16;
+/// An image in row-major order with top-left origin.
+#[derive(Clone, Debug)]
+pub struct Image {
+    /// Width and height in pixels.
+    pub size: [u32; 2],
+    /// Linear RGBA texels.
+    pub pixels: Vec<[f32; 4]>,
+}
+/// Fixed input state shared by the two native backends and scalar reference.
+pub struct Fixture {
+    /// Odd-size half-precision HDR input.
+    pub hdr: Image,
+    /// Half-precision 3D LUT, red varying fastest.
+    pub lut: Vec<[f32; 4]>,
+    /// Side length of the cube LUT.
+    pub lut_size: u32,
+    /// Exact Renderlab Settings ABI: five vec4 values.
+    pub settings: [f32; 20],
+}
+pub(super) fn half(v: [f32; 4]) -> [f32; 4] {
+    v.map(|x| f16::from_f32(x).to_f32())
+}
+/// Deterministic 17x11 HDR gradient with an impulse and a nonidentity four-cube LUT.
+pub fn fixture() -> Fixture {
+    let size = [17, 11];
+    let pixels = (0..size[0] * size[1])
+        .map(|i| {
+            let x = (i % size[0]) as f32;
+            let y = (i / size[0]) as f32;
+            half([
+                0.03 + x * 0.13 + if i == 78 { 7. } else { 0. },
+                0.08 + y * 0.12,
+                0.12 + (x + y) * 0.035,
+                1.,
+            ])
+        })
+        .collect();
+    let lut_size = 4;
+    let lut = (0..64)
+        .map(|i| {
+            let r = (i % 4) as f32 / 3.;
+            let g = (i / 4 % 4) as f32 / 3.;
+            let b = (i / 16) as f32 / 3.;
+            half([0.8 * r + 0.1 * g, 0.9 * g, 0.75 * b + 0.15 * r, 1.])
+        })
+        .collect();
+    Fixture {
+        hdr: Image { size, pixels },
+        lut,
+        lut_size,
+        settings: [
+            0.25, 0., 0., 0., 0., 0., 0., 0., 1.1, 0.85, 0.05, 0., 1.1, 0.95, 1., 1., 0., 0.5, 4.,
+            0.,
+        ],
+    }
+}
+fn load(image: &Image, x: i32, y: i32) -> [f32; 4] {
+    let x = x.clamp(0, image.size[0] as i32 - 1) as usize;
+    let y = y.clamp(0, image.size[1] as i32 - 1) as usize;
+    image.pixels[y * image.size[0] as usize + x]
+}
+fn mix(a: [f32; 4], b: [f32; 4], t: f32) -> [f32; 4] {
+    std::array::from_fn(|i| a[i] * (1. - t) + b[i] * t)
+}
+pub(super) fn sample(image: &Image, uv: [f32; 2]) -> [f32; 4] {
+    let x = uv[0] * image.size[0] as f32 - 0.5;
+    let y = uv[1] * image.size[1] as f32 - 0.5;
+    let ix = x.floor() as i32;
+    let iy = y.floor() as i32;
+    mix(
+        mix(load(image, ix, iy), load(image, ix + 1, iy), x - x.floor()),
+        mix(
+            load(image, ix, iy + 1),
+            load(image, ix + 1, iy + 1),
+            x - x.floor(),
+        ),
+        y - y.floor(),
+    )
+}
+fn tent(image: &Image, uv: [f32; 2]) -> [f32; 4] {
+    let mut out = [0.; 4];
+    for y in -1i32..=1 {
+        for x in -1i32..=1 {
+            let w = ((2 - x.abs()) * (2 - y.abs())) as f32 / 16.;
+            let p = sample(
+                image,
+                [
+                    uv[0] + x as f32 / image.size[0] as f32,
+                    uv[1] + y as f32 / image.size[1] as f32,
+                ],
+            );
+            for c in 0..4 {
+                out[c] += p[c] * w;
+            }
+        }
+    }
+    out
+}
+/// Scalar nine-tap tent followed by an RGBA16Float store.
+pub fn downsample(input: &Image, size: [u32; 2]) -> Image {
+    Image {
+        size,
+        pixels: (0..size[0] * size[1])
+            .map(|i| {
+                half(tent(
+                    input,
+                    [
+                        (i % size[0]) as f32 / size[0] as f32 + 0.5 / size[0] as f32,
+                        (i / size[0]) as f32 / size[1] as f32 + 0.5 / size[1] as f32,
+                    ],
+                ))
+            })
+            .collect(),
+    }
+}
+/// Scalar Renderlab upsample with a 0.65 convex mix and RGBA16Float store.
+pub fn upsample(input: &Image, second: &Image) -> Image {
+    let size = input.size;
+    Image {
+        size,
+        pixels: (0..size[0] * size[1])
+            .map(|i| {
+                let x = i % size[0];
+                let y = i / size[0];
+                half(mix(
+                    load(input, x as i32, y as i32),
+                    tent(
+                        second,
+                        [
+                            (x as f32 + 0.5) / size[0] as f32,
+                            (y as f32 + 0.5) / size[1] as f32,
+                        ],
+                    ),
+                    0.65,
+                ))
+            })
+            .collect(),
+    }
+}
+fn lut_sample(f: &Fixture, rgb: [f32; 3]) -> [f32; 3] {
+    let n = f.lut_size as usize;
+    let at = rgb.map(|x| x.clamp(0., 1.) * (n - 1) as f32);
+    let lo = at.map(|x| x.floor() as usize);
+    let hi = lo.map(|x| (x + 1).min(n - 1));
+    let t = at.map(|x| x - x.floor());
+    let mut out = [0.; 3];
+    for z in 0..2 {
+        for y in 0..2 {
+            for x in 0..2 {
+                let i = if x == 0 { lo[0] } else { hi[0] }
+                    + n * (if y == 0 { lo[1] } else { hi[1] }
+                        + n * if z == 0 { lo[2] } else { hi[2] });
+                let w = if x == 0 { 1. - t[0] } else { t[0] }
+                    * if y == 0 { 1. - t[1] } else { t[1] }
+                    * if z == 0 { 1. - t[2] } else { t[2] };
+                for (c, v) in out.iter_mut().enumerate() {
+                    *v += f.lut[i][c] * w;
+                }
+            }
+        }
+    }
+    out
+}
+/// Scalar tone/grade/LUT/vignette, channel aberration and wrapping grain hash.
+pub fn tone(colour: &Image, bloom: &Image, f: &Fixture) -> Image {
+    let size = colour.size;
+    let pixels = (0..size[0] * size[1])
+        .map(|i| {
+            let uv = [
+                ((i % size[0]) as f32 + 0.5) / size[0] as f32,
+                ((i / size[0]) as f32 + 0.5) / size[1] as f32,
+            ];
+            let hdr_at = |uv| mix(sample(colour, uv), sample(bloom, uv), f.settings[0]);
+            let mut hdr = hdr_at(uv);
+            if f.settings[16] > 0. {
+                let radial = uv.map(|v| v * 2. - 1.);
+                let squared = radial[0] * radial[0] + radial[1] * radial[1];
+                let shift = [
+                    radial[0] * squared * f.settings[16] / size[0] as f32,
+                    radial[1] * squared * f.settings[16] / size[1] as f32,
+                ];
+                hdr[0] = hdr_at([uv[0] + shift[0], uv[1] + shift[1]])[0];
+                hdr[2] = hdr_at([uv[0] - shift[0], uv[1] - shift[1]])[2];
+            }
+            let mut rgb = std::array::from_fn::<_, 3, _>(|c| {
+                let x = (hdr[c] * f.settings[12 + c]).max(0.);
+                let x = if f.settings[15] > 0.5 {
+                    ((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)).clamp(0., 1.)
+                } else {
+                    x / (1. + x)
+                };
+                0.18 * (x / 0.18).max(0.).powf(f.settings[8])
+            });
+            let l = rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+            rgb = rgb.map(|x| (l * (1. - f.settings[9]) + x * f.settings[9]).clamp(0., 1.));
+            if f.settings[17] > 0. {
+                let mapped = lut_sample(f, rgb);
+                rgb = std::array::from_fn(|c| {
+                    rgb[c] * (1. - f.settings[17]) + mapped[c] * f.settings[17]
+                });
+            }
+            let r = uv.map(|x| x * 2. - 1.);
+            let edge = ((r[0] * r[0] + r[1] * r[1] - 0.15) / (1.8 - 0.15)).clamp(0., 1.);
+            let edge = edge * edge * (3. - 2. * edge);
+            let mut rgb = rgb.map(|x| x * (1. - f.settings[10] * edge));
+            if f.settings[11] > 0. {
+                let mut h = (i % size[0]).wrapping_mul(0x9e3779b9)
+                    ^ (i / size[0]).wrapping_mul(0x85ebca6b)
+                    ^ (f.settings[3] as u32).wrapping_mul(0xc2b2ae35);
+                h = (h ^ (h >> 16)).wrapping_mul(0x7feb352d);
+                h = (h ^ (h >> 15)).wrapping_mul(0x846ca68b);
+                let hash = ((h ^ (h >> 16)) >> 8) as f32 / 16777216.;
+                let signal = ((rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722) * 4.)
+                    .clamp(0., 1.)
+                    .sqrt();
+                rgb = rgb.map(|x| x + (hash - 0.5) * f.settings[11] * signal);
+            }
+            let rgb = rgb.map(|x| x.clamp(0., 1.));
+            [rgb[0], rgb[1], rgb[2], 1.]
+        })
+        .collect();
+    Image { size, pixels }
+}
+
+/// Independent linear-to-sRGB display transfer, before hardware UNORM quantization.
+pub fn display(input: &Image) -> Image {
+    Image {
+        size: input.size,
+        pixels: input
+            .pixels
+            .iter()
+            .map(|p| {
+                let mut out = *p;
+                for x in &mut out[..3] {
+                    let v = x.clamp(0., 1.);
+                    *x = if v <= 0.0031308 {
+                        v * 12.92
+                    } else {
+                        1.055 * v.powf(1. / 2.4) - 0.055
+                    };
+                }
+                out[3] = 1.;
+                out
+            })
+            .collect(),
+    }
+}
+
+/// Scalar maxima, including clamp replication at incomplete edge tiles.
+pub fn tile_max(aux: &Image) -> Image {
+    let size = aux.size.map(|n| n.div_ceil(16));
+    let pixels = (0..size[0] * size[1])
+        .map(|i| {
+            let mut best = [0.; 4];
+            let mut distance = 0.;
+            for y in 0..16 {
+                for x in 0..16 {
+                    let v = load(
+                        aux,
+                        (i % size[0] * 16 + x) as i32,
+                        (i / size[0] * 16 + y) as i32,
+                    );
+                    let d = v[0] * v[0] + v[1] * v[1];
+                    if d > distance {
+                        best = [v[0], v[1], 0., 0.];
+                        distance = d;
+                    }
+                }
+            }
+            half(best)
+        })
+        .collect();
+    Image { size, pixels }
+}
+fn length(v: [f32; 4]) -> f32 {
+    (v[0] * v[0] + v[1] * v[1]).sqrt()
+}
+fn cone(d: f32, r: f32) -> f32 {
+    (1. - d / r.max(0.001)).clamp(0., 1.)
+}
+fn cylinder(d: f32, r: f32) -> f32 {
+    let a = (r - 1.).max(0.);
+    let b = r + 1.;
+    let t = ((d - a) / (b - a)).clamp(0., 1.);
+    1. - t * t * (3. - 2. * t)
+}
+/// Scalar depth-aware shutter gather with neighbour maximum direction.
+pub fn motion_blur(input: &Image, aux: &Image, tiles: &Image, settings: &[f32; 20]) -> Image {
+    let size = input.size;
+    let pixels = (0..size[0] * size[1])
+        .map(|i| {
+            let x = (i % size[0]) as i32;
+            let y = (i / size[0]) as i32;
+            let a = load(aux, x, y);
+            let own = length(a);
+            let mut v = a;
+            let reach = (settings[2] / 16.).ceil() as i32;
+            for ty in -reach..=reach {
+                for tx in -reach..=reach {
+                    let b = load(tiles, x / 16 + tx, y / 16 + ty);
+                    if b[0] * b[0] + b[1] * b[1] > v[0] * v[0] + v[1] * v[1] {
+                        v = b;
+                    }
+                }
+            }
+            let radius = length(v);
+            let centre = load(input, x, y);
+            if radius < 0.5 {
+                return half(centre);
+            }
+            let mut sum = std::array::from_fn::<_, 3, _>(|c| centre[c] / own.max(1.));
+            let mut weight = 1. / own.max(1.);
+            for tap in 0..16 {
+                let t = (tap as f32 + 0.5) / 8. - 1.;
+                let q = [x as f32 + 0.5 + v[0] * t, y as f32 + 0.5 + v[1] * t];
+                let b = load(aux, q[0] as i32, q[1] as i32);
+                let d = t.abs() * radius;
+                let soft = 0.02f32.max(0.02 * a[2].min(b[2]));
+                let front = (1. - (b[2] - a[2]) / soft).clamp(0., 1.);
+                let back = (1. - (a[2] - b[2]) / soft).clamp(0., 1.);
+                let w = front * cone(d, length(b))
+                    + back * cone(d, own)
+                    + 2. * cylinder(d, length(b)) * cylinder(d, own);
+                let p = sample(input, [q[0] / size[0] as f32, q[1] / size[1] as f32]);
+                for c in 0..3 {
+                    sum[c] += p[c] * w;
+                }
+                weight += w;
+            }
+            half([
+                sum[0] / weight.max(1e-5),
+                sum[1] / weight.max(1e-5),
+                sum[2] / weight.max(1e-5),
+                centre[3],
+            ])
+        })
+        .collect();
+    Image { size, pixels }
+}
+/// Scalar 48-tap near/far lens gather, preserving foreground coverage.
+pub fn depth_of_field(input: &Image, aux: &Image, settings: &[f32; 20]) -> Image {
+    let size = input.size;
+    let coc =
+        |z: f32| (settings[5] * (z - settings[4]) / z.max(0.001)).clamp(-settings[6], settings[6]);
+    let pixels = (0..size[0] * size[1])
+        .map(|i| {
+            let x = (i % size[0]) as i32;
+            let y = (i / size[0]) as i32;
+            let z = load(aux, x, y)[2];
+            let c = coc(z);
+            let centre = load(input, x, y);
+            let foreground = c < -0.5;
+            let mut far = [0.; 3];
+            let mut far_w = 0.;
+            if !foreground {
+                far.copy_from_slice(&centre[..3]);
+                far_w = 1.;
+            }
+            let mut near = [0.; 3];
+            let mut near_w = 0.;
+            let radius = if foreground { -c } else { settings[6] };
+            for tap in 0..48 {
+                let r = ((tap as f32 + 0.5) / 48.).sqrt() * radius;
+                let angle = tap as f32 * 2.399_963_1;
+                let q = [
+                    x as f32 + 0.5 + angle.cos() * r,
+                    y as f32 + 0.5 + angle.sin() * r,
+                ];
+                let nz = load(aux, q[0] as i32, q[1] as i32)[2];
+                let nc = coc(nz);
+                let colour = sample(input, [q[0] / size[0] as f32, q[1] / size[1] as f32]);
+                if nc < -0.5 {
+                    let w = cylinder(r, -nc) / (nc * nc).max(1.);
+                    for j in 0..3 {
+                        near[j] += colour[j] * w;
+                    }
+                    near_w += w;
+                }
+                let w = if c > 0.5 && nc > 0. && nz >= z - 0.02f32.max(z * 0.02) {
+                    cylinder(r, c.min(nc))
+                } else if foreground && nc >= -0.5 {
+                    cylinder(r, -c)
+                } else {
+                    0.
+                };
+                for j in 0..3 {
+                    far[j] += colour[j] * w;
+                }
+                far_w += w;
+            }
+            let mut out = centre;
+            let coverage = (near_w * radius * radius / 48.).clamp(0., 1.);
+            for j in 0..3 {
+                let f = if far_w > 1e-5 {
+                    far[j] / far_w
+                } else {
+                    centre[j]
+                };
+                out[j] = f * (1. - coverage) + near[j] / near_w.max(1e-6) * coverage;
+            }
+            half(out)
+        })
+        .collect();
+    Image { size, pixels }
+}

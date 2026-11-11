@@ -1,0 +1,102 @@
+//! Caller-authored WGSL with one immutable reflected packet contract.
+use super::{Pass, ShaderInput};
+use anyhow::{Context, Result, ensure};
+use sha2::{Digest, Sha256};
+use std::sync::Arc;
+/// Prepared WGSL for a selected compute or raster entry family. Prepare outside recording;
+/// pipelines and packets retain their own contract identity after this is dropped.
+/// Clones share the source and the reflected inputs, so a built-in program kept for
+/// the process (`memo::Memo`) costs a frame nothing to hand out.
+#[derive(Clone)]
+pub struct Program {
+    pass: Pass,
+    source: Arc<str>,
+    inputs: Arc<[ShaderInput]>,
+    threads: Option<[u32; 3]>,
+    contract: [u8; 32],
+    /// The source's digest, taken once: its key in the reflection tables and in the
+    /// pipeline cache.
+    digest: [u8; 32],
+    /// The runtime checks its native code carries: engine code's unless
+    /// [`checked`](Self::checked) says it holds a caller's program.
+    checks: super::Checks,
+}
+impl Program {
+    /// Validate caller WGSL and reflect only the chosen entry or raster pair. The family selects
+    /// its entry name and wrapper convention, while the program owns its code.
+    pub fn new(pass: Pass, source: impl Into<String>) -> Result<Self> {
+        ensure!(pass.indirect(), "program needs a reflected packet family");
+        let source: String = source.into();
+        let digest = super::memo::digest(&source);
+        let inputs = super::heap_interface::from_digest(pass, &source, digest)?;
+        let threads = if pass.raster() {
+            None
+        } else {
+            Some(super::threads_digest(pass, &source, digest)?)
+        };
+        let contract = contract(pass, &inputs);
+        Ok(Self {
+            pass,
+            source: source.into(),
+            inputs: inputs.into(),
+            threads,
+            contract,
+            digest,
+            checks: super::Checks::Engine,
+        })
+    }
+    /// This program with naga's runtime checks, as the wgpu renderer creates every module
+    /// composed from program text, the bundled standard program's included
+    /// (`PipelineDevice::create_program_module`, P-SPLIT).
+    pub fn checked(mut self) -> Self {
+        self.checks = super::Checks::User;
+        self
+    }
+    pub(crate) fn checks(&self) -> super::Checks {
+        self.checks
+    }
+    /// Ordered source keys and resource requirements for this program's packet.
+    pub fn inputs(&self) -> &[ShaderInput] {
+        &self.inputs
+    }
+    /// Selected compute or raster family.
+    pub fn pass(&self) -> Pass {
+        self.pass
+    }
+    /// Resolved compute workgroup size; raster programs return an error.
+    pub fn threads(&self) -> Result<[u32; 3]> {
+        self.threads
+            .context("raster programs have no compute workgroup size")
+    }
+    /// Emit native Metal source through the shared heap adapter.
+    pub fn msl(&self) -> Result<super::MetalProgram> {
+        super::metal::from_source(self.pass, &self.source)
+    }
+    /// Emit SPIR-V through the shared heap adapter.
+    pub fn spirv(&self) -> Result<Vec<super::SpirvStage>> {
+        super::spirv::from_source(
+            self.pass,
+            &self.source,
+            self.checks,
+            super::DeviceGuards::default(),
+        )
+    }
+    pub(crate) fn source(&self) -> &str {
+        &self.source
+    }
+    pub(crate) fn contract(&self) -> [u8; 32] {
+        self.contract
+    }
+    pub(crate) fn digest(&self) -> [u8; 32] {
+        self.digest
+    }
+}
+
+pub(crate) fn contract(pass: Pass, inputs: &[ShaderInput]) -> [u8; 32] {
+    let mut hash = Sha256::new();
+    hash.update(format!("{pass:?}"));
+    for input in inputs {
+        hash.update(format!("{:?}:{:?};", input.key, input.kind));
+    }
+    hash.finalize().into()
+}
