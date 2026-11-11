@@ -16,10 +16,10 @@ use film_accumulation::{FilmLayouts, FilmState};
 #[path = "shadow_visibility_filter.rs"]
 mod shadow_visibility_filter;
 #[path = "temporal_reconstruction.rs"]
-pub(super) mod temporal_reconstruction;
+pub(crate) mod temporal_reconstruction;
 // MP1: per-program deferred shading of mixed-program frames.
 #[path = "program_lists.rs"]
-pub(super) mod program_lists;
+pub(crate) mod program_lists;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
@@ -63,7 +63,7 @@ pub(super) fn transparent_reflection_head(wgsl: &str) -> Result<String, Error> {
 }
 
 /// Same engine seams and material ABI, with no traversal declarations at all.
-pub(super) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
+pub(crate) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
     // Validate the affine/visibility seams even though this composition has no rays.
     crate::hardware_shadows::shader_source(wgsl, SampleCount::One)?;
     let (before, rest) = wgsl
@@ -81,7 +81,7 @@ pub(super) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
     Ok([hard, soft].map(|body| format!("enable wgpu_binding_array;\n{before}\n{body}\n{after}\n{hash}\nconst PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}", include_str!("../shaders/primary_rays.wgsl"))))
 }
 
-pub(super) fn non_rt_sources(wgsl: &str) -> Result<([String; 2], [String; 2]), Error> {
+pub(crate) fn non_rt_sources(wgsl: &str) -> Result<([String; 2], [String; 2]), Error> {
     let heads = non_rt_heads(wgsl)?;
     let kernels = heads.clone().map(|h| format!("{h}\noverride FRESH_DIRECTIONS:u32=256u;\n@compute @workgroup_size(1) fn primary_trace() {{}}\n@compute @workgroup_size(1) fn primary_trace_receivers() {{}}\n@compute @workgroup_size(1) fn primary_trace_interactive() {{}}\n@compute @workgroup_size(1) fn fresh_compute() {{}}"));
     // M7-R1n: non-RT shading heads declare the software reflection geometry.
@@ -92,7 +92,7 @@ pub(super) fn non_rt_sources(wgsl: &str) -> Result<([String; 2], [String; 2]), E
 
 /// The engine's trace and visibility kernel modules: hard (camera rays and exact
 /// receivers) and soft (traced fresh visibility and the fused Interactive pass).
-pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
+pub(crate) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
     let [hard, soft] = heads(wgsl)?;
     if soft.matches(COVERAGE_SEAM).count() != 1 {
         return Err(Error::InvalidInput(
@@ -123,7 +123,7 @@ pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
 
 /// The check pipeline shares the actual geometry arithmetic, including test rays,
 /// but has no traversal types, builtins or lighting estimator in its module.
-pub(super) fn edge_check_source(kernels: &str) -> String {
+pub(crate) fn edge_check_source(kernels: &str) -> String {
     use std::collections::{BTreeMap, BTreeSet};
     let kernels = kernels.replace("\r\n", "\n");
     let mut functions = BTreeMap::new();
@@ -201,7 +201,7 @@ pub(super) fn edge_check_source(kernels: &str) -> String {
 /// Heads of every program's traced shading modules, indexed by `Shading`: Hard (inline
 /// `hard_shadow` rays) and Soft (fresh counts). `program::compose` appends the API, the
 /// program and the shading entry.
-pub(super) fn shading_heads(wgsl: &str) -> Result<[String; 2], Error> {
+pub(crate) fn shading_heads(wgsl: &str) -> Result<[String; 2], Error> {
     let mut heads = heads(wgsl)?;
     // Hard shading reuses the exact epsilon published by its camera-hit pass.
     // Keep this engine helper separate from every user's shading program.
@@ -259,7 +259,7 @@ pub(super) fn sources_hash(sources: &[String; 2]) -> [u8; 32] {
 /// rectangle of every conservative world bound projected through `matrix`, 2 px
 /// outward. A ray outside it misses every triangle; traced frames skip those rays.
 /// Bounds reaching behind the eye, or a nonfinite projection, give the image.
-pub(super) fn scene_pixels(bounds: &[Bounds], matrix: Mat4, [width, height]: [u32; 2]) -> [u32; 4] {
+pub(crate) fn scene_pixels(bounds: &[Bounds], matrix: Mat4, [width, height]: [u32; 2]) -> [u32; 4] {
     let matrix = matrix.as_dmat4();
     let (mut lower, mut upper) = (glam::DVec2::INFINITY, glam::DVec2::NEG_INFINITY);
     for b in bounds {

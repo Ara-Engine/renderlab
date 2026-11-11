@@ -277,7 +277,8 @@ fn primary_repair_range(batch:u32,primitive:u32,edge:u32)->vec3<u32> {
     if h>=primary_repair_scan[s-1u] {return whole;}
     return vec3<u32>(primary_repair_scan[s+h],primary_repair_scan[s+h+1u],1u);
 }";
-pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
+/// Share the original ray-free visibility composition across native backends.
+pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let head = primary_ray_gpu::non_rt_heads(wgsl)?;
     Ok(format!(
         "{}\n{REPAIR_POLICY}\n{}\n{}",
@@ -287,7 +288,7 @@ pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     ))
 }
 /// The shared declarations, the per-draw array size, then one stage.
-fn stage_source(stage: &str) -> String {
+pub(crate) fn stage_source(stage: &str) -> String {
     format!(
         "{}\nconst PRIMARY_BATCHES:u32={}u;\n{stage}",
         include_str!("../shaders/visibility_buffer.wgsl"),

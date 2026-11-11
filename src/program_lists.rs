@@ -17,7 +17,7 @@ const LIST_TILE: [u32; 2] = [4, 4];
 /// `TRACED_DRAWS` batches.
 const INFO_BYTES: u64 = 16 + 4 * TRACED_DRAWS as u64;
 /// Standalone binning shares the composed shading draw-table ABI.
-fn bin_source() -> String {
+pub(crate) fn bin_source() -> String {
     format!(
         "const PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}",
         include_str!("../shaders/program_bins.wgsl")
