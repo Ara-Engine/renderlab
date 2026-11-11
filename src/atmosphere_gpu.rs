@@ -489,9 +489,11 @@ impl Renderer {
                 }),
                 ResourceKind::Texture,
             );
+            // Shading samples the whole chain as one cube (lighting group 3); the
+            // kernels write each level through its own array view below.
             let view = ledger.own(
                 texture.create_view(&wgpu::TextureViewDescriptor {
-                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    dimension: Some(wgpu::TextureViewDimension::CubeArray),
                     ..Default::default()
                 }),
                 ResourceKind::TextureView,

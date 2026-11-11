@@ -114,6 +114,10 @@ pub enum Background {
     /// The map itself along each pixel's ray, exposed and scaled like the light it gives
     /// (TR1b's visible sky, `Renderer::set_visible_environment`).
     Sky,
+    /// The map along each pixel's ray at its own radiance scale (nonnegative), in place
+    /// of the sky's `intensity`: a sky that lights the scene more or less brightly than it
+    /// looks (an engine's sky-light strength). Reflections still see the lighting scale.
+    ScaledSky(f32),
 }
 
 /// How scene luminance maps to display values before tone mapping.
@@ -235,7 +239,7 @@ pub(crate) fn lighting(
         // A visible-sky background clears to black wherever the map is not drawn.
         Sky::Map { background, .. } => match background {
             Background::Color(radiance) => radiance,
-            Background::Sky => [0.0; 3],
+            Background::Sky | Background::ScaledSky(_) => [0.0; 3],
         },
     };
     let mut all = Vec::with_capacity(lights.len() + 1);
