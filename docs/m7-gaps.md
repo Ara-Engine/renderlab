@@ -1033,3 +1033,12 @@ A still scene whose cache lighting key never changes stays below its converged b
 - **Where non-RT glossy time goes (16 strata):** about 17 ms closest-hit walks and reconstruction, 8 ms the hits' sun walks, 3.5 ms hit shading; 2.6 ms with glossy tracing off.
 - **The roughness-0.4 bound:** 71% of Showcase's traced glossy pixels are at roughness 0.4-0.5; one ray there saves 11-15 ms non-RT but speckles the 0.42 aluminium ball (held flicker 2.5x). A bound, not a candidate.
 - **Next:** run the bisect screens, shrink or remove the exchange, then make 4 shared strata the default and measure Showcase still, moving and cut and the game scene. Owner: the next glossy unit (row 3 of ara-render-replacement.md, the editor frame cost).
+
+## BC7/BC5 texture upload: U-BC parked (2026-11-11)
+
+**OPEN, parked on branch `t3/bc` at fafd8f63, DON'T MERGE: written, never compiled or run.** Stopped for the picture defect (U-SPECK). Record and exact next step: docs/texture-compression.md on the branch, section "Status".
+- **Written:** `TextureData` carries `Uncompressed`, `Bc7` or `Bc5`; blocks upload as they are where the device samples BC, decoded to RGBA8 at upload otherwise; streaming carries compressed chains; BC5 normals rebuild Z in the shared normal-map helpers (programs unchanged); `.rla` schema 7 only for compressed textures; CPU tests and five ignored GPU tests.
+- **Choices taken (root accepts):** one decoder, `bcdec_rs 0.2.1` (MIT, safe Rust, no dependencies); no BC4 (no single-channel role); `Mip::rgba8` keeps its name.
+- **Next:** one test build without `--locked` (Cargo.lock lacks the new dependency), fix compile errors, three short leases for the GPU tests and the lib suite, then the game scene against main's frames.
+- **Ara side, after it lands:** `texture::prepare` passes each KTX2 level's blocks (`Bc7`/`Bc7Srgb`, `Bc5` under `NormalLinear`) and keeps a decode only for mean colours, masks, decals and the splat atlas.
+- **For the ara-gpu backend:** new formats BC7 unorm and sRGB, BC5; the BC device feature; the material's `normal_mapped` word is 0, 1 or 2; `rl_normal_texel` is new in program_api.wgsl.
