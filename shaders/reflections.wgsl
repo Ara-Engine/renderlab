@@ -118,7 +118,11 @@ fn rl_hit_input(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,width:f32,spread:f
     let material=primary_materials[hit.batch].value;
     let positions=array<vec3<f32>,3>(ta.position,tb.position,tc.position);
     let info=primary_placements[hit.placement];
-    let receiver=Receiver(receiver_world,geometric,vec2<i32>(pixel),info&0x1fffffffu,primary_epsilon(positions,hit.placement),(info&0x20000000u)!=0u);
+    // The hit's shadow origin is offset toward each light (shadow_origin's `thin` side, as
+    // rl_hit_shadow's): its viewed side is the reflection ray's, not the camera's, and the
+    // camera-side offset started a hit's local-light rays inside every surface that faces
+    // away from the camera (U-SPECK2, docs/speck2.md).
+    let receiver=Receiver(receiver_world,geometric,vec2<i32>(pixel),info&0x1fffffffu,primary_epsilon(positions,hit.placement),true);
     // DC1's world-space decals project onto hits as onto camera receivers.
     let input=decal_prepare(SurfaceInput(world,e1*bary_gradients[0].x+e2*bary_gradients[0].y,e1*bary_gradients[1].x+e2*bary_gradients[1].y,source_geometric,
         a.normal*w.x+b.normal*w.y+c.normal*w.z,normal_dx,normal_dy,a.tangent*w.x+b.tangent*w.y+c.tangent*w.z,a.handedness,
