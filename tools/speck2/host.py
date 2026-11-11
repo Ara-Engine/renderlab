@@ -30,7 +30,8 @@ def load():
     spec = importlib.util.spec_from_file_location("speck2_host", HERE.parent / "p-relit/host.py")
     host = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(host)
-    host.OWNER, host.WORK, host.TARGET = "u-speck2", WORK, WORK / "target"
+    # SPECK2_TARGET: a second tree (the main baseline) builds into its own Cargo target.
+    host.OWNER, host.WORK, host.TARGET = "u-speck2", WORK, Path(os.environ.get("SPECK2_TARGET", WORK / "target"))
     host.EXAMPLES = ("game_scene", "reflection_matched")
     # Root's away-limits (2026-11-11): builds up to -j 8.
     source = inspect.getsource(host.build).replace('"-j", "2"', '"-j", "8"').replace('"CARGO_BUILD_JOBS": "2"', '"CARGO_BUILD_JOBS": "8"').replace("-j 2 {r.utc()}", "-j 8 {r.utc()}")
