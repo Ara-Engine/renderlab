@@ -125,7 +125,6 @@ fn aerial_and_fog_volume_native_replay_against_cpu() -> Result<()> {
         println!("camera volume stage {i}: max error {max}");
         ensure!(max <= 0.002, "camera volume stage {i} differs by {max}");
     }
-    passes.retire(&mut gpu)?;
     params.record.retire(&mut gpu)?;
     for t in [
         luts.transmittance,

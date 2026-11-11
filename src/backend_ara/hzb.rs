@@ -49,7 +49,6 @@ impl Hzb {
         let reduce = match Kernel::new(gpu, cache, Pass::HzbReduce) {
             Ok(p) => p,
             Err(e) => {
-                base.retire(gpu)?;
                 return Err(e);
             }
         };
@@ -57,8 +56,6 @@ impl Hzb {
         {
             Ok(p) => p,
             Err(e) => {
-                base.retire(gpu)?;
-                reduce.retire(gpu)?;
                 return Err(e);
             }
         };
@@ -66,8 +63,6 @@ impl Hzb {
             Ok(v) => v,
             Err(e) => {
                 params.retire(gpu)?;
-                base.retire(gpu)?;
-                reduce.retire(gpu)?;
                 return Err(e);
             }
         };
@@ -168,9 +163,7 @@ impl Hzb {
         graph.forget(Resource::Image(self.parent.image));
         graph.forget(Resource::Buffer(self.params.buffer));
         gpu.retire(Resource::Image(self.parent.image))?;
-        self.params.retire(gpu)?;
-        self.base.retire(gpu)?;
-        self.reduce.retire(gpu)
+        self.params.retire(gpu)
     }
 }
 impl HzbInputs<'_> {

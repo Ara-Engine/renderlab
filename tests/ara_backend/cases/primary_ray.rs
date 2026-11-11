@@ -229,9 +229,6 @@ fn heap_bound_primary_ray_query_native_replay_against_cpu() -> Result<()> {
     for p in packets {
         p.retire(&mut gpu, &mut graph)?;
     }
-    for k in kernels {
-        k.retire(&mut gpu)?;
-    }
     scene.retire(&mut gpu)?;
     decoy.retire(&mut gpu)?;
     gpu.retire(Resource::AccelerationStructure(blas))?;

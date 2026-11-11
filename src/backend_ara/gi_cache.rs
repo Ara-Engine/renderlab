@@ -541,12 +541,6 @@ impl Cache {
     }
     /// Retire after every list that names the cache has been submitted.
     pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        for (_, _, kernel) in self.stages {
-            kernel.retire(gpu)?;
-        }
-        if let Some((_, kernel)) = self.shade {
-            kernel.retire(gpu)?;
-        }
         for buffer in [self.table, self.work, self.outgoing, self.raw] {
             buffer.retire(gpu)?;
         }

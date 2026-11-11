@@ -18,15 +18,12 @@ impl VisibilityCull {
         let finish = match Kernel::new(gpu, cache, Pass::VisibilityFinish) {
             Ok(p) => p,
             Err(e) => {
-                cull.retire(gpu)?;
                 return Err(e);
             }
         };
         let reset = match Kernel::new(gpu, cache, Pass::VisibilityReset) {
             Ok(p) => p,
             Err(e) => {
-                cull.retire(gpu)?;
-                finish.retire(gpu)?;
                 return Err(e);
             }
         };
@@ -90,11 +87,5 @@ impl VisibilityCull {
         inputs: &HeapBindings<'_>,
     ) -> Result<()> {
         self.reset.record(graph, rec, inputs, [128, 1, 1])
-    }
-    /// Retire after all referencing lists have been submitted.
-    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        self.cull.retire(gpu)?;
-        self.finish.retire(gpu)?;
-        self.reset.retire(gpu)
     }
 }

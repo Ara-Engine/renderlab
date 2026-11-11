@@ -404,7 +404,6 @@ fn lit_toon_original_program_native_replay_against_cpu() -> Result<()> {
     for b in staging {
         gpu.retire(Resource::Buffer(b))?;
     }
-    pass.retire(&mut gpu)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;

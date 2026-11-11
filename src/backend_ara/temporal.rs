@@ -201,7 +201,6 @@ impl History {
     }
     /// Retire after every list that names the history has been submitted.
     pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        self.kernel.retire(gpu)?;
         for image in self.colour.into_iter().chain(self.anchor).chain(self.layer) {
             gpu.retire(Resource::Image(image.image))?;
         }

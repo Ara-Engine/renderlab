@@ -2328,9 +2328,9 @@ changed with it, so a cache directory cooks its shaders once more.
 
 **Pipelines.** The shader cache now owns each pipeline: it makes one per WGSL, entry
 and state and hands the same handle out every frame, and `ShaderCache::retire` releases
-them. The passes that draw with a pipeline no longer release it (their `retire` is
-empty and stays only so its callers need not change; removing the 21 of them and their
-call sites is mechanical and not done). No pipeline is created or destroyed per frame.
+them. The passes that draw with a pipeline no longer release it, and the `retire`
+methods that did nothing else are gone with their call sites. No pipeline is created
+or destroyed per frame.
 On Metal this moved the frame little, since Metal's own cache hid the cost; on Vulkan
 it is every pipeline of the frame.
 

@@ -164,7 +164,6 @@ fn primary_geometry_check_retry_queue_native_replay() -> Result<()> {
         gpu.retire(Resource::Buffer(b))?;
     }
     packet.retire(&mut gpu, &mut graph)?;
-    pass.retire(&mut gpu)?;
     for b in buffers
         .into_values()
         .chain(batches.into_values().flatten())

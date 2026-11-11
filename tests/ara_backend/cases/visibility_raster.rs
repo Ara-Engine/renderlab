@@ -184,8 +184,6 @@ fn software_and_hardware_cluster_raster_native_replay() -> Result<()> {
     for p in packets {
         p.retire(&mut gpu, &mut graph)?;
     }
-    software.retire(&mut gpu)?;
-    hardware.retire(&mut gpu)?;
     depth.retire(&mut gpu, &mut graph)?;
     for b in buffers
         .into_values()

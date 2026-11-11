@@ -123,7 +123,6 @@ fn skinned_streams_history_and_cluster_copies_native_replay() -> Result<()> {
         }
     }
     buffers.retire(&mut gpu, &mut graph)?;
-    passes.retire(&mut gpu)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;

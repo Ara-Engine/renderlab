@@ -138,7 +138,6 @@ fn full_bloom_and_queued_tone_settings_native_replay() -> Result<()> {
         ensure!(max <= 0.003, "queued tone differs by{max}");
         reads.push(read);
     }
-    passes.retire(&mut gpu)?;
     bloom.retire(&mut gpu)?;
     for t in [hdr, lut, output] {
         gpu.retire(Resource::Image(t.image))?;

@@ -131,7 +131,6 @@ fn raster_sky_sun_and_fog_native_replay_against_cpu() -> Result<()> {
         ensure!(relative <= 0.0005, "sky flags {i} differs by {relative}");
         staging.push(read);
     }
-    pass.retire(&mut gpu)?;
     for p in records {
         p.retire(&mut gpu, &mut graph)?;
     }

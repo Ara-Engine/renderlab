@@ -85,8 +85,4 @@ impl PrimaryCheck {
         });
         Ok(())
     }
-    /// Retire after submitting every referencing list.
-    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        self.kernel.retire(gpu)
-    }
 }

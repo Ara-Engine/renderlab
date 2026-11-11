@@ -116,7 +116,6 @@ fn scattered_buffer_arrays_lengths_aliases_and_bounds_native_replay() -> Result<
     );
     gpu.retire(Resource::Buffer(read))?;
     inputs.retire(&mut gpu, &mut graph)?;
-    kernel.retire(&mut gpu)?;
     output.retire(&mut gpu)?;
     short.retire(&mut gpu)?;
     for b in storage.into_iter().chain(counters) {

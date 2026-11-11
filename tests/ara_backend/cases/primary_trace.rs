@@ -309,9 +309,6 @@ fn production_primary_trace_and_receivers_native_replay_against_cpu() -> Result<
     for p in packets {
         p.retire(&mut gpu, &mut graph)?;
     }
-    for k in kernels {
-        k.retire(&mut gpu)?;
-    }
     scene.retire(&mut gpu)?;
     decoy.retire(&mut gpu)?;
     for mesh in meshes.into_values() {

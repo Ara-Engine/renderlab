@@ -86,7 +86,6 @@ fn transparency_raster_depth_native_replay_against_cpu() -> Result<()> {
     }
     println!("transparency depth: max error {max}, {misses} exact misses");
     ensure!(max <= 1e-5 && misses == 9, "transparency depth differs");
-    pass.retire(&mut gpu)?;
     frame.record.retire(&mut gpu)?;
     depth.retire(&mut gpu, &mut graph)?;
     gpu.retire(Resource::Image(output.image))?;

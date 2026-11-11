@@ -101,7 +101,7 @@ fn cache_kernels_reflect_validate_and_compile() -> Result<()> {
         );
         program.msl()?;
         forward_cases::validate_spirv(&program, &format!("gi-{entry:?}"))?;
-        Kernel::from_program(&mut gpu, &cache, &program)?.retire(&mut gpu)?;
+        Kernel::from_program(&mut gpu, &cache, &program)?;
     }
     // Cell shading: the work words read-only, the outgoing radiance and the draw table,
     // then the traced shading interface (geometry, materials, lighting and the table).
@@ -121,7 +121,7 @@ fn cache_kernels_reflect_validate_and_compile() -> Result<()> {
     );
     shade.msl()?;
     forward_cases::validate_spirv(&shade, "gi-ShadeCells")?;
-    Kernel::from_program(&mut gpu, &cache, &shade)?.retire(&mut gpu)?;
+    Kernel::from_program(&mut gpu, &cache, &shade)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;

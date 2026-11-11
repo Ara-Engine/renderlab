@@ -118,7 +118,6 @@ fn atmosphere_lut_chain_native_replay_against_cpu() -> Result<()> {
     }
     println!("atmosphere ambient: max error {max}");
     ensure!(max <= 0.0005, "atmosphere ambient differs by {max}");
-    passes.retire(&mut gpu)?;
     params.record.retire(&mut gpu)?;
     for t in [targets.transmittance, targets.multiscatter, targets.sky] {
         gpu.retire(Resource::Image(t.image))?;

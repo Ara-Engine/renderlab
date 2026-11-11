@@ -149,7 +149,6 @@ fn particle_update_native_replay_against_cpu() -> Result<()> {
     for b in staging.into_iter().chain([read]) {
         gpu.retire(Resource::Buffer(b))?;
     }
-    pass.retire(&mut gpu)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;

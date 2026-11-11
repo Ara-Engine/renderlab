@@ -51,7 +51,7 @@ fn temporal_resolve_reflects_validates_and_compiles() -> Result<()> {
     );
     program.msl()?;
     forward_cases::validate_spirv(&program, "tr1-resolve")?;
-    Kernel::from_program(&mut gpu, &cache, &program)?.retire(&mut gpu)?;
+    Kernel::from_program(&mut gpu, &cache, &program)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
@@ -644,7 +644,7 @@ fn interactive_trace_entries_reflect_validate_and_compile() -> Result<()> {
             );
             program.msl()?;
             forward_cases::validate_spirv(&program, &format!("interactive-{entry:?}-{rotated}"))?;
-            Kernel::from_program(&mut gpu, &cache, &program)?.retire(&mut gpu)?;
+            Kernel::from_program(&mut gpu, &cache, &program)?;
         }
     }
     cache.retire(&mut gpu)?;

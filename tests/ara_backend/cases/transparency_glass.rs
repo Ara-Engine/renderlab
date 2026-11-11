@@ -262,8 +262,6 @@ fn programmable_transparent_glass_native_replay_against_cpu() -> Result<()> {
             gpu.retire(Resource::Buffer(b))?;
         }
     }
-    seed.retire(&mut gpu)?;
-    glass.retire(&mut gpu)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
@@ -336,8 +334,8 @@ fn traced_glass_reflects_validates_and_compiles() -> Result<()> {
         }
     }
     ensure!(queries > 0, "the traced glass stages trace nothing");
-    let glass = transparency_glass::Glass::new(&mut gpu, &cache, &program)?;
-    glass.retire(&mut gpu)?;
+    // The pipeline compiles.
+    transparency_glass::Glass::new(&mut gpu, &cache, &program)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;

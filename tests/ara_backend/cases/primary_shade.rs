@@ -398,8 +398,6 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
     for p in lists {
         p.retire(&mut gpu, &mut graph)?;
     }
-    kernel.retire(&mut gpu)?;
-    list_kernel.retire(&mut gpu)?;
     for b in buffers.into_values() {
         b.retire(&mut gpu)?;
     }

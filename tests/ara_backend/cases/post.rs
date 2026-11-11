@@ -140,7 +140,6 @@ fn bloom_and_tone_native_replay_against_cpu() -> Result<()> {
         ensure!(maximum <= 0.003, "post stage {index} differs by {maximum}");
         gpu.retire(Resource::Buffer(read))?;
     }
-    passes.retire(&mut gpu)?;
     for texture in [hdr, down0, down1, up1, up0, output, encoded, lut] {
         gpu.retire(Resource::Image(texture.image))?;
     }

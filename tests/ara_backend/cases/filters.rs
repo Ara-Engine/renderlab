@@ -136,7 +136,6 @@ fn velocity_motion_and_lens_native_replays_against_cpu() -> Result<()> {
         }
         gpu.collect()?;
     }
-    passes.retire(&mut gpu)?;
     for t in [hdr, auxiliary, tiles, motion, dof] {
         gpu.retire(Resource::Image(t.image))?;
     }

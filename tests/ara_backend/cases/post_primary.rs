@@ -214,7 +214,6 @@ fn hit_based_post_velocity_depth_and_history_native_replay() -> Result<()> {
         gpu.retire(Resource::Buffer(read))?;
     }
     packet.retire(&mut gpu, &mut graph)?;
-    kernel.retire(&mut gpu)?;
     for b in buffers.into_values().chain(std::iter::once(dummy)) {
         b.retire(&mut gpu)?;
     }

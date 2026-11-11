@@ -129,9 +129,4 @@ impl ParticleSort {
         rec.push(Command::EndPass);
         Ok(())
     }
-    /// Nothing of its own to release: its pipelines stay with the shader cache
-    /// (`ShaderCache::retire`).
-    pub fn retire(self, _: &mut GpuDevice) -> Result<()> {
-        Ok(())
-    }
 }

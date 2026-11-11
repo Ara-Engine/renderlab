@@ -219,7 +219,6 @@ fn shadow_depth_atlas_native_instances_and_subresources_against_cpu() -> Result<
     }
     geometry.retire(&mut gpu, &mut graph)?;
     gpu.retire(Resource::Image(atlas.image))?;
-    pass.retire(&mut gpu)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
@@ -355,7 +354,6 @@ fn vertex_only_transparency_sun_shadow_native_replay_against_cpu() -> Result<()>
     frame.retire(&mut gpu)?;
     geometry.retire(&mut gpu, &mut graph)?;
     gpu.retire(Resource::Image(atlas.image))?;
-    pass.retire(&mut gpu)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;

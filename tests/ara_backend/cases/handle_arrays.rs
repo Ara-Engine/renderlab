@@ -353,8 +353,6 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
     for packet in packets {
         packet.retire(&mut gpu, &mut graph)?;
     }
-    kernel.retire(&mut gpu)?;
-    authored_kernel.retire(&mut gpu)?;
     output.retire(&mut gpu)?;
     for t in textures.into_iter().chain(depths).chain(query_images) {
         gpu.retire(Resource::Image(t.image))?;

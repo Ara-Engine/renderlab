@@ -162,7 +162,6 @@ fn transparency_hit_depth_native_replay_against_cpu() -> Result<()> {
         gpu.retire(Resource::Buffer(read))?;
     }
     packet.retire(&mut gpu, &mut graph)?;
-    kernel.retire(&mut gpu)?;
     for b in buffers
         .into_values()
         .chain(batches.into_values().flatten())

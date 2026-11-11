@@ -398,11 +398,6 @@ impl DiagnosticMesh {
         rec.push(Command::EndPass);
         Ok(())
     }
-    /// Nothing of its own to release: its pipelines stay with the shader cache
-    /// (`ShaderCache::retire`).
-    pub fn retire(self, _: &mut GpuDevice) -> Result<()> {
-        Ok(())
-    }
 }
 
 pub(crate) fn pack_models(models: &[crate::Mat4]) -> Result<(Vec<u8>, Vec<u8>)> {

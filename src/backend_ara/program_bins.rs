@@ -100,8 +100,4 @@ impl ProgramBins {
         }
         self.kernel.record(graph, rec, inputs, extent)
     }
-    /// Retire after every referencing list has been submitted.
-    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        self.kernel.retire(gpu)
-    }
 }

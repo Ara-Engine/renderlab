@@ -209,7 +209,6 @@ fn source_triangle_receiver_resolve_native_replay_against_cpu() -> Result<()> {
         }
     }
     packet.retire(&mut gpu, &mut graph)?;
-    kernel.retire(&mut gpu)?;
     for b in buffers
         .into_values()
         .chain(batches.into_values().flatten())

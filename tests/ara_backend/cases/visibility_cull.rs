@@ -231,7 +231,6 @@ fn two_phase_cluster_cull_finish_reset_native_replay() -> Result<()> {
     {
         b.retire(&mut gpu)?;
     }
-    pass.retire(&mut gpu)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;

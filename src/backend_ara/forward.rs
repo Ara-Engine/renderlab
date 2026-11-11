@@ -407,11 +407,6 @@ struct Panes {
 }
 impl Panes {
     fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
-        self.hit_depth.retire(gpu)?;
-        self.seed.retire(gpu)?;
-        for (_, glass) in self.programs {
-            glass.retire(gpu)?;
-        }
         self.target.retire(gpu, graph)?;
         self.camera.retire(gpu)?;
         self.frame.retire(gpu)?;
@@ -567,13 +562,6 @@ fn provided<'a>(
     }
 }
 
-/// Post's motion surface kernel: from the depth target, or from the hit records with
-/// the packet record it was dispatched with.
-enum SurfaceKernel {
-    Raster(RasterPostSurface),
-    Hits(Kernel, StorageBuffer),
-}
-
 /// `material::sampler_descriptor` for a texture of `levels` mips.
 fn sampler_desc(
     sampler: crate::asset::Sampler,
@@ -666,7 +654,6 @@ struct Sky<'a> {
     scatter: Texture,
     /// The procedural diffuse and specular cubes, when the environment is on.
     environment: Option<[&'a Texture; 2]>,
-    kernels: (AtmospherePasses, VolumePasses, Option<EnvironmentPasses>),
 }
 
 fn key(group: u32, binding: u32) -> InputKey {
@@ -1293,7 +1280,6 @@ fn frame(
             lut_kernels.record(&mut graph, &mut rec, stage, &atmosphere, luts)?;
         }
         let mut environment = None;
-        let mut environment_kernels = None;
         if let Some(cubes) = cubes {
             let kernels = EnvironmentPasses::new(gpu, cache)?;
             if integrate {
@@ -1317,7 +1303,6 @@ fn frame(
                 )?;
             }
             environment = Some([&cubes.diffuse.0, &cubes.specular.0]);
-            environment_kernels = Some(kernels);
         }
         let volume_kernels = VolumePasses::new(gpu, cache)?;
         volume_kernels.record(
@@ -1334,7 +1319,6 @@ fn frame(
             volume,
             scatter,
             environment,
-            kernels: (lut_kernels, volume_kernels, environment_kernels),
         })
     } else {
         None
@@ -2984,7 +2968,8 @@ fn frame(
             let auxiliary = Texture::new(gpu, target, Format::Rgba32Float, true, false)?;
             // `PostGpu::encode`'s surface pass: from the depth target on a raster frame,
             // from the hit records and the placements' motion on a traced one.
-            let kernel = if deferred_path {
+            // The hit-based surface's packet record, released with the frame.
+            let surface_record = if deferred_path {
                 let kernel = Kernel::new(gpu, cache, Pass::PostPrimarySurface)?;
                 let values = shader::inputs(Pass::PostPrimarySurface)?
                     .iter()
@@ -3005,12 +2990,12 @@ fn frame(
                 packet.import(&mut graph);
                 kernel.record(&mut graph, &mut rec, &packet, [target[0], target[1], 1])?;
                 // The packet borrows the frame record and the surface, which move on
-                // below: keep only its own record, retired with the kernel.
-                SurfaceKernel::Hits(kernel, packet.release())
+                // below: keep only its own record.
+                Some(packet.release())
             } else {
-                let kernel = RasterPostSurface::new(gpu, cache)?;
-                kernel.record(&mut graph, &mut rec, &depth, &frame, &auxiliary)?;
-                SurfaceKernel::Raster(kernel)
+                RasterPostSurface::new(gpu, cache)?
+                    .record(&mut graph, &mut rec, &depth, &frame, &auxiliary)?;
+                None
             };
             // `PostGpu::encode`: the tile maximum and the blur with motion blur on, then
             // depth of field over what that left, each only when its setting asks.
@@ -3091,7 +3076,7 @@ fn frame(
                     u64::from(target[0]) * u64::from(target[1]) * 16,
                 )?);
             }
-            surface = Some((kernel, frame, blurred));
+            surface = Some((surface_record, frame, blurred));
             post_images.push(auxiliary);
         }
         let colour = surface.as_ref().map_or(shown, |(_, _, blurred)| blurred);
@@ -3170,22 +3155,17 @@ fn frame(
             .zip(resolve.map(|(images, _)| images.reset())),
     };
 
-    if let Some((passes, bloom, surface)) = tail {
+    if let Some((_, bloom, surface)) = tail {
         if let Some(bloom) = bloom {
             bloom.retire(gpu)?;
         }
-        if let Some((kernel, frame, blurred)) = surface {
-            match kernel {
-                SurfaceKernel::Raster(kernel) => kernel.retire(gpu)?,
-                SurfaceKernel::Hits(kernel, record) => {
-                    kernel.retire(gpu)?;
-                    record.retire(gpu)?;
-                }
+        if let Some((record, frame, blurred)) = surface {
+            if let Some(record) = record {
+                record.retire(gpu)?;
             }
             frame.record.retire(gpu)?;
             post_images.push(blurred);
         }
-        passes.retire(gpu)?;
     }
     for packet in packets
         .into_iter()
@@ -3203,8 +3183,7 @@ fn frame(
     if let Some(panes) = panes {
         panes.retire(gpu, &mut graph)?;
     }
-    if let Some((pass, panes, base, depth, _)) = transmission {
-        pass.retire(gpu)?;
+    if let Some((_, panes, base, depth, _)) = transmission {
         for (geometry, material) in panes {
             geometry.retire(gpu, &mut graph)?;
             material.retire(gpu)?;
@@ -3214,9 +3193,7 @@ fn frame(
         }
     }
     if let Some(lists) = program_lists {
-        lists.bins.retire(gpu)?;
-        for (_, kernel, info) in lists.slots {
-            kernel.retire(gpu)?;
+        for (_, _, info) in lists.slots {
             info.retire(gpu)?;
         }
         lists.entries.retire(gpu)?;
@@ -3234,9 +3211,6 @@ fn frame(
         records.retire(gpu)?;
     }
     if let Some(deferred) = deferred {
-        for kernel in [deferred.trace, deferred.fresh, deferred.shade] {
-            kernel.retire(gpu)?;
-        }
         for buffer in [
             deferred.frame,
             deferred.region,
@@ -3253,8 +3227,6 @@ fn frame(
         post_images.extend([deferred.hit, deferred.tiles, deferred.epsilon]);
     }
     if let Some(traced) = traced {
-        traced.receivers.retire(gpu)?;
-        traced.kernel.retire(gpu)?;
         traced.scene.retire(gpu)?;
         for mesh in traced.transient {
             mesh.retire(gpu)?;
@@ -3276,16 +3248,7 @@ fn frame(
     {
         buffer.retire(gpu)?;
     }
-    if let Some(backdrop) = backdrop {
-        backdrop.retire(gpu)?;
-    }
     if let Some(sky) = sky {
-        let (luts, volumes, environment) = sky.kernels;
-        luts.retire(gpu)?;
-        volumes.retire(gpu)?;
-        if let Some(environment) = environment {
-            environment.retire(gpu)?;
-        }
         post_images.extend([sky.volume, sky.scatter]);
     }
     atmosphere.retire(gpu, &mut graph)?;
@@ -3312,10 +3275,6 @@ fn frame(
     {
         gpu.retire(Resource::Buffer(buffer))?;
     }
-    if let Some(pass) = pass {
-        pass.retire(gpu)?;
-    }
-    clusters.retire(gpu)?;
     gpu.collect()?;
     images.times.finish = finishing.elapsed();
     Ok((images, left))

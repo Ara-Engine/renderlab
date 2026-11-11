@@ -140,7 +140,6 @@ fn program_tile_bins_native_replay_against_cpu() -> Result<()> {
     for t in [hit, coverage] {
         gpu.retire(Resource::Image(t.image))?;
     }
-    pass.retire(&mut gpu)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;

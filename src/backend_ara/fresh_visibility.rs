@@ -92,10 +92,6 @@ impl Visibility {
         self.kernel
             .record(graph, rec, inputs, [x, height.div_ceil(self.tile[1]), 1])
     }
-    /// Retire after the last referencing submission.
-    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        self.kernel.retire(gpu)
-    }
 }
 /// The estimator as a traced frame composes it (`primary_ray_gpu::shader_sources`):
 /// the same `fresh_compute`, with coverage gated on the primary tiles and hit image

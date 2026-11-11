@@ -139,8 +139,6 @@ fn transparency_msaa_seed_and_original_fallback_present_native_replay() -> Resul
     }
     seed_packet.retire(&mut gpu, &mut graph)?;
     present_packet.retire(&mut gpu, &mut graph)?;
-    seed.retire(&mut gpu)?;
-    present.retire(&mut gpu)?;
     multisample.retire(&mut gpu, &mut graph)?;
     fresh.retire(&mut gpu, &mut graph)?;
     for t in [source, resolved, repeated, output, wrong] {

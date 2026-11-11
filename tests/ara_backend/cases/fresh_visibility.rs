@@ -233,9 +233,6 @@ fn fresh_shadow_visibility_native_replay_against_cpu() -> Result<()> {
         );
         gpu.retire(Resource::Buffer(read))?;
     }
-    for p in passes {
-        p.retire(&mut gpu)?;
-    }
     for b in records {
         b.retire(&mut gpu)?;
     }

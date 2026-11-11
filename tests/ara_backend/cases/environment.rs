@@ -159,7 +159,6 @@ fn environment_array_mips_native_replay_against_cpu() -> Result<()> {
             ensure!(max <= 0.004, "diffuse environment differs by {max}");
         }
     }
-    passes.retire(&mut gpu)?;
     params.record.retire(&mut gpu)?;
     for t in [input, specular, diffuse] {
         gpu.retire(Resource::Image(t.image))?;
