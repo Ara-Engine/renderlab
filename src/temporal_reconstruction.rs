@@ -1315,6 +1315,12 @@ impl ReconstructionState {
     fn output(&self) -> wgpu::Extent3d {
         self.colour[0].texture.size()
     }
+    /// The anchors and silhouette slots this frame's resolve writes, for the ID pass
+    /// (src/id_output.rs), which runs after it and reads which surface settled.
+    pub(in crate::renderer) fn written_slots(&self) -> (&wgpu::TextureView, &wgpu::TextureView) {
+        let side = self.plan.parity;
+        (&self.anchor[side].view, &self.layer[side].view)
+    }
 }
 
 impl Renderer {

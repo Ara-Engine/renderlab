@@ -6,16 +6,45 @@ use crate::{
 use renderlab_asset::{Filter, MipmapFilter, Sampler, TextureRole, Wrap};
 use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 #[repr(u32)]
-/// Modes 0-3 show stored material data/authored normals. Lit adds direct and constant-environment illumination.
+/// What a frame shows (docs/design-id-output.md). `Lit` is the program's `shade`. The data
+/// modes show one value of the program's surface per pixel (its optional `view_data` hook,
+/// else its material inputs), exactly: no temporal reconstruction, fog or tone mapping.
+/// `LightingOnly` lights a white Lambert surface at the program's normal and is lit (it is
+/// reconstructed and tone-mapped). Traced and visibility-buffer frames shade every mode
+/// through the program; the raster path shows modes 0-3 from material data.
 pub enum ViewMode {
     #[default]
     BaseColor,
+    /// The shading normal, world space, as `n * 0.5 + 0.5`.
     Normal,
     Metallic,
     Roughness,
     Lit = 4,
+    /// The surface's own radiance (unexposed).
+    Emission,
+    /// The program's occlusion output (`ViewData::occlusion`), 1 where it declares none.
+    Occlusion,
+    /// White albedo lit at the program's normal by the frame's lights and indirect light.
+    LightingOnly,
+}
+impl ViewMode {
+    /// Every mode, in discriminant order.
+    pub const ALL: [ViewMode; 8] = [
+        ViewMode::BaseColor,
+        ViewMode::Normal,
+        ViewMode::Metallic,
+        ViewMode::Roughness,
+        ViewMode::Lit,
+        ViewMode::Emission,
+        ViewMode::Occlusion,
+        ViewMode::LightingOnly,
+    ];
+    /// Shows exact values: no temporal reconstruction, transparency, fog or tone mapping.
+    pub fn is_data(self) -> bool {
+        !matches!(self, ViewMode::Lit | ViewMode::LightingOnly)
+    }
 }
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(u32)]

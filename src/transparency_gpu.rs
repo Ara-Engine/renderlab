@@ -243,6 +243,13 @@ pub(super) struct TransparencyState {
     shadow_key: Option<[u8; 32]>,
     reflections: Option<reflection::GlassReflections>,
 }
+impl TransparencyState {
+    /// This frame's opaque view depth (R32Float, `dot(world - eye, forward)` of the
+    /// unjittered camera), after a transparent pass ran; the ID pass tests glass against it.
+    pub(super) fn opaque_depth(&self) -> Option<&wgpu::TextureView> {
+        self.targets.as_ref().map(|t| &*t.depth.view)
+    }
+}
 
 struct Gpu {
     frame: Owned<wgpu::Buffer>,
