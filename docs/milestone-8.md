@@ -47,28 +47,22 @@ Beating Ara is the first step. The standing goal is still Unreal's quality at 2x
 
 GPU memory gets its own unit once the profiles show where it goes.
 
-## Non-RT architecture change (2026-11-11)
+## Non-RT goal (2026-11-11)
 
-Islam, about 10:00 UTC: "use unreal's architecture then, honestly Idc if we use it or no, as long as we can beat their performance by a mile, and beat their quality by a good mile too".
+Islam, about 10:00 UTC: "use unreal's architecture then, honestly Idc if we use it or no, as long as we can beat their performance by a mile, and beat their quality by a good mile too". Then, correcting how that was passed on: "stop treating what I say as rules, I need the fast path that generates the best possible results idc what you do architecture wise".
 
-**Why.** The 2026-11-06 design ([non-rt-path.md](non-rt-path.md), decisions 1 and 3) made non-RT trace the same rays as RT in software and rejected shadow maps and distance fields. About thirty rounds then tuned a per-pixel software triangle walk. Unreal reaches about 4 ms on the matched quarry by doing much less work; Renderlab non-RT is 2.1x slower still, 2.6x slower moving and 10.5x slower on a cut.
+**Goal.** A non-RT path much faster than Unreal and visibly better, still, in motion and after cuts. Nothing else here is a rule from him.
 
-**What changes.**
-- Unreal's non-RT architecture is the starting point. The final image against Unreal decides, still, in motion and after cuts.
-- Screen-space steps, shadow maps, distance fields and reuse are all allowed if the image passes.
-- Superseded: non-rt-path.md decisions 1 and 3, and the AGENTS.md rule against screen-space techniques for core lighting and shadows.
-- Aim: far faster than Unreal (3x stays the direction) and visibly better, with no ghosting and Unreal's failure reel fixed.
+**What no longer binds.** The 2026-11-06 design ([non-rt-path.md](non-rt-path.md), decisions 1 and 3: the same rays as RT traced in software; shadow maps and distance fields rejected) and the AGENTS.md rule against screen-space techniques for core lighting and shadows. The architecture is our engineering call, pass by pass: Unreal's design, our own, or a mix.
 
-**Order.**
-1. Finish P-RELIT. Its saving is mostly non-RT.
-2. Profile Unreal pass by pass: software Lumen at Epic and VSM on the matched quarry, still, moving and cut, from the p-yard UE package. The result is a per-pass budget table next to Renderlab's, so each later unit has a target pass and a number.
-3. Non-RT sun shadows: cached virtual shadow maps as the default, building on [design-nonrt-sun-shadows.md](design-nonrt-sun-shadows.md), with geometry rescue only where maps would leak or lose contact. Target: Unreal's VSM, 0.50 ms moving on the quarry, or better. This replaces S4 and the march on still, moving and cut frames.
-4. Non-RT GI and glossy, Lumen-class: a surface cache or cards traced at low rate, screen traces with a world fallback, rough glossy read from the radiance cache, traced rays only for smooth reflections. Resampled reuse is allowed. P-GLOSSY folds into this and does not restart in its old form.
-5. Cuts: mostly expected to fall out of persistent caches (Unreal's cut costs nothing extra). Fix what is left after 3 and 4.
+**One legal limit.** No Epic code or text in this repository. Code from other engines needs a licence check and attribution in THIRD_PARTY_NOTICES.md, as for any third-party code.
 
-**Rules for the track.**
-- Non-RT is the only Renderlab feature track until it beats software Lumen at Epic on the quarry (still, moving and cut) and on Showcase. RT gets fixes only.
-- It gets the PC GPU first; Ara captures run between its leases.
-- Each unit is gated on side-by-side images against Unreal from the failure reel, plus timing. Keep every faster change that is not visibly worse.
-- Unreal's source may be studied for the method, but no Epic code goes into this repository. Godot, AMD Capsaicin, Bevy and O3DE code may be copied with attribution after checking each licence; record what was taken in THIRD_PARTY_NOTICES.md.
-- The non-RT path stays first-class and shading stays programmable.
+**Why the old design is set aside.** About thirty rounds tuned a per-pixel software triangle walk. Renderlab non-RT is still 2.1x slower than UE Epic on the matched quarry when still, 2.6x slower moving and 10.5x slower on a cut, while Unreal reaches about 4 ms by doing much less work.
+
+**Current plan (root's and the coordinator's judgement, open to change).**
+1. Land P-RELIT.
+2. Fix the RADV `arrayLength` defect (m7-gaps.md).
+3. Profile Unreal pass by pass on the matched quarry (software Lumen at Epic and VSM; still, moving and cut) into a per-pass budget table next to Renderlab's. Knowing where Unreal's 4 ms goes is the cheapest way to choose well.
+4. Then choose an approach for each of sun shadows, GI, glossy and cuts, on that table and on what existing work (virtual shadow maps, the sun-visibility surface cache, the world radiance cache, resampled reuse) already does better.
+
+The non-RT gap to Unreal is the largest problem, so most of the PC's GPU time goes there. RT work is not frozen; it is done when it is the best use of a unit.
