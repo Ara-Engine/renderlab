@@ -160,6 +160,7 @@ impl Card {
                     reconstruction,
                     reflections: None,
                     textures: None,
+                    local_shadows: None,
                 },
             )?;
             let hdr = images

@@ -93,6 +93,7 @@ fn floor(
                 objects,
                 anisotropy_clamp: 1,
             }),
+            local_shadows: None,
         },
     )?;
     Ok(images

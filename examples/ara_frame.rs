@@ -50,6 +50,8 @@
 //! directions rotate and its ray count follows the reconstruction's budget.
 //! `--reflections` implies `--traced` and turns traced reflections on at their
 //! default roughness band: the shading program's own reflection rays.
+//! `--local-shadows` implies `--traced` and shadows every point and spot light with the
+//! shading program's own rays, at `LocalShadows`' defaults (off otherwise).
 //! `--textures` gives the floor a base-colour
 //! texture (a 64-texel checker with its full mip chain, tiled eight times, trilinear with
 //! the renderer's anisotropy) so that a comparison covers texture upload, mip selection
@@ -92,7 +94,7 @@ fn main() -> Result<(), Failure> {
     let mut traced = false;
     let (mut gi, mut bounce, mut filter, mut still) = (false, false, false, false);
     let (mut crevice, mut reconstruction, mut interactive) = (false, false, false);
-    let (mut reflections, mut textures) = (false, false);
+    let (mut reflections, mut textures, mut local_shadows) = (false, false, false);
     let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -105,6 +107,7 @@ fn main() -> Result<(), Failure> {
             "--crevice" => crevice = true,
             "--textures" => textures = true,
             "--reflections" => (sun_shadows, traced, reflections) = (true, true, true),
+            "--local-shadows" => (sun_shadows, traced, local_shadows) = (true, true, true),
             "--interactive" => (sun_shadows, traced, interactive) = (true, true, true),
             "--reconstruction" => (sun_shadows, traced, reconstruction) = (true, true, true),
             "--filter" => {
@@ -189,6 +192,7 @@ fn main() -> Result<(), Failure> {
         interactive,
         reflections,
         textures,
+        local_shadows,
         still,
         frames,
     };
@@ -228,6 +232,8 @@ struct Level {
     reflections: bool,
     /// The floor carries the checker base-colour texture.
     textures: bool,
+    /// Point and spot lights are shadowed, at `LocalShadows`' defaults, on a traced frame.
+    local_shadows: bool,
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
@@ -413,7 +419,11 @@ fn wgpu_frame(
     // The frame the ara backend assembles today: everything else is a later level.
     r.set_atmosphere(atmosphere)?;
     r.set_local_shadows(LocalShadows {
-        count: 0,
+        count: if level.local_shadows {
+            LocalShadows::default().count
+        } else {
+            0
+        },
         ..Default::default()
     })?;
     if sun_shadows {
@@ -626,6 +636,7 @@ fn ara_frame(
                     objects: &slots,
                     anisotropy_clamp: ANISOTROPY,
                 }),
+                local_shadows: level.local_shadows.then(renderlab::LocalShadows::default),
             },
         )?;
         let trace = history.reconstruction_plan().map_or(
@@ -748,10 +759,11 @@ fn write(
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
             "scene": format!(
-                "M5-A authored v1{}{}, {}, local shadows off, default post{}{}{}",
+                "M5-A authored v1{}{}, {}, local shadows {}, default post{}{}{}",
                 if level.crevice { " with a slot between two walls" } else { "" },
                 if level.textures { " with a checker-textured floor" } else { "" },
                 if level.still { "every frame from pose 0" } else { "camera path from pose 0" },
+                if level.local_shadows { "traced for every local light" } else { "off" },
                 if level.reconstruction { ", temporal reconstruction at its defaults" } else { "" },
                 if level.interactive { ", Interactive soft shadows" } else { "" },
                 if level.reflections { ", traced reflections" } else { "" }

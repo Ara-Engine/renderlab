@@ -128,6 +128,11 @@ pub struct ForwardScene<'a> {
     /// defaults everywhere. The texture slots of `ForwardObject::material` itself must
     /// stay empty: they name the wgpu renderer's own uploads.
     pub textures: Option<SceneTextures<'a>>,
+    /// Shadows for point and spot lights, on traced frames only, where every local
+    /// light is shadowed by rays from the shading program (one ray, or four over a
+    /// light with a source radius). `None` is a count of zero: local lights unshadowed.
+    /// The map path of untraced frames is not assembled.
+    pub local_shadows: Option<crate::LocalShadows>,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -752,8 +757,32 @@ fn frame(
         h.update(&uniform[32..40]);
         h.finalize().into()
     };
+    // `prepare_light_clusters` on a frame whose shading traces local shadows: every
+    // point and spot light's record names itself, and needs no map slot.
+    let local_shadows = scene.local_shadows.filter(|s| s.count > 0);
+    ensure!(
+        local_shadows.is_none() || deferred_path,
+        "local-light shadows are assembled on traced frames only"
+    );
+    if local_shadows.is_some() {
+        for (index, (record, light)) in records
+            .as_chunks_mut::<{ crate::lighting::LIGHT_BYTES }>()
+            .0
+            .iter_mut()
+            .zip(&scene.lighting.lights)
+            .enumerate()
+        {
+            if lc::sphere(light).is_some() {
+                record[60..64].copy_from_slice(&((index as u32 & 0xffff) + 1).to_ne_bytes());
+            }
+        }
+    }
     let mut frame = lc::header(&view, size, packed.count, true, &[]);
-    frame[100..104].copy_from_slice(&crate::LocalShadows::default().near.to_ne_bytes());
+    // LC2's source-sampling word turns only with reconstruction: its sample plus one.
+    let turn = sample.map_or(0u32, |k| k.wrapping_add(1) as u32);
+    frame[88..92].copy_from_slice(&turn.to_ne_bytes());
+    let near = scene.local_shadows.unwrap_or_default().near;
+    frame[100..104].copy_from_slice(&near.to_ne_bytes());
     let cluster_inputs = ClusterInputs {
         lights: StorageBuffer::new(gpu, &records)?,
         frame: StorageBuffer::new(gpu, &frame)?,

@@ -1802,6 +1802,38 @@ scope here.
 field, render scale below native, local-light shadows, normal maps, transparency and
 particles, and the smaller table the tool uses for the cache.
 
+## Local-light shadows on the traced frame
+
+On ray-traced shading modules the shadow rays of point and spot lights are code the
+shading program already carries (`local_light_ray.wgsl`, `rl_local_shadow`): one ray
+toward a light with no source radius, four over a disk for one with a radius. The
+renderer switches them on per light. With `LocalShadows::count` above zero on a frame
+whose shading traces them, `prepare_light_clusters` writes each local light's own index
+plus one into its record's last word, and shading traces where that word is not zero;
+no map slot is involved. `ForwardScene::local_shadows` does the same on traced frames,
+and writes the cluster frame's sample word (the reconstruction's sample index plus
+one, zero without it), which turns the four disk samples from frame to frame. The mesh
+pass refuses the setting: its shadow maps (atlas, slots, caching) are not assembled.
+
+`a_lamp_behind_a_card_shadows_the_floor_where_the_card_blocks_it` holds it to one
+occluder: a card 1 m over a floor, seen from above, with a lamp up and to one side.
+
+- No source radius: each floor pixel is decided by whether the segment from its floor
+  point to the lamp passes through the card. All 836 pixels it does are the sun-only
+  frame within 0.1%; all 10,428 it does not, and the 900 on the card's own top, are
+  the unshadowed frame bit for bit.
+- A 15 cm source: beyond the source's reach of the edge nothing changes, and within it
+  every pixel holds a whole number of quarters of the lamp's light (264 hold one,
+  two or three).
+- Under reconstruction the cold first frame is the plain frame outside the penumbra,
+  and inside it 246 pixels hold a different number of quarters: other points of the
+  disk were asked. With the sample word left at zero none differ, and the test fails.
+
+`ara_frame --local-shadows` is the level on either layer. On Metal it darkens 20,699
+of M5-A's 614,400 pixels, by up to 15%, and brightens none. **Not compared with wgpu.**
+What the test cannot see: a spot light's cone against its shadow, a light with a
+range, and more lights than one.
+
 ## Cube-array environment lookups (Renderlab main's P-SKY)
 
 Renderlab main turned the three environment maps into `texture_cube_array<f32>`
@@ -1862,3 +1894,20 @@ kernel.
   still differ the fixture moves off the dyadic edges instead.
 
 Neither change has run on a Vulkan device.
+
+## Second Vulkan run (8a8ead7)
+
+62 passed, 2 failed, no validation message. The particle sort passes. The geometry
+check fails on the same two words, so `NoContraction` did not settle it; they are the
+fallback flags of the two hits on an edge of a mesh with no adjacency (words 30 and
+39, GPU 0 where 1 is expected). Read against the kernel, no decision for those hits is
+near a rounding boundary, so the cause is not established. What changed for the next
+run: the two hits lie 2^-22 inside their edge instead of on it; a failing word is
+named by item and field; and the buffer-array probe binds buffers of 52, 76 and 88
+bytes, because `primary_edge_neighbour` tells an index buffer with adjacency from one
+without by `arrayLength % 3`, the failing mesh's 12-byte index buffer is the only one
+in the suite that is not a multiple of 16 bytes, and a bound range rounded up to 16
+would read as adjacency and produce exactly this result. The second failure was the
+cold reconstructed frame held bit-equal to the plain frame, where RADV gives weights
+of 1 + 2^-16 and 48 pixels one half-float step apart; the test allows one step now.
+None of this has run on Vulkan.
