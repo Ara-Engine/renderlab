@@ -61,6 +61,9 @@ SWITCHES = {
     "slots17": ([], {"RENDERLAB_GI": "slots_log2=17"}),
     "slots18": ([], {"RENDERLAB_GI": "slots_log2=18"}),
     "slots19": ([], {"RENDERLAB_GI": "slots_log2=19"}),
+    # The same binary without the eviction under pressure (IndirectSettings::pressure_eviction).
+    "pressure-off": ([], {"RENDERLAB_GI": "pressure_eviction=0"}),
+    "slots17-pressure-off": ([], {"RENDERLAB_GI": "slots_log2=17;pressure_eviction=0"}),
 }
 FLIGHT = ["--frames", "180", "--diag", "cut=1"]
 STILL = ["--still", "--frames", "96", "--every", "95", "--diag", "flicker=0"]
