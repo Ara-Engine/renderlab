@@ -44,7 +44,11 @@
 //! bits, which makes the cache Renderlab's default configuration but for the table
 //! size. `--reconstruction` implies `--traced` and turns temporal reconstruction on at its
 //! default settings and native scale: each frame is rendered through a jittered camera
-//! and resolved against its history, so only a sequence shows it. `--crevice` adds a slot to the scene, two 1.2 m walls 7 cm apart on the floor
+//! and resolved against its history, so only a sequence shows it. `--interactive` implies `--traced` and swaps the exact
+//! soft shadows for `SoftShadows::Interactive`, the fused eight-direction trace with its
+//! repair, which is `HardwareRt` at its realtime quality; with `--reconstruction` its
+//! directions rotate and its ray count follows the reconstruction's budget.
+//! `--crevice` adds a slot to the scene, two 1.2 m walls 7 cm apart on the floor
 //! with their open end toward the camera: the filter's contrast refine fires on the
 //! floor cells inside it, which nothing in M5-A itself makes it do.
 //!
@@ -81,7 +85,7 @@ fn main() -> Result<(), Failure> {
     let mut sun_shadows = false;
     let mut traced = false;
     let (mut gi, mut bounce, mut filter, mut still) = (false, false, false, false);
-    let (mut crevice, mut reconstruction) = (false, false);
+    let (mut crevice, mut reconstruction, mut interactive) = (false, false, false);
     let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -92,6 +96,7 @@ fn main() -> Result<(), Failure> {
             "--gi" => (sun_shadows, traced, gi) = (true, true, true),
             "--bounce" => (sun_shadows, traced, gi, bounce) = (true, true, true, true),
             "--crevice" => crevice = true,
+            "--interactive" => (sun_shadows, traced, interactive) = (true, true, true),
             "--reconstruction" => (sun_shadows, traced, reconstruction) = (true, true, true),
             "--filter" => {
                 (sun_shadows, traced, gi, bounce, filter) = (true, true, true, true, true)
@@ -162,6 +167,7 @@ fn main() -> Result<(), Failure> {
         filter,
         crevice,
         reconstruction,
+        interactive,
         still,
         frames,
     };
@@ -195,6 +201,8 @@ struct Level {
     crevice: bool,
     /// Temporal reconstruction at its defaults, on a traced frame.
     reconstruction: bool,
+    /// Interactive soft shadows instead of exact ones, on a traced frame.
+    interactive: bool,
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
@@ -299,7 +307,11 @@ fn wgpu_frame(
     };
     if traced {
         r.set_primary_visibility(PrimaryVisibility::Traced)?;
-        r.set_soft_shadows(SoftShadows::Exact);
+        r.set_soft_shadows(if level.interactive {
+            SoftShadows::Interactive
+        } else {
+            SoftShadows::Exact
+        });
         r.set_indirect(if gi {
             cache_settings(level)
         } else {
@@ -469,10 +481,10 @@ fn ara_frame(
                 size,
                 atmosphere,
                 sun_shadows: sun_shadows.then_some(&shadows),
-                primary: if traced {
-                    forward::Primary::Traced
-                } else {
-                    forward::Primary::Raster
+                primary: match (traced, level.interactive) {
+                    (true, true) => forward::Primary::TracedInteractive,
+                    (true, false) => forward::Primary::Traced,
+                    _ => forward::Primary::Raster,
                 },
                 post: Some(if traced {
                     traced_post()
@@ -602,10 +614,11 @@ fn write(
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
             "scene": format!(
-                "M5-A authored v1{}, {}, local shadows off, default post{}",
+                "M5-A authored v1{}, {}, local shadows off, default post{}{}",
                 if level.crevice { " with a slot between two walls" } else { "" },
                 if level.still { "every frame from pose 0" } else { "camera path from pose 0" },
-                if level.reconstruction { ", temporal reconstruction at its defaults" } else { "" }
+                if level.reconstruction { ", temporal reconstruction at its defaults" } else { "" },
+                if level.interactive { ", Interactive soft shadows" } else { "" }
             ),
                                     "primary": match (level.traced, level.gi, level.bounce) {
                 (true, true, true) if level.filter => "traced, exact soft shadows, radiance cache with bounce and the cell filter (2^17 slots), no reconstruction, reflections or motion blur",

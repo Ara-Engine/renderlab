@@ -106,6 +106,12 @@ pub enum Primary {
     /// GI, temporal reconstruction and reflections off: the camera trace with
     /// receivers, the gated fresh estimator, then shading on the hardware soft head.
     Traced,
+    /// The same frame with `SoftShadows::Interactive`, as `HardwareRt` draws it at its
+    /// realtime quality: the fused trace (camera hit and eight sun directions per pixel
+    /// in one dispatch, near-edge pixels listed) and its indirectly dispatched repair
+    /// replace the trace and the 256-ray estimator. With reconstruction the directions
+    /// rotate with the sample and the ray count is the planner's budget.
+    TracedInteractive,
 }
 
 /// The sun's shadow request, as `Shadows` carries it for a directional light.
@@ -182,6 +188,9 @@ struct Deferred {
     normals: StorageBuffer,
     /// Pads the per-draw arrays, as the renderer's 48-byte absent buffer does.
     absent: StorageBuffer,
+    /// Interactive frames: the near-edge repair queue, whose first words are the
+    /// repair's dispatch arguments.
+    repairs: Option<StorageBuffer>,
     /// Dispatch groups of the trace, the estimator and the shading.
     groups: [[u32; 2]; 3],
 }
@@ -231,6 +240,10 @@ impl<'a> Shared<'a> {
                 (0, 0) => self.camera,
                 (0, 10) => &deferred()?.frame,
                 (0, 22) => &deferred()?.region,
+                (0, 24) | (0, 26) => deferred()?
+                    .repairs
+                    .as_ref()
+                    .context("no repair queue in this frame")?,
                 (1, 0) => match object {
                     Some((geometry, _)) => geometry.models(),
                     None => &deferred()?.models,
@@ -469,7 +482,8 @@ fn frame(
         "forward frame binds the default textures and the standard program only"
     );
     let size = scene.size;
-    let deferred_path = scene.primary == Primary::Traced;
+    let deferred_path = scene.primary != Primary::Raster;
+    let interactive = scene.primary == Primary::TracedInteractive;
     // Post's motion surface on a traced frame comes from hit records (entry 35), which
     // this frame does not chain yet; bloom and tone need nothing from the frame family.
     ensure!(
@@ -845,8 +859,20 @@ fn frame(
     // The reconstruction's frame record and the copy of the frame's shaded samples.
     let mut tr1_records = None;
     let deferred = if deferred_path {
-        let trace_program = primary_trace::Entry::Receivers.program()?;
-        let fresh_program = fresh_visibility::traced_program()?;
+        // `encode_reconstruction_interactive` or `encode_primary_interactive`: the
+        // rotated kernels where reconstruction rotates directions, else production's.
+        let rotated = interactive && reconstruct.is_some_and(|r| r.settings.rotate_directions);
+        let (trace_program, fresh_program) = if interactive {
+            (
+                primary_trace::Interactive::Deferred.program(rotated)?,
+                primary_trace::Interactive::Repair.program(rotated)?,
+            )
+        } else {
+            (
+                primary_trace::Entry::Receivers.program()?,
+                fresh_visibility::traced_program()?,
+            )
+        };
         let matrix = view.matrix(size[0], size[1]);
         let inverse = matrix.inverse();
         ensure!(inverse.is_finite(), "traced camera inverse is nonfinite");
@@ -1017,6 +1043,20 @@ fn frame(
         let models = StorageBuffer::new(gpu, &[matrices.as_slice(), &previous].concat())?;
         let normals = StorageBuffer::new(gpu, &normal_bytes)?;
         let absent = StorageBuffer::new(gpu, &[0; 48])?;
+        // `repair_bytes`: the queue's header, then room for every pixel. Zeroed, as the
+        // renderer clears its header before the trace.
+        let repairs = if interactive {
+            let bytes = 16 + size[0] as usize * size[1] as usize * 36;
+            let queue = StorageBuffer::with_usage(
+                gpu,
+                &vec![0; bytes],
+                ara_gpu::vk::BufferUsageFlags::INDIRECT_BUFFER,
+            )?;
+            graph.import(Resource::Buffer(queue.buffer), Access::HostWrite);
+            Some(queue)
+        } else {
+            None
+        };
         for buffer in [
             &frame,
             &region_buffer,
@@ -1043,6 +1083,7 @@ fn frame(
             models,
             normals,
             absent,
+            repairs,
             groups: [
                 trace_groups,
                 [size[0].div_ceil(2), size[1].div_ceil(2)],
@@ -1097,7 +1138,8 @@ fn frame(
                 .contains(&spec.key)
                     || (spec.key == key(3, 5) && traced.is_some())
                     || (deferred.is_some()
-                        && [key(0, 10), key(0, 22), key(1, 5)].contains(&spec.key))
+                        && [key(0, 10), key(0, 22), key(0, 24), key(0, 26), key(1, 5)]
+                            .contains(&spec.key))
                     || (gi.is_some()
                         && (spec.key == key(3, 20)
                             || (spec.key.group == 0 && (30..=37).contains(&spec.key.binding))))
@@ -1390,12 +1432,20 @@ fn frame(
                     gi_shade_packet.as_ref(),
                 )?;
             }
-            kernel.record(
-                &mut graph,
-                &mut rec,
-                packet,
-                [groups[0] * threads[0], groups[1] * threads[1], 1],
-            )?;
+            // The repair runs over the queue the trace filled, from its own counts.
+            match deferred
+                .repairs
+                .as_ref()
+                .filter(|_| std::ptr::eq(kernel, &deferred.fresh))
+            {
+                Some(queue) => kernel.record_indirect(&mut graph, &mut rec, packet, queue, 0)?,
+                None => kernel.record(
+                    &mut graph,
+                    &mut rec,
+                    packet,
+                    [groups[0] * threads[0], groups[1] * threads[1], 1],
+                )?,
+            }
         }
     }
     // `encode_reconstruction`: keep the shaded samples, then resolve into the HDR target.
@@ -1718,7 +1768,10 @@ fn frame(
             deferred.models,
             deferred.normals,
             deferred.absent,
-        ] {
+        ]
+        .into_iter()
+        .chain(deferred.repairs)
+        {
             buffer.retire(gpu)?;
         }
         post_images.extend([deferred.hit, deferred.tiles, deferred.epsilon]);

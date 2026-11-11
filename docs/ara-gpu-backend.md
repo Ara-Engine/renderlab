@@ -1672,15 +1672,37 @@ Two tests on a bright card over a dark floor, seen from straight above:
 | `reconstruction_accumulates_jittered_samples_into_edge_coverage` | The first frame restarts at weight one and equals the unreconstructed frame. Each later frame adds one sample to the mean weight, within 1%, and leaves smooth regions at the plain frame's value within 0.1%. After 48 frames the pixel the card's left edge crosses holds 0.290 of the card's radiance where the card covers 0.290 of its area, and the top-edge pixel 0.749 where it covers 0.753: 48 jittered point samples have become coverage. Bound 0.03. |
 | `reconstruction_history_survives_a_pan_and_restarts_on_cuts_and_sun_turns` | A camera panning half a pixel a frame never restarts and the floor's weight keeps growing through reprojection. A cut and a 0.2 rad sun turn each restart every pixel, with weights back within the spatial start's window, and the frame after a restart adds one sample again. Two runs of the pan give identical images and history. |
 
-**Step 2 so far, through the adapter only.** The fused Interactive trace (the camera
-hit and eight sun directions per pixel in one dispatch, near-edge pixels listed for an
+**Step 2 is built: Interactive shadows.** The fused Interactive trace (the camera hit
+and eight sun directions per pixel in one dispatch, near-edge pixels listed for an
 indirectly dispatched repair) has three entries, `primary_trace_interactive_deferred`,
 `primary_trace_interactive` and `primary_repair_interactive`. Composed from
-`shader_sources`' soft module with the portable trace and the renderer's eight-direction
-override, and again through `trace_source`'s two edits (rotated directions, a ray
-count read from the frame record), all six reflect, emit valid SPIR-V and compile
-natively (`interactive_trace_entries_reflect_validate_and_compile`). Nothing records
-them in a frame yet.
+`shader_sources`' soft module with the portable trace and the renderer's
+eight-direction override, and again through `trace_source`'s two edits (rotated
+directions, a ray count read from the frame record), all six reflect, emit valid
+SPIR-V and compile natively (`interactive_trace_entries_reflect_validate_and_compile`).
+
+`Primary::TracedInteractive` is the traced frame with them: the deferred trace and its
+repair, dispatched from the queue's own counts, replace the camera trace and the
+256-ray estimator, as `HardwareRt` draws at its realtime quality. With reconstruction
+the rotated kernels run and read the planner's budget from the frame record.
+`interactive_frame_is_the_exact_frame_outside_the_penumbra_and_on_a_cold_start` holds
+it to the exact frame under a slanted sun with a wide disk:
+
+- Without reconstruction, 12,101 of 12,288 pixels are bit-identical to the exact
+  frame. The 187 that differ all lie where the exact frame is partly shadowed, and
+  each holds a whole number of eighths of the sun's light (within 0.04 of an eighth).
+  That also holds the fused trace's hits, repaired near triangle edges, to the exact
+  trace's.
+- With reconstruction, the first frame is the exact frame in every pixel: the cold
+  budget is 256 rays at rotation zero, so the rotated kernels, the budget words and
+  the repair reproduce the trace and gated estimator they replace. Later frames, on
+  64, then 32, then 8 rotated rays, differ from the exact sequence on at most 244
+  penumbra pixels by at most 0.05 of the shadow's contrast.
+
+`ara_frame --interactive` is the level; with `--reconstruction --filter` it is the
+closest frame so far to `HardwareRt` at its defaults. Not assembled: the path for a
+repair queue above device limits (`Full` compiles and is never chosen), and render
+scale.
 
 `ara_frame --reconstruction` is the level on either layer, combinable with the cache
 levels. On Metal, M5-A with the cache at its defaults and reconstruction on is
@@ -1694,7 +1716,7 @@ Renderlab main turned the three environment maps into `texture_cube_array<f32>`
 sampled with a filtering sampler (lighting binding 11), in the prelude every lit
 program includes. ara-gpu had no cube views, so this needed
 [ara#45](https://github.com/Ara-Engine/ara/pull/45) (`ViewDimension::CubeArray`);
-this branch is pinned to its head until it merges.
+it is merged, and this branch is pinned to Ara main.
 
 In the backend: reflection maps an arrayed cube image to that view dimension; the MSL
 path reads it through a `texturecube_array` table entry and the SPIR-V path declares

@@ -65,6 +65,8 @@ struct Card {
     card: [Vertex; 4],
     lighting: Lighting,
     shadows: SunShadows,
+    /// `Primary::Traced` (exact shadows) unless a test asks for the Interactive trace.
+    primary: Primary,
 }
 const SIZE: [u32; 2] = [128, 96];
 /// One frame: its HDR as RGBA f32, and its history colour and reset flag.
@@ -100,6 +102,7 @@ impl Card {
                 split_ends: vec![8.],
                 disk_angle: 0.02,
             },
+            primary: Primary::Traced,
         }
     }
     /// Looking down from 4 m, `shift` metres off the card's centre in x and y.
@@ -148,7 +151,7 @@ impl Card {
                     size: SIZE,
                     atmosphere: renderlab::Atmosphere::off(),
                     sun_shadows: Some(&self.shadows),
-                    primary: Primary::Traced,
+                    primary: self.primary,
                     post: None,
                     indirect: None,
                     reconstruction,
@@ -384,7 +387,9 @@ fn interactive_trace_entries_reflect_validate_and_compile() -> Result<()> {
         (3, 1),
         (3, 5),
     ];
-    let stages: [(Interactive, [u32; 3], &[(u32, u32)]); 3] = [
+    /// An entry, its workgroup size and the inputs it adds to the common ones.
+    type Stage = (Interactive, [u32; 3], &'static [(u32, u32)]);
+    let stages: [Stage; 3] = [
         (Interactive::Deferred, [8, 4, 1], &[(0, 20), (0, 24)]),
         (Interactive::Full, [8, 4, 1], &[(0, 20)]),
         (Interactive::Repair, [32, 1, 1], &[(0, 26)]),
@@ -410,6 +415,106 @@ fn interactive_trace_entries_reflect_validate_and_compile() -> Result<()> {
             Kernel::from_program(&mut gpu, &cache, &program)?.retire(&mut gpu)?;
         }
     }
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// The Interactive frame against the exact one, under a slanted sun with a wide disk.
+/// - Without reconstruction it traces eight sun directions a pixel where the exact
+///   frame traces 256: the two agree bit for bit wherever the exact frame is fully lit
+///   or fully shadowed, and where they differ the Interactive pixel holds a whole
+///   number of eighths of the sun's light. That also holds the fused trace's hits,
+///   repaired near triangle edges, to the exact trace's.
+/// - With reconstruction the planner's cold budget is 256 rays at rotation zero, so the
+///   first frame is the exact frame in every pixel: the rotated kernels, the budget
+///   words and the indirectly dispatched repair reproduce the trace and the gated
+///   estimator they replace. Later frames, on 64 then 32 then 8 rotated rays, stay
+///   within a tenth of the contrast of the exact sequence (0.05 measured) on a few
+///   hundred penumbra pixels.
+#[test]
+fn interactive_frame_is_the_exact_frame_outside_the_penumbra_and_on_a_cold_start() -> Result<()> {
+    let path = root("interactive-frame");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let mut scene = Card::new();
+    scene.lighting.lights = vec![Light::Directional {
+        travel: Vec3::new(-0.6, 0., -1.),
+        lux: [1000.; 3],
+    }];
+    scene.shadows.disk_angle = 0.08;
+    let camera = Card::camera([0.03, 0.02])?;
+    let mut render =
+        |primary: Primary, tr: Option<Reconstruct>, n: usize| -> Result<Vec<Vec<f32>>> {
+            scene.primary = primary;
+            let mut history = Frames::default();
+            let out = scene.frames(&mut gpu, &cache, &mut history, tr, &vec![camera; n])?;
+            history.retire(&mut gpu)?;
+            Ok(out.into_iter().map(|frame| frame.0).collect())
+        };
+    let reds =
+        |frame: &[f32]| -> Vec<f32> { frame.as_chunks::<4>().0.iter().map(|p| p[0]).collect() };
+    let exact = reds(&render(Primary::Traced, None, 1)?[0]);
+    let fast = reds(&render(Primary::TracedInteractive, None, 1)?[0]);
+    // The floor lit and in the card's umbra: the shadow's contrast.
+    let lit = exact[at(10, 10) / 4];
+    let umbra = exact.iter().cloned().fold(f32::MAX, f32::min);
+    let contrast = lit - umbra;
+    // The sky is black, so the umbra is too.
+    ensure!(
+        contrast > 0.1 && umbra == 0.,
+        "the fixture has no shadow: lit {lit}, umbra {umbra}"
+    );
+    let (mut differing, mut worst, mut off_grid) = (0, 0f32, 0f32);
+    for (a, b) in exact.iter().zip(&fast) {
+        if a == b {
+            continue;
+        }
+        differing += 1;
+        worst = worst.max((a - b).abs());
+        // Only where the exact frame is partly shadowed.
+        ensure!(
+            *a > umbra + 1e-3 * contrast && *a < lit - 1e-3 * contrast,
+            "a pixel outside the penumbra differs: {a} against {b}"
+        );
+        // Eight rays: the sun's light arrives in eighths.
+        let eighths = (b - umbra) / contrast * 8.;
+        off_grid = off_grid.max((eighths - eighths.round()).abs());
+    }
+    ensure!(
+        (50..400).contains(&differing) && off_grid < 0.05 && worst < 0.5 * contrast,
+        "{differing} pixels differ by up to {worst} of a contrast of {contrast}, {off_grid} of an \
+         eighth off the eight-ray grid"
+    );
+    let exact_sequence = render(Primary::Traced, reconstructed(), 24)?;
+    let fast_sequence = render(Primary::TracedInteractive, reconstructed(), 24)?;
+    ensure!(
+        exact_sequence[0] == fast_sequence[0],
+        "the cold reconstructed frame is not the exact frame"
+    );
+    let mut later = (0, 0f32);
+    for (a, b) in exact_sequence.iter().zip(&fast_sequence).skip(1) {
+        let (a, b) = (reds(a), reds(b));
+        let apart = a.iter().zip(&b).filter(|(x, y)| x != y).count();
+        let most = a
+            .iter()
+            .zip(&b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f32, f32::max);
+        later = (later.0.max(apart), later.1.max(most));
+    }
+    eprintln!(
+        "plain: {differing} pixels differ by up to {:.3} of the contrast, {off_grid:.4} of an \
+         eighth off the grid; reconstructed: frame 0 identical, later frames up to {} pixels by \
+         up to {:.4} of the contrast",
+        worst / contrast,
+        later.0,
+        later.1 / contrast
+    );
+    ensure!(
+        later.0 < 400 && later.1 < contrast / 10.,
+        "reconstructed Interactive frames drift from the exact sequence: {later:?}"
+    );
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
