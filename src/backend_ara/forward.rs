@@ -272,8 +272,8 @@ pub struct IdScene<'a> {
 }
 
 /// The id targets a sequence keeps: the ids of its last frame with ids (R32Uint, two
-/// layers: opaque, front, at the output's size), the settled (placement + 1, primitive)
-/// of the last two frames, which ping-pong, and the camera the last ids were taken from.
+/// layers: opaque, front, at the output's size), the settled (placement + 1, primitive,
+/// pending primitive, its streak; Rgba32Uint) of the last two frames, which ping-pong, and the camera the last ids were taken from.
 struct IdTargets {
     size: [u32; 2],
     ids: Texture,
@@ -3647,8 +3647,8 @@ fn frame(
                 }
             }
             let settled = [
-                Texture::new(gpu, id_size, Format::Rg32Uint, true, false)?,
-                Texture::new(gpu, id_size, Format::Rg32Uint, true, false)?,
+                Texture::new(gpu, id_size, Format::Rgba32Uint, true, false)?,
+                Texture::new(gpu, id_size, Format::Rgba32Uint, true, false)?,
             ];
             *kept_ids = Some(IdTargets {
                 size: id_size,
@@ -3667,7 +3667,7 @@ fn frame(
                     &mut graph,
                     &mut rec,
                     texture.image,
-                    &vec![0; (id_size[0] * id_size[1] * 8) as usize],
+                    &vec![0; (id_size[0] * id_size[1] * 16) as usize],
                 )?);
             }
         } else if let Some(t) = kept_ids.as_ref() {
