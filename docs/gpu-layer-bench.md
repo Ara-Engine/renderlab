@@ -1,4 +1,4 @@
-# GPU layer benchmark: wgpu 30 (Renderlab v0.1.1) vs ara-gpu (Ara 1e04fe5dd)
+# GPU layer benchmark: wgpu 30 (Renderlab v0.1.1) vs ara-gpu (Ara 9f6be7173)
 
 2026-11-10, research unit `gpu-layer-bench` (not M8). Raw numbers: `D:/Coding/renderlab-work/gpu-layer-bench/results.json`.
 Probe source: `D:/Coding/renderlab-work/gpu-layer-bench/renderlab-probe.patch` (branch `glb-probe` in `renderlab/`, on tag v0.1.1 = 87ba60a).
@@ -29,13 +29,13 @@ On measured performance, the GPU layer itself is not the big lever:
 
 Sources: Renderlab `69c667b`, counted before the tag existed. v0.1.1 (`87ba60a`) differs only by the
 P-GATHER merge: `shaders/gi_gather_software.wgsl` (+175 lines), 19 lines of `src/gi_cache.rs`, and docs and version
-files, so the counts below are within a few lines of v0.1.1. Ara `1e04fe5dd`
+files, so the counts below are within a few lines of v0.1.1. Ara `9f6be7173`
 (`crates/ara-gpu`, 19.9k lines src incl. tests, 17.4k non-test; `crates/ara-shader-cook`, 972 lines).
 Counts are from the source tree, not runtime, unless marked.
 
 ### What Renderlab uses from wgpu, against ara-gpu
 
-| Renderlab dependency (evidence) | ara-gpu at 1e04fe5dd | Gap / effort to close |
+| Renderlab dependency (evidence) | ara-gpu at 9f6be7173 | Gap / effort to close |
 |---|---|---|
 | Vulkan 1.3 device, one graphics queue | Vulkan 1.3; graphics + **required** dedicated compute-only family; optional 2nd graphics queue | Equal on NVIDIA/AMD. Ara refuses devices with no compute-only family (`create.rs:117-124`). Small: make it optional. |
 | Binding model: 107 `BindGroupLayout`, 44 `create_bind_group` sites, 167 `set_bind_group` calls, up to 4 groups, 13 storage buffers + 24 sampled textures + 5 storage textures per stage, 3 dynamic-offset bindings, 27 uniform buffers | One global bindless set: runtime arrays of sampled images (binding 5, ≤65,536), storage buffers (binding 1, **cap 128**, baked into the ABI hash `storage128`), 64 storage images, 3 fixed samplers, 16 AS; **32-byte root constants**; no uniform buffers, no per-pass descriptor sets | **Redesign.** Every pass and every shader changes its resource access to heap indices (8 root words, so most passes need an index table). The 128-buffer cap needs an ABI bump (all Ara pipelines recook). Medium in ara-gpu, large in Renderlab. |
@@ -267,7 +267,7 @@ This driver reports `maxMemoryAllocationCount` = 2^32−1, so ara-gpu's one-allo
 
 ## M6. Mac (**M**, report only)
 
-MacBook Pro Mac17,9, **Apple M5 Pro**, macOS 27.0, Xcode 26.6, rustc 1.99.1, fresh clone at 1e04fe5dd:
+MacBook Pro Mac17,9, **Apple M5 Pro**, macOS 27.0, Xcode 26.6, rustc 1.99.1, fresh clone at 9f6be7173:
 
 | Command | Passed | Failed | Ignored |
 |---|---:|---:|---:|
@@ -359,7 +359,7 @@ These are estimates from code size and one small port, not measured.
 
 - Cargo targets (`target-rl` 643 MB, `target-glb` 613 MB) are deleted.
 - Deleted after summarising: 22 HDR dumps (16.6 MB each), both wgpu API traces (58 MB and 48 MB; their counts are in `results.json` → `m3.replay_shapes` and the table above), pipeline caches and staged binaries.
-- My 6.7 GB scratch Ara clone is deleted. Recreate it with `git clone --no-checkout D:/Coding/projects/desktop/snengine ara && git -C ara checkout --detach 1e04fe5dd`.
+- My 6.7 GB scratch Ara clone is deleted. Recreate it with `git clone --no-checkout D:/Coding/projects/desktop/snengine ara && git -C ara checkout --detach 9f6be7173`.
 - Kept: `dump/` (9 MB of production SPIR-V by hash), `variants/` (18 MB), per-run `frames.jsonl`, the diff PNG, `renderlab/` (73 MB, branch `glb-probe`).
 - No edits were made to D:/Coding/projects/desktop/renderlab or snengine.
 - Time:

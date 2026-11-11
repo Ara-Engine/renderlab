@@ -246,3 +246,25 @@ py -3 -B tools/n-vsm1/yard.py run NAME:timing:nonrt:passes+RENDERLAB_PASS_LOG_DE
 py -3 -B tools/n-vsm1/yard.py timing OUT.json RUN...
 game_scene --path nonrt --diag vsm-lookup=disk      # the lookup on the courtyard
 ```
+
+## Quarry window (root, 2026-11-11 13:56-14:00 UTC)
+
+The held quarry batch ran once in an owner-granted RAM window (`tools/n-vsm1/quarry.py q-y5 m0 d13`: main's default against part 2's `Disk`, RTX 4070 SUPER, 1080p, non-RT, one lease of 206 s, no watchdog trip). Unreal is software Lumen at Epic from the same yardstick.
+
+**Frame and sun pass, two visits each (GPU p50):**
+
+| State | Default (`Surface`, S4 on cuts) | `Disk` | Unreal |
+|---|---|---|---|
+| Still: frame | 8.61-8.68 ms (2.15x slower) | 4.30-4.33 ms (1.07-1.08x slower) | 4.02 ms |
+| Moving: frame | 10.81-10.84 ms (2.6x slower) | 4.50-4.53 ms (1.09-1.10x slower) | 4.12 ms |
+| Cut: frame | 45.5-46.8 ms (11x slower) | 4.76-4.93 ms (1.16-1.20x slower) | 4.11 ms |
+| Still: sun pass | 4.51-4.52 ms | 0.236 ms (lookup 0.142, raster 0.033, requests 0.055) | about 0.6 ms |
+| Moving: sun pass | 6.55-6.56 ms | 0.232-0.233 ms | about 0.6 ms |
+| Cut: sun pass | 41.1-42.0 ms | 0.378-0.381 ms (raster 0.16) | about 0.6 ms |
+
+- The older lookups, one visit: `Map` 0.79 / 0.77 / 1.18 ms (frame 4.89 / 5.02 / 5.60); `Hybrid` 3.52 / 3.37 / 4.08 ms (its queued walk is 2.6-2.9 ms).
+- **The 0.6 ms target is met on the quarry in every state, the cut included.** On the game scene with the fox the pass is still 1.7 ms.
+
+**Picture.** On the quarry `Disk` and `Surface` are nearly the same image: of covered pixels, 0.10-0.39% differ by more than half a code and none by more than 3.3 codes, on the still, walking, cut and cut+1 frames. Scores against the path-traced reference: error 7.289 / 7.641 / 8.263 (still / moving / cut) against the default's 7.278 / 7.633 / 8.257; contact crop 10.95 against 10.93; flicker 4.375 on both. The quarry therefore does not exercise the cases where `Disk` is behind (S1-S3 above). Sheet: [quarry-window-rock.jpg](n-vsm1/quarry-window-rock.jpg), Unreal, `Surface`, `Disk` and their difference x16. Inspected: no stray bright pixels in either Renderlab column; the cut frame is sharp with shadows in place; Unreal's cut and cut+1 frames are visibly softer.
+
+**First frame of a brand-new view (no page exists yet).** Renderlab's first frame rasterises the whole visible clipmap: page raster 56-57 ms with `Disk` (43 ms plus 275 ms of walk records with `Surface`). Unreal's first frame spends 1.9 ms in shadow depths and 0.14 ms marking pages (its whole first frame is 18 ms). A cut inside an area already seen costs Renderlab 0.16 ms of raster. So the remaining cut hitch is a cut to somewhere never seen: OPEN, for the page-structure unit.

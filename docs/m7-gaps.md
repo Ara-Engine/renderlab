@@ -742,7 +742,7 @@ Unreal flaws Renderlab already beats here: SW Lumen's sun leak through S4's thin
 
 ## M8 Showcase follow-through (P-SHOW2, 2026-11-10)
 
-[P-SHOW2](p-show2.md), Showcase at 1080p through Ara's bridge (`ede758f7a`, Sky::Map), with a named per-pass GPU timeline (`RENDERLAB_PASS_LOG`) and ablations (`RENDERLAB_ABLATE`).
+[P-SHOW2](p-show2.md), Showcase at 1080p through Ara's bridge (`eb20a48b5`, Sky::Map), with a named per-pass GPU timeline (`RENDERLAB_PASS_LOG`) and ablations (`RENDERLAB_ABLATE`).
 
 - **FIXED: main's non-RT regression on skinned scenes.** P-SHOW's relight switch made every frame a GI drain frame, at P-DEFECT's 4x gather budget. Deleted: non-RT still 55.2 → 33.1 ms (GI 20.5 → 0.9 ms), plinths clean still, moving and on cuts.
 - **HALF FIXED: Sky::Map cost.** A 16-texel legacy chain sent glossy and hit lookups through the cross-face slow path; narrow levels are now banked at load. RT still with the map 52.5 → 33.9 ms, image within 2 codes.
@@ -855,7 +855,7 @@ The tests were only ever verified on the RTX 4070 SUPER; docs/camera-depth.md re
 
 ## Showcase non-RT through Ara, first render on the RTX (2026-11-11)
 
-Ara main d2d990f26, Renderlab pin 901c1d2, RTX 4070 SUPER, 1080p, sky map, quiet slot. This is the baseline for the glossy unit and for P-SPLIT's cold-start case.
+Ara main 9cac08416, Renderlab pin 901c1d2, RTX 4070 SUPER, 1080p, sky map, quiet slot. This is the baseline for the glossy unit and for P-SPLIT's cold-start case.
 - **Start:** the first `ara capture` timed out at 120 s with no frame. The pipeline cache grew during compilation (31.8 -> 32.4 MiB), so persistence works through Ara. The second try also took about two minutes in total, against 35 s for the game scene after a kill: Showcase compiles more program kernels (mixed list, glass, toon).
 - **Frame:** 40.5 ms GPU per frame over 120 frames, against 3.0 ms for Ara's own renderer.
 
@@ -983,7 +983,7 @@ Pixels on the open ground more than 10 codes above their 21-pixel median:
 
 ## Layout decorations on workgroup and function variables (validation layer, 2026-11-11)
 
-**OPEN upstream, low priority; no action here.** With the Khronos validation layer on, every Renderlab compute module with a `var<workgroup>` array draws `VUID-StandaloneSpirv-None-10684`: "Invalid explicit layout decorations on type ... the Workgroup storage class has an explicit layout from the ArrayStride decoration". The integration thread saw 120 lines of it running Ara's `cargo test -p ara-renderlab` on the RTX 4070 SUPER (Ara d547adf98, pin a0094f6a6e4), quoting `OpVariable %_ptr_Workgroup__arr_v4float_uint_64`. A second form names the Function storage class and an Offset decoration.
+**OPEN upstream, low priority; no action here.** With the Khronos validation layer on, every Renderlab compute module with a `var<workgroup>` array draws `VUID-StandaloneSpirv-None-10684`: "Invalid explicit layout decorations on type ... the Workgroup storage class has an explicit layout from the ArrayStride decoration". The integration thread saw 120 lines of it running Ara's `cargo test -p ara-renderlab` on the RTX 4070 SUPER (Ara bb4b89e71, pin a0094f6a6e4), quoting `OpVariable %_ptr_Workgroup__arr_v4float_uint_64`. A second form names the Function storage class and an Offset decoration.
 - **Kernel quoted:** `lc_spheres:array<vec4<f32>,64>` in `shaders/light_cluster.wgsl`. It is not special: naga emits `ArrayStride` on every such array, and Renderlab has about 80 `var<workgroup>` declarations.
 - **Cause:** naga's SPIR-V emission, not our WGSL. Tracked upstream as gfx-rs/wgpu issue 7696 (open).
 - **Why Renderlab's validated runs do not show it:** wgpu-hal 30.0.1's own debug callback silences this message id (`vulkan/instance.rs`, citing that issue), so it never reaches our sink and `gpu_validation_summary` reads errors=0. Ara's messenger is its own and sees it. A lease run with the layer set by environment but without wgpu's debug flags prints it too.
@@ -1003,3 +1003,7 @@ Pixels on the open ground more than 10 codes above their 21-pixel median:
 ## One pixel at a bulb's rim differs between the two GPU layers under TR1 (ara-gpu port, 2026-11-11)
 
 **UNCONFIRMED as a renderer fault; nothing to do yet.** The ara-gpu port (draft PR #3 at 3d7eeed) matches the wgpu renderer on the game scene on the Radeon (worst HDR cell 0.1%) and on the RTX, except one pixel at a bulb's rim: (588, 178) at pose 11 with `--supported`, wgpu (0.3843, 0.2228, 0.1062) against the port's (0.4619, 0.2976, 0.1720), neighbours equal to 0.0001. It goes away with temporal reconstruction off. The port's author is locating the decision in the resolve that lands differently. If it is a float comparison in `shaders/temporal_resolve.wgsl` that two correct GPUs may round apart, as the native-scale test was, the fix is root's.
+
+## First frame of a brand-new view: page raster (quarry window, 2026-11-11)
+
+**OPEN (owner: the page-structure unit after N-VSM2).** With no cached page, Renderlab's first non-RT frame rasterises the whole visible clipmap: 56-57 ms of page raster on the quarry at 1080p. Unreal's first frame spends 1.9 ms in shadow depths. A cut inside an area already seen costs 0.16 ms, so this is the hitch that remains on a cut to somewhere never seen, and at start-up. Candidates: spread first-view page raster over a few frames with a coarse level answering meanwhile; a sparse page pool that rasterises only requested pages.

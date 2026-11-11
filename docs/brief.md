@@ -67,7 +67,7 @@ Research is copied into `docs/research/industry-rendering-costs.md`. It contains
 Local evidence, consult on demand:
 
 - Ara checkout: `C:/Users/snowy/.t3/worktrees/snengine/t3-9c4a1f92`
-- Final saved campaign commit reported by coordinator: `1e714c2b5` on `t3/render-v3`
+- Final saved campaign commit reported by coordinator: `92512c829` on `t3/render-v3`
 - Original architecture: `D:/AraBuild/render-research/council-v3/FINAL-architecture.md`
 - Results: `D:/AraBuild/render-v3/gates/G1` through `G6`, especially `B*-RESULT.md`
 - B3 report: `D:/AraBuild/render-v3/B3-report.md`
