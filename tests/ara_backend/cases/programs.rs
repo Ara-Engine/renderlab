@@ -3,7 +3,8 @@ use super::*;
 use renderlab::{
     Camera, Light, Lighting, Mat4, MaterialDescriptor, Value, Vec3, Vertex,
     backend_ara::forward::{
-        ForwardObject, ForwardScene, ObjectProgram, Primary, ScenePrograms, SunShadows, render,
+        ForwardObject, ForwardScene, Frames, ObjectProgram, Primary, ScenePrograms, SunShadows,
+        render,
     },
 };
 
@@ -18,9 +19,21 @@ fn surface(input:SurfaceInput) -> Surface { return Surface(material_normal(input
 fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> { return expose(params.colour*params.gain); }
 ";
 
+/// A program whose surface sends on only the red of the light that reaches it, and
+/// shows nothing to the camera itself.
+const RED: &str = "struct Surface { n:vec3<f32> };
+fn surface(input:SurfaceInput) -> Surface { return Surface(material_normal(input)); }
+fn scatter(s:Surface, input:SurfaceInput, wi:vec3<f32>, wo:vec3<f32>) -> vec3<f32> {
+    return vec3<f32>(max(dot(s.n,wi),0.0)/PI,0.0,0.0);
+}
+fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> { return vec3<f32>(0.0); }
+";
+
 /// The Vulkan side of each program, from any host: the whole-region entry and the
 /// list entry of the test's program and of the game scene's two emit SPIR-V that
 /// validates, with every resource-array access marked non-uniform and exact arithmetic.
+/// So does the cache's cell entry for one program among several, for the two programs
+/// that reflect.
 #[test]
 fn programs_emit_valid_spirv_at_the_region_and_list_entries() -> Result<()> {
     use renderlab::backend_ara::primary_shade::{
@@ -32,6 +45,15 @@ fn programs_emit_valid_spirv_at_the_region_and_list_entries() -> Result<()> {
         forward_cases::validate_spirv(
             &hardware_soft_list_program(source)?,
             &format!("{name}-list"),
+        )?;
+    }
+    for (slot, (name, source)) in [("game", GAME), ("toon", toon), ("red", RED)]
+        .into_iter()
+        .enumerate()
+    {
+        forward_cases::validate_spirv(
+            &renderlab::backend_ara::gi_cache::mixed_shade_program(source, 64, slot as u32)?,
+            &format!("{name}-cells"),
         )?;
     }
     Ok(())
@@ -301,6 +323,224 @@ fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
     }
     eprintln!(
         "programs: flat exact on {floors} floor and {cards} card pixels; game at defaults {apart:.2e} from standard; glow within {worst:.4}; {mixed} pixels exact in frames of two programs"
+    );
+    cache.retire(&mut gpu)?;
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// Two sunlit floors side by side, a black wall between them, and on each an upright
+/// card the sun does not reach, under a black sky: a card shows only the light its own
+/// floor sends up. One floor is the standard program's white, the other the test's
+/// program that sends on red alone; the cards and the wall are standard.
+///
+/// After eight frames of one sequence with the radiance cache on, the card over the
+/// white floor is lit and grey, and the card over the red floor is lit and red with
+/// no green or blue. So each floor's cells were shaded by that floor's program. It
+/// holds with either floor drawn first, which is what tells it from shading every
+/// cell with the frame's first program: that turns one card or the other the wrong
+/// colour, whichever order is drawn.
+///
+/// It also holds when the floors change places in the draw order part way through a
+/// sequence, which gives each program the other's slot: four frames later, and on the
+/// very next frame, where a cache that had started again would show no bounce light.
+#[test]
+fn two_programs_in_one_frame_each_light_their_own_cells() -> Result<()> {
+    let path = root("program-cells");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let rectangle = |corners: [[f32; 3]; 4], normal: [f32; 3]| {
+        corners.map(|position| Vertex {
+            position,
+            normal,
+            uv: [0.; 2],
+            color: [1.; 4],
+        })
+    };
+    let floor = |x: f32| {
+        rectangle(
+            [
+                [x - 2., -2., 0.],
+                [x + 2., -2., 0.],
+                [x + 2., 2., 0.],
+                [x - 2., 2., 0.],
+            ],
+            [0., 0., 1.],
+        )
+    };
+    let card = |x: f32| {
+        rectangle(
+            [
+                [x - 1., 1., 0.],
+                [x + 1., 1., 0.],
+                [x + 1., 1., 1.5],
+                [x - 1., 1., 1.5],
+            ],
+            [0., -1., 0.],
+        )
+    };
+    let wall = rectangle(
+        [[0., -3., 0.], [0., 3., 0.], [0., 3., 3.], [0., -3., 3.]],
+        [1., 0., 0.],
+    );
+    const WHITE: f32 = -2.2;
+    const REDS: f32 = 2.2;
+    let (floors, cards) = ([floor(WHITE), floor(REDS)], [card(WHITE), card(REDS)]);
+    // The sun leans away from the cards' faces, so no direct light reaches them.
+    let lighting = Lighting {
+        lights: vec![Light::Directional {
+            travel: Vec3::new(0., -0.05, -1.).normalize(),
+            lux: [8.; 3],
+        }],
+        environment: [0.; 3],
+        exposure_stops: 0.,
+    };
+    let shadows = SunShadows {
+        split_ends: vec![16.],
+        disk_angle: 0.02,
+    };
+    let camera = Camera::look_at(
+        Vec3::new(0., -7., 1.6),
+        Vec3::new(0., 1., 0.7),
+        Vec3::Z,
+        55f32.to_radians(),
+        0.1,
+        100.,
+    )?;
+    let matrix = camera.matrix(SIZE[0], SIZE[1]);
+    // The mean of the 8 by 8 pixels about the middle of the card at `x`.
+    let patch = |hdr: &[u8], x: f32| -> [f32; 3] {
+        let ndc = matrix.project_point3(Vec3::new(x, 1., 0.75));
+        let centre = [
+            ((ndc.x + 1.) * 0.5 * SIZE[0] as f32) as usize,
+            ((1. - ndc.y) * 0.5 * SIZE[1] as f32) as usize,
+        ];
+        let mut sum = [0f32; 3];
+        for y in centre[1] - 4..centre[1] + 4 {
+            for x in centre[0] - 4..centre[0] + 4 {
+                let p = &hdr[(y * SIZE[0] as usize + x) * 8..][..8];
+                for (c, sum) in sum.iter_mut().enumerate() {
+                    *sum += f16::from_bits(u16::from_le_bytes([p[2 * c], p[2 * c + 1]])).to_f32();
+                }
+            }
+        }
+        sum.map(|c| c / 64.)
+    };
+    let red = Some(ObjectProgram {
+        source: RED,
+        parameters: &[],
+    });
+    // One sequence: a frame for each entry, with the red floor drawn first where it says.
+    let mut sequence = |red_first: &[bool]| -> Result<Vec<u8>> {
+        let mut frames = Frames::default();
+        let mut last = Ok(Vec::new());
+        for &red_first in red_first {
+            let order: [usize; 2] = if red_first { [1, 0] } else { [0, 1] };
+            let object = |vertices, base: f32| ForwardObject {
+                vertices,
+                indices: &[0, 1, 2, 0, 2, 3],
+                transform: Mat4::IDENTITY,
+                material: MaterialDescriptor {
+                    base_color: [base, base, base, 1.],
+                    metallic: 0.,
+                    roughness: 1.,
+                    double_sided: true,
+                    ..Default::default()
+                },
+            };
+            let objects = [
+                object(&floors[order[0]][..], 0.8),
+                object(&floors[order[1]][..], 0.8),
+                object(&cards[0][..], 0.8),
+                object(&cards[1][..], 0.8),
+                object(&wall[..], 0.),
+            ];
+            let programs = [
+                if red_first { red } else { None },
+                if red_first { None } else { red },
+                None,
+                None,
+                None,
+            ];
+            last = frames
+                .render(
+                    &mut gpu,
+                    &cache,
+                    &ForwardScene {
+                        meshes: None,
+                        instances: None,
+                        objects: &objects,
+                        lighting: &lighting,
+                        camera,
+                        size: SIZE,
+                        atmosphere: renderlab::Atmosphere::off(),
+                        sun_shadows: Some(&shadows),
+                        primary: Primary::Traced,
+                        post: None,
+                        indirect: Some(renderlab::backend_ara::gi_cache::Indirect {
+                            settings: renderlab::IndirectSettings {
+                                slots_log2: 17,
+                                ..Default::default()
+                            },
+                            read_table: false,
+                        }),
+                        reconstruction: None,
+                        reflections: None,
+                        textures: None,
+                        local_shadows: None,
+                        transparent: &[],
+                        programs: Some(ScenePrograms {
+                            objects: &programs,
+                            transparent: &[],
+                        }),
+                    },
+                )
+                .map(|images| images.hdr);
+            if last.is_err() {
+                break;
+            }
+        }
+        frames.retire(&mut gpu)?;
+        last
+    };
+    const F: bool = false;
+    for (name, red_first) in [
+        ("white floor first", &[F; 8][..]),
+        ("red floor first", &[true; 8]),
+        (
+            "the frame after the floors change places",
+            &[F, F, F, F, F, F, F, F, true],
+        ),
+        (
+            "four frames after the floors change places",
+            &[F, F, F, F, F, F, F, F, true, true, true, true],
+        ),
+    ] {
+        let hdr = sequence(red_first)?;
+        let (white, reds) = (patch(&hdr, WHITE), patch(&hdr, REDS));
+        eprintln!("program cells, {name}: card over white {white:?}, card over red {reds:?}");
+        ensure!(
+            white[0] > 0.3 && white.iter().all(|c| (c - white[0]).abs() < 1e-3 * white[0]),
+            "{name}: the card over the white floor is {white:?}, not lit grey"
+        );
+        ensure!(
+            reds[0] > 0.3 && reds[1] < 1e-3 && reds[2] < 1e-3,
+            "{name}: the card over the red floor is {reds:?}, not lit red alone"
+        );
+        // The red program sends on all the red it receives, the white floor 0.8 of it.
+        let ratio = reds[0] / white[0];
+        ensure!(
+            (1.15..1.35).contains(&ratio),
+            "{name}: the red floor sends {ratio} of the white floor's red, expected about 1.25"
+        );
+    }
+    // A cache that starts again shows nothing on its first frame, so the frame after
+    // the change kept its table.
+    let first = patch(&sequence(&[F])?, WHITE);
+    ensure!(
+        first.iter().all(|c| *c < 1e-3),
+        "a first frame already shows bounce light: {first:?}"
     );
     cache.retire(&mut gpu)?;
     gpu.collect()?;

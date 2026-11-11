@@ -109,6 +109,15 @@ pub fn shade_program(material: &str, directions: u32) -> Result<Program> {
         shade_source(material, directions)?,
     )
 }
+/// `material`'s cell shading in a frame of several programs, where it holds `slot`:
+/// `shade_program` shading only the cells whose draw selects that slot
+/// (`gi_cache::mixed_cell_entry`).
+pub fn mixed_shade_program(material: &str, directions: u32, slot: u32) -> Result<Program> {
+    Program::new(
+        Pass::GiCache(Entry::ShadeCells),
+        shared::mixed_cell_entry(&shade_source(material, directions)?, u64::from(slot)),
+    )
+}
 pub(crate) fn shade_source(material: &str, directions: u32) -> Result<String> {
     let [_, head] =
         crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
@@ -183,8 +192,10 @@ pub(crate) struct CacheScene<'a> {
     pub size: [u32; 2],
     /// Every placement's world bounds, in draw order then instance order.
     pub bounds: Vec<[f32; 6]>,
-    /// Each draw's instance count, in draw order: their sum is `bounds`' length.
-    pub draws: Vec<u32>,
+    /// Each draw's instance count and program slot (its place among the frame's
+    /// programs, as `Cache::new` took them), in draw order. The counts' sum is `bounds`'
+    /// length.
+    pub draws: Vec<[u32; 2]>,
     /// `scene_pixels`: the scene's pixel rectangle.
     pub region: [u32; 4],
     /// Placement model matrices, then their normal transforms, as the traced tables
@@ -233,7 +244,62 @@ pub struct Cache {
     zeroed: bool,
     planner: Planner,
     stages: Vec<(Entry, Program, Kernel)>,
-    shade: Option<(Program, Kernel)>,
+    /// Cell shading, with bounce: one program for a frame of one program, or one per
+    /// reflecting program of a frame of several, each shading its own draws' cells.
+    shade: Vec<(Program, Kernel)>,
+    /// Each program slot's word in the draw table: zero in a frame of one program and
+    /// for a program that reflects nothing, else `cell_selector` of the slot.
+    selectors: Vec<u32>,
+    /// A digest of the programs the cell shading was composed from.
+    programs: [u8; 32],
+}
+/// Cell shading's programs, and each program slot's word in the draw table.
+type CellPrograms = (Vec<(Program, Kernel)>, Vec<u32>);
+/// Cell shading for a frame's programs, in slot order, and each slot's word in the
+/// draw table.
+///
+/// `Renderer::ensure_gi_shade`: a frame of one program shades its cells with it. A
+/// frame of several (MP1) shades each draw's cells with the draw's own program, one
+/// cell program per program that reflects; cells of the others reflect nothing. Some
+/// program must read the cache and some program must reflect into it.
+fn cell_programs(
+    gpu: &mut GpuDevice,
+    cache: &ShaderCache,
+    settings: &crate::IndirectSettings,
+    materials: &[&str],
+) -> Result<CellPrograms> {
+    ensure!(
+        materials.iter().any(|m| crate::program::uses_indirect(m))
+            && materials.iter().any(|m| crate::program::reflects(m)),
+        "none of the frame's programs reads the cache, or none reflects into it"
+    );
+    let mixed = materials.len() > 1;
+    let mut shade = Vec::new();
+    let mut selectors = vec![0; materials.len()];
+    for (slot, material) in materials.iter().enumerate() {
+        if !settings.bounce || !crate::program::reflects(material) {
+            continue;
+        }
+        let program = if mixed {
+            selectors[slot] = shared::cell_selector(slot as u64);
+            mixed_shade_program(material, settings.directions, slot as u32)?
+        } else {
+            shade_program(material, settings.directions)?
+        };
+        let kernel = Kernel::from_program(gpu, cache, &program)?;
+        shade.push((program, kernel));
+    }
+    Ok((shade, selectors))
+}
+/// A digest of a frame's programs, in slot order.
+fn programs_digest(materials: &[&str]) -> [u8; 32] {
+    use sha2::Digest;
+    let mut hash = sha2::Sha256::new();
+    for material in materials {
+        hash.update((material.len() as u64).to_le_bytes());
+        hash.update(material.as_bytes());
+    }
+    hash.finalize().into()
 }
 impl Cache {
     /// Allocates the table for `1 << slots_log2` slots (no device limit shrinks it
@@ -243,7 +309,7 @@ impl Cache {
         cache: &ShaderCache,
         settings: crate::IndirectSettings,
         lights: u32,
-        material: &str,
+        materials: &[&str],
     ) -> Result<Self> {
         settings
             .validate()
@@ -252,12 +318,7 @@ impl Cache {
             settings.enabled && !settings.force_software,
             "the cache is assembled on hardware rays only"
         );
-        // `Renderer::gi_shade_pipeline`: cells are shaded by the frame's program, which
-        // must read the cache and say how it scatters light back into it.
-        ensure!(
-            crate::program::uses_indirect(material) && crate::program::reflects(material),
-            "the frame's program does not read the cache or reflect into it"
-        );
+
         let slots = 1u32 << settings.slots_log2;
         let sizes = Sizes::of(slots, lights, &settings);
         let stages = Entry::ALL
@@ -268,13 +329,7 @@ impl Cache {
                 Ok((entry, program, kernel))
             })
             .collect::<Result<Vec<_>>>()?;
-        let shade = if settings.bounce {
-            let program = shade_program(material, settings.directions)?;
-            let kernel = Kernel::from_program(gpu, cache, &program)?;
-            Some((program, kernel))
-        } else {
-            None
-        };
+        let (shade, selectors) = cell_programs(gpu, cache, &settings, materials)?;
         Ok(Self {
             settings,
             slots,
@@ -287,10 +342,28 @@ impl Cache {
             planner: Planner::default(),
             stages,
             shade,
+            selectors,
+            programs: programs_digest(materials),
         })
     }
     pub(crate) fn settings(&self) -> crate::IndirectSettings {
         self.settings
+    }
+    /// Composes the cell shading again when the frame's programs, in slot order, are
+    /// not the ones it was composed from. The table and everything in it stay, as the
+    /// renderer remakes its cell pipelines and keeps its cache.
+    pub(crate) fn shade_with(
+        &mut self,
+        gpu: &mut GpuDevice,
+        cache: &ShaderCache,
+        materials: &[&str],
+    ) -> Result<()> {
+        let digest = programs_digest(materials);
+        if self.programs != digest {
+            (self.shade, self.selectors) = cell_programs(gpu, cache, &self.settings, materials)?;
+            self.programs = digest;
+        }
+        Ok(())
     }
     /// The table, for shading (lighting binding 20) and for reading back.
     pub(crate) fn table(&self) -> &StorageBuffer {
@@ -356,13 +429,17 @@ impl Cache {
             offset: 0,
             bytes: begun.header.iter().flat_map(|w| w.to_le_bytes()).collect(),
         });
-        // Per draw its stable id, first placement and instance count. Ids are the
-        // draws' indices plus one, as the renderer's first frame numbers its (mesh,
-        // material) pairs.
+        // Per draw its stable id, first placement, instance count and, in a frame of
+        // several programs, its cell program's selector. Ids are the draws' indices
+        // plus one, as the renderer's first frame numbers its (mesh, material) pairs.
         let objects = scene.bounds.len();
         ensure!(
-            scene.draws.iter().sum::<u32>() as usize == objects,
-            "the cache's draws do not account for its placements"
+            scene.draws.iter().map(|d| d[0]).sum::<u32>() as usize == objects
+                && scene
+                    .draws
+                    .iter()
+                    .all(|d| (d[1] as usize) < self.selectors.len()),
+            "the cache's draws do not account for its placements and programs"
         );
         let table = shared::draw_table(
             scene.draws.len(),
@@ -370,7 +447,9 @@ impl Cache {
                 .draws
                 .iter()
                 .enumerate()
-                .map(|(b, &instances)| [b as u32 + 1, instances, 0]),
+                .map(|(b, &[instances, slot])| {
+                    [b as u32 + 1, instances, self.selectors[slot as usize]]
+                }),
         );
         let draws = StorageBuffer::new(gpu, bytemuck::cast_slice(&table))?;
         let models = StorageBuffer::new(gpu, scene.models)?;
@@ -444,9 +523,9 @@ impl Cache {
     pub(crate) fn programs(&self) -> impl Iterator<Item = &Program> {
         self.stages.iter().map(|(_, program, _)| program)
     }
-    /// Cell shading's program, with bounce.
-    pub(crate) fn shade_program(&self) -> Option<&Program> {
-        self.shade.as_ref().map(|(program, _)| program)
+    /// Cell shading's programs, with bounce, in the order `record` takes their packets.
+    pub(crate) fn shade_programs(&self) -> impl Iterator<Item = &Program> {
+        self.shade.iter().map(|(program, _)| program)
     }
     /// `GiState::encode` without profiling: the clears, then the passes this frame's
     /// plan runs. `packets` are in `programs` order; `shade` is cell shading's.
@@ -456,13 +535,14 @@ impl Cache {
         rec: &mut Recorder,
         frame: &CacheFrame,
         packets: &[HeapBindings<'_>],
-        shade: Option<&HeapBindings<'_>>,
+        shade: &[HeapBindings<'_>],
     ) -> Result<()> {
         let Some(plan) = &frame.plan else {
             return Ok(());
         };
         ensure!(
-            packets.len() == self.stages.len() && (!plan.bounce || shade.is_some()),
+            packets.len() == self.stages.len()
+                && (!plan.bounce || (shade.len() == self.shade.len() && !shade.is_empty())),
             "cache packets do not match the plan's passes"
         );
         let layout = WorkLayout::of_counts(self.slots, self.sizes.misses);
@@ -542,14 +622,16 @@ impl Cache {
         }
         if plan.bounce {
             pass(Entry::Light, [shared::LIGHT_GROUPS, 1])?;
-            let (program, kernel) = self.shade.as_ref().context("bounce without cell shading")?;
-            let threads = program.threads()?;
-            kernel.record(
-                graph,
-                rec,
-                shade.context("checked above")?,
-                [shared::LIGHT_GROUPS * threads[0], 1, 1],
-            )?;
+            // MP1: each reflecting program over the queue in turn.
+            for ((program, kernel), packet) in self.shade.iter().zip(shade) {
+                let threads = program.threads()?;
+                kernel.record(
+                    graph,
+                    rec,
+                    packet,
+                    [shared::LIGHT_GROUPS * threads[0], 1, 1],
+                )?;
+            }
         }
         Ok(())
     }

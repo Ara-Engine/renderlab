@@ -1420,6 +1420,20 @@ fn frame(
             }
             _ => None,
         };
+    // What the panes' sun map is made from (`prepare_transmission`'s key): its record,
+    // and each pane's geometry, material and transform.
+    let transmission_key: Option<[u8; 32]> = transmission_record.as_ref().map(|record| {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(record);
+        for pane in scene.transparent {
+            h.update((pane.vertices.len() as u64).to_le_bytes());
+            h.update((pane.indices.len() as u64).to_le_bytes());
+            h.update(pane.material.bytes());
+            h.update(bytemuck::cast_slice(&pane.transform.to_cols_array()));
+        }
+        h.finalize().into()
+    });
     // The scene and the fresh visibility's targets and kernels.
     let geometry_started = std::time::Instant::now();
     let traced = match &shadow_frame {
@@ -1742,16 +1756,9 @@ fn frame(
                     h.update(source.as_bytes());
                 }
                 h.update(bytemuck::cast_slice(&slots));
-                // `prepare_transmission` cuts when the panes' sun map would change: its
-                // record, or a pane's geometry, material or transform.
-                if let Some(record) = &transmission_record {
-                    h.update(record);
-                    for pane in scene.transparent {
-                        h.update((pane.vertices.len() as u64).to_le_bytes());
-                        h.update((pane.indices.len() as u64).to_le_bytes());
-                        h.update(pane.material.bytes());
-                        h.update(bytemuck::cast_slice(&pane.transform.to_cols_array()));
-                    }
+                // `prepare_transmission` cuts when the panes' sun map would change.
+                if let Some(key) = transmission_key {
+                    h.update(key);
                 }
                 for index in 0..scene.objects.len() {
                     if let Some(program) = object_program(index) {
@@ -1804,14 +1811,18 @@ fn frame(
                     .is_none_or(|c| c.settings() == indirect.settings),
                 "indirect settings changed within a sequence, which is not assembled yet"
             );
-            if gi.is_none() {
-                *gi = Some(Cache::new(
-                    gpu,
-                    cache,
-                    indirect.settings,
-                    packed.count,
-                    material_source,
-                )?);
+            // The frame's programs shade the cells; a kept cache keeps its table.
+            match gi.as_mut() {
+                Some(kept) => kept.shade_with(gpu, cache, &sources)?,
+                None => {
+                    *gi = Some(Cache::new(
+                        gpu,
+                        cache,
+                        indirect.settings,
+                        packed.count,
+                        &sources,
+                    )?)
+                }
             }
             gi_frame = Some(
                 gi.as_mut().context("allocated above")?.prepare(
@@ -1826,7 +1837,7 @@ fn frame(
                             .map(|b| [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z])
                             .collect(),
                         draws: (0..scene.objects.len())
-                            .map(|i| placed(i).len() as u32)
+                            .map(|i| [placed(i).len() as u32, slots[i]])
                             .collect(),
                         region: rect,
                         models: &matrices,
@@ -1834,14 +1845,19 @@ fn frame(
                         environment: environment_digest,
                         field,
                         lights: packed.count,
-                        // `prepare_gi`'s lighting key: the lights, the environment and
-                        // the program. Decals, transmission and the draws do not vary.
+                        // `prepare_gi`'s lighting key: the lights, the panes' sun map,
+                        // the environment, the programs and which draw has which. There
+                        // are no decals.
                         light_key: {
                             use sha2::Digest;
                             let mut h = sha2::Sha256::new();
                             h.update(format!("{:?}", scene.lighting.lights).as_bytes());
+                            h.update(transmission_key.unwrap_or_default());
                             h.update(environment_digest);
-                            h.update(material_source.as_bytes());
+                            for source in &sources {
+                                h.update(source.as_bytes());
+                            }
+                            h.update(bytemuck::cast_slice(&slots));
                             h.finalize().into()
                         },
                     },
@@ -1948,7 +1964,7 @@ fn frame(
         );
     }
     if let Some((cache, _)) = gi {
-        for stage in cache.programs().chain(cache.shade_program()) {
+        for stage in cache.programs().chain(cache.shade_programs()) {
             specs.extend(stage.inputs().iter().cloned());
         }
     }
@@ -2435,28 +2451,27 @@ fn frame(
         }
     }
     // Cell shading: the cache's group 0, then the traced shading interface.
-    let gi_shade_packet =
-        match gi.and_then(|(cache, records)| Some((cache, records, cache.shade_program()?))) {
-            Some((cache, records, stage)) => {
-                let values = stage
-                    .inputs()
-                    .iter()
-                    .map(|spec| {
-                        Ok((
-                            spec.key,
-                            match cache.shade_input(records, spec.key) {
-                                Some(buffer) => Input::Buffer(buffer),
-                                None => shared.input(spec, None)?,
-                            },
-                        ))
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                let packet = HeapBindings::for_program(gpu, stage, &values)?;
-                packet.import(&mut graph);
-                Some(packet)
-            }
-            None => None,
-        };
+    let mut gi_shade_packets = Vec::new();
+    if let Some((cache, records)) = gi {
+        for stage in cache.shade_programs() {
+            let values = stage
+                .inputs()
+                .iter()
+                .map(|spec| {
+                    Ok((
+                        spec.key,
+                        match cache.shade_input(records, spec.key) {
+                            Some(buffer) => Input::Buffer(buffer),
+                            None => shared.input(spec, None)?,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let packet = HeapBindings::for_program(gpu, stage, &values)?;
+            packet.import(&mut graph);
+            gi_shade_packets.push(packet);
+        }
+    }
     // The resolve: its frame record, the copied samples, the history sides the parity
     // selects and the HDR target it rewrites; the rest from the traced frame.
     let resolve_packet = match resolve {
@@ -2613,7 +2628,7 @@ fn frame(
                     &mut rec,
                     records,
                     &gi_packets,
-                    gi_shade_packet.as_ref(),
+                    &gi_shade_packets,
                 )?;
             }
             // The repair runs over the queue the trace filled, from its own counts.
@@ -3275,7 +3290,7 @@ fn frame(
         .chain(shadow_packets)
         .chain(deferred_packets)
         .chain(gi_packets)
-        .chain(gi_shade_packet)
+        .chain(gi_shade_packets)
         .chain(resolve_packet)
         .chain(pane_packets)
         .chain(transmission_packets)

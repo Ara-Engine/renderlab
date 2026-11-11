@@ -2544,9 +2544,53 @@ the test above repeats its comparison over four frames with the cache on and a c
 moving, where the old table fails at the third frame. A one-frame test without the
 cache had passed.
 
-Still one program for the cache's cells: in a frame of several programs the renderer
-selects each draw's cell program (the table's fourth word) and the port shades every
-cell with the first program's.
+## Each draw's cells by its own program
+
+Until this, a frame of several programs shaded every cell of the cache with the first
+program's cell shading, so a surface's bounce light was another program's. The frame
+now does what `Renderer::ensure_gi_shade` does (MP1): one cell program for each of the
+frame's programs that reflects, each rewritten by the renderer's own
+`gi_cache::mixed_cell_entry` to shade only the cells whose draw selects it, and each
+dispatched over the queue in turn; the draw table's fourth word is the draw's
+`cell_selector`, zero for a program that reflects nothing. A frame of one program is
+unchanged (the plain entry, zero in every row). The selector is the program's slot in
+the frame, where the renderer uses its program id; the two only have to agree between
+the table and the entry.
+
+When the frame's programs or their order change inside a sequence, the cache
+composes its cell programs again and keeps its table (`Cache::shade_with`), as the
+renderer remakes its cell pipelines and keeps its cache. The cache's lighting key now
+also takes every program, which draw has which, and the panes' sun map, as
+`prepare_gi`'s does; the sun map was missing from it since the panes' shadow was
+added, so cells under a pane that moved were relit only by the rotation. That last
+part has no test of its own.
+
+`two_programs_in_one_frame_each_light_their_own_cells`: two sunlit floors with a
+black wall between them and an upright card on each that the sun does not reach,
+under a black sky, so a card shows only what its own floor sends up. One floor is the
+standard program at 0.8, the other a program that sends on red alone. After eight
+frames the card over the white floor is [0.602, 0.602, 0.602] and the card over the
+red floor [0.759, 1e-7, 1e-7], with either floor drawn first; the ratio 1.26 is the
+red program's whole reflectance against 0.8. With every cell shaded by the first
+program (the old behaviour) the test fails in both orders: the card over the red floor
+comes out grey with white first, the card over the white floor red with red first.
+When the floors change places in the draw order after eight frames, the next frame is
+still the settled one (a cache that had started again shows nothing on its first
+frame) and four frames later the colours hold; without `shade_with` the two cards
+swap colours there.
+
+The cell entry of one program among several emits valid SPIR-V for the game scene's
+two programs and the test's (`programs_emit_valid_spirv_at_the_region_and_list_entries`).
+It has not run on a Vulkan device yet.
+
+A limit this test showed and did not cause: the port numbers its draws by their place
+in the frame, where the renderer gives each (mesh, material) pair an id that lasts. A
+cell remembers the id of the draw it lies on, so when the draw order changes in a
+sequence, cells are read with another draw's material and program until they are
+traced again. Four frames after the floors change places the white card is 0.7% up
+and its red 0.02% over its green, which only a white-floor cell shaded as red can do
+(the wall is black); that the stale id is the cause is my reading of the code, not
+something I isolated. The game scene's draw order does not change.
 
 ## The first timing against wgpu (Radeon, d5f9cf8) and what it found
 
