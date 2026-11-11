@@ -336,6 +336,12 @@ pub struct IndirectSettings {
     /// uncreated and their pixels on lone or coarser cells: a blocky mosaic. Off only to
     /// measure.
     pub pressure_eviction: bool,
+    /// Cells across a gather ray's cone at its hit (U-SPECK, docs/speck.md; 0, or 1 to 64). A
+    /// fixed direction stands for a cone about 0.36 of the hit's distance wide (64 directions),
+    /// so a hit reads and requests a cell that many to the cone's width, never finer than a
+    /// pixel there would read. 0 gives every hit the pixels' level, as before: those cells
+    /// were most of the table.
+    pub hit_cone_cells: f32,
 }
 impl Default for IndirectSettings {
     /// On by default since G2b (Islam's overnight push, 2026-11-08; docs/m7-g2b.md): G2's
@@ -386,6 +392,10 @@ impl Default for IndirectSettings {
             // the blobs; 8 leave the lintel's bounce 8 % high.
             near_light_rays: 16,
             pressure_eviction: true,
+            // Against the path tracer (docs/speck.md section 8): the field walk's error is the
+            // same at 0, 16, 8 and 4; the spinning crate moves toward the reference as the
+            // cells grow, most at 4; and the field walk creates half the cells.
+            hit_cone_cells: 4.0,
         }
     }
 }
@@ -413,7 +423,8 @@ impl IndirectSettings {
             && [1, 2, 4].contains(&self.gather_stride)
             && self.filter <= 15
             && (0.0..=1.0).contains(&self.filter_edge)
-            && self.near_light_rays <= 64;
+            && self.near_light_rays <= 64
+            && (self.hit_cone_cells == 0.0 || (1.0..=64.0).contains(&self.hit_cone_cells));
         if valid {
             Ok(())
         } else {
@@ -1026,6 +1037,15 @@ impl Planner {
         header[24] = filter;
         header[25] = s.filter_edge.to_bits();
         header[26] = u32::from(s.pressure_eviction);
+        // The cone of one of K equal-solid-angle hemisphere directions: 1 - cos(half-angle) =
+        // 1 / K, and its width at distance 1 is twice the half-angle's tangent.
+        let cone_width = 2.0 * (1.0 - 1.0 / s.directions as f32).acos().tan();
+        let spread = if s.hit_cone_cells > 0.0 {
+            cone_width / s.hit_cone_cells
+        } else {
+            0.0
+        };
+        header[27] = spread.to_bits();
         Begun {
             header,
             since_clear,

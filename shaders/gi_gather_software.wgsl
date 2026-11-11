@@ -92,6 +92,8 @@ var<workgroup> gi_drain_base:u32;
             var changing=0u;
             var rays=0u;
             let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
+            // The fixed directions' hits read cells sized to the ray's cone (gi_hit_radiance).
+            gi_hit_spread=gi_header_f32(GI_H_HIT_SPREAD);
             for(var k=lane;k<GI_DIRECTIONS;k+=GI_GATHER_LANES) {
                 if k%stride!=0u || (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
                 let d=gi_direction(frame,c.key,k);
@@ -107,6 +109,8 @@ var<workgroup> gi_drain_base:u32;
                 let radiance=o.rgb*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
                 for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=radiance*gi_y[i]; }
             }
+            // The aimed rays resolve what is near a light: their hits keep the pixels' level.
+            gi_hit_spread=0.0;
             let aimed=gi_near_gather(lane,origin,n,c.key,band,tertiary);
             rays+=aimed.x;
             missing+=aimed.y;

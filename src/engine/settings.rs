@@ -348,7 +348,7 @@ pub(crate) fn ablated(mut s: Settings) -> Settings {
 /// the embedder asks for, so a defect seen through an embedder can be bisected there:
 /// `lookup=nearest|trilinear`, `filter`, `filter_edge`, `rotate`, `bounce`, `directions`,
 /// `cell_pixels`, `level_blend`, `gathers`, `gather_cells`, `claim_cells`, `near_light_rays`,
-/// `slots_log2`, `evict_frames`, `pressure_eviction`. Unset, it changes nothing. An unknown key, a pair without `=`
+/// `slots_log2`, `evict_frames`, `pressure_eviction`, `hit_cone_cells`. Unset, it changes nothing. An unknown key, a pair without `=`
 /// or a value that does not parse is an error, named on stderr: a mistyped switch must not
 /// pass for a measurement of the default.
 fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error> {
@@ -379,6 +379,7 @@ fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error>
             ("slots_log2", Some(v), _) => s.slots_log2 = v,
             ("evict_frames", Some(v), _) => s.evict_frames = v,
             ("pressure_eviction", Some(v), _) => s.pressure_eviction = v != 0,
+            ("hit_cone_cells", _, Some(v)) => s.hit_cone_cells = v,
             _ => {
                 eprintln!("RENDERLAB_GI: unknown key or unreadable value in `{pair}`");
                 return Err(Error::InvalidInput(

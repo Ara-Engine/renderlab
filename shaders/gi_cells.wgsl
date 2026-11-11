@@ -94,6 +94,9 @@ const GI_H_FILTER_EDGE:u32=25u;
 // Nonzero: a full bucket gives up its least recently seen cell to a miss (gi_claim_miss;
 // src/gi_cache.rs IndirectSettings::pressure_eviction).
 const GI_H_PRESSURE:u32=26u;
+// A gather hit's cell edge over the hit's distance along the ray (f32; 0: the cell a pixel
+// there would read): src/gi_cache.rs IndirectSettings::hit_cone_cells.
+const GI_H_HIT_SPREAD:u32=27u;
 const GI_FILTER_SKY:u32=1u;
 const GI_FILTER_BOUNCE:u32=2u;
 // Bit 2: contrast refine (gi_filter_cell), with the sky filter.
