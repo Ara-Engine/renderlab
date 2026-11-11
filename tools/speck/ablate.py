@@ -1,8 +1,14 @@
-"""U-SPECK diagnosis flights (one lease, resumable): the game scene's flight with its cut at
-frame 24, 180 frames at 1080p, on both paths, with one switch off at a time. A finished run
-leaves `done.json` and is skipped on a rerun.
+"""U-SPECK flights (one lease, resumable): the game scene's flight with its cut at frame 24,
+180 frames at 1080p, on both paths, with one switch changed at a time. A finished run leaves
+`done.json` and is skipped on a rerun.
 
-    py -3 -B tools/speck/ablate.py GAME_EXE OUT [--every N] [--only name,name]
+    py -3 -B tools/speck/ablate.py GAME_EXE OUT [--every N] [--only name,name] [--stills]
+                                   [--lib-test LIB_EXE FILTER]
+
+`--stills` also renders each switch from a frozen camera with a steady fire (`--still`, 96
+frames, the last written) into OUT/still-PATH-NAME: the settled frame, for the energy check.
+`--lib-test` first runs the lib test binary's test named FILTER and stops the lease if it
+fails.
 """
 import json
 import os
@@ -34,7 +40,19 @@ SWITCHES = {
     "fire-only": (["--diag", "lights=4"], {}),
     "sun-off": (["--diag", "sun=0"], {}),
     "rotate-off": (["--diag", "gi-rotate=0"], {}),
+    # Which lamp-lit surface: no bulb spheres, or bulbs that glow but reflect nothing.
+    "bulb-off": (["--diag", "bulb=off"], {}),
+    "bulb-dark": (["--diag", "bulb=dark"], {}),
+    # The fix (IndirectSettings::near_light_rays): rays aimed around each local light.
+    "rays0": (["--diag", "gi-light-rays=0"], {}),
+    "rays8": (["--diag", "gi-light-rays=8"], {}),
+    "rays16": (["--diag", "gi-light-rays=16"], {}),
+    "rays32": (["--diag", "gi-light-rays=32"], {}),
+    "rays0-dark": (["--diag", "gi-light-rays=0", "--diag", "bulb=dark"], {}),
+    "rays16-dark": (["--diag", "gi-light-rays=16", "--diag", "bulb=dark"], {}),
 }
+FLIGHT = ["--frames", "180", "--diag", "cut=1"]
+STILL = ["--still", "--frames", "96", "--every", "95", "--diag", "flicker=0"]
 
 
 def main():
@@ -45,25 +63,33 @@ def main():
     env = {k: v for k, v in os.environ.items() if k not in ("VK_INSTANCE_LAYERS", "VK_LAYER_PATH", "RENDERLAB_ABLATE")}
     env |= {"RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK": "I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK",
             "TMP": str(WORK / "tmp"), "TEMP": str(WORK / "tmp")}
+    if "--lib-test" in sys.argv:
+        lib, name = sys.argv[sys.argv.index("--lib-test") + 1:][:2]
+        r = subprocess.run([lib, name, "--exact", "--test-threads", "1"], cwd=REPO, env=env, capture_output=True, text=True, timeout=600)
+        print((r.stdout + r.stderr)[-1500:], flush=True)
+        if r.returncode != 0:
+            return r.returncode
     worst = 0
-    for name in only:
-        extra, extra_env = SWITCHES[name]
-        for path in ("nonrt", "rt"):
-            run = out / f"{path}-{name}"
-            if (run / "done.json").exists():
-                continue
-            run.mkdir(parents=True, exist_ok=True)
-            start = time.monotonic()
-            r = subprocess.run([game, "--path", path, "--fox", FOX, "--size", "1920x1080", "--frames", "180", "--every", every,
-                                "--diag", "cut=1", *extra, "--out", str(run), "--pipeline-cache", str(WORK / "cache")],
-                               cwd=REPO, env=env | extra_env, capture_output=True, text=True, timeout=600)
-            frames = len(list(run.glob("frame-*.png")))
-            print(f"{run.name}: exit {r.returncode}, {frames} frames, {time.monotonic() - start:.0f} s", flush=True)
-            if r.returncode == 0:
-                (run / "done.json").write_text(json.dumps(dict(game=game, frames=frames, tail=(r.stdout + r.stderr)[-400:])))
-            else:
-                print((r.stdout + r.stderr)[-1500:], flush=True)
-            worst = max(worst, r.returncode)
+    modes = [("", FLIGHT + ["--every", every])] + ([("still-", STILL)] if "--stills" in sys.argv else [])
+    for prefix, mode in modes:
+        for name in only:
+            extra, extra_env = SWITCHES[name]
+            for path in ("nonrt", "rt"):
+                run = out / f"{prefix}{path}-{name}"
+                if (run / "done.json").exists():
+                    continue
+                run.mkdir(parents=True, exist_ok=True)
+                start = time.monotonic()
+                r = subprocess.run([game, "--path", path, "--fox", FOX, "--size", "1920x1080", *mode, *extra,
+                                    "--out", str(run), "--pipeline-cache", str(WORK / "cache")],
+                                   cwd=REPO, env=env | extra_env, capture_output=True, text=True, timeout=600)
+                frames = len(list(run.glob("frame-*.png")))
+                print(f"{run.name}: exit {r.returncode}, {frames} frames, {time.monotonic() - start:.0f} s", flush=True)
+                if r.returncode == 0:
+                    (run / "done.json").write_text(json.dumps(dict(game=game, frames=frames, tail=(r.stdout + r.stderr)[-400:])))
+                else:
+                    print((r.stdout + r.stderr)[-1500:], flush=True)
+                worst = max(worst, r.returncode)
     return worst
 
 
