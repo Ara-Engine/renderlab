@@ -1327,10 +1327,11 @@ through Ara" means a second entry point over the same scene description, as
 keeps: post's frame serial and the previous unjittered camera (valid only from the
 frame directly before, as in `PostGpu::prepare`), the shadow planner's light
 orientations (`ShadowState::bases`), and the placement transforms a traced frame
-publishes as previous matrices. `Frames::cut` forgets them. GPU resources are still
-built per frame; a family that stores data on the GPU between frames (the GI cache,
-temporal reconstruction) adds its resources to this type. `forward::render` is a
-one-frame sequence.
+publishes as previous matrices. `Frames::cut` forgets them. It also owns the radiance
+cache (below), the first family with data on the GPU between frames; `Frames::retire`
+releases it, and a cut keeps its buffers and empties the table on the next frame, as
+`Renderer::reset_indirect` does. Every other GPU resource is still built per frame.
+`forward::render` is a one-frame sequence.
 
 `frames_carry_the_previous_camera_into_motion_blur` renders two frames with the
 camera stepping 0.3 units sideways. The first has a still motion surface. The second
@@ -1384,7 +1385,8 @@ edge, which the mesh pass will always have and the traced frame does not.
 
 The world radiance cache (`gi_cache.rs`, 3,227 lines; `gi_cache.wgsl`, `gi_cells.wgsl`,
 `gi_api.wgsl` and `gi_shade_entry.wgsl`, 2,948 lines) is the first family the default
-image needs that has no ported entry. Read from the source; nothing below is built.
+image needs that had no ported entry. This section is the scope as read from the
+source before porting; what is built since is in the two subsections after it.
 
 **Thirteen compute entries, in `GiState::encode` order:** `gi_probe` (visible pixels
 request cells), `gi_gather` (bounce), three rounds of `gi_claim` and `gi_resolve` with
@@ -1439,9 +1441,68 @@ closed on the way:
   intrinsic becomes a fetch from the module's own per-draw vertex and index arrays
   through the hit's placement; seam counts are checked so a source change fails here.
 
-None of this is a replay. The next step is the cache's CPU side as a shared function
-(`prepare_gi`: the table and work layouts, the frame record, the per-frame plan), then
-stage replays for these nine against CPU references.
+That test replays nothing; the replays are in the next subsection.
+
+### Sky visibility in frame sequences
+
+**The plan is Renderlab's own.** `Renderer::prepare_gi` now plans through
+`gi_cache::Planner` (`begin` gives the table header, `finish` the frame record and
+the plan, `advance` counts the frame), and sizes its buffers and packs its draw table
+through `Sizes::of` and `draw_table`. The backend calls the same functions, so the
+header, the 1,104-byte frame record, the idle shortcut and the pass list cannot drift.
+Those two extractions are their own PRs on Renderlab main and are merged into this
+branch; the dispatch grids and clears in `Cache::record` follow `GiState::encode` by
+hand.
+
+**The cache.** `gi_cache::Cache` owns the table, the work words, the outgoing radiance
+and the filter sources (the last two allocated but unused), device-local and zeroed on
+their first frame, plus the planner and the nine kernels. `ForwardScene::indirect`
+asks for it on a traced frame; `forward::Frames` allocates it on the first such frame
+and keeps it. Each frame writes the header, uploads the frame record, the draw table
+and the placement matrices, runs the plan's passes between the fresh estimator and
+shading (probe, three claim and resolve rounds, scan, setup, rays, finish, integrate,
+each only when the plan has it), and binds the table to shading at lighting binding
+20. Refused for now: bounce, the cell filter, software rays, and settings or a light
+count that change within a sequence.
+
+**Replays** (`tests/ara_backend/cases/gi_cache.rs`, reference in
+`gi_cache_reference.rs`), on a 12 m floor with a 12 m wall under a uniform sky:
+
+| Test | What it holds the cache to |
+|---|---|
+| `sky_visibility_cells_hold_exact_ray_bits_and_their_sh` | All 668 cells traced from their own query point: each of their 42,749 testable rays (64 a cell, less those within 2 mm of an edge) against the scene in f64, bit for bit. Every valid cell's stored SH against the sum over its open directions: scale within 1.4e-7, halves within 2.4e-4. |
+| `sky_visibility_darkens_the_floor_by_the_walls_share_of_the_sky` | 132 floor pixels: frame with the cache over frame without against one minus the wall's form factor in closed form, from 0.52 at the wall's foot up. Worst error 0.033, bound 0.06 (64 directions, 4 px cells, an L2 fit of a hard edge). |
+| `cache_sequences_repeat_idle_when_still_and_follow_the_camera` | Two runs of an 11-frame still sequence give the same table words. Still frames change only the frame stamp and seen stamps, the ninth only the header stamp, and from then on nothing (the planner's idle shortcut). Six frames of a moving camera claim cells every frame and keep exact bits. |
+
+Shifting the reference's rotation by 0.05 rad or one SH constant by 2% fails the first
+test, so it is not vacuous. The suite is 55 tests under Metal API and shader
+validation.
+
+**The comparison tool.** `ara_frame --gi` (implies `--traced`) turns sky visibility
+on for both layers with a fixed 2^17-slot table, writes each frame's whole table as
+`table-NNN.u32` (25 MB a frame, so they stay local) and puts the slot count, counts
+and digests of 256 chunks in `frame.json`. `--still` holds pose 0. `--compare` reports
+the slot count, then per frame the first differing word and what it holds, and the
+cells by key: present on one side only, differing in direction bits, differing in
+stored SH. Without both raw tables it names the first differing chunk from the
+digests. A still sequence idles from its ninth frame, so the moving sequence is the
+one that keeps comparing.
+
+```sh
+cargo run --example ara_frame -- --backend wgpu --gi --atmosphere --frames 12 --output out/wgpu-gi
+cargo +1.99.1 run --features backend-ara --example ara_frame -- --backend ara --gi --atmosphere --frames 12 --output out/ara-gi
+cargo run --example ara_frame -- --compare out/wgpu-gi out/ara-gi
+```
+
+On Metal, M5-A at 960x640 with the physical sky: two runs of the 12-frame moving
+sequence give identical tables and pixels in every frame (14,516 cells after the
+first frame, 15,642 after the twelfth); the still sequence holds 14,516 cells and its
+stamp stops at 8. **Not compared with wgpu yet**: the reference has to come from the
+Linux gate, which can also run both layers on the same GPU, where the raw tables do
+not have to travel.
+
+Next: bounce (gather, light visibility, and cell shading through the program
+composer) and the cell filter.
 
 ## First Vulkan run (Radeon 760M, RADV, validation on)
 
