@@ -5,6 +5,7 @@ mod handle_arrays;
 mod heap_interface;
 /// Renames locals that shadow a resource global before the textual heap rewrite.
 pub mod local_shadows;
+mod memo;
 mod mesh_interface;
 mod metal;
 mod packet_spirv;
@@ -33,7 +34,7 @@ pub const POST: &str = include_str!("../../../shaders/post.wgsl");
 /// The unchanged Renderlab fullscreen vertex and tone fragment source.
 pub const TONE: &str = include_str!("../../../shaders/post_tone.wgsl");
 /// One pass family in the replay.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Pass {
     /// Shared frontend conformance probe; not a Renderlab rendering pass.
     BufferArrayProbe,
@@ -707,6 +708,10 @@ pub(crate) use metal::from_source as msl_source;
 #[cfg(not(target_os = "macos"))]
 pub(crate) use spirv::from_source as spirv_source;
 pub(crate) fn threads_source(pass: Pass, source: &str) -> anyhow::Result<[u32; 3]> {
+    static KEPT: memo::Memo<[u32; 3]> = memo::Memo::new();
+    KEPT.get(pass, source, || threads_of(pass, source))
+}
+fn threads_of(pass: Pass, source: &str) -> anyhow::Result<[u32; 3]> {
     let mut module = parse(source)?;
     select(&mut module, pass)?;
     let entry = module

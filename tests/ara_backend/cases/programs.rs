@@ -110,6 +110,7 @@ fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
             &mut gpu,
             &cache,
             &ForwardScene {
+                meshes: None,
                 objects: &objects,
                 lighting: &lighting,
                 camera,

@@ -123,6 +123,7 @@ fn forward_lit_frame_matches_closed_form_photometry() -> Result<()> {
             &mut gpu,
             &cache,
             &ForwardScene {
+                meshes: None,
                 objects: &[ForwardObject {
                     vertices: &vertices,
                     indices: &[0, 1, 2, 0, 2, 3],
@@ -299,6 +300,7 @@ fn forward_frame_display_matches_cpu_post_replay_of_its_hdr() -> Result<()> {
         &mut gpu,
         &cache,
         &ForwardScene {
+            meshes: None,
             objects: &[ForwardObject {
                 vertices: &vertices,
                 indices: &[0, 1, 2, 0, 2, 3],
@@ -402,6 +404,7 @@ fn forward_frame_atmosphere_scales_the_sun_and_lights_from_the_sky() -> Result<(
             &mut gpu,
             &cache,
             &ForwardScene {
+                meshes: None,
                 objects: &[ForwardObject {
                     vertices: &vertices,
                     indices: &[0, 1, 2, 0, 2, 3],
@@ -753,6 +756,7 @@ fn sun_shadow_has_the_predicted_umbra_and_penumbra_on_both_frame_families() -> R
             &mut gpu,
             &cache,
             &ForwardScene {
+                meshes: None,
                 objects: &[
                     ForwardObject {
                         vertices: &floor,
@@ -975,6 +979,7 @@ fn traced_frame_agrees_with_the_mesh_pass_over_misses_sky_and_post() -> Result<(
                 &mut gpu,
                 &cache,
                 &ForwardScene {
+                    meshes: None,
                     objects: &[
                         ForwardObject {
                             vertices: &floor,
@@ -1219,6 +1224,7 @@ fn frames_carry_the_previous_camera_into_motion_blur() -> Result<()> {
             &mut gpu,
             &cache,
             &ForwardScene {
+                meshes: None,
                 objects: &[ForwardObject {
                     vertices: &vertices,
                     indices: &[0, 1, 2, 0, 2, 3],
@@ -1332,6 +1338,7 @@ fn traced_frames_carry_camera_and_placement_motion_into_motion_blur() -> Result<
             &mut gpu,
             &cache,
             &ForwardScene {
+                meshes: None,
                 objects: &[ForwardObject {
                     vertices: &vertices,
                     indices: &[0, 1, 2, 0, 2, 3],

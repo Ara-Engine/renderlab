@@ -66,6 +66,9 @@ impl Program {
 /// Geometry the frame is rebuilt from, or a mesh this layer refused.
 enum Mesh {
     Static {
+        /// Its identity to the frames, which keep its buffers and bottom-level
+        /// structure on the GPU while a frame names it. Never reused.
+        key: u64,
         vertices: Vec<Vertex>,
         indices: Vec<u32>,
     },
@@ -114,11 +117,13 @@ pub struct Engine {
     /// The last frame's images, for `capture`.
     last: Option<ForwardImages>,
     frame: u64,
+    /// Meshes created so far: the next one's identity.
+    meshes: u64,
     refusals: Vec<Refusal>,
 }
 
-/// One object of a frame: its geometry, material and transform.
-type Placed<'a> = (&'a [Vertex], &'a [u32], &'a Material, Mat4);
+/// One object of a frame: its geometry, material, transform and mesh identity.
+type Placed<'a> = (&'a [Vertex], &'a [u32], &'a Material, Mat4, u64);
 
 /// Records a refusal once.
 fn note(refusals: &mut Vec<Refusal>, call: &'static str, what: &'static str) {
@@ -143,6 +148,7 @@ impl Engine {
             size: None,
             last: None,
             frame: 0,
+            meshes: 0,
             refusals: Vec::new(),
         };
         engine.refuse_settings(&settings);
@@ -213,7 +219,12 @@ impl Engine {
         let (mut opaque, mut transparent) = (Vec::new(), Vec::new());
         for id in state.batches.ids() {
             let batch = state.batches.get(id)?;
-            let Mesh::Static { vertices, indices } = state.meshes.get(batch.mesh)? else {
+            let Mesh::Static {
+                key,
+                vertices,
+                indices,
+            } = state.meshes.get(batch.mesh)?
+            else {
                 continue;
             };
             let material = &state.materials.get(batch.material)?.material;
@@ -226,7 +237,7 @@ impl Engine {
                 batch
                     .models
                     .iter()
-                    .map(|&model| (&vertices[..], &indices[..], material, model)),
+                    .map(|&model| (&vertices[..], &indices[..], material, model, *key)),
             );
         }
         Ok([opaque, transparent])
@@ -242,27 +253,31 @@ fn texture(slot: &Option<(Arc<TextureData>, Sampler)>) -> Option<ObjectTexture<'
 fn objects<'a>(placed: &[Placed<'a>]) -> Vec<ForwardObject<'a>> {
     placed
         .iter()
-        .map(|&(vertices, indices, material, transform)| ForwardObject {
-            vertices,
-            indices,
-            transform,
-            material: MaterialDescriptor {
-                base_color: material.base_color,
-                metallic: material.metallic,
-                roughness: material.roughness,
-                normal_scale: material.normal_scale,
-                double_sided: material.double_sided,
-                thin: material.thin,
-                transparency: material.transparency,
-                ..Default::default()
+        .map(
+            |&(vertices, indices, material, transform, _)| ForwardObject {
+                vertices,
+                indices,
+                transform,
+                material: MaterialDescriptor {
+                    base_color: material.base_color,
+                    metallic: material.metallic,
+                    roughness: material.roughness,
+                    normal_scale: material.normal_scale,
+                    double_sided: material.double_sided,
+                    thin: material.thin,
+                    transparency: material.transparency,
+                    ..Default::default()
+                },
             },
-        })
+        )
         .collect()
 }
 
 impl Scene for Engine {
     fn create_mesh(&mut self, data: &MeshData<'_>) -> Result<MeshId, Error> {
+        self.meshes += 1;
         Ok(self.state.meshes.insert(Mesh::Static {
+            key: self.meshes,
             vertices: data.vertices.to_vec(),
             indices: data.indices.to_vec(),
         }))
@@ -481,6 +496,7 @@ impl Scene for Engine {
         let mut media = atmosphere(self.state.sky, &settings);
         media.volumetric_fog = None;
         let opaque_objects = objects(&opaque);
+        let keys: Vec<u64> = opaque.iter().map(|p| p.4).collect();
         let transparent_objects = objects(&transparent);
         let values: Vec<Vec<(&str, Value)>> = opaque
             .iter()
@@ -543,6 +559,7 @@ impl Scene for Engine {
             local_shadows: (settings.local_shadows.count > 0).then_some(settings.local_shadows),
             transparent: &transparent_objects,
             programs: Some(ScenePrograms { objects: &programs }),
+            meshes: Some(&keys),
         };
         let images = self
             .frames

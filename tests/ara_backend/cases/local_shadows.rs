@@ -97,6 +97,7 @@ impl Scene {
         reconstruction: Option<Reconstruct>,
     ) -> ForwardScene<'a> {
         ForwardScene {
+            meshes: None,
             objects,
             lighting,
             camera: self.camera,

@@ -14,6 +14,11 @@ use std::path::{Path, PathBuf};
 pub struct ShaderCache {
     root: PathBuf,
     compiler: String,
+    /// The digest of everything a pipeline's key holds besides its own WGSL, entry
+    /// and state: the adapter's sources, the compiler and the binding layout.
+    salt: [u8; 32],
+    /// Pipeline manifests already read, by key.
+    manifests: std::cell::RefCell<std::collections::HashMap<String, CookedPipeline>>,
 }
 impl ShaderCache {
     /// Create an explicit cache directory; no files are written to the user profile.
@@ -33,7 +38,41 @@ impl ShaderCache {
         };
         #[cfg(not(target_os = "macos"))]
         let compiler = String::from("naga30 SPIR-V1.5");
-        Ok(Self { root, compiler })
+        let adapter = format!(
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            include_str!("shader/metal.rs"),
+            include_str!("shader/spirv.rs"),
+            include_str!("shader/mod.rs"),
+            include_str!("shader/skin_interface.rs"),
+            include_str!("shader/particle_interface.rs"),
+            include_str!("shader/mesh_interface.rs"),
+            include_str!("shader/heap_interface.rs"),
+            include_str!("shader/packet_spirv.rs"),
+            include_str!("shader/spv_layout.rs"),
+            include_str!("shader/spv_nonuniform.rs"),
+            include_str!("shader/spv_precise.rs"),
+            include_str!("shader/spv_acceleration.rs"),
+            include_str!("shader/array_access.rs"),
+            include_str!("shader/buffer_arrays.rs"),
+            include_str!("shader/handle_arrays.rs"),
+            include_str!("shader/program.rs"),
+            include_str!("shader/local_shadows.rs"),
+            include_str!("shader/ray_source.rs"),
+            include_str!("cache.rs"),
+            include_str!("../../Cargo.lock")
+        );
+        let salt = Sha256::digest(format!(
+            "renderlab-ara-v2:{adapter}:{compiler}:{}:{}",
+            include_str!("shader/abi.metal"),
+            cooked::binding_layout_hash()
+        ))
+        .into();
+        Ok(Self {
+            root,
+            compiler,
+            salt,
+            manifests: Default::default(),
+        })
     }
     /// Compile only on a cache miss, then use Ara's hashed artifact/PSO loader.
     pub fn pipeline(
@@ -74,40 +113,13 @@ impl ShaderCache {
             pass.metal_version() != (4, 0) || gpu.info().fragment_barycentrics,
             "{pass:?} reads per-vertex attributes, which this device does not support"
         );
-        let source = format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
-            wgsl,
-            include_str!("shader/metal.rs"),
-            include_str!("shader/spirv.rs"),
-            include_str!("shader/mod.rs"),
-            include_str!("shader/skin_interface.rs"),
-            include_str!("shader/particle_interface.rs"),
-            include_str!("shader/mesh_interface.rs"),
-            include_str!("shader/heap_interface.rs"),
-            include_str!("shader/packet_spirv.rs"),
-            include_str!("shader/spv_layout.rs"),
-            include_str!("shader/spv_nonuniform.rs"),
-            include_str!("shader/spv_precise.rs"),
-            include_str!("shader/spv_acceleration.rs"),
-            include_str!("shader/array_access.rs"),
-            include_str!("shader/buffer_arrays.rs"),
-            include_str!("shader/handle_arrays.rs"),
-            include_str!("shader/program.rs"),
-            include_str!("shader/local_shadows.rs"),
-            include_str!("shader/ray_source.rs"),
-            include_str!("cache.rs"),
-            include_str!("../../Cargo.lock")
-        );
-        let key = format!(
-            "{:x}",
-            Sha256::digest(format!(
-                "renderlab-ara-v1:{source}:{}:{state:?}:{}:{}:{}",
-                pass.entry(),
-                self.compiler,
-                include_str!("shader/abi.metal"),
-                cooked::binding_layout_hash()
-            ))
-        );
+        // The key covers the WGSL, its entry and state here, and through the salt the
+        // adapter's sources, the compiler and the binding layout.
+        let mut key = Sha256::new();
+        key.update(self.salt);
+        key.update(format!("{}:{state:?}:", pass.entry()));
+        key.update(wgsl);
+        let key = format!("{:x}", key.finalize());
         let path = self.root.join(&key);
         if !path.join("pipeline.json").exists() {
             let scratch = self
@@ -130,9 +142,14 @@ impl ShaderCache {
                 }
             }
         }
-        let meta: CookedPipeline =
-            serde_json::from_slice(&std::fs::read(path.join("pipeline.json"))?)?;
-        Ok(gpu.create_pipeline(&meta, &path)?)
+        let mut manifests = self.manifests.borrow_mut();
+        let meta = match manifests.entry(key) {
+            std::collections::hash_map::Entry::Occupied(kept) => kept.into_mut(),
+            std::collections::hash_map::Entry::Vacant(empty) => empty.insert(
+                serde_json::from_slice(&std::fs::read(path.join("pipeline.json"))?)?,
+            ),
+        };
+        Ok(gpu.create_pipeline(meta, &path)?)
     }
     fn emit(
         &self,

@@ -807,6 +807,7 @@ fn ara_frame(
             &mut gpu,
             &cache,
             &forward::ForwardScene {
+                meshes: None,
                 objects: &objects,
                 lighting: &fixture.lighting,
                 camera: level.camera(fixture, pose),
@@ -891,9 +892,13 @@ fn game_frames<S: renderlab::engine::Scene>(
     let mut sequence = Vec::new();
     for frame in 0..level.frames as u32 {
         let camera = game::animate(engine, &built, if level.still { 0 } else { frame })?;
+        let rendering = std::time::Instant::now();
         let report = engine.render(&camera)?;
+        let render_ms = (rendering.elapsed().as_secs_f64() * 1e5).round() / 1e2;
         let display = engine.capture()?.rgba8;
         let mut record = trace(engine);
+        record["render_ms"] = render_ms.into();
+        eprintln!("pose {frame}: {record}");
         record["draws"] = report.scene.draws.into();
         record["triangles"] = report.scene.triangles.into();
         sequence.push((hdr(engine)?, display, None, record));
@@ -979,7 +984,15 @@ fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, F
                 .iter()
                 .map(|r| format!("{}: {}", r.call, r.what))
                 .collect();
-            serde_json::json!({ "refusals": refusals })
+            let ms = |d: std::time::Duration| (d.as_secs_f64() * 1e5).round() / 1e2;
+            let times = engine.images().map(|i| i.times).unwrap_or_default();
+            serde_json::json!({
+                "refusals": refusals,
+                "record_ms": ms(times.record),
+                "geometry_ms": ms(times.geometry),
+                "gpu_ms": ms(times.gpu),
+                "finish_ms": ms(times.finish),
+            })
         },
     )?;
     for refusal in engine.refusals() {

@@ -110,6 +110,7 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
             &mut gpu,
             &cache,
             &ForwardScene {
+                meshes: None,
                 objects: &objects,
                 lighting: &lighting,
                 camera,

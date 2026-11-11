@@ -92,6 +92,10 @@ pub fn inputs(pass: super::Pass) -> Result<Vec<ShaderInput>> {
     from_source(pass, pass.source().as_ref())
 }
 pub(super) fn from_source(pass: super::Pass, source: &str) -> Result<Vec<ShaderInput>> {
+    static KEPT: super::memo::Memo<Vec<ShaderInput>> = super::memo::Memo::new();
+    KEPT.get(pass, source, || reflect(pass, source))
+}
+fn reflect(pass: super::Pass, source: &str) -> Result<Vec<ShaderInput>> {
     let mut module = super::parse(source)?;
     super::select(&mut module, pass)?;
     from_module(&module)

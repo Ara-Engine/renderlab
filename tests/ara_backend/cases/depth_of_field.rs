@@ -91,6 +91,7 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
             &mut gpu,
             &cache,
             &ForwardScene {
+                meshes: None,
                 objects: &objects,
                 lighting: &lighting,
                 camera,

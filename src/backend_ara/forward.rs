@@ -61,7 +61,7 @@ use ara_gpu::{
     sampler::{Filter, SamplerDesc},
     texture::{SampleCount, ViewDimension},
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// One opaque object: its own mesh, one instance and untextured material factors.
 pub struct ForwardObject<'a> {
@@ -132,6 +132,20 @@ pub struct SceneTextures<'a> {
     pub anisotropy_clamp: u8,
 }
 
+/// Where one frame's wall time went, as the CPU saw it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameTimes {
+    /// Building the frame before it is submitted: allocation, uploads, shader
+    /// composition, pipelines and recording. Includes `geometry`.
+    pub record: std::time::Duration,
+    /// Of `record`: the scene's mesh buffers and acceleration structures.
+    pub geometry: std::time::Duration,
+    /// From submission until the GPU has finished the frame.
+    pub gpu: std::time::Duration,
+    /// Reading the images back and releasing the frame's resources.
+    pub finish: std::time::Duration,
+}
+
 /// A scene for [`render`], in the terms the wgpu renderer takes it.
 pub struct ForwardScene<'a> {
     /// Draw order; equal depths resolve to the earlier object, as in the mesh pass.
@@ -182,6 +196,12 @@ pub struct ForwardScene<'a> {
     /// for every object. The program shades camera hits, reflection hits and, with
     /// bounce, the radiance cache's cells, as the renderer composes it at each stage.
     pub programs: Option<ScenePrograms<'a>>,
+    /// One identity per object, on traced frames: objects with equal identities are
+    /// one mesh, whose buffers and bottom-level structure are built once and kept on
+    /// the GPU for as long as the frames of a sequence keep naming it (`Frames`). An
+    /// identity must always name the same geometry. `None` uploads and builds every
+    /// object's geometry each frame.
+    pub meshes: Option<&'a [u64]>,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -212,6 +232,8 @@ pub struct SunShadows {
 
 /// Readbacks of one frame, each tightly packed in row order.
 pub struct ForwardImages {
+    /// Where this frame's wall time went.
+    pub times: FrameTimes,
     /// The exposed linear HDR image post reads, as RGBA16F at the scene's size. At
     /// native scale it is `Renderer::try_capture_hdr`'s bytes; below native scale it is
     /// the resolve's upscaled output, which the wgpu renderer does not expose.
@@ -244,10 +266,47 @@ const LUT_SIDE: u32 = 2;
 /// `atmosphere_gpu::FROXEL_TILE`: output pixels per camera-volume cell.
 const FROXEL_TILE: u32 = 8;
 
+/// A mesh on the GPU: its vertex and index buffers, which are also its build inputs,
+/// and its bottom-level structure.
+struct ResidentMesh {
+    vertices: StorageBuffer,
+    indices: StorageBuffer,
+    blas: AccelerationStructure,
+    /// Vertex and index counts, to hold an identity to one geometry.
+    counts: [usize; 2],
+}
+impl ResidentMesh {
+    fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
+        gpu.retire(Resource::AccelerationStructure(self.blas))?;
+        self.vertices.retire(gpu)?;
+        self.indices.retire(gpu)
+    }
+}
+#[derive(Clone, Copy)]
+enum Geometry {
+    Resident(u64),
+    Transient(usize),
+}
+impl Geometry {
+    fn of<'a>(
+        self,
+        resident: &'a BTreeMap<u64, ResidentMesh>,
+        transient: &'a [ResidentMesh],
+    ) -> &'a ResidentMesh {
+        match self {
+            Self::Resident(key) => &resident[&key],
+            Self::Transient(index) => &transient[index],
+        }
+    }
+}
+
 /// What sun shadows add: the scene to query, receivers to query from and the counts.
 struct Traced {
-    /// Vertex and index build inputs with their bottom-level structure, per object.
-    meshes: Vec<(StorageBuffer, StorageBuffer, AccelerationStructure)>,
+    /// Where each object's geometry is: resident in the sequence under its identity,
+    /// or this frame's own at an index of `transient`.
+    geometry: Vec<Geometry>,
+    /// Geometry built for this frame alone.
+    transient: Vec<ResidentMesh>,
     /// Each object's tangent stream, where it has a normal map.
     tangents: Vec<Option<StorageBuffer>>,
     scene: Scene,
@@ -615,6 +674,8 @@ pub struct Frames {
     gi: Option<Cache>,
     /// Temporal reconstruction's history, allocated the same way.
     tr1: Option<History>,
+    /// The meshes the last frame named by identity (`ForwardScene::meshes`).
+    meshes: BTreeMap<u64, ResidentMesh>,
 }
 impl Frames {
     /// Forgets history: the next frame is a first frame after a cut. The cache keeps
@@ -630,6 +691,7 @@ impl Frames {
         *self = Self {
             gi,
             tr1,
+            meshes: std::mem::take(&mut self.meshes),
             ..Self::default()
         };
     }
@@ -640,6 +702,9 @@ impl Frames {
         }
         if let Some(history) = self.tr1 {
             history.retire(gpu)?;
+        }
+        for mesh in self.meshes.into_values() {
+            mesh.retire(gpu)?;
         }
         Ok(())
     }
@@ -661,7 +726,9 @@ impl Frames {
         // The cache outlives a failed frame. Its planner may already have planned that
         // frame (and consumed a pending clear), so it starts from an empty table again.
         let (mut gi, mut tr1) = (self.gi.take(), self.tr1.take());
-        let next = frame(self, &mut gi, &mut tr1, gpu, cache, scene);
+        let mut meshes = std::mem::take(&mut self.meshes);
+        let next = frame(self, &mut gi, &mut tr1, &mut meshes, gpu, cache, scene);
+        self.meshes = meshes;
         if next.is_err() {
             if let Some(cache) = &mut gi {
                 cache.reset();
@@ -675,10 +742,40 @@ impl Frames {
         *self = Self {
             gi: self.gi.take(),
             tr1: self.tr1.take(),
+            meshes: std::mem::take(&mut self.meshes),
             ..left
         };
         Ok(images)
     }
+}
+
+/// A program's reflected `Parameters` layout, composed and validated at the raster
+/// stage as `Renderer::try_create_program` does. Kept by source for the life of the
+/// process: a frame names the same programs every time, and validating one parses the
+/// whole scene shader.
+fn parameter_layout(source: &str) -> Result<Option<crate::program::ParameterLayout>> {
+    type Kept = std::sync::Mutex<BTreeMap<[u8; 32], Option<crate::program::ParameterLayout>>>;
+    static KEPT: std::sync::OnceLock<Kept> = std::sync::OnceLock::new();
+    use sha2::Digest as _;
+    let key: [u8; 32] = sha2::Sha256::digest(source.as_bytes()).into();
+    let table = KEPT.get_or_init(Default::default);
+    if let Some(kept) = table.lock().expect("layout lock").get(&key) {
+        return Ok(kept.clone());
+    }
+    let composed = crate::program::compose(
+        include_str!("../../shaders/scene.wgsl"),
+        source,
+        crate::program::Stage::Raster,
+        crate::program::declares_parameters(source),
+    );
+    let layout = crate::program::analyse("scene program", source, &composed)
+        .map_err(|e| anyhow::anyhow!("scene program: {e}"))?
+        .parameters;
+    table
+        .lock()
+        .expect("layout lock")
+        .insert(key, layout.clone());
+    Ok(layout)
 }
 
 /// One frame from `history` and the cache; returns its images and the history it
@@ -687,10 +784,13 @@ fn frame(
     history: &Frames,
     gi: &mut Option<Cache>,
     tr1: &mut Option<History>,
+    resident: &mut BTreeMap<u64, ResidentMesh>,
     gpu: &mut GpuDevice,
     cache: &ShaderCache,
     scene: &ForwardScene<'_>,
 ) -> Result<(ForwardImages, Frames)> {
+    let started = std::time::Instant::now();
+    let mut times = FrameTimes::default();
     let mut left = Frames {
         count: history.count + 1,
         post_serial: history.post_serial,
@@ -699,6 +799,7 @@ fn frame(
         transforms: scene.objects.iter().map(|o| o.transform).collect(),
         gi: None,
         tr1: None,
+        meshes: BTreeMap::new(),
     };
     ensure!(!scene.objects.is_empty(), "forward frame needs an object");
     ensure!(
@@ -825,17 +926,7 @@ fn frame(
     // `Parameters` block is reflected from it.
     let parameter_layouts = sources
         .iter()
-        .map(|source| {
-            let composed = crate::program::compose(
-                include_str!("../../shaders/scene.wgsl"),
-                source,
-                crate::program::Stage::Raster,
-                crate::program::declares_parameters(source),
-            );
-            Ok(crate::program::analyse("scene program", source, &composed)
-                .map_err(|e| anyhow::anyhow!("scene program: {e}"))?
-                .parameters)
-        })
+        .map(|source| parameter_layout(source))
         .collect::<Result<Vec<_>>>()?;
     for index in 0..scene.objects.len() {
         if let Some(program) = object_program(index) {
@@ -1121,12 +1212,20 @@ fn frame(
         None
     };
     // The scene and the fresh visibility's targets and kernels.
+    let geometry_started = std::time::Instant::now();
     let traced = match &shadow_frame {
         Some(frame) => {
             let usage =
                 ara_gpu::vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
                     | ara_gpu::vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
-            let mut meshes = Vec::new();
+            ensure!(
+                scene.meshes.is_none_or(|m| m.len() == scene.objects.len()),
+                "mesh identities need one entry per object"
+            );
+            let mut geometry = Vec::new();
+            let mut transient = Vec::new();
+            // The identities this frame names, each imported or built once.
+            let mut named = BTreeSet::new();
             let mut tangents = Vec::new();
             let mut instances = Vec::new();
             for (index, object) in scene.objects.iter().enumerate() {
@@ -1142,54 +1241,112 @@ fn frame(
                     }
                     None => None,
                 });
-                let vertex_bytes: Vec<u8> = object
-                    .vertices
-                    .iter()
-                    .flat_map(|v| {
-                        v.position
-                            .into_iter()
-                            .chain(v.normal)
-                            .chain(v.uv)
-                            .chain(v.color)
-                    })
-                    .flat_map(f32::to_le_bytes)
-                    .collect();
-                let vertices = StorageBuffer::with_usage(gpu, &vertex_bytes, usage)?;
-                let indices =
-                    StorageBuffer::with_usage(gpu, bytemuck::cast_slice(object.indices), usage)?;
-                let blas = gpu.create_acceleration_structure(&AccelerationDesc::Triangles {
-                    vertices: vertices.buffer,
-                    vertex_count: object.vertices.len() as u32,
-                    vertex_stride: 48,
-                    indices: indices.buffer,
-                    index_count: object.indices.len() as u32,
-                })?;
-                for buffer in [&vertices, &indices] {
-                    graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
-                }
-                graph.node(
-                    &mut rec,
-                    &[
-                        (Resource::Buffer(vertices.buffer), Access::AsInput),
-                        (Resource::Buffer(indices.buffer), Access::AsInput),
-                        (Resource::AccelerationStructure(blas), Access::AsBuild),
-                    ],
-                )?;
-                rec.push(Command::BuildAccelerationStructure(blas));
+                let key = scene.meshes.map(|m| m[index]);
+                let counts = [object.vertices.len(), object.indices.len()];
+                let kept = key.and_then(|key| resident.get(&key));
+                let place = match (key, kept) {
+                    (Some(key), Some(mesh)) => {
+                        ensure!(
+                            mesh.counts == counts,
+                            "mesh identity {key} named another geometry before"
+                        );
+                        if named.insert(key) {
+                            // Built and read in an earlier frame of the sequence.
+                            for buffer in [&mesh.vertices, &mesh.indices] {
+                                graph.import(Resource::Buffer(buffer.buffer), Access::ShaderRead);
+                            }
+                            graph.import(
+                                Resource::AccelerationStructure(mesh.blas),
+                                Access::AsInput,
+                            );
+                        }
+                        Geometry::Resident(key)
+                    }
+                    _ => {
+                        let vertex_bytes: Vec<u8> = object
+                            .vertices
+                            .iter()
+                            .flat_map(|v| {
+                                v.position
+                                    .into_iter()
+                                    .chain(v.normal)
+                                    .chain(v.uv)
+                                    .chain(v.color)
+                            })
+                            .flat_map(f32::to_le_bytes)
+                            .collect();
+                        let vertices = StorageBuffer::with_usage(gpu, &vertex_bytes, usage)?;
+                        let indices = StorageBuffer::with_usage(
+                            gpu,
+                            bytemuck::cast_slice(object.indices),
+                            usage,
+                        )?;
+                        let blas =
+                            gpu.create_acceleration_structure(&AccelerationDesc::Triangles {
+                                vertices: vertices.buffer,
+                                vertex_count: object.vertices.len() as u32,
+                                vertex_stride: 48,
+                                indices: indices.buffer,
+                                index_count: object.indices.len() as u32,
+                            })?;
+                        for buffer in [&vertices, &indices] {
+                            graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+                        }
+                        graph.node(
+                            &mut rec,
+                            &[
+                                (Resource::Buffer(vertices.buffer), Access::AsInput),
+                                (Resource::Buffer(indices.buffer), Access::AsInput),
+                                (Resource::AccelerationStructure(blas), Access::AsBuild),
+                            ],
+                        )?;
+                        rec.push(Command::BuildAccelerationStructure(blas));
+                        let mesh = ResidentMesh {
+                            vertices,
+                            indices,
+                            blas,
+                            counts,
+                        };
+                        match key {
+                            Some(key) => {
+                                named.insert(key);
+                                resident.insert(key, mesh);
+                                Geometry::Resident(key)
+                            }
+                            None => {
+                                transient.push(mesh);
+                                Geometry::Transient(transient.len() - 1)
+                            }
+                        }
+                    }
+                };
                 // `hardware_shadow_gpu`: one instance per placement, in draw order.
                 let m = object.transform.to_cols_array_2d();
                 instances.push(AccelerationInstance {
-                    geometry: blas,
+                    geometry: place.of(resident, &transient).blas,
                     transform: std::array::from_fn(|i| m[i % 4][i / 4]),
                     custom_index: index as u32,
                     mask: 255,
                 });
-                meshes.push((vertices, indices, blas));
+                geometry.push(place);
+            }
+            // A mesh no object names any more leaves the GPU.
+            let unnamed: Vec<u64> = resident
+                .keys()
+                .copied()
+                .filter(|key| !named.contains(key))
+                .collect();
+            for key in unnamed {
+                if let Some(mesh) = resident.remove(&key) {
+                    mesh.retire(gpu)?;
+                }
             }
             let tlas = Scene::new(gpu, instances)?;
-            let mut uses: Vec<_> = meshes
+            let mut uses: Vec<_> = named
                 .iter()
-                .map(|m| (Resource::AccelerationStructure(m.2), Access::AsInput))
+                .map(|key| &resident[key])
+                .chain(&transient)
+                .map(|m| (Resource::AccelerationStructure(m.blas), Access::AsInput))
                 .collect();
             uses.push((
                 Resource::AccelerationStructure(tlas.acceleration),
@@ -1197,12 +1354,14 @@ fn frame(
             ));
             graph.node(&mut rec, &uses)?;
             rec.push(Command::BuildAccelerationStructure(tlas.acceleration));
+            times.geometry = geometry_started.elapsed();
             let mut bytes = frame.records().to_vec();
             bytes.resize(bytes.len().max(crate::shadows::VIEW_BYTES as usize), 0);
             let records = StorageBuffer::new(gpu, &bytes)?;
             graph.import(Resource::Buffer(records.buffer), Access::HostWrite);
             Some(Traced {
-                meshes,
+                geometry,
+                transient,
                 tangents,
                 scene: tlas,
                 world: Texture::new(gpu, size, Format::Rgba32Float, deferred_path, true)?,
@@ -1807,10 +1966,18 @@ fn frame(
             "traced frames hold TRACED_DRAWS draws"
         );
         arrays.vertices = (0..draws)
-            .map(|i| traced.meshes.get(i).map_or(&deferred.absent, |m| &m.0))
+            .map(|i| {
+                traced.geometry.get(i).map_or(&deferred.absent, |g| {
+                    &g.of(resident, &traced.transient).vertices
+                })
+            })
             .collect();
         arrays.indices = (0..draws)
-            .map(|i| traced.meshes.get(i).map_or(&deferred.absent, |m| &m.1))
+            .map(|i| {
+                traced.geometry.get(i).map_or(&deferred.absent, |g| {
+                    &g.of(resident, &traced.transient).indices
+                })
+            })
             .collect();
         arrays.absent = vec![&deferred.absent; draws];
         arrays.tangents = (0..draws)
@@ -2678,9 +2845,14 @@ fn frame(
         tail = Some((passes, bloom, surface));
     }
 
+    times.record = started.elapsed();
+    let submitted = std::time::Instant::now();
     let point = gpu.submit(rec.finish(), &[])?;
     gpu.wait(point)?;
-    let images = ForwardImages {
+    times.gpu = submitted.elapsed();
+    let finishing = std::time::Instant::now();
+    let mut images = ForwardImages {
+        times,
         hdr: gpu.read(read).context("HDR readback")?,
         samples: samples_read.map(|b| gpu.read(b)).transpose()?,
         surface: reads[0].map(|b| gpu.read(b)).transpose()?,
@@ -2783,10 +2955,8 @@ fn frame(
         traced.receivers.retire(gpu)?;
         traced.kernel.retire(gpu)?;
         traced.scene.retire(gpu)?;
-        for (vertices, indices, blas) in traced.meshes {
-            gpu.retire(Resource::AccelerationStructure(blas))?;
-            vertices.retire(gpu)?;
-            indices.retire(gpu)?;
+        for mesh in traced.transient {
+            mesh.retire(gpu)?;
         }
         for tangents in traced.tangents.into_iter().flatten() {
             tangents.retire(gpu)?;
@@ -2856,5 +3026,6 @@ fn frame(
     }
     clusters.retire(gpu)?;
     gpu.collect()?;
+    images.times.finish = finishing.elapsed();
     Ok((images, left))
 }

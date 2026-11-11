@@ -230,6 +230,7 @@ impl Yard {
                 gpu,
                 cache,
                 &ForwardScene {
+                    meshes: None,
                     objects: &objects,
                     lighting: &self.lighting,
                     camera: *camera,

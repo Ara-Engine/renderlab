@@ -2251,9 +2251,8 @@ without a sun, and more than `TRACED_DRAWS` (256) objects.
 
 - One object is one draw. The wgpu engine draws a mesh-material batch of many
   instances as one draw, so it holds 256 batches where this holds 256 objects.
-- Nothing is resident between frames: every frame uploads its meshes and textures and
-  builds its acceleration structures again. Frame time here says nothing about the
-  layer.
+- Little is resident between frames yet (see "What a frame keeps" below): frame time
+  here is not yet the layer's.
 - The design note's strict mode (the first refusal as an error) is not built.
 
 `the_game_scene_builds_and_renders_through_the_engine_calls` builds the example's scene
@@ -2288,3 +2287,55 @@ ara_frame --backend ara  --scene game --frames 12 --output out/game-ara
 ara_frame --compare out/game-wgpu out/game-ara
 # what both draw: the same with --supported on each
 ```
+
+## What a frame keeps, and its time on Metal
+
+`forward::frame` was written as a test harness: it allocates, uploads, compiles and
+releases everything a frame needs, every frame. Measured on the game scene
+(`ara_frame --backend ara --scene game --supported --frames 12 --size 1280x720`, release
+build, M5 Pro, no validation layer; frames 2 to 12, which agree within 3%):
+
+| | wall time a frame | building the frame | of it, meshes | GPU until done | readback and release |
+|---|---|---|---|---|---|
+| Everything rebuilt | 196 ms | 111 ms | 3.0 ms | 83 ms | 2 ms |
+| Meshes and bottom-level structures kept | 186 ms | 106 ms | 0.03 ms | 78 ms | 1.8 ms |
+| and shader reflection kept | 86 ms | 14 ms | 0.02 ms | 70 ms | 1.8 ms |
+
+The last frame's HDR is byte for byte the same in all three. `ForwardImages::times`
+carries the four numbers and the tool prints them per frame.
+
+**Meshes.** `ForwardScene::meshes` gives each object an identity. `Frames` keeps a named
+mesh's vertex and index buffers and its bottom-level structure for as long as frames
+name it; objects of one identity share one structure, each with its own instance. The
+top-level structure is still built every frame, as the renderer rebuilds its own when
+instances move. The engine names its meshes, so the game scene builds four structures
+once in place of thirty a frame. `named_meshes_stay_on_the_gpu_and_draw_the_same_frames`
+holds a named sequence to the unnamed one byte for byte over five frames in which two
+cards of one identity move, leave and return. Panes and normal-map tangent streams are
+still uploaded every frame.
+
+**Shader reflection.** That was not where the time went. A sampling profile of the
+steady state showed the frame's CPU time in naga: every frame parsed and validated the
+whole composed WGSL of each of its programs (the scene cooks 42 pipelines) to
+reflect their inputs and workgroup sizes, validated each scene program again for its
+parameter layout, and hashed a quarter of a megabyte of adapter source for each
+pipeline's cache key.
+Reflection results are now kept for the life of the process by pass and source digest
+(`shader::memo`), parameter layouts by source, the key's constant part is digested
+once per `ShaderCache`, and pipeline manifests are read once. The cache key's format
+changed with it, so a cache directory cooks its shaders once more.
+
+**What a frame still redoes**, and so what its 86 ms still contains that the
+renderer's frame does not:
+
+- every pipeline object is created from its kept manifest and released;
+- every target, lookup table and record buffer is allocated and released;
+- the atmosphere's lookup tables and the procedural environment are recomputed, which
+  the renderer does only when the sun or the medium changes;
+- the top-level structure is built, and the HDR and displayed images are read back;
+- `render` waits for the GPU to finish each frame, so this is the time of one frame
+  alone, not a frame rate with frames in flight.
+
+Until those are resident too, a timing comparison with wgpu on this scene would
+measure the harness. The first frame of a run takes 13 to 14 s on a fresh cache
+directory: the native shader compile.
