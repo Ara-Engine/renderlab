@@ -45,15 +45,11 @@ impl Program {
             checks: super::Checks::Engine,
         })
     }
-    /// This program with the runtime checks of `program`'s composition, as the wgpu
-    /// renderer creates its module: a caller's program keeps naga's guards, the
-    /// standard program does not (`program_gpu::module`'s `engine_owned`).
-    pub fn checked(mut self, program: &str) -> Self {
-        self.checks = if program == crate::program::STANDARD_PROGRAM {
-            super::Checks::Engine
-        } else {
-            super::Checks::User
-        };
+    /// This program with naga's runtime checks, as the wgpu renderer creates every module
+    /// composed from program text, the bundled standard program's included
+    /// (`PipelineDevice::create_program_module`, P-SPLIT).
+    pub fn checked(mut self) -> Self {
+        self.checks = super::Checks::User;
         self
     }
     pub(crate) fn checks(&self) -> super::Checks {

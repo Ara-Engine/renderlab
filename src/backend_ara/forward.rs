@@ -703,7 +703,7 @@ fn standard_program_uncached(fresh: bool) -> Result<Program> {
     } else {
         scene.to_owned()
     };
-    Program::new(
+    Ok(Program::new(
         Pass::MeshToon,
         crate::program::compose(
             &head,
@@ -712,7 +712,8 @@ fn standard_program_uncached(fresh: bool) -> Result<Program> {
             crate::program::declares_parameters(source),
         )
         .source,
-    )
+    )?
+    .checked())
 }
 
 /// Renders `scene` once, as the first frame after a cut, and reads back what it

@@ -15,14 +15,15 @@ impl Entry {
     /// Programs keep their Surface/Parameters definitions and material hooks.
     pub fn program(self, material: &str) -> Result<Program> {
         let list = matches!(self, Self::List);
-        Program::new(
+        Ok(Program::new(
             if list {
                 Pass::PrimaryShadeList
             } else {
                 Pass::PrimaryShadeTiles
             },
             source(material, list)?,
-        )
+        )?
+        .checked())
     }
 }
 pub(crate) fn source(material: &str, list: bool) -> Result<String> {
@@ -54,7 +55,7 @@ fn hardware_soft_program_uncached(material: &str) -> Result<Program> {
         Pass::PrimaryShadeTiles,
         crate::program::compose(&head, material, crate::program::Stage::Traced, parameters).source,
     )?
-    .checked(material))
+    .checked())
 }
 /// The list entry on the same hardware soft head: one program's share of a frame of
 /// several programs, shading the tiles the binning pass listed for its slot
@@ -72,5 +73,5 @@ fn list_program_uncached(material: &str) -> Result<Program> {
         crate::program::compose_list(&head, material, crate::program::Stage::Traced, parameters)
             .source,
     )?
-    .checked(material))
+    .checked())
 }

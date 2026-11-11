@@ -17,7 +17,7 @@ use ara_gpu::{
 };
 /// Compose the production non-RT transparent material, preserving its authored hooks.
 pub fn program(material: &str) -> Result<Program> {
-    Program::new(Pass::TransparencyGlass, source(material))
+    Ok(Program::new(Pass::TransparencyGlass, source(material))?.checked())
 }
 /// The same material on a ray-traced renderer's head: the pane's sun visibility is a ray
 /// its own fragment traces against the frame's scene, not a lookup in the sun map.
@@ -40,7 +40,7 @@ fn traced_program_uncached(material: &str) -> Result<Program> {
             crate::program::declares_parameters(material),
         ),
     )?
-    .checked(material))
+    .checked())
 }
 pub(crate) fn source(material: &str) -> String {
     crate::renderer::transparency_gpu::glass_source(

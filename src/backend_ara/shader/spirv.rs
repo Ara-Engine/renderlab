@@ -18,10 +18,11 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
 /// module (`pipeline_compilation::create_engine_shader_module` against
 /// `create_shader_module`).
 ///
-/// The renderer creates its own kernels, the standard program's compositions and every
-/// program's cell shading with `ShaderRuntimeChecks::unchecked()`, unless
-/// `RENDERLAB_ENGINE_SHADER_CHECKS` asks otherwise, and only compositions of another
-/// program checked. Unchecked, wgpu-hal writes no loop bounds, no ray-query state
+/// The renderer creates its own kernels with `ShaderRuntimeChecks::unchecked()`,
+/// unless `RENDERLAB_ENGINE_SHADER_CHECKS` asks otherwise, and every module composed
+/// from program text checked: user programs, the bundled standard and toon programs,
+/// glass, cell shading and glass reflected hits (P-SPLIT,
+/// `PipelineDevice::create_program_module`). Unchecked, wgpu-hal writes no loop bounds, no ray-query state
 /// tracking and no integer division checks. Bounds checks are not taken from here:
 /// indices and buffers stay unchecked in both, and image loads follow the device
 /// ([`DeviceGuards`]).
@@ -30,8 +31,8 @@ pub enum Checks {
     /// Engine-owned code: without the three guards.
     #[default]
     Engine,
-    /// A caller's program composed into a camera-pixel stage: naga's guards, as wgpu
-    /// writes them for checked modules.
+    /// A module composed from program text: naga's guards, as wgpu writes them for
+    /// checked modules.
     User,
 }
 /// What the device does for every shader that the SPIR-V would otherwise do itself:

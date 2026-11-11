@@ -105,19 +105,21 @@ impl Entry {
 /// it on a hardware-ray renderer: the soft shading head, the cell stage, and the
 /// direction count the kernels' cold layout uses.
 pub fn shade_program(material: &str, directions: u32) -> Result<Program> {
-    Program::new(
+    Ok(Program::new(
         Pass::GiCache(Entry::ShadeCells),
         shade_source(material, directions)?,
-    )
+    )?
+    .checked())
 }
 /// `material`'s cell shading in a frame of several programs, where it holds `slot`:
 /// `shade_program` shading only the cells whose draw selects that slot
 /// (`gi_cache::mixed_cell_entry`).
 pub fn mixed_shade_program(material: &str, directions: u32, slot: u32) -> Result<Program> {
-    Program::new(
+    Ok(Program::new(
         Pass::GiCache(Entry::ShadeCells),
         shared::mixed_cell_entry(&shade_source(material, directions)?, u64::from(slot)),
-    )
+    )?
+    .checked())
 }
 pub(crate) fn shade_source(material: &str, directions: u32) -> Result<String> {
     let [_, head] =
