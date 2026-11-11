@@ -12,7 +12,7 @@ Phase 1 only, 2026-11-09. Phase 2 begins **only when root declares the overnight
 |---|---|
 | Renderlab preparation base | `f4fcb4cd866f2b5a0e624955492672874b3b6dae`; rebase/merge the completed feature base before phase 2 and rebuild |
 | Ara shipping main | Local `main` and `origin/main` both `1d2d647f0074f9f1f1d7f69a86f6d71b3142c9e3`; detached, read-only checkout at `D:/Coding/renderlab-work/ara1/ara-main` |
-| Ara render-v3 | `1e04fe5dd9d04ede28592597dace9c0c06a15f9a`, branch `t3/render-v3`, original checkout `C:/Users/snowy/.t3/worktrees/snengine/t3-9c4a1f92`; tracked tree clean at inventory time; its existing untracked target is untouched |
+| Ara render-v3 | `9f6be717353dec66d52774df8d019079cb6a687c`, branch `t3/render-v3`, original checkout `C:/Users/snowy/.t3/worktrees/snengine/t3-9c4a1f92`; tracked tree clean at inventory time; its existing untracked target is untouched |
 | Earlier Ara campaign | `D:/AraBuild/render-v3/README.md`, `B3-report.md`, `gates/G1-G6` **unavailable**. Root confirmed they are absent on this machine. No old numeric result is reused as current comparative evidence. Regenerate the needed cases. |
 | Secondary Ara context | `reports/vsm-shadow-proof.html`, `reports/ara-fidelity-strategy.html`, `evidence/samples/{outpost,showcase}`, `docs/research`, render-v3's `docs/plan/rendering-production.md`. Historical reports retain their original identities, scenes, and limitations; their tables are not pooled with new measurements. |
 

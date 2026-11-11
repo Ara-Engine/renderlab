@@ -2899,7 +2899,7 @@ impl Renderer {
 // ---- MP1 per-program cell shading (docs/m7-mp1.md) ----
 /// The draw table's cell-program word for a reflecting program `id` of a mixed frame; 0
 /// marks draws whose program reflects nothing.
-fn cell_selector(id: u64) -> u32 {
+pub(crate) fn cell_selector(id: u64) -> u32 {
     u32::try_from(id + 1).expect("program ids fit the cell selector")
 }
 const CELL_PLACEMENT_SEAM: &str = "    if p==0xffffffffu { return vec4<f32>(0.0,0.0,0.0,1.0); }\n";
@@ -2907,7 +2907,7 @@ const CELL_STORE_SEAM: &str = "        gi_shade_out[slot]=gs_shade(slot);\n";
 /// A mixed frame's cell entry for program `id`: it shades only cells whose draw selects
 /// it, writes "reflects nothing" for draws whose program has no cell shading (every
 /// program's dispatch writes the same value), and leaves other programs' cells to theirs.
-fn mixed_cell_entry(source: &str, id: u64) -> String {
+pub(crate) fn mixed_cell_entry(source: &str, id: u64) -> String {
     assert_eq!(source.matches(CELL_PLACEMENT_SEAM).count(), 1);
     assert_eq!(source.matches(CELL_STORE_SEAM).count(), 1);
     let check = format!(
