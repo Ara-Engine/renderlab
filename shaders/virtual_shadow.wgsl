@@ -438,6 +438,20 @@ struct VsmU32s {data:array<u32>};
 @group(1) @binding(2) var<storage,read> primary_vertices:binding_array<VsmVec4s,PRIMARY_BATCHES>;
 @group(1) @binding(3) var<storage,read> primary_indices:binding_array<VsmU32s,PRIMARY_BATCHES>;
 @group(1) @binding(5) var<storage,read> primary_placements:array<u32>;
+// renderlab: batch info begin
+// Per draw (batch), after the placement words and counted back from the buffer end
+// (primary_ray::batch_word): triangle count, bit 30 an adjacency suffix in the index buffer,
+// bit 31 a skinned previous-vertex stream. Read these here, never from `arrayLength` of a
+// binding-array element: naga 30 leaves that element index undecorated, and a driver may
+// then answer for one element per workgroup (RADV does). Functions only, no constants:
+// composers that carry functions by name (the edge check) pick these up whole.
+fn primary_batch_info(batch:u32)->u32 {
+    return primary_placements[arrayLength(&primary_placements)-1u-batch];
+}
+fn batch_triangles(info:u32)->u32 {return info&0x3fffffffu;}
+fn batch_adjacent(info:u32)->bool {return (info&0x40000000u)!=0u;}
+fn batch_skinned(info:u32)->bool {return (info&0x80000000u)!=0u;}
+// renderlab: batch info end
 
 struct LightingUniform {eye:vec3<f32>,count:u32,environment:vec3<f32>,exposure:f32,map:vec4<f32>};
 struct Light {position_range:vec4<f32>,travel_outer:vec4<f32>,rgb_inner:vec4<f32>,kind:vec4<u32>, source:vec4<f32>};
@@ -454,9 +468,9 @@ fn vsm_triangle(batch:u32,primitive:u32)->array<vec3<f32>,3> {
 }
 // The adjacency suffix of the index buffer (receiver_adjacency.rs): 6T+1 words.
 fn vsm_neighbour(batch:u32,primitive:u32,edge:u32)->u32 {
-    let words=arrayLength(&primary_indices[batch].data);
-    if words%3u!=1u {return VSM_MISSING;}
-    return primary_indices[batch].data[(words-1u)/2u+primitive*3u+edge];
+    let info=primary_batch_info(batch);
+    if !batch_adjacent(info) {return VSM_MISSING;}
+    return primary_indices[batch].data[(batch_triangles(info)+primitive)*3u+edge];
 }
 // N8g walk records (virtual_shadow_records.wgsl, docs/non-rt-n8g.md), N8h's layout
 // (docs/non-rt-n8h.md): per recorded triangle its three positions' bits, 36 contiguous bytes,
@@ -505,8 +519,8 @@ fn vsm_tri_in(rec:vec2<u32>,batch:u32,primitive:u32)->array<vec3<f32>,3> {
 // N8l: the first word of a batch's adjacency suffix (VSM_NONE without one), found once per walk
 // or ring rather than per neighbour, and neighbours read from it.
 fn vsm_adjacency(batch:u32)->u32 {
-    let words=arrayLength(&primary_indices[batch].data);
-    return select(VSM_NONE,(words-1u)/2u,words%3u==1u);
+    let info=primary_batch_info(batch);
+    return select(VSM_NONE,batch_triangles(info)*3u,batch_adjacent(info));
 }
 fn vsm_nb_at(batch:u32,adj:u32,primitive:u32,edge:u32)->u32 {
     if adj==VSM_NONE {return VSM_MISSING;}

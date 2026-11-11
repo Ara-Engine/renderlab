@@ -151,4 +151,6 @@ impl std::fmt::Display for ReloadError {
 impl std::error::Error for ReloadError {}
 
 #[cfg(test)]
+mod array_length_probe_tests;
+#[cfg(test)]
 mod tests;
