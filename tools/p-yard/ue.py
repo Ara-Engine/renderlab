@@ -5,6 +5,8 @@ replaced by a no-op because n8-run already holds the shared GPU slot.
 
     capture SCENE CONFIGS...   native Tonemap-input HDR of every frame from ue_dump_first
     timing SCENE CONFIGS...    the same frames without dumps; CSV GPUTime per frame
+    profile SCENE CONFIGS... --frame N   a timing run with one extra ProfileGPU at frame N
+                               (U0's own is frame 64, the still pose); passes.json per run
     decode SCENE               CPU only, after the lease: HDR dumps to npz (raw dumps deleted)
 
 Settings are U0's (scripts/m7-u0-ue.py BASE_COMMANDS: D3D12 SM6, -RenderOffscreen, manual
@@ -119,7 +121,8 @@ def run(args, capture):
     evs = events(u, b, scene, args.scene)
     n = len(scene["frames"])
     for config in args.configs:
-        out = WORK / args.scene / ("capture" if capture else f"timing-{args.visit}") / config
+        profile = getattr(args, "frame", None)
+        out = WORK / args.scene / ("capture" if capture else f"profile-{profile}" if profile else f"timing-{args.visit}") / config
         if (out / "process.json").exists() and json.loads((out / "process.json").read_text())["exit_code"] == 0:
             continue
         out.mkdir(parents=True, exist_ok=True)
@@ -140,6 +143,11 @@ def run(args, capture):
                       "r.DumpGPU.Buffer 2", "r.DumpGPU.PassParameters 1", f"r.DumpGPU.FrameCount {count}",
                       "r.DumpGPU.Root Tonemap*", f"r.DumpGPU.Directory {(out / 'hdr').as_posix()}"]
             e.append((first - 1, "DumpGPU"))
+        if profile:
+            # U0's attribution settings (RDG events 3, async compute off) round the profiled frame.
+            e += [(profile - 6, "r.RDG.Events 3"), (profile - 4, "r.RDG.AsyncCompute 0"), (profile - 3, "r.Lumen.AsyncCompute 0"),
+                  (profile, "ProfileGPU"), (profile + 4, "r.RDG.AsyncCompute 1"), (profile + 5, "r.Lumen.AsyncCompute 1"),
+                  (profile + 6, "r.RDG.Events 1")]
         e.sort(key=lambda x: x[0])
         started = time.monotonic()
         u.launch_ue(out, config, "static", extra=extra, events=e, frames=n + 8, level=scene["ue_level"])
@@ -154,8 +162,33 @@ def run(args, capture):
                                          fixed_timestep=capture, seconds=time.monotonic() - started))
         print(json.dumps(dict(scene=args.scene, config=config, capture=capture, readback_ok=ok,
                               seconds=round(time.monotonic() - started, 1))), flush=True)
+        if profile:
+            u.save(out / "passes.json", dict(frame=profile, dumps=profile_dumps(out / "ue.log")))
         if not ok:
             raise RuntimeError("readback failed " + str(out))
+
+
+def profile_dumps(log):
+    """Every ProfileGPU table in an Unreal log, in order: rows of (depth, name, exclusive ms,
+    inclusive ms). A new table starts where the tree returns to its first row."""
+    import re
+    dumps, first = [], None
+    for line in log.read_text(encoding="utf-8-sig", errors="replace").splitlines():
+        columns = line.split("┃")
+        if len(columns) < 5:
+            continue
+        times = [(i, m) for i, c in enumerate(columns) if (m := re.search(r"([\d.]+) ms", c))]
+        if len(times) != 2:
+            continue
+        name = columns[times[1][0] + 1].rstrip()
+        row = dict(depth=len(name) - len(name.lstrip()), name=name.strip(),
+                   exclusive_ms=float(times[0][1][1]), inclusive_ms=float(times[1][1][1]))
+        if first is None:
+            first = (row["name"], row["depth"])
+        if (row["name"], row["depth"]) == first:
+            dumps.append([])
+        dumps[-1].append(row)
+    return dumps
 
 
 def decode(args):
@@ -203,11 +236,13 @@ def bench_native(out):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     s = p.add_subparsers(dest="mode", required=True)
-    for mode in ("capture", "timing"):
+    for mode in ("capture", "timing", "profile"):
         q = s.add_parser(mode)
         q.add_argument("scene")
         q.add_argument("configs", nargs="*", default=CONFIGS)
         q.add_argument("--visit", type=int, default=0)
+        if mode == "profile":
+            q.add_argument("--frame", type=int, required=True)
     s.add_parser("decode").add_argument("scene")
     a = p.parse_args()
     if a.mode == "decode":
