@@ -858,3 +858,9 @@ Ara main d2d990f26, Renderlab pin 901c1d2, RTX 4070 SUPER, 1080p, sky map, quiet
 
   This is before P-SKY, which should take part of the shading cost. The rest is the glossy unit's target.
 - **Picture:** complete and correct. Stability mean change is 0.008; 0.1% of 16x16 blocks flicker.
+
+## Non-RT run-to-run determinism on RADV (Linux gate, 2026-11-11)
+
+- **OPEN.** On the AMD Radeon 760M (RADV), two runs of main's game_scene on the non-RT path differ in about 5,300 pixels. On the RTX 4070 SUPER both paths repeat byte-for-byte (P-SKY check, 2026-11-11).
+- **Consequence:** on RADV a non-RT byte comparison can't prove a change is image-neutral. Use a run-to-run control from the same build, and judge on the difference beyond that control.
+- **Next:** find the source. Candidates are GPU atomics whose order varies between runs (GI cache inserts, visibility-buffer resolve, software traversal claims) and driver scheduling.
