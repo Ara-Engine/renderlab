@@ -220,7 +220,8 @@ struct TpEmitter {
                              // w span this step's spawns spread over (s; 0: the step)
     shape:vec4<f32>,         // x 0 sphere, 1 box (yzw half extents), 2 cone (yzw axis)
     velocity_box:vec4<f32>,  // xyz per-axis velocity half range
-    curl:vec4<f32>,          // x frequency, y strength, z this step's burst births
+    curl:vec4<f32>,          // x frequency, y strength, z this step's burst births,
+                             // w phase per second of birth time (0: per spawn ordinal)
     vortex_center:vec4<f32>,
     vortex_axis:vec4<f32>,   // xyz axis scaled by strength
     attractor:vec4<f32>,     // xyz position, w strength
@@ -234,7 +235,8 @@ struct TpEmitter {
     align:vec4<f32>,         // x 0 camera, 1 velocity (y stretch), 2 plane (yzw unit normal)
     flipbook:vec4<f32>,      // x columns, y rows, z frames per second, w 1 at that rate,
                              // 2 once over each life (0: no flipbook)
-    sprite:vec4<f32>,        // x height over width, y 1 to turn each sprite randomly
+    sprite:vec4<f32>,        // x height over width, y 1 to turn each sprite randomly,
+                             // z the emitter's clock at the end of this step (s)
 };
 // A curve's interpolation weights at life fraction t: the key below (index) and the share
 // of the next. Keys hold their end values outside their range.
@@ -286,11 +288,16 @@ fn tp_spawn_offset(seed:ptr<function,u32>) -> vec3<f32> {
     }
     return tp_ball(seed)*tp_emitter.position.w;
 }
+// The curl field's origin (Forces::curl_origin), in the w lanes of velocity_box,
+// vortex_center and vortex_axis.
+fn tp_curl_origin() -> vec3<f32> {
+    return vec3<f32>(tp_emitter.velocity_box.w,tp_emitter.vortex_center.w,tp_emitter.vortex_axis.w);
+}
 // Accelerations beyond gravity: curl noise, vortex and attractor (Ara's formulas).
 fn tp_forces(x:vec3<f32>, phase:f32) -> vec3<f32> {
     var a=vec3<f32>(0.0);
     if tp_emitter.curl.y!=0.0 {
-        let q=x*tp_emitter.curl.x+vec3<f32>(phase);
+        let q=(x-tp_curl_origin())*tp_emitter.curl.x+vec3<f32>(phase);
         a+=tp_emitter.curl.y*vec3<f32>(cos(q.y)-cos(q.z),cos(q.z)-cos(q.x),cos(q.x)-cos(q.y));
     }
     a+=cross(tp_emitter.vortex_axis.xyz,x-tp_emitter.vortex_center.xyz);
@@ -379,8 +386,10 @@ fn tp_incident(world:vec3<f32>) -> vec3<f32> {
         let g=select((age-f)/max(d,1e-6),0.5*age*age,d<1e-4);
         let velocity=v0*e+a*f;
         let position=start+v0*f+a*g;
-        // light.w: the particle's curl-noise phase, from its spawn ordinal (as Ara's).
-        let phase=f32((first+k)%100000u)*0.013;
+        // light.w: the particle's curl-noise phase: its birth time (the emitter's clock less
+        // its age) times the phase rate, or by default its spawn ordinal.
+        var phase=f32((first+k)%100000u)*0.013;
+        if tp_emitter.curl.w!=0.0 { phase=(tp_emitter.sprite.z-age)*tp_emitter.curl.w; }
         p=TpParticle(vec4<f32>(position,age),vec4<f32>(velocity,life),vec4<f32>(0.0,0.0,0.0,phase));
     } else if p.position.w<p.velocity.w {
         let drag=exp(-tp_emitter.acceleration.w*dt);
