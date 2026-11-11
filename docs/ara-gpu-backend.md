@@ -2232,3 +2232,15 @@ the glass pane) run under validation, finite and lit, and the last is written to
 **Not compared with wgpu**: the wgpu game scene cannot run on the Mac, and nothing on
 either Vulkan machine can build this scene on the backend until the engine entry
 exists or this test runs there.
+
+## Renderlab main at 6adfaee
+
+Merged: #33 (the glass reflection source and head, crate-visible; nothing uses them
+yet) and the TR1 native-scale fix. `tr1_native()` compared a float quotient of the
+sample and output sizes with exactly 1, and RADV's division of equal sizes is not
+exactly 1, so its native frames took the upscaling path and lost history at the image
+border and beside silhouettes: the 659 short pixels of
+`reconstruction_accumulates_jittered_samples_into_edge_coverage` on the Radeon, which Renderlab's own test
+(#34) showed on its wgpu path too. The resolve now compares the two integer sizes. The
+port needed no change, and neither did its test, which should now pass on the Radeon;
+that has not been rerun. 78 tests pass on Metal in both validation modes.
