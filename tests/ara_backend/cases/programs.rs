@@ -153,6 +153,7 @@ fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
                     objects,
                     transparent: &[],
                 }),
+                sky_map: None,
             },
         )?;
         Ok(images
@@ -544,6 +545,7 @@ fn two_programs_in_one_frame_each_light_their_own_cells() -> Result<()> {
                         objects: &programs,
                         transparent: &[],
                     }),
+                    sky_map: None,
                 },
             );
             match (image, &mut cards) {

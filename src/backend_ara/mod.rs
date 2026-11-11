@@ -26,6 +26,7 @@ pub mod program_bins;
 pub mod shader;
 pub mod skinning;
 pub mod sky;
+pub mod sky_map;
 pub mod toon;
 pub mod transfer;
 pub mod transparency_depth;

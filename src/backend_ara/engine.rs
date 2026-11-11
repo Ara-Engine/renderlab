@@ -5,27 +5,28 @@
 //! A scene written against [`crate::engine::Scene`] runs on either layer. This one does
 //! not implement everything: a call or setting it cannot honour is recorded as a
 //! [`Refusal`] and the scene goes on without that piece, so a run ends with every gap
-//! named. What the frame itself rejects (no sun, more than `TRACED_DRAWS` objects) is an
+//! named. What the frame itself rejects (more than `TRACED_DRAWS` objects) is an
 //! error from [`Scene::render`].
 use super::{
     cache::ShaderCache,
     forward::{
-        self, ForwardImages, ForwardObject, ForwardScene, ObjectProgram, ObjectTexture,
+        self, ForwardImages, ForwardObject, ForwardScene, NormalMap, ObjectProgram, ObjectTexture,
         ObjectTextures, Primary, ScenePrograms, SceneTextures, SunShadows,
     },
     gi_cache::Indirect,
+    sky_map::SkyMap,
     temporal::Reconstruct,
 };
 use crate::{
     Camera, Decal, EmitterDescriptor, Error, FrameId, FrameReport, Light, Mat4, MaterialDescriptor,
     MeshData, PrimaryVisibility, SoftShadows, Value, Vertex,
     asset::{
-        Asset, Primitive, Sampler, Texture as TextureData, environment::PreparedEnvironment,
-        skin::Influence,
+        Asset, Primitive, Sampler, TangentStream, Texture as TextureData,
+        environment::PreparedEnvironment, skin::Influence,
     },
     engine::{
-        AssetHandles, EmitterId, EnvironmentId, Image, MaterialDesc, MaterialId, MeshId, ObjectId,
-        ProgramId, Quality, Scene, Settings, Sky, Sun, TextureId,
+        AssetHandles, Background, EmitterId, EnvironmentId, Image, MaterialDesc, MaterialId,
+        MeshId, ObjectId, ProgramId, Quality, Scene, Settings, Sky, Sun, TextureId,
         settings::{atmosphere, lighting},
         state::{MaterialEntry, Residency, State},
     },
@@ -71,6 +72,8 @@ enum Mesh {
         key: u64,
         vertices: Vec<Vertex>,
         indices: Vec<u32>,
+        /// Its tangent frame, which a normal-mapped material needs.
+        tangents: Option<TangentStream>,
     },
     Refused,
 }
@@ -89,6 +92,7 @@ struct Material {
     program: Arc<Program>,
     base_color_texture: Option<(Arc<TextureData>, Sampler)>,
     metallic_roughness_texture: Option<(Arc<TextureData>, Sampler)>,
+    normal_texture: Option<(Arc<TextureData>, Sampler)>,
     parameters: Vec<(String, Value)>,
 }
 
@@ -99,7 +103,8 @@ impl Residency for Kept {
     type Texture = Arc<TextureData>;
     type Program = Arc<Program>;
     type Material = Material;
-    type Environment = ();
+    /// Its identity to the frames, and the map.
+    type Environment = (u64, Arc<PreparedEnvironment>);
     type Emitter = ();
     /// Nothing is kept resident between frames, so no batch is ever live.
     type Instances = ();
@@ -130,6 +135,8 @@ pub struct Engine {
     meshes: u64,
     /// Materials created so far: the next one's identity.
     materials: u64,
+    /// Environments created so far: the next one's identity.
+    environments: u64,
     /// Whether frames are read back (`set_readback`).
     readback: bool,
     refusals: Vec<Refusal>,
@@ -138,9 +145,20 @@ pub struct Engine {
     ended: Vec<forward::Frames>,
 }
 
-/// One draw of a frame: its geometry, material, first transform, mesh identity and
-/// every transform it is placed at.
-type Placed<'a> = (&'a [Vertex], &'a [u32], &'a Material, Mat4, u64, &'a [Mat4]);
+/// One draw of a frame.
+#[derive(Clone, Copy)]
+struct Placed<'a> {
+    vertices: &'a [Vertex],
+    indices: &'a [u32],
+    tangents: Option<&'a TangentStream>,
+    material: &'a Material,
+    /// Its first transform.
+    transform: Mat4,
+    /// The mesh's identity to the frames.
+    mesh: u64,
+    /// Every transform it is placed at.
+    placements: &'a [Mat4],
+}
 
 /// Records a refusal once.
 fn note(refusals: &mut Vec<Refusal>, call: &'static str, what: &'static str) {
@@ -166,6 +184,7 @@ impl Engine {
             frame: 0,
             meshes: 0,
             materials: 0,
+            environments: 0,
             readback: true,
             refusals: Vec::new(),
             ended: Vec::new(),
@@ -293,31 +312,36 @@ impl Engine {
                 key,
                 vertices,
                 indices,
+                tangents,
             } = state.meshes.get(batch.mesh)?
             else {
                 continue;
             };
             let material = &state.materials.get(batch.material)?.material;
-            if material.transparency.is_some() {
-                transparent.extend(batch.models.iter().map(|model| {
-                    (
-                        &vertices[..],
-                        &indices[..],
-                        material,
-                        *model,
-                        *key,
-                        std::slice::from_ref(model),
-                    )
-                }));
-            } else if let Some(first) = batch.models.first() {
-                opaque.push((
-                    &vertices[..],
-                    &indices[..],
-                    material,
-                    *first,
-                    *key,
-                    &batch.models[..],
+            if material.normal_texture.is_some() && tangents.is_none() {
+                // As the wgpu renderer refuses the draw.
+                return Err(Error::InvalidInput(
+                    "normal-mapped draw requires tangent stream",
                 ));
+            }
+            let placed = |transform, placements| Placed {
+                vertices,
+                indices,
+                tangents: tangents.as_ref(),
+                material,
+                transform,
+                mesh: *key,
+                placements,
+            };
+            if material.transparency.is_some() {
+                transparent.extend(
+                    batch
+                        .models
+                        .iter()
+                        .map(|model| placed(*model, std::slice::from_ref(model))),
+                );
+            } else if let Some(first) = batch.models.first() {
+                opaque.push(placed(*first, &batch.models[..]));
             }
         }
         Ok([opaque, transparent])
@@ -334,7 +358,13 @@ fn objects<'a>(placed: &[Placed<'a>]) -> Vec<ForwardObject<'a>> {
     placed
         .iter()
         .map(
-            |&(vertices, indices, material, transform, _, _)| ForwardObject {
+            |&Placed {
+                 vertices,
+                 indices,
+                 material,
+                 transform,
+                 ..
+             }| ForwardObject {
                 vertices,
                 indices,
                 transform,
@@ -355,14 +385,16 @@ fn objects<'a>(placed: &[Placed<'a>]) -> Vec<ForwardObject<'a>> {
 
 /// The scene calls, as [`Scene`] documents each; none touches the device.
 impl Engine {
-    /// A mesh with a tangent frame. The tangents are not kept: normal maps are not
-    /// assembled on this layer (a material that asks for one is refused).
+    /// A mesh with a per-vertex tangent frame, which normal-mapped materials need.
+    /// The frame is checked as the wgpu renderer checks it.
     pub fn create_mesh_with_tangents(
         &mut self,
         data: &MeshData<'_>,
-        _tangents: &crate::engine::TangentStream,
+        tangents: &TangentStream,
     ) -> Result<MeshId, Error> {
-        self.create_mesh(data)
+        crate::asset::validate_tangents(data.vertices, data.indices, tangents)
+            .map_err(|_| Error::InvalidInput("invalid unit tangent frame or handedness"))?;
+        self.insert_mesh(data, Some(tangents.clone()))
     }
     /// Releases the mesh once no object uses it; its buffers leave the device with the
     /// next frame that no longer names it.
@@ -410,11 +442,19 @@ impl Engine {
         Ok(())
     }
     pub fn create_mesh(&mut self, data: &MeshData<'_>) -> Result<MeshId, Error> {
+        self.insert_mesh(data, None)
+    }
+    fn insert_mesh(
+        &mut self,
+        data: &MeshData<'_>,
+        tangents: Option<TangentStream>,
+    ) -> Result<MeshId, Error> {
         self.meshes += 1;
         Ok(self.state.meshes.insert(Mesh::Static {
             key: self.meshes,
             vertices: data.vertices.to_vec(),
             indices: data.indices.to_vec(),
+            tangents,
         }))
     }
     pub fn create_texture(&mut self, data: TextureData) -> Result<TextureId, Error> {
@@ -447,6 +487,7 @@ impl Engine {
             transparency: desc.transparency,
             base_color_texture: texture(desc.base_color_texture)?,
             metallic_roughness_texture: texture(desc.metallic_roughness_texture)?,
+            normal_texture: texture(desc.normal_texture)?,
             parameters: desc
                 .parameters
                 .iter()
@@ -454,12 +495,6 @@ impl Engine {
                 .collect(),
             program,
         };
-        if let Some(normal) = desc.normal_texture {
-            // Checked as the others are; the map needs the mesh's tangent stream, which
-            // this layer's meshes do not keep yet.
-            self.state.textures.get(normal.texture)?;
-            self.refuse("create_material", "normal_texture");
-        }
         Ok(self.state.materials.insert(MaterialEntry {
             material,
             program: program_id,
@@ -485,9 +520,22 @@ impl Engine {
         }
         Ok(())
     }
-    pub fn create_environment(&mut self, _: &PreparedEnvironment) -> Result<EnvironmentId, Error> {
-        self.refuse("create_environment", "environment maps");
-        Ok(self.state.environments.insert(()))
+    /// Keeps the map for `Sky::Map`; the first frame that names it uploads it. Maps above
+    /// the wgpu renderer's default policy are refused as it refuses them.
+    pub fn create_environment(
+        &mut self,
+        data: &PreparedEnvironment,
+    ) -> Result<EnvironmentId, Error> {
+        crate::environment::upload_bytes(
+            data,
+            crate::environment::EnvironmentLimits::default(),
+            u32::MAX,
+        )?;
+        self.environments += 1;
+        Ok(self
+            .state
+            .environments
+            .insert((self.environments, Arc::new(data.clone()))))
     }
     pub fn add_asset(&mut self, _: Asset) -> Result<AssetHandles, Error> {
         self.refuse("add_asset", "cooked assets");
@@ -566,11 +614,27 @@ impl Engine {
         Ok(())
     }
     pub fn set_sky(&mut self, sky: Sky) -> Result<(), Error> {
-        if let Sky::Map { map, .. } = sky {
-            // The previous sky stays.
+        if let Sky::Map {
+            map,
+            rotation_y,
+            intensity,
+            background,
+        } = sky
+        {
             self.state.environments.get(map)?;
-            self.refuse("set_sky", "Sky::Map");
-            return Ok(());
+            // As the wgpu engine checks them.
+            if !rotation_y.is_finite() || !intensity.is_finite() || intensity < 0.0 {
+                return Err(Error::InvalidInput(
+                    "sky rotation must be finite and intensity finite and nonnegative",
+                ));
+            }
+            if let Background::ScaledSky(scale) = background
+                && !(scale.is_finite() && scale >= 0.0)
+            {
+                return Err(Error::InvalidInput(
+                    "sky background scale must be finite and nonnegative",
+                ));
+            }
         }
         atmosphere(sky, &self.state.settings).validate()?;
         self.state.sky = sky;
@@ -609,18 +673,28 @@ impl Engine {
         let settings = self.state.settings;
         let [opaque, transparent] = Self::placed(&self.state)?;
         // The frame's texture table covers its opaque objects alone.
-        if transparent
-            .iter()
-            .any(|p| p.2.base_color_texture.is_some() || p.2.metallic_roughness_texture.is_some())
-        {
+        if transparent.iter().any(|p| {
+            let m = p.material;
+            m.base_color_texture.is_some()
+                || m.metallic_roughness_texture.is_some()
+                || m.normal_texture.is_some()
+        }) {
             note(
                 &mut self.refusals,
                 "render",
                 "textures on a transparent material",
             );
         }
+        // The traced frame shades with a sun; a scene without one draws with a sun that
+        // adds no light (its shadow rays are the cost).
+        let sun = self.state.sun.unwrap_or(Sun {
+            travel: crate::Vec3::NEG_Y,
+            illuminance: [0.; 3],
+            // The sun's shadow planning wants a disk.
+            angular_radius: 0.04,
+        });
         let (lit, shadows) = lighting(
-            self.state.sun,
+            Some(sun),
             &self.state.lights,
             self.state.sky,
             settings.exposure,
@@ -634,15 +708,38 @@ impl Engine {
         });
         let mut media = atmosphere(self.state.sky, &settings);
         media.volumetric_fog = None;
+        let sky_map = match self.state.sky {
+            Sky::Map {
+                map,
+                rotation_y,
+                intensity,
+                background,
+            } => {
+                let (key, data) = self.state.environments.get(map)?;
+                Some(SkyMap {
+                    key: *key,
+                    data,
+                    rotation_y,
+                    intensity,
+                    visible: match background {
+                        Background::Sky => Some(intensity),
+                        Background::ScaledSky(scale) => Some(scale),
+                        Background::Color(_) => None,
+                    },
+                })
+            }
+            _ => None,
+        };
         let opaque_objects = objects(&opaque);
-        let keys: Vec<u64> = opaque.iter().map(|p| p.4).collect();
-        let material_keys: Vec<u64> = opaque.iter().map(|p| p.2.key).collect();
-        let placements: Vec<&[Mat4]> = opaque.iter().map(|p| p.5).collect();
+        let keys: Vec<u64> = opaque.iter().map(|p| p.mesh).collect();
+        let material_keys: Vec<u64> = opaque.iter().map(|p| p.material.key).collect();
+        let placements: Vec<&[Mat4]> = opaque.iter().map(|p| p.placements).collect();
         let transparent_objects = objects(&transparent);
         let values: Vec<Vec<(&str, Value)>> = opaque
             .iter()
             .map(|p| {
-                p.2.parameters
+                p.material
+                    .parameters
                     .iter()
                     .map(|(n, v)| (n.as_str(), v.clone()))
                     .collect()
@@ -653,7 +750,7 @@ impl Engine {
             .zip(&values)
             .map(|(p, values)| {
                 Some(ObjectProgram {
-                    source: &p.2.program.source,
+                    source: &p.material.program.source,
                     parameters: values,
                 })
             })
@@ -663,12 +760,15 @@ impl Engine {
             .iter()
             .map(|p| {
                 Some(ObjectProgram {
-                    source: &p.2.program.source,
+                    source: &p.material.program.source,
                     parameters: &[],
                 })
             })
             .collect();
-        if transparent.iter().any(|p| p.2.program.layout.is_some()) {
+        if transparent
+            .iter()
+            .any(|p| p.material.program.layout.is_some())
+        {
             return Err(Error::InvalidInput(
                 "a transparent material's program with Parameters is not assembled",
             ));
@@ -676,14 +776,17 @@ impl Engine {
         let textures: Vec<_> = opaque
             .iter()
             .map(|p| ObjectTextures {
-                base_color: texture(&p.2.base_color_texture),
-                metallic_roughness: texture(&p.2.metallic_roughness_texture),
-                normal: None,
+                base_color: texture(&p.material.base_color_texture),
+                metallic_roughness: texture(&p.material.metallic_roughness_texture),
+                // `placed` refused a map without a tangent stream.
+                normal: texture(&p.material.normal_texture)
+                    .zip(p.tangents)
+                    .map(|(texture, tangents)| NormalMap { texture, tangents }),
             })
             .collect();
-        let textured = textures
-            .iter()
-            .any(|t| t.base_color.is_some() || t.metallic_roughness.is_some());
+        let textured = textures.iter().any(|t| {
+            t.base_color.is_some() || t.metallic_roughness.is_some() || t.normal.is_some()
+        });
         let scene = ForwardScene {
             objects: &opaque_objects,
             lighting: &lit,
@@ -721,14 +824,18 @@ impl Engine {
             meshes: Some(&keys),
             materials: Some(&material_keys),
             instances: Some(&placements),
+            sky_map,
         };
         let images = self
             .frames
             .render(gpu, &self.cache, &scene)
             .map_err(fault)?;
         // The renderer's counts are of its opaque draws; a pane is not among them.
-        let triangles: usize = opaque.iter().map(|p| p.1.len() / 3 * p.5.len()).sum();
-        let instances: usize = opaque.iter().map(|p| p.5.len()).sum();
+        let triangles: usize = opaque
+            .iter()
+            .map(|p| p.indices.len() / 3 * p.placements.len())
+            .sum();
+        let instances: usize = opaque.iter().map(|p| p.placements.len()).sum();
         self.last = Some(images);
         self.frame += 1;
         Ok(FrameReport {

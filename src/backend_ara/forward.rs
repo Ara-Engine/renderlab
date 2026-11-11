@@ -42,6 +42,7 @@ use super::{
     shader::{self, InputKey, InputKind, Pass, Program, SampleType, ShaderInput},
     shadow_raster::ShadowDraw,
     sky::SkyPass,
+    sky_map::{ResidentMap, SkyMap},
     temporal::{History, Reconstruct},
     toon::{MeshAttachments, ToonDraw, ToonPass},
     transfer,
@@ -230,6 +231,10 @@ pub struct ForwardScene<'a> {
     /// renderer `Draw` over its `Instances`). A frame holds `TRACED_DRAWS` draws and
     /// any number of placements. `None` draws each object once at its `transform`.
     pub instances: Option<&'a [&'a [crate::Mat4]]>,
+    /// A prepared environment map that lights the scene in place of the uniform
+    /// environment (`Sky::Map`), kept on the GPU while frames go on naming its key.
+    /// The atmosphere's procedural environment must be off.
+    pub sky_map: Option<SkyMap<'a>>,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -477,6 +482,7 @@ struct Shared<'a> {
     lists: &'a Texture,
     atmosphere: &'a AtmosphereParameters,
     sky: Option<&'a Sky<'a>>,
+    map: Option<&'a ResidentMap>,
     traced: Option<&'a Traced>,
     /// The radiance cache's table where the cache runs; otherwise a zero header binds.
     gi_table: Option<&'a StorageBuffer>,
@@ -548,7 +554,7 @@ impl<'a> Shared<'a> {
                 Input::Image(match (group, binding) {
                     (3, 24) => self.lists,
                     (0, 18) => self.output,
-                    _ => provided(self.sky, self.traced, self.deferred, spec.key)
+                    _ => provided(self.sky, self.map, self.traced, self.deferred, spec.key)
                         .or_else(|| self.images.get(&spec.key))
                         .with_context(|| format!("forward frame cannot supply {}", spec.name))?,
                 })
@@ -562,14 +568,16 @@ impl<'a> Shared<'a> {
         })
     }
 }
-/// The atmosphere's and the shadow passes' images where they ran.
+/// The atmosphere's and the shadow passes' images where they ran, and the sky map's.
 fn provided<'a>(
     sky: Option<&'a Sky<'a>>,
+    map: Option<&'a ResidentMap>,
     traced: Option<&'a Traced>,
     deferred: Option<&'a Deferred>,
     key: InputKey,
 ) -> Option<&'a Texture> {
     match (key.group, key.binding) {
+        (3, 6 | 7 | 9 | 10) if map.is_some() => map?.binding(key.binding),
         (0, 13) | (0, 7) => deferred.map(|d| &d.hit),
         (0, 20) | (0, 21) => deferred.map(|d| &d.tiles),
         (0, 23) => deferred.map(|d| &d.epsilon),
@@ -757,6 +765,8 @@ struct Kept {
     meshes: BTreeMap<u64, ResidentMesh>,
     /// The atmosphere's tables, made by the first frame with an active atmosphere.
     sky: Option<SkyTables>,
+    /// The sky map the last frame named (`ForwardScene::sky_map`).
+    map: Option<ResidentMap>,
     /// The Interactive trace's repair queue: a header, then room for every pixel.
     repairs: Option<StorageBuffer>,
     /// The 2D targets the last frame made and released, for the next frame to take.
@@ -814,6 +824,9 @@ impl Frames {
         }
         if let Some(sky) = self.kept.sky {
             sky.retire(gpu)?;
+        }
+        if let Some(map) = self.kept.map {
+            map.retire(gpu)?;
         }
         if let Some(repairs) = self.kept.repairs {
             repairs.retire(gpu)?;
@@ -925,6 +938,7 @@ fn frame(
         tr1,
         meshes: resident,
         sky: tables,
+        map: kept_map,
         repairs: kept_repairs,
         // Taken out and made active for this frame by `Frames::render`.
         targets: _,
@@ -1132,6 +1146,33 @@ fn frame(
     let mut rec = gpu.begin(Queue::Graphics);
     let mut staging = Vec::new();
 
+    // `Sky::Map`: the map's images, uploaded by the first frame that names it and read
+    // by every frame after it. Another map, or none, releases them.
+    if kept_map
+        .as_ref()
+        .is_some_and(|kept| scene.sky_map.is_none_or(|map| map.key != kept.key))
+    {
+        kept_map.take().context("checked")?.retire(gpu)?;
+    }
+    match (scene.sky_map, kept_map.as_ref()) {
+        (Some(_), Some(kept)) => kept.import(&mut graph),
+        (Some(map), None) => {
+            ensure!(
+                !scene.atmosphere.environment,
+                "a sky map lights the scene in place of the procedural environment"
+            );
+            *kept_map = Some(ResidentMap::upload(
+                gpu,
+                &mut graph,
+                &mut rec,
+                &mut staging,
+                &map,
+            )?);
+        }
+        (None, _) => {}
+    }
+    let map = kept_map.as_ref();
+
     // Lighting group 3: records, the eye/count/environment/exposure uniform and the
     // cluster frame, packed by Renderlab's own writers.
     let packed = PackedLighting::new(scene.lighting, lc::MAX_CLUSTERED as u32)?;
@@ -1217,6 +1258,9 @@ fn frame(
             uniform[32..].copy_from_slice(bytemuck::cast_slice(&[1f32, 0., 1., 5.]));
         }
     }
+    if let (Some(sky_map), Some(kept)) = (scene.sky_map, map) {
+        uniform[32..].copy_from_slice(bytemuck::cast_slice(&kept.words(&sky_map)));
+    }
     // What `update_procedural_environment` keys the procedural map's content on, and
     // the environment uniform's rotation words: the cache re-integrates when they change.
     let field = settings.active() && settings.environment;
@@ -1231,6 +1275,10 @@ fn frame(
             h.update(format!("{:?}", (sun, settings.medium, altitude)).as_bytes());
         }
         h.update(&uniform[32..40]);
+        // A sky map by its identity: another map re-integrates the cache.
+        if let Some(map) = scene.sky_map {
+            h.update(map.key.to_le_bytes());
+        }
         h.finalize().into()
     };
     // `prepare_light_clusters` on a frame whose shading traces local shadows: every
@@ -1705,6 +1753,13 @@ fn frame(
         frame[64..80].copy_from_slice(bytemuck::cast_slice(&[clear[0], clear[1], clear[2], 1.]));
         let sided = placements.iter().any(|p| p & (1 << 30) != 0);
         frame[80..84].copy_from_slice(&u32::from(sided).to_ne_bytes());
+        // Visible sky: misses read the map at the radiance scale whose bits this word
+        // holds (0: off; `primary_miss`).
+        let visible = scene
+            .sky_map
+            .and_then(|m| m.visible)
+            .map_or(0, f32::to_bits);
+        frame[92..96].copy_from_slice(&visible.to_ne_bytes());
         frame[96..112].copy_from_slice(bytemuck::cast_slice(&rect));
         frame[112..116].copy_from_slice(&8u32.to_ne_bytes());
         frame[116..120].copy_from_slice(&8u32.to_ne_bytes());
@@ -1831,7 +1886,12 @@ fn frame(
                 jitter: view.jitter(),
                 exposure: packed.exposure,
                 background: clear,
-                visible_sky: settings.sky,
+                // AT1's sky, or a visible sky map: misses vary per pixel.
+                visible_sky: settings.sky
+                    || scene
+                        .sky_map
+                        .and_then(|m| m.visible)
+                        .is_some_and(|v| v != 0.),
                 pixel_angle: 2.0 * (0.5 * scene.camera.fov_y()).tan() / target[1] as f32,
                 scene_bounds,
                 skin_bounds: None,
@@ -1906,7 +1966,8 @@ fn frame(
                         models: &matrices,
                         normals: &normal_bytes,
                         environment: environment_digest,
-                        field,
+                        // The procedural environment or a sky map.
+                        field: field || map.is_some(),
                         lights: packed.count,
                         // `prepare_gi`'s lighting key: the lights, the panes' sun map,
                         // the environment, the programs, and the draws by program and
@@ -2134,8 +2195,14 @@ fn frame(
                     || (resolve.is_some()
                         && spec.key.group == 0
                         && (41..=47).contains(&spec.key.binding))
-                    || provided(sky.as_ref(), traced.as_ref(), deferred.as_ref(), spec.key)
-                        .is_some()
+                    || provided(
+                        sky.as_ref(),
+                        map,
+                        traced.as_ref(),
+                        deferred.as_ref(),
+                        spec.key,
+                    )
+                    .is_some()
                     || inputs.contains_key(&spec.key)
                 {
                     continue;
@@ -2442,6 +2509,7 @@ fn frame(
         lists: &lists,
         atmosphere: &atmosphere,
         sky: sky.as_ref(),
+        map,
         traced: traced.as_ref(),
         gi_table: gi.map(|(cache, _)| cache.table()),
         buffers: &buffers,

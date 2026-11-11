@@ -99,6 +99,7 @@ fn floor(
             local_shadows: None,
             transparent: &[],
             programs: None,
+            sky_map: None,
         },
     )?;
     Ok(images

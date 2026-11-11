@@ -115,6 +115,7 @@ impl Scene {
             local_shadows,
             transparent: &[],
             programs: None,
+            sky_map: None,
         }
     }
     fn objects(&self) -> [ForwardObject<'_>; 2] {

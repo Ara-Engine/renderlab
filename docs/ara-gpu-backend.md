@@ -2240,13 +2240,26 @@ frame sequence, since the cache and the history are sized by them.
 | `create_emitter` | particle emitters |
 | `set_decals` | decals |
 | `create_skinned_mesh` | skinned meshes (objects spawned with one are not drawn) |
-| `create_material` | `normal_texture` (the trait has no mesh with tangents yet) |
-| `create_environment`, `set_sky` | environment maps and `Sky::Map` (the previous sky stays) |
 | `add_asset` | cooked assets |
 | `render` | textures on a transparent material |
 
-What the frame itself rejects is an error from `render`, not a refusal: a scene
-without a sun, and more than `TRACED_DRAWS` (256) objects.
+What the frame itself rejects is an error from `render`, not a refusal: more than
+`TRACED_DRAWS` (256) objects, and a normal-mapped material on a mesh without a tangent
+stream (as the wgpu renderer refuses that draw). A scene without a sun draws with a sun
+that adds no light.
+
+**Normal maps and sky maps** (`tests/ara_backend/cases/engine_maps.rs`).
+`create_mesh_with_tangents` keeps the checked tangent stream and `normal_texture` the
+map; the frame's traced path does the rest ("Normal maps on the traced frame"). A floor
+mapped with a one-texel normal is the floor turned to that normal within 0.25% at every
+pixel, at either handedness. `create_environment` keeps the prepared map (refused above
+the wgpu renderer's default policy) and the first frame that names it uploads it in the
+wgpu renderer's layout (`sky_map.rs`): the irradiance cube; an independent field's 42 + 23
+knot cubes and its lobe table, or a legacy chain with its banked narrow levels; the
+`lighting.map` words; the visible-sky word; and the cache's environment key and field
+flag. A constant map of radiance L is `Sky::Uniform(L)` within 0.001% at every pixel with direct
+light and without a sun, and within 0.081% with the radiance cache over three frames, on both
+layouts; intensity and `ScaledSky` and half a turn of rotation do what they say.
 
 **Short of the wgpu engine in how it works, not in what it draws:**
 

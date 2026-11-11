@@ -112,6 +112,7 @@ fn fixture_frame(
             local_shadows: None,
             transparent: &[],
             programs: None,
+            sky_map: None,
         },
     )
 }

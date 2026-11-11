@@ -116,6 +116,7 @@ fn a_mirror_floor_shows_the_wall_at_the_metals_reflectance() -> Result<()> {
                     local_shadows: None,
                     transparent: &[],
                     programs: None,
+                    sky_map: None,
                 },
             )?;
             Ok(images
@@ -317,6 +318,7 @@ fn a_uniform_sky_reflects_as_the_untraced_estimate_in_every_band() -> Result<()>
                 local_shadows: None,
                 transparent: &[],
                 programs: None,
+                sky_map: None,
             },
         )?;
         Ok(images

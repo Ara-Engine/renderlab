@@ -130,6 +130,7 @@ fn a_normal_mapped_floor_is_the_floor_tilted_to_that_normal() -> Result<()> {
                 local_shadows: None,
                 transparent: &[],
                 programs: None,
+                sky_map: None,
             },
         )?;
         Ok(images

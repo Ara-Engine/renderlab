@@ -69,6 +69,45 @@ pub fn upload_mip(
     rec.push(Command::EndPass);
     Ok(buffer)
 }
+/// Stage one mip level of the first `layers` layers of an image, tightly packed layer
+/// after layer; retire the returned buffer after submitting its list.
+#[allow(clippy::too_many_arguments)]
+pub fn upload_region(
+    gpu: &mut GpuDevice,
+    graph: &mut Graph,
+    rec: &mut Recorder,
+    image: Image,
+    mip: u32,
+    extent: [u32; 2],
+    layers: u32,
+    bytes: &[u8],
+) -> Result<Buffer> {
+    let buffer = gpu.create_buffer(bytes.len() as u64, vk::BufferUsageFlags::TRANSFER_SRC, true)?;
+    gpu.upload(buffer, bytes)?;
+    graph.import(Resource::Buffer(buffer), Access::HostWrite);
+    graph.node(
+        rec,
+        &[
+            (Resource::Buffer(buffer), Access::CopySource),
+            (Resource::Image(image), Access::CopyDestination),
+        ],
+    )?;
+    rec.push(Command::BeginPass("ara::Upload".into()));
+    rec.push(Command::UploadImageRegion {
+        source: buffer,
+        destination: image,
+        buffer_offset: 0,
+        region: ara_gpu::texture::ImageRegion {
+            mip,
+            origin: [0; 3],
+            extent: [extent[0], extent[1], 1],
+            base_layer: 0,
+            layer_count: layers,
+        },
+    });
+    rec.push(Command::EndPass);
+    Ok(buffer)
+}
 /// Copy an entire image to a correctly sized host buffer and declare its host read.
 pub fn readback(
     gpu: &mut GpuDevice,

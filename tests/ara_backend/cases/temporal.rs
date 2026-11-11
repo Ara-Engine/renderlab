@@ -171,6 +171,7 @@ impl Card {
                     local_shadows: None,
                     transparent: &[],
                     programs: None,
+                    sky_map: None,
                 },
             )?;
             ensure!(

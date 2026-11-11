@@ -249,6 +249,7 @@ impl Yard {
                     local_shadows: None,
                     transparent: &[],
                     programs: None,
+                    sky_map: None,
                 },
             )?;
             let red = images
