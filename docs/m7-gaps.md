@@ -102,18 +102,21 @@ TP1 GPU emitters ([m7-tp1.md](m7-tp1.md) §1.3).
 Islam (2026-11-09): "in both quality defect images you showed I can see noise on the boxes". P-FLAT ([p-flat.md](p-flat.md)) found three causes.
 
 - **Current status (P-FLAT2's fresh measure on main ee361f5, real fire and Fox, frames 8-47).** Crate-top speckle is 0.079 on RT and 0.075 on non-RT. The path-traced reference's own grain is 0.080-0.096, so both paths are at or below it. Main started at 0.759 (RT) and 0.278 (non-RT); P-FLAT's lamp fix and P-NSQ's non-RT shadow fix brought them down. Crate sides are 0.044 on RT and 0.024 on non-RT.
-- **OPEN, improvement beyond the reference grain:** P-FLAT2's exact light-range history ([p-flat2.md](p-flat2.md), branch `t3/p-flat2` 68a902b, NOT merged) cuts crate tops to 0.057 on RT and 0.054 on non-RT, with flicker slopes within noise of main's. Its final silhouette build was never compiled, and none of its acceptance tests ran (RF, Q-walk, SK1, MQ1, MV1, object motion, lib), because outside builds blocked the host. `light_budget` stays 0. The plan is in D:/Coding/renderlab-work/p-flat2/plans/w2.json.
+- **P-FLAT2's exact light-range history** (branch `t3/p-flat2` 68a902b, never merged) is superseded by P-RELIT ([p-relit.md](p-relit.md)), which ships its swing restart with an exposure-referred budget: crate tops 0.073 on RT and 0.067 on non-RT with the per-pixel shadow budget (0.059 and 0.055 while every pixel still traced 64 rays).
 
 - **Fixed (P-FLAT): the courtyard's spot lamp sat inside its own iron post.** 74-82 % of its source disk was blocked for every receiver, so every spot-lit pixel was a permanent penumbra that LC2's four rays sampled as grain. The arch light also clipped its bulb. Both lamps now clear their fixtures (`examples/game_scene.rs`; `--diag lamp=post` restores the old placement).
   - RT crate tops in flight: speckle 0.759 → 0.079, sides 0.270 → 0.044, arch 0.059 → 0.015.
   - The crates get the spot's light: both paths agree within 1.6 codes, where they differed by 6.8.
 - **Partly fixed (P-FLAT-TR1, [p-flat-tr1.md](p-flat-tr1.md)): TR1's two history resets in this scene.**
   - **The walking character's rejection box is fixed.** With one shadowed sun, `tr1_caster_shadow` tests receivers against the swept bounds' own shadow, a conservative disk-wide test, instead of a world AABB stretched along the sun. Frames that drop history somewhere use the 64-ray restart budget. SK1's fixture shows no trailing shadow on either path. RF1-RF10 and the Q-walk stay byte-identical to main.
-  - **OPEN, quality defect: a flickering local light still restarts every pixel every frame** (`Reconstruction::light_budget` 0, main's behaviour). In the courtyard that keeps every flight frame a restart, so the crates keep main's numbers (RT tops 0.079, non-RT 0.278).
-  - **What the opt-in budget does and why it isn't the default.** A positive `light_budget` continues history under MQ1's 3x3 box, capped near the changed light from its distance, range and intensity change alone (B'). It improves every crop: RT crate tops 0.079 to 0.058-0.063, non-RT 0.278 to 0.198-0.220, and the wall, ground and arch on both paths. But it follows the fire's flicker slightly less than main does (wall slope 0.980 vs 0.985 RT, 0.980 vs 0.982 non-RT; ground 0.988 vs 0.996 and 0.989 vs 0.994), so root's bar keeps it off.
-  - **Remaining lag source and fix directions.** On frames where the flicker barely changes, the cap allows history that still holds earlier intensities. Two directions:
-    - size the cap from the light's change since the history's oldest sample, not since the last frame;
-    - restart within a fixed fraction of the light's range.
+  - **FIXED (P-RELIT, [p-relit.md](p-relit.md)): a flickering local light no longer restarts the frame.** A changed light restarts only its restart sphere: the points where its swing since the histories began could leave more than `Reconstruction::light_budget` (0.05 exposed lux) of stale light. Pixels inside follow the light exactly; the rest of the frame accumulates. The 64-ray restart shadow budget is per pixel on both paths: only receivers TR1 will restart trace it.
+    - Game scene, 1080p, moving, fire flickering: non-RT 92.6 → 70.3 ms (steady-fire floor 68-71), RT 30.2 → 27.8 (floor 27). With the Fox walking: non-RT 100.0 → 79.8, RT 33.5 → 32.6.
+    - Flicker slope on the fire-lit wall and ground equals main's (RT 0.984 / 0.994, non-RT 0.986 / 0.994). Held-camera step away from the brazier falls to the steady-light floor (RT 0.370 → 0.299 codes, non-RT 0.435 → 0.350). Crate tops 0.079 → 0.073 RT, 0.074 → 0.067 non-RT.
+    - A light switched off leaves no ghost (0 pixels over 8 codes above the no-history control on both paths).
+  - **OPEN, by design: sub-budget flicker is smoothed on a held camera.** Outside the sphere the fire's remaining flicker (0.27 codes RMS a frame on the arch) passes at 82 % on a held camera and 99.7 % in flight. `light_budget` 0.02 passes 95 % and restarts more of the frame.
+  - **OPEN (owner: root; a follow-up unit on the same per-light zones): a moving local light still restarts every pixel every frame**, as on main (its position is in the history key), with the 64-ray budget frame-wide: a carried torch gets no accumulation. The restart spheres extend to it directly: restart the light's old and new spheres at full swing. Not built.
+  - **OPEN: inside a restart sphere nothing accumulates while the light changes**, as on main: no temporal anti-aliasing and raw local-shadow noise within about 6 m of the courtyard fire. Following the light without restarting needs the light's contribution kept apart from the rest of the history (a per-pixel fit of colour against the known candela); not built.
+  - **Not run for P-RELIT:** RF1-RF10 and Q-walk byte identity, `gpu_object_motion`, quarry capture hashes. A steady-fire game scene is byte-identical to main at 1080p on both paths.
 - **OPEN (owner P-NSQ): the non-RT sun lookup leaves a fixed per-receiver pattern on flat surfaces.** It measures 0.631 on the crates on a still camera and 0.025 with the sun off. Its residual is frame-invariant (correlation 0.995 across 150 frames), so TR1 cannot average it. This is the non-RT sun-penumbra gap below, measured on a flat material.
 - **Reference:** the matched courtyard (dusk sun, uniform sky, no local lights or character) against a 16,384-spp path trace. RT crate tops sit at or below the reference's own grain (0.021-0.045 against 0.080-0.096, RMS 1.3 codes). Non-RT is clean in flight but 0.509 on a still camera (RMS 4.5 codes). The path tracer has no point or spot lights, so local-light quality has no path-traced reference yet.
 - The ground, arch and wall stay at 0.006-0.06 on RT.
@@ -908,3 +911,52 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
 2. Merge the trust policy. The numbers above support it. Before merging: fix the census tool, whose `cpu_shader_compile_structure` test fails on the branch because it composes the `program-bins` module without the `PRIMARY_BATCHES` constant (a tool fault, three variants), and merge main (the branch is based on a97d663).
 3. The kernel split itself was not started. P-SKY took the game scene's cold first image from about 183 s to about 10 s, so it is no longer urgent; the remaining cold cost is the per-kernel NVIDIA compile (P-PIPE).
 4. `docs/p-split.md` has empty Census and Cold start sections and no result summary.
+
+## arrayLength of a buffer-array element on RADV (ara-gpu backend finding, 2026-11-11)
+
+**CONFIRMED on the wgpu renderer** (PR #30 at 904e147, Radeon 760M, RADV, Mesa 26.0.8): first words [100, 101, 102, 103] correct, lengths [3, 3, 3, 3] against bounds [3, 13, 6, 22]. **Call sites FIXED on main (9fc3ad0, decision M8-ARRAY-LENGTH):** per-draw batch words replace every `arrayLength` of a buffer-array element. Still OPEN: naga's bounds checks (below), the upstream fix (gfx-rs/wgpu issue 10920), and the Radeon reruns of the two RADV-only shadow tests and of the still-camera history-weight test.
+
+- **Fault.** naga 30.0.1 decorates `heap[i].data[j]` NonUniform, but emits `OpArrayLength` on `heap[i].data` with no decoration (`write_runtime_array_length` never adds one). The result is then undefined when the index differs within a workgroup. RADV reads one element's length for the whole workgroup; NVIDIA reads per invocation. The backend's adapter now adds the decoration; the wgpu renderer goes through the same naga path.
+- **Why nothing has shown it.** Every mesh in the compared scenes has the same kind of index buffer.
+- **Call sites that decide rendering per pixel** (root's grep; every `arrayLength` on an indexed binding):
+  - `shaders/primary_trace.wgsl:33` `primary_edge_neighbour`: adjacency by `arrayLength(&primary_indices[batch].data) % 3`.
+  - `shaders/virtual_shadow.wgsl:450` `vsm_neighbour` and `:501` `vsm_adjacency`: the same test.
+  - `src/visibility_buffer.rs:259`: the same test, composed into the visibility-buffer kernel.
+  - `shaders/object_motion.wgsl:15` `motion_skinned` and `shaders/temporal_resolve.wgsl:101` `tr1_skinned`: skinned or static by the lengths of `motion_previous_vertices[batch]` and `tr1_vertices[batch]`. A workgroup covering skinned and static meshes would judge them all by one.
+  - Not affected (single buffers): `object_motion.wgsl:7`, `virtual_shadow_cache.wgsl`, `reference_path_tracer.wgsl`.
+- **naga's own bounds checks share the fault (read from naga 30.0.1's source, not yet tested).** In a checked module every `heap[i].data[j]` is clamped to the array's length, and `write_sequence_length` gets that length from the same `write_runtime_array_length`. So on RADV a checked module would clamp `j` by another element's length, and no change to our WGSL removes that. Engine modules compile unchecked; modules composed from program text are checked for any non-standard program, and P-SPLIT's parked trust-policy change would check all of them. The fix therefore has two parts: carry the flags in data (below), and keep element indexing off naga's clamp on RADV until naga is fixed (test first: PR #30's probe with an index past element 0's length in a checked module).
+- **RADV-only shadow failures above.** Possibly related, not shown: both failing tests draw a receiver and a separate blocker mesh, and the sun-shadow kernels read adjacency this way. Whether those two meshes differ in index-buffer kind, and which kernel the tests run, is not traced yet.
+- **Next.**
+  1. The backend's author is opening a PR with one ignored GPU test that reproduces it through wgpu (four buffers of different lengths, indexed differently within one workgroup). The Linux gate runs it on the Radeon.
+  2. If it fails there, root fixes it ahead of P-GLOSSY: pass the adjacency flag (or the length) and the skinned flag in the placement or draw record, so nothing that decides rendering reads a buffer-array element's `arrayLength`; then rerun the two RADV shadow tests.
+  3. Report the missing decoration to naga upstream.
+
+## Specks after a game-scene cut (root, 2026-11-11)
+
+**OPEN (owner: root, a clamp experiment; the cut unit at the latest). Cause found: GI cache fireflies in newly seen cells, on both paths.** Game scene with the fox, 720p, cut at frame 24, main 575596b, RTX 4070 SUPER. After the cut the open ground shows soft bright blotches a few pixels across (GI-cell sized), not single pixels.
+
+Pixels on the open ground more than 10 codes above their 21-pixel median:
+
+| Frame | 23 | 24 (cut) | 25 | 26 | 28 | 30 | 34 | 38 | 39 |
+|---|---|---|---|---|---|---|---|---|---|
+| Non-RT | 122 | 230 | 603 | 1080 | 1217 | 1035 | 613 | 517 | 517 |
+| Non-RT, GI off | 118 | 210 | 212 | 137 | 73 | 31 | 1 | 0 | 0 |
+| RT | 122 | 235 | 580 | 1039 | 1134 | 934 | 538 | 458 | 450 |
+| RT, GI off | 120 | 217 | 180 | 114 | 42 | 3 | 0 | 0 | 0 |
+
+- Reflections off and particles off change nothing after the cut (identical counts to the default).
+- The blotches peak four frames after the cut and are still there fifteen frames later, at about 40% of the peak and no longer falling.
+- `shaders/gi_cache.wgsl` has no clamp on a rare bright sample entering a young cell. The scene's small bright emitters (bulbs, the fire) are the likely source; see the emission-firefly note under GI.
+- **Next:** clamp a new sample against the cell's history or its neighbours' mean while the cell is young, and check the same sequence plus the quarry cut. Unreal's cut shows no such blotches, so this is a visible loss on cuts.
+
+## RT cost of a small transparent surface (Ara integration thread, Showcase, 2026-11-11)
+
+**OPEN, cause not known.** Showcase through the Ara bridge, RTX 4070 SUPER, 1080p, RT path, Renderlab pin a0094f6a6e4. Two lens-sized objects sent through transparency (the binoculars' glass and a lantern's glass; both turned out to be opaque and are now classified so) raised `visibility` from about 4.0 ms to 6.6-7.2 ms and `transparency` from 0.54 to 1.47 ms: about 4 ms a frame for two small surfaces. The base's own `visibility` moves 1.5 ms between identical runs, so one small transparent object costs roughly 1.5-3 ms of RT visibility plus 0.5 ms of transparency. Real glass will pay that.
+
+- **Reproduction:** Showcase with those two materials forced to BLEND, pass log on, against the same run with them opaque.
+- **Why, in one line:** not established. The cost lands in the visibility pass, not in the transparency pass, which suggests a frame-wide change in how every ray is traced once any transparent draw exists, not work proportional to the glass's pixels.
+- **First checks, cheapest first:**
+  1. `primary_frame.sided.x` (`shaders/primary_trace.wgsl:107`): one single-sided draw switches every primary ray from `RAY_FLAG_FORCE_OPAQUE` to the candidate loop. If the transparent draws are what set it on Showcase, that is the cause and the fix is per-instance opacity flags.
+  2. Whether transparent draws enter the TLAS as non-opaque casters, so every sun-shadow ray pays candidate handling.
+  3. Whether the cost follows the glass's screen coverage at all (move the camera until the glass is off screen).
+- **When:** after the non-RT work, or sooner if check 1 or 2 confirms a frame-wide switch.

@@ -1,5 +1,7 @@
 # Non-RT path: the same rays, traced in software
 
+> **No longer binding, 2026-11-11.** Decisions 1 (the same rays traced in software) and 3 (shadow maps, hybrids and distance fields rejected as core shadows) no longer constrain the non-RT path; its architecture is an engineering call judged on the final image and cost. See [milestone-8.md](milestone-8.md#non-rt-goal-2026-11-11). The rest of this document is evidence.
+
 Design decision, 2026-11-06, base `3bf0558`. It answers the standing rule in AGENTS.md: win with and without hardware ray tracing, with the same film-quality gates on both paths. CPU reading and arithmetic only. There was no prototype, GPU run, build, window or Unreal launch. Labels: **M** is measured in the cited records; **I** is an inference or estimate.
 
 ## Decisions

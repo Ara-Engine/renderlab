@@ -23,6 +23,7 @@
 //! that keeps its sun basis through small turns, and a rolling refresh that looks up one
 //! trace tile in sixteen per frame while the camera, casters and settings hold still.
 // PC1: only the device type changes; pipeline creation uses the shared cache.
+use super::primary_ray_gpu::temporal_reconstruction::ZONES_BYTES;
 use super::*;
 use crate::pipeline_compilation::PipelineDevice;
 use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
@@ -41,16 +42,21 @@ const MAX_RECTS: usize = 16;
 const PAGE: u32 = 128;
 /// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen light-space and sixteen
 /// screen rectangles, the TRACED_DRAWS per-batch horizon offsets and (first record, recorded) pairs,
-/// N8e's uvec4 and P-NSQ's sampling uvec4 (`SAMPLING_OFFSET`).
+/// N8e's uvec4, P-NSQ's sampling uvec4 (`SAMPLING_OFFSET`) and TR1's restart zones
+/// (`ZONES_OFFSET`).
 const FRAME_BYTES: usize = 6 * 16
     + 2 * 16
     + MAX_LEVELS * 32
     + 2 * MAX_RECTS * 16
     + 12 * crate::TRACED_DRAWS as usize
     + 16
-    + 16;
+    + 16
+    + ZONES_BYTES;
 /// `VsmFrame::nsq`: direction batches and the frame's sequence rotation (docs/p-nsq.md).
-const SAMPLING_OFFSET: u64 = (FRAME_BYTES - 16) as u64;
+const SAMPLING_OFFSET: u64 = ZONES_OFFSET - 16;
+/// `VsmFrame::zones` (P-RELIT): TR1's restart zones, where a receiver evaluates the restart
+/// count instead of the frame's batches.
+const ZONES_OFFSET: u64 = (FRAME_BYTES - ZONES_BYTES) as u64;
 /// Per-draw `VsmHorizonPass` uniforms at the minimum dynamic-offset alignment.
 const HORIZON_STRIDE: u64 = 256;
 /// `VsmPass` uniforms (a clip level or a mip index) at the minimum dynamic-offset alignment.
@@ -616,12 +622,14 @@ pub(super) fn shader_source() -> String {
         .map(|path| std::fs::read_to_string(path).unwrap());
     #[cfg(not(test))]
     let variant: Option<String> = None;
+    // P-RELIT: the restart-zone tests over VsmFrame's copy (vsm_prepare's batches).
     format!(
-        "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
+        "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}\n{}",
         crate::TRACED_DRAWS,
         variant
             .as_deref()
-            .unwrap_or(include_str!("../shaders/virtual_shadow.wgsl"))
+            .unwrap_or(include_str!("../shaders/virtual_shadow.wgsl")),
+        super::primary_ray_gpu::temporal_reconstruction::zones_source("vsm.zones")
     )
 }
 
@@ -1407,12 +1415,13 @@ impl Renderer {
 
     /// P-NSQ: after TR1 chose this frame's shadow budget (`prepare_reconstruction`), the
     /// Exact and Surface lookups evaluate it in batches of eight, like RT Interactive's rays.
-    /// Frames without TR1, Map and Hybrid keep one batch.
+    /// Frames without TR1, Map and Hybrid keep one batch. P-RELIT: they also take TR1's
+    /// restart zones, where a receiver evaluates the restart count instead.
     pub(super) fn prepare_virtual_sampling(&mut self) {
-        let Some(rays) = self
+        let Some((rays, restart_rays, zones)) = self
             .reconstruction_state
             .as_ref()
-            .map(|r| r.plan.shadow_rays)
+            .map(|r| (r.plan.shadow_rays, r.plan.restart_rays, r.zones))
             .filter(|_| self.reconstruction_frame.is_some())
         else {
             return;
@@ -1432,14 +1441,18 @@ impl Renderer {
         let batches = (rays / 8).max(1);
         self.queue
             .write_buffer(&r.frame, SAMPLING_OFFSET, &batches.to_ne_bytes());
-        self.uploads.shadows += 4;
-        // P-S4C: the occluder gather serves the frames where it beats the march.
+        self.queue.write_buffer(&r.frame, ZONES_OFFSET, &zones);
+        self.uploads.shadows += 4 + ZONES_BYTES as u64;
+        // P-S4C: the occluder gather serves the frames where it beats the march. It evaluates
+        // the frame's batches for every pixel, so it sits out frames whose restart zones
+        // evaluate more (non-default budgets only: its frames have eight batches or more).
         let pixels = u64::from(r.size[0]) * u64::from(r.size[1]);
         let disk = self.shadows.settings.directional_disk_angle;
         let state = self.virtual_shadows.as_mut().unwrap();
         if let Some(s4) = state.s4.as_mut() {
-            s4.frame =
-                state.stats.occluder_gather_ready && sunvis_s4::chosen(batches, pixels, disk);
+            s4.frame = state.stats.occluder_gather_ready
+                && restart_rays == 0
+                && sunvis_s4::chosen(batches, pixels, disk);
             state.stats.occluder_gather_frame = s4.frame;
         }
     }
@@ -2327,6 +2340,8 @@ impl Renderer {
         for value in [1, rotation, truncated, s.walk_steps] {
             frame.extend_from_slice(&u32::to_ne_bytes(value));
         }
+        // P-RELIT: no restart zones until prepare_virtual_sampling has TR1's.
+        frame.extend_from_slice(&[0; ZONES_BYTES]);
         debug_assert_eq!(frame.len(), FRAME_BYTES);
         let state = self.virtual_shadows.as_mut().unwrap();
         let casters = state.casters.as_ref().unwrap();
@@ -2906,18 +2921,27 @@ mod tests {
                 .offset as u64,
             SAMPLING_OFFSET
         );
-        assert_eq!(FRAME_BYTES, 928 + 12 * crate::TRACED_DRAWS as usize);
-        // P-NSQ: the sampling uvec4 is VsmFrame's last member, after N8e's.
-        assert_eq!(SAMPLING_OFFSET, FRAME_BYTES as u64 - 16);
+        assert_eq!(
+            FRAME_BYTES,
+            928 + 12 * crate::TRACED_DRAWS as usize + ZONES_BYTES
+        );
+        // P-NSQ: the sampling uvec4 follows N8e's; P-RELIT: TR1's zones are the last member.
+        assert_eq!(SAMPLING_OFFSET, (FRAME_BYTES - ZONES_BYTES) as u64 - 16);
+        let zones = members.last().unwrap();
+        assert_eq!(zones.name.as_deref(), Some("zones"));
+        assert_eq!(u64::from(zones.offset), ZONES_OFFSET);
         let source = shader_source();
         let n8e = source.find("    n8e:vec4<u32>,").unwrap();
         let nsq = source.find("    nsq:vec4<u32>,").unwrap();
-        assert!(
-            n8e < nsq
-                && source[nsq..]
-                    .trim_start_matches("    nsq:vec4<u32>,")
-                    .trim_start()
-                    .starts_with("};")
+        assert!(n8e < nsq);
+        // Both modules declare the same Tr1Zones.
+        let declared = |text: &str| {
+            let at = text.find("struct Tr1Zones {").unwrap();
+            text[at..at + text[at..].find("};").unwrap()].to_owned()
+        };
+        assert_eq!(
+            declared(&source),
+            declared(include_str!("../shaders/primary_rays.wgsl"))
         );
         // The encoder reads the lookup schedule's defaults from the shader.
         assert_eq!(schedule_defaults(&shader_source()), (4096, true));

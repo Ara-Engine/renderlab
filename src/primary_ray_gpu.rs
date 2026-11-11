@@ -7,7 +7,9 @@
 // PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
 use crate::pipeline_compilation::PipelineDevice;
-use crate::primary_ray::{TRACED_DRAWS, TRACED_FEATURES, placement_table, traced_limits};
+use crate::primary_ray::{
+    TRACED_DRAWS, TRACED_FEATURES, batch_word, placement_table, placement_words, traced_limits,
+};
 use crate::shadow_plan::Bounds;
 
 #[path = "film_accumulation.rs"]
@@ -23,10 +25,13 @@ pub(crate) mod program_lists;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
-/// `scene_pixels` rectangle, the sampling words and the reflection bands
-/// (`ReflectionSettings::frame_words`).
+/// `scene_pixels` rectangle, the sampling words, the reflection bands
+/// (`ReflectionSettings::frame_words`) and TR1's restart zones (`FRAME_ZONES`).
 // TP2 integration: post-processing shares this ABI instead of freezing its byte size.
-pub(super) const FRAME_BYTES: usize = 144;
+pub(super) const FRAME_BYTES: usize = FRAME_ZONES + temporal_reconstruction::ZONES_BYTES;
+/// `PrimaryFrame::zones`: written by `prepare_reconstruction` on reconstructed frames, zero
+/// otherwise.
+pub(super) const FRAME_ZONES: usize = 144;
 /// Pixels per trace workgroup; the WGSL workgroup sizes must match.
 pub(super) const TRACE_TILE: [u32; 2] = [8, 4];
 /// Pixels per shading workgroup; the WGSL workgroup size must match.
@@ -1763,18 +1768,27 @@ impl Renderer {
                 storage,
             );
             let normals = Buffer::new(self, "primary placement normals", instance_bytes, storage);
-            let table = Buffer::new(
-                self,
-                "primary placement draws",
-                (placements.len().max(1) * 4) as u64,
-                storage,
-            );
-            let words: Vec<u8> = placements.iter().flat_map(|v| v.to_ne_bytes()).collect();
-            if !words.is_empty() {
-                self.queue.write_buffer(&table.value, 0, &words);
-                uploads.shadows += words.len() as u64;
-                uploads.write_calls += 1;
-            }
+            // A skinned draw binds its own previous stream, one padding vec4 longer than
+            // the current one; a static draw aliases the current stream.
+            let batches: Vec<u32> = draws
+                .iter()
+                .map(|d| {
+                    let skinned = d
+                        .mesh
+                        .skin
+                        .as_ref()
+                        .is_some_and(|s| s.previous.size() > d.mesh.vertex.size());
+                    batch_word(d.mesh.index.size() / 4, skinned)
+                })
+                .collect();
+            let words: Vec<u8> = placement_words(&placements, &batches)
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect();
+            let table = Buffer::new(self, "primary placement draws", words.len() as u64, storage);
+            self.queue.write_buffer(&table.value, 0, &words);
+            uploads.shadows += words.len() as u64;
+            uploads.write_calls += 1;
             let state = self.primary.as_ref().unwrap();
             let absent: &wgpu::Buffer = &state.absent.as_ref().unwrap().value;
             let vertices = padded(draws.iter().map(|d| &**d.mesh.vertex), absent);

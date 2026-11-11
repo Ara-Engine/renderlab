@@ -1,6 +1,6 @@
 # Renderlab
 
-Provisional name for an independent Rust renderer. Public repository: [Ara-Engine/renderlab](https://github.com/Ara-Engine/renderlab). The license remains undecided.
+Provisional name for an independent Rust renderer. Public repository: [Ara-Engine/renderlab](https://github.com/Ara-Engine/renderlab). Licensed under either of [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at your option. Unless you state otherwise, any contribution you submit for inclusion is dual-licensed the same way, without additional terms.
 
 Current version: **0.1.3**: Showcase fixes (skinned-cache settling, non-RT relight removal, sky-map banking) and a per-pass GPU timeline ([release notes](docs/release-0.1.3.md)). [0.1.1](docs/release-0.1.1.md) carries the patent flag on the non-RT sun-shadow method; the first complete base was [0.1.0](docs/release-0.1.0.md).
 

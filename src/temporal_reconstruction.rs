@@ -74,16 +74,17 @@ pub struct Reconstruction {
     /// surface-identity history does not trail them. Zero turns the cap off. Programs that
     /// declare nothing are unaffected.
     pub view_budget: f32,
-    /// P-FLAT (docs/p-flat-tr1.md): on frames where local lights' intensity or colour changed,
-    /// a pixel within such a light's range caps its window at `1 + light_budget / (change *
-    /// falloff)`. `change` is the light's largest relative channel change; `falloff` is its
-    /// range-windowed inverse square relative to 1 m, the shading's attenuation shape. Where
-    /// the cap falls below 2 the pixel restarts, as every pixel did before P-FLAT. Only engine
-    /// data and the receiver's position size the cap, never the pixel's colour. History
-    /// continues under MQ1's 3x3 box. Zero, the default, restarts every pixel on any such
-    /// change, as before P-FLAT. A positive budget trades a measured flicker lag near the light
-    /// for history elsewhere (docs/p-flat-tr1.md). More than four changed lights in one frame
-    /// also restart.
+    /// P-RELIT (docs/p-relit.md): the exposed illuminance (lux times the frame's exposure) of
+    /// stale local light a continued history may hold. On a frame where a local light's
+    /// intensity or colour changed, a pixel restarts where that light's swing could put more
+    /// than this on it, and continues under MQ1's 3x3 box elsewhere. The swing is the light's
+    /// largest channel distance from its current candela to any candela it had since every
+    /// pixel last restarted, so to any intensity a history can hold; it reaches a pixel through
+    /// the shading's own attenuation (inverse square, range window). A restarted pixel follows
+    /// the light exactly, as every pixel did when any such change restarted the whole frame;
+    /// a continued one is within the budget of it. Only engine light data, the exposure and
+    /// the receiver's position decide it, never the pixel's colour. Zero restarts every pixel
+    /// in the light's range.
     pub light_budget: f32,
     /// TR2 (docs/m7-tr2.md): upscaled frames weight every internal sample of the pixel's
     /// surface by a tent whose radius shrinks from the internal sample spacing (young history
@@ -196,13 +197,19 @@ impl Reconstruction {
 }
 
 /// WGSL Tr1Frame.
-const FRAME_BYTES: usize = 448;
-/// Changed local lights one frame can cap (`Reconstruction::light_budget`); more restart.
-const RELIT_SLOTS: usize = 4;
-/// `Reconstruction::light_budget`'s default: zero, so a local light's intensity change
-/// restarts every pixel. Every positive budget P-FLAT measured kept flicker lag on the surfaces
-/// the light dominates (docs/p-flat-tr1.md, section 3).
-const LIGHT_BUDGET: f32 = 0.0;
+const FRAME_BYTES: usize = ZONES_OFFSET + ZONES_BYTES + 16;
+/// WGSL Tr1Zones (shaders/primary_rays.wgsl) and its place in Tr1Frame: where this frame's
+/// resolve restarts static receivers' histories.
+pub(crate) const ZONES_BYTES: usize = 48 + RELIT_SLOTS * 16 + 16;
+const ZONES_OFFSET: usize = 304;
+/// Restart spheres a frame carries around changed local lights; the smallest ones beyond
+/// that share one bounding sphere (`relit_zones`).
+const RELIT_SLOTS: usize = 8;
+/// `Reconstruction::light_budget`'s default: 0.05 exposed lux, about 0.8 % of display white on
+/// a mid-grey diffuse surface. In the courtyard it restarts the 5.4-6.7 m around the brazier,
+/// where the fire-lit wall and ground follow the flicker as closely as a full restart did
+/// (docs/p-relit.md, section 3).
+const LIGHT_BUDGET: f32 = 0.05;
 // Test-only tail permits the immutable MQ1 static-control shader's runtime-array
 // minimum binding span. Production has only fixed words; transform history lives
 // exclusively in the shared placement buffer.
@@ -214,11 +221,72 @@ pub(crate) fn without_candela(mut light: Light) -> Light {
     }
     light
 }
-/// Local lights whose candela changed from `previous` (bits, in order): position, range
-/// (f32::MAX when unlimited) and largest relative channel change. The key equals the previous
-/// frame's, so the local lights are the same lights in the same order.
-fn relit_lights(previous: &[[u32; 3]], lights: &[Light]) -> Vec<(Vec3, f32, f32)> {
-    lights
+/// Each local light's candela range per channel, `[lo, hi]`, since every pixel last
+/// restarted: every intensity a history can hold.
+type Swing = [[f32; 3]; 2];
+/// `swings` (one per local light, in order) widened by this frame's candela; a fresh range
+/// for each light when `swings` is `None`.
+fn widen_swings(swings: Option<&[Swing]>, intensities: &[[u32; 3]]) -> Vec<Swing> {
+    intensities
+        .iter()
+        .enumerate()
+        .map(|(i, bits)| {
+            let now = bits.map(f32::from_bits);
+            swings
+                .and_then(|s| s.get(i))
+                .map_or([now, now], |[lo, hi]| {
+                    [
+                        std::array::from_fn(|c| lo[c].min(now[c])),
+                        std::array::from_fn(|c| hi[c].max(now[c])),
+                    ]
+                })
+        })
+        .collect()
+}
+/// The radius around a local light inside which its attenuation (program_api.wgsl
+/// `light_sample`: inverse square, times the range window `(1 - (d / range)^4)^2`) is at
+/// least `1 / level`; rounded up. Zero when no distance reaches it: the shading clamps the
+/// distance at 1 cm, so the attenuation never passes 1e4.
+fn restart_radius(range: Option<f32>, level: f32) -> f32 {
+    if level.is_nan() || level < 1e-4 {
+        return 0.0;
+    }
+    let Some(range) = range else {
+        return level.sqrt();
+    };
+    if level == f32::INFINITY {
+        return range;
+    }
+    // The attenuation falls with distance, so the radius is its one crossing of 1 / level.
+    let reaches = |d: f32| {
+        let window = (1.0 - (d / range).powi(4)).max(0.0);
+        level * window * window >= d * d
+    };
+    let (mut lo, mut hi) = (0.0, range.min(level.sqrt()));
+    for _ in 0..32 {
+        let mid = 0.5 * (lo + hi);
+        if reaches(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    hi
+}
+/// The restart spheres (centre, squared radius) of the local lights whose candela changed
+/// from `previous` (bits, in order): each holds every point where the light's swing, the
+/// largest channel distance from its current candela to either end of its `swings` range,
+/// could change the exposed illuminance by `budget` or more. The key equals the previous
+/// frame's, so the local lights are the same lights in the same order. At most `RELIT_SLOTS`
+/// spheres: the smallest ones beyond that are replaced by one sphere bounding them.
+fn relit_zones(
+    previous: &[[u32; 3]],
+    swings: &[Swing],
+    lights: &[Light],
+    exposure: f32,
+    budget: f32,
+) -> Vec<[f32; 4]> {
+    let mut spheres: Vec<(Vec3, f32)> = lights
         .iter()
         .filter_map(|l| match *l {
             Light::Point {
@@ -232,18 +300,33 @@ fn relit_lights(previous: &[[u32; 3]], lights: &[Light]) -> Vec<(Vec3, f32, f32)
                 candela,
                 range,
                 ..
-            } => Some((position, range.unwrap_or(f32::MAX), candela)),
+            } => Some((position, range, candela)),
             Light::Directional { .. } => None,
         })
-        .zip(previous)
-        .filter_map(|((position, range, candela), old)| {
-            let change = candela
-                .iter()
-                .zip(old.map(f32::from_bits))
-                .map(|(&new, old)| (new - old).abs() / new.max(old).max(f32::MIN_POSITIVE))
+        .zip(previous.iter().zip(swings))
+        .filter(|((_, _, candela), (old, _))| candela.map(f32::to_bits) != **old)
+        .map(|((position, range, candela), (_, [lo, hi]))| {
+            let swing = (0..3)
+                .map(|c| (candela[c] - lo[c]).max(hi[c] - candela[c]))
                 .fold(0.0, f32::max);
-            (change > 0.0).then_some((position, range, change))
+            (position, restart_radius(range, swing * exposure / budget))
         })
+        .filter(|&(_, radius)| radius > 0.0)
+        .collect();
+    if spheres.len() > RELIT_SLOTS {
+        spheres.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let rest = spheres.split_off(RELIT_SLOTS - 1);
+        let centre = rest.iter().map(|s| s.0).sum::<Vec3>() / rest.len() as f32;
+        let radius = rest
+            .iter()
+            .map(|&(c, r)| (c - centre).length() + r)
+            .fold(0.0, f32::max);
+        // Rounded up: the bound must hold every sphere it replaces.
+        spheres.push((centre, radius * (1.0 + 1e-5)));
+    }
+    spheres
+        .into_iter()
+        .map(|(c, r)| [c.x, c.y, c.z, (r * r).min(f32::MAX)])
         .collect()
 }
 /// Local lights' candela bits in order: what `reconstruction_key` leaves out of a light.
@@ -417,12 +500,18 @@ fn trace_source_with(soft_kernels: &str, listing: bool) -> Result<String, Error>
     if !listing {
         // Only TR1's fused modules use the runtime budget. The legacy eight-ray and
         // Exact pipelines keep their override, direction sequence and normalization.
-        return Ok(source
-            .replace(
-                loop_seam,
-                "for(var j=lane;j<primary_frame.sampling.x;j+=1u)",
-            )
-            .replace("256u/FRESH_DIRECTIONS", "256u/primary_frame.sampling.x"));
+        // P-RELIT: each receiver traces the frame's budget, or the restart count where the
+        // resolve will restart it (tr1_zone_rays); its count is normalised by its own rays.
+        return Ok(format!(
+            "{}\nvar<private> tr1_rays:u32=8u;\n{}",
+            source
+                .replace(
+                    loop_seam,
+                    "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u)",
+                )
+                .replace("256u/FRESH_DIRECTIONS", "256u/tr1_rays"),
+            zones_source("primary_frame.zones")
+        ));
     }
     // P-RTS: the full-budget estimator for listed penumbra pixels is this module's own
     // fresh_estimate text, renamed, with lanes striding the frame's budget.
@@ -475,12 +564,18 @@ pub(super) const PENUMBRA_LISTING: bool = false;
 /// P-RTS's standalone penumbra list pass (docs/p-rts.md).
 pub(in crate::renderer) const PENUMBRA_LIST: &str =
     include_str!("../shaders/primary_penumbra_list.wgsl");
+/// The restart-zone tests (shaders/temporal_zones.wgsl) over `record`, the including
+/// module's `Tr1Zones` member.
+pub(crate) fn zones_source(record: &str) -> String {
+    include_str!("../shaders/temporal_zones.wgsl").replace("ZONES", record)
+}
 pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
     // MV1 motion-source seam; history/resolve policy belongs to MQ1.
     Ok(format!(
-        "{head}\n{}\n{RESOLVE}",
-        include_str!("../shaders/object_motion.wgsl")
+        "{head}\n{}\n{RESOLVE}\n{}",
+        include_str!("../shaders/object_motion.wgsl"),
+        zones_source("tr1.zones")
     ))
 }
 
@@ -610,6 +705,8 @@ struct Previous {
     key: [u8; 32],
     /// Local lights' candela bits (P-FLAT): a change continues history under MQ1's box.
     intensities: Vec<[u32; 3]>,
+    /// Local lights' candela ranges since the last restart of every pixel (P-RELIT).
+    swings: Vec<Swing>,
     skin_bounds: Option<crate::shadow_plan::Bounds>,
     skin_revisions: Vec<u64>,
 }
@@ -666,6 +763,13 @@ pub(crate) struct Planned {
     pub(crate) frame: Vec<u8>,
     pub(crate) sampling: Vec<u8>,
 }
+impl Planned {
+    /// The frame's `Tr1Zones` record (`ZONES_BYTES`), which the sun-shadow passes also bind:
+    /// `PrimaryFrame::zones` and `VsmFrame::zones`.
+    pub(crate) fn zones(&self) -> &[u8] {
+        &self.frame[ZONES_OFFSET..ZONES_OFFSET + ZONES_BYTES]
+    }
+}
 
 /// The reconstruction's CPU history between frames and the per-frame plan made from it:
 /// everything `prepare_reconstruction` decides without a device. The wgpu renderer and
@@ -679,7 +783,11 @@ pub(crate) struct Planner {
     /// The last prepared frame restarted every pixel.
     pub reset: bool,
     held_frames: u32,
+    /// Sun-shadow directions every receiver evaluates this frame.
     pub shadow_rays: u32,
+    /// P-RELIT: directions a receiver in a restart zone evaluates instead (`Tr1Zones`
+    /// counts.y); 0 when no zone is up or the frame's count is already as large.
+    pub restart_rays: u32,
     /// P-RTS: directions every receiver traces first; below `shadow_rays`, only listed
     /// penumbra pixels trace the full budget (docs/p-rts.md).
     pub probe_rays: u32,
@@ -693,6 +801,7 @@ impl Planner {
             reset: true,
             held_frames: 0,
             shadow_rays: 8,
+            restart_rays: 0,
             probe_rays: 8,
         }
     }
@@ -795,24 +904,34 @@ impl Planner {
         } else {
             settings.window
         };
-        // P-FLAT: local lights whose intensity or colour changed. History continues, held to
-        // this frame's 3x3 box as for moving placements and capped near those lights
-        // (`light_budget`), so a flicker is followed without restarting every pixel on every
-        // frame. A zero budget, or more changed lights than the frame can carry, restarts.
-        let changed = match (continued, self.previous.as_ref()) {
-            (Some(_), Some(p)) if p.intensities != intensities => {
-                relit_lights(&p.intensities, i.lights)
-            }
+        self.reset = continued.is_none() || self.cut || event_window < 1.0;
+        self.cut = false;
+        // P-RELIT: local lights whose intensity or colour changed never restart the frame.
+        // History continues, held to this frame's 3x3 box as for moving placements, except
+        // inside each such light's restart sphere, where its swing since the histories began
+        // could leave `light_budget` of stale light: those pixels restart and follow the
+        // light exactly (`relit_zones`).
+        let previous = continued.and(self.previous.as_ref());
+        let swings = widen_swings(
+            previous
+                .filter(|_| !self.reset)
+                .map(|p| p.swings.as_slice()),
+            &intensities,
+        );
+        let relit = !self.reset && previous.is_some_and(|p| p.intensities != intensities);
+        let relit_spheres = match previous {
+            Some(p) if relit => relit_zones(
+                &p.intensities,
+                &swings,
+                i.lights,
+                exposure,
+                settings.light_budget,
+            ),
             _ => vec![],
         };
-        let light_restart =
-            !changed.is_empty() && (settings.light_budget == 0.0 || changed.len() > RELIT_SLOTS);
-        self.reset = continued.is_none() || self.cut || event_window < 1.0 || light_restart;
-        self.cut = false;
         // MQ1's clamp event comes from the same submitted transforms that feed
         // TR1/PP1 on the GPU; no second transform history or frame-buffer payload.
         let moved = !self.reset && rigid_motion;
-        let relit = !self.reset && !changed.is_empty();
         let jitter = i.jitter;
         let (previous_matrix, previous_eye, scale, previous_jitter) = match continued {
             Some((m, e, x, _, j)) if !self.reset => (m, e, exposure / x, j),
@@ -823,8 +942,7 @@ impl Planner {
         let options = u32::from(settings.catmull_rom)
             | u32::from(settings.spatial_start) << 1
             | u32::from((moved || relit || (posed && !self.reset)) && settings.motion_box) << 3
-            | u32::from(settings.upscale_interpolation) << 4
-            | u32::from(relit) << 5;
+            | u32::from(settings.upscale_interpolation) << 4;
         let mut bytes = Vec::with_capacity(FRAME_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         bytes.extend_from_slice(&matrix_bytes(matrix));
@@ -872,15 +990,22 @@ impl Planner {
         } else {
             0
         };
-        // P-FLAT: frames that drop history somewhere (receivers in a moving caster's shadow, or
-        // pixels near a relit light) take the restart budget, as frames that restart every
-        // pixel do: the restarted pixels keep main's per-pixel ray count.
-        self.shadow_rays = i.budget.rays(
-            cold,
-            self.reset || shadow_bounds.is_some() || relit,
-            sampling_still,
-            self.held_frames,
-        );
+        // P-RELIT: the restart budget is per pixel. A frame that restarts every pixel takes
+        // it frame-wide. A frame that restarts only some (receivers in a moving caster's
+        // shadow, or pixels in a changed light's restart sphere) keeps the moving or held
+        // count, and the receivers in those zones trace `restart_rays` (tr1_zone_rays): they
+        // keep the per-pixel ray count a full restart gave them. One frame-wide word put the
+        // whole frame on 64 rays for every frame of a flickering fire, which cost the game
+        // scene 24 ms a frame on the non-RT path (docs/p-relit.md).
+        self.shadow_rays = i
+            .budget
+            .rays(cold, self.reset, sampling_still, self.held_frames);
+        let zoned = shadow_bounds.is_some() || !relit_spheres.is_empty();
+        self.restart_rays = if zoned && i.budget.reset_rays > self.shadow_rays {
+            i.budget.reset_rays
+        } else {
+            0
+        };
         // Listing pays only where the budget exceeds both probe sets.
         self.probe_rays = if listing && PENUMBRA_LISTING && self.shadow_rays > 2 * PROBE_DISK {
             2 * PROBE_DISK
@@ -937,20 +1062,18 @@ impl Planner {
         }) {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
-        // relit[4]: position and range of each changed light (zero rows unused), then each one's
-        // relative change, then the budget.
-        let mut relit_words = [0f32; 24];
-        if relit {
-            for (k, (position, range, change)) in changed.iter().enumerate() {
-                relit_words[k * 4..k * 4 + 4]
-                    .copy_from_slice(&[position.x, position.y, position.z, *range]);
-                relit_words[16 + k] = *change;
+        // Tr1Zones.relit: each restart sphere (zero rows unused), then their count.
+        for row in 0..RELIT_SLOTS {
+            for value in relit_spheres.get(row).copied().unwrap_or_default() {
+                bytes.extend_from_slice(&value.to_ne_bytes());
             }
-            relit_words[20] = settings.light_budget;
         }
-        // relit_params.y (every frame): P-FLICKER's Catmull-Rom blur budget.
-        relit_words[21] = settings.sharp_blur_budget;
-        for value in relit_words {
+        for count in [relit_spheres.len() as u32, self.restart_rays, 0, 0] {
+            bytes.extend_from_slice(&count.to_ne_bytes());
+        }
+        debug_assert_eq!(bytes.len(), ZONES_OFFSET + ZONES_BYTES);
+        // resample.x: P-FLICKER's Catmull-Rom blur budget.
+        for value in [settings.sharp_blur_budget, 0.0, 0.0, 0.0] {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
@@ -963,6 +1086,7 @@ impl Planner {
             suns,
             key,
             intensities,
+            swings,
             skin_bounds,
             skin_revisions,
         });
@@ -987,6 +1111,8 @@ pub(in crate::renderer) struct ReconstructionState {
     groups: Option<(GroupKey, [Owned<wgpu::BindGroup>; 2])>,
     /// The CPU history and per-frame plan (shared with the ara-gpu backend).
     pub plan: Planner,
+    /// The last planned frame's `Tr1Zones` record.
+    pub zones: [u8; ZONES_BYTES],
 }
 type GroupKey = (
     wgpu::Texture,
@@ -1075,6 +1201,7 @@ impl ReconstructionState {
             ),
             groups: None,
             plan: Planner::new(),
+            zones: [0; ZONES_BYTES],
         }
     }
     fn size(&self) -> wgpu::Extent3d {
@@ -1186,14 +1313,15 @@ impl Renderer {
     }
 
     /// Identity of every input a reconstructed frame depends on besides the camera, the
-    /// eye, exposure, directional-light directions, local-light intensities (P-FLAT), skinned
+    /// eye, exposure, directional-light directions, local-light intensities (P-RELIT), skinned
     /// poses (SK1) and placement transforms (MQ1), which TR1 follows: a change restarts every
     /// pixel. Programs, prelude, geometry, bindings, materials, textures, new placements, the
     /// sun's colour, light kinds and local lights' position, direction, range, cone and source
     /// radius, the environment and every shadow and visibility setting. Before MQ1 transform
     /// edits of existing placements restarted every pixel, so a scene with any animated rigid
     /// object never accumulated; they now reproject through their previous transforms. Before
-    /// P-FLAT a flickering local light restarted every pixel every frame in the same way.
+    /// P-RELIT a flickering local light restarted every pixel every frame in the same way;
+    /// it now restarts only its restart sphere (`relit_zones`).
     fn reconstruction_key(&self) -> [u8; 32] {
         let u = &self.uploads;
         let state = self.primary.as_ref().unwrap();
@@ -1433,8 +1561,13 @@ impl Renderer {
         let primary_frame = &primary.frame.as_ref().unwrap().0.value;
         self.queue
             .write_buffer(primary_frame, 112, &planned.sampling);
-        self.uploads.view_settings += 16;
-        self.uploads.write_calls += 1;
+        self.queue
+            .write_buffer(primary_frame, super::FRAME_ZONES as u64, planned.zones());
+        self.uploads.view_settings += 16 + ZONES_BYTES as u64;
+        self.uploads.write_calls += 2;
+        // The non-RT sun lookup reads the same zones (prepare_virtual_sampling).
+        let zones: [u8; ZONES_BYTES] = planned.zones().try_into().unwrap();
+        self.reconstruction_state.as_mut().unwrap().zones = zones;
         let state = self.reconstruction_state.as_ref().unwrap();
         self.queue
             .write_buffer(&state.frame.value, 0, &planned.frame);
@@ -1572,6 +1705,212 @@ mod tests {
         assert_eq!(identity(sun), format!("{sun:?}"));
     }
 
+    /// A moving camera's plan inputs over `lights`, frame `frame` of an unchanged scene.
+    fn inputs(lights: &[Light], frame: u64) -> PlanInputs<'_> {
+        PlanInputs {
+            settings: Reconstruction::default(),
+            budget: ReconstructionShadowBudget::default(),
+            rendered_frames: frame,
+            index: frame,
+            key: [7; 32],
+            lights,
+            requests: &[],
+            directional_disk_angle: 0.0,
+            matrix: Mat4::from_translation(Vec3::new(frame as f32, 0.0, 0.0)),
+            eye: Vec3::new(frame as f32, 1.0, 0.0),
+            jitter: [0.0; 2],
+            exposure: 2f32.powi(-11),
+            background: [0.0; 3],
+            visible_sky: false,
+            pixel_angle: 1e-3,
+            scene_bounds: None,
+            skin_bounds: None,
+            skin_revisions: vec![],
+            rigid_motion: false,
+            listing: false,
+        }
+    }
+    /// The courtyard's fire at `scale` of its peak.
+    fn fire(scale: f32) -> Light {
+        Light::Point {
+            position: Vec3::new(-3.8, 0.95, 2.0),
+            candela: [24_000.0 * scale, 12_000.0 * scale, 4_000.0 * scale],
+            range: Some(10.0),
+            source_radius: 0.25,
+        }
+    }
+
+    /// The restart spheres in a planned frame's `Tr1Zones`: (centre, radius).
+    fn spheres(planned: &Planned) -> Vec<(Vec3, f32)> {
+        let zones = &planned.frame[ZONES_OFFSET..ZONES_OFFSET + ZONES_BYTES];
+        let word = |at: usize| u32::from_ne_bytes(zones[at..at + 4].try_into().unwrap());
+        let float = |at: usize| f32::from_bits(word(at));
+        (0..word(48 + RELIT_SLOTS * 16) as usize)
+            .map(|k| 48 + k * 16)
+            .map(|at| {
+                (
+                    Vec3::new(float(at), float(at + 4), float(at + 8)),
+                    float(at + 12).sqrt(),
+                )
+            })
+            .collect()
+    }
+
+    /// P-RELIT: a flickering local light never restarts the frame nor selects the restart
+    /// shadow budget; it restarts a sphere sized by its swing since the histories began, not
+    /// by its change since the last frame. A cut and a key change still restart every pixel.
+    #[test]
+    fn light_intensity_restarts_a_sphere_not_the_frame() {
+        let budget = ReconstructionShadowBudget::default();
+        let mut plan = Planner::new();
+        let cold = plan.prepare(inputs(&[fire(1.0)], 0));
+        assert!(plan.reset && spheres(&cold).is_empty());
+        assert_eq!(plan.shadow_rays, budget.cold_rays);
+        let mut radii = vec![];
+        // 1.0 -> 0.7 -> 0.9 -> 0.91: the last step is one percent, but the oldest history may
+        // still hold 1.0 and 0.7, so its sphere is as wide as the 0.9 frame's.
+        for (frame, scale) in [(1, 0.7), (2, 0.9), (3, 0.91)] {
+            let planned = plan.prepare(inputs(&[fire(scale)], frame));
+            assert!(!plan.reset, "frame {frame}");
+            // The frame keeps the moving count; receivers in the sphere trace the restart count.
+            assert_eq!(plan.shadow_rays, budget.active_rays, "frame {frame}");
+            assert_eq!(plan.restart_rays, budget.reset_rays, "frame {frame}");
+            assert_eq!(
+                planned.zones()[52 + RELIT_SLOTS * 16..][..4],
+                budget.reset_rays.to_ne_bytes()
+            );
+            let [(centre, radius)] = spheres(&planned)[..] else {
+                panic!("one sphere, frame {frame}")
+            };
+            assert_eq!(centre, Vec3::new(-3.8, 0.95, 2.0));
+            radii.push(radius);
+        }
+        // The courtyard: 0.3 x 24,000 cd at 2^-11 leaves 0.05 exposed lux at 6.7 m.
+        assert!((radii[0] - 6.7).abs() < 0.05, "{radii:?}");
+        assert!(radii[1] > 5.5 && radii[1] < radii[0], "{radii:?}");
+        assert!(
+            radii[2] > radii[1] && radii[2] - radii[1] < 0.15,
+            "{radii:?}"
+        );
+        // An unchanged light restarts nothing; its box and spheres are off.
+        let steady = plan.prepare(inputs(&[fire(0.91)], 4));
+        assert!(spheres(&steady).is_empty());
+        assert_eq!(plan.restart_rays, 0);
+        let options = u32::from_ne_bytes(steady.frame[292..296].try_into().unwrap());
+        assert_eq!(options & 8, 0);
+        // A key change restarts every pixel and the swing: the next flicker starts small.
+        plan.prepare(PlanInputs {
+            key: [8; 32],
+            ..inputs(&[fire(0.91)], 5)
+        });
+        assert!(plan.reset);
+        assert_eq!(
+            (plan.shadow_rays, plan.restart_rays),
+            (budget.reset_rays, 0)
+        );
+        let after = plan.prepare(PlanInputs {
+            key: [8; 32],
+            ..inputs(&[fire(0.9)], 6)
+        });
+        assert!(spheres(&after)[0].1 < 1.6, "{:?}", spheres(&after));
+        plan.cut = true;
+        plan.prepare(PlanInputs {
+            key: [8; 32],
+            ..inputs(&[fire(0.9)], 7)
+        });
+        assert_eq!(plan.shadow_rays, budget.cold_rays);
+    }
+
+    /// P-RELIT: a light switched off restarts everything it lit above the budget, and a zero
+    /// budget its whole range; a light too dim to show at this exposure restarts nothing.
+    #[test]
+    fn restart_spheres_follow_the_swing_and_the_exposure() {
+        let radius = |from: f32, to: f32, budget: f32, exposure: f32| {
+            let mut plan = Planner::new();
+            let settings = Reconstruction {
+                light_budget: budget,
+                ..Default::default()
+            };
+            let (before, after) = ([fire(from)], [fire(to)]);
+            plan.prepare(PlanInputs {
+                settings,
+                exposure,
+                ..inputs(&before, 0)
+            });
+            let planned = plan.prepare(PlanInputs {
+                settings,
+                exposure,
+                ..inputs(&after, 1)
+            });
+            assert!(!plan.reset);
+            // History continues under MQ1's box on a relit frame.
+            let options = u32::from_ne_bytes(planned.frame[292..296].try_into().unwrap());
+            assert_eq!(options & 8, 8);
+            spheres(&planned).first().map_or(0.0, |s| s.1)
+        };
+        let dusk = 2f32.powi(-11);
+        let off = radius(1.0, 0.0, LIGHT_BUDGET, dusk);
+        assert!(off > 8.0 && off < 10.0, "{off}");
+        assert_eq!(radius(1.0, 0.0, 0.0, dusk), 10.0);
+        assert!(radius(1.0, 0.99, LIGHT_BUDGET, dusk) < 1.6);
+        // At a noon exposure the same flicker reaches less than half as far.
+        let noon = radius(1.0, 0.7, LIGHT_BUDGET, 2f32.powi(-14));
+        assert!(noon > 2.7 && noon < 3.0, "{noon}");
+        assert_eq!(radius(1e-9, 0.0, LIGHT_BUDGET, dusk), 0.0);
+        // The radius is where the shading's attenuation crosses the level, rounded up.
+        for (range, level) in [(Some(10.0), 2.3), (Some(4.0), 900.0), (None, 2.3)] {
+            let r = restart_radius(range, level);
+            let attenuation = |d: f32| {
+                let window = range.map_or(1.0, |range: f32| 1.0 - (d / range).powi(4));
+                window * window / (d * d)
+            };
+            assert!(level * attenuation(r * 1.001) < 1.0, "{range:?} {level}");
+            assert!(level * attenuation(r * 0.999) >= 1.0, "{range:?} {level}");
+        }
+    }
+
+    /// P-RELIT: more changed lights than the frame has rows keep the largest spheres and
+    /// bound the rest by one.
+    #[test]
+    fn many_relit_lights_share_a_bounding_sphere() {
+        let torch = |k: usize, scale: f32| Light::Point {
+            position: Vec3::new(3.0 * k as f32, 2.0, 0.0),
+            candela: [(2_000.0 + 500.0 * k as f32) * scale; 3],
+            range: Some(8.0),
+            source_radius: 0.05,
+        };
+        let hall = |scale: f32| (0..12).map(|k| torch(k, scale)).collect::<Vec<_>>();
+        let mut plan = Planner::new();
+        let (bright, dim) = (hall(1.0), hall(0.6));
+        plan.prepare(inputs(&bright, 0));
+        let planned = plan.prepare(inputs(&dim, 1));
+        assert!(!plan.reset);
+        let zones = spheres(&planned);
+        assert_eq!(zones.len(), RELIT_SLOTS);
+        // Every light's own sphere lies inside some uploaded one.
+        let previous = local_intensities(&bright);
+        let swings = widen_swings(
+            Some(&widen_swings(None, &previous)),
+            &local_intensities(&dim),
+        );
+        for (k, light) in dim.iter().enumerate() {
+            let own = relit_zones(
+                &previous[k..=k],
+                &swings[k..=k],
+                std::slice::from_ref(light),
+                2f32.powi(-11),
+                LIGHT_BUDGET,
+            )[0];
+            let (centre, radius) = (Vec3::new(own[0], own[1], own[2]), own[3].sqrt());
+            assert!(
+                zones
+                    .iter()
+                    .any(|&(c, r)| (c - centre).length() + radius <= r * 1.0001),
+                "light {k}"
+            );
+        }
+    }
+
     #[test]
     fn samples_are_balanced_lattice_pairs() {
         assert_eq!(sample_offset(0), [0.0; 2]);
@@ -1653,7 +1992,11 @@ mod tests {
         let kernels = shader_sources(prelude).unwrap();
         // Main's module when listing is off; P-RTS's seams when it is on.
         let off = trace_source_with(&kernels[1], false).unwrap();
-        assert!(off.contains("for(var j=lane;j<primary_frame.sampling.x;j+=1u)"));
+        // P-RELIT: each receiver traces and normalises by its own count.
+        assert!(off.contains(
+            "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u)"
+        ));
+        assert!(off.contains("256u/tr1_rays") && !off.contains("256u/FRESH_DIRECTIONS"));
         assert!(!off.contains("primary_penumbra_trace"));
         let trace = trace_source_with(&kernels[1], true).unwrap();
         assert!(trace.contains(
