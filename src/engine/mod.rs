@@ -920,6 +920,7 @@ impl Engine {
         let deadline = Instant::now() + ADMISSION;
         loop {
             if let Some(report) = renderer.try_render_view(color, camera, &mut draws, mode)? {
+                settings::log_indirect(renderer)?;
                 return Ok(report);
             }
             if Instant::now() > deadline {
