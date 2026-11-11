@@ -21,6 +21,20 @@ struct PrimaryFrame { inverse:mat4x4<f32>, clear:vec4<f32>, sided:vec4<u32>, sce
 @group(0) @binding(10) var<uniform> primary_frame:PrimaryFrame;
 // Per placement: batch index; bit 31 tangent, bit 30 single-sided, bit 29 thin.
 @group(1) @binding(5) var<storage,read> primary_placements:array<u32>;
+// renderlab: batch info begin
+// Per draw (batch), after the placement words and counted back from the buffer end
+// (primary_ray::batch_word): triangle count, bit 30 an adjacency suffix in the index buffer,
+// bit 31 a skinned previous-vertex stream. Read these here, never from `arrayLength` of a
+// binding-array element: naga 30 leaves that element index undecorated, and a driver may
+// then answer for one element per workgroup (RADV does). Functions only, no constants:
+// composers that carry functions by name (the edge check) pick these up whole.
+fn primary_batch_info(batch:u32)->u32 {
+    return primary_placements[arrayLength(&primary_placements)-1u-batch];
+}
+fn batch_triangles(info:u32)->u32 {return info&0x3fffffffu;}
+fn batch_adjacent(info:u32)->bool {return (info&0x40000000u)!=0u;}
+fn batch_skinned(info:u32)->bool {return (info&0x80000000u)!=0u;}
+// renderlab: batch info end
 
 fn primary_epsilon(v:array<vec3<f32>,3>,placement:u32)->f32 {
     let a=world_position(v[0],placement).xyz;let b=world_position(v[1],placement).xyz;

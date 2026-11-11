@@ -30,9 +30,9 @@ fn primary_triangle_vertices(batch:u32,primitive:u32)->array<vec3<f32>,3> {
 // Original triangle indices, then one neighbour per opposite-vertex edge, then
 // padding: 6*T+1 words. Original-only buffers have 3*T words and use the probe.
 fn primary_edge_neighbour(batch:u32,primitive:u32,edge:u32)->u32 {
-    let words=arrayLength(&primary_indices[batch].data);
-    if words%3u!=1u {return 0xffffffffu;}
-    return primary_indices[batch].data[(words-1u)/2u+primitive*3u+edge];
+    let info=primary_batch_info(batch);
+    if !batch_adjacent(info) {return 0xffffffffu;}
+    return primary_indices[batch].data[(batch_triangles(info)+primitive)*3u+edge];
 }
 // renderlab: fold inset begin
 // A neighbouring facet must lie above the viewed-side plane before an inset

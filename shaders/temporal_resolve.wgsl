@@ -83,11 +83,11 @@ struct Tr1Vec4s { data:array<vec4<f32>> };
 struct Tr1U32s { data:array<u32> };
 @group(1) @binding(2) var<storage,read> tr1_vertices:binding_array<Tr1Vec4s,PRIMARY_BATCHES>;
 @group(1) @binding(3) var<storage,read> tr1_indices:binding_array<Tr1U32s,PRIMARY_BATCHES>;
-// SK1: previous submitted vertices. Static draws alias the current stream; a
-// skinned previous stream has one padding vec4, preserving placement/material bits.
+// SK1: previous submitted vertices. Static draws alias the current stream; a skinned
+// draw binds its own previous stream, and the batch word says which (batch_skinned).
 var<private> tr1_near_skin:bool;
 fn tr1_skinned(batch:u32)->bool {
-    return motion_skinned(batch,arrayLength(&tr1_vertices[batch].data));
+    return batch_skinned(primary_batch_info(batch));
 }
 // MV1: only the motion source changes; moving rigid silhouettes follow SK1's path.
 fn tr1_moving(slot:u32)->bool {
