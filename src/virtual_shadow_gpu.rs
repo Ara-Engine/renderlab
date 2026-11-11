@@ -664,6 +664,19 @@ pub(super) fn map_source() -> String {
     )
 }
 
+/// CPU-only access to nested production source composers.
+#[cfg(test)]
+pub(super) fn compile_structure_sources() -> Vec<(&'static str, String)> {
+    vec![
+        ("virtual", shader_source()),
+        ("records", records_source()),
+        ("hybrid", hybrid_source()),
+        ("map", map_source()),
+        ("surface", surface_cache::surface_source()),
+        ("s4", sunvis_s4::source()),
+    ]
+}
+
 fn corners(b: &crate::shadow_plan::Bounds) -> impl Iterator<Item = glam::DVec3> + '_ {
     (0..8).map(move |i| {
         glam::DVec3::new(
