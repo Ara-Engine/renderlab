@@ -11,12 +11,17 @@
 // receiver. Unprepared stages (cell shading, film accumulation) and receivers outside the
 // grid walk every light in order.
 var<private> rl_light_list:vec3<u32>;
+// Disk rays per soft local light for this receiver on ray-traced stages (0: the ordinary
+// four). rl_local_budget raises it where the resolve restarts the receiver's history;
+// reflection hits are shaded before it is set and keep four.
+var<private> rl_local_rays:u32;
 
 fn rl_cluster_word(c:u32, k:u32) -> u32 {
     return textureLoad(rl_cluster_lists,vec2<u32>((c%LC_ROW)*LC_STRIDE+k,c/LC_ROW),0).x;
 }
 // The generated entries call this once per receiver, before `shade`.
 fn rl_lights_prepare(world:vec3<f32>) {
+    rl_local_budget(world);
     if rl_light_frame.info.y==0u { return; }
     let proj=rl_light_frame.proj;
     let v=rl_light_frame.view*vec4<f32>(world,1.0);
