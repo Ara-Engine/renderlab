@@ -2,7 +2,7 @@
 PC rarely has the 14 GiB the lease needs, so one window has to be enough). Binaries must be
 built first (host.py build); nothing here compiles.
 
-    py -3 -B tools/n-vsm1/quarry.py LABEL DEFAULT_BIN DISK_BIN     # e.g. q-y4 m0 d8
+    py -3 -B tools/n-vsm1/quarry.py LABEL DEFAULT_BIN DISK_BIN     # e.g. q-y4 m0 d13
     py -3 -B tools/n-vsm1/quarry.py after LABEL                    # CPU, after the lease
 
 Steps, in the order they would be dropped from the end if the lease ran short:
