@@ -84,6 +84,51 @@ impl PostSettings {
             ..Self::default()
         }
     }
+    /// The `Settings` record the post kernels and the tone stage read: five vec4.
+    /// `serial` counts post frames from one, `height` is the output height in pixels,
+    /// and the LUT strength is zero until a custom LUT is installed.
+    pub(crate) fn record(
+        &self,
+        serial: u32,
+        height: u32,
+        lut_width: u32,
+        lut_custom: bool,
+    ) -> [f32; 20] {
+        let d = self.depth_of_field.unwrap_or_default();
+        let focal = d.focal_length_mm * 0.001;
+        let scale = focal * focal / (d.f_number * (d.focus_distance_m - focal)) * height as f32
+            / (d.sensor_height_mm * 0.001)
+            * 0.5;
+        // Neutral at 6500 K; bounded RGB camera adaptation, separate from exposure.
+        let warmth = (6500.0 / self.white_balance_kelvin).ln();
+        let white = [
+            (warmth * 0.35).exp(),
+            (-self.tint * 0.15).exp(),
+            (-warmth * 0.35).exp(),
+        ];
+        [
+            self.bloom,
+            self.shutter_angle_degrees / 720.0,
+            self.max_motion_radius_px,
+            (serial & 0x00ff_ffff) as f32,
+            d.focus_distance_m,
+            scale,
+            d.max_radius_px,
+            u32::from(self.depth_of_field.is_some()) as f32,
+            self.contrast,
+            self.saturation,
+            self.vignette,
+            self.grain,
+            white[0],
+            white[1],
+            white[2],
+            u32::from(self.tonemapper == Tonemapper::Filmic) as f32,
+            self.chromatic_aberration_px,
+            if lut_custom { self.lut_strength } else { 0.0 },
+            lut_width as f32,
+            0.0,
+        ]
+    }
     pub(crate) fn validate(&self) -> Result<(), Error> {
         let range = |v: f32, lo, hi| v.is_finite() && (lo..=hi).contains(&v);
         if !range(self.bloom, 0.0, 1.0)
