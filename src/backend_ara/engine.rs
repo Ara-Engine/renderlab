@@ -221,12 +221,23 @@ impl Engine {
     pub fn output(&self) -> Option<&super::image::Texture> {
         self.frames.output()
     }
-    /// Releases what the engine keeps on `gpu`: its frame sequences and pipelines.
-    pub fn retire(mut self, gpu: &mut GpuDevice) -> anyhow::Result<()> {
+    /// Releases what the engine keeps on `gpu` (its frame sequences and pipelines) and
+    /// stays usable: the scene is kept, and the next frame starts a new sequence and
+    /// makes its pipelines again. What a host calls before it destroys the device.
+    pub fn release(&mut self, gpu: &mut GpuDevice) -> anyhow::Result<()> {
         self.release_ended(gpu)?;
-        self.frames.retire(gpu)?;
+        let fresh = if self.readback {
+            forward::Frames::default()
+        } else {
+            forward::Frames::without_images()
+        };
+        std::mem::replace(&mut self.frames, fresh).retire(gpu)?;
         self.cache.retire(gpu)?;
         Ok(())
+    }
+    /// [`release`](Self::release), for an engine that is done.
+    pub fn retire(mut self, gpu: &mut GpuDevice) -> anyhow::Result<()> {
+        self.release(gpu)
     }
     /// The engine and `gpu` together as a [`Scene`], for code written against the trait.
     pub fn on<'a>(&'a mut self, gpu: &'a mut GpuDevice) -> Bound<'a> {
