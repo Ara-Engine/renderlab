@@ -236,7 +236,8 @@ struct TpEmitter {
     flipbook:vec4<f32>,      // x columns, y rows, z frames per second, w 1 at that rate,
                              // 2 once over each life (0: no flipbook)
     sprite:vec4<f32>,        // x height over width, y 1 to turn each sprite randomly,
-                             // z the emitter's clock at the end of this step (s)
+                             // z the emitter's clock at the end of this step (s), w a
+                             // stepped prewarm's substep (s; 0: the frame's step)
 };
 // A curve's interpolation weights at life fraction t: the key below (index) and the share
 // of the next. Keys hold their end values outside their range.
@@ -355,7 +356,7 @@ fn tp_incident(world:vec3<f32>) -> vec3<f32> {
     let capacity=tp_emitter.counts.x;
     let slot=id.x;
     if slot>=capacity { return; }
-    let dt=tp.misc.x;
+    let dt=select(tp.misc.x,tp_emitter.sprite.w,tp_emitter.sprite.w>0.0);
     var p=tp_particles[slot];
     let first=tp_emitter.counts.y;
     let spawned=tp_emitter.counts.z;
