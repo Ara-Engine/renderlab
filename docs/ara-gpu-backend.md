@@ -1737,11 +1737,23 @@ moving runs of that are identical in every table word and pixel.
 
 **Not compared with wgpu**, like the levels above it.
 
-**What still separates this frame from `HardwareRt`'s default image:** motion blur
-(off on the traced frame: its motion surface comes from hit records and is not
-chained), depth of field, render scale below native, local-light shadows, textured
-materials on the traced frame, transparency and particles, and the smaller table the
-tool uses for the cache.
+**Motion blur on the traced frame.** Post's motion surface on a traced frame is the
+hit-based entry (35), already replayed alone: it takes each pixel's hit record, the
+placement's current and previous model matrix and the post frame record, and needs no
+depth target. The frame now chains it before the tile maximum and the blur, with the
+same record the mesh pass's surface takes (the frame's camera: unjittered for the
+current matrix, the frame's own for the inverse).
+`traced_frames_carry_camera_and_placement_motion_into_motion_blur` gets 1.153 px of
+shutter velocity for a sideways camera step, which is the closed form the mesh-pass
+test uses, and the same 1.153 px for a still camera over a floor that slides by that
+distance, which a depth target cannot know; still, settled and cut frames have none,
+and each blurred display sits inside the scalar post replay of its own HDR and
+surface. `ara_frame`'s traced levels now run post at its defaults.
+
+**What still separates this frame from `HardwareRt`'s default image:** depth of
+field, render scale below native, local-light shadows, textured materials on the
+traced frame, transparency and particles, and the smaller table the tool uses for the
+cache.
 
 ## Cube-array environment lookups (Renderlab main's P-SKY)
 

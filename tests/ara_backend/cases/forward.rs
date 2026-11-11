@@ -1265,3 +1265,116 @@ fn frames_carry_the_previous_camera_into_motion_blur() -> Result<()> {
     gpu.assert_clean()?;
     Ok(())
 }
+
+/// Motion blur on the traced frame, whose motion surface comes from the hit records
+/// and the placements' own motion rather than from a depth target.
+/// - A sideways camera step gives the same shutter velocity as on the mesh pass, in
+///   closed form, and the blurred display sits inside the scalar post replay of the
+///   frame's own HDR and surface.
+/// - A still camera over a floor that slides by the same distance gives the same
+///   speed: the surface follows the placement's previous transform, which a depth
+///   target cannot know.
+/// - A cut drops the previous camera, and the placement's previous transform with it.
+#[test]
+fn traced_frames_carry_camera_and_placement_motion_into_motion_blur() -> Result<()> {
+    use renderlab::backend_ara::forward::{Frames, Primary, SunShadows};
+    let path = root("forward-traced-motion");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let size = [96u32, 64];
+    let vertices =
+        [[-6., -6., 0.], [6., -6., 0.], [6., 6., 0.], [-6., 6., 0.]].map(|position| Vertex {
+            position,
+            normal: [0., 0., 1.],
+            uv: [0.; 2],
+            color: [1.; 4],
+        });
+    let settings = PostSettings::default();
+    let lighting = Lighting {
+        lights: vec![Light::Directional {
+            travel: Vec3::new(-0.25, 0., -1.),
+            lux: [1000.; 3],
+        }],
+        environment: [20., 25., 40.],
+        exposure_stops: -8.,
+    };
+    let shadows = SunShadows {
+        split_ends: vec![12.],
+        disk_angle: 0.02,
+    };
+    let mut frames = Frames::default();
+    let mut frame = |frames: &mut Frames, eye_x: f32, floor_x: f32| {
+        frames.render(
+            &mut gpu,
+            &cache,
+            &ForwardScene {
+                objects: &[ForwardObject {
+                    vertices: &vertices,
+                    indices: &[0, 1, 2, 0, 2, 3],
+                    transform: Mat4::from_translation(Vec3::new(floor_x, 0., 0.)),
+                    material: MaterialDescriptor {
+                        base_color: BASE,
+                        metallic: 0.,
+                        roughness: 1.,
+                        double_sided: true,
+                        ..Default::default()
+                    },
+                }],
+                lighting: &lighting,
+                camera: Camera::look_at(
+                    Vec3::new(eye_x, 0., 4.),
+                    Vec3::new(eye_x, 0., 0.),
+                    Vec3::Y,
+                    55f32.to_radians(),
+                    0.1,
+                    100.,
+                )?,
+                size,
+                atmosphere: renderlab::Atmosphere::off(),
+                sun_shadows: Some(&shadows),
+                primary: Primary::Traced,
+                post: Some(settings),
+                indirect: None,
+                reconstruction: None,
+                reflections: None,
+            },
+        )
+    };
+    let view_width = 2. * 4. * (55f32.to_radians() / 2.).tan() * size[0] as f32 / size[1] as f32;
+    let expected = 0.3 / view_width * size[0] as f32 * settings.shutter_angle_degrees / 720.;
+    let replay = |images, serial| {
+        display_inside_cpu_post_replay(size, images, &post_record(&settings, size[1], serial))
+    };
+    let first = frame(&mut frames, 0., 0.)?;
+    let still = replay(&first, 1)?;
+    let second = frame(&mut frames, 0.3, 0.)?;
+    let panned = replay(&second, 2)?;
+    // The camera holds; the floor slides the other way by the same distance.
+    let third = frame(&mut frames, 0.3, 0.3)?;
+    let slid = replay(&third, 3)?;
+    let fourth = frame(&mut frames, 0.3, 0.3)?;
+    let settled = replay(&fourth, 4)?;
+    ensure!(
+        still.speed == 0.
+            && (panned.speed - expected).abs() < 0.01
+            && (slid.speed - expected).abs() < 0.01
+            && settled.speed == 0.,
+        "shutter velocities: still {}, camera step {}, floor step {}, then {} (expected \
+         {expected} for both steps)",
+        still.speed,
+        panned.speed,
+        slid.speed,
+        settled.speed
+    );
+    frames.cut();
+    let after_cut = frame(&mut frames, 0.6, 0.6)?;
+    let cut = replay(&after_cut, 1)?;
+    ensure!(cut.speed == 0., "a cut left a velocity of {}", cut.speed);
+    println!(
+        "traced motion blur: {:.3} px for a camera step and {:.3} px for a floor step \
+         (expected {expected:.3}); still, settled and cut frames have none",
+        panned.speed, slid.speed
+    );
+    gpu.assert_clean()?;
+    Ok(())
+}

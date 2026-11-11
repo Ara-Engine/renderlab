@@ -299,6 +299,12 @@ impl<'a> HeapBindings<'a> {
             words: [self.record.slot, 16, 0, 0, 0, 0, 0, 0],
         }
     }
+    /// Give up the resource borrows once every pass that uses the packet is recorded,
+    /// keeping only its own record. Retire that record after the list is submitted; the
+    /// resources it named must still outlive that submission.
+    pub fn release(self) -> StorageBuffer {
+        self.record
+    }
     /// Retire the packet and release its resource borrows after its last submission.
     pub fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
         graph.forget(Resource::Buffer(self.record.buffer));

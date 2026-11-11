@@ -16,9 +16,9 @@
 //! `--traced` implies `--sun-shadows` and draws the frame with camera rays and
 //! deferred shading instead of the mesh pass: the renderer's traced primary
 //! visibility with `SoftShadows::Exact` and GI, temporal reconstruction and
-//! reflections off, which is `HardwareRt` at `Quality::Reference`. Motion blur is off
-//! at this level on both layers (the Ara frame does not chain its hit-based motion
-//! surface yet); bloom, tone and the rest of post are on.
+//! reflections off, which is `HardwareRt` at `Quality::Reference`. Post is at its
+//! defaults, motion blur included: on a traced frame its motion surface comes from the
+//! hit records.
 //!
 //! `--frames N` renders a sequence: pose 0 to N-1 of the fixture's camera path (the
 //! eye moves 0.04 m sideways per pose) through one renderer, so every frame after the
@@ -231,14 +231,6 @@ fn cache_settings(level: Level) -> renderlab::IndirectSettings {
     }
 }
 
-/// Post at the traced level: the defaults without motion blur, on both layers.
-fn traced_post() -> renderlab::PostSettings {
-    renderlab::PostSettings {
-        motion_blur: false,
-        ..Default::default()
-    }
-}
-
 /// The exposed HDR target and the displayed image of one frame, and the cache's table
 /// after it at the `--gi` level.
 type Frame = (Vec<u8>, Vec<u8>, Option<Vec<u32>>);
@@ -334,7 +326,7 @@ fn wgpu_frame(
         } else {
             ReflectionSettings::off()
         })?;
-        r.set_post_settings(traced_post())?;
+        r.set_post_settings(PostSettings::default())?;
     }
     // The frame the ara backend assembles today: everything else is a later level.
     r.set_atmosphere(atmosphere)?;
@@ -497,11 +489,7 @@ fn ara_frame(
                     (true, false) => forward::Primary::Traced,
                     _ => forward::Primary::Raster,
                 },
-                post: Some(if traced {
-                    traced_post()
-                } else {
-                    renderlab::PostSettings::default()
-                }),
+                post: Some(renderlab::PostSettings::default()),
                 indirect: gi.then(|| Indirect {
                     settings: cache_settings(level),
                     read_table: true,
@@ -636,10 +624,10 @@ fn write(
                 if level.reflections { ", traced reflections" } else { "" }
             ),
                                     "primary": match (level.traced, level.gi, level.bounce) {
-                (true, true, true) if level.filter => "traced, exact soft shadows, radiance cache with bounce and the cell filter (2^17 slots), no reconstruction, reflections or motion blur",
-                (true, true, true) => "traced, exact soft shadows, radiance cache with bounce (2^17 slots, no filter), no reconstruction, reflections or motion blur",
-                (true, true, false) => "traced, exact soft shadows, radiance cache sky visibility (2^17 slots, no bounce or filter), no reconstruction, reflections or motion blur",
-                (true, false, _) => "traced, exact soft shadows, no GI, reconstruction, reflections or motion blur",
+                (true, true, true) if level.filter => "traced, exact soft shadows, radiance cache with bounce and the cell filter (2^17 slots), post at its defaults",
+                (true, true, true) => "traced, exact soft shadows, radiance cache with bounce (2^17 slots, no filter), post at its defaults",
+                (true, true, false) => "traced, exact soft shadows, radiance cache sky visibility (2^17 slots, no bounce or filter), post at its defaults",
+                (true, false, _) => "traced, exact soft shadows, no GI, post at its defaults",
                 _ => "mesh pass",
             },
             "atmosphere": if level.atmosphere.active() { "physical sky without volumetric fog" } else { "off" },

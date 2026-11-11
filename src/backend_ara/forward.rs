@@ -322,6 +322,13 @@ fn provided<'a>(
     }
 }
 
+/// Post's motion surface kernel: from the depth target, or from the hit records with
+/// the packet record it was dispatched with.
+enum SurfaceKernel {
+    Raster(RasterPostSurface),
+    Hits(Kernel, StorageBuffer),
+}
+
 /// What an active atmosphere produces for the sky backdrop and the lit pass.
 struct Sky {
     luts: AtmosphereTargets,
@@ -488,13 +495,9 @@ fn frame(
     let size = scene.size;
     let deferred_path = scene.primary != Primary::Raster;
     let interactive = scene.primary == Primary::TracedInteractive;
-    // Post's motion surface on a traced frame comes from hit records (entry 35), which
-    // this frame does not chain yet; bloom and tone need nothing from the frame family.
     ensure!(
-        !deferred_path
-            || (scene.sun_shadows.is_some()
-                && scene.post.is_none_or(|p| !p.enabled || !p.motion_blur)),
-        "a traced frame needs sun shadows, and its post runs without motion blur for now"
+        !deferred_path || scene.sun_shadows.is_some(),
+        "a traced frame needs sun shadows"
     );
     // `prepare_cache_and_post`: only traced frames feed the cache.
     let indirect = scene.indirect.filter(|i| i.settings.enabled);
@@ -1623,10 +1626,11 @@ fn frame(
         )?);
         let mut surface = None;
         if settings.motion_blur {
-            let kernel = RasterPostSurface::new(gpu, cache)?;
+            // `PostGpu::prepare` takes the frame's camera, jittered on a reconstructed
+            // frame: its current matrix is the unjittered one, its inverse the frame's.
             let frame = PostCameraFrame::new(
                 gpu,
-                scene.camera,
+                view,
                 previous_camera,
                 size,
                 settings.shutter_angle_degrees,
@@ -1634,7 +1638,36 @@ fn frame(
             )?;
             graph.import(Resource::Buffer(frame.record.buffer), Access::HostWrite);
             let auxiliary = Texture::new(gpu, size, Format::Rgba32Float, true, false)?;
-            kernel.record(&mut graph, &mut rec, &depth, &frame, &auxiliary)?;
+            // `PostGpu::encode`'s surface pass: from the depth target on a raster frame,
+            // from the hit records and the placements' motion on a traced one.
+            let kernel = if deferred_path {
+                let kernel = Kernel::new(gpu, cache, Pass::PostPrimarySurface)?;
+                let values = shader::inputs(Pass::PostPrimarySurface)?
+                    .iter()
+                    .map(|spec| {
+                        Ok((
+                            spec.key,
+                            match (spec.key.group, spec.key.binding) {
+                                (0, 40) => Input::Buffer(&frame.record),
+                                (0, 41) => Input::Image(&auxiliary),
+                                // Rigid placements: last frame's vertices are this frame's.
+                                (1, 6) => Input::Buffers(&arrays.vertices),
+                                _ => shared.input(spec, None)?,
+                            },
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let packet = HeapBindings::new(gpu, Pass::PostPrimarySurface, &values)?;
+                packet.import(&mut graph);
+                kernel.record(&mut graph, &mut rec, &packet, [size[0], size[1], 1])?;
+                // The packet borrows the frame record and the surface, which move on
+                // below: keep only its own record, retired with the kernel.
+                SurfaceKernel::Hits(kernel, packet.release())
+            } else {
+                let kernel = RasterPostSurface::new(gpu, cache)?;
+                kernel.record(&mut graph, &mut rec, &depth, &frame, &auxiliary)?;
+                SurfaceKernel::Raster(kernel)
+            };
             let tiles = Texture::new(
                 gpu,
                 size.map(|n| n.div_ceil(16)),
@@ -1747,7 +1780,13 @@ fn frame(
             bloom.retire(gpu)?;
         }
         if let Some((kernel, frame, blurred)) = surface {
-            kernel.retire(gpu)?;
+            match kernel {
+                SurfaceKernel::Raster(kernel) => kernel.retire(gpu)?,
+                SurfaceKernel::Hits(kernel, record) => {
+                    kernel.retire(gpu)?;
+                    record.retire(gpu)?;
+                }
+            }
             frame.record.retire(gpu)?;
             post_images.push(blurred);
         }
