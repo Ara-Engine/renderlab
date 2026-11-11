@@ -2587,12 +2587,14 @@ fn frame(
                 + (size[0] + 8).div_ceil(4) * (size[1] + 4).div_ceil(4)
                 + size[0].div_ceil(16) * size[1].div_ceil(16);
             let entries = StorageBuffer::device(gpu, u64::from(count) * u64::from(capacity) * 4)?;
-            let arguments = StorageBuffer::with_usage(
+            // Device-local, as the renderer's: binning clears it every frame before its
+            // atomics. Host-visible, it lay in system memory on a discrete NVIDIA card,
+            // and every 4x4 tile's appends crossed the bus.
+            let arguments = StorageBuffer::device_with_usage(
                 gpu,
-                &vec![0u8; count as usize * 16],
+                u64::from(count) * 16,
                 ara_gpu::vk::BufferUsageFlags::INDIRECT_BUFFER,
             )?;
-            graph.import(Resource::Buffer(arguments.buffer), Access::HostWrite);
             let mut built = Vec::new();
             for (slot, program) in list_programs.into_iter().enumerate() {
                 // `RlList`: slot, list base, capacity, flags, then each batch's slot.
