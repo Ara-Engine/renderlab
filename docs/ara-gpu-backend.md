@@ -1320,3 +1320,43 @@ Decals and streamed textures are tables and uploads rather than passes; they fol
 whichever scene needs them. `Engine` itself takes wgpu textures, so "an engine frame
 through Ara" means a second entry point over the same scene description, as
 `forward::render` is for the forward path, until the two are unified.
+
+## GI cache: scope before porting
+
+The world radiance cache (`gi_cache.rs`, 3,227 lines; `gi_cache.wgsl`, `gi_cells.wgsl`,
+`gi_api.wgsl` and `gi_shade_entry.wgsl`, 2,948 lines) is the first family the default
+image needs that has no ported entry. Read from the source; nothing below is built.
+
+**Thirteen compute entries, in `GiState::encode` order:** `gi_probe` (visible pixels
+request cells), `gi_gather` (bounce), three rounds of `gi_claim` and `gi_resolve` with
+`gi_resolve_last` closing the third (inserts are `atomicMax` claims the winner
+writes), `gi_scan` (the fixed refresh rotation), `gi_setup`, `gi_rays` and `gi_finish`
+(up to 2^21 visibility rays a frame, traced in parallel), `gi_integrate` (the occluded
+sky as L2 SH), `gi_filter` (cell-space filter), then `gi_light` and `gi_shade_cells`
+(bounce: light visibility, and the material program shading cells through its own
+entry, so this family also goes through the program composer). Shading reads the
+result through `indirect_irradiance` and lighting binding 20, which the frames above
+already bind as the header-only "off" table.
+
+**What makes it larger than a pass count suggests:**
+
+- **It is stateful across frames.** Cells persist, refresh on a rotation and evict;
+  after a cut the cache fills over several frames. A first frame alone shows partly
+  filled GI, so the comparison with wgpu has to be a frame sequence with the same
+  per-frame plan on both layers. `forward::render` is one-shot; this family needs the
+  frame code to keep resources and history between frames first.
+- **The CPU plan is large.** `prepare_gi` (from line 2125) decides each frame's
+  groups, scan, clear, integrate, bounce and filter, publishes a 1,104-byte frame
+  record with up to 32 boxes, and maintains request, counter and miss words. That
+  plan has to be shared with the wgpu renderer as a function, as the shadow planner
+  now is, not re-derived.
+- **Two ray sources.** Hardware rays are the variant to port first; the software
+  variant (`gi_rays_software`, `gi_gather_software`, the CPU BVH in `gi_bvh.rs`)
+  belongs with the non-RT default.
+
+**Smallest comparable configuration:** `IndirectSettings` with `bounce` off and the
+filter bits clear is sky visibility only (the original G1): probe, claim, resolve,
+scan, setup, rays, finish and integrate, nine entries, with no program-composed
+shading entry. That is the first target: stage replays for those nine, then a
+persistent frame, then a fixed-length sequence compared with wgpu. Bounce (gather,
+light, cell shading) and the filter follow.
