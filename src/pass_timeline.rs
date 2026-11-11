@@ -136,13 +136,7 @@ impl PassTimeline {
         let count = entry.names.len() as u32;
         let offset = u64::from(first) * 8;
         encoder.resolve_query_set(&self.queries, first..first + count, &self.resolve, offset);
-        encoder.copy_buffer_to_buffer(
-            &self.resolve,
-            offset,
-            &entry.readback,
-            0,
-            u64::from(count) * 8,
-        );
+        encoder.copy_buffer_to_buffer(&self.resolve, offset, &entry.readback, 0, u64::from(count) * 8);
     }
 
     /// After the frame's final submission: maps its stamps.
@@ -152,12 +146,9 @@ impl PassTimeline {
         let done = Arc::new(OnceLock::new());
         let callback = done.clone();
         let bytes = entry.names.len() as u64 * 8;
-        entry
-            .readback
-            .slice(..bytes)
-            .map_async(wgpu::MapMode::Read, move |r| {
-                let _ = callback.set(r);
-            });
+        entry.readback.slice(..bytes).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = callback.set(r);
+        });
         entry.mapped = Some(done);
     }
 
@@ -168,22 +159,15 @@ impl PassTimeline {
                 continue;
             };
             let bytes = entry.names.len() as u64 * 8;
-            let stamps: Option<Vec<u64>> = result
-                .is_ok()
-                .then(|| {
-                    let words = entry
-                        .readback
-                        .slice(..bytes)
-                        .get_mapped_range()
-                        .map(|view| {
-                            view.chunks_exact(8)
-                                .map(|c| u64::from_ne_bytes(c.try_into().unwrap()))
-                                .collect()
-                        });
-                    entry.readback.unmap();
-                    words.ok()
-                })
-                .flatten();
+            let stamps: Option<Vec<u64>> = result.is_ok().then(|| {
+                let words = entry.readback.slice(..bytes).get_mapped_range().map(|view| {
+                    view.chunks_exact(8)
+                        .map(|c| u64::from_ne_bytes(c.try_into().unwrap()))
+                        .collect()
+                });
+                entry.readback.unmap();
+                words.ok()
+            }).flatten();
             if let Some(stamps) = stamps {
                 let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * self.period * 1e-6;
                 // Repeated stage names in one frame add up.
