@@ -747,11 +747,18 @@ pub(super) fn map_source() -> String {
 /// The N-VSM1 disk lookup module: the window radius, then shaders/virtual_shadow_disk.wgsl.
 /// Measurement only: `RENDERLAB_VD=NAME=VALUE,...` replaces the defaults of the module's `VD_`
 /// override constants (screens and cost splits without a build per variant; docs/n-vsm1.md).
-/// Unset, the module is the file.
+/// `RENDERLAB_VD_SHADER=PATH` reads the module from a variant file instead (the same layouts
+/// and entries), as `RENDERLAB_VSM_SHADER` does for the exact lookup. Unset, the module is the
+/// file.
 pub(super) fn disk_source() -> String {
+    let variant = std::env::var("RENDERLAB_VD_SHADER")
+        .ok()
+        .map(|path| std::fs::read_to_string(path).unwrap());
     let mut source = format!(
         "const VD_R:u32={DISK_RADIUS}u;\n{}",
-        include_str!("../shaders/virtual_shadow_disk.wgsl")
+        variant
+            .as_deref()
+            .unwrap_or(include_str!("../shaders/virtual_shadow_disk.wgsl"))
     );
     for (name, value) in std::env::var("RENDERLAB_VD")
         .iter()

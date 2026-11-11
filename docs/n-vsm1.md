@@ -246,3 +246,38 @@ py -3 -B tools/n-vsm1/yard.py run NAME:timing:nonrt:passes+RENDERLAB_PASS_LOG_DE
 py -3 -B tools/n-vsm1/yard.py timing OUT.json RUN...
 game_scene --path nonrt --diag vsm-lookup=disk      # the lookup on the courtyard
 ```
+
+## N-VSM2 (2026-11-11, branch `t3/n-vsm2` from main `c341861`)
+
+Brief: find and fix the bias and the flips, then cut the map windows by skipping. Written as the work goes; the result table is at the end of this section once the fixes are scored.
+
+### What the errors were (M)
+
+Baseline at `c341861`, the unchanged scorers, one repeat (lease `n1`): S1 partial RMS .137 / .136; S2 .093-.098 with 87, 8 and 92 camera-track leaks; S3 .078-.087 with 190-370 flips. `Surface` in the same lease: .082 / .081, .073-.075 and .079-.083, no flips, S3 leaks 2-9.
+
+A new CPU check, `tools/n-vsm1/exact.py`, traces S2's 32 triangles from every crop pixel's receiver toward Disk's own 64 sun samples (`exact64`) and toward 1,024 stratified ones. S2 `shadow-step` frame 16, partial pixels (8,338, of which 8,300 are penumbrae wider than 3 pixels):
+
+| Against the film | Partial RMS |
+|---|---|
+| Exact, 1,024 samples at the pixel centre | .018 |
+| Exact, Disk's 64 samples | .020 |
+| `Surface` | .074 |
+| `Disk` | .089 |
+
+- **The 64-sample pattern is not the problem.** It is within .010 of the 1,024-sample answer with no mean error, and a noise-free centre-point lookup could score .020 where `Surface`'s noise scores .074.
+- **Disk's error is the map: 5.2 percent too dark on average** (Disk minus exact64: mean -.052, RMS .091). The previous session's guess that S2's partial pixels are one-to-two-pixel contact transitions is wrong: 99.5 percent of them are wide penumbrae.
+- **The darkening is not at a page or level edge.** Every partial receiver is on level 1 and the error follows the shadows, not the page grid (level and page overlay dumped with `tools/n-vsm1/variant.py`).
+- **It is the max-mip bands.** S2 has three levels (texels 0.98, 1.95 and 3.9 mm), so real texels serve occluders only up to 0.29 m above a receiver along the light. The blocker (0.38-0.5 m) and the plate's top edge (0.94 m) are served by the bands above, where a cell is its highest texel: any occupied texel fills the cell, so every occluder grows by up to a cell, and a cell is a third to two thirds of the disk's radius. By the mean height of the occluders a receiver sees:
+
+| Occluder height above the receiver | Served by | Partial pixels | Disk minus exact64, mean | RMS |
+|---|---|---:|---:|---:|
+| 0 - 0.07 m | level 0 | 253 | -.008 | .121 |
+| 0.07 - 0.15 m | level 1 | 232 | -.006 | .094 |
+| 0.15 - 0.29 m | level 2 | 377 | -.029 | .089 |
+| 0.29 - 0.59 m | max-mip band 1 | 2,507 | -.039 | .080 |
+| 0.59 - 1.17 m | max-mip band 2 | 3,658 | -.081 | .102 |
+
+  The rectangle root saw is the blocker's shadow drawn from whole cells.
+- **A second error has no sign: about .09 RMS in the real levels too.** A band's texel is a third to two thirds of the disk's radius and the raster samples texel centres, so an occluder edge sits up to half a texel from the truth. That is a blotchy, still error of the same size as `Surface`'s noise. Removing the max-mip bias alone therefore cannot bring S2 below `Surface` without TR1.
+- **S3's flips are the near-field screen samples.** All 242 on frame 0 are lit relief pixels with count 0. The map alone leaves 240 of them lit; the screen samples alone turn all 242 black. A sample was a column from its own point down to the receiver, so a neighbouring pixel within half a footprint of the light's axis hid the whole disk: any neighbour within about 30 degrees of the sun, where the truth needs 2.3.
+- **S2's camera-track leaks are a second occluder the lookup ignored.** They are umbra pixels returning 7 to 14 of 64 samples lit (frame 27: 87 pixels on the tiles; frames 31 on: 8-10 floor pixels), where the plate's and the blocker's shadows overlap. The top layer holds the plate; the blocker under it is in the peel layer, which the lookup read only as the top surface's underside. This is not the two-layer leak of a closed caster behind another (that one is absent from both layers); here the data is in the map.
