@@ -380,6 +380,23 @@ impl Renderer {
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         let state = self.primary.as_ref().unwrap();
+        self.encode_program_lists_with(encoder, shading, timestamp_writes, |k| {
+            let list = &self.program_slot(state.programs[k]).pipelines.list;
+            list[usize::from(state.requests)][shading as usize]
+                .as_ref()
+                .unwrap()
+        });
+    }
+    /// `encode_program_lists` with the pipeline of the frame's `k`th program from `pipeline`
+    /// (view modes shade the same lists with their own modules).
+    pub(in crate::renderer) fn encode_program_lists_with<'p>(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        shading: Shading,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        pipeline: impl Fn(usize) -> &'p wgpu::ComputePipeline,
+    ) {
+        let state = self.primary.as_ref().unwrap();
         let lists = state.lists.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
         let group = state.bindings.as_ref().unwrap().list[shading as usize]
@@ -404,9 +421,8 @@ impl Renderer {
         pass.set_bind_group(1, &*g.arrays, &[]);
         pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
-        for (k, &id) in state.programs.iter().enumerate() {
-            let list = &self.program_slot(id).pipelines.list[usize::from(state.requests)];
-            pass.set_pipeline(list[shading as usize].as_ref().unwrap());
+        for k in 0..state.programs.len() {
+            pass.set_pipeline(pipeline(k));
             pass.set_bind_group(0, &**group, &[k as u32 * lists.stride]);
             pass.dispatch_workgroups_indirect(&lists.args.value, k as u64 * ARGS_BYTES);
         }

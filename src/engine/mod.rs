@@ -12,7 +12,7 @@
 //! tuning surface changes as features are measured, while this module stays stable
 //! (docs/api.md lists what is frozen).
 mod device;
-mod ids;
+pub(crate) mod ids;
 mod scene;
 // Crate-visible for a second GPU layer's engine: the same lighting and atmosphere
 // translation, over the same state.
@@ -21,7 +21,7 @@ pub(crate) mod state;
 
 pub use device::{Capabilities, ExperimentalRayQuery, RenderPath};
 pub use ids::{
-    EmitterId, EnvironmentId, Id, MaterialId, MeshId, ObjectId, ProgramId, TextureId, kind,
+    EmitterId, EnvironmentId, Id, MaterialId, MeshId, ObjectId, ProgramId, TextureId, ViewId, kind,
 };
 pub use scene::Scene;
 pub use settings::{Background, Exposure, Quality, Settings, Sky, Sun};
@@ -41,11 +41,15 @@ pub use crate::{
     ReloadReport, RenderScale, Renderer, SizeKey, SpawnShape, SpriteAlignment, Tonemapper,
     Transparency, Value, Vec3, Vertex, VolumetricFog,
 };
+pub use crate::{
+    ID_NONE, ID_UNTAGGED, IdLayer, IdPixel, IdReadback, IdRect, IdRequest, IdsLost, MAX_ID_RECT,
+    Outputs, ViewMode,
+};
 
 use crate::{
     Emitter, EnvironmentMap, EnvironmentParameters, HardwareShadowOptions, Instances, Material,
     MaterialDescriptor, Mesh, PrimaryVisibility, Program, ProgramDescriptor, RendererOptions,
-    SampleCount, SkinnedMeshInstance, Texture, TextureBinding, ViewMode,
+    SampleCount, SkinnedMeshInstance, Texture, TextureBinding,
 };
 use state::{MaterialEntry, Residency, State};
 use std::{
@@ -235,6 +239,8 @@ pub struct Engine {
     /// The scene: resource handles by id, objects in batches, sun, lights, sky, settings.
     state: State<Handles>,
     events: Events,
+    /// Object ids and the view's ID output switch (src/object_ids.rs).
+    ids: crate::object_ids::EngineIds,
 }
 
 /// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
@@ -331,9 +337,16 @@ impl Engine {
             output: None,
             state,
             events: Events::default(),
+            ids: Default::default(),
         };
         settings::apply(&mut engine.renderer, path, &engine.state.settings)?;
         engine.apply_lighting()?;
+        // Measurement switch: ids on for the view of an embedder that does not set them
+        // (cost timing through Ara's player, docs/design-id-output.md).
+        if std::env::var_os("RENDERLAB_IDS").is_some_and(|v| v == "1") {
+            let view = engine.view();
+            engine.set_outputs(view, Outputs { ids: true })?;
+        }
         Ok(engine)
     }
 
@@ -719,7 +732,9 @@ impl Engine {
         self.state.transform(object)
     }
     pub fn despawn(&mut self, object: ObjectId) -> Result<(), Error> {
-        self.state.despawn(object)
+        self.state.despawn(object)?;
+        self.ids.objects.forget(object);
+        Ok(())
     }
     pub fn object_count(&self) -> usize {
         self.state.object_count()
@@ -926,6 +941,9 @@ impl Engine {
                 self.state.batches.get_mut(id)?.instances = Some(instances);
             }
         }
+        if self.ids.outputs.ids {
+            self.publish_object_ids()?;
+        }
         let Self {
             renderer,
             state:
@@ -945,10 +963,11 @@ impl Engine {
             let instances = batch.instances.as_mut().expect("uploaded above");
             draws.push(crate::Draw::new(mesh, instances).with_material(material));
         }
+        let mode = self.ids.mode;
         let deadline = Instant::now() + ADMISSION;
         loop {
             if let Some(report) =
-                renderer.try_render_view(color, camera, &mut draws, ViewMode::Lit)?
+                renderer.try_render_view(color, camera, &mut draws, mode)?
             {
                 return Ok(report);
             }
@@ -975,6 +994,8 @@ impl Engine {
     /// Nonblocking progress: completed frames and GPU pass timings since the last poll.
     pub fn poll(&mut self) -> Result<Events, Error> {
         stash(&mut self.events, self.renderer.poll()?);
+        let (ids, lost) = self.renderer.take_ids()?;
+        stash_ids(&mut self.events, ids, lost);
         Ok(std::mem::take(&mut self.events))
     }
     /// Reads back the engine's output after the last frame (blocking). Needs an RGBA8
@@ -999,6 +1020,87 @@ impl Engine {
             }
             std::thread::yield_now();
         }
+    }
+
+    // ---- Object ids (docs/design-id-output.md) ----
+
+    /// The embedder's ids for an object's primitives: disjoint ranges `(first primitive,
+    /// count, id)` in any order, so one merged object can hold many entities; one id for
+    /// the whole object is `&[(0, u32::MAX, id)]`, and an empty list clears them. `ID_NONE`
+    /// and `ID_UNTAGGED` are reserved; primitives outside every range read as untagged.
+    /// Frames from the next one on report them.
+    pub fn set_object_ids(&mut self, object: ObjectId, ranges: &[(u32, u32, u32)]) -> Result<(), Error> {
+        self.state.transform(object)?;
+        self.ids.objects.set(object, ranges)
+    }
+    /// The engine's one view until `create_view` exists (docs/design-views.md): the
+    /// handle the view calls below take.
+    pub fn view(&self) -> ViewId {
+        self.ids.view
+    }
+    /// A view's outputs (its `ViewDesc::outputs` once views exist). Ids are off by default;
+    /// turning them off frees their targets and the next frames encode nothing for them.
+    pub fn set_outputs(&mut self, view: ViewId, outputs: Outputs) -> Result<(), Error> {
+        self.ids.check(view)?;
+        self.ids.outputs = outputs;
+        self.renderer.set_id_output(outputs.ids);
+        Ok(())
+    }
+    /// What the view shows (its `ViewDesc::view_mode` once views exist); `Lit` by default.
+    pub fn set_view_mode(&mut self, view: ViewId, mode: ViewMode) -> Result<(), Error> {
+        self.ids.check(view)?;
+        self.ids.mode = mode;
+        Ok(())
+    }
+    /// The view's ID target of its last rendered frame: R32Uint, the output's size, two
+    /// layers (0: opaque ids, 1: front ids). None while ids are off or before a frame.
+    pub fn view_ids(&self, view: ViewId) -> Option<&wgpu::Texture> {
+        self.ids.check(view).ok()?;
+        self.renderer.id_texture()
+    }
+    /// Writes one id layer of the view's last frame into `target`, for an overlay that reads
+    /// ids every frame through the colour's handoff. `target` is a single-sample, single-mip
+    /// 2D `Rgba8Unorm` (not sRGB) texture of the view's size whose usage includes
+    /// `RENDER_ATTACHMENT | COPY_SRC` (the handoff copies from it); anything else is an
+    /// error. Each 32-bit id is packed bit-exact little-endian, one texel per output pixel
+    /// (R = bits 0-7, G = 8-15, B = 16-23, A = 24-31; read by exact texel fetch): `ID_NONE`
+    /// (0) is nothing, `ID_UNTAGGED` (0xFFFF_FFFF) a hit without an id. Queued behind that
+    /// frame, nothing waits; call it after each `render`/`render_to` the overlay follows.
+    pub fn render_view_ids_to(
+        &mut self,
+        view: ViewId,
+        target: &wgpu::Texture,
+        layer: IdLayer,
+    ) -> Result<(), Error> {
+        self.ids.check(view)?;
+        let layer = match layer {
+            IdLayer::Opaque => 0,
+            IdLayer::Front => 1,
+        };
+        self.renderer.write_ids_to(target, layer)
+    }
+    /// Asks for the ids of a rectangle (at most `MAX_ID_RECT` a side) of the view's last
+    /// frame without stalling: the copy is queued after that frame, and its result arrives
+    /// in `poll()` (`Events::ids`, naming the view and frame), or `Events::ids_lost` when the
+    /// copy did not land within `ID_TICKS` rendered frames. Refused at once while `ID_SLOTS` requests
+    /// are in flight, or before the view rendered a frame with ids.
+    pub fn request_ids(&mut self, view: ViewId, rect: IdRect) -> Result<IdRequest, Error> {
+        self.ids.check(view)?;
+        self.renderer.request_ids(view, rect)
+    }
+    /// Gives the renderer this frame's tag tables, in the order the frame's draws place
+    /// their instances.
+    fn publish_object_ids(&mut self) -> Result<(), Error> {
+        let Self { state, ids, .. } = self;
+        let mut batches = Vec::with_capacity(state.batches.len());
+        for id in state.batches.ids() {
+            let batch = state.batches.get(id)?;
+            let material = &state.materials.get(batch.material)?.material;
+            batches.push((material.transparency.is_some(), &batch.objects[..]));
+        }
+        ids.objects.tables(batches.into_iter(), &mut ids.tables);
+        self.renderer.set_object_tags(&self.ids.tables);
+        Ok(())
     }
 
     /// Retries a bounded renderer admission while the GPU drains, keeping its events.
@@ -1054,6 +1156,20 @@ fn asset_material(
         double_sided: m.double_sided,
         ..Default::default()
     })
+}
+
+/// Keeps the newest `KEPT_ID_EVENTS` id events for `Engine::poll`, counting the dropped.
+fn stash_ids(kept: &mut Events, ids: Vec<IdReadback>, lost: Vec<IdsLost>) {
+    kept.ids.extend(ids);
+    kept.ids_lost.extend(lost);
+    while kept.ids.len() + kept.ids_lost.len() > crate::KEPT_ID_EVENTS {
+        if kept.ids.is_empty() {
+            kept.ids_lost.remove(0);
+        } else {
+            kept.ids.remove(0);
+        }
+        kept.ids_dropped += 1;
+    }
 }
 
 /// Keeps the newest `KEPT_EVENTS` of each kind for `Engine::poll`.

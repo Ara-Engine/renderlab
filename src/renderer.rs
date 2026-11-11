@@ -56,6 +56,12 @@ pub(crate) mod skinning;
 // TP1 transparent pass and particles (docs/m7-tp1.md).
 #[path = "transparency_gpu.rs"]
 pub(crate) mod transparency_gpu;
+// Entity-ID output (docs/design-id-output.md).
+#[path = "id_output.rs"]
+pub(crate) mod id_output;
+// View modes as shading-stage switches (docs/design-id-output.md).
+#[path = "view_modes.rs"]
+pub(crate) mod view_modes;
 pub use gi_cache::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
     ProbeCounters,
@@ -625,6 +631,8 @@ pub struct Renderer {
     upscale: Option<temporal_reconstruction::Upscale>,
     /// TP1 transparent draws and particle emitters (`transparency_gpu.rs`).
     transparency: transparency_gpu::TransparencyState,
+    /// The view's optional outputs: entity ids and the view mode (`id_output.rs`).
+    outputs: id_output::ViewOutputs,
 }
 
 // Native wgpu scope futures are immediately ready. This never polls for GPU completion.
@@ -1089,6 +1097,7 @@ impl Renderer {
             reconstruction_frame: None,
             upscale: None,
             transparency: Default::default(),
+            outputs: Default::default(),
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
             hardware_source,
@@ -2410,6 +2419,8 @@ impl Renderer {
         view_mode: ViewMode,
     ) -> Result<Option<FrameReport>, Error> {
         self.check_fault()?;
+        // Hit-record frames shade every view mode through the lit frame (view_modes.rs).
+        let view_mode = self.frame_view_mode(view_mode);
         let preparation_start = Instant::now();
         // TP1: the transparent pass runs after reconstruction, with the unjittered camera.
         self.transparency.camera = Some(*camera);
@@ -2420,6 +2431,7 @@ impl Renderer {
         // reconstructed, so their frames are not jittered either.
         self.reconstruction_frame = (self.reconstruction.enabled
             && view_mode == ViewMode::Lit
+            && !self.outputs.modes.data()
             && self.primary_mode != PrimaryVisibility::Raster
             && self.soft_mode != crate::SoftShadows::Temporal)
             .then_some(self.reconstruction_index);
@@ -3325,7 +3337,11 @@ impl Renderer {
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
                 mark(&mut encoder, "shading");
-                self.encode_primary_shading(&mut encoder, shading, stamps(0));
+                if self.outputs.modes.shades() {
+                    self.encode_view_shading(&mut encoder, shading, stamps(0))?;
+                } else {
+                    self.encode_primary_shading(&mut encoder, shading, stamps(0));
+                }
             }
             if reconstructed {
                 mark(&mut encoder, "tr1");
@@ -3472,16 +3488,23 @@ impl Renderer {
         }
         // TP1: transparent draws and particles, after opaque shading and reconstruction.
         // Upscaled frames skip them (docs/m7-gaps.md, Transparency).
-        if lit && self.upscale.is_none() {
+        if lit && self.upscale.is_none() && !self.outputs.modes.data() {
             mark(&mut encoder, "transparency");
             self.encode_transparency(&mut encoder, draws, transparent, traced)?;
+        }
+        if traced && self.outputs.ids.enabled() {
+            mark(&mut encoder, "ids");
+            self.encode_ids(&mut encoder, draws, transparent, reconstructed);
         }
         // TR1b upscaling: present writes the caller's target, not the internal one.
         let output_view = self.upscale.as_ref().map(|u| {
             self.ledger
                 .attachment(u.output.create_view(&Default::default()))
         });
-        if lit && self.lighting.hdr.is_some() {
+        if lit && self.lighting.hdr.is_some() && self.outputs.modes.data() {
+            mark(&mut encoder, "post");
+            self.encode_view_present(&mut encoder, output_view.as_ref().unwrap_or(&view));
+        } else if lit && self.lighting.hdr.is_some() {
             mark(&mut encoder, "post");
             self.encode_hdr_present(
                 &mut encoder,
