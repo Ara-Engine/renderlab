@@ -140,7 +140,7 @@ pub struct SceneTextures<'a> {
 }
 
 /// Where one frame's wall time went, as the CPU saw it.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct FrameTimes {
     /// Building the frame before it is submitted: allocation, uploads, shader
     /// composition, pipelines and recording. Includes `geometry`.
@@ -151,6 +151,11 @@ pub struct FrameTimes {
     pub gpu: std::time::Duration,
     /// Reading the images back and releasing the frame's resources.
     pub finish: std::time::Duration,
+    /// On a sequence `without_images`: the GPU's own time in each labelled pass, in
+    /// milliseconds from the device's timestamps, summed by label in first-run order.
+    /// What `gpu` holds beyond their sum is unlabelled: acceleration-structure builds,
+    /// uploads, copies and fills, and the gaps between passes.
+    pub passes: Vec<(String, f64)>,
 }
 
 /// A scene for [`render`], in the terms the wgpu renderer takes it.
@@ -560,7 +565,7 @@ fn provided<'a>(
         (0, 5) | (0, 6) => traced.map(|t| &t.visibility),
         (3, 51) => sky.map(|s| &s.luts.transmittance),
         (3, 52) => sky.map(|s| &s.luts.sky),
-        (3, 53) => sky.map(|s| &s.volume),
+        (3, 53) => sky.map(|s| s.volume),
         (3, 6) => sky?.environment.map(|e| e[0]),
         (3, 7) => sky?.environment.map(|e| e[1]),
         _ => None,
@@ -619,6 +624,11 @@ struct SkyTables {
     medium: Option<crate::AtmosphereMedium>,
     luts: AtmosphereTargets,
     environment: Option<Environment>,
+    /// The camera volume and the fog's scatter volume, for the grid they were made at.
+    /// Fog is not assembled: the scatter volume and the camera volume's fog slices
+    /// stay the zeros they were made with, and aerial perspective rewrites its own
+    /// slices every frame.
+    volumes: Option<([u32; 2], Texture, Texture)>,
 }
 /// The procedural diffuse and specular cubes with their level views.
 struct Environment {
@@ -630,6 +640,7 @@ struct Environment {
 impl SkyTables {
     fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
         let cubes = self.environment.map(|e| [e.diffuse.0, e.specular.0]);
+        let volumes = self.volumes.map(|(_, volume, scatter)| [volume, scatter]);
         for image in [
             self.luts.transmittance,
             self.luts.multiscatter,
@@ -637,6 +648,7 @@ impl SkyTables {
         ]
         .into_iter()
         .chain(cubes.into_iter().flatten())
+        .chain(volumes.into_iter().flatten())
         {
             gpu.retire(Resource::Image(image.image))?;
         }
@@ -655,8 +667,7 @@ impl SkyTables {
 struct Sky<'a> {
     luts: &'a AtmosphereTargets,
     /// Camera volume: fog in slices 0..64 (zero here), aerial perspective in 64..96.
-    volume: Texture,
-    scatter: Texture,
+    volume: &'a Texture,
     /// The procedural diffuse and specular cubes, when the environment is on.
     environment: Option<[&'a Texture; 2]>,
 }
@@ -728,6 +739,8 @@ struct Kept {
     meshes: BTreeMap<u64, ResidentMesh>,
     /// The atmosphere's tables, made by the first frame with an active atmosphere.
     sky: Option<SkyTables>,
+    /// The Interactive trace's repair queue: a header, then room for every pixel.
+    repairs: Option<StorageBuffer>,
 }
 /// A sequence of frames: what each hands to the next, and what stays on the GPU (the
 /// radiance cache, the reconstruction's history, named meshes with their bottom-level
@@ -776,6 +789,9 @@ impl Frames {
         }
         if let Some(sky) = self.kept.sky {
             sky.retire(gpu)?;
+        }
+        if let Some(repairs) = self.kept.repairs {
+            repairs.retire(gpu)?;
         }
         Ok(())
     }
@@ -870,6 +886,7 @@ fn frame(
         tr1,
         meshes: resident,
         sky: tables,
+        repairs: kept_repairs,
     } = kept;
     let started = std::time::Instant::now();
     let mut times = FrameTimes::default();
@@ -1244,6 +1261,7 @@ fn frame(
                 medium: None,
                 luts: AtmosphereTargets::new(gpu)?,
                 environment: None,
+                volumes: None,
             });
         }
         let kept = tables.as_mut().context("made above")?;
@@ -1254,6 +1272,22 @@ fn frame(
                 specular: Texture::cube_chain(gpu, 128, 5)?,
                 diffuse: Texture::cube_chain(gpu, 16, 1)?,
             });
+        }
+        let volumes_made = kept
+            .volumes
+            .as_ref()
+            .is_none_or(|(at, ..)| *at != [grid[0], grid[1]]);
+        if volumes_made {
+            if let Some((_, volume, scatter)) = kept.volumes.take() {
+                for image in [volume, scatter] {
+                    gpu.retire(Resource::Image(image.image))?;
+                }
+            }
+            kept.volumes = Some((
+                [grid[0], grid[1]],
+                Texture::volume_shape(gpu, [grid[0], grid[1], 96], Format::Rgba16Float, true)?,
+                Texture::volume_shape(gpu, [grid[0], grid[1], 64], Format::Rgba16Float, false)?,
+            ));
         }
         // `a.luts != Some(medium)`, and `ProceduralKey` changing.
         let stale = kept.medium != Some(settings.medium);
@@ -1276,17 +1310,25 @@ fn frame(
                 graph.import(Resource::Image(image.image), Access::ShaderRead);
             }
         }
-        let volume = Texture::volume_shape(gpu, [grid[0], grid[1], 96], Format::Rgba16Float, true)?;
-        let scatter =
-            Texture::volume_shape(gpu, [grid[0], grid[1], 64], Format::Rgba16Float, false)?;
-        // wgpu zero-initialises these; the kernels write only part of each.
+        let (_, volume, scatter) = kept.volumes.as_ref().context("made above")?;
+        if !volumes_made {
+            for image in [volume, scatter] {
+                graph.import(Resource::Image(image.image), Access::ShaderRead);
+            }
+        }
+        // wgpu zero-initialises these; the kernels write only part of each. Once, when
+        // each is made.
         for (image, texels) in made
             .then_some((luts.transmittance.image, 256 * 65))
             .into_iter()
-            .chain([
-                (volume.image, grid[0] * grid[1] * 96),
-                (scatter.image, grid[0] * grid[1] * 64),
-            ])
+            .chain(
+                [
+                    (volume.image, grid[0] * grid[1] * 96),
+                    (scatter.image, grid[0] * grid[1] * 64),
+                ]
+                .into_iter()
+                .filter(|_| volumes_made),
+            )
         {
             staging.push(transfer::upload(
                 gpu,
@@ -1336,13 +1378,12 @@ fn frame(
             Pass::AtmosphereAerial,
             &atmosphere,
             luts,
-            &scatter,
-            &volume,
+            scatter,
+            volume,
         )?;
         Some(Sky {
             luts,
             volume,
-            scatter,
             environment,
         })
     } else {
@@ -1823,16 +1864,28 @@ fn frame(
         let models = StorageBuffer::new(gpu, &[matrices.as_slice(), &previous].concat())?;
         let normals = StorageBuffer::new(gpu, &normal_bytes)?;
         let absent = StorageBuffer::new(gpu, &[0; 48])?;
-        // `repair_bytes`: the queue's header, then room for every pixel. Zeroed, as the
-        // renderer clears its header before the trace.
+        // `repair_bytes`: the queue's header, then room for every pixel. The sequence
+        // keeps it; each frame clears its header before the trace, as the renderer
+        // does, and what lies past the header's count is never read.
         let repairs = if interactive {
-            let bytes = 16 + size[0] as usize * size[1] as usize * 36;
-            let queue = StorageBuffer::with_usage(
-                gpu,
-                &vec![0; bytes],
-                ara_gpu::vk::BufferUsageFlags::INDIRECT_BUFFER,
-            )?;
-            graph.import(Resource::Buffer(queue.buffer), Access::HostWrite);
+            let bytes = 16 + u64::from(size[0]) * u64::from(size[1]) * 36;
+            let queue = match kept_repairs.take() {
+                Some(queue) if queue.len == bytes => {
+                    graph.import(Resource::Buffer(queue.buffer), Access::Storage);
+                    queue
+                }
+                stale => {
+                    if let Some(stale) = stale {
+                        stale.retire(gpu)?;
+                    }
+                    StorageBuffer::device_with_usage(
+                        gpu,
+                        bytes,
+                        ara_gpu::vk::BufferUsageFlags::INDIRECT_BUFFER,
+                    )?
+                }
+            };
+            super::gi_cache::fill(&mut graph, &mut rec, &queue, 0, 16)?;
             Some(queue)
         } else {
             None
@@ -2645,7 +2698,7 @@ fn frame(
                 &mut rec,
                 &atmosphere,
                 sky.luts,
-                &sky.volume,
+                sky.volume,
                 &output,
             )?;
             Some(backdrop)
@@ -3148,8 +3201,27 @@ fn frame(
 
     times.record = started.elapsed();
     let submitted = std::time::Instant::now();
-    let point = gpu.submit(rec.finish(), &[])?;
-    gpu.wait(point)?;
+    if blind {
+        // A timed frame: one completion scope around its submission returns every
+        // pass's device timestamps when it is done.
+        gpu.begin_deferred_completion_on_current_queue()?;
+        let submission = gpu.submit(rec.finish(), &[]);
+        let mut completion = gpu.end_deferred_completion()?;
+        submission?;
+        for pass in gpu.wait_completion(&mut completion)? {
+            match times
+                .passes
+                .iter_mut()
+                .find(|(label, _)| *label == pass.pass)
+            {
+                Some((_, total)) => *total += pass.milliseconds,
+                None => times.passes.push((pass.pass, pass.milliseconds)),
+            }
+        }
+    } else {
+        let point = gpu.submit(rec.finish(), &[])?;
+        gpu.wait(point)?;
+    }
     times.gpu = submitted.elapsed();
     let finishing = std::time::Instant::now();
     let mut images = ForwardImages {
@@ -3242,6 +3314,7 @@ fn frame(
         records.retire(gpu)?;
     }
     if let Some(deferred) = deferred {
+        *kept_repairs = deferred.repairs;
         for buffer in [
             deferred.frame,
             deferred.region,
@@ -3251,7 +3324,6 @@ fn frame(
             deferred.absent,
         ]
         .into_iter()
-        .chain(deferred.repairs)
         {
             buffer.retire(gpu)?;
         }
@@ -3279,9 +3351,7 @@ fn frame(
     {
         buffer.retire(gpu)?;
     }
-    if let Some(sky) = sky {
-        post_images.extend([sky.volume, sky.scatter]);
-    }
+
     atmosphere.retire(gpu, &mut graph)?;
     cluster_inputs.retire(gpu)?;
     depth.retire(gpu, &mut graph)?;

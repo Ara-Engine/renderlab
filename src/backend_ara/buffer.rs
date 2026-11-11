@@ -52,6 +52,14 @@ impl StorageBuffer {
     /// Device-local storage of `len` bytes with undefined contents: fill or update it in
     /// a command list before anything reads it. For buffers the GPU keeps across frames.
     pub fn device(gpu: &mut GpuDevice, len: u64) -> Result<Self> {
+        Self::device_with_usage(gpu, len, vk::BufferUsageFlags::empty())
+    }
+    /// [`device`](Self::device) with further roles, such as indirect arguments.
+    pub fn device_with_usage(
+        gpu: &mut GpuDevice,
+        len: u64,
+        extra: vk::BufferUsageFlags,
+    ) -> Result<Self> {
         ensure!(
             len > 0 && len.is_multiple_of(4),
             "storage records need aligned bytes"
@@ -60,7 +68,8 @@ impl StorageBuffer {
             len,
             vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_SRC
-                | vk::BufferUsageFlags::TRANSFER_DST,
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | extra,
             false,
         )?;
         match gpu.storage_buffer(buffer) {

@@ -949,12 +949,13 @@ fn game_frames<S: renderlab::engine::Scene>(
     options: game::Options,
     mut settle: impl FnMut(&mut S) -> Result<(), Failure>,
     mut hdr: impl FnMut(&mut S) -> Result<Vec<u8>, Failure>,
-    trace: impl Fn(&S) -> serde_json::Value,
+    mut trace: impl FnMut(&mut S) -> serde_json::Value,
 ) -> Result<Vec<Frame>, Failure> {
     engine.resize(size[0], size[1])?;
     let built = game::build(engine, options)?;
     let mut sequence = Vec::new();
     let mut times = Vec::new();
+    let mut records = Vec::new();
     let timing = level.timing;
     for frame in 0..level.frames as u32 {
         let camera = game::animate(engine, &built, if level.still { 0 } else { frame })?;
@@ -969,6 +970,7 @@ fn game_frames<S: renderlab::engine::Scene>(
         eprintln!("pose {frame}: {record}");
         if timing {
             times.push(render_ms);
+            records.push(record);
         } else {
             let display = engine.capture()?.rgba8;
             let hdr = hdr(engine)?;
@@ -1010,6 +1012,30 @@ fn game_frames<S: renderlab::engine::Scene>(
             steady[steady.len() - 1],
             times[0]
         );
+        // Where the time went: the median over the same frames of every number a
+        // frame's record carries, one level down (a layer's own passes and phases).
+        let median = |values: &mut Vec<f64>| {
+            values.sort_by(f64::total_cmp);
+            values[values.len() / 2]
+        };
+        let mut split = Vec::new();
+        let mut fields = |of: &dyn Fn(&serde_json::Value) -> Option<&serde_json::Value>| {
+            let Some(serde_json::Value::Object(first)) = records.get(WARM).and_then(of) else {
+                return;
+            };
+            for key in first.keys() {
+                let mut values: Vec<f64> = records[WARM..]
+                    .iter()
+                    .filter_map(|r| of(r)?.get(key)?.as_f64())
+                    .collect();
+                if values.len() == records.len() - WARM {
+                    split.push(format!("{key} {:.2}", median(&mut values)));
+                }
+            }
+        };
+        fields(&|r| Some(r));
+        fields(&|r| r.get("passes_ms"));
+        eprintln!("timing split, medians in ms: {}", split.join(", "));
     }
     Ok(sequence)
 }
@@ -1096,7 +1122,29 @@ fn game_wgpu(size: [u32; 2], level: Level) -> Result<Vec<Frame>, Failure> {
                 .poll(renderlab::wgpu::PollType::wait_indefinitely())?;
             Ok(capture.try_read()?.ok_or("HDR readback pending")?)
         },
-        |_| serde_json::json!({}),
+        // The renderer's own timestamps for the frames that have completed.
+        |engine| {
+            let ms = |d: std::time::Duration| (d.as_secs_f64() * 1e5).round() / 1e2;
+            let mut record = serde_json::json!({});
+            if let Ok(events) = engine.poll()
+                && let Some(sample) = events.gpu.last()
+            {
+                record["gpu_render_span_ms"] = ms(sample.render_span).into();
+                record["gpu_shading_ms"] = ms(sample.mesh_pass).into();
+                for (name, pass) in [
+                    ("gpu_camera_rays_ms", sample.receiver_pass),
+                    ("gpu_visibility_ms", sample.visibility_compute),
+                    ("gpu_reconstruction_ms", sample.reconstruction_pass),
+                    ("gpu_present_ms", sample.present_pass),
+                    ("gpu_shadow_generation_ms", sample.shadow_generation),
+                ] {
+                    if let Some(pass) = pass {
+                        record[name] = ms(pass).into();
+                    }
+                }
+            }
+            record
+        },
     )
 }
 
@@ -1126,13 +1174,19 @@ fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, F
                 .map(|r| format!("{}: {}", r.call, r.what))
                 .collect();
             let ms = |d: std::time::Duration| (d.as_secs_f64() * 1e5).round() / 1e2;
-            let times = engine.images().map(|i| i.times).unwrap_or_default();
+            let times = engine.images().map(|i| i.times.clone()).unwrap_or_default();
+            let passes: serde_json::Map<_, _> = times
+                .passes
+                .iter()
+                .map(|(label, t)| (label.clone(), ((t * 1e2).round() / 1e2).into()))
+                .collect();
             serde_json::json!({
                 "refusals": refusals,
                 "record_ms": ms(times.record),
                 "geometry_ms": ms(times.geometry),
                 "gpu_ms": ms(times.gpu),
                 "finish_ms": ms(times.finish),
+                "passes_ms": passes,
             })
         },
     )?;

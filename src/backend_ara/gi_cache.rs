@@ -563,7 +563,7 @@ impl Cache {
 }
 
 /// `encoder.clear_buffer` for a word range.
-fn fill(
+pub(super) fn fill(
     graph: &mut Graph,
     rec: &mut Recorder,
     buffer: &StorageBuffer,
