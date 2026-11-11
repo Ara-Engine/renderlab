@@ -4,6 +4,8 @@ Milestone 8 ([milestone-8.md](milestone-8.md), "Non-RT goal"), 2026-11-11, branc
 
 ## Result
 
+**Current state: see [N-VSM2](#n-vsm2-2026-11-11-branch-t3n-vsm2-from-main-c341861) at the end.** Its fixes put `Disk` below `Surface` on S1-S3 penumbra error and it recommends `Disk` as the non-RT default; the sections before it are the record of parts 1 to 3.
+
 **A new lookup, `VirtualLookup::Disk`, answers sun visibility from the cached clipmap alone. It is opt-in; `Surface` stays the default.** The quarry yardstick has not run: its lease needs 14 GiB of free RAM, the machine idles at 12.6 to 13.8 GiB, and root has put the quarry on hold until a window is arranged ([Not done](#not-done)). Everything below is the game scene (courtyard) and the S4 and S5 benches.
 
 | Scene, non-RT, GPU p50 (M) | Sun pass, Surface | Sun pass, Disk | Frame, Surface | Frame, Disk |
@@ -228,6 +230,7 @@ Root saw a clean one-signed rectangle in Disk's S2 error (`review-s2-penumbra.jp
 
 ## For the ara-gpu backend
 
+- **N-VSM2 adds no buffer or texture kind, binding, sampler or device feature, and changes no shared planner.** The disk module no longer reads `VdFrame::clip` (the layout is unchanged) and reads `vsm_peel_words` as a second occluder as well as an underside. `RENDERLAB_VD_SHADER=PATH` (measurement only) reads the module from a file.
 - **New uniform buffer:** `VdFrame`, 1,120 bytes, at the disk lookup's group 0 binding 50 (world-to-clip matrix, image size and jitter index, 65 two-word masks, 64 sample positions). No new buffer or texture kind, sampler or device feature.
 - **New module** `shaders/virtual_shadow_disk.wgsl` (prefix `const VD_R:u32=3u;`), entries `vd_mark` (the `mark` layout) and `vd_lookup` (group 0: bindings 0, 7, 8, 9, 10, 15, 16, 18, 19, 35, 50; group 3: lighting).
 - `VsmFrame`, `shadow_gpu::plan_frame`, `temporal_reconstruction::Planner` and the transparency `frame_block` are unchanged.
@@ -268,3 +271,170 @@ The held quarry batch ran once in an owner-granted RAM window (`tools/n-vsm1/qua
 **Picture.** On the quarry `Disk` and `Surface` are nearly the same image: of covered pixels, 0.10-0.39% differ by more than half a code and none by more than 3.3 codes, on the still, walking, cut and cut+1 frames. Scores against the path-traced reference: error 7.289 / 7.641 / 8.263 (still / moving / cut) against the default's 7.278 / 7.633 / 8.257; contact crop 10.95 against 10.93; flicker 4.375 on both. The quarry therefore does not exercise the cases where `Disk` is behind (S1-S3 above). Sheet: [quarry-window-rock.jpg](n-vsm1/quarry-window-rock.jpg), Unreal, `Surface`, `Disk` and their difference x16. Inspected: no stray bright pixels in either Renderlab column; the cut frame is sharp with shadows in place; Unreal's cut and cut+1 frames are visibly softer.
 
 **First frame of a brand-new view (no page exists yet).** Renderlab's first frame rasterises the whole visible clipmap: page raster 56-57 ms with `Disk` (43 ms plus 275 ms of walk records with `Surface`). Unreal's first frame spends 1.9 ms in shadow depths and 0.14 ms marking pages (its whole first frame is 18 ms). A cut inside an area already seen costs Renderlab 0.16 ms of raster. So the remaining cut hitch is a cut to somewhere never seen: OPEN, for the page-structure unit.
+
+## N-VSM2 (2026-11-11, branch `t3/n-vsm2` from main `c341861`)
+
+Brief: find and fix the bias and the flips, then cut the map windows by skipping. Written as the work goes; the result table is at the end of this section once the fixes are scored.
+
+### What the errors were (M)
+
+Baseline at `c341861`, the unchanged scorers, one repeat (lease `n1`): S1 partial RMS .137 / .136; S2 .093-.098 with 87, 8 and 92 camera-track leaks; S3 .078-.087 with 190-370 flips. `Surface` in the same lease: .082 / .081, .073-.075 and .079-.083, no flips, S3 leaks 2-9.
+
+A new CPU check, `tools/n-vsm1/exact.py`, traces S2's 32 triangles from every crop pixel's receiver toward Disk's own 64 sun samples (`exact64`) and toward 1,024 stratified ones. S2 `shadow-step` frame 16, partial pixels (8,338, of which 8,300 are penumbrae wider than 3 pixels):
+
+| Against the film | Partial RMS |
+|---|---|
+| Exact, 1,024 samples at the pixel centre | .018 |
+| Exact, Disk's 64 samples | .020 |
+| `Surface` | .074 |
+| `Disk` | .089 |
+
+- **The 64-sample pattern is not the problem.** It is within .010 of the 1,024-sample answer with no mean error, and a noise-free centre-point lookup could score .020 where `Surface`'s noise scores .074.
+- **Disk's error is the map: 5.2 percent too dark on average** (Disk minus exact64: mean -.052, RMS .091). The previous session's guess that S2's partial pixels are one-to-two-pixel contact transitions is wrong: 99.5 percent of them are wide penumbrae.
+- **The darkening is not at a page or level edge.** Every partial receiver is on level 1 and the error follows the shadows, not the page grid (level and page overlay dumped with `tools/n-vsm1/variant.py`).
+- **It is the max-mip bands.** S2 has three levels (texels 0.98, 1.95 and 3.9 mm), so real texels serve occluders only up to 0.29 m above a receiver along the light. The blocker (0.38-0.5 m) and the plate's top edge (0.94 m) are served by the bands above, where a cell is its highest texel: any occupied texel fills the cell, so every occluder grows by up to a cell, and a cell is a third to two thirds of the disk's radius. By the mean height of the occluders a receiver sees:
+
+| Occluder height above the receiver | Served by | Partial pixels | Disk minus exact64, mean | RMS |
+|---|---|---:|---:|---:|
+| 0 - 0.07 m | level 0 | 253 | -.008 | .121 |
+| 0.07 - 0.15 m | level 1 | 232 | -.006 | .094 |
+| 0.15 - 0.29 m | level 2 | 377 | -.029 | .089 |
+| 0.29 - 0.59 m | max-mip band 1 | 2,507 | -.039 | .080 |
+| 0.59 - 1.17 m | max-mip band 2 | 3,658 | -.081 | .102 |
+
+  The rectangle root saw is the blocker's shadow drawn from whole cells.
+- **A second error has no sign: about .09 RMS in the real levels too.** A band's texel is a third to two thirds of the disk's radius and the raster samples texel centres, so an occluder edge sits up to half a texel from the truth. That is a blotchy, still error of the same size as `Surface`'s noise. Removing the max-mip bias alone therefore cannot bring S2 below `Surface` without TR1.
+- **S3's flips are the near-field screen samples.** All 242 on frame 0 are lit relief pixels with count 0. The map alone leaves 240 of them lit; the screen samples alone turn all 242 black. A sample was a column from its own point down to the receiver, so a neighbouring pixel within half a footprint of the light's axis hid the whole disk: any neighbour within about 30 degrees of the sun, where the truth needs 2.3.
+- **S2's camera-track leaks are a second occluder the lookup ignored.** They are umbra pixels returning 7 to 14 of 64 samples lit (frame 27: 87 pixels on the tiles; frames 31 on: 8-10 floor pixels), where the plate's and the blocker's shadows overlap. The top layer holds the plate; the blocker under it is in the peel layer, which the lookup read only as the top surface's underside. This is not the two-layer leak of a closed caster behind another (that one is absent from both layers); here the data is in the map.
+||||||| c341861
+
+### Step 1: the fixes (M)
+
+Two changes to the lookup and one removal, all in `shaders/virtual_shadow_disk.wgsl` (`89c58f1`, `e88433cc`). `Disk` stays opt-in in the code; the recommendation is at the end.
+
+1. **The bands above the coarsest level read one texel per max-mip cell** (`VD_MIP_POINT`). The cell is the texel at its middle, with that texel's own underside, as a coarser level rasterized at its centres would hold. The max-mip is still read first, as the test that the cell holds anything in the band. This removes the widening: S1 partial RMS .137 to .080, S2 .093-.098 to .062-.067.
+2. **The peel layer is a second occluder where it is another placement's surface** (`VD_PEEL2`): a second sheet under the first, or the solid a sheet lies over. S2 camera-track leaks 87 / 8 / 92 to 1 / 1 / 1.
+3. **The visible-surface samples are removed.** See "The near field" below: every rule tried cost more than it gave.
+
+| Bench | Measure | Unreal VSM | `Surface` | Disk before | **Disk after** |
+|---|---|---|---|---|---|
+| S1 contact fold, poses 0 / 1 | Partial RMS | .164 / .163 | .082 / .081 | .137 / .136 | **.080 / .080** |
+| | Flips, leaks, contacts lost | 0-1, 0, 5-6 / 2-3 | 0, 0, 0 | 0, 0, 0 | 0, 0, 1 |
+| S2 wide sun, six phases | Partial RMS | .168-.176 | .073-.075 | .093-.098 | **.062-.067** |
+| | Flips | 119-167 | 0 | 0-2 | 0-1 |
+| | Leaks, camera track | 57-67 | 0 | 87, 8, 92 | **1, 1, 1** |
+| | Leaks, shadow track | 57-67 | 0 | 0 | 0 |
+| | Contacts lost | 1,039-2,101 | 0 | 0-14 | 32-92 |
+| S3 relief and pillars, six phases | Partial RMS | .181-.188 | .079-.083 | .078-.087 | **.063-.074** |
+| | Flips | 187-226 | 0 | 190-370 | **2-7** |
+| | Leaks | 103-114 | 2-9 | 0 | 0-1 |
+| | Contacts lost | 2,929-12,289 | 0 | 0-60 | 32-158 |
+
+Same scorers and references as part 2, one repeat, no TR1 (leases `n1`, `n11`). Unreal rows are the recorded ones ([non-rt-n8k.md](non-rt-n8k.md)).
+
+- **Against the coordinator's bar** (S2 camera-track leaks and S3 flips at Unreal's level or better, the S1/S2 bias explained): **met.** Leaks 1 against 57-67, flips 2-7 against 187-226, and the bias is explained and gone.
+- **Against `Surface`:** partial RMS is now lower on all three benches. Flips are 0-7 against 0, S2 leaks 1 against 0, S3 leaks 0-1 against 2-9. **Contacts lost is the one measure that got worse**: 32-158 per phase, which is 1 to 3 pixels a frame of about 300 (S2) and 1,500 (S3) contact pixels, against 0 for `Surface` and thousands for Unreal. It is the price of removing the screen samples.
+- **What is left of the penumbra error is a still pattern of both signs** (`docs/n-vsm1/n-vsm2-s2-error.jpg`): a texel is a third to two thirds of the disk's radius, so an edge sits up to half a texel off. TR1 cannot average it, because it does not change from frame to frame. Reading a finer level with a stride and a per-frame offset would turn it into noise TR1 integrates; that is not built.
+- **Thin casters high above a receiver are now hit or miss** at the size of a cell (S1's strips, S2's wires): before they were always hit and a cell wide. `Surface` at eight directions dots them too (`review-s1-contact.jpg`).
+
+Sheets: `docs/n-vsm1/n-vsm2-s2-error.jpg` (S2 `shadow-step` frame 16, visibility and signed error against the film), `n-vsm2-s3-flips.jpg` (S3 frame 0, the flipped pixels marked), `n-vsm2-courtyard.jpg` (flight frame 24 against the RT path). `tools/n-vsm1/review2.py` builds them.
+
+### The near field (M)
+
+Within one receiver-level texel of the tangent plane the map is not used, and N-VSM1 read up to six pixels of the visible surface there. Four rules were scored with the two map fixes in place:
+
+| Rule for a visible-surface sample | S3 flips | S2 contacts lost | Courtyard against RT, frame 24 | Fox scene against RT, 9 frames |
+|---|---|---|---|---|
+| A column from the sample down to the receiver (N-VSM1) | 190-370 | 3-14 | 1.07 | not run |
+| Range along the march axis between joined samples | 2-7 | 0-10 | **11.3** (ground far to the side goes dark) | 18.0 |
+| Horizon over the tangent plane from the receiver up | 198-226 | 32-80 | not run | not run |
+| Range of elevations over the tangent plane | 73-92 | 32-80 | 1.07 | 1.38 |
+| **No samples** | **2-7** | 32-92 | 1.07 | 1.43 |
+
+- The cause of the first row's flips: a pixel beside the receiver is far wider than the sun's disk (half a footprint at one footprint's distance is half a radian; the disk is 0.04), so any model that gives the sample its pixel's width hides the whole disk or none of it.
+- The second row is right on relief and wrong on flat ground seen obliquely: pixel snapping moves a ground sample along the ground's horizon, which is not along the march axis there. It darkened a third of the courtyard and must not come back in that form.
+- The last two rows differ by 0.05 codes on the fox scene (the bushes' leaves) and by 70 to 90 flips on S3. With the coordinator's direction (keep the map fixes, drop the screen rule if it cannot hold the courtyard), **the samples are removed**. `VdFrame::clip` is no longer read; the uniform's layout is unchanged.
+- **Open:** contact within one texel of height. If the quarry's contact crop asks for it, the place to start is the fourth row's rule (block the directions between the least and the greatest elevation over the tangent plane among the joined samples after the first; it is not kept in the tree), restricted to smooth receivers.
+
+### Courtyard and fox scene against the RT path (M)
+
+Whole-frame RMS in display codes, 720p, the same frames as part 1 (leases `n5`, `n11`):
+
+| Frames | `Surface` | Disk before | **Disk after** |
+|---|---|---|---|
+| Courtyard flight, 7 frames | 1.19-2.51, mean 1.57 | 1.25-2.32, mean 1.49 | **1.07-2.30, mean 1.35** (lower than before on all 7) |
+| Courtyard, contact crop (sphere, post, crates), mean | 3.25 | 3.99 | **3.09** |
+| Fox scene round the cut, 9 frames | 1.41-1.86, mean 1.65 | 1.23-1.51, mean 1.43 | 1.22-1.55, mean 1.43 |
+
+The lit line on the ground between the post and the crates and the bright crate face are still there (`n-vsm2-courtyard.jpg`): that is the two-layer leak, which is the page-pool unit's.
+
+### Step 2: cost by skipping (M)
+
+**The lookup's time is not its texel reads, so skipping them did not pay.** One small skip landed (`d5391d8d`); the 0.6 ms target is not met on the fox scene and nothing here brings it close.
+
+Timing: game scene with the fox, 1080p, non-RT, 90 frames with a cut at 25, sun pass stages from `RENDERLAB_PASS_LOG_DETAIL`, GPU p50 over the frames after the cut (the 17 frames before it in brackets). Lease `n15`, 16:20 UTC, one process a row, opened and closed by a reference run of main's `Disk` (`bin/d13`): 1.191 and 1.194 ms, inside the expected 1.19-1.25, frame span 32.3 ms both times, so the lease counts. The first runs of the culling test and of the split (leases `n11` 15:33 and `n12` 15:46, inside the slow-GPU window root reported) are **rerun here** and reproduced to 0.002 ms; the numbers below are the reruns.
+
+| Lookup | Lookup, ms | Whole pass, ms | Picture |
+|---|---:|---:|---|
+| Main (`2035f19`'s shader), reference, two runs | 1.191, 1.194 (1.433, 1.441) | 1.68 | |
+| Step 1 (`e88433cc`), two runs | 1.249, 1.250 (1.537, 1.540) | 1.74 | |
+| Step 1 with max-mip bands as before (`VD_MIP_POINT=false`) | 1.169 | 1.67 | |
+| Step 1 without the second occluder (`VD_PEEL2=false`) | 1.199 | 1.69 | |
+| **Step 2, landed**: a window ends at its first full row; a band cell is tested against the cone before its texel is read. Two runs | **1.230, 1.229** (1.511, 1.511); the built binary in lease `n16`: 1.224, 1.228 (1.505, 1.507), cut frame 1.204-1.207 | **1.72** | 55 of 55 frames identical to step 1 |
+| Rejected: each level window by the 2x2 cells of the first max-mip, cells and texels under the cone not read | 1.379 (1.784) | 1.87 | identical (0 of 545 bench frames differ) |
+| Rejected: the bound on the highest caster read until it settles (12 reads, or 32) | 1.241, 1.243 (lease `n13`, no reference run) | | S2 changes: 4,918 pixels over 160 frames |
+
+Page raster is 0.327 ms and page requests 0.166 ms in every row. Courtyard without the fox, 1080p: lookup 1.508 (main), 1.636 (step 1), 1.602 (step 2).
+
+- **Step 1 costs 4.7 percent of the lookup on the fox scene (0.058 ms) and 8.5 percent on the courtyard, and it is accounted for:** the bands' texel in place of a max-mip cell is +0.080 ms, the second occluder +0.050 ms, and removing the screen samples took back about 0.07 ms (1.315 ms with the first replacement rule in lease `n5`, which had no reference run, against 1.249). Step 2 takes back 0.020 ms. The remaining 0.04 ms buys the S1/S2 bias and the leaks; it is not recovered.
+- **Texels read per receiver, and why cutting them did not help.** Counted by `tools/n-vsm1/variant.py` on the bench crops (the game scene has no readback):
+
+| Per receiver, mean | S2 `shadow-step` frame 16 | S3 frame 0 |
+|---|---|---|
+| Step 1: top-layer texels read / max-mip cells read | 26.6 / 8.7 | 64.6 / 3.9 |
+| Rejected 2x2-cell culling: texels / cells | 6.2 / 16.8 | 4.7 / 24.8 |
+| Step 2, landed: texels / cells | 26.1 / 8.7 | 64.3 / 3.9 |
+
+  The rejected culling reads 4 to 14 times fewer texels with the same picture and is 10 percent slower on the fox scene. The cost follows the number of windows a receiver walks and the arithmetic per cell, not the map reads.
+- **Where the time is** (measurement variants of step 1's shader): without the bands above the coarsest level the lookup is 0.798 ms, so the bands are 0.45 ms, and the eight levels' windows are about 0.65 ms over the 0.15 ms of setup. Capping the height of the occluders a receiver may meet (which changes the picture, so it is a probe, not a candidate): at 100 m no change, at 30 m 1.239 ms, at 10 m 1.094, at 3 m 0.710. So 0.54 ms goes on occluders more than 3 m up the light and 0.16 ms on those above 10 m: at dusk the sun is low, every shadow is long, and the far casters are real.
+- **What stops 0.6 ms here.** Page raster and requests are 0.49 ms before the lookup starts, and the lookup's cost is real work at this sun height. On the quarry the pass is already 0.24 ms (root's quarry window). The lever left for the dusk case is fewer windows per receiver, which needs data the map does not hold: a bound on the highest caster that is exact per level (the one tried changes thin casters, because a coarse level does not bound a finer level's texels), or coarser real levels in place of the five max-mip bands (49 cells each).
+- **Not tried:** a min-mip for the "fully covered" exit (the buffer exists only for the `Map` lookup); it would serve umbra receivers, which step 2's row exit already shortens.
+
+### Default recommendation
+
+**Make `Disk` the non-RT default.** The coordinator's bar is met (S2 camera-track leaks 1 against Unreal's 57-67, S3 flips 2-7 against 187-226, the S1/S2 bias explained and removed), partial RMS is below `Surface` on S1, S2 and S3, the courtyard is closer to the RT path than part 2's `Disk` and than `Surface` on every frame, and the fox scene is level with part 2. The cut frame costs 1.2 ms of lookup against `Surface`'s 159 ms pass.
+
+What is still worse than `Surface`, to weigh before flipping it:
+
+1. Contacts lost on S2 and S3: 1 to 3 pixels a frame against 0. Nothing answers within one texel of height above a receiver.
+2. S3 flips 2-7 and S2 leaks 1 against 0.
+3. The remaining penumbra error is a still pattern (a texel is a third to two thirds of the disk's radius), where `Surface`'s is noise TR1 integrates.
+4. Thin casters far up the light are hit or miss at the size of a cell.
+5. Not checked by this unit: Showcase, S4/S5, hard edges far to the side of the eye, a clip at playback speed, and the quarry with this build (the batch is ready: `py -3 -B tools/n-vsm1/quarry.py LABEL m0 n3`).
+
+The default itself is unchanged in the code: `Surface` and S4. Flipping it is one line (`VirtualLookup::default`) plus the frames root wants to look at first.
+
+### For the page-pool unit
+
+- **Levels are chosen by the camera, not by the casters.** `levels = level_of(far) - finest + 2` from the view's near and far footprints. S2 gets three levels, so every caster more than 0.29 m up the light is served by the bands above the coarsest level. `Disk` needs levels up to the band that holds the highest caster a cone can meet; a pool with cheap coarse levels can give it real ones and retire the bands (0.45 ms of the fox scene's lookup, and the hit-or-miss thin casters).
+- **A coarse level does not bound a finer one.** Each level samples the geometry at its own texel centres, so a thin caster can be in a fine level and absent from a coarse one. Any hierarchy the pool builds for skipping must be a max over the finer level's texels, not the coarser level's own raster.
+- **`vd_mark` requests, per receiver, every level from its own up to the one whose band holds the scene's highest caster**, each over min(reach, 3 texels) + 2 texels, and the coarsest over whole max-mip cells. Under a low sun the ground itself raises "the scene's highest caster" without limit, so receivers request all eight levels everywhere. A caster-aware bound there would cut requested pages; it was not measured here.
+- **The peel layer now matters to `Disk` as an occluder**, not only as an underside: a pool that drops or thins the second layer brings S2's camera-track leaks back (87-92 against 1).
+- **The first frame of a view** was not touched: a re-centred level is still rasterized whole.
+
+### Evidence (N-VSM2)
+
+- Hardware as above (RTX 4070 SUPER, driver 617.14, Windows 11 Pro 26300, Vulkan), shared with the Ara integration thread and P-GLOSSY; one lease at a time.
+- Builds: `bin/n3` (release examples) and `bin/lib-n3` (lib test binary) at `d5391d8d`, clean tree. `bin/n2` and `bin/lib-n2` at `89c58f1` ran the screens through `RENDERLAB_VD_SHADER` (the shader read from a file, same binary). `bin/d13` is main's `Disk` at `2035f19`, the timing reference.
+- Timing leases and their GPU state lines (clocks, memory clock, power, temperature, utilisation, P-state):
+  - `n15` 16:20:01-16:21:23 UTC, start `210 MHz, 405 MHz, 7.01 W, 42, 0 %, P8`, end `1005 MHz, 5001 MHz, 38.97 W, 46, 0 %, P3`; reference 1.191 and 1.194 ms.
+  - `n16` 16:26:05-16:28:06 UTC, start `210 MHz, 405 MHz, 6.55 W, 35, 5 %, P8`, end `225 MHz, 5001 MHz, 24.79 W, 36, 0 %, P3`; reference 1.190 and 1.191 ms, frame span 32.2 ms.
+  - `n5`, `n11`, `n12`, `n13`, `n14r` had no reference run. Every number taken from them that is quoted above was reproduced in `n15` or `n16`, except the two rejected "bound read until it settles" timings and `n5`'s 1.315 ms.
+- Closing lease `n16` on the built binaries: lib suite 219 passed, 0 failed, 171 ignored. S1-S3 with the shipped shader: the table above, 0 of 545 S2/S3 frames differ from step 1. The default path is untouched: `Surface` and RT courtyard frames are 7 of 7 identical to the same frames before this unit's shader changes.
+- Tools added under `tools/n-vsm1/`: `bench.py` (S1-S3 for one lookup, counts packed per frame), `exact.py` (the exact 64-sample answer on the CPU), `variant.py` (level, page and texel-count dumps), `review2.py` (the sheets). Bench counts and scores are in `D:/Coding/renderlab-work/n-vsm1/bench/` (`n1-*` before, `n16-final` after), pass logs in `runs/n15`, `runs/n16`.
+
+```powershell
+py -3 -B tools/n-vsm1/host.py lease LABEL 12 -- py -3 -B tools/n-vsm1/steps.py OUT bench=py -3 -B tools/n-vsm1/bench.py run ROOT LIB_EXE disk s1 s2 s3
+py -3 -B tools/n-vsm1/bench.py score ROOT            # CPU: the unchanged scorers, the table, counts packed, raw deleted
+py -3 -B tools/n-vsm1/quarry.py LABEL m0 n3          # the quarry batch with this unit's build (root runs it)
+```
