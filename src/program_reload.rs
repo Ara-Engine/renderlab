@@ -225,7 +225,6 @@ impl Renderer {
                     &label,
                     &text,
                 )?;
-                let engine_owned = text == STANDARD_PROGRAM;
                 let glass_worker = glass_recipe.map(|recipe| {
                     let device = device.clone();
                     let ledger = ledger.clone();
@@ -238,11 +237,7 @@ impl Renderer {
                                     label: Some("background glass reflection"),
                                     source: wgpu::ShaderSource::Wgsl(recipe.source.into()),
                                 };
-                                if engine_owned {
-                                    device.create_engine_shader_module(descriptor)
-                                } else {
-                                    device.create_shader_module(descriptor)
-                                }
+                                device.create_shader_module(descriptor)
                             },
                             ResourceKind::ShaderModule,
                         );
@@ -356,7 +351,7 @@ impl Renderer {
                         program::declares_parameters(&text),
                     );
                     let scopes = OperationScopes::new(&device);
-                    let module = module(&abi, &label, &composed, engine_owned);
+                    let module = module(&abi, &label, &composed);
                     if let Some(error) = scopes.finish() {
                         return Err(scope_error(&label, error, &[composed]));
                     }

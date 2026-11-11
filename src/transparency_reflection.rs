@@ -203,7 +203,15 @@ impl Renderer {
                 &self.lighting.bindings,
             ],
         );
-        let module = self.tp_module("TP2 glass reflection", &source);
+        // Hits run program text: checked, as every program module (P-SPLIT).
+        let module = self.ledger.own(
+            self.device
+                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("TP2 glass reflection"),
+                    source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+                }),
+            ResourceKind::ShaderModule,
+        );
         let pipeline = self.tp_compute(
             "TP2 glass reflection",
             &pipeline_layout,

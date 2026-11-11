@@ -1124,11 +1124,8 @@ impl Renderer {
                     label: Some(&label),
                     source: wgpu::ShaderSource::Wgsl(source.into()),
                 };
-                if slot.source == crate::program::STANDARD_PROGRAM {
-                    self.device.create_engine_shader_module(descriptor)
-                } else {
-                    self.device.create_shader_module(descriptor)
-                }
+                // Program text compiles checked, the standard program included (P-SPLIT).
+                self.device.create_shader_module(descriptor)
             },
             ResourceKind::ShaderModule,
         );
