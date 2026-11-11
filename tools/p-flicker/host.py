@@ -16,8 +16,9 @@ import time
 import uuid
 
 REPO = Path(__file__).resolve().parents[2]
-OWNER = "p-flicker"
-WORK = Path("D:/Coding/renderlab-work/p-flicker")
+OWNER = os.environ.get("P_FLICKER_OWNER", "p-flicker")
+UNIT = Path("D:/Coding/renderlab-work/p-flicker")  # Unreal captures and the clip manifest
+WORK = Path(os.environ.get("P_FLICKER_WORK", UNIT))  # runs, sheets, builds (another unit sets its own)
 SCHEDULE = Path("E:/renderlab-work/gpu-schedule.md")
 BUILD_SLOT = Path("D:/Coding/renderlab-work/build-slot.lock")
 TARGET = WORK / "target"

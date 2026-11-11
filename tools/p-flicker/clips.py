@@ -6,6 +6,7 @@ side, through the frozen F0 display transform (-14 EV), as an animated GIF at pl
       RUN: runs/ directory (clip captures), or ue:CONFIG (p-flicker/ue/quarry/capture/CONFIG)
     Output: D:/Coding/renderlab-work/p-flicker/sheets/NAME.gif and NAME-steps.png
 """
+import os
 import importlib.util
 from pathlib import Path
 import sys
@@ -14,7 +15,8 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 HERE = Path(__file__).resolve().parent
-WORK = Path("D:/Coding/renderlab-work/p-flicker")
+UNIT = Path("D:/Coding/renderlab-work/p-flicker")  # Unreal captures and the clip manifest
+WORK = Path(os.environ.get("P_FLICKER_WORK", UNIT))  # runs, sheets, builds (another unit sets its own)
 spec = importlib.util.spec_from_file_location("pflicker_split", HERE / "split.py")
 split = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(split)
