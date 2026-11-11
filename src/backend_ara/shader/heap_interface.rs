@@ -362,6 +362,7 @@ pub(super) fn storage_format(format: naga::StorageFormat) -> Result<Format> {
         naga::StorageFormat::R32Uint => Format::R32Uint,
         naga::StorageFormat::Rg32Uint => Format::Rg32Uint,
         naga::StorageFormat::Rgba32Uint => Format::Rgba32Uint,
+        naga::StorageFormat::Rgba8Unorm => Format::Rgba8,
         _ => bail!("unported storage-image format {format:?}"),
     })
 }
