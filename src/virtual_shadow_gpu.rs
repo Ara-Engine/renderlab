@@ -2545,9 +2545,9 @@ impl Renderer {
             // samples along the sun's screen direction.
             let mut bytes = Vec::with_capacity(DISK_FRAME_BYTES as usize);
             let clip = camera.matrix(size.width, size.height).to_cols_array();
-            for value in
-                clip.into_iter()
-                    .chain([size.width as f32, size.height as f32, disk_jitter, 0.0])
+            for value in clip
+                .into_iter()
+                .chain([size.width as f32, size.height as f32, disk_jitter, 0.0])
             {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }

@@ -404,12 +404,18 @@ pub(super) fn investigate(
     let sources = primary_ray_gpu::shading_sources(SOURCE, STANDARD).unwrap();
     let mut fresh = shading_pipelines(r, &sources);
     let fresh_image = shade(r, &fresh[1]);
-    std::mem::swap(r.test_standard().traced[1].as_mut().unwrap(), &mut fresh[1]);
+    std::mem::swap(
+        r.test_standard().traced[1].as_mut().unwrap(),
+        &mut fresh[1],
+    );
     let mut old_images = vec![];
     for _ in 0..32 {
         old_images.push(difference(deviant, &shade(r, &fresh[1]), 8));
     }
-    std::mem::swap(r.test_standard().traced[1].as_mut().unwrap(), &mut fresh[1]);
+    std::mem::swap(
+        r.test_standard().traced[1].as_mut().unwrap(),
+        &mut fresh[1],
+    );
     let module = seeded_module(r);
     let fresh_trace = r.primary.as_ref().unwrap().interactive_pipeline(
         &r.device,

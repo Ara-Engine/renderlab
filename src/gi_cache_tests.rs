@@ -125,10 +125,7 @@ fn reference_cache_dir(unit: &str) -> PathBuf {
         .find(|p| p.file_name().is_some_and(|n| n == "target"))
         .map(Path::to_path_buf)
         .unwrap_or_else(|| exe.parent().unwrap().to_path_buf());
-    eprintln!(
-        "RENDERLAB_M7_G1_REFS unset and E:/renderlab-work absent: reference cache under {}",
-        target.display()
-    );
+    eprintln!("RENDERLAB_M7_G1_REFS unset and E:/renderlab-work absent: reference cache under {}", target.display());
     target.join("gi-reference-cache").join(unit)
 }
 fn env(name: &str) -> Option<String> {
