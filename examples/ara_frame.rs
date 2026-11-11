@@ -24,7 +24,19 @@
 //! eye moves 0.04 m sideways per pose) through one renderer, so every frame after the
 //! first has history: the previous camera for motion blur, and whatever later
 //! families keep between frames. The same line on either layer writes one summary
-//! per frame; `--compare` then reports every frame.
+//! per frame; `--compare` then reports every frame. `--still` holds pose 0 for the
+//! whole sequence instead.
+//!
+//! `--gi` implies `--traced` and turns the world radiance cache on for sky visibility
+//! (bounce and the cell filter off) with a table of 2^17 slots on both layers, small
+//! enough that no device limit shrinks it. Each frame's whole table is written as
+//! `table-NNN.u32` (little-endian words, large: keep them local) and summarised in
+//! `frame.json` with digests of 256 equal chunks. `--compare` reports the slot count
+//! and, frame by frame, how the tables differ: the first differing word and what it
+//! holds, and the cells by key (present on one side only, direction bits, SH). Without
+//! the raw tables it falls back to the digests and names the first differing chunk.
+//! Run both a moving and a `--still` sequence: a still view goes idle after eight
+//! frames, and from then on its tables say nothing new.
 //!
 //! ```text
 //! cargo run --example ara_frame -- --backend wgpu --output out/wgpu
@@ -58,6 +70,7 @@ fn main() -> Result<(), Failure> {
     let mut atmosphere = renderlab::Atmosphere::off();
     let mut sun_shadows = false;
     let mut traced = false;
+    let (mut gi, mut still) = (false, false);
     let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -65,6 +78,8 @@ fn main() -> Result<(), Failure> {
             "--output" => output = args.next(),
             "--sun-shadows" => sun_shadows = true,
             "--traced" => (sun_shadows, traced) = (true, true),
+            "--gi" => (sun_shadows, traced, gi) = (true, true, true),
+            "--still" => still = true,
             "--frames" => {
                 frames = args.next().ok_or("--frames N")?.parse()?;
                 if !(1..=240).contains(&frames) {
@@ -101,6 +116,8 @@ fn main() -> Result<(), Failure> {
         atmosphere,
         sun_shadows,
         traced,
+        gi,
+        still,
         frames,
     };
     let sequence = match backend.as_deref() {
@@ -123,7 +140,26 @@ struct Level {
     atmosphere: renderlab::Atmosphere,
     sun_shadows: bool,
     traced: bool,
+    /// The radiance cache's sky visibility, on a traced frame.
+    gi: bool,
+    /// Every frame from pose 0.
+    still: bool,
     frames: usize,
+}
+impl Level {
+    fn camera(&self, fixture: &lighting_fixture::Fixture, frame: usize) -> renderlab::Camera {
+        fixture.camera(if self.still { 0 } else { frame })
+    }
+}
+
+/// The cache at the `--gi` level, on both layers.
+fn sky_visibility() -> renderlab::IndirectSettings {
+    renderlab::IndirectSettings {
+        bounce: false,
+        filter: 0,
+        slots_log2: 17,
+        ..Default::default()
+    }
 }
 
 /// Post at the traced level: the defaults without motion blur, on both layers.
@@ -134,20 +170,24 @@ fn traced_post() -> renderlab::PostSettings {
     }
 }
 
-/// The exposed HDR target and the displayed image of one frame.
-type Frame = (Vec<u8>, Vec<u8>);
+/// The exposed HDR target and the displayed image of one frame, and the cache's table
+/// after it at the `--gi` level.
+type Frame = (Vec<u8>, Vec<u8>, Option<Vec<u32>>);
 
 fn wgpu_frame(
     fixture: &lighting_fixture::Fixture,
     size: [u32; 2],
-    Level {
+    level: Level,
+) -> Result<Vec<Frame>, Failure> {
+    use renderlab::*;
+    let Level {
         atmosphere,
         sun_shadows,
         traced,
+        gi,
         frames,
-    }: Level,
-) -> Result<Vec<Frame>, Failure> {
-    use renderlab::*;
+        ..
+    } = level;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
         ..wgpu::InstanceDescriptor::new_without_display_handle()
@@ -206,7 +246,11 @@ fn wgpu_frame(
     if traced {
         r.set_primary_visibility(PrimaryVisibility::Traced)?;
         r.set_soft_shadows(SoftShadows::Exact);
-        r.set_indirect(IndirectSettings::off())?;
+        r.set_indirect(if gi {
+            sky_visibility()
+        } else {
+            IndirectSettings::off()
+        })?;
         r.set_reconstruction(Reconstruction::off())?;
         r.set_reflections(ReflectionSettings::off())?;
         r.set_post_settings(traced_post())?;
@@ -285,7 +329,7 @@ fn wgpu_frame(
     }
     let mut sequence = Vec::new();
     for pose in 0..frames {
-        let camera = fixture.camera(pose);
+        let camera = level.camera(fixture, pose);
         {
             let mut draws: Vec<_> = instances
                 .iter_mut()
@@ -303,7 +347,9 @@ fn wgpu_frame(
         }
         let hdr = admit(&mut r, |_| capture.try_read())?;
         let mut shown = admit(&mut r, |r| r.try_capture(&color))?;
-        sequence.push((hdr, admit(&mut r, |_| shown.try_read())?));
+        let display = admit(&mut r, |_| shown.try_read())?;
+        let table = if gi { r.indirect_table()? } else { None };
+        sequence.push((hdr, display, table));
     }
     Ok(sequence)
 }
@@ -312,15 +358,18 @@ fn wgpu_frame(
 fn ara_frame(
     fixture: &lighting_fixture::Fixture,
     size: [u32; 2],
-    Level {
+    level: Level,
+    output: &Path,
+) -> Result<Vec<Frame>, Failure> {
+    use renderlab::backend_ara::{cache::ShaderCache, forward, gi_cache::Indirect};
+    let Level {
         atmosphere,
         sun_shadows,
         traced,
+        gi,
         frames,
-    }: Level,
-    output: &Path,
-) -> Result<Vec<Frame>, Failure> {
-    use renderlab::backend_ara::{cache::ShaderCache, forward};
+        ..
+    } = level;
     let mut gpu = if sun_shadows {
         ara_gpu::GpuDevice::new(&[], output.join("device"))?
     } else {
@@ -356,7 +405,7 @@ fn ara_frame(
             &forward::ForwardScene {
                 objects: &objects,
                 lighting: &fixture.lighting,
-                camera: fixture.camera(pose),
+                camera: level.camera(fixture, pose),
                 size,
                 atmosphere,
                 sun_shadows: sun_shadows.then_some(&shadows),
@@ -370,11 +419,20 @@ fn ara_frame(
                 } else {
                     renderlab::PostSettings::default()
                 }),
-                indirect: None,
+                indirect: gi.then(|| Indirect {
+                    settings: sky_visibility(),
+                    read_table: true,
+                }),
             },
         )?;
-        sequence.push((pixels.hdr, pixels.display.ok_or("post did not run")?));
+        sequence.push((
+            pixels.hdr,
+            pixels.display.ok_or("post did not run")?,
+            pixels.indirect_table,
+        ));
     }
+    history.retire(&mut gpu)?;
+    ara_gpu::Device::collect(&mut gpu)?;
     gpu.assert_clean()?;
     Ok(sequence)
 }
@@ -424,7 +482,8 @@ fn write(
     let pixels = size[0] as usize * size[1] as usize;
     let mut summaries = Vec::new();
     let mut nonfinite = 0;
-    for (pose, (bytes, display)) in sequence.iter().enumerate() {
+    fs::create_dir_all(dir)?;
+    for (pose, (bytes, display, table)) in sequence.iter().enumerate() {
         if bytes.len() != pixels * 8 || display.len() != pixels * 4 {
             return Err("frame is not tightly packed RGBA16F with an RGBA8 display".into());
         }
@@ -432,16 +491,21 @@ fn write(
         let display_values: Vec<f32> = display.iter().map(|v| f32::from(*v)).collect();
         let bad = values.iter().filter(|v| !v.is_finite()).count();
         nonfinite += bad;
-        summaries.push(serde_json::json!({
+        let mut summary = serde_json::json!({
             "pose": pose,
             "nonfinite_channels": bad,
             "grid_mean_linear_rgb": grid(&values, size),
             "grid_mean_display_bytes": grid(&display_values, size),
-        }));
+        });
+        if let Some(table) = table {
+            summary["table"] = Table::new(table)?.summary();
+            let raw: Vec<u8> = table.iter().flat_map(|w| w.to_le_bytes()).collect();
+            fs::write(dir.join(format!("table-{pose:03}.u32")), raw)?;
+        }
+        summaries.push(summary);
     }
     // The raw files and the pictures are the last frame's: the one with most history.
-    let (bytes, display) = sequence.last().ok_or("no frame was rendered")?;
-    fs::create_dir_all(dir)?;
+    let (bytes, display, _) = sequence.last().ok_or("no frame was rendered")?;
     fs::write(dir.join("frame.rgba16f"), bytes)?;
     fs::write(dir.join("display.rgba8"), display)?;
     let mut shown = png::Encoder::new(fs::File::create(dir.join("display.png"))?, size[0], size[1]);
@@ -473,8 +537,12 @@ fn write(
         dir.join("frame.json"),
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
-            "scene": "M5-A authored v1, camera path from pose 0, local shadows off, default post",
-            "primary": if level.traced { "traced, exact soft shadows, no GI, reconstruction, reflections or motion blur" } else { "mesh pass" },
+            "scene": if level.still { "M5-A authored v1, every frame from pose 0, local shadows off, default post" } else { "M5-A authored v1, camera path from pose 0, local shadows off, default post" },
+            "primary": match (level.traced, level.gi) {
+                (true, true) => "traced, exact soft shadows, radiance cache sky visibility (2^17 slots, no bounce or filter), no reconstruction, reflections or motion blur",
+                (true, false) => "traced, exact soft shadows, no GI, reconstruction, reflections or motion blur",
+                _ => "mesh pass",
+            },
             "atmosphere": if level.atmosphere.active() { "physical sky without volumetric fog" } else { "off" },
             "sun_shadows": if level.sun_shadows { "ray-traced, 0.02 rad disk, all materials double-sided" } else { "off" },
             "backend": backend,
@@ -512,8 +580,9 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
     if ja["atmosphere"] != jb["atmosphere"]
         || ja["sun_shadows"] != jb["sun_shadows"]
         || primary(&ja) != primary(&jb)
+        || ja["scene"] != jb["scene"]
     {
-        return Err("frames differ in atmosphere, sun shadow or primary setting".into());
+        return Err("frames differ in scene, atmosphere, sun shadow or primary setting".into());
     }
     println!(
         "{} ({}) against {} ({}), {}x{}",
@@ -559,6 +628,7 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
         }
         println!("last frame:");
     }
+    compare_tables(a, b, &ja, &jb)?;
     // Relative for linear radiance (floored so black does not dominate); display bytes
     // are compared in levels.
     let (ga, gb) = (
@@ -669,5 +739,234 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
         over[1] as f64 / pixels as f64 * 100.,
         over[2] as f64 / pixels as f64 * 100.
     );
+    Ok(())
+}
+
+/// A cache table as `Renderer::indirect_table` returns it: 64 header words, a 24-word
+/// hot record per slot, then a cold record per slot (`shaders/gi_cells.wgsl`).
+struct Table<'a> {
+    words: &'a [u32],
+    slots: usize,
+    cold: usize,
+}
+const TABLE_CHUNKS: usize = 256;
+impl<'a> Table<'a> {
+    fn new(words: &'a [u32]) -> Result<Self, Failure> {
+        let slots = words.get(1).map_or(0, |mask| *mask as usize + 1);
+        let cold = words.get(23).map_or(0, |n| (*n as usize).max(24));
+        if !slots.is_power_of_two() || words.len() != 64 + slots * (24 + cold) {
+            return Err("cache table length does not match its header".into());
+        }
+        Ok(Self { words, slots, cold })
+    }
+    fn hot(&self, slot: usize) -> &'a [u32] {
+        &self.words[64 + slot * 24..][..24]
+    }
+    fn cold(&self, slot: usize) -> &'a [u32] {
+        &self.words[64 + self.slots * 24 + slot * self.cold..][..self.cold]
+    }
+    /// What a word holds, for naming a difference.
+    fn field(&self, word: usize) -> String {
+        if word < 64 {
+            return format!("header word {word}");
+        }
+        let hot_end = 64 + self.slots * 24;
+        if word < hot_end {
+            let (slot, at) = ((word - 64) / 24, (word - 64) % 24);
+            let name = match at {
+                0 => "key a and valid bit",
+                1 => "SH scale",
+                2..=15 => "SH halves",
+                16..=22 => "bounce SH",
+                _ => "query normal",
+            };
+            return format!("slot {slot}, hot word {at} ({name})");
+        }
+        let (slot, at) = ((word - hot_end) / self.cold, (word - hot_end) % self.cold);
+        let name = match at {
+            0 => "key b",
+            1 => "state",
+            2 => "seen stamp",
+            3 => "definition",
+            4..=6 => "cell",
+            7 => "query normal",
+            8..=10 => "query point",
+            11 => "ray item base",
+            12..=13 => "direction bits",
+            14..=15 => "known directions",
+            16..=17 => "pending directions",
+            18..=19 => "near-field directions",
+            20..=22 => "material",
+            _ => "light bits",
+        };
+        format!("slot {slot}, cold word {at} ({name})")
+    }
+    /// Occupied slots by key (a without the valid bit, then b).
+    fn cells(&self) -> std::collections::BTreeMap<(u32, u32), usize> {
+        (0..self.slots)
+            .filter(|slot| self.hot(*slot)[0] != 0)
+            .map(|slot| ((self.hot(slot)[0] & 0x7fff_ffff, self.cold(slot)[0]), slot))
+            .collect()
+    }
+    fn summary(&self) -> serde_json::Value {
+        use sha2::Digest;
+        let digest = |words: &[u32]| {
+            let mut h = sha2::Sha256::new();
+            for word in words {
+                h.update(word.to_le_bytes());
+            }
+            h.finalize()
+                .iter()
+                .take(8)
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        };
+        let valid = (0..self.slots)
+            .filter(|slot| self.hot(*slot)[0] & 0x8000_0000 != 0)
+            .count();
+        serde_json::json!({
+            "words": self.words.len(),
+            "slots": self.slots,
+            "cold_words": self.cold,
+            "stamp": self.words[3],
+            "occupied": self.cells().len(),
+            "valid": valid,
+            "digest": digest(self.words),
+            // Equal word ranges, the last one taking the remainder.
+            "chunks": (0..TABLE_CHUNKS)
+                .map(|i| digest(&self.words[chunk(self.words.len(), i)]))
+                .collect::<Vec<_>>(),
+        })
+    }
+}
+fn chunk(words: usize, index: usize) -> std::ops::Range<usize> {
+    let size = words / TABLE_CHUNKS;
+    let end = if index + 1 == TABLE_CHUNKS {
+        words
+    } else {
+        (index + 1) * size
+    };
+    index * size..end
+}
+
+/// The cache tables of two `--gi` runs, frame by frame: the slot count, the first
+/// differing word, and how the cells differ by key.
+fn compare_tables(
+    a: &Path,
+    b: &Path,
+    ja: &serde_json::Value,
+    jb: &serde_json::Value,
+) -> Result<(), Failure> {
+    let frames = |j: &serde_json::Value| -> Vec<serde_json::Value> {
+        j["sequence"].as_array().cloned().unwrap_or_default()
+    };
+    let (sa, sb) = (frames(ja), frames(jb));
+    let has = |s: &[serde_json::Value]| s.iter().any(|f| !f["table"].is_null());
+    match (has(&sa), has(&sb)) {
+        (false, false) => return Ok(()),
+        (true, true) => {}
+        _ => return Err("only one run has cache tables".into()),
+    }
+    let read = |dir: &Path, pose: usize| -> Option<Vec<u32>> {
+        let bytes = fs::read(dir.join(format!("table-{pose:03}.u32"))).ok()?;
+        Some(
+            bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|w| u32::from_le_bytes(*w))
+                .collect(),
+        )
+    };
+    let mut first = None;
+    for (pose, (fa, fb)) in sa.iter().zip(&sb).enumerate() {
+        let (ta, tb) = (&fa["table"], &fb["table"]);
+        if ta["slots"] != tb["slots"] || ta["words"] != tb["words"] {
+            return Err(format!(
+                "pose {pose}: tables differ in shape: {} slots in {} words against {} in {}",
+                ta["slots"], ta["words"], tb["slots"], tb["words"]
+            )
+            .into());
+        }
+        if pose == 0 {
+            println!(
+                "cache tables: {} slots, {} cold words a slot, {} words",
+                ta["slots"], ta["cold_words"], ta["words"]
+            );
+        }
+        let counts = format!(
+            "stamp {} / {}, occupied {} / {}, valid {} / {}",
+            ta["stamp"], tb["stamp"], ta["occupied"], tb["occupied"], ta["valid"], tb["valid"]
+        );
+        let (Some(wa), Some(wb)) = (read(a, pose), read(b, pose)) else {
+            // Digests only: the first differing chunk bounds the first differing word.
+            let differing = (0..TABLE_CHUNKS).find(|i| ta["chunks"][i] != tb["chunks"][i]);
+            match differing {
+                Some(i) => {
+                    let range = chunk(ta["words"].as_u64().unwrap_or(0) as usize, i);
+                    println!(
+                        "pose {pose}: {counts}; raw tables not both present; first differing word is in {}..{}",
+                        range.start, range.end
+                    );
+                    first
+                        .get_or_insert((pose, format!("a word in {}..{}", range.start, range.end)));
+                }
+                None => println!("pose {pose}: {counts}; digests equal"),
+            }
+            continue;
+        };
+        let (xa, xb) = (Table::new(&wa)?, Table::new(&wb)?);
+        let differing: Vec<usize> = (0..wa.len()).filter(|i| wa[*i] != wb[*i]).collect();
+        let Some(&word) = differing.first() else {
+            println!("pose {pose}: {counts}; tables identical");
+            continue;
+        };
+        first.get_or_insert((pose, format!("word {word}: {}", xa.field(word))));
+        // By key, since the same cell may sit in another slot of its bucket.
+        let (ca, cb) = (xa.cells(), xb.cells());
+        let common: Vec<_> = ca
+            .iter()
+            .filter_map(|(key, slot)| Some((*slot, *cb.get(key)?)))
+            .collect();
+        let (mut moved, mut bits, mut rays, mut values, mut worst) = (0, 0, 0u32, 0, 0f32);
+        for &(slot_a, slot_b) in &common {
+            moved += usize::from(slot_a != slot_b);
+            let (cold_a, cold_b) = (xa.cold(slot_a), xb.cold(slot_b));
+            let flipped =
+                (cold_a[12] ^ cold_b[12]).count_ones() + (cold_a[13] ^ cold_b[13]).count_ones();
+            bits += usize::from(flipped != 0);
+            rays += flipped;
+            let (hot_a, hot_b) = (xa.hot(slot_a), xb.hot(slot_b));
+            // The SH in cached units: each half times its record's scale.
+            let sh = |hot: &[u32]| -> Vec<f32> {
+                let scale = f32::from_bits(hot[1]);
+                hot[2..16]
+                    .iter()
+                    .flat_map(|w| [*w as u16, (*w >> 16) as u16])
+                    .take(27)
+                    .map(|h| decode_f16(h) * scale)
+                    .collect()
+            };
+            let difference = sh(hot_a)
+                .iter()
+                .zip(sh(hot_b))
+                .map(|(x, y)| (x - y).abs())
+                .fold(0f32, f32::max);
+            values += usize::from(hot_a[1..16] != hot_b[1..16]);
+            worst = worst.max(difference);
+        }
+        println!(
+            "pose {pose}: {counts}; {} words differ, first at {word} ({}); cells by key: {} in both ({moved} in another slot), {} only in the first, {} only in the second; of those in both, {bits} differ in direction bits ({rays} rays), {values} in stored SH (worst coefficient difference {worst:.2e})",
+            differing.len(),
+            xa.field(word),
+            common.len(),
+            ca.len() - common.len(),
+            cb.len() - common.len()
+        );
+    }
+    match first {
+        Some((pose, what)) => println!("cache tables: first difference in frame {pose}, {what}"),
+        None => println!("cache tables: identical in every frame"),
+    }
     Ok(())
 }
