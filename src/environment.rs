@@ -94,6 +94,9 @@ pub(crate) struct EnvironmentState {
     pub parameters: EnvironmentParameters,
     /// Primary misses show the selected map (Renderer::set_visible_environment).
     pub visible: bool,
+    /// Their radiance scale when it differs from the lighting's intensity
+    /// (Renderer::set_visible_environment_scale).
+    pub visible_scale: Option<f32>,
     pub generation: u64,
     /// In-place procedural pixels changed; bindings and geometric visibility stay valid.
     pub content_revision: u64,

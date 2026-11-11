@@ -16,7 +16,8 @@
 //! N` (a drained timing segment), `--night-lanterns` (27 dim local sources),
 //! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT), `--sky
 //! uniform`, `--sky map` or `map-flat` (Showcase's gradient sky as a prepared map, or the
-//! same layout at its mean radiance; support/gradient_sky.rs, face size `--sky-face N`),
+//! same layout at its mean radiance; support/gradient_sky.rs, face size `--sky-face N`;
+//! `--sky-light K` lights with the map at K while drawing it at 1, `Background::ScaledSky`),
 //! `--no-volumetric-fog`, `--no-gi`, `--no-temporal`, `--no-post`,
 //! `--no-reflections` (every program keeps its untraced estimate), `--render-scale`,
 //! `--exposure`, and `--quarry MANIFEST`,
@@ -85,6 +86,8 @@ struct Args {
     /// `--sky map` (Some(false)) or `map-flat` (Some(true)): support/gradient_sky.rs.
     sky_map: Option<bool>,
     sky_face: u32,
+    /// `--sky-light K`: the map lights at K and is drawn at 1 (`Background::ScaledSky`).
+    sky_light: Option<f32>,
     volumetric_fog: Option<bool>,
     post: bool,
     glass: bool,
@@ -119,6 +122,7 @@ impl Args {
             uniform_sky: false,
             sky_map: None,
             sky_face: 64,
+            sky_light: None,
             volumetric_fog: None,
             post: true,
             glass: true,
@@ -182,6 +186,7 @@ impl Args {
                     }
                 }
                 "--sky-face" => a.sky_face = value()?.parse()?,
+                "--sky-light" => a.sky_light = Some(value()?.parse()?),
                 "--volumetric-fog" => a.volumetric_fog = Some(true),
                 "--no-volumetric-fog" => a.volumetric_fog = Some(false),
                 "--no-temporal" => a.temporal = false,
@@ -487,8 +492,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 engine.set_sky(Sky::Map {
                     map,
                     rotation_y: 0.0,
-                    intensity: 1.0,
-                    background: Background::Sky,
+                    intensity: args.sky_light.unwrap_or(1.0),
+                    background: match args.sky_light {
+                        Some(_) => Background::ScaledSky(1.0),
+                        None => Background::Sky,
+                    },
                 })?;
             }
             Vec3::ZERO

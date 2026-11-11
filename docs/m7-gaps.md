@@ -781,6 +781,24 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
   - **Short follow-up:** find whether the peak comes from scene preparation, upload staging or duplicate copies of the 13 M-triangle scan, then cut it.
   - **Until then:** full-quarry leases run with the named `--quarry-lease` runner setting. It sets a 12 GiB watchdog child cap and starts only at 14 GiB available. The 8 GiB machine floor still applies and is still what kills the lease.
 
+## M8 motion flicker cause (P-FLICKER, 2026-11-10)
+
+[P-FLICKER](p-flicker.md) split the yardstick's motion flicker (4.39 RT / 4.44 non-RT against Unreal Epic's 3.68-3.69). It updates item 1 of the P-YARD2 list above.
+
+- **OPEN: the quarry flicker is TR1's moving texture, not lighting.**
+  - 96% of the residual energy is on surface interiors, rising with texture contrast: 9.5 codes RMS where the reference changes by 20+ codes per pixel, 2.3 on flat areas.
+  - GI off moves it by 0.03 and reflections off by nothing; the two paths differ by 0.05; no jitter reaches only 4.15.
+  - Cause (code and a 1-D replay): the Catmull-Rom history fetch keeps a fixed 16-frame window. Its fraction-dependent softening changes every frame and accumulates, so texture shimmers. Bilinear is already capped by T1b's blur budget.
+  - **Partly FIXED:** `Reconstruction::sharp_blur_budget` 2 (default on) caps that window by the fetch fraction. Flicker RT 4.39 → 4.32, non-RT 4.44 → 4.38. Moving error improves, cost is unchanged and there is no added trail.
+  - **Still OPEN, the remaining gap to Unreal (3.68):** one-frame bright flashes along thin cracks and crevice edges.
+    - They are 26% of the energy, against Unreal's 16%; steps above 40 codes are 8% against 2%.
+    - Without the >20-code steps, Renderlab is at 3.73 and Unreal at 3.38.
+    - They are not GI and not Catmull-Rom/bilinear switching.
+    - Next: capture TR1's per-pixel restart mask, to tell geometric-tap rejection on the scan's crack triangles from glints in the fresh sample.
+- **Not the cause:** GI cell churn (P-STILL §4.2). In motion the cache creates 56 cells a frame, with about 9 bucket-full misses a frame, but it does not move flicker. The eviction follow-up stays a cost item.
+- **S4 interior grain** (P-YARD2 item 1, second half) is a separate source: dim walls lit by GI and sky, not sunlit texture. It was not split here.
+- **The validation layer never affected any Unreal ratio.** P-NSQ, P-NSQ2 and P-NSQ3 timed with it on: their CPU submit and short RT spans read high, and their non-RT GPU passes stand. RT still is 3.35 ms, 1.34x faster than HW Lumen Epic. P-YARD2's 3.82 was a contended visit pair.
+
 ## M8 sky-map cost off the PC (Linux bridge thread, Radeon 760M, 2026-11-11)
 
 - **The sky-map cost reproduces on RADV, inside Renderlab's environment lookups.**
@@ -793,6 +811,61 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
   |---|---|---|
   | RT | 30.2 s | 15.7 s |
   | non-RT | 33.9 s | 19.6 s |
+
+## M8 where we stand against the owner's target (2026-11-11)
+
+Islam's direction is about 3x faster than Unreal with a better picture. On the matched quarry, at main c8c7443 (1080p GPU p50, RTX 4070 SUPER, validation layer off on both sides), against UE 5.7.4 Epic:
+
+| Path | Still | Moving | Cut |
+|---|---|---|---|
+| Ray-traced (vs HW Lumen) | 1.34x faster | 1.06x faster | 2.8x slower |
+| Non-RT (vs SW Lumen) | 2.1x slower | 2.6x slower | 10.5x slower |
+
+**Picture.** Renderlab's full-frame error against the path-traced reference is 19-23% below every Unreal preset. Moving-frame flicker is still above Unreal's: RT 4.323 and non-RT 4.375 against 3.68. The cause is one-frame flashes on the scan's cracks.
+
+**Order of work.** Steady-state frames on real content come first, non-RT above all, then cuts:
+1. Crack-flash flicker.
+2. P-SPLIT cold start, time-boxed by P-SKY.
+3. Lower-rate glossy with resampled reuse (docs/design-nonrt-glossy-cost.md). Glossy is 21 of 33 ms on Showcase non-RT and about 6 of 15 ms on RT.
+4. Non-RT sun shadows: 4.2 of 7.0 ms on the quarry at rest.
+5. Cuts.
+
+## RADV-only raster shadow test failures (Linux gate, 2026-11-11)
+
+**OPEN.** Two GPU shadow tests fail on the AMD Radeon 760M (RADV PHOENIX, Mesa 26.0.8) at main `48962fa`. The Linux gate found them while testing PR #20, and they are not caused by it: the result is identical on its base, so they predate it.
+- `gpu_shadow_offscreen_local_and_reload` fails at `shadow_tests.rs:170` with "offscreen blocker failed for case 1".
+- `gpu_shadow_planar_receiver_motion` fails at `shadow_tests.rs:604` on a thin blocker over a grazing cascade receiver, with `tilt=0 kind=0 pose=0 samples=1 clear=230 blocked=29`.
+
+The tests were only ever verified on the RTX 4070 SUPER; docs/camera-depth.md records the first one. No gap entry covered them before.
+- **Next:** run both alone on the RTX at the same commit.
+  - If they pass there, the difference is RADV raster precision, or the tests' thresholds depend on the vendor. Fix the threshold, or the depth bias on thin grazing blockers, so non-NVIDIA hardware is covered.
+  - If they also fail there, the bug is on main.
+- **Harness note:** about 84 shadow tests that are ignored by default also fail under `--include-ignored` in one process. They need fixture variables, `--release`, or one process per test, because a second validation-logger install poisons a `Once`. Run them one per process.
+
+## Showcase non-RT through Ara, first render on the RTX (2026-11-11)
+
+Ara main d2d990f26, Renderlab pin 901c1d2, RTX 4070 SUPER, 1080p, sky map, quiet slot. This is the baseline for the glossy unit and for P-SPLIT's cold-start case.
+- **Start:** the first `ara capture` timed out at 120 s with no frame. The pipeline cache grew during compilation (31.8 -> 32.4 MiB), so persistence works through Ara. The second try also took about two minutes in total, against 35 s for the game scene after a kill: Showcase compiles more program kernels (mixed list, glass, toon).
+- **Frame:** 40.5 ms GPU per frame over 120 frames, against 3.0 ms for Ara's own renderer.
+
+  | Pass | ms |
+  |---|---|
+  | shading | 33.4 (82% of the frame) |
+  | visibility | 2.0 |
+  | receivers | 0.5 |
+  | reconstruction | 0.5 |
+
+  This is before P-SKY, which should take part of the shading cost. The rest is the glossy unit's target.
+- **Picture:** complete and correct. Stability mean change is 0.008; 0.1% of 16x16 blocks flicker.
+
+## Non-RT run-to-run determinism on RADV (Linux gate, 2026-11-11)
+
+- **OPEN.** On the AMD Radeon 760M (RADV), two runs of main's game_scene on the non-RT path differ in about 5,300 pixels. On the RTX 4070 SUPER both paths repeat byte-for-byte (P-SKY check, 2026-11-11).
+- **Consequence:** on RADV a non-RT byte comparison can't prove a change is image-neutral. Use a run-to-run control from the same build, and judge on the difference beyond that control.
+- **Next:** find the source. Candidates are GPU atomics whose order varies between runs (GI cache inserts, visibility-buffer resolve, software traversal claims) and driver scheduling.
+
+## M8 sky-map cost, P-SKY (Linux thread PRs #16/#17, merged 2026-11-11)
+
 - **Sky-map cost halved (P-SKY, [p-sky.md](p-sky.md)), from the Linux thread's PR.**
   - Cause: every environment lookup ran a manual cube filter: face selection, four loads per level, and a seam path that diverges whole waves. It ran at every glossy-ray miss, every reflection hit and the primary. Every hit also ran a discarded miss lookup.
   - Fix: filtered cube-array lookups (`FLOAT32_FILTERABLE` joins `RECEIVER_FEATURES`) and a miss-only sky lookup.
@@ -803,6 +876,11 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
   - The first run of each succeeded. Every run after the first ring reset lost the device.
   - Still captures and the Showcase-like scene were unaffected.
   - Not investigated yet.
+- **RTX 4070 SUPER check (root, 2026-11-11):**
+  - Game scene, 1080p: the map premium goes from 7.6 to 1.1 ms on RT and from 6.9 to 1.3 ms on non-RT, at most 1 code from main.
+  - Showcase through Ara: still RT 31.5 to 16.2 ms, non-RT 43.6 to 30.8 ms; identical by eye.
+  - Cold start, first image: about 183 s to about 11 s on the game scene; about 120 s (timed out) to about 25 s for Showcase through Ara.
+  - `gpu_environment_ownership_admission_and_reload` already fails on main (live-bytes bound); still OPEN.
 - **P-SKY2 (stacked on P-SKY): half-float maps where lossless, one trilinear sample for the atmosphere's chain.**
   - The Showcase-like map premium goes to about 6.8 ms on RT and 6.5 ms on non-RT, from 16.5 and 17.4 on main.
   - Images within 4 codes.

@@ -189,7 +189,7 @@ let leaves = engine.create_material(&MaterialDesc { thin: true, ..leaf_material 
 |---|---|---|---|
 | `Atmosphere(AtmosphereMedium)`, **the default** (Earth) | a procedural environment generated from the physical sky (Hillaire 2020), so image-based light and the GI cache see it | the physical sky with a limb-darkened sun disk | `illuminance` is outside the atmosphere; transmittance at the camera's altitude dims and colours it, so low suns turn orange |
 | `Uniform(radiance)` | a constant radiance in cd/m² | the same constant | arrives as given |
-| `Map { map, rotation_y, intensity, background }` | a captured HDR environment (`create_environment`) | `Background::Color(radiance)`, or `Background::Sky` for the map along each pixel's ray (TR1b's visible sky) | arrives as given |
+| `Map { map, rotation_y, intensity, background }` | a captured HDR environment (`create_environment`) | `Background::Color(radiance)`, `Background::Sky` for the map along each pixel's ray (TR1b's visible sky), or `Background::ScaledSky(scale)` for that map at its own radiance scale instead of `intensity` (a sky that lights more or less than it looks) | arrives as given |
 
 `AtmosphereMedium` holds the planet and air: radii, `ground_height` (world y of the planet surface), Rayleigh, Mie and ozone coefficients per km, ground albedo and the visible sun radius. The procedural environment regenerates when the sun, the medium or the yaw changes, and the GI cache treats each regeneration as a new sky.
 
@@ -367,7 +367,7 @@ New handles follow the `Id<T>` pattern, new settings are new fields with default
 
 - `Engine` method names and signatures above; `EngineDescriptor`, `Capabilities`, `RenderPath`, `ExperimentalRayQuery`.
 - Handle semantics: `Copy` typed `Id<T>`, stale handles rejected, the batching of objects by mesh and material.
-- `MaterialDesc`, `TextureRef`, `Sun`, `Sky::Atmosphere`/`Uniform`/`Map`, `Background::Color`/`Sky`, `AtmosphereMedium`, `HeightFog`, `VolumetricFog`, `Exposure::Manual`, `Quality::Realtime`/`Reference`, `RenderScale`, and the meaning of each `Settings` field.
+- `MaterialDesc`, `TextureRef`, `Sun`, `Sky::Atmosphere`/`Uniform`/`Map`, `Background::Color`/`Sky`/`ScaledSky`, `AtmosphereMedium`, `HeightFog`, `VolumetricFog`, `Exposure::Manual`, `Quality::Realtime`/`Reference`, `RenderScale`, and the meaning of each `Settings` field.
 - `set_decals(&[Decal])` and the re-exported decal types.
 - Skinned meshes (`create_skinned_mesh`, `add_skinned_asset`, `set_joint_palette`), emitters (`create_emitter`, `update_emitter`, `remove_emitter`, `set_particle_step`), `set_colour_lut`, `cutout`/`AlphaMask`, `Sun::at`/`at_hour`.
 - The program contract: `surface`, `shade`, optional `Parameters`, `DEFAULT_PARAMETERS`, `scatter`, `emission`, `reflection_lobe`, `view_dependence`, and the documented engine inputs.
