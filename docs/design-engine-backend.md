@@ -135,6 +135,14 @@ every program's WGSL each frame to reflect its inputs; keeping reflection per pr
 source brought the frame to 86 ms. A layer's engine must hold what `create_program`
 makes, not only what `create_mesh` uploads.
 
+The first timing against wgpu on one machine (Radeon 760M) then showed the backend 33 ms
+a frame slower, and its split showed why part of it was the frame's scaffolding: every
+frame zero-filled and uploaded 51 MB (a repair queue of 36 bytes a pixel, of which the
+renderer clears a 16-byte header, and two fog volumes that stay zero). A layer's frame
+must keep its per-frame storage as the renderer does and clear only what the renderer
+clears; allocating it fresh and zeroed each frame is correct and costs more than the
+passes it serves.
+
 ## Order of work
 
 1. A PR on main, now: `engine::state` and the trait, moves only, existing engine tests
