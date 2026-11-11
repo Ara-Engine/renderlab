@@ -251,6 +251,12 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
 ///
 /// It requires what the pass must give anywhere: the blurred value within one
 /// half-float step of the sharp one, and each displayed level within one of the CPU's.
+///
+/// Measured so far: Metal loses the step at 1 of the 16 brightnesses; an RTX 4070 SUPER
+/// loses it at 12 of 16, always downward. That is a bias and not noise: a blurred flat
+/// region is 0.03% darker on that vendor (a weighted sum and divide that rounds down).
+/// It is harmless at this size, and the first place to look if a later test sees
+/// blurred regions drift dark on NVIDIA.
 #[test]
 fn depth_of_field_keeps_a_flat_region_within_a_level_at_every_brightness() -> Result<()> {
     let path = root("depth-of-field-flat");

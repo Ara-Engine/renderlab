@@ -2326,20 +2326,67 @@ Reflection results are now kept for the life of the process by pass and source d
 once per `ShaderCache`, and pipeline manifests are read once. The cache key's format
 changed with it, so a cache directory cooks its shaders once more.
 
-**What a frame still redoes**, and so what its 86 ms still contains that the
-renderer's frame does not:
+**Pipelines.** The shader cache now owns each pipeline: it makes one per WGSL, entry
+and state and hands the same handle out every frame, and `ShaderCache::retire` releases
+them. The passes that draw with a pipeline no longer release it (their `retire` is
+empty and stays only so its callers need not change; removing the 21 of them and their
+call sites is mechanical and not done). No pipeline is created or destroyed per frame.
+On Metal this moved the frame little, since Metal's own cache hid the cost; on Vulkan
+it is every pipeline of the frame.
 
-- every pipeline object is created from its kept manifest and released;
-- every target, lookup table and record buffer is allocated and released;
-- the atmosphere's lookup tables and the procedural environment are recomputed, which
-  the renderer does only when the sun or the medium changes;
-- the top-level structure is built, and the HDR and displayed images are read back;
-- `render` waits for the GPU to finish each frame, so this is the time of one frame
-  alone, not a frame rate with frames in flight.
+**Fixed passes and digests.** A pass's own source is composed once and kept, its
+inputs and workgroup size are kept by pass, and its pipeline is found without hashing.
+A caller-authored program takes its source's digest once, for the reflection tables
+and the pipeline key.
 
-Until those are resident too, a timing comparison with wgpu on this scene would
-measure the harness. The first frame of a run takes 13 to 14 s on a fresh cache
-directory: the native shader compile.
+**The atmosphere's tables.** `Frames` keeps the transmittance, multiple-scattering and
+sky-view tables and the procedural environment's two cubes, and remakes each only
+when the renderer would: the first two when the medium changes
+(`a.luts != Some(medium)`), the environment when `ProceduralKey` (sun, medium,
+altitude) changes, the sky view every frame.
+`kept_atmosphere_tables_give_every_frame_what_fresh_tables_give` holds a five-frame
+sequence (a repeated view, the camera 40 m higher, a thicker medium, a lower sun) to
+the frame a fresh sequence renders, byte for byte; it fails at the camera's rise if
+the environment is made only once and at the thicker medium if the first two tables
+are. One exception it states: after the sun turns, a few penumbra pixels differ,
+because the shadow planner carries the sun's shadow orientation from frame to frame
+and a fresh sequence starts it anew. That is the planner's state and not a table's.
+
+**Readback.** `Frames::without_images` (the engine's `set_readback(false)`) renders
+frames and leaves their images on the GPU, for timing.
+
+The frame over those steps, same scene and machine as the table above (frames 2 to
+12; the last frame is byte-identical from step to step):
+
+| | wall time a frame | building the frame | GPU until done | readback and release |
+|---|---|---|---|---|
+| Reflection kept (as above) | 86 ms | 14 ms | 70 ms | 1.8 ms |
+| Pipelines owned by the cache | 84 ms | 12 ms | 70 ms | 2 ms |
+| Fixed passes by pass, digests carried | 79 ms | 7 ms | 70 ms | 1.8 ms |
+| Atmosphere tables kept | 81 ms | 8 ms | 71 ms | 2 ms |
+
+The last two rows are within the run-to-run spread. A sampling profile of the last
+state puts about 90% of the main thread in the wait for the GPU.
+
+**What the 70 ms on the GPU is.** With one feature left out at a time
+(`--without`): the radiance cache 24 ms, the lanterns 13 ms, reconstruction 8 ms,
+local-light shadows 8 ms, reflections 5 ms, the pane 2 ms; with all six out the frame's
+GPU time is 19 ms. Those are the renderer's own passes running through this layer, not
+the harness. Whether they cost more here than through wgpu is what the comparison on
+one machine is for; it cannot be made on the Mac, where wgpu's traced path does not
+run.
+
+**`ara_frame --scene game --timing`** is that comparison's script for both layers: it
+captures and reads back nothing and prints the median, least and greatest time of a
+frame after the first eight, each from the call to `render` until the GPU has finished
+the frame (the wgpu engine returns at submission, so the tool then waits on its
+device). On the Mac the backend's line is `median 80.03 ms` at 1280x720.
+
+**What a frame still makes every time:** its targets and record buffers (allocated
+and released), the top-level structure, the aerial volume, and each program's composed
+source (the text, to look its kept reflection up). On Metal none of these shows in the
+profile. On Vulkan the allocations may; the first timing run there will say, since the
+tool prints the split between building the frame and the GPU.
 
 ## The first game-scene comparison (Radeon, c9a0053) and what it found
 

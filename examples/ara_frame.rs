@@ -93,7 +93,10 @@
 //! comparison of what both draw. `--without NAME[,NAME]` leaves a feature out on both
 //! layers, to find which one a difference belongs to: `gi`, `reconstruction`,
 //! `reflections`, `local-shadows`, `glass`, `lanterns` (the three local lights) or `glow`
-//! (the bulbs' emission). The other level flags do not apply.
+//! (the bulbs' emission). `--timing` renders the frames without capturing or reading
+//! any back and prints one line: the median, least and greatest time of a frame after
+//! the first eight, each from the call to `render` until the GPU has finished the
+//! frame, on either layer. It writes no images. The other level flags do not apply.
 // The fixture also carries names and a scene record for the Unreal match export.
 #[allow(dead_code)]
 #[path = "../support/lighting_fixture.rs"]
@@ -127,6 +130,7 @@ fn main() -> Result<(), Failure> {
     let mut frames = 1usize;
     let (mut game_scene, mut supported) = (false, false);
     let mut without = [false; WITHOUT.len()];
+    let mut timing = false;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--scene" => match args.next().as_deref() {
@@ -134,6 +138,7 @@ fn main() -> Result<(), Failure> {
                 _ => return Err("--scene game".into()),
             },
             "--supported" => supported = true,
+            "--timing" => timing = true,
             "--without" => {
                 for name in args.next().ok_or("--without NAME[,NAME]")?.split(',') {
                     let at = WITHOUT
@@ -216,12 +221,17 @@ fn main() -> Result<(), Failure> {
             still,
             frames,
             game: Some((supported, without)),
+            timing,
         };
         let sequence = match backend.as_deref() {
             Some("wgpu") => game_wgpu(size, level)?,
             Some("ara") => game_ara(size, level, Path::new(&output))?,
             _ => return Err("--backend wgpu|ara".into()),
         };
+        if timing {
+            // Nothing was read back: the run's result is the line it printed.
+            return Ok(());
+        }
         return write(
             Path::new(&output),
             size,
@@ -289,6 +299,7 @@ fn main() -> Result<(), Failure> {
         still,
         frames,
         game: None,
+        timing: false,
     };
     let sequence = match backend.as_deref() {
         Some("wgpu") => wgpu_frame(&fixture, size, level)?,
@@ -342,6 +353,8 @@ struct Level {
     /// left out on wgpu what the backend refuses, and what `--without` left out on
     /// both, by index of `WITHOUT`.
     game: Option<(bool, [bool; WITHOUT.len()])>,
+    /// `--timing`: frames are timed and not captured.
+    timing: bool,
 }
 /// What `--without` can leave out of the game scene on both layers, to find which
 /// feature a difference between them belongs to.
@@ -911,29 +924,60 @@ fn ara_frame(
 /// The game scene's frames on any layer's engine: `engine` already holds the scene's
 /// settings, and `hdr` reads the last frame's exposed HDR from it. `trace` goes into
 /// every frame's record.
+///
+/// With `timing`, no frame is captured or read: each frame's time is taken from the
+/// call to `render` until `settle` has waited for the GPU to finish it, and the run
+/// prints one line (the median, least and greatest of the frames after the first
+/// eight) and returns no frames.
 fn game_frames<S: renderlab::engine::Scene>(
     engine: &mut S,
     size: [u32; 2],
     level: Level,
     options: game::Options,
+    mut settle: impl FnMut(&mut S) -> Result<(), Failure>,
     mut hdr: impl FnMut(&mut S) -> Result<Vec<u8>, Failure>,
     trace: impl Fn(&S) -> serde_json::Value,
 ) -> Result<Vec<Frame>, Failure> {
     engine.resize(size[0], size[1])?;
     let built = game::build(engine, options)?;
     let mut sequence = Vec::new();
+    let mut times = Vec::new();
+    let timing = level.timing;
     for frame in 0..level.frames as u32 {
         let camera = game::animate(engine, &built, if level.still { 0 } else { frame })?;
         let rendering = std::time::Instant::now();
         let report = engine.render(&camera)?;
+        settle(engine)?;
         let render_ms = (rendering.elapsed().as_secs_f64() * 1e5).round() / 1e2;
-        let display = engine.capture()?.rgba8;
         let mut record = trace(engine);
-        record["render_ms"] = render_ms.into();
-        eprintln!("pose {frame}: {record}");
         record["draws"] = report.scene.draws.into();
         record["triangles"] = report.scene.triangles.into();
-        sequence.push((hdr(engine)?, display, None, record));
+        record["render_ms"] = render_ms.into();
+        eprintln!("pose {frame}: {record}");
+        if timing {
+            times.push(render_ms);
+        } else {
+            let display = engine.capture()?.rgba8;
+            sequence.push((hdr(engine)?, display, None, record));
+        }
+    }
+    if timing {
+        const WARM: usize = 8;
+        let mut steady = times.get(WARM..).unwrap_or_default().to_vec();
+        if steady.is_empty() {
+            return Err(format!("--timing needs more than {WARM} frames").into());
+        }
+        steady.sort_by(f64::total_cmp);
+        eprintln!(
+            "timing: {} frames after the first {WARM} at {}x{}: median {:.2} ms, least {:.2}, greatest {:.2}; first frame {:.2} ms",
+            steady.len(),
+            size[0],
+            size[1],
+            steady[steady.len() / 2],
+            steady[0],
+            steady[steady.len() - 1],
+            times[0]
+        );
     }
     Ok(sequence)
 }
@@ -1003,6 +1047,13 @@ fn game_wgpu(size: [u32; 2], level: Level) -> Result<Vec<Frame>, Failure> {
         size,
         level,
         options,
+        // The engine returns once the frame is submitted: wait for the GPU to finish it.
+        |engine| {
+            engine
+                .device()
+                .poll(renderlab::wgpu::PollType::wait_indefinitely())?;
+            Ok(())
+        },
         |engine| {
             let mut capture = engine
                 .renderer_mut()
@@ -1027,11 +1078,14 @@ fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, F
         ShaderCache::new(output.join("shaders"))?,
         settings,
     )?;
+    engine.set_readback(!level.timing)?;
     let sequence = game_frames(
         &mut engine,
         size,
         level,
         options,
+        // The backend's `render` returns when the GPU has finished the frame.
+        |_| Ok(()),
         |engine| Ok(engine.images().ok_or("no frame")?.hdr.clone()),
         |engine| {
             let refusals: Vec<_> = engine

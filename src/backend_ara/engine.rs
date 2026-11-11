@@ -119,6 +119,8 @@ pub struct Engine {
     frame: u64,
     /// Meshes created so far: the next one's identity.
     meshes: u64,
+    /// Whether frames are read back (`set_readback`).
+    readback: bool,
     refusals: Vec<Refusal>,
 }
 
@@ -149,6 +151,7 @@ impl Engine {
             last: None,
             frame: 0,
             meshes: 0,
+            readback: true,
             refusals: Vec::new(),
         };
         engine.refuse_settings(&settings);
@@ -163,10 +166,25 @@ impl Engine {
     pub fn images(&self) -> Option<&ForwardImages> {
         self.last.as_ref()
     }
+    /// Whether frames come back to the CPU. On, the default, `capture` and `images`
+    /// have the last frame. Off, a frame is rendered and left on the GPU, which is
+    /// what a frame time should measure. Changing it starts a new frame sequence.
+    pub fn set_readback(&mut self, on: bool) -> Result<(), Error> {
+        if on != self.readback {
+            self.readback = on;
+            self.restart()?;
+        }
+        Ok(())
+    }
     /// Starts a new frame sequence: the history's size and settings are fixed within
     /// one, so a change of either releases the old sequence's cache and history.
     fn restart(&mut self) -> Result<(), Error> {
-        std::mem::take(&mut self.frames)
+        let fresh = if self.readback {
+            forward::Frames::default()
+        } else {
+            forward::Frames::without_images()
+        };
+        std::mem::replace(&mut self.frames, fresh)
             .retire(&mut self.gpu)
             .map_err(fault)
     }

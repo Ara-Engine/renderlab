@@ -458,7 +458,7 @@ struct Shared<'a> {
     clusters: &'a ClusterInputs,
     lists: &'a Texture,
     atmosphere: &'a AtmosphereParameters,
-    sky: Option<&'a Sky>,
+    sky: Option<&'a Sky<'a>>,
     traced: Option<&'a Traced>,
     /// The radiance cache's table where the cache runs; otherwise a zero header binds.
     gi_table: Option<&'a StorageBuffer>,
@@ -546,7 +546,7 @@ impl<'a> Shared<'a> {
 }
 /// The atmosphere's and the shadow passes' images where they ran.
 fn provided<'a>(
-    sky: Option<&'a Sky>,
+    sky: Option<&'a Sky<'a>>,
     traced: Option<&'a Traced>,
     deferred: Option<&'a Deferred>,
     key: InputKey,
@@ -561,8 +561,8 @@ fn provided<'a>(
         (3, 51) => sky.map(|s| &s.luts.transmittance),
         (3, 52) => sky.map(|s| &s.luts.sky),
         (3, 53) => sky.map(|s| &s.volume),
-        (3, 6) => sky?.environment.as_ref().map(|e| &e[0]),
-        (3, 7) => sky?.environment.as_ref().map(|e| &e[1]),
+        (3, 6) => sky?.environment.map(|e| e[0]),
+        (3, 7) => sky?.environment.map(|e| e[1]),
         _ => None,
     }
 }
@@ -617,14 +617,55 @@ fn sampler_desc(
     })
 }
 
-/// What an active atmosphere produces for the sky backdrop and the lit pass.
-struct Sky {
+/// The atmosphere's tables a sequence keeps on the GPU, as the renderer does: the
+/// transmittance and multiple-scattering tables are remade when the medium changes,
+/// the procedural environment when its content would (`update_procedural_environment`'s
+/// key), and the sky view every frame, into the same texture.
+struct SkyTables {
+    /// The medium the first two tables hold; `None` until a frame has made them.
+    medium: Option<crate::AtmosphereMedium>,
     luts: AtmosphereTargets,
+    environment: Option<Environment>,
+}
+/// The procedural diffuse and specular cubes with their level views.
+struct Environment {
+    /// What the cubes were integrated from; `None` until a frame has made them.
+    digest: Option<[u8; 32]>,
+    diffuse: (Texture, Vec<Texture>),
+    specular: (Texture, Vec<Texture>),
+}
+impl SkyTables {
+    fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
+        let cubes = self.environment.map(|e| [e.diffuse.0, e.specular.0]);
+        for image in [
+            self.luts.transmittance,
+            self.luts.multiscatter,
+            self.luts.sky,
+        ]
+        .into_iter()
+        .chain(cubes.into_iter().flatten())
+        {
+            gpu.retire(Resource::Image(image.image))?;
+        }
+        Ok(())
+    }
+    /// A frame that failed may have left any table unwritten: the next remakes all.
+    fn forget(&mut self) {
+        self.medium = None;
+        if let Some(environment) = &mut self.environment {
+            environment.digest = None;
+        }
+    }
+}
+
+/// What an active atmosphere produces for the sky backdrop and the lit pass.
+struct Sky<'a> {
+    luts: &'a AtmosphereTargets,
     /// Camera volume: fog in slices 0..64 (zero here), aerial perspective in 64..96.
     volume: Texture,
     scatter: Texture,
     /// The procedural diffuse and specular cubes, when the environment is on.
-    environment: Option<[Texture; 2]>,
+    environment: Option<[&'a Texture; 2]>,
     kernels: (AtmospherePasses, VolumePasses, Option<EnvironmentPasses>),
 }
 
@@ -667,13 +708,11 @@ pub fn render(
     images
 }
 
-/// What one frame leaves for the next, kept as the wgpu renderer keeps it: post's
-/// frame serial and previous camera, the shadow planner's light orientations and the
-/// placement transforms, and the radiance cache with its table on the GPU. Every other
-/// GPU resource is still built per frame. Call [`Frames::retire`] when the sequence
-/// ends, to release the cache.
+/// What one frame hands to the next, as the wgpu renderer keeps it: post's frame serial
+/// and previous camera, the shadow planner's light orientations and the placement
+/// transforms.
 #[derive(Default)]
-pub struct Frames {
+struct Carried {
     /// Frames rendered since creation.
     count: u64,
     /// Post frames prepared so far: the `Settings` record's serial.
@@ -685,51 +724,76 @@ pub struct Frames {
     shadow_bases: Vec<Option<glam::DMat4>>,
     /// The last frame's object transforms, for traced frames' previous matrices.
     transforms: Vec<crate::Mat4>,
+}
+/// What a sequence keeps on the GPU from frame to frame.
+#[derive(Default)]
+struct Kept {
     /// The radiance cache, allocated by the first frame that asks for it.
     gi: Option<Cache>,
     /// Temporal reconstruction's history, allocated the same way.
     tr1: Option<History>,
     /// The meshes the last frame named by identity (`ForwardScene::meshes`).
     meshes: BTreeMap<u64, ResidentMesh>,
+    /// The atmosphere's tables, made by the first frame with an active atmosphere.
+    sky: Option<SkyTables>,
+}
+/// A sequence of frames: what each hands to the next, and what stays on the GPU (the
+/// radiance cache, the reconstruction's history, named meshes with their bottom-level
+/// structures, the atmosphere's tables). Targets and records are still made per frame.
+/// Call [`Frames::retire`] when the sequence ends.
+#[derive(Default)]
+pub struct Frames {
+    carried: Carried,
+    kept: Kept,
+    /// Frames leave their images on the GPU: `ForwardImages::hdr` comes back empty
+    /// and `samples`, `surface`, `display` and `focused` as `None` (`without_images`).
+    blind: bool,
 }
 impl Frames {
+    /// A sequence whose frames are rendered and not read back: for timing, where the
+    /// copies to the CPU are not the frame's work. Tables and history asked for by
+    /// `Indirect::read_table` and `Reconstruct::read_history` still come back.
+    pub fn without_images() -> Self {
+        Self {
+            blind: true,
+            ..Self::default()
+        }
+    }
     /// Forgets history: the next frame is a first frame after a cut. The cache keeps
-    /// its buffers and starts from an empty table, as `Renderer::reset_indirect`.
+    /// its buffers and starts from an empty table, as `Renderer::reset_indirect`. The
+    /// meshes and the atmosphere's tables stay as they are.
     pub fn cut(&mut self) {
-        let (mut gi, mut tr1) = (self.gi.take(), self.tr1.take());
-        if let Some(cache) = &mut gi {
+        if let Some(cache) = &mut self.kept.gi {
             cache.reset();
         }
-        if let Some(history) = &mut tr1 {
+        if let Some(history) = &mut self.kept.tr1 {
             history.cut();
         }
-        *self = Self {
-            gi,
-            tr1,
-            meshes: std::mem::take(&mut self.meshes),
-            ..Self::default()
-        };
+        self.carried = Carried::default();
     }
     /// Releases what the sequence kept on the GPU.
     pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        if let Some(cache) = self.gi {
+        if let Some(cache) = self.kept.gi {
             cache.retire(gpu)?;
         }
-        if let Some(history) = self.tr1 {
+        if let Some(history) = self.kept.tr1 {
             history.retire(gpu)?;
         }
-        for mesh in self.meshes.into_values() {
+        for mesh in self.kept.meshes.into_values() {
             mesh.retire(gpu)?;
+        }
+        if let Some(sky) = self.kept.sky {
+            sky.retire(gpu)?;
         }
         Ok(())
     }
     /// The last reconstructed frame's plan (`History::planned`), for telemetry.
     pub fn reconstruction_plan(&self) -> Option<(bool, u32)> {
-        self.tr1.as_ref().map(History::planned)
+        self.kept.tr1.as_ref().map(History::planned)
     }
     /// The serial the next post frame's `Settings` record carries.
     pub fn next_post_serial(&self) -> u32 {
-        self.post_serial.wrapping_add(1)
+        self.carried.post_serial.wrapping_add(1)
     }
     /// Renders the next frame of the sequence and reads back what it produced.
     pub fn render(
@@ -738,29 +802,27 @@ impl Frames {
         cache: &ShaderCache,
         scene: &ForwardScene<'_>,
     ) -> Result<ForwardImages> {
-        // The cache outlives a failed frame. Its planner may already have planned that
-        // frame (and consumed a pending clear), so it starts from an empty table again.
-        let (mut gi, mut tr1) = (self.gi.take(), self.tr1.take());
-        let mut meshes = std::mem::take(&mut self.meshes);
-        let next = frame(self, &mut gi, &mut tr1, &mut meshes, gpu, cache, scene);
-        self.meshes = meshes;
-        if next.is_err() {
-            if let Some(cache) = &mut gi {
-                cache.reset();
+        match frame(&self.carried, &mut self.kept, self.blind, gpu, cache, scene) {
+            Ok((images, carried)) => {
+                self.carried = carried;
+                Ok(images)
             }
-            if let Some(history) = &mut tr1 {
-                history.cut();
+            Err(error) => {
+                // What is kept outlives a failed frame. The cache's planner may already
+                // have planned that frame (and consumed a pending clear), so it starts
+                // from an empty table again; the history and the tables likewise.
+                if let Some(cache) = &mut self.kept.gi {
+                    cache.reset();
+                }
+                if let Some(history) = &mut self.kept.tr1 {
+                    history.cut();
+                }
+                if let Some(sky) = &mut self.kept.sky {
+                    sky.forget();
+                }
+                Err(error)
             }
         }
-        (self.gi, self.tr1) = (gi, tr1);
-        let (images, left) = next?;
-        *self = Self {
-            gi: self.gi.take(),
-            tr1: self.tr1.take(),
-            meshes: std::mem::take(&mut self.meshes),
-            ..left
-        };
-        Ok(images)
     }
 }
 
@@ -801,28 +863,30 @@ fn parameter_layout(source: &str) -> Result<Option<crate::program::ParameterLayo
     Ok(layout)
 }
 
-/// One frame from `history` and the cache; returns its images and the history it
-/// leaves (without the cache, which the caller keeps).
+/// One frame after `history`, over what the sequence keeps on the GPU; returns its
+/// images and what it hands to the next frame.
 fn frame(
-    history: &Frames,
-    gi: &mut Option<Cache>,
-    tr1: &mut Option<History>,
-    resident: &mut BTreeMap<u64, ResidentMesh>,
+    history: &Carried,
+    kept: &mut Kept,
+    blind: bool,
     gpu: &mut GpuDevice,
     cache: &ShaderCache,
     scene: &ForwardScene<'_>,
-) -> Result<(ForwardImages, Frames)> {
+) -> Result<(ForwardImages, Carried)> {
+    let Kept {
+        gi,
+        tr1,
+        meshes: resident,
+        sky: tables,
+    } = kept;
     let started = std::time::Instant::now();
     let mut times = FrameTimes::default();
-    let mut left = Frames {
+    let mut left = Carried {
         count: history.count + 1,
         post_serial: history.post_serial,
         post_camera: None,
         shadow_bases: Vec::new(),
         transforms: scene.objects.iter().map(|o| o.transform).collect(),
-        gi: None,
-        tr1: None,
-        meshes: BTreeMap::new(),
     };
     ensure!(!scene.objects.is_empty(), "forward frame needs an object");
     ensure!(
@@ -1158,18 +1222,60 @@ fn frame(
         graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
     }
 
-    // `Renderer::encode_atmosphere`, in its order. Stale LUTs: this is a first frame.
+    // `Renderer::encode_atmosphere`, in its order, over the tables the sequence keeps.
     let sky = if settings.active() {
-        let luts = AtmosphereTargets::new(gpu)?;
+        // Make what is missing, and decide what this frame remakes, before the tables
+        // are borrowed for the rest of the frame.
+        let made = tables.is_none();
+        if made {
+            *tables = Some(SkyTables {
+                medium: None,
+                luts: AtmosphereTargets::new(gpu)?,
+                environment: None,
+            });
+        }
+        let kept = tables.as_mut().context("made above")?;
+        let cubes_made = settings.environment && kept.environment.is_none();
+        if cubes_made {
+            kept.environment = Some(Environment {
+                digest: None,
+                specular: Texture::cube_chain(gpu, 128, 5)?,
+                diffuse: Texture::cube_chain(gpu, 16, 1)?,
+            });
+        }
+        // `a.luts != Some(medium)`, and `ProceduralKey` changing.
+        let stale = kept.medium != Some(settings.medium);
+        kept.medium = Some(settings.medium);
+        let integrate = match kept.environment.as_mut().filter(|_| settings.environment) {
+            Some(cubes) => cubes.digest.replace(environment_digest) != Some(environment_digest),
+            None => false,
+        };
+        let kept = tables.as_ref().context("made above")?;
+        let luts = &kept.luts;
+        let cubes = kept.environment.as_ref().filter(|_| settings.environment);
+        // What an earlier frame of the sequence left: written, then read by shading.
+        if !made {
+            for image in [&luts.transmittance, &luts.multiscatter, &luts.sky] {
+                graph.import(Resource::Image(image.image), Access::ShaderRead);
+            }
+        }
+        if let Some(cubes) = cubes.filter(|_| !cubes_made) {
+            for image in [&cubes.diffuse.0, &cubes.specular.0] {
+                graph.import(Resource::Image(image.image), Access::ShaderRead);
+            }
+        }
         let volume = Texture::volume_shape(gpu, [grid[0], grid[1], 96], Format::Rgba16Float, true)?;
         let scatter =
             Texture::volume_shape(gpu, [grid[0], grid[1], 64], Format::Rgba16Float, false)?;
         // wgpu zero-initialises these; the kernels write only part of each.
-        for (image, texels) in [
-            (luts.transmittance.image, 256 * 65),
-            (volume.image, grid[0] * grid[1] * 96),
-            (scatter.image, grid[0] * grid[1] * 64),
-        ] {
+        for (image, texels) in made
+            .then_some((luts.transmittance.image, 256 * 65))
+            .into_iter()
+            .chain([
+                (volume.image, grid[0] * grid[1] * 96),
+                (scatter.image, grid[0] * grid[1] * 64),
+            ])
+        {
             staging.push(transfer::upload(
                 gpu,
                 &mut graph,
@@ -1179,39 +1285,38 @@ fn frame(
             )?);
         }
         let lut_kernels = AtmospherePasses::new(gpu, cache)?;
-        for stage in [
-            Pass::AtmosphereTransmittance,
-            Pass::AtmosphereMultiscatter,
-            Pass::AtmosphereSky,
-            Pass::AtmosphereAmbient,
-        ] {
-            lut_kernels.record(&mut graph, &mut rec, stage, &atmosphere, &luts)?;
+        for stage in [Pass::AtmosphereTransmittance, Pass::AtmosphereMultiscatter]
+            .into_iter()
+            .filter(|_| stale)
+            .chain([Pass::AtmosphereSky, Pass::AtmosphereAmbient])
+        {
+            lut_kernels.record(&mut graph, &mut rec, stage, &atmosphere, luts)?;
         }
         let mut environment = None;
         let mut environment_kernels = None;
-        if settings.environment {
+        if let Some(cubes) = cubes {
             let kernels = EnvironmentPasses::new(gpu, cache)?;
-            let (specular, levels) = Texture::cube_chain(gpu, 128, 5)?;
-            for level in &levels {
+            if integrate {
+                for level in &cubes.specular.1 {
+                    kernels.record(
+                        &mut graph,
+                        &mut rec,
+                        Pass::EnvironmentSpecular,
+                        &atmosphere,
+                        &luts.sky,
+                        level,
+                    )?;
+                }
                 kernels.record(
                     &mut graph,
                     &mut rec,
-                    Pass::EnvironmentSpecular,
+                    Pass::EnvironmentDiffuse,
                     &atmosphere,
                     &luts.sky,
-                    level,
+                    &cubes.diffuse.1[0],
                 )?;
             }
-            let (diffuse, levels) = Texture::cube_chain(gpu, 16, 1)?;
-            kernels.record(
-                &mut graph,
-                &mut rec,
-                Pass::EnvironmentDiffuse,
-                &atmosphere,
-                &luts.sky,
-                &levels[0],
-            )?;
-            environment = Some([diffuse, specular]);
+            environment = Some([&cubes.diffuse.0, &cubes.specular.0]);
             environment_kernels = Some(kernels);
         }
         let volume_kernels = VolumePasses::new(gpu, cache)?;
@@ -1220,7 +1325,7 @@ fn frame(
             &mut rec,
             Pass::AtmosphereAerial,
             &atmosphere,
-            &luts,
+            luts,
             &scatter,
             &volume,
         )?;
@@ -2524,7 +2629,7 @@ fn frame(
                 &mut graph,
                 &mut rec,
                 &atmosphere,
-                &sky.luts,
+                sky.luts,
                 &sky.volume,
                 &output,
             )?;
@@ -2764,15 +2869,19 @@ fn frame(
             pane_packets.push(packet);
         }
     }
-    let read = transfer::readback(
-        gpu,
-        &mut graph,
-        &mut rec,
-        shown.image,
-        u64::from(target[0]) * u64::from(target[1]) * 8,
-    )?;
+    let read = if blind {
+        None
+    } else {
+        Some(transfer::readback(
+            gpu,
+            &mut graph,
+            &mut rec,
+            shown.image,
+            u64::from(target[0]) * u64::from(target[1]) * 8,
+        )?)
+    };
     // Below native scale the HDR target still holds the shaded samples.
-    let samples_read = match &upscaled {
+    let samples_read = match upscaled.as_ref().filter(|_| !blind) {
         Some(_) => Some(transfer::readback(
             gpu,
             &mut graph,
@@ -2835,7 +2944,7 @@ fn frame(
     if let Some(settings) = scene.post.filter(|s| s.enabled) {
         settings.validate()?;
         let passes = PostPasses::new(gpu, cache, Format::Rgba32Float)?;
-        left.post_serial = history.next_post_serial();
+        left.post_serial = history.post_serial.wrapping_add(1);
         let record =
             SettingsRecord::new(gpu, &post_record(&settings, target[1], left.post_serial))?;
         // `PostGpu::prepare`: the previous camera counts only from the frame before.
@@ -2961,23 +3070,27 @@ fn frame(
                     },
                     &focused,
                 )?;
-                reads[2] = Some(transfer::readback(
-                    gpu,
-                    &mut graph,
-                    &mut rec,
-                    focused.image,
-                    u64::from(target[0]) * u64::from(target[1]) * 8,
-                )?);
+                if !blind {
+                    reads[2] = Some(transfer::readback(
+                        gpu,
+                        &mut graph,
+                        &mut rec,
+                        focused.image,
+                        u64::from(target[0]) * u64::from(target[1]) * 8,
+                    )?);
+                }
                 post_images.extend(blurred.replace(focused));
             }
             let blurred = blurred.context("a post surface with no pass to read it")?;
-            reads[0] = Some(transfer::readback(
-                gpu,
-                &mut graph,
-                &mut rec,
-                auxiliary.image,
-                u64::from(target[0]) * u64::from(target[1]) * 16,
-            )?);
+            if !blind {
+                reads[0] = Some(transfer::readback(
+                    gpu,
+                    &mut graph,
+                    &mut rec,
+                    auxiliary.image,
+                    u64::from(target[0]) * u64::from(target[1]) * 16,
+                )?);
+            }
             surface = Some((kernel, frame, blurred));
             post_images.push(auxiliary);
         }
@@ -3003,13 +3116,15 @@ fn frame(
         )?;
         let display = Texture::new(gpu, target, Format::Rgba8, false, true)?;
         passes.display(&mut graph, &mut rec, &linear, &display)?;
-        reads[1] = Some(transfer::readback(
-            gpu,
-            &mut graph,
-            &mut rec,
-            display.image,
-            u64::from(target[0]) * u64::from(target[1]) * 4,
-        )?);
+        if !blind {
+            reads[1] = Some(transfer::readback(
+                gpu,
+                &mut graph,
+                &mut rec,
+                display.image,
+                u64::from(target[0]) * u64::from(target[1]) * 4,
+            )?);
+        }
         post_images.extend([lut, linear, display]);
         post_buffers.push(record.buffer);
         tail = Some((passes, bloom, surface));
@@ -3023,7 +3138,11 @@ fn frame(
     let finishing = std::time::Instant::now();
     let mut images = ForwardImages {
         times,
-        hdr: gpu.read(read).context("HDR readback")?,
+        hdr: read
+            .map(|b| gpu.read(b))
+            .transpose()
+            .context("HDR readback")?
+            .unwrap_or_default(),
         samples: samples_read.map(|b| gpu.read(b)).transpose()?,
         surface: reads[0].map(|b| gpu.read(b)).transpose()?,
         display: reads[1].map(|b| gpu.read(b)).transpose()?,
@@ -3167,17 +3286,7 @@ fn frame(
         if let Some(environment) = environment {
             environment.retire(gpu)?;
         }
-        post_images.extend(
-            [
-                sky.luts.transmittance,
-                sky.luts.multiscatter,
-                sky.luts.sky,
-                sky.volume,
-                sky.scatter,
-            ]
-            .into_iter()
-            .chain(sky.environment.into_iter().flatten()),
-        );
+        post_images.extend([sky.volume, sky.scatter]);
     }
     atmosphere.retire(gpu, &mut graph)?;
     cluster_inputs.retire(gpu)?;
@@ -3199,7 +3308,7 @@ fn frame(
         .chain(outgoing_read)
         .chain(raw_read)
         .chain(history_read)
-        .chain([read])
+        .chain(read)
     {
         gpu.retire(Resource::Buffer(buffer))?;
     }
