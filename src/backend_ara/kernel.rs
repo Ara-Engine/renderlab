@@ -92,11 +92,30 @@ impl Kernel {
                 && extent.iter().all(|n| *n > 0),
             "invalid kernel packet or extent"
         );
+        self.record_labelled(graph, rec, inputs, extent, format!("ara::{:?}", self.pass))
+    }
+    /// `record` under another pass label, to time one dispatch of a pass apart from
+    /// the others.
+    pub(crate) fn record_labelled(
+        &self,
+        graph: &mut Graph,
+        rec: &mut Recorder,
+        inputs: &HeapBindings<'_>,
+        extent: [u32; 3],
+        label: String,
+    ) -> Result<()> {
+        ensure!(
+            inputs.pass() == self.pass
+                && inputs.contract() == self.contract
+                && extent.iter().all(|n| *n > 0),
+            "invalid kernel packet or extent"
+        );
         graph.node_uses(rec, &inputs.uses())?;
         self.dispatch(
             rec,
             inputs,
             Command::Dispatch(std::array::from_fn(|i| extent[i].div_ceil(self.threads[i]))),
+            label,
         );
         Ok(())
     }
@@ -129,11 +148,18 @@ impl Kernel {
                 arguments: arguments.buffer,
                 offset,
             },
+            format!("ara::{:?}", self.pass),
         );
         Ok(())
     }
-    fn dispatch(&self, rec: &mut Recorder, inputs: &HeapBindings<'_>, command: Command) {
-        rec.push(Command::BeginPass(format!("ara::{:?}", self.pass)));
+    fn dispatch(
+        &self,
+        rec: &mut Recorder,
+        inputs: &HeapBindings<'_>,
+        command: Command,
+        label: String,
+    ) {
+        rec.push(Command::BeginPass(label));
         rec.push(Command::Pipeline(self.pipeline));
         rec.push(Command::Constants(inputs.roots()));
         rec.push(command);

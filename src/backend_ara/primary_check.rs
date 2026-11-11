@@ -77,12 +77,14 @@ impl PrimaryCheck {
             rec,
             &[(Resource::Buffer(retries.buffer), Access::CopyDestination)],
         )?;
+        rec.push(Command::BeginPass("ara::Fill".into()));
         rec.push(Command::FillBuffer {
             destination: retries.buffer,
             offset: 0,
             size: 16,
             value: 0,
         });
+        rec.push(Command::EndPass);
         Ok(())
     }
 }

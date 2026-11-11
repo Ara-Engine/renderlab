@@ -24,10 +24,12 @@ pub fn upload(
             (Resource::Image(image), Access::CopyDestination),
         ],
     )?;
+    rec.push(Command::BeginPass("ara::Upload".into()));
     rec.push(Command::UploadImage {
         source: buffer,
         destination: image,
     });
+    rec.push(Command::EndPass);
     Ok(buffer)
 }
 /// Stage one mip level of a single-layer 2D image; retire the returned buffer after
@@ -51,6 +53,7 @@ pub fn upload_mip(
             (Resource::Image(image), Access::CopyDestination),
         ],
     )?;
+    rec.push(Command::BeginPass("ara::Upload".into()));
     rec.push(Command::UploadImageRegion {
         source: buffer,
         destination: image,
@@ -63,6 +66,7 @@ pub fn upload_mip(
             layer_count: 1,
         },
     });
+    rec.push(Command::EndPass);
     Ok(buffer)
 }
 /// Copy an entire image to a correctly sized host buffer and declare its host read.
@@ -81,10 +85,12 @@ pub fn readback(
             (Resource::Buffer(buffer), Access::CopyDestination),
         ],
     )?;
+    rec.push(Command::BeginPass("ara::Readback".into()));
     rec.push(Command::ReadImage {
         source: image,
         destination: buffer,
     });
+    rec.push(Command::EndPass);
     graph.node(rec, &[(Resource::Buffer(buffer), Access::HostRead)])?;
     Ok(buffer)
 }
@@ -107,6 +113,7 @@ pub fn readback_buffer(
             (Resource::Buffer(destination), Access::CopyDestination),
         ],
     )?;
+    rec.push(Command::BeginPass("ara::Readback".into()));
     rec.push(Command::CopyBufferRange {
         source,
         source_offset: offset,
@@ -114,6 +121,7 @@ pub fn readback_buffer(
         destination_offset: 0,
         size: len,
     });
+    rec.push(Command::EndPass);
     graph.node(rec, &[(Resource::Buffer(destination), Access::HostRead)])?;
     Ok(destination)
 }

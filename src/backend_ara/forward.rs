@@ -1553,7 +1553,9 @@ fn frame(
                                 (Resource::AccelerationStructure(blas), Access::AsBuild),
                             ],
                         )?;
+                        rec.push(Command::BeginPass("ara::BuildBlas".into()));
                         rec.push(Command::BuildAccelerationStructure(blas));
+                        rec.push(Command::EndPass);
                         let mesh = ResidentMesh {
                             vertices,
                             indices,
@@ -1609,7 +1611,9 @@ fn frame(
                 Access::AsBuild,
             ));
             graph.node(&mut rec, &uses)?;
+            rec.push(Command::BeginPass("ara::BuildTlas".into()));
             rec.push(Command::BuildAccelerationStructure(tlas.acceleration));
+            rec.push(Command::EndPass);
             times.geometry = geometry_started.elapsed();
             let mut bytes = frame.records().to_vec();
             bytes.resize(bytes.len().max(crate::shadows::VIEW_BYTES as usize), 0);
@@ -2733,10 +2737,12 @@ fn frame(
                 (Resource::Image(samples.image), Access::CopyDestination),
             ],
         )?;
+        rec.push(Command::BeginPass("ara::CopyImage".into()));
         rec.push(Command::CopyImage {
             source: output.image,
             destination: samples.image,
         });
+        rec.push(Command::EndPass);
         images.record(&mut graph, &mut rec, packet)?;
     }
     let draws: Vec<_> = geometries
@@ -2964,10 +2970,12 @@ fn frame(
                     (Resource::Image(pane.behind.image), Access::CopyDestination),
                 ],
             )?;
+            rec.push(Command::BeginPass("ara::CopyImage".into()));
             rec.push(Command::CopyImage {
                 source: output.image,
                 destination: pane.behind.image,
             });
+            rec.push(Command::EndPass);
             let seed = HeapBindings::new(
                 gpu,
                 Pass::TransparencySeed,

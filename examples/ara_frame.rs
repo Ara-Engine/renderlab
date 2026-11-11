@@ -1202,6 +1202,11 @@ fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, F
                 "record_ms": ms(times.record),
                 "geometry_ms": ms(times.geometry),
                 "gpu_ms": ms(times.gpu),
+                // What no labelled pass holds: ara-gpu's own staging copies, barriers
+                // and the gaps between passes.
+                "unlabelled_ms": ms(times.gpu.saturating_sub(std::time::Duration::from_secs_f64(
+                    times.passes.iter().map(|(_, t)| t).sum::<f64>() / 1e3,
+                ))),
                 "finish_ms": ms(times.finish),
                 "passes_ms": passes,
             })

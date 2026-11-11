@@ -708,11 +708,13 @@ pub(super) fn fill(
         rec,
         &[(Resource::Buffer(buffer.buffer), Access::CopyDestination)],
     )?;
+    rec.push(Command::BeginPass("ara::Fill".into()));
     rec.push(Command::FillBuffer {
         destination: buffer.buffer,
         offset,
         size,
         value: 0,
     });
+    rec.push(Command::EndPass);
     Ok(())
 }
