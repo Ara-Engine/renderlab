@@ -10,6 +10,9 @@
 #[cfg(test)]
 extern crate self as renderlab;
 pub mod animation;
+/// Optional ara-gpu renderer, independently constructed from the wgpu renderer.
+#[cfg(feature = "backend-ara")]
+pub mod backend_ara;
 // AT1: physical sky, aerial perspective and fog (docs/m7-at1.md).
 mod atmosphere;
 /// TP1 alpha-tested (cutout) geometry, cut at load (docs/m7-tp1.md).

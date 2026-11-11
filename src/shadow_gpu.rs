@@ -21,6 +21,12 @@ impl ShadowFrame {
     pub fn records(&self) -> &[u8] {
         &self.records
     }
+    /// The light orientations this plan transported, which the next frame's plan
+    /// starts from. The wgpu renderer takes the field itself after submitting.
+    #[cfg(feature = "backend-ara")]
+    pub(crate) fn bases(&self) -> &[Option<DMat4>] {
+        &self.bases
+    }
     pub fn prepare_hardware_bias(&mut self, light_records: &[u8]) -> Result<(), Error> {
         for (light, &[first, count]) in light_records
             .chunks_exact(crate::lighting::LIGHT_BYTES)
