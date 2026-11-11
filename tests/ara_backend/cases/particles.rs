@@ -32,12 +32,23 @@ fn particle_depth_sort_native_replay_against_cpu() -> Result<()> {
     for capacity in [1u32, 9, 2048] {
         let particles: Vec<[f32; 12]> = (0..capacity)
             .map(|i| {
-                let depth = match i % 7 {
+                let depth: f32 = match i % 7 {
                     0 => -1.,
                     1 => 0.,
                     2 => 8.,
                     3 => 8.0001,
                     _ => ((i * 17) % 101) as f32 * 0.25,
+                };
+                // The key keeps a depth's bits above the low eleven. Round numbers have
+                // those bits zero, exactly on a bucket boundary, where the last ulp of
+                // either device's dot product decides the bucket. Keep every positive
+                // depth at least 768 ulps inside its bucket; distinct depths that shared
+                // a bucket (8 and 8.0001) stay distinct and still share it.
+                let depth = if depth > 0. {
+                    let bits = depth.to_bits();
+                    f32::from_bits((bits & !0x7ff) | (0x300 + (bits & 0x7ff) % 0x200))
+                } else {
+                    depth
                 };
                 let p = eye + forward * depth;
                 [

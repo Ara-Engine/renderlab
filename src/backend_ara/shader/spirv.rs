@@ -73,6 +73,7 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
             validate_heap_bindings(&words)?;
             repair_image_arguments(&mut words)?;
             super::spv_layout::repair(&mut words)?;
+            super::spv_precise::decorate(&mut words)?;
             Ok(SpirvStage {
                 stage,
                 entry: entry.into(),

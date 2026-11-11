@@ -21,6 +21,7 @@ mod spirv;
 mod spv_acceleration;
 mod spv_layout;
 mod spv_nonuniform;
+mod spv_precise;
 pub(crate) use skin_interface::SkinResource;
 
 pub use metal::msl;

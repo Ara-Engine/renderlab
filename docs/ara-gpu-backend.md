@@ -1457,5 +1457,27 @@ What the twelve were, and where each stands:
 | 1 | Rendering to layer 0 of an array attached the image's whole view, so layer 1 needed the attachment layout too (coloured transmission layers). | Fixed in ara-gpu (same PR), with a regression test that passes on Metal. Not rerun on Vulkan. |
 | 2 wrong results, validation or not | `particle_depth_sort` differs at 2,048 slots (1 and 9 are exact); `primary_geometry_check_retry_queue` differs at words 30 and 39 (GPU 0, CPU 1). | Not diagnosed. Both kernels are unchanged Renderlab WGSL; whether wgpu gives the right answer for them on the same driver is not known yet, which would separate the adapter from the driver. |
 
-The two wrong results are the only open correctness question on Vulkan. Both passes
-replay exactly on Metal.
+At 33f1ff6, pinned to the ara-gpu fixes, the gate reran the suite under validation:
+49 passed and 2 failed with no validation message, and all ten validation-only
+failures are gone. The gate then diagnosed the two wrong results; neither is a broken
+kernel.
+
+- **Particle depth sort.** The fixture's depths were multiples of 0.25, whose low
+  eleven mantissa bits are zero, exactly on the boundary of the key's `>> 11`
+  bucket. RADV's dot product landed one ulp under for a few of them, so those keys
+  moved one bucket down and the sort then ordered them correctly. The fixture now
+  keeps every positive depth at least 768 ulps inside its bucket. A one-bucket move
+  of a boundary depth changes no picture; the kernel is untouched.
+- **Primary geometry check.** Two of 85 words differed, both for items on exact
+  dyadic edge coordinates. The SPIR-V carried no `NoContraction`, so the driver was
+  free to fuse a multiply and an add where Metal, compiled with
+  `-fno-fast-math -ffp-contract=off`, keeps them apart. `shader::spv_precise` now
+  decorates every float arithmetic result of every emitted stage `NoContraction`
+  (4,520 results in the standard cohort; explicit `fma` calls stay fused, as the
+  source asks), which gives Vulkan the float policy Metal already has. The fixture
+  is unchanged. Whether this makes the two words agree on RADV, and what it costs
+  in GPU time, are both unmeasured: it has only run through `spirv-val` here. If it
+  costs measurably it can be narrowed to the geometry kernels, and if the words
+  still differ the fixture moves off the dyadic edges instead.
+
+Neither change has run on a Vulkan device.

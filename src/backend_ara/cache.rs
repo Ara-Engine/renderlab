@@ -75,7 +75,7 @@ impl ShaderCache {
             "{pass:?} reads per-vertex attributes, which this device does not support"
         );
         let source = format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             wgsl,
             include_str!("shader/metal.rs"),
             include_str!("shader/spirv.rs"),
@@ -87,6 +87,7 @@ impl ShaderCache {
             include_str!("shader/packet_spirv.rs"),
             include_str!("shader/spv_layout.rs"),
             include_str!("shader/spv_nonuniform.rs"),
+            include_str!("shader/spv_precise.rs"),
             include_str!("shader/spv_acceleration.rs"),
             include_str!("shader/array_access.rs"),
             include_str!("shader/buffer_arrays.rs"),

@@ -55,6 +55,7 @@ fn upload(
 #[test]
 fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
     let path = root("spirv");
+    let mut precise = 0;
     for pass in [
         Pass::BufferArrayProbe,
         Pass::HandleArrayProbe,
@@ -146,6 +147,7 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
                 "{pass:?} native entry ABI mismatch: {entries:?} != {}",
                 stage.spirv_entry
             );
+            precise += assert_precise_arithmetic(&words)?;
         }
         if let Some(sdk) = std::env::var_os("VULKAN_SDK") {
             let sdk = std::path::PathBuf::from(sdk);
@@ -172,7 +174,14 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
             }
         }
     }
-    println!("SPIR-V output: {}", path.display());
+    ensure!(
+        precise > 1000,
+        "the cohort lost its float arithmetic: {precise}"
+    );
+    println!(
+        "SPIR-V output: {}; {precise} float arithmetic results, all NoContraction",
+        path.display()
+    );
     Ok(())
 }
 
@@ -297,6 +306,33 @@ mod handle_array_cases;
 mod primary_shade_cases;
 #[path = "ara_backend/primary_shade_reference.rs"]
 mod primary_shade_reference;
+
+/// Every float arithmetic result must be decorated NoContraction (42), so a Vulkan
+/// driver fuses nothing the Metal compile, which runs with contraction off, keeps
+/// apart. Returns how many results there were.
+fn assert_precise_arithmetic(words: &[u32]) -> Result<usize> {
+    let (mut arithmetic, mut precise) = (Vec::new(), std::collections::BTreeSet::new());
+    let mut at = 5;
+    while at < words.len() {
+        let n = (words[at] >> 16) as usize;
+        ensure!(n > 0 && at + n <= words.len(), "invalid SPIR-V instruction");
+        match words[at] & 0xffff {
+            71 if n == 3 && words[at + 2] == 42 => {
+                precise.insert(words[at + 1]);
+            }
+            127 | 129 | 131 | 133 | 136 | 140 | 141 | 142..=148 => arithmetic.push(words[at + 2]),
+            _ => {}
+        }
+        at += n;
+    }
+    ensure!(
+        arithmetic.iter().all(|id| precise.contains(id)) && precise.len() == arithmetic.len(),
+        "{} float arithmetic results, {} NoContraction decorations",
+        arithmetic.len(),
+        precise.len()
+    );
+    Ok(arithmetic.len())
+}
 
 // Inspect the final operand consumed by sampling; spirv-val does not enforce this
 // semantic descriptor-indexing rule. Independent from the production repair pass.
