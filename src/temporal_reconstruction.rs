@@ -500,12 +500,18 @@ fn trace_source_with(soft_kernels: &str, listing: bool) -> Result<String, Error>
     if !listing {
         // Only TR1's fused modules use the runtime budget. The legacy eight-ray and
         // Exact pipelines keep their override, direction sequence and normalization.
-        return Ok(source
-            .replace(
-                loop_seam,
-                "for(var j=lane;j<primary_frame.sampling.x;j+=1u)",
-            )
-            .replace("256u/FRESH_DIRECTIONS", "256u/primary_frame.sampling.x"));
+        // P-RELIT: each receiver traces the frame's budget, or the restart count where the
+        // resolve will restart it (tr1_zone_rays); its count is normalised by its own rays.
+        return Ok(format!(
+            "{}\nvar<private> tr1_rays:u32=8u;\n{}",
+            source
+                .replace(
+                    loop_seam,
+                    "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u)",
+                )
+                .replace("256u/FRESH_DIRECTIONS", "256u/tr1_rays"),
+            zones_source("primary_frame.zones")
+        ));
     }
     // P-RTS: the full-budget estimator for listed penumbra pixels is this module's own
     // fresh_estimate text, renamed, with lanes striding the frame's budget.
@@ -757,6 +763,13 @@ pub(crate) struct Planned {
     pub(crate) frame: Vec<u8>,
     pub(crate) sampling: Vec<u8>,
 }
+impl Planned {
+    /// The frame's `Tr1Zones` record (`ZONES_BYTES`), which the sun-shadow passes also bind:
+    /// `PrimaryFrame::zones` and `VsmFrame::zones`.
+    pub(crate) fn zones(&self) -> &[u8] {
+        &self.frame[ZONES_OFFSET..ZONES_OFFSET + ZONES_BYTES]
+    }
+}
 
 /// The reconstruction's CPU history between frames and the per-frame plan made from it:
 /// everything `prepare_reconstruction` decides without a device. The wgpu renderer and
@@ -770,7 +783,11 @@ pub(crate) struct Planner {
     /// The last prepared frame restarted every pixel.
     pub reset: bool,
     held_frames: u32,
+    /// Sun-shadow directions every receiver evaluates this frame.
     pub shadow_rays: u32,
+    /// P-RELIT: directions a receiver in a restart zone evaluates instead (`Tr1Zones`
+    /// counts.y); 0 when no zone is up or the frame's count is already as large.
+    pub restart_rays: u32,
     /// P-RTS: directions every receiver traces first; below `shadow_rays`, only listed
     /// penumbra pixels trace the full budget (docs/p-rts.md).
     pub probe_rays: u32,
@@ -784,6 +801,7 @@ impl Planner {
             reset: true,
             held_frames: 0,
             shadow_rays: 8,
+            restart_rays: 0,
             probe_rays: 8,
         }
     }
@@ -972,17 +990,22 @@ impl Planner {
         } else {
             0
         };
-        // P-FLAT: frames that drop history in a moving caster's shadow take the restart budget,
-        // as frames that restart every pixel do: the restarted pixels keep main's per-pixel ray
-        // count. P-RELIT: a local light's intensity change never selects it. The light cannot
-        // change sun visibility, and the 64 rays it bought on every frame of a flickering fire
-        // cost the game scene 24 ms a frame on the non-RT path (docs/p-relit.md).
-        self.shadow_rays = i.budget.rays(
-            cold,
-            self.reset || shadow_bounds.is_some(),
-            sampling_still,
-            self.held_frames,
-        );
+        // P-RELIT: the restart budget is per pixel. A frame that restarts every pixel takes
+        // it frame-wide. A frame that restarts only some (receivers in a moving caster's
+        // shadow, or pixels in a changed light's restart sphere) keeps the moving or held
+        // count, and the receivers in those zones trace `restart_rays` (tr1_zone_rays): they
+        // keep the per-pixel ray count a full restart gave them. One frame-wide word put the
+        // whole frame on 64 rays for every frame of a flickering fire, which cost the game
+        // scene 24 ms a frame on the non-RT path (docs/p-relit.md).
+        self.shadow_rays = i
+            .budget
+            .rays(cold, self.reset, sampling_still, self.held_frames);
+        let zoned = shadow_bounds.is_some() || !relit_spheres.is_empty();
+        self.restart_rays = if zoned && i.budget.reset_rays > self.shadow_rays {
+            i.budget.reset_rays
+        } else {
+            0
+        };
         // Listing pays only where the budget exceeds both probe sets.
         self.probe_rays = if listing && PENUMBRA_LISTING && self.shadow_rays > 2 * PROBE_DISK {
             2 * PROBE_DISK
@@ -1045,7 +1068,7 @@ impl Planner {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
         }
-        for count in [relit_spheres.len() as u32, 0, 0, 0] {
+        for count in [relit_spheres.len() as u32, self.restart_rays, 0, 0] {
             bytes.extend_from_slice(&count.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), ZONES_OFFSET + ZONES_BYTES);
@@ -1088,6 +1111,8 @@ pub(in crate::renderer) struct ReconstructionState {
     groups: Option<(GroupKey, [Owned<wgpu::BindGroup>; 2])>,
     /// The CPU history and per-frame plan (shared with the ara-gpu backend).
     pub plan: Planner,
+    /// The last planned frame's `Tr1Zones` record.
+    pub zones: [u8; ZONES_BYTES],
 }
 type GroupKey = (
     wgpu::Texture,
@@ -1176,6 +1201,7 @@ impl ReconstructionState {
             ),
             groups: None,
             plan: Planner::new(),
+            zones: [0; ZONES_BYTES],
         }
     }
     fn size(&self) -> wgpu::Extent3d {
@@ -1534,8 +1560,13 @@ impl Renderer {
         let primary_frame = &primary.frame.as_ref().unwrap().0.value;
         self.queue
             .write_buffer(primary_frame, 112, &planned.sampling);
-        self.uploads.view_settings += 16;
-        self.uploads.write_calls += 1;
+        self.queue
+            .write_buffer(primary_frame, super::FRAME_ZONES as u64, planned.zones());
+        self.uploads.view_settings += 16 + ZONES_BYTES as u64;
+        self.uploads.write_calls += 2;
+        // The non-RT sun lookup reads the same zones (prepare_virtual_sampling).
+        let zones: [u8; ZONES_BYTES] = planned.zones().try_into().unwrap();
+        self.reconstruction_state.as_mut().unwrap().zones = zones;
         let state = self.reconstruction_state.as_ref().unwrap();
         self.queue
             .write_buffer(&state.frame.value, 0, &planned.frame);
@@ -1740,7 +1771,13 @@ mod tests {
         for (frame, scale) in [(1, 0.7), (2, 0.9), (3, 0.91)] {
             let planned = plan.prepare(inputs(&[fire(scale)], frame));
             assert!(!plan.reset, "frame {frame}");
+            // The frame keeps the moving count; receivers in the sphere trace the restart count.
             assert_eq!(plan.shadow_rays, budget.active_rays, "frame {frame}");
+            assert_eq!(plan.restart_rays, budget.reset_rays, "frame {frame}");
+            assert_eq!(
+                planned.zones()[52 + RELIT_SLOTS * 16..][..4],
+                budget.reset_rays.to_ne_bytes()
+            );
             let [(centre, radius)] = spheres(&planned)[..] else {
                 panic!("one sphere, frame {frame}")
             };
@@ -1757,6 +1794,7 @@ mod tests {
         // An unchanged light restarts nothing; its box and spheres are off.
         let steady = plan.prepare(inputs(&[fire(0.91)], 4));
         assert!(spheres(&steady).is_empty());
+        assert_eq!(plan.restart_rays, 0);
         let options = u32::from_ne_bytes(steady.frame[292..296].try_into().unwrap());
         assert_eq!(options & 8, 0);
         // A key change restarts every pixel and the swing: the next flicker starts small.
@@ -1765,7 +1803,10 @@ mod tests {
             ..inputs(&[fire(0.91)], 5)
         });
         assert!(plan.reset);
-        assert_eq!(plan.shadow_rays, budget.reset_rays);
+        assert_eq!(
+            (plan.shadow_rays, plan.restart_rays),
+            (budget.reset_rays, 0)
+        );
         let after = plan.prepare(PlanInputs {
             key: [8; 32],
             ..inputs(&[fire(0.9)], 6)
@@ -1946,7 +1987,11 @@ mod tests {
         let kernels = shader_sources(prelude).unwrap();
         // Main's module when listing is off; P-RTS's seams when it is on.
         let off = trace_source_with(&kernels[1], false).unwrap();
-        assert!(off.contains("for(var j=lane;j<primary_frame.sampling.x;j+=1u)"));
+        // P-RELIT: each receiver traces and normalises by its own count.
+        assert!(off.contains(
+            "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u)"
+        ));
+        assert!(off.contains("256u/tr1_rays") && !off.contains("256u/FRESH_DIRECTIONS"));
         assert!(!off.contains("primary_penumbra_trace"));
         let trace = trace_source_with(&kernels[1], true).unwrap();
         assert!(trace.contains(

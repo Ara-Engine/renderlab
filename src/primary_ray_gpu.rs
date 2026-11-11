@@ -23,10 +23,13 @@ pub(crate) mod program_lists;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
-/// `scene_pixels` rectangle, the sampling words and the reflection bands
-/// (`ReflectionSettings::frame_words`).
+/// `scene_pixels` rectangle, the sampling words, the reflection bands
+/// (`ReflectionSettings::frame_words`) and TR1's restart zones (`FRAME_ZONES`).
 // TP2 integration: post-processing shares this ABI instead of freezing its byte size.
-pub(super) const FRAME_BYTES: usize = 144;
+pub(super) const FRAME_BYTES: usize = FRAME_ZONES + temporal_reconstruction::ZONES_BYTES;
+/// `PrimaryFrame::zones`: written by `prepare_reconstruction` on reconstructed frames, zero
+/// otherwise.
+pub(super) const FRAME_ZONES: usize = 144;
 /// Pixels per trace workgroup; the WGSL workgroup sizes must match.
 pub(super) const TRACE_TILE: [u32; 2] = [8, 4];
 /// Pixels per shading workgroup; the WGSL workgroup size must match.

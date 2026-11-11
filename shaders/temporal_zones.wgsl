@@ -34,3 +34,14 @@ fn tr1_relit(x:vec3<f32>)->bool {
     }
     return false;
 }
+
+// Sun-shadow directions a receiver at x evaluates this frame: the frame's `rays`, or the
+// restart count (counts.y; 0 when it is no larger) where the resolve will restart a static
+// receiver there, so a pixel that starts again from one frame gets the rays a frame that
+// restarts every pixel would give it and every other pixel keeps the frame's count. A moving
+// receiver in a caster's swept shadow gets the restart count too; its history continues.
+fn tr1_zone_rays(x:vec3<f32>,rays:u32)->u32 {
+    let restart=ZONES.counts.y;
+    if restart<=rays {return rays;}
+    return select(rays,restart,tr1_caster_shadow(x) || tr1_relit(x));
+}
