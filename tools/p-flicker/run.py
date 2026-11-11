@@ -24,7 +24,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import host  # noqa: E402  (run_guarded: the 5 GiB stop)
 
 HERE = Path(__file__).resolve().parent
-WORK = Path("D:/Coding/renderlab-work/p-flicker")
+UNIT = Path("D:/Coding/renderlab-work/p-flicker")  # Unreal captures and the clip manifest
+WORK = Path(os.environ.get("P_FLICKER_WORK", UNIT))  # runs, sheets, builds (another unit sets its own)
 MANIFEST = HERE.parent / "p-yard/manifest.json"
 LAYER = dict(VK_LAYER_PATH="C:/VulkanSDK/1.4.363.0/Bin", VK_INSTANCE_LAYERS="VK_LAYER_KHRONOS_validation")
 
@@ -51,7 +52,7 @@ def run(step):
         elif o == "count":
             env["RENDERLAB_P_STILL_COUNT"] = "1"
         elif o == "clip":
-            manifest = WORK / "manifest-clip.json"
+            manifest = UNIT / "manifest-clip.json"
         elif o.startswith("scene="):
             scene = o[6:]
         elif o.startswith("bin="):

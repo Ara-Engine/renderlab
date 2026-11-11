@@ -287,6 +287,11 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         include_str!("../shaders/visibility_buffer_resolve.wgsl")
     ))
 }
+#[cfg(test)]
+pub(super) fn compile_structure_stage_source(stage: &str) -> String {
+    stage_source(stage)
+}
+
 /// The shared declarations, the per-draw array size, then one stage.
 pub(crate) fn stage_source(stage: &str) -> String {
     format!(
@@ -878,10 +883,12 @@ impl VisibilityBuffer {
                        entry: &str,
                        groups: &[Option<&wgpu::BindGroupLayout>],
                        constants: &[(&str, f64)]| {
-            let module = r.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(entry),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            });
+            let module = r
+                .device
+                .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(entry),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
             r.device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
@@ -915,12 +922,14 @@ impl VisibilityBuffer {
             ],
             &[],
         );
-        let shader = r.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("N1c hardware ID raster"),
-            source: wgpu::ShaderSource::Wgsl(
-                stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")).into(),
-            ),
-        });
+        let shader = r
+            .device
+            .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("N1c hardware ID raster"),
+                source: wgpu::ShaderSource::Wgsl(
+                    stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")).into(),
+                ),
+            });
         let hardware_pipeline = r
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {

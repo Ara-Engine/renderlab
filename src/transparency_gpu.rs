@@ -185,6 +185,43 @@ pub(crate) fn hit_depth_source() -> String {
     )
 }
 
+/// Final production compositions, exposed only to the CPU source census.
+#[cfg(test)]
+pub(super) fn compile_structure_sources(
+    prelude: &str,
+    program: &str,
+    rt: bool,
+) -> Result<Vec<(&'static str, String)>, Error> {
+    let head = if rt {
+        crate::hardware_shadows::shader_source(prelude, SampleCount::One)?
+    } else {
+        prelude.to_owned()
+    };
+    let parameters = crate::program::declares_parameters(program);
+    let [sim, draw] = particle_sources(prelude);
+    let mut sources = vec![
+        ("glass", glass_source(&head, rt, program, parameters)),
+        ("particles-sim", sim),
+        ("particles-draw", draw),
+        ("hit-depth", hit_depth_source()),
+        (
+            "raster-depth",
+            format!("{}{}", section("TP_FRAME"), section("TP_DEPTH_RASTER")),
+        ),
+        (
+            "shadow",
+            format!("{}{}", section("TP_FRAME"), section("TP_SHADOW")),
+        ),
+        ("aa-seed", section("TP_AA_SEED").to_owned()),
+        ("transmission", transmission_shadow::draw_source(prelude)),
+    ];
+    if rt {
+        let head = primary_ray_gpu::transparent_reflection_head(prelude)?;
+        sources.push(("reflection", reflection::source(&head, program, parameters)));
+    }
+    Ok(sources)
+}
+
 #[cfg(test)]
 #[path = "transparency_tests.rs"]
 mod tp1_tests;
@@ -1125,11 +1162,8 @@ impl Renderer {
                     label: Some(&label),
                     source: wgpu::ShaderSource::Wgsl(source.into()),
                 };
-                if slot.source == crate::program::STANDARD_PROGRAM {
-                    self.device.create_engine_shader_module(descriptor)
-                } else {
-                    self.device.create_shader_module(descriptor)
-                }
+                // Program text compiles checked, the standard program included (P-SPLIT).
+                self.device.create_program_module(descriptor)
             },
             ResourceKind::ShaderModule,
         );

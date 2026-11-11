@@ -10,6 +10,7 @@ reference population (edge, silhouette, occluded, contact, lit, solid) and in `i
 (covered, not edge or silhouette); the shares are of the headline's squared sum. `energy.npy`
 is the mean squared residual per pixel, for heat maps against Unreal.
 """
+import os
 import importlib.util
 import json
 from pathlib import Path
@@ -18,7 +19,8 @@ import sys
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-WORK = Path("D:/Coding/renderlab-work/p-flicker")
+UNIT = Path("D:/Coding/renderlab-work/p-flicker")  # Unreal captures and the clip manifest
+WORK = Path(os.environ.get("P_FLICKER_WORK", UNIT))  # runs, sheets, builds (another unit sets its own)
 spec = importlib.util.spec_from_file_location("pyard_score", HERE.parent / "p-yard/score.py")
 score = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(score)
@@ -31,7 +33,7 @@ CONTRAST = ((0, 2), (2, 5), (5, 10), (10, 20), (20, 1000))
 def loaders(run):
     """{frame index: () -> HDR} for one run."""
     if run.startswith("ue:"):
-        case = WORK / "ue/quarry/capture" / run[3:]
+        case = UNIT / "ue/quarry/capture" / run[3:]
         native = json.loads((case / "native.json").read_text())["frames"]
         first = score.MANIFEST["scenes"]["quarry"]["ue_dump_first"]
         def load(row):
