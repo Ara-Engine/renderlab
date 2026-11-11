@@ -394,7 +394,7 @@ pub(in crate::renderer) struct Pipelines {
     pub resolve: Owned<wgpu::ComputePipeline>,
 }
 
-pub(super) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
+pub(crate) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
     trace_source_with(soft_kernels, PENUMBRA_LISTING)
 }
 /// The reconstruction's trace module; `listing` adds P-RTS's probes and penumbra pass,

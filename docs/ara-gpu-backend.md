@@ -1672,6 +1672,16 @@ Two tests on a bright card over a dark floor, seen from straight above:
 | `reconstruction_accumulates_jittered_samples_into_edge_coverage` | The first frame restarts at weight one and equals the unreconstructed frame. Each later frame adds one sample to the mean weight, within 1%, and leaves smooth regions at the plain frame's value within 0.1%. After 48 frames the pixel the card's left edge crosses holds 0.290 of the card's radiance where the card covers 0.290 of its area, and the top-edge pixel 0.749 where it covers 0.753: 48 jittered point samples have become coverage. Bound 0.03. |
 | `reconstruction_history_survives_a_pan_and_restarts_on_cuts_and_sun_turns` | A camera panning half a pixel a frame never restarts and the floor's weight keeps growing through reprojection. A cut and a 0.2 rad sun turn each restart every pixel, with weights back within the spatial start's window, and the frame after a restart adds one sample again. Two runs of the pan give identical images and history. |
 
+**Step 2 so far, through the adapter only.** The fused Interactive trace (the camera
+hit and eight sun directions per pixel in one dispatch, near-edge pixels listed for an
+indirectly dispatched repair) has three entries, `primary_trace_interactive_deferred`,
+`primary_trace_interactive` and `primary_repair_interactive`. Composed from
+`shader_sources`' soft module with the portable trace and the renderer's eight-direction
+override, and again through `trace_source`'s two edits (rotated directions, a ray
+count read from the frame record), all six reflect, emit valid SPIR-V and compile
+natively (`interactive_trace_entries_reflect_validate_and_compile`). Nothing records
+them in a frame yet.
+
 `ara_frame --reconstruction` is the level on either layer, combinable with the cache
 levels. On Metal, M5-A with the cache at its defaults and reconstruction on is
 identical across two 16-frame moving runs. **Not compared with wgpu.** What these

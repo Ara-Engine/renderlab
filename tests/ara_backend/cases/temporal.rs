@@ -356,3 +356,61 @@ fn reconstruction_history_survives_a_pan_and_restarts_on_cuts_and_sun_turns() ->
     gpu.assert_clean()?;
     Ok(())
 }
+
+/// The fused Interactive trace's three entries, in the production soft module and in
+/// reconstruction's rotated variant of it, reflect the interface their stage needs,
+/// emit SPIR-V that validates and compile natively. Nothing is replayed here.
+#[test]
+fn interactive_trace_entries_reflect_validate_and_compile() -> Result<()> {
+    use renderlab::backend_ara::primary_trace::Interactive;
+    let path = root("interactive-kernels");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    // The scene twice (visibility and camera rays), the visibility counts, the primary
+    // frame, the hit records, the geometry and the lights with their shadow views
+    // everywhere; then the tile flags and the repair queue, or the queue as input.
+    let common = [
+        (0, 2),
+        (0, 5),
+        (0, 10),
+        (0, 13),
+        (0, 19),
+        (1, 0),
+        (1, 1),
+        (1, 2),
+        (1, 3),
+        (1, 5),
+        (3, 0),
+        (3, 1),
+        (3, 5),
+    ];
+    let stages: [(Interactive, [u32; 3], &[(u32, u32)]); 3] = [
+        (Interactive::Deferred, [8, 4, 1], &[(0, 20), (0, 24)]),
+        (Interactive::Full, [8, 4, 1], &[(0, 20)]),
+        (Interactive::Repair, [32, 1, 1], &[(0, 26)]),
+    ];
+    for rotated in [false, true] {
+        for (entry, threads, extra) in stages {
+            let program = entry.program(rotated)?;
+            let mut keys = common.to_vec();
+            keys.extend_from_slice(extra);
+            keys.sort_unstable();
+            let reflected: Vec<_> = program
+                .inputs()
+                .iter()
+                .map(|i| (i.key.group, i.key.binding))
+                .collect();
+            ensure!(
+                reflected == keys && program.threads()? == threads,
+                "{entry:?} (rotated {rotated}) interface changed: {:?}",
+                program.inputs()
+            );
+            program.msl()?;
+            forward_cases::validate_spirv(&program, &format!("interactive-{entry:?}-{rotated}"))?;
+            Kernel::from_program(&mut gpu, &cache, &program)?.retire(&mut gpu)?;
+        }
+    }
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}

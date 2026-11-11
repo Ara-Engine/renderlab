@@ -45,6 +45,8 @@ pub enum Pass {
     PrimaryTrace,
     /// Original camera trace publishing exact receiver world and normals.
     PrimaryTraceReceivers,
+    /// The fused Interactive trace, its undeferred form and its repair.
+    PrimaryInteractive(crate::backend_ara::primary_trace::Interactive),
     /// One kernel of the world radiance cache's hardware-ray module.
     GiCache(crate::backend_ara::gi_cache::Entry),
     /// Temporal reconstruction's resolve (`tr1_resolve`): history, reprojection and the
@@ -199,6 +201,11 @@ impl Pass {
                 crate::renderer::transparency_gpu::section("TP_AA_SEED").into()
             }
             Self::FallbackPresent => include_str!("../../../shaders/scene.wgsl").into(),
+            Self::PrimaryInteractive(_) => {
+                crate::backend_ara::primary_trace::interactive_source(false)
+                    .expect("original soft kernel seams remain valid")
+                    .into()
+            }
             Self::PrimaryTrace | Self::PrimaryTraceReceivers => {
                 crate::backend_ara::primary_trace::source()
                     .expect("original primary trace seams remain valid")
@@ -433,6 +440,7 @@ impl Pass {
                 | Self::FallbackPresent
                 | Self::PrimaryTrace
                 | Self::PrimaryTraceReceivers
+                | Self::PrimaryInteractive(_)
                 | Self::PrimaryRayProbe
                 | Self::PrimaryShadeTiles
                 | Self::PrimaryShadeList
@@ -531,6 +539,7 @@ impl Pass {
             Self::FallbackPresent => "fs_present",
             Self::PrimaryTrace => "primary_trace",
             Self::PrimaryTraceReceivers => "primary_trace_receivers",
+            Self::PrimaryInteractive(entry) => entry.name(),
             Self::PrimaryRayProbe => "primary_probe",
             Self::PrimaryShadeTiles => "primary_shade_tiles",
             Self::PrimaryShadeList => "primary_shade_list",

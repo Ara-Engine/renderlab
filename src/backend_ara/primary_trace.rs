@@ -62,3 +62,49 @@ pub(crate) fn portable_trace() -> Result<String> {
         .replace("ray_query<vertex_return>","ray_query")
         .replace("acceleration_structure<vertex_return>","acceleration_structure"))
 }
+
+/// The fused Interactive pass: each pixel's camera hit and its sun visibility in one
+/// dispatch, with pixels near a triangle edge listed for a repair pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Interactive {
+    /// Trace and estimate every pixel; list near-edge pixels in the repair queue.
+    Deferred,
+    /// The same without deferral, for a repair queue above the device's limits.
+    Full,
+    /// Re-trace the listed pixels exactly; dispatched indirectly from the queue.
+    Repair,
+}
+impl Interactive {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Deferred => "primary_trace_interactive_deferred",
+            Self::Full => "primary_trace_interactive",
+            Self::Repair => "primary_repair_interactive",
+        }
+    }
+    /// The entry in the production soft module, or with `rotated` in temporal
+    /// reconstruction's variant of it: disk directions rotated by the frame's sample
+    /// and a ray count read from the primary frame record's sampling words.
+    pub fn program(self, rotated: bool) -> Result<Program> {
+        Program::new(Pass::PrimaryInteractive(self), interactive_source(rotated)?)
+    }
+}
+/// `shader_sources`' soft module with the portable trace, eight directions as the
+/// renderer's pipeline override sets, and optionally `trace_source`'s two edits.
+pub(crate) fn interactive_source(rotated: bool) -> Result<String> {
+    let [_, soft] =
+        crate::renderer::primary_ray_gpu::shader_sources(include_str!("../../shaders/scene.wgsl"))?;
+    let marker = "override FRESH_DIRECTIONS:u32=256u;";
+    ensure!(
+        soft.matches(TRACE).count() == 1 && soft.matches(marker).count() == 1,
+        "original soft kernel composition changed"
+    );
+    let soft = soft
+        .replace(TRACE, &portable_trace()?)
+        .replace(marker, "override FRESH_DIRECTIONS:u32=8u;");
+    Ok(if rotated {
+        crate::renderer::primary_ray_gpu::temporal_reconstruction::trace_source(&soft)?
+    } else {
+        soft
+    })
+}
