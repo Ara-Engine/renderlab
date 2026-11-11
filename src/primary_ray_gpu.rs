@@ -403,7 +403,7 @@ impl Renderer {
     /// infer from the camera alone.
     pub fn cut_reconstruction(&mut self) {
         if let Some(state) = &mut self.reconstruction_state {
-            state.cut = true;
+            state.plan.cut = true;
         }
     }
 
@@ -2298,7 +2298,7 @@ impl Renderer {
         let listed = self
             .reconstruction_state
             .as_ref()
-            .is_some_and(|s| s.probe_rays < s.shadow_rays);
+            .is_some_and(|s| s.plan.probe_rays < s.plan.shadow_rays);
         let kernels = InteractiveKernels {
             check: p.interactive_repair.as_deref(),
             repair: t.repair.as_deref(),

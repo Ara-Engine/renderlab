@@ -614,18 +614,63 @@ struct Previous {
     skin_revisions: Vec<u64>,
 }
 
-/// Per-pixel history at the HDR size, ping-ponged by frame: exposed mean and weight
-/// (Rgba32Float) and anchors (Rg32Uint), plus the copy of the frame's shaded samples.
-pub(in crate::renderer) struct ReconstructionState {
-    colour: [Depth; 2],
-    anchor: [Depth; 2],
-    /// Silhouettes' second slot and occluder coverage (Rgba32Uint).
-    layer: [Depth; 2],
-    sample: Depth,
-    /// Fixed frame words; shared placement history is bound with the geometry.
-    frame: Buffer,
-    /// Resolve groups per written side, keyed by the textures and frame buffers they bind.
-    groups: Option<(GroupKey, [Owned<wgpu::BindGroup>; 2])>,
+/// The world-space union of an optional box and a box.
+fn union(
+    a: Option<crate::shadow_plan::Bounds>,
+    b: crate::shadow_plan::Bounds,
+) -> crate::shadow_plan::Bounds {
+    a.map_or(b, |a| crate::shadow_plan::Bounds {
+        min: a.min.min(b.min),
+        max: a.max.max(b.max),
+    })
+}
+
+/// What a frame's plan is computed from, apart from the planner's own history.
+pub(crate) struct PlanInputs<'a> {
+    pub(crate) settings: Reconstruction,
+    pub(crate) budget: ReconstructionShadowBudget,
+    /// Frames rendered so far: history continues only from the frame directly before.
+    pub(crate) rendered_frames: u64,
+    /// The reconstruction sample index.
+    pub(crate) index: u64,
+    /// A digest of everything that restarts history when it changes
+    /// (`reconstruction_key`).
+    pub(crate) key: [u8; 32],
+    /// The lights as given, and their shadow requests.
+    pub(crate) lights: &'a [Light],
+    pub(crate) requests: &'a [ShadowRequest],
+    pub(crate) directional_disk_angle: f32,
+    /// The unjittered camera matrix at the internal size, the eye and this frame's jitter.
+    pub(crate) matrix: Mat4,
+    pub(crate) eye: Vec3,
+    pub(crate) jitter: [f32; 2],
+    pub(crate) exposure: f32,
+    /// The clear colour misses show, and whether they show the visible sky instead.
+    pub(crate) background: [f32; 3],
+    pub(crate) visible_sky: bool,
+    /// One output pixel's angle.
+    pub(crate) pixel_angle: f32,
+    /// The draws' world bounds, the skinned ones', every skinned draw's revision in draw
+    /// order, and whether any placement moved since the previous frame.
+    pub(crate) scene_bounds: Option<crate::shadow_plan::Bounds>,
+    pub(crate) skin_bounds: Option<crate::shadow_plan::Bounds>,
+    pub(crate) skin_revisions: Vec<u64>,
+    pub(crate) rigid_motion: bool,
+    /// P-RTS: the penumbra pass is compiled and edges are deferred.
+    pub(crate) listing: bool,
+}
+
+/// A frame's plan: the `Tr1Frame` record, and the primary frame record's sampling words
+/// (bytes 112..128: the shadow ray budget, the probe count, the probe disk and its cone).
+pub(crate) struct Planned {
+    pub(crate) frame: Vec<u8>,
+    pub(crate) sampling: Vec<u8>,
+}
+
+/// The reconstruction's CPU history between frames and the per-frame plan made from it:
+/// everything `prepare_reconstruction` decides without a device. The wgpu renderer and
+/// the ara-gpu backend both plan through `prepare`.
+pub(crate) struct Planner {
     /// The side this frame writes; the other holds the previous frame.
     pub parity: usize,
     previous: Option<Previous>,
@@ -638,6 +683,310 @@ pub(in crate::renderer) struct ReconstructionState {
     /// P-RTS: directions every receiver traces first; below `shadow_rays`, only listed
     /// penumbra pixels trace the full budget (docs/p-rts.md).
     pub probe_rays: u32,
+}
+impl Planner {
+    pub(crate) fn new() -> Self {
+        Self {
+            parity: 0,
+            previous: None,
+            cut: false,
+            reset: true,
+            held_frames: 0,
+            shadow_rays: 8,
+            probe_rays: 8,
+        }
+    }
+    /// Plans the next frame and advances the history.
+    pub(crate) fn prepare(&mut self, i: PlanInputs<'_>) -> Planned {
+        let settings = i.settings;
+        let (key, matrix, eye, exposure) = (i.key, i.matrix, i.eye, i.exposure);
+        let (background, visible_sky, pixel_angle) = (i.background, i.visible_sky, i.pixel_angle);
+        let (scene_bounds, skin_bounds, rigid_motion) =
+            (i.scene_bounds, i.skin_bounds, i.rigid_motion);
+        let (skin_revisions, listing) = (i.skin_revisions, i.listing);
+        let intensities = local_intensities(i.lights);
+        let suns: Vec<Vec3> = i
+            .lights
+            .iter()
+            .filter_map(|l| match l {
+                crate::Light::Directional { travel, .. } => Some(travel.normalize()),
+                _ => None,
+            })
+            .collect();
+        // SK1: vertex motion reprojects the character, but its changing shadow also
+        // changes otherwise-static receivers. Reject those receivers' lighting history
+        // in a conservative world-space swept shadow volume, never a screen-space
+        // lighting approximation. This leaves unrelated static pixels accumulating.
+        let mut shadow_bounds = None;
+        // The shadowed sun's direction toward it and disk half-angle, when `shadow_bounds` is
+        // tested as its swept shadow rather than as a box (P-FLAT).
+        let mut caster_light: Option<(Vec3, f32)> = None;
+        // MQ2: some skinned pose changed since the previous frame.
+        let mut posed = false;
+        if let (Some(current), Some(previous)) = (skin_bounds, self.previous.as_ref())
+            && previous.skin_revisions != skin_revisions
+        {
+            posed = true;
+            let swept = union(previous.skin_bounds, current);
+            let mut affected = swept;
+            let distance = scene_bounds.map_or(1., |b: crate::shadow_plan::Bounds| {
+                (b.max - b.min).length().max(1.)
+            }) * 2.;
+            let requested: Vec<&Light> = i
+                .lights
+                .iter()
+                .zip(i.requests)
+                .filter(|(_, r)| !matches!(r, ShadowRequest::None))
+                .map(|(l, _)| l)
+                .collect();
+            // P-FLAT: with one shadowed sun and no other shadow request, receivers are tested
+            // against the swept bounds' own shadow (`tr1_caster_shadow`): inside the bounds, or
+            // a ray toward the sun within its disk meets them. The box below stretches the
+            // bounds twice the scene's size along the sun; under a low sun it held most of the
+            // scene's static receivers to one frame of history while a character walked.
+            if let [Light::Directional { travel, .. }] = requested[..] {
+                caster_light = Some((-travel.normalize(), i.directional_disk_angle));
+            } else {
+                for light in requested {
+                    if let Light::Directional { travel, .. } = light {
+                        affected = union(
+                            Some(affected),
+                            crate::shadow_plan::Bounds {
+                                min: swept.min + travel.normalize() * distance,
+                                max: swept.max + travel.normalize() * distance,
+                            },
+                        );
+                    } else if let Some(scene) = scene_bounds {
+                        affected = union(Some(affected), scene);
+                    }
+                }
+            }
+            // Sky occlusion and bounce the character changes outside its direct shadow are
+            // held to this frame's 3x3 box (MQ2: skinned frames set TR1_BOX), as MQ1 holds
+            // rigid motion's; SK1 rejected every receiver's history scene-wide while GI was
+            // on, so an animated character restarted the whole image on every frame.
+            let margin = Vec3::splat(1e-4) + affected.min.abs().max(affected.max.abs()) * 1e-5;
+            affected.min -= margin;
+            affected.max += margin;
+            shadow_bounds = Some(affected);
+        }
+        let cold = self.previous.is_none() || self.cut;
+        let continued = self
+            .previous
+            .as_ref()
+            .filter(|p| p.frame == i.rendered_frames && p.key == key && p.suns.len() == suns.len())
+            .map(|p| {
+                // The largest directional-light turn since the previous frame.
+                let turn = p
+                    .suns
+                    .iter()
+                    .zip(&suns)
+                    // Chord angle: exactly zero for an unchanged direction, where acos of
+                    // a rounded unit dot product is not.
+                    .map(|(a, b)| 2.0 * (0.5 * (*a - *b).length()).min(1.0).asin())
+                    .fold(0.0, f32::max);
+                (p.matrix, p.eye, p.exposure, turn, p.jitter)
+            });
+        // A sun turn caps the window at turn_angle / turn; a turn past turn_angle (any turn
+        // when it is zero) restarts every pixel.
+        let turn = continued.map_or(0.0, |c| c.3);
+        let event_window = if turn > 0.0 {
+            settings.turn_angle / turn
+        } else {
+            settings.window
+        };
+        // P-FLAT: local lights whose intensity or colour changed. History continues, held to
+        // this frame's 3x3 box as for moving placements and capped near those lights
+        // (`light_budget`), so a flicker is followed without restarting every pixel on every
+        // frame. A zero budget, or more changed lights than the frame can carry, restarts.
+        let changed = match (continued, self.previous.as_ref()) {
+            (Some(_), Some(p)) if p.intensities != intensities => {
+                relit_lights(&p.intensities, i.lights)
+            }
+            _ => vec![],
+        };
+        let light_restart =
+            !changed.is_empty() && (settings.light_budget == 0.0 || changed.len() > RELIT_SLOTS);
+        self.reset = continued.is_none() || self.cut || event_window < 1.0 || light_restart;
+        self.cut = false;
+        // MQ1's clamp event comes from the same submitted transforms that feed
+        // TR1/PP1 on the GPU; no second transform history or frame-buffer payload.
+        let moved = !self.reset && rigid_motion;
+        let relit = !self.reset && !changed.is_empty();
+        let jitter = i.jitter;
+        let (previous_matrix, previous_eye, scale, previous_jitter) = match continued {
+            Some((m, e, x, _, j)) if !self.reset => (m, e, exposure / x, j),
+            _ => (matrix, eye, 1.0, jitter),
+        };
+        self.parity = 1 - self.parity;
+        // MV1 keeps the shared motion source; MQ1/MQ2 clamp rigid or skinned motion.
+        let options = u32::from(settings.catmull_rom)
+            | u32::from(settings.spatial_start) << 1
+            | u32::from((moved || relit || (posed && !self.reset)) && settings.motion_box) << 3
+            | u32::from(settings.upscale_interpolation) << 4
+            | u32::from(relit) << 5;
+        let mut bytes = Vec::with_capacity(FRAME_BYTES);
+        bytes.extend_from_slice(&matrix_bytes(previous_matrix));
+        bytes.extend_from_slice(&matrix_bytes(matrix));
+        bytes.extend_from_slice(&matrix_bytes(previous_matrix.inverse()));
+        let floats: [f32; 24] = [
+            previous_eye.x,
+            previous_eye.y,
+            previous_eye.z,
+            pixel_angle,
+            eye.x,
+            eye.y,
+            eye.z,
+            previous_jitter[0],
+            jitter[0],
+            jitter[1],
+            scale,
+            previous_jitter[1],
+            background[0],
+            background[1],
+            background[2],
+            // 1: misses show the constant clear colour; 0: the visible sky, which misses
+            // reconstruct like a surface keyed by direction.
+            if visible_sky { 0.0 } else { 1.0 },
+            settings.window,
+            event_window.max(1.0),
+            settings.coverage_window,
+            settings.blur_budget,
+            settings.sharp_window,
+            settings.start_window,
+            settings.start_radius,
+            settings.view_budget,
+        ];
+        for f in floats {
+            bytes.extend_from_slice(&f.to_ne_bytes());
+        }
+        // Camera stillness; MV1/SK1's surface source handles moving placements/vertices.
+        let still = !self.reset
+            && previous_matrix.to_cols_array().map(f32::to_bits)
+                == matrix.to_cols_array().map(f32::to_bits);
+        // MV1 motion-source integration: rigid/deforming casters must not enter
+        // RTDEF2's settled shadow budget just because the camera is stationary.
+        let sampling_still = still && turn == 0.0 && !rigid_motion && shadow_bounds.is_none();
+        self.held_frames = if sampling_still {
+            self.held_frames.saturating_add(1)
+        } else {
+            0
+        };
+        // P-FLAT: frames that drop history somewhere (receivers in a moving caster's shadow, or
+        // pixels near a relit light) take the restart budget, as frames that restart every
+        // pixel do: the restarted pixels keep main's per-pixel ray count.
+        self.shadow_rays = i.budget.rays(
+            cold,
+            self.reset || shadow_bounds.is_some() || relit,
+            sampling_still,
+            self.held_frames,
+        );
+        // Listing pays only where the budget exceeds both probe sets.
+        self.probe_rays = if listing && PENUMBRA_LISTING && self.shadow_rays > 2 * PROBE_DISK {
+            2 * PROBE_DISK
+        } else {
+            self.shadow_rays
+        };
+        // Listing frames probe a cone PROBE_CONE times the sun's; frames without listing
+        // keep the exact budget directions (x 1.0 is exact).
+        let (disk, widen) = if self.probe_rays < self.shadow_rays {
+            (PROBE_DISK, PROBE_CONE)
+        } else {
+            (0, 1.0)
+        };
+        let mut words = self.shadow_rays.to_ne_bytes().to_vec();
+        words.extend_from_slice(&self.probe_rays.to_ne_bytes());
+        words.extend_from_slice(&disk.to_ne_bytes());
+        words.extend_from_slice(&widen.to_bits().to_ne_bytes());
+        for w in [
+            u32::from(self.reset),
+            options,
+            u32::from(still),
+            i.index as u32,
+        ] {
+            bytes.extend_from_slice(&w.to_ne_bytes());
+        }
+        // shadow_lo.w enables rejection; shadow_hi.w selects the swept-shadow test, whose
+        // shadow_light is the unit direction toward the sun (no zero component, so the slab
+        // test's reciprocals stay finite) and the tangent of its disk half-angle, widened.
+        let toward = caster_light.map_or(Vec3::ZERO, |(l, _)| {
+            l.map(|c| {
+                if c.abs() < 1e-6 {
+                    1e-6f32.copysign(c)
+                } else {
+                    c
+                }
+            })
+        });
+        let spread = caster_light.map_or(0., |(_, angle)| angle.tan() * 1.01 + 1e-4);
+        for value in shadow_bounds.map_or([0.; 12], |b| {
+            [
+                b.min.x,
+                b.min.y,
+                b.min.z,
+                1.,
+                b.max.x,
+                b.max.y,
+                b.max.z,
+                if caster_light.is_some() { 1. } else { 0. },
+                toward.x,
+                toward.y,
+                toward.z,
+                spread,
+            ]
+        }) {
+            bytes.extend_from_slice(&value.to_ne_bytes());
+        }
+        // relit[4]: position and range of each changed light (zero rows unused), then each one's
+        // relative change, then the budget.
+        let mut relit_words = [0f32; 24];
+        if relit {
+            for (k, (position, range, change)) in changed.iter().enumerate() {
+                relit_words[k * 4..k * 4 + 4]
+                    .copy_from_slice(&[position.x, position.y, position.z, *range]);
+                relit_words[16 + k] = *change;
+            }
+            relit_words[20] = settings.light_budget;
+        }
+        // relit_params.y (every frame): P-FLICKER's Catmull-Rom blur budget.
+        relit_words[21] = settings.sharp_blur_budget;
+        for value in relit_words {
+            bytes.extend_from_slice(&value.to_ne_bytes());
+        }
+        debug_assert_eq!(bytes.len(), FRAME_BYTES);
+        self.previous = Some(Previous {
+            frame: i.rendered_frames + 1,
+            matrix,
+            jitter,
+            eye,
+            exposure,
+            suns,
+            key,
+            intensities,
+            skin_bounds,
+            skin_revisions,
+        });
+        Planned {
+            frame: bytes,
+            sampling: words,
+        }
+    }
+}
+
+/// Per-pixel history at the HDR size, ping-ponged by frame: exposed mean and weight
+/// (Rgba32Float) and anchors (Rg32Uint), plus the copy of the frame's shaded samples.
+pub(in crate::renderer) struct ReconstructionState {
+    colour: [Depth; 2],
+    anchor: [Depth; 2],
+    /// Silhouettes' second slot and occluder coverage (Rgba32Uint).
+    layer: [Depth; 2],
+    sample: Depth,
+    /// Fixed frame words; shared placement history is bound with the geometry.
+    frame: Buffer,
+    /// Resolve groups per written side, keyed by the textures and frame buffers they bind.
+    groups: Option<(GroupKey, [Owned<wgpu::BindGroup>; 2])>,
+    /// The CPU history and per-frame plan (shared with the ara-gpu backend).
+    pub plan: Planner,
 }
 type GroupKey = (
     wgpu::Texture,
@@ -703,7 +1052,7 @@ pub(in crate::renderer) struct Upscale {
 impl ReconstructionState {
     #[cfg(test)]
     pub(in crate::renderer) fn test_history(&self) -> &wgpu::Texture {
-        &self.colour[self.parity].texture
+        &self.colour[self.plan.parity].texture
     }
     /// Histories at the output size; the copy of the frame's samples at the internal size
     /// (equal at native resolution).
@@ -725,13 +1074,7 @@ impl ReconstructionState {
                 wgpu::BufferUsages::STORAGE,
             ),
             groups: None,
-            parity: 0,
-            previous: None,
-            cut: false,
-            reset: true,
-            held_frames: 0,
-            shadow_rays: 8,
-            probe_rays: 8,
+            plan: Planner::new(),
         }
     }
     fn size(&self) -> wgpu::Extent3d {
@@ -740,7 +1083,7 @@ impl ReconstructionState {
     /// The colour history this frame wrote (exposed mean, sample weight; Rgba32Float).
     #[cfg(test)]
     pub(in crate::renderer) fn written_colour(&self) -> &wgpu::Texture {
-        &self.colour[self.parity].texture
+        &self.colour[self.plan.parity].texture
     }
     fn output(&self) -> wgpu::Extent3d {
         self.colour[0].texture.size()
@@ -774,7 +1117,9 @@ impl Renderer {
         {
             return None;
         }
-        self.reconstruction_state.as_ref().map(|s| s.shadow_rays)
+        self.reconstruction_state
+            .as_ref()
+            .map(|s| s.plan.shadow_rays)
     }
     /// This frame's internal colour target when an upscaling preset applies to it (a
     /// reconstructed frame below native scale), allocated for the caller's `color`; None
@@ -1004,41 +1349,23 @@ impl Renderer {
             .as_ref()
             .is_none_or(|s| s.size() != size || s.output() != output)
         {
-            let cut = self.reconstruction_state.as_ref().is_some_and(|s| s.cut);
+            let cut = self
+                .reconstruction_state
+                .as_ref()
+                .is_some_and(|s| s.plan.cut);
             let mut next = ReconstructionState::new(self, size, output);
-            next.cut = cut;
+            next.plan.cut = cut;
             self.reconstruction_state = Some(next);
         }
         let key = self.reconstruction_key();
-        let intensities = local_intensities(&self.lighting.source_lights);
-        let settings = self.reconstruction;
         let matrix = camera.unjittered().matrix(size.width, size.height);
         let eye = camera.view().inverse().w_axis.truncate();
         let exposure = self.lighting.pending.exposure;
-        let suns: Vec<Vec3> = self
-            .lighting
-            .source_lights
-            .iter()
-            .filter_map(|l| match l {
-                crate::Light::Directional { travel, .. } => Some(travel.normalize()),
-                _ => None,
-            })
-            .collect();
         let background = self.lit_clear().map(|v| v as f32);
         // AT1: misses also vary per pixel while the atmosphere's sky is on.
         let visible_sky = (self.environment.visible && self.environment.selected.is_some())
             || self.atmosphere_sky_visible();
         let pixel_angle = 2.0 * (0.5 * camera.fov_y()).tan() / output.height as f32;
-        // SK1: vertex motion reprojects the character, but its changing shadow also
-        // changes otherwise-static receivers. Reject those receivers' lighting history
-        // in a conservative world-space swept shadow volume, never a screen-space
-        // lighting approximation. This leaves unrelated static pixels accumulating.
-        let union = |a: Option<crate::shadow_plan::Bounds>, b: crate::shadow_plan::Bounds| {
-            a.map_or(b, |a| crate::shadow_plan::Bounds {
-                min: a.min.min(b.min),
-                max: a.max.max(b.max),
-            })
-        };
         let mut scene_bounds = None;
         let mut skin_bounds = None;
         let mut skin_revisions = vec![];
@@ -1065,180 +1392,6 @@ impl Renderer {
                 }
             }
         }
-        let mut shadow_bounds = None;
-        // The shadowed sun's direction toward it and disk half-angle, when `shadow_bounds` is
-        // tested as its swept shadow rather than as a box (P-FLAT).
-        let mut caster_light: Option<(Vec3, f32)> = None;
-        // MQ2: some skinned pose changed since the previous frame.
-        let mut posed = false;
-        if let (Some(current), Some(previous)) = (
-            skin_bounds,
-            self.reconstruction_state
-                .as_ref()
-                .and_then(|s| s.previous.as_ref()),
-        ) && previous.skin_revisions != skin_revisions
-        {
-            posed = true;
-            let swept = union(previous.skin_bounds, current);
-            let mut affected = swept;
-            let distance = scene_bounds.map_or(1., |b: crate::shadow_plan::Bounds| {
-                (b.max - b.min).length().max(1.)
-            }) * 2.;
-            let requested: Vec<&Light> = self
-                .lighting
-                .source_lights
-                .iter()
-                .zip(&self.shadows.settings.requests)
-                .filter(|(_, r)| !matches!(r, ShadowRequest::None))
-                .map(|(l, _)| l)
-                .collect();
-            // P-FLAT: with one shadowed sun and no other shadow request, receivers are tested
-            // against the swept bounds' own shadow (`tr1_caster_shadow`): inside the bounds, or
-            // a ray toward the sun within its disk meets them. The box below stretches the
-            // bounds twice the scene's size along the sun; under a low sun it held most of the
-            // scene's static receivers to one frame of history while a character walked.
-            if let [Light::Directional { travel, .. }] = requested[..] {
-                caster_light = Some((
-                    -travel.normalize(),
-                    self.shadows.settings.directional_disk_angle,
-                ));
-            } else {
-                for light in requested {
-                    if let Light::Directional { travel, .. } = light {
-                        affected = union(
-                            Some(affected),
-                            crate::shadow_plan::Bounds {
-                                min: swept.min + travel.normalize() * distance,
-                                max: swept.max + travel.normalize() * distance,
-                            },
-                        );
-                    } else if let Some(scene) = scene_bounds {
-                        affected = union(Some(affected), scene);
-                    }
-                }
-            }
-            // Sky occlusion and bounce the character changes outside its direct shadow are
-            // held to this frame's 3x3 box (MQ2: skinned frames set TR1_BOX), as MQ1 holds
-            // rigid motion's; SK1 rejected every receiver's history scene-wide while GI was
-            // on, so an animated character restarted the whole image on every frame.
-            let margin = Vec3::splat(1e-4) + affected.min.abs().max(affected.max.abs()) * 1e-5;
-            affected.min -= margin;
-            affected.max += margin;
-            shadow_bounds = Some(affected);
-        }
-        let rendered_frames = self.frames;
-        let state = self.reconstruction_state.as_mut().unwrap();
-        let cold = state.previous.is_none() || state.cut;
-        let continued = state
-            .previous
-            .as_ref()
-            .filter(|p| p.frame == rendered_frames && p.key == key && p.suns.len() == suns.len())
-            .map(|p| {
-                // The largest directional-light turn since the previous frame.
-                let turn = p
-                    .suns
-                    .iter()
-                    .zip(&suns)
-                    // Chord angle: exactly zero for an unchanged direction, where acos of
-                    // a rounded unit dot product is not.
-                    .map(|(a, b)| 2.0 * (0.5 * (*a - *b).length()).min(1.0).asin())
-                    .fold(0.0, f32::max);
-                (p.matrix, p.eye, p.exposure, turn, p.jitter)
-            });
-        // A sun turn caps the window at turn_angle / turn; a turn past turn_angle (any turn
-        // when it is zero) restarts every pixel.
-        let turn = continued.map_or(0.0, |c| c.3);
-        let event_window = if turn > 0.0 {
-            settings.turn_angle / turn
-        } else {
-            settings.window
-        };
-        // P-FLAT: local lights whose intensity or colour changed. History continues, held to
-        // this frame's 3x3 box as for moving placements and capped near those lights
-        // (`light_budget`), so a flicker is followed without restarting every pixel on every
-        // frame. A zero budget, or more changed lights than the frame can carry, restarts.
-        let changed = match (continued, state.previous.as_ref()) {
-            (Some(_), Some(p)) if p.intensities != intensities => {
-                relit_lights(&p.intensities, &self.lighting.source_lights)
-            }
-            _ => vec![],
-        };
-        let light_restart =
-            !changed.is_empty() && (settings.light_budget == 0.0 || changed.len() > RELIT_SLOTS);
-        state.reset = continued.is_none() || state.cut || event_window < 1.0 || light_restart;
-        state.cut = false;
-        // MQ1's clamp event comes from the same submitted transforms that feed
-        // TR1/PP1 on the GPU; no second transform history or frame-buffer payload.
-        let moved = !state.reset && rigid_motion;
-        let relit = !state.reset && !changed.is_empty();
-        let jitter = camera.jitter();
-        let (previous_matrix, previous_eye, scale, previous_jitter) = match continued {
-            Some((m, e, x, _, j)) if !state.reset => (m, e, exposure / x, j),
-            _ => (matrix, eye, 1.0, jitter),
-        };
-        state.parity = 1 - state.parity;
-        // MV1 keeps the shared motion source; MQ1/MQ2 clamp rigid or skinned motion.
-        let options = u32::from(settings.catmull_rom)
-            | u32::from(settings.spatial_start) << 1
-            | u32::from((moved || relit || (posed && !state.reset)) && settings.motion_box) << 3
-            | u32::from(settings.upscale_interpolation) << 4
-            | u32::from(relit) << 5;
-        let mut bytes = Vec::with_capacity(FRAME_BYTES);
-        bytes.extend_from_slice(&matrix_bytes(previous_matrix));
-        bytes.extend_from_slice(&matrix_bytes(matrix));
-        bytes.extend_from_slice(&matrix_bytes(previous_matrix.inverse()));
-        let floats: [f32; 24] = [
-            previous_eye.x,
-            previous_eye.y,
-            previous_eye.z,
-            pixel_angle,
-            eye.x,
-            eye.y,
-            eye.z,
-            previous_jitter[0],
-            jitter[0],
-            jitter[1],
-            scale,
-            previous_jitter[1],
-            background[0],
-            background[1],
-            background[2],
-            // 1: misses show the constant clear colour; 0: the visible sky, which misses
-            // reconstruct like a surface keyed by direction.
-            if visible_sky { 0.0 } else { 1.0 },
-            settings.window,
-            event_window.max(1.0),
-            settings.coverage_window,
-            settings.blur_budget,
-            settings.sharp_window,
-            settings.start_window,
-            settings.start_radius,
-            settings.view_budget,
-        ];
-        for f in floats {
-            bytes.extend_from_slice(&f.to_ne_bytes());
-        }
-        // Camera stillness; MV1/SK1's surface source handles moving placements/vertices.
-        let still = !state.reset
-            && previous_matrix.to_cols_array().map(f32::to_bits)
-                == matrix.to_cols_array().map(f32::to_bits);
-        // MV1 motion-source integration: rigid/deforming casters must not enter
-        // RTDEF2's settled shadow budget just because the camera is stationary.
-        let sampling_still = still && turn == 0.0 && !rigid_motion && shadow_bounds.is_none();
-        state.held_frames = if sampling_still {
-            state.held_frames.saturating_add(1)
-        } else {
-            0
-        };
-        // P-FLAT: frames that drop history somewhere (receivers in a moving caster's shadow, or
-        // pixels near a relit light) take the restart budget, as frames that restart every
-        // pixel do: the restarted pixels keep main's per-pixel ray count.
-        state.shadow_rays = self.reconstruction_shadow_budget.rays(
-            cold,
-            state.reset || shadow_bounds.is_some() || relit,
-            sampling_still,
-            state.held_frames,
-        );
         // P-RTS: with the penumbra pass compiled and edges deferred, every receiver first
         // traces the held count; only listed pixels trace the rest of the budget.
         let primary = self.primary.as_ref().unwrap();
@@ -1249,99 +1402,44 @@ impl Renderer {
                     .and_then(|r| r.trace.as_ref())
                     .is_some_and(|t| t.penumbra.is_some())
             });
-        // Listing pays only where the budget exceeds both probe sets.
-        state.probe_rays = if listing && PENUMBRA_LISTING && state.shadow_rays > 2 * PROBE_DISK {
-            2 * PROBE_DISK
-        } else {
-            state.shadow_rays
-        };
-        // Listing frames probe a cone PROBE_CONE times the sun's; frames without listing
-        // keep the exact budget directions (x 1.0 is exact).
-        let (disk, widen) = if state.probe_rays < state.shadow_rays {
-            (PROBE_DISK, PROBE_CONE)
-        } else {
-            (0, 1.0)
-        };
+        let planned = self
+            .reconstruction_state
+            .as_mut()
+            .unwrap()
+            .plan
+            .prepare(PlanInputs {
+                settings: self.reconstruction,
+                budget: self.reconstruction_shadow_budget,
+                rendered_frames: self.frames,
+                index,
+                key,
+                lights: &self.lighting.source_lights,
+                requests: &self.shadows.settings.requests,
+                directional_disk_angle: self.shadows.settings.directional_disk_angle,
+                matrix,
+                eye,
+                jitter: camera.jitter(),
+                exposure,
+                background,
+                visible_sky,
+                pixel_angle,
+                scene_bounds,
+                skin_bounds,
+                skin_revisions,
+                rigid_motion,
+                listing,
+            });
         // PrimaryFrame.sampling is private engine state; no material/shading ABI changes.
         let primary_frame = &primary.frame.as_ref().unwrap().0.value;
-        let mut words = state.shadow_rays.to_ne_bytes().to_vec();
-        words.extend_from_slice(&state.probe_rays.to_ne_bytes());
-        words.extend_from_slice(&disk.to_ne_bytes());
-        words.extend_from_slice(&widen.to_bits().to_ne_bytes());
-        self.queue.write_buffer(primary_frame, 112, &words);
+        self.queue
+            .write_buffer(primary_frame, 112, &planned.sampling);
         self.uploads.view_settings += 16;
         self.uploads.write_calls += 1;
-        for w in [
-            u32::from(state.reset),
-            options,
-            u32::from(still),
-            index as u32,
-        ] {
-            bytes.extend_from_slice(&w.to_ne_bytes());
-        }
-        // shadow_lo.w enables rejection; shadow_hi.w selects the swept-shadow test, whose
-        // shadow_light is the unit direction toward the sun (no zero component, so the slab
-        // test's reciprocals stay finite) and the tangent of its disk half-angle, widened.
-        let toward = caster_light.map_or(Vec3::ZERO, |(l, _)| {
-            l.map(|c| {
-                if c.abs() < 1e-6 {
-                    1e-6f32.copysign(c)
-                } else {
-                    c
-                }
-            })
-        });
-        let spread = caster_light.map_or(0., |(_, angle)| angle.tan() * 1.01 + 1e-4);
-        for value in shadow_bounds.map_or([0.; 12], |b| {
-            [
-                b.min.x,
-                b.min.y,
-                b.min.z,
-                1.,
-                b.max.x,
-                b.max.y,
-                b.max.z,
-                if caster_light.is_some() { 1. } else { 0. },
-                toward.x,
-                toward.y,
-                toward.z,
-                spread,
-            ]
-        }) {
-            bytes.extend_from_slice(&value.to_ne_bytes());
-        }
-        // relit[4]: position and range of each changed light (zero rows unused), then each one's
-        // relative change, then the budget.
-        let mut relit_words = [0f32; 24];
-        if relit {
-            for (k, (position, range, change)) in changed.iter().enumerate() {
-                relit_words[k * 4..k * 4 + 4]
-                    .copy_from_slice(&[position.x, position.y, position.z, *range]);
-                relit_words[16 + k] = *change;
-            }
-            relit_words[20] = settings.light_budget;
-        }
-        // relit_params.y (every frame): P-FLICKER's Catmull-Rom blur budget.
-        relit_words[21] = settings.sharp_blur_budget;
-        for value in relit_words {
-            bytes.extend_from_slice(&value.to_ne_bytes());
-        }
-        debug_assert_eq!(bytes.len(), FRAME_BYTES);
-        self.queue.write_buffer(&state.frame.value, 0, &bytes);
+        let state = self.reconstruction_state.as_ref().unwrap();
+        self.queue
+            .write_buffer(&state.frame.value, 0, &planned.frame);
         self.uploads.view_settings += FRAME_BYTES as u64;
         self.uploads.write_calls += 1;
-        state.previous = Some(Previous {
-            frame: rendered_frames + 1,
-            matrix,
-            jitter,
-            eye,
-            exposure,
-            suns,
-            key,
-            intensities,
-            skin_bounds,
-            skin_revisions,
-        });
         // The resolve writes the frame's HDR target, or the upscaled output.
         let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
         let out = self.upscale.as_ref().map_or(hdr, |u| &u.hdr);
@@ -1421,7 +1519,11 @@ impl Renderer {
             timestamp_writes,
         });
         pass.set_pipeline(&pipelines.reconstruction.as_ref().unwrap().resolve);
-        pass.set_bind_group(0, &*state.groups.as_ref().unwrap().1[state.parity], &[]);
+        pass.set_bind_group(
+            0,
+            &*state.groups.as_ref().unwrap().1[state.plan.parity],
+            &[],
+        );
         pass.set_bind_group(1, primary.virtual_geometry().unwrap().1, &[]);
         pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
     }

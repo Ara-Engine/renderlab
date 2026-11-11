@@ -1412,7 +1412,7 @@ impl Renderer {
         let Some(rays) = self
             .reconstruction_state
             .as_ref()
-            .map(|r| r.shadow_rays)
+            .map(|r| r.plan.shadow_rays)
             .filter(|_| self.reconstruction_frame.is_some())
         else {
             return;
