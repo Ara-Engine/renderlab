@@ -963,14 +963,15 @@ Pixels on the open ground more than 10 codes above their 21-pixel median:
 
 ## Still-frame history weights on RADV (ara-gpu backend finding, 2026-11-11)
 
-**FIXED on main (3fbb429, decision M8-TR1-NATIVE); the Radeon confirmation run is pending.**
+**CLOSED. Fixed on main (3fbb429, decision M8-TR1-NATIVE) and confirmed on the Radeon.**
 
 - **Symptom (PR #34's test through the wgpu path, Radeon 760M, RADV, Mesa 26.0.8):** after 17 frames from a still camera, 659 pixels short of full weight by 1,917 samples: all 444 border pixels (mean weight 14.86) and 215 within a pixel of the card's outline. The RTX 4070 SUPER and Metal lose weight only on the 92 pixels an edge actually crosses.
 - **Cause (found by the ara-gpu backend's author):** `shaders/temporal_resolve.wgsl` decided native scale with `all(tr1_ratio == vec2(1.0))`, where `tr1_ratio` is a float quotient of two image sizes. Vulkan allows `OpFDiv` 2.5 ULP of error, so 96.0 / 96.0 need not be exactly 1. When it is not, a native frame takes the upscaling path: every sample gets a tent weight just under 1, and the nearest-sample mapping is clamped at the image border. Evidence: on Metal, scaling the ratio by one ulp under 1 turns the passing test into the Radeon's failure word for word, and deciding from the integer sizes removes it with the perturbation still in place. Not verified: that RADV's quotient really is one ulp off.
 - **What it meant:** on AMD under Linux, Renderlab at native resolution reconstructed as if upscaling, with less accumulation at the image border and beside silhouettes.
 - **Fix:** `tr1_native()` compares the two integer sizes, and `tr1_ratio` is exactly 1 in that case. It was the only float equality on a derived ratio in the shaders.
 - **Checked on the RTX:** `gpu_tr1_still_weights` passes (92 short by 628 samples, 0 on the border); game scene with the fox, 40 of 40 frames byte-identical to main on both paths; lib 214 passed.
-- **Still to come:** the Linux gate's run of the test on the Radeon (expected 92 short, 0 on the border) and one quarry timing visit there before and after, since RADV's native frames now leave the upscaling path.
+- **Confirmed on the Radeon 760M (RADV) at main 6adfaee:** `gpu_tr1_still_weights` passes with mean weight 16.95 of 17, 92 pixels short by 628 samples, 0 on the border, 92 within a pixel of the card's outline, 0 elsewhere: the same line as the RTX. The ara-gpu port's own version of the test passes there too with the fix merged.
+- **Not reported yet:** the Radeon quarry timing visit before and after (RADV's native frames have left the upscaling path, so its `tr1` cost may differ).
 
 ## Layout decorations on workgroup and function variables (validation layer, 2026-11-11)
 
