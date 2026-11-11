@@ -89,8 +89,7 @@ pub struct ShaderInput {
 }
 /// Reflect only the selected entry pair; unused program interfaces are omitted.
 pub fn inputs(pass: super::Pass) -> Result<Vec<ShaderInput>> {
-    static KEPT: super::memo::Memo<super::Pass, Vec<ShaderInput>> = super::memo::Memo::new();
-    KEPT.get(pass, || reflect(pass, pass.source().as_ref()))
+    pass.reflected()?.inputs()
 }
 /// A caller-authored program's inputs, kept by the pass and its source's `digest`.
 pub(super) fn from_digest(
@@ -98,14 +97,7 @@ pub(super) fn from_digest(
     source: &str,
     digest: [u8; 32],
 ) -> Result<Vec<ShaderInput>> {
-    static KEPT: super::memo::Memo<(super::Pass, [u8; 32]), Vec<ShaderInput>> =
-        super::memo::Memo::new();
-    KEPT.get((pass, digest), || reflect(pass, source))
-}
-fn reflect(pass: super::Pass, source: &str) -> Result<Vec<ShaderInput>> {
-    let mut module = super::parse(source)?;
-    super::select(&mut module, pass)?;
-    from_module(&module)
+    super::reflection::reflected(pass, source, digest)?.inputs()
 }
 pub(super) fn from_module(module: &naga::Module) -> Result<Vec<ShaderInput>> {
     let mut layout = naga::proc::Layouter::default();

@@ -11,11 +11,13 @@ mod metal;
 mod packet_spirv;
 mod program;
 mod ray_source;
+mod reflection;
 pub use heap_interface::{InputKey, InputKind, SampleType, ShaderInput, inputs};
 pub(crate) use memo::digest;
 pub(crate) use mesh_interface::MeshResource;
 pub use program::Program;
 pub(crate) use program::contract as packet_contract;
+pub(crate) use reflection::store_in as store_reflection_in;
 mod particle_interface;
 pub(crate) use particle_interface::ParticleResource;
 mod skin_interface;
@@ -540,8 +542,17 @@ impl Pass {
         )
     }
     pub(crate) fn threads(self) -> anyhow::Result<[u32; 3]> {
-        static KEPT: memo::Memo<Pass, [u32; 3]> = memo::Memo::new();
-        KEPT.get(self, || threads_of(self, self.source().as_ref()))
+        self.reflected()?
+            .threads
+            .ok_or_else(|| anyhow::anyhow!("raster passes have no workgroup size"))
+    }
+    /// The pass's own source's reflection (`reflection::reflected`), by its digest,
+    /// taken once a process.
+    fn reflected(self) -> anyhow::Result<reflection::Reflected> {
+        static DIGESTS: memo::Memo<Pass, [u8; 32]> = memo::Memo::new();
+        let source = self.source();
+        let digest = DIGESTS.get(self, || Ok(memo::digest(&source)))?;
+        reflection::reflected(self, &source, digest)
     }
 
     pub(super) fn entry(self) -> &'static str {
@@ -733,20 +744,7 @@ pub(crate) fn threads_source(pass: Pass, source: &str) -> anyhow::Result<[u32; 3
 /// A caller-authored program's workgroup size, kept by the pass and its source's
 /// `digest`.
 fn threads_digest(pass: Pass, source: &str, digest: [u8; 32]) -> anyhow::Result<[u32; 3]> {
-    static KEPT: memo::Memo<(Pass, [u8; 32]), [u32; 3]> = memo::Memo::new();
-    KEPT.get((pass, digest), || threads_of(pass, source))
-}
-fn threads_of(pass: Pass, source: &str) -> anyhow::Result<[u32; 3]> {
-    let mut module = parse(source)?;
-    select(&mut module, pass)?;
-    let entry = module
-        .entry_points
-        .iter()
-        .find(|entry| entry.name == pass.entry())
-        .ok_or_else(|| anyhow::anyhow!("selected WGSL entry missing"))?;
-    anyhow::ensure!(
-        entry.stage == naga::ShaderStage::Compute && entry.workgroup_size.iter().all(|v| *v > 0),
-        "selected pass is not a concrete compute entry"
-    );
-    Ok(entry.workgroup_size)
+    reflection::reflected(pass, source, digest)?
+        .threads
+        .ok_or_else(|| anyhow::anyhow!("raster programs have no workgroup size"))
 }

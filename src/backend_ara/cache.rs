@@ -46,7 +46,7 @@ impl ShaderCache {
         #[cfg(not(target_os = "macos"))]
         let compiler = String::from("naga30 SPIR-V1.5");
         let adapter = format!(
-            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
+            "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             include_str!("shader/metal.rs"),
             include_str!("shader/spirv.rs"),
             include_str!("shader/mod.rs"),
@@ -54,6 +54,7 @@ impl ShaderCache {
             include_str!("shader/particle_interface.rs"),
             include_str!("shader/mesh_interface.rs"),
             include_str!("shader/heap_interface.rs"),
+            include_str!("shader/reflection.rs"),
             include_str!("shader/packet_spirv.rs"),
             include_str!("shader/spv_layout.rs"),
             include_str!("shader/spv_nonuniform.rs"),
@@ -77,6 +78,8 @@ impl ShaderCache {
             super::shader::spirv_variant()
         ))
         .into();
+        // A process reads its programs' reflection back from beside the cooked code.
+        shader::store_reflection_in(root.clone(), salt);
         Ok(Self {
             root,
             compiler,

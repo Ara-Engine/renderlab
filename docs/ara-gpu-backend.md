@@ -2867,6 +2867,32 @@ each append's five atomics went to it. 0a72fc4 makes it device-local (binning cl
 every frame anyway); 8c422ae adds `RENDERLAB_ARA_SPV=bins-root`, the binning kernel
 reading its buffers' heap indices from root words, to price the heap path apart.
 
+**What the RTX said about placement (issuecomment-6801529082 and -6801995507).** The
+device-local arguments (0a72fc4) took `ProgramBins` from 6.9 to 0.15 ms and the frame
+from about 21.5 to 14.0 ms (wgpu 10.5), frames byte for byte the same. The card offers
+a `DEVICE_LOCAL | HOST_VISIBLE` memory type, so an experiment (ara-gpu preferring it
+for host-visible storage buffers, measured on side branches since deleted) put every
+mesh and record buffer on the card: no effect (frame 14.02 against 14.11, every pass
+within its spread, frames byte for byte the same). Reading meshes and records from
+system memory costs these kernels nothing measurable there; only the atomics did. So
+the staged device-local copies are not built. The design stays here in case a card
+shows otherwise: a host staging buffer written at creation and imported `HostWrite`,
+a device-local buffer, one copy node before the first pass that reads it, so the graph
+gives the transfer barrier and refuses any read recorded before the copy.
+
+With `--without gi` on both layers (one lease, three interleaved a side) the radiance
+cache costs wgpu 4.78 ms and the port 6.12, and the port is still 1.36x without it.
+The rest of the 3.5 ms on NVIDIA is ordinary tuning with no single owner: the cache
++1.3, the shade list without the cache +0.7, the resolve +0.36, recording +0.25.
+
+**Reflection kept beside the cooked code.** A process reflected every program twice
+(inputs, then workgroup size, each a naga parse) though the cooked code was on disk:
+186 of the 250 ms a warm process spent recording its first frame on the Mac. Reflection
+now takes one parse and is written to `<cache root>/reflection/`, keyed by the cache's
+salt, the pass and the source digest (`shader/reflection.rs`). Warm first frame on the
+Mac 376 to 394 ms before, 184 to 191 after (recording 51 ms, the rest the first frame's
+GPU work); the twelfth frame is byte for byte the same with a cold and a warm store.
+
 **Which image loads read a substituted component (for robustImageAccess2).** Every
 load whose alpha or whole vector a kernel uses, in a pass the port runs, is on a
 four-component format (the reconstruction's sample, colour, layer and hit records, the
