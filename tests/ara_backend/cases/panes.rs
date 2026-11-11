@@ -3,7 +3,7 @@ use super::*;
 use glam::DVec3;
 use renderlab::{
     Camera, Light, Lighting, Mat4, MaterialDescriptor, Transparency, Vec3, Vertex,
-    backend_ara::forward::{ForwardObject, ForwardScene, Primary, SunShadows, render},
+    backend_ara::forward::{ForwardObject, ForwardScene, Frames, Primary, SunShadows, render},
 };
 
 const SIZE: [u32; 2] = [128, 96];
@@ -339,6 +339,173 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
         "the mesh pass accepted a transparent pane"
     );
     eprintln!("panes: {report}");
+    cache.retire(&mut gpu)?;
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// A sunlit floor, an upright card on it that the sun does not reach, and a red pane
+/// overhead between the floor and the sun, under a black sky with the radiance cache
+/// on: the card shows only the floor's bounce light, which is the pane's red.
+///
+/// After ten such frames the pane is carried away, and six frames later (the frame
+/// that relights every cell, the cache's three gathers, and two more) the card is
+/// what it is in a sequence whose pane was never overhead, within 2%, and grey. So a
+/// change in the panes' sun map is a lighting change to the cache, as
+/// `Renderer::prepare_gi` keys it. Nothing else tells the cache: a pane is no caster
+/// in its world and the view is still, so without the map in its lighting key the
+/// card stays red.
+#[test]
+fn a_pane_carried_away_relights_the_cells_it_shaded() -> Result<()> {
+    let path = root("pane-relight");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let floor = quad(3., 0., [0.; 2]);
+    let card = [[-1., 0.], [1., 0.], [1., 1.5], [-1., 1.5]].map(|[x, z]| Vertex {
+        position: [x, 1., z],
+        normal: [0., -1., 0.],
+        uv: [0.; 2],
+        color: [1.; 4],
+    });
+    let pane = quad(2.8, 2.5, [0.; 2]);
+    // The sun leans away from the card's face, so no direct light reaches it.
+    let lighting = Lighting {
+        lights: vec![Light::Directional {
+            travel: Vec3::new(0., -0.05, -1.).normalize(),
+            lux: [8.; 3],
+        }],
+        environment: [0.; 3],
+        exposure_stops: 0.,
+    };
+    let shadows = SunShadows {
+        split_ends: vec![16.],
+        disk_angle: 0.02,
+    };
+    let camera = Camera::look_at(
+        Vec3::new(0., -7., 1.6),
+        Vec3::new(0., 1., 0.7),
+        Vec3::Z,
+        55f32.to_radians(),
+        0.1,
+        100.,
+    )?;
+    let matrix = camera.matrix(SIZE[0], SIZE[1]);
+    // The mean of the 8 by 8 pixels about the middle of the card.
+    let patch = |hdr: &[u8]| -> [f32; 3] {
+        let ndc = matrix.project_point3(Vec3::new(0., 1., 0.75));
+        let centre = [
+            ((ndc.x + 1.) * 0.5 * SIZE[0] as f32) as usize,
+            ((1. - ndc.y) * 0.5 * SIZE[1] as f32) as usize,
+        ];
+        let mut sum = [0f32; 3];
+        for y in centre[1] - 4..centre[1] + 4 {
+            for x in centre[0] - 4..centre[0] + 4 {
+                let p = &hdr[(y * SIZE[0] as usize + x) * 8..][..8];
+                for (c, sum) in sum.iter_mut().enumerate() {
+                    *sum += f16::from_bits(u16::from_le_bytes([p[2 * c], p[2 * c + 1]])).to_f32();
+                }
+            }
+        }
+        sum.map(|c| c / 64.)
+    };
+    // One sequence: a frame for each entry, with the pane overhead where it says and
+    // far to one side otherwise. The card after each frame.
+    let mut sequence = |overhead: &[bool]| -> Result<Vec<[f32; 3]>> {
+        let material = |base: [f32; 3], transparency| MaterialDescriptor {
+            base_color: [base[0], base[1], base[2], 1.],
+            metallic: 0.,
+            roughness: 1.,
+            double_sided: true,
+            transparency,
+            ..Default::default()
+        };
+        let objects = [&floor, &card].map(|vertices| ForwardObject {
+            vertices,
+            indices: &[0, 1, 2, 0, 2, 3],
+            transform: Mat4::IDENTITY,
+            material: material([0.8; 3], None),
+        });
+        let mut frames = Frames::default();
+        let mut cards = Ok(Vec::new());
+        for &overhead in overhead {
+            let transparent = [ForwardObject {
+                vertices: &pane,
+                indices: &[0, 1, 2, 0, 2, 3],
+                transform: Mat4::from_translation(Vec3::new(
+                    if overhead { 0. } else { 20. },
+                    0.,
+                    0.,
+                )),
+                material: material(
+                    [1., 0.2, 0.2],
+                    Some(Transparency {
+                        opacity: 0.,
+                        ior: IOR as f32,
+                        thickness: 0.,
+                    }),
+                ),
+            }];
+            let image = frames.render(
+                &mut gpu,
+                &cache,
+                &ForwardScene {
+                    meshes: None,
+                    instances: None,
+                    objects: &objects,
+                    lighting: &lighting,
+                    camera,
+                    size: SIZE,
+                    atmosphere: renderlab::Atmosphere::off(),
+                    sun_shadows: Some(&shadows),
+                    primary: Primary::Traced,
+                    post: None,
+                    indirect: Some(renderlab::backend_ara::gi_cache::Indirect {
+                        settings: renderlab::IndirectSettings {
+                            slots_log2: 17,
+                            ..Default::default()
+                        },
+                        read_table: false,
+                    }),
+                    reconstruction: None,
+                    reflections: None,
+                    textures: None,
+                    local_shadows: None,
+                    transparent: &transparent,
+                    programs: None,
+                },
+            );
+            match (image, &mut cards) {
+                (Ok(image), Ok(cards)) => cards.push(patch(&image.hdr)),
+                (Err(error), _) => {
+                    cards = Err(error);
+                    break;
+                }
+                _ => unreachable!("the loop stops at the first error"),
+            }
+        }
+        frames.retire(&mut gpu)?;
+        cards
+    };
+    let mut overhead = [true; 16];
+    overhead[10..].fill(false);
+    let (carried, never) = (sequence(&overhead)?, sequence(&[false; 16])?);
+    let (under, after, open) = (carried[9], carried[15], never[15]);
+    eprintln!(
+        "pane relight: under the pane {under:?}, six frames after {after:?}, never under {open:?}"
+    );
+    ensure!(
+        under[0] > 0.3 && under[1] < 0.3 * under[0],
+        "the card under the pane is {under:?}, not lit red"
+    );
+    ensure!(
+        open[0] > 0.3 && open[1] == open[0] && open[2] == open[0],
+        "the card with the pane away is {open:?}, not lit grey"
+    );
+    ensure!(
+        (0..3).all(|c| (after[c] - open[c]).abs() < 0.02 * open[c]),
+        "six frames after the pane left the card is {after:?}, and {open:?} where it was never overhead"
+    );
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;

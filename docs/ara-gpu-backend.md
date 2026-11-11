@@ -2562,8 +2562,18 @@ composes its cell programs again and keeps its table (`Cache::shade_with`), as t
 renderer remakes its cell pipelines and keeps its cache. The cache's lighting key now
 also takes every program, which draw has which, and the panes' sun map, as
 `prepare_gi`'s does; the sun map was missing from it since the panes' shadow was
-added, so cells under a pane that moved were relit only by the rotation. That last
-part has no test of its own.
+added, and nothing else tells the cache about a pane (it is no caster in the cache's
+world, and the default settings have no rotation), so cells under a pane that moved
+kept their old light for as long as the view stood still.
+
+`a_pane_carried_away_relights_the_cells_it_shaded`: a sunlit floor, a card the sun
+does not reach, a red pane overhead. Under the pane the card is [0.641, 0.128, 0.128].
+The pane is carried away after ten frames; three frames later the card has settled at
+[0.673, 0.671, 0.671], against [0.668, 0.668, 0.668] in a sequence whose pane was
+never overhead (the test asks for 2% at six frames). The 0.7% that stays, with red
+0.2% over green, does not decay over the three frames after and I have not explained
+it. With the key as it was the card is still [0.641, 0.128, 0.128] six frames later
+and the test fails.
 
 `two_programs_in_one_frame_each_light_their_own_cells`: two sunlit floors with a
 black wall between them and an upright card on each that the sun does not reach,
