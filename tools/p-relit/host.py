@@ -2,7 +2,8 @@
 GPU leases through scripts/n8-run.py (<=15 min). Builds also take the stillkit mutex, only once admitted.
 
     py -3 -B tools/p-relit/host.py build NAME [TREE]   # release examples of TREE into bin/NAME (NAME lib: the lib test binary)
-    py -3 -B tools/p-relit/host.py lease LABEL MIN -- COMMAND...   # full-quarry lease (--quarry-lease), no validation layer
+    py -3 -B tools/p-relit/host.py lease LABEL MIN -- COMMAND...   # GPU lease (10 GiB start; LABEL q-...: a
+                                                                   # full-quarry lease, --quarry-lease, 14 GiB)
 """
 import importlib.util
 import inspect
@@ -113,7 +114,8 @@ def runner():
 # full-quarry leases keep 7 GiB (quarry runs tripped the 2 GiB runtime guard below that).
 # Root budget 2026-11-10 (sole unit): start builds and leases at 10 GiB, stop below 5 GiB.
 BUILD_MIB = 10240
-LEASE_MIB = 14336  # quarry leases: 14 GiB (P-RELIT brief)
+LEASE_MIB = 10240
+QUARRY_MIB = 14336  # quarry leases (labels q-...): 14 GiB (P-RELIT brief)
 
 
 def ready(r, label):
@@ -127,7 +129,7 @@ def ready(r, label):
         why.append("build slot held")
     if sample["compilers"]:
         why.append("foreign compiler")
-    if sample["available_mbytes"] < (BUILD_MIB if label == "build" else LEASE_MIB):
+    if sample["available_mbytes"] < (BUILD_MIB if label == "build" else QUARRY_MIB if label.startswith("q-") else LEASE_MIB):
         why.append(f"available {sample['available_mbytes']:.0f} MiB")
     if shutil.disk_usage("D:/").free < 5e9:
         why.append("D: below 5 GB")
@@ -228,12 +230,18 @@ def lease(label, minutes, command):
     """Wait for admission, then run COMMAND under scripts/n8-run.py's guarded lease."""
     assert 0 < minutes <= 15
     r = runner()
-    requeues = 0
+    requeues = deferrals = 0
+    quarry = ["--quarry-lease"] if label.startswith("q-") else []
     while True:
         wait_ready(r, label)
+        # Islam's game comes first (P-RELIT brief): no GPU work while one runs. Report, don't wait.
+        games = [g["Name"] for g in r.state()["games"]]
+        if games:
+            print("no lease: a game is running:", games, flush=True)
+            return 4
         env = os.environ | {"N8_OWNER": OWNER, "N8_OUT": str(WORK / "lease")}
         code = sp.run(["py", "-3", "-B", str(REPO / "scripts/n8-run.py"), "--label", label, "--minutes", str(minutes),
-                       "--quarry-lease", "--", *command], cwd=REPO, env=env).returncode
+                       *quarry, "--", *command], cwd=REPO, env=env).returncode
         # run.py stops its own capture process below 5 GiB and exits 75; n8-run's finally has
         # released the lease by then. Requeue behind admission; finished steps are skipped.
         if code == 75 and requeues < 2:
@@ -241,10 +249,11 @@ def lease(label, minutes, command):
             post(f"{OWNER} {label} window released {r.utc()} (stopped by its owner: available RAM below 5 GiB; requeued behind 14 GiB admission).")
             label = label + "q"
             continue
-        if code != 3:
+        deferrals += 1
+        if code != 3 or deferrals > 8:
             return code
         label = label + "r"  # a deferral leaves the label's log; retry under a new one
-        time.sleep(2)
+        time.sleep(15)
 
 
 if __name__ == "__main__":

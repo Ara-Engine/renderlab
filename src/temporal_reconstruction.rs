@@ -1830,13 +1830,17 @@ mod tests {
                 light_budget: budget,
                 ..Default::default()
             };
-            let frame = |lights, n| PlanInputs {
+            let (before, after) = ([fire(from)], [fire(to)]);
+            plan.prepare(PlanInputs {
                 settings,
                 exposure,
-                ..inputs(lights, n)
-            };
-            plan.prepare(frame(&[fire(from)], 0));
-            let planned = plan.prepare(frame(&[fire(to)], 1));
+                ..inputs(&before, 0)
+            });
+            let planned = plan.prepare(PlanInputs {
+                settings,
+                exposure,
+                ..inputs(&after, 1)
+            });
             assert!(!plan.reset);
             // History continues under MQ1's box on a relit frame.
             let options = u32::from_ne_bytes(planned.frame[292..296].try_into().unwrap());
