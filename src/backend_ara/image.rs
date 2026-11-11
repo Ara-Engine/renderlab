@@ -565,8 +565,10 @@ pub(crate) fn release(gpu: &mut GpuDevice, image: Image) -> Result<()> {
 /// [`Texture::shaped`] takes a free target of the same description from it, and
 /// [`release`] gives a target it lent back. A target given back is free for the next
 /// frame only, so one frame never hands one image to two roles. At the frame's end
-/// ([`Pool::end_frame`]) the targets no frame took are retired, and the ones lent and
-/// not given back belong to whoever kept them (histories, tables) and leave the pool.
+/// ([`Pool::end_frame`]) a target no frame took for [`KEEP_IDLE`] frames in a row is
+/// retired, and the ones lent and not given back belong to whoever kept them
+/// (histories, tables) and leave the pool. The engine's views share one pool, each
+/// view's frame in turn, so a target idle for one view's frame serves the next view.
 /// Frames wait for the GPU before they return, so a free target is idle. A new frame's
 /// graph starts every target undefined, as it would a new one.
 pub(crate) mod pool {
@@ -575,11 +577,14 @@ pub(crate) mod pool {
     use ara_gpu::{Device, GpuDevice, Image};
     use std::cell::RefCell;
 
-    /// A sequence's targets. See the module.
+    /// Frames a free target may go untaken before it is retired: enough for views
+    /// that alternate to keep their own sizes' targets.
+    pub(crate) const KEEP_IDLE: u32 = 3;
+    /// A sequence's targets, or an engine's for all its views. See the module.
     #[derive(Default)]
     pub(crate) struct Pool {
-        /// Free for this frame, by description.
-        free: Vec<(String, Texture)>,
+        /// Free for this frame, by description, with the frames each has gone untaken.
+        free: Vec<(String, Texture, u32)>,
         /// Lent this frame.
         lent: Vec<(String, Texture)>,
         /// Given back this frame: free for the next one.
@@ -589,17 +594,31 @@ pub(crate) mod pool {
         /// Ends a frame: retires what it did not take, frees what it gave back, and
         /// forgets what it kept.
         pub(crate) fn end_frame(&mut self, gpu: &mut GpuDevice) -> Result<()> {
-            for (_, unused) in self.free.drain(..) {
-                gpu.retire(ara_gpu::Resource::Image(unused.image))?;
+            let mut kept = Vec::new();
+            for (key, unused, idle) in self.free.drain(..) {
+                if idle + 1 >= KEEP_IDLE {
+                    gpu.retire(ara_gpu::Resource::Image(unused.image))?;
+                } else {
+                    kept.push((key, unused, idle + 1));
+                }
             }
-            self.free = std::mem::take(&mut self.returned);
+            kept.extend(
+                self.returned
+                    .drain(..)
+                    .map(|(key, texture)| (key, texture, 0)),
+            );
+            self.free = kept;
             self.lent.clear();
             Ok(())
         }
         /// Retires every target the pool holds.
-        pub(crate) fn retire(mut self, gpu: &mut GpuDevice) -> Result<()> {
-            self.returned.append(&mut self.free);
-            for (_, texture) in self.returned {
+        pub(crate) fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
+            for texture in self
+                .returned
+                .into_iter()
+                .map(|(_, t)| t)
+                .chain(self.free.into_iter().map(|(_, t, _)| t))
+            {
                 gpu.retire(ara_gpu::Resource::Image(texture.image))?;
             }
             Ok(())
@@ -626,10 +645,9 @@ pub(crate) mod pool {
         ACTIVE.with(|a| {
             let mut active = a.borrow_mut();
             let pool = active.as_mut()?;
-            let at = pool.free.iter().position(|(k, _)| k == key)?;
-            let entry = pool.free.swap_remove(at);
-            let texture = entry.1;
-            pool.lent.push(entry);
+            let at = pool.free.iter().position(|(k, _, _)| k == key)?;
+            let (key, texture, _) = pool.free.swap_remove(at);
+            pool.lent.push((key, texture));
             Some(texture)
         })
     }

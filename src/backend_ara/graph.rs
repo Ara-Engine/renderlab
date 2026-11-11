@@ -6,6 +6,7 @@ use ara_gpu::{
     sync::{BarrierRange, ResourceBarrier},
     texture::ImageViewDesc,
 };
+use std::collections::HashMap;
 
 /// Allocated subresource counts; 3D depth slices belong to one array layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -37,71 +38,60 @@ impl From<(Resource, Access)> for ResourceUse {
         Self::Whole(resource, access)
     }
 }
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 struct Key {
     resource: Resource,
     cell: Option<(u32, u32)>,
 }
-impl Key {
-    fn whole(resource: Resource) -> Self {
-        Self {
-            resource,
-            cell: None,
-        }
-    }
-}
+/// One resource's scheduled states: its whole state, or one per mip/layer cell once a
+/// view registered its cells (a cell without its own state reads the whole one).
+type States = Vec<(Option<(u32, u32)>, Access)>;
 /// Persistent scheduled states. Import actual states for external resources.
 /// Submit lists in order; discard this tracker if a recorded list is abandoned.
+/// States are found by resource, so planning a node costs its own uses, not the
+/// number of resources the frame has declared.
 #[derive(Default)]
 pub struct Graph {
-    states: Vec<(Key, Access)>,
-    images: Vec<(Image, Subresources)>,
+    states: HashMap<Resource, States>,
+    images: HashMap<Image, Subresources>,
 }
 impl Graph {
     /// Remove retired resources and their registered subresource bounds.
     pub fn forget(&mut self, resource: Resource) {
-        self.states.retain(|(k, _)| k.resource != resource);
+        self.states.remove(&resource);
         if let Resource::Image(image) = resource {
-            self.images.retain(|(i, _)| *i != image);
+            self.images.remove(&image);
         }
     }
     /// Import a whole resource state. Already registered images update every cell.
     pub fn import(&mut self, resource: Resource, access: Access) {
-        let mut found = false;
-        for (key, state) in &mut self.states {
-            if key.resource == resource {
-                *state = access;
-                found = true;
+        match self.states.get_mut(&resource) {
+            Some(states) => states.iter_mut().for_each(|(_, state)| *state = access),
+            None => {
+                self.states.insert(resource, vec![(None, access)]);
             }
-        }
-        if !found {
-            self.states.push((Key::whole(resource), access));
         }
     }
     /// Whole attachment loads require every registered cell to have a producer.
     pub fn require_initialized(&self, resource: Resource) -> Result<()> {
-        let mut found = false;
-        for (key, state) in &self.states {
-            if key.resource == resource {
-                found = true;
-                ensure!(
-                    *state != Access::Undefined,
-                    "attachment load has no initialized producer"
-                );
-            }
-        }
-        ensure!(found, "attachment load has no initialized producer");
+        let states = self
+            .states
+            .get(&resource)
+            .filter(|states| !states.is_empty());
+        ensure!(
+            states.is_some_and(|states| states.iter().all(|(_, s)| *s != Access::Undefined)),
+            "attachment load has no initialized producer"
+        );
         Ok(())
     }
     fn before(&self, key: Key) -> Access {
-        self.states
+        let Some(states) = self.states.get(&key.resource) else {
+            return Access::Undefined;
+        };
+        states
             .iter()
-            .find(|(k, _)| *k == key)
-            .or_else(|| {
-                self.states
-                    .iter()
-                    .find(|(k, _)| *k == Key::whole(key.resource))
-            })
+            .find(|(cell, _)| *cell == key.cell)
+            .or_else(|| states.iter().find(|(cell, _)| cell.is_none()))
             .map_or(Access::Undefined, |(_, a)| *a)
     }
     /// Whole-resource compatibility path. Once an image has view states, whole
@@ -127,7 +117,7 @@ impl Graph {
     /// Validate a node and advance scheduled states, returning its exact barriers.
     /// Record these dependencies before executing the node. Errors change no state.
     pub fn plan(&mut self, uses: &[ResourceUse]) -> Result<Vec<ResourceBarrier>> {
-        let mut registered = Vec::new();
+        let mut registered: Vec<(Image, Subresources)> = Vec::new();
         for use_ in uses {
             if let ResourceUse::Image {
                 image,
@@ -153,11 +143,10 @@ impl Graph {
                             .is_some_and(|n| n <= allocation.layers),
                     "image view exceeds allocation"
                 );
-                if let Some((_, old)) = self
+                if let Some(old) = self
                     .images
-                    .iter()
-                    .chain(&registered)
-                    .find(|(i, _)| *i == image)
+                    .get(&image)
+                    .or_else(|| registered.iter().find(|(i, _)| *i == image).map(|(_, s)| s))
                 {
                     ensure!(*old == allocation, "image allocation bounds changed");
                 } else {
@@ -165,16 +154,19 @@ impl Graph {
                 }
             }
         }
+        // The node's distinct uses in declaration order, and where each key is.
         let mut unique = Vec::<(Key, Access)>::new();
+        let mut at = HashMap::<Key, usize>::new();
         for use_ in uses {
             let (resource, access, range) = match *use_ {
                 ResourceUse::Whole(resource, access) => {
                     let range = if let Resource::Image(image) = resource {
                         self.images
-                            .iter()
-                            .chain(&registered)
-                            .find(|(i, _)| *i == image)
-                            .map(|(_, s)| (0, s.mips, 0, s.layers))
+                            .get(&image)
+                            .or_else(|| {
+                                registered.iter().find(|(i, _)| *i == image).map(|(_, s)| s)
+                            })
+                            .map(|s| (0, s.mips, 0, s.layers))
                     } else {
                         None
                     };
@@ -202,7 +194,7 @@ impl Graph {
             );
             let mut add = |cell| -> Result<()> {
                 let key = Key { resource, cell };
-                if let Some((_, old)) = unique.iter_mut().find(|(k, _)| *k == key) {
+                if let Some((_, old)) = at.get(&key).map(|i| &mut unique[*i]) {
                     if matches!(resource, Resource::Buffer(_))
                         && matches!(
                             (*old, access),
@@ -220,6 +212,7 @@ impl Graph {
                         );
                     }
                 } else {
+                    at.insert(key, unique.len());
                     unique.push((key, access));
                 }
                 Ok(())
@@ -243,20 +236,15 @@ impl Graph {
         // Registration follows all validation, inheriting any prior whole state.
         for (image, shape) in registered {
             let resource = Resource::Image(image);
-            let before = self.before(Key::whole(resource));
-            self.states.retain(|(k, _)| k.resource != resource);
-            for mip in 0..shape.mips {
-                for layer in 0..shape.layers {
-                    self.states.push((
-                        Key {
-                            resource,
-                            cell: Some((mip, layer)),
-                        },
-                        before,
-                    ));
-                }
-            }
-            self.images.push((image, shape));
+            let before = self.before(Key {
+                resource,
+                cell: None,
+            });
+            let cells = (0..shape.mips)
+                .flat_map(|mip| (0..shape.layers).map(move |layer| (Some((mip, layer)), before)))
+                .collect();
+            self.states.insert(resource, cells);
+            self.images.insert(image, shape);
         }
         let mut barriers = Vec::new();
         for (key, after) in unique {
@@ -279,10 +267,10 @@ impl Graph {
                     }),
                 });
             }
-            if let Some((_, state)) = self.states.iter_mut().find(|(k, _)| *k == key) {
-                *state = after;
-            } else {
-                self.states.push((key, after));
+            let states = self.states.entry(key.resource).or_default();
+            match states.iter_mut().find(|(cell, _)| *cell == key.cell) {
+                Some((_, state)) => *state = after,
+                None => states.push((key.cell, after)),
             }
         }
         Ok(barriers)

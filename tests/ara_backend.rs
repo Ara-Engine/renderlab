@@ -490,6 +490,12 @@ mod engine_map_cases;
 #[path = "ara_backend/cases/engine_skinning.rs"]
 mod engine_skinning_cases;
 
+#[path = "ara_backend/cases/engine_lut.rs"]
+mod engine_lut_cases;
+
+#[path = "ara_backend/cases/engine_fog.rs"]
+mod engine_fog_cases;
+
 #[path = "ara_backend/cases/resident_meshes.rs"]
 mod resident_mesh_cases;
 

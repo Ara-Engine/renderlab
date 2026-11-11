@@ -38,9 +38,9 @@ The working notes this page replaces (every port step, its tests and its measure
 
   Records and small buffers are still made per frame.
 - **The engine entry** (`engine::Engine`) takes the same scene calls as the wgpu
-  `engine::Engine` and records them without a device. `render(gpu, camera)` draws on
-  the caller's device. `output()` is the displayed image: sRGB-encoded RGBA8, left in
-  `CopySource` for a presenter. `release(gpu)` and `retire(gpu)` free what it keeps
+  `engine::Engine` and records them without a device. `render_view(gpu, view, camera)`
+  draws on the caller's device. `view_output(view)` is the view's displayed image:
+  sRGB-encoded RGBA8, left in `CopySource` for a presenter. `release(gpu)` and `retire(gpu)` free what it keeps
   there. `on(gpu)` gives the engine and the device together as an `engine::Scene`.
   What it cannot honour it records once as a `Refusal { call, what }` and draws the
   rest.
@@ -60,19 +60,21 @@ exact one):
   shadows.
 - Uniform, atmosphere and map skies: `Sky::Map` in both of the renderer's layouts,
   with intensity, rotation and visible or scaled backgrounds.
-- Aerial perspective and height fog.
+- Aerial perspective, height fog and volumetric fog: the fog's cells see the sun by
+  one ray a sample against the frame's scene, as the wgpu renderer's hardware path
+  does, and keep a two-frame history that the same changes invalidate.
 - The radiance cache (GI) and traced reflections.
 - Temporal reconstruction at every render scale.
 - Transparent panes with their coloured sun shadows.
-- Post: bloom, motion blur, depth of field, tone mapping and grading.
+- Post: bloom, motion blur, depth of field, tone mapping and grading, with the colour
+  LUT.
 - A scene without a sun.
 
 Refused by the engine entry, and reported:
 
 | Call | What |
 |---|---|
-| `set_settings` | `volumetric_fog`; `sky_light` other than 1; `post.enabled` false; any field added to `Settings` later, while it differs from its default |
-| `set_colour_lut` | colour lookup tables (the LUT is the identity) |
+| `set_settings` | `sky_light` other than 1; `post.enabled` false; any field added to `Settings` later, while it differs from its default |
 | `add_asset` | cooked assets |
 | `create_emitter`, `update_emitter` | particle emitters |
 | `set_decals` | decals |
@@ -90,7 +92,7 @@ path's software rays (the port is the traced frame only).
 
 - **Metal, M5 Pro (macOS 27):** the whole suite,
   `cargo test -p renderlab --features backend-ara --test ara_backend -- --test-threads=1`,
-  88 tests, under `MTL_DEBUG_LAYER=1` with `MTL_SHADER_VALIDATION=1` and `=0`. Ara's
+  91 tests, under `MTL_DEBUG_LAYER=1` with `MTL_SHADER_VALIDATION=1` and `=0`. Ara's
   player draws Showcase with it through the presenter's own Metal device (Ara #71).
 - **Vulkan, Radeon 760M (RADV) and RTX 4070 SUPER:** the suite and the timings below,
   on the gate machine. The heads from the engine entry (0a4307c) on have run on Metal
@@ -123,22 +125,21 @@ reflection was kept on disk).
 - **Drawn by the wgpu renderer and not yet by the port, in this order:**
   1. decals;
   2. particles;
-  3. volumetric fog;
-  4. reflections inside panes;
-  5. the colour LUT.
+  3. textures on transparent materials;
+  4. reflections inside panes.
 
   Then skinning on the GPU (SK1's ported kernel, with structure refits) in place of the
   CPU pose and per-pose build, for frame cost.
-- **Views and ids** (Renderlab #39 and its id-output spec). When views merge, the
-  entry's `resize`/`render`/`output`/`cut`/`capture` become:
-  - `tick`;
-  - `create_view` with a `ViewDesc` that carries its look;
-  - `render_view(gpu, view, camera)`;
-  - `view_output(view)`.
-
-  The frame sequence (`Frames`) becomes per view. The shared state (meshes, textures,
-  the sky map, the cache table and planner) moves to the engine, and the cache's
-  `ViewPlan` to the view. Nothing in this entry is meant to outlive that change.
+- **Views** (docs/design-views.md): the entry has the views API. `tick`,
+  `create_view`, `set_view`, `remove_view`, `render_view(gpu, view, camera)`,
+  `cut_view`, `capture_view` and `view_output`; a view's look is its `ViewDesc`'s.
+  Each view draws through its own frame sequence (histories, cache, resident meshes
+  and textures); the views share the scene and one pool of frame targets. Two views of
+  the game scene are each the bytes of one view alone. Not yet shared between views:
+  the resident meshes, textures and sky map, and the radiance cache (the wgpu engine
+  shares the cache table and keeps a `ViewPlan` per view). View modes other than lit
+  are refused.
+- **Ids** (docs/design-id-output.md): not built; `Outputs::ids` is refused as on wgpu.
 
 ## Fixture
 

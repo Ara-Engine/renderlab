@@ -19,6 +19,14 @@ pub struct AtmosphereSun {
     /// Nonnegative camera exposure; illuminance multiplication uses the original f64 clamp.
     pub exposure: f32,
 }
+/// What volumetric fog's history reads from the frames before (`atmosphere_uniform`).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FogHistory {
+    /// The previous lit frame's view-projection and eye, when its fog may be reused.
+    pub previous: Option<(crate::Mat4, crate::Vec3)>,
+    /// Frames the atmosphere has encoded: the froxel jitter's sequence index.
+    pub frame: u32,
+}
 /// Static medium/sun/camera-altitude parameters in the existing 432-byte ABI.
 pub struct AtmosphereParameters {
     /// Storage record to declare and retire.
@@ -73,6 +81,28 @@ impl AtmosphereParameters {
         viewport: [u32; 2],
         grid: [u32; 2],
     ) -> Result<Self> {
+        Self::for_frame(
+            gpu,
+            settings,
+            sun,
+            camera,
+            viewport,
+            grid,
+            FogHistory::default(),
+        )
+    }
+    /// [`for_camera_with_sun`](Self::for_camera_with_sun) with fog's history: the
+    /// previous camera (valid flag set) and the frame index, and the hardware sun
+    /// visibility source, as the wgpu renderer's hardware path packs them.
+    pub fn for_frame(
+        gpu: &mut GpuDevice,
+        settings: crate::Atmosphere,
+        sun: AtmosphereSun,
+        camera: crate::Camera,
+        viewport: [u32; 2],
+        grid: [u32; 2],
+        history: FogHistory,
+    ) -> Result<Self> {
         ensure!(
             sun.illuminance
                 .into_iter()
@@ -119,13 +149,21 @@ impl AtmosphereParameters {
             volume.history_weight,
             2.,
         ]);
-        values[48..51].copy_from_slice(&eye.to_array());
         let matrix = camera.matrix(viewport[0], viewport[1]);
+        let (previous, previous_eye, valid) = match history.previous {
+            Some((matrix, eye)) => (matrix, eye, 1.),
+            None => (matrix, eye, 0.),
+        };
+        values[48..51].copy_from_slice(&previous_eye.to_array());
+        values[51] = valid;
         values[52..68].copy_from_slice(&matrix.to_cols_array());
         values[68..84].copy_from_slice(&matrix.inverse().to_cols_array());
-        values[84..100].copy_from_slice(&matrix.to_cols_array());
+        values[84..100].copy_from_slice(&previous.to_cols_array());
         values[100] = f32::from_bits(grid[0]);
         values[101] = f32::from_bits(grid[1]);
+        values[102] = f32::from_bits(history.frame);
+        // The sun-visibility source: the scene's rays on a hardware renderer.
+        values[103] = f32::from_bits(1);
         values[104] = viewport[0] as f32;
         values[105] = viewport[1] as f32;
         Ok(Self {

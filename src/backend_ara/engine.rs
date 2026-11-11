@@ -20,16 +20,16 @@ use super::{
 };
 use crate::{
     Camera, Decal, EmitterDescriptor, Error, FrameId, FrameReport, Light, Mat4, MaterialDescriptor,
-    MeshData, PrimaryVisibility, RenderScale, SoftShadows, Value, Vertex, ViewId,
+    MeshData, PrimaryVisibility, SoftShadows, Value, Vertex, ViewId, ViewMode,
     asset::{
         Asset, Primitive, Sampler, TangentStream, Texture as TextureData,
         environment::PreparedEnvironment, skin::Influence,
     },
     engine::{
-        AssetHandles, Background, EmitterId, EnvironmentId, Image, MaterialDesc, MaterialId,
-        MeshId, ObjectId, ProgramId, Quality, Scene, Settings, Sky, Sun, TextureId, ViewDesc,
-        ViewLook,
-        settings::{atmosphere, lighting},
+        AssetHandles, Background, EmitterId, EnvironmentId, Exposure, Image, MaterialDesc,
+        MaterialId, MeshId, ObjectId, ProgramId, Quality, Scene, Settings, Sky, Sun, TextureId,
+        ViewDesc,
+        settings::{atmosphere, lighting, validate_look},
         state::{MaterialEntry, Residency, State},
     },
     program::{self, ParameterLayout},
@@ -134,11 +134,12 @@ impl Residency for Kept {
 pub struct Engine {
     cache: ShaderCache,
     state: State<Kept>,
-    frames: forward::Frames,
-    size: Option<[u32; 2]>,
-    /// The last frame's images, for `capture`.
-    last: Option<ForwardImages>,
-    frame: u64,
+    /// The views in creation order (removal reorders), each with its frames.
+    views: Vec<View>,
+    /// Views created so far: the next one's identity.
+    views_made: u64,
+    /// The 2D targets every view's frames take and give back in turn (`image::pool`).
+    targets: super::image::pool::Pool,
     /// Meshes created so far: the next one's identity.
     meshes: u64,
     /// Materials created so far: the next one's identity.
@@ -150,14 +151,24 @@ pub struct Engine {
     /// Whether frames are read back (`set_readback`).
     readback: bool,
     refusals: Vec<Refusal>,
-    /// Frame sequences a resize or a settings or readback change ended, released at the
-    /// next call that has the device.
+    /// Frame sequences a view change, a removal or a settings or readback change ended,
+    /// released at the next call that has the device.
     ended: Vec<forward::Frames>,
-    /// This layer renders one view (docs/design-views.md: views are not ported here): its
-    /// handle once created, and its look and render scale.
-    view: Option<ViewId>,
-    look: ViewLook,
-    render_scale: RenderScale,
+}
+
+/// One view (docs/design-views.md): its description, and the frame sequence that draws
+/// it, which holds its histories, its cache and what it keeps on the GPU. Views share
+/// the scene and the engine's pool of frame targets, not their sequences: a second view
+/// keeps its own copy of the scene's meshes and textures on the GPU and its own radiance
+/// cache.
+struct View {
+    id: ViewId,
+    desc: ViewDesc,
+    frames: forward::Frames,
+    /// The view's last frame's images (`images`, `capture_view`).
+    last: Option<ForwardImages>,
+    /// Frames rendered for this view.
+    frame: u64,
 }
 
 /// One draw of a frame.
@@ -195,10 +206,9 @@ impl Engine {
         let mut engine = Self {
             cache,
             state: State::new(standard, settings),
-            frames: forward::Frames::default(),
-            size: None,
-            last: None,
-            frame: 0,
+            views: Vec::new(),
+            views_made: 0,
+            targets: Default::default(),
             meshes: 0,
             materials: 0,
             environments: 0,
@@ -206,9 +216,6 @@ impl Engine {
             readback: true,
             refusals: Vec::new(),
             ended: Vec::new(),
-            view: None,
-            look: ViewLook::default(),
-            render_scale: RenderScale::Native,
         };
         engine.refuse_settings(&settings);
         Ok(engine)
@@ -217,16 +224,32 @@ impl Engine {
     pub fn refusals(&self) -> &[Refusal] {
         &self.refusals
     }
-    /// The last reconstructed frame's plan, for telemetry: whether it restarted every
-    /// pixel, and the Interactive trace's shadow rays a pixel
+    /// The view's last reconstructed frame's plan, for telemetry: whether it restarted
+    /// every pixel, and the Interactive trace's shadow rays a pixel
     /// (`Renderer::reconstruction_shadow_rays`).
-    pub fn reconstruction_plan(&self) -> Option<(bool, u32)> {
-        self.frames.reconstruction_plan()
+    pub fn reconstruction_plan(&self, view: ViewId) -> Option<(bool, u32)> {
+        self.view(view).ok()?.frames.reconstruction_plan()
     }
-    /// The last frame's images as the frame read them back: the exposed HDR before
-    /// post, and the displayed bytes `capture` returns.
-    pub fn images(&self) -> Option<&ForwardImages> {
-        self.last.as_ref()
+    /// The view's last frame's images as the frame read them back: the exposed HDR
+    /// before post, and the displayed bytes `capture_view` returns.
+    pub fn images(&self, view: ViewId) -> Option<&ForwardImages> {
+        self.view(view).ok()?.last.as_ref()
+    }
+    /// The engine's views in creation order (removal reorders).
+    pub fn views(&self) -> impl Iterator<Item = ViewId> + '_ {
+        self.views.iter().map(|v| v.id)
+    }
+    fn view(&self, view: ViewId) -> Result<&View, Error> {
+        self.views
+            .iter()
+            .find(|v| v.id == view)
+            .ok_or(Error::InvalidInput("unknown or removed view"))
+    }
+    fn view_index(&self, view: ViewId) -> Result<usize, Error> {
+        self.views
+            .iter()
+            .position(|v| v.id == view)
+            .ok_or(Error::InvalidInput("unknown or removed view"))
     }
     /// Whether frames come back to the CPU. On, the default, `capture` and `images`
     /// have the last frame. Off, a frame is rendered and left on the GPU, which is
@@ -237,16 +260,26 @@ impl Engine {
             self.restart();
         }
     }
-    /// Starts a new frame sequence: the history's size and settings are fixed within
-    /// one, so a change of either ends the old sequence, whose cache and history are
-    /// released at the next call that has the device.
-    fn restart(&mut self) {
-        let fresh = if self.readback {
+    /// A frame sequence as `set_readback` asks for.
+    fn fresh(&self) -> forward::Frames {
+        if self.readback {
             forward::Frames::default()
         } else {
             forward::Frames::without_images()
-        };
-        self.ended.push(std::mem::replace(&mut self.frames, fresh));
+        }
+    }
+    /// Starts every view's frame sequence anew: a sequence's size and settings are fixed,
+    /// so a change ends it, and its cache and history are released at the next call
+    /// that has the device.
+    fn restart(&mut self) {
+        for at in 0..self.views.len() {
+            self.restart_view(at);
+        }
+    }
+    fn restart_view(&mut self, at: usize) {
+        let fresh = self.fresh();
+        self.ended
+            .push(std::mem::replace(&mut self.views[at].frames, fresh));
     }
     /// Releases the ended sequences on `gpu`.
     fn release_ended(&mut self, gpu: &mut GpuDevice) -> Result<(), Error> {
@@ -255,23 +288,19 @@ impl Engine {
         }
         Ok(())
     }
-    /// The last frame's displayed image on the device it was rendered on: sRGB-encoded
-    /// RGBA8 at the output's size, kept until the frame after next. `None` before the
-    /// first frame with post enabled.
-    pub fn output(&self) -> Option<&super::image::Texture> {
-        self.frames.output()
+    /// The view's last displayed image on the device it was rendered on: sRGB-encoded
+    /// RGBA8 at the view's size, kept until its frame after next and left in
+    /// `CopySource`. `None` before the view's first frame.
+    pub fn view_output(&self, view: ViewId) -> Option<&super::image::Texture> {
+        self.view(view).ok()?.frames.output()
     }
     /// Releases what the engine keeps on `gpu` (its frame sequences and pipelines) and
     /// stays usable: the scene is kept, and the next frame starts a new sequence and
     /// makes its pipelines again. What a host calls before it destroys the device.
     pub fn release(&mut self, gpu: &mut GpuDevice) -> anyhow::Result<()> {
+        self.restart();
         self.release_ended(gpu)?;
-        let fresh = if self.readback {
-            forward::Frames::default()
-        } else {
-            forward::Frames::without_images()
-        };
-        std::mem::replace(&mut self.frames, fresh).retire(gpu)?;
+        std::mem::take(&mut self.targets).retire(gpu)?;
         self.cache.retire(gpu)?;
         Ok(())
     }
@@ -290,9 +319,6 @@ impl Engine {
     /// Records the fields of `asked` this layer cannot honour. A field it does not know
     /// is refused whenever it differs from its default.
     fn refuse_settings(&mut self, asked: &Settings) {
-        if asked.volumetric_fog.is_some() {
-            self.refuse("set_settings", "volumetric_fog");
-        }
         if asked.sky_light != 1.0 {
             self.refuse("set_settings", "sky_light");
         }
@@ -457,14 +483,6 @@ impl Engine {
         self.refuse("update_emitter", "particle emitters");
         Ok(())
     }
-    /// The post pass's colour LUT is the identity on this layer; a LUT is recorded
-    /// once as refused and the frame is graded without it.
-    pub fn set_colour_lut(&mut self, lut: Option<crate::post::ColourLut>) -> Result<(), Error> {
-        if lut.is_some() {
-            self.refuse("set_colour_lut", "colour lookup tables");
-        }
-        Ok(())
-    }
     pub fn create_mesh(&mut self, data: &MeshData<'_>) -> Result<MeshId, Error> {
         self.insert_mesh(data, None)
     }
@@ -601,8 +619,9 @@ impl Engine {
         self.refuse("create_emitter", "particle emitters");
         Ok(self.state.emitters.insert(()))
     }
-    /// Kept by nothing: there are no particles to step.
-    pub fn set_particle_step(&mut self, _: f32) -> Result<(), Error> {
+    /// One engine frame: the shared per-frame work. Skinned poses are applied when their
+    /// palettes are set and there are no particles to step, so it does nothing here.
+    pub fn tick(&mut self, _seconds: f32) -> Result<(), Error> {
         Ok(())
     }
 
@@ -625,12 +644,12 @@ impl Engine {
     }
 
     pub fn set_sun(&mut self, sun: Option<Sun>) -> Result<(), Error> {
-        lighting(sun, &self.state.lights, self.state.sky, self.look.exposure)?;
+        lighting(sun, &self.state.lights, self.state.sky, Exposure::default())?;
         self.state.sun = sun;
         Ok(())
     }
     pub fn set_lights(&mut self, lights: &[Light]) -> Result<(), Error> {
-        lighting(self.state.sun, lights, self.state.sky, self.look.exposure)?;
+        lighting(self.state.sun, lights, self.state.sky, Exposure::default())?;
         self.state.lights = lights.to_vec();
         Ok(())
     }
@@ -674,24 +693,98 @@ impl Engine {
         self.state.settings
     }
 
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Error> {
-        if width == 0 || height == 0 {
-            return Err(Error::InvalidInput("output extent must be nonzero"));
+    /// Checks a view as the wgpu engine does, and records what this layer leaves out of
+    /// one: view modes other than lit, and a look without post.
+    fn check_view(&mut self, desc: &ViewDesc) -> Result<(), Error> {
+        if desc.width == 0 || desc.height == 0 {
+            return Err(Error::InvalidInput("view extent must be nonzero"));
         }
-        if self.size.is_some_and(|size| size != [width, height]) {
-            self.restart();
+        if desc.outputs.ids {
+            return Err(Error::InvalidInput(
+                "view id output is not built yet (U-IDS, docs/design-id-output.md)",
+            ));
         }
-        self.size = Some([width, height]);
+        validate_look(&self.state.settings, &desc.look, desc.render_scale)?;
+        if desc.view_mode != ViewMode::Lit {
+            self.refuse("create_view", "view modes other than lit");
+        }
+        if !desc.look.post.enabled {
+            self.refuse("create_view", "look.post.enabled");
+        }
         Ok(())
     }
-    /// Draws the next frame on `gpu` (the device every frame of this engine uses).
-    pub fn render(&mut self, gpu: &mut GpuDevice, camera: &Camera) -> Result<FrameReport, Error> {
+    /// Creates a view; its first frame allocates its targets.
+    pub fn create_view(&mut self, desc: &ViewDesc) -> Result<ViewId, Error> {
+        self.check_view(desc)?;
+        self.views_made += 1;
+        let id = ViewId(self.views_made);
+        let frames = self.fresh();
+        self.views.push(View {
+            id,
+            desc: desc.clone(),
+            frames,
+            last: None,
+            frame: 0,
+        });
+        Ok(id)
+    }
+    /// Changes a view. A new size or render scale restarts its frame sequence (its
+    /// histories and what it keeps on the GPU); a new mode, look or outputs restarts
+    /// nothing.
+    pub fn set_view(&mut self, view: ViewId, desc: &ViewDesc) -> Result<(), Error> {
+        self.check_view(desc)?;
+        let at = self.view_index(view)?;
+        let old = &self.views[at].desc;
+        if (old.width, old.height, old.render_scale) != (desc.width, desc.height, desc.render_scale)
+        {
+            self.restart_view(at);
+        }
+        self.views[at].desc = desc.clone();
+        Ok(())
+    }
+    /// Removes a view; its sequence is released at the next call that has the device.
+    pub fn remove_view(&mut self, view: ViewId) -> Result<(), Error> {
+        let at = self.view_index(view)?;
+        let removed = self.views.swap_remove(at);
+        self.ended.push(removed.frames);
+        Ok(())
+    }
+    /// A camera cut for this view only: its reconstruction, fog and post histories
+    /// restart (and, unlike the wgpu engine's shared cache, its own radiance cache).
+    pub fn cut_view(&mut self, view: ViewId) {
+        if let Ok(at) = self.view_index(view) {
+            self.views[at].frames.cut();
+        }
+    }
+    /// The view's last displayed frame, from its read-back images.
+    pub fn capture_view(&mut self, view: ViewId) -> Result<Image, Error> {
+        let view = self.view(view)?;
+        let display = view
+            .last
+            .as_ref()
+            .and_then(|images| images.display.clone())
+            .ok_or(Error::InvalidInput(
+                "no displayed frame to capture: render the view with read-back on first",
+            ))?;
+        Ok(Image {
+            width: view.desc.width,
+            height: view.desc.height,
+            rgba8: display,
+        })
+    }
+    /// Draws `view`'s next frame from `camera` on `gpu` (the device every frame of this
+    /// engine uses).
+    pub fn render_view(
+        &mut self,
+        gpu: &mut GpuDevice,
+        view: ViewId,
+        camera: &Camera,
+    ) -> Result<FrameReport, Error> {
         self.release_ended(gpu)?;
-        let size = self.size.ok_or(Error::InvalidInput(
-            "call Engine::resize before Engine::render",
-        ))?;
+        let at = self.view_index(view)?;
+        let desc = self.views[at].desc.clone();
+        let (size, look) = ([desc.width, desc.height], &desc.look);
         let settings = self.state.settings;
-        let look = self.look.clone();
         let [opaque, transparent] = Self::placed(&self.state)?;
         // The frame's texture table covers its opaque objects alone.
         if transparent.iter().any(|p| {
@@ -723,8 +816,7 @@ impl Engine {
             }),
             _ => None,
         });
-        let mut media = atmosphere(self.state.sky, &settings);
-        media.volumetric_fog = None;
+        let media = atmosphere(self.state.sky, &settings);
         let sky_map = match self.state.sky {
             Sky::Map {
                 map,
@@ -823,7 +915,7 @@ impl Engine {
             }),
             reconstruction: settings.temporal_reconstruction.then(|| Reconstruct {
                 settings: crate::Reconstruction {
-                    scale: self.render_scale,
+                    scale: desc.render_scale,
                     ..Default::default()
                 },
                 read_history: false,
@@ -844,10 +936,11 @@ impl Engine {
             instances: Some(&placements),
             sky_map,
             skins: Some(&skins),
+            colour_lut: look.colour_lut.as_ref(),
         };
-        let images = self
+        let images = self.views[at]
             .frames
-            .render(gpu, &self.cache, &scene)
+            .render_with(gpu, &self.cache, &scene, &mut self.targets)
             .map_err(fault)?;
         // The renderer's counts are of its opaque draws; a pane is not among them.
         let triangles: usize = opaque
@@ -855,11 +948,12 @@ impl Engine {
             .map(|p| p.indices.len() / 3 * p.placements.len())
             .sum();
         let instances: usize = opaque.iter().map(|p| p.placements.len()).sum();
-        self.last = Some(images);
-        self.frame += 1;
+        let view_state = &mut self.views[at];
+        view_state.last = Some(images);
+        view_state.frame += 1;
         Ok(FrameReport {
-            view: self.view.unwrap_or(ViewId(0)),
-            frame: FrameId(self.frame),
+            view,
+            frame: FrameId(view_state.frame),
             revision: crate::Revision(0),
             cpu: Default::default(),
             uploads: Default::default(),
@@ -879,100 +973,6 @@ impl Engine {
                 Quality::Reference => SoftShadows::Exact,
             },
         })
-    }
-    pub fn cut(&mut self) {
-        self.frames.cut();
-    }
-    pub fn capture(&mut self) -> Result<Image, Error> {
-        let size = self.size.ok_or(Error::InvalidInput(
-            "call Engine::resize before Engine::capture",
-        ))?;
-        let display = self
-            .last
-            .as_ref()
-            .and_then(|images| images.display.clone())
-            .ok_or(Error::InvalidInput(
-                "no displayed frame to capture: render with post enabled first",
-            ))?;
-        Ok(Image {
-            width: size[0],
-            height: size[1],
-            rgba8: display,
-        })
-    }
-    // ---- One view (docs/design-views.md). This layer is not ported to views: it renders
-    // a single view, and the view calls map onto `resize`, `render`, `cut` and `capture`.
-
-    /// The view: a second is refused.
-    pub fn create_view(&mut self, desc: &ViewDesc) -> Result<ViewId, Error> {
-        if self.view.is_some() {
-            return Err(Error::InvalidInput("the ara-gpu layer renders one view"));
-        }
-        self.set_look(desc)?;
-        let view = ViewId(0);
-        self.view = Some(view);
-        Ok(view)
-    }
-    pub fn set_view(&mut self, view: ViewId, desc: &ViewDesc) -> Result<(), Error> {
-        self.check_view(view)?;
-        self.set_look(desc)
-    }
-    pub fn remove_view(&mut self, view: ViewId) -> Result<(), Error> {
-        self.check_view(view)?;
-        self.view = None;
-        Ok(())
-    }
-    pub fn render_view(
-        &mut self,
-        gpu: &mut GpuDevice,
-        view: ViewId,
-        camera: &Camera,
-    ) -> Result<FrameReport, Error> {
-        self.check_view(view)?;
-        self.render(gpu, camera)
-    }
-    pub fn cut_view(&mut self, view: ViewId) {
-        if self.view == Some(view) {
-            self.cut();
-        }
-    }
-    pub fn capture_view(&mut self, view: ViewId) -> Result<Image, Error> {
-        self.check_view(view)?;
-        self.capture()
-    }
-    /// One engine frame: its particle step (this layer has no particles).
-    pub fn tick(&mut self, seconds: f32) -> Result<(), Error> {
-        self.set_particle_step(seconds)
-    }
-    fn check_view(&self, view: ViewId) -> Result<(), Error> {
-        if self.view != Some(view) {
-            return Err(Error::InvalidInput("unknown or removed view"));
-        }
-        Ok(())
-    }
-    /// The view's size, look and render scale. A change of look or scale starts a new
-    /// frame sequence, as a settings change does.
-    fn set_look(&mut self, desc: &ViewDesc) -> Result<(), Error> {
-        desc.look.post.validate()?;
-        if desc.outputs.ids {
-            return Err(Error::InvalidInput("the ara-gpu layer has no id output"));
-        }
-        if desc.view_mode != crate::ViewMode::Lit {
-            self.refuse("create_view", "view_mode");
-        }
-        if !desc.look.post.enabled {
-            self.refuse("create_view", "look.post.enabled");
-        }
-        if desc.look.colour_lut.is_some() {
-            self.refuse("create_view", "look.colour_lut");
-        }
-        self.resize(desc.width, desc.height)?;
-        if desc.look != self.look || desc.render_scale != self.render_scale {
-            self.restart();
-        }
-        self.look = desc.look.clone();
-        self.render_scale = desc.render_scale;
-        Ok(())
     }
 }
 

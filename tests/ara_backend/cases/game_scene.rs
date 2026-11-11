@@ -3,9 +3,9 @@
 //! description is the fixture `support/ara_game_scene.rs`, a copy of the example's.
 use super::*;
 use renderlab::{
-    Camera, LocalShadows, ReflectionSettings, Value, Vec3,
+    Camera, LocalShadows, ReflectionSettings, Value, Vec3, ViewId,
     backend_ara::engine::{Engine, Refusal},
-    engine::{Settings, ViewDesc, ViewLook},
+    engine::{Exposure, Settings, ViewDesc, ViewLook},
 };
 #[path = "../../../support/ara_game_scene.rs"]
 mod scene;
@@ -14,7 +14,7 @@ use scene::{GLOW, Options, STOPS, animate, build, eye, hero, look, settings};
 const SIZE: [u32; 2] = [480, 270];
 
 /// Direct light only, so that one object's shading cannot reach another's pixels: no
-/// radiance cache, reflections, local-light shadows or history.
+/// radiance cache, reflections, local-light shadows, fog or history.
 fn direct() -> Settings {
     Settings {
         global_illumination: false,
@@ -23,7 +23,16 @@ fn direct() -> Settings {
             count: 0,
             ..Default::default()
         },
+        // Its cells keep a history: a second frame would differ from the first.
+        volumetric_fog: None,
         ..settings()
+    }
+}
+/// The scene's view at the test's size, with `look`.
+fn view(look: ViewLook) -> ViewDesc {
+    ViewDesc {
+        look,
+        ..ViewDesc::new(SIZE[0], SIZE[1])
     }
 }
 /// The scene's look without reflections, for `direct`.
@@ -31,13 +40,6 @@ fn direct_look() -> ViewLook {
     ViewLook {
         reflections: ReflectionSettings::off(),
         ..look()
-    }
-}
-/// The one view at the test's size with `look`.
-fn view(look: ViewLook) -> ViewDesc {
-    ViewDesc {
-        look,
-        ..ViewDesc::new(SIZE[0], SIZE[1])
     }
 }
 
@@ -59,7 +61,7 @@ fn first_frames(
     gpu: &mut GpuDevice,
     toon_hero: bool,
 ) -> Result<[Vec<[f32; 3]>; 2]> {
-    engine.create_view(&view(direct_look()))?;
+    let view = engine.create_view(&view(direct_look()))?;
     let built = build(
         &mut engine.on(gpu),
         Options {
@@ -68,19 +70,19 @@ fn first_frames(
         },
     )?;
     let camera = animate(&mut engine.on(gpu), &built, 0)?;
-    engine.render(gpu, &camera)?;
-    let lit = rgb(&engine.images().context("no frame")?.hdr);
+    engine.render_view(gpu, view, &camera)?;
+    let lit = rgb(&engine.images(view).context("no frame")?.hdr);
     engine.set_material_parameters(built.bulb, &[("glow", Value::Vec3([0.; 3]))])?;
-    engine.render(gpu, &camera)?;
-    let dark = rgb(&engine.images().context("no frame")?.hdr);
+    engine.render_view(gpu, view, &camera)?;
+    let dark = rgb(&engine.images(view).context("no frame")?.hdr);
     engine.set_material_parameters(built.bulb, &[("glow", Value::Vec3(GLOW))])?;
     Ok([lit, dark])
 }
 
 /// The example's scene, built by its own `Engine` calls on the backend's engine.
 ///
-/// The engine names what it left out and nothing else: the scene's volumetric fog, its
-/// particle emitters and its decals.
+/// The engine names what it left out and nothing else: the scene's particle emitters
+/// and its decals.
 ///
 /// With direct light only, at the fly path's first pose:
 /// - Every material on its own program, as the scene has them (the props on `game`, the
@@ -107,7 +109,6 @@ fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
     ensure!(
         engine.refusals()
             == [
-                refused("set_settings", "volumetric_fog"),
                 refused("create_emitter", "particle emitters"),
                 refused("set_decals", "decals"),
             ],
@@ -216,16 +217,16 @@ fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
 
     // The scene's own settings, and its animation.
     let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, settings())?;
-    engine.create_view(&view(look()))?;
+    let view = engine.create_view(&view(look()))?;
     let built = build(&mut engine.on(&mut gpu), Options::default())?;
     let mut report = None;
     for frame in 0..6 {
         let camera = animate(&mut engine.on(&mut gpu), &built, frame)?;
-        report = Some(engine.render(&mut gpu, &camera)?);
+        report = Some(engine.render_view(&mut gpu, view, &camera)?);
     }
     // The displayed frame stays on the device for a presenter, at the output's size.
     let output = engine
-        .output()
+        .view_output(view)
         .context("no displayed image on the device")?;
     ensure!(
         output.size == SIZE,
@@ -233,12 +234,12 @@ fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
         output.size
     );
     let report = report.context("no frame")?;
-    let images = engine.images().context("no frame")?;
+    let images = engine.images(view).context("no frame")?;
     ensure!(
         rgb(&images.hdr).iter().flatten().all(|v| v.is_finite()),
         "the full frame holds a value that is not finite"
     );
-    let image = engine.capture()?;
+    let image = engine.capture_view(view)?;
     let lit = image
         .rgba8
         .as_chunks::<4>()
@@ -264,6 +265,118 @@ fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
         report.scene.draws,
         report.scene.triangles,
         file.display()
+    );
+    engine.retire(&mut gpu)?;
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// The views test's size: smaller, since it renders the scene sixteen times.
+const VIEW_SIZE: [u32; 2] = [240, 135];
+
+/// The second view's camera: across the scene from the first's, looking back.
+fn across_camera() -> Result<Camera> {
+    Ok(Camera::look_at(
+        Vec3::new(4., 3., 12.),
+        Vec3::new(0., 1., 2.),
+        Vec3::Y,
+        50f32.to_radians(),
+        0.05,
+        500.,
+    )?)
+}
+
+/// The game scene seen by two views at once, from the fly path and from across the
+/// scene, with the radiance cache, reconstruction and fog on, rendered in turn for four
+/// frames: each view's last frame is the same bytes as a single-view engine that
+/// renders that camera alone. Views share the scene and nothing of each other's frames.
+/// Then a view resized by `set_view` draws at its new size, and a removed view is gone.
+#[test]
+fn two_views_each_draw_what_one_view_alone_draws() -> Result<()> {
+    let path = root("engine-views");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let desc = ViewDesc {
+        look: ViewLook {
+            exposure: Exposure::Manual {
+                stops: scene::STOPS,
+            },
+            ..look()
+        },
+        ..ViewDesc::new(VIEW_SIZE[0], VIEW_SIZE[1])
+    };
+    let second = across_camera()?;
+    // Four frames of the scene with one view for each camera `which` names (0: the fly
+    // path, 1: across), and each view's last exposed HDR.
+    let mut run = |which: &[usize]| -> Result<Vec<Vec<u8>>> {
+        let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, Settings::default())?;
+        let views: Vec<ViewId> = which
+            .iter()
+            .map(|_| engine.create_view(&desc))
+            .collect::<Result<_, _>>()?;
+        let built = build(&mut engine.on(&mut gpu), Options::default())?;
+        for frame in 0..4 {
+            let path_camera = animate(&mut engine.on(&mut gpu), &built, frame)?;
+            for (view, camera) in views.iter().zip(which) {
+                let camera = if *camera == 0 { path_camera } else { second };
+                engine.render_view(&mut gpu, *view, &camera)?;
+            }
+        }
+        let images = views
+            .iter()
+            .map(|view| Ok(engine.images(*view).context("no frame")?.hdr.clone()))
+            .collect::<Result<_>>()?;
+        engine.retire(&mut gpu)?;
+        Ok(images)
+    };
+    let both = run(&[0, 1])?;
+    let [alone_path, alone_across] = [run(&[0])?, run(&[1])?];
+    // Half-float values that differ, of all of them.
+    let differing =
+        |a: &[u8], b: &[u8]| a.chunks(2).zip(b.chunks(2)).filter(|(x, y)| x != y).count();
+    ensure!(
+        both[0] == alone_path[0],
+        "the fly-path view differs from the same camera alone in {} of {} values",
+        differing(&both[0], &alone_path[0]),
+        both[0].len() / 2
+    );
+    ensure!(
+        both[1] == alone_across[0],
+        "the view across the scene differs from the same camera alone in {} of {} values",
+        differing(&both[1], &alone_across[0]),
+        both[1].len() / 2
+    );
+    ensure!(both[0] != both[1], "the two cameras drew the same image");
+
+    // A resized view draws at its new size; a removed one is gone.
+    let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, Settings::default())?;
+    let view = engine.create_view(&desc)?;
+    let built = build(&mut engine.on(&mut gpu), Options::default())?;
+    let camera = animate(&mut engine.on(&mut gpu), &built, 0)?;
+    engine.render_view(&mut gpu, view, &camera)?;
+    engine.set_view(
+        view,
+        &ViewDesc {
+            width: 160,
+            height: 90,
+            ..desc.clone()
+        },
+    )?;
+    engine.render_view(&mut gpu, view, &camera)?;
+    let output = engine.view_output(view).context("no output")?;
+    ensure!(
+        output.size == [160, 90],
+        "resized view drew at {:?}",
+        output.size
+    );
+    ensure!(
+        engine.capture_view(view)?.rgba8.len() == 160 * 90 * 4,
+        "the resized capture has the old size"
+    );
+    engine.remove_view(view)?;
+    ensure!(
+        engine.render_view(&mut gpu, view, &camera).is_err() && engine.views().count() == 0,
+        "a removed view still renders"
     );
     engine.retire(&mut gpu)?;
     gpu.collect()?;

@@ -128,18 +128,16 @@ fn a_posed_skinned_mesh_draws_as_its_posed_geometry() -> Result<()> {
         volumetric_fog: None,
         ..Default::default()
     };
-    // The one view: no reflections, a fixed exposure.
-    let view = ViewDesc {
-        look: ViewLook {
-            reflections: ReflectionSettings::off(),
-            exposure: Exposure::Manual { stops: -11. },
-            ..Default::default()
-        },
-        ..ViewDesc::new(SIZE[0], SIZE[1])
-    };
     let mut frames = |skinned: bool, history: bool, poses: u32| -> Result<Vec<f32>> {
         let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, settings(history))?;
-        engine.create_view(&view)?;
+        let view = engine.create_view(&ViewDesc {
+            look: ViewLook {
+                exposure: Exposure::Manual { stops: -11. },
+                reflections: ReflectionSettings::off(),
+                ..Default::default()
+            },
+            ..ViewDesc::new(SIZE[0], SIZE[1])
+        })?;
         engine.set_sky(Sky::Uniform([1000., 1200., 1500.]))?;
         engine.set_sun(Some(Sun {
             travel: Vec3::new(0.3, -1., 0.5).normalize(),
@@ -185,10 +183,10 @@ fn a_posed_skinned_mesh_draws_as_its_posed_geometry() -> Result<()> {
             if skinned {
                 engine.set_joint_palette(mesh, &palette(pose as f32))?;
             }
-            engine.render(&mut gpu, &camera)?;
+            engine.render_view(&mut gpu, view, &camera)?;
         }
         let hdr: Vec<f32> = engine
-            .images()
+            .images(view)
             .context("no frame")?
             .hdr
             .as_chunks::<2>()

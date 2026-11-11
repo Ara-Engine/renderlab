@@ -106,6 +106,7 @@ fn named_meshes_stay_on_the_gpu_and_draw_the_same_frames() -> Result<()> {
                     programs: None,
                     sky_map: None,
                     skins: None,
+                    colour_lut: None,
                 },
             );
             match frame {
@@ -167,6 +168,7 @@ fn named_meshes_stay_on_the_gpu_and_draw_the_same_frames() -> Result<()> {
                 programs: None,
                 sky_map: None,
                 skins: None,
+                colour_lut: None,
             },
         )
     };
@@ -289,6 +291,7 @@ fn kept_atmosphere_tables_give_every_frame_what_fresh_tables_give() -> Result<()
             programs: None,
             sky_map: None,
             skins: None,
+            colour_lut: None,
         };
         let kept = frames.render(&mut gpu, &cache, &scene)?.hdr;
         let fresh = render(&mut gpu, &cache, &scene)?.hdr;
@@ -421,6 +424,7 @@ fn one_draw_placed_many_times_is_the_frame_of_as_many_objects() -> Result<()> {
                     programs: None,
                     sky_map: None,
                     skins: None,
+                    colour_lut: None,
                 },
             )
             .map(|images| images.hdr)
@@ -504,6 +508,7 @@ fn one_draw_placed_many_times_is_the_frame_of_as_many_objects() -> Result<()> {
                     programs: None,
                     sky_map: None,
                     skins: None,
+                    colour_lut: None,
                 },
             );
             match image {

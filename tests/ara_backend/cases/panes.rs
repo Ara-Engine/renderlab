@@ -136,6 +136,7 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
                 programs: None,
                 sky_map: None,
                 skins: None,
+                colour_lut: None,
             },
         )?;
         Ok(images
@@ -479,6 +480,7 @@ fn a_pane_carried_away_relights_the_cells_it_shaded() -> Result<()> {
                     programs: None,
                     sky_map: None,
                     skins: None,
+                    colour_lut: None,
                 },
             );
             match (image, &mut cards) {

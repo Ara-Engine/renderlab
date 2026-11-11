@@ -117,6 +117,7 @@ impl Scene {
             programs: None,
             sky_map: None,
             skins: None,
+            colour_lut: None,
         }
     }
     fn objects(&self) -> [ForwardObject<'_>; 2] {

@@ -1,6 +1,6 @@
 // AT1: atmosphere LUTs, camera volume and raster sky (docs/m7-at1.md).
 #[path = "atmosphere_gpu.rs"]
-mod atmosphere_gpu;
+pub(crate) mod atmosphere_gpu;
 #[path = "environment_gpu.rs"]
 mod environment_gpu;
 #[path = "light_cluster_gpu.rs"]
