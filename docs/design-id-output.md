@@ -30,6 +30,7 @@ pub enum Event { /* existing */ Ids { request: IdRequest, rect: IdRect, ids: Vec
 pub struct IdPixel { pub opaque: u32, pub front: u32 }
 ```
 
+- **Shared and typed calls:** `set_object_id`, `request_ids` and the `Ids` event are on the shared `Scene` trait (both GPU layers); `view_ids` returns a layer-typed handle and lives on each layer's engine only (see design-views.md).
 - **Two ids per pixel.** `opaque` is the nearest opaque surface. `front` is the frontmost surface of any kind that is not fully clear: glass, a cut-out leaf, a blended decal's host surface; particles are excluded (they are effects, not objects, in the first version). A click on glass therefore has both the glass and the thing behind it; the editor chooses (Unity's rule is "front", with a modifier for "through").
 - **Ids do not shimmer under temporal jitter.** They come from the history's settled surface where temporal reconstruction has one (the surface covering most of the pixel), and from this frame's hit only where the history restarted. A still camera's ID image is identical across 16 jittered frames; at a moving edge a pixel names the surface covering more than half of it.
 - **Both paths:** the non-RT visibility buffer and the RT traced primaries write the same hit record (placement + 1, primitive); the ID pass maps placement and instance slot to the embedder's id through a per-placement table rewritten when ids or batches change.

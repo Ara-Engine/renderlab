@@ -36,11 +36,23 @@ impl Engine {
 - Scene calls (`create_mesh`, `spawn`, `set_sun`, `set_settings`, ...) stay on `Engine` and apply to every view.
 - A view that is not rendered costs nothing per frame. Rendering only visible views, and the Scene view at a lower `render_scale` or only on change, is the embedder's choice through these calls.
 
+## Which calls are shared by both GPU layers (decided 2026-11-11, with the ara-gpu port's author)
+The Mac gets Renderlab only through the ara-gpu port, so the bridge must be able to drive views and ids without wgpu types.
+- **On the shared `Scene` trait** (wgpu `Engine` and the port both implement it; no GPU-layer types): `create_view`, `set_view`, `remove_view`, `render_view` (into the view's own output), `cut_view`, `capture_view` (CPU `Image`), and for ids `set_object_id`, `request_ids` and the `poll` event that carries them.
+- **On each layer's engine only** (typed by that layer): `view_output` and `view_ids` (a `wgpu::Texture` on the wgpu engine; the port's own image or export-ring handle on the port), and `render_view_to` (renders into a caller's `wgpu::Texture`). The bridge's image handoff already differs per layer, so it calls these on the concrete engine, not through the trait.
+
+## The GI planner: per engine and per view
+`gi_cache::Planner` holds both scene state and camera state today, and both layers hold it (the port bundles it with the table in its `gi_cache::Cache`). It splits in two:
+- **`gi_cache::Planner` (per engine, with the table and cells):** placement bounds and poses; the environment digest and its streak, catch-up and phase; the light digest, light streak, relight catch-up and phase; the bounce digest and its busy count; the frame stamp cells are marked seen with; the pending clear and frames since it; the update parity. Cell updates, relighting and clearing run once per engine frame, whichever view triggers them.
+- **`gi_cache::ViewPlan` (per view, owned by the view):** the idle key and idle frames, the view key and view frames, and the claimed pixel region (`scene_pixels`). Probing, claims and the gather run per view.
+- **Planning a frame:** `planner.begin(&mut view_plan, &inputs)` and `finish` as today, with the view's state passed in. A view is idle when its own keys and the engine's scene and lighting keys are unchanged; the engine's per-frame cell work runs if any view rendered this frame is not idle.
+- Both layers hold one `Planner` per engine and one `ViewPlan` per view, the same way.
+
 ## What a view owns, and what stays shared
 | Owned by a view | Shared by the engine |
 |---|---|
 | Output, depth, MSAA, visibility-buffer and hit-record targets, transparency targets | Meshes, textures, programs, materials, BVHs and acceleration structures |
-| Temporal reconstruction's histories, restart zones and upscale state | The GI world radiance cache (cells); its per-pixel probe and idle key are per view |
+| Temporal reconstruction's histories, restart zones and upscale state | The GI world radiance cache (table, cells and `gi_cache::Planner`); `gi_cache::ViewPlan`, the per-pixel probe and the claimed region are per view |
 | Post histories (exposure, motion) | The shadow map's page contents; page requests and clipmap placement are per view |
 | Atmosphere temporal volumes (aerial, fog) | Environment maps, LUTs, the sky |
 | Reflection film accumulation | Lights, sun, decals, emitters and particle state |

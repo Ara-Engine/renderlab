@@ -18,7 +18,8 @@ Islam's target for this and U-IDS together: done by about 17:00 UTC 2026-11-12. 
 1. Split `Renderer` into shared scene and cache state and a `View` that owns everything keyed on the camera or the output: targets, temporal reconstruction histories and restart zones, upscale state, post histories, atmosphere temporal volumes, reflection film accumulation, the shadow clipmap placement and page requests, the GI per-pixel probe and idle key, transparency targets, frame records. Shared: meshes, textures, programs, materials, BVHs and acceleration structures, the GI world cache, shadow page contents, lights, environment, pipelines.
 2. The `Engine` API in docs/design-views.md: `create_view`, `set_view`, `remove_view`, `render_view`, `render_view_to`, `view_output`, `capture_view`, `cut_view`. Update this repository's examples and tests to it.
 3. A view that is not rendered costs nothing. Two views rendered in one frame share the scene work that does not depend on the camera (skinning, particle simulation, GI cell updates) once per frame, not once per view, where that is simple; say what you did.
-4. The shadow map: per-view placement and page requests over a shared page store if it fits; otherwise per-view maps, with the memory stated.
+4. Follow docs/design-views.md's two settled points: which calls are on the shared `Scene` trait and which are wgpu-typed on `Engine` only, and the GI planner split (`gi_cache::Planner` per engine, `gi_cache::ViewPlan` per view). The ara-gpu port holds both the same way; flag any deviation.
+5. The shadow map: per-view placement and page requests over a shared page store if it fits; otherwise per-view maps, with the memory stated.
 
 ## Done
 - Two views of one scene from two cameras: each view's still frame byte-identical to a single-view engine rendering that camera alone, both paths (non-RT on this machine; RT picture checks also run on the PC's RTX: ask root).
