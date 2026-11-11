@@ -48,7 +48,7 @@ pub(crate) const RAY_ITEMS: u32 = 1 << 21;
 const PROFILE_STAMPS: u32 = 2 * (10 + 2 * CLAIM_ROUNDS);
 /// Gather workgroups (one cell each) and light workgroups (64 cells), fixed grids like the
 /// others.
-const GATHER_GROUPS: u32 = 4096;
+pub(crate) const GATHER_GROUPS: u32 = 4096;
 /// The default per-frame gather budget (`IndirectSettings::gather_cells` 0), in cells, on both
 /// paths. G2b sized per-path budgets to about 4 ms of a cut frame's gathers (0.13 us a cell with hardware rays and
 /// 0.4 us with software rays on the quarry; docs/m7-g2b.md). Moving frames gather fewer
@@ -66,10 +66,10 @@ const CLAIM_CELLS_SOFTWARE: u32 = 20480;
 /// the cells cover the view within the claim budget, and the finer cells that follow fall back
 /// to them until they exist (G2b).
 const COARSE_CUT_FRAMES: u32 = 4;
-const LIGHT_GROUPS: u32 = 1024;
+pub(crate) const LIGHT_GROUPS: u32 = 1024;
 /// The cell-space filter's fixed grid (G3): nine items (a changed cell and its eight
 /// neighbours) per cell shading queue entry.
-const FILTER_GROUPS: u32 = 1024;
+pub(crate) const FILTER_GROUPS: u32 = 1024;
 /// Unfiltered hot words 1-22 per slot, the filter's sources (shaders/gi_cache.wgsl gi_raw).
 const RAW_WORDS: u64 = 22;
 /// Slot groups a lighting, environment or caster change spreads relighting over while it
@@ -1364,7 +1364,7 @@ impl GiState {
 
 /// The kernel module: built-in prelude, primary ray helpers, cell definitions, one ray
 /// source and the kernels.
-pub(super) fn kernel_source(software: bool, directions: u32) -> String {
+pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
     let enables = if software {
         "enable wgpu_binding_array;\n"
     } else {

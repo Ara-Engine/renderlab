@@ -49,7 +49,7 @@ fn glass_samples() -> u32 {
 }
 
 /// One `// ---- NAME ----` section of the shader.
-fn section(name: &str) -> &'static str {
+pub(crate) fn section(name: &str) -> &'static str {
     let start = SHADER.find(&format!("// ---- {name} ----")).unwrap();
     let end = SHADER.find(&format!("// ---- end {name} ----")).unwrap();
     &SHADER[start..end]
@@ -78,7 +78,7 @@ const MAP_SHADOW: &str = "fn hard_shadow(light:Light, receiver:Receiver, l:vec3<
 /// A transparent material's module: its program composed on `head` (the hardware prelude
 /// on RT renderers; otherwise the prelude with the map's sun visibility), then the pass's
 /// entry with the program's composite.
-fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String {
+pub(crate) fn glass_source(head: &str, rt: bool, program: &str, parameters: bool) -> String {
     let head = if rt {
         head.to_owned()
     } else {
@@ -175,7 +175,8 @@ fn particle_sources(prelude: &str) -> [String; 2] {
     );
     ["TP_PARTICLES_SIM", "TP_PARTICLES_DRAW"].map(|s| format!("{common}{}", section(s)))
 }
-fn hit_depth_source() -> String {
+/// Share the original hit-to-view-distance composition across native backends.
+pub(crate) fn hit_depth_source() -> String {
     format!(
         "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}{}",
         crate::TRACED_DRAWS,
