@@ -220,6 +220,59 @@ fn array_length_of_a_binding_array_element_is_that_elements() {
     );
 }
 
+const LAST_WORD_SHADER: &str = "enable wgpu_binding_array;
+struct Words { data: array<u32> };
+@group(0) @binding(0) var<storage,read> reads: binding_array<Words,4>;
+@group(0) @binding(1) var<storage,read_write> output: array<u32>;
+@compute @workgroup_size(4)
+fn probe(@builtin(local_invocation_index) i: u32) {
+    // Each element's last index, by a table the compiler cannot fold with the binding.
+    var last = array<u32,4>(2u, 12u, 5u, 21u);
+    output[i * 2u] = reads[i].data[last[i]];
+    output[i * 2u + 1u] = reads[i].data[0];
+}
+";
+
+/// naga's own bounds check on `heap[i].data[j]` in a checked module: it restricts `j` to the
+/// array's length, and takes that length the same undecorated way as `arrayLength` does. Four
+/// buffers of 3, 13, 6 and 22 words, each with its last word set; one invocation each reads
+/// its own element's last word. A driver that answers with one element's length clamps the
+/// longer elements' index to 2 and reads zero. This decides whether modules composed from
+/// program text may compile checked on such a driver.
+#[test]
+#[ignore = "GPU; cargo test -p renderlab --lib bounds_check_of_a_binding_array_element -- --ignored --nocapture"]
+fn bounds_check_of_a_binding_array_element_uses_that_elements_length() {
+    const LENGTHS: [u32; 4] = [3, 13, 6, 22];
+    let reads: Vec<Vec<u32>> = LENGTHS
+        .iter()
+        .enumerate()
+        .map(|(i, &n)| {
+            let mut words = vec![0u32; n as usize];
+            words[0] = 100 + i as u32;
+            words[n as usize - 1] = 200 + i as u32;
+            words
+        })
+        .collect();
+    let pairs = run_probe(LAST_WORD_SHADER, &reads);
+    let (last, first): (Vec<u32>, Vec<u32>) = pairs
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|p| (p[0], p[1]))
+        .unzip();
+    eprintln!("[array-length] last words {last:?}, first words {first:?}, lengths {LENGTHS:?}");
+    assert_eq!(
+        first,
+        [100, 101, 102, 103],
+        "an invocation read another element's data"
+    );
+    assert_eq!(
+        last,
+        [200, 201, 202, 203],
+        "a bounds check clamped an index by another element's length on this device"
+    );
+}
+
 /// The renderer's replacement, through its own shader text and packer: one workgroup whose
 /// four invocations read four draws that differ in every fact (static and skinned, with and
 /// without adjacency, different triangle counts). Each must get its own draw's word.
