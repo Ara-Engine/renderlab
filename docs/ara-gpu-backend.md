@@ -1442,3 +1442,20 @@ closed on the way:
 None of this is a replay. The next step is the cache's CPU side as a shared function
 (`prepare_gi`: the table and work layouts, the frame record, the per-frame plan), then
 stage replays for these nine against CPU references.
+
+## First Vulkan run (Radeon 760M, RADV, validation on)
+
+At 65119b7 the Linux gate ran the suite on Vulkan for the first time: 38 passed and
+12 failed under Khronos and synchronization validation; with validation off, 48
+passed and the forward frame matched the wgpu reference within one display level.
+What the twelve were, and where each stands:
+
+| Failures | Cause | State |
+|---:|---|---|
+| 9, and `ara_frame --backend ara` | The per-vertex fragment stages declare `FragmentBarycentricKHR`; ara-gpu never enabled `VK_KHR_fragment_shader_barycentric`. | Fixed in ara-gpu (Ara PR #34), which this branch now pins. The cache refuses those families where `DeviceInfo::fragment_barycentrics` is false. Not rerun. |
+| 2 | The traced fresh module carried the camera trace text, whose vertex-return types put `SPV_KHR_ray_tracing_position_fetch` in its SPIR-V. | Fixed here: it takes the portable trace. All 94 stages the suite emits are scanned; none declares the extension. Not rerun. |
+| 1 | Rendering to layer 0 of an array attached the image's whole view, so layer 1 needed the attachment layout too (coloured transmission layers). | Fixed in ara-gpu (same PR), with a regression test that passes on Metal. Not rerun on Vulkan. |
+| 2 wrong results, validation or not | `particle_depth_sort` differs at 2,048 slots (1 and 9 are exact); `primary_geometry_check_retry_queue` differs at words 30 and 39 (GPU 0, CPU 1). | Not diagnosed. Both kernels are unchanged Renderlab WGSL; whether wgpu gives the right answer for them on the same driver is not known yet, which would separate the adapter from the driver. |
+
+The two wrong results are the only open correctness question on Vulkan. Both passes
+replay exactly on Metal.

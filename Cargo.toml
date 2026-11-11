@@ -16,8 +16,8 @@ resolver = "3"
 members = ["viewer", "crates/asset", "crates/cook"]
 
 [dependencies]
-# Ara main at merged PR #5 (no ara-gpu change on main since); disabled in default wgpu builds.
-ara-gpu = { git = "https://github.com/Ara-Engine/ara", rev = "b822fb343708e31bfe388d3e1c411c2a449f6088", optional = true }
+# Ara PR #34 head (fragment barycentrics and array-layer views on Vulkan) until it merges; disabled in default wgpu builds.
+ara-gpu = { git = "https://github.com/Ara-Engine/ara", rev = "f37502ebe342a03ba010eda247dec78026f1b545", optional = true }
 anyhow = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 half = { version = "2.7", optional = true }
@@ -74,7 +74,7 @@ opt-level = 2
 opt-level = 2
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ara-window = { package = "ara-sdl3-src", git = "https://github.com/Ara-Engine/ara", rev = "b822fb343708e31bfe388d3e1c411c2a449f6088", optional = true }
+ara-window = { package = "ara-sdl3-src", git = "https://github.com/Ara-Engine/ara", rev = "f37502ebe342a03ba010eda247dec78026f1b545", optional = true }
 
 [[example]]
 name = "ara_post"

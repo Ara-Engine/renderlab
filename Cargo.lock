@@ -57,7 +57,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "ara-diag"
 version = "0.0.1-alpha"
-source = "git+https://github.com/Ara-Engine/ara?rev=b822fb343708e31bfe388d3e1c411c2a449f6088#b822fb343708e31bfe388d3e1c411c2a449f6088"
+source = "git+https://github.com/Ara-Engine/ara?rev=f37502ebe342a03ba010eda247dec78026f1b545#f37502ebe342a03ba010eda247dec78026f1b545"
 dependencies = [
  "serde",
  "serde_json",
@@ -66,7 +66,7 @@ dependencies = [
 [[package]]
 name = "ara-gpu"
 version = "0.0.1-alpha"
-source = "git+https://github.com/Ara-Engine/ara?rev=b822fb343708e31bfe388d3e1c411c2a449f6088#b822fb343708e31bfe388d3e1c411c2a449f6088"
+source = "git+https://github.com/Ara-Engine/ara?rev=f37502ebe342a03ba010eda247dec78026f1b545#f37502ebe342a03ba010eda247dec78026f1b545"
 dependencies = [
  "anyhow",
  "ara-diag",
@@ -92,7 +92,7 @@ dependencies = [
 [[package]]
 name = "ara-json"
 version = "0.0.1-alpha"
-source = "git+https://github.com/Ara-Engine/ara?rev=b822fb343708e31bfe388d3e1c411c2a449f6088#b822fb343708e31bfe388d3e1c411c2a449f6088"
+source = "git+https://github.com/Ara-Engine/ara?rev=f37502ebe342a03ba010eda247dec78026f1b545#f37502ebe342a03ba010eda247dec78026f1b545"
 dependencies = [
  "ryu",
  "serde",
@@ -102,7 +102,7 @@ dependencies = [
 [[package]]
 name = "ara-sdl3-src"
 version = "0.0.1-alpha"
-source = "git+https://github.com/Ara-Engine/ara?rev=b822fb343708e31bfe388d3e1c411c2a449f6088#b822fb343708e31bfe388d3e1c411c2a449f6088"
+source = "git+https://github.com/Ara-Engine/ara?rev=f37502ebe342a03ba010eda247dec78026f1b545#f37502ebe342a03ba010eda247dec78026f1b545"
 dependencies = [
  "cc",
  "sdl3-sys",

@@ -68,6 +68,12 @@ impl ShaderCache {
         wgsl: &str,
         state: RenderState,
     ) -> Result<Pipeline> {
+        // The per-vertex families' fragment stages declare barycentrics, which Vulkan
+        // has only where the device enabled the extension.
+        ensure!(
+            pass.metal_version() != (4, 0) || gpu.info().fragment_barycentrics,
+            "{pass:?} reads per-vertex attributes, which this device does not support"
+        );
         let source = format!(
             "{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}",
             wgsl,
