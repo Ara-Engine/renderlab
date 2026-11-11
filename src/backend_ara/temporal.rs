@@ -16,9 +16,7 @@ use super::{
 };
 use crate::renderer::primary_ray_gpu::temporal_reconstruction::{PlanInputs, Planned, Planner};
 use anyhow::{Result, ensure};
-use ara_gpu::{
-    Access, Buffer, Device, GpuDevice, Resource, commands::Recorder, descriptors::Format,
-};
+use ara_gpu::{Access, Buffer, GpuDevice, Resource, commands::Recorder, descriptors::Format};
 
 /// `temporal_reconstruction::resolve_source` on the standard prelude: the non-RT
 /// shading head, the object-motion source and the resolve itself. No ray queries.
@@ -205,7 +203,7 @@ impl History {
     /// Retire after every list that names the history has been submitted.
     pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
         for image in self.colour.into_iter().chain(self.anchor).chain(self.layer) {
-            gpu.retire(Resource::Image(image.image))?;
+            super::image::release(gpu, image.image)?;
         }
         Ok(())
     }

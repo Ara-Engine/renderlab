@@ -9,9 +9,7 @@ use super::{
     shader::{InputKey, Pass},
 };
 use anyhow::{Context, Result, ensure};
-use ara_gpu::{
-    Access, Device, GpuDevice, Image, Resource, commands::Recorder, descriptors::Format,
-};
+use ara_gpu::{Access, GpuDevice, Image, Resource, commands::Recorder, descriptors::Format};
 /// Persistent source-size record, mip views and the two original reduction kernels.
 pub struct Hzb {
     size: [u32; 2],
@@ -162,7 +160,7 @@ impl Hzb {
     pub fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
         graph.forget(Resource::Image(self.parent.image));
         graph.forget(Resource::Buffer(self.params.buffer));
-        gpu.retire(Resource::Image(self.parent.image))?;
+        super::image::release(gpu, self.parent.image)?;
         self.params.retire(gpu)
     }
 }

@@ -6,7 +6,7 @@ use super::{
     shader::Pass,
 };
 use anyhow::Result;
-use ara_gpu::{Device, GpuDevice, Resource, commands::Recorder, descriptors::Format};
+use ara_gpu::{GpuDevice, commands::Recorder, descriptors::Format};
 /// Reusable down/up resources; record after motion/DOF and before tone.
 pub struct Bloom {
     down: Vec<Texture>,
@@ -88,7 +88,7 @@ impl Bloom {
     /// Retire all levels after their recorded lists have been submitted.
     pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
         for t in self.down.into_iter().chain(self.up) {
-            gpu.retire(Resource::Image(t.image))?;
+            super::image::release(gpu, t.image)?;
         }
         Ok(())
     }

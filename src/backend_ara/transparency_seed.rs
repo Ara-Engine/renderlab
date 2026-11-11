@@ -8,7 +8,7 @@ use super::{
 };
 use anyhow::{Result, ensure};
 use ara_gpu::{
-    Access, Device, GpuDevice, Image, Pipeline, Resource,
+    Access, GpuDevice, Image, Pipeline, Resource,
     commands::{Attachment, Command, Recorder},
     cooked::RenderState,
     descriptors::{Format, ImageDesc},
@@ -86,7 +86,7 @@ impl MsaaColor {
     /// Retire after submitting all seed/draw/resolve uses.
     pub fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
         graph.forget(Resource::Image(self.image));
-        Ok(gpu.retire(Resource::Image(self.image))?)
+        super::image::release(gpu, self.image)
     }
 }
 /// Persistent original TP_AA_SEED fullscreen pipeline.

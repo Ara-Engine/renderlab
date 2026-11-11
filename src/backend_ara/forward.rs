@@ -437,13 +437,13 @@ impl Panes {
             pane.geometry.retire(gpu, graph)?;
             pane.material.retire(gpu)?;
             pane.slot.retire(gpu)?;
-            gpu.retire(Resource::Image(pane.behind.image))?;
+            super::image::release(gpu, pane.behind.image)?;
         }
         for image in [self.depth, self.reflected]
             .into_iter()
             .chain(self.defaults)
         {
-            gpu.retire(Resource::Image(image.image))?;
+            super::image::release(gpu, image.image)?;
         }
         Ok(())
     }
@@ -663,7 +663,7 @@ impl SkyTables {
         .chain(cubes.into_iter().flatten())
         .chain(volumes.into_iter().flatten())
         {
-            gpu.retire(Resource::Image(image.image))?;
+            super::image::release(gpu, image.image)?;
         }
         Ok(())
     }
@@ -758,10 +758,13 @@ struct Kept {
     sky: Option<SkyTables>,
     /// The Interactive trace's repair queue: a header, then room for every pixel.
     repairs: Option<StorageBuffer>,
+    /// The 2D targets the last frame made and released, for the next frame to take.
+    targets: super::image::pool::Pool,
 }
 /// A sequence of frames: what each hands to the next, and what stays on the GPU (the
 /// radiance cache, the reconstruction's history, named meshes with their bottom-level
-/// structures, the atmosphere's tables). Targets and records are still made per frame.
+/// structures, the atmosphere's tables), and the 2D targets each frame takes and gives
+/// back (`image::pool`). Records and buffers are still made per frame.
 /// Call [`Frames::retire`] when the sequence ends.
 #[derive(Default)]
 pub struct Frames {
@@ -810,7 +813,7 @@ impl Frames {
         if let Some(repairs) = self.kept.repairs {
             repairs.retire(gpu)?;
         }
-        Ok(())
+        self.kept.targets.retire(gpu)
     }
     /// The last reconstructed frame's plan (`History::planned`), for telemetry.
     pub fn reconstruction_plan(&self) -> Option<(bool, u32)> {
@@ -827,7 +830,12 @@ impl Frames {
         cache: &ShaderCache,
         scene: &ForwardScene<'_>,
     ) -> Result<ForwardImages> {
-        match frame(&self.carried, &mut self.kept, self.blind, gpu, cache, scene) {
+        let mut targets = std::mem::take(&mut self.kept.targets);
+        let result = super::image::pool::active(&mut targets, gpu, |gpu| {
+            frame(&self.carried, &mut self.kept, self.blind, gpu, cache, scene)
+        });
+        self.kept.targets = targets;
+        match result {
             Ok((images, carried)) => {
                 self.carried = carried;
                 Ok(images)
@@ -904,6 +912,8 @@ fn frame(
         meshes: resident,
         sky: tables,
         repairs: kept_repairs,
+        // Taken out and made active for this frame by `Frames::render`.
+        targets: _,
     } = kept;
     let started = std::time::Instant::now();
     let mut times = FrameTimes::default();
@@ -1297,7 +1307,7 @@ fn frame(
         if volumes_made {
             if let Some((_, volume, scatter)) = kept.volumes.take() {
                 for image in [volume, scatter] {
-                    gpu.retire(Resource::Image(image.image))?;
+                    super::image::release(gpu, image.image)?;
                 }
             }
             kept.volumes = Some((
@@ -3370,7 +3380,7 @@ fn frame(
             material.retire(gpu)?;
         }
         for image in [base, depth] {
-            gpu.retire(Resource::Image(image.image))?;
+            super::image::release(gpu, image.image)?;
         }
     }
     if let Some(lists) = program_lists {
@@ -3440,7 +3450,7 @@ fn frame(
         .chain([lists, output])
         .chain(upscaled)
     {
-        gpu.retire(Resource::Image(image.image))?;
+        super::image::release(gpu, image.image)?;
     }
     for buffer in staging
         .into_iter()

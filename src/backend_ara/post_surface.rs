@@ -4,7 +4,7 @@ use super::{
 };
 use anyhow::{Result, ensure};
 use ara_gpu::{
-    Access, Device, GpuDevice, Image, Pipeline, Resource, RootConstants,
+    Access, GpuDevice, Image, Pipeline, Resource, RootConstants,
     commands::{Command, Recorder},
     cooked::RenderState,
     descriptors::{Format, ImageDesc},
@@ -44,7 +44,7 @@ impl RasterDepth {
                 slot: slot.index,
             }),
             Err(e) => {
-                gpu.retire(Resource::Image(image))?;
+                super::image::release(gpu, image)?;
                 Err(e.into())
             }
         }
@@ -67,7 +67,7 @@ impl RasterDepth {
     /// Retire after all submitted raster/auxiliary uses and remove its scheduled state.
     pub fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
         graph.forget(Resource::Image(self.image));
-        Ok(gpu.retire(Resource::Image(self.image))?)
+        super::image::release(gpu, self.image)
     }
 }
 /// Exact 272-byte current/previous-camera record used by the original kernel.

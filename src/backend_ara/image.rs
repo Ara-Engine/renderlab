@@ -1,4 +1,6 @@
 //! Typed image identities and publication; the caller owns device retirement.
+//! Release images with [`release`], which hands a sequence's frame targets back to
+//! its pool ([`pool`]) and retires everything else.
 use super::graph::{ResourceUse, Subresources};
 use anyhow::{Result, ensure};
 use ara_gpu::{
@@ -482,6 +484,10 @@ impl Texture {
             size.into_iter().all(|n| n > 0),
             "image extent must be nonzero"
         );
+        let key = format!("{size:?} {format:?} {storage} {attachment} {shape:?}");
+        if let Some(kept) = pool::take(&key) {
+            return Ok(kept);
+        }
         let image = gpu.create_texture(&TextureDesc {
             image: ImageDesc {
                 size,
@@ -505,35 +511,150 @@ impl Texture {
             ))
         })();
         match published {
-            Ok((sampled, storage)) => Ok(Self {
-                image,
-                size,
-                format,
-                shape,
-                allocation: Subresources {
-                    mips: shape.mip_levels,
-                    layers: shape.layers,
-                },
-                view: ImageViewDesc {
-                    dimension: if shape.dimension == ara_gpu::texture::TextureDimension::D3 {
-                        ViewDimension::D3
-                    } else if shape.layers > 1 {
-                        ViewDimension::D2Array
-                    } else {
-                        ViewDimension::D2
+            Ok((sampled, storage)) => Ok(pool::lent(
+                key,
+                Self {
+                    image,
+                    size,
+                    format,
+                    shape,
+                    allocation: Subresources {
+                        mips: shape.mip_levels,
+                        layers: shape.layers,
                     },
-                    base_mip: 0,
-                    mip_count: shape.mip_levels,
-                    base_layer: 0,
-                    layer_count: shape.layers,
+                    view: ImageViewDesc {
+                        dimension: if shape.dimension == ara_gpu::texture::TextureDimension::D3 {
+                            ViewDimension::D3
+                        } else if shape.layers > 1 {
+                            ViewDimension::D2Array
+                        } else {
+                            ViewDimension::D2
+                        },
+                        base_mip: 0,
+                        mip_count: shape.mip_levels,
+                        base_layer: 0,
+                        layer_count: shape.layers,
+                    },
+                    sampled,
+                    storage,
                 },
-                sampled,
-                storage,
-            }),
+            )),
             Err(e) => {
                 gpu.retire(ara_gpu::Resource::Image(image))?;
                 Err(e)
             }
         }
+    }
+}
+
+/// Releases `image` after its last recorded use: a frame target of a sequence goes back
+/// to the sequence's pool for its next frame ([`pool`]); any other image is retired.
+pub(crate) fn release(gpu: &mut GpuDevice, image: Image) -> Result<()> {
+    if !pool::give_back(image) {
+        gpu.retire(ara_gpu::Resource::Image(image))?;
+    }
+    Ok(())
+}
+
+/// The 2D targets a frame sequence keeps between its frames (`forward::Frames`).
+///
+/// A frame of the game scene made about 40 targets and released them (about 130 MB at
+/// 1280x720): on Vulkan, ara-gpu frees an image's memory block when it empties, so
+/// each frame allocated and freed device memory, and on Metal each frame changed the
+/// residency set. While a sequence renders a frame its pool is [`active`]:
+/// [`Texture::shaped`] takes a free target of the same description from it, and
+/// [`release`] gives a target it lent back. A target given back is free for the next
+/// frame only, so one frame never hands one image to two roles. At the frame's end
+/// ([`Pool::end_frame`]) the targets no frame took are retired, and the ones lent and
+/// not given back belong to whoever kept them (histories, tables) and leave the pool.
+/// Frames wait for the GPU before they return, so a free target is idle. A new frame's
+/// graph starts every target undefined, as it would a new one.
+pub(crate) mod pool {
+    use super::Texture;
+    use anyhow::Result;
+    use ara_gpu::{Device, GpuDevice, Image};
+    use std::cell::RefCell;
+
+    /// A sequence's targets. See the module.
+    #[derive(Default)]
+    pub(crate) struct Pool {
+        /// Free for this frame, by description.
+        free: Vec<(String, Texture)>,
+        /// Lent this frame.
+        lent: Vec<(String, Texture)>,
+        /// Given back this frame: free for the next one.
+        returned: Vec<(String, Texture)>,
+    }
+    impl Pool {
+        /// Ends a frame: retires what it did not take, frees what it gave back, and
+        /// forgets what it kept.
+        pub(crate) fn end_frame(&mut self, gpu: &mut GpuDevice) -> Result<()> {
+            for (_, unused) in self.free.drain(..) {
+                gpu.retire(ara_gpu::Resource::Image(unused.image))?;
+            }
+            self.free = std::mem::take(&mut self.returned);
+            self.lent.clear();
+            Ok(())
+        }
+        /// Retires every target the pool holds.
+        pub(crate) fn retire(mut self, gpu: &mut GpuDevice) -> Result<()> {
+            self.returned.append(&mut self.free);
+            for (_, texture) in self.returned {
+                gpu.retire(ara_gpu::Resource::Image(texture.image))?;
+            }
+            Ok(())
+        }
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Pool>> = const { RefCell::new(None) };
+    }
+    /// Runs `frame` with `pool` active on this thread, and ends the frame.
+    pub(crate) fn active<T>(
+        pool: &mut Pool,
+        gpu: &mut GpuDevice,
+        frame: impl FnOnce(&mut GpuDevice) -> Result<T>,
+    ) -> Result<T> {
+        ACTIVE.with(|a| a.replace(Some(std::mem::take(pool))));
+        let result = frame(gpu);
+        *pool = ACTIVE.with(|a| a.take()).unwrap_or_default();
+        pool.end_frame(gpu)?;
+        result
+    }
+    /// A free target described by `key`, lent to the frame.
+    pub(super) fn take(key: &str) -> Option<Texture> {
+        ACTIVE.with(|a| {
+            let mut active = a.borrow_mut();
+            let pool = active.as_mut()?;
+            let at = pool.free.iter().position(|(k, _)| k == key)?;
+            let entry = pool.free.swap_remove(at);
+            let texture = entry.1;
+            pool.lent.push(entry);
+            Some(texture)
+        })
+    }
+    /// `texture`, just made, lent to the frame if a pool is active.
+    pub(super) fn lent(key: String, texture: Texture) -> Texture {
+        ACTIVE.with(|a| {
+            if let Some(pool) = a.borrow_mut().as_mut() {
+                pool.lent.push((key, texture));
+            }
+        });
+        texture
+    }
+    /// Gives `image` back if the active pool lent it.
+    pub(super) fn give_back(image: Image) -> bool {
+        ACTIVE.with(|a| {
+            let mut active = a.borrow_mut();
+            let Some(pool) = active.as_mut() else {
+                return false;
+            };
+            let Some(at) = pool.lent.iter().position(|(_, t)| t.image == image) else {
+                return false;
+            };
+            let entry = pool.lent.swap_remove(at);
+            pool.returned.push(entry);
+            true
+        })
     }
 }

@@ -2779,8 +2779,13 @@ and 12 staging uploads; on Metal releasing and adding those allocations costs ab
 1.0 ms a frame in the residency-set commit at submission, which `gpu_ms` includes.
 ara-gpu's Vulkan side sub-allocates images from 8 MB blocks and frees a block when
 it empties, so the same churn frees and allocates device memory every frame there.
-Keeping the targets in the sequence is the next step for recording if the Radeon's
-split still shows it.
+A sequence now keeps its 2D targets (`image::pool`): each frame takes a target of the
+same description from the pool and gives it back when it releases it, and a target
+given back is free for the next frame only. On Metal, game scene at 1280x720, three
+interleaved pairs: median frame 77.9 to 78.2 ms without the pool, 75.5 to 76.1 with it,
+almost all of it in `gpu_ms` (the submission's residency commit); recording 1.03 to
+0.91 ms. The twelfth frame is byte for byte the same HDR and display with and
+without. Buffers and records (87 a frame, 629 KB) are still made per frame.
 
 **The one pixel.** The RTX gives the Metal and wgpu value at (588,178) and the pixel
 below it (0.6279 against the Radeon port's 0.5566): the difference is the port's
