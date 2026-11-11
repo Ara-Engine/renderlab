@@ -9,6 +9,7 @@ scripts/n8-run.py with its memory watchdog).
                                                       # >= 12 GiB free at its start, stops under 6 GiB,
                                                       # no stillkit mutex, never beside a GPU lease)
     py -3 -B tools/speck2/host.py lease LABEL MIN -- COMMAND...
+    py -3 -B tools/speck2/host.py lease-picture LABEL MIN -- COMMAND...   # see beside_packaging
 """
 import hashlib
 import importlib.util
@@ -98,10 +99,38 @@ def build2(host, name, tree=None):
     return code
 
 
+def beside_packaging(host):
+    """Root ruling, 2026-11-11T20:47Z: while build-slot.lock is held by ara-integration's
+    preview-rehearsal2 packaging step and no compiler runs (cargo.exe alone, the parent of
+    `ara-dev preview`), a picture-only lease may run beside it. For that one reason only the
+    lease's admission drops the build-slot and cargo.exe refusals; no timing comes from it."""
+    refuse = host.ready
+
+    def ready(r, label):
+        why = refuse(r, label)
+        if label == "build":
+            return why
+        try:
+            owner = json.loads((host.BUILD_SLOT / "owner.json").read_text())
+        except (OSError, ValueError):
+            return why
+        packaging = owner.get("owner") == "ara-integration" and owner.get("label") == "preview-rehearsal2"
+        cargo_only = all(c["name"].lower() == "cargo.exe" for c in r.resource_sample()["compilers"])
+        if packaging and cargo_only:
+            why = [w for w in why if w not in ("build slot held", "foreign compiler")]
+        return why
+
+    host.ready = ready
+
+
 if __name__ == "__main__":
     host = load()
     if sys.argv[1] == "build2":
         raise SystemExit(build2(host, *sys.argv[2:4]))
+    if sys.argv[1] == "lease-picture":
+        beside_packaging(host)
+        i = sys.argv.index("--")
+        raise SystemExit(host.lease(sys.argv[2], float(sys.argv[3]), sys.argv[i + 1:]))
     if sys.argv[1] == "build":
         raise SystemExit(host.build(*sys.argv[2:4]))
     if sys.argv[1] == "lease":
