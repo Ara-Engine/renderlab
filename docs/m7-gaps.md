@@ -930,3 +930,7 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
   1. The backend's author is opening a PR with one ignored GPU test that reproduces it through wgpu (four buffers of different lengths, indexed differently within one workgroup). The Linux gate runs it on the Radeon.
   2. If it fails there, root fixes it ahead of P-GLOSSY: pass the adjacency flag (or the length) and the skinned flag in the placement or draw record, so nothing that decides rendering reads a buffer-array element's `arrayLength`; then rerun the two RADV shadow tests.
   3. Report the missing decoration to naga upstream.
+
+## Specks after a game-scene cut (root, 2026-11-11)
+
+**OPEN, not yet investigated.** In the game scene on non-RT, the frames after a camera cut (frames 25 and 28 of P-RELIT's cut case, 720p) show single-pixel bright specks scattered on the open ground. They are in the no-history control, in main and in the P-RELIT branch alike, so they predate P-RELIT. Stray white pixels after cuts are on the owner's watch list. Next: check RT, find which pass writes them (GI gather cap after a cold cache, or glossy), and how many frames they last.
