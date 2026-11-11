@@ -103,7 +103,8 @@
 #[allow(dead_code)]
 #[path = "../support/lighting_fixture.rs"]
 mod lighting_fixture;
-// TEMPORARY: a copy of the example's scene, until both include the example's own.
+// The game scene fixture: a copy of the example's scene, until both include the
+// example's own.
 #[path = "../support/ara_game_scene.rs"]
 #[allow(dead_code)]
 mod game;
@@ -839,6 +840,7 @@ fn ara_frame(
         slots[floor_index(fixture)?].base_color = Some(forward::ObjectTexture {
             data: &checker,
             sampler: renderlab::asset::Sampler::default(),
+            key: None,
         });
     }
     let (studs, tangents) = (studs(), floor_tangents(fixture)?);
@@ -847,6 +849,7 @@ fn ara_frame(
             texture: forward::ObjectTexture {
                 data: &studs,
                 sampler: renderlab::asset::Sampler::default(),
+                key: None,
             },
             tangents: &tangents,
         });

@@ -90,17 +90,22 @@ struct Material {
     /// material. Never reused.
     key: u64,
     program: Arc<Program>,
-    base_color_texture: Option<(Arc<TextureData>, Sampler)>,
-    metallic_roughness_texture: Option<(Arc<TextureData>, Sampler)>,
-    normal_texture: Option<(Arc<TextureData>, Sampler)>,
+    base_color_texture: Option<MaterialTexture>,
+    metallic_roughness_texture: Option<MaterialTexture>,
+    normal_texture: Option<MaterialTexture>,
     parameters: Vec<(String, Value)>,
 }
+
+/// A material's texture slot: the texture's identity to the frames, the texture and
+/// the sampler.
+type MaterialTexture = (u64, Arc<TextureData>, Sampler);
 
 /// What this layer keeps for each resource: the data its frames are rebuilt from.
 struct Kept;
 impl Residency for Kept {
     type Mesh = Mesh;
-    type Texture = Arc<TextureData>;
+    /// Its identity to the frames, and the texture.
+    type Texture = (u64, Arc<TextureData>);
     type Program = Arc<Program>;
     type Material = Material;
     /// Its identity to the frames, and the map.
@@ -137,6 +142,8 @@ pub struct Engine {
     materials: u64,
     /// Environments created so far: the next one's identity.
     environments: u64,
+    /// Textures created so far: the next one's identity.
+    textures: u64,
     /// Whether frames are read back (`set_readback`).
     readback: bool,
     refusals: Vec<Refusal>,
@@ -185,6 +192,7 @@ impl Engine {
             meshes: 0,
             materials: 0,
             environments: 0,
+            textures: 0,
             readback: true,
             refusals: Vec::new(),
             ended: Vec::new(),
@@ -348,10 +356,11 @@ impl Engine {
     }
 }
 
-fn texture(slot: &Option<(Arc<TextureData>, Sampler)>) -> Option<ObjectTexture<'_>> {
-    slot.as_ref().map(|(data, sampler)| ObjectTexture {
+fn texture(slot: &Option<MaterialTexture>) -> Option<ObjectTexture<'_>> {
+    slot.as_ref().map(|(key, data, sampler)| ObjectTexture {
         data,
         sampler: *sampler,
+        key: Some(*key),
     })
 }
 fn objects<'a>(placed: &[Placed<'a>]) -> Vec<ForwardObject<'a>> {
@@ -458,7 +467,8 @@ impl Engine {
         }))
     }
     pub fn create_texture(&mut self, data: TextureData) -> Result<TextureId, Error> {
-        Ok(self.state.textures.insert(Arc::new(data)))
+        self.textures += 1;
+        Ok(self.state.textures.insert((self.textures, Arc::new(data))))
     }
     pub fn create_program(&mut self, label: &str, source: &str) -> Result<ProgramId, Error> {
         let program = Program::new(label, source)?;
@@ -472,8 +482,11 @@ impl Engine {
             desc.parameters.iter().map(|(n, v)| (*n, v.clone())),
         )?;
         let texture = |slot: Option<crate::engine::TextureRef>| {
-            slot.map(|t| Ok::<_, Error>((self.state.textures.get(t.texture)?.clone(), t.sampler)))
-                .transpose()
+            slot.map(|t| {
+                let (key, data) = self.state.textures.get(t.texture)?;
+                Ok::<_, Error>((*key, data.clone(), t.sampler))
+            })
+            .transpose()
         };
         self.materials += 1;
         let material = Material {

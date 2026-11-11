@@ -178,6 +178,7 @@ fn a_normal_mapped_floor_is_the_floor_tilted_to_that_normal() -> Result<()> {
                 texture: ObjectTexture {
                     data: &map,
                     sampler: Sampler::default(),
+                    key: None,
                 },
                 tangents: &tangents,
             }),
@@ -230,6 +231,7 @@ fn a_normal_mapped_floor_is_the_floor_tilted_to_that_normal() -> Result<()> {
             texture: ObjectTexture {
                 data: &map,
                 sampler: Sampler::default(),
+                key: None,
             },
             tangents,
         })

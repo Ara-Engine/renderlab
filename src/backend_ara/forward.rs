@@ -85,6 +85,10 @@ pub struct ForwardObject<'a> {
 pub struct ObjectTexture<'a> {
     pub data: &'a crate::asset::Texture,
     pub sampler: crate::asset::Sampler,
+    /// Its identity to the frames, which keep it on the GPU for as long as the frames of
+    /// a sequence keep naming it (`Frames`); an identity must always name the same
+    /// texture. `None` uploads it for this frame alone.
+    pub key: Option<u64>,
 }
 /// A tangent-space normal map with the tangent frames it is authored against: what the
 /// wgpu renderer takes as a material's `normal_texture` and the mesh's tangent stream
@@ -767,6 +771,9 @@ struct Kept {
     sky: Option<SkyTables>,
     /// The sky map the last frame named (`ForwardScene::sky_map`).
     map: Option<ResidentMap>,
+    /// The textures the last frame named by identity (`ObjectTexture::key`), by
+    /// identity and slot: a slot fixes the format and view.
+    textures: BTreeMap<(u64, usize), Texture>,
     /// The Interactive trace's repair queue: a header, then room for every pixel.
     repairs: Option<StorageBuffer>,
     /// The 2D targets the last frame made and released, for the next frame to take.
@@ -827,6 +834,9 @@ impl Frames {
         }
         if let Some(map) = self.kept.map {
             map.retire(gpu)?;
+        }
+        for texture in self.kept.textures.into_values() {
+            gpu.retire(Resource::Image(texture.image))?;
         }
         if let Some(repairs) = self.kept.repairs {
             repairs.retire(gpu)?;
@@ -939,6 +949,7 @@ fn frame(
         meshes: resident,
         sky: tables,
         map: kept_map,
+        textures: kept_textures,
         repairs: kept_repairs,
         // Taken out and made active for this frame by `Frames::render`.
         targets: _,
@@ -2337,8 +2348,12 @@ fn frame(
             transmission_packets.push(packet);
         }
     }
-    // `try_upload_texture` and `sampler_descriptor` for each object's texture slots.
+    // `try_upload_texture` and `sampler_descriptor` for each object's texture slots. A
+    // texture with an identity is uploaded by the first frame that names it and kept;
+    // one without is this frame's alone (`transient_textures`).
     let mut object_textures: Vec<[Option<(Texture, SamplerDesc)>; 3]> = Vec::new();
+    let mut transient_textures = Vec::new();
+    let mut named_textures = std::collections::BTreeSet::new();
     if let Some(textures) = scene.textures {
         ensure!(
             textures.objects.len() == scene.objects.len()
@@ -2382,28 +2397,54 @@ fn frame(
                     "texture slot holds a {:?} texture",
                     texture.data.role
                 );
-                let image = Texture::sampled_mips(
-                    gpu,
-                    [first.width, first.height],
-                    texture.data.mips.len() as u32,
-                    format,
-                    dimension,
-                )?;
-                for (level, mip) in texture.data.mips.iter().enumerate() {
-                    ensure!(
-                        mip.rgba8.len() == mip.width as usize * mip.height as usize * 4,
-                        "texture level {level} is not tightly packed RGBA8"
-                    );
-                    staging.push(transfer::upload_mip(
-                        gpu,
-                        &mut graph,
-                        &mut rec,
-                        image.image,
-                        level as u32,
-                        [mip.width, mip.height],
-                        &mip.rgba8,
-                    )?);
-                }
+                let named = texture.key.map(|key| (key, slot));
+                let image = match named.and_then(|named| kept_textures.get(&named)) {
+                    Some(kept) => {
+                        ensure!(
+                            kept.size == [first.width, first.height]
+                                && kept.shape.mip_levels == texture.data.mips.len() as u32,
+                            "texture identity {:?} named another texture before",
+                            texture.key
+                        );
+                        // Written by an earlier frame, read by shading since.
+                        if named_textures.insert(named) {
+                            graph.import(Resource::Image(kept.image), Access::ShaderRead);
+                        }
+                        *kept
+                    }
+                    None => {
+                        let image = Texture::sampled_mips(
+                            gpu,
+                            [first.width, first.height],
+                            texture.data.mips.len() as u32,
+                            format,
+                            dimension,
+                        )?;
+                        for (level, mip) in texture.data.mips.iter().enumerate() {
+                            ensure!(
+                                mip.rgba8.len() == mip.width as usize * mip.height as usize * 4,
+                                "texture level {level} is not tightly packed RGBA8"
+                            );
+                            staging.push(transfer::upload_mip(
+                                gpu,
+                                &mut graph,
+                                &mut rec,
+                                image.image,
+                                level as u32,
+                                [mip.width, mip.height],
+                                &mip.rgba8,
+                            )?);
+                        }
+                        match named {
+                            Some(named) => {
+                                named_textures.insert(Some(named));
+                                kept_textures.insert(named, image);
+                            }
+                            None => transient_textures.push(image),
+                        }
+                        image
+                    }
+                };
                 let sampler = sampler_desc(
                     texture.sampler,
                     textures.anisotropy_clamp,
@@ -2414,6 +2455,14 @@ fn frame(
             object_textures.push(slots);
         }
     }
+    // A texture no object names any more leaves the GPU.
+    kept_textures.retain(|named, texture| {
+        let keep = named_textures.contains(&Some(*named));
+        if !keep {
+            transient_textures.push(*texture);
+        }
+        keep
+    });
     let output = Texture::new(gpu, size, Format::Rgba16Float, deferred_path, true)?;
     // `Upscale::hdr`: below native scale the resolve writes a target-size image, which
     // is what post and the caller then see.
@@ -3557,7 +3606,7 @@ fn frame(
     for image in inputs
         .into_values()
         .chain(post_images)
-        .chain(object_textures.into_iter().flatten().flatten().map(|t| t.0))
+        .chain(transient_textures)
         .chain([lists, output])
         .chain(upscaled)
     {

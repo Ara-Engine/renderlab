@@ -5,7 +5,7 @@ use renderlab::{
     Camera, Light, Lighting, Mat4, MaterialDescriptor, Vec3, Vertex,
     asset::{Filter, Mip, MipmapFilter, Sampler, Texture, TextureRole, Wrap},
     backend_ara::forward::{
-        ForwardObject, ForwardScene, ObjectTexture, ObjectTextures, Primary, SceneTextures,
+        ForwardObject, ForwardScene, Frames, ObjectTexture, ObjectTextures, Primary, SceneTextures,
         SunShadows, render,
     },
 };
@@ -27,6 +27,22 @@ fn linear(byte: u8) -> f32 {
 fn floor(
     gpu: &mut GpuDevice,
     cache: &ShaderCache,
+    primary: Primary,
+    distance: f32,
+    repeats: f32,
+    material: MaterialDescriptor<'_>,
+    textures: Option<ObjectTextures<'_>>,
+) -> Result<Vec<[f32; 3]>> {
+    floor_in(
+        gpu, cache, None, primary, distance, repeats, material, textures,
+    )
+}
+/// [`floor`] as the next frame of `sequence`, or on its own.
+#[allow(clippy::too_many_arguments)]
+fn floor_in(
+    gpu: &mut GpuDevice,
+    cache: &ShaderCache,
+    sequence: Option<&mut Frames>,
     primary: Primary,
     distance: f32,
     repeats: f32,
@@ -59,49 +75,49 @@ fn floor(
         disk_angle: 0.02,
     };
     let slots = textures.map(|t| [t]);
-    let images = render(
-        gpu,
-        cache,
-        &ForwardScene {
-            meshes: None,
-            materials: None,
-            instances: None,
-            objects: &[ForwardObject {
-                vertices: &vertices,
-                indices: &[0, 1, 2, 0, 2, 3],
-                transform: Mat4::IDENTITY,
-                material: MaterialDescriptor {
-                    double_sided: true,
-                    ..material
-                },
-            }],
-            lighting: &lighting,
-            camera: Camera::look_at(
-                Vec3::new(0., 0., distance),
-                Vec3::ZERO,
-                Vec3::Y,
-                55f32.to_radians(),
-                0.1,
-                100.,
-            )?,
-            size: SIZE,
-            atmosphere: renderlab::Atmosphere::off(),
-            sun_shadows: (primary != Primary::Raster).then_some(&shadows),
-            primary,
-            post: None,
-            indirect: None,
-            reconstruction: None,
-            reflections: None,
-            textures: slots.as_ref().map(|objects| SceneTextures {
-                objects,
-                anisotropy_clamp: 1,
-            }),
-            local_shadows: None,
-            transparent: &[],
-            programs: None,
-            sky_map: None,
-        },
-    )?;
+    let scene = ForwardScene {
+        meshes: None,
+        materials: None,
+        instances: None,
+        objects: &[ForwardObject {
+            vertices: &vertices,
+            indices: &[0, 1, 2, 0, 2, 3],
+            transform: Mat4::IDENTITY,
+            material: MaterialDescriptor {
+                double_sided: true,
+                ..material
+            },
+        }],
+        lighting: &lighting,
+        camera: Camera::look_at(
+            Vec3::new(0., 0., distance),
+            Vec3::ZERO,
+            Vec3::Y,
+            55f32.to_radians(),
+            0.1,
+            100.,
+        )?,
+        size: SIZE,
+        atmosphere: renderlab::Atmosphere::off(),
+        sun_shadows: (primary != Primary::Raster).then_some(&shadows),
+        primary,
+        post: None,
+        indirect: None,
+        reconstruction: None,
+        reflections: None,
+        textures: slots.as_ref().map(|objects| SceneTextures {
+            objects,
+            anisotropy_clamp: 1,
+        }),
+        local_shadows: None,
+        transparent: &[],
+        programs: None,
+        sky_map: None,
+    };
+    let images = match sequence {
+        Some(frames) => frames.render(gpu, cache, &scene)?,
+        None => render(gpu, cache, &scene)?,
+    };
     Ok(images
         .hdr
         .as_chunks::<8>()
@@ -180,10 +196,12 @@ fn a_textured_floor_is_quadrant_by_quadrant_the_untextured_floor_of_that_texel()
         base_color: Some(ObjectTexture {
             data: &base,
             sampler: nearest,
+            key: None,
         }),
         metallic_roughness: Some(ObjectTexture {
             data: &surface,
             sampler: nearest,
+            key: None,
         }),
         normal: None,
     };
@@ -277,6 +295,7 @@ fn a_mip_chain_shows_the_level_the_pixel_footprint_selects() -> Result<()> {
                 min: Filter::Linear,
                 mipmap: MipmapFilter::Nearest,
             },
+            key: None,
         }),
         metallic_roughness: None,
         normal: None,
@@ -341,6 +360,65 @@ fn a_mip_chain_shows_the_level_the_pixel_footprint_selects() -> Result<()> {
         }
     }
     eprintln!("{report}");
+    cache.retire(&mut gpu)?;
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// Textures named by identity stay on the GPU while a sequence's frames name them. A
+/// sequence whose base colour is named draws, frame by frame, the bytes of one whose
+/// texture is uploaded every frame: three frames, a frame without the texture (which
+/// lets it go) and a frame that names it again. An identity that named a texture of
+/// another size before is refused.
+#[test]
+fn named_textures_stay_on_the_gpu_and_draw_what_they_name() -> Result<()> {
+    let path = root("textures-named");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let texture = |side: u32| Texture {
+        role: TextureRole::BaseColorSrgb,
+        mips: vec![Mip {
+            width: side,
+            height: side,
+            rgba8: (0..side * side)
+                .flat_map(|i| [(i * 60 % 256) as u8, 120, (255 - i * 40 % 256) as u8, 255])
+                .collect(),
+        }],
+    };
+    let (base, other) = (texture(2), texture(4));
+    let slot = |data, key| ObjectTextures {
+        base_color: Some(ObjectTexture {
+            data,
+            sampler: Sampler::default(),
+            key,
+        }),
+        ..Default::default()
+    };
+    let (mut named, mut unnamed) = (Frames::default(), Frames::default());
+    let mut frame = |frames: &mut Frames, textures| {
+        floor_in(
+            &mut gpu,
+            &cache,
+            Some(frames),
+            Primary::Traced,
+            4.,
+            1.,
+            MaterialDescriptor::default(),
+            textures,
+        )
+    };
+    for (index, kept) in [true, true, true, false, true].into_iter().enumerate() {
+        let a = frame(&mut named, kept.then(|| slot(&base, Some(7))))?;
+        let b = frame(&mut unnamed, kept.then(|| slot(&base, None)))?;
+        ensure!(a == b, "frame {index}: the named texture drew other bytes");
+    }
+    ensure!(
+        frame(&mut named, Some(slot(&other, Some(7)))).is_err(),
+        "an identity naming another texture was accepted"
+    );
+    named.retire(&mut gpu)?;
+    unnamed.retire(&mut gpu)?;
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
