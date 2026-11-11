@@ -533,7 +533,7 @@ impl Renderer {
     /// Blocks until the GPU is idle.
     #[doc(hidden)]
     pub fn p_still_surface_walks(&mut self) -> Option<u32> {
-        let state = self.virtual_shadows.as_ref()?;
+        let state = self.view.virtual_shadows.as_ref()?;
         let surface = state.surface.as_ref()?;
         let r = state.resources.as_ref()?;
         Some(surface.read_stats(&self.device, &self.queue, r)[5])
@@ -545,7 +545,7 @@ impl Renderer {
     /// Tests: `SurfaceCache::read_stats` of the last frame, after a drain.
     pub(crate) fn test_surface_stats(&mut self) -> Option<[u32; 8]> {
         self.test_drain("N8n surface counters");
-        let state = self.virtual_shadows.as_ref()?;
+        let state = self.view.virtual_shadows.as_ref()?;
         let surface = state.surface.as_ref()?;
         let r = state.resources.as_ref()?;
         Some(surface.read_stats(&self.device, &self.queue, r))

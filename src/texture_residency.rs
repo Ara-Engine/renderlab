@@ -186,7 +186,7 @@ pub(crate) struct Residency {
     /// The next frame is verified (`mark_camera_cut`).
     pub cut: bool,
     /// The last streamed frame's view.
-    pub view: Option<ViewKey>,
+    pub view: Option<ViewId>,
     /// Probe anisotropic samples too, recording the levels sparse residency would need.
     pub survey: bool,
     pub stats: ResidencyStats,
@@ -224,14 +224,14 @@ impl Residency {
 /// What camera-cut detection compares: eye, unit forward direction, projection scale
 /// (zoom) and target size.
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct ViewKey {
+pub(crate) struct ViewId {
     pub eye: Vec3,
     pub forward: Vec3,
     pub scale: [f32; 2],
     pub size: [u32; 2],
 }
 /// Whether a view change from `last` to `next` is large enough to verify the frame.
-pub(crate) fn camera_cut(last: Option<ViewKey>, next: ViewKey) -> bool {
+pub(crate) fn camera_cut(last: Option<ViewId>, next: ViewId) -> bool {
     let Some(last) = last else {
         return true;
     };
@@ -596,7 +596,7 @@ impl Renderer {
     ) -> bool {
         let view = camera.view().inverse();
         let projection = camera.matrix(size[0], size[1]) * camera.view().inverse();
-        let next = ViewKey {
+        let next = ViewId {
             eye: view.w_axis.truncate(),
             forward: -view.z_axis.truncate().normalize_or_zero(),
             scale: [projection.x_axis.x, projection.y_axis.y],
@@ -623,7 +623,14 @@ impl Renderer {
             self.slots[slot].residency_readback = Some(self.residency_buffer());
         }
         let readback = self.slots[slot].residency_readback.as_ref().unwrap();
-        let state = self.primary.as_ref().unwrap().residency.as_ref().unwrap();
+        let state = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .residency
+            .as_ref()
+            .unwrap();
         encoder.copy_buffer_to_buffer(
             &state.buffer.value,
             REQUEST_OFFSET,
@@ -709,7 +716,14 @@ impl Renderer {
             self.encode_request_clear(&mut encoder);
             self.encode_primary_shading(&mut encoder, shading, None);
             self.encode_hdr_present(&mut encoder, view, None);
-            let state = self.primary.as_ref().unwrap().residency.as_ref().unwrap();
+            let state = self
+                .view
+                .primary
+                .as_ref()
+                .unwrap()
+                .residency
+                .as_ref()
+                .unwrap();
             encoder.copy_buffer_to_buffer(
                 &state.buffer.value,
                 REQUEST_OFFSET,
@@ -860,22 +874,22 @@ mod tests {
 
     #[test]
     fn camera_cuts_need_a_large_view_change() {
-        let view = ViewKey {
+        let view = ViewId {
             eye: Vec3::ZERO,
             forward: Vec3::NEG_Z,
             scale: [1.0, 1.5],
             size: [1920, 1080],
         };
-        let at = |eye| ViewKey { eye, ..view };
+        let at = |eye| ViewId { eye, ..view };
         assert!(camera_cut(None, view));
         // The quarry bench's 1 mm steps and 1 cm pose change stay feedback frames.
         assert!(!camera_cut(Some(view), at(Vec3::new(0.01, 0.0, 0.0))));
         assert!(camera_cut(Some(view), at(Vec3::new(0.3, 0.0, 0.0))));
         let forward = Vec3::new(0.1f32.sin(), 0.0, -0.1f32.cos());
-        assert!(camera_cut(Some(view), ViewKey { forward, ..view }));
+        assert!(camera_cut(Some(view), ViewId { forward, ..view }));
         let size = [1280, 720];
-        assert!(camera_cut(Some(view), ViewKey { size, ..view }));
+        assert!(camera_cut(Some(view), ViewId { size, ..view }));
         let scale = [1.1, 1.65];
-        assert!(camera_cut(Some(view), ViewKey { scale, ..view }));
+        assert!(camera_cut(Some(view), ViewId { scale, ..view }));
     }
 }

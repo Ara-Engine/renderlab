@@ -180,6 +180,7 @@ fn temporal_shading(r: &Renderer, program: &str, black: bool) -> Owned<wgpu::Com
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     let pipeline = r
+        .view
         .primary
         .as_ref()
         .unwrap()
@@ -229,6 +230,7 @@ fn per_sample_shading(r: &Renderer, program: &str) -> Owned<wgpu::ComputePipelin
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     let pipeline = r
+        .view
         .primary
         .as_ref()
         .unwrap()
@@ -301,11 +303,11 @@ fn rl_conditioned(v:f32,depth:f32)->vec3<f32> { let high=quantizeToF16(depth); r
                 compilation_options: Default::default(),
                 cache: None,
             });
-        let primary = r.primary.as_ref().unwrap().targets.as_ref().unwrap();
+        let primary = r.view.primary.as_ref().unwrap().targets.as_ref().unwrap();
         let size = [primary.hit.texture.width(), primary.hit.texture.height()];
         let views = [
             &primary.hit.texture,
-            &r.lighting.hdr.as_ref().unwrap().resolved.texture,
+            &r.view.hdr.as_ref().unwrap().resolved.texture,
             &primary.tiles.texture,
         ]
         .map(|t| t.create_view(&Default::default()));
@@ -344,7 +346,7 @@ fn rl_conditioned(v:f32,depth:f32)->vec3<f32> { let high=quantizeToF16(depth); r
     /// Re-shades the last temporal frame's samples and accumulates their visibility into
     /// `half`. The frame's HDR image is overwritten by the per-sample output.
     fn accumulate(&self, r: &Renderer, half: usize) {
-        let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
+        let film = r.view.primary.as_ref().unwrap().film.as_ref().unwrap();
         let mut e = r.device.create_command_encoder(&Default::default());
         r.encode_shade_group(
             &mut e,
@@ -423,7 +425,7 @@ fn centre_frames(
     let mut sun = centre_shading(r, &direct_program(), true);
     for (mode, seeds) in [("exact", exact), ("interactive", interactive)] {
         for seed in 0..seeds {
-            let primary = r.primary.as_ref().unwrap();
+            let primary = r.view.primary.as_ref().unwrap();
             let mut pipeline = if mode == "exact" {
                 primary.fresh_pipeline(
                     &r.device,
@@ -550,14 +552,14 @@ fn integrate_t1(
             compilation_options: Default::default(),
             cache: None,
         });
-    let primary = r.primary.as_ref().unwrap();
-    let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+    let primary = r.view.primary.as_ref().unwrap();
+    let t = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
     let pt = primary.targets.as_ref().unwrap();
     let views = [
         &pt.hit.texture,
         &t.world.texture,
         &t.visibility.texture,
-        &r.lighting.hdr.as_ref().unwrap().resolved.texture,
+        &r.view.hdr.as_ref().unwrap().resolved.texture,
         &pt.tiles.texture,
     ]
     .map(|t| t.create_view(&Default::default()));
@@ -758,7 +760,7 @@ fn digest(bytes: &[u8]) -> String {
 
 /// Both history sides of the current film state, packed.
 fn history(r: &Renderer) -> Vec<u8> {
-    let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
+    let film = r.view.primary.as_ref().unwrap().film.as_ref().unwrap();
     let written = film.parity;
     let [colour, anchor, tiles] = film.history(written);
     [
@@ -815,6 +817,7 @@ fn temporal_acceptance(
                 .unwrap(),
         );
         let kernel = r
+            .view
             .primary
             .as_ref()
             .unwrap()
@@ -974,18 +977,18 @@ fn temporal_acceptance(
     // tile, frame by frame, and the same history wherever it is kept.
     let mut runs = vec![];
     for materialize in [false, true] {
-        r.primary.as_mut().unwrap().test_film_materialize = materialize;
+        r.view.primary.as_mut().unwrap().test_film_materialize = materialize;
         reset_film(r);
         let mut images = vec![];
         for _ in 1..=frames {
             traced_frame(r, color, &cameras[pose], asset, true);
             images.push(digest(&settled(r)));
         }
-        let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
+        let film = r.view.primary.as_ref().unwrap().film.as_ref().unwrap();
         let [colour, anchor, tiles] = film.history(film.parity).map(|t| read_texture(r, t));
         runs.push((images, colour, anchor, tiles));
     }
-    r.primary.as_mut().unwrap().test_film_materialize = false;
+    r.view.primary.as_mut().unwrap().test_film_materialize = false;
     let (kept, all) = (&runs[0], &runs[1]);
     let tile_width = 1920u32.div_ceil(8) as usize;
     let flag = |tiles: &[u8], i: usize| tiles[i * 4..i * 4 + 4] != [0; 4];

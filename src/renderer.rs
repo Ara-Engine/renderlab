@@ -51,6 +51,11 @@ mod texture_residency;
 pub use texture_residency::{ResidencyStats, TextureResidency};
 #[path = "gi_cache.rs"]
 pub(crate) mod gi_cache;
+// Views: what each camera owns, and selecting one (docs/design-views.md).
+#[path = "view.rs"]
+mod view;
+pub use view::ViewId;
+use view::ViewState;
 #[path = "skinning.rs"]
 pub(crate) mod skinning;
 // TP1 transparent pass and particles (docs/m7-tp1.md).
@@ -106,6 +111,8 @@ pub(crate) struct Flight {
     fresh: bool,
     submission: u64,
     frame: Option<FrameId>,
+    /// The view a frame rendered; None for uploads.
+    view: Option<ViewId>,
     revision: Revision,
     submitted_at: Instant,
 }
@@ -212,7 +219,7 @@ impl Renderer {
             "multisample depth cannot be copied"
         );
         let rgba = self.test_readback(color, false);
-        let depth = self.depth.as_ref().unwrap().texture.clone();
+        let depth = self.view.depth.as_ref().unwrap().texture.clone();
         (rgba, self.test_readback(&depth, true))
     }
     fn test_readback(&mut self, color: &wgpu::Texture, depth: bool) -> Vec<u8> {
@@ -272,6 +279,7 @@ impl Renderer {
                 fresh: false,
                 submission: self.submissions,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at,
             },
@@ -300,6 +308,7 @@ impl Renderer {
             fresh: false,
             submission: self.submissions,
             frame: Some(FrameId(self.frames)),
+            view: None,
             revision: self.revision,
             submitted_at: Instant::now(),
         });
@@ -326,6 +335,7 @@ impl Renderer {
                 fresh: false,
                 submission: self.submissions,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at: Instant::now(),
             });
@@ -516,6 +526,20 @@ struct Depth {
 /// Use an sRGB output format for encoded base color; linear targets retain linear values.
 /// Alternating target sizes recreates attachments. Separate renderers suit independent streams.
 pub struct Renderer {
+    /// The selected view: everything keyed on the camera or the output (`view.rs`). Frames
+    /// render it; `select_view` exchanges it with a parked one.
+    view: ViewState,
+    view_key: ViewId,
+    /// The other views, keyed by `create_view`'s handles.
+    parked: Vec<(ViewId, ViewState)>,
+    next_view: u64,
+    /// The engine clock (`begin_tick`): the tick counter, the last tick whose shared work
+    /// ran, whether ticks are explicit (otherwise every frame is a tick), and whether the
+    /// frame being prepared runs that work.
+    tick: u64,
+    worked_tick: u64,
+    explicit_ticks: bool,
+    tick_work: bool,
     device: PipelineDevice,
     queue: wgpu::Queue,
     format: wgpu::TextureFormat,
@@ -540,25 +564,20 @@ pub struct Renderer {
     lighting: LightingGpu,
     post_settings: PostSettings,
     post_lut: Option<ColourLut>,
-    post: Option<PostGpu>,
     retired_post: Vec<(u64, PostGpu)>,
     environment: crate::environment::EnvironmentState,
-    shadows: ShadowState,
     hardware_shadows: Option<HardwareState>,
-    fresh: Option<FreshState>,
-    /// Exists on hardware-shadow 1x renderers, which can trace primary visibility.
-    primary: Option<PrimaryState>,
     primary_mode: PrimaryVisibility,
-    visibility_buffer: Option<visibility_buffer::VisibilityBuffer>,
     cluster_instances: visibility_buffer::ClusterInstanceCache,
     /// N1c cut error bound and software-raster cluster extent, in pixels.
     lod_pixels: f32,
     software_extent: f32,
     lod_lift: f32,
     soft_mode: crate::SoftShadows,
-    /// `SoftShadows::Virtual` state, created by its first frame (N8).
-    virtual_shadows: Option<virtual_shadow_gpu::VirtualState>,
     virtual_settings: VirtualShadowSettings,
+    /// The sun shadow settings every view renders with; each view keeps a copy beside its
+    /// shadow plan, synchronised when it renders (`sync_view_shadows`).
+    shadow_settings: crate::Shadows,
     /// Identity of the traced modules, which also produce the HDR of traced frames.
     primary_hash: [u8; 32],
     /// Last installed prelude WGSL, composed again when traced visibility is selected.
@@ -581,8 +600,6 @@ pub struct Renderer {
     program_cache: program_gpu::ProgramCache,
     standard: crate::Program,
     next_program: u64,
-    depth: Option<Depth>,
-    msaa: Option<Depth>,
     view_mode: ViewMode,
     camera_shadow: Option<[u8; 64]>,
     scratch: Vec<u8>,
@@ -609,20 +626,15 @@ pub struct Renderer {
     residency: texture_residency::Residency,
     /// M7 world radiance cache (`gi_cache.rs`).
     gi: gi_cache::GiState,
-    /// AT1 sky, aerial perspective and fog (`atmosphere_gpu.rs`).
+    /// AT1 sky LUTs, kernels and the procedural sky (`atmosphere_gpu.rs`); each view owns
+    /// its camera volume and fog histories.
     atmosphere: atmosphere_gpu::AtmosphereGpu,
-    /// TR1 temporal reconstruction settings, its history (created by its first frame), the
-    /// next frame's sample index, and the index of the frame being prepared while that frame
-    /// reconstructs (`temporal_reconstruction.rs`).
+    /// TR1 temporal reconstruction settings (`temporal_reconstruction.rs`); its history is
+    /// the view's.
     reconstruction: Reconstruction,
     /// M7-R1/R1n global reflection controls (`set_reflections`).
     reflections: crate::ReflectionSettings,
     reconstruction_shadow_budget: ReconstructionShadowBudget,
-    reconstruction_state: Option<ReconstructionState>,
-    reconstruction_index: u64,
-    reconstruction_frame: Option<u64>,
-    /// TR1b upscaling: the scaled frame's internal colour target and output HDR.
-    upscale: Option<temporal_reconstruction::Upscale>,
     /// TP1 transparent draws and particle emitters (`transparency_gpu.rs`).
     transparency: transparency_gpu::TransparencyState,
 }
@@ -1039,6 +1051,21 @@ impl Renderer {
         let (standard, slot) = program_gpu::standard_slot(&identity, standard);
         let pass_timeline = crate::pass_timeline::PassTimeline::from_env(&device, &queue);
         let mut renderer = Self {
+            view: ViewState::new(
+                ViewId(0),
+                shadows,
+                atmosphere_gpu::AtmosphereView::new(&device, &ledger, 0),
+                fresh,
+                primary,
+            ),
+            atmosphere,
+            view_key: ViewId(0),
+            parked: vec![],
+            next_view: 1,
+            tick: 0,
+            worked_tick: 0,
+            explicit_ticks: false,
+            tick_work: true,
             device,
             queue,
             format: color_format,
@@ -1063,31 +1090,21 @@ impl Renderer {
             lighting,
             post_settings: PostSettings::default(),
             post_lut: None,
-            post: None,
             retired_post: vec![],
             environment: Default::default(),
-            shadows,
             hardware_shadows,
-            fresh,
-            primary,
             primary_mode: PrimaryVisibility::Raster,
-            visibility_buffer: None,
             cluster_instances: Default::default(),
             lod_pixels: visibility_buffer::DEFAULT_LOD_PIXELS,
             software_extent: visibility_buffer::DEFAULT_SOFTWARE_EXTENT,
             lod_lift: visibility_buffer::DEFAULT_LOD_LIFT,
             soft_mode: crate::SoftShadows::Exact,
-            virtual_shadows: None,
             virtual_settings: VirtualShadowSettings::default(),
-            atmosphere,
+            shadow_settings: Default::default(),
             gi,
             reconstruction: Reconstruction::default(),
             reflections: crate::ReflectionSettings::default(),
             reconstruction_shadow_budget: ReconstructionShadowBudget::default(),
-            reconstruction_state: None,
-            reconstruction_index: 0,
-            reconstruction_frame: None,
-            upscale: None,
             transparency: Default::default(),
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
@@ -1100,8 +1117,6 @@ impl Renderer {
             program_cache,
             standard,
             next_program: 1,
-            depth: None,
-            msaa: None,
             view_mode: ViewMode::BaseColor,
             camera_shadow: None,
             scratch: Vec::new(),
@@ -1328,6 +1343,7 @@ impl Renderer {
             .transpose()
             .map_err(rejected)?;
         let fresh_source = self
+            .view
             .fresh
             .as_ref()
             .filter(|_| self.hardware_shadows.is_some())
@@ -1378,10 +1394,11 @@ impl Renderer {
             &self.ledger,
             &*self.layout,
             &self.lighting,
-            &self.shadows,
+            &self.view.shadows,
         );
-        let fresh = self.fresh.as_ref().zip(fresh_source.as_deref());
+        let fresh = self.view.fresh.as_ref().zip(fresh_source.as_deref());
         let primary = self
+            .view
             .primary
             .as_ref()
             .zip(primary_sources.as_ref().map(|(k, _)| k));
@@ -1467,7 +1484,7 @@ impl Renderer {
             self.programs[i].pipelines.install(variant, pair);
         }
         wgsl.clone_into(&mut self.source);
-        self.visibility_buffer = None;
+        self.view.visibility_buffer = None;
         self.hardware_source = hardware_source;
         self.fresh_source = fresh_source;
         self.primary_sources = primary_sources;
@@ -1567,7 +1584,7 @@ impl Renderer {
 
     fn receiver_adjacency_fits(&self, sizes: (u64, u64), tangent_bytes: u64) -> bool {
         let adjacency_bytes = sizes.1 + 4;
-        self.primary.is_some()
+        self.view.primary.is_some()
             && sizes.1 + adjacency_bytes <= self.device.limits().max_storage_buffer_binding_size
             && sizes.1 + adjacency_bytes <= self.device.limits().max_buffer_size
             && sizes.0 + sizes.1 + tangent_bytes + adjacency_bytes <= self.limits.max_mesh_bytes
@@ -1647,7 +1664,7 @@ impl Renderer {
         let start = Instant::now();
         let scopes = OperationScopes::new(&self.device);
         // Traced shading reads the same buffers as storage; no second geometry copy.
-        let traced = if self.primary.is_some() || skinned {
+        let traced = if self.view.primary.is_some() || skinned {
             wgpu::BufferUsages::STORAGE
         } else {
             wgpu::BufferUsages::empty()
@@ -1805,6 +1822,7 @@ impl Renderer {
                 fresh: false,
                 submission: self.submissions,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at,
             },
@@ -1817,8 +1835,8 @@ impl Renderer {
             ..CpuFrame::default()
         };
         self.check_fault()?;
-        let clusters =
-            (self.primary.is_some() && visibility_buffer::supported(&self.device)).then(|| {
+        let clusters = (self.view.primary.is_some() && visibility_buffer::supported(&self.device))
+            .then(|| {
                 let b = visibility_buffer::source_clusters(data);
                 self.upload_clusters(b.clusters, &b.words, vec![[0., 0., 0., 0., f32::MAX]])
             });
@@ -2002,6 +2020,7 @@ impl Renderer {
                 fresh: false,
                 submission: self.submissions,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at,
             },
@@ -2044,6 +2063,7 @@ impl Renderer {
                 fresh: false,
                 submission: self.submissions,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at,
             },
@@ -2215,7 +2235,7 @@ impl Renderer {
                 // Traced shading reads every draw's factors from a storage binding array.
                 usage: wgpu::BufferUsages::UNIFORM
                     | wgpu::BufferUsages::COPY_DST
-                    | if self.primary.is_some() {
+                    | if self.view.primary.is_some() {
                         wgpu::BufferUsages::STORAGE
                     } else {
                         wgpu::BufferUsages::empty()
@@ -2316,10 +2336,15 @@ impl Renderer {
         view: &wgpu::TextureView,
         timestamp_writes: Option<wgpu::RenderPassTimestampWrites<'_>>,
     ) {
-        let hdr = self.lighting.hdr.as_ref().unwrap();
+        let hdr = self.view.hdr.as_ref().unwrap();
         // PP1 runs after reconstruction and never modifies its HDR/history targets.
         let mut timestamp_writes = timestamp_writes;
-        if let Some(post) = self.post.as_ref().filter(|_| self.post_settings.enabled) {
+        if let Some(post) = self
+            .view
+            .post
+            .as_ref()
+            .filter(|_| self.post_settings.enabled)
+        {
             if let Some(stamps) = &mut timestamp_writes {
                 let _start = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("post start timestamp"),
@@ -2346,12 +2371,21 @@ impl Renderer {
             timestamp_writes,
             ..Default::default()
         });
-        if let Some(post) = self.post.as_ref().filter(|_| self.post_settings.enabled) {
+        if let Some(post) = self
+            .view
+            .post
+            .as_ref()
+            .filter(|_| self.post_settings.enabled)
+        {
             post.tone(&mut pass);
         } else {
             pass.set_pipeline(&self.pipeline.present);
             // TR1b presents the target-size reconstruction even when post is disabled.
-            let bind = self.upscale.as_ref().map_or(&*hdr.bind, |u| &*u.present);
+            let bind = self
+                .view
+                .upscale
+                .as_ref()
+                .map_or(&*hdr.bind, |u| &*u.present);
             pass.set_bind_group(0, bind, &[]);
         }
         pass.draw(0..3, 0..1);
@@ -2410,6 +2444,7 @@ impl Renderer {
         view_mode: ViewMode,
     ) -> Result<Option<FrameReport>, Error> {
         self.check_fault()?;
+        self.sync_view_shadows();
         let preparation_start = Instant::now();
         // TP1: the transparent pass runs after reconstruction, with the unjittered camera.
         self.transparency.camera = Some(*camera);
@@ -2418,13 +2453,13 @@ impl Renderer {
         // next lattice offset: every matrix of this frame comes from the jittered camera.
         // TR1b (default on): Temporal soft shadows keep their own film history and are never
         // reconstructed, so their frames are not jittered either.
-        self.reconstruction_frame = (self.reconstruction.enabled
+        self.view.reconstruction_frame = (self.reconstruction.enabled
             && view_mode == ViewMode::Lit
             && self.primary_mode != PrimaryVisibility::Raster
             && self.soft_mode != crate::SoftShadows::Temporal)
-            .then_some(self.reconstruction_index);
+            .then_some(self.view.reconstruction_index);
         let jittered;
-        let camera = match self.reconstruction_frame {
+        let camera = match self.view.reconstruction_frame {
             Some(k) => {
                 let offset = if temporal_reconstruction::p_still("nojitter") {
                     [0.0; 2]
@@ -2441,8 +2476,12 @@ impl Renderer {
         // the caller's size and present writes the caller's target.
         let internal = self.upscale_target(color);
         let color = internal.as_ref().unwrap_or(color);
-        if self.shadows.settings.directional_disk_angle > 0.0 && view_mode == ViewMode::Lit {
-            fresh_shadow_gpu::admit_targets(&self.shadows.settings, color.width(), color.height())?;
+        if self.view.shadows.settings.directional_disk_angle > 0.0 && view_mode == ViewMode::Lit {
+            fresh_shadow_gpu::admit_targets(
+                &self.view.shadows.settings,
+                color.width(),
+                color.height(),
+            )?;
         }
         if draws.iter().any(|draw| {
             !Arc::ptr_eq(&self.identity, &draw.instances.renderer)
@@ -2499,9 +2538,9 @@ impl Renderer {
                 ));
             }
             if self.hardware_shadows.is_none()
-                && self.shadows.enabled(view_mode)
+                && self.view.shadows.enabled(view_mode)
                 && (self.soft_mode != crate::SoftShadows::Virtual
-                    || self.shadows.settings.directional_disk_angle <= 0.0)
+                    || self.view.shadows.settings.directional_disk_angle <= 0.0)
             {
                 return Err(Error::InvalidInput(
                     "visibility-buffer shadows without RT require SoftShadows::Virtual and a nonzero disk",
@@ -2510,7 +2549,7 @@ impl Renderer {
             primary_ray_gpu::admit_draws(
                 draws,
                 matrix,
-                self.shadows.enabled(view_mode),
+                self.view.shadows.enabled(view_mode),
                 self.standard.id(),
                 self.soft_mode == SoftShadows::Temporal,
             )?;
@@ -2526,11 +2565,17 @@ impl Renderer {
             self.busy_frames += 1;
             return Ok(None);
         };
+        // The tick's shared work (skinning, the particle step) runs in its first frame only.
+        self.tick_work = self.take_tick();
         // SK1: palette writes and software-ray updates only after frame admission.
-        let skinning_uploads = self.prepare_skinning(draws)?;
+        let skinning_uploads = if self.tick_work {
+            self.prepare_skinning(draws)?
+        } else {
+            UploadBytes::default()
+        };
         let camera_bytes = matrix_bytes(matrix);
         let shadow_start = Instant::now();
-        let mut shadow_frame = if self.shadows.enabled(view_mode) {
+        let mut shadow_frame = if self.view.shadows.enabled(view_mode) {
             let bounds = draws
                 .iter()
                 .flat_map(|draw| {
@@ -2541,7 +2586,7 @@ impl Renderer {
                         .map(move |&model| shadow_gpu::world_bounds(draw.mesh.bounds, model))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            Some(self.shadows.plan(
+            Some(self.view.shadows.plan(
                 camera,
                 [color.width(), color.height()],
                 &self.lighting.source_lights,
@@ -2749,7 +2794,9 @@ impl Renderer {
         );
         if matches!(&result, Ok(Some(_))) {
             for draw in draws {
-                draw.instances.state.motion_submitted(self.frames);
+                draw.instances
+                    .state
+                    .motion_submitted(self.view_key.0, self.frames);
             }
         }
         result
@@ -2846,7 +2893,7 @@ impl Renderer {
                 || (traced
                     && self.primary_mode == PrimaryVisibility::VisibilityBuffer
                     && self.soft_mode == crate::SoftShadows::Virtual));
-        let soft = hardware_shadowed && self.shadows.settings.directional_disk_angle > 0.0;
+        let soft = hardware_shadowed && self.view.shadows.settings.directional_disk_angle > 0.0;
         #[cfg(test)]
         let soft = soft && (traced || !self.fresh_fragment_reference);
         let fresh = soft && !traced;
@@ -2960,9 +3007,9 @@ impl Renderer {
             ..
         } = self.frame_paths(view_mode, shadow_frame.is_some(), traced);
         // Lit traced frames only; raster frames of a reconstructing renderer keep no history.
-        let reconstructed = traced && !temporal && self.reconstruction_frame.is_some();
+        let reconstructed = traced && !temporal && self.view.reconstruction_frame.is_some();
         if !reconstructed {
-            self.reconstruction_frame = None;
+            self.view.reconstruction_frame = None;
         }
         // Streamed textures (texture_residency.rs): traced and visibility-buffer frames
         // that bind any outside Full mode shade with pipelines that request their levels.
@@ -3006,7 +3053,7 @@ impl Renderer {
             && self.soft_mode == crate::SoftShadows::Virtual;
         if soft
             && !virtual_frame
-            && let Some(state) = self.virtual_shadows.as_mut()
+            && let Some(state) = self.view.virtual_shadows.as_mut()
         {
             state.rolling = false;
         }
@@ -3040,6 +3087,7 @@ impl Renderer {
         // Traced frames resolve visibility without raster depth or MSAA targets.
         if !traced
             && self
+                .view
                 .depth
                 .as_ref()
                 .is_none_or(|depth| depth.texture.size() != color.size())
@@ -3072,12 +3120,12 @@ impl Renderer {
                 * u64::from(color.height())
                 * 4
                 * self.options.samples as u64;
-            self.depth = Some(Depth {
+            self.view.depth = Some(Depth {
                 texture,
                 view,
                 _allocation: self.ledger.allocate(AllocationKind::Target, bytes),
             });
-            self.msaa = if self.options.samples == SampleCount::Four {
+            self.view.msaa = if self.options.samples == SampleCount::Four {
                 let texture = self.ledger.own(
                     self.device.create_texture(&wgpu::TextureDescriptor {
                         label: Some("MSAA color"),
@@ -3121,7 +3169,7 @@ impl Renderer {
             }
         }
         if traced {
-            self.primary.as_mut().unwrap().requests = streaming;
+            self.view.primary.as_mut().unwrap().requests = streaming;
             let scopes = OperationScopes::new(&self.device);
             let scene_generation = self
                 .hardware_shadows
@@ -3151,7 +3199,7 @@ impl Renderer {
                 let key = self.film_key(&camera_bytes, shadow_frame.as_ref().map(|f| f.records()));
                 self.prepare_film(key);
             }
-            if let Some(index) = self.reconstruction_frame {
+            if let Some(index) = self.view.reconstruction_frame {
                 self.ensure_reconstruction()?;
                 self.prepare_reconstruction(camera, index, draws);
                 // P-NSQ: non-RT sun visibility samples TR1's shadow budget, as RT does.
@@ -3207,7 +3255,9 @@ impl Renderer {
             }
         };
         mark(&mut encoder, "skinning");
-        self.encode_skinning(&mut encoder, draws, hardware_build);
+        if self.tick_work {
+            self.encode_skinning(&mut encoder, draws, hardware_build);
+        }
         if let Some(frame) = &local_lights {
             mark(&mut encoder, "light_clusters");
             self.encode_light_clusters(&mut encoder, frame, draws);
@@ -3315,13 +3365,16 @@ impl Renderer {
                 if streaming {
                     self.encode_request_clear(&mut encoder);
                 }
-                let shade = self.primary.as_ref().and_then(|p| p.shading_groups()).map(
-                    |(arrays, materials)| gi_cache::ShadeGroups {
+                let shade = self
+                    .view
+                    .primary
+                    .as_ref()
+                    .and_then(|p| p.shading_groups())
+                    .map(|(arrays, materials)| gi_cache::ShadeGroups {
                         arrays,
                         materials,
                         lighting: self.lighting.bind(),
-                    },
-                );
+                    });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
                 mark(&mut encoder, "shading");
@@ -3342,11 +3395,11 @@ impl Renderer {
                     beginning_of_pass_write_index: Some(slot as u32 * 10),
                     end_of_pass_write_index: Some(slot as u32 * 10 + 1),
                 });
-        let hdr = self.lighting.hdr.as_ref().filter(|_| lit);
+        let hdr = self.view.hdr.as_ref().filter(|_| lit);
         let msaa = if lit {
             hdr.and_then(|h| h.msaa.as_ref())
         } else {
-            self.msaa.as_ref()
+            self.view.msaa.as_ref()
         };
         let resolved = hdr.map_or(&*view, |h| &*h.resolved.view);
         let clear = if lit { self.lit_clear() } else { CLEAR_COLOR };
@@ -3378,7 +3431,7 @@ impl Renderer {
                     },
                 })],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth.as_ref().unwrap().view,
+                    view: &self.view.depth.as_ref().unwrap().view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
@@ -3419,7 +3472,15 @@ impl Renderer {
             pass.set_bind_group(
                 0,
                 if fresh {
-                    &self.fresh.as_ref().unwrap().targets.as_ref().unwrap().shade
+                    &self
+                        .view
+                        .fresh
+                        .as_ref()
+                        .unwrap()
+                        .targets
+                        .as_ref()
+                        .unwrap()
+                        .shade
                 } else if hardware_shadowed {
                     self.hardware_shadows.as_ref().unwrap().bind()
                 } else {
@@ -3472,16 +3533,16 @@ impl Renderer {
         }
         // TP1: transparent draws and particles, after opaque shading and reconstruction.
         // Upscaled frames skip them (docs/m7-gaps.md, Transparency).
-        if lit && self.upscale.is_none() {
+        if lit && self.view.upscale.is_none() {
             mark(&mut encoder, "transparency");
             self.encode_transparency(&mut encoder, draws, transparent, traced)?;
         }
         // TR1b upscaling: present writes the caller's target, not the internal one.
-        let output_view = self.upscale.as_ref().map(|u| {
+        let output_view = self.view.upscale.as_ref().map(|u| {
             self.ledger
                 .attachment(u.output.create_view(&Default::default()))
         });
-        if lit && self.lighting.hdr.is_some() {
+        if lit && self.view.hdr.is_some() {
             mark(&mut encoder, "post");
             self.encode_hdr_present(
                 &mut encoder,
@@ -3598,6 +3659,7 @@ impl Renderer {
             );
         }
         self.frames += 1;
+        self.view.last_frame = self.frames;
         self.timed_frames += u64::from(timed);
         let frame = FrameId(self.frames);
         self.record_flight(
@@ -3610,6 +3672,7 @@ impl Renderer {
                 fresh: soft && !interactive && !temporal,
                 submission: self.submissions,
                 frame: Some(frame),
+                view: Some(self.view_key),
                 revision: self.revision,
                 submitted_at,
             },
@@ -3617,8 +3680,8 @@ impl Renderer {
         self.slots[slot].traced_receivers = traced && (!soft || interactive || temporal);
         self.slots[slot].reconstructed = reconstructed;
         if reconstructed {
-            self.reconstruction_index += 1;
-            self.reconstruction_frame = None;
+            self.view.reconstruction_index += 1;
+            self.view.reconstruction_frame = None;
         }
         self.slots[slot].residency = residency;
         self.check_fault()?;
@@ -3641,6 +3704,7 @@ impl Renderer {
             self.verify_frame(slot, index, draws, soft, &view)?;
         }
         Ok(Some(FrameReport {
+            view: self.view_key,
             frame,
             revision: self.revision,
             cpu: CpuFrame {
@@ -3815,6 +3879,7 @@ impl Renderer {
                 completion: Completion {
                     submission: flight.submission,
                     frame: flight.frame,
+                    view: flight.view,
                     revision: flight.revision,
                     submitted_at: flight.submitted_at,
                     observed_at: Instant::now(),
@@ -3836,16 +3901,8 @@ impl Renderer {
         self.environment
             .uploading
             .retain(|(last, _)| *last > self.completed_submission);
-        self.shadows.collect(self.completed_submission);
-        if let Some(fresh) = &mut self.fresh {
-            fresh.collect(self.completed_submission);
-        }
-        if let Some(state) = &mut self.virtual_shadows {
-            state.collect(self.completed_submission);
-        }
-        if let Some(primary) = &mut self.primary {
-            primary.collect(self.completed_submission);
-        }
+        self.view.collect(self.completed_submission);
+        self.collect_parked(self.completed_submission);
         if let Some(hardware) = &mut self.hardware_shadows {
             hardware.collect(
                 self.completed_submission,

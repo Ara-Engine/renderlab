@@ -175,10 +175,12 @@ fn hdr_state(r: &mut Renderer) -> HdrState {
     let scene = capture(r);
     // Upscaling resolves to a separate output; try_capture_hdr returns the internal image.
     let reconstructed = r
+        .view
         .upscale
         .as_ref()
         .map_or_else(|| hex(&scene), |u| hex(&read_texture(r, &u.hdr.texture)));
     let history = r
+        .view
         .reconstruction_state
         .as_ref()
         .map(|state| hex(&read_texture(r, state.test_history())));

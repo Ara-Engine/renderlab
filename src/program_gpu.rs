@@ -864,7 +864,7 @@ impl Renderer {
                 // Traced shading reads every draw's block from a storage binding array.
                 usage: wgpu::BufferUsages::UNIFORM
                     | wgpu::BufferUsages::COPY_DST
-                    | if self.primary.is_some() {
+                    | if self.view.primary.is_some() {
                         wgpu::BufferUsages::STORAGE
                     } else {
                         wgpu::BufferUsages::empty()
@@ -1078,8 +1078,9 @@ impl Renderer {
             samples: self.options.samples,
             lit: &self.lighting.layout,
             hardware: self.hardware_shadows.as_ref().map(|h| &*h.layout),
-            fresh: self.fresh.as_ref(),
+            fresh: self.view.fresh.as_ref(),
             primary: self
+                .view
                 .primary
                 .as_ref()
                 .filter(|_| self.pipeline.primary.is_some()),

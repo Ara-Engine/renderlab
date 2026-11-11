@@ -482,6 +482,7 @@ impl Renderer {
         // LC2 source sampling rotates only with TR1; comparisons with history off remain
         // deterministic. Raster map filtering is deterministic on every frame.
         let sample = self
+            .view
             .reconstruction_frame
             .map_or(0u32, |k| k.wrapping_add(1) as u32);
         header[88..92].copy_from_slice(&sample.to_ne_bytes());
@@ -510,7 +511,7 @@ impl Renderer {
                 let next = Atlas::new(
                     &self.device,
                     &self.ledger,
-                    Some(&self.shadows.bindings),
+                    Some(&self.view.shadows.bindings),
                     state.settings.resolution,
                     count,
                     cube_layers,

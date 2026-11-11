@@ -259,7 +259,7 @@ impl PostGpu {
                 e,
             )
         });
-        let (primary_layout, primary_pipeline) = if let Some(primary) = &r.primary {
+        let (primary_layout, primary_pipeline) = if let Some(primary) = &r.view.primary {
             let bindings = layout(
                 r,
                 "post primary surface",
@@ -501,7 +501,7 @@ impl PostGpu {
             .retain(|(last, _)| *last > r.completed_submission);
         let s = r.post_settings;
         self.prepare_targets(r);
-        let internal = r.lighting.hdr.as_ref().unwrap().resolved.texture.size();
+        let internal = r.view.hdr.as_ref().unwrap().resolved.texture.size();
         let current = camera.unjittered().matrix(internal.width, internal.height);
         // MV1: camera and object history must describe the same rendered frame.
         let previous = self
@@ -539,7 +539,8 @@ impl PostGpu {
         use wgpu::BindingResource as R;
         let hdr = r.post_hdr();
         let hit = primary.then(|| {
-            (*r.primary
+            (*r.view
+                .primary
                 .as_ref()
                 .unwrap()
                 .targets
@@ -560,7 +561,7 @@ impl PostGpu {
             return;
         }
         let surface = if primary {
-            let p = r.primary.as_ref().unwrap();
+            let p = r.view.primary.as_ref().unwrap();
             let t = p.targets.as_ref().unwrap();
             group(
                 r,
@@ -580,7 +581,7 @@ impl PostGpu {
                 "post raster surface",
                 &self.raster_layout,
                 &[
-                    (0, R::TextureView(&r.depth.as_ref().unwrap().view)),
+                    (0, R::TextureView(&r.view.depth.as_ref().unwrap().view)),
                     (1, self.frame.value.as_entire_binding()),
                     (2, R::TextureView(&self.aux.view)),
                 ],
@@ -751,7 +752,13 @@ impl PostGpu {
             if primary {
                 pass.set_bind_group(
                     1,
-                    r.primary.as_ref().unwrap().virtual_geometry().unwrap().1,
+                    r.view
+                        .primary
+                        .as_ref()
+                        .unwrap()
+                        .virtual_geometry()
+                        .unwrap()
+                        .1,
                     &[],
                 );
             }
@@ -793,9 +800,10 @@ impl PostGpu {
 impl Renderer {
     /// The image after reconstruction: native HDR, or TR1b's target-size output.
     fn post_hdr(&self) -> &Depth {
-        self.upscale
+        self.view
+            .upscale
             .as_ref()
-            .map_or(&self.lighting.hdr.as_ref().unwrap().resolved, |u| &u.hdr)
+            .map_or(&self.view.hdr.as_ref().unwrap().resolved, |u| &u.hdr)
     }
     pub fn post_settings(&self) -> PostSettings {
         self.post_settings
@@ -805,9 +813,10 @@ impl Renderer {
         settings.validate()?;
         self.post_settings = settings;
         if !settings.enabled {
-            if let Some(post) = self.post.take() {
-                self.retired_post.push((self.submissions, post));
-            }
+            let submissions = self.submissions;
+            let retired: Vec<_> = self.views_mut().filter_map(|v| v.post.take()).collect();
+            self.retired_post
+                .extend(retired.into_iter().map(|post| (submissions, post)));
         }
         Ok(())
     }
@@ -822,19 +831,20 @@ impl Renderer {
             }
         }
         self.post_lut = lut;
-        if let Some(mut post) = self.post.take() {
-            post.write_lut(
-                self,
-                self.post_lut.as_ref().unwrap_or(&ColourLut::identity(2)?),
-            );
+        let identity = ColourLut::identity(2)?;
+        let mut posts: Vec<_> = self.views_mut().map(|v| v.post.take()).collect();
+        for post in posts.iter_mut().flatten() {
+            post.write_lut(self, self.post_lut.as_ref().unwrap_or(&identity));
             post.lut_custom = self.post_lut.is_some();
-            self.post = Some(post);
+        }
+        for (view, post) in self.views_mut().zip(posts) {
+            view.post = post;
         }
         Ok(())
     }
     /// Suppress shutter motion across an explicit camera cut.
     pub fn cut_post_motion(&mut self) {
-        if let Some(post) = &mut self.post {
+        if let Some(post) = &mut self.view.post {
             post.previous = None;
         }
     }
@@ -843,7 +853,7 @@ impl Renderer {
             return Ok(());
         }
         let size = self.post_hdr().texture.size();
-        let mut post = match self.post.take() {
+        let mut post = match self.view.post.take() {
             Some(p) if p.size == size && (!primary || p.primary_pipeline.is_some()) => p,
             old => {
                 if let Some(old) = old {
@@ -863,7 +873,7 @@ impl Renderer {
             }
         }
         post.prepare(self, camera, primary);
-        self.post = Some(post);
+        self.view.post = Some(post);
         Ok(())
     }
 }

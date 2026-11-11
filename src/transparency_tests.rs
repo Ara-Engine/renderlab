@@ -706,7 +706,7 @@ fn gpu_tp1_scene() {
     r.test_drain("TP1 probe frame");
     drop(probe);
     let depth: Vec<f32> = {
-        let texture = &r.transparency.targets.as_ref().unwrap().depth.texture;
+        let texture = &r.view.transparency_targets.as_ref().unwrap().depth.texture;
         read_texture(&r, texture, 4)
             .chunks_exact(4)
             .map(|b| f32::from_le_bytes(b.try_into().unwrap()))

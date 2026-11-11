@@ -3,7 +3,7 @@
 use renderlab::{
     IndirectLookup, IndirectSettings, Reconstruction, ReconstructionShadowBudget, SoftShadows,
     VirtualLookup, VirtualShadowSettings,
-    engine::{Engine, Light, Quality, RenderPath, RenderScale, Settings},
+    engine::{Engine, Light, Quality, RenderPath, RenderScale, Settings, ViewLook},
 };
 
 /// Bisect switches (`--diag KEY=VALUE`; P-FLAT, docs/p-flat.md). Settings-level keys edit the
@@ -127,25 +127,29 @@ impl Diag {
         Ok(d)
     }
     pub fn settings(&self, mut s: Settings) -> Settings {
-        if let Some(quality) = self.quality {
-            s.quality = quality;
-        }
         if let Some(aerial) = self.aerial_perspective {
             s.aerial_perspective = aerial;
         }
         if self.height_fog == Some(false) {
             s.height_fog = None;
         }
-        if let Some(r) = self.reflection_max_roughness {
-            s.reflections.max_roughness = r;
-        }
         s
+    }
+    pub fn look(&self, mut look: ViewLook) -> ViewLook {
+        if let Some(quality) = self.quality {
+            look.quality = quality;
+        }
+        if let Some(r) = self.reflection_max_roughness {
+            look.reflections.max_roughness = r;
+        }
+        look
     }
     pub fn apply(
         &self,
         engine: &mut Engine,
         path: RenderPath,
         scale: RenderScale,
+        quality: Quality,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let settings = engine.settings();
         let r = engine.renderer_mut();
@@ -172,7 +176,7 @@ impl Diag {
             }
             RenderPath::NonRt => {
                 if let Some(mut vsm) = self.virtual_shadows {
-                    if settings.quality == Quality::Reference {
+                    if quality == Quality::Reference {
                         vsm.lookup = VirtualLookup::Exact;
                     }
                     r.set_virtual_shadow_settings(vsm)?;

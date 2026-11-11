@@ -140,7 +140,7 @@ fn swap(r: &mut Renderer, candidate: &mut Option<primary_ray_gpu::PrimaryPipelin
 /// Current GPU receiver attachments at the three old-origin witnesses. Normal.w
 /// carries the explicit material thin sign; world.w carries the actual epsilon.
 fn receiver_policy(r: &Renderer, camera: &Camera) -> serde_json::Value {
-    let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+    let t = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
     let world = read_texture(r, &t.world.texture);
     let normal = read_texture(r, &t.normal.texture);
     let eye = camera.view().inverse().w_axis.truncate();
@@ -193,7 +193,7 @@ fn gpu_rt1b_footprint_batch() {
         ]
     };
     for (name, mode, pattern, rays) in variants_to_compile {
-        let p = r.primary.as_ref().unwrap().compile(
+        let p = r.view.primary.as_ref().unwrap().compile(
             &r.device,
             &r.ledger,
             &sources(mode, pattern, rays),

@@ -2094,7 +2094,7 @@ impl Renderer {
     /// frame has no traced shading groups. A mixed-program frame (MP1) compiles one cell
     /// pipeline per reflecting program instead; cells of the others reflect nothing.
     fn ensure_gi_shade(&mut self, software: bool) -> Result<bool, Error> {
-        let Some(state) = self.primary.as_ref() else {
+        let Some(state) = self.view.primary.as_ref() else {
             return Ok(false);
         };
         if state.shading_groups().is_none() {
@@ -2175,7 +2175,7 @@ impl Renderer {
                 }),
             ResourceKind::ShaderModule,
         );
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let layout = self.ledger.own(
             self.device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2748,7 +2748,7 @@ impl Renderer {
         // Bounce (G2): the lights, the environment, the frame's program and its draws'
         // materials (stable ids) form the lighting key.
         let light_key: Option<[u8; 32]> = bounce.then(|| {
-            let state = self.primary.as_ref().unwrap();
+            let state = self.view.primary.as_ref().unwrap();
             let mut h = Sha256::new();
             h.update(format!("{:?}", self.lighting.source_lights).as_bytes());
             // DC1: altered surface inputs relight bounce cells on the existing schedule.
@@ -2764,7 +2764,7 @@ impl Renderer {
             h.update(ids.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<_>>());
             h.finalize().into()
         });
-        let region = self.primary.as_ref().unwrap().scene;
+        let region = self.view.primary.as_ref().unwrap().scene;
         // P-STILL (docs/p-still.md): a still view is the unjittered camera and the target
         // size, decided on the CPU from their bits. TR1's sub-pixel jitter (and the jittered
         // `scene_pixels` rectangle, which follows from the camera, the hashed placements
@@ -2816,7 +2816,14 @@ impl Renderer {
     }
 
     fn prepare_gi_groups(&mut self, software: bool, scene_generation: u64) -> Result<(), Error> {
-        let targets = self.primary.as_ref().unwrap().targets.as_ref().unwrap();
+        let targets = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .targets
+            .as_ref()
+            .unwrap();
         // A new software geometry buffer drops the groups itself; transform changes rewrite it.
         let rays = if software {
             self.gi.packed.as_ref().map_or(0, |p| p.bytes)

@@ -1326,8 +1326,10 @@ impl Renderer {
     ) -> Result<(), Error> {
         budget.validate()?;
         if budget != self.reconstruction_shadow_budget {
-            self.reconstruction_state = None;
-            self.reconstruction_index = 0;
+            for view in self.views_mut() {
+                view.reconstruction_state = None;
+                view.reconstruction_index = 0;
+            }
         }
         self.reconstruction_shadow_budget = budget;
         Ok(())
@@ -1339,12 +1341,13 @@ impl Renderer {
     pub fn reconstruction_shadow_rays(&self) -> Option<u32> {
         if self.primary_mode != PrimaryVisibility::Traced
             || self.soft_mode != SoftShadows::Interactive
-            || self.shadows.settings.directional_disk_angle == 0.0
+            || self.view.shadows.settings.directional_disk_angle == 0.0
             || !self.reconstruction.enabled
         {
             return None;
         }
-        self.reconstruction_state
+        self.view
+            .reconstruction_state
             .as_ref()
             .map(|s| s.plan.shadow_rays)
     }
@@ -1359,9 +1362,10 @@ impl Renderer {
             .reconstruction
             .scale
             .internal_size(color.width(), color.height());
-        if self.reconstruction_frame.is_none() || [width, height] == [color.width(), color.height()]
+        if self.view.reconstruction_frame.is_none()
+            || [width, height] == [color.width(), color.height()]
         {
-            self.upscale = None;
+            self.view.upscale = None;
             return None;
         }
         let size = wgpu::Extent3d {
@@ -1370,6 +1374,7 @@ impl Renderer {
             depth_or_array_layers: 1,
         };
         if self
+            .view
             .upscale
             .as_ref()
             .is_none_or(|u| u.color.texture.size() != size || u.hdr.texture.size() != color.size())
@@ -1400,14 +1405,14 @@ impl Renderer {
                 }),
                 ResourceKind::BindGroup,
             );
-            self.upscale = Some(Upscale {
+            self.view.upscale = Some(Upscale {
                 color: internal,
                 hdr,
                 present,
                 output: color.clone(),
             });
         }
-        let upscale = self.upscale.as_mut().unwrap();
+        let upscale = self.view.upscale.as_mut().unwrap();
         upscale.output = color.clone();
         Some((*upscale.color.texture).clone())
     }
@@ -1424,7 +1429,7 @@ impl Renderer {
     /// it now restarts only its restart sphere (`relit_zones`).
     fn reconstruction_key(&self) -> [u8; 32] {
         let u = &self.uploads;
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let lights: Vec<_> = self
             .lighting
             .source_lights
@@ -1449,7 +1454,7 @@ impl Renderer {
             )
             .chain_update(state.geometry_generation.to_ne_bytes())
             .chain_update(state.reconstruction_bindings_generation.to_ne_bytes())
-            .chain_update(format!("{:?}", self.shadows.settings).as_bytes())
+            .chain_update(format!("{:?}", self.view.shadows.settings).as_bytes())
             .chain_update(format!("{:?}", self.virtual_settings).as_bytes())
             .chain_update(format!("{:?} {:?}", self.soft_mode, self.primary_mode).as_bytes())
             .chain_update(format!("{lights:?}").as_bytes())
@@ -1509,12 +1514,17 @@ impl Renderer {
         };
         let scopes = OperationScopes::new(&self.device);
         let production = self.pipeline.primary.as_ref().unwrap();
-        let pipelines = self.primary.as_ref().unwrap().reconstruction_pipelines(
-            &self.device,
-            &self.ledger,
-            &resolve,
-            trace.as_deref().map(|s| (s, production)),
-        );
+        let pipelines = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .reconstruction_pipelines(
+                &self.device,
+                &self.ledger,
+                &resolve,
+                trace.as_deref().map(|s| (s, production)),
+            );
         if let Some(error) = scopes.finish() {
             return Err(match error {
                 wgpu::Error::Validation { .. } => Error::Shader(error.to_string()),
@@ -1540,12 +1550,12 @@ impl Renderer {
             None => resolve_source(&self.source).unwrap(),
         };
         let scopes = OperationScopes::new(&self.device);
-        let pipelines = self.primary.as_ref().unwrap().reconstruction_pipelines(
-            &self.device,
-            &self.ledger,
-            &source,
-            None,
-        );
+        let pipelines = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .reconstruction_pipelines(&self.device, &self.ledger, &source, None);
         assert!(
             scopes.finish().is_none(),
             "static-control resolve must compile"
@@ -1570,20 +1580,26 @@ impl Renderer {
         index: u64,
         draws: &[PreparedDraw<'_>],
     ) {
-        let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
-        let output = self.upscale.as_ref().map_or(size, |u| u.hdr.texture.size());
+        let size = self.view.hdr.as_ref().unwrap().resolved.texture.size();
+        let output = self
+            .view
+            .upscale
+            .as_ref()
+            .map_or(size, |u| u.hdr.texture.size());
         if self
+            .view
             .reconstruction_state
             .as_ref()
             .is_none_or(|s| s.size() != size || s.output() != output)
         {
             let cut = self
+                .view
                 .reconstruction_state
                 .as_ref()
                 .is_some_and(|s| s.plan.cut);
             let mut next = ReconstructionState::new(self, size, output);
             next.plan.cut = cut;
-            self.reconstruction_state = Some(next);
+            self.view.reconstruction_state = Some(next);
         }
         let key = self.reconstruction_key();
         let matrix = camera.unjittered().matrix(size.width, size.height);
@@ -1602,13 +1618,11 @@ impl Renderer {
             if let Some(s) = &d.mesh.skin {
                 skin_revisions.push(s.revision);
             }
-            for (&model, &previous_model) in d
-                .instances
-                .state
-                .models
-                .iter()
-                .zip(d.instances.state.previous_models(self.frames))
-            {
+            for (&model, &previous_model) in d.instances.state.models.iter().zip(
+                d.instances
+                    .state
+                    .previous_models(self.view_key.0, self.view.last_frame),
+            ) {
                 let moved = model.to_cols_array().map(f32::to_bits)
                     != previous_model.to_cols_array().map(f32::to_bits);
                 rigid_motion |= moved;
@@ -1622,7 +1636,7 @@ impl Renderer {
         }
         // P-RTS: with the penumbra pass compiled and edges deferred, every receiver first
         // traces the held count; only listed pixels trace the rest of the budget.
-        let primary = self.primary.as_ref().unwrap();
+        let primary = self.view.primary.as_ref().unwrap();
         let listing = primary.targets.as_ref().is_some_and(|t| t.defer_edges)
             && self.pipeline.primary.as_ref().is_some_and(|p| {
                 p.reconstruction
@@ -1631,6 +1645,7 @@ impl Renderer {
                     .is_some_and(|t| t.penumbra.is_some())
             });
         let planned = self
+            .view
             .reconstruction_state
             .as_mut()
             .unwrap()
@@ -1642,8 +1657,8 @@ impl Renderer {
                 index,
                 key,
                 lights: &self.lighting.source_lights,
-                requests: &self.shadows.settings.requests,
-                directional_disk_angle: self.shadows.settings.directional_disk_angle,
+                requests: &self.view.shadows.settings.requests,
+                directional_disk_angle: self.view.shadows.settings.directional_disk_angle,
                 matrix,
                 eye,
                 jitter: camera.jitter(),
@@ -1667,19 +1682,19 @@ impl Renderer {
         self.uploads.write_calls += 2;
         // The non-RT sun lookup reads the same zones (prepare_virtual_sampling).
         let zones: [u8; ZONES_BYTES] = planned.zones().try_into().unwrap();
-        self.reconstruction_state.as_mut().unwrap().zones = zones;
-        let state = self.reconstruction_state.as_ref().unwrap();
+        self.view.reconstruction_state.as_mut().unwrap().zones = zones;
+        let state = self.view.reconstruction_state.as_ref().unwrap();
         self.queue
             .write_buffer(&state.frame.value, 0, &planned.frame);
         self.uploads.view_settings += FRAME_BYTES as u64;
         self.uploads.write_calls += 1;
         // The resolve writes the frame's HDR target, or the upscaled output.
-        let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
-        let out = self.upscale.as_ref().map_or(hdr, |u| &u.hdr);
-        let primary = self.primary.as_ref().unwrap();
+        let hdr = &self.view.hdr.as_ref().unwrap().resolved;
+        let out = self.view.upscale.as_ref().map_or(hdr, |u| &u.hdr);
+        let primary = self.view.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
         let frame = &primary.frame.as_ref().unwrap().0.value;
-        let state = self.reconstruction_state.as_ref().unwrap();
+        let state = self.view.reconstruction_state.as_ref().unwrap();
         let group_key: GroupKey = (
             (*targets.hit.texture).clone(),
             (*targets.tiles.texture).clone(),
@@ -1689,18 +1704,18 @@ impl Renderer {
         );
         if state.groups.as_ref().is_none_or(|(k, _)| *k != group_key) {
             let groups = self.reconstruction_groups();
-            self.reconstruction_state.as_mut().unwrap().groups = Some((group_key, groups));
+            self.view.reconstruction_state.as_mut().unwrap().groups = Some((group_key, groups));
         }
     }
 
     fn reconstruction_groups(&self) -> [Owned<wgpu::BindGroup>; 2] {
         use wgpu::BindingResource as R;
-        let state = self.reconstruction_state.as_ref().unwrap();
-        let primary = self.primary.as_ref().unwrap();
+        let state = self.view.reconstruction_state.as_ref().unwrap();
+        let primary = self.view.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
         let frame = &primary.frame.as_ref().unwrap().0.value;
-        let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
-        let out = self.upscale.as_ref().map_or(hdr, |u| &u.hdr);
+        let hdr = &self.view.hdr.as_ref().unwrap().resolved;
+        let out = self.view.upscale.as_ref().map_or(hdr, |u| &u.hdr);
         [0, 1].map(|written| {
             let read = 1 - written;
             let entries = [
@@ -1737,15 +1752,15 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let state = self.reconstruction_state.as_ref().unwrap();
-        let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
+        let state = self.view.reconstruction_state.as_ref().unwrap();
+        let hdr = &self.view.hdr.as_ref().unwrap().resolved;
         encoder.copy_texture_to_texture(
             hdr.texture.as_image_copy(),
             state.sample.texture.as_image_copy(),
             state.size(),
         );
         let size = state.output();
-        let primary = self.primary.as_ref().unwrap();
+        let primary = self.view.primary.as_ref().unwrap();
         let pipelines = self.pipeline.primary.as_ref().unwrap();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("temporal reconstruction"),

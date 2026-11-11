@@ -676,10 +676,13 @@ fn render_repeats(
     #[cfg(test)]
     let shader = diagnostic_shader.as_deref().unwrap_or(shader);
     let make_pipeline = || {
-        let module = crate::pipeline_compilation::create_engine_shader_module(device, wgpu::ShaderModuleDescriptor {
-            label: Some("reference path tracer"),
-            source: wgpu::ShaderSource::Wgsl(shader.into()),
-        });
+        let module = crate::pipeline_compilation::create_engine_shader_module(
+            device,
+            wgpu::ShaderModuleDescriptor {
+                label: Some("reference path tracer"),
+                source: wgpu::ShaderSource::Wgsl(shader.into()),
+            },
+        );
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("reference path tracer"),
             layout: Some(
