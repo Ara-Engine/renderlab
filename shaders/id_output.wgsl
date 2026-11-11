@@ -12,9 +12,9 @@
 // pixel once. Other frames (no reconstruction: unjittered) read this frame's hit record.
 //
 // The slots name placements, not primitives. A still camera keeps the previous frame's
-// primitive of an unchanged placement. Otherwise the placement's ids are voted over this
-// frame's 3x3 samples showing it, with the previous frame's id kept until another leads by
-// two samples: entities merged into one object hold still and flip once at a moving edge.
+// primitive of an unchanged placement. Otherwise a placement's id changes only once the
+// pixel's own sample has shown the new id ID_STREAK frames running: entities merged into one
+// object hold still under jitter and flip once, a little late, at a moving edge.
 
 struct IdFrame {
     // Output size in pixels.
@@ -39,6 +39,9 @@ const ID_UNTAGGED:u32=0xffffffffu;
 const ID_ANY:u32=0xffffffffu;
 // The hysteresis of a moving pixel's choice, in coverage.
 const ID_MARGIN:f32=0.125;
+// Frames running a merged object's new id must be seen before a moving pixel takes it (the
+// jitter sequence shows an edge's other side for up to two frames running).
+const ID_STREAK:u32=3u;
 
 @group(0) @binding(0) var<uniform> id_frame:IdFrame;
 // The frame's hit record (placement + 1, primitive, barycentrics) and trace tile coverage,
@@ -54,9 +57,10 @@ const ID_MARGIN:f32=0.125;
 @group(0) @binding(6) var<storage,read> id_moved:array<u32>;
 // The glass raster's nearest pane: transparent instance + 1, 0 for none.
 @group(0) @binding(7) var id_glass:texture_2d<u32>;
-// The previous frame's settled (placement + 1, primitive), and this frame's.
+// The previous frame's settled (placement + 1, primitive, pending primitive, its streak),
+// and this frame's.
 @group(0) @binding(8) var id_previous:texture_2d<u32>;
-@group(0) @binding(9) var id_settled:texture_storage_2d<rg32uint,write>;
+@group(0) @binding(9) var id_settled:texture_storage_2d<rgba32uint,write>;
 // Layer 0: opaque id; layer 1: front id.
 @group(0) @binding(10) var id_out:texture_storage_2d_array<r32uint,write>;
 // Sorted, disjoint (first primitive, count, id, 0) per entry.
@@ -129,38 +133,39 @@ fn id_settle(p:vec2<u32>,here:vec2<u32>)->u32 {
     }
     let here=id_record(q);
     let placement=id_settle(p,here);
-    let previous=textureLoad(id_previous,p,0).xy;
-    var primitive=ID_ANY;
+    let previous=textureLoad(id_previous,p,0);
     let keep=(id_frame.flags&ID_PREVIOUS)!=0u && previous.x==placement;
+    // This frame's primitive of the settled placement: the pixel's own sample's when it shows
+    // the placement, else the first 3x3 sample's that does.
+    var candidate=select(ID_ANY,here.y,here.x==placement);
+    for(var i=0;i<9 && candidate==ID_ANY;i+=1) {
+        let r=id_record(q+vec2<i32>(i%3,i/3)-vec2<i32>(1));
+        if r.x==placement {candidate=r.y;}
+    }
+    var settled=vec4<u32>(placement,candidate,ID_ANY,0u);
     if keep && (id_frame.flags&ID_STILL_CAMERA)!=0u && !id_has_moved(placement) {
-        primitive=previous.y;
-    } else {
-        // One placement can hold several entities (merged objects): its id follows its
-        // primitive, which only this frame's jittered samples know. Vote by id over the 3x3
-        // samples showing the placement: the previous frame's id stays until another id
-        // leads it by two samples, so an edge between two entities of one object flips a
-        // pixel once as it crosses.
-        let previous_id=select(ID_UNTAGGED,id_lookup(placement-1u,previous.y),keep && placement!=0u && placement<=id_frame.opaque);
-        var candidate=select(ID_ANY,here.y,here.x==placement);
-        var candidate_id=0u;
-        if candidate!=ID_ANY {candidate_id=id_tag(vec2<u32>(placement,candidate));}
-        var kept=0u;var rival=0u;
-        for(var i=0;i<9;i+=1) {
-            let r=id_record(q+vec2<i32>(i%3,i/3)-vec2<i32>(1));
-            if r.x!=placement {continue;}
-            if candidate==ID_ANY {candidate=r.y;candidate_id=id_tag(vec2<u32>(placement,r.y));}
-            let id=id_tag(vec2<u32>(placement,r.y));
-            if keep && id==previous_id {kept+=1u;}
-            if id==candidate_id {rival+=1u;}
-        }
-        primitive=candidate;
-        if keep && (candidate==ID_ANY || candidate_id==previous_id || (kept>0u && rival<kept+2u)) {
-            primitive=previous.y;
+        settled=previous;
+    } else if keep && placement!=0u && placement<=id_frame.opaque {
+        // One placement can hold several entities (merged objects), and only this frame's
+        // jittered sample knows which: the previous id stays until the candidate's id is seen
+        // ID_STREAK frames running, so jitter at an edge between two entities does not flip a
+        // pixel and a crossing edge flips it once, ID_STREAK - 1 frames late.
+        let previous_id=id_lookup(placement-1u,previous.y);
+        let candidate_id=select(previous_id,id_lookup(placement-1u,candidate),candidate!=ID_ANY);
+        if candidate_id==previous_id {
+            settled=vec4<u32>(placement,previous.y,ID_ANY,0u);
+        } else if previous.z!=ID_ANY && id_lookup(placement-1u,previous.z)==candidate_id {
+            if previous.w+1u>=ID_STREAK {
+                settled=vec4<u32>(placement,candidate,ID_ANY,0u);
+            } else {
+                settled=vec4<u32>(placement,previous.y,candidate,previous.w+1u);
+            }
+        } else {
+            settled=vec4<u32>(placement,previous.y,candidate,1u);
         }
     }
-    let settled=vec2<u32>(placement,primitive);
-    textureStore(id_settled,p,vec4<u32>(settled,0u,0u));
-    let opaque=id_tag(settled);
+    textureStore(id_settled,p,settled);
+    let opaque=id_tag(settled.xy);
     var front=opaque;
     if (id_frame.flags&ID_GLASS)!=0u {
         let g=textureLoad(id_glass,p,0).x;
