@@ -142,6 +142,13 @@ fn glossy_screen(mut api: String) -> String {
                 "let count=min(footprint,RL_GLOSSY_TRACED);",
                 "let count=select(min(footprint,RL_GLOSSY_TRACED),1u,rough>=0.4);",
             ),
+            Some(("rough4", n)) => edit(
+                "let count=min(footprint,RL_GLOSSY_TRACED);",
+                &format!(
+                    "let count=select(min(footprint,RL_GLOSSY_TRACED),min(footprint,{}u),rough>=0.4);",
+                    n.parse::<u32>().unwrap()
+                ),
+            ),
             // Counting screen: traced glossy receivers turn green below roughness 0.4 and
             // magenta from it.
             None if item == "mark4" => edit(
@@ -159,6 +166,16 @@ fn glossy_screen(mut api: String) -> String {
             None if item == "noshade" => edit(
                 "            let hs=surface(h.input);\n            radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n",
                 "            radiance=select(vec3<f32>(0.0),rl_sky(d,cone_alpha),h.visible);\n",
+            ),
+            // Cost bisect of the exchange: none of it, no barrier, no sample arrays.
+            None if item == "noexchange" => edit(
+                "fn rl_reflection_share(lane:u32,width:u32,live:bool) {\n",
+                "fn rl_reflection_share(lane:u32,width:u32,live:bool) {\n    if true {return;}\n",
+            ),
+            None if item == "nobarrier" => edit("    workgroupBarrier();\n", ""),
+            None if item == "noshmem" => edit(
+                "var<workgroup> rl_share_point:array<vec4<f32>,128>;\nvar<workgroup> rl_share_radiance:array<vec4<f32>,128>;",
+                "var<workgroup> rl_share_point:array<vec4<f32>,1>;\nvar<workgroup> rl_share_radiance:array<vec4<f32>,1>;",
             ),
             // Read by src/reflection_software.rs when it builds trees.
             None if item == "median" => {}
