@@ -1522,8 +1522,19 @@ stamp stops at 8. **Not compared with wgpu yet**: the reference has to come from
 Linux gate, which can also run both layers on the same GPU, where the raw tables do
 not have to travel.
 
-Next: bounce (gather, light visibility, and cell shading through the program
-composer) and the cell filter.
+**Bounce and the filter, so far only through the adapter.** `gi_gather`, `gi_light`,
+`gi_filter` and `gi_shade_cells` (composed with the standard program on the hardware
+soft head at the cell stage, as `gi_shade_pipeline` composes it) reflect, emit MSL and
+SPIR-V that validates, and compile natively
+(`cache_kernels_reflect_validate_and_compile`). Nothing records them yet. One adapter
+defect surfaced: the SPIR-V path's textual rewrite of resource names decided "struct
+member" by looking back over comments, so a table write that followed a comment
+ending in a period kept its original binding. The heap-binding check refused the
+module, so it was loud, never silent; both textual passes now look back over code
+only, and the rename regression covers it.
+
+Next: bounce in the frame (the gather before the claims, light visibility and cell
+shading after the integration), then the cell filter.
 
 ## First Vulkan run (Radeon 760M, RADV, validation on)
 
