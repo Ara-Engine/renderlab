@@ -911,3 +911,21 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
 2. Merge the trust policy. The numbers above support it. Before merging: fix the census tool, whose `cpu_shader_compile_structure` test fails on the branch because it composes the `program-bins` module without the `PRIMARY_BATCHES` constant (a tool fault, three variants), and merge main (the branch is based on a97d663).
 3. The kernel split itself was not started. P-SKY took the game scene's cold first image from about 183 s to about 10 s, so it is no longer urgent; the remaining cold cost is the per-kernel NVIDIA compile (P-PIPE).
 4. `docs/p-split.md` has empty Census and Cold start sections and no result summary.
+
+## arrayLength of a buffer-array element on RADV (ara-gpu backend finding, 2026-11-11)
+
+**UNCONFIRMED on the wgpu renderer.** Found on the Radeon (RADV) through the ara-gpu backend. No fix until a test confirms it here.
+
+- **Fault.** naga 30.0.1 decorates `heap[i].data[j]` NonUniform, but emits `OpArrayLength` on `heap[i].data` with no decoration (`write_runtime_array_length` never adds one). The result is then undefined when the index differs within a workgroup. RADV reads one element's length for the whole workgroup; NVIDIA reads per invocation. The backend's adapter now adds the decoration; the wgpu renderer goes through the same naga path.
+- **Why nothing has shown it.** Every mesh in the compared scenes has the same kind of index buffer.
+- **Call sites that decide rendering per pixel** (root's grep; every `arrayLength` on an indexed binding):
+  - `shaders/primary_trace.wgsl:33` `primary_edge_neighbour`: adjacency by `arrayLength(&primary_indices[batch].data) % 3`.
+  - `shaders/virtual_shadow.wgsl:450` `vsm_neighbour` and `:501` `vsm_adjacency`: the same test.
+  - `src/visibility_buffer.rs:259`: the same test, composed into the visibility-buffer kernel.
+  - `shaders/object_motion.wgsl:15` `motion_skinned` and `shaders/temporal_resolve.wgsl:101` `tr1_skinned`: skinned or static by the lengths of `motion_previous_vertices[batch]` and `tr1_vertices[batch]`. A workgroup covering skinned and static meshes would judge them all by one.
+  - Not affected (single buffers): `object_motion.wgsl:7`, `virtual_shadow_cache.wgsl`, `reference_path_tracer.wgsl`.
+- **RADV-only shadow failures above.** Possibly related, not shown: both failing tests draw a receiver and a separate blocker mesh, and the sun-shadow kernels read adjacency this way. Whether those two meshes differ in index-buffer kind, and which kernel the tests run, is not traced yet.
+- **Next.**
+  1. The backend's author is opening a PR with one ignored GPU test that reproduces it through wgpu (four buffers of different lengths, indexed differently within one workgroup). The Linux gate runs it on the Radeon.
+  2. If it fails there, root fixes it ahead of P-GLOSSY: pass the adjacency flag (or the length) and the skinned flag in the placement or draw record, so nothing that decides rendering reads a buffer-array element's `arrayLength`; then rerun the two RADV shadow tests.
+  3. Report the missing decoration to naga upstream.

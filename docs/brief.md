@@ -8,7 +8,7 @@ The immediate motivation is unacceptable iteration speed in the large engine. Tr
 
 Islam additionally requires development policy limits to be configurable or explicitly disableable where valid. Small source-file, texture, metadata and streaming-work defaults must not become permanent product ceilings. Expose effective limits through the library and relevant tools, while preserving structural validation, checked arithmetic, format constraints and device limits. This is implemented through typed library limits and an optional shared tooling limits file; see [limits.md](limits.md). Keep registered test budgets unchanged so prior evidence remains comparable. Removing a policy cap does not establish large-asset scalability; that still requires measurement.
 
-The public name is undecided; Renderlab is a reversible working name. The public repository is https://github.com/Ara-Engine/renderlab. The license remains undecided. See milestone-0.md for the completed development environment and project-handoff.md for the current scope.
+The public name is undecided; Renderlab is a reversible working name. The public repository is https://github.com/Ara-Engine/renderlab. The license is MIT OR Apache-2.0 (2026-11-11). See milestone-0.md for the completed development environment and project-handoff.md for the current scope.
 
 ## Long-term quality and performance target
 
