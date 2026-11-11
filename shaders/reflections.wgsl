@@ -194,13 +194,14 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
             d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
         }
         if dot(d,side)<=0.0 {continue;}
+        // The sample's place for rl_reflection_share: a miss's direction or a hit's point.
+        var point=vec4<f32>(d,0.0);
         rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));
         while rayQueryProceed(&query) {}
         let hit=rayQueryGetCommittedIntersection(&query);
         // Only a miss looks up the sky: the compiler does not sink a lookup the hit
         // branch overwrites (P-SKY, docs/p-sky.md).
         var radiance=vec3<f32>(0.0);
-        var point=vec4<f32>(d,0.0);
         if hit.kind!=0u {
             let h=rl_hit_input(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),origin,d,width,spread,pixel);
             rl_load_parameters(h.batch);
@@ -242,7 +243,7 @@ const RL_SHARE_SLOTS:u32=4u;
 const RL_SHARE:bool=RL_GLOSSY_TRACED<=RL_SHARE_SLOTS;
 // Rows of every shading group (8x4 tiles, 4x4 lists).
 const RL_SHARE_ROWS:u32=4u;
-struct RlGather {origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:vec3<f32>,alpha:f32,traced:f32,width:f32,count:u32,mirror:bool,active:bool};
+struct RlGather {origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:vec3<f32>,alpha:f32,traced:f32,width:f32,count:u32,mirror:bool,lobe:bool};
 var<private> rl_g:RlGather;
 var<workgroup> rl_share_point:array<vec4<f32>,128>;
 var<workgroup> rl_share_radiance:array<vec4<f32>,128>;
@@ -266,7 +267,7 @@ fn rl_lobe_pdf(n:vec3<f32>,v:vec3<f32>,alpha:f32,w:vec3<f32>)->f32 {
 // rl_reflection_prepare (or none, `live` false); `width` is the group's lanes per row.
 fn rl_reflection_share(lane:u32,width:u32,live:bool) {
     let g=rl_g;
-    let count=select(0.0,select(f32(g.count),-1.0,g.mirror),live && g.active && RL_SHARE);
+    let count=select(0.0,select(f32(g.count),-1.0,g.mirror),live && g.lobe && RL_SHARE);
     rl_share_origin[lane]=vec4<f32>(g.origin,count);
     rl_share_side[lane]=vec4<f32>(g.side,g.width);
     workgroupBarrier();
