@@ -354,7 +354,11 @@ impl Renderer {
                 hash.update(packed);
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
-                        origin: wgpu::Origin3d { x: 0, y: 0, z: k as u32 * 6 },
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: k as u32 * 6,
+                        },
                         ..target._texture.as_image_copy()
                     },
                     packed,
@@ -363,7 +367,11 @@ impl Renderer {
                         bytes_per_row: Some(size * 16),
                         rows_per_image: Some(size),
                     },
-                    wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 6 },
+                    wgpu::Extent3d {
+                        width: size,
+                        height: size,
+                        depth_or_array_layers: 6,
+                    },
                 );
                 self.uploads.texture_writes += 1;
                 self.uploads.write_calls += 1;

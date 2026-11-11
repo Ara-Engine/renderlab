@@ -594,6 +594,34 @@ impl<'a> Shared<'a> {
         })
     }
 }
+/// A fog pass's packet: the scene its rays trace, the atmosphere record, a linear
+/// sampler, and its volumes by binding.
+fn fog_packet<'a>(
+    pass: Pass,
+    scene: &'a Scene,
+    record: &'a StorageBuffer,
+    images: &[(u32, &'a Texture)],
+) -> Result<Vec<(InputKey, Input<'a>)>> {
+    shader::inputs(pass)?
+        .iter()
+        .map(|spec| {
+            let value = match (spec.kind, spec.key.binding) {
+                (InputKind::AccelerationStructure, _) => Input::Scene(scene),
+                (InputKind::Buffer { .. }, 0) => Input::Buffer(record),
+                (InputKind::Sampler { .. }, _) => Input::Sampler(SamplerDesc::default()),
+                (_, binding) => Input::Image(
+                    images
+                        .iter()
+                        .find(|(b, _)| *b == binding)
+                        .with_context(|| format!("fog pass cannot supply {}", spec.name))?
+                        .1,
+                ),
+            };
+            Ok((spec.key, value))
+        })
+        .collect()
+}
+
 /// The atmosphere's and the shadow passes' images where they ran, and the sky map's.
 fn provided<'a>(
     sky: Option<&'a Sky<'a>>,
@@ -779,6 +807,11 @@ struct Carried {
     shadow_bases: Vec<Option<glam::DMat4>>,
     /// The last frame's object transforms, for traced frames' previous matrices.
     transforms: Vec<crate::Mat4>,
+    /// Volumetric fog's history source: the last lit frame's view-projection and eye,
+    /// and the key its fog was integrated under (`FogHistory`).
+    fog: Option<(crate::Mat4, crate::Vec3, [u8; 32])>,
+    /// Frames the atmosphere has encoded (`Atmosphere::frame`).
+    fog_frame: u32,
 }
 /// What a sequence keeps on the GPU from frame to frame.
 #[derive(Default)]
@@ -796,6 +829,9 @@ struct Kept {
     /// The textures the last frame named by identity (`ObjectTexture::key`), by
     /// identity and slot: a slot fixes the format and view.
     textures: BTreeMap<(u64, usize), Texture>,
+    /// Volumetric fog's cells at their grid: this frame's raw cells, and the resolved
+    /// cells of the two most recent frames (each frame's history is the other).
+    fog: Option<([u32; 2], [Texture; 3])>,
     /// The Interactive trace's repair queue: a header, then room for every pixel.
     repairs: Option<StorageBuffer>,
     /// The 2D targets the last frame made and released, for the next frame to take.
@@ -858,6 +894,9 @@ impl Frames {
             map.retire(gpu)?;
         }
         for texture in self.kept.textures.into_values() {
+            gpu.retire(Resource::Image(texture.image))?;
+        }
+        for texture in self.kept.fog.into_iter().flat_map(|(_, cells)| cells) {
             gpu.retire(Resource::Image(texture.image))?;
         }
         if let Some(repairs) = self.kept.repairs {
@@ -972,6 +1011,7 @@ fn frame(
         sky: tables,
         map: kept_map,
         textures: kept_textures,
+        fog: kept_fog,
         repairs: kept_repairs,
         // Taken out and made active for this frame by `Frames::render`.
         targets: _,
@@ -1016,6 +1056,8 @@ fn frame(
         transforms: (0..scene.objects.len())
             .flat_map(|i| placed(i).iter().copied())
             .collect(),
+        fog: None,
+        fog_frame: history.fog_frame,
     };
     ensure!(!scene.objects.is_empty(), "forward frame needs an object");
     ensure!(
@@ -1307,8 +1349,8 @@ fn frame(
     });
     if settings.active() {
         ensure!(
-            settings.volumetric_fog.is_none(),
-            "forward frame does not assemble volumetric fog yet"
+            settings.volumetric_fog.is_none() || deferred_path,
+            "volumetric fog is assembled on traced frames only (its sun rays need the scene)"
         );
         if let (true, Some((toward, _))) = (settings.sun_transmittance, sun) {
             records = crate::atmosphere::scale_directional(
@@ -1389,7 +1431,36 @@ fn frame(
         [1, 1]
     };
     let (toward_sun, illuminance) = sun.unwrap_or((crate::Vec3::Y, [0.; 3]));
-    let atmosphere = AtmosphereParameters::for_camera_with_sun(
+    // Volumetric fog reuses the last frame's cells while nothing they were integrated
+    // under changed: the renderer drops its history on any geometry, placement or pose
+    // upload, a new grid, and a change of sun, exposure or environment.
+    let fogged = settings.active() && settings.volumetric_fog.is_some();
+    let fog_key: [u8; 32] = {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(format!("{sun:?}{grid:?}{:?}", packed.exposure).as_bytes());
+        h.update(environment_digest);
+        for transform in &left.transforms {
+            h.update(bytemuck::cast_slice(&transform.to_cols_array()));
+        }
+        h.update(format!("{poses:?}").as_bytes());
+        if let Some(meshes) = scene.meshes {
+            h.update(bytemuck::cast_slice(meshes));
+        }
+        h.finalize().into()
+    };
+    let fog_history = crate::backend_ara::atmosphere::FogHistory {
+        previous: history
+            .fog
+            .filter(|(_, _, key)| fogged && *key == fog_key)
+            .map(|(matrix, eye, _)| (matrix, eye)),
+        frame: history.fog_frame,
+    };
+    if settings.active() {
+        left.fog_frame = history.fog_frame.wrapping_add(1);
+        left.fog = fogged.then(|| (view.matrix(size[0], size[1]), eye, fog_key));
+    }
+    let atmosphere = AtmosphereParameters::for_frame(
         gpu,
         settings,
         AtmosphereSun {
@@ -1400,6 +1471,7 @@ fn frame(
         view,
         size,
         grid,
+        fog_history,
     )?;
     for buffer in [&camera, &lighting, &atmosphere.record] {
         graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
@@ -1766,6 +1838,72 @@ fn frame(
         }
         None => None,
     };
+
+    // The fog passes' packet records, retired with the frame.
+    let mut fog_records = Vec::new();
+    // `encode_atmosphere`'s volumetric fog, after the scene its sun rays trace: raw cells,
+    // then the resolved cells against the other frame's, then the camera volume's fog
+    // slices from them.
+    if let (true, Some(sky), Some(traced)) = (fogged, &sky, &traced) {
+        let made = kept_fog.as_ref().is_none_or(|(at, _)| *at != grid);
+        if made {
+            if let Some((_, cells)) = kept_fog.take() {
+                for texture in cells {
+                    gpu.retire(Resource::Image(texture.image))?;
+                }
+            }
+            let mut cell =
+                || Texture::volume_shape(gpu, [grid[0], grid[1], 64], Format::Rgba16Float, true);
+            let cells = [cell()?, cell()?, cell()?];
+            // wgpu zero-initialises them; the first frame's history is read regardless.
+            for texture in &cells {
+                staging.push(transfer::upload(
+                    gpu,
+                    &mut graph,
+                    &mut rec,
+                    texture.image,
+                    &vec![0; (grid[0] * grid[1] * 64 * 8) as usize],
+                )?);
+            }
+            *kept_fog = Some((grid, cells));
+        }
+        let (_, cells) = kept_fog.as_ref().context("made above")?;
+        if !made {
+            for texture in cells {
+                graph.import(Resource::Image(texture.image), Access::ShaderRead);
+            }
+        }
+        let parity = (history.fog_frame % 2) as usize;
+        let (raw, resolved, previous) = (&cells[0], &cells[1 + parity], &cells[2 - parity]);
+        let extent = [grid[0], grid[1], 64];
+        for (pass, images) in [
+            (Pass::AtmosphereFogInject, vec![(15, raw)]),
+            (
+                Pass::AtmosphereFogTemporal,
+                vec![(5, previous), (6, raw), (15, resolved)],
+            ),
+        ] {
+            let kernel = Kernel::new(gpu, cache, pass)?;
+            let values = fog_packet(pass, &traced.scene, &atmosphere.record, &images)?;
+            let bindings = HeapBindings::new(gpu, pass, &values)?;
+            bindings.import(&mut graph);
+            kernel.record(&mut graph, &mut rec, &bindings, extent)?;
+            fog_records.push(bindings.release());
+        }
+        let (_, volume, _) = tables
+            .as_ref()
+            .and_then(|t| t.volumes.as_ref())
+            .context("the camera volume")?;
+        VolumePasses::new(gpu, cache)?.record(
+            &mut graph,
+            &mut rec,
+            Pass::AtmosphereFogIntegrate,
+            &atmosphere,
+            sky.luts,
+            resolved,
+            volume,
+        )?;
+    }
 
     // Every other reflected input, of any program this frame runs, is a feature that is
     // off. The wgpu renderer binds zero-filled buffers and zero-initialised textures there.
@@ -3726,6 +3864,9 @@ fn frame(
 
     atmosphere.retire(gpu, &mut graph)?;
     cluster_inputs.retire(gpu)?;
+    for record in fog_records {
+        record.retire(gpu)?;
+    }
     for buffer in previous_buffers.into_iter().flatten() {
         buffer.retire(gpu)?;
     }

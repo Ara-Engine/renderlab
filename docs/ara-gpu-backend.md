@@ -60,7 +60,9 @@ exact one):
   shadows.
 - Uniform, atmosphere and map skies: `Sky::Map` in both of the renderer's layouts,
   with intensity, rotation and visible or scaled backgrounds.
-- Aerial perspective and height fog.
+- Aerial perspective, height fog and volumetric fog: the fog's cells see the sun by
+  one ray a sample against the frame's scene, as the wgpu renderer's hardware path
+  does, and keep a two-frame history that the same changes invalidate.
 - The radiance cache (GI) and traced reflections.
 - Temporal reconstruction at every render scale.
 - Transparent panes with their coloured sun shadows.
@@ -72,7 +74,7 @@ Refused by the engine entry, and reported:
 
 | Call | What |
 |---|---|
-| `set_settings` | `volumetric_fog`; `sky_light` other than 1; `post.enabled` false; any field added to `Settings` later, while it differs from its default |
+| `set_settings` | `sky_light` other than 1; `post.enabled` false; any field added to `Settings` later, while it differs from its default |
 | `add_asset` | cooked assets |
 | `create_emitter`, `update_emitter` | particle emitters |
 | `set_decals` | decals |
@@ -90,7 +92,7 @@ path's software rays (the port is the traced frame only).
 
 - **Metal, M5 Pro (macOS 27):** the whole suite,
   `cargo test -p renderlab --features backend-ara --test ara_backend -- --test-threads=1`,
-  89 tests, under `MTL_DEBUG_LAYER=1` with `MTL_SHADER_VALIDATION=1` and `=0`. Ara's
+  90 tests, under `MTL_DEBUG_LAYER=1` with `MTL_SHADER_VALIDATION=1` and `=0`. Ara's
   player draws Showcase with it through the presenter's own Metal device (Ara #71).
 - **Vulkan, Radeon 760M (RADV) and RTX 4070 SUPER:** the suite and the timings below,
   on the gate machine. The heads from the engine entry (0a4307c) on have run on Metal
@@ -123,7 +125,7 @@ reflection was kept on disk).
 - **Drawn by the wgpu renderer and not yet by the port, in this order:**
   1. decals;
   2. particles;
-  3. volumetric fog;
+  3. textures on transparent materials;
   4. reflections inside panes.
 
   Then skinning on the GPU (SK1's ported kernel, with structure refits) in place of the

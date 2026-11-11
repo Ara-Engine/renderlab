@@ -14,7 +14,7 @@ use scene::{GLOW, Options, STOPS, animate, build, eye, hero, settings};
 const SIZE: [u32; 2] = [480, 270];
 
 /// Direct light only, so that one object's shading cannot reach another's pixels: no
-/// radiance cache, reflections, local-light shadows or history.
+/// radiance cache, reflections, local-light shadows, fog or history.
 fn direct() -> Settings {
     Settings {
         global_illumination: false,
@@ -25,6 +25,8 @@ fn direct() -> Settings {
             count: 0,
             ..Default::default()
         },
+        // Its cells keep a history: a second frame would differ from the first.
+        volumetric_fog: None,
         ..settings()
     }
 }
@@ -67,8 +69,8 @@ fn first_frames(
 
 /// The example's scene, built by its own `Engine` calls on the backend's engine.
 ///
-/// The engine names what it left out and nothing else: the scene's volumetric fog, its
-/// particle emitters and its decals.
+/// The engine names what it left out and nothing else: the scene's particle emitters
+/// and its decals.
 ///
 /// With direct light only, at the fly path's first pose:
 /// - Every material on its own program, as the scene has them (the props on `game`, the
@@ -95,7 +97,6 @@ fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
     ensure!(
         engine.refusals()
             == [
-                refused("set_settings", "volumetric_fog"),
                 refused("create_emitter", "particle emitters"),
                 refused("set_decals", "decals"),
             ],

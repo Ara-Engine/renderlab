@@ -284,9 +284,6 @@ impl Engine {
     /// Records the fields of `asked` this layer cannot honour. A field it does not know
     /// is refused whenever it differs from its default.
     fn refuse_settings(&mut self, asked: &Settings) {
-        if asked.volumetric_fog.is_some() {
-            self.refuse("set_settings", "volumetric_fog");
-        }
         if asked.sky_light != 1.0 {
             self.refuse("set_settings", "sky_light");
         }
@@ -746,8 +743,7 @@ impl Engine {
             }),
             _ => None,
         });
-        let mut media = atmosphere(self.state.sky, &settings);
-        media.volumetric_fog = None;
+        let media = atmosphere(self.state.sky, &settings);
         let sky_map = match self.state.sky {
             Sky::Map {
                 map,
