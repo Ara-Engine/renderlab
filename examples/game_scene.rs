@@ -28,7 +28,8 @@
 //! (P-FLAT, docs/p-flat.md; keys in `Diag::parse`). P-RELIT's scene events (docs/p-relit.md)
 //! happen at frame 24: `fire=off` or `fire=on` switches the fire light, `fire=move` circles
 //! it from the first frame, `glow=step` dims the lamp bulbs' emission to a tenth, and `cut=1`
-//! jumps the camera a third of the way round its orbit with `Engine::cut`.
+//! jumps the camera a third of the way round its orbit with `Engine::cut`. `hold=1` keeps the
+//! camera at its first pose while the lights, the hero and the objects animate.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -303,7 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.diag.iter().cloned().partition(|(k, _)| {
             matches!(
                 k.as_str(),
-                "flicker" | "lamp" | "sun" | "fire" | "glow" | "cut"
+                "flicker" | "lamp" | "sun" | "fire" | "glow" | "cut" | "hold"
             )
         });
     let diag = Diag::parse(&estimator_keys)?;
@@ -315,6 +316,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scene_key("fire", "move"),
     );
     let (glow_steps, cuts) = (scene_key("glow", "step"), scene_key("cut", "1"));
+    let hold = scene_key("hold", "1");
+    let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
     // A soft source must clear its own fixture, or every receiver sees it partly blocked: a
@@ -848,6 +851,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 radius * orbit.cos(),
             );
         let target = focus.lerp(anchor + Vec3::Y, 0.5);
+        let (eye, target) = if hold {
+            *held_pose.get_or_insert((eye, target))
+        } else {
+            (eye, target)
+        };
         let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, 500.0)?;
         let begin = Instant::now();
         let report = engine.render(&camera)?;
