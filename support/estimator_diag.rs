@@ -84,12 +84,15 @@ impl Diag {
                                 "exact" => VirtualLookup::Exact,
                                 "map" => VirtualLookup::Map,
                                 "hybrid" => VirtualLookup::Hybrid,
+                                "disk" => VirtualLookup::Disk,
                                 _ => VirtualLookup::Surface,
                             }
                         }
                         "vsm-walk-cap" => s.walk_cap = v.parse()?,
                         "vsm-refresh" => s.refresh = v.parse()?,
                         "vsm-directions" => s.directions = v.parse()?,
+                        "vsm-march-samples" => s.march_samples = v.parse()?,
+                        "vsm-caster-error" => s.caster_error_texels = v.parse()?,
                         other => return Err(format!("unknown diag key {other}").into()),
                     }
                 }
