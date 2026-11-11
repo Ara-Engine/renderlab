@@ -304,3 +304,63 @@ A new CPU check, `tools/n-vsm1/exact.py`, traces S2's 32 triangles from every cr
 - **S3's flips are the near-field screen samples.** All 242 on frame 0 are lit relief pixels with count 0. The map alone leaves 240 of them lit; the screen samples alone turn all 242 black. A sample was a column from its own point down to the receiver, so a neighbouring pixel within half a footprint of the light's axis hid the whole disk: any neighbour within about 30 degrees of the sun, where the truth needs 2.3.
 - **S2's camera-track leaks are a second occluder the lookup ignored.** They are umbra pixels returning 7 to 14 of 64 samples lit (frame 27: 87 pixels on the tiles; frames 31 on: 8-10 floor pixels), where the plate's and the blocker's shadows overlap. The top layer holds the plate; the blocker under it is in the peel layer, which the lookup read only as the top surface's underside. This is not the two-layer leak of a closed caster behind another (that one is absent from both layers); here the data is in the map.
 ||||||| c341861
+
+### Step 1: the fixes (M)
+
+Two changes to the lookup and one removal, all in `shaders/virtual_shadow_disk.wgsl` (`89c58f1`, `e88433cc`). `Disk` stays opt-in in the code; the recommendation is at the end.
+
+1. **The bands above the coarsest level read one texel per max-mip cell** (`VD_MIP_POINT`). The cell is the texel at its middle, with that texel's own underside, as a coarser level rasterized at its centres would hold. The max-mip is still read first, as the test that the cell holds anything in the band. This removes the widening: S1 partial RMS .137 to .080, S2 .093-.098 to .062-.067.
+2. **The peel layer is a second occluder where it is another placement's surface** (`VD_PEEL2`): a second sheet under the first, or the solid a sheet lies over. S2 camera-track leaks 87 / 8 / 92 to 1 / 1 / 1.
+3. **The visible-surface samples are removed.** See "The near field" below: every rule tried cost more than it gave.
+
+| Bench | Measure | Unreal VSM | `Surface` | Disk before | **Disk after** |
+|---|---|---|---|---|---|
+| S1 contact fold, poses 0 / 1 | Partial RMS | .164 / .163 | .082 / .081 | .137 / .136 | **.080 / .080** |
+| | Flips, leaks, contacts lost | 0-1, 0, 5-6 / 2-3 | 0, 0, 0 | 0, 0, 0 | 0, 0, 1 |
+| S2 wide sun, six phases | Partial RMS | .168-.176 | .073-.075 | .093-.098 | **.062-.067** |
+| | Flips | 119-167 | 0 | 0-2 | 0-1 |
+| | Leaks, camera track | 57-67 | 0 | 87, 8, 92 | **1, 1, 1** |
+| | Leaks, shadow track | 57-67 | 0 | 0 | 0 |
+| | Contacts lost | 1,039-2,101 | 0 | 0-14 | 32-92 |
+| S3 relief and pillars, six phases | Partial RMS | .181-.188 | .079-.083 | .078-.087 | **.063-.074** |
+| | Flips | 187-226 | 0 | 190-370 | **2-7** |
+| | Leaks | 103-114 | 2-9 | 0 | 0-1 |
+| | Contacts lost | 2,929-12,289 | 0 | 0-60 | 32-158 |
+
+Same scorers and references as part 2, one repeat, no TR1 (leases `n1`, `n11`). Unreal rows are the recorded ones ([non-rt-n8k.md](non-rt-n8k.md)).
+
+- **Against the coordinator's bar** (S2 camera-track leaks and S3 flips at Unreal's level or better, the S1/S2 bias explained): **met.** Leaks 1 against 57-67, flips 2-7 against 187-226, and the bias is explained and gone.
+- **Against `Surface`:** partial RMS is now lower on all three benches. Flips are 0-7 against 0, S2 leaks 1 against 0, S3 leaks 0-1 against 2-9. **Contacts lost is the one measure that got worse**: 32-158 per phase, which is 1 to 3 pixels a frame of about 300 (S2) and 1,500 (S3) contact pixels, against 0 for `Surface` and thousands for Unreal. It is the price of removing the screen samples.
+- **What is left of the penumbra error is a still pattern of both signs** (`docs/n-vsm1/n-vsm2-s2-error.jpg`): a texel is a third to two thirds of the disk's radius, so an edge sits up to half a texel off. TR1 cannot average it, because it does not change from frame to frame. Reading a finer level with a stride and a per-frame offset would turn it into noise TR1 integrates; that is not built.
+- **Thin casters high above a receiver are now hit or miss** at the size of a cell (S1's strips, S2's wires): before they were always hit and a cell wide. `Surface` at eight directions dots them too (`review-s1-contact.jpg`).
+
+Sheets: `docs/n-vsm1/n-vsm2-s2-error.jpg` (S2 `shadow-step` frame 16, visibility and signed error against the film), `n-vsm2-s3-flips.jpg` (S3 frame 0, the flipped pixels marked), `n-vsm2-courtyard.jpg` (flight frame 24 against the RT path). `tools/n-vsm1/review2.py` builds them.
+
+### The near field (M)
+
+Within one receiver-level texel of the tangent plane the map is not used, and N-VSM1 read up to six pixels of the visible surface there. Four rules were scored with the two map fixes in place:
+
+| Rule for a visible-surface sample | S3 flips | S2 contacts lost | Courtyard against RT, frame 24 | Fox scene against RT, 9 frames |
+|---|---|---|---|---|
+| A column from the sample down to the receiver (N-VSM1) | 190-370 | 3-14 | 1.07 | not run |
+| Range along the march axis between joined samples | 2-7 | 0-10 | **11.3** (ground far to the side goes dark) | 18.0 |
+| Horizon over the tangent plane from the receiver up | 198-226 | 32-80 | not run | not run |
+| Range of elevations over the tangent plane | 73-92 | 32-80 | 1.07 | 1.38 |
+| **No samples** | **2-7** | 32-92 | 1.07 | 1.43 |
+
+- The cause of the first row's flips: a pixel beside the receiver is far wider than the sun's disk (half a footprint at one footprint's distance is half a radian; the disk is 0.04), so any model that gives the sample its pixel's width hides the whole disk or none of it.
+- The second row is right on relief and wrong on flat ground seen obliquely: pixel snapping moves a ground sample along the ground's horizon, which is not along the march axis there. It darkened a third of the courtyard and must not come back in that form.
+- The last two rows differ by 0.05 codes on the fox scene (the bushes' leaves) and by 70 to 90 flips on S3. With the coordinator's direction (keep the map fixes, drop the screen rule if it cannot hold the courtyard), **the samples are removed**. `VdFrame::clip` is no longer read; the uniform's layout is unchanged.
+- **Open:** contact within one texel of height. If the quarry's contact crop asks for it, the place to start is the fourth row's rule (block the directions between the least and the greatest elevation over the tangent plane among the joined samples after the first; it is not kept in the tree), restricted to smooth receivers.
+
+### Courtyard and fox scene against the RT path (M)
+
+Whole-frame RMS in display codes, 720p, the same frames as part 1 (leases `n5`, `n11`):
+
+| Frames | `Surface` | Disk before | **Disk after** |
+|---|---|---|---|
+| Courtyard flight, 7 frames | 1.19-2.51, mean 1.57 | 1.25-2.32, mean 1.49 | **1.07-2.30, mean 1.35** (lower than before on all 7) |
+| Courtyard, contact crop (sphere, post, crates), mean | 3.25 | 3.99 | **3.09** |
+| Fox scene round the cut, 9 frames | 1.41-1.86, mean 1.65 | 1.23-1.51, mean 1.43 | 1.22-1.55, mean 1.43 |
+
+The lit line on the ground between the post and the crates and the bright crate face are still there (`n-vsm2-courtyard.jpg`): that is the two-layer leak, which is the page-pool unit's.

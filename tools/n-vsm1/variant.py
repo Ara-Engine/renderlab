@@ -7,7 +7,8 @@ the visible count (the benches read it back as count / 256):
   1  the receiver's level and its map cell: level * 32 + page parity (16 x, 8 y) + a 4-texel
      checker (4) + texel parity (2 x, 1 y); 255 where no level holds the receiver.
   2  top-layer texels read by the map windows, divided by 3.
-  3  max-mip cells read by the bands above the coarsest level, divided by 3.
+  3  max-mip cells read by the level windows (N-VSM2 step 2) and by the bands above the
+     coarsest level, divided by 3.
   4  the receiver's level plus one, times 16, where the map windows blocked anything; 0 elsewhere.
 The shipped shader carries none of this (dead debug code has cost the lookups before).
 """
@@ -24,7 +25,11 @@ def patch(source, old, new, count=1):
 
 def debug(s):
     s = patch(s, "override VD_SKIP:u32=0u;", "override VD_SKIP:u32=0u;\noverride VD_DEBUG:u32=0u;\nvar<private> vd_texels:u32;\nvar<private> vd_cells:u32;")
-    s = patch(s, "                    let top=vsm_top_words[i];\n", "                    let top=vsm_top_words[i];\n                    vd_texels+=1u;\n")
+    s = patch(s, "    let top=vsm_top_words[i];\n", "    let top=vsm_top_words[i];\n    vd_texels+=1u;\n")
+    # The level windows' first max-mip cells (N-VSM2 step 2) count with the bands' cells.
+    cell = "                    let top=fma(vsm_mips[first+u32(cy*cells+cx)],vsm.depth.z,vsm.depth.x)-p.z;\n"
+    if cell in s:
+        s = patch(s, cell, cell + "                    vd_cells+=1u;\n")
     s = patch(s, "                let height=fma(vsm_mips[base+u32(y*s+cx)],vsm.depth.z,vsm.depth.x);\n",
               "                let height=fma(vsm_mips[base+u32(y*s+cx)],vsm.depth.z,vsm.depth.x);\n                vd_cells+=1u;\n")
     s = patch(s, "    vd_mask=vec2<u32>(0u);\n", """    vd_mask=vec2<u32>(0u);
