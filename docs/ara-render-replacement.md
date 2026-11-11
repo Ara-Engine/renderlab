@@ -4,6 +4,8 @@ Root, 2026-11-11. Islam (about 17:10 UTC): "I honestly do not care about ara's r
 
 Approved plan: ara-render is frozen; Renderlab is the default in Ara's player and the editor's Game view now (the Linux bridge thread flips it); ara-render is deleted once the editor's Scene view, picking and the Mac work without it. This is a second line of work beside the non-RT goal ([milestone-8.md](milestone-8.md#non-rt-goal-2026-11-11)), not a replacement for it.
 
+**Decision, 2026-11-11 evening (Islam, relayed by the coordinator; Ara records it as D40 in its docs/decisions.md):** "I want ara's old renderer toally removed icl like totally and replaced with ours then the scene view is figured out, I do not think it is that hard to do". This replaces the last step above. ara-render is deleted now, everywhere, in two Ara stages, with no fallback in the preview; anything only it drew becomes a gap row. The editor's Scene view runs on Renderlab only, and the Mac runs on the ara-gpu port (`src/backend_ara`) as its only renderer, so the port follows each Renderlab output the editor reads (the id image first). For Renderlab this makes the packed id image, the one-pixel id request and views per `Engine` (RL#39) in main tonight the floor for the next day's preview; the editor's next asks are ranked in [m7-gaps.md](m7-gaps.md#editor-after-ara-render-2026-11-11).
+
 The list is the "Blocks deleting `ara-render`?" column of `crates/ara-renderlab/AGENTS.md` in Ara (read at Ara main `aab165a87`). Below are the rows that are Renderlab's, in the order root would take them. Order and method are our engineering call.
 
 ## Order
