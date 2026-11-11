@@ -167,6 +167,7 @@ fn named_meshes_stay_on_the_gpu_and_draw_the_same_frames() -> Result<()> {
         "an identity named a smaller geometry than before and was accepted"
     );
     frames.retire(&mut gpu)?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

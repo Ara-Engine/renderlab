@@ -11,14 +11,19 @@ use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
 /// Owned native shader cache. Construct outside frame recording.
+///
+/// A pipeline belongs to the cache that made it. The cache makes each one once and
+/// hands the same handle to every caller that asks for the same WGSL, entry and
+/// state, frame after frame; [`retire`](Self::retire) releases them all. The passes
+/// that draw with a pipeline do not release it.
 pub struct ShaderCache {
     root: PathBuf,
     compiler: String,
     /// The digest of everything a pipeline's key holds besides its own WGSL, entry
     /// and state: the adapter's sources, the compiler and the binding layout.
     salt: [u8; 32],
-    /// Pipeline manifests already read, by key.
-    manifests: std::cell::RefCell<std::collections::HashMap<String, CookedPipeline>>,
+    /// The pipelines made so far, by key.
+    pipelines: std::cell::RefCell<std::collections::HashMap<String, Pipeline>>,
 }
 impl ShaderCache {
     /// Create an explicit cache directory; no files are written to the user profile.
@@ -71,8 +76,16 @@ impl ShaderCache {
             root,
             compiler,
             salt,
-            manifests: Default::default(),
+            pipelines: Default::default(),
         })
+    }
+    /// Releases every pipeline this cache made, after the last list that uses one was
+    /// submitted. The cache stays usable and makes them again when asked.
+    pub fn retire(&self, gpu: &mut GpuDevice) -> Result<()> {
+        for (_, pipeline) in self.pipelines.borrow_mut().drain() {
+            gpu.retire_pipeline(pipeline)?;
+        }
+        Ok(())
     }
     /// Compile only on a cache miss, then use Ara's hashed artifact/PSO loader.
     pub fn pipeline(
@@ -120,6 +133,9 @@ impl ShaderCache {
         key.update(format!("{}:{state:?}:", pass.entry()));
         key.update(wgsl);
         let key = format!("{:x}", key.finalize());
+        if let Some(kept) = self.pipelines.borrow().get(&key) {
+            return Ok(*kept);
+        }
         let path = self.root.join(&key);
         if !path.join("pipeline.json").exists() {
             let scratch = self
@@ -142,14 +158,11 @@ impl ShaderCache {
                 }
             }
         }
-        let mut manifests = self.manifests.borrow_mut();
-        let meta = match manifests.entry(key) {
-            std::collections::hash_map::Entry::Occupied(kept) => kept.into_mut(),
-            std::collections::hash_map::Entry::Vacant(empty) => empty.insert(
-                serde_json::from_slice(&std::fs::read(path.join("pipeline.json"))?)?,
-            ),
-        };
-        Ok(gpu.create_pipeline(meta, &path)?)
+        let meta: CookedPipeline =
+            serde_json::from_slice(&std::fs::read(path.join("pipeline.json"))?)?;
+        let pipeline = gpu.create_pipeline(&meta, &path)?;
+        self.pipelines.borrow_mut().insert(key, pipeline);
+        Ok(pipeline)
     }
     fn emit(
         &self,

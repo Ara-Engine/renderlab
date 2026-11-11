@@ -218,6 +218,7 @@ fn indexed_instanced_mesh_native_replay_against_cpu() -> Result<()> {
         gpu.retire(Resource::Buffer(b))?;
     }
     pass.retire(&mut gpu)?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

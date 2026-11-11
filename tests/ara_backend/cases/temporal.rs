@@ -52,6 +52,7 @@ fn temporal_resolve_reflects_validates_and_compiles() -> Result<()> {
     program.msl()?;
     forward_cases::validate_spirv(&program, "tr1-resolve")?;
     Kernel::from_program(&mut gpu, &cache, &program)?.retire(&mut gpu)?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -351,6 +352,7 @@ fn reconstruction_accumulates_jittered_samples_into_edge_coverage() -> Result<()
         );
     }
     eprintln!("{report}");
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -424,6 +426,7 @@ fn reconstruction_history_survives_a_pan_and_restarts_on_cuts_and_sun_turns() ->
     let second = scene.frames(&mut gpu, &cache, &mut again, reconstructed(), &pan)?;
     again.retire(&mut gpu)?;
     ensure!(first == second, "the same sequence gave different frames");
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -522,6 +525,7 @@ fn reconstruction_below_native_scale_fills_the_target_from_fewer_samples() -> Re
     scene.frames(&mut gpu, &cache, &mut history, performance, &[camera; 2])?;
     history.retire(&mut gpu)?;
     eprintln!("{report}");
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -582,6 +586,7 @@ fn reconstruction_keeps_history_under_a_climbing_camera_and_a_slow_sun() -> Resu
         "after the slow turn: reset {reset}, the floor's weight is {}, the most {most}, the cap {cap}",
         colour[floor]
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -642,6 +647,7 @@ fn interactive_trace_entries_reflect_validate_and_compile() -> Result<()> {
             Kernel::from_program(&mut gpu, &cache, &program)?.retire(&mut gpu)?;
         }
     }
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -742,6 +748,7 @@ fn interactive_frame_is_the_exact_frame_outside_the_penumbra_and_on_a_cold_start
         later.0 < 400 && later.1 < contrast / 10.,
         "reconstructed Interactive frames drift from the exact sequence: {later:?}"
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

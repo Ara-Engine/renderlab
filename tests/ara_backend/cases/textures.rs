@@ -232,6 +232,7 @@ fn a_textured_floor_is_quadrant_by_quadrant_the_untextured_floor_of_that_texel()
         report += &format!("{primary:?}: four quadrants within {worst:.5}; ");
     }
     eprintln!("{report}");
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -337,6 +338,7 @@ fn a_mip_chain_shows_the_level_the_pixel_footprint_selects() -> Result<()> {
         }
     }
     eprintln!("{report}");
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

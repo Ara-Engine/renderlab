@@ -183,6 +183,7 @@ fn particle_billboard_native_replay_against_cpu() -> Result<()> {
         }
     }
     pass.retire(&mut gpu)?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

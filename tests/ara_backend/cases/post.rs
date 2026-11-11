@@ -145,6 +145,7 @@ fn bloom_and_tone_native_replay_against_cpu() -> Result<()> {
         gpu.retire(Resource::Image(texture.image))?;
     }
     gpu.retire(Resource::Buffer(settings.buffer))?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

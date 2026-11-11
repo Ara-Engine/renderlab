@@ -124,9 +124,6 @@ impl PostPasses {
             match cache.pipeline(gpu, pass, state) {
                 Ok(pipeline) => created.push(pipeline),
                 Err(error) => {
-                    for pipeline in created {
-                        gpu.retire_pipeline(pipeline)?;
-                    }
                     return Err(error);
                 }
             }
@@ -134,9 +131,6 @@ impl PostPasses {
         let sampler = match gpu.sampler(&ara_gpu::sampler::SamplerDesc::default()) {
             Ok(slot) => slot.index,
             Err(error) => {
-                for pipeline in created {
-                    gpu.retire_pipeline(pipeline)?;
-                }
                 return Err(error.into());
             }
         };
@@ -318,19 +312,9 @@ impl PostPasses {
         rec.push(Command::EndPass);
         Ok(())
     }
-    /// Retire pipelines only after their last recorded lists have been submitted.
-    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        for pipeline in [
-            self.downsample,
-            self.upsample,
-            self.tile_max,
-            self.motion_blur,
-            self.depth_of_field,
-            self.tone,
-            self.display,
-        ] {
-            gpu.retire_pipeline(pipeline)?;
-        }
+    /// Nothing of its own to release: its pipelines stay with the shader cache
+    /// (`ShaderCache::retire`).
+    pub fn retire(self, _: &mut GpuDevice) -> Result<()> {
         Ok(())
     }
 }

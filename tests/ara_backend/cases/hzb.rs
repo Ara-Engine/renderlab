@@ -158,6 +158,7 @@ fn hzb_mip_chain_native_replay_against_cpu() -> Result<()> {
     inputs.retire(&mut gpu, &mut graph)?;
     hzb.retire(&mut gpu, &mut graph)?;
     source.retire(&mut gpu)?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

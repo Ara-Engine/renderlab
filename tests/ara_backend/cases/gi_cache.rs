@@ -122,6 +122,7 @@ fn cache_kernels_reflect_validate_and_compile() -> Result<()> {
     shade.msl()?;
     forward_cases::validate_spirv(&shade, "gi-ShadeCells")?;
     Kernel::from_program(&mut gpu, &cache, &shade)?.retire(&mut gpu)?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -388,6 +389,7 @@ fn sky_visibility_cells_hold_exact_ray_bits_and_their_sh() -> Result<()> {
         worst.0,
         worst.1
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -441,6 +443,7 @@ fn sky_visibility_darkens_the_floor_by_the_walls_share_of_the_sky() -> Result<()
         samples >= 60 && least < 0.6 && worst < 0.06,
         "{samples} floor samples down to a share of {least:.3}: worst error {worst:.4}"
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -510,6 +513,7 @@ fn cache_sequences_repeat_idle_when_still_and_follow_the_camera() -> Result<()> 
         occupied.is_sorted_by(|a, b| a < b),
         "a moving camera did not claim cells every frame: {occupied:?}"
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -691,6 +695,7 @@ fn bounce_cells_shade_and_gather_what_the_scene_predicts() -> Result<()> {
         ratios.0,
         ratios.1
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -816,6 +821,7 @@ fn filtered_cells_are_the_weighted_mean_of_their_unfiltered_neighbourhood() -> R
             && last.contrast + last.probe == 0,
         "the filter replay covered too little: {last:?}"
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -891,6 +897,7 @@ fn contrast_refine_splits_the_cells_of_a_slot_as_its_rule_predicts() -> Result<(
         first.len() == 1 && first[&coarsest][1] >= 10 && last.keys().any(|level| *level < coarsest),
         "the refine did not bring finer cells into the slot: {first:?} then {last:?}"
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

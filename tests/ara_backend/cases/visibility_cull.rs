@@ -184,6 +184,7 @@ fn two_phase_cluster_cull_finish_reset_native_replay() -> Result<()> {
     let reset_point = gpu.submit(rec.finish(), &[])?;
     ensure!(final_point.is_some(), "cull submissions missing");
     gpu.wait(reset_point)?;
+    cache.retire(&mut gpu)?;
     gpu.assert_clean()?;
     for (i, finished, reads) in checks {
         f.assert_pass(
@@ -231,6 +232,7 @@ fn two_phase_cluster_cull_finish_reset_native_replay() -> Result<()> {
         b.retire(&mut gpu)?;
     }
     pass.retire(&mut gpu)?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

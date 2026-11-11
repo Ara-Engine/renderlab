@@ -221,6 +221,7 @@ fn depth_winning_receiver_raster_native_replay_against_cpu() -> Result<()> {
         gpu.retire(Resource::Image(t.image))?;
     }
     pass.retire(&mut gpu)?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

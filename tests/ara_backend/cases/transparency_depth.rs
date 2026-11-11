@@ -91,6 +91,7 @@ fn transparency_raster_depth_native_replay_against_cpu() -> Result<()> {
     depth.retire(&mut gpu, &mut graph)?;
     gpu.retire(Resource::Image(output.image))?;
     gpu.retire(Resource::Buffer(read))?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

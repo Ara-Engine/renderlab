@@ -115,8 +115,9 @@ impl Transmission {
         rec.push(Command::EndPass);
         Ok(())
     }
-    /// Retire after all object's layer submissions.
-    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        Ok(gpu.retire_pipeline(self.pipeline)?)
+    /// Nothing of its own to release: its pipelines stay with the shader cache
+    /// (`ShaderCache::retire`).
+    pub fn retire(self, _: &mut GpuDevice) -> Result<()> {
+        Ok(())
     }
 }

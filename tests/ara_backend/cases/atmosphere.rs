@@ -126,6 +126,7 @@ fn atmosphere_lut_chain_native_replay_against_cpu() -> Result<()> {
     for read in reads {
         gpu.retire(Resource::Buffer(read))?;
     }
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

@@ -177,6 +177,7 @@ fn transparency_hit_depth_native_replay_against_cpu() -> Result<()> {
     for b in staging {
         gpu.retire(Resource::Buffer(b))?;
     }
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

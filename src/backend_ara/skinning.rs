@@ -266,7 +266,6 @@ impl SkinningPasses {
         let second = match cache.pipeline(gpu, stages[1], RenderState::default()) {
             Ok(p) => p,
             Err(e) => {
-                gpu.retire_pipeline(first)?;
                 return Err(e);
             }
         };
@@ -343,11 +342,9 @@ impl SkinningPasses {
         rec.push(Command::EndPass);
         Ok(())
     }
-    /// Retire pipelines after submitting all referencing lists.
-    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        for p in self.pipelines {
-            gpu.retire_pipeline(p)?;
-        }
+    /// Nothing of its own to release: its pipelines stay with the shader cache
+    /// (`ShaderCache::retire`).
+    pub fn retire(self, _: &mut GpuDevice) -> Result<()> {
         Ok(())
     }
 }

@@ -338,6 +338,7 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
         "the mesh pass accepted a transparent pane"
     );
     eprintln!("panes: {report}");
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

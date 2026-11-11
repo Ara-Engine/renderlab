@@ -141,6 +141,7 @@ fn velocity_motion_and_lens_native_replays_against_cpu() -> Result<()> {
         gpu.retire(Resource::Image(t.image))?;
     }
     gpu.retire(Resource::Buffer(settings.buffer))?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

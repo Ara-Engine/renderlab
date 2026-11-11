@@ -172,6 +172,7 @@ fn primary_geometry_check_retry_queue_native_replay() -> Result<()> {
     {
         b.retire(&mut gpu)?;
     }
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

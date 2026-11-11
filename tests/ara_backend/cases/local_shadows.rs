@@ -333,6 +333,7 @@ fn a_lamp_behind_a_card_shadows_the_floor_where_the_card_blocks_it() -> Result<(
     eprintln!(
         "local shadows: {lit} lit, {dark} shadowed and {tops} card pixels exact; {fractions} partly lit on quarters; {turned} of them differ on the cold reconstructed frame"
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

@@ -232,6 +232,7 @@ fn hit_based_post_velocity_depth_and_history_native_replay() -> Result<()> {
     for b in staging {
         gpu.retire(Resource::Buffer(b))?;
     }
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

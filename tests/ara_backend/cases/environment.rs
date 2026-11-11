@@ -167,6 +167,7 @@ fn environment_array_mips_native_replay_against_cpu() -> Result<()> {
     for b in [staging, read_spec, read_diff] {
         gpu.retire(Resource::Buffer(b))?;
     }
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

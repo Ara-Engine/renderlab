@@ -195,6 +195,7 @@ fn software_and_hardware_cluster_raster_native_replay() -> Result<()> {
     {
         b.retire(&mut gpu)?;
     }
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

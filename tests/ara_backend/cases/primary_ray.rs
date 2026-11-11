@@ -242,6 +242,7 @@ fn heap_bound_primary_ray_query_native_replay_against_cpu() -> Result<()> {
         gpu.retire(Resource::Image(t.image))?;
     }
     gpu.retire(Resource::Buffer(staging))?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

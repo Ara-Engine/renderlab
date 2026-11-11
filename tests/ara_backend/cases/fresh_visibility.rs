@@ -250,6 +250,7 @@ fn fresh_shadow_visibility_native_replay_against_cpu() -> Result<()> {
     gpu.retire(Resource::AccelerationStructure(blas))?;
     vertices.retire(&mut gpu)?;
     indices.retire(&mut gpu)?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

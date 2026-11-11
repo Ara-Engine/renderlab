@@ -241,6 +241,7 @@ fn a_normal_mapped_floor_is_the_floor_tilted_to_that_normal() -> Result<()> {
         "a tangent along its own normal was accepted"
     );
     eprintln!("normal maps: {report}handedness {mirrored:.3} apart");
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

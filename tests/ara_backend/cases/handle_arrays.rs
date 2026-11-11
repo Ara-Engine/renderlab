@@ -362,6 +362,7 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
     for b in staging {
         gpu.retire(Resource::Buffer(b))?;
     }
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

@@ -301,6 +301,7 @@ fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
     eprintln!(
         "programs: flat exact on {floors} floor and {cards} card pixels; game at defaults {apart:.2e} from standard; glow within {worst:.4}; {mixed} pixels exact in frames of two programs"
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

@@ -122,6 +122,7 @@ fn packed_light_clusters_native_replay_against_cpu() -> Result<()> {
     }
     pass.retire(&mut gpu)?;
     gpu.retire(Resource::Image(target.image))?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

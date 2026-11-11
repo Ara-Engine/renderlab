@@ -237,6 +237,7 @@ fn a_mirror_floor_shows_the_wall_at_the_metals_reflectance() -> Result<()> {
         worst[0],
         worst[1]
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -342,6 +343,7 @@ fn a_uniform_sky_reflects_as_the_untraced_estimate_in_every_band() -> Result<()>
         );
     }
     eprintln!("{report}");
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

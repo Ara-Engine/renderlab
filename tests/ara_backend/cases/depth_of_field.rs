@@ -208,6 +208,7 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
         );
     }
     eprintln!("depth of field: {report}");
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
@@ -254,6 +255,7 @@ fn depth_of_field_keeps_a_flat_region_within_a_level_at_every_brightness() -> Re
     eprintln!(
         "depth of field, flat card (HDR half, sharp level, blurred level) per 0.05% step of the sun: {table}{apart} of 16 a level apart"
     );
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

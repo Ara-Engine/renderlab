@@ -170,9 +170,10 @@ impl Engine {
             .retire(&mut self.gpu)
             .map_err(fault)
     }
-    /// Releases the frame history and returns the device.
+    /// Releases the frame history and the pipelines and returns the device.
     pub fn retire(mut self) -> anyhow::Result<GpuDevice> {
         self.frames.retire(&mut self.gpu)?;
+        self.cache.retire(&mut self.gpu)?;
         Ok(self.gpu)
     }
 

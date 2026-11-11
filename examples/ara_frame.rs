@@ -888,6 +888,7 @@ fn ara_frame(
         ));
     }
     history.retire(&mut gpu)?;
+    cache.retire(&mut gpu)?;
     ara_gpu::Device::collect(&mut gpu)?;
     gpu.assert_clean()?;
     Ok(sequence)

@@ -235,9 +235,6 @@ impl AtmospherePasses {
             match cache.pipeline(gpu, stage, RenderState::default()) {
                 Ok(p) => pipelines.push(p),
                 Err(e) => {
-                    for p in pipelines {
-                        gpu.retire_pipeline(p)?;
-                    }
                     return Err(e);
                 }
             }
@@ -331,11 +328,9 @@ impl AtmospherePasses {
         rec.push(Command::EndPass);
         Ok(())
     }
-    /// Retire native pipelines after submitting their lists.
-    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        for p in self.pipelines {
-            gpu.retire_pipeline(p)?;
-        }
+    /// Nothing of its own to release: its pipelines stay with the shader cache
+    /// (`ShaderCache::retire`).
+    pub fn retire(self, _: &mut GpuDevice) -> Result<()> {
         Ok(())
     }
 }

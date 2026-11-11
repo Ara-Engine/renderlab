@@ -148,6 +148,7 @@ fn full_bloom_and_queued_tone_settings_native_replay() -> Result<()> {
     for b in reads {
         gpu.retire(Resource::Buffer(b))?;
     }
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

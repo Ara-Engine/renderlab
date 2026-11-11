@@ -166,6 +166,7 @@ fn raster_depth_velocity_and_camera_cuts_native_replay() -> Result<()> {
         gpu.collect()?;
     }
     passes.retire(&mut gpu)?;
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

@@ -122,6 +122,7 @@ fn scattered_buffer_arrays_lengths_aliases_and_bounds_native_replay() -> Result<
     for b in storage.into_iter().chain(counters) {
         b.retire(&mut gpu)?;
     }
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

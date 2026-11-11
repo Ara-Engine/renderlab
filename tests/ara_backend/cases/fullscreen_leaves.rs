@@ -149,6 +149,7 @@ fn transparency_msaa_seed_and_original_fallback_present_native_replay() -> Resul
     for b in staging {
         gpu.retire(Resource::Buffer(b))?;
     }
+    cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())
