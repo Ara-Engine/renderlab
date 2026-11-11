@@ -991,3 +991,13 @@ Pixels on the open ground more than 10 codes above their 21-pixel median:
 
 - **OPEN, not yet investigated (owner: the sun-shadow unit).** On N-VSM1's contact and penumbra sheets (game scene courtyard), both non-RT lookups, `Surface` and `Disk`, differ from the RT path in the same two places: a diagonal band on the ground between the sphere, the pole and the crates, and a grazing crate face that is brighter than RT. It is not a regression from N-VSM1; which side is right against a path-traced reference has not been checked.
 - **OPEN (pre-existing):** the ignored GPU test `gpu_non_rt_requested_limit_pipelines` fails on main at `virtual_limits_tests.rs:174` (its view-projection reuse check), and the same way on the N-VSM1 branch. Not caused by `VirtualLookup::Disk`; cause not looked at.
+
+## Cuts: the first frame after `Engine::cut()` is sometimes dim on non-RT (Ara bridge, 2026-11-11)
+
+**OPEN (owner: the cuts unit).** From the Ara bridge's exposure work (Ara PR #61), Radeon 760M, a scratch dark-to-bright cut through the presenter at 640x360, 8 runs a head: on the non-RT path the first frame after the cut is bimodal. In about 1 run in 4 it is a dim, partly lit frame (the history reset shows before the lighting has arrived); in the others it is fully lit. It happens at main as well as at the PR's head, so it is the renderer's, not the meter's. An automatic exposure meter reads the dim frame and steps the wrong way for a frame or two.
+- Not yet reproduced on the RTX, and the pass that is late is not identified.
+- **What the cuts unit is judged on:** the first frame after a cut is fully lit every time, next to the GI fireflies above ("Specks after a game-scene cut").
+
+## One pixel at a bulb's rim differs between the two GPU layers under TR1 (ara-gpu port, 2026-11-11)
+
+**UNCONFIRMED as a renderer fault; nothing to do yet.** The ara-gpu port (draft PR #3 at 3d7eeed) matches the wgpu renderer on the game scene on the Radeon (worst HDR cell 0.1%) and on the RTX, except one pixel at a bulb's rim: (588, 178) at pose 11 with `--supported`, wgpu (0.3843, 0.2228, 0.1062) against the port's (0.4619, 0.2976, 0.1720), neighbours equal to 0.0001. It goes away with temporal reconstruction off. The port's author is locating the decision in the resolve that lands differently. If it is a float comparison in `shaders/temporal_resolve.wgsl` that two correct GPUs may round apart, as the native-scale test was, the fix is root's.
