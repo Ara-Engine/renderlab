@@ -589,7 +589,7 @@ pub(super) fn validate_spirv(
             .iter()
             .map(|b| u32::from_le_bytes(*b))
             .collect();
-        assert_nonuniform_sampled_images(&words)?;
+        assert_nonuniform_resources(&words)?;
         assert_precise_arithmetic(&words)?;
         // ara-gpu enables neither hit-vertex return nor its SPIR-V extension: every
         // hit position comes from retained geometry. OpExtension is opcode 10.

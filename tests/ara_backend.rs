@@ -125,7 +125,7 @@ fn all_ported_stages_emit_bindless_spirv() -> Result<()> {
                 .iter()
                 .map(|b| u32::from_le_bytes(*b))
                 .collect();
-            assert_nonuniform_sampled_images(&words)?;
+            assert_nonuniform_resources(&words)?;
             let mut at = 5;
             let mut entries = Vec::new();
             while at < words.len() {
@@ -267,7 +267,6 @@ mod visibility_cull_reference;
 #[path = "ara_backend/cases/graph.rs"]
 mod graph_cases;
 
-#[cfg(target_os = "macos")]
 #[path = "ara_backend/cases/buffer_arrays.rs"]
 mod buffer_array_cases;
 // Compile the pure adapter tests here as well: the repository's unrelated lib-test
@@ -336,9 +335,11 @@ fn assert_precise_arithmetic(words: &[u32]) -> Result<usize> {
 
 // Inspect the final operand consumed by sampling; spirv-val does not enforce this
 // semantic descriptor-indexing rule. Independent from the production repair pass.
-fn assert_nonuniform_sampled_images(words: &[u32]) -> Result<()> {
+fn assert_nonuniform_resources(words: &[u32]) -> Result<()> {
     let mut decorations = std::collections::BTreeSet::new();
     let mut combined = Vec::new();
+    // Pointers made by an indexed access chain, and the pointers `OpArrayLength` reads.
+    let (mut elements, mut lengths) = (std::collections::BTreeSet::new(), Vec::new());
     let mut at = 5;
     while at < words.len() {
         let n = (words[at] >> 16) as usize;
@@ -351,9 +352,25 @@ fn assert_nonuniform_sampled_images(words: &[u32]) -> Result<()> {
                 ensure!(n == 5, "short sampled image");
                 combined.push(&words[at + 1..at + n]);
             }
+            65 | 66 if n >= 5 => {
+                elements.insert(words[at + 2]);
+            }
+            68 => {
+                ensure!(n == 5, "short array length");
+                lengths.push(words[at + 3]);
+            }
             _ => {}
         }
         at += n;
+    }
+    // The length of one element of a heap array: its index differs between the
+    // invocations of a workgroup, and a driver may otherwise read one element's
+    // length for all of them (RADV does).
+    for pointer in lengths {
+        ensure!(
+            !elements.contains(&pointer) || decorations.contains(&pointer),
+            "array length through element pointer {pointer} is not NonUniform"
+        );
     }
     for values in combined {
         if decorations.contains(&values[2]) || decorations.contains(&values[3]) {

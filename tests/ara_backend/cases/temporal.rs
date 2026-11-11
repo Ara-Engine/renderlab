@@ -250,9 +250,16 @@ fn reconstruction_accumulates_jittered_samples_into_edge_coverage() -> Result<()
         }
         // One more sample a frame on average, within a percent: silhouette pixels
         // start from their neighbours and are held to a shorter window.
+        // What a failure needs to say: how many pixels fall short of one sample a frame
+        // and by how much in all. On Metal 92 pixels do from frame 4 on (the card's
+        // outline), by 809 samples in all at frame 16 (0.39%) and 2,116 at frame 47.
+        let samples = (index + 1) as f32;
+        let all = colour.as_chunks::<4>().0.iter().map(|p| p[3]);
+        let short = all.clone().filter(|w| *w < samples - 0.01).count();
+        let deficit: f32 = all.map(|w| (samples - w).max(0.)).sum();
         ensure!(
-            (mean / (index + 1) as f32 - 1.).abs() < 0.01 && least >= 1.,
-            "frame {index}: weights {least} to {most}, mean {mean}"
+            (mean / samples - 1.).abs() < 0.01 && least >= 1.,
+            "frame {index}: weights {least} to {most}, mean {mean}; {short} pixels short of {samples} by {deficit:.0} samples in all"
         );
         // Away from the edges the shading is smooth, so jittered samples agree with the
         // pixel-centre one.

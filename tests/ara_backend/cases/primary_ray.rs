@@ -44,7 +44,7 @@ fn heap_bound_primary_ray_query_native_replay_against_cpu() -> Result<()> {
             .iter()
             .map(|w| u32::from_le_bytes(*w))
             .collect();
-        assert_nonuniform_sampled_images(&words)?;
+        assert_nonuniform_resources(&words)?;
         if let Ok(sdk) = std::env::var("VULKAN_SDK") {
             let validator = std::path::Path::new(&sdk).join(if cfg!(windows) {
                 "Bin/spirv-val.exe"

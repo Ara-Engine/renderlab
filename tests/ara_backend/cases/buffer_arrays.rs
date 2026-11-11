@@ -7,6 +7,13 @@ use renderlab::backend_ara::{
     shader::InputKey,
     transfer::readback_buffer,
 };
+/// Words added to every probed buffer. On Metal none: the probe then reads past three
+/// of them, and Naga's Metal output clamps such a read to the last element, which the
+/// test holds it to. The SPIR-V carries no clamp (a read past the end is the device's
+/// to define, as on the wgpu renderer with robust buffer access), so elsewhere every
+/// read is kept in bounds and the test is about slots and lengths.
+const SPARE: u32 = if cfg!(target_os = "macos") { 0 } else { 20 };
+
 fn key(binding: u32) -> InputKey {
     InputKey { group: 0, binding }
 }
@@ -24,7 +31,7 @@ fn scattered_buffer_arrays_lengths_aliases_and_bounds_native_replay() -> Result<
         // the renderer tells an index buffer with adjacency from one without by its
         // length modulo three.
         let mut data = vec![1000 + i, 0, 0, 0];
-        data.extend((0..(i + 1) * 4 + [0, 1, 3, 2][i as usize]).map(|j| i * 100 + j));
+        data.extend((0..(i + 1) * 4 + [0, 1, 3, 2][i as usize] + SPARE).map(|j| i * 100 + j));
         storage.push(StorageBuffer::new(&mut gpu, bytemuck::cast_slice(&data))?);
         words.push(data);
         storage.push(StorageBuffer::new(&mut gpu, &[0; 16])?);

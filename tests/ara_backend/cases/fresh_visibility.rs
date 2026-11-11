@@ -31,7 +31,7 @@ fn fresh_shadow_visibility_native_replay_against_cpu() -> Result<()> {
             .iter()
             .map(|b| u32::from_le_bytes(*b))
             .collect();
-        assert_nonuniform_sampled_images(&words)?;
+        assert_nonuniform_resources(&words)?;
         if let Some(sdk) = std::env::var_os("VULKAN_SDK") {
             let validator = std::path::PathBuf::from(sdk).join(if cfg!(windows) {
                 "Bin/spirv-val.exe"

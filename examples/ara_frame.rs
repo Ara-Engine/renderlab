@@ -639,10 +639,16 @@ fn ara_frame(
                 local_shadows: level.local_shadows.then(renderlab::LocalShadows::default),
             },
         )?;
-        let trace = history.reconstruction_plan().map_or(
-            serde_json::json!({}),
-            |(reset, rays)| serde_json::json!({"reset": reset, "shadow_rays": rays}),
-        );
+        // The planner budgets shadow rays on every reconstructed frame; only the
+        // Interactive trace reads the budget, and only then does the renderer report it.
+        let trace = history
+            .reconstruction_plan()
+            .map_or(serde_json::json!({}), |(reset, rays)| {
+                serde_json::json!({
+                    "reset": reset,
+                    "shadow_rays": level.interactive.then_some(rays),
+                })
+            });
         eprintln!("ara pose {pose}: {trace}");
         sequence.push((
             pixels.hdr,

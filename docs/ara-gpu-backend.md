@@ -1730,10 +1730,14 @@ scale.
 
 `ara_frame --reconstruction` is the level on either layer, combinable with the cache
 levels. On Metal, M5-A with the cache at its defaults and reconstruction on is
-identical across two 16-frame moving runs. Compared with wgpu once, which found the
-restart key above; **the comparison at the corrected key has not run yet.** What these
-tests cannot see is the resolve's filter weights away from a straight edge, or its
-rejection rules under object motion; those need the cross-layer comparison.
+identical across two 16-frame moving runs. The first comparison with wgpu found the
+restart key above. At the corrected key (520b2bb, both layers on the Radeon 760M, 16
+moving frames) the two agree: worst HDR cell mean 0.06% at poses 0 to 4 and 0.03% at
+pose 15, worst display channel 6 levels on 6 pixels, at this level and with
+Interactive shadows, reflections and the textured floor added; both show 256 shadow
+rays at pose 0 and 32 after, and neither restarts after pose 0. What neither the
+tests nor that comparison sees is the resolve's rejection rules under object motion:
+the path moves only the camera.
 
 ## Traced reflections
 
@@ -1895,19 +1899,49 @@ kernel.
 
 Neither change has run on a Vulkan device.
 
-## Second Vulkan run (8a8ead7)
+## Second and third Vulkan runs (8a8ead7, 520b2bb)
 
-62 passed, 2 failed, no validation message. The particle sort passes. The geometry
-check fails on the same two words, so `NoContraction` did not settle it; they are the
-fallback flags of the two hits on an edge of a mesh with no adjacency (words 30 and
-39, GPU 0 where 1 is expected). Read against the kernel, no decision for those hits is
-near a rounding boundary, so the cause is not established. What changed for the next
-run: the two hits lie 2^-22 inside their edge instead of on it; a failing word is
-named by item and field; and the buffer-array probe binds buffers of 52, 76 and 88
-bytes, because `primary_edge_neighbour` tells an index buffer with adjacency from one
-without by `arrayLength % 3`, the failing mesh's 12-byte index buffer is the only one
-in the suite that is not a multiple of 16 bytes, and a bound range rounded up to 16
-would read as adjacency and produce exactly this result. The second failure was the
-cold reconstructed frame held bit-equal to the plain frame, where RADV gives weights
-of 1 + 2^-16 and 48 pixels one half-float step apart; the test allows one step now.
-None of this has run on Vulkan.
+At 8a8ead7: 62 passed, 2 failed, no validation message. At 520b2bb: 66 passed, the
+same 2 failed. The particle sort passes.
+
+**The geometry check, and the length of a heap-array element.** The check failed on
+the same two words in every run: the fallback flags of the two hits on an edge of a
+mesh with no adjacency (GPU 0 where 1 is expected). `NoContraction` did not change it
+and neither did moving the hits 2^-22 inside their edge, so it was never arithmetic.
+The gate found the cause by running the buffer-array probe on Vulkan (it was gated to
+macOS, the only test in the suite that was): `arrayLength(&reads[i].data)` returned
+one element's length for all four invocations.
+
+The SPIR-V explains it. For `heap[i].data[j]` Naga decorates the access chain
+`NonUniform`; for `arrayLength(&heap[i].data)` it emits the element pointer and
+`OpArrayLength` with no decoration (`write_runtime_array_length` never adds one).
+Without it the index must be the same for every invocation of a workgroup, and where
+it is not the result is undefined. RADV then reads one element for the whole
+workgroup; NVIDIA and Metal (where lengths come from a table, not a query) happen to
+give each invocation its own. The renderer's `primary_edge_neighbour` tells an index
+buffer with adjacency from one without by `arrayLength % 3`, per pixel, so on RADV
+every mesh in a workgroup was judged by one mesh's length: in the fixture the mesh
+without adjacency took the other's 13 words for its own 3.
+
+`shader::spv_nonuniform::repair` now decorates the element pointer of every
+`OpArrayLength` that reads through an indexed access chain, next to the
+sampled-image repair it already made. Every emitted stage is held to it statically
+(`assert_nonuniform_resources`, which failed on three tests before the fix), and the
+buffer-array probe now runs on every backend, with buffers that are not multiples of
+16 bytes and, off Metal, with every read in bounds: the emitted SPIR-V has no bounds
+clamp, where Naga's Metal output clamps, so a read past the end is the device's to
+define. **Not run on Vulkan since the fix.**
+
+The same omission is in Naga's output for the wgpu renderer: its SPIR-V for
+`primary_edge_neighbour` has the same undecorated `OpArrayLength`. Whether the wgpu
+renderer shows it on RADV is not measured here; the frames compared so far would not
+show it, because every mesh in them has the same kind of index buffer.
+
+**The cold reconstructed frame** was held bit-equal to the plain frame, where RADV
+gives weights of 1 + 2^-16 and 48 pixels one half-float step apart; the test allows
+one step. With that it runs on and fails at frame 16 on the mean weight: 16.826
+against 17, 1.02% short where the bound is 1%. On Metal the shortfall is 92 pixels
+(the card's outline) and 809 samples at that frame, 0.39%; RADV's is 2,138 samples
+with a least weight of 3.56 against Metal's 6.66. That is 2.6 times Metal's and not
+explained: the bound stays, and the failure now reports how many pixels are short and
+by how much, which tells more outline pixels from the same pixels losing more.

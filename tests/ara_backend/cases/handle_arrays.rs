@@ -74,7 +74,7 @@ fn scattered_image_sampler_and_comparison_arrays_native_replay() -> Result<()> {
             .iter()
             .map(|w| u32::from_le_bytes(*w))
             .collect();
-        assert_nonuniform_sampled_images(&words)?;
+        assert_nonuniform_resources(&words)?;
         let mut at = 5;
         let mut local_size = None;
         while at < words.len() {
