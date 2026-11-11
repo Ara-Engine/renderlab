@@ -120,6 +120,75 @@ fn shadow_fit_maps_receivers_into_the_map() {
 }
 
 /// The standard program as it was before TP1's marked edits, rebuilt from the current one.
+/// `frame_block` puts each `TpFrame` field where transparency.wgsl reads it: the camera
+/// matrix first and its inverse after it, the fit's matrix, the eye and the view's forward
+/// axis, the size, the direction toward the sun with the map flag, the lux with the map's
+/// texel, the step with the map's bias and size and the reflection flag, and the scene
+/// rectangle as integers at byte 304. Casters only deepen the fit toward the sun.
+#[test]
+fn frame_block_packs_the_fields_where_the_shader_reads_them() {
+    let camera = Camera::look_at(
+        Vec3::new(1.0, 2.0, 5.0),
+        Vec3::new(1.0, 2.0, 0.0),
+        Vec3::Y,
+        1.0,
+        0.1,
+        100.0,
+    )
+    .unwrap();
+    let travel = Vec3::new(0.3, 0.2, -1.0).normalize();
+    let receivers = [(Vec3::new(-1.0, 2.0, 0.0), Vec3::new(1.0, 3.0, 2.0))];
+    let fit = shadow_fit(travel, &receivers, &[]).unwrap();
+    let block = frame_block(&FrameInputs {
+        camera,
+        size: [640, 360],
+        sun: Some((travel, [3.0, 2.0, 1.0])),
+        fit: Some(fit),
+        step: 0.25,
+        reflect: true,
+        scene: [7, 8, 9, 10],
+    });
+    assert_eq!(block.len() as u64, FRAME_BYTES);
+    let float = |i: usize| f32::from_ne_bytes(block[4 * i..4 * i + 4].try_into().unwrap());
+    let floats = |from: usize, n: usize| (from..from + n).map(float).collect::<Vec<_>>();
+    let matrix = camera.matrix(640, 360);
+    assert_eq!(floats(0, 16), matrix.to_cols_array());
+    assert_eq!(floats(16, 16), matrix.inverse().to_cols_array());
+    assert_eq!(floats(32, 16), fit.matrix.to_cols_array());
+    assert_eq!(floats(48, 4), [1.0, 2.0, 5.0, 1.0]);
+    assert!((Vec3::new(float(52), float(53), float(54)) - Vec3::NEG_Z).length() < 1e-6);
+    assert_eq!(floats(64, 4), [640.0, 360.0, 1.0 / 640.0, 1.0 / 360.0]);
+    assert_eq!(floats(68, 4), [-travel.x, -travel.y, -travel.z, 1.0]);
+    assert_eq!(floats(72, 4), [3.0, 2.0, 1.0, fit.texel]);
+    assert_eq!(floats(80, 4), [0.25, fit.bias, SHADOW_SIZE as f32, 1.0]);
+    let scene: Vec<u32> = (0..4)
+        .map(|k| u32::from_ne_bytes(block[304 + 4 * k..308 + 4 * k].try_into().unwrap()))
+        .collect();
+    assert_eq!(scene, [7, 8, 9, 10]);
+    // No sun and no fit: the direction is +z with no map, and the block says so.
+    let dark = frame_block(&FrameInputs {
+        camera,
+        size: [640, 360],
+        sun: None,
+        fit: None,
+        step: 0.25,
+        reflect: false,
+        scene: [0; 4],
+    });
+    let float = |i: usize| f32::from_ne_bytes(dark[4 * i..4 * i + 4].try_into().unwrap());
+    assert_eq!(
+        [float(68), float(69), float(70), float(71)],
+        [0.0, 0.0, 1.0, 0.0]
+    );
+    assert_eq!(float(83), 0.0);
+    // A caster sunward of the receivers moves the map's near plane toward the sun and
+    // leaves its footprint alone.
+    let above = [(Vec3::new(-0.5, 2.0, 40.0), Vec3::new(0.5, 3.0, 41.0))];
+    let deep = shadow_fit(travel, &receivers, &above).unwrap();
+    assert_eq!(deep.texel, fit.texel);
+    assert!(deep.bias < fit.bias);
+}
+
 fn pre_tp1_standard() -> String {
     let mut s = crate::STANDARD_PROGRAM.to_owned();
     // Undo P-LTS's later exact-zero work rejection as well: this oracle must keep

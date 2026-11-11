@@ -41,6 +41,10 @@ const VSM_FAN_STEPS:u32=24u;
 // caster cut's error bound (metres; negative: original geometry). info: page epoch and
 // absolute level (levels[0].info.y).
 struct VsmLevel {origin:vec4<f32>,info:vec4<u32>};
+// TR1's restart zones, as shaders/primary_rays.wgsl declares them (the two texts are compared
+// by a test): a moving caster's swept shadow and changed local lights' restart spheres, and in
+// counts.y the directions a receiver inside one evaluates.
+struct Tr1Zones { shadow_lo:vec4<f32>, shadow_hi:vec4<f32>, shadow_light:vec4<f32>, relit:array<vec4<f32>,8>, counts:vec4<u32> };
 struct VsmFrame {
     u:vec4<f32>,v:vec4<f32>,l:vec4<f32>,
     // xyz: world eye; w: pixel footprint per metre of distance (2 tan(fov_y/2)/height).
@@ -81,6 +85,9 @@ struct VsmFrame {
     // (`truncated_walks_block`, vsm_march). w: a candidate walk's step budget at the
     // receiver's level (`walk_steps`; 0: VSM_WALK_STEPS).
     nsq:vec4<u32>,
+    // P-RELIT: on TR1 frames of the Exact and Surface lookups, a receiver in a restart zone
+    // evaluates zones.counts.y directions instead of nsq.x batches (vsm_batches); zero otherwise.
+    zones:Tr1Zones,
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
 
@@ -431,6 +438,20 @@ struct VsmU32s {data:array<u32>};
 @group(1) @binding(2) var<storage,read> primary_vertices:binding_array<VsmVec4s,PRIMARY_BATCHES>;
 @group(1) @binding(3) var<storage,read> primary_indices:binding_array<VsmU32s,PRIMARY_BATCHES>;
 @group(1) @binding(5) var<storage,read> primary_placements:array<u32>;
+// renderlab: batch info begin
+// Per draw (batch), after the placement words and counted back from the buffer end
+// (primary_ray::batch_word): triangle count, bit 30 an adjacency suffix in the index buffer,
+// bit 31 a skinned previous-vertex stream. Read these here, never from `arrayLength` of a
+// binding-array element: naga 30 leaves that element index undecorated, and a driver may
+// then answer for one element per workgroup (RADV does). Functions only, no constants:
+// composers that carry functions by name (the edge check) pick these up whole.
+fn primary_batch_info(batch:u32)->u32 {
+    return primary_placements[arrayLength(&primary_placements)-1u-batch];
+}
+fn batch_triangles(info:u32)->u32 {return info&0x3fffffffu;}
+fn batch_adjacent(info:u32)->bool {return (info&0x40000000u)!=0u;}
+fn batch_skinned(info:u32)->bool {return (info&0x80000000u)!=0u;}
+// renderlab: batch info end
 
 struct LightingUniform {eye:vec3<f32>,count:u32,environment:vec3<f32>,exposure:f32,map:vec4<f32>};
 struct Light {position_range:vec4<f32>,travel_outer:vec4<f32>,rgb_inner:vec4<f32>,kind:vec4<u32>, source:vec4<f32>};
@@ -447,9 +468,9 @@ fn vsm_triangle(batch:u32,primitive:u32)->array<vec3<f32>,3> {
 }
 // The adjacency suffix of the index buffer (receiver_adjacency.rs): 6T+1 words.
 fn vsm_neighbour(batch:u32,primitive:u32,edge:u32)->u32 {
-    let words=arrayLength(&primary_indices[batch].data);
-    if words%3u!=1u {return VSM_MISSING;}
-    return primary_indices[batch].data[(words-1u)/2u+primitive*3u+edge];
+    let info=primary_batch_info(batch);
+    if !batch_adjacent(info) {return VSM_MISSING;}
+    return primary_indices[batch].data[(batch_triangles(info)+primitive)*3u+edge];
 }
 // N8g walk records (virtual_shadow_records.wgsl, docs/non-rt-n8g.md), N8h's layout
 // (docs/non-rt-n8h.md): per recorded triangle its three positions' bits, 36 contiguous bytes,
@@ -498,8 +519,8 @@ fn vsm_tri_in(rec:vec2<u32>,batch:u32,primitive:u32)->array<vec3<f32>,3> {
 // N8l: the first word of a batch's adjacency suffix (VSM_NONE without one), found once per walk
 // or ring rather than per neighbour, and neighbours read from it.
 fn vsm_adjacency(batch:u32)->u32 {
-    let words=arrayLength(&primary_indices[batch].data);
-    return select(VSM_NONE,(words-1u)/2u,words%3u==1u);
+    let info=primary_batch_info(batch);
+    return select(VSM_NONE,batch_triangles(info)*3u,batch_adjacent(info));
 }
 fn vsm_nb_at(batch:u32,adj:u32,primitive:u32,edge:u32)->u32 {
     if adj==VSM_NONE {return VSM_MISSING;}
@@ -1383,6 +1404,7 @@ fn vsm_prepare(id:vec2<u32>)->VsmPixel {
     let view=shadow_views[layer];
     let slot=record.x-1u;
     out.r=VsmReceiver(world.xyz,normal.xyz,world.w,normal.w<0.0,slot,primary_placements[slot]&0x1fffffffu,record.y);
+    vsm_pixel_batches=tr1_zone_rays(world.xyz,8u*vsm.nsq.x)/8u;
     let l=-light.travel_outer.xyz;
     let rows=transpose(view.world_to_clip);let u=normalize(rows[0].xyz);let v=normalize(rows[1].xyz);
     let seed=vsm_hash(id.x+id.y*size.x);
@@ -1410,8 +1432,13 @@ fn vsm_directions(b:u32) {
     vsm_dir_store(6u,vsm_direction(base+6u,shift,l,u,v,slope));vsm_dir_store(7u,vsm_direction(base+7u,shift,l,u,v,slope));
     vsm_prepare_rays(l);
 }
-// Directions a pixel evaluates this frame: n8e.x per batch, nsq.x batches.
-fn vsm_total()->u32 {return vsm.n8e.x*vsm.nsq.x;}
+// P-RELIT: the prepared pixel's batches (vsm_prepare): the frame's, or the restart count's
+// where TR1 will restart its history (tr1_zone_rays). A pixel no lane prepared (a cached cell,
+// S4's gather) has the frame's.
+var<private> vsm_pixel_batches:u32;
+fn vsm_batches()->u32 {return max(vsm.nsq.x,vsm_pixel_batches);}
+// Directions the pixel evaluates this frame: n8e.x per batch.
+fn vsm_total()->u32 {return vsm.n8e.x*vsm_batches();}
 // P-NSQ: the prepared pixel's visible directions over the frame's batches `first`, `first` +
 // `stride`, ... (P-NSQ3: the Surface walk splits a pixel's batches over several lanes; every
 // other caller takes them all, 0 and 1). Each batch is N8e's lookup of eight directions (its walk
@@ -1423,7 +1450,7 @@ fn vsm_walk_batches(px:VsmPixel,first:u32,stride:u32)->u32 {
     let r=px.r;
     var visible=0u;
     vsm_batch_work=0u;
-    for(var b=first;b<vsm.nsq.x;b+=stride) {
+    for(var b=first;b<vsm_batches();b+=stride) {
         if b>0u {vsm_directions(b);}
         vsm_visits=0u;
         let ring=vsm_ring(r,(vsm.misc.w&1u)!=0u && !vsm_beyond_horizon(r,px.l));

@@ -16,17 +16,17 @@ use lighting_gpu::LightingGpu;
 mod post_gpu;
 use post_gpu::PostGpu;
 #[path = "shadow_gpu.rs"]
-mod shadow_gpu;
+pub(crate) mod shadow_gpu;
 use sha2::{Digest, Sha256};
 use shadow_gpu::{ShadowDraw, ShadowFrame, ShadowState};
 #[path = "hardware_shadow_gpu.rs"]
 pub(crate) mod hardware_shadow_gpu;
 use hardware_shadow_gpu::HardwareState;
 #[path = "fresh_shadow_gpu.rs"]
-mod fresh_shadow_gpu;
+pub(crate) mod fresh_shadow_gpu;
 use fresh_shadow_gpu::{FreshPipelines, FreshState};
 #[path = "primary_ray_gpu.rs"]
-mod primary_ray_gpu;
+pub(crate) mod primary_ray_gpu;
 use primary_ray_gpu::temporal_reconstruction::{self, ReconstructionState};
 pub use primary_ray_gpu::temporal_reconstruction::{
     Reconstruction, ReconstructionShadowBudget, RenderScale,
@@ -50,7 +50,7 @@ use program_gpu::{Preludes, ProgramAbi, ProgramSlot};
 mod texture_residency;
 pub use texture_residency::{ResidencyStats, TextureResidency};
 #[path = "gi_cache.rs"]
-mod gi_cache;
+pub(crate) mod gi_cache;
 #[path = "skinning.rs"]
 pub(crate) mod skinning;
 // TP1 transparent pass and particles (docs/m7-tp1.md).
@@ -3280,7 +3280,7 @@ impl Renderer {
                         self.encode_primary_visibility(&mut encoder, true, stamps(6));
                     }
                     mark(&mut encoder, "sun_shadow");
-                    self.encode_virtual(&mut encoder, stamps(8));
+                    self.encode_virtual(&mut encoder, stamps(8), &mut mark);
                     // VF1 samples the freshly generated Virtual depth pages.
                     mark(&mut encoder, "atmosphere");
                     self.encode_atmosphere(&mut encoder, scene_generation);

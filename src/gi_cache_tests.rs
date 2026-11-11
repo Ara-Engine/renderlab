@@ -107,6 +107,27 @@ fn load(path: &Path) -> Sv {
         sha: format!("{:x}", sha2::Sha256::digest(&bytes)),
     }
 }
+/// The path-traced reference cache: RENDERLAB_M7_G1_REFS, else the original evidence folder
+/// `E:/renderlab-work/<unit>/refs` where that drive exists, else `<target>/gi-reference-cache/<unit>`
+/// next to the test binary. Never a relative path: on Linux "E:/..." would land inside the repo.
+fn reference_cache_dir(unit: &str) -> PathBuf {
+    if let Some(dir) = env("RENDERLAB_M7_G1_REFS") {
+        return PathBuf::from(dir);
+    }
+    let evidence = PathBuf::from(format!("E:/renderlab-work/{unit}/refs"));
+    if evidence.is_absolute() && evidence.parent().is_some_and(|p| p.exists()) {
+        return evidence;
+    }
+    // target/<profile>/deps/<test binary>: the cache lives under target/.
+    let exe = std::env::current_exe().expect("test binary path");
+    let target = exe
+        .ancestors()
+        .find(|p| p.file_name().is_some_and(|n| n == "target"))
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| exe.parent().unwrap().to_path_buf());
+    eprintln!("RENDERLAB_M7_G1_REFS unset and E:/renderlab-work absent: reference cache under {}", target.display());
+    target.join("gi-reference-cache").join(unit)
+}
 fn env(name: &str) -> Option<String> {
     std::env::var(name).ok()
 }
@@ -920,7 +941,7 @@ fn frame_gpu(r: &mut Renderer) -> Json {
 }
 
 /// A reference image, rendered once and kept as f32 mean and standard error in
-/// RENDERLAB_M7_G1_REFS (default E:/renderlab-work/m7-g1/refs) under a key naming the
+/// RENDERLAB_M7_G1_REFS (default: see reference_cache_dir) under a key naming the
 /// scene, view, sample count and specular scale, so later short leases reuse it
 /// instead of path tracing again. Raw caches are deleted once G1 is summarized.
 fn cached_reference(
@@ -933,9 +954,7 @@ fn cached_reference(
     settings: &reference::Settings,
 ) -> reference::Image {
     use sha2::Digest;
-    let dir = PathBuf::from(
-        env("RENDERLAB_M7_G1_REFS").unwrap_or_else(|| "E:/renderlab-work/m7-g1/refs".into()),
-    );
+    let dir = reference_cache_dir("m7-g1");
     let mut h = sha2::Sha256::new();
     h.update(sv.sha.as_bytes());
     for v in [eye, target] {
@@ -2335,9 +2354,7 @@ fn quarry_reference(
         max_depth: 2,
         ..Default::default()
     };
-    let dir = PathBuf::from(
-        env("RENDERLAB_M7_G1_REFS").unwrap_or_else(|| "E:/renderlab-work/m7-g1b/refs".into()),
-    );
+    let dir = reference_cache_dir("m7-g1b");
     let mut h = sha2::Sha256::new();
     // The constant-sky gate keeps its G1b key, so its cached images stay valid.
     match (content, sky) {
@@ -3291,6 +3308,8 @@ fn gpu_software_hit_normals_follow_instance_transforms() {
     );
     let source = [
         "fn unit_normal(n:vec3<f32>) -> vec3<f32> { return normalize(n); }",
+        // gi_rays_software.wgsl's gi_hit_primitive returns gi_cells.wgsl's sentinel.
+        "const GI_NO_PRIMITIVE:u32=0xffffffffu;",
         include_str!("../shaders/gi_rays_software.wgsl"),
         &entry,
     ]

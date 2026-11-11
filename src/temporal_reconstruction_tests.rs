@@ -305,7 +305,7 @@ fn gpu_mq1_moving_placement() {
                 ],
             );
             r.test_drain("MQ1 moving placement");
-            let reset = r.reconstruction_state.as_ref().unwrap().reset;
+            let reset = r.reconstruction_state.as_ref().unwrap().plan.reset;
             assert_eq!(
                 reset,
                 f == 0,
@@ -332,6 +332,147 @@ fn gpu_mq1_moving_placement() {
             "{path}: ground weight {ground_weight}"
         );
     }
+}
+
+/// Reproduction: how much history a still frame accumulates, and where it falls short.
+///
+/// Under a still camera every pixel takes one jittered sample a frame, so after n frames a
+/// pixel that never leaves its surface holds a weight of n. Only pixels the card's outline
+/// crosses have a reason to hold less. Through the ara-gpu backend on RADV (Radeon 760M,
+/// Mesa 26.0.8) 659 pixels of a 128x96 frame were short after 17 frames where Metal and an
+/// RTX card had 92: all 444 pixels of the image's border, at a mean weight of 14.86, and
+/// 215 within a pixel of the card's outline. This asks the same of the wgpu renderer: a
+/// card 1 m over a ground, seen from straight above, 17 frames, then the written history's
+/// weights. It prints the counts by place and fails if any pixel on the image's border or
+/// away from the card's outline is short. It fixes nothing.
+#[test]
+#[ignore = "GPU; RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK; cargo test -p renderlab --lib gpu_tr1_still_weights -- --ignored --nocapture"]
+fn gpu_tr1_still_weights() {
+    let mut r = renderer(false);
+    r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
+    r.set_soft_shadows(SoftShadows::Exact);
+    r.set_lighting_and_shadows(
+        &Lighting {
+            lights: vec![Light::Directional {
+                travel: Vec3::NEG_Y,
+                lux: [1000.; 3],
+            }],
+            environment: [0.; 3],
+            exposure_stops: -8.,
+        },
+        &Shadows {
+            directional_disk_angle: 0.02,
+            requests: vec![ShadowRequest::Directional {
+                split_ends: vec![8.],
+            }],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    r.set_reconstruction(Reconstruction::default()).unwrap();
+    let quad = |half: f32, y: f32| {
+        [
+            [-half, y, -half],
+            [half, y, -half],
+            [half, y, half],
+            [-half, y, half],
+        ]
+    };
+    let (ground, mut ground_at) = geometry(&mut r, &quad(4., 0.), &[0, 2, 1, 0, 3, 2]);
+    let (card, mut card_at) = geometry(&mut r, &quad(0.5, 1.), &[0, 2, 1, 0, 3, 2]);
+    let [w, h] = [128u32, 96];
+    let color = target(&r, w, h);
+    // Straight down from 4 m, a little off the card's centre so its outline falls inside
+    // pixels and not on their boundaries.
+    let camera = Camera::look_at(
+        Vec3::new(0.03, 4., 0.02),
+        Vec3::new(0.03, 0., 0.02),
+        Vec3::NEG_Z,
+        55f32.to_radians(),
+        0.1,
+        100.,
+    )
+    .unwrap();
+    const FRAMES: u32 = 17;
+    for f in 0..FRAMES {
+        render(
+            &mut r,
+            &color,
+            &camera,
+            &mut [
+                Draw::new(&ground, &mut ground_at),
+                Draw::new(&card, &mut card_at),
+            ],
+        );
+        r.test_drain("TR1 still weights");
+        let reset = r.reconstruction_state.as_ref().unwrap().plan.reset;
+        assert_eq!(reset, f == 0, "frame {f}: a still frame must not restart");
+    }
+    let state = r.reconstruction_state.as_ref().unwrap();
+    let history = read_texture(&r, state.written_colour());
+    assert_eq!(history.len(), (w * h * 16) as usize, "an RGBA32F history");
+    let weights: Vec<f32> = history
+        .chunks_exact(16)
+        .map(|texel| f32::from_le_bytes(texel[12..16].try_into().unwrap()))
+        .collect();
+    // The card's outline in pixels: the least and greatest of its projected corners.
+    let matrix = camera.matrix(w, h);
+    let corners = quad(0.5, 1.).map(|p| {
+        let c = matrix * Vec3::from_array(p).extend(1.0);
+        [
+            (c.x / c.w + 1.0) * 0.5 * w as f32,
+            (1.0 - c.y / c.w) * 0.5 * h as f32,
+        ]
+    });
+    let outline = [0, 1].map(|axis| {
+        corners
+            .iter()
+            .map(|c| c[axis])
+            .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)))
+    });
+    let samples = FRAMES as f32;
+    let (mut border, mut border_weight, mut ring, mut on_card, mut elsewhere) =
+        (0usize, 0f32, 0usize, 0usize, 0usize);
+    let (mut least, mut most, mut deficit) = (f32::MAX, 0f32, 0f32);
+    for (i, &weight) in weights.iter().enumerate() {
+        least = least.min(weight);
+        most = most.max(weight);
+        if weight >= samples - 0.01 {
+            continue;
+        }
+        deficit += samples - weight;
+        let (x, y) = (i as u32 % w, i as u32 / w);
+        // Signed distance of the pixel's centre from the outline: negative on the card.
+        let centre = [x as f32 + 0.5, y as f32 + 0.5];
+        let signed = (0..2)
+            .map(|a| (outline[a].0 - centre[a]).max(centre[a] - outline[a].1))
+            .fold(f32::MIN, f32::max);
+        if x == 0 || y == 0 || x == w - 1 || y == h - 1 {
+            border += 1;
+            border_weight += weight;
+        } else if signed.abs() < 1.0 {
+            ring += 1;
+            on_card += usize::from(signed < 0.0);
+        } else {
+            elsewhere += 1;
+        }
+    }
+    let mean = weights.iter().map(|w| f64::from(*w)).sum::<f64>() / weights.len() as f64;
+    eprintln!(
+        "[still-weights] frame {}: weights {least} to {most}, mean {mean:.6}; {} pixels short of {samples} by {deficit:.0} samples in all: {border} on the image's border (mean weight {:.2}), {ring} within a pixel of the card's outline ({on_card} on the card), {elsewhere} elsewhere",
+        FRAMES - 1,
+        border + ring + elsewhere,
+        border_weight / border.max(1) as f32,
+    );
+    assert!(
+        most <= samples + 0.01 && least >= 1.0,
+        "weights {least} to {most} after {FRAMES} frames"
+    );
+    assert_eq!(
+        (border, elsewhere),
+        (0, 0),
+        "still pixels away from the card's outline hold less than one sample a frame"
+    );
 }
 
 #[test]

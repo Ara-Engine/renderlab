@@ -445,7 +445,7 @@ fn vsc_finish() {
     // The verdict's visible code (0..n8e.x): over several batches (P-NSQ), 0 or n8e.x when
     // solid and 1 when partial (only solidity and the solid count are read).
     var code=visible;
-    if vsm.nsq.x>1u {code=select(select(1u,vsm.n8e.x,visible==vsm_total()),0u,visible==0u);}
+    if vsm_batches()>1u {code=select(select(1u,vsm.n8e.x,visible==vsm_total()),0u,visible==0u);}
     let start=u32((i32(vsm.levels[0].info.y)+i32(min(vsc_level,15u)))&15);
     let work=min(15u,32u-countLeadingZeros(total));
     atomicStore(&vsm_scratch.words[2u*k+1u],0x80000000u|code|(start<<4u)|(work<<8u));

@@ -7,7 +7,9 @@
 // PC1: only the device type changes; pipeline creation uses the shared cache.
 use super::*;
 use crate::pipeline_compilation::PipelineDevice;
-use crate::primary_ray::{TRACED_DRAWS, TRACED_FEATURES, placement_table, traced_limits};
+use crate::primary_ray::{
+    TRACED_DRAWS, TRACED_FEATURES, batch_word, placement_table, placement_words, traced_limits,
+};
 use crate::shadow_plan::Bounds;
 
 #[path = "film_accumulation.rs"]
@@ -16,17 +18,20 @@ use film_accumulation::{FilmLayouts, FilmState};
 #[path = "shadow_visibility_filter.rs"]
 mod shadow_visibility_filter;
 #[path = "temporal_reconstruction.rs"]
-pub(super) mod temporal_reconstruction;
+pub(crate) mod temporal_reconstruction;
 // MP1: per-program deferred shading of mixed-program frames.
 #[path = "program_lists.rs"]
-pub(super) mod program_lists;
+pub(crate) mod program_lists;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
-/// `scene_pixels` rectangle, the sampling words and the reflection bands
-/// (`ReflectionSettings::frame_words`).
+/// `scene_pixels` rectangle, the sampling words, the reflection bands
+/// (`ReflectionSettings::frame_words`) and TR1's restart zones (`FRAME_ZONES`).
 // TP2 integration: post-processing shares this ABI instead of freezing its byte size.
-pub(super) const FRAME_BYTES: usize = 144;
+pub(super) const FRAME_BYTES: usize = FRAME_ZONES + temporal_reconstruction::ZONES_BYTES;
+/// `PrimaryFrame::zones`: written by `prepare_reconstruction` on reconstructed frames, zero
+/// otherwise.
+pub(super) const FRAME_ZONES: usize = 144;
 /// Pixels per trace workgroup; the WGSL workgroup sizes must match.
 pub(super) const TRACE_TILE: [u32; 2] = [8, 4];
 /// Pixels per shading workgroup; the WGSL workgroup size must match.
@@ -58,12 +63,12 @@ fn heads(wgsl: &str) -> Result<[String; 2], Error> {
 }
 
 // TP2: glass reflection hits use R1's ordinary traced hit shading and geometry ABI.
-pub(super) fn transparent_reflection_head(wgsl: &str) -> Result<String, Error> {
+pub(crate) fn transparent_reflection_head(wgsl: &str) -> Result<String, Error> {
     Ok(finish_shading_heads(heads(wgsl)?)?[0].clone())
 }
 
 /// Same engine seams and material ABI, with no traversal declarations at all.
-pub(super) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
+pub(crate) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
     // Validate the affine/visibility seams even though this composition has no rays.
     crate::hardware_shadows::shader_source(wgsl, SampleCount::One)?;
     let (before, rest) = wgsl
@@ -81,7 +86,7 @@ pub(super) fn non_rt_heads(wgsl: &str) -> Result<[String; 2], Error> {
     Ok([hard, soft].map(|body| format!("enable wgpu_binding_array;\n{before}\n{body}\n{after}\n{hash}\nconst PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}", include_str!("../shaders/primary_rays.wgsl"))))
 }
 
-pub(super) fn non_rt_sources(wgsl: &str) -> Result<([String; 2], [String; 2]), Error> {
+pub(crate) fn non_rt_sources(wgsl: &str) -> Result<([String; 2], [String; 2]), Error> {
     let heads = non_rt_heads(wgsl)?;
     let kernels = heads.clone().map(|h| format!("{h}\noverride FRESH_DIRECTIONS:u32=256u;\n@compute @workgroup_size(1) fn primary_trace() {{}}\n@compute @workgroup_size(1) fn primary_trace_receivers() {{}}\n@compute @workgroup_size(1) fn primary_trace_interactive() {{}}\n@compute @workgroup_size(1) fn fresh_compute() {{}}"));
     // M7-R1n: non-RT shading heads declare the software reflection geometry.
@@ -92,7 +97,7 @@ pub(super) fn non_rt_sources(wgsl: &str) -> Result<([String; 2], [String; 2]), E
 
 /// The engine's trace and visibility kernel modules: hard (camera rays and exact
 /// receivers) and soft (traced fresh visibility and the fused Interactive pass).
-pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
+pub(crate) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
     let [hard, soft] = heads(wgsl)?;
     if soft.matches(COVERAGE_SEAM).count() != 1 {
         return Err(Error::InvalidInput(
@@ -123,7 +128,7 @@ pub(super) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
 
 /// The check pipeline shares the actual geometry arithmetic, including test rays,
 /// but has no traversal types, builtins or lighting estimator in its module.
-pub(super) fn edge_check_source(kernels: &str) -> String {
+pub(crate) fn edge_check_source(kernels: &str) -> String {
     use std::collections::{BTreeMap, BTreeSet};
     let kernels = kernels.replace("\r\n", "\n");
     let mut functions = BTreeMap::new();
@@ -201,7 +206,7 @@ pub(super) fn edge_check_source(kernels: &str) -> String {
 /// Heads of every program's traced shading modules, indexed by `Shading`: Hard (inline
 /// `hard_shadow` rays) and Soft (fresh counts). `program::compose` appends the API, the
 /// program and the shading entry.
-pub(super) fn shading_heads(wgsl: &str) -> Result<[String; 2], Error> {
+pub(crate) fn shading_heads(wgsl: &str) -> Result<[String; 2], Error> {
     let mut heads = heads(wgsl)?;
     // Hard shading reuses the exact epsilon published by its camera-hit pass.
     // Keep this engine helper separate from every user's shading program.
@@ -269,7 +274,7 @@ pub(super) fn sources_hash(sources: &[String; 2]) -> [u8; 32] {
 /// rectangle of every conservative world bound projected through `matrix`, 2 px
 /// outward. A ray outside it misses every triangle; traced frames skip those rays.
 /// Bounds reaching behind the eye, or a nonfinite projection, give the image.
-pub(super) fn scene_pixels(bounds: &[Bounds], matrix: Mat4, [width, height]: [u32; 2]) -> [u32; 4] {
+pub(crate) fn scene_pixels(bounds: &[Bounds], matrix: Mat4, [width, height]: [u32; 2]) -> [u32; 4] {
     let matrix = matrix.as_dmat4();
     let (mut lower, mut upper) = (glam::DVec2::INFINITY, glam::DVec2::NEG_INFINITY);
     for b in bounds {
@@ -413,7 +418,7 @@ impl Renderer {
     /// infer from the camera alone.
     pub fn cut_reconstruction(&mut self) {
         if let Some(state) = &mut self.reconstruction_state {
-            state.cut = true;
+            state.plan.cut = true;
         }
     }
 
@@ -1773,18 +1778,27 @@ impl Renderer {
                 storage,
             );
             let normals = Buffer::new(self, "primary placement normals", instance_bytes, storage);
-            let table = Buffer::new(
-                self,
-                "primary placement draws",
-                (placements.len().max(1) * 4) as u64,
-                storage,
-            );
-            let words: Vec<u8> = placements.iter().flat_map(|v| v.to_ne_bytes()).collect();
-            if !words.is_empty() {
-                self.queue.write_buffer(&table.value, 0, &words);
-                uploads.shadows += words.len() as u64;
-                uploads.write_calls += 1;
-            }
+            // A skinned draw binds its own previous stream, one padding vec4 longer than
+            // the current one; a static draw aliases the current stream.
+            let batches: Vec<u32> = draws
+                .iter()
+                .map(|d| {
+                    let skinned = d
+                        .mesh
+                        .skin
+                        .as_ref()
+                        .is_some_and(|s| s.previous.size() > d.mesh.vertex.size());
+                    batch_word(d.mesh.index.size() / 4, skinned)
+                })
+                .collect();
+            let words: Vec<u8> = placement_words(&placements, &batches)
+                .iter()
+                .flat_map(|v| v.to_ne_bytes())
+                .collect();
+            let table = Buffer::new(self, "primary placement draws", words.len() as u64, storage);
+            self.queue.write_buffer(&table.value, 0, &words);
+            uploads.shadows += words.len() as u64;
+            uploads.write_calls += 1;
             let state = self.primary.as_ref().unwrap();
             let absent: &wgpu::Buffer = &state.absent.as_ref().unwrap().value;
             let vertices = padded(draws.iter().map(|d| &**d.mesh.vertex), absent);
@@ -2308,7 +2322,7 @@ impl Renderer {
         let listed = self
             .reconstruction_state
             .as_ref()
-            .is_some_and(|s| s.probe_rays < s.shadow_rays);
+            .is_some_and(|s| s.plan.probe_rays < s.plan.shadow_rays);
         let kernels = InteractiveKernels {
             check: p.interactive_repair.as_deref(),
             repair: t.repair.as_deref(),

@@ -11,9 +11,6 @@ fn motion_rigid(slot:u32)->bool {
     return any(bitcast<vec4<u32>>(a[0])!=bitcast<vec4<u32>>(b[0]))||any(bitcast<vec4<u32>>(a[1])!=bitcast<vec4<u32>>(b[1]))
         ||any(bitcast<vec4<u32>>(a[2])!=bitcast<vec4<u32>>(b[2]))||any(bitcast<vec4<u32>>(a[3])!=bitcast<vec4<u32>>(b[3]));
 }
-fn motion_skinned(batch:u32,current_vec4s:u32)->bool {
-    return arrayLength(&motion_previous_vertices[batch].data)>current_vec4s;
-}
 fn motion_previous_vertex(batch:u32,vertex:u32)->vec3<f32> {
     return motion_previous_vertices[batch].data[vertex*3u].xyz;
 }

@@ -16,7 +16,7 @@ use super::*;
 use crate::gi_bvh::{self, Blas};
 use crate::primary_ray::{TRACED_DRAWS, placement_table};
 
-const HEADER_WORDS: u64 = 64;
+pub(crate) const HEADER_WORDS: u64 = 64;
 /// Keep the original admission policy: packing storage must not change the chosen
 /// slot count on devices with smaller binding limits. The cold stride is sized below.
 const SLOT_WORDS: u64 = 24 + 32;
@@ -30,7 +30,7 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
     (light_cold_offset(directions) + lights.div_ceil(32).max(1)).next_multiple_of(4)
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
-const COUNTER_WORDS: u64 = 44;
+pub(crate) const COUNTER_WORDS: u64 = 44;
 const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
@@ -39,16 +39,16 @@ const REQUEST_WORDS: u64 = 3;
 const FRAME_BYTES: usize = 80 + 64 * 16;
 const MAX_BOXES: usize = 32;
 /// Claim and resolve repeat in rounds, so collisions retry within the frame.
-const CLAIM_ROUNDS: u32 = 3;
+pub(crate) const CLAIM_ROUNDS: u32 = 3;
 /// Ray items per frame (shaders/gi_cache.wgsl GI_RAY_ITEMS): one visibility ray each,
 /// traced in parallel. A frame wanting more traces the rest in setup, eight lanes a cell.
-const RAY_ITEMS: u32 = 1 << 21;
+pub(crate) const RAY_ITEMS: u32 = 1 << 21;
 /// Probe, three claim and resolve rounds, scan, setup, rays, finish and integrate, then
 /// bounce's gather, light and cell shading (G2), then the cell-space filter (G3).
 const PROFILE_STAMPS: u32 = 2 * (10 + 2 * CLAIM_ROUNDS);
 /// Gather workgroups (one cell each) and light workgroups (64 cells), fixed grids like the
 /// others.
-const GATHER_GROUPS: u32 = 4096;
+pub(crate) const GATHER_GROUPS: u32 = 4096;
 /// The default per-frame gather budget (`IndirectSettings::gather_cells` 0), in cells, on both
 /// paths. G2b sized per-path budgets to about 4 ms of a cut frame's gathers (0.13 us a cell with hardware rays and
 /// 0.4 us with software rays on the quarry; docs/m7-g2b.md). Moving frames gather fewer
@@ -66,10 +66,10 @@ const CLAIM_CELLS_SOFTWARE: u32 = 20480;
 /// the cells cover the view within the claim budget, and the finer cells that follow fall back
 /// to them until they exist (G2b).
 const COARSE_CUT_FRAMES: u32 = 4;
-const LIGHT_GROUPS: u32 = 1024;
+pub(crate) const LIGHT_GROUPS: u32 = 1024;
 /// The cell-space filter's fixed grid (G3): nine items (a changed cell and its eight
 /// neighbours) per cell shading queue entry.
-const FILTER_GROUPS: u32 = 1024;
+pub(crate) const FILTER_GROUPS: u32 = 1024;
 /// Unfiltered hot words 1-22 per slot, the filter's sources (shaders/gi_cache.wgsl gi_raw).
 const RAW_WORDS: u64 = 22;
 /// Slot groups a lighting, environment or caster change spreads relighting over while it
@@ -95,10 +95,10 @@ fn probe_tile() -> u32 {
 /// (`InstanceFlags::VALIDATION_INDIRECT_CALL`, on by default); an idle workgroup exits
 /// at once. Claims and resolves, setup (eight cells per workgroup), rays (one item per
 /// thread), then finish and integrate (sixteen cells per workgroup).
-const CLAIM_GROUPS: u32 = 512;
-const SETUP_GROUPS: u32 = 4096;
-const RAY_GROUPS: u32 = 4096;
-const CELL_GROUPS: u32 = 2048;
+pub(crate) const CLAIM_GROUPS: u32 = 512;
+pub(crate) const SETUP_GROUPS: u32 = 4096;
+pub(crate) const RAY_GROUPS: u32 = 4096;
+pub(crate) const CELL_GROUPS: u32 = 2048;
 /// Frames the profile ring holds, and its per-frame stride (resolve offsets are
 /// 256-byte aligned).
 const PROFILE_RING: u64 = 64;
@@ -128,32 +128,99 @@ fn requests(misses: u32) -> u32 {
 /// the request table, bounce's two gather queues (a count, then slots) and its cell shading
 /// queue (G2).
 #[derive(Clone, Copy)]
-struct WorkLayout {
-    misses: u32,
-    traces: u32,
-    items: u32,
-    requests: u32,
-    queues: [u32; 2],
-    shade: u32,
+pub(crate) struct WorkLayout {
+    pub(crate) misses: u32,
+    pub(crate) traces: u32,
+    pub(crate) items: u32,
+    pub(crate) requests: u32,
+    pub(crate) queues: [u32; 2],
+    pub(crate) shade: u32,
 }
 impl WorkLayout {
     fn of(r: &Resources) -> Self {
-        let misses = COUNTER_WORDS as u32 + r.slots;
-        let traces = misses + r.misses * MISS_WORDS as u32;
-        let items = traces + 2 * r.slots;
+        Self::of_counts(r.slots, r.misses)
+    }
+    pub(crate) fn of_counts(slots: u32, miss_slots: u32) -> Self {
+        let misses = COUNTER_WORDS as u32 + slots;
+        let traces = misses + miss_slots * MISS_WORDS as u32;
+        let items = traces + 2 * slots;
         let requests_at = items + RAY_ITEMS + RAY_ITEMS / 32;
-        let queues = requests_at + REQUEST_WORDS as u32 * requests(r.misses);
+        let queues = requests_at + REQUEST_WORDS as u32 * requests(miss_slots);
         Self {
             misses,
             traces,
             items,
             requests: requests_at,
-            queues: [queues, queues + 1 + r.slots],
-            shade: queues + 2 * (1 + r.slots),
+            queues: [queues, queues + 1 + slots],
+            shade: queues + 2 * (1 + slots),
         }
     }
 }
 /// Blocking readbacks for measurement helpers.
+/// The cache's buffers for a table of `slots`: their sizes in bytes, and the counts the
+/// sizes follow from.
+pub(crate) struct Sizes {
+    /// Miss-list entries.
+    pub(crate) misses: u32,
+    /// The cold record's stride in words, with a visibility bit per light.
+    pub(crate) cold_words: u32,
+    /// Slots the filter sources hold (1 without a filter).
+    pub(crate) raw_slots: u32,
+    pub(crate) table: u64,
+    pub(crate) work: u64,
+    pub(crate) outgoing: u64,
+    pub(crate) draws: u64,
+    pub(crate) raw: u64,
+}
+impl Sizes {
+    pub(crate) fn of(slots: u32, lights: u32, settings: &IndirectSettings) -> Self {
+        // A frame lists at most 2^19 misses (a 2 px cut at 1080p makes about 240k cells):
+        // the miss list and request table stay at G2's size with the larger tables.
+        let misses = slots.min(1 << 19);
+        let directions = settings.directions;
+        let cold_words = light_cold_words(lights, directions);
+        let table_bytes = (HEADER_WORDS + u64::from(slots) * (24 + u64::from(cold_words))) * 4;
+        // Counters, claims, misses, trace and integrate queues, ray items and their
+        // staged bits, the request table, then bounce's two gather queues (a count, then
+        // slots) and the cell shading queue (the frame offsets follow this order).
+        let work_bytes = (COUNTER_WORDS
+            + u64::from(slots)
+            + u64::from(misses) * MISS_WORDS
+            + 2 * u64::from(slots)
+            + u64::from(RAY_ITEMS + RAY_ITEMS / 32)
+            + REQUEST_WORDS * u64::from(requests(misses))
+            + 2 * (1 + u64::from(slots))
+            + u64::from(slots))
+            * 4;
+        let outgoing_bytes = u64::from(slots) * 16;
+        let draws_bytes = u64::from(TRACED_DRAWS + 1) * 16;
+        let raw_slots = if settings.filter != 0 { slots } else { 1 };
+        let raw_bytes = u64::from(raw_slots) * RAW_WORDS * 4;
+        Self {
+            misses,
+            cold_words,
+            raw_slots,
+            table: table_bytes,
+            work: work_bytes,
+            outgoing: outgoing_bytes,
+            draws: draws_bytes,
+            raw: raw_bytes,
+        }
+    }
+}
+/// The draw table: per draw (batch), its stable id, first placement, instance count and
+/// cell-program selector, from `rows` of id, instance count and selector in draw order;
+/// the final vec4 carries the active count of `draws`, preserving per-batch indexing.
+pub(crate) fn draw_table(draws: usize, rows: impl Iterator<Item = [u32; 3]>) -> Vec<u32> {
+    let mut table = vec![0u32; (TRACED_DRAWS as usize + 1) * 4];
+    table[TRACED_DRAWS as usize * 4] = draws.min(TRACED_DRAWS as usize) as u32;
+    let mut first = 0u32;
+    for (b, [id, n, selector]) in rows.enumerate().take(TRACED_DRAWS as usize) {
+        table[b * 4..b * 4 + 4].copy_from_slice(&[id, first, n, selector]);
+        first += n;
+    }
+    table
+}
 const WAIT: wgpu::PollType = wgpu::PollType::Wait {
     submission_index: None,
     timeout: None,
@@ -312,7 +379,7 @@ impl IndirectSettings {
             ..Self::default()
         }
     }
-    fn validate(&self) -> Result<(), Error> {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         let valid = self.cell_pixels.is_finite()
             && self.cell_pixels > 0.0
             && self.min_edge.is_finite()
@@ -682,23 +749,528 @@ struct Profile {
     written: u64,
 }
 /// What `prepare_gi` decided for this frame.
-struct Plan {
-    groups: [u32; 2],
+pub(crate) struct Plan {
+    pub(crate) groups: [u32; 2],
     /// Scan workgroups: every slot, or one environment slot group.
-    scan_groups: u32,
-    scan: bool,
+    pub(crate) scan_groups: u32,
+    pub(crate) scan: bool,
     /// The environment changed: cells re-integrate their stored bits.
-    integrate: bool,
-    clear: bool,
+    pub(crate) integrate: bool,
+    pub(crate) clear: bool,
     /// Only the environment changed, with the view and scene otherwise idle: only the scan
     /// and integrate passes run (and bounce's, which relight).
-    environment_only: bool,
+    pub(crate) environment_only: bool,
     /// Bounce (G2) runs this frame: gathers, light visibility and cell shading. The work
     /// offset (in bytes) of next frame's gather queue count, cleared before the passes.
-    bounce: bool,
-    next_queue_at: u64,
+    pub(crate) bounce: bool,
+    pub(crate) next_queue_at: u64,
     /// The cell-space filter (G3) runs this frame (bounce on, a filter bit set).
-    filter: bool,
+    pub(crate) filter: bool,
+}
+/// What a frame's plan is computed from, apart from the planner's own history: the
+/// settings, the allocated table's shape, and the view.
+pub(crate) struct PlanConfig {
+    pub(crate) settings: IndirectSettings,
+    /// Cell slots, miss slots, the cold record's stride and the filter-source slots of
+    /// the allocated table.
+    pub(crate) slots: u32,
+    pub(crate) misses: u32,
+    pub(crate) cold_words: u32,
+    pub(crate) raw_slots: u32,
+    /// Software rays (the non-RT path) rather than hardware ray queries.
+    pub(crate) software: bool,
+    /// An environment map is selected.
+    pub(crate) field: bool,
+    pub(crate) profiling: bool,
+    /// The software near field's bin count.
+    pub(crate) near_bins: u32,
+    pub(crate) eye: Vec3,
+    pub(crate) fov_y: f32,
+    pub(crate) size: [u32; 2],
+}
+
+/// The first half of a frame's plan: the table header, and what the second half
+/// needs from it.
+pub(crate) struct Begun {
+    /// The table's header words (written at its start every frame).
+    pub(crate) header: [u32; HEADER_WORDS as usize],
+    since_clear: u32,
+    cut_phases: u32,
+    filter: u32,
+}
+
+/// What the second half needs that only the caller's scene and device state give.
+pub(crate) struct FrameInputs<'a> {
+    /// Every placement's world bounds, in draw order then instance slot.
+    pub(crate) bounds: Vec<[f32; 6]>,
+    pub(crate) poses: Vec<crate::renderer::skinning::PlacementPose>,
+    /// A digest of the environment's generation, content revision and rotation.
+    pub(crate) environment: [u8; 32],
+    /// With bounce: a digest of everything cell shading reads (lights, decals,
+    /// transmission, the environment, the programs, the draws).
+    pub(crate) light_key: Option<[u8; 32]>,
+    /// The scene's pixel rectangle (`scene_pixels`).
+    pub(crate) region: [u32; 4],
+    /// The view the idle keys hash: its matrix bytes, then its extent bytes.
+    pub(crate) still_matrix: [u8; 64],
+    pub(crate) still_extent: Vec<u8>,
+    /// The placement transforms' bytes as the geometry arrays hold them.
+    pub(crate) instances: &'a [u8],
+    /// Every skinned draw's revision, little-endian, in draw order.
+    pub(crate) skin_revisions: Vec<u8>,
+}
+
+/// The second half: the frame record and, unless the cache is idle this frame, the
+/// passes to run.
+pub(crate) struct Finished {
+    /// The `GiFrame` record's bytes.
+    pub(crate) frame: Vec<u8>,
+    /// None: the cache is idle (view, scene and lighting unchanged for long enough).
+    pub(crate) plan: Option<Plan>,
+}
+
+/// The cache's CPU history between frames, and the per-frame plan made from it:
+/// everything `prepare_gi` decides without a device. The wgpu renderer and the ara-gpu
+/// backend both plan through `begin` and `finish`, then `advance` once the frame's
+/// passes are certain to run.
+pub(crate) struct Planner {
+    bounds: Vec<[f32; 6]>,
+    poses: Vec<crate::renderer::skinning::PlacementPose>,
+    environment: Option<[u8; 32]>,
+    /// The frame stamp cells are marked seen with.
+    frame: u32,
+    /// Empty the cache at the start of the next planned frame.
+    pending_clear: bool,
+    /// Frames since the cache was last emptied.
+    since_clear: u32,
+    idle_key: Option<[u8; 32]>,
+    idle_frames: u32,
+    view_key: Option<[u8; 32]>,
+    view_frames: u32,
+    environment_streak: bool,
+    environment_catchup: u32,
+    environment_phase: u32,
+    bounce_last: Option<bool>,
+    bounce_busy: u32,
+    parity: bool,
+    light_key: Option<[u8; 32]>,
+    light_streak: bool,
+    relight_catchup: u32,
+    relight_phase: u32,
+}
+impl Default for Planner {
+    fn default() -> Self {
+        Self {
+            bounds: vec![],
+            poses: vec![],
+            environment: None,
+            frame: 0,
+            pending_clear: false,
+            since_clear: u32::MAX,
+            idle_key: None,
+            idle_frames: 0,
+            view_key: None,
+            view_frames: 0,
+            environment_streak: false,
+            environment_catchup: 0,
+            environment_phase: 0,
+            bounce_last: None,
+            bounce_busy: 0,
+            parity: false,
+            light_key: None,
+            light_streak: false,
+            relight_catchup: 0,
+            relight_phase: 0,
+        }
+    }
+}
+impl Planner {
+    /// Whether the next planned frame empties the cache first.
+    pub(crate) fn pending_clear(&self) -> bool {
+        self.pending_clear
+    }
+    pub(crate) fn set_pending_clear(&mut self, pending: bool) {
+        self.pending_clear = pending;
+    }
+    /// A camera cut or scene replacement: empty the cache on the next frame and restart
+    /// the seen stamps, so a reset sequence repeats bit for bit.
+    pub(crate) fn reset(&mut self) {
+        self.pending_clear = true;
+        self.frame = 0;
+    }
+    /// A new table: forget what the old one was planned from and start it empty.
+    pub(crate) fn reallocated(&mut self) {
+        self.environment = None;
+        self.bounds.clear();
+        self.pending_clear = true;
+    }
+    /// Frames since the cache was last emptied.
+    #[cfg(test)]
+    pub(crate) fn since_clear(&self) -> u32 {
+        self.since_clear
+    }
+    /// The table header for this frame. `run`: the cache's passes are wanted this frame;
+    /// `bounce`: its bounce passes too.
+    pub(crate) fn begin(&mut self, c: &PlanConfig, run: bool, bounce: bool) -> Begun {
+        if run {
+            if self.bounce_last.is_some_and(|b| b != bounce) {
+                self.pending_clear = true;
+            }
+            self.bounce_last = Some(bounce);
+        }
+        let eye = c.eye;
+        let s = c.settings;
+        let software = c.software;
+        let layout = WorkLayout::of_counts(c.slots, c.misses);
+        let mut header = [0u32; HEADER_WORDS as usize];
+        header[0] = u32::from(run);
+        header[1] = c.slots - 1;
+        header[23] = c.cold_words; // LC2 per-cell light visibility stride.
+        let field = c.field;
+        // Probe statistics (GI_F_STATS) on profiled frames only.
+        header[2] = u32::from(s.lookup == IndirectLookup::Trilinear)
+            | (u32::from(field) << 1)
+            | (u32::from(s.rotate_directions) << 2)
+            | (u32::from(c.profiling) << 3);
+        header[3] = self.frame;
+        // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
+        // are uncapped.
+        let since_clear = if self.pending_clear {
+            0
+        } else {
+            self.since_clear
+        };
+        let coarse = s.claim_cells != u32::MAX && since_clear < COARSE_CUT_FRAMES;
+        let footprint = 2.0 * (c.fov_y * 0.5).tan() / c.size[1] as f32
+            * s.cell_pixels
+            * if coarse { 2.0 } else { 1.0 };
+        header[4] = footprint.to_bits();
+        header[5] = s.min_edge.to_bits();
+        header[6] = s.levels;
+        header[7] = s.evict_frames;
+        for (i, v) in eye.to_array().into_iter().enumerate() {
+            header[8 + i] = v.to_bits();
+        }
+        header[11] = s.direction_phases;
+        header[12] = s.level_blend.to_bits();
+        header[13] = if s.parallel_rays { RAY_ITEMS } else { 0 };
+        // The cut refill: S groups over the S cache frames that start at a reset.
+        let cut_phases = match s.cut_phases {
+            0 if software => 4,
+            0 => 1,
+            phases => phases,
+        };
+        let spread = cut_phases > 1 && since_clear < cut_phases;
+        header[14] = if spread { cut_phases } else { 0 };
+        // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
+        if software {
+            header[16] = c.near_bins;
+        }
+        header[17] = u32::from(bounce);
+        header[18] = layout.shade;
+        header[19] = s.gathers;
+        header[20] = match s.gather_cells {
+            0 => GATHER_CELLS,
+            u32::MAX => 0,
+            cells => cells,
+        };
+        header[21] = s.gather_stride;
+        header[22] = match s.claim_cells {
+            0 if software => CLAIM_CELLS_SOFTWARE,
+            0 => CLAIM_CELLS_HARDWARE,
+            u32::MAX => 0,
+            cells => cells,
+        };
+        // The cell-space filter (G3) runs over cell shading's queue, so only with bounce, and
+        // only once its sources are allocated.
+        let filter = if bounce && c.raw_slots == c.slots {
+            s.filter
+        } else {
+            0
+        };
+        header[24] = filter;
+        header[25] = s.filter_edge.to_bits();
+        Begun {
+            header,
+            since_clear,
+            cut_phases,
+            filter,
+        }
+    }
+    /// The frame record and the passes to run. `bounce` as given to `begin`.
+    pub(crate) fn finish(
+        &mut self,
+        c: &PlanConfig,
+        begun: &Begun,
+        bounce: bool,
+        inputs: FrameInputs<'_>,
+    ) -> Finished {
+        let s = c.settings;
+        let layout = WorkLayout::of_counts(c.slots, c.misses);
+        let (since_clear, cut_phases, filter) = (begun.since_clear, begun.cut_phases, begun.filter);
+        let FrameInputs {
+            bounds,
+            poses,
+            environment,
+            light_key,
+            region,
+            still_matrix,
+            still_extent,
+            instances,
+            skin_revisions,
+        } = inputs;
+        let mut boxes: Vec<[f32; 6]> = vec![];
+        let previous = std::mem::take(&mut self.bounds);
+        let previous_poses = std::mem::replace(&mut self.poses, poses.clone());
+        if !previous.is_empty() {
+            // A skinned caster can change within identical aggregate bounds; P-SHOW: only a
+            // new pose does (one per placement, in `bounds` order, collected once; P-GI:
+            // searching the draws per placement made this loop quadratic in placements).
+            for i in 0..bounds.len().max(previous.len()) {
+                let (a, b) = (previous.get(i), bounds.get(i));
+                if a == b && !crate::renderer::skinning::deformed(&previous_poses, &poses, i) {
+                    continue;
+                }
+                let mut swept = [
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                    f32::NEG_INFINITY,
+                ];
+                for x in [a, b].into_iter().flatten() {
+                    for k in 0..3 {
+                        swept[k] = swept[k].min(x[k]);
+                        swept[k + 3] = swept[k + 3].max(x[k + 3]);
+                    }
+                }
+                boxes.push(swept);
+            }
+        }
+        self.bounds = bounds;
+        if boxes.len() > MAX_BOXES {
+            let all = boxes.iter().fold(boxes[0], |u, b| {
+                std::array::from_fn(|k| {
+                    if k < 3 {
+                        u[k].min(b[k])
+                    } else {
+                        u[k].max(b[k])
+                    }
+                })
+            });
+            boxes = vec![all];
+        }
+        // An environment change re-integrates every cell from its bits (no rays):
+        // yaw rotates the sky, a new map replaces it. A map's intensity and the constant
+        // sky are applied at lookup, so their changes re-integrate nothing.
+        let environment_changed = self.environment.is_some_and(|e| e != environment);
+        self.environment = Some(environment);
+        let mut flags = 0u32;
+        if !boxes.is_empty() && s.invalidate_casters {
+            flags |= 1;
+        }
+        // Partially traced cells re-queue: form 2 always; the cut refill on the frames after
+        // its first, and one frame past its window, where a cell still partial (made late in
+        // the window) traces every remaining direction.
+        let refill = cut_phases > 1 && (1..=cut_phases).contains(&since_clear);
+        if s.direction_phases > 1 || refill {
+            flags |= 8;
+        }
+        if s.rotation_period != 0 {
+            flags |= 2;
+        }
+        // A step after a still frame re-integrates every cell; a map changing on
+        // consecutive frames, and the ENVIRONMENT_PERIOD frames after it last changed,
+        // re-integrate one fixed slot group a frame (ENVIRONMENT_PERIOD).
+        let integrate_all = environment_changed && !self.environment_streak;
+        let spread = !integrate_all && (environment_changed || self.environment_catchup > 0);
+        self.environment_catchup = if integrate_all {
+            0
+        } else if environment_changed {
+            ENVIRONMENT_PERIOD
+        } else {
+            self.environment_catchup.saturating_sub(1)
+        };
+        self.environment_streak = environment_changed;
+        let integrate = integrate_all || spread;
+        let environment_group = if spread {
+            self.environment_phase = (self.environment_phase + 1) % ENVIRONMENT_PERIOD;
+            ENVIRONMENT_PERIOD | (self.environment_phase << 8)
+        } else {
+            0
+        };
+        if integrate {
+            flags |= 4;
+        }
+        // Bounce (G2): lighting events. The lights, the environment, the frame's program and
+        // its draws' materials (stable ids) form the lighting key. A step after still frames
+        // relights every cell (shaded this frame, then `gathers` gathers); a change on
+        // consecutive frames, a moved caster, and the RELIGHT_PERIOD frames after either
+        // relight one fixed slot group a frame, one gather each (W2: a fixed rotation).
+        let mut relight = 0u32;
+        if bounce {
+            let changed = self.light_key.is_some() && self.light_key != light_key;
+            let caster = !boxes.is_empty() && s.invalidate_casters;
+            let all = changed && !self.light_streak;
+            let spread = !all && (changed || caster || self.relight_catchup > 0);
+            self.relight_catchup = if all {
+                0
+            } else if changed || caster {
+                RELIGHT_PERIOD
+            } else {
+                self.relight_catchup.saturating_sub(1)
+            };
+            self.light_streak = changed;
+            if all {
+                relight = 1 << 31;
+            } else if spread {
+                self.relight_phase = (self.relight_phase + 1) % RELIGHT_PERIOD;
+                relight = RELIGHT_PERIOD | (self.relight_phase << 8);
+            }
+            if relight != 0 {
+                flags |= 16;
+            }
+        }
+        self.light_key = light_key;
+        // Gathers scheduled by a relight run on the frames after it, even where the view is
+        // otherwise idle.
+        let busy = bounce && self.bounce_busy > 0;
+        self.bounce_busy = if bounce && relight != 0 {
+            s.gathers + 2
+        } else {
+            self.bounce_busy.saturating_sub(1)
+        };
+        let mut frame = vec![0u8; FRAME_BYTES];
+        let mut put =
+            |at: usize, v: u32| frame[at * 4..at * 4 + 4].copy_from_slice(&v.to_le_bytes());
+        for (i, v) in region.into_iter().enumerate() {
+            put(i, v);
+        }
+        put(4, boxes.len() as u32);
+        put(5, s.rotation_period);
+        put(6, flags);
+        put(7, c.misses);
+        put(8, c.slots);
+        put(9, layout.misses);
+        put(10, layout.traces);
+        put(11, layout.traces + c.slots);
+        put(12, layout.requests);
+        put(13, requests(c.misses) - 1);
+        put(14, layout.items);
+        // The environment's slot group: period (0: every slot) and phase; bit 31 is set
+        // below on environment-only frames, whose scan visits only that group.
+        put(15, environment_group);
+        // Bounce (G2): this frame's and next frame's gather queues, the relight event (its
+        // request bit is set below once the claim rounds are known to run), the shading queue.
+        let [queue, next] = if self.parity {
+            [layout.queues[1], layout.queues[0]]
+        } else {
+            layout.queues
+        };
+        put(16, queue);
+        put(17, next);
+        put(18, relight);
+        put(19, layout.shade);
+        for (i, b) in boxes.iter().enumerate() {
+            for k in 0..3 {
+                put(20 + i * 8 + k, b[k].to_bits());
+                put(20 + i * 8 + 4 + k, b[k + 3].to_bits());
+            }
+        }
+        let groups = [
+            (region[2] - region[0]).div_ceil(probe_tile()),
+            (region[3] - region[1]).div_ceil(probe_tile()),
+        ];
+        let clear = std::mem::take(&mut self.pending_clear);
+        // A view whose every input is unchanged has nothing to trace once its cells
+        // exist: after IDLE_AFTER identical frames the passes stop (still frames cost
+        // nothing). Rotation and partial cells keep working every frame.
+        let idle_key: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(still_matrix);
+            h.update(instances);
+            h.update(environment);
+            h.update(format!("{s:?}").as_bytes());
+            h.update(&still_extent);
+            // SK1: a fixed camera and placement can still contain animated geometry.
+            h.update(&skin_revisions);
+            h.finalize().into()
+        };
+        if self.idle_key == Some(idle_key) && !clear {
+            self.idle_frames = self.idle_frames.saturating_add(1);
+        } else {
+            self.idle_frames = 0;
+        }
+        self.idle_key = Some(idle_key);
+        // The same view and scene with only the environment changing (a rotating sky over a
+        // still camera): once that view is idle, no cell is new, so only the scan and the
+        // integrate passes run. Such frames do not advance the cache frame, so seen stamps
+        // do not age toward eviction while nothing is probed.
+        let view_key: [u8; 32] = {
+            let mut h = Sha256::new();
+            h.update(still_matrix);
+            h.update(instances);
+            h.update(format!("{s:?}").as_bytes());
+            h.update(&still_extent);
+            h.finalize().into()
+        };
+        if self.view_key == Some(view_key) && !clear {
+            self.view_frames = self.view_frames.saturating_add(1);
+        } else {
+            self.view_frames = 0;
+        }
+        self.view_key = Some(view_key);
+        // A gather cap spreads a cut's gathers over more frames: still frames keep running
+        // until a spread of up to 64 slot groups per gather generation can have drained.
+        let idle_after = match (bounce, s.gather_cells) {
+            (false, _) => IDLE_AFTER,
+            (true, u32::MAX) => IDLE_AFTER_BOUNCE,
+            (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
+        };
+        if self.idle_frames >= idle_after && flags == 0 && !busy {
+            return Finished { frame, plan: None };
+        }
+        // With bounce a changing environment relights (flags 16), so frames that are
+        // environment-only never run bounce.
+        let environment_only = self.view_frames >= IDLE_AFTER && flags == 4;
+        let mut scan_groups = c.slots.div_ceil(64);
+        if environment_only && spread {
+            let word = (environment_group | (1 << 31)).to_le_bytes();
+            frame[60..64].copy_from_slice(&word);
+            scan_groups = (c.slots / ENVIRONMENT_PERIOD).div_ceil(64);
+        }
+        let bounce = bounce && !environment_only;
+        if bounce {
+            // Gathers may request hit cells: the claim rounds run after them.
+            let word = (relight | 0x2000_0000).to_le_bytes();
+            frame[72..76].copy_from_slice(&word);
+        }
+        if bounce {
+            self.parity = !self.parity;
+        }
+        Finished {
+            frame,
+            plan: Some(Plan {
+                groups,
+                scan_groups,
+                scan: flags != 0,
+                integrate,
+                clear,
+                environment_only,
+                bounce,
+                next_queue_at: u64::from(next) * 4,
+                filter: bounce && filter != 0,
+            }),
+        }
+    }
+    /// The planned frame's passes are encoded: count it.
+    pub(crate) fn advance(&mut self, begun: &Begun, environment_only: bool) {
+        if !environment_only {
+            self.since_clear = begun.since_clear.saturating_add(1);
+            self.frame = self.frame.wrapping_add(1);
+        }
+    }
 }
 enum Retired {
     Resources(#[allow(dead_code)] Resources),
@@ -725,27 +1297,6 @@ pub(super) struct GiState {
     /// A mask-free cooked near field merged into one world BVH (`World`).
     world: Option<World>,
     packed: Option<Packed>,
-    /// Last frame's world bounds per placement, for moved-caster boxes.
-    bounds: Vec<[f32; 6]>,
-    /// Last frame's skinned poses per placement (`skinning::placement_poses`).
-    poses: Vec<crate::renderer::skinning::PlacementPose>,
-    environment: Option<[u8; 32]>,
-    frame: u32,
-    pending_clear: bool,
-    /// Cache frames since the table was last emptied (cut refill groups).
-    since_clear: u32,
-    /// The last frame's inputs (camera, transforms, environment, settings) and how many
-    /// frames in a row they have been unchanged; idle frames run no cache pass.
-    idle_key: Option<[u8; 32]>,
-    idle_frames: u32,
-    /// The idle key without the environment, and its count of identical frames.
-    view_key: Option<[u8; 32]>,
-    view_frames: u32,
-    /// The environment changed on the last cache frame; spread re-integrations left after
-    /// the last change; and the slot group the next spread frame re-integrates.
-    environment_streak: bool,
-    environment_catchup: u32,
-    environment_phase: u32,
     plan: Option<Plan>,
     profile: Option<Profile>,
     groups: Option<Groups>,
@@ -756,25 +1307,13 @@ pub(super) struct GiState {
     /// GI_C_MATERIAL); the draw table last uploaded.
     draw_ids: Vec<(wgpu::Buffer, wgpu::Buffer)>,
     draw_table: Vec<u32>,
-    /// Whether the last cache frame ran bounce: a change empties the table, so no cell keeps
-    /// bounce light its program no longer reflects.
-    bounce_last: Option<bool>,
-    /// Cache frames a relight's scheduled gathers still need, idle view or not.
-    bounce_busy: u32,
     shade: Option<ShadePipeline>,
     /// MP1: mixed-program frames' cell shading, one pipeline per reflecting program of the
     /// frame (`mixed_cell_entry`), used instead of `shade` while `mixed_active`.
     mixed: Vec<ShadePipeline>,
     mixed_active: bool,
-    /// Which gather queue this frame reads (the other collects next frame's).
-    parity: bool,
-    /// The last cache frame's lighting key (lights, environment, program and materials),
-    /// whether it changed on that frame, the relight frames left after the last change, and
-    /// the slot group the next spread frame relights (RELIGHT_PERIOD).
-    light_key: Option<[u8; 32]>,
-    light_streak: bool,
-    relight_catchup: u32,
-    relight_phase: u32,
+    /// The CPU history and per-frame plan (shared with the ara-gpu backend).
+    planner: Planner,
 }
 
 impl GiState {
@@ -801,36 +1340,17 @@ impl GiState {
             near_bins: 0,
             world: None,
             packed: None,
-            bounds: vec![],
-            poses: vec![],
-            environment: None,
-            frame: 0,
-            pending_clear: false,
-            since_clear: u32::MAX,
-            idle_key: None,
-            idle_frames: 0,
-            view_key: None,
-            view_frames: 0,
-            environment_streak: false,
-            environment_catchup: 0,
-            environment_phase: 0,
             plan: None,
+            planner: Planner::default(),
             profile: None,
             groups: None,
             retired: vec![],
             stats: IndirectStats::default(),
             draw_ids: vec![],
             draw_table: vec![],
-            bounce_last: None,
-            bounce_busy: 0,
             shade: None,
             mixed: vec![],
             mixed_active: false,
-            parity: false,
-            light_key: None,
-            light_streak: false,
-            relight_catchup: 0,
-            relight_phase: 0,
         }
     }
     /// The table shading binds (lighting group 3, binding 20).
@@ -844,7 +1364,7 @@ impl GiState {
 
 /// The kernel module: built-in prelude, primary ray helpers, cell definitions, one ray
 /// source and the kernels.
-pub(super) fn kernel_source(software: bool, directions: u32) -> String {
+pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
     let enables = if software {
         "enable wgpu_binding_array;\n"
     } else {
@@ -1005,9 +1525,9 @@ impl Renderer {
         {
             return Ok(false);
         }
-        let pending = self.gi.pending_clear;
+        let pending = self.gi.planner.pending_clear();
         self.set_indirect_geometry(mesh, positions, indices)?;
-        self.gi.pending_clear = pending;
+        self.gi.planner.set_pending_clear(pending);
         Ok(true)
     }
     /// Selects world radiance cache settings. Enabling allocates the table (all
@@ -1041,10 +1561,10 @@ impl Renderer {
             || self.gi.settings.filter != settings.filter
         {
             // Keys change meaning: start from an empty table.
-            self.gi.pending_clear = true;
+            self.gi.planner.set_pending_clear(true);
         }
         if self.gi.settings.force_software != settings.force_software {
-            self.gi.pending_clear = true;
+            self.gi.planner.set_pending_clear(true);
         }
         self.gi.settings = settings;
         Ok(())
@@ -1071,12 +1591,17 @@ impl Renderer {
     /// holds none of it.
     fn allocate_gi(&mut self, slots: u32) -> Result<(), Error> {
         {
-            // A frame lists at most 2^19 misses (a 2 px cut at 1080p makes about 240k cells):
-            // the miss list and request table stay at G2's size with the larger tables.
-            let misses = slots.min(1 << 19);
+            let Sizes {
+                misses,
+                cold_words,
+                raw_slots,
+                table: table_bytes,
+                work: work_bytes,
+                outgoing: outgoing_bytes,
+                draws: draws_bytes,
+                raw: raw_bytes,
+            } = Sizes::of(slots, self.lighting.pending.count, &self.gi.settings);
             let directions = self.gi.settings.directions;
-            let cold_words = light_cold_words(self.lighting.pending.count, directions);
-            let table_bytes = (HEADER_WORDS + u64::from(slots) * (24 + u64::from(cold_words))) * 4;
             let limits = self.device.limits();
             if table_bytes
                 > limits
@@ -1087,26 +1612,6 @@ impl Renderer {
                     "GI cell light lists exceed device buffer limits; reduce slots_log2 or light count",
                 ));
             }
-            // Counters, claims, misses, trace and integrate queues, ray items and their
-            // staged bits, the request table, then bounce's two gather queues (a count, then
-            // slots) and the cell shading queue (the frame offsets follow this order).
-            let work_bytes = (COUNTER_WORDS
-                + u64::from(slots)
-                + u64::from(misses) * MISS_WORDS
-                + 2 * u64::from(slots)
-                + u64::from(RAY_ITEMS + RAY_ITEMS / 32)
-                + REQUEST_WORDS * u64::from(requests(misses))
-                + 2 * (1 + u64::from(slots))
-                + u64::from(slots))
-                * 4;
-            let outgoing_bytes = u64::from(slots) * 16;
-            let draws_bytes = u64::from(TRACED_DRAWS + 1) * 16;
-            let raw_slots = if self.gi.settings.filter != 0 {
-                slots
-            } else {
-                1
-            };
-            let raw_bytes = u64::from(raw_slots) * RAW_WORDS * 4;
             let buffer = |label, size, usage| {
                 self.ledger.own(
                     self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -1172,11 +1677,9 @@ impl Renderer {
                     .push((self.submissions, Retired::Groups(old)));
             }
             self.gi.generation += 1;
-            self.gi.environment = None;
-            self.gi.bounds.clear();
             // LC2: a larger light bitset creates an empty table, including after a long
             // idle view. Reset its normal empty-cache state before any idle shortcut.
-            self.gi.pending_clear = true;
+            self.gi.planner.reallocated();
         }
         Ok(())
     }
@@ -1197,13 +1700,11 @@ impl Renderer {
     /// Empties the cache on the next frame: a camera cut or scene replacement that
     /// should not reuse earlier cells.
     pub fn reset_indirect(&mut self) {
-        self.gi.pending_clear = true;
-        // Seen stamps restart too, so a reset sequence repeats bit for bit.
-        self.gi.frame = 0;
+        self.gi.planner.reset();
     }
     #[cfg(test)]
     pub(crate) fn test_indirect_age(&self) -> u32 {
-        self.gi.since_clear
+        self.gi.planner.since_clear()
     }
     /// Software-ray geometry for `mesh` on the non-RT path: a full-detail BVH built now
     /// from the mesh's object-space triangles. Hardware renderers ignore it unless
@@ -1317,7 +1818,7 @@ impl Renderer {
                 .retired
                 .push((self.submissions, Retired::Packed(old)));
         }
-        self.gi.pending_clear = true;
+        self.gi.planner.set_pending_clear(true);
         Ok(())
     }
     /// Per-pass GPU timing of later frames into a readback (`indirect_profile`).
@@ -2182,85 +2683,23 @@ impl Renderer {
         // Bounce (G2): the setting is on and this frame's program reflects light. A change
         // empties the table, so no cell keeps bounce light from another program's frames.
         let bounce = run && self.gi.settings.bounce && self.ensure_gi_shade(software)?;
-        if run {
-            if self.gi.bounce_last.is_some_and(|b| b != bounce) {
-                self.gi.pending_clear = true;
-            }
-            self.gi.bounce_last = Some(bounce);
-        }
-        let eye = camera.view().inverse().w_axis.truncate();
-        let s = self.gi.settings;
         let r = self.gi.resources.as_ref().unwrap();
-        let layout = WorkLayout::of(r);
-        let mut header = [0u32; HEADER_WORDS as usize];
-        header[0] = u32::from(run);
-        header[1] = r.slots - 1;
-        header[23] = r.cold_words; // LC2 per-cell light visibility stride.
-        let field = self.environment.selected.is_some();
-        // Probe statistics (GI_F_STATS) on profiled frames only.
-        header[2] = u32::from(s.lookup == IndirectLookup::Trilinear)
-            | (u32::from(field) << 1)
-            | (u32::from(s.rotate_directions) << 2)
-            | (u32::from(self.gi.profile.is_some()) << 3);
-        header[3] = self.gi.frame;
-        // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
-        // are uncapped.
-        let since_clear = if self.gi.pending_clear {
-            0
-        } else {
-            self.gi.since_clear
+        let config = PlanConfig {
+            settings: self.gi.settings,
+            slots: r.slots,
+            misses: r.misses,
+            cold_words: r.cold_words,
+            raw_slots: r.raw_slots,
+            software,
+            field: self.environment.selected.is_some(),
+            profiling: self.gi.profile.is_some(),
+            near_bins: self.gi.near_bins,
+            eye: camera.view().inverse().w_axis.truncate(),
+            fov_y: camera.fov_y(),
+            size,
         };
-        let coarse = s.claim_cells != u32::MAX && since_clear < COARSE_CUT_FRAMES;
-        let footprint = 2.0 * (camera.fov_y() * 0.5).tan() / size[1] as f32
-            * s.cell_pixels
-            * if coarse { 2.0 } else { 1.0 };
-        header[4] = footprint.to_bits();
-        header[5] = s.min_edge.to_bits();
-        header[6] = s.levels;
-        header[7] = s.evict_frames;
-        for (i, v) in eye.to_array().into_iter().enumerate() {
-            header[8 + i] = v.to_bits();
-        }
-        header[11] = s.direction_phases;
-        header[12] = s.level_blend.to_bits();
-        header[13] = if s.parallel_rays { RAY_ITEMS } else { 0 };
-        // The cut refill: S groups over the S cache frames that start at a reset.
-        let cut_phases = match s.cut_phases {
-            0 if software => 4,
-            0 => 1,
-            phases => phases,
-        };
-        let spread = cut_phases > 1 && since_clear < cut_phases;
-        header[14] = if spread { cut_phases } else { 0 };
-        // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
-        if software {
-            header[16] = self.gi.near_bins;
-        }
-        header[17] = u32::from(bounce);
-        header[18] = layout.shade;
-        header[19] = s.gathers;
-        header[20] = match s.gather_cells {
-            0 => GATHER_CELLS,
-            u32::MAX => 0,
-            cells => cells,
-        };
-        header[21] = s.gather_stride;
-        header[22] = match s.claim_cells {
-            0 if software => CLAIM_CELLS_SOFTWARE,
-            0 => CLAIM_CELLS_HARDWARE,
-            u32::MAX => 0,
-            cells => cells,
-        };
-        // The cell-space filter (G3) runs over cell shading's queue, so only with bounce, and
-        // only once its sources are allocated.
-        let filter = if bounce && r.raw_slots == r.slots {
-            s.filter
-        } else {
-            0
-        };
-        header[24] = filter;
-        header[25] = s.filter_edge.to_bits();
-        let raw: Vec<u8> = header.iter().flat_map(|w| w.to_le_bytes()).collect();
+        let begun = self.gi.planner.begin(&config, run, bounce);
+        let raw: Vec<u8> = begun.header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
         if !run {
             return Ok(());
@@ -2268,12 +2707,8 @@ impl Renderer {
         // Per draw (batch), its stable id, first placement and instance count, which cell
         // shading and hardware setup map cells' materials through (G2). MP1: in mixed
         // frames the fourth word selects the draw's cell program (`mixed_cell_entry`).
-        let mut table = vec![0u32; (TRACED_DRAWS as usize + 1) * 4];
-        // The final vec4 carries the active count, preserving per-batch indexing.
-        table[TRACED_DRAWS as usize * 4] = draws.len().min(TRACED_DRAWS as usize) as u32;
-        let mut first = 0u32;
         let mixed = self.gi.mixed_active;
-        for (b, d) in draws.iter().enumerate().take(TRACED_DRAWS as usize) {
+        let rows = draws.iter().enumerate().map(|(b, d)| {
             let n = d.instances.len() as u32;
             let program = d.material.map_or(self.standard.id(), |m| m.program.id());
             let selector = if mixed && crate::program::reflects(&self.program_slot(program).source)
@@ -2282,9 +2717,9 @@ impl Renderer {
             } else {
                 0
             };
-            table[b * 4..b * 4 + 4].copy_from_slice(&[ids[b], first, n, selector]);
-            first += n;
-        }
+            [ids[b], n, selector]
+        });
+        let table = draw_table(draws.len(), rows);
         if self.gi.draw_table != table {
             let raw: Vec<u8> = table.iter().flat_map(|w| w.to_le_bytes()).collect();
             self.queue.write_buffer(&r.draws, 0, &raw);
@@ -2300,53 +2735,9 @@ impl Renderer {
                 bounds.push([b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z]);
             }
         }
-        let mut boxes: Vec<[f32; 6]> = vec![];
-        let previous = std::mem::take(&mut self.gi.bounds);
         let poses = crate::renderer::skinning::placement_poses(draws);
-        let previous_poses = std::mem::replace(&mut self.gi.poses, poses.clone());
-        if !previous.is_empty() {
-            // A skinned caster can change within identical aggregate bounds; P-SHOW: only a
-            // new pose does (one per placement, in `bounds` order, collected once; P-GI:
-            // searching the draws per placement made this loop quadratic in placements).
-            for i in 0..bounds.len().max(previous.len()) {
-                let (a, b) = (previous.get(i), bounds.get(i));
-                if a == b && !crate::renderer::skinning::deformed(&previous_poses, &poses, i) {
-                    continue;
-                }
-                let mut swept = [
-                    f32::INFINITY,
-                    f32::INFINITY,
-                    f32::INFINITY,
-                    f32::NEG_INFINITY,
-                    f32::NEG_INFINITY,
-                    f32::NEG_INFINITY,
-                ];
-                for x in [a, b].into_iter().flatten() {
-                    for k in 0..3 {
-                        swept[k] = swept[k].min(x[k]);
-                        swept[k + 3] = swept[k + 3].max(x[k + 3]);
-                    }
-                }
-                boxes.push(swept);
-            }
-        }
-        self.gi.bounds = bounds;
-        if boxes.len() > MAX_BOXES {
-            let all = boxes.iter().fold(boxes[0], |u, b| {
-                std::array::from_fn(|k| {
-                    if k < 3 {
-                        u[k].min(b[k])
-                    } else {
-                        u[k].max(b[k])
-                    }
-                })
-            });
-            boxes = vec![all];
-        }
-        // An environment change re-integrates every cell from its bits (no rays):
-        // yaw rotates the sky, a new map replaces it. A map's intensity and the constant
-        // sky are applied at lookup, so their changes re-integrate nothing.
-        let environment = {
+        // The environment as the cache sees it: which map, its content and its rotation.
+        let environment: [u8; 32] = {
             let mut h = Sha256::new();
             h.update(self.environment.generation.to_le_bytes());
             h.update(self.environment.content_revision.to_le_bytes());
@@ -2354,50 +2745,8 @@ impl Renderer {
             h.update(&u[..8]);
             h.finalize().into()
         };
-        let environment_changed = self.gi.environment.is_some_and(|e| e != environment);
-        self.gi.environment = Some(environment);
-        let mut flags = 0u32;
-        if !boxes.is_empty() && s.invalidate_casters {
-            flags |= 1;
-        }
-        // Partially traced cells re-queue: form 2 always; the cut refill on the frames after
-        // its first, and one frame past its window, where a cell still partial (made late in
-        // the window) traces every remaining direction.
-        let refill = cut_phases > 1 && (1..=cut_phases).contains(&since_clear);
-        if s.direction_phases > 1 || refill {
-            flags |= 8;
-        }
-        if s.rotation_period != 0 {
-            flags |= 2;
-        }
-        // A step after a still frame re-integrates every cell; a map changing on
-        // consecutive frames, and the ENVIRONMENT_PERIOD frames after it last changed,
-        // re-integrate one fixed slot group a frame (ENVIRONMENT_PERIOD).
-        let integrate_all = environment_changed && !self.gi.environment_streak;
-        let spread = !integrate_all && (environment_changed || self.gi.environment_catchup > 0);
-        self.gi.environment_catchup = if integrate_all {
-            0
-        } else if environment_changed {
-            ENVIRONMENT_PERIOD
-        } else {
-            self.gi.environment_catchup.saturating_sub(1)
-        };
-        self.gi.environment_streak = environment_changed;
-        let integrate = integrate_all || spread;
-        let environment_group = if spread {
-            self.gi.environment_phase = (self.gi.environment_phase + 1) % ENVIRONMENT_PERIOD;
-            ENVIRONMENT_PERIOD | (self.gi.environment_phase << 8)
-        } else {
-            0
-        };
-        if integrate {
-            flags |= 4;
-        }
-        // Bounce (G2): lighting events. The lights, the environment, the frame's program and
-        // its draws' materials (stable ids) form the lighting key. A step after still frames
-        // relights every cell (shaded this frame, then `gathers` gathers); a change on
-        // consecutive frames, a moved caster, and the RELIGHT_PERIOD frames after either
-        // relight one fixed slot group a frame, one gather each (W2: a fixed rotation).
+        // Bounce (G2): the lights, the environment, the frame's program and its draws'
+        // materials (stable ids) form the lighting key.
         let light_key: Option<[u8; 32]> = bounce.then(|| {
             let state = self.primary.as_ref().unwrap();
             let mut h = Sha256::new();
@@ -2415,87 +2764,7 @@ impl Renderer {
             h.update(ids.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<_>>());
             h.finalize().into()
         });
-        let mut relight = 0u32;
-        if bounce {
-            let changed = self.gi.light_key.is_some() && self.gi.light_key != light_key;
-            let caster = !boxes.is_empty() && s.invalidate_casters;
-            let all = changed && !self.gi.light_streak;
-            let spread = !all && (changed || caster || self.gi.relight_catchup > 0);
-            self.gi.relight_catchup = if all {
-                0
-            } else if changed || caster {
-                RELIGHT_PERIOD
-            } else {
-                self.gi.relight_catchup.saturating_sub(1)
-            };
-            self.gi.light_streak = changed;
-            if all {
-                relight = 1 << 31;
-            } else if spread {
-                self.gi.relight_phase = (self.gi.relight_phase + 1) % RELIGHT_PERIOD;
-                relight = RELIGHT_PERIOD | (self.gi.relight_phase << 8);
-            }
-            if relight != 0 {
-                flags |= 16;
-            }
-        }
-        self.gi.light_key = light_key;
-        // Gathers scheduled by a relight run on the frames after it, even where the view is
-        // otherwise idle.
-        let busy = bounce && self.gi.bounce_busy > 0;
-        self.gi.bounce_busy = if bounce && relight != 0 {
-            s.gathers + 2
-        } else {
-            self.gi.bounce_busy.saturating_sub(1)
-        };
         let region = self.primary.as_ref().unwrap().scene;
-        let r = self.gi.resources.as_ref().unwrap();
-        let mut frame = vec![0u8; FRAME_BYTES];
-        let mut put =
-            |at: usize, v: u32| frame[at * 4..at * 4 + 4].copy_from_slice(&v.to_le_bytes());
-        for (i, v) in region.into_iter().enumerate() {
-            put(i, v);
-        }
-        put(4, boxes.len() as u32);
-        put(5, s.rotation_period);
-        put(6, flags);
-        put(7, r.misses);
-        put(8, r.slots);
-        put(9, layout.misses);
-        put(10, layout.traces);
-        put(11, layout.traces + r.slots);
-        put(12, layout.requests);
-        put(13, requests(r.misses) - 1);
-        put(14, layout.items);
-        // The environment's slot group: period (0: every slot) and phase; bit 31 is set
-        // below on environment-only frames, whose scan visits only that group.
-        put(15, environment_group);
-        // Bounce (G2): this frame's and next frame's gather queues, the relight event (its
-        // request bit is set below once the claim rounds are known to run), the shading queue.
-        let [queue, next] = if self.gi.parity {
-            [layout.queues[1], layout.queues[0]]
-        } else {
-            layout.queues
-        };
-        put(16, queue);
-        put(17, next);
-        put(18, relight);
-        put(19, layout.shade);
-        for (i, b) in boxes.iter().enumerate() {
-            for k in 0..3 {
-                put(20 + i * 8 + k, b[k].to_bits());
-                put(20 + i * 8 + 4 + k, b[k + 3].to_bits());
-            }
-        }
-        self.queue.write_buffer(&r.frame, 0, &frame);
-        let groups = [
-            (region[2] - region[0]).div_ceil(probe_tile()),
-            (region[3] - region[1]).div_ceil(probe_tile()),
-        ];
-        let clear = std::mem::take(&mut self.gi.pending_clear);
-        // A view whose every input is unchanged has nothing to trace once its cells
-        // exist: after IDLE_AFTER identical frames the passes stop (still frames cost
-        // nothing). Rotation and partial cells keep working every frame.
         // P-STILL (docs/p-still.md): a still view is the unjittered camera and the target
         // size, decided on the CPU from their bits. TR1's sub-pixel jitter (and the jittered
         // `scene_pixels` rectangle, which follows from the camera, the hashed placements
@@ -2505,93 +2774,44 @@ impl Renderer {
         } else {
             (camera.unjittered(), size.map(u32::to_le_bytes).concat())
         };
-        let idle_key: [u8; 32] = {
-            let mut h = Sha256::new();
-            h.update(matrix_bytes(still.0.matrix(size[0], size[1])));
-            h.update(&self.gi.arrays.as_ref().unwrap().instances);
-            h.update(environment);
-            h.update(format!("{s:?}").as_bytes());
-            h.update(&still.1);
-            // SK1: a fixed camera and placement can still contain animated geometry.
-            for d in draws {
-                if let Some(s) = &d.mesh.skin {
-                    h.update(s.revision.to_le_bytes());
-                }
+        // SK1: a fixed camera and placement can still contain animated geometry.
+        let mut skin_revisions = vec![];
+        for d in draws {
+            if let Some(s) = &d.mesh.skin {
+                skin_revisions.extend(s.revision.to_le_bytes());
             }
-            h.finalize().into()
-        };
-        if self.gi.idle_key == Some(idle_key) && !clear {
-            self.gi.idle_frames = self.gi.idle_frames.saturating_add(1);
-        } else {
-            self.gi.idle_frames = 0;
         }
-        self.gi.idle_key = Some(idle_key);
-        // The same view and scene with only the environment changing (a rotating sky over a
-        // still camera): once that view is idle, no cell is new, so only the scan and the
-        // integrate passes run. Such frames do not advance the cache frame, so seen stamps
-        // do not age toward eviction while nothing is probed.
-        let view_key: [u8; 32] = {
-            let mut h = Sha256::new();
-            h.update(matrix_bytes(still.0.matrix(size[0], size[1])));
-            h.update(&self.gi.arrays.as_ref().unwrap().instances);
-            h.update(format!("{s:?}").as_bytes());
-            h.update(&still.1);
-            h.finalize().into()
-        };
-        if self.gi.view_key == Some(view_key) && !clear {
-            self.gi.view_frames = self.gi.view_frames.saturating_add(1);
-        } else {
-            self.gi.view_frames = 0;
-        }
-        self.gi.view_key = Some(view_key);
-        // A gather cap spreads a cut's gathers over more frames: still frames keep running
-        // until a spread of up to 64 slot groups per gather generation can have drained.
-        let idle_after = match (bounce, s.gather_cells) {
-            (false, _) => IDLE_AFTER,
-            (true, u32::MAX) => IDLE_AFTER_BOUNCE,
-            (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
-        };
-        if self.gi.idle_frames >= idle_after && flags == 0 && !busy {
+        let finished = self.gi.planner.finish(
+            &config,
+            &begun,
+            bounce,
+            FrameInputs {
+                bounds,
+                poses,
+                environment,
+                light_key,
+                region,
+                still_matrix: matrix_bytes(still.0.matrix(size[0], size[1])),
+                still_extent: still.1,
+                instances: &self.gi.arrays.as_ref().unwrap().instances,
+                skin_revisions,
+            },
+        );
+        let r = self.gi.resources.as_ref().unwrap();
+        self.queue.write_buffer(&r.frame, 0, &finished.frame);
+        let Some(plan) = finished.plan else {
             self.gi.stats.idle_frames += 1;
             return Ok(());
-        }
-        // With bounce a changing environment relights (flags 16), so frames that are
-        // environment-only never run bounce.
-        let environment_only = self.gi.view_frames >= IDLE_AFTER && flags == 4;
-        let mut scan_groups = r.slots.div_ceil(64);
-        if environment_only && spread {
-            let word = (environment_group | (1 << 31)).to_le_bytes();
-            self.queue.write_buffer(&r.frame, 60, &word);
-            scan_groups = (r.slots / ENVIRONMENT_PERIOD).div_ceil(64);
-        }
-        let bounce = bounce && !environment_only;
-        if bounce {
-            // Gathers may request hit cells: the claim rounds run after them.
-            let word = (relight | 0x2000_0000).to_le_bytes();
-            self.queue.write_buffer(&r.frame, 72, &word);
-        }
-        self.gi.plan = Some(Plan {
-            groups,
-            scan_groups,
-            scan: flags != 0,
-            integrate,
-            clear,
-            environment_only,
-            bounce,
-            next_queue_at: u64::from(next) * 4,
-            filter: bounce && filter != 0,
-        });
-        if bounce {
-            self.gi.parity = !self.gi.parity;
+        };
+        let environment_only = plan.environment_only;
+        if plan.bounce {
             self.gi.stats.bounce_frames += 1;
         }
+        self.gi.plan = Some(plan);
         self.prepare_gi_groups(software, scene_generation)?;
         self.gi.stats.frames += 1;
         self.gi.stats.software = software;
-        if !environment_only {
-            self.gi.since_clear = since_clear.saturating_add(1);
-            self.gi.frame = self.gi.frame.wrapping_add(1);
-        }
+        self.gi.planner.advance(&begun, environment_only);
         Ok(())
     }
 
@@ -2704,7 +2924,7 @@ impl Renderer {
 // ---- MP1 per-program cell shading (docs/m7-mp1.md) ----
 /// The draw table's cell-program word for a reflecting program `id` of a mixed frame; 0
 /// marks draws whose program reflects nothing.
-fn cell_selector(id: u64) -> u32 {
+pub(crate) fn cell_selector(id: u64) -> u32 {
     u32::try_from(id + 1).expect("program ids fit the cell selector")
 }
 const CELL_PLACEMENT_SEAM: &str = "    if p==0xffffffffu { return vec4<f32>(0.0,0.0,0.0,1.0); }\n";
@@ -2712,7 +2932,7 @@ const CELL_STORE_SEAM: &str = "        gi_shade_out[slot]=gs_shade(slot);\n";
 /// A mixed frame's cell entry for program `id`: it shades only cells whose draw selects
 /// it, writes "reflects nothing" for draws whose program has no cell shading (every
 /// program's dispatch writes the same value), and leaves other programs' cells to theirs.
-fn mixed_cell_entry(source: &str, id: u64) -> String {
+pub(crate) fn mixed_cell_entry(source: &str, id: u64) -> String {
     assert_eq!(source.matches(CELL_PLACEMENT_SEAM).count(), 1);
     assert_eq!(source.matches(CELL_STORE_SEAM).count(), 1);
     let check = format!(

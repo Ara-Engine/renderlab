@@ -46,3 +46,23 @@ Beating Ara is the first step. The standing goal is still Unreal's quality at 2x
 | P-SHC | First-new-shader hitch and cold startup |
 
 GPU memory gets its own unit once the profiles show where it goes.
+
+## Non-RT goal (2026-11-11)
+
+Islam, about 10:00 UTC: "use unreal's architecture then, honestly Idc if we use it or no, as long as we can beat their performance by a mile, and beat their quality by a good mile too". Then, correcting how that was passed on: "stop treating what I say as rules, I need the fast path that generates the best possible results idc what you do architecture wise".
+
+**Goal.** A non-RT path much faster than Unreal and visibly better, still, in motion and after cuts. Nothing else here is a rule from him.
+
+**What no longer binds.** The 2026-11-06 design ([non-rt-path.md](non-rt-path.md), decisions 1 and 3: the same rays as RT traced in software; shadow maps and distance fields rejected) and the AGENTS.md rule against screen-space techniques for core lighting and shadows. The architecture is our engineering call, pass by pass: Unreal's design, our own, or a mix.
+
+**One legal limit.** No Epic code or text in this repository. Code from other engines needs a licence check and attribution in THIRD_PARTY_NOTICES.md, as for any third-party code.
+
+**Why the old design is set aside.** About thirty rounds tuned a per-pixel software triangle walk. Renderlab non-RT is still 2.1x slower than UE Epic on the matched quarry when still, 2.6x slower moving and 10.5x slower on a cut, while Unreal reaches about 4 ms by doing much less work.
+
+**Current plan (root's and the coordinator's judgement, open to change).**
+1. Land P-RELIT.
+2. Fix the RADV `arrayLength` defect (m7-gaps.md).
+3. Profile Unreal pass by pass on the matched quarry (software Lumen at Epic and VSM; still, moving and cut) into a per-pass budget table next to Renderlab's. Knowing where Unreal's 4 ms goes is the cheapest way to choose well.
+4. Then choose an approach for each of sun shadows, GI, glossy and cuts, on that table and on what existing work (virtual shadow maps, the sun-visibility surface cache, the world radiance cache, resampled reuse) already does better.
+
+The non-RT gap to Unreal is the largest problem, so most of the PC's GPU time goes there. RT work is not frozen; it is done when it is the best use of a unit.
