@@ -387,9 +387,13 @@ impl Frames {
         cache: &ShaderCache,
         scene: &ForwardScene<'_>,
     ) -> Result<ForwardImages> {
-        // The cache outlives a failed frame: its planner has already moved on.
+        // The cache outlives a failed frame. Its planner may already have planned that
+        // frame (and consumed a pending clear), so it starts from an empty table again.
         let mut gi = self.gi.take();
         let next = frame(self, &mut gi, gpu, cache, scene);
+        if let (Err(_), Some(cache)) = (&next, &mut gi) {
+            cache.reset();
+        }
         self.gi = gi;
         let (images, left) = next?;
         *self = Self {
