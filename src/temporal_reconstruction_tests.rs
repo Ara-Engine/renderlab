@@ -305,7 +305,7 @@ fn gpu_mq1_moving_placement() {
                 ],
             );
             r.test_drain("MQ1 moving placement");
-            let reset = r.reconstruction_state.as_ref().unwrap().reset;
+            let reset = r.reconstruction_state.as_ref().unwrap().plan.reset;
             assert_eq!(
                 reset,
                 f == 0,
