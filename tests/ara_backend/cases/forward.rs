@@ -558,7 +558,10 @@ fn traced_fresh_visibility_reflects_its_primary_gates() -> Result<()> {
     validate_spirv(&program, "traced-fresh")
 }
 
-fn validate_spirv(program: &renderlab::backend_ara::shader::Program, label: &str) -> Result<()> {
+pub(super) fn validate_spirv(
+    program: &renderlab::backend_ara::shader::Program,
+    label: &str,
+) -> Result<()> {
     let export = root(label);
     std::fs::create_dir_all(&export)?;
     let stages = renderlab::backend_ara::cache::emit_spirv_program(program, &export)?;

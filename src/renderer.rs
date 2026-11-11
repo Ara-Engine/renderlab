@@ -50,7 +50,7 @@ use program_gpu::{Preludes, ProgramAbi, ProgramSlot};
 mod texture_residency;
 pub use texture_residency::{ResidencyStats, TextureResidency};
 #[path = "gi_cache.rs"]
-mod gi_cache;
+pub(crate) mod gi_cache;
 #[path = "skinning.rs"]
 pub(crate) mod skinning;
 // TP1 transparent pass and particles (docs/m7-tp1.md).

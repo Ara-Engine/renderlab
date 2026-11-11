@@ -44,6 +44,8 @@ pub enum Pass {
     PrimaryTrace,
     /// Original camera trace publishing exact receiver world and normals.
     PrimaryTraceReceivers,
+    /// One kernel of the world radiance cache's hardware-ray module.
+    GiCache(crate::backend_ara::gi_cache::Entry),
     /// Original colored transmission layer from one transparent object.
     TransmissionShadow,
     /// Original vertex-only transparency sun-shadow depth raster.
@@ -159,6 +161,9 @@ impl Pass {
             )
             .into(),
             Self::ShadowRaster => include_str!("../../../shaders/scene.wgsl").into(),
+            Self::GiCache(_) => crate::backend_ara::gi_cache::source()
+                .expect("embedded radiance cache composition")
+                .into(),
             Self::FreshVisibility => crate::backend_ara::fresh_visibility::source(
                 crate::backend_ara::fresh_visibility::Mode::Exact,
             )
@@ -403,6 +408,7 @@ impl Pass {
                 | Self::TransparencySunShadow
                 | Self::ShadowRaster
                 | Self::FreshVisibility
+                | Self::GiCache(_)
                 | Self::ReceiverRaster
                 | Self::TransparencyGlass
                 | Self::TransparencySeed
@@ -499,6 +505,7 @@ impl Pass {
             Self::TransparencySunShadow => "tp_shadow_vs",
             Self::ShadowRaster => "fs_shadow",
             Self::FreshVisibility => "fresh_compute",
+            Self::GiCache(entry) => entry.name(),
             Self::ReceiverRaster => "fs_receiver",
             Self::TransparencyGlass => "fs_transparent",
             Self::TransparencySeed => "tp_seed_fs",

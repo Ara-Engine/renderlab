@@ -214,6 +214,11 @@ fn wrap(
                 "ara_local".to_owned(),
                 Some("uint3 ara_local [[thread_position_in_threadgroup]]".to_string()),
             )
+        } else if attribute.contains("threadgroups_per_grid") {
+            (
+                "ara_groups".to_owned(),
+                Some("uint3 ara_groups [[threadgroups_per_grid]]".to_string()),
+            )
         } else if attribute.contains("threadgroup_position_in_grid") {
             (
                 "ara_group".to_owned(),

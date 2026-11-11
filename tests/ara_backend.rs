@@ -369,3 +369,6 @@ mod transmission_shadow_reference;
 
 #[path = "ara_backend/cases/forward.rs"]
 mod forward_cases;
+
+#[path = "ara_backend/cases/gi_cache.rs"]
+mod gi_cache_cases;

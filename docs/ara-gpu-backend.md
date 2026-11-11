@@ -1394,3 +1394,26 @@ scan, setup, rays, finish and integrate, nine entries, with no program-composed
 shading entry. That is the first target: stage replays for those nine, then a
 persistent frame, then a fixed-length sequence compared with wgpu. Bounce (gather,
 light, cell shading) and the filter follow.
+
+### The nine sky-visibility kernels through the adapter
+
+`gi_cache::Entry::program` composes `gi_cache::kernel_source` for hardware rays and
+selects one entry. All nine reflect, emit MSL and SPIR-V that passes `spirv-val` for
+Vulkan 1.3 with the NonUniform audit, and become native Metal pipelines on a
+ray-query device (`sky_visibility_kernels_reflect_validate_and_compile`). Every one
+takes the table, the work words and the frame record; the probe adds the primary hit
+image, tile flags and the placement geometry, setup and rays add the scene, finish
+and integrate add the lighting uniform and the environment cubes. Two adapter gaps
+closed on the way:
+
+- **`@builtin(num_workgroups)` on Metal.** Seven of the entries take it; the MSL
+  entry wrapper now forwards `[[threadgroups_per_grid]]`.
+- **Hit vertex positions.** The hardware ray source declares its scene and queries
+  with `vertex_return` and reads the committed hit's vertex positions once, in
+  `gi_closest`. As in the camera trace, the qualifier is dropped and that one
+  intrinsic becomes a fetch from the module's own per-draw vertex and index arrays
+  through the hit's placement; seam counts are checked so a source change fails here.
+
+None of this is a replay. The next step is the cache's CPU side as a shared function
+(`prepare_gi`: the table and work layouts, the frame record, the per-frame plan), then
+stage replays for these nine against CPU references.

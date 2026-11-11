@@ -844,7 +844,7 @@ impl GiState {
 
 /// The kernel module: built-in prelude, primary ray helpers, cell definitions, one ray
 /// source and the kernels.
-pub(super) fn kernel_source(software: bool, directions: u32) -> String {
+pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
     let enables = if software {
         "enable wgpu_binding_array;\n"
     } else {
