@@ -798,7 +798,6 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
 - **Not the cause:** GI cell churn (P-STILL §4.2). In motion the cache creates 56 cells a frame, with about 9 bucket-full misses a frame, but it does not move flicker. The eviction follow-up stays a cost item.
 - **S4 interior grain** (P-YARD2 item 1, second half) is a separate source: dim walls lit by GI and sky, not sunlit texture. It was not split here.
 - **The validation layer never affected any Unreal ratio.** P-NSQ, P-NSQ2 and P-NSQ3 timed with it on: their CPU submit and short RT spans read high, and their non-RT GPU passes stand. RT still is 3.35 ms, 1.34x faster than HW Lumen Epic. P-YARD2's 3.82 was a contended visit pair.
-||||||| f64c82e
 
 ## M8 sky-map cost off the PC (Linux bridge thread, Radeon 760M, 2026-11-11)
 
