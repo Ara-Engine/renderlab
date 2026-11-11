@@ -164,6 +164,17 @@ override VD_THICK:f32=4.0;
 // texel-wide box over the map: where a texel spans several pixels, a hard shadow edge becomes a
 // ramp one texel wide instead of a staircase. 0: off.
 override VD_JITTER:f32=0.5;
+// A texel's peel surface of another placement is a second occluder under the top one (two
+// sheets, or a sheet over a solid); false: only the top surface's column.
+override VD_PEEL2:bool=true;
+// The bands above the coarsest level read one of its texels per max-mip cell (the cell is that
+// texel, as a coarser level rasterized at its centres would hold); false: the cell is its
+// highest texel, which widens every occluder by up to a cell.
+override VD_MIP_POINT:bool=true;
+// Visible-surface samples joined to the one before (within this many pixel footprints) are a
+// surface profile: they block the directions between them. 0: every sample is a column down to
+// the receiver (N-VSM1).
+override VD_JOIN:f32=4.0;
 // Screens: 1 writes lit before any work (dispatch and page work only), 2 after the receiver's
 // setup, 3 skips the map windows, 4 the visible-surface samples.
 override VD_SKIP:u32=0u;
@@ -336,12 +347,57 @@ fn vd_above(q:vec3<f32>,margin:f32)->bool {
     return dot(vd_px.normal,q-vd_px.point)>margin;
 }
 
+// The columns of one map texel, `cell` of `level`, standing for a square of side `size` centred
+// `c` (light xy): a level's own texel, or the one texel read for a max-mip cell `stride` texels
+// wide. `lo`..`hi` is the band of heights being served, `margin` the near-field bias.
+fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo:f32,hi:f32,margin:f32) {
+    let i=vsm_word(cell,level);
+    let top=vsm_top_words[i];
+    if top.x==0u {return;}
+    let p=vd_px.p;
+    let height=vsm_height(top);
+    let t=height-p.z;
+    // The peel surface is under the top one: below the band or the bias when the top is.
+    if t<=lo || !vd_above(vec3<f32>(c,height),margin) {return;}
+    let side=i32(vsm.counts.y*VSM_PAGE);
+    let bits=vsm.misc.x;
+    // The underside. A closed mesh gives it: the peel layer, when that is the top's own
+    // placement. Otherwise the top is a sheet (a card, a terrain): it is as thick as its step to
+    // its lowest neighbour of the same placement, which closes a sloped surface between texels
+    // and leaves a floating sheet thin. Either way a column is at least VD_THICK texels thick,
+    // so the columns of a thin or oblique surface overlap in height where thinner ones would
+    // leave slits of light.
+    var bottom=t-VD_THICK*size;
+    var peel=vec2<u32>(0u);
+    if VD_PEEL {peel=vsm_peel_words[i];}
+    let own=peel.x!=0u && peel.x>>bits==top.x>>bits;
+    if own {
+        bottom=min(bottom,vsm_height(peel)-p.z);
+    } else {
+        for(var k=0u;k<4u;k+=1u) {
+            let n=cell+stride*vec2<i32>(select(select(0,1,k==1u),-1,k==0u),select(select(0,1,k==3u),-1,k==2u));
+            if any(n<vec2<i32>(0)) || any(n>=vec2<i32>(side)) {continue;}
+            let other=vsm_top_words[vsm_word(n,level)];
+            if other.x!=0u && other.x>>bits==top.x>>bits {bottom=min(bottom,vsm_height(other)-p.z);}
+        }
+    }
+    vd_column(c-p.xy,0.5*size,max(max(bottom,lo),1e-6*size),min(t,hi));
+    // Another placement's surface under the top one: a second sheet, or the solid a sheet lies
+    // over. Its own underside is unknown: the least thickness.
+    if VD_PEEL2 && peel.x!=0u && !own {
+        let under=vsm_height(peel);
+        let t2=under-p.z;
+        if t2>lo && vd_above(vec3<f32>(c,under),margin) {
+            vd_column(c-p.xy,0.5*size,max(max(t2-VD_THICK*size,lo),1e-6*size),min(t2,hi));
+        }
+    }
+}
+
 // The map's columns: from the receiver's level up, each level's band of heights.
 fn vd_map() {
     let p=vd_px.p;
     let slope=vd_px.slope;
     let side=i32(vsm.counts.y*VSM_PAGE);
-    let bits=vsm.misc.x;
     let last=vsm.counts.x-1u;
     // The highest caster the cone can meet: the max-mip over its footprint at the level whose
     // band holds the height, refined once from the scene's highest caster.
@@ -376,43 +432,16 @@ fn vd_map() {
         if !skip {
             for(var y=a.y;y<=b.y;y+=1) {
                 for(var cx=a.x;cx<=b.x;cx+=1) {
-                    let i=vsm_word(vec2<i32>(cx,y),level);
-                    let top=vsm_top_words[i];
-                    if top.x==0u {continue;}
-                    let c=origin+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*texel;
-                    let height=vsm_height(top);
-                    let t=height-p.z;
-                    if t<=lo || !vd_above(vec3<f32>(c,height),margin) {continue;}
-                    // The underside. A closed mesh gives it: the peel layer, when that is the top's
-                    // own placement. Otherwise the top is a sheet (a card, a terrain): it is as thick
-                    // as its step to its lowest neighbour of the same placement, which closes a
-                    // sloped surface between texels and leaves a floating sheet thin. Either way a
-                    // column is at least VD_THICK texels thick, so the columns of a thin or oblique
-                    // surface overlap in height where thinner ones would leave slits of light.
-                    var bottom=t-VD_THICK*texel;
-                    var sheet=true;
-                    if VD_PEEL {
-                        let peel=vsm_peel_words[i];
-                        if peel.x!=0u && peel.x>>bits==top.x>>bits {bottom=min(bottom,vsm_height(peel)-p.z);sheet=false;}
-                    }
-                    if sheet {
-                        for(var k=0u;k<4u;k+=1u) {
-                            let n=vec2<i32>(cx,y)+vec2<i32>(select(select(0,1,k==1u),-1,k==0u),select(select(0,1,k==3u),-1,k==2u));
-                            if any(n<vec2<i32>(0)) || any(n>=vec2<i32>(side)) {continue;}
-                            let other=vsm_top_words[vsm_word(n,level)];
-                            if other.x!=0u && other.x>>bits==top.x>>bits {bottom=min(bottom,vsm_height(other)-p.z);}
-                        }
-                    }
-                    bottom=max(bottom,lo);
-                    vd_column(c-p.xy,0.5*texel,max(bottom,1e-6*texel),min(t,hi));
+                    vd_texel(vec2<i32>(cx,y),level,1,origin+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*texel,texel,lo,hi,margin);
                 }
             }
             if vd_full() {return;}
         }
         lo=hi;
     }
-    // Above the coarsest level's band: its max-mips, one band each; the last takes every
-    // height above too, over the same window.
+    // Above the coarsest level's band: its max-mips' cells, one band each; the last takes every
+    // height above too, over the same window. A cell whose highest texel reaches the band is
+    // one texel of the coarsest level, the same in every cell (VD_MIP_POINT).
     let texel=vsm_texel(last);
     let origin=vsm.levels[last].origin.xy;
     for(var mip=1u;mip<=VD_MIPS;mip+=1u) {
@@ -425,12 +454,19 @@ fn vd_map() {
         let a=max(vec2<i32>(floor(x-vec2<f32>(r))),vec2<i32>(0));
         let b=min(vec2<i32>(floor(x+vec2<f32>(r))),vec2<i32>(s-1));
         let base=vsm_mip_base(last,mip);
+        let step=i32(1u<<mip);
         for(var y=a.y;y<=b.y;y+=1) {
             for(var cx=a.x;cx<=b.x;cx+=1) {
                 let height=fma(vsm_mips[base+u32(y*s+cx)],vsm.depth.z,vsm.depth.x);
-                let c=origin+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*cell;
                 let t=height-p.z;
-                if t<=lo || !vd_above(vec3<f32>(c,height),margin) {continue;}
+                if t<=lo {continue;}
+                if VD_MIP_POINT {
+                    let at=vec2<i32>(cx,y)*step+vec2<i32>(step/2);
+                    vd_texel(at,last,step,origin+(vec2<f32>(at)+vec2<f32>(0.5))*texel,cell,lo,hi,margin);
+                    continue;
+                }
+                let c=origin+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*cell;
+                if !vd_above(vec3<f32>(c,height),margin) {continue;}
                 // A cell is its highest centre alone: a slab VD_THICK cells thick.
                 vd_column(c-p.xy,0.5*cell,max(max(lo,t-VD_THICK*cell),1e-6*texel),min(t,hi));
             }
@@ -440,8 +476,31 @@ fn vd_map() {
     }
 }
 
+// Blocks the samples whose coordinate along the unit `axis` of the disk (in radii from its
+// centre) lies in lo..hi.
+fn vd_span(axis:vec2<f32>,lo:f32,hi:f32) {
+    if lo>1.0 || hi< -1.0 || hi<=lo {return;}
+    for(var i=0u;i<32u;i+=1u) {
+        let s=vd.samples[i];
+        let x=vec2<f32>(dot(s.xy,axis),dot(s.zw,axis));
+        let inside=(x>=vec2<f32>(lo)) & (x<=vec2<f32>(hi));
+        let bits=u32(inside.x)|(u32(inside.y)<<1u);
+        if i<16u {vd_mask.x|=bits<<(2u*i);} else {vd_mask.y|=bits<<(2u*i-32u);}
+    }
+}
+
 // The visible surface as occluder samples: the pixels along the sun's screen direction from
-// the receiver, each a column at its own world point down to where it leaves the cone.
+// the receiver, at their own world points. They lie in the plane of the view ray and the sun,
+// where a direction is one coordinate: its place along `axis`, the line through the disk's
+// centre that the view ray maps to. Consecutive samples on one surface (VD_JOIN) are its
+// profile, and a ray toward the disk meets the profile exactly when its coordinate is between
+// the least and the greatest of the profile's points. Across the plane a pixel is far wider
+// than the disk this close to the receiver, so the samples blocked are a band of the disk.
+// A sample with no joined neighbour before it (a silhouette in front, thin geometry) is a
+// patch at its own height.
+// N-VSM1 took every sample as a column down to the receiver, which hid the whole disk whenever
+// a neighbouring pixel lay within half a footprint of the light's axis: lit relief turned black
+// (S3's flips).
 fn vd_screen(id:vec2<u32>) {
     let l=normalize(vd_px.centre.x*vsm.u.xyz+vd_px.centre.y*vsm.v.xyz+vsm.l.xyz);
     let reach=f32(VD_SCREEN)*vd_px.footprint;
@@ -457,17 +516,47 @@ fn vd_screen(id:vec2<u32>) {
     let first=vec2<f32>(id)+vec2<f32>(0.5);
     let size=vec2<i32>(textureDimensions(vsm_world));
     let margin=VD_SCREEN_BIAS*vd_px.footprint;
+    // The view ray in the map's basis, and the line of direction space it maps to.
+    let view=vd_px.world-vsm.eye.xyz;
+    let across=vec2<f32>(dot(view,vsm.u.xyz),dot(view,vsm.v.xyz))-vd_px.centre*dot(view,vsm.l.xyz);
+    if dot(across,across)<=1e-12*dot(view,view) {return;}
+    let axis=normalize(across);
+    // The profile so far: its range along the axis (disk radii), the sample before (its world
+    // point and footprint) and whether the next sample can join it. The receiver comes first.
+    var lo=3.4e38;var hi=-3.4e38;
+    var before=vd_px.world;
+    var before_size=vd_px.footprint;
+    var chained=true;
+    let floor_t=1e-3*vd_px.footprint;
     for(var k=1u;k<=min(VD_SCREEN,u32(ceil(pixels)));k+=1u) {
         let s=vec2<i32>(floor(first+step*f32(k)));
-        if any(s<vec2<i32>(0)) || any(s>=size) {return;}
-        if textureLoad(vsm_tiles,vec2<u32>(s)/VSM_TRACE_TILE,0).x==0u || textureLoad(vsm_hit,s,0).x==0u {continue;}
+        if any(s<vec2<i32>(0)) || any(s>=size) {break;}
+        if textureLoad(vsm_tiles,vec2<u32>(s)/VSM_TRACE_TILE,0).x==0u || textureLoad(vsm_hit,s,0).x==0u {
+            vd_span(axis,lo,hi);lo=3.4e38;hi=-3.4e38;chained=false;
+            continue;
+        }
         let world=textureLoad(vsm_world,s,0).xyz;
         let q=vsm_light(world);
-        let t=q.z-vd_px.p.z;
-        if t<=0.0 || !vd_above(q,margin) {continue;}
-        vd_column(q.xy-vd_px.p.xy,0.5*length(world-vsm.eye.xyz)*vsm.eye.w,1e-6*vd_px.footprint,t);
+        let rel=vec3<f32>(q.xy-vd_px.p.xy,q.z-vd_px.p.z);
+        let pixel=length(world-vsm.eye.xyz)*vsm.eye.w;
+        if VD_JOIN<=0.0 {
+            if rel.z>0.0 && vd_above(q,margin) {vd_column(rel.xy,0.5*pixel,1e-6*vd_px.footprint,rel.z);}
+            if vd_full() {return;}
+            continue;
+        }
+        let joined=chained && distance(world,before)<=VD_JOIN*(pixel+before_size);
+        before=world;before_size=pixel;
+        // A point no higher than the receiver along the light is more than a right angle from
+        // the sun: the profile ends there.
+        chained=rel.z>floor_t;
+        if !joined || !chained {vd_span(axis,lo,hi);lo=3.4e38;hi=-3.4e38;}
+        if !chained {continue;}
+        if !joined && vd_above(q,margin) {vd_column(rel.xy,0.5*pixel,0.875*rel.z,rel.z);}
+        let x=dot(rel.xy/rel.z-vd_px.centre,axis)/vd_px.radius;
+        lo=min(lo,x);hi=max(hi,x);
         if vd_full() {return;}
     }
+    vd_span(axis,lo,hi);
 }
 
 fn vd_pixel(id:vec2<u32>)->u32 {
