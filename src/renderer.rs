@@ -3280,7 +3280,7 @@ impl Renderer {
                         self.encode_primary_visibility(&mut encoder, true, stamps(6));
                     }
                     mark(&mut encoder, "sun_shadow");
-                    self.encode_virtual(&mut encoder, stamps(8));
+                    self.encode_virtual(&mut encoder, stamps(8), &mut mark);
                     // VF1 samples the freshly generated Virtual depth pages.
                     mark(&mut encoder, "atmosphere");
                     self.encode_atmosphere(&mut encoder, scene_generation);
