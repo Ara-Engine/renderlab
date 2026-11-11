@@ -1065,7 +1065,7 @@ fn gpu_film_t1_timing() {
             let mode = (pair + j) % 2;
             // set_soft_shadows would release the film history when leaving Temporal; the
             // field keeps it, so Temporal frames stay in their steady static state.
-            r.soft_mode = modes[mode];
+            r.view.soft_mode = modes[mode];
             let report = traced_frame(&mut r, &color, &camera, &mut asset, true);
             assert_eq!(report.soft_shadows, modes[mode]);
             if pair >= warmup {

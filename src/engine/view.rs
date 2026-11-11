@@ -50,6 +50,8 @@ pub(super) struct ViewEntry {
     pub desc: ViewDesc,
     /// The view's own colour output (`render_view`, `capture_view`).
     pub output: wgpu::Texture,
+    /// The renderer holds this view's look and render scale (`apply_look`).
+    pub applied: bool,
 }
 
 impl Engine {
@@ -80,6 +82,7 @@ impl Engine {
             id,
             desc: desc.clone(),
             output,
+            applied: false,
         });
         self.renderer.select_view(id)?;
         self.apply_look(self.views.len() - 1)?;
@@ -94,10 +97,12 @@ impl Engine {
         let old = &self.views[at].desc;
         let resized = (old.width, old.height) != (desc.width, desc.height);
         let rescaled = old.render_scale != desc.render_scale;
+        let restyled = rescaled || old.look != desc.look;
         if resized {
             self.views[at].output = self.create_output(desc.width, desc.height);
         }
         self.views[at].desc = desc.clone();
+        self.views[at].applied &= !restyled;
         if resized || rescaled {
             self.cut_view(view);
         }
@@ -113,7 +118,6 @@ impl Engine {
         if was_selected {
             // The renderer replaced it with an empty view; the next created view takes it.
             self.spare = Some(self.renderer.selected_view());
-            self.look = None;
         }
         Ok(())
     }
@@ -188,29 +192,33 @@ impl Engine {
             .position(|v| v.id == view)
             .ok_or(Error::InvalidInput("unknown or removed view"))
     }
-    /// Gives the renderer view `at`'s look and render scale, unless it carries them already.
+    /// Gives view `at` (selected) its look and render scale, unless it holds them already.
+    /// The renderer keeps each view's look with the view, so views with different looks
+    /// restart nothing when they alternate.
     fn apply_look(&mut self, at: usize) -> Result<(), Error> {
-        let desc = &self.views[at].desc;
-        let wanted = (desc.look.clone(), desc.render_scale);
-        if self.look.as_ref() == Some(&wanted) {
+        if self.views[at].applied {
             return Ok(());
         }
+        let desc = &self.views[at].desc;
         settings::apply_look(
             &mut self.renderer,
             self.path,
             &self.state.settings,
-            &settings::ablated_look(wanted.0.clone()),
-            wanted.1,
+            &settings::ablated_look(desc.look.clone()),
+            desc.render_scale,
         )?;
-        let exposure_changed = self
-            .look
-            .as_ref()
-            .is_none_or(|(look, _)| look.exposure != wanted.0.exposure);
-        self.look = Some(wanted);
-        if exposure_changed {
-            self.apply_lighting()?;
-        }
+        // The exposure travels with the lighting.
+        self.apply_lighting()?;
+        self.views[at].applied = true;
         Ok(())
+    }
+    /// The selected view's exposure (the default for the renderer's spare view).
+    pub(super) fn selected_exposure(&self) -> super::Exposure {
+        let selected = self.renderer.selected_view();
+        self.views
+            .iter()
+            .find(|v| v.id == selected)
+            .map_or(super::Exposure::default(), |v| v.desc.look.exposure)
     }
     fn create_output(&self, width: u32, height: u32) -> wgpu::Texture {
         self.device().create_texture(&wgpu::TextureDescriptor {

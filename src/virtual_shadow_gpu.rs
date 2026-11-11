@@ -1561,11 +1561,10 @@ impl Renderer {
         settings: VirtualShadowSettings,
     ) -> Result<(), Error> {
         settings.validate()?;
-        // The selected view now; the others when they next render (`prepare_virtual`).
         if let Some(state) = &mut self.view.virtual_shadows {
             state.set_settings(settings, self.submissions)?;
         }
-        self.virtual_settings = settings;
+        self.view.virtual_settings = settings;
         Ok(())
     }
 
@@ -1576,7 +1575,7 @@ impl Renderer {
         let exact = matches!(s.lookup, VirtualLookup::Exact | VirtualLookup::Surface);
         self.view
             .reconstruction_frame
-            .filter(|_| exact && self.reconstruction.rotate_directions)
+            .filter(|_| exact && self.view.reconstruction.rotate_directions)
             .map_or(0, super::primary_ray_gpu::temporal_reconstruction::rotation)
     }
 
@@ -1737,17 +1736,12 @@ impl Renderer {
                 primary.array_layout(),
                 &self.lighting.bindings,
             );
-            state.settings = self.virtual_settings;
+            state.settings = self.view.virtual_settings;
             self.pipelines.created += 10;
             self.view.virtual_shadows = Some(state);
-        } else if let Some(state) = &mut self.view.virtual_shadows
-            && state.settings != self.virtual_settings
-        {
-            // Settings changed while this view was not selected.
-            state.set_settings(self.virtual_settings, self.submissions)?;
         }
         self.ensure_virtual_casters(draws)?;
-        let rotation = self.virtual_rotation(self.virtual_settings);
+        let rotation = self.virtual_rotation(self.view.virtual_settings);
         // N-VSM1: the disk lookup's receiver jitter follows TR1's frames (`VdFrame::size.z`).
         let disk_jitter = self
             .view

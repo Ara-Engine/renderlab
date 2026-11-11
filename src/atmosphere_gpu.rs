@@ -660,7 +660,7 @@ impl Renderer {
             environment: self.environment.generation,
             shadows: self.view.shadows.settings.clone(),
             primary: self.primary_mode,
-            soft: self.soft_mode,
+            soft: self.view.soft_mode,
         };
         if self.view.atmosphere.history_key.as_ref() != Some(&key) {
             self.view.atmosphere.previous = None;
@@ -984,7 +984,7 @@ impl Renderer {
         let tlas = self.hardware_shadows.as_ref().map(|h| h.scene());
         let virtual_buffers = (self.hardware_shadows.is_none()
             && self.primary_mode == PrimaryVisibility::VisibilityBuffer
-            && self.soft_mode == SoftShadows::Virtual
+            && self.view.soft_mode == SoftShadows::Virtual
             && self.view.shadows.settings.enabled()
             && self.view.shadows.settings.directional_disk_angle > 0.0)
             .then(|| self.view.virtual_shadows.as_ref()?.atmosphere_buffers())

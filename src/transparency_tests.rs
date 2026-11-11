@@ -682,8 +682,8 @@ fn gpu_tp1_scene() {
     });
     let mut log = serde_json::json!({"path": path, "primary": format!("{:?}", r.primary_mode),
         "indirect": r.indirect().enabled,
-        "soft": format!("{:?}", r.soft_mode), "exposure_stops": exposure, "size": [width, height],
-        "tr1": r.reconstruction.enabled});
+        "soft": format!("{:?}", r.view.soft_mode), "exposure_stops": exposure, "size": [width, height],
+        "tr1": r.view.reconstruction.enabled});
 
     // 1. Pick ground points from the opaque depth the pass writes (a probe emitter runs it).
     let probe = r
@@ -965,7 +965,7 @@ fn gpu_tp1_scene() {
         // The opaque image with the pre-TP1 standard program: TP1 leaves it unchanged.
         // TR1 and the radiance cache off for this pair, so both images are single frames of
         // the same shading (a program reload relights the cache over several frames).
-        let reconstruction = r.reconstruction;
+        let reconstruction = r.view.reconstruction;
         let indirect = r.indirect();
         r.set_reconstruction(Reconstruction::off()).unwrap();
         r.set_indirect(IndirectSettings::off()).unwrap();

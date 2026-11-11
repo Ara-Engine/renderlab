@@ -1342,9 +1342,9 @@ impl Renderer {
     /// Last prepared reconstructed frame's Interactive ray count, for telemetry.
     pub fn reconstruction_shadow_rays(&self) -> Option<u32> {
         if self.primary_mode != PrimaryVisibility::Traced
-            || self.soft_mode != SoftShadows::Interactive
+            || self.view.soft_mode != SoftShadows::Interactive
             || self.view.shadows.settings.directional_disk_angle == 0.0
-            || !self.reconstruction.enabled
+            || !self.view.reconstruction.enabled
         {
             return None;
         }
@@ -1361,6 +1361,7 @@ impl Renderer {
         color: &wgpu::Texture,
     ) -> Option<wgpu::Texture> {
         let [width, height] = self
+            .view
             .reconstruction
             .scale
             .internal_size(color.width(), color.height());
@@ -1460,8 +1461,8 @@ impl Renderer {
             .chain_update(state.geometry_generation.to_ne_bytes())
             .chain_update(state.reconstruction_bindings_generation.to_ne_bytes())
             .chain_update(format!("{:?}", self.view.shadows.settings).as_bytes())
-            .chain_update(format!("{:?}", self.virtual_settings).as_bytes())
-            .chain_update(format!("{:?} {:?}", self.soft_mode, self.primary_mode).as_bytes())
+            .chain_update(format!("{:?}", self.view.virtual_settings).as_bytes())
+            .chain_update(format!("{:?} {:?}", self.view.soft_mode, self.primary_mode).as_bytes())
             .chain_update(format!("{lights:?}").as_bytes())
             .chain_update(
                 self.lighting
@@ -1656,7 +1657,7 @@ impl Renderer {
             .unwrap()
             .plan
             .prepare(PlanInputs {
-                settings: self.reconstruction,
+                settings: self.view.reconstruction,
                 budget: self.reconstruction_shadow_budget,
                 previous_frame: self.view.last_frame,
                 frame: self.frames + 1,

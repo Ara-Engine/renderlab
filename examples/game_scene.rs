@@ -1029,7 +1029,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     } else {
         serde_json::Value::Null
     };
+    // Device memory after the run, for a view's cost (`--views ab` against `a`).
+    let stats = engine.renderer().stats();
+    let memory = serde_json::json!({
+        "allocator_allocated_bytes": stats.allocator.as_ref().map(|a| a.allocated_bytes),
+        "allocator_reserved_bytes": stats.allocator.as_ref().map(|a| a.reserved_bytes),
+        "hal_buffer_bytes": stats.hal.buffer_bytes, "hal_texture_bytes": stats.hal.texture_bytes,
+        "target_bytes": stats.ownership.target_bytes.live, "shadow_bytes": stats.ownership.shadow_bytes.live,
+    });
     let summary = serde_json::json!({
+        "memory": memory,
         "path": format!("{path:?}"), "adapter": engine.adapter_info().name,
         "debug_build": cfg!(debug_assertions), "size": args.size, "exposure_stops": exposure,
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),

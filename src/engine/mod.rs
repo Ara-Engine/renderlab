@@ -16,6 +16,8 @@ mod device;
 mod ids;
 mod scene;
 mod view;
+#[cfg(test)]
+mod view_tests;
 // Crate-visible for a second GPU layer's engine: the same lighting and atmosphere
 // translation, over the same state.
 pub(crate) mod settings;
@@ -240,8 +242,6 @@ pub struct Engine {
     /// The views, and the renderer's empty view the next `create_view` takes (its first).
     views: Vec<view::ViewEntry>,
     spare: Option<ViewId>,
-    /// The look and render scale the renderer carries, from the view it rendered last.
-    look: Option<(ViewLook, RenderScale)>,
 }
 
 /// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
@@ -340,7 +340,6 @@ impl Engine {
             events: Events::default(),
             views: Vec::new(),
             spare: Some(renderer_first_view),
-            look: None,
         };
         settings::apply(&mut engine.renderer, &engine.state.settings)?;
         // Ticks are explicit from the start: the first frame runs the first tick's work.
@@ -790,7 +789,9 @@ impl Engine {
         settings::apply(&mut self.renderer, &settings)?;
         self.state.settings = settings;
         // Views' looks depend on the settings (temporal reconstruction): reapply on render.
-        self.look = None;
+        for view in &mut self.views {
+            view.applied = false;
+        }
         // The view-path media live with the lighting and atmosphere.
         self.apply_lighting()
     }
@@ -804,9 +805,7 @@ impl Engine {
             self.state.sun,
             &self.state.lights,
             self.state.sky,
-            self.look
-                .as_ref()
-                .map_or(Exposure::default(), |(look, _)| look.exposure),
+            self.selected_exposure(),
         )?;
         let atmosphere = settings::atmosphere(self.state.sky, &self.state.settings);
         atmosphere.validate()?;

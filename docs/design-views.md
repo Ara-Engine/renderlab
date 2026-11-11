@@ -6,7 +6,9 @@ Root, 2026-11-11. API shape published first so the Ara bridge can write against 
 
 ```rust
 /// A view: one camera's targets, histories and camera-keyed caches. Scene resources are shared.
-pub type ViewId = Id<kind::View>;
+/// As built: `renderlab::ViewId`, a handle never reused, shared by `Renderer` and `Engine`
+/// (re-exported by `renderlab::engine`), so frame reports and events name the view directly.
+pub struct ViewId(/* u64 */);
 
 pub struct ViewDesc {
     pub width: u32,
@@ -95,3 +97,27 @@ The shadow clipmap's levels follow the camera; two cameras far apart would each 
 - `set_view`: a resize or a render-scale change restarts that view's histories; a mode or look change restarts nothing. `remove_view` retires the view's resources after its frames in flight complete.
 - `FrameReport` and events carry the view they describe.
 - Memory of a second view at 1080p: measured and stated; budget 250 MiB.
+
+## As built (U-VIEWS, `t3/views`)
+
+Where the code and the sections above differ, this section is current. Code: `src/view.rs` (renderer views), `src/engine/view.rs` (engine views), `game_scene --views a|b|ab [--b-orbit]` (the identity and motion checks).
+
+**How the split works.** `Renderer` holds the selected view in its field `view: ViewState` and parks the others. `select_view` swaps them, so the code that encodes a frame reads `self.view.*` and never looks up which view it serves. `create_view` forks layouts from the selected view, and a new view allocates nothing until its first frame. Bind groups the renderer shares (the lighting group) key on generation counters of a view's resources. Each view counts in its own range (`id << 40`), so selecting another view rebinds them as a resize would, and view 0 counts exactly as a single-view renderer did.
+
+**What `ViewState` owns:** depth, MSAA and HDR targets; post (targets and histories); TR1's history, sample index and upscale state; the visibility buffer; the primary state (hit records, shading targets, geometry tables, film); fresh targets; the Virtual shadow state (clipmap placement, page requests and pages: the per-view-map fallback); the sun shadow plan (cascade bases and records); LC1's cluster grid, local-shadow selection with its transitions, and atlas; the GI `ViewPlan`; the atmosphere's camera volume and fog histories; transparency and glass-reflection targets; the frame it last submitted; its own primary-table uploads; and the look (post settings and LUT, exposure, `Reconstruction`, reflections, soft-shadow mode, Virtual tuning).
+
+**Shared, with why:**
+- The sky-view LUT: one texture, recomputed from the eye in every view's frame. Same result as one per view, no extra memory.
+- The atmosphere uniform, the camera uniform, the lighting uniform and the light clusters' kernel inputs: rewritten in each frame before use (queue order makes that safe).
+- Sun shadow settings: canonical on the renderer, copied into a view when it renders. Exposure: the selected view's, copied into the lighting uniform when it renders.
+- Scene-wide restarts (fog media, transmission changes) cut every view's TR1 history.
+
+**Ticks.** `Engine::tick(seconds)` sets the particle step and calls `Renderer::begin_tick`. The first frame of a tick runs skinning and the particle simulation. A later view of the same tick spawns nothing and moves nothing: its particle update runs with step 0, which only relights the particles for its own sun-map fit (`tp_incident`). The GI cache's per-tick work (scene, environment and light events, scan and eviction, integrate, gathers, cell shading, the clock) runs in the tick's first frame whose plan is not idle. Later views of the tick probe, claim and trace only their new cells, into the tick's next gather queue. A renderer that never calls `begin_tick` treats every frame as a tick, as before.
+
+**Continuity per view.** TR1's plan and post's motion history continue from the view's own last frame, not the renderer's. TR1's history key hashes the scene's uploads and the view's own primary uploads, not other views'.
+
+**Object motion: per view (decided over the tick-restart rule above, 2026-11-11).** Each instance collection keeps, per view, the placement that view last submitted (`InstanceState::motion`, 64 B per instance per view). A view that skipped ticks reprojects rigid motion over the whole gap instead of restarting history. Skinned previous positions are still per engine, so a view that skipped ticks gets a skinned object's motion from the last tick only.
+
+**Looks.** `ViewLook` (exposure, quality, post with its tone mapper, bloom and depth of field, colour LUT, reflections) and `render_scale` are applied when a view is created and when it renders after `set_view` or `set_settings` changed them. The renderer keeps them in the view, so views with different looks alternate without restarting each other's histories. A look change restarts nothing except a render-scale change (TR1 restarts at a new internal size). `renderer_mut` tuning applies to the selected view (the last created or rendered).
+
+**Not built yet:** ids (`Outputs::ids` is rejected until U-IDS lands); the GI touch pass for views that skip ticks; texture streaming feedback is shared without a per-view union rule (each streaming frame's requests add to one residency).

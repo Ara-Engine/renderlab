@@ -470,6 +470,8 @@ impl Renderer {
             self.lighting.pending = packed;
             self.lighting.source_lights.clone_from(&lighting.lights);
         }
+        // Exposure is the selected view's look.
+        self.view.exposure = exposure;
         Ok(())
     }
     pub fn max_lights(&self) -> u32 {
@@ -622,7 +624,9 @@ impl Renderer {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 24,
-                                resource: wgpu::BindingResource::TextureView(&self.view.clusters.lists),
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.view.clusters.lists,
+                                ),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 25,

@@ -380,23 +380,19 @@ impl Renderer {
     /// diagnostic frames use Exact, as reported by `FrameReport::soft_shadows`.
     /// Leaving `Temporal` releases its film history after in-flight frames.
     pub fn set_soft_shadows(&mut self, mode: crate::SoftShadows) {
-        if mode != crate::SoftShadows::Temporal {
-            let submissions = self.submissions;
-            for view in self.views_mut() {
-                if let Some(state) = &mut view.primary
-                    && let Some(film) = state.film.take()
-                {
-                    state
-                        .retired
-                        .push((submissions, Retired::Film(Box::new(film))));
-                }
-            }
+        if mode != crate::SoftShadows::Temporal
+            && let Some(state) = &mut self.view.primary
+            && let Some(film) = state.film.take()
+        {
+            state
+                .retired
+                .push((self.submissions, Retired::Film(Box::new(film))));
         }
-        self.soft_mode = mode;
+        self.view.soft_mode = mode;
     }
 
     pub fn soft_shadows(&self) -> crate::SoftShadows {
-        self.soft_mode
+        self.view.soft_mode
     }
 
     /// Selects TR1 temporal reconstruction (docs/m7-tr1.md) for traced and visibility-buffer
@@ -404,29 +400,27 @@ impl Renderer {
     /// in-flight frames.
     pub fn set_reconstruction(&mut self, settings: Reconstruction) -> Result<(), Error> {
         settings.validate()?;
-        if settings != self.reconstruction {
+        if settings != self.view.reconstruction {
             // A new history starts the sample sequence again, so equal settings replay
             // equal frames.
-            for view in self.views_mut() {
-                view.reconstruction_state = None;
-                view.reconstruction_index = 0;
-            }
+            self.view.reconstruction_state = None;
+            self.view.reconstruction_index = 0;
         }
-        self.reconstruction = settings;
+        self.view.reconstruction = settings;
         Ok(())
     }
     pub fn reconstruction(&self) -> Reconstruction {
-        self.reconstruction
+        self.view.reconstruction
     }
     /// Global reflection controls (src/reflections.rs): R1's traced reflections and R1n's
     /// software rays trace only while enabled, and only up to `max_roughness`. Default on.
     pub fn set_reflections(&mut self, settings: crate::ReflectionSettings) -> Result<(), Error> {
         settings.validate()?;
-        self.reflections = settings;
+        self.view.reflections = settings;
         Ok(())
     }
     pub fn reflections(&self) -> crate::ReflectionSettings {
-        self.reflections
+        self.view.reflections
     }
     /// The next reconstructed frame restarts every pixel: a camera cut the engine cannot
     /// infer from the camera alone.
@@ -1756,7 +1750,7 @@ impl Renderer {
         let rotation = self
             .view
             .reconstruction_frame
-            .filter(|_| self.reconstruction.rotate_directions)
+            .filter(|_| self.view.reconstruction.rotate_directions)
             .map_or(0, temporal_reconstruction::rotation);
         bytes[84..88].copy_from_slice(&rotation.to_ne_bytes());
         // Visible sky (Renderer::set_visible_environment): misses sample the selected map,
@@ -1769,7 +1763,7 @@ impl Renderer {
         bytes[92..96].copy_from_slice(&(if visible { scale.to_bits() } else { 0 }).to_ne_bytes());
         // RT1d uses a spare frame word; all geometry/visibility bindings already exist.
         let filter = self.primary_mode == PrimaryVisibility::Traced
-            && self.soft_mode == SoftShadows::Interactive
+            && self.view.soft_mode == SoftShadows::Interactive
             && self
                 .hardware_shadows
                 .as_ref()
@@ -1788,7 +1782,7 @@ impl Renderer {
                 .iter()
                 .all(|d| d.mesh.reflection.is_some() || d.mesh.skin.is_some());
         let bands = if covered {
-            self.reflections.frame_words()
+            self.view.reflections.frame_words()
         } else {
             crate::ReflectionSettings::off().frame_words()
         };
@@ -1992,7 +1986,7 @@ impl Renderer {
         let repair_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 36;
         let retry_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 4;
         let defer_edges = self.primary_mode == PrimaryVisibility::Traced
-            && self.soft_mode == SoftShadows::Interactive
+            && self.view.soft_mode == SoftShadows::Interactive
             && repair_bytes <= self.device.limits().max_storage_buffer_binding_size
             && repair_bytes <= self.device.limits().max_buffer_size;
         if self
