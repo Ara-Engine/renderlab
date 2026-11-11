@@ -14,8 +14,10 @@
 mod device;
 mod ids;
 mod scene;
-mod settings;
-mod state;
+// Crate-visible for a second GPU layer's engine: the same lighting and atmosphere
+// translation, over the same state.
+pub(crate) mod settings;
+pub(crate) mod state;
 
 pub use device::{Capabilities, ExperimentalRayQuery, RenderPath};
 pub use ids::{
