@@ -177,8 +177,13 @@ pub struct SunShadows {
 
 /// Readbacks of one frame, each tightly packed in row order.
 pub struct ForwardImages {
-    /// The exposed linear HDR target as RGBA16F: `Renderer::try_capture_hdr`'s bytes.
+    /// The exposed linear HDR image post reads, as RGBA16F at the scene's size. At
+    /// native scale it is `Renderer::try_capture_hdr`'s bytes; below native scale it is
+    /// the resolve's upscaled output, which the wgpu renderer does not expose.
     pub hdr: Vec<u8>,
+    /// Below native scale: the frame's shaded samples before the resolve, RGBA16F at
+    /// the internal size. This is what `Renderer::try_capture_hdr` returns there.
+    pub samples: Option<Vec<u8>>,
     /// Output-space shutter velocity and linear depth as RGBA32F, when motion blur ran.
     pub surface: Option<Vec<u8>>,
     /// The displayed image as RGBA8 with the display transfer applied, when post ran.
@@ -1883,6 +1888,17 @@ fn frame(
         shown.image,
         u64::from(target[0]) * u64::from(target[1]) * 8,
     )?;
+    // Below native scale the HDR target still holds the shaded samples.
+    let samples_read = match &upscaled {
+        Some(_) => Some(transfer::readback(
+            gpu,
+            &mut graph,
+            &mut rec,
+            output.image,
+            u64::from(size[0]) * u64::from(size[1]) * 8,
+        )?),
+        None => None,
+    };
     let table_read = match gi.filter(|_| indirect.is_some_and(|i| i.read_table)) {
         Some((cache, _)) => Some(transfer::readback_buffer(
             gpu,
@@ -2113,6 +2129,7 @@ fn frame(
     gpu.wait(point)?;
     let images = ForwardImages {
         hdr: gpu.read(read).context("HDR readback")?,
+        samples: samples_read.map(|b| gpu.read(b)).transpose()?,
         surface: reads[0].map(|b| gpu.read(b)).transpose()?,
         display: reads[1].map(|b| gpu.read(b)).transpose()?,
         indirect_table: table_read.map(|b| gpu.read(b)).transpose()?.map(|bytes| {

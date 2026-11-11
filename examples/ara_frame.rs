@@ -72,6 +72,9 @@
 //! cargo run --example ara_frame -- --compare out/wgpu out/ara
 //! ```
 //!
+//! Below native scale the HDR a run writes is the frame's shaded samples at the internal
+//! size (all the wgpu renderer's capture returns there); the displayed image is the
+//! output's size, so the display lines are the comparison of the resolved image.
 //! Each run writes the exposed HDR target as `frame.rgba16f` (tightly packed rows) with
 //! `frame.png` (Reinhard, sRGB; for looking at only), the displayed image after the
 //! default post chain as `display.rgba8` and `display.png`, and `frame.json` (extent
@@ -268,6 +271,16 @@ struct Level {
     frames: usize,
 }
 impl Level {
+    /// The size of the HDR image a run writes. Below native scale the wgpu renderer's
+    /// capture is its internal-size shaded samples, not the resolved image, so both
+    /// layers write those; the displayed image is the output's size either way.
+    fn hdr_size(&self, size: [u32; 2]) -> [u32; 2] {
+        if self.reconstruction {
+            self.scale.internal_size(size[0], size[1])
+        } else {
+            size
+        }
+    }
     fn camera(&self, fixture: &lighting_fixture::Fixture, frame: usize) -> renderlab::Camera {
         fixture.camera(if self.still { 0 } else { frame })
     }
@@ -653,7 +666,9 @@ fn wgpu_frame(
         eprintln!("wgpu pose {pose}: {trace}");
         let mut capture = admit(&mut r, |r| r.try_capture_hdr())?;
         let info = capture.info();
-        if info.format != wgpu::TextureFormat::Rgba16Float || [info.width, info.height] != size {
+        if info.format != wgpu::TextureFormat::Rgba16Float
+            || [info.width, info.height] != level.hdr_size(size)
+        {
             return Err("unexpected HDR capture".into());
         }
         let hdr = admit(&mut r, |_| capture.try_read())?;
@@ -779,7 +794,7 @@ fn ara_frame(
             });
         eprintln!("ara pose {pose}: {trace}");
         sequence.push((
-            pixels.hdr,
+            pixels.samples.unwrap_or(pixels.hdr),
             pixels.display.ok_or("post did not run")?,
             pixels.indirect_table,
             trace,
@@ -834,11 +849,13 @@ fn write(
     level: Level,
 ) -> Result<(), Failure> {
     let pixels = size[0] as usize * size[1] as usize;
+    let hdr_size = level.hdr_size(size);
+    let hdr_pixels = hdr_size[0] as usize * hdr_size[1] as usize;
     let mut summaries = Vec::new();
     let mut nonfinite = 0;
     fs::create_dir_all(dir)?;
     for (pose, (bytes, display, table, trace)) in sequence.iter().enumerate() {
-        if bytes.len() != pixels * 8 || display.len() != pixels * 4 {
+        if bytes.len() != hdr_pixels * 8 || display.len() != pixels * 4 {
             return Err("frame is not tightly packed RGBA16F with an RGBA8 display".into());
         }
         let values = floats(bytes);
@@ -848,7 +865,7 @@ fn write(
         let mut summary = serde_json::json!({
             "pose": pose,
             "nonfinite_channels": bad,
-            "grid_mean_linear_rgb": grid(&values, size),
+            "grid_mean_linear_rgb": grid(&values, hdr_size),
             "grid_mean_display_bytes": grid(&display_values, size),
             "trace": trace,
         });
@@ -883,7 +900,11 @@ fn write(
             })
         })
         .collect();
-    let mut png = png::Encoder::new(fs::File::create(dir.join("frame.png"))?, size[0], size[1]);
+    let mut png = png::Encoder::new(
+        fs::File::create(dir.join("frame.png"))?,
+        hdr_size[0],
+        hdr_size[1],
+    );
     png.set_color(png::ColorType::Rgb);
     png.set_depth(png::BitDepth::Eight);
     png.write_header()?.write_image_data(&rgb)?;
@@ -919,8 +940,11 @@ fn write(
             "atmosphere": if level.atmosphere.active() { "physical sky without volumetric fog" } else { "off" },
             "sun_shadows": if level.sun_shadows { "ray-traced, 0.02 rad disk, all materials double-sided" } else { "off" },
             "backend": backend,
-            "width": size[0],
+                        "width": size[0],
             "height": size[1],
+            // The HDR image's own size: the internal one below native scale.
+            "hdr_width": hdr_size[0],
+            "hdr_height": hdr_size[1],
             "nonfinite_channels": nonfinite,
             "grid": GRID,
             // The last frame's grids, where a single-frame run has always had them.
@@ -1105,7 +1129,10 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
         }
     }
     let pixels = fa.len() / 4;
-    let width = ja["width"].as_u64().unwrap_or(1) as usize;
+    let width = ja["hdr_width"]
+        .as_u64()
+        .or(ja["width"].as_u64())
+        .unwrap_or(1) as usize;
     println!(
         "pixels: {pixels}; max absolute {max_abs:.6}; max relative {:.4}% at ({}, {}); mean relative {:.5}%",
         max_rel * 100.,

@@ -1758,8 +1758,14 @@ pixels a frame samples (0.248 a frame for 0.250 at half scale, 0.440 for 0.443 a
 thirds); after 64 frames the pixel the card's edge crosses holds 0.324 and 0.343 of the
 card where it covers 0.290 (bound 0.1), and pixels two away are pure.
 
-`ara_frame --scale quality|performance` is the level on either layer. **Not compared
-with wgpu.** What the test cannot see: anything under motion (the rejection tolerance
+`ara_frame --scale quality|performance` is the level on either layer. Below native
+scale the wgpu renderer's `try_capture_hdr` returns its internal-size shaded samples,
+not the resolved image, and exposes no capture of the latter; the tool therefore
+writes those samples as the HDR on both layers (`ForwardImages::samples` on this one)
+and the displayed image is the comparison of the resolved frame. Compared once with
+wgpu on the Radeon at 80acbfd, with the gate upscaling wgpu's HDR by hand: cache PASS at
+both scales, worst display channel 11 levels at two thirds and 6 at half, at most 10
+pixels over one level. **The HDR samples have not been compared.** What the test cannot see: anything under motion (the rejection tolerance
 uses the output pixel's angle, and the interpolation of young history), and the
 quality of the upscaled edge beyond that one bound. As in the renderer, an upscaled
 frame would skip transparent draws; the frame has none yet.
