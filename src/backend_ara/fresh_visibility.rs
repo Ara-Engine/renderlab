@@ -1,4 +1,5 @@
 //! Original geometric shadow queries; no raster visibility map or history is involved.
+use super::shader::memo::Memo;
 use super::{
     bindings::HeapBindings,
     cache::ShaderCache,
@@ -9,7 +10,7 @@ use super::{
 use anyhow::{Context, Result, ensure};
 use ara_gpu::{GpuDevice, commands::Recorder, descriptors::Format};
 /// Source estimator specialization, retaining the same 0..256 output count contract.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Mode {
     /// 256 fresh directions, eight cooperating lanes per receiver in a 2x2 tile.
     Exact,
@@ -25,7 +26,8 @@ impl Mode {
     }
     /// Compose the production source and specialize only its existing direction override.
     pub fn program(self) -> Result<Program> {
-        Program::new(Pass::FreshVisibility, source(self)?)
+        static KEPT: Memo<Mode, Program> = Memo::new();
+        KEPT.get(self, || Program::new(Pass::FreshVisibility, source(self)?))
     }
 }
 pub(crate) fn source(mode: Mode) -> Result<String> {
@@ -98,6 +100,10 @@ impl Visibility {
 /// its camera trace wrote. Reflected and compiled natively on Metal; not yet executed
 /// against a reference.
 pub fn traced_program() -> Result<Program> {
+    static KEPT: Memo<(), Program> = Memo::new();
+    KEPT.get((), traced_program_uncached)
+}
+fn traced_program_uncached() -> Result<Program> {
     let [_, soft] =
         crate::renderer::primary_ray_gpu::shader_sources(include_str!("../../shaders/scene.wgsl"))?;
     // The module also carries the camera trace, which this entry never reaches; its

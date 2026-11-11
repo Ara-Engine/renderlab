@@ -18,6 +18,7 @@
 //! shading, as `GiState::encode` places them, and shading reads the cache's table.
 //! [`render`] is one-shot: its frame is always the first after a cut. [`Frames`] keeps
 //! what a sequence carries from frame to frame.
+use super::shader::memo::Memo;
 use super::{
     acceleration::Scene,
     atmosphere::{AtmosphereParameters, AtmospherePasses, AtmosphereSun, AtmosphereTargets},
@@ -688,6 +689,10 @@ fn key(group: u32, binding: u32) -> InputKey {
 /// The standard program composed exactly as the wgpu renderer's lit raster variant, or
 /// its fresh variant, whose `hard_shadow` reads the receiver pixel's visible-ray count.
 pub fn standard_program(fresh: bool) -> Result<Program> {
+    static KEPT: Memo<bool, Program> = Memo::new();
+    KEPT.get(fresh, || standard_program_uncached(fresh))
+}
+fn standard_program_uncached(fresh: bool) -> Result<Program> {
     let source = crate::program::STANDARD_PROGRAM;
     let scene = include_str!("../../shaders/scene.wgsl");
     let head = if fresh {

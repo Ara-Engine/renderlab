@@ -1,8 +1,9 @@
 //! Original camera traces, with portable hit-position fetches from retained meshes.
+use super::shader::memo::Memo;
 use super::shader::{Pass, Program};
 use anyhow::{Context, Result, ensure};
 /// Original camera trace output contract.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Entry {
     /// Hit records, tile coverage and hit-only geometric precision.
     Trace,
@@ -13,14 +14,17 @@ impl Entry {
     /// Compose the unchanged hardware traversal/culling/repair algorithms, reading
     /// hit positions from the same vertex/index version used to build the BLAS.
     pub fn program(self) -> Result<Program> {
-        Program::new(
-            if matches!(self, Self::Trace) {
-                Pass::PrimaryTrace
-            } else {
-                Pass::PrimaryTraceReceivers
-            },
-            source()?,
-        )
+        static KEPT: Memo<Entry, Program> = Memo::new();
+        KEPT.get(self, || {
+            Program::new(
+                if matches!(self, Self::Trace) {
+                    Pass::PrimaryTrace
+                } else {
+                    Pass::PrimaryTraceReceivers
+                },
+                source()?,
+            )
+        })
     }
 }
 pub(crate) fn source() -> Result<String> {
@@ -86,7 +90,10 @@ impl Interactive {
     /// reconstruction's variant of it: disk directions rotated by the frame's sample
     /// and a ray count read from the primary frame record's sampling words.
     pub fn program(self, rotated: bool) -> Result<Program> {
-        Program::new(Pass::PrimaryInteractive(self), interactive_source(rotated)?)
+        static KEPT: Memo<(Interactive, bool), Program> = Memo::new();
+        KEPT.get((self, rotated), || {
+            Program::new(Pass::PrimaryInteractive(self), interactive_source(rotated)?)
+        })
     }
 }
 /// `shader_sources`' soft module with the portable trace, eight directions as the

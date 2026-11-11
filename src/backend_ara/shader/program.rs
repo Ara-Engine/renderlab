@@ -2,12 +2,16 @@
 use super::{Pass, ShaderInput};
 use anyhow::{Context, Result, ensure};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 /// Prepared WGSL for a selected compute or raster entry family. Prepare outside recording;
 /// pipelines and packets retain their own contract identity after this is dropped.
+/// Clones share the source and the reflected inputs, so a built-in program kept for
+/// the process (`memo::Memo`) costs a frame nothing to hand out.
+#[derive(Clone)]
 pub struct Program {
     pass: Pass,
-    source: String,
-    inputs: Vec<ShaderInput>,
+    source: Arc<str>,
+    inputs: Arc<[ShaderInput]>,
     threads: Option<[u32; 3]>,
     contract: [u8; 32],
     /// The source's digest, taken once: its key in the reflection tables and in the
@@ -19,7 +23,7 @@ impl Program {
     /// its entry name and wrapper convention, while the program owns its code.
     pub fn new(pass: Pass, source: impl Into<String>) -> Result<Self> {
         ensure!(pass.indirect(), "program needs a reflected packet family");
-        let source = source.into();
+        let source: String = source.into();
         let digest = super::memo::digest(&source);
         let inputs = super::heap_interface::from_digest(pass, &source, digest)?;
         let threads = if pass.raster() {
@@ -30,8 +34,8 @@ impl Program {
         let contract = contract(pass, &inputs);
         Ok(Self {
             pass,
-            source,
-            inputs,
+            source: source.into(),
+            inputs: inputs.into(),
             threads,
             contract,
             digest,

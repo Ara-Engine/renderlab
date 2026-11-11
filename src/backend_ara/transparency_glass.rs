@@ -1,4 +1,5 @@
 //! Original programmable transparent pane shading into seeded coverage samples.
+use super::shader::memo::{self, Memo};
 use super::{
     bindings::HeapBindings,
     cache::ShaderCache,
@@ -21,6 +22,10 @@ pub fn program(material: &str) -> Result<Program> {
 /// The same material on a ray-traced renderer's head: the pane's sun visibility is a ray
 /// its own fragment traces against the frame's scene, not a lookup in the sun map.
 pub fn traced_program(material: &str) -> Result<Program> {
+    static KEPT: Memo<[u8; 32], Program> = Memo::new();
+    KEPT.get(memo::digest(material), || traced_program_uncached(material))
+}
+fn traced_program_uncached(material: &str) -> Result<Program> {
     let head = crate::hardware_shadows::shader_source(
         include_str!("../../shaders/scene.wgsl"),
         crate::SampleCount::One,

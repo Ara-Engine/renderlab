@@ -5,7 +5,7 @@ mod handle_arrays;
 mod heap_interface;
 /// Renames locals that shadow a resource global before the textual heap rewrite.
 pub mod local_shadows;
-mod memo;
+pub(crate) mod memo;
 mod mesh_interface;
 mod metal;
 mod packet_spirv;

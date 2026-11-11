@@ -1,4 +1,5 @@
 //! Original non-RT deferred shading entries, composed with caller material WGSL.
+use super::shader::memo::{self, Memo};
 use super::shader::{Pass, Program};
 use anyhow::Result;
 /// Dispatch family for one program's deferred primary shading.
@@ -40,6 +41,12 @@ pub(crate) fn source(material: &str, list: bool) -> Result<String> {
 /// local-light shadow rays. It needs a ray-query device. Compiled natively on Metal
 /// with the standard program; not yet executed against a reference.
 pub fn hardware_soft_program(material: &str) -> Result<Program> {
+    static KEPT: Memo<[u8; 32], Program> = Memo::new();
+    KEPT.get(memo::digest(material), || {
+        hardware_soft_program_uncached(material)
+    })
+}
+fn hardware_soft_program_uncached(material: &str) -> Result<Program> {
     let [_, head] =
         crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
     let parameters = crate::program::declares_parameters(material);
@@ -52,6 +59,10 @@ pub fn hardware_soft_program(material: &str) -> Result<Program> {
 /// several programs, shading the tiles the binning pass listed for its slot
 /// (`program::compose_list`, as `ProgramPipelines::list` compiles it).
 pub fn hardware_soft_list_program(material: &str) -> Result<Program> {
+    static KEPT: Memo<[u8; 32], Program> = Memo::new();
+    KEPT.get(memo::digest(material), || list_program_uncached(material))
+}
+fn list_program_uncached(material: &str) -> Result<Program> {
     let [_, head] =
         crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
     let parameters = crate::program::declares_parameters(material);
