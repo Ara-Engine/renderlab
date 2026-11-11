@@ -68,10 +68,11 @@ def flights(control, runs):
         return {c: np.array(v) for c, v in out.items()}
 
     ref = series(control)
-    m.score.FRAMES = {8, 16, 24, 32, 40, 47}
     result = {}
     for run in runs:
+        m.score.FRAMES = None
         s = series(run)
+        m.score.FRAMES = {8, 16, 24, 32, 40, 47}
         row = {}
         for c in s:
             dc, dv = np.diff(ref[c])[7:], np.diff(s[c])[7:]

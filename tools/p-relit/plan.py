@@ -10,7 +10,8 @@ hold     the camera held at its first pose while the scene animates (`--diag hol
 cases    the scene events at frame 24 (fire off, fire on, fire circling, bulb emission step,
          camera cut), for each NAME, plus the first NAME's no-history control.
 timing   1080p, 150 frames of the flight with no images written and the per-pass GPU log
-         (RENDERLAB_PASS_LOG), flicker on and steady, for each NAME, both paths.
+         (RENDERLAB_PASS_LOG), flicker on and steady, with the Fox and with the two-sphere hero,
+         for each NAME, both paths.
 tests    NAME's lib test binary (host.py build lib-NAME): the GPU acceptance tests, then the
          lib suite.
 """
@@ -23,10 +24,11 @@ FOX = "D:/Coding/renderlab-work/m7-sk1/Fox.glb"
 PATHS = ("rt", "nonrt")
 CASES = {"fire-off": "fire=off", "fire-on": "fire=on", "fire-move": "fire=move", "glow-step": "glow=step", "cut": "cut=1"}
 MANIFEST = "D:/Coding/renderlab-work/mq1/primary-manifest.json"
+CACHE = {"c": "main"}
 
 
-def game(name, run, path, args, env=None):
-    out = dict(name=f"{name}-{path}-{run}", binary=name, path=path, args=args)
+def game(name, run, path, args, env=None, fox=True):
+    out = dict(name=f"{name}-{path}-{run}", binary=name, path=path, args=(["--fox", FOX] if fox else []) + args)
     if env:
         out["env"] = env
     return out
@@ -57,9 +59,12 @@ def runs(kind, names):
     elif kind == "timing":
         for path in PATHS:
             for n in names:
-                for run, keys in (("time", ()), ("time-steady", ("flicker=0",))):
+                # With the Fox (a skinned caster's swept shadow is a restart zone too) and with
+                # the two-sphere hero of root's capture.
+                for run, keys, fox in (("time", (), True), ("time-steady", ("flicker=0",), True),
+                                       ("time-spheres", (), False), ("time-spheres-steady", ("flicker=0",), False)):
                     out.append(game(n, run, path, ["--size", "1920x1080", "--frames", "150", "--every", "1000", *diag(*keys)],
-                                    env={"RENDERLAB_PASS_LOG": "{out}/passes.jsonl"}))
+                                    env={"RENDERLAB_PASS_LOG": "{out}/passes.jsonl"}, fox=fox))
     elif kind == "tests":
         for n in names:
             lib = f"lib-{n}"
@@ -83,8 +88,8 @@ def main():
     for n in names:
         binaries[n] = str(WORK / "bin" / n / "game_scene.exe")
         binaries[f"lib-{n}"] = str(WORK / "bin" / f"lib-{n}" / "renderlab-lib.exe")
-        # One pipeline cache per binary: their shaders differ.
-        common[n] = ["--fox", FOX, "--frames", "48", "--pipeline-cache", str(WORK / "pcache" / n)]
+        # One pipeline cache per shader set (c changes no shader).
+        common[n] = ["--frames", "48", "--pipeline-cache", str(WORK / "pcache" / CACHE.get(n, n))]
     plan = dict(binaries=binaries, common=common, runs=runs(kind, names), env={
         "RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK": "I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK",
         "VK_IMPLICIT_LAYER_PATH": "D:/Coding/renderlab-work/m7-mv1/empty-implicit",

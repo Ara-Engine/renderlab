@@ -158,11 +158,13 @@ EXAMPLES = ("game_scene", "p_yard_capture")
 
 def build(name, tree=None):
     """One Cargo command in TREE (default: this checkout): `lib` builds the lib test binary, any
-    other NAME the release examples into bin/NAME (lib-NAME: the lib test binary into bin/lib-NAME) with a build.json naming the commit."""
+    other NAME the release examples into bin/NAME (lib-NAME: the lib test binary into bin/lib-NAME; clippy: lint only) with a build.json naming the commit."""
     r = runner()
     tree = Path(tree) if tree else REPO
     lib = name.startswith("lib")
+    lint = name == "clippy"
     command = (["cargo", "test", "--locked", "-j", "2", "--lib", "--no-run", "--message-format=json-render-diagnostics"] if lib else
+               ["cargo", "clippy", "--locked", "-j", "2", "--lib", "--tests", "--example", "game_scene"] if lint else
                ["cargo", "build", "--release", "--locked", "-j", "2"] + [a for e in EXAMPLES for a in ("--example", e)])
     (WORK / "tmp").mkdir(parents=True, exist_ok=True)
     post(f"[{OWNER} request] owner={OWNER} {name} build: one Cargo command, atomic build slot + stillkit mutex; >=10 GiB start, stop <5 GiB/5 GB; no foreign compiler; -j 2 {r.utc()}")
@@ -196,7 +198,7 @@ def build(name, tree=None):
         with log_path.open("w") as log:
             code, stopped = run_guarded(command, cwd=tree, stdout=log, stderr=sp.STDOUT,
                           env=os.environ | {"CARGO_TARGET_DIR": str(TARGET), "CARGO_BUILD_JOBS": "2", "TMP": str(WORK / "tmp"), "TEMP": str(WORK / "tmp")})
-        if code == 0:
+        if code == 0 and not lint:
             commit = sp.check_output(["git", "rev-parse", "HEAD"], cwd=tree, text=True).strip()
             dirty = sp.check_output(["git", "status", "--porcelain", "--", "src", "shaders", "crates", "examples", "support", "Cargo.toml", "Cargo.lock"],
                                     cwd=tree, text=True).strip()

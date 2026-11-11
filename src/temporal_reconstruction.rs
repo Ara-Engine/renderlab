@@ -206,9 +206,9 @@ const ZONES_OFFSET: usize = 304;
 /// that share one bounding sphere (`relit_zones`).
 const RELIT_SLOTS: usize = 8;
 /// `Reconstruction::light_budget`'s default: 0.05 exposed lux, about 0.8 % of display white on
-/// a mid-grey diffuse surface. In the courtyard it restarts the 5.4-6.3 m around the brazier
-/// that P-FLAT2 measured as following the fire as closely as a full restart
-/// (docs/p-relit.md).
+/// a mid-grey diffuse surface. In the courtyard it restarts the 5.4-6.7 m around the brazier,
+/// where the fire-lit wall and ground follow the flicker as closely as a full restart did
+/// (docs/p-relit.md, section 3).
 const LIGHT_BUDGET: f32 = 0.05;
 // Test-only tail permits the immutable MQ1 static-control shader's runtime-array
 // minimum binding span. Production has only fixed words; transform history lives
@@ -248,7 +248,7 @@ fn widen_swings(swings: Option<&[Swing]>, intensities: &[[u32; 3]]) -> Vec<Swing
 /// least `1 / level`; rounded up. Zero when no distance reaches it: the shading clamps the
 /// distance at 1 cm, so the attenuation never passes 1e4.
 fn restart_radius(range: Option<f32>, level: f32) -> f32 {
-    if !(level >= 1e-4) {
+    if level.is_nan() || level < 1e-4 {
         return 0.0;
     }
     let Some(range) = range else {
@@ -1313,14 +1313,15 @@ impl Renderer {
     }
 
     /// Identity of every input a reconstructed frame depends on besides the camera, the
-    /// eye, exposure, directional-light directions, local-light intensities (P-FLAT), skinned
+    /// eye, exposure, directional-light directions, local-light intensities (P-RELIT), skinned
     /// poses (SK1) and placement transforms (MQ1), which TR1 follows: a change restarts every
     /// pixel. Programs, prelude, geometry, bindings, materials, textures, new placements, the
     /// sun's colour, light kinds and local lights' position, direction, range, cone and source
     /// radius, the environment and every shadow and visibility setting. Before MQ1 transform
     /// edits of existing placements restarted every pixel, so a scene with any animated rigid
     /// object never accumulated; they now reproject through their previous transforms. Before
-    /// P-FLAT a flickering local light restarted every pixel every frame in the same way.
+    /// P-RELIT a flickering local light restarted every pixel every frame in the same way;
+    /// it now restarts only its restart sphere (`relit_zones`).
     fn reconstruction_key(&self) -> [u8; 32] {
         let u = &self.uploads;
         let state = self.primary.as_ref().unwrap();
