@@ -42,7 +42,9 @@
 //! turns the cache's bounce light on as well (gathers, light visibility and cell
 //! shading). `--filter` implies `--bounce` and adds the cell filter at its default
 //! bits, which makes the cache Renderlab's default configuration but for the table
-//! size.
+//! size. `--crevice` adds a slot to the scene, two 1.2 m walls 7 cm apart on the floor
+//! with their open end toward the camera: the filter's contrast refine fires on the
+//! floor cells inside it, which nothing in M5-A itself makes it do.
 //!
 //! ```text
 //! cargo run --example ara_frame -- --backend wgpu --output out/wgpu
@@ -77,6 +79,7 @@ fn main() -> Result<(), Failure> {
     let mut sun_shadows = false;
     let mut traced = false;
     let (mut gi, mut bounce, mut filter, mut still) = (false, false, false, false);
+    let mut crevice = false;
     let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -86,6 +89,7 @@ fn main() -> Result<(), Failure> {
             "--traced" => (sun_shadows, traced) = (true, true),
             "--gi" => (sun_shadows, traced, gi) = (true, true, true),
             "--bounce" => (sun_shadows, traced, gi, bounce) = (true, true, true, true),
+            "--crevice" => crevice = true,
             "--filter" => {
                 (sun_shadows, traced, gi, bounce, filter) = (true, true, true, true, true)
             }
@@ -117,6 +121,30 @@ fn main() -> Result<(), Failure> {
     }
     let output = output.ok_or("--output DIR")?;
     let mut fixture = lighting_fixture::Fixture::new();
+    if crevice {
+        // In front of the spheres, running away from the camera along -z.
+        for x in [0.06f32, 0.13] {
+            let vertices = [[x, 0., 0.9], [x, 0., 2.3], [x, 1.2, 2.3], [x, 1.2, 0.9]]
+                .map(|position| renderlab::Vertex {
+                    position,
+                    normal: [1., 0., 0.],
+                    uv: [0.; 2],
+                    color: [1.; 4],
+                })
+                .to_vec();
+            fixture.objects.push(lighting_fixture::Object {
+                name: format!("slot-wall-{x}"),
+                vertices,
+                indices: vec![0, 1, 2, 0, 2, 3],
+                transform: renderlab::Mat4::IDENTITY,
+                base: [0.5, 0.5, 0.5, 1.],
+                metal: 0.,
+                rough: 0.5,
+                double_sided: true,
+                recipe: serde_json::json!({"shape": "world_quad"}),
+            });
+        }
+    }
     if sun_shadows {
         for object in &mut fixture.objects {
             object.double_sided = true;
@@ -129,6 +157,7 @@ fn main() -> Result<(), Failure> {
         gi,
         bounce,
         filter,
+        crevice,
         still,
         frames,
     };
@@ -158,6 +187,8 @@ struct Level {
     bounce: bool,
     /// The cell filter as well, at its default bits.
     filter: bool,
+    /// The scene has the slot that makes contrast refine fire.
+    crevice: bool,
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
@@ -554,7 +585,11 @@ fn write(
         dir.join("frame.json"),
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
-            "scene": if level.still { "M5-A authored v1, every frame from pose 0, local shadows off, default post" } else { "M5-A authored v1, camera path from pose 0, local shadows off, default post" },
+            "scene": format!(
+                "M5-A authored v1{}, {}, local shadows off, default post",
+                if level.crevice { " with a slot between two walls" } else { "" },
+                if level.still { "every frame from pose 0" } else { "camera path from pose 0" }
+            ),
                                     "primary": match (level.traced, level.gi, level.bounce) {
                 (true, true, true) if level.filter => "traced, exact soft shadows, radiance cache with bounce and the cell filter (2^17 slots), no reconstruction, reflections or motion blur",
                 (true, true, true) => "traced, exact soft shadows, radiance cache with bounce (2^17 slots, no filter), no reconstruction, reflections or motion blur",
@@ -799,7 +834,8 @@ impl<'a> Table<'a> {
             let name = match at {
                 0 => "key a and valid bit",
                 1 => "SH scale",
-                2..=15 => "SH halves",
+                2..=14 => "SH halves",
+                15 => "last SH half and split flag",
                 16..=22 => "bounce SH",
                 _ => "query normal",
             };
@@ -892,6 +928,10 @@ fn chunk(words: usize, index: usize) -> std::ops::Range<usize> {
 ///    `BOUNCE_BOUND` of its scale apart are at most `BOUNCE_CELLS`: a gather sums the
 ///    radiance of up to 64 other cells, so one boundary cell or grazing ray elsewhere
 ///    moves a neighbour by a ray's share; more than that is a wrong gather or shade.
+/// 6. **Same splits.** Of those cells, the ones whose split flag (the probe's two-layer
+///    mark or the filter's contrast refine) differs are at most `SPLIT_CELLS` of the
+///    larger side's split cells, or `SPLIT_FLOOR` cells: a cell at the refine's
+///    threshold may fall either way, a refine that never fires may not.
 ///
 /// The bounds were set before any cross-layer run existed; the output prints the
 /// measured figure beside each so they can be tightened.
@@ -902,6 +942,8 @@ const FLIPPED_RAYS: f64 = 0.001;
 const SH_BOUND: f32 = 0.01;
 const BOUNCE_BOUND: f32 = 0.02;
 const BOUNCE_CELLS: f64 = 0.01;
+const SPLIT_CELLS: f64 = 0.1;
+const SPLIT_FLOOR: usize = 2;
 
 /// The cache tables of two `--gi` runs, frame by frame, against the acceptance rule
 /// above. Prints the slot count, each frame's measurements and first differing word,
@@ -1015,6 +1057,7 @@ fn compare_tables(
         // 3 and 4. Direction bits, then the SH where the bits agree.
         let (mut flipped, mut worst, mut compared) = (0u64, 0f32, 0usize);
         let (mut bounce_off, mut bounce_worst) = (0usize, 0f32);
+        let (mut splits, mut split_off) = ([0usize; 2], 0usize);
         for &(slot_a, slot_b) in &both {
             let (cold_a, cold_b) = (xa.cold(slot_a), xb.cold(slot_b));
             let rays =
@@ -1059,6 +1102,10 @@ fn compare_tables(
                 / top_a.max(top_b).max(1e-30);
             bounce_worst = bounce_worst.max(apart);
             bounce_off += usize::from(apart.is_nan() || apart > BOUNCE_BOUND);
+            let split = [hot_a, hot_b].map(|hot| hot[15] & 0x1_0000 != 0);
+            splits[0] += usize::from(split[0]);
+            splits[1] += usize::from(split[1]);
+            split_off += usize::from(split[0] != split[1]);
         }
         let flipped_share = flipped as f64 / (both.len().max(1) as f64 * 64.);
         if flipped_share > FLIPPED_RAYS {
@@ -1068,13 +1115,17 @@ fn compare_tables(
         if bounce_share > BOUNCE_CELLS {
             reasons.push(format!("{bounce_off} cells differ in bounce"));
         }
+        let split_bound = SPLIT_FLOOR.max((splits[0].max(splits[1]) as f64 * SPLIT_CELLS) as usize);
+        if split_off > split_bound {
+            reasons.push(format!("{split_off} cells differ in their split flag"));
+        }
         if worst.is_nan() || worst > SH_BOUND {
             reasons.push(format!(
                 "an SH coefficient differs by {worst:.2e} of its scale"
             ));
         }
         println!(
-            "pose {pose}: {counts}; {} words differ, first at {word} ({}); header {}; one-sided cells {one_sided} of {cells} ({:.3}%, bound {:.1}%); differing direction bits {flipped} over {} cells valid in both ({:.4}%, bound {:.2}%); worst SH coefficient {worst:.2e} of its scale over {compared} cells with equal bits (bound {SH_BOUND:.0e}); bounce further than {BOUNCE_BOUND:.0e} of scale apart in {bounce_off} of them ({:.3}%, bound {:.1}%; worst {bounce_worst:.2e}): {}",
+            "pose {pose}: {counts}; {} words differ, first at {word} ({}); header {}; one-sided cells {one_sided} of {cells} ({:.3}%, bound {:.1}%); differing direction bits {flipped} over {} cells valid in both ({:.4}%, bound {:.2}%); worst SH coefficient {worst:.2e} of its scale over {compared} cells with equal bits (bound {SH_BOUND:.0e}); bounce further than {BOUNCE_BOUND:.0e} of scale apart in {bounce_off} of them ({:.3}%, bound {:.1}%; worst {bounce_worst:.2e}); split cells {} / {}, {split_off} differing (bound {split_bound}): {}",
             differing.len(),
             xa.field(word),
             if header { "same" } else { "DIFFERS" },
@@ -1085,6 +1136,8 @@ fn compare_tables(
             FLIPPED_RAYS * 100.,
             bounce_share * 100.,
             BOUNCE_CELLS * 100.,
+            splits[0],
+            splits[1],
             if reasons.is_empty() { "pass" } else { "FAIL" }
         );
         if !reasons.is_empty() {
@@ -1095,10 +1148,11 @@ fn compare_tables(
         println!("cache tables: first difference in frame {pose}, {what}");
     }
     let rule = format!(
-        "same header, one-sided cells within {:.1}%, differing direction bits within {:.2}%, SH within {SH_BOUND:.0e} of scale where bits agree, bounce further than {BOUNCE_BOUND:.0e} of scale apart in at most {:.1}% of those cells, in every frame",
+        "same header, one-sided cells within {:.1}%, differing direction bits within {:.2}%, SH within {SH_BOUND:.0e} of scale where bits agree, bounce further than {BOUNCE_BOUND:.0e} of scale apart in at most {:.1}% of those cells, split flags differing on at most {:.0}% of split cells, in every frame",
         ONE_SIDED_CELLS * 100.,
         FLIPPED_RAYS * 100.,
-        BOUNCE_CELLS * 100.
+        BOUNCE_CELLS * 100.,
+        SPLIT_CELLS * 100.
     );
     Ok(match (failed, unjudged, first) {
         (Some(failure), ..) => {

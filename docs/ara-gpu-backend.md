@@ -1491,7 +1491,7 @@ one that keeps comparing.
 positions and ray directions differ by rounding between shader compilers and drivers,
 which now and then moves a pixel across a cell or level boundary or flips a ray that
 grazes an edge. `--compare` ends with one line, `cache tables: PASS` or `FAIL`, and
-exits nonzero on a fail. A frame passes when all five hold; a comparison passes when
+exits nonzero on a fail. A frame passes when all six hold; a comparison passes when
 every frame does.
 
 | | Criterion | Bound | What a miss would mean |
@@ -1501,6 +1501,7 @@ every frame does.
 | 3 | Differing direction bits over cells valid on both sides, of their rays | 0.1% | A wrong ray origin or basis, not edge grazers |
 | 4 | Every SH coefficient of cells valid on both sides with equal bits, of the cell's scale | 1% | A wrong weight, not f16 storage or a sampled environment |
 | 5 | Of those cells, the ones with a bounce coefficient further than 2% of its scale apart | 1% of them | A wrong gather or cell shade, not one boundary cell or grazing ray moving a neighbour by a ray's share |
+| 6 | Of those cells, the ones whose split flag differs | 10% of the larger side's split cells, or 2 | A refine that does not fire, not a cell at its threshold |
 
 The bounds were chosen before any cross-layer run existed, from what each criterion
 should absorb; every frame's line prints the measured figure beside its bound, so the
@@ -1562,10 +1563,28 @@ of six frames: the tent-, normal- and plane-weighted mean of the cell's own valu
 its tangent neighbours', found by level, bin and lattice coordinates from the cold
 records, for the sky SH and for the bounce SH. In the last frame all 2,495 valid cells
 agree to f16 precision, with 6.9 neighbours a cell; the filter moves 2,465 of them,
-so agreeing with it is not agreeing with the unfiltered value. **Not exercised:**
-contrast refine (bit 2) never fires on that scene or, by the cell counts, on M5-A, so
-its split flag is only checked to stay clear, and with an environment map its
-openness reads the diffuse cube, which the reference does not model.
+so agreeing with it is not agreeing with the unfiltered value.
+
+**Contrast refine** (filter bit 2) does not fire on the yard or, as far as the cell
+counts show, on M5-A, so it has its own scene:
+`contrast_refine_splits_the_cells_of_a_slot_as_its_rule_predicts` stands two 1.5 m
+walls 7 cm apart on the floor and looks into the slot from its open end. A floor cell
+whose query point lies in the slot sees almost no sky, the cells beside it outside the
+walls see most of it, and the filter marks it split so that its pixels read the next
+finer level. In each of five frames the split flag of every valid cell equals the
+rule recomputed on the CPU from the unfiltered sources (under a quarter of an
+agreeing neighbour's openness, that neighbour above a quarter): 12 cells in the first
+frame, 36 once settled, told apart from the 21 flags the probe sets itself on the two
+facing walls. The finer cells the refine asks for appear on the slot's floor from the
+second frame. Lowering the reference's threshold to a tenth gives mismatches, so the
+agreement is not vacuous. **Still not modelled by the reference:** with an
+environment map the openness is measured against the diffuse cube; the test's sky is
+uniform.
+
+`ara_frame --crevice` adds such a slot to M5-A (105 split cells by the twelfth frame
+on Metal), and the verdict has a sixth criterion: split flags may differ on at most
+10% of the larger side's split cells, or two cells. A copy of a Metal run with its
+split flags cleared fails it.
 
 `ara_frame --filter` (implies `--bounce`) is the cache at Renderlab's defaults but for
 the 2^17-slot table; on Metal two runs of the 12-frame moving sequence are identical

@@ -260,8 +260,9 @@ impl Raw<'_> {
                 .collect()
         })
     }
-    /// Whether the unfiltered value carried the split flag.
-    fn split(&self, slot: usize) -> bool {
+    /// Whether the unfiltered value carried the split flag (the probe's, for a cell
+    /// whose lines meet two surface layers).
+    pub fn split(&self, slot: usize) -> bool {
         self.word(slot, 15) & 0x1_0000 != 0
     }
 }

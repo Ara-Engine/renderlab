@@ -137,6 +137,8 @@ type YardFrame = (
 struct Yard {
     floor: [Vertex; 4],
     wall: [Vertex; 4],
+    /// More quads in the wall's material (none in the yard itself).
+    extra: Vec<[Vertex; 4]>,
     /// Grey base colours of the floor and the wall.
     base: [f32; 2],
     lighting: Lighting,
@@ -164,6 +166,7 @@ impl Yard {
                 [[0., -6., 0.], [0., 6., 0.], [0., 6., 12.], [0., -6., 12.]],
                 [1., 0., 0.],
             ),
+            extra: vec![],
             base: [0.5; 2],
             lighting: Lighting {
                 lights: vec![Light::Directional {
@@ -200,21 +203,22 @@ impl Yard {
         indirect: Option<Indirect>,
         cameras: &[Camera],
     ) -> Result<Vec<YardFrame>> {
-        let objects =
-            [(&self.floor, self.base[0]), (&self.wall, self.base[1])].map(|(vertices, base)| {
-                ForwardObject {
-                    vertices,
-                    indices: &[0, 1, 2, 0, 2, 3],
-                    transform: Mat4::IDENTITY,
-                    material: MaterialDescriptor {
-                        base_color: [base, base, base, 1.],
-                        metallic: 0.,
-                        roughness: 1.,
-                        double_sided: true,
-                        ..Default::default()
-                    },
-                }
-            });
+        let objects: Vec<_> = [(&self.floor, self.base[0]), (&self.wall, self.base[1])]
+            .into_iter()
+            .chain(self.extra.iter().map(|quad| (quad, self.base[1])))
+            .map(|(vertices, base)| ForwardObject {
+                vertices,
+                indices: &[0, 1, 2, 0, 2, 3],
+                transform: Mat4::IDENTITY,
+                material: MaterialDescriptor {
+                    base_color: [base, base, base, 1.],
+                    metallic: 0.,
+                    roughness: 1.,
+                    double_sided: true,
+                    ..Default::default()
+                },
+            })
+            .collect();
         let mut history = Frames::default();
         let mut frames = Vec::new();
         for camera in cameras {
@@ -681,99 +685,200 @@ fn bounce_cells_shade_and_gather_what_the_scene_predicts() -> Result<()> {
     Ok(())
 }
 
+/// What one frame's filter replay covered.
+#[derive(Clone, Copy, Debug, Default)]
+struct Filtered {
+    valid: usize,
+    /// Cells whose filtered sky value differs from their unfiltered one.
+    moved: usize,
+    /// Cells with a filtered bounce value.
+    bounced: usize,
+    neighbours: usize,
+    /// Split flags the filter's contrast refine set, and ones the probe had set.
+    contrast: usize,
+    probe: usize,
+}
+/// Recomputes `gi_filter_cell` for every valid cell of a frame read back with its
+/// sources: the sky SH, the bounce SH where the filter writes one, and the split flag.
+fn replay_filter(index: usize, frame: &YardFrame) -> Result<Filtered> {
+    let (Some(words), Some(sources)) = (&frame.1, &frame.3) else {
+        anyhow::bail!("the table or the filter sources were not read");
+    };
+    let table = Table::new(words)?;
+    ensure!(
+        table.filter() == (15, 0.5),
+        "the filter is not at its default: {:?}",
+        table.filter()
+    );
+    let raw = gi_cache_reference::Raw(sources);
+    let cells = table.cells();
+    let find: std::collections::HashMap<_, _> = cells
+        .iter()
+        .enumerate()
+        .map(|(i, c)| ((c.level, c.bin, c.lattice), i))
+        .collect();
+    let apart = |a: &[f64], b: &[f64]| {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0f64, f64::max)
+    };
+    let mut covered = Filtered::default();
+    for cell in cells.iter().filter(|c| c.valid) {
+        covered.valid += 1;
+        let expected = gi_cache_reference::filter(&table, &raw, &cells, &find, cell);
+        covered.neighbours += expected.neighbours;
+        // Halves of values in [-1, 1], scaled; the filter's own sums are f32.
+        let scale = f64::from(cell.scale);
+        let stored: Vec<f64> = cell.sh.iter().map(|h| f64::from(*h) * scale).collect();
+        ensure!(
+            apart(&stored, &expected.sky) < 2e-3 * scale,
+            "frame {index}, slot {} at {:?}: sky SH is not its filtered value",
+            cell.slot,
+            cell.point
+        );
+        covered.moved += usize::from(apart(&expected.sky, &raw.sky(cell.slot)) > 2e-3 * scale);
+        if let Some(bounce) = &expected.bounce {
+            let scale = f64::from(cell.bounce_scale.max(0.));
+            let stored: Vec<f64> = cell.bounce.iter().map(|h| f64::from(*h) * scale).collect();
+            let top = bounce.iter().fold(scale, |m, v| m.max(v.abs()));
+            ensure!(
+                apart(&stored, bounce) <= 2e-3 * top,
+                "frame {index}, slot {} at {:?}: bounce SH is not its filtered value",
+                cell.slot,
+                cell.point
+            );
+            covered.bounced += 1;
+        }
+        ensure!(
+            cell.split == expected.split,
+            "frame {index}, slot {} at {:?}: split flag is {}, the filter's rule gives {}",
+            cell.slot,
+            cell.point,
+            cell.split,
+            expected.split
+        );
+        if cell.split {
+            if raw.split(cell.slot) {
+                covered.probe += 1;
+            } else {
+                covered.contrast += 1;
+            }
+        }
+    }
+    Ok(covered)
+}
+fn default_cache() -> Option<Indirect> {
+    Some(Indirect {
+        settings: IndirectSettings {
+            slots_log2: 14,
+            ..Default::default()
+        },
+        read_table: true,
+    })
+}
+
 /// The cell filter at Renderlab's default settings (bounce on, filter bits 15), on the
 /// yard under its uniform sky. In every frame of a still sequence, every valid cell's
 /// hot record is what `gi_filter_cell` computes from the unfiltered sources: the
 /// tent-, normal- and plane-weighted mean of its own value and its tangent neighbours',
 /// for the sky SH and for the bounce SH. The filter moves nearly every cell's sky value,
-/// so agreeing with it is not agreeing with the unfiltered one. Contrast refine never
-/// fires on this scene (no cell is four times darker than an agreeing neighbour), so
-/// its split flag is only checked to stay clear.
+/// so agreeing with it is not agreeing with the unfiltered one. Contrast refine does
+/// not fire on this scene; the crevice test below is where it does.
 #[test]
 fn filtered_cells_are_the_weighted_mean_of_their_unfiltered_neighbourhood() -> Result<()> {
     let path = root("gi-cache-filter");
     let mut gpu = GpuDevice::new(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
     let yard = Yard::new();
-    let indirect = Some(Indirect {
-        settings: IndirectSettings {
-            slots_log2: 14,
-            ..Default::default()
-        },
-        read_table: true,
-    });
-    let frames = yard.sequence(&mut gpu, &cache, indirect, &[Yard::camera(0)?; 6])?;
-    let mut last = (0, 0, 0, 0f64);
+    let frames = yard.sequence(&mut gpu, &cache, default_cache(), &[Yard::camera(0)?; 6])?;
+    let mut last = Filtered::default();
     for (index, frame) in frames.iter().enumerate() {
-        let (Some(words), Some(sources)) = (&frame.1, &frame.3) else {
-            anyhow::bail!("the table or the filter sources were not read");
-        };
-        let table = Table::new(words)?;
-        ensure!(
-            table.filter() == (15, 0.5),
-            "the filter is not at its default: {:?}",
-            table.filter()
-        );
-        let raw = gi_cache_reference::Raw(sources);
-        let cells = table.cells();
-        let find: std::collections::HashMap<_, _> = cells
-            .iter()
-            .enumerate()
-            .map(|(i, c)| ((c.level, c.bin, c.lattice), i))
-            .collect();
-        let apart = |a: &[f64], b: &[f64]| {
-            a.iter()
-                .zip(b)
-                .map(|(x, y)| (x - y).abs())
-                .fold(0f64, f64::max)
-        };
-        let (mut valid, mut moved, mut bounced, mut neighbours) = (0, 0, 0, 0);
-        for cell in cells.iter().filter(|c| c.valid) {
-            valid += 1;
-            let expected = gi_cache_reference::filter(&table, &raw, &cells, &find, cell);
-            neighbours += expected.neighbours;
-            // Halves of values in [-1, 1], scaled; the filter's own sums are f32.
-            let scale = f64::from(cell.scale);
-            let stored: Vec<f64> = cell.sh.iter().map(|h| f64::from(*h) * scale).collect();
-            ensure!(
-                apart(&stored, &expected.sky) < 2e-3 * scale,
-                "frame {index}, slot {} at {:?}: sky SH is not its filtered value",
-                cell.slot,
-                cell.point
-            );
-            moved += usize::from(apart(&expected.sky, &raw.sky(cell.slot)) > 2e-3 * scale);
-            if let Some(bounce) = &expected.bounce {
-                let scale = f64::from(cell.bounce_scale.max(0.));
-                let stored: Vec<f64> = cell.bounce.iter().map(|h| f64::from(*h) * scale).collect();
-                let top = bounce.iter().fold(scale, |m, v| m.max(v.abs()));
-                ensure!(
-                    apart(&stored, bounce) <= 2e-3 * top,
-                    "frame {index}, slot {} at {:?}: bounce SH is not its filtered value",
-                    cell.slot,
-                    cell.point
-                );
-                bounced += 1;
-            }
-            ensure!(
-                !cell.split && !expected.split,
-                "frame {index}, slot {}: an unexpected split",
-                cell.slot
-            );
-        }
-        last = (
-            valid,
-            moved,
-            bounced,
-            neighbours as f64 / valid.max(1) as f64,
-        );
+        last = replay_filter(index, frame)?;
     }
+    eprintln!("last frame: {last:?}");
+    ensure!(
+        last.valid >= 2000
+            && last.moved * 10 >= last.valid * 9
+            && last.bounced == last.valid
+            && last.neighbours > 6 * last.valid
+            && last.contrast + last.probe == 0,
+        "the filter replay covered too little: {last:?}"
+    );
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// Contrast refine, the filter's third default bit, on a slot: two 1.5 m walls 7 cm
+/// apart on the floor, seen from its open end. A floor cell whose query point lies in
+/// the slot sees almost no sky while the cells beside it, outside the walls, see most
+/// of it; the filter marks such a cell split, and its pixels then read the next finer
+/// level. The split flag of every valid cell equals the rule recomputed on the CPU
+/// from the unfiltered sources (less than a quarter of an agreeing neighbour's
+/// openness, that neighbour above a quarter), in every frame; the flags the probe set
+/// itself on the facing walls are told apart from the filter's; and the finer cells
+/// the refine asks for appear on the slot's floor after the first frame.
+#[test]
+fn contrast_refine_splits_the_cells_of_a_slot_as_its_rule_predicts() -> Result<()> {
+    let path = root("gi-cache-crevice");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    const SLOT: [f32; 2] = [0.06, 0.13];
+    let side = |x: f32| {
+        [[x, -3., 0.], [x, 0., 0.], [x, 0., 1.5], [x, -3., 1.5]].map(|position| Vertex {
+            position,
+            normal: [1., 0., 0.],
+            uv: [0.; 2],
+            color: [1.; 4],
+        })
+    };
+    let mut yard = Yard::new();
+    yard.wall = side(SLOT[0]);
+    yard.extra = vec![side(SLOT[1])];
+    let camera = Camera::look_at(
+        Vec3::new(0.095, 2.5, 1.8),
+        Vec3::new(0.095, -0.5, 0.),
+        Vec3::Z,
+        55f32.to_radians(),
+        0.1,
+        100.,
+    )?;
+    let frames = yard.sequence(&mut gpu, &cache, default_cache(), &[camera; 5])?;
+    // Floor cells with their query point between the walls, by level.
+    let in_slot = |frame: &YardFrame| -> Result<std::collections::BTreeMap<u32, [usize; 2]>> {
+        let table = Table::new(frame.1.as_ref().context("table was not read")?)?;
+        let mut levels = std::collections::BTreeMap::new();
+        for cell in table.cells().iter().filter(|c| {
+            c.valid && c.bin == 4 && c.point.x > SLOT[0] && c.point.x < SLOT[1] && c.point.y < 0.
+        }) {
+            let entry: &mut [usize; 2] = levels.entry(cell.level).or_default();
+            entry[usize::from(cell.split)] += 1;
+        }
+        Ok(levels)
+    };
+    let mut covered = Vec::new();
+    for (index, frame) in frames.iter().enumerate() {
+        covered.push(replay_filter(index, frame)?);
+    }
+    let (first, last) = (in_slot(&frames[0])?, in_slot(&frames[4])?);
     eprintln!(
-        "last frame: {} valid cells, {} moved by the filter, {} with filtered bounce, {:.2} neighbours a cell",
-        last.0, last.1, last.2, last.3
+        "first {:?}, last {:?}; slot cells by level first {first:?}, last {last:?}",
+        covered[0], covered[4]
+    );
+    let coarsest = *first
+        .keys()
+        .next()
+        .context("no slot cell in the first frame")?;
+    ensure!(
+        covered[0].contrast >= 10 && covered[0].probe == 0 && covered[4].contrast >= 30,
+        "contrast refine fired on too few cells: {:?} then {:?}",
+        covered[0],
+        covered[4]
     );
     ensure!(
-        last.0 >= 2000 && last.1 * 10 >= last.0 * 9 && last.2 == last.0 && last.3 > 6.,
-        "the filter replay covered too little: {last:?}"
+        first.len() == 1 && first[&coarsest][1] >= 10 && last.keys().any(|level| *level < coarsest),
+        "the refine did not bring finer cells into the slot: {first:?} then {last:?}"
     );
     gpu.collect()?;
     gpu.assert_clean()?;
