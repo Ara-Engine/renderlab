@@ -114,9 +114,14 @@ fn tr1_inside(t:vec2<i32>,size:vec2<u32>)->bool {
 // the sample nearest its centre. tr1_ratio is the sample grid's size over the output's, per
 // axis; at 1 (native) every mapping below is the identity and every weight 1.
 var<private> tr1_ratio:vec2<f32>;
+// Whether the sample grid is the output grid, decided from the two integer sizes and never
+// from tr1_ratio: a float quotient of equal sizes need not be exactly 1 (Vulkan allows
+// OpFDiv 2.5 ULP), and RADV's native frames then took the upscaling path, with tent weights
+// just under 1 and the nearest-sample clamp at the image border.
+var<private> tr1_same_grid:bool;
 // The output pixel this invocation resolves.
 var<private> tr1_here:vec2<i32>;
-fn tr1_native()->bool {return all(tr1_ratio==vec2<f32>(1.0));}
+fn tr1_native()->bool {return tr1_same_grid;}
 // The sample grid pixel whose sample (offset `jitter`) is nearest output pixel p's centre.
 fn tr1_nearest(p:vec2<i32>,jitter:vec2<f32>)->vec2<i32> {
     let c=fma(vec2<f32>(p)+vec2<f32>(0.5),tr1_ratio,-jitter);
@@ -597,7 +602,9 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
 @compute @workgroup_size(8,8) fn tr1_resolve(@builtin(global_invocation_id) id:vec3<u32>,
         @builtin(local_invocation_index) lane:u32,@builtin(workgroup_id) group:vec3<u32>) {
     let size=textureDimensions(tr1_output);
-    tr1_ratio=vec2<f32>(textureDimensions(tr1_sample))/vec2<f32>(size);
+    let samples=textureDimensions(tr1_sample);
+    tr1_same_grid=all(samples==size);
+    tr1_ratio=select(vec2<f32>(samples)/vec2<f32>(size),vec2<f32>(1.0),tr1_same_grid);
     tr1_here=vec2<i32>(id.xy);
     // This frame's placements over the 10x10 tile, two loads per invocation at most.
     let corner=vec2<i32>(group.xy*8u)-vec2<i32>(1);
