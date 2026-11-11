@@ -137,4 +137,17 @@ NonRt is timed at 720p because the moving and still NonRt game scene at 1080p ha
 - `InstanceState::previous_models(view, previous_frame)` and `motion_submitted(view, frame)` take the view.
 - Per-frame records the port keeps once per renderer that are per view here: the TR1 plan, post's previous matrix, the atmosphere's reprojection, the instance motion record, the light cluster selection.
 
+**Cuts.** `Engine::cut_view` restarts that view's TR1 history, its fog history and the camera texture verification. Other views and the GI cache are untouched.
+
+Checked on m6u (`game_scene --views ab --cut-b 12` against `a` and `b`, 1280x720, GI off, view a flying):
+- With `--sky uniform`, both views are byte-identical on all 20 frames, NonRt and HardwareRt, to single-view engines. For view b that is an engine cut at the same frame, so the frames right after the cut carry no stale history, and view a is unaffected.
+- Under the atmosphere sky, view b differs by at most 1-2 levels on every frame, before and after the cut: the sky light placed at view a's altitude.
+
+**An idle view costs nothing measurable.** A second view created and never rendered (`--views ai` against `a`, release, still, 60 ticks, reference drift 0.5% and 0.1%):
+- HardwareRt 1920x1080: 99.05 against 98.42 ms a tick, 14 MiB.
+- NonRt 1280x720: 83.61 against 83.79 ms a tick, 9 MiB.
+Its targets are created by its first frame.
+
+**The ara-gpu backend (`src/backend_ara`, feature `backend-ara`) renders one view.** Views are not ported there. Its `Scene` implementation maps the view calls onto its single view: `create_view` once (a second is refused), and `set_view`, `remove_view`, `render_view`, `cut_view` and `capture_view` call its `resize`, `render`, `cut` and `capture`. `tick` is its particle step. The look comes from that view's `ViewDesc`. Its GI plans with one `ViewPlan` and every frame a tick.
+
 **Not built yet:** ids (`Outputs::ids` is rejected until U-IDS lands); the GI touch pass for views that skip ticks; texture streaming feedback is shared without a per-view union rule (each streaming frame's requests add to one residency).

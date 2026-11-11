@@ -30,10 +30,11 @@
 //! it from the first frame, `glow=step` dims the lamp bulbs' emission to a tenth, and `cut=1`
 //! jumps the camera a third of the way round its orbit with `Engine::cut_view`. `hold=1` keeps
 //! the camera at its first pose while the lights, the hero and the objects animate.
-//! `--views a|b|ab` (docs/design-views.md) picks which of two views render each tick: `a` is
-//! the fly path, `b` a second camera across the scene, still unless `--b-orbit`. With `ab`
+//! `--views a|b|ab|ai` (docs/design-views.md) picks which of two views render each tick: `a`
+//! is the fly path, `b` a second camera across the scene, still unless `--b-orbit`. With `ab`
 //! both render from one engine and each frame records both hashes, so a run of `a` or `b`
-//! alone checks that each view matches a single-view engine.
+//! alone checks that each view matches a single-view engine; `ai` is `a` with a second view
+//! created and never rendered. `--cut-b FRAME` jumps view b's camera and cuts it there.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -115,6 +116,8 @@ struct Args {
     /// `--views`: which of the two cameras render (`a`, `b` or `ab`).
     views: String,
     b_orbit: bool,
+    /// `--cut-b FRAME`: view b's camera jumps across the scene there, with `cut_view`.
+    cut_b: Option<u32>,
     timing_frames: u32,
     pipeline_cache: Option<PathBuf>,
     reload_probe: bool,
@@ -153,6 +156,7 @@ impl Args {
             still: false,
             views: "a".into(),
             b_orbit: false,
+            cut_b: None,
             timing_frames: 0,
             pipeline_cache: Some(
                 std::env::var_os("RENDERLAB_PIPELINE_CACHE_DIR")
@@ -229,11 +233,12 @@ impl Args {
                 "--still" => a.still = true,
                 "--views" => {
                     a.views = value()?;
-                    if !["a", "b", "ab"].contains(&a.views.as_str()) {
-                        return Err("--views a|b|ab".into());
+                    if !["a", "b", "ab", "ai"].contains(&a.views.as_str()) {
+                        return Err("--views a|b|ab|ai".into());
                     }
                 }
                 "--b-orbit" => a.b_orbit = true,
+                "--cut-b" => a.cut_b = Some(value()?.parse()?),
                 "--night-lanterns" => a.night_lanterns = true,
                 "--local-shadow-count" => a.local_shadow_count = Some(value()?.parse()?),
                 "--timing-frames" => a.timing_frames = value()?.parse()?,
@@ -320,9 +325,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.diag.iter().cloned().partition(|(k, _)| {
             matches!(
                 k.as_str(),
-                "flicker" | "lamp" | "sun" | "fire" | "glow" | "cut" | "hold"
+                "flicker" | "lamp" | "sun" | "fire" | "glow" | "cut" | "hold" | "bulb"
             )
         });
+    // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
+    // keeps them glowing but reflecting nothing, to tell which lit surface a blob comes from.
+    let (bulb_off, bulb_dark) = (
+        scene_keys.iter().any(|(k, v)| k == "bulb" && v == "off"),
+        scene_keys.iter().any(|(k, v)| k == "bulb" && v == "dark"),
+    );
     let diag = Diag::parse(&estimator_keys)?;
     let scene_key = |key: &str, value: &str| scene_keys.iter().any(|(k, v)| k == key && v == value);
     let steady_fire = scene_key("flicker", "0");
@@ -398,10 +409,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..ViewDesc::new(args.size[0], args.size[1])
     };
     // `--views ab`: the second view is created first, so the first view's renderer tuning
-    // (diag) is what both views render with.
-    let second = (args.views == "ab")
+    // (diag) is what both views render with. `ai`: it is created and never rendered (an
+    // idle view's cost).
+    let idle = (["ab", "ai"].contains(&args.views.as_str()))
         .then(|| engine.create_view(&view_desc))
         .transpose()?;
+    let second = idle.filter(|_| args.views == "ab");
     let view = engine.create_view(&view_desc)?;
     diag.apply(&mut engine, path, args.scale, view_desc.look.quality)?;
     let engine_seconds = start.elapsed().as_secs_f64();
@@ -472,7 +485,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Night diagnostics keep the courtyard sources at lantern-scale exposure.
     let lamp_scale = if args.night_lanterns { 0.001 } else { 1.0 };
     let bulb = engine.create_material(&MaterialDesc {
-        base_color: [1.0, 0.9, 0.7, 1.0],
+        base_color: if bulb_dark {
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            [1.0, 0.9, 0.7, 1.0]
+        },
         program: Some(program),
         parameters: &[(
             "glow",
@@ -617,7 +634,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         boxed(brazier + Vec3::new(0.0, 0.3, 0.0), Vec3::splat(0.6)),
     )?;
     let arch_lamp = at(0.0, 3.55, -3.0);
-    engine.spawn(sphere, bulb, boxed(arch_lamp, Vec3::splat(0.12)))?;
+    if !bulb_off {
+        engine.spawn(sphere, bulb, boxed(arch_lamp, Vec3::splat(0.12)))?;
+    }
     engine.spawn(
         cube,
         iron,
@@ -641,7 +660,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec3::new(0.4 + lamp_offset.x.abs(), 0.08, 0.4 + lamp_offset.z.abs()),
         ),
     )?;
-    engine.spawn(sphere, bulb, boxed(post_lamp, Vec3::splat(0.1)))?;
+    if !bulb_off {
+        engine.spawn(sphere, bulb, boxed(post_lamp, Vec3::splat(0.1)))?;
+    }
     // A mirror-polished chrome sphere: traced mirror reflections on RT (M7-R1).
     engine.spawn(sphere, chrome, boxed(at(-1.2, 0.8, 5.6), Vec3::splat(0.8)))?;
     let spinner = engine.spawn(cube, paint, Mat4::from_translation(at(-2.5, 0.6, 3.0)))?;
@@ -886,8 +907,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (eye, target)
         };
         let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, 500.0)?;
-        // View b: across the scene, still at its first pose unless `--b-orbit`.
-        let b_orbit = 0.6 + PI + if args.b_orbit { 0.25 * t } else { 0.0 };
+        // View b: across the scene, still at its first pose unless `--b-orbit`, a third of
+        // the way round from `--cut-b` on.
+        let b_cut = args.cut_b.is_some_and(|f| frame >= f);
+        let b_orbit =
+            0.6 + PI + if args.b_orbit { 0.25 * t } else { 0.0 } + if b_cut { 2.1 } else { 0.0 };
+        if args.cut_b == Some(frame) {
+            match (args.views.as_str(), second) {
+                ("ab", Some(second)) => engine.cut_view(second),
+                ("b", _) => engine.cut_view(view),
+                _ => {}
+            }
+        }
         let camera_b = Camera::look_at(
             anchor + Vec3::new(12.0 * b_orbit.sin(), 4.5, 12.0 * b_orbit.cos()),
             anchor + Vec3::Y,
