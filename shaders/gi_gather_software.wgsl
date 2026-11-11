@@ -97,7 +97,8 @@ var<workgroup> gi_drain_base:u32;
                 let d=gi_direction(frame,c.key,k);
                 let h=gi_closest(origin,d,0.0,1e20);
                 rays+=1u;
-                if !h.hit { continue; }
+                // A hit in a local light's near region is the aimed rays' (gi_near_gather).
+                if !h.hit || gi_near_owner(origin,n,origin+d*h.t)!=0xffffffffu { continue; }
                 let o=gi_hit_radiance(origin,d,h,band,tertiary);
                 if o.w==GI_HIT_MISSING || o.w==0.0 { missing+=1u; }
                 if o.w==GI_HIT_CHANGING { changing+=1u; }
@@ -106,6 +107,10 @@ var<workgroup> gi_drain_base:u32;
                 let radiance=o.rgb*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
                 for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=radiance*gi_y[i]; }
             }
+            let aimed=gi_near_gather(lane,origin,n,c.key,band,tertiary);
+            rays+=aimed.x;
+            missing+=aimed.y;
+            changing+=aimed.z;
             if missing!=0u { atomicAdd(&gi_wg_missing,missing); }
             if changing!=0u { atomicAdd(&gi_wg_changing,changing); }
             if rays!=0u { atomicAdd(&gi_wg_rays,rays); }

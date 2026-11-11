@@ -320,9 +320,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.diag.iter().cloned().partition(|(k, _)| {
             matches!(
                 k.as_str(),
-                "flicker" | "lamp" | "sun" | "fire" | "glow" | "cut" | "hold"
+                "flicker" | "lamp" | "sun" | "fire" | "glow" | "cut" | "hold" | "bulb"
             )
         });
+    // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
+    // keeps them glowing but reflecting nothing, to tell which lit surface a blob comes from.
+    let (bulb_off, bulb_dark) = (
+        scene_keys.iter().any(|(k, v)| k == "bulb" && v == "off"),
+        scene_keys.iter().any(|(k, v)| k == "bulb" && v == "dark"),
+    );
     let diag = Diag::parse(&estimator_keys)?;
     let scene_key = |key: &str, value: &str| scene_keys.iter().any(|(k, v)| k == key && v == value);
     let steady_fire = scene_key("flicker", "0");
@@ -472,7 +478,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Night diagnostics keep the courtyard sources at lantern-scale exposure.
     let lamp_scale = if args.night_lanterns { 0.001 } else { 1.0 };
     let bulb = engine.create_material(&MaterialDesc {
-        base_color: [1.0, 0.9, 0.7, 1.0],
+        base_color: if bulb_dark {
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            [1.0, 0.9, 0.7, 1.0]
+        },
         program: Some(program),
         parameters: &[(
             "glow",
@@ -617,7 +627,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         boxed(brazier + Vec3::new(0.0, 0.3, 0.0), Vec3::splat(0.6)),
     )?;
     let arch_lamp = at(0.0, 3.55, -3.0);
-    engine.spawn(sphere, bulb, boxed(arch_lamp, Vec3::splat(0.12)))?;
+    if !bulb_off {
+        engine.spawn(sphere, bulb, boxed(arch_lamp, Vec3::splat(0.12)))?;
+    }
     engine.spawn(
         cube,
         iron,
@@ -641,7 +653,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec3::new(0.4 + lamp_offset.x.abs(), 0.08, 0.4 + lamp_offset.z.abs()),
         ),
     )?;
-    engine.spawn(sphere, bulb, boxed(post_lamp, Vec3::splat(0.1)))?;
+    if !bulb_off {
+        engine.spawn(sphere, bulb, boxed(post_lamp, Vec3::splat(0.1)))?;
+    }
     // A mirror-polished chrome sphere: traced mirror reflections on RT (M7-R1).
     engine.spawn(sphere, chrome, boxed(at(-1.2, 0.8, 5.6), Vec3::splat(0.8)))?;
     let spinner = engine.spawn(cube, paint, Mat4::from_translation(at(-2.5, 0.6, 3.0)))?;
