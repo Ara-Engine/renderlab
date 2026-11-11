@@ -126,6 +126,15 @@ does not know refuses by default. A new setting then costs the trait nothing.
 - No behaviour change, no new error, no change to the public API or its docs.
 - No new dependency; nothing of the backend compiles without `backend-ara`.
 
+## What the backend's first frames cost
+
+Measured on the game scene once the backend's engine ran it (M5 Pro, 1280x720): a
+frame that rebuilt everything took 196 ms, and keeping meshes and bottom-level
+structures across frames saved 10 of them. The time was in parsing and validating
+every program's WGSL each frame to reflect its inputs; keeping reflection per program
+source brought the frame to 86 ms. A layer's engine must hold what `create_program`
+makes, not only what `create_mesh` uploads.
+
 ## Order of work
 
 1. A PR on main, now: `engine::state` and the trait, moves only, existing engine tests
