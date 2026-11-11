@@ -156,7 +156,9 @@ def ready(r, label):
         why.append("gpu slot held")
     if BUILD_SLOT.exists():
         why.append("build slot held")
-    if sample["compilers"]:
+    # Root, 2026-11-11: a foreign compile outside the slot system (an Ara side check) may be
+    # ignored for an incremental build that holds the slot (U_IDS_IGNORE_FOREIGN=1).
+    if sample["compilers"] and not (label == "build" and os.environ.get("U_IDS_IGNORE_FOREIGN") == "1"):
         why.append("foreign compiler")
     if sample["available_mbytes"] < (BUILD_MIB if label == "build" else LEASE_MIB):
         why.append(f"available {sample['available_mbytes']:.0f} MiB")

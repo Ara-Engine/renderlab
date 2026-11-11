@@ -11,10 +11,10 @@
 // covers at least half minus ID_MARGIN: a still image never flips, and a moving edge flips a
 // pixel once. Other frames (no reconstruction: unjittered) read this frame's hit record.
 //
-// The slots name placements, not primitives. The settled placement's primitive is this
-// frame's at the pixel's nearest sample when that sample shows it, else a 3x3 neighbour's
-// that does, else the previous frame's; a still camera keeps the previous frame's
-// primitive of an unchanged placement, so entities merged into one object hold still too.
+// The slots name placements, not primitives. A still camera keeps the previous frame's
+// primitive of an unchanged placement. Otherwise the placement's ids are voted over this
+// frame's 3x3 samples showing it, with the previous frame's id kept until another leads by
+// two samples: entities merged into one object hold still and flip once at a moving edge.
 
 struct IdFrame {
     // Output size in pixels.
@@ -134,15 +134,29 @@ fn id_settle(p:vec2<u32>,here:vec2<u32>)->u32 {
     let keep=(id_frame.flags&ID_PREVIOUS)!=0u && previous.x==placement;
     if keep && (id_frame.flags&ID_STILL_CAMERA)!=0u && !id_has_moved(placement) {
         primitive=previous.y;
-    } else if here.x==placement {
-        primitive=here.y;
     } else {
-        var found=false;
-        for(var i=0;i<9 && !found;i+=1) {
+        // One placement can hold several entities (merged objects): its id follows its
+        // primitive, which only this frame's jittered samples know. Vote by id over the 3x3
+        // samples showing the placement: the previous frame's id stays until another id
+        // leads it by two samples, so an edge between two entities of one object flips a
+        // pixel once as it crosses.
+        let previous_id=select(ID_UNTAGGED,id_lookup(placement-1u,previous.y),keep && placement!=0u && placement<=id_frame.opaque);
+        var candidate=select(ID_ANY,here.y,here.x==placement);
+        var candidate_id=0u;
+        if candidate!=ID_ANY {candidate_id=id_tag(vec2<u32>(placement,candidate));}
+        var kept=0u;var rival=0u;
+        for(var i=0;i<9;i+=1) {
             let r=id_record(q+vec2<i32>(i%3,i/3)-vec2<i32>(1));
-            if r.x==placement {primitive=r.y;found=true;}
+            if r.x!=placement {continue;}
+            if candidate==ID_ANY {candidate=r.y;candidate_id=id_tag(vec2<u32>(placement,r.y));}
+            let id=id_tag(vec2<u32>(placement,r.y));
+            if keep && id==previous_id {kept+=1u;}
+            if id==candidate_id {rival+=1u;}
         }
-        if !found && keep {primitive=previous.y;}
+        primitive=candidate;
+        if keep && (candidate==ID_ANY || candidate_id==previous_id || (kept>0u && rival<kept+2u)) {
+            primitive=previous.y;
+        }
     }
     let settled=vec2<u32>(placement,primitive);
     textureStore(id_settled,p,vec4<u32>(settled,0u,0u));
