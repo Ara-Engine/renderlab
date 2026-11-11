@@ -807,7 +807,11 @@ impl Planner {
         };
         let light_restart =
             !changed.is_empty() && (settings.light_budget == 0.0 || changed.len() > RELIT_SLOTS);
-        self.reset = continued.is_none() || self.cut || event_window < 1.0 || light_restart;
+        // Every other restart: a cut, a key change, the first frame or a sun turn.
+        let scene_restart = continued.is_none() || self.cut || event_window < 1.0;
+        self.reset = scene_restart || light_restart;
+        // The frame restarts only because local lights changed intensity.
+        let light_only = light_restart && !scene_restart;
         self.cut = false;
         // MQ1's clamp event comes from the same submitted transforms that feed
         // TR1/PP1 on the GPU; no second transform history or frame-buffer payload.
@@ -872,12 +876,14 @@ impl Planner {
         } else {
             0
         };
-        // P-FLAT: frames that drop history somewhere (receivers in a moving caster's shadow, or
-        // pixels near a relit light) take the restart budget, as frames that restart every
-        // pixel do: the restarted pixels keep main's per-pixel ray count.
+        // P-FLAT: frames that drop history in a moving caster's shadow take the restart budget,
+        // as frames that restart every pixel do: the restarted pixels keep main's per-pixel ray
+        // count. P-RELIT: a local light's intensity change never selects it. The light cannot
+        // change sun visibility, and the 64 rays it bought on every frame of a flickering fire
+        // cost the game scene 24 ms a frame on the non-RT path (docs/p-relit.md).
         self.shadow_rays = i.budget.rays(
             cold,
-            self.reset || shadow_bounds.is_some() || relit,
+            (self.reset && !light_only) || shadow_bounds.is_some(),
             sampling_still,
             self.held_frames,
         );
@@ -1570,6 +1576,64 @@ mod tests {
             assert_ne!(identity(lamp), identity(moved), "{moved:?}");
         }
         assert_eq!(identity(sun), format!("{sun:?}"));
+    }
+
+    /// A moving camera's plan inputs over `lights`, frame `frame` of an unchanged scene.
+    fn inputs(lights: &[Light], frame: u64) -> PlanInputs<'_> {
+        PlanInputs {
+            settings: Reconstruction::default(),
+            budget: ReconstructionShadowBudget::default(),
+            rendered_frames: frame,
+            index: frame,
+            key: [7; 32],
+            lights,
+            requests: &[],
+            directional_disk_angle: 0.0,
+            matrix: Mat4::from_translation(Vec3::new(frame as f32, 0.0, 0.0)),
+            eye: Vec3::new(frame as f32, 1.0, 0.0),
+            jitter: [0.0; 2],
+            exposure: 2f32.powi(-11),
+            background: [0.0; 3],
+            visible_sky: false,
+            pixel_angle: 1e-3,
+            scene_bounds: None,
+            skin_bounds: None,
+            skin_revisions: vec![],
+            rigid_motion: false,
+            listing: false,
+        }
+    }
+    /// The courtyard's fire at `scale` of its peak.
+    fn fire(scale: f32) -> Light {
+        Light::Point {
+            position: Vec3::new(-3.8, 0.95, 2.0),
+            candela: [24_000.0 * scale, 12_000.0 * scale, 4_000.0 * scale],
+            range: Some(10.0),
+            source_radius: 0.25,
+        }
+    }
+
+    /// P-RELIT: a flickering local light never selects the restart shadow budget; a cut and
+    /// a key change still do.
+    #[test]
+    fn light_intensity_keeps_the_moving_shadow_budget() {
+        let budget = ReconstructionShadowBudget::default();
+        let mut plan = Planner::new();
+        plan.prepare(inputs(&[fire(1.0)], 0));
+        assert_eq!(plan.shadow_rays, budget.cold_rays);
+        for (frame, scale) in [(1, 0.9), (2, 0.7), (3, 0.95)] {
+            plan.prepare(inputs(&[fire(scale)], frame));
+            assert_eq!(plan.shadow_rays, budget.active_rays, "frame {frame}");
+        }
+        plan.prepare(PlanInputs {
+            key: [8; 32],
+            ..inputs(&[fire(0.8)], 4)
+        });
+        assert!(plan.reset);
+        assert_eq!(plan.shadow_rays, budget.reset_rays);
+        plan.cut = true;
+        plan.prepare(inputs(&[fire(0.8)], 5));
+        assert_eq!(plan.shadow_rays, budget.cold_rays);
     }
 
     #[test]
