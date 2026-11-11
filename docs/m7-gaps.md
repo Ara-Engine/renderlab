@@ -1007,3 +1007,20 @@ Pixels on the open ground more than 10 codes above their 21-pixel median:
 ## First frame of a brand-new view: page raster (quarry window, 2026-11-11)
 
 **OPEN (owner: the page-structure unit after N-VSM2).** With no cached page, Renderlab's first non-RT frame rasterises the whole visible clipmap: 56-57 ms of page raster on the quarry at 1080p. Unreal's first frame spends 1.9 ms in shadow depths. A cut inside an area already seen costs 0.16 ms, so this is the hitch that remains on a cut to somewhere never seen, and at start-up. Candidates: spread first-view page raster over a few frames with a coarse level answering meanwhile; a sparse page pool that rasterises only requested pages.
+
+## GI: a never-relit cache sits below its converged bounce (ara-gpu port, Metal, 2026-11-11)
+
+**OPEN, low priority; for the next GI unit. Not measured on the wgpu path** (found on Metal in the shared radiance-cache planner code).
+
+A still scene whose cache lighting key never changes stays below its converged bounce, and steps up the first time anything changes the key. Fixture: two sunlit floors and a card lit only by bounce.
+
+| Case | Card value |
+|---|---|
+| Never relit | 0.602417 at frame 20 and at frame 71 |
+| One key change at frame 8 | 0.604492, 0.606308, 0.606483 on the next three frames, then 0.606483 to the last bit for 60 frames (+0.68%) |
+| Same, card over a floor with full red reflectance | +0.93% |
+| Ten changes four frames apart | 0.606506 after the second and after every later one |
+
+- It is not a gain per relight and it does not drift. The cold start carries gathers + 1 bounce orders (gathers is 3); a relight adds the next orders on top of the stored outgoing light.
+- At these albedos the step is under one percent and not visible. In a bright interior (albedo 0.8 to 0.9) the missing orders are several percent, and the step would land on the first lighting change after a cut.
+- **Fix candidates:** let a settled cache keep gathering at a low rate until the series converges, or start cold with enough orders for the scene's albedo. **Judge it on a white room.**
