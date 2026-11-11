@@ -41,11 +41,18 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
                 &info,
                 &naga::back::spv::Options {
                     lang_version: (1, 5),
-                    // Keep Naga's existing unchecked SPIR-V policy: enabling
-                    // checks hits its descriptor-wrapper inference and unsigned
-                    // vector constant bugs. Metal checks are enabled separately.
+                    // Index and buffer accesses keep Naga's unchecked SPIR-V policy:
+                    // enabling those checks hits its descriptor-wrapper inference and
+                    // unsigned vector constant bugs. Image loads are checked, and read
+                    // zero outside the image: ara-gpu enables no robust image access, so
+                    // an unchecked load there is undefined, and zero is what the wgpu
+                    // renderer gets from `robustImageAccess` on the same devices.
                     flags: naga::back::spv::Options::default().flags
                         | naga::back::spv::WriterFlags::DEBUG,
+                    bounds_check_policies: naga::proc::BoundsCheckPolicies {
+                        image_load: naga::proc::BoundsCheckPolicy::ReadZeroSkipWrite,
+                        ..Default::default()
+                    },
                     ..Default::default()
                 },
                 Some(&naga::back::spv::PipelineOptions {

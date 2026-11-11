@@ -687,13 +687,17 @@ fn transparency_section(name: &str) -> &'static str {
         .0
 }
 
-// Match wgpu's Metal data checks. Resource-array indices remain caller-valid,
-// as in wgpu; heap-index records are validated when the packet is published.
+// The Metal emission's data checks: indices and buffer reads clamp, as wgpu's Metal
+// backend has them. An image load outside the image reads zero, on Metal and in the
+// SPIR-V alike: that is what the wgpu renderer gets on Vulkan, where it leaves the load
+// unchecked under `robustImageAccess`, and the renderer is compared on Vulkan.
+// Resource-array indices remain caller-valid, as in wgpu; heap-index records are
+// validated when the packet is published.
 pub(super) fn bounds_checks() -> naga::proc::BoundsCheckPolicies {
     naga::proc::BoundsCheckPolicies {
         index: naga::proc::BoundsCheckPolicy::Restrict,
         buffer: naga::proc::BoundsCheckPolicy::Restrict,
-        image_load: naga::proc::BoundsCheckPolicy::Restrict,
+        image_load: naga::proc::BoundsCheckPolicy::ReadZeroSkipWrite,
         binding_array: naga::proc::BoundsCheckPolicy::Unchecked,
     }
 }

@@ -2033,3 +2033,24 @@ At 29d8e7b the buffer-array probe and the geometry check both pass on RADV (69 o
 no validation message), so the `NonUniform` repair is confirmed there. The same
 question put to the wgpu renderer's own path (Renderlab #30) fails on RADV with
 lengths 3, 3, 3, 3 for buffers of 3, 13, 6 and 22 words.
+
+**Where RADV's short pixels are, and out-of-bounds image loads.** At 937e439 the gate's
+line placed them: 215 within a pixel of the card's outline and 444 three or more pixels
+from it. A 128x96 image has exactly 444 border pixels, so RADV loses weight along the
+image's border, which Metal and the RTX card do not. The resolve reads its 3x3
+neighbourhoods and history taps beside tests for being inside the image, and its
+shader, like the renderer's others, is written against a defined result for a load
+outside one. The emitted SPIR-V left image loads unchecked, and ara-gpu enables no
+robust image access, so on Vulkan such a load was undefined: each driver's own
+behaviour. On Metal the emission clamped it. The wgpu renderer on Vulkan leaves loads
+unchecked under `robustImageAccess`, which returns zero.
+
+Both emissions now give a load outside the image zero (Naga's `ReadZeroSkipWrite` for
+image loads): one defined behaviour, the renderer's on the devices it is compared on.
+All 73 tests pass on Metal with it and all 67 stages pass `spirv-val`. **Whether it
+removes RADV's border shortfall is not known until the weights test reruns there**;
+it is the likely cause, not a measured one. Index and buffer accesses in the SPIR-V
+are still unchecked (enabling those checks trips Naga bugs), where the wgpu renderer
+has `robustBufferAccess2`: a read past a buffer's end is still each driver's own on
+Vulkan. The GPU-time cost of the image checks is unmeasured.
+
