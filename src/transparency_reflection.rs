@@ -206,7 +206,7 @@ impl Renderer {
         // Hits run program text: checked, as every program module (P-SPLIT).
         let module = self.ledger.own(
             self.device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                .create_program_module(wgpu::ShaderModuleDescriptor {
                     label: Some("TP2 glass reflection"),
                     source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
                 }),

@@ -1162,7 +1162,7 @@ impl Renderer {
                     source: wgpu::ShaderSource::Wgsl(source.into()),
                 };
                 // Program text compiles checked, the standard program included (P-SPLIT).
-                self.device.create_shader_module(descriptor)
+                self.device.create_program_module(descriptor)
             },
             ResourceKind::ShaderModule,
         );

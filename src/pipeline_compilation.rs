@@ -192,6 +192,26 @@ impl PipelineDevice {
             shader_module(&self.raw, desc.clone(), true)
         })
     }
+    /// A module composed from program text: user, bundled standard and toon, TP1 glass, GI
+    /// cell and glass reflected-hit shading. Always checked (P-SPLIT), so an edit recompiles
+    /// only the kernels its text changes. Measurement only:
+    /// `RENDERLAB_P_SPLIT_STANDARD_UNCHECKED` restores the earlier policy for the frame-time
+    /// A/B, modules holding the bundled standard program on the engine API.
+    pub fn create_program_module(
+        &self,
+        desc: wgpu::ShaderModuleDescriptor<'_>,
+    ) -> wgpu::ShaderModule {
+        static LEGACY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let legacy = *LEGACY.get_or_init(|| {
+            std::env::var_os("RENDERLAB_P_SPLIT_STANDARD_UNCHECKED").is_some_and(|v| !v.is_empty())
+        });
+        if legacy
+            && matches!(&desc.source, wgpu::ShaderSource::Wgsl(s) if s.contains(crate::STANDARD_PROGRAM))
+        {
+            return self.create_engine_shader_module(desc);
+        }
+        self.create_shader_module(desc)
+    }
     pub fn create_compute_pipeline(
         &self,
         desc: &wgpu::ComputePipelineDescriptor<'_>,

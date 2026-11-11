@@ -1668,7 +1668,7 @@ impl Renderer {
         let module = self.ledger.own(
             self.device
                 // It composes program text: checked, as every program module (P-SPLIT).
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
+                .create_program_module(wgpu::ShaderModuleDescriptor {
                     label: Some("indirect cache cell shading"),
                     source: wgpu::ShaderSource::Wgsl(composed.source.into()),
                 }),

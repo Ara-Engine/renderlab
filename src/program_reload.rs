@@ -237,7 +237,7 @@ impl Renderer {
                                     label: Some("background glass reflection"),
                                     source: wgpu::ShaderSource::Wgsl(recipe.source.into()),
                                 };
-                                device.create_shader_module(descriptor)
+                                device.create_program_module(descriptor)
                             },
                             ResourceKind::ShaderModule,
                         );

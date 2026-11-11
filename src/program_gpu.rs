@@ -365,7 +365,7 @@ fn module(abi: &ProgramAbi<'_>, label: &str, composed: &Composed) -> Module {
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(composed.source.as_str().into()),
             };
-            abi.device.create_shader_module(descriptor)
+            abi.device.create_program_module(descriptor)
         },
         ResourceKind::ShaderModule,
     ));
