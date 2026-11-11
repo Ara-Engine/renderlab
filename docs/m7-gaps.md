@@ -141,6 +141,8 @@ Islam (2026-11-09): "in both quality defect images you showed I can see noise on
   - **OPEN: picture.** A grazing crate face is a little brighter than RT and Surface; long shadows have less streak detail than RT; S4 and S5 score behind Surface against RT (1.78-2.30 against 1.25-1.79; 0.39-0.43 against 0.27-0.31). Not inspected: S1-S3, a clip at playback speed, anything against Unreal.
   - **OPEN: map resolution.** Dense 2048-texel levels give 1.2 to 2.3 pixels per texel for receivers far to the side of the eye; under Disk that sets hard-edge sharpness. Needs a sparse page pool. A re-centred level is still rasterized whole, and the first frame of a never-seen view is not measured.
   - The walk's 2 percent cost under M8-ARRAY-LENGTH stands: the walk is not retired.
+  - **Part 2 (`2035f19`).** Fixed: thin receivers shadowing themselves, sheet undersides, slits between thin columns (S1 flips 1,318 to 0, S2 flips about 1,150 to 0-2). **OPEN:** S1 and S2 partial RMS behind Surface (.137 against .082; .093-.098 against .073-.075), a penumbra bias on raised thin casters, cause not found. S3 solid flips 190-370 against Surface's 0. S2 camera-track leaks up to 92. Lookup still 1.2 ms at 1080p on the courtyard (the map windows are 1.0 ms of it; a 2-texel window is 34 percent cheaper but visibly worse).
+  - **OPEN, both map lookups: light through stacked closed casters.** The map's two layers hold the front crate's entry and exit and nothing of a crate behind it, so a thin lit line and a too-bright crate face appear where RT is dark (courtyard, +4 to +8 codes). Needs a third layer or undersides widened at page raster.
 
 ## Non-RT frame cost (M8, P-NRT)
 

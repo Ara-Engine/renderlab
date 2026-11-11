@@ -112,6 +112,95 @@ Root's step 1, timing Map and Hybrid at head on the quarry, did not run: it is i
 3. A sparse page pool so levels can be wider than 2048 texels, and window moves that keep the pages still inside (today a re-centred level is rasterized whole).
 4. The grazing-face brightening and the far-shadow streak detail.
 
+## Part 2 (2026-11-11, after the opt-in merge at main `eeb34ae`)
+
+Brief: make `Disk` fit to be the non-RT default. **It is not yet. Recommendation: keep `Surface` the default.** Three fixes landed (`2035f19`); the S1 and S2 penumbra error, the cost and three checks remain open. The quarry stayed closed throughout.
+
+### Which side is right where both non-RT lookups differ from RT (M)
+
+**RT is right; the map lets light through.** The RT path with reference-quality shadows (`--diag quality=reference`) agrees with RT Interactive to 0.09 codes, and the difference survives `--no-glass`, so it is neither sampling nor the glass pane.
+
+- **The diagonal band on the ground** is a thin lit line inside the crates' shadow: +4 to +5 codes on Disk, +8 on Surface, 0 on RT.
+- **Cause: the map has two layers.** Where one closed crate stands in front of another along the light, a texel holds the front crate's entry and exit and nothing of the one behind. A ray passing under the front crate's exit and through the hidden crate meets no column. Evidence: with every underside treated as unknown (`VD_PEEL=false`) the line disappears (107 codes, RT 107) and the crate-face error falls from 6.63 to 2.67, but the whole frame gets worse (1.59 against 1.36), because every column is then too thick for its penumbra. Solid-without-end columns (`VD_UNDERSIDE=0`, since removed), a smaller bias and no screen samples change nothing.
+- **Not fixed.** A least thickness of 16 texels closes a little of it (face 6.19). The real fix is a third layer or an underside widened at page-raster time from neighbouring texels. `Surface` has the same leak, larger on the ground line.
+
+### Three fixes (M)
+
+| Fix | What was wrong | Effect |
+|---|---|---|
+| Thin receivers use their light-facing tangent plane | A tilted thin sheet's own texels counted as occluders: whole tiles rendered black on S2 | S1 solid flips 1,318 / 976 to 0; S2 about 1,150 to 0-2 |
+| Sheet undersides from same-placement neighbours | A sheet over other geometry was taken down to half its height: wires and bars cast shadows as if twice as close | S1 partial RMS .172 to .142; S2 .17-.29 to .13-.23 |
+| A least column thickness of 4 texels | Columns of a thin or oblique closed surface left slits between them | Courtyard without glass 1.36 to 1.34 (measured alone); at 1 texel S2's camera-track leaks rise from 87-92 to 116-117 |
+
+All three together: S2 partial RMS .093-.098, and the fox scene after the cut 1.65-1.73 to 1.38-1.51 against RT.
+
+### S1 to S3 against the film references (M)
+
+`scripts/n8-batch.py` score steps, the unchanged scorers, no TR1 (so no receiver jitter), one repeat. Unreal VSM rows are the recorded ones ([non-rt-n8k.md](non-rt-n8k.md)).
+
+| Bench | Measure | Unreal VSM | Surface | **Disk** |
+|---|---|---|---|---|
+| S1 contact fold, poses 0 / 1 | Partial RMS | .164 / .163 | .082 / .080 | **.137 / .136** |
+| | Solid flips, leaks, contacts lost | 0-1, 0, 5-6 / 2-3 | 0, 0, 0 | 0, 0, 0 |
+| S2 wide sun, six phases | Partial RMS | .168-.176 | .073-.075 | **.093-.098** |
+| | Flips | 119-167 | 0 | 0-2 |
+| | Leaks | 57-67 | 0 | 0 on the shadow track, 8 to 92 on the camera track |
+| | Contacts lost | 1,039-2,101 | 0 | 0-14 |
+| S3 relief and pillars, six phases | Partial RMS | .181-.188 | .079-.083 | **.078-.087** |
+| | Flips | 187-226 | 0 | 190-370 |
+| | Leaks | 103-114 | 2-9 | 0 |
+| | Contacts lost | 2,929-12,289 | 0 | 0-60 |
+
+- **Disk is above Unreal VSM on every measure except S3's flips, where it is level or worse** (370 against 226 on the jump recovery).
+- **Disk is behind Surface on S1 and S2 partial RMS.** `docs/n-vsm1/review-s2-penumbra.jpg` shows why: Surface's error there is unbiased sampling noise (which TR1 integrates in the engine); Disk has no noise but its penumbrae of raised thin casters are darker on the outer side. That is a bias and TR1 will not remove it. Cause not found.
+- **S3's flips were not located.**
+
+### Motion (M, with what was and was not watched)
+
+Courtyard flight, 720p, 40 consecutive frames, each path's frame-to-frame step minus the RT path's step (RMS, display codes; lower is steadier):
+
+| | Whole frame, mean (max) | Leaves crop, mean (max) |
+|---|---|---|
+| Surface | 0.780 (0.916) | 0.880 (1.110) |
+| Disk | 0.719 (0.952) | 0.788 (1.021) |
+
+Flipbooks are built: `D:/Coding/renderlab-work/n-vsm1/sheets/flight-surface-disk.gif` and `leaves-rt-surface-disk.gif`. **I scored them and looked at single frames (`docs/n-vsm1/review-leaves-motion.jpg`); I did not watch them play.** The numbers say Disk is a little steadier than Surface on average; they cannot show a crawl or a one-frame pop. Root should play both before any default change.
+
+### Cost (M)
+
+Fox scene after the cut, 1080p, `RENDERLAB_VD` stage splits on one binary:
+
+| | Lookup | Raster | Requests |
+|---|---:|---:|---:|
+| Disk, part 1 (`8c606a7`) | 1.17 ms | 0.33 | 0.17 |
+| Disk now (`2035f19`) | 1.19 ms | 0.33 | 0.17 |
+| No map windows (facing and screen samples only) | 0.17 ms | | |
+| No screen samples (part 1's shader, the flight without the cut) | 1.51 of 1.54 ms | | |
+| Dispatch alone | 0.04 ms | | |
+
+- **The map windows are about 1.0 ms of the 1.2 ms lookup.** Screen samples are about 0.03 ms and setup with the facing test under 0.15 ms.
+- **Tried, not kept:** a whole-disk shortcut before the four `asin` (1.19 to 1.25 ms: no gain). A window radius of 2 texels instead of 3 (1.25 to 0.82 ms, minus 34 percent) makes the courtyard worse against RT on 5 of 7 frames (2.61 against 2.32 at worst), so it is not taken.
+- **The 0.6 ms target is not met** (the pass is 1.7 ms on this scene; S5 is 0.47 ms, S4 1.46 ms). The texel reads per window are the cost; the next lever is fewer of them (a min-max test per window row, or a coarser first pass), not the mask arithmetic.
+
+### Not done in part 2
+
+- **Showcase through Ara:** not attempted.
+- **S4 and S5 against RT with the new shader:** not rescored (their RT and Surface captures were deleted with the raw dumps). Part 1's gap stands unexplained.
+- **Hard-edge sharpness far to the side of the eye** (a sparse page pool), **the lost streak detail in long shadows**, **the S4 base line:** untouched.
+- Lib suite at `2035f19`: 219 passed, 0 failed, 170 ignored (lease `t13`).
+- **Quarry:** closed by root. `bin/m0` and `bin/d13` (the code at `2035f19`) are built: `py -3 -B tools/n-vsm1/quarry.py q-y4 m0 d13`.
+
+### Would I make Disk the default now? No.
+
+What is still worse than `Surface`:
+
+1. Penumbra error on S1 and S2 (partial RMS .137 against .082, .093-.098 against .073-.075), a bias, not noise.
+2. S3 solid flips (190-370 against 0) and S2 camera-track leaks (up to 92 against 0).
+3. Hard edges where a texel spans several pixels (dense 2048-texel levels).
+4. Nothing is known on the quarry, against Unreal, or on Showcase.
+
+What is better: the cut frame (159 ms to 1.6 ms on the fox scene), every frame's cost (23.6 to 1.7 ms after the cut), no sampling noise, a slightly steadier flight, S3 leaks, and the fox scene's picture against RT after the cut (1.38-1.51 against 1.54-1.75).
+
 ## For the ara-gpu backend
 
 - **New uniform buffer:** `VdFrame`, 1,120 bytes, at the disk lookup's group 0 binding 50 (world-to-clip matrix, image size and jitter index, 65 two-word masks, 64 sample positions). No new buffer or texture kind, sampler or device feature.

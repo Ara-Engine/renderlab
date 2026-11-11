@@ -745,11 +745,28 @@ pub(super) fn map_source() -> String {
 }
 
 /// The N-VSM1 disk lookup module: the window radius, then shaders/virtual_shadow_disk.wgsl.
+/// Measurement only: `RENDERLAB_VD=NAME=VALUE,...` replaces the defaults of the module's `VD_`
+/// override constants (screens and cost splits without a build per variant; docs/n-vsm1.md).
+/// Unset, the module is the file.
 pub(super) fn disk_source() -> String {
-    format!(
+    let mut source = format!(
         "const VD_R:u32={DISK_RADIUS}u;\n{}",
         include_str!("../shaders/virtual_shadow_disk.wgsl")
-    )
+    );
+    for (name, value) in std::env::var("RENDERLAB_VD")
+        .iter()
+        .flat_map(|list| list.split(','))
+        .filter_map(|item| item.split_once('='))
+    {
+        let declaration = format!("override {name}:");
+        let Some(at) = source.find(&declaration) else {
+            panic!("RENDERLAB_VD: no override named {name}");
+        };
+        let equals = at + source[at..].find('=').unwrap() + 1;
+        let end = equals + source[equals..].find(';').unwrap();
+        source.replace_range(equals..end, value);
+    }
+    source
 }
 
 fn corners(b: &crate::shadow_plan::Bounds) -> impl Iterator<Item = glam::DVec3> + '_ {
