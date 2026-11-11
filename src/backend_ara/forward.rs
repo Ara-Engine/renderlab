@@ -253,6 +253,9 @@ pub struct ForwardImages {
     pub surface: Option<Vec<u8>>,
     /// The displayed image as RGBA8 with the display transfer applied, when post ran.
     pub display: Option<Vec<u8>>,
+    /// The frame as depth of field left it, RGBA16F, when it ran: what bloom and the
+    /// tone stage then read.
+    pub focused: Option<Vec<u8>>,
     /// The cache's whole table after this frame, when `Indirect::read_table` asked.
     pub indirect_table: Option<Vec<u32>>,
     /// With bounce and `read_table`: every slot's outgoing radiance, w 1 once written.
@@ -2827,7 +2830,7 @@ fn frame(
     // The post tail, in `PostGpu::encode` order. Each stage reads the one before it.
     let mut post_images = Vec::new();
     let mut post_buffers = Vec::new();
-    let mut reads = [None, None];
+    let mut reads = [None, None, None];
     let mut tail = None;
     if let Some(settings) = scene.post.filter(|s| s.enabled) {
         settings.validate()?;
@@ -2958,6 +2961,13 @@ fn frame(
                     },
                     &focused,
                 )?;
+                reads[2] = Some(transfer::readback(
+                    gpu,
+                    &mut graph,
+                    &mut rec,
+                    focused.image,
+                    u64::from(target[0]) * u64::from(target[1]) * 8,
+                )?);
                 post_images.extend(blurred.replace(focused));
             }
             let blurred = blurred.context("a post surface with no pass to read it")?;
@@ -3017,6 +3027,7 @@ fn frame(
         samples: samples_read.map(|b| gpu.read(b)).transpose()?,
         surface: reads[0].map(|b| gpu.read(b)).transpose()?,
         display: reads[1].map(|b| gpu.read(b)).transpose()?,
+        focused: reads[2].map(|b| gpu.read(b)).transpose()?,
         indirect_table: table_read.map(|b| gpu.read(b)).transpose()?.map(|bytes| {
             bytes
                 .as_chunks::<4>()

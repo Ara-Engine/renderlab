@@ -119,12 +119,19 @@ fn fixture_frame(
 /// card's middle, across its left edge:
 ///
 /// - Focused on the floor, the card is out of focus by the thin lens's radius for its
-///   distance (3.4 px). Pixels further than that from the edge, on either side, are the
-///   sharp frame's bytes; pixels well inside it are between the floor and the card, and
-///   the row never falls from the floor's side to the card's.
+///   distance (3.4 px). Pixels further than that from the edge, on either side, keep
+///   the sharp frame's value; pixels well inside it are between the floor and the
+///   card, and the row never falls from the floor's side to the card's.
 /// - Focused on the card, the floor is out of focus by the same formula and is flat, so
-///   it does not change away from the edge, and every card pixel is the sharp frame's:
-///   an in-focus foreground keeps its edge.
+///   it does not change away from the edge, and every card pixel keeps the sharp
+///   frame's value: an in-focus foreground keeps its edge.
+/// - "Keeps its value" is measured where the pass writes it, in the half floats depth
+///   of field leaves, and allows one half-float step (0.1%): out of the blur's reach a
+///   pixel is still a weighted mean of up to 48 bilinear taps of its own flat surface,
+///   which need not round back to the value it started from. Displayed levels cannot
+///   carry this check: a step is 0.035 of a level here, the card sits 0.08 of a level
+///   above a rounding boundary, and devices place that boundary a few hundredths
+///   apart, so one step shows as a whole level on some and not on others.
 /// - The mesh pass, whose surface comes from the depth target, and the traced frame,
 ///   whose surface comes from the hit records, display the same image in every case.
 #[test]
@@ -133,10 +140,20 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
     let mut gpu = GpuDevice::new(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
     let camera = camera()?;
-    let mut frame = |primary: Primary, focus: Option<f32>| -> Result<Vec<u8>> {
-        fixture_frame(&mut gpu, &cache, 1000., primary, focus)?
-            .display
-            .context("post did not run")
+    let mut frame = |primary: Primary, focus: Option<f32>| {
+        fixture_frame(&mut gpu, &cache, 1000., primary, focus)
+    };
+    let display = |images: &renderlab::backend_ara::forward::ForwardImages| {
+        images.display.clone().context("post did not run")
+    };
+    // The red half float of each pixel of the row through the card's middle.
+    let halves = |hdr: &[u8]| -> Vec<i32> {
+        (0..SIZE[0] as usize)
+            .map(|x| {
+                let at = (48 * SIZE[0] as usize + x) * 8;
+                i32::from(u16::from_le_bytes([hdr[at], hdr[at + 1]]))
+            })
+            .collect()
     };
     // The card's left edge on the row through its middle, in pixels.
     let matrix = camera.matrix(SIZE[0], SIZE[1]);
@@ -151,7 +168,17 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
     for (focus, name) in [(4f32, "floor"), (3., "card")] {
         let sharp = frame(Primary::Raster, None)?;
         let blurred = frame(Primary::Raster, Some(focus))?;
-        let traced = frame(Primary::Traced, Some(focus))?;
+        let (was, now) = (
+            halves(&sharp.hdr),
+            halves(
+                blurred
+                    .focused
+                    .as_ref()
+                    .context("depth of field did not run")?,
+            ),
+        );
+        let (sharp, blurred) = (display(&sharp)?, display(&blurred)?);
+        let traced = display(&frame(Primary::Traced, Some(focus))?)?;
         let apart = blurred
             .iter()
             .zip(&traced)
@@ -159,7 +186,7 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
             .max()
             .unwrap_or(0);
         ensure!(
-            apart <= 1 && frame(Primary::Traced, None)? == sharp,
+            apart <= 1 && display(&frame(Primary::Traced, None)?)? == sharp,
             "focused on the {name}: the mesh pass and the traced frame display {apart} levels apart"
         );
         let (sharp, blurred) = (row(&sharp), row(&blurred));
@@ -174,24 +201,21 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
         // Clear of the card's right edge, 31 pixels further on.
         for x in 20..62usize {
             let distance = x as f64 + 0.5 - edge;
-            let (now, was) = (blurred[x], sharp[x]);
             if distance.abs() > radius + 1.5 || (focus == 3. && distance > 0.) {
-                // Out of the blur's reach a pixel is still a weighted mean of up to 48
-                // taps, all of its own flat surface: the surface's value to the last
-                // float bit or one off, which is one display level where that value
-                // sits on a rounding boundary (an RTX card showed 192 for 193 at one
-                // pixel 5.8 px inside the card, where no floor tap can reach). A leak
-                // would move many pixels and by more, so most must be exact.
+                // Positive half floats order as their bits do: one apart is one step.
                 checked += 1;
-                exact += usize::from(now == was);
+                exact += usize::from(now[x] == was[x]);
                 ensure!(
-                    (now - was).abs() <= 1,
-                    "focused on the {name}: pixel {x}, {distance:.2} px from the edge, is {now}, sharp {was}"
+                    (now[x] - was[x]).abs() <= 1,
+                    "focused on the {name}: pixel {x}, {distance:.2} px from the edge, is the half float {:#06x}, sharp {:#06x}",
+                    now[x],
+                    was[x]
                 );
             } else if focus == 4. && distance.abs() < radius - 1. {
+                let level = blurred[x];
                 ensure!(
-                    now > dark + 2 && now < bright - 2,
-                    "focused on the {name}: pixel {x}, {distance:.2} px from the edge, is {now}: not between {dark} and {bright}"
+                    level > dark + 2 && level < bright - 2,
+                    "focused on the {name}: pixel {x}, {distance:.2} px from the edge, is {level}: not between {dark} and {bright}"
                 );
             }
             ensure!(
@@ -199,12 +223,8 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
                 "focused on the {name}: the row falls at pixel {x}"
             );
         }
-        ensure!(
-            exact * 10 >= checked * 9,
-            "focused on the {name}: only {exact} of {checked} pixels out of the blur's reach are the sharp frame's"
-        );
         report += &format!(
-            "{name}: radius {radius:.2} px, {exact} of {checked} out of reach exact, mesh pass and traced {apart} apart; "
+            "{name}: radius {radius:.2} px, {checked} out of reach within a half-float step ({exact} exact), mesh pass and traced {apart} levels apart; "
         );
     }
     eprintln!("depth of field: {report}");
@@ -214,15 +234,23 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
     Ok(())
 }
 
-/// What the blur does to a flat region, measured where a display level can see it.
+/// What the blur does to a flat region, in half-float steps, and where each device
+/// puts a display level's boundary.
 ///
 /// A card pixel out of the edge's reach is a weighted mean of 48 bilinear taps of one
 /// value, mixed and stored as a half float, where the sharp frame stores that value
 /// once. The test steps the sun down by 0.05% a frame across more than one display
-/// level and prints, for one such pixel, the card's HDR half float, its sharp level
-/// and its blurred level. The step at which each column changes level places the
-/// blurred value against the sharp one in half-float steps, on whatever device runs
-/// it. It requires what the pass must give anywhere: never more than one level apart.
+/// level and prints, for one such pixel:
+///
+/// - the card's HDR half float and the level a CPU conversion of it gives before
+///   rounding (the scalar tone and sRGB replay);
+/// - the level the device displays for it: its own tone stage, sRGB encode and
+///   UNORM store, which no CPU code touches;
+/// - the half float depth of field leaves, how many steps below the sharp one it is,
+///   and the level displayed for that.
+///
+/// It requires what the pass must give anywhere: the blurred value within one
+/// half-float step of the sharp one, and each displayed level within one of the CPU's.
 #[test]
 fn depth_of_field_keeps_a_flat_region_within_a_level_at_every_brightness() -> Result<()> {
     let path = root("depth-of-field-flat");
@@ -230,13 +258,40 @@ fn depth_of_field_keeps_a_flat_region_within_a_level_at_every_brightness() -> Re
     let cache = ShaderCache::new(path.join("shaders"))?;
     // A card pixel 8 px inside its left edge, on the row through its middle.
     let at = (48 * SIZE[0] + 56) as usize;
+    // The frame's post settings as the tone stage receives them.
+    let words = renderlab::backend_ara::forward::post_record(
+        &PostSettings {
+            bloom: 0.,
+            motion_blur: false,
+            vignette: 0.,
+            ..Default::default()
+        },
+        SIZE[1],
+        1,
+    );
+    let cpu_level = |half: u16| {
+        let v = f16::from_bits(half).to_f32();
+        let image = reference::Image {
+            size: [1, 1],
+            pixels: vec![[v, v, v, 1.]],
+        };
+        let fixture = reference::Fixture {
+            hdr: image.clone(),
+            lut: (0..8u32)
+                .map(|i| [i & 1, (i >> 1) & 1, i >> 2, 1].map(|v| v as f32))
+                .collect(),
+            lut_size: 2,
+            settings: words,
+        };
+        reference::display(&reference::tone(&image, &image, &fixture)).pixels[0][0] * 255.
+    };
     let mut table = String::new();
-    let mut apart = 0;
+    let (mut lost_most, mut apart) = (0i32, 0);
     for step in 0..16 {
         let lux = 1000. * (1. - step as f32 * 5e-4);
         let sharp = fixture_frame(&mut gpu, &cache, lux, Primary::Raster, None)?;
         let blurred = fixture_frame(&mut gpu, &cache, lux, Primary::Raster, Some(4.))?;
-        let hdr = u16::from_le_bytes([sharp.hdr[at * 8], sharp.hdr[at * 8 + 1]]);
+        let half = |bytes: &[u8]| u16::from_le_bytes([bytes[at * 8], bytes[at * 8 + 1]]);
         let level = |images: &renderlab::backend_ara::forward::ForwardImages| {
             images
                 .display
@@ -244,16 +299,39 @@ fn depth_of_field_keeps_a_flat_region_within_a_level_at_every_brightness() -> Re
                 .map(|d| i32::from(d[at * 4]))
                 .context("post did not run")
         };
-        let (was, now) = (level(&sharp)?, level(&blurred)?);
-        apart += usize::from(was != now);
-        table += &format!("{hdr:#06x} {was} {now}; ");
-        ensure!(
-            (was - now).abs() <= 1,
-            "at {lux} lux the flat card is {now} blurred and {was} sharp"
+        let (was, now) = (
+            half(&sharp.hdr),
+            half(
+                blurred
+                    .focused
+                    .as_ref()
+                    .context("depth of field did not run")?,
+            ),
         );
+        let (shown, shown_blurred) = (level(&sharp)?, level(&blurred)?);
+        // Both are in one binade here, so their bits differ by half-float steps.
+        let lost = i32::from(was) - i32::from(now);
+        lost_most = lost_most.max(lost.abs());
+        apart += usize::from(shown != shown_blurred);
+        table += &format!(
+            "{was:#06x} cpu {:.2} shown {shown} | blurred {now:#06x} ({lost} steps) cpu {:.2} shown {shown_blurred}; ",
+            cpu_level(was),
+            cpu_level(now)
+        );
+        ensure!(
+            lost.abs() <= 1,
+            "at {lux} lux depth of field leaves the flat card {lost} half-float steps below {was:#06x}"
+        );
+        for (half, shown) in [(was, shown), (now, shown_blurred)] {
+            ensure!(
+                (cpu_level(half) - shown as f32).abs() <= 1.,
+                "at {lux} lux {half:#06x} is displayed as {shown}, the CPU conversion gives {:.2}",
+                cpu_level(half)
+            );
+        }
     }
     eprintln!(
-        "depth of field, flat card (HDR half, sharp level, blurred level) per 0.05% step of the sun: {table}{apart} of 16 a level apart"
+        "depth of field, flat card per 0.05% step of the sun: {table}most steps lost {lost_most}, {apart} of 16 a level apart"
     );
     cache.retire(&mut gpu)?;
     gpu.collect()?;

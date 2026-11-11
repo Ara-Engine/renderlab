@@ -2395,29 +2395,37 @@ the same on both sides. `ara_frame --scene game --without NAME[,NAME]` leaves on
 feature out on both layers (`gi`, `reconstruction`, `reflections`, `local-shadows`,
 `glass`, `lanterns`, `glow`) so the gate can find which one the rim belongs to.
 
-## Depth of field on NVIDIA: one level low on the flat card, not yet placed
+## Depth of field on NVIDIA: one level low on the flat card
 
-Twice on the RTX 4070 SUPER the depth-of-field test has failed on the card's pixels
-out of the blur's reach: 192 where the sharp frame shows 193. The two runs are one
-symptom. The first stopped at the first such pixel (53); the second, with one level
-allowed, counted them: 23 of 32 exact, and the 32 are 23 floor pixels and 9 card
-pixels, so every card pixel is one level low and every floor pixel exact.
+Twice on the RTX 4070 SUPER the depth-of-field test failed on the card's pixels out of
+the blur's reach: 192 where the sharp frame shows 193. The two runs are one symptom
+(the first stopped at the first such pixel; the second counted them: all 9 card
+pixels one level low, all 23 floor pixels exact).
 
 From the kernel: a card pixel out of the edge's reach takes 48 bilinear taps of one
 value, divides their weighted sum by the weights' sum, mixes that with the centre and
 stores a half float, where the sharp frame stores the value once. Nothing in it can
-reach the floor from there (the gather radius is the card's own 3.42 px, the nearest
-checked pixel is 5.8 px inside).
+reach the floor from there.
 
-From the numbers on Metal: the card's HDR value is the half float `0x3c86`, which
-displays 193, and the boundary to 192 lies between `0x3c84` and `0x3c83`. Blurred and
-sharp agree at every one of 16 brightness steps across that boundary. So on Metal the
-blur is exact to the half-float step and the card sits three steps, 0.26%, above the
-boundary. For NVIDIA to show 192 its blurred card must be at or below `0x3c83`:
-either its card is shaded a step or two lower than Metal's and the blur loses one
-step there (rounding the test should allow), or the blur loses three (a real loss of
-a quarter of a percent in a flat region, which it should not).
-`depth_of_field_keeps_a_flat_region_within_a_level_at_every_brightness` prints the
-table that tells them apart on any device: the card's half float, its sharp level and
-its blurred level at each step. The tolerance of the first test is unchanged until
-the RTX's table is in.
+From the numbers. The displayed level is the device's own: its tone stage, its sRGB
+encode in a fragment shader and its UNORM store. No CPU code converts it. A CPU
+conversion of the same half floats (the scalar tone and sRGB replay) gives the card,
+`0x3c86`, 192.58, and each half-float step below it 0.035 of a level less; the
+rounding boundary 192.5 falls between `0x3c84` and `0x3c83`, which is exactly where
+Metal changes level. The RTX shows 193 for `0x3c86` and already 192 for `0x3c85`
+(192.55 on the CPU): its own encode lands about 0.06 of a level lower than the CPU's,
+a few parts in ten thousand, which is what two different GPU encodes are allowed. So
+on the RTX the card sits one half-float step above its boundary. And the blur does
+lose a step on a flat region, on Metal too: in half floats 4 of 37 out-of-reach pixels
+are one step low when focused on the card, and one of 16 brightness steps. One step
+is invisible in levels on Metal here and a whole level on the RTX.
+
+The test assumed more exactness than the pass gives, and measured it in the wrong
+unit. It now compares, out of the blur's reach, the half floats depth of field leaves
+(`ForwardImages::focused`) with the sharp frame's, one step allowed, which holds a
+leak to 0.1% whatever a device's rounding. `depth_of_field_keeps_a_flat_region_within_a_level_at_every_brightness`
+prints, per brightness step, the sharp half float, the
+CPU's level for it, the device's level, the blurred half float, the steps lost and
+its level, and requires at most one step lost and every displayed level within one of
+the CPU's. If the RTX's line shows more than one step lost, that is a real loss and
+both tests fail there.
