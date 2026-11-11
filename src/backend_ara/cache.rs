@@ -69,9 +69,12 @@ impl ShaderCache {
             include_str!("../../Cargo.lock")
         );
         let salt = Sha256::digest(format!(
-            "renderlab-ara-v2:{adapter}:{compiler}:{}:{}",
+            "renderlab-ara-v2:{adapter}:{compiler}:{}:{}{}",
             include_str!("shader/abi.metal"),
-            cooked::binding_layout_hash()
+            cooked::binding_layout_hash(),
+            // MEASUREMENT ONLY: a SPIR-V emission variant cooks its own code. Unset, the
+            // salt is what it was.
+            super::shader::spirv_variant()
         ))
         .into();
         Ok(Self {

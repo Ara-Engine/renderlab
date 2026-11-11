@@ -725,6 +725,7 @@ pub(super) fn bounds_checks() -> naga::proc::BoundsCheckPolicies {
 pub(crate) use metal::from_source as msl_source;
 #[cfg(not(target_os = "macos"))]
 pub(crate) use spirv::from_source as spirv_source;
+pub(crate) use spirv::variant_name as spirv_variant;
 pub(crate) fn threads_source(pass: Pass, source: &str) -> anyhow::Result<[u32; 3]> {
     threads_digest(pass, source, memo::digest(source))
 }

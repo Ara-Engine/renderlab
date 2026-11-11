@@ -36,6 +36,7 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
                 .context("selected SPIR-V entry missing")?
                 .name = "main".into();
             let info = validate(&selected)?;
+            let variant = Variant::from_environment();
             let mut words = naga::back::spv::write_vec(
                 &selected,
                 &info,
@@ -50,9 +51,20 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
                     flags: naga::back::spv::Options::default().flags
                         | naga::back::spv::WriterFlags::DEBUG,
                     bounds_check_policies: naga::proc::BoundsCheckPolicies {
-                        image_load: naga::proc::BoundsCheckPolicy::ReadZeroSkipWrite,
+                        image_load: if variant.image_unchecked {
+                            naga::proc::BoundsCheckPolicy::Unchecked
+                        } else {
+                            naga::proc::BoundsCheckPolicy::ReadZeroSkipWrite
+                        },
                         ..Default::default()
                     },
+                    zero_initialize_workgroup_memory: if variant.workgroup_unzeroed {
+                        naga::back::spv::ZeroInitializeWorkgroupMemoryMode::None
+                    } else {
+                        naga::back::spv::ZeroInitializeWorkgroupMemoryMode::Polyfill
+                    },
+                    force_loop_bounding: !variant.loops_unbounded,
+                    ray_query_initialization_tracking: !variant.queries_untracked,
                     ..Default::default()
                 },
                 Some(&naga::back::spv::PipelineOptions {
@@ -80,7 +92,9 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
             validate_heap_bindings(&words)?;
             repair_image_arguments(&mut words)?;
             super::spv_layout::repair(&mut words)?;
-            super::spv_precise::decorate(&mut words)?;
+            if !variant.fused {
+                super::spv_precise::decorate(&mut words)?;
+            }
             Ok(SpirvStage {
                 stage,
                 entry: entry.into(),
@@ -88,6 +102,40 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<Vec<SpirvStage>> {
             })
         })
         .collect()
+}
+/// MEASUREMENT ONLY: what `RENDERLAB_ARA_SPV` changes in the emitted SPIR-V, to find
+/// what a kernel's time on a Vulkan driver depends on. A comma-separated list of
+/// `fused` (no `NoContraction` marks, so the driver may fuse a multiply and an add),
+/// `image-unchecked` (image loads without the size test; a load outside its image is
+/// then undefined), `workgroup-unzeroed` (no zeroing of workgroup variables at entry;
+/// a kernel that reads one before writing it is then undefined), `loops-unbounded` and
+/// `queries-untracked` (naga's loop bound and ray-query state checks, which the wgpu
+/// renderer's modules also carry). A frame is evidence under a variant only if it is
+/// byte for byte the frame without it. The shader cache keys on the value.
+#[derive(Clone, Copy, Default)]
+struct Variant {
+    fused: bool,
+    image_unchecked: bool,
+    workgroup_unzeroed: bool,
+    loops_unbounded: bool,
+    queries_untracked: bool,
+}
+impl Variant {
+    fn from_environment() -> Self {
+        let named = variant_name();
+        let has = |name: &str| named.split(',').any(|part| part.trim() == name);
+        Self {
+            fused: has("fused"),
+            image_unchecked: has("image-unchecked"),
+            workgroup_unzeroed: has("workgroup-unzeroed"),
+            loops_unbounded: has("loops-unbounded"),
+            queries_untracked: has("queries-untracked"),
+        }
+    }
+}
+/// `RENDERLAB_ARA_SPV`, empty when unset: part of the shader cache's salt.
+pub(crate) fn variant_name() -> String {
+    std::env::var("RENDERLAB_ARA_SPV").unwrap_or_default()
 }
 fn adapt(pass: Pass, wgsl: &str) -> Result<String> {
     // Select before interface adaptation: unreferenced program/shadow bindings

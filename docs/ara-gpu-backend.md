@@ -2666,3 +2666,107 @@ processes and ara-gpu persists its Vulkan pipeline cache in the run's device dir
 What repeats in each process is reflecting every program's WGSL once (kept in memory
 only) and creating each pipeline object: 230 ms of the first frame on the Mac, about a
 second on the Radeon. Persisting the reflection beside the cooked code is not done.
+
+## Where the timing work stands (handover, 2026-11-11)
+
+Written for whoever takes the next turn. Everything here is from the Radeon run at
+484431a (the gate's comment of 14:38 UTC on PR #3) unless it says Metal.
+
+**The gap.** The port's frame is 104.4 to 105.8 ms against wgpu's 86.4 to 88.0, 18 ms.
+Pass against pass, where the boundaries line up:
+
+| | wgpu | port | port minus wgpu |
+|---|---|---|---|
+| camera rays / `PrimaryInteractive(Deferred)` | 11.4 to 11.9 | 15.3 to 15.8 | +4.0 (35%) |
+| the same without reconstruction | 2.90 | 3.94 | +1.0 (36%) |
+| cache (wgpu: render span minus its listed passes) | 33.5 | 37.9 | +4.3 |
+| frame minus GPU time (the port's `record_ms` is 5.6) | 1.5 | 5.8 | +4.3 |
+| shading / `PrimaryShadeList` + `ProgramBins` | 34.2 | 36.1 + 1.0 | +1.9 to +2.9 |
+| reconstruction / `TemporalResolve` | 3.81 | 4.77 | +1.0 (25%) |
+| present / the post chain | 1.92 | 2.46 | +0.5 |
+
+**Reflections and local shadows are not owners.** The table of features left out put
+reflections at +11.4 ms on the port. That was one disturbed wgpu run: its passes that
+reflections do not touch ran 11 to 20% slow (camera rays 13.76 against 11.41 to 11.48
+in five other runs), while its shading fell 10.5 ms, about what the port's shade list
+loses (14.0). Local shadows cost both shading passes the same (19.4 and 19.2). A
+confirmation (three interleaved runs a side with `--without reflections`) was running
+when this was written; expect wgpu's median near 73 to 76 ms with camera rays back at
+11.4. Feature-out tables are three interleaved runs a side or they are not a finding.
+
+**The camera-ray kernel: compared so far, nothing found.** Nothing has been measured
+to move its time yet. What the two layers hand the driver for it, from the code:
+- Structure builds are the same: `PREFER_FAST_TRACE`, opaque triangle geometry,
+  instances with facing cull disabled (`ara-gpu/src/vulkan/acceleration.rs`,
+  `src/hardware_shadow_gpu.rs`). The renderer also asks for compaction and for
+  hit-vertex return on the trace scene; ara-gpu enables neither.
+- The game scene's materials are all double-sided (the engine's default), so the camera
+  ray runs with `FORCE_OPAQUE` and handles no candidate triangle in the shader on
+  either layer. The per-candidate vertex fetch is not in play; I chased it and it was
+  wrong. What remains of hit-vertex return is one fetch a pixel for the committed hit:
+  the renderer reads the positions from the structure, the port reads three indices
+  and three vertices through the heap (`primary_trace::portable_trace`).
+- SPIR-V writer options (`shader/spirv.rs` against wgpu-hal's
+  `vulkan/adapter.rs`). The port checks less, not more: index and buffer accesses
+  unchecked (wgpu restricts indices), loop bounding and ray-query tracking on in both.
+  The port differs in three ways that cost: every float result is marked
+  `NoContraction` (81 in this kernel), image loads carry a size test and branch
+  (`ReadZeroSkipWrite`; wgpu leaves them to `robustImageAccess`), and workgroup
+  variables are zeroed by naga's polyfill (wgpu uses the device's own zeroing). The
+  camera kernel has one size query and three workgroup words, so the last two cannot
+  explain it; the resolve has 25 size queries for 20 fetches, so the image test is a
+  candidate for its 25%.
+- Pass timestamps bracket the same work on the port (begin and end at
+  `ALL_COMMANDS`), so the pass time is real.
+- Not yet compared: the frame inputs that decide how many shadow rays the fused
+  kernel traces (the reconstruction's budget and restart zones). On Metal the port
+  reports `restarted` 1 and `shadow_rays` 256 at pose 0, then 0 and 32 at every later
+  pose. Both layers now print `shadow_rays` in the timing split, so the next pair
+  shows whether they budget the same.
+
+**Experiments ready to run (Radeon, head of this branch).** Each is one variable; the
+control is that a 12-frame run's HDR dumps are byte for byte those of the run without
+the variable, and a variant whose frames differ is not evidence.
+- The pair as before, for `shadow_rays` on both layers in the split line:
+  `ara_frame --backend wgpu|ara --scene game --supported --timing --frames 60 --size 1280x720 --output DIR`
+- The port alone under each SPIR-V variant, three runs each interleaved with three
+  without the variable, same lock:
+  `RENDERLAB_ARA_SPV=NAME ara_frame --backend ara --scene game --supported --timing --frames 60 --size 1280x720 --output DIR`
+  with NAME one of `fused`, `image-unchecked`, `workgroup-unzeroed`,
+  `loops-unbounded`, `queries-untracked`. Each variant cooks its own shaders on its
+  first run (the cache keys on the value), so discard that run. The control for each:
+  the same command without `--timing` and with `--frames 12`, dumps compared with the
+  unset run's. `image-unchecked` and `workgroup-unzeroed` are undefined where a
+  kernel loads outside an image or reads a workgroup word before writing it, so their
+  control may fail; `loops-unbounded` and `queries-untracked` remove checks wgpu's
+  modules also carry, so they show headroom, not a difference between the layers.
+  What to read: which variant moves `PrimaryInteractive(Deferred)`, `TemporalResolve`
+  and the cache stages, and by how much.
+`RENDERLAB_ARA_SPV` is measurement only (`shader/spirv.rs`, `Variant`); the suite's
+SPIR-V assertions fail under `fused` by design.
+
+**Open items, in order.**
+1. The camera-ray kernel's 35%: read the two experiments above when they land. If no
+   variant moves it and the budgets agree, the next suspects are the committed hit's
+   vertex fetch (ara-gpu would need `VK_KHR_ray_tracing_position_fetch`, an Ara
+   change) and RADV's handling of the heap-indexed bindings; the RTX pair says
+   whether the share is RADV's.
+2. The 5.6 ms of recording a frame on the Radeon (3.4 to 3.9 ms on the Mac at
+   1280x720): not started. `FrameTimes::record` covers building the frame up to
+   submission; targets and record buffers are still made every frame.
+3. The cache's +4.3 ms: not started.
+4. The one pixel (588,178) under reconstruction on the Radeon: waits for the RTX's
+   probe lines; a debug build of the resolve printing the fetch position, the four
+   taps and the path taken for that pixel is the next step, on the Radeon if the RTX
+   sides with Metal.
+5. Persisting shader reflection beside the cooked code. The port's first frame in a
+   warm process is 1231 to 1255 ms against wgpu's 236 to 249; without gi it is 707,
+   so about 520 ms of it is the cache's programs.
+
+**Smaller things recorded and not acted on.** A sequence that is never relit sits
+about 0.7% under its converged bounce and steps up at its first lighting-key change
+(one change +0.68%, a second +0.004%, then nothing; does not decay over 60 frames,
+does not add up over ten changes): shared planner code, not measured on wgpu. The
+sun-turn difference between a sequence and a fresh frame (20 penumbra pixels) is
+shared by construction.
+

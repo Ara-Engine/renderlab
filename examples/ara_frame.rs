@@ -1127,6 +1127,11 @@ fn game_wgpu(size: [u32; 2], level: Level) -> Result<Vec<Frame>, Failure> {
         |engine| {
             let ms = |d: std::time::Duration| (d.as_secs_f64() * 1e5).round() / 1e2;
             let mut record = serde_json::json!({});
+            // The Interactive trace's shadow rays a pixel this frame, as the planner
+            // budgeted them.
+            if let Some(rays) = engine.renderer_mut().reconstruction_shadow_rays() {
+                record["shadow_rays"] = rays.into();
+            }
             if let Ok(events) = engine.poll()
                 && let Some(sample) = events.gpu.last()
             {
@@ -1181,8 +1186,12 @@ fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, F
                 .iter()
                 .map(|(label, t)| (label.clone(), ((t * 1e2).round() / 1e2).into()))
                 .collect();
+            // The same planner's budget, and whether it restarted every pixel.
+            let (restarted, shadow_rays) = engine.reconstruction_plan().unzip();
             serde_json::json!({
                 "refusals": refusals,
+                "restarted": restarted.map(u32::from),
+                "shadow_rays": shadow_rays,
                 "record_ms": ms(times.record),
                 "geometry_ms": ms(times.geometry),
                 "gpu_ms": ms(times.gpu),

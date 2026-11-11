@@ -168,6 +168,12 @@ impl Engine {
     pub fn refusals(&self) -> &[Refusal] {
         &self.refusals
     }
+    /// The last reconstructed frame's plan, for telemetry: whether it restarted every
+    /// pixel, and the Interactive trace's shadow rays a pixel
+    /// (`Renderer::reconstruction_shadow_rays`).
+    pub fn reconstruction_plan(&self) -> Option<(bool, u32)> {
+        self.frames.reconstruction_plan()
+    }
     /// The last frame's images as the frame read them back: the exposed HDR before
     /// post, and the displayed bytes `capture` returns.
     pub fn images(&self) -> Option<&ForwardImages> {
