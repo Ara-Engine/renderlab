@@ -120,6 +120,8 @@ pub struct ForwardImages {
     pub display: Option<Vec<u8>>,
     /// The cache's whole table after this frame, when `Indirect::read_table` asked.
     pub indirect_table: Option<Vec<u32>>,
+    /// With bounce and `read_table`: every slot's outgoing radiance, w 1 once written.
+    pub indirect_outgoing: Option<Vec<[f32; 4]>>,
 }
 
 /// The post `Settings` record at this output height for the post frame with this
@@ -856,6 +858,16 @@ fn frame(
                         environment: environment_digest,
                         field,
                         lights: packed.count,
+                        // `prepare_gi`'s lighting key: the lights, the environment and
+                        // the program. Decals, transmission and the draws do not vary.
+                        light_key: {
+                            use sha2::Digest;
+                            let mut h = sha2::Sha256::new();
+                            h.update(format!("{:?}", scene.lighting.lights).as_bytes());
+                            h.update(environment_digest);
+                            h.update(crate::program::STANDARD_PROGRAM.as_bytes());
+                            h.finalize().into()
+                        },
                     },
                 )?,
             );
@@ -911,7 +923,7 @@ fn frame(
     let gi = gi.as_ref().zip(gi_frame.as_ref());
     let mut specs = program.inputs().to_vec();
     if let Some((cache, _)) = gi {
-        for stage in cache.programs() {
+        for stage in cache.programs().chain(cache.shade_program()) {
             specs.extend(stage.inputs().iter().cloned());
         }
     }
@@ -1137,6 +1149,29 @@ fn frame(
             gi_packets.push(packet);
         }
     }
+    // Cell shading: the cache's group 0, then the traced shading interface.
+    let gi_shade_packet =
+        match gi.and_then(|(cache, records)| Some((cache, records, cache.shade_program()?))) {
+            Some((cache, records, stage)) => {
+                let values = stage
+                    .inputs()
+                    .iter()
+                    .map(|spec| {
+                        Ok((
+                            spec.key,
+                            match cache.shade_input(records, spec.key) {
+                                Some(buffer) => Input::Buffer(buffer),
+                                None => shared.input(spec, None)?,
+                            },
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let packet = HeapBindings::for_program(gpu, stage, &values)?;
+                packet.import(&mut graph);
+                Some(packet)
+            }
+            None => None,
+        };
     // The traced frame's three packets: none of them belongs to one object.
     let mut deferred_packets = Vec::new();
     if let Some(deferred) = &deferred {
@@ -1165,7 +1200,13 @@ fn frame(
                 .zip(threads)
         {
             if let (Some((cache, records)), true) = (gi, std::ptr::eq(kernel, &deferred.shade)) {
-                cache.record(&mut graph, &mut rec, records, &gi_packets)?;
+                cache.record(
+                    &mut graph,
+                    &mut rec,
+                    records,
+                    &gi_packets,
+                    gi_shade_packet.as_ref(),
+                )?;
             }
             kernel.record(
                 &mut graph,
@@ -1245,6 +1286,20 @@ fn frame(
             cache.table().buffer,
             0,
             cache.table().len,
+        )?),
+        None => None,
+    };
+    let outgoing_read = match gi
+        .filter(|_| table_read.is_some())
+        .and_then(|(cache, _)| cache.outgoing())
+    {
+        Some(outgoing) => Some(transfer::readback_buffer(
+            gpu,
+            &mut graph,
+            &mut rec,
+            outgoing.buffer,
+            0,
+            outgoing.len,
         )?),
         None => None,
     };
@@ -1389,6 +1444,10 @@ fn frame(
                 .map(|w| u32::from_le_bytes(*w))
                 .collect()
         }),
+        indirect_outgoing: outgoing_read
+            .map(|b| gpu.read(b))
+            .transpose()?
+            .map(|bytes| bytemuck::pod_collect_to_vec(&bytes)),
     };
 
     if let Some((passes, bloom, surface)) = tail {
@@ -1407,6 +1466,7 @@ fn frame(
         .chain(shadow_packets)
         .chain(deferred_packets)
         .chain(gi_packets)
+        .chain(gi_shade_packet)
     {
         packet.retire(gpu, &mut graph)?;
     }
@@ -1488,6 +1548,7 @@ fn frame(
         .chain(post_buffers)
         .chain(reads.into_iter().flatten())
         .chain(table_read)
+        .chain(outgoing_read)
         .chain([read])
     {
         gpu.retire(Resource::Buffer(buffer))?;

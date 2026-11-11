@@ -170,9 +170,10 @@ const FETCH: &str = "fn gi_hit_vertices(batch:u32,primitive:u32)->array<vec3<f32
 /// What a frame sequence asks of the cache.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Indirect {
-    /// Sky visibility on hardware rays: enabled, with bounce and the filter off.
+    /// Enabled, on hardware rays. Bounce and the cell filter follow the settings.
     pub settings: crate::IndirectSettings,
-    /// Copy the whole table out after each frame, as `Renderer::indirect_table` does.
+    /// Copy the whole table out after each frame, as `Renderer::indirect_table` does,
+    /// and with bounce every slot's outgoing radiance (`Renderer::indirect_outgoing`).
     pub read_table: bool,
 }
 
@@ -193,6 +194,9 @@ pub(crate) struct CacheScene<'a> {
     /// An environment map is selected.
     pub field: bool,
     pub lights: u32,
+    /// A digest of everything cell shading reads besides the cache: the lights, the
+    /// environment and the program. Bounce relights when it changes.
+    pub light_key: [u8; 32],
 }
 
 /// One frame's records and its plan; the packets borrow the records.
@@ -213,8 +217,8 @@ impl CacheFrame {
 }
 
 /// The cache across frames: `GiState`'s table, work words, outgoing radiance and
-/// filter sources (the last two unused until bounce and the filter are assembled), the
-/// planner's history and the nine kernels.
+/// filter sources, the planner's history, the kernel module's twelve entries and, with
+/// bounce, cell shading composed with the standard program.
 pub struct Cache {
     settings: crate::IndirectSettings,
     slots: u32,
@@ -227,6 +231,7 @@ pub struct Cache {
     zeroed: bool,
     planner: Planner,
     stages: Vec<(Entry, Program, Kernel)>,
+    shade: Option<(Program, Kernel)>,
 }
 impl Cache {
     /// Allocates the table for `1 << slots_log2` slots (no device limit shrinks it
@@ -241,16 +246,13 @@ impl Cache {
             .validate()
             .map_err(|e| anyhow::anyhow!("indirect settings: {e}"))?;
         ensure!(
-            settings.enabled
-                && !settings.bounce
-                && settings.filter == 0
-                && !settings.force_software,
-            "the cache is assembled for sky visibility on hardware rays: bounce, the filter \
-             and software rays are not yet"
+            settings.enabled && !settings.force_software && settings.filter == 0,
+            "the cache is assembled on hardware rays, and its cell filter has no replay yet"
         );
+        let standard = crate::program::STANDARD_PROGRAM;
         ensure!(
-            crate::program::uses_indirect(crate::program::STANDARD_PROGRAM),
-            "the standard program no longer reads the cache"
+            crate::program::uses_indirect(standard) && crate::program::reflects(standard),
+            "the standard program no longer reads the cache or reflects into it"
         );
         let slots = 1u32 << settings.slots_log2;
         let sizes = Sizes::of(slots, lights, &settings);
@@ -262,6 +264,13 @@ impl Cache {
                 Ok((entry, program, kernel))
             })
             .collect::<Result<Vec<_>>>()?;
+        let shade = if settings.bounce {
+            let program = shade_program(standard, settings.directions)?;
+            let kernel = Kernel::from_program(gpu, cache, &program)?;
+            Some((program, kernel))
+        } else {
+            None
+        };
         Ok(Self {
             settings,
             slots,
@@ -273,6 +282,7 @@ impl Cache {
             zeroed: false,
             planner: Planner::default(),
             stages,
+            shade,
         })
     }
     pub(crate) fn settings(&self) -> crate::IndirectSettings {
@@ -281,6 +291,10 @@ impl Cache {
     /// The table, for shading (lighting binding 20) and for reading back.
     pub(crate) fn table(&self) -> &StorageBuffer {
         &self.table
+    }
+    /// Every slot's outgoing radiance (bounce), for reading back.
+    pub(crate) fn outgoing(&self) -> Option<&StorageBuffer> {
+        self.settings.bounce.then_some(&self.outgoing)
     }
     /// `Renderer::reset_indirect`: the next frame starts from an empty table.
     pub fn reset(&mut self) {
@@ -313,7 +327,9 @@ impl Cache {
             fov_y: scene.camera.fov_y(),
             size: scene.size,
         };
-        let begun = self.planner.begin(&config, true, false);
+        // `ensure_gi_shade`: the setting is on and the frame's program reflects light.
+        let bounce = self.settings.bounce;
+        let begun = self.planner.begin(&config, true, bounce);
         // The buffers are idle between frames: every frame waits for its submission.
         for buffer in [&self.table, &self.work, &self.outgoing, &self.raw] {
             graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
@@ -340,12 +356,12 @@ impl Cache {
         let finished = self.planner.finish(
             &config,
             &begun,
-            false,
+            bounce,
             FrameInputs {
                 bounds: scene.bounds,
                 poses: vec![None; objects],
                 environment: scene.environment,
-                light_key: None,
+                light_key: bounce.then_some(scene.light_key),
                 region: scene.region,
                 still_matrix: crate::mesh::matrix_bytes(
                     scene
@@ -389,25 +405,44 @@ impl Cache {
             _ => return None,
         })
     }
-    /// The entries' programs in encode order, to build one packet each.
+    /// Cell shading's group 0 (`Layouts::shade`): the work words, the outgoing radiance
+    /// and the draw table. Its other groups are the traced shading interface.
+    pub(crate) fn shade_input<'a>(
+        &'a self,
+        frame: &'a CacheFrame,
+        key: InputKey,
+    ) -> Option<&'a StorageBuffer> {
+        Some(match (key.group, key.binding) {
+            (0, 31) => &self.work,
+            (0, 33) => &self.outgoing,
+            (0, 36) => &frame.draws,
+            _ => return None,
+        })
+    }
+    /// The kernel module's programs in encode order, to build one packet each.
     pub(crate) fn programs(&self) -> impl Iterator<Item = &Program> {
         self.stages.iter().map(|(_, program, _)| program)
     }
-    /// `GiState::encode` without bounce, the filter or profiling: the clears, then the
-    /// passes this frame's plan runs. `packets` are in `programs` order.
+    /// Cell shading's program, with bounce.
+    pub(crate) fn shade_program(&self) -> Option<&Program> {
+        self.shade.as_ref().map(|(program, _)| program)
+    }
+    /// `GiState::encode` without profiling: the clears, then the passes this frame's
+    /// plan runs. `packets` are in `programs` order; `shade` is cell shading's.
     pub(crate) fn record(
         &self,
         graph: &mut Graph,
         rec: &mut Recorder,
         frame: &CacheFrame,
         packets: &[HeapBindings<'_>],
+        shade: Option<&HeapBindings<'_>>,
     ) -> Result<()> {
         let Some(plan) = &frame.plan else {
             return Ok(());
         };
         ensure!(
-            packets.len() == self.stages.len() && !plan.bounce && !plan.filter,
-            "cache packets or plan do not match the sky-visibility passes"
+            packets.len() == self.stages.len() && (!plan.bounce || shade.is_some()),
+            "cache packets do not match the plan's passes"
         );
         let layout = WorkLayout::of_counts(self.slots, self.sizes.misses);
         let header = shared::HEADER_WORDS * 4;
@@ -419,6 +454,10 @@ impl Cache {
             }
         }
         fill(graph, rec, &self.work, 0, shared::COUNTER_WORDS * 4)?;
+        // Next frame's gather queue starts empty; this frame's holds last frame's appends.
+        if plan.bounce {
+            fill(graph, rec, &self.work, plan.next_queue_at, 4)?;
+        }
         // The staged ray bits, after the ray items.
         fill(
             graph,
@@ -444,6 +483,13 @@ impl Cache {
         let traced = !plan.environment_only;
         if traced {
             pass(Entry::Probe, plan.groups)?;
+        }
+        // Gathers read last frame's outgoing radiance and may request hit cells for
+        // the claim rounds that follow.
+        if plan.bounce {
+            pass(Entry::Gather, [shared::GATHER_GROUPS, 1])?;
+        }
+        if traced {
             for round in 0..shared::CLAIM_ROUNDS {
                 pass(Entry::Claim, [shared::CLAIM_GROUPS, 1])?;
                 let last = round + 1 == shared::CLAIM_ROUNDS;
@@ -468,11 +514,30 @@ impl Cache {
         if plan.integrate {
             pass(Entry::Integrate, [shared::CELL_GROUPS, 1])?;
         }
+        // The filter once every value of the frame is written; then light visibility at
+        // the cells to shade, and the program's cell shading.
+        if plan.filter {
+            pass(Entry::Filter, [shared::FILTER_GROUPS, 1])?;
+        }
+        if plan.bounce {
+            pass(Entry::Light, [shared::LIGHT_GROUPS, 1])?;
+            let (program, kernel) = self.shade.as_ref().context("bounce without cell shading")?;
+            let threads = program.threads()?;
+            kernel.record(
+                graph,
+                rec,
+                shade.context("checked above")?,
+                [shared::LIGHT_GROUPS * threads[0], 1, 1],
+            )?;
+        }
         Ok(())
     }
     /// Retire after every list that names the cache has been submitted.
     pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
         for (_, _, kernel) in self.stages {
+            kernel.retire(gpu)?;
+        }
+        if let Some((_, kernel)) = self.shade {
             kernel.retire(gpu)?;
         }
         for buffer in [self.table, self.work, self.outgoing, self.raw] {

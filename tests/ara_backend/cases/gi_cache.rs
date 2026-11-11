@@ -126,12 +126,14 @@ fn cache_kernels_reflect_validate_and_compile() -> Result<()> {
 /// A 12 m floor in the xy plane with a 12 m wall standing on its y axis, grey and
 /// rough, under a uniform unit sky and a sun too dim to matter. The wall hides half
 /// the sky from the floor at its foot and less with distance.
-/// One frame of a sequence: its HDR red channel per pixel, and the cache's table when
-/// the cache ran and was read.
-type YardFrame = (Vec<f32>, Option<Vec<u32>>);
+/// One frame of a sequence: its HDR red channel per pixel, and the cache's table and
+/// outgoing radiance when the cache ran and was read.
+type YardFrame = (Vec<f32>, Option<Vec<u32>>, Option<Vec<[f32; 4]>>);
 struct Yard {
     floor: [Vertex; 4],
     wall: [Vertex; 4],
+    /// Grey base colours of the floor and the wall.
+    base: [f32; 2],
     lighting: Lighting,
     shadows: SunShadows,
 }
@@ -157,6 +159,7 @@ impl Yard {
                 [[0., -6., 0.], [0., 6., 0.], [0., 6., 12.], [0., -6., 12.]],
                 [1., 0., 0.],
             ),
+            base: [0.5; 2],
             lighting: Lighting {
                 lights: vec![Light::Directional {
                     travel: Vec3::new(0., 0., -1.),
@@ -192,19 +195,21 @@ impl Yard {
         indirect: Option<Indirect>,
         cameras: &[Camera],
     ) -> Result<Vec<YardFrame>> {
-        let material = || MaterialDescriptor {
-            base_color: [0.5, 0.5, 0.5, 1.],
-            metallic: 0.,
-            roughness: 1.,
-            double_sided: true,
-            ..Default::default()
-        };
-        let objects = [&self.floor, &self.wall].map(|vertices| ForwardObject {
-            vertices,
-            indices: &[0, 1, 2, 0, 2, 3],
-            transform: Mat4::IDENTITY,
-            material: material(),
-        });
+        let objects =
+            [(&self.floor, self.base[0]), (&self.wall, self.base[1])].map(|(vertices, base)| {
+                ForwardObject {
+                    vertices,
+                    indices: &[0, 1, 2, 0, 2, 3],
+                    transform: Mat4::IDENTITY,
+                    material: MaterialDescriptor {
+                        base_color: [base, base, base, 1.],
+                        metallic: 0.,
+                        roughness: 1.,
+                        double_sided: true,
+                        ..Default::default()
+                    },
+                }
+            });
         let mut history = Frames::default();
         let mut frames = Vec::new();
         for camera in cameras {
@@ -230,7 +235,7 @@ impl Yard {
                 .iter()
                 .map(|p| f16::from_bits(u16::from_le_bytes([p[0], p[1]])).to_f32())
                 .collect();
-            frames.push((red, images.indirect_table));
+            frames.push((red, images.indirect_table, images.indirect_outgoing));
         }
         history.retire(gpu)?;
         Ok(frames)
@@ -479,6 +484,187 @@ fn cache_sequences_repeat_idle_when_still_and_follow_the_camera() -> Result<()> 
     ensure!(
         occupied.is_sorted_by(|a, b| a < b),
         "a moving camera did not claim cells every frame: {occupied:?}"
+    );
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// Bounce on a sunlit floor with a dark wall, once the gathers have settled (frame 8 of
+/// a still sequence). Three stages against the table and the outgoing radiance:
+/// - **Cell shading.** Every shaded cell's outgoing radiance is one reflectance over pi
+///   times its incident light (the sun where it faces it, plus its own gathered
+///   bounce): the same reflectance for every cell of a material, just above its base
+///   colour.
+/// - **Gather.** A wall cell's blocked rays all end on the floor, whose radiance is
+///   nearly uniform, so each of its four L1 coefficients is that radiance times the
+///   kernel's quadrature over exactly its blocked directions.
+/// - **Shading.** Wall pixels, black without bounce since the sun grazes the wall, show
+///   the radiance of the wall cell they fall in.
+#[test]
+fn bounce_cells_shade_and_gather_what_the_scene_predicts() -> Result<()> {
+    let path = root("gi-cache-bounce");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    const SUN: f64 = 1000.;
+    let mut yard = Yard::new();
+    yard.base = [0.8, 0.2];
+    yard.lighting = Lighting {
+        lights: vec![Light::Directional {
+            travel: Vec3::new(0., 0., -1.),
+            lux: [SUN as f32; 3],
+        }],
+        environment: [0.; 3],
+        exposure_stops: -8.,
+    };
+    let settings = |bounce: bool| {
+        Some(Indirect {
+            settings: IndirectSettings {
+                bounce,
+                filter: 0,
+                slots_log2: 14,
+                ..Default::default()
+            },
+            read_table: true,
+        })
+    };
+    let camera = Yard::camera(0)?;
+    let plain = yard.sequence(&mut gpu, &cache, settings(false), &[camera])?;
+    let frames = yard.sequence(&mut gpu, &cache, settings(true), &[camera; 8])?;
+    let (red, Some(words), Some(outgoing)) = frames.last().context("no frame")? else {
+        anyhow::bail!("the table or the outgoing radiance was not read");
+    };
+    let previous = frames[6].1.as_ref().context("table was not read")?;
+    // Every slot's hot record (the values); seen stamps in the cold records still tick.
+    let hot = 64..64 + (words[1] as usize + 1) * 24;
+    ensure!(
+        words[hot.clone()] == previous[hot],
+        "bounce had not settled by the seventh frame"
+    );
+    let table = Table::new(words)?;
+    let cells = table.cells();
+    let shaded = |axis: usize| {
+        cells
+            .iter()
+            .filter(move |c| c.valid && c.settled && c.normal[axis] > 0.9 && c.point.x >= 0.)
+    };
+    // Cell shading. The sun is the floor's only light besides bounce; it grazes the wall.
+    let mut reflectance = [(f64::MAX, 0f64); 2];
+    for (material, (axis, sun)) in [(2, SUN), (0, 0.)].into_iter().enumerate() {
+        for cell in shaded(axis) {
+            let out = outgoing[cell.slot];
+            ensure!(out[3] == 1., "slot {} is not shaded and final", cell.slot);
+            let incident = sun + gi_cache_reference::bounce_irradiance(cell)[0];
+            let a = f64::from(out[0]) * std::f64::consts::PI / incident;
+            reflectance[material] = (
+                reflectance[material].0.min(a),
+                reflectance[material].1.max(a),
+            );
+        }
+    }
+    for ((least, most), base) in reflectance.into_iter().zip(yard.base) {
+        // One value per material (to f16 in the bounce term), the base colour plus
+        // the rough dielectric's specular share.
+        ensure!(
+            most - least < 2e-3 * most && (0.0..0.03).contains(&(least - f64::from(base))),
+            "cell reflectance of base {base} spans {least:.5} to {most:.5}"
+        );
+    }
+    // Gather: the floor's radiance, then each wall cell's coefficients.
+    let floor: Vec<f64> = shaded(2).map(|c| f64::from(outgoing[c.slot][0])).collect();
+    let (least, most) = floor
+        .iter()
+        .fold((f64::MAX, 0f64), |(lo, hi), l| (lo.min(*l), hi.max(*l)));
+    ensure!(
+        // A few percent brighter by the wall, which lights it back.
+        floor.len() >= 500 && most / least < 1.05,
+        "floor radiance is not uniform: {least} to {most} over {} cells",
+        floor.len()
+    );
+    let (mut walls, mut worst) = (0, 0f64);
+    for cell in shaded(0) {
+        let weight = std::f64::consts::TAU / f64::from(gi_cache_reference::DIRECTIONS);
+        let (mut sums, mut magnitudes) = ([0f64; 4], [0f64; 4]);
+        for k in (0..gi_cache_reference::DIRECTIONS).filter(|k| cell.bits >> k & 1 == 0) {
+            let d = gi_cache_reference::direction(cell, table.rotates(), k).as_dvec3();
+            let y = [0.282095, 0.488603 * d.y, 0.488603 * d.z, 0.488603 * d.x];
+            for i in 0..4 {
+                sums[i] += weight * y[i];
+                magnitudes[i] += weight * y[i].abs();
+            }
+        }
+        if cell.bits == u64::MAX {
+            continue;
+        }
+        walls += 1;
+        let mean = (least + most) / 2.;
+        for i in 0..4 {
+            let stored = f64::from(cell.bounce[i * 3]) * f64::from(cell.bounce_scale);
+            // The floor's spread, then f16 storage relative to the record's scale.
+            let bound = (most - least) / 2. * magnitudes[i] + 1e-3 * f64::from(cell.bounce_scale);
+            let error = (stored - mean * sums[i]).abs();
+            worst = worst.max(error / bound);
+            ensure!(
+                error <= bound,
+                "slot {} at {:?}: L1 coefficient {i} is {stored:.3}, quadrature gives {:.3}",
+                cell.slot,
+                cell.point,
+                mean * sums[i]
+            );
+        }
+    }
+    ensure!(walls >= 500, "only {walls} wall cells gathered");
+    // Shading: wall pixels against the cell nearest their point on the wall.
+    let inverse = camera.matrix(SIZE[0], SIZE[1]).as_dmat4().inverse();
+    let exposure = f64::from(yard.lighting.exposure_stops).exp2();
+    let wall: Vec<_> = shaded(0).collect();
+    let (mut pixels, mut ratios) = (0, (f64::MAX, 0f64));
+    for y in (4..SIZE[1]).step_by(8) {
+        for x in (4..SIZE[0]).step_by(4) {
+            let ndc = |depth: f64| {
+                inverse.project_point3(DVec3::new(
+                    (f64::from(x) + 0.5) / f64::from(SIZE[0]) * 2. - 1.,
+                    1. - (f64::from(y) + 0.5) / f64::from(SIZE[1]) * 2.,
+                    depth,
+                ))
+            };
+            let (a, b) = (ndc(0.25), ndc(0.75));
+            // The wall plane x = 0, above the floor and inside the wall's extent.
+            let p = a + (b - a) * (-a.x / (b.x - a.x));
+            if !(p.z > 0.3 && p.z < 5. && p.y.abs() < 5.) {
+                continue;
+            }
+            let at = (y * SIZE[0] + x) as usize;
+            ensure!(
+                plain[0].0[at] == 0.,
+                "wall pixel ({x}, {y}) is lit without bounce"
+            );
+            let nearest = wall
+                .iter()
+                .min_by(|c, d| {
+                    let distance =
+                        |cell: &&gi_cache_reference::Cell| cell.point.as_dvec3().distance(p);
+                    distance(c).total_cmp(&distance(d))
+                })
+                .context("no wall cell")?;
+            let ratio = f64::from(red[at]) / (f64::from(outgoing[nearest.slot][0]) * exposure);
+            ratios = (ratios.0.min(ratio), ratios.1.max(ratio));
+            pixels += 1;
+        }
+    }
+    eprintln!(
+        "reflectance {reflectance:?}; floor radiance {least:.2} to {most:.2}; {walls} wall cells, \
+         worst coefficient at {worst:.2} of its bound; {pixels} wall pixels at {:.3} to {:.3} of \
+         their cell's radiance",
+        ratios.0, ratios.1
+    );
+    // A cell holds one value for its whole footprint and reflects as a Lambertian; the
+    // pixel interpolates four cells and shades with the program's own lobes.
+    ensure!(
+        pixels >= 40 && ratios.0 > 0.8 && ratios.1 < 1.25,
+        "{pixels} wall pixels are {:.3} to {:.3} of their cell's radiance",
+        ratios.0,
+        ratios.1
     );
     gpu.collect()?;
     gpu.assert_clean()?;

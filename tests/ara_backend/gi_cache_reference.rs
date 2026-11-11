@@ -38,6 +38,10 @@ pub struct Cell {
     /// The SH's f32 scale, and its 27 halves (coefficient i * 3 + channel) over it.
     pub scale: f32,
     pub sh: [f32; 27],
+    /// Bounce: the L1 SH's f32 scale (0 before the cell's first gather, -0.0 after a
+    /// gather that found no light) and its 12 halves (coefficient i * 3 + channel).
+    pub bounce_scale: f32,
+    pub bounce: [f32; 12],
 }
 
 impl<'a> Table<'a> {
@@ -74,6 +78,16 @@ impl<'a> Table<'a> {
                     };
                     *value = half::f16::from_bits(half).to_f32();
                 }
+                let mut bounce = [0f32; 12];
+                for (j, value) in bounce.iter_mut().enumerate() {
+                    let pair = self.words[hot + 17 + j / 2];
+                    let half = if j % 2 == 0 {
+                        pair as u16
+                    } else {
+                        (pair >> 16) as u16
+                    };
+                    *value = half::f16::from_bits(half).to_f32();
+                }
                 Some(Cell {
                     slot,
                     valid: self.words[hot] & 0x8000_0000 != 0,
@@ -87,6 +101,8 @@ impl<'a> Table<'a> {
                         | (u64::from(self.words[cold + 13]) << 32),
                     scale: self.f32(hot + 1),
                     sh,
+                    bounce_scale: self.f32(hot + 16),
+                    bounce,
                 })
             })
             .collect()
@@ -169,4 +185,27 @@ pub fn sky_sh(cell: &Cell, rotates: bool, bits: u64) -> [f64; 9] {
         }
     }
     sh
+}
+
+/// `gi_cell_bounce_irradiance`: the bounce light arriving about the cell's own normal,
+/// from its L1 SH through the clamped-cosine band weights.
+pub fn bounce_irradiance(cell: &Cell) -> [f64; 3] {
+    if cell.bounce_scale <= 0. {
+        return [0.; 3];
+    }
+    let n = cell.normal.as_dvec3();
+    let y = [0.282095, 0.488603 * n.y, 0.488603 * n.z, 0.488603 * n.x];
+    let weight = [
+        std::f64::consts::PI,
+        2.0943951023931953,
+        2.0943951023931953,
+        2.0943951023931953,
+    ];
+    std::array::from_fn(|c| {
+        (0..4)
+            .map(|i| weight[i] * y[i] * f64::from(cell.bounce[i * 3 + c]))
+            .sum::<f64>()
+            .max(0.)
+            * f64::from(cell.bounce_scale)
+    })
 }
