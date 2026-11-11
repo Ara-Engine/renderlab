@@ -1462,8 +1462,8 @@ and keeps it. Each frame writes the header, uploads the frame record, the draw t
 and the placement matrices, runs the plan's passes between the fresh estimator and
 shading (probe, three claim and resolve rounds, scan, setup, rays, finish, integrate,
 each only when the plan has it), and binds the table to shading at lighting binding
-20. Refused for now: bounce, the cell filter, software rays, and settings or a light
-count that change within a sequence.
+20. Refused for now: the cell filter, software rays, and settings or a light count
+that change within a sequence. Bounce is described below.
 
 **Replays** (`tests/ara_backend/cases/gi_cache.rs`, reference in
 `gi_cache_reference.rs`), on a 12 m floor with a 12 m wall under a uniform sky:
@@ -1491,7 +1491,7 @@ one that keeps comparing.
 positions and ray directions differ by rounding between shader compilers and drivers,
 which now and then moves a pixel across a cell or level boundary or flips a ray that
 grazes an edge. `--compare` ends with one line, `cache tables: PASS` or `FAIL`, and
-exits nonzero on a fail. A frame passes when all four hold; a comparison passes when
+exits nonzero on a fail. A frame passes when all five hold; a comparison passes when
 every frame does.
 
 | | Criterion | Bound | What a miss would mean |
@@ -1500,6 +1500,7 @@ every frame does.
 | 2 | Cells present, or valid, on one side only, of the larger side's cells | 0.5% | A stage is missing cells, not boundary pixels |
 | 3 | Differing direction bits over cells valid on both sides, of their rays | 0.1% | A wrong ray origin or basis, not edge grazers |
 | 4 | Every SH coefficient of cells valid on both sides with equal bits, of the cell's scale | 1% | A wrong weight, not f16 storage or a sampled environment |
+| 5 | Of those cells, the ones with a bounce coefficient further than 2% of its scale apart | 1% of them | A wrong gather or cell shade, not one boundary cell or grazing ray moving a neighbour by a ray's share |
 
 The bounds were chosen before any cross-layer run existed, from what each criterion
 should absorb; every frame's line prints the measured figure beside its bound, so the
@@ -1522,19 +1523,44 @@ stamp stops at 8. **Not compared with wgpu yet**: the reference has to come from
 Linux gate, which can also run both layers on the same GPU, where the raw tables do
 not have to travel.
 
-**Bounce and the filter, so far only through the adapter.** `gi_gather`, `gi_light`,
-`gi_filter` and `gi_shade_cells` (composed with the standard program on the hardware
-soft head at the cell stage, as `gi_shade_pipeline` composes it) reflect, emit MSL and
-SPIR-V that validates, and compile natively
-(`cache_kernels_reflect_validate_and_compile`). Nothing records them yet. One adapter
-defect surfaced: the SPIR-V path's textual rewrite of resource names decided "struct
-member" by looking back over comments, so a table write that followed a comment
-ending in a period kept its original binding. The heap-binding check refused the
-module, so it was loud, never silent; both textual passes now look back over code
-only, and the rename regression covers it.
+**Bounce.** With `IndirectSettings::bounce` the frame adds `GiState::encode`'s bounce
+passes: the gather after the probe and before the claim rounds (it reads last frame's
+outgoing radiance and may request the cells its rays hit), then light visibility and
+cell shading after the integration. Cell shading is the standard program composed at
+the cell stage on the hardware soft head, as `gi_shade_pipeline` composes it; its
+group 0 is the cache's (work words, outgoing radiance, draw table) and its other
+groups are the traced shading packet's. The planner gets the lighting key (lights,
+environment, program) and so schedules relights as on wgpu.
 
-Next: bounce in the frame (the gather before the claims, light visibility and cell
-shading after the integration), then the cell filter.
+`bounce_cells_shade_and_gather_what_the_scene_predicts` runs the yard with a 1,000 lux
+sun straight down, a black sky, a 0.8 floor and a 0.2 wall, and judges frame 8 of a
+still sequence, by which the values have stopped changing:
+
+| Stage | Held to | Result |
+|---|---|---|
+| Cell shading | Outgoing radiance times pi over incident light (the sun where the cell faces it, plus its own gathered bounce) is one number per material | 0.81231 on all floor cells and 0.21231 on all wall cells, each constant to 3e-7: the base colour plus the rough dielectric's 0.0123 |
+| Gather | Each wall cell's four L1 coefficients equal the floor's radiance times the kernel's quadrature over exactly that cell's blocked directions | 1,413 cells, worst at 0.82 of a bound set by the floor's own 3.5% spread; a 5% weight error fails |
+| Shading | Wall pixels are black without bounce (the sun grazes the wall) and show their cell's radiance with it | 108 pixels at 0.98 to 1.16 of the nearest cell's radiance |
+
+The closed-form irradiance `pi L F` matches only near the floor: high on the wall the
+stored value is up to 50% above it, because an L1 fit cannot tell grazing light from
+light along the normal. That is the representation Renderlab chose, not a port
+defect, which is why the gather is held to its own quadrature instead.
+
+`ara_frame --bounce` (implies `--gi`) is that level on either layer; on Metal two
+runs of the 12-frame moving sequence are identical in every table word and pixel
+(14,516 cells after the first frame, 23,613 after the twelfth, the gathers' hit cells
+included).
+
+**The cell filter** is wired into the pass list but refused: `gi_filter` reflects,
+emits and compiles (`cache_kernels_reflect_validate_and_compile`), and has no replay.
+Renderlab's default settings have it on, so it is next.
+
+One adapter defect surfaced with these kernels: the SPIR-V path's textual rewrite of
+resource names decided "struct member" by looking back over comments, so a table
+write that followed a comment ending in a period kept its original binding. The
+heap-binding check refused the module, so it was loud, never silent; both textual
+passes now look back over code only, and the rename regression covers it.
 
 ## First Vulkan run (Radeon 760M, RADV, validation on)
 

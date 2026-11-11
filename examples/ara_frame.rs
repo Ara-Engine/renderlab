@@ -38,7 +38,9 @@
 //! `HEADER_ULPS` below, and exits nonzero on FAIL. Without the raw tables it falls back
 //! to the digests: equal digests pass, anything else is NO VERDICT.
 //! Run both a moving and a `--still` sequence: a still view goes idle after eight
-//! frames, and from then on its tables say nothing new.
+//! frames, and from then on its tables say nothing new. `--bounce` implies `--gi` and
+//! turns the cache's bounce light on as well (gathers, light visibility and cell
+//! shading; the cell filter stays off, which the Ara frame does not assemble yet).
 //!
 //! ```text
 //! cargo run --example ara_frame -- --backend wgpu --output out/wgpu
@@ -72,7 +74,7 @@ fn main() -> Result<(), Failure> {
     let mut atmosphere = renderlab::Atmosphere::off();
     let mut sun_shadows = false;
     let mut traced = false;
-    let (mut gi, mut still) = (false, false);
+    let (mut gi, mut bounce, mut still) = (false, false, false);
     let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -81,6 +83,7 @@ fn main() -> Result<(), Failure> {
             "--sun-shadows" => sun_shadows = true,
             "--traced" => (sun_shadows, traced) = (true, true),
             "--gi" => (sun_shadows, traced, gi) = (true, true, true),
+            "--bounce" => (sun_shadows, traced, gi, bounce) = (true, true, true, true),
             "--still" => still = true,
             "--frames" => {
                 frames = args.next().ok_or("--frames N")?.parse()?;
@@ -119,6 +122,7 @@ fn main() -> Result<(), Failure> {
         sun_shadows,
         traced,
         gi,
+        bounce,
         still,
         frames,
     };
@@ -144,6 +148,8 @@ struct Level {
     traced: bool,
     /// The radiance cache's sky visibility, on a traced frame.
     gi: bool,
+    /// The cache's bounce light as well.
+    bounce: bool,
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
@@ -154,10 +160,10 @@ impl Level {
     }
 }
 
-/// The cache at the `--gi` level, on both layers.
-fn sky_visibility() -> renderlab::IndirectSettings {
+/// The cache at the `--gi` level, or with bounce at the `--bounce` level, on both layers.
+fn cache_settings(bounce: bool) -> renderlab::IndirectSettings {
     renderlab::IndirectSettings {
-        bounce: false,
+        bounce,
         filter: 0,
         slots_log2: 17,
         ..Default::default()
@@ -249,7 +255,7 @@ fn wgpu_frame(
         r.set_primary_visibility(PrimaryVisibility::Traced)?;
         r.set_soft_shadows(SoftShadows::Exact);
         r.set_indirect(if gi {
-            sky_visibility()
+            cache_settings(level.bounce)
         } else {
             IndirectSettings::off()
         })?;
@@ -422,7 +428,7 @@ fn ara_frame(
                     renderlab::PostSettings::default()
                 }),
                 indirect: gi.then(|| Indirect {
-                    settings: sky_visibility(),
+                    settings: cache_settings(level.bounce),
                     read_table: true,
                 }),
             },
@@ -540,9 +546,10 @@ fn write(
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
             "scene": if level.still { "M5-A authored v1, every frame from pose 0, local shadows off, default post" } else { "M5-A authored v1, camera path from pose 0, local shadows off, default post" },
-            "primary": match (level.traced, level.gi) {
-                (true, true) => "traced, exact soft shadows, radiance cache sky visibility (2^17 slots, no bounce or filter), no reconstruction, reflections or motion blur",
-                (true, false) => "traced, exact soft shadows, no GI, reconstruction, reflections or motion blur",
+                        "primary": match (level.traced, level.gi, level.bounce) {
+                (true, true, true) => "traced, exact soft shadows, radiance cache with bounce (2^17 slots, no filter), no reconstruction, reflections or motion blur",
+                (true, true, false) => "traced, exact soft shadows, radiance cache sky visibility (2^17 slots, no bounce or filter), no reconstruction, reflections or motion blur",
+                (true, false, _) => "traced, exact soft shadows, no GI, reconstruction, reflections or motion blur",
                 _ => "mesh pass",
             },
             "atmosphere": if level.atmosphere.active() { "physical sky without volumetric fog" } else { "off" },
@@ -871,6 +878,10 @@ fn chunk(words: usize, index: usize) -> std::ops::Range<usize> {
 /// 4. **Same values.** Every cell valid on both sides with equal direction bits has
 ///    each SH coefficient within `SH_BOUND` of its scale: f16 storage and a sampled
 ///    environment, not a wrong weight.
+/// 5. **Same bounce.** Of those cells, the ones with a bounce coefficient further than
+///    `BOUNCE_BOUND` of its scale apart are at most `BOUNCE_CELLS`: a gather sums the
+///    radiance of up to 64 other cells, so one boundary cell or grazing ray elsewhere
+///    moves a neighbour by a ray's share; more than that is a wrong gather or shade.
 ///
 /// The bounds were set before any cross-layer run existed; the output prints the
 /// measured figure beside each so they can be tightened.
@@ -879,6 +890,8 @@ const HEADER_FLOATS: [usize; 7] = [4, 5, 8, 9, 10, 12, 25];
 const ONE_SIDED_CELLS: f64 = 0.005;
 const FLIPPED_RAYS: f64 = 0.001;
 const SH_BOUND: f32 = 0.01;
+const BOUNCE_BOUND: f32 = 0.02;
+const BOUNCE_CELLS: f64 = 0.01;
 
 /// The cache tables of two `--gi` runs, frame by frame, against the acceptance rule
 /// above. Prints the slot count, each frame's measurements and first differing word,
@@ -991,6 +1004,7 @@ fn compare_tables(
         }
         // 3 and 4. Direction bits, then the SH where the bits agree.
         let (mut flipped, mut worst, mut compared) = (0u64, 0f32, 0usize);
+        let (mut bounce_off, mut bounce_worst) = (0usize, 0f32);
         for &(slot_a, slot_b) in &both {
             let (cold_a, cold_b) = (xa.cold(slot_a), xb.cold(slot_b));
             let rays =
@@ -1016,10 +1030,33 @@ fn compare_tables(
                 .fold(0f32, f32::max);
             worst = worst.max(difference / scale_a.max(scale_b).max(1e-30));
             compared += 1;
+            // The bounce L1 SH: a scale of 0 or -0.0 is no value, which reads as zero.
+            let bounce = |hot: &'_ [u32]| -> (f32, Vec<f32>) {
+                let scale = f32::from_bits(hot[16]).max(0.);
+                let values = hot[17..23]
+                    .iter()
+                    .flat_map(|w| [*w as u16, (*w >> 16) as u16])
+                    .map(|h| decode_f16(h) * scale)
+                    .collect();
+                (scale, values)
+            };
+            let ((top_a, bounce_a), (top_b, bounce_b)) = (bounce(hot_a), bounce(hot_b));
+            let apart = bounce_a
+                .iter()
+                .zip(bounce_b)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0f32, f32::max)
+                / top_a.max(top_b).max(1e-30);
+            bounce_worst = bounce_worst.max(apart);
+            bounce_off += usize::from(apart.is_nan() || apart > BOUNCE_BOUND);
         }
         let flipped_share = flipped as f64 / (both.len().max(1) as f64 * 64.);
         if flipped_share > FLIPPED_RAYS {
             reasons.push(format!("{flipped} direction bits differ"));
+        }
+        let bounce_share = bounce_off as f64 / compared.max(1) as f64;
+        if bounce_share > BOUNCE_CELLS {
+            reasons.push(format!("{bounce_off} cells differ in bounce"));
         }
         if worst.is_nan() || worst > SH_BOUND {
             reasons.push(format!(
@@ -1027,7 +1064,7 @@ fn compare_tables(
             ));
         }
         println!(
-            "pose {pose}: {counts}; {} words differ, first at {word} ({}); header {}; one-sided cells {one_sided} of {cells} ({:.3}%, bound {:.1}%); differing direction bits {flipped} over {} cells valid in both ({:.4}%, bound {:.2}%); worst SH coefficient {worst:.2e} of its scale over {compared} cells with equal bits (bound {SH_BOUND:.0e}): {}",
+            "pose {pose}: {counts}; {} words differ, first at {word} ({}); header {}; one-sided cells {one_sided} of {cells} ({:.3}%, bound {:.1}%); differing direction bits {flipped} over {} cells valid in both ({:.4}%, bound {:.2}%); worst SH coefficient {worst:.2e} of its scale over {compared} cells with equal bits (bound {SH_BOUND:.0e}); bounce further than {BOUNCE_BOUND:.0e} of scale apart in {bounce_off} of them ({:.3}%, bound {:.1}%; worst {bounce_worst:.2e}): {}",
             differing.len(),
             xa.field(word),
             if header { "same" } else { "DIFFERS" },
@@ -1036,6 +1073,8 @@ fn compare_tables(
             both.len(),
             flipped_share * 100.,
             FLIPPED_RAYS * 100.,
+            bounce_share * 100.,
+            BOUNCE_CELLS * 100.,
             if reasons.is_empty() { "pass" } else { "FAIL" }
         );
         if !reasons.is_empty() {
@@ -1046,9 +1085,10 @@ fn compare_tables(
         println!("cache tables: first difference in frame {pose}, {what}");
     }
     let rule = format!(
-        "same header, one-sided cells within {:.1}%, differing direction bits within {:.2}%, SH within {SH_BOUND:.0e} of scale where bits agree, in every frame",
+        "same header, one-sided cells within {:.1}%, differing direction bits within {:.2}%, SH within {SH_BOUND:.0e} of scale where bits agree, bounce further than {BOUNCE_BOUND:.0e} of scale apart in at most {:.1}% of those cells, in every frame",
         ONE_SIDED_CELLS * 100.,
-        FLIPPED_RAYS * 100.
+        FLIPPED_RAYS * 100.,
+        BOUNCE_CELLS * 100.
     );
     Ok(match (failed, unjudged, first) {
         (Some(failure), ..) => {
