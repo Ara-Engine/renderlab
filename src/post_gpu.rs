@@ -503,10 +503,11 @@ impl PostGpu {
         self.prepare_targets(r);
         let internal = r.view.hdr.as_ref().unwrap().resolved.texture.size();
         let current = camera.unjittered().matrix(internal.width, internal.height);
-        // MV1: camera and object history must describe the same rendered frame.
+        // MV1: camera and object history must describe the same rendered frame: the frame
+        // this view rendered last.
         let previous = self
             .previous
-            .filter(|(frame, _)| *frame == r.frames)
+            .filter(|(frame, _)| *frame == r.view.last_frame)
             .map(|(_, matrix)| matrix);
         let mut frame = Vec::with_capacity(272);
         for m in [

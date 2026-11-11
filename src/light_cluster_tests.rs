@@ -425,7 +425,7 @@ impl Renderer {
     /// The cluster list texture as words in cluster order (`STRIDE` per cluster).
     fn test_cluster_words(&mut self) -> Vec<u32> {
         self.test_drain("LC1 list readback");
-        let texture = &self.lighting.clusters.test_lists();
+        let texture = &self.view.clusters.test_lists();
         let [w, h] = lc::LIST_SIZE;
         let row = (w * 4).next_multiple_of(256);
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -725,8 +725,8 @@ fn gpu_lc1_quarry_night() {
             ..Default::default()
         })
         .unwrap();
-        r.lighting.clusters.legacy_limit = true;
-        r.lighting.clusters.test_reset_selection();
+        r.view.clusters.legacy_limit = true;
+        r.view.clusters.test_reset_selection();
         for _ in 0..16 {
             render(&mut r, &mut asset, &camera);
         }
@@ -736,7 +736,7 @@ fn gpu_lc1_quarry_night() {
             "local_lights_without_direct_shadow":all.len()-1-baseline.shadowed.iter().flatten().count(),
             "time":time(&mut r,&mut asset,&mut|_,_|{})});
         r.set_local_shadows(LocalShadows::default()).unwrap();
-        r.lighting.clusters.legacy_limit = false;
+        r.view.clusters.legacy_limit = false;
         for _ in 0..16 {
             render(&mut r, &mut asset, &camera);
         }
@@ -1271,7 +1271,7 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
                 ..Default::default()
             })
             .unwrap();
-            r.lighting.clusters.legacy_limit = legacy;
+            r.view.clusters.legacy_limit = legacy;
             for _ in 0..24 {
                 let mut draws: Vec<_> = meshes
                     .iter()
@@ -1345,7 +1345,7 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
                 ..Default::default()
             })
             .unwrap();
-            r.lighting.clusters.test_reset_selection();
+            r.view.clusters.test_reset_selection();
             r.set_lighting_and_shadows(
                 &lighting(false),
                 &Shadows {

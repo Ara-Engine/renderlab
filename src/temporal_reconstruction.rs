@@ -826,8 +826,10 @@ fn union(
 pub(crate) struct PlanInputs<'a> {
     pub(crate) settings: Reconstruction,
     pub(crate) budget: ReconstructionShadowBudget,
-    /// Frames rendered so far: history continues only from the frame directly before.
-    pub(crate) rendered_frames: u64,
+    /// The renderer frame this view rendered last: history continues only from it.
+    pub(crate) previous_frame: u64,
+    /// This frame's renderer frame (`FrameId`).
+    pub(crate) frame: u64,
     /// The reconstruction sample index.
     pub(crate) index: u64,
     /// A digest of everything that restarts history when it changes
@@ -983,7 +985,7 @@ impl Planner {
         let continued = self
             .previous
             .as_ref()
-            .filter(|p| p.frame == i.rendered_frames && p.key == key && p.suns.len() == suns.len())
+            .filter(|p| p.frame == i.previous_frame && p.key == key && p.suns.len() == suns.len())
             .map(|p| {
                 // The largest directional-light turn since the previous frame.
                 let turn = p
@@ -1178,7 +1180,7 @@ impl Planner {
         }
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
         self.previous = Some(Previous {
-            frame: i.rendered_frames + 1,
+            frame: i.frame,
             matrix,
             jitter,
             eye,
@@ -1428,7 +1430,10 @@ impl Renderer {
     /// P-RELIT a flickering local light restarted every pixel every frame in the same way;
     /// it now restarts only its restart sphere (`relit_zones`).
     fn reconstruction_key(&self) -> [u8; 32] {
+        // The scene's uploads and this view's own, not other views' primary tables.
         let u = &self.uploads;
+        let (others, mine) = (&self.primary_uploads, &self.view.primary_uploads);
+        let own = |all: u64, others: u64, mine: u64| all - others + mine;
         let state = self.view.primary.as_ref().unwrap();
         let lights: Vec<_> = self
             .lighting
@@ -1474,14 +1479,14 @@ impl Renderer {
         // primary tables, so placement slots are stable; new placements change `instances`
         // and `geometry_generation`.
         for v in [
-            u.environment,
-            u.geometry,
-            u.lut,
-            u.textures,
-            u.materials,
+            own(u.environment, others.environment, mine.environment),
+            own(u.geometry, others.geometry, mine.geometry),
+            own(u.lut, others.lut, mine.lut),
+            own(u.textures, others.textures, mine.textures),
+            own(u.materials, others.materials, mine.materials),
             // MV1: transform/derived-normal uploads move surfaces; they no longer
             // reset all history. Placement identity/topology stays in the key above.
-            u.instances,
+            own(u.instances, others.instances, mine.instances),
         ] {
             hash.update(v.to_ne_bytes());
         }
@@ -1653,7 +1658,8 @@ impl Renderer {
             .prepare(PlanInputs {
                 settings: self.reconstruction,
                 budget: self.reconstruction_shadow_budget,
-                rendered_frames: self.frames,
+                previous_frame: self.view.last_frame,
+                frame: self.frames + 1,
                 index,
                 key,
                 lights: &self.lighting.source_lights,
@@ -1825,7 +1831,8 @@ mod tests {
         PlanInputs {
             settings: Reconstruction::default(),
             budget: ReconstructionShadowBudget::default(),
-            rendered_frames: frame,
+            previous_frame: frame,
+            frame: frame + 1,
             index: frame,
             key: [7; 32],
             lights,

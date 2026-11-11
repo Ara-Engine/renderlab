@@ -320,6 +320,16 @@ impl LightClusters {
     pub fn collect(&mut self, completed: u64) {
         self.retired.retain(|(last, _)| *last > completed);
     }
+    /// A new view's clusters: these settings, its own grid, selection and atlas, and
+    /// generations from `generations` (`ViewId::generations`).
+    pub fn fork(&self, device: &PipelineDevice, ledger: &Ledger, generations: u64) -> Self {
+        Self {
+            enabled: self.enabled,
+            settings: self.settings,
+            generation: generations,
+            ..Self::new(device, ledger)
+        }
+    }
     #[cfg(test)]
     pub fn test_lists(&self) -> &wgpu::Texture {
         &self._lists
@@ -338,19 +348,23 @@ impl Renderer {
     pub fn set_local_shadows(&mut self, settings: LocalShadows) -> Result<(), Error> {
         self.check_fault()?;
         settings.validate(self.device.limits().max_texture_dimension_2d)?;
-        self.lighting.clusters.settings = settings;
+        for view in self.views_mut() {
+            view.clusters.settings = settings;
+        }
         Ok(())
     }
     pub fn local_shadows(&self) -> LocalShadows {
-        self.lighting.clusters.settings
+        self.view.clusters.settings
     }
     /// LC1 clustered culling, on by default. Off, every receiver walks every light (the
     /// pre-LC1 loop): for comparisons and debugging.
     pub fn set_light_clusters(&mut self, enabled: bool) {
-        self.lighting.clusters.enabled = enabled;
+        for view in self.views_mut() {
+            view.clusters.enabled = enabled;
+        }
     }
     pub fn light_cluster_stats(&self) -> LightClusterStats {
-        self.lighting.clusters.stats.clone()
+        self.view.clusters.stats.clone()
     }
     /// Per admitted lit frame, before `upload_lighting`: choose the shadowed lights and
     /// mark their records (kind.w), write the shading header and the kernel uniform, and
@@ -365,7 +379,7 @@ impl Renderer {
         uploads: &mut UploadBytes,
     ) -> LocalFrame {
         let lights = &self.lighting.source_lights;
-        let state = &mut self.lighting.clusters;
+        let state = &mut self.view.clusters;
         let count = state.settings.count;
         for slot in &mut state.slots {
             if slot.is_some_and(|i| {
@@ -666,7 +680,7 @@ impl Renderer {
     ) {
         let generation = self.lighting.generation;
         let lights = self.lighting.light_buffer().clone();
-        let state = &mut self.lighting.clusters;
+        let state = &mut self.view.clusters;
         if frame.dispatch {
             if state.bind.as_ref().is_none_or(|(g, _)| *g != generation) {
                 let bind = self.ledger.own(
@@ -700,7 +714,7 @@ impl Renderer {
             pass.set_bind_group(0, &*state.bind.as_ref().unwrap().1, &[]);
             pass.dispatch_workgroups(lc::CLUSTERS.div_ceil(64), 1, 1);
         }
-        let state = &self.lighting.clusters;
+        let state = &self.view.clusters;
         for (layer, casters) in &frame.redraw {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("LC1 local shadow face"),

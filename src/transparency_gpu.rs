@@ -1697,7 +1697,13 @@ impl Renderer {
             size: [size.width, size.height],
             sun,
             fit,
-            step: self.transparency.step,
+            // A later view of the tick moves nothing: its update only relights the
+            // particles for its own sun map fit (`tp_incident`).
+            step: if self.tick_work {
+                self.transparency.step
+            } else {
+                0.0
+            },
             reflect,
             scene: if traced {
                 self.view.primary.as_ref().unwrap().scene
@@ -1750,10 +1756,15 @@ impl Renderer {
         }
         self.queue.write_buffer(&gpu.draws, 0, &draw_slots);
         // Emitters' spawns for this step: once per tick (`Renderer::begin_tick`); a later view
-        // of the same tick only sorts and draws the particles.
+        // of the same tick spawns nothing.
         let step = f64::from(self.transparency.step);
-        let simulate = self.tick_work;
-        for e in self.transparency.emitters.iter_mut().filter(|_| simulate) {
+        for e in &mut self.transparency.emitters {
+            if !self.tick_work {
+                let textured = e.sprite.is_some();
+                let none = e.params.uniform(e.spawned as u32, 0, 0, textured, 0.0);
+                self.queue.write_buffer(&e.uniform, 0, &none);
+                continue;
+            }
             // A new emitter's first step spawns its prewarm span (no longer than a life:
             // older particles would be dead), spread over that span, plus its burst.
             // The burst is born this step; rate births fill the prewarm window (or the
@@ -1892,10 +1903,8 @@ impl Renderer {
             pass.set_bind_group(3, self.lighting.bind(), &[]);
             for e in &self.transparency.emitters {
                 pass.set_bind_group(0, &*e.sim, &[]);
-                if self.tick_work {
-                    pass.set_pipeline(&p.update);
-                    pass.dispatch_workgroups(e.params.capacity.div_ceil(64), 1, 1);
-                }
+                pass.set_pipeline(&p.update);
+                pass.dispatch_workgroups(e.params.capacity.div_ceil(64), 1, 1);
                 pass.set_pipeline(&p.sort);
                 pass.dispatch_workgroups(1, 1, 1);
             }

@@ -538,6 +538,9 @@ pub struct Renderer {
     /// frame being prepared runs that work.
     tick: u64,
     worked_tick: u64,
+    /// Every view's `ViewState::primary_uploads`, summed: the part of `uploads` that is
+    /// per view (TR1's key reads the scene's part and the selected view's own).
+    primary_uploads: UploadBytes,
     explicit_ticks: bool,
     tick_work: bool,
     device: PipelineDevice,
@@ -1054,6 +1057,7 @@ impl Renderer {
             view: ViewState::new(
                 ViewId(0),
                 shadows,
+                light_cluster_gpu::LightClusters::new(&device, &ledger),
                 atmosphere_gpu::AtmosphereView::new(&device, &ledger, 0),
                 fresh,
                 primary,
@@ -1064,6 +1068,7 @@ impl Renderer {
             next_view: 1,
             tick: 0,
             worked_tick: 0,
+            primary_uploads: UploadBytes::default(),
             explicit_ticks: false,
             tick_work: true,
             device,
@@ -3183,6 +3188,8 @@ impl Renderer {
             result?;
             uploads.add(primary);
             self.uploads.add(primary);
+            self.view.primary_uploads.add(primary);
+            self.primary_uploads.add(primary);
             if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                 self.prepare_visibility_buffer(draws, camera, color.size())?;
             }

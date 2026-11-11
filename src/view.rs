@@ -11,7 +11,8 @@
 //! them as a resize would, and view 0 counts exactly as a single-view renderer did.
 use super::{
     Depth, PostGpu, ReconstructionState, Renderer, ShadowState, atmosphere_gpu::AtmosphereView,
-    fresh_shadow_gpu::FreshState, lighting_gpu::Hdr, primary_ray_gpu::PrimaryState,
+    fresh_shadow_gpu::FreshState, light_cluster_gpu::LightClusters, lighting_gpu::Hdr,
+    primary_ray_gpu::PrimaryState,
     temporal_reconstruction::Upscale, transparency_gpu, virtual_shadow_gpu::VirtualState,
     visibility_buffer::VisibilityBuffer,
 };
@@ -49,6 +50,9 @@ pub(super) struct ViewState {
     /// `SoftShadows::Virtual` state, created by the view's first frame (N8): its clipmap
     /// placement, page requests and pages.
     pub virtual_shadows: Option<VirtualState>,
+    /// LC1: the light cluster grid (screen space), the local-shadow selection with its
+    /// transitions, and the atlas holding the selected lights' maps.
+    pub clusters: LightClusters,
     /// The camera volume and fog histories (`atmosphere_gpu.rs`).
     pub atmosphere: AtmosphereView,
     /// TR1 history (created by the first reconstructed frame), the next frame's sample
@@ -64,11 +68,14 @@ pub(super) struct ViewState {
     /// The renderer frame this view last submitted (`FrameId`): object motion vectors
     /// reproject from that frame's placements (`InstanceState::previous_models`).
     pub last_frame: u64,
+    /// What this view's primary preparation uploaded (its geometry and instance tables).
+    pub primary_uploads: crate::UploadBytes,
 }
 impl ViewState {
     pub fn new(
         key: ViewId,
         shadows: ShadowState,
+        clusters: LightClusters,
         atmosphere: AtmosphereView,
         fresh: Option<FreshState>,
         primary: Option<PrimaryState>,
@@ -80,6 +87,7 @@ impl ViewState {
             target_generation: key.generations(),
             post: None,
             shadows,
+            clusters,
             fresh,
             primary,
             visibility_buffer: None,
@@ -92,6 +100,7 @@ impl ViewState {
             transparency_targets: None,
             transparency_reflections: None,
             last_frame: 0,
+            primary_uploads: Default::default(),
         }
     }
 }
@@ -107,6 +116,9 @@ impl Renderer {
             key,
             self.view
                 .shadows
+                .fork(&self.device, &self.ledger, key.generations()),
+            self.view
+                .clusters
                 .fork(&self.device, &self.ledger, key.generations()),
             AtmosphereView::new(&self.device, &self.ledger, key.generations()),
             self.view.fresh.as_ref().map(FreshState::fork),
@@ -198,6 +210,7 @@ impl Renderer {
 impl ViewState {
     pub(super) fn collect(&mut self, completed: u64) {
         self.shadows.collect(completed);
+        self.clusters.collect(completed);
         if let Some(fresh) = &mut self.fresh {
             fresh.collect(completed);
         }
