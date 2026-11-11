@@ -133,8 +133,10 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str, checks: Checks) -> Result<Vec<
 /// a kernel that reads one before writing it is then undefined), `loops-unbounded` and
 /// `queries-untracked` (naga's loop bounds and ray-query state tracking, which only
 /// [`Checks::User`] modules carry, as in the wgpu renderer). A frame is evidence under
-/// a variant only if it is byte for byte the frame without it. The shader cache keys
-/// on the value.
+/// a variant only if it is byte for byte the frame without it. `bins-root` is not
+/// about checks: the binning kernel reads its five buffers' heap indices from root
+/// words, not through its packet (`packet_spirv::lower`, `HeapBindings::roots`). The
+/// shader cache keys on the value.
 #[derive(Clone, Copy, Default)]
 struct Variant {
     fused: bool,
@@ -142,6 +144,7 @@ struct Variant {
     workgroup_unzeroed: bool,
     loops_unbounded: bool,
     queries_untracked: bool,
+    bins_root: bool,
 }
 impl Variant {
     fn from_environment() -> Self {
@@ -153,8 +156,15 @@ impl Variant {
             workgroup_unzeroed: has("workgroup-unzeroed"),
             loops_unbounded: has("loops-unbounded"),
             queries_untracked: has("queries-untracked"),
+            bins_root: has("bins-root"),
         }
     }
+}
+/// Whether the binning kernel reads its buffers' heap indices from root words
+/// (`RENDERLAB_ARA_SPV=bins-root`), on the Vulkan path. Metal's module reads only the
+/// packet's two words, whatever the other root words hold.
+pub(crate) fn bins_root() -> bool {
+    Variant::from_environment().bins_root
 }
 /// `RENDERLAB_ARA_SPV`, empty when unset: part of the shader cache's salt.
 pub(crate) fn variant_name() -> String {
@@ -186,7 +196,8 @@ fn adapt(pass: Pass, wgsl: &str) -> Result<String> {
             wgsl,
             &super::heap_interface::from_module(&original)?,
         )?;
-        return super::packet_spirv::adapt(&source, &original);
+        let root_buffers = pass == Pass::ProgramBins && Variant::from_environment().bins_root;
+        return super::packet_spirv::adapt(&source, &original, root_buffers);
     }
     if matches!(pass, Pass::MeshDiagnostic) {
         return mesh_interface(&body, &original);

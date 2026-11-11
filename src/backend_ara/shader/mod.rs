@@ -723,6 +723,7 @@ pub(super) fn bounds_checks() -> naga::proc::BoundsCheckPolicies {
 
 #[cfg(target_os = "macos")]
 pub(crate) use metal::from_source as msl_source;
+pub(crate) use spirv::bins_root;
 #[cfg(not(target_os = "macos"))]
 pub(crate) use spirv::from_source as spirv_source;
 pub(crate) use spirv::variant_name as spirv_variant;

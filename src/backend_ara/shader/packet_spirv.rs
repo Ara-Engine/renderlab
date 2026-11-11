@@ -3,9 +3,9 @@ use super::spirv::rewrite_globals;
 use anyhow::{Context, Result};
 use std::collections::BTreeMap;
 
-pub(super) fn adapt(source: &str, module: &naga::Module) -> Result<String> {
+pub(super) fn adapt(source: &str, module: &naga::Module, root_buffers: bool) -> Result<String> {
     let inputs = super::heap_interface::from_module(module)?;
-    lower(source, module, &inputs, false)
+    lower(source, module, &inputs, false, root_buffers)
 }
 pub(super) fn adapt_ray_source(source: &str, inputs: &[super::ShaderInput]) -> Result<String> {
     // This path rewrites the original text, so a local named like a resource global
@@ -21,21 +21,31 @@ pub(super) fn adapt_ray_source(source: &str, inputs: &[super::ShaderInput]) -> R
     let original = super::parse(source)?;
     let moved = super::ray_source::relocate_groups(source, &original)?;
     let module = super::parse(&moved)?;
-    lower(&moved, &module, inputs, true)
+    lower(&moved, &module, inputs, true, false)
 }
 fn lower(
     source: &str,
     module: &naga::Module,
     inputs: &[super::ShaderInput],
     preserve_declarations: bool,
+    root_buffers: bool,
 ) -> Result<String> {
     use super::{InputKind, SampleType};
     use ara_gpu::texture::ViewDimension;
     let mut names = BTreeMap::new();
     let mut declarations = String::new();
     let mut arrays = Vec::new();
+    // MEASUREMENT ONLY (`RENDERLAB_ARA_SPV=bins-root`): each plain buffer's heap index
+    // from a root word, in input order from `w2`, instead of from the packet; images
+    // and the rest still come from the packet. `HeapBindings::roots` fills the words.
+    let mut root_word = 2;
     for (i, input) in inputs.iter().enumerate() {
-        let slot = format!("ara_packet[ara_root.w0].values[(ara_root.w1 >> 2u) + {i}u]");
+        let mut slot = format!("ara_packet[ara_root.w0].values[(ara_root.w1 >> 2u) + {i}u]");
+        if root_buffers && matches!(input.kind, InputKind::Buffer { .. }) {
+            anyhow::ensure!(root_word < 8, "more plain buffers than root words");
+            slot = format!("ara_root.w{root_word}");
+            root_word += 1;
+        }
         match input.kind {
             InputKind::AccelerationStructure => {
                 declarations.push_str(&format!("@group(0) @binding({}) var ara_acceleration_{i}:binding_array<acceleration_structure>;\n",2200+i));
