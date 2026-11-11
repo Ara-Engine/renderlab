@@ -934,3 +934,15 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
 ## Specks after a game-scene cut (root, 2026-11-11)
 
 **OPEN (owner: root looks once now; the cut unit at the latest).** In the game scene on non-RT, the frames after a camera cut (frames 25 and 28 of P-RELIT's cut case, 720p) show single-pixel bright specks scattered on the open ground. They are in the no-history control, in main and in the P-RELIT branch alike, so they predate P-RELIT. Stray white pixels after cuts are on the owner's watch list. Next: check RT, find which pass writes them (GI gather cap after a cold cache, or glossy), and how many frames they last.
+
+## RT cost of a small transparent surface (Ara integration thread, Showcase, 2026-11-11)
+
+**OPEN, cause not known.** Showcase through the Ara bridge, RTX 4070 SUPER, 1080p, RT path, Renderlab pin a0094f6a6e4. Two lens-sized objects sent through transparency (the binoculars' glass and a lantern's glass; both turned out to be opaque and are now classified so) raised `visibility` from about 4.0 ms to 6.6-7.2 ms and `transparency` from 0.54 to 1.47 ms: about 4 ms a frame for two small surfaces. The base's own `visibility` moves 1.5 ms between identical runs, so one small transparent object costs roughly 1.5-3 ms of RT visibility plus 0.5 ms of transparency. Real glass will pay that.
+
+- **Reproduction:** Showcase with those two materials forced to BLEND, pass log on, against the same run with them opaque.
+- **Why, in one line:** not established. The cost lands in the visibility pass, not in the transparency pass, which suggests a frame-wide change in how every ray is traced once any transparent draw exists, not work proportional to the glass's pixels.
+- **First checks, cheapest first:**
+  1. `primary_frame.sided.x` (`shaders/primary_trace.wgsl:107`): one single-sided draw switches every primary ray from `RAY_FLAG_FORCE_OPAQUE` to the candidate loop. If the transparent draws are what set it on Showcase, that is the cause and the fix is per-instance opacity flags.
+  2. Whether transparent draws enter the TLAS as non-opaque casters, so every sun-shadow ray pays candidate handling.
+  3. Whether the cost follows the glass's screen coverage at all (move the camera until the glass is off screen).
+- **When:** after the non-RT work, or sooner if check 1 or 2 confirms a frame-wide switch.
