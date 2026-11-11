@@ -156,10 +156,10 @@ EXAMPLES = ("game_scene", "p_yard_capture")
 
 def build(name, tree=None):
     """One Cargo command in TREE (default: this checkout): `lib` builds the lib test binary, any
-    other NAME the release examples into bin/NAME with a build.json naming the commit."""
+    other NAME the release examples into bin/NAME (lib-NAME: the lib test binary into bin/lib-NAME) with a build.json naming the commit."""
     r = runner()
     tree = Path(tree) if tree else REPO
-    lib = name == "lib"
+    lib = name.startswith("lib")
     command = (["cargo", "test", "--locked", "-j", "2", "--lib", "--no-run", "--message-format=json-render-diagnostics"] if lib else
                ["cargo", "build", "--release", "--locked", "-j", "2"] + [a for e in EXAMPLES for a in ("--example", e)])
     (WORK / "tmp").mkdir(parents=True, exist_ok=True)

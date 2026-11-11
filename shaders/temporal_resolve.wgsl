@@ -333,7 +333,8 @@ struct Tr1History { colour:vec3<f32>, weight:f32, window:f32 };
 // (tr1_continue), as on a frame that restarts every pixel.
 fn tr1_restarts(s:Tr1Surface)->bool {
     if s.id==0u {return false;}
-    return (!tr1_moving(s.id-1u) && tr1_caster_shadow(s.point.xyz)) || tr1_relit(s.point.xyz);
+    // The zone tests first: both are off on most frames, and tr1_moving reads the placement.
+    return (tr1_caster_shadow(s.point.xyz) && !tr1_moving(s.id-1u)) || tr1_relit(s.point.xyz);
 }
 
 fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
