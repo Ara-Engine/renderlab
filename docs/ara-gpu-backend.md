@@ -2547,3 +2547,40 @@ cache had passed.
 Still one program for the cache's cells: in a frame of several programs the renderer
 selects each draw's cell program (the table's fourth word) and the port shades every
 cell with the first program's.
+
+## The first timing against wgpu (Radeon, d5f9cf8) and what it found
+
+`ara_frame --scene game --supported --timing`, 1280x720, 60 frames, three interleaved
+pairs on the Radeon 760M: wgpu's median frame 86 to 89 ms, the backend's 119 to 120 ms.
+The port was 33 ms, 38%, slower a frame, with 17.4 ms building the frame and 100.9 ms
+on the GPU (medians of poses 8 to 59), and 1.2 s for the first frame of every process.
+That run had one draw a placement (29 draws); every backend timing line from it is
+superseded by the batched frame.
+
+**Two costs it exposed that were the harness's.** An Interactive traced frame made its
+repair queue anew each frame, zero-filled and uploaded: a 16-byte header and 36 bytes a
+pixel, 33 MB at 1280x720, where the renderer clears the header alone. It also
+zero-filled and uploaded the camera volume and the fog's scatter volume, 18 MB, though
+fog is not assembled and the aerial pass rewrites only its own slices. 51 MB of fill,
+copy and upload a frame. The sequence now keeps all three (`Kept::repairs`,
+`SkyTables::volumes`): a frame clears the queue's header, and the volumes keep the
+zeros they were made with. On Metal building the frame goes from 7 ms to 3.4 ms and
+the last frame is byte-identical. The Radeon's number is not known yet.
+
+**The split.** A timed sequence (`Frames::without_images`) wraps its submission in one
+ara-gpu completion scope and returns the device's timestamp for every labelled pass
+(`FrameTimes::passes`). `--timing` prints `timing split, medians in ms` on either
+layer: the backend's passes with `record_ms` and `gpu_ms`, or the wgpu renderer's own
+GPU samples from `Engine::poll` (render span, shading, camera rays, visibility,
+reconstruction, present, shadow generation). What `gpu_ms` holds beyond the passes' sum
+is unlabelled: structure builds, uploads, copies. The renderer's samples have no line
+for the cache, so a feature's cost on both layers comes from `--timing --without NAME`
+by difference. On Metal the per-pass attribution is not usable (the device reports a
+46 ms cache stage beside a 0.01 ms trace: its timestamps do not follow the command
+stream); on Vulkan they do.
+
+**The first frame of every process.** The cooked shader code is reused across
+processes and ara-gpu persists its Vulkan pipeline cache in the run's device directory.
+What repeats in each process is reflecting every program's WGSL once (kept in memory
+only) and creating each pipeline object: 230 ms of the first frame on the Mac, about a
+second on the Radeon. Persisting the reflection beside the cooked code is not done.
