@@ -1484,9 +1484,30 @@ on for both layers with a fixed 2^17-slot table, writes each frame's whole table
 and digests of 256 chunks in `frame.json`. `--still` holds pose 0. `--compare` reports
 the slot count, then per frame the first differing word and what it holds, and the
 cells by key: present on one side only, differing in direction bits, differing in
-stored SH. Without both raw tables it names the first differing chunk from the
-digests. A still sequence idles from its ninth frame, so the moving sequence is the
+stored SH. A still sequence idles from its ninth frame, so the moving sequence is the
 one that keeps comparing.
+
+**The acceptance rule.** Two layers' tables are not expected to be bit-identical: hit
+positions and ray directions differ by rounding between shader compilers and drivers,
+which now and then moves a pixel across a cell or level boundary or flips a ray that
+grazes an edge. `--compare` ends with one line, `cache tables: PASS` or `FAIL`, and
+exits nonzero on a fail. A frame passes when all four hold; a comparison passes when
+every frame does.
+
+| | Criterion | Bound | What a miss would mean |
+|---|---|---|---|
+| 1 | Header: integer words equal (the frame stamp among them), float words within 2 ulp | exact | The two layers planned different frames |
+| 2 | Cells present, or valid, on one side only, of the larger side's cells | 0.5% | A stage is missing cells, not boundary pixels |
+| 3 | Differing direction bits over cells valid on both sides, of their rays | 0.1% | A wrong ray origin or basis, not edge grazers |
+| 4 | Every SH coefficient of cells valid on both sides with equal bits, of the cell's scale | 1% | A wrong weight, not f16 storage or a sampled environment |
+
+The bounds were chosen before any cross-layer run existed, from what each criterion
+should absorb; every frame's line prints the measured figure beside its bound, so the
+first gate run shows how much room there is and the bounds can be tightened to it.
+Without both raw tables equal digests pass and anything else is `NO VERDICT`, also a
+nonzero exit. Perturbing one frame of a Metal run confirms each path: one flipped bit
+passes and is reported, 200 dropped cells, a changed header word and a 5% SH scale
+each fail with their reason.
 
 ```sh
 cargo run --example ara_frame -- --backend wgpu --gi --atmosphere --frames 12 --output out/wgpu-gi

@@ -33,8 +33,10 @@
 //! `table-NNN.u32` (little-endian words, large: keep them local) and summarised in
 //! `frame.json` with digests of 256 equal chunks. `--compare` reports the slot count
 //! and, frame by frame, how the tables differ: the first differing word and what it
-//! holds, and the cells by key (present on one side only, direction bits, SH). Without
-//! the raw tables it falls back to the digests and names the first differing chunk.
+//! holds, and the cells by key (present on one side only, direction bits, SH). It ends
+//! with one verdict line, PASS or FAIL against the acceptance rule documented at
+//! `HEADER_ULPS` below, and exits nonzero on FAIL. Without the raw tables it falls back
+//! to the digests: equal digests pass, anything else is NO VERDICT.
 //! Run both a moving and a `--still` sequence: a still view goes idle after eight
 //! frames, and from then on its tables say nothing new.
 //!
@@ -628,7 +630,11 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
         }
         println!("last frame:");
     }
-    compare_tables(a, b, &ja, &jb)?;
+    // The verdict on the cache tables decides the exit status, after the images print.
+    let verdict = |failure: Option<String>| -> Result<(), Failure> {
+        failure.map_or(Ok(()), |f| Err(f.into()))
+    };
+    let tables = compare_tables(a, b, &ja, &jb)?;
     // Relative for linear radiance (floored so black does not dominate); display bytes
     // are compared in levels.
     let (ga, gb) = (
@@ -690,7 +696,7 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
         fs::read(b.join("frame.rgba16f")),
     ) else {
         println!("raw frames not both present; grid comparison only");
-        return Ok(());
+        return verdict(tables);
     };
     let (fa, fb) = (floats(&ra), floats(&rb));
     if fa.len() != fb.len() {
@@ -739,7 +745,7 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
         over[1] as f64 / pixels as f64 * 100.,
         over[2] as f64 / pixels as f64 * 100.
     );
-    Ok(())
+    verdict(tables)
 }
 
 /// A cache table as `Renderer::indirect_table` returns it: 64 header words, a 24-word
@@ -849,21 +855,47 @@ fn chunk(words: usize, index: usize) -> std::ops::Range<usize> {
     index * size..end
 }
 
-/// The cache tables of two `--gi` runs, frame by frame: the slot count, the first
-/// differing word, and how the cells differ by key.
+/// The acceptance rule for two layers' cache tables. Bit-identical tables are not
+/// expected: hit positions and ray directions differ by rounding between shader
+/// compilers and drivers, which moves a pixel across a cell or level boundary now and
+/// then and flips a ray that grazes an edge. A frame passes when all four hold, and a
+/// comparison passes when every frame does:
+///
+/// 1. **Same plan.** The header's integer words are equal (the frame stamp among them)
+///    and its float words are within `HEADER_ULPS`: the header is computed on the CPU
+///    by code both layers share, so only another machine's `tan` may move it.
+/// 2. **Same cells.** Keys present, or valid, on one side only are at most
+///    `ONE_SIDED_CELLS` of the larger side's cells: boundary pixels, not a missing stage.
+/// 3. **Same rays.** Over cells valid on both sides, differing direction bits are at
+///    most `FLIPPED_RAYS` of their rays: edge grazers, not a wrong origin or basis.
+/// 4. **Same values.** Every cell valid on both sides with equal direction bits has
+///    each SH coefficient within `SH_BOUND` of its scale: f16 storage and a sampled
+///    environment, not a wrong weight.
+///
+/// The bounds were set before any cross-layer run existed; the output prints the
+/// measured figure beside each so they can be tightened.
+const HEADER_ULPS: u32 = 2;
+const HEADER_FLOATS: [usize; 7] = [4, 5, 8, 9, 10, 12, 25];
+const ONE_SIDED_CELLS: f64 = 0.005;
+const FLIPPED_RAYS: f64 = 0.001;
+const SH_BOUND: f32 = 0.01;
+
+/// The cache tables of two `--gi` runs, frame by frame, against the acceptance rule
+/// above. Prints the slot count, each frame's measurements and first differing word,
+/// and one verdict line; returns the failure, if any, for the exit status.
 fn compare_tables(
     a: &Path,
     b: &Path,
     ja: &serde_json::Value,
     jb: &serde_json::Value,
-) -> Result<(), Failure> {
+) -> Result<Option<String>, Failure> {
     let frames = |j: &serde_json::Value| -> Vec<serde_json::Value> {
         j["sequence"].as_array().cloned().unwrap_or_default()
     };
     let (sa, sb) = (frames(ja), frames(jb));
     let has = |s: &[serde_json::Value]| s.iter().any(|f| !f["table"].is_null());
     match (has(&sa), has(&sb)) {
-        (false, false) => return Ok(()),
+        (false, false) => return Ok(None),
         (true, true) => {}
         _ => return Err("only one run has cache tables".into()),
     }
@@ -878,7 +910,9 @@ fn compare_tables(
                 .collect(),
         )
     };
-    let mut first = None;
+    // The first differing word, the first frame that fails the rule, and whether some
+    // differing frame could not be judged for want of its raw tables.
+    let (mut first, mut failed, mut unjudged) = (None, None, false);
     for (pose, (fa, fb)) in sa.iter().zip(&sb).enumerate() {
         let (ta, tb) = (&fa["table"], &fb["table"]);
         if ta["slots"] != tb["slots"] || ta["words"] != tb["words"] {
@@ -900,8 +934,7 @@ fn compare_tables(
         );
         let (Some(wa), Some(wb)) = (read(a, pose), read(b, pose)) else {
             // Digests only: the first differing chunk bounds the first differing word.
-            let differing = (0..TABLE_CHUNKS).find(|i| ta["chunks"][i] != tb["chunks"][i]);
-            match differing {
+            match (0..TABLE_CHUNKS).find(|i| ta["chunks"][i] != tb["chunks"][i]) {
                 Some(i) => {
                     let range = chunk(ta["words"].as_u64().unwrap_or(0) as usize, i);
                     println!(
@@ -910,36 +943,65 @@ fn compare_tables(
                     );
                     first
                         .get_or_insert((pose, format!("a word in {}..{}", range.start, range.end)));
+                    unjudged = true;
                 }
-                None => println!("pose {pose}: {counts}; digests equal"),
+                None => println!("pose {pose}: {counts}; digests equal: pass"),
             }
             continue;
         };
         let (xa, xb) = (Table::new(&wa)?, Table::new(&wb)?);
         let differing: Vec<usize> = (0..wa.len()).filter(|i| wa[*i] != wb[*i]).collect();
         let Some(&word) = differing.first() else {
-            println!("pose {pose}: {counts}; tables identical");
+            println!("pose {pose}: {counts}; tables identical: pass");
             continue;
         };
         first.get_or_insert((pose, format!("word {word}: {}", xa.field(word))));
-        // By key, since the same cell may sit in another slot of its bucket.
+        let mut reasons = Vec::new();
+        // 1. The plan.
+        let header = (0..64).all(|i| {
+            wa[i] == wb[i]
+                || (HEADER_FLOATS.contains(&i)
+                    && (wa[i] ^ wb[i]) >> 31 == 0
+                    && wa[i].abs_diff(wb[i]) <= HEADER_ULPS)
+        });
+        if !header {
+            reasons.push("the headers differ".to_owned());
+        }
+        // 2. The cells, by key: the same cell may sit in another slot of its bucket.
         let (ca, cb) = (xa.cells(), xb.cells());
+        let valid = |table: &Table, slot: usize| table.hot(slot)[0] & 0x8000_0000 != 0;
         let common: Vec<_> = ca
             .iter()
             .filter_map(|(key, slot)| Some((*slot, *cb.get(key)?)))
             .collect();
-        let (mut moved, mut bits, mut rays, mut values, mut worst) = (0, 0, 0u32, 0, 0f32);
-        for &(slot_a, slot_b) in &common {
-            moved += usize::from(slot_a != slot_b);
+        let both: Vec<_> = common
+            .iter()
+            .copied()
+            .filter(|(sa, sb)| valid(&xa, *sa) && valid(&xb, *sb))
+            .collect();
+        let validity = common
+            .iter()
+            .filter(|(sa, sb)| valid(&xa, *sa) != valid(&xb, *sb))
+            .count();
+        let one_sided = ca.len() + cb.len() - 2 * common.len() + validity;
+        let cells = ca.len().max(cb.len()).max(1);
+        let one_sided_share = one_sided as f64 / cells as f64;
+        if one_sided_share > ONE_SIDED_CELLS {
+            reasons.push(format!("{one_sided} cells are on one side only"));
+        }
+        // 3 and 4. Direction bits, then the SH where the bits agree.
+        let (mut flipped, mut worst, mut compared) = (0u64, 0f32, 0usize);
+        for &(slot_a, slot_b) in &both {
             let (cold_a, cold_b) = (xa.cold(slot_a), xb.cold(slot_b));
-            let flipped =
+            let rays =
                 (cold_a[12] ^ cold_b[12]).count_ones() + (cold_a[13] ^ cold_b[13]).count_ones();
-            bits += usize::from(flipped != 0);
-            rays += flipped;
+            flipped += u64::from(rays);
+            if rays != 0 {
+                continue;
+            }
             let (hot_a, hot_b) = (xa.hot(slot_a), xb.hot(slot_b));
-            // The SH in cached units: each half times its record's scale.
-            let sh = |hot: &[u32]| -> Vec<f32> {
-                let scale = f32::from_bits(hot[1]);
+            let (scale_a, scale_b) = (f32::from_bits(hot_a[1]), f32::from_bits(hot_b[1]));
+            let halves = |hot: &'_ [u32], scale: f32| -> Vec<f32> {
                 hot[2..16]
                     .iter()
                     .flat_map(|w| [*w as u16, (*w >> 16) as u16])
@@ -947,26 +1009,65 @@ fn compare_tables(
                     .map(|h| decode_f16(h) * scale)
                     .collect()
             };
-            let difference = sh(hot_a)
+            let difference = halves(hot_a, scale_a)
                 .iter()
-                .zip(sh(hot_b))
+                .zip(halves(hot_b, scale_b))
                 .map(|(x, y)| (x - y).abs())
                 .fold(0f32, f32::max);
-            values += usize::from(hot_a[1..16] != hot_b[1..16]);
-            worst = worst.max(difference);
+            worst = worst.max(difference / scale_a.max(scale_b).max(1e-30));
+            compared += 1;
+        }
+        let flipped_share = flipped as f64 / (both.len().max(1) as f64 * 64.);
+        if flipped_share > FLIPPED_RAYS {
+            reasons.push(format!("{flipped} direction bits differ"));
+        }
+        if worst.is_nan() || worst > SH_BOUND {
+            reasons.push(format!(
+                "an SH coefficient differs by {worst:.2e} of its scale"
+            ));
         }
         println!(
-            "pose {pose}: {counts}; {} words differ, first at {word} ({}); cells by key: {} in both ({moved} in another slot), {} only in the first, {} only in the second; of those in both, {bits} differ in direction bits ({rays} rays), {values} in stored SH (worst coefficient difference {worst:.2e})",
+            "pose {pose}: {counts}; {} words differ, first at {word} ({}); header {}; one-sided cells {one_sided} of {cells} ({:.3}%, bound {:.1}%); differing direction bits {flipped} over {} cells valid in both ({:.4}%, bound {:.2}%); worst SH coefficient {worst:.2e} of its scale over {compared} cells with equal bits (bound {SH_BOUND:.0e}): {}",
             differing.len(),
             xa.field(word),
-            common.len(),
-            ca.len() - common.len(),
-            cb.len() - common.len()
+            if header { "same" } else { "DIFFERS" },
+            one_sided_share * 100.,
+            ONE_SIDED_CELLS * 100.,
+            both.len(),
+            flipped_share * 100.,
+            FLIPPED_RAYS * 100.,
+            if reasons.is_empty() { "pass" } else { "FAIL" }
         );
+        if !reasons.is_empty() {
+            failed.get_or_insert(format!("frame {pose}: {}", reasons.join("; ")));
+        }
     }
-    match first {
-        Some((pose, what)) => println!("cache tables: first difference in frame {pose}, {what}"),
-        None => println!("cache tables: identical in every frame"),
+    if let Some((pose, what)) = &first {
+        println!("cache tables: first difference in frame {pose}, {what}");
     }
-    Ok(())
+    let rule = format!(
+        "same header, one-sided cells within {:.1}%, differing direction bits within {:.2}%, SH within {SH_BOUND:.0e} of scale where bits agree, in every frame",
+        ONE_SIDED_CELLS * 100.,
+        FLIPPED_RAYS * 100.
+    );
+    Ok(match (failed, unjudged, first) {
+        (Some(failure), ..) => {
+            println!("cache tables: FAIL ({failure}). Rule: {rule}");
+            Some(format!("cache tables fail the acceptance rule: {failure}"))
+        }
+        (None, true, _) => {
+            println!(
+                "cache tables: NO VERDICT. A frame differs and its raw tables are not both present. Rule: {rule}"
+            );
+            Some("cache tables differ and could not be judged without the raw tables".to_owned())
+        }
+        (None, false, Some(_)) => {
+            println!("cache tables: PASS. Rule: {rule}");
+            None
+        }
+        (None, false, None) => {
+            println!("cache tables: PASS, identical in every frame");
+            None
+        }
+    })
 }
