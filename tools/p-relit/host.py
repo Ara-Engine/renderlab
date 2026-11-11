@@ -115,7 +115,9 @@ def runner():
 # Root budget 2026-11-10 (sole unit): start builds and leases at 10 GiB, stop below 5 GiB.
 BUILD_MIB = 10240
 LEASE_MIB = 10240
-QUARRY_MIB = 14336  # quarry leases (labels q-...): 14 GiB (P-RELIT brief)
+# Quarry leases (labels q-...): 14 GiB (P-RELIT brief). RENDERLAB_QUARRY_WINDOW_MB="START,FLOOR" is an
+# owner-granted window's lower start bar; scripts/m6-film-run.py reads the same variable.
+QUARRY_MIB = int(float(os.environ.get("RENDERLAB_QUARRY_WINDOW_MB", "14336,0").split(",")[0]))
 
 
 def ready(r, label):
