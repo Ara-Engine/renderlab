@@ -859,6 +859,7 @@ fn ara_frame(
             &cache,
             &forward::ForwardScene {
                 meshes: None,
+                materials: None,
                 instances: None,
                 objects: &objects,
                 lighting: &fixture.lighting,

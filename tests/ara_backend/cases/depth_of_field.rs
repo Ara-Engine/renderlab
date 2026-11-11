@@ -84,6 +84,7 @@ fn fixture_frame(
         cache,
         &ForwardScene {
             meshes: None,
+            materials: None,
             instances: None,
             objects: &objects,
             lighting: &lighting,

@@ -215,6 +215,15 @@ pub struct ForwardScene<'a> {
     /// identity must always name the same geometry. `None` uploads and builds every
     /// object's geometry each frame.
     pub meshes: Option<&'a [u64]>,
+    /// One identity per object for its material, on frames with `meshes` and the
+    /// radiance cache: an object's mesh and material identities together are its
+    /// draw's lasting name in the cache, as a renderer draw's vertex buffer and
+    /// material are. A cell remembers the draw it lies on by that name, so it keeps
+    /// reading its own draw's material and program when draws enter, leave or change
+    /// place. An identity names one material for the whole sequence, whatever its
+    /// values become. Without it (or without `meshes`) the cache numbers the draws
+    /// by their place in the frame, which holds only while the draw order does.
+    pub materials: Option<&'a [u64]>,
     /// One list of transforms per object, on traced frames: the object is one draw of
     /// that many instances, placed at each in turn, in place of its own `transform` (a
     /// renderer `Draw` over its `Instances`). A frame holds `TRACED_DRAWS` draws and
@@ -1442,8 +1451,11 @@ fn frame(
                 ara_gpu::vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
                     | ara_gpu::vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
             ensure!(
-                scene.meshes.is_none_or(|m| m.len() == scene.objects.len()),
-                "mesh identities need one entry per object"
+                scene.meshes.is_none_or(|m| m.len() == scene.objects.len())
+                    && scene
+                        .materials
+                        .is_none_or(|m| m.len() == scene.objects.len()),
+                "mesh and material identities need one entry per object"
             );
             let mut geometry = Vec::new();
             let mut transient = Vec::new();
@@ -1811,6 +1823,18 @@ fn frame(
                     .is_none_or(|c| c.settings() == indirect.settings),
                 "indirect settings changed within a sequence, which is not assembled yet"
             );
+            // The draws' lasting names, where the scene gives both halves.
+            let draw_names: Option<Vec<[u64; 2]>> =
+                scene
+                    .meshes
+                    .zip(scene.materials)
+                    .map(|(meshes, materials)| {
+                        meshes
+                            .iter()
+                            .zip(materials)
+                            .map(|(a, b)| [*a, *b])
+                            .collect()
+                    });
             // The frame's programs shade the cells; a kept cache keeps its table.
             match gi.as_mut() {
                 Some(kept) => kept.shade_with(gpu, cache, &sources)?,
@@ -1839,6 +1863,7 @@ fn frame(
                         draws: (0..scene.objects.len())
                             .map(|i| [placed(i).len() as u32, slots[i]])
                             .collect(),
+                        names: draw_names.clone(),
                         region: rect,
                         models: &matrices,
                         normals: &normal_bytes,
@@ -1846,8 +1871,8 @@ fn frame(
                         field,
                         lights: packed.count,
                         // `prepare_gi`'s lighting key: the lights, the panes' sun map,
-                        // the environment, the programs and which draw has which. There
-                        // are no decals.
+                        // the environment, the programs, and the draws by program and
+                        // by name (the renderer's ids). There are no decals.
                         light_key: {
                             use sha2::Digest;
                             let mut h = sha2::Sha256::new();
@@ -1858,6 +1883,9 @@ fn frame(
                                 h.update(source.as_bytes());
                             }
                             h.update(bytemuck::cast_slice(&slots));
+                            if let Some(names) = &draw_names {
+                                h.update(bytemuck::cast_slice(names));
+                            }
                             h.finalize().into()
                         },
                     },

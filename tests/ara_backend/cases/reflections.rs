@@ -86,6 +86,7 @@ fn a_mirror_floor_shows_the_wall_at_the_metals_reflectance() -> Result<()> {
                 &cache,
                 &ForwardScene {
                     meshes: None,
+                    materials: None,
                     instances: None,
                     objects: &[
                         ForwardObject {
@@ -288,6 +289,7 @@ fn a_uniform_sky_reflects_as_the_untraced_estimate_in_every_band() -> Result<()>
             &cache,
             &ForwardScene {
                 meshes: None,
+                materials: None,
                 instances: None,
                 objects: &[ForwardObject {
                     vertices: &floor,

@@ -18,6 +18,7 @@ use crate::renderer::gi_cache::{
 };
 use anyhow::{Context, Result, ensure};
 use ara_gpu::{Access, GpuDevice, Resource, commands::Command, commands::Recorder};
+use std::collections::HashMap;
 
 /// The cache's entries, in `GiState::encode` order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -196,6 +197,10 @@ pub(crate) struct CacheScene<'a> {
     /// programs, as `Cache::new` took them), in draw order. The counts' sum is `bounds`'
     /// length.
     pub draws: Vec<[u32; 2]>,
+    /// Each draw's mesh and material by lasting names, in draw order, when the scene
+    /// gives them (`ForwardScene::materials`). A sequence names its draws in every
+    /// frame or in none.
+    pub names: Option<Vec<[u64; 2]>>,
     /// `scene_pixels`: the scene's pixel rectangle.
     pub region: [u32; 4],
     /// Placement model matrices, then their normal transforms, as the traced tables
@@ -252,6 +257,17 @@ pub struct Cache {
     selectors: Vec<u32>,
     /// A digest of the programs the cell shading was composed from.
     programs: [u8; 32],
+    /// How the sequence's draws get their stable ids, decided by its first frame.
+    draw_ids: Option<DrawIds>,
+}
+/// Stable draw ids, as `Renderer::gi_draw_ids` keeps them: a cell remembers its draw's
+/// id, and reads that draw's material and program through it.
+enum DrawIds {
+    /// The sequence names nothing: a draw's id is its place in the frame.
+    ByPlace,
+    /// Each (mesh, material) pair's id, with the pair's count in its frame so far for
+    /// frames that draw a pair more than once. It only grows.
+    ByName(HashMap<([u64; 2], u32), u32>),
 }
 /// Cell shading's programs, and each program slot's word in the draw table.
 type CellPrograms = (Vec<(Program, Kernel)>, Vec<u32>);
@@ -344,6 +360,7 @@ impl Cache {
             shade,
             selectors,
             programs: programs_digest(materials),
+            draw_ids: None,
         })
     }
     pub(crate) fn settings(&self) -> crate::IndirectSettings {
@@ -364,6 +381,43 @@ impl Cache {
             self.programs = digest;
         }
         Ok(())
+    }
+    /// Each draw's stable id (`Renderer::gi_draw_ids`). Named draws keep the id their
+    /// (mesh, material) pair first got, so a draw entering, leaving or changing place
+    /// leaves every other draw's cells with their own draw; past 0xfffe pairs a new
+    /// one gets 0 and reflects nothing. A sequence without names numbers its draws by
+    /// place, which holds only while its draw order does.
+    fn stable_ids(&mut self, scene: &CacheScene<'_>) -> Result<Vec<u32>> {
+        let kept = self.draw_ids.get_or_insert_with(|| match scene.names {
+            Some(_) => DrawIds::ByName(HashMap::new()),
+            None => DrawIds::ByPlace,
+        });
+        let (kept, names) = match (kept, &scene.names) {
+            (DrawIds::ByName(kept), Some(names)) => (kept, names),
+            (DrawIds::ByPlace, None) => return Ok((1..=scene.draws.len() as u32).collect()),
+            _ => anyhow::bail!("a sequence names its draws in every frame or in none"),
+        };
+        ensure!(
+            names.len() == scene.draws.len(),
+            "the cache's draws need one name each"
+        );
+        let mut seen = HashMap::<[u64; 2], u32>::new();
+        Ok(names
+            .iter()
+            .map(|&name| {
+                let nth = seen.entry(name).or_default();
+                *nth += 1;
+                let next = kept.len() as u32 + 1;
+                match kept.get(&(name, *nth)) {
+                    Some(&id) => id,
+                    None if next < 0xffff => {
+                        kept.insert((name, *nth), next);
+                        next
+                    }
+                    None => 0,
+                }
+            })
+            .collect())
     }
     /// The table, for shading (lighting binding 20) and for reading back.
     pub(crate) fn table(&self) -> &StorageBuffer {
@@ -430,8 +484,8 @@ impl Cache {
             bytes: begun.header.iter().flat_map(|w| w.to_le_bytes()).collect(),
         });
         // Per draw its stable id, first placement, instance count and, in a frame of
-        // several programs, its cell program's selector. Ids are the draws' indices
-        // plus one, as the renderer's first frame numbers its (mesh, material) pairs.
+        // several programs, its cell program's selector.
+        let ids = self.stable_ids(&scene)?;
         let objects = scene.bounds.len();
         ensure!(
             scene.draws.iter().map(|d| d[0]).sum::<u32>() as usize == objects
@@ -446,10 +500,8 @@ impl Cache {
             scene
                 .draws
                 .iter()
-                .enumerate()
-                .map(|(b, &[instances, slot])| {
-                    [b as u32 + 1, instances, self.selectors[slot as usize]]
-                }),
+                .zip(ids)
+                .map(|(&[instances, slot], id)| [id, instances, self.selectors[slot as usize]]),
         );
         let draws = StorageBuffer::new(gpu, bytemuck::cast_slice(&table))?;
         let models = StorageBuffer::new(gpu, scene.models)?;

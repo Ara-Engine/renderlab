@@ -133,6 +133,7 @@ fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
             &cache,
             &ForwardScene {
                 meshes: None,
+                materials: None,
                 instances: None,
                 objects: &objects,
                 lighting: &lighting,
@@ -342,9 +343,20 @@ fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
 /// cell with the frame's first program: that turns one card or the other the wrong
 /// colour, whichever order is drawn.
 ///
-/// It also holds when the floors change places in the draw order part way through a
-/// sequence, which gives each program the other's slot: four frames later, and on the
-/// very next frame, where a cache that had started again would show no bounce light.
+/// It also holds when the frame's draws change part way through a sequence whose
+/// draws are named (`ForwardScene::meshes` and `materials`), on the very next frame
+/// and four frames later:
+/// - The floors change places in the draw order, which gives each program the other's
+///   slot and each floor the other's place. The two floors' meshes have the same
+///   bounds, so nothing but its draw's name tells a cell which floor it lies on:
+///   numbered by place, the cells read the other floor's draw and the cards trade
+///   colours for good.
+/// - A draw that lights nothing is put ahead of the others, which moves every draw
+///   one place on. (Numbered by place this case comes out right as well: the cache's
+///   planner sees different bounds at every place and probes those cells again.)
+///
+/// A cache that had started again would show no bounce light on the frame after a
+/// change, as a sequence's first frame shows none.
 #[test]
 fn two_programs_in_one_frame_each_light_their_own_cells() -> Result<()> {
     let path = root("program-cells");
@@ -358,8 +370,12 @@ fn two_programs_in_one_frame_each_light_their_own_cells() -> Result<()> {
             color: [1.; 4],
         })
     };
+    // A floor about `x`, and with it a speck under the far corner of the floor about
+    // `-x`, so the two floors' meshes have the same bounds.
     let floor = |x: f32| {
-        rectangle(
+        let far = -x + 2f32.copysign(-x);
+        let speck = [[far, 2.], [far - 0.01f32.copysign(far), 2.], [far, 1.99]];
+        let mut vertices = rectangle(
             [
                 [x - 2., -2., 0.],
                 [x + 2., -2., 0.],
@@ -368,7 +384,17 @@ fn two_programs_in_one_frame_each_light_their_own_cells() -> Result<()> {
             ],
             [0., 0., 1.],
         )
+        .to_vec();
+        vertices.extend(speck.map(|[x, y]| Vertex {
+            position: [x, y, -0.01],
+            normal: [0., 0., 1.],
+            uv: [0.; 2],
+            color: [1.; 4],
+        }));
+        vertices
     };
+    const FLOOR: &[u32] = &[0, 1, 2, 0, 2, 3, 4, 5, 6];
+    const QUAD: &[u32] = &[0, 1, 2, 0, 2, 3];
     let card = |x: f32| {
         rectangle(
             [
@@ -386,7 +412,7 @@ fn two_programs_in_one_frame_each_light_their_own_cells() -> Result<()> {
     );
     const WHITE: f32 = -2.2;
     const REDS: f32 = 2.2;
-    let (floors, cards) = ([floor(WHITE), floor(REDS)], [card(WHITE), card(REDS)]);
+    let (floors, cards_) = ([floor(WHITE), floor(REDS)], [card(WHITE), card(REDS)]);
     // The sun leans away from the cards' faces, so no direct light reaches them.
     let lighting = Lighting {
         lights: vec![Light::Directional {
@@ -431,15 +457,27 @@ fn two_programs_in_one_frame_each_light_their_own_cells() -> Result<()> {
         source: RED,
         parameters: &[],
     });
-    // One sequence: a frame for each entry, with the red floor drawn first where it says.
-    let mut sequence = |red_first: &[bool]| -> Result<Vec<u8>> {
+    // A small black square behind the camera: a draw that lights nothing.
+    let extra = rectangle(
+        [
+            [-0.1, -20., 0.],
+            [0.1, -20., 0.],
+            [0.1, -19.8, 0.],
+            [-0.1, -19.8, 0.],
+        ],
+        [0., 0., 1.],
+    );
+    // One sequence: a frame for each step, which says whether the red floor is drawn
+    // before the white one and whether the extra draw comes ahead of them all. `named`
+    // gives every draw its mesh and material identities. Both cards after each frame.
+    let mut sequence = |steps: &[[bool; 2]], named: bool| -> Result<Vec<[[f32; 3]; 2]>> {
         let mut frames = Frames::default();
-        let mut last = Ok(Vec::new());
-        for &red_first in red_first {
+        let mut cards = Ok(Vec::new());
+        for &[red_first, ahead] in steps {
             let order: [usize; 2] = if red_first { [1, 0] } else { [0, 1] };
-            let object = |vertices, base: f32| ForwardObject {
+            let object = |vertices, indices, base: f32| ForwardObject {
                 vertices,
-                indices: &[0, 1, 2, 0, 2, 3],
+                indices,
                 transform: Mat4::IDENTITY,
                 material: MaterialDescriptor {
                     base_color: [base, base, base, 1.],
@@ -449,76 +487,109 @@ fn two_programs_in_one_frame_each_light_their_own_cells() -> Result<()> {
                     ..Default::default()
                 },
             };
-            let objects = [
-                object(&floors[order[0]][..], 0.8),
-                object(&floors[order[1]][..], 0.8),
-                object(&cards[0][..], 0.8),
-                object(&cards[1][..], 0.8),
-                object(&wall[..], 0.),
-            ];
-            let programs = [
-                if red_first { red } else { None },
-                if red_first { None } else { red },
-                None,
-                None,
-                None,
-            ];
-            last = frames
-                .render(
-                    &mut gpu,
-                    &cache,
-                    &ForwardScene {
-                        meshes: None,
-                        instances: None,
-                        objects: &objects,
-                        lighting: &lighting,
-                        camera,
-                        size: SIZE,
-                        atmosphere: renderlab::Atmosphere::off(),
-                        sun_shadows: Some(&shadows),
-                        primary: Primary::Traced,
-                        post: None,
-                        indirect: Some(renderlab::backend_ara::gi_cache::Indirect {
-                            settings: renderlab::IndirectSettings {
-                                slots_log2: 17,
-                                ..Default::default()
-                            },
-                            read_table: false,
-                        }),
-                        reconstruction: None,
-                        reflections: None,
-                        textures: None,
-                        local_shadows: None,
-                        transparent: &[],
-                        programs: Some(ScenePrograms {
-                            objects: &programs,
-                            transparent: &[],
-                        }),
-                    },
+            // Each draw with its program and its mesh and material identities.
+            let floor = |which: usize| {
+                (
+                    object(&floors[which][..], FLOOR, 0.8),
+                    if which == 1 { red } else { None },
+                    [1 + which as u64; 2],
                 )
-                .map(|images| images.hdr);
-            if last.is_err() {
-                break;
+            };
+            let mut draws = vec![
+                floor(order[0]),
+                floor(order[1]),
+                (object(&cards_[0][..], QUAD, 0.8), None, [3, 3]),
+                (object(&cards_[1][..], QUAD, 0.8), None, [4, 3]),
+                (object(&wall[..], QUAD, 0.), None, [5, 4]),
+            ];
+            if ahead {
+                draws.insert(0, (object(&extra[..], QUAD, 0.), None, [6, 5]));
+            }
+            let (mut objects, mut programs) = (Vec::new(), Vec::new());
+            let (mut meshes, mut materials) = (Vec::new(), Vec::new());
+            for (object, program, [mesh, material]) in draws {
+                objects.push(object);
+                programs.push(program);
+                meshes.push(mesh);
+                materials.push(material);
+            }
+            let image = frames.render(
+                &mut gpu,
+                &cache,
+                &ForwardScene {
+                    meshes: named.then_some(&meshes),
+                    materials: named.then_some(&materials),
+                    instances: None,
+                    objects: &objects,
+                    lighting: &lighting,
+                    camera,
+                    size: SIZE,
+                    atmosphere: renderlab::Atmosphere::off(),
+                    sun_shadows: Some(&shadows),
+                    primary: Primary::Traced,
+                    post: None,
+                    indirect: Some(renderlab::backend_ara::gi_cache::Indirect {
+                        settings: renderlab::IndirectSettings {
+                            slots_log2: 17,
+                            ..Default::default()
+                        },
+                        read_table: false,
+                    }),
+                    reconstruction: None,
+                    reflections: None,
+                    textures: None,
+                    local_shadows: None,
+                    transparent: &[],
+                    programs: Some(ScenePrograms {
+                        objects: &programs,
+                        transparent: &[],
+                    }),
+                },
+            );
+            match (image, &mut cards) {
+                (Ok(image), Ok(cards)) => {
+                    cards.push([patch(&image.hdr, WHITE), patch(&image.hdr, REDS)])
+                }
+                (Err(error), _) => {
+                    cards = Err(error);
+                    break;
+                }
+                _ => unreachable!("the loop stops at the first error"),
             }
         }
         frames.retire(&mut gpu)?;
-        last
+        cards
     };
-    const F: bool = false;
-    for (name, red_first) in [
-        ("white floor first", &[F; 8][..]),
-        ("red floor first", &[true; 8]),
+    const PLAIN: [bool; 2] = [false, false];
+    let steps = |change: [bool; 2], after: usize| -> Vec<[bool; 2]> {
+        [vec![PLAIN; 8], vec![change; after]].concat()
+    };
+    for (name, steps, named) in [
+        ("white floor first", steps(PLAIN, 0), false),
+        ("red floor first", vec![[true, false]; 8], false),
         (
             "the frame after the floors change places",
-            &[F, F, F, F, F, F, F, F, true],
+            steps([true, false], 1),
+            true,
         ),
         (
             "four frames after the floors change places",
-            &[F, F, F, F, F, F, F, F, true, true, true, true],
+            steps([true, false], 4),
+            true,
+        ),
+        (
+            "the frame after a draw is put ahead of the others",
+            steps([false, true], 1),
+            true,
+        ),
+        (
+            "four frames after a draw is put ahead of the others",
+            steps([false, true], 4),
+            true,
         ),
     ] {
-        let hdr = sequence(red_first)?;
-        let (white, reds) = (patch(&hdr, WHITE), patch(&hdr, REDS));
+        let cards = sequence(&steps, named)?;
+        let [white, reds] = cards[cards.len() - 1];
         eprintln!("program cells, {name}: card over white {white:?}, card over red {reds:?}");
         ensure!(
             white[0] > 0.3 && white.iter().all(|c| (c - white[0]).abs() < 1e-3 * white[0]),
@@ -535,9 +606,9 @@ fn two_programs_in_one_frame_each_light_their_own_cells() -> Result<()> {
             "{name}: the red floor sends {ratio} of the white floor's red, expected about 1.25"
         );
     }
-    // A cache that starts again shows nothing on its first frame, so the frame after
-    // the change kept its table.
-    let first = patch(&sequence(&[F])?, WHITE);
+    // A cache that starts again shows nothing on its first frame, so the frames after
+    // the changes kept their tables.
+    let first = sequence(&[PLAIN], true)?[0][0];
     ensure!(
         first.iter().all(|c| *c < 1e-3),
         "a first frame already shows bounce light: {first:?}"

@@ -83,6 +83,9 @@ struct Material {
     double_sided: bool,
     thin: bool,
     transparency: Option<crate::Transparency>,
+    /// Its identity to the frames' radiance cache, which names a draw by its mesh and
+    /// material. Never reused.
+    key: u64,
     program: Arc<Program>,
     base_color_texture: Option<(Arc<TextureData>, Sampler)>,
     metallic_roughness_texture: Option<(Arc<TextureData>, Sampler)>,
@@ -119,6 +122,8 @@ pub struct Engine {
     frame: u64,
     /// Meshes created so far: the next one's identity.
     meshes: u64,
+    /// Materials created so far: the next one's identity.
+    materials: u64,
     /// Whether frames are read back (`set_readback`).
     readback: bool,
     refusals: Vec<Refusal>,
@@ -152,6 +157,7 @@ impl Engine {
             last: None,
             frame: 0,
             meshes: 0,
+            materials: 0,
             readback: true,
             refusals: Vec::new(),
         };
@@ -332,7 +338,9 @@ impl Scene for Engine {
             slot.map(|t| Ok::<_, Error>((self.state.textures.get(t.texture)?.clone(), t.sampler)))
                 .transpose()
         };
+        self.materials += 1;
         let material = Material {
+            key: self.materials,
             base_color: desc.base_color,
             metallic: desc.metallic,
             roughness: desc.roughness,
@@ -529,6 +537,7 @@ impl Scene for Engine {
         media.volumetric_fog = None;
         let opaque_objects = objects(&opaque);
         let keys: Vec<u64> = opaque.iter().map(|p| p.4).collect();
+        let material_keys: Vec<u64> = opaque.iter().map(|p| p.2.key).collect();
         let placements: Vec<&[Mat4]> = opaque.iter().map(|p| p.5).collect();
         let transparent_objects = objects(&transparent);
         let values: Vec<Vec<(&str, Value)>> = opaque
@@ -611,6 +620,7 @@ impl Scene for Engine {
                 transparent: &pane_programs,
             }),
             meshes: Some(&keys),
+            materials: Some(&material_keys),
             instances: Some(&placements),
         };
         let images = self

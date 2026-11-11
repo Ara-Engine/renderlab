@@ -87,6 +87,7 @@ fn named_meshes_stay_on_the_gpu_and_draw_the_same_frames() -> Result<()> {
                 &cache,
                 &ForwardScene {
                     meshes: named.then_some(&keys),
+                    materials: None,
                     instances: None,
                     objects: &objects,
                     lighting: &lighting,
@@ -137,6 +138,7 @@ fn named_meshes_stay_on_the_gpu_and_draw_the_same_frames() -> Result<()> {
             &cache,
             &ForwardScene {
                 meshes: Some(&[7]),
+                materials: None,
                 instances: None,
                 objects: &[ForwardObject {
                     vertices,
@@ -253,6 +255,7 @@ fn kept_atmosphere_tables_give_every_frame_what_fresh_tables_give() -> Result<()
         });
         let scene = ForwardScene {
             meshes: None,
+            materials: None,
             instances: None,
             objects: &objects,
             lighting: &lighting,
@@ -393,6 +396,7 @@ fn one_draw_placed_many_times_is_the_frame_of_as_many_objects() -> Result<()> {
                 &cache,
                 &ForwardScene {
                     meshes: None,
+                    materials: None,
                     instances,
                     objects,
                     lighting: &lighting,
@@ -467,6 +471,7 @@ fn one_draw_placed_many_times_is_the_frame_of_as_many_objects() -> Result<()> {
                 &cache,
                 &ForwardScene {
                     meshes: None,
+                    materials: None,
                     instances: instanced.then_some(&lists),
                     objects: if instanced { &one } else { &separate },
                     lighting: &lighting,

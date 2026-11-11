@@ -98,6 +98,7 @@ impl Scene {
     ) -> ForwardScene<'a> {
         ForwardScene {
             meshes: None,
+            materials: None,
             instances: None,
             objects,
             lighting,

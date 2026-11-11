@@ -110,6 +110,7 @@ fn a_normal_mapped_floor_is_the_floor_tilted_to_that_normal() -> Result<()> {
             &cache,
             &ForwardScene {
                 meshes: None,
+                materials: None,
                 instances: None,
                 objects: &objects,
                 lighting: &lighting,

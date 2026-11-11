@@ -232,6 +232,7 @@ impl Yard {
                 cache,
                 &ForwardScene {
                     meshes: None,
+                    materials: None,
                     instances: None,
                     objects: &objects,
                     lighting: &self.lighting,

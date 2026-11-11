@@ -2587,20 +2587,48 @@ comes out grey with white first, the card over the white floor red with red firs
 When the floors change places in the draw order after eight frames, the next frame is
 still the settled one (a cache that had started again shows nothing on its first
 frame) and four frames later the colours hold; without `shade_with` the two cards
-swap colours there.
+swap colours there. (These cases name their draws; see the next section.)
 
 The cell entry of one program among several emits valid SPIR-V for the game scene's
 two programs and the test's (`programs_emit_valid_spirv_at_the_region_and_list_entries`).
 It has not run on a Vulkan device yet.
 
-A limit this test showed and did not cause: the port numbers its draws by their place
-in the frame, where the renderer gives each (mesh, material) pair an id that lasts. A
-cell remembers the id of the draw it lies on, so when the draw order changes in a
-sequence, cells are read with another draw's material and program until they are
-traced again. Four frames after the floors change places the white card is 0.7% up
-and its red 0.02% over its green, which only a white-floor cell shaded as red can do
-(the wall is black); that the stale id is the cause is my reading of the code, not
-something I isolated. The game scene's draw order does not change.
+## Draws named in the cache as the renderer names them
+
+A cell remembers the draw it lies on by an id (written when the cell is probed, never
+on a relight) and reads that draw's material and program through the draw table. The
+port numbered its draws by their place in the frame; the renderer keeps an id for each
+(vertex buffer, material) pair it has seen (`Renderer::gi_draw_ids`). The port now does
+the same: `ForwardScene::materials` gives each object a material identity beside its
+mesh identity, the cache keeps one id per pair for the sequence (and per repeat, for a
+frame that draws a pair more than once), and its lighting key takes the names as the
+renderer's takes the ids. The engine entry names every material it creates. A scene
+that names nothing is numbered by place as before, and a sequence must do one or the
+other throughout.
+
+What numbering by place gets wrong is narrower than I first reported. I had read the
+0.7% rise four frames after the floors changed places as cells read through a stale
+id. It is not: the named sequence shows the same numbers to the last bit, and so does a
+sequence where the order changed and nothing was misread. It is the relight that any
+change of the lighting key starts, which runs the cache's gathers again on top of the
+light already there; a sequence that never changes stays at 0.602. The same residue is
+in the pane test above. Whether the renderer shows it is not measured; the planner
+that schedules it is shared.
+
+What protects a sequence numbered by place is the cache's own planner (shared code):
+it compares the placements' bounds place by place, and where they differ it probes the
+cells in both boxes again, which writes their ids afresh in the frame of the change.
+So a draw put ahead of the others, which moves every draw one place on, comes out
+right under either numbering. Numbering by place fails when a draw's place changes
+and the bounds at each place do not, and then it fails for good: with the test's two
+floors given equal bounds and traded in the draw order, the card over the white floor
+is [0.755, 0, 0] and the card over the red floor [0.615, 0.613, 0.613] four frames
+later and after. With names both cases hold on the next frame and four frames later
+(`two_programs_in_one_frame_each_light_their_own_cells`).
+
+Not done: the renderer's software path also maps ids on the CPU (`draw_identity`);
+the port has no software rays. An id the map cannot hold (past 65,534 pairs) reflects
+nothing, as in the renderer; no test reaches it.
 
 ## The first timing against wgpu (Radeon, d5f9cf8) and what it found
 
