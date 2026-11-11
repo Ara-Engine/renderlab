@@ -152,13 +152,22 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
             (3. ..4.).contains(&radius) && bright > dark + 40,
             "the fixture lost its blur or its contrast: {radius:.2} px, {dark} and {bright}"
         );
+        let (mut checked, mut exact) = (0usize, 0usize);
         // Clear of the card's right edge, 31 pixels further on.
         for x in 20..62usize {
             let distance = x as f64 + 0.5 - edge;
             let (now, was) = (blurred[x], sharp[x]);
             if distance.abs() > radius + 1.5 || (focus == 3. && distance > 0.) {
+                // Out of the blur's reach a pixel is still a weighted mean of up to 48
+                // taps, all of its own flat surface: the surface's value to the last
+                // float bit or one off, which is one display level where that value
+                // sits on a rounding boundary (an RTX card showed 192 for 193 at one
+                // pixel 5.8 px inside the card, where no floor tap can reach). A leak
+                // would move many pixels and by more, so most must be exact.
+                checked += 1;
+                exact += usize::from(now == was);
                 ensure!(
-                    now == was,
+                    (now - was).abs() <= 1,
                     "focused on the {name}: pixel {x}, {distance:.2} px from the edge, is {now}, sharp {was}"
                 );
             } else if focus == 4. && distance.abs() < radius - 1. {
@@ -172,7 +181,13 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
                 "focused on the {name}: the row falls at pixel {x}"
             );
         }
-        report += &format!("{name}: radius {radius:.2} px, mesh pass and traced {apart} apart; ");
+        ensure!(
+            exact * 10 >= checked * 9,
+            "focused on the {name}: only {exact} of {checked} pixels out of the blur's reach are the sharp frame's"
+        );
+        report += &format!(
+            "{name}: radius {radius:.2} px, {exact} of {checked} out of reach exact, mesh pass and traced {apart} apart; "
+        );
     }
     eprintln!("depth of field: {report}");
     gpu.collect()?;
