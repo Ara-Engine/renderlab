@@ -247,6 +247,28 @@ py -3 -B tools/n-vsm1/yard.py timing OUT.json RUN...
 game_scene --path nonrt --diag vsm-lookup=disk      # the lookup on the courtyard
 ```
 
+## Quarry window (root, 2026-11-11 13:56-14:00 UTC)
+
+The held quarry batch ran once in an owner-granted RAM window (`tools/n-vsm1/quarry.py q-y5 m0 d13`: main's default against part 2's `Disk`, RTX 4070 SUPER, 1080p, non-RT, one lease of 206 s, no watchdog trip). Unreal is software Lumen at Epic from the same yardstick.
+
+**Frame and sun pass, two visits each (GPU p50):**
+
+| State | Default (`Surface`, S4 on cuts) | `Disk` | Unreal |
+|---|---|---|---|
+| Still: frame | 8.61-8.68 ms (2.15x slower) | 4.30-4.33 ms (1.07-1.08x slower) | 4.02 ms |
+| Moving: frame | 10.81-10.84 ms (2.6x slower) | 4.50-4.53 ms (1.09-1.10x slower) | 4.12 ms |
+| Cut: frame | 45.5-46.8 ms (11x slower) | 4.76-4.93 ms (1.16-1.20x slower) | 4.11 ms |
+| Still: sun pass | 4.51-4.52 ms | 0.236 ms (lookup 0.142, raster 0.033, requests 0.055) | about 0.6 ms |
+| Moving: sun pass | 6.55-6.56 ms | 0.232-0.233 ms | about 0.6 ms |
+| Cut: sun pass | 41.1-42.0 ms | 0.378-0.381 ms (raster 0.16) | about 0.6 ms |
+
+- The older lookups, one visit: `Map` 0.79 / 0.77 / 1.18 ms (frame 4.89 / 5.02 / 5.60); `Hybrid` 3.52 / 3.37 / 4.08 ms (its queued walk is 2.6-2.9 ms).
+- **The 0.6 ms target is met on the quarry in every state, the cut included.** On the game scene with the fox the pass is still 1.7 ms.
+
+**Picture.** On the quarry `Disk` and `Surface` are nearly the same image: of covered pixels, 0.10-0.39% differ by more than half a code and none by more than 3.3 codes, on the still, walking, cut and cut+1 frames. Scores against the path-traced reference: error 7.289 / 7.641 / 8.263 (still / moving / cut) against the default's 7.278 / 7.633 / 8.257; contact crop 10.95 against 10.93; flicker 4.375 on both. The quarry therefore does not exercise the cases where `Disk` is behind (S1-S3 above). Sheet: [quarry-window-rock.jpg](n-vsm1/quarry-window-rock.jpg), Unreal, `Surface`, `Disk` and their difference x16. Inspected: no stray bright pixels in either Renderlab column; the cut frame is sharp with shadows in place; Unreal's cut and cut+1 frames are visibly softer.
+
+**First frame of a brand-new view (no page exists yet).** Renderlab's first frame rasterises the whole visible clipmap: page raster 56-57 ms with `Disk` (43 ms plus 275 ms of walk records with `Surface`). Unreal's first frame spends 1.9 ms in shadow depths and 0.14 ms marking pages (its whole first frame is 18 ms). A cut inside an area already seen costs Renderlab 0.16 ms of raster. So the remaining cut hitch is a cut to somewhere never seen: OPEN, for the page-structure unit.
+
 ## N-VSM2 (2026-11-11, branch `t3/n-vsm2` from main `c341861`)
 
 Brief: find and fix the bias and the flips, then cut the map windows by skipping. Written as the work goes; the result table is at the end of this section once the fixes are scored.
@@ -281,3 +303,4 @@ A new CPU check, `tools/n-vsm1/exact.py`, traces S2's 32 triangles from every cr
 - **A second error has no sign: about .09 RMS in the real levels too.** A band's texel is a third to two thirds of the disk's radius and the raster samples texel centres, so an occluder edge sits up to half a texel from the truth. That is a blotchy, still error of the same size as `Surface`'s noise. Removing the max-mip bias alone therefore cannot bring S2 below `Surface` without TR1.
 - **S3's flips are the near-field screen samples.** All 242 on frame 0 are lit relief pixels with count 0. The map alone leaves 240 of them lit; the screen samples alone turn all 242 black. A sample was a column from its own point down to the receiver, so a neighbouring pixel within half a footprint of the light's axis hid the whole disk: any neighbour within about 30 degrees of the sun, where the truth needs 2.3.
 - **S2's camera-track leaks are a second occluder the lookup ignored.** They are umbra pixels returning 7 to 14 of 64 samples lit (frame 27: 87 pixels on the tiles; frames 31 on: 8-10 floor pixels), where the plate's and the blocker's shadows overlap. The top layer holds the plate; the blocker under it is in the peel layer, which the lookup read only as the top surface's underside. This is not the two-layer leak of a closed caster behind another (that one is absent from both layers); here the data is in the map.
+||||||| c341861
