@@ -1935,10 +1935,6 @@ fn frame(
     let mut tail = None;
     if let Some(settings) = scene.post.filter(|s| s.enabled) {
         settings.validate()?;
-        ensure!(
-            settings.depth_of_field.is_none(),
-            "forward frame does not assemble depth of field yet"
-        );
         let passes = PostPasses::new(gpu, cache, Format::Rgba32Float)?;
         left.post_serial = history.next_post_serial();
         let record =
@@ -1964,7 +1960,7 @@ fn frame(
             gpu, &mut graph, &mut rec, lut.image, &identity,
         )?);
         let mut surface = None;
-        if settings.motion_blur {
+        if settings.motion_blur || settings.depth_of_field.is_some() {
             // `PostGpu::prepare` takes the frame's camera, jittered on a reconstructed
             // frame: its current matrix is the unjittered one, its inverse the frame's.
             // Both at the internal size; every post target is at the caller's.
@@ -2008,40 +2004,67 @@ fn frame(
                 kernel.record(&mut graph, &mut rec, &depth, &frame, &auxiliary)?;
                 SurfaceKernel::Raster(kernel)
             };
-            let tiles = Texture::new(
-                gpu,
-                target.map(|n| n.div_ceil(16)),
-                Format::Rgba16Float,
-                true,
-                false,
-            )?;
-            passes.filter(
-                &mut graph,
-                &mut rec,
-                Pass::TileMax,
-                &FilterInputs {
-                    colour: shown,
-                    second: shown,
-                    auxiliary: &auxiliary,
-                    velocity_tiles: shown,
-                    settings: &record,
-                },
-                &tiles,
-            )?;
-            let blurred = Texture::new(gpu, target, Format::Rgba16Float, true, false)?;
-            passes.filter(
-                &mut graph,
-                &mut rec,
-                Pass::MotionBlur,
-                &FilterInputs {
-                    colour: shown,
-                    second: shown,
-                    auxiliary: &auxiliary,
-                    velocity_tiles: &tiles,
-                    settings: &record,
-                },
-                &blurred,
-            )?;
+            // `PostGpu::encode`: the tile maximum and the blur with motion blur on, then
+            // depth of field over what that left, each only when its setting asks.
+            let mut blurred = None;
+            if settings.motion_blur {
+                let tiles = Texture::new(
+                    gpu,
+                    target.map(|n| n.div_ceil(16)),
+                    Format::Rgba16Float,
+                    true,
+                    false,
+                )?;
+                passes.filter(
+                    &mut graph,
+                    &mut rec,
+                    Pass::TileMax,
+                    &FilterInputs {
+                        colour: shown,
+                        second: shown,
+                        auxiliary: &auxiliary,
+                        velocity_tiles: shown,
+                        settings: &record,
+                    },
+                    &tiles,
+                )?;
+                let image = Texture::new(gpu, target, Format::Rgba16Float, true, false)?;
+                passes.filter(
+                    &mut graph,
+                    &mut rec,
+                    Pass::MotionBlur,
+                    &FilterInputs {
+                        colour: shown,
+                        second: shown,
+                        auxiliary: &auxiliary,
+                        velocity_tiles: &tiles,
+                        settings: &record,
+                    },
+                    &image,
+                )?;
+                post_images.push(tiles);
+                blurred = Some(image);
+            }
+            if settings.depth_of_field.is_some() {
+                let source = blurred.as_ref().unwrap_or(shown);
+                let focused = Texture::new(gpu, target, Format::Rgba16Float, true, false)?;
+                // The kernel reads no velocity tiles: that slot takes its own input.
+                passes.filter(
+                    &mut graph,
+                    &mut rec,
+                    Pass::DepthOfField,
+                    &FilterInputs {
+                        colour: source,
+                        second: source,
+                        auxiliary: &auxiliary,
+                        velocity_tiles: source,
+                        settings: &record,
+                    },
+                    &focused,
+                )?;
+                post_images.extend(blurred.replace(focused));
+            }
+            let blurred = blurred.context("a post surface with no pass to read it")?;
             reads[0] = Some(transfer::readback(
                 gpu,
                 &mut graph,
@@ -2050,7 +2073,7 @@ fn frame(
                 u64::from(target[0]) * u64::from(target[1]) * 16,
             )?);
             surface = Some((kernel, frame, blurred));
-            post_images.extend([auxiliary, tiles]);
+            post_images.push(auxiliary);
         }
         let colour = surface.as_ref().map_or(shown, |(_, _, blurred)| blurred);
         let bloom = if settings.bloom > 0.0 {

@@ -440,5 +440,8 @@ mod local_shadow_cases;
 #[path = "ara_backend/cases/normal_maps.rs"]
 mod normal_map_cases;
 
+#[path = "ara_backend/cases/depth_of_field.rs"]
+mod depth_of_field_cases;
+
 #[path = "ara_backend/cases/textures.rs"]
 mod texture_cases;

@@ -1827,10 +1827,28 @@ clamp that ara-gpu's samplers do not have; the frame refuses both. Streamed
 (partially resident) textures are the renderer's own residency system and are out of
 scope here.
 
-**What still separates this frame from `HardwareRt`'s default image:** depth of
-field, transparency and particles, and the smaller table the tool uses for the cache.
-Local-light shadows, normal maps and render scale below native are built since
-(below, and under temporal reconstruction).
+**What still separates this frame from `HardwareRt`'s default image** on an opaque
+scene: only the smaller table the tool uses for the cache. Depth of field was listed
+here and is not part of the default (`PostSettings::default()` has it off). Local-light
+shadows, normal maps, render scale below native and depth of field are built since
+(below, and under temporal reconstruction). Not assembled: transparent draws and
+particles on the frame, and on the mesh pass local-light shadow maps and the tangent
+vertex stream.
+
+**Depth of field on the frame.** `PostSettings::depth_of_field` adds the ported
+`DepthOfField` kernel to the post tail in `PostGpu::encode`'s place, after motion
+blur and before bloom, reading the surface pass's depth (which now runs for either
+setting) and what motion blur left, or the frame when motion blur is off.
+`depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge` holds it to
+the lens: a card 3 m away over a floor 4 m away, through a 100 mm f/0.5 lens. Focused
+on the floor, pixels further from the card's edge than the thin-lens radius for 3 m
+(3.42 px) are the sharp frame's bytes and pixels well inside it lie between the floor
+and the card; focused on the card, every card pixel is the sharp frame's and the flat
+floor does not change away from the edge. The mesh pass (surface from the depth
+target) and the traced frame (surface from the hit records) display identical images
+in every case. `ara_frame --depth-of-field` is the level on either layer and either
+family. **Not compared with wgpu.** What the test cannot see: the kernel's weights
+inside the blur, and depth of field together with motion blur or an upscaled frame.
 
 ## Local-light shadows on the traced frame
 
