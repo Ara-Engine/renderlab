@@ -960,3 +960,9 @@ Pixels on the open ground more than 10 codes above their 21-pixel median:
   2. Whether transparent draws enter the TLAS as non-opaque casters, so every sun-shadow ray pays candidate handling.
   3. Whether the cost follows the glass's screen coverage at all (move the camera until the glass is off screen).
 - **When:** after the non-RT work, or sooner if check 1 or 2 confirms a frame-wide switch.
+
+## Still-frame history weights on RADV (ara-gpu backend finding, 2026-11-11)
+
+**UNCONFIRMED on the wgpu renderer.** In the ara-gpu port on the Radeon 760M (RADV), temporal reconstruction under a still camera loses about 1% of accumulated weight: the image's border pixels (444 on a 128x96 image) and a one-pixel ring on both sides of a silhouette, where Metal and the RTX lose weight only on pixels an edge actually crosses. So a still pixel beside an edge or at the border is treated as a moving silhouette. The port's images agree with the wgpu renderer's on the Radeon to 0.06%, so the wgpu renderer may do the same. The `arrayLength` fix (9fc3ad0) did not change the count in the port.
+- **If confirmed:** less history at edges and borders on AMD, which is more noise where the eye looks. The fix would be root's, probably in the resolve's still-silhouette test (`tr1_resolve`).
+- **Next:** the backend's author adds an ignored GPU test on main (still camera over a card, read the history weights, count pixels short of one sample a frame). The Linux gate runs it on the Radeon; the RTX is the control.
