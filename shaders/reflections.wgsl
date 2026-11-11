@@ -33,6 +33,10 @@ const RL_UNTRACED:f32=0.5;
 const RL_GLOSSY_RAYS:u32=4u;
 const RL_GLOSSY_MAX:u32=16u;
 const RL_RAYS_PER_ROUGHNESS:f32=48.0;
+// A receiver the resolve restarts this frame (rl_restarts: a changed local light's restart
+// sphere, a moving caster's swept shadow) shows this frame's strata alone, so its glossy
+// lobe traces primary_frame.reflection.w times the strata (1 or less: the ordinary count;
+// U-SPECK2, docs/speck2.md).
 const RL_FAR:f32=1.0e6;
 // Lone-stratum bound (U-SPECK2, docs/speck2.md). A glossy pixel's estimate is the mean of at
 // most 16 strata, and temporal reconstruction averages some 16 frames of it: about 256
@@ -168,7 +172,9 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let width=pixel_angle*length(input.world-input.eye);
     let curvature=2.0*max(length(input.normal_dx),length(input.normal_dy))/max(length(input.normal),1e-30);
     let mirror=rough<RL_MIRROR;
-    let count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
+    var count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
+    let restart_strata=primary_frame.reflection.w;
+    if !mirror && restart_strata>1.0 && rl_restarts(input.world) {count*=u32(restart_strata);}
     let cone_alpha=select(alpha*inverseSqrt(f32(count)),0.0,mirror);
     let spread=pixel_angle+curvature+2.0*cone_alpha;
     let basis=rl_basis(n);

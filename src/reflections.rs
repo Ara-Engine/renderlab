@@ -34,6 +34,24 @@ fn lone_stratum_limit() -> f32 {
     })
 }
 
+/// How many times its ordinary glossy strata a receiver traces on a frame the resolve restarts
+/// it (a changed local light's restart sphere, a moving caster's swept shadow): it shows
+/// that frame's strata alone (shaders/reflections.wgsl, docs/speck2.md).
+const RESTART_STRATA: f32 = 2.0;
+
+/// The multiple in force. Measurement switch: `RENDERLAB_REFLECTION_RESTART_STRATA` replaces
+/// it for a process (1 switches it off).
+fn restart_strata() -> f32 {
+    static STRATA: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *STRATA.get_or_init(|| {
+        std::env::var("RENDERLAB_REFLECTION_RESTART_STRATA")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &f32| (1.0..=4.0).contains(v))
+            .unwrap_or(RESTART_STRATA)
+    })
+}
+
 impl Default for ReflectionSettings {
     fn default() -> Self {
         Self {
@@ -61,14 +79,14 @@ impl ReflectionSettings {
     }
     /// WGSL `primary_frame.reflection`: x the roughness where the traced fraction reaches 0
     /// (0 when disabled, so nothing is traced), y where it starts to fall, z the lone-stratum
-    /// bound (0: none).
+    /// bound (0: none), w the strata multiple of restarted receivers.
     pub(crate) fn frame_words(&self) -> [f32; 4] {
         let end = if self.enabled {
             self.max_roughness
         } else {
             0.0
         };
-        [end, 0.7 * end, lone_stratum_limit(), 0.0]
+        [end, 0.7 * end, lone_stratum_limit(), restart_strata()]
     }
 }
 
@@ -98,6 +116,7 @@ mod tests {
             );
         }
         assert!(wgsl.contains("let lone=primary_frame.reflection.z;"));
+        assert!(wgsl.contains("let restart_strata=primary_frame.reflection.w;"));
         for bad in [-0.1, 1.5, f32::NAN] {
             let settings = ReflectionSettings {
                 max_roughness: bad,

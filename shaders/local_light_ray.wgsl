@@ -1,11 +1,13 @@
 // LC2: four uniform disk samples, with TR1 rotating the sequence across frames. A disk
 // facing the receiver approximates a spherical emitter's apparent area. Incidence and
 // candela stay at the light centre; only visibility is integrated over its source.
+// A camera receiver the resolve restarts this frame traces the restart count instead
+// (rl_local_rays, set by rl_local_budget): four rays are a penumbra's whole estimate there.
 fn rl_local_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     // Naga 30: declare the query before control flow and reuse it for every ray.
     var lc_query:ray_query;
     let radius=light.source.x;
-    let samples=select(1u,4u,radius>0.0);
+    let samples=select(1u,max(rl_local_rays,4u),radius>0.0);
     let axis=select(vec3<f32>(1.0,0.0,0.0),vec3<f32>(0.0,1.0,0.0),abs(l.x)>0.9);
     let tangent=unit_normal(cross(l,axis));
     let bitangent=cross(l,tangent);

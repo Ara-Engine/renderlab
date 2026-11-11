@@ -291,12 +291,24 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
             "return mix(1.0,rl_local_shadow_map(light,receiver,l),rl_light_frame.tiles[slot].w)",
         )
     };
+    // The restart ray budget (U-SPECK2) asks the frame's restart zones, which only traced ray
+    // stages see; every other module composes the empty stub.
+    let budget = |module: &str| module.contains("if rl_restarts(world) { rl_local_rays=restart; }");
+    // Every traced module can ask whether the resolve restarts a receiver.
+    let zones = |module: &str| {
+        module.contains("fn rl_restarts(world:vec3<f32>)->bool")
+            && module.contains("fn rl_zone_relit(x:vec3<f32>)->bool")
+            && module.contains("primary_frame.zones.relit[k]")
+    };
+    let stub = |module: &str| module.contains("fn rl_local_budget(world:vec3<f32>) {}");
     let raster = compose(SOURCE, standard, Stage::Raster, false).source;
     assert!(map(&raster) && !ray(&raster, "hardware_scene"));
+    assert!(stub(&raster) && !budget(&raster));
     validate("raster", &raster);
     let hardware = crate::hardware_shadows::shader_source(SOURCE, crate::SampleCount::One).unwrap();
     let hardware = compose(&hardware, standard, Stage::Raster, false).source;
     assert!(ray(&hardware, "hardware_scene") && !map(&hardware));
+    assert!(stub(&hardware) && !budget(&hardware));
     validate("hardware raster", &hardware);
     // The fresh raster layout binds no acceleration structure for fragments: maps.
     let fresh = fresh_shadow_gpu::shader_source(SOURCE).unwrap();
@@ -311,12 +323,21 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
     {
         let module = compose(head, standard, Stage::Traced, false).source;
         assert!(ray(&module, scene) && !map(&module), "traced {k}");
+        assert!(
+            budget(&module) && !stub(&module) && zones(&module),
+            "traced {k}"
+        );
+        assert!(module.contains("let samples=select(1u,max(rl_local_rays,4u),radius>0.0);"));
         validate(&format!("traced {k}"), &module);
     }
     let non_rt = primary_ray_gpu::non_rt_sources(SOURCE).unwrap().1;
     for (k, head) in non_rt.iter().enumerate() {
         let module = compose(head, standard, Stage::Traced, false).source;
         assert!(map(&module), "non-RT {k}");
+        assert!(
+            stub(&module) && !budget(&module) && zones(&module),
+            "non-RT {k}"
+        );
         validate(&format!("non-RT {k}"), &module);
     }
 }
