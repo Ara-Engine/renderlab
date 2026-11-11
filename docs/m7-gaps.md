@@ -812,3 +812,21 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
   |---|---|---|
   | RT | 30.2 s | 15.7 s |
   | non-RT | 33.9 s | 19.6 s |
+
+## M8 where we stand against the owner's target (2026-11-11)
+
+Islam's direction is about 3x faster than Unreal with a better picture. On the matched quarry, at main c8c7443 (1080p GPU p50, RTX 4070 SUPER, validation layer off on both sides), against UE 5.7.4 Epic:
+
+| Path | Still | Moving | Cut |
+|---|---|---|---|
+| Ray-traced (vs HW Lumen) | 1.34x faster | 1.06x faster | 2.8x slower |
+| Non-RT (vs SW Lumen) | 2.1x slower | 2.6x slower | 10.5x slower |
+
+**Picture.** Renderlab's full-frame error against the path-traced reference is 19-23% below every Unreal preset. Moving-frame flicker is still above Unreal's: RT 4.323 and non-RT 4.375 against 3.68. The cause is one-frame flashes on the scan's cracks.
+
+**Order of work.** Steady-state frames on real content come first, non-RT above all, then cuts:
+1. Crack-flash flicker.
+2. P-SPLIT cold start, time-boxed by P-SKY.
+3. Lower-rate glossy with resampled reuse (docs/design-nonrt-glossy-cost.md). Glossy is 21 of 33 ms on Showcase non-RT and about 6 of 15 ms on RT.
+4. Non-RT sun shadows: 4.2 of 7.0 ms on the quarry at rest.
+5. Cuts.
