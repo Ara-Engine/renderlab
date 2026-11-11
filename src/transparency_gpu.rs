@@ -264,6 +264,9 @@ struct EmitterSlot {
     sorted: Owned<wgpu::Buffer>,
     spawned: u64,
     carry: f64,
+    /// Seconds since the emitter started, prewarm included, at the end of its last step:
+    /// particles' birth times for `Forces::curl_phase_rate`.
+    clock: f64,
     /// Seconds of history the first frame spawns (`EmitterDescriptor::prewarm`), and the
     /// burst it adds; both zero once spawned.
     warm: f32,
@@ -366,7 +369,8 @@ impl EmitterParams {
     }
     /// `window`: the span this step's spawns are spread over, seconds (0: the step).
     /// `burst`: how many of this step's spawns (the last, youngest) are burst births,
-    /// aged within the step rather than across `window`.
+    /// aged within the step rather than across `window`. `clock`: seconds since the
+    /// emitter started, at the end of this step (`EmitterSlot::clock`).
     fn uniform(
         &self,
         first: u32,
@@ -374,6 +378,7 @@ impl EmitterParams {
         burst: u32,
         textured: bool,
         window: f32,
+        clock: f32,
     ) -> [u8; EMITTER_BYTES as usize] {
         const FLOATS: usize = EMITTER_BYTES as usize / 4;
         let mut f = [0f32; FLOATS];
@@ -428,10 +433,17 @@ impl EmitterParams {
             },
         );
         let fo = &self.forces;
-        v4(&mut f, 44, self.velocity_box.extend(0.0).to_array());
-        v4(&mut f, 48, [fo.curl[0], fo.curl[1], burst as f32, 0.0]);
-        v4(&mut f, 52, fo.vortex_center.extend(0.0).to_array());
-        v4(&mut f, 56, fo.vortex_axis.extend(0.0).to_array());
+        // The curl field's origin rides in the w lanes of 44, 52 and 56; its phase rate in
+        // 48's (shaders/transparency.wgsl `tp_curl_origin`).
+        let o = fo.curl_origin;
+        v4(&mut f, 44, self.velocity_box.extend(o.x).to_array());
+        v4(
+            &mut f,
+            48,
+            [fo.curl[0], fo.curl[1], burst as f32, fo.curl_phase_rate],
+        );
+        v4(&mut f, 52, fo.vortex_center.extend(o.y).to_array());
+        v4(&mut f, 56, fo.vortex_axis.extend(o.z).to_array());
         v4(
             &mut f,
             60,
@@ -486,14 +498,14 @@ impl EmitterParams {
                 [b.grid[0] as f32, b.grid[1] as f32, b.fps, play]
             }),
         );
-        // 124: sprite aspect and random rotation.
+        // 124: sprite aspect, random rotation, and the emitter's clock.
         v4(
             &mut f,
             124,
             [
                 self.aspect,
                 f32::from(u8::from(self.random_rotation)),
-                0.0,
+                clock,
                 0.0,
             ],
         );
@@ -1307,6 +1319,7 @@ impl Renderer {
             sorted,
             spawned: 0,
             carry: 0.0,
+            clock: 0.0,
             warm: d.prewarm,
             burst: d.burst,
             _allocation: self.ledger.allocate(
@@ -1748,6 +1761,7 @@ impl Renderer {
             let capacity = u64::from(e.params.capacity);
             let burst = u64::from(e.burst).min(capacity);
             let mut window = f64::from(e.warm.min(e.params.lifetime[1]));
+            e.clock += if window > 0.0 { window } else { step };
             e.carry += f64::from(e.params.spawn_rate) * if window > 0.0 { window } else { step };
             let births = e.carry.floor() as u64;
             e.carry -= e.carry.floor();
@@ -1764,8 +1778,14 @@ impl Renderer {
             self.queue.write_buffer(
                 &e.uniform,
                 0,
-                &e.params
-                    .uniform(first, spawned as u32, burst as u32, textured, window as f32),
+                &e.params.uniform(
+                    first,
+                    spawned as u32,
+                    burst as u32,
+                    textured,
+                    window as f32,
+                    e.clock as f32,
+                ),
             );
         }
         // ---- GPU ----
