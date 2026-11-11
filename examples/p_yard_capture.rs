@@ -83,6 +83,46 @@ fn constant_sky(
     )?)
 }
 
+/// P-FLICKER A/B knobs (docs/p-flicker.md), measurement only; unset changes nothing.
+/// `RENDERLAB_P_FLICKER_SUN_ACTIVE`: TR1's moving-frame sun rays (default 32).
+/// `RENDERLAB_P_FLICKER_TR1`: TR1 overrides, e.g. `sharp=32,blur=2,sharpblur=1,cr=0,window=256`.
+/// `RENDERLAB_P_FLICKER_GI_EVICT`: frames a GI cell may go unseen before its slot is reusable.
+fn flicker_knobs(engine: &mut Engine) -> Result<(), Box<dyn std::error::Error>> {
+    let r = engine.renderer_mut();
+    if let Ok(v) = env::var("RENDERLAB_P_FLICKER_SUN_ACTIVE") {
+        let budget = renderlab::ReconstructionShadowBudget {
+            active_rays: v.parse()?,
+            ..r.reconstruction_shadow_budget()
+        };
+        r.set_reconstruction_shadow_budget(budget)?;
+    }
+    if let Ok(v) = env::var("RENDERLAB_P_FLICKER_TR1") {
+        let mut t = r.reconstruction();
+        for item in v.split(',').filter(|s| !s.is_empty()) {
+            let (key, value) = item.split_once('=').ok_or("TR1 knob: key=value")?;
+            match key {
+                "sharp" => t.sharp_window = value.parse()?,
+                "window" => t.window = value.parse()?,
+                "blur" => t.blur_budget = value.parse()?,
+                "sharpblur" => t.sharp_blur_budget = value.parse()?,
+                "cr" => t.catmull_rom = value != "0",
+                _ => return Err(format!("unknown TR1 knob {key}").into()),
+            }
+        }
+        r.set_reconstruction(t)?;
+    }
+    if let Ok(v) = env::var("RENDERLAB_P_FLICKER_GI_EVICT") {
+        let s = r.indirect();
+        if s.enabled {
+            r.set_indirect(renderlab::IndirectSettings {
+                evict_frames: v.parse()?,
+                ..s
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let begin = Instant::now();
     let args: Vec<_> = env::args().skip(1).collect();
@@ -250,6 +290,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         illuminance: sun.lux,
         angular_radius: sun.angular_radius,
     }))?;
+    flicker_knobs(&mut engine)?;
     let ready_ms = begin.elapsed().as_secs_f64() * 1e3;
     let mut counts = p_still::Counts::start(&mut engine);
     let mut rows = Vec::new();
