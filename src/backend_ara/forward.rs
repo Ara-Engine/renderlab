@@ -90,6 +90,15 @@ pub struct ObjectTexture<'a> {
     /// texture. `None` uploads it for this frame alone.
     pub key: Option<u64>,
 }
+/// A skinned object's pose before this frame's, for reconstruction's motion (SK1's
+/// previous vertex stream), and its pose revision.
+#[derive(Clone, Copy)]
+pub struct Skin<'a> {
+    /// The object's vertices in the previous pose, one per vertex of its mesh.
+    pub previous: &'a [crate::Vertex],
+    /// Changes exactly when the pose does (`SkinnedMesh::revision`).
+    pub revision: u64,
+}
 /// A tangent-space normal map with the tangent frames it is authored against: what the
 /// wgpu renderer takes as a material's `normal_texture` and the mesh's tangent stream
 /// (`try_upload_mesh_with_tangents`), which it refuses to draw one without the other.
@@ -239,6 +248,11 @@ pub struct ForwardScene<'a> {
     /// environment (`Sky::Map`), kept on the GPU while frames go on naming its key.
     /// The atmosphere's procedural environment must be off.
     pub sky_map: Option<SkyMap<'a>>,
+    /// One entry per object on traced frames: a skinned object's previous pose, `None`
+    /// for a rigid one. A skinned object's geometry is uploaded and built each frame
+    /// (its `meshes` identity still names its draw), its batch word says it is skinned,
+    /// and the reconstruction and the cache see its pose change. `None` is all rigid.
+    pub skins: Option<&'a [Option<Skin<'a>>]>,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -473,6 +487,9 @@ struct Arrays<'a> {
     samplers: BTreeMap<InputKey, Vec<SamplerDesc>>,
     default_samplers: Vec<SamplerDesc>,
     textures: BTreeMap<InputKey, Vec<&'a Texture>>,
+    /// Each draw's previous vertices: a skinned draw's own stream, a rigid draw's
+    /// current one (SK1's `motion_previous_vertices`).
+    previous: Vec<&'a StorageBuffer>,
 }
 
 /// Everything a packet of this frame can name, borrowed for the packets' lifetime.
@@ -537,6 +554,7 @@ impl<'a> Shared<'a> {
                     (1, 2) => &self.arrays.vertices,
                     (1, 3) => &self.arrays.indices,
                     (1, 4) => &self.arrays.tangents,
+                    (1, 6) if !self.arrays.previous.is_empty() => &self.arrays.previous,
                     (2, 10) => &self.arrays.materials,
                     (2, 17) => &self.arrays.parameters,
                     _ => &self.arrays.absent,
@@ -973,6 +991,18 @@ fn frame(
             None => std::slice::from_ref(&scene.objects[index].transform),
         }
     };
+    // Each object's previous pose, where it is skinned.
+    let skin = |index: usize| scene.skins.and_then(|s| s.get(index).copied().flatten());
+    ensure!(
+        scene.skins.is_none_or(|s| {
+            scene.primary != Primary::Raster
+                && s.len() == scene.objects.len()
+                && s.iter().enumerate().all(|(i, k)| {
+                    k.is_none_or(|k| k.previous.len() == scene.objects[i].vertices.len())
+                })
+        }),
+        "skins are assembled on traced frames, one entry per object, one previous vertex per vertex"
+    );
     let mut left = Carried {
         count: history.count + 1,
         post_serial: history.post_serial,
@@ -1143,15 +1173,33 @@ fn frame(
             Format::Rgba16Float,
         )?)
     };
-    let mut bounds = Vec::new();
+    let (mut bounds, mut skin_bounds) = (Vec::new(), Vec::new());
     for (index, object) in scene.objects.iter().enumerate() {
         let local =
             crate::visibility::Aabb::from_positions(object.vertices.iter().map(|v| v.position))
                 .context("empty mesh")?;
         for transform in placed(index) {
-            bounds.push(shadow_gpu::world_bounds(local, *transform)?);
+            let world = shadow_gpu::world_bounds(local, *transform)?;
+            bounds.push(world);
+            if skin(index).is_some() {
+                skin_bounds.push(world);
+            }
         }
     }
+    // Per placement, the skinned draw's identity and pose revision (`PlacementPose`), and
+    // every skinned draw's revision in draw order.
+    let poses: Vec<Option<(usize, u64)>> = (0..scene.objects.len())
+        .flat_map(|i| {
+            let pose = skin(i).map(|k| {
+                let name = scene.meshes.map_or(i as u64, |m| m[i]);
+                (name as usize, k.revision)
+            });
+            std::iter::repeat_n(pose, placed(i).len())
+        })
+        .collect();
+    let skin_revisions: Vec<u64> = (0..scene.objects.len())
+        .filter_map(|i| skin(i).map(|k| k.revision))
+        .collect();
     let clusters = LightClusters::new(gpu, cache)?;
     let mut graph = Graph::default();
     let mut rec = gpu.begin(Queue::Graphics);
@@ -1569,7 +1617,11 @@ fn frame(
                     }
                     None => None,
                 });
-                let key = scene.meshes.map(|m| m[index]);
+                // A skinned object's geometry is this pose's alone.
+                let key = scene
+                    .meshes
+                    .map(|m| m[index])
+                    .filter(|_| skin(index).is_none());
                 let counts = [object.vertices.len(), object.indices.len()];
                 let kept = key.and_then(|key| resident.get(&key));
                 let place = match (key, kept) {
@@ -1905,8 +1957,13 @@ fn frame(
                         .is_some_and(|v| v != 0.),
                 pixel_angle: 2.0 * (0.5 * scene.camera.fov_y()).tan() / target[1] as f32,
                 scene_bounds,
-                skin_bounds: None,
-                skin_revisions: vec![],
+                skin_bounds: skin_bounds.iter().copied().reduce(|a, b| {
+                    crate::shadow_plan::Bounds {
+                        min: a.min.min(b.min),
+                        max: a.max.max(b.max),
+                    }
+                }),
+                skin_revisions: skin_revisions.clone(),
                 rigid_motion,
                 listing: false,
             });
@@ -1979,6 +2036,11 @@ fn frame(
                         environment: environment_digest,
                         // The procedural environment or a sky map.
                         field: field || map.is_some(),
+                        poses: poses.clone(),
+                        skin_revisions: skin_revisions
+                            .iter()
+                            .flat_map(|r| r.to_le_bytes())
+                            .collect(),
                         lights: packed.count,
                         // `prepare_gi`'s lighting key: the lights, the panes' sun map,
                         // the environment, the programs, and the draws by program and
@@ -2004,12 +2066,14 @@ fn frame(
         }
         let frame = StorageBuffer::new(gpu, &frame)?;
         let region_buffer = StorageBuffer::new(gpu, bytemuck::cast_slice(&region))?;
-        // The placement words, then each draw's batch word (triangle count; no adjacency
-        // suffix and no skinned stream here), as `prepare_primary` uploads them.
+        // The placement words, then each draw's batch word (triangle count, no adjacency
+        // suffix, whether its previous-vertex stream is skinned), as `prepare_primary`
+        // uploads them.
         let batches: Vec<u32> = scene
             .objects
             .iter()
-            .map(|o| crate::primary_ray::batch_word(o.indices.len() as u64, false))
+            .enumerate()
+            .map(|(i, o)| crate::primary_ray::batch_word(o.indices.len() as u64, skin(i).is_some()))
             .collect();
         let placement_buffer = StorageBuffer::new(
             gpu,
@@ -2473,6 +2537,30 @@ fn frame(
     };
     let shown = upscaled.as_ref().unwrap_or(&output);
     let depth = RasterDepth::new(gpu, size, SampleCount::One)?;
+    // Skinned draws' previous vertices, as the mesh's vertex records.
+    let previous_buffers: Vec<Option<StorageBuffer>> = (0..scene.objects.len())
+        .map(|i| {
+            skin(i)
+                .map(|k| {
+                    let bytes: Vec<u8> = k
+                        .previous
+                        .iter()
+                        .flat_map(|v| {
+                            v.position
+                                .into_iter()
+                                .chain(v.normal)
+                                .chain(v.uv)
+                                .chain(v.color)
+                        })
+                        .flat_map(f32::to_le_bytes)
+                        .collect();
+                    let buffer = StorageBuffer::new(gpu, &bytes)?;
+                    graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+                    Ok::<_, anyhow::Error>(buffer)
+                })
+                .transpose()
+        })
+        .collect::<Result<_>>()?;
     let mut arrays = Arrays::default();
     if let (Some(deferred), Some(traced)) = (&deferred, &traced) {
         let draws = crate::TRACED_DRAWS as usize;
@@ -2495,6 +2583,14 @@ fn frame(
             })
             .collect();
         arrays.absent = vec![&deferred.absent; draws];
+        arrays.previous = (0..draws)
+            .map(|i| {
+                previous_buffers
+                    .get(i)
+                    .and_then(Option::as_ref)
+                    .unwrap_or(arrays.vertices[i])
+            })
+            .collect();
         arrays.tangents = (0..draws)
             .map(|i| {
                 traced
@@ -3290,8 +3386,8 @@ fn frame(
                             match (spec.key.group, spec.key.binding) {
                                 (0, 40) => Input::Buffer(&frame.record),
                                 (0, 41) => Input::Image(&auxiliary),
-                                // Rigid placements: last frame's vertices are this frame's.
-                                (1, 6) => Input::Buffers(&arrays.vertices),
+                                // Rigid draws' last vertices are this frame's.
+                                (1, 6) => Input::Buffers(&arrays.previous),
                                 _ => shared.input(spec, None)?,
                             },
                         ))
@@ -3602,6 +3698,9 @@ fn frame(
 
     atmosphere.retire(gpu, &mut graph)?;
     cluster_inputs.retire(gpu)?;
+    for buffer in previous_buffers.into_iter().flatten() {
+        buffer.retire(gpu)?;
+    }
     depth.retire(gpu, &mut graph)?;
     for image in inputs
         .into_values()

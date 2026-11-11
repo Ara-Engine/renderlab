@@ -152,6 +152,7 @@ fn forward_lit_frame_matches_closed_form_photometry() -> Result<()> {
                 transparent: &[],
                 programs: None,
                 sky_map: None,
+                skins: None,
             },
         )?
         .hdr;
@@ -355,6 +356,7 @@ fn forward_frame_display_matches_cpu_post_replay_of_its_hdr() -> Result<()> {
             transparent: &[],
             programs: None,
             sky_map: None,
+            skins: None,
         },
     )?;
     let checked =
@@ -448,6 +450,7 @@ fn forward_frame_atmosphere_scales_the_sun_and_lights_from_the_sky() -> Result<(
                 transparent: &[],
                 programs: None,
                 sky_map: None,
+                skins: None,
             },
         )?
         .hdr;
@@ -810,6 +813,7 @@ fn sun_shadow_has_the_predicted_umbra_and_penumbra_on_both_frame_families() -> R
                 transparent: &[],
                 programs: None,
                 sky_map: None,
+                skins: None,
             },
         )?
         .hdr;
@@ -1037,6 +1041,7 @@ fn traced_frame_agrees_with_the_mesh_pass_over_misses_sky_and_post() -> Result<(
                     transparent: &[],
                     programs: None,
                     sky_map: None,
+                    skins: None,
                 },
             )?;
             Ok((
@@ -1280,6 +1285,7 @@ fn frames_carry_the_previous_camera_into_motion_blur() -> Result<()> {
                 transparent: &[],
                 programs: None,
                 sky_map: None,
+                skins: None,
             },
         )
     };
@@ -1399,6 +1405,7 @@ fn traced_frames_carry_camera_and_placement_motion_into_motion_blur() -> Result<
                 transparent: &[],
                 programs: None,
                 sky_map: None,
+                skins: None,
             },
         )
     };

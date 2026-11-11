@@ -113,6 +113,7 @@ fn floor_in(
         transparent: &[],
         programs: None,
         sky_map: None,
+        skins: None,
     };
     let images = match sequence {
         Some(frames) => frames.render(gpu, cache, &scene)?,

@@ -217,6 +217,11 @@ pub(crate) struct CacheScene<'a> {
     /// A digest of everything cell shading reads besides the cache: the lights, the
     /// environment and the program. Bounce relights when it changes.
     pub light_key: [u8; 32],
+    /// Per placement, in draw order then instance slot: a skinned draw's mesh identity
+    /// and pose revision (`PlacementPose`), `None` for a rigid one.
+    pub poses: Vec<Option<(usize, u64)>>,
+    /// Every skinned draw's pose revision, in draw order, as little-endian bytes.
+    pub skin_revisions: Vec<u8>,
 }
 
 /// One frame's records and its plan; the packets borrow the records.
@@ -513,7 +518,7 @@ impl Cache {
             bounce,
             FrameInputs {
                 bounds: scene.bounds,
-                poses: vec![None; objects],
+                poses: scene.poses.clone(),
                 environment: scene.environment,
                 light_key: bounce.then_some(scene.light_key),
                 region: scene.region,
@@ -525,7 +530,7 @@ impl Cache {
                 ),
                 still_extent: scene.size.map(u32::to_le_bytes).concat(),
                 instances: &[scene.models, scene.normals].concat(),
-                skin_revisions: vec![],
+                skin_revisions: scene.skin_revisions.clone(),
             },
         );
         let record = StorageBuffer::new(gpu, &finished.frame)?;

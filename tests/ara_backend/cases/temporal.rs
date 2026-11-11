@@ -172,6 +172,7 @@ impl Card {
                     transparent: &[],
                     programs: None,
                     sky_map: None,
+                    skins: None,
                 },
             )?;
             ensure!(

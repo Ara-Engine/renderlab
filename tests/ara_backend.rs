@@ -487,6 +487,9 @@ mod game_scene_cases;
 #[path = "ara_backend/cases/engine_maps.rs"]
 mod engine_map_cases;
 
+#[path = "ara_backend/cases/engine_skinning.rs"]
+mod engine_skinning_cases;
+
 #[path = "ara_backend/cases/resident_meshes.rs"]
 mod resident_mesh_cases;
 

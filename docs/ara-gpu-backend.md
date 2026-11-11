@@ -50,6 +50,9 @@ The working notes this page replaces (every port step, its tests and its measure
 On the traced frame (`Quality::Realtime` is the Interactive trace, `Reference` the
 exact one):
 - Opaque meshes, batched by mesh and material and instanced.
+- Skinned meshes: posed on the CPU when a palette is set, with SK1's operations
+  (`skinned.rs`). Each pose's geometry is built for that frame; its previous pose feeds
+  reconstruction's motion; its revision feeds the cache's and the history's pose checks.
 - The standard program and user programs, with their parameters; several programs in
   one frame (tile bins).
 - Base-colour, metallic-roughness and normal maps (with the mesh's tangent stream).
@@ -70,7 +73,7 @@ Refused by the engine entry, and reported:
 |---|---|
 | `set_settings` | `volumetric_fog`; `sky_light` other than 1; `post.enabled` false; any field added to `Settings` later, while it differs from its default |
 | `set_colour_lut` | colour lookup tables (the LUT is the identity) |
-| `create_skinned_mesh`, `add_asset` | skinned meshes and cooked assets |
+| `add_asset` | cooked assets |
 | `create_emitter`, `update_emitter` | particle emitters |
 | `set_decals` | decals |
 | `render` | textures on a transparent material |
@@ -87,7 +90,7 @@ path's software rays (the port is the traced frame only).
 
 - **Metal, M5 Pro (macOS 27):** the whole suite,
   `cargo test -p renderlab --features backend-ara --test ara_backend -- --test-threads=1`,
-  87 tests, under `MTL_DEBUG_LAYER=1` with `MTL_SHADER_VALIDATION=1` and `=0`. Ara's
+  88 tests, under `MTL_DEBUG_LAYER=1` with `MTL_SHADER_VALIDATION=1` and `=0`. Ara's
   player draws Showcase with it through the presenter's own Metal device (Ara #71).
 - **Vulkan, Radeon 760M (RADV) and RTX 4070 SUPER:** the suite and the timings below,
   on the gate machine. The heads from the engine entry (0a4307c) on have run on Metal
@@ -118,12 +121,14 @@ reflection was kept on disk).
   resolve's taps for one pixel. It waits for its Radeon run.
 - **NVIDIA's remaining 3.5 ms:** parked; see the table.
 - **Drawn by the wgpu renderer and not yet by the port, in this order:**
-  1. skinning;
-  2. decals;
-  3. particles;
-  4. volumetric fog;
-  5. reflections inside panes;
-  6. the colour LUT.
+  1. decals;
+  2. particles;
+  3. volumetric fog;
+  4. reflections inside panes;
+  5. the colour LUT.
+
+  Then skinning on the GPU (SK1's ported kernel, with structure refits) in place of the
+  CPU pose and per-pose build, for frame cost.
 - **Views and ids** (Renderlab #39 and its id-output spec). When views merge, the
   entry's `resize`/`render`/`output`/`cut`/`capture` become:
   - `tick`;

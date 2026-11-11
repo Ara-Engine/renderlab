@@ -250,6 +250,7 @@ impl Yard {
                     transparent: &[],
                     programs: None,
                     sky_map: None,
+                    skins: None,
                 },
             )?;
             let red = images

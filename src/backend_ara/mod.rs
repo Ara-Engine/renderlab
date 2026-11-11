@@ -24,6 +24,7 @@ pub mod primary_shade;
 pub mod primary_trace;
 pub mod program_bins;
 pub mod shader;
+mod skinned;
 pub mod skinning;
 pub mod sky;
 pub mod sky_map;

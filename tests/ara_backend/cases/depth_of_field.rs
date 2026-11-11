@@ -113,6 +113,7 @@ fn fixture_frame(
             transparent: &[],
             programs: None,
             sky_map: None,
+            skins: None,
         },
     )
 }

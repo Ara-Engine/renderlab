@@ -11,9 +11,10 @@ use super::{
     cache::ShaderCache,
     forward::{
         self, ForwardImages, ForwardObject, ForwardScene, NormalMap, ObjectProgram, ObjectTexture,
-        ObjectTextures, Primary, ScenePrograms, SceneTextures, SunShadows,
+        ObjectTextures, Primary, ScenePrograms, SceneTextures, Skin, SunShadows,
     },
     gi_cache::Indirect,
+    skinned::Skinned,
     sky_map::SkyMap,
     temporal::Reconstruct,
 };
@@ -64,7 +65,7 @@ impl Program {
         })
     }
 }
-/// Geometry the frame is rebuilt from, or a mesh this layer refused.
+/// Geometry the frame is rebuilt from.
 enum Mesh {
     Static {
         /// Its identity to the frames, which keep its buffers and bottom-level
@@ -75,7 +76,8 @@ enum Mesh {
         /// Its tangent frame, which a normal-mapped material needs.
         tangents: Option<TangentStream>,
     },
-    Refused,
+    /// Posed on the CPU when its palette is set (`skinned.rs`).
+    Skinned(Box<Skinned>),
 }
 /// A material's factors, with the program and textures it keeps alive.
 struct Material {
@@ -165,6 +167,8 @@ struct Placed<'a> {
     mesh: u64,
     /// Every transform it is placed at.
     placements: &'a [Mat4],
+    /// A skinned mesh's pose before this one, and its pose revision.
+    skin: Option<Skin<'a>>,
 }
 
 /// Records a refusal once.
@@ -316,14 +320,23 @@ impl Engine {
         let (mut opaque, mut transparent) = (Vec::new(), Vec::new());
         for id in state.batches.ids() {
             let batch = state.batches.get(id)?;
-            let Mesh::Static {
-                key,
-                vertices,
-                indices,
-                tangents,
-            } = state.meshes.get(batch.mesh)?
-            else {
-                continue;
+            let (key, vertices, indices, tangents, skin) = match state.meshes.get(batch.mesh)? {
+                Mesh::Static {
+                    key,
+                    vertices,
+                    indices,
+                    tangents,
+                } => (key, vertices, indices, tangents, None),
+                Mesh::Skinned(mesh) => (
+                    &mesh.key,
+                    &mesh.vertices,
+                    &mesh.indices,
+                    &mesh.tangents,
+                    Some(Skin {
+                        previous: &mesh.previous,
+                        revision: mesh.revision,
+                    }),
+                ),
             };
             let material = &state.materials.get(batch.material)?.material;
             if material.normal_texture.is_some() && tangents.is_none() {
@@ -340,6 +353,7 @@ impl Engine {
                 transform,
                 mesh: *key,
                 placements,
+                skin,
             };
             if material.transparency.is_some() {
                 transparent.extend(
@@ -554,18 +568,21 @@ impl Engine {
         self.refuse("add_asset", "cooked assets");
         Ok(AssetHandles::default())
     }
+    /// A posable mesh in its bind pose; `set_joint_palette` poses it.
     pub fn create_skinned_mesh(
         &mut self,
-        _: &Primitive,
-        _: &[Influence],
-        _: u32,
+        primitive: &Primitive,
+        influences: &[Influence],
+        joint_count: u32,
     ) -> Result<MeshId, Error> {
-        self.refuse("create_skinned_mesh", "skinned meshes");
-        Ok(self.state.meshes.insert(Mesh::Refused))
+        self.meshes += 1;
+        let mesh = Skinned::new(self.meshes, primitive, influences, joint_count)?;
+        Ok(self.state.meshes.insert(Mesh::Skinned(Box::new(mesh))))
     }
-    pub fn set_joint_palette(&mut self, mesh: MeshId, _: &[Mat4]) -> Result<(), Error> {
-        match self.state.meshes.get(mesh)? {
-            Mesh::Refused => Ok(()),
+    /// Poses a skinned mesh with mesh-local joint matrices; the next frame draws it.
+    pub fn set_joint_palette(&mut self, mesh: MeshId, palette: &[Mat4]) -> Result<(), Error> {
+        match self.state.meshes.get_mut(mesh)? {
+            Mesh::Skinned(skinned) => skinned.set_palette(palette),
             Mesh::Static { .. } => Err(Error::InvalidInput("mesh is not skinned")),
         }
     }
@@ -747,6 +764,7 @@ impl Engine {
         let keys: Vec<u64> = opaque.iter().map(|p| p.mesh).collect();
         let material_keys: Vec<u64> = opaque.iter().map(|p| p.material.key).collect();
         let placements: Vec<&[Mat4]> = opaque.iter().map(|p| p.placements).collect();
+        let skins: Vec<Option<Skin<'_>>> = opaque.iter().map(|p| p.skin).collect();
         let transparent_objects = objects(&transparent);
         let values: Vec<Vec<(&str, Value)>> = opaque
             .iter()
@@ -838,6 +856,7 @@ impl Engine {
             materials: Some(&material_keys),
             instances: Some(&placements),
             sky_map,
+            skins: Some(&skins),
         };
         let images = self
             .frames
