@@ -16,7 +16,7 @@ use super::*;
 use crate::gi_bvh::{self, Blas};
 use crate::primary_ray::{TRACED_DRAWS, placement_table};
 
-const HEADER_WORDS: u64 = 64;
+pub(crate) const HEADER_WORDS: u64 = 64;
 /// Keep the original admission policy: packing storage must not change the chosen
 /// slot count on devices with smaller binding limits. The cold stride is sized below.
 const SLOT_WORDS: u64 = 24 + 32;
@@ -30,7 +30,7 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
     (light_cold_offset(directions) + lights.div_ceil(32).max(1)).next_multiple_of(4)
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
-const COUNTER_WORDS: u64 = 44;
+pub(crate) const COUNTER_WORDS: u64 = 44;
 const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
@@ -39,10 +39,10 @@ const REQUEST_WORDS: u64 = 3;
 const FRAME_BYTES: usize = 80 + 64 * 16;
 const MAX_BOXES: usize = 32;
 /// Claim and resolve repeat in rounds, so collisions retry within the frame.
-const CLAIM_ROUNDS: u32 = 3;
+pub(crate) const CLAIM_ROUNDS: u32 = 3;
 /// Ray items per frame (shaders/gi_cache.wgsl GI_RAY_ITEMS): one visibility ray each,
 /// traced in parallel. A frame wanting more traces the rest in setup, eight lanes a cell.
-const RAY_ITEMS: u32 = 1 << 21;
+pub(crate) const RAY_ITEMS: u32 = 1 << 21;
 /// Probe, three claim and resolve rounds, scan, setup, rays, finish and integrate, then
 /// bounce's gather, light and cell shading (G2), then the cell-space filter (G3).
 const PROFILE_STAMPS: u32 = 2 * (10 + 2 * CLAIM_ROUNDS);
@@ -95,10 +95,10 @@ fn probe_tile() -> u32 {
 /// (`InstanceFlags::VALIDATION_INDIRECT_CALL`, on by default); an idle workgroup exits
 /// at once. Claims and resolves, setup (eight cells per workgroup), rays (one item per
 /// thread), then finish and integrate (sixteen cells per workgroup).
-const CLAIM_GROUPS: u32 = 512;
-const SETUP_GROUPS: u32 = 4096;
-const RAY_GROUPS: u32 = 4096;
-const CELL_GROUPS: u32 = 2048;
+pub(crate) const CLAIM_GROUPS: u32 = 512;
+pub(crate) const SETUP_GROUPS: u32 = 4096;
+pub(crate) const RAY_GROUPS: u32 = 4096;
+pub(crate) const CELL_GROUPS: u32 = 2048;
 /// Frames the profile ring holds, and its per-frame stride (resolve offsets are
 /// 256-byte aligned).
 const PROFILE_RING: u64 = 64;
@@ -157,6 +157,70 @@ impl WorkLayout {
     }
 }
 /// Blocking readbacks for measurement helpers.
+/// The cache's buffers for a table of `slots`: their sizes in bytes, and the counts the
+/// sizes follow from.
+pub(crate) struct Sizes {
+    /// Miss-list entries.
+    pub(crate) misses: u32,
+    /// The cold record's stride in words, with a visibility bit per light.
+    pub(crate) cold_words: u32,
+    /// Slots the filter sources hold (1 without a filter).
+    pub(crate) raw_slots: u32,
+    pub(crate) table: u64,
+    pub(crate) work: u64,
+    pub(crate) outgoing: u64,
+    pub(crate) draws: u64,
+    pub(crate) raw: u64,
+}
+impl Sizes {
+    pub(crate) fn of(slots: u32, lights: u32, settings: &IndirectSettings) -> Self {
+        // A frame lists at most 2^19 misses (a 2 px cut at 1080p makes about 240k cells):
+        // the miss list and request table stay at G2's size with the larger tables.
+        let misses = slots.min(1 << 19);
+        let directions = settings.directions;
+        let cold_words = light_cold_words(lights, directions);
+        let table_bytes = (HEADER_WORDS + u64::from(slots) * (24 + u64::from(cold_words))) * 4;
+        // Counters, claims, misses, trace and integrate queues, ray items and their
+        // staged bits, the request table, then bounce's two gather queues (a count, then
+        // slots) and the cell shading queue (the frame offsets follow this order).
+        let work_bytes = (COUNTER_WORDS
+            + u64::from(slots)
+            + u64::from(misses) * MISS_WORDS
+            + 2 * u64::from(slots)
+            + u64::from(RAY_ITEMS + RAY_ITEMS / 32)
+            + REQUEST_WORDS * u64::from(requests(misses))
+            + 2 * (1 + u64::from(slots))
+            + u64::from(slots))
+            * 4;
+        let outgoing_bytes = u64::from(slots) * 16;
+        let draws_bytes = u64::from(TRACED_DRAWS + 1) * 16;
+        let raw_slots = if settings.filter != 0 { slots } else { 1 };
+        let raw_bytes = u64::from(raw_slots) * RAW_WORDS * 4;
+        Self {
+            misses,
+            cold_words,
+            raw_slots,
+            table: table_bytes,
+            work: work_bytes,
+            outgoing: outgoing_bytes,
+            draws: draws_bytes,
+            raw: raw_bytes,
+        }
+    }
+}
+/// The draw table: per draw (batch), its stable id, first placement, instance count and
+/// cell-program selector, from `rows` of id, instance count and selector in draw order;
+/// the final vec4 carries the active count of `draws`, preserving per-batch indexing.
+pub(crate) fn draw_table(draws: usize, rows: impl Iterator<Item = [u32; 3]>) -> Vec<u32> {
+    let mut table = vec![0u32; (TRACED_DRAWS as usize + 1) * 4];
+    table[TRACED_DRAWS as usize * 4] = draws.min(TRACED_DRAWS as usize) as u32;
+    let mut first = 0u32;
+    for (b, [id, n, selector]) in rows.enumerate().take(TRACED_DRAWS as usize) {
+        table[b * 4..b * 4 + 4].copy_from_slice(&[id, first, n, selector]);
+        first += n;
+    }
+    table
+}
 const WAIT: wgpu::PollType = wgpu::PollType::Wait {
     submission_index: None,
     timeout: None,
@@ -315,7 +379,7 @@ impl IndirectSettings {
             ..Self::default()
         }
     }
-    fn validate(&self) -> Result<(), Error> {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         let valid = self.cell_pixels.is_finite()
             && self.cell_pixels > 0.0
             && self.min_edge.is_finite()
@@ -1495,12 +1559,17 @@ impl Renderer {
     /// holds none of it.
     fn allocate_gi(&mut self, slots: u32) -> Result<(), Error> {
         {
-            // A frame lists at most 2^19 misses (a 2 px cut at 1080p makes about 240k cells):
-            // the miss list and request table stay at G2's size with the larger tables.
-            let misses = slots.min(1 << 19);
+            let Sizes {
+                misses,
+                cold_words,
+                raw_slots,
+                table: table_bytes,
+                work: work_bytes,
+                outgoing: outgoing_bytes,
+                draws: draws_bytes,
+                raw: raw_bytes,
+            } = Sizes::of(slots, self.lighting.pending.count, &self.gi.settings);
             let directions = self.gi.settings.directions;
-            let cold_words = light_cold_words(self.lighting.pending.count, directions);
-            let table_bytes = (HEADER_WORDS + u64::from(slots) * (24 + u64::from(cold_words))) * 4;
             let limits = self.device.limits();
             if table_bytes
                 > limits
@@ -1511,26 +1580,6 @@ impl Renderer {
                     "GI cell light lists exceed device buffer limits; reduce slots_log2 or light count",
                 ));
             }
-            // Counters, claims, misses, trace and integrate queues, ray items and their
-            // staged bits, the request table, then bounce's two gather queues (a count, then
-            // slots) and the cell shading queue (the frame offsets follow this order).
-            let work_bytes = (COUNTER_WORDS
-                + u64::from(slots)
-                + u64::from(misses) * MISS_WORDS
-                + 2 * u64::from(slots)
-                + u64::from(RAY_ITEMS + RAY_ITEMS / 32)
-                + REQUEST_WORDS * u64::from(requests(misses))
-                + 2 * (1 + u64::from(slots))
-                + u64::from(slots))
-                * 4;
-            let outgoing_bytes = u64::from(slots) * 16;
-            let draws_bytes = u64::from(TRACED_DRAWS + 1) * 16;
-            let raw_slots = if self.gi.settings.filter != 0 {
-                slots
-            } else {
-                1
-            };
-            let raw_bytes = u64::from(raw_slots) * RAW_WORDS * 4;
             let buffer = |label, size, usage| {
                 self.ledger.own(
                     self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2633,12 +2682,8 @@ impl Renderer {
         // Per draw (batch), its stable id, first placement and instance count, which cell
         // shading and hardware setup map cells' materials through (G2). MP1: in mixed
         // frames the fourth word selects the draw's cell program (`mixed_cell_entry`).
-        let mut table = vec![0u32; (TRACED_DRAWS as usize + 1) * 4];
-        // The final vec4 carries the active count, preserving per-batch indexing.
-        table[TRACED_DRAWS as usize * 4] = draws.len().min(TRACED_DRAWS as usize) as u32;
-        let mut first = 0u32;
         let mixed = self.gi.mixed_active;
-        for (b, d) in draws.iter().enumerate().take(TRACED_DRAWS as usize) {
+        let rows = draws.iter().enumerate().map(|(b, d)| {
             let n = d.instances.len() as u32;
             let program = d.material.map_or(self.standard.id(), |m| m.program.id());
             let selector = if mixed && crate::program::reflects(&self.program_slot(program).source)
@@ -2647,9 +2692,9 @@ impl Renderer {
             } else {
                 0
             };
-            table[b * 4..b * 4 + 4].copy_from_slice(&[ids[b], first, n, selector]);
-            first += n;
-        }
+            [ids[b], n, selector]
+        });
+        let table = draw_table(draws.len(), rows);
         if self.gi.draw_table != table {
             let raw: Vec<u8> = table.iter().flat_map(|w| w.to_le_bytes()).collect();
             self.queue.write_buffer(&r.draws, 0, &raw);
