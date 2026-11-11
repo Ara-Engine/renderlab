@@ -89,3 +89,16 @@ pub struct IdPixel { pub opaque: u32, pub front: u32 }
 **Cost** is a target until measured; ids are on permanently in the editor, so the first measurement states it (target under 0.3 ms at 1080p; the pass runs after the temporal resolve).
 
 **Consumers' answers (from the review, Ara side):** glass and cards as `front` plus `opaque`, no list along the ray; 32 bits are enough (the bridge packs index and generation, and 0 is never a valid entity); rectangles read back and reduce on the CPU; agents get a list (id, name, pixel count, bounding box) beside the PNG; the editor draws the outline from the id image.
+
+## The editor's needs (Ara bridge thread, read from the editor's code, 2026-11-11 evening): these set the order
+- **The Scene view is one view of an editor-hosted engine**, on the editor's own device beside its UI compositor; the Game view is a separate player process. Multi-view is not on the critical path for it.
+- **Ids on the GPU every frame, through the same handoff as colour.** The editor's selection, hover and review outlines, its grid (occluded by scene ids), gizmos and icons are its own overlay shaders reading an id texture each frame. Renderlab renders on its own device, so the id image rides the colour's handoff (a shared-image ring on Windows, a CPU copy on Linux; both RGBA8). So:
+  - `render_view_ids_to(view, target: &wgpu::Texture, which: IdLayer)` writes the view's `opaque` (or `front`) ids into a caller's RGBA8-compatible texture (`Rgba8Unorm`, not sRGB), each 32-bit id packed bit-exact into the four channels (r = bits 0-7 ... a = bits 24-31), no filtering. Wgpu-typed, so on `Engine` only, beside `render_view_to`. `view_ids` as R32Uint stays for same-device users.
+  - `opaque` is what the overlays need every frame; `front` is for the click.
+  - **Depth for the overlays:** `render_view_depth_to(view, target)` writes linear view depth (metres, f32 bits packed the same way into RGBA8). It is cheap: the hit record already gives the surface point, so it is one more store in the ID pass.
+- **Picking is one pixel:** `request_ids` with a 1x1 rectangle; click takes `front`, outlines `opaque`. The marquee and snapping are CPU-side in the editor; no rectangle readback is needed today (the bounded rectangle API stays, it costs nothing).
+- **Tags:** a 32-bit compact index is enough; `set_object_ids` with primitive ranges stays because the bridge merges draws.
+- **Capture legend:** the bridge computes `{entity, name, bbox, pixel count}` from a full-frame id image (through `capture_view`'s path, not interactive); Renderlab supplies only the image.
+- **View modes:** for now `Lit` plus ids is enough. The editor's list, in the order its users would miss them: wireframe, depth, entity ids, lit wireframe, shadow cascades, GI debug, light complexity, shadow penumbra, vertex colour channels, decal coverage, and twelve debug effect switches. The data modes above (base colour, normal, roughness, metalness, emission, occlusion, lighting only) come after ids.
+
+**U-IDS's order, from this:** (1) object ids correct on both paths with primitive ranges; (2) the id output (and depth) into a caller's RGBA8 texture every frame; (3) the one-pixel request; (4) glass `front`; (5) view modes, last.
