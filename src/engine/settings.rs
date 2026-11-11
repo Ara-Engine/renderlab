@@ -348,7 +348,7 @@ pub(crate) fn ablated(mut s: Settings) -> Settings {
 /// the embedder asks for, so a defect seen through an embedder can be bisected there:
 /// `lookup=nearest|trilinear`, `filter`, `filter_edge`, `rotate`, `bounce`, `directions`,
 /// `cell_pixels`, `level_blend`, `gathers`, `gather_cells`, `claim_cells`, `near_light_rays`,
-/// `slots_log2`, `evict_frames`. Unset, it changes nothing. An unknown key, a pair without `=`
+/// `slots_log2`, `evict_frames`, `pressure_eviction`. Unset, it changes nothing. An unknown key, a pair without `=`
 /// or a value that does not parse is an error, named on stderr: a mistyped switch must not
 /// pass for a measurement of the default.
 fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error> {
@@ -378,6 +378,7 @@ fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error>
             ("near_light_rays", Some(v), _) => s.near_light_rays = v,
             ("slots_log2", Some(v), _) => s.slots_log2 = v,
             ("evict_frames", Some(v), _) => s.evict_frames = v,
+            ("pressure_eviction", Some(v), _) => s.pressure_eviction = v != 0,
             _ => {
                 eprintln!("RENDERLAB_GI: unknown key or unreadable value in `{pair}`");
                 return Err(Error::InvalidInput(
@@ -400,7 +401,7 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
         return Ok(());
     };
     let line = format!(
-        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"table_bytes\":{}}}\n",
+        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"full_pixel\":{},\"table_bytes\":{}}}\n",
         c.misses,
         c.miss_overflow,
         c.created,
@@ -421,6 +422,7 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
         c.bounce_queued,
         c.evicted,
         c.evicted_recent,
+        c.full_pixel,
         r.indirect_stats().table_bytes,
     );
     // A log that cannot be written is not a rendering error.
