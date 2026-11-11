@@ -1024,3 +1024,12 @@ A still scene whose cache lighting key never changes stays below its converged b
 - It is not a gain per relight and it does not drift. The cold start carries gathers + 1 bounce orders (gathers is 3); a relight adds the next orders on top of the stored outgoing light.
 - At these albedos the step is under one percent and not visible. In a bright interior (albedo 0.8 to 0.9) the missing orders are several percent, and the step would land on the first lighting change after a cut.
 - **Fix candidates:** let a settled cache keep gathering at a low rate until the series converges, or start cold with enough orders for the scene's albedo. **Judge it on a white room.**
+
+## Glossy: P-GLOSSY parked (2026-11-11)
+
+**OPEN, parked on branch `t3/p-glossy` at 52b07129 (main merged in), DON'T MERGE yet.** Record: docs/p-glossy.md on the branch, with the resume steps in its section 5.
+- **What it found:** four strata shared within a shading group (6 neighbours per pixel and frame from a 5x5 window) match the 16-strata image on every crop of the matched scene against the path-traced reference, both paths, held and moving. Showcase shading: non-RT 11.4 ms against 23.5-24.1 on pure main; RT 8.69 to 5.77 ms. The first 3x3 sharing stamped rare bright hits as 3x3 squares on cuts; the 5x5 pick removes them, leaving a faint mottle on the cut that needs a look in motion.
+- **Why not merged:** as committed, the default 16-strata path is 8-12 ms slower than main on Showcase non-RT (36.5 / 31.9 against 24.1 / 23.5 ms shading). The cost is the branch's entry restructure or its workgroup-memory exchange (leading guess: shared memory taking L1 from the software walk); the bisect lease was prepared and not run.
+- **Where non-RT glossy time goes (16 strata):** about 17 ms closest-hit walks and reconstruction, 8 ms the hits' sun walks, 3.5 ms hit shading; 2.6 ms with glossy tracing off.
+- **The roughness-0.4 bound:** 71% of Showcase's traced glossy pixels are at roughness 0.4-0.5; one ray there saves 11-15 ms non-RT but speckles the 0.42 aluminium ball (held flicker 2.5x). A bound, not a candidate.
+- **Next:** run the bisect screens, shrink or remove the exchange, then make 4 shared strata the default and measure Showcase still, moving and cut and the game scene. Owner: the next glossy unit (row 3 of ara-render-replacement.md, the editor frame cost).
