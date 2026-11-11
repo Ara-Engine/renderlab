@@ -1596,6 +1596,62 @@ write that followed a comment ending in a period kept its original binding. The
 heap-binding check refused the module, so it was loud, never silent; both textual
 passes now look back over code only, and the rename regression covers it.
 
+## Temporal reconstruction: scope before porting
+
+Temporal reconstruction (TR1; `temporal_reconstruction.rs`, 1,693 lines, and
+`temporal_resolve.wgsl`, 792) is the next family the default image needs. Read from
+the source at 3cc9384; only the last paragraph is built.
+
+**What it adds to a traced frame.** The camera is jittered by a fixed 256-entry
+sub-pixel sequence, through the projection only, and every pass of the frame sees the
+jittered camera except post and the cache's still key. After shading, the shaded HDR
+is copied aside and one kernel, `tr1_resolve` (8x8 groups over the output), reprojects
+three history images, blends, and writes the reconstructed image back into the HDR
+target in place. Shading already writes a view hint into HDR alpha for it, on or off.
+On Interactive frames the fresh shadow kernels are also swapped for a variant whose
+disk directions rotate with the sample index and whose ray count is a per-frame
+budget (256 cold, 64 after a reset, 32 moving, 8 once still for 16 frames); that
+variant is two string edits on the production module, not a new file.
+
+**State across frames.** Two each of history colour (RGBA32F: exposed mean and
+weight), anchor (RG32U: placement, side, distance) and silhouette layer (RGBA32U), at
+the output size, ping-ponged by a parity bit; the previous frame's camera, eye,
+exposure, sun directions, light and scene key, skin revisions; the sample index; a
+still counter. History continues only when the previous reconstructed frame is the
+one directly before.
+
+**The CPU plan.** `prepare_reconstruction` is about 370 lines, of which about 300 are
+arithmetic on the camera, the lights, the draws' bounds and motion, the settings and
+the previous frame: it produces the 448-byte `Tr1Frame` record, sixteen bytes of the
+primary frame record (the ray budget) and the next history. The rest allocates,
+writes and binds. That pure part is the function both layers must share, as the
+cache's planner is. Its one awkward input is the reset key, a digest of renderer
+internals (generations, upload counters, programs); the backend needs only that it
+changes when the same things change.
+
+**What makes it harder than one kernel suggests:**
+
+- **Stillness is decided by bit equality.** `still` compares the unjittered camera
+  matrix's bits with the previous frame's, and rigid motion compares model matrices
+  the same way. A layer whose matrices differ in the last bit never settles.
+- **It reads four other families' outputs**: the trace's hit records and tiles, the
+  primary frame record with the jittered inverse, the placement geometry with
+  previous models, and shading's alpha.
+- **Its sample index leaks.** The rotation word also seeds glossy reflection rays and
+  the light clusters' source sampling.
+- **Render scale.** Below native scale every pass renders at an internal size and
+  the resolve writes the caller's size; transparency is then skipped.
+
+**Order.** (1) The resolve on the frame the backend has, `HardwareRt` at
+`Quality::Reference` with the default settings at native scale: the jitter, the copy
+and `tr1_resolve`, with the history in `forward::Frames` and the plan shared. The ray
+budget is computed and nothing consumes it. (2) Interactive shadows with the rotated
+kernels and the budget. (3) Render scale.
+
+**Built so far:** `tr1_resolve` composed as `resolve_source` composes it reflects its
+17 inputs, emits MSL and SPIR-V that validates, and compiles natively
+(`temporal_resolve_reflects_validates_and_compiles`). No adapter gap.
+
 ## First Vulkan run (Radeon 760M, RADV, validation on)
 
 At 65119b7 the Linux gate ran the suite on Vulkan for the first time: 38 passed and

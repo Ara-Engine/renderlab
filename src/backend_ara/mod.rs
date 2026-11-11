@@ -52,3 +52,4 @@ pub mod forward;
 
 /// The world radiance cache's kernels.
 pub mod gi_cache;
+pub mod temporal;

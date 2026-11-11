@@ -475,7 +475,7 @@ pub(super) const PENUMBRA_LISTING: bool = false;
 /// P-RTS's standalone penumbra list pass (docs/p-rts.md).
 pub(in crate::renderer) const PENUMBRA_LIST: &str =
     include_str!("../shaders/primary_penumbra_list.wgsl");
-pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
+pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
     // MV1 motion-source seam; history/resolve policy belongs to MQ1.
     Ok(format!(

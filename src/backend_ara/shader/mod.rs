@@ -47,6 +47,9 @@ pub enum Pass {
     PrimaryTraceReceivers,
     /// One kernel of the world radiance cache's hardware-ray module.
     GiCache(crate::backend_ara::gi_cache::Entry),
+    /// Temporal reconstruction's resolve (`tr1_resolve`): history, reprojection and the
+    /// reconstructed image.
+    TemporalResolve,
     /// Original colored transmission layer from one transparent object.
     TransmissionShadow,
     /// Original vertex-only transparency sun-shadow depth raster.
@@ -170,10 +173,13 @@ impl Pass {
                 .expect("embedded cell shading composition")
                 .into()
             }
-            Self::GiCache(_) => crate::backend_ara::gi_cache::source(
-                crate::IndirectSettings::default().directions,
-            )
-                .expect("embedded radiance cache composition")
+            Self::GiCache(_) => {
+                crate::backend_ara::gi_cache::source(crate::IndirectSettings::default().directions)
+                    .expect("embedded radiance cache composition")
+                    .into()
+            }
+            Self::TemporalResolve => crate::backend_ara::temporal::resolve_source()
+                .expect("embedded temporal resolve composition")
                 .into(),
             Self::FreshVisibility => crate::backend_ara::fresh_visibility::source(
                 crate::backend_ara::fresh_visibility::Mode::Exact,
@@ -419,6 +425,7 @@ impl Pass {
                 | Self::TransparencySunShadow
                 | Self::ShadowRaster
                 | Self::FreshVisibility
+                | Self::TemporalResolve
                 | Self::GiCache(_)
                 | Self::ReceiverRaster
                 | Self::TransparencyGlass
@@ -516,6 +523,7 @@ impl Pass {
             Self::TransparencySunShadow => "tp_shadow_vs",
             Self::ShadowRaster => "fs_shadow",
             Self::FreshVisibility => "fresh_compute",
+            Self::TemporalResolve => "tr1_resolve",
             Self::GiCache(entry) => entry.name(),
             Self::ReceiverRaster => "fs_receiver",
             Self::TransparencyGlass => "fs_transparent",
