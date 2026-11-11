@@ -413,3 +413,6 @@ mod gi_cache_reference;
 
 #[path = "ara_backend/cases/temporal.rs"]
 mod temporal_cases;
+
+#[path = "ara_backend/cases/reflections.rs"]
+mod reflection_cases;

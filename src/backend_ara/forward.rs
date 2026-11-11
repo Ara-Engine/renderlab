@@ -95,6 +95,10 @@ pub struct ForwardScene<'a> {
     /// Temporal reconstruction, on `Primary::Traced` frames only: the frame is rendered
     /// through a jittered camera and resolved against its history.
     pub reconstruction: Option<Reconstruct>,
+    /// Traced reflections, on traced frames only: the shading program's own reflection
+    /// rays (one mirror ray, or strata over its declared lobe) up to the settings'
+    /// roughness. `None` is `ReflectionSettings::off()`: the untraced estimate.
+    pub reflections: Option<crate::ReflectionSettings>,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -500,6 +504,18 @@ fn frame(
     );
     // `render_view`: a reconstructed frame draws everything through the camera jittered
     // by its sample of the sequence; post and the cache's still key use it unjittered.
+    // The traced shading program carries its reflection rays whenever its material
+    // declares a lobe; the frame record's words switch them on (`primary_frame.reflection`).
+    let reflections = scene
+        .reflections
+        .unwrap_or_else(crate::ReflectionSettings::off);
+    reflections
+        .validate()
+        .map_err(|e| anyhow::anyhow!("reflection settings: {e}"))?;
+    ensure!(
+        !reflections.enabled || deferred_path,
+        "traced reflections run on traced frames"
+    );
     let reconstruct = scene.reconstruction.filter(|r| r.settings.enabled);
     ensure!(
         reconstruct.is_none() || deferred_path,
@@ -903,7 +919,7 @@ fn frame(
             .as_chunks_mut::<4>()
             .0
             .iter_mut()
-            .zip(crate::ReflectionSettings::off().frame_words())
+            .zip(reflections.frame_words())
         {
             *dst = value.to_ne_bytes();
         }
@@ -963,6 +979,7 @@ fn frame(
                 h.update((scene.objects.len() as u64).to_le_bytes());
                 h.update(environment_digest);
                 h.update([u8::from(indirect.is_some())]);
+                h.update(format!("{reflections:?}").as_bytes());
                 h.finalize().into()
             };
             let planned = images.plan(tr::PlanInputs {

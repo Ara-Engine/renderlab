@@ -240,6 +240,7 @@ impl Yard {
                     post: None,
                     indirect,
                     reconstruction: None,
+                    reflections: None,
                 },
             )?;
             let red = images

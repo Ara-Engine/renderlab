@@ -1710,6 +1710,39 @@ identical across two 16-frame moving runs. **Not compared with wgpu.** What thes
 tests cannot see is the resolve's filter weights away from a straight edge, or its
 rejection rules under object motion; those need the cross-layer comparison.
 
+## Traced reflections
+
+On a hardware-ray traced frame reflections are not a pass. `program::compose` appends
+`reflections.wgsl` to the traced shading module of any program that declares
+`reflection_lobe` and reads `specular_incident`, on a head that declares a scene; the
+standard program on the hardware soft head is one. So the shading kernel the backend
+already built and ran contains the reflection rays (one mirror ray below roughness
+0.05, four to sixteen strata over the declared lobe above it, a hit shaded by the same
+program with its own shadow ray, a miss reading the sky), and they were inert only
+because the primary frame record carried `ReflectionSettings::off()`'s words. There is
+no reflection state between frames on this path; under reconstruction the strata turn
+with the rotation word the frame record already carries.
+
+`ForwardScene::reflections` writes the settings' words into the frame record. Three
+checks, on a metal floor:
+
+| Test | What it holds reflections to |
+|---|---|
+| `a_mirror_floor_shows_the_wall_at_the_metals_reflectance` | In front of a sunlit matte wall under a black sky: with reflections off the floor is black. With them on, 224 floor pixels whose mirror ray meets the wall show the wall's radiance (read from the pixels that see it directly) times the metal's reflectance toward the camera, within 0.003 for a white metal and for a grey one against Schlick's fraction; 64 pixels whose ray passes the wall's top see the black sky; the wall, too rough to trace, is unchanged. At roughness 0.2 the same pixels, aimed at the wall's middle, hold 0.90 to 1.00 of its radiance. |
+| `a_uniform_sky_reflects_as_the_untraced_estimate_in_every_band` | A lone floor under a uniform sky looks the same with reflections on as off, exactly, at roughness 0.02, 0.2 and 0.45: every ray misses and returns what the untraced estimate assumes. |
+
+`ara_frame --reflections` is the level. With `--interactive --reconstruction --filter`
+it is `HardwareRt` at its defaults but for the items below; on Metal two 16-frame
+moving runs of that are identical in every table word and pixel.
+
+**Not compared with wgpu**, like the levels above it.
+
+**What still separates this frame from `HardwareRt`'s default image:** motion blur
+(off on the traced frame: its motion surface comes from hit records and is not
+chained), depth of field, render scale below native, local-light shadows, textured
+materials on the traced frame, transparency and particles, and the smaller table the
+tool uses for the cache.
+
 ## Cube-array environment lookups (Renderlab main's P-SKY)
 
 Renderlab main turned the three environment maps into `texture_cube_array<f32>`

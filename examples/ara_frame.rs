@@ -48,6 +48,8 @@
 //! soft shadows for `SoftShadows::Interactive`, the fused eight-direction trace with its
 //! repair, which is `HardwareRt` at its realtime quality; with `--reconstruction` its
 //! directions rotate and its ray count follows the reconstruction's budget.
+//! `--reflections` implies `--traced` and turns traced reflections on at their
+//! default roughness band: the shading program's own reflection rays.
 //! `--crevice` adds a slot to the scene, two 1.2 m walls 7 cm apart on the floor
 //! with their open end toward the camera: the filter's contrast refine fires on the
 //! floor cells inside it, which nothing in M5-A itself makes it do.
@@ -86,6 +88,7 @@ fn main() -> Result<(), Failure> {
     let mut traced = false;
     let (mut gi, mut bounce, mut filter, mut still) = (false, false, false, false);
     let (mut crevice, mut reconstruction, mut interactive) = (false, false, false);
+    let mut reflections = false;
     let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -96,6 +99,7 @@ fn main() -> Result<(), Failure> {
             "--gi" => (sun_shadows, traced, gi) = (true, true, true),
             "--bounce" => (sun_shadows, traced, gi, bounce) = (true, true, true, true),
             "--crevice" => crevice = true,
+            "--reflections" => (sun_shadows, traced, reflections) = (true, true, true),
             "--interactive" => (sun_shadows, traced, interactive) = (true, true, true),
             "--reconstruction" => (sun_shadows, traced, reconstruction) = (true, true, true),
             "--filter" => {
@@ -168,6 +172,7 @@ fn main() -> Result<(), Failure> {
         crevice,
         reconstruction,
         interactive,
+        reflections,
         still,
         frames,
     };
@@ -203,6 +208,8 @@ struct Level {
     reconstruction: bool,
     /// Interactive soft shadows instead of exact ones, on a traced frame.
     interactive: bool,
+    /// Traced reflections at their defaults, on a traced frame.
+    reflections: bool,
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
@@ -322,7 +329,11 @@ fn wgpu_frame(
         } else {
             Reconstruction::off()
         })?;
-        r.set_reflections(ReflectionSettings::off())?;
+        r.set_reflections(if level.reflections {
+            ReflectionSettings::default()
+        } else {
+            ReflectionSettings::off()
+        })?;
         r.set_post_settings(traced_post())?;
     }
     // The frame the ara backend assembles today: everything else is a later level.
@@ -499,6 +510,9 @@ fn ara_frame(
                     settings: renderlab::Reconstruction::default(),
                     read_history: false,
                 }),
+                reflections: level
+                    .reflections
+                    .then(renderlab::ReflectionSettings::default),
             },
         )?;
         sequence.push((
@@ -614,11 +628,12 @@ fn write(
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
             "scene": format!(
-                "M5-A authored v1{}, {}, local shadows off, default post{}{}",
+                "M5-A authored v1{}, {}, local shadows off, default post{}{}{}",
                 if level.crevice { " with a slot between two walls" } else { "" },
                 if level.still { "every frame from pose 0" } else { "camera path from pose 0" },
                 if level.reconstruction { ", temporal reconstruction at its defaults" } else { "" },
-                if level.interactive { ", Interactive soft shadows" } else { "" }
+                if level.interactive { ", Interactive soft shadows" } else { "" },
+                if level.reflections { ", traced reflections" } else { "" }
             ),
                                     "primary": match (level.traced, level.gi, level.bounce) {
                 (true, true, true) if level.filter => "traced, exact soft shadows, radiance cache with bounce and the cell filter (2^17 slots), no reconstruction, reflections or motion blur",

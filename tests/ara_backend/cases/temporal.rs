@@ -155,6 +155,7 @@ impl Card {
                     post: None,
                     indirect: None,
                     reconstruction,
+                    reflections: None,
                 },
             )?;
             let hdr = images
