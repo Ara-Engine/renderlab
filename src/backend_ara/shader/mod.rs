@@ -135,6 +135,10 @@ pub enum Pass {
     AtmosphereFogInject,
     /// Fog cells against their reprojected history, bounded by their neighbours.
     AtmosphereFogTemporal,
+    /// Each output pixel's settled opaque and front object ids (`id_output.wgsl`).
+    IdResolve,
+    /// One id layer packed bit-exact into an RGBA8 image (`shaders/id_pack.wgsl`).
+    IdPack,
     /// Forty-step transmittance LUT.
     AtmosphereTransmittance,
     /// Multiple-scattering transfer LUT.
@@ -453,6 +457,15 @@ impl Pass {
             }
             Self::Tone => TONE.into(),
             Self::Display => include_str!("../shaders/display.wgsl").into(),
+            Self::IdResolve => {
+                let source = include_str!("../../../shaders/id_output.wgsl");
+                source
+                    .split_once("// ---- Handoff:")
+                    .expect("the id output has a handoff part")
+                    .0
+                    .into()
+            }
+            Self::IdPack => include_str!("../shaders/id_pack.wgsl").into(),
             _ => POST.into(),
         }
     }
@@ -496,6 +509,8 @@ impl Pass {
                 | Self::FallbackPresent
                 | Self::AtmosphereFogInject
                 | Self::AtmosphereFogTemporal
+                | Self::IdResolve
+                | Self::IdPack
                 | Self::PrimaryTrace
                 | Self::PrimaryTraceReceivers
                 | Self::PrimaryInteractive(_)
@@ -641,6 +656,8 @@ impl Pass {
             Self::AtmosphereFogIntegrate => "at_fog_integrate",
             Self::AtmosphereFogInject => "at_fog_inject",
             Self::AtmosphereFogTemporal => "at_fog_temporal",
+            Self::IdResolve => "id_resolve",
+            Self::IdPack => "id_pack",
             Self::AtmosphereTransmittance => "at_transmittance_lut",
             Self::AtmosphereMultiscatter => "at_multiscatter_lut",
             Self::AtmosphereSky => "at_skyview_lut",
