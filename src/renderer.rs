@@ -543,6 +543,8 @@ pub struct Renderer {
     primary_uploads: UploadBytes,
     /// The tick whose GI cache work has run (`prepare_gi`).
     gi_tick: u64,
+    /// LC1's local shadow atlas and the selection the views share.
+    local_maps: light_cluster_gpu::LocalMaps,
     /// Frames that uploaded placements, geometry or poses, counted for views' histories.
     scene_edits: u64,
     explicit_ticks: bool,
@@ -1065,6 +1067,7 @@ impl Renderer {
             worked_tick: 0,
             primary_uploads: UploadBytes::default(),
             gi_tick: 0,
+            local_maps: light_cluster_gpu::LocalMaps::new(&device, &ledger),
             scene_edits: 0,
             explicit_ticks: false,
             tick_work: true,
@@ -3909,6 +3912,7 @@ impl Renderer {
             .uploading
             .retain(|(last, _)| *last > self.completed_submission);
         self.view.collect(self.completed_submission);
+        self.local_maps.collect(self.completed_submission);
         self.collect_parked(self.completed_submission);
         if let Some(hardware) = &mut self.hardware_shadows {
             hardware.collect(

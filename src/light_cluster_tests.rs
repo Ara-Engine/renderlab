@@ -726,7 +726,7 @@ fn gpu_lc1_quarry_night() {
         })
         .unwrap();
         r.view.clusters.legacy_limit = true;
-        r.view.clusters.test_reset_selection();
+        r.local_maps.test_reset_selection();
         for _ in 0..16 {
             render(&mut r, &mut asset, &camera);
         }
@@ -1345,7 +1345,7 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
                 ..Default::default()
             })
             .unwrap();
-            r.view.clusters.test_reset_selection();
+            r.local_maps.test_reset_selection();
             r.set_lighting_and_shadows(
                 &lighting(false),
                 &Shadows {

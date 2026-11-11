@@ -5,8 +5,8 @@ use crate::pipeline_compilation::PipelineDevice;
 
 pub(super) struct LightBuffer {
     shadow_generation: u64,
-    /// LC1: the local shadow maps bound at binding 22 (light_cluster_gpu.rs).
-    cluster_generation: u64,
+    /// LC1: the view's cluster grid and the shared local shadow maps (light_cluster_gpu.rs).
+    cluster_generation: (u64, u64),
     environment_generation: u64,
     indirect_generation: u64,
     atmosphere_generation: u64,
@@ -502,7 +502,8 @@ impl Renderer {
         if state.active.as_ref().is_none_or(|active| {
             active.buffer.size() < needed
                 || active.shadow_generation != self.view.shadows.stats.resource_generation
-                || active.cluster_generation != self.view.clusters.generation
+                || active.cluster_generation
+                    != (self.view.clusters.generation, self.local_maps.generation)
                 || active.environment_generation != self.environment.generation
                 || active.indirect_generation != self.gi.generation
                 || active.atmosphere_generation != self.view.atmosphere.generation
@@ -631,7 +632,7 @@ impl Renderer {
                             wgpu::BindGroupEntry {
                                 binding: 25,
                                 resource: wgpu::BindingResource::TextureView(
-                                    &self.view.clusters.atlas.view,
+                                    &self.local_maps.atlas.view,
                                 ),
                             },
                             wgpu::BindGroupEntry {
@@ -665,7 +666,7 @@ impl Renderer {
             let kernel = group("lighting, indirect cache kernels", &self.gi.dummy);
             let next = LightBuffer {
                 shadow_generation: self.view.shadows.stats.resource_generation,
-                cluster_generation: self.view.clusters.generation,
+                cluster_generation: (self.view.clusters.generation, self.local_maps.generation),
                 environment_generation: self.environment.generation,
                 indirect_generation: self.gi.generation,
                 atmosphere_generation: self.view.atmosphere.generation,

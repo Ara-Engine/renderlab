@@ -241,7 +241,6 @@ impl Renderer {
 impl ViewState {
     pub(super) fn collect(&mut self, completed: u64) {
         self.shadows.collect(completed);
-        self.clusters.collect(completed);
         if let Some(fresh) = &mut self.fresh {
             fresh.collect(completed);
         }

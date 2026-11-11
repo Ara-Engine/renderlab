@@ -120,4 +120,10 @@ Where the code and the sections above differ, this section is current. Code: `sr
 
 **Looks.** `ViewLook` (exposure, quality, post with its tone mapper, bloom and depth of field, colour LUT, reflections) and `render_scale` are applied when a view is created and when it renders after `set_view` or `set_settings` changed them. The renderer keeps them in the view, so views with different looks alternate without restarting each other's histories. A look change restarts nothing except a render-scale change (TR1 restarts at a new internal size). `renderer_mut` tuning applies to the selected view (the last created or rendered).
 
+**For the ara-gpu backend: shared planners whose signatures changed.**
+- `gi_cache::Planner::begin(&config, run, bounce, tick)` and `finish(&config, &begun, bounce, tick, &mut ViewPlan, inputs)`: `tick` is true for the tick's first frame whose plan runs (a renderer without explicit ticks passes true every frame). `ViewPlan` (idle and view keys) moved out of `Planner` and is owned per view. Call `advance` only when `tick` is true.
+- `temporal_reconstruction::PlanInputs`: `rendered_frames` became `previous_frame` (the frame this view rendered last) and `frame` (this frame's id). History continues only when the plan's previous frame is the view's own.
+- `InstanceState::previous_models(view, previous_frame)` and `motion_submitted(view, frame)` take the view.
+- Per-frame records the port keeps once per renderer that are per view here: the TR1 plan, post's previous matrix, the atmosphere's reprojection, the instance motion record, the light cluster selection.
+
 **Not built yet:** ids (`Outputs::ids` is rejected until U-IDS lands); the GI touch pass for views that skip ticks; texture streaming feedback is shared without a per-view union rule (each streaming frame's requests add to one residency).

@@ -839,6 +839,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ready = start.elapsed();
     let mut frames = Vec::new();
     let mut last_camera = None;
+    let mut last_camera_b = None;
     let mut first_image_seconds = None;
     let mut reload = None;
     for frame in 0..args.frames {
@@ -942,6 +943,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "hdr_sha256": hdr_hash, "view": &args.views[..1], "b_rgba8_sha256": second_hash,
         }));
         last_camera = Some(camera);
+        last_camera_b = Some(camera_b);
         // PC1 diagnostic only: a real, visible program edit, then a rejected edit
         // and restoration. These captures are separate from the ordinary frame hashes.
         if args.reload_probe && frame + 1 == args.frames {
@@ -1019,13 +1021,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             engine.tick(1.0 / FPS)?;
             engine.render_view(view, camera)?;
+            if let (Some(second), Some(camera_b)) = (second, &last_camera_b) {
+                engine.render_view(second, camera_b)?;
+            }
             cpu.push(submit.elapsed().as_secs_f64() * 1e3);
         }
         engine.capture_view(view)?;
         serde_json::json!({"frames":args.timing_frames,
             "wall_ms_per_frame":begin.elapsed().as_secs_f64()*1e3/f64::from(args.timing_frames),
             "cpu_submit_ms":cpu,
-            "note":"drained throughput, final colour copy/readback included; no PNG encoding"})
+            "views": args.views,
+            "note":"drained throughput per tick (every view of --views), final colour copy/readback included; no PNG encoding"})
     } else {
         serde_json::Value::Null
     };
