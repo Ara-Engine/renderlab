@@ -38,6 +38,8 @@ pub(crate) const FRAME_BYTES: u64 = 336;
 /// curve counts, the colour, emission and size curves, and the sprite's alignment and
 /// flipbook (`EmitterParams::uniform`).
 const EMITTER_BYTES: u64 = 512;
+/// Substeps a stepped prewarm runs at most (`EmitterParams::steps_prewarm`).
+const MAX_PREWARM_STEPS: usize = 600;
 const PARTICLE_BYTES: u64 = 48;
 
 fn glass_samples() -> u32 {
@@ -307,6 +309,12 @@ struct EmitterSlot {
     sorted: Owned<wgpu::Buffer>,
     spawned: u64,
     carry: f64,
+    /// Seconds since the emitter started, prewarm included, at the end of its last step:
+    /// particles' birth times for `Forces::curl_phase_rate`.
+    clock: f64,
+    /// A stepped prewarm's uniforms, one per substep, then this frame's own: run in order
+    /// before the frame's simulation (`EmitterParams::steps_prewarm`).
+    warm_steps: Option<Vec<u8>>,
     /// Seconds of history the first frame spawns (`EmitterDescriptor::prewarm`), and the
     /// burst it adds; both zero once spawned.
     warm: f32,
@@ -379,6 +387,15 @@ impl EmitterParams {
             seed: d.seed,
         }
     }
+    /// Whether a prewarm must be stepped: forces and collisions act along the way, which
+    /// the closed-form placement of prewarmed particles (drag and acceleration) leaves out.
+    fn steps_prewarm(&self) -> bool {
+        let f = &self.forces;
+        f.curl[1] != 0.0
+            || f.vortex_axis != Vec3::ZERO
+            || f.attractor_strength[0] != 0.0
+            || self.collision.is_some()
+    }
     /// A world box every live particle stays inside.
     fn bounds(&self) -> (Vec3, Vec3) {
         let life = self.lifetime[1];
@@ -409,7 +426,10 @@ impl EmitterParams {
     }
     /// `window`: the span this step's spawns are spread over, seconds (0: the step).
     /// `burst`: how many of this step's spawns (the last, youngest) are burst births,
-    /// aged within the step rather than across `window`.
+    /// aged within the step rather than across `window`. `clock`: seconds since the
+    /// emitter started, at the end of this step (`EmitterSlot::clock`). `dt`: this step's
+    /// length when it is a prewarm substep (0: the frame's particle step).
+    #[allow(clippy::too_many_arguments)]
     fn uniform(
         &self,
         first: u32,
@@ -417,6 +437,8 @@ impl EmitterParams {
         burst: u32,
         textured: bool,
         window: f32,
+        clock: f32,
+        dt: f32,
     ) -> [u8; EMITTER_BYTES as usize] {
         const FLOATS: usize = EMITTER_BYTES as usize / 4;
         let mut f = [0f32; FLOATS];
@@ -471,10 +493,17 @@ impl EmitterParams {
             },
         );
         let fo = &self.forces;
-        v4(&mut f, 44, self.velocity_box.extend(0.0).to_array());
-        v4(&mut f, 48, [fo.curl[0], fo.curl[1], burst as f32, 0.0]);
-        v4(&mut f, 52, fo.vortex_center.extend(0.0).to_array());
-        v4(&mut f, 56, fo.vortex_axis.extend(0.0).to_array());
+        // The curl field's origin rides in the w lanes of 44, 52 and 56; its phase rate in
+        // 48's (shaders/transparency.wgsl `tp_curl_origin`).
+        let o = fo.curl_origin;
+        v4(&mut f, 44, self.velocity_box.extend(o.x).to_array());
+        v4(
+            &mut f,
+            48,
+            [fo.curl[0], fo.curl[1], burst as f32, fo.curl_phase_rate],
+        );
+        v4(&mut f, 52, fo.vortex_center.extend(o.y).to_array());
+        v4(&mut f, 56, fo.vortex_axis.extend(o.z).to_array());
         v4(
             &mut f,
             60,
@@ -529,15 +558,15 @@ impl EmitterParams {
                 [b.grid[0] as f32, b.grid[1] as f32, b.fps, play]
             }),
         );
-        // 124: sprite aspect and random rotation.
+        // 124: sprite aspect, random rotation, the emitter's clock and a substep's length.
         v4(
             &mut f,
             124,
             [
                 self.aspect,
                 f32::from(u8::from(self.random_rotation)),
-                0.0,
-                0.0,
+                clock,
+                dt,
             ],
         );
         let mut bytes = [0u8; EMITTER_BYTES as usize];
@@ -1347,6 +1376,8 @@ impl Renderer {
             sorted,
             spawned: 0,
             carry: 0.0,
+            clock: 0.0,
+            warm_steps: None,
             warm: d.prewarm,
             burst: d.burst,
             _allocation: self.ledger.allocate(
@@ -1765,12 +1796,47 @@ impl Renderer {
         // Emitters' spawns for this step: once per tick (`Renderer::begin_tick`); a later view
         // of the same tick spawns nothing.
         let step = f64::from(self.transparency.step);
+        // A stepped prewarm's substep: the frame's particle step, or 60 Hz while it is 0.
+        let substep = if step > 0.0 { step } else { 1.0 / 60.0 };
         for e in &mut self.transparency.emitters {
+            let textured = e.sprite.is_some();
             if !self.tick_work {
-                let textured = e.sprite.is_some();
-                let none = e.params.uniform(e.spawned as u32, 0, 0, textured, 0.0);
+                let none = e
+                    .params
+                    .uniform(e.spawned as u32, 0, 0, textured, 0.0, e.clock as f32, 0.0);
                 self.queue.write_buffer(&e.uniform, 0, &none);
                 continue;
+            }
+            // A new emitter whose forces or collision the closed-form prewarm cannot place
+            // steps its prewarm window instead: each substep spawns its share of the rate
+            // and moves every live particle, as a running emitter would have.
+            if e.warm > 0.0 && e.params.steps_prewarm() {
+                let capacity = u64::from(e.params.capacity);
+                let window = f64::from(e.warm.min(e.params.lifetime[1]));
+                let count = ((window / substep).ceil() as usize).clamp(1, MAX_PREWARM_STEPS);
+                let dt = window / count as f64;
+                let mut blobs = Vec::with_capacity((count + 1) * EMITTER_BYTES as usize);
+                for i in 0..count {
+                    let burst = if i == 0 { u64::from(e.burst).min(capacity) } else { 0 };
+                    e.clock += dt;
+                    e.carry += f64::from(e.params.spawn_rate) * dt;
+                    let births = (e.carry.floor() as u64).min(capacity - burst);
+                    e.carry -= e.carry.floor();
+                    let first = e.spawned as u32;
+                    let spawned = births + burst;
+                    e.spawned += spawned;
+                    blobs.extend_from_slice(&e.params.uniform(
+                        first,
+                        spawned as u32,
+                        burst as u32,
+                        textured,
+                        0.0,
+                        e.clock as f32,
+                        dt as f32,
+                    ));
+                }
+                (e.warm, e.burst) = (0.0, 0);
+                e.warm_steps = Some(blobs);
             }
             // A new emitter's first step spawns its prewarm span (no longer than a life:
             // older particles would be dead), spread over that span, plus its burst.
@@ -1781,6 +1847,7 @@ impl Renderer {
             let capacity = u64::from(e.params.capacity);
             let burst = u64::from(e.burst).min(capacity);
             let mut window = f64::from(e.warm.min(e.params.lifetime[1]));
+            e.clock += if window > 0.0 { window } else { step };
             e.carry += f64::from(e.params.spawn_rate) * if window > 0.0 { window } else { step };
             let births = e.carry.floor() as u64;
             e.carry -= e.carry.floor();
@@ -1793,13 +1860,21 @@ impl Renderer {
             let first = e.spawned as u32;
             let spawned = kept + burst;
             e.spawned += spawned;
-            let textured = e.sprite.is_some();
-            self.queue.write_buffer(
-                &e.uniform,
-                0,
-                &e.params
-                    .uniform(first, spawned as u32, burst as u32, textured, window as f32),
+            let uniform = e.params.uniform(
+                first,
+                spawned as u32,
+                burst as u32,
+                textured,
+                window as f32,
+                e.clock as f32,
+                0.0,
             );
+            self.queue.write_buffer(&e.uniform, 0, &uniform);
+            // The prewarm's substeps overwrite the uniform on the GPU; the frame's own
+            // follows them.
+            if let Some(blobs) = &mut e.warm_steps {
+                blobs.extend_from_slice(&uniform);
+            }
         }
         // ---- GPU ----
         let hdr = self.view.hdr.as_ref().unwrap();
@@ -1899,8 +1974,46 @@ impl Renderer {
                 pass.draw_indexed(0..draw.mesh.index_count, 0, 0..draw.instances.len() as u32);
             }
         }
-        // 3. Particles: simulate, light and sort.
+        // 3. Particles: stepped prewarms first (each substep's uniform copied in, then
+        // simulated), then this frame's simulation, lighting and sort.
         if let Some(p) = &gpu.particles {
+            for e in &mut self.transparency.emitters {
+                let Some(blobs) = e.warm_steps.take() else {
+                    continue;
+                };
+                let staging = wgpu::util::DeviceExt::create_buffer_init(
+                    &*self.device,
+                    &wgpu::util::BufferInitDescriptor {
+                        label: Some("TP1 stepped prewarm"),
+                        contents: &blobs,
+                        usage: wgpu::BufferUsages::COPY_SRC,
+                    },
+                );
+                let steps = blobs.len() as u64 / EMITTER_BYTES;
+                for i in 0..steps {
+                    encoder.copy_buffer_to_buffer(
+                        &staging,
+                        i * EMITTER_BYTES,
+                        &e.uniform,
+                        0,
+                        EMITTER_BYTES,
+                    );
+                    // The last blob is the frame's own uniform, simulated below.
+                    if i + 1 == steps {
+                        break;
+                    }
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("TP1 prewarm step"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_bind_group(0, &*e.sim, &[]);
+                    pass.set_bind_group(1, &*gpu.empty, &[]);
+                    pass.set_bind_group(2, &*gpu.empty, &[]);
+                    pass.set_bind_group(3, self.lighting.bind(), &[]);
+                    pass.set_pipeline(&p.update);
+                    pass.dispatch_workgroups(e.params.capacity.div_ceil(64), 1, 1);
+                }
+            }
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("TP1 particles"),
                 timestamp_writes: None,
