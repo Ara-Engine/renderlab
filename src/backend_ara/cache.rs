@@ -24,6 +24,8 @@ pub struct ShaderCache {
     salt: [u8; 32],
     /// The pipelines made so far, by key.
     pipelines: std::cell::RefCell<std::collections::HashMap<String, Pipeline>>,
+    /// Each pass's own source's digest, taken once.
+    digests: std::cell::RefCell<std::collections::HashMap<Pass, [u8; 32]>>,
 }
 impl ShaderCache {
     /// Create an explicit cache directory; no files are written to the user profile.
@@ -77,6 +79,7 @@ impl ShaderCache {
             compiler,
             salt,
             pipelines: Default::default(),
+            digests: Default::default(),
         })
     }
     /// Releases every pipeline this cache made, after the last list that uses one was
@@ -94,7 +97,13 @@ impl ShaderCache {
         pass: Pass,
         state: RenderState,
     ) -> Result<Pipeline> {
-        self.pipeline_source(gpu, pass, pass.source().as_ref(), state)
+        let source = pass.source();
+        let digest = *self
+            .digests
+            .borrow_mut()
+            .entry(pass)
+            .or_insert_with(|| shader::digest(&source));
+        self.pipeline_source(gpu, pass, source.as_ref(), digest, state)
     }
     /// Compile a caller-authored compute program through the same native cache.
     pub fn program(&self, gpu: &mut GpuDevice, program: &shader::Program) -> Result<Pipeline> {
@@ -111,13 +120,20 @@ impl ShaderCache {
         program: &shader::Program,
         state: RenderState,
     ) -> Result<Pipeline> {
-        self.pipeline_source(gpu, program.pass(), program.source(), state)
+        self.pipeline_source(
+            gpu,
+            program.pass(),
+            program.source(),
+            program.digest(),
+            state,
+        )
     }
     fn pipeline_source(
         &self,
         gpu: &mut GpuDevice,
         pass: Pass,
         wgsl: &str,
+        digest: [u8; 32],
         state: RenderState,
     ) -> Result<Pipeline> {
         // The per-vertex families' fragment stages declare barycentrics, which Vulkan
@@ -126,12 +142,12 @@ impl ShaderCache {
             pass.metal_version() != (4, 0) || gpu.info().fragment_barycentrics,
             "{pass:?} reads per-vertex attributes, which this device does not support"
         );
-        // The key covers the WGSL, its entry and state here, and through the salt the
-        // adapter's sources, the compiler and the binding layout.
+        // The key covers the WGSL by its digest, its entry and state here, and through
+        // the salt the adapter's sources, the compiler and the binding layout.
         let mut key = Sha256::new();
         key.update(self.salt);
         key.update(format!("{}:{state:?}:", pass.entry()));
-        key.update(wgsl);
+        key.update(digest);
         let key = format!("{:x}", key.finalize());
         if let Some(kept) = self.pipelines.borrow().get(&key) {
             return Ok(*kept);

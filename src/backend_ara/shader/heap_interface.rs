@@ -89,11 +89,18 @@ pub struct ShaderInput {
 }
 /// Reflect only the selected entry pair; unused program interfaces are omitted.
 pub fn inputs(pass: super::Pass) -> Result<Vec<ShaderInput>> {
-    from_source(pass, pass.source().as_ref())
+    static KEPT: super::memo::Memo<super::Pass, Vec<ShaderInput>> = super::memo::Memo::new();
+    KEPT.get(pass, || reflect(pass, pass.source().as_ref()))
 }
-pub(super) fn from_source(pass: super::Pass, source: &str) -> Result<Vec<ShaderInput>> {
-    static KEPT: super::memo::Memo<Vec<ShaderInput>> = super::memo::Memo::new();
-    KEPT.get(pass, source, || reflect(pass, source))
+/// A caller-authored program's inputs, kept by the pass and its source's `digest`.
+pub(super) fn from_digest(
+    pass: super::Pass,
+    source: &str,
+    digest: [u8; 32],
+) -> Result<Vec<ShaderInput>> {
+    static KEPT: super::memo::Memo<(super::Pass, [u8; 32]), Vec<ShaderInput>> =
+        super::memo::Memo::new();
+    KEPT.get((pass, digest), || reflect(pass, source))
 }
 fn reflect(pass: super::Pass, source: &str) -> Result<Vec<ShaderInput>> {
     let mut module = super::parse(source)?;
@@ -342,7 +349,7 @@ pub(super) fn assert_source_contract(
     source: &str,
     actual: &[ShaderInput],
 ) -> Result<()> {
-    let expected = from_source(pass, source)?;
+    let expected = from_digest(pass, source, super::memo::digest(source))?;
     ensure!(
         expected.len() == actual.len()
             && expected

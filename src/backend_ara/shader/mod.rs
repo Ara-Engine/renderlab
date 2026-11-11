@@ -12,6 +12,7 @@ mod packet_spirv;
 mod program;
 mod ray_source;
 pub use heap_interface::{InputKey, InputKind, SampleType, ShaderInput, inputs};
+pub(crate) use memo::digest;
 pub(crate) use mesh_interface::MeshResource;
 pub use program::Program;
 pub(crate) use program::contract as packet_contract;
@@ -153,7 +154,23 @@ pub enum Pass {
     Tone,
 }
 impl Pass {
+    /// The pass's WGSL, composed once and kept for the life of the process.
     pub(super) fn source(self) -> std::borrow::Cow<'static, str> {
+        use std::sync::{Mutex, OnceLock};
+        static KEPT: OnceLock<Mutex<std::collections::HashMap<Pass, &'static str>>> =
+            OnceLock::new();
+        let table = KEPT.get_or_init(Default::default);
+        if let Some(kept) = table.lock().expect("source lock").get(&self) {
+            return std::borrow::Cow::Borrowed(kept);
+        }
+        let made: &'static str = match self.compose() {
+            std::borrow::Cow::Borrowed(fixed) => fixed,
+            std::borrow::Cow::Owned(composed) => Box::leak(composed.into_boxed_str()),
+        };
+        table.lock().expect("source lock").insert(self, made);
+        std::borrow::Cow::Borrowed(made)
+    }
+    fn compose(self) -> std::borrow::Cow<'static, str> {
         match self {
             Self::TransmissionShadow => {
                 crate::renderer::transparency_gpu::transmission_shadow::draw_source(include_str!(
@@ -523,7 +540,8 @@ impl Pass {
         )
     }
     pub(crate) fn threads(self) -> anyhow::Result<[u32; 3]> {
-        threads_source(self, self.source().as_ref())
+        static KEPT: memo::Memo<Pass, [u32; 3]> = memo::Memo::new();
+        KEPT.get(self, || threads_of(self, self.source().as_ref()))
     }
 
     pub(super) fn entry(self) -> &'static str {
@@ -708,8 +726,13 @@ pub(crate) use metal::from_source as msl_source;
 #[cfg(not(target_os = "macos"))]
 pub(crate) use spirv::from_source as spirv_source;
 pub(crate) fn threads_source(pass: Pass, source: &str) -> anyhow::Result<[u32; 3]> {
-    static KEPT: memo::Memo<[u32; 3]> = memo::Memo::new();
-    KEPT.get(pass, source, || threads_of(pass, source))
+    threads_digest(pass, source, memo::digest(source))
+}
+/// A caller-authored program's workgroup size, kept by the pass and its source's
+/// `digest`.
+fn threads_digest(pass: Pass, source: &str, digest: [u8; 32]) -> anyhow::Result<[u32; 3]> {
+    static KEPT: memo::Memo<(Pass, [u8; 32]), [u32; 3]> = memo::Memo::new();
+    KEPT.get((pass, digest), || threads_of(pass, source))
 }
 fn threads_of(pass: Pass, source: &str) -> anyhow::Result<[u32; 3]> {
     let mut module = parse(source)?;

@@ -879,7 +879,12 @@ fn ara_frame(
                     "shadow_rays": level.interactive.then_some(rays),
                 })
             });
-        eprintln!("ara pose {pose}: {trace}");
+        eprintln!(
+            "ara pose {pose}: {trace}; record {:.2} ms, gpu {:.2} ms, finish {:.2} ms",
+            pixels.times.record.as_secs_f64() * 1e3,
+            pixels.times.gpu.as_secs_f64() * 1e3,
+            pixels.times.finish.as_secs_f64() * 1e3
+        );
         sequence.push((
             pixels.samples.unwrap_or(pixels.hdr),
             pixels.display.ok_or("post did not run")?,
