@@ -1750,10 +1750,32 @@ distance, which a depth target cannot know; still, settled and cut frames have n
 and each blurred display sits inside the scalar post replay of its own HDR and
 surface. `ara_frame`'s traced levels now run post at its defaults.
 
+**Material textures, on both frame families.** `ForwardScene::textures` gives each
+object a base-colour and a metallic-roughness slot as asset data with every mip level
+and an asset sampler, the terms `try_upload_texture` and `TextureBinding` take. The
+frame uploads each level, maps the sampler as `material::sampler_descriptor` does
+(wrap, filters, anisotropy on fully linear samplers), and binds the object's own
+image and sampler: per object on the mesh pass, per draw in the traced frame's
+256-element image and sampler arrays, where a draw without a texture keeps the 1x1
+default. Material bytes need no change: only normal maps carry a flag there.
+
+| Test | What it holds textures to |
+|---|---|
+| `a_textured_floor_is_quadrant_by_quadrant_the_untextured_floor_of_that_texel` | A 2x2 base-colour and a 2x2 metallic-roughness texture, sampled nearest: each quadrant of the floor equals the untextured floor whose factors are that texel's values (colour decoded from sRGB, roughness from green, metalness from blue), within 0.15%, on the mesh pass and on the traced frame. |
+| `a_mip_chain_shows_the_level_the_pixel_footprint_selects` | A chain of flat, distinct levels tiled to about four texels a pixel from 4 m and two from 2 m, with nearest mip selection: the floor is the untextured floor of level two's colour from 4 m and level one's from 2 m, within 0.15%. The mesh pass selects from screen derivatives, the traced frame from each pixel's ray footprint; both land on the same level. |
+
+`ara_frame --textures` gives M5-A's floor a 64-texel checker with a box-filtered mip
+chain, trilinear at anisotropy 16, on either layer.
+
+**Not assembled:** normal maps (the frame's meshes carry no tangents) and
+`MipmapFilter::None` on a mip chain, which the renderer implements with a sampler LOD
+clamp that ara-gpu's samplers do not have; the frame refuses both. Streamed
+(partially resident) textures are the renderer's own residency system and are out of
+scope here.
+
 **What still separates this frame from `HardwareRt`'s default image:** depth of
-field, render scale below native, local-light shadows, textured materials on the
-traced frame, transparency and particles, and the smaller table the tool uses for the
-cache.
+field, render scale below native, local-light shadows, normal maps, transparency and
+particles, and the smaller table the tool uses for the cache.
 
 ## Cube-array environment lookups (Renderlab main's P-SKY)
 

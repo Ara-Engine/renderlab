@@ -416,3 +416,6 @@ mod temporal_cases;
 
 #[path = "ara_backend/cases/reflections.rs"]
 mod reflection_cases;
+
+#[path = "ara_backend/cases/textures.rs"]
+mod texture_cases;

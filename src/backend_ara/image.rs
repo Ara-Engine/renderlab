@@ -206,6 +206,56 @@ impl Texture {
         }
         result
     }
+    /// One sampled 2D mip chain, filled level by level with `transfer::upload_mip`.
+    pub fn sampled_mips(
+        gpu: &mut GpuDevice,
+        size: [u32; 2],
+        levels: u32,
+        format: Format,
+    ) -> Result<Self> {
+        let shape = ImageShape {
+            mip_levels: levels,
+            ..Default::default()
+        };
+        let image = gpu.create_texture(&TextureDesc {
+            image: ImageDesc {
+                size,
+                format,
+                sampled: true,
+                storage: false,
+                attachment: false,
+                copy_source: true,
+                copy_destination: true,
+            },
+            shape,
+        })?;
+        let view = ImageViewDesc {
+            dimension: ViewDimension::D2,
+            base_mip: 0,
+            mip_count: levels,
+            base_layer: 0,
+            layer_count: 1,
+        };
+        match gpu.sampled_view(image, view) {
+            Ok(slot) => Ok(Self {
+                image,
+                size,
+                format,
+                shape,
+                allocation: Subresources {
+                    mips: levels,
+                    layers: 1,
+                },
+                view,
+                sampled: slot.index,
+                storage: None,
+            }),
+            Err(error) => {
+                gpu.retire(ara_gpu::Resource::Image(image))?;
+                Err(error.into())
+            }
+        }
+    }
     /// Whole cubes of `side` texels, six layers each (+X, -X, +Y, -Y, +Z, -Z), sampled
     /// as a cube array and filled by upload.
     pub fn cubes(gpu: &mut GpuDevice, side: u32, cubes: u32, format: Format) -> Result<Self> {

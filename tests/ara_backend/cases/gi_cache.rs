@@ -241,6 +241,7 @@ impl Yard {
                     indirect,
                     reconstruction: None,
                     reflections: None,
+                    textures: None,
                 },
             )?;
             let red = images

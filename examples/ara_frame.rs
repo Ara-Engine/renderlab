@@ -50,6 +50,10 @@
 //! directions rotate and its ray count follows the reconstruction's budget.
 //! `--reflections` implies `--traced` and turns traced reflections on at their
 //! default roughness band: the shading program's own reflection rays.
+//! `--textures` gives the floor a base-colour
+//! texture (a 64-texel checker with its full mip chain, tiled eight times, trilinear with
+//! the renderer's anisotropy) so that a comparison covers texture upload, mip selection
+//! and filtering; the fixture itself is untextured.
 //! `--crevice` adds a slot to the scene, two 1.2 m walls 7 cm apart on the floor
 //! with their open end toward the camera: the filter's contrast refine fires on the
 //! floor cells inside it, which nothing in M5-A itself makes it do.
@@ -88,7 +92,7 @@ fn main() -> Result<(), Failure> {
     let mut traced = false;
     let (mut gi, mut bounce, mut filter, mut still) = (false, false, false, false);
     let (mut crevice, mut reconstruction, mut interactive) = (false, false, false);
-    let mut reflections = false;
+    let (mut reflections, mut textures) = (false, false);
     let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -99,6 +103,7 @@ fn main() -> Result<(), Failure> {
             "--gi" => (sun_shadows, traced, gi) = (true, true, true),
             "--bounce" => (sun_shadows, traced, gi, bounce) = (true, true, true, true),
             "--crevice" => crevice = true,
+            "--textures" => textures = true,
             "--reflections" => (sun_shadows, traced, reflections) = (true, true, true),
             "--interactive" => (sun_shadows, traced, interactive) = (true, true, true),
             "--reconstruction" => (sun_shadows, traced, reconstruction) = (true, true, true),
@@ -157,6 +162,16 @@ fn main() -> Result<(), Failure> {
             });
         }
     }
+    if textures {
+        // The floor panel is a unit quad with no uv of its own: eight tiles across it.
+        let floor = floor_index(&fixture)?;
+        for vertex in &mut fixture.objects[floor].vertices {
+            vertex.uv = [
+                (vertex.position[0] + 0.5) * 8.,
+                (vertex.position[1] + 0.5) * 8.,
+            ];
+        }
+    }
     if sun_shadows {
         for object in &mut fixture.objects {
             object.double_sided = true;
@@ -173,6 +188,7 @@ fn main() -> Result<(), Failure> {
         reconstruction,
         interactive,
         reflections,
+        textures,
         still,
         frames,
     };
@@ -210,6 +226,8 @@ struct Level {
     interactive: bool,
     /// Traced reflections at their defaults, on a traced frame.
     reflections: bool,
+    /// The floor carries the checker base-colour texture.
+    textures: bool,
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
@@ -219,6 +237,68 @@ impl Level {
         fixture.camera(if self.still { 0 } else { frame })
     }
 }
+
+/// The fixture's floor object.
+fn floor_index(fixture: &lighting_fixture::Fixture) -> Result<usize, Failure> {
+    fixture
+        .objects
+        .iter()
+        .position(|o| o.name == "floor")
+        .ok_or_else(|| "the fixture has no floor".into())
+}
+
+/// The `--textures` floor: a 64-texel sRGB checker of 8-texel squares with every mip
+/// level box-filtered from the one above, as an importer would cook it.
+fn checker() -> renderlab::asset::Texture {
+    use renderlab::asset::{Mip, Texture, TextureRole};
+    let mut level: Vec<[f32; 3]> = (0..64 * 64)
+        .map(|i| {
+            if (i % 64 / 8 + i / 64 / 8) % 2 == 0 {
+                [0.85, 0.80, 0.70]
+            } else {
+                [0.25, 0.30, 0.45]
+            }
+        })
+        .collect();
+    let mut mips = Vec::new();
+    let mut side = 64usize;
+    loop {
+        mips.push(Mip {
+            width: side as u32,
+            height: side as u32,
+            rgba8: level
+                .iter()
+                .flat_map(|c| {
+                    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+                    [byte(c[0]), byte(c[1]), byte(c[2]), 255]
+                })
+                .collect(),
+        });
+        if side == 1 {
+            break;
+        }
+        let half = side / 2;
+        level = (0..half * half)
+            .map(|i| {
+                let (x, y) = (i % half * 2, i / half * 2);
+                std::array::from_fn(|c| {
+                    [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)]
+                        .iter()
+                        .map(|(x, y)| level[y * side + x][c])
+                        .sum::<f32>()
+                        / 4.
+                })
+            })
+            .collect();
+        side = half;
+    }
+    Texture {
+        role: TextureRole::BaseColorSrgb,
+        mips,
+    }
+}
+/// The anisotropy clamp both layers sample material textures with.
+const ANISOTROPY: u8 = 16;
 
 /// The cache at the `--gi`, `--bounce` or `--filter` level, on both layers.
 fn cache_settings(level: Level) -> renderlab::IndirectSettings {
@@ -283,7 +363,7 @@ fn wgpu_frame(
     let (device, queue) = pollster::block_on(adapter.request_device(&requested))?;
     let options = RendererOptions {
         samples: SampleCount::One,
-        anisotropy_clamp: 16,
+        anisotropy_clamp: ANISOTROPY as u16,
     };
     let (format, prelude) = (
         wgpu::TextureFormat::Rgba8UnormSrgb,
@@ -382,7 +462,14 @@ fn wgpu_frame(
         }
     }
     let (mut meshes, mut instances, mut materials) = (vec![], vec![], vec![]);
-    for o in &fixture.objects {
+    let checker = checker();
+    let floor = if level.textures {
+        let texture = admit(&mut r, |r| r.try_upload_texture(&checker))?;
+        Some((floor_index(fixture)?, texture))
+    } else {
+        None
+    };
+    for (index, o) in fixture.objects.iter().enumerate() {
         meshes.push(admit(&mut r, |r| {
             r.try_upload_mesh(&MeshData {
                 vertices: &o.vertices,
@@ -396,6 +483,12 @@ fn wgpu_frame(
                 metallic: o.metal,
                 roughness: o.rough,
                 double_sided: o.double_sided,
+                base_color_texture: floor.as_ref().filter(|f| f.0 == index).map(|f| {
+                    TextureBinding {
+                        texture: &f.1,
+                        sampler: asset::Sampler::default(),
+                    }
+                }),
                 ..Default::default()
             })
         })?);
@@ -471,6 +564,14 @@ fn ara_frame(
             },
         })
         .collect();
+    let checker = checker();
+    let mut slots = vec![forward::ObjectTextures::default(); objects.len()];
+    if level.textures {
+        slots[floor_index(fixture)?].base_color = Some(forward::ObjectTexture {
+            data: &checker,
+            sampler: renderlab::asset::Sampler::default(),
+        });
+    }
     let mut history = forward::Frames::default();
     let mut sequence = Vec::new();
     for pose in 0..frames {
@@ -501,6 +602,10 @@ fn ara_frame(
                 reflections: level
                     .reflections
                     .then(renderlab::ReflectionSettings::default),
+                textures: level.textures.then_some(forward::SceneTextures {
+                    objects: &slots,
+                    anisotropy_clamp: ANISOTROPY,
+                }),
             },
         )?;
         sequence.push((
@@ -616,8 +721,9 @@ fn write(
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
             "scene": format!(
-                "M5-A authored v1{}, {}, local shadows off, default post{}{}{}",
+                "M5-A authored v1{}{}, {}, local shadows off, default post{}{}{}",
                 if level.crevice { " with a slot between two walls" } else { "" },
+                if level.textures { " with a checker-textured floor" } else { "" },
                 if level.still { "every frame from pose 0" } else { "camera path from pose 0" },
                 if level.reconstruction { ", temporal reconstruction at its defaults" } else { "" },
                 if level.interactive { ", Interactive soft shadows" } else { "" },

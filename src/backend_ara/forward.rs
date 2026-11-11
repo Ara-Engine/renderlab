@@ -71,6 +71,31 @@ pub struct ForwardObject<'a> {
     pub material: crate::MaterialDescriptor<'a>,
 }
 
+/// One texture slot: the asset the wgpu renderer would take through
+/// `try_upload_texture`, with every mip level, and its `TextureBinding` sampler.
+#[derive(Clone, Copy)]
+pub struct ObjectTexture<'a> {
+    pub data: &'a crate::asset::Texture,
+    pub sampler: crate::asset::Sampler,
+}
+/// One object's material textures; an empty slot samples the renderer's 1x1 default.
+/// Normal maps are not assembled: the frame's meshes carry no tangents.
+#[derive(Clone, Copy, Default)]
+pub struct ObjectTextures<'a> {
+    /// `TextureRole::BaseColorSrgb`.
+    pub base_color: Option<ObjectTexture<'a>>,
+    /// `TextureRole::MetallicRoughnessLinear`.
+    pub metallic_roughness: Option<ObjectTexture<'a>>,
+}
+/// The scene's material textures.
+#[derive(Clone, Copy)]
+pub struct SceneTextures<'a> {
+    /// One entry per object, in `ForwardScene::objects` order.
+    pub objects: &'a [ObjectTextures<'a>],
+    /// `RendererOptions::anisotropy_clamp`, 1 to 16: applied to fully linear samplers.
+    pub anisotropy_clamp: u8,
+}
+
 /// A scene for [`render`], in the terms the wgpu renderer takes it.
 pub struct ForwardScene<'a> {
     /// Draw order; equal depths resolve to the earlier object, as in the mesh pass.
@@ -99,6 +124,10 @@ pub struct ForwardScene<'a> {
     /// rays (one mirror ray, or strata over its declared lobe) up to the settings'
     /// roughness. `None` is `ReflectionSettings::off()`: the untraced estimate.
     pub reflections: Option<crate::ReflectionSettings>,
+    /// Base-colour and metallic-roughness textures per object; `None` binds the
+    /// defaults everywhere. The texture slots of `ForwardObject::material` itself must
+    /// stay empty: they name the wgpu renderer's own uploads.
+    pub textures: Option<SceneTextures<'a>>,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -206,7 +235,9 @@ struct Arrays<'a> {
     indices: Vec<&'a StorageBuffer>,
     absent: Vec<&'a StorageBuffer>,
     materials: Vec<&'a StorageBuffer>,
-    samplers: Vec<SamplerDesc>,
+    /// Per sampler-array key; a key without an entry takes `default_samplers`.
+    samplers: BTreeMap<InputKey, Vec<SamplerDesc>>,
+    default_samplers: Vec<SamplerDesc>,
     textures: BTreeMap<InputKey, Vec<&'a Texture>>,
 }
 
@@ -280,7 +311,12 @@ impl<'a> Shared<'a> {
                     .get(&spec.key)
                     .with_context(|| format!("forward frame cannot supply {}", spec.name))?,
             ),
-            (InputKind::SamplerArray { .. }, ..) => Input::Samplers(&self.arrays.samplers),
+            (InputKind::SamplerArray { .. }, ..) => Input::Samplers(
+                self.arrays
+                    .samplers
+                    .get(&spec.key)
+                    .unwrap_or(&self.arrays.default_samplers),
+            ),
             (InputKind::Image { .. } | InputKind::StorageImage { .. }, group, binding) => {
                 Input::Image(match (group, binding) {
                     (3, 24) => self.lists,
@@ -327,6 +363,49 @@ fn provided<'a>(
 enum SurfaceKernel {
     Raster(RasterPostSurface),
     Hits(Kernel, StorageBuffer),
+}
+
+/// `material::sampler_descriptor` for a texture of `levels` mips.
+fn sampler_desc(
+    sampler: crate::asset::Sampler,
+    anisotropy_clamp: u8,
+    levels: usize,
+) -> Result<SamplerDesc> {
+    use crate::asset::{Filter as F, MipmapFilter as M, Wrap};
+    use ara_gpu::sampler::AddressMode;
+    // The renderer clamps the LOD to the base level for `MipmapFilter::None`; the
+    // layer's samplers have no LOD clamp, so that is only the same without a chain.
+    ensure!(
+        sampler.mipmap != M::None || levels == 1,
+        "MipmapFilter::None on a mip chain needs a sampler LOD clamp, which ara-gpu lacks"
+    );
+    let wrap = |w| match w {
+        Wrap::Clamp => AddressMode::ClampToEdge,
+        Wrap::Mirror => AddressMode::MirrorRepeat,
+        Wrap::Repeat => AddressMode::Repeat,
+    };
+    let filter = |f| match f {
+        F::Nearest => Filter::Nearest,
+        F::Linear => Filter::Linear,
+    };
+    let linear =
+        sampler.mag == F::Linear && sampler.min == F::Linear && sampler.mipmap == M::Linear;
+    Ok(SamplerDesc {
+        min: filter(sampler.min),
+        mag: filter(sampler.mag),
+        mip: if sampler.mipmap == M::Linear {
+            Filter::Linear
+        } else {
+            Filter::Nearest
+        },
+        address: [
+            wrap(sampler.wrap_u),
+            wrap(sampler.wrap_v),
+            AddressMode::ClampToEdge,
+        ],
+        compare: None,
+        anisotropy: if linear { anisotropy_clamp } else { 1 },
+    })
 }
 
 /// What an active atmosphere produces for the sky backdrop and the lit pass.
@@ -1262,6 +1341,73 @@ fn frame(
         graph.import(Resource::Buffer(material.buffer), Access::HostWrite);
         materials.push(material);
     }
+    // `try_upload_texture` and `sampler_descriptor` for each object's texture slots.
+    let mut object_textures: Vec<[Option<(Texture, SamplerDesc)>; 2]> = Vec::new();
+    if let Some(textures) = scene.textures {
+        ensure!(
+            textures.objects.len() == scene.objects.len()
+                && (1..=16).contains(&textures.anisotropy_clamp),
+            "scene textures need one entry per object and an anisotropy clamp in 1..=16"
+        );
+        for object in textures.objects {
+            let mut slots = [None, None];
+            for (slot, (texture, role, format)) in [
+                (
+                    object.base_color,
+                    crate::asset::TextureRole::BaseColorSrgb,
+                    Format::Rgba8Srgb,
+                ),
+                (
+                    object.metallic_roughness,
+                    crate::asset::TextureRole::MetallicRoughnessLinear,
+                    Format::Rgba8,
+                ),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let Some(texture) = texture else { continue };
+                let first = texture
+                    .data
+                    .mips
+                    .first()
+                    .context("texture without a level")?;
+                ensure!(
+                    texture.data.role == role,
+                    "texture slot holds a {:?} texture",
+                    texture.data.role
+                );
+                let image = Texture::sampled_mips(
+                    gpu,
+                    [first.width, first.height],
+                    texture.data.mips.len() as u32,
+                    format,
+                )?;
+                for (level, mip) in texture.data.mips.iter().enumerate() {
+                    ensure!(
+                        mip.rgba8.len() == mip.width as usize * mip.height as usize * 4,
+                        "texture level {level} is not tightly packed RGBA8"
+                    );
+                    staging.push(transfer::upload_mip(
+                        gpu,
+                        &mut graph,
+                        &mut rec,
+                        image.image,
+                        level as u32,
+                        [mip.width, mip.height],
+                        &mip.rgba8,
+                    )?);
+                }
+                let sampler = sampler_desc(
+                    texture.sampler,
+                    textures.anisotropy_clamp,
+                    texture.data.mips.len(),
+                )?;
+                slots[slot] = Some((image, sampler));
+            }
+            object_textures.push(slots);
+        }
+    }
     let output = Texture::new(gpu, size, Format::Rgba16Float, deferred_path, true)?;
     let depth = RasterDepth::new(gpu, size, SampleCount::One)?;
     let mut arrays = Arrays::default();
@@ -1282,12 +1428,38 @@ fn frame(
         arrays.materials = (0..draws)
             .map(|i| materials.get(i).unwrap_or(&materials[0]))
             .collect();
-        arrays.samplers = vec![SamplerDesc::default(); draws];
+        arrays.default_samplers = vec![SamplerDesc::default(); draws];
+        // Base colour at 11 and 12, metallic-roughness at 13 and 14: each draw's own
+        // texture and sampler where it has one.
+        for (slot, bindings) in [(0, [11, 12]), (1, [13, 14])] {
+            arrays.samplers.insert(
+                key(2, bindings[1]),
+                (0..draws)
+                    .map(|i| {
+                        object_textures
+                            .get(i)
+                            .and_then(|t| t[slot].as_ref())
+                            .map_or(SamplerDesc::default(), |t| t.1)
+                    })
+                    .collect(),
+            );
+        }
         for spec in &specs {
             if let InputKind::ImageArray { .. } = spec.kind {
-                arrays
-                    .textures
-                    .insert(spec.key, vec![&inputs[&spec.key]; draws]);
+                let slot = match (spec.key.group, spec.key.binding) {
+                    (2, 11) => Some(0),
+                    (2, 13) => Some(1),
+                    _ => None,
+                };
+                arrays.textures.insert(
+                    spec.key,
+                    (0..draws)
+                        .map(|i| {
+                            slot.and_then(|slot| object_textures.get(i)?[slot].as_ref())
+                                .map_or(&inputs[&spec.key], |t| &t.0)
+                        })
+                        .collect(),
+                );
             }
         }
     }
@@ -1308,11 +1480,22 @@ fn frame(
     };
     // One lit packet per object on the raster path (none when traced: no geometries).
     let mut packets = Vec::new();
-    for object in geometries.iter().zip(&materials) {
+    for (index, object) in geometries.iter().zip(&materials).enumerate() {
         let values = program
             .inputs()
             .iter()
-            .map(|spec| Ok((spec.key, shared.input(spec, Some(object))?)))
+            .map(|spec| {
+                // The object's own base colour (1, 2) and metallic-roughness (3, 4).
+                let own = |slot: usize| object_textures.get(index).and_then(|t| t[slot].as_ref());
+                Ok((
+                    spec.key,
+                    match (spec.key.group, spec.key.binding, own(0), own(1)) {
+                        (2, 1, Some(t), _) | (2, 3, _, Some(t)) => Input::Image(&t.0),
+                        (2, 2, Some(t), _) | (2, 4, _, Some(t)) => Input::Sampler(t.1),
+                        _ => shared.input(spec, Some(object))?,
+                    },
+                ))
+            })
             .collect::<Result<Vec<_>>>()?;
         let packet = HeapBindings::for_program(gpu, &program, &values)?;
         packet.import(&mut graph);
@@ -1882,6 +2065,7 @@ fn frame(
     for image in inputs
         .into_values()
         .chain(post_images)
+        .chain(object_textures.into_iter().flatten().flatten().map(|t| t.0))
         .chain([lists, output])
     {
         gpu.retire(Resource::Image(image.image))?;
