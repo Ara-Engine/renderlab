@@ -599,8 +599,18 @@ fn frame(
         }),
         "forward frame binds the default textures and the standard program only"
     );
-    let size = scene.size;
+    // The caller's size, and the size every pass before the resolve renders at: below
+    // native scale a reconstructed frame is drawn at an internal size and resolved to
+    // the caller's (`Renderer::upscale_target`). Equal otherwise.
+    let target = scene.size;
     let deferred_path = scene.primary != Primary::Raster;
+    let size = match scene
+        .reconstruction
+        .filter(|r| r.settings.enabled && deferred_path)
+    {
+        Some(r) => r.settings.scale.internal_size(target[0], target[1]),
+        None => target,
+    };
     // Each object's normal map, by object index.
     let normal_map = |index: usize| scene.textures.and_then(|t| t.objects.get(index)?.normal);
     for (index, object) in scene.objects.iter().enumerate() {
@@ -645,11 +655,11 @@ fn frame(
     );
     if let Some(r) = reconstruct {
         ensure!(
-            tr1.as_ref().is_none_or(|h| h.matches(r.settings, size)),
+            tr1.as_ref().is_none_or(|h| h.matches(r.settings, target)),
             "reconstruction settings or size changed within a sequence, which is not assembled yet"
         );
         if tr1.is_none() {
-            *tr1 = Some(History::new(gpu, cache, r.settings, size)?);
+            *tr1 = Some(History::new(gpu, cache, r.settings, target)?);
         }
     }
     let sample = tr1
@@ -1186,7 +1196,7 @@ fn frame(
                 exposure: packed.exposure,
                 background: clear,
                 visible_sky: settings.sky,
-                pixel_angle: 2.0 * (0.5 * scene.camera.fov_y()).tan() / size[1] as f32,
+                pixel_angle: 2.0 * (0.5 * scene.camera.fov_y()).tan() / target[1] as f32,
                 scene_bounds,
                 skin_bounds: None,
                 skin_revisions: vec![],
@@ -1536,6 +1546,14 @@ fn frame(
         }
     }
     let output = Texture::new(gpu, size, Format::Rgba16Float, deferred_path, true)?;
+    // `Upscale::hdr`: below native scale the resolve writes a target-size image, which
+    // is what post and the caller then see.
+    let upscaled = if size == target {
+        None
+    } else {
+        Some(Texture::new(gpu, target, Format::Rgba16Float, true, false)?)
+    };
+    let shown = upscaled.as_ref().unwrap_or(&output);
     let depth = RasterDepth::new(gpu, size, SampleCount::One)?;
     let mut arrays = Arrays::default();
     if let (Some(deferred), Some(traced)) = (&deferred, &traced) {
@@ -1721,7 +1739,7 @@ fn frame(
                         match (spec.key.group, spec.key.binding) {
                             (0, 40) => Input::Buffer(record),
                             (0, 41) => Input::Image(samples),
-                            (0, 46) => Input::Image(&output),
+                            (0, 46) => Input::Image(shown),
                             _ => match images.input(spec.key) {
                                 Some(image) => Input::Image(image),
                                 None => shared.input(spec, None)?,
@@ -1862,8 +1880,8 @@ fn frame(
         gpu,
         &mut graph,
         &mut rec,
-        output.image,
-        u64::from(size[0]) * u64::from(size[1]) * 8,
+        shown.image,
+        u64::from(target[0]) * u64::from(target[1]) * 8,
     )?;
     let table_read = match gi.filter(|_| indirect.is_some_and(|i| i.read_table)) {
         Some((cache, _)) => Some(transfer::readback_buffer(
@@ -1906,7 +1924,7 @@ fn frame(
             &mut graph,
             &mut rec,
             images.written().image,
-            u64::from(size[0]) * u64::from(size[1]) * 16,
+            u64::from(target[0]) * u64::from(target[1]) * 16,
         )?),
         None => None,
     };
@@ -1923,7 +1941,8 @@ fn frame(
         );
         let passes = PostPasses::new(gpu, cache, Format::Rgba32Float)?;
         left.post_serial = history.next_post_serial();
-        let record = SettingsRecord::new(gpu, &post_record(&settings, size[1], left.post_serial))?;
+        let record =
+            SettingsRecord::new(gpu, &post_record(&settings, target[1], left.post_serial))?;
         // `PostGpu::prepare`: the previous camera counts only from the frame before.
         let previous_camera = history
             .post_camera
@@ -1948,6 +1967,7 @@ fn frame(
         if settings.motion_blur {
             // `PostGpu::prepare` takes the frame's camera, jittered on a reconstructed
             // frame: its current matrix is the unjittered one, its inverse the frame's.
+            // Both at the internal size; every post target is at the caller's.
             let frame = PostCameraFrame::new(
                 gpu,
                 view,
@@ -1957,7 +1977,7 @@ fn frame(
                 settings.max_motion_radius_px,
             )?;
             graph.import(Resource::Buffer(frame.record.buffer), Access::HostWrite);
-            let auxiliary = Texture::new(gpu, size, Format::Rgba32Float, true, false)?;
+            let auxiliary = Texture::new(gpu, target, Format::Rgba32Float, true, false)?;
             // `PostGpu::encode`'s surface pass: from the depth target on a raster frame,
             // from the hit records and the placements' motion on a traced one.
             let kernel = if deferred_path {
@@ -1979,7 +1999,7 @@ fn frame(
                     .collect::<Result<Vec<_>>>()?;
                 let packet = HeapBindings::new(gpu, Pass::PostPrimarySurface, &values)?;
                 packet.import(&mut graph);
-                kernel.record(&mut graph, &mut rec, &packet, [size[0], size[1], 1])?;
+                kernel.record(&mut graph, &mut rec, &packet, [target[0], target[1], 1])?;
                 // The packet borrows the frame record and the surface, which move on
                 // below: keep only its own record, retired with the kernel.
                 SurfaceKernel::Hits(kernel, packet.release())
@@ -1990,7 +2010,7 @@ fn frame(
             };
             let tiles = Texture::new(
                 gpu,
-                size.map(|n| n.div_ceil(16)),
+                target.map(|n| n.div_ceil(16)),
                 Format::Rgba16Float,
                 true,
                 false,
@@ -2000,22 +2020,22 @@ fn frame(
                 &mut rec,
                 Pass::TileMax,
                 &FilterInputs {
-                    colour: &output,
-                    second: &output,
+                    colour: shown,
+                    second: shown,
                     auxiliary: &auxiliary,
-                    velocity_tiles: &output,
+                    velocity_tiles: shown,
                     settings: &record,
                 },
                 &tiles,
             )?;
-            let blurred = Texture::new(gpu, size, Format::Rgba16Float, true, false)?;
+            let blurred = Texture::new(gpu, target, Format::Rgba16Float, true, false)?;
             passes.filter(
                 &mut graph,
                 &mut rec,
                 Pass::MotionBlur,
                 &FilterInputs {
-                    colour: &output,
-                    second: &output,
+                    colour: shown,
+                    second: shown,
                     auxiliary: &auxiliary,
                     velocity_tiles: &tiles,
                     settings: &record,
@@ -2027,20 +2047,20 @@ fn frame(
                 &mut graph,
                 &mut rec,
                 auxiliary.image,
-                u64::from(size[0]) * u64::from(size[1]) * 16,
+                u64::from(target[0]) * u64::from(target[1]) * 16,
             )?);
             surface = Some((kernel, frame, blurred));
             post_images.extend([auxiliary, tiles]);
         }
-        let colour = surface.as_ref().map_or(&output, |(_, _, blurred)| blurred);
+        let colour = surface.as_ref().map_or(shown, |(_, _, blurred)| blurred);
         let bloom = if settings.bloom > 0.0 {
-            let bloom = Bloom::new(gpu, size)?;
+            let bloom = Bloom::new(gpu, target)?;
             bloom.record(&passes, &mut graph, &mut rec, colour, &record)?;
             Some(bloom)
         } else {
             None
         };
-        let linear = Texture::new(gpu, size, Format::Rgba32Float, false, true)?;
+        let linear = Texture::new(gpu, target, Format::Rgba32Float, false, true)?;
         passes.tone(
             &mut graph,
             &mut rec,
@@ -2052,14 +2072,14 @@ fn frame(
             },
             &linear,
         )?;
-        let display = Texture::new(gpu, size, Format::Rgba8, false, true)?;
+        let display = Texture::new(gpu, target, Format::Rgba8, false, true)?;
         passes.display(&mut graph, &mut rec, &linear, &display)?;
         reads[1] = Some(transfer::readback(
             gpu,
             &mut graph,
             &mut rec,
             display.image,
-            u64::from(size[0]) * u64::from(size[1]) * 4,
+            u64::from(target[0]) * u64::from(target[1]) * 4,
         )?);
         post_images.extend([lut, linear, display]);
         post_buffers.push(record.buffer);
@@ -2207,6 +2227,7 @@ fn frame(
         .chain(post_images)
         .chain(object_textures.into_iter().flatten().flatten().map(|t| t.0))
         .chain([lists, output])
+        .chain(upscaled)
     {
         gpu.retire(Resource::Image(image.image))?;
     }

@@ -50,6 +50,8 @@
 //! directions rotate and its ray count follows the reconstruction's budget.
 //! `--reflections` implies `--traced` and turns traced reflections on at their
 //! default roughness band: the shading program's own reflection rays.
+//! `--scale quality|performance` implies `--reconstruction` and renders the frame at two
+//! thirds or half the output size in each axis, resolved to the output's.
 //! `--normal-map` implies `--traced` and gives the floor a tangent stream and a
 //! tangent-space normal map of round studs, with its full mip chain.
 //! `--local-shadows` implies `--traced` and shadows every point and spot light with the
@@ -98,6 +100,7 @@ fn main() -> Result<(), Failure> {
     let (mut crevice, mut reconstruction, mut interactive) = (false, false, false);
     let (mut reflections, mut textures, mut local_shadows) = (false, false, false);
     let mut normal_map = false;
+    let mut scale = renderlab::RenderScale::Native;
     let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -112,6 +115,14 @@ fn main() -> Result<(), Failure> {
             "--reflections" => (sun_shadows, traced, reflections) = (true, true, true),
             "--local-shadows" => (sun_shadows, traced, local_shadows) = (true, true, true),
             "--normal-map" => (sun_shadows, traced, normal_map) = (true, true, true),
+            "--scale" => {
+                (sun_shadows, traced, reconstruction) = (true, true, true);
+                scale = match args.next().as_deref() {
+                    Some("quality") => renderlab::RenderScale::Quality,
+                    Some("performance") => renderlab::RenderScale::Performance,
+                    _ => return Err("--scale quality|performance".into()),
+                };
+            }
             "--interactive" => (sun_shadows, traced, interactive) = (true, true, true),
             "--reconstruction" => (sun_shadows, traced, reconstruction) = (true, true, true),
             "--filter" => {
@@ -198,6 +209,7 @@ fn main() -> Result<(), Failure> {
         textures,
         local_shadows,
         normal_map,
+        scale,
         still,
         frames,
     };
@@ -241,6 +253,9 @@ struct Level {
     local_shadows: bool,
     /// The floor carries the stud normal map and a tangent stream, on a traced frame.
     normal_map: bool,
+    /// The reconstruction's render scale: below native the frame is drawn at an
+    /// internal size and resolved to the output's.
+    scale: renderlab::RenderScale,
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
@@ -471,7 +486,10 @@ fn wgpu_frame(
             IndirectSettings::off()
         })?;
         r.set_reconstruction(if level.reconstruction {
-            Reconstruction::default()
+            Reconstruction {
+                scale: level.scale,
+                ..Default::default()
+            }
         } else {
             Reconstruction::off()
         })?;
@@ -717,7 +735,10 @@ fn ara_frame(
                     read_table: true,
                 }),
                 reconstruction: level.reconstruction.then(|| Reconstruct {
-                    settings: renderlab::Reconstruction::default(),
+                    settings: renderlab::Reconstruction {
+                        scale: level.scale,
+                        ..Default::default()
+                    },
                     read_history: false,
                 }),
                 reflections: level
@@ -856,13 +877,18 @@ fn write(
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
             "scene": format!(
-                "M5-A authored v1{}{}{}, {}, local shadows {}, default post{}{}{}",
+                "M5-A authored v1{}{}{}, {}, local shadows {}, default post{}{}{}{}",
                 if level.crevice { " with a slot between two walls" } else { "" },
                 if level.textures { " with a checker-textured floor" } else { "" },
                 if level.normal_map { " with a stud normal map on the floor" } else { "" },
                 if level.still { "every frame from pose 0" } else { "camera path from pose 0" },
                 if level.local_shadows { "traced for every local light" } else { "off" },
                 if level.reconstruction { ", temporal reconstruction at its defaults" } else { "" },
+                match level.scale {
+                    renderlab::RenderScale::Native => "",
+                    renderlab::RenderScale::Quality => " at two thirds scale",
+                    renderlab::RenderScale::Performance => " at half scale",
+                },
                 if level.interactive { ", Interactive soft shadows" } else { "" },
                 if level.reflections { ", traced reflections" } else { "" }
             ),

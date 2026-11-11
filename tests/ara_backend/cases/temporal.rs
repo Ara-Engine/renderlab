@@ -1,7 +1,7 @@
 //! Temporal reconstruction through the adapter.
 use super::*;
 use renderlab::{
-    Camera, Light, Lighting, Mat4, MaterialDescriptor, Reconstruction, Vec3, Vertex,
+    Camera, Light, Lighting, Mat4, MaterialDescriptor, Reconstruction, RenderScale, Vec3, Vertex,
     backend_ara::{
         forward::{ForwardObject, ForwardScene, Frames, Primary, SunShadows},
         kernel::Kernel,
@@ -69,6 +69,9 @@ struct Card {
     primary: Primary,
     /// Off unless a test asks for the physical sky.
     atmosphere: renderlab::Atmosphere,
+    /// None unless a test asks for the post chain, whose displayed image must then be
+    /// the frame's size.
+    post: Option<renderlab::PostSettings>,
 }
 const SIZE: [u32; 2] = [128, 96];
 /// One frame: its HDR as RGBA f32, and its history colour and reset flag.
@@ -106,6 +109,7 @@ impl Card {
             },
             primary: Primary::Traced,
             atmosphere: renderlab::Atmosphere::off(),
+            post: None,
         }
     }
     /// Looking down from 4 m, `shift` metres off the card's centre in x and y.
@@ -155,7 +159,7 @@ impl Card {
                     atmosphere: self.atmosphere,
                     sun_shadows: Some(&self.shadows),
                     primary: self.primary,
-                    post: None,
+                    post: self.post,
                     indirect: None,
                     reconstruction,
                     reflections: None,
@@ -163,6 +167,14 @@ impl Card {
                     local_shadows: None,
                 },
             )?;
+            ensure!(
+                images
+                    .display
+                    .as_ref()
+                    .is_none_or(|d| d.len() == (SIZE[0] * SIZE[1] * 4) as usize)
+                    && images.display.is_some() == self.post.is_some(),
+                "the displayed image is not the frame's size"
+            );
             let hdr = images
                 .hdr
                 .as_chunks::<2>()
@@ -401,6 +413,104 @@ fn reconstruction_history_survives_a_pan_and_restarts_on_cuts_and_sun_turns() ->
     let second = scene.frames(&mut gpu, &cache, &mut again, reconstructed(), &pan)?;
     again.retire(&mut gpu)?;
     ensure!(first == second, "the same sequence gave different frames");
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// Below native scale every pass before the resolve renders at an internal size (two
+/// thirds or half of the target in each axis) and the resolve fills the target from
+/// those samples over frames. Under a still camera:
+///
+/// - the frame, its history and the displayed image are the target's size;
+/// - away from the edges every frame equals the native frame, since a flat region's
+///   samples all hold its value;
+/// - once the history is no longer young, the mean weight grows each frame by the
+///   share of target pixels a frame samples: the internal pixel count over the
+///   target's (0.25 and 0.44);
+/// - after 64 frames the pixel the card's left edge crosses holds the card's and the
+///   floor's radiance near the proportion of its area the card covers, and the pixels
+///   two away on either side are still pure.
+#[test]
+fn reconstruction_below_native_scale_fills_the_target_from_fewer_samples() -> Result<()> {
+    let path = root("temporal-scale");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let mut scene = Card::new();
+    let camera = Card::camera([0.03, 0.02])?;
+    let plain = scene.frames(&mut gpu, &cache, &mut Frames::default(), None, &[camera])?;
+    let (card, floor) = (plain[0].0[at(64, 48)], plain[0].0[at(10, 10)]);
+    let matrix = camera.matrix(SIZE[0], SIZE[1]);
+    let left = (matrix.project_point3(Vec3::new(-0.5, 0., 1.)).x + 1.) * 0.5 * SIZE[0] as f32;
+    let (edge, covered) = (left as u32, 1. - left.fract());
+    let texels = (SIZE[0] * SIZE[1]) as usize;
+    let mut report = String::new();
+    for scale in [RenderScale::Performance, RenderScale::Quality] {
+        let [width, height] = scale.internal_size(SIZE[0], SIZE[1]);
+        let share = (width * height) as f32 / texels as f32;
+        let upscaled = Some(Reconstruct {
+            settings: Reconstruction {
+                scale,
+                ..Default::default()
+            },
+            read_history: true,
+        });
+        const FRAMES: usize = 64;
+        let mut history = Frames::default();
+        let frames = scene.frames(&mut gpu, &cache, &mut history, upscaled, &[camera; FRAMES])?;
+        history.retire(&mut gpu)?;
+        let mut means = Vec::new();
+        for (index, (hdr, read)) in frames.iter().enumerate() {
+            let (colour, reset) = read.as_ref().context("history was not read")?;
+            ensure!(
+                hdr.len() == texels * 4 && colour.len() == texels * 4 && *reset == (index == 0),
+                "{scale:?} frame {index}: {} and {} channels, reset {reset}",
+                hdr.len(),
+                colour.len()
+            );
+            for (x, y) in [(64, 48), (10, 10), (100, 80)] {
+                let (value, flat) = (hdr[at(x, y)], plain[0].0[at(x, y)]);
+                ensure!(
+                    (value - flat).abs() <= 1e-3 * flat,
+                    "{scale:?} frame {index}: flat pixel ({x}, {y}) is {value}, not {flat}"
+                );
+            }
+            means.push(weights(colour)[1]);
+        }
+        let growth = (means[FRAMES - 1] - means[FRAMES / 2 - 1]) / (FRAMES / 2) as f32;
+        ensure!(
+            (growth / share - 1.).abs() < 0.1,
+            "{scale:?}: the mean weight grows {growth:.3} a frame where a frame samples {share:.3} of the target"
+        );
+        let last = &frames[FRAMES - 1].0;
+        let held = |x: u32| (last[at(x, 48)] - floor) / (card - floor);
+        ensure!(
+            (held(edge) - covered).abs() < 0.1
+                && held(edge - 2).abs() < 0.02
+                && held(edge + 2) > 0.98,
+            "{scale:?}: the edge pixel holds {:.3} of the card where it covers {covered:.3}; two pixels out {:.3} and {:.3}",
+            held(edge),
+            held(edge - 2),
+            held(edge + 2)
+        );
+        report += &format!(
+            "{scale:?}: weight growth {growth:.3} for {share:.3}, edge {:.3} for {covered:.3}; ",
+            held(edge)
+        );
+    }
+    // Post runs at the target's size on the resolved image.
+    scene.post = Some(renderlab::PostSettings::default());
+    let performance = Some(Reconstruct {
+        settings: Reconstruction {
+            scale: RenderScale::Performance,
+            ..Default::default()
+        },
+        read_history: false,
+    });
+    let mut history = Frames::default();
+    scene.frames(&mut gpu, &cache, &mut history, performance, &[camera; 2])?;
+    history.retire(&mut gpu)?;
+    eprintln!("{report}");
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

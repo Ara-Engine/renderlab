@@ -1661,8 +1661,8 @@ sample index, and lives in `forward::Frames` beside the cache. With
 its sample of the sequence (post and the cache's still key keep it unjittered), the
 primary frame record carries the rotation word and the planner's sampling words, and
 after shading the HDR target is copied aside and resolved in place. A cut restarts the
-history and keeps the sample index, as `cut_reconstruction` does. Refused: render
-scale below native, and settings or a size that change within a sequence. The ray
+history and keeps the sample index, as `cut_reconstruction` does. Refused: settings
+or a size that change within a sequence. The ray
 budget is planned but nothing consumes it until Interactive shadows are assembled.
 
 Three tests on a bright card over a dark floor, seen from straight above:
@@ -1725,8 +1725,7 @@ it to the exact frame under a slanted sun with a wide disk:
 
 `ara_frame --interactive` is the level; with `--reconstruction --filter` it is the
 closest frame so far to `HardwareRt` at its defaults. Not assembled: the path for a
-repair queue above device limits (`Full` compiles and is never chosen), and render
-scale.
+repair queue above device limits (`Full` compiles and is never chosen).
 
 `ara_frame --reconstruction` is the level on either layer, combinable with the cache
 levels. On Metal, M5-A with the cache at its defaults and reconstruction on is
@@ -1738,6 +1737,32 @@ Interactive shadows, reflections and the textured floor added; both show 256 sha
 rays at pose 0 and 32 after, and neither restarts after pose 0. What neither the
 tests nor that comparison sees is the resolve's rejection rules under object motion:
 the path moves only the camera.
+
+**Render scale below native.** `Reconstruction::scale` at `Quality` or `Performance`
+draws the frame at two thirds or half the target in each axis. As
+`Renderer::upscale_target` does it, every pass before the resolve (the trace, the
+estimator, the cache's shading, the atmosphere) runs at the internal size, the copy of
+the shaded samples is the internal size, and the three history pairs and the resolve's
+output are the target's: a separate target-size HDR image that post and the caller
+then see. The planner takes its matrices at the internal size and one output pixel's
+angle; post's camera record is at the internal size and every post target at the
+caller's, with the hit-based surface pass reading the internal hit image as its shader
+already does. The resolve shader needed nothing: it derives the ratio from the two
+image sizes.
+
+`reconstruction_below_native_scale_fills_the_target_from_fewer_samples`, on the card
+under a still camera, at both scales: the frame, its history and the displayed image
+are the target's size; away from the edges every frame equals the native frame; once
+the history is no longer young the mean weight grows each frame by the share of target
+pixels a frame samples (0.248 a frame for 0.250 at half scale, 0.440 for 0.443 at two
+thirds); after 64 frames the pixel the card's edge crosses holds 0.324 and 0.343 of the
+card where it covers 0.290 (bound 0.1), and pixels two away are pure.
+
+`ara_frame --scale quality|performance` is the level on either layer. **Not compared
+with wgpu.** What the test cannot see: anything under motion (the rejection tolerance
+uses the output pixel's angle, and the interpolation of young history), and the
+quality of the upscaled edge beyond that one bound. As in the renderer, an upscaled
+frame would skip transparent draws; the frame has none yet.
 
 ## Traced reflections
 
@@ -1803,8 +1828,9 @@ clamp that ara-gpu's samplers do not have; the frame refuses both. Streamed
 scope here.
 
 **What still separates this frame from `HardwareRt`'s default image:** depth of
-field, render scale below native, local-light shadows, normal maps, transparency and
-particles, and the smaller table the tool uses for the cache.
+field, transparency and particles, and the smaller table the tool uses for the cache.
+Local-light shadows, normal maps and render scale below native are built since
+(below, and under temporal reconstruction).
 
 ## Local-light shadows on the traced frame
 

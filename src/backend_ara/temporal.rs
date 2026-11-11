@@ -38,7 +38,8 @@ pub fn resolve_program() -> Result<Program> {
 /// What a frame sequence asks of the reconstruction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Reconstruct {
-    /// Enabled, at native scale.
+    /// Enabled. Below native scale the frame renders at `RenderScale::internal_size`
+    /// and the history and the resolved image are the scene's size.
     pub settings: crate::Reconstruction,
     /// Copy this frame's history colour out: per pixel the exposed mean in rgb and
     /// the accumulated sample weight in alpha, as RGBA32F.
@@ -73,10 +74,7 @@ impl History {
         settings
             .validate()
             .map_err(|e| anyhow::anyhow!("reconstruction settings: {e}"))?;
-        ensure!(
-            settings.enabled && settings.scale == crate::RenderScale::Native,
-            "reconstruction is assembled at native scale only"
-        );
+        ensure!(settings.enabled, "reconstruction history needs it enabled");
         let program = resolve_program()?;
         let kernel = Kernel::from_program(gpu, cache, &program)?;
         let mut pair = |format| -> Result<[Texture; 2]> {
