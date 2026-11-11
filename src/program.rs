@@ -112,7 +112,8 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
 /// lists edits to the composed reflection block. `traced=N` traces N of the footprint's
 /// strata (shared between neighbours at 4 or fewer; `noshare` keeps each pixel's own);
 /// `cone=traced` recomputes the cone from the traced count (diagnostic);
-/// `noshadow` makes hit lights unshadowed; `noshade` replaces hit shading by the sky.
+/// `noshadow` makes hit lights unshadowed; `noshade` replaces hit shading by the sky;
+/// `rough4` and `mark4` are the rough-band bound and its pixel count.
 /// Unset, the block is unchanged.
 fn glossy_screen(mut api: String) -> String {
     let Ok(list) = std::env::var("RENDERLAB_GLOSSY_SCREEN") else {
@@ -131,6 +132,18 @@ fn glossy_screen(mut api: String) -> String {
             Some(("cone", "traced")) => edit(
                 "alpha*inverseSqrt(f32(footprint))",
                 "alpha*inverseSqrt(f32(count))",
+            ),
+            // The rough-band bound (docs/design-nonrt-options.md section 3): one ray from
+            // roughness 0.4, the footprint unchanged.
+            None if item == "rough4" => edit(
+                "let count=min(footprint,RL_GLOSSY_TRACED);",
+                "let count=select(min(footprint,RL_GLOSSY_TRACED),1u,rough>=0.4);",
+            ),
+            // Counting screen: traced glossy receivers turn green below roughness 0.4 and
+            // magenta from it.
+            None if item == "mark4" => edit(
+                "    if traced<=0.0 || !(lobe.weight>0.0) {return;}\n",
+                "    if traced<=0.0 || !(lobe.weight>0.0) {return;}\n    if rough>=RL_MIRROR {rl_specular=vec4<f32>(select(vec3<f32>(0.0,1e4,0.0),vec3<f32>(1e4,0.0,1e4),rough>=0.4),1.0);return;}\n",
             ),
             None if item == "noshare" => edit(
                 "const RL_SHARE:bool=RL_GLOSSY_TRACED<=RL_SHARE_SLOTS;",

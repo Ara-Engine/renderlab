@@ -170,7 +170,8 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let seed=rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y^(frame*0x85ebca6bu)));
     let rotation=f32(seed>>8u)*(1.0/16777216.0);
     let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
-    rl_g=RlGather(origin,n,v,side,alpha,traced,width,0u,mirror,true);
+    rl_g.seed=seed;
+    rl_g=RlGather(origin,n,v,side,alpha,traced,width,0u,mirror,true,0u);
     var sum=vec3<f32>(0.0);
     var valid=0u;
     var shaded=false;
@@ -231,7 +232,9 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
 // Each pixel traces RL_GLOSSY_TRACED of its footprint's strata and leaves every sample in
 // workgroup memory: the hit point (or, for a miss, the direction) with the radiance its own
 // hit program shaded and the probability its own lobe drew it with. After one barrier each
-// glossy receiver reconnects to its 3x3 neighbours' samples inside the shading group: a
+// glossy receiver reconnects to the samples of RL_SHARE_PICKS neighbours inside the shading
+// group, picked per pixel and frame from its 5x5 window (a fixed 3x3 stamped a rare bright
+// hit as a visible square on cuts): a
 // neighbour's hit is seen from this receiver's origin along a new direction, weighted by
 // this receiver's lobe density over the sample's own (pairwise, bounded by 2) and
 // self-normalized. The reflected image stays this receiver's own (each sample is placed by
@@ -243,7 +246,8 @@ const RL_SHARE_SLOTS:u32=4u;
 const RL_SHARE:bool=RL_GLOSSY_TRACED<=RL_SHARE_SLOTS;
 // Rows of every shading group (8x4 tiles, 4x4 lists).
 const RL_SHARE_ROWS:u32=4u;
-struct RlGather {origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:vec3<f32>,alpha:f32,traced:f32,width:f32,count:u32,mirror:bool,lobe:bool};
+const RL_SHARE_PICKS:u32=6u;
+struct RlGather {origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:vec3<f32>,alpha:f32,traced:f32,width:f32,count:u32,mirror:bool,lobe:bool,seed:u32};
 var<private> rl_g:RlGather;
 var<workgroup> rl_share_point:array<vec4<f32>,128>;
 var<workgroup> rl_share_radiance:array<vec4<f32>,128>;
@@ -275,41 +279,52 @@ fn rl_reflection_share(lane:u32,width:u32,live:bool) {
     let x=i32(lane%width);let y=i32(lane/width);
     var sum=vec3<f32>(0.0);
     var weights=0.0;
-    for(var dy=-1;dy<=1;dy+=1) {
-        for(var dx=-1;dx<=1;dx+=1) {
-            let nx=x+dx;let ny=y+dy;
-            if nx<0 || ny<0 || nx>=i32(width) || ny>=i32(RL_SHARE_ROWS) {continue;}
-            let j=u32(ny)*width+u32(nx);
-            let o=rl_share_origin[j];
-            if o.w<=0.0 {continue;}
-            let own=j==lane;
+    // The own pixel, then RL_SHARE_PICKS distinct offsets of the 5x5 window (a stride
+    // coprime to its 24 off-centre cells from a hashed start), mirrored into the group.
+    let start=rl_hash(g.seed)%24u;
+    for(var t=0u;t<=RL_SHARE_PICKS;t+=1u) {
+        var j=lane;
+        if t>0u {
+            let m=(start+(t-1u)*7u)%24u;
+            let q=i32(m+select(0u,1u,m>=12u));
+            var nx=x+q%5-2;var ny=y+q/5-2;
+            if nx<0 {nx=-nx;}
+            if nx>=i32(width) {nx=2*i32(width)-2-nx;}
+            if ny<0 {ny=-ny;}
+            if ny>=i32(RL_SHARE_ROWS) {ny=2*i32(RL_SHARE_ROWS)-2-ny;}
+            j=u32(ny)*width+u32(nx);
+            // A mirrored pick can land back on this pixel.
+            if j==lane {continue;}
+        }
+        let o=rl_share_origin[j];
+        if o.w<=0.0 {continue;}
+        let own=j==lane;
+        if !own {
+            // Same surface only: facing alike and within two footprints of the plane.
+            let s=rl_share_side[j];
+            if dot(s.xyz,g.side)<0.9 || abs(dot(g.side,o.xyz-g.origin))>2.0*max(g.width,s.w) {continue;}
+        }
+        for(var k=0u;k<u32(o.w);k+=1u) {
+            let p=rl_share_point[j*RL_SHARE_SLOTS+k];
+            let r=rl_share_radiance[j*RL_SHARE_SLOTS+k];
+            var w=1.0;
             if !own {
-                // Same surface only: facing alike and within two footprints of the plane.
-                let s=rl_share_side[j];
-                if dot(s.xyz,g.side)<0.9 || abs(dot(g.side,o.xyz-g.origin))>2.0*max(g.width,s.w) {continue;}
-            }
-            for(var k=0u;k<u32(o.w);k+=1u) {
-                let p=rl_share_point[j*RL_SHARE_SLOTS+k];
-                let r=rl_share_radiance[j*RL_SHARE_SLOTS+k];
-                var w=1.0;
-                if !own {
-                    var dir=p.xyz;
-                    var jacobian=1.0;
-                    if p.w>0.5 {
-                        // Reconnect to the hit: solid angle scales by the squared distances.
-                        let to=p.xyz-g.origin;let back=p.xyz-o.xyz;
-                        let ri=dot(to,to);
-                        jacobian=ri/max(dot(back,back),1e-30);
-                        if jacobian<0.5 || jacobian>2.0 {continue;}
-                        dir=to*inverseSqrt(max(ri,1e-30));
-                    }
-                    if dot(dir,g.side)<=0.0 {continue;}
-                    let target_pdf=rl_lobe_pdf(g.n,g.v,g.alpha,dir);
-                    w=2.0*target_pdf/max(target_pdf+r.w*jacobian,1e-30);
+                var dir=p.xyz;
+                var jacobian=1.0;
+                if p.w>0.5 {
+                    // Reconnect to the hit: solid angle scales by the squared distances.
+                    let to=p.xyz-g.origin;let back=p.xyz-o.xyz;
+                    let ri=dot(to,to);
+                    jacobian=ri/max(dot(back,back),1e-30);
+                    if jacobian<0.5 || jacobian>2.0 {continue;}
+                    dir=to*inverseSqrt(max(ri,1e-30));
                 }
-                sum+=w*r.rgb;
-                weights+=w;
+                if dot(dir,g.side)<=0.0 {continue;}
+                let target_pdf=rl_lobe_pdf(g.n,g.v,g.alpha,dir);
+                w=2.0*target_pdf/max(target_pdf+r.w*jacobian,1e-30);
             }
+            sum+=w*r.rgb;
+            weights+=w;
         }
     }
     if weights>0.0 {rl_specular=vec4<f32>(sum/weights,g.traced);}
