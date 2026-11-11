@@ -172,7 +172,7 @@ impl Reconstruction {
             ..Self::default()
         }
     }
-    pub(in crate::renderer) fn validate(&self) -> Result<(), Error> {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
         let windows = [
             self.window,
             self.sharp_window,
@@ -215,7 +215,7 @@ const LIGHT_BUDGET: f32 = 0.05;
 // exclusively in the shared placement buffer.
 const FRAME_BUFFER_BYTES: usize = FRAME_BYTES + if cfg!(test) { 64 } else { 0 };
 /// `light` with its candela zeroed: a local light's identity for `reconstruction_key`.
-fn without_candela(mut light: Light) -> Light {
+pub(crate) fn without_candela(mut light: Light) -> Light {
     if let Light::Point { candela, .. } | Light::Spot { candela, .. } = &mut light {
         *candela = [0.; 3];
     }
@@ -437,7 +437,7 @@ impl ReconstructionShadowBudget {
 /// has a mean offset of exactly zero, so a still pixel's mean is first-order exact on smooth
 /// shading (the sky's glow) every other frame, and off by at most one offset over n
 /// otherwise (docs/m7-tr1b.md §4.6).
-pub(in crate::renderer) fn sample_offset(k: u64) -> [f32; 2] {
+pub(crate) fn sample_offset(k: u64) -> [f32; 2] {
     let k = (k & 0xff) as usize;
     if k == 0 || k == 255 {
         return [0.0; 2];
@@ -456,7 +456,7 @@ pub(crate) fn p_still(flag: &str) -> bool {
         .any(|f| f == flag)
 }
 /// Interactive's direction rotation for sample k: directions 8 (k mod 32) onward.
-pub(in crate::renderer) fn rotation(k: u64) -> u32 {
+pub(crate) fn rotation(k: u64) -> u32 {
     8 * (k & 31) as u32
 }
 
@@ -477,7 +477,7 @@ pub(in crate::renderer) struct Pipelines {
     pub resolve: Owned<wgpu::ComputePipeline>,
 }
 
-pub(super) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
+pub(crate) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
     trace_source_with(soft_kernels, PENUMBRA_LISTING)
 }
 /// The reconstruction's trace module; `listing` adds P-RTS's probes and penumbra pass,
@@ -563,7 +563,7 @@ pub(in crate::renderer) const PENUMBRA_LIST: &str =
 pub(crate) fn zones_source(record: &str) -> String {
     include_str!("../shaders/temporal_zones.wgsl").replace("ZONES", record)
 }
-pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
+pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
     // MV1 motion-source seam; history/resolve policy belongs to MQ1.
     Ok(format!(
