@@ -481,5 +481,8 @@ mod pane_cases;
 #[path = "ara_backend/cases/programs.rs"]
 mod program_cases;
 
+#[path = "ara_backend/cases/game_scene.rs"]
+mod game_scene_cases;
+
 #[path = "ara_backend/cases/textures.rs"]
 mod texture_cases;

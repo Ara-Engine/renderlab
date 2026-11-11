@@ -1853,8 +1853,12 @@ and the card; focused on the card, every card pixel is the sharp frame's and the
 floor does not change away from the edge. The mesh pass (surface from the depth
 target) and the traced frame (surface from the hit records) display identical images
 in every case. `ara_frame --depth-of-field` is the level on either layer and either
-family. **Not compared with wgpu.** What the test cannot see: the kernel's weights
-inside the blur, and depth of field together with motion blur or an upscaled frame.
+family. What the test cannot see: the kernel's weights inside the blur, and depth of
+field together with motion blur or an upscaled frame. Out of the blur's reach the test
+allows one display level, with nine pixels in ten exact: a pixel there is still a
+weighted mean of up to 48 taps of its own flat surface, and an RTX 4070 SUPER showed
+192 for 193 at one pixel 5.8 px inside the card, where no floor tap can reach. A leak
+would move many pixels, and by more.
 
 ## Local-light shadows on the traced frame
 
@@ -2130,3 +2134,101 @@ opaque surfaces) is not assembled: panes are not in the scene and cast nothing.
 Particles and emitters are not assembled. **Not compared with wgpu**, and with the
 reflection missing a comparison of a pane is expected to differ.
 
+## Shading programs and their parameters on the traced frame
+
+Until here the frame shaded with the standard program alone. That was a shortcut of
+the port, not a limit of what was ported: a renderer material names its program by a
+wgpu `Program` handle, which the backend cannot take, so the frame's description had no
+way to name one and `frame()` composed `STANDARD_PROGRAM` as a constant. The pieces
+behind it (`program::compose` and `compose_list`, the binning kernel, the list entry)
+were ported and replayed long ago and never chained.
+
+`ForwardScene::programs` now gives each object a program by its WGSL source and its
+parameter values by name, which is also how the engine-level entry will identify them
+(docs/design-engine-backend.md on main's #35). The frame does what
+`Renderer::create_program` and the traced frame do with them:
+
+- Each distinct source is composed at the raster stage and analysed, which validates it
+  and reflects its `Parameters` layout. Values are checked against that layout by name
+  and type and packed into a 256-byte block per draw (`ParameterLayout::pack`), bound
+  as `rl_parameters` at (2, 17). A program without `Parameters` gets a zero block when
+  another program of the frame declares some.
+- The program is composed into every stage the renderer composes it into: camera hits,
+  reflection hits (same pipeline) and, with bounce, the radiance cache's cells
+  (`Cache::new` takes the source). The restart key covers the sources, each object's
+  slot and its parameter bytes, as `reconstruction_key` does.
+- **One program:** the whole region is shaded by one dispatch, as before.
+- **Several programs** (MP1, `ProgramLists::prepare` and `encode`): the distinct
+  sources in first-draw order are the frame's slots, at most 32. After the trace and
+  the fresh visibility pass, the binning kernel lists each program's 4x4 tiles, then
+  each program's list entry (`primary_shade::hardware_soft_list_program`) runs as one
+  indirect dispatch from the arguments the binning pass wrote, with its own `RlList`
+  record (slot, list base, capacity, then every batch's slot) at (0, 38) and the lists
+  at (0, 39). Slot 0, the first draw's program, also writes misses. The cache's cells
+  are shaded by slot 0's source.
+
+A list program reads only what its own source reads, so the frame gathers its inputs
+from every list program and not from slot 0's alone: with a program that samples no
+texture in slot 0, the next program's texture arrays were at first not supplied.
+
+`a_program_shades_each_object_with_its_own_parameters` (a card over a floor, traced):
+
+- A program of the test's own that emits `colour * gain` and reads no light puts
+  exactly that times the exposure in every pixel of each object, the floor at the
+  program's defaults and the card at its own values: 11,232 floor and 812 card pixels,
+  bit for bit.
+- The game scene's program at its defaults shades as the standard program (0 apart).
+- `glow` set on the card alone adds the exposed glow to the card (within 0.0002) and
+  changes no floor pixel.
+- Two programs in one frame, in three arrangements (game then flat, flat then game
+  with glow, standard then flat): the flat object's pixels are the flat value and every
+  other pixel is bit for bit the frame where its program shaded alone, 36,132 pixels
+  in all, down to the tiles both objects share.
+- Refused: a parameter the program does not declare, and any program on the mesh pass.
+
+`programs_emit_valid_spirv_at_the_region_and_list_entries` emits the region and list
+entries of that program and of the game scene's two as SPIR-V and holds them to
+`spirv-val`, the `NonUniform` check and exact arithmetic. **None of this has run on
+Vulkan, and none is compared with wgpu.**
+
+### The game scene's opaque objects
+
+`examples/game_scene.rs` exists only as `Engine` calls, which the backend cannot take
+until the engine-level entry is built.
+`the_game_scenes_opaque_objects_are_shaded_by_their_own_programs` restates the
+scene's first frame instead: its 29 opaque objects
+(ground, arch, wall, crates, the gold and chrome spheres, nine cut-out bush cards with
+`thin` materials, brazier, lamp fittings and bulbs, the spinning crate, the hero's two
+spheres) with their materials, the `game` and `toon` programs with the hero's style and
+the bulbs' `glow`, the dusk sun through the atmosphere with height fog, the three
+lanterns, and the fly path's first pose, at 480x270. The geometry builders are copies
+of the example's and go when the example itself runs on the backend.
+
+With direct light only, so that one object's shading cannot reach another's pixels:
+
+- Against the frame where the hero is given the `game` program (one program, one
+  dispatch), only pixels near the hero differ (183; the gold sphere stands in front of
+  most of the body).
+- All 17,280 pixels of sky above the horizon are lit and bit for bit the one-program
+  frame's: slot 0's list writes the misses.
+- Against the frame without `glow`, only 18 pixels at the two bulbs differ, and the
+  arch bulb's centre gains 0.9955 of its exposed glow, the rest lost to 17 m of haze.
+
+Then four frames at the scene's own settings as far as the frame goes (radiance cache,
+traced reflections, local-light shadows, reconstruction, post with the scene's bloom,
+the glass pane) run under validation, finite and lit, and the last is written to
+`target/` as a PNG.
+
+**What still refuses or is missing for this scene:**
+
+- *Refused by the frame:* the scene's volumetric fog (`VolumetricFog`, 0.0015/m).
+- *Not expressible in the frame's description:* the two particle emitters (fire and
+  smoke), the two ground decals (emblem and puddle), the skinned Fox (the hero is the
+  two spheres), and the pane's traced reflection and tinted sun shadow.
+- *Not exercised:* the camera path, the hero's walk, the spinner and the lantern
+  flicker (one pose, repeated); `Engine::cut`, program reload and
+  `set_material_parameters` between frames; the quarry and sky-map variants.
+
+**Not compared with wgpu**: the wgpu game scene cannot run on the Mac, and nothing on
+either Vulkan machine can build this scene on the backend until the engine entry
+exists or this test runs there.

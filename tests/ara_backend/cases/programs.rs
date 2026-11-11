@@ -18,6 +18,25 @@ fn surface(input:SurfaceInput) -> Surface { return Surface(material_normal(input
 fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> { return expose(params.colour*params.gain); }
 ";
 
+/// The Vulkan side of each program, from any host: the whole-region entry and the
+/// list entry of the test's program and of the game scene's two emit SPIR-V that
+/// validates, with every resource-array access marked non-uniform and exact arithmetic.
+#[test]
+fn programs_emit_valid_spirv_at_the_region_and_list_entries() -> Result<()> {
+    use renderlab::backend_ara::primary_shade::{
+        hardware_soft_list_program, hardware_soft_program,
+    };
+    let toon = include_str!("../../../examples/game_toon.wgsl");
+    for (name, source) in [("flat", FLAT), ("game", GAME), ("toon", toon)] {
+        forward_cases::validate_spirv(&hardware_soft_program(source)?, &format!("{name}-region"))?;
+        forward_cases::validate_spirv(
+            &hardware_soft_list_program(source)?,
+            &format!("{name}-list"),
+        )?;
+    }
+    Ok(())
+}
+
 fn quad(half: f32, z: f32) -> [Vertex; 4] {
     [[-half, -half], [half, -half], [half, half], [-half, half]].map(|[x, y]| Vertex {
         position: [x, y, z],
