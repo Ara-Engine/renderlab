@@ -21,7 +21,7 @@ use crate::transparency::{
 use glam::Vec4;
 
 #[path = "transparency_reflection.rs"]
-mod reflection;
+pub(crate) mod reflection;
 #[path = "transparency_shadow.rs"]
 pub(crate) mod transmission_shadow;
 
