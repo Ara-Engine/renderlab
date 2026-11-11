@@ -114,6 +114,10 @@ pub enum Background {
     /// The map itself along each pixel's ray, exposed and scaled like the light it gives
     /// (TR1b's visible sky, `Renderer::set_visible_environment`).
     Sky,
+    /// The map along each pixel's ray at its own radiance scale (nonnegative), in place
+    /// of the sky's `intensity`: a sky that lights the scene more or less brightly than it
+    /// looks (an engine's sky-light strength). Reflections still see the lighting scale.
+    ScaledSky(f32),
 }
 
 /// How scene luminance maps to display values before tone mapping.
@@ -191,6 +195,12 @@ pub struct Settings {
     /// for programs that declare `reflection_lobe`: on by default up to roughness 0.5.
     /// `ReflectionSettings::off()` leaves every program its untraced estimate.
     pub reflections: crate::ReflectionSettings,
+    /// How brightly the physical atmosphere's sky lights the scene, relative to how it
+    /// looks (an engine's sky-light strength): it scales the procedural environment the
+    /// atmosphere lights through (image-based light, GI and reflected sky), not the sky
+    /// drawn, the sun or the fog. 1, the default, is physical; finite and nonnegative.
+    /// [`Sky::Map`] has its own `intensity` and `Background::ScaledSky`.
+    pub sky_light: f32,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -206,6 +216,7 @@ impl Default for Settings {
             local_shadows: LocalShadows::default(),
             post: PostSettings::default(),
             reflections: crate::ReflectionSettings::default(),
+            sky_light: 1.0,
         }
     }
 }
@@ -235,7 +246,7 @@ pub(crate) fn lighting(
         // A visible-sky background clears to black wherever the map is not drawn.
         Sky::Map { background, .. } => match background {
             Background::Color(radiance) => radiance,
-            Background::Sky => [0.0; 3],
+            Background::Sky | Background::ScaledSky(_) => [0.0; 3],
         },
     };
     let mut all = Vec::with_capacity(lights.len() + 1);

@@ -798,7 +798,6 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
 - **Not the cause:** GI cell churn (P-STILL §4.2). In motion the cache creates 56 cells a frame, with about 9 bucket-full misses a frame, but it does not move flicker. The eviction follow-up stays a cost item.
 - **S4 interior grain** (P-YARD2 item 1, second half) is a separate source: dim walls lit by GI and sky, not sunlit texture. It was not split here.
 - **The validation layer never affected any Unreal ratio.** P-NSQ, P-NSQ2 and P-NSQ3 timed with it on: their CPU submit and short RT spans read high, and their non-RT GPU passes stand. RT still is 3.35 ms, 1.34x faster than HW Lumen Epic. P-YARD2's 3.82 was a contended visit pair.
-||||||| f64c82e
 
 ## M8 sky-map cost off the PC (Linux bridge thread, Radeon 760M, 2026-11-11)
 
@@ -864,3 +863,21 @@ Ara main d2d990f26, Renderlab pin 901c1d2, RTX 4070 SUPER, 1080p, sky map, quiet
 - **OPEN.** On the AMD Radeon 760M (RADV), two runs of main's game_scene on the non-RT path differ in about 5,300 pixels. On the RTX 4070 SUPER both paths repeat byte-for-byte (P-SKY check, 2026-11-11).
 - **Consequence:** on RADV a non-RT byte comparison can't prove a change is image-neutral. Use a run-to-run control from the same build, and judge on the difference beyond that control.
 - **Next:** find the source. Candidates are GPU atomics whose order varies between runs (GI cache inserts, visibility-buffer resolve, software traversal claims) and driver scheduling.
+
+## M8 sky-map cost, P-SKY (Linux thread PRs #16/#17, merged 2026-11-11)
+
+- **Sky-map cost halved (P-SKY, [p-sky.md](p-sky.md)), from the Linux thread's PR.**
+  - Cause: every environment lookup ran a manual cube filter: face selection, four loads per level, and a seam path that diverges whole waves. It ran at every glossy-ray miss, every reflection hit and the primary. Every hit also ran a discarded miss lookup.
+  - Fix: filtered cube-array lookups (`FLOAT32_FILTERABLE` joins `RECEIVER_FEATURES`) and a miss-only sky lookup.
+  - Radeon 760M, 1080p: the Showcase-like map premium goes from 16.5 to 8.5 ms on RT and from 17.4 to 9.4 ms on non-RT. The game scene with its atmosphere sky is 4.3–4.9 ms faster: it lights through the same lookups.
+  - **Still open:** the remaining 8.5 ms is the lookups' own sampling (misses 2.1, hits 3.8, primary 0.9). A half-precision field measured −1.5 ms but needs a range and quality gate before it can ship.
+- **OPEN: the non-RT moving game scene hangs RADV's gfx ring** (Radeon 760M, Mesa).
+  - `game_scene --path nonrt` on the camera path, 1080p. The kernel charges the ring timeouts to that process, on main `ac7f46a` and on the P-SKY branch alike.
+  - The first run of each succeeded. Every run after the first ring reset lost the device.
+  - Still captures and the Showcase-like scene were unaffected.
+  - Not investigated yet.
+- **RTX 4070 SUPER check (root, 2026-11-11):**
+  - Game scene, 1080p: the map premium goes from 7.6 to 1.1 ms on RT and from 6.9 to 1.3 ms on non-RT, at most 1 code from main.
+  - Showcase through Ara: still RT 31.5 to 16.2 ms, non-RT 43.6 to 30.8 ms; identical by eye.
+  - Cold start, first image: about 183 s to about 11 s on the game scene; about 120 s (timed out) to about 25 s for Showcase through Ara.
+  - `gpu_environment_ownership_admission_and_reload` already fails on main (live-bytes bound); still OPEN.

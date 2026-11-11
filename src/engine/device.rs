@@ -37,6 +37,9 @@ pub struct Capabilities {
     pub non_rt: bool,
 }
 impl Capabilities {
+    /// What `adapter` supports. Both paths need `RECEIVER_FEATURES`, including
+    /// `FLOAT32_FILTERABLE` for the filtered environment lookups (P-SKY): an adapter
+    /// without it supports neither path, and `Engine::new` refuses it at start.
     pub fn query(adapter: &wgpu::Adapter) -> Self {
         let features = adapter.features();
         let limits = adapter.limits();
@@ -135,4 +138,18 @@ pub(crate) fn request_device(
     }
     pollster::block_on(adapter.request_device(&descriptor))
         .map_err(|_| Error::InvalidInput("adapter cannot create a device for this render path"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// P-SKY samples the RGBA32F environment with hardware filtering: an adapter that
+    /// cannot filter it must be refused by `Capabilities` on both paths, never drawn.
+    #[test]
+    fn both_paths_require_filterable_f32_environments() {
+        for features in [rt_features(), non_rt_features()] {
+            assert!(features.contains(wgpu::Features::FLOAT32_FILTERABLE));
+        }
+    }
 }
