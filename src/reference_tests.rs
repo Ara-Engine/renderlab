@@ -255,6 +255,7 @@ pub(super) fn load_bench(path: &Path) -> Bench {
                 list.iter()
                     .map(|t| renderlab_asset::Texture {
                         role: renderlab_asset::TextureRole::BaseColorSrgb,
+                        format: renderlab_asset::TextureFormat::Uncompressed,
                         mips: t["mips"]
                             .as_array()
                             .unwrap()
@@ -670,6 +671,7 @@ fn gpu_reference_analytic() {
     });
     normal_floor.textures.push(renderlab_asset::Texture {
         role: renderlab_asset::TextureRole::NormalLinear,
+        format: renderlab_asset::TextureFormat::Uncompressed,
         mips: vec![renderlab_asset::Mip {
             width: 2,
             height: 2,

@@ -90,7 +90,7 @@ loop {
 |---|---|---|
 | `create_mesh(&MeshData)` | `MeshId` | 48-byte `Vertex` (position, normal, uv, colour), u32 triangle list. On `NonRt` it also builds the mesh's GI ray geometry (CPU time proportional to triangle count). |
 | `create_mesh_with_tangents(&MeshData, &TangentStream)` | `MeshId` | needed by normal-mapped materials |
-| `create_texture(TextureData)` | `TextureId` | a prepared mip chain (`renderlab_asset::Texture`), for example from the cooker |
+| `create_texture(TextureData)` | `TextureId` | a prepared mip chain (`renderlab_asset::Texture`), for example from the cooker. `TextureData::format` is `Uncompressed` (RGBA8), `Bc7` or `Bc5` (normal maps: X and Y, Z rebuilt when sampled); blocks upload as they are where the adapter samples BC and decode to RGBA8 otherwise ([texture-compression.md](texture-compression.md)) |
 | `create_program(label, wgsl)` | `ProgramId` | composed and checked for both paths now; see [Programs](#shading-programs) |
 | `reload_program(id, wgsl)` | `ReloadReport` | transactional: a rejected edit keeps the last working pipelines |
 | `standard_program()` | `ProgramId` | the built-in photoreal program |
@@ -333,7 +333,7 @@ renderlab::engine re-exports Camera, Light, Mat4, Vec3, MeshData, Vertex, Value,
                              AlphaMask, CutoutMesh, cutout, ClipPlayer, AnimationPose,
                              SkinnedAsset, Influence, Primitive,
                              Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures,
-                             Sampler, TextureData, TangentStream, PreparedEnvironment,
+                             Sampler, TextureData, TextureFormat, TangentStream, PreparedEnvironment,
                              Error, ReloadError, ReloadReport, FrameReport, Events, FrameId, Renderer
 renderlab::*                 the low-level renderer (expert API, not frozen)
 ```

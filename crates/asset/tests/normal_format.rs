@@ -36,6 +36,7 @@ fn mapped() -> Asset {
     });
     a.textures.push(Texture {
         role: TextureRole::NormalLinear,
+        format: TextureFormat::Uncompressed,
         mips: vec![Mip {
             width: 1,
             height: 1,

@@ -100,14 +100,17 @@ fn rt_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
 }
 
 /// A device for `path` on `adapter`: the path's features and limits, plus timestamp
-/// queries and the pipeline cache where the adapter has them.
+/// queries, the pipeline cache and BC texture sampling where the adapter has them.
+/// Without BC sampling, compressed textures decode to RGBA8 at upload (`texture_bc.rs`).
 pub(crate) fn request_device(
     adapter: &wgpu::Adapter,
     path: RenderPath,
 ) -> Result<(wgpu::Device, wgpu::Queue), Error> {
     let limits = adapter.limits();
-    let optional =
-        adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::PIPELINE_CACHE);
+    let optional = adapter.features()
+        & (wgpu::Features::TIMESTAMP_QUERY
+            | wgpu::Features::PIPELINE_CACHE
+            | wgpu::Features::TEXTURE_COMPRESSION_BC);
     let (features, required_limits, experimental_features) = match path {
         RenderPath::HardwareRt => (
             rt_features(),

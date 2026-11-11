@@ -1164,6 +1164,7 @@ fn gpu_virtual_configured_limits_use_real_quotas_and_device_admission() {
     }
     package.resources.textures.push(asset::Texture {
         role: asset::TextureRole::BaseColorSrgb,
+        format: asset::TextureFormat::Uncompressed,
         mips: vec![asset::Mip {
             width: 1,
             height: 1,
@@ -1263,6 +1264,7 @@ fn gpu_virtual_configured_limits_use_real_quotas_and_device_admission() {
     }
     let invalid = asset::Texture {
         role: asset::TextureRole::BaseColorSrgb,
+        format: asset::TextureFormat::Uncompressed,
         mips,
     };
     let before = r.stats().uploads.textures;

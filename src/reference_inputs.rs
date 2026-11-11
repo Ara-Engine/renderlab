@@ -87,6 +87,12 @@ pub(super) fn validate(scene: &Scene) -> Result<(), Error> {
         }
     }
     for t in &scene.textures {
+        // The tracer reads texels itself; decode blocks first (`decode_texture`).
+        if t.format.compressed() {
+            return Err(Error::InvalidInput(
+                "reference textures must be uncompressed",
+            ));
+        }
         if t.mips.is_empty()
             || t.mips.iter().any(|m| {
                 m.width == 0

@@ -7,9 +7,10 @@ pub mod skin;
 pub mod virtual_mesh;
 
 pub use binary::{
-    CLUSTER_BVH_SCHEMA_VERSION, NORMAL_MOMENTS_BVH_SCHEMA_VERSION, NORMAL_MOMENTS_SCHEMA_VERSION,
-    NORMAL_SCHEMA_VERSION, NORMAL_VARIANCE_SCHEMA_VERSION, SCHEMA_VERSION, decode, decode_with_bvh,
-    encode, encode_mesh, encode_with_bvh,
+    CLUSTER_BVH_SCHEMA_VERSION, COMPRESSED_TEXTURE_SCHEMA_VERSION,
+    NORMAL_MOMENTS_BVH_SCHEMA_VERSION, NORMAL_MOMENTS_SCHEMA_VERSION, NORMAL_SCHEMA_VERSION,
+    NORMAL_VARIANCE_SCHEMA_VERSION, SCHEMA_VERSION, decode, decode_with_bvh, encode, encode_mesh,
+    encode_with_bvh,
 };
 use std::fmt;
 
@@ -194,18 +195,67 @@ impl TextureRole {
     }
 }
 
+/// How a texture's level bytes are encoded. The role still says what the channels mean
+/// and whether colour is sRGB.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum TextureFormat {
+    /// The role's own texels: RGBA8, or RGBA16Float pairs for slope moments.
+    #[default]
+    Uncompressed,
+    /// BC7 blocks, for every RGBA8 role (sRGB for `BaseColorSrgb`).
+    Bc7,
+    /// BC5 blocks holding tangent-space X and Y of a `NormalLinear` map; the renderer
+    /// rebuilds Z = sqrt(1 - X^2 - Y^2) from the filtered sample.
+    Bc5,
+}
+impl TextureFormat {
+    /// Texels along a block's side, and the bytes of one block, for both BC formats.
+    pub const BLOCK: u32 = 4;
+    pub const BLOCK_BYTES: usize = 16;
+    pub fn compressed(self) -> bool {
+        self != Self::Uncompressed
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Texture {
     pub role: TextureRole,
+    pub format: TextureFormat,
+    /// Finest level first, each half the last (rounded down, at least 1). Uncompressed
+    /// chains end at 1x1; a compressed chain may stop at any level.
     pub mips: Vec<Mip>,
+}
+impl Texture {
+    /// Whether the role can be stored in the format.
+    pub fn format_valid(&self) -> bool {
+        match self.format {
+            TextureFormat::Uncompressed => true,
+            TextureFormat::Bc7 => self.role != TextureRole::NormalSlopeMoments,
+            TextureFormat::Bc5 => self.role == TextureRole::NormalLinear,
+        }
+    }
+    /// The bytes of a `width` x `height` level: whole blocks for compressed formats, so
+    /// a level smaller than a block is still one block. None on overflow.
+    pub fn level_bytes(&self, width: u32, height: u32) -> Option<usize> {
+        let (w, h, unit) = if self.format.compressed() {
+            (
+                width.div_ceil(TextureFormat::BLOCK),
+                height.div_ceil(TextureFormat::BLOCK),
+                TextureFormat::BLOCK_BYTES,
+            )
+        } else {
+            (width, height, self.role.texel_bytes())
+        };
+        (w as usize).checked_mul(h as usize)?.checked_mul(unit)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Mip {
     pub width: u32,
     pub height: u32,
-    /// Layer-major little-endian texels; format/stride are determined by TextureRole.
-    /// Historical name retained for compatibility with RGBA8 asset callers.
+    /// The level in the texture's format: layer-major little-endian texels, or blocks in
+    /// row order for compressed formats. The name predates compressed formats.
     pub rgba8: Vec<u8>,
 }
 
@@ -458,6 +508,9 @@ impl Asset {
             }
         }
         for texture in &self.textures {
+            if !texture.format_valid() {
+                return Err(Error("texture format does not fit its role"));
+            }
             let first = texture.mips.first().ok_or(Error("empty mip chain"))?;
             let (mut w, mut h) = (first.width, first.height);
             if w == 0 || h == 0 || w > limits.max_dimension || h > limits.max_dimension {
@@ -472,8 +525,7 @@ impl Asset {
                 }
                 if mip.width != w
                     || mip.height != h
-                    || mip.rgba8.len()
-                        != product(product(w as usize, h as usize)?, texture.role.texel_bytes())?
+                    || Some(mip.rgba8.len()) != texture.level_bytes(w, h)
                 {
                     return Err(Error("invalid mip dimensions or bytes"));
                 }
@@ -492,7 +544,7 @@ impl Asset {
                 h = (h / 2).max(1);
             }
             let last = texture.mips.last().unwrap();
-            if last.width != 1 || last.height != 1 {
+            if !texture.format.compressed() && (last.width != 1 || last.height != 1) {
                 return Err(Error("incomplete mip chain"));
             }
         }

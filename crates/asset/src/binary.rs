@@ -9,6 +9,9 @@ pub const CLUSTER_BVH_SCHEMA_VERSION: u32 = 4;
 pub const NORMAL_MOMENTS_SCHEMA_VERSION: u32 = 5;
 /// Slope moments plus the same acceleration trailer as v4.
 pub const NORMAL_MOMENTS_BVH_SCHEMA_VERSION: u32 = 6;
+/// Block-compressed textures: each texture records its format, and a flag after the
+/// textures says whether the acceleration trailer follows.
+pub const COMPRESSED_TEXTURE_SCHEMA_VERSION: u32 = 7;
 const MAGIC: &[u8; 4] = b"RLA\0";
 
 struct Writer(Vec<u8>);
@@ -95,7 +98,9 @@ pub fn encode_with_bvh(
 ) -> Result<Vec<u8>> {
     let counts = asset.validate(limits)?;
     let mut w = Writer(MAGIC.to_vec());
-    let version = if asset
+    let version = if asset.textures.iter().any(|t| t.format.compressed()) {
+        COMPRESSED_TEXTURE_SCHEMA_VERSION
+    } else if asset
         .textures
         .iter()
         .any(|t| t.role == TextureRole::NormalSlopeMoments)
@@ -155,6 +160,13 @@ pub fn encode_with_bvh(
             TextureRole::NormalVarianceLinear => 3,
             TextureRole::NormalSlopeMoments => 4,
         });
+        if version >= COMPRESSED_TEXTURE_SCHEMA_VERSION {
+            w.u32(match t.format {
+                TextureFormat::Uncompressed => 0,
+                TextureFormat::Bc7 => 1,
+                TextureFormat::Bc5 => 2,
+            });
+        }
         w.count(t.mips.len())?;
         for m in &t.mips {
             w.u32(m.width);
@@ -162,6 +174,9 @@ pub fn encode_with_bvh(
             w.count(m.rgba8.len())?;
             w.0.extend(&m.rgba8);
         }
+    }
+    if version >= COMPRESSED_TEXTURE_SCHEMA_VERSION {
+        w.u32(u32::from(bvh.is_some()));
     }
     if let Some(bvh) = bvh {
         if bvh.leaves.iter().any(|l| {
@@ -308,7 +323,7 @@ pub fn decode_with_bvh(bytes: &[u8], limits: Limits) -> Result<(Asset, Option<cl
         return Err(Error("unknown prepared schema"));
     }
     let version = r.u32()?;
-    if !matches!(version, 1..=6) {
+    if !matches!(version, 1..=COMPRESSED_TEXTURE_SCHEMA_VERSION) {
         return Err(Error("unknown prepared schema"));
     }
     let meshes = r.count(limits.max_meshes, 4, std::mem::size_of::<Mesh>())?;
@@ -451,12 +466,23 @@ pub fn decode_with_bvh(bytes: &[u8], limits: Limits) -> Result<(Asset, Option<cl
             }
             _ => return Err(Error("invalid texture role")),
         };
+        let format = if version >= COMPRESSED_TEXTURE_SCHEMA_VERSION {
+            match r.u32()? {
+                0 => TextureFormat::Uncompressed,
+                1 => TextureFormat::Bc7,
+                2 => TextureFormat::Bc5,
+                _ => return Err(Error("invalid texture format")),
+            }
+        } else {
+            TextureFormat::Uncompressed
+        };
         let n = r.count(32, 12, std::mem::size_of::<Mip>())?;
         if n == 0 {
             return Err(Error("empty mip chain"));
         }
         let mut t = Texture {
             role,
+            format,
             mips: Vec::with_capacity(n),
         };
         let mut expected = None;
@@ -473,10 +499,10 @@ pub fn decode_with_bvh(bytes: &[u8], limits: Limits) -> Result<(Asset, Option<cl
             if w == 1 && h == 1 && t.mips.len() + 1 != n {
                 return Err(Error("mips after 1x1"));
             }
-            if t.mips.len() + 1 == n && (w != 1 || h != 1) {
+            if t.mips.len() + 1 == n && !format.compressed() && (w != 1 || h != 1) {
                 return Err(Error("incomplete mip chain"));
             }
-            let size = product(product(w as usize, h as usize)?, role.texel_bytes())?;
+            let size = t.level_bytes(w, h).ok_or(Error("size overflow"))?;
             let length = r.count(size, 1, 1)?;
             if size != length {
                 return Err(Error("invalid mip byte count"));
@@ -490,14 +516,18 @@ pub fn decode_with_bvh(bytes: &[u8], limits: Limits) -> Result<(Asset, Option<cl
         }
         a.textures.push(t);
     }
-    let bvh =
-        if version == NORMAL_MOMENTS_BVH_SCHEMA_VERSION
+    let attached = if version >= COMPRESSED_TEXTURE_SCHEMA_VERSION {
+        r.boolean()?
+    } else {
+        version == NORMAL_MOMENTS_BVH_SCHEMA_VERSION
             || (version == CLUSTER_BVH_SCHEMA_VERSION
                 && !a
                     .textures
                     .iter()
                     .any(|t| t.role == TextureRole::NormalSlopeMoments))
-        {
+    };
+    let bvh =
+        if attached {
             let length = r.u32()? as usize;
             let remaining = limits.max_decoded_bytes.saturating_sub(r.decoded);
             let bvh = cluster_bvh::decode(

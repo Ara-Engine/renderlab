@@ -215,7 +215,7 @@ fn spatial_brdf(input:SurfaceInput,l:vec3<f32>,base:vec3<f32>,metal:f32,rough:f3
             let uv=input.uv+input.uv_dx*offset.x+input.uv_dy*offset.y;
             var value:vec3<f32>;
             if input.material.normal_variance==2u {value=sample_normal_layer_grad(input,uv,input.uv_dx/16.0,input.uv_dy/16.0,1).yzw;}
-            else {value=sample_normal_layer_grad(input,uv,input.uv_dx/16.0,input.uv_dy/16.0,0).xyz*2.0-vec3<f32>(1.0);}
+            else {value=rl_normal_texel(input.material,sample_normal_layer_grad(input,uv,input.uv_dx/16.0,input.uv_dy/16.0,0)).xyz*2.0-vec3<f32>(1.0);}
             let scale=max(abs(input.material.normal_scale),1.0);
             let decoded=vec3<f32>(value.xy*(input.material.normal_scale/scale),value.z/scale);
             var mapped=unit_normal(decoded);

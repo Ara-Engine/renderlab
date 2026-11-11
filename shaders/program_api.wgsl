@@ -138,6 +138,14 @@ fn expose(radiance:vec3<f32>) -> vec3<f32> { return exposed_product(radiance,vec
 fn rl_finite(c:vec3<f32>) -> vec3<f32> {
     return min(select(vec3<f32>(0.0),c,c>=vec3<f32>(0.0)),vec3<f32>(65504.0));
 }
+// A normal-map sample as three channels. A two-channel map (BC5, normal_mapped 2)
+// stores X and Y; its Z is the unit normal's, rebuilt from the filtered sample. Every
+// normal-map helper returns this form, so programs read all maps the same way.
+fn rl_normal_texel(material:Material, value:vec4<f32>) -> vec4<f32> {
+    if material.normal_mapped!=2u { return value; }
+    let xy=value.xy*2.0-vec2<f32>(1.0);
+    return vec4<f32>(value.xy,sqrt(max(1.0-dot(xy,xy),0.0))*0.5+0.5,value.a);
+}
 // The standard material normal, including tangent repair, finite normal scale,
 // mirrored handedness and source-back reversal. Safe on meshes without tangents.
 // Call uniformly in raster stages, like the mesh-uv sampling helpers.
@@ -215,5 +223,5 @@ fn sample_normal_map_grad(input:SurfaceInput,uv:vec2<f32>,dx:vec2<f32>,dy:vec2<f
         let value=sample_normal_layer_grad(input,uv,dx,dy,1).yzw;
         return vec4<f32>(unit_normal(value)*0.5+vec3<f32>(0.5),0.0);
     }
-    return sample_normal_layer_grad(input,uv,dx,dy,0);
+    return rl_normal_texel(input.material,sample_normal_layer_grad(input,uv,dx,dy,0));
 }

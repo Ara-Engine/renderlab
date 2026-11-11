@@ -108,6 +108,7 @@ pub fn prepare_rgba8(
     }
     let mut texture = Texture {
         role: TextureRole::NormalSlopeMoments,
+        format: renderlab_asset::TextureFormat::Uncompressed,
         mips: Vec::new(),
     };
     let (mut w, mut h) = (width, height);

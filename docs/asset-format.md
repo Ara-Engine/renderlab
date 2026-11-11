@@ -20,6 +20,8 @@ Every integer is little-endian u32 unless stated otherwise. Floats are IEEE-754 
 | Texture | Role, mip count, mip records |
 | Mip | Width, height, RGBA8 byte count, exact bytes |
 
+Schema 7 (U-BC, [texture-compression.md](texture-compression.md)) is written only when a texture is block-compressed: each texture record then carries a format tag after its role (0 uncompressed, 1 BC7, 2 BC5), mip records hold whole 4x4 blocks of 16 bytes (a level under 4 texels is one block) and may stop before 1x1, and a boolean after the textures says whether the acceleration trailer follows. Assets without compressed textures keep their earlier schema and bytes.
+
 Boolean tags are 0/1. Texture role tags are 0 for base-color sRGB and 1 for linear metallic/roughness. Wrap tags are 0 clamp, 1 mirror, 2 repeat. Mag/min filter tags are 0 nearest and 1 linear. Mipmap tags are 0 disabled, 1 nearest, 2 linear. Separate `BaseColorTexture` and `MetallicRoughnessTexture` types carry the role-specific references. Validation rejects a reference to the wrong role. Material samplers are separate from image records, so one role-correct texture can serve several sampling choices.
 
 Every primitive is nonempty and has a nonempty index count divisible by three. All indices address its owned vertices. Materials and vertex colors have finite [0,1] factors. UVs and positions must be finite. A placement's matrix has bottom row exactly [0,0,0,1] and a finite nonzero 3x3 determinant evaluated in f64. This is not a conditioning guarantee. Every mip has width/height at least one, exact `width * height * 4` bytes, and follows `(max(1,w/2), max(1,h/2))` through exactly one final 1x1 level.

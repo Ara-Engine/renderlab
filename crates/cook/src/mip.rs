@@ -28,6 +28,7 @@ pub(crate) fn build(width: u32, height: u32, rgba8: Vec<u8>, role: TextureRole) 
         };
         return Ok(Texture {
             role,
+            format: renderlab_asset::TextureFormat::Uncompressed,
             mips: prepared
                 .mips()
                 .iter()
@@ -58,6 +59,7 @@ pub(crate) fn build(width: u32, height: u32, rgba8: Vec<u8>, role: TextureRole) 
     )?;
     let mut texture = Texture {
         role,
+        format: renderlab_asset::TextureFormat::Uncompressed,
         mips: vec![Mip {
             width,
             height,

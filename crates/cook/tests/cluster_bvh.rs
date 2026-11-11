@@ -137,6 +137,7 @@ fn attachments_are_opt_in_and_old_rla_rvg_bytes_are_preserved() {
     // virtual v3 can carry a v5 resource section and the existing BVH trailer.
     let moment = asset::Texture {
         role: asset::TextureRole::NormalSlopeMoments,
+        format: asset::TextureFormat::Uncompressed,
         mips: vec![asset::Mip {
             width: 1,
             height: 1,
@@ -238,6 +239,7 @@ fn opt_in_cache_reuses_repairs_and_separates_lod_settings() {
         if moments {
             a.textures.push(asset::Texture {
                 role: asset::TextureRole::NormalSlopeMoments,
+                format: asset::TextureFormat::Uncompressed,
                 mips: vec![asset::Mip {
                     width: 1,
                     height: 1,

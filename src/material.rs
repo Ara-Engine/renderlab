@@ -47,6 +47,8 @@ pub struct Texture(pub(crate) Arc<TextureInner>);
 pub(crate) struct TextureInner {
     pub renderer: Arc<()>,
     pub role: TextureRole,
+    /// A BC5 normal map: X and Y only, Z rebuilt when sampled (`texture_bc.rs`).
+    pub normal_xy: bool,
     pub storage: TextureStorage,
 }
 pub(crate) enum TextureStorage {
@@ -183,7 +185,11 @@ impl MaterialDescriptor<'_> {
         bytes[24..28].copy_from_slice(&u32::from(self.double_sided).to_ne_bytes());
         bytes[28..32].copy_from_slice(&u32::from(self.thin).to_ne_bytes());
         bytes[32..36].copy_from_slice(&self.normal_scale.to_ne_bytes());
-        bytes[36..40].copy_from_slice(&u32::from(self.normal_texture.is_some()).to_ne_bytes());
+        // WGSL `normal_mapped`: 1 a three-channel normal map, 2 X and Y only.
+        let mapped = self
+            .normal_texture
+            .map_or(0u32, |t| 1 + u32::from(t.texture.0.normal_xy));
+        bytes[36..40].copy_from_slice(&mapped.to_ne_bytes());
         let variance = self
             .normal_texture
             .map_or(0u32, |t| match t.texture.0.role {
@@ -198,11 +204,16 @@ impl MaterialDescriptor<'_> {
         bytes
     }
 }
+/// Checks a prepared chain before anything is allocated and returns its source bytes.
+/// Uncompressed chains end at 1x1; a compressed chain may stop at any level.
 pub(crate) fn validate_texture(
     data: &renderlab_asset::Texture,
     max_dimension: u32,
     max_bytes: u64,
 ) -> Result<u64, Error> {
+    if !data.format_valid() {
+        return Err(Error::InvalidInput("texture format does not fit its role"));
+    }
     let first = data
         .mips
         .first()
@@ -215,13 +226,7 @@ pub(crate) fn validate_texture(
     }
     let mut bytes = 0u64;
     for (i, mip) in data.mips.iter().enumerate() {
-        if mip.width != w
-            || mip.height != h
-            || Some(mip.rgba8.len() as u64)
-                != u64::from(w)
-                    .checked_mul(u64::from(h))
-                    .and_then(|x| x.checked_mul(data.role.texel_bytes() as u64))
-        {
+        if mip.width != w || mip.height != h || Some(mip.rgba8.len()) != data.level_bytes(w, h) {
             return Err(Error::InvalidInput("texture mip dimensions/bytes mismatch"));
         }
         if !data.role.texels_finite(&mip.rgba8) {
@@ -240,6 +245,9 @@ pub(crate) fn validate_texture(
         }
         w = (w / 2).max(1);
         h = (h / 2).max(1);
+    }
+    if data.format.compressed() {
+        return Ok(bytes);
     }
     Err(Error::InvalidInput("incomplete texture mip chain"))
 }
@@ -340,6 +348,7 @@ mod tests {
     fn texture_admission_checks_complete_odd_mips_before_allocation() {
         let mut data = Data {
             role: TextureRole::BaseColorSrgb,
+            format: renderlab_asset::TextureFormat::Uncompressed,
             mips: vec![
                 Mip {
                     width: 3,
@@ -365,5 +374,40 @@ mod tests {
         assert!(validate_texture(&data, 5, 72).is_err());
         data.mips[1].rgba8.pop();
         assert!(validate_texture(&data, 5, 72).is_err());
+    }
+    #[test]
+    fn compressed_chains_are_whole_blocks_and_may_stop_early() {
+        let blocks = |width: u32, height: u32| Mip {
+            width,
+            height,
+            rgba8: vec![0; (width.div_ceil(4) * height.div_ceil(4) * 16) as usize],
+        };
+        let mut data = Data {
+            role: TextureRole::BaseColorSrgb,
+            format: renderlab_asset::TextureFormat::Bc7,
+            mips: vec![blocks(8, 4), blocks(4, 2), blocks(2, 1), blocks(1, 1)],
+        };
+        assert_eq!(validate_texture(&data, 8, 80).unwrap(), 80);
+        assert!(validate_texture(&data, 8, 79).is_err());
+        // Stopping at the block size, or anywhere, is a valid compressed chain.
+        data.mips.truncate(2);
+        assert_eq!(validate_texture(&data, 8, 80).unwrap(), 48);
+        // Levels are whole blocks: a 4x2 level is one block, not 4 * 2 * 4 bytes.
+        data.mips[1].rgba8 = vec![0; 32];
+        assert!(validate_texture(&data, 8, 80).is_err());
+        // BC5 holds two channels: normal maps only.
+        let normal = |role| Data {
+            role,
+            format: renderlab_asset::TextureFormat::Bc5,
+            mips: vec![blocks(4, 4)],
+        };
+        assert!(validate_texture(&normal(TextureRole::NormalLinear), 8, 80).is_ok());
+        for role in [
+            TextureRole::BaseColorSrgb,
+            TextureRole::MetallicRoughnessLinear,
+            TextureRole::NormalVarianceLinear,
+        ] {
+            assert!(validate_texture(&normal(role), 8, 80).is_err());
+        }
     }
 }

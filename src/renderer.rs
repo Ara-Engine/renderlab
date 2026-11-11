@@ -349,6 +349,7 @@ impl Renderer {
         assert!(self.try_upload_mesh(data).unwrap().is_none());
         let texture_data = asset::Texture {
             role: asset::TextureRole::BaseColorSrgb,
+            format: asset::TextureFormat::Uncompressed,
             mips: vec![asset::Mip {
                 width: 1,
                 height: 1,
@@ -1151,6 +1152,7 @@ impl Renderer {
             renderer.create_texture(
                 &asset::Texture {
                     role,
+                    format: asset::TextureFormat::Uncompressed,
                     mips: vec![asset::Mip {
                         width: 1,
                         height: 1,
@@ -1161,6 +1163,7 @@ impl Renderer {
                         },
                     }],
                 },
+                crate::texture_bc::Storage::Source,
                 4,
             )
         });
@@ -2053,8 +2056,9 @@ impl Renderer {
     pub fn try_upload_texture(&mut self, data: &asset::Texture) -> Result<Option<Texture>, Error> {
         self.check_fault()?;
         let started = Instant::now();
-        let bytes = crate::material::validate_texture(
+        let (storage, bytes) = crate::texture_bc::admit(
             data,
+            self.device.features(),
             self.device.limits().max_texture_dimension_2d,
             self.limits.max_texture_bytes,
         )?;
@@ -2067,7 +2071,7 @@ impl Renderer {
         let slot = self.free_slot().unwrap();
         let started = Instant::now();
         let scopes = OperationScopes::new(&self.device);
-        let texture = self.create_texture(data, bytes);
+        let texture = self.create_texture(data, storage, bytes);
         if let Some(error) = scopes.finish() {
             return Err(self.fail(error.to_string()));
         }
@@ -2081,7 +2085,12 @@ impl Renderer {
         self.check_fault()?;
         Ok(Some(texture))
     }
-    fn create_texture(&mut self, data: &asset::Texture, bytes: u64) -> Texture {
+    fn create_texture(
+        &mut self,
+        data: &asset::Texture,
+        storage: crate::texture_bc::Storage,
+        bytes: u64,
+    ) -> Texture {
         let first = &data.mips[0];
         let texture = self.ledger.own(
             self.device.create_texture(&wgpu::TextureDescriptor {
@@ -2094,7 +2103,7 @@ impl Renderer {
                 mip_level_count: data.mips.len() as u32,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format: texture_residency::texture_format(data.role),
+                format: crate::texture_bc::gpu_format(data, storage),
                 usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
                 view_formats: &[],
             }),
@@ -2105,32 +2114,21 @@ impl Renderer {
             ResourceKind::TextureView,
         );
         for (level, mip) in data.mips.iter().enumerate() {
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    mip_level: level as u32,
-                    ..texture.as_image_copy()
-                },
-                &mip.rgba8,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(
-                        mip.width * (data.role.texel_bytes() as u32 / data.role.layers()),
-                    ),
-                    rows_per_image: Some(mip.height),
-                },
-                wgpu::Extent3d {
-                    width: mip.width,
-                    height: mip.height,
-                    depth_or_array_layers: data.role.layers(),
-                },
+            self.uploads.textures += crate::texture_bc::write_level(
+                &self.queue,
+                &texture,
+                level as u32,
+                data,
+                mip,
+                storage,
             );
-            self.uploads.textures += mip.rgba8.len() as u64;
             self.uploads.texture_writes += 1;
             self.uploads.write_calls += 1;
         }
         Texture(Arc::new(crate::material::TextureInner {
             renderer: self.identity.clone(),
             role: data.role,
+            normal_xy: data.format == asset::TextureFormat::Bc5,
             storage: crate::material::TextureStorage::Full(Box::new(
                 crate::material::FullTexture {
                     _texture: texture,

@@ -46,6 +46,8 @@ mod renderer;
 pub mod shader_compiler;
 mod shadow_plan;
 mod shadows;
+// U-BC: BC7 and BC5 material textures, as blocks or decoded at upload.
+mod texture_bc;
 mod transparency;
 pub mod virtual_geometry;
 mod visibility;
@@ -88,6 +90,7 @@ pub use renderer::{
 pub use renderlab_asset::{self as asset, Vertex};
 pub use shadows::SoftShadows;
 pub use shadows::{ShadowLimits, ShadowRequest, ShadowStats, Shadows};
+pub use texture_bc::decode_texture;
 pub use transparency::{
     ColorKey, Emitter, EmitterDescriptor, Flipbook, Forces, MAX_CURVE_KEYS, MAX_PARTICLES,
     PlaneCollision, SizeKey, SpawnShape, SpriteAlignment, Transparency, TransparencyStats,

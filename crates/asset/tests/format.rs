@@ -36,6 +36,7 @@ fn fixture() -> Asset {
         }],
         textures: vec![Texture {
             role: TextureRole::BaseColorSrgb,
+            format: TextureFormat::Uncompressed,
             mips: vec![Mip {
                 width: 1,
                 height: 1,
@@ -163,4 +164,65 @@ fn uncapped_policy_keeps_truncation_overflow_and_validity_checks() {
     let mut invalid = a;
     invalid.meshes[0].primitives[0].indices[0] = u32::MAX;
     assert!(invalid.validate(limits).is_err());
+}
+
+#[test]
+fn compressed_textures_round_trip_as_schema_seven() {
+    let blocks = |width: u32, height: u32| Mip {
+        width,
+        height,
+        rgba8: vec![7; (width.div_ceil(4) * height.div_ceil(4) * 16) as usize],
+    };
+    let mut a = fixture();
+    // A BC7 chain of whole blocks that stops before 1x1, as a cooked texture may.
+    a.textures[0] = Texture {
+        role: TextureRole::BaseColorSrgb,
+        format: TextureFormat::Bc7,
+        mips: vec![blocks(8, 4), blocks(4, 2)],
+    };
+    let limits = Limits::default();
+    assert_eq!(a.validate(limits).unwrap().texture_bytes, 48);
+    let bytes = encode(&a, limits).unwrap();
+    assert_eq!(
+        &bytes[4..8],
+        &COMPRESSED_TEXTURE_SCHEMA_VERSION.to_le_bytes()
+    );
+    assert_eq!(decode(&bytes, limits).unwrap(), a);
+    for length in 0..bytes.len() {
+        assert!(decode(&bytes[..length], limits).is_err(), "prefix {length}");
+    }
+    // An uncompressed asset keeps its earlier schema and bytes.
+    assert_eq!(
+        &encode(&fixture(), limits).unwrap()[4..8],
+        &1u32.to_le_bytes()
+    );
+
+    // Levels are whole blocks: 4x2 is one block, not 4 * 2 * 4 bytes.
+    let mut texels = a.clone();
+    texels.textures[0].mips[1].rgba8 = vec![7; 32];
+    assert_eq!(
+        texels.validate(limits).unwrap_err().0,
+        "invalid mip dimensions or bytes"
+    );
+    // BC5 holds two channels: normal maps only. Uncompressed chains still end at 1x1.
+    let mut two_channel = a.clone();
+    two_channel.textures[0].format = TextureFormat::Bc5;
+    assert_eq!(
+        two_channel.validate(limits).unwrap_err().0,
+        "texture format does not fit its role"
+    );
+    let mut plain = a;
+    plain.textures[0] = Texture {
+        role: TextureRole::BaseColorSrgb,
+        format: TextureFormat::Uncompressed,
+        mips: vec![Mip {
+            width: 2,
+            height: 2,
+            rgba8: vec![7; 16],
+        }],
+    };
+    assert_eq!(
+        plain.validate(limits).unwrap_err().0,
+        "incomplete mip chain"
+    );
 }

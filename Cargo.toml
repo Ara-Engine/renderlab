@@ -24,6 +24,9 @@ sha2 = "=0.10.9"
 rayon = "1.11"
 # Program composition checks and Parameters reflection; wgpu already validates with it.
 naga = { version = "=30.0.1", features = ["wgsl-in"] }
+# The one BC7/BC5 decoder: uploads on devices without BC sampling, and tests' ground
+# truth for the GPU's own decode. Safe Rust, no_std, no dependencies of its own.
+bcdec_rs = "=0.2.1"
 # Matches wgpu-hal's existing Vulkan binding; no second Vulkan loader/backend.
 ash = { version = "=0.38.0", default-features = false, features = ["std", "debug"] }
 
@@ -51,6 +54,10 @@ opt-level = 1
 opt-level = 2
 
 [profile.dev.package.sha2]
+opt-level = 2
+
+# Block decoding runs at upload on devices without BC sampling.
+[profile.dev.package.bcdec_rs]
 opt-level = 2
 
 [profile.dev.package.wgpu]

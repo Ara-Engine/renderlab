@@ -24,6 +24,7 @@
 //! residency (not exposed by wgpu 30) would keep (docs/memory-m3.md).
 use super::*;
 use crate::material::{TextureInner, TextureStorage};
+use crate::texture_bc::{self, Storage};
 use std::collections::BTreeMap;
 use std::sync::Weak;
 
@@ -118,7 +119,8 @@ pub(crate) struct Resident {
 pub(crate) struct Entry {
     owner: Weak<TextureInner>,
     source: Arc<asset::Texture>,
-    format: wgpu::TextureFormat,
+    /// Blocks as they are, or RGBA8 decoded per level as it is written (`texture_bc.rs`).
+    storage: Storage,
     max_top: u32,
     /// log2(extent / probe extent) per axis: the exact probe gradient scales.
     scale: [i32; 2],
@@ -133,7 +135,8 @@ pub(crate) struct Entry {
 }
 impl Entry {
     fn full_bytes(&self) -> u64 {
-        self.source.mips.iter().map(|m| m.rgba8.len() as u64).sum()
+        let bytes = |m| texture_bc::level_bytes(m, self.storage);
+        self.source.mips.iter().map(bytes).sum()
     }
     /// The slot word the sampling helpers decode: streamed, probed with this margin,
     /// resident top, probe scales, survey.
@@ -168,12 +171,15 @@ pub(crate) fn transition_levels(
 }
 
 /// The finest level a streamed texture may drop to: power-of-two extents only (the probe
-/// scales and the tail's level-0 extent must be exact), at most `MAX_TOP`.
-pub(crate) fn max_top(width: u32, height: u32, levels: u32) -> Option<u32> {
+/// scales and the tail's level-0 extent must be exact), at most `MAX_TOP`. A tail of
+/// sampled blocks (`blocks`) is itself a compressed texture, so its level 0 stays at
+/// least one block (4 texels) along each axis.
+pub(crate) fn max_top(width: u32, height: u32, levels: u32, blocks: bool) -> Option<u32> {
+    let smallest = if blocks { 2 } else { 0 };
     (width.is_power_of_two() && height.is_power_of_two()).then(|| {
         MAX_TOP
-            .min(width.trailing_zeros())
-            .min(height.trailing_zeros())
+            .min(width.trailing_zeros().saturating_sub(smallest))
+            .min(height.trailing_zeros().saturating_sub(smallest))
             .min(levels - 1)
     })
 }
@@ -252,14 +258,16 @@ impl Renderer {
     ) -> Result<Option<Texture>, Error> {
         self.check_fault()?;
         let started = Instant::now();
-        crate::material::validate_texture(
+        let (storage, _) = texture_bc::admit(
             &data,
+            self.device.features(),
             self.device.limits().max_texture_dimension_2d,
             self.limits.max_texture_bytes,
         )?;
         let preparation = started.elapsed();
         let first = &data.mips[0];
-        let droppable = max_top(first.width, first.height, data.mips.len() as u32);
+        let blocks = data.format.compressed() && storage == Storage::Source;
+        let droppable = max_top(first.width, first.height, data.mips.len() as u32, blocks);
         let Some(max_top) = droppable.filter(|_| self.residency.mode != TextureResidency::Full)
         else {
             return self.try_upload_texture(&data);
@@ -273,13 +281,13 @@ impl Renderer {
         let started = Instant::now();
         let scopes = OperationScopes::new(&self.device);
         let top = max_top;
-        let format = texture_format(data.role);
-        let resident = self.create_resident(&data, format, top, top..data.mips.len() as u32);
+        let resident = self.create_resident(&data, storage, top, top..data.mips.len() as u32);
         let id = self.residency.next_id;
         self.residency.next_id += 1;
         let texture = Texture(Arc::new(TextureInner {
             renderer: self.identity.clone(),
             role: data.role,
+            normal_xy: data.format == asset::TextureFormat::Bc5,
             storage: TextureStorage::Streamed(id),
         }));
         let scale =
@@ -289,7 +297,7 @@ impl Renderer {
             Entry {
                 owner: Arc::downgrade(&texture.0),
                 source: data,
-                format,
+                storage,
                 max_top,
                 scale,
                 resident,
@@ -431,7 +439,7 @@ impl Renderer {
     fn create_resident(
         &mut self,
         data: &asset::Texture,
-        format: wgpu::TextureFormat,
+        storage: Storage,
         top: u32,
         written: std::ops::Range<u32>,
     ) -> Resident {
@@ -447,7 +455,7 @@ impl Renderer {
                 mip_level_count: data.mips.len() as u32 - top,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
-                format,
+                format: texture_bc::gpu_format(data, storage),
                 usage: wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::COPY_DST
                     | wgpu::TextureUsages::COPY_SRC,
@@ -457,26 +465,8 @@ impl Renderer {
         );
         for level in written {
             let mip = &data.mips[level as usize];
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    mip_level: level - top,
-                    ..texture.as_image_copy()
-                },
-                &mip.rgba8,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(
-                        mip.width * (data.role.texel_bytes() as u32 / data.role.layers()),
-                    ),
-                    rows_per_image: Some(mip.height),
-                },
-                wgpu::Extent3d {
-                    width: mip.width,
-                    height: mip.height,
-                    depth_or_array_layers: data.role.layers(),
-                },
-            );
-            self.uploads.textures += mip.rgba8.len() as u64;
+            self.uploads.textures +=
+                texture_bc::write_level(&self.queue, &texture, level - top, data, mip, storage);
             self.uploads.texture_writes += 1;
             self.uploads.write_calls += 1;
         }
@@ -486,7 +476,7 @@ impl Renderer {
         );
         let bytes = data.mips[top as usize..]
             .iter()
-            .map(|m| m.rgba8.len() as u64)
+            .map(|m| texture_bc::level_bytes(m, storage))
             .sum();
         Resident {
             texture,
@@ -529,16 +519,18 @@ impl Renderer {
                 break;
             }
             let e = &self.residency.entries[&id];
-            let (source, format, old) = (e.source.clone(), e.format, e.resident.top);
+            let (source, storage, old) = (e.source.clone(), e.storage, e.resident.top);
             let levels = source.mips.len() as u32;
             let (written, copied) = transition_levels(old, target, levels);
             let uploaded: u64 = written
                 .clone()
-                .map(|l| source.mips[l as usize].rgba8.len() as u64)
+                .map(|l| texture_bc::level_bytes(&source.mips[l as usize], storage))
                 .sum();
-            let resident = self.create_resident(&source, format, target, written);
+            let resident = self.create_resident(&source, storage, target, written);
             for level in copied {
-                let m = &source.mips[level as usize];
+                // Whole blocks for sampled blocks: a level under 4 texels copies one.
+                let extent =
+                    texture_bc::level_copy(&source, &source.mips[level as usize], storage).1;
                 encoder.copy_texture_to_texture(
                     wgpu::TexelCopyTextureInfo {
                         mip_level: level - old,
@@ -548,11 +540,7 @@ impl Renderer {
                         mip_level: level - target,
                         ..resident.texture.as_image_copy()
                     },
-                    wgpu::Extent3d {
-                        width: m.width,
-                        height: m.height,
-                        depth_or_array_layers: source.role.layers(),
-                    },
+                    extent,
                 );
             }
             let e = self.residency.entries.get_mut(&id).unwrap();
@@ -781,17 +769,6 @@ pub(crate) fn read_words(readback: &wgpu::Buffer) -> Vec<u32> {
     words
 }
 
-/// The GPU format of a texture role: base colour decodes sRGB when sampled.
-pub(crate) fn texture_format(role: asset::TextureRole) -> wgpu::TextureFormat {
-    match role {
-        asset::TextureRole::BaseColorSrgb => wgpu::TextureFormat::Rgba8UnormSrgb,
-        asset::TextureRole::NormalSlopeMoments => wgpu::TextureFormat::Rgba16Float,
-        asset::TextureRole::MetallicRoughnessLinear
-        | asset::TextureRole::NormalLinear
-        | asset::TextureRole::NormalVarianceLinear => wgpu::TextureFormat::Rgba8Unorm,
-    }
-}
-
 /// Normal maps use array views even for one layer, keeping one sampling ABI for all roles.
 pub(crate) fn texture_view_descriptor(
     role: asset::TextureRole,
@@ -851,11 +828,23 @@ mod tests {
 
     #[test]
     fn only_power_of_two_extents_stream() {
-        assert_eq!(max_top(4096, 4096, 13), Some(6));
-        assert_eq!(max_top(4096, 16, 13), Some(4));
-        assert_eq!(max_top(2, 2, 2), Some(1));
-        assert_eq!(max_top(1, 1, 1), Some(0));
-        assert_eq!(max_top(1000, 1024, 11), None);
+        assert_eq!(max_top(4096, 4096, 13, false), Some(6));
+        assert_eq!(max_top(4096, 16, 13, false), Some(4));
+        assert_eq!(max_top(2, 2, 2, false), Some(1));
+        assert_eq!(max_top(1, 1, 1, false), Some(0));
+        assert_eq!(max_top(1000, 1024, 11, false), None);
+    }
+
+    #[test]
+    fn tails_of_sampled_blocks_keep_a_whole_block_at_level_zero() {
+        // 4096 x 16 in blocks: the tail may start at 1024 x 4, no finer along the 16.
+        assert_eq!(max_top(4096, 4096, 13, true), Some(6));
+        assert_eq!(max_top(4096, 16, 13, true), Some(2));
+        assert_eq!(max_top(64, 64, 7, true), Some(4));
+        // One block or less never drops a level; a chain that stops early bounds it too.
+        assert_eq!(max_top(4, 4, 3, true), Some(0));
+        assert_eq!(max_top(2, 2, 2, true), Some(0));
+        assert_eq!(max_top(4096, 4096, 3, true), Some(2));
     }
 
     #[test]

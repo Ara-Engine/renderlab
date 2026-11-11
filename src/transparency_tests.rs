@@ -521,6 +521,7 @@ fn upload_texture(
 ) -> crate::Texture {
     let data = crate::asset::Texture {
         role,
+        format: crate::asset::TextureFormat::Uncompressed,
         mips: mips(size, size, rgba),
     };
     loop {

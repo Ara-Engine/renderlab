@@ -139,6 +139,7 @@ fn gpu_material_values_sampler_normals_and_sidedness() {
         &mut r,
         &asset::Texture {
             role: TextureRole::BaseColorSrgb,
+            format: asset::TextureFormat::Uncompressed,
             mips: vec![Mip {
                 width: 1,
                 height: 1,
@@ -150,6 +151,7 @@ fn gpu_material_values_sampler_normals_and_sidedness() {
         &mut r,
         &asset::Texture {
             role: TextureRole::MetallicRoughnessLinear,
+            format: asset::TextureFormat::Uncompressed,
             mips: vec![Mip {
                 width: 1,
                 height: 1,
@@ -385,6 +387,7 @@ fn sampler_mips(
 ) {
     let mut data = asset::Texture {
         role: TextureRole::BaseColorSrgb,
+        format: asset::TextureFormat::Uncompressed,
         mips: vec![
             Mip {
                 width: 2,
@@ -895,6 +898,7 @@ fn gpu_material_target_replacement_overlap() {
         let mut inst = instances(&mut r, &models);
         let data = asset::Texture {
             role: TextureRole::BaseColorSrgb,
+            format: asset::TextureFormat::Uncompressed,
             mips: (0..7)
                 .map(|i| {
                     let side = 64 >> i;

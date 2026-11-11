@@ -1,0 +1,14 @@
+[
+  {
+    "package": "bcdec_rs-0.2.1",
+    "source": "https://raw.githubusercontent.com/ScanMountGoat/image_dds/5e1ef829f8c44980e21bdcda2e1ffb574b81b57b/LICENSE",
+    "file": "third-party\\licenses\\bcdec_rs-0.2.1\\LICENSE-MIT",
+    "sha256": "0194fa871df6d82a26d58f3b6e035bed033afdc413e2a6ac0ae2f15b7becbb20"
+  },
+  {
+    "package": "bcdec_rs-0.2.1",
+    "source": "https://raw.githubusercontent.com/iOrange/bcdec/main/LICENSE (the ported C library's notice, read 2026-11-11 at 80859ed3b7afb1c527a2a99d70c61457bea72d0c)",
+    "file": "third-party\\licenses\\bcdec_rs-0.2.1\\bcdec-LICENSE",
+    "sha256": "2414c782587f6e96661cb0d19d752432ddecfcc1a221b4cb12bc2253a54dc5ac"
+  }
+]

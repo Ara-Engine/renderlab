@@ -28,7 +28,7 @@ pub use settings::{Background, Exposure, Quality, Settings, Sky, Sun};
 
 pub use crate::animation::{AnimationPose, ClipPlayer};
 pub use crate::asset::{
-    Primitive, Sampler, TangentStream, Texture as TextureData,
+    Primitive, Sampler, TangentStream, Texture as TextureData, TextureFormat,
     environment::PreparedEnvironment,
     skin::{Influence, SkinnedAsset},
 };

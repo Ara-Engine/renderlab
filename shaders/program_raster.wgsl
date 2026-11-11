@@ -5,7 +5,7 @@
 fn sample_base_color(input:SurfaceInput) -> vec4<f32> { return textureSample(base_color,base_sampler,input.uv); }
 fn sample_metallic_roughness(input:SurfaceInput) -> vec4<f32> { return textureSample(metallic_roughness,mr_sampler,input.uv); }
 fn sample_normal_map(input:SurfaceInput) -> vec4<f32> { if input.material.normal_variance==2u { return vec4<f32>(unit_normal(textureSample(normal_map,normal_sampler,input.uv,1).yzw)*0.5+vec3<f32>(0.5),0.0); }
-    return textureSample(normal_map,normal_sampler,input.uv,0); }
+    return rl_normal_texel(input.material,textureSample(normal_map,normal_sampler,input.uv,0)); }
 fn sample_base_color_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>) -> vec4<f32> {
     return textureSampleGrad(base_color,base_sampler,uv,dx,dy);
 }

@@ -420,6 +420,7 @@ fn export_sample(out: &Path) -> Result<()> {
             let index = result.textures.len() as u32;
             result.textures.push(asset::Texture {
                 role,
+                format: asset::TextureFormat::Uncompressed,
                 mips: shared_mips(tex, role),
             });
             match slot {

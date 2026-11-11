@@ -519,12 +519,13 @@ fn analyse(
 }
 
 /// A device and renderer for one bench path: "nort" (visibility buffer + Virtual on a
-/// device without RT), "rt" (traced + Interactive) or "traced-virtual".
-fn residency_renderer(path: &str) -> Renderer {
+/// device without RT), "rt" (traced + Interactive) or "traced-virtual". `extra` adds
+/// device features (U-BC: BC sampling).
+fn residency_renderer(path: &str, extra: wgpu::Features) -> Renderer {
     if path != "nort" {
         let mut r = renderer_with_features(
             true,
-            crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES,
+            crate::VIRTUAL_FEATURES | crate::VISIBILITY_RASTER_FEATURES | extra,
         );
         r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
         r.set_soft_shadows(if path == "rt" {
@@ -545,7 +546,8 @@ fn residency_renderer(path: &str) -> Renderer {
             | crate::VISIBILITY_FEATURES
             | crate::VISIBILITY_RASTER_FEATURES
             | crate::VIRTUAL_FEATURES
-            | wgpu::Features::TIMESTAMP_QUERY,
+            | wgpu::Features::TIMESTAMP_QUERY
+            | extra,
         required_limits: crate::visibility_limits(wgpu::Limits::default()),
         memory_hints: super::test_memory_hints(),
         ..Default::default()
@@ -599,18 +601,30 @@ fn uv_quad(r: &mut Renderer, corners: [[f32; 3]; 4]) -> (Mesh, Instances) {
     (mesh, instances)
 }
 
-fn streamed_texture(r: &mut Renderer, size: u32, seed: u64) -> Texture {
-    let mips = random_chain(size, size, seed)
-        .into_iter()
-        .map(|(width, height, rgba8)| asset::Mip {
-            width,
-            height,
-            rgba8,
-        })
-        .collect();
-    let data = Arc::new(asset::Texture {
-        role: asset::TextureRole::BaseColorSrgb,
-        mips,
+/// A streamed base-colour texture with independent random levels: RGBA8 texels, or
+/// BC7 blocks in every mode (U-BC).
+fn streamed_texture(
+    r: &mut Renderer,
+    size: u32,
+    seed: u64,
+    format: asset::TextureFormat,
+) -> Texture {
+    let role = asset::TextureRole::BaseColorSrgb;
+    let data = Arc::new(if format.compressed() {
+        crate::texture_bc::fixture::seeded_chain(role, format, size, seed)
+    } else {
+        asset::Texture {
+            role,
+            format,
+            mips: random_chain(size, size, seed)
+                .into_iter()
+                .map(|(width, height, rgba8)| asset::Mip {
+                    width,
+                    height,
+                    rgba8,
+                })
+                .collect(),
+        }
     });
     let texture = loop {
         if let Some(t) = r.try_upload_streamed_texture(data.clone()).unwrap() {
@@ -631,12 +645,24 @@ type CutFrame = (String, Vec<u8>, Vec<u8>, [u32; 2]);
 /// renderer 16x anisotropic sampler. Frames: 8 at a mid view; HOLD+8 looking away, so
 /// both textures drop to their tails; then a cut to a close view that needs the ground
 /// level 0 and finer wall levels, and 6 frames of small motion there.
-fn cut_run(path: &str, mode: TextureResidency) -> (Vec<CutFrame>, ResidencyStats) {
-    let mut r = residency_renderer(path);
+fn cut_run(
+    path: &str,
+    mode: TextureResidency,
+    format: asset::TextureFormat,
+) -> (Vec<CutFrame>, ResidencyStats) {
+    // Compressed chains stream as blocks: the device samples them.
+    let mut r = residency_renderer(
+        path,
+        if format.compressed() {
+            wgpu::Features::TEXTURE_COMPRESSION_BC
+        } else {
+            wgpu::Features::empty()
+        },
+    );
     r.set_texture_residency(mode);
     light(&mut r);
-    let ground = streamed_texture(&mut r, 1024, 7);
-    let wall = streamed_texture(&mut r, 512, 9);
+    let ground = streamed_texture(&mut r, 1024, 7, format);
+    let wall = streamed_texture(&mut r, 512, 9, format);
     let material = |r: &mut Renderer, texture: &Texture, sampler: asset::Sampler| loop {
         if let Some(m) = r
             .try_create_material(&MaterialDescriptor {
@@ -738,13 +764,14 @@ fn gpu_residency_camera_cut() {
     let mut report = vec![];
     let mut failures = vec![];
     for path in ["nort", "rt", "traced-virtual"] {
-        let (full, full_stats) = cut_run(path, TextureResidency::Full);
+        let plain = asset::TextureFormat::Uncompressed;
+        let (full, full_stats) = cut_run(path, TextureResidency::Full, plain);
         assert_eq!(
             full_stats.verified_frames, 0,
             "{path}: full residency never waits"
         );
         for mode in [TextureResidency::Exact, TextureResidency::Feedback] {
-            let (streamed, stats) = cut_run(path, mode);
+            let (streamed, stats) = cut_run(path, mode, plain);
             let tops =
                 |frames: &[CutFrame], label: &str| frames.iter().find(|f| f.0 == label).unwrap().3;
             // Both textures were down to their tails when the first close frame was
@@ -792,3 +819,6 @@ fn gpu_residency_camera_cut() {
     .unwrap();
     assert!(failures.is_empty(), "streamed frames differ: {failures:?}");
 }
+
+#[path = "texture_bc_tests.rs"]
+mod texture_bc_tests;

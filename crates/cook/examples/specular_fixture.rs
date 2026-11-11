@@ -33,6 +33,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let prepared = normal_map::prepare_vectors(size, size, normals)?;
     let texture = Texture {
         role: TextureRole::NormalVarianceLinear,
+        format: renderlab_asset::TextureFormat::Uncompressed,
         mips: prepared
             .mips()
             .iter()

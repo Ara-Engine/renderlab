@@ -73,6 +73,7 @@ fn gpu_normal_maps_frame_oracle_and_tangent_bundle_recovery() {
             let texture = r
                 .try_upload_texture(&asset::Texture {
                     role: TextureRole::NormalLinear,
+                    format: asset::TextureFormat::Uncompressed,
                     mips: vec![Mip {
                         width: 1,
                         height: 1,
@@ -401,6 +402,7 @@ fn gpu_normal_maps_integration_replacement_affinity_and_mixed_draws() {
         let mut basic_slots = instances(&mut r, &[Mat4::from_translation(Vec3::new(0.8, 0., 0.1))]);
         let normal = asset::Texture {
             role: TextureRole::NormalLinear,
+            format: asset::TextureFormat::Uncompressed,
             mips: vec![Mip {
                 width: 1,
                 height: 1,
@@ -661,6 +663,7 @@ pub(super) fn geometric_shadow_case(samples: SampleCount, hardware: bool) {
     let tex = r
         .try_upload_texture(&asset::Texture {
             role: TextureRole::NormalLinear,
+            format: asset::TextureFormat::Uncompressed,
             mips: vec![Mip {
                 width: 1,
                 height: 1,

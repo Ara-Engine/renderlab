@@ -1418,6 +1418,7 @@ fn configured_data_and_runtime_limits_reach_bootstrap_and_preparation() {
     }
     package.resources.textures.push(asset::Texture {
         role: asset::TextureRole::BaseColorSrgb,
+        format: asset::TextureFormat::Uncompressed,
         mips,
     });
     assert!(package.validate(VirtualLimits::default()).is_err());
