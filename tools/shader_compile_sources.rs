@@ -70,7 +70,8 @@ pub(super) fn sources(program_source: &str) -> Result<Vec<Source>, String> {
     }
     let prelude = include_str!("../shaders/scene.wgsl");
     let parameters = program::declares_parameters(program_source);
-    let checked_as_engine = program_source == program::STANDARD_PROGRAM;
+    // P-SPLIT: every module composed from program text is created checked (user API).
+    let program_engine_api = false;
     let mut out = Vec::new();
     let err = |e: crate::Error| e.to_string();
 
@@ -135,7 +136,7 @@ pub(super) fn sources(program_source: &str) -> Result<Vec<Source>, String> {
         "shared",
         "program-raster-map",
         program::compose(prelude, program_source, program::Stage::Raster, parameters).source,
-        checked_as_engine,
+        program_engine_api,
         &raster_entries,
     );
     for samples in [SampleCount::One, SampleCount::Four] {
@@ -149,7 +150,7 @@ pub(super) fn sources(program_source: &str) -> Result<Vec<Source>, String> {
                 "program-raster-hardware-4x"
             },
             program::compose(&head, program_source, program::Stage::Raster, parameters).source,
-            checked_as_engine,
+            program_engine_api,
             &raster_entries,
         );
     }
@@ -167,7 +168,7 @@ pub(super) fn sources(program_source: &str) -> Result<Vec<Source>, String> {
         "rt",
         "program-raster-fresh",
         program::compose(&fresh, program_source, program::Stage::Raster, parameters).source,
-        checked_as_engine,
+        program_engine_api,
         &raster_entries,
     );
 
@@ -274,7 +275,7 @@ pub(super) fn sources(program_source: &str) -> Result<Vec<Source>, String> {
                     path,
                     &format!("program-{band}-{stage_name}"),
                     program::compose(head, program_source, stage, parameters).source,
-                    checked_as_engine,
+                    program_engine_api,
                     &["primary_shade_tiles"],
                 );
                 add(
@@ -282,7 +283,7 @@ pub(super) fn sources(program_source: &str) -> Result<Vec<Source>, String> {
                     path,
                     &format!("program-list-{band}-{stage_name}"),
                     program::compose_list(head, program_source, stage, parameters).source,
-                    checked_as_engine,
+                    program_engine_api,
                     &["primary_shade_list"],
                 );
             }
@@ -298,7 +299,7 @@ pub(super) fn sources(program_source: &str) -> Result<Vec<Source>, String> {
                 parameters,
             )
             .source,
-            checked_as_engine,
+            program_engine_api,
             &["primary_shade_tiles"],
         );
         if program::reflects(program_source) {
@@ -308,7 +309,7 @@ pub(super) fn sources(program_source: &str) -> Result<Vec<Source>, String> {
                     path,
                     if mixed { "gi-cell-mixed" } else { "gi-cell" },
                     gi_cache::compile_structure_cell_source(&heads[1], program_source, 64, mixed),
-                    true,
+                    program_engine_api,
                     &["gi_shade_cells"],
                 );
             }
@@ -395,8 +396,8 @@ pub(super) fn sources(program_source: &str) -> Result<Vec<Source>, String> {
                 path,
                 &format!("transparency-{name}"),
                 source,
-                if name == "glass" {
-                    checked_as_engine
+                if name == "glass" || name == "reflection" {
+                    program_engine_api
                 } else {
                     true
                 },
