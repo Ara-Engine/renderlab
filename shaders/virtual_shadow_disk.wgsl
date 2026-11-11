@@ -44,7 +44,8 @@ struct VsmFrame {
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
 // clip: this frame's world-to-clip matrix (the receivers' own, jitter included).
-// size: the image size in pixels (xy).
+// size: the image size in pixels (xy); z: TR1's frame number plus one on reconstructed frames
+// (the receiver jitter's sequence index), 0 otherwise.
 // above: per k in 0..=64 (two a vec4), the mask of the samples whose y rank is at least k.
 // samples: the 64 sample positions in the unit disk (two a vec4), bit s first.
 struct VdFrame {clip:mat4x4<f32>,size:vec4<f32>,above:array<vec4<u32>,33>,samples:array<vec4<f32>,32>};
@@ -60,10 +61,8 @@ fn vsm_word(cell:vec2<i32>,level:u32)->u32 {
     let side=vsm.counts.y*VSM_PAGE;
     return (level*side+u32(cell.y))*side+u32(cell.x);
 }
-// The widened disk slope the map was requested for (disk plus sun hysteresis).
+// The widened disk slope the pages are requested for (disk plus sun hysteresis).
 fn vd_slope()->f32 {return max(vsm.params.z,1e-4);}
-// The top of level `level`'s band: the height whose reach is VD_R of its texels.
-fn vd_band(level:u32)->f32 {return f32(VD_R)*vsm_texel(level)/vd_slope();}
 // Max-mip bands above the coarsest level's: their windows reach VD_R << VD_MIPS of its texels,
 // within the page around the receiver's.
 const VD_MIPS:u32=5u;
@@ -156,10 +155,19 @@ override VD_SCREEN_BIAS:f32=0.1;
 override VD_SCREEN:u32=6u;
 // The peel layer bounds a column from below (off: every column is solid without end).
 override VD_PEEL:bool=true;
+// On reconstructed frames each receiver reads the map from a point of its tangent plane up to
+// this many texels of its level away (per axis, a new point every frame), so TR1 integrates a
+// texel-wide box over the map: where a texel spans several pixels, a hard shadow edge becomes a
+// ramp one texel wide instead of a staircase. 0: off.
+override VD_JITTER:f32=0.5;
 // Screens: 1 writes lit before any work (dispatch and page work only), 2 after the receiver's
 // setup, 3 skips the map windows, 4 the visible-surface samples.
 override VD_SKIP:u32=0u;
 
+// The top of level `level`'s band: the height whose reach is VD_R of its texels. The reach is
+// the receiver's own (vd_px.slope: this frame's disk, not the widened one), so a band's texel
+// stays a third to a sixth of the penumbra it resolves however small the sun is.
+fn vd_band(level:u32)->f32 {return f32(VD_R)*vsm_texel(level)/vd_px.slope;}
 fn vsm_height(word:vec2<u32>)->f32 {return fma(bitcast<f32>(word.y),vsm.depth.z,vsm.depth.x);}
 // virtual_shadow.wgsl's max-mip layout.
 fn vsm_mip_base(level:u32,mip:u32)->u32 {
@@ -211,6 +219,9 @@ fn vd_rect(g0:vec2<f32>,g1:vec2<f32>)->vec2<u32> {
     return vd_from(first.x)&~vd_from(end.x)&vd_above_rank(first.y)&~vd_above_rank(end.y);
 }
 
+fn vd_hash(input:u32)->u32 {
+    var x=input;x=(x^(x>>16u))*0x7feb352du;x=(x^(x>>15u))*0x846ca68bu;return x^(x>>16u);
+}
 // Per-pixel state, set once by vd_prepare.
 struct VdPixel {
     valid:bool,thin:bool,level:u32,
@@ -218,8 +229,9 @@ struct VdPixel {
     world:vec3<f32>,origin:vec3<f32>,
     // Light space: the origin, the receiver's point, and the unit normal of the viewed side.
     p:vec3<f32>,point:vec3<f32>,normal:vec3<f32>,
-    // The disk in direction space (light xy per unit of height): its centre and radius.
-    centre:vec2<f32>,radius:f32,
+    // The disk in direction space (light xy per unit of height): its centre and radius, and
+    // the largest slope of its directions from the map's axis.
+    centre:vec2<f32>,radius:f32,slope:f32,
     // The pixel footprint at the receiver, metres.
     footprint:f32,
 };
@@ -261,7 +273,20 @@ fn vd_prepare(id:vec2<u32>) {
     let s=vec3<f32>(dot(l,vsm.u.xyz),dot(l,vsm.v.xyz),dot(l,vsm.l.xyz));
     vd_px.centre=s.xy/max(s.z,1e-3);
     vd_px.radius=max(shadow_views[layer].texel.z,1e-5);
+    vd_px.slope=vd_px.radius+length(vd_px.centre);
     vd_px.footprint=length(world.xyz-vsm.eye.xyz)*vsm.eye.w;
+    // The jitter moves the receiver within its tangent plane, so the plane tests stay exact. A
+    // plane steeper than 5:1 in light space would move it far along the surface: no jitter.
+    let nl=vd_px.normal;
+    if VD_JITTER>0.0 && vd.size.z>0.0 && vd_px.level!=VSM_NONE && nl.z>0.2 {
+        let seed=vd_hash(id.x+id.y*u32(vd.size.x));
+        let shift=vec2<f32>(f32(seed>>8u),f32(vd_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);
+        let r=fract(vec2<f32>(vd.size.z)*vec2<f32>(0.7548776662466927,0.5698402909980532)+shift);
+        let j=(r-vec2<f32>(0.5))*2.0*VD_JITTER*vsm_texel(vd_px.level);
+        let slide=vec3<f32>(j,-dot(nl.xy,j)/nl.z);
+        vd_px.p+=slide;
+        vd_px.point+=slide;
+    }
 }
 
 // A direction (d,1) leaves an opaque receiver's surface only above its tangent plane. Blocks
@@ -287,9 +312,9 @@ fn vd_facing()->bool {
 // Blocks the directions hidden by a column part: a square of half side `half` centred `c`
 // (light xy, metres) from the origin, solid from height `lo` to `hi` above it (metres).
 fn vd_column(c:vec2<f32>,half:f32,lo_in:f32,hi:f32) {
-    // Below this height its nearest point is outside the cone of the widened disk.
+    // Below this height its nearest point is outside the cone of the disk.
     let near=max(abs(c)-vec2<f32>(half),vec2<f32>(0.0));
-    let lo=max(lo_in,length(near)/vd_slope());
+    let lo=max(lo_in,length(near)/vd_px.slope);
     if lo>=hi {return;}
     // The square at height t covers directions (c -+ half) / t: the bounding rectangle over
     // lo..hi takes each side at the height where it lies farthest out.
@@ -310,7 +335,7 @@ fn vd_above(q:vec3<f32>,margin:f32)->bool {
 // The map's columns: from the receiver's level up, each level's band of heights.
 fn vd_map() {
     let p=vd_px.p;
-    let slope=vd_slope();
+    let slope=vd_px.slope;
     let side=i32(vsm.counts.y*VSM_PAGE);
     let bits=vsm.misc.x;
     let last=vsm.counts.x-1u;

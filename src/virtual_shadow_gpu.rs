@@ -1706,6 +1706,10 @@ impl Renderer {
         }
         self.ensure_virtual_casters(draws)?;
         let rotation = self.virtual_rotation(self.virtual_settings);
+        // N-VSM1: the disk lookup's receiver jitter follows TR1's frames (`VdFrame::size.z`).
+        let disk_jitter = self
+            .reconstruction_frame
+            .map_or(0.0, |frame| (frame % 4096 + 1) as f32);
         let state = self.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
         // N8n: the surface cache exists only while it is the lookup (wgpu keeps the table alive
@@ -2513,7 +2517,7 @@ impl Renderer {
             let clip = camera.matrix(size.width, size.height).to_cols_array();
             for value in clip
                 .into_iter()
-                .chain([size.width as f32, size.height as f32, 0.0, 0.0])
+                .chain([size.width as f32, size.height as f32, disk_jitter, 0.0])
             {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
