@@ -829,6 +829,17 @@ pub(crate) struct Finished {
     pub(crate) plan: Option<Plan>,
 }
 
+/// One view's part of the plan (docs/design-views.md): whether its camera and the scene it
+/// sees are unchanged, so its frames can idle. Owned by the view; the cache, its clock and
+/// its lighting history are the engine's `Planner`.
+#[derive(Default)]
+pub(crate) struct ViewPlan {
+    idle_key: Option<[u8; 32]>,
+    idle_frames: u32,
+    view_key: Option<[u8; 32]>,
+    view_frames: u32,
+}
+
 /// The cache's CPU history between frames, and the per-frame plan made from it:
 /// everything `prepare_gi` decides without a device. The wgpu renderer and the ara-gpu
 /// backend both plan through `begin` and `finish`, then `advance` once the frame's
@@ -843,16 +854,15 @@ pub(crate) struct Planner {
     pending_clear: bool,
     /// Frames since the cache was last emptied.
     since_clear: u32,
-    idle_key: Option<[u8; 32]>,
-    idle_frames: u32,
-    view_key: Option<[u8; 32]>,
-    view_frames: u32,
     environment_streak: bool,
     environment_catchup: u32,
     environment_phase: u32,
     bounce_last: Option<bool>,
     bounce_busy: u32,
     parity: bool,
+    /// The gather queues (this frame's, next frame's) the tick's first frame used: later
+    /// views of the tick trace into the same next queue.
+    tick_queues: [u32; 2],
     light_key: Option<[u8; 32]>,
     light_streak: bool,
     relight_catchup: u32,
@@ -867,16 +877,13 @@ impl Default for Planner {
             frame: 0,
             pending_clear: false,
             since_clear: u32::MAX,
-            idle_key: None,
-            idle_frames: 0,
-            view_key: None,
-            view_frames: 0,
             environment_streak: false,
             environment_catchup: 0,
             environment_phase: 0,
             bounce_last: None,
             bounce_busy: 0,
             parity: false,
+            tick_queues: [0; 2],
             light_key: None,
             light_streak: false,
             relight_catchup: 0,
@@ -910,9 +917,11 @@ impl Planner {
         self.since_clear
     }
     /// The table header for this frame. `run`: the cache's passes are wanted this frame;
-    /// `bounce`: its bounce passes too.
-    pub(crate) fn begin(&mut self, c: &PlanConfig, run: bool, bounce: bool) -> Begun {
-        if run {
+    /// `bounce`: its bounce passes too. `tick`: the first frame of an engine tick, which
+    /// does the cache's per-tick work; later views of the tick only probe, claim and trace
+    /// their new cells, and change none of the engine's history.
+    pub(crate) fn begin(&mut self, c: &PlanConfig, run: bool, bounce: bool, tick: bool) -> Begun {
+        if run && tick {
             if self.bounce_last.is_some_and(|b| b != bounce) {
                 self.pending_clear = true;
             }
@@ -997,12 +1006,15 @@ impl Planner {
             filter,
         }
     }
-    /// The frame record and the passes to run. `bounce` as given to `begin`.
+    /// The frame record and the passes to run. `bounce` and `tick` as given to `begin`;
+    /// `view` is the rendering view's plan.
     pub(crate) fn finish(
         &mut self,
         c: &PlanConfig,
         begun: &Begun,
         bounce: bool,
+        tick: bool,
+        view: &mut ViewPlan,
         inputs: FrameInputs<'_>,
     ) -> Finished {
         let s = c.settings;
@@ -1020,7 +1032,14 @@ impl Planner {
             skin_revisions,
         } = inputs;
         let mut boxes: Vec<[f32; 6]> = vec![];
-        let previous = std::mem::take(&mut self.bounds);
+        // Scene, environment and lighting events are the tick's: a later view of the tick
+        // sees none, and leaves their history for the next tick.
+        let previous = if tick {
+            std::mem::take(&mut self.bounds)
+        } else {
+            vec![]
+        };
+        let poses = if tick { poses } else { self.poses.clone() };
         let previous_poses = std::mem::replace(&mut self.poses, poses.clone());
         if !previous.is_empty() {
             // A skinned caster can change within identical aggregate bounds; P-SHOW: only a
@@ -1048,7 +1067,9 @@ impl Planner {
                 boxes.push(swept);
             }
         }
-        self.bounds = bounds;
+        if tick {
+            self.bounds = bounds;
+        }
         if boxes.len() > MAX_BOXES {
             let all = boxes.iter().fold(boxes[0], |u, b| {
                 std::array::from_fn(|k| {
@@ -1064,8 +1085,10 @@ impl Planner {
         // An environment change re-integrates every cell from its bits (no rays):
         // yaw rotates the sky, a new map replaces it. A map's intensity and the constant
         // sky are applied at lookup, so their changes re-integrate nothing.
-        let environment_changed = self.environment.is_some_and(|e| e != environment);
-        self.environment = Some(environment);
+        let environment_changed = tick && self.environment.is_some_and(|e| e != environment);
+        if tick {
+            self.environment = Some(environment);
+        }
         let mut flags = 0u32;
         if !boxes.is_empty() && s.invalidate_casters {
             flags |= 1;
@@ -1074,25 +1097,28 @@ impl Planner {
         // its first, and one frame past its window, where a cell still partial (made late in
         // the window) traces every remaining direction.
         let refill = cut_phases > 1 && (1..=cut_phases).contains(&since_clear);
-        if s.direction_phases > 1 || refill {
+        if tick && (s.direction_phases > 1 || refill) {
             flags |= 8;
         }
-        if s.rotation_period != 0 {
+        if tick && s.rotation_period != 0 {
             flags |= 2;
         }
         // A step after a still frame re-integrates every cell; a map changing on
         // consecutive frames, and the ENVIRONMENT_PERIOD frames after it last changed,
         // re-integrate one fixed slot group a frame (ENVIRONMENT_PERIOD).
         let integrate_all = environment_changed && !self.environment_streak;
-        let spread = !integrate_all && (environment_changed || self.environment_catchup > 0);
-        self.environment_catchup = if integrate_all {
-            0
-        } else if environment_changed {
-            ENVIRONMENT_PERIOD
-        } else {
-            self.environment_catchup.saturating_sub(1)
-        };
-        self.environment_streak = environment_changed;
+        let spread =
+            tick && !integrate_all && (environment_changed || self.environment_catchup > 0);
+        if tick {
+            self.environment_catchup = if integrate_all {
+                0
+            } else if environment_changed {
+                ENVIRONMENT_PERIOD
+            } else {
+                self.environment_catchup.saturating_sub(1)
+            };
+            self.environment_streak = environment_changed;
+        }
         let integrate = integrate_all || spread;
         let environment_group = if spread {
             self.environment_phase = (self.environment_phase + 1) % ENVIRONMENT_PERIOD;
@@ -1109,6 +1135,9 @@ impl Planner {
         // consecutive frames, a moved caster, and the RELIGHT_PERIOD frames after either
         // relight one fixed slot group a frame, one gather each (W2: a fixed rotation).
         let mut relight = 0u32;
+        // Bounce (gathers, cell shading) is the tick's; later views trace their new cells
+        // into the tick's next gather queue.
+        let bounce = bounce && tick;
         if bounce {
             let changed = self.light_key.is_some() && self.light_key != light_key;
             let caster = !boxes.is_empty() && s.invalidate_casters;
@@ -1132,15 +1161,19 @@ impl Planner {
                 flags |= 16;
             }
         }
-        self.light_key = light_key;
+        if tick {
+            self.light_key = light_key;
+        }
         // Gathers scheduled by a relight run on the frames after it, even where the view is
         // otherwise idle.
         let busy = bounce && self.bounce_busy > 0;
-        self.bounce_busy = if bounce && relight != 0 {
-            s.gathers + 2
-        } else {
-            self.bounce_busy.saturating_sub(1)
-        };
+        if tick {
+            self.bounce_busy = if bounce && relight != 0 {
+                s.gathers + 2
+            } else {
+                self.bounce_busy.saturating_sub(1)
+            };
+        }
         let mut frame = vec![0u8; FRAME_BYTES];
         let mut put =
             |at: usize, v: u32| frame[at * 4..at * 4 + 4].copy_from_slice(&v.to_le_bytes());
@@ -1163,11 +1196,16 @@ impl Planner {
         put(15, environment_group);
         // Bounce (G2): this frame's and next frame's gather queues, the relight event (its
         // request bit is set below once the claim rounds are known to run), the shading queue.
-        let [queue, next] = if self.parity {
+        let [queue, next] = if !tick {
+            self.tick_queues
+        } else if self.parity {
             [layout.queues[1], layout.queues[0]]
         } else {
             layout.queues
         };
+        if tick {
+            self.tick_queues = [queue, next];
+        }
         put(16, queue);
         put(17, next);
         put(18, relight);
@@ -1182,7 +1220,7 @@ impl Planner {
             (region[2] - region[0]).div_ceil(probe_tile()),
             (region[3] - region[1]).div_ceil(probe_tile()),
         ];
-        let clear = std::mem::take(&mut self.pending_clear);
+        let clear = tick && std::mem::take(&mut self.pending_clear);
         // A view whose every input is unchanged has nothing to trace once its cells
         // exist: after IDLE_AFTER identical frames the passes stop (still frames cost
         // nothing). Rotation and partial cells keep working every frame.
@@ -1197,12 +1235,12 @@ impl Planner {
             h.update(&skin_revisions);
             h.finalize().into()
         };
-        if self.idle_key == Some(idle_key) && !clear {
-            self.idle_frames = self.idle_frames.saturating_add(1);
+        if view.idle_key == Some(idle_key) && !clear {
+            view.idle_frames = view.idle_frames.saturating_add(1);
         } else {
-            self.idle_frames = 0;
+            view.idle_frames = 0;
         }
-        self.idle_key = Some(idle_key);
+        view.idle_key = Some(idle_key);
         // The same view and scene with only the environment changing (a rotating sky over a
         // still camera): once that view is idle, no cell is new, so only the scan and the
         // integrate passes run. Such frames do not advance the cache frame, so seen stamps
@@ -1215,12 +1253,12 @@ impl Planner {
             h.update(&still_extent);
             h.finalize().into()
         };
-        if self.view_key == Some(view_key) && !clear {
-            self.view_frames = self.view_frames.saturating_add(1);
+        if view.view_key == Some(view_key) && !clear {
+            view.view_frames = view.view_frames.saturating_add(1);
         } else {
-            self.view_frames = 0;
+            view.view_frames = 0;
         }
-        self.view_key = Some(view_key);
+        view.view_key = Some(view_key);
         // A gather cap spreads a cut's gathers over more frames: still frames keep running
         // until a spread of up to 64 slot groups per gather generation can have drained.
         let idle_after = match (bounce, s.gather_cells) {
@@ -1228,12 +1266,12 @@ impl Planner {
             (true, u32::MAX) => IDLE_AFTER_BOUNCE,
             (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
         };
-        if self.idle_frames >= idle_after && flags == 0 && !busy {
+        if view.idle_frames >= idle_after && flags == 0 && !busy {
             return Finished { frame, plan: None };
         }
         // With bounce a changing environment relights (flags 16), so frames that are
         // environment-only never run bounce.
-        let environment_only = self.view_frames >= IDLE_AFTER && flags == 4;
+        let environment_only = view.view_frames >= IDLE_AFTER && flags == 4;
         let mut scan_groups = c.slots.div_ceil(64);
         if environment_only && spread {
             let word = (environment_group | (1 << 31)).to_le_bytes();
@@ -2094,7 +2132,7 @@ impl Renderer {
     /// frame has no traced shading groups. A mixed-program frame (MP1) compiles one cell
     /// pipeline per reflecting program instead; cells of the others reflect nothing.
     fn ensure_gi_shade(&mut self, software: bool) -> Result<bool, Error> {
-        let Some(state) = self.primary.as_ref() else {
+        let Some(state) = self.view.primary.as_ref() else {
             return Ok(false);
         };
         if state.shading_groups().is_none() {
@@ -2175,7 +2213,7 @@ impl Renderer {
                 }),
             ResourceKind::ShaderModule,
         );
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let layout = self.ledger.own(
             self.device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -2698,7 +2736,10 @@ impl Renderer {
             fov_y: camera.fov_y(),
             size,
         };
-        let begun = self.gi.planner.begin(&config, run, bounce);
+        // The cache's per-tick work runs in the tick's first frame whose plan is not idle, so
+        // a moving view beside a still one still relights and gathers.
+        let tick = !self.explicit_ticks || self.gi_tick != self.tick;
+        let begun = self.gi.planner.begin(&config, run, bounce, tick);
         let raw: Vec<u8> = begun.header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
         if !run {
@@ -2748,7 +2789,7 @@ impl Renderer {
         // Bounce (G2): the lights, the environment, the frame's program and its draws'
         // materials (stable ids) form the lighting key.
         let light_key: Option<[u8; 32]> = bounce.then(|| {
-            let state = self.primary.as_ref().unwrap();
+            let state = self.view.primary.as_ref().unwrap();
             let mut h = Sha256::new();
             h.update(format!("{:?}", self.lighting.source_lights).as_bytes());
             // DC1: altered surface inputs relight bounce cells on the existing schedule.
@@ -2764,7 +2805,7 @@ impl Renderer {
             h.update(ids.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<_>>());
             h.finalize().into()
         });
-        let region = self.primary.as_ref().unwrap().scene;
+        let region = self.view.primary.as_ref().unwrap().scene;
         // P-STILL (docs/p-still.md): a still view is the unjittered camera and the target
         // size, decided on the CPU from their bits. TR1's sub-pixel jitter (and the jittered
         // `scene_pixels` rectangle, which follows from the camera, the hashed placements
@@ -2785,6 +2826,8 @@ impl Renderer {
             &config,
             &begun,
             bounce,
+            tick,
+            &mut self.view.gi,
             FrameInputs {
                 bounds,
                 poses,
@@ -2811,12 +2854,23 @@ impl Renderer {
         self.prepare_gi_groups(software, scene_generation)?;
         self.gi.stats.frames += 1;
         self.gi.stats.software = software;
-        self.gi.planner.advance(&begun, environment_only);
+        // The cache's clock (seen stamps, eviction, refill phases) counts ticks.
+        if tick {
+            self.gi.planner.advance(&begun, environment_only);
+            self.gi_tick = self.tick;
+        }
         Ok(())
     }
 
     fn prepare_gi_groups(&mut self, software: bool, scene_generation: u64) -> Result<(), Error> {
-        let targets = self.primary.as_ref().unwrap().targets.as_ref().unwrap();
+        let targets = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .targets
+            .as_ref()
+            .unwrap();
         // A new software geometry buffer drops the groups itself; transform changes rewrite it.
         let rays = if software {
             self.gi.packed.as_ref().map_or(0, |p| p.bytes)

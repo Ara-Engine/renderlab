@@ -533,6 +533,7 @@ impl Renderer {
                 fresh: false,
                 submission: self.submissions,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at,
             },

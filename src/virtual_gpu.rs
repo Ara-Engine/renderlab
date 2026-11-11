@@ -299,6 +299,7 @@ impl Renderer {
                 fresh: false,
                 submission,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at,
             },
@@ -388,7 +389,7 @@ impl Renderer {
         let shadow_start = Instant::now();
         // Hierarchy bounds cover every LOD of the submitted placement. The caster
         // range below is exactly the same published cut used by the camera pass.
-        let placement_bounds = if self.shadows.enabled(view_mode) {
+        let placement_bounds = if self.view.shadows.enabled(view_mode) {
             scene
                 .meshes
                 .iter()
@@ -420,8 +421,8 @@ impl Renderer {
         } else {
             vec![]
         };
-        let mut shadow_frame = if self.shadows.enabled(view_mode) {
-            Some(self.shadows.plan(
+        let mut shadow_frame = if self.view.shadows.enabled(view_mode) {
+            Some(self.view.shadows.plan(
                 camera,
                 [color.width(), color.height()],
                 &self.lighting.source_lights,
@@ -639,7 +640,7 @@ impl Renderer {
     pub fn try_capture_hdr(&mut self) -> Result<Option<Capture>, Error> {
         self.check_fault()?;
         let hdr = self
-            .lighting
+            .view
             .hdr
             .as_ref()
             .filter(|h| h.frame.0 > 0)
@@ -715,6 +716,7 @@ impl Renderer {
                 fresh: false,
                 submission: self.submissions,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at,
             },

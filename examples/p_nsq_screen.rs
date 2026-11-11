@@ -139,13 +139,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 settings: Settings {
                     global_illumination: spec.effects.gi,
                     temporal_reconstruction: v.tr1,
-                    reflections: renderlab::ReflectionSettings {
-                        enabled: spec.effects.reflections,
-                        ..Default::default()
-                    },
-                    exposure: Exposure::Manual {
-                        stops: spec.exposure_stops,
-                    },
                     aerial_perspective: false,
                     height_fog: None,
                     volumetric_fog: None,
@@ -159,7 +152,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ..Default::default()
             },
         )?;
-        engine.resize(spec.size[0], spec.size[1])?;
+        let view = engine.create_view(&ViewDesc {
+            look: ViewLook {
+                reflections: renderlab::ReflectionSettings {
+                    enabled: spec.effects.reflections,
+                    ..Default::default()
+                },
+                exposure: Exposure::Manual {
+                    stops: spec.exposure_stops,
+                },
+                ..Default::default()
+            },
+            ..ViewDesc::new(spec.size[0], spec.size[1])
+        })?;
         engine
             .renderer_mut()
             .set_post_settings(renderlab::PostSettings {
@@ -215,7 +220,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let mut gpu = Vec::new();
         for (index, frame) in spec.frames.iter().enumerate().take(last + 1) {
             if frame.cut {
-                engine.cut();
+                engine.cut_view(view);
             }
             let camera = Camera::look_at(
                 Vec3::from_array(frame.eye),
@@ -225,7 +230,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 0.1,
                 10_000.0,
             )?;
-            let report = engine.render(&camera)?;
+            engine.tick(1.0 / 60.0)?;
+            let report = engine.render_view(view, &camera)?;
             engine.device().poll(wgpu::PollType::Wait {
                 submission_index: None,
                 timeout: Some(std::time::Duration::from_secs(60)),
@@ -233,7 +239,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if frames.contains(&index) {
                 write_png(
                     &dir.join(format!("frame-{index:04}.png")),
-                    &engine.capture()?,
+                    &engine.capture_view(view)?,
                 )?;
             }
             rows.push(
@@ -248,7 +254,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     "shadow_generation_ms":g.shadow_generation.map(|d| d.as_secs_f64()*1e3)}));
             }
         }
-        engine.capture()?;
+        engine.capture_view(view)?;
         for g in engine.poll()?.gpu {
             gpu.push(json!({"frame_id":g.frame.0,
                 "span_ms":g.render_span.as_secs_f64()*1e3,

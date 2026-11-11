@@ -258,7 +258,7 @@ fn read_texture(r: &Renderer, texture: &wgpu::Texture, texel: u32) -> Vec<u8> {
 /// the shaded region and in uncovered tiles, whose records are stale.
 fn hit_records(r: &mut Renderer) -> Vec<u8> {
     r.test_drain("IQ1 hit admission");
-    let primary = r.primary.as_ref().unwrap();
+    let primary = r.view.primary.as_ref().unwrap();
     let targets = primary.targets.as_ref().unwrap();
     let region = primary.scene;
     let (hit, tiles) = (targets.hit.texture.clone(), targets.tiles.texture.clone());

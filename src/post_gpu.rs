@@ -259,7 +259,7 @@ impl PostGpu {
                 e,
             )
         });
-        let (primary_layout, primary_pipeline) = if let Some(primary) = &r.primary {
+        let (primary_layout, primary_pipeline) = if let Some(primary) = &r.view.primary {
             let bindings = layout(
                 r,
                 "post primary surface",
@@ -373,7 +373,7 @@ impl PostGpu {
         );
         let image =
             |label, size| texture(r, label, size, F::Rgba16Float, wgpu::TextureDimension::D2);
-        let settings = r.post_settings;
+        let settings = r.view.post_settings;
         let tiny = wgpu::Extent3d {
             width: 1,
             height: 1,
@@ -499,14 +499,15 @@ impl PostGpu {
             .retain(|(last, _)| *last > r.completed_submission);
         self.retired_targets
             .retain(|(last, _)| *last > r.completed_submission);
-        let s = r.post_settings;
+        let s = r.view.post_settings;
         self.prepare_targets(r);
-        let internal = r.lighting.hdr.as_ref().unwrap().resolved.texture.size();
+        let internal = r.view.hdr.as_ref().unwrap().resolved.texture.size();
         let current = camera.unjittered().matrix(internal.width, internal.height);
-        // MV1: camera and object history must describe the same rendered frame.
+        // MV1: camera and object history must describe the same rendered frame: the frame
+        // this view rendered last.
         let previous = self
             .previous
-            .filter(|(frame, _)| *frame == r.frames)
+            .filter(|(frame, _)| *frame == r.view.last_frame)
             .map(|(_, matrix)| matrix);
         let mut frame = Vec::with_capacity(272);
         for m in [
@@ -539,7 +540,8 @@ impl PostGpu {
         use wgpu::BindingResource as R;
         let hdr = r.post_hdr();
         let hit = primary.then(|| {
-            (*r.primary
+            (*r.view
+                .primary
                 .as_ref()
                 .unwrap()
                 .targets
@@ -560,7 +562,7 @@ impl PostGpu {
             return;
         }
         let surface = if primary {
-            let p = r.primary.as_ref().unwrap();
+            let p = r.view.primary.as_ref().unwrap();
             let t = p.targets.as_ref().unwrap();
             group(
                 r,
@@ -580,7 +582,7 @@ impl PostGpu {
                 "post raster surface",
                 &self.raster_layout,
                 &[
-                    (0, R::TextureView(&r.depth.as_ref().unwrap().view)),
+                    (0, R::TextureView(&r.view.depth.as_ref().unwrap().view)),
                     (1, self.frame.value.as_entire_binding()),
                     (2, R::TextureView(&self.aux.view)),
                 ],
@@ -675,7 +677,7 @@ impl PostGpu {
     /// full target before encoding, preserving camera history and the post frame index.
     fn prepare_targets(&mut self, r: &Renderer) {
         use wgpu::TextureFormat as F;
-        let s = r.post_settings;
+        let s = r.view.post_settings;
         let tiny = wgpu::Extent3d {
             width: 1,
             height: 1,
@@ -735,7 +737,7 @@ impl PostGpu {
     }
     pub(super) fn encode(&self, r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
         let g = self.groups.as_ref().unwrap();
-        let s = r.post_settings;
+        let s = r.view.post_settings;
         if s.motion_blur || s.depth_of_field.is_some() {
             let primary = g.key.1.is_some();
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -751,7 +753,13 @@ impl PostGpu {
             if primary {
                 pass.set_bind_group(
                     1,
-                    r.primary.as_ref().unwrap().virtual_geometry().unwrap().1,
+                    r.view
+                        .primary
+                        .as_ref()
+                        .unwrap()
+                        .virtual_geometry()
+                        .unwrap()
+                        .1,
                     &[],
                 );
             }
@@ -793,19 +801,20 @@ impl PostGpu {
 impl Renderer {
     /// The image after reconstruction: native HDR, or TR1b's target-size output.
     fn post_hdr(&self) -> &Depth {
-        self.upscale
+        self.view
+            .upscale
             .as_ref()
-            .map_or(&self.lighting.hdr.as_ref().unwrap().resolved, |u| &u.hdr)
+            .map_or(&self.view.hdr.as_ref().unwrap().resolved, |u| &u.hdr)
     }
     pub fn post_settings(&self) -> PostSettings {
-        self.post_settings
+        self.view.post_settings
     }
     /// Presentation settings never invalidate TR1. Disabling releases post resources.
     pub fn set_post_settings(&mut self, settings: PostSettings) -> Result<(), Error> {
         settings.validate()?;
-        self.post_settings = settings;
+        self.view.post_settings = settings;
         if !settings.enabled {
-            if let Some(post) = self.post.take() {
+            if let Some(post) = self.view.post.take() {
                 self.retired_post.push((self.submissions, post));
             }
         }
@@ -821,29 +830,32 @@ impl Renderer {
                 ));
             }
         }
-        self.post_lut = lut;
-        if let Some(mut post) = self.post.take() {
+        self.view.post_lut = lut;
+        if let Some(mut post) = self.view.post.take() {
             post.write_lut(
                 self,
-                self.post_lut.as_ref().unwrap_or(&ColourLut::identity(2)?),
+                self.view
+                    .post_lut
+                    .as_ref()
+                    .unwrap_or(&ColourLut::identity(2)?),
             );
-            post.lut_custom = self.post_lut.is_some();
-            self.post = Some(post);
+            post.lut_custom = self.view.post_lut.is_some();
+            self.view.post = Some(post);
         }
         Ok(())
     }
     /// Suppress shutter motion across an explicit camera cut.
     pub fn cut_post_motion(&mut self) {
-        if let Some(post) = &mut self.post {
+        if let Some(post) = &mut self.view.post {
             post.previous = None;
         }
     }
     pub(super) fn prepare_post(&mut self, camera: &Camera, primary: bool) -> Result<(), Error> {
-        if !self.post_settings.enabled {
+        if !self.view.post_settings.enabled {
             return Ok(());
         }
         let size = self.post_hdr().texture.size();
-        let mut post = match self.post.take() {
+        let mut post = match self.view.post.take() {
             Some(p) if p.size == size && (!primary || p.primary_pipeline.is_some()) => p,
             old => {
                 if let Some(old) = old {
@@ -857,13 +869,13 @@ impl Renderer {
             }
         };
         if post.serial == 0 {
-            if let Some(lut) = &self.post_lut {
+            if let Some(lut) = &self.view.post_lut {
                 post.write_lut(self, lut);
                 post.lut_custom = true;
             }
         }
         post.prepare(self, camera, primary);
-        self.post = Some(post);
+        self.view.post = Some(post);
         Ok(())
     }
 }

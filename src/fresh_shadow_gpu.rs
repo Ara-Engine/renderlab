@@ -91,6 +91,19 @@ pub(super) struct FreshState {
     retired_binds: Vec<(u64, ComputeBinding)>,
 }
 impl FreshState {
+    /// A new view's state: these layouts, and targets created by its first fresh frame.
+    pub fn fork(&self) -> Self {
+        Self {
+            compute_bindings: self.compute_bindings.clone(),
+            shade_bindings: self.shade_bindings.clone(),
+            receiver_layout: self.receiver_layout.clone(),
+            compute_layout: self.compute_layout.clone(),
+            shade_layout: self.shade_layout.clone(),
+            targets: None,
+            retired: vec![],
+            retired_binds: vec![],
+        }
+    }
     pub fn new(
         device: &PipelineDevice,
         ledger: &Ledger,
@@ -377,12 +390,12 @@ impl Renderer {
     pub(super) fn ensure_fresh_targets(&mut self, size: wgpu::Extent3d, hardware_build: bool) {
         // Traced frames write the same receivers from compute.
         let receiver_usage = wgpu::TextureUsages::RENDER_ATTACHMENT
-            | if self.primary.is_some() {
+            | if self.view.primary.is_some() {
                 wgpu::TextureUsages::STORAGE_BINDING
             } else {
                 wgpu::TextureUsages::empty()
             };
-        let state = self.fresh.as_mut().unwrap();
+        let state = self.view.fresh.as_mut().unwrap();
         let ledger = &self.ledger;
         let device = &self.device;
         if state
@@ -516,7 +529,7 @@ impl Renderer {
         slot: usize,
         timed: bool,
     ) {
-        let t = self.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+        let t = self.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
         let p = self.pipeline.fresh.as_ref().unwrap();
         {
             let attachments = [&t.world, &t.normal].map(|t| {
@@ -534,7 +547,7 @@ impl Renderer {
                 label: Some("fresh receiver raster"),
                 color_attachments: &attachments,
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.depth.as_ref().unwrap().view,
+                    view: &self.view.depth.as_ref().unwrap().view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
@@ -599,7 +612,7 @@ impl Renderer {
         tile: [u32; 2],
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let t = self.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+        let t = self.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("fresh 256-ray visibility"),
             timestamp_writes,

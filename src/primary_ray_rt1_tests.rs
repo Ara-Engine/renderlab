@@ -19,7 +19,7 @@ fn gpu_rt1_film_defects() {
         label: Some("RT1 separate eight-ray control"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
-    let separate = r.primary.as_ref().unwrap().fresh_pipeline(
+    let separate = r.view.primary.as_ref().unwrap().fresh_pipeline(
         &r.device,
         &r.ledger,
         &module,
@@ -37,7 +37,7 @@ fn gpu_rt1_film_defects() {
         fs::write(out.join(format!("pose-{pose}-exact.u32")), &exact_counts).unwrap();
         let mut encoder = r.device.create_command_encoder(&Default::default());
         {
-            let primary = r.primary.as_ref().unwrap();
+            let primary = r.view.primary.as_ref().unwrap();
             let mut pass = encoder.begin_compute_pass(&Default::default());
             pass.set_pipeline(&separate);
             pass.set_bind_group(0, primary.test_fresh_bindings().1, &[]);

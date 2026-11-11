@@ -601,7 +601,7 @@ impl Renderer {
             .map(|s| s.stats(&self.ledger))
     }
     pub(crate) fn reject_virtual_hardware_shadows(&self, mode: ViewMode) -> Result<(), Error> {
-        if self.hardware_shadows.is_some() && self.shadows.enabled(mode) {
+        if self.hardware_shadows.is_some() && self.view.shadows.enabled(mode) {
             return Err(Error::InvalidInput(
                 "hardware shadows do not yet support virtual geometry; use the raster renderer",
             ));
@@ -629,6 +629,7 @@ impl Renderer {
                 fresh: false,
                 submission: self.submissions,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at: Instant::now(),
             });
