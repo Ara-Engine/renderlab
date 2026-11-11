@@ -2,6 +2,7 @@
 
     py -3 -B tools/p-flicker/quality.py RUN...   RUN: runs/ directory (NAME-PATH)
 """
+import os
 import importlib.util
 import json
 from pathlib import Path
@@ -9,7 +10,8 @@ import subprocess
 import sys
 
 HERE = Path(__file__).resolve().parent
-WORK = Path("D:/Coding/renderlab-work/p-flicker")
+UNIT = Path("D:/Coding/renderlab-work/p-flicker")  # Unreal captures and the clip manifest
+WORK = Path(os.environ.get("P_FLICKER_WORK", UNIT))  # runs, sheets, builds (another unit sets its own)
 spec = importlib.util.spec_from_file_location("pyard_score", HERE.parent / "p-yard/score.py")
 score = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(score)

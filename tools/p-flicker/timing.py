@@ -5,6 +5,7 @@ so the Vulkan layer never touched it).
 
     py -3 -B tools/p-flicker/timing.py OUT.json RUN...   RUN: runs/ directory (NAME-PATH)
 """
+import os
 import json
 from pathlib import Path
 import sys
@@ -12,7 +13,8 @@ import sys
 import numpy as np
 
 HERE = Path(__file__).resolve().parent
-WORK = Path("D:/Coding/renderlab-work/p-flicker")
+UNIT = Path("D:/Coding/renderlab-work/p-flicker")  # Unreal captures and the clip manifest
+WORK = Path(os.environ.get("P_FLICKER_WORK", UNIT))  # runs, sheets, builds (another unit sets its own)
 FRAMES = json.loads((HERE.parent / "p-yard/manifest.json").read_text())["scenes"]["quarry"]["frames"]
 STATE = {f["index"]: ("moving" if f["state"] in ("walk", "return") else f["state"]) for f in FRAMES}
 EPIC = {k: v for k, v in json.loads(Path("D:/Coding/renderlab-work/p-yard2/timing.json").read_text())["summary"].items()

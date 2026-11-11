@@ -747,6 +747,19 @@ pub(super) fn map_source() -> String {
     )
 }
 
+/// CPU-only access to nested production source composers.
+#[cfg(test)]
+pub(super) fn compile_structure_sources() -> Vec<(&'static str, String)> {
+    vec![
+        ("virtual", shader_source()),
+        ("records", records_source()),
+        ("hybrid", hybrid_source()),
+        ("map", map_source()),
+        ("surface", surface_cache::surface_source()),
+        ("s4", sunvis_s4::source()),
+    ]
+}
+
 /// The N-VSM1 disk lookup module: the window radius, then shaders/virtual_shadow_disk.wgsl.
 /// Measurement only: `RENDERLAB_VD=NAME=VALUE,...` replaces the defaults of the module's `VD_`
 /// override constants (screens and cost splits without a build per variant; docs/n-vsm1.md).

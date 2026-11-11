@@ -122,10 +122,12 @@ fn pipeline(
     source: &str,
     entry: &str,
 ) -> Owned<wgpu::ComputePipeline> {
-    let module = r.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-        label: Some(label),
-        source: wgpu::ShaderSource::Wgsl(source.into()),
-    });
+    let module = r
+        .device
+        .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some(label),
+            source: wgpu::ShaderSource::Wgsl(source.into()),
+        });
     let layout = r
         .device
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -187,6 +189,36 @@ fn texture(
         ),
     }
 }
+fn primary_surface_source() -> Result<String, Error> {
+    let head = primary_ray_gpu::non_rt_heads(include_str!("../shaders/scene.wgsl"))?[0].clone();
+    Ok(head
+        + include_str!("../shaders/object_motion.wgsl")
+        + include_str!("../shaders/post_surface.wgsl"))
+}
+
+fn raster_surface_source(samples: SampleCount) -> String {
+    let source = include_str!("../shaders/post_raster_surface.wgsl").to_owned();
+    if samples == SampleCount::Four {
+        source.replace("texture_depth_2d;", "texture_depth_multisampled_2d;")
+    } else {
+        source
+    }
+}
+
+#[cfg(test)]
+pub(super) fn compile_structure_sources() -> Result<Vec<(&'static str, String)>, Error> {
+    Ok(vec![
+        ("filters", include_str!("../shaders/post.wgsl").to_owned()),
+        ("tone", include_str!("../shaders/post_tone.wgsl").to_owned()),
+        ("primary-surface", primary_surface_source()?),
+        ("raster-surface-1x", raster_surface_source(SampleCount::One)),
+        (
+            "raster-surface-4x",
+            raster_surface_source(SampleCount::Four),
+        ),
+    ])
+}
+
 impl PostGpu {
     #[cfg(test)]
     pub(in crate::renderer) fn test_surface(&self) -> &wgpu::Texture {
@@ -240,15 +272,12 @@ impl PostGpu {
                     storage(41, F::Rgba32Float),
                 ],
             );
-            let head =
-                primary_ray_gpu::non_rt_heads(include_str!("../shaders/scene.wgsl"))?[0].clone();
+            let source = primary_surface_source()?;
             let pipe = pipeline(
                 r,
                 "post primary surface",
                 &[&bindings, primary.array_layout()],
-                &(head
-                    + include_str!("../shaders/object_motion.wgsl")
-                    + include_str!("../shaders/post_surface.wgsl")),
+                &source,
                 "post_primary_surface",
             );
             (Some(bindings), Some(pipe))
@@ -256,13 +285,11 @@ impl PostGpu {
             (None, None)
         };
         let mut depth = sampled(0, T::Depth);
-        let mut raster_source = include_str!("../shaders/post_raster_surface.wgsl").to_owned();
+        let raster_source = raster_surface_source(r.options.samples);
         if r.options.samples == SampleCount::Four {
             if let wgpu::BindingType::Texture { multisampled, .. } = &mut depth.ty {
                 *multisampled = true;
             }
-            raster_source =
-                raster_source.replace("texture_depth_2d;", "texture_depth_multisampled_2d;");
         }
         let raster_layout = layout(
             r,
@@ -304,10 +331,12 @@ impl PostGpu {
                 bind_group_layouts: &[Some(&tone_layout)],
                 immediate_size: 0,
             });
-        let module = r.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("post tone"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/post_tone.wgsl").into()),
-        });
+        let module = r
+            .device
+            .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("post tone"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/post_tone.wgsl").into()),
+            });
         let tone = r.ledger.own(
             r.device
                 .create_render_pipeline(&wgpu::RenderPipelineDescriptor {

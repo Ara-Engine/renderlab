@@ -768,9 +768,9 @@ Reported by Ara's integration thread through `ara capture` on the RTX 4070 SUPER
     - FIXED, product defect: cold starts could use unbounded driver memory. Each program shading kernel holds about 4.5-5 GB of NVIDIA compiler memory while it compiles, and the engine compiled them all at once (18.3 GB private in lease pipe1). A process-wide limit now keeps one native compile in flight by default. Measured cold peaks: 5.1-6.1 GB, also with two engines.
     - Measured cause of the ~100 s: the program shading kernel is 89-96% of cold start on both paths. Standard program 69-96 s, toon 26-31 s, glass reflection 8 s; all engine kernels together 5-7 s. The cost comes from engine helpers composed into every program's kernel.
   - Still open:
-    - Ara's 120 s limit. Cold game-scene starts are 125-143 s, serial under the memory limit, so a first attempt can still miss and the retry succeeds. The fix is moving GI lookup and local-shadow visibility out of the program kernel (census boundaries 3-4, draft PR #11); measure its frame cost against these compile numbers.
+    - ~~Ara's 120 s limit.~~ FIXED by P-SKY: game scene cold first image about 10-11 s on both paths (P-SPLIT: 10.9 s RT, 9.9 s non-RT, peak private 1.3 / 2.0 GB; warm 0.9 s), Showcase through Ara 24-25 s cold. The kernel split is deferred.
     - Quarry startup memory. The warm quarry reaches 8 GB private before its first image, from scene preparation or upload staging (main reaches 8.5 GB at 16 s). It cannot run under the 8 GB lease watchdog.
-    - Trust policy. An edit to the standard program switches all 24 of its kernels from unchecked to checked; pin programs to checked after a frame-time A/B. GI-cell and glass reflected-hit pipelines compose user text through the unchecked engine API.
+    - Trust policy and the two unchecked user-text paths: fixed on `t3/p-split`, not yet merged (see "M8 P-SPLIT parked").
     - The lease runner (scripts/m6-film-run.py) forces the Khronos validation layer on every child, so n8-run timings since F0 include it.
 - **OPEN, programmable shading: reflection hits shade with the receiver's program and the hit's material.**
   - A program that adds a per-material glow in `shade` makes every reflection it shows glow at its own value; with an emissive map, the hit's textures stand in for the map.
@@ -917,9 +917,9 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
 
 **Left, OPEN**
 1. Crack-flash fix. Candidates, unmeasured: a tap test that tolerates near-coplanar folds of one mesh, or keeping the window when only outer taps fail and renormalising over the accepted ones. Real disocclusions must keep rejecting, so the S4 door and the silhouette tests gate it.
-2. Merge the trust policy. The numbers above support it. Before merging: fix the census tool, whose `cpu_shader_compile_structure` test fails on the branch because it composes the `program-bins` module without the `PRIMARY_BATCHES` constant (a tool fault, three variants), and merge main (the branch is based on a97d663).
+2. Merge the trust policy. The numbers above support it. Since the park (P-SPLIT, after resuming): main is merged into the branch (4cc14916; conflicts in `temporal_reconstruction.rs` and `virtual_shadow_gpu.rs` were adjacent additions, both kept), and the census catalogue now calls `program_lists::bin_source()` for `program-bins`. **Neither was built or tested after these two commits**: the merge gate must build, run the lib tests and rerun `cpu_shader_compile_structure` (expect 1,171 records, 0 failures). The census does not yet list main's new N-VSM1 disk lookup module (`virtual_shadow_gpu::disk_source`); add it when convenient.
 3. The kernel split itself was not started. P-SKY took the game scene's cold first image from about 183 s to about 10 s, so it is no longer urgent; the remaining cold cost is the per-kernel NVIDIA compile (P-PIPE).
-4. `docs/p-split.md` has empty Census and Cold start sections and no result summary.
+4. ~~`docs/p-split.md` has empty sections~~ Filled: result table, A/B, census (standard → glass tint now changes 2 binaries, was 24), cold start.
 
 ## arrayLength of a buffer-array element on RADV (ara-gpu backend finding, 2026-11-11)
 
@@ -1025,3 +1025,12 @@ A still scene whose cache lighting key never changes stays below its converged b
 - It is not a gain per relight and it does not drift. The cold start carries gathers + 1 bounce orders (gathers is 3); a relight adds the next orders on top of the stored outgoing light.
 - At these albedos the step is under one percent and not visible. In a bright interior (albedo 0.8 to 0.9) the missing orders are several percent, and the step would land on the first lighting change after a cut.
 - **Fix candidates:** let a settled cache keep gathering at a low rate until the series converges, or start cold with enough orders for the scene's albedo. **Judge it on a white room.**
+
+## Glossy: P-GLOSSY parked (2026-11-11)
+
+**OPEN, parked on branch `t3/p-glossy` at 52b07129 (main merged in), DON'T MERGE yet.** Record: docs/p-glossy.md on the branch, with the resume steps in its section 5.
+- **What it found:** four strata shared within a shading group (6 neighbours per pixel and frame from a 5x5 window) match the 16-strata image on every crop of the matched scene against the path-traced reference, both paths, held and moving. Showcase shading: non-RT 11.4 ms against 23.5-24.1 on pure main; RT 8.69 to 5.77 ms. The first 3x3 sharing stamped rare bright hits as 3x3 squares on cuts; the 5x5 pick removes them, leaving a faint mottle on the cut that needs a look in motion.
+- **Why not merged:** as committed, the default 16-strata path is 8-12 ms slower than main on Showcase non-RT (36.5 / 31.9 against 24.1 / 23.5 ms shading). The cost is the branch's entry restructure or its workgroup-memory exchange (leading guess: shared memory taking L1 from the software walk); the bisect lease was prepared and not run.
+- **Where non-RT glossy time goes (16 strata):** about 17 ms closest-hit walks and reconstruction, 8 ms the hits' sun walks, 3.5 ms hit shading; 2.6 ms with glossy tracing off.
+- **The roughness-0.4 bound:** 71% of Showcase's traced glossy pixels are at roughness 0.4-0.5; one ray there saves 11-15 ms non-RT but speckles the 0.42 aluminium ball (held flicker 2.5x). A bound, not a candidate.
+- **Next:** run the bisect screens, shrink or remove the exchange, then make 4 shared strata the default and measure Showcase still, moving and cut and the game scene. Owner: the next glossy unit (row 3 of ara-render-replacement.md, the editor frame cost).
