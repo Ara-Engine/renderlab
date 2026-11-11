@@ -30,7 +30,7 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
     (light_cold_offset(directions) + lights.div_ceil(32).max(1)).next_multiple_of(4)
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
-pub(crate) const COUNTER_WORDS: u64 = 44;
+pub(crate) const COUNTER_WORDS: u64 = 48;
 const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
@@ -525,6 +525,10 @@ pub struct IndirectCounters {
     pub gather_deferred: u32,
     /// Listed misses a capped claim left for a later frame (`IndirectSettings::claim_cells`).
     pub claim_deferred: u32,
+    /// Cells a full bucket gave up to a miss before their eviction age (U-SPECK,
+    /// docs/speck.md), and those of them seen within the last eight frames.
+    pub evicted: u32,
+    pub evicted_recent: u32,
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -1443,6 +1447,12 @@ pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
             .count(),
         1
     );
+    assert_eq!(
+        kernels
+            .matches(&format!("const GI_W_CLAIMS:u32={COUNTER_WORDS}u;"))
+            .count(),
+        1
+    );
     let line = "const GI_NEIGHBOURS:array<u32,256>=array<u32,256>();";
     assert_eq!(kernels.matches(line).count(), 1);
     let words: Vec<String> = neighbour_table(directions)
@@ -1456,6 +1466,11 @@ pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
             words.join(",")
         ),
     );
+    kernels.push('\n');
+    kernels.push_str(&gi_shader(
+        "gi_near.wgsl",
+        include_str!("../shaders/gi_near.wgsl"),
+    ));
     // Keep the hardware module unchanged, including its original gather entry.
     if software {
         kernels.push('\n');
@@ -2041,6 +2056,8 @@ impl Renderer {
             gather_orphans: w[41],
             gather_deferred: w[42],
             claim_deferred: w[43],
+            evicted: w[44],
+            evicted_recent: w[45],
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).

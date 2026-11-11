@@ -2,13 +2,16 @@
 180 frames at 1080p, on both paths, with one switch changed at a time. A finished run leaves
 `done.json` and is skipped on a rerun.
 
-    py -3 -B tools/speck/ablate.py GAME_EXE OUT [--every N] [--only name,name] [--stills]
-                                   [--lib-test LIB_EXE FILTER]
+    py -3 -B tools/speck/ablate.py GAME_EXE OUT [--every N] [--only name,name]
+                                   [--flight] [--stills] [--field] [--field-still]
+                                   [--lib-test LIB_EXE NAME[,NAME]]
 
 `--stills` also renders each switch from a frozen camera with a steady fire (`--still`, 96
 frames, the last written) into OUT/still-PATH-NAME: the settled frame, for the energy check.
-`--lib-test` first runs the lib test binary's test named FILTER and stops the lease if it
-fails.
+`--field` flies the field walk (game_scene `--diag field=1`), `--field-still` holds its first
+pose; with any of these the flight runs only if `--flight` is given too. `--lib-test` first runs the lib test
+binary's tests whose names contain NAME (ignored GPU tests included) and stops the lease unless
+every NAME reports ok.
 """
 import json
 import os
@@ -50,9 +53,20 @@ SWITCHES = {
     "rays32": (["--diag", "gi-light-rays=32"], {}),
     "rays0-dark": (["--diag", "gi-light-rays=0", "--diag", "bulb=dark"], {}),
     "rays16-dark": (["--diag", "gi-light-rays=16", "--diag", "bulb=dark"], {}),
+    # The cache's own structure (the field fixture): lookup, filter, direction count.
+    "nearest": (["--diag", "gi-lookup=nearest"], {}),
+    "filter-off": (["--diag", "gi-filter=0"], {}),
+    "dirs128": (["--diag", "gi-directions=128"], {}),
+    # A table too small for the view (RENDERLAB_GI, src/engine/settings.rs): what full buckets look like.
+    "slots17": ([], {"RENDERLAB_GI": "slots_log2=17"}),
+    "slots18": ([], {"RENDERLAB_GI": "slots_log2=18"}),
+    "slots19": ([], {"RENDERLAB_GI": "slots_log2=19"}),
 }
 FLIGHT = ["--frames", "180", "--diag", "cut=1"]
 STILL = ["--still", "--frames", "96", "--every", "95", "--diag", "flicker=0"]
+# `--field`: the field walk (game_scene `--diag field=1`): 120 frames, every tenth written (the
+# integration clip's frames 0, 10, 30, 60, 90 and 119 among them), into OUT/field-PATH-NAME.
+FIELD = ["--frames", "120", "--every", "10", "--diag", "field=1"]
 
 
 def main():
@@ -65,12 +79,20 @@ def main():
             "TMP": str(WORK / "tmp"), "TEMP": str(WORK / "tmp")}
     if "--lib-test" in sys.argv:
         lib, name = sys.argv[sys.argv.index("--lib-test") + 1:][:2]
-        r = subprocess.run([lib, name, "--exact", "--test-threads", "1"], cwd=REPO, env=env, capture_output=True, text=True, timeout=600)
-        print((r.stdout + r.stderr)[-1500:], flush=True)
-        if r.returncode != 0:
-            return r.returncode
+        names = name.split(",")
+        r = subprocess.run([lib, *names, "--include-ignored", "--test-threads", "1"], cwd=REPO, env=env,
+                           capture_output=True, text=True, timeout=600)
+        print((r.stdout + r.stderr)[-2500:], flush=True)
+        # libtest exits 0 when no test matches a filter: every named test must report ok.
+        missing = [n for n in names if not any(line.startswith("test ") and line.endswith("ok") and n in line for line in r.stdout.splitlines())]
+        if r.returncode != 0 or missing:
+            print("lib tests failed or did not run:", missing, flush=True)
+            return r.returncode or 1
     worst = 0
-    modes = [("", FLIGHT + ["--every", every])] + ([("still-", STILL)] if "--stills" in sys.argv else [])
+    chosen = [m for m in ("--flight", "--stills", "--field", "--field-still") if m in sys.argv] or ["--flight"]
+    table = {"--flight": ("", FLIGHT + ["--every", every]), "--stills": ("still-", STILL), "--field": ("field-", FIELD),
+             "--field-still": ("fieldstill-", FIELD + ["--still"])}
+    modes = [table[m] for m in chosen]
     for prefix, mode in modes:
         for name in only:
             extra, extra_env = SWITCHES[name]
@@ -80,9 +102,11 @@ def main():
                     continue
                 run.mkdir(parents=True, exist_ok=True)
                 start = time.monotonic()
+                # Every run logs the cache's counters per frame (gi.jsonl; a readback, no picture change).
+                log = {"RENDERLAB_GI_LOG": str(run / "gi.jsonl")}
                 r = subprocess.run([game, "--path", path, "--fox", FOX, "--size", "1920x1080", *mode, *extra,
                                     "--out", str(run), "--pipeline-cache", str(WORK / "cache")],
-                                   cwd=REPO, env=env | extra_env, capture_output=True, text=True, timeout=600)
+                                   cwd=REPO, env=env | extra_env | log, capture_output=True, text=True, timeout=600)
                 frames = len(list(run.glob("frame-*.png")))
                 print(f"{run.name}: exit {r.returncode}, {frames} frames, {time.monotonic() - start:.0f} s", flush=True)
                 if r.returncode == 0:
