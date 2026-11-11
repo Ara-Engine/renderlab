@@ -57,7 +57,7 @@ struct Tr1Frame {
     shadow_light:vec4<f32>,
     // P-FLAT, TR1_RELIT frames: up to four local lights whose intensity or colour changed:
     // position and range (xyz, w; zero rows unused), each one's largest relative channel change,
-    // and x: Reconstruction::light_budget.
+    // and x: Reconstruction::light_budget; relit_params.y (every frame): sharp_blur_budget.
     relit:array<vec4<f32>,4>,
     relit_change:vec4<f32>,
     relit_params:vec4<f32>,
@@ -445,6 +445,9 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
         if outer {
             h.colour=clamp(sharp,lo,hi);
             h.window=min(tr1.windows.x,tr1.starts.x);
+            // P-FLICKER: Catmull-Rom's own blur still varies with f, so its window follows the
+            // same rule as bilinear's, with its own budget (0: the fixed window).
+            if tr1.relit_params.y>0.0 {h.window=min(h.window,1.0+tr1.relit_params.y/blur);}
         }
     }
     h.window=min(h.window,tr1.windows.y);
