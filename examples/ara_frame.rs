@@ -81,10 +81,23 @@
 //! and 24x16 grids of mean linear RGB and mean display bytes, small enough to paste
 //! where the raw files cannot travel). `--compare` prefers the raw files and falls
 //! back to the grids.
+//!
+//! `--scene game` renders the game scene (`examples/game_scene.rs` at its defaults)
+//! instead of the fixture, through the engine-level API on either layer: the wgpu
+//! `Engine` on its `HardwareRt` path, or the backend's engine. `--frames` follows the
+//! example's animation and `--still` holds its first frame. The backend leaves out what
+//! it refuses (it prints the list, and writes it in `frame.json`), so a comparison shows
+//! those pieces as differences; `--supported` leaves the same pieces out on wgpu
+//! (volumetric fog, particles, decals), for a comparison of what both draw. The other
+//! level flags do not apply.
 // The fixture also carries names and a scene record for the Unreal match export.
 #[allow(dead_code)]
 #[path = "../support/lighting_fixture.rs"]
 mod lighting_fixture;
+// TEMPORARY: a copy of the example's scene, until both include the example's own.
+#[path = "../support/ara_game_scene.rs"]
+#[allow(dead_code)]
+mod game;
 
 use renderlab::decode_f16;
 use std::{fs, path::Path};
@@ -108,8 +121,14 @@ fn main() -> Result<(), Failure> {
     let mut scale = renderlab::RenderScale::Native;
     let mut depth_of_field = false;
     let mut frames = 1usize;
+    let (mut game_scene, mut supported) = (false, false);
     while let Some(arg) = args.next() {
         match arg.as_str() {
+            "--scene" => match args.next().as_deref() {
+                Some("game") => game_scene = true,
+                _ => return Err("--scene game".into()),
+            },
+            "--supported" => supported = true,
             "--backend" => backend = args.next(),
             "--output" => output = args.next(),
             "--sun-shadows" => sun_shadows = true,
@@ -162,6 +181,41 @@ fn main() -> Result<(), Failure> {
         }
     }
     let output = output.ok_or("--output DIR")?;
+    if game_scene {
+        // The engine's defaults, for the record `write` keeps and `--compare` matches.
+        let level = Level {
+            atmosphere: renderlab::Atmosphere::default(),
+            sun_shadows: true,
+            traced: true,
+            gi: true,
+            bounce: true,
+            filter: true,
+            crevice: false,
+            reconstruction: true,
+            interactive: true,
+            reflections: true,
+            textures: false,
+            local_shadows: true,
+            normal_map: false,
+            scale: renderlab::RenderScale::Native,
+            depth_of_field: false,
+            still,
+            frames,
+            game: Some(supported),
+        };
+        let sequence = match backend.as_deref() {
+            Some("wgpu") => game_wgpu(size, level)?,
+            Some("ara") => game_ara(size, level, Path::new(&output))?,
+            _ => return Err("--backend wgpu|ara".into()),
+        };
+        return write(
+            Path::new(&output),
+            size,
+            &sequence,
+            backend.as_deref().unwrap_or_default(),
+            level,
+        );
+    }
     let mut fixture = lighting_fixture::Fixture::new();
     if crevice {
         // In front of the spheres, running away from the camera along -z.
@@ -220,6 +274,7 @@ fn main() -> Result<(), Failure> {
         depth_of_field,
         still,
         frames,
+        game: None,
     };
     let sequence = match backend.as_deref() {
         Some("wgpu") => wgpu_frame(&fixture, size, level)?,
@@ -269,6 +324,9 @@ struct Level {
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
+    /// `--scene game`: the game scene through the engine API, and whether `--supported`
+    /// left out on wgpu what the backend refuses.
+    game: Option<bool>,
 }
 impl Level {
     /// The size of the HDR image a run writes. Below native scale the wgpu renderer's
@@ -817,6 +875,125 @@ fn ara_frame(
     Err("--backend ara needs --features backend-ara".into())
 }
 
+/// The game scene's frames on any layer's engine: `engine` already holds the scene's
+/// settings, and `hdr` reads the last frame's exposed HDR from it. `trace` goes into
+/// every frame's record.
+fn game_frames<S: renderlab::engine::Scene>(
+    engine: &mut S,
+    size: [u32; 2],
+    level: Level,
+    options: game::Options,
+    mut hdr: impl FnMut(&mut S) -> Result<Vec<u8>, Failure>,
+    trace: impl Fn(&S) -> serde_json::Value,
+) -> Result<Vec<Frame>, Failure> {
+    engine.resize(size[0], size[1])?;
+    let built = game::build(engine, options)?;
+    let mut sequence = Vec::new();
+    for frame in 0..level.frames as u32 {
+        let camera = game::animate(engine, &built, if level.still { 0 } else { frame })?;
+        let report = engine.render(&camera)?;
+        let display = engine.capture()?.rgba8;
+        let mut record = trace(engine);
+        record["draws"] = report.scene.draws.into();
+        record["triangles"] = report.scene.triangles.into();
+        sequence.push((hdr(engine)?, display, None, record));
+    }
+    Ok(sequence)
+}
+/// The scene's settings and parts for a run: all of them, or without what the backend
+/// refuses.
+fn game_ask(supported: bool) -> (renderlab::engine::Settings, game::Options) {
+    let mut settings = game::settings();
+    if supported {
+        settings.volumetric_fog = None;
+    }
+    (
+        settings,
+        game::Options {
+            toon_hero: true,
+            particles: !supported,
+            decals: !supported,
+        },
+    )
+}
+
+fn game_wgpu(size: [u32; 2], level: Level) -> Result<Vec<Frame>, Failure> {
+    use renderlab::engine::*;
+    if std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref()
+        != Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK")
+    {
+        return Err("--scene game on wgpu needs RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK".into());
+    }
+    let adapter = headless_adapter()?;
+    eprintln!("wgpu adapter: {:?}", adapter.get_info());
+    let (settings, options) = game_ask(level.game == Some(true));
+    let mut engine = Engine::new(
+        &adapter,
+        EngineDescriptor {
+            path: RenderPath::HardwareRt,
+            // SAFETY: the acknowledgment above accepts wgpu's experimental ray-query
+            // contract for this engine's device.
+            experimental_ray_query: Some(unsafe { ExperimentalRayQuery::acknowledge() }),
+            settings,
+            ..Default::default()
+        },
+    )?;
+    game_frames(
+        &mut engine,
+        size,
+        level,
+        options,
+        |engine| {
+            let mut capture = engine
+                .renderer_mut()
+                .try_capture_hdr()?
+                .ok_or("HDR capture busy")?;
+            engine
+                .device()
+                .poll(renderlab::wgpu::PollType::wait_indefinitely())?;
+            Ok(capture.try_read()?.ok_or("HDR readback pending")?)
+        },
+        |_| serde_json::json!({}),
+    )
+}
+
+#[cfg(feature = "backend-ara")]
+fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, Failure> {
+    use ara_gpu::Device as _;
+    use renderlab::backend_ara::{cache::ShaderCache, engine::Engine};
+    let (settings, options) = game_ask(level.game == Some(true));
+    let mut engine = Engine::new(
+        ara_gpu::GpuDevice::new(&[], output.join("device"))?,
+        ShaderCache::new(output.join("shaders"))?,
+        settings,
+    )?;
+    let sequence = game_frames(
+        &mut engine,
+        size,
+        level,
+        options,
+        |engine| Ok(engine.images().ok_or("no frame")?.hdr.clone()),
+        |engine| {
+            let refusals: Vec<_> = engine
+                .refusals()
+                .iter()
+                .map(|r| format!("{}: {}", r.call, r.what))
+                .collect();
+            serde_json::json!({ "refusals": refusals })
+        },
+    )?;
+    for refusal in engine.refusals() {
+        eprintln!("ara refused {}: {}", refusal.call, refusal.what);
+    }
+    let mut gpu = engine.retire()?;
+    gpu.collect()?;
+    Ok(sequence)
+}
+#[cfg(not(feature = "backend-ara"))]
+fn game_ara(_: [u32; 2], _: Level, _: &Path) -> Result<Vec<Frame>, Failure> {
+    Err("--backend ara needs --features backend-ara".into())
+}
+
 fn floats(bytes: &[u8]) -> Vec<f32> {
     bytes
         .as_chunks::<2>()
@@ -915,7 +1092,13 @@ fn write(
         dir.join("frame.json"),
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
-            "scene": format!(
+            "scene": if let Some(supported) = level.game {
+                format!(
+                    "the game scene at its defaults{}, {}",
+                    if supported { " without volumetric fog, particles or decals" } else { "" },
+                    if level.still { "every frame its first" } else { "its animation from frame 0" }
+                )
+            } else { format!(
                 "M5-A authored v1{}{}{}, {}, local shadows {}, default post{}{}{}{}{}",
                 if level.crevice { " with a slot between two walls" } else { "" },
                 if level.textures { " with a checker-textured floor" } else { "" },
@@ -931,8 +1114,9 @@ fn write(
                 },
                 if level.interactive { ", Interactive soft shadows" } else { "" },
                 if level.reflections { ", traced reflections" } else { "" }
-            ),
+            ) },
                                     "primary": match (level.traced, level.gi, level.bounce) {
+                _ if level.game.is_some() => "the engine's HardwareRt path at the scene's settings",
                 (true, true, true) if level.filter => "traced, exact soft shadows, radiance cache with bounce and the cell filter (2^17 slots), post at its defaults",
                 (true, true, true) => "traced, exact soft shadows, radiance cache with bounce (2^17 slots, no filter), post at its defaults",
                 (true, true, false) => "traced, exact soft shadows, radiance cache sky visibility (2^17 slots, no bounce or filter), post at its defaults",

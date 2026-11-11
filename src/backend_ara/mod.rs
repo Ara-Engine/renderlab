@@ -50,6 +50,9 @@ pub mod transmission_shadow;
 /// The forward lit frame assembled from the ported passes.
 pub mod forward;
 
+/// The engine-level entry: `engine::Scene` over the frames above.
+pub mod engine;
+
 /// The world radiance cache's kernels.
 pub mod gi_cache;
 pub mod temporal;

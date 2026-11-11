@@ -2193,45 +2193,10 @@ Vulkan, and none is compared with wgpu.**
 
 ### The game scene's opaque objects
 
-`examples/game_scene.rs` exists only as `Engine` calls, which the backend cannot take
-until the engine-level entry is built.
-`the_game_scenes_opaque_objects_are_shaded_by_their_own_programs` restates the
-scene's first frame instead: its 29 opaque objects
-(ground, arch, wall, crates, the gold and chrome spheres, nine cut-out bush cards with
-`thin` materials, brazier, lamp fittings and bulbs, the spinning crate, the hero's two
-spheres) with their materials, the `game` and `toon` programs with the hero's style and
-the bulbs' `glow`, the dusk sun through the atmosphere with height fog, the three
-lanterns, and the fly path's first pose, at 480x270. The geometry builders are copies
-of the example's and go when the example itself runs on the backend.
-
-With direct light only, so that one object's shading cannot reach another's pixels:
-
-- Against the frame where the hero is given the `game` program (one program, one
-  dispatch), only pixels near the hero differ (183; the gold sphere stands in front of
-  most of the body).
-- All 17,280 pixels of sky above the horizon are lit and bit for bit the one-program
-  frame's: slot 0's list writes the misses.
-- Against the frame without `glow`, only 18 pixels at the two bulbs differ, and the
-  arch bulb's centre gains 0.9955 of its exposed glow, the rest lost to 17 m of haze.
-
-Then four frames at the scene's own settings as far as the frame goes (radiance cache,
-traced reflections, local-light shadows, reconstruction, post with the scene's bloom,
-the glass pane) run under validation, finite and lit, and the last is written to
-`target/` as a PNG.
-
-**What still refuses or is missing for this scene:**
-
-- *Refused by the frame:* the scene's volumetric fog (`VolumetricFog`, 0.0015/m).
-- *Not expressible in the frame's description:* the two particle emitters (fire and
-  smoke), the two ground decals (emblem and puddle), the skinned Fox (the hero is the
-  two spheres), and the pane's traced reflection and tinted sun shadow.
-- *Not exercised:* the camera path, the hero's walk, the spinner and the lantern
-  flicker (one pose, repeated); `Engine::cut`, program reload and
-  `set_material_parameters` between frames; the quarry and sky-map variants.
-
-**Not compared with wgpu**: the wgpu game scene cannot run on the Mac, and nothing on
-either Vulkan machine can build this scene on the backend until the engine entry
-exists or this test runs there.
+Superseded by the engine-level entry below, which builds the same scene by the
+example's own calls. The numbers it first gave (183 pixels changed by the hero's
+program, 18 by the glow, 17,280 exact sky pixels, the arch bulb keeping 0.9955 of its
+glow) are the ones the engine's frames give.
 
 ## Renderlab main at 6adfaee
 
@@ -2244,3 +2209,82 @@ border and beside silhouettes: the 659 short pixels of
 (#34) showed on its wgpu path too. The resolve now compares the two integer sizes. The
 port needed no change, and neither did its test, which should now pass on the Radeon;
 that has not been rerun. 78 tests pass on Metal in both validation modes.
+
+**On the Radeon (RADV) at 322372d:** 78 of 78 pass under validation and sync
+validation with no validation message, programs and the game-scene frame included, and
+`reconstruction_accumulates_jittered_samples_into_edge_coverage` passes with main's
+fix. The wgpu renderer on main gives 92 pixels short and none on the border there, the
+RTX's line exactly. The weights question is closed on both sides.
+
+## The engine-level entry
+
+`backend_ara::engine::Engine` takes the same scene-building and frame calls as
+`engine::Engine`, through the `engine::Scene` trait (Renderlab #36, design in #35). It
+records them into the engine's own device-free `State`, with its own payloads: mesh
+vertices and indices, texture data, a program's WGSL and reflected parameter layout, a
+material's factors with the program and textures it keeps alive. `render` turns the
+state into a `ForwardScene` and runs it through `forward::Frames`; `capture` returns
+the displayed bytes; `images` gives the frame's HDR. The sun, lights, sky and settings
+go through the engine's own `settings::lighting` and `settings::atmosphere`, so both
+layers translate them with the same code. `Quality::Realtime` is the Interactive
+traced frame and `Reference` the exact one. A change of settings or size starts a new
+frame sequence, since the cache and the history are sized by them.
+
+**Refusals.** A call or setting the layer cannot honour is recorded once as
+`Refusal { call, what }` and the scene goes on without that piece:
+
+| Call | What |
+|---|---|
+| `set_settings` | `volumetric_fog`; `sky_light` other than 1; `post.enabled` false; any field added to `Settings` later, while it differs from its default |
+| `create_emitter` | particle emitters |
+| `set_decals` | decals |
+| `create_skinned_mesh` | skinned meshes (objects spawned with one are not drawn) |
+| `create_material` | `normal_texture` (the trait has no mesh with tangents yet) |
+| `create_environment`, `set_sky` | environment maps and `Sky::Map` (the previous sky stays) |
+| `add_asset` | cooked assets |
+| `render` | textures on a transparent material |
+
+What the frame itself rejects is an error from `render`, not a refusal: a scene
+without a sun, and more than `TRACED_DRAWS` (256) objects.
+
+**Short of the wgpu engine in how it works, not in what it draws:**
+
+- One object is one draw. The wgpu engine draws a mesh-material batch of many
+  instances as one draw, so it holds 256 batches where this holds 256 objects.
+- Nothing is resident between frames: every frame uploads its meshes and textures and
+  builds its acceleration structures again. Frame time here says nothing about the
+  layer.
+- The design note's strict mode (the first refusal as an error) is not built.
+
+`the_game_scene_builds_and_renders_through_the_engine_calls` builds the example's scene
+at its defaults by `Scene` calls (two programs, twelve materials, four meshes, 30
+objects with the glass pane, the sun, two emitters, two decals) and animates it as the
+example does.
+
+- The engine's refusals are exactly the scene's volumetric fog, its emitters and its
+  decals.
+- With direct light only, against a second engine whose hero has the props' program:
+  183 pixels differ, all at the hero, and all 17,280 sky pixels are lit and identical.
+- `set_material_parameters` setting the bulbs' glow to zero changes 18 pixels, all at
+  the two bulbs, and the arch bulb's centre loses 0.9955 of its exposed glow.
+- At the scene's own settings, six frames of the animation run (hero, spinner,
+  lanterns and camera moving), finite and lit, and the last is written to `target/`.
+
+The scene's description is `support/ara_game_scene.rs`, **a temporary second copy** of
+the example's construction, animation and geometry builders, with flat stand-ins for
+the two decal textures. It goes when the example's own are functions both layers call
+(the PR on main after N-VSM1).
+
+`ara_frame --scene game` renders it on either layer, the wgpu `Engine` on `HardwareRt`
+or the backend's, and `--compare` reads the two as it reads the fixture's levels.
+`--supported` leaves out on wgpu what the backend refuses. On Metal two backend runs of
+three frames are identical in every byte. **The wgpu side has only been compiled**: it
+cannot run on the Mac.
+
+```sh
+# what the picture is missing: the full scene on wgpu against the backend
+ara_frame --backend wgpu --scene game --frames 12 --output out/game-wgpu
+ara_frame --backend ara  --scene game --frames 12 --output out/game-ara
+ara_frame --compare out/game-wgpu out/game-ara
+# what both draw: the same with --supported on each
+```
