@@ -94,8 +94,8 @@ pub(super) fn scratch_trace_offset(size: [u32; 2]) -> u64 {
 pub const VIRTUAL_FEATURES: wgpu::Features =
     wgpu::Features::SHADER_INT64.union(wgpu::Features::SHADER_INT64_ATOMIC_MIN_MAX);
 
-/// Tuning of `SoftShadows::Virtual`. Surface is the default lookup (docs/non-rt-n8p.md);
-/// Exact remains selectable as the reference. Other defaults follow docs/non-rt-n8.md,
+/// Tuning of `SoftShadows::Virtual`. Disk is the default lookup (docs/n-vsm1.md); Surface and
+/// Exact remain selectable, Exact as the reference. Other defaults follow docs/non-rt-n8.md,
 /// non-rt-n8c.md and non-rt-n8e.md; N8c's output is
 /// `walk_cap: 0, refresh: 1, sun_hysteresis: 0.0` with `lookup: VirtualLookup::Exact`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -199,14 +199,14 @@ pub enum VirtualLookup {
     /// N8k: `Map`, then the exact lookup only for the receivers whose map decision used an
     /// ambiguous block (shaders/virtual_shadow_hybrid.wgsl); keeps both lookups' resources.
     Hybrid,
-    /// The default. N8n/N8o: `Exact`'s walks kept per receiver surface cell across frames in a hash table
+    /// The default until 2026-11-11 (N-VSM2 replaced it with `Disk`). N8n/N8o: `Exact`'s walks kept
+    /// per receiver surface cell across frames in a hash table
     /// (shaders/virtual_shadow_cache.wgsl, docs/non-rt-n8n.md, docs/non-rt-n8o.md). A pixel
     /// shows its cell's count only where the cell is solid and every pixel that computed it agreed
     /// with its neighbourhood; every other pixel walks as `Exact` does. Static frames run nothing,
     /// and camera motion walks only shadow-boundary pixels and cells not seen yet. Deterministic;
     /// caster motion retires exactly the cells it can reach. Adds the table and its claim words
     /// (64 MiB) and the miss queue (8 bytes per pixel).
-    #[default]
     Surface,
     /// N-VSM1 (docs/n-vsm1.md, shaders/virtual_shadow_disk.wgsl): the disk's visible share
     /// from the cached map alone. Every map texel near the receiver is projected back onto
@@ -214,7 +214,10 @@ pub enum VirtualLookup {
     /// level as the occluder's height grows; the visible surface around the pixel supplies
     /// the occluders closer than a texel. No triangle is read per pixel, no walk records or
     /// ring horizons are kept, and the cost does not depend on TR1's shadow budget, so a cut
-    /// frame costs what a moving frame does.
+    /// frame costs what a moving frame does. The default since 2026-11-11 (N-VSM2,
+    /// decision M8-DISK-DEFAULT): against the film references it beats `Surface` and Unreal's
+    /// VSM on S1-S3, and on the quarry it is the same picture at 0.24 ms instead of 4.5.
+    #[default]
     Disk,
 }
 impl VirtualLookup {
@@ -249,7 +252,7 @@ impl Default for VirtualShadowSettings {
             refresh: 16,
             sun_hysteresis: 0.01,
             walk_records: WalkRecords::Source,
-            lookup: VirtualLookup::Surface,
+            lookup: VirtualLookup::Disk,
             truncated_walks_block: true,
             walk_steps: 32,
             occluder_gather: true,
@@ -760,11 +763,18 @@ pub(super) fn compile_structure_sources() -> Vec<(&'static str, String)> {
 /// The N-VSM1 disk lookup module: the window radius, then shaders/virtual_shadow_disk.wgsl.
 /// Measurement only: `RENDERLAB_VD=NAME=VALUE,...` replaces the defaults of the module's `VD_`
 /// override constants (screens and cost splits without a build per variant; docs/n-vsm1.md).
-/// Unset, the module is the file.
+/// `RENDERLAB_VD_SHADER=PATH` reads the module from a variant file instead (the same layouts
+/// and entries), as `RENDERLAB_VSM_SHADER` does for the exact lookup. Unset, the module is the
+/// file.
 pub(super) fn disk_source() -> String {
+    let variant = std::env::var("RENDERLAB_VD_SHADER")
+        .ok()
+        .map(|path| std::fs::read_to_string(path).unwrap());
     let mut source = format!(
         "const VD_R:u32={DISK_RADIUS}u;\n{}",
-        include_str!("../shaders/virtual_shadow_disk.wgsl")
+        variant
+            .as_deref()
+            .unwrap_or(include_str!("../shaders/virtual_shadow_disk.wgsl"))
     );
     for (name, value) in std::env::var("RENDERLAB_VD")
         .iter()
@@ -2545,9 +2555,9 @@ impl Renderer {
             // samples along the sun's screen direction.
             let mut bytes = Vec::with_capacity(DISK_FRAME_BYTES as usize);
             let clip = camera.matrix(size.width, size.height).to_cols_array();
-            for value in clip
-                .into_iter()
-                .chain([size.width as f32, size.height as f32, disk_jitter, 0.0])
+            for value in
+                clip.into_iter()
+                    .chain([size.width as f32, size.height as f32, disk_jitter, 0.0])
             {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
