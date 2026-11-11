@@ -2788,6 +2788,39 @@ SPIR-V on RADV only. Next: a one-pixel trace of the resolve on the Radeon (fetch
 position, the four taps, the stored coverage, the path taken), with Metal's values as
 the reference.
 
+**Request to Ara: two device features (ara-gpu, Vulkan).** On the Radeon the port's
+SPIR-V carries two things the wgpu renderer's does not, because ara-gpu's device lacks
+a feature wgpu's device enables. Measured as one-variable variants at 9bfb255, three
+runs each interleaved with three without (the gate's comment of 15:32 UTC; their
+byte-for-byte controls were still running when this was written):
+
+1. *Image loads outside an image.* ara-gpu enables no image robustness, so a load
+   outside its image is undefined there, and the port's naga writes a size test and
+   branch before every `textureLoad` (`ReadZeroSkipWrite`) so the load reads zero, as
+   the renderer's does. Cost: 1.31 ms a frame (`TemporalResolve` 0.58, the shade
+   list 0.65). wgpu enables `robustImageAccess2` from `VK_EXT_robustness2` where the
+   device has it (RADV and NVIDIA do), else Vulkan 1.3's `robustImageAccess`, and
+   writes no test (wgpu-hal 30.0.1, `vulkan/adapter.rs`, `robust_image_access`).
+   What ara-gpu would have to do: enable `robustImageAccess2` where supported, report
+   in its device info whether it is on, and guarantee what an out-of-bounds load
+   returns. The port needs zero in every component it reads, which as I understand the
+   spec `robustImageAccess2` gives (alpha 1 for formats without alpha) and plain
+   `robustImageAccess` does not promise for every format; that is to check against
+   the spec, not something I verified. The port would then drop the test only on a
+   device that reports it, keyed in the pipeline cache, and keep it everywhere else;
+   `977c4e8`'s test (a load outside its image reads zero on both backends) holds it.
+2. *Workgroup variables zeroed at entry.* ara-gpu does not enable
+   `shaderZeroInitializeWorkgroupMemory` (Vulkan 1.3 core), so the port's naga zeroes
+   each workgroup variable with its polyfill: a store by some invocations and a
+   barrier at entry. Cost: 0.81 ms a frame (`GiCache(Probe)` 0.98, `Integrate` 0.18).
+   wgpu enables the feature where supported and naga then declares the variables with
+   a null initialiser for the driver to zero (`ZeroInitializeWorkgroupMemoryMode::Native`).
+   What ara-gpu would have to do: enable the feature where supported and report it, so
+   the port writes `Native` there, also keyed in the cache.
+
+Metal is not affected: both stay as they are on the Mac. Together about 2.1 ms of the
+port's frame on the Radeon.
+
 **Open items, in order.**
 1. The camera-ray kernel's 35%: read the two experiments above when they land. If no
    variant moves it and the budgets agree, the next suspects are the committed hit's
