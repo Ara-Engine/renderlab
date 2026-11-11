@@ -960,3 +960,23 @@ Pixels on the open ground more than 10 codes above their 21-pixel median:
   2. Whether transparent draws enter the TLAS as non-opaque casters, so every sun-shadow ray pays candidate handling.
   3. Whether the cost follows the glass's screen coverage at all (move the camera until the glass is off screen).
 - **When:** after the non-RT work, or sooner if check 1 or 2 confirms a frame-wide switch.
+
+## Still-frame history weights on RADV (ara-gpu backend finding, 2026-11-11)
+
+**CLOSED. Fixed on main (3fbb429, decision M8-TR1-NATIVE) and confirmed on the Radeon.**
+
+- **Symptom (PR #34's test through the wgpu path, Radeon 760M, RADV, Mesa 26.0.8):** after 17 frames from a still camera, 659 pixels short of full weight by 1,917 samples: all 444 border pixels (mean weight 14.86) and 215 within a pixel of the card's outline. The RTX 4070 SUPER and Metal lose weight only on the 92 pixels an edge actually crosses.
+- **Cause (found by the ara-gpu backend's author):** `shaders/temporal_resolve.wgsl` decided native scale with `all(tr1_ratio == vec2(1.0))`, where `tr1_ratio` is a float quotient of two image sizes. Vulkan allows `OpFDiv` 2.5 ULP of error, so 96.0 / 96.0 need not be exactly 1. When it is not, a native frame takes the upscaling path: every sample gets a tent weight just under 1, and the nearest-sample mapping is clamped at the image border. Evidence: on Metal, scaling the ratio by one ulp under 1 turns the passing test into the Radeon's failure word for word, and deciding from the integer sizes removes it with the perturbation still in place. Not verified: that RADV's quotient really is one ulp off.
+- **What it meant:** on AMD under Linux, Renderlab at native resolution reconstructed as if upscaling, with less accumulation at the image border and beside silhouettes.
+- **Fix:** `tr1_native()` compares the two integer sizes, and `tr1_ratio` is exactly 1 in that case. It was the only float equality on a derived ratio in the shaders.
+- **Checked on the RTX:** `gpu_tr1_still_weights` passes (92 short by 628 samples, 0 on the border); game scene with the fox, 40 of 40 frames byte-identical to main on both paths; lib 214 passed.
+- **Confirmed on the Radeon 760M (RADV) at main 6adfaee:** `gpu_tr1_still_weights` passes with mean weight 16.95 of 17, 92 pixels short by 628 samples, 0 on the border, 92 within a pixel of the card's outline, 0 elsewhere: the same line as the RTX. The ara-gpu port's own version of the test passes there too with the fix merged.
+- **Not reported yet:** the Radeon quarry timing visit before and after (RADV's native frames have left the upscaling path, so its `tr1` cost may differ).
+
+## Layout decorations on workgroup and function variables (validation layer, 2026-11-11)
+
+**OPEN upstream, low priority; no action here.** With the Khronos validation layer on, every Renderlab compute module with a `var<workgroup>` array draws `VUID-StandaloneSpirv-None-10684`: "Invalid explicit layout decorations on type ... the Workgroup storage class has an explicit layout from the ArrayStride decoration". The integration thread saw 120 lines of it running Ara's `cargo test -p ara-renderlab` on the RTX 4070 SUPER (Ara d547adf98, pin a0094f6a6e4), quoting `OpVariable %_ptr_Workgroup__arr_v4float_uint_64`. A second form names the Function storage class and an Offset decoration.
+- **Kernel quoted:** `lc_spheres:array<vec4<f32>,64>` in `shaders/light_cluster.wgsl`. It is not special: naga emits `ArrayStride` on every such array, and Renderlab has about 80 `var<workgroup>` declarations.
+- **Cause:** naga's SPIR-V emission, not our WGSL. Tracked upstream as gfx-rs/wgpu issue 7696 (open).
+- **Why Renderlab's validated runs do not show it:** wgpu-hal 30.0.1's own debug callback silences this message id (`vulkan/instance.rs`, citing that issue), so it never reaches our sink and `gpu_validation_summary` reads errors=0. Ara's messenger is its own and sees it. A lease run with the layer set by environment but without wgpu's debug flags prints it too.
+- **Risk:** drivers accept it today. A stricter driver or a later layer version could make it an error; the fix has to come from naga.

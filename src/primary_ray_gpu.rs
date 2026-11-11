@@ -63,7 +63,7 @@ fn heads(wgsl: &str) -> Result<[String; 2], Error> {
 }
 
 // TP2: glass reflection hits use R1's ordinary traced hit shading and geometry ABI.
-pub(super) fn transparent_reflection_head(wgsl: &str) -> Result<String, Error> {
+pub(crate) fn transparent_reflection_head(wgsl: &str) -> Result<String, Error> {
     Ok(finish_shading_heads(heads(wgsl)?)?[0].clone())
 }
 
