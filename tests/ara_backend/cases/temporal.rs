@@ -154,6 +154,7 @@ impl Card {
                 cache,
                 &ForwardScene {
                     meshes: None,
+                    instances: None,
                     objects: &objects,
                     lighting: &self.lighting,
                     camera: *camera,

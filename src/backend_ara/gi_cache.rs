@@ -181,8 +181,10 @@ pub struct Indirect {
 pub(crate) struct CacheScene<'a> {
     pub camera: crate::Camera,
     pub size: [u32; 2],
-    /// Every placement's world bounds, in draw order.
+    /// Every placement's world bounds, in draw order then instance order.
     pub bounds: Vec<[f32; 6]>,
+    /// Each draw's instance count, in draw order: their sum is `bounds`' length.
+    pub draws: Vec<u32>,
     /// `scene_pixels`: the scene's pixel rectangle.
     pub region: [u32; 4],
     /// Placement model matrices, then their normal transforms, as the traced tables
@@ -354,10 +356,22 @@ impl Cache {
             offset: 0,
             bytes: begun.header.iter().flat_map(|w| w.to_le_bytes()).collect(),
         });
-        // One instance per object; ids are the objects' indices plus one, as the
-        // renderer's first frame numbers its (mesh, material) pairs.
+        // Per draw its stable id, first placement and instance count. Ids are the
+        // draws' indices plus one, as the renderer's first frame numbers its (mesh,
+        // material) pairs.
         let objects = scene.bounds.len();
-        let table = shared::draw_table(objects, (0..objects as u32).map(|b| [b + 1, 1, 0]));
+        ensure!(
+            scene.draws.iter().sum::<u32>() as usize == objects,
+            "the cache's draws do not account for its placements"
+        );
+        let table = shared::draw_table(
+            scene.draws.len(),
+            scene
+                .draws
+                .iter()
+                .enumerate()
+                .map(|(b, &instances)| [b as u32 + 1, instances, 0]),
+        );
         let draws = StorageBuffer::new(gpu, bytemuck::cast_slice(&table))?;
         let models = StorageBuffer::new(gpu, scene.models)?;
         let finished = self.planner.finish(

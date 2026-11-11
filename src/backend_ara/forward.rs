@@ -210,6 +210,11 @@ pub struct ForwardScene<'a> {
     /// identity must always name the same geometry. `None` uploads and builds every
     /// object's geometry each frame.
     pub meshes: Option<&'a [u64]>,
+    /// One list of transforms per object, on traced frames: the object is one draw of
+    /// that many instances, placed at each in turn, in place of its own `transform` (a
+    /// renderer `Draw` over its `Instances`). A frame holds `TRACED_DRAWS` draws and
+    /// any number of placements. `None` draws each object once at its `transform`.
+    pub instances: Option<&'a [&'a [crate::Mat4]]>,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -868,12 +873,30 @@ fn frame(
     } = kept;
     let started = std::time::Instant::now();
     let mut times = FrameTimes::default();
+    ensure!(
+        scene.instances.is_none_or(|lists| {
+            scene.primary != Primary::Raster
+                && lists.len() == scene.objects.len()
+                && lists.iter().all(|list| !list.is_empty())
+        }),
+        "instances are assembled on traced frames, one nonempty list per object"
+    );
+    // Each object's placements: its instance list, or its own transform.
+    let placed = |index: usize| -> &[crate::Mat4] {
+        match scene.instances {
+            Some(lists) => lists[index],
+            None => std::slice::from_ref(&scene.objects[index].transform),
+        }
+    };
     let mut left = Carried {
         count: history.count + 1,
         post_serial: history.post_serial,
         post_camera: None,
         shadow_bases: Vec::new(),
-        transforms: scene.objects.iter().map(|o| o.transform).collect(),
+        // Per placement, in draw then instance order, as every table below.
+        transforms: (0..scene.objects.len())
+            .flat_map(|i| placed(i).iter().copied())
+            .collect(),
     };
     ensure!(!scene.objects.is_empty(), "forward frame needs an object");
     ensure!(
@@ -1036,11 +1059,13 @@ fn frame(
         )?)
     };
     let mut bounds = Vec::new();
-    for object in scene.objects {
+    for (index, object) in scene.objects.iter().enumerate() {
         let local =
             crate::visibility::Aabb::from_positions(object.vertices.iter().map(|v| v.position))
                 .context("empty mesh")?;
-        bounds.push(shadow_gpu::world_bounds(local, object.transform)?);
+        for transform in placed(index) {
+            bounds.push(shadow_gpu::world_bounds(local, *transform)?);
+        }
     }
     let clusters = LightClusters::new(gpu, cache)?;
     let mut graph = Graph::default();
@@ -1463,14 +1488,17 @@ fn frame(
                         }
                     }
                 };
-                // `hardware_shadow_gpu`: one instance per placement, in draw order.
-                let m = object.transform.to_cols_array_2d();
-                instances.push(AccelerationInstance {
-                    geometry: place.of(resident, &transient).blas,
-                    transform: std::array::from_fn(|i| m[i % 4][i / 4]),
-                    custom_index: index as u32,
-                    mask: 255,
-                });
+                // `hardware_shadow_gpu`: one instance per placement, in draw then
+                // instance order, named by its place in that order.
+                for transform in placed(index) {
+                    let m = transform.to_cols_array_2d();
+                    instances.push(AccelerationInstance {
+                        geometry: place.of(resident, &transient).blas,
+                        transform: std::array::from_fn(|i| m[i % 4][i / 4]),
+                        custom_index: instances.len() as u32,
+                        mask: 255,
+                    });
+                }
                 geometry.push(place);
             }
             // A mesh no object names any more leaves the GPU.
@@ -1560,7 +1588,7 @@ fn frame(
         let placements =
             crate::primary_ray::placement_table(scene.objects.iter().enumerate().map(|(i, o)| {
                 (
-                    1,
+                    placed(i).len(),
                     normal_map(i).is_some(),
                     !o.material.double_sided,
                     o.material.thin,
@@ -1755,6 +1783,9 @@ fn frame(
                         bounds: bounds
                             .iter()
                             .map(|b| [b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z])
+                            .collect(),
+                        draws: (0..scene.objects.len())
+                            .map(|i| placed(i).len() as u32)
                             .collect(),
                         region: rect,
                         models: &matrices,

@@ -64,6 +64,7 @@ fn floor(
         cache,
         &ForwardScene {
             meshes: None,
+            instances: None,
             objects: &[ForwardObject {
                 vertices: &vertices,
                 indices: &[0, 1, 2, 0, 2, 3],

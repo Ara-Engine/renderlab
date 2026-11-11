@@ -124,8 +124,9 @@ pub struct Engine {
     refusals: Vec<Refusal>,
 }
 
-/// One object of a frame: its geometry, material, transform and mesh identity.
-type Placed<'a> = (&'a [Vertex], &'a [u32], &'a Material, Mat4, u64);
+/// One draw of a frame: its geometry, material, first transform, mesh identity and
+/// every transform it is placed at.
+type Placed<'a> = (&'a [Vertex], &'a [u32], &'a Material, Mat4, u64, &'a [Mat4]);
 
 /// Records a refusal once.
 fn note(refusals: &mut Vec<Refusal>, call: &'static str, what: &'static str) {
@@ -233,7 +234,9 @@ impl Engine {
         }
     }
 
-    /// The frame's objects in batch order: opaque ones, then transparent ones.
+    /// The frame's draws in batch order: each opaque mesh-material batch as one draw of
+    /// its objects, as the wgpu engine draws it, then each transparent object on its
+    /// own, as the pane pass takes them.
     fn placed(state: &State<Kept>) -> Result<[Vec<Placed<'_>>; 2], Error> {
         let (mut opaque, mut transparent) = (Vec::new(), Vec::new());
         for id in state.batches.ids() {
@@ -247,17 +250,27 @@ impl Engine {
                 continue;
             };
             let material = &state.materials.get(batch.material)?.material;
-            let list = if material.transparency.is_some() {
-                &mut transparent
-            } else {
-                &mut opaque
-            };
-            list.extend(
-                batch
-                    .models
-                    .iter()
-                    .map(|&model| (&vertices[..], &indices[..], material, model, *key)),
-            );
+            if material.transparency.is_some() {
+                transparent.extend(batch.models.iter().map(|model| {
+                    (
+                        &vertices[..],
+                        &indices[..],
+                        material,
+                        *model,
+                        *key,
+                        std::slice::from_ref(model),
+                    )
+                }));
+            } else if let Some(first) = batch.models.first() {
+                opaque.push((
+                    &vertices[..],
+                    &indices[..],
+                    material,
+                    *first,
+                    *key,
+                    &batch.models[..],
+                ));
+            }
         }
         Ok([opaque, transparent])
     }
@@ -273,7 +286,7 @@ fn objects<'a>(placed: &[Placed<'a>]) -> Vec<ForwardObject<'a>> {
     placed
         .iter()
         .map(
-            |&(vertices, indices, material, transform, _)| ForwardObject {
+            |&(vertices, indices, material, transform, _, _)| ForwardObject {
                 vertices,
                 indices,
                 transform,
@@ -516,6 +529,7 @@ impl Scene for Engine {
         media.volumetric_fog = None;
         let opaque_objects = objects(&opaque);
         let keys: Vec<u64> = opaque.iter().map(|p| p.4).collect();
+        let placements: Vec<&[Mat4]> = opaque.iter().map(|p| p.5).collect();
         let transparent_objects = objects(&transparent);
         let values: Vec<Vec<(&str, Value)>> = opaque
             .iter()
@@ -597,14 +611,15 @@ impl Scene for Engine {
                 transparent: &pane_programs,
             }),
             meshes: Some(&keys),
+            instances: Some(&placements),
         };
         let images = self
             .frames
             .render(&mut self.gpu, &self.cache, &scene)
             .map_err(fault)?;
         // The renderer's counts are of its opaque draws; a pane is not among them.
-        let triangles: usize = opaque.iter().map(|p| p.1.len() / 3).sum();
-        let draws = opaque.len() as u64;
+        let triangles: usize = opaque.iter().map(|p| p.1.len() / 3 * p.5.len()).sum();
+        let instances: usize = opaque.iter().map(|p| p.5.len()).sum();
         self.last = Some(images);
         self.frame += 1;
         Ok(FrameReport {
@@ -614,10 +629,11 @@ impl Scene for Engine {
             uploads: Default::default(),
             timed: false,
             scene: crate::SceneCounts {
-                total_instances: draws,
-                visible_instances: draws,
-                submitted_instances: draws,
-                draws,
+                collections: opaque.len() as u64,
+                total_instances: instances as u64,
+                visible_instances: instances as u64,
+                submitted_instances: instances as u64,
+                draws: opaque.len() as u64,
                 triangles: triangles as u64,
                 ..Default::default()
             },

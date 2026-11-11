@@ -2250,8 +2250,8 @@ without a sun, and more than `TRACED_DRAWS` (256) objects.
 
 **Short of the wgpu engine in how it works, not in what it draws:**
 
-- One object is one draw. The wgpu engine draws a mesh-material batch of many
-  instances as one draw, so it holds 256 batches where this holds 256 objects.
+- (Removed since: a mesh-material batch is one draw of its objects as instances, as
+  in the wgpu engine; see "One draw, many placements" below.)
 - Little is resident between frames yet (see "What a frame keeps" below): frame time
   here is not yet the layer's.
 - The design note's strict mode (the first refusal as an error) is not built.
@@ -2517,3 +2517,33 @@ wgpu differs, (0.3716, 0.1664, 0.0392). The difference has the dusk sun's colour
 the ground and is an eighth of the sunlit ground beside it: one of the eight shadow
 rays of the unreconstructed Interactive estimator at the edge of the gold sphere's
 shadow.
+
+## One draw, many placements
+
+A traced frame held one placement a draw, so 256 objects; the renderer holds 256 draws
+of any number of instances. `ForwardScene::instances` gives each object a list of
+transforms: it is one draw placed at each. The frame's per-placement tables (transforms
+and previous transforms, world bounds, top-level instances, the placement table) run
+over every instance in draw then instance order, and its per-draw tables (geometry,
+material, parameters, program slot, batch word) stay one a draw; the renderer's own
+`placement_table` already took instance counts. The engine now draws each
+mesh-material batch as one draw, and its report's counts are the renderer's: the game
+scene is 11 draws and 37,598 triangles on both layers.
+
+`one_draw_placed_many_times_is_the_frame_of_as_many_objects`: three cards as three
+objects and as one draw of three instances are the same frame byte for byte; 300
+cards are one draw where 300 objects are refused; the mesh pass refuses instances.
+
+**A defect this found in the port's radiance cache.** The cache's draw table gives
+each draw its stable id, first placement and instance count, and the port wrote one
+instance a draw, which was true only while a draw was a placement. With batches the
+game scene's frames went 20% to 32% wrong in their worst cell from the second frame,
+all of it through the cache (identical with it off). The table now takes each draw's
+count; the batched scene is byte for byte the unbatched one over twelve frames, and
+the test above repeats its comparison over four frames with the cache on and a card
+moving, where the old table fails at the third frame. A one-frame test without the
+cache had passed.
+
+Still one program for the cache's cells: in a frame of several programs the renderer
+selects each draw's cell program (the table's fourth word) and the port shades every
+cell with the first program's.

@@ -117,6 +117,7 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
             &cache,
             &ForwardScene {
                 meshes: None,
+                instances: None,
                 objects: &objects,
                 lighting: &lighting,
                 camera,

@@ -1,5 +1,5 @@
-//! What a sequence keeps on the GPU across its frames: named meshes and the
-//! atmosphere's tables.
+//! What a sequence keeps on the GPU across its frames (named meshes, the atmosphere's
+//! tables), and one draw placed many times.
 use super::*;
 use renderlab::{
     Camera, Light, Lighting, Mat4, MaterialDescriptor, Vec3, Vertex,
@@ -87,6 +87,7 @@ fn named_meshes_stay_on_the_gpu_and_draw_the_same_frames() -> Result<()> {
                 &cache,
                 &ForwardScene {
                     meshes: named.then_some(&keys),
+                    instances: None,
                     objects: &objects,
                     lighting: &lighting,
                     camera,
@@ -136,6 +137,7 @@ fn named_meshes_stay_on_the_gpu_and_draw_the_same_frames() -> Result<()> {
             &cache,
             &ForwardScene {
                 meshes: Some(&[7]),
+                instances: None,
                 objects: &[ForwardObject {
                     vertices,
                     indices,
@@ -251,6 +253,7 @@ fn kept_atmosphere_tables_give_every_frame_what_fresh_tables_give() -> Result<()
         });
         let scene = ForwardScene {
             meshes: None,
+            instances: None,
             objects: &objects,
             lighting: &lighting,
             camera: Camera::look_at(
@@ -316,6 +319,196 @@ fn kept_atmosphere_tables_give_every_frame_what_fresh_tables_give() -> Result<()
         images[0] == images[1] && images[1..].windows(2).all(|pair| pair[0] != pair[1]),
         "the frames do not differ where the camera, the medium or the sun did"
     );
+    cache.retire(&mut gpu)?;
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// A floor and cards over it, as separate objects and as one draw of instances.
+///
+/// - Three cards as three objects and as one object placed three times give the same
+///   frame byte for byte: an instance is a placement like any other, with its own
+///   transform, shadow and hit records.
+/// - 300 cards are one draw of 300 instances, where 300 objects are more draws than a
+///   traced frame holds (`TRACED_DRAWS`, 256) and are refused. The frame shows them:
+///   it differs from the bare floor's over the grid they cover.
+/// - The same holds over four frames with the radiance cache on and one card moving,
+///   frame by frame: the cache's draw table gives each draw its first placement and
+///   instance count, and a table of one instance a draw (the port's, before draws had
+///   instances) fails here at the third frame.
+/// - The mesh pass refuses instances.
+#[test]
+fn one_draw_placed_many_times_is_the_frame_of_as_many_objects() -> Result<()> {
+    let path = root("instances");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let (floor, card) = (quad(8.), quad(0.04));
+    let lighting = Lighting {
+        lights: vec![Light::Directional {
+            travel: Vec3::new(0.3, 0.2, -1.).normalize(),
+            lux: [4.; 3],
+        }],
+        environment: [0.2; 3],
+        exposure_stops: -2.,
+    };
+    let shadows = SunShadows {
+        split_ends: vec![8.],
+        disk_angle: 0.02,
+    };
+    let camera = Camera::look_at(
+        Vec3::new(0., 0., 4.),
+        Vec3::ZERO,
+        Vec3::Y,
+        55f32.to_radians(),
+        0.1,
+        100.,
+    )?;
+    let object = |vertices, base: f32, transform| ForwardObject {
+        vertices,
+        indices: &[0, 1, 2, 0, 2, 3],
+        transform,
+        material: MaterialDescriptor {
+            base_color: [base, base, base, 1.],
+            metallic: 0.,
+            roughness: 0.6,
+            double_sided: true,
+            ..Default::default()
+        },
+    };
+    // A 20 by 15 grid of cards a metre over the floor.
+    let grid: Vec<Mat4> = (0..300)
+        .map(|i| {
+            Mat4::from_translation(Vec3::new(
+                (i % 20) as f32 * 0.15 - 1.425,
+                (i / 20) as f32 * 0.15 - 1.05,
+                1.,
+            ))
+        })
+        .collect();
+    let mut frame =
+        |objects: &[ForwardObject<'_>], instances: Option<&[&[Mat4]]>, primary: Primary| {
+            render(
+                &mut gpu,
+                &cache,
+                &ForwardScene {
+                    meshes: None,
+                    instances,
+                    objects,
+                    lighting: &lighting,
+                    camera,
+                    size: SIZE,
+                    atmosphere: renderlab::Atmosphere::off(),
+                    sun_shadows: Some(&shadows),
+                    primary,
+                    post: None,
+                    indirect: None,
+                    reconstruction: None,
+                    reflections: None,
+                    textures: None,
+                    local_shadows: None,
+                    transparent: &[],
+                    programs: None,
+                },
+            )
+            .map(|images| images.hdr)
+        };
+    let draws = |count: usize| -> Vec<ForwardObject<'_>> {
+        std::iter::once(object(&floor[..], 0.3, Mat4::IDENTITY))
+            .chain(grid[..count].iter().map(|m| object(&card[..], 0.8, *m)))
+            .collect()
+    };
+    let one = [
+        object(&floor[..], 0.3, Mat4::IDENTITY),
+        object(&card[..], 0.8, Mat4::IDENTITY),
+    ];
+    let placed = |count: usize| -> [&[Mat4]; 2] { [&[Mat4::IDENTITY], &grid[..count]] };
+    let separate = frame(&draws(3), None, Primary::Traced)?;
+    let together = frame(&one, Some(&placed(3)), Primary::Traced)?;
+    ensure!(
+        separate == together,
+        "three instances of one draw are not the frame of three objects"
+    );
+    let bare = frame(&draws(0), None, Primary::Traced)?;
+    ensure!(separate != bare, "the cards do not show");
+    ensure!(
+        frame(&draws(300), None, Primary::Traced).is_err(),
+        "a traced frame accepted 301 draws"
+    );
+    let many = frame(&one, Some(&placed(300)), Primary::Traced)?;
+    let changed = many
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .zip(bare.as_chunks::<8>().0)
+        .filter(|(a, b)| a != b)
+        .count();
+    ensure!(
+        changed > 1500,
+        "300 instances changed {changed} pixels of the bare floor's frame"
+    );
+    ensure!(
+        frame(&one, Some(&placed(3)), Primary::Raster).is_err(),
+        "the mesh pass accepted instances"
+    );
+    // A sequence with the cache: the first card slides, the others stay.
+    let mut sequence = |instanced: bool| -> Result<Vec<Vec<u8>>> {
+        let mut frames = Frames::default();
+        let mut images = Vec::new();
+        for step in 0..4 {
+            let mut cards = grid[..3].to_vec();
+            cards[0] *= Mat4::from_translation(Vec3::new(0., 0.05 * step as f32, 0.));
+            let separate: Vec<_> = std::iter::once(object(&floor[..], 0.3, Mat4::IDENTITY))
+                .chain(cards.iter().map(|m| object(&card[..], 0.8, *m)))
+                .collect();
+            let lists: [&[Mat4]; 2] = [&[Mat4::IDENTITY], &cards];
+            let image = frames.render(
+                &mut gpu,
+                &cache,
+                &ForwardScene {
+                    meshes: None,
+                    instances: instanced.then_some(&lists),
+                    objects: if instanced { &one } else { &separate },
+                    lighting: &lighting,
+                    camera,
+                    size: SIZE,
+                    atmosphere: renderlab::Atmosphere::off(),
+                    sun_shadows: Some(&shadows),
+                    primary: Primary::Traced,
+                    post: None,
+                    indirect: Some(renderlab::backend_ara::gi_cache::Indirect {
+                        settings: renderlab::IndirectSettings {
+                            slots_log2: 17,
+                            ..Default::default()
+                        },
+                        read_table: false,
+                    }),
+                    reconstruction: None,
+                    reflections: None,
+                    textures: None,
+                    local_shadows: None,
+                    transparent: &[],
+                    programs: None,
+                },
+            );
+            match image {
+                Ok(image) => images.push(image.hdr),
+                Err(error) => {
+                    frames.retire(&mut gpu)?;
+                    return Err(error);
+                }
+            }
+        }
+        frames.retire(&mut gpu)?;
+        Ok(images)
+    };
+    let (apart, as_one) = (sequence(false)?, sequence(true)?);
+    for (index, (apart, as_one)) in apart.iter().zip(&as_one).enumerate() {
+        ensure!(
+            apart == as_one,
+            "with the cache on, frame {index} of three instances is not that of three objects"
+        );
+    }
     cache.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;

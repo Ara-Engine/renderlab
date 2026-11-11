@@ -111,6 +111,7 @@ fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
             &cache,
             &ForwardScene {
                 meshes: None,
+                instances: None,
                 objects: &objects,
                 lighting: &lighting,
                 camera,
