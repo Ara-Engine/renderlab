@@ -14,7 +14,8 @@
 //! `--time dusk|noon`, `--sun-speed DEGREES_PER_SECOND` (advances the time of day, 15 degrees
 //! an hour) with `--sun-after FRAME`, `--still` (frozen camera and objects), `--timing-frames
 //! N` (a drained timing segment), `--night-lanterns` (27 dim local sources),
-//! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT), `--sky
+//! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT),
+//! `--atmosphere-light K` (`Settings::sky_light`: the atmosphere lights at K), `--sky
 //! uniform`, `--no-volumetric-fog`, `--no-gi`, `--no-temporal`, `--no-post`,
 //! `--no-reflections` (every program keeps its untraced estimate), `--render-scale`,
 //! `--exposure`, and `--quarry MANIFEST`,
@@ -87,6 +88,8 @@ struct Args {
     hour: f32,
     fox: Option<PathBuf>,
     sun_speed: f32,
+    /// `--atmosphere-light K`: `Settings::sky_light`, the atmosphere's light over its look.
+    atmosphere_light: f32,
     sun_after: u32,
     still: bool,
     timing_frames: u32,
@@ -119,6 +122,7 @@ impl Args {
             hour: 17.5,
             fox: std::env::var_os("RENDERLAB_FOX_GLB").map(PathBuf::from),
             sun_speed: 0.0,
+            atmosphere_light: 1.0,
             sun_after: 0,
             still: false,
             timing_frames: 0,
@@ -185,6 +189,7 @@ impl Args {
                     }
                 }
                 "--sun-speed" => a.sun_speed = value()?.parse()?,
+                "--atmosphere-light" => a.atmosphere_light = value()?.parse()?,
                 "--sun-after" => a.sun_after = value()?.parse()?,
                 "--still" => a.still = true,
                 "--night-lanterns" => a.night_lanterns = true,
@@ -321,6 +326,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 },
                 exposure: Exposure::Manual { stops: exposure },
+                sky_light: args.atmosphere_light,
                 reflections: if args.reflections {
                     ReflectionSettings::default()
                 } else {

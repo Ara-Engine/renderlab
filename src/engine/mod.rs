@@ -912,7 +912,22 @@ impl Engine {
         let atmosphere = settings::atmosphere(self.sky, &self.settings);
         atmosphere.validate()?;
         let (map, parameters) = match self.sky {
-            Sky::Atmosphere(_) | Sky::Uniform(_) => (None, EnvironmentParameters::default()),
+            Sky::Atmosphere(_) => {
+                let sky_light = self.settings.sky_light;
+                if !(sky_light.is_finite() && sky_light >= 0.0) {
+                    return Err(Error::InvalidInput(
+                        "sky light must be finite and nonnegative",
+                    ));
+                }
+                // The atmosphere's procedural environment lights at this intensity; its
+                // drawn sky does not read it.
+                let parameters = EnvironmentParameters {
+                    intensity: sky_light,
+                    ..EnvironmentParameters::default()
+                };
+                (None, parameters)
+            }
+            Sky::Uniform(_) => (None, EnvironmentParameters::default()),
             Sky::Map {
                 map,
                 rotation_y,
