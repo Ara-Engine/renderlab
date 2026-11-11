@@ -27,13 +27,13 @@ pub(crate) mod transmission_shadow;
 
 const SHADER: &str = include_str!("../shaders/transparency.wgsl");
 /// Square sun shadow map of the transparent receivers' footprint.
-const SHADOW_SIZE: u32 = 2048;
+pub(crate) const SHADOW_SIZE: u32 = 2048;
 /// Transparent draws per frame: one 256-byte dynamic slot each.
 const MAX_TRANSPARENT_DRAWS: usize = crate::TRACED_DRAWS as usize;
-const SLOT: u64 = 256;
+pub(crate) const SLOT: u64 = 256;
 /// The camera block at 0, then `TpFrame` at 256.
-const FRAME_OFFSET: u64 = 256;
-const FRAME_BYTES: u64 = 336;
+pub(crate) const FRAME_OFFSET: u64 = 256;
+pub(crate) const FRAME_BYTES: u64 = 336;
 /// WGSL `TpEmitter`: ten vec4s of TP1, then shape, velocity box, forces, collision,
 /// curve counts, the colour, emission and size curves, and the sprite's alignment and
 /// flipbook (`EmitterParams::uniform`).
@@ -1630,8 +1630,6 @@ impl Renderer {
         let inverse_view = camera.view().inverse();
         let eye = inverse_view.w_axis.truncate();
         let forward = -inverse_view.z_axis.truncate().normalize();
-        let right = inverse_view.x_axis.truncate().normalize();
-        let up = inverse_view.y_axis.truncate().normalize();
         let sun = self.lighting.source_lights.iter().find_map(|l| match l {
             crate::Light::Directional { travel, lux } => Some((travel.normalize(), *lux)),
             _ => None,
@@ -1644,9 +1642,19 @@ impl Renderer {
             }
         }
         receivers.extend(self.transparency.emitters.iter().map(|e| e.params.bounds()));
-        let fit = sun.and_then(|(travel, _)| shadow_fit(travel, &receivers, opaque));
-        let (shadow, bias, texel) =
-            fit.map_or((Mat4::IDENTITY, 0.0, 0.0), |f| (f.matrix, f.bias, f.texel));
+        // Every opaque caster's world bounds, in draw then instance order.
+        let casters: Vec<(Vec3, Vec3)> = opaque
+            .iter()
+            .flat_map(|draw| {
+                draw.instances.state.models.iter().filter_map(|&model| {
+                    shadow_gpu::world_bounds(draw.mesh.bounds, model)
+                        .ok()
+                        .map(|b| (b.min, b.max))
+                })
+            })
+            .collect();
+        let fit = sun.and_then(|(travel, _)| shadow_fit(travel, &receivers, &casters));
+        let shadow = fit.map_or(Mat4::IDENTITY, |f| f.matrix);
         let mut key = Sha256::new();
         key.update(bytes_of(&shadow.to_cols_array()));
         for draw in opaque {
@@ -1657,42 +1665,19 @@ impl Renderer {
         }
         let key: [u8; 32] = key.finalize().into();
         let render_shadow = fit.is_some() && self.transparency.shadow_key != Some(key);
-        let mut frame = [0f32; (FRAME_BYTES / 4) as usize];
-        frame[0..16].copy_from_slice(&matrix.to_cols_array());
-        frame[16..32].copy_from_slice(&matrix.inverse().to_cols_array());
-        frame[32..48].copy_from_slice(&shadow.to_cols_array());
-        frame[48..52].copy_from_slice(&eye.extend(1.0).to_array());
-        frame[52..56].copy_from_slice(&forward.extend(0.0).to_array());
-        frame[56..60].copy_from_slice(&right.extend(0.0).to_array());
-        frame[60..64].copy_from_slice(&up.extend(0.0).to_array());
-        frame[64..68].copy_from_slice(&[
-            size.width as f32,
-            size.height as f32,
-            1.0 / size.width as f32,
-            1.0 / size.height as f32,
-        ]);
-        let (toward, lux) = sun.map_or((Vec3::Z, [0.0; 3]), |(t, l)| (-t, l));
-        frame[68..72]
-            .copy_from_slice(&toward.extend(f32::from(u8::from(fit.is_some()))).to_array());
-        frame[72..76].copy_from_slice(&[lux[0], lux[1], lux[2], texel]);
-        frame[80..84].copy_from_slice(&[
-            self.transparency.step,
-            bias,
-            SHADOW_SIZE as f32,
-            f32::from(u8::from(reflect)),
-        ]);
-        let mut bytes = vec![0u8; FRAME_BYTES as usize];
-        for (dst, v) in bytes.chunks_exact_mut(4).zip(frame) {
-            dst.copy_from_slice(&v.to_ne_bytes());
-        }
-        let scene = if traced {
-            self.primary.as_ref().unwrap().scene
-        } else {
-            [0; 4]
-        };
-        for (k, v) in scene.into_iter().enumerate() {
-            bytes[304 + 4 * k..308 + 4 * k].copy_from_slice(&v.to_ne_bytes());
-        }
+        let bytes = frame_block(&FrameInputs {
+            camera,
+            size: [size.width, size.height],
+            sun,
+            fit,
+            step: self.transparency.step,
+            reflect,
+            scene: if traced {
+                self.primary.as_ref().unwrap().scene
+            } else {
+                [0; 4]
+            },
+        });
         let gpu = self.transparency.gpu.as_ref().unwrap();
         let mut camera_block = [0u8; 80];
         camera_block[..64].copy_from_slice(&matrix_bytes(matrix));
@@ -2237,18 +2222,91 @@ fn bytes_of(values: &[f32]) -> Vec<u8> {
     values.iter().flat_map(|v| v.to_ne_bytes()).collect()
 }
 
+/// What `TpFrame` is packed from.
+pub(crate) struct FrameInputs {
+    /// The frame's unjittered camera, and the HDR target's size.
+    pub(crate) camera: Camera,
+    pub(crate) size: [u32; 2],
+    /// The first directional light: its unit travel direction and its lux.
+    pub(crate) sun: Option<(Vec3, [f32; 3])>,
+    /// The sun map's fit over the transparent receivers, when a sun and receivers exist.
+    pub(crate) fit: Option<ShadowFit>,
+    /// The particle simulation's step in seconds.
+    pub(crate) step: f32,
+    /// R1 reflections run for this frame's transparent draws.
+    pub(crate) reflect: bool,
+    /// The traced frame's `scene_pixels` rectangle; zero on a raster frame.
+    pub(crate) scene: [u32; 4],
+}
+
+/// WGSL `TpFrame`, `FRAME_BYTES` long: the camera matrix and its inverse, the sun map's
+/// matrix, the eye and the view's axes, the size and its reciprocal, the direction toward
+/// the sun (w: a map exists), its lux (w: the map's texel), then at float 80 the step, the
+/// map's bias and size and whether reflections run, and at byte 304 the scene rectangle.
+/// The wgpu renderer and the ara-gpu backend both pack through it.
+pub(crate) fn frame_block(i: &FrameInputs) -> Vec<u8> {
+    let matrix = i.camera.matrix(i.size[0], i.size[1]);
+    let inverse_view = i.camera.view().inverse();
+    let eye = inverse_view.w_axis.truncate();
+    let forward = -inverse_view.z_axis.truncate().normalize();
+    let right = inverse_view.x_axis.truncate().normalize();
+    let up = inverse_view.y_axis.truncate().normalize();
+    let (shadow, bias, texel) = i
+        .fit
+        .map_or((Mat4::IDENTITY, 0.0, 0.0), |f| (f.matrix, f.bias, f.texel));
+    let [width, height] = i.size;
+    let mut frame = [0f32; (FRAME_BYTES / 4) as usize];
+    frame[0..16].copy_from_slice(&matrix.to_cols_array());
+    frame[16..32].copy_from_slice(&matrix.inverse().to_cols_array());
+    frame[32..48].copy_from_slice(&shadow.to_cols_array());
+    frame[48..52].copy_from_slice(&eye.extend(1.0).to_array());
+    frame[52..56].copy_from_slice(&forward.extend(0.0).to_array());
+    frame[56..60].copy_from_slice(&right.extend(0.0).to_array());
+    frame[60..64].copy_from_slice(&up.extend(0.0).to_array());
+    frame[64..68].copy_from_slice(&[
+        width as f32,
+        height as f32,
+        1.0 / width as f32,
+        1.0 / height as f32,
+    ]);
+    let (toward, lux) = i.sun.map_or((Vec3::Z, [0.0; 3]), |(t, l)| (-t, l));
+    frame[68..72].copy_from_slice(
+        &toward
+            .extend(f32::from(u8::from(i.fit.is_some())))
+            .to_array(),
+    );
+    frame[72..76].copy_from_slice(&[lux[0], lux[1], lux[2], texel]);
+    frame[80..84].copy_from_slice(&[
+        i.step,
+        bias,
+        SHADOW_SIZE as f32,
+        f32::from(u8::from(i.reflect)),
+    ]);
+    let mut bytes = vec![0u8; FRAME_BYTES as usize];
+    for (dst, v) in bytes.chunks_exact_mut(4).zip(frame) {
+        dst.copy_from_slice(&v.to_ne_bytes());
+    }
+    for (k, v) in i.scene.into_iter().enumerate() {
+        bytes[304 + 4 * k..308 + 4 * k].copy_from_slice(&v.to_ne_bytes());
+    }
+    bytes
+}
+
+/// The sun map's fit: world to its clip space, the depth bias and one texel's size in
+/// metres.
 #[derive(Clone, Copy)]
-struct ShadowFit {
-    matrix: Mat4,
-    bias: f32,
-    texel: f32,
+pub(crate) struct ShadowFit {
+    pub(crate) matrix: Mat4,
+    pub(crate) bias: f32,
+    pub(crate) texel: f32,
 }
 /// An orthographic sun map over the receivers' footprint, deep enough toward the sun to
 /// hold every opaque caster: square texels, depth 0 at the most sunward caster.
-fn shadow_fit(
+/// `receivers` and `casters` are world bounds (least and greatest corner).
+pub(crate) fn shadow_fit(
     travel: Vec3,
     receivers: &[(Vec3, Vec3)],
-    opaque: &[PreparedDraw<'_>],
+    casters: &[(Vec3, Vec3)],
 ) -> Option<ShadowFit> {
     if receivers.is_empty() || !travel.is_finite() {
         return None;
@@ -2275,13 +2333,9 @@ fn shadow_fit(
         }
     }
     let mut near = lo.z;
-    for draw in opaque {
-        for &model in &draw.instances.state.models {
-            if let Ok(b) = shadow_gpu::world_bounds(draw.mesh.bounds, model) {
-                for p in corners((b.min, b.max)) {
-                    near = near.min(p.dot(w));
-                }
-            }
+    for &caster in casters {
+        for p in corners(caster) {
+            near = near.min(p.dot(w));
         }
     }
     let margin = 0.25;
