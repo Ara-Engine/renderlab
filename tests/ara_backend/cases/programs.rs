@@ -37,8 +37,14 @@ fn quad(half: f32, z: f32) -> [Vertex; 4] {
 /// - The game scene's program at its defaults shades as the standard program does.
 /// - With `glow` set on the card alone, the card's pixels gain the exposed glow and the
 ///   floor's do not change by a bit.
-/// - Refused, each with its reason: two different programs in one frame, a parameter
-///   the program does not declare, and any program on the mesh pass.
+/// - Different programs in one frame each shade their own object's pixels and no
+///   others, down to the pixels of a tile both objects share: with the flat program on
+///   one object, that object's pixels are the flat value exactly and the other's are
+///   bit for bit those of the frame where its program shaded alone. Checked with the
+///   flat program second, first (where it also holds the frame's first slot), and
+///   beside the standard program, which declares no parameters.
+/// - Refused, each with its reason: a parameter the program does not declare, and any
+///   program on the mesh pass.
 #[test]
 fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
     let path = root("programs");
@@ -218,18 +224,41 @@ fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
             None => {}
         }
     }
-    // Refusals.
+    // Several programs in one frame.
     let flat_only = Some(ObjectProgram {
         source: FLAT,
         parameters: &[],
     });
+    let flat_own = Some(ObjectProgram {
+        source: FLAT,
+        parameters: &own,
+    });
+    let mut mixed = 0;
+    for (name, programs, alone) in [
+        ("game then flat", [game(&[]), flat_own], &plain),
+        ("flat then game", [flat_only, game(&lit)], &glowing),
+        ("standard then flat", [None, flat_own], &standard),
+    ] {
+        let flat_on_card = programs[1].is_some_and(|p| p.source == FLAT);
+        let frame = frame(Some(programs), Primary::Traced)?;
+        for (i, pixel) in frame.iter().enumerate() {
+            let Some(card) = on_card(i) else { continue };
+            let expected = match (card == flat_on_card, card) {
+                (false, _) => alone[i],
+                (true, true) => [1., 0., 0.5].map(|c: f32| c * 2. * exposure),
+                (true, false) => [0.25, 0.5, 1.].map(|c: f32| c * exposure),
+            };
+            ensure!(
+                *pixel == expected,
+                "{name}: pixel {i} on the {} is {pixel:?}, expected {expected:?}",
+                if card { "card" } else { "floor" }
+            );
+            mixed += 1;
+        }
+    }
+    // Refusals.
     let unknown = [("sparkle", Value::F32(1.))];
     for (name, programs, primary) in [
-        (
-            "two programs in one frame",
-            [game(&[]), flat_only],
-            Primary::Traced,
-        ),
         (
             "an undeclared parameter",
             [game(&unknown), game(&[])],
@@ -247,7 +276,7 @@ fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
         );
     }
     eprintln!(
-        "programs: flat exact on {floors} floor and {cards} card pixels; game at defaults {apart:.2e} from standard; glow within {worst:.4}"
+        "programs: flat exact on {floors} floor and {cards} card pixels; game at defaults {apart:.2e} from standard; glow within {worst:.4}; {mixed} pixels exact in frames of two programs"
     );
     gpu.collect()?;
     gpu.assert_clean()?;

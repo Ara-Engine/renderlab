@@ -36,6 +36,7 @@ use super::{
     post::{FilterInputs, PostPasses, SettingsRecord, ToneInputs},
     post_surface::{PostCameraFrame, RasterDepth, RasterPostSurface},
     primary_shade, primary_trace,
+    program_bins::{BinDispatch, ProgramBins},
     receiver_raster::{ReceiverDraw, ReceiverTargets, Receivers},
     shader::{self, InputKey, InputKind, Pass, Program, SampleType, ShaderInput},
     sky::SkyPass,
@@ -116,9 +117,9 @@ pub struct ObjectProgram<'a> {
 #[derive(Clone, Copy)]
 pub struct ScenePrograms<'a> {
     /// One entry per object, in `ForwardScene::objects` order; `None` is the standard
-    /// program. One program a frame for now: every object must name the same source
-    /// (or none); a frame of several programs is shaded by per-program lists, which
-    /// are not assembled yet.
+    /// program. Objects naming the same source share a program. A frame of one program
+    /// shades the whole region in one dispatch; a frame of several bins its 4x4 tiles
+    /// by program and each program shades its own list (MP1), up to 32 programs.
     pub objects: &'a [Option<ObjectProgram<'a>>],
 }
 
@@ -274,6 +275,8 @@ struct Deferred {
     tiles: Texture,
     /// `scene_pixels`: the rectangle camera rays can reach a placement in.
     scene: [u32; 4],
+    /// That rectangle widened to whole trace tiles, as the region record holds it.
+    region_rect: [u32; 4],
     epsilon: Texture,
     frame: StorageBuffer,
     region: StorageBuffer,
@@ -288,6 +291,17 @@ struct Deferred {
     repairs: Option<StorageBuffer>,
     /// Dispatch groups of the trace, the estimator and the shading.
     groups: [[u32; 2]; 3],
+}
+
+/// A frame of several programs (`ProgramLists`): the binning kernel, each slot's list
+/// program with its kernel and `RlList` record, and the lists and dispatch arguments
+/// the binning pass fills.
+struct ProgramLists {
+    bins: ProgramBins,
+    slots: Vec<(Program, Kernel, StorageBuffer)>,
+    entries: StorageBuffer,
+    arguments: StorageBuffer,
+    dispatch: BinDispatch,
 }
 
 /// One transparent pane's own resources.
@@ -786,34 +800,47 @@ fn frame(
             "scene programs are assembled on traced frames, one entry per object"
         );
     }
-    let material_source = {
-        let mut sources = (0..scene.objects.len())
-            .map(|i| object_program(i).map_or(crate::program::STANDARD_PROGRAM, |p| p.source));
-        let first = sources.next().context("no object")?;
-        ensure!(
-            sources.all(|s| s == first),
-            "a frame of several shading programs is not assembled yet"
-        );
-        first
-    };
-    // `Engine::create_program`: the program must compose and validate, and its
+    // `frame_slots`: the frame's distinct programs in first-draw order and each
+    // object's slot among them. Slot 0 also writes misses.
+    let mut sources: Vec<&str> = Vec::new();
+    let slots: Vec<u32> = (0..scene.objects.len())
+        .map(|i| {
+            let source = object_program(i).map_or(crate::program::STANDARD_PROGRAM, |p| p.source);
+            let slot = sources
+                .iter()
+                .position(|s| *s == source)
+                .unwrap_or_else(|| {
+                    sources.push(source);
+                    sources.len() - 1
+                });
+            slot as u32
+        })
+        .collect();
+    ensure!(
+        sources.len() <= crate::renderer::primary_ray_gpu::program_lists::MAX_FRAME_PROGRAMS,
+        "a frame shades at most MAX_FRAME_PROGRAMS programs"
+    );
+    let material_source = *sources.first().context("no object")?;
+    // `Engine::create_program`: each program must compose and validate, and its
     // `Parameters` block is reflected from it.
-    let parameter_layout = {
-        let parameters = crate::program::declares_parameters(material_source);
-        let composed = crate::program::compose(
-            include_str!("../../shaders/scene.wgsl"),
-            material_source,
-            crate::program::Stage::Raster,
-            parameters,
-        );
-        crate::program::analyse("scene program", material_source, &composed)
-            .map_err(|e| anyhow::anyhow!("scene program: {e}"))?
-            .parameters
-    };
+    let parameter_layouts = sources
+        .iter()
+        .map(|source| {
+            let composed = crate::program::compose(
+                include_str!("../../shaders/scene.wgsl"),
+                source,
+                crate::program::Stage::Raster,
+                crate::program::declares_parameters(source),
+            );
+            Ok(crate::program::analyse("scene program", source, &composed)
+                .map_err(|e| anyhow::anyhow!("scene program: {e}"))?
+                .parameters)
+        })
+        .collect::<Result<Vec<_>>>()?;
     for index in 0..scene.objects.len() {
         if let Some(program) = object_program(index) {
             crate::program::ParameterLayout::check(
-                parameter_layout.as_ref(),
+                parameter_layouts[slots[index] as usize].as_ref(),
                 program.parameters.iter().map(|(n, v)| (*n, v.clone())),
             )
             .map_err(|e| anyhow::anyhow!("object {index}'s parameters: {e}"))?;
@@ -823,6 +850,15 @@ fn frame(
         primary_shade::hardware_soft_program(material_source)?
     } else {
         standard_program(scene.sun_shadows.is_some())?
+    };
+    // A traced frame of several programs: each one's list entry, in slot order.
+    let list_programs = if deferred_path && sources.len() > 1 {
+        sources
+            .iter()
+            .map(|source| primary_shade::hardware_soft_list_program(source))
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
     };
     let pass = if deferred_path {
         None
@@ -1331,7 +1367,10 @@ fn frame(
                 h.update(&uniform[32..48]);
                 // The program, and each object's parameter values (`state.program` and
                 // the materials' uploads in the renderer's key).
-                h.update(material_source.as_bytes());
+                for source in &sources {
+                    h.update(source.as_bytes());
+                }
+                h.update(bytemuck::cast_slice(&slots));
                 for index in 0..scene.objects.len() {
                     if let Some(program) = object_program(index) {
                         h.update(format!("{:?}", program.parameters).as_bytes());
@@ -1473,6 +1512,7 @@ fn frame(
             fresh_program,
             hit: Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
             scene: rect,
+            region_rect: region,
             tiles: Texture::new(gpu, trace_groups, Format::R32Uint, true, false)?,
             epsilon: Texture::new(gpu, size, Format::R32Float, true, false)?,
             frame,
@@ -1500,6 +1540,16 @@ fn frame(
     // The cache as this frame's passes and shading see it.
     let gi = gi.as_ref().zip(gi_frame.as_ref());
     let mut specs = program.inputs().to_vec();
+    // A list program reads what its own source reads; its record and the lists are the
+    // frame's own.
+    for list in &list_programs {
+        specs.extend(
+            list.inputs()
+                .iter()
+                .filter(|spec| !matches!((spec.key.group, spec.key.binding), (0, 38 | 39)))
+                .cloned(),
+        );
+    }
     if let Some((cache, _)) = gi {
         for stage in cache.programs().chain(cache.shade_program()) {
             specs.extend(stage.inputs().iter().cloned());
@@ -1645,13 +1695,18 @@ fn frame(
         graph.import(Resource::Buffer(material.buffer), Access::HostWrite);
         materials.push(material);
         // `MaterialParameters`: the program's defaults with this object's named values.
-        if parameter_layout.is_some() {
+        // Packed against the draw's own program; a program without `Parameters` gets a
+        // zero block when another program of the frame declares some.
+        if parameter_layouts.iter().any(Option::is_some) {
             let values: Vec<(String, crate::Value)> = object_program(index)
                 .map_or(&[][..], |p| p.parameters)
                 .iter()
                 .map(|(name, value)| ((*name).to_owned(), value.clone()))
                 .collect();
-            let block = crate::program::ParameterLayout::pack(parameter_layout.as_ref(), &values);
+            let block = crate::program::ParameterLayout::pack(
+                parameter_layouts[slots[index] as usize].as_ref(),
+                &values,
+            );
             let block = StorageBuffer::new(gpu, &block)?;
             graph.import(Resource::Buffer(block.buffer), Access::HostWrite);
             parameter_blocks.push(block);
@@ -1960,6 +2015,100 @@ fn frame(
             packet.import(&mut graph);
             deferred_packets.push(packet);
         }
+    }
+    // MP1 (`prepare_program_lists`): with several programs, one list per slot.
+    let program_lists = match &deferred {
+        Some(deferred) if !list_programs.is_empty() => {
+            let count = sources.len() as u32;
+            // Words of one slot's list: its length, then every 4x4 shading tile of the
+            // trace-tile-widened region and every 16x16 clear block.
+            let capacity = 1
+                + (size[0] + 8).div_ceil(4) * (size[1] + 4).div_ceil(4)
+                + size[0].div_ceil(16) * size[1].div_ceil(16);
+            let entries = StorageBuffer::device(gpu, u64::from(count) * u64::from(capacity) * 4)?;
+            let arguments = StorageBuffer::with_usage(
+                gpu,
+                &vec![0u8; count as usize * 16],
+                ara_gpu::vk::BufferUsageFlags::INDIRECT_BUFFER,
+            )?;
+            graph.import(Resource::Buffer(arguments.buffer), Access::HostWrite);
+            let mut built = Vec::new();
+            for (slot, program) in list_programs.into_iter().enumerate() {
+                // `RlList`: slot, list base, capacity, flags, then each batch's slot.
+                let mut words = vec![slot as u32, slot as u32 * capacity, capacity, 0];
+                words.extend(
+                    (0..crate::TRACED_DRAWS as usize).map(|b| slots.get(b).copied().unwrap_or(0)),
+                );
+                let info = StorageBuffer::new(gpu, bytemuck::cast_slice(&words))?;
+                graph.import(Resource::Buffer(info.buffer), Access::HostWrite);
+                let kernel = Kernel::from_program(gpu, cache, &program)?;
+                built.push((program, kernel, info));
+            }
+            let r = deferred.region_rect;
+            Some(ProgramLists {
+                bins: ProgramBins::new(gpu, cache)?,
+                slots: built,
+                entries,
+                arguments,
+                dispatch: BinDispatch {
+                    slots: count,
+                    capacity,
+                    groups: [
+                        (r[2] - r[0]).div_ceil(4).max(size[0].div_ceil(16)),
+                        (r[3] - r[1]).div_ceil(4) + size[1].div_ceil(16),
+                        1,
+                    ],
+                },
+            })
+        }
+        _ => None,
+    };
+    let mut list_packets = Vec::new();
+    if let (Some(lists), Some(deferred)) = (&program_lists, &deferred) {
+        // The binning packet, then one shading packet per slot: the shading inputs with
+        // that slot's record and the lists.
+        let values = shader::inputs(Pass::ProgramBins)?
+            .iter()
+            .map(|spec| {
+                Ok((
+                    spec.key,
+                    match (spec.key.group, spec.key.binding) {
+                        (0, 0) => Input::Image(&deferred.hit),
+                        (0, 1) => Input::Image(&deferred.tiles),
+                        (0, 2) => Input::Buffer(&deferred.region),
+                        (0, 3) => Input::Buffer(&deferred.placements),
+                        (0, 4) => Input::Buffer(&lists.slots[0].2),
+                        (0, 5) => Input::Buffer(&lists.entries),
+                        (0, 6) => Input::Buffer(&lists.arguments),
+                        _ => bail!("unexpected binning input {}", spec.name),
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let packet = HeapBindings::new(gpu, Pass::ProgramBins, &values)?;
+        packet.import(&mut graph);
+        list_packets.push(packet);
+        for (program, _, info) in &lists.slots {
+            let values = program
+                .inputs()
+                .iter()
+                .map(|spec| {
+                    Ok((
+                        spec.key,
+                        match (spec.key.group, spec.key.binding) {
+                            (0, 38) => Input::Buffer(info),
+                            (0, 39) => Input::Buffer(&lists.entries),
+                            _ => shared.input(spec, None)?,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let packet = HeapBindings::for_program(gpu, program, &values)?;
+            packet.import(&mut graph);
+            list_packets.push(packet);
+        }
+    }
+    if let Some(deferred) = &deferred {
         // `encode_primary_visibility`, `encode_primary_fresh`, the cache's passes
         // (`GiState::encode`), then `encode_primary_shading`.
         let threads = [
@@ -1984,6 +2133,25 @@ fn frame(
                 )?;
             }
             // The repair runs over the queue the trace filled, from its own counts.
+            // `encode_program_lists`: binning, then each program's list from the counts
+            // the binning pass left.
+            if let (Some(lists), true) = (&program_lists, std::ptr::eq(kernel, &deferred.shade)) {
+                lists
+                    .bins
+                    .record(&mut graph, &mut rec, &list_packets[0], &lists.dispatch)?;
+                for (slot, ((_, kernel, _), packet)) in
+                    lists.slots.iter().zip(&list_packets[1..]).enumerate()
+                {
+                    kernel.record_indirect(
+                        &mut graph,
+                        &mut rec,
+                        packet,
+                        &lists.arguments,
+                        slot as u64 * 16,
+                    )?;
+                }
+                continue;
+            }
             match deferred
                 .repairs
                 .as_ref()
@@ -2565,11 +2733,21 @@ fn frame(
         .chain(gi_shade_packet)
         .chain(resolve_packet)
         .chain(pane_packets)
+        .chain(list_packets)
     {
         packet.retire(gpu, &mut graph)?;
     }
     if let Some(panes) = panes {
         panes.retire(gpu, &mut graph)?;
+    }
+    if let Some(lists) = program_lists {
+        lists.bins.retire(gpu)?;
+        for (_, kernel, info) in lists.slots {
+            kernel.retire(gpu)?;
+            info.retire(gpu)?;
+        }
+        lists.entries.retire(gpu)?;
+        lists.arguments.retire(gpu)?;
     }
     if let Some((record, samples)) = tr1_records {
         record.retire(gpu)?;

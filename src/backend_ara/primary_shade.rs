@@ -48,3 +48,16 @@ pub fn hardware_soft_program(material: &str) -> Result<Program> {
         crate::program::compose(&head, material, crate::program::Stage::Traced, parameters).source,
     )
 }
+/// The list entry on the same hardware soft head: one program's share of a frame of
+/// several programs, shading the tiles the binning pass listed for its slot
+/// (`program::compose_list`, as `ProgramPipelines::list` compiles it).
+pub fn hardware_soft_list_program(material: &str) -> Result<Program> {
+    let [_, head] =
+        crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
+    let parameters = crate::program::declares_parameters(material);
+    Program::new(
+        Pass::PrimaryShadeList,
+        crate::program::compose_list(&head, material, crate::program::Stage::Traced, parameters)
+            .source,
+    )
+}
