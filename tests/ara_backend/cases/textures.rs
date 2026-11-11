@@ -179,6 +179,7 @@ fn a_textured_floor_is_quadrant_by_quadrant_the_untextured_floor_of_that_texel()
             data: &surface,
             sampler: nearest,
         }),
+        normal: None,
     };
     let mut report = String::new();
     for primary in [Primary::Raster, Primary::Traced] {
@@ -271,6 +272,7 @@ fn a_mip_chain_shows_the_level_the_pixel_footprint_selects() -> Result<()> {
             },
         }),
         metallic_roughness: None,
+        normal: None,
     };
     let material = |grey: u8| MaterialDescriptor {
         base_color: [linear(grey), linear(grey), linear(grey), 1.],

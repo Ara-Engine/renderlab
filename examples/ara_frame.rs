@@ -50,6 +50,8 @@
 //! directions rotate and its ray count follows the reconstruction's budget.
 //! `--reflections` implies `--traced` and turns traced reflections on at their
 //! default roughness band: the shading program's own reflection rays.
+//! `--normal-map` implies `--traced` and gives the floor a tangent stream and a
+//! tangent-space normal map of round studs, with its full mip chain.
 //! `--local-shadows` implies `--traced` and shadows every point and spot light with the
 //! shading program's own rays, at `LocalShadows`' defaults (off otherwise).
 //! `--textures` gives the floor a base-colour
@@ -95,6 +97,7 @@ fn main() -> Result<(), Failure> {
     let (mut gi, mut bounce, mut filter, mut still) = (false, false, false, false);
     let (mut crevice, mut reconstruction, mut interactive) = (false, false, false);
     let (mut reflections, mut textures, mut local_shadows) = (false, false, false);
+    let mut normal_map = false;
     let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -108,6 +111,7 @@ fn main() -> Result<(), Failure> {
             "--textures" => textures = true,
             "--reflections" => (sun_shadows, traced, reflections) = (true, true, true),
             "--local-shadows" => (sun_shadows, traced, local_shadows) = (true, true, true),
+            "--normal-map" => (sun_shadows, traced, normal_map) = (true, true, true),
             "--interactive" => (sun_shadows, traced, interactive) = (true, true, true),
             "--reconstruction" => (sun_shadows, traced, reconstruction) = (true, true, true),
             "--filter" => {
@@ -165,7 +169,7 @@ fn main() -> Result<(), Failure> {
             });
         }
     }
-    if textures {
+    if textures || normal_map {
         // The floor panel is a unit quad with no uv of its own: eight tiles across it.
         let floor = floor_index(&fixture)?;
         for vertex in &mut fixture.objects[floor].vertices {
@@ -193,6 +197,7 @@ fn main() -> Result<(), Failure> {
         reflections,
         textures,
         local_shadows,
+        normal_map,
         still,
         frames,
     };
@@ -234,6 +239,8 @@ struct Level {
     textures: bool,
     /// Point and spot lights are shadowed, at `LocalShadows`' defaults, on a traced frame.
     local_shadows: bool,
+    /// The floor carries the stud normal map and a tangent stream, on a traced frame.
+    normal_map: bool,
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
@@ -302,6 +309,65 @@ fn checker() -> renderlab::asset::Texture {
         role: TextureRole::BaseColorSrgb,
         mips,
     }
+}
+/// The `--normal-map` floor: a 64-texel tangent-space map of round studs, four to a
+/// tile, tilting up to about 19 degrees, with every mip level box-filtered from the one
+/// above (not renormalised: both layers get the same bytes).
+fn studs() -> renderlab::asset::Texture {
+    use renderlab::asset::{Mip, Texture, TextureRole};
+    let wave = |i: usize| (std::f32::consts::TAU * (i as f32 + 0.5) / 16.).sin() * 0.35;
+    let mut level: Vec<[f32; 3]> = (0..64 * 64)
+        .map(|i| {
+            let n = renderlab::Vec3::new(wave(i % 64), wave(i / 64), 1.).normalize();
+            [n.x, n.y, n.z].map(|v| v * 0.5 + 0.5)
+        })
+        .collect();
+    let mut mips = Vec::new();
+    let mut side = 64usize;
+    loop {
+        mips.push(Mip {
+            width: side as u32,
+            height: side as u32,
+            rgba8: level
+                .iter()
+                .flat_map(|c| {
+                    let byte = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+                    [byte(c[0]), byte(c[1]), byte(c[2]), 255]
+                })
+                .collect(),
+        });
+        if side == 1 {
+            break;
+        }
+        let half = side / 2;
+        level = (0..half * half)
+            .map(|i| {
+                let (x, y) = (i % half * 2, i / half * 2);
+                std::array::from_fn(|c| {
+                    [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)]
+                        .iter()
+                        .map(|(x, y)| level[y * side + x][c])
+                        .sum::<f32>()
+                        / 4.
+                })
+            })
+            .collect();
+        side = half;
+    }
+    Texture {
+        role: TextureRole::NormalLinear,
+        mips,
+    }
+}
+/// The floor's tangent frames for `--normal-map`: along its own x, right-handed.
+fn floor_tangents(
+    fixture: &lighting_fixture::Fixture,
+) -> Result<renderlab::asset::TangentStream, Failure> {
+    let floor = &fixture.objects[floor_index(fixture)?];
+    Ok(renderlab::asset::TangentStream {
+        basis: renderlab::asset::TangentBasis::Authored,
+        values: vec![[1., 0., 0., 1.]; floor.vertices.len()],
+    })
 }
 /// The anisotropy clamp both layers sample material textures with.
 const ANISOTROPY: u8 = 16;
@@ -481,12 +547,23 @@ fn wgpu_frame(
     } else {
         None
     };
+    let (studs, tangents) = (studs(), floor_tangents(fixture)?);
+    let bumps = if level.normal_map {
+        let texture = admit(&mut r, |r| r.try_upload_texture(&studs))?;
+        Some((floor_index(fixture)?, texture))
+    } else {
+        None
+    };
     for (index, o) in fixture.objects.iter().enumerate() {
+        let bumped = bumps.as_ref().filter(|b| b.0 == index);
         meshes.push(admit(&mut r, |r| {
-            r.try_upload_mesh(&MeshData {
-                vertices: &o.vertices,
-                indices: &o.indices,
-            })
+            r.try_upload_mesh_with_tangents(
+                &MeshData {
+                    vertices: &o.vertices,
+                    indices: &o.indices,
+                },
+                bumped.map(|_| &tangents),
+            )
         })?);
         instances.push(admit(&mut r, |r| r.try_upload_instances(&[o.transform]))?);
         materials.push(admit(&mut r, |r| {
@@ -500,6 +577,10 @@ fn wgpu_frame(
                         texture: &f.1,
                         sampler: asset::Sampler::default(),
                     }
+                }),
+                normal_texture: bumped.map(|b| TextureBinding {
+                    texture: &b.1,
+                    sampler: asset::Sampler::default(),
                 }),
                 ..Default::default()
             })
@@ -602,6 +683,16 @@ fn ara_frame(
             sampler: renderlab::asset::Sampler::default(),
         });
     }
+    let (studs, tangents) = (studs(), floor_tangents(fixture)?);
+    if level.normal_map {
+        slots[floor_index(fixture)?].normal = Some(forward::NormalMap {
+            texture: forward::ObjectTexture {
+                data: &studs,
+                sampler: renderlab::asset::Sampler::default(),
+            },
+            tangents: &tangents,
+        });
+    }
     let mut history = forward::Frames::default();
     let mut sequence = Vec::new();
     for pose in 0..frames {
@@ -632,7 +723,7 @@ fn ara_frame(
                 reflections: level
                     .reflections
                     .then(renderlab::ReflectionSettings::default),
-                textures: level.textures.then_some(forward::SceneTextures {
+                textures: (level.textures || level.normal_map).then_some(forward::SceneTextures {
                     objects: &slots,
                     anisotropy_clamp: ANISOTROPY,
                 }),
@@ -765,9 +856,10 @@ fn write(
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
             "scene": format!(
-                "M5-A authored v1{}{}, {}, local shadows {}, default post{}{}{}",
+                "M5-A authored v1{}{}{}, {}, local shadows {}, default post{}{}{}",
                 if level.crevice { " with a slot between two walls" } else { "" },
                 if level.textures { " with a checker-textured floor" } else { "" },
+                if level.normal_map { " with a stud normal map on the floor" } else { "" },
                 if level.still { "every frame from pose 0" } else { "camera path from pose 0" },
                 if level.local_shadows { "traced for every local light" } else { "off" },
                 if level.reconstruction { ", temporal reconstruction at its defaults" } else { "" },

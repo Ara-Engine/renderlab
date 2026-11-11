@@ -1838,6 +1838,42 @@ of M5-A's 614,400 pixels, by up to 15%, and brightens none. **Not compared with 
 What the test cannot see: a spot light's cone against its shadow, a light with a
 range, and more lights than one.
 
+## Normal maps on the traced frame
+
+Traced shading already carries the tangent path: `program_traced_entry.wgsl` builds a
+hit's tangent frame through the prelude's own `vs_tangent` when the placement word's
+bit 31 says the draw has a tangent stream, reading one vec4 per vertex from the
+tangent buffer array at (1, 4). What a frame has to supply is the stream, the bit,
+the map and the material's flag. `ObjectTextures::normal` takes a `NormalMap`: the
+texture (`TextureRole::NormalLinear`, full mip chain, its own sampler) and the
+`TangentStream` it is authored against, checked by Renderlab's own
+`validate_tangents`. The frame uploads the stream as the draw's tangent buffer, sets
+bit 31 through `placement_table`, publishes the map as a one-layer array view (the
+`normal_map` binding is a `texture_2d_array`) at (2, 15) with its sampler at (2, 16),
+and sets `normal_mapped` in the material record, which `MaterialDescriptor::bytes`
+only sets from a wgpu texture binding. `normal_scale` is the material's.
+
+`a_normal_mapped_floor_is_the_floor_tilted_to_that_normal` holds it to geometry. A
+flat floor with a one-texel map has the same shading normal at every pixel: the
+texel's normal carried through the tangent, the bitangent `handedness * cross(n, t)`
+and the surface normal. The same floor with no map, turned about the origin until its
+real normal is that vector, has the same normal, the same view ray per pixel and the
+same sun, so the two images must agree. Five cases: a tilt along the tangent, along
+the bitangent at either handedness, with the tangent stream along y, and at half
+`normal_scale`. Three agree with their tilted floor to under 0.001% at every pixel
+and two within 0.08% (bound 0.5%); each is 4.7% to 12% from the flat floor on average, and
+the two handednesses are 16% apart. With the tangent buffers left unbound the
+bitangent case is 21% off and the test fails. The mesh pass refuses a normal map, and
+a tangent that is not perpendicular to its normal is refused.
+
+`ara_frame --normal-map` gives M5-A's floor a 64-texel stud map with its mip chain
+and a tangent stream, on either layer; on Metal it changes 135,814 of 614,400 pixels,
+99,712 by more than 5%. **Not compared with wgpu.** Not assembled: the mesh pass's
+tangent vertex stream (`vs_tangent` and a third vertex buffer), and the variance and
+slope-moment normal roles (two-layer maps and specular antialiasing from them). What
+the test cannot see: mip selection and filtering of the map (one texel), and a
+tangent frame that varies across a mesh.
+
 ## Cube-array environment lookups (Renderlab main's P-SKY)
 
 Renderlab main turned the three environment maps into `texture_cube_array<f32>`

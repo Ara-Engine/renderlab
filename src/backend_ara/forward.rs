@@ -78,14 +78,28 @@ pub struct ObjectTexture<'a> {
     pub data: &'a crate::asset::Texture,
     pub sampler: crate::asset::Sampler,
 }
+/// A tangent-space normal map with the tangent frames it is authored against: what the
+/// wgpu renderer takes as a material's `normal_texture` and the mesh's tangent stream
+/// (`try_upload_mesh_with_tangents`), which it refuses to draw one without the other.
+#[derive(Clone, Copy)]
+pub struct NormalMap<'a> {
+    /// `TextureRole::NormalLinear`. The variance and slope-moment roles are not
+    /// assembled.
+    pub texture: ObjectTexture<'a>,
+    /// One frame per vertex of the object's mesh.
+    pub tangents: &'a crate::asset::TangentStream,
+}
+
 /// One object's material textures; an empty slot samples the renderer's 1x1 default.
-/// Normal maps are not assembled: the frame's meshes carry no tangents.
 #[derive(Clone, Copy, Default)]
 pub struct ObjectTextures<'a> {
     /// `TextureRole::BaseColorSrgb`.
     pub base_color: Option<ObjectTexture<'a>>,
     /// `TextureRole::MetallicRoughnessLinear`.
     pub metallic_roughness: Option<ObjectTexture<'a>>,
+    /// Traced frames only: the mesh pass's tangent vertex stream is not assembled. The
+    /// material's `normal_scale` applies.
+    pub normal: Option<NormalMap<'a>>,
 }
 /// The scene's material textures.
 #[derive(Clone, Copy)]
@@ -194,6 +208,8 @@ const FROXEL_TILE: u32 = 8;
 struct Traced {
     /// Vertex and index build inputs with their bottom-level structure, per object.
     meshes: Vec<(StorageBuffer, StorageBuffer, AccelerationStructure)>,
+    /// Each object's tangent stream, where it has a normal map.
+    tangents: Vec<Option<StorageBuffer>>,
     scene: Scene,
     world: Texture,
     normal: Texture,
@@ -238,6 +254,8 @@ struct Deferred {
 struct Arrays<'a> {
     vertices: Vec<&'a StorageBuffer>,
     indices: Vec<&'a StorageBuffer>,
+    /// Each draw's tangent stream, the absent stand-in where it has none.
+    tangents: Vec<&'a StorageBuffer>,
     absent: Vec<&'a StorageBuffer>,
     materials: Vec<&'a StorageBuffer>,
     /// Per sampler-array key; a key without an entry takes `default_samplers`.
@@ -306,6 +324,7 @@ impl<'a> Shared<'a> {
                 Input::Buffers(match (group, binding) {
                     (1, 2) => &self.arrays.vertices,
                     (1, 3) => &self.arrays.indices,
+                    (1, 4) => &self.arrays.tangents,
                     (2, 10) => &self.arrays.materials,
                     _ => &self.arrays.absent,
                 })
@@ -582,6 +601,18 @@ fn frame(
     );
     let size = scene.size;
     let deferred_path = scene.primary != Primary::Raster;
+    // Each object's normal map, by object index.
+    let normal_map = |index: usize| scene.textures.and_then(|t| t.objects.get(index)?.normal);
+    for (index, object) in scene.objects.iter().enumerate() {
+        if let Some(map) = normal_map(index) {
+            ensure!(
+                deferred_path,
+                "normal maps are assembled on traced frames only"
+            );
+            crate::asset::validate_tangents(object.vertices, object.indices, map.tangents)
+                .map_err(|e| anyhow::anyhow!("object {index}'s tangents: {e:?}"))?;
+        }
+    }
     let interactive = scene.primary == Primary::TracedInteractive;
     ensure!(
         !deferred_path || scene.sun_shadows.is_some(),
@@ -901,8 +932,21 @@ fn frame(
                 ara_gpu::vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
                     | ara_gpu::vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
             let mut meshes = Vec::new();
+            let mut tangents = Vec::new();
             let mut instances = Vec::new();
             for (index, object) in scene.objects.iter().enumerate() {
+                // `Mesh::tangent`: one vec4 per vertex, read by traced shading alone.
+                tangents.push(match normal_map(index) {
+                    Some(map) => {
+                        let buffer = StorageBuffer::new(
+                            gpu,
+                            bytemuck::cast_slice(map.tangents.values.as_slice()),
+                        )?;
+                        graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+                        Some(buffer)
+                    }
+                    None => None,
+                });
                 let vertex_bytes: Vec<u8> = object
                     .vertices
                     .iter()
@@ -964,6 +1008,7 @@ fn frame(
             graph.import(Resource::Buffer(records.buffer), Access::HostWrite);
             Some(Traced {
                 meshes,
+                tangents,
                 scene: tlas,
                 world: Texture::new(gpu, size, Format::Rgba32Float, deferred_path, true)?,
                 normal: Texture::new(gpu, size, Format::Rgba32Float, deferred_path, true)?,
@@ -1015,12 +1060,15 @@ fn frame(
             lo[0] + (rect[2] - lo[0]).div_ceil(8) * 8,
             lo[1] + (rect[3] - lo[1]).div_ceil(4) * 4,
         ];
-        let placements = crate::primary_ray::placement_table(
-            scene
-                .objects
-                .iter()
-                .map(|o| (1, false, !o.material.double_sided, o.material.thin)),
-        )?;
+        let placements =
+            crate::primary_ray::placement_table(scene.objects.iter().enumerate().map(|(i, o)| {
+                (
+                    1,
+                    normal_map(i).is_some(),
+                    !o.material.double_sided,
+                    o.material.thin,
+                )
+            }))?;
         let mut frame = [0u8; 144];
         frame[..64].copy_from_slice(&crate::mesh::matrix_bytes(inverse));
         frame[64..80].copy_from_slice(bytemuck::cast_slice(&[clear[0], clear[1], clear[2], 1.]));
@@ -1390,7 +1438,7 @@ fn frame(
 
     let mut geometries = Vec::new();
     let mut materials = Vec::new();
-    for object in scene.objects {
+    for (index, object) in scene.objects.iter().enumerate() {
         if !deferred_path {
             let geometry = MeshGeometry::new(
                 gpu,
@@ -1402,12 +1450,16 @@ fn frame(
             geometry.import(&mut graph);
             geometries.push(geometry);
         }
-        let material = StorageBuffer::new(gpu, &object.material.bytes())?;
+        // `MaterialDescriptor::bytes` reads `normal_mapped` off its own texture binding,
+        // which names a wgpu texture and stays empty here.
+        let mut record = object.material.bytes();
+        record[36..40].copy_from_slice(&u32::from(normal_map(index).is_some()).to_ne_bytes());
+        let material = StorageBuffer::new(gpu, &record)?;
         graph.import(Resource::Buffer(material.buffer), Access::HostWrite);
         materials.push(material);
     }
     // `try_upload_texture` and `sampler_descriptor` for each object's texture slots.
-    let mut object_textures: Vec<[Option<(Texture, SamplerDesc)>; 2]> = Vec::new();
+    let mut object_textures: Vec<[Option<(Texture, SamplerDesc)>; 3]> = Vec::new();
     if let Some(textures) = scene.textures {
         ensure!(
             textures.objects.len() == scene.objects.len()
@@ -1415,17 +1467,26 @@ fn frame(
             "scene textures need one entry per object and an anisotropy clamp in 1..=16"
         );
         for object in textures.objects {
-            let mut slots = [None, None];
-            for (slot, (texture, role, format)) in [
+            let mut slots = [None, None, None];
+            // The normal slot is sampled as a one-layer array (`normal_map`).
+            for (slot, (texture, role, format, dimension)) in [
                 (
                     object.base_color,
                     crate::asset::TextureRole::BaseColorSrgb,
                     Format::Rgba8Srgb,
+                    ViewDimension::D2,
                 ),
                 (
                     object.metallic_roughness,
                     crate::asset::TextureRole::MetallicRoughnessLinear,
                     Format::Rgba8,
+                    ViewDimension::D2,
+                ),
+                (
+                    object.normal.map(|n| n.texture),
+                    crate::asset::TextureRole::NormalLinear,
+                    Format::Rgba8,
+                    ViewDimension::D2Array,
                 ),
             ]
             .into_iter()
@@ -1447,6 +1508,7 @@ fn frame(
                     [first.width, first.height],
                     texture.data.mips.len() as u32,
                     format,
+                    dimension,
                 )?;
                 for (level, mip) in texture.data.mips.iter().enumerate() {
                     ensure!(
@@ -1489,14 +1551,23 @@ fn frame(
             .map(|i| traced.meshes.get(i).map_or(&deferred.absent, |m| &m.1))
             .collect();
         arrays.absent = vec![&deferred.absent; draws];
+        arrays.tangents = (0..draws)
+            .map(|i| {
+                traced
+                    .tangents
+                    .get(i)
+                    .and_then(Option::as_ref)
+                    .unwrap_or(&deferred.absent)
+            })
+            .collect();
         // The renderer pads with its default material; padded slots are never read.
         arrays.materials = (0..draws)
             .map(|i| materials.get(i).unwrap_or(&materials[0]))
             .collect();
         arrays.default_samplers = vec![SamplerDesc::default(); draws];
-        // Base colour at 11 and 12, metallic-roughness at 13 and 14: each draw's own
-        // texture and sampler where it has one.
-        for (slot, bindings) in [(0, [11, 12]), (1, [13, 14])] {
+        // Base colour at 11 and 12, metallic-roughness at 13 and 14, the normal map at 15
+        // and 16: each draw's own texture and sampler where it has one.
+        for (slot, bindings) in [(0, [11, 12]), (1, [13, 14]), (2, [15, 16])] {
             arrays.samplers.insert(
                 key(2, bindings[1]),
                 (0..draws)
@@ -1514,6 +1585,7 @@ fn frame(
                 let slot = match (spec.key.group, spec.key.binding) {
                     (2, 11) => Some(0),
                     (2, 13) => Some(1),
+                    (2, 15) => Some(2),
                     _ => None,
                 };
                 arrays.textures.insert(
@@ -2088,6 +2160,9 @@ fn frame(
             gpu.retire(Resource::AccelerationStructure(blas))?;
             vertices.retire(gpu)?;
             indices.retire(gpu)?;
+        }
+        for tangents in traced.tangents.into_iter().flatten() {
+            tangents.retire(gpu)?;
         }
         traced.records.retire(gpu)?;
         post_images.extend([traced.world, traced.normal, traced.visibility]);

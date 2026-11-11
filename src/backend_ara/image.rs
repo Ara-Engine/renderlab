@@ -206,13 +206,19 @@ impl Texture {
         }
         result
     }
-    /// One sampled 2D mip chain, filled level by level with `transfer::upload_mip`.
+    /// One sampled 2D mip chain, filled level by level with `transfer::upload_mip`,
+    /// published as a 2D view or as a one-layer array (`ViewDimension::D2Array`).
     pub fn sampled_mips(
         gpu: &mut GpuDevice,
         size: [u32; 2],
         levels: u32,
         format: Format,
+        dimension: ViewDimension,
     ) -> Result<Self> {
+        anyhow::ensure!(
+            matches!(dimension, ViewDimension::D2 | ViewDimension::D2Array),
+            "a sampled mip chain is one 2D layer"
+        );
         let shape = ImageShape {
             mip_levels: levels,
             ..Default::default()
@@ -230,7 +236,7 @@ impl Texture {
             shape,
         })?;
         let view = ImageViewDesc {
-            dimension: ViewDimension::D2,
+            dimension,
             base_mip: 0,
             mip_count: levels,
             base_layer: 0,

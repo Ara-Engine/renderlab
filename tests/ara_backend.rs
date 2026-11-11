@@ -437,5 +437,8 @@ mod reflection_cases;
 #[path = "ara_backend/cases/local_shadows.rs"]
 mod local_shadow_cases;
 
+#[path = "ara_backend/cases/normal_maps.rs"]
+mod normal_map_cases;
+
 #[path = "ara_backend/cases/textures.rs"]
 mod texture_cases;
