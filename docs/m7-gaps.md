@@ -971,3 +971,11 @@ Pixels on the open ground more than 10 codes above their 21-pixel median:
 - **Fix:** `tr1_native()` compares the two integer sizes, and `tr1_ratio` is exactly 1 in that case. It was the only float equality on a derived ratio in the shaders.
 - **Checked on the RTX:** `gpu_tr1_still_weights` passes (92 short by 628 samples, 0 on the border); game scene with the fox, 40 of 40 frames byte-identical to main on both paths; lib 214 passed.
 - **Still to come:** the Linux gate's run of the test on the Radeon (expected 92 short, 0 on the border) and one quarry timing visit there before and after, since RADV's native frames now leave the upscaling path.
+
+## Layout decorations on workgroup and function variables (validation layer, 2026-11-11)
+
+**OPEN upstream, low priority; no action here.** With the Khronos validation layer on, every Renderlab compute module with a `var<workgroup>` array draws `VUID-StandaloneSpirv-None-10684`: "Invalid explicit layout decorations on type ... the Workgroup storage class has an explicit layout from the ArrayStride decoration". The integration thread saw 120 lines of it running Ara's `cargo test -p ara-renderlab` on the RTX 4070 SUPER (Ara d547adf98, pin a0094f6a6e4), quoting `OpVariable %_ptr_Workgroup__arr_v4float_uint_64`. A second form names the Function storage class and an Offset decoration.
+- **Kernel quoted:** `lc_spheres:array<vec4<f32>,64>` in `shaders/light_cluster.wgsl`. It is not special: naga emits `ArrayStride` on every such array, and Renderlab has about 80 `var<workgroup>` declarations.
+- **Cause:** naga's SPIR-V emission, not our WGSL. Tracked upstream as gfx-rs/wgpu issue 7696 (open).
+- **Why Renderlab's validated runs do not show it:** wgpu-hal 30.0.1's own debug callback silences this message id (`vulkan/instance.rs`, citing that issue), so it never reaches our sink and `gpu_validation_summary` reads errors=0. Ara's messenger is its own and sees it. A lease run with the layer set by environment but without wgpu's debug flags prints it too.
+- **Risk:** drivers accept it today. A stricter driver or a later layer version could make it an error; the fix has to come from naga.
