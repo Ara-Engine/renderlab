@@ -914,7 +914,7 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
 
 ## arrayLength of a buffer-array element on RADV (ara-gpu backend finding, 2026-11-11)
 
-**CONFIRMED on the wgpu renderer** (PR #30 at 904e147, Radeon 760M, RADV, Mesa 26.0.8): first words [100, 101, 102, 103] correct, lengths [3, 3, 3, 3] against bounds [3, 13, 6, 22]. The fix is root's, after P-RELIT lands.
+**CONFIRMED on the wgpu renderer** (PR #30 at 904e147, Radeon 760M, RADV, Mesa 26.0.8): first words [100, 101, 102, 103] correct, lengths [3, 3, 3, 3] against bounds [3, 13, 6, 22]. **Call sites FIXED on main (9fc3ad0, decision M8-ARRAY-LENGTH):** per-draw batch words replace every `arrayLength` of a buffer-array element. Still OPEN: naga's bounds checks (below), the upstream fix (gfx-rs/wgpu issue 10920), and the Radeon reruns of the two RADV-only shadow tests and of the still-camera history-weight test.
 
 - **Fault.** naga 30.0.1 decorates `heap[i].data[j]` NonUniform, but emits `OpArrayLength` on `heap[i].data` with no decoration (`write_runtime_array_length` never adds one). The result is then undefined when the index differs within a workgroup. RADV reads one element's length for the whole workgroup; NVIDIA reads per invocation. The backend's adapter now adds the decoration; the wgpu renderer goes through the same naga path.
 - **Why nothing has shown it.** Every mesh in the compared scenes has the same kind of index buffer.
