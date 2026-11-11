@@ -943,7 +943,7 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
 
 ## Specks after a game-scene cut (root, 2026-11-11)
 
-**OPEN (owner: root, a clamp experiment; the cut unit at the latest). Cause found: GI cache fireflies in newly seen cells, on both paths.** Game scene with the fox, 720p, cut at frame 24, main 575596b, RTX 4070 SUPER. After the cut the open ground shows soft bright blotches a few pixels across (GI-cell sized), not single pixels.
+**FIXED on `t3/speck` (U-SPECK, [speck.md](speck.md) section 2), pending merge. Cause: the arch lamp's bulb, a small white surface 0.13 m from its own light, met by a few cells' fixed gather directions; not a cut effect (the same blobs fill every moving frame). Rays aimed around each local light now gather such surfaces: at 1080p, 4 frames after the cut, blob pixels fall from 17,431 to 8,788 (RT) and 17,858 to 8,399 (non-RT), the GI-off level, with no region of the settled frame changed by more than 0.14 codes. The notes below are the first diagnosis.** Game scene with the fox, 720p, cut at frame 24, main 575596b, RTX 4070 SUPER. After the cut the open ground shows soft bright blotches a few pixels across (GI-cell sized), not single pixels.
 
 Pixels on the open ground more than 10 codes above their 21-pixel median:
 
