@@ -306,7 +306,7 @@ Engine inputs a program may call include `sample_base_color`, `sample_metallic_r
 ## Current limits
 
 - At most 32 shading programs per frame; `SoftShadows::Temporal` frames use one (above).
-- At most 256 mesh-material groups per frame (`TRACED_DRAWS`), on both paths. Objects sharing a mesh and material count once. Per-batch program, glass-reflection and virtual-shadow tables share this limit; transparent draw slots also follow `TRACED_DRAWS`.
+- At most 1,024 mesh-material groups per frame (`TRACED_DRAWS`; 256 until 2026-11-11), on both paths. Objects sharing a mesh and material count once. Per-batch program, glass-reflection and virtual-shadow tables share this limit; transparent draw slots also follow `TRACED_DRAWS`.
 - Materials must be double-sided while the sun casts shadows.
 - Map heads shadow at most 128 local lights (`Settings::local_shadows`); lights beyond the selected pool remain unshadowed. RT heads shadow all contributing clustered locals. Coarse tail tiles, changed-light full-detail map redraws and reflection-hit visibility remain limitations. Budget reductions and removal/reindexing of the light vector do not guarantee a smooth fade. See [Lights gaps](m7-gaps.md#lights).
 - Glass casts coloured sun shadows only (no local-light shadows) and is invisible to GI rays; particles cast no shadows (TP1, TP2).
