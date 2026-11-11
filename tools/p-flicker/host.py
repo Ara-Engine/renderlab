@@ -1,7 +1,7 @@
 """P-FLICKER host discipline (copied from tools/p-still/host.py): schedule lines, root-order checks, the atomic build slot and
 GPU leases through scripts/n8-run.py (<=15 min). Builds also take the stillkit mutex, only once admitted.
 
-    py -3 -B tools/p-flicker/host.py build [lib]      # release adapter (or the lib test binary), one Cargo command
+    py -3 -B tools/p-flicker/host.py build [lib|examples]   # release adapter (lib: the test binary; examples: adapter + game_scene), one Cargo command
     py -3 -B tools/p-flicker/host.py lease LABEL MIN -- COMMAND...   # full-quarry lease (--quarry-lease), no validation layer
 """
 import importlib.util
@@ -16,8 +16,9 @@ import time
 import uuid
 
 REPO = Path(__file__).resolve().parents[2]
-OWNER = "p-flicker"
-WORK = Path("D:/Coding/renderlab-work/p-flicker")
+OWNER = os.environ.get("P_FLICKER_OWNER", "p-flicker")
+UNIT = Path("D:/Coding/renderlab-work/p-flicker")  # Unreal captures and the clip manifest
+WORK = Path(os.environ.get("P_FLICKER_WORK", UNIT))  # runs, sheets, builds (another unit sets its own)
 SCHEDULE = Path("E:/renderlab-work/gpu-schedule.md")
 BUILD_SLOT = Path("D:/Coding/renderlab-work/build-slot.lock")
 TARGET = WORK / "target"
@@ -155,7 +156,8 @@ def wait_ready(r, label, minutes=90):
 def build(kind="adapter"):
     r = runner()
     command = (["cargo", "test", "--locked", "-j", "2", "--lib", "--no-run"] if kind == "lib" else
-               ["cargo", "build", "--release", "--locked", "-j", "2", "--example", "p_yard_capture"])
+               ["cargo", "build", "--release", "--locked", "-j", "2", "--example", "p_yard_capture"]
+               + (["--example", "game_scene"] if kind == "examples" else []))
     WORK.mkdir(parents=True, exist_ok=True)
     post(f"[{OWNER} request] owner={OWNER} {kind} build: one Cargo command, atomic build slot + stillkit mutex; >=10 GiB start, stop <5 GiB/5 GB; no foreign compiler; -j 2 {r.utc()}")
     import ctypes
@@ -191,6 +193,8 @@ def build(kind="adapter"):
             if kind != "lib":
                 BINARY.parent.mkdir(exist_ok=True)
                 shutil.copy2(TARGET / "release/examples/p_yard_capture.exe", BINARY)
+                if kind == "examples":  # P-SPLIT: the game scene for compile timings, beside the adapter
+                    shutil.copy2(TARGET / "release/examples/game_scene.exe", BINARY.parent / "game_scene.exe")
             commit = sp.check_output(["git", "rev-parse", "HEAD"], cwd=REPO, text=True).strip()
             dirty = sp.check_output(["git", "status", "--porcelain", "--", "src", "shaders", "crates", "Cargo.toml", "Cargo.lock"],
                                     cwd=REPO, text=True).strip()

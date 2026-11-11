@@ -352,7 +352,10 @@ pub(super) struct Compiled {
     pub layout: Option<ParameterLayout>,
 }
 
-fn module(abi: &ProgramAbi<'_>, label: &str, composed: &Composed, engine_owned: bool) -> Module {
+/// A program module, from the cache or newly created. Program modules always compile checked,
+/// the bundled standard program included (P-SPLIT): one check mode for every program means an
+/// edit recompiles only the kernels its text changes, not every kernel the program has.
+fn module(abi: &ProgramAbi<'_>, label: &str, composed: &Composed) -> Module {
     if let Some(module) = abi.modules.get(&composed.source) {
         return module;
     }
@@ -362,11 +365,7 @@ fn module(abi: &ProgramAbi<'_>, label: &str, composed: &Composed, engine_owned: 
                 label: Some(label),
                 source: wgpu::ShaderSource::Wgsl(composed.source.as_str().into()),
             };
-            if engine_owned {
-                abi.device.create_engine_shader_module(descriptor)
-            } else {
-                abi.device.create_shader_module(descriptor)
-            }
+            abi.device.create_program_module(descriptor)
         },
         ResourceKind::ShaderModule,
     ));
@@ -421,24 +420,20 @@ pub(super) fn compile_program(
     let compose = started.elapsed() - analysis;
     let modules_started = Instant::now();
     let scopes = OperationScopes::new(abi.device);
-    let engine_owned = source == STANDARD_PROGRAM;
     let raster_variant = |head: &str| {
         module(
             abi,
             label,
             &program::compose(head, source, Stage::Raster, parameters),
-            engine_owned,
         )
     };
     let modules = ProgramModules {
-        lit: module(abi, label, &raster, engine_owned),
+        lit: module(abi, label, &raster),
         hardware: preludes.hardware.map(raster_variant),
         fresh: preludes.fresh.map(raster_variant),
         traced: (!traced_sources.is_empty())
-            .then(|| [0, 1].map(|i| module(abi, label, &traced_sources[i], engine_owned))),
-        temporal: traced_sources
-            .get(2)
-            .map(|c| module(abi, label, c, engine_owned)),
+            .then(|| [0, 1].map(|i| module(abi, label, &traced_sources[i]))),
+        temporal: traced_sources.get(2).map(|c| module(abi, label, c)),
         streamed: None,
     };
     if let Some(error) = scopes.finish() {
@@ -933,11 +928,11 @@ impl Renderer {
         let abi = self.program_abi();
         let scopes = OperationScopes::new(&self.device);
         // Modules are cheap (naga); only the pipeline this frame shades with compiles.
-        let modules = slot.modules.streamed.clone().unwrap_or_else(|| {
-            sources
-                .each_ref()
-                .map(|c| module(&abi, &slot.label, c, slot.source == STANDARD_PROGRAM))
-        });
+        let modules = slot
+            .modules
+            .streamed
+            .clone()
+            .unwrap_or_else(|| sources.each_ref().map(|c| module(&abi, &slot.label, c)));
         let pipeline = abi.primary.unwrap().streamed_pipeline(
             abi.device,
             abi.ledger,
@@ -1006,12 +1001,7 @@ impl Renderer {
         let mut modules = vec![];
         for (i, composed) in sources.iter().enumerate() {
             let scopes = OperationScopes::new(&self.device);
-            modules.push(module(
-                &abi,
-                &self.program_slot(missing[i]).label,
-                composed,
-                self.program_slot(missing[i]).source == STANDARD_PROGRAM,
-            ));
+            modules.push(module(&abi, &self.program_slot(missing[i]).label, composed));
             if let Some(error) = scopes.finish() {
                 return Err(rejected(i, error));
             }
@@ -1069,9 +1059,7 @@ impl Renderer {
                 film_accumulation::compose_shading(&temporal, &slot.source, parameters),
             ];
             let scopes = OperationScopes::new(&self.device);
-            let [hard, soft, film] = sources
-                .each_ref()
-                .map(|c| module(&abi, &slot.label, c, slot.source == STANDARD_PROGRAM));
+            let [hard, soft, film] = sources.each_ref().map(|c| module(&abi, &slot.label, c));
             if let Some(error) = scopes.finish() {
                 return Err(match scope_error(&slot.label, error, &sources) {
                     Error::Fault(Fault(message)) => self.fail(message),

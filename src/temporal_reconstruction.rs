@@ -571,12 +571,112 @@ pub(crate) fn zones_source(record: &str) -> String {
 }
 pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
+    let mode = ["tr1-mask", "tr1-raw", "tr1-window"]
+        .into_iter()
+        .find(|m| p_still(m));
+    let mut resolve = match mode {
+        Some(mode) => mask_resolve(mode),
+        None => RESOLVE.to_owned(),
+    };
+    if let Ok(k) = std::env::var("RENDERLAB_P_SPLIT_FRESH_CLAMP") {
+        resolve = fresh_clamp_resolve(
+            &resolve,
+            k.parse()
+                .map_err(|_| Error::InvalidInput("RENDERLAB_P_SPLIT_FRESH_CLAMP: a number"))?,
+        );
+    }
     // MV1 motion-source seam; history/resolve policy belongs to MQ1.
     Ok(format!(
-        "{head}\n{}\n{RESOLVE}\n{}",
+        "{head}\n{}\n{resolve}\n{}",
         include_str!("../shaders/object_motion.wgsl"),
         zones_source("tr1.zones")
     ))
+}
+
+/// Measurement only (P-SPLIT crack flashes): a continued history's fresh sample is clamped to
+/// its 8 same-surface neighbours' range, widened by `k` times that range on each side.
+fn fresh_clamp_resolve(source: &str, k: f32) -> String {
+    let seam = "var x=sample;";
+    assert_eq!(source.matches(seam).count(), 1, "TR1 fresh clamp seam");
+    source.replace(seam, "var x=tr1_fresh_clamp(p,s.id,sample,size);")
+        + &format!(
+            "
+fn tr1_fresh_clamp(p:vec2<i32>,id:u32,x:vec3<f32>,size:vec2<u32>)->vec3<f32> {{
+    var lo=vec3<f32>(3.4e38);var hi=vec3<f32>(-3.4e38);var n=0u;
+    for(var i=0;i<9;i+=1) {{
+        let t=p+vec2<i32>(i%3,i/3)-vec2<i32>(1);
+        if i==4 || !tr1_inside(t,size) || tr1_ring(i)!=id {{continue;}}
+        let c=textureLoad(tr1_sample,tr1_map(t),0).xyz;
+        lo=min(lo,c);hi=max(hi,c);n+=1u;
+    }}
+    if n<2u {{return x;}}
+    let r=(hi-lo)*{k:?};
+    return clamp(x,lo-r,hi+r);
+}}
+"
+        )
+}
+
+/// Measurement only (P-SPLIT crack flashes): `RENDERLAB_P_STILL=tr1-mask|tr1-raw|tr1-window`
+/// writes how TR1 continued each pixel into the output's alpha, which nothing after TR1 reads
+/// as colour. History and every other target are production's; production compiles
+/// `RESOLVE` unchanged. Alpha: 1 restart (cut), 2 still, 3 Catmull-Rom (16 taps), 4 bilinear
+/// (4 taps), 5 bilinear (1-3 taps), 6 no tap (spatial start), 7 rejected (caster or relit
+/// light); +16 on silhouettes; 32 a third-surface pixel. `tr1-raw` writes this frame's sample
+/// as the colour, `tr1-window` the history weight and window before the sample (r, g).
+fn mask_resolve(mode: &str) -> String {
+    let colour = match mode {
+        "tr1-raw" => "textureLoad(tr1_sample,tr1_map(p),0).xyz",
+        "tr1-window" => "vec3<f32>(tr1_mask_history,0.0)",
+        _ => "",
+    };
+    let film = |film: &str| {
+        if colour.is_empty() {
+            film.to_owned()
+        } else {
+            colour.to_owned()
+        }
+    };
+    let edits = [
+        (
+            "if shown==0u || total<=0.0 {return h;}",
+            "if shown==0u || total<=0.0 {return h;}\n    tr1_mask_last=select(select(5.0,4.0,shown==4u),2.0,tr1_still(s));"
+                .to_owned(),
+        ),
+        (
+            "h.colour=clamp(sharp,lo,hi);",
+            "h.colour=clamp(sharp,lo,hi);tr1_mask_last=3.0;".to_owned(),
+        ),
+        (
+            "if tr1.flags.x==0u {h=tr1_history(p,s,size);}",
+            "tr1_mask_last=select(6.0,1.0,tr1.flags.x!=0u);if tr1.flags.x==0u {h=tr1_history(p,s,size);}\n    tr1_mask_own=tr1_mask_last;tr1_mask_history=vec2<f32>(h.weight,h.window);".to_owned(),
+        ),
+        (
+            "textureStore(tr1_output,p,vec4<f32>(film.xyz,1.0));",
+            format!("textureStore(tr1_output,p,vec4<f32>({},tr1_mask_own));", film("film.xyz")),
+        ),
+        (
+            "textureStore(tr1_output,p,vec4<f32>(film,1.0));",
+            format!("textureStore(tr1_output,p,vec4<f32>({},tr1_mask_own+16.0));", film("film")),
+        ),
+        (
+            "textureStore(tr1_output,p,vec4<f32>(mix(theirs,mine.xyz,own.coverage),1.0));",
+            format!(
+                "textureStore(tr1_output,p,vec4<f32>({},32.0));",
+                film("mix(theirs,mine.xyz,own.coverage)")
+            ),
+        ),
+    ];
+    let mut source = RESOLVE.replace(
+        "var rejected:Tr1History;return rejected;",
+        "tr1_mask_last=7.0;var rejected:Tr1History;return rejected;",
+    );
+    for (from, to) in edits {
+        assert_eq!(source.matches(from).count(), 1, "TR1 mask seam: {from}");
+        source = source.replace(from, &to);
+    }
+    source
+        + "\nvar<private> tr1_mask_last:f32;\nvar<private> tr1_mask_own:f32;\nvar<private> tr1_mask_history:vec2<f32>;\n"
 }
 
 impl PrimaryState {
@@ -2016,7 +2116,15 @@ mod tests {
                 .count(),
             1
         );
-        for source in [resolve, off, trace, PENUMBRA_LIST.to_owned()] {
+        // The measurement-only mask modes (mask_resolve) must stay valid as TR1 changes.
+        let masks = ["tr1-mask", "tr1-raw", "tr1-window"]
+            .map(|m| resolve.replace(RESOLVE, &mask_resolve(m)));
+        let resolve_clone = resolve.clone();
+        for source in [resolve, off, trace, PENUMBRA_LIST.to_owned()]
+            .into_iter()
+            .chain(masks)
+            .chain([fresh_clamp_resolve(&resolve_clone, 0.5)])
+        {
             let module = naga::front::wgsl::parse_str(&source).unwrap();
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),

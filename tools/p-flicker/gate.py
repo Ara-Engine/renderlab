@@ -10,7 +10,8 @@ import sys
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-WORK = Path("D:/Coding/renderlab-work/p-flicker")
+UNIT = Path("D:/Coding/renderlab-work/p-flicker")  # Unreal captures and the clip manifest
+WORK = Path(os.environ.get("P_FLICKER_WORK", UNIT))  # runs, sheets, builds (another unit sets its own)
 
 if __name__ == "__main__":
     code = subprocess.call([sys.executable, "-B", str(HERE / "run.py"), *sys.argv[1:]]) if sys.argv[1:] else 0

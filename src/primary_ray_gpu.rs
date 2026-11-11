@@ -250,6 +250,16 @@ pub(super) fn shading_sources(wgsl: &str, program: &str) -> Result<[String; 2], 
     }))
 }
 
+#[cfg(test)]
+pub(super) fn compile_structure_reconstruction_trace(kernels: &str) -> Result<String, Error> {
+    temporal_reconstruction::trace_source(kernels)
+}
+
+#[cfg(test)]
+pub(super) fn compile_structure_reconstruction_resolve(prelude: &str) -> Result<String, Error> {
+    temporal_reconstruction::resolve_source(prelude)
+}
+
 /// Identity of the traced kernel modules, combined with the programs' on the HDR images
 /// they write.
 pub(super) fn sources_hash(sources: &[String; 2]) -> [u8; 32] {
