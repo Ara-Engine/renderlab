@@ -140,6 +140,12 @@ pub struct Engine {
     views_made: u64,
     /// The 2D targets every view's frames take and give back in turn (`image::pool`).
     targets: super::image::pool::Pool,
+    /// The scene's object ids and the last frame's tag tables (docs/design-id-output.md).
+    ids: crate::object_ids::EngineIds,
+    /// Finished id readbacks, for `poll`.
+    events: crate::Events,
+    /// Id requests made so far: the next one's name.
+    requests: u64,
     /// Meshes created so far: the next one's identity.
     meshes: u64,
     /// Materials created so far: the next one's identity.
@@ -209,6 +215,9 @@ impl Engine {
             views: Vec::new(),
             views_made: 0,
             targets: Default::default(),
+            ids: Default::default(),
+            events: Default::default(),
+            requests: 0,
             meshes: 0,
             materials: 0,
             environments: 0,
@@ -699,11 +708,6 @@ impl Engine {
         if desc.width == 0 || desc.height == 0 {
             return Err(Error::InvalidInput("view extent must be nonzero"));
         }
-        if desc.outputs.ids {
-            return Err(Error::InvalidInput(
-                "view id output is not built yet (U-IDS, docs/design-id-output.md)",
-            ));
-        }
         validate_look(&self.state.settings, &desc.look, desc.render_scale)?;
         if desc.view_mode != ViewMode::Lit {
             self.refuse("create_view", "view modes other than lit");
@@ -771,6 +775,78 @@ impl Engine {
             height: view.desc.height,
             rgba8: display,
         })
+    }
+    /// The embedder's ids for an object's primitives: disjoint ranges `(first primitive,
+    /// count, id)`, as the wgpu engine takes them. Frames from the next one on report them.
+    pub fn set_object_ids(
+        &mut self,
+        object: ObjectId,
+        ranges: &[(u32, u32, u32)],
+    ) -> Result<(), Error> {
+        self.state.transform(object)?;
+        self.ids.objects.set(object, ranges)
+    }
+    /// The view's id texture of its last frame with ids on (`ViewDesc::outputs.ids`):
+    /// R32Uint, the view's size, layer 0 the opaque ids and layer 1 the front ids.
+    pub fn view_ids(&self, view: ViewId) -> Option<&super::image::Texture> {
+        self.view(view).ok()?.frames.ids()
+    }
+    /// One id layer of the view's last frame packed bit-exact into an RGBA8 image (R =
+    /// bits 0-7 ... A = bits 24-31), left in `CopySource` for a presenter to copy: what
+    /// `render_view_ids_to` writes into a caller's texture on the wgpu engine.
+    pub fn view_ids_packed(
+        &mut self,
+        gpu: &mut GpuDevice,
+        view: ViewId,
+        layer: crate::IdLayer,
+    ) -> Result<&super::image::Texture, Error> {
+        let at = self.view_index(view)?;
+        let layer = match layer {
+            crate::IdLayer::Opaque => 0,
+            crate::IdLayer::Front => 1,
+        };
+        self.views[at]
+            .frames
+            .pack_ids(gpu, &self.cache, layer)
+            .map_err(fault)
+    }
+    /// Reads a rectangle of the view's last frame's ids. The frame is complete when
+    /// `render_view` returns, so the readback finishes here; it arrives at the next
+    /// `poll` (`Events::ids`), as on the wgpu engine.
+    pub fn request_ids(
+        &mut self,
+        gpu: &mut GpuDevice,
+        view: ViewId,
+        rect: crate::IdRect,
+    ) -> Result<crate::IdRequest, Error> {
+        let at = self.view_index(view)?;
+        let desc = &self.views[at].desc;
+        rect.check(desc.width, desc.height)?;
+        let ids = self.views[at]
+            .frames
+            .read_ids(gpu, [rect.x, rect.y, rect.width, rect.height])
+            .map_err(fault)?;
+        self.requests += 1;
+        let request = crate::IdRequest(self.requests);
+        self.events.ids.push(crate::IdReadback {
+            request,
+            view,
+            frame: FrameId(self.views[at].frame),
+            rect,
+            ids: ids
+                .into_iter()
+                .map(|[opaque, front]| crate::IdPixel { opaque, front })
+                .collect(),
+        });
+        while self.events.ids.len() > crate::KEPT_ID_EVENTS {
+            self.events.ids.remove(0);
+            self.events.ids_dropped += 1;
+        }
+        Ok(request)
+    }
+    /// The id readbacks finished since the last poll.
+    pub fn poll(&mut self) -> Result<crate::Events, Error> {
+        Ok(std::mem::take(&mut self.events))
     }
     /// Draws `view`'s next frame from `camera` on `gpu` (the device every frame of this
     /// engine uses).
@@ -844,6 +920,30 @@ impl Engine {
         let material_keys: Vec<u64> = opaque.iter().map(|p| p.material.key).collect();
         let placements: Vec<&[Mat4]> = opaque.iter().map(|p| p.placements).collect();
         let skins: Vec<Option<Skin<'_>>> = opaque.iter().map(|p| p.skin).collect();
+        // The view's ids: the tag tables in the frame's placement order, every opaque
+        // placement's entry and then every transparent one's (`prepare_view_ids`).
+        let id_entries = desc.outputs.ids.then(|| {
+            let mut batches = Vec::new();
+            for id in self.state.batches.ids() {
+                if let (Ok(batch), Ok(entry)) = (
+                    self.state.batches.get(id),
+                    self.state
+                        .batches
+                        .get(id)
+                        .and_then(|b| self.state.materials.get(b.material)),
+                ) {
+                    batches.push((entry.material.transparency.is_some(), &batch.objects[..]));
+                }
+            }
+            let mut tables = crate::object_ids::TagTables::default();
+            self.ids.objects.tables(batches.into_iter(), &mut tables);
+            let opaque_count: usize = opaque.iter().map(|p| p.placements.len()).sum();
+            let mut entries = tables.opaque.clone();
+            entries.resize(opaque_count, [0, 0]);
+            entries.extend_from_slice(&tables.transparent);
+            entries.resize(opaque_count + transparent.len(), [0, 0]);
+            (entries, tables.ranges)
+        });
         let transparent_objects = objects(&transparent);
         let values: Vec<Vec<(&str, Value)>> = opaque
             .iter()
@@ -937,6 +1037,9 @@ impl Engine {
             sky_map,
             skins: Some(&skins),
             colour_lut: look.colour_lut.as_ref(),
+            ids: id_entries
+                .as_ref()
+                .map(|(entries, ranges)| forward::IdScene { entries, ranges }),
         };
         let images = self.views[at]
             .frames
@@ -1065,6 +1168,23 @@ impl Scene for Bound<'_> {
     }
     fn tick(&mut self, seconds: f32) -> Result<(), Error> {
         self.engine.tick(seconds)
+    }
+    fn set_object_ids(
+        &mut self,
+        object: ObjectId,
+        ranges: &[(u32, u32, u32)],
+    ) -> Result<(), Error> {
+        self.engine.set_object_ids(object, ranges)
+    }
+    fn request_ids(
+        &mut self,
+        view: ViewId,
+        rect: crate::IdRect,
+    ) -> Result<crate::IdRequest, Error> {
+        self.engine.request_ids(self.gpu, view, rect)
+    }
+    fn poll(&mut self) -> Result<crate::Events, Error> {
+        self.engine.poll()
     }
     fn create_view(&mut self, desc: &ViewDesc) -> Result<ViewId, Error> {
         self.engine.create_view(desc)
