@@ -11,8 +11,8 @@ Scope after root's steers: (A) first, the quarry crack flashes P-FLICKER left; (
 | A. Crack flashes: capture TR1's per-pixel continuation mask | 64% of the >20-code step energy sits on the 13% of quarry pixels where TR1 rejected history taps, all along the scan's crack folds. Bright fresh samples are not the cause: a fresh-sample clamp leaves flicker at 4.32 | **MERGE** the measurement switch (production source unchanged). Fix not attempted, per root's steer: the next flicker unit |
 | B1. Trust-policy fan-out | Every program module compiles checked. A source-only edit to a glass program now changes 2 binaries, down from 24 (census) | **MERGE** |
 | B2. GI-cell and glass reflected-hit modules compiled program text unchecked | Both now go through the one program-module entry and compile checked | **MERGE** (with B1) |
-| Frame-time cost of B1/B2 (quarry, interleaved) | None measurable: RT still 3.01-3.15 vs 3.03-3.19 ms, non-RT still 8.03-8.24 vs 8.17-8.36 ms (checked vs old) | — |
-| B3. Census tool (draft PR #11) | Merged in with main; 1,168 of 1,171 records emitted. Its `program-bins` entry predates main's `PRIMARY_BATCHES` prefix and fails to parse | **MERGE** the tool; the one stale entry is an open gap |
+| Frame-time cost of B1/B2 (quarry, interleaved) | None measurable: RT still 3.01-3.15 vs 3.03-3.19 ms, non-RT still 8.03-8.24 vs 8.17-8.36 ms (checked vs old); HDR 125/125 identical per path | — |
+| B3. Census tool (draft PR #11) | Merged in; 1,168 of 1,171 records emitted at 4ae6fdb. Its `program-bins` entry predated main's `PRIMARY_BATCHES` prefix; it now calls `program_lists::bin_source()` (not rebuilt) | **MERGE** after the merge gate reruns it |
 | Kernel split | Not started: P-SKY took the cold game scene to about 11 s and Showcase through Ara to 24-25 s (root) | Deferred by root |
 
 No new resource kind, binding shape, texture view, sampler, storage format or device feature. No planner signature or per-frame record changes (`shadow_gpu::plan_frame`, `PostSettings::record`, `prepare_gi` untouched).
@@ -79,11 +79,11 @@ Change: every module composed from program text compiles checked: the standard a
 | non-RT moving | 10.44 / 10.33 | 10.30 / 10.22 | 2.5x slower |
 | non-RT cut | 42.74 / 44.34 | 42.77 / 43.97 | 10.4-10.7x slower |
 
-The checked kernels are within visit-to-visit noise of the unchecked ones, and if anything faster. The image is unchanged in principle: runtime checks change results only on out-of-range accesses (C). The identity captures from this lease (`idu`/`idc`) were not on disk afterwards (their `engine.json` files are there, the HDR dumps are not), so HDR identity is **not verified** here.
+The checked kernels are within visit-to-visit noise of the unchecked ones, and if anything faster. The image is unchanged in principle: runtime checks change results only on out-of-range accesses (C). HDR identity: root compared this lease's `idu`/`idc` captures before they were cleared: 125 of 125 frames identical on each path (docs/m7-gaps.md, "M8 P-SPLIT parked").
 
 ## Census (M)
 
-The census tool from draft PR #11 is merged in, conflict-resolved against main (`visibility_buffer.rs`). Its catalogue now records the checked API for every program-composed module, GI cell and glass reflection included. Run inside `split-l2` on `4ae6fdb` (after P-SKY): 1,168 records, 3 failures. The failures are all the same stale entry: `program-bins` includes `program_bins.wgsl` raw, but main now prepends `const PRIMARY_BATCHES` in `program_lists::bin_source`. The fix is to call that composer from the catalogue; it is listed as open.
+The census tool from draft PR #11 is merged in, conflict-resolved against main (`visibility_buffer.rs`). Its catalogue now records the checked API for every program-composed module, GI cell and glass reflection included. Run inside `split-l2` on `4ae6fdb` (after P-SKY): 1,168 records, 3 failures. The failures are all the same stale entry: `program-bins` included `program_bins.wgsl` raw, but main now prepends `const PRIMARY_BATCHES` in `program_lists::bin_source`. The catalogue now calls that composer; this and the later merge of main were not rebuilt in this unit, so the merge gate reruns the census.
 
 | Default policy, user edit | Before (PR #11, main ff19aef) | After (this branch) |
 |---|---:|---:|

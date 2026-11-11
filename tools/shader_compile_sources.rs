@@ -125,7 +125,7 @@ pub(super) fn sources(program_source: &str) -> Result<Vec<Source>, String> {
         &mut out,
         "shared",
         "program-bins",
-        include_str!("../shaders/program_bins.wgsl").to_owned(),
+        primary_ray_gpu::program_lists::bin_source(),
         true,
         &["program_bins"],
     );

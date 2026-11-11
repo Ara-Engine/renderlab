@@ -767,9 +767,9 @@ Reported by Ara's integration thread through `ara capture` on the RTX 4070 SUPER
     - FIXED, product defect: cold starts could use unbounded driver memory. Each program shading kernel holds about 4.5-5 GB of NVIDIA compiler memory while it compiles, and the engine compiled them all at once (18.3 GB private in lease pipe1). A process-wide limit now keeps one native compile in flight by default. Measured cold peaks: 5.1-6.1 GB, also with two engines.
     - Measured cause of the ~100 s: the program shading kernel is 89-96% of cold start on both paths. Standard program 69-96 s, toon 26-31 s, glass reflection 8 s; all engine kernels together 5-7 s. The cost comes from engine helpers composed into every program's kernel.
   - Still open:
-    - Ara's 120 s limit. Cold game-scene starts are 125-143 s, serial under the memory limit, so a first attempt can still miss and the retry succeeds. The fix is moving GI lookup and local-shadow visibility out of the program kernel (census boundaries 3-4, draft PR #11); measure its frame cost against these compile numbers.
+    - ~~Ara's 120 s limit.~~ FIXED by P-SKY: game scene cold first image about 10-11 s on both paths (P-SPLIT: 10.9 s RT, 9.9 s non-RT, peak private 1.3 / 2.0 GB; warm 0.9 s), Showcase through Ara 24-25 s cold. The kernel split is deferred.
     - Quarry startup memory. The warm quarry reaches 8 GB private before its first image, from scene preparation or upload staging (main reaches 8.5 GB at 16 s). It cannot run under the 8 GB lease watchdog.
-    - Trust policy. An edit to the standard program switches all 24 of its kernels from unchecked to checked; pin programs to checked after a frame-time A/B. GI-cell and glass reflected-hit pipelines compose user text through the unchecked engine API.
+    - Trust policy and the two unchecked user-text paths: fixed on `t3/p-split`, not yet merged (see "M8 P-SPLIT parked").
     - The lease runner (scripts/m6-film-run.py) forces the Khronos validation layer on every child, so n8-run timings since F0 include it.
 - **OPEN, programmable shading: reflection hits shade with the receiver's program and the hit's material.**
   - A program that adds a per-material glow in `shade` makes every reflection it shows glow at its own value; with an emissive map, the hit's textures stand in for the map.
@@ -916,9 +916,9 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
 
 **Left, OPEN**
 1. Crack-flash fix. Candidates, unmeasured: a tap test that tolerates near-coplanar folds of one mesh, or keeping the window when only outer taps fail and renormalising over the accepted ones. Real disocclusions must keep rejecting, so the S4 door and the silhouette tests gate it.
-2. Merge the trust policy. The numbers above support it. Before merging: fix the census tool, whose `cpu_shader_compile_structure` test fails on the branch because it composes the `program-bins` module without the `PRIMARY_BATCHES` constant (a tool fault, three variants), and merge main (the branch is based on a97d663).
+2. Merge the trust policy. The numbers above support it. Since the park (P-SPLIT, after resuming): main is merged into the branch (4cc14916; conflicts in `temporal_reconstruction.rs` and `virtual_shadow_gpu.rs` were adjacent additions, both kept), and the census catalogue now calls `program_lists::bin_source()` for `program-bins`. **Neither was built or tested after these two commits**: the merge gate must build, run the lib tests and rerun `cpu_shader_compile_structure` (expect 1,171 records, 0 failures). The census does not yet list main's new N-VSM1 disk lookup module (`virtual_shadow_gpu::disk_source`); add it when convenient.
 3. The kernel split itself was not started. P-SKY took the game scene's cold first image from about 183 s to about 10 s, so it is no longer urgent; the remaining cold cost is the per-kernel NVIDIA compile (P-PIPE).
-4. `docs/p-split.md` has empty Census and Cold start sections and no result summary.
+4. ~~`docs/p-split.md` has empty sections~~ Filled: result table, A/B, census (standard → glass tint now changes 2 binaries, was 24), cold start.
 
 ## arrayLength of a buffer-array element on RADV (ara-gpu backend finding, 2026-11-11)
 
