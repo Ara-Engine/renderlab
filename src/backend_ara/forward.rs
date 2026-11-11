@@ -508,6 +508,10 @@ impl Frames {
         }
         Ok(())
     }
+    /// The last reconstructed frame's plan (`History::planned`), for telemetry.
+    pub fn reconstruction_plan(&self) -> Option<(bool, u32)> {
+        self.tr1.as_ref().map(History::planned)
+    }
     /// The serial the next post frame's `Settings` record carries.
     pub fn next_post_serial(&self) -> u32 {
         self.post_serial.wrapping_add(1)
@@ -1045,23 +1049,49 @@ fn frame(
                     _ => crate::ShadowRequest::None,
                 })
                 .collect();
-            // `reconstruction_key`: what restarts history when it changes. Local lights'
-            // candela is left out, as there, so a flicker continues under the box.
+            // `reconstruction_key`: what restarts history when it changes, and nothing
+            // the planner follows instead. As there: a sun enters by its lux alone (its
+            // turn caps the window), a local light without its candela (a flicker
+            // continues under the box), the environment by its uniform and whether the
+            // sky shows, and the scene by its draws and materials. The atmosphere's
+            // settings stand for `set_atmosphere`'s cut. What the procedural sky's
+            // content is keyed on (the eye's altitude among it) is not here: it relights
+            // the cache and leaves history alone, and its bits change under a camera that
+            // only translates. Reflection and cache settings do not restart either.
             let key: [u8; 32] = {
                 use sha2::Digest;
                 let lights: Vec<_> = scene
                     .lighting
                     .lights
                     .iter()
-                    .cloned()
-                    .map(tr::without_candela)
+                    .map(|light| match *light {
+                        crate::Light::Directional { lux, .. } => format!("directional {lux:?}"),
+                        local => format!("{:?}", tr::without_candela(local)),
+                    })
                     .collect();
                 let mut h = sha2::Sha256::new();
                 h.update(format!("{:?}{:?}{lights:?}", r.settings, scene.sun_shadows).as_bytes());
-                h.update((scene.objects.len() as u64).to_le_bytes());
-                h.update(environment_digest);
-                h.update([u8::from(indirect.is_some())]);
-                h.update(format!("{reflections:?}").as_bytes());
+                h.update(format!("{:?}{:?}", scene.primary, settings).as_bytes());
+                for object in scene.objects {
+                    h.update((object.vertices.len() as u64).to_le_bytes());
+                    h.update((object.indices.len() as u64).to_le_bytes());
+                    h.update(format!("{:?}", object.material.base_color).as_bytes());
+                    h.update(
+                        [object.material.metallic, object.material.roughness]
+                            .map(f32::to_bits)
+                            .map(u32::to_le_bytes)
+                            .concat(),
+                    );
+                }
+                h.update(
+                    scene
+                        .lighting
+                        .environment
+                        .map(f32::to_bits)
+                        .map(u32::to_le_bytes)
+                        .concat(),
+                );
+                h.update(&uniform[32..48]);
                 h.finalize().into()
             };
             let planned = images.plan(tr::PlanInputs {
@@ -1086,8 +1116,14 @@ fn frame(
                 rigid_motion,
                 listing: false,
             });
-            // The rotation word, then the sampling words the planner budgets.
-            frame[84..88].copy_from_slice(&tr::rotation(k).to_ne_bytes());
+            // The rotation word (zero with `rotate_directions` off), then the sampling
+            // words the planner budgets.
+            let rotation = if r.settings.rotate_directions {
+                tr::rotation(k)
+            } else {
+                0
+            };
+            frame[84..88].copy_from_slice(&rotation.to_ne_bytes());
             frame[112..128].copy_from_slice(&planned.sampling);
             let record = StorageBuffer::new(gpu, &planned.frame)?;
             graph.import(Resource::Buffer(record.buffer), Access::HostWrite);

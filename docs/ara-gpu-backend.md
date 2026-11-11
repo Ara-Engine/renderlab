@@ -1665,12 +1665,36 @@ history and keeps the sample index, as `cut_reconstruction` does. Refused: rende
 scale below native, and settings or a size that change within a sequence. The ray
 budget is planned but nothing consumes it until Interactive shadows are assembled.
 
-Two tests on a bright card over a dark floor, seen from straight above:
+Three tests on a bright card over a dark floor, seen from straight above:
 
 | Test | What it holds the resolve to |
 |---|---|
 | `reconstruction_accumulates_jittered_samples_into_edge_coverage` | The first frame restarts at weight one and equals the unreconstructed frame. Each later frame adds one sample to the mean weight, within 1%, and leaves smooth regions at the plain frame's value within 0.1%. After 48 frames the pixel the card's left edge crosses holds 0.290 of the card's radiance where the card covers 0.290 of its area, and the top-edge pixel 0.749 where it covers 0.753: 48 jittered point samples have become coverage. Bound 0.03. |
 | `reconstruction_history_survives_a_pan_and_restarts_on_cuts_and_sun_turns` | A camera panning half a pixel a frame never restarts and the floor's weight keeps growing through reprojection. A cut and a 0.2 rad sun turn each restart every pixel, with weights back within the spatial start's window, and the frame after a restart adds one sample again. Two runs of the pan give identical images and history. |
+| `reconstruction_keeps_history_under_a_climbing_camera_and_a_slow_sun` | Under the physical sky a camera climbing half a pixel a frame from 2 m never restarts, though every frame changes what the procedural sky's content is keyed on. A 0.01 rad sun turn, under the 0.064 rad turn angle, does not restart either and holds every weight to `turn_angle / turn` = 6.4 samples. Fails on the key the port had before (restart on climb frame 1; restart on the turn). |
+
+**The restart key, and what the first comparison with wgpu found.** History restarts
+when `reconstruction_key` changes. The renderer's key holds what its planner does not
+follow: a sun by its lux alone (a turn caps the window), a local light without its
+candela, the environment by its uniform and whether the sky shows, the programs,
+geometry and materials. The port's first key was written from a summary of that and got
+two things wrong: it hashed the suns' directions, so any sun turn restarted, and it
+hashed the digest the cache relights on, which includes the eye's altitude under the
+physical sky. On M5-A's camera path the eye only moves in x, but the eye recovered
+from the inverse view matrix changes in its last bits from pose 3, so from pose 3 the
+port restarted every pixel on every frame while the wgpu renderer kept accumulating.
+The gate's first wgpu-against-ara run showed it as poses 0 to 2 within 0.07% and pose
+3 on up to 33% apart in one HDR cell (the mirror sphere's highlight; 7% of pixels over
+1%, mostly one-pixel silhouette edges), only with reconstruction on, and not on a
+still camera. The cache tables passed in every frame throughout. The key now mirrors
+the renderer's field by field, with the atmosphere's settings standing for
+`set_atmosphere`'s cut; the rotation word honours `rotate_directions`.
+
+`ara_frame` now records, per frame, how each layer made it: on ara the planner's
+restart flag and shadow ray budget, on wgpu `reconstruction_shadow_rays`, the frame's
+uploads by the categories the key hashes, and the revision. `--compare` prints both
+beside each pose, so a restart on one side reads directly (256 rays cold, 64 on a
+restart, 32 moving, 8 held).
 
 **Step 2 is built: Interactive shadows.** The fused Interactive trace (the camera hit
 and eight sun directions per pixel in one dispatch, near-edge pixels listed for an
@@ -1706,7 +1730,8 @@ scale.
 
 `ara_frame --reconstruction` is the level on either layer, combinable with the cache
 levels. On Metal, M5-A with the cache at its defaults and reconstruction on is
-identical across two 16-frame moving runs. **Not compared with wgpu.** What these
+identical across two 16-frame moving runs. Compared with wgpu once, which found the
+restart key above; **the comparison at the corrected key has not run yet.** What these
 tests cannot see is the resolve's filter weights away from a straight edge, or its
 rejection rules under object motion; those need the cross-layer comparison.
 

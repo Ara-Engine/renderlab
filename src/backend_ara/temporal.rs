@@ -101,6 +101,11 @@ impl History {
     pub(crate) fn matches(&self, settings: crate::Reconstruction, size: [u32; 2]) -> bool {
         self.settings == settings && self.size == size
     }
+    /// What the planner decided for the last planned frame: whether it restarted every
+    /// pixel, and the Interactive shadow ray budget (`Renderer::reconstruction_shadow_rays`).
+    pub fn planned(&self) -> (bool, u32) {
+        (self.plan.reset, self.plan.shadow_rays)
+    }
     /// This frame's index into the jitter sequence.
     pub(crate) fn index(&self) -> u64 {
         self.index

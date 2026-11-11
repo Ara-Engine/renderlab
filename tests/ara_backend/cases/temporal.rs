@@ -67,6 +67,8 @@ struct Card {
     shadows: SunShadows,
     /// `Primary::Traced` (exact shadows) unless a test asks for the Interactive trace.
     primary: Primary,
+    /// Off unless a test asks for the physical sky.
+    atmosphere: renderlab::Atmosphere,
 }
 const SIZE: [u32; 2] = [128, 96];
 /// One frame: its HDR as RGBA f32, and its history colour and reset flag.
@@ -103,6 +105,7 @@ impl Card {
                 disk_angle: 0.02,
             },
             primary: Primary::Traced,
+            atmosphere: renderlab::Atmosphere::off(),
         }
     }
     /// Looking down from 4 m, `shift` metres off the card's centre in x and y.
@@ -149,7 +152,7 @@ impl Card {
                     lighting: &self.lighting,
                     camera: *camera,
                     size: SIZE,
-                    atmosphere: renderlab::Atmosphere::off(),
+                    atmosphere: self.atmosphere,
                     sun_shadows: Some(&self.shadows),
                     primary: self.primary,
                     post: None,
@@ -225,15 +228,23 @@ fn reconstruction_accumulates_jittered_samples_into_edge_coverage() -> Result<()
         ensure!(*reset == (index == 0), "frame {index} has reset {reset}");
         if index == 0 {
             // Colour only: the plain frame's alpha still holds shading's view hint.
+            // Within one step of the half-float target, and a weight within 1e-4 of
+            // one: the spatial start divides a tent-weighted sum by its weight, and
+            // RADV rounds that to 1 + 2^-16 on some pixels where Metal and the RTX
+            // card give exactly one (48 of 12,288 pixels moved one step there).
+            let step = |a: f32, b: f32| {
+                let bits = |v: f32| i32::from(f16::from_f32(v).to_bits());
+                (bits(a) - bits(b)).abs() <= 1
+            };
             let same = hdr
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .zip(plain[0].0.as_chunks::<4>().0)
-                .all(|(a, b)| a[..3] == b[..3]);
+                .all(|(a, b)| (0..3).all(|c| step(a[c], b[c])));
             ensure!(
-                [least, most] == [1., 1.] && same,
-                "the first frame is not the plain frame at weight one"
+                least >= 1. && most <= 1.0001 && same,
+                "the first frame is not the plain frame at weight one: weights {least} to {most}"
             );
         }
         // One more sample a frame on average, within a percent: silhouette pixels
@@ -357,6 +368,66 @@ fn reconstruction_history_survives_a_pan_and_restarts_on_cuts_and_sun_turns() ->
     let second = scene.frames(&mut gpu, &cache, &mut again, reconstructed(), &pan)?;
     again.retire(&mut gpu)?;
     ensure!(first == second, "the same sequence gave different frames");
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// What the planner follows does not restart history. A camera that climbs under the
+/// physical sky changes what the procedural sky's content is keyed on (the eye's
+/// altitude) on every frame: the renderer rewrites the sky and relights the cache, and
+/// its reconstruction keeps accumulating. A sun that turns by less than the turn angle
+/// keeps its history too, held to `turn_angle / turn` samples. The port once hashed
+/// both into its restart key, and restarted every pixel on every such frame.
+#[test]
+fn reconstruction_keeps_history_under_a_climbing_camera_and_a_slow_sun() -> Result<()> {
+    let path = root("temporal-followed");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let mut scene = Card::new();
+    scene.atmosphere = renderlab::Atmosphere {
+        volumetric_fog: None,
+        ..Default::default()
+    };
+    // Half a pixel a frame along world y, the atmosphere's up, from 2 m: above the
+    // kilometre-thousandth the sky's altitude is clamped to, so every frame's differs.
+    let step = 0.5 * 2. * 4. * (27.5f32.to_radians()).tan() / SIZE[1] as f32;
+    let climb: Vec<Camera> = (0..8)
+        .map(|i| Card::camera([0.03, 2. + step * i as f32]))
+        .collect::<Result<_>>()?;
+    let mut history = Frames::default();
+    let climbed = scene.frames(&mut gpu, &cache, &mut history, reconstructed(), &climb)?;
+    // A floor pixel away from the card and its shadow, which sit below the view.
+    let floor = at(100, 20) + 3;
+    for (index, (_, read)) in climbed.iter().enumerate() {
+        let (colour, reset) = read.as_ref().context("history was not read")?;
+        ensure!(
+            *reset == (index == 0) && colour[floor] > 0.6 * (index + 1) as f32,
+            "climb frame {index}: reset {reset}, the floor's weight is {}",
+            colour[floor]
+        );
+    }
+    let turn = 0.01f32;
+    let settings = Reconstruction::default();
+    ensure!(
+        turn < settings.turn_angle,
+        "the turn is not under the turn angle"
+    );
+    scene.lighting.lights = vec![Light::Directional {
+        travel: Vec3::new(turn.sin(), 0., -turn.cos()),
+        lux: [1000.; 3],
+    }];
+    let still = [*climb.last().context("no camera")?];
+    let turned = scene.frames(&mut gpu, &cache, &mut history, reconstructed(), &still)?;
+    history.retire(&mut gpu)?;
+    let (colour, reset) = turned[0].1.as_ref().context("history was not read")?;
+    let cap = settings.turn_angle / turn;
+    let most = weights(colour)[2];
+    ensure!(
+        !*reset && colour[floor] > settings.start_window && most <= cap * 1.01,
+        "after the slow turn: reset {reset}, the floor's weight is {}, the most {most}, the cap {cap}",
+        colour[floor]
+    );
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

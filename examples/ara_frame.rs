@@ -311,9 +311,11 @@ fn cache_settings(level: Level) -> renderlab::IndirectSettings {
     }
 }
 
-/// The exposed HDR target and the displayed image of one frame, and the cache's table
-/// after it at the `--gi` level.
-type Frame = (Vec<u8>, Vec<u8>, Option<Vec<u32>>);
+/// The exposed HDR target and the displayed image of one frame, the cache's table after
+/// it at the `--gi` level, and what the layer reports about how it made the frame (the
+/// reconstruction's restart and ray budget; on wgpu also the frame's uploads, which feed
+/// the reconstruction's restart key).
+type Frame = (Vec<u8>, Vec<u8>, Option<Vec<u32>>, serde_json::Value);
 
 fn wgpu_frame(
     fixture: &lighting_fixture::Fixture,
@@ -496,16 +498,34 @@ fn wgpu_frame(
     let mut sequence = Vec::new();
     for pose in 0..frames {
         let camera = level.camera(fixture, pose);
+        let report;
         {
             let mut draws: Vec<_> = instances
                 .iter_mut()
                 .enumerate()
                 .map(|(i, inst)| Draw::new(&meshes[i], inst).with_material(&materials[i]))
                 .collect();
-            admit(&mut r, |r| {
+            report = admit(&mut r, |r| {
                 r.try_render_view(&color, &camera, &mut draws, ViewMode::Lit)
             })?;
         }
+        let (u, stats) = (report.uploads, r.stats());
+        let trace = serde_json::json!({
+            "frame": report.frame.0,
+            "revision": report.revision.0,
+            "shadow_rays": r.reconstruction_shadow_rays(),
+            "busy_frames": stats.busy_frames,
+            "submissions": stats.submissions,
+            "pipelines_created": stats.pipelines.created,
+            // The categories `reconstruction_key` hashes, then the ones it does not.
+            "uploads": {
+                "environment": u.environment, "geometry": u.geometry, "lut": u.lut,
+                "textures": u.textures, "materials": u.materials, "instances": u.instances,
+                "models": u.models, "normals": u.normals, "lights": u.lights,
+                "lighting": u.lighting, "shadows": u.shadows,
+            },
+        });
+        eprintln!("wgpu pose {pose}: {trace}");
         let mut capture = admit(&mut r, |r| r.try_capture_hdr())?;
         let info = capture.info();
         if info.format != wgpu::TextureFormat::Rgba16Float || [info.width, info.height] != size {
@@ -515,7 +535,7 @@ fn wgpu_frame(
         let mut shown = admit(&mut r, |r| r.try_capture(&color))?;
         let display = admit(&mut r, |_| shown.try_read())?;
         let table = if gi { r.indirect_table()? } else { None };
-        sequence.push((hdr, display, table));
+        sequence.push((hdr, display, table, trace));
     }
     Ok(sequence)
 }
@@ -608,10 +628,16 @@ fn ara_frame(
                 }),
             },
         )?;
+        let trace = history.reconstruction_plan().map_or(
+            serde_json::json!({}),
+            |(reset, rays)| serde_json::json!({"reset": reset, "shadow_rays": rays}),
+        );
+        eprintln!("ara pose {pose}: {trace}");
         sequence.push((
             pixels.hdr,
             pixels.display.ok_or("post did not run")?,
             pixels.indirect_table,
+            trace,
         ));
     }
     history.retire(&mut gpu)?;
@@ -666,7 +692,7 @@ fn write(
     let mut summaries = Vec::new();
     let mut nonfinite = 0;
     fs::create_dir_all(dir)?;
-    for (pose, (bytes, display, table)) in sequence.iter().enumerate() {
+    for (pose, (bytes, display, table, trace)) in sequence.iter().enumerate() {
         if bytes.len() != pixels * 8 || display.len() != pixels * 4 {
             return Err("frame is not tightly packed RGBA16F with an RGBA8 display".into());
         }
@@ -679,6 +705,7 @@ fn write(
             "nonfinite_channels": bad,
             "grid_mean_linear_rgb": grid(&values, size),
             "grid_mean_display_bytes": grid(&display_values, size),
+            "trace": trace,
         });
         if let Some(table) = table {
             summary["table"] = Table::new(table)?.summary();
@@ -688,7 +715,7 @@ fn write(
         summaries.push(summary);
     }
     // The raw files and the pictures are the last frame's: the one with most history.
-    let (bytes, display, _) = sequence.last().ok_or("no frame was rendered")?;
+    let (bytes, display, ..) = sequence.last().ok_or("no frame was rendered")?;
     fs::write(dir.join("frame.rgba16f"), bytes)?;
     fs::write(dir.join("display.rgba8"), display)?;
     let mut shown = png::Encoder::new(fs::File::create(dir.join("display.png"))?, size[0], size[1]);
@@ -818,6 +845,12 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
                 fa["pose"],
                 hdr * 100.
             );
+            if !fa["trace"].is_null() || !fb["trace"].is_null() {
+                println!(
+                    "pose {}: made as {} / {}",
+                    fa["pose"], fa["trace"], fb["trace"]
+                );
+            }
         }
         println!("last frame:");
     }

@@ -19,8 +19,12 @@ fn scattered_buffer_arrays_lengths_aliases_and_bounds_native_replay() -> Result<
     let mut storage = Vec::new();
     let mut words = Vec::new();
     for i in 0..4u32 {
+        // Lengths that are not all multiples of 16 bytes (32, 52, 76 and 88): a layer
+        // or driver that rounds a buffer's bound range up reports a longer array, and
+        // the renderer tells an index buffer with adjacency from one without by its
+        // length modulo three.
         let mut data = vec![1000 + i, 0, 0, 0];
-        data.extend((0..(i + 1) * 4).map(|j| i * 100 + j));
+        data.extend((0..(i + 1) * 4 + [0, 1, 3, 2][i as usize]).map(|j| i * 100 + j));
         storage.push(StorageBuffer::new(&mut gpu, bytemuck::cast_slice(&data))?);
         words.push(data);
         storage.push(StorageBuffer::new(&mut gpu, &[0; 16])?);

@@ -46,9 +46,38 @@ pub struct Fixture {
 }
 
 impl Fixture {
-    /// Check exact words for this dyadic fixture without imposing retry append order.
+    /// Check exact words without imposing retry append order. A repair word that differs
+    /// is named by its item and field.
     pub fn assert_matches(&self, repairs: &[u32], retries: &[u32]) {
-        assert_eq!(repairs, self.expected.repairs.as_slice());
+        const FIELDS: [&str; 9] = [
+            "pixel",
+            "placement",
+            "primitive",
+            "u",
+            "v",
+            "point x",
+            "point y",
+            "point z",
+            "fallback",
+        ];
+        let differing: Vec<String> = repairs
+            .iter()
+            .zip(&self.expected.repairs)
+            .enumerate()
+            .filter(|(_, (got, expected))| got != expected)
+            .map(|(word, (got, expected))| match word.checked_sub(4) {
+                Some(w) => format!(
+                    "word {word} (item {}, {}): {got:#x}, expected {expected:#x}",
+                    w / 9,
+                    FIELDS[w % 9]
+                ),
+                None => format!("header word {word}: {got:#x}, expected {expected:#x}"),
+            })
+            .collect();
+        assert!(
+            differing.is_empty() && repairs.len() == self.expected.repairs.len(),
+            "repair words differ: {differing:#?}"
+        );
         assert_eq!(retries.len(), self.retries.len());
         assert_eq!(&retries[..4], self.expected.retry_header.as_slice());
         let count = self.expected.retry_set.len();
@@ -126,10 +155,21 @@ pub fn reference(fixture: &Fixture) -> Expected {
         let v = f64::from(f32::from_bits(item[4]));
         let weights = [1. - u - v, u, v];
         let point = record_point(positions, weights);
+        // `primary_repair`'s edge strip, in exact arithmetic: a weight under a quarter of
+        // the margin takes the first probe. Eight times inside that bound is decided the
+        // same way under any rounding of the kernel's own margin.
+        let (ab, ac) = (positions[1] - positions[0], positions[2] - positions[0]);
+        let extent = positions
+            .iter()
+            .flat_map(|p| p.to_array())
+            .fold(0f64, |m, v| m.max(v.abs())) as f32;
+        let epsilon = f64::from((16. * (f32::from_bits(extent.to_bits() + 1) - extent)).max(1e-5));
+        let lengths = [(ac - ab).length(), ac.length(), ab.length()];
+        let margin = lengths.map(|l| (4. * epsilon * l / ab.cross(ac).length()).min(0.25));
         let edges: Vec<_> = weights
             .iter()
             .enumerate()
-            .filter_map(|(edge, &w)| (w == 0.).then_some(edge))
+            .filter_map(|(edge, &w)| (w < margin[edge] / 32.).then_some(edge))
             .collect();
         if edges.is_empty() {
             assert!(
@@ -146,10 +186,17 @@ pub fn reference(fixture: &Fixture) -> Expected {
             u32::MAX
         };
         if neighbour == u32::MAX {
+            // Within reach of the edge: `edge_distance` is at most four epsilons.
+            let altitude = ab.cross(ac).length() / lengths[edge];
+            assert!(weights[edge] * altitude < epsilon);
             repairs[start + 8] = 1;
             retry_set.insert(index as u32);
             continue;
         }
+        assert_eq!(
+            weights[edge], 0.,
+            "a planar tie is resolved on the edge itself"
+        );
         let other = triangle(batch, neighbour, model);
         let a = positions[(edge + 1) % 3];
         let b = positions[(edge + 2) % 3];
@@ -213,6 +260,9 @@ pub fn reference(fixture: &Fixture) -> Expected {
     }
 }
 
+/// The fallback items' weight toward the vertex opposite their edge.
+const INSIDE: f32 = 1. / 4_194_304.;
+
 fn vertices(positions: &[[f32; 3]]) -> Vec<[u32; 4]> {
     positions
         .iter()
@@ -241,6 +291,8 @@ fn item(pixel: u32, placement: u32, primitive: u32, u: f32, v: f32, point: [f32;
 }
 
 /// Six unique pixels: three interiors, one known planar canonicalization, two fallbacks.
+/// The fallbacks lie 2^-22 of the triangle inside its edge, not on it: within the edge
+/// strip by a factor of ten, and with no weight that is exactly zero.
 /// Batch three's adjacency contains 6*T+1 words; batch 37 has original-only indices.
 pub fn fixture() -> Fixture {
     let inverse = Mat4::from_scale_rotation_translation(
@@ -298,8 +350,8 @@ pub fn fixture() -> Fixture {
     let items = [
         item(4 + 2 * 9, 1, 1, 0.25, 0.25, [0., 1., -1.]),
         item(4 + 3 * 9, 1, 1, 0.5, 0.5, [0., 0., -1.]),
-        item(4 + 4 * 9, 2, 0, 0.5, 0.5, [0., -1., -1.]),
-        item(3 + 4 * 9, 2, 0, 0.625, 0.375, [-1., -1., -1.]),
+        item(4 + 4 * 9, 2, 0, 0.5, 0.5 - INSIDE, [0., -1., -1.]),
+        item(3 + 4 * 9, 2, 0, 0.625, 0.375 - INSIDE, [-1., -1., -1.]),
         item(3 + 3 * 9, 2, 0, 0.5, 0.25, [-1., 0., -1.]),
         item(4 + 9, 1, 0, 0.25, 0.5, [0., 2., -1.]),
     ];
