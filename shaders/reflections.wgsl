@@ -4,9 +4,10 @@
 // and call `specular_incident(input)` (docs/m7-r1.md). Every other composition gets the
 // zero stub, so those programs keep their untraced `indirect_radiance` estimate.
 //
-// Each pixel traces its own rays from its own traced primary hit and writes only its own
-// value: no common projection, matching, reservoir, history or denoiser (P0's C1/C7,
-// docs/m7-p0-claims.md). Traced frames admit one program, so every hit is shaded by that
+// Each pixel traces its own rays from its own traced primary hit; its shading group then
+// shares those shaded hits between neighbouring receivers of one surface (P-GLOSSY,
+// rl_reflection_share below), with no history or denoiser. Traced frames admit one
+// program, so every hit is shaded by that
 // same program's `surface` and `shade`, with view vector -d and a ray-cone footprint; at a
 // hit `specular_incident` is zero, so the hit takes its own untraced estimate (one bounce),
 // and its indirect inputs read the open environment (no world radiance cache at hits).
@@ -132,9 +133,11 @@ fn rl_hit_input(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,width:f32,spread:f
 // Called by the traced entry after `surface` and before the receiver's indirect inputs are
 // prepared (src/program.rs); hits read the open environment state (`rl_indirect_open`: the
 // cache-off values, no cache lookup per hit). Restores the receiver's parameters.
-fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,size:vec2<u32>) {
+// `lane` is the pixel's slot in its shading group for rl_reflection_share.
+fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,size:vec2<u32>,lane:u32) {
     var query:ray_query;
     rl_specular=vec4<f32>(0.0);
+    rl_g=RlGather();
     let lobe=reflection_lobe(s,input);
     let alpha=clamp(lobe.alpha,0.0,1.0);
     let rough=sqrt(alpha);
@@ -167,6 +170,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let seed=rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y^(frame*0x85ebca6bu)));
     let rotation=f32(seed>>8u)*(1.0/16777216.0);
     let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
+    rl_g=RlGather(origin,n,v,side,alpha,traced,width,0u,mirror,true);
     var sum=vec3<f32>(0.0);
     var valid=0u;
     var shaded=false;
@@ -196,22 +200,118 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         // Only a miss looks up the sky: the compiler does not sink a lookup the hit
         // branch overwrites (P-SKY, docs/p-sky.md).
         var radiance=vec3<f32>(0.0);
+        var point=vec4<f32>(d,0.0);
         if hit.kind!=0u {
             let h=rl_hit_input(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),origin,d,width,spread,pixel);
             rl_load_parameters(h.batch);
             let hs=surface(h.input);
             radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);
             shaded=true;
+            point=vec4<f32>(h.input.world,1.0);
         } else {
             radiance=rl_sky(d,cone_alpha);
         }
         sum+=radiance;
+        if RL_SHARE && valid<RL_SHARE_SLOTS {
+            rl_share_point[lane*RL_SHARE_SLOTS+valid]=point;
+            rl_share_radiance[lane*RL_SHARE_SLOTS+valid]=vec4<f32>(radiance,rl_lobe_pdf(n,v,alpha,d));
+        }
         valid+=1u;
     }
     rl_reflection_hit=false;
     rl_hit_variance=0.0;
     if shaded {rl_load_parameters(batch);}
+    rl_g.count=valid;
     if valid==0u {return;}
     rl_specular=vec4<f32>(sum/f32(valid),traced);
 }
+
+// ---- P-GLOSSY shared strata (docs/p-glossy.md) ----
+// Each pixel traces RL_GLOSSY_TRACED of its footprint's strata and leaves every sample in
+// workgroup memory: the hit point (or, for a miss, the direction) with the radiance its own
+// hit program shaded and the probability its own lobe drew it with. After one barrier each
+// glossy receiver reconnects to its 3x3 neighbours' samples inside the shading group: a
+// neighbour's hit is seen from this receiver's origin along a new direction, weighted by
+// this receiver's lobe density over the sample's own (pairwise, bounded by 2) and
+// self-normalized. The reflected image stays this receiver's own (each sample is placed by
+// its hit point, not its ray), a rare bright hit spreads over the neighbourhood with its
+// energy kept, and neighbours across a depth or normal edge, mirrors and below-plane
+// directions are not reused. Hits are still shaded only by their own program; reuse
+// changes which receiver averages a shaded value, never how it is shaded.
+const RL_SHARE_SLOTS:u32=4u;
+const RL_SHARE:bool=RL_GLOSSY_TRACED<=RL_SHARE_SLOTS;
+// Rows of every shading group (8x4 tiles, 4x4 lists).
+const RL_SHARE_ROWS:u32=4u;
+struct RlGather {origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:vec3<f32>,alpha:f32,traced:f32,width:f32,count:u32,mirror:bool,active:bool};
+var<private> rl_g:RlGather;
+var<workgroup> rl_share_point:array<vec4<f32>,128>;
+var<workgroup> rl_share_radiance:array<vec4<f32>,128>;
+// Per lane: origin and sample count (-1: a mirror), then the receiver's side and footprint.
+var<workgroup> rl_share_origin:array<vec4<f32>,32>;
+var<workgroup> rl_share_side:array<vec4<f32>,32>;
+
+// The density of direction w under the VNDF strata of lobe (n, v, alpha), per steradian.
+fn rl_lobe_pdf(n:vec3<f32>,v:vec3<f32>,alpha:f32,w:vec3<f32>)->f32 {
+    let h=normalize(v+w);
+    let nh=dot(n,h);let nv=dot(n,v);
+    if nh<=0.0 || nv<=0.0 || dot(v,h)<=0.0 {return 0.0;}
+    let a2=max(alpha*alpha,1e-12);
+    let k=nh*nh*(a2-1.0)+1.0;
+    let g1=2.0*nv/(nv+sqrt(a2+(1.0-a2)*nv*nv));
+    return a2*g1/(12.566370614359172*k*k*nv);
+}
+
+// Exchanges this group's samples and sets the receiver's `specular_incident` from them.
+// Called by the traced entry in uniform control flow, after every lane's
+// rl_reflection_prepare (or none, `live` false); `width` is the group's lanes per row.
+fn rl_reflection_share(lane:u32,width:u32,live:bool) {
+    let g=rl_g;
+    let count=select(0.0,select(f32(g.count),-1.0,g.mirror),live && g.active && RL_SHARE);
+    rl_share_origin[lane]=vec4<f32>(g.origin,count);
+    rl_share_side[lane]=vec4<f32>(g.side,g.width);
+    workgroupBarrier();
+    if count<=0.0 {return;}
+    let x=i32(lane%width);let y=i32(lane/width);
+    var sum=vec3<f32>(0.0);
+    var weights=0.0;
+    for(var dy=-1;dy<=1;dy+=1) {
+        for(var dx=-1;dx<=1;dx+=1) {
+            let nx=x+dx;let ny=y+dy;
+            if nx<0 || ny<0 || nx>=i32(width) || ny>=i32(RL_SHARE_ROWS) {continue;}
+            let j=u32(ny)*width+u32(nx);
+            let o=rl_share_origin[j];
+            if o.w<=0.0 {continue;}
+            let own=j==lane;
+            if !own {
+                // Same surface only: facing alike and within two footprints of the plane.
+                let s=rl_share_side[j];
+                if dot(s.xyz,g.side)<0.9 || abs(dot(g.side,o.xyz-g.origin))>2.0*max(g.width,s.w) {continue;}
+            }
+            for(var k=0u;k<u32(o.w);k+=1u) {
+                let p=rl_share_point[j*RL_SHARE_SLOTS+k];
+                let r=rl_share_radiance[j*RL_SHARE_SLOTS+k];
+                var w=1.0;
+                if !own {
+                    var dir=p.xyz;
+                    var jacobian=1.0;
+                    if p.w>0.5 {
+                        // Reconnect to the hit: solid angle scales by the squared distances.
+                        let to=p.xyz-g.origin;let back=p.xyz-o.xyz;
+                        let ri=dot(to,to);
+                        jacobian=ri/max(dot(back,back),1e-30);
+                        if jacobian<0.5 || jacobian>2.0 {continue;}
+                        dir=to*inverseSqrt(max(ri,1e-30));
+                    }
+                    if dot(dir,g.side)<=0.0 {continue;}
+                    let target_pdf=rl_lobe_pdf(g.n,g.v,g.alpha,dir);
+                    w=2.0*target_pdf/max(target_pdf+r.w*jacobian,1e-30);
+                }
+                sum+=w*r.rgb;
+                weights+=w;
+            }
+        }
+    }
+    if weights>0.0 {rl_specular=vec4<f32>(sum/weights,g.traced);}
+}
+// ---- end of P-GLOSSY shared strata ----
 // ---- end of M7-R1 traced reflections ----

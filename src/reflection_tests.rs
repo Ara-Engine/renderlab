@@ -26,7 +26,7 @@ fn reflection_composition_contract() {
     let fresh = "@group(0) @binding(2) var fresh_scene:acceleration_structure;\n";
     let toon = include_str!("../shaders/programs/toon.wgsl");
     let standard = crate::STANDARD_PROGRAM;
-    let call = "rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    rl_indirect_prepare(surface_input);";
+    let call = "rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size,lane);\n    }\n    rl_reflection_share(lane,width,live);\n    if live {rl_indirect_prepare(surface_input);}";
     for stage in [
         Stage::Raster,
         Stage::Traced,

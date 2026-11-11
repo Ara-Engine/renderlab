@@ -46,7 +46,17 @@ pub(super) fn source(head: &str, program: &str, parameters: bool) -> String {
             "rl_load_parameters(rl_glass_parameter_batch(h.batch));",
         )
         // Glass draws after TR1: fixed glossy strata avoid unfiltered frame rotation.
-        .replace("let frame=primary_frame.sided.y;", "let frame=0u;");
+        .replace("let frame=primary_frame.sided.y;", "let frame=0u;")
+        // P-GLOSSY: glass has no TR1 history and its own kernel, so it traces every
+        // footprint stratum and shares none.
+        .replace(
+            "const RL_SHARE:bool=RL_GLOSSY_TRACED<=RL_SHARE_SLOTS;",
+            "const RL_SHARE:bool=false;",
+        )
+        .replace(
+            "let count=min(footprint,RL_GLOSSY_TRACED);",
+            "let count=footprint;",
+        );
     s.push_str(r#"
 @group(0) @binding(31) var tp_reflection_position:texture_2d<f32>;
 @group(0) @binding(32) var tp_reflection_normal:texture_2d<f32>;
@@ -67,7 +77,7 @@ fn rl_glass_parameter_batch(batch:u32)->u32 {
     let input=SurfaceInput(p.xyz,vec3<f32>(0.0),vec3<f32>(0.0),geometric,n,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(0.0),0.0,
         vec2<f32>(0.0),vec2<f32>(0.0),vec2<f32>(0.0),vec4<f32>(1.0),true,lighting.eye,id.xy,primary_materials[0].value,receiver,decal_none());
     rl_indirect_open();
-    rl_reflection_prepare(SpecularLobe(n,lobe.w,1.0),input,0u,id.xy,size);
+    rl_reflection_prepare(SpecularLobe(n,lobe.w,1.0),input,0u,id.xy,size,0u);
     textureStore(primary_hdr,id.xy,rl_specular);
 }
 "#);

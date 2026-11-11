@@ -56,24 +56,27 @@ const PRIMARY_CLEAR_TILE=16u;
     let region=primary_region;
     let shaded=(region.zw-region.xy+vec2<u32>(7u,3u))/vec2<u32>(8u,4u);
     let size=textureDimensions(primary_hit);
+    // Every return before primary_shade_pixel is uniform over the group: shading groups
+    // exchange reflection samples behind a barrier (P-GLOSSY, reflections.wgsl).
     if group.y>=shaded.y {
         // Each lane stores one column of a clear block, skipping the region.
-        if lane>=PRIMARY_CLEAR_TILE {return;}
-        let base=vec2<u32>(group.x,group.y-shaded.y)*PRIMARY_CLEAR_TILE+vec2<u32>(lane,0u);
-        for(var k=0u;k<PRIMARY_CLEAR_TILE;k+=1u) {
-            let p=base+vec2<u32>(0u,k);
-            if all(p<size) && !(all(p>=region.xy) && all(p<region.zw)) {textureStore(primary_hdr,vec2<i32>(p),primary_miss(p,size,primary_frame.clear));}
+        if lane<PRIMARY_CLEAR_TILE {
+            let base=vec2<u32>(group.x,group.y-shaded.y)*PRIMARY_CLEAR_TILE+vec2<u32>(lane,0u);
+            for(var k=0u;k<PRIMARY_CLEAR_TILE;k+=1u) {
+                let p=base+vec2<u32>(0u,k);
+                if all(p<size) && !(all(p>=region.xy) && all(p<region.zw)) {textureStore(primary_hdr,vec2<i32>(p),primary_miss(p,size,primary_frame.clear));}
+            }
         }
         return;
     }
     if group.x>=shaded.x {return;}
     let id=grid+vec3<u32>(region.xy,0u);
-    if any(id.xy>=size) || any(id.xy>=region.zw) {return;}
-    if textureLoad(primary_tiles,id.xy/PRIMARY_TILE,0).x==0u {
+    var live=!(any(id.xy>=size) || any(id.xy>=region.zw));
+    if live && textureLoad(primary_tiles,id.xy/PRIMARY_TILE,0).x==0u {
         textureStore(primary_hdr,vec2<i32>(id.xy),primary_miss(id.xy,size,primary_frame.clear));
-        return;
+        live=false;
     }
-    primary_shade_pixel(id.xy,size);
+    primary_shade_pixel(id.xy,size,live,lane,8u);
 }
 // A primary miss: `clear` (the lit clear colour), or with the visible sky on
 // (primary_frame.sided.w, Renderer::set_visible_environment) the selected map along the
@@ -91,15 +94,24 @@ fn primary_miss(id:vec2<u32>,size:vec2<u32>,clear:vec4<f32>)->vec4<f32> {
 }
 // One pixel inside the image: its hit record shaded, or the clear colour for a miss.
 // The program sees the same receiver frame as on raster, with explicit footprints.
-fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
-    let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);
-    if record.x==0u {textureStore(primary_hdr,pixel,primary_miss(id,size,primary_frame.clear));return;}
+// Every lane of the group calls this in uniform control flow (`live` false: nothing to
+// shade) and reaches the reflection exchange; `lane` and `width` place it in its group.
+fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>,live_in:bool,lane:u32,width:u32) {
+    var live=live_in;
+    let pixel=vec2<i32>(id);
+    var record=vec4<u32>(0u);
+    if live {record=textureLoad(primary_hit,pixel,0);}
+    if live && record.x==0u {textureStore(primary_hdr,pixel,primary_miss(id,size,primary_frame.clear));live=false;}
+    var input:VertexOutput;
+    var surface_input:SurfaceInput;
+    var surface_output:Surface;
+    var visible=true;
+    if live {
     let hit=primary_decode(record);
     let ta=primary_input(hit.batch,hit.ia,hit.placement);let tb=primary_input(hit.batch,hit.ib,hit.placement);
     let tc=primary_input(hit.batch,hit.ic,hit.placement);
     let a=primary_vertex(hit,ta,hit.ia);let b=primary_vertex(hit,tb,hit.ib);let c=primary_vertex(hit,tc,hit.ic);
     let w=vec3<f32>(1.0-hit.bary.x-hit.bary.y,hit.bary);
-    var input:VertexOutput;
     input.world=world_position(ta.position*w.x+tb.position*w.y+tc.position*w.z,hit.placement).xyz;
     // Keep the program's interpolation arithmetic while pinning the engine's
     // shadow point to R1's accepted barycentric contraction order.
@@ -128,18 +140,22 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     let face=-receiver_geometric;
     let source_geometric=select(-face,face,lit_front);
     let material=primary_materials[hit.batch].value;
+    // Unreachable: traced frames cull the source-back faces of single-sided draws.
+    visible=material.double_sided!=0u || lit_front;
     rl_load_parameters(hit.batch);
-    let surface_input=decal_prepare(SurfaceInput(input.world,e1*bary_gradients[0].x+e2*bary_gradients[0].y,e1*bary_gradients[1].x+e2*bary_gradients[1].y,source_geometric,input.normal,normal_dx,normal_dy,input.tangent,input.handedness,
+    surface_input=decal_prepare(SurfaceInput(input.world,e1*bary_gradients[0].x+e2*bary_gradients[0].y,e1*bary_gradients[1].x+e2*bary_gradients[1].y,source_geometric,input.normal,normal_dx,normal_dy,input.tangent,input.handedness,
         input.uv,gradients[0],gradients[1],input.color,lit_front,lighting.eye,id,material,
         primary_receiver(receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),hit.placement,pixel),decal_none()));
     // Engine inputs computed once per receiver (src/program.rs), before the program's
     // values are live.
     rl_indirect_prepare(surface_input);
-    let surface_output=surface(surface_input);
+    surface_output=surface(surface_input);
+    }
+    // ---- reflection exchange ----
+    if !live {return;}
     // LC1: after `surface` and any reflection hits, which walk every light.
     rl_lights_prepare(surface_input.world);
-    // Unreachable: traced frames cull the source-back faces of single-sided draws.
-    if material.double_sided==0u && !lit_front {textureStore(primary_hdr,pixel,vec4<f32>(0.0));return;}
+    if !visible {textureStore(primary_hdr,pixel,vec4<f32>(0.0));return;}
     // AT1: the program's exposed output through the camera's fog and aerial perspective.
     // MQ2: alpha is the program's view dependence for TR1 (1 when undeclared).
     textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,id,size)));

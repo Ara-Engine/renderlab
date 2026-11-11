@@ -259,12 +259,10 @@ impl FilmCrop {
         );
         sources.shading = edit(
             &sources.shading,
+            // P-GLOSSY: lanes stay in the group's uniform flow (a reflection exchange).
             (
-                "fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {",
-                &format!(
-                    "fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {{ if {} {{return;}}",
-                    outside("id")
-                ),
+                "    var live=live_in;\n",
+                &format!("    var live=live_in && !{};\n", outside("id")),
             ),
         );
         let pipelines = r.primary.as_ref().unwrap().test_film_pipelines(

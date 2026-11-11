@@ -72,9 +72,13 @@ const REFLECTION_STUB: &str = "struct SpecularLobe { normal:vec3<f32>, alpha:f32
 /// overwrites them and the cache's prepared state is not live across the ray loop (a restore
 /// after the loop cost +0.62 ms of quarry shading with the cache on). `surface` and the hits
 /// read the open environment state (`rl_indirect_open`).
+/// P-GLOSSY: the group then exchanges its reflection samples (`rl_reflection_share`, a
+/// barrier every lane reaches) before any receiver prepares its indirect inputs and shades.
 const REFLECTION_ENTRY_SEAM: &str =
-    "    rl_indirect_prepare(surface_input);\n    let surface_output=surface(surface_input);\n";
-const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    rl_indirect_prepare(surface_input);\n";
+    "    rl_indirect_prepare(surface_input);\n    surface_output=surface(surface_input);\n";
+const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size,lane);\n";
+const REFLECTION_EXCHANGE_SEAM: &str = "    // ---- reflection exchange ----\n";
+const REFLECTION_EXCHANGE: &str = "    rl_reflection_share(lane,width,live);\n    if live {rl_indirect_prepare(surface_input);}\n";
 /// Reflection hits trace their own light visibility: the frame's belongs to its receivers.
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";
@@ -106,7 +110,8 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
 
 /// P-GLOSSY measurement screens (scaffolding, docs/p-glossy.md): `RENDERLAB_GLOSSY_SCREEN`
 /// lists edits to the composed reflection block. `traced=N` traces N of the footprint's
-/// strata; `cone=traced` recomputes the cone from the traced count (diagnostic);
+/// strata (shared between neighbours at 4 or fewer; `noshare` keeps each pixel's own);
+/// `cone=traced` recomputes the cone from the traced count (diagnostic);
 /// `noshadow` makes hit lights unshadowed; `noshade` replaces hit shading by the sky.
 /// Unset, the block is unchanged.
 fn glossy_screen(mut api: String) -> String {
@@ -126,6 +131,10 @@ fn glossy_screen(mut api: String) -> String {
             Some(("cone", "traced")) => edit(
                 "alpha*inverseSqrt(f32(footprint))",
                 "alpha*inverseSqrt(f32(count))",
+            ),
+            None if item == "noshare" => edit(
+                "const RL_SHARE:bool=RL_GLOSSY_TRACED<=RL_SHARE_SLOTS;",
+                "const RL_SHARE:bool=false;",
             ),
             None if item == "noshadow" => edit(
                 "fn rl_hit_shadow(light:Light,receiver:Receiver,l:vec3<f32>)->f32 {\n",
@@ -566,7 +575,12 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     if traces {
         // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
-        source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
+        assert_eq!(entry.matches(REFLECTION_EXCHANGE_SEAM).count(), 1);
+        source.push_str(
+            &entry
+                .replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1)
+                .replacen(REFLECTION_EXCHANGE_SEAM, REFLECTION_EXCHANGE, 1),
+        );
     } else {
         source.push_str(entry);
     }

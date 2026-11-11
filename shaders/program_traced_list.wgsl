@@ -35,18 +35,20 @@ fn rl_slot_of(batch:u32)->u32 { return rl_list.programs[batch>>2u][batch&3u]; }
         }
         return;
     }
+    // From here every lane reaches primary_shade_pixel (its reflection exchange is a barrier).
     let id=region.xy+tile*4u+local.xy;
-    if any(id>=size) {return;}
+    var live=!any(id>=size);
     let misses=(entry&RL_LIST_MISSES)!=0u;
-    if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x==0u {
+    if live && textureLoad(primary_tiles,id/PRIMARY_TILE,0).x==0u {
         if misses {textureStore(primary_hdr,vec2<i32>(id),primary_miss(id,size,primary_frame.clear));}
-        return;
+        live=false;
     }
-    let record=textureLoad(primary_hit,vec2<i32>(id),0);
-    if record.x==0u {
+    var record=vec4<u32>(0u);
+    if live {record=textureLoad(primary_hit,vec2<i32>(id),0);}
+    if live && record.x==0u {
         if misses {textureStore(primary_hdr,vec2<i32>(id),primary_miss(id,size,primary_frame.clear));}
-        return;
+        live=false;
     }
-    if rl_slot_of(primary_placements[record.x-1u]&0x1fffffffu)!=rl_list.slot {return;}
-    primary_shade_pixel(id,size);
+    if live && rl_slot_of(primary_placements[record.x-1u]&0x1fffffffu)!=rl_list.slot {live=false;}
+    primary_shade_pixel(id,size,live,lane,4u);
 }

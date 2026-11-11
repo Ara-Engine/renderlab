@@ -71,6 +71,7 @@ fn film_begin(k:u32,pixel:vec2<u32>,width:u32) {
 // An anchor's view distance of the hit triangle's receiver point (R1's barycentric order),
 // with every multiply-add explicit: the program-independent interpolation is not used, and
 // long-lived pipelines cannot re-contract it (docs/determinism.md).
+var<private> film_distance:f32;
 fn film_view_distance(a:vec3<f32>,b:vec3<f32>,c:vec3<f32>,w:vec3<f32>,placement:u32)->f32 {
     let p=receiver_point(a,b,c,w);let m=models[placement];
     let x=fma(m[0],vec4<f32>(p.x),fma(m[1],vec4<f32>(p.y),fma(m[2],vec4<f32>(p.z),m[3])));

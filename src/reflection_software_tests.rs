@@ -16,7 +16,7 @@ const SOURCE: &str = include_str!("../shaders/scene.wgsl");
 fn software_reflection_composition() {
     use crate::program::{Stage, compose};
     let (_, heads) = non_rt_sources(SOURCE).unwrap();
-    let call = "rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);";
+    let call = "rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size,lane);";
     for head in &heads {
         assert!(head.contains(crate::program::SOFTWARE_REFLECTION_GEOMETRY));
         let source = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false).source;

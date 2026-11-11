@@ -45,7 +45,9 @@ const FILM_TILE_SEAM: (&str, &str) = (
 );
 /// The shading entry's stores, each routed through `film_store`, and the sample
 /// selection before its gradients read the camera ray.
-const FILM_ENTRY_SEAMS: [(&str, &str); 6] = [
+/// The anchor's view distance is taken where the hit's corners are in scope
+/// (`film_distance`, shaders/film_accumulation.wgsl) and stored after the program shades.
+const FILM_ENTRY_SEAMS: [(&str, &str); 7] = [
     (
         "{textureStore(primary_hdr,vec2<i32>(p),primary_miss(p,size,primary_frame.clear));}",
         "{film_store(vec2<i32>(p),film_background(),0u,0.0);}",
@@ -55,20 +57,24 @@ const FILM_ENTRY_SEAMS: [(&str, &str); 6] = [
         "film_store(vec2<i32>(id.xy),film_background(),0u,0.0);",
     ),
     (
-        "let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);",
-        "let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);\n    film_begin(film_index(pixel),id,size.x);",
+        "if live {record=textureLoad(primary_hit,pixel,0);}",
+        "if live {record=textureLoad(primary_hit,pixel,0);film_begin(film_index(pixel),id,size.x);}",
     ),
     (
-        "if record.x==0u {textureStore(primary_hdr,pixel,primary_miss(id,size,primary_frame.clear));return;}",
-        "if record.x==0u {film_store(pixel,film_background(),0u,0.0);return;}",
+        "if live && record.x==0u {textureStore(primary_hdr,pixel,primary_miss(id,size,primary_frame.clear));live=false;}",
+        "if live && record.x==0u {film_store(pixel,film_background(),0u,0.0);live=false;}",
+    ),
+    (
+        "    input.world=world_position(ta.position*w.x+tb.position*w.y+tc.position*w.z,hit.placement).xyz;\n",
+        "    input.world=world_position(ta.position*w.x+tb.position*w.y+tc.position*w.z,hit.placement).xyz;\n    film_distance=film_view_distance(ta.position,tb.position,tc.position,w,hit.placement);\n",
     ),
     (
         "{textureStore(primary_hdr,pixel,vec4<f32>(0.0));return;}",
-        "{film_store(pixel,vec3<f32>(0.0),record.x,film_view_distance(ta.position,tb.position,tc.position,w,hit.placement));return;}",
+        "{film_store(pixel,vec3<f32>(0.0),record.x,film_distance);return;}",
     ),
     (
         "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,id,size)));",
-        "film_store(pixel,atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),record.x,film_view_distance(ta.position,tb.position,tc.position,w,hit.placement));",
+        "film_store(pixel,atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),record.x,film_distance);",
     ),
 ];
 
