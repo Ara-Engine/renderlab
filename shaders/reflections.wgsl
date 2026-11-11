@@ -34,6 +34,17 @@ const RL_GLOSSY_RAYS:u32=4u;
 const RL_GLOSSY_MAX:u32=16u;
 const RL_RAYS_PER_ROUGHNESS:f32=48.0;
 const RL_FAR:f32=1.0e6;
+// Lone-stratum bound (U-SPECK2, docs/speck2.md). A glossy pixel's estimate is the mean of at
+// most 16 strata, and temporal reconstruction averages some 16 frames of it: about 256
+// samples. A target one ray in tens of thousands strikes (a lamp's bulb seen from across a
+// yard, hundreds of times brighter than the rest of its lobe) cannot average out at that
+// count; each strike is a white pixel that lasts as long as its history. So the brightest
+// stratum counts for at most primary_frame.reflection.z times the luminance of all the
+// others together (1: at most half the estimate; 0: no bound). Two strata on the same
+// feature bound nothing, so a feature the lobe resolves keeps its energy; what the bound
+// removes is the mean of targets too rare to draw (measured in docs/speck2.md). Mirror
+// rays (one ray, the exact image) are never bound.
+const RL_LUMA:vec3<f32>=vec3<f32>(0.2126,0.7152,0.0722);
 
 var<private> rl_specular:vec4<f32>;
 // Shading a reflection hit: light visibility traces its own shadow ray (rl_hit_shadow),
@@ -168,6 +179,8 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let rotation=f32(seed>>8u)*(1.0/16777216.0);
     let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
     var sum=vec3<f32>(0.0);
+    // The brightest stratum (rgb) and its luminance (w), for the lone-stratum bound.
+    var top=vec4<f32>(0.0);
     var valid=0u;
     var shaded=false;
     // PP1/SK1 integration: reuse the function-scope query above. Naga 30 emits an
@@ -206,12 +219,19 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
             radiance=rl_sky(d,cone_alpha);
         }
         sum+=radiance;
+        let level=dot(radiance,RL_LUMA);
+        if level>top.w {top=vec4<f32>(radiance,level);}
         valid+=1u;
     }
     rl_reflection_hit=false;
     rl_hit_variance=0.0;
     if shaded {rl_load_parameters(batch);}
     if valid==0u {return;}
+    let lone=primary_frame.reflection.z;
+    if lone>0.0 && valid>1u {
+        let rest=max(dot(sum,RL_LUMA)-top.w,0.0)*lone;
+        if top.w>rest {sum-=top.rgb*(1.0-rest/top.w);}
+    }
     rl_specular=vec4<f32>(sum/f32(valid),traced);
 }
 // ---- end of M7-R1 traced reflections ----

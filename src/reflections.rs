@@ -16,6 +16,24 @@ pub struct ReflectionSettings {
     pub max_roughness: f32,
 }
 
+/// The lone-stratum bound of glossy reflection rays (shaders/reflections.wgsl, docs/speck2.md):
+/// the brightest stratum counts for at most this many times the luminance of all the others
+/// together. 1 keeps any single stratum to half a pixel's estimate.
+const LONE_STRATUM_LIMIT: f32 = 1.0;
+
+/// The bound in force. Measurement switch: `RENDERLAB_REFLECTION_LONE` replaces it for a
+/// process (0 switches the bound off), so one binary renders both sides of a comparison.
+fn lone_stratum_limit() -> f32 {
+    static LIMIT: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| {
+        std::env::var("RENDERLAB_REFLECTION_LONE")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|v: &f32| v.is_finite() && *v >= 0.0)
+            .unwrap_or(LONE_STRATUM_LIMIT)
+    })
+}
+
 impl Default for ReflectionSettings {
     fn default() -> Self {
         Self {
@@ -42,14 +60,15 @@ impl ReflectionSettings {
         Ok(())
     }
     /// WGSL `primary_frame.reflection`: x the roughness where the traced fraction reaches 0
-    /// (0 when disabled, so nothing is traced), y where it starts to fall.
+    /// (0 when disabled, so nothing is traced), y where it starts to fall, z the lone-stratum
+    /// bound (0: none).
     pub(crate) fn frame_words(&self) -> [f32; 4] {
         let end = if self.enabled {
             self.max_roughness
         } else {
             0.0
         };
-        [end, 0.7 * end, 0.0, 0.0]
+        [end, 0.7 * end, lone_stratum_limit(), 0.0]
     }
 }
 
@@ -71,6 +90,14 @@ mod tests {
             (0.5f32.to_bits(), 0.35f32.to_bits())
         );
         assert_eq!(ReflectionSettings::off().frame_words()[0], 0.0);
+        // The lone-stratum bound reaches the shader in word z, and the shader reads it there.
+        if std::env::var_os("RENDERLAB_REFLECTION_LONE").is_none() {
+            assert_eq!(
+                ReflectionSettings::default().frame_words()[2],
+                LONE_STRATUM_LIMIT
+            );
+        }
+        assert!(wgsl.contains("let lone=primary_frame.reflection.z;"));
         for bad in [-0.1, 1.5, f32::NAN] {
             let settings = ReflectionSettings {
                 max_roughness: bad,
