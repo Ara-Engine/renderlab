@@ -1,0 +1,117 @@
+//! Original camera traces, with portable hit-position fetches from retained meshes.
+use super::shader::memo::Memo;
+use super::shader::{Pass, Program};
+use anyhow::{Context, Result, ensure};
+/// Original camera trace output contract.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Entry {
+    /// Hit records, tile coverage and hit-only geometric precision.
+    Trace,
+    /// Hit records, tile coverage and hit-only world/normal receiver records.
+    Receivers,
+}
+impl Entry {
+    /// Compose the unchanged hardware traversal/culling/repair algorithms, reading
+    /// hit positions from the same vertex/index version used to build the BLAS.
+    pub fn program(self) -> Result<Program> {
+        static KEPT: Memo<Entry, Program> = Memo::new();
+        KEPT.get(self, || {
+            Program::new(
+                if matches!(self, Self::Trace) {
+                    Pass::PrimaryTrace
+                } else {
+                    Pass::PrimaryTraceReceivers
+                },
+                source()?,
+            )
+        })
+    }
+}
+pub(crate) fn source() -> Result<String> {
+    let [hard, _] =
+        crate::renderer::primary_ray_gpu::shader_sources(include_str!("../../shaders/scene.wgsl"))?;
+    let head = hard
+        .strip_suffix(TRACE)
+        .context("original primary trace composition changed")?;
+    Ok(format!("{head}{}", portable_trace()?))
+}
+const TRACE: &str = include_str!("../../shaders/primary_trace.wgsl");
+
+/// `primary_trace.wgsl` without hit-vertex return: its three position intrinsics read
+/// the retained vertex and index arrays through the hit's placement, and its query and
+/// scene types lose the qualifier. Every module that contains the trace text needs
+/// this, reachable or not, or its SPIR-V declares `SPV_KHR_ray_tracing_position_fetch`.
+pub(crate) fn portable_trace() -> Result<String> {
+    let trace = TRACE;
+    ensure!(
+        trace
+            .matches("getCandidateHitVertexPositions(&query)")
+            .count()
+            == 2
+            && trace
+                .matches("getCommittedHitVertexPositions(&query)")
+                .count()
+                == 1
+            && trace.matches("ray_query<vertex_return>").count() == 2
+            && trace
+                .matches("acceleration_structure<vertex_return>")
+                .count()
+                == 1,
+        "original primary hit-position seams changed"
+    );
+    Ok(trace.replace("getCandidateHitVertexPositions(&query)",
+        "primary_triangle_vertices(primary_placements[candidate.instance_custom_data]&0x1fffffffu,candidate.primitive_index)")
+        .replace("getCommittedHitVertexPositions(&query)",
+        "primary_triangle_vertices(primary_placements[hit.instance_custom_data]&0x1fffffffu,hit.primitive_index)")
+        .replace("ray_query<vertex_return>","ray_query")
+        .replace("acceleration_structure<vertex_return>","acceleration_structure"))
+}
+
+/// The fused Interactive pass: each pixel's camera hit and its sun visibility in one
+/// dispatch, with pixels near a triangle edge listed for a repair pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Interactive {
+    /// Trace and estimate every pixel; list near-edge pixels in the repair queue.
+    Deferred,
+    /// The same without deferral, for a repair queue above the device's limits.
+    Full,
+    /// Re-trace the listed pixels exactly; dispatched indirectly from the queue.
+    Repair,
+}
+impl Interactive {
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Deferred => "primary_trace_interactive_deferred",
+            Self::Full => "primary_trace_interactive",
+            Self::Repair => "primary_repair_interactive",
+        }
+    }
+    /// The entry in the production soft module, or with `rotated` in temporal
+    /// reconstruction's variant of it: disk directions rotated by the frame's sample
+    /// and a ray count read from the primary frame record's sampling words.
+    pub fn program(self, rotated: bool) -> Result<Program> {
+        static KEPT: Memo<(Interactive, bool), Program> = Memo::new();
+        KEPT.get((self, rotated), || {
+            Program::new(Pass::PrimaryInteractive(self), interactive_source(rotated)?)
+        })
+    }
+}
+/// `shader_sources`' soft module with the portable trace, eight directions as the
+/// renderer's pipeline override sets, and optionally `trace_source`'s two edits.
+pub(crate) fn interactive_source(rotated: bool) -> Result<String> {
+    let [_, soft] =
+        crate::renderer::primary_ray_gpu::shader_sources(include_str!("../../shaders/scene.wgsl"))?;
+    let marker = "override FRESH_DIRECTIONS:u32=256u;";
+    ensure!(
+        soft.matches(TRACE).count() == 1 && soft.matches(marker).count() == 1,
+        "original soft kernel composition changed"
+    );
+    let soft = soft
+        .replace(TRACE, &portable_trace()?)
+        .replace(marker, "override FRESH_DIRECTIONS:u32=8u;");
+    Ok(if rotated {
+        crate::renderer::primary_ray_gpu::temporal_reconstruction::trace_source(&soft)?
+    } else {
+        soft
+    })
+}

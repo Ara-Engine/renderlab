@@ -72,7 +72,7 @@ fn first_image(
             ..Default::default()
         },
     )?;
-    engine.resize(640, 360)?;
+    let view = engine.create_view(&ViewDesc::new(640, 360))?;
     let material = engine.create_material(&MaterialDesc {
         base_color: [0.7, 0.6, 0.5, 1.0],
         ..Default::default()
@@ -100,9 +100,11 @@ fn first_image(
         0.05,
         200.0,
     )?;
-    engine.render(&camera)?;
-    engine.render(&camera)?;
-    let image = engine.capture()?;
+    engine.tick(1.0 / 60.0)?;
+    engine.render_view(view, &camera)?;
+    engine.tick(1.0 / 60.0)?;
+    engine.render_view(view, &camera)?;
+    let image = engine.capture_view(view)?;
     let seconds = start.elapsed().as_secs_f64();
     Ok((
         seconds,

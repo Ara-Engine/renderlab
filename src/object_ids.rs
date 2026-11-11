@@ -2,7 +2,7 @@
 //! primitive range of each object, the per-placement tables a frame's ID pass reads, and the
 //! readback's request and event types. Both GPU layers share this; the wgpu pass is
 //! src/id_output.rs.
-use crate::{Error, FrameId, engine::ObjectId, engine::ViewId};
+use crate::{Error, FrameId, ViewId, engine::ObjectId};
 use std::collections::HashMap;
 
 /// No surface: sky or background.
@@ -13,18 +13,10 @@ pub const ID_UNTAGGED: u32 = 0xFFFF_FFFF;
 pub const MAX_ID_RECT: u32 = 512;
 /// Id readbacks in flight per engine; a request beyond them is refused.
 pub const ID_SLOTS: usize = 4;
-/// Rendered frames a readback may take before it is reported as `IdsLost`.
+/// `Engine::tick`s a readback may take before it is reported as `IdsLost`.
 pub const ID_TICKS: u32 = 8;
 /// Undelivered id events kept between polls; older ones are dropped and counted.
 pub const KEPT_ID_EVENTS: usize = 64;
-
-/// A view's optional outputs; everything is off by default and costs nothing when off.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct Outputs {
-    /// Per-pixel ids (`IdPixel`) of every rendered frame, readable with `request_ids` and,
-    /// on the wgpu engine, as a texture (`Engine::view_ids`).
-    pub ids: bool,
-}
 
 /// Which of a pixel's two ids a handoff writes (`Engine::render_view_ids_to`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -104,7 +96,7 @@ impl IdReadback {
     }
 }
 
-/// A `request_ids` whose copy did not map within `ID_TICKS` rendered frames; reported once.
+/// A `request_ids` whose copy did not map within `ID_TICKS` ticks; reported once.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct IdsLost {
     pub request: IdRequest,
@@ -202,37 +194,12 @@ impl TagTables {
     }
 }
 
-/// What an engine keeps for ids: the scene's object ids, the frame's tables, and (until
-/// views exist, docs/design-views.md) the handle of its one view and that view's outputs.
+/// What an engine keeps for ids: the scene's object ids and the frame's tables (each view's
+/// outputs are in its `ViewDesc`).
+#[derive(Default)]
 pub(crate) struct EngineIds {
     pub objects: ObjectIds,
     pub tables: TagTables,
-    pub view: ViewId,
-    pub outputs: Outputs,
-    pub mode: crate::ViewMode,
-}
-impl Default for EngineIds {
-    fn default() -> Self {
-        let mut views =
-            crate::engine::ids::Slots::<crate::engine::kind::View, ()>::new("unknown view");
-        Self {
-            objects: ObjectIds::default(),
-            tables: TagTables::default(),
-            view: views.insert(()),
-            outputs: Outputs::default(),
-            mode: crate::ViewMode::Lit,
-        }
-    }
-}
-impl EngineIds {
-    /// The one view until `create_view` exists; any other handle is stale.
-    pub fn check(&self, view: ViewId) -> Result<(), Error> {
-        if view == self.view {
-            Ok(())
-        } else {
-            Err(Error::InvalidInput("unknown view"))
-        }
-    }
 }
 
 #[cfg(test)]

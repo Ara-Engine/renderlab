@@ -14,9 +14,9 @@ cache and reload transaction are used in both modes. No duplicate pipeline path.
 
 `EngineDescriptor::checked_engine_shaders` and the environment override are documented
 in [api.md](api.md#shader-runtime-checks-p-free). Arbitrary program sources, transparent
-program compositions and background glass compilation stay checked. The exact bundled
-standard program bytes are trusted because they are engine-owned; copying those exact
-bytes into a program does not introduce arbitrary code. Custom low-level preludes latch
+program compositions and background glass compilation stay checked. (The exact bundled
+standard program bytes were trusted here; P-SPLIT made every program module checked, so an
+edit recompiles only the kernels its text changes.) Custom low-level preludes latch
 future compilation into checked mode, including across worker clones and after a rejected
 edit. Existing modules still contain their originally compiled source.
 

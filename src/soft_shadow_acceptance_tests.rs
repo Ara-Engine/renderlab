@@ -41,7 +41,7 @@ pub(super) fn gpu_soft_shadow_traced_acceptance() {
         drop(exact);
         drop(counts);
         for seed in 0..4 {
-            let mut p = r.primary.as_ref().unwrap().interactive_pipeline(
+            let mut p = r.view.primary.as_ref().unwrap().interactive_pipeline(
                 &r.device,
                 &r.ledger,
                 &module,
@@ -85,7 +85,7 @@ pub(super) fn gpu_soft_shadow_traced_acceptance() {
             fs::write(name(&format!("seed-{seed}-interactive.rgba16f")), &image).unwrap();
             fs::write(name(&format!("seed-{seed}-interactive.u32")), &counts).unwrap();
         }
-        let soft = r.shadows.settings.clone();
+        let soft = r.view.shadows.settings.clone();
         let mut hard = soft.clone();
         hard.directional_disk_angle = 0.;
         r.set_shadows(&hard).unwrap();
@@ -182,7 +182,7 @@ fn gpu_soft_shadow_complete_paired_timing() {
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     let color = target(&r, 1920, 1080);
     let poses = [0, 1].map(|i| cameras.frames[i].camera().unwrap());
-    let soft = r.shadows.settings.clone();
+    let soft = r.view.shadows.settings.clone();
     let mut hard = soft.clone();
     hard.directional_disk_angle = 0.;
     let mut pending = std::collections::HashMap::new();

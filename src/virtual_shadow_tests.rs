@@ -163,10 +163,10 @@ pub(super) fn diagnose(
     rect: Option<[u32; 4]>,
     draw: &mut dyn FnMut(&mut Renderer),
 ) {
-    if r.virtual_shadows.as_ref().is_none_or(|s| !s.debug) {
+    if r.view.virtual_shadows.as_ref().is_none_or(|s| !s.debug) {
         r.set_soft_shadows(SoftShadows::Virtual);
         draw(r);
-        r.virtual_shadows.as_mut().unwrap().debug = true;
+        r.view.virtual_shadows.as_mut().unwrap().debug = true;
         // The manifest's screen constants, if any (variant traces).
         set_screen_constants(r, screen_constants(&manifest()));
     }
@@ -177,12 +177,13 @@ pub(super) fn diagnose(
     draw(r);
     let [hit_n8, n8] = interactive_outputs(r);
     assert!(hit_n8 == hit, "N8 diagnosis traces the same camera hits");
-    let state = r.virtual_shadows.as_ref().unwrap();
+    let state = r.view.virtual_shadows.as_ref().unwrap();
     let buffer = state.debug_buffer().unwrap().clone();
     // The trace follows the scratch's header and per-tile words.
     let offset = crate::renderer::virtual_shadow_gpu::scratch_trace_offset(state.size()) as usize;
     let mut trace = read_buffer(r, &buffer, buffer.size())[offset..].to_vec();
     let width = r
+        .view
         .fresh
         .as_ref()
         .unwrap()
@@ -301,7 +302,7 @@ pub(crate) fn screen_constants(v: &serde_json::Value) -> Vec<(&'static str, f64)
 }
 /// Sets the lookup constants; the state must exist (after one Virtual frame).
 pub(crate) fn set_screen_constants(r: &mut Renderer, constants: Vec<(&'static str, f64)>) {
-    r.virtual_shadows.as_mut().unwrap().constants = constants;
+    r.view.virtual_shadows.as_mut().unwrap().constants = constants;
 }
 /// A traced renderer with the manifest's `virtual` settings, for the diagnosis tests.
 pub(super) fn diagnosis_renderer(m: &serde_json::Value) -> Renderer {
@@ -328,7 +329,7 @@ fn gpu_virtual_quarry_screen() {
     let lighting =
         lighting_settings::parse(&fs::read_to_string(m["lighting"].as_str().unwrap()).unwrap())
             .unwrap();
-    let shadows = r.shadows.settings.clone();
+    let shadows = r.view.shadows.settings.clone();
     let Light::Directional { travel, lux } = lighting.lights[0] else {
         panic!("quarry sun");
     };
@@ -624,7 +625,7 @@ fn gpu_virtual_quarry() {
     let lighting =
         lighting_settings::parse(&fs::read_to_string(m["lighting"].as_str().unwrap()).unwrap())
             .unwrap();
-    let shadows = r.shadows.settings.clone();
+    let shadows = r.view.shadows.settings.clone();
     let Light::Directional { travel, lux } = lighting.lights[0] else {
         panic!("quarry sun");
     };
@@ -635,7 +636,7 @@ fn gpu_virtual_quarry() {
     let module = seeded_module(&r);
     let seeded: Vec<_> = (1..=64u32)
         .map(|s| {
-            r.primary.as_ref().unwrap().fresh_pipeline(
+            r.view.primary.as_ref().unwrap().fresh_pipeline(
                 &r.device,
                 &r.ledger,
                 &module,

@@ -137,9 +137,9 @@ fn fixture(path: RenderPath) -> Fixture {
         },
     )
     .unwrap();
-    engine.resize(SIZE[0], SIZE[1]).unwrap();
-    let view = engine.view();
-    engine.set_outputs(view, Outputs { ids: true }).unwrap();
+    let mut desc = ViewDesc::new(SIZE[0], SIZE[1]);
+    desc.outputs.ids = true;
+    engine.create_view(&desc).unwrap();
     let stone = engine
         .create_material(&MaterialDesc {
             base_color: [0.6, 0.55, 0.5, 1.0],
@@ -249,10 +249,21 @@ fn camera(offset: f32) -> Camera {
     .unwrap()
 }
 
+/// The fixture's one view.
+fn first(engine: &Engine) -> ViewId {
+    engine.views().next().unwrap()
+}
+/// Changes a view's description in place.
+fn change(engine: &mut Engine, view: ViewId, edit: impl FnOnce(&mut ViewDesc)) {
+    let mut desc = engine.view_desc(view).unwrap().clone();
+    edit(&mut desc);
+    engine.set_view(view, &desc).unwrap();
+}
+
 /// Renders one frame and reads back every id of it.
 fn frame(engine: &mut Engine, camera: &Camera) -> Vec<IdPixel> {
-    engine.render(camera).unwrap();
-    let view = engine.view();
+    let view = first(engine);
+    engine.render_view(view, camera).unwrap();
     let request = engine
         .request_ids(view, IdRect { x: 0, y: 0, width: SIZE[0], height: SIZE[1] })
         .unwrap();
@@ -382,12 +393,12 @@ fn ids_match_a_cpu_ray_cast_on_the_rt_path() {
 #[test]
 fn ids_off_encode_nothing_and_requests_name_their_rectangle() {
     let Fixture { mut engine, .. } = fixture(RenderPath::NonRt);
-    let view = engine.view();
-    engine.set_outputs(view, Outputs { ids: false }).unwrap();
-    engine.render(&camera(0.0)).unwrap();
+    let view = first(&engine);
+    change(&mut engine, view, |d| d.outputs.ids = false);
+    engine.render_view(view, &camera(0.0)).unwrap();
     assert!(engine.view_ids(view).is_none(), "no ID target while ids are off");
     assert!(engine.request_ids(view, IdRect::pixel(0, 0)).is_err());
-    engine.set_outputs(view, Outputs { ids: true }).unwrap();
+    change(&mut engine, view, |d| d.outputs.ids = true);
     let all = frame(&mut engine, &camera(0.0));
     let rect = IdRect { x: 100, y: 60, width: 7, height: 3 };
     let request = engine.request_ids(view, rect).unwrap();
@@ -488,7 +499,7 @@ fn view_modes_match_their_cpu_reference(path: RenderPath) {
         },
     )
     .unwrap();
-    engine.resize(SIZE[0], SIZE[1]).unwrap();
+    engine.create_view(&ViewDesc::new(SIZE[0], SIZE[1])).unwrap();
     let program = engine.create_program("view", VIEW_PROGRAM).unwrap();
     // (base colour, metallic, roughness, program); the custom program declares its own.
     let looks = [
@@ -525,7 +536,7 @@ fn view_modes_match_their_cpu_reference(path: RenderPath) {
             ..Sun::default()
         }))
         .unwrap();
-    let view = engine.view();
+    let view = first(&engine);
     let camera = camera(0.0);
     let only: Vec<Shape> = shapes
         .iter()
@@ -549,9 +560,9 @@ fn view_modes_match_their_cpu_reference(path: RenderPath) {
         ViewMode::Emission,
         ViewMode::Occlusion,
     ] {
-        engine.set_view_mode(view, mode).unwrap();
-        engine.render(&camera).unwrap();
-        let image = engine.capture().unwrap();
+        change(&mut engine, view, |d| d.view_mode = mode);
+        engine.render_view(view, &camera).unwrap();
+        let image = engine.capture_view(view).unwrap();
         let mut checked = 0usize;
         for p in (0..hits.len()).filter(|&p| interior(p)) {
             let expected: [f64; 3] = match hits[p] {
@@ -587,17 +598,17 @@ fn view_modes_match_their_cpu_reference(path: RenderPath) {
         }
         assert!(checked > hits.len() / 2, "{mode:?}: only {checked} interior pixels");
         // Data modes are not jittered: a second frame is the same image.
-        engine.render(&camera).unwrap();
-        assert!(engine.capture().unwrap().rgba8 == image.rgba8, "{mode:?} changed between frames");
+        engine.render_view(view, &camera).unwrap();
+        assert!(engine.capture_view(view).unwrap().rgba8 == image.rgba8, "{mode:?} changed between frames");
     }
     // LightingOnly is lit (reconstructed and tone-mapped), so it has no exact reference
     // here, and white albedo under the sun saturates the tone map. It is program-independent
     // white lighting: the sunlit top faces of a standard and the custom cube read alike.
-    engine.set_view_mode(view, ViewMode::LightingOnly).unwrap();
+    change(&mut engine, view, |d| d.view_mode = ViewMode::LightingOnly);
     for _ in 0..8 {
-        engine.render(&camera).unwrap();
+        engine.render_view(view, &camera).unwrap();
     }
-    let image = engine.capture().unwrap();
+    let image = engine.capture_view(view).unwrap();
     let luma = |p: usize| image.rgba8[p * 4..p * 4 + 3].iter().map(|&c| f64::from(c)).sum::<f64>();
     let face = |s: usize, normal: [f32; 3]| -> f64 {
         let picked: Vec<f64> = (0..hits.len())
@@ -616,8 +627,8 @@ fn view_modes_match_their_cpu_reference(path: RenderPath) {
         "white lighting differs by program: {standard} vs {custom}"
     );
     // Back to Lit: the ordinary frame again.
-    engine.set_view_mode(view, ViewMode::Lit).unwrap();
-    engine.render(&camera).unwrap();
+    change(&mut engine, view, |d| d.view_mode = ViewMode::Lit);
+    engine.render_view(view, &camera).unwrap();
 }
 
 #[test]
@@ -677,7 +688,7 @@ fn read_words(engine: &Engine, texture: &wgpu::Texture) -> Vec<u32> {
 /// against the readback (which the cast test checks against the CPU).
 fn handoff_matches_the_readback(path: RenderPath) {
     let Fixture { mut engine, .. } = fixture(path);
-    let view = engine.view();
+    let view = first(&engine);
     let ids = frame(&mut engine, &camera(0.0));
     let target = engine.device().create_texture(&wgpu::TextureDescriptor {
         label: Some("test id handoff"),

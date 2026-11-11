@@ -54,8 +54,6 @@ pub mod kind {
     pub enum Environment {}
     pub enum Object {}
     pub enum Emitter {}
-    /// A view: one camera's targets and histories (docs/design-views.md).
-    pub enum View {}
     /// The engine's internal mesh-material draw groups.
     pub(crate) enum Batch {}
 }
@@ -66,7 +64,6 @@ pub type MaterialId = Id<kind::Material>;
 pub type EnvironmentId = Id<kind::Environment>;
 pub type ObjectId = Id<kind::Object>;
 pub type EmitterId = Id<kind::Emitter>;
-pub type ViewId = Id<kind::View>;
 
 /// Dense storage with a free list; each reuse of a slot bumps its generation.
 pub(crate) struct Slots<K, V> {

@@ -571,12 +571,112 @@ pub(crate) fn zones_source(record: &str) -> String {
 }
 pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
+    let mode = ["tr1-mask", "tr1-raw", "tr1-window"]
+        .into_iter()
+        .find(|m| p_still(m));
+    let mut resolve = match mode {
+        Some(mode) => mask_resolve(mode),
+        None => RESOLVE.to_owned(),
+    };
+    if let Ok(k) = std::env::var("RENDERLAB_P_SPLIT_FRESH_CLAMP") {
+        resolve = fresh_clamp_resolve(
+            &resolve,
+            k.parse()
+                .map_err(|_| Error::InvalidInput("RENDERLAB_P_SPLIT_FRESH_CLAMP: a number"))?,
+        );
+    }
     // MV1 motion-source seam; history/resolve policy belongs to MQ1.
     Ok(format!(
-        "{head}\n{}\n{RESOLVE}\n{}",
+        "{head}\n{}\n{resolve}\n{}",
         include_str!("../shaders/object_motion.wgsl"),
         zones_source("tr1.zones")
     ))
+}
+
+/// Measurement only (P-SPLIT crack flashes): a continued history's fresh sample is clamped to
+/// its 8 same-surface neighbours' range, widened by `k` times that range on each side.
+fn fresh_clamp_resolve(source: &str, k: f32) -> String {
+    let seam = "var x=sample;";
+    assert_eq!(source.matches(seam).count(), 1, "TR1 fresh clamp seam");
+    source.replace(seam, "var x=tr1_fresh_clamp(p,s.id,sample,size);")
+        + &format!(
+            "
+fn tr1_fresh_clamp(p:vec2<i32>,id:u32,x:vec3<f32>,size:vec2<u32>)->vec3<f32> {{
+    var lo=vec3<f32>(3.4e38);var hi=vec3<f32>(-3.4e38);var n=0u;
+    for(var i=0;i<9;i+=1) {{
+        let t=p+vec2<i32>(i%3,i/3)-vec2<i32>(1);
+        if i==4 || !tr1_inside(t,size) || tr1_ring(i)!=id {{continue;}}
+        let c=textureLoad(tr1_sample,tr1_map(t),0).xyz;
+        lo=min(lo,c);hi=max(hi,c);n+=1u;
+    }}
+    if n<2u {{return x;}}
+    let r=(hi-lo)*{k:?};
+    return clamp(x,lo-r,hi+r);
+}}
+"
+        )
+}
+
+/// Measurement only (P-SPLIT crack flashes): `RENDERLAB_P_STILL=tr1-mask|tr1-raw|tr1-window`
+/// writes how TR1 continued each pixel into the output's alpha, which nothing after TR1 reads
+/// as colour. History and every other target are production's; production compiles
+/// `RESOLVE` unchanged. Alpha: 1 restart (cut), 2 still, 3 Catmull-Rom (16 taps), 4 bilinear
+/// (4 taps), 5 bilinear (1-3 taps), 6 no tap (spatial start), 7 rejected (caster or relit
+/// light); +16 on silhouettes; 32 a third-surface pixel. `tr1-raw` writes this frame's sample
+/// as the colour, `tr1-window` the history weight and window before the sample (r, g).
+fn mask_resolve(mode: &str) -> String {
+    let colour = match mode {
+        "tr1-raw" => "textureLoad(tr1_sample,tr1_map(p),0).xyz",
+        "tr1-window" => "vec3<f32>(tr1_mask_history,0.0)",
+        _ => "",
+    };
+    let film = |film: &str| {
+        if colour.is_empty() {
+            film.to_owned()
+        } else {
+            colour.to_owned()
+        }
+    };
+    let edits = [
+        (
+            "if shown==0u || total<=0.0 {return h;}",
+            "if shown==0u || total<=0.0 {return h;}\n    tr1_mask_last=select(select(5.0,4.0,shown==4u),2.0,tr1_still(s));"
+                .to_owned(),
+        ),
+        (
+            "h.colour=clamp(sharp,lo,hi);",
+            "h.colour=clamp(sharp,lo,hi);tr1_mask_last=3.0;".to_owned(),
+        ),
+        (
+            "if tr1.flags.x==0u {h=tr1_history(p,s,size);}",
+            "tr1_mask_last=select(6.0,1.0,tr1.flags.x!=0u);if tr1.flags.x==0u {h=tr1_history(p,s,size);}\n    tr1_mask_own=tr1_mask_last;tr1_mask_history=vec2<f32>(h.weight,h.window);".to_owned(),
+        ),
+        (
+            "textureStore(tr1_output,p,vec4<f32>(film.xyz,1.0));",
+            format!("textureStore(tr1_output,p,vec4<f32>({},tr1_mask_own));", film("film.xyz")),
+        ),
+        (
+            "textureStore(tr1_output,p,vec4<f32>(film,1.0));",
+            format!("textureStore(tr1_output,p,vec4<f32>({},tr1_mask_own+16.0));", film("film")),
+        ),
+        (
+            "textureStore(tr1_output,p,vec4<f32>(mix(theirs,mine.xyz,own.coverage),1.0));",
+            format!(
+                "textureStore(tr1_output,p,vec4<f32>({},32.0));",
+                film("mix(theirs,mine.xyz,own.coverage)")
+            ),
+        ),
+    ];
+    let mut source = RESOLVE.replace(
+        "var rejected:Tr1History;return rejected;",
+        "tr1_mask_last=7.0;var rejected:Tr1History;return rejected;",
+    );
+    for (from, to) in edits {
+        assert_eq!(source.matches(from).count(), 1, "TR1 mask seam: {from}");
+        source = source.replace(from, &to);
+    }
+    source
+        + "\nvar<private> tr1_mask_last:f32;\nvar<private> tr1_mask_own:f32;\nvar<private> tr1_mask_history:vec2<f32>;\n"
 }
 
 impl PrimaryState {
@@ -726,8 +826,10 @@ fn union(
 pub(crate) struct PlanInputs<'a> {
     pub(crate) settings: Reconstruction,
     pub(crate) budget: ReconstructionShadowBudget,
-    /// Frames rendered so far: history continues only from the frame directly before.
-    pub(crate) rendered_frames: u64,
+    /// The renderer frame this view rendered last: history continues only from it.
+    pub(crate) previous_frame: u64,
+    /// This frame's renderer frame (`FrameId`).
+    pub(crate) frame: u64,
     /// The reconstruction sample index.
     pub(crate) index: u64,
     /// A digest of everything that restarts history when it changes
@@ -883,7 +985,7 @@ impl Planner {
         let continued = self
             .previous
             .as_ref()
-            .filter(|p| p.frame == i.rendered_frames && p.key == key && p.suns.len() == suns.len())
+            .filter(|p| p.frame == i.previous_frame && p.key == key && p.suns.len() == suns.len())
             .map(|p| {
                 // The largest directional-light turn since the previous frame.
                 let turn = p
@@ -1078,7 +1180,7 @@ impl Planner {
         }
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
         self.previous = Some(Previous {
-            frame: i.rendered_frames + 1,
+            frame: i.frame,
             matrix,
             jitter,
             eye,
@@ -1232,8 +1334,10 @@ impl Renderer {
     ) -> Result<(), Error> {
         budget.validate()?;
         if budget != self.reconstruction_shadow_budget {
-            self.reconstruction_state = None;
-            self.reconstruction_index = 0;
+            for view in self.views_mut() {
+                view.reconstruction_state = None;
+                view.reconstruction_index = 0;
+            }
         }
         self.reconstruction_shadow_budget = budget;
         Ok(())
@@ -1244,13 +1348,14 @@ impl Renderer {
     /// Last prepared reconstructed frame's Interactive ray count, for telemetry.
     pub fn reconstruction_shadow_rays(&self) -> Option<u32> {
         if self.primary_mode != PrimaryVisibility::Traced
-            || self.soft_mode != SoftShadows::Interactive
-            || self.shadows.settings.directional_disk_angle == 0.0
-            || !self.reconstruction.enabled
+            || self.view.soft_mode != SoftShadows::Interactive
+            || self.view.shadows.settings.directional_disk_angle == 0.0
+            || !self.view.reconstruction.enabled
         {
             return None;
         }
-        self.reconstruction_state
+        self.view
+            .reconstruction_state
             .as_ref()
             .map(|s| s.plan.shadow_rays)
     }
@@ -1262,12 +1367,14 @@ impl Renderer {
         color: &wgpu::Texture,
     ) -> Option<wgpu::Texture> {
         let [width, height] = self
+            .view
             .reconstruction
             .scale
             .internal_size(color.width(), color.height());
-        if self.reconstruction_frame.is_none() || [width, height] == [color.width(), color.height()]
+        if self.view.reconstruction_frame.is_none()
+            || [width, height] == [color.width(), color.height()]
         {
-            self.upscale = None;
+            self.view.upscale = None;
             return None;
         }
         let size = wgpu::Extent3d {
@@ -1276,6 +1383,7 @@ impl Renderer {
             depth_or_array_layers: 1,
         };
         if self
+            .view
             .upscale
             .as_ref()
             .is_none_or(|u| u.color.texture.size() != size || u.hdr.texture.size() != color.size())
@@ -1306,14 +1414,14 @@ impl Renderer {
                 }),
                 ResourceKind::BindGroup,
             );
-            self.upscale = Some(Upscale {
+            self.view.upscale = Some(Upscale {
                 color: internal,
                 hdr,
                 present,
                 output: color.clone(),
             });
         }
-        let upscale = self.upscale.as_mut().unwrap();
+        let upscale = self.view.upscale.as_mut().unwrap();
         upscale.output = color.clone();
         Some((*upscale.color.texture).clone())
     }
@@ -1329,8 +1437,11 @@ impl Renderer {
     /// P-RELIT a flickering local light restarted every pixel every frame in the same way;
     /// it now restarts only its restart sphere (`relit_zones`).
     fn reconstruction_key(&self) -> [u8; 32] {
+        // The scene's uploads and this view's own, not other views' primary tables.
         let u = &self.uploads;
-        let state = self.primary.as_ref().unwrap();
+        let (others, mine) = (&self.primary_uploads, &self.view.primary_uploads);
+        let own = |all: u64, others: u64, mine: u64| all - others + mine;
+        let state = self.view.primary.as_ref().unwrap();
         let lights: Vec<_> = self
             .lighting
             .source_lights
@@ -1355,9 +1466,9 @@ impl Renderer {
             )
             .chain_update(state.geometry_generation.to_ne_bytes())
             .chain_update(state.reconstruction_bindings_generation.to_ne_bytes())
-            .chain_update(format!("{:?}", self.shadows.settings).as_bytes())
-            .chain_update(format!("{:?}", self.virtual_settings).as_bytes())
-            .chain_update(format!("{:?} {:?}", self.soft_mode, self.primary_mode).as_bytes())
+            .chain_update(format!("{:?}", self.view.shadows.settings).as_bytes())
+            .chain_update(format!("{:?}", self.view.virtual_settings).as_bytes())
+            .chain_update(format!("{:?} {:?}", self.view.soft_mode, self.primary_mode).as_bytes())
             .chain_update(format!("{lights:?}").as_bytes())
             .chain_update(
                 self.lighting
@@ -1375,14 +1486,14 @@ impl Renderer {
         // primary tables, so placement slots are stable; new placements change `instances`
         // and `geometry_generation`.
         for v in [
-            u.environment,
-            u.geometry,
-            u.lut,
-            u.textures,
-            u.materials,
+            own(u.environment, others.environment, mine.environment),
+            own(u.geometry, others.geometry, mine.geometry),
+            own(u.lut, others.lut, mine.lut),
+            own(u.textures, others.textures, mine.textures),
+            own(u.materials, others.materials, mine.materials),
             // MV1: transform/derived-normal uploads move surfaces; they no longer
             // reset all history. Placement identity/topology stays in the key above.
-            u.instances,
+            own(u.instances, others.instances, mine.instances),
         ] {
             hash.update(v.to_ne_bytes());
         }
@@ -1415,12 +1526,17 @@ impl Renderer {
         };
         let scopes = OperationScopes::new(&self.device);
         let production = self.pipeline.primary.as_ref().unwrap();
-        let pipelines = self.primary.as_ref().unwrap().reconstruction_pipelines(
-            &self.device,
-            &self.ledger,
-            &resolve,
-            trace.as_deref().map(|s| (s, production)),
-        );
+        let pipelines = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .reconstruction_pipelines(
+                &self.device,
+                &self.ledger,
+                &resolve,
+                trace.as_deref().map(|s| (s, production)),
+            );
         if let Some(error) = scopes.finish() {
             return Err(match error {
                 wgpu::Error::Validation { .. } => Error::Shader(error.to_string()),
@@ -1446,12 +1562,12 @@ impl Renderer {
             None => resolve_source(&self.source).unwrap(),
         };
         let scopes = OperationScopes::new(&self.device);
-        let pipelines = self.primary.as_ref().unwrap().reconstruction_pipelines(
-            &self.device,
-            &self.ledger,
-            &source,
-            None,
-        );
+        let pipelines = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .reconstruction_pipelines(&self.device, &self.ledger, &source, None);
         assert!(
             scopes.finish().is_none(),
             "static-control resolve must compile"
@@ -1476,20 +1592,26 @@ impl Renderer {
         index: u64,
         draws: &[PreparedDraw<'_>],
     ) {
-        let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
-        let output = self.upscale.as_ref().map_or(size, |u| u.hdr.texture.size());
+        let size = self.view.hdr.as_ref().unwrap().resolved.texture.size();
+        let output = self
+            .view
+            .upscale
+            .as_ref()
+            .map_or(size, |u| u.hdr.texture.size());
         if self
+            .view
             .reconstruction_state
             .as_ref()
             .is_none_or(|s| s.size() != size || s.output() != output)
         {
             let cut = self
+                .view
                 .reconstruction_state
                 .as_ref()
                 .is_some_and(|s| s.plan.cut);
             let mut next = ReconstructionState::new(self, size, output);
             next.plan.cut = cut;
-            self.reconstruction_state = Some(next);
+            self.view.reconstruction_state = Some(next);
         }
         let key = self.reconstruction_key();
         let matrix = camera.unjittered().matrix(size.width, size.height);
@@ -1508,13 +1630,11 @@ impl Renderer {
             if let Some(s) = &d.mesh.skin {
                 skin_revisions.push(s.revision);
             }
-            for (&model, &previous_model) in d
-                .instances
-                .state
-                .models
-                .iter()
-                .zip(d.instances.state.previous_models(self.frames))
-            {
+            for (&model, &previous_model) in d.instances.state.models.iter().zip(
+                d.instances
+                    .state
+                    .previous_models(self.view_key.0, self.view.last_frame),
+            ) {
                 let moved = model.to_cols_array().map(f32::to_bits)
                     != previous_model.to_cols_array().map(f32::to_bits);
                 rigid_motion |= moved;
@@ -1528,7 +1648,7 @@ impl Renderer {
         }
         // P-RTS: with the penumbra pass compiled and edges deferred, every receiver first
         // traces the held count; only listed pixels trace the rest of the budget.
-        let primary = self.primary.as_ref().unwrap();
+        let primary = self.view.primary.as_ref().unwrap();
         let listing = primary.targets.as_ref().is_some_and(|t| t.defer_edges)
             && self.pipeline.primary.as_ref().is_some_and(|p| {
                 p.reconstruction
@@ -1537,19 +1657,21 @@ impl Renderer {
                     .is_some_and(|t| t.penumbra.is_some())
             });
         let planned = self
+            .view
             .reconstruction_state
             .as_mut()
             .unwrap()
             .plan
             .prepare(PlanInputs {
-                settings: self.reconstruction,
+                settings: self.view.reconstruction,
                 budget: self.reconstruction_shadow_budget,
-                rendered_frames: self.frames,
+                previous_frame: self.view.last_frame,
+                frame: self.frames + 1,
                 index,
                 key,
                 lights: &self.lighting.source_lights,
-                requests: &self.shadows.settings.requests,
-                directional_disk_angle: self.shadows.settings.directional_disk_angle,
+                requests: &self.view.shadows.settings.requests,
+                directional_disk_angle: self.view.shadows.settings.directional_disk_angle,
                 matrix,
                 eye,
                 jitter: camera.jitter(),
@@ -1573,19 +1695,19 @@ impl Renderer {
         self.uploads.write_calls += 2;
         // The non-RT sun lookup reads the same zones (prepare_virtual_sampling).
         let zones: [u8; ZONES_BYTES] = planned.zones().try_into().unwrap();
-        self.reconstruction_state.as_mut().unwrap().zones = zones;
-        let state = self.reconstruction_state.as_ref().unwrap();
+        self.view.reconstruction_state.as_mut().unwrap().zones = zones;
+        let state = self.view.reconstruction_state.as_ref().unwrap();
         self.queue
             .write_buffer(&state.frame.value, 0, &planned.frame);
         self.uploads.view_settings += FRAME_BYTES as u64;
         self.uploads.write_calls += 1;
         // The resolve writes the frame's HDR target, or the upscaled output.
-        let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
-        let out = self.upscale.as_ref().map_or(hdr, |u| &u.hdr);
-        let primary = self.primary.as_ref().unwrap();
+        let hdr = &self.view.hdr.as_ref().unwrap().resolved;
+        let out = self.view.upscale.as_ref().map_or(hdr, |u| &u.hdr);
+        let primary = self.view.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
         let frame = &primary.frame.as_ref().unwrap().0.value;
-        let state = self.reconstruction_state.as_ref().unwrap();
+        let state = self.view.reconstruction_state.as_ref().unwrap();
         let group_key: GroupKey = (
             (*targets.hit.texture).clone(),
             (*targets.tiles.texture).clone(),
@@ -1595,18 +1717,18 @@ impl Renderer {
         );
         if state.groups.as_ref().is_none_or(|(k, _)| *k != group_key) {
             let groups = self.reconstruction_groups();
-            self.reconstruction_state.as_mut().unwrap().groups = Some((group_key, groups));
+            self.view.reconstruction_state.as_mut().unwrap().groups = Some((group_key, groups));
         }
     }
 
     fn reconstruction_groups(&self) -> [Owned<wgpu::BindGroup>; 2] {
         use wgpu::BindingResource as R;
-        let state = self.reconstruction_state.as_ref().unwrap();
-        let primary = self.primary.as_ref().unwrap();
+        let state = self.view.reconstruction_state.as_ref().unwrap();
+        let primary = self.view.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
         let frame = &primary.frame.as_ref().unwrap().0.value;
-        let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
-        let out = self.upscale.as_ref().map_or(hdr, |u| &u.hdr);
+        let hdr = &self.view.hdr.as_ref().unwrap().resolved;
+        let out = self.view.upscale.as_ref().map_or(hdr, |u| &u.hdr);
         [0, 1].map(|written| {
             let read = 1 - written;
             let entries = [
@@ -1643,15 +1765,15 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let state = self.reconstruction_state.as_ref().unwrap();
-        let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
+        let state = self.view.reconstruction_state.as_ref().unwrap();
+        let hdr = &self.view.hdr.as_ref().unwrap().resolved;
         encoder.copy_texture_to_texture(
             hdr.texture.as_image_copy(),
             state.sample.texture.as_image_copy(),
             state.size(),
         );
         let size = state.output();
-        let primary = self.primary.as_ref().unwrap();
+        let primary = self.view.primary.as_ref().unwrap();
         let pipelines = self.pipeline.primary.as_ref().unwrap();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("temporal reconstruction"),
@@ -1716,7 +1838,8 @@ mod tests {
         PlanInputs {
             settings: Reconstruction::default(),
             budget: ReconstructionShadowBudget::default(),
-            rendered_frames: frame,
+            previous_frame: frame,
+            frame: frame + 1,
             index: frame,
             key: [7; 32],
             lights,
@@ -2022,7 +2145,15 @@ mod tests {
                 .count(),
             1
         );
-        for source in [resolve, off, trace, PENUMBRA_LIST.to_owned()] {
+        // The measurement-only mask modes (mask_resolve) must stay valid as TR1 changes.
+        let masks = ["tr1-mask", "tr1-raw", "tr1-window"]
+            .map(|m| resolve.replace(RESOLVE, &mask_resolve(m)));
+        let resolve_clone = resolve.clone();
+        for source in [resolve, off, trace, PENUMBRA_LIST.to_owned()]
+            .into_iter()
+            .chain(masks)
+            .chain([fresh_clamp_resolve(&resolve_clone, 0.5)])
+        {
             let module = naga::front::wgsl::parse_str(&source).unwrap();
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),

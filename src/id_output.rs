@@ -112,8 +112,8 @@ struct Pending {
     buffer: Owned<wgpu::Buffer>,
     row: u32,
     mapped: Arc<OnceLock<Result<(), wgpu::BufferAsyncError>>>,
-    /// The renderer's frame count at the request: `ID_TICKS` frames later an unmapped copy
-    /// is reported lost and only waits for its map to free the slot.
+    /// The renderer's tick (`Engine::tick`) at the request: `ID_TICKS` ticks later an
+    /// unmapped copy is reported lost and only waits for its map to free the slot.
     issued: u64,
     lost: bool,
 }
@@ -127,28 +127,28 @@ impl IdOutput {
 impl Renderer {
     /// Turns the per-frame ID pass on or off. Off frees its targets and encodes nothing.
     pub fn set_id_output(&mut self, enabled: bool) {
-        self.outputs.ids.enabled = enabled;
+        self.view.outputs.ids.enabled = enabled;
         if !enabled {
-            self.outputs.ids.targets = None;
-            self.outputs.ids.camera = None;
+            self.view.outputs.ids.targets = None;
+            self.view.outputs.ids.camera = None;
         }
     }
     pub fn id_output(&self) -> bool {
-        self.outputs.ids.enabled
+        self.view.outputs.ids.enabled
     }
     /// The id tables of the next frames' placements (`TagTables`): `opaque` per instance of
     /// the frame's opaque draws in draw order (the hit record's placements), `transparent` per
     /// instance of its transparent draws in draw order. Missing entries read as untagged.
     pub fn set_object_tags(&mut self, tables: &TagTables) {
-        if self.outputs.ids.tables != *tables {
-            self.outputs.ids.tables.clone_from(tables);
-            self.outputs.ids.tables_dirty = true;
+        if self.view.outputs.ids.tables != *tables {
+            self.view.outputs.ids.tables.clone_from(tables);
+            self.view.outputs.ids.tables_dirty = true;
         }
     }
     /// The ID target of the last frame with ids: R32Uint, the output's size, layer 0 the
     /// opaque ids and layer 1 the front ids. None before such a frame.
     pub fn id_texture(&self) -> Option<&wgpu::Texture> {
-        self.outputs
+        self.view.outputs
             .ids
             .targets
             .as_ref()
@@ -160,13 +160,13 @@ impl Renderer {
     /// Refused while `ID_SLOTS` readbacks are in flight; `view` names the result.
     pub fn request_ids(&mut self, view: ViewId, rect: IdRect) -> Result<IdRequest, Error> {
         self.check_fault()?;
-        let targets = self.outputs.ids.targets.as_ref();
+        let targets = self.view.outputs.ids.targets.as_ref();
         let (targets, frame) = targets
             .and_then(|t| Some((t, t.frame?)))
             .ok_or(Error::InvalidInput("no frame with ids to read"))?;
         let size = targets.ids.size();
         rect.check(size.width, size.height)?;
-        if self.outputs.ids.pending.len() >= ID_SLOTS {
+        if self.view.outputs.ids.pending.len() >= ID_SLOTS {
             return Err(Error::InvalidInput(
                 "every id readback slot is busy; retry after the next poll",
             ));
@@ -215,9 +215,9 @@ impl Renderer {
         // Queue order puts the copy behind the last frame and ahead of the next one; the
         // submitted copy keeps the texture alive through a resize or cut.
         self.queue.submit([encoder.finish()]);
-        let request = IdRequest(self.outputs.ids.next_request);
-        self.outputs.ids.next_request += 1;
-        self.outputs.ids.pending.push(Pending {
+        let request = IdRequest(self.view.outputs.ids.next_request);
+        self.view.outputs.ids.next_request += 1;
+        self.view.outputs.ids.pending.push(Pending {
             request,
             view,
             frame,
@@ -225,26 +225,26 @@ impl Renderer {
             buffer,
             row,
             mapped,
-            issued: self.frames,
+            issued: self.tick,
             lost: false,
         });
         Ok(request)
     }
     /// The readbacks' progress: finished ones in request order, and ones still unmapped
-    /// `ID_TICKS` rendered frames after their request, reported lost once. Polls the device
+    /// `ID_TICKS` engine ticks after their request, reported lost once. Polls the device
     /// without waiting.
     pub fn take_ids(&mut self) -> Result<(Vec<IdReadback>, Vec<IdsLost>), Error> {
         let (mut done, mut lost) = (Vec::new(), Vec::new());
-        if self.outputs.ids.pending.is_empty() {
+        if self.view.outputs.ids.pending.is_empty() {
             return Ok((done, lost));
         }
         self.device
             .poll(wgpu::PollType::Poll)
             .map_err(Error::Poll)?;
-        let mut kept = Vec::with_capacity(self.outputs.ids.pending.len());
-        for mut p in std::mem::take(&mut self.outputs.ids.pending) {
+        let mut kept = Vec::with_capacity(self.view.outputs.ids.pending.len());
+        for mut p in std::mem::take(&mut self.view.outputs.ids.pending) {
             let Some(result) = p.mapped.get() else {
-                if self.frames >= p.issued + u64::from(ID_TICKS) && !p.lost {
+                if self.tick >= p.issued + u64::from(ID_TICKS) && !p.lost {
                     p.lost = true;
                     lost.push(IdsLost {
                         request: p.request,
@@ -266,7 +266,7 @@ impl Renderer {
             }
             done.push(read(&p)?);
         }
-        self.outputs.ids.pending = kept;
+        self.view.outputs.ids.pending = kept;
         Ok((done, lost))
     }
 
@@ -279,25 +279,26 @@ impl Renderer {
         transparent: &[Draw<'_>],
         reconstructed: bool,
     ) {
-        let hit_size = self.primary.as_ref().unwrap().targets.as_ref().unwrap().hit.texture.size();
+        let hit_size = self.view.primary.as_ref().unwrap().targets.as_ref().unwrap().hit.texture.size();
         // Reconstructed frames resolve at the output size (upscaled or not); others at the
         // hit record's, which is then the output's.
-        let size = match (&self.upscale, reconstructed) {
+        let size = match (&self.view.upscale, reconstructed) {
             (Some(u), true) => u.output.size(),
             _ => hit_size,
         };
-        if self.outputs.ids.gpu.is_none() {
-            self.outputs.ids.gpu = Some(self.id_gpu());
+        if self.view.outputs.ids.gpu.is_none() {
+            self.view.outputs.ids.gpu = Some(self.id_gpu());
         }
         if self
+            .view
             .outputs
             .ids
             .targets
             .as_ref()
             .is_none_or(|t| t.ids.size().width != size.width || t.ids.size().height != size.height)
         {
-            self.outputs.ids.targets = Some(self.id_targets(size));
-            self.outputs.ids.camera = None;
+            self.view.outputs.ids.targets = Some(self.id_targets(size));
+            self.view.outputs.ids.camera = None;
         }
         // Moved placements: a transform changed since the last submitted frame, or skinned.
         let placements: usize = draws.iter().map(|d| d.instances.len()).sum();
@@ -305,7 +306,7 @@ impl Renderer {
         let mut base = 0;
         for d in draws {
             let models = &d.instances.state.models;
-            let previous = d.instances.state.previous_models(self.frames);
+            let previous = d.instances.state.previous_models(self.view_key.0, self.view.last_frame);
             for (slot, model) in models.iter().enumerate() {
                 let changed = d.mesh.skin.is_some()
                     || model.to_cols_array().map(f32::to_bits)
@@ -317,7 +318,7 @@ impl Renderer {
             base += models.len();
         }
         // The entry table as this frame's placements need it: untagged past the tables.
-        let tables = &self.outputs.ids.tables;
+        let tables = &self.view.outputs.ids.tables;
         let mut entries = tables.opaque.clone();
         entries.resize(placements, [0, 0]);
         entries.extend_from_slice(&tables.transparent);
@@ -333,8 +334,8 @@ impl Renderer {
             .transparency
             .camera
             .map(|c| matrix_bytes(c.matrix(size.width, size.height)));
-        let still = camera.is_some() && camera == self.outputs.ids.camera;
-        self.outputs.ids.camera = camera;
+        let still = camera.is_some() && camera == self.view.outputs.ids.camera;
+        self.view.outputs.ids.camera = camera;
         let frame = FrameId(self.frames + 1);
         // The previous frame's settled surfaces name its placements, which spawning or
         // despawning renumbers: they continue only with reconstruction's history, which
@@ -342,29 +343,30 @@ impl Renderer {
         // a batch's new instance count or buffers bump). Unreconstructed frames need none.
         let continued = reconstructed
             && self
+                .view
                 .reconstruction_state
                 .as_ref()
                 .is_some_and(|s| !s.plan.reset);
-        let targets = self.outputs.ids.targets.as_mut().unwrap();
+        let targets = self.view.outputs.ids.targets.as_mut().unwrap();
         let previous = targets.frame.is_some() && continued;
         targets.parity = 1 - targets.parity;
         targets.frame = Some(frame);
 
-        let dirty = std::mem::take(&mut self.outputs.ids.tables_dirty);
-        let gpu = self.outputs.ids.gpu.as_mut().unwrap();
+        let dirty = std::mem::take(&mut self.view.outputs.ids.tables_dirty);
+        let gpu = self.view.outputs.ids.gpu.as_mut().unwrap();
         let (device, queue, ledger) = (&self.device, &self.queue, &self.ledger);
         upload(device, queue, ledger, &mut gpu.entries, "id entries", words(entries.as_flattened()), dirty);
         upload(device, queue, ledger, &mut gpu.ranges, "id ranges", words(ranges.as_flattened()), dirty);
-        let moved_changed = moved != self.outputs.ids.moved;
+        let moved_changed = moved != self.view.outputs.ids.moved;
         upload(device, queue, ledger, &mut gpu.moved, "id moved placements", words(&moved), moved_changed);
-        self.outputs.ids.moved = moved;
+        self.view.outputs.ids.moved = moved;
         // Glass: only where the transparent pass ran this frame (native lit frames with
         // visible transparent draws, not data modes), which leaves its opaque depth; its
         // target outlives frames that skip it.
-        let glass = self.upscale.is_none()
-            && !self.outputs.modes.data()
+        let glass = self.view.upscale.is_none()
+            && !self.view.outputs.modes.data()
             && transparent.iter().any(|d| !d.instances.state.ids.is_empty())
-            && self.transparency.opaque_depth().is_some();
+            && self.view.transparency_targets.is_some();
         if glass {
             self.encode_glass(encoder, transparent, size);
         }
@@ -374,12 +376,12 @@ impl Renderer {
             | if glass { GLASS } else { 0 };
         let tile = super::primary_ray_gpu::TRACE_TILE;
         let frame_words = [size.width, size.height, flags, placements as u32, tile[0], tile[1], 0, 0];
-        let gpu = self.outputs.ids.gpu.as_ref().unwrap();
+        let gpu = self.view.outputs.ids.gpu.as_ref().unwrap();
         self.queue.write_buffer(&gpu.frame, 0, &words(&frame_words));
 
-        let targets = self.outputs.ids.targets.as_ref().unwrap();
-        let primary_targets = self.primary.as_ref().unwrap().targets.as_ref().unwrap();
-        let (anchors, layers) = match (reconstructed, &self.reconstruction_state) {
+        let targets = self.view.outputs.ids.targets.as_ref().unwrap();
+        let primary_targets = self.view.primary.as_ref().unwrap().targets.as_ref().unwrap();
+        let (anchors, layers) = match (reconstructed, &self.view.reconstruction_state) {
             (true, Some(state)) => state.written_slots(),
             _ => (&*gpu.zero_rg.view, &*gpu.zero_rgba.view),
         };
@@ -394,7 +396,7 @@ impl Renderer {
             (6, gpu.moved.as_ref().unwrap().0.as_entire_binding()),
             (
                 7,
-                R::TextureView(match (&self.outputs.ids.glass, glass) {
+                R::TextureView(match (&self.view.outputs.ids.glass, glass) {
                     (Some(Glass { target: Some((ids, _)), .. }), true) => &ids.view,
                     _ => &gpu.zero_uint.view,
                 }),
@@ -424,7 +426,7 @@ impl Renderer {
     /// (r = bits 0-7 ... a = bits 24-31). Queued behind that frame; nothing waits.
     pub fn write_ids_to(&mut self, target: &wgpu::Texture, layer: u32) -> Result<(), Error> {
         self.check_fault()?;
-        let targets = self.outputs.ids.targets.as_ref().filter(|t| t.frame.is_some());
+        let targets = self.view.outputs.ids.targets.as_ref().filter(|t| t.frame.is_some());
         let size = targets
             .ok_or(Error::InvalidInput("no frame with ids to write"))?
             .ids
@@ -441,12 +443,12 @@ impl Renderer {
                 "id target must be a single-sample, single-mip 2D Rgba8Unorm texture of the view's size with RENDER_ATTACHMENT | COPY_SRC usage",
             ));
         }
-        if self.outputs.ids.gpu.as_ref().unwrap().handoff.is_none() {
+        if self.view.outputs.ids.gpu.as_ref().unwrap().handoff.is_none() {
             let handoff = self.id_handoff();
-            self.outputs.ids.gpu.as_mut().unwrap().handoff = Some(handoff);
+            self.view.outputs.ids.gpu.as_mut().unwrap().handoff = Some(handoff);
         }
-        let gpu = self.outputs.ids.gpu.as_ref().unwrap();
-        let targets = self.outputs.ids.targets.as_ref().unwrap();
+        let gpu = self.view.outputs.ids.gpu.as_ref().unwrap();
+        let targets = self.view.outputs.ids.targets.as_ref().unwrap();
         let (layout, pipeline, uniform) = gpu.handoff.as_ref().unwrap();
         self.queue.write_buffer(uniform, 0, &words(&[layer, 0, 0, 0]));
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -575,22 +577,23 @@ impl Renderer {
         size: wgpu::Extent3d,
     ) {
         if self
+            .view
             .outputs
             .ids
             .glass
             .as_ref()
             .is_none_or(|g| g.prelude != self.source)
         {
-            self.outputs.ids.glass = Some(self.id_glass());
+            self.view.outputs.ids.glass = Some(self.id_glass());
         }
-        let resized = self.outputs.ids.glass.as_ref().unwrap().target.as_ref().is_none_or(|(t, _)| {
+        let resized = self.view.outputs.ids.glass.as_ref().unwrap().target.as_ref().is_none_or(|(t, _)| {
             t.texture.size().width != size.width || t.texture.size().height != size.height
         });
         if resized {
             use wgpu::{TextureFormat as F, TextureUsages as U};
             let ids = self.id_target("id glass", size, F::R32Uint, U::RENDER_ATTACHMENT);
             let depth = self.id_target("id glass depth", size, F::Depth32Float, U::RENDER_ATTACHMENT);
-            self.outputs.ids.glass.as_mut().unwrap().target = Some((ids, depth));
+            self.view.outputs.ids.glass.as_mut().unwrap().target = Some((ids, depth));
         }
         // The unjittered camera block, eye and forward, as transparency_gpu.rs computes them.
         let camera = self.transparency.camera.unwrap();
@@ -612,7 +615,7 @@ impl Renderer {
             draws[at..at + 4].copy_from_slice(&first.to_ne_bytes());
             first += d.instances.len() as u32;
         }
-        let glass = self.outputs.ids.glass.as_mut().unwrap();
+        let glass = self.view.outputs.ids.glass.as_mut().unwrap();
         self.queue.write_buffer(&glass.view, 0, &view);
         upload_with(
             &self.device,
@@ -623,7 +626,7 @@ impl Renderer {
             draws,
             wgpu::BufferUsages::UNIFORM,
         );
-        let glass = self.outputs.ids.glass.as_ref().unwrap();
+        let glass = self.view.outputs.ids.glass.as_ref().unwrap();
         let (target, depth) = glass.target.as_ref().unwrap();
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("id glass"),
@@ -648,7 +651,7 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 41,
                     resource: wgpu::BindingResource::TextureView(
-                        self.transparency.opaque_depth().unwrap(),
+                        self.view.transparency_targets.as_ref().unwrap().opaque_depth(),
                     ),
                 },
                 wgpu::BindGroupEntry {

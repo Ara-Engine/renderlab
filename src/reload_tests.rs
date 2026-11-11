@@ -203,7 +203,8 @@ fn variant_pipelines(r: &Renderer, variant: Variant, modules: &[wgpu::ShaderModu
         Variant::Hardware => lit(&r.hardware_shadows.as_ref().unwrap().layout),
         Variant::Fresh => vec![
             timed(|| {
-                r.fresh
+                r.view
+                    .fresh
                     .as_ref()
                     .unwrap()
                     .shade_pipelines(&r.device, &r.ledger, &modules[0])
@@ -212,7 +213,7 @@ fn variant_pipelines(r: &Renderer, variant: Variant, modules: &[wgpu::ShaderModu
         ],
         Variant::Traced => vec![
             timed(|| {
-                r.primary.as_ref().unwrap().shade_pipelines(
+                r.view.primary.as_ref().unwrap().shade_pipelines(
                     &r.device,
                     &r.ledger,
                     [&modules[0], &modules[1]],
@@ -246,7 +247,7 @@ fn compile_engine(r: &Renderer, prelude: &str) -> serde_json::Value {
             &r.ledger,
             &r.layout,
             &r.lighting,
-            &r.shadows,
+            &r.view.shadows,
             None,
             None,
             r.format,
@@ -256,14 +257,16 @@ fn compile_engine(r: &Renderer, prelude: &str) -> serde_json::Value {
     });
     let fresh_source = fresh_shadow_gpu::shader_source(prelude).unwrap();
     let (_, fresh) = timed(|| {
-        r.fresh
+        r.view
+            .fresh
             .as_ref()
             .unwrap()
             .compile(&r.device, &r.ledger, &fresh_source)
     });
     let kernels = primary_ray_gpu::shader_sources(prelude).unwrap();
     let (_, traced) = timed(|| {
-        r.primary
+        r.view
+            .primary
             .as_ref()
             .unwrap()
             .compile(&r.device, &r.ledger, &kernels)

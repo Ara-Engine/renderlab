@@ -2,8 +2,9 @@
 //!
 //! A game creates an engine for a [`RenderPath`], creates resources (meshes, textures,
 //! programs, materials, environments) and spawns objects, all named by copyable typed
-//! handles ([`Id`]). Each frame it moves objects, sets the camera and calls
-//! [`Engine::render`] or [`Engine::render_to`]. Every call blocks only for GPU
+//! handles ([`Id`]), and creates one or more views ([`Engine::create_view`]). Each frame it
+//! moves objects, calls [`Engine::tick`] once and renders each view it shows from its
+//! camera ([`Engine::render_view`] or [`Engine::render_view_to`]). Every call blocks only for GPU
 //! backpressure; the engine handles admission retries, per-path configuration (traced
 //! primaries or the visibility buffer, sun visibility, GI geometry) and draw batching.
 //!
@@ -14,6 +15,9 @@
 mod device;
 pub(crate) mod ids;
 mod scene;
+mod view;
+#[cfg(test)]
+mod view_tests;
 // Crate-visible for a second GPU layer's engine: the same lighting and atmosphere
 // translation, over the same state.
 pub(crate) mod settings;
@@ -21,10 +25,11 @@ pub(crate) mod state;
 
 pub use device::{Capabilities, ExperimentalRayQuery, RenderPath};
 pub use ids::{
-    EmitterId, EnvironmentId, Id, MaterialId, MeshId, ObjectId, ProgramId, TextureId, ViewId, kind,
+    EmitterId, EnvironmentId, Id, MaterialId, MeshId, ObjectId, ProgramId, TextureId, kind,
 };
 pub use scene::Scene;
 pub use settings::{Background, Exposure, Quality, Settings, Sky, Sun};
+pub use view::{Outputs, ViewDesc, ViewLook};
 
 pub use crate::animation::{AnimationPose, ClipPlayer};
 pub use crate::asset::{
@@ -39,11 +44,10 @@ pub use crate::{
     Forces, FrameId, FrameReport, HeightFog, Light, Limits, LocalShadows, MAX_CURVE_KEYS,
     MAX_PARTICLES, Mat4, MeshData, PlaneCollision, PostSettings, ReflectionSettings, ReloadError,
     ReloadReport, RenderScale, Renderer, SizeKey, SpawnShape, SpriteAlignment, Tonemapper,
-    Transparency, Value, Vec3, Vertex, VolumetricFog,
+    Transparency, Value, Vec3, Vertex, ViewId, ViewMode, VolumetricFog,
 };
 pub use crate::{
     ID_NONE, ID_UNTAGGED, IdLayer, IdPixel, IdReadback, IdRect, IdRequest, IdsLost, MAX_ID_RECT,
-    Outputs, ViewMode,
 };
 
 use crate::{
@@ -235,12 +239,14 @@ pub struct Engine {
     adapter: wgpu::AdapterInfo,
     format: wgpu::TextureFormat,
     limits: Limits,
-    output: Option<wgpu::Texture>,
     /// The scene: resource handles by id, objects in batches, sun, lights, sky, settings.
     state: State<Handles>,
     events: Events,
-    /// Object ids and the view's ID output switch (src/object_ids.rs).
+    /// The scene's object ids and the frame's id tables (src/object_ids.rs).
     ids: crate::object_ids::EngineIds,
+    /// The views, and the renderer's empty view the next `create_view` takes (its first).
+    views: Vec<view::ViewEntry>,
+    spare: Option<ViewId>,
 }
 
 /// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
@@ -324,6 +330,7 @@ impl Engine {
                 "renderer did not select the path's primary visibility",
             ));
         }
+        let renderer_first_view = renderer.selected_view();
         let state = State::new(
             renderer.standard_program().clone(),
             settings::ablated(descriptor.settings),
@@ -334,19 +341,16 @@ impl Engine {
             adapter: info,
             format,
             limits: descriptor.limits,
-            output: None,
             state,
             events: Events::default(),
             ids: Default::default(),
+            views: Vec::new(),
+            spare: Some(renderer_first_view),
         };
-        settings::apply(&mut engine.renderer, path, &engine.state.settings)?;
+        settings::apply(&mut engine.renderer, &engine.state.settings)?;
+        // Ticks are explicit from the start: the first frame runs the first tick's work.
+        engine.renderer.begin_tick();
         engine.apply_lighting()?;
-        // Measurement switch: ids on for the view of an embedder that does not set them
-        // (cost timing through Ara's player, docs/design-id-output.md).
-        if std::env::var_os("RENDERLAB_IDS").is_some_and(|v| v == "1") {
-            let view = engine.view();
-            engine.set_outputs(view, Outputs { ids: true })?;
-        }
         Ok(engine)
     }
 
@@ -705,11 +709,6 @@ impl Engine {
     pub fn remove_emitter(&mut self, emitter: EmitterId) -> Result<(), Error> {
         self.state.remove_emitter(emitter).map(drop)
     }
-    /// Particle simulation time per rendered frame, in seconds (default 1/60). Set it to
-    /// the game's frame time; zero freezes particles.
-    pub fn set_particle_step(&mut self, seconds: f32) -> Result<(), Error> {
-        self.renderer.set_particle_step(seconds)
-    }
 
     // ---- Objects ----
 
@@ -791,20 +790,21 @@ impl Engine {
         // Validate before touching the renderer (docs/api.md): a rejected sky_light must
         // leave the stored settings unchanged, or later set_sun/set_sky/light edits fail.
         if !(settings.sky_light.is_finite() && settings.sky_light >= 0.0) {
-            return Err(Error::InvalidInput("sky light must be finite and nonnegative"));
+            return Err(Error::InvalidInput(
+                "sky light must be finite and nonnegative",
+            ));
         }
-        settings::apply(&mut self.renderer, self.path, &settings)?;
+        settings::apply(&mut self.renderer, &settings)?;
         self.state.settings = settings;
-        // Exposure and the view-path media live with the lighting and atmosphere.
+        // Views' looks depend on the settings (temporal reconstruction): reapply on render.
+        for view in &mut self.views {
+            view.applied = false;
+        }
+        // The view-path media live with the lighting and atmosphere.
         self.apply_lighting()
     }
     pub fn settings(&self) -> Settings {
         self.state.settings
-    }
-    /// Sets or clears the post pass's display-linear 3D colour LUT (PP1), applied at
-    /// `Settings::post.lut_strength`.
-    pub fn set_colour_lut(&mut self, lut: Option<ColourLut>) -> Result<(), Error> {
-        self.renderer.set_colour_lut(lut)
     }
     /// Publishes the sun, lights, sky and exposure. Everything is validated before the
     /// renderer changes, so a rejected call leaves the previous lighting in place.
@@ -813,7 +813,7 @@ impl Engine {
             self.state.sun,
             &self.state.lights,
             self.state.sky,
-            self.state.settings.exposure,
+            self.selected_exposure(),
         )?;
         let atmosphere = settings::atmosphere(self.state.sky, &self.state.settings);
         atmosphere.validate()?;
@@ -880,55 +880,12 @@ impl Engine {
 
     // ---- Frames ----
 
-    /// Creates or resizes the engine's own colour output (for offscreen rendering and
-    /// [`capture`](Self::capture)). Windowed games can use `render_to` instead.
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Error> {
-        if width == 0 || height == 0 {
-            return Err(Error::InvalidInput("output extent must be nonzero"));
-        }
-        if self
-            .output
-            .as_ref()
-            .is_some_and(|t| (t.width(), t.height()) == (width, height))
-        {
-            return Ok(());
-        }
-        self.output = Some(self.device().create_texture(&wgpu::TextureDescriptor {
-            label: Some("renderlab engine output"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        }));
-        Ok(())
-    }
-    /// The engine's own output, after `resize`.
-    pub fn output(&self) -> Option<&wgpu::Texture> {
-        self.output.as_ref()
-    }
-    /// Renders the scene from `camera` into the engine's output.
-    pub fn render(&mut self, camera: &Camera) -> Result<FrameReport, Error> {
-        let output = self.output.clone().ok_or(Error::InvalidInput(
-            "call Engine::resize before Engine::render",
-        ))?;
-        self.render_to(&output, camera)
-    }
-    /// Renders the scene from `camera` into `color`: a single-sample 2D render attachment
-    /// in the engine's output format, such as a surface texture (then call `present`).
-    /// The camera's aspect follows `color`.
-    pub fn render_to(
+    /// Renders the renderer's selected view into `color` with the scene's batches.
+    fn render_selected(
         &mut self,
         color: &wgpu::Texture,
         camera: &Camera,
+        mode: ViewMode,
     ) -> Result<FrameReport, Error> {
         let ids: Vec<_> = self.state.batches.ids().collect();
         for id in ids {
@@ -940,9 +897,6 @@ impl Engine {
                 })?;
                 self.state.batches.get_mut(id)?.instances = Some(instances);
             }
-        }
-        if self.ids.outputs.ids {
-            self.publish_object_ids()?;
         }
         let Self {
             renderer,
@@ -963,12 +917,9 @@ impl Engine {
             let instances = batch.instances.as_mut().expect("uploaded above");
             draws.push(crate::Draw::new(mesh, instances).with_material(material));
         }
-        let mode = self.ids.mode;
         let deadline = Instant::now() + ADMISSION;
         loop {
-            if let Some(report) =
-                renderer.try_render_view(color, camera, &mut draws, mode)?
-            {
+            if let Some(report) = renderer.try_render_view(color, camera, &mut draws, mode)? {
                 return Ok(report);
             }
             if Instant::now() > deadline {
@@ -978,84 +929,41 @@ impl Engine {
             std::thread::yield_now();
         }
     }
-    /// Starts the next frame without history: a camera cut or teleport. Temporal
-    /// reconstruction and volumetric fog history restart, and streamed textures verify the
-    /// new view; the GI cache refills its newly seen cells over a few frames on its own.
-    /// (Fog resets here, not in `cut_reconstruction`, which transmission changes also call.)
-    pub fn cut(&mut self) {
-        self.renderer.cut_reconstruction();
-        self.renderer.reset_atmosphere_history();
-        self.renderer.mark_camera_cut();
-    }
-    /// Presents a surface texture rendered with `render_to`.
+    /// Presents a surface texture rendered with `render_view_to`.
     pub fn present(&self, frame: wgpu::SurfaceTexture) -> Result<(), Error> {
         self.renderer.present(frame)
     }
     /// Nonblocking progress: completed frames and GPU pass timings since the last poll.
     pub fn poll(&mut self) -> Result<Events, Error> {
         stash(&mut self.events, self.renderer.poll()?);
-        let (ids, lost) = self.renderer.take_ids()?;
-        stash_ids(&mut self.events, ids, lost);
+        // Every view's finished and lost id readbacks.
+        let selected = self.renderer.selected_view();
+        for view in self.views.iter().map(|v| v.id).collect::<Vec<_>>() {
+            self.renderer.select_view(view)?;
+            let (ids, lost) = self.renderer.take_ids()?;
+            stash_ids(&mut self.events, ids, lost);
+        }
+        if self.views.iter().any(|v| v.id == selected) {
+            self.renderer.select_view(selected)?;
+        }
         Ok(std::mem::take(&mut self.events))
     }
-    /// Reads back the engine's output after the last frame (blocking). Needs an RGBA8
-    /// output format.
-    pub fn capture(&mut self) -> Result<Image, Error> {
-        let output = self.output.clone().ok_or(Error::InvalidInput(
-            "call Engine::resize before Engine::capture",
-        ))?;
-        let mut capture = self.admit("capture admission timed out", |r| r.try_capture(&output))?;
-        let deadline = Instant::now() + ADMISSION;
-        loop {
-            stash(&mut self.events, self.renderer.poll()?);
-            if let Some(rgba8) = capture.try_read()? {
-                return Ok(Image {
-                    width: output.width(),
-                    height: output.height(),
-                    rgba8,
-                });
-            }
-            if Instant::now() > deadline {
-                return Err(Error::InvalidInput("capture readback timed out"));
-            }
-            std::thread::yield_now();
-        }
-    }
-
     // ---- Object ids (docs/design-id-output.md) ----
 
     /// The embedder's ids for an object's primitives: disjoint ranges `(first primitive,
     /// count, id)` in any order, so one merged object can hold many entities; one id for
     /// the whole object is `&[(0, u32::MAX, id)]`, and an empty list clears them. `ID_NONE`
     /// and `ID_UNTAGGED` are reserved; primitives outside every range read as untagged.
-    /// Frames from the next one on report them.
+    /// Every view with ids reports them from its next frame.
     pub fn set_object_ids(&mut self, object: ObjectId, ranges: &[(u32, u32, u32)]) -> Result<(), Error> {
         self.state.transform(object)?;
         self.ids.objects.set(object, ranges)
     }
-    /// The engine's one view until `create_view` exists (docs/design-views.md): the
-    /// handle the view calls below take.
-    pub fn view(&self) -> ViewId {
-        self.ids.view
-    }
-    /// A view's outputs (its `ViewDesc::outputs` once views exist). Ids are off by default;
-    /// turning them off frees their targets and the next frames encode nothing for them.
-    pub fn set_outputs(&mut self, view: ViewId, outputs: Outputs) -> Result<(), Error> {
-        self.ids.check(view)?;
-        self.ids.outputs = outputs;
-        self.renderer.set_id_output(outputs.ids);
-        Ok(())
-    }
-    /// What the view shows (its `ViewDesc::view_mode` once views exist); `Lit` by default.
-    pub fn set_view_mode(&mut self, view: ViewId, mode: ViewMode) -> Result<(), Error> {
-        self.ids.check(view)?;
-        self.ids.mode = mode;
-        Ok(())
-    }
-    /// The view's ID target of its last rendered frame: R32Uint, the output's size, two
-    /// layers (0: opaque ids, 1: front ids). None while ids are off or before a frame.
-    pub fn view_ids(&self, view: ViewId) -> Option<&wgpu::Texture> {
-        self.ids.check(view).ok()?;
+    /// The view's ID target of its last rendered frame: R32Uint, the view's size, two
+    /// layers (0: opaque ids, 1: front ids). None while its ids are off or before a frame.
+    pub fn view_ids(&mut self, view: ViewId) -> Option<&wgpu::Texture> {
+        self.view_index(view).ok()?;
+        self.renderer.select_view(view).ok()?;
         self.renderer.id_texture()
     }
     /// Writes one id layer of the view's last frame into `target`, for an overlay that reads
@@ -1065,14 +973,16 @@ impl Engine {
     /// error. Each 32-bit id is packed bit-exact little-endian, one texel per output pixel
     /// (R = bits 0-7, G = 8-15, B = 16-23, A = 24-31; read by exact texel fetch): `ID_NONE`
     /// (0) is nothing, `ID_UNTAGGED` (0xFFFF_FFFF) a hit without an id. Queued behind that
-    /// frame, nothing waits; call it after each `render`/`render_to` the overlay follows.
+    /// frame, nothing waits; call it after each `render_view`/`render_view_to` the overlay
+    /// follows. Needs `ViewDesc::outputs.ids`.
     pub fn render_view_ids_to(
         &mut self,
         view: ViewId,
         target: &wgpu::Texture,
         layer: IdLayer,
     ) -> Result<(), Error> {
-        self.ids.check(view)?;
+        self.view_index(view)?;
+        self.renderer.select_view(view)?;
         let layer = match layer {
             IdLayer::Opaque => 0,
             IdLayer::Front => 1,
@@ -1082,15 +992,26 @@ impl Engine {
     /// Asks for the ids of a rectangle (at most `MAX_ID_RECT` a side) of the view's last
     /// frame without stalling: the copy is queued after that frame, and its result arrives
     /// in `poll()` (`Events::ids`, naming the view and frame), or `Events::ids_lost` when the
-    /// copy did not land within `ID_TICKS` rendered frames. Refused at once while `ID_SLOTS` requests
-    /// are in flight, or before the view rendered a frame with ids.
+    /// copy did not land within `ID_TICKS` ticks (`Engine::tick`). Refused at once while `ID_SLOTS`
+    /// of the view's requests are in flight, or before the view rendered a frame with ids.
     pub fn request_ids(&mut self, view: ViewId, rect: IdRect) -> Result<IdRequest, Error> {
-        self.ids.check(view)?;
+        self.view_index(view)?;
+        self.renderer.select_view(view)?;
         self.renderer.request_ids(view, rect)
     }
-    /// Gives the renderer this frame's tag tables, in the order the frame's draws place
-    /// their instances.
-    fn publish_object_ids(&mut self) -> Result<(), Error> {
+    /// Turns the selected view's ID pass on or off for its next frame and, when on, gives
+    /// the renderer this frame's id tables in the order the frame's draws place their
+    /// instances.
+    pub(super) fn prepare_view_ids(&mut self, ids: bool) -> Result<(), Error> {
+        // Measurement switch: ids on for every view of an embedder that does not set them
+        // (cost timing through Ara's player, docs/design-id-output.md).
+        let ids = ids || std::env::var_os("RENDERLAB_IDS").is_some_and(|v| v == "1");
+        if self.renderer.id_output() != ids {
+            self.renderer.set_id_output(ids);
+        }
+        if !ids {
+            return Ok(());
+        }
         let Self { state, ids, .. } = self;
         let mut batches = Vec::with_capacity(state.batches.len());
         for id in state.batches.ids() {

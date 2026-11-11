@@ -10,9 +10,10 @@ struct GpuIdentity {
 
 impl GpuIdentity {
     fn new(r: &Renderer, soft: bool) -> Self {
-        let primary = r.primary.as_ref().unwrap().targets.as_ref().unwrap();
+        let primary = r.view.primary.as_ref().unwrap().targets.as_ref().unwrap();
         let visibility = if soft {
-            &r.fresh
+            &r.view
+                .fresh
                 .as_ref()
                 .unwrap()
                 .targets
@@ -24,7 +25,7 @@ impl GpuIdentity {
             &primary.tiles.texture
         };
         let textures: [&wgpu::Texture; 4] = [
-            &r.lighting.hdr.as_ref().unwrap().resolved.texture,
+            &r.view.hdr.as_ref().unwrap().resolved.texture,
             &primary.hit.texture,
             visibility,
             &primary.tiles.texture,
@@ -170,7 +171,7 @@ fn gpu_parallel_adjacency_batch() {
         r.test_drain("startup to first completed offscreen image");
         timings.push(serde_json::json!({"parallel":parallel,"load_ms":load_ms,
             "startup_to_first_image_ms":start.elapsed().as_secs_f64()*1000.}));
-        let soft = r.shadows.settings.clone();
+        let soft = r.view.shadows.settings.clone();
         let mut hard = soft.clone();
         hard.directional_disk_angle = 0.;
         for (pose, camera) in cameras.iter().enumerate() {

@@ -455,10 +455,12 @@ or reloading a custom low-level prelude latches checked compilation on for futur
 modules on that renderer, including background workers; the environment override
 cannot disable this protection.
 
-User-authored programs, edited standard programs, transparent program compositions
-and programmable reflection probes always retain runtime checks. Only the exact
-bundled standard program source is engine-owned. No setting disables checks for
-arbitrary user programs.
+Every module composed from program text retains runtime checks: user programs, the
+bundled standard and toon programs, transparent program compositions, GI cell shading,
+glass reflected-hit shading and programmable reflection probes (P-SPLIT, 2026-11-11:
+before, the exact bundled standard program compiled unchecked, so its first edit changed
+the check mode of all 24 of its kernels instead of the 2 its text touched). No setting
+disables checks for program modules.
 
 `engine::instance_flags()` disables wgpu indirect-call validation by default because
 the engine generates bounded indirect arguments. `headless_adapter()` and the viewer

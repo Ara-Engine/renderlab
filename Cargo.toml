@@ -6,6 +6,8 @@ license = "MIT OR Apache-2.0"
 publish = false
 
 [features]
+backend-ara-window = ["backend-ara", "dep:ara-window"]
+backend-ara = ["dep:ara-gpu", "dep:anyhow", "dep:half", "dep:bytemuck", "dep:serde_json", "naga/msl-out", "naga/spv-out", "naga/wgsl-out", "wgpu/vulkan-portability"]
 selection-oracle = ["renderlab-asset/selection-oracle"]
 selection-shadow = ["selection-oracle"]
 selection-profile = ["renderlab-asset/selection-profile"]
@@ -15,6 +17,12 @@ resolver = "3"
 members = ["viewer", "crates/asset", "crates/cook"]
 
 [dependencies]
+# Ara main (6f03c10, with #65: image robustness and workgroup zeroing reported in DeviceInfo); disabled in default wgpu builds.
+ara-gpu = { git = "https://github.com/Ara-Engine/ara", rev = "6f03c10ab6191bfeb16654708595989ef8f7eafd", optional = true }
+anyhow = { version = "1", optional = true }
+serde_json = { version = "1", optional = true }
+half = { version = "2.7", optional = true }
+bytemuck = { version = "1.24", optional = true }
 renderlab-asset = { path = "crates/asset" }
 wgpu = { version = "30.0.1", default-features = false, features = ["std", "parking_lot", "vulkan", "wgsl", "counters"] }
 pollster = "0.4"
@@ -65,3 +73,10 @@ opt-level = 2
 # The editable shader frontend is runtime work in the development viewer.
 [profile.dev.package.naga]
 opt-level = 2
+
+[target.'cfg(target_os = "macos")'.dependencies]
+ara-window = { package = "ara-sdl3-src", git = "https://github.com/Ara-Engine/ara", rev = "6f03c10ab6191bfeb16654708595989ef8f7eafd", optional = true }
+
+[[example]]
+name = "ara_post"
+required-features = ["backend-ara-window"]

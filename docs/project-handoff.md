@@ -78,3 +78,11 @@ Published history was corrected with explicit user authorization immediately bef
 The discussion agent made no implementation changes for M1. Its only authored file in this handoff is this document. Islam authorizes the owning agent to include it in a normal checkpoint and link it from the active brief/instructions while reconciling the milestone numbering.
 
 Use the existing two-job Cargo setting. Windows/RTX 4070 SUPER is the current tested GPU host; check current load and any active GPU quiet-window ownership before measurements. Keep captures/raw measurements ignored. Do not introduce persistent services or close T3. Other platforms and licensing decisions remain to be discussed directly with Islam.
+
+## 2026-11-10: optional ara-gpu backend authorized
+
+Islam authorized the pass-by-pass WGSL/naga migration in `src/backend_ara` behind
+`backend-ara`, starting with post and easy leaves. The default wgpu renderer and
+PC-owned pass files stay unchanged. Draft PR #3 and `docs/ara-gpu-backend.md` track
+Metal replay proof, native adaptations and pending Vulkan verification. Earlier
+integration-deferred directions are superseded for this isolated candidate backend.

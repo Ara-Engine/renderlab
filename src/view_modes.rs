@@ -59,10 +59,10 @@ impl Renderer {
     /// mode run as lit frames (and remember the mode for shading); raster frames keep it.
     pub(super) fn frame_view_mode(&mut self, mode: ViewMode) -> ViewMode {
         if self.primary_mode == crate::PrimaryVisibility::Raster {
-            self.outputs.modes.mode = ViewMode::Lit;
+            self.view.outputs.modes.mode = ViewMode::Lit;
             return mode;
         }
-        self.outputs.modes.mode = mode;
+        self.view.outputs.modes.mode = mode;
         ViewMode::Lit
     }
 
@@ -73,19 +73,19 @@ impl Renderer {
         shading: Shading,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) -> Result<(), Error> {
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let (list, streamed) = (state.mixed(), state.requests);
         let programs = if list {
             state.programs.clone()
         } else {
             vec![state.program]
         };
-        let mode = self.outputs.modes.mode;
+        let mode = self.view.outputs.modes.mode;
         let mut indices = Vec::with_capacity(programs.len());
         for &id in &programs {
             indices.push(self.view_pipeline(id, list, streamed, shading as usize, mode)?);
         }
-        let pipelines = &self.outputs.modes.pipelines;
+        let pipelines = &self.view.outputs.modes.pipelines;
         if list {
             self.encode_program_lists_with(encoder, shading, timestamp_writes, |k| {
                 &pipelines[indices[k]].pipeline
@@ -109,7 +109,7 @@ impl Renderer {
     ) -> Result<usize, Error> {
         let head = &self.primary_sources.as_ref().unwrap().1[shading];
         let slot = self.program_slot(id);
-        let found = self.outputs.modes.pipelines.iter().position(|p| {
+        let found = self.view.outputs.modes.pipelines.iter().position(|p| {
             (p.program, p.list, p.streamed, p.shading, p.mode) == (id, list, streamed, shading, mode)
                 && p.source == slot.source
                 && p.head == *head
@@ -140,7 +140,7 @@ impl Renderer {
         } else {
             self.device.create_shader_module(descriptor)
         };
-        let primary = self.primary.as_ref().unwrap();
+        let primary = self.view.primary.as_ref().unwrap();
         let pipeline = match (list, streamed) {
             (true, _) => primary.list_pipeline(&self.device, &self.ledger, &module, shading, streamed, None),
             (false, true) => primary.streamed_pipeline(&self.device, &self.ledger, &module, shading, None),
@@ -163,7 +163,7 @@ impl Renderer {
             pipeline,
         };
         // Pipelines of removed programs or old sources are never found again; drop them.
-        let modes = &mut self.outputs.modes;
+        let modes = &mut self.view.outputs.modes;
         modes.pipelines.retain(|p| {
             !((p.program, p.list, p.streamed, p.shading, p.mode) == (id, list, streamed, shading, mode))
         });
@@ -178,11 +178,11 @@ impl Renderer {
         view: &wgpu::TextureView,
     ) {
         let format = self.format;
-        if self.outputs.modes.present.as_ref().is_none_or(|p| p.0 != format) {
-            self.outputs.modes.present = Some(self.view_present(format));
+        if self.view.outputs.modes.present.as_ref().is_none_or(|p| p.0 != format) {
+            self.view.outputs.modes.present = Some(self.view_present(format));
         }
-        let (_, layout, pipeline) = self.outputs.modes.present.as_ref().unwrap();
-        let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
+        let (_, layout, pipeline) = self.view.outputs.modes.present.as_ref().unwrap();
+        let hdr = &self.view.hdr.as_ref().unwrap().resolved;
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("view mode present"),
             layout,

@@ -262,7 +262,7 @@ pub(super) fn receiver_paired_with(
     let read = |names: [&str; 2]| {
         names.map(|n| fs::read_to_string(frozen.join(format!("{n}.wgsl"))).unwrap())
     };
-    let mut old = r.primary.as_ref().unwrap().compile(
+    let mut old = r.view.primary.as_ref().unwrap().compile(
         &r.device,
         &r.ledger,
         &read(["kernels-hard", "kernels-soft"]),
@@ -273,7 +273,7 @@ pub(super) fn receiver_paired_with(
         let read = |names: [&str; 2]| {
             names.map(|n| fs::read_to_string(directory.join(format!("{n}.wgsl"))).unwrap())
         };
-        r.pipeline.primary = Some(r.primary.as_ref().unwrap().compile(
+        r.pipeline.primary = Some(r.view.primary.as_ref().unwrap().compile(
             &r.device,
             &r.ledger,
             &read(["kernels-hard", "kernels-soft"]),
@@ -287,7 +287,7 @@ pub(super) fn receiver_paired_with(
             label: Some("separate eight-ray screen"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        r.primary.as_ref().unwrap().fresh_pipeline(
+        r.view.primary.as_ref().unwrap().fresh_pipeline(
             &r.device,
             &r.ledger,
             &shader,
@@ -298,7 +298,7 @@ pub(super) fn receiver_paired_with(
     let warmup = m["warmup_pairs"].as_u64().unwrap_or(24) as usize;
     let pairs = m["pairs"].as_u64().unwrap_or(48) as usize;
     let poses = [0, 1].map(|i| cameras.frames[i].camera().unwrap());
-    let soft = r.shadows.settings.clone();
+    let soft = r.view.shadows.settings.clone();
     let mut hard = soft.clone();
     hard.directional_disk_angle = 0.;
     let mut pending = std::collections::HashMap::new();
@@ -331,7 +331,7 @@ pub(super) fn receiver_paired_with(
                     crate::SoftShadows::Exact
                 });
                 let split = mode == 2 && !baseline && separate.is_some();
-                r.primary.as_mut().unwrap().test_fresh_tile = if split {
+                r.view.primary.as_mut().unwrap().test_fresh_tile = if split {
                     m["separate_tile"]
                         .as_array()
                         .map(|t| [0, 1].map(|i| t[i].as_u64().unwrap() as u32))
@@ -361,6 +361,7 @@ pub(super) fn receiver_paired_with(
                         .is_some()
                 {
                     let buffer = (*r
+                        .view
                         .primary
                         .as_ref()
                         .unwrap()
@@ -471,6 +472,7 @@ fn gpu_receiver_deferred_repeats() {
             );
         }
         let buffer = (*r
+            .view
             .primary
             .as_ref()
             .unwrap()
@@ -540,7 +542,8 @@ pub(super) fn receiver_pass_with(
         let path = PathBuf::from(path);
         let sources = ["kernels-hard", "kernels-soft"]
             .map(|name| fs::read_to_string(path.join(format!("{name}.wgsl"))).unwrap());
-        r.primary
+        r.view
+            .primary
             .as_ref()
             .unwrap()
             .compile(&r.device, &r.ledger, &sources)
@@ -549,7 +552,8 @@ pub(super) fn receiver_pass_with(
     if let Some(path) = m["candidate_modules"].as_str() {
         r.pipeline.primary = Some(compile(path));
     }
-    r.primary
+    r.view
+        .primary
         .as_mut()
         .unwrap()
         .test_split_interactive_timestamps = true;
@@ -622,6 +626,7 @@ pub(super) fn receiver_pass_with(
                         .count();
                     if deferred {
                         let queue = (*r
+                            .view
                             .primary
                             .as_ref()
                             .unwrap()
@@ -634,6 +639,7 @@ pub(super) fn receiver_pass_with(
                         let header = read_buffer(r, &queue, 16);
                         near_edges = u32::from_le_bytes(header[12..16].try_into().unwrap());
                         let retries = (*r
+                            .view
                             .primary
                             .as_ref()
                             .unwrap()
@@ -691,7 +697,8 @@ pub(super) fn receiver_pass_with(
     let out = PathBuf::from(m["output"].as_str().unwrap());
     fs::create_dir_all(&out).unwrap();
     fs::write(out.join("kernel-screen.json"),serde_json::to_vec_pretty(&serde_json::json!({"samples":samples,"validation":validate,"warmup_pairs":warmup,"pairs":pairs,"pose":pose,"near_edge_pixels":near_edges,"changed_hit_records":changed_hits,"retry_pixels":retry_pixels,"retry_fallback_pixels":retry_fallback_pixels,"fallback_pixels":fallback_pixels,"fallback_queries":fallback_queries,"probe_stats":m["probe_stats"].as_bool().unwrap_or(false)})).unwrap()).unwrap();
-    r.primary
+    r.view
+        .primary
         .as_mut()
         .unwrap()
         .test_split_interactive_timestamps = false;
@@ -712,7 +719,7 @@ fn gpu_receiver_policy_centres() {
     let read = |names: [&str; 2]| {
         names.map(|n| fs::read_to_string(frozen.join(format!("{n}.wgsl"))).unwrap())
     };
-    let mut old = r.primary.as_ref().unwrap().compile(
+    let mut old = r.view.primary.as_ref().unwrap().compile(
         &r.device,
         &r.ledger,
         &read(["kernels-hard", "kernels-soft"]),
@@ -749,7 +756,7 @@ fn gpu_receiver_policy_centres() {
             }),
         )
     });
-    let soft = r.shadows.settings.clone();
+    let soft = r.view.shadows.settings.clone();
     let mut hard = soft.clone();
     hard.directional_disk_angle = 0.;
     for (pose, index) in [0, 1, 0].into_iter().enumerate() {

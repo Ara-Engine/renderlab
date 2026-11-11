@@ -305,14 +305,14 @@ fn gpu_mq1_moving_placement() {
                 ],
             );
             r.test_drain("MQ1 moving placement");
-            let reset = r.reconstruction_state.as_ref().unwrap().plan.reset;
+            let reset = r.view.reconstruction_state.as_ref().unwrap().plan.reset;
             assert_eq!(
                 reset,
                 f == 0,
                 "{path} frame {f}: transform edits must not restart"
             );
         }
-        let state = r.reconstruction_state.as_ref().unwrap();
+        let state = r.view.reconstruction_state.as_ref().unwrap();
         let history = read_texture(&r, state.written_colour());
         let weight = |p: Vec3| {
             let c = camera.matrix(w, h) * p.extend(1.0);
@@ -405,10 +405,10 @@ fn gpu_tr1_still_weights() {
             ],
         );
         r.test_drain("TR1 still weights");
-        let reset = r.reconstruction_state.as_ref().unwrap().plan.reset;
+        let reset = r.view.reconstruction_state.as_ref().unwrap().plan.reset;
         assert_eq!(reset, f == 0, "frame {f}: a still frame must not restart");
     }
-    let state = r.reconstruction_state.as_ref().unwrap();
+    let state = r.view.reconstruction_state.as_ref().unwrap();
     let history = read_texture(&r, state.written_colour());
     assert_eq!(history.len(), (w * h * 16) as usize, "an RGBA32F history");
     let weights: Vec<f32> = history

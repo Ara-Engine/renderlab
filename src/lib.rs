@@ -10,6 +10,9 @@
 #[cfg(test)]
 extern crate self as renderlab;
 pub mod animation;
+/// Optional ara-gpu renderer, independently constructed from the wgpu renderer.
+#[cfg(feature = "backend-ara")]
+pub mod backend_ara;
 // AT1: physical sky, aerial perspective and fog (docs/m7-at1.md).
 mod atmosphere;
 /// TP1 alpha-tested (cutout) geometry, cut at load (docs/m7-tp1.md).
@@ -68,7 +71,7 @@ pub use material::{
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData};
 pub use object_ids::{
     ID_NONE, ID_SLOTS, ID_TICKS, ID_UNTAGGED, IdLayer, IdPixel, IdReadback, IdRect, IdRequest, IdsLost,
-    KEPT_ID_EVENTS, MAX_ID_RECT, Outputs, TagTables,
+    KEPT_ID_EVENTS, MAX_ID_RECT, TagTables,
 };
 pub use observe::*;
 pub use post::{ColourLut, DepthOfField, PostSettings, Tonemapper};
@@ -86,7 +89,7 @@ pub use renderer::{
     ProbeCounters,
 };
 pub use renderer::{LodPackage, LodStats, MeshLod};
-pub use renderer::{Reconstruction, ReconstructionShadowBudget, RenderScale, Renderer};
+pub use renderer::{Reconstruction, ReconstructionShadowBudget, RenderScale, Renderer, ViewId};
 pub use renderer::{ResidencyStats, TextureResidency};
 pub use renderer::{
     VIRTUAL_FEATURES, VirtualLookup, VirtualShadowSettings, VirtualShadowStats, WalkRecords,
