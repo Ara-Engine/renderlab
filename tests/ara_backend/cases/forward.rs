@@ -575,6 +575,25 @@ pub(super) fn validate_spirv(
             .map(|b| u32::from_le_bytes(*b))
             .collect();
         assert_nonuniform_sampled_images(&words)?;
+        // ara-gpu enables neither hit-vertex return nor its SPIR-V extension: every
+        // hit position comes from retained geometry. OpExtension is opcode 10.
+        let mut at = 5;
+        while at < words.len() {
+            let count = (words[at] >> 16) as usize;
+            ensure!(count > 0 && at + count <= words.len(), "invalid SPIR-V");
+            if words[at] & 0xffff == 10 {
+                let name: Vec<u8> = words[at + 1..at + count]
+                    .iter()
+                    .flat_map(|w| w.to_le_bytes())
+                    .take_while(|b| *b != 0)
+                    .collect();
+                ensure!(
+                    name != b"SPV_KHR_ray_tracing_position_fetch",
+                    "{label} declares the position-fetch extension"
+                );
+            }
+            at += count;
+        }
     }
     if let Some(sdk) = std::env::var_os("VULKAN_SDK") {
         let sdk = std::path::PathBuf::from(sdk);

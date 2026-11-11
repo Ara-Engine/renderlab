@@ -104,5 +104,16 @@ impl Visibility {
 pub fn traced_program() -> Result<Program> {
     let [_, soft] =
         crate::renderer::primary_ray_gpu::shader_sources(include_str!("../../shaders/scene.wgsl"))?;
-    Program::new(Pass::FreshVisibility, soft)
+    // The module also carries the camera trace, which this entry never reaches; its
+    // hit-vertex-return types would still put the position-fetch extension in the
+    // SPIR-V, so it takes the same portable form the trace port runs.
+    let trace = include_str!("../../shaders/primary_trace.wgsl");
+    ensure!(
+        soft.matches(trace).count() == 1,
+        "traced kernel composition changed"
+    );
+    Program::new(
+        Pass::FreshVisibility,
+        soft.replacen(trace, &super::primary_trace::portable_trace()?, 1),
+    )
 }

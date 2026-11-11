@@ -26,10 +26,19 @@ impl Entry {
 pub(crate) fn source() -> Result<String> {
     let [hard, _] =
         crate::renderer::primary_ray_gpu::shader_sources(include_str!("../../shaders/scene.wgsl"))?;
-    let trace = include_str!("../../shaders/primary_trace.wgsl");
     let head = hard
-        .strip_suffix(trace)
+        .strip_suffix(TRACE)
         .context("original primary trace composition changed")?;
+    Ok(format!("{head}{}", portable_trace()?))
+}
+const TRACE: &str = include_str!("../../shaders/primary_trace.wgsl");
+
+/// `primary_trace.wgsl` without hit-vertex return: its three position intrinsics read
+/// the retained vertex and index arrays through the hit's placement, and its query and
+/// scene types lose the qualifier. Every module that contains the trace text needs
+/// this, reachable or not, or its SPIR-V declares `SPV_KHR_ray_tracing_position_fetch`.
+pub(crate) fn portable_trace() -> Result<String> {
+    let trace = TRACE;
     ensure!(
         trace
             .matches("getCandidateHitVertexPositions(&query)")
@@ -46,11 +55,10 @@ pub(crate) fn source() -> Result<String> {
                 == 1,
         "original primary hit-position seams changed"
     );
-    let portable=trace.replace("getCandidateHitVertexPositions(&query)",
+    Ok(trace.replace("getCandidateHitVertexPositions(&query)",
         "primary_triangle_vertices(primary_placements[candidate.instance_custom_data]&0x1fffffffu,candidate.primitive_index)")
         .replace("getCommittedHitVertexPositions(&query)",
         "primary_triangle_vertices(primary_placements[hit.instance_custom_data]&0x1fffffffu,hit.primitive_index)")
         .replace("ray_query<vertex_return>","ray_query")
-        .replace("acceleration_structure<vertex_return>","acceleration_structure");
-    Ok(format!("{head}{portable}"))
+        .replace("acceleration_structure<vertex_return>","acceleration_structure"))
 }
