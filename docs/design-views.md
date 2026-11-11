@@ -15,9 +15,17 @@ pub struct ViewDesc {
     pub render_scale: RenderScale,
     pub view_mode: ViewMode,        // Lit by default; see design-id-output.md
     pub outputs: Outputs,           // ids on or off; see design-id-output.md
+    /// How this view looks: exposure, tone mapper, colour table and its strength, bloom, depth of
+    /// field, quality and reflection settings. Everything that lights the world stays engine-wide.
+    pub look: ViewLook,
 }
 
 impl Engine {
+    /// Advances the engine one frame: the shared per-frame work runs here, once, never per view
+    /// (skinning, the particle step, joint palette upload, the TLAS refit, the GI cache's cell work
+    /// and its clock). `render_view` renders a view against the current tick; rendering a view
+    /// twice in one tick renders twice without stepping anything.
+    pub fn tick(&mut self, seconds: f32) -> Result<(), Error>;
     pub fn create_view(&mut self, desc: &ViewDesc) -> Result<ViewId, Error>;
     pub fn set_view(&mut self, view: ViewId, desc: &ViewDesc) -> Result<(), Error>; // resize, scale, mode, outputs
     pub fn remove_view(&mut self, view: ViewId) -> Result<(), Error>;
@@ -61,7 +69,29 @@ The Mac gets Renderlab only through the ara-gpu port, so the bridge must be able
 The shadow clipmap's levels follow the camera; two cameras far apart would each want their own placement. First version: each view has its own clipmap placement and page requests over one shared page store (the dense levels today; the page pool later), so a second view adds its requested pages, not a second map. If that does not fit in the time, each view gets its own map and the memory is stated.
 
 ## Judged on
-- Two views of one scene from two cameras: each view's still frame byte-identical to a single-view engine rendering that camera alone, both paths.
+- Two views of one scene from two cameras: each view's still frame byte-identical to a single-view engine rendering that camera alone once the shared GI cache is quiescent, both paths.
 - A moving pair (one view's camera moving, the other still, then both): no history bleeding between views; the still view stays byte-identical to rendering it alone.
 - Frame time for two views against two engines with the same cameras; memory of the second view in MiB.
 - For the ara-gpu backend: the per-frame records become per view; flag every shared planner whose signature changes.
+
+## Review folded in (cloud reviewer on PR #38, 2026-11-11; the only review round)
+
+**Settings: what moves into a view.** `ViewLook` carries exposure (manual or automatic, metered per view), the tone mapper, the colour table and its strength, bloom, depth of field, quality and reflection settings. Engine-wide `Settings` keeps what lights the world: sun, sky and sky light, local lights, GI on or off, atmosphere and fog media. Otherwise the Game view takes the Scene view's exposure and look.
+
+**One clock: `Engine::tick`.** Shared per-frame work runs once per tick. The GI cache's frame stamp, update parity and relight and environment phases advance per tick, never per `render_view`. Each view keeps its own **sample counter** (jitter, sun direction rotation, film accumulation index), so a view's noise sequence does not depend on how often another view renders, and its frames match a single-view engine.
+
+**GI eviction with a view that renders rarely.** Eviction counts engine ticks. A view that skips ticks keeps its cells alive by a touch: each view records the cell slots its last render claimed (bounded by its probe tiles), and on every tick in which the view does not render, one small pass re-stamps those slots as seen. A redraw after a long pause therefore does not refill like a cut. The gather cap is per tick and shared; a cut in one view may slow the other's refill for a few ticks, which is acceptable. Two views at different distances key the same surface as different cells; the table's capacity is stated with two views in the measurements.
+
+**Previous transforms for a view that skipped ticks.** Motion reads the previous submitted placement, which is per engine. Rule: each placement carries the tick it last moved; a view that did not render the previous tick restarts history on pixels whose placement moved since that view's last render. Per-view previous transforms come later only if this looks bad.
+
+**Identity gate.** Each view's still frame is byte-identical to a single-view engine rendering that camera alone **once the shared GI cache is quiescent** (a view that finds cells filled by the other differs during fill, for the better).
+
+**Per view or shared, one line each:**
+- `cut_view`: per view. Temporal reconstruction, the atmosphere's histories and the camera texture verification (`mark_camera_cut`) restart for that view. The GI cache is not reset.
+- Texture streaming: shared, demand is the union of the views' feedback under one budget, so a texture seen only by the Scene view still streams in.
+- Local-light shadow selection: shared atlas, importance is the union of the views' demands under one budget. Light clusters: per view (they are screen-space).
+- Shadow pages: shared store keyed by world position (level and world page coordinates), so one view's window move never invalidates the other's pages. Invalidation by moved casters and sun turns is engine-wide and applies to every view's pages. If the pages turn out to be addressed relative to the window, U-VIEWS uses the fallback (one map per view, memory stated). The `Surface` lookup's receiver cache is keyed by receiver cell: shared.
+- Atmosphere: transmittance and multiscatter LUTs shared; the sky-view LUT depends on the camera's height, so it is per view, as are the aerial and fog volumes.
+- `set_view`: a resize or a render-scale change restarts that view's histories; a mode or look change restarts nothing. `remove_view` retires the view's resources after its frames in flight complete.
+- `FrameReport` and events carry the view they describe.
+- Memory of a second view at 1080p: measured and stated; budget 250 MiB.
