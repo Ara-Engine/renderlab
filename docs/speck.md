@@ -171,11 +171,31 @@ It is the existing eviction with an age that yields under pressure. The seen sta
 | Evicted under pressure | - | 4,083 / 4,157 | - | 1,583 / 1,614 |
 | ... of them seen within 8 frames | - | 107 / 118 | - | 1,348 / 1,377 |
 
-- Failed inserts stay high because that counter mixes the pixels' misses with the gathers' requests, which a full table refuses by design. The pixels' share is counted separately since `57ecce8c` (`full_pixel`); its numbers are in the next lease.
+- Failed inserts stay high because that counter mixes the pixels' misses with the gathers' requests, which a full table refuses by design. The pixels' share is counted separately since `57ecce8c` (`full_pixel`): see the next table.
 - **No thrash of visible cells:** by construction (a victim must have gone unseen for 2 frames). With a held camera and the default table, creations and evictions both fall to 0 by frame 90. With a held camera at 2^17, 120-330 cells a frame are still created as hit cells age out.
 - **When the table is still too small** (2^17 against the same view): no mosaic, but less bounce light: frame 119 is 2.4 codes darker on average than with the default table, up to 9.7 codes in a 120 px region, on both paths. The hit cells are what is refused.
 - **The game flight does not fit either:** 213,687 evictions under pressure over its 180 frames (786 of cells seen within 8 frames).
 - Lib tests in that lease: `gpu_near_light_rays_keep_the_gathered_light` and `kernels_validate_on_both_ray_sources`, "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 396 filtered out". (The lease that first claimed the second one for (c) had run 0 tests: its runner named the wrong module path with `--exact`. The runner now fails unless every named test reports ok.)
+
+### Same binary, eviction off against on (M, leases `speck-ab`, `speck-ab2rr`, commit `c8b6812c`, 1080p)
+
+`RENDERLAB_GI=pressure_eviction=0` against the default, one binary. Pixels' failed inserts are counted once per claim round (`full_pixel`).
+
+| | RT off | RT on | Non-RT off | Non-RT on |
+|---|---:|---:|---:|---:|
+| Game flight, 180 frames: pixels' failed inserts, total | 2,998,909 | 362 | 3,032,915 | 373 |
+| ... at frame 90 | 24,716 | 0 | 24,916 | 0 |
+| ... at frame 179 | 14,276 | 6 | 14,338 | 3 |
+| Game flight: median blob pixels (`tools/blobs.py`) | 9,600 | 9,198 | 10,215 | 10,059 |
+| Field walk, default table: pixels' failed inserts at frame 119 | 111,249 | 81 | not run | 116 |
+| ... total over 120 frames | 5,349,917 | 4,378 | not run | 4,920 |
+| Field walk, 2^17 table: pixels' failed inserts at frame 119 | 254,598 | 60,602 | 248,553 | 57,898 |
+
+- **Unchanged where the table has room.** The settled still (frozen camera, steady fire, frame 95) is byte-identical with the eviction off and on, on both paths: no insert fails and nothing is evicted there. In the flight, frames 14 and 21 are identical by 120 px region (0.00 codes), before the table fills.
+- **Where it does not fit, the picture moves little and the cells exist.** Flight frames 56, 98 and 175 differ by at most 0.22 codes (RT) and 0.33 (non-RT) by region, with no region over 1 code, while the pixels' failed inserts fall from about 3.0 million to under 400 over the flight.
+- **At 2^17 the pixels' inserts still fail** (about 60,000 a frame, counted once per round): 103,000 pixel cells do not fit 131,072 slots in buckets of 8. The picture has no flat blocks there, because most of each pixel's neighbouring cells now exist; it has less bounce light (above).
+- Lib tests in `speck-ab`: "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 396 filtered out".
+- **Not run: the quarry.** Its lease needs 14 GiB free and the machine held 9-11 GiB all evening.
 
 ### Table size and what else it costs
 
@@ -194,5 +214,5 @@ The work buffer's counters grew from 44 to 48 words (`COUNTER_WORDS`; `GI_W_CLAI
 ### Open
 
 - The Outpost rerun with the log (integration thread).
-- The same-binary before/after on the game flight, a settled still and the quarry (the off switch exists since `57ecce8c`).
+- The same-binary before/after on the quarry.
 - The capacity change above, and the starved gather queue ([m7-gaps.md](m7-gaps.md)).
