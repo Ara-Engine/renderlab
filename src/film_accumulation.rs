@@ -149,6 +149,7 @@ fn sample_point(k: u32, s: u32) -> [u32; 2] {
 
 /// Bind group and pipeline layouts of the temporal trace and shading: the fused
 /// Interactive and Soft shading ABIs plus the film history.
+#[derive(Clone)]
 pub(super) struct FilmLayouts {
     trace_bindings: Owned<wgpu::BindGroupLayout>,
     shade_bindings: Owned<wgpu::BindGroupLayout>,
@@ -354,7 +355,7 @@ impl FilmState {
             written: None,
             frames: 0,
             #[cfg(test)]
-            materialize: r.primary.as_ref().unwrap().test_film_materialize,
+            materialize: r.view.primary.as_ref().unwrap().test_film_materialize,
             parity: 0,
             key: None,
             reset: true,
@@ -392,14 +393,14 @@ impl Renderer {
         shadow: Option<&[u8]>,
     ) -> [u8; 32] {
         let u = &self.uploads;
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let mut hash = Sha256::new()
             .chain_update(camera_bytes)
             .chain_update(self.revision.0.to_ne_bytes())
             .chain_update(state.program.to_ne_bytes())
             .chain_update(state.geometry_generation.to_ne_bytes())
             .chain_update(state.bindings_generation.to_ne_bytes())
-            .chain_update(format!("{:?}", self.shadows.settings).as_bytes());
+            .chain_update(format!("{:?}", self.view.shadows.settings).as_bytes());
         for v in [
             u.environment,
             u.geometry,
@@ -424,8 +425,9 @@ impl Renderer {
     /// HDR size, resets every pixel when `key` changed, flips the written side and binds
     /// the frame's targets.
     pub(in crate::renderer) fn prepare_film(&mut self, key: [u8; 32]) {
-        let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
+        let size = self.view.hdr.as_ref().unwrap().resolved.texture.size();
         let stale = self
+            .view
             .primary
             .as_ref()
             .unwrap()
@@ -435,14 +437,14 @@ impl Renderer {
         if stale {
             let next = FilmState::new(self, size);
             let submissions = self.submissions;
-            let state = self.primary.as_mut().unwrap();
+            let state = self.view.primary.as_mut().unwrap();
             if let Some(old) = state.film.replace(next) {
                 state
                     .retired
                     .push((submissions, Retired::Film(Box::new(old))));
             }
         }
-        let state = self.primary.as_mut().unwrap();
+        let state = self.view.primary.as_mut().unwrap();
         let generation = state.bindings_generation;
         let film = state.film.as_mut().unwrap();
         film.reset = film.key != Some(key);
@@ -467,7 +469,7 @@ impl Renderer {
         }
         if film.groups.as_ref().is_none_or(|g| g.0 != generation) {
             let groups = self.film_groups();
-            let state = self.primary.as_mut().unwrap();
+            let state = self.view.primary.as_mut().unwrap();
             let film = state.film.as_mut().unwrap();
             if let Some((_, old)) = film.groups.replace((generation, groups)) {
                 // Frames in flight may still bind them.
@@ -481,11 +483,11 @@ impl Renderer {
     /// Trace, shading and reset groups for each written side over the current targets.
     fn film_groups(&self) -> [[Owned<wgpu::BindGroup>; 3]; 2] {
         use wgpu::BindingResource as R;
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let film = state.film.as_ref().unwrap();
         let t = state.targets.as_ref().unwrap();
-        let f = self.fresh.as_ref().unwrap().targets.as_ref().unwrap();
-        let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
+        let f = self.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+        let hdr = &self.view.hdr.as_ref().unwrap().resolved;
         let hardware = self.hardware_shadows.as_ref().unwrap();
         let frame = &state.frame.as_ref().unwrap().0.value;
         let region = &state.region_buffer.as_ref().unwrap().value;
@@ -566,7 +568,8 @@ impl Renderer {
         let source = kernel_source(&self.primary_sources.as_ref().unwrap().0[1])?;
         let scopes = OperationScopes::new(&self.device);
         let pipeline =
-            self.primary
+            self.view
+                .primary
                 .as_ref()
                 .unwrap()
                 .film_kernel(&self.device, &self.ledger, &source);
@@ -590,7 +593,7 @@ impl Renderer {
         trace_stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         shade_stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let film = state.film.as_ref().unwrap();
         let groups = &film.groups.as_ref().unwrap().1[film.parity];
         let size = state.targets.as_ref().unwrap().hit.texture.size();
@@ -653,7 +656,7 @@ impl Renderer {
         grid: u32,
     ) -> Vec<u8> {
         let count = targets.len() / 80;
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let device = self.device.clone();
         let group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -778,7 +781,7 @@ impl Renderer {
             self.queue.write_buffer(&params, 0, &words);
             let mut encoder = self.device.create_command_encoder(&Default::default());
             {
-                let state = self.primary.as_ref().unwrap();
+                let state = self.view.primary.as_ref().unwrap();
                 let mut pass = encoder.begin_compute_pass(&Default::default());
                 pass.set_pipeline(&pipeline);
                 pass.set_bind_group(0, &zero_group, &[]);

@@ -4,12 +4,12 @@
 //! [`Engine`] implements [`Scene`] by delegating to its own methods, which stay the
 //! documented API (docs/api.md): nothing that uses an `Engine` needs this trait in scope.
 //! It holds the calls a scene shared between layers uses, and no more. Device and window
-//! calls (`Engine::device`, `render_to`, `present`, `reload_program` and their kin) are
-//! the wgpu engine's alone.
+//! calls (`Engine::device`, `render_view_to`, `view_output`, `present`, `reload_program`
+//! and their kin) are the wgpu engine's alone (docs/design-views.md).
 use super::{AssetHandles, EmitterId};
 use super::{
     Engine, EnvironmentId, Image, MaterialDesc, MaterialId, MeshId, ObjectId, ProgramId, Settings,
-    SkinnedHandles, Sky, Sun, TextureId, asset_material,
+    SkinnedHandles, Sky, Sun, TextureId, ViewDesc, ViewId, asset_material,
 };
 use crate::{
     Camera, Decal, EmitterDescriptor, Error, FrameReport, Light, Mat4, MeshData, Value,
@@ -95,7 +95,6 @@ pub trait Scene {
         desc: &EmitterDescriptor<'_>,
         sprite: Option<TextureId>,
     ) -> Result<EmitterId, Error>;
-    fn set_particle_step(&mut self, seconds: f32) -> Result<(), Error>;
 
     fn spawn(
         &mut self,
@@ -114,10 +113,15 @@ pub trait Scene {
     fn set_settings(&mut self, settings: Settings) -> Result<(), Error>;
     fn settings(&self) -> Settings;
 
-    fn resize(&mut self, width: u32, height: u32) -> Result<(), Error>;
-    fn render(&mut self, camera: &Camera) -> Result<FrameReport, Error>;
-    fn cut(&mut self);
-    fn capture(&mut self) -> Result<Image, Error>;
+    /// One engine frame: the shared per-frame work runs once, before the views render.
+    fn tick(&mut self, seconds: f32) -> Result<(), Error>;
+    fn create_view(&mut self, desc: &ViewDesc) -> Result<ViewId, Error>;
+    fn set_view(&mut self, view: ViewId, desc: &ViewDesc) -> Result<(), Error>;
+    fn remove_view(&mut self, view: ViewId) -> Result<(), Error>;
+    /// Renders into the view's own output; each layer hands that output over its own way.
+    fn render_view(&mut self, view: ViewId, camera: &Camera) -> Result<FrameReport, Error>;
+    fn cut_view(&mut self, view: ViewId);
+    fn capture_view(&mut self, view: ViewId) -> Result<Image, Error>;
 }
 
 impl Scene for Engine {
@@ -164,9 +168,6 @@ impl Scene for Engine {
     ) -> Result<EmitterId, Error> {
         Engine::create_emitter(self, desc, sprite)
     }
-    fn set_particle_step(&mut self, seconds: f32) -> Result<(), Error> {
-        Engine::set_particle_step(self, seconds)
-    }
     fn spawn(
         &mut self,
         mesh: MeshId,
@@ -196,16 +197,25 @@ impl Scene for Engine {
     fn settings(&self) -> Settings {
         Engine::settings(self)
     }
-    fn resize(&mut self, width: u32, height: u32) -> Result<(), Error> {
-        Engine::resize(self, width, height)
+    fn tick(&mut self, seconds: f32) -> Result<(), Error> {
+        Engine::tick(self, seconds)
     }
-    fn render(&mut self, camera: &Camera) -> Result<FrameReport, Error> {
-        Engine::render(self, camera)
+    fn create_view(&mut self, desc: &ViewDesc) -> Result<ViewId, Error> {
+        Engine::create_view(self, desc)
     }
-    fn cut(&mut self) {
-        Engine::cut(self)
+    fn set_view(&mut self, view: ViewId, desc: &ViewDesc) -> Result<(), Error> {
+        Engine::set_view(self, view, desc)
     }
-    fn capture(&mut self) -> Result<Image, Error> {
-        Engine::capture(self)
+    fn remove_view(&mut self, view: ViewId) -> Result<(), Error> {
+        Engine::remove_view(self, view)
+    }
+    fn render_view(&mut self, view: ViewId, camera: &Camera) -> Result<FrameReport, Error> {
+        Engine::render_view(self, view, camera)
+    }
+    fn cut_view(&mut self, view: ViewId) {
+        Engine::cut_view(self, view)
+    }
+    fn capture_view(&mut self, view: ViewId) -> Result<Image, Error> {
+        Engine::capture_view(self, view)
     }
 }

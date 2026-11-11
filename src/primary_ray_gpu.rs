@@ -364,6 +364,14 @@ pub(super) fn admit_draws(
     Ok(())
 }
 
+impl super::view::ViewState {
+    /// This view's TR1 history restarts on its next reconstructed frame.
+    pub(super) fn cut_reconstruction(&mut self) {
+        if let Some(state) = &mut self.reconstruction_state {
+            state.plan.cut = true;
+        }
+    }
+}
 impl Renderer {
     /// Chooses disk-shadow sampling for traced lit 1x frames. Traced-capable RT
     /// renderers start with Interactive and TR1's adaptive ray budget; Exact remains
@@ -373,18 +381,18 @@ impl Renderer {
     /// Leaving `Temporal` releases its film history after in-flight frames.
     pub fn set_soft_shadows(&mut self, mode: crate::SoftShadows) {
         if mode != crate::SoftShadows::Temporal
-            && let Some(state) = &mut self.primary
+            && let Some(state) = &mut self.view.primary
             && let Some(film) = state.film.take()
         {
             state
                 .retired
                 .push((self.submissions, Retired::Film(Box::new(film))));
         }
-        self.soft_mode = mode;
+        self.view.soft_mode = mode;
     }
 
     pub fn soft_shadows(&self) -> crate::SoftShadows {
-        self.soft_mode
+        self.view.soft_mode
     }
 
     /// Selects TR1 temporal reconstruction (docs/m7-tr1.md) for traced and visibility-buffer
@@ -392,34 +400,33 @@ impl Renderer {
     /// in-flight frames.
     pub fn set_reconstruction(&mut self, settings: Reconstruction) -> Result<(), Error> {
         settings.validate()?;
-        if settings != self.reconstruction {
+        if settings != self.view.reconstruction {
             // A new history starts the sample sequence again, so equal settings replay
             // equal frames.
-            self.reconstruction_state = None;
-            self.reconstruction_index = 0;
+            self.view.reconstruction_state = None;
+            self.view.reconstruction_index = 0;
         }
-        self.reconstruction = settings;
+        self.view.reconstruction = settings;
         Ok(())
     }
     pub fn reconstruction(&self) -> Reconstruction {
-        self.reconstruction
+        self.view.reconstruction
     }
     /// Global reflection controls (src/reflections.rs): R1's traced reflections and R1n's
     /// software rays trace only while enabled, and only up to `max_roughness`. Default on.
     pub fn set_reflections(&mut self, settings: crate::ReflectionSettings) -> Result<(), Error> {
         settings.validate()?;
-        self.reflections = settings;
+        self.view.reflections = settings;
         Ok(())
     }
     pub fn reflections(&self) -> crate::ReflectionSettings {
-        self.reflections
+        self.view.reflections
     }
     /// The next reconstructed frame restarts every pixel: a camera cut the engine cannot
     /// infer from the camera alone.
+    /// The selected view's history restarts on its next reconstructed frame.
     pub fn cut_reconstruction(&mut self) {
-        if let Some(state) = &mut self.reconstruction_state {
-            state.plan.cut = true;
-        }
+        self.view.cut_reconstruction();
     }
 
     /// Selects how lit frames resolve camera visibility. Traced compiles its kernels and
@@ -445,8 +452,11 @@ impl Renderer {
                     slot.pipelines.list = Default::default();
                 }
                 self.primary_sources = None;
-                if let Some(primary) = &mut self.primary {
-                    primary.release(self.submissions);
+                let submissions = self.submissions;
+                for view in self.views_mut() {
+                    if let Some(primary) = &mut view.primary {
+                        primary.release(submissions);
+                    }
                 }
             }
             PrimaryVisibility::Traced | PrimaryVisibility::VisibilityBuffer => {
@@ -464,7 +474,7 @@ impl Renderer {
                         "visibility-buffer primaries require VISIBILITY_FEATURES, VISIBILITY_RASTER_FEATURES and visibility_limits",
                     ));
                 }
-                let state = self.primary.as_ref().ok_or(Error::InvalidInput(
+                let state = self.view.primary.as_ref().ok_or(Error::InvalidInput(
                     "traced primary visibility requires a hardware-shadow renderer at 1x with TRACED_FEATURES and traced_limits",
                 ))?;
                 let (sources, heads) = if self.hardware_shadows.is_some() {
@@ -499,7 +509,9 @@ impl Renderer {
         }
         self.primary_mode = mode;
         if mode != PrimaryVisibility::VisibilityBuffer {
-            self.visibility_buffer = None;
+            for view in self.views_mut() {
+                view.visibility_buffer = None;
+            }
         }
         Ok(())
     }
@@ -1236,6 +1248,62 @@ impl PrimaryState {
         }
     }
 
+    /// A new view's state: these layouts (pipelines compiled against them serve every
+    /// view) and the binning kernel; its targets, geometry tables, bindings and film start
+    /// empty and are built by its first traced frame.
+    pub fn fork(&self) -> Self {
+        Self {
+            #[cfg(test)]
+            test_split_interactive_timestamps: self.test_split_interactive_timestamps,
+            #[cfg(test)]
+            test_fresh_tile: self.test_fresh_tile,
+            #[cfg(test)]
+            test_film_materialize: self.test_film_materialize,
+            trace_bindings: self.trace_bindings.clone(),
+            shade_bindings: self.shade_bindings.clone(),
+            fresh_bindings: self.fresh_bindings.clone(),
+            fresh_layout: self.fresh_layout.clone(),
+            interactive_bindings: self.interactive_bindings.clone(),
+            interactive_layout: self.interactive_layout.clone(),
+            repair_bindings: self.repair_bindings.clone(),
+            repair_layout: self.repair_layout.clone(),
+            check_bindings: self.check_bindings.clone(),
+            check_layout: self.check_layout.clone(),
+            penumbra_list_bindings: self.penumbra_list_bindings.clone(),
+            penumbra_list_layout: self.penumbra_list_layout.clone(),
+            penumbra_trace_bindings: self.penumbra_trace_bindings.clone(),
+            penumbra_trace_layout: self.penumbra_trace_layout.clone(),
+            array_bindings: self.array_bindings.clone(),
+            material_bindings: self.material_bindings.clone(),
+            streamed_bindings: self.streamed_bindings.clone(),
+            streamed_layouts: self.streamed_layouts.clone(),
+            trace_layouts: self.trace_layouts.clone(),
+            shade_layouts: self.shade_layouts.clone(),
+            list_layouts: self.list_layouts.clone(),
+            film_layouts: self.film_layouts.clone(),
+            reconstruction: self.reconstruction.clone(),
+            bins: self.bins.clone(),
+            frame: None,
+            scene: [0; 4],
+            region: [0; 4],
+            region_buffer: None,
+            absent: None,
+            program: 0,
+            programs: vec![],
+            lists: None,
+            targets: None,
+            geometry: None,
+            reflections: None,
+            bindings: None,
+            geometry_generation: 0,
+            bindings_generation: 0,
+            reconstruction_bindings_generation: 0,
+            film: None,
+            residency: None,
+            requests: false,
+            retired: vec![],
+        }
+    }
     /// `sources` are `shader_sources` output: hard kernels first, soft kernels second.
     pub fn compile(
         &self,
@@ -1595,7 +1663,7 @@ impl Renderer {
         scene_generation: u64,
         uploads: &mut UploadBytes,
     ) -> Result<(), Error> {
-        let size = self.lighting.hdr.as_ref().unwrap().resolved.texture.size();
+        let size = self.view.hdr.as_ref().unwrap().resolved.texture.size();
         let default = self.default_material.as_ref().unwrap();
         let placements = placement_table(draws.iter().map(|d| {
             let material = d.material.unwrap_or(default);
@@ -1613,7 +1681,7 @@ impl Renderer {
                 .iter()
                 .map(|d| d.material.unwrap_or(default).program.id()),
         );
-        self.primary.as_mut().unwrap().program =
+        self.view.primary.as_mut().unwrap().program =
             programs.first().copied().unwrap_or(self.standard.id());
         let sided = placements.iter().any(|p| p & 1 << 30 != 0);
         let matrix = camera.matrix(size.width, size.height);
@@ -1640,19 +1708,19 @@ impl Renderer {
                 lo[1] + (scene[3] - lo[1]).div_ceil(t[1]) * t[1],
             ]
         };
-        if self.primary.as_ref().unwrap().region_buffer.is_none() {
+        if self.view.primary.as_ref().unwrap().region_buffer.is_none() {
             let buffer = Buffer::new(
                 self,
                 "primary shading region",
                 16,
                 wgpu::BufferUsages::STORAGE,
             );
-            let state = self.primary.as_mut().unwrap();
+            let state = self.view.primary.as_mut().unwrap();
             state.region_buffer = Some(buffer);
             // No real region is all ones, so the new buffer is always written.
             state.region = [u32::MAX; 4];
         }
-        let state = self.primary.as_mut().unwrap();
+        let state = self.view.primary.as_mut().unwrap();
         state.scene = scene;
         if state.region != region {
             let words: Vec<u8> = region.iter().flat_map(|v| v.to_ne_bytes()).collect();
@@ -1680,8 +1748,9 @@ impl Renderer {
         // Reconstructed frames' Interactive direction rotation (temporal_reconstruction.rs);
         // production kernels never read it.
         let rotation = self
+            .view
             .reconstruction_frame
-            .filter(|_| self.reconstruction.rotate_directions)
+            .filter(|_| self.view.reconstruction.rotate_directions)
             .map_or(0, temporal_reconstruction::rotation);
         bytes[84..88].copy_from_slice(&rotation.to_ne_bytes());
         // Visible sky (Renderer::set_visible_environment): misses sample the selected map,
@@ -1694,7 +1763,7 @@ impl Renderer {
         bytes[92..96].copy_from_slice(&(if visible { scale.to_bits() } else { 0 }).to_ne_bytes());
         // RT1d uses a spare frame word; all geometry/visibility bindings already exist.
         let filter = self.primary_mode == PrimaryVisibility::Traced
-            && self.soft_mode == SoftShadows::Interactive
+            && self.view.soft_mode == SoftShadows::Interactive
             && self
                 .hardware_shadows
                 .as_ref()
@@ -1713,32 +1782,32 @@ impl Renderer {
                 .iter()
                 .all(|d| d.mesh.reflection.is_some() || d.mesh.skin.is_some());
         let bands = if covered {
-            self.reflections.frame_words()
+            self.view.reflections.frame_words()
         } else {
             crate::ReflectionSettings::off().frame_words()
         };
         for (dst, value) in bytes[128..144].chunks_exact_mut(4).zip(bands) {
             dst.copy_from_slice(&value.to_ne_bytes());
         }
-        if self.primary.as_ref().unwrap().frame.is_none() {
+        if self.view.primary.as_ref().unwrap().frame.is_none() {
             let frame = Buffer::new(
                 self,
                 "primary camera inverse, clear and culling",
                 FRAME_BYTES as u64,
                 wgpu::BufferUsages::UNIFORM,
             );
-            self.primary.as_mut().unwrap().frame = Some((frame, [0; FRAME_BYTES]));
+            self.view.primary.as_mut().unwrap().frame = Some((frame, [0; FRAME_BYTES]));
         }
-        if self.primary.as_ref().unwrap().absent.is_none() {
+        if self.view.primary.as_ref().unwrap().absent.is_none() {
             let absent = Buffer::new(
                 self,
                 "primary absent storage",
                 48,
                 wgpu::BufferUsages::STORAGE,
             );
-            self.primary.as_mut().unwrap().absent = Some(absent);
+            self.view.primary.as_mut().unwrap().absent = Some(absent);
         }
-        let (frame, shadow) = self.primary.as_mut().unwrap().frame.as_mut().unwrap();
+        let (frame, shadow) = self.view.primary.as_mut().unwrap().frame.as_mut().unwrap();
         if *shadow != bytes {
             self.queue.write_buffer(&frame.value, 0, &bytes);
             *shadow = bytes;
@@ -1761,7 +1830,7 @@ impl Renderer {
                 instances: d.instances.len(),
             })
             .collect();
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         if state.geometry.as_ref().is_none_or(|g| g.keys != keys) {
             let storage = wgpu::BufferUsages::STORAGE;
             let instance_bytes = (placements.len().max(1) * 64) as u64;
@@ -1799,7 +1868,7 @@ impl Renderer {
             self.queue.write_buffer(&table.value, 0, &words);
             uploads.shadows += words.len() as u64;
             uploads.write_calls += 1;
-            let state = self.primary.as_ref().unwrap();
+            let state = self.view.primary.as_ref().unwrap();
             let absent: &wgpu::Buffer = &state.absent.as_ref().unwrap().value;
             let vertices = padded(draws.iter().map(|d| &**d.mesh.vertex), absent);
             let previous = padded(
@@ -1859,7 +1928,7 @@ impl Renderer {
                 materials: None,
                 material_key: vec![],
             };
-            let state = self.primary.as_mut().unwrap();
+            let state = self.view.primary.as_mut().unwrap();
             state.geometry_generation += 1;
             if let Some(old) = state.geometry.replace(next) {
                 state
@@ -1875,7 +1944,11 @@ impl Renderer {
             }
         }
         for d in draws {
-            for model in d.instances.state.previous_models(self.frames) {
+            for model in d
+                .instances
+                .state
+                .previous_models(self.view_key.0, self.view.last_frame)
+            {
                 instances.extend_from_slice(&matrix_bytes(*model));
             }
         }
@@ -1884,7 +1957,14 @@ impl Renderer {
                 instances.extend_from_slice(&normal.bytes());
             }
         }
-        let g = self.primary.as_mut().unwrap().geometry.as_mut().unwrap();
+        let g = self
+            .view
+            .primary
+            .as_mut()
+            .unwrap()
+            .geometry
+            .as_mut()
+            .unwrap();
         if g.instances != instances {
             let (models, normals) = instances.split_at(instances.len() / 3 * 2);
             if !models.is_empty() {
@@ -1906,10 +1986,11 @@ impl Renderer {
         let repair_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 36;
         let retry_bytes = 16 + u64::from(size.width) * u64::from(size.height) * 4;
         let defer_edges = self.primary_mode == PrimaryVisibility::Traced
-            && self.soft_mode == SoftShadows::Interactive
+            && self.view.soft_mode == SoftShadows::Interactive
             && repair_bytes <= self.device.limits().max_storage_buffer_binding_size
             && repair_bytes <= self.device.limits().max_buffer_size;
         if self
+            .view
             .primary
             .as_ref()
             .unwrap()
@@ -2001,7 +2082,7 @@ impl Renderer {
                 ),
                 tiles: target("primary tile coverage", tiles, wgpu::TextureFormat::R32Uint),
             };
-            let state = self.primary.as_mut().unwrap();
+            let state = self.view.primary.as_mut().unwrap();
             if let Some(old) = state.targets.replace(next) {
                 state
                     .retired
@@ -2009,10 +2090,10 @@ impl Renderer {
             }
         }
         self.prepare_program_lists(programs, &slots, [size.width, size.height], uploads);
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let t = state.targets.as_ref().unwrap();
-        let hdr = &self.lighting.hdr.as_ref().unwrap().resolved;
-        let fresh = soft.then(|| self.fresh.as_ref().unwrap().targets.as_ref().unwrap());
+        let hdr = &self.view.hdr.as_ref().unwrap().resolved;
+        let fresh = soft.then(|| self.view.fresh.as_ref().unwrap().targets.as_ref().unwrap());
         let lists = state.lists.as_ref();
         let key = (
             (*t.hit.texture).clone(),
@@ -2215,7 +2296,7 @@ impl Renderer {
                 list,
                 key,
             };
-            let state = self.primary.as_mut().unwrap();
+            let state = self.view.primary.as_mut().unwrap();
             state.bindings_generation += 1;
             state.reconstruction_bindings_generation += u64::from(reconstruction_changed);
             if let Some(old) = state.bindings.replace(next) {
@@ -2249,7 +2330,7 @@ impl Renderer {
         soft: bool,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let size = state.targets.as_ref().unwrap().hit.texture.size();
         let bindings = state.bindings.as_ref().unwrap();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -2280,6 +2361,7 @@ impl Renderer {
         let tile = fresh_shadow_gpu::TILE;
         #[cfg(test)]
         let tile = self
+            .view
             .primary
             .as_ref()
             .unwrap()
@@ -2320,6 +2402,7 @@ impl Renderer {
         // P-RTS: the probe kernels traced fewer directions than the budget only when the
         // frame words say so (ReconstructionState::probe_rays).
         let listed = self
+            .view
             .reconstruction_state
             .as_ref()
             .is_some_and(|s| s.plan.probe_rays < s.plan.shadow_rays);
@@ -2344,7 +2427,7 @@ impl Renderer {
         tile: [u32; 2],
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let size = state.targets.as_ref().unwrap().hit.texture.size();
         let bindings = state.bindings.as_ref().unwrap();
         let targets = state.targets.as_ref().unwrap();
@@ -2353,6 +2436,7 @@ impl Renderer {
         let split_timestamps = false;
         #[cfg(test)]
         let split_timestamps = self
+            .view
             .primary
             .as_ref()
             .unwrap()
@@ -2520,7 +2604,7 @@ impl Renderer {
         tile: [u32; 2],
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let size = state.targets.as_ref().unwrap().hit.texture.size();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("traced fresh visibility"),
@@ -2547,8 +2631,8 @@ impl Renderer {
     ) {
         use crate::material::TextureStorage;
         use texture_residency::{SLOTS, WORDS};
-        let requests = self.primary.as_ref().unwrap().requests;
-        if requests && self.primary.as_ref().unwrap().residency.is_none() {
+        let requests = self.view.primary.as_ref().unwrap().requests;
+        if requests && self.view.primary.as_ref().unwrap().residency.is_none() {
             let buffer = Buffer::new(
                 self,
                 "texture residency words and requests",
@@ -2556,7 +2640,7 @@ impl Renderer {
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
             );
             let (probe, view, allocation) = self.level_probe();
-            self.primary.as_mut().unwrap().residency = Some(ResidencyGpu {
+            self.view.primary.as_mut().unwrap().residency = Some(ResidencyGpu {
                 buffer,
                 _probe: probe,
                 probe: view,
@@ -2595,7 +2679,7 @@ impl Renderer {
                 }
             }
         }
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let residency = state.residency.as_ref().filter(|_| requests);
         if let Some(residency) = residency
             && residency.words != words
@@ -2664,7 +2748,7 @@ impl Renderer {
         } else {
             None
         };
-        let state = self.primary.as_mut().unwrap();
+        let state = self.view.primary.as_mut().unwrap();
         if let Some(residency) = state.residency.as_mut().filter(|_| requests) {
             residency.words = words;
             residency.ids = ids;
@@ -2678,7 +2762,14 @@ impl Renderer {
     }
     /// Zeroes the frame's request and miss counters before its shading.
     pub(super) fn encode_request_clear(&self, encoder: &mut wgpu::CommandEncoder) {
-        let residency = self.primary.as_ref().unwrap().residency.as_ref().unwrap();
+        let residency = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .residency
+            .as_ref()
+            .unwrap();
         encoder.clear_buffer(
             &residency.buffer.value,
             texture_residency::REQUEST_OFFSET,
@@ -2694,7 +2785,7 @@ impl Renderer {
         shading: Shading,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         if state.mixed() {
             self.encode_program_lists(encoder, shading, timestamp_writes);
             return;
@@ -2718,7 +2809,14 @@ impl Renderer {
         shading: Shading,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let bindings = self.primary.as_ref().unwrap().bindings.as_ref().unwrap();
+        let bindings = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .bindings
+            .as_ref()
+            .unwrap();
         let group = bindings.shade[shading as usize].as_ref().unwrap();
         self.encode_shade_group(encoder, pipeline, group, tile, timestamp_writes);
     }
@@ -2731,7 +2829,7 @@ impl Renderer {
         tile: [u32; 2],
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
         let size = state.targets.as_ref().unwrap().hit.texture.size();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -2792,7 +2890,7 @@ impl Renderer {
                 slot += 1;
             }
         }
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let same = state.reflections.as_ref().is_some_and(|r| {
             r.meshes.len() == meshes.len()
                 && r.meshes.iter().zip(&meshes).all(|(a, b)| Arc::ptr_eq(a, b))
@@ -2815,7 +2913,14 @@ impl Renderer {
             words
         };
         if same {
-            let r = self.primary.as_ref().unwrap().reflections.as_ref().unwrap();
+            let r = self
+                .view
+                .primary
+                .as_ref()
+                .unwrap()
+                .reflections
+                .as_ref()
+                .unwrap();
             let words = records(&r.bases);
             if words != r.records {
                 let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
@@ -2825,7 +2930,8 @@ impl Renderer {
                 // TR1's restart key and restarted every non-RT pixel on every animated frame.
                 uploads.models += (words.len() * 4) as u64;
                 uploads.write_calls += 1;
-                self.primary
+                self.view
+                    .primary
                     .as_mut()
                     .unwrap()
                     .reflections
@@ -2849,7 +2955,7 @@ impl Renderer {
         self.queue.write_buffer(&buffer.value, 0, &bytes);
         uploads.geometry += (packed.words.len() * 4) as u64;
         uploads.write_calls += 1;
-        let state = self.primary.as_mut().unwrap();
+        let state = self.view.primary.as_mut().unwrap();
         let generation = state.reflections.as_ref().map_or(0, |r| r.generation) + 1;
         state.reflections = Some(SoftwareReflections {
             buffer,

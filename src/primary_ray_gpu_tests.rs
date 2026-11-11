@@ -37,7 +37,8 @@ fn shading_pipelines(r: &Renderer, sources: &[String; 2]) -> [Owned<wgpu::Comput
         })
     });
     let pipelines =
-        r.primary
+        r.view
+            .primary
             .as_ref()
             .unwrap()
             .shade_pipelines(&r.device, &r.ledger, [&hard, &soft]);
@@ -76,7 +77,7 @@ fn traced_frame(
 /// World, normal and counts. Traced misses leave receivers stale, so world and normal
 /// are zeroed where the hit record misses: the coverage fresh visibility uses.
 fn receivers(r: &Renderer) -> [Vec<u8>; 3] {
-    let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+    let t = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
     let mut out = [&t.world, &t.normal, &t.visibility].map(|d| read_texture(r, &d.texture));
     // Evidence retains the registered world.xyz + reversed-Z depth format. The
     // production attachment's fourth channel now carries receiver epsilon.
@@ -108,7 +109,7 @@ fn receivers(r: &Renderer) -> [Vec<u8>; 3] {
 /// Per pixel, whether the last traced frame leaves it uncovered: outside the scene
 /// rectangle, where no ray is traced, or in a tile whose flag is clear.
 fn uncovered(r: &Renderer) -> Vec<bool> {
-    let primary = r.primary.as_ref().unwrap();
+    let primary = r.view.primary.as_ref().unwrap();
     let t = primary.targets.as_ref().unwrap();
     let tiles = read_texture(r, &t.tiles.texture);
     let s = primary.scene.map(|v| v as usize);
@@ -133,7 +134,8 @@ fn uncovered(r: &Renderer) -> Vec<bool> {
 fn hit_record(r: &Renderer) -> Vec<u8> {
     let mut hit = read_texture(
         r,
-        &r.primary
+        &r.view
+            .primary
             .as_ref()
             .unwrap()
             .targets
@@ -153,6 +155,7 @@ fn hit_record(r: &Renderer) -> Vec<u8> {
 /// publish neither; every pixel there is a miss, a zero record with count 256.
 fn interactive_outputs(r: &Renderer) -> [Vec<u8>; 2] {
     let visibility = &r
+        .view
         .fresh
         .as_ref()
         .unwrap()
@@ -224,7 +227,7 @@ fn gpu_primary_traced_quarry_acceptance() {
     let before = r.stats().ownership;
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     let module = seeded_module(&r);
-    let primary = r.primary.as_ref().unwrap();
+    let primary = r.view.primary.as_ref().unwrap();
     let mut seeded: Vec<_> = (0..=80u32)
         .map(|s| {
             primary.fresh_pipeline(
@@ -243,7 +246,7 @@ fn gpu_primary_traced_quarry_acceptance() {
         (COUNT_DECODE, &COUNT_DECODE.replace("/256.0", "/16777216.0")),
     );
     let mut fixed = shading_pipelines(&r, &sources);
-    let soft = r.shadows.settings.clone();
+    let soft = r.view.shadows.settings.clone();
     let mut hard = soft.clone();
     hard.directional_disk_angle = 0.0;
     let mut records: Vec<[Vec<u8>; 6]> = vec![];
@@ -292,6 +295,7 @@ fn gpu_primary_traced_quarry_acceptance() {
         swap_compute(&mut r, &mut noop);
         r.test_standard().swap_traced(&mut fixed);
         let t = &r
+            .view
             .fresh
             .as_ref()
             .unwrap()
@@ -521,11 +525,11 @@ fn gpu_primary_paired_timing() {
     let mut r = renderer(validate);
     let (mut asset, cameras) = load_quarry(&manifest, &mut r);
     if manifest["hard"].as_bool().unwrap_or(false) {
-        let mut hard = r.shadows.settings.clone();
+        let mut hard = r.view.shadows.settings.clone();
         hard.directional_disk_angle = 0.0;
         r.set_shadows(&hard).unwrap();
     }
-    let soft = r.shadows.settings.directional_disk_angle > 0.0;
+    let soft = r.view.shadows.settings.directional_disk_angle > 0.0;
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     let color = target(&r, 1920, 1080);
     let poses = [0, 1].map(|i| cameras.frames[i].camera().unwrap());
@@ -595,11 +599,11 @@ fn gpu_primary_kernel_screen() {
     let mut r = renderer(validate);
     let (mut asset, cameras) = load_quarry(&manifest, &mut r);
     if manifest["hard"].as_bool().unwrap_or(false) {
-        let mut hard = r.shadows.settings.clone();
+        let mut hard = r.view.shadows.settings.clone();
         hard.directional_disk_angle = 0.0;
         r.set_shadows(&hard).unwrap();
     }
-    let soft = r.shadows.settings.directional_disk_angle > 0.0;
+    let soft = r.view.shadows.settings.directional_disk_angle > 0.0;
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     let color = target(&r, 1920, 1080);
     let camera = cameras.frames[1].camera().unwrap();
@@ -649,6 +653,7 @@ fn gpu_primary_kernel_screen() {
         let [a, b] = if trace {
             let scopes = OperationScopes::new(&r.device);
             let compiled = r
+                .view
                 .primary
                 .as_ref()
                 .unwrap()
@@ -695,7 +700,7 @@ fn gpu_primary_kernel_screen() {
         } else {
             vec![read_texture(
                 r,
-                &r.lighting.hdr.as_ref().unwrap().resolved.texture,
+                &r.view.hdr.as_ref().unwrap().resolved.texture,
             )]
         }
     };
@@ -1100,7 +1105,8 @@ fn gpu_program_compile_cost() {
                     source: wgpu::ShaderSource::Wgsl(source.into()),
                 });
                 drop(
-                    r.fresh
+                    r.view
+                        .fresh
                         .as_ref()
                         .unwrap()
                         .shade_pipelines(&r.device, &r.ledger, &m),

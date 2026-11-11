@@ -172,8 +172,11 @@ impl Renderer {
             }
         }
         let key: [u8; 32] = key.finalize().into();
+        // The coloured sun map is scene state: every view's history restarts.
         if self.lighting.transmission.hash != key {
-            self.cut_reconstruction();
+            for view in self.views_mut() {
+                view.cut_reconstruction();
+            }
         }
         self.lighting.transmission.hash = key;
         self.queue

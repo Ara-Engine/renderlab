@@ -297,7 +297,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             settings: diag.settings(Settings {
                 global_illumination: args.gi,
                 temporal_reconstruction: args.temporal,
-                render_scale: args.scale,
                 // Sun shafts through a light haze (0.01 per metre over the first 128 m).
                 volumetric_fog: match args.volumetric_fog {
                     _ if args.matched => None,
@@ -310,15 +309,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 },
                 aerial_perspective: !args.matched,
                 height_fog: Settings::default().height_fog.filter(|_| !args.matched),
-                exposure: Exposure::Manual { stops: exposure },
                 ..Default::default()
             }),
             ..Default::default()
         },
     )?;
-    diag.apply(&mut engine, path, args.scale)?;
+    let view_desc = ViewDesc {
+        render_scale: args.scale,
+        look: diag.look(ViewLook {
+            exposure: Exposure::Manual { stops: exposure },
+            ..Default::default()
+        }),
+        ..ViewDesc::new(args.size[0], args.size[1])
+    };
+    let view = engine.create_view(&view_desc)?;
+    diag.apply(&mut engine, path, args.scale, view_desc.look.quality)?;
     let engine_seconds = start.elapsed().as_secs_f64();
-    engine.resize(args.size[0], args.size[1])?;
     if args.matched || !args.post {
         engine
             .renderer_mut()
@@ -561,7 +567,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (at(-2.3, 0.42, 7.2), 0.8, [0.95, 0.64, 0.54], 0.3),
         ] {
             let metal = material(&mut engine, base, 1.0, roughness)?;
-            spawn(&mut engine, &mut placed, sphere, metal, boxed(center, Vec3::splat(size)))?;
+            spawn(
+                &mut engine,
+                &mut placed,
+                sphere,
+                metal,
+                boxed(center, Vec3::splat(size)),
+            )?;
         }
     }
     if args.glass_balls {
@@ -740,11 +752,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let camera = Camera::look_at(eye, target, Vec3::Y, FOV_Y.to_radians(), 0.05, 500.0)?;
         let begin = Instant::now();
-        let report = engine.render(&camera)?;
+        engine.tick(1.0 / 60.0)?;
+        let report = engine.render_view(view, &camera)?;
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
         let mut image_hash = None;
         if written {
-            let image = engine.capture()?;
+            let image = engine.capture_view(view)?;
             first_image_seconds.get_or_insert_with(|| start.elapsed().as_secs_f64());
             image_hash = Some(format!("{:x}", Sha256::digest(&image.rgba8)));
             write_png(&args.out.join(format!("frame-{frame:03}.png")), &image)?;
@@ -765,8 +778,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let edited = Instant::now();
             engine.reload_program(program, &edit)?;
             let compiled_seconds = edited.elapsed().as_secs_f64();
-            engine.render(&camera)?;
-            let image = engine.capture()?;
+            engine.tick(1.0 / 60.0)?;
+            engine.render_view(view, &camera)?;
+            let image = engine.capture_view(view)?;
             let image_seconds = edited.elapsed().as_secs_f64();
             write_png(&args.out.join("edited.png"), &image)?;
             let rejected = engine
@@ -775,12 +789,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !rejected {
                 return Err("invalid program reload was accepted".into());
             }
-            engine.render(&camera)?;
-            let retained = engine.capture()?;
+            engine.tick(1.0 / 60.0)?;
+            engine.render_view(view, &camera)?;
+            let retained = engine.capture_view(view)?;
             write_png(&args.out.join("rejected-retained.png"), &retained)?;
             engine.reload_program(program, GAME_PROGRAM)?;
-            engine.render(&camera)?;
-            let restored = engine.capture()?;
+            engine.tick(1.0 / 60.0)?;
+            engine.render_view(view, &camera)?;
+            let restored = engine.capture_view(view)?;
             write_png(&args.out.join("restored.png"), &restored)?;
             reload = Some(serde_json::json!({"compile_seconds": compiled_seconds,
                 "edit_to_readback_seconds": image_seconds, "invalid_edit_rejected": rejected}));
@@ -800,7 +816,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // drains all submitted work; its copy/readback cost is included in throughput.
     let timing = if args.timing_frames > 0 {
         let camera = last_camera.as_ref().unwrap();
-        engine.capture()?;
+        engine.capture_view(view)?;
         engine.poll()?;
         let begin = Instant::now();
         let mut cpu = Vec::new();
@@ -816,10 +832,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 }))?;
             }
-            engine.render(camera)?;
+            engine.tick(1.0 / 60.0)?;
+            engine.render_view(view, camera)?;
             cpu.push(submit.elapsed().as_secs_f64() * 1e3);
         }
-        engine.capture()?;
+        engine.capture_view(view)?;
         serde_json::json!({"frames":args.timing_frames,
             "wall_ms_per_frame":begin.elapsed().as_secs_f64()*1e3/f64::from(args.timing_frames),
             "cpu_submit_ms":cpu,

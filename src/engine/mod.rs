@@ -2,8 +2,9 @@
 //!
 //! A game creates an engine for a [`RenderPath`], creates resources (meshes, textures,
 //! programs, materials, environments) and spawns objects, all named by copyable typed
-//! handles ([`Id`]). Each frame it moves objects, sets the camera and calls
-//! [`Engine::render`] or [`Engine::render_to`]. Every call blocks only for GPU
+//! handles ([`Id`]), and creates one or more views ([`Engine::create_view`]). Each frame it
+//! moves objects, calls [`Engine::tick`] once and renders each view it shows from its
+//! camera ([`Engine::render_view`] or [`Engine::render_view_to`]). Every call blocks only for GPU
 //! backpressure; the engine handles admission retries, per-path configuration (traced
 //! primaries or the visibility buffer, sun visibility, GI geometry) and draw batching.
 //!
@@ -14,6 +15,9 @@
 mod device;
 mod ids;
 mod scene;
+mod view;
+#[cfg(test)]
+mod view_tests;
 // Crate-visible for a second GPU layer's engine: the same lighting and atmosphere
 // translation, over the same state.
 pub(crate) mod settings;
@@ -25,6 +29,7 @@ pub use ids::{
 };
 pub use scene::Scene;
 pub use settings::{Background, Exposure, Quality, Settings, Sky, Sun};
+pub use view::{Outputs, ViewDesc, ViewLook};
 
 pub use crate::animation::{AnimationPose, ClipPlayer};
 pub use crate::asset::{
@@ -39,13 +44,13 @@ pub use crate::{
     Forces, FrameId, FrameReport, HeightFog, Light, Limits, LocalShadows, MAX_CURVE_KEYS,
     MAX_PARTICLES, Mat4, MeshData, PlaneCollision, PostSettings, ReflectionSettings, ReloadError,
     ReloadReport, RenderScale, Renderer, SizeKey, SpawnShape, SpriteAlignment, Tonemapper,
-    Transparency, Value, Vec3, Vertex, VolumetricFog,
+    Transparency, Value, Vec3, Vertex, ViewId, ViewMode, VolumetricFog,
 };
 
 use crate::{
     Emitter, EnvironmentMap, EnvironmentParameters, HardwareShadowOptions, Instances, Material,
     MaterialDescriptor, Mesh, PrimaryVisibility, Program, ProgramDescriptor, RendererOptions,
-    SampleCount, SkinnedMeshInstance, Texture, TextureBinding, ViewMode,
+    SampleCount, SkinnedMeshInstance, Texture, TextureBinding,
 };
 use state::{MaterialEntry, Residency, State};
 use std::{
@@ -231,10 +236,12 @@ pub struct Engine {
     adapter: wgpu::AdapterInfo,
     format: wgpu::TextureFormat,
     limits: Limits,
-    output: Option<wgpu::Texture>,
     /// The scene: resource handles by id, objects in batches, sun, lights, sky, settings.
     state: State<Handles>,
     events: Events,
+    /// The views, and the renderer's empty view the next `create_view` takes (its first).
+    views: Vec<view::ViewEntry>,
+    spare: Option<ViewId>,
 }
 
 /// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
@@ -318,6 +325,7 @@ impl Engine {
                 "renderer did not select the path's primary visibility",
             ));
         }
+        let renderer_first_view = renderer.selected_view();
         let state = State::new(
             renderer.standard_program().clone(),
             settings::ablated(descriptor.settings),
@@ -328,11 +336,14 @@ impl Engine {
             adapter: info,
             format,
             limits: descriptor.limits,
-            output: None,
             state,
             events: Events::default(),
+            views: Vec::new(),
+            spare: Some(renderer_first_view),
         };
-        settings::apply(&mut engine.renderer, path, &engine.state.settings)?;
+        settings::apply(&mut engine.renderer, &engine.state.settings)?;
+        // Ticks are explicit from the start: the first frame runs the first tick's work.
+        engine.renderer.begin_tick();
         engine.apply_lighting()?;
         Ok(engine)
     }
@@ -692,11 +703,6 @@ impl Engine {
     pub fn remove_emitter(&mut self, emitter: EmitterId) -> Result<(), Error> {
         self.state.remove_emitter(emitter).map(drop)
     }
-    /// Particle simulation time per rendered frame, in seconds (default 1/60). Set it to
-    /// the game's frame time; zero freezes particles.
-    pub fn set_particle_step(&mut self, seconds: f32) -> Result<(), Error> {
-        self.renderer.set_particle_step(seconds)
-    }
 
     // ---- Objects ----
 
@@ -776,20 +782,21 @@ impl Engine {
         // Validate before touching the renderer (docs/api.md): a rejected sky_light must
         // leave the stored settings unchanged, or later set_sun/set_sky/light edits fail.
         if !(settings.sky_light.is_finite() && settings.sky_light >= 0.0) {
-            return Err(Error::InvalidInput("sky light must be finite and nonnegative"));
+            return Err(Error::InvalidInput(
+                "sky light must be finite and nonnegative",
+            ));
         }
-        settings::apply(&mut self.renderer, self.path, &settings)?;
+        settings::apply(&mut self.renderer, &settings)?;
         self.state.settings = settings;
-        // Exposure and the view-path media live with the lighting and atmosphere.
+        // Views' looks depend on the settings (temporal reconstruction): reapply on render.
+        for view in &mut self.views {
+            view.applied = false;
+        }
+        // The view-path media live with the lighting and atmosphere.
         self.apply_lighting()
     }
     pub fn settings(&self) -> Settings {
         self.state.settings
-    }
-    /// Sets or clears the post pass's display-linear 3D colour LUT (PP1), applied at
-    /// `Settings::post.lut_strength`.
-    pub fn set_colour_lut(&mut self, lut: Option<ColourLut>) -> Result<(), Error> {
-        self.renderer.set_colour_lut(lut)
     }
     /// Publishes the sun, lights, sky and exposure. Everything is validated before the
     /// renderer changes, so a rejected call leaves the previous lighting in place.
@@ -798,7 +805,7 @@ impl Engine {
             self.state.sun,
             &self.state.lights,
             self.state.sky,
-            self.state.settings.exposure,
+            self.selected_exposure(),
         )?;
         let atmosphere = settings::atmosphere(self.state.sky, &self.state.settings);
         atmosphere.validate()?;
@@ -865,55 +872,12 @@ impl Engine {
 
     // ---- Frames ----
 
-    /// Creates or resizes the engine's own colour output (for offscreen rendering and
-    /// [`capture`](Self::capture)). Windowed games can use `render_to` instead.
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Error> {
-        if width == 0 || height == 0 {
-            return Err(Error::InvalidInput("output extent must be nonzero"));
-        }
-        if self
-            .output
-            .as_ref()
-            .is_some_and(|t| (t.width(), t.height()) == (width, height))
-        {
-            return Ok(());
-        }
-        self.output = Some(self.device().create_texture(&wgpu::TextureDescriptor {
-            label: Some("renderlab engine output"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        }));
-        Ok(())
-    }
-    /// The engine's own output, after `resize`.
-    pub fn output(&self) -> Option<&wgpu::Texture> {
-        self.output.as_ref()
-    }
-    /// Renders the scene from `camera` into the engine's output.
-    pub fn render(&mut self, camera: &Camera) -> Result<FrameReport, Error> {
-        let output = self.output.clone().ok_or(Error::InvalidInput(
-            "call Engine::resize before Engine::render",
-        ))?;
-        self.render_to(&output, camera)
-    }
-    /// Renders the scene from `camera` into `color`: a single-sample 2D render attachment
-    /// in the engine's output format, such as a surface texture (then call `present`).
-    /// The camera's aspect follows `color`.
-    pub fn render_to(
+    /// Renders the renderer's selected view into `color` with the scene's batches.
+    fn render_selected(
         &mut self,
         color: &wgpu::Texture,
         camera: &Camera,
+        mode: ViewMode,
     ) -> Result<FrameReport, Error> {
         let ids: Vec<_> = self.state.batches.ids().collect();
         for id in ids {
@@ -947,9 +911,7 @@ impl Engine {
         }
         let deadline = Instant::now() + ADMISSION;
         loop {
-            if let Some(report) =
-                renderer.try_render_view(color, camera, &mut draws, ViewMode::Lit)?
-            {
+            if let Some(report) = renderer.try_render_view(color, camera, &mut draws, mode)? {
                 settings::log_indirect(renderer)?;
                 return Ok(report);
             }
@@ -960,16 +922,7 @@ impl Engine {
             std::thread::yield_now();
         }
     }
-    /// Starts the next frame without history: a camera cut or teleport. Temporal
-    /// reconstruction and volumetric fog history restart, and streamed textures verify the
-    /// new view; the GI cache refills its newly seen cells over a few frames on its own.
-    /// (Fog resets here, not in `cut_reconstruction`, which transmission changes also call.)
-    pub fn cut(&mut self) {
-        self.renderer.cut_reconstruction();
-        self.renderer.reset_atmosphere_history();
-        self.renderer.mark_camera_cut();
-    }
-    /// Presents a surface texture rendered with `render_to`.
+    /// Presents a surface texture rendered with `render_view_to`.
     pub fn present(&self, frame: wgpu::SurfaceTexture) -> Result<(), Error> {
         self.renderer.present(frame)
     }
@@ -978,30 +931,6 @@ impl Engine {
         stash(&mut self.events, self.renderer.poll()?);
         Ok(std::mem::take(&mut self.events))
     }
-    /// Reads back the engine's output after the last frame (blocking). Needs an RGBA8
-    /// output format.
-    pub fn capture(&mut self) -> Result<Image, Error> {
-        let output = self.output.clone().ok_or(Error::InvalidInput(
-            "call Engine::resize before Engine::capture",
-        ))?;
-        let mut capture = self.admit("capture admission timed out", |r| r.try_capture(&output))?;
-        let deadline = Instant::now() + ADMISSION;
-        loop {
-            stash(&mut self.events, self.renderer.poll()?);
-            if let Some(rgba8) = capture.try_read()? {
-                return Ok(Image {
-                    width: output.width(),
-                    height: output.height(),
-                    rgba8,
-                });
-            }
-            if Instant::now() > deadline {
-                return Err(Error::InvalidInput("capture readback timed out"));
-            }
-            std::thread::yield_now();
-        }
-    }
-
     /// Retries a bounded renderer admission while the GPU drains, keeping its events.
     /// `timeout` is the error after `ADMISSION`.
     fn admit<T>(

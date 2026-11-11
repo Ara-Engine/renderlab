@@ -125,7 +125,10 @@ fn reference_cache_dir(unit: &str) -> PathBuf {
         .find(|p| p.file_name().is_some_and(|n| n == "target"))
         .map(Path::to_path_buf)
         .unwrap_or_else(|| exe.parent().unwrap().to_path_buf());
-    eprintln!("RENDERLAB_M7_G1_REFS unset and E:/renderlab-work absent: reference cache under {}", target.display());
+    eprintln!(
+        "RENDERLAB_M7_G1_REFS unset and E:/renderlab-work absent: reference cache under {}",
+        target.display()
+    );
     target.join("gi-reference-cache").join(unit)
 }
 fn env(name: &str) -> Option<String> {
@@ -504,7 +507,7 @@ impl Rig {
     /// populations included about 323,000 sky pixels; docs/m7-g1b.md).
     fn placements(&mut self, sv: &Sv) -> Vec<u32> {
         self.r.test_drain("G1 hit admission");
-        let primary = self.r.primary.as_ref().unwrap();
+        let primary = self.r.view.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
         let region = primary.scene;
         let (hit, tiles) = (targets.hit.texture.clone(), targets.tiles.texture.clone());
@@ -2229,7 +2232,7 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
 /// Placement + 1 per covered pixel (0 = miss or uncovered tile), with bit 31 on pixels
 /// whose 3x3 neighbourhood meets another placement (the quarry's silhouettes between scans).
 fn quarry_hits(r: &Renderer) -> Vec<u32> {
-    let primary = r.primary.as_ref().unwrap();
+    let primary = r.view.primary.as_ref().unwrap();
     let targets = primary.targets.as_ref().unwrap();
     let region = primary.scene;
     let size = targets.hit.texture.size();

@@ -6,7 +6,7 @@
 //! engine keeps these stable and maps them to each path's measured configuration.
 use super::{EnvironmentId, RenderPath};
 use crate::{
-    Atmosphere, AtmosphereMedium, Error, HeightFog, IndirectSettings, Light, Lighting,
+    Atmosphere, AtmosphereMedium, ColourLut, Error, HeightFog, IndirectSettings, Light, Lighting,
     LocalShadows, PostSettings, Reconstruction, RenderScale, Renderer, ShadowRequest, Shadows,
     SoftShadows, Vec3, VirtualLookup, VirtualShadowSettings, VolumetricFog,
 };
@@ -151,23 +151,49 @@ pub enum Quality {
     Reference,
 }
 
-/// Frame-wide rendering choices. Construct with `..Default::default()`: new fields are
-/// added with defaults as features land, so struct literals that spell out every field
-/// may need updating. Defaults follow each feature unit's default ruling (docs/api.md).
+/// How one view looks (`ViewDesc::look`): the exposure, presentation, estimator quality and
+/// reflections. Everything that lights the world is engine-wide [`Settings`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct ViewLook {
+    pub exposure: Exposure,
+    pub quality: Quality,
+    /// Presentation after reconstruction (PP1): bloom, motion blur, optional depth of field,
+    /// the tone mapper, white balance, contrast, saturation, vignette, grain and the colour
+    /// LUT's strength. On by default; `PostSettings { enabled: false, .. }` presents the
+    /// plain tone-mapped image.
+    pub post: PostSettings,
+    /// The display-linear 3D colour LUT (PP1), applied at `post.lut_strength`.
+    pub colour_lut: Option<ColourLut>,
+    /// Traced reflections on both paths (M7-R1 on HardwareRt, R1n's software rays on NonRt)
+    /// for programs that declare `reflection_lobe`: on by default up to roughness 0.5.
+    /// `ReflectionSettings::off()` leaves every program its untraced estimate.
+    pub reflections: crate::ReflectionSettings,
+}
+impl Default for ViewLook {
+    fn default() -> Self {
+        Self {
+            exposure: Exposure::default(),
+            quality: Quality::Realtime,
+            post: PostSettings::default(),
+            colour_lut: None,
+            reflections: crate::ReflectionSettings::default(),
+        }
+    }
+}
+
+/// Engine-wide choices: what lights the world and which features run. Construct with
+/// `..Default::default()`: new fields are added with defaults as features land.
+/// Defaults follow each feature unit's default ruling (docs/api.md). How each view looks
+/// is its [`ViewLook`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
-    pub quality: Quality,
     /// Indirect light: sky visibility and bounce light from the world radiance cache
     /// (M7 G2). On by default (G2b). Off, programs read the unoccluded sky.
     pub global_illumination: bool,
     /// Temporal reconstruction (TR1): each frame samples at a new sub-pixel offset and
-    /// accumulates history, antialiasing edges and textures. On by default (TR1b).
+    /// accumulates history, antialiasing edges and textures. On by default (TR1b). Each
+    /// view's internal resolution is its `ViewDesc::render_scale`.
     pub temporal_reconstruction: bool,
-    /// Internal resolution while temporal reconstruction is on: `Native`, or the
-    /// `Quality` (2/3 per axis) and `Performance` (1/2) upscaling presets, which TR1
-    /// reconstructs to the target size. Needs `temporal_reconstruction`.
-    pub render_scale: RenderScale,
-    pub exposure: Exposure,
     /// Atmospheric scattering along every camera ray to a surface (AT1): distant surfaces
     /// fade toward the sky. On by default; it uses the physical atmosphere's medium
     /// whatever the [`Sky`].
@@ -186,15 +212,6 @@ pub struct Settings {
     /// paths; any positive count enables all-light RT. Unselected map lights still light
     /// the scene. Each light's source radius controls its soft penumbra.
     pub local_shadows: LocalShadows,
-    /// Presentation after reconstruction (PP1): bloom, motion blur, optional depth of field,
-    /// the tone mapper, white balance, contrast, saturation, vignette, grain and the colour
-    /// LUT's strength. On by default; `PostSettings { enabled: false, .. }` presents the
-    /// plain tone-mapped image.
-    pub post: PostSettings,
-    /// Traced reflections on both paths (M7-R1 on HardwareRt, R1n's software rays on NonRt)
-    /// for programs that declare `reflection_lobe`: on by default up to roughness 0.5.
-    /// `ReflectionSettings::off()` leaves every program its untraced estimate.
-    pub reflections: crate::ReflectionSettings,
     /// How brightly the physical atmosphere's sky lights the scene, relative to how it
     /// looks (an engine's sky-light strength): it scales the procedural environment the
     /// atmosphere lights through (image-based light, GI and reflected sky), not the sky
@@ -205,17 +222,12 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            quality: Quality::Realtime,
             global_illumination: true,
             temporal_reconstruction: true,
-            render_scale: RenderScale::Native,
-            exposure: Exposure::default(),
             aerial_perspective: true,
             height_fog: Some(HeightFog::default()),
             volumetric_fog: Some(VolumetricFog::default()),
             local_shadows: LocalShadows::default(),
-            post: PostSettings::default(),
-            reflections: crate::ReflectionSettings::default(),
             sky_light: 1.0,
         }
     }
@@ -318,14 +330,12 @@ pub(crate) fn ablated(mut s: Settings) -> Settings {
     for feature in list.split(',').map(str::trim) {
         match feature {
             "gi" => s.global_illumination = false,
-            "reflections" => s.reflections = crate::ReflectionSettings::off(),
             "local_shadows" => s.local_shadows.count = 0,
             "media" => {
                 s.aerial_perspective = false;
                 s.height_fog = None;
                 s.volumetric_fog = None;
             }
-            "post" => s.post.enabled = false,
             "tr1" => s.temporal_reconstruction = false,
             _ => {}
         }
@@ -420,44 +430,83 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
     Ok(())
 }
 
-/// Applies `settings` to the renderer's estimators on `path`. Called only on change:
-/// re-applying identical GI settings is cheap, but the engine does not rely on it.
-pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> Result<(), Error> {
-    // Validated setters first, so a rejected value changes nothing else.
-    settings.post.validate()?;
-    r.set_local_shadows(settings.local_shadows)?;
-    r.set_post_settings(settings.post)?;
-    if !settings.temporal_reconstruction && settings.render_scale != RenderScale::Native {
-        return Err(Error::InvalidInput(
-            "render_scale below Native needs temporal_reconstruction",
-        ));
+/// `RENDERLAB_ABLATE`'s `post` and `reflections` switch those off in every view's look.
+pub(crate) fn ablated_look(mut look: ViewLook) -> ViewLook {
+    let Ok(list) = std::env::var("RENDERLAB_ABLATE") else {
+        return look;
+    };
+    for feature in list.split(',').map(str::trim) {
+        match feature {
+            "reflections" => look.reflections = crate::ReflectionSettings::off(),
+            "post" => look.post.enabled = false,
+            _ => {}
+        }
     }
+    look
+}
+
+/// Applies the engine-wide `settings` to the renderer's estimators. Called only on change:
+/// re-applying identical GI settings is cheap, but the engine does not rely on it.
+pub(crate) fn apply(r: &mut Renderer, settings: &Settings) -> Result<(), Error> {
+    r.set_local_shadows(settings.local_shadows)?;
     r.set_indirect(if settings.global_illumination {
         indirect_measured(IndirectSettings::default())?
     } else {
         IndirectSettings::off()
-    })?;
+    })
+}
+
+/// Applies a view's look, and its render scale under the engine's `settings`, to the
+/// renderer on `path`. Validates everything before the first setter.
+pub(crate) fn apply_look(
+    r: &mut Renderer,
+    path: RenderPath,
+    settings: &Settings,
+    look: &ViewLook,
+    scale: RenderScale,
+) -> Result<(), Error> {
+    validate_look(settings, look, scale)?;
+    r.set_post_settings(look.post)?;
+    r.set_colour_lut(look.colour_lut.clone())?;
     r.set_reconstruction(if settings.temporal_reconstruction {
         Reconstruction {
-            scale: settings.render_scale,
+            scale,
             ..Reconstruction::default()
         }
     } else {
         Reconstruction::off()
     })?;
-    r.set_reflections(settings.reflections)?;
+    r.set_reflections(look.reflections)?;
     match path {
-        RenderPath::HardwareRt => r.set_soft_shadows(match settings.quality {
+        RenderPath::HardwareRt => r.set_soft_shadows(match look.quality {
             Quality::Realtime => SoftShadows::Interactive,
             Quality::Reference => SoftShadows::Exact,
         }),
         RenderPath::NonRt => r.set_virtual_shadow_settings(VirtualShadowSettings {
-            lookup: match settings.quality {
+            lookup: match look.quality {
                 Quality::Realtime => VirtualShadowSettings::default().lookup,
                 Quality::Reference => VirtualLookup::Exact,
             },
             ..VirtualShadowSettings::default()
         })?,
+    }
+    Ok(())
+}
+
+/// What `apply_look` checks before it changes anything.
+pub(crate) fn validate_look(
+    settings: &Settings,
+    look: &ViewLook,
+    scale: RenderScale,
+) -> Result<(), Error> {
+    look.post.validate()?;
+    if let Some(lut) = &look.colour_lut {
+        lut.validate()?;
+    }
+    if !settings.temporal_reconstruction && scale != RenderScale::Native {
+        return Err(Error::InvalidInput(
+            "render_scale below Native needs temporal_reconstruction",
+        ));
     }
     Ok(())
 }
