@@ -1,11 +1,11 @@
-//! TEMPORARY: the game scene (`examples/game_scene.rs`) as calls on `engine::Scene`, for
-//! the ara-gpu backend's test and comparison tool.
+//! A test fixture: the game scene (`examples/game_scene.rs`) as calls on
+//! `engine::Scene`, for the ara-gpu backend's engine-level test and `ara_frame --scene
+//! game`.
 //!
-//! This is a second description of the scene, copied from the example: its construction
+//! It is a second description of the scene, copied from the example: its construction
 //! at the defaults (no quarry, no Fox), its per-frame animation, its settings and its
-//! geometry builders. It goes when the example's own construction and animation are
-//! functions both layers call (docs/design-engine-backend.md on main, the PR after
-//! N-VSM1); the test and the tool then include that file instead.
+//! geometry builders. When the example's own construction and animation are functions
+//! both layers call, the test and the tool include that file instead.
 use renderlab::{
     Camera, Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures, EmitterDescriptor,
     Error, Light, Mat4, MeshData, PostSettings, Transparency, Value, Vec3, Vertex, VolumetricFog,

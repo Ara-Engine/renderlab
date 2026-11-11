@@ -1,6 +1,6 @@
 //! The game scene (`examples/game_scene.rs`) through the backend's engine-level entry:
 //! the example's own `Engine` calls, made on `backend_ara::engine::Engine`. The scene's
-//! description is `support/ara_game_scene.rs`, a temporary copy of the example's.
+//! description is the fixture `support/ara_game_scene.rs`, a copy of the example's.
 use super::*;
 use renderlab::{
     Camera, LocalShadows, ReflectionSettings, Value, Vec3,
