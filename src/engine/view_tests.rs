@@ -36,8 +36,9 @@ fn cube(c: [f32; 3], h: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
     (vertices, indices)
 }
 
-/// An engine with a ground, a red wall (bounce light) and a crate under the default sun.
-fn engine(gi: bool) -> Engine {
+/// An engine with a ground, a red wall (bounce light) and a crate under the default sun,
+/// and the crate's object.
+fn engine(gi: bool) -> (Engine, ObjectId) {
     let adapter = headless_adapter().unwrap();
     let settings = Settings {
         global_illumination: gi,
@@ -48,6 +49,7 @@ fn engine(gi: bool) -> Engine {
         ..Default::default()
     };
     let mut engine = Engine::new(&adapter, descriptor).unwrap();
+    let mut last = None;
     for (c, h, colour) in [
         ([0.0, -0.05, 0.0], [6.0, 0.05, 6.0], [0.7, 0.7, 0.7, 1.0]),
         ([-1.5, 1.0, 0.0], [0.1, 1.0, 1.5], [0.8, 0.1, 0.1, 1.0]),
@@ -66,16 +68,17 @@ fn engine(gi: bool) -> Engine {
                 ..Default::default()
             })
             .unwrap();
-        engine.spawn(mesh, material, Mat4::IDENTITY).unwrap();
+        last = Some(engine.spawn(mesh, material, Mat4::IDENTITY).unwrap());
     }
     engine.set_sun(Some(Sun::at(0.6, 2.2))).unwrap();
-    engine
+    (engine, last.unwrap())
 }
 
-fn cameras() -> [Camera; 2] {
+/// View 0 orbits by `turn` radians; view 1 stays still.
+fn cameras(turn: f32) -> [Camera; 2] {
     [
         Camera::look_at(
-            Vec3::new(3.0, 2.0, 4.0),
+            Vec3::new(5.0 * (0.64 + turn).sin(), 2.0, 5.0 * (0.64 + turn).cos()),
             Vec3::Y * 0.4,
             Vec3::Y,
             0.9,
@@ -104,16 +107,22 @@ fn desc() -> ViewDesc {
     }
 }
 
-/// Renders `ticks` still ticks of the cameras `which` (indices into `cameras`), each tick
-/// rendering every view in order, and returns each view's last image.
-fn render(which: &[usize], ticks: u32, gi: bool) -> Vec<Image> {
-    let mut engine = engine(gi);
-    let cameras = cameras();
+/// Renders `ticks` ticks of the cameras `which` (indices into `cameras`), each tick rendering
+/// every view in order, and returns each view's last image. `moving`: the crate spins and
+/// view 0 orbits, a little every tick.
+fn render(which: &[usize], ticks: u32, gi: bool, moving: bool) -> Vec<Image> {
+    let (mut engine, crate_object) = engine(gi);
     let views: Vec<_> = which
         .iter()
         .map(|_| engine.create_view(&desc()).unwrap())
         .collect();
-    for _ in 0..ticks {
+    for tick in 0..ticks {
+        let t = if moving { tick as f32 * 0.05 } else { 0.0 };
+        let cameras = cameras(t);
+        let spin = Mat4::from_translation(Vec3::new(0.5, 0.4, 0.3))
+            * Mat4::from_rotation_y(t)
+            * Mat4::from_translation(Vec3::new(-0.5, -0.4, -0.3));
+        engine.set_transform(crate_object, spin).unwrap();
         engine.tick(1.0 / 60.0).unwrap();
         for (view, &camera) in views.iter().zip(which) {
             let report = engine.render_view(*view, &cameras[camera]).unwrap();
@@ -128,9 +137,12 @@ fn render(which: &[usize], ticks: u32, gi: bool) -> Vec<Image> {
 
 /// Per view of `[0, 1]` rendered together, the mean absolute byte difference from the same
 /// camera in an engine of its own, after `ticks` still ticks.
-fn difference_from_alone(ticks: u32, gi: bool) -> [f64; 2] {
-    let both = render(&[0, 1], ticks, gi);
-    let alone = [render(&[0], ticks, gi), render(&[1], ticks, gi)];
+fn difference_from_alone(ticks: u32, gi: bool, moving: bool) -> [f64; 2] {
+    let both = render(&[0, 1], ticks, gi, moving);
+    let alone = [
+        render(&[0], ticks, gi, moving),
+        render(&[1], ticks, gi, moving),
+    ];
     std::array::from_fn(|view| {
         let (a, b) = (&both[view].rgba8, &alone[view][0].rgba8);
         let sum: u64 = a
@@ -145,7 +157,14 @@ fn difference_from_alone(ticks: u32, gi: bool) -> [f64; 2] {
 #[test]
 fn two_views_match_single_view_engines_without_gi() {
     // Every per-view and per-tick state, with no shared cache filled by both views.
-    assert_eq!(difference_from_alone(24, false), [0.0; 2]);
+    assert_eq!(difference_from_alone(24, false, false), [0.0; 2]);
+}
+
+#[test]
+fn a_moving_view_and_moving_objects_leave_each_view_as_if_alone() {
+    // View 0 orbits and the crate spins every tick; view 1 is still. No history (TR1, fog,
+    // motion vectors, particles) carries from one view into the other.
+    assert_eq!(difference_from_alone(24, false, true), [0.0; 2]);
 }
 
 #[test]
@@ -153,14 +172,14 @@ fn two_views_differ_from_single_view_engines_only_by_the_shared_gi_cache() {
     // The GI cache holds both views' cells; a view's cells are traced and gathered on the
     // tick's schedule rather than its own, so its still frame is not byte-identical to an
     // engine of its own, by well under one level on average (docs/design-views.md).
-    let [a, b] = difference_from_alone(96, true);
+    let [a, b] = difference_from_alone(96, true, false);
     assert!(a < 1.0 && b < 1.0, "mean byte difference {a} and {b}");
 }
 
 #[test]
 fn views_are_created_resized_and_removed_independently() {
-    let mut engine = engine(true);
-    let [near, far] = cameras();
+    let (mut engine, _) = engine(true);
+    let [near, far] = cameras(0.0);
     let a = engine.create_view(&desc()).unwrap();
     let b = engine.create_view(&desc()).unwrap();
     assert_ne!(a, b);

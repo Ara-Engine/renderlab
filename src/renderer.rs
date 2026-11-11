@@ -543,6 +543,8 @@ pub struct Renderer {
     primary_uploads: UploadBytes,
     /// The tick whose GI cache work has run (`prepare_gi`).
     gi_tick: u64,
+    /// Frames that uploaded placements, geometry or poses, counted for views' histories.
+    scene_edits: u64,
     explicit_ticks: bool,
     tick_work: bool,
     device: PipelineDevice,
@@ -1063,6 +1065,7 @@ impl Renderer {
             worked_tick: 0,
             primary_uploads: UploadBytes::default(),
             gi_tick: 0,
+            scene_edits: 0,
             explicit_ticks: false,
             tick_work: true,
             device,
@@ -2977,6 +2980,15 @@ impl Renderer {
         mut cpu: CpuFrame,
     ) -> Result<Option<FrameReport>, Error> {
         // Both callers have admitted this slot. No camera/mode/lighting staging on busy.
+        // Frames that move placements, geometry or poses: every view's fog history restarts
+        // at its next frame (`prepare_atmosphere`).
+        if uploads.geometry > 0
+            || uploads.models > 0
+            || uploads.instances > 0
+            || uploads.skinning > 0
+        {
+            self.scene_edits += 1;
+        }
         let start = Instant::now();
         if self.camera_shadow != Some(camera_bytes) {
             self.queue.write_buffer(&self.uniform, 0, &camera_bytes);

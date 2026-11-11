@@ -247,6 +247,8 @@ pub(super) struct AtmosphereView {
     previous: Option<(Mat4, Vec3)>,
     history_key: Option<HistoryKey>,
     frame: u32,
+    /// `Renderer::scene_edits` when this view's fog history was last kept.
+    scene_edits: u64,
     /// Bumped when the camera volume is replaced, so lighting rebinds it.
     pub generation: u64,
 }
@@ -258,6 +260,7 @@ impl AtmosphereView {
             previous: None,
             history_key: None,
             frame: 0,
+            scene_edits: 0,
             generation: generations,
         }
     }
@@ -645,13 +648,12 @@ impl Renderer {
         }
         self.atmosphere_volume_groups(false, 0);
         self.update_procedural_environment(eye);
-        if uploads.geometry > 0
-            || uploads.models > 0
-            || uploads.instances > 0
-            || uploads.skinning > 0
-        {
+        // Moved placements, geometry or poses since this view's last frame (another view's
+        // frame of the tick may have uploaded them).
+        if self.view.atmosphere.scene_edits != self.scene_edits {
             self.view.atmosphere.previous = None;
         }
+        self.view.atmosphere.scene_edits = self.scene_edits;
         // Conservatively invalidate visibility reuse for shadow, medium and lighting
         // changes. Camera motion uses world reprojection; phase is always current.
         let key = HistoryKey {
