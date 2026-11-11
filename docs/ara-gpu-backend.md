@@ -2784,9 +2784,30 @@ split still shows it.
 
 **The one pixel.** The RTX gives the Metal and wgpu value at (588,178) and the pixel
 below it (0.6279 against the Radeon port's 0.5566): the difference is the port's
-SPIR-V on RADV only. Next: a one-pixel trace of the resolve on the Radeon (fetch
-position, the four taps, the stored coverage, the path taken), with Metal's values as
-the reference.
+SPIR-V on RADV only. The one-pixel trace is built (measurement only,
+`resolve_probe.rs`): `RENDERLAB_ARA_PROBE_RESOLVE=X,Y` writes, for that pixel, the
+surfaces, the path, every fetch position, the four coverage taps with the ids and the
+stored coverage they read, and what the resolve stored, and `ara_frame` prints one
+`resolve:` line a record before each `pose` line. On Metal at pose 11 it shows the
+silhouette path and the film 0.3843 the probe lines give. Its taps are the reading to
+check first on the Radeon: tap 3's stored coverage is 0.99902344, so its `c` is
+0.0009765625, just under the `c<=0.001` cut of the edge-normal loop; every tap is cut,
+and the resolve takes `coverage/total` (0.336). Stored one half-float step lower
+(0.99853516), `c` is 0.00146, the tap counts, and the box-area path gives another
+coverage. That is a hypothesis; the Radeon's trace says whether its taps part there
+or earlier. Command, on the Radeon at the head that has the trace:
+`RENDERLAB_ARA_PROBE_RESOLVE=588,178 ara_frame --backend ara --scene game --supported --frames 12 --size 960x640 --probe 588,178 --output DIR`
+
+**The rerun at 7aaffdd (Radeon, the gate's comments of 15:34 and 15:48 UTC).** The
+port's median frame is 95.56 ms against wgpu's 86.38, ratio 1.106 (was 1.21), with
+frames byte for byte those of 9bfb255 at all 12. Recording 2.91 ms (was 5.6),
+`PrimaryInteractive(Deferred)` 12.16 against wgpu's camera rays 11.4, the shade list
+36.05 against 34.2, the resolve 4.69 against 3.81. The variants' controls at 9bfb255:
+`image-unchecked`, `workgroup-unzeroed`, `loops-unbounded` and `queries-untracked`
+each give the unset frame byte for byte, so their timings are evidence. `fused` does
+not: without the `NoContraction` marks the frame differs. Its 0.8 ms is therefore not
+evidence, and the changed frame is a measured reason to keep the marks: the
+renderer's decisions on exact float comparisons depend on them.
 
 **Request to Ara: two device features (ara-gpu, Vulkan).** On the Radeon the port's
 SPIR-V carries two things the wgpu renderer's does not, because ara-gpu's device lacks

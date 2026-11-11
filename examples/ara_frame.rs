@@ -1179,6 +1179,13 @@ fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, F
                 .iter()
                 .map(|r| format!("{}: {}", r.call, r.what))
                 .collect();
+            // MEASUREMENT ONLY: the resolve's one-pixel trace of the frame the next
+            // `pose` line reports, with RENDERLAB_ARA_PROBE_RESOLVE set.
+            if let Some(words) = engine.images().and_then(|i| i.resolve_probe.as_ref()) {
+                for line in renderlab::backend_ara::resolve_probe::describe(words) {
+                    eprintln!("resolve: {line}");
+                }
+            }
             let ms = |d: std::time::Duration| (d.as_secs_f64() * 1e5).round() / 1e2;
             let times = engine.images().map(|i| i.times.clone()).unwrap_or_default();
             let passes: serde_json::Map<_, _> = times

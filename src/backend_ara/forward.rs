@@ -286,6 +286,9 @@ pub struct ForwardImages {
     /// With `Reconstruct::read_history`: the history colour this frame wrote, RGBA32F
     /// (exposed mean, accumulated weight), and whether the frame restarted every pixel.
     pub reconstruction_history: Option<(Vec<f32>, bool)>,
+    /// MEASUREMENT ONLY: with `RENDERLAB_ARA_PROBE_RESOLVE` set, the resolve's
+    /// one-pixel trace (`resolve_probe::describe` reads it).
+    pub resolve_probe: Option<Vec<[f32; 4]>>,
 }
 
 /// The post `Settings` record at this output height for the post frame with this
@@ -2507,6 +2510,15 @@ fn frame(
     }
     // The resolve: its frame record, the copied samples, the history sides the parity
     // selects and the HDR target it rewrites; the rest from the traced frame.
+    // MEASUREMENT ONLY: the one-pixel trace's buffer, zeroed each frame.
+    let probe = match resolve.filter(|_| super::resolve_probe::pixel().is_some()) {
+        Some(_) => {
+            let probe = StorageBuffer::new(gpu, &vec![0; super::resolve_probe::BYTES as usize])?;
+            graph.import(Resource::Buffer(probe.buffer), Access::HostWrite);
+            Some(probe)
+        }
+        None => None,
+    };
     let resolve_packet = match resolve {
         Some((images, (record, samples))) => {
             let values = images
@@ -2520,6 +2532,9 @@ fn frame(
                             (0, 40) => Input::Buffer(record),
                             (0, 41) => Input::Image(samples),
                             (0, 46) => Input::Image(shown),
+                            (0, super::resolve_probe::BINDING) => {
+                                Input::Buffer(probe.as_ref().context("the resolve's probe buffer")?)
+                            }
                             _ => match images.input(spec.key) {
                                 Some(image) => Input::Image(image),
                                 None => shared.input(spec, None)?,
@@ -3042,6 +3057,17 @@ fn frame(
         )?),
         None => None,
     };
+    let probe_read = match &probe {
+        Some(probe) => Some(transfer::readback_buffer(
+            gpu,
+            &mut graph,
+            &mut rec,
+            probe.buffer,
+            0,
+            super::resolve_probe::BYTES,
+        )?),
+        None => None,
+    };
     let history_read = match resolve.filter(|_| reconstruct.is_some_and(|r| r.read_history)) {
         Some((images, _)) => Some(transfer::readback(
             gpu,
@@ -3304,6 +3330,10 @@ fn frame(
             .transpose()?
             .map(|bytes| bytemuck::pod_collect_to_vec(&bytes))
             .zip(resolve.map(|(images, _)| images.reset())),
+        resolve_probe: probe_read
+            .map(|b| gpu.read(b))
+            .transpose()?
+            .map(|bytes| bytemuck::pod_collect_to_vec(&bytes)),
     };
 
     if let Some((_, bloom, surface)) = tail {
@@ -3420,9 +3450,13 @@ fn frame(
         .chain(outgoing_read)
         .chain(raw_read)
         .chain(history_read)
+        .chain(probe_read)
         .chain(read)
     {
         gpu.retire(Resource::Buffer(buffer))?;
+    }
+    if let Some(probe) = probe {
+        probe.retire(gpu)?;
     }
     gpu.collect()?;
     images.times.finish = finishing.elapsed();

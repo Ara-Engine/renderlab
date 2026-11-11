@@ -55,4 +55,5 @@ pub mod engine;
 
 /// The world radiance cache's kernels.
 pub mod gi_cache;
+pub mod resolve_probe;
 pub mod temporal;

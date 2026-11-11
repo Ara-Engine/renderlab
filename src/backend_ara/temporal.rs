@@ -23,11 +23,14 @@ use ara_gpu::{
 /// `temporal_reconstruction::resolve_source` on the standard prelude: the non-RT
 /// shading head, the object-motion source and the resolve itself. No ray queries.
 pub(crate) fn resolve_source() -> Result<String> {
-    Ok(
-        crate::renderer::primary_ray_gpu::temporal_reconstruction::resolve_source(include_str!(
-            "../../shaders/scene.wgsl"
-        ))?,
-    )
+    let source = crate::renderer::primary_ray_gpu::temporal_reconstruction::resolve_source(
+        include_str!("../../shaders/scene.wgsl"),
+    )?;
+    // MEASUREMENT ONLY: the one-pixel trace, when asked for.
+    match super::resolve_probe::pixel() {
+        Some(pixel) => super::resolve_probe::instrument(&source, pixel),
+        None => Ok(source),
+    }
 }
 
 /// The resolve kernel, reflected.
