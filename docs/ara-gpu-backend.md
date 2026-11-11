@@ -2130,7 +2130,8 @@ colour behind it, so two frames with different floors behind the same pane diffe
 also traces a reflection for panes whose program declares a lobe (the standard one
 does), with a three-attachment lobe pass and `tp_reflect`; neither is ported, and the
 frame block tells the shader so. Coloured sun transmission (a pane's tinted shadow on
-opaque surfaces) is not assembled: panes are not in the scene and cast nothing.
+opaque surfaces) was not assembled at this step; it is now (below, under the first
+game-scene comparison).
 Particles and emitters are not assembled. **Not compared with wgpu**, and with the
 reflection missing a comparison of a pane is expected to differ.
 
@@ -2339,3 +2340,57 @@ renderer's frame does not:
 Until those are resident too, a timing comparison with wgpu on this scene would
 measure the harness. The first frame of a run takes 13 to 14 s on a fresh cache
 directory: the native shader compile.
+
+## The first game-scene comparison (Radeon, c9a0053) and what it found
+
+`ara_frame --scene game --supported` on the Radeon, wgpu against the backend, 12 moving
+frames: whole-frame means agreed (146.48 against 146.51) but the worst HDR cell was
+16% to 18% off, far from the fixture levels' 0.06%. Three findings, each read from the
+code:
+
+**The bright band on the ground: the pane's coloured sun shadow, the port's.** The
+renderer draws each transparent draw's nearest sheet into its own layer of a 1024²
+sun map over the panes' footprint (`prepare_transmission`, `encode_transmission`: the
+light the sheet passes in rgb, its depth in alpha), and `light_sample` in the program
+API multiplies a shadowed sun by every layer that lies between the receiver and the
+sun. Every program reads the record at (3, 26) and the map at (3, 27). The port had
+the layer pipeline as a stand-alone replay (entry 49) and the frame bound zeros there,
+which the shader reads as no panes: full light. At dusk the game scene's pane throws a
+long shadow, the band. The frame now builds the record with the renderer's own
+`shadow_fit`, draws each pane into its layer before anything shades, and binds both;
+the restart key takes the record and each pane's geometry, material and transform, as
+the renderer cuts reconstruction when the map changes. A frame below native scale
+keeps the shadows though it skips the panes, as the renderer does.
+
+`a_pane_passes_what_its_coverage_fresnel_and_tint_leave` now holds the shadow to its
+closed form with the view's passage: under a lower sun, the difference of two frames
+with different floors over the bare floors' difference is every `T` the view ray
+crosses times every `S` the floor point's sun ray crosses, `S` being the pane's
+coverage, Schlick's Fresnel at the sun's angle and its tint. 1,593 pixels inside a
+pane and 225 in a pane's shadow alone are within 0.0013; outside every pane and shadow
+the frame is the bare floor's bit for bit. Under two panes the far pane's own light,
+dimmed where the near pane shadows it, passes the near one within 0.0005, and the
+other draw order would be 0.17 away.
+
+**The pane's own picture: its traced reflection, not built.** On a ray-traced frame
+the renderer traces a reflection for a pane whose program declares `reflection_lobe`.
+The port does not. `--supported` now leaves it out on wgpu by giving the pane the
+standard program with that one function renamed, which the renderer then shades
+without tracing; `ScenePrograms::transparent` lets a pane name its program in the
+port, and there the two programs draw the same image byte for byte (checked on
+Metal). A pane program that declares `Parameters` is refused: a pane's parameter block
+is not assembled.
+
+**The 12 triangles: the pane, a matter of counting.** The renderer's `FrameReport`
+counts its opaque draws; the pane's cube is 12 triangles and the port counted it. It
+no longer does (37,598 on both). Draws stay different by construction: the renderer
+reports 11 mesh-material batches, the port 29 objects.
+
+**The bulb's rim: not explained from the code.** The worst HDR pixel (38%) is on the
+rim of the bulb under the arch. That bulb sits one source radius above its own point
+light, whose light on it is about ten times its glow, and every lantern has a source
+radius, which no fixture light has: the soft-source path had never been compared with
+wgpu. The cluster header's sampling word, the light records and the shading code read
+the same on both sides. `ara_frame --scene game --without NAME[,NAME]` leaves one
+feature out on both layers (`gi`, `reconstruction`, `reflections`, `local-shadows`,
+`glass`, `lanterns`, `glow`) so the gate can find which one the rim belongs to.

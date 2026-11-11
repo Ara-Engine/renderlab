@@ -125,7 +125,10 @@ fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
                 textures: None,
                 local_shadows: None,
                 transparent: &[],
-                programs: programs.as_ref().map(|objects| ScenePrograms { objects }),
+                programs: programs.as_ref().map(|objects| ScenePrograms {
+                    objects,
+                    transparent: &[],
+                }),
             },
         )?;
         Ok(images

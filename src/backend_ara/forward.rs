@@ -39,10 +39,12 @@ use super::{
     program_bins::{BinDispatch, ProgramBins},
     receiver_raster::{ReceiverDraw, ReceiverTargets, Receivers},
     shader::{self, InputKey, InputKind, Pass, Program, SampleType, ShaderInput},
+    shadow_raster::ShadowDraw,
     sky::SkyPass,
     temporal::{History, Reconstruct},
     toon::{MeshAttachments, ToonDraw, ToonPass},
     transfer,
+    transmission_shadow::Transmission,
     transparency_glass::{self, Glass},
     transparency_seed::{MsaaColor, Seed},
     volumes::VolumePasses,
@@ -121,6 +123,11 @@ pub struct ScenePrograms<'a> {
     /// shades the whole region in one dispatch; a frame of several bins its 4x4 tiles
     /// by program and each program shades its own list (MP1), up to 32 programs.
     pub objects: &'a [Option<ObjectProgram<'a>>],
+    /// One entry per pane, in `ForwardScene::transparent` order, or empty for the
+    /// standard program on every pane. A pane's program is composed into the glass
+    /// pass as the renderer composes it; one that declares `Parameters` is refused,
+    /// since a pane's parameter block is not assembled.
+    pub transparent: &'a [Option<ObjectProgram<'a>>],
 }
 
 /// The scene's material textures.
@@ -187,9 +194,10 @@ pub struct ForwardScene<'a> {
     /// `Transparency`. Drawn after opaque shading and the resolve, far to near, each
     /// over the colour behind it on four coverage samples, with its sun visibility a
     /// ray its own fragments trace (`Renderer::encode_transparency` on a ray-traced
-    /// renderer). Short of the renderer in three ways, each stated where it applies:
-    /// no traced reflection in a pane, no tinted shadow of a pane on opaque surfaces,
-    /// and no particles. A frame below native scale skips them, as the renderer does.
+    /// renderer). Each pane also casts its coloured sun shadow on everything opaque
+    /// (`prepare_transmission`). Short of the renderer in two ways: no traced
+    /// reflection in a pane, and no particles. A frame below native scale skips the
+    /// panes and keeps their shadows, as the renderer does.
     pub transparent: &'a [ForwardObject<'a>],
     /// The objects' shading programs and their parameters, on traced frames only: the
     /// mesh pass composes the standard program alone. `None` is the standard program
@@ -371,14 +379,16 @@ struct Pane {
     material: StorageBuffer,
     /// `TpDraw`: the thin slab's thickness.
     slot: StorageBuffer,
+    /// Its program's index in `Panes::programs`.
+    program: usize,
 }
 /// What a traced frame's transparent panes add: `encode_transparency`'s targets,
 /// records and pipelines.
 struct Panes {
     hit_depth: Kernel,
     seed: Seed,
-    glass: Glass,
-    program: Program,
+    /// Each distinct pane program composed for the glass pass, with its pipeline.
+    programs: Vec<(Program, Glass)>,
     target: MsaaColor,
     /// The pass's camera block and `TpFrame`, from the unjittered camera.
     camera: StorageBuffer,
@@ -396,7 +406,9 @@ impl Panes {
     fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
         self.hit_depth.retire(gpu)?;
         self.seed.retire(gpu)?;
-        self.glass.retire(gpu)?;
+        for (_, glass) in self.programs {
+            glass.retire(gpu)?;
+        }
         self.target.retire(gpu, graph)?;
         self.camera.retire(gpu)?;
         self.frame.retire(gpu)?;
@@ -747,6 +759,14 @@ impl Frames {
         };
         Ok(images)
     }
+}
+
+/// A pane's world bounds, least and greatest corner.
+fn pane_bounds(object: &ForwardObject<'_>) -> Result<(crate::Vec3, crate::Vec3)> {
+    let local = crate::visibility::Aabb::from_positions(object.vertices.iter().map(|v| v.position))
+        .context("a transparent pane without vertices")?;
+    let b = shadow_gpu::world_bounds(local, object.transform)?;
+    Ok((b.min, b.max))
 }
 
 /// A program's reflected `Parameters` layout, composed and validated at the raster
@@ -1211,6 +1231,37 @@ fn frame(
     } else {
         None
     };
+    // TP2 (`prepare_transmission`): the panes' coloured sun shadow on everything opaque.
+    // A sun map over the panes' own footprint holds, in one layer a pane, the light its
+    // nearest sheet passes and that sheet's depth. Its record is `TpTransmission`: the
+    // map's matrix, the direction toward the sun with the layer count, twice the fit's
+    // bias. Without panes or a sun the record stays zero and shading reads full light.
+    let transmission_record: Option<Vec<u8>> =
+        match scene.lighting.lights.iter().find_map(|l| match l {
+            crate::Light::Directional { travel, .. } => Some(travel.normalize()),
+            _ => None,
+        }) {
+            Some(travel) if deferred_path && !scene.transparent.is_empty() => {
+                let receivers = scene
+                    .transparent
+                    .iter()
+                    .map(pane_bounds)
+                    .collect::<Result<Vec<_>>>()?;
+                tp::shadow_fit(travel, &receivers, &[]).map(|fit| {
+                    let mut record = crate::mesh::matrix_bytes(fit.matrix).to_vec();
+                    record.extend(
+                        (-travel)
+                            .extend(scene.transparent.len() as f32)
+                            .to_array()
+                            .into_iter()
+                            .chain([fit.bias * 2.0, 0.0, 0.0, 0.0])
+                            .flat_map(f32::to_ne_bytes),
+                    );
+                    record
+                })
+            }
+            _ => None,
+        };
     // The scene and the fresh visibility's targets and kernels.
     let geometry_started = std::time::Instant::now();
     let traced = match &shadow_frame {
@@ -1530,6 +1581,17 @@ fn frame(
                     h.update(source.as_bytes());
                 }
                 h.update(bytemuck::cast_slice(&slots));
+                // `prepare_transmission` cuts when the panes' sun map would change: its
+                // record, or a pane's geometry, material or transform.
+                if let Some(record) = &transmission_record {
+                    h.update(record);
+                    for pane in scene.transparent {
+                        h.update((pane.vertices.len() as u64).to_le_bytes());
+                        h.update((pane.indices.len() as u64).to_le_bytes());
+                        h.update(pane.material.bytes());
+                        h.update(bytemuck::cast_slice(&pane.transform.to_cols_array()));
+                    }
+                }
                 for index in 0..scene.objects.len() {
                     if let Some(program) = object_program(index) {
                         h.update(format!("{:?}", program.parameters).as_bytes());
@@ -1729,6 +1791,53 @@ fn frame(
     }
     let mut buffers = BTreeMap::new();
     let mut inputs = BTreeMap::new();
+    // The transmission record and map are what every program reads at (3, 26) and
+    // (3, 27); each pane's geometry and material are drawn into its layer below.
+    const TRANSMISSION_SIZE: [u32; 2] = [1024; 2];
+    let mut transmission = None;
+    if let Some(record) = &transmission_record {
+        let record = StorageBuffer::new(gpu, record)?;
+        graph.import(Resource::Buffer(record.buffer), Access::HostWrite);
+        buffers.insert(key(3, 26), record);
+        inputs.insert(
+            key(3, 27),
+            Texture::array(
+                gpu,
+                TRANSMISSION_SIZE,
+                scene.transparent.len() as u32,
+                Format::Rgba16Float,
+                false,
+                true,
+            )?,
+        );
+        let mut panes = Vec::new();
+        for object in scene.transparent {
+            let geometry = MeshGeometry::new(
+                gpu,
+                object.vertices,
+                object.indices,
+                &[0],
+                &[object.transform],
+            )?;
+            geometry.import(&mut graph);
+            let material = StorageBuffer::new(gpu, &object.material.bytes())?;
+            graph.import(Resource::Buffer(material.buffer), Access::HostWrite);
+            panes.push((geometry, material));
+        }
+        // The material's base colour texture: the renderer's white default.
+        let base = Texture::new(gpu, [1, 1], Format::Rgba8Srgb, false, false)?;
+        staging.push(transfer::upload(
+            gpu, &mut graph, &mut rec, base.image, &[255; 4],
+        )?);
+        let (depth, depth_views) = Texture::depth_atlas(gpu, TRANSMISSION_SIZE, 1, 1)?;
+        transmission = Some((
+            Transmission::new(gpu, cache)?,
+            panes,
+            base,
+            depth,
+            depth_views,
+        ));
+    }
     for spec in &specs {
         match spec.kind {
             InputKind::Buffer { minimum, .. } => {
@@ -1869,6 +1978,38 @@ fn frame(
             let block = StorageBuffer::new(gpu, &block)?;
             graph.import(Resource::Buffer(block.buffer), Access::HostWrite);
             parameter_blocks.push(block);
+        }
+    }
+    // `encode_transmission`: each pane into its own layer, cleared to full light.
+    let mut transmission_packets = Vec::new();
+    if let Some((pass, panes, base, _, depth_views)) = &transmission {
+        let map = &inputs[&key(3, 27)];
+        for (layer, (geometry, material)) in panes.iter().enumerate() {
+            let packet = HeapBindings::new(
+                gpu,
+                Pass::TransmissionShadow,
+                &[
+                    (key(0, 30), Input::Buffer(&buffers[&key(3, 26)])),
+                    (key(1, 0), Input::Buffer(geometry.models())),
+                    (key(2, 0), Input::Buffer(material)),
+                    (key(2, 1), Input::Image(base)),
+                    (key(2, 2), Input::Sampler(SamplerDesc::default())),
+                ],
+            )?;
+            packet.import(&mut graph);
+            pass.record_layer(
+                &mut graph,
+                &mut rec,
+                &ShadowDraw {
+                    geometry,
+                    bindings: &packet,
+                    first_instance: 0,
+                    instance_count: 1,
+                },
+                &map.view_2d(gpu, 0, layer as u32)?,
+                &depth_views[0],
+            )?;
+            transmission_packets.push(packet);
         }
     }
     // `try_upload_texture` and `sampler_descriptor` for each object's texture slots.
@@ -2409,18 +2550,10 @@ fn frame(
     // that copy, the pane, and the resolve back into the HDR target.
     let panes = match (deferred.as_ref(), upscaled.as_ref()) {
         (Some(deferred), None) if !scene.transparent.is_empty() => {
-            let world = |object: &ForwardObject<'_>| -> Result<(crate::Vec3, crate::Vec3)> {
-                let local = crate::visibility::Aabb::from_positions(
-                    object.vertices.iter().map(|v| v.position),
-                )
-                .context("a transparent pane without vertices")?;
-                let b = shadow_gpu::world_bounds(local, object.transform)?;
-                Ok((b.min, b.max))
-            };
             let receivers = scene
                 .transparent
                 .iter()
-                .map(world)
+                .map(pane_bounds)
                 .collect::<Result<Vec<_>>>()?;
             let casters: Vec<_> = bounds.iter().map(|b| (b.min, b.max)).collect();
             let sun = scene.lighting.lights.iter().find_map(|l| match l {
@@ -2481,9 +2614,32 @@ fn frame(
             let mut order: Vec<usize> = (0..scene.transparent.len()).collect();
             let distance = |i: usize| ((receivers[i].0 + receivers[i].1) * 0.5 - eye).dot(forward);
             order.sort_by(|a, b| distance(*b).total_cmp(&distance(*a)));
+            // Each pane's program, composed once per distinct source.
+            let pane_programs = scene.programs.map_or(&[][..], |p| p.transparent);
+            ensure!(
+                pane_programs.is_empty() || pane_programs.len() == scene.transparent.len(),
+                "pane programs need one entry per pane"
+            );
+            let mut sources: Vec<&str> = Vec::new();
             let mut panes = Vec::new();
             for index in order {
                 let object = &scene.transparent[index];
+                let source = pane_programs
+                    .get(index)
+                    .copied()
+                    .flatten()
+                    .map_or(crate::program::STANDARD_PROGRAM, |p| p.source);
+                ensure!(
+                    !crate::program::declares_parameters(source),
+                    "a pane's program with Parameters is not assembled"
+                );
+                let program = sources
+                    .iter()
+                    .position(|s| *s == source)
+                    .unwrap_or_else(|| {
+                        sources.push(source);
+                        sources.len() - 1
+                    });
                 let geometry = MeshGeometry::new(
                     gpu,
                     object.vertices,
@@ -2505,14 +2661,19 @@ fn frame(
                     geometry,
                     material,
                     slot,
+                    program,
                 });
             }
-            let program = transparency_glass::traced_program(crate::program::STANDARD_PROGRAM)?;
+            let mut programs = Vec::new();
+            for source in sources {
+                let program = transparency_glass::traced_program(source)?;
+                let glass = Glass::new(gpu, cache, &program)?;
+                programs.push((program, glass));
+            }
             Some(Panes {
                 hit_depth: Kernel::new(gpu, cache, Pass::TransparencyHitDepth)?,
                 seed: Seed::new(gpu, cache)?,
-                glass: Glass::new(gpu, cache, &program)?,
-                program,
+                programs,
                 target: MsaaColor::new(gpu, size)?,
                 camera,
                 frame,
@@ -2566,8 +2727,8 @@ fn frame(
             seed.import(&mut graph);
             t.seed.record(&mut graph, &mut rec, &seed, &t.target)?;
             pane_packets.push(seed);
-            let values = t
-                .program
+            let (program, glass) = &t.programs[pane.program];
+            let values = program
                 .inputs()
                 .iter()
                 .map(|spec| {
@@ -2593,10 +2754,9 @@ fn frame(
                     ))
                 })
                 .collect::<Result<Vec<_>>>()?;
-            let packet = HeapBindings::for_program(gpu, &t.program, &values)?;
+            let packet = HeapBindings::for_program(gpu, program, &values)?;
             packet.import(&mut graph);
-            t.glass
-                .record(&mut graph, &mut rec, &packet, &pane.geometry, &t.target)?;
+            glass.record(&mut graph, &mut rec, &packet, &pane.geometry, &t.target)?;
             t.target.resolve_to(&mut graph, &mut rec, &output)?;
             pane_packets.push(packet);
         }
@@ -2905,12 +3065,23 @@ fn frame(
         .chain(gi_shade_packet)
         .chain(resolve_packet)
         .chain(pane_packets)
+        .chain(transmission_packets)
         .chain(list_packets)
     {
         packet.retire(gpu, &mut graph)?;
     }
     if let Some(panes) = panes {
         panes.retire(gpu, &mut graph)?;
+    }
+    if let Some((pass, panes, base, depth, _)) = transmission {
+        pass.retire(gpu)?;
+        for (geometry, material) in panes {
+            geometry.retire(gpu, &mut graph)?;
+            material.retire(gpu)?;
+        }
+        for image in [base, depth] {
+            gpu.retire(Resource::Image(image.image))?;
+        }
     }
     if let Some(lists) = program_lists {
         lists.bins.retire(gpu)?;

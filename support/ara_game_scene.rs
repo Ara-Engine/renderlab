@@ -187,6 +187,8 @@ pub struct Built {
     pub arch_lamp: Vec3,
     pub post_lamp: Vec3,
     pub flame: Vec3,
+    /// Whether `animate` lights the lanterns.
+    pub lanterns: bool,
 }
 
 /// Which parts of the example's scene to build.
@@ -198,6 +200,15 @@ pub struct Options {
     pub particles: bool,
     /// The two ground decals.
     pub decals: bool,
+    /// The glass pane's traced reflection. Off, the pane's program is the standard
+    /// program without its `reflection_lobe`, which shades the same without one.
+    pub pane_reflection: bool,
+    /// The glass pane itself.
+    pub glass: bool,
+    /// The lamp bulbs' `glow`; off, they keep the program's default (none).
+    pub glow: bool,
+    /// The three lanterns' point and spot lights.
+    pub lanterns: bool,
 }
 impl Default for Options {
     fn default() -> Self {
@@ -205,6 +216,10 @@ impl Default for Options {
             toon_hero: true,
             particles: true,
             decals: true,
+            pane_reflection: true,
+            glass: true,
+            glow: true,
+            lanterns: true,
         }
     }
 }
@@ -245,10 +260,22 @@ pub fn build<S: Scene>(scene: &mut S, options: Options) -> Result<Built, Error> 
         parameters: if toon_hero { &style } else { &[] },
         ..Default::default()
     })?;
+    // The example's glass names no program: the standard one, whose `reflection_lobe`
+    // makes a traced renderer trace the pane's reflection. Without the lobe the same
+    // program shades the pane with its untraced estimate.
+    let glass_program = if options.pane_reflection {
+        None
+    } else {
+        const LOBE: &str = "fn reflection_lobe(";
+        assert_eq!(renderlab::STANDARD_PROGRAM.matches(LOBE).count(), 1);
+        let source = renderlab::STANDARD_PROGRAM.replace(LOBE, "fn unused_reflection_lobe(");
+        Some(scene.create_program("glass without a reflection", &source)?)
+    };
     let glass = scene.create_material(&MaterialDesc {
         base_color: [0.86, 0.95, 0.93, 1.],
         roughness: 0.04,
         transparency: Some(Transparency::default()),
+        program: glass_program,
         ..Default::default()
     })?;
     let leaves = scene.create_material(&MaterialDesc {
@@ -261,7 +288,11 @@ pub fn build<S: Scene>(scene: &mut S, options: Options) -> Result<Built, Error> 
     let bulb = scene.create_material(&MaterialDesc {
         base_color: [1., 0.9, 0.7, 1.],
         program: Some(game),
-        parameters: &[("glow", Value::Vec3(GLOW))],
+        parameters: if options.glow {
+            &[("glow", Value::Vec3(GLOW))]
+        } else {
+            &[]
+        },
         ..Default::default()
     })?;
     let mesh = |scene: &mut S, g: &Geometry| {
@@ -295,13 +326,15 @@ pub fn build<S: Scene>(scene: &mut S, options: Options) -> Result<Built, Error> 
         )?;
     }
     scene.spawn(sphere, gold, boxed(at(1.8, 1., 3.2), Vec3::ONE))?;
-    scene.spawn(
-        cube,
-        glass,
-        Mat4::from_translation(at(5.4, 0.8, 3.6))
-            * Mat4::from_rotation_y(0.8)
-            * Mat4::from_scale(at(2.2, 1.6, 0.04)),
-    )?;
+    if options.glass {
+        scene.spawn(
+            cube,
+            glass,
+            Mat4::from_translation(at(5.4, 0.8, 3.6))
+                * Mat4::from_rotation_y(0.8)
+                * Mat4::from_scale(at(2.2, 1.6, 0.04)),
+        )?;
+    }
     for (x, z) in [(-4., -2.2), (3.6, -3.8), (6.2, -0.6)] {
         for k in 0..3 {
             scene.spawn(
@@ -429,6 +462,7 @@ pub fn build<S: Scene>(scene: &mut S, options: Options) -> Result<Built, Error> 
         arch_lamp,
         post_lamp,
         flame,
+        lanterns: options.lanterns,
     })
 }
 
@@ -461,7 +495,7 @@ pub fn animate<S: Scene>(scene: &mut S, built: &Built, frame: u32) -> Result<Cam
         )?;
     }
     let flicker = 0.85 + 0.1 * (23. * t).sin() + 0.05 * (37. * t + 1.).sin();
-    scene.set_lights(&[
+    let lanterns = [
         Light::Point {
             position: built.arch_lamp - Vec3::new(0., 0.25, 0.),
             candela: [30_000., 21_000., 11_000.],
@@ -483,7 +517,8 @@ pub fn animate<S: Scene>(scene: &mut S, built: &Built, frame: u32) -> Result<Cam
             range: Some(10.),
             source_radius: 0.25,
         },
-    ])?;
+    ];
+    scene.set_lights(if built.lanterns { &lanterns } else { &[] })?;
     scene.set_transform(
         built.spinner,
         Mat4::from_translation(Vec3::new(-2.5, 0.6 + 0.3 * (2. * t).sin(), 3.))

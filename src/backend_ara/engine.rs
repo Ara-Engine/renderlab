@@ -517,6 +517,21 @@ impl Scene for Engine {
                 })
             })
             .collect();
+        // A pane's program by its source; its parameter block is not assembled.
+        let pane_programs: Vec<_> = transparent
+            .iter()
+            .map(|p| {
+                Some(ObjectProgram {
+                    source: &p.2.program.source,
+                    parameters: &[],
+                })
+            })
+            .collect();
+        if transparent.iter().any(|p| p.2.program.layout.is_some()) {
+            return Err(Error::InvalidInput(
+                "a transparent material's program with Parameters is not assembled",
+            ));
+        }
         let textures: Vec<_> = opaque
             .iter()
             .map(|p| ObjectTextures {
@@ -558,19 +573,19 @@ impl Scene for Engine {
             }),
             local_shadows: (settings.local_shadows.count > 0).then_some(settings.local_shadows),
             transparent: &transparent_objects,
-            programs: Some(ScenePrograms { objects: &programs }),
+            programs: Some(ScenePrograms {
+                objects: &programs,
+                transparent: &pane_programs,
+            }),
             meshes: Some(&keys),
         };
         let images = self
             .frames
             .render(&mut self.gpu, &self.cache, &scene)
             .map_err(fault)?;
-        let triangles: usize = opaque
-            .iter()
-            .chain(&transparent)
-            .map(|p| p.1.len() / 3)
-            .sum();
-        let draws = (opaque.len() + transparent.len()) as u64;
+        // The renderer's counts are of its opaque draws; a pane is not among them.
+        let triangles: usize = opaque.iter().map(|p| p.1.len() / 3).sum();
+        let draws = opaque.len() as u64;
         self.last = Some(images);
         self.frame += 1;
         Ok(FrameReport {

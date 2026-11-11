@@ -87,9 +87,13 @@
 //! `Engine` on its `HardwareRt` path, or the backend's engine. `--frames` follows the
 //! example's animation and `--still` holds its first frame. The backend leaves out what
 //! it refuses (it prints the list, and writes it in `frame.json`), so a comparison shows
-//! those pieces as differences; `--supported` leaves the same pieces out on wgpu
-//! (volumetric fog, particles, decals), for a comparison of what both draw. The other
-//! level flags do not apply.
+//! those pieces as differences; `--supported` leaves out on wgpu what the backend does
+//! not draw (volumetric fog, particles, decals and the glass pane's traced reflection,
+//! by giving the pane the standard program without its `reflection_lobe`), for a
+//! comparison of what both draw. `--without NAME[,NAME]` leaves a feature out on both
+//! layers, to find which one a difference belongs to: `gi`, `reconstruction`,
+//! `reflections`, `local-shadows`, `glass`, `lanterns` (the three local lights) or `glow`
+//! (the bulbs' emission). The other level flags do not apply.
 // The fixture also carries names and a scene record for the Unreal match export.
 #[allow(dead_code)]
 #[path = "../support/lighting_fixture.rs"]
@@ -122,6 +126,7 @@ fn main() -> Result<(), Failure> {
     let mut depth_of_field = false;
     let mut frames = 1usize;
     let (mut game_scene, mut supported) = (false, false);
+    let mut without = [false; WITHOUT.len()];
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--scene" => match args.next().as_deref() {
@@ -129,6 +134,15 @@ fn main() -> Result<(), Failure> {
                 _ => return Err("--scene game".into()),
             },
             "--supported" => supported = true,
+            "--without" => {
+                for name in args.next().ok_or("--without NAME[,NAME]")?.split(',') {
+                    let at = WITHOUT
+                        .iter()
+                        .position(|n| *n == name)
+                        .ok_or_else(|| format!("--without takes {}", WITHOUT.join(", ")))?;
+                    without[at] = true;
+                }
+            }
             "--backend" => backend = args.next(),
             "--output" => output = args.next(),
             "--sun-shadows" => sun_shadows = true,
@@ -201,7 +215,7 @@ fn main() -> Result<(), Failure> {
             depth_of_field: false,
             still,
             frames,
-            game: Some(supported),
+            game: Some((supported, without)),
         };
         let sequence = match backend.as_deref() {
             Some("wgpu") => game_wgpu(size, level)?,
@@ -324,10 +338,22 @@ struct Level {
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
-    /// `--scene game`: the game scene through the engine API, and whether `--supported`
-    /// left out on wgpu what the backend refuses.
-    game: Option<bool>,
+    /// `--scene game`: the game scene through the engine API, whether `--supported`
+    /// left out on wgpu what the backend refuses, and what `--without` left out on
+    /// both, by index of `WITHOUT`.
+    game: Option<(bool, [bool; WITHOUT.len()])>,
 }
+/// What `--without` can leave out of the game scene on both layers, to find which
+/// feature a difference between them belongs to.
+const WITHOUT: [&str; 7] = [
+    "gi",
+    "reconstruction",
+    "reflections",
+    "local-shadows",
+    "glass",
+    "lanterns",
+    "glow",
+];
 impl Level {
     /// The size of the HDR image a run writes. Below native scale the wgpu renderer's
     /// capture is its internal-size shaded samples, not the resolved image, so both
@@ -907,10 +933,29 @@ fn game_frames<S: renderlab::engine::Scene>(
 }
 /// The scene's settings and parts for a run: all of them, or without what the backend
 /// refuses.
-fn game_ask(supported: bool) -> (renderlab::engine::Settings, game::Options) {
+fn game_ask(
+    (supported, without): (bool, [bool; WITHOUT.len()]),
+) -> (renderlab::engine::Settings, game::Options) {
+    let [
+        gi,
+        reconstruction,
+        reflections,
+        local_shadows,
+        glass,
+        lanterns,
+        glow,
+    ] = without;
     let mut settings = game::settings();
     if supported {
         settings.volumetric_fog = None;
+    }
+    settings.global_illumination &= !gi;
+    settings.temporal_reconstruction &= !reconstruction;
+    if reflections {
+        settings.reflections = renderlab::ReflectionSettings::off();
+    }
+    if local_shadows {
+        settings.local_shadows.count = 0;
     }
     (
         settings,
@@ -918,6 +963,10 @@ fn game_ask(supported: bool) -> (renderlab::engine::Settings, game::Options) {
             toon_hero: true,
             particles: !supported,
             decals: !supported,
+            pane_reflection: !supported,
+            glass: !glass,
+            glow: !glow,
+            lanterns: !lanterns,
         },
     )
 }
@@ -931,7 +980,7 @@ fn game_wgpu(size: [u32; 2], level: Level) -> Result<Vec<Frame>, Failure> {
     }
     let adapter = headless_adapter()?;
     eprintln!("wgpu adapter: {:?}", adapter.get_info());
-    let (settings, options) = game_ask(level.game == Some(true));
+    let (settings, options) = game_ask(level.game.unwrap_or_default());
     let mut engine = Engine::new(
         &adapter,
         EngineDescriptor {
@@ -966,7 +1015,7 @@ fn game_wgpu(size: [u32; 2], level: Level) -> Result<Vec<Frame>, Failure> {
 fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, Failure> {
     use ara_gpu::Device as _;
     use renderlab::backend_ara::{cache::ShaderCache, engine::Engine};
-    let (settings, options) = game_ask(level.game == Some(true));
+    let (settings, options) = game_ask(level.game.unwrap_or_default());
     let mut engine = Engine::new(
         ara_gpu::GpuDevice::new(&[], output.join("device"))?,
         ShaderCache::new(output.join("shaders"))?,
@@ -1105,10 +1154,16 @@ fn write(
         dir.join("frame.json"),
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
-            "scene": if let Some(supported) = level.game {
+            "scene": if let Some((supported, without)) = level.game {
+                let left_out: Vec<&str> = WITHOUT
+                    .iter()
+                    .zip(without)
+                    .filter_map(|(name, off)| off.then_some(*name))
+                    .collect();
                 format!(
-                    "the game scene at its defaults{}, {}",
-                    if supported { " without volumetric fog, particles or decals" } else { "" },
+                    "the game scene at its defaults{}{}, {}",
+                    if supported { " without volumetric fog, particles, decals or the pane's traced reflection" } else { "" },
+                    if left_out.is_empty() { String::new() } else { format!(", and without {}", left_out.join(", ")) },
                     if level.still { "every frame its first" } else { "its animation from frame 0" }
                 )
             } else { format!(
