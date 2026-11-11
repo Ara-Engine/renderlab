@@ -911,7 +911,7 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
 
 ## arrayLength of a buffer-array element on RADV (ara-gpu backend finding, 2026-11-11)
 
-**UNCONFIRMED on the wgpu renderer.** Found on the Radeon (RADV) through the ara-gpu backend. No fix until a test confirms it here.
+**CONFIRMED on the wgpu renderer** (PR #30 at 904e147, Radeon 760M, RADV, Mesa 26.0.8): first words [100, 101, 102, 103] correct, lengths [3, 3, 3, 3] against bounds [3, 13, 6, 22]. The fix is root's, after P-RELIT lands.
 
 - **Fault.** naga 30.0.1 decorates `heap[i].data[j]` NonUniform, but emits `OpArrayLength` on `heap[i].data` with no decoration (`write_runtime_array_length` never adds one). The result is then undefined when the index differs within a workgroup. RADV reads one element's length for the whole workgroup; NVIDIA reads per invocation. The backend's adapter now adds the decoration; the wgpu renderer goes through the same naga path.
 - **Why nothing has shown it.** Every mesh in the compared scenes has the same kind of index buffer.
@@ -921,6 +921,7 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
   - `src/visibility_buffer.rs:259`: the same test, composed into the visibility-buffer kernel.
   - `shaders/object_motion.wgsl:15` `motion_skinned` and `shaders/temporal_resolve.wgsl:101` `tr1_skinned`: skinned or static by the lengths of `motion_previous_vertices[batch]` and `tr1_vertices[batch]`. A workgroup covering skinned and static meshes would judge them all by one.
   - Not affected (single buffers): `object_motion.wgsl:7`, `virtual_shadow_cache.wgsl`, `reference_path_tracer.wgsl`.
+- **naga's own bounds checks share the fault (read from naga 30.0.1's source, not yet tested).** In a checked module every `heap[i].data[j]` is clamped to the array's length, and `write_sequence_length` gets that length from the same `write_runtime_array_length`. So on RADV a checked module would clamp `j` by another element's length, and no change to our WGSL removes that. Engine modules compile unchecked; modules composed from program text are checked for any non-standard program, and P-SPLIT's parked trust-policy change would check all of them. The fix therefore has two parts: carry the flags in data (below), and keep element indexing off naga's clamp on RADV until naga is fixed (test first: PR #30's probe with an index past element 0's length in a checked module).
 - **RADV-only shadow failures above.** Possibly related, not shown: both failing tests draw a receiver and a separate blocker mesh, and the sun-shadow kernels read adjacency this way. Whether those two meshes differ in index-buffer kind, and which kernel the tests run, is not traced yet.
 - **Next.**
   1. The backend's author is opening a PR with one ignored GPU test that reproduces it through wgpu (four buffers of different lengths, indexed differently within one workgroup). The Linux gate runs it on the Radeon.
