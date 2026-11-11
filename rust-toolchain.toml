@@ -1,0 +1,4 @@
+[toolchain]
+# The Rust release Ara builds with, so the Linux gate, the Mac and the PC build the same thing
+# (coordinator, 2026-11-11). Raise it together with Ara.
+channel = "1.99.1"

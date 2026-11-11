@@ -320,7 +320,7 @@ pub(super) fn receiver_paired_with(
         // Each mode gets an old/new pair, with mode and order rotating together.
         for k in 0..3 {
             let mode = (pair + k) % 3;
-            let mut identity = None;
+            let mut identity: Option<Vec<Vec<u8>>> = None;
             for j in 0..2 {
                 let baseline = (pair + j) % 2 == 0;
                 r.set_shadows(if mode == 0 { &hard } else { &soft })
@@ -393,11 +393,11 @@ pub(super) fn receiver_paired_with(
                             "candidate byte identity pose={pair} mode={mode}; differing buffers {:?}",
                             actual
                                 .iter()
-                                .zip(&expected)
+                                .zip(expected.iter())
                                 .enumerate()
                                 .filter_map(|(i, (a, b))| (a != b).then_some((
                                     i,
-                                    a.iter().zip(b).filter(|(a, b)| a != b).count()
+                                    a.iter().zip(b.iter()).filter(|(a, b)| a != b).count()
                                 )))
                                 .collect::<Vec<_>>()
                         );
