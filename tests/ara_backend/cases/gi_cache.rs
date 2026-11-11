@@ -1,4 +1,4 @@
-//! The world radiance cache's sky-visibility kernels through the adapter.
+//! The world radiance cache through the adapter, and its sky visibility in frames.
 use super::*;
 use gi_cache_reference::Table;
 use glam::DVec3;
@@ -6,7 +6,7 @@ use renderlab::{
     Camera, IndirectSettings, Light, Lighting, Mat4, MaterialDescriptor, Vec3, Vertex,
     backend_ara::{
         forward::{ForwardObject, ForwardScene, Frames, Primary, SunShadows},
-        gi_cache::{Entry, Indirect},
+        gi_cache::{Entry, Indirect, shade_program},
         kernel::Kernel,
     },
 };
@@ -14,20 +14,34 @@ use renderlab::{
 /// An entry, its workgroup size, and the inputs it adds to the three every stage takes.
 type Stage = (Entry, [u32; 3], &'static [(u32, u32)]);
 
-/// Every sky-visibility entry of the hardware-ray module reflects the interface its
-/// stage needs, emits SPIR-V that validates, and becomes a native pipeline on a
-/// ray-query device. None of them is replayed against a reference here.
+/// Every entry of the hardware-ray module, and cell shading composed with the standard
+/// program, reflects the interface its stage needs, emits SPIR-V that validates, and
+/// becomes a native pipeline on a ray-query device. Nothing is replayed here.
 #[test]
-fn sky_visibility_kernels_reflect_validate_and_compile() -> Result<()> {
+fn cache_kernels_reflect_validate_and_compile() -> Result<()> {
     let path = root("gi-cache-kernels");
     let mut gpu = GpuDevice::new(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
     // Table, work words and frame record everywhere; then what each stage adds.
-    let expected: [Stage; 9] = [
+    let expected: [Stage; 12] = [
         (
             Entry::Probe,
             [8, 8, 1],
             &[(0, 7), (0, 21), (1, 0), (1, 1), (1, 2), (1, 3), (1, 5)],
+        ),
+        (
+            Entry::Gather,
+            [64, 1, 1],
+            &[
+                (0, 33),
+                (0, 34),
+                (0, 37),
+                (1, 0),
+                (1, 1),
+                (1, 2),
+                (1, 3),
+                (1, 5),
+            ],
         ),
         (Entry::Claim, [64, 1, 1], &[]),
         (Entry::Resolve, [64, 1, 1], &[(0, 33), (0, 37)]),
@@ -58,6 +72,8 @@ fn sky_visibility_kernels_reflect_validate_and_compile() -> Result<()> {
             [64, 1, 1],
             &[(0, 37), (3, 0), (3, 6), (3, 7), (3, 9)],
         ),
+        (Entry::Filter, [64, 1, 1], &[(0, 37), (3, 0), (3, 6)]),
+        (Entry::Light, [64, 1, 1], &[(0, 34), (3, 0), (3, 1)]),
     ];
     ensure!(
         expected.map(|e| e.0) == Entry::ALL,
@@ -83,6 +99,25 @@ fn sky_visibility_kernels_reflect_validate_and_compile() -> Result<()> {
         forward_cases::validate_spirv(&program, &format!("gi-{entry:?}"))?;
         Kernel::from_program(&mut gpu, &cache, &program)?.retire(&mut gpu)?;
     }
+    // Cell shading: the work words read-only, the outgoing radiance and the draw table,
+    // then the traced shading interface (geometry, materials, lighting and the table).
+    let shade = shade_program(renderlab::STANDARD_PROGRAM, 64)?;
+    let reflected: Vec<_> = shade
+        .inputs()
+        .iter()
+        .map(|i| (i.key.group, i.key.binding))
+        .collect();
+    let groups = |group: u32| reflected.iter().filter(|k| k.0 == group).count();
+    ensure!(
+        reflected[..3] == [(0, 31), (0, 33), (0, 36)]
+            && [groups(0), groups(1), groups(2), groups(3)] == [3, 6, 7, 7]
+            && reflected.contains(&(3, 20))
+            && shade.threads()? == [64, 1, 1],
+        "cell shading interface changed: {reflected:?}"
+    );
+    shade.msl()?;
+    forward_cases::validate_spirv(&shade, "gi-ShadeCells")?;
+    Kernel::from_program(&mut gpu, &cache, &shade)?.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

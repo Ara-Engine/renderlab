@@ -509,7 +509,22 @@ pub(super) fn rewrite_globals<S: AsRef<str>>(
     }
     let mut out = String::new();
     let mut at = 0;
+    // The last character of code before `at`, whitespace and comments aside: a name
+    // is a member only when a `.` in code precedes it, not one that ends a comment.
+    let mut before = None;
     while at < body.len() {
+        let comment = if body[at..].starts_with("//") {
+            Some(body[at..].find('\n').map_or(body.len(), |n| at + n))
+        } else if body[at..].starts_with("/*") {
+            Some(body[at + 2..].find("*/").map_or(body.len(), |n| at + n + 4))
+        } else {
+            None
+        };
+        if let Some(end) = comment {
+            out.push_str(&body[at..end]);
+            at = end;
+            continue;
+        }
         let c = body[at..]
             .chars()
             .next()
@@ -522,7 +537,7 @@ pub(super) fn rewrite_globals<S: AsRef<str>>(
                 at += 1;
             }
             let word = &body[start..at];
-            let member = body[..start].trim_end().ends_with('.');
+            let member = before == Some('.');
             let declaration = body[at..].trim_start().starts_with(':');
             if !member && !declaration && globals.contains(word) {
                 out.push_str(
@@ -534,7 +549,11 @@ pub(super) fn rewrite_globals<S: AsRef<str>>(
             } else {
                 out.push_str(word);
             }
+            before = word.chars().last();
         } else {
+            if !c.is_whitespace() {
+                before = Some(c);
+            }
             out.push(c);
             at += c.len_utf8();
         }

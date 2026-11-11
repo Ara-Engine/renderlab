@@ -162,6 +162,14 @@ impl Pass {
             )
             .into(),
             Self::ShadowRaster => include_str!("../../../shaders/scene.wgsl").into(),
+            Self::GiCache(crate::backend_ara::gi_cache::Entry::ShadeCells) => {
+                crate::backend_ara::gi_cache::shade_source(
+                    crate::program::STANDARD_PROGRAM,
+                    crate::IndirectSettings::default().directions,
+                )
+                .expect("embedded cell shading composition")
+                .into()
+            }
             Self::GiCache(_) => crate::backend_ara::gi_cache::source(
                 crate::IndirectSettings::default().directions,
             )

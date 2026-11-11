@@ -32,6 +32,9 @@ pub fn rename(source: &str, globals: &BTreeSet<&str>) -> Result<String> {
     // angle brackets of `var<function>` in between.
     let mut declaring = false;
     let mut template = 0usize;
+    // The last character of code so far, whitespace and comments aside: a name is a
+    // member only when a `.` in code precedes it, not one that ends a comment.
+    let mut before = None;
     let mut at = 0;
     while at < bytes.len() {
         let c = bytes[at];
@@ -51,7 +54,8 @@ pub fn rename(source: &str, globals: &BTreeSet<&str>) -> Result<String> {
                 at += 1;
             }
             let word = &source[start..at];
-            let member = source[..start].trim_end().ends_with('.');
+            let member = before == Some(b'.');
+            before = Some(bytes[at - 1]);
             let typed = source[at..].trim_start().starts_with(':');
             if declaring && template > 0 {
                 out.push_str(word);
@@ -121,6 +125,9 @@ pub fn rename(source: &str, globals: &BTreeSet<&str>) -> Result<String> {
                 _ => {}
             }
             let width = source[at..].chars().next().map_or(1, char::len_utf8);
+            if !c.is_ascii_whitespace() {
+                before = Some(c);
+            }
             // Anything but space or a template list between the keyword and a name
             // means this was not a declaration after all.
             if declaring && template == 0 && !c.is_ascii_whitespace() && c != b'>' {

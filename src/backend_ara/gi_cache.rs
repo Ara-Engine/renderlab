@@ -19,11 +19,14 @@ use crate::renderer::gi_cache::{
 use anyhow::{Context, Result, ensure};
 use ara_gpu::{Access, GpuDevice, Resource, commands::Command, commands::Recorder};
 
-/// The sky-visibility entries, in `GiState::encode` order.
+/// The cache's entries, in `GiState::encode` order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Entry {
     /// Visible pixels look their cells up and request the missing ones.
     Probe,
+    /// Bounce: queued cells gather last frame's outgoing radiance along their blocked
+    /// directions, and may request the cells their rays hit.
+    Gather,
     /// One round of `atomicMax` claims for requested cells.
     Claim,
     /// The winner of each claim writes its cell; losers retry next round.
@@ -40,11 +43,20 @@ pub enum Entry {
     Finish,
     /// The occluded sky as fixed-weight L2 SH per cell.
     Integrate,
+    /// The cell-space filter over the frame's written values.
+    Filter,
+    /// Bounce: light visibility at the query points of the cells to shade.
+    Light,
+    /// Bounce: the material program shades the queued cells' query points. Composed
+    /// with a program ([`shade_program`]), not part of the kernel module.
+    ShadeCells,
 }
 impl Entry {
-    /// Every sky-visibility entry, in encode order.
-    pub const ALL: [Self; 9] = [
+    /// The kernel module's entries, in encode order: sky visibility is these without
+    /// `Gather`, `Filter` and `Light`.
+    pub const ALL: [Self; 12] = [
         Self::Probe,
+        Self::Gather,
         Self::Claim,
         Self::Resolve,
         Self::ResolveLast,
@@ -53,10 +65,16 @@ impl Entry {
         Self::Rays,
         Self::Finish,
         Self::Integrate,
+        Self::Filter,
+        Self::Light,
     ];
     pub(crate) fn name(self) -> &'static str {
         match self {
             Self::Probe => "gi_probe",
+            Self::Gather => "gi_gather",
+            Self::Filter => "gi_filter",
+            Self::Light => "gi_light",
+            Self::ShadeCells => "gi_shade_cells",
             Self::Claim => "gi_claim",
             Self::Resolve => "gi_resolve",
             Self::ResolveLast => "gi_resolve_last",
@@ -74,8 +92,39 @@ impl Entry {
     }
     /// The same for `directions` fixed directions per cell (64 or 128).
     pub fn program_for(self, directions: u32) -> Result<Program> {
+        ensure!(
+            self != Self::ShadeCells,
+            "cell shading is composed with a material program"
+        );
         Program::new(Pass::GiCache(self), source(directions)?)
     }
+}
+
+/// `gi_shade_cells` for `material`, composed as `Renderer::gi_shade_pipeline` composes
+/// it on a hardware-ray renderer: the soft shading head, the cell stage, and the
+/// direction count the kernels' cold layout uses.
+pub fn shade_program(material: &str, directions: u32) -> Result<Program> {
+    Program::new(
+        Pass::GiCache(Entry::ShadeCells),
+        shade_source(material, directions)?,
+    )
+}
+pub(crate) fn shade_source(material: &str, directions: u32) -> Result<String> {
+    let [_, head] =
+        crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
+    let composed = crate::program::compose(
+        &head,
+        material,
+        crate::program::Stage::Cell,
+        crate::program::declares_parameters(material),
+    )
+    .source;
+    let line = "const GI_DIRECTIONS:u32=64u;";
+    ensure!(
+        composed.matches(line).count() == 1,
+        "cell shading's direction count seam changed"
+    );
+    Ok(composed.replace(line, &format!("const GI_DIRECTIONS:u32={directions}u;")))
 }
 
 /// `gi_cache::kernel_source` for hardware rays, with its one hit-position intrinsic

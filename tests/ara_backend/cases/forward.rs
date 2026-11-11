@@ -640,7 +640,12 @@ fn block() -> f32 {
     }
     return before + camera.exposure;
 }
-fn later() -> f32 { let camera = 1.0; return camera; }
+fn later() -> f32 {
+    var camera = 1.0;
+    // A comment that ends with a period.
+    camera = 2.0;
+    return camera;
+}
 ";
     let expected = "\
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -657,7 +662,12 @@ fn block() -> f32 {
     }
     return before + camera.exposure;
 }
-fn later() -> f32 { let camera_ara_local = 1.0; return camera_ara_local; }
+fn later() -> f32 {
+    var camera_ara_local = 1.0;
+    // A comment that ends with a period.
+    camera_ara_local = 2.0;
+    return camera_ara_local;
+}
 ";
     let renamed = rename(source, &globals)?;
     ensure!(renamed == expected, "unexpected rename:\n{renamed}");
