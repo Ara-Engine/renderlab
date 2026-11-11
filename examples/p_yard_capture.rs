@@ -8,6 +8,9 @@
 //! `capture` writes each `capture` frame's post-reconstruction HDR (the Tonemap input, as
 //! Unreal's native decode) as raw RGBA f16 `hdr-NNNN.bin`; `timing` reads nothing back.
 //! Both write `engine.json` with every frame's GPU render span.
+#[path = "../support/estimator_diag.rs"]
+#[allow(dead_code)]
+mod diag;
 #[path = "../tools/p-still/count.rs"]
 mod p_still;
 use renderlab::{asset, engine::*};
@@ -291,6 +294,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         angular_radius: sun.angular_radius,
     }))?;
     flicker_knobs(&mut engine)?;
+    // N-VSM1: the example scenes' estimator switches (`RENDERLAB_DIAG=vsm-lookup=map;...`),
+    // measurement only; unset changes nothing.
+    if let Ok(keys) = env::var("RENDERLAB_DIAG") {
+        let keys: Vec<(String, String)> = keys
+            .split(';')
+            .filter_map(|k| k.split_once('='))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        diag::Diag::parse(&keys)?.apply(&mut engine, render_path, RenderScale::Native)?;
+    }
     let ready_ms = begin.elapsed().as_secs_f64() * 1e3;
     let mut counts = p_still::Counts::start(&mut engine);
     let mut rows = Vec::new();
@@ -361,7 +374,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "engine":"renderlab","scene":name,"path":path,"mode":mode,"size":spec.size,
             "adapter":engine.adapter_info().name,"debug_build":cfg!(debug_assertions),
             "scene_ready_ms":ready_ms,"settings":format!("{:?}",engine.settings()),
-            "sky":format!("{:?}",engine.sky()),"hdr":hdr_info,"frames":rows,"gpu":gpu,"counts":counts.map(p_still::Counts::finish),
+            "sky":format!("{:?}",engine.sky()),
+            "virtual_shadows":format!("{:?}",engine.renderer().virtual_shadow_stats()),"hdr":hdr_info,"frames":rows,"gpu":gpu,"counts":counts.map(p_still::Counts::finish),
             "timing_scope":"GPU render span: first pass to present end, GPU timestamps; one frame in flight",
         }))?,
     )?;

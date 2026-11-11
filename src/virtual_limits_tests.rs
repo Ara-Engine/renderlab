@@ -127,6 +127,7 @@ fn gpu_non_rt_requested_limit_pipelines() {
         VirtualLookup::Exact,
         VirtualLookup::Map,
         VirtualLookup::Hybrid,
+        VirtualLookup::Disk,
         VirtualLookup::Surface,
     ] {
         r.set_virtual_shadow_settings(VirtualShadowSettings {

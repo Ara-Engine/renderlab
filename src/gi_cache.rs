@@ -48,7 +48,7 @@ pub(crate) const RAY_ITEMS: u32 = 1 << 21;
 const PROFILE_STAMPS: u32 = 2 * (10 + 2 * CLAIM_ROUNDS);
 /// Gather workgroups (one cell each) and light workgroups (64 cells), fixed grids like the
 /// others.
-const GATHER_GROUPS: u32 = 4096;
+pub(crate) const GATHER_GROUPS: u32 = 4096;
 /// The default per-frame gather budget (`IndirectSettings::gather_cells` 0), in cells, on both
 /// paths. G2b sized per-path budgets to about 4 ms of a cut frame's gathers (0.13 us a cell with hardware rays and
 /// 0.4 us with software rays on the quarry; docs/m7-g2b.md). Moving frames gather fewer
@@ -66,10 +66,10 @@ const CLAIM_CELLS_SOFTWARE: u32 = 20480;
 /// the cells cover the view within the claim budget, and the finer cells that follow fall back
 /// to them until they exist (G2b).
 const COARSE_CUT_FRAMES: u32 = 4;
-const LIGHT_GROUPS: u32 = 1024;
+pub(crate) const LIGHT_GROUPS: u32 = 1024;
 /// The cell-space filter's fixed grid (G3): nine items (a changed cell and its eight
 /// neighbours) per cell shading queue entry.
-const FILTER_GROUPS: u32 = 1024;
+pub(crate) const FILTER_GROUPS: u32 = 1024;
 /// Unfiltered hot words 1-22 per slot, the filter's sources (shaders/gi_cache.wgsl gi_raw).
 const RAW_WORDS: u64 = 22;
 /// Slot groups a lighting, environment or caster change spreads relighting over while it
@@ -1364,7 +1364,7 @@ impl GiState {
 
 /// The kernel module: built-in prelude, primary ray helpers, cell definitions, one ray
 /// source and the kernels.
-pub(super) fn kernel_source(software: bool, directions: u32) -> String {
+pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
     let enables = if software {
         "enable wgpu_binding_array;\n"
     } else {
@@ -2899,7 +2899,7 @@ impl Renderer {
 // ---- MP1 per-program cell shading (docs/m7-mp1.md) ----
 /// The draw table's cell-program word for a reflecting program `id` of a mixed frame; 0
 /// marks draws whose program reflects nothing.
-fn cell_selector(id: u64) -> u32 {
+pub(crate) fn cell_selector(id: u64) -> u32 {
     u32::try_from(id + 1).expect("program ids fit the cell selector")
 }
 const CELL_PLACEMENT_SEAM: &str = "    if p==0xffffffffu { return vec4<f32>(0.0,0.0,0.0,1.0); }\n";
@@ -2907,7 +2907,7 @@ const CELL_STORE_SEAM: &str = "        gi_shade_out[slot]=gs_shade(slot);\n";
 /// A mixed frame's cell entry for program `id`: it shades only cells whose draw selects
 /// it, writes "reflects nothing" for draws whose program has no cell shading (every
 /// program's dispatch writes the same value), and leaves other programs' cells to theirs.
-fn mixed_cell_entry(source: &str, id: u64) -> String {
+pub(crate) fn mixed_cell_entry(source: &str, id: u64) -> String {
     assert_eq!(source.matches(CELL_PLACEMENT_SEAM).count(), 1);
     assert_eq!(source.matches(CELL_STORE_SEAM).count(), 1);
     let check = format!(

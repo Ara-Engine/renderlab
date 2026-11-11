@@ -239,7 +239,7 @@ fn gpu_object_motion() {
             r.test_drain("MV1 fixture frame");
             if frame > 0 {
                 assert!(
-                    !r.reconstruction_state.as_ref().unwrap().reset,
+                    !r.reconstruction_state.as_ref().unwrap().plan.reset,
                     "rigid motion reset TR1"
                 );
             }
@@ -434,7 +434,7 @@ fn gpu_object_motion() {
         &mut [Draw::new(&mesh, &mut instances)],
     );
     r.test_drain("MV1 resume after diagnostic view");
-    assert!(r.reconstruction_state.as_ref().unwrap().reset);
+    assert!(r.reconstruction_state.as_ref().unwrap().plan.reset);
     let max_resumed = words(&r, r.post.as_ref().unwrap().test_surface())
         .iter()
         .map(|v| glam::Vec2::new(f32::from_bits(v[0]), f32::from_bits(v[1])).length())

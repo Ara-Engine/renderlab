@@ -14,7 +14,7 @@ Unit P-SHOW2, milestone 8 ([milestone-8.md](milestone-8.md)), 2026-11-10, branch
 | 3. Glossy at a lower rate | **NOT RUN** (time box, re-prioritized) | | |
 | 4. Aluminium ball | **cause found (both sides); Renderlab half built, not screened** | | |
 
-The main score is Showcase on the RTX 4070 SUPER at 1080p, Ara release build (Ara `ede758f7a`, the integration thread's Sky::Map bridge, patched to this tree). Its constant-sky switch `ARA_RENDERLAB_SKY=constant` gives the like-for-like rows. All rows are single captures (`ara capture --stability 60`: 16 settle frames, then the median of 60 live GPU samples) in leases `pshow2-e` (main's behaviour, through screen switches) and `pshow2-h` (the head, the careful restart), on a shared machine. The Ara span is `GpuSample::render_span`, and "timeline" is section 1's span.
+The main score is Showcase on the RTX 4070 SUPER at 1080p, Ara release build (Ara `eb20a48b5`, the integration thread's Sky::Map bridge, patched to this tree). Its constant-sky switch `ARA_RENDERLAB_SKY=constant` gives the like-for-like rows. All rows are single captures (`ara capture --stability 60`: 16 settle frames, then the median of 60 live GPU samples) in leases `pshow2-e` (main's behaviour, through screen switches) and `pshow2-h` (the head, the careful restart), on a shared machine. The Ara span is `GpuSample::render_span`, and "timeline" is section 1's span.
 
 ## 1. Per-pass GPU timeline (step 1, MERGE)
 
@@ -131,7 +131,7 @@ The map's cost is reflection rays' environment lookups: about 14 ms on misses an
 
 **Which side it's on (C, M).** Both, and not in the material mapping.
 - **The material is a plain rough metal.** `ball_aluminium` is `Material::flat("brushed aluminium", [0.91, 0.92, 0.92], 0.42, 1.0)` (Ara `crates/ara-samples/src/build/showcase.rs`). It has no anisotropy and no texture; "brushed" is only its name. The bridge (`scene.rs`, `material`) carries base colour, metallic and roughness through unchanged, so anisotropic GGX is not the missing feature.
-- **Bridge: the sky (C, A).** Before `ede758f7a` the bridge drew Showcase's gradient sky as `Sky::Uniform` at its mean radiance, so a 0.42 metal had no horizon to reflect. Ara's ball shows a floor/sky horizon; ours was uniform (`crops/pre-alu.png`: the integration thread's release captures, Ara Epic, Renderlab RT and non-RT, x4). Correction to my first message to that thread: Showcase's player sky is a gradient, not the studio HDRI; the HDRI is only used by `ara-samples`' own capture tool (A). The bridge now passes it as `Sky::Map`, and section 3 is the cost that exposed.
+- **Bridge: the sky (C, A).** Before `eb20a48b5` the bridge drew Showcase's gradient sky as `Sky::Uniform` at its mean radiance, so a 0.42 metal had no horizon to reflect. Ara's ball shows a floor/sky horizon; ours was uniform (`crops/pre-alu.png`: the integration thread's release captures, Ara Epic, Renderlab RT and non-RT, x4). Correction to my first message to that thread: Showcase's player sky is a gradient, not the studio HDRI; the HDRI is only used by `ara-samples`' own capture tool (A). The bridge now passes it as `Sky::Map`, and section 3 is the cost that exposed.
 - **Renderlab: the untraced half of a rough lobe sees the sky about the normal (C).**
   - Roughness 0.42 sits in the fade band, traced fully to 0.35 and untraced from 0.5, so 53 % of its lobe is traced.
   - The untraced half is `indirect_radiance(reflected, roughness)`: the sky's prefiltered radiance about the reflection, times `es_visibility`, plus the cache's bounce about the reflection.
@@ -161,7 +161,7 @@ None of this unit's commits move the quarry; the quarry has no skinned mesh and 
 
 - **Hardware:** RTX 4070 SUPER (12,282 MiB), NVIDIA 617.14, Ryzen 7 7800X3D, Windows 11; shared machine (Ara units building and capturing between leases; the integration thread's captures ran just before ours).
 - **Build identity:**
-  - Showcase screens: Ara `ede758f7a` (detached worktree, `renderlab` patched to this tree) built at this branch plus the screen commits (`t3/p-show2-screens` `91bf40d` plus the miss-lookup switch), release, 275 s.
+  - Showcase screens: Ara `eb20a48b5` (detached worktree, `renderlab` patched to this tree) built at this branch plus the screen commits (`t3/p-show2-screens` `91bf40d` plus the miss-lookup switch), release, 275 s.
   - Head `374265f` (careful restart): one build session of Ara release, the lib test binary (release) and `p_yard_capture` (release), 743 s, at 20 GiB free.
   - Lease E's main-behaviour rows come from the screen binary with every switch unset. The switches only rewrite shader text, or bypass a branch, when set.
 - **Builds:** build slot plus stillkit mutex, two jobs, one at a time:

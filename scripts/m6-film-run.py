@@ -190,9 +190,19 @@ def main():
     if RUNTIME_MEMORY_MBYTES is not None:
         a.runtime_memory_mbytes = RUNTIME_MEMORY_MBYTES
     global WATCH_CHILD_MBYTES
+    global WATCH_FREE_MBYTES
     if a.quarry_lease:
         WATCH_CHILD_MBYTES = QUARRY_CHILD_MBYTES
         preflight_floor = max(preflight_floor, QUARRY_PREFLIGHT_MBYTES)
+        # An owner-granted quarry window (coordinator relays his word): RENDERLAB_QUARRY_WINDOW_MB
+        # = "START,FLOOR" lowers the start bar and the machine floor for this one lease. The only
+        # way below the defaults, never below 12 GiB to start or 4 GiB free; the child cap stays.
+        window = os.environ.get("RENDERLAB_QUARRY_WINDOW_MB")
+        if window:
+            start, floor = (float(x) for x in window.split(","))
+            preflight_floor = max(12288.0, start)
+            WATCH_FREE_MBYTES = max(4096.0, floor)
+            print(f"quarry window: start bar {preflight_floor:g} MiB, machine floor {WATCH_FREE_MBYTES:g} MiB", flush=True)
     print(f"memory watchdog: child cap {WATCH_CHILD_MBYTES:g} MiB, machine floor {WATCH_FREE_MBYTES:g} MiB"
           f"{' (quarry lease)' if a.quarry_lease else ''}", flush=True)
     if not 0 < a.minutes <= 45:

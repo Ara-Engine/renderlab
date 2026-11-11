@@ -102,9 +102,69 @@ pub(crate) fn placement_table(
     Ok(table)
 }
 
+/// Bit 31 of a draw's batch word: its previous-vertex stream is a skinned one.
+pub(crate) const BATCH_SKINNED: u32 = 1 << 31;
+/// Bit 30 of a draw's batch word: its index buffer carries the adjacency suffix.
+pub(crate) const BATCH_ADJACENT: u32 = 1 << 30;
+/// One draw's geometry facts for the shaders (`primary_batch_info`): the triangle count,
+/// `BATCH_ADJACENT` for an index buffer of 6T + 1 words (receiver_adjacency.rs) rather than
+/// 3T, and `BATCH_SKINNED`. The shaders once read these from `arrayLength` of the draw's
+/// element of a buffer binding array, which a driver may answer for another element.
+pub(crate) fn batch_word(index_words: u64, skinned: bool) -> u32 {
+    let adjacent = index_words % 3 == 1;
+    let triangles = if adjacent {
+        (index_words - 1) / 6
+    } else {
+        index_words / 3
+    };
+    debug_assert!(triangles < u64::from(BATCH_ADJACENT));
+    triangles as u32
+        | if adjacent { BATCH_ADJACENT } else { 0 }
+        | if skinned { BATCH_SKINNED } else { 0 }
+}
+/// The placement buffer's words: `placements` (one zero word for an empty frame), then
+/// `TRACED_DRAWS` batch words counted back from the end, draw 0 last, so a shader finds
+/// draw `b` at `arrayLength - 1 - b` whatever the placement count.
+pub(crate) fn placement_words(placements: &[u32], batches: &[u32]) -> Vec<u32> {
+    let mut words = placements.to_vec();
+    words.resize(placements.len().max(1) + TRACED_DRAWS as usize, 0);
+    let end = words.len();
+    for (batch, &word) in batches.iter().enumerate() {
+        words[end - 1 - batch] = word;
+    }
+    words
+}
+/// The shaders' reader of the batch words, cut from a shader file that carries it.
+#[cfg(test)]
+pub(crate) fn batch_info_source(shader: &'static str) -> &'static str {
+    let (_, rest) = shader.split_once("// renderlab: batch info begin").unwrap();
+    rest.split_once("// renderlab: batch info end").unwrap().0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn batch_words_follow_the_buffers_and_sit_at_the_end() {
+        // 4 triangles: 12 words without adjacency, 25 with.
+        assert_eq!(batch_word(12, false), 4);
+        assert_eq!(batch_word(25, false), 4 | BATCH_ADJACENT);
+        assert_eq!(batch_word(12, true), 4 | BATCH_SKINNED);
+        assert_eq!(batch_word(0, false), 0);
+        let words = placement_words(&[7, 8, 9], &[11, 12]);
+        assert_eq!(words.len(), 3 + TRACED_DRAWS as usize);
+        assert_eq!(words[..3], [7, 8, 9]);
+        assert_eq!(words[words.len() - 1], 11);
+        assert_eq!(words[words.len() - 2], 12);
+        assert_eq!(placement_words(&[], &[]).len(), 1 + TRACED_DRAWS as usize);
+    }
+    #[test]
+    fn both_shader_copies_of_the_batch_reader_are_one_text() {
+        assert_eq!(
+            batch_info_source(include_str!("../shaders/primary_rays.wgsl")),
+            batch_info_source(include_str!("../shaders/virtual_shadow.wgsl"))
+        );
+    }
     #[test]
     fn visibility_and_traced_limits_include_virtual_lighting() {
         let limits = visibility_limits(wgpu::Limits::default());

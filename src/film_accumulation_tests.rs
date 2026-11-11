@@ -76,6 +76,7 @@ pub(crate) fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualSh
         Some("map") => crate::VirtualLookup::Map,
         Some("hybrid") => crate::VirtualLookup::Hybrid,
         Some("surface") => crate::VirtualLookup::Surface,
+        Some("disk") => crate::VirtualLookup::Disk,
         _ => s.lookup,
     };
     Some(s)
@@ -110,6 +111,7 @@ fn virtual_manifest_lookup_defaults_and_overrides() {
     for (name, lookup) in [
         ("exact", crate::VirtualLookup::Exact),
         ("surface", crate::VirtualLookup::Surface),
+        ("disk", crate::VirtualLookup::Disk),
     ] {
         let manifest = serde_json::json!({"virtual": {"lookup": name}});
         assert_eq!(virtual_settings(&manifest).unwrap().lookup, lookup);

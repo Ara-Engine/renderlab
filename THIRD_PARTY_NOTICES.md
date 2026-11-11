@@ -2,7 +2,7 @@
 
 PP1's optional filmic tone curve uses Krzysztof Narkowicz's five-constant ACES-like fit from [ACES Filmic Tone Mapping Curve (2016)](https://knarkowicz.wordpress.com/2016/01/06/aces-filmic-tone-mapping-curve/), offered by its author under CC0 or MIT; CC0 is selected. It is a curve approximation, not the ACES colour-management implementation. The bloom, depth-of-field and motion filters are original implementations from the cited papers/talks in `docs/m7-pp1.md`; no third-party filter source was copied.
 
-Renderlab's project license remains undecided. These notices cover dependencies and the attributed tone curve above. The self-authored fixture generator introduces no third-party artwork.
+Renderlab is licensed under MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`). These notices cover dependencies and the attributed tone curve above. The self-authored fixture generator introduces no third-party artwork.
 
 SK1 additionally uses the externally downloaded **Fox** test model and animations.
 Their CC0/CC BY 4.0 attribution, pinned source and modification notice are in

@@ -8,7 +8,7 @@ The immediate motivation is unacceptable iteration speed in the large engine. Tr
 
 Islam additionally requires development policy limits to be configurable or explicitly disableable where valid. Small source-file, texture, metadata and streaming-work defaults must not become permanent product ceilings. Expose effective limits through the library and relevant tools, while preserving structural validation, checked arithmetic, format constraints and device limits. This is implemented through typed library limits and an optional shared tooling limits file; see [limits.md](limits.md). Keep registered test budgets unchanged so prior evidence remains comparable. Removing a policy cap does not establish large-asset scalability; that still requires measurement.
 
-The public name is undecided; Renderlab is a reversible working name. The public repository is https://github.com/Ara-Engine/renderlab. The license remains undecided. See milestone-0.md for the completed development environment and project-handoff.md for the current scope.
+The public name is undecided; Renderlab is a reversible working name. The public repository is https://github.com/Ara-Engine/renderlab. The license is MIT OR Apache-2.0 (2026-11-11). See milestone-0.md for the completed development environment and project-handoff.md for the current scope.
 
 ## Long-term quality and performance target
 
@@ -67,7 +67,7 @@ Research is copied into `docs/research/industry-rendering-costs.md`. It contains
 Local evidence, consult on demand:
 
 - Ara checkout: `C:/Users/snowy/.t3/worktrees/snengine/t3-9c4a1f92`
-- Final saved campaign commit reported by coordinator: `1e714c2b5` on `t3/render-v3`
+- Final saved campaign commit reported by coordinator: `92512c829` on `t3/render-v3`
 - Original architecture: `D:/AraBuild/render-research/council-v3/FINAL-architecture.md`
 - Results: `D:/AraBuild/render-v3/gates/G1` through `G6`, especially `B*-RESULT.md`
 - B3 report: `D:/AraBuild/render-v3/B3-report.md`
