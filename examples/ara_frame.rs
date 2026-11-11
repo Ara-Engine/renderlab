@@ -780,6 +780,7 @@ fn ara_frame(
                     anisotropy_clamp: ANISOTROPY,
                 }),
                 local_shadows: level.local_shadows.then(renderlab::LocalShadows::default),
+                transparent: &[],
             },
         )?;
         // The planner budgets shadow rays on every reconstructed frame; only the

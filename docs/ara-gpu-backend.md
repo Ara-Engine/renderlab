@@ -2087,3 +2087,46 @@ through the crate, so the layout is checked from both sides. The adapter's `NonU
 repair stays: other kernels still take lengths of heap elements, and an undecorated one
 is undefined whoever reads it.
 
+## Transparent panes on the traced frame
+
+`ForwardScene::transparent` draws panes as `Renderer::encode_transparency` does on a
+ray-traced renderer, after opaque shading and the resolve and before post. Opaque view
+depth comes from the hit records (`tp_depth_hits`, already ported). Then each pane, far
+to near by the centre of its world bounds along the view's forward axis: the HDR target
+is copied behind it, a four-sample target is seeded from that copy, the pane draws
+into it, and it resolves back into the HDR target. The renderer reseeds for every pane
+and so does the frame; the earlier stand-alone glass replay seeds once and keeps the
+samples, which is the same picture for panes with nothing drawn between them.
+
+The pane's program is the standard program composed by the renderer's own
+`glass_source` on the hardware head (`transparency_glass::traced_program`). Its
+fragment stage traces the pane's own sun ray against the frame's scene, the first
+fragment-stage ray query the backend has compiled or run; it took no adapter change.
+The frame block and the sun-map fit are the renderer's own functions (Renderlab #32).
+The camera is the unjittered one. A frame below native scale skips the panes, as the
+renderer does.
+
+`a_pane_passes_what_its_coverage_fresnel_and_tint_leave` measures what a pane passes
+without modelling its lighting: a pane's light is its own shading plus `T` times the
+colour behind it, so two frames with different floors behind the same pane differ by
+`T` times the two bare floors' difference.
+
+- Inside a pane, on 1,764 pixels, `T` is within 0.002 of (1 - coverage) x (1 -
+  Schlick's Fresnel reflectance at the pixel's view angle) x tint, in each channel.
+- Outside every pane the frame is the bare floor's, bit for bit.
+- On 176 edge pixels the four coverage samples leave whole quarters of the pane.
+- With a second, different pane under half of the first: the floor's light passes
+  both (544 pixels), and the frame there is the near pane alone plus its `T` times what
+  the far pane alone adds to the floor, within 0.0005, in either submission order. The
+  other draw order would be 0.21 away, and with the sort removed the test fails by
+  exactly that.
+- The mesh pass refuses panes.
+
+**Short of the renderer, by design of this step:** on a ray-traced frame the renderer
+also traces a reflection for panes whose program declares a lobe (the standard one
+does), with a three-attachment lobe pass and `tp_reflect`; neither is ported, and the
+frame block tells the shader so. Coloured sun transmission (a pane's tinted shadow on
+opaque surfaces) is not assembled: panes are not in the scene and cast nothing.
+Particles and emitters are not assembled. **Not compared with wgpu**, and with the
+reflection missing a comparison of a pane is expected to differ.
+

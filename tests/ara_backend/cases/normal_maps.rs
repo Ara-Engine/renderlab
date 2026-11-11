@@ -125,6 +125,7 @@ fn a_normal_mapped_floor_is_the_floor_tilted_to_that_normal() -> Result<()> {
                     anisotropy_clamp: 16,
                 }),
                 local_shadows: None,
+                transparent: &[],
             },
         )?;
         Ok(images

@@ -110,6 +110,7 @@ impl Scene {
             reflections: None,
             textures: None,
             local_shadows,
+            transparent: &[],
         }
     }
     fn objects(&self) -> [ForwardObject<'_>; 2] {

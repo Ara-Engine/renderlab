@@ -42,11 +42,14 @@ use super::{
     temporal::{History, Reconstruct},
     toon::{MeshAttachments, ToonDraw, ToonPass},
     transfer,
+    transparency_glass::{self, Glass},
+    transparency_seed::{MsaaColor, Seed},
     volumes::VolumePasses,
 };
 use crate::{
     light_cluster as lc, lighting::PackedLighting,
     renderer::primary_ray_gpu::temporal_reconstruction as tr, renderer::shadow_gpu,
+    renderer::transparency_gpu as tp,
 };
 use anyhow::{Context, Result, bail, ensure};
 use ara_gpu::{
@@ -147,6 +150,14 @@ pub struct ForwardScene<'a> {
     /// light with a source radius). `None` is a count of zero: local lights unshadowed.
     /// The map path of untraced frames is not assembled.
     pub local_shadows: Option<crate::LocalShadows>,
+    /// Transparent panes, on traced frames only: each object's material carries a
+    /// `Transparency`. Drawn after opaque shading and the resolve, far to near, each
+    /// over the colour behind it on four coverage samples, with its sun visibility a
+    /// ray its own fragments trace (`Renderer::encode_transparency` on a ray-traced
+    /// renderer). Short of the renderer in three ways, each stated where it applies:
+    /// no traced reflection in a pane, no tinted shadow of a pane on opaque surfaces,
+    /// and no particles. A frame below native scale skips them, as the renderer does.
+    pub transparent: &'a [ForwardObject<'a>],
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -238,6 +249,8 @@ struct Deferred {
     /// Hit records, one tile flag per trace group, and receiver precision.
     hit: Texture,
     tiles: Texture,
+    /// `scene_pixels`: the rectangle camera rays can reach a placement in.
+    scene: [u32; 4],
     epsilon: Texture,
     frame: StorageBuffer,
     region: StorageBuffer,
@@ -252,6 +265,59 @@ struct Deferred {
     repairs: Option<StorageBuffer>,
     /// Dispatch groups of the trace, the estimator and the shading.
     groups: [[u32; 2]; 3],
+}
+
+/// One transparent pane's own resources.
+struct Pane {
+    /// The colour behind it: the HDR target copied before it draws.
+    behind: Texture,
+    geometry: MeshGeometry,
+    material: StorageBuffer,
+    /// `TpDraw`: the thin slab's thickness.
+    slot: StorageBuffer,
+}
+/// What a traced frame's transparent panes add: `encode_transparency`'s targets,
+/// records and pipelines.
+struct Panes {
+    hit_depth: Kernel,
+    seed: Seed,
+    glass: Glass,
+    program: Program,
+    target: MsaaColor,
+    /// The pass's camera block and `TpFrame`, from the unjittered camera.
+    camera: StorageBuffer,
+    frame: StorageBuffer,
+    /// Opaque view depth from the hit records, `R32Float`.
+    depth: Texture,
+    /// The traced reflection no pass writes yet (the frame block says so), and the
+    /// material textures' 1x1 defaults.
+    reflected: Texture,
+    defaults: [Texture; 3],
+    /// Far to near.
+    panes: Vec<Pane>,
+}
+impl Panes {
+    fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
+        self.hit_depth.retire(gpu)?;
+        self.seed.retire(gpu)?;
+        self.glass.retire(gpu)?;
+        self.target.retire(gpu, graph)?;
+        self.camera.retire(gpu)?;
+        self.frame.retire(gpu)?;
+        for pane in self.panes {
+            pane.geometry.retire(gpu, graph)?;
+            pane.material.retire(gpu)?;
+            pane.slot.retire(gpu)?;
+            gpu.retire(Resource::Image(pane.behind.image))?;
+        }
+        for image in [self.depth, self.reflected]
+            .into_iter()
+            .chain(self.defaults)
+        {
+            gpu.retire(Resource::Image(image.image))?;
+        }
+        Ok(())
+    }
 }
 
 /// The per-draw arrays of a traced frame, padded to `TRACED_DRAWS`.
@@ -616,6 +682,17 @@ fn frame(
         Some(r) => r.settings.scale.internal_size(target[0], target[1]),
         None => target,
     };
+    ensure!(
+        scene.transparent.is_empty() || deferred_path,
+        "transparent panes are assembled on traced frames only"
+    );
+    ensure!(
+        scene
+            .transparent
+            .iter()
+            .all(|o| o.material.transparency.is_some()),
+        "a transparent pane's material carries a Transparency"
+    );
     // Each object's normal map, by object index.
     let normal_map = |index: usize| scene.textures.and_then(|t| t.objects.get(index)?.normal);
     for (index, object) in scene.objects.iter().enumerate() {
@@ -1314,6 +1391,7 @@ fn frame(
             trace_program,
             fresh_program,
             hit: Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
+            scene: rect,
             tiles: Texture::new(gpu, trace_groups, Format::R32Uint, true, false)?,
             epsilon: Texture::new(gpu, size, Format::R32Float, true, false)?,
             frame,
@@ -1893,6 +1971,203 @@ fn frame(
         )?;
     }
     drop(draws);
+    // TP1/TP2 (`encode_transparency`): opaque depth from the hit records, then each pane
+    // far to near: the HDR target copied behind it, a four-sample target seeded from
+    // that copy, the pane, and the resolve back into the HDR target.
+    let panes = match (deferred.as_ref(), upscaled.as_ref()) {
+        (Some(deferred), None) if !scene.transparent.is_empty() => {
+            let world = |object: &ForwardObject<'_>| -> Result<(crate::Vec3, crate::Vec3)> {
+                let local = crate::visibility::Aabb::from_positions(
+                    object.vertices.iter().map(|v| v.position),
+                )
+                .context("a transparent pane without vertices")?;
+                let b = shadow_gpu::world_bounds(local, object.transform)?;
+                Ok((b.min, b.max))
+            };
+            let receivers = scene
+                .transparent
+                .iter()
+                .map(world)
+                .collect::<Result<Vec<_>>>()?;
+            let casters: Vec<_> = bounds.iter().map(|b| (b.min, b.max)).collect();
+            let sun = scene.lighting.lights.iter().find_map(|l| match l {
+                crate::Light::Directional { travel, lux } => Some((travel.normalize(), *lux)),
+                _ => None,
+            });
+            let fit = sun.and_then(|(travel, _)| tp::shadow_fit(travel, &receivers, &casters));
+            // The unjittered camera, as `Renderer::transparency.camera`.
+            let block = tp::frame_block(&tp::FrameInputs {
+                camera: scene.camera,
+                size,
+                sun,
+                fit,
+                step: 1.0 / 60.0,
+                // The reflection lobe pass and `tp_reflect` are not assembled.
+                reflect: false,
+                scene: deferred.scene,
+            });
+            let mut camera_block = [0u8; 80];
+            camera_block[..64].copy_from_slice(&crate::mesh::matrix_bytes(
+                scene.camera.matrix(size[0], size[1]),
+            ));
+            camera_block[64..68].copy_from_slice(&(crate::ViewMode::Lit as u32).to_ne_bytes());
+            let camera = StorageBuffer::new(gpu, &camera_block)?;
+            let frame = StorageBuffer::new(gpu, &block)?;
+            for buffer in [&camera, &frame] {
+                graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+            }
+            // The traced reflection's stand-in, and `Renderer::new_configured`'s material
+            // defaults: white base colour and metallic-roughness, a flat normal in a
+            // one-layer array.
+            let reflected = Texture::new(gpu, [1, 1], Format::Rgba16Float, false, false)?;
+            let defaults = [
+                Texture::new(gpu, [1, 1], Format::Rgba8Srgb, false, false)?,
+                Texture::new(gpu, [1, 1], Format::Rgba8, false, false)?,
+                Texture::array(gpu, [1, 1], 1, Format::Rgba8, false, false)?,
+            ];
+            for (image, bytes) in [
+                (&reflected, &[0u8; 8][..]),
+                (&defaults[0], &[255; 4]),
+                (&defaults[1], &[255; 4]),
+                (&defaults[2], &[128, 128, 255, 255]),
+            ] {
+                staging.push(transfer::upload(
+                    gpu,
+                    &mut graph,
+                    &mut rec,
+                    image.image,
+                    bytes,
+                )?);
+            }
+            // Far to near along the view's forward axis, by world bounds centre.
+            let inverse_view = scene.camera.view().inverse();
+            let (eye, forward) = (
+                inverse_view.w_axis.truncate(),
+                -inverse_view.z_axis.truncate().normalize(),
+            );
+            let mut order: Vec<usize> = (0..scene.transparent.len()).collect();
+            let distance = |i: usize| ((receivers[i].0 + receivers[i].1) * 0.5 - eye).dot(forward);
+            order.sort_by(|a, b| distance(*b).total_cmp(&distance(*a)));
+            let mut panes = Vec::new();
+            for index in order {
+                let object = &scene.transparent[index];
+                let geometry = MeshGeometry::new(
+                    gpu,
+                    object.vertices,
+                    object.indices,
+                    &[0],
+                    &[object.transform],
+                )?;
+                geometry.import(&mut graph);
+                let material = StorageBuffer::new(gpu, &object.material.bytes())?;
+                let thickness = object.material.transparency.map_or(0.0, |t| t.thickness);
+                let mut slot = [0u8; 16];
+                slot[..4].copy_from_slice(&thickness.to_ne_bytes());
+                let slot = StorageBuffer::new(gpu, &slot)?;
+                for buffer in [&material, &slot] {
+                    graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+                }
+                panes.push(Pane {
+                    behind: Texture::new(gpu, size, Format::Rgba16Float, false, true)?,
+                    geometry,
+                    material,
+                    slot,
+                });
+            }
+            let program = transparency_glass::traced_program(crate::program::STANDARD_PROGRAM)?;
+            Some(Panes {
+                hit_depth: Kernel::new(gpu, cache, Pass::TransparencyHitDepth)?,
+                seed: Seed::new(gpu, cache)?,
+                glass: Glass::new(gpu, cache, &program)?,
+                program,
+                target: MsaaColor::new(gpu, size)?,
+                camera,
+                frame,
+                depth: Texture::new(gpu, size, Format::R32Float, true, false)?,
+                reflected,
+                defaults,
+                panes,
+            })
+        }
+        _ => None,
+    };
+    let mut pane_packets = Vec::new();
+    if let (Some(t), Some(deferred)) = (&panes, deferred.as_ref()) {
+        let values = shader::inputs(Pass::TransparencyHitDepth)?
+            .iter()
+            .map(|spec| {
+                Ok((
+                    spec.key,
+                    match (spec.key.group, spec.key.binding) {
+                        (0, 30) => Input::Buffer(&t.frame),
+                        (0, 50) => Input::Image(&deferred.hit),
+                        (0, 51) => Input::Image(&deferred.tiles),
+                        (0, 52) => Input::Image(&t.depth),
+                        _ => shared.input(spec, None)?,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let packet = HeapBindings::new(gpu, Pass::TransparencyHitDepth, &values)?;
+        packet.import(&mut graph);
+        t.hit_depth
+            .record(&mut graph, &mut rec, &packet, [size[0], size[1], 1])?;
+        pane_packets.push(packet);
+        for pane in &t.panes {
+            graph.node(
+                &mut rec,
+                &[
+                    (Resource::Image(output.image), Access::CopySource),
+                    (Resource::Image(pane.behind.image), Access::CopyDestination),
+                ],
+            )?;
+            rec.push(Command::CopyImage {
+                source: output.image,
+                destination: pane.behind.image,
+            });
+            let seed = HeapBindings::new(
+                gpu,
+                Pass::TransparencySeed,
+                &[(key(0, 31), Input::Image(&pane.behind))],
+            )?;
+            seed.import(&mut graph);
+            t.seed.record(&mut graph, &mut rec, &seed, &t.target)?;
+            pane_packets.push(seed);
+            let values = t
+                .program
+                .inputs()
+                .iter()
+                .map(|spec| {
+                    Ok((
+                        spec.key,
+                        match (spec.kind, spec.key.group, spec.key.binding) {
+                            (_, 0, 0) => Input::Buffer(&t.camera),
+                            (_, 0, 30) => Input::Buffer(&t.frame),
+                            (_, 0, 31) => Input::Image(&pane.behind),
+                            (_, 0, 32) => Input::Image(&t.depth),
+                            // `TP1 linear clamp`.
+                            (_, 0, 33) => Input::Sampler(SamplerDesc {
+                                mip: Filter::Nearest,
+                                ..SamplerDesc::default()
+                            }),
+                            (_, 0, 37) => Input::Buffer(&pane.slot),
+                            (_, 0, 38) => Input::Image(&t.reflected),
+                            (_, 2, 1) => Input::Image(&t.defaults[0]),
+                            (_, 2, 3) => Input::Image(&t.defaults[1]),
+                            (_, 2, 5) => Input::Image(&t.defaults[2]),
+                            _ => shared.input(spec, Some((&pane.geometry, &pane.material)))?,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let packet = HeapBindings::for_program(gpu, &t.program, &values)?;
+            packet.import(&mut graph);
+            t.glass
+                .record(&mut graph, &mut rec, &packet, &pane.geometry, &t.target)?;
+            t.target.resolve_to(&mut graph, &mut rec, &output)?;
+            pane_packets.push(packet);
+        }
+    }
     let read = transfer::readback(
         gpu,
         &mut graph,
@@ -2191,8 +2466,12 @@ fn frame(
         .chain(gi_packets)
         .chain(gi_shade_packet)
         .chain(resolve_packet)
+        .chain(pane_packets)
     {
         packet.retire(gpu, &mut graph)?;
+    }
+    if let Some(panes) = panes {
+        panes.retire(gpu, &mut graph)?;
     }
     if let Some((record, samples)) = tr1_records {
         record.retire(gpu)?;

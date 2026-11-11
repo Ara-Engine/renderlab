@@ -115,6 +115,7 @@ fn depth_of_field_blurs_by_the_thin_lens_radius_and_keeps_the_focused_edge() -> 
                 reflections: None,
                 textures: None,
                 local_shadows: None,
+                transparent: &[],
             },
         )?;
         images.display.context("post did not run")
