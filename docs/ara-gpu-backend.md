@@ -2476,3 +2476,44 @@ CPU's level for it, the device's level, the blurred half float, the steps lost a
 its level, and requires at most one step lost and every displayed level within one of
 the CPU's. If the RTX's line shows more than one step lost, that is a real loss and
 both tests fail there.
+
+## The one-pixel difference at the arch lamp: where it is, not yet why
+
+In the supported pair on the Radeon one pixel, (588, 178) at 960x640, differs by 38%
+under reconstruction and by nothing without it. What is established, on Metal:
+
+- **It is not the bulb.** `ara_frame --probe 588,178` prints the pixel and its
+  neighbours every frame. Through pose 10 it is plain beam, (0.3210, 0.1620, 0.0527).
+  In the last frame the camera's motion brings the edge between the beam and the lit
+  surface below it into the pixel's row, and it becomes a silhouette pixel.
+- **Both values are one mix of the same two surfaces.** wgpu on the Radeon,
+  (0.3843, 0.2228, 0.1062), is the beam plus 20.6% of the pixel below it,
+  (0.6279, 0.4585, 0.3132), in all three channels; ara on the Radeon,
+  (0.4619, 0.2976, 0.1720), is the beam plus 45.9% of it. So the two runs differ in
+  one number: the coverage the resolve carries for a moving silhouette edge
+  (`tr1_coverage`), at one pixel, in one frame.
+- **The port on Metal gives wgpu's value**, (0.3843, 0.2228, 0.1063). The port's
+  resolve is not different from the renderer's here; the port on the Radeon is the odd
+  one of three.
+- **It is not contraction, on Metal.** Letting the resolve's arithmetic contract
+  (`-ffp-contract=fast` for that shader alone) changes no pixel by more than 0.1%, and
+  for every shader no pixel by more than 0.5%; this pixel does not move at all.
+- **Forcing the resolve's decisions the other way, for every pixel and frame, does not
+  give the Radeon's value**: the occluder chosen by the other side of
+  `s.distance<=u.distance` gives 0.343; the carried straight edge switched off
+  (`gg>=0.0025`) gives 0.381; no coverage history gives the plain beam, 0.321, so the
+  20.6% is carried coverage and this frame's samples alone would show none.
+
+What is not established: which expression fell differently on the Radeon. The
+candidates in `tr1_coverage` are its thresholds on stored coverages
+(`c<=0.001 || c>=0.999`), on the gradient (`gg>=0.0025`) and the tap chosen by
+`floor(q)`; each is a decision on a float, in the renderer's own shader. The next
+datum is the port's per-pose probe on the Radeon and on the RTX: whether pose 10
+already differs from Metal's line, and whether the RTX sides with Metal.
+
+The second pixel, (504, 377) without reconstruction, is a different thing: there the
+port agrees with itself on Metal and on the Radeon, (0.3369, 0.1519, 0.0365), and
+wgpu differs, (0.3716, 0.1664, 0.0392). The difference has the dusk sun's colour on
+the ground and is an eighth of the sunlit ground beside it: one of the eight shadow
+rays of the unreconstructed Interactive estimator at the edge of the gold sphere's
+shadow.

@@ -96,7 +96,9 @@
 //! (the bulbs' emission). `--timing` renders the frames without capturing or reading
 //! any back and prints one line: the median, least and greatest time of a frame after
 //! the first eight, each from the call to `render` until the GPU has finished the
-//! frame, on either layer. It writes no images. The other level flags do not apply.
+//! frame, on either layer. It writes no images. `--probe X,Y` prints, every frame, the
+//! HDR colour of that pixel and its eight neighbours, to see at which frame two runs
+//! part. The other level flags do not apply.
 // The fixture also carries names and a scene record for the Unreal match export.
 #[allow(dead_code)]
 #[path = "../support/lighting_fixture.rs"]
@@ -131,6 +133,7 @@ fn main() -> Result<(), Failure> {
     let (mut game_scene, mut supported) = (false, false);
     let mut without = [false; WITHOUT.len()];
     let mut timing = false;
+    let mut probe = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--scene" => match args.next().as_deref() {
@@ -139,6 +142,11 @@ fn main() -> Result<(), Failure> {
             },
             "--supported" => supported = true,
             "--timing" => timing = true,
+            "--probe" => {
+                let value = args.next().ok_or("--probe X,Y")?;
+                let (x, y) = value.split_once(',').ok_or("--probe X,Y")?;
+                probe = Some([x.parse()?, y.parse()?]);
+            }
             "--without" => {
                 for name in args.next().ok_or("--without NAME[,NAME]")?.split(',') {
                     let at = WITHOUT
@@ -222,6 +230,7 @@ fn main() -> Result<(), Failure> {
             frames,
             game: Some((supported, without)),
             timing,
+            probe,
         };
         let sequence = match backend.as_deref() {
             Some("wgpu") => game_wgpu(size, level)?,
@@ -300,6 +309,7 @@ fn main() -> Result<(), Failure> {
         frames,
         game: None,
         timing: false,
+        probe: None,
     };
     let sequence = match backend.as_deref() {
         Some("wgpu") => wgpu_frame(&fixture, size, level)?,
@@ -355,6 +365,8 @@ struct Level {
     game: Option<(bool, [bool; WITHOUT.len()])>,
     /// `--timing`: frames are timed and not captured.
     timing: bool,
+    /// `--probe X,Y`: a pixel whose HDR neighbourhood every frame prints.
+    probe: Option<[u32; 2]>,
 }
 /// What `--without` can leave out of the game scene on both layers, to find which
 /// feature a difference between them belongs to.
@@ -958,7 +970,26 @@ fn game_frames<S: renderlab::engine::Scene>(
             times.push(render_ms);
         } else {
             let display = engine.capture()?.rgba8;
-            sequence.push((hdr(engine)?, display, None, record));
+            let hdr = hdr(engine)?;
+            if let Some([x, y]) = level.probe {
+                // The pixel's row and the rows above and below, three pixels each.
+                let rows: Vec<String> = (y.saturating_sub(1)..=(y + 1).min(size[1] - 1))
+                    .map(|row| {
+                        (x.saturating_sub(1)..=(x + 1).min(size[0] - 1))
+                            .map(|column| {
+                                let at = ((row * size[0] + column) * 8) as usize;
+                                let [r, g, b] = [0, 2, 4].map(|c| {
+                                    decode_f16(u16::from_le_bytes([hdr[at + c], hdr[at + c + 1]]))
+                                });
+                                format!("({r:.4} {g:.4} {b:.4})")
+                            })
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    })
+                    .collect();
+                eprintln!("probe pose {frame} at ({x}, {y}): {}", rows.join(" / "));
+            }
+            sequence.push((hdr, display, None, record));
         }
     }
     if timing {
