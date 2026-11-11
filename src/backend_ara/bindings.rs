@@ -34,9 +34,6 @@ pub struct HeapBindings<'a> {
     layout: Vec<ShaderInput>,
     pass: Pass,
     contract: [u8; 32],
-    /// Each plain buffer input's heap index, in input order, for the root words of
-    /// the binning kernel's `bins-root` variant (measurement only).
-    buffer_slots: Vec<u32>,
 }
 impl<'a> HeapBindings<'a> {
     /// Array heads contain buffer-absolute tail word offsets. Packing records
@@ -77,7 +74,6 @@ impl<'a> HeapBindings<'a> {
         let mut words = vec![0; 4 + layout.len()];
         words[0] = layout.len() as u32;
         let mut retained = Vec::new();
-        let mut buffer_slots = Vec::new();
         for (ordinal, required) in layout.iter().enumerate() {
             let mut matches = values.iter().filter(|(key, _)| *key == required.key);
             let value = matches
@@ -102,7 +98,6 @@ impl<'a> HeapBindings<'a> {
                         "buffer {} is too short",
                         required.name
                     );
-                    buffer_slots.push(b.slot);
                     b.slot
                 }
                 (InputKind::BufferArray { count, minimum, .. }, Input::Buffers(buffers)) => {
@@ -206,7 +201,6 @@ impl<'a> HeapBindings<'a> {
             layout,
             pass,
             contract,
-            buffer_slots,
         })
     }
     pub(crate) fn contract(&self) -> [u8; 32] {
@@ -301,13 +295,9 @@ impl<'a> HeapBindings<'a> {
     }
     /// The packet starts after four reserved words, exercising the byte-offset ABI.
     pub fn roots(&self) -> RootConstants {
-        let mut words = [self.record.slot, 16, 0, 0, 0, 0, 0, 0];
-        if self.pass == Pass::ProgramBins && shader::bins_root() {
-            for (word, slot) in words[2..].iter_mut().zip(&self.buffer_slots) {
-                *word = *slot;
-            }
+        RootConstants {
+            words: [self.record.slot, 16, 0, 0, 0, 0, 0, 0],
         }
-        RootConstants { words }
     }
     /// Give up the resource borrows once every pass that uses the packet is recorded,
     /// keeping only its own record. Retire that record after the list is submitted; the

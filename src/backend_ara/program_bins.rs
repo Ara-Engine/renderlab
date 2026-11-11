@@ -41,19 +41,6 @@ impl ProgramBins {
         inputs: &HeapBindings<'_>,
         dispatch: &BinDispatch,
     ) -> Result<()> {
-        // MEASUREMENT ONLY: with RENDERLAB_ARA_BINS_TWICE set, the binning runs twice,
-        // the first time under its own label. The second starts from cleared counters,
-        // so the lists are the same. A first dispatch much slower than the second is
-        // paying for something other than the kernel (memory the frame just made).
-        if std::env::var_os("RENDERLAB_ARA_BINS_TWICE").is_some() {
-            self.record_labelled(
-                graph,
-                rec,
-                inputs,
-                dispatch,
-                "ara::ProgramBins(first)".into(),
-            )?;
-        }
         self.record_labelled(graph, rec, inputs, dispatch, "ara::ProgramBins".into())
     }
     fn record_labelled(

@@ -5,7 +5,7 @@ use super::*;
 use renderlab::{
     Camera, LocalShadows, ReflectionSettings, Value, Vec3,
     backend_ara::engine::{Engine, Refusal},
-    engine::{RenderScale, Scene, Settings},
+    engine::{RenderScale, Settings},
 };
 #[path = "../../../support/ara_game_scene.rs"]
 mod scene;
@@ -42,20 +42,24 @@ fn rgb(hdr: &[u8]) -> Vec<[f32; 3]> {
 }
 /// The first frame's exposed HDR from an engine built with the hero on toon or on the
 /// props' program, then the same frame with the bulbs' glow set to zero.
-fn first_frames(engine: &mut Engine, toon_hero: bool) -> Result<[Vec<[f32; 3]>; 2]> {
+fn first_frames(
+    engine: &mut Engine,
+    gpu: &mut GpuDevice,
+    toon_hero: bool,
+) -> Result<[Vec<[f32; 3]>; 2]> {
     engine.resize(SIZE[0], SIZE[1])?;
     let built = build(
-        engine,
+        &mut engine.on(gpu),
         Options {
             toon_hero,
             ..Default::default()
         },
     )?;
-    let camera = animate(engine, &built, 0)?;
-    engine.render(&camera)?;
+    let camera = animate(&mut engine.on(gpu), &built, 0)?;
+    engine.render(gpu, &camera)?;
     let lit = rgb(&engine.images().context("no frame")?.hdr);
     engine.set_material_parameters(built.bulb, &[("glow", Value::Vec3([0.; 3]))])?;
-    engine.render(&camera)?;
+    engine.render(gpu, &camera)?;
     let dark = rgb(&engine.images().context("no frame")?.hdr);
     engine.set_material_parameters(built.bulb, &[("glow", Value::Vec3(GLOW))])?;
     Ok([lit, dark])
@@ -84,9 +88,9 @@ fn first_frames(engine: &mut Engine, toon_hero: bool) -> Result<[Vec<[f32; 3]>; 
 #[test]
 fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
     let path = root("game-scene");
-    let gpu = GpuDevice::new(&[], path.join("device"))?;
-    let mut engine = Engine::new(gpu, ShaderCache::new(path.join("shaders"))?, direct())?;
-    let [own, dark] = first_frames(&mut engine, true)?;
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, direct())?;
+    let [own, dark] = first_frames(&mut engine, &mut gpu, true)?;
     let refused = |call, what| Refusal { call, what };
     ensure!(
         engine.refusals()
@@ -98,10 +102,10 @@ fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
         "unexpected refusals: {:?}",
         engine.refusals()
     );
-    let gpu = engine.retire()?;
-    let mut other = Engine::new(gpu, ShaderCache::new(path.join("shaders"))?, direct())?;
-    let [one, _] = first_frames(&mut other, false)?;
-    let gpu = other.retire()?;
+    engine.retire(&mut gpu)?;
+    let mut other = Engine::new(ShaderCache::new(path.join("shaders"))?, direct())?;
+    let [one, _] = first_frames(&mut other, &mut gpu, false)?;
+    other.retire(&mut gpu)?;
     ensure!(
         own.iter().flatten().all(|v| v.is_finite()),
         "the frame holds a value that is not finite"
@@ -199,14 +203,23 @@ fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
     }
 
     // The scene's own settings, and its animation.
-    let mut engine = Engine::new(gpu, ShaderCache::new(path.join("shaders"))?, settings())?;
+    let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, settings())?;
     engine.resize(SIZE[0], SIZE[1])?;
-    let built = build(&mut engine, Options::default())?;
+    let built = build(&mut engine.on(&mut gpu), Options::default())?;
     let mut report = None;
     for frame in 0..6 {
-        let camera = animate(&mut engine, &built, frame)?;
-        report = Some(engine.render(&camera)?);
+        let camera = animate(&mut engine.on(&mut gpu), &built, frame)?;
+        report = Some(engine.render(&mut gpu, &camera)?);
     }
+    // The displayed frame stays on the device for a presenter, at the output's size.
+    let output = engine
+        .output()
+        .context("no displayed image on the device")?;
+    ensure!(
+        output.size == SIZE,
+        "the displayed image is {:?}, the output {SIZE:?}",
+        output.size
+    );
     let report = report.context("no frame")?;
     let images = engine.images().context("no frame")?;
     ensure!(
@@ -240,7 +253,7 @@ fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
         report.scene.triangles,
         file.display()
     );
-    let mut gpu = engine.retire()?;
+    engine.retire(&mut gpu)?;
     gpu.collect()?;
     gpu.assert_clean()?;
     Ok(())

@@ -30,7 +30,7 @@ pub(crate) use skin_interface::SkinResource;
 
 pub use metal::msl;
 pub use naga::ShaderStage;
-pub use spirv::{Checks, spirv};
+pub use spirv::{Checks, DeviceGuards, spirv};
 
 /// The unchanged Renderlab filter source, including the selected bloom kernels.
 pub const POST: &str = include_str!("../../../shaders/post.wgsl");
@@ -734,10 +734,10 @@ pub(super) fn bounds_checks() -> naga::proc::BoundsCheckPolicies {
 
 #[cfg(target_os = "macos")]
 pub(crate) use metal::from_source as msl_source;
-pub(crate) use spirv::bins_root;
 #[cfg(not(target_os = "macos"))]
 pub(crate) use spirv::from_source as spirv_source;
-pub(crate) use spirv::variant_name as spirv_variant;
+/// A source's workgroup size, for the Metal pipeline description.
+#[cfg(target_os = "macos")]
 pub(crate) fn threads_source(pass: Pass, source: &str) -> anyhow::Result<[u32; 3]> {
     threads_digest(pass, source, memo::digest(source))
 }

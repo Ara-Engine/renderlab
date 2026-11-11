@@ -760,6 +760,10 @@ struct Kept {
     repairs: Option<StorageBuffer>,
     /// The 2D targets the last frame made and released, for the next frame to take.
     targets: super::image::pool::Pool,
+    /// The displayed images, two so a frame draws into the one not on screen while a
+    /// presenter may still read the other; `shown` is the last frame's.
+    outputs: [Option<Texture>; 2],
+    shown: Option<usize>,
 }
 /// A sequence of frames: what each hands to the next, and what stays on the GPU (the
 /// radiance cache, the reconstruction's history, named meshes with their bottom-level
@@ -813,7 +817,16 @@ impl Frames {
         if let Some(repairs) = self.kept.repairs {
             repairs.retire(gpu)?;
         }
+        for output in self.kept.outputs.into_iter().flatten() {
+            gpu.retire(ara_gpu::Resource::Image(output.image))?;
+        }
         self.kept.targets.retire(gpu)
+    }
+    /// The last frame's displayed image (sRGB-encoded RGBA8, the output's size), kept on
+    /// the device until the frame after next draws over it: what a presenter shows.
+    /// `None` before the first frame with post enabled.
+    pub fn output(&self) -> Option<&Texture> {
+        self.kept.shown.and_then(|s| self.kept.outputs[s].as_ref())
     }
     /// The last reconstructed frame's plan (`History::planned`), for telemetry.
     pub fn reconstruction_plan(&self) -> Option<(bool, u32)> {
@@ -914,6 +927,8 @@ fn frame(
         repairs: kept_repairs,
         // Taken out and made active for this frame by `Frames::render`.
         targets: _,
+        outputs,
+        shown: shown_output,
     } = kept;
     let started = std::time::Instant::now();
     let mut times = FrameTimes::default();
@@ -3277,8 +3292,19 @@ fn frame(
             },
             &linear,
         )?;
-        let display = Texture::new(gpu, target, Format::Rgba8, false, true)?;
-        passes.display(&mut graph, &mut rec, &linear, &display)?;
+        // The displayed image is kept past the frame for a presenter: the one of the
+        // sequence's two that is not on screen, made again when the size changes.
+        let slot = shown_output.map_or(0, |s| 1 - s);
+        if outputs[slot].as_ref().is_some_and(|o| o.size != target)
+            && let Some(old) = outputs[slot].take()
+        {
+            super::image::release(gpu, old.image)?;
+        }
+        if outputs[slot].is_none() {
+            outputs[slot] = Some(Texture::new(gpu, target, Format::Rgba8, false, true)?);
+        }
+        let display = outputs[slot].as_ref().context("made above")?;
+        passes.display(&mut graph, &mut rec, &linear, display)?;
         if !blind {
             reads[1] = Some(transfer::readback(
                 gpu,
@@ -3288,7 +3314,8 @@ fn frame(
                 u64::from(target[0]) * u64::from(target[1]) * 4,
             )?);
         }
-        post_images.extend([lut, linear, display]);
+        post_images.extend([lut, linear]);
+        *shown_output = Some(slot);
         post_buffers.push(record.buffer);
         tail = Some((passes, bloom, surface));
     }

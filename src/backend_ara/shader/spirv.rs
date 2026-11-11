@@ -7,7 +7,12 @@ use std::collections::BTreeMap;
 /// is aliased onto sampled binding 5 in the emitted decorations, because naga's
 /// validator rejects different typed declarations sharing one source binding.
 pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
-    from_source(pass, pass.source().as_ref(), Checks::Engine)
+    from_source(
+        pass,
+        pass.source().as_ref(),
+        Checks::Engine,
+        DeviceGuards::default(),
+    )
 }
 /// The runtime checks naga writes into a module, as the wgpu renderer creates the same
 /// module (`pipeline_compilation::create_engine_shader_module` against
@@ -18,8 +23,8 @@ pub fn spirv(pass: Pass) -> Result<Vec<SpirvStage>> {
 /// `RENDERLAB_ENGINE_SHADER_CHECKS` asks otherwise, and only compositions of another
 /// program checked. Unchecked, wgpu-hal writes no loop bounds, no ray-query state
 /// tracking and no integer division checks. Bounds checks are not taken from here:
-/// indices and buffers stay unchecked in both, and image loads keep their size test
-/// because ara-gpu enables no robust image access (the renderer's device does).
+/// indices and buffers stay unchecked in both, and image loads follow the device
+/// ([`DeviceGuards`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Checks {
     /// Engine-owned code: without the three guards.
@@ -29,7 +34,35 @@ pub enum Checks {
     /// writes them for checked modules.
     User,
 }
-pub(crate) fn from_source(pass: Pass, wgsl: &str, checks: Checks) -> Result<Vec<SpirvStage>> {
+/// What the device does for every shader that the SPIR-V would otherwise do itself:
+/// ara-gpu's `DeviceInfo::robust_image_access` (an image load outside its image reads
+/// zero in every component the format has; the port's kernels read no substituted
+/// component, `docs/ara-gpu-backend.md`) and `zero_initialize_workgroup_memory`. The
+/// default, neither, is what offline emission and any other device get: a size test
+/// before each image load, and naga's zeroing of workgroup variables at entry. The
+/// wgpu renderer's device enables both where it can, so its modules carry neither.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct DeviceGuards {
+    /// Image loads need no size test.
+    pub robust_image_access: bool,
+    /// Workgroup variables need no zeroing stores.
+    pub zero_initialize_workgroup_memory: bool,
+}
+impl DeviceGuards {
+    /// What `gpu`'s device provides.
+    pub fn of(info: &ara_gpu::vulkan::DeviceInfo) -> Self {
+        Self {
+            robust_image_access: info.robust_image_access,
+            zero_initialize_workgroup_memory: info.zero_initialize_workgroup_memory,
+        }
+    }
+}
+pub(crate) fn from_source(
+    pass: Pass,
+    wgsl: &str,
+    checks: Checks,
+    device: DeviceGuards,
+) -> Result<Vec<SpirvStage>> {
     let user = checks == Checks::User;
     let source = hoist_directives(&adapt(pass, wgsl)?);
     let mut module = parse(&source)?;
@@ -57,7 +90,6 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str, checks: Checks) -> Result<Vec<
                 .context("selected SPIR-V entry missing")?
                 .name = "main".into();
             let info = validate(&selected)?;
-            let variant = Variant::from_environment();
             let mut words = naga::back::spv::write_vec(
                 &selected,
                 &info,
@@ -65,27 +97,25 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str, checks: Checks) -> Result<Vec<
                     lang_version: (1, 5),
                     // Index and buffer accesses keep Naga's unchecked SPIR-V policy:
                     // enabling those checks hits its descriptor-wrapper inference and
-                    // unsigned vector constant bugs. Image loads are checked, and read
-                    // zero outside the image: ara-gpu enables no robust image access, so
-                    // an unchecked load there is undefined, and zero is what the wgpu
-                    // renderer gets from `robustImageAccess` on the same devices.
+                    // unsigned vector constant bugs. Image loads read zero outside the
+                    // image: the device does it where it can, the shader otherwise.
                     flags: naga::back::spv::Options::default().flags
                         | naga::back::spv::WriterFlags::DEBUG,
                     bounds_check_policies: naga::proc::BoundsCheckPolicies {
-                        image_load: if variant.image_unchecked {
+                        image_load: if device.robust_image_access {
                             naga::proc::BoundsCheckPolicy::Unchecked
                         } else {
                             naga::proc::BoundsCheckPolicy::ReadZeroSkipWrite
                         },
                         ..Default::default()
                     },
-                    zero_initialize_workgroup_memory: if variant.workgroup_unzeroed {
-                        naga::back::spv::ZeroInitializeWorkgroupMemoryMode::None
+                    zero_initialize_workgroup_memory: if device.zero_initialize_workgroup_memory {
+                        naga::back::spv::ZeroInitializeWorkgroupMemoryMode::Native
                     } else {
                         naga::back::spv::ZeroInitializeWorkgroupMemoryMode::Polyfill
                     },
-                    force_loop_bounding: user && !variant.loops_unbounded,
-                    ray_query_initialization_tracking: user && !variant.queries_untracked,
+                    force_loop_bounding: user,
+                    ray_query_initialization_tracking: user,
                     emit_int_div_checks: user,
                     ..Default::default()
                 },
@@ -114,9 +144,7 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str, checks: Checks) -> Result<Vec<
             validate_heap_bindings(&words)?;
             repair_image_arguments(&mut words)?;
             super::spv_layout::repair(&mut words)?;
-            if !variant.fused {
-                super::spv_precise::decorate(&mut words)?;
-            }
+            super::spv_precise::decorate(&mut words)?;
             Ok(SpirvStage {
                 stage,
                 entry: entry.into(),
@@ -124,51 +152,6 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str, checks: Checks) -> Result<Vec<
             })
         })
         .collect()
-}
-/// MEASUREMENT ONLY: what `RENDERLAB_ARA_SPV` changes in the emitted SPIR-V, to find
-/// what a kernel's time on a Vulkan driver depends on. A comma-separated list of
-/// `fused` (no `NoContraction` marks, so the driver may fuse a multiply and an add),
-/// `image-unchecked` (image loads without the size test; a load outside its image is
-/// then undefined), `workgroup-unzeroed` (no zeroing of workgroup variables at entry;
-/// a kernel that reads one before writing it is then undefined), `loops-unbounded` and
-/// `queries-untracked` (naga's loop bounds and ray-query state tracking, which only
-/// [`Checks::User`] modules carry, as in the wgpu renderer). A frame is evidence under
-/// a variant only if it is byte for byte the frame without it. `bins-root` is not
-/// about checks: the binning kernel reads its five buffers' heap indices from root
-/// words, not through its packet (`packet_spirv::lower`, `HeapBindings::roots`). The
-/// shader cache keys on the value.
-#[derive(Clone, Copy, Default)]
-struct Variant {
-    fused: bool,
-    image_unchecked: bool,
-    workgroup_unzeroed: bool,
-    loops_unbounded: bool,
-    queries_untracked: bool,
-    bins_root: bool,
-}
-impl Variant {
-    fn from_environment() -> Self {
-        let named = variant_name();
-        let has = |name: &str| named.split(',').any(|part| part.trim() == name);
-        Self {
-            fused: has("fused"),
-            image_unchecked: has("image-unchecked"),
-            workgroup_unzeroed: has("workgroup-unzeroed"),
-            loops_unbounded: has("loops-unbounded"),
-            queries_untracked: has("queries-untracked"),
-            bins_root: has("bins-root"),
-        }
-    }
-}
-/// Whether the binning kernel reads its buffers' heap indices from root words
-/// (`RENDERLAB_ARA_SPV=bins-root`), on the Vulkan path. Metal's module reads only the
-/// packet's two words, whatever the other root words hold.
-pub(crate) fn bins_root() -> bool {
-    Variant::from_environment().bins_root
-}
-/// `RENDERLAB_ARA_SPV`, empty when unset: part of the shader cache's salt.
-pub(crate) fn variant_name() -> String {
-    std::env::var("RENDERLAB_ARA_SPV").unwrap_or_default()
 }
 fn adapt(pass: Pass, wgsl: &str) -> Result<String> {
     // Select before interface adaptation: unreferenced program/shadow bindings
@@ -196,8 +179,7 @@ fn adapt(pass: Pass, wgsl: &str) -> Result<String> {
             wgsl,
             &super::heap_interface::from_module(&original)?,
         )?;
-        let root_buffers = pass == Pass::ProgramBins && Variant::from_environment().bins_root;
-        return super::packet_spirv::adapt(&source, &original, root_buffers);
+        return super::packet_spirv::adapt(&source, &original);
     }
     if matches!(pass, Pass::MeshDiagnostic) {
         return mesh_interface(&body, &original);

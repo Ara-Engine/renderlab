@@ -108,11 +108,17 @@ impl Residency for Kept {
     }
 }
 
-/// The scene and its frames on ara-gpu. Build it with the [`Scene`] calls, read
-/// [`refusals`](Self::refusals) for what was left out, and [`retire`](Self::retire) it
-/// to get the device back.
+/// The scene and its frames on ara-gpu, on a device the caller owns (Ara's own, so a
+/// frame needs no second device and no copy to be presented).
+///
+/// The scene calls take no device and touch none: they record what the next frame
+/// draws. [`render`](Self::render) draws it on the device it is given and leaves the
+/// displayed image there ([`output`](Self::output)); [`retire`](Self::retire) releases
+/// what the engine keeps on that device. Use one device for an engine's whole life.
+/// [`on`](Self::on) borrows the engine and the device together as a [`Scene`], for
+/// code written against that trait. Read [`refusals`](Self::refusals) for what was left
+/// out.
 pub struct Engine {
-    gpu: GpuDevice,
     cache: ShaderCache,
     state: State<Kept>,
     frames: forward::Frames,
@@ -127,6 +133,9 @@ pub struct Engine {
     /// Whether frames are read back (`set_readback`).
     readback: bool,
     refusals: Vec<Refusal>,
+    /// Frame sequences a resize or a settings or readback change ended, released at the
+    /// next call that has the device.
+    ended: Vec<forward::Frames>,
 }
 
 /// One draw of a frame: its geometry, material, first transform, mesh identity and
@@ -145,11 +154,10 @@ fn fault(error: anyhow::Error) -> Error {
 }
 
 impl Engine {
-    /// An empty scene on `gpu`, compiling through `cache`, with `settings`.
-    pub fn new(gpu: GpuDevice, cache: ShaderCache, settings: Settings) -> Result<Self, Error> {
+    /// An empty scene compiling through `cache`, with `settings`.
+    pub fn new(cache: ShaderCache, settings: Settings) -> Result<Self, Error> {
         let standard = Arc::new(Program::new("standard", crate::STANDARD_PROGRAM)?);
         let mut engine = Self {
-            gpu,
             cache,
             state: State::new(standard, settings),
             frames: forward::Frames::default(),
@@ -160,6 +168,7 @@ impl Engine {
             materials: 0,
             readback: true,
             refusals: Vec::new(),
+            ended: Vec::new(),
         };
         engine.refuse_settings(&settings);
         Ok(engine)
@@ -182,30 +191,46 @@ impl Engine {
     /// Whether frames come back to the CPU. On, the default, `capture` and `images`
     /// have the last frame. Off, a frame is rendered and left on the GPU, which is
     /// what a frame time should measure. Changing it starts a new frame sequence.
-    pub fn set_readback(&mut self, on: bool) -> Result<(), Error> {
+    pub fn set_readback(&mut self, on: bool) {
         if on != self.readback {
             self.readback = on;
-            self.restart()?;
+            self.restart();
         }
-        Ok(())
     }
     /// Starts a new frame sequence: the history's size and settings are fixed within
-    /// one, so a change of either releases the old sequence's cache and history.
-    fn restart(&mut self) -> Result<(), Error> {
+    /// one, so a change of either ends the old sequence, whose cache and history are
+    /// released at the next call that has the device.
+    fn restart(&mut self) {
         let fresh = if self.readback {
             forward::Frames::default()
         } else {
             forward::Frames::without_images()
         };
-        std::mem::replace(&mut self.frames, fresh)
-            .retire(&mut self.gpu)
-            .map_err(fault)
+        self.ended.push(std::mem::replace(&mut self.frames, fresh));
     }
-    /// Releases the frame history and the pipelines and returns the device.
-    pub fn retire(mut self) -> anyhow::Result<GpuDevice> {
-        self.frames.retire(&mut self.gpu)?;
-        self.cache.retire(&mut self.gpu)?;
-        Ok(self.gpu)
+    /// Releases the ended sequences on `gpu`.
+    fn release_ended(&mut self, gpu: &mut GpuDevice) -> Result<(), Error> {
+        for ended in self.ended.drain(..) {
+            ended.retire(gpu).map_err(fault)?;
+        }
+        Ok(())
+    }
+    /// The last frame's displayed image on the device it was rendered on: sRGB-encoded
+    /// RGBA8 at the output's size, kept until the frame after next. `None` before the
+    /// first frame with post enabled.
+    pub fn output(&self) -> Option<&super::image::Texture> {
+        self.frames.output()
+    }
+    /// Releases what the engine keeps on `gpu`: its frame sequences and pipelines.
+    pub fn retire(mut self, gpu: &mut GpuDevice) -> anyhow::Result<()> {
+        self.release_ended(gpu)?;
+        self.frames.retire(gpu)?;
+        self.cache.retire(gpu)?;
+        Ok(())
+    }
+    /// The engine and `gpu` together as a [`Scene`], for code written against the trait.
+    pub fn on<'a>(&'a mut self, gpu: &'a mut GpuDevice) -> Bound<'a> {
+        Bound { engine: self, gpu }
     }
 
     fn refuse(&mut self, call: &'static str, what: &'static str) {
@@ -317,8 +342,9 @@ fn objects<'a>(placed: &[Placed<'a>]) -> Vec<ForwardObject<'a>> {
         .collect()
 }
 
-impl Scene for Engine {
-    fn create_mesh(&mut self, data: &MeshData<'_>) -> Result<MeshId, Error> {
+/// The scene calls, as [`Scene`] documents each; none touches the device.
+impl Engine {
+    pub fn create_mesh(&mut self, data: &MeshData<'_>) -> Result<MeshId, Error> {
         self.meshes += 1;
         Ok(self.state.meshes.insert(Mesh::Static {
             key: self.meshes,
@@ -326,14 +352,14 @@ impl Scene for Engine {
             indices: data.indices.to_vec(),
         }))
     }
-    fn create_texture(&mut self, data: TextureData) -> Result<TextureId, Error> {
+    pub fn create_texture(&mut self, data: TextureData) -> Result<TextureId, Error> {
         Ok(self.state.textures.insert(Arc::new(data)))
     }
-    fn create_program(&mut self, label: &str, source: &str) -> Result<ProgramId, Error> {
+    pub fn create_program(&mut self, label: &str, source: &str) -> Result<ProgramId, Error> {
         let program = Program::new(label, source)?;
         Ok(self.state.programs.insert(Arc::new(program)))
     }
-    fn create_material(&mut self, desc: &MaterialDesc<'_>) -> Result<MaterialId, Error> {
+    pub fn create_material(&mut self, desc: &MaterialDesc<'_>) -> Result<MaterialId, Error> {
         let program_id = desc.program.unwrap_or(self.state.standard);
         let program = self.state.programs.get(program_id)?.clone();
         ParameterLayout::check(
@@ -374,7 +400,7 @@ impl Scene for Engine {
             program: program_id,
         }))
     }
-    fn set_material_parameters(
+    pub fn set_material_parameters(
         &mut self,
         material: MaterialId,
         values: &[(&str, Value)],
@@ -394,15 +420,15 @@ impl Scene for Engine {
         }
         Ok(())
     }
-    fn create_environment(&mut self, _: &PreparedEnvironment) -> Result<EnvironmentId, Error> {
+    pub fn create_environment(&mut self, _: &PreparedEnvironment) -> Result<EnvironmentId, Error> {
         self.refuse("create_environment", "environment maps");
         Ok(self.state.environments.insert(()))
     }
-    fn add_asset(&mut self, _: Asset) -> Result<AssetHandles, Error> {
+    pub fn add_asset(&mut self, _: Asset) -> Result<AssetHandles, Error> {
         self.refuse("add_asset", "cooked assets");
         Ok(AssetHandles::default())
     }
-    fn create_skinned_mesh(
+    pub fn create_skinned_mesh(
         &mut self,
         _: &Primitive,
         _: &[Influence],
@@ -411,13 +437,13 @@ impl Scene for Engine {
         self.refuse("create_skinned_mesh", "skinned meshes");
         Ok(self.state.meshes.insert(Mesh::Refused))
     }
-    fn set_joint_palette(&mut self, mesh: MeshId, _: &[Mat4]) -> Result<(), Error> {
+    pub fn set_joint_palette(&mut self, mesh: MeshId, _: &[Mat4]) -> Result<(), Error> {
         match self.state.meshes.get(mesh)? {
             Mesh::Refused => Ok(()),
             Mesh::Static { .. } => Err(Error::InvalidInput("mesh is not skinned")),
         }
     }
-    fn create_emitter(
+    pub fn create_emitter(
         &mut self,
         desc: &EmitterDescriptor<'_>,
         sprite: Option<TextureId>,
@@ -432,11 +458,11 @@ impl Scene for Engine {
         Ok(self.state.emitters.insert(()))
     }
     /// Kept by nothing: there are no particles to step.
-    fn set_particle_step(&mut self, _: f32) -> Result<(), Error> {
+    pub fn set_particle_step(&mut self, _: f32) -> Result<(), Error> {
         Ok(())
     }
 
-    fn spawn(
+    pub fn spawn(
         &mut self,
         mesh: MeshId,
         material: MaterialId,
@@ -444,17 +470,17 @@ impl Scene for Engine {
     ) -> Result<ObjectId, Error> {
         self.state.spawn(mesh, material, transform, u32::MAX)
     }
-    fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error> {
+    pub fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error> {
         self.state.set_transform(object, transform)
     }
-    fn set_decals(&mut self, decals: &[Decal]) -> Result<(), Error> {
+    pub fn set_decals(&mut self, decals: &[Decal]) -> Result<(), Error> {
         if !decals.is_empty() {
             self.refuse("set_decals", "decals");
         }
         Ok(())
     }
 
-    fn set_sun(&mut self, sun: Option<Sun>) -> Result<(), Error> {
+    pub fn set_sun(&mut self, sun: Option<Sun>) -> Result<(), Error> {
         lighting(
             sun,
             &self.state.lights,
@@ -464,7 +490,7 @@ impl Scene for Engine {
         self.state.sun = sun;
         Ok(())
     }
-    fn set_lights(&mut self, lights: &[Light]) -> Result<(), Error> {
+    pub fn set_lights(&mut self, lights: &[Light]) -> Result<(), Error> {
         lighting(
             self.state.sun,
             lights,
@@ -474,7 +500,7 @@ impl Scene for Engine {
         self.state.lights = lights.to_vec();
         Ok(())
     }
-    fn set_sky(&mut self, sky: Sky) -> Result<(), Error> {
+    pub fn set_sky(&mut self, sky: Sky) -> Result<(), Error> {
         if let Sky::Map { map, .. } = sky {
             // The previous sky stays.
             self.state.environments.get(map)?;
@@ -485,31 +511,33 @@ impl Scene for Engine {
         self.state.sky = sky;
         Ok(())
     }
-    fn set_settings(&mut self, settings: Settings) -> Result<(), Error> {
+    pub fn set_settings(&mut self, settings: Settings) -> Result<(), Error> {
         atmosphere(self.state.sky, &settings).validate()?;
         settings.post.validate()?;
         self.refuse_settings(&settings);
         if settings != self.state.settings {
-            self.restart()?;
+            self.restart();
         }
         self.state.settings = settings;
         Ok(())
     }
-    fn settings(&self) -> Settings {
+    pub fn settings(&self) -> Settings {
         self.state.settings
     }
 
-    fn resize(&mut self, width: u32, height: u32) -> Result<(), Error> {
+    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Error> {
         if width == 0 || height == 0 {
             return Err(Error::InvalidInput("output extent must be nonzero"));
         }
         if self.size.is_some_and(|size| size != [width, height]) {
-            self.restart()?;
+            self.restart();
         }
         self.size = Some([width, height]);
         Ok(())
     }
-    fn render(&mut self, camera: &Camera) -> Result<FrameReport, Error> {
+    /// Draws the next frame on `gpu` (the device every frame of this engine uses).
+    pub fn render(&mut self, gpu: &mut GpuDevice, camera: &Camera) -> Result<FrameReport, Error> {
+        self.release_ended(gpu)?;
         let size = self.size.ok_or(Error::InvalidInput(
             "call Engine::resize before Engine::render",
         ))?;
@@ -631,7 +659,7 @@ impl Scene for Engine {
         };
         let images = self
             .frames
-            .render(&mut self.gpu, &self.cache, &scene)
+            .render(gpu, &self.cache, &scene)
             .map_err(fault)?;
         // The renderer's counts are of its opaque draws; a pane is not among them.
         let triangles: usize = opaque.iter().map(|p| p.1.len() / 3 * p.5.len()).sum();
@@ -660,10 +688,10 @@ impl Scene for Engine {
             },
         })
     }
-    fn cut(&mut self) {
+    pub fn cut(&mut self) {
         self.frames.cut();
     }
-    fn capture(&mut self) -> Result<Image, Error> {
+    pub fn capture(&mut self) -> Result<Image, Error> {
         let size = self.size.ok_or(Error::InvalidInput(
             "call Engine::resize before Engine::capture",
         ))?;
@@ -679,5 +707,109 @@ impl Scene for Engine {
             height: size[1],
             rgba8: display,
         })
+    }
+}
+
+/// An [`Engine`] and the device its frames are drawn on, as a [`Scene`]: what
+/// [`Engine::on`] gives.
+pub struct Bound<'a> {
+    engine: &'a mut Engine,
+    gpu: &'a mut GpuDevice,
+}
+/// The engine's own accessors (`images`, `refusals`, `output`) through the borrow.
+impl std::ops::Deref for Bound<'_> {
+    type Target = Engine;
+    fn deref(&self) -> &Engine {
+        self.engine
+    }
+}
+impl Scene for Bound<'_> {
+    fn create_mesh(&mut self, data: &MeshData<'_>) -> Result<MeshId, Error> {
+        self.engine.create_mesh(data)
+    }
+    fn create_texture(&mut self, data: TextureData) -> Result<TextureId, Error> {
+        self.engine.create_texture(data)
+    }
+    fn create_program(&mut self, label: &str, source: &str) -> Result<ProgramId, Error> {
+        self.engine.create_program(label, source)
+    }
+    fn create_material(&mut self, desc: &MaterialDesc<'_>) -> Result<MaterialId, Error> {
+        self.engine.create_material(desc)
+    }
+    fn set_material_parameters(
+        &mut self,
+        material: MaterialId,
+        values: &[(&str, Value)],
+    ) -> Result<(), Error> {
+        self.engine.set_material_parameters(material, values)
+    }
+    fn create_environment(&mut self, data: &PreparedEnvironment) -> Result<EnvironmentId, Error> {
+        self.engine.create_environment(data)
+    }
+    fn add_asset(&mut self, asset: Asset) -> Result<AssetHandles, Error> {
+        self.engine.add_asset(asset)
+    }
+    fn create_skinned_mesh(
+        &mut self,
+        primitive: &Primitive,
+        influences: &[Influence],
+        joint_count: u32,
+    ) -> Result<MeshId, Error> {
+        self.engine
+            .create_skinned_mesh(primitive, influences, joint_count)
+    }
+    fn set_joint_palette(&mut self, mesh: MeshId, palette: &[Mat4]) -> Result<(), Error> {
+        self.engine.set_joint_palette(mesh, palette)
+    }
+    fn create_emitter(
+        &mut self,
+        desc: &EmitterDescriptor<'_>,
+        sprite: Option<TextureId>,
+    ) -> Result<EmitterId, Error> {
+        self.engine.create_emitter(desc, sprite)
+    }
+    fn set_particle_step(&mut self, seconds: f32) -> Result<(), Error> {
+        self.engine.set_particle_step(seconds)
+    }
+    fn spawn(
+        &mut self,
+        mesh: MeshId,
+        material: MaterialId,
+        transform: Mat4,
+    ) -> Result<ObjectId, Error> {
+        self.engine.spawn(mesh, material, transform)
+    }
+    fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error> {
+        self.engine.set_transform(object, transform)
+    }
+    fn set_decals(&mut self, decals: &[Decal]) -> Result<(), Error> {
+        self.engine.set_decals(decals)
+    }
+    fn set_sun(&mut self, sun: Option<Sun>) -> Result<(), Error> {
+        self.engine.set_sun(sun)
+    }
+    fn set_lights(&mut self, lights: &[Light]) -> Result<(), Error> {
+        self.engine.set_lights(lights)
+    }
+    fn set_sky(&mut self, sky: Sky) -> Result<(), Error> {
+        self.engine.set_sky(sky)
+    }
+    fn set_settings(&mut self, settings: Settings) -> Result<(), Error> {
+        self.engine.set_settings(settings)
+    }
+    fn settings(&self) -> Settings {
+        self.engine.settings()
+    }
+    fn resize(&mut self, width: u32, height: u32) -> Result<(), Error> {
+        self.engine.resize(width, height)
+    }
+    fn render(&mut self, camera: &Camera) -> Result<FrameReport, Error> {
+        self.engine.render(self.gpu, camera)
+    }
+    fn cut(&mut self) {
+        self.engine.cut()
+    }
+    fn capture(&mut self) -> Result<Image, Error> {
+        self.engine.capture()
     }
 }

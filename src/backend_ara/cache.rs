@@ -70,12 +70,9 @@ impl ShaderCache {
             include_str!("../../Cargo.lock")
         );
         let salt = Sha256::digest(format!(
-            "renderlab-ara-v2:{adapter}:{compiler}:{}:{}{}",
+            "renderlab-ara-v2:{adapter}:{compiler}:{}:{}",
             include_str!("shader/abi.metal"),
             cooked::binding_layout_hash(),
-            // MEASUREMENT ONLY: a SPIR-V emission variant cooks its own code. Unset, the
-            // salt is what it was.
-            super::shader::spirv_variant()
         ))
         .into();
         // A process reads its programs' reflection back from beside the cooked code.
@@ -153,9 +150,12 @@ impl ShaderCache {
         );
         // The key covers the WGSL by its digest, its entry and state here, and through
         // the salt the adapter's sources, the compiler and the binding layout.
+        // What the device does for every shader (image robustness, workgroup zeroing)
+        // changes the SPIR-V, so it is part of the key.
+        let device = shader::DeviceGuards::of(gpu.info());
         let mut key = Sha256::new();
         key.update(self.salt);
-        key.update(format!("{}:{state:?}:{checks:?}:", pass.entry()));
+        key.update(format!("{}:{state:?}:{checks:?}:{device:?}:", pass.entry()));
         key.update(digest);
         let key = format!("{:x}", key.finalize());
         if let Some(kept) = self.pipelines.borrow().get(&key) {
@@ -167,7 +167,7 @@ impl ShaderCache {
                 .root
                 .join(format!(".{}-{}-{}", key, std::process::id(), next()));
             std::fs::create_dir(&scratch)?;
-            let result = self.emit(pass, (wgsl, checks), state, &scratch, &key);
+            let result = self.emit(pass, (wgsl, checks, device), state, &scratch, &key);
             if let Err(e) = result {
                 let _ = std::fs::remove_dir_all(&scratch);
                 return Err(e);
@@ -192,7 +192,7 @@ impl ShaderCache {
     fn emit(
         &self,
         pass: Pass,
-        (wgsl, checks): (&str, shader::Checks),
+        (wgsl, checks, device): (&str, shader::Checks, shader::DeviceGuards),
         state: RenderState,
         dir: &Path,
         key: &str,
@@ -200,7 +200,7 @@ impl ShaderCache {
         // The Metal path writes naga's MSL defaults whatever the checks; only the
         // SPIR-V the Vulkan gate compares with wgpu follows them.
         #[cfg(target_os = "macos")]
-        let _ = checks;
+        let _ = (checks, device);
         #[cfg(target_os = "macos")]
         let stages = {
             use ara_gpu::cooked::CookedMetalStage;
@@ -266,7 +266,8 @@ impl ShaderCache {
             stages
         };
         #[cfg(not(target_os = "macos"))]
-        let stages = emit_spirv_source(pass, shader::spirv_source(pass, wgsl, checks)?, dir)?;
+        let stages =
+            emit_spirv_source(pass, shader::spirv_source(pass, wgsl, checks, device)?, dir)?;
         cooked::write_json(
             &dir.join("pipeline.json"),
             &CookedPipeline {

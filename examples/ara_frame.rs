@@ -1159,14 +1159,11 @@ fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, F
     use ara_gpu::Device as _;
     use renderlab::backend_ara::{cache::ShaderCache, engine::Engine};
     let (settings, options) = game_ask(level.game.unwrap_or_default());
-    let mut engine = Engine::new(
-        ara_gpu::GpuDevice::new(&[], output.join("device"))?,
-        ShaderCache::new(output.join("shaders"))?,
-        settings,
-    )?;
-    engine.set_readback(!level.timing)?;
+    let mut gpu = ara_gpu::GpuDevice::new(&[], output.join("device"))?;
+    let mut engine = Engine::new(ShaderCache::new(output.join("shaders"))?, settings)?;
+    engine.set_readback(!level.timing);
     let sequence = game_frames(
-        &mut engine,
+        &mut engine.on(&mut gpu),
         size,
         level,
         options,
@@ -1215,7 +1212,7 @@ fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, F
     for refusal in engine.refusals() {
         eprintln!("ara refused {}: {}", refusal.call, refusal.what);
     }
-    let mut gpu = engine.retire()?;
+    engine.retire(&mut gpu)?;
     gpu.collect()?;
     Ok(sequence)
 }

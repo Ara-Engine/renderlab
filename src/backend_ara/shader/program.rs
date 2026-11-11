@@ -78,7 +78,12 @@ impl Program {
     }
     /// Emit SPIR-V through the shared heap adapter.
     pub fn spirv(&self) -> Result<Vec<super::SpirvStage>> {
-        super::spirv::from_source(self.pass, &self.source, self.checks)
+        super::spirv::from_source(
+            self.pass,
+            &self.source,
+            self.checks,
+            super::DeviceGuards::default(),
+        )
     }
     pub(crate) fn source(&self) -> &str {
         &self.source
