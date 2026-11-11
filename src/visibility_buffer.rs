@@ -699,9 +699,9 @@ impl VisibilityBuffer {
         use wgpu::{
             BindingResource as R, ShaderStages as S, TextureFormat as F, TextureUsages as U,
         };
-        let state = r.primary.as_ref().unwrap();
+        let state = r.view.primary.as_ref().unwrap();
         let t = state.targets.as_ref().unwrap();
-        let fresh = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+        let fresh = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
         let instances = ClusterInstances::new(r, draws)?;
         let count = instances.count as usize;
         let (clusters, group_buffer) = (instances.clusters, instances.groups);
@@ -981,7 +981,7 @@ impl VisibilityBuffer {
                 &[("WRITE_RECEIVERS", v), ("LOD_LIFT", f64::from(r.lod_lift))],
             )
         });
-        let state = r.primary.as_ref().unwrap();
+        let state = r.view.primary.as_ref().unwrap();
         let absent = Buffer::new(r, "N1c absent cluster data", 16, storage);
         let cull_groups = std::array::from_fn(|i| {
             bind(
@@ -1328,6 +1328,7 @@ impl Renderer {
     ) -> Result<(), Error> {
         // Unshadowed raster-primary frames still need receiver targets bound to resolve.
         if self
+            .view
             .fresh
             .as_ref()
             .unwrap()
@@ -1337,8 +1338,16 @@ impl Renderer {
         {
             self.ensure_fresh_targets(size, false);
         }
-        let primary = self.primary.as_ref().unwrap().targets.as_ref().unwrap();
+        let primary = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .targets
+            .as_ref()
+            .unwrap();
         let world = &self
+            .view
             .fresh
             .as_ref()
             .unwrap()
@@ -1351,7 +1360,7 @@ impl Renderer {
             .iter()
             .map(|d| ((**d.mesh.index).clone(), d.instances.len()))
             .collect();
-        if self.visibility_buffer.as_ref().is_none_or(|v| {
+        if self.view.visibility_buffer.as_ref().is_none_or(|v| {
             v.size != size
                 || v.key != key
                 || v.lift != self.lod_lift
@@ -1363,10 +1372,10 @@ impl Renderer {
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
             }
-            self.visibility_buffer = Some(next);
+            self.view.visibility_buffer = Some(next);
         }
         let (lod, extent) = (self.lod_pixels, self.software_extent);
-        let v = self.visibility_buffer.as_mut().unwrap();
+        let v = self.view.visibility_buffer.as_mut().unwrap();
         let matrix = camera.matrix(size.width, size.height);
         let eye = camera.view().inverse().w_axis.truncate();
         let scale = size.height as f32 * 0.5 / (camera.fov_y() * 0.5).tan();
@@ -1407,8 +1416,15 @@ impl Renderer {
         stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         stages: Option<&wgpu::QuerySet>,
     ) {
-        let v = self.visibility_buffer.as_ref().unwrap();
-        let arrays = self.primary.as_ref().unwrap().virtual_geometry().unwrap().1;
+        let v = self.view.visibility_buffer.as_ref().unwrap();
+        let arrays = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .virtual_geometry()
+            .unwrap()
+            .1;
         let stage = |i: u32| Stamp(stages.map(|q| (q, i * 2)));
         // The first cull records the primary span's start and the resolve pass its end.
         // No clears: the previous frame's resolve zeroed its hits and its reset zeroed

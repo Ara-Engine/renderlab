@@ -59,13 +59,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     count: if spec.effects.local_shadows { 128 } else { 0 },
                     ..Default::default()
                 },
-                reflections: renderlab::ReflectionSettings {
-                    enabled: spec.effects.reflections,
-                    ..Default::default()
-                },
-                exposure: Exposure::Manual {
-                    stops: spec.exposure_stops,
-                },
                 // The neutral matched subset has no participating medium in either engine.
                 aerial_perspective: spec.effects.atmosphere,
                 height_fog: spec.effects.fog.then_some(renderlab::HeightFog {
@@ -92,7 +85,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     )?;
-    engine.resize(spec.size[0], spec.size[1])?;
+    let view = engine.create_view(&ViewDesc {
+        look: ViewLook {
+            reflections: renderlab::ReflectionSettings {
+                enabled: spec.effects.reflections,
+                ..Default::default()
+            },
+            exposure: Exposure::Manual {
+                stops: spec.exposure_stops,
+            },
+            ..Default::default()
+        },
+        ..ViewDesc::new(spec.size[0], spec.size[1])
+    })?;
     engine
         .renderer_mut()
         .set_post_settings(renderlab::PostSettings {
@@ -202,7 +207,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut gpu = Vec::new();
     for (index, frame) in spec.frames.iter().enumerate() {
         if frame.cut {
-            engine.cut();
+            engine.cut_view(view);
         }
         // Ara's perspective camera uses a 0.1 m near plane and infinite reversed Z.
         // The finite far plane here has the same perspective rays, at 10 km.
@@ -215,7 +220,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             10_000.0,
         )?;
         let start = Instant::now();
-        let report = engine.render(&camera)?;
+        engine.tick(1.0 / 60.0)?;
+        let report = engine.render_view(view, &camera)?;
         let cpu_ms = start.elapsed().as_secs_f64() * 1e3;
         if spec.synchronous {
             engine.device().poll(wgpu::PollType::Wait {
@@ -226,7 +232,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let service_ms = start.elapsed().as_secs_f64() * 1e3;
         let mut hdr_sha256 = None;
         if frame.capture || index == 0 {
-            let image = engine.capture()?;
+            let image = engine.capture_view(view)?;
             if first_image_ms.is_none() {
                 first_image_ms = Some(begin.elapsed().as_secs_f64() * 1e3);
                 fs::write(
@@ -273,7 +279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             gpu.push(gpu_row(sample));
         }
     }
-    engine.capture()?;
+    engine.capture_view(view)?;
     for sample in engine.poll()?.gpu {
         gpu.push(gpu_row(sample));
     }
@@ -291,7 +297,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             0.1,
             10_000.0,
         )?;
-        let before = engine.capture()?;
+        let before = engine.capture_view(view)?;
         let source = include_str!("../shaders/programs/standard.wgsl");
         let edit = source.replace(
             "return exposed;",
@@ -303,8 +309,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let start = Instant::now();
         let report = engine.reload_program(engine.standard_program(), &edit)?;
         let compile_ms = start.elapsed().as_secs_f64() * 1e3;
-        engine.render(&camera)?;
-        let edited = engine.capture()?;
+        engine.tick(1.0 / 60.0)?;
+        engine.render_view(view, &camera)?;
+        let edited = engine.capture_view(view)?;
         let image_ms = start.elapsed().as_secs_f64() * 1e3;
         write_png(&out.join("shader-edited.png"), &edited)?;
         reload = Some(

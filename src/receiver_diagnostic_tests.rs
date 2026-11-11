@@ -66,7 +66,7 @@ fn gpu_receiver_blocking_ray() {
     let out = PathBuf::from(m["output"].as_str().unwrap());
     fs::create_dir_all(&out).unwrap();
     // Raw attachments retain epsilon (the generic evidence helper exports depth).
-    let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+    let t = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
     fs::write(out.join("world.f32"), read_texture(&r, &t.world.texture)).unwrap();
     fs::write(out.join("normal.f32"), read_texture(&r, &t.normal.texture)).unwrap();
     fs::write(
@@ -131,7 +131,7 @@ fn gpu_receiver_blocking_ray() {
             },
         ],
     });
-    let (fresh_layout, fresh_bind) = r.primary.as_ref().unwrap().test_fresh_bindings();
+    let (fresh_layout, fresh_bind) = r.view.primary.as_ref().unwrap().test_fresh_bindings();
     let pipeline_layout = r
         .device
         .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -280,7 +280,7 @@ fn gpu_receiver_solid_verification() {
                 },
             ],
         });
-        let (fresh_layout, fresh_bind) = r.primary.as_ref().unwrap().test_fresh_bindings();
+        let (fresh_layout, fresh_bind) = r.view.primary.as_ref().unwrap().test_fresh_bindings();
         let pipeline_layout = r
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -356,7 +356,7 @@ fn gpu_receiver_fresh_screen() {
             label: Some("fresh scheduling candidate"),
             source: wgpu::ShaderSource::Wgsl(source.into()),
         });
-        let p = r.primary.as_ref().unwrap().fresh_pipeline(
+        let p = r.view.primary.as_ref().unwrap().fresh_pipeline(
             &r.device,
             &r.ledger,
             &shader,

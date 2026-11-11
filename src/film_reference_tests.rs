@@ -239,9 +239,10 @@ fn integrate_with(
             compilation_options: Default::default(),
             cache: None,
         });
-    let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+    let t = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
     let textures = [
-        &r.primary
+        &r.view
+            .primary
             .as_ref()
             .unwrap()
             .targets
@@ -251,7 +252,7 @@ fn integrate_with(
             .texture,
         &t.world.texture,
         &t.visibility.texture,
-        &r.lighting.hdr.as_ref().unwrap().resolved.texture,
+        &r.view.hdr.as_ref().unwrap().resolved.texture,
     ];
     let views = textures.map(|t| t.create_view(&Default::default()));
     let mut entries: Vec<_> = views
@@ -277,6 +278,7 @@ fn integrate_with(
         },
     ]);
     let tile_view = r
+        .view
         .primary
         .as_ref()
         .unwrap()
@@ -319,13 +321,13 @@ fn integrate_with(
         entries: &entries,
     });
     let sources = policy.map_or_else(film_sources, receiver_policy_tests::sources);
-    let pipelines = r.primary.as_ref().unwrap().test_film_pipelines(
+    let pipelines = r.view.primary.as_ref().unwrap().test_film_pipelines(
         &r.device,
         &sources.kernels,
         &sources.shading,
     );
     let direct_pipelines = policy.map(|_| {
-        r.primary.as_ref().unwrap().test_film_pipelines(
+        r.view.primary.as_ref().unwrap().test_film_pipelines(
             &r.device,
             &sources.kernels,
             &receiver_policy_tests::direct_source(),
@@ -486,7 +488,7 @@ fn gpu_film_reference() {
         let read = |names: [&str; 2]| {
             names.map(|n| fs::read_to_string(frozen.join(format!("{n}.wgsl"))).unwrap())
         };
-        r.pipeline.primary = Some(r.primary.as_ref().unwrap().compile(
+        r.pipeline.primary = Some(r.view.primary.as_ref().unwrap().compile(
             &r.device,
             &r.ledger,
             &read(["kernels-hard", "kernels-soft"]),

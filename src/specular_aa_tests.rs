@@ -226,7 +226,7 @@ impl Average {
         // the reference raster projection. Eye/light/materials are not jittered.
         frame(r, t, c, scene, 2);
         let view = r
-            .lighting
+            .view
             .hdr
             .as_ref()
             .unwrap()

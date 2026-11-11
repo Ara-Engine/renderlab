@@ -1938,7 +1938,9 @@ fn frame(
             let planned = images.plan(tr::PlanInputs {
                 settings: r.settings,
                 budget: crate::ReconstructionShadowBudget::default(),
-                rendered_frames: history.count,
+                // One view: its previous frame is the history's last.
+                previous_frame: history.count,
+                frame: history.count + 1,
                 index: k,
                 key,
                 lights: &scene.lighting.lights,

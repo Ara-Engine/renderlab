@@ -35,7 +35,7 @@ fn replay_pose(r: &Renderer, out: &std::path::Path, pose: usize, seeds: u32) -> 
     let [world, normal, _] = receivers(r);
     fs::write(out.join(format!("pose-{pose}-world.f32")), &world).unwrap();
     fs::write(out.join(format!("pose-{pose}-normal.f32")), &normal).unwrap();
-    let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+    let t = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
     let (w, h) = (t.world.texture.width(), t.world.texture.height());
     let size = u64::from(w) * u64::from(h) * 32;
     let masks = r.device.create_buffer(&wgpu::BufferDescriptor {
@@ -75,7 +75,7 @@ fn replay_pose(r: &Renderer, out: &std::path::Path, pose: usize, seeds: u32) -> 
             resource: masks.as_entire_binding(),
         }],
     });
-    let primary = r.primary.as_ref().unwrap();
+    let primary = r.view.primary.as_ref().unwrap();
     let (fresh_layout, fresh_bind) = primary.test_fresh_bindings();
     let pipeline_layout = r
         .device
@@ -340,7 +340,7 @@ fn gpu_soft_shadow_mask_replay() {
         r.set_shadows(&Shadows::default()).unwrap();
         r.collect().unwrap();
         assert!(
-            r.fresh.as_ref().unwrap().targets.is_none(),
+            r.view.fresh.as_ref().unwrap().targets.is_none(),
             "disabled shadow targets retained"
         );
     }
