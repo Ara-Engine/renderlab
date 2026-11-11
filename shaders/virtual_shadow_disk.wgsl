@@ -6,7 +6,10 @@
 // Method: occluder back-projection onto the light. The disk is 64 fixed sample directions, one
 // bit each (the rook pattern of tools/n-vsm1/pattern.py). Every map texel near the receiver is a
 // column of solid between its top surface and the surface under it (the peel layer, when that
-// belongs to the same placement; otherwise down without end, as a height field). A column
+// belongs to the same placement; otherwise its underside is unknown and it is taken down to
+// half its height above the receiver: a height field stays closed wherever neighbouring tops
+// differ by less than that, and an occluder far up the light is not taken for a wall beside
+// the receiver, which would harden its penumbra). A column
 // part at height t above the receiver, at light-space offset q, hides the directions q/t, a
 // rectangle for a square texel; a part from t0 to t1 hides the rectangles between, taken as
 // their bounding rectangle. The blocked directions of all columns are OR-ed, so overlapping
@@ -18,7 +21,7 @@
 // its texels (its "band"), over at most a (2 VD_R + 1)^2 window; the next level serves the
 // band above over the same texel count. The receiver's level starts at the bias height. Above
 // the coarsest level's band its max-mips continue the ladder (VD_MIPS of them): cells twice
-// as large per band, each a column solid from its highest centre down.
+// as large per band, each a column from its highest centre down to half that height.
 //
 // Near field: a surface closer to the receiver's tangent plane than VD_BIAS texels is not
 // taken from the map (its heights are a texel apart, and LOD receivers lie off the source
@@ -379,7 +382,8 @@ fn vd_map() {
                     let height=vsm_height(top);
                     let t=height-p.z;
                     if t<=lo || !vd_above(vec3<f32>(c,height),margin) {continue;}
-                    var bottom=lo;
+                    // An unknown underside: half the top's height above the receiver.
+                    var bottom=max(lo,0.5*t);
                     if VD_PEEL {
                         let peel=vsm_peel_words[i];
                         if peel.x!=0u && peel.x>>bits==top.x>>bits {bottom=max(lo,vsm_height(peel)-p.z);}
@@ -411,7 +415,7 @@ fn vd_map() {
                 let c=origin+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*cell;
                 let t=height-p.z;
                 if t<=lo || !vd_above(vec3<f32>(c,height),margin) {continue;}
-                vd_column(c-p.xy,0.5*cell,max(lo,1e-6*texel),min(t,hi));
+                vd_column(c-p.xy,0.5*cell,max(max(lo,0.5*t),1e-6*texel),min(t,hi));
             }
         }
         if vd_full() {return;}
