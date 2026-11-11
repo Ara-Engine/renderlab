@@ -24,10 +24,10 @@
 //
 // Near field: a surface closer to the receiver's tangent plane than VD_BIAS texels is not
 // taken from the map (its heights are a texel apart, and LOD receivers lie off the source
-// surface). There the visible surface decides (vd_screen): the pixels along the sun's screen
-// direction are occluder samples at their own world points, tested like map columns. A sample
-// counts only when its point really lies in the receiver's cone toward the disk, so a
-// foreground object that merely overlaps on screen is never taken for an occluder.
+// surface). Nothing else answers there. N-VSM1 read the visible surface along the sun's screen
+// direction for it; N-VSM2 removed that: a pixel next to the receiver is far wider than the
+// disk, so every rule tried either turned lit relief black (S3's flips) or added nothing
+// (docs/n-vsm1.md, "The near field").
 // virtual_shadow_gpu.rs prepends VD_R and owns every layout below; the
 // shared structures and helpers are copies of virtual_shadow.wgsl's and must keep its layouts.
 
@@ -45,7 +45,8 @@ struct VsmFrame {
     levels:array<VsmLevel,VSM_MAX_LEVELS>,
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
-// clip: this frame's world-to-clip matrix (the receivers' own, jitter included).
+// clip: this frame's world-to-clip matrix (the receivers' own, jitter included); not read since
+// the visible-surface samples went, kept so the uniform's layout stands.
 // size: the image size in pixels (xy); z: TR1's frame number plus one on reconstructed frames
 // (the receiver jitter's sequence index), 0 otherwise.
 // above: per k in 0..=64 (two a vec4), the mask of the samples whose y rank is at least k.
@@ -149,12 +150,8 @@ struct ShadowView {world_to_clip:mat4x4<f32>,coverage_bias:vec4<f32>,camera_dept
 
 // Screen constants (variant screens set them; the defaults are the shipped lookup).
 // A map surface blocks only when it is this many texels of the receiver's level above the
-// receiver's tangent plane (measured along the normal); below that the visible surface decides.
+// receiver's tangent plane (measured along the normal).
 override VD_BIAS:f32=1.0;
-// The same for a visible-surface sample, in pixel footprints at the receiver.
-override VD_SCREEN_BIAS:f32=0.1;
-// Pixels the visible-surface samples reach along the sun's screen direction (0: off).
-override VD_SCREEN:u32=6u;
 // The peel layer bounds a column from below where it is the top's own placement.
 override VD_PEEL:bool=true;
 // The least thickness of a column, in texels of its level (see vd_map).
@@ -171,12 +168,8 @@ override VD_PEEL2:bool=true;
 // texel, as a coarser level rasterized at its centres would hold); false: the cell is its
 // highest texel, which widens every occluder by up to a cell.
 override VD_MIP_POINT:bool=true;
-// Visible-surface samples joined to the one before (within this many pixel footprints) are a
-// surface profile: they block the directions between them. 0: every sample is a column down to
-// the receiver (N-VSM1).
-override VD_JOIN:f32=4.0;
 // Screens: 1 writes lit before any work (dispatch and page work only), 2 after the receiver's
-// setup, 3 skips the map windows, 4 the visible-surface samples.
+// setup, 3 skips the map windows.
 override VD_SKIP:u32=0u;
 
 // The top of level `level`'s band: the height whose reach is VD_R of its texels. The reach is
@@ -247,8 +240,6 @@ struct VdPixel {
     // The disk in direction space (light xy per unit of height): its centre and radius, and
     // the largest slope of its directions from the map's axis.
     centre:vec2<f32>,radius:f32,slope:f32,
-    // The pixel footprint at the receiver, metres.
-    footprint:f32,
 };
 var<private> vd_px:VdPixel;
 // The blocked directions so far.
@@ -289,7 +280,6 @@ fn vd_prepare(id:vec2<u32>) {
     vd_px.centre=s.xy/max(s.z,1e-3);
     vd_px.radius=max(shadow_views[layer].texel.z,1e-5);
     vd_px.slope=vd_px.radius+length(vd_px.centre);
-    vd_px.footprint=length(world.xyz-vsm.eye.xyz)*vsm.eye.w;
     // The jitter moves the receiver within its tangent plane, so the plane tests stay exact. A
     // plane steeper than 5:1 in light space would move it far along the surface: no jitter.
     let nl=vd_px.normal;
@@ -476,89 +466,6 @@ fn vd_map() {
     }
 }
 
-// Blocks the samples whose coordinate along the unit `axis` of the disk (in radii from its
-// centre) lies in lo..hi.
-fn vd_span(axis:vec2<f32>,lo:f32,hi:f32) {
-    if lo>1.0 || hi< -1.0 || hi<=lo {return;}
-    for(var i=0u;i<32u;i+=1u) {
-        let s=vd.samples[i];
-        let x=vec2<f32>(dot(s.xy,axis),dot(s.zw,axis));
-        let inside=(x>=vec2<f32>(lo)) & (x<=vec2<f32>(hi));
-        let bits=u32(inside.x)|(u32(inside.y)<<1u);
-        if i<16u {vd_mask.x|=bits<<(2u*i);} else {vd_mask.y|=bits<<(2u*i-32u);}
-    }
-}
-
-// The visible surface as occluder samples: the pixels along the sun's screen direction from
-// the receiver, at their own world points. They lie in the plane of the view ray and the sun,
-// where a direction is one coordinate: its place along `axis`, the line through the disk's
-// centre that the view ray maps to. Consecutive samples on one surface (VD_JOIN) are its
-// profile, and a ray toward the disk meets the profile exactly when its coordinate is between
-// the least and the greatest of the profile's points. Across the plane a pixel is far wider
-// than the disk this close to the receiver, so the samples blocked are a band of the disk.
-// A sample with no joined neighbour before it (a silhouette in front, thin geometry) is a
-// patch at its own height.
-// N-VSM1 took every sample as a column down to the receiver, which hid the whole disk whenever
-// a neighbouring pixel lay within half a footprint of the light's axis: lit relief turned black
-// (S3's flips).
-fn vd_screen(id:vec2<u32>) {
-    let l=normalize(vd_px.centre.x*vsm.u.xyz+vd_px.centre.y*vsm.v.xyz+vsm.l.xyz);
-    let reach=f32(VD_SCREEN)*vd_px.footprint;
-    let a=vd.clip*vec4<f32>(vd_px.origin,1.0);
-    let b=vd.clip*vec4<f32>(vd_px.origin+l*reach,1.0);
-    if a.w<=1e-6 || b.w<=1e-6 {return;}
-    let scale=vec2<f32>(0.5,-0.5)*vd.size.xy;
-    let span=(b.xy/b.w-a.xy/a.w)*scale;
-    let pixels=max(abs(span.x),abs(span.y));
-    // A sun along the view ray moves no pixel: nothing visible lies above the receiver.
-    if pixels<0.5 {return;}
-    let step=span/pixels;
-    let first=vec2<f32>(id)+vec2<f32>(0.5);
-    let size=vec2<i32>(textureDimensions(vsm_world));
-    let margin=VD_SCREEN_BIAS*vd_px.footprint;
-    // The view ray in the map's basis, and the line of direction space it maps to.
-    let view=vd_px.world-vsm.eye.xyz;
-    let across=vec2<f32>(dot(view,vsm.u.xyz),dot(view,vsm.v.xyz))-vd_px.centre*dot(view,vsm.l.xyz);
-    if dot(across,across)<=1e-12*dot(view,view) {return;}
-    let axis=normalize(across);
-    // The profile so far: its range along the axis (disk radii), the sample before (its world
-    // point and footprint) and whether the next sample can join it. The receiver comes first.
-    var lo=3.4e38;var hi=-3.4e38;
-    var before=vd_px.world;
-    var before_size=vd_px.footprint;
-    var chained=true;
-    let floor_t=1e-3*vd_px.footprint;
-    for(var k=1u;k<=min(VD_SCREEN,u32(ceil(pixels)));k+=1u) {
-        let s=vec2<i32>(floor(first+step*f32(k)));
-        if any(s<vec2<i32>(0)) || any(s>=size) {break;}
-        if textureLoad(vsm_tiles,vec2<u32>(s)/VSM_TRACE_TILE,0).x==0u || textureLoad(vsm_hit,s,0).x==0u {
-            vd_span(axis,lo,hi);lo=3.4e38;hi=-3.4e38;chained=false;
-            continue;
-        }
-        let world=textureLoad(vsm_world,s,0).xyz;
-        let q=vsm_light(world);
-        let rel=vec3<f32>(q.xy-vd_px.p.xy,q.z-vd_px.p.z);
-        let pixel=length(world-vsm.eye.xyz)*vsm.eye.w;
-        if VD_JOIN<=0.0 {
-            if rel.z>0.0 && vd_above(q,margin) {vd_column(rel.xy,0.5*pixel,1e-6*vd_px.footprint,rel.z);}
-            if vd_full() {return;}
-            continue;
-        }
-        let joined=chained && distance(world,before)<=VD_JOIN*(pixel+before_size);
-        before=world;before_size=pixel;
-        // A point no higher than the receiver along the light is more than a right angle from
-        // the sun: the profile ends there.
-        chained=rel.z>floor_t;
-        if !joined || !chained {vd_span(axis,lo,hi);lo=3.4e38;hi=-3.4e38;}
-        if !chained {continue;}
-        if !joined && vd_above(q,margin) {vd_column(rel.xy,0.5*pixel,0.875*rel.z,rel.z);}
-        let x=dot(rel.xy/rel.z-vd_px.centre,axis)/vd_px.radius;
-        lo=min(lo,x);hi=max(hi,x);
-        if vd_full() {return;}
-    }
-    vd_span(axis,lo,hi);
-}
-
 fn vd_pixel(id:vec2<u32>)->u32 {
     if VD_SKIP==1u {return 256u;}
     vd_prepare(id);
@@ -566,7 +473,6 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     vd_mask=vec2<u32>(0u);
     if !vd_px.thin && !vd_facing() {return 0u;}
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {vd_map();}
-    if VD_SCREEN!=0u && VD_SKIP!=4u && !vd_full() {vd_screen(id);}
     // 64 samples to the 0..256 count the shading programs read.
     return 4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
 }
