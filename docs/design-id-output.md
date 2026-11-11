@@ -1,6 +1,6 @@
 # Entity-ID output and view modes (spec)
 
-Root, 2026-11-11. Draft for review by the Ara bridge thread and the editor's owner before the API is fixed. Row 1 of [ara-render-replacement.md](ara-render-replacement.md).
+Root, 2026-11-11. API shape for the Ara bridge to write against now (2026-11-11 ~17:20 UTC); the unit builds it. It hangs off a view ([design-views.md](design-views.md)). Row 1 of [ara-render-replacement.md](ara-render-replacement.md).
 
 ## What it is for
 - **Picking in the editor:** which object is under a pixel, and later a rectangle's objects.
@@ -12,30 +12,28 @@ Root, 2026-11-11. Draft for review by the Ara bridge thread and the editor's own
 - The engine's batch table knows, per placement, which `ObjectId` it is (`State::batches`: each batch's `objects` in instance-slot order).
 - `Renderer` already has a `ViewMode` (`BaseColor`, `Normal`, `Metallic`, `Roughness`, `Lit`), used by the raster path.
 
-## Proposed API (engine level)
+## API (engine level; hangs off a view, see design-views.md)
 
 ```rust
-/// What the engine writes besides the colour image.
-pub struct Outputs { pub ids: bool }          // Engine::set_outputs; off by default
-pub enum ViewMode { Lit, BaseColor, Normal, Roughness, Metallic, Emission, Occlusion,
-                    LightingOnly, Overdraw, Wireframe /* later */, ShadowCascades /* later */ }
+pub struct Outputs { pub ids: bool }                 // per view, in ViewDesc; off by default
+pub enum ViewMode { Lit, BaseColor, Normal, Roughness, Metallic, Emission, Occlusion, LightingOnly, Overdraw }
 impl Engine {
-    pub fn set_outputs(&mut self, outputs: Outputs) -> Result<(), Error>;
-    pub fn set_view_mode(&mut self, mode: ViewMode) -> Result<(), Error>;
-    /// The ID image of the last rendered frame: one u32 per pixel, an object's tag (below)
-    /// or 0 for none. Same size as the colour output.
-    pub fn id_output(&self) -> Option<&wgpu::Texture>;          // R32Uint, for GPU consumers
-    pub fn pick(&mut self, x: u32, y: u32) -> Result<Option<ObjectId>, Error>;   // one-pixel readback
-    pub fn capture_ids(&mut self) -> Result<IdImage, Error>;   // whole-frame readback for legends
-    /// The caller's own 32-bit tag for an object (an Ara entity id); 0 is reserved.
-    pub fn set_tag(&mut self, object: ObjectId, tag: u32) -> Result<(), Error>;
+    /// The embedder's own 32-bit id for an object (Ara's entity); 0 means none.
+    pub fn set_object_id(&mut self, object: ObjectId, id: u32) -> Result<(), Error>;
+    /// The view's ID target of its last rendered frame: R32Uint, same size as its output.
+    pub fn view_ids(&self, view: ViewId) -> Option<&wgpu::Texture>;
+    /// Asks for the ids of a rectangle of the view's last frame without stalling: the copy is
+    /// queued after that frame and its result arrives in `poll()` as `Event::Ids`.
+    pub fn request_ids(&mut self, view: ViewId, rect: IdRect) -> Result<IdRequest, Error>;
 }
+pub enum Event { /* existing */ Ids { request: IdRequest, rect: IdRect, ids: Vec<IdPixel> } }
+pub struct IdPixel { pub opaque: u32, pub front: u32 }
 ```
 
-- **Tags, not internal ids.** The ID image holds a caller-chosen 32-bit tag per object (Ara's entity index), so Ara needs no table to translate back. Untagged objects write their engine object index + 1 with the top bit set, so they are still distinct.
-- **Which surface a pixel names:** the nearest opaque surface on the primary visibility (the hit record). Transparent surfaces and particles do not write IDs in the first version; a stated rule, open to the consumers (see questions).
-- **Cost:** one compute pass after primary visibility, reading the hit record and a per-placement tag buffer (one u32 per placement, rewritten when tags or batches change). Nothing runs when `ids` is off.
-- **Temporal reconstruction:** IDs come from this frame's unjittered-or-jittered hit record, so an edge pixel names whichever surface this frame's sample hit. For picking that is right; for legends it is right at pixel precision.
+- **Two ids per pixel.** `opaque` is the nearest opaque surface. `front` is the frontmost surface of any kind that is not fully clear: glass, a cut-out leaf, a blended decal's host surface; particles are excluded (they are effects, not objects, in the first version). A click on glass therefore has both the glass and the thing behind it; the editor chooses (Unity's rule is "front", with a modifier for "through").
+- **Ids do not shimmer under temporal jitter.** They come from the history's settled surface where temporal reconstruction has one (the surface covering most of the pixel), and from this frame's hit only where the history restarted. A still camera's ID image is identical across 16 jittered frames; at a moving edge a pixel names the surface covering more than half of it.
+- **Both paths:** the non-RT visibility buffer and the RT traced primaries write the same hit record (placement + 1, primitive); the ID pass maps placement and instance slot to the embedder's id through a per-placement table rewritten when ids or batches change.
+- **Cost:** nothing when `ids` is off; one compute pass when on (target under 0.3 ms at 1080p).
 
 ## View modes
 - Each mode is a shading-stage switch on the existing paths, not a separate renderer: the program's `surface` outputs are written instead of lit colour (base colour, normal, roughness, metalness, emission, occlusion), or lighting is computed on white albedo (lighting only).
