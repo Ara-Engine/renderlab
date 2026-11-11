@@ -56,7 +56,7 @@ the Rust profile (the dev numbers already had Renderlab at opt-level 3 as a depe
 release agree within run-to-run spread. RT baselines vary from 22 to 28 ms across leases, a spread
 the tables below show inside one lease.
 
-Build identity: Renderlab worktree at `46caa60` plus this branch; Ara `f3248b339` (PR #4's head) in
+Build identity: Renderlab worktree at `46caa60` plus this branch; Ara `62893cd04` (PR #4's head) in
 a detached worktree with `renderlab` patched to the local path and two local, unpushed ablation
 hooks in the bridge (`PSHOW_OFF`, `PSHOW_ANISO`, `PSHOW_FREEZE`, `PSHOW_NOSKIN`, a per-sample pass log).
 
