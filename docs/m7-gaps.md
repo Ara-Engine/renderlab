@@ -794,7 +794,7 @@ Showcase RT with the map: shading pass 24.2 ms of a 32.5 ms span; with the const
     - They are 26% of the energy, against Unreal's 16%; steps above 40 codes are 8% against 2%.
     - Without the >20-code steps, Renderlab is at 3.73 and Unreal at 3.38.
     - They are not GI and not Catmull-Rom/bilinear switching.
-    - Next: capture TR1's per-pixel restart mask, to tell geometric-tap rejection on the scan's crack triangles from glints in the fresh sample.
+    - Mask captured (P-SPLIT, 2026-11-11): the cause is history rejection along the scan's crack folds, not bright samples. See "M8 P-SPLIT parked" below. The fix is the next flicker unit.
 - **Not the cause:** GI cell churn (P-STILL §4.2). In motion the cache creates 56 cells a frame, with about 9 bucket-full misses a frame, but it does not move flicker. The eviction follow-up stays a cost item.
 - **S4 interior grain** (P-YARD2 item 1, second half) is a separate source: dim walls lit by GI and sky, not sunlit texture. It was not split here.
 - **The validation layer never affected any Unreal ratio.** P-NSQ, P-NSQ2 and P-NSQ3 timed with it on: their CPU submit and short RT spans read high, and their non-RT GPU passes stand. RT still is 3.35 ms, 1.34x faster than HW Lumen Epic. P-YARD2's 3.82 was a contended visit pair.
@@ -881,3 +881,30 @@ Ara main d2d990f26, Renderlab pin 901c1d2, RTX 4070 SUPER, 1080p, sky map, quiet
   - Showcase through Ara: still RT 31.5 to 16.2 ms, non-RT 43.6 to 30.8 ms; identical by eye.
   - Cold start, first image: about 183 s to about 11 s on the game scene; about 120 s (timed out) to about 25 s for Showcase through Ara.
   - `gpu_environment_ownership_admission_and_reload` already fails on main (live-bytes bound); still OPEN.
+
+## M8 P-SPLIT parked (2026-11-11)
+
+The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothing it did failed. Its branch `t3/p-split` is pushed at 4ae6fdb and is **not merged**. The coordinator parked the remainder behind P-RELIT and P-GLOSSY.
+
+**Done on the branch**
+- Crack flashes, diagnosis only (`docs/p-split.md` section A, commit 3052644). The >20-code one-frame steps are history rejection: TR1's geometric tap test (`tr1_tap`) rejects taps across the scan's crack folds, so those pixels sit in a 3-5 frame window every frame.
+  - 64% of the step energy is on 13% of pixels, which line the cracks, ledges and folds.
+  - The spikes are 75% bilinear with 1-3 taps and 20% spatial start; only 15% of their fresh samples lie more than 10 codes outside the neighbours' range.
+  - Clamping the fresh sample does nothing: flicker 4.325 (hard clamp) and 4.319 (widened) against 4.323, and the hard clamp raises still error from 6.630 to 6.703.
+- Trust policy (commits 9023f46, 4ae6fdb): every module composed from program text compiles checked, the bundled standard program, GI cell shading and glass reflected hits included, so an edit recompiles only the kernels whose text changes. Root summarised the unit's last lease (RTX 4070 SUPER, quarry, 1080p, old unchecked policy against checked, interleaved twice):
+
+  | | Unchecked | Checked |
+  |---|---|---|
+  | RT moving frame (walk) | 3.98 ms | 3.96 ms |
+  | RT shading pass | 0.64 ms | 0.62 ms |
+  | Non-RT moving frame (walk) | 10.54-10.61 ms | 10.32-10.47 ms |
+  | Non-RT shading pass | 0.65 ms | 0.565 ms |
+  | HDR frames identical to the other policy | | 125 of 125 on each path |
+
+  Lib tests pass at 4ae6fdb (209 passed). Game scene first image at 720p: cold 10.9 s RT and 9.9 s non-RT, warm 0.9 s on both.
+
+**Left, OPEN**
+1. Crack-flash fix. Candidates, unmeasured: a tap test that tolerates near-coplanar folds of one mesh, or keeping the window when only outer taps fail and renormalising over the accepted ones. Real disocclusions must keep rejecting, so the S4 door and the silhouette tests gate it.
+2. Merge the trust policy. The numbers above support it. Before merging: fix the census tool, whose `cpu_shader_compile_structure` test fails on the branch because it composes the `program-bins` module without the `PRIMARY_BATCHES` constant (a tool fault, three variants), and merge main (the branch is based on a97d663).
+3. The kernel split itself was not started. P-SKY took the game scene's cold first image from about 183 s to about 10 s, so it is no longer urgent; the remaining cold cost is the per-kernel NVIDIA compile (P-PIPE).
+4. `docs/p-split.md` has empty Census and Cold start sections and no result summary.
