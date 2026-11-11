@@ -59,6 +59,71 @@ def resource_sample():
     return dict(host_unix_seconds=time.time(), available_mbytes=memory.available/(1024**2), rustc_count=count)
 
 
+# The environment may only tighten these. The one sanctioned raise is --quarry-lease
+# (coordinator, 2026-11-10): child cap 12 GiB, 14 GiB to start, machine floor still 8 GiB.
+WATCH_CHILD_MBYTES = min(8192.0, float(os.environ.get("RENDERLAB_WATCH_CHILD_MB", 8192)))
+WATCH_FREE_MBYTES = max(8192.0, float(os.environ.get("RENDERLAB_WATCH_FREE_MB", 8192)))
+QUARRY_CHILD_MBYTES = 12288.0
+QUARRY_PREFLIGHT_MBYTES = 14336.0
+
+
+def memory_watch_sample(root_pid):
+    """Machine available MiB and the largest working set (MiB) in root_pid's process tree.
+
+    The always-on watchdog (coordinator rule, 2026-11-10): an admission bar is not a memory
+    guard, so every leased child tree is sampled once a second, apart from --runtime-memory-mbytes.
+    """
+    class Memory(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("load", wintypes.DWORD)] + [
+            (name, ctypes.c_ulonglong) for name in ("total", "available", "page_total", "page_available", "virtual_total", "virtual_available", "extended")]
+    class Process(ctypes.Structure):
+        _fields_ = [("size", wintypes.DWORD), ("usage", wintypes.DWORD), ("pid", wintypes.DWORD),
+            ("heap", ctypes.c_size_t), ("module", wintypes.DWORD), ("threads", wintypes.DWORD),
+            ("parent", wintypes.DWORD), ("priority", wintypes.LONG), ("flags", wintypes.DWORD),
+            ("name", wintypes.WCHAR*260)]
+    class Counters(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("faults", wintypes.DWORD)] + [
+            (name, ctypes.c_size_t) for name in ("peak_ws", "ws", "qpp", "qp", "qnpp", "qnp", "pagefile", "peak_pagefile")]
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    kernel.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+    kernel.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Process)]
+    kernel.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Process)]
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Counters), wintypes.DWORD]
+    memory = Memory(); memory.size = ctypes.sizeof(memory)
+    kernel.GlobalMemoryStatusEx(ctypes.byref(memory))
+    parents = {}
+    snapshot = kernel.CreateToolhelp32Snapshot(2, 0)
+    entry = Process(); entry.size = ctypes.sizeof(entry)
+    try:
+        valid = kernel.Process32FirstW(snapshot, ctypes.byref(entry))
+        while valid:
+            parents[entry.pid] = entry.parent
+            valid = kernel.Process32NextW(snapshot, ctypes.byref(entry))
+    finally:
+        kernel.CloseHandle(snapshot)
+    tree, grew = {root_pid}, True
+    while grew:
+        more = {pid for pid, parent in parents.items() if parent in tree} - tree
+        grew = bool(more); tree |= more
+    largest, largest_pid = 0.0, None
+    for pid in tree:
+        handle = kernel.OpenProcess(0x1000 | 0x0010, False, pid)  # QUERY_LIMITED_INFORMATION | VM_READ
+        if not handle:
+            continue
+        try:
+            counters = Counters(); counters.cb = ctypes.sizeof(counters)
+            if psapi.GetProcessMemoryInfo(handle, ctypes.byref(counters), counters.cb):
+                ws = max(counters.ws, counters.pagefile) / 2**20
+                if ws > largest:
+                    largest, largest_pid = ws, pid
+        finally:
+            kernel.CloseHandle(handle)
+    return memory.available / 2**20, largest, largest_pid
+
+
 def utc():
     return datetime.datetime.now(datetime.timezone.utc).isoformat()
 
@@ -110,6 +175,8 @@ def main():
     p.add_argument("--contended-screen", action="store_true", help="authorized screen only: 5 GiB preflight, 3 GiB runtime, marked contended")
     p.add_argument("--record-resources", action="store_true", help="attach 10 Hz memory/rustc context to each timing sample")
     p.add_argument("--fast-check", action="store_true", help="correctness batch: 4 GiB preflight, 2 GiB runtime abort")
+    p.add_argument("--quarry-lease", action="store_true",
+                   help="full-quarry lease: watchdog child cap 12 GiB (machine floor stays 8 GiB), starts only at 14 GiB available")
     p.add_argument("command", nargs=argparse.REMAINDER)
     a = p.parse_args()
     preflight_floor = PREFLIGHT_MEMORY_MBYTES if PREFLIGHT_MEMORY_MBYTES is not None else (5120 if a.contended_screen else 6144)
@@ -122,6 +189,12 @@ def main():
         a.record_resources = True
     if RUNTIME_MEMORY_MBYTES is not None:
         a.runtime_memory_mbytes = RUNTIME_MEMORY_MBYTES
+    global WATCH_CHILD_MBYTES
+    if a.quarry_lease:
+        WATCH_CHILD_MBYTES = QUARRY_CHILD_MBYTES
+        preflight_floor = max(preflight_floor, QUARRY_PREFLIGHT_MBYTES)
+    print(f"memory watchdog: child cap {WATCH_CHILD_MBYTES:g} MiB, machine floor {WATCH_FREE_MBYTES:g} MiB"
+          f"{' (quarry lease)' if a.quarry_lease else ''}", flush=True)
     if not 0 < a.minutes <= 45:
         p.error("lease must be at most 45 minutes")
     if not 0 <= a.wait_seconds <= 45:
@@ -147,7 +220,8 @@ def main():
                 save(runs / f"{a.label}-deferred.json", dict(utc=utc(), owner=(LOCK / "owner.json").read_text() if (LOCK / "owner.json").exists() else None))
                 return 3
             time.sleep(min(1,max(0,deadline-time.monotonic())))
-    owner = dict(owner=OWNER, utc=utc(), expected_minutes=a.minutes, launcher_pid=os.getpid(), token=uuid.uuid4().hex, label=a.label)
+    owner = dict(owner=OWNER, utc=utc(), expected_minutes=a.minutes, launcher_pid=os.getpid(), token=uuid.uuid4().hex, label=a.label,
+                 watch_child_mbytes=WATCH_CHILD_MBYTES, watch_free_mbytes=WATCH_FREE_MBYTES, quarry_lease=a.quarry_lease)
     save(LOCK / "owner.json", owner)
     start = time.monotonic()
     try:
@@ -161,7 +235,14 @@ def main():
         implicit.mkdir(exist_ok=True)
         env.update(CARGO_BUILD_JOBS="2", OPENBLAS_NUM_THREADS="2", OMP_NUM_THREADS="2", NUMBA_NUM_THREADS="2",
                    RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK="I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK",
-                   VK_LAYER_PATH="C:/VulkanSDK/1.4.363.0/Bin", VK_IMPLICIT_LAYER_PATH=str(implicit), VK_INSTANCE_LAYERS="VK_LAYER_KHRONOS_validation")
+                   VK_IMPLICIT_LAYER_PATH=str(implicit))
+        # The Khronos validation layer is for correctness batches only (--fast-check, or
+        # RENDERLAB_LEASE_VALIDATION=1). Timing leases run without it, as a shipping build does:
+        # P-PIPE (2026-11-10) found it forced on every leased child since F0.
+        if a.fast_check or os.environ.get("RENDERLAB_LEASE_VALIDATION") == "1":
+            env.update(VK_LAYER_PATH="C:/VulkanSDK/1.4.363.0/Bin", VK_INSTANCE_LAYERS="VK_LAYER_KHRONOS_validation")
+        else:
+            env.pop("VK_INSTANCE_LAYERS", None)
         env.pop("VK_LOADER_LAYERS_DISABLE", None)
         if a.manifest:
             env["RENDERLAB_PRIMARY_MANIFEST"] = str(a.manifest.resolve())
@@ -199,6 +280,20 @@ def main():
                     stop.wait(.1)
             resource_thread = threading.Thread(target=resource_monitor) if a.record_resources else None
             if resource_thread: resource_thread.start()
+            def memory_watchdog():
+                while not stop.is_set():
+                    try:
+                        free, largest, pid = memory_watch_sample(child.pid)
+                        if largest > WATCH_CHILD_MBYTES or free < WATCH_FREE_MBYTES:
+                            failure.append(f"memory watchdog: process {pid} at {largest:.0f} MiB (limit {WATCH_CHILD_MBYTES:g}), "
+                                           f"machine available {free:.0f} MiB (floor {WATCH_FREE_MBYTES:g})")
+                            print("MEMORY WATCHDOG:", failure[-1], flush=True)
+                            terminate_owned_tree(); return
+                    except Exception as e:
+                        failure.append(f"memory watchdog error: {e}")
+                    stop.wait(1)
+            watchdog_thread = threading.Thread(target=memory_watchdog)
+            watchdog_thread.start()
             try:
                 child.wait(timeout=max(1, a.minutes * 60 - (time.monotonic() - start) - 90))
             except subprocess.TimeoutExpired:
@@ -208,6 +303,7 @@ def main():
             finally:
                 stop.set()
                 thread.join()
+                watchdog_thread.join()
                 if resource_thread: resource_thread.join()
         binary = Path(cmd[0])
         record = dict(command=cmd, start=owner["utc"], end=utc(), seconds=time.monotonic() - start,

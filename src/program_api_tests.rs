@@ -102,7 +102,7 @@ fn gpu_vulkan_compile_screen() {
         .subsec_nanos();
     let mut rows = vec![];
     let mut serial = 0u32;
-    for variant in [Variant::Lit, Variant::Traced] {
+    for variant in [Variant::Lit, Variant::Traced(Shading::Soft)] {
         let vertex_identity = Sha256::digest(PRELUDE.as_bytes()).into();
         let abi = r.program_abi();
         let scopes = OperationScopes::new(&r.device);
@@ -125,7 +125,7 @@ fn gpu_vulkan_compile_screen() {
                 CompilePolicy::LibraryFast,
                 CompilePolicy::LibraryLto,
             ] {
-                if variant == Variant::Traced
+                if variant == Variant::Traced(Shading::Soft)
                     && matches!(
                         policy,
                         CompilePolicy::LibraryFast | CompilePolicy::LibraryLto
@@ -295,7 +295,7 @@ fn gpu_vulkan_helper_boundaries() {
     let variants: &[Variant] = if paired {
         &[Variant::Lit]
     } else {
-        &[Variant::Lit, Variant::Traced]
+        &[Variant::Lit, Variant::Traced(Shading::Soft)]
     };
     for &variant in variants {
         if paired {
@@ -409,7 +409,7 @@ fn gpu_vulkan_helper_size() {
         .unwrap()
         .subsec_nanos();
     let mut rows = vec![];
-    for variant in [Variant::Lit, Variant::Traced] {
+    for variant in [Variant::Lit, Variant::Traced(Shading::Soft)] {
         for repeat in 0..2 {
             for calls in [0, 1, 2, 4] {
                 let tint =
@@ -596,7 +596,7 @@ fn gpu_registered_program_files_defaults_arrays() {
             Variant::Lit,
             Variant::Hardware,
             Variant::Fresh,
-            Variant::Traced,
+            Variant::Traced(Shading::Soft),
             Variant::Temporal,
         ]
         .into_iter()

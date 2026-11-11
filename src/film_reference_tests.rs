@@ -491,8 +491,8 @@ fn gpu_film_reference() {
             &r.ledger,
             &read(["kernels-hard", "kernels-soft"]),
         ));
-        *r.test_standard().traced.as_mut().unwrap() =
-            shading_pipelines(&r, &read(["traced-hard", "traced-soft"]));
+        r.test_standard().traced =
+            shading_pipelines(&r, &read(["traced-hard", "traced-soft"])).map(Some);
     }
     let out = PathBuf::from(m["output"].as_str().unwrap());
     let minimal = m["minimal"].as_bool().unwrap();

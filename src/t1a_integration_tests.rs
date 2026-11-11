@@ -291,7 +291,7 @@ fn primary_baseline(
             .flat_map(|s| (s * 1024).to_le_bytes())
             .collect();
         swap_compute(r, &mut noop);
-        std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut fixed);
+        r.test_standard().swap_traced(&mut fixed);
         let t = &r
             .fresh
             .as_ref()
@@ -313,7 +313,7 @@ fn primary_baseline(
         );
         traced_frame(r, color, &camera, asset, true);
         swap_compute(r, &mut noop);
-        std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut fixed);
+        r.test_standard().swap_traced(&mut fixed);
         hashes.write(name("reference.rgba16f"), capture(r)).unwrap();
         traced_frame(r, color, &camera, asset, false);
         let raster = capture(r);

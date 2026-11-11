@@ -290,7 +290,7 @@ fn gpu_primary_traced_quarry_acceptance() {
             .flat_map(|s| (s * 1024).to_le_bytes())
             .collect();
         swap_compute(&mut r, &mut noop);
-        std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut fixed);
+        r.test_standard().swap_traced(&mut fixed);
         let t = &r
             .fresh
             .as_ref()
@@ -312,7 +312,7 @@ fn gpu_primary_traced_quarry_acceptance() {
         );
         traced_frame(&mut r, &color, &camera, &mut asset, true);
         swap_compute(&mut r, &mut noop);
-        std::mem::swap(r.test_standard().traced.as_mut().unwrap(), &mut fixed);
+        r.test_standard().swap_traced(&mut fixed);
         fs::write(name("reference.rgba16f"), capture(&mut r)).unwrap();
         traced_frame(&mut r, &color, &camera, &mut asset, false);
         let raster = capture(&mut r);
