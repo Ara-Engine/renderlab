@@ -298,14 +298,14 @@ impl LightingGpu {
             ResourceKind::Sampler,
         );
         let dummy_environment = super::environment_gpu::dummy_cube(device, queue, ledger);
-        // Bilinear within a level, exact integer levels (a legacy chain's mips); cube
-        // sampling filters across face edges and corners.
+        // Bilinear within a level and linear between a legacy chain's mips (integer levels
+        // stay exact); cube sampling filters across face edges and corners.
         let environment_sampler = ledger.own(
             device.create_sampler(&wgpu::SamplerDescriptor {
-                label: Some("environment field bilinear"),
+                label: Some("environment field trilinear"),
                 mag_filter: wgpu::FilterMode::Linear,
                 min_filter: wgpu::FilterMode::Linear,
-                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                mipmap_filter: wgpu::MipmapFilterMode::Linear,
                 ..Default::default()
             }),
             ResourceKind::Sampler,

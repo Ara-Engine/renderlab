@@ -1,5 +1,5 @@
 use super::*;
-use crate::environment::{EnvironmentCube, EnvironmentInner, pack_level, upload_bytes};
+use crate::environment::{Encoding, EnvironmentCube, EnvironmentInner, upload_bytes};
 use renderlab_asset::environment::{PreparedEnvironment, SpecularLayout};
 
 fn cube(
@@ -209,8 +209,10 @@ impl Renderer {
         Ok(())
     }
     /// Bounded immediate upload. Busy performs no packing, allocation or queue write.
-    /// RGBA32F arrays: specular and diffuse lookups sample their cube-array views with
-    /// hardware filtering (`FLOAT32_FILTERABLE`, part of `RECEIVER_FEATURES`).
+    /// RGBA16F arrays when every texel already fits half precision's normal range,
+    /// RGBA32F otherwise (`Encoding`); specular and diffuse lookups sample their
+    /// cube-array views with hardware filtering (`FLOAT32_FILTERABLE`, part of
+    /// `RECEIVER_FEATURES`, for the f32 case).
     pub fn try_upload_environment(
         &mut self,
         data: &PreparedEnvironment,
@@ -253,14 +255,18 @@ impl Renderer {
         let slot = self.free_slot().unwrap();
         let started = Instant::now();
         let scopes = OperationScopes::new(&self.device);
-        let diffuse_bytes = data.diffuse_irradiance().texels().len() as u64 * 16;
+        // P-SKY2: half floats where lossless in range (the limit checks above use f32).
+        let encoding = Encoding::choose(data);
+        let (format, texel) = (encoding.format(), u64::from(encoding.texel_bytes()));
+        let bytes = bytes / 16 * texel;
+        let diffuse_bytes = data.diffuse_irradiance().texels().len() as u64 * texel;
         let diffuse = cube(
             &self.device,
             &self.ledger,
             data.diffuse_irradiance().size(),
             1,
             6,
-            wgpu::TextureFormat::Rgba32Float,
+            format,
             diffuse_bytes,
         );
         let levels = data.specular_radiance().len() as u32;
@@ -270,9 +276,9 @@ impl Renderer {
             data.specular_radiance()[0].size(),
             if independent { 1 } else { levels },
             if independent { 252 } else { 6 },
-            wgpu::TextureFormat::Rgba32Float,
+            format,
             if independent {
-                42 * data.specular_radiance()[0].texels().len() as u64 * 16
+                42 * data.specular_radiance()[0].texels().len() as u64 * texel
             } else {
                 bytes - diffuse_bytes
             },
@@ -288,8 +294,8 @@ impl Renderer {
                 data.specular_radiance()[0].size(),
                 1,
                 138,
-                wgpu::TextureFormat::Rgba32Float,
-                23 * data.specular_radiance()[0].texels().len() as u64 * 16,
+                format,
+                23 * data.specular_radiance()[0].texels().len() as u64 * texel,
             ))
         } else {
             banked.as_ref().map(|(_, banks)| {
@@ -299,8 +305,8 @@ impl Renderer {
                     crate::environment::BANK_SIZE,
                     1,
                     6 * banks.len() as u32,
-                    wgpu::TextureFormat::Rgba32Float,
-                    banks.iter().map(|b| b.len() as u64).sum(),
+                    format,
+                    banks.iter().map(|b| b.len() as u64 / 16 * texel).sum(),
                 )
             })
         };
@@ -320,7 +326,7 @@ impl Renderer {
                 } else {
                     (target, mip as u32, 0)
                 };
-                let packed = pack_level(level);
+                let packed = encoding.pack(level);
                 hash.update(&packed);
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -335,7 +341,7 @@ impl Renderer {
                     &packed,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(level.size() * 16),
+                        bytes_per_row: Some(level.size() * encoding.texel_bytes()),
                         rows_per_image: Some(level.size()),
                     },
                     wgpu::Extent3d {
@@ -351,6 +357,7 @@ impl Renderer {
         if let (Some((_, banks)), Some(target)) = (&banked, &specular_second) {
             let size = crate::environment::BANK_SIZE;
             for (k, packed) in banks.iter().enumerate() {
+                let packed = &encoding.repack(packed.clone());
                 hash.update(packed);
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
@@ -360,7 +367,7 @@ impl Renderer {
                     packed,
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(size * 16),
+                        bytes_per_row: Some(size * encoding.texel_bytes()),
                         rows_per_image: Some(size),
                     },
                     wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 6 },

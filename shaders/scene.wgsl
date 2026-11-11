@@ -299,6 +299,9 @@ fn environment_radiance(d:vec3<f32>, roughness:f32) -> vec3<f32> {
     if lighting.map.w>0.0 {
         let n=environment_legacy_levels();
         let x=clamp(r*(n-1.0),0.0,n-1.0);
+        // P-SKY2: an unbanked chain (the atmosphere's procedural sky) blends its two
+        // adjacent mips in the texture unit: one trilinear sample at the fractional level.
+        if fract(lighting.map.w)==0.0 { return textureSampleLevel(environment_specular,environment_sampler,d,0,x).rgb; }
         lo=i32(floor(x));
         hi=min(lo+1,i32(n)-1);
         t=fract(x);

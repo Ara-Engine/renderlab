@@ -881,3 +881,8 @@ Ara main d2d990f26, Renderlab pin 901c1d2, RTX 4070 SUPER, 1080p, sky map, quiet
   - Showcase through Ara: still RT 31.5 to 16.2 ms, non-RT 43.6 to 30.8 ms; identical by eye.
   - Cold start, first image: about 183 s to about 11 s on the game scene; about 120 s (timed out) to about 25 s for Showcase through Ara.
   - `gpu_environment_ownership_admission_and_reload` already fails on main (live-bytes bound); still OPEN.
+- **P-SKY2 (stacked on P-SKY): half-float maps where lossless, one trilinear sample for the atmosphere's chain.**
+  - The Showcase-like map premium goes to about 6.8 ms on RT and 6.5 ms on non-RT, from 16.5 and 17.4 on main.
+  - Images within 4 codes.
+  - What remains is the lookups' own sampling; [p-sky.md](p-sky.md) section 7 has the screens.
+  - **Rejected by its quality gate:** RGB9E5, which is 1 ms faster but fails the r⁴ interpolation tolerance.
