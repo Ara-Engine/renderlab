@@ -929,10 +929,22 @@ impl Frames {
         scene: &ForwardScene<'_>,
     ) -> Result<ForwardImages> {
         let mut targets = std::mem::take(&mut self.kept.targets);
-        let result = super::image::pool::active(&mut targets, gpu, |gpu| {
+        let result = self.render_with(gpu, cache, scene, &mut targets);
+        self.kept.targets = targets;
+        result
+    }
+    /// [`render`](Self::render) taking its 2D targets from `targets`, a pool other
+    /// sequences share (an engine's views): the sequence's own pool is not used.
+    pub(crate) fn render_with(
+        &mut self,
+        gpu: &mut GpuDevice,
+        cache: &ShaderCache,
+        scene: &ForwardScene<'_>,
+        targets: &mut super::image::pool::Pool,
+    ) -> Result<ForwardImages> {
+        let result = super::image::pool::active(targets, gpu, |gpu| {
             frame(&self.carried, &mut self.kept, self.blind, gpu, cache, scene)
         });
-        self.kept.targets = targets;
         match result {
             Ok((images, carried)) => {
                 self.carried = carried;
@@ -2080,7 +2092,9 @@ fn frame(
             let planned = images.plan(tr::PlanInputs {
                 settings: r.settings,
                 budget: crate::ReconstructionShadowBudget::default(),
-                rendered_frames: history.count,
+                // One sequence draws one view: its frames are consecutive.
+                previous_frame: history.count,
+                frame: history.count + 1,
                 index: k,
                 key,
                 lights: &scene.lighting.lights,

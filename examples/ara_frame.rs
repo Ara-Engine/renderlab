@@ -949,16 +949,22 @@ fn ara_frame(
 /// call to `render` until `settle` has waited for the GPU to finish it, and the run
 /// prints one line (the median, least and greatest of the frames after the first
 /// eight) and returns no frames.
+#[allow(clippy::too_many_arguments)]
 fn game_frames<S: renderlab::engine::Scene>(
     engine: &mut S,
     size: [u32; 2],
     level: Level,
+    look: renderlab::engine::ViewLook,
     options: game::Options,
     mut settle: impl FnMut(&mut S) -> Result<(), Failure>,
-    mut hdr: impl FnMut(&mut S) -> Result<Vec<u8>, Failure>,
-    mut trace: impl FnMut(&mut S) -> serde_json::Value,
+    mut hdr: impl FnMut(&mut S, renderlab::ViewId) -> Result<Vec<u8>, Failure>,
+    mut trace: impl FnMut(&mut S, renderlab::ViewId) -> serde_json::Value,
 ) -> Result<Vec<Frame>, Failure> {
-    engine.resize(size[0], size[1])?;
+    // One view, at the run's size and the scene's look.
+    let view = engine.create_view(&renderlab::engine::ViewDesc {
+        look,
+        ..renderlab::engine::ViewDesc::new(size[0], size[1])
+    })?;
     let built = game::build(engine, options)?;
     let mut sequence = Vec::new();
     let mut times = Vec::new();
@@ -967,10 +973,10 @@ fn game_frames<S: renderlab::engine::Scene>(
     for frame in 0..level.frames as u32 {
         let camera = game::animate(engine, &built, if level.still { 0 } else { frame })?;
         let rendering = std::time::Instant::now();
-        let report = engine.render(&camera)?;
+        let report = engine.render_view(view, &camera)?;
         settle(engine)?;
         let render_ms = (rendering.elapsed().as_secs_f64() * 1e5).round() / 1e2;
-        let mut record = trace(engine);
+        let mut record = trace(engine, view);
         record["draws"] = report.scene.draws.into();
         record["triangles"] = report.scene.triangles.into();
         record["render_ms"] = render_ms.into();
@@ -979,8 +985,8 @@ fn game_frames<S: renderlab::engine::Scene>(
             times.push(render_ms);
             records.push(record);
         } else {
-            let display = engine.capture()?.rgba8;
-            let hdr = hdr(engine)?;
+            let display = engine.capture_view(view)?.rgba8;
+            let hdr = hdr(engine, view)?;
             if let Some([x, y]) = level.probe {
                 // The pixel's row and the rows above and below, three pixels each.
                 let rows: Vec<String> = (y.saturating_sub(1)..=(y + 1).min(size[1] - 1))
@@ -1050,7 +1056,11 @@ fn game_frames<S: renderlab::engine::Scene>(
 /// refuses.
 fn game_ask(
     (supported, without): (bool, [bool; WITHOUT.len()]),
-) -> (renderlab::engine::Settings, game::Options) {
+) -> (
+    renderlab::engine::Settings,
+    renderlab::engine::ViewLook,
+    game::Options,
+) {
     let [
         gi,
         reconstruction,
@@ -1060,20 +1070,21 @@ fn game_ask(
         lanterns,
         glow,
     ] = without;
-    let mut settings = game::settings();
+    let (mut settings, mut look) = (game::settings(), game::look());
     if supported {
         settings.volumetric_fog = None;
     }
     settings.global_illumination &= !gi;
     settings.temporal_reconstruction &= !reconstruction;
     if reflections {
-        settings.reflections = renderlab::ReflectionSettings::off();
+        look.reflections = renderlab::ReflectionSettings::off();
     }
     if local_shadows {
         settings.local_shadows.count = 0;
     }
     (
         settings,
+        look,
         game::Options {
             toon_hero: true,
             particles: !supported,
@@ -1095,7 +1106,7 @@ fn game_wgpu(size: [u32; 2], level: Level) -> Result<Vec<Frame>, Failure> {
     }
     let adapter = headless_adapter()?;
     eprintln!("wgpu adapter: {:?}", adapter.get_info());
-    let (settings, options) = game_ask(level.game.unwrap_or_default());
+    let (settings, look, options) = game_ask(level.game.unwrap_or_default());
     let mut engine = Engine::new(
         &adapter,
         EngineDescriptor {
@@ -1111,6 +1122,7 @@ fn game_wgpu(size: [u32; 2], level: Level) -> Result<Vec<Frame>, Failure> {
         &mut engine,
         size,
         level,
+        look,
         options,
         // The engine returns once the frame is submitted: wait for the GPU to finish it.
         |engine| {
@@ -1119,7 +1131,7 @@ fn game_wgpu(size: [u32; 2], level: Level) -> Result<Vec<Frame>, Failure> {
                 .poll(renderlab::wgpu::PollType::wait_indefinitely())?;
             Ok(())
         },
-        |engine| {
+        |engine, _| {
             let mut capture = engine
                 .renderer_mut()
                 .try_capture_hdr()?
@@ -1130,7 +1142,7 @@ fn game_wgpu(size: [u32; 2], level: Level) -> Result<Vec<Frame>, Failure> {
             Ok(capture.try_read()?.ok_or("HDR readback pending")?)
         },
         // The renderer's own timestamps for the frames that have completed.
-        |engine| {
+        |engine, _| {
             let ms = |d: std::time::Duration| (d.as_secs_f64() * 1e5).round() / 1e2;
             let mut record = serde_json::json!({});
             // The Interactive trace's shadow rays a pixel this frame, as the planner
@@ -1164,7 +1176,7 @@ fn game_wgpu(size: [u32; 2], level: Level) -> Result<Vec<Frame>, Failure> {
 fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, Failure> {
     use ara_gpu::Device as _;
     use renderlab::backend_ara::{cache::ShaderCache, engine::Engine};
-    let (settings, options) = game_ask(level.game.unwrap_or_default());
+    let (settings, look, options) = game_ask(level.game.unwrap_or_default());
     let mut gpu = ara_gpu::GpuDevice::new(&[], output.join("device"))?;
     let mut engine = Engine::new(ShaderCache::new(output.join("shaders"))?, settings)?;
     engine.set_readback(!level.timing);
@@ -1172,11 +1184,12 @@ fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, F
         &mut engine.on(&mut gpu),
         size,
         level,
+        look,
         options,
-        // The backend's `render` returns when the GPU has finished the frame.
+        // The backend's `render_view` returns when the GPU has finished the frame.
         |_| Ok(()),
-        |engine| Ok(engine.images().ok_or("no frame")?.hdr.clone()),
-        |engine| {
+        |engine, view| Ok(engine.images(view).ok_or("no frame")?.hdr.clone()),
+        |engine, view| {
             let refusals: Vec<_> = engine
                 .refusals()
                 .iter()
@@ -1184,20 +1197,23 @@ fn game_ara(size: [u32; 2], level: Level, output: &Path) -> Result<Vec<Frame>, F
                 .collect();
             // MEASUREMENT ONLY: the resolve's one-pixel trace of the frame the next
             // `pose` line reports, with RENDERLAB_ARA_PROBE_RESOLVE set.
-            if let Some(words) = engine.images().and_then(|i| i.resolve_probe.as_ref()) {
+            if let Some(words) = engine.images(view).and_then(|i| i.resolve_probe.as_ref()) {
                 for line in renderlab::backend_ara::resolve_probe::describe(words) {
                     eprintln!("resolve: {line}");
                 }
             }
             let ms = |d: std::time::Duration| (d.as_secs_f64() * 1e5).round() / 1e2;
-            let times = engine.images().map(|i| i.times.clone()).unwrap_or_default();
+            let times = engine
+                .images(view)
+                .map(|i| i.times.clone())
+                .unwrap_or_default();
             let passes: serde_json::Map<_, _> = times
                 .passes
                 .iter()
                 .map(|(label, t)| (label.clone(), ((t * 1e2).round() / 1e2).into()))
                 .collect();
             // The same planner's budget, and whether it restarted every pixel.
-            let (restarted, shadow_rays) = engine.reconstruction_plan().unzip();
+            let (restarted, shadow_rays) = engine.reconstruction_plan(view).unzip();
             serde_json::json!({
                 "refusals": refusals,
                 "restarted": restarted.map(u32::from),

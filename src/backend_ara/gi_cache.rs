@@ -255,6 +255,9 @@ pub struct Cache {
     /// wgpu zero-initialises its buffers; these are filled on their first frame.
     zeroed: bool,
     planner: Planner,
+    /// The one view this cache's sequence draws: its idle and view keys
+    /// (`gi_cache::ViewPlan`).
+    view: crate::renderer::gi_cache::ViewPlan,
     stages: Vec<(Entry, Program, Kernel)>,
     /// Cell shading, with bounce: one program for a frame of one program, or one per
     /// reflecting program of a frame of several, each shading its own draws' cells.
@@ -363,6 +366,7 @@ impl Cache {
             sizes,
             zeroed: false,
             planner: Planner::default(),
+            view: Default::default(),
             stages,
             shade,
             selectors,
@@ -472,7 +476,8 @@ impl Cache {
         };
         // `ensure_gi_shade`: the setting is on and the frame's program reflects light.
         let bounce = self.settings.bounce;
-        let begun = self.planner.begin(&config, true, bounce);
+        // A sequence draws one view, so each of its frames is a tick of its own.
+        let begun = self.planner.begin(&config, true, bounce, true);
         // The buffers are idle between frames: every frame waits for its submission.
         for buffer in [&self.table, &self.work, &self.outgoing, &self.raw] {
             graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
@@ -516,6 +521,8 @@ impl Cache {
             &config,
             &begun,
             bounce,
+            true,
+            &mut self.view,
             FrameInputs {
                 bounds: scene.bounds,
                 poses: scene.poses.clone(),

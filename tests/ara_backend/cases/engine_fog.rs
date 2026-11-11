@@ -3,7 +3,7 @@ use super::*;
 use renderlab::{
     Camera, LocalShadows, Mat4, MeshData, ReflectionSettings, Vec3, Vertex, VolumetricFog,
     backend_ara::engine::Engine,
-    engine::{Exposure, MaterialDesc, RenderScale, Settings, Sky, Sun},
+    engine::{Exposure, MaterialDesc, Settings, Sky, Sun, ViewDesc, ViewLook},
 };
 
 const SIZE: [u32; 2] = [96, 64];
@@ -53,13 +53,10 @@ fn volumetric_fog_lights_the_air_and_the_scene_shades_it() -> Result<()> {
         let settings = Settings {
             global_illumination: false,
             temporal_reconstruction: false,
-            render_scale: RenderScale::Native,
-            reflections: ReflectionSettings::off(),
             local_shadows: LocalShadows {
                 count: 0,
                 ..Default::default()
             },
-            exposure: Exposure::Manual { stops: -11. },
             height_fog: None,
             volumetric_fog: fogged.then_some(VolumetricFog {
                 distance: 128.,
@@ -69,7 +66,14 @@ fn volumetric_fog_lights_the_air_and_the_scene_shades_it() -> Result<()> {
             ..Default::default()
         };
         let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, settings)?;
-        engine.resize(SIZE[0], SIZE[1])?;
+        let view = engine.create_view(&ViewDesc {
+            look: ViewLook {
+                exposure: Exposure::Manual { stops: -11. },
+                reflections: ReflectionSettings::off(),
+                ..Default::default()
+            },
+            ..ViewDesc::new(SIZE[0], SIZE[1])
+        })?;
         engine.set_sky(Sky::Uniform([1500., 1700., 2000.]))?;
         engine.set_sun(Some(Sun {
             travel: Vec3::new(0.1, -0.3, -1.).normalize(),
@@ -94,9 +98,9 @@ fn volumetric_fog_lights_the_air_and_the_scene_shades_it() -> Result<()> {
         }
         let mut last = Vec::new();
         for _ in 0..6 {
-            engine.render(&mut gpu, &camera)?;
+            engine.render_view(&mut gpu, view, &camera)?;
             let luminance: Vec<f32> = engine
-                .images()
+                .images(view)
                 .context("no frame")?
                 .hdr
                 .as_chunks::<8>()

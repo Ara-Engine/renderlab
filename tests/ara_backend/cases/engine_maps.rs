@@ -2,7 +2,7 @@
 //! the same scene that must give the same image without it.
 use super::*;
 use renderlab::{
-    Camera, LocalShadows, Mat4, MeshData, ReflectionSettings, Vec3, Vertex,
+    Camera, LocalShadows, Mat4, MeshData, ReflectionSettings, Vec3, Vertex, ViewId,
     asset::{
         Mip, Sampler, TangentBasis, TangentStream, Texture as TextureData, TextureRole,
         environment::{
@@ -12,7 +12,8 @@ use renderlab::{
     },
     backend_ara::engine::Engine,
     engine::{
-        Background, Exposure, MaterialDesc, Quality, RenderScale, Settings, Sky, Sun, TextureRef,
+        Background, Exposure, MaterialDesc, Quality, Settings, Sky, Sun, TextureRef, ViewDesc,
+        ViewLook,
     },
 };
 
@@ -21,22 +22,30 @@ const STOPS: f32 = -11.;
 /// Wound counter-clockwise seen from +Y, as its normals face.
 const INDICES: [u32; 6] = [0, 2, 1, 0, 3, 2];
 
-/// Direct light only unless `global_illumination`: no history, reflections, fog or
-/// local-light shadows, at a fixed exposure.
+/// Direct light only unless `global_illumination`: no history, fog or local-light
+/// shadows.
 fn settings(global_illumination: bool) -> Settings {
     Settings {
         global_illumination,
         temporal_reconstruction: false,
-        render_scale: RenderScale::Native,
-        reflections: ReflectionSettings::off(),
         local_shadows: LocalShadows {
             count: 0,
             ..Default::default()
         },
-        exposure: Exposure::Manual { stops: STOPS },
-        // Not on this layer.
         volumetric_fog: None,
         ..Default::default()
+    }
+}
+/// The view: at a fixed exposure, without reflections.
+fn view(quality: Quality) -> ViewDesc {
+    ViewDesc {
+        look: ViewLook {
+            exposure: Exposure::Manual { stops: STOPS },
+            reflections: ReflectionSettings::off(),
+            quality,
+            ..Default::default()
+        },
+        ..ViewDesc::new(SIZE[0], SIZE[1])
     }
 }
 /// A 40 m floor through the origin, facing +Y, its uv its xz.
@@ -58,10 +67,10 @@ fn sun() -> Sun {
         angular_radius: 0.02,
     }
 }
-/// The last frame's exposed HDR.
-fn hdr(engine: &Engine) -> Result<Vec<[f32; 3]>> {
+/// The view's last frame's exposed HDR.
+fn hdr(engine: &Engine, view: ViewId) -> Result<Vec<[f32; 3]>> {
     Ok(engine
-        .images()
+        .images(view)
         .context("no frame")?
         .hdr
         .as_chunks::<8>()
@@ -131,16 +140,13 @@ fn a_normal_mapped_material_reaches_the_frame_through_the_engine() -> Result<()>
         0.1,
         100.,
     )?;
-    // The exact traced frame, as the frame-level test renders it.
-    let exact = Settings {
-        quality: Quality::Reference,
-        ..settings(false)
-    };
+    let exact = settings(false);
     type Image = Vec<[f32; 3]>;
     let mut frame =
         |transform: Mat4, tangents: Option<TangentStream>, mapped: bool| -> Result<Image> {
             let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, exact)?;
-            engine.resize(SIZE[0], SIZE[1])?;
+            // The exact traced frame, as the frame-level test renders it.
+            let view = engine.create_view(&view(Quality::Reference))?;
             engine.set_sky(Sky::Uniform([0.; 3]))?;
             engine.set_sun(Some(sun()))?;
             let mesh = match &tangents {
@@ -164,9 +170,9 @@ fn a_normal_mapped_material_reaches_the_frame_through_the_engine() -> Result<()>
             })?;
             engine.spawn(mesh, material, transform)?;
             let image = engine
-                .render(&mut gpu, &camera)
+                .render_view(&mut gpu, view, &camera)
                 .map_err(anyhow::Error::from)
-                .and_then(|_| hdr(&engine));
+                .and_then(|_| hdr(&engine, view));
             let refusals = engine.refusals().to_vec();
             engine.retire(&mut gpu)?;
             ensure!(refusals.is_empty(), "refused: {refusals:?}");
@@ -331,7 +337,7 @@ fn a_sky_map_lights_and_fills_misses_as_its_uniform_sky_does() -> Result<()> {
             ShaderCache::new(path.join("shaders"))?,
             settings(light == Light::Cached),
         )?;
-        engine.resize(SIZE[0], SIZE[1])?;
+        let view = engine.create_view(&view(Quality::Realtime))?;
         if light != Light::Sunless {
             engine.set_sun(Some(sun()))?;
         }
@@ -355,9 +361,9 @@ fn a_sky_map_lights_and_fills_misses_as_its_uniform_sky_does() -> Result<()> {
         })?;
         engine.spawn(mesh, material, Mat4::IDENTITY)?;
         for _ in 0..if light == Light::Cached { 3 } else { 1 } {
-            engine.render(&mut gpu, &camera)?;
+            engine.render_view(&mut gpu, view, &camera)?;
         }
-        let image = hdr(&engine)?;
+        let image = hdr(&engine, view)?;
         let refusals = engine.refusals().to_vec();
         engine.retire(&mut gpu)?;
         ensure!(refusals.is_empty(), "refused: {refusals:?}");

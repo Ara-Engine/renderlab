@@ -7,7 +7,7 @@ use renderlab::{
         skin::Influence,
     },
     backend_ara::engine::Engine,
-    engine::{Exposure, MaterialDesc, RenderScale, Settings, Sky, Sun, TextureRef},
+    engine::{Exposure, MaterialDesc, Settings, Sky, Sun, TextureRef, ViewDesc, ViewLook},
 };
 
 const SIZE: [u32; 2] = [96, 64];
@@ -121,19 +121,23 @@ fn a_posed_skinned_mesh_draws_as_its_posed_geometry() -> Result<()> {
     let settings = |history: bool| Settings {
         global_illumination: history,
         temporal_reconstruction: history,
-        render_scale: RenderScale::Native,
-        reflections: ReflectionSettings::off(),
         local_shadows: LocalShadows {
             count: 0,
             ..Default::default()
         },
-        exposure: Exposure::Manual { stops: -11. },
         volumetric_fog: None,
         ..Default::default()
     };
     let mut frames = |skinned: bool, history: bool, poses: u32| -> Result<Vec<f32>> {
         let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, settings(history))?;
-        engine.resize(SIZE[0], SIZE[1])?;
+        let view = engine.create_view(&ViewDesc {
+            look: ViewLook {
+                exposure: Exposure::Manual { stops: -11. },
+                reflections: ReflectionSettings::off(),
+                ..Default::default()
+            },
+            ..ViewDesc::new(SIZE[0], SIZE[1])
+        })?;
         engine.set_sky(Sky::Uniform([1000., 1200., 1500.]))?;
         engine.set_sun(Some(Sun {
             travel: Vec3::new(0.3, -1., 0.5).normalize(),
@@ -179,10 +183,10 @@ fn a_posed_skinned_mesh_draws_as_its_posed_geometry() -> Result<()> {
             if skinned {
                 engine.set_joint_palette(mesh, &palette(pose as f32))?;
             }
-            engine.render(&mut gpu, &camera)?;
+            engine.render_view(&mut gpu, view, &camera)?;
         }
         let hdr: Vec<f32> = engine
-            .images()
+            .images(view)
             .context("no frame")?
             .hdr
             .as_chunks::<2>()

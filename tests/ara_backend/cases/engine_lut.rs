@@ -3,7 +3,7 @@ use super::*;
 use renderlab::{
     Camera, ColourLut, Mat4, MeshData, PostSettings, Vec3, Vertex,
     backend_ara::engine::Engine,
-    engine::{Exposure, MaterialDesc, Settings, Sky, Sun},
+    engine::{Exposure, MaterialDesc, Settings, Sky, Sun, ViewDesc, ViewLook},
 };
 
 const SIZE: [u32; 2] = [64, 48];
@@ -52,25 +52,30 @@ fn a_colour_lut_grades_the_displayed_frame() -> Result<()> {
     let constant = [0.5f32, 0.25, 0.75];
     let mut frame = |lut: Option<ColourLut>, strength: f32| -> Result<Vec<u8>> {
         let settings = Settings {
-            exposure: Exposure::Manual { stops: -11. },
             volumetric_fog: None,
-            post: PostSettings {
-                vignette: 0.,
-                grain: 0.,
-                lut_strength: strength,
-                ..PostSettings::default()
-            },
             ..Default::default()
         };
         let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, settings)?;
-        engine.resize(SIZE[0], SIZE[1])?;
+        let view = engine.create_view(&ViewDesc {
+            look: ViewLook {
+                exposure: Exposure::Manual { stops: -11. },
+                post: PostSettings {
+                    vignette: 0.,
+                    grain: 0.,
+                    lut_strength: strength,
+                    ..PostSettings::default()
+                },
+                colour_lut: lut,
+                ..Default::default()
+            },
+            ..ViewDesc::new(SIZE[0], SIZE[1])
+        })?;
         engine.set_sky(Sky::Uniform([2000.; 3]))?;
         engine.set_sun(Some(Sun {
             travel: Vec3::new(0.3, -1., 0.5).normalize(),
             illuminance: [50_000.; 3],
             angular_radius: 0.02,
         }))?;
-        engine.set_colour_lut(lut)?;
         let mesh = engine.create_mesh(&MeshData {
             vertices: &floor,
             indices: &[0, 2, 1, 0, 3, 2],
@@ -81,8 +86,8 @@ fn a_colour_lut_grades_the_displayed_frame() -> Result<()> {
             ..Default::default()
         })?;
         engine.spawn(mesh, material, Mat4::IDENTITY)?;
-        engine.render(&mut gpu, &camera)?;
-        let image = engine.capture()?;
+        engine.render_view(&mut gpu, view, &camera)?;
+        let image = engine.capture_view(view)?;
         let refusals = engine.refusals().to_vec();
         engine.retire(&mut gpu)?;
         ensure!(refusals.is_empty(), "refused: {refusals:?}");
