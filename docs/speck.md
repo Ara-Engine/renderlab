@@ -2,7 +2,7 @@
 
 Unit U-SPECK, branch `t3/speck` from main `30e7e26c`, 2026-11-11. Islam's report on the game scene's flight (1080p, 180 frames, camera cut at frame 24; RT, non-RT `Surface` and non-RT `Disk` captures in `D:/Coding/renderlab-work/n-vsm1/flipbooks/raw`): "almost as you go all frames has noise on ground alot of points of white... also on all of the objects", then "not just on the ground... I think this happens in shadowed areas only maybe". Labels: **M** measured here, **C** read from code, **I** inference.
 
-**Status: (c) is fixed in the engine (section 2), on both paths, with the scene unchanged. Open: its cost (not measured), a1, a2, the quarry and Showcase sequences, and the path-traced reference. (b), a3 and a4 moved to U-SPECK2 (`t3/speck2`).**
+**Status: (c) is fixed in the engine (section 2) and merged (main `338144be`). The cell mosaic Ara's Outpost showed is the cache's table filling up (section 7); its fix is merged (main `6f47207f`) and awaits the Outpost rerun. Open: the cost of (c), the capacity change for gather hit cells, the starved gather queue, a1's mottle, a2, the quarry and Showcase sequences, and the path-traced reference. (b), a3 and a4 moved to U-SPECK2 (`t3/speck2`).**
 
 ## 1. Three symptoms, six mechanisms (M)
 
@@ -122,7 +122,77 @@ Native pixels, enlarged 2-3× nearest-neighbour, under `D:/Coding/renderlab-work
 
 ## 6. Not done yet
 
-- (c): the items under "Not measured yet" in section 2.
-- a1 (first now: Ara's Outpost shows it as a cell mosaic on flat ground) and a2.
+- (c): the items under "Not measured yet" in section 2. Its lib tests did run later (section 7).
+- The mosaic: the Outpost rerun, and the items under "Open" in section 7.
+- a1's remaining mottle (about a code on flat surfaces) and a2.
 - The pillar's stair-stepped edge at frame 100.
 - The gap entries in [m7-gaps.md](m7-gaps.md).
+
+## 7. The cell mosaic: the cache's table fills up
+
+Ara's Outpost (integration thread, RTX 4070 SUPER, 1080p, both paths): a camera that walks 4 m and turns 12 degrees over 120 frames leaves the ground and a slab covered in flat, sharp-edged, cell-sized blocks, the near field first at frame 30 and everything by frame 60; frames 0 and 10 are smooth. Pixel rows across it read plateaus up to 13 codes apart (82, 82, 82, ..., 95, 95, 95, ...). Ara's old renderer is clean.
+
+### Cause (M in the fixture; an inference for Outpost until its counters come back)
+
+The table holds 2^20 cells in buckets of 8, and a cell is kept until it has gone unseen for 120 frames, whatever the pressure. A moving camera and the cells gathers request for their hits fill it well inside that time. A cell that cannot be created leaves its pixels on a lone neighbouring cell, a coarser one or the open sky: each reads as one flat value over the cell's footprint.
+
+It is not the cells' sky sums differing from their neighbours' (the first reading): a flat plane under the dusk sky stays smooth in the fixture, and a lone cell read at full weight is what makes a plateau.
+
+The fixture is `game_scene --diag field=1`: 300 boxes and a pale slab on an empty quarter of the ground, the camera walking 4 m while turning 12 degrees over the run's frames (120 here), 1080p. Counters per frame come from `RENDERLAB_GI_LOG` (below); `tools/speck/gilog.py` summarizes them.
+
+| Before the fix, default table (RT) | Frame 0 | 1 | 10 | 30 | 60 | 119 |
+|---|---:|---:|---:|---:|---:|---:|
+| Cells created | 103,431 | 86,657 | 5,402 | 6,925 | 2,619 | 1,671 |
+| Failed inserts (every band, once per claim round) | 0 | 0 | 4,171 | 27,692 | 73,036 | 216,759 |
+| Cells waiting for a gather | 97,367 | 181,294 | 560,324 | 686,371 | 769,826 | 848,478 |
+
+- 962,111 cells were created in 120 frames against 1,048,576 slots. Non-RT reads the same (967,597).
+- **What fills it is gather hit cells, not pixels' cells.** Frame 0 creates the pixels' 103,431; frames 1-9 create 486,089 more, nearly all requested by gathers for their hits (`gather_requests` 82,049 in frame 1, 154,208 in frame 2). A hit is given a cell at the 4 px level of its distance from the camera, though a gather ray stands for a wide cone.
+- **Forced:** with a 2^17-slot table (`RENDERLAB_GI=slots_log2=17`) the far boxes, the far ground and the slab's edge turn into the same flat blocks on both paths (`D:/Coding/renderlab-work/unit-speck/sheets/evict-f119-rt-far.png`, left panel). At the default size the fixture ends 92 % full and shows a 1-code mottle; Outpost is a larger scene.
+
+### Fix (C): a full bucket gives up its least recently seen cell
+
+`shaders/gi_cache.wgsl`, `gi_claim_miss`: when no slot of the bucket is free or past the eviction age, the miss takes the bucket's least recently seen cell, once that cell has gone unseen for the miss's own band's age (`gi_pressure_age`):
+
+- a pixel's cell takes one no pixel or gather has read for 2 frames;
+- a cell a gather requests for a hit takes one unseen for 16 frames (32 for the second generation), so gathers cannot push out cells the view reads.
+
+It is the existing eviction with an age that yields under pressure. The seen stamps are complete before the claim rounds (the probe and the gathers write them), so the choice does not depend on thread order. A visible cell (seen this frame or the last) is never taken. Setting: `IndirectSettings::pressure_eviction` (on; off only to measure), header word 26.
+
+### Result (M, lease `speck-evict5r`, the merged commit `b24f2f0c`, 1080p, both paths)
+
+- **Picture, frame 119:** with the forced 2^17 table the flat blocks are gone on the far boxes, the far ground and the slab on both paths (`evict-f119-rt-far.png`, `evict-f119-nonrt-far.png`: before | after). The default table is clean before and after.
+- **Counters at frame 119, RT / non-RT:**
+
+| | Default 2^20, before | after | Forced 2^17, before | after |
+|---|---:|---:|---:|---:|
+| Failed inserts (every band, once per round) | 216,759 / 221,670 | 27,471 / 31,542 | 393,204 / 393,207 | 386,982 / 386,798 |
+| Cells created | 1,671 / 1,609 | 5,776 / 5,869 | 0 / 0 | 1,583 / 1,614 |
+| Evicted under pressure | - | 4,083 / 4,157 | - | 1,583 / 1,614 |
+| ... of them seen within 8 frames | - | 107 / 118 | - | 1,348 / 1,377 |
+
+- Failed inserts stay high because that counter mixes the pixels' misses with the gathers' requests, which a full table refuses by design. The pixels' share is counted separately since `57ecce8c` (`full_pixel`); its numbers are in the next lease.
+- **No thrash of visible cells:** by construction (a victim must have gone unseen for 2 frames). With a held camera and the default table, creations and evictions both fall to 0 by frame 90. With a held camera at 2^17, 120-330 cells a frame are still created as hit cells age out.
+- **When the table is still too small** (2^17 against the same view): no mosaic, but less bounce light: frame 119 is 2.4 codes darker on average than with the default table, up to 9.7 codes in a 120 px region, on both paths. The hit cells are what is refused.
+- **The game flight does not fit either:** 213,687 evictions under pressure over its 180 frames (786 of cells seen within 8 frames).
+- Lib tests in that lease: `gpu_near_light_rays_keep_the_gathered_light` and `kernels_validate_on_both_ray_sources`, "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 396 filtered out". (The lease that first claimed the second one for (c) had run 0 tests: its runner named the wrong module path with `--exact`. The runner now fails unless every named test reports ok.)
+
+### Table size and what else it costs
+
+- The table is 192 MiB at 2^20 (192 bytes a slot), plus 16 MiB of outgoing radiance, 88 MiB of filter sources and 4 MiB of claim words. 2^21 adds about 300 MiB and does not fit the non-RT device as one buffer (384 MiB against its 256 MiB limit).
+- The capacity change that fits both paths is to give gather hits coarser cells (one sized to the ray's cone at the hit, not to 4 px at the hit's distance from the camera): the table's need falls toward the pixels' 100,000 cells. It changes bounce values and needs the reference check. Not done yet.
+
+### Measurement switches (both through any embedder)
+
+- **`RENDERLAB_GI`**: overrides the cache's tuning over the engine's own choice, `key=value` pairs separated by `;`. Keys: `lookup=nearest|trilinear`, `filter`, `filter_edge`, `rotate`, `bounce`, `directions`, `cell_pixels`, `level_blend`, `gathers`, `gather_cells`, `claim_cells`, `near_light_rays`, `slots_log2`, `evict_frames`, `pressure_eviction`. Unset, it changes nothing. An unknown key, a pair without `=` or a value that does not parse is an error (named on stderr), so a mistyped switch cannot pass for the default. Example: `RENDERLAB_GI="slots_log2=17;pressure_eviction=0"`.
+- **`RENDERLAB_GI_LOG=<file>`**: appends one JSON line per rendered frame with the cache's counters: `misses`, `miss_overflow`, `created`, `full` (failed inserts, every band, once per claim round), `full_pixel` (the pixels' share), `lost`, `orphans`, `traces`, `invalidated`, `splits`, `local_overflow`, `shades`, `gathers`, `gather_rays`, `gather_misses`, `gather_requests`, `gather_deferred`, `claim_deferred`, `bounce_queued`, `evicted`, `evicted_recent`, `table_bytes`. It is a blocking readback each frame: measurement only, never with a timing.
+
+### For the ara-gpu port
+
+The work buffer's counters grew from 44 to 48 words (`COUNTER_WORDS`; `GI_W_CLAIMS` is 48), `IndirectCounters` has `evicted`, `evicted_recent` and `full_pixel`, `Planner::begin` writes header word 26 (`pressure_eviction`), and the near-light helpers are in `shaders/gi_near.wgsl`, which `kernel_source` appends. No new buffer, texture or binding.
+
+### Open
+
+- The Outpost rerun with the log (integration thread).
+- The same-binary before/after on the game flight, a settled still and the quarry (the off switch exists since `57ecce8c`).
+- The capacity change above, and the starved gather queue ([m7-gaps.md](m7-gaps.md)).
