@@ -1036,6 +1036,16 @@ A still scene whose cache lighting key never changes stays below its converged b
 - **The roughness-0.4 bound:** 71% of Showcase's traced glossy pixels are at roughness 0.4-0.5; one ray there saves 11-15 ms non-RT but speckles the 0.42 aluminium ball (held flicker 2.5x). A bound, not a candidate.
 - **Next:** run the bisect screens, shrink or remove the exchange, then make 4 shared strata the default and measure Showcase still, moving and cut and the game scene. Owner: the next glossy unit (row 3 of ara-render-replacement.md, the editor frame cost).
 
+## GI: the bounce gather queue is starved (U-SPECK, 2026-11-11)
+
+**OPEN (owner: U-SPECK, after the table eviction fix).** Found in the cache's per-frame counters (`RENDERLAB_GI_LOG`, [speck.md](speck.md)) on the game scene's field walk (`--diag field=1`, 1080p, 120 frames, RTX 4070 SUPER, default settings).
+
+- **Symptom:** 848,478 cells wait for a gather at frame 119 on RT (852,745 on non-RT), while a frame gathers about 27,000. A cell created by the moving camera can wait dozens of frames for its first bounce value; meanwhile its pixels read its neighbours' or a coarser level's bounce.
+- **Why (read from code, not yet isolated by a switch):** a lighting change that keeps changing relights one fixed slot group a frame, an eighth of every cell in the table (`gi_scan`, `GI_SCAN_RELIGHT`), whatever the light reaches. The game scene's fire flickers every frame, so about 131,000 cells of a full 2^20-slot table are queued a frame against a gather cap of 32,768 (8,192 on software rays). The queue is served by slot rotation (`gi_gather_period`, up to 64 frames), so new cells wait behind cells the fire never lights.
+- **First checks:** the same walk with a steady fire (`--diag flicker=0`) and with no local lights (`lights=0`): the queue should drain. Then the queue's share of cells within the changing light's range.
+- **Fix candidates:** relight only the cells the changed light can reach (its range, as `gi_light_affects` already tests); serve first gathers before relights; a relight budget separate from the new-cell budget.
+- **Judged on:** frames to a new cell's first gather on the field walk and the flight (a count, per frame), and the flight's picture with the fire flickering.
+
 ## BC7/BC5 texture upload: U-BC parked (2026-11-11)
 
 **OPEN, parked on branch `t3/bc` at fafd8f63, DON'T MERGE: written, never compiled or run.** Stopped for the picture defect (U-SPECK). Record and exact next step: docs/texture-compression.md on the branch, section "Status".
@@ -1052,3 +1062,11 @@ Islam decided on 2026-11-11 to delete ara-render now with no fallback ([ara-rend
 2. **Asset previews and thumbnails.** A small offscreen view of one object with its own look and lighting. The views API covers the view; open: a preview scene separate from the level (a second `Engine`, or a scene subset per view), the cost of creating and rendering a tiny view, and thumbnail readback.
 3. **Material graphs.** Ara's graph-to-WGSL compiler against Renderlab's program API; Renderlab owes vertex colour, a second UV set and an occlusion input reaching programs on both paths (row 4 of the replacement order).
 4. Everything else in the replacement order (BC7/BC5 upload, large levels on non-RT, light shapes, atmosphere features, decal maps) keeps its rank there; anything only ara-render drew that is not in this list becomes a row here when the Ara side finds it.
+
+## Bulb glints on rough metal, and history inside a restart sphere (U-SPECK2, 2026-11-11)
+
+[speck2.md](speck2.md). Both are on `t3/speck2`.
+
+- **Bulb glints on rough metal: the lone-stratum bound drops them; main drew them as sand.** A glossy pixel's brightest stratum now counts for at most the luminance of all its others together, which removes the white specks one ray in tens of thousands made on the cube and the stray dots on the gold sphere. It also removes the post lamp's bulb from the gold sphere (settled still: one 60 px box -0.99 codes luminance, 1.50 worst channel; everything else under 1). Main's glint was a cluster of specks that never settled, so neither build draws the smooth glow that is right. Mirrors are untouched. **The fix is the emitter link for MIS (preferred: Ara's lamps all have bulbs)**: the light's own sample covers its visible emitter, and rays that reach it are weighted against it. The other route is a long-window history for the bounded energy. Either needs an API or a texture on both paths and in the ara-gpu port.
+- **History inside a restart sphere.** A flickering light restarts every receiver in its sphere each frame. Restarted receivers now trace 16 disk rays per soft local light on RT (4 before) and twice their glossy strata on both paths, which brings RT's grain by the brazier to the steady-fire level (2.63 → 1.04 codes) without holding the light. The restart itself remains: the right fix keeps the history and rescales the changed light's share of each pixel, which needs that share per pixel (a second shade, or bookkeeping in the light services and a new channel).
+- **Cost: unmeasured** until a quiet machine (root's ruling): the bound, the 16 disk rays in the restart sphere (RT, game scene; the quarry has no local lights) and the doubled strata.

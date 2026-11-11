@@ -135,6 +135,14 @@ pub struct Forces {
     /// Divergence-free curl noise: spatial frequency (1/m) and strength (m/s²). The field
     /// is the curl of a sinusoidal potential, phase-shifted per particle.
     pub curl: [f32; 2],
+    /// Where the curl field is centred: particles sample it at their position minus this
+    /// (an embedder's effect-local space). Zero, the default, is world space.
+    pub curl_origin: Vec3,
+    /// The curl phase per second of a particle's birth time (rad/s): each particle samples
+    /// the field shifted by its birth time, counted from the emitter's start (prewarm
+    /// included), times this, so particles born close together drift alike. Zero, the
+    /// default, phases particles by their spawn ordinal, 0.013 rad apart.
+    pub curl_phase_rate: f32,
     /// Swirl about the line through `vortex_center` along `vortex_axis`; the axis's length
     /// is the strength (1/s²), its direction the sense of rotation.
     pub vortex_center: Vec3,
@@ -300,7 +308,9 @@ impl EmitterDescriptor<'_> {
             && f.curl
                 .iter()
                 .chain(&f.attractor_strength)
+                .chain(&[f.curl_phase_rate])
                 .all(|v| v.is_finite())
+            && f.curl_origin.is_finite()
             && f.curl[0] >= 0.0
             && (f.attractor_strength[0] == 0.0 || f.attractor_strength[1] > 0.0);
         let collision = self.collision.is_none_or(|c| {

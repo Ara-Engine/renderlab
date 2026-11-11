@@ -18,7 +18,10 @@
 //! `--still`, `--timing-frames N` and `--quarry MANIFEST`. `--hour H` replaces the fixed sun
 //! with the game example's sun at that time of day (`Sun::at_hour`, latitude 0.7), and
 //! `--diag KEY=VALUE` sets the game example's estimator bisect switches (P-FLAT,
-//! docs/p-flat.md).
+//! docs/p-flat.md). `--lamp SCALE` hangs the game example's arch lamp under the lintel (a white
+//! bulb with its point light 0.25 m below, at SCALE times 30,000 cd); in the reference, which
+//! has no point lights, a sphere of the light's source radius and intensity stands in for it
+//! (U-SPECK, docs/speck.md).
 //!
 //! P-DEFECT's Showcase-like additions (docs/p-defect.md): `--stage` lays a glossy black
 //! dielectric turntable (Ara Showcase's: base 0.06, roughness 0.35) under the chrome and gold
@@ -88,6 +91,9 @@ struct Args {
     write_frames: Option<Vec<u32>>,
     hour: Option<f32>,
     diag: Vec<(String, String)>,
+    /// `--lamp SCALE`: the game example's arch lamp, a white bulb with its point light 0.25 m
+    /// below, at SCALE times its candela.
+    lamp: Option<f32>,
     stage: bool,
     glass_balls: bool,
     metal_balls: bool,
@@ -126,6 +132,7 @@ impl Args {
             write_frames: None,
             hour: None,
             diag: Vec::new(),
+            lamp: None,
             stage: false,
             glass_balls: false,
             metal_balls: false,
@@ -183,6 +190,7 @@ impl Args {
                 "--reference" => a.reference = Some(value()?.parse::<u32>()?.max(2)),
                 "--freeze" => a.freeze = Some(value()?.parse()?),
                 "--hour" => a.hour = Some(value()?.parse()?),
+                "--lamp" => a.lamp = Some(value()?.parse()?),
                 "--stage" => a.stage = true,
                 "--glass-balls" => a.glass_balls = true,
                 "--metal-balls" => a.metal_balls = true,
@@ -469,6 +477,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stone,
         boxed(at(0.0, 4.4, -3.0), Vec3::new(5.2, 0.8, 1.0)),
     )?;
+    // U-SPECK (docs/speck.md): the game example's arch lamp, a white bulb hanging under the
+    // lintel with its point light 0.25 m below it, so the bulb's underside is 0.13 m from the
+    // light: the small bright surface the GI gather must resolve. The reference has no point
+    // lights: there a sphere of the light's source radius and the same intensity stands in for
+    // it (its radiance is the intensity over pi r^2).
+    let arch_lamp = at(0.0, 3.55, -3.0);
+    const LAMP_SOURCE_RADIUS: f32 = 0.12;
+    let lamp = args.lamp.map(|scale| {
+        let candela = [30_000.0 * scale, 21_000.0 * scale, 11_000.0 * scale];
+        (arch_lamp - Vec3::new(0.0, 0.25, 0.0), candela)
+    });
+    if let Some((position, candela)) = lamp {
+        let bulb = material(&mut engine, [1.0, 0.9, 0.7], 0.0, 0.9)?;
+        spawn(
+            &mut engine,
+            &mut placed,
+            sphere,
+            bulb,
+            boxed(arch_lamp, Vec3::splat(0.12)),
+        )?;
+        engine.set_lights(&diag.lights(vec![Light::Point {
+            position,
+            candela,
+            range: None,
+            source_radius: LAMP_SOURCE_RADIUS,
+        }]))?;
+    }
     // A red wall beside it, whose colour should bleed onto the ground and hero.
     spawn(
         &mut engine,
@@ -632,6 +667,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             &traced_meshes,
             &traced_materials,
             sun,
+            lamp.map(|(position, candela)| Emitter {
+                mesh: sphere,
+                transform: boxed(position, Vec3::splat(LAMP_SOURCE_RADIUS)),
+                radiance: candela
+                    .map(|c| c / (std::f32::consts::PI * LAMP_SOURCE_RADIUS * LAMP_SOURCE_RADIUS)),
+            }),
         )?),
         None => None,
     };
@@ -856,9 +897,17 @@ fn spawn(
     Ok(object)
 }
 
+/// A point light's stand-in in the path-traced reference: a black sphere emitting `radiance`.
+struct Emitter {
+    mesh: MeshId,
+    transform: Mat4,
+    radiance: [f32; 3],
+}
 /// The path-traced reference of the matched scene (`--reference SPP`): the same meshes,
 /// standard-model materials, sun disk and uniform sky, on its own ray-query device.
 struct Traced {
+    /// The lamp's stand-in: its mesh, its material's index and its transform.
+    emitter: Option<(usize, usize, Mat4)>,
     device: wgpu::Device,
     queue: wgpu::Queue,
     samples: u32,
@@ -874,6 +923,7 @@ impl Traced {
         meshes: &HashMap<MeshId, Geometry>,
         materials: &HashMap<MaterialId, reference::Material>,
         sun: Sun,
+        emitter: Option<Emitter>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         if std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref()
             != Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK")
@@ -922,7 +972,7 @@ impl Traced {
             })
             .collect();
         let mut material_index = HashMap::new();
-        let materials = materials
+        let mut materials: Vec<reference::Material> = materials
             .iter()
             .enumerate()
             .map(|(k, (id, m))| {
@@ -930,7 +980,17 @@ impl Traced {
                 *m
             })
             .collect();
+        let emitter = emitter.map(|e| {
+            materials.push(reference::Material {
+                base_color: [0.0; 3],
+                roughness: 1.0,
+                emission: e.radiance,
+                ..Default::default()
+            });
+            (mesh_index[&e.mesh], materials.len() - 1, e.transform)
+        });
         Ok(Self {
+            emitter,
             device,
             queue,
             samples,
@@ -969,6 +1029,14 @@ impl Traced {
                     .find(|(o, _)| *o == p.object)
                     .map_or(p.transform, |(_, t)| *t),
             })
+            .chain(
+                self.emitter
+                    .map(|(mesh, material, transform)| reference::Instance {
+                        mesh,
+                        material,
+                        transform,
+                    }),
+            )
             .collect();
         let scene = reference::Scene {
             meshes: self.meshes.clone(),
