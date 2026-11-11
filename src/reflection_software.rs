@@ -1,7 +1,7 @@
 //! M7-R1n: the geometry software reflection rays trace on the non-RT path
 //! (docs/m7-r1n.md; shaders/reflections_software.wgsl traverses it).
 //!
-//! Each uploaded mesh of a non-RT visibility-buffer renderer gets a BVH2 over its drawn
+//! Each uploaded mesh of a non-RT visibility-buffer renderer gets a binned-SAH BVH2 over its drawn
 //! triangles, built once at upload and never refit. Leaves keep each triangle's primitive
 //! index in the mesh's own index buffer and its corners in index order, so a hit is the same
 //! `(placement + 1, primitive, barycentrics)` record a hardware ray query returns and R1's
@@ -16,6 +16,8 @@ use crate::Mat4;
 pub(crate) const MAX_TRIANGLES: usize = 1 << 19;
 /// Triangles per leaf at most; the WGSL leaf tag holds the count in three bits.
 const LEAF_TRIANGLES: usize = 4;
+/// Deepest leaf: the WGSL walk pushes at most one node a level onto its 32-entry stack.
+const MAX_DEPTH: usize = 30;
 /// Words per node: child 0 bounds (lo, hi), child 1 bounds, then the two tagged child IDs.
 const NODE_WORDS: usize = 16;
 /// Words per triangle: corner a, edges b - a and c - a, the drawn primitive index, then two
@@ -41,8 +43,9 @@ pub(crate) struct Blas {
 }
 
 impl Blas {
-    /// Median-split BVH2 over `indices` (a triangle list into `positions`). Deterministic:
-    /// ties on the split axis break by triangle index. None for an empty list.
+    /// BVH2 over `indices` (a triangle list into `positions`), split by binned surface area
+    /// (P-GLOSSY; median splits before). Deterministic: ties on the split axis break by
+    /// triangle index. None for an empty list.
     pub(crate) fn build(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
         let count = indices.len() / 3;
         if count == 0 || count >= (1 << 28) {
@@ -54,15 +57,19 @@ impl Blas {
                 std::array::from_fn(|a| (corner(t, 0)[a] + corner(t, 1)[a] + corner(t, 2)[a]) / 3.0)
             })
             .collect();
+        let boxes: Vec<Aabb> = (0..count)
+            .map(|t| bounds((0..3).map(|k| corner(t, k))))
+            .collect();
         let mut builder = Builder {
             positions,
             indices,
             centroids: &centroids,
+            boxes: &boxes,
             nodes: Vec::new(),
             triangles: Vec::with_capacity(count * TRIANGLE_WORDS),
         };
         let mut order: Vec<u32> = (0..count as u32).collect();
-        let (root, lo, hi) = builder.subtree(&mut order);
+        let (root, lo, hi) = builder.subtree(&mut order, 0);
         Some(Self {
             nodes: builder.nodes,
             triangles: builder.triangles,
@@ -85,20 +92,17 @@ struct Builder<'a> {
     positions: &'a [[f32; 3]],
     indices: &'a [u32],
     centroids: &'a [[f32; 3]],
+    boxes: &'a [Aabb],
     nodes: Vec<u32>,
     triangles: Vec<u32>,
 }
 impl Builder<'_> {
-    /// The tagged child ID of the subtree over `order`, and its bounds.
-    fn subtree(&mut self, order: &mut [u32]) -> (u32, [f32; 3], [f32; 3]) {
+    /// The tagged child ID of the subtree over `order` at `depth`, and its bounds.
+    fn subtree(&mut self, order: &mut [u32], depth: usize) -> (u32, [f32; 3], [f32; 3]) {
         if order.len() <= LEAF_TRIANGLES {
             return self.leaf(order);
         }
-        let (lo, hi) = bounds(order.iter().map(|&t| self.centroids[t as usize]));
-        let axis = (0..3)
-            .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))
-            .unwrap();
-        let mid = order.len() / 2;
+        let (axis, mid) = self.split(order, depth);
         let centroids = self.centroids;
         order.select_nth_unstable_by(mid, |&a, &b| {
             centroids[a as usize][axis]
@@ -108,8 +112,8 @@ impl Builder<'_> {
         let node = self.nodes.len() / NODE_WORDS;
         self.nodes.extend([0; NODE_WORDS]);
         let (left, right) = order.split_at_mut(mid);
-        let a = self.subtree(left);
-        let b = self.subtree(right);
+        let a = self.subtree(left, depth + 1);
+        let b = self.subtree(right, depth + 1);
         let words = &mut self.nodes[node * NODE_WORDS..(node + 1) * NODE_WORDS];
         for (i, v) in [a.1, a.2, b.1, b.2].iter().flatten().enumerate() {
             words[i] = v.to_bits();
@@ -119,6 +123,74 @@ impl Builder<'_> {
         let lo = std::array::from_fn(|i| a.1[i].min(b.1[i]));
         let hi = std::array::from_fn(|i| a.2[i].max(b.2[i]));
         (node as u32, lo, hi)
+    }
+    /// P-GLOSSY: the split axis and the size of the lower part of `order` (sorted along that
+    /// axis by centroid): the cheapest binned surface-area split, or the old median split
+    /// on the longest centroid axis when no bin boundary separates the triangles or the
+    /// split would let the tree outgrow MAX_DEPTH (the WGSL walk's stack).
+    fn split(&self, order: &[u32], depth: usize) -> (usize, usize) {
+        const BINS: usize = 16;
+        let (lo, hi) = bounds(order.iter().map(|&t| self.centroids[t as usize]));
+        let longest = (0..3)
+            .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))
+            .unwrap();
+        let mut best: Option<(f32, usize, usize)> = None;
+        for axis in 0..3 {
+            let extent = hi[axis] - lo[axis];
+            if !(extent > 0.0) {
+                continue;
+            }
+            let bin = |t: u32| {
+                let c = self.centroids[t as usize][axis];
+                (((c - lo[axis]) / extent * BINS as f32) as usize).min(BINS - 1)
+            };
+            let mut counts = [0usize; BINS];
+            let mut boxes = [([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]); BINS];
+            for &t in order {
+                let b = bin(t);
+                counts[b] += 1;
+                let (tl, th) = self.boxes[t as usize];
+                boxes[b] = (
+                    std::array::from_fn(|i| boxes[b].0[i].min(tl[i])),
+                    std::array::from_fn(|i| boxes[b].1[i].max(th[i])),
+                );
+            }
+            // Right-to-left prefix areas, then sweep left to right.
+            let mut right = [(0.0f32, 0usize); BINS];
+            let mut acc = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+            let mut n = 0;
+            for b in (1..BINS).rev() {
+                acc = merge(acc, boxes[b]);
+                n += counts[b];
+                right[b] = (area(acc), n);
+            }
+            let mut acc = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+            let mut n = 0;
+            for b in 0..BINS - 1 {
+                acc = merge(acc, boxes[b]);
+                n += counts[b];
+                let (ra, rn) = right[b + 1];
+                if n == 0 || rn == 0 {
+                    continue;
+                }
+                let cost = area(acc) * n as f32 + ra * rn as f32;
+                if best.is_none_or(|(c, _, _)| cost < c) {
+                    best = Some((cost, axis, n));
+                }
+            }
+        }
+        // Median subtrees below a node at `depth` holding `n` triangles reach this depth.
+        let reach = |depth: usize, n: usize| {
+            depth + n.div_ceil(LEAF_TRIANGLES).next_power_of_two().ilog2() as usize
+        };
+        // Measurement scaffolding: RENDERLAB_GLOSSY_SCREEN=median keeps the old trees.
+        static MEDIAN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let median = *MEDIAN.get_or_init(|| {
+            std::env::var("RENDERLAB_GLOSSY_SCREEN")
+                .is_ok_and(|s| s.split(',').any(|i| i.trim() == "median"))
+        });
+        best.filter(|&(_, _, n)| !median && reach(depth + 1, n.max(order.len() - n)) <= MAX_DEPTH)
+            .map_or((longest, order.len() / 2), |(_, axis, n)| (axis, n))
     }
     fn leaf(&mut self, order: &[u32]) -> (u32, [f32; 3], [f32; 3]) {
         let first = (self.triangles.len() / TRIANGLE_WORDS) as u32;
@@ -136,6 +208,19 @@ impl Builder<'_> {
         let (lo, hi) = bounds(points.into_iter());
         (LEAF | first << 3 | order.len() as u32, lo, hi)
     }
+}
+
+type Aabb = ([f32; 3], [f32; 3]);
+fn merge(a: Aabb, b: Aabb) -> Aabb {
+    (
+        std::array::from_fn(|i| a.0[i].min(b.0[i])),
+        std::array::from_fn(|i| a.1[i].max(b.1[i])),
+    )
+}
+/// Half the surface area of a box (0 for an empty one).
+fn area((lo, hi): Aabb) -> f32 {
+    let d: [f32; 3] = std::array::from_fn(|i| (hi[i] - lo[i]).max(0.0));
+    d[0] * d[1] + d[1] * d[2] + d[2] * d[0]
 }
 
 fn bounds(points: impl Iterator<Item = [f32; 3]>) -> ([f32; 3], [f32; 3]) {
@@ -327,6 +412,36 @@ mod tests {
         // Deterministic: a rebuild is word-identical.
         let again = Blas::build(&positions, &indices).unwrap();
         assert_eq!((b.nodes, b.triangles), (again.nodes, again.triangles));
+    }
+
+    /// Surface-area splits peel geometrically shrinking triangles one at a time; the depth
+    /// rule still keeps every leaf within the WGSL walk's stack, with every triangle once.
+    #[test]
+    fn reflection_bvh_depth_fits_the_walk_stack() {
+        let mut positions = vec![];
+        let mut indices = vec![];
+        for i in 0..4096u32 {
+            let s = 0.97f32.powi(i as i32);
+            let base = positions.len() as u32;
+            positions.extend([[s, 0.0, 0.0], [s * 1.01, 0.0, 0.0], [s, s * 0.01, 0.0]]);
+            indices.extend([base, base + 1, base + 2]);
+        }
+        let b = Blas::build(&positions, &indices).unwrap();
+        let mut deepest = 0;
+        let mut stack = vec![(b.root, 0usize)];
+        while let Some((child, depth)) = stack.pop() {
+            if child & LEAF != 0 {
+                deepest = deepest.max(depth);
+                continue;
+            }
+            let n = child as usize * NODE_WORDS;
+            stack.push((b.nodes[n + 12], depth + 1));
+            stack.push((b.nodes[n + 13], depth + 1));
+        }
+        assert!(deepest <= MAX_DEPTH, "{deepest}");
+        let mut seen: Vec<u32> = b.triangles.chunks(TRIANGLE_WORDS).map(|t| t[9]).collect();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..4096).collect::<Vec<_>>());
     }
 
     /// Instance records hold the inverse rows and a world box enclosing the transformed mesh.

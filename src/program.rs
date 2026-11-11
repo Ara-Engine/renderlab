@@ -99,7 +99,10 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
         .find(|name| head.contains(&format!("var {name}:acceleration_structure;")));
     let traced = lobe && reads && matches!(stage, Stage::Traced | Stage::TracedStreamed);
     match scene.filter(|_| traced) {
-        Some(scene) => (glossy_screen(REFLECTION_API.replace("RL_SCENE", scene)), true),
+        Some(scene) => (
+            glossy_screen(REFLECTION_API.replace("RL_SCENE", scene)),
+            true,
+        ),
         // M7-R1n: non-RT heads that declare the software geometry trace it instead.
         None if traced && head.contains(SOFTWARE_REFLECTION_GEOMETRY) => {
             (glossy_screen(software_reflection_api()), true)
@@ -157,6 +160,8 @@ fn glossy_screen(mut api: String) -> String {
                 "            let hs=surface(h.input);\n            radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n",
                 "            radiance=select(vec3<f32>(0.0),rl_sky(d,cone_alpha),h.visible);\n",
             ),
+            // Read by src/reflection_software.rs when it builds trees.
+            None if item == "median" => {}
             _ => panic!("unknown RENDERLAB_GLOSSY_SCREEN item {item:?}"),
         }
     }
