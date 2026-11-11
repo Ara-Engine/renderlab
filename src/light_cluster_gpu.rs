@@ -179,15 +179,11 @@ pub(super) struct LightClusters {
     pipeline: Owned<wgpu::ComputePipeline>,
     /// The kernel's group, keyed on the light buffer generation it binds.
     bind: Option<(u64, Owned<wgpu::BindGroup>)>,
-    /// Bound at group 3 binding 25; `generation` changes with it.
-    pub atlas: Atlas,
-    retired: Vec<(u64, Atlas)>,
+    /// This view's grid, for bindings over `frame` and `lists` (`ViewId::generations`).
     pub generation: u64,
-    /// Each slot's map content (light placement, settings and casters), None to redraw.
-    keys: Vec<Option<[u8; 32]>>,
-    slots: Vec<Option<u32>>,
-    strengths: Vec<f32>,
-    tiles: Vec<Option<lc::Tile>>,
+    /// The lights this view's camera wants maps for, by rank, as of its last lit frame:
+    /// its part of the union the shared selection serves (`LocalMaps`).
+    desired: Vec<Option<u32>>,
     pub stats: LightClusterStats,
     /// The frame uniform as last written: unchanged frames upload nothing.
     published: Vec<u8>,
@@ -306,6 +302,47 @@ impl LightClusters {
             layout,
             pipeline,
             bind: None,
+            generation: 0,
+            desired: vec![],
+            stats: LightClusterStats::default(),
+            published: vec![],
+        }
+    }
+    /// A new view's clusters: these settings, its own grid and kernel bindings, and
+    /// generations from `generations` (`ViewId::generations`).
+    pub fn fork(&self, device: &PipelineDevice, ledger: &Ledger, generations: u64) -> Self {
+        Self {
+            enabled: self.enabled,
+            settings: self.settings,
+            generation: generations,
+            ..Self::new(device, ledger)
+        }
+    }
+    #[cfg(test)]
+    pub fn test_lists(&self) -> &wgpu::Texture {
+        &self._lists
+    }
+}
+
+/// LC1's shadowed local lights, shared by the views (docs/design-views.md): one atlas, and
+/// one selection made once per tick from the union of the views' demands, so a view's maps
+/// are the other views' too and two cameras never fight over slots.
+pub(super) struct LocalMaps {
+    /// Bound at group 3 binding 25; `generation` changes with it.
+    pub atlas: Atlas,
+    retired: Vec<(u64, Atlas)>,
+    pub generation: u64,
+    /// Each slot's map content (light placement, settings and casters), None to redraw.
+    keys: Vec<Option<[u8; 32]>>,
+    slots: Vec<Option<u32>>,
+    strengths: Vec<f32>,
+    tiles: Vec<Option<lc::Tile>>,
+    /// The tick whose selection has been made (`Renderer::begin_tick`).
+    tick: u64,
+}
+impl LocalMaps {
+    pub fn new(device: &PipelineDevice, ledger: &Ledger) -> Self {
+        Self {
             atlas: Atlas::new(device, ledger, None, 1, 0, false),
             retired: vec![],
             generation: 0,
@@ -313,16 +350,11 @@ impl LightClusters {
             slots: vec![],
             strengths: vec![],
             tiles: vec![],
-            stats: LightClusterStats::default(),
-            published: vec![],
+            tick: 0,
         }
     }
     pub fn collect(&mut self, completed: u64) {
         self.retired.retain(|(last, _)| *last > completed);
-    }
-    #[cfg(test)]
-    pub fn test_lists(&self) -> &wgpu::Texture {
-        &self._lists
     }
     #[cfg(test)]
     pub fn test_reset_selection(&mut self) {
@@ -332,25 +364,47 @@ impl LightClusters {
     }
 }
 
+/// The lights several views want maps for: their ranked demands interleaved, each light
+/// once, at most `count`. One view's demand is itself.
+fn union(demands: &[&[Option<u32>]], count: u32) -> Vec<Option<u32>> {
+    let ranked: Vec<Vec<u32>> = demands
+        .iter()
+        .map(|d| d.iter().flatten().copied().collect())
+        .collect();
+    let mut union = vec![];
+    for rank in 0..ranked.iter().map(Vec::len).max().unwrap_or(0) {
+        for light in ranked.iter().filter_map(|r| r.get(rank)) {
+            if union.len() < count as usize && !union.contains(&Some(*light)) {
+                union.push(Some(*light));
+            }
+        }
+    }
+    union
+}
+
 impl Renderer {
     /// LC1: how many point and spot lights are shadowed each frame, and their map settings.
     /// Applies from the next lit frame.
     pub fn set_local_shadows(&mut self, settings: LocalShadows) -> Result<(), Error> {
         self.check_fault()?;
         settings.validate(self.device.limits().max_texture_dimension_2d)?;
-        self.lighting.clusters.settings = settings;
+        for view in self.views_mut() {
+            view.clusters.settings = settings;
+        }
         Ok(())
     }
     pub fn local_shadows(&self) -> LocalShadows {
-        self.lighting.clusters.settings
+        self.view.clusters.settings
     }
     /// LC1 clustered culling, on by default. Off, every receiver walks every light (the
     /// pre-LC1 loop): for comparisons and debugging.
     pub fn set_light_clusters(&mut self, enabled: bool) {
-        self.lighting.clusters.enabled = enabled;
+        for view in self.views_mut() {
+            view.clusters.enabled = enabled;
+        }
     }
     pub fn light_cluster_stats(&self) -> LightClusterStats {
-        self.lighting.clusters.stats.clone()
+        self.view.clusters.stats.clone()
     }
     /// Per admitted lit frame, before `upload_lighting`: choose the shadowed lights and
     /// mark their records (kind.w), write the shading header and the kernel uniform, and
@@ -365,9 +419,10 @@ impl Renderer {
         uploads: &mut UploadBytes,
     ) -> LocalFrame {
         let lights = &self.lighting.source_lights;
-        let state = &mut self.lighting.clusters;
+        let state = &mut self.view.clusters;
+        let shared = &mut self.local_maps;
         let count = state.settings.count;
-        for slot in &mut state.slots {
+        for slot in &mut shared.slots {
             if slot.is_some_and(|i| {
                 lights
                     .get(i as usize)
@@ -377,7 +432,7 @@ impl Renderer {
             }
         }
         let eye = camera.view().inverse().w_axis.truncate();
-        let previous = state.slots.clone();
+        let previous = shared.slots.clone();
         let all_rays = !maps && count > 0;
         #[cfg(test)]
         let all_rays = all_rays && !state.legacy_limit;
@@ -386,7 +441,7 @@ impl Renderer {
                 lights,
                 camera.matrix(viewport[0], viewport[1]),
                 eye,
-                &state.slots,
+                &shared.slots,
                 count,
             );
             #[cfg(test)]
@@ -395,16 +450,28 @@ impl Renderer {
                     lights,
                     camera.matrix(viewport[0], viewport[1]),
                     eye,
-                    &state.slots,
+                    &shared.slots,
                     count,
                 )
             } else {
                 desired
             };
-            let (slots, strengths) =
-                lc::transition(&state.slots, &state.strengths, &desired, count);
-            state.strengths = strengths;
-            slots
+            // The tick's first lit frame selects for every view: this view's demand, then
+            // each other view's from its last frame. Later views of the tick keep it.
+            if !self.explicit_ticks || shared.tick != self.tick {
+                shared.tick = self.tick;
+                let mut demands = vec![&desired[..]];
+                demands.extend(self.parked.iter().map(|(_, v)| &v.clusters.desired[..]));
+                let wanted = union(&demands, count);
+                let (slots, strengths) =
+                    lc::transition(&shared.slots, &shared.strengths, &wanted, count);
+                shared.strengths = strengths;
+                state.desired = desired;
+                slots
+            } else {
+                state.desired = desired;
+                shared.slots.clone()
+            }
         } else {
             vec![]
         };
@@ -430,20 +497,20 @@ impl Renderer {
         }
         let mut layers = vec![glam::Mat4::IDENTITY; count as usize * 6];
         let mut faces = vec![0usize; count as usize];
-        state.tiles.resize(count as usize, None);
-        if state.atlas.resolution != state.settings.resolution {
-            state.tiles.fill(None);
+        shared.tiles.resize(count as usize, None);
+        if shared.atlas.resolution != state.settings.resolution {
+            shared.tiles.fill(None);
         }
         for slot in 0..count as usize {
             if slots.get(slot).is_none_or(Option::is_none) || previous.get(slot) != slots.get(slot)
             {
-                state.tiles[slot] = None;
+                shared.tiles[slot] = None;
             }
         }
         let vp = camera.matrix(viewport[0], viewport[1]);
         for (slot, light) in slots.iter().enumerate() {
             if let Some(light) = light {
-                if state.tiles[slot].is_none() {
+                if shared.tiles[slot].is_none() {
                     let pixels = lc::coverage(&lights[*light as usize], vp).sqrt()
                         * viewport[0].max(viewport[1]) as f32;
                     let maximum = state.settings.resolution;
@@ -454,7 +521,7 @@ impl Renderer {
                     } else {
                         (maximum / 4).max(1)
                     };
-                    state.tiles[slot] = lc::allocate_tile(&state.tiles, maximum, desired);
+                    shared.tiles[slot] = lc::allocate_tile(&shared.tiles, maximum, desired);
                 }
                 let m = lc::matrices(&lights[*light as usize], state.settings.near);
                 faces[slot] = m.len();
@@ -463,13 +530,13 @@ impl Renderer {
         }
         let clustered = state.enabled && lights.len() <= lc::MAX_CLUSTERED;
         let mut header = lc::header(camera, viewport, lights.len() as u32, clustered, &layers);
-        for (slot, tile) in state.tiles.iter().enumerate() {
+        for (slot, tile) in shared.tiles.iter().enumerate() {
             if let Some(tile) = tile {
                 for (k, value) in [
                     tile.x as f32,
                     tile.y as f32,
                     tile.size as f32,
-                    state.strengths.get(slot).copied().unwrap_or(0.0),
+                    shared.strengths.get(slot).copied().unwrap_or(0.0),
                 ]
                 .into_iter()
                 .enumerate()
@@ -504,9 +571,9 @@ impl Renderer {
                 .iter()
                 .flatten()
                 .any(|&i| lc::cube(&lights[i as usize]));
-            if state.atlas.slots != count
-                || state.atlas.resolution != state.settings.resolution
-                || state.atlas.cube_layers != cube_layers
+            if shared.atlas.slots != count
+                || shared.atlas.resolution != state.settings.resolution
+                || shared.atlas.cube_layers != cube_layers
             {
                 let next = Atlas::new(
                     &self.device,
@@ -516,10 +583,10 @@ impl Renderer {
                     count,
                     cube_layers,
                 );
-                let old = std::mem::replace(&mut state.atlas, next);
-                state.retired.push((self.submissions, old));
-                state.generation += 1;
-                state.keys = vec![None; count as usize];
+                let old = std::mem::replace(&mut shared.atlas, next);
+                shared.retired.push((self.submissions, old));
+                shared.generation += 1;
+                shared.keys = vec![None; count as usize];
             }
             // Hash each caster once, then include only intersecting casters in a map's
             // key. A distant moving object no longer invalidates the entire atlas.
@@ -552,10 +619,10 @@ impl Renderer {
             }
             for (slot, light) in slots.iter().enumerate() {
                 let Some(light) = *light else {
-                    state.keys[slot] = None;
+                    shared.keys[slot] = None;
                     continue;
                 };
-                let Some(tile) = state.tiles[slot] else {
+                let Some(tile) = shared.tiles[slot] else {
                     continue;
                 };
                 let (centre, radius) = lc::sphere(&lights[light as usize]).unwrap();
@@ -582,15 +649,15 @@ impl Renderer {
                     .chain_update(scene)
                     .finalize()
                     .into();
-                if state.keys[slot] == Some(key) {
+                if shared.keys[slot] == Some(key) {
                     continue;
                 }
-                state.keys[slot] = Some(key);
+                shared.keys[slot] = Some(key);
                 for face in 0..faces[slot] {
                     let layer = (slot * 6 + face) as u32;
                     self.queue.write_buffer(
-                        state.atlas.uniforms.as_ref().unwrap(),
-                        u64::from(layer) * state.atlas.stride,
+                        shared.atlas.uniforms.as_ref().unwrap(),
+                        u64::from(layer) * shared.atlas.stride,
                         &matrix_bytes(layers[layer as usize]),
                     );
                     uploads.shadows += 64;
@@ -614,7 +681,7 @@ impl Renderer {
                 }
             }
         } else {
-            state.keys.iter_mut().for_each(|k| *k = None);
+            shared.keys.iter_mut().for_each(|k| *k = None);
         }
         let stats = &mut state.stats;
         stats.clustered = clustered;
@@ -629,7 +696,7 @@ impl Renderer {
             slots.clone()
         };
         stats.resolutions = if maps {
-            state
+            shared
                 .tiles
                 .iter()
                 .map(|t| t.map_or(0, |t| t.size))
@@ -638,16 +705,16 @@ impl Renderer {
             vec![]
         };
         stats.strengths = if maps {
-            state.strengths.clone()
+            shared.strengths.clone()
         } else {
             vec![1.0; stats.shadowed.len()]
         };
         stats.atlas_bytes = if maps {
-            6 * 4 * u64::from(lc::atlas_extent(state.atlas.resolution)).pow(2)
+            6 * 4 * u64::from(lc::atlas_extent(shared.atlas.resolution)).pow(2)
         } else {
             0
         };
-        state.slots = slots;
+        shared.slots = slots;
         stats.maps = maps;
         stats.faces_drawn = redraw.len() as u32;
         stats.total_faces_drawn += redraw.len() as u64;
@@ -666,7 +733,7 @@ impl Renderer {
     ) {
         let generation = self.lighting.generation;
         let lights = self.lighting.light_buffer().clone();
-        let state = &mut self.lighting.clusters;
+        let state = &mut self.view.clusters;
         if frame.dispatch {
             if state.bind.as_ref().is_none_or(|(g, _)| *g != generation) {
                 let bind = self.ledger.own(
@@ -700,7 +767,7 @@ impl Renderer {
             pass.set_bind_group(0, &*state.bind.as_ref().unwrap().1, &[]);
             pass.dispatch_workgroups(lc::CLUSTERS.div_ceil(64), 1, 1);
         }
-        let state = &self.lighting.clusters;
+        let state = &self.local_maps;
         for (layer, casters) in &frame.redraw {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("LC1 local shadow face"),

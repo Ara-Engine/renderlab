@@ -94,15 +94,12 @@ pub(crate) fn exact_virtual_settings(m: &serde_json::Value) -> crate::VirtualSha
 
 #[test]
 fn virtual_manifest_lookup_defaults_and_overrides() {
-    assert_eq!(
-        crate::VirtualLookup::default(),
-        crate::VirtualLookup::Surface
-    );
+    assert_eq!(crate::VirtualLookup::default(), crate::VirtualLookup::Disk);
     assert_eq!(
         virtual_settings(&serde_json::json!({"virtual": {}}))
             .unwrap()
             .lookup,
-        crate::VirtualLookup::Surface
+        crate::VirtualLookup::Disk
     );
     assert_eq!(
         exact_virtual_settings(&serde_json::json!({})).lookup,
@@ -1065,7 +1062,7 @@ fn gpu_film_t1_timing() {
             let mode = (pair + j) % 2;
             // set_soft_shadows would release the film history when leaving Temporal; the
             // field keeps it, so Temporal frames stay in their steady static state.
-            r.soft_mode = modes[mode];
+            r.view.soft_mode = modes[mode];
             let report = traced_frame(&mut r, &color, &camera, &mut asset, true);
             assert_eq!(report.soft_shadows, modes[mode]);
             if pair >= warmup {

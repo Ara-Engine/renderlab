@@ -538,6 +538,15 @@ pub struct Renderer {
     /// frame being prepared runs that work.
     tick: u64,
     worked_tick: u64,
+    /// Every view's `ViewState::primary_uploads`, summed: the part of `uploads` that is
+    /// per view (TR1's key reads the scene's part and the selected view's own).
+    primary_uploads: UploadBytes,
+    /// The tick whose GI cache work has run (`prepare_gi`).
+    gi_tick: u64,
+    /// LC1's local shadow atlas and the selection the views share.
+    local_maps: light_cluster_gpu::LocalMaps,
+    /// Frames that uploaded placements, geometry or poses, counted for views' histories.
+    scene_edits: u64,
     explicit_ticks: bool,
     tick_work: bool,
     device: PipelineDevice,
@@ -562,8 +571,6 @@ pub struct Renderer {
     pipeline: Pipelines,
     shader_hash: [u8; 32],
     lighting: LightingGpu,
-    post_settings: PostSettings,
-    post_lut: Option<ColourLut>,
     retired_post: Vec<(u64, PostGpu)>,
     environment: crate::environment::EnvironmentState,
     hardware_shadows: Option<HardwareState>,
@@ -573,8 +580,6 @@ pub struct Renderer {
     lod_pixels: f32,
     software_extent: f32,
     lod_lift: f32,
-    soft_mode: crate::SoftShadows,
-    virtual_settings: VirtualShadowSettings,
     /// The sun shadow settings every view renders with; each view keeps a copy beside its
     /// shadow plan, synchronised when it renders (`sync_view_shadows`).
     shadow_settings: crate::Shadows,
@@ -629,11 +634,6 @@ pub struct Renderer {
     /// AT1 sky LUTs, kernels and the procedural sky (`atmosphere_gpu.rs`); each view owns
     /// its camera volume and fog histories.
     atmosphere: atmosphere_gpu::AtmosphereGpu,
-    /// TR1 temporal reconstruction settings (`temporal_reconstruction.rs`); its history is
-    /// the view's.
-    reconstruction: Reconstruction,
-    /// M7-R1/R1n global reflection controls (`set_reflections`).
-    reflections: crate::ReflectionSettings,
     reconstruction_shadow_budget: ReconstructionShadowBudget,
     /// TP1 transparent draws and particle emitters (`transparency_gpu.rs`).
     transparency: transparency_gpu::TransparencyState,
@@ -1054,6 +1054,7 @@ impl Renderer {
             view: ViewState::new(
                 ViewId(0),
                 shadows,
+                light_cluster_gpu::LightClusters::new(&device, &ledger),
                 atmosphere_gpu::AtmosphereView::new(&device, &ledger, 0),
                 fresh,
                 primary,
@@ -1064,6 +1065,10 @@ impl Renderer {
             next_view: 1,
             tick: 0,
             worked_tick: 0,
+            primary_uploads: UploadBytes::default(),
+            gi_tick: 0,
+            local_maps: light_cluster_gpu::LocalMaps::new(&device, &ledger),
+            scene_edits: 0,
             explicit_ticks: false,
             tick_work: true,
             device,
@@ -1088,8 +1093,6 @@ impl Renderer {
             pipeline,
             shader_hash: [0; 32],
             lighting,
-            post_settings: PostSettings::default(),
-            post_lut: None,
             retired_post: vec![],
             environment: Default::default(),
             hardware_shadows,
@@ -1098,12 +1101,8 @@ impl Renderer {
             lod_pixels: visibility_buffer::DEFAULT_LOD_PIXELS,
             software_extent: visibility_buffer::DEFAULT_SOFTWARE_EXTENT,
             lod_lift: visibility_buffer::DEFAULT_LOD_LIFT,
-            soft_mode: crate::SoftShadows::Exact,
-            virtual_settings: VirtualShadowSettings::default(),
             shadow_settings: Default::default(),
             gi,
-            reconstruction: Reconstruction::default(),
-            reflections: crate::ReflectionSettings::default(),
             reconstruction_shadow_budget: ReconstructionShadowBudget::default(),
             transparency: Default::default(),
             primary_hash: [0; 32],
@@ -2343,7 +2342,7 @@ impl Renderer {
             .view
             .post
             .as_ref()
-            .filter(|_| self.post_settings.enabled)
+            .filter(|_| self.view.post_settings.enabled)
         {
             if let Some(stamps) = &mut timestamp_writes {
                 let _start = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -2375,7 +2374,7 @@ impl Renderer {
             .view
             .post
             .as_ref()
-            .filter(|_| self.post_settings.enabled)
+            .filter(|_| self.view.post_settings.enabled)
         {
             post.tone(&mut pass);
         } else {
@@ -2453,10 +2452,10 @@ impl Renderer {
         // next lattice offset: every matrix of this frame comes from the jittered camera.
         // TR1b (default on): Temporal soft shadows keep their own film history and are never
         // reconstructed, so their frames are not jittered either.
-        self.view.reconstruction_frame = (self.reconstruction.enabled
+        self.view.reconstruction_frame = (self.view.reconstruction.enabled
             && view_mode == ViewMode::Lit
             && self.primary_mode != PrimaryVisibility::Raster
-            && self.soft_mode != crate::SoftShadows::Temporal)
+            && self.view.soft_mode != crate::SoftShadows::Temporal)
             .then_some(self.view.reconstruction_index);
         let jittered;
         let camera = match self.view.reconstruction_frame {
@@ -2522,7 +2521,7 @@ impl Renderer {
         if traced {
             if self.primary_mode == PrimaryVisibility::VisibilityBuffer
                 && matches!(
-                    self.soft_mode,
+                    self.view.soft_mode,
                     SoftShadows::Interactive | SoftShadows::Temporal
                 )
             {
@@ -2539,7 +2538,7 @@ impl Renderer {
             }
             if self.hardware_shadows.is_none()
                 && self.view.shadows.enabled(view_mode)
-                && (self.soft_mode != crate::SoftShadows::Virtual
+                && (self.view.soft_mode != crate::SoftShadows::Virtual
                     || self.view.shadows.settings.directional_disk_angle <= 0.0)
             {
                 return Err(Error::InvalidInput(
@@ -2551,7 +2550,7 @@ impl Renderer {
                 matrix,
                 self.view.shadows.enabled(view_mode),
                 self.standard.id(),
-                self.soft_mode == SoftShadows::Temporal,
+                self.view.soft_mode == SoftShadows::Temporal,
             )?;
             #[cfg(test)]
             assert!(
@@ -2892,12 +2891,12 @@ impl Renderer {
             && (self.hardware_shadows.is_some()
                 || (traced
                     && self.primary_mode == PrimaryVisibility::VisibilityBuffer
-                    && self.soft_mode == crate::SoftShadows::Virtual));
+                    && self.view.soft_mode == crate::SoftShadows::Virtual));
         let soft = hardware_shadowed && self.view.shadows.settings.directional_disk_angle > 0.0;
         #[cfg(test)]
         let soft = soft && (traced || !self.fresh_fragment_reference);
         let fresh = soft && !traced;
-        let temporal = traced && soft && self.soft_mode == crate::SoftShadows::Temporal;
+        let temporal = traced && soft && self.view.soft_mode == crate::SoftShadows::Temporal;
         FramePaths {
             lit,
             hardware_shadowed,
@@ -2906,7 +2905,7 @@ impl Renderer {
             interactive: traced
                 && self.primary_mode == PrimaryVisibility::Traced
                 && soft
-                && self.soft_mode == crate::SoftShadows::Interactive,
+                && self.view.soft_mode == crate::SoftShadows::Interactive,
             temporal,
             variant: if temporal {
                 Some(Variant::Temporal)
@@ -2984,6 +2983,15 @@ impl Renderer {
         mut cpu: CpuFrame,
     ) -> Result<Option<FrameReport>, Error> {
         // Both callers have admitted this slot. No camera/mode/lighting staging on busy.
+        // Frames that move placements, geometry or poses: every view's fog history restarts
+        // at its next frame (`prepare_atmosphere`).
+        if uploads.geometry > 0
+            || uploads.models > 0
+            || uploads.instances > 0
+            || uploads.skinning > 0
+        {
+            self.scene_edits += 1;
+        }
         let start = Instant::now();
         if self.camera_shadow != Some(camera_bytes) {
             self.queue.write_buffer(&self.uniform, 0, &camera_bytes);
@@ -3050,7 +3058,7 @@ impl Renderer {
             && soft
             && !temporal
             && !interactive
-            && self.soft_mode == crate::SoftShadows::Virtual;
+            && self.view.soft_mode == crate::SoftShadows::Virtual;
         if soft
             && !virtual_frame
             && let Some(state) = self.view.virtual_shadows.as_mut()
@@ -3183,10 +3191,12 @@ impl Renderer {
             result?;
             uploads.add(primary);
             self.uploads.add(primary);
+            self.view.primary_uploads.add(primary);
+            self.primary_uploads.add(primary);
             if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                 self.prepare_visibility_buffer(draws, camera, color.size())?;
             }
-            if soft && self.soft_mode == crate::SoftShadows::Virtual {
+            if soft && self.view.soft_mode == crate::SoftShadows::Virtual {
                 let scopes = OperationScopes::new(&self.device);
                 let result = self.prepare_virtual(draws, camera, color.size());
                 if let Some(error) = scopes.finish() {
@@ -3203,7 +3213,7 @@ impl Renderer {
                 self.ensure_reconstruction()?;
                 self.prepare_reconstruction(camera, index, draws);
                 // P-NSQ: non-RT sun visibility samples TR1's shadow budget, as RT does.
-                if soft && self.soft_mode == crate::SoftShadows::Virtual {
+                if soft && self.view.soft_mode == crate::SoftShadows::Virtual {
                     self.prepare_virtual_sampling();
                 }
             }
@@ -3316,13 +3326,13 @@ impl Renderer {
                 if interactive
                     && reconstructed
                     && p.reconstruction.as_ref().is_some_and(|r| r.trace.is_some())
-                    && self.reconstruction.rotate_directions
+                    && self.view.reconstruction.rotate_directions
                 {
                     self.encode_reconstruction_interactive(&mut encoder, stamps(6));
                 } else if interactive {
                     let tile = primary_ray_gpu::TRACE_TILE;
                     self.encode_primary_interactive(&mut encoder, &p.interactive, tile, stamps(6));
-                } else if soft && self.soft_mode == crate::SoftShadows::Virtual {
+                } else if soft && self.view.soft_mode == crate::SoftShadows::Virtual {
                     // Traced receivers, then N8 visibility with no ray queries.
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                         self.encode_visibility_buffer(&mut encoder, true, stamps(6));
@@ -3721,7 +3731,7 @@ impl Renderer {
                 PrimaryVisibility::Raster
             },
             soft_shadows: if traced && soft {
-                self.soft_mode
+                self.view.soft_mode
             } else {
                 crate::SoftShadows::Exact
             },
@@ -3902,6 +3912,7 @@ impl Renderer {
             .uploading
             .retain(|(last, _)| *last > self.completed_submission);
         self.view.collect(self.completed_submission);
+        self.local_maps.collect(self.completed_submission);
         self.collect_parked(self.completed_submission);
         if let Some(hardware) = &mut self.hardware_shadows {
             hardware.collect(

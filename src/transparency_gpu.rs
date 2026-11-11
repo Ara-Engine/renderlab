@@ -1728,7 +1728,13 @@ impl Renderer {
             size: [size.width, size.height],
             sun,
             fit,
-            step: self.transparency.step,
+            // A later view of the tick moves nothing: its update only relights the
+            // particles for its own sun map fit (`tp_incident`).
+            step: if self.tick_work {
+                self.transparency.step
+            } else {
+                0.0
+            },
             reflect,
             scene: if traced {
                 self.view.primary.as_ref().unwrap().scene
@@ -1781,13 +1787,19 @@ impl Renderer {
         }
         self.queue.write_buffer(&gpu.draws, 0, &draw_slots);
         // Emitters' spawns for this step: once per tick (`Renderer::begin_tick`); a later view
-        // of the same tick only sorts and draws the particles.
+        // of the same tick spawns nothing.
         let step = f64::from(self.transparency.step);
-        let simulate = self.tick_work;
         // A stepped prewarm's substep: the frame's particle step, or 60 Hz while it is 0.
         let substep = if step > 0.0 { step } else { 1.0 / 60.0 };
-        for e in self.transparency.emitters.iter_mut().filter(|_| simulate) {
+        for e in &mut self.transparency.emitters {
             let textured = e.sprite.is_some();
+            if !self.tick_work {
+                let none = e
+                    .params
+                    .uniform(e.spawned as u32, 0, 0, textured, 0.0, e.clock as f32, 0.0);
+                self.queue.write_buffer(&e.uniform, 0, &none);
+                continue;
+            }
             // A new emitter whose forces or collision the closed-form prewarm cannot place
             // steps its prewarm window instead: each substep spawns its share of the rate
             // and moves every live particle, as a running emitter would have.
@@ -2004,10 +2016,8 @@ impl Renderer {
             pass.set_bind_group(3, self.lighting.bind(), &[]);
             for e in &self.transparency.emitters {
                 pass.set_bind_group(0, &*e.sim, &[]);
-                if self.tick_work {
-                    pass.set_pipeline(&p.update);
-                    pass.dispatch_workgroups(e.params.capacity.div_ceil(64), 1, 1);
-                }
+                pass.set_pipeline(&p.update);
+                pass.dispatch_workgroups(e.params.capacity.div_ceil(64), 1, 1);
                 pass.set_pipeline(&p.sort);
                 pass.dispatch_workgroups(1, 1, 1);
             }

@@ -21,6 +21,12 @@ impl ShadowFrame {
     pub fn records(&self) -> &[u8] {
         &self.records
     }
+    /// The light orientations this plan transported, which the next frame's plan
+    /// starts from. The wgpu renderer takes the field itself after submitting.
+    #[cfg(feature = "backend-ara")]
+    pub(crate) fn bases(&self) -> &[Option<DMat4>] {
+        &self.bases
+    }
     pub fn prepare_hardware_bias(&mut self, light_records: &[u8]) -> Result<(), Error> {
         for (light, &[first, count]) in light_records
             .chunks_exact(crate::lighting::LIGHT_BYTES)
@@ -612,9 +618,11 @@ impl Renderer {
         assert_eq!(report.uploads.geometry, 0);
         self.test_drain("shadow admission cleanup");
     }
-    /// Gives the selected view the renderer's shadow settings: at once for the selected view
-    /// when they change, and for any other view when it is next rendered.
+    /// Gives the shared lighting the selected view's exposure, and the view the renderer's
+    /// shadow settings (at once for the selected view when they change, and for any other
+    /// view when it is next rendered).
     pub(super) fn sync_view_shadows(&mut self) {
+        self.lighting.pending.exposure = self.view.exposure;
         if self.view.shadows.settings == self.shadow_settings {
             return;
         }
@@ -662,6 +670,8 @@ impl Renderer {
             self.lighting.pending.environment = lighting.environment;
             self.lighting.pending.exposure = exposure;
         }
+        // Exposure is the selected view's look.
+        self.view.exposure = exposure;
         self.shadow_settings.clone_from(shadows);
         self.sync_view_shadows();
         if !shadows.enabled()

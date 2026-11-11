@@ -11,9 +11,9 @@
 //! them as a resize would, and view 0 counts exactly as a single-view renderer did.
 use super::{
     Depth, PostGpu, ReconstructionState, Renderer, ShadowState, atmosphere_gpu::AtmosphereView,
-    fresh_shadow_gpu::FreshState, lighting_gpu::Hdr, primary_ray_gpu::PrimaryState,
-    temporal_reconstruction::Upscale, transparency_gpu, virtual_shadow_gpu::VirtualState,
-    visibility_buffer::VisibilityBuffer,
+    fresh_shadow_gpu::FreshState, light_cluster_gpu::LightClusters, lighting_gpu::Hdr,
+    primary_ray_gpu::PrimaryState, temporal_reconstruction::Upscale, transparency_gpu,
+    virtual_shadow_gpu::VirtualState, visibility_buffer::VisibilityBuffer,
 };
 use crate::Error;
 
@@ -39,6 +39,19 @@ pub(super) struct ViewState {
     pub target_generation: u64,
     /// Post's targets and histories (exposure, motion).
     pub post: Option<PostGpu>,
+    // ---- The view's look (`engine::ViewLook`): set while the view is selected ----
+    /// PP1 presentation and its colour LUT.
+    pub post_settings: crate::PostSettings,
+    pub post_lut: Option<crate::ColourLut>,
+    /// The exposure scale (2^stops) this view's frames light and present at; synced into the
+    /// shared lighting uniform when it renders.
+    pub exposure: f32,
+    /// TR1 settings (its render scale among them); M7-R1/R1n reflection controls.
+    pub reconstruction: crate::Reconstruction,
+    pub reflections: crate::ReflectionSettings,
+    /// The sun visibility estimator, and Virtual's tuning (the quality preset).
+    pub soft_mode: crate::SoftShadows,
+    pub virtual_settings: crate::VirtualShadowSettings,
     /// The sun shadow plan, its cascade bases and records (the raster maps' placement).
     pub shadows: ShadowState,
     pub fresh: Option<FreshState>,
@@ -49,6 +62,11 @@ pub(super) struct ViewState {
     /// `SoftShadows::Virtual` state, created by the view's first frame (N8): its clipmap
     /// placement, page requests and pages.
     pub virtual_shadows: Option<VirtualState>,
+    /// LC1: the light cluster grid (screen space), the local-shadow selection with its
+    /// transitions, and the atlas holding the selected lights' maps.
+    pub clusters: LightClusters,
+    /// The GI cache's view keys: whether this view's camera and scene are unchanged.
+    pub gi: super::gi_cache::ViewPlan,
     /// The camera volume and fog histories (`atmosphere_gpu.rs`).
     pub atmosphere: AtmosphereView,
     /// TR1 history (created by the first reconstructed frame), the next frame's sample
@@ -64,11 +82,14 @@ pub(super) struct ViewState {
     /// The renderer frame this view last submitted (`FrameId`): object motion vectors
     /// reproject from that frame's placements (`InstanceState::previous_models`).
     pub last_frame: u64,
+    /// What this view's primary preparation uploaded (its geometry and instance tables).
+    pub primary_uploads: crate::UploadBytes,
 }
 impl ViewState {
     pub fn new(
         key: ViewId,
         shadows: ShadowState,
+        clusters: LightClusters,
         atmosphere: AtmosphereView,
         fresh: Option<FreshState>,
         primary: Option<PrimaryState>,
@@ -79,7 +100,16 @@ impl ViewState {
             hdr: None,
             target_generation: key.generations(),
             post: None,
+            post_settings: Default::default(),
+            post_lut: None,
+            exposure: 1.0,
+            reconstruction: Default::default(),
+            reflections: Default::default(),
+            soft_mode: crate::SoftShadows::Exact,
+            virtual_settings: Default::default(),
             shadows,
+            clusters,
+            gi: Default::default(),
             fresh,
             primary,
             visibility_buffer: None,
@@ -92,6 +122,7 @@ impl ViewState {
             transparency_targets: None,
             transparency_reflections: None,
             last_frame: 0,
+            primary_uploads: Default::default(),
         }
     }
 }
@@ -103,15 +134,27 @@ impl Renderer {
     pub fn create_view(&mut self) -> ViewId {
         let key = ViewId(self.next_view);
         self.next_view += 1;
-        let view = ViewState::new(
+        let mut view = ViewState::new(
             key,
             self.view
                 .shadows
+                .fork(&self.device, &self.ledger, key.generations()),
+            self.view
+                .clusters
                 .fork(&self.device, &self.ledger, key.generations()),
             AtmosphereView::new(&self.device, &self.ledger, key.generations()),
             self.view.fresh.as_ref().map(FreshState::fork),
             self.view.primary.as_ref().map(PrimaryState::fork),
         );
+        // The selected view's look, until the caller sets this view's.
+        let v = &self.view;
+        view.post_settings = v.post_settings;
+        view.post_lut.clone_from(&v.post_lut);
+        view.exposure = v.exposure;
+        view.reconstruction = v.reconstruction;
+        view.reflections = v.reflections;
+        view.soft_mode = v.soft_mode;
+        view.virtual_settings = v.virtual_settings;
         self.parked.push((key, view));
         key
     }

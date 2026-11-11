@@ -1,0 +1,1 @@
+Own synthetic linear HDR fixture, 320x200 RGB float32 PFM (little endian, bottom-up). Analytic coloured spheres, checker floor, HDR emitter; no private or third-party assets. This is a post-processing input, not a proof of geometry/lighting ports. Replays use an independent smaller procedural fixture.

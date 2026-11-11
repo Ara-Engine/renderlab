@@ -1397,7 +1397,7 @@ fn gpu_visibility_quarry() {
                 eprintln!("N8f caster motion {label}: {:?}", r.virtual_shadow_stats());
                 // Kept counts must equal a full lookup of the final placement (N8f identity).
                 let [_, rolled] = interactive_outputs(&r);
-                let settings = r.virtual_settings;
+                let settings = r.view.virtual_settings;
                 r.set_virtual_shadow_settings(crate::VirtualShadowSettings {
                     refresh: 1,
                     ..settings
@@ -1850,7 +1850,7 @@ fn gpu_virtual_configuration_reset() {
         };
         r.set_virtual_shadow_settings(settings).unwrap();
         assert_eq!(
-            r.virtual_settings, settings,
+            r.view.virtual_settings, settings,
             "saved settings must stay current"
         );
         if reset {

@@ -5,8 +5,8 @@ use crate::pipeline_compilation::PipelineDevice;
 
 pub(super) struct LightBuffer {
     shadow_generation: u64,
-    /// LC1: the local shadow maps bound at binding 22 (light_cluster_gpu.rs).
-    cluster_generation: u64,
+    /// LC1: the view's cluster grid and the shared local shadow maps (light_cluster_gpu.rs).
+    cluster_generation: (u64, u64),
     environment_generation: u64,
     indirect_generation: u64,
     atmosphere_generation: u64,
@@ -59,8 +59,6 @@ pub(super) struct LightingGpu {
     uniform_shadow: Option<[u8; 48]>,
     pub max: u32,
     pub generation: u64,
-    /// LC1 clustered lights and local shadow maps (light_cluster_gpu.rs).
-    pub clusters: super::light_cluster_gpu::LightClusters,
 }
 impl LightingGpu {
     pub fn new(
@@ -310,12 +308,10 @@ impl LightingGpu {
         );
         let dummy_lobes = super::environment_gpu::dummy_lobes(device, queue, ledger);
         let limits = device.limits();
-        let clusters = super::light_cluster_gpu::LightClusters::new(device, ledger);
         Self {
             transmission: super::transparency_gpu::transmission_shadow::TransmissionShadow::new(
                 device, ledger,
             ),
-            clusters,
             decals: super::decal_gpu::DecalState::new(device, ledger),
             bindings,
             layout,
@@ -359,7 +355,6 @@ impl LightingGpu {
         self.decals.collect(completed);
         self.retired.retain(|(last, _)| *last > completed);
         self.retired_hdr.retain(|(last, _)| *last > completed);
-        self.clusters.collect(completed);
     }
 }
 fn computed(mut entry: wgpu::BindGroupLayoutEntry) -> wgpu::BindGroupLayoutEntry {
@@ -475,6 +470,8 @@ impl Renderer {
             self.lighting.pending = packed;
             self.lighting.source_lights.clone_from(&lighting.lights);
         }
+        // Exposure is the selected view's look.
+        self.view.exposure = exposure;
         Ok(())
     }
     pub fn max_lights(&self) -> u32 {
@@ -505,7 +502,8 @@ impl Renderer {
         if state.active.as_ref().is_none_or(|active| {
             active.buffer.size() < needed
                 || active.shadow_generation != self.view.shadows.stats.resource_generation
-                || active.cluster_generation != state.clusters.generation
+                || active.cluster_generation
+                    != (self.view.clusters.generation, self.local_maps.generation)
                 || active.environment_generation != self.environment.generation
                 || active.indirect_generation != self.gi.generation
                 || active.atmosphere_generation != self.view.atmosphere.generation
@@ -623,16 +621,18 @@ impl Renderer {
                             },
                             wgpu::BindGroupEntry {
                                 binding: 23,
-                                resource: state.clusters.frame.as_entire_binding(),
+                                resource: self.view.clusters.frame.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 24,
-                                resource: wgpu::BindingResource::TextureView(&state.clusters.lists),
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.view.clusters.lists,
+                                ),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 25,
                                 resource: wgpu::BindingResource::TextureView(
-                                    &state.clusters.atlas.view,
+                                    &self.local_maps.atlas.view,
                                 ),
                             },
                             wgpu::BindGroupEntry {
@@ -666,7 +666,7 @@ impl Renderer {
             let kernel = group("lighting, indirect cache kernels", &self.gi.dummy);
             let next = LightBuffer {
                 shadow_generation: self.view.shadows.stats.resource_generation,
-                cluster_generation: state.clusters.generation,
+                cluster_generation: (self.view.clusters.generation, self.local_maps.generation),
                 environment_generation: self.environment.generation,
                 indirect_generation: self.gi.generation,
                 atmosphere_generation: self.view.atmosphere.generation,

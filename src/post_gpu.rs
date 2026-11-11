@@ -373,7 +373,7 @@ impl PostGpu {
         );
         let image =
             |label, size| texture(r, label, size, F::Rgba16Float, wgpu::TextureDimension::D2);
-        let settings = r.post_settings;
+        let settings = r.view.post_settings;
         let tiny = wgpu::Extent3d {
             width: 1,
             height: 1,
@@ -499,14 +499,15 @@ impl PostGpu {
             .retain(|(last, _)| *last > r.completed_submission);
         self.retired_targets
             .retain(|(last, _)| *last > r.completed_submission);
-        let s = r.post_settings;
+        let s = r.view.post_settings;
         self.prepare_targets(r);
         let internal = r.view.hdr.as_ref().unwrap().resolved.texture.size();
         let current = camera.unjittered().matrix(internal.width, internal.height);
-        // MV1: camera and object history must describe the same rendered frame.
+        // MV1: camera and object history must describe the same rendered frame: the frame
+        // this view rendered last.
         let previous = self
             .previous
-            .filter(|(frame, _)| *frame == r.frames)
+            .filter(|(frame, _)| *frame == r.view.last_frame)
             .map(|(_, matrix)| matrix);
         let mut frame = Vec::with_capacity(272);
         for m in [
@@ -676,7 +677,7 @@ impl PostGpu {
     /// full target before encoding, preserving camera history and the post frame index.
     fn prepare_targets(&mut self, r: &Renderer) {
         use wgpu::TextureFormat as F;
-        let s = r.post_settings;
+        let s = r.view.post_settings;
         let tiny = wgpu::Extent3d {
             width: 1,
             height: 1,
@@ -736,7 +737,7 @@ impl PostGpu {
     }
     pub(super) fn encode(&self, r: &Renderer, encoder: &mut wgpu::CommandEncoder) {
         let g = self.groups.as_ref().unwrap();
-        let s = r.post_settings;
+        let s = r.view.post_settings;
         if s.motion_blur || s.depth_of_field.is_some() {
             let primary = g.key.1.is_some();
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -806,17 +807,16 @@ impl Renderer {
             .map_or(&self.view.hdr.as_ref().unwrap().resolved, |u| &u.hdr)
     }
     pub fn post_settings(&self) -> PostSettings {
-        self.post_settings
+        self.view.post_settings
     }
     /// Presentation settings never invalidate TR1. Disabling releases post resources.
     pub fn set_post_settings(&mut self, settings: PostSettings) -> Result<(), Error> {
         settings.validate()?;
-        self.post_settings = settings;
+        self.view.post_settings = settings;
         if !settings.enabled {
-            let submissions = self.submissions;
-            let retired: Vec<_> = self.views_mut().filter_map(|v| v.post.take()).collect();
-            self.retired_post
-                .extend(retired.into_iter().map(|post| (submissions, post)));
+            if let Some(post) = self.view.post.take() {
+                self.retired_post.push((self.submissions, post));
+            }
         }
         Ok(())
     }
@@ -830,15 +830,17 @@ impl Renderer {
                 ));
             }
         }
-        self.post_lut = lut;
-        let identity = ColourLut::identity(2)?;
-        let mut posts: Vec<_> = self.views_mut().map(|v| v.post.take()).collect();
-        for post in posts.iter_mut().flatten() {
-            post.write_lut(self, self.post_lut.as_ref().unwrap_or(&identity));
-            post.lut_custom = self.post_lut.is_some();
-        }
-        for (view, post) in self.views_mut().zip(posts) {
-            view.post = post;
+        self.view.post_lut = lut;
+        if let Some(mut post) = self.view.post.take() {
+            post.write_lut(
+                self,
+                self.view
+                    .post_lut
+                    .as_ref()
+                    .unwrap_or(&ColourLut::identity(2)?),
+            );
+            post.lut_custom = self.view.post_lut.is_some();
+            self.view.post = Some(post);
         }
         Ok(())
     }
@@ -849,7 +851,7 @@ impl Renderer {
         }
     }
     pub(super) fn prepare_post(&mut self, camera: &Camera, primary: bool) -> Result<(), Error> {
-        if !self.post_settings.enabled {
+        if !self.view.post_settings.enabled {
             return Ok(());
         }
         let size = self.post_hdr().texture.size();
@@ -867,7 +869,7 @@ impl Renderer {
             }
         };
         if post.serial == 0 {
-            if let Some(lut) = &self.post_lut {
+            if let Some(lut) = &self.view.post_lut {
                 post.write_lut(self, lut);
                 post.lut_custom = true;
             }
