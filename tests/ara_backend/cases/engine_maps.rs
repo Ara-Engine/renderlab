@@ -12,7 +12,8 @@ use renderlab::{
     },
     backend_ara::engine::Engine,
     engine::{
-        Background, Exposure, MaterialDesc, Quality, RenderScale, Settings, Sky, Sun, TextureRef,
+        Background, Exposure, MaterialDesc, Quality, Settings, Sky, Sun, TextureRef, ViewDesc,
+        ViewLook,
     },
 };
 
@@ -27,16 +28,25 @@ fn settings(global_illumination: bool) -> Settings {
     Settings {
         global_illumination,
         temporal_reconstruction: false,
-        render_scale: RenderScale::Native,
-        reflections: ReflectionSettings::off(),
         local_shadows: LocalShadows {
             count: 0,
             ..Default::default()
         },
-        exposure: Exposure::Manual { stops: STOPS },
         // Not on this layer.
         volumetric_fog: None,
         ..Default::default()
+    }
+}
+/// The one view: no reflections, the fixed exposure, at `quality`.
+fn view(quality: Quality) -> ViewDesc {
+    ViewDesc {
+        look: ViewLook {
+            reflections: ReflectionSettings::off(),
+            exposure: Exposure::Manual { stops: STOPS },
+            quality,
+            ..Default::default()
+        },
+        ..ViewDesc::new(SIZE[0], SIZE[1])
     }
 }
 /// A 40 m floor through the origin, facing +Y, its uv its xz.
@@ -132,15 +142,12 @@ fn a_normal_mapped_material_reaches_the_frame_through_the_engine() -> Result<()>
         100.,
     )?;
     // The exact traced frame, as the frame-level test renders it.
-    let exact = Settings {
-        quality: Quality::Reference,
-        ..settings(false)
-    };
+    let exact = settings(false);
     type Image = Vec<[f32; 3]>;
     let mut frame =
         |transform: Mat4, tangents: Option<TangentStream>, mapped: bool| -> Result<Image> {
             let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, exact)?;
-            engine.resize(SIZE[0], SIZE[1])?;
+            engine.create_view(&view(Quality::Reference))?;
             engine.set_sky(Sky::Uniform([0.; 3]))?;
             engine.set_sun(Some(sun()))?;
             let mesh = match &tangents {
@@ -331,7 +338,7 @@ fn a_sky_map_lights_and_fills_misses_as_its_uniform_sky_does() -> Result<()> {
             ShaderCache::new(path.join("shaders"))?,
             settings(light == Light::Cached),
         )?;
-        engine.resize(SIZE[0], SIZE[1])?;
+        engine.create_view(&view(Quality::Realtime))?;
         if light != Light::Sunless {
             engine.set_sun(Some(sun()))?;
         }

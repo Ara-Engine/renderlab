@@ -14,7 +14,7 @@ use super::{
     shader::{InputKey, Pass, Program},
 };
 use crate::renderer::gi_cache::{
-    self as shared, FrameInputs, Plan, PlanConfig, Planner, Sizes, WorkLayout,
+    self as shared, FrameInputs, Plan, PlanConfig, Planner, Sizes, ViewPlan, WorkLayout,
 };
 use anyhow::{Context, Result, ensure};
 use ara_gpu::{Access, GpuDevice, Resource, commands::Command, commands::Recorder};
@@ -255,6 +255,8 @@ pub struct Cache {
     /// wgpu zero-initialises its buffers; these are filled on their first frame.
     zeroed: bool,
     planner: Planner,
+    /// The one view's idle keys (this layer renders one view).
+    view_plan: ViewPlan,
     stages: Vec<(Entry, Program, Kernel)>,
     /// Cell shading, with bounce: one program for a frame of one program, or one per
     /// reflecting program of a frame of several, each shading its own draws' cells.
@@ -363,6 +365,7 @@ impl Cache {
             sizes,
             zeroed: false,
             planner: Planner::default(),
+            view_plan: ViewPlan::default(),
             stages,
             shade,
             selectors,
@@ -472,7 +475,8 @@ impl Cache {
         };
         // `ensure_gi_shade`: the setting is on and the frame's program reflects light.
         let bounce = self.settings.bounce;
-        let begun = self.planner.begin(&config, true, bounce);
+        // One view, and every frame a tick (docs/design-views.md).
+        let begun = self.planner.begin(&config, true, bounce, true);
         // The buffers are idle between frames: every frame waits for its submission.
         for buffer in [&self.table, &self.work, &self.outgoing, &self.raw] {
             graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
@@ -516,6 +520,8 @@ impl Cache {
             &config,
             &begun,
             bounce,
+            true,
+            &mut self.view_plan,
             FrameInputs {
                 bounds: scene.bounds,
                 poses: scene.poses.clone(),
