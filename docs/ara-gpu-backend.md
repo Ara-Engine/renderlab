@@ -1966,7 +1966,7 @@ sampled-image repair it already made. Every emitted stage is held to it statical
 buffer-array probe now runs on every backend, with buffers that are not multiples of
 16 bytes and, off Metal, with every read in bounds: the emitted SPIR-V has no bounds
 clamp, where Naga's Metal output clamps, so a read past the end is the device's to
-define. **Not run on Vulkan since the fix.**
+define.
 
 The same omission is in Naga's output for the wgpu renderer: its SPIR-V for
 `primary_edge_neighbour` has the same undecorated `OpArrayLength`. Whether the wgpu
@@ -1978,6 +1978,14 @@ gives weights of 1 + 2^-16 and 48 pixels one half-float step apart; the test all
 one step. With that it runs on and fails at frame 16 on the mean weight: 16.826
 against 17, 1.02% short where the bound is 1%. On Metal the shortfall is 92 pixels
 (the card's outline) and 809 samples at that frame, 0.39%; RADV's is 2,138 samples
-with a least weight of 3.56 against Metal's 6.66. That is 2.6 times Metal's and not
-explained: the bound stays, and the failure now reports how many pixels are short and
-by how much, which tells more outline pixels from the same pixels losing more.
+with a least weight of 3.56 against Metal's 6.66. At 29d8e7b the gate's line says
+659 pixels are short on RADV where 92 are on Metal, so it is more pixels, not the
+same pixels losing more. On Metal all 92 lie within a pixel of the card's outline.
+Not explained: the bound stays, and the failure now also counts the short pixels by
+their distance from that outline, which says whether RADV's are a wider ring around
+the card or somewhere else.
+
+At 29d8e7b the buffer-array probe and the geometry check both pass on RADV (69 of 70,
+no validation message), so the `NonUniform` repair is confirmed there. The same
+question put to the wgpu renderer's own path (Renderlab #30) fails on RADV with
+lengths 3, 3, 3, 3 for buffers of 3, 13, 6 and 22 words.

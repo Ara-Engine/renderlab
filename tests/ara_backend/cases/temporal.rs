@@ -223,6 +223,18 @@ fn reconstruction_accumulates_jittered_samples_into_edge_coverage() -> Result<()
         card > 4. * floor && floor > 0.1,
         "the fixture lost its contrast: card {card}, floor {floor}"
     );
+    // The card's outline in pixels: its least and greatest corner.
+    let outline = {
+        let matrix = camera.matrix(SIZE[0], SIZE[1]);
+        let corner = |x: f32, y: f32| {
+            let ndc = matrix.project_point3(Vec3::new(x, y, 1.));
+            [
+                (ndc.x + 1.) * 0.5 * SIZE[0] as f32,
+                (1. - ndc.y) * 0.5 * SIZE[1] as f32,
+            ]
+        };
+        [corner(-0.5, 0.5), corner(0.5, -0.5)]
+    };
     for (index, (hdr, history)) in frames.iter().enumerate() {
         let (colour, reset) = history.as_ref().context("history was not read")?;
         let [least, mean, most] = weights(colour);
@@ -250,16 +262,29 @@ fn reconstruction_accumulates_jittered_samples_into_edge_coverage() -> Result<()
         }
         // One more sample a frame on average, within a percent: silhouette pixels
         // start from their neighbours and are held to a shorter window.
-        // What a failure needs to say: how many pixels fall short of one sample a frame
-        // and by how much in all. On Metal 92 pixels do from frame 4 on (the card's
-        // outline), by 809 samples in all at frame 16 (0.39%) and 2,116 at frame 47.
+        // What a failure needs to say: how many pixels fall short of one sample a frame,
+        // by how much in all, and where they are. On Metal 92 pixels do from frame 4 on,
+        // every one within a pixel of the card's outline (30 of them on the card), by
+        // 809 samples in all at frame 16 (0.39%) and 2,116 at frame 47. RADV at frame 16
+        // has 659 short by 2,135 (1.02%): more pixels, not yet placed.
         let samples = (index + 1) as f32;
         let all = colour.as_chunks::<4>().0.iter().map(|p| p[3]);
-        let short = all.clone().filter(|w| *w < samples - 0.01).count();
-        let deficit: f32 = all.map(|w| (samples - w).max(0.)).sum();
+        let deficit: f32 = all.clone().map(|w| (samples - w).max(0.)).sum();
+        // Short pixels by how far their centre is from the card's outline, in pixels:
+        // within one, two, three, further; and how many of them lie on the card.
+        let (mut rings, mut inside) = ([0usize; 4], 0usize);
+        for (i, _) in all.enumerate().filter(|(_, w)| *w < samples - 0.01) {
+            let centre = [i as u32 % SIZE[0], i as u32 / SIZE[0]].map(|c| c as f32 + 0.5);
+            let signed = (0..2)
+                .map(|a| (outline[0][a] - centre[a]).max(centre[a] - outline[1][a]))
+                .fold(f32::MIN, f32::max);
+            rings[(signed.abs() as usize).min(3)] += 1;
+            inside += usize::from(signed < 0.);
+        }
+        let short: usize = rings.iter().sum();
         ensure!(
             (mean / samples - 1.).abs() < 0.01 && least >= 1.,
-            "frame {index}: weights {least} to {most}, mean {mean}; {short} pixels short of {samples} by {deficit:.0} samples in all"
+            "frame {index}: weights {least} to {most}, mean {mean}; {short} pixels short of {samples} by {deficit:.0} samples in all; {rings:?} of them within 1, 2, 3 and more pixels of the card's outline, {inside} on the card"
         );
         // Away from the edges the shading is smooth, so jittered samples agree with the
         // pixel-centre one.
