@@ -823,8 +823,8 @@ impl Frames {
         self.kept.targets.retire(gpu)
     }
     /// The last frame's displayed image (sRGB-encoded RGBA8, the output's size), kept on
-    /// the device until the frame after next draws over it: what a presenter shows.
-    /// `None` before the first frame with post enabled.
+    /// the device until the frame after next draws over it, and left in `CopySource`:
+    /// what a presenter shows. `None` before the first frame with post enabled.
     pub fn output(&self) -> Option<&Texture> {
         self.kept.shown.and_then(|s| self.kept.outputs[s].as_ref())
     }
@@ -3305,6 +3305,11 @@ fn frame(
         }
         let display = outputs[slot].as_ref().context("made above")?;
         passes.display(&mut graph, &mut rec, &linear, display)?;
+        // A presenter copies it from here (`ExternalFrame::image` is in `CopySource`).
+        graph.node(
+            &mut rec,
+            &[(Resource::Image(display.image), Access::CopySource)],
+        )?;
         if !blind {
             reads[1] = Some(transfer::readback(
                 gpu,

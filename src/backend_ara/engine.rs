@@ -344,6 +344,60 @@ fn objects<'a>(placed: &[Placed<'a>]) -> Vec<ForwardObject<'a>> {
 
 /// The scene calls, as [`Scene`] documents each; none touches the device.
 impl Engine {
+    /// A mesh with a tangent frame. The tangents are not kept: normal maps are not
+    /// assembled on this layer (a material that asks for one is refused).
+    pub fn create_mesh_with_tangents(
+        &mut self,
+        data: &MeshData<'_>,
+        _tangents: &crate::engine::TangentStream,
+    ) -> Result<MeshId, Error> {
+        self.create_mesh(data)
+    }
+    /// Releases the mesh once no object uses it; its buffers leave the device with the
+    /// next frame that no longer names it.
+    pub fn remove_mesh(&mut self, mesh: MeshId) -> Result<(), Error> {
+        self.state.remove_mesh(mesh).map(drop)
+    }
+    /// Releases the texture once no material uses it.
+    pub fn remove_texture(&mut self, texture: TextureId) -> Result<(), Error> {
+        self.state.remove_texture(texture).map(drop)
+    }
+    /// Releases the material once no object uses it.
+    pub fn remove_material(&mut self, material: MaterialId) -> Result<(), Error> {
+        self.state.remove_material(material).map(drop)
+    }
+    /// Releases the environment once the sky no longer uses it.
+    pub fn remove_environment(&mut self, environment: EnvironmentId) -> Result<(), Error> {
+        self.state.remove_environment(environment).map(drop)
+    }
+    /// Releases the emitter.
+    pub fn remove_emitter(&mut self, emitter: EmitterId) -> Result<(), Error> {
+        self.state.remove_emitter(emitter).map(drop)
+    }
+    /// Removes the object from the scene.
+    pub fn despawn(&mut self, object: ObjectId) -> Result<(), Error> {
+        self.state.despawn(object)
+    }
+    /// Emitters are refused on this layer (`create_emitter`), so there is nothing to
+    /// change; the call is recorded once.
+    pub fn update_emitter(
+        &mut self,
+        emitter: EmitterId,
+        _desc: &EmitterDescriptor<'_>,
+        _sprite: Option<TextureId>,
+    ) -> Result<(), Error> {
+        self.state.emitters.get(emitter)?;
+        self.refuse("update_emitter", "particle emitters");
+        Ok(())
+    }
+    /// The post pass's colour LUT is the identity on this layer; a LUT is recorded
+    /// once as refused and the frame is graded without it.
+    pub fn set_colour_lut(&mut self, lut: Option<crate::post::ColourLut>) -> Result<(), Error> {
+        if lut.is_some() {
+            self.refuse("set_colour_lut", "colour lookup tables");
+        }
+        Ok(())
+    }
     pub fn create_mesh(&mut self, data: &MeshData<'_>) -> Result<MeshId, Error> {
         self.meshes += 1;
         Ok(self.state.meshes.insert(Mesh::Static {
