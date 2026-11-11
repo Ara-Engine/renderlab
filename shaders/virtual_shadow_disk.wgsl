@@ -5,11 +5,10 @@
 //
 // Method: occluder back-projection onto the light. The disk is 64 fixed sample directions, one
 // bit each (the rook pattern of tools/n-vsm1/pattern.py). Every map texel near the receiver is a
-// column of solid between its top surface and the surface under it (the peel layer, when that
-// belongs to the same placement; otherwise its underside is unknown and it is taken down to
-// half its height above the receiver: a height field stays closed wherever neighbouring tops
-// differ by less than that, and an occluder far up the light is not taken for a wall beside
-// the receiver, which would harden its penumbra). A column
+// column of solid between its top surface and its underside: the peel layer when that belongs
+// to the same placement (a closed mesh), otherwise the lowest neighbouring top of the same
+// placement (a sheet: a sloped surface stays closed between texels, a floating card stays
+// thin, and an occluder far up the light is not taken for a wall beside the receiver). A column
 // part at height t above the receiver, at light-space offset q, hides the directions q/t, a
 // rectangle for a square texel; a part from t0 to t1 hides the rectangles between, taken as
 // their bounding rectangle. The blocked directions of all columns are OR-ed, so overlapping
@@ -21,7 +20,7 @@
 // its texels (its "band"), over at most a (2 VD_R + 1)^2 window; the next level serves the
 // band above over the same texel count. The receiver's level starts at the bias height. Above
 // the coarsest level's band its max-mips continue the ladder (VD_MIPS of them): cells twice
-// as large per band, each a column from its highest centre down to half that height.
+// as large per band, each a slab a few cells thick under its highest centre.
 //
 // Near field: a surface closer to the receiver's tangent plane than VD_BIAS texels is not
 // taken from the map (its heights are a texel apart, and LOD receivers lie off the source
@@ -156,8 +155,10 @@ override VD_BIAS:f32=1.0;
 override VD_SCREEN_BIAS:f32=0.1;
 // Pixels the visible-surface samples reach along the sun's screen direction (0: off).
 override VD_SCREEN:u32=6u;
-// The peel layer bounds a column from below (off: every column is solid without end).
+// The peel layer bounds a column from below where it is the top's own placement.
 override VD_PEEL:bool=true;
+// The least thickness of a column, in texels of its level (see vd_map).
+override VD_THICK:f32=4.0;
 // On reconstructed frames each receiver reads the map from a point of its tangent plane up to
 // this many texels of its level away (per axis, a new point every frame), so TR1 integrates a
 // texel-wide box over the map: where a texel spans several pixels, a hard shadow edge becomes a
@@ -329,9 +330,9 @@ fn vd_column(c:vec2<f32>,half:f32,lo_in:f32,hi:f32) {
 }
 
 // Whether a surface point (light space) is far enough above the receiver's tangent plane to
-// be an occluder: `margin` metres along the normal (thin receivers: in height).
+// be an occluder: `margin` metres along the normal. A thin receiver's normal is its light-facing
+// one (vd_prepare), so a tilted sheet does not shadow itself.
 fn vd_above(q:vec3<f32>,margin:f32)->bool {
-    if vd_px.thin {return q.z-vd_px.p.z>margin;}
     return dot(vd_px.normal,q-vd_px.point)>margin;
 }
 
@@ -382,12 +383,27 @@ fn vd_map() {
                     let height=vsm_height(top);
                     let t=height-p.z;
                     if t<=lo || !vd_above(vec3<f32>(c,height),margin) {continue;}
-                    // An unknown underside: half the top's height above the receiver.
-                    var bottom=max(lo,0.5*t);
+                    // The underside. A closed mesh gives it: the peel layer, when that is the top's
+                    // own placement. Otherwise the top is a sheet (a card, a terrain): it is as thick
+                    // as its step to its lowest neighbour of the same placement, which closes a
+                    // sloped surface between texels and leaves a floating sheet thin. Either way a
+                    // column is at least VD_THICK texels thick, so the columns of a thin or oblique
+                    // surface overlap in height where thinner ones would leave slits of light.
+                    var bottom=t-VD_THICK*texel;
+                    var sheet=true;
                     if VD_PEEL {
                         let peel=vsm_peel_words[i];
-                        if peel.x!=0u && peel.x>>bits==top.x>>bits {bottom=max(lo,vsm_height(peel)-p.z);}
+                        if peel.x!=0u && peel.x>>bits==top.x>>bits {bottom=min(bottom,vsm_height(peel)-p.z);sheet=false;}
                     }
+                    if sheet {
+                        for(var k=0u;k<4u;k+=1u) {
+                            let n=vec2<i32>(cx,y)+vec2<i32>(select(select(0,1,k==1u),-1,k==0u),select(select(0,1,k==3u),-1,k==2u));
+                            if any(n<vec2<i32>(0)) || any(n>=vec2<i32>(side)) {continue;}
+                            let other=vsm_top_words[vsm_word(n,level)];
+                            if other.x!=0u && other.x>>bits==top.x>>bits {bottom=min(bottom,vsm_height(other)-p.z);}
+                        }
+                    }
+                    bottom=max(bottom,lo);
                     vd_column(c-p.xy,0.5*texel,max(bottom,1e-6*texel),min(t,hi));
                 }
             }
@@ -415,7 +431,8 @@ fn vd_map() {
                 let c=origin+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*cell;
                 let t=height-p.z;
                 if t<=lo || !vd_above(vec3<f32>(c,height),margin) {continue;}
-                vd_column(c-p.xy,0.5*cell,max(max(lo,0.5*t),1e-6*texel),min(t,hi));
+                // A cell is its highest centre alone: a slab VD_THICK cells thick.
+                vd_column(c-p.xy,0.5*cell,max(max(lo,t-VD_THICK*cell),1e-6*texel),min(t,hi));
             }
         }
         if vd_full() {return;}
