@@ -830,3 +830,15 @@ Islam's direction is about 3x faster than Unreal with a better picture. On the m
 3. Lower-rate glossy with resampled reuse (docs/design-nonrt-glossy-cost.md). Glossy is 21 of 33 ms on Showcase non-RT and about 6 of 15 ms on RT.
 4. Non-RT sun shadows: 4.2 of 7.0 ms on the quarry at rest.
 5. Cuts.
+
+## RADV-only raster shadow test failures (Linux gate, 2026-11-11)
+
+**OPEN.** Two GPU shadow tests fail on the AMD Radeon 760M (RADV PHOENIX, Mesa 26.0.8) at main `48962fa`. The Linux gate found them while testing PR #20, and they are not caused by it: the result is identical on its base, so they predate it.
+- `gpu_shadow_offscreen_local_and_reload` fails at `shadow_tests.rs:170` with "offscreen blocker failed for case 1".
+- `gpu_shadow_planar_receiver_motion` fails at `shadow_tests.rs:604` on a thin blocker over a grazing cascade receiver, with `tilt=0 kind=0 pose=0 samples=1 clear=230 blocked=29`.
+
+The tests were only ever verified on the RTX 4070 SUPER; docs/camera-depth.md records the first one. No gap entry covered them before.
+- **Next:** run both alone on the RTX at the same commit.
+  - If they pass there, the difference is RADV raster precision, or the tests' thresholds depend on the vendor. Fix the threshold, or the depth bias on thin grazing blockers, so non-NVIDIA hardware is covered.
+  - If they also fail there, the bug is on main.
+- **Harness note:** about 84 shadow tests that are ignored by default also fail under `--include-ignored` in one process. They need fixture variables, `--release`, or one process per test, because a second validation-logger install poisons a `Once`. Run them one per process.
