@@ -253,6 +253,9 @@ pub struct ForwardScene<'a> {
     /// (its `meshes` identity still names its draw), its batch word says it is skinned,
     /// and the reconstruction and the cache see its pose change. `None` is all rigid.
     pub skins: Option<&'a [Option<Skin<'a>>]>,
+    /// The display-linear 3D colour LUT the post pass applies at `post.lut_strength`
+    /// (`Renderer::set_colour_lut`); `None` is the identity, at strength zero.
+    pub colour_lut: Option<&'a crate::post::ColourLut>,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -319,6 +322,7 @@ pub struct ForwardImages {
 pub fn post_record(settings: &crate::PostSettings, height: u32, serial: u32) -> [f32; 20] {
     settings.record(serial, height, LUT_SIDE, false)
 }
+/// The identity LUT's side, as the renderer starts with it.
 const LUT_SIDE: u32 = 2;
 /// `atmosphere_gpu::FROXEL_TILE`: output pixels per camera-volume cell.
 const FROXEL_TILE: u32 = 8;
@@ -3336,8 +3340,15 @@ fn frame(
         settings.validate()?;
         let passes = PostPasses::new(gpu, cache, Format::Rgba32Float)?;
         left.post_serial = history.post_serial.wrapping_add(1);
-        let record =
-            SettingsRecord::new(gpu, &post_record(&settings, target[1], left.post_serial))?;
+        let record = SettingsRecord::new(
+            gpu,
+            &settings.record(
+                left.post_serial,
+                target[1],
+                scene.colour_lut.map_or(LUT_SIDE, |l| l.size),
+                scene.colour_lut.is_some(),
+            ),
+        )?;
         // `PostGpu::prepare`: the previous camera counts only from the frame before.
         let previous_camera = history
             .post_camera
@@ -3348,15 +3359,32 @@ fn frame(
             scene.camera.unjittered().matrix(size[0], size[1]),
         ));
         graph.import(Resource::Buffer(record.buffer), Access::HostWrite);
-        let lut = Texture::volume(gpu, LUT_SIDE, Format::Rgba16Float)?;
-        let identity: Vec<u8> = (0..LUT_SIDE.pow(3))
-            .flat_map(|i| {
-                [i & 1, (i >> 1) & 1, i >> 2, 1].map(|v| half::f16::from_f32(v as f32).to_bits())
+        // `PostGpu::write_lut`: RGBA8 texels of the LUT, or of the identity.
+        let identity;
+        let colour_lut = match scene.colour_lut {
+            Some(lut) => {
+                lut.validate()
+                    .map_err(|e| anyhow::anyhow!("colour LUT: {e}"))?;
+                lut
+            }
+            None => {
+                identity = crate::post::ColourLut::identity(LUT_SIDE)
+                    .map_err(|e| anyhow::anyhow!("identity LUT: {e}"))?;
+                &identity
+            }
+        };
+        let lut = Texture::volume(gpu, colour_lut.size, Format::Rgba8)?;
+        let texels: Vec<u8> = colour_lut
+            .rgb
+            .iter()
+            .flat_map(|v| {
+                v.map(|x| (x * 255.0).round() as u8)
+                    .into_iter()
+                    .chain([255])
             })
-            .flat_map(u16::to_le_bytes)
             .collect();
         post_buffers.push(transfer::upload(
-            gpu, &mut graph, &mut rec, lut.image, &identity,
+            gpu, &mut graph, &mut rec, lut.image, &texels,
         )?);
         let mut surface = None;
         if settings.motion_blur || settings.depth_of_field.is_some() {

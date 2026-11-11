@@ -64,7 +64,8 @@ exact one):
 - The radiance cache (GI) and traced reflections.
 - Temporal reconstruction at every render scale.
 - Transparent panes with their coloured sun shadows.
-- Post: bloom, motion blur, depth of field, tone mapping and grading.
+- Post: bloom, motion blur, depth of field, tone mapping and grading, with the colour
+  LUT.
 - A scene without a sun.
 
 Refused by the engine entry, and reported:
@@ -72,7 +73,6 @@ Refused by the engine entry, and reported:
 | Call | What |
 |---|---|
 | `set_settings` | `volumetric_fog`; `sky_light` other than 1; `post.enabled` false; any field added to `Settings` later, while it differs from its default |
-| `set_colour_lut` | colour lookup tables (the LUT is the identity) |
 | `add_asset` | cooked assets |
 | `create_emitter`, `update_emitter` | particle emitters |
 | `set_decals` | decals |
@@ -90,7 +90,7 @@ path's software rays (the port is the traced frame only).
 
 - **Metal, M5 Pro (macOS 27):** the whole suite,
   `cargo test -p renderlab --features backend-ara --test ara_backend -- --test-threads=1`,
-  88 tests, under `MTL_DEBUG_LAYER=1` with `MTL_SHADER_VALIDATION=1` and `=0`. Ara's
+  89 tests, under `MTL_DEBUG_LAYER=1` with `MTL_SHADER_VALIDATION=1` and `=0`. Ara's
   player draws Showcase with it through the presenter's own Metal device (Ara #71).
 - **Vulkan, Radeon 760M (RADV) and RTX 4070 SUPER:** the suite and the timings below,
   on the gate machine. The heads from the engine entry (0a4307c) on have run on Metal
@@ -124,8 +124,7 @@ reflection was kept on disk).
   1. decals;
   2. particles;
   3. volumetric fog;
-  4. reflections inside panes;
-  5. the colour LUT.
+  4. reflections inside panes.
 
   Then skinning on the GPU (SK1's ported kernel, with structure refits) in place of the
   CPU pose and per-pose build, for frame cost.

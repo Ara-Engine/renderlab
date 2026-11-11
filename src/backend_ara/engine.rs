@@ -146,6 +146,8 @@ pub struct Engine {
     environments: u64,
     /// Textures created so far: the next one's identity.
     textures: u64,
+    /// The post pass's colour LUT (`set_colour_lut`).
+    colour_lut: Option<crate::post::ColourLut>,
     /// Whether frames are read back (`set_readback`).
     readback: bool,
     refusals: Vec<Refusal>,
@@ -197,6 +199,7 @@ impl Engine {
             materials: 0,
             environments: 0,
             textures: 0,
+            colour_lut: None,
             readback: true,
             refusals: Vec::new(),
             ended: Vec::new(),
@@ -456,12 +459,19 @@ impl Engine {
         self.refuse("update_emitter", "particle emitters");
         Ok(())
     }
-    /// The post pass's colour LUT is the identity on this layer; a LUT is recorded
-    /// once as refused and the frame is graded without it.
+    /// Grades every following frame with `lut` at `post.lut_strength`, or with the
+    /// identity (`Renderer::set_colour_lut`).
     pub fn set_colour_lut(&mut self, lut: Option<crate::post::ColourLut>) -> Result<(), Error> {
-        if lut.is_some() {
-            self.refuse("set_colour_lut", "colour lookup tables");
+        if let Some(lut) = &lut {
+            lut.validate()?;
+            // Metal's and Vulkan's guaranteed 3D extent.
+            if lut.size > 2048 {
+                return Err(Error::InvalidInput(
+                    "LUT exceeds device 3D texture dimension",
+                ));
+            }
         }
+        self.colour_lut = lut;
         Ok(())
     }
     pub fn create_mesh(&mut self, data: &MeshData<'_>) -> Result<MeshId, Error> {
@@ -857,6 +867,7 @@ impl Engine {
             instances: Some(&placements),
             sky_map,
             skins: Some(&skins),
+            colour_lut: self.colour_lut.as_ref(),
         };
         let images = self
             .frames

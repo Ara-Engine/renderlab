@@ -132,6 +132,7 @@ fn a_normal_mapped_floor_is_the_floor_tilted_to_that_normal() -> Result<()> {
                 programs: None,
                 sky_map: None,
                 skins: None,
+                colour_lut: None,
             },
         )?;
         Ok(images

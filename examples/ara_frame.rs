@@ -866,6 +866,7 @@ fn ara_frame(
                 instances: None,
                 sky_map: None,
                 skins: None,
+                colour_lut: None,
                 objects: &objects,
                 lighting: &fixture.lighting,
                 camera: level.camera(fixture, pose),
