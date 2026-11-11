@@ -95,7 +95,8 @@ struct Targets {
     /// Two layers of R32Uint: opaque ids, front ids.
     ids: Owned<wgpu::Texture>,
     ids_view: Owned<wgpu::TextureView>,
-    /// Settled (placement + 1, primitive), ping-ponged: the previous frame's is read.
+    /// Settled (placement + 1, primitive, pending primitive, its streak), ping-ponged: the
+    /// previous frame's is read.
     settled: [Depth; 2],
     parity: usize,
     /// The frame that last wrote `ids` (and `settled[parity]`); None before one.
@@ -879,7 +880,7 @@ impl Renderer {
                         storage(6),
                         texture(7, uint),
                         texture(8, uint),
-                        written(9, wgpu::TextureFormat::Rg32Uint, wgpu::TextureViewDimension::D2),
+                        written(9, wgpu::TextureFormat::Rgba32Uint, wgpu::TextureViewDimension::D2),
                         written(10, wgpu::TextureFormat::R32Uint, wgpu::TextureViewDimension::D2Array),
                         storage(11),
                     ],
@@ -1007,7 +1008,7 @@ impl Renderer {
             self.id_target(
                 "settled id surfaces",
                 size,
-                wgpu::TextureFormat::Rg32Uint,
+                wgpu::TextureFormat::Rgba32Uint,
                 wgpu::TextureUsages::STORAGE_BINDING,
             )
         };
