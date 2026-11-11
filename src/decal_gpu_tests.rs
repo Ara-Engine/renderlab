@@ -287,7 +287,7 @@ fn quarry(path: Path_, device: (wgpu::Device, wgpu::Queue), out: &Path) -> Json 
     }
     render(&mut r, &mut asset, &camera);
     r.test_drain("DC1 receiver setup");
-    let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+    let t = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
     let world = read_texture(&r, &t.world.texture, 16);
     let normals = read_texture(&r, &t.normal.texture, 16);
     if path == Path_::Rt {

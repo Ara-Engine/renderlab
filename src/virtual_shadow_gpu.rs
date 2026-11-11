@@ -23,6 +23,7 @@
 //! that keeps its sun basis through small turns, and a rolling refresh that looks up one
 //! trace tile in sixteen per frame while the camera, casters and settings hold still.
 // PC1: only the device type changes; pipeline creation uses the shared cache.
+use super::primary_ray_gpu::temporal_reconstruction::ZONES_BYTES;
 use super::*;
 use crate::pipeline_compilation::PipelineDevice;
 use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
@@ -41,16 +42,21 @@ const MAX_RECTS: usize = 16;
 const PAGE: u32 = 128;
 /// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen light-space and sixteen
 /// screen rectangles, the TRACED_DRAWS per-batch horizon offsets and (first record, recorded) pairs,
-/// N8e's uvec4 and P-NSQ's sampling uvec4 (`SAMPLING_OFFSET`).
+/// N8e's uvec4, P-NSQ's sampling uvec4 (`SAMPLING_OFFSET`) and TR1's restart zones
+/// (`ZONES_OFFSET`).
 const FRAME_BYTES: usize = 6 * 16
     + 2 * 16
     + MAX_LEVELS * 32
     + 2 * MAX_RECTS * 16
     + 12 * crate::TRACED_DRAWS as usize
     + 16
-    + 16;
+    + 16
+    + ZONES_BYTES;
 /// `VsmFrame::nsq`: direction batches and the frame's sequence rotation (docs/p-nsq.md).
-const SAMPLING_OFFSET: u64 = (FRAME_BYTES - 16) as u64;
+const SAMPLING_OFFSET: u64 = ZONES_OFFSET - 16;
+/// `VsmFrame::zones` (P-RELIT): TR1's restart zones, where a receiver evaluates the restart
+/// count instead of the frame's batches.
+const ZONES_OFFSET: u64 = (FRAME_BYTES - ZONES_BYTES) as u64;
 /// Per-draw `VsmHorizonPass` uniforms at the minimum dynamic-offset alignment.
 const HORIZON_STRIDE: u64 = 256;
 /// `VsmPass` uniforms (a clip level or a mip index) at the minimum dynamic-offset alignment.
@@ -88,8 +94,8 @@ pub(super) fn scratch_trace_offset(size: [u32; 2]) -> u64 {
 pub const VIRTUAL_FEATURES: wgpu::Features =
     wgpu::Features::SHADER_INT64.union(wgpu::Features::SHADER_INT64_ATOMIC_MIN_MAX);
 
-/// Tuning of `SoftShadows::Virtual`. Surface is the default lookup (docs/non-rt-n8p.md);
-/// Exact remains selectable as the reference. Other defaults follow docs/non-rt-n8.md,
+/// Tuning of `SoftShadows::Virtual`. Disk is the default lookup (docs/n-vsm1.md); Surface and
+/// Exact remain selectable, Exact as the reference. Other defaults follow docs/non-rt-n8.md,
 /// non-rt-n8c.md and non-rt-n8e.md; N8c's output is
 /// `walk_cap: 0, refresh: 1, sun_hysteresis: 0.0` with `lookup: VirtualLookup::Exact`.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -193,20 +199,35 @@ pub enum VirtualLookup {
     /// N8k: `Map`, then the exact lookup only for the receivers whose map decision used an
     /// ambiguous block (shaders/virtual_shadow_hybrid.wgsl); keeps both lookups' resources.
     Hybrid,
-    /// The default. N8n/N8o: `Exact`'s walks kept per receiver surface cell across frames in a hash table
+    /// The default until 2026-11-11 (N-VSM2 replaced it with `Disk`). N8n/N8o: `Exact`'s walks kept
+    /// per receiver surface cell across frames in a hash table
     /// (shaders/virtual_shadow_cache.wgsl, docs/non-rt-n8n.md, docs/non-rt-n8o.md). A pixel
     /// shows its cell's count only where the cell is solid and every pixel that computed it agreed
     /// with its neighbourhood; every other pixel walks as `Exact` does. Static frames run nothing,
     /// and camera motion walks only shadow-boundary pixels and cells not seen yet. Deterministic;
     /// caster motion retires exactly the cells it can reach. Adds the table and its claim words
     /// (64 MiB) and the miss queue (8 bytes per pixel).
-    #[default]
     Surface,
+    /// N-VSM1 (docs/n-vsm1.md, shaders/virtual_shadow_disk.wgsl): the disk's visible share
+    /// from the cached map alone. Every map texel near the receiver is projected back onto
+    /// the sun disk and the blocked directions are OR-ed into a 52-sample mask, level by
+    /// level as the occluder's height grows; the visible surface around the pixel supplies
+    /// the occluders closer than a texel. No triangle is read per pixel, no walk records or
+    /// ring horizons are kept, and the cost does not depend on TR1's shadow budget, so a cut
+    /// frame costs what a moving frame does. The default since 2026-11-11 (N-VSM2,
+    /// decision M8-DISK-DEFAULT): against the film references it beats `Surface` and Unreal's
+    /// VSM on S1-S3, and on the quarry it is the same picture at 0.24 ms instead of 4.5.
+    #[default]
+    Disk,
 }
 impl VirtualLookup {
     /// Whether the map lookup and its per-texel data run.
     fn map(self) -> bool {
         matches!(self, Self::Map | Self::Hybrid)
+    }
+    /// Whether the lookup reads triangles: ring horizons and walk records are kept for it.
+    fn walks(self) -> bool {
+        !matches!(self, Self::Map | Self::Disk)
     }
     /// Whether the lookup queues receivers in `Resources::queue` (8 bytes per pixel).
     fn queues(self) -> bool {
@@ -231,7 +252,7 @@ impl Default for VirtualShadowSettings {
             refresh: 16,
             sun_hysteresis: 0.01,
             walk_records: WalkRecords::Source,
-            lookup: VirtualLookup::Surface,
+            lookup: VirtualLookup::Disk,
             truncated_walks_block: true,
             walk_steps: 32,
             occluder_gather: true,
@@ -324,6 +345,9 @@ struct Pipelines {
     /// on first use with the exact lookup's constants).
     queue_args: Owned<wgpu::ComputePipeline>,
     queued: Option<Owned<wgpu::ComputePipeline>>,
+    /// N-VSM1 (shaders/virtual_shadow_disk.wgsl): its page requests and its lookup.
+    disk_mark: Owned<wgpu::ComputePipeline>,
+    disk: Owned<wgpu::ComputePipeline>,
 }
 struct Layouts {
     mark: Owned<wgpu::BindGroupLayout>,
@@ -343,6 +367,8 @@ struct Layouts {
     mip_dispatch: Owned<wgpu::BindGroupLayout>,
     minmip: Owned<wgpu::BindGroupLayout>,
     queue: Owned<wgpu::BindGroupLayout>,
+    /// N-VSM1: the disk lookup's group 0.
+    disk: Owned<wgpu::BindGroupLayout>,
 }
 /// Ring horizons (N8b lever 1): 4 bytes per triangle of every traced draw, computed once
 /// per draw list by `vsm_horizon`. Elevations do not change under the similarity transforms
@@ -426,6 +452,8 @@ struct Resources {
     /// words per receiver; 32 bytes unless `VirtualLookup::Hybrid`) and its dispatch.
     queue: Owned<wgpu::Buffer>,
     queue_dispatch: Owned<wgpu::Buffer>,
+    /// N-VSM1: the disk lookup's WGSL `VdFrame` (`DISK_FRAME_BYTES`).
+    disk_frame: Owned<wgpu::Buffer>,
     /// The hardware raster's attachment, which only sizes its raster area.
     _area: Owned<wgpu::Texture>,
     area: Owned<wgpu::TextureView>,
@@ -465,6 +493,7 @@ struct Groups {
     mip_dispatch: Owned<wgpu::BindGroup>,
     minmip: Owned<wgpu::BindGroup>,
     queue: Owned<wgpu::BindGroup>,
+    disk: Owned<wgpu::BindGroup>,
     /// The exact lookup's group with the queue in its scratch binding.
     queued: Owned<wgpu::BindGroup>,
     /// N8n: the surface cache's probe, dispatch and insert groups.
@@ -529,6 +558,10 @@ pub(super) struct VirtualState {
     map_layout: Owned<wgpu::PipelineLayout>,
     /// N8m: the hybrid queue dispatch's layout (its pass is rebuilt with the `VMAP_` constants).
     queue_layout: Owned<wgpu::PipelineLayout>,
+    /// N-VSM1: shaders/virtual_shadow_disk.wgsl and its lookup's layout (rebuilt with the
+    /// screens' `VD_` constants).
+    disk_module: Owned<wgpu::ShaderModule>,
+    disk_layout: Owned<wgpu::PipelineLayout>,
     /// N8k hybrid: the exact module with shaders/virtual_shadow_hybrid.wgsl appended (first use).
     hybrid_module: Option<Owned<wgpu::ShaderModule>>,
     /// N8n: the surface cache while `VirtualLookup::Surface` is the lookup; kept across resets,
@@ -540,6 +573,54 @@ pub(super) struct VirtualState {
 /// Screen constants with this prefix belong to the map lookup's module, the others to the
 /// exact one.
 const MAP_CONSTANTS: &str = "VMAP_";
+/// And these to the disk lookup's.
+const DISK_CONSTANTS: &str = "VD_";
+/// The disk lookup's window radius in texels per level (WGSL `VD_R`): a level serves the
+/// occluder heights whose reach is half to all of this many of its texels.
+const DISK_RADIUS: u32 = 3;
+/// WGSL `VdFrame`: the world-to-clip matrix, the image size, the 65 y-rank masks and the 64
+/// sample positions.
+const DISK_FRAME_BYTES: u64 = 80 + 33 * 16 + 32 * 16;
+/// The disk lookup's 64 sample directions (tools/n-vsm1/pattern.py): sample s has the s-th
+/// smallest x in the disk, and this is its y rank. Both coordinates sit at the 64 quantiles of
+/// the disk's marginal distribution (`disk_quantile`). No sample lies outside the disk, and the
+/// nearest pair is 0.205 radii apart (a square lattice of 64 in the disk: 0.222).
+const DISK_Y_RANK: [u8; 64] = [
+    34, 48, 19, 40, 30, 11, 51, 4, 23, 36, 57, 45, 13, 29, 6, 21, 1, 59, 42, 50, 33, 9, 63, 17, 25,
+    55, 46, 38, 5, 61, 12, 20, 0, 28, 56, 49, 41, 7, 14, 62, 22, 31, 54, 2, 39, 47, 16, 60, 8, 24,
+    53, 32, 43, 3, 18, 10, 26, 58, 35, 44, 52, 15, 27, 37,
+];
+/// The coordinate below which share `u` of a unit disk's area lies (the inverse of WGSL
+/// `vd_share`).
+fn disk_quantile(u: f64) -> f64 {
+    let share = |g: f64| 0.5 + (g * (1.0 - g * g).sqrt() + g.asin()) / std::f64::consts::PI;
+    let (mut lo, mut hi) = (-1.0, 1.0);
+    for _ in 0..60 {
+        let mid = 0.5 * (lo + hi);
+        if share(mid) < u {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    0.5 * (lo + hi)
+}
+/// `VdFrame`'s constant tail: per k in 0..=64 the mask of the samples whose y rank is at least
+/// k (two u32s each, padded to 33 vec4s), then the 64 sample positions.
+fn disk_pattern() -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(33 * 16 + 32 * 16);
+    for k in 0..66u8 {
+        let mask = (0..64).fold(0u64, |m, s| m | u64::from(DISK_Y_RANK[s] >= k) << s);
+        bytes.extend_from_slice(&(mask as u32).to_ne_bytes());
+        bytes.extend_from_slice(&((mask >> 32) as u32).to_ne_bytes());
+    }
+    let quantile = |rank: usize| disk_quantile((rank as f64 + 0.5) / 64.0) as f32;
+    for s in 0..64 {
+        bytes.extend_from_slice(&quantile(s).to_ne_bytes());
+        bytes.extend_from_slice(&quantile(usize::from(DISK_Y_RANK[s])).to_ne_bytes());
+    }
+    bytes
+}
 
 fn layout_entry(
     binding: u32,
@@ -616,12 +697,14 @@ pub(super) fn shader_source() -> String {
         .map(|path| std::fs::read_to_string(path).unwrap());
     #[cfg(not(test))]
     let variant: Option<String> = None;
+    // P-RELIT: the restart-zone tests over VsmFrame's copy (vsm_prepare's batches).
     format!(
-        "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}",
+        "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}\n{}",
         crate::TRACED_DRAWS,
         variant
             .as_deref()
-            .unwrap_or(include_str!("../shaders/virtual_shadow.wgsl"))
+            .unwrap_or(include_str!("../shaders/virtual_shadow.wgsl")),
+        super::primary_ray_gpu::temporal_reconstruction::zones_source("vsm.zones")
     )
 }
 
@@ -662,6 +745,51 @@ pub(super) fn map_source() -> String {
             .as_deref()
             .unwrap_or(include_str!("../shaders/virtual_shadow_lookup.wgsl"))
     )
+}
+
+/// CPU-only access to nested production source composers.
+#[cfg(test)]
+pub(super) fn compile_structure_sources() -> Vec<(&'static str, String)> {
+    vec![
+        ("virtual", shader_source()),
+        ("records", records_source()),
+        ("hybrid", hybrid_source()),
+        ("map", map_source()),
+        ("surface", surface_cache::surface_source()),
+        ("s4", sunvis_s4::source()),
+    ]
+}
+
+/// The N-VSM1 disk lookup module: the window radius, then shaders/virtual_shadow_disk.wgsl.
+/// Measurement only: `RENDERLAB_VD=NAME=VALUE,...` replaces the defaults of the module's `VD_`
+/// override constants (screens and cost splits without a build per variant; docs/n-vsm1.md).
+/// `RENDERLAB_VD_SHADER=PATH` reads the module from a variant file instead (the same layouts
+/// and entries), as `RENDERLAB_VSM_SHADER` does for the exact lookup. Unset, the module is the
+/// file.
+pub(super) fn disk_source() -> String {
+    let variant = std::env::var("RENDERLAB_VD_SHADER")
+        .ok()
+        .map(|path| std::fs::read_to_string(path).unwrap());
+    let mut source = format!(
+        "const VD_R:u32={DISK_RADIUS}u;\n{}",
+        variant
+            .as_deref()
+            .unwrap_or(include_str!("../shaders/virtual_shadow_disk.wgsl"))
+    );
+    for (name, value) in std::env::var("RENDERLAB_VD")
+        .iter()
+        .flat_map(|list| list.split(','))
+        .filter_map(|item| item.split_once('='))
+    {
+        let declaration = format!("override {name}:");
+        let Some(at) = source.find(&declaration) else {
+            panic!("RENDERLAB_VD: no override named {name}");
+        };
+        let equals = at + source[at..].find('=').unwrap() + 1;
+        let end = equals + source[equals..].find(';').unwrap();
+        source.replace_range(equals..end, value);
+    }
+    source
 }
 
 fn corners(b: &crate::shadow_plan::Bounds) -> impl Iterator<Item = glam::DVec3> + '_ {
@@ -920,6 +1048,30 @@ impl VirtualState {
                     storage(44, false, S::COMPUTE),
                 ],
             ),
+            disk: group(
+                "N-VSM1 disk visibility",
+                &[
+                    frame_uniform(S::COMPUTE),
+                    sampled(7, uint, D::D2),
+                    sampled(8, uint, D::D2),
+                    sampled(9, float, D::D2),
+                    sampled(10, float, D::D2),
+                    written(15),
+                    storage(16, true, S::COMPUTE),
+                    sampled(18, uint, D::D2),
+                    storage(19, true, S::COMPUTE),
+                    storage(35, true, S::COMPUTE),
+                    layout_entry(
+                        50,
+                        S::COMPUTE,
+                        wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(DISK_FRAME_BYTES),
+                        },
+                    ),
+                ],
+            ),
         };
         let pipeline_layout = |label, groups: &[Option<&wgpu::BindGroupLayout>]| {
             ledger.own(
@@ -1005,6 +1157,32 @@ impl VirtualState {
         let queue_layout = pipeline_layout("N8k hybrid queue ABI", &[Some(&layouts.queue)]);
         let queue_args = map_compute("vmap_queue_args", &queue_layout, &[]);
         let map = map_compute("vmap_lookup", &map_layout, &[]);
+        let disk_layout = pipeline_layout(
+            "N-VSM1 disk visibility ABI",
+            &[Some(&layouts.disk), None, None, Some(lighting)],
+        );
+        let disk_module = ledger.own(
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("N-VSM1 disk sun visibility"),
+                source: wgpu::ShaderSource::Wgsl(disk_source().into()),
+            }),
+            ResourceKind::ShaderModule,
+        );
+        let disk_compute = |entry, layout: &wgpu::PipelineLayout| {
+            ledger.own(
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(layout),
+                    module: &disk_module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
+                ResourceKind::ComputePipeline,
+            )
+        };
+        let disk_mark = disk_compute("vd_mark", &mark_layout);
+        let disk = disk_compute("vd_lookup", &disk_layout);
         let record_module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8g walk records"),
@@ -1110,6 +1288,8 @@ impl VirtualState {
             minmip,
             queue_args,
             queued: None,
+            disk_mark,
+            disk,
         };
         Self {
             settings: VirtualShadowSettings::default(),
@@ -1138,6 +1318,8 @@ impl VirtualState {
             map_module,
             map_layout,
             queue_layout,
+            disk_module,
+            disk_layout,
             hybrid_module: None,
             surface: None,
             s4: None,
@@ -1354,6 +1536,7 @@ impl VirtualState {
             ),
             queue: buffer("N8k hybrid queue", queue_bytes, B::STORAGE | B::COPY_SRC),
             queue_dispatch: buffer("N8k hybrid queue dispatch", 16, B::STORAGE | B::INDIRECT),
+            disk_frame: buffer("N-VSM1 disk frame", DISK_FRAME_BYTES, B::UNIFORM),
             _area: area,
             area: area_view,
             _level: level,
@@ -1388,10 +1571,10 @@ impl Renderer {
         settings: VirtualShadowSettings,
     ) -> Result<(), Error> {
         settings.validate()?;
-        if let Some(state) = &mut self.virtual_shadows {
+        if let Some(state) = &mut self.view.virtual_shadows {
             state.set_settings(settings, self.submissions)?;
         }
-        self.virtual_settings = settings;
+        self.view.virtual_settings = settings;
         Ok(())
     }
 
@@ -1400,24 +1583,27 @@ impl Renderer {
     /// and Surface lookups, else 0. Map and Hybrid keep N8k's fixed directions.
     fn virtual_rotation(&self, s: VirtualShadowSettings) -> u32 {
         let exact = matches!(s.lookup, VirtualLookup::Exact | VirtualLookup::Surface);
-        self.reconstruction_frame
-            .filter(|_| exact && self.reconstruction.rotate_directions)
+        self.view
+            .reconstruction_frame
+            .filter(|_| exact && self.view.reconstruction.rotate_directions)
             .map_or(0, super::primary_ray_gpu::temporal_reconstruction::rotation)
     }
 
     /// P-NSQ: after TR1 chose this frame's shadow budget (`prepare_reconstruction`), the
     /// Exact and Surface lookups evaluate it in batches of eight, like RT Interactive's rays.
-    /// Frames without TR1, Map and Hybrid keep one batch.
+    /// Frames without TR1, Map and Hybrid keep one batch. P-RELIT: they also take TR1's
+    /// restart zones, where a receiver evaluates the restart count instead.
     pub(super) fn prepare_virtual_sampling(&mut self) {
-        let Some(rays) = self
+        let Some((rays, restart_rays, zones)) = self
+            .view
             .reconstruction_state
             .as_ref()
-            .map(|r| r.shadow_rays)
-            .filter(|_| self.reconstruction_frame.is_some())
+            .map(|r| (r.plan.shadow_rays, r.plan.restart_rays, r.zones))
+            .filter(|_| self.view.reconstruction_frame.is_some())
         else {
             return;
         };
-        let Some(state) = self.virtual_shadows.as_ref() else {
+        let Some(state) = self.view.virtual_shadows.as_ref() else {
             return;
         };
         if !matches!(
@@ -1432,14 +1618,18 @@ impl Renderer {
         let batches = (rays / 8).max(1);
         self.queue
             .write_buffer(&r.frame, SAMPLING_OFFSET, &batches.to_ne_bytes());
-        self.uploads.shadows += 4;
-        // P-S4C: the occluder gather serves the frames where it beats the march.
+        self.queue.write_buffer(&r.frame, ZONES_OFFSET, &zones);
+        self.uploads.shadows += 4 + ZONES_BYTES as u64;
+        // P-S4C: the occluder gather serves the frames where it beats the march. It evaluates
+        // the frame's batches for every pixel, so it sits out frames whose restart zones
+        // evaluate more (non-default budgets only: its frames have eight batches or more).
         let pixels = u64::from(r.size[0]) * u64::from(r.size[1]);
-        let disk = self.shadows.settings.directional_disk_angle;
-        let state = self.virtual_shadows.as_mut().unwrap();
+        let disk = self.view.shadows.settings.directional_disk_angle;
+        let state = self.view.virtual_shadows.as_mut().unwrap();
         if let Some(s4) = state.s4.as_mut() {
-            s4.frame =
-                state.stats.occluder_gather_ready && sunvis_s4::chosen(batches, pixels, disk);
+            s4.frame = state.stats.occluder_gather_ready
+                && restart_rays == 0
+                && sunvis_s4::chosen(batches, pixels, disk);
             state.stats.occluder_gather_frame = s4.frame;
         }
     }
@@ -1448,12 +1638,16 @@ impl Renderer {
     /// frame rebuilds requested pages and looks up every pixel, discarding rolling counts
     /// and map hysteresis from earlier frames. In-flight resources retire normally.
     pub fn reset_virtual_shadow_cache(&mut self) {
-        if let Some(state) = &mut self.virtual_shadows {
-            state.reset(self.submissions);
+        let submissions = self.submissions;
+        for view in self.views_mut() {
+            if let Some(state) = &mut view.virtual_shadows {
+                state.reset(submissions);
+            }
         }
     }
     pub fn virtual_shadow_stats(&self) -> VirtualShadowStats {
-        self.virtual_shadows
+        self.view
+            .virtual_shadows
             .as_ref()
             .map_or_else(Default::default, |s| s.stats)
     }
@@ -1464,7 +1658,7 @@ impl Renderer {
             .iter()
             .map(|d| (Arc::as_ptr(&d.mesh.index) as usize, d.instances.len()))
             .collect();
-        let state = self.virtual_shadows.as_ref().unwrap();
+        let state = self.view.virtual_shadows.as_ref().unwrap();
         if state.casters.as_ref().is_some_and(|c| c.key == key) {
             return Ok(());
         }
@@ -1501,13 +1695,13 @@ impl Renderer {
             }),
             ResourceKind::Buffer,
         );
-        let state = self.virtual_shadows.as_ref().unwrap();
+        let state = self.view.virtual_shadows.as_ref().unwrap();
         let data = self.ledger.own(
             cluster_data_group(self, &state.layouts.data, draws, &absent),
             ResourceKind::BindGroup,
         );
         let allocation = self.ledger.allocate(AllocationKind::Shadow, work_bytes);
-        let state = self.virtual_shadows.as_mut().unwrap();
+        let state = self.view.virtual_shadows.as_mut().unwrap();
         let generation = state.casters.as_ref().map_or(0, |c| c.generation + 1);
         if let Some(old) = state.casters.take() {
             state.retired_casters.push((self.submissions, old));
@@ -1544,21 +1738,26 @@ impl Renderer {
                 "SoftShadows::Virtual shadows lights[0], which must be directional",
             ));
         };
-        let primary = self.primary.as_ref().unwrap();
-        if self.virtual_shadows.is_none() {
+        let primary = self.view.primary.as_ref().unwrap();
+        if self.view.virtual_shadows.is_none() {
             let mut state = VirtualState::new(
                 &self.device,
                 &self.ledger,
                 primary.array_layout(),
                 &self.lighting.bindings,
             );
-            state.settings = self.virtual_settings;
+            state.settings = self.view.virtual_settings;
             self.pipelines.created += 10;
-            self.virtual_shadows = Some(state);
+            self.view.virtual_shadows = Some(state);
         }
         self.ensure_virtual_casters(draws)?;
-        let rotation = self.virtual_rotation(self.virtual_settings);
-        let state = self.virtual_shadows.as_mut().unwrap();
+        let rotation = self.virtual_rotation(self.view.virtual_settings);
+        // N-VSM1: the disk lookup's receiver jitter follows TR1's frames (`VdFrame::size.z`).
+        let disk_jitter = self
+            .view
+            .reconstruction_frame
+            .map_or(0.0, |frame| (frame % 4096 + 1) as f32);
+        let state = self.view.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
         // N8n: the surface cache exists only while it is the lookup (wgpu keeps the table alive
         // for frames in flight).
@@ -1586,7 +1785,7 @@ impl Renderer {
             });
             s4.frame = false;
         }
-        if let Some(mut s4) = self.virtual_shadows.as_mut().unwrap().s4.take() {
+        if let Some(mut s4) = self.view.virtual_shadows.as_mut().unwrap().s4.take() {
             let ready = s4.prepare(
                 &self.device,
                 &self.queue,
@@ -1595,14 +1794,15 @@ impl Renderer {
                 |mesh| self.exact_indirect_geometry(mesh),
                 -travel,
             );
-            self.virtual_shadows.as_mut().unwrap().s4 = Some(s4);
-            self.virtual_shadows
+            self.view.virtual_shadows.as_mut().unwrap().s4 = Some(s4);
+            self.view
+                .virtual_shadows
                 .as_mut()
                 .unwrap()
                 .stats
                 .occluder_gather_ready = ready;
         }
-        let state = self.virtual_shadows.as_mut().unwrap();
+        let state = self.view.virtual_shadows.as_mut().unwrap();
         // N8e: the map keeps the sun direction it was rasterized for while the sun stays
         // within `sun_hysteresis` of it; the march and page requests then widen their cone by
         // that angle (the lookup's directions are always the current sun's).
@@ -1610,7 +1810,7 @@ impl Renderer {
             s.sun_hysteresis > 0.0
                 && m.angle_between(-travel.as_dvec3()) <= f64::from(s.sun_hysteresis)
         });
-        let disk = f64::from(self.shadows.settings.directional_disk_angle);
+        let disk = f64::from(self.view.shadows.settings.directional_disk_angle);
         let slope = (disk + f64::from(s.sun_hysteresis)).tan() * 1.001;
         let eye = camera.view().inverse().w_axis.truncate().as_dvec3();
         let (toward, light_bits) = kept.unwrap_or((
@@ -1837,8 +2037,8 @@ impl Renderer {
         }
         // Ring horizons: (re)built when the draw list's geometry changes.
         // Every addressed triangle, appended LOD triangles included (LOD receivers).
-        // N8k: the map lookup reads neither, so it keeps none.
-        let map = state.settings.lookup == VirtualLookup::Map;
+        // N8k, N-VSM1: the map and disk lookups read neither, so they keep none.
+        let map = !state.settings.lookup.walks();
         let coverage = state.settings.walk_records;
         let horizon_key: Vec<(usize, u32, u32, u64)> = draws
             .iter()
@@ -2108,9 +2308,32 @@ impl Renderer {
         let (map_constants, exact): (Vec<_>, Vec<_>) = constants
             .iter()
             .copied()
-            .filter(|(name, _)| !name.starts_with(surface_cache::CONSTANTS))
+            .filter(|(name, _)| {
+                !name.starts_with(surface_cache::CONSTANTS) && !name.starts_with(DISK_CONSTANTS)
+            })
             .partition(|(name, _)| name.starts_with(MAP_CONSTANTS));
         if rebuild {
+            // N-VSM1: `VD_` constants are the disk lookup's.
+            let disk_constants: Vec<_> = constants
+                .iter()
+                .copied()
+                .filter(|(name, _)| name.starts_with(DISK_CONSTANTS))
+                .collect();
+            state.pipelines.disk = self.ledger.own(
+                self.device
+                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some("vd_lookup"),
+                        layout: Some(&state.disk_layout),
+                        module: &state.disk_module,
+                        entry_point: Some("vd_lookup"),
+                        compilation_options: wgpu::PipelineCompilationOptions {
+                            constants: &disk_constants,
+                            ..Default::default()
+                        },
+                        cache: None,
+                    }),
+                ResourceKind::ComputePipeline,
+            );
             let map = |entry, layout: &wgpu::PipelineLayout| {
                 self.ledger.own(
                     self.device
@@ -2273,7 +2496,8 @@ impl Renderer {
             && (!state.page_work || casters_only)
             && !rebuild
             && s.refresh > 1
-            && s.lookup != VirtualLookup::Surface;
+            // N-VSM1: the disk lookup's frames differ by TR1's jitter alone; it never rolls.
+            && !matches!(s.lookup, VirtualLookup::Surface | VirtualLookup::Disk);
         state.casters_only = rolling && casters_only;
         state.history_frames = if rolling {
             state.history_frames.wrapping_add(1)
@@ -2327,11 +2551,29 @@ impl Renderer {
         for value in [1, rotation, truncated, s.walk_steps] {
             frame.extend_from_slice(&u32::to_ne_bytes(value));
         }
+        // P-RELIT: no restart zones until prepare_virtual_sampling has TR1's.
+        frame.extend_from_slice(&[0; ZONES_BYTES]);
         debug_assert_eq!(frame.len(), FRAME_BYTES);
-        let state = self.virtual_shadows.as_mut().unwrap();
+        let state = self.view.virtual_shadows.as_mut().unwrap();
         let casters = state.casters.as_ref().unwrap();
         let r = state.resources.as_mut().unwrap();
         self.queue.write_buffer(&r.frame, 0, &frame);
+        if s.lookup == VirtualLookup::Disk {
+            // N-VSM1 `VdFrame`: the receivers' own world-to-clip matrix, for the visible-surface
+            // samples along the sun's screen direction.
+            let mut bytes = Vec::with_capacity(DISK_FRAME_BYTES as usize);
+            let clip = camera.matrix(size.width, size.height).to_cols_array();
+            for value in
+                clip.into_iter()
+                    .chain([size.width as f32, size.height as f32, disk_jitter, 0.0])
+            {
+                bytes.extend_from_slice(&value.to_ne_bytes());
+            }
+            bytes.extend_from_slice(&disk_pattern());
+            debug_assert_eq!(bytes.len() as u64, DISK_FRAME_BYTES);
+            self.queue.write_buffer(&r.disk_frame, 0, &bytes);
+            self.uploads.shadows += DISK_FRAME_BYTES;
+        }
         let mut pass = vec![0u8; PASS_ENTRIES * PASS_STRIDE as usize];
         for i in 0..PASS_ENTRIES {
             pass[i * PASS_STRIDE as usize..i * PASS_STRIDE as usize + 4]
@@ -2340,9 +2582,9 @@ impl Renderer {
         self.queue.write_buffer(&r.pass, 0, &pass);
         self.uploads.shadows += (FRAME_BYTES + pass.len()) as u64;
 
-        let primary = self.primary.as_ref().unwrap();
+        let primary = self.view.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
-        let fresh = self.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+        let fresh = self.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
         let (arrays_models, _) = primary.virtual_geometry().unwrap();
         let key = [
             (*targets.hit.texture).clone(),
@@ -2501,6 +2743,23 @@ impl Renderer {
                     &l.queue,
                     &[buffer(47, &r.queue), buffer(48, &r.queue_dispatch)],
                 ),
+                disk: group(
+                    "N-VSM1 disk visibility",
+                    &l.disk,
+                    &[
+                        buffer(0, &r.frame),
+                        texture(7, &hit),
+                        texture(8, &tiles),
+                        texture(9, &fresh.world.view),
+                        texture(10, &fresh.normal.view),
+                        texture(15, &fresh.visibility.view),
+                        buffer(16, &r.top),
+                        texture(18, &r.level_view),
+                        buffer(19, &r.peel),
+                        buffer(35, &r.mips),
+                        buffer(50, &r.disk_frame),
+                    ],
+                ),
                 queued: group(
                     "N8k hybrid exact lookup",
                     &l.lookup,
@@ -2563,13 +2822,16 @@ impl Renderer {
     }
 
     /// Page requests, compaction and the stale-page raster, then the 8-direction lookup
-    /// into the fresh visibility target. `timestamps` brackets all of it.
+    /// into the fresh visibility target. `timestamps` brackets all of it; `mark` names its
+    /// parts for the pass log (`sun_shadow.requests`, `.raster`, `.planes`, `.lookup`,
+    /// `.queued`; src/pass_timeline.rs).
     pub(super) fn encode_virtual(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         timestamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
-        let state = self.virtual_shadows.as_ref().unwrap();
+        let state = self.view.virtual_shadows.as_ref().unwrap();
         let r = state.resources.as_ref().unwrap();
         let g = r.groups.as_ref().unwrap();
         let p = &state.pipelines;
@@ -2581,13 +2843,16 @@ impl Renderer {
             encoder.clear_buffer(&r.debug, 0, Some(SCRATCH_HEADER));
         }
         if state.page_work {
-            self.encode_virtual_pages(encoder, timestamps.as_ref());
+            mark(encoder, "sun_shadow.requests");
+            self.encode_virtual_pages(encoder, timestamps.as_ref(), mark);
         }
-        let primary = self.primary.as_ref().unwrap();
+        let primary = self.view.primary.as_ref().unwrap();
         let (_, arrays) = primary.virtual_geometry().unwrap();
         let map = state.settings.lookup.map();
         let hybrid = state.settings.lookup == VirtualLookup::Hybrid;
+        let disk = state.settings.lookup == VirtualLookup::Disk;
         if map && state.page_work {
+            mark(encoder, "sun_shadow.planes");
             // N8k: the planes of the pages rasterized this frame, one workgroup per page slot.
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("N8k texel planes"),
@@ -2598,8 +2863,9 @@ impl Renderer {
             pass.set_bind_group(1, arrays, &[]);
             pass.dispatch_workgroups(state.levels as u32 * r.pages * r.pages, 1, 1);
         }
-        let exact_walk = state.settings.lookup != VirtualLookup::Map;
+        let exact_walk = state.settings.lookup.walks();
         if let Some(h) = state.horizons.as_ref().filter(|h| h.dispatch && exact_walk) {
+            mark(encoder, "sun_shadow.records");
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("N8 ring horizons"),
                 timestamp_writes: None,
@@ -2629,6 +2895,7 @@ impl Renderer {
             .as_ref()
             .filter(|_| state.settings.lookup == VirtualLookup::Surface)
         {
+            mark(encoder, "sun_shadow.lookup");
             // N8n: probe, queued walk and insert; page work (if any) began the span.
             let timestamps = timestamps.map(|t| wgpu::ComputePassTimestampWrites {
                 query_set: t.query_set,
@@ -2655,6 +2922,7 @@ impl Renderer {
         if hybrid {
             encoder.clear_buffer(&r.queue, 0, Some(16));
         }
+        mark(encoder, "sun_shadow.lookup");
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("N8 ring and map visibility"),
             timestamp_writes: timestamps
@@ -2681,6 +2949,9 @@ impl Renderer {
         if map {
             pass.set_pipeline(&p.map);
             pass.set_bind_group(0, &*g.map, &[]);
+        } else if disk {
+            pass.set_pipeline(&p.disk);
+            pass.set_bind_group(0, &*g.disk, &[]);
         } else {
             pass.set_bind_group(0, &*g.lookup, &[]);
             pass.set_bind_group(1, arrays, &[]);
@@ -2701,7 +2972,7 @@ impl Renderer {
             height.div_ceil(4).div_ceil(b),
         ];
         let tiles = grid[0] * grid[1];
-        if map {
+        if map || disk {
             pass.dispatch_workgroups(grid[0], grid[1], 1);
         } else {
             // Casters-only frames keep the grid's order (vsm_lookup).
@@ -2723,6 +2994,7 @@ impl Renderer {
         }
         drop(pass);
         if hybrid {
+            mark(encoder, "sun_shadow.queued");
             // N8k: the exact walk over the queued receivers, 32 lanes to a workgroup (N8m: a
             // small queue spreads each receiver over several, vmap_queue_args).
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -2749,7 +3021,7 @@ impl Renderer {
     /// Tests: the triangles with walk records.
     #[cfg(test)]
     pub(super) fn test_walk_records(&self) -> Option<u64> {
-        let h = self.virtual_shadows.as_ref()?.horizons.as_ref()?;
+        let h = self.view.virtual_shadows.as_ref()?.horizons.as_ref()?;
         Some(h.records.iter().map(|&[_, count]| u64::from(count)).sum())
     }
 
@@ -2761,15 +3033,22 @@ impl Renderer {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         timestamps: Option<&wgpu::ComputePassTimestampWrites<'_>>,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
-        let state = self.virtual_shadows.as_ref().unwrap();
+        let state = self.view.virtual_shadows.as_ref().unwrap();
         let r = state.resources.as_ref().unwrap();
         let g = r.groups.as_ref().unwrap();
         let casters = state.casters.as_ref().unwrap();
         let p = &state.pipelines;
         let slots = state.levels as u64 * u64::from(r.pages * r.pages);
         let [width, height] = r.size;
-        let (_, arrays) = self.primary.as_ref().unwrap().virtual_geometry().unwrap();
+        let (_, arrays) = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .virtual_geometry()
+            .unwrap();
         encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
         encoder.clear_buffer(&r.render, 0, Some(slots * 4));
         encoder.clear_buffer(&casters.work, 0, Some(MAX_LEVELS as u64 * ARGS_BYTES));
@@ -2783,7 +3062,12 @@ impl Renderer {
                     end_of_pass_write_index: None,
                 }),
             });
-            pass.set_pipeline(&p.mark);
+            // N-VSM1: the disk lookup requests its own windows' pages.
+            pass.set_pipeline(if state.settings.lookup == VirtualLookup::Disk {
+                &p.disk_mark
+            } else {
+                &p.mark
+            });
             pass.set_bind_group(0, &*g.mark, &[]);
             pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(4), 1);
             pass.set_pipeline(&p.compact);
@@ -2800,6 +3084,7 @@ impl Renderer {
             pass.set_pipeline(&p.finish);
             pass.dispatch_workgroups(1, 1, 1);
         }
+        mark(encoder, "sun_shadow.raster");
         for layer in 0..2 {
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -2875,6 +3160,7 @@ mod tests {
             map_source(),
             hybrid_source(),
             surface_cache::surface_source(),
+            disk_source(),
         ] {
             assert!(!source.contains("ray_query") && !source.contains("acceleration_structure"));
             let module = naga::front::wgsl::parse_str(&source)
@@ -2906,18 +3192,27 @@ mod tests {
                 .offset as u64,
             SAMPLING_OFFSET
         );
-        assert_eq!(FRAME_BYTES, 928 + 12 * crate::TRACED_DRAWS as usize);
-        // P-NSQ: the sampling uvec4 is VsmFrame's last member, after N8e's.
-        assert_eq!(SAMPLING_OFFSET, FRAME_BYTES as u64 - 16);
+        assert_eq!(
+            FRAME_BYTES,
+            928 + 12 * crate::TRACED_DRAWS as usize + ZONES_BYTES
+        );
+        // P-NSQ: the sampling uvec4 follows N8e's; P-RELIT: TR1's zones are the last member.
+        assert_eq!(SAMPLING_OFFSET, (FRAME_BYTES - ZONES_BYTES) as u64 - 16);
+        let zones = members.last().unwrap();
+        assert_eq!(zones.name.as_deref(), Some("zones"));
+        assert_eq!(u64::from(zones.offset), ZONES_OFFSET);
         let source = shader_source();
         let n8e = source.find("    n8e:vec4<u32>,").unwrap();
         let nsq = source.find("    nsq:vec4<u32>,").unwrap();
-        assert!(
-            n8e < nsq
-                && source[nsq..]
-                    .trim_start_matches("    nsq:vec4<u32>,")
-                    .trim_start()
-                    .starts_with("};")
+        assert!(n8e < nsq);
+        // Both modules declare the same Tr1Zones.
+        let declared = |text: &str| {
+            let at = text.find("struct Tr1Zones {").unwrap();
+            text[at..at + text[at..].find("};").unwrap()].to_owned()
+        };
+        assert_eq!(
+            declared(&source),
+            declared(include_str!("../shaders/primary_rays.wgsl"))
         );
         // The encoder reads the lookup schedule's defaults from the shader.
         assert_eq!(schedule_defaults(&shader_source()), (4096, true));
@@ -2962,6 +3257,36 @@ mod tests {
         ] {
             assert!(bad.validate().is_err());
         }
+    }
+    /// N-VSM1: the disk lookup's samples are a rook pattern inside the disk, at the marginal's
+    /// quantiles, and the uploaded masks select by y rank.
+    #[test]
+    fn disk_pattern_is_a_rook_pattern_in_the_disk() {
+        let mut ranks = DISK_Y_RANK;
+        ranks.sort_unstable();
+        assert!(ranks.iter().enumerate().all(|(k, &r)| usize::from(r) == k));
+        let bytes = disk_pattern();
+        assert_eq!(bytes.len() as u64, DISK_FRAME_BYTES - 80);
+        let word = |i: usize| u32::from_ne_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap());
+        let mask = |k: usize| u64::from(word(2 * k)) | u64::from(word(2 * k + 1)) << 32;
+        assert_eq!(mask(0), u64::MAX);
+        assert_eq!(mask(64), 0);
+        for k in 0..64 {
+            // Each rank removes exactly its own sample.
+            let gone = mask(k) & !mask(k + 1);
+            assert_eq!(gone.count_ones(), 1);
+            assert_eq!(usize::from(DISK_Y_RANK[gone.trailing_zeros() as usize]), k);
+        }
+        let float = |i: usize| f32::from_ne_bytes(bytes[4 * i..4 * i + 4].try_into().unwrap());
+        let mut last = -1.0;
+        for s in 0..64 {
+            let (x, y) = (float(132 + 2 * s), float(133 + 2 * s));
+            assert!(x > last && x * x + y * y <= 1.0);
+            last = x;
+        }
+        // The marginal's share at a quantile is the quantile's rank.
+        let share = |g: f64| 0.5 + (g * (1.0 - g * g).sqrt() + g.asin()) / std::f64::consts::PI;
+        assert!((share(disk_quantile(0.3)) - 0.3).abs() < 1e-12);
     }
     /// N8e: every tile of a refresh block is looked up exactly once per `refresh` frames, so
     /// no kept count is older than `refresh - 1` frames.

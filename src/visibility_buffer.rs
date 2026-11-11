@@ -256,7 +256,7 @@ pub(super) fn repair_source() -> String {
         + s[start..]
             .find("                }\n                var common_vertices")
             .unwrap();
-    s.replace_range(start..end, "                    let words=arrayLength(&primary_indices[batch].data);\n                    let end=select(select(words/3u,(words-1u)/6u,words%3u==1u),range.y,range.z!=0u);\n                    if search>=end {break;}candidate_primitive=select(search,primary_repair_scan[search],range.z!=0u);search+=1u;\n                    if candidate_primitive==trace.record.y {continue;}\n                    v=primary_triangle_vertices(batch,candidate_primitive);\n                    var shared_count=0u;for(var j=0u;j<3u;j+=1u) {shared_count+=u32(all(v[j]==e0)||all(v[j]==e1));}\n                    if shared_count!=2u || !primary_probe_intersects(v,slot,start,probe_direction,reach) {continue;}\n                    if !visible {visible=primary_edge_dot(primary_geometric(v[0],v[1],v[2],slot),direction)<0.0;}\n");
+    s.replace_range(start..end, "                    let end=select(batch_triangles(primary_batch_info(batch)),range.y,range.z!=0u);\n                    if search>=end {break;}candidate_primitive=select(search,primary_repair_scan[search],range.z!=0u);search+=1u;\n                    if candidate_primitive==trace.record.y {continue;}\n                    v=primary_triangle_vertices(batch,candidate_primitive);\n                    var shared_count=0u;for(var j=0u;j<3u;j+=1u) {shared_count+=u32(all(v[j]==e0)||all(v[j]==e1));}\n                    if shared_count!=2u || !primary_probe_intersects(v,slot,start,probe_direction,reach) {continue;}\n                    if !visible {visible=primary_edge_dot(primary_geometric(v[0],v[1],v[2],slot),direction)<0.0;}\n");
     assert!(!s.contains("rayQuery") && !s.contains("ray_query"));
     s
 }
@@ -277,7 +277,8 @@ fn primary_repair_range(batch:u32,primitive:u32,edge:u32)->vec3<u32> {
     if h>=primary_repair_scan[s-1u] {return whole;}
     return vec3<u32>(primary_repair_scan[s+h],primary_repair_scan[s+h+1u],1u);
 }";
-pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
+/// Share the original ray-free visibility composition across native backends.
+pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     let head = primary_ray_gpu::non_rt_heads(wgsl)?;
     Ok(format!(
         "{}\n{REPAIR_POLICY}\n{}\n{}",
@@ -286,8 +287,13 @@ pub(super) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         include_str!("../shaders/visibility_buffer_resolve.wgsl")
     ))
 }
+#[cfg(test)]
+pub(super) fn compile_structure_stage_source(stage: &str) -> String {
+    stage_source(stage)
+}
+
 /// The shared declarations, the per-draw array size, then one stage.
-fn stage_source(stage: &str) -> String {
+pub(crate) fn stage_source(stage: &str) -> String {
     format!(
         "{}\nconst PRIMARY_BATCHES:u32={}u;\n{stage}",
         include_str!("../shaders/visibility_buffer.wgsl"),
@@ -693,9 +699,9 @@ impl VisibilityBuffer {
         use wgpu::{
             BindingResource as R, ShaderStages as S, TextureFormat as F, TextureUsages as U,
         };
-        let state = r.primary.as_ref().unwrap();
+        let state = r.view.primary.as_ref().unwrap();
         let t = state.targets.as_ref().unwrap();
-        let fresh = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+        let fresh = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
         let instances = ClusterInstances::new(r, draws)?;
         let count = instances.count as usize;
         let (clusters, group_buffer) = (instances.clusters, instances.groups);
@@ -877,10 +883,12 @@ impl VisibilityBuffer {
                        entry: &str,
                        groups: &[Option<&wgpu::BindGroupLayout>],
                        constants: &[(&str, f64)]| {
-            let module = r.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some(entry),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            });
+            let module = r
+                .device
+                .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(entry),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
             r.device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
@@ -914,12 +922,14 @@ impl VisibilityBuffer {
             ],
             &[],
         );
-        let shader = r.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("N1c hardware ID raster"),
-            source: wgpu::ShaderSource::Wgsl(
-                stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")).into(),
-            ),
-        });
+        let shader = r
+            .device
+            .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("N1c hardware ID raster"),
+                source: wgpu::ShaderSource::Wgsl(
+                    stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")).into(),
+                ),
+            });
         let hardware_pipeline = r
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -971,7 +981,7 @@ impl VisibilityBuffer {
                 &[("WRITE_RECEIVERS", v), ("LOD_LIFT", f64::from(r.lod_lift))],
             )
         });
-        let state = r.primary.as_ref().unwrap();
+        let state = r.view.primary.as_ref().unwrap();
         let absent = Buffer::new(r, "N1c absent cluster data", 16, storage);
         let cull_groups = std::array::from_fn(|i| {
             bind(
@@ -1318,6 +1328,7 @@ impl Renderer {
     ) -> Result<(), Error> {
         // Unshadowed raster-primary frames still need receiver targets bound to resolve.
         if self
+            .view
             .fresh
             .as_ref()
             .unwrap()
@@ -1327,8 +1338,16 @@ impl Renderer {
         {
             self.ensure_fresh_targets(size, false);
         }
-        let primary = self.primary.as_ref().unwrap().targets.as_ref().unwrap();
+        let primary = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .targets
+            .as_ref()
+            .unwrap();
         let world = &self
+            .view
             .fresh
             .as_ref()
             .unwrap()
@@ -1341,7 +1360,7 @@ impl Renderer {
             .iter()
             .map(|d| ((**d.mesh.index).clone(), d.instances.len()))
             .collect();
-        if self.visibility_buffer.as_ref().is_none_or(|v| {
+        if self.view.visibility_buffer.as_ref().is_none_or(|v| {
             v.size != size
                 || v.key != key
                 || v.lift != self.lod_lift
@@ -1353,10 +1372,10 @@ impl Renderer {
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
             }
-            self.visibility_buffer = Some(next);
+            self.view.visibility_buffer = Some(next);
         }
         let (lod, extent) = (self.lod_pixels, self.software_extent);
-        let v = self.visibility_buffer.as_mut().unwrap();
+        let v = self.view.visibility_buffer.as_mut().unwrap();
         let matrix = camera.matrix(size.width, size.height);
         let eye = camera.view().inverse().w_axis.truncate();
         let scale = size.height as f32 * 0.5 / (camera.fov_y() * 0.5).tan();
@@ -1397,8 +1416,15 @@ impl Renderer {
         stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         stages: Option<&wgpu::QuerySet>,
     ) {
-        let v = self.visibility_buffer.as_ref().unwrap();
-        let arrays = self.primary.as_ref().unwrap().virtual_geometry().unwrap().1;
+        let v = self.view.visibility_buffer.as_ref().unwrap();
+        let arrays = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .virtual_geometry()
+            .unwrap()
+            .1;
         let stage = |i: u32| Stamp(stages.map(|q| (q, i * 2)));
         // The first cull records the primary span's start and the resolve pass its end.
         // No clears: the previous frame's resolve zeroed its hits and its reset zeroed

@@ -67,6 +67,19 @@ QUARRY_CHILD_MBYTES = 12288.0
 QUARRY_PREFLIGHT_MBYTES = 14336.0
 
 
+def gpu_clocks():
+    """The GPU's clocks, power, temperature, utilisation and P-state, one nvidia-smi line. The
+    coordinator (2026-11-11): the RTX sat in a slow state for a whole lease (22.1 ms against 10.44
+    at the same commit later) with no contention check firing; every lease records this at its
+    start and end, and a timing lease also opens with a known reference run."""
+    try:
+        return subprocess.run(["nvidia-smi", "--query-gpu=clocks.gr,clocks.mem,power.draw,temperature.gpu,utilization.gpu,pstate",
+                               "--format=csv,noheader"], capture_output=True, text=True, timeout=10,
+                              creationflags=FLAGS).stdout.strip()
+    except Exception as e:
+        return f"nvidia-smi failed: {e}"
+
+
 def memory_watch_sample(root_pid):
     """Machine available MiB and the largest working set (MiB) in root_pid's process tree.
 
@@ -190,9 +203,19 @@ def main():
     if RUNTIME_MEMORY_MBYTES is not None:
         a.runtime_memory_mbytes = RUNTIME_MEMORY_MBYTES
     global WATCH_CHILD_MBYTES
+    global WATCH_FREE_MBYTES
     if a.quarry_lease:
         WATCH_CHILD_MBYTES = QUARRY_CHILD_MBYTES
         preflight_floor = max(preflight_floor, QUARRY_PREFLIGHT_MBYTES)
+        # An owner-granted quarry window (coordinator relays his word): RENDERLAB_QUARRY_WINDOW_MB
+        # = "START,FLOOR" lowers the start bar and the machine floor for this one lease. The only
+        # way below the defaults, never below 12 GiB to start or 4 GiB free; the child cap stays.
+        window = os.environ.get("RENDERLAB_QUARRY_WINDOW_MB")
+        if window:
+            start, floor = (float(x) for x in window.split(","))
+            preflight_floor = max(12288.0, start)
+            WATCH_FREE_MBYTES = max(4096.0, floor)
+            print(f"quarry window: start bar {preflight_floor:g} MiB, machine floor {WATCH_FREE_MBYTES:g} MiB", flush=True)
     print(f"memory watchdog: child cap {WATCH_CHILD_MBYTES:g} MiB, machine floor {WATCH_FREE_MBYTES:g} MiB"
           f"{' (quarry lease)' if a.quarry_lease else ''}", flush=True)
     if not 0 < a.minutes <= 45:
@@ -247,6 +270,8 @@ def main():
         if a.manifest:
             env["RENDERLAB_PRIMARY_MANIFEST"] = str(a.manifest.resolve())
         samples, resources, stop, failure = [], [], threading.Event(), []
+        gpu_state = {"start": gpu_clocks()}
+        print("gpu state at start:", gpu_state["start"], flush=True)
         with log.open("w", encoding="utf-8") as f:
             child = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=f, stderr=subprocess.STDOUT, creationflags=FLAGS)
             def terminate_owned_tree():
@@ -305,8 +330,10 @@ def main():
                 thread.join()
                 watchdog_thread.join()
                 if resource_thread: resource_thread.join()
+        gpu_state["end"] = gpu_clocks()
+        print("gpu state at end:", gpu_state["end"], flush=True)
         binary = Path(cmd[0])
-        record = dict(command=cmd, start=owner["utc"], end=utc(), seconds=time.monotonic() - start,
+        record = dict(command=cmd, start=owner["utc"], end=utc(), seconds=time.monotonic() - start, gpu_state=gpu_state,
                       exit=child.returncode, failures=failure, samples=samples,
                       manifest=json.loads(a.manifest.read_text()) if a.manifest else None,
                       runtime_memory_floor_mbytes=a.runtime_memory_mbytes,

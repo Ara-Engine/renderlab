@@ -81,6 +81,8 @@ pub struct CpuFrame {
 }
 #[derive(Debug)]
 pub struct FrameReport {
+    /// The view this frame rendered.
+    pub view: crate::ViewId,
     pub frame: FrameId,
     pub revision: Revision,
     pub cpu: CpuFrame,
@@ -122,6 +124,8 @@ pub struct ReloadReport {
 pub struct Completion {
     pub submission: u64,
     pub frame: Option<FrameId>,
+    /// The view a frame rendered; None for uploads.
+    pub view: Option<crate::ViewId>,
     pub revision: Revision,
     /// Host collection time, not GPU execution time or scanout.
     pub observed_at: Instant,
@@ -334,6 +338,26 @@ impl<T> Deref for Owned<T> {
     type Target = T;
     fn deref(&self) -> &T {
         &self.resource
+    }
+}
+/// Another handle to the same resource, counted as one more live handle: a view's state
+/// shares the renderer's layouts this way (`Renderer::create_view`).
+impl<T: Clone> Clone for Owned<T> {
+    fn clone(&self) -> Self {
+        let mut ledger = self.ledger.0.lock().unwrap();
+        let count = match self.kind {
+            Some(kind) => &mut ledger.persistent[kind as usize],
+            None => &mut ledger.attachment_views,
+        };
+        count.created += 1;
+        count.live += 1;
+        count.peak = count.peak.max(count.live);
+        drop(ledger);
+        Self {
+            resource: self.resource.clone(),
+            ledger: self.ledger.clone(),
+            kind: self.kind,
+        }
     }
 }
 impl<T> Drop for Owned<T> {

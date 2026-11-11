@@ -10,7 +10,7 @@ pub(super) struct ShadowDraw<'a> {
     pub indices: std::ops::Range<u32>,
     pub slot: u32,
 }
-pub(super) struct ShadowFrame {
+pub(crate) struct ShadowFrame {
     pub views: Vec<ShadowView>,
     pub light_ranges: Vec<[u32; 2]>,
     bases: Vec<Option<DMat4>>,
@@ -20,6 +20,12 @@ impl ShadowFrame {
     /// The packed view records this frame uploads (temporal film accumulation keys on them).
     pub fn records(&self) -> &[u8] {
         &self.records
+    }
+    /// The light orientations this plan transported, which the next frame's plan
+    /// starts from. The wgpu renderer takes the field itself after submitting.
+    #[cfg(feature = "backend-ara")]
+    pub(crate) fn bases(&self) -> &[Option<DMat4>] {
+        &self.bases
     }
     pub fn prepare_hardware_bias(&mut self, light_records: &[u8]) -> Result<(), Error> {
         for (light, &[first, count]) in light_records
@@ -173,6 +179,25 @@ impl ShadowState {
             ranges_published: false,
         }
     }
+    /// A new view's state: these settings, limits and layouts, and the tiny fallback map
+    /// until its first shadowed frame.
+    pub fn fork(&self, device: &wgpu::Device, ledger: &Ledger, generations: u64) -> Self {
+        Self {
+            settings: self.settings.clone(),
+            limits: self.limits,
+            bindings: self.bindings.clone(),
+            layout: self.layout.clone(),
+            active: Self::resources(device, ledger, &self.bindings, self.limits, 1, 1, true),
+            retired: vec![],
+            bases: vec![],
+            stats: ShadowStats {
+                resource_generation: generations,
+                ..ShadowStats::default()
+            },
+            published_hash: [0; 32],
+            ranges_published: false,
+        }
+    }
     fn resources(
         device: &wgpu::Device,
         ledger: &Ledger,
@@ -307,121 +332,134 @@ impl ShadowState {
         lights: &[Light],
         bounds: &[Bounds],
     ) -> Result<ShadowFrame, Error> {
-        let mut views = vec![];
-        let mut light_ranges = vec![[0, 0]; lights.len()];
-        let mut bases = vec![None; lights.len()];
-        for (index, (light, request)) in lights.iter().zip(&self.settings.requests).enumerate() {
-            let first = views.len() as u32;
-            match (light, request) {
-                (_, ShadowRequest::None) => {}
-                (Light::Directional { travel, .. }, ShadowRequest::Directional { split_ends }) => {
-                    let basis = plan::transported_orientation(
-                        *travel,
-                        self.bases.get(index).copied().flatten(),
-                    )?;
-                    views.extend(plan::directional_oriented(
-                        camera,
-                        viewport,
-                        basis,
-                        split_ends,
-                        self.settings.resolution,
-                        bounds,
-                    )?);
-                    bases[index] = Some(basis);
-                }
-                (
-                    Light::Spot {
-                        position,
-                        travel,
-                        outer,
-                        ..
-                    },
-                    ShadowRequest::Spot { near, far },
-                ) => {
-                    validate_local_casters(*position, *near, bounds)?;
-                    let basis = plan::transported_orientation(
-                        *travel,
-                        self.bases.get(index).copied().flatten(),
-                    )?;
-                    views.push(plan::spot_oriented(
-                        *position,
-                        basis,
-                        *outer,
-                        LocalRange {
-                            near: *near,
-                            far: *far,
-                        },
-                        self.settings.resolution,
-                        bounds,
-                    )?);
-                    bases[index] = Some(basis);
-                }
-                (Light::Point { position, .. }, ShadowRequest::Point { near, far }) => {
-                    validate_local_casters(*position, *near, bounds)?;
-                    views.extend(plan::point(
-                        *position,
-                        LocalRange {
-                            near: *near,
-                            far: *far,
-                        },
-                        self.settings.resolution,
-                        bounds,
-                    )?);
-                }
-                _ => unreachable!("validated whole shadow/light set"),
+        plan_frame(
+            &self.settings,
+            &self.bases,
+            camera,
+            viewport,
+            lights,
+            bounds,
+        )
+    }
+}
+
+/// The CPU half of a shadow frame: views for every requested light, their packed
+/// records and each light's view range. `previous` holds the last frame's light
+/// orientations (empty on a first frame). The wgpu renderer and the ara-gpu backend
+/// both plan through this.
+pub(crate) fn plan_frame(
+    settings: &crate::Shadows,
+    previous: &[Option<glam::DMat4>],
+    camera: &Camera,
+    viewport: [u32; 2],
+    lights: &[Light],
+    bounds: &[Bounds],
+) -> Result<ShadowFrame, Error> {
+    let mut views = vec![];
+    let mut light_ranges = vec![[0, 0]; lights.len()];
+    let mut bases = vec![None; lights.len()];
+    for (index, (light, request)) in lights.iter().zip(&settings.requests).enumerate() {
+        let first = views.len() as u32;
+        match (light, request) {
+            (_, ShadowRequest::None) => {}
+            (Light::Directional { travel, .. }, ShadowRequest::Directional { split_ends }) => {
+                let basis =
+                    plan::transported_orientation(*travel, previous.get(index).copied().flatten())?;
+                views.extend(plan::directional_oriented(
+                    camera,
+                    viewport,
+                    basis,
+                    split_ends,
+                    settings.resolution,
+                    bounds,
+                )?);
+                bases[index] = Some(basis);
             }
-            light_ranges[index] = [first, views.len() as u32 - first];
+            (
+                Light::Spot {
+                    position,
+                    travel,
+                    outer,
+                    ..
+                },
+                ShadowRequest::Spot { near, far },
+            ) => {
+                validate_local_casters(*position, *near, bounds)?;
+                let basis =
+                    plan::transported_orientation(*travel, previous.get(index).copied().flatten())?;
+                views.push(plan::spot_oriented(
+                    *position,
+                    basis,
+                    *outer,
+                    LocalRange {
+                        near: *near,
+                        far: *far,
+                    },
+                    settings.resolution,
+                    bounds,
+                )?);
+                bases[index] = Some(basis);
+            }
+            (Light::Point { position, .. }, ShadowRequest::Point { near, far }) => {
+                validate_local_casters(*position, *near, bounds)?;
+                views.extend(plan::point(
+                    *position,
+                    LocalRange {
+                        near: *near,
+                        far: *far,
+                    },
+                    settings.resolution,
+                    bounds,
+                )?);
+            }
+            _ => unreachable!("validated whole shadow/light set"),
         }
-        let mut records = Vec::with_capacity(views.len() * VIEW_BYTES as usize);
-        // The final row is camera-forward depth, shared by raster metadata and sampling.
-        let camera_depth = -camera.view().transpose().z_axis;
-        for view in &views {
-            debug_assert_eq!(view.resolution, self.settings.resolution);
-            debug_assert!(view.world_to_view.is_finite() && view.view_to_clip.is_finite());
-            debug_assert!(view.depth[1] > view.depth[0]);
-            records.extend_from_slice(&matrix_bytes(raster_depth_matrix(view)));
-            let (near, far) = match view.kind {
-                plan::ViewKind::Cascade { near, far } => (near, far),
-                _ => (0.0, 0.0),
-            };
-            for value in [
-                near,
-                far,
-                self.settings.depth_bias,
-                self.settings.normal_bias,
-            ]
+        light_ranges[index] = [first, views.len() as u32 - first];
+    }
+    let mut records = Vec::with_capacity(views.len() * VIEW_BYTES as usize);
+    // The final row is camera-forward depth, shared by raster metadata and sampling.
+    let camera_depth = -camera.view().transpose().z_axis;
+    for view in &views {
+        debug_assert_eq!(view.resolution, settings.resolution);
+        debug_assert!(view.world_to_view.is_finite() && view.view_to_clip.is_finite());
+        debug_assert!(view.depth[1] > view.depth[0]);
+        records.extend_from_slice(&matrix_bytes(raster_depth_matrix(view)));
+        let (near, far) = match view.kind {
+            plan::ViewKind::Cascade { near, far } => (near, far),
+            _ => (0.0, 0.0),
+        };
+        for value in [near, far, settings.depth_bias, settings.normal_bias]
             .into_iter()
             .chain(camera_depth.to_array())
             .chain([
                 view.world_units_per_texel.unwrap_or(0.0),
                 0.0,
-                self.settings.directional_disk_angle.tan(),
+                settings.directional_disk_angle.tan(),
                 0.0,
-            ]) {
-                records.extend_from_slice(&value.to_ne_bytes());
-            }
+            ])
+        {
+            records.extend_from_slice(&value.to_ne_bytes());
         }
-        for (request, &[first, count]) in self.settings.requests.iter().zip(&light_ranges) {
-            if let ShadowRequest::Point { near, far } | ShadowRequest::Spot { near, far } = request
-            {
-                for layer in first..first + count {
-                    let offset = layer as usize * VIEW_BYTES as usize + 64;
-                    records[offset..offset + 4].copy_from_slice(&near.to_ne_bytes());
-                    records[offset + 4..offset + 8].copy_from_slice(&far.to_ne_bytes());
-                }
-            }
-        }
-        Ok(ShadowFrame {
-            views,
-            light_ranges,
-            bases,
-            records,
-        })
     }
+    for (request, &[first, count]) in settings.requests.iter().zip(&light_ranges) {
+        if let ShadowRequest::Point { near, far } | ShadowRequest::Spot { near, far } = request {
+            for layer in first..first + count {
+                let offset = layer as usize * VIEW_BYTES as usize + 64;
+                records[offset..offset + 4].copy_from_slice(&near.to_ne_bytes());
+                records[offset + 4..offset + 8].copy_from_slice(&far.to_ne_bytes());
+            }
+        }
+    }
+    Ok(ShadowFrame {
+        views,
+        light_ranges,
+        bases,
+        records,
+    })
 }
 
 /// F64 affine corners plus outward f32 rounding retain the full submitted geometry.
-pub(super) fn world_bounds(bounds: Aabb, model: Mat4) -> Result<Bounds, Error> {
+pub(crate) fn world_bounds(bounds: Aabb, model: Mat4) -> Result<Bounds, Error> {
     let mut min = glam::DVec3::splat(f64::INFINITY);
     let mut max = glam::DVec3::splat(f64::NEG_INFINITY);
     for i in 0..8 {
@@ -478,7 +516,7 @@ impl Renderer {
         // shadow views (kind.z 0), so further lights are allowed when they carry no request;
         // the most important local lights get LC1's own shadows (light_cluster.rs).
         if shadows.directional_disk_angle > 0.0
-            && (self.fresh.is_none()
+            && (self.view.fresh.is_none()
                 || !matches!(lights.first(), Some(Light::Directional { .. }))
                 || !matches!(
                     shadows.requests.split_first(),
@@ -493,13 +531,13 @@ impl Renderer {
         if self.hardware_shadows.is_none()
             && self.primary_mode != PrimaryVisibility::VisibilityBuffer
         {
-            shadows.validate(lights, self.shadows.limits)?;
+            shadows.validate(lights, self.view.shadows.limits)?;
             return Ok(());
         }
         crate::hardware_shadows::validate_requests(lights, shadows)?;
         let mut coverage = shadows.clone();
         coverage.max_bytes = None;
-        let views = coverage.validate(lights, self.shadows.limits)?;
+        let views = coverage.validate(lights, self.view.shadows.limits)?;
         // Hardware uses sampling records plus a tiny featureless fallback, no maps.
         let bytes = u64::from(views) * VIEW_BYTES + VIEW_BYTES + 4;
         if views > 0 && shadows.max_bytes.is_some_and(|max| bytes > max) {
@@ -527,6 +565,7 @@ impl Renderer {
                 fresh: false,
                 submission: self.submissions,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at: Instant::now(),
             });
@@ -579,15 +618,27 @@ impl Renderer {
         assert_eq!(report.uploads.geometry, 0);
         self.test_drain("shadow admission cleanup");
     }
-    pub fn set_shadows(&mut self, shadows: &Shadows) -> Result<(), Error> {
-        self.check_fault()?;
-        self.validate_shadow_settings(&self.lighting.source_lights, shadows)?;
-        self.shadows.settings.clone_from(shadows);
+    /// Gives the shared lighting the selected view's exposure, and the view the renderer's
+    /// shadow settings (at once for the selected view when they change, and for any other
+    /// view when it is next rendered).
+    pub(super) fn sync_view_shadows(&mut self) {
+        self.lighting.pending.exposure = self.view.exposure;
+        if self.view.shadows.settings == self.shadow_settings {
+            return;
+        }
+        self.view.shadows.settings.clone_from(&self.shadow_settings);
+        let shadows = &self.shadow_settings;
         if (!shadows.enabled() || shadows.directional_disk_angle == 0.0)
-            && let Some(fresh) = &mut self.fresh
+            && let Some(fresh) = &mut self.view.fresh
         {
             fresh.release(self.submissions);
         }
+    }
+    pub fn set_shadows(&mut self, shadows: &Shadows) -> Result<(), Error> {
+        self.check_fault()?;
+        self.validate_shadow_settings(&self.lighting.source_lights, shadows)?;
+        self.shadow_settings.clone_from(shadows);
+        self.sync_view_shadows();
         if !shadows.enabled()
             && let Some(hardware) = &mut self.hardware_shadows
         {
@@ -619,12 +670,10 @@ impl Renderer {
             self.lighting.pending.environment = lighting.environment;
             self.lighting.pending.exposure = exposure;
         }
-        self.shadows.settings.clone_from(shadows);
-        if (!shadows.enabled() || shadows.directional_disk_angle == 0.0)
-            && let Some(fresh) = &mut self.fresh
-        {
-            fresh.release(self.submissions);
-        }
+        // Exposure is the selected view's look.
+        self.view.exposure = exposure;
+        self.shadow_settings.clone_from(shadows);
+        self.sync_view_shadows();
         if !shadows.enabled()
             && let Some(hardware) = &mut self.hardware_shadows
         {
@@ -633,12 +682,12 @@ impl Renderer {
         Ok(())
     }
     pub fn shadow_limits(&self) -> ShadowLimits {
-        self.shadows.limits
+        self.view.shadows.limits
     }
     pub fn shadow_stats(&self) -> ShadowStats {
         ShadowStats {
-            retained_generations: self.shadows.retired.len(),
-            ..self.shadows.stats
+            retained_generations: self.view.shadows.retired.len(),
+            ..self.view.shadows.stats
         }
     }
     pub(super) fn upload_shadows(
@@ -646,7 +695,7 @@ impl Renderer {
         frame: Option<&ShadowFrame>,
         uploads: &mut UploadBytes,
     ) -> Result<(), Error> {
-        let state = &mut self.shadows;
+        let state = &mut self.view.shadows;
         let raster = self.hardware_shadows.is_none()
             && self.primary_mode != PrimaryVisibility::VisibilityBuffer;
         if frame.is_none() && !state.ranges_published {
@@ -724,7 +773,7 @@ impl Renderer {
                 label: Some("shadow generation"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.shadows.active.layers[index],
+                    view: &self.view.shadows.active.layers[index],
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
@@ -744,7 +793,7 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_pipeline(&self.pipeline.shadow);
-            pass.set_bind_group(0, &*self.shadows.active.binds[index], &[]);
+            pass.set_bind_group(0, &*self.view.shadows.active.binds[index], &[]);
             let (mut instances, mut material, mut mesh) = (None, None, None);
             for &caster in &view.caster_indices {
                 let draw = &draws[caster];
@@ -783,18 +832,18 @@ impl Renderer {
         }
         let mut hash = Sha256::new();
         hash.update(&frame.records);
-        hash.update(self.shadows.settings.resolution.to_ne_bytes());
-        self.shadows.published_hash = hash.finalize().into();
-        self.shadows.bases = frame.bases;
-        let stats = &mut self.shadows.stats;
+        hash.update(self.view.shadows.settings.resolution.to_ne_bytes());
+        self.view.shadows.published_hash = hash.finalize().into();
+        self.view.shadows.bases = frame.bases;
+        let stats = &mut self.view.shadows.stats;
         stats.generation += 1;
         stats.views = frame.views.len() as u32;
         stats.resolution = if self.hardware_shadows.is_some() {
             0
         } else {
-            self.shadows.settings.resolution
+            self.view.shadows.settings.resolution
         };
-        stats.bytes = self.shadows.active.bytes;
+        stats.bytes = self.view.shadows.active.bytes;
         stats.caster_draws = count;
         stats.caster_triangles = triangles;
     }

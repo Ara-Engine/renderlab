@@ -61,6 +61,9 @@ const GI_H_ITEMS:u32=13u;
 // group of directions k % S == g that is still untraced, one group a frame, so a cut's
 // rays spread over S frames (src/gi_cache.rs IndirectSettings::cut_phases).
 const GI_H_SPREAD:u32=14u;
+// Rays a gather aims around each local light in range (U-SPECK, gi_near_gather; 0: none, and
+// the fixed directions keep every hit): src/gi_cache.rs IndirectSettings::near_light_rays.
+const GI_H_NEAR_RAYS:u32=15u;
 // Software rays with cooked near-field masks (M7 G1c): their octahedral bins per side (0:
 // none).
 const GI_H_NEAR_BINS:u32=16u;

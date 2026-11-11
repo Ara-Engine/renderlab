@@ -44,6 +44,39 @@ fn at_sun_visible(p:vec3<f32>) -> f32 {
 ";
 const MAP_VISIBILITY: &str = include_str!("../shaders/atmosphere_shadow_map.wgsl");
 
+fn kernel_source(hardware: bool) -> String {
+    format!(
+        "{}{COMMON}{KERNELS}{}",
+        if hardware {
+            "enable wgpu_ray_query;\n"
+        } else {
+            ""
+        },
+        if hardware {
+            HARDWARE_VISIBILITY
+        } else {
+            MAP_VISIBILITY
+        },
+    )
+}
+
+fn virtual_kernel_source() -> String {
+    format!("{COMMON}{KERNELS}{}", Renderer::atmosphere_shadow_source())
+}
+
+fn sky_source() -> String {
+    format!("{}{SKY}", crate::atmosphere::api_source())
+}
+
+#[cfg(test)]
+pub(super) fn compile_structure_sources(hardware: bool) -> Vec<(&'static str, String)> {
+    let mut sources = vec![("kernels", kernel_source(hardware)), ("sky", sky_source())];
+    if !hardware {
+        sources.push(("virtual-injection", virtual_kernel_source()));
+    }
+    sources
+}
+
 #[derive(PartialEq)]
 struct VisibilityKey {
     virtual_map: bool,
@@ -194,7 +227,6 @@ pub(super) struct AtmosphereGpu {
     pub transmittance: Lut,
     multiscatter: Lut,
     pub skyview: Lut,
-    pub volume: Volume,
     retired: Vec<(u64, Volume)>,
     kernels: Option<Kernels>,
     procedural: Option<Procedural>,
@@ -202,16 +234,36 @@ pub(super) struct AtmosphereGpu {
     /// The medium the transmittance and multiple-scattering LUTs hold.
     luts: Option<AtmosphereMedium>,
     published: Option<Vec<u8>>,
-    /// The last encoded frame's view-projection and eye, for froxel reprojection.
-    previous: Option<(Mat4, Vec3)>,
-    history_key: Option<HistoryKey>,
-    frame: u32,
     #[cfg(test)]
     test_fog_quality: Option<(u32, u32)>,
     /// Whether this frame encodes the kernels (set by `prepare_atmosphere`).
     active: bool,
+}
+/// What a view owns of the atmosphere: its camera volume and fog histories, and their
+/// reprojection state. The LUTs, kernels and the procedural sky are the renderer's.
+pub(super) struct AtmosphereView {
+    pub volume: Volume,
+    /// The last encoded frame's view-projection and eye, for froxel reprojection.
+    previous: Option<(Mat4, Vec3)>,
+    history_key: Option<HistoryKey>,
+    frame: u32,
+    /// `Renderer::scene_edits` when this view's fog history was last kept.
+    scene_edits: u64,
     /// Bumped when the camera volume is replaced, so lighting rebinds it.
     pub generation: u64,
+}
+impl AtmosphereView {
+    /// `generations`: the view's first generation (`ViewId::generations`).
+    pub fn new(device: &PipelineDevice, ledger: &Ledger, generations: u64) -> Self {
+        Self {
+            volume: Volume::new(device, ledger, [1, 1], false),
+            previous: None,
+            history_key: None,
+            frame: 0,
+            scene_edits: 0,
+            generation: generations,
+        }
+    }
 }
 impl AtmosphereGpu {
     pub fn new(device: &PipelineDevice, ledger: &Ledger) -> Self {
@@ -265,20 +317,15 @@ impl AtmosphereGpu {
                 [SKYVIEW[0], SKYVIEW[1], 1],
                 false,
             ),
-            volume: Volume::new(device, ledger, [1, 1], false),
             retired: vec![],
             kernels: None,
             procedural: None,
             sky: None,
             luts: None,
             published: None,
-            previous: None,
-            history_key: None,
-            frame: 0,
             #[cfg(test)]
             test_fog_quality: None,
             active: false,
-            generation: 0,
         }
     }
     pub fn uniform(&self) -> &wgpu::Buffer {
@@ -364,10 +411,12 @@ impl Renderer {
         self.check_fault()?;
         atmosphere.validate()?;
         if self.atmosphere.settings != atmosphere {
-            self.atmosphere.previous = None;
-            // TR1 otherwise keeps pixels integrated under the old fog density or
-            // medium even after the froxels have restarted.
-            self.cut_reconstruction();
+            // Every view: TR1 otherwise keeps pixels integrated under the old fog density
+            // or medium even after the froxels have restarted.
+            for view in self.views_mut() {
+                view.atmosphere.previous = None;
+                view.cut_reconstruction();
+            }
         }
         self.atmosphere.settings = atmosphere;
         Ok(())
@@ -378,14 +427,14 @@ impl Renderer {
     /// Restarts volumetric fog history and its sample sequence on the next lit frame.
     /// Call alongside reconstruction/GI resets after a camera cut or teleport.
     pub fn reset_atmosphere_history(&mut self) {
-        self.atmosphere.previous = None;
-        self.atmosphere.frame = 0;
+        self.view.atmosphere.previous = None;
+        self.view.atmosphere.frame = 0;
     }
     #[cfg(test)]
     pub(crate) fn test_fog_quality(&mut self, tile: u32, samples: u32) {
         assert!([8, 16].contains(&tile) && (1..=2).contains(&samples));
         self.atmosphere.test_fog_quality = Some((tile, samples));
-        self.atmosphere.previous = None;
+        self.view.atmosphere.previous = None;
         self.cut_reconstruction();
     }
     #[cfg(test)]
@@ -448,6 +497,12 @@ impl Renderer {
             self.atmosphere.procedural = None;
             return;
         }
+        // It lights the world (image-based light, the GI cache), so one camera places it per
+        // tick: the tick's first view's altitude. Later views of the tick keep it, or the
+        // views' heights would relight the cache every tick (docs/design-views.md).
+        if !self.tick_work && mine && self.atmosphere.procedural.is_some() {
+            return;
+        }
         let key = ProceduralKey {
             sun: self.atmosphere_sun(),
             medium: s.medium,
@@ -489,9 +544,11 @@ impl Renderer {
                 }),
                 ResourceKind::Texture,
             );
+            // Shading samples the whole chain as one cube (lighting group 3); the
+            // kernels write each level through its own array view below.
             let view = ledger.own(
                 texture.create_view(&wgpu::TextureViewDescriptor {
-                    dimension: Some(wgpu::TextureViewDimension::D2Array),
+                    dimension: Some(wgpu::TextureViewDimension::CubeArray),
                     ..Default::default()
                 }),
                 ResourceKind::TextureView,
@@ -577,7 +634,7 @@ impl Renderer {
         let eye = camera.view().inverse().w_axis.truncate();
         if !self.atmosphere.active {
             self.update_procedural_environment(eye);
-            self.atmosphere.previous = None;
+            self.view.atmosphere.previous = None;
             return Ok(());
         }
         self.ensure_atmosphere_kernels()?;
@@ -586,37 +643,36 @@ impl Renderer {
         let tile = self.atmosphere.test_fog_quality.map_or(tile, |q| q.0);
         let grid = size.map(|n| n.div_ceil(tile));
         let volumetric = s.volumetric_fog.is_some();
-        if self.atmosphere.volume.grid != grid
-            || self.atmosphere.volume.scatter.is_some() != volumetric
+        if self.view.atmosphere.volume.grid != grid
+            || self.view.atmosphere.volume.scatter.is_some() != volumetric
         {
             let volume = Volume::new(&self.device, &self.ledger, grid, volumetric);
-            let old = std::mem::replace(&mut self.atmosphere.volume, volume);
+            let old = std::mem::replace(&mut self.view.atmosphere.volume, volume);
             self.atmosphere.retired.push((self.submissions, old));
-            self.atmosphere.generation += 1;
-            self.atmosphere.previous = None;
+            self.view.atmosphere.generation += 1;
+            self.view.atmosphere.previous = None;
         }
         self.atmosphere_volume_groups(false, 0);
         self.update_procedural_environment(eye);
-        if uploads.geometry > 0
-            || uploads.models > 0
-            || uploads.instances > 0
-            || uploads.skinning > 0
-        {
-            self.atmosphere.previous = None;
+        // Moved placements, geometry or poses since this view's last frame (another view's
+        // frame of the tick may have uploaded them).
+        if self.view.atmosphere.scene_edits != self.scene_edits {
+            self.view.atmosphere.previous = None;
         }
+        self.view.atmosphere.scene_edits = self.scene_edits;
         // Conservatively invalidate visibility reuse for shadow, medium and lighting
         // changes. Camera motion uses world reprojection; phase is always current.
         let key = HistoryKey {
             sun: self.atmosphere_sun(),
             exposure: self.lighting.pending.exposure,
             environment: self.environment.generation,
-            shadows: self.shadows.settings.clone(),
+            shadows: self.view.shadows.settings.clone(),
             primary: self.primary_mode,
-            soft: self.soft_mode,
+            soft: self.view.soft_mode,
         };
-        if self.atmosphere.history_key.as_ref() != Some(&key) {
-            self.atmosphere.previous = None;
-            self.atmosphere.history_key = Some(key);
+        if self.view.atmosphere.history_key.as_ref() != Some(&key) {
+            self.view.atmosphere.previous = None;
+            self.view.atmosphere.history_key = Some(key);
         }
         let bytes = self.atmosphere_uniform(camera, size);
         if self.atmosphere.published.as_deref() != Some(&bytes[..]) {
@@ -631,6 +687,7 @@ impl Renderer {
 
     fn atmosphere_uniform(&self, camera: &Camera, size: [u32; 2]) -> Vec<u8> {
         let a = &self.atmosphere;
+        let av = &self.view.atmosphere;
         let s = &a.settings;
         let m = &s.medium;
         let (sun, lux) = self.atmosphere_sun().unwrap_or((Vec3::Y, [0.0; 3]));
@@ -653,7 +710,7 @@ impl Renderer {
         #[cfg(test)]
         let samples = a.test_fog_quality.map_or(samples, |q| q.1);
         let matrix = camera.matrix(size[0], size[1]);
-        let (previous, previous_eye, valid) = match a.previous {
+        let (previous, previous_eye, valid) = match av.previous {
             Some((m, e)) => (m, e, 1.0),
             None => (matrix, eye, 0.0),
         };
@@ -701,7 +758,7 @@ impl Renderer {
         f.extend(previous.to_cols_array());
         let mut bytes: Vec<u8> = f.iter().flat_map(|v| v.to_ne_bytes()).collect();
         let source = u32::from(self.hardware_shadows.is_some());
-        for v in [a.volume.grid[0], a.volume.grid[1], a.frame, source] {
+        for v in [av.volume.grid[0], av.volume.grid[1], av.frame, source] {
             bytes.extend(v.to_ne_bytes());
         }
         let range = self
@@ -730,19 +787,7 @@ impl Renderer {
             return Ok(());
         }
         let hardware = self.hardware_shadows.is_some();
-        let source = format!(
-            "{}{COMMON}{KERNELS}{}",
-            if hardware {
-                "enable wgpu_ray_query;\n"
-            } else {
-                ""
-            },
-            if hardware {
-                HARDWARE_VISIBILITY
-            } else {
-                MAP_VISIBILITY
-            }
-        );
+        let source = kernel_source(hardware);
         let scopes = OperationScopes::new(&self.device);
         let (device, ledger) = (&self.device, &self.ledger);
         let module = ledger.own(
@@ -767,9 +812,7 @@ impl Renderer {
         let inject_virtual = (!hardware).then(|| {
             let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("VF1 Virtual fog sampling"),
-                source: wgpu::ShaderSource::Wgsl(
-                    format!("{COMMON}{KERNELS}{}", Self::atmosphere_shadow_source()).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(virtual_kernel_source().into()),
             });
             kernel(device, ledger, &module, "at_fog_inject")
         });
@@ -827,9 +870,7 @@ impl Renderer {
         let sky_module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("AT1 raster sky"),
-                source: wgpu::ShaderSource::Wgsl(
-                    format!("{}{SKY}", crate::atmosphere::api_source()).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(sky_source().into()),
             }),
             ResourceKind::ShaderModule,
         );
@@ -902,9 +943,9 @@ impl Renderer {
     /// (`tlas_builds + hardware_build`), the key the other TLAS consumers use.
     fn atmosphere_volume_groups(&mut self, injection: bool, scene: u64) {
         let (device, ledger) = (&self.device, &self.ledger);
-        let a = &mut self.atmosphere;
+        let a = &self.atmosphere;
         let k = a.kernels.as_ref().unwrap();
-        let v = &mut a.volume;
+        let v = &mut self.view.atmosphere.volume;
         let uniform = wgpu::BindGroupEntry {
             binding: 0,
             resource: a.uniform.as_entire_binding(),
@@ -951,10 +992,10 @@ impl Renderer {
         let tlas = self.hardware_shadows.as_ref().map(|h| h.scene());
         let virtual_buffers = (self.hardware_shadows.is_none()
             && self.primary_mode == PrimaryVisibility::VisibilityBuffer
-            && self.soft_mode == SoftShadows::Virtual
-            && self.shadows.settings.enabled()
-            && self.shadows.settings.directional_disk_angle > 0.0)
-            .then(|| self.virtual_shadows.as_ref()?.atmosphere_buffers())
+            && self.view.soft_mode == SoftShadows::Virtual
+            && self.view.shadows.settings.enabled()
+            && self.view.shadows.settings.directional_disk_angle > 0.0)
+            .then(|| self.view.virtual_shadows.as_ref()?.atmosphere_buffers())
             .flatten();
         let key = VisibilityKey {
             virtual_map: virtual_buffers.is_some(),
@@ -962,7 +1003,7 @@ impl Renderer {
             // replaces it in place (`HardwareState::active`), so an address key kept binding
             // the previous TLAS: stale fog shadows, and a validation fault once a skinned
             // BLAS was refit after that TLAS's build. Key on the scene generation instead.
-            generation: tlas.map_or(self.shadows.stats.resource_generation, |_| scene),
+            generation: tlas.map_or(self.view.shadows.stats.resource_generation, |_| scene),
             buffers: virtual_buffers.map_or_else(Vec::new, |b| b.map(Clone::clone).to_vec()),
         };
         if v.integrate.is_none() {
@@ -997,10 +1038,10 @@ impl Renderer {
                         }
                     }));
                 } else {
-                    entries.push(view(21, self.shadows.sample_view()));
+                    entries.push(view(21, self.view.shadows.sample_view()));
                     entries.push(wgpu::BindGroupEntry {
                         binding: 22,
-                        resource: self.shadows.records().as_entire_binding(),
+                        resource: self.view.shadows.records().as_entire_binding(),
                     });
                 }
                 group(
@@ -1028,12 +1069,12 @@ impl Renderer {
         // Virtual's resources exist after prepare_virtual, and its pages have been
         // encoded before this call. Raster depth and the TLAS are ready here too.
         self.atmosphere_volume_groups(true, scene);
-        let a = &mut self.atmosphere;
+        let (a, av) = (&mut self.atmosphere, &mut self.view.atmosphere);
         let medium = a.settings.medium;
         let stale = a.luts != Some(medium);
         a.luts = Some(medium);
         let k = a.kernels.as_ref().unwrap();
-        let v = &a.volume;
+        let v = &av.volume;
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("AT1 atmosphere"),
             timestamp_writes: None,
@@ -1068,7 +1109,7 @@ impl Renderer {
         pass.set_bind_group(0, &**v.aerial.as_ref().unwrap(), &[]);
         pass.dispatch_workgroups(v.grid[0].div_ceil(8), v.grid[1].div_ceil(8), 1);
         if let (Some((inject, _)), Some(integrate)) = (&v.inject, &v.integrate) {
-            let i = (a.frame % 2) as usize;
+            let i = (av.frame % 2) as usize;
             pass.set_pipeline(if v.inject.as_ref().unwrap().1.virtual_map {
                 k.inject_virtual.as_ref().unwrap()
             } else {
@@ -1092,13 +1133,13 @@ impl Renderer {
             pass.dispatch_workgroups(v.grid[0].div_ceil(8), v.grid[1].div_ceil(8), 1);
         }
         drop(pass);
-        a.frame = a.frame.wrapping_add(1);
+        av.frame = av.frame.wrapping_add(1);
     }
 
     /// After a lit frame encodes: its camera becomes the froxels' reprojection source.
     pub(super) fn atmosphere_submitted(&mut self, camera: &Camera, size: [u32; 2]) {
         if self.atmosphere.active {
-            self.atmosphere.previous = Some((
+            self.view.atmosphere.previous = Some((
                 camera.matrix(size[0], size[1]),
                 camera.view().inverse().w_axis.truncate(),
             ));

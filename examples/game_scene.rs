@@ -14,14 +14,27 @@
 //! `--time dusk|noon`, `--sun-speed DEGREES_PER_SECOND` (advances the time of day, 15 degrees
 //! an hour) with `--sun-after FRAME`, `--still` (frozen camera and objects), `--timing-frames
 //! N` (a drained timing segment), `--night-lanterns` (27 dim local sources),
-//! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT), `--sky
-//! uniform`, `--no-volumetric-fog`, `--no-gi`, `--no-temporal`, `--no-post`,
+//! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT),
+//! `--atmosphere-light K` (`Settings::sky_light`: the atmosphere lights at K), `--sky
+//! uniform`, `--sky map` or `map-flat` (Showcase's gradient sky as a prepared map, or the
+//! same layout at its mean radiance; support/gradient_sky.rs, face size `--sky-face N`;
+//! `--sky-light K` lights with the map at K while drawing it at 1, `Background::ScaledSky`),
+//! `--no-volumetric-fog`, `--no-gi`, `--no-temporal`, `--no-post`,
 //! `--no-reflections` (every program keeps its untraced estimate), `--render-scale`,
 //! `--exposure`, and `--quarry MANIFEST`,
 //! which replaces the ground with the registered quarry scans and its RLE2 sky (manifest
 //! keys `asset`, `limits`, `environment`, `exposure_stops`). `--diag KEY=VALUE` (repeatable)
 //! sets estimator switches the public settings do not expose, for bisecting image defects
-//! (P-FLAT, docs/p-flat.md; keys in `Diag::parse`).
+//! (P-FLAT, docs/p-flat.md; keys in `Diag::parse`). P-RELIT's scene events (docs/p-relit.md)
+//! happen at frame 24: `fire=off` or `fire=on` switches the fire light, `fire=move` circles
+//! it from the first frame, `glow=step` dims the lamp bulbs' emission to a tenth, and `cut=1`
+//! jumps the camera a third of the way round its orbit with `Engine::cut_view`. `hold=1` keeps
+//! the camera at its first pose while the lights, the hero and the objects animate.
+//! `--views a|b|ab|ai` (docs/design-views.md) picks which of two views render each tick: `a`
+//! is the fly path, `b` a second camera across the scene, still unless `--b-orbit`. With `ab`
+//! both render from one engine and each frame records both hashes, so a run of `a` or `b`
+//! alone checks that each view matches a single-view engine; `ai` is `a` with a second view
+//! created and never rendered. `--cut-b FRAME` jumps view b's camera and cuts it there.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -33,6 +46,8 @@ mod diag;
 #[path = "../support/environment_controls.rs"]
 #[allow(dead_code)]
 mod environment_controls;
+#[path = "../support/gradient_sky.rs"]
+mod gradient_sky;
 #[path = "../support/limits.rs"]
 mod policy;
 
@@ -63,6 +78,8 @@ fn tinted_program(tint: f32) -> String {
     )
 }
 const FPS: f32 = 30.0;
+/// The frame of P-RELIT's scene events (`--diag fire=off|on`, `glow=step`, `cut=1`).
+const EVENT_FRAME: u32 = 24;
 /// The scene's latitude for `Sun::at_hour`, radians.
 const LATITUDE: f32 = 0.7;
 
@@ -78,6 +95,11 @@ struct Args {
     temporal: bool,
     scale: RenderScale,
     uniform_sky: bool,
+    /// `--sky map` (Some(false)) or `map-flat` (Some(true)): support/gradient_sky.rs.
+    sky_map: Option<bool>,
+    sky_face: u32,
+    /// `--sky-light K`: the map lights at K and is drawn at 1 (`Background::ScaledSky`).
+    sky_light: Option<f32>,
     volumetric_fog: Option<bool>,
     post: bool,
     glass: bool,
@@ -87,8 +109,15 @@ struct Args {
     hour: f32,
     fox: Option<PathBuf>,
     sun_speed: f32,
+    /// `--atmosphere-light K`: `Settings::sky_light`, the atmosphere's light over its look.
+    atmosphere_light: f32,
     sun_after: u32,
     still: bool,
+    /// `--views`: which of the two cameras render (`a`, `b` or `ab`).
+    views: String,
+    b_orbit: bool,
+    /// `--cut-b FRAME`: view b's camera jumps across the scene there, with `cut_view`.
+    cut_b: Option<u32>,
     timing_frames: u32,
     pipeline_cache: Option<PathBuf>,
     reload_probe: bool,
@@ -110,6 +139,9 @@ impl Args {
             temporal: true,
             scale: RenderScale::Native,
             uniform_sky: false,
+            sky_map: None,
+            sky_face: 64,
+            sky_light: None,
             volumetric_fog: None,
             post: true,
             glass: true,
@@ -119,8 +151,12 @@ impl Args {
             hour: 17.5,
             fox: std::env::var_os("RENDERLAB_FOX_GLB").map(PathBuf::from),
             sun_speed: 0.0,
+            atmosphere_light: 1.0,
             sun_after: 0,
             still: false,
+            views: "a".into(),
+            b_orbit: false,
+            cut_b: None,
             timing_frames: 0,
             pipeline_cache: Some(
                 std::env::var_os("RENDERLAB_PIPELINE_CACHE_DIR")
@@ -159,14 +195,21 @@ impl Args {
                 "--reload-probe" => a.reload_probe = true,
                 "--no-gi" => a.gi = false,
                 "--sky" => {
-                    a.uniform_sky = match value()?.as_str() {
-                        "atmosphere" => false,
-                        "uniform" => true,
+                    (a.uniform_sky, a.sky_map) = match value()?.as_str() {
+                        "atmosphere" => (false, None),
+                        "uniform" => (true, None),
+                        "map" => (false, Some(false)),
+                        "map-flat" => (false, Some(true)),
                         other => {
-                            return Err(format!("--sky atmosphere|uniform, not {other}").into());
+                            return Err(format!(
+                                "--sky atmosphere|uniform|map|map-flat, not {other}"
+                            )
+                            .into());
                         }
                     }
                 }
+                "--sky-face" => a.sky_face = value()?.parse()?,
+                "--sky-light" => a.sky_light = Some(value()?.parse()?),
                 "--volumetric-fog" => a.volumetric_fog = Some(true),
                 "--no-volumetric-fog" => a.volumetric_fog = Some(false),
                 "--no-temporal" => a.temporal = false,
@@ -185,8 +228,17 @@ impl Args {
                     }
                 }
                 "--sun-speed" => a.sun_speed = value()?.parse()?,
+                "--atmosphere-light" => a.atmosphere_light = value()?.parse()?,
                 "--sun-after" => a.sun_after = value()?.parse()?,
                 "--still" => a.still = true,
+                "--views" => {
+                    a.views = value()?;
+                    if !["a", "b", "ab", "ai"].contains(&a.views.as_str()) {
+                        return Err("--views a|b|ab|ai".into());
+                    }
+                }
+                "--b-orbit" => a.b_orbit = true,
+                "--cut-b" => a.cut_b = Some(value()?.parse()?),
                 "--night-lanterns" => a.night_lanterns = true,
                 "--local-shadow-count" => a.local_shadow_count = Some(value()?.parse()?),
                 "--timing-frames" => a.timing_frames = value()?.parse()?,
@@ -269,13 +321,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Scene switches (`flicker=0`: a steady fire light; `lamp=post`: v0.1.0's lamp placement,
     // with each soft source inside its own fixture; `sun=0`: no sun) stay here; the rest are
     // estimator switches.
-    let (scene_keys, estimator_keys): (Vec<_>, Vec<_>) = args
-        .diag
-        .iter()
-        .cloned()
-        .partition(|(k, _)| matches!(k.as_str(), "flicker" | "lamp" | "sun"));
+    let (scene_keys, estimator_keys): (Vec<_>, Vec<_>) =
+        args.diag.iter().cloned().partition(|(k, _)| {
+            matches!(
+                k.as_str(),
+                "flicker" | "lamp" | "sun" | "fire" | "glow" | "cut" | "hold" | "bulb"
+            )
+        });
+    // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
+    // keeps them glowing but reflecting nothing, to tell which lit surface a blob comes from.
+    let (bulb_off, bulb_dark) = (
+        scene_keys.iter().any(|(k, v)| k == "bulb" && v == "off"),
+        scene_keys.iter().any(|(k, v)| k == "bulb" && v == "dark"),
+    );
     let diag = Diag::parse(&estimator_keys)?;
-    let steady_fire = scene_keys.iter().any(|(k, v)| k == "flicker" && v == "0");
+    let scene_key = |key: &str, value: &str| scene_keys.iter().any(|(k, v)| k == key && v == value);
+    let steady_fire = scene_key("flicker", "0");
+    let (fire_off, fire_on, fire_moves) = (
+        scene_key("fire", "off"),
+        scene_key("fire", "on"),
+        scene_key("fire", "move"),
+    );
+    let (glow_steps, cuts) = (scene_key("glow", "step"), scene_key("cut", "1"));
+    let hold = scene_key("hold", "1");
+    let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
     // A soft source must clear its own fixture, or every receiver sees it partly blocked: a
@@ -297,7 +366,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             settings: diag.settings(Settings {
                 global_illumination: args.gi,
                 temporal_reconstruction: args.temporal,
-                render_scale: args.scale,
                 // A light dusk haze (0.0015 per metre over the first 128 m) for shafts.
                 volumetric_fog: match args.volumetric_fog {
                     Some(false) => None,
@@ -315,25 +383,41 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     },
                     ..Default::default()
                 },
-                post: PostSettings {
-                    enabled: args.post,
-                    bloom: 0.06,
-                    ..Default::default()
-                },
-                exposure: Exposure::Manual { stops: exposure },
-                reflections: if args.reflections {
-                    ReflectionSettings::default()
-                } else {
-                    ReflectionSettings::off()
-                },
+                sky_light: args.atmosphere_light,
                 ..Default::default()
             }),
             ..Default::default()
         },
     )?;
-    diag.apply(&mut engine, path, args.scale)?;
+    let look = diag.look(ViewLook {
+        post: PostSettings {
+            enabled: args.post,
+            bloom: 0.06,
+            ..Default::default()
+        },
+        exposure: Exposure::Manual { stops: exposure },
+        reflections: if args.reflections {
+            ReflectionSettings::default()
+        } else {
+            ReflectionSettings::off()
+        },
+        ..Default::default()
+    });
+    let view_desc = ViewDesc {
+        render_scale: args.scale,
+        look,
+        ..ViewDesc::new(args.size[0], args.size[1])
+    };
+    // `--views ab`: the second view is created first, so the first view's renderer tuning
+    // (diag) is what both views render with. `ai`: it is created and never rendered (an
+    // idle view's cost).
+    let idle = (["ab", "ai"].contains(&args.views.as_str()))
+        .then(|| engine.create_view(&view_desc))
+        .transpose()?;
+    let second = idle.filter(|_| args.views == "ab");
+    let view = engine.create_view(&view_desc)?;
+    diag.apply(&mut engine, path, args.scale, view_desc.look.quality)?;
     let engine_seconds = start.elapsed().as_secs_f64();
-    engine.resize(args.size[0], args.size[1])?;
     eprintln!(
         "game_scene adapter={:?} path={path:?} capabilities=(rt {}, nonrt {}) size={}x{} debug_build={}",
         engine.adapter_info().name,
@@ -401,7 +485,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Night diagnostics keep the courtyard sources at lantern-scale exposure.
     let lamp_scale = if args.night_lanterns { 0.001 } else { 1.0 };
     let bulb = engine.create_material(&MaterialDesc {
-        base_color: [1.0, 0.9, 0.7, 1.0],
+        base_color: if bulb_dark {
+            [0.0, 0.0, 0.0, 1.0]
+        } else {
+            [1.0, 0.9, 0.7, 1.0]
+        },
         program: Some(program),
         parameters: &[(
             "glow",
@@ -466,6 +554,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // constant blue sky for comparison.
             if args.uniform_sky {
                 engine.set_sky(Sky::Uniform([3500.0, 5000.0, 7500.0]))?;
+            } else if let Some(flat) = args.sky_map {
+                let map =
+                    engine.create_environment(&gradient_sky::prepare(args.sky_face, flat)?)?;
+                engine.set_sky(Sky::Map {
+                    map,
+                    rotation_y: 0.0,
+                    intensity: args.sky_light.unwrap_or(1.0),
+                    background: match args.sky_light {
+                        Some(_) => Background::ScaledSky(1.0),
+                        None => Background::Sky,
+                    },
+                })?;
             }
             Vec3::ZERO
         }
@@ -534,7 +634,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         boxed(brazier + Vec3::new(0.0, 0.3, 0.0), Vec3::splat(0.6)),
     )?;
     let arch_lamp = at(0.0, 3.55, -3.0);
-    engine.spawn(sphere, bulb, boxed(arch_lamp, Vec3::splat(0.12)))?;
+    if !bulb_off {
+        engine.spawn(sphere, bulb, boxed(arch_lamp, Vec3::splat(0.12)))?;
+    }
     engine.spawn(
         cube,
         iron,
@@ -558,7 +660,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec3::new(0.4 + lamp_offset.x.abs(), 0.08, 0.4 + lamp_offset.z.abs()),
         ),
     )?;
-    engine.spawn(sphere, bulb, boxed(post_lamp, Vec3::splat(0.1)))?;
+    if !bulb_off {
+        engine.spawn(sphere, bulb, boxed(post_lamp, Vec3::splat(0.1)))?;
+    }
     // A mirror-polished chrome sphere: traced mirror reflections on RT (M7-R1).
     engine.spawn(sphere, chrome, boxed(at(-1.2, 0.8, 5.6), Vec3::splat(0.8)))?;
     let spinner = engine.spawn(cube, paint, Mat4::from_translation(at(-2.5, 0.6, 3.0)))?;
@@ -592,8 +696,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if args.night_lanterns {
         engine.set_sky(Sky::Uniform([0.001, 0.002, 0.005]))?;
     }
-    // Fire and smoke over the brazier (TP1 GPU particles), simulated at the frame rate.
-    engine.set_particle_step(1.0 / FPS)?;
+    // Fire and smoke over the brazier (TP1 GPU particles) step at the frame rate: every
+    // render below is its own engine tick (`Engine::tick`), as one view's game loop is.
     let flame = brazier + Vec3::new(0.0, 0.65, 0.0);
     if args.particles {
         engine.create_emitter(
@@ -644,9 +748,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keep the courtyard's point/spot/fire sources; night mode adds 24 LC3 lanterns.
     // The facade shadows every contributing RT local, or up to 128 cached map lights.
     // Source radii retain soft penumbrae on both paths.
-    let lanterns = |t: f32| {
+    let lanterns = |t: f32, frame: u32| {
         let ft = if steady_fire { 0.0 } else { t };
-        let flicker = 0.85 + 0.1 * (23.0 * ft).sin() + 0.05 * (37.0 * ft + 1.0).sin();
+        // P-RELIT: the fire switched off or on at the event frame.
+        let lit = if frame < EVENT_FRAME {
+            !fire_on
+        } else {
+            !fire_off
+        };
+        let flicker = if lit {
+            0.85 + 0.1 * (23.0 * ft).sin() + 0.05 * (37.0 * ft + 1.0).sin()
+        } else {
+            0.0
+        };
+        // P-RELIT: the fire light circling its brazier, 0.6 m out.
+        let fire_offset = if fire_moves {
+            0.6 * Vec3::new((3.0 * t).cos(), 0.0, (3.0 * t).sin())
+        } else {
+            Vec3::ZERO
+        };
         let mut lights = vec![
             Light::Point {
                 position: arch_lamp - Vec3::new(0.0, arch_drop, 0.0),
@@ -672,7 +792,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 source_radius: 0.1,
             },
             Light::Point {
-                position: flame + Vec3::new(0.0, 0.3, 0.0),
+                position: flame + Vec3::new(0.0, 0.3, 0.0) + fire_offset,
                 candela: [
                     24_000.0 * flicker * lamp_scale,
                     12_000.0 * flicker * lamp_scale,
@@ -740,6 +860,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ready = start.elapsed();
     let mut frames = Vec::new();
     let mut last_camera = None;
+    let mut last_camera_b = None;
     let mut first_image_seconds = None;
     let mut reload = None;
     for frame in 0..args.frames {
@@ -755,7 +876,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ground = at(3.0 * walk.sin(), 0.0, -1.0 + 3.0 * walk.cos());
         let heading = walk.cos().atan2(-walk.sin());
         let focus = hero.update(&mut engine, ground, heading, t)?;
-        engine.set_lights(&diag.lights(lanterns(t)))?;
+        engine.set_lights(&diag.lights(lanterns(t, frame)))?;
+        if glow_steps && frame == EVENT_FRAME {
+            let dim = [6_000.0, 4_000.0, 1_800.0].map(|v| v * lamp_scale);
+            engine.set_material_parameters(bulb, &[("glow", Value::Vec3(dim))])?;
+        }
         engine.set_transform(
             spinner,
             Mat4::from_translation(at(-2.5, 0.6 + 0.3 * (2.0 * t).sin(), 3.0))
@@ -763,7 +888,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 * Mat4::from_rotation_x(0.6 * t),
         )?;
         // Fly path: a slow orbit that descends and closes in on the hero.
-        let orbit = 0.6 + 0.25 * t;
+        let cut = cuts && frame >= EVENT_FRAME;
+        if cuts && frame == EVENT_FRAME {
+            engine.cut_view(view);
+        }
+        let orbit = 0.6 + 0.25 * t + if cut { 2.1 } else { 0.0 };
         let radius = 14.0 - 4.0 * (t / 2.0).min(1.0);
         let eye = anchor
             + Vec3::new(
@@ -772,15 +901,57 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 radius * orbit.cos(),
             );
         let target = focus.lerp(anchor + Vec3::Y, 0.5);
+        let (eye, target) = if hold {
+            *held_pose.get_or_insert((eye, target))
+        } else {
+            (eye, target)
+        };
         let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, 500.0)?;
+        // View b: across the scene, still at its first pose unless `--b-orbit`, a third of
+        // the way round from `--cut-b` on.
+        let b_cut = args.cut_b.is_some_and(|f| frame >= f);
+        let b_orbit =
+            0.6 + PI + if args.b_orbit { 0.25 * t } else { 0.0 } + if b_cut { 2.1 } else { 0.0 };
+        if args.cut_b == Some(frame) {
+            match (args.views.as_str(), second) {
+                ("ab", Some(second)) => engine.cut_view(second),
+                ("b", _) => engine.cut_view(view),
+                _ => {}
+            }
+        }
+        let camera_b = Camera::look_at(
+            anchor + Vec3::new(12.0 * b_orbit.sin(), 4.5, 12.0 * b_orbit.cos()),
+            anchor + Vec3::Y,
+            Vec3::Y,
+            50f32.to_radians(),
+            0.05,
+            500.0,
+        )?;
+        let camera = if args.views == "b" { camera_b } else { camera };
         let begin = Instant::now();
-        let report = engine.render(&camera)?;
+        engine.tick(1.0 / FPS)?;
+        let report = engine.render_view(view, &camera)?;
+        // `--views ab`: the second view renders in the same tick, after the first.
+        let second_hash = match second {
+            Some(second) => {
+                engine.render_view(second, &camera_b)?;
+                let written = frame % args.every == 0 || frame + 1 == args.frames;
+                written
+                    .then(|| -> Result<_, Box<dyn std::error::Error>> {
+                        let image = engine.capture_view(second)?;
+                        write_png(&args.out.join(format!("frame-{frame:03}-b.png")), &image)?;
+                        Ok(format!("{:x}", Sha256::digest(&image.rgba8)))
+                    })
+                    .transpose()?
+            }
+            None => None,
+        };
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
         let written = frame % args.every == 0 || frame + 1 == args.frames;
         let mut image_hash = None;
         let mut hdr_hash = None;
         if written {
-            let image = engine.capture()?;
+            let image = engine.capture_view(view)?;
             first_image_seconds.get_or_insert_with(|| start.elapsed().as_secs_f64());
             image_hash = Some(format!("{:x}", Sha256::digest(&image.rgba8)));
             if std::env::var_os("RENDERLAB_SHC_HDR_HASHES").is_some() {
@@ -800,9 +971,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "primary": format!("{:?}", report.primary), "soft_shadows": format!("{:?}", report.soft_shadows),
             "draws": report.scene.draws, "triangles": report.scene.triangles, "written": written,
             "rgba8_sha256": image_hash, "t": t, "eye": eye.to_array(), "target": target.to_array(),
-            "hdr_sha256": hdr_hash,
+            "hdr_sha256": hdr_hash, "view": &args.views[..1], "b_rgba8_sha256": second_hash,
         }));
         last_camera = Some(camera);
+        last_camera_b = Some(camera_b);
         // PC1 diagnostic only: a real, visible program edit, then a rejected edit
         // and restoration. These captures are separate from the ordinary frame hashes.
         if args.reload_probe && frame + 1 == args.frames {
@@ -818,8 +990,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let edited = Instant::now();
             engine.reload_program(program, &edit)?;
             let compiled_seconds = edited.elapsed().as_secs_f64();
-            engine.render(&camera)?;
-            let image = engine.capture()?;
+            engine.tick(1.0 / FPS)?;
+            engine.render_view(view, &camera)?;
+            let image = engine.capture_view(view)?;
             let image_seconds = edited.elapsed().as_secs_f64();
             write_png(&args.out.join("edited.png"), &image)?;
             let rejected = engine
@@ -828,21 +1001,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if !rejected {
                 return Err("invalid program reload was accepted".into());
             }
-            engine.render(&camera)?;
-            let retained = engine.capture()?;
+            engine.tick(1.0 / FPS)?;
+            engine.render_view(view, &camera)?;
+            let retained = engine.capture_view(view)?;
             write_png(&args.out.join("rejected-retained.png"), &retained)?;
             engine.reload_program(program, game_program)?;
-            engine.render(&camera)?;
-            let restored = engine.capture()?;
+            engine.tick(1.0 / FPS)?;
+            engine.render_view(view, &camera)?;
+            let restored = engine.capture_view(view)?;
             write_png(&args.out.join("restored.png"), &restored)?;
             let repeated = Instant::now();
             engine.reload_program(program, &edit)?;
-            engine.render(&camera)?;
-            engine.capture()?;
+            engine.tick(1.0 / FPS)?;
+            engine.render_view(view, &camera)?;
+            engine.capture_view(view)?;
             let repeat_seconds = repeated.elapsed().as_secs_f64();
             engine.reload_program(program, game_program)?;
-            engine.render(&camera)?;
-            engine.capture()?;
+            engine.tick(1.0 / FPS)?;
+            engine.render_view(view, &camera)?;
+            engine.capture_view(view)?;
             reload = Some(serde_json::json!({"compile_seconds": compiled_seconds,
                 "edit_to_readback_seconds": image_seconds, "repeat_to_readback_seconds": repeat_seconds,
                 "tint":tint,"source_changed":edit != game_program,
@@ -864,7 +1041,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // drains all submitted work; its copy/readback cost is included in throughput.
     let timing = if args.timing_frames > 0 {
         let camera = last_camera.as_ref().unwrap();
-        engine.capture()?;
+        engine.capture_view(view)?;
         engine.poll()?;
         let begin = Instant::now();
         let mut cpu = Vec::new();
@@ -873,23 +1050,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             if args.sun_speed != 0.0 {
                 engine.set_sun(scene_sun(sun_hour(args.frames + step)))?;
             }
-            engine.render(camera)?;
+            engine.tick(1.0 / FPS)?;
+            engine.render_view(view, camera)?;
+            if let (Some(second), Some(camera_b)) = (second, &last_camera_b) {
+                engine.render_view(second, camera_b)?;
+            }
             cpu.push(submit.elapsed().as_secs_f64() * 1e3);
         }
-        engine.capture()?;
+        engine.capture_view(view)?;
         serde_json::json!({"frames":args.timing_frames,
             "wall_ms_per_frame":begin.elapsed().as_secs_f64()*1e3/f64::from(args.timing_frames),
             "cpu_submit_ms":cpu,
-            "note":"drained throughput, final colour copy/readback included; no PNG encoding"})
+            "views": args.views,
+            "note":"drained throughput per tick (every view of --views), final colour copy/readback included; no PNG encoding"})
     } else {
         serde_json::Value::Null
     };
+    // Device memory after the run, for a view's cost (`--views ab` against `a`).
+    let stats = engine.renderer().stats();
+    let memory = serde_json::json!({
+        "allocator_allocated_bytes": stats.allocator.as_ref().map(|a| a.allocated_bytes),
+        "allocator_reserved_bytes": stats.allocator.as_ref().map(|a| a.reserved_bytes),
+        "hal_buffer_bytes": stats.hal.buffer_bytes, "hal_texture_bytes": stats.hal.texture_bytes,
+        "target_bytes": stats.ownership.target_bytes.live, "shadow_bytes": stats.ownership.shadow_bytes.live,
+    });
     let summary = serde_json::json!({
+        "memory": memory,
         "path": format!("{path:?}"), "adapter": engine.adapter_info().name,
         "debug_build": cfg!(debug_assertions), "size": args.size, "exposure_stops": exposure,
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),
         "fox": args.fox, "hour": args.hour,
-        "night_lanterns": args.night_lanterns, "local_lights": diag.lights(lanterns(0.0)).len(),
+        "night_lanterns": args.night_lanterns, "local_lights": diag.lights(lanterns(0.0, 0)).len(),
         "diag": args.diag, "lamp_head": post_lamp.to_array(),
         "local_shadow_count":engine.settings().local_shadows.count,
         "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),

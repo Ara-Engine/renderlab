@@ -5,8 +5,8 @@ use crate::pipeline_compilation::PipelineDevice;
 
 pub(super) struct LightBuffer {
     shadow_generation: u64,
-    /// LC1: the local shadow maps bound at binding 22 (light_cluster_gpu.rs).
-    cluster_generation: u64,
+    /// LC1: the view's cluster grid and the shared local shadow maps (light_cluster_gpu.rs).
+    cluster_generation: (u64, u64),
     environment_generation: u64,
     indirect_generation: u64,
     atmosphere_generation: u64,
@@ -47,21 +47,18 @@ pub(super) struct LightingGpu {
     _dfg_allocation: Allocation,
     sampler: Owned<wgpu::Sampler>,
     dummy_environment: crate::environment::EnvironmentCube,
+    environment_sampler: Owned<wgpu::Sampler>,
     /// The empty environment lobe table, bound when the selected map has none.
     dummy_lobes: crate::environment::EnvironmentCube,
     active: Option<LightBuffer>,
     retired: Vec<(u64, LightBuffer)>,
     pub retired_hdr: Vec<(u64, Hdr)>,
-    pub hdr: Option<Hdr>,
     pub(super) pending: PackedLighting,
     pub(super) source_lights: Vec<Light>,
     published: Vec<u8>,
     uniform_shadow: Option<[u8; 48]>,
     pub max: u32,
     pub generation: u64,
-    pub target_generation: u64,
-    /// LC1 clustered lights and local shadow maps (light_cluster_gpu.rs).
-    pub clusters: super::light_cluster_gpu::LightClusters,
 }
 impl LightingGpu {
     pub fn new(
@@ -111,6 +108,13 @@ impl LightingGpu {
                     computed(cube_entry(6)),
                     computed(cube_entry(7)),
                     computed(cube_entry(9)),
+                    // The environment cubes' bilinear sampler (shaders/scene.wgsl).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                     // The selected map's environment lobe table, read by the M7-ES1
                     // inputs (shaders/environment_lobes.wgsl).
                     computed(lobe_entry(10)),
@@ -290,14 +294,24 @@ impl LightingGpu {
             ResourceKind::Sampler,
         );
         let dummy_environment = super::environment_gpu::dummy_cube(device, queue, ledger);
+        // Bilinear within a level, exact integer levels (a legacy chain's mips); cube
+        // sampling filters across face edges and corners.
+        let environment_sampler = ledger.own(
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("environment field bilinear"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                ..Default::default()
+            }),
+            ResourceKind::Sampler,
+        );
         let dummy_lobes = super::environment_gpu::dummy_lobes(device, queue, ledger);
         let limits = device.limits();
-        let clusters = super::light_cluster_gpu::LightClusters::new(device, ledger);
         Self {
             transmission: super::transparency_gpu::transmission_shadow::TransmissionShadow::new(
                 device, ledger,
             ),
-            clusters,
             decals: super::decal_gpu::DecalState::new(device, ledger),
             bindings,
             layout,
@@ -310,11 +324,11 @@ impl LightingGpu {
             _dfg_allocation: ledger.allocate(AllocationKind::Lut, DFG.len() as u64),
             sampler,
             dummy_environment,
+            environment_sampler,
             dummy_lobes,
             active: None,
             retired: vec![],
             retired_hdr: vec![],
-            hdr: None,
             pending: PackedLighting::new(&Lighting::default(), u32::MAX).unwrap(),
             source_lights: Vec::new(),
             published: vec![],
@@ -325,7 +339,6 @@ impl LightingGpu {
                 / crate::lighting::LIGHT_BYTES as u64)
                 .min(u64::from(u32::MAX)) as u32,
             generation: 0,
-            target_generation: 0,
         }
     }
     pub fn bind(&self) -> &wgpu::BindGroup {
@@ -342,7 +355,6 @@ impl LightingGpu {
         self.decals.collect(completed);
         self.retired.retain(|(last, _)| *last > completed);
         self.retired_hdr.retain(|(last, _)| *last > completed);
-        self.clusters.collect(completed);
     }
 }
 fn computed(mut entry: wgpu::BindGroupLayoutEntry) -> wgpu::BindGroupLayoutEntry {
@@ -383,6 +395,7 @@ impl Renderer {
                 fresh: false,
                 submission: self.submissions,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at: Instant::now(),
             });
@@ -446,7 +459,7 @@ impl Renderer {
     /// Atomic CPU replacement. No queue writes until an admitted Lit submission.
     pub fn set_lighting(&mut self, lighting: &Lighting) -> Result<(), Error> {
         self.check_fault()?;
-        self.validate_shadow_settings(&lighting.lights, &self.shadows.settings)?;
+        self.validate_shadow_settings(&lighting.lights, &self.shadow_settings)?;
         let exposure = PackedLighting::settings(lighting)?;
         if lighting.lights == self.lighting.source_lights {
             // Settings-only edits never normalize/repack the light vector.
@@ -457,6 +470,8 @@ impl Renderer {
             self.lighting.pending = packed;
             self.lighting.source_lights.clone_from(&lighting.lights);
         }
+        // Exposure is the selected view's look.
+        self.view.exposure = exposure;
         Ok(())
     }
     pub fn max_lights(&self) -> u32 {
@@ -467,7 +482,7 @@ impl Renderer {
             max_lights: self.max_lights(),
             lights: self.lighting.pending.count,
             buffer_generation: self.lighting.generation,
-            target_generation: self.lighting.target_generation,
+            target_generation: self.view.target_generation,
             retained_light_generations: self.lighting.retired.len(),
             retained_target_generations: self.lighting.retired_hdr.len(),
             lut_bytes: DFG.len() as u64,
@@ -486,11 +501,12 @@ impl Renderer {
         let needed = records.len().max(crate::lighting::LIGHT_BYTES) as u64;
         if state.active.as_ref().is_none_or(|active| {
             active.buffer.size() < needed
-                || active.shadow_generation != self.shadows.stats.resource_generation
-                || active.cluster_generation != state.clusters.generation
+                || active.shadow_generation != self.view.shadows.stats.resource_generation
+                || active.cluster_generation
+                    != (self.view.clusters.generation, self.local_maps.generation)
                 || active.environment_generation != self.environment.generation
                 || active.indirect_generation != self.gi.generation
-                || active.atmosphere_generation != self.atmosphere.generation
+                || active.atmosphere_generation != self.view.atmosphere.generation
                 || active.decal_generation != state.decals.generation
                 || active.transmission_generation != state.transmission.generation
         }) {
@@ -562,6 +578,12 @@ impl Renderer {
                                 ),
                             },
                             wgpu::BindGroupEntry {
+                                binding: 11,
+                                resource: wgpu::BindingResource::Sampler(
+                                    &state.environment_sampler,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
                                 binding: 10,
                                 resource: wgpu::BindingResource::TextureView(
                                     self.environment
@@ -590,25 +612,27 @@ impl Renderer {
                             wgpu::BindGroupEntry {
                                 binding: 4,
                                 resource: wgpu::BindingResource::TextureView(
-                                    self.shadows.sample_view(),
+                                    self.view.shadows.sample_view(),
                                 ),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 5,
-                                resource: self.shadows.records().as_entire_binding(),
+                                resource: self.view.shadows.records().as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 23,
-                                resource: state.clusters.frame.as_entire_binding(),
+                                resource: self.view.clusters.frame.as_entire_binding(),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 24,
-                                resource: wgpu::BindingResource::TextureView(&state.clusters.lists),
+                                resource: wgpu::BindingResource::TextureView(
+                                    &self.view.clusters.lists,
+                                ),
                             },
                             wgpu::BindGroupEntry {
                                 binding: 25,
                                 resource: wgpu::BindingResource::TextureView(
-                                    &state.clusters.atlas.view,
+                                    &self.local_maps.atlas.view,
                                 ),
                             },
                             wgpu::BindGroupEntry {
@@ -630,7 +654,7 @@ impl Renderer {
                             wgpu::BindGroupEntry {
                                 binding: 53,
                                 resource: wgpu::BindingResource::TextureView(
-                                    &self.atmosphere.volume.camera.view,
+                                    &self.view.atmosphere.volume.camera.view,
                                 ),
                             },
                         ],
@@ -641,11 +665,11 @@ impl Renderer {
             let bind = group("lighting", self.gi.shading_table());
             let kernel = group("lighting, indirect cache kernels", &self.gi.dummy);
             let next = LightBuffer {
-                shadow_generation: self.shadows.stats.resource_generation,
-                cluster_generation: state.clusters.generation,
+                shadow_generation: self.view.shadows.stats.resource_generation,
+                cluster_generation: (self.view.clusters.generation, self.local_maps.generation),
                 environment_generation: self.environment.generation,
                 indirect_generation: self.gi.generation,
-                atmosphere_generation: self.atmosphere.generation,
+                atmosphere_generation: self.view.atmosphere.generation,
                 decal_generation: state.decals.generation,
                 transmission_generation: state.transmission.generation,
                 _environment: self.environment.selected.clone(),
@@ -690,7 +714,7 @@ impl Renderer {
     }
     pub(super) fn ensure_hdr(&mut self, color: &wgpu::Texture) {
         if self
-            .lighting
+            .view
             .hdr
             .as_ref()
             .is_some_and(|h| h.resolved.texture.size() == color.size())
@@ -721,10 +745,10 @@ impl Renderer {
             shader_hash: self.shader_hash,
             lighting_hash: [0; 32],
         };
-        if let Some(old) = self.lighting.hdr.replace(hdr) {
+        if let Some(old) = self.view.hdr.replace(hdr) {
             self.lighting.retired_hdr.push((self.submissions, old));
         }
-        self.lighting.target_generation += 1;
+        self.view.target_generation += 1;
     }
     fn hdr_target(&self, size: wgpu::Extent3d, samples: u32) -> Depth {
         let texture = self.ledger.own(
@@ -742,7 +766,7 @@ impl Renderer {
                         wgpu::TextureUsages::empty()
                     }
                     // Traced deferred shading writes the resolved HDR from compute.
-                    | if samples == 1 && self.primary.is_some() {
+                    | if samples == 1 && self.view.primary.is_some() {
                         wgpu::TextureUsages::STORAGE_BINDING
                     } else {
                         wgpu::TextureUsages::empty()
@@ -772,7 +796,7 @@ impl Renderer {
     }
     /// `shader_hash` names the modules that wrote this HDR (raster or traced).
     pub(super) fn stamp_hdr(&mut self, frame: FrameId, shader_hash: [u8; 32]) {
-        if let Some(hdr) = &mut self.lighting.hdr {
+        if let Some(hdr) = &mut self.view.hdr {
             hdr.exposure = self.lighting.pending.exposure;
             hdr.frame = frame;
             hdr.revision = self.revision;
@@ -786,8 +810,8 @@ impl Renderer {
             if let Some(map) = &self.environment.selected {
                 hash.update(map.0.hash);
             }
-            if self.shadows.settings.enabled() {
-                hash.update(self.shadows.published_hash);
+            if self.view.shadows.settings.enabled() {
+                hash.update(self.view.shadows.published_hash);
             }
             hdr.lighting_hash = hash.finalize().into();
         }
@@ -806,8 +830,8 @@ fn lobe_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 fn cube_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     let mut entry = texture_entry(binding);
     entry.ty = wgpu::BindingType::Texture {
-        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-        view_dimension: wgpu::TextureViewDimension::D2Array,
+        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        view_dimension: wgpu::TextureViewDimension::CubeArray,
         multisampled: false,
     };
     entry

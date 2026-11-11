@@ -328,7 +328,7 @@ fn tp_collide(p:ptr<function,TpParticle>) {
 // The program API's `ambient`: prepared diffuse irradiance, or pi times the constant sky.
 fn tp_ambient(n:vec3<f32>) -> vec3<f32> {
     if lighting.map.w!=0.0 {
-        return environment_bilinear(environment_diffuse,environment_direction(n),0,0)*lighting.map.z;
+        return environment_diffuse_at(environment_direction(n))*lighting.map.z;
     }
     return PI*lighting.environment;
 }

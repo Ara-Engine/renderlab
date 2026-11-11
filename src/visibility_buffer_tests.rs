@@ -234,7 +234,15 @@ fn snapshot(r: &mut Renderer, out: &std::path::Path, label: &str) {
     fs::write(out.join(format!("{label}.hit")), hits).unwrap();
     fs::write(out.join(format!("{label}.counts")), counts).unwrap();
     fs::write(out.join(format!("{label}.hdr")), capture(r)).unwrap();
-    let world = &r.fresh.as_ref().unwrap().targets.as_ref().unwrap().world;
+    let world = &r
+        .view
+        .fresh
+        .as_ref()
+        .unwrap()
+        .targets
+        .as_ref()
+        .unwrap()
+        .world;
     fs::write(
         out.join(format!("{label}.world")),
         read_texture(r, &world.texture),
@@ -251,7 +259,7 @@ fn snapshot(r: &mut Renderer, out: &std::path::Path, label: &str) {
         serde_json::to_vec(&matrix).unwrap(),
     )
     .unwrap();
-    if let Some(v) = &r.visibility_buffer {
+    if let Some(v) = &r.view.visibility_buffer {
         let passes: Vec<_> = v
             .test_counts(r)
             .iter()
@@ -453,6 +461,7 @@ fn reference(
         r.encode_primary_fresh(&mut e, pipeline, None);
         r.queue.submit([e.finish()]);
         let t = &r
+            .view
             .fresh
             .as_ref()
             .unwrap()
@@ -1004,7 +1013,7 @@ fn gpu_visibility_quarry() {
     let lighting =
         lighting_settings::parse(&fs::read_to_string(m["lighting"].as_str().unwrap()).unwrap())
             .unwrap();
-    let shadows = r.shadows.settings.clone();
+    let shadows = r.view.shadows.settings.clone();
     let poses: Vec<usize> = m["poses"].as_array().map_or(vec![0, 1, 0], |v| {
         v.iter().map(|x| x.as_u64().unwrap() as usize).collect()
     });
@@ -1031,7 +1040,7 @@ fn gpu_visibility_quarry() {
         let module = seeded_module(&r);
         (1..=64u32)
             .map(|seed| {
-                r.primary.as_ref().unwrap().fresh_pipeline(
+                r.view.primary.as_ref().unwrap().fresh_pipeline(
                     &r.device,
                     &r.ledger,
                     &module,
@@ -1146,7 +1155,7 @@ fn gpu_visibility_quarry() {
                 let cpu_start = Instant::now();
                 // N8i: the variant's constants, once the shadow state exists (an unchanged
                 // list rebuilds nothing).
-                if r.virtual_shadows.is_some() {
+                if r.view.virtual_shadows.is_some() {
                     screens::set_screen_constants(&mut r, constants.clone());
                 }
                 let cpu_report = render(
@@ -1388,7 +1397,7 @@ fn gpu_visibility_quarry() {
                 eprintln!("N8f caster motion {label}: {:?}", r.virtual_shadow_stats());
                 // Kept counts must equal a full lookup of the final placement (N8f identity).
                 let [_, rolled] = interactive_outputs(&r);
-                let settings = r.virtual_settings;
+                let settings = r.view.virtual_settings;
                 r.set_virtual_shadow_settings(crate::VirtualShadowSettings {
                     refresh: 1,
                     ..settings
@@ -1526,7 +1535,7 @@ fn gpu_rt1c_m1_cost() {
     let lighting =
         lighting_settings::parse(&fs::read_to_string(m["lighting"].as_str().unwrap()).unwrap())
             .unwrap();
-    let shadows = r.shadows.settings.clone();
+    let shadows = r.view.shadows.settings.clone();
     let Light::Directional { travel, lux } = lighting.lights[0] else {
         panic!("quarry sun");
     };
@@ -1722,7 +1731,7 @@ fn gpu_primary_memory_modes() {
                 );
             }
             r.test_drain("M1 memory mode round trip");
-            let t = r.primary.as_ref().unwrap().targets.as_ref().unwrap();
+            let t = r.view.primary.as_ref().unwrap().targets.as_ref().unwrap();
             let interactive = shadows == SoftShadows::Interactive;
             assert_eq!(
                 t.repairs.value.size(),
@@ -1797,7 +1806,7 @@ fn gpu_virtual_configuration_reset() {
         environment: [0.03; 3],
         exposure_stops: -8.,
     };
-    let shadows = r.shadows.settings.clone();
+    let shadows = r.view.shadows.settings.clone();
     let (mesh, mut instances) = geometry(
         &mut r,
         &[
@@ -1841,7 +1850,7 @@ fn gpu_virtual_configuration_reset() {
         };
         r.set_virtual_shadow_settings(settings).unwrap();
         assert_eq!(
-            r.virtual_settings, settings,
+            r.view.virtual_settings, settings,
             "saved settings must stay current"
         );
         if reset {

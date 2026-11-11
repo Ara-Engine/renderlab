@@ -76,6 +76,7 @@ pub(crate) fn virtual_settings(m: &serde_json::Value) -> Option<crate::VirtualSh
         Some("map") => crate::VirtualLookup::Map,
         Some("hybrid") => crate::VirtualLookup::Hybrid,
         Some("surface") => crate::VirtualLookup::Surface,
+        Some("disk") => crate::VirtualLookup::Disk,
         _ => s.lookup,
     };
     Some(s)
@@ -93,15 +94,12 @@ pub(crate) fn exact_virtual_settings(m: &serde_json::Value) -> crate::VirtualSha
 
 #[test]
 fn virtual_manifest_lookup_defaults_and_overrides() {
-    assert_eq!(
-        crate::VirtualLookup::default(),
-        crate::VirtualLookup::Surface
-    );
+    assert_eq!(crate::VirtualLookup::default(), crate::VirtualLookup::Disk);
     assert_eq!(
         virtual_settings(&serde_json::json!({"virtual": {}}))
             .unwrap()
             .lookup,
-        crate::VirtualLookup::Surface
+        crate::VirtualLookup::Disk
     );
     assert_eq!(
         exact_virtual_settings(&serde_json::json!({})).lookup,
@@ -110,6 +108,7 @@ fn virtual_manifest_lookup_defaults_and_overrides() {
     for (name, lookup) in [
         ("exact", crate::VirtualLookup::Exact),
         ("surface", crate::VirtualLookup::Surface),
+        ("disk", crate::VirtualLookup::Disk),
     ] {
         let manifest = serde_json::json!({"virtual": {"lookup": name}});
         assert_eq!(virtual_settings(&manifest).unwrap().lookup, lookup);
@@ -178,6 +177,7 @@ fn temporal_shading(r: &Renderer, program: &str, black: bool) -> Owned<wgpu::Com
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     let pipeline = r
+        .view
         .primary
         .as_ref()
         .unwrap()
@@ -227,6 +227,7 @@ fn per_sample_shading(r: &Renderer, program: &str) -> Owned<wgpu::ComputePipelin
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
     let pipeline = r
+        .view
         .primary
         .as_ref()
         .unwrap()
@@ -299,11 +300,11 @@ fn rl_conditioned(v:f32,depth:f32)->vec3<f32> { let high=quantizeToF16(depth); r
                 compilation_options: Default::default(),
                 cache: None,
             });
-        let primary = r.primary.as_ref().unwrap().targets.as_ref().unwrap();
+        let primary = r.view.primary.as_ref().unwrap().targets.as_ref().unwrap();
         let size = [primary.hit.texture.width(), primary.hit.texture.height()];
         let views = [
             &primary.hit.texture,
-            &r.lighting.hdr.as_ref().unwrap().resolved.texture,
+            &r.view.hdr.as_ref().unwrap().resolved.texture,
             &primary.tiles.texture,
         ]
         .map(|t| t.create_view(&Default::default()));
@@ -342,7 +343,7 @@ fn rl_conditioned(v:f32,depth:f32)->vec3<f32> { let high=quantizeToF16(depth); r
     /// Re-shades the last temporal frame's samples and accumulates their visibility into
     /// `half`. The frame's HDR image is overwritten by the per-sample output.
     fn accumulate(&self, r: &Renderer, half: usize) {
-        let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
+        let film = r.view.primary.as_ref().unwrap().film.as_ref().unwrap();
         let mut e = r.device.create_command_encoder(&Default::default());
         r.encode_shade_group(
             &mut e,
@@ -421,7 +422,7 @@ fn centre_frames(
     let mut sun = centre_shading(r, &direct_program(), true);
     for (mode, seeds) in [("exact", exact), ("interactive", interactive)] {
         for seed in 0..seeds {
-            let primary = r.primary.as_ref().unwrap();
+            let primary = r.view.primary.as_ref().unwrap();
             let mut pipeline = if mode == "exact" {
                 primary.fresh_pipeline(
                     &r.device,
@@ -548,14 +549,14 @@ fn integrate_t1(
             compilation_options: Default::default(),
             cache: None,
         });
-    let primary = r.primary.as_ref().unwrap();
-    let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+    let primary = r.view.primary.as_ref().unwrap();
+    let t = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
     let pt = primary.targets.as_ref().unwrap();
     let views = [
         &pt.hit.texture,
         &t.world.texture,
         &t.visibility.texture,
-        &r.lighting.hdr.as_ref().unwrap().resolved.texture,
+        &r.view.hdr.as_ref().unwrap().resolved.texture,
         &pt.tiles.texture,
     ]
     .map(|t| t.create_view(&Default::default()));
@@ -756,7 +757,7 @@ fn digest(bytes: &[u8]) -> String {
 
 /// Both history sides of the current film state, packed.
 fn history(r: &Renderer) -> Vec<u8> {
-    let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
+    let film = r.view.primary.as_ref().unwrap().film.as_ref().unwrap();
     let written = film.parity;
     let [colour, anchor, tiles] = film.history(written);
     [
@@ -813,6 +814,7 @@ fn temporal_acceptance(
                 .unwrap(),
         );
         let kernel = r
+            .view
             .primary
             .as_ref()
             .unwrap()
@@ -972,18 +974,18 @@ fn temporal_acceptance(
     // tile, frame by frame, and the same history wherever it is kept.
     let mut runs = vec![];
     for materialize in [false, true] {
-        r.primary.as_mut().unwrap().test_film_materialize = materialize;
+        r.view.primary.as_mut().unwrap().test_film_materialize = materialize;
         reset_film(r);
         let mut images = vec![];
         for _ in 1..=frames {
             traced_frame(r, color, &cameras[pose], asset, true);
             images.push(digest(&settled(r)));
         }
-        let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
+        let film = r.view.primary.as_ref().unwrap().film.as_ref().unwrap();
         let [colour, anchor, tiles] = film.history(film.parity).map(|t| read_texture(r, t));
         runs.push((images, colour, anchor, tiles));
     }
-    r.primary.as_mut().unwrap().test_film_materialize = false;
+    r.view.primary.as_mut().unwrap().test_film_materialize = false;
     let (kept, all) = (&runs[0], &runs[1]);
     let tile_width = 1920u32.div_ceil(8) as usize;
     let flag = |tiles: &[u8], i: usize| tiles[i * 4..i * 4 + 4] != [0; 4];
@@ -1060,7 +1062,7 @@ fn gpu_film_t1_timing() {
             let mode = (pair + j) % 2;
             // set_soft_shadows would release the film history when leaving Temporal; the
             // field keeps it, so Temporal frames stay in their steady static state.
-            r.soft_mode = modes[mode];
+            r.view.soft_mode = modes[mode];
             let report = traced_frame(&mut r, &color, &camera, &mut asset, true);
             assert_eq!(report.soft_shadows, modes[mode]);
             if pair >= warmup {

@@ -152,7 +152,7 @@ fn gi_sample_refined(world:vec3<f32>, level:u32, bin:u32) -> f32 {
 // Intensity products saturate at the f32 maximum instead of overflowing.
 fn gi_open_irradiance(n:vec3<f32>) -> vec3<f32> {
     if lighting.map.w!=0.0 {
-        return gi_intensity(environment_bilinear(environment_diffuse,environment_direction(n),0,0));
+        return gi_intensity(environment_diffuse_at(environment_direction(n)));
     }
     return PI*lighting.environment;
 }

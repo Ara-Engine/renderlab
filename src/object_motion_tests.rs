@@ -124,7 +124,7 @@ fn gpu_mv1_mq1_static_identity() {
             for mq1 in [true, false] {
                 r.test_resolve_source(mq1.then_some(baseline.as_str()));
                 r.cut_reconstruction();
-                r.reconstruction_index = 0;
+                r.view.reconstruction_index = 0;
                 r.cut_post_motion();
                 for f in 0..32 {
                     render(
@@ -135,7 +135,7 @@ fn gpu_mv1_mq1_static_identity() {
                     );
                     r.test_drain("MV1 static identity");
                 }
-                let bytes = read_texture(&r, &r.lighting.hdr.as_ref().unwrap().resolved.texture);
+                let bytes = read_texture(&r, &r.view.hdr.as_ref().unwrap().resolved.texture);
                 let hash = format!("{:x}", Sha256::digest(&bytes));
                 eprintln!("MV1 static identity {path} camera_moving={moving} mq1={mq1} HDR={hash}");
                 if let Some(expected) = &control {
@@ -239,7 +239,7 @@ fn gpu_object_motion() {
             r.test_drain("MV1 fixture frame");
             if frame > 0 {
                 assert!(
-                    !r.reconstruction_state.as_ref().unwrap().reset,
+                    !r.view.reconstruction_state.as_ref().unwrap().plan.reset,
                     "rigid motion reset TR1"
                 );
             }
@@ -255,10 +255,11 @@ fn gpu_object_motion() {
                 );
             }
             if blur && [0, 8, 23].contains(&frame) {
-                let aux = words(&r, r.post.as_ref().unwrap().test_surface());
+                let aux = words(&r, r.view.post.as_ref().unwrap().test_surface());
                 let hits = words(
                     &r,
-                    &r.primary
+                    &r.view
+                        .primary
                         .as_ref()
                         .unwrap()
                         .targets
@@ -302,10 +303,14 @@ fn gpu_object_motion() {
                 rows.push(serde_json::json!({"frame":frame,"velocity_pixels":count,"max_error_px":max_error,"max_half_extent_px":max_speed}));
             }
         }
-        let history = words(&r, r.reconstruction_state.as_ref().unwrap().test_history());
+        let history = words(
+            &r,
+            r.view.reconstruction_state.as_ref().unwrap().test_history(),
+        );
         let hits = words(
             &r,
-            &r.primary
+            &r.view
+                .primary
                 .as_ref()
                 .unwrap()
                 .targets
@@ -315,6 +320,7 @@ fn gpu_object_motion() {
                 .texture,
         );
         let tiles = &r
+            .view
             .primary
             .as_ref()
             .unwrap()
@@ -324,7 +330,7 @@ fn gpu_object_motion() {
             .tiles
             .texture;
         let tile_width = tiles.width() as usize;
-        let region = r.primary.as_ref().unwrap().scene;
+        let region = r.view.primary.as_ref().unwrap().scene;
         let [tile_x, tile_y] = primary_ray_gpu::TRACE_TILE.map(|v| v as usize);
         let flags: Vec<_> = read_texture(&r, tiles)
             .chunks_exact(4)
@@ -399,7 +405,7 @@ fn gpu_object_motion() {
         &mut [Draw::new(&mesh, &mut instances)],
     );
     r.test_drain("MV1 stop");
-    let max_stop = words(&r, r.post.as_ref().unwrap().test_surface())
+    let max_stop = words(&r, r.view.post.as_ref().unwrap().test_surface())
         .iter()
         .map(|v| glam::Vec2::new(f32::from_bits(v[0]), f32::from_bits(v[1])).length())
         .fold(0f32, f32::max);
@@ -434,8 +440,8 @@ fn gpu_object_motion() {
         &mut [Draw::new(&mesh, &mut instances)],
     );
     r.test_drain("MV1 resume after diagnostic view");
-    assert!(r.reconstruction_state.as_ref().unwrap().reset);
-    let max_resumed = words(&r, r.post.as_ref().unwrap().test_surface())
+    assert!(r.view.reconstruction_state.as_ref().unwrap().plan.reset);
+    let max_resumed = words(&r, r.view.post.as_ref().unwrap().test_surface())
         .iter()
         .map(|v| glam::Vec2::new(f32::from_bits(v[0]), f32::from_bits(v[1])).length())
         .fold(0f32, f32::max);

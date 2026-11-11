@@ -8,6 +8,9 @@
 //! `capture` writes each `capture` frame's post-reconstruction HDR (the Tonemap input, as
 //! Unreal's native decode) as raw RGBA f16 `hdr-NNNN.bin`; `timing` reads nothing back.
 //! Both write `engine.json` with every frame's GPU render span.
+#[path = "../support/estimator_diag.rs"]
+#[allow(dead_code)]
+mod diag;
 #[path = "../tools/p-still/count.rs"]
 mod p_still;
 use renderlab::{asset, engine::*};
@@ -83,6 +86,46 @@ fn constant_sky(
     )?)
 }
 
+/// P-FLICKER A/B knobs (docs/p-flicker.md), measurement only; unset changes nothing.
+/// `RENDERLAB_P_FLICKER_SUN_ACTIVE`: TR1's moving-frame sun rays (default 32).
+/// `RENDERLAB_P_FLICKER_TR1`: TR1 overrides, e.g. `sharp=32,blur=2,sharpblur=1,cr=0,window=256`.
+/// `RENDERLAB_P_FLICKER_GI_EVICT`: frames a GI cell may go unseen before its slot is reusable.
+fn flicker_knobs(engine: &mut Engine) -> Result<(), Box<dyn std::error::Error>> {
+    let r = engine.renderer_mut();
+    if let Ok(v) = env::var("RENDERLAB_P_FLICKER_SUN_ACTIVE") {
+        let budget = renderlab::ReconstructionShadowBudget {
+            active_rays: v.parse()?,
+            ..r.reconstruction_shadow_budget()
+        };
+        r.set_reconstruction_shadow_budget(budget)?;
+    }
+    if let Ok(v) = env::var("RENDERLAB_P_FLICKER_TR1") {
+        let mut t = r.reconstruction();
+        for item in v.split(',').filter(|s| !s.is_empty()) {
+            let (key, value) = item.split_once('=').ok_or("TR1 knob: key=value")?;
+            match key {
+                "sharp" => t.sharp_window = value.parse()?,
+                "window" => t.window = value.parse()?,
+                "blur" => t.blur_budget = value.parse()?,
+                "sharpblur" => t.sharp_blur_budget = value.parse()?,
+                "cr" => t.catmull_rom = value != "0",
+                _ => return Err(format!("unknown TR1 knob {key}").into()),
+            }
+        }
+        r.set_reconstruction(t)?;
+    }
+    if let Ok(v) = env::var("RENDERLAB_P_FLICKER_GI_EVICT") {
+        let s = r.indirect();
+        if s.enabled {
+            r.set_indirect(renderlab::IndirectSettings {
+                evict_frames: v.parse()?,
+                ..s
+            })?;
+        }
+    }
+    Ok(())
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let begin = Instant::now();
     let args: Vec<_> = env::args().skip(1).collect();
@@ -124,9 +167,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             path: render_path,
             experimental_ray_query: ack,
             settings: Settings {
-                exposure: Exposure::Manual {
-                    stops: spec.exposure_stops,
-                },
                 // The matched Unreal levels and the path-traced references have no medium.
                 aerial_perspective: false,
                 height_fog: None,
@@ -144,7 +184,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     )?;
-    engine.resize(spec.size[0], spec.size[1])?;
+    let view = engine.create_view(&ViewDesc {
+        look: ViewLook {
+            exposure: Exposure::Manual {
+                stops: spec.exposure_stops,
+            },
+            ..Default::default()
+        },
+        ..ViewDesc::new(spec.size[0], spec.size[1])
+    })?;
     engine
         .renderer_mut()
         .set_environment_limits(renderlab::EnvironmentLimits {
@@ -250,6 +298,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         illuminance: sun.lux,
         angular_radius: sun.angular_radius,
     }))?;
+    flicker_knobs(&mut engine)?;
+    // N-VSM1: the example scenes' estimator switches (`RENDERLAB_DIAG=vsm-lookup=map;...`),
+    // measurement only; unset changes nothing.
+    if let Ok(keys) = env::var("RENDERLAB_DIAG") {
+        let keys: Vec<(String, String)> = keys
+            .split(';')
+            .filter_map(|k| k.split_once('='))
+            .map(|(k, v)| (k.to_owned(), v.to_owned()))
+            .collect();
+        diag::Diag::parse(&keys)?.apply(
+            &mut engine,
+            render_path,
+            RenderScale::Native,
+            Quality::Realtime,
+        )?;
+    }
     let ready_ms = begin.elapsed().as_secs_f64() * 1e3;
     let mut counts = p_still::Counts::start(&mut engine);
     let mut rows = Vec::new();
@@ -261,7 +325,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             engine.set_transform(object, Mat4::from_translation(Vec3::from_array(*offset)))?;
         }
         if frame.cut {
-            engine.cut();
+            engine.cut_view(view);
         }
         let camera = Camera::look_at(
             Vec3::from_array(frame.eye),
@@ -272,7 +336,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spec.far,
         )?;
         let start = Instant::now();
-        let report = engine.render(&camera)?;
+        engine.tick(1.0 / 60.0)?;
+        let report = engine.render_view(view, &camera)?;
         let cpu_ms = start.elapsed().as_secs_f64() * 1e3;
         // One frame in flight, as Unreal's -csvGpuStats runs; the GPU span is unaffected.
         engine.device().poll(wgpu::PollType::Wait {
@@ -312,7 +377,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         gpu.extend(engine.poll()?.gpu.into_iter().map(gpu_row));
     }
-    engine.capture()?;
+    engine.capture_view(view)?;
     gpu.extend(engine.poll()?.gpu.into_iter().map(gpu_row));
     fs::write(
         out.join("engine.json"),
@@ -320,7 +385,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "engine":"renderlab","scene":name,"path":path,"mode":mode,"size":spec.size,
             "adapter":engine.adapter_info().name,"debug_build":cfg!(debug_assertions),
             "scene_ready_ms":ready_ms,"settings":format!("{:?}",engine.settings()),
-            "sky":format!("{:?}",engine.sky()),"hdr":hdr_info,"frames":rows,"gpu":gpu,"counts":counts.map(p_still::Counts::finish),
+            "sky":format!("{:?}",engine.sky()),
+            "virtual_shadows":format!("{:?}",engine.renderer().virtual_shadow_stats()),"hdr":hdr_info,"frames":rows,"gpu":gpu,"counts":counts.map(p_still::Counts::finish),
             "timing_scope":"GPU render span: first pass to present end, GPU timestamps; one frame in flight",
         }))?,
     )?;

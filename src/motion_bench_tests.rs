@@ -122,7 +122,7 @@ fn read_rect(r: &Renderer, texture: &wgpu::Texture, rect: [u32; 4]) -> Vec<u8> {
 }
 
 fn hdr_rect(r: &Renderer, rect: [u32; 4]) -> Vec<u8> {
-    read_rect(r, &r.lighting.hdr.as_ref().unwrap().resolved.texture, rect)
+    read_rect(r, &r.view.hdr.as_ref().unwrap().resolved.texture, rect)
 }
 
 fn frame_inputs(r: &Renderer, p: &Pose) -> serde_json::Value {
@@ -130,13 +130,13 @@ fn frame_inputs(r: &Renderer, p: &Pose) -> serde_json::Value {
         "camera": r.camera_shadow.unwrap().to_vec(),
         "light": r.lighting.pending.records,
         "lighting": r.lighting.pending.uniform(Vec3::from_array(p.eye)),
-        "shadow_views_sha256": r.shadows.published_hash,
+        "shadow_views_sha256": r.view.shadows.published_hash,
         "sun": p.to_light,
     })
 }
 
 fn crop_hit(r: &Renderer, rect: [u32; 4]) -> Vec<u8> {
-    let state = r.primary.as_ref().unwrap();
+    let state = r.view.primary.as_ref().unwrap();
     let t = state.targets.as_ref().unwrap();
     let mut hit = read_rect(r, &t.hit.texture, rect);
     let [x0, y0, x1, y1] = rect;
@@ -267,7 +267,7 @@ impl FilmCrop {
                 ),
             ),
         );
-        let pipelines = r.primary.as_ref().unwrap().test_film_pipelines(
+        let pipelines = r.view.primary.as_ref().unwrap().test_film_pipelines(
             &r.device,
             &sources.kernels,
             &sources.shading,
@@ -329,7 +329,7 @@ impl FilmCrop {
         fs::create_dir_all(out).unwrap();
         let start = Instant::now();
         r.test_drain("motion film centre");
-        let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+        let t = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
         let mut world = read_rect(r, &t.world.texture, self.rect);
         let mut normal = read_rect(r, &t.normal.texture, self.rect);
         let hit = crop_hit(r, self.rect);
@@ -357,9 +357,10 @@ impl FilmCrop {
             fs::write(prefix.with_extension(suffix), bytes).unwrap();
         }
         r.queue.write_buffer(&self.centre, 0, &centre);
-        let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+        let t = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
         let views = [
-            &r.primary
+            &r.view
+                .primary
                 .as_ref()
                 .unwrap()
                 .targets
@@ -369,7 +370,7 @@ impl FilmCrop {
                 .texture,
             &t.world.texture,
             &t.visibility.texture,
-            &r.lighting.hdr.as_ref().unwrap().resolved.texture,
+            &r.view.hdr.as_ref().unwrap().resolved.texture,
         ]
         .map(|t| t.create_view(&Default::default()));
         let mut entries: Vec<_> = views
@@ -514,7 +515,7 @@ fn gpu_motion_reset_identity() {
         r.set_soft_shadows(mode);
         for _ in 0..8 {
             if seed_replays {
-                r.shadows.test_reset_bases();
+                r.view.shadows.test_reset_bases();
             }
             for p in &track.frames {
                 let camera = configure(&mut r, &b, p, radius, &mut scene);
@@ -524,7 +525,7 @@ fn gpu_motion_reset_identity() {
         // Replay setup belongs before the first frame, never inside the track:
         // transported shadow bases are part of its light sampling inputs.
         if seed_replays {
-            r.shadows.test_reset_bases();
+            r.view.shadows.test_reset_bases();
         }
         r.set_soft_shadows(SoftShadows::Interactive);
         let camera = configure(&mut r, &b, &track.frames[0], radius, &mut scene);
@@ -534,12 +535,19 @@ fn gpu_motion_reset_identity() {
             let camera = configure(&mut r, &b, p, radius, &mut scene);
             frame(&mut r, &color, &camera, &mut scene);
             let reset = mode == SoftShadows::Interactive
-                || r.primary.as_ref().unwrap().film.as_ref().unwrap().reset;
+                || r.view
+                    .primary
+                    .as_ref()
+                    .unwrap()
+                    .film
+                    .as_ref()
+                    .unwrap()
+                    .reset;
             if !reset {
                 continue;
             }
-            let t = r.primary.as_ref().unwrap().targets.as_ref().unwrap();
-            let f = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+            let t = r.view.primary.as_ref().unwrap().targets.as_ref().unwrap();
+            let f = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
             let outputs = [
                 hdr_rect(&r, b.crop),
                 crop_hit(&r, b.crop),
@@ -642,7 +650,7 @@ fn gpu_motion_virtual_diagnose() {
         .find(|t| case.starts_with(&format!("{}-r", t.name)))
         .unwrap();
     let radius: f32 = case.rsplit("-r").next().unwrap().parse().unwrap();
-    r.shadows.test_reset_bases();
+    r.view.shadows.test_reset_bases();
     let last = *frames.iter().max().unwrap();
     for p in track.frames.iter().take_while(|p| p.frame as u64 <= last) {
         let camera = configure(&mut r, &b, p, radius, &mut scene);
@@ -682,7 +690,7 @@ fn gpu_motion_virtual_screen() {
     let radius: f32 = case.rsplit("-r").next().unwrap().parse().unwrap();
     let p = &track.frames[m["frame"].as_u64().unwrap_or(0) as usize];
     let turn = m["turn_degrees"].as_f64().unwrap_or(0.05) as f32;
-    r.shadows.test_reset_bases();
+    r.view.shadows.test_reset_bases();
     let camera = configure(&mut r, &b, p, radius, &mut scene);
     r.set_soft_shadows(SoftShadows::Interactive);
     frame(&mut r, &color, &camera, &mut scene);
@@ -711,7 +719,7 @@ fn gpu_motion_virtual_screen() {
         r.set_soft_shadows(SoftShadows::Virtual);
         frame(&mut r, &color, &camera, &mut scene);
         vs::set_screen_constants(&mut r, vs::screen_constants(v));
-        r.shadows.test_reset_bases();
+        r.view.shadows.test_reset_bases();
         let camera = configure(&mut r, &b, p, radius, &mut scene);
         for _ in 0..4 {
             frame(&mut r, &color, &camera, &mut scene);
@@ -737,7 +745,7 @@ fn gpu_motion_virtual_screen() {
                     environment: [0.; 3],
                     exposure_stops: b.exposure_stops,
                 },
-                r.shadows.settings.clone(),
+                r.view.shadows.settings.clone(),
             );
             r.set_lighting_and_shadows(&lighting, &shadows).unwrap();
             frame(&mut r, &color, &camera, &mut scene);
@@ -809,7 +817,7 @@ fn gpu_motion_bench_batch() {
             }
             fs::create_dir_all(&directory).unwrap();
             let p = &track.frames[0];
-            r.shadows.test_reset_bases();
+            r.view.shadows.test_reset_bases();
             let camera = configure(&mut r, &b, p, radius, &mut scene);
             r.set_soft_shadows(SoftShadows::Exact);
             frame(&mut r, &color, &camera, &mut scene);
@@ -900,7 +908,7 @@ fn gpu_motion_bench_batch() {
                 // Separate uninterrupted production replays from diagnostic readbacks.
                 let mut records = vec![];
                 for repeat in 0..repeats {
-                    r.shadows.test_reset_bases();
+                    r.view.shadows.test_reset_bases();
                     let warm = configure(
                         &mut r,
                         &b,
@@ -946,7 +954,7 @@ fn gpu_motion_bench_batch() {
                         }
                     }
                 }
-                r.shadows.test_reset_bases();
+                r.view.shadows.test_reset_bases();
                 let _ = configure(
                     &mut r,
                     &b,
@@ -987,7 +995,14 @@ fn gpu_motion_bench_batch() {
                     fs::write(path.join(format!("{:04}.rgba16f", p.frame)), &rgb).unwrap();
                     let reset = mode == SoftShadows::Temporal
                         && (radius == 0.
-                            || r.primary.as_ref().unwrap().film.as_ref().unwrap().reset);
+                            || r.view
+                                .primary
+                                .as_ref()
+                                .unwrap()
+                                .film
+                                .as_ref()
+                                .unwrap()
+                                .reset);
                     let inputs = frame_inputs(&r, p);
                     if reset && radius > 0. {
                         let expected: serde_json::Value = serde_json::from_slice(
@@ -1025,7 +1040,7 @@ fn gpu_motion_bench_batch() {
                         .unwrap();
                     }
                     if mode == SoftShadows::Temporal && radius > 0. {
-                        let film = r.primary.as_ref().unwrap().film.as_ref().unwrap();
+                        let film = r.view.primary.as_ref().unwrap().film.as_ref().unwrap();
                         let mut e = r.device.create_command_encoder(&Default::default());
                         r.encode_shade_group(
                             &mut e,
@@ -1078,7 +1093,7 @@ fn gpu_motion_bench_batch() {
             }
             r.set_soft_shadows(SoftShadows::Exact);
             let reference_radius = if radius == 0. { 0.04 } else { radius };
-            r.shadows.test_reset_bases();
+            r.view.shadows.test_reset_bases();
             let camera = configure(&mut r, &b, p, reference_radius, &mut scene);
             frame(&mut r, &color, &camera, &mut scene);
             let reference = FilmCrop::new(&r, &b, radius);

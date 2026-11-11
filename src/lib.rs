@@ -10,6 +10,9 @@
 #[cfg(test)]
 extern crate self as renderlab;
 pub mod animation;
+/// Optional ara-gpu renderer, independently constructed from the wgpu renderer.
+#[cfg(feature = "backend-ara")]
+pub mod backend_ara;
 // AT1: physical sky, aerial perspective and fog (docs/m7-at1.md).
 mod atmosphere;
 /// TP1 alpha-tested (cutout) geometry, cut at load (docs/m7-tp1.md).
@@ -80,7 +83,7 @@ pub use renderer::{
     ProbeCounters,
 };
 pub use renderer::{LodPackage, LodStats, MeshLod};
-pub use renderer::{Reconstruction, ReconstructionShadowBudget, RenderScale, Renderer};
+pub use renderer::{Reconstruction, ReconstructionShadowBudget, RenderScale, Renderer, ViewId};
 pub use renderer::{ResidencyStats, TextureResidency};
 pub use renderer::{
     VIRTUAL_FEATURES, VirtualLookup, VirtualShadowSettings, VirtualShadowStats, WalkRecords,
@@ -94,9 +97,11 @@ pub use transparency::{
 };
 pub use wgpu;
 
-/// Raster shadow receivers read the actual triangle's world-space vertices.
-/// Callers must request this native Vulkan device feature.
-pub const RECEIVER_FEATURES: wgpu::Features = wgpu::Features::SHADER_PER_VERTEX;
+/// Raster shadow receivers read the actual triangle's world-space vertices, and
+/// environment lookups filter the RGBA32F field in the texture unit (P-SKY,
+/// docs/p-sky.md). Callers must request these device features.
+pub const RECEIVER_FEATURES: wgpu::Features =
+    wgpu::Features::SHADER_PER_VERTEX.union(wgpu::Features::FLOAT32_FILTERABLE);
 
 /// Device memory hints Renderlab recommends for `wgpu::DeviceDescriptor::memory_hints`:
 /// wgpu's 8-64 MiB blocks. Smaller blocks saved more space but regressed quarry
@@ -148,5 +153,7 @@ impl std::fmt::Display for ReloadError {
 }
 impl std::error::Error for ReloadError {}
 
+#[cfg(test)]
+mod array_length_probe_tests;
 #[cfg(test)]
 mod tests;

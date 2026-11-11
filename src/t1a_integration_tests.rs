@@ -12,7 +12,7 @@ fn interactive_baseline(
     hashes: &mut Hashes,
 ) {
     let module = seeded_module(r);
-    let soft = r.shadows.settings.clone();
+    let soft = r.view.shadows.settings.clone();
     let mut hard = soft.clone();
     hard.directional_disk_angle = 0.;
     for (index, pose) in [0, 1, 0].into_iter().enumerate() {
@@ -25,7 +25,7 @@ fn interactive_baseline(
         hashes.write(name("world.f32"), world).unwrap();
         hashes.write(name("normal.f32"), normal).unwrap();
         for seed in 0..4 {
-            let mut pipeline = r.primary.as_ref().unwrap().interactive_pipeline(
+            let mut pipeline = r.view.primary.as_ref().unwrap().interactive_pipeline(
                 &r.device,
                 &r.ledger,
                 &module,
@@ -88,7 +88,16 @@ fn program_resets(
         for pose in [0, 1, 2, 0] {
             // Each camera change must reset by itself, with no explicit history reset.
             traced_frame(r, color, &cameras[pose], asset, true);
-            assert!(r.primary.as_ref().unwrap().film.as_ref().unwrap().reset);
+            assert!(
+                r.view
+                    .primary
+                    .as_ref()
+                    .unwrap()
+                    .film
+                    .as_ref()
+                    .unwrap()
+                    .reset
+            );
             assert_eq!(
                 digest(&settled(r)),
                 expected[pose].0,
@@ -100,7 +109,16 @@ fn program_resets(
                 "{name} camera reset trace"
             );
             traced_frame(r, color, &cameras[pose], asset, true);
-            assert!(!r.primary.as_ref().unwrap().film.as_ref().unwrap().reset);
+            assert!(
+                !r.view
+                    .primary
+                    .as_ref()
+                    .unwrap()
+                    .film
+                    .as_ref()
+                    .unwrap()
+                    .reset
+            );
         }
         let mut expected_run = None;
         for _ in 0..8 {
@@ -124,16 +142,43 @@ fn program_resets(
         assert!(r.test_reload_standard("invalid WGSL").is_err());
         assert_eq!(r.revision, revision);
         traced_frame(r, color, &cameras[0], asset, true);
-        assert!(!r.primary.as_ref().unwrap().film.as_ref().unwrap().reset);
+        assert!(
+            !r.view
+                .primary
+                .as_ref()
+                .unwrap()
+                .film
+                .as_ref()
+                .unwrap()
+                .reset
+        );
         r.test_reload_standard(source).unwrap();
         traced_frame(r, color, &cameras[0], asset, true);
-        assert!(r.primary.as_ref().unwrap().film.as_ref().unwrap().reset);
+        assert!(
+            r.view
+                .primary
+                .as_ref()
+                .unwrap()
+                .film
+                .as_ref()
+                .unwrap()
+                .reset
+        );
         assert_eq!(digest(&settled(r)), expected[0].0);
         // A prelude rejection keeps the pipelines; a valid reload is atomic and resets.
         assert!(r.reload("invalid WGSL").is_err());
         r.reload(SOURCE).unwrap();
         traced_frame(r, color, &cameras[0], asset, true);
-        assert!(r.primary.as_ref().unwrap().film.as_ref().unwrap().reset);
+        assert!(
+            r.view
+                .primary
+                .as_ref()
+                .unwrap()
+                .film
+                .as_ref()
+                .unwrap()
+                .reset
+        );
         assert_eq!(digest(&settled(r)), expected[0].0);
         rows.push(serde_json::json!({"program":name,"camera_resets":4,"repeats":8,"digests":expected_run,"reload":true}));
     }
@@ -227,7 +272,7 @@ fn primary_baseline(
 ) {
     r.set_primary_visibility(PrimaryVisibility::Traced).unwrap();
     let module = seeded_module(r);
-    let primary = r.primary.as_ref().unwrap();
+    let primary = r.view.primary.as_ref().unwrap();
     let mut seeded: Vec<_> = (0..=80u32)
         .map(|s| {
             primary.fresh_pipeline(
@@ -246,7 +291,7 @@ fn primary_baseline(
         (COUNT_DECODE, &COUNT_DECODE.replace("/256.0", "/16777216.0")),
     );
     let mut fixed = shading_pipelines(r, &sources);
-    let soft = r.shadows.settings.clone();
+    let soft = r.view.shadows.settings.clone();
     let mut hard = soft.clone();
     hard.directional_disk_angle = 0.0;
     for (index, pose) in [0, 1, 0].into_iter().enumerate() {
@@ -293,6 +338,7 @@ fn primary_baseline(
         swap_compute(r, &mut noop);
         r.test_standard().swap_traced(&mut fixed);
         let t = &r
+            .view
             .fresh
             .as_ref()
             .unwrap()

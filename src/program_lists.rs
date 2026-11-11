@@ -17,7 +17,7 @@ const LIST_TILE: [u32; 2] = [4, 4];
 /// `TRACED_DRAWS` batches.
 const INFO_BYTES: u64 = 16 + 4 * TRACED_DRAWS as u64;
 /// Standalone binning shares the composed shading draw-table ABI.
-fn bin_source() -> String {
+pub(crate) fn bin_source() -> String {
     format!(
         "const PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}",
         include_str!("../shaders/program_bins.wgsl")
@@ -28,6 +28,7 @@ fn bin_source() -> String {
 const ARGS_BYTES: u64 = 16;
 
 /// The bind group layouts and pipeline layouts of binning and list shading.
+#[derive(Clone)]
 pub(super) struct ListLayouts {
     bins: Owned<wgpu::BindGroupLayout>,
     bins_layout: Owned<wgpu::PipelineLayout>,
@@ -217,7 +218,7 @@ impl PrimaryState {
 impl Renderer {
     /// The binning kernel, compiled by the first mixed frame. It holds no program code.
     pub(crate) fn ensure_bins(&mut self) -> Result<(), Error> {
-        if self.primary.as_ref().unwrap().bins.is_some() {
+        if self.view.primary.as_ref().unwrap().bins.is_some() {
             return Ok(());
         }
         let scopes = OperationScopes::new(&self.device);
@@ -227,7 +228,7 @@ impl Renderer {
                 label: Some("program tile binning"),
                 source: wgpu::ShaderSource::Wgsl(bin_source().into()),
             });
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let pipeline = self.ledger.own(
             self.device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -244,7 +245,7 @@ impl Renderer {
             return Err(self.fail(error.to_string()));
         }
         self.pipelines.created += 1;
-        self.primary.as_mut().unwrap().bins = Some(pipeline);
+        self.view.primary.as_mut().unwrap().bins = Some(pipeline);
         Ok(())
     }
 
@@ -259,12 +260,12 @@ impl Renderer {
         uploads: &mut UploadBytes,
     ) {
         let k = programs.len() as u32;
-        self.primary.as_mut().unwrap().programs = programs;
+        self.view.primary.as_mut().unwrap().programs = programs;
         if k < 2 {
             return;
         }
         let capacity = capacity(size);
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         if state
             .lists
             .as_ref()
@@ -300,11 +301,11 @@ impl Renderer {
                 bins: None,
                 generation: state.lists.as_ref().map_or(1, |l| l.generation + 1),
             };
-            let state = self.primary.as_mut().unwrap();
+            let state = self.view.primary.as_mut().unwrap();
             // Queued frames keep the buffers their bind groups hold.
             state.lists = Some(next);
         }
-        let lists = self.primary.as_mut().unwrap().lists.as_mut().unwrap();
+        let lists = self.view.primary.as_mut().unwrap().lists.as_mut().unwrap();
         let mut bytes = vec![0u8; (lists.slots * lists.stride) as usize];
         for slot in 0..k {
             let at = (slot * lists.stride) as usize;
@@ -325,7 +326,7 @@ impl Renderer {
 
     /// The binning group of a prepared mixed frame: after its targets and tables exist.
     pub(super) fn prepare_bins_group(&mut self) {
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let Some(lists) = state.lists.as_ref().filter(|_| state.mixed()) else {
             return;
         };
@@ -369,7 +370,14 @@ impl Renderer {
             }),
             ResourceKind::BindGroup,
         );
-        self.primary.as_mut().unwrap().lists.as_mut().unwrap().bins = Some((group, key));
+        self.view
+            .primary
+            .as_mut()
+            .unwrap()
+            .lists
+            .as_mut()
+            .unwrap()
+            .bins = Some((group, key));
     }
 
     /// Mixed-frame deferred shading: binning, then each program's list, in one pass.
@@ -379,7 +387,7 @@ impl Renderer {
         shading: Shading,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let state = self.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
         let lists = state.lists.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
         let group = state.bindings.as_ref().unwrap().list[shading as usize]

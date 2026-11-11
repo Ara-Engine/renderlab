@@ -5,12 +5,36 @@
 // scene: [x0, y0, x1, y1) pixels whose camera rays can reach a placement (scene_pixels).
 // reflection (M7-R1/R1n, ReflectionSettings::frame_words): x the perceptual roughness where
 // the traced reflection fraction reaches 0 (0: reflections off), y where it starts to fall.
-struct PrimaryFrame { inverse:mat4x4<f32>, clear:vec4<f32>, sided:vec4<u32>, scene:vec4<u32>, sampling:vec4<u32>, reflection:vec4<f32> };
+// zones: this frame's TR1 restart zones (reconstructed frames; only TR1's trace kernels read it).
+// TR1's restart zones (temporal_reconstruction.rs `Planner::prepare`, tests in
+// shaders/temporal_zones.wgsl). shadow_lo.w enables the moving caster's swept shadow volume
+// (SK1); shadow_hi.w 0 rejects inside the box itself, 1 (one shadowed sun) inside the caster's
+// swept bounds or where a ray toward the sun within its disk can meet them; shadow_light is the
+// unit direction toward the sun (no zero component) and the tangent of its disk half-angle.
+// relit: the restart spheres (xyz centre, w squared radius) of local lights whose intensity or
+// colour changed this frame; counts.x of them. counts.y: the sun-shadow directions a receiver
+// in either zone evaluates (tr1_zone_rays; 0: the frame's count everywhere).
+struct Tr1Zones { shadow_lo:vec4<f32>, shadow_hi:vec4<f32>, shadow_light:vec4<f32>, relit:array<vec4<f32>,8>, counts:vec4<u32> };
+struct PrimaryFrame { inverse:mat4x4<f32>, clear:vec4<f32>, sided:vec4<u32>, scene:vec4<u32>, sampling:vec4<u32>, reflection:vec4<f32>, zones:Tr1Zones };
 // Hit record: placement+1 (zero is a miss), primitive, then f32 barycentrics.
 @group(0) @binding(7) var primary_hit:texture_2d<u32>;
 @group(0) @binding(10) var<uniform> primary_frame:PrimaryFrame;
 // Per placement: batch index; bit 31 tangent, bit 30 single-sided, bit 29 thin.
 @group(1) @binding(5) var<storage,read> primary_placements:array<u32>;
+// renderlab: batch info begin
+// Per draw (batch), after the placement words and counted back from the buffer end
+// (primary_ray::batch_word): triangle count, bit 30 an adjacency suffix in the index buffer,
+// bit 31 a skinned previous-vertex stream. Read these here, never from `arrayLength` of a
+// binding-array element: naga 30 leaves that element index undecorated, and a driver may
+// then answer for one element per workgroup (RADV does). Functions only, no constants:
+// composers that carry functions by name (the edge check) pick these up whole.
+fn primary_batch_info(batch:u32)->u32 {
+    return primary_placements[arrayLength(&primary_placements)-1u-batch];
+}
+fn batch_triangles(info:u32)->u32 {return info&0x3fffffffu;}
+fn batch_adjacent(info:u32)->bool {return (info&0x40000000u)!=0u;}
+fn batch_skinned(info:u32)->bool {return (info&0x80000000u)!=0u;}
+// renderlab: batch info end
 
 fn primary_epsilon(v:array<vec3<f32>,3>,placement:u32)->f32 {
     let a=world_position(v[0],placement).xyz;let b=world_position(v[1],placement).xyz;

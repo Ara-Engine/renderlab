@@ -158,6 +158,7 @@ pub(super) fn gpu_receiver_fold_traced() {
     sources[0].push_str(include_str!("../support/receiver_fold_traced.wgsl"));
     validate_wgsl(&sources[0]);
     let pipelines = r
+        .view
         .primary
         .as_ref()
         .unwrap()
@@ -176,7 +177,8 @@ pub(super) fn gpu_receiver_fold_traced() {
         r.queue.submit([encoder.finish()]);
         let bytes = read_texture(
             &r,
-            &r.primary
+            &r.view
+                .primary
                 .as_ref()
                 .unwrap()
                 .targets
@@ -233,7 +235,7 @@ pub(super) fn gpu_receiver_fold_traced() {
 
     // Exercise nonempty correction writes through the real Interactive worklist.
     // Quarry pixel centres can have no changed hits despite dense subpixel bands.
-    let mut shadows = r.shadows.settings.clone();
+    let mut shadows = r.view.shadows.settings.clone();
     shadows.directional_disk_angle = 0.001;
     r.set_shadows(&shadows).unwrap();
     r.set_soft_shadows(crate::SoftShadows::Interactive);
@@ -263,7 +265,8 @@ pub(super) fn gpu_receiver_fold_traced() {
     );
     control[1].push_str("\n@compute @workgroup_size(32) fn primary_retry_interactive() {}\n");
     r.pipeline.primary = Some(
-        r.primary
+        r.view
+            .primary
             .as_ref()
             .unwrap()
             .compile(&r.device, &r.ledger, &control),
@@ -280,7 +283,8 @@ pub(super) fn gpu_receiver_fold_traced() {
         [
             read_texture(
                 r,
-                &r.primary
+                &r.view
+                    .primary
                     .as_ref()
                     .unwrap()
                     .targets
@@ -291,7 +295,8 @@ pub(super) fn gpu_receiver_fold_traced() {
             ),
             read_texture(
                 r,
-                &r.fresh
+                &r.view
+                    .fresh
                     .as_ref()
                     .unwrap()
                     .targets
@@ -312,7 +317,8 @@ pub(super) fn gpu_receiver_fold_traced() {
         "the raw hot control must reproduce false shadows"
     );
     r.pipeline.primary = Some(
-        r.primary
+        r.view
+            .primary
             .as_ref()
             .unwrap()
             .compile(&r.device, &r.ledger, &sources),

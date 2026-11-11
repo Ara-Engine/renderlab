@@ -2,8 +2,9 @@
 //!
 //! A game creates an engine for a [`RenderPath`], creates resources (meshes, textures,
 //! programs, materials, environments) and spawns objects, all named by copyable typed
-//! handles ([`Id`]). Each frame it moves objects, sets the camera and calls
-//! [`Engine::render`] or [`Engine::render_to`]. Every call blocks only for GPU
+//! handles ([`Id`]), and creates one or more views ([`Engine::create_view`]). Each frame it
+//! moves objects, calls [`Engine::tick`] once and renders each view it shows from its
+//! camera ([`Engine::render_view`] or [`Engine::render_view_to`]). Every call blocks only for GPU
 //! backpressure; the engine handles admission retries, per-path configuration (traced
 //! primaries or the visibility buffer, sun visibility, GI geometry) and draw batching.
 //!
@@ -13,13 +14,22 @@
 //! (docs/api.md lists what is frozen).
 mod device;
 mod ids;
-mod settings;
+mod scene;
+mod view;
+#[cfg(test)]
+mod view_tests;
+// Crate-visible for a second GPU layer's engine: the same lighting and atmosphere
+// translation, over the same state.
+pub(crate) mod settings;
+pub(crate) mod state;
 
 pub use device::{Capabilities, ExperimentalRayQuery, RenderPath};
 pub use ids::{
     EmitterId, EnvironmentId, Id, MaterialId, MeshId, ObjectId, ProgramId, TextureId, kind,
 };
+pub use scene::Scene;
 pub use settings::{Background, Exposure, Quality, Settings, Sky, Sun};
+pub use view::{Outputs, ViewDesc, ViewLook};
 
 pub use crate::animation::{AnimationPose, ClipPlayer};
 pub use crate::asset::{
@@ -34,17 +44,16 @@ pub use crate::{
     Forces, FrameId, FrameReport, HeightFog, Light, Limits, LocalShadows, MAX_CURVE_KEYS,
     MAX_PARTICLES, Mat4, MeshData, PlaneCollision, PostSettings, ReflectionSettings, ReloadError,
     ReloadReport, RenderScale, Renderer, SizeKey, SpawnShape, SpriteAlignment, Tonemapper,
-    Transparency, Value, Vec3, Vertex, VolumetricFog,
+    Transparency, Value, Vec3, Vertex, ViewId, ViewMode, VolumetricFog,
 };
 
 use crate::{
     Emitter, EnvironmentMap, EnvironmentParameters, HardwareShadowOptions, Instances, Material,
     MaterialDescriptor, Mesh, PrimaryVisibility, Program, ProgramDescriptor, RendererOptions,
-    SampleCount, SkinnedMeshInstance, Texture, TextureBinding, ViewMode,
+    SampleCount, SkinnedMeshInstance, Texture, TextureBinding,
 };
-use ids::Slots;
+use state::{MaterialEntry, Residency, State};
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -204,47 +213,35 @@ impl MeshEntry {
     }
 }
 
-struct MaterialEntry {
-    material: Material,
-    program: ProgramId,
-}
-struct ObjectEntry {
-    batch: Id<kind::Batch>,
-    slot: usize,
-}
-/// Objects sharing a mesh and material: one instance collection, one draw.
-struct Batch {
-    mesh: MeshId,
-    material: MaterialId,
-    models: Vec<Mat4>,
-    objects: Vec<ObjectId>,
-    /// None until the next frame uploads the current `models` (after spawn/despawn).
-    instances: Option<Instances>,
+/// What the wgpu engine keeps for each resource: the renderer's own handles.
+struct Handles;
+impl Residency for Handles {
+    type Mesh = MeshEntry;
+    type Texture = Texture;
+    type Program = Program;
+    type Material = Material;
+    type Environment = EnvironmentMap;
+    type Emitter = Emitter;
+    type Instances = Instances;
+    fn set_instance(instances: &mut Instances, slot: usize, transform: Mat4) -> Result<(), Error> {
+        instances.set(slot, transform)
+    }
 }
 
 /// The renderer, its device, the scene's resources and objects, and the frame settings.
 pub struct Engine {
+    /// First, so the scene's handles drop after the renderer.
     renderer: Renderer,
     path: RenderPath,
     adapter: wgpu::AdapterInfo,
     format: wgpu::TextureFormat,
     limits: Limits,
-    output: Option<wgpu::Texture>,
-    meshes: Slots<kind::Mesh, MeshEntry>,
-    textures: Slots<kind::Texture, Texture>,
-    programs: Slots<kind::Program, Program>,
-    materials: Slots<kind::Material, MaterialEntry>,
-    environments: Slots<kind::Environment, EnvironmentMap>,
-    objects: Slots<kind::Object, ObjectEntry>,
-    emitters: Slots<kind::Emitter, Emitter>,
-    batches: Slots<kind::Batch, Batch>,
-    batch_keys: HashMap<(MeshId, MaterialId), Id<kind::Batch>>,
-    standard: ProgramId,
-    sun: Option<Sun>,
-    lights: Vec<Light>,
-    sky: Sky,
-    settings: Settings,
+    /// The scene: resource handles by id, objects in batches, sun, lights, sky, settings.
+    state: State<Handles>,
     events: Events,
+    /// The views, and the renderer's empty view the next `create_view` takes (its first).
+    views: Vec<view::ViewEntry>,
+    spare: Option<ViewId>,
 }
 
 /// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
@@ -328,32 +325,25 @@ impl Engine {
                 "renderer did not select the path's primary visibility",
             ));
         }
-        let mut programs = Slots::new("unknown or removed program");
-        let standard = programs.insert(renderer.standard_program().clone());
+        let renderer_first_view = renderer.selected_view();
+        let state = State::new(
+            renderer.standard_program().clone(),
+            settings::ablated(descriptor.settings),
+        );
         let mut engine = Self {
             renderer,
             path,
             adapter: info,
             format,
             limits: descriptor.limits,
-            output: None,
-            meshes: Slots::new("unknown or removed mesh"),
-            textures: Slots::new("unknown or removed texture"),
-            programs,
-            materials: Slots::new("unknown or removed material"),
-            environments: Slots::new("unknown or removed environment"),
-            objects: Slots::new("unknown or removed object"),
-            emitters: Slots::new("unknown or removed emitter"),
-            batches: Slots::new("internal: unknown batch"),
-            batch_keys: HashMap::new(),
-            standard,
-            sun: None,
-            lights: Vec::new(),
-            sky: Sky::default(),
-            settings: settings::ablated(descriptor.settings),
+            state,
             events: Events::default(),
+            views: Vec::new(),
+            spare: Some(renderer_first_view),
         };
-        settings::apply(&mut engine.renderer, path, &engine.settings)?;
+        settings::apply(&mut engine.renderer, &engine.state.settings)?;
+        // Ticks are explicit from the start: the first frame runs the first tick's work.
+        engine.renderer.begin_tick();
         engine.apply_lighting()?;
         Ok(engine)
     }
@@ -425,15 +415,11 @@ impl Engine {
             self.renderer
                 .set_indirect_geometry(&mesh, &positions, indices)?;
         }
-        Ok(self.meshes.insert(MeshEntry::Static(mesh)))
+        Ok(self.state.meshes.insert(MeshEntry::Static(mesh)))
     }
     /// Releases the mesh once no object uses it.
     pub fn remove_mesh(&mut self, mesh: MeshId) -> Result<(), Error> {
-        self.meshes.get(mesh)?;
-        if self.batch_keys.keys().any(|(m, _)| *m == mesh) {
-            return Err(Error::InvalidInput("mesh is still used by objects"));
-        }
-        self.meshes.remove(mesh).map(drop)
+        self.state.remove_mesh(mesh).map(drop)
     }
 
     /// Uploads a prepared texture (every mip level; see `renderlab_asset::Texture`).
@@ -442,11 +428,11 @@ impl Engine {
         let texture = self.admit("texture upload admission timed out", |r| {
             r.try_upload_streamed_texture(data.clone())
         })?;
-        Ok(self.textures.insert(texture))
+        Ok(self.state.textures.insert(texture))
     }
     /// Materials keep their own textures alive; this only drops the engine's handle.
     pub fn remove_texture(&mut self, texture: TextureId) -> Result<(), Error> {
-        self.textures.remove(texture).map(drop)
+        self.state.remove_texture(texture).map(drop)
     }
 
     /// Composes a shading program (WGSL `surface` and `shade`, optional `struct
@@ -456,7 +442,7 @@ impl Engine {
         let program = self
             .renderer
             .try_create_program(&ProgramDescriptor { label, source })?;
-        Ok(self.programs.insert(program))
+        Ok(self.state.programs.insert(program))
     }
     /// Replaces a program's source transactionally: on rejection its last working
     /// pipelines keep rendering and the diagnostic names program lines. Materials keep
@@ -467,6 +453,7 @@ impl Engine {
         source: &str,
     ) -> Result<ReloadReport, ReloadError> {
         let handle = self
+            .state
             .programs
             .get(program)
             .map_err(|e| ReloadError::Rejected {
@@ -479,27 +466,25 @@ impl Engine {
     /// The built-in photoreal program (shaders/programs/standard.wgsl), which materials
     /// without a program use.
     pub fn standard_program(&self) -> ProgramId {
-        self.standard
+        self.state.standard
     }
     /// Materials keep their program alive; this only drops the engine's handle.
     pub fn remove_program(&mut self, program: ProgramId) -> Result<(), Error> {
-        if program == self.standard {
-            return Err(Error::InvalidInput(
-                "the standard program cannot be removed",
-            ));
-        }
-        self.programs.remove(program).map(drop)
+        self.state.remove_program(program).map(drop)
     }
 
     pub fn create_material(&mut self, desc: &MaterialDesc<'_>) -> Result<MaterialId, Error> {
-        let program_id = desc.program.unwrap_or(self.standard);
-        let program = self.programs.get(program_id)?;
+        let program_id = desc.program.unwrap_or(self.state.standard);
+        let program = self.state.programs.get(program_id)?;
         let binding = |slot: Option<TextureRef>| {
             slot.map(|t| {
-                self.textures.get(t.texture).map(|texture| TextureBinding {
-                    texture,
-                    sampler: t.sampler,
-                })
+                self.state
+                    .textures
+                    .get(t.texture)
+                    .map(|texture| TextureBinding {
+                        texture,
+                        sampler: t.sampler,
+                    })
             })
             .transpose()
         };
@@ -528,7 +513,7 @@ impl Engine {
             stash(&mut self.events, self.renderer.poll()?);
             std::thread::yield_now();
         };
-        Ok(self.materials.insert(MaterialEntry {
+        Ok(self.state.materials.insert(MaterialEntry {
             material,
             program: program_id,
         }))
@@ -540,19 +525,15 @@ impl Engine {
         material: MaterialId,
         values: &[(&str, Value)],
     ) -> Result<(), Error> {
-        let entry = self.materials.get(material)?;
+        let entry = self.state.materials.get(material)?;
         self.renderer.try_update_parameters(&entry.material, values)
     }
     pub fn material_program(&self, material: MaterialId) -> Result<ProgramId, Error> {
-        Ok(self.materials.get(material)?.program)
+        Ok(self.state.materials.get(material)?.program)
     }
     /// Releases the material once no object uses it.
     pub fn remove_material(&mut self, material: MaterialId) -> Result<(), Error> {
-        self.materials.get(material)?;
-        if self.batch_keys.keys().any(|(_, m)| *m == material) {
-            return Err(Error::InvalidInput("material is still used by objects"));
-        }
-        self.materials.remove(material).map(drop)
+        self.state.remove_material(material).map(drop)
     }
 
     /// Uploads a prepared HDR environment (RLE1/RLE2, `renderlab_asset::environment`) for
@@ -565,11 +546,11 @@ impl Engine {
         let map = self.admit("environment upload admission timed out", |r| {
             r.try_upload_environment(data)
         })?;
-        Ok(self.environments.insert(map))
+        Ok(self.state.environments.insert(map))
     }
     /// The renderer keeps a selected sky map alive until the sky changes.
     pub fn remove_environment(&mut self, environment: EnvironmentId) -> Result<(), Error> {
-        self.environments.remove(environment).map(drop)
+        self.state.remove_environment(environment).map(drop)
     }
 
     /// Uploads a prepared asset (`renderlab_asset::decode` of a cooked `.rla`): its
@@ -619,7 +600,7 @@ impl Engine {
                 self.renderer
                     .set_indirect_geometry(&mesh, &positions, &indices)?;
             }
-            flat.push((self.meshes.insert(MeshEntry::Static(mesh)), material));
+            flat.push((self.state.meshes.insert(MeshEntry::Static(mesh)), material));
         }
         let mut next = flat.iter();
         for mesh in &asset.meshes {
@@ -663,12 +644,12 @@ impl Engine {
         let mesh = self.admit("skinned mesh upload admission timed out", |r| {
             r.try_upload_skinned_mesh(primitive, influences, joint_count)
         })?;
-        Ok(self.meshes.insert(MeshEntry::Skinned(mesh)))
+        Ok(self.state.meshes.insert(MeshEntry::Skinned(mesh)))
     }
     /// Poses a skinned mesh with mesh-local joint matrices, uploaded with the next frame:
     /// `AnimationPose::joint_palette` gives them from a cooked clip (`ClipPlayer`).
     pub fn set_joint_palette(&mut self, mesh: MeshId, palette: &[Mat4]) -> Result<(), Error> {
-        match self.meshes.get_mut(mesh)? {
+        match self.state.meshes.get_mut(mesh)? {
             MeshEntry::Skinned(skinned) => skinned.set_joint_palette(palette),
             MeshEntry::Static(_) => Err(Error::InvalidInput("mesh is not skinned")),
         }
@@ -678,47 +659,7 @@ impl Engine {
     /// need) and one posable mesh per skinned primitive of each binding. Spawn objects from
     /// the returned meshes; its static meshes and placements are not added.
     pub fn add_skinned_asset(&mut self, asset: &SkinnedAsset) -> Result<SkinnedHandles, Error> {
-        let mut handles = SkinnedHandles::default();
-        for texture in &asset.geometry.textures {
-            handles.textures.push(self.create_texture(texture.clone())?);
-        }
-        for m in &asset.geometry.materials {
-            let desc = MaterialDesc {
-                double_sided: true,
-                ..asset_material(m, &handles.textures)?
-            };
-            handles.materials.push(self.create_material(&desc)?);
-        }
-        for binding in &asset.bindings {
-            let missing = Error::InvalidInput("skinned binding names a missing mesh or skin");
-            let joints = asset
-                .skins
-                .get(binding.skin as usize)
-                .ok_or(missing)?
-                .joints
-                .len();
-            let mesh = asset
-                .geometry
-                .meshes
-                .get(binding.mesh as usize)
-                .ok_or(Error::InvalidInput("skinned binding names a missing mesh"))?;
-            let mut parts = Vec::with_capacity(mesh.primitives.len());
-            for (p, primitive) in mesh.primitives.iter().enumerate() {
-                let influences = asset
-                    .influences
-                    .get(binding.mesh as usize)
-                    .and_then(|m| m.get(p))
-                    .and_then(Option::as_ref)
-                    .ok_or(Error::InvalidInput("skinned primitive has no influences"))?;
-                let id = self.create_skinned_mesh(primitive, influences, joints as u32)?;
-                let material = *handles.materials.get(primitive.material as usize).ok_or(
-                    Error::InvalidInput("skinned primitive names a missing material"),
-                )?;
-                parts.push((id, material));
-            }
-            handles.bindings.push(parts);
-        }
-        Ok(handles)
+        Scene::add_skinned_asset(self, asset)
     }
 
     // ---- Particles ----
@@ -735,11 +676,11 @@ impl Engine {
                 "pass an emitter's sprite as a TextureId",
             ));
         }
-        let texture = sprite.map(|t| self.textures.get(t)).transpose()?;
+        let texture = sprite.map(|t| self.state.textures.get(t)).transpose()?;
         let emitter = self
             .renderer
             .try_create_emitter(&EmitterDescriptor { texture, ..*desc })?;
-        Ok(self.emitters.insert(emitter))
+        Ok(self.state.emitters.insert(emitter))
     }
     /// Changes a live emitter; its particles continue. Its capacity and whether it has a
     /// sprite must stay the same.
@@ -754,18 +695,13 @@ impl Engine {
                 "pass an emitter's sprite as a TextureId",
             ));
         }
-        let texture = sprite.map(|t| self.textures.get(t)).transpose()?;
-        let handle = self.emitters.get(emitter)?;
+        let texture = sprite.map(|t| self.state.textures.get(t)).transpose()?;
+        let handle = self.state.emitters.get(emitter)?;
         self.renderer
             .try_update_emitter(handle, &EmitterDescriptor { texture, ..*desc })
     }
     pub fn remove_emitter(&mut self, emitter: EmitterId) -> Result<(), Error> {
-        self.emitters.remove(emitter).map(drop)
-    }
-    /// Particle simulation time per rendered frame, in seconds (default 1/60). Set it to
-    /// the game's frame time; zero freezes particles.
-    pub fn set_particle_step(&mut self, seconds: f32) -> Result<(), Error> {
-        self.renderer.set_particle_step(seconds)
+        self.state.remove_emitter(emitter).map(drop)
     }
 
     // ---- Objects ----
@@ -778,71 +714,21 @@ impl Engine {
         material: MaterialId,
         transform: Mat4,
     ) -> Result<ObjectId, Error> {
-        self.meshes.get(mesh)?;
-        self.materials.get(material)?;
-        if !transform.is_finite() {
-            return Err(Error::InvalidInput("object transform must be finite"));
-        }
-        let batch = match self.batch_keys.get(&(mesh, material)) {
-            Some(&batch) => batch,
-            None => {
-                let batch = self.batches.insert(Batch {
-                    mesh,
-                    material,
-                    models: Vec::new(),
-                    objects: Vec::new(),
-                    instances: None,
-                });
-                self.batch_keys.insert((mesh, material), batch);
-                batch
-            }
-        };
-        let entry = self.batches.get_mut(batch)?;
-        if entry.models.len() >= self.limits.max_instances as usize {
-            return Err(Error::InvalidInput(
-                "objects per mesh-material pair exceed Limits::max_instances",
-            ));
-        }
-        let slot = entry.models.len();
-        let object = self.objects.insert(ObjectEntry { batch, slot });
-        entry.models.push(transform);
-        entry.objects.push(object);
-        entry.instances = None;
-        Ok(object)
+        self.state
+            .spawn(mesh, material, transform, self.limits.max_instances)
     }
     /// Moves an object: a transform write on the next frame, no reallocation.
     pub fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error> {
-        let &ObjectEntry { batch, slot } = self.objects.get(object)?;
-        let entry = self.batches.get_mut(batch)?;
-        if let Some(instances) = &mut entry.instances {
-            instances.set(slot, transform)?;
-        } else if !transform.is_finite() {
-            return Err(Error::InvalidInput("object transform must be finite"));
-        }
-        entry.models[slot] = transform;
-        Ok(())
+        self.state.set_transform(object, transform)
     }
     pub fn transform(&self, object: ObjectId) -> Result<Mat4, Error> {
-        let entry = self.objects.get(object)?;
-        Ok(self.batches.get(entry.batch)?.models[entry.slot])
+        self.state.transform(object)
     }
     pub fn despawn(&mut self, object: ObjectId) -> Result<(), Error> {
-        let ObjectEntry { batch, slot } = self.objects.remove(object)?;
-        let entry = self.batches.get_mut(batch)?;
-        entry.models.swap_remove(slot);
-        entry.objects.swap_remove(slot);
-        entry.instances = None;
-        if let Some(&moved) = entry.objects.get(slot) {
-            self.objects.get_mut(moved)?.slot = slot;
-        }
-        if entry.objects.is_empty() {
-            let Batch { mesh, material, .. } = self.batches.remove(batch)?;
-            self.batch_keys.remove(&(mesh, material));
-        }
-        Ok(())
+        self.state.despawn(object)
     }
     pub fn object_count(&self) -> usize {
-        self.objects.len()
+        self.state.object_count()
     }
 
     // ---- Decals ----
@@ -862,156 +748,157 @@ impl Engine {
 
     /// Sets or removes the sun, the scene's one shadowed directional light.
     pub fn set_sun(&mut self, sun: Option<Sun>) -> Result<(), Error> {
-        let previous = std::mem::replace(&mut self.sun, sun);
-        self.apply_lighting().inspect_err(|_| self.sun = previous)
+        let previous = std::mem::replace(&mut self.state.sun, sun);
+        self.apply_lighting()
+            .inspect_err(|_| self.state.sun = previous)
     }
     pub fn sun(&self) -> Option<Sun> {
-        self.sun
+        self.state.sun
     }
     /// Replaces the local lights (point and spot). The most important lights shadow
     /// automatically; `source_radius` sets their penumbra size (zero keeps hard shadows).
     pub fn set_lights(&mut self, lights: &[Light]) -> Result<(), Error> {
-        let previous = std::mem::replace(&mut self.lights, lights.to_vec());
+        let previous = std::mem::replace(&mut self.state.lights, lights.to_vec());
         self.apply_lighting()
-            .inspect_err(|_| self.lights = previous)
+            .inspect_err(|_| self.state.lights = previous)
     }
     pub fn lights(&self) -> &[Light] {
-        &self.lights
+        &self.state.lights
     }
     pub fn set_sky(&mut self, sky: Sky) -> Result<(), Error> {
-        let previous = std::mem::replace(&mut self.sky, sky);
-        self.apply_lighting().inspect_err(|_| self.sky = previous)
+        let previous = std::mem::replace(&mut self.state.sky, sky);
+        self.apply_lighting()
+            .inspect_err(|_| self.state.sky = previous)
     }
     pub fn sky(&self) -> Sky {
-        self.sky
+        self.state.sky
     }
     pub fn set_settings(&mut self, settings: Settings) -> Result<(), Error> {
         let settings = settings::ablated(settings);
-        if settings == self.settings {
+        if settings == self.state.settings {
             return Ok(());
         }
-        settings::atmosphere(self.sky, &settings).validate()?;
-        settings::apply(&mut self.renderer, self.path, &settings)?;
-        self.settings = settings;
-        // Exposure and the view-path media live with the lighting and atmosphere.
+        settings::atmosphere(self.state.sky, &settings).validate()?;
+        // Validate before touching the renderer (docs/api.md): a rejected sky_light must
+        // leave the stored settings unchanged, or later set_sun/set_sky/light edits fail.
+        if !(settings.sky_light.is_finite() && settings.sky_light >= 0.0) {
+            return Err(Error::InvalidInput(
+                "sky light must be finite and nonnegative",
+            ));
+        }
+        settings::apply(&mut self.renderer, &settings)?;
+        self.state.settings = settings;
+        // Views' looks depend on the settings (temporal reconstruction): reapply on render.
+        for view in &mut self.views {
+            view.applied = false;
+        }
+        // The view-path media live with the lighting and atmosphere.
         self.apply_lighting()
     }
     pub fn settings(&self) -> Settings {
-        self.settings
-    }
-    /// Sets or clears the post pass's display-linear 3D colour LUT (PP1), applied at
-    /// `Settings::post.lut_strength`.
-    pub fn set_colour_lut(&mut self, lut: Option<ColourLut>) -> Result<(), Error> {
-        self.renderer.set_colour_lut(lut)
+        self.state.settings
     }
     /// Publishes the sun, lights, sky and exposure. Everything is validated before the
     /// renderer changes, so a rejected call leaves the previous lighting in place.
     fn apply_lighting(&mut self) -> Result<(), Error> {
-        let (lighting, shadows) =
-            settings::lighting(self.sun, &self.lights, self.sky, self.settings.exposure)?;
-        let atmosphere = settings::atmosphere(self.sky, &self.settings);
+        let (lighting, shadows) = settings::lighting(
+            self.state.sun,
+            &self.state.lights,
+            self.state.sky,
+            self.selected_exposure(),
+        )?;
+        let atmosphere = settings::atmosphere(self.state.sky, &self.state.settings);
         atmosphere.validate()?;
-        let (map, parameters) = match self.sky {
-            Sky::Atmosphere(_) | Sky::Uniform(_) => (None, EnvironmentParameters::default()),
+        let (map, parameters) = match self.state.sky {
+            Sky::Atmosphere(_) => {
+                let sky_light = self.state.settings.sky_light;
+                if !(sky_light.is_finite() && sky_light >= 0.0) {
+                    return Err(Error::InvalidInput(
+                        "sky light must be finite and nonnegative",
+                    ));
+                }
+                // The atmosphere's procedural environment lights at this intensity; its
+                // drawn sky does not read it.
+                let parameters = EnvironmentParameters {
+                    intensity: sky_light,
+                    ..EnvironmentParameters::default()
+                };
+                (None, parameters)
+            }
+            Sky::Uniform(_) => (None, EnvironmentParameters::default()),
             Sky::Map {
                 map,
                 rotation_y,
                 intensity,
-                ..
+                background,
             } => {
                 if !rotation_y.is_finite() || !intensity.is_finite() || intensity < 0.0 {
                     return Err(Error::InvalidInput(
                         "sky rotation must be finite and intensity finite and nonnegative",
                     ));
                 }
+                if let Background::ScaledSky(scale) = background
+                    && !(scale.is_finite() && scale >= 0.0)
+                {
+                    return Err(Error::InvalidInput(
+                        "sky background scale must be finite and nonnegative",
+                    ));
+                }
                 let parameters = EnvironmentParameters {
                     rotation_y_radians: rotation_y,
                     intensity,
                 };
-                (Some(self.environments.get(map)?), parameters)
+                (Some(self.state.environments.get(map)?), parameters)
             }
         };
         self.renderer
             .set_lighting_and_shadows(&lighting, &shadows)?;
         self.renderer.set_environment(map, parameters)?;
+        let background = match self.state.sky {
+            Sky::Map { background, .. } => Some(background),
+            _ => None,
+        };
         self.renderer.set_visible_environment(matches!(
-            self.sky,
-            Sky::Map {
-                background: Background::Sky,
-                ..
-            }
+            background,
+            Some(Background::Sky | Background::ScaledSky(_))
         ));
+        self.renderer
+            .set_visible_environment_scale(match background {
+                Some(Background::ScaledSky(scale)) => Some(scale),
+                _ => None,
+            });
         self.renderer.set_atmosphere(atmosphere)
     }
 
     // ---- Frames ----
 
-    /// Creates or resizes the engine's own colour output (for offscreen rendering and
-    /// [`capture`](Self::capture)). Windowed games can use `render_to` instead.
-    pub fn resize(&mut self, width: u32, height: u32) -> Result<(), Error> {
-        if width == 0 || height == 0 {
-            return Err(Error::InvalidInput("output extent must be nonzero"));
-        }
-        if self
-            .output
-            .as_ref()
-            .is_some_and(|t| (t.width(), t.height()) == (width, height))
-        {
-            return Ok(());
-        }
-        self.output = Some(self.device().create_texture(&wgpu::TextureDescriptor {
-            label: Some("renderlab engine output"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        }));
-        Ok(())
-    }
-    /// The engine's own output, after `resize`.
-    pub fn output(&self) -> Option<&wgpu::Texture> {
-        self.output.as_ref()
-    }
-    /// Renders the scene from `camera` into the engine's output.
-    pub fn render(&mut self, camera: &Camera) -> Result<FrameReport, Error> {
-        let output = self.output.clone().ok_or(Error::InvalidInput(
-            "call Engine::resize before Engine::render",
-        ))?;
-        self.render_to(&output, camera)
-    }
-    /// Renders the scene from `camera` into `color`: a single-sample 2D render attachment
-    /// in the engine's output format, such as a surface texture (then call `present`).
-    /// The camera's aspect follows `color`.
-    pub fn render_to(
+    /// Renders the renderer's selected view into `color` with the scene's batches.
+    fn render_selected(
         &mut self,
         color: &wgpu::Texture,
         camera: &Camera,
+        mode: ViewMode,
     ) -> Result<FrameReport, Error> {
-        let ids: Vec<_> = self.batches.ids().collect();
+        let ids: Vec<_> = self.state.batches.ids().collect();
         for id in ids {
-            let batch = self.batches.get(id)?;
+            let batch = self.state.batches.get(id)?;
             if batch.instances.is_none() {
                 let models = batch.models.clone();
                 let instances = self.admit("instance upload admission timed out", |r| {
                     r.try_upload_instances(&models)
                 })?;
-                self.batches.get_mut(id)?.instances = Some(instances);
+                self.state.batches.get_mut(id)?.instances = Some(instances);
             }
         }
         let Self {
             renderer,
-            meshes,
-            materials,
-            batches,
+            state:
+                State {
+                    meshes,
+                    materials,
+                    batches,
+                    ..
+                },
             events,
             ..
         } = self;
@@ -1024,9 +911,7 @@ impl Engine {
         }
         let deadline = Instant::now() + ADMISSION;
         loop {
-            if let Some(report) =
-                renderer.try_render_view(color, camera, &mut draws, ViewMode::Lit)?
-            {
+            if let Some(report) = renderer.try_render_view(color, camera, &mut draws, mode)? {
                 return Ok(report);
             }
             if Instant::now() > deadline {
@@ -1036,16 +921,7 @@ impl Engine {
             std::thread::yield_now();
         }
     }
-    /// Starts the next frame without history: a camera cut or teleport. Temporal
-    /// reconstruction and volumetric fog history restart, and streamed textures verify the
-    /// new view; the GI cache refills its newly seen cells over a few frames on its own.
-    /// (Fog resets here, not in `cut_reconstruction`, which transmission changes also call.)
-    pub fn cut(&mut self) {
-        self.renderer.cut_reconstruction();
-        self.renderer.reset_atmosphere_history();
-        self.renderer.mark_camera_cut();
-    }
-    /// Presents a surface texture rendered with `render_to`.
+    /// Presents a surface texture rendered with `render_view_to`.
     pub fn present(&self, frame: wgpu::SurfaceTexture) -> Result<(), Error> {
         self.renderer.present(frame)
     }
@@ -1054,30 +930,6 @@ impl Engine {
         stash(&mut self.events, self.renderer.poll()?);
         Ok(std::mem::take(&mut self.events))
     }
-    /// Reads back the engine's output after the last frame (blocking). Needs an RGBA8
-    /// output format.
-    pub fn capture(&mut self) -> Result<Image, Error> {
-        let output = self.output.clone().ok_or(Error::InvalidInput(
-            "call Engine::resize before Engine::capture",
-        ))?;
-        let mut capture = self.admit("capture admission timed out", |r| r.try_capture(&output))?;
-        let deadline = Instant::now() + ADMISSION;
-        loop {
-            stash(&mut self.events, self.renderer.poll()?);
-            if let Some(rgba8) = capture.try_read()? {
-                return Ok(Image {
-                    width: output.width(),
-                    height: output.height(),
-                    rgba8,
-                });
-            }
-            if Instant::now() > deadline {
-                return Err(Error::InvalidInput("capture readback timed out"));
-            }
-            std::thread::yield_now();
-        }
-    }
-
     /// Retries a bounded renderer admission while the GPU drains, keeping its events.
     /// `timeout` is the error after `ADMISSION`.
     fn admit<T>(

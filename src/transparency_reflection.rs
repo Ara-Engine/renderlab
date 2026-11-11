@@ -2,7 +2,7 @@
 //! frame's geometry/material tables and the opaque program's hit shading.
 use super::*;
 
-pub(super) struct GlassReflections {
+pub(in crate::renderer) struct GlassReflections {
     pub position: Depth,
     pub normal: Depth,
     pub geometric: Depth,
@@ -26,7 +26,10 @@ pub(super) fn key(head: &str, program: &str, parameters: bool) -> [u8; 32] {
     hash.update([u8::from(parameters)]);
     hash.finalize().into()
 }
-pub(super) fn source(head: &str, program: &str, parameters: bool) -> String {
+/// The `tp_reflect` kernel's module: `program`'s traced hit shading composed on `head`
+/// (`transparent_reflection_head`), with the glass lobe read from the lobe pass's targets
+/// instead of a camera hit. The wgpu renderer and the ara-gpu backend both compile it.
+pub(crate) fn source(head: &str, program: &str, parameters: bool) -> String {
     let program = crate::program::glass_hit_program(program);
     let mut s = crate::program::compose(head, &program, crate::program::Stage::Traced, parameters)
         .source
@@ -75,8 +78,14 @@ fn rl_glass_parameter_batch(batch:u32)->u32 {
 }
 impl Renderer {
     pub(crate) fn tp_reload_pipeline(&self, program: u64) -> Option<&wgpu::ComputePipeline> {
-        self.primary.as_ref().filter(|p| p.program == program)?;
-        self.transparency.reflections.as_ref().map(|r| &*r.pipeline)
+        self.view
+            .primary
+            .as_ref()
+            .filter(|p| p.program == program)?;
+        self.view
+            .transparency_reflections
+            .as_ref()
+            .map(|r| &*r.pipeline)
     }
 
     pub(crate) fn tp_reload_recipe(
@@ -104,8 +113,8 @@ impl Renderer {
         pipeline: Owned<wgpu::ComputePipeline>,
     ) {
         if let Some(reflections) = self
-            .transparency
-            .reflections
+            .view
+            .transparency_reflections
             .as_mut()
             .filter(|r| *r.pipeline == *previous)
         {
@@ -121,7 +130,7 @@ impl Renderer {
                 "glass reflections require three colour attachments and 32 bytes per sample",
             ));
         }
-        let primary = self.primary.as_ref().unwrap();
+        let primary = self.view.primary.as_ref().unwrap();
         let program = self.program_slot(primary.program);
         let head = primary_ray_gpu::transparent_reflection_head(&self.source)?;
         let source = source(&head, &program.source, program.layout.is_some());
@@ -203,7 +212,15 @@ impl Renderer {
                 &self.lighting.bindings,
             ],
         );
-        let module = self.tp_module("TP2 glass reflection", &source);
+        // Hits run program text: checked, as every program module (P-SPLIT).
+        let module = self.ledger.own(
+            self.device
+                .create_program_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("TP2 glass reflection"),
+                    source: wgpu::ShaderSource::Wgsl(source.as_str().into()),
+                }),
+            ResourceKind::ShaderModule,
+        );
         let pipeline = self.tp_compute(
             "TP2 glass reflection",
             &pipeline_layout,

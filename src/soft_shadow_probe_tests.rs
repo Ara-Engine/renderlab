@@ -102,7 +102,7 @@ fn pipeline(r: &Renderer, source: String) -> Owned<wgpu::ComputePipeline> {
         label: Some("test-only 8-direction prefix"),
         source: wgpu::ShaderSource::Wgsl(source.into()),
     });
-    let p = r.primary.as_ref().unwrap().fresh_pipeline(
+    let p = r.view.primary.as_ref().unwrap().fresh_pipeline(
         &r.device,
         &r.ledger,
         &module,
@@ -120,7 +120,7 @@ fn dispatch(
     tile: [u32; 2],
     stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
 ) {
-    let primary = r.primary.as_ref().unwrap();
+    let primary = r.view.primary.as_ref().unwrap();
     let texture = &primary.targets.as_ref().unwrap().hit.texture;
     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
         label: Some("test-only 8-ray cost probe"),
@@ -239,7 +239,7 @@ fn gpu_soft_shadow_cost_probe() {
         }
         expected = Some(counts);
     }
-    let soft = r.shadows.settings.clone();
+    let soft = r.view.shadows.settings.clone();
     let mut hard = soft.clone();
     hard.directional_disk_angle = 0.0;
     let mut pending = std::collections::HashMap::new();

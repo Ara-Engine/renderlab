@@ -3,7 +3,7 @@
 use renderlab::{
     IndirectLookup, IndirectSettings, Reconstruction, ReconstructionShadowBudget, SoftShadows,
     VirtualLookup, VirtualShadowSettings,
-    engine::{Engine, Light, Quality, RenderPath, RenderScale, Settings},
+    engine::{Engine, Light, Quality, RenderPath, RenderScale, Settings, ViewLook},
 };
 
 /// Bisect switches (`--diag KEY=VALUE`; P-FLAT, docs/p-flat.md). Settings-level keys edit the
@@ -60,6 +60,7 @@ impl Diag {
                 "gi-level-blend" => indirect.level_blend = v.parse()?,
                 "gi-gather-cells" => indirect.gather_cells = v.parse()?,
                 "gi-gather-stride" => indirect.gather_stride = v.parse()?,
+                "gi-light-rays" => indirect.near_light_rays = v.parse()?,
                 key if key.starts_with("tr-") => {
                     let r = d.reconstruction.get_or_insert_with(Reconstruction::default);
                     match key {
@@ -84,12 +85,15 @@ impl Diag {
                                 "exact" => VirtualLookup::Exact,
                                 "map" => VirtualLookup::Map,
                                 "hybrid" => VirtualLookup::Hybrid,
+                                "disk" => VirtualLookup::Disk,
                                 _ => VirtualLookup::Surface,
                             }
                         }
                         "vsm-walk-cap" => s.walk_cap = v.parse()?,
                         "vsm-refresh" => s.refresh = v.parse()?,
                         "vsm-directions" => s.directions = v.parse()?,
+                        "vsm-march-samples" => s.march_samples = v.parse()?,
+                        "vsm-caster-error" => s.caster_error_texels = v.parse()?,
                         other => return Err(format!("unknown diag key {other}").into()),
                     }
                 }
@@ -124,25 +128,29 @@ impl Diag {
         Ok(d)
     }
     pub fn settings(&self, mut s: Settings) -> Settings {
-        if let Some(quality) = self.quality {
-            s.quality = quality;
-        }
         if let Some(aerial) = self.aerial_perspective {
             s.aerial_perspective = aerial;
         }
         if self.height_fog == Some(false) {
             s.height_fog = None;
         }
-        if let Some(r) = self.reflection_max_roughness {
-            s.reflections.max_roughness = r;
-        }
         s
+    }
+    pub fn look(&self, mut look: ViewLook) -> ViewLook {
+        if let Some(quality) = self.quality {
+            look.quality = quality;
+        }
+        if let Some(r) = self.reflection_max_roughness {
+            look.reflections.max_roughness = r;
+        }
+        look
     }
     pub fn apply(
         &self,
         engine: &mut Engine,
         path: RenderPath,
         scale: RenderScale,
+        quality: Quality,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let settings = engine.settings();
         let r = engine.renderer_mut();
@@ -169,7 +177,7 @@ impl Diag {
             }
             RenderPath::NonRt => {
                 if let Some(mut vsm) = self.virtual_shadows {
-                    if settings.quality == Quality::Reference {
+                    if quality == Quality::Reference {
                         vsm.lookup = VirtualLookup::Exact;
                     }
                     r.set_virtual_shadow_settings(vsm)?;

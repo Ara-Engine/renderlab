@@ -123,7 +123,7 @@ fn gpu_skinned_streams_history_and_paths() {
             }
             r.test_drain("skin oracle frame");
             assert_eq!(
-                r.reconstruction_state.as_ref().unwrap().reset,
+                r.view.reconstruction_state.as_ref().unwrap().plan.reset,
                 frame == 0,
                 "animated TR1 must continue after the first frame on rt={rt}"
             );

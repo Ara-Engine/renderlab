@@ -8,6 +8,9 @@
 //! Stages that the GPU overlaps share their boundary, so the stage times always sum to the
 //! span. Embedders need no change: harnesses read the file (tools/showcase/showcase.py).
 //! Without the variable nothing is created and every call returns at once.
+//! `RENDERLAB_PASS_LOG_DETAIL` also keeps a stage's parts (names with a dot, such as
+//! `sun_shadow.raster`); without it those marks are skipped, so the part's time stays in
+//! the stage before it.
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
@@ -34,6 +37,8 @@ pub(crate) struct PassTimeline {
     next: usize,
     frame: u64,
     period: f64,
+    /// Whether dotted part names are marked (`RENDERLAB_PASS_LOG_DETAIL`).
+    detail: bool,
     log: std::io::BufWriter<std::fs::File>,
 }
 
@@ -76,6 +81,7 @@ impl PassTimeline {
             next: 0,
             frame: 0,
             period: f64::from(queue.get_timestamp_period()),
+            detail: std::env::var_os("RENDERLAB_PASS_LOG_DETAIL").is_some(),
             log: std::io::BufWriter::new(log),
         })
     }
@@ -98,6 +104,9 @@ impl PassTimeline {
     /// Starts stage `name` at this point of `encoder`'s work.
     pub(crate) fn mark(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         let Some(i) = self.current else { return };
+        if name.contains('.') && !self.detail {
+            return;
+        }
         let entry = &mut self.frames[i];
         if entry.names.len() + 1 >= MARKS as usize {
             return;

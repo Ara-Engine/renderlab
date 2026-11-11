@@ -51,12 +51,20 @@ pub(crate) struct VisibilityUpdate {
     pub partial_tests: u64,
 }
 
+/// One view's last successfully submitted placement, independent of pending/coalesced edits.
+struct Motion {
+    view: u64,
+    previous: Vec<Mat4>,
+    frame: u64,
+    edits: u64,
+}
+
 pub(crate) struct InstanceState {
     pub models: Vec<Mat4>,
-    /// Last successfully submitted placement, independent of pending/coalesced edits.
-    previous: Vec<Mat4>,
-    submitted_frame: Option<u64>,
-    motion_dirty: bool,
+    /// Per view, the placement it last submitted (motion vectors' previous frame).
+    motion: Vec<Motion>,
+    /// Counts accepted edits, so a view knows whether `models` changed since it submitted.
+    edits: u64,
     pub normals: Vec<crate::normal::NormalTransform>,
     pub invalid_normals: usize,
     dirty: Vec<u64>,
@@ -87,9 +95,8 @@ impl InstanceState {
         let invalid_normals = normals.iter().filter(|n| !n.valid()).count();
         Self {
             models: models.to_vec(),
-            previous: models.to_vec(),
-            submitted_frame: None,
-            motion_dirty: false,
+            motion: Vec::new(),
+            edits: 0,
             normals,
             invalid_normals,
             dirty: vec![0; models.len().div_ceil(64)],
@@ -116,7 +123,7 @@ impl InstanceState {
         self.invalid_normals += usize::from(!normal.valid());
         self.normals[slot] = normal;
         self.models[slot] = model;
-        self.motion_dirty = true;
+        self.edits += 1;
         let bit = 1 << (slot % 64);
         if self.dirty[slot / 64] & bit == 0 {
             self.dirty[slot / 64] |= bit;
@@ -124,20 +131,32 @@ impl InstanceState {
         }
         Ok(())
     }
-    pub fn previous_models(&self, previous_frame: u64) -> &[Mat4] {
-        if self.submitted_frame == Some(previous_frame) {
-            &self.previous
-        } else {
-            &self.models
+    /// The placement `view` submitted in its frame `previous_frame`, or the current one when
+    /// that frame did not draw these instances (no surface, so no motion).
+    pub fn previous_models(&self, view: u64, previous_frame: u64) -> &[Mat4] {
+        match self.motion.iter().find(|m| m.view == view) {
+            Some(m) if m.frame == previous_frame => &m.previous,
+            _ => &self.models,
         }
     }
-    /// Called only after a successful render submission; backpressure keeps history.
-    pub fn motion_submitted(&mut self, frame: u64) {
-        if self.motion_dirty || self.submitted_frame.is_none() {
-            self.previous.clone_from(&self.models);
-            self.motion_dirty = false;
+    /// Called only after `view` successfully submitted `frame`; backpressure keeps history.
+    pub fn motion_submitted(&mut self, view: u64, frame: u64) {
+        let edits = self.edits;
+        match self.motion.iter_mut().find(|m| m.view == view) {
+            Some(m) => {
+                if m.edits != edits {
+                    m.previous.clone_from(&self.models);
+                    m.edits = edits;
+                }
+                m.frame = frame;
+            }
+            None => self.motion.push(Motion {
+                view,
+                previous: self.models.clone(),
+                frame,
+                edits,
+            }),
         }
-        self.submitted_frame = Some(frame);
     }
     pub fn dirty_runs(&self) -> impl Iterator<Item = Range<usize>> + '_ {
         let mut slots = self
@@ -286,19 +305,39 @@ mod tests {
         let b = Mat4::from_rotation_y(0.7);
         // An edit before the first render has no invented initial velocity.
         s.set(0, a).unwrap();
-        assert_eq!(s.previous_models(0), s.models);
-        s.motion_submitted(1);
+        assert_eq!(s.previous_models(0, 0), s.models);
+        s.motion_submitted(0, 1);
         s.set(0, b).unwrap();
         s.clear_dirty(); // upload is not submission
-        assert_eq!(s.previous_models(1), [a, Mat4::IDENTITY]);
+        assert_eq!(s.previous_models(0, 1), [a, Mat4::IDENTITY]);
         s.set(0, Mat4::IDENTITY).unwrap();
-        assert_eq!(s.previous_models(1), [a, Mat4::IDENTITY]);
+        assert_eq!(s.previous_models(0, 1), [a, Mat4::IDENTITY]);
         // An omitted draw has no surface in the immediately previous frame.
-        assert_eq!(s.previous_models(2), s.models);
-        s.motion_submitted(3);
-        assert_eq!(s.previous_models(3), [Mat4::IDENTITY; 2]);
-        s.motion_submitted(4);
-        assert_eq!(s.previous_models(4), [Mat4::IDENTITY; 2]);
+        assert_eq!(s.previous_models(0, 2), s.models);
+        s.motion_submitted(0, 3);
+        assert_eq!(s.previous_models(0, 3), [Mat4::IDENTITY; 2]);
+        s.motion_submitted(0, 4);
+        assert_eq!(s.previous_models(0, 4), [Mat4::IDENTITY; 2]);
+    }
+    #[test]
+    fn each_view_keeps_its_own_previous_placement() {
+        // Two views render each engine frame; the object moves between engine frames.
+        let mut s = InstanceState::new(&[Mat4::IDENTITY]);
+        let [a, b] = [1.0, 2.0].map(|x| Mat4::from_translation(Vec3::X * x));
+        s.motion_submitted(0, 1);
+        s.motion_submitted(1, 2);
+        s.set(0, a).unwrap();
+        // Both views see the move from their own last frame, not from each other's.
+        assert_eq!(s.previous_models(0, 1), [Mat4::IDENTITY]);
+        s.motion_submitted(0, 3);
+        assert_eq!(s.previous_models(1, 2), [Mat4::IDENTITY]);
+        s.motion_submitted(1, 4);
+        s.set(0, b).unwrap();
+        assert_eq!(s.previous_models(0, 3), [a]);
+        s.motion_submitted(0, 5);
+        assert_eq!(s.previous_models(1, 4), [a]);
+        // A view that skipped a frame of these instances sees no motion.
+        assert_eq!(s.previous_models(1, 3), [b]);
     }
     #[test]
     fn edits_validate_before_mutation_and_coalesce_across_words() {

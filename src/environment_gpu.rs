@@ -30,7 +30,7 @@ fn cube(
     );
     let view = ledger.own(
         texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            dimension: Some(wgpu::TextureViewDimension::CubeArray),
             ..Default::default()
         }),
         ResourceKind::TextureView,
@@ -151,6 +151,7 @@ impl Renderer {
                 fresh: false,
                 submission: self.submissions,
                 frame: None,
+                view: None,
                 revision: self.revision,
                 submitted_at: Instant::now(),
             });
@@ -209,7 +210,8 @@ impl Renderer {
         Ok(())
     }
     /// Bounded immediate upload. Busy performs no packing, allocation or queue write.
-    /// Uses textureLoad on RGB32F arrays, without optional float filtering features.
+    /// RGBA32F arrays: specular and diffuse lookups sample their cube-array views with
+    /// hardware filtering (`FLOAT32_FILTERABLE`, part of `RECEIVER_FEATURES`).
     pub fn try_upload_environment(
         &mut self,
         data: &PreparedEnvironment,
@@ -353,7 +355,11 @@ impl Renderer {
                 hash.update(packed);
                 self.queue.write_texture(
                     wgpu::TexelCopyTextureInfo {
-                        origin: wgpu::Origin3d { x: 0, y: 0, z: k as u32 * 6 },
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: k as u32 * 6,
+                        },
                         ..target._texture.as_image_copy()
                     },
                     packed,
@@ -362,7 +368,11 @@ impl Renderer {
                         bytes_per_row: Some(size * 16),
                         rows_per_image: Some(size),
                     },
-                    wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 6 },
+                    wgpu::Extent3d {
+                        width: size,
+                        height: size,
+                        depth_or_array_layers: 6,
+                    },
                 );
                 self.uploads.texture_writes += 1;
                 self.uploads.write_calls += 1;
@@ -431,6 +441,11 @@ impl Renderer {
     /// frames and renderers without a selected map keep the clear colour.
     pub fn set_visible_environment(&mut self, visible: bool) {
         self.environment.visible = visible;
+    }
+    /// The visible sky's radiance scale in place of the lighting's `intensity` (None: the
+    /// same as the lighting, the default), for a sky that lights more or less than it looks.
+    pub fn set_visible_environment_scale(&mut self, scale: Option<f32>) {
+        self.environment.visible_scale = scale.map(|s| s.max(0.0));
     }
     /// Atomic CPU selection. None restores the automatic sky (procedural atmosphere when
     /// enabled, otherwise Lighting::environment). Admitted frames publish changes.

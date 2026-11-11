@@ -29,7 +29,7 @@ struct TxVertex { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f3
 pub(crate) fn api_source() -> &'static str {
     API
 }
-pub(super) fn draw_source(head: &str) -> String {
+pub(crate) fn draw_source(head: &str) -> String {
     format!("{head}{DRAW}")
 }
 pub(crate) fn binding_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
@@ -172,8 +172,11 @@ impl Renderer {
             }
         }
         let key: [u8; 32] = key.finalize().into();
+        // The coloured sun map is scene state: every view's history restarts.
         if self.lighting.transmission.hash != key {
-            self.cut_reconstruction();
+            for view in self.views_mut() {
+                view.cut_reconstruction();
+            }
         }
         self.lighting.transmission.hash = key;
         self.queue
