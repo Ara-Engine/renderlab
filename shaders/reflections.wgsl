@@ -33,6 +33,7 @@ const RL_UNTRACED:f32=0.5;
 const RL_GLOSSY_RAYS:u32=4u;
 const RL_GLOSSY_MAX:u32=16u;
 const RL_RAYS_PER_ROUGHNESS:f32=48.0;
+const RL_GLOSSY_TRACED:u32=16u;
 const RL_FAR:f32=1.0e6;
 
 var<private> rl_specular:vec4<f32>;
@@ -153,8 +154,11 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let width=pixel_angle*length(input.world-input.eye);
     let curvature=2.0*max(length(input.normal_dx),length(input.normal_dy))/max(length(input.normal),1e-30);
     let mirror=rough<RL_MIRROR;
-    let count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
-    let cone_alpha=select(alpha*inverseSqrt(f32(count)),0.0,mirror);
+    // The footprint count sets every cone; the traced count is how many of those strata
+    // this frame takes (P-GLOSSY, docs/p-glossy.md).
+    let footprint=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
+    let count=min(footprint,RL_GLOSSY_TRACED);
+    let cone_alpha=select(alpha*inverseSqrt(f32(footprint)),0.0,mirror);
     let spread=pixel_angle+curvature+2.0*cone_alpha;
     let basis=rl_basis(n);
     let local_v=vec3<f32>(dot(v,basis[0]),dot(v,basis[1]),dot(v,basis[2]));

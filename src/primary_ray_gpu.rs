@@ -2813,6 +2813,14 @@ impl Renderer {
         }
         let refs: Vec<_> = meshes.iter().map(|m| &**m).collect();
         let mut packed = crate::reflection_software::pack(&refs, traced.len());
+        if std::env::var_os("RENDERLAB_GLOSSY_SCREEN").is_some() {
+            eprintln!(
+                "P-GLOSSY software reflections: {} instances, {} meshes, {} bytes",
+                traced.len(),
+                meshes.len(),
+                packed.words.len() * 4
+            );
+        }
         let words = records(&packed.bases);
         packed.words[..words.len()].copy_from_slice(&words);
         let buffer = Buffer::new(

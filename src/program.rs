@@ -95,13 +95,50 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
         .find(|name| head.contains(&format!("var {name}:acceleration_structure;")));
     let traced = lobe && reads && matches!(stage, Stage::Traced | Stage::TracedStreamed);
     match scene.filter(|_| traced) {
-        Some(scene) => (REFLECTION_API.replace("RL_SCENE", scene), true),
+        Some(scene) => (glossy_screen(REFLECTION_API.replace("RL_SCENE", scene)), true),
         // M7-R1n: non-RT heads that declare the software geometry trace it instead.
         None if traced && head.contains(SOFTWARE_REFLECTION_GEOMETRY) => {
-            (software_reflection_api(), true)
+            (glossy_screen(software_reflection_api()), true)
         }
         None => (REFLECTION_STUB.to_owned(), false),
     }
+}
+
+/// P-GLOSSY measurement screens (scaffolding, docs/p-glossy.md): `RENDERLAB_GLOSSY_SCREEN`
+/// lists edits to the composed reflection block. `traced=N` traces N of the footprint's
+/// strata; `cone=traced` recomputes the cone from the traced count (diagnostic);
+/// `noshadow` makes hit lights unshadowed; `noshade` replaces hit shading by the sky.
+/// Unset, the block is unchanged.
+fn glossy_screen(mut api: String) -> String {
+    let Ok(list) = std::env::var("RENDERLAB_GLOSSY_SCREEN") else {
+        return api;
+    };
+    let mut edit = |from: &str, to: &str| {
+        assert_eq!(api.matches(from).count(), 1, "glossy screen seam {from:?}");
+        api = api.replacen(from, to, 1);
+    };
+    for item in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        match item.split_once('=') {
+            Some(("traced", n)) => edit(
+                "const RL_GLOSSY_TRACED:u32=16u;",
+                &format!("const RL_GLOSSY_TRACED:u32={}u;", n.parse::<u32>().unwrap()),
+            ),
+            Some(("cone", "traced")) => edit(
+                "alpha*inverseSqrt(f32(footprint))",
+                "alpha*inverseSqrt(f32(count))",
+            ),
+            None if item == "noshadow" => edit(
+                "fn rl_hit_shadow(light:Light,receiver:Receiver,l:vec3<f32>)->f32 {\n",
+                "fn rl_hit_shadow(light:Light,receiver:Receiver,l:vec3<f32>)->f32 {\n    if true {return 1.0;}\n",
+            ),
+            None if item == "noshade" => edit(
+                "            let hs=surface(h.input);\n            radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n",
+                "            radiance=select(vec3<f32>(0.0),rl_sky(d,cone_alpha),h.visible);\n",
+            ),
+            _ => panic!("unknown RENDERLAB_GLOSSY_SCREEN item {item:?}"),
+        }
+    }
+    api
 }
 // ---- end of M7-R1 reflections ----
 
