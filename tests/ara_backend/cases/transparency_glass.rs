@@ -268,3 +268,76 @@ fn programmable_transparent_glass_native_replay_against_cpu() -> Result<()> {
     gpu.assert_clean()?;
     Ok(())
 }
+
+/// The standard program as glass on a ray-traced renderer's head. Its fragment stage
+/// traces the pane's own sun ray against the frame's scene, so its interface names the
+/// scene and no sun map, and it is still one vertex and one fragment stage whose SPIR-V
+/// validates and whose pipeline compiles natively.
+#[test]
+fn traced_glass_reflects_validates_and_compiles() -> Result<()> {
+    let path = root("traced-glass");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let program = transparency_glass::traced_program(renderlab::STANDARD_PROGRAM)?;
+    let key = |binding| InputKey { group: 0, binding };
+    let kind = |binding| {
+        program
+            .inputs()
+            .iter()
+            .find(|i| i.key == key(binding))
+            .map(|i| i.kind)
+    };
+    ensure!(
+        matches!(kind(2), Some(InputKind::AccelerationStructure))
+            && kind(34).is_none()
+            && kind(35).is_none()
+            && matches!(kind(30), Some(InputKind::Buffer { minimum: 336, .. }))
+            && program.inputs().len() == 35,
+        "unexpected traced glass interface: {} inputs",
+        program.inputs().len()
+    );
+    let export = path.join("spirv");
+    let stages = renderlab::backend_ara::cache::emit_spirv_program(&program, &export)?;
+    ensure!(stages.len() == 2, "traced glass is not two stages");
+    let mut queries = 0;
+    for stage in &stages {
+        let bytes = std::fs::read(export.join(&stage.spirv))?;
+        let words: Vec<_> = bytes
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| u32::from_le_bytes(*b))
+            .collect();
+        assert_nonuniform_resources(&words)?;
+        // OpRayQueryInitializeKHR, in the fragment stage alone.
+        let mut at = 5;
+        while at < words.len() {
+            queries += usize::from(words[at] & 0xffff == 4473);
+            at += (words[at] >> 16) as usize;
+        }
+        if let Some(sdk) = std::env::var_os("VULKAN_SDK") {
+            let validator = std::path::PathBuf::from(sdk).join(if cfg!(windows) {
+                "Bin/spirv-val.exe"
+            } else {
+                "bin/spirv-val"
+            });
+            if validator.is_file() {
+                let output = std::process::Command::new(validator)
+                    .args(["--target-env", "vulkan1.3"])
+                    .arg(export.join(&stage.spirv))
+                    .output()?;
+                ensure!(
+                    output.status.success(),
+                    "traced glass SPIR-V: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+            }
+        }
+    }
+    ensure!(queries > 0, "the traced glass stages trace nothing");
+    let glass = transparency_glass::Glass::new(&mut gpu, &cache, &program)?;
+    glass.retire(&mut gpu)?;
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}

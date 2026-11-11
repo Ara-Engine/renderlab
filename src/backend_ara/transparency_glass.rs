@@ -18,6 +18,24 @@ use ara_gpu::{
 pub fn program(material: &str) -> Result<Program> {
     Program::new(Pass::TransparencyGlass, source(material))
 }
+/// The same material on a ray-traced renderer's head: the pane's sun visibility is a ray
+/// its own fragment traces against the frame's scene, not a lookup in the sun map.
+pub fn traced_program(material: &str) -> Result<Program> {
+    let head = crate::hardware_shadows::shader_source(
+        include_str!("../../shaders/scene.wgsl"),
+        crate::SampleCount::One,
+    )
+    .map_err(|e| anyhow::anyhow!("hardware head: {e}"))?;
+    Program::new(
+        Pass::TransparencyGlass,
+        crate::renderer::transparency_gpu::glass_source(
+            &head,
+            true,
+            material,
+            crate::program::declares_parameters(material),
+        ),
+    )
+}
 pub(crate) fn source(material: &str) -> String {
     crate::renderer::transparency_gpu::glass_source(
         include_str!("../../shaders/scene.wgsl"),
