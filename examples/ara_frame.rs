@@ -20,6 +20,12 @@
 //! at this level on both layers (the Ara frame does not chain its hit-based motion
 //! surface yet); bloom, tone and the rest of post are on.
 //!
+//! `--frames N` renders a sequence: pose 0 to N-1 of the fixture's camera path (the
+//! eye moves 0.04 m sideways per pose) through one renderer, so every frame after the
+//! first has history: the previous camera for motion blur, and whatever later
+//! families keep between frames. The same line on either layer writes one summary
+//! per frame; `--compare` then reports every frame.
+//!
 //! ```text
 //! cargo run --example ara_frame -- --backend wgpu --output out/wgpu
 //! cargo run --features backend-ara --example ara_frame -- --backend ara --output out/ara
@@ -52,12 +58,19 @@ fn main() -> Result<(), Failure> {
     let mut atmosphere = renderlab::Atmosphere::off();
     let mut sun_shadows = false;
     let mut traced = false;
+    let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--backend" => backend = args.next(),
             "--output" => output = args.next(),
             "--sun-shadows" => sun_shadows = true,
             "--traced" => (sun_shadows, traced) = (true, true),
+            "--frames" => {
+                frames = args.next().ok_or("--frames N")?.parse()?;
+                if !(1..=240).contains(&frames) {
+                    return Err("--frames 1..=240".into());
+                }
+            }
             "--atmosphere" => {
                 atmosphere = renderlab::Atmosphere {
                     volumetric_fog: None,
@@ -84,26 +97,33 @@ fn main() -> Result<(), Failure> {
             object.double_sided = true;
         }
     }
-    let (hdr, display) = match backend.as_deref() {
-        Some("wgpu") => wgpu_frame(&fixture, size, atmosphere, sun_shadows, traced)?,
-        Some("ara") => ara_frame(
-            &fixture,
-            size,
-            atmosphere,
-            sun_shadows,
-            traced,
-            Path::new(&output),
-        )?,
+    let level = Level {
+        atmosphere,
+        sun_shadows,
+        traced,
+        frames,
+    };
+    let sequence = match backend.as_deref() {
+        Some("wgpu") => wgpu_frame(&fixture, size, level)?,
+        Some("ara") => ara_frame(&fixture, size, level, Path::new(&output))?,
         _ => return Err("--backend wgpu|ara".into()),
     };
     write(
         Path::new(&output),
         size,
-        &hdr,
-        &display,
+        &sequence,
         backend.as_deref().unwrap_or_default(),
-        [atmosphere.active(), sun_shadows, traced],
+        level,
     )
+}
+
+/// What a run renders: which features are on, and how many poses.
+#[derive(Clone, Copy)]
+struct Level {
+    atmosphere: renderlab::Atmosphere,
+    sun_shadows: bool,
+    traced: bool,
+    frames: usize,
 }
 
 /// Post at the traced level: the defaults without motion blur, on both layers.
@@ -120,10 +140,13 @@ type Frame = (Vec<u8>, Vec<u8>);
 fn wgpu_frame(
     fixture: &lighting_fixture::Fixture,
     size: [u32; 2],
-    atmosphere: renderlab::Atmosphere,
-    sun_shadows: bool,
-    traced: bool,
-) -> Result<Frame, Failure> {
+    Level {
+        atmosphere,
+        sun_shadows,
+        traced,
+        frames,
+    }: Level,
+) -> Result<Vec<Frame>, Failure> {
     use renderlab::*;
     let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
         backends: wgpu::Backends::VULKAN,
@@ -260,36 +283,43 @@ fn wgpu_frame(
             })
         })?);
     }
-    let camera = fixture.camera(0);
-    {
-        let mut draws: Vec<_> = instances
-            .iter_mut()
-            .enumerate()
-            .map(|(i, inst)| Draw::new(&meshes[i], inst).with_material(&materials[i]))
-            .collect();
-        admit(&mut r, |r| {
-            r.try_render_view(&color, &camera, &mut draws, ViewMode::Lit)
-        })?;
+    let mut sequence = Vec::new();
+    for pose in 0..frames {
+        let camera = fixture.camera(pose);
+        {
+            let mut draws: Vec<_> = instances
+                .iter_mut()
+                .enumerate()
+                .map(|(i, inst)| Draw::new(&meshes[i], inst).with_material(&materials[i]))
+                .collect();
+            admit(&mut r, |r| {
+                r.try_render_view(&color, &camera, &mut draws, ViewMode::Lit)
+            })?;
+        }
+        let mut capture = admit(&mut r, |r| r.try_capture_hdr())?;
+        let info = capture.info();
+        if info.format != wgpu::TextureFormat::Rgba16Float || [info.width, info.height] != size {
+            return Err("unexpected HDR capture".into());
+        }
+        let hdr = admit(&mut r, |_| capture.try_read())?;
+        let mut shown = admit(&mut r, |r| r.try_capture(&color))?;
+        sequence.push((hdr, admit(&mut r, |_| shown.try_read())?));
     }
-    let mut capture = admit(&mut r, |r| r.try_capture_hdr())?;
-    let info = capture.info();
-    if info.format != wgpu::TextureFormat::Rgba16Float || [info.width, info.height] != size {
-        return Err("unexpected HDR capture".into());
-    }
-    let hdr = admit(&mut r, |_| capture.try_read())?;
-    let mut shown = admit(&mut r, |r| r.try_capture(&color))?;
-    Ok((hdr, admit(&mut r, |_| shown.try_read())?))
+    Ok(sequence)
 }
 
 #[cfg(feature = "backend-ara")]
 fn ara_frame(
     fixture: &lighting_fixture::Fixture,
     size: [u32; 2],
-    atmosphere: renderlab::Atmosphere,
-    sun_shadows: bool,
-    traced: bool,
+    Level {
+        atmosphere,
+        sun_shadows,
+        traced,
+        frames,
+    }: Level,
     output: &Path,
-) -> Result<Frame, Failure> {
+) -> Result<Vec<Frame>, Failure> {
     use renderlab::backend_ara::{cache::ShaderCache, forward};
     let mut gpu = if sun_shadows {
         ara_gpu::GpuDevice::new(&[], output.join("device"))?
@@ -317,40 +347,43 @@ fn ara_frame(
             },
         })
         .collect();
-    let pixels = forward::render(
-        &mut gpu,
-        &cache,
-        &forward::ForwardScene {
-            objects: &objects,
-            lighting: &fixture.lighting,
-            camera: fixture.camera(0),
-            size,
-            atmosphere,
-            sun_shadows: sun_shadows.then_some(&shadows),
-            primary: if traced {
-                forward::Primary::Traced
-            } else {
-                forward::Primary::Raster
+    let mut history = forward::Frames::default();
+    let mut sequence = Vec::new();
+    for pose in 0..frames {
+        let pixels = history.render(
+            &mut gpu,
+            &cache,
+            &forward::ForwardScene {
+                objects: &objects,
+                lighting: &fixture.lighting,
+                camera: fixture.camera(pose),
+                size,
+                atmosphere,
+                sun_shadows: sun_shadows.then_some(&shadows),
+                primary: if traced {
+                    forward::Primary::Traced
+                } else {
+                    forward::Primary::Raster
+                },
+                post: Some(if traced {
+                    traced_post()
+                } else {
+                    renderlab::PostSettings::default()
+                }),
             },
-            post: Some(if traced {
-                traced_post()
-            } else {
-                renderlab::PostSettings::default()
-            }),
-        },
-    )?;
+        )?;
+        sequence.push((pixels.hdr, pixels.display.ok_or("post did not run")?));
+    }
     gpu.assert_clean()?;
-    Ok((pixels.hdr, pixels.display.ok_or("post did not run")?))
+    Ok(sequence)
 }
 #[cfg(not(feature = "backend-ara"))]
 fn ara_frame(
     _: &lighting_fixture::Fixture,
     _: [u32; 2],
-    _: renderlab::Atmosphere,
-    _: bool,
-    _: bool,
+    _: Level,
     _: &Path,
-) -> Result<Frame, Failure> {
+) -> Result<Vec<Frame>, Failure> {
     Err("--backend ara needs --features backend-ara".into())
 }
 
@@ -383,15 +416,30 @@ fn grid(values: &[f32], size: [u32; 2]) -> Vec<[f64; 3]> {
 fn write(
     dir: &Path,
     size: [u32; 2],
-    bytes: &[u8],
-    display: &[u8],
+    sequence: &[Frame],
     backend: &str,
-    [atmosphere, sun_shadows, traced]: [bool; 3],
+    level: Level,
 ) -> Result<(), Failure> {
     let pixels = size[0] as usize * size[1] as usize;
-    if bytes.len() != pixels * 8 || display.len() != pixels * 4 {
-        return Err("frame is not tightly packed RGBA16F with an RGBA8 display".into());
+    let mut summaries = Vec::new();
+    let mut nonfinite = 0;
+    for (pose, (bytes, display)) in sequence.iter().enumerate() {
+        if bytes.len() != pixels * 8 || display.len() != pixels * 4 {
+            return Err("frame is not tightly packed RGBA16F with an RGBA8 display".into());
+        }
+        let values = floats(bytes);
+        let display_values: Vec<f32> = display.iter().map(|v| f32::from(*v)).collect();
+        let bad = values.iter().filter(|v| !v.is_finite()).count();
+        nonfinite += bad;
+        summaries.push(serde_json::json!({
+            "pose": pose,
+            "nonfinite_channels": bad,
+            "grid_mean_linear_rgb": grid(&values, size),
+            "grid_mean_display_bytes": grid(&display_values, size),
+        }));
     }
+    // The raw files and the pictures are the last frame's: the one with most history.
+    let (bytes, display) = sequence.last().ok_or("no frame was rendered")?;
     fs::create_dir_all(dir)?;
     fs::write(dir.join("frame.rgba16f"), bytes)?;
     fs::write(dir.join("display.rgba8"), display)?;
@@ -399,9 +447,7 @@ fn write(
     shown.set_color(png::ColorType::Rgba);
     shown.set_depth(png::BitDepth::Eight);
     shown.write_header()?.write_image_data(display)?;
-    let display_values: Vec<f32> = display.iter().map(|v| f32::from(*v)).collect();
-    let values = floats(bytes);
-    let rgb: Vec<u8> = values
+    let rgb: Vec<u8> = floats(bytes)
         .as_chunks::<4>()
         .0
         .iter()
@@ -421,25 +467,30 @@ fn write(
     png.set_color(png::ColorType::Rgb);
     png.set_depth(png::BitDepth::Eight);
     png.write_header()?.write_image_data(&rgb)?;
-    let nonfinite = values.iter().filter(|v| !v.is_finite()).count();
+    let last = summaries.last().cloned().unwrap_or_default();
     fs::write(
         dir.join("frame.json"),
-        serde_json::to_vec_pretty(&serde_json::json!({
-            "scene": "M5-A authored v1, pose 0, local shadows off, default post",
-            "primary": if traced { "traced, exact soft shadows, no GI, reconstruction, reflections or motion blur" } else { "mesh pass" },
-            "atmosphere": if atmosphere { "physical sky without volumetric fog" } else { "off" },
-            "sun_shadows": if sun_shadows { "ray-traced, 0.02 rad disk, all materials double-sided" } else { "off" },
+        // Compact: a sequence's grids are large, and this file travels as text.
+        serde_json::to_vec(&serde_json::json!({
+            "scene": "M5-A authored v1, camera path from pose 0, local shadows off, default post",
+            "primary": if level.traced { "traced, exact soft shadows, no GI, reconstruction, reflections or motion blur" } else { "mesh pass" },
+            "atmosphere": if level.atmosphere.active() { "physical sky without volumetric fog" } else { "off" },
+            "sun_shadows": if level.sun_shadows { "ray-traced, 0.02 rad disk, all materials double-sided" } else { "off" },
             "backend": backend,
             "width": size[0],
             "height": size[1],
             "nonfinite_channels": nonfinite,
             "grid": GRID,
-            "grid_mean_linear_rgb": grid(&values, size),
-            "grid_mean_display_bytes": grid(&display_values, size),
+            // The last frame's grids, where a single-frame run has always had them.
+            "grid_mean_linear_rgb": last["grid_mean_linear_rgb"],
+            "grid_mean_display_bytes": last["grid_mean_display_bytes"],
+            "frames": sequence.len(),
+            "sequence": summaries,
         }))?,
     )?;
     eprintln!(
-        "{backend} frame {}x{} written to {}; nonfinite channels {nonfinite}",
+        "{backend}: {} frame(s) {}x{} written to {}; nonfinite channels {nonfinite}",
+        sequence.len(),
         size[0],
         size[1],
         dir.display()
@@ -475,6 +526,38 @@ fn compare(a: &Path, b: &Path) -> Result<(), Failure> {
     let cells = |j: &serde_json::Value, name: &str| -> Result<Vec<[f64; 3]>, Failure> {
         Ok(serde_json::from_value(j[name].clone())?)
     };
+    // Sequences: every frame's grids. A run from before sequences existed is one frame.
+    let count = |j: &serde_json::Value| j["frames"].as_u64().unwrap_or(1);
+    if count(&ja) != count(&jb) {
+        return Err("frames differ in sequence length".into());
+    }
+    if count(&ja) > 1 {
+        for (fa, fb) in ja["sequence"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .zip(jb["sequence"].as_array().into_iter().flatten())
+        {
+            let hdr = cells(fa, "grid_mean_linear_rgb")?
+                .iter()
+                .zip(&cells(fb, "grid_mean_linear_rgb")?)
+                .flat_map(|(x, y)| {
+                    (0..3).map(move |c| (x[c] - y[c]).abs() / x[c].abs().max(y[c].abs()).max(1e-3))
+                })
+                .fold(0f64, f64::max);
+            let shown = cells(fa, "grid_mean_display_bytes")?
+                .iter()
+                .zip(&cells(fb, "grid_mean_display_bytes")?)
+                .flat_map(|(x, y)| (0..3).map(move |c| (x[c] - y[c]).abs()))
+                .fold(0f64, f64::max);
+            println!(
+                "pose {}: worst HDR cell mean differs by {:.4}%, worst display cell mean by {shown:.3} levels",
+                fa["pose"],
+                hdr * 100.
+            );
+        }
+        println!("last frame:");
+    }
     // Relative for linear radiance (floored so black does not dominate); display bytes
     // are compared in levels.
     let (ga, gb) = (

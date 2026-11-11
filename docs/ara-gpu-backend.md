@@ -1321,6 +1321,40 @@ whichever scene needs them. `Engine` itself takes wgpu textures, so "an engine f
 through Ara" means a second entry point over the same scene description, as
 `forward::render` is for the forward path, until the two are unified.
 
+## Frame sequences
+
+`forward::Frames` renders a sequence and keeps between frames what the wgpu renderer
+keeps: post's frame serial and the previous unjittered camera (valid only from the
+frame directly before, as in `PostGpu::prepare`), the shadow planner's light
+orientations (`ShadowState::bases`), and the placement transforms a traced frame
+publishes as previous matrices. `Frames::cut` forgets them. GPU resources are still
+built per frame; a family that stores data on the GPU between frames (the GI cache,
+temporal reconstruction) adds its resources to this type. `forward::render` is a
+one-frame sequence.
+
+`frames_carry_the_previous_camera_into_motion_blur` renders two frames with the
+camera stepping 0.3 units sideways. The first has a still motion surface. The second
+carries serial two and a shutter velocity of 1.15 pixels, which is the step's 4.61
+pixels times the 180 degree shutter's quarter, and its blurred display sits inside
+the scalar post replay of its own HDR and surface. After a cut the same camera gives
+the same HDR, no velocity and a different display.
+
+`ara_frame --frames N` is the comparison tool for every family with history: poses 0
+to N-1 of the fixture's camera path through one renderer, on either layer, one
+summary per frame in `frame.json` and the last frame's raw files and pictures.
+`--compare` reports every frame's grids, then the last frame per pixel. The summary
+is about 20 KB of compact JSON per frame, so a sequence travels as a file, not as a
+PR comment.
+
+```sh
+cargo run --example ara_frame -- --backend wgpu --atmosphere --sun-shadows --frames 8 --output out/wgpu-seq
+cargo +1.99.1 run --features backend-ara --example ara_frame -- --backend ara --atmosphere --sun-shadows --frames 8 --output out/ara-seq
+cargo run --example ara_frame -- --compare out/wgpu-seq out/ara-seq
+```
+
+On this Mac a four-frame sequence with the sky and sun shadows is byte-identical
+across two runs. No wgpu sequence has been produced yet.
+
 ## GI cache: scope before porting
 
 The world radiance cache (`gi_cache.rs`, 3,227 lines; `gi_cache.wgsl`, `gi_cells.wgsl`,

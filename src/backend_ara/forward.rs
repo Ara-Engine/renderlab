@@ -113,10 +113,10 @@ pub struct ForwardImages {
     pub display: Option<Vec<u8>>,
 }
 
-/// The post `Settings` record of the first frame after a cut at this output height,
-/// with the identity LUT the renderer starts with.
-pub fn post_record(settings: &crate::PostSettings, height: u32) -> [f32; 20] {
-    settings.record(1, height, LUT_SIDE, false)
+/// The post `Settings` record at this output height for the post frame with this
+/// serial (one for the first), with the identity LUT the renderer starts with.
+pub fn post_record(settings: &crate::PostSettings, height: u32, serial: u32) -> [f32; 20] {
+    settings.record(serial, height, LUT_SIDE, false)
 }
 const LUT_SIDE: u32 = 2;
 /// `atmosphere_gpu::FROXEL_TILE`: output pixels per camera-volume cell.
@@ -310,12 +310,70 @@ pub fn standard_program(fresh: bool) -> Result<Program> {
     )
 }
 
-/// Renders `scene` once and reads back what it produced.
+/// Renders `scene` once, as the first frame after a cut, and reads back what it
+/// produced. Use [`Frames`] for a sequence.
 pub fn render(
     gpu: &mut GpuDevice,
     cache: &ShaderCache,
     scene: &ForwardScene<'_>,
 ) -> Result<ForwardImages> {
+    Frames::default().render(gpu, cache, scene)
+}
+
+/// What one frame leaves for the next, kept as the wgpu renderer keeps it: post's
+/// frame serial and previous camera, the shadow planner's light orientations and the
+/// placement transforms. GPU resources are still built per frame; a family that
+/// stores data on the GPU between frames will add its resources here.
+#[derive(Default)]
+pub struct Frames {
+    /// Frames rendered since creation.
+    count: u64,
+    /// Post frames prepared so far: the `Settings` record's serial.
+    post_serial: u32,
+    /// The unjittered view-projection post last saw, and the frame it is previous to.
+    /// A frame without post in between breaks the chain, as `PostGpu::prepare` does.
+    post_camera: Option<(u64, crate::Mat4)>,
+    /// `ShadowState::bases`: the orientations the planner transports from.
+    shadow_bases: Vec<Option<glam::DMat4>>,
+    /// The last frame's object transforms, for traced frames' previous matrices.
+    transforms: Vec<crate::Mat4>,
+}
+impl Frames {
+    /// Forgets history: the next frame is a first frame after a cut.
+    pub fn cut(&mut self) {
+        *self = Self::default();
+    }
+    /// The serial the next post frame's `Settings` record carries.
+    pub fn next_post_serial(&self) -> u32 {
+        self.post_serial.wrapping_add(1)
+    }
+    /// Renders the next frame of the sequence and reads back what it produced.
+    pub fn render(
+        &mut self,
+        gpu: &mut GpuDevice,
+        cache: &ShaderCache,
+        scene: &ForwardScene<'_>,
+    ) -> Result<ForwardImages> {
+        let next = frame(self, gpu, cache, scene)?;
+        *self = next.1;
+        Ok(next.0)
+    }
+}
+
+/// One frame from `history`; returns its images and the history it leaves.
+fn frame(
+    history: &Frames,
+    gpu: &mut GpuDevice,
+    cache: &ShaderCache,
+    scene: &ForwardScene<'_>,
+) -> Result<(ForwardImages, Frames)> {
+    let mut left = Frames {
+        count: history.count + 1,
+        post_serial: history.post_serial,
+        post_camera: None,
+        shadow_bases: Vec::new(),
+        transforms: scene.objects.iter().map(|o| o.transform).collect(),
+    };
     ensure!(!scene.objects.is_empty(), "forward frame needs an object");
     ensure!(
         scene.objects.iter().all(|o| {
@@ -404,13 +462,14 @@ pub fn render(
             );
             let mut frame = shadow_gpu::plan_frame(
                 &shadows,
-                &[],
+                &history.shadow_bases,
                 &scene.camera,
                 size,
                 &scene.lighting.lights,
                 &bounds,
             )?;
             frame.prepare_hardware_bias(&records)?;
+            left.shadow_bases = frame.bases().to_vec();
             for (record, range) in records
                 .as_chunks_mut::<{ crate::lighting::LIGHT_BYTES }>()
                 .0
@@ -691,13 +750,18 @@ pub fn render(
         {
             *dst = value.to_ne_bytes();
         }
-        let transforms: Vec<_> = scene.objects.iter().map(|o| o.transform).collect();
-        let (matrices, normal_bytes) = super::mesh::pack_models(&transforms)?;
+        let (matrices, normal_bytes) = super::mesh::pack_models(&left.transforms)?;
+        // `InstanceState::previous_models`: last frame's matrices when it drew the
+        // same placements, otherwise the current ones.
+        let previous = if history.transforms.len() == left.transforms.len() {
+            super::mesh::pack_models(&history.transforms)?.0
+        } else {
+            matrices.clone()
+        };
         let frame = StorageBuffer::new(gpu, &frame)?;
         let region_buffer = StorageBuffer::new(gpu, bytemuck::cast_slice(&region))?;
         let placement_buffer = StorageBuffer::new(gpu, bytemuck::cast_slice(&placements))?;
-        // No history on a first frame: the previous matrices are the current ones.
-        let models = StorageBuffer::new(gpu, &[matrices.as_slice(), &matrices].concat())?;
+        let models = StorageBuffer::new(gpu, &[matrices.as_slice(), &previous].concat())?;
         let normals = StorageBuffer::new(gpu, &normal_bytes)?;
         let absent = StorageBuffer::new(gpu, &[0; 48])?;
         for buffer in [
@@ -1047,7 +1111,17 @@ pub fn render(
             "forward frame does not assemble depth of field yet"
         );
         let passes = PostPasses::new(gpu, cache, Format::Rgba32Float)?;
-        let record = SettingsRecord::new(gpu, &post_record(&settings, size[1]))?;
+        left.post_serial = history.next_post_serial();
+        let record = SettingsRecord::new(gpu, &post_record(&settings, size[1], left.post_serial))?;
+        // `PostGpu::prepare`: the previous camera counts only from the frame before.
+        let previous_camera = history
+            .post_camera
+            .filter(|(frame, _)| *frame == left.count)
+            .map(|(_, matrix)| matrix);
+        left.post_camera = Some((
+            left.count + 1,
+            scene.camera.unjittered().matrix(size[0], size[1]),
+        ));
         graph.import(Resource::Buffer(record.buffer), Access::HostWrite);
         let lut = Texture::volume(gpu, LUT_SIDE, Format::Rgba16Float)?;
         let identity: Vec<u8> = (0..LUT_SIDE.pow(3))
@@ -1065,7 +1139,7 @@ pub fn render(
             let frame = PostCameraFrame::new(
                 gpu,
                 scene.camera,
-                None,
+                previous_camera,
                 size,
                 settings.shutter_angle_degrees,
                 settings.max_motion_radius_px,
@@ -1260,5 +1334,5 @@ pub fn render(
     }
     clusters.retire(gpu)?;
     gpu.collect()?;
-    Ok(images)
+    Ok((images, left))
 }

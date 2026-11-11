@@ -334,84 +334,10 @@ fn forward_frame_display_matches_cpu_post_replay_of_its_hdr() -> Result<()> {
             post: Some(settings),
         },
     )?;
-    let image = |pixels| reference::Image { size, pixels };
-    let hdr = image(
-        images
-            .hdr
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|p| {
-                std::array::from_fn(|c| {
-                    f16::from_bits(u16::from_le_bytes([p[c * 2], p[c * 2 + 1]])).to_f32()
-                })
-            })
-            .collect(),
-    );
-    let surface = images.surface.expect("motion blur is on by default");
-    let aux = image(
-        surface
-            .as_chunks::<16>()
-            .0
-            .iter()
-            .map(|p| {
-                std::array::from_fn(|c| {
-                    f32::from_le_bytes([p[c * 4], p[c * 4 + 1], p[c * 4 + 2], p[c * 4 + 3]])
-                })
-            })
-            .collect(),
-    );
-    let words = post_record(&settings, size[1]);
-    let tiles = reference::tile_max(&aux);
-    let blurred = reference::motion_blur(&hdr, &aux, &tiles, &words);
-    let mut levels = Vec::new();
-    let mut current = blurred.clone();
-    for _ in 0..6 {
-        current = reference::downsample(&current, current.size.map(|n| n.div_ceil(2)));
-        levels.push(current.clone());
-        if current.size == [1, 1] {
-            break;
-        }
-    }
-    let coarsest = levels.last().expect("bloom has a level");
-    let mut bloom = reference::upsample(coarsest, coarsest);
-    for level in levels[..levels.len() - 1].iter().rev() {
-        bloom = reference::upsample(level, &bloom);
-    }
-    let fixture = reference::Fixture {
-        hdr: hdr.clone(),
-        lut: (0..8u32)
-            .map(|i| [i & 1, (i >> 1) & 1, i >> 2, 1].map(|v| v as f32))
-            .collect(),
-        lut_size: 2,
-        settings: words,
-    };
-    let tone = reference::tone(&blurred, &bloom, &fixture);
-    // Tone agrees to 0.003 linear in the stage replays; the display adds UNORM rounding.
-    let encode = |linear: &reference::Image| reference::display(linear).pixels;
-    let shifted = |by: f32| {
-        encode(&image(
-            tone.pixels.iter().map(|p| p.map(|v| v + by)).collect(),
-        ))
-    };
-    let (low, high) = (shifted(-0.003), shifted(0.003));
+    let checked =
+        display_inside_cpu_post_replay(size, &images, &post_record(&settings, size[1], 1))?;
+    let (brightest, distinct) = (checked.peak, checked.colours);
     let display = images.display.expect("post ran");
-    let mut brightest = 0f32;
-    let mut distinct = std::collections::BTreeSet::new();
-    for (i, actual) in display.as_chunks::<4>().0.iter().enumerate() {
-        distinct.insert(*actual);
-        brightest = brightest.max(hdr.pixels[i][0].max(hdr.pixels[i][1]).max(hdr.pixels[i][2]));
-        for channel in 0..3 {
-            let value = f32::from(actual[channel]) / 255.;
-            ensure!(
-                value >= low[i][channel] - 0.6 / 255. && value <= high[i][channel] + 0.6 / 255.,
-                "display pixel {i} channel {channel}: {value} outside [{}, {}]",
-                low[i][channel],
-                high[i][channel]
-            );
-        }
-        ensure!(actual[3] == 255, "display alpha");
-    }
     ensure!(
         brightest > 1.5 && distinct.len() > 64,
         "fixture lost its highlight or its gradient: peak {brightest}, {} colours",
@@ -1073,6 +999,218 @@ fn traced_frame_agrees_with_the_mesh_pass_over_misses_sky_and_post() -> Result<(
             worst * 100.
         );
     }
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// What [`display_inside_cpu_post_replay`] saw on the way.
+struct Replayed {
+    /// The brightest HDR channel.
+    peak: f32,
+    /// Distinct displayed colours.
+    colours: std::collections::BTreeSet<[u8; 4]>,
+    /// The largest shutter velocity in the motion surface, in pixels.
+    speed: f32,
+}
+
+/// Pushes a frame's own HDR and motion surface through the scalar post replay (tile
+/// maximum, motion blur, six bloom levels, tone, sRGB transfer) with these `Settings`
+/// words and requires every displayed byte inside its bounds: the tone stage's 0.003
+/// linear allowance carried through the transfer, plus UNORM rounding.
+fn display_inside_cpu_post_replay(
+    size: [u32; 2],
+    images: &renderlab::backend_ara::forward::ForwardImages,
+    words: &[f32; 20],
+) -> Result<Replayed> {
+    let image = |pixels| reference::Image { size, pixels };
+    let hdr = image(
+        images
+            .hdr
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|p| {
+                std::array::from_fn(|c| {
+                    f16::from_bits(u16::from_le_bytes([p[c * 2], p[c * 2 + 1]])).to_f32()
+                })
+            })
+            .collect(),
+    );
+    let surface = images.surface.as_ref().context("motion blur ran")?;
+    let aux = image(
+        surface
+            .as_chunks::<16>()
+            .0
+            .iter()
+            .map(|p| {
+                std::array::from_fn(|c| {
+                    f32::from_le_bytes([p[c * 4], p[c * 4 + 1], p[c * 4 + 2], p[c * 4 + 3]])
+                })
+            })
+            .collect(),
+    );
+    let tiles = reference::tile_max(&aux);
+    let blurred = reference::motion_blur(&hdr, &aux, &tiles, words);
+    let mut levels = Vec::new();
+    let mut current = blurred.clone();
+    for _ in 0..6 {
+        current = reference::downsample(&current, current.size.map(|n| n.div_ceil(2)));
+        levels.push(current.clone());
+        if current.size == [1, 1] {
+            break;
+        }
+    }
+    let coarsest = levels.last().context("bloom has a level")?;
+    let mut bloom = reference::upsample(coarsest, coarsest);
+    for level in levels[..levels.len() - 1].iter().rev() {
+        bloom = reference::upsample(level, &bloom);
+    }
+    let fixture = reference::Fixture {
+        hdr: hdr.clone(),
+        lut: (0..8u32)
+            .map(|i| [i & 1, (i >> 1) & 1, i >> 2, 1].map(|v| v as f32))
+            .collect(),
+        lut_size: 2,
+        settings: *words,
+    };
+    let tone = reference::tone(&blurred, &bloom, &fixture);
+    let shifted = |by: f32| {
+        reference::display(&image(
+            tone.pixels.iter().map(|p| p.map(|v| v + by)).collect(),
+        ))
+        .pixels
+    };
+    let (low, high) = (shifted(-0.003), shifted(0.003));
+    let display = images.display.as_ref().context("post ran")?;
+    let mut seen = Replayed {
+        peak: 0.,
+        colours: Default::default(),
+        speed: aux
+            .pixels
+            .iter()
+            .map(|p| p[0].hypot(p[1]))
+            .fold(0., f32::max),
+    };
+    for (i, actual) in display.as_chunks::<4>().0.iter().enumerate() {
+        seen.colours.insert(*actual);
+        seen.peak = seen
+            .peak
+            .max(hdr.pixels[i][0].max(hdr.pixels[i][1]).max(hdr.pixels[i][2]));
+        for channel in 0..3 {
+            let value = f32::from(actual[channel]) / 255.;
+            ensure!(
+                value >= low[i][channel] - 0.6 / 255. && value <= high[i][channel] + 0.6 / 255.,
+                "display pixel {i} channel {channel}: {value} outside [{}, {}]",
+                low[i][channel],
+                high[i][channel]
+            );
+        }
+        ensure!(actual[3] == 255, "display alpha");
+    }
+    Ok(seen)
+}
+
+/// A sequence keeps what the renderer keeps between frames. The first frame has no
+/// previous camera and a still surface; the second, after the camera moves, carries
+/// serial two and real shutter velocities into the motion blur, and its display still
+/// sits inside the scalar replay of its own HDR and surface. A cut forgets all of it.
+#[test]
+fn frames_carry_the_previous_camera_into_motion_blur() -> Result<()> {
+    use renderlab::backend_ara::forward::{Frames, Primary};
+    let path = root("forward-sequence");
+    let mut gpu = GpuDevice::new_raster(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let size = [96u32, 64];
+    let vertices =
+        [[-4., -4., 0.], [4., -4., 0.], [4., 4., 0.], [-4., 4., 0.]].map(|position| Vertex {
+            position,
+            normal: [0., 0., 1.],
+            uv: [0.; 2],
+            color: [1.; 4],
+        });
+    let settings = PostSettings::default();
+    let lighting = Lighting {
+        lights: vec![
+            Light::Directional {
+                travel: Vec3::new(-0.25, 0., -1.),
+                lux: [1000.; 3],
+            },
+            Light::Point {
+                position: Vec3::new(1.5, -1., 1.),
+                candela: [60., 40., 20.],
+                range: Some(6.),
+                source_radius: 0.0,
+            },
+        ],
+        environment: [20., 25., 40.],
+        exposure_stops: -8.,
+    };
+    let mut frames = Frames::default();
+    let mut frame = |frames: &mut Frames, eye_x: f32| {
+        frames.render(
+            &mut gpu,
+            &cache,
+            &ForwardScene {
+                objects: &[ForwardObject {
+                    vertices: &vertices,
+                    indices: &[0, 1, 2, 0, 2, 3],
+                    transform: Mat4::IDENTITY,
+                    material: MaterialDescriptor {
+                        base_color: BASE,
+                        metallic: 1.,
+                        roughness: 0.3,
+                        ..Default::default()
+                    },
+                }],
+                lighting: &lighting,
+                camera: Camera::look_at(
+                    Vec3::new(eye_x, 0., 4.),
+                    Vec3::new(eye_x, 0., 0.),
+                    Vec3::Y,
+                    55f32.to_radians(),
+                    0.1,
+                    100.,
+                )?,
+                size,
+                atmosphere: renderlab::Atmosphere::off(),
+                sun_shadows: None,
+                primary: Primary::Raster,
+                post: Some(settings),
+            },
+        )
+    };
+    let first = frame(&mut frames, 0.)?;
+    let still = display_inside_cpu_post_replay(size, &first, &post_record(&settings, size[1], 1))?;
+    ensure!(
+        frames.next_post_serial() == 2,
+        "post serial did not advance"
+    );
+    let second = frame(&mut frames, 0.3)?;
+    let moving =
+        display_inside_cpu_post_replay(size, &second, &post_record(&settings, size[1], 2))?;
+    // A sideways camera step of 0.3 at distance 4 moves the floor by 0.3 of the view's
+    // width in world units, in pixels; the surface stores the shutter's share of it,
+    // angle / 720 of the frame-to-frame motion.
+    let view_width = 2. * 4. * (55f32.to_radians() / 2.).tan() * size[0] as f32 / size[1] as f32;
+    let expected = 0.3 / view_width * size[0] as f32 * settings.shutter_angle_degrees / 720.;
+    ensure!(
+        still.speed == 0. && (moving.speed - expected).abs() < 0.01,
+        "shutter velocities: first frame {}, second {} (expected {expected})",
+        still.speed,
+        moving.speed
+    );
+    frames.cut();
+    let after_cut = frame(&mut frames, 0.3)?;
+    let cut =
+        display_inside_cpu_post_replay(size, &after_cut, &post_record(&settings, size[1], 1))?;
+    ensure!(
+        cut.speed == 0. && after_cut.hdr == second.hdr && after_cut.display != second.display,
+        "a cut must drop the previous camera and nothing else"
+    );
+    println!(
+        "frame sequence: still surface on frame one, {:.2} px shutter velocity on frame two, none after a cut; all three displays inside the CPU post replay",
+        moving.speed
+    );
     gpu.assert_clean()?;
     Ok(())
 }
