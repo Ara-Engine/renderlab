@@ -986,3 +986,8 @@ Pixels on the open ground more than 10 codes above their 21-pixel median:
 - **Cause:** naga's SPIR-V emission, not our WGSL. Tracked upstream as gfx-rs/wgpu issue 7696 (open).
 - **Why Renderlab's validated runs do not show it:** wgpu-hal 30.0.1's own debug callback silences this message id (`vulkan/instance.rs`, citing that issue), so it never reaches our sink and `gpu_validation_summary` reads errors=0. Ara's messenger is its own and sees it. A lease run with the layer set by environment but without wgpu's debug flags prints it too.
 - **Risk:** drivers accept it today. A stricter driver or a later layer version could make it an error; the fix has to come from naga.
+
+## Non-RT sun shadows against RT on the courtyard, and a failing limits test (root, 2026-11-11)
+
+- **OPEN, not yet investigated (owner: the sun-shadow unit).** On N-VSM1's contact and penumbra sheets (game scene courtyard), both non-RT lookups, `Surface` and `Disk`, differ from the RT path in the same two places: a diagonal band on the ground between the sphere, the pole and the crates, and a grazing crate face that is brighter than RT. It is not a regression from N-VSM1; which side is right against a path-traced reference has not been checked.
+- **OPEN (pre-existing):** the ignored GPU test `gpu_non_rt_requested_limit_pipelines` fails on main at `virtual_limits_tests.rs:174` (its view-projection reuse check), and the same way on the N-VSM1 branch. Not caused by `VirtualLookup::Disk`; cause not looked at.
