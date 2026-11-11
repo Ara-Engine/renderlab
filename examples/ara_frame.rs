@@ -40,7 +40,9 @@
 //! Run both a moving and a `--still` sequence: a still view goes idle after eight
 //! frames, and from then on its tables say nothing new. `--bounce` implies `--gi` and
 //! turns the cache's bounce light on as well (gathers, light visibility and cell
-//! shading; the cell filter stays off, which the Ara frame does not assemble yet).
+//! shading). `--filter` implies `--bounce` and adds the cell filter at its default
+//! bits, which makes the cache Renderlab's default configuration but for the table
+//! size.
 //!
 //! ```text
 //! cargo run --example ara_frame -- --backend wgpu --output out/wgpu
@@ -74,7 +76,7 @@ fn main() -> Result<(), Failure> {
     let mut atmosphere = renderlab::Atmosphere::off();
     let mut sun_shadows = false;
     let mut traced = false;
-    let (mut gi, mut bounce, mut still) = (false, false, false);
+    let (mut gi, mut bounce, mut filter, mut still) = (false, false, false, false);
     let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -84,6 +86,9 @@ fn main() -> Result<(), Failure> {
             "--traced" => (sun_shadows, traced) = (true, true),
             "--gi" => (sun_shadows, traced, gi) = (true, true, true),
             "--bounce" => (sun_shadows, traced, gi, bounce) = (true, true, true, true),
+            "--filter" => {
+                (sun_shadows, traced, gi, bounce, filter) = (true, true, true, true, true)
+            }
             "--still" => still = true,
             "--frames" => {
                 frames = args.next().ok_or("--frames N")?.parse()?;
@@ -123,6 +128,7 @@ fn main() -> Result<(), Failure> {
         traced,
         gi,
         bounce,
+        filter,
         still,
         frames,
     };
@@ -150,6 +156,8 @@ struct Level {
     gi: bool,
     /// The cache's bounce light as well.
     bounce: bool,
+    /// The cell filter as well, at its default bits.
+    filter: bool,
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
@@ -160,13 +168,14 @@ impl Level {
     }
 }
 
-/// The cache at the `--gi` level, or with bounce at the `--bounce` level, on both layers.
-fn cache_settings(bounce: bool) -> renderlab::IndirectSettings {
+/// The cache at the `--gi`, `--bounce` or `--filter` level, on both layers.
+fn cache_settings(level: Level) -> renderlab::IndirectSettings {
+    let default = renderlab::IndirectSettings::default();
     renderlab::IndirectSettings {
-        bounce,
-        filter: 0,
+        bounce: level.bounce,
+        filter: if level.filter { default.filter } else { 0 },
         slots_log2: 17,
-        ..Default::default()
+        ..default
     }
 }
 
@@ -255,7 +264,7 @@ fn wgpu_frame(
         r.set_primary_visibility(PrimaryVisibility::Traced)?;
         r.set_soft_shadows(SoftShadows::Exact);
         r.set_indirect(if gi {
-            cache_settings(level.bounce)
+            cache_settings(level)
         } else {
             IndirectSettings::off()
         })?;
@@ -428,7 +437,7 @@ fn ara_frame(
                     renderlab::PostSettings::default()
                 }),
                 indirect: gi.then(|| Indirect {
-                    settings: cache_settings(level.bounce),
+                    settings: cache_settings(level),
                     read_table: true,
                 }),
             },
@@ -546,7 +555,8 @@ fn write(
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
             "scene": if level.still { "M5-A authored v1, every frame from pose 0, local shadows off, default post" } else { "M5-A authored v1, camera path from pose 0, local shadows off, default post" },
-                        "primary": match (level.traced, level.gi, level.bounce) {
+                                    "primary": match (level.traced, level.gi, level.bounce) {
+                (true, true, true) if level.filter => "traced, exact soft shadows, radiance cache with bounce and the cell filter (2^17 slots), no reconstruction, reflections or motion blur",
                 (true, true, true) => "traced, exact soft shadows, radiance cache with bounce (2^17 slots, no filter), no reconstruction, reflections or motion blur",
                 (true, true, false) => "traced, exact soft shadows, radiance cache sky visibility (2^17 slots, no bounce or filter), no reconstruction, reflections or motion blur",
                 (true, false, _) => "traced, exact soft shadows, no GI, reconstruction, reflections or motion blur",

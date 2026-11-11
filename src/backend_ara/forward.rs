@@ -122,6 +122,9 @@ pub struct ForwardImages {
     pub indirect_table: Option<Vec<u32>>,
     /// With bounce and `read_table`: every slot's outgoing radiance, w 1 once written.
     pub indirect_outgoing: Option<Vec<[f32; 4]>>,
+    /// With the cell filter and `read_table`: its sources, 22 words a slot (hot words 1
+    /// to 22 as written before filtering).
+    pub indirect_raw: Option<Vec<u32>>,
 }
 
 /// The post `Settings` record at this output height for the post frame with this
@@ -1304,6 +1307,15 @@ fn frame(
         None => None,
     };
 
+    let raw_read = match gi
+        .filter(|_| table_read.is_some())
+        .and_then(|(cache, _)| cache.raw())
+    {
+        Some(raw) => Some(transfer::readback_buffer(
+            gpu, &mut graph, &mut rec, raw.buffer, 0, raw.len,
+        )?),
+        None => None,
+    };
     // The post tail, in `PostGpu::encode` order. Each stage reads the one before it.
     let mut post_images = Vec::new();
     let mut post_buffers = Vec::new();
@@ -1448,6 +1460,10 @@ fn frame(
             .map(|b| gpu.read(b))
             .transpose()?
             .map(|bytes| bytemuck::pod_collect_to_vec(&bytes)),
+        indirect_raw: raw_read
+            .map(|b| gpu.read(b))
+            .transpose()?
+            .map(|bytes| bytemuck::pod_collect_to_vec(&bytes)),
     };
 
     if let Some((passes, bloom, surface)) = tail {
@@ -1549,6 +1565,7 @@ fn frame(
         .chain(reads.into_iter().flatten())
         .chain(table_read)
         .chain(outgoing_read)
+        .chain(raw_read)
         .chain([read])
     {
         gpu.retire(Resource::Buffer(buffer))?;

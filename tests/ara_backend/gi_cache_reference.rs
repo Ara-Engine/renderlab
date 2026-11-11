@@ -31,6 +31,11 @@ pub struct Cell {
     pub settled: bool,
     pub key_b: u32,
     pub level: u32,
+    /// The six-way normal bin, and the cell's integer lattice coordinates at its level.
+    pub bin: u32,
+    pub lattice: [i32; 3],
+    /// The hot record's split flag.
+    pub split: bool,
     pub normal: Vec3,
     pub point: Vec3,
     /// One bit per fixed direction: set where the sky is visible.
@@ -95,6 +100,9 @@ impl<'a> Table<'a> {
                         && self.words[cold + 14] & self.words[cold + 15] == u32::MAX,
                     key_b: self.words[cold],
                     level: self.words[cold + 3] & 0xff,
+                    bin: self.words[cold + 3] >> 8,
+                    lattice: std::array::from_fn(|i| self.words[cold + 4 + i] as i32),
+                    split: self.words[hot + 15] & 0x1_0000 != 0,
                     normal: unpack_normal(self.words[cold + 7]),
                     point: Vec3::new(self.f32(cold + 8), self.f32(cold + 9), self.f32(cold + 10)),
                     bits: u64::from(self.words[cold + 12])
@@ -113,6 +121,11 @@ impl<'a> Table<'a> {
     }
     pub fn rotates(&self) -> bool {
         self.words[2] & 4 != 0
+    }
+    /// The cell filter's bits (sky, bounce, contrast refine, fill) and its tent's edge
+    /// weight.
+    pub fn filter(&self) -> (u32, f32) {
+        (self.words[24], self.f32(25))
     }
 }
 
@@ -208,4 +221,168 @@ pub fn bounce_irradiance(cell: &Cell) -> [f64; 3] {
             .max(0.)
             * f64::from(cell.bounce_scale)
     })
+}
+
+/// The cell filter's sources (`gi_raw`): hot words 1 to 22 of every slot as they were
+/// written before filtering.
+pub struct Raw<'a>(pub &'a [u32]);
+impl Raw<'_> {
+    fn word(&self, slot: usize, hot: usize) -> u32 {
+        self.0[slot * 22 + hot - 1]
+    }
+    fn halves(&self, slot: usize, first: usize, count: usize) -> Vec<f64> {
+        (0..count)
+            .map(|j| {
+                let pair = self.word(slot, first + j / 2);
+                let half = if j % 2 == 0 {
+                    pair as u16
+                } else {
+                    (pair >> 16) as u16
+                };
+                f64::from(half::f16::from_bits(half).to_f32())
+            })
+            .collect()
+    }
+    /// The unfiltered sky SH: 27 coefficients in cached units.
+    pub fn sky(&self, slot: usize) -> Vec<f64> {
+        let scale = f64::from(f32::from_bits(self.word(slot, 1)));
+        self.halves(slot, 2, 27).iter().map(|h| h * scale).collect()
+    }
+    /// The unfiltered bounce SH, or None for a cell not gathered yet. A gather that
+    /// found no light (-0.0) is twelve zeros.
+    pub fn bounce(&self, slot: usize) -> Option<Vec<f64>> {
+        let word = self.word(slot, 16);
+        let scale = f64::from(f32::from_bits(word).max(0.));
+        (word != 0).then(|| {
+            self.halves(slot, 17, 12)
+                .iter()
+                .map(|h| h * scale)
+                .collect()
+        })
+    }
+    /// Whether the unfiltered value carried the split flag.
+    fn split(&self, slot: usize) -> bool {
+        self.word(slot, 15) & 0x1_0000 != 0
+    }
+}
+
+/// What `gi_filter_cell` leaves in a cell's hot record: the filtered sky SH, the
+/// filtered bounce SH (None where the filter leaves the bounce words alone), and the
+/// split flag.
+pub struct Filtered {
+    pub sky: Vec<f64>,
+    pub bounce: Option<Vec<f64>>,
+    pub split: bool,
+    /// Neighbours that took part, the cell itself aside.
+    pub neighbours: usize,
+}
+
+/// `gi_filter_cell` under a constant sky: the weighted mean of the unfiltered values of
+/// the cell and the eight cells around it in its bin's tangent plane at its level.
+/// `cells` are the table's; `find` maps (level, bin, lattice) to an index into them.
+pub fn filter(
+    table: &Table,
+    raw: &Raw,
+    cells: &[Cell],
+    find: &std::collections::HashMap<(u32, u32, [i32; 3]), usize>,
+    cell: &Cell,
+) -> Filtered {
+    let (bits, e) = table.filter();
+    let (sky_on, bounce_on, contrast_on, fill) =
+        (bits & 1 != 0, bits & 2 != 0, bits & 5 == 5, bits & 8 != 0);
+    let edge = table.min_edge() * (cell.level as f32).exp2();
+    let axis = (cell.bin >> 1) as usize;
+    let (q, n) = (cell.point, cell.normal);
+    // The share of the open sky's irradiance about n that a slot's unfiltered value holds.
+    let y = [
+        0.282095,
+        0.488603 * n.y,
+        0.488603 * n.z,
+        0.488603 * n.x,
+        1.092548 * n.x * n.y,
+        1.092548 * n.y * n.z,
+        0.315392 * (3. * n.z * n.z - 1.),
+        1.092548 * n.x * n.z,
+        0.546274 * (n.x * n.x - n.y * n.y),
+    ]
+    .map(f64::from);
+    let band = |i: usize| match i {
+        0 => std::f64::consts::PI,
+        1..=3 => 2.0943951023931953,
+        _ => std::f64::consts::FRAC_PI_4,
+    };
+    let openness = |slot: usize| {
+        let sky = raw.sky(slot);
+        (0..27)
+            .map(|j| band(j / 3) * y[j / 3] * sky[j])
+            .sum::<f64>()
+            / (3. * std::f64::consts::PI)
+    };
+    let own = openness(cell.slot);
+    let gathered = raw.bounce(cell.slot).is_some();
+    let filter_bounce = bounce_on && (gathered || fill);
+    let (mut sky, mut bounce) = (vec![0f64; 27], vec![0f64; 12]);
+    let (mut ws, mut wb, mut contrast, mut neighbours) = (0f64, 0f64, false, 0);
+    for j in 0..9 {
+        let (du, dv) = ((j % 3) as f32 - 1., (j / 3) as f32 - 1.);
+        let (slot, w) = if j == 4 {
+            (cell.slot, 1.)
+        } else {
+            let mut p = q;
+            p[(axis + 1) % 3] += du * edge;
+            p[(axis + 2) % 3] += dv * edge;
+            if n[axis].abs() > 0.3 {
+                p[axis] -= ((p - q).dot(n) / n[axis]).clamp(-1.5 * edge, 1.5 * edge);
+            }
+            let mut u = p / edge;
+            u[axis] -= if cell.bin & 1 == 0 { 0.25 } else { -0.25 };
+            let lattice = u.floor().as_ivec3().to_array();
+            let Some(other) = find
+                .get(&(cell.level, cell.bin, lattice))
+                .map(|i| &cells[*i])
+            else {
+                continue;
+            };
+            if !other.valid {
+                continue;
+            }
+            let tent = if du != 0. && dv != 0. { e * e } else { e };
+            let d = other.normal.dot(n);
+            let t = ((d - 0.5) / 0.4).clamp(0., 1.);
+            let agree = t * t * (3. - 2. * t);
+            let plane = (1.5 - 3. * (other.point - q).dot(n).abs() / edge).clamp(0., 1.);
+            let w = f64::from(tent * agree * plane);
+            if w <= 0. {
+                continue;
+            }
+            if contrast_on && agree * plane >= 0.5 {
+                let o = openness(other.slot);
+                contrast |= o > 0.25 && own < 0.25 * o;
+            }
+            neighbours += 1;
+            (other.slot, w)
+        };
+        if sky_on {
+            for (sum, v) in sky.iter_mut().zip(raw.sky(slot)) {
+                *sum += w * v;
+            }
+            ws += w;
+        }
+        if filter_bounce && let Some(values) = raw.bounce(slot) {
+            for (sum, v) in bounce.iter_mut().zip(values) {
+                *sum += w * v;
+            }
+            wb += w;
+        }
+    }
+    Filtered {
+        sky: if sky_on && ws > 0. {
+            sky.iter().map(|v| v / ws).collect()
+        } else {
+            raw.sky(cell.slot)
+        },
+        bounce: (filter_bounce && wb > 0.).then(|| bounce.iter().map(|v| v / wb).collect()),
+        split: raw.split(cell.slot) || (sky_on && ws > 0. && contrast),
+        neighbours,
+    }
 }

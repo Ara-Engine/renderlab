@@ -128,7 +128,12 @@ fn cache_kernels_reflect_validate_and_compile() -> Result<()> {
 /// the sky from the floor at its foot and less with distance.
 /// One frame of a sequence: its HDR red channel per pixel, and the cache's table and
 /// outgoing radiance when the cache ran and was read.
-type YardFrame = (Vec<f32>, Option<Vec<u32>>, Option<Vec<[f32; 4]>>);
+type YardFrame = (
+    Vec<f32>,
+    Option<Vec<u32>>,
+    Option<Vec<[f32; 4]>>,
+    Option<Vec<u32>>,
+);
 struct Yard {
     floor: [Vertex; 4],
     wall: [Vertex; 4],
@@ -235,7 +240,12 @@ impl Yard {
                 .iter()
                 .map(|p| f16::from_bits(u16::from_le_bytes([p[0], p[1]])).to_f32())
                 .collect();
-            frames.push((red, images.indirect_table, images.indirect_outgoing));
+            frames.push((
+                red,
+                images.indirect_table,
+                images.indirect_outgoing,
+                images.indirect_raw,
+            ));
         }
         history.retire(gpu)?;
         Ok(frames)
@@ -531,7 +541,7 @@ fn bounce_cells_shade_and_gather_what_the_scene_predicts() -> Result<()> {
     let camera = Yard::camera(0)?;
     let plain = yard.sequence(&mut gpu, &cache, settings(false), &[camera])?;
     let frames = yard.sequence(&mut gpu, &cache, settings(true), &[camera; 8])?;
-    let (red, Some(words), Some(outgoing)) = frames.last().context("no frame")? else {
+    let (red, Some(words), Some(outgoing), _) = frames.last().context("no frame")? else {
         anyhow::bail!("the table or the outgoing radiance was not read");
     };
     let previous = frames[6].1.as_ref().context("table was not read")?;
@@ -665,6 +675,105 @@ fn bounce_cells_shade_and_gather_what_the_scene_predicts() -> Result<()> {
         "{pixels} wall pixels are {:.3} to {:.3} of their cell's radiance",
         ratios.0,
         ratios.1
+    );
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// The cell filter at Renderlab's default settings (bounce on, filter bits 15), on the
+/// yard under its uniform sky. In every frame of a still sequence, every valid cell's
+/// hot record is what `gi_filter_cell` computes from the unfiltered sources: the
+/// tent-, normal- and plane-weighted mean of its own value and its tangent neighbours',
+/// for the sky SH and for the bounce SH. The filter moves nearly every cell's sky value,
+/// so agreeing with it is not agreeing with the unfiltered one. Contrast refine never
+/// fires on this scene (no cell is four times darker than an agreeing neighbour), so
+/// its split flag is only checked to stay clear.
+#[test]
+fn filtered_cells_are_the_weighted_mean_of_their_unfiltered_neighbourhood() -> Result<()> {
+    let path = root("gi-cache-filter");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let yard = Yard::new();
+    let indirect = Some(Indirect {
+        settings: IndirectSettings {
+            slots_log2: 14,
+            ..Default::default()
+        },
+        read_table: true,
+    });
+    let frames = yard.sequence(&mut gpu, &cache, indirect, &[Yard::camera(0)?; 6])?;
+    let mut last = (0, 0, 0, 0f64);
+    for (index, frame) in frames.iter().enumerate() {
+        let (Some(words), Some(sources)) = (&frame.1, &frame.3) else {
+            anyhow::bail!("the table or the filter sources were not read");
+        };
+        let table = Table::new(words)?;
+        ensure!(
+            table.filter() == (15, 0.5),
+            "the filter is not at its default: {:?}",
+            table.filter()
+        );
+        let raw = gi_cache_reference::Raw(sources);
+        let cells = table.cells();
+        let find: std::collections::HashMap<_, _> = cells
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ((c.level, c.bin, c.lattice), i))
+            .collect();
+        let apart = |a: &[f64], b: &[f64]| {
+            a.iter()
+                .zip(b)
+                .map(|(x, y)| (x - y).abs())
+                .fold(0f64, f64::max)
+        };
+        let (mut valid, mut moved, mut bounced, mut neighbours) = (0, 0, 0, 0);
+        for cell in cells.iter().filter(|c| c.valid) {
+            valid += 1;
+            let expected = gi_cache_reference::filter(&table, &raw, &cells, &find, cell);
+            neighbours += expected.neighbours;
+            // Halves of values in [-1, 1], scaled; the filter's own sums are f32.
+            let scale = f64::from(cell.scale);
+            let stored: Vec<f64> = cell.sh.iter().map(|h| f64::from(*h) * scale).collect();
+            ensure!(
+                apart(&stored, &expected.sky) < 2e-3 * scale,
+                "frame {index}, slot {} at {:?}: sky SH is not its filtered value",
+                cell.slot,
+                cell.point
+            );
+            moved += usize::from(apart(&expected.sky, &raw.sky(cell.slot)) > 2e-3 * scale);
+            if let Some(bounce) = &expected.bounce {
+                let scale = f64::from(cell.bounce_scale.max(0.));
+                let stored: Vec<f64> = cell.bounce.iter().map(|h| f64::from(*h) * scale).collect();
+                let top = bounce.iter().fold(scale, |m, v| m.max(v.abs()));
+                ensure!(
+                    apart(&stored, bounce) <= 2e-3 * top,
+                    "frame {index}, slot {} at {:?}: bounce SH is not its filtered value",
+                    cell.slot,
+                    cell.point
+                );
+                bounced += 1;
+            }
+            ensure!(
+                !cell.split && !expected.split,
+                "frame {index}, slot {}: an unexpected split",
+                cell.slot
+            );
+        }
+        last = (
+            valid,
+            moved,
+            bounced,
+            neighbours as f64 / valid.max(1) as f64,
+        );
+    }
+    eprintln!(
+        "last frame: {} valid cells, {} moved by the filter, {} with filtered bounce, {:.2} neighbours a cell",
+        last.0, last.1, last.2, last.3
+    );
+    ensure!(
+        last.0 >= 2000 && last.1 * 10 >= last.0 * 9 && last.2 == last.0 && last.3 > 6.,
+        "the filter replay covered too little: {last:?}"
     );
     gpu.collect()?;
     gpu.assert_clean()?;

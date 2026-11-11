@@ -246,8 +246,8 @@ impl Cache {
             .validate()
             .map_err(|e| anyhow::anyhow!("indirect settings: {e}"))?;
         ensure!(
-            settings.enabled && !settings.force_software && settings.filter == 0,
-            "the cache is assembled on hardware rays, and its cell filter has no replay yet"
+            settings.enabled && !settings.force_software,
+            "the cache is assembled on hardware rays only"
         );
         let standard = crate::program::STANDARD_PROGRAM;
         ensure!(
@@ -295,6 +295,11 @@ impl Cache {
     /// Every slot's outgoing radiance (bounce), for reading back.
     pub(crate) fn outgoing(&self) -> Option<&StorageBuffer> {
         self.settings.bounce.then_some(&self.outgoing)
+    }
+    /// The filter's sources (22 words a slot: hot words 1 to 22 before filtering), for
+    /// reading back; None unless the filter runs.
+    pub(crate) fn raw(&self) -> Option<&StorageBuffer> {
+        (self.settings.bounce && self.settings.filter != 0).then_some(&self.raw)
     }
     /// `Renderer::reset_indirect`: the next frame starts from an empty table.
     pub fn reset(&mut self) {

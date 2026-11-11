@@ -1462,8 +1462,8 @@ and keeps it. Each frame writes the header, uploads the frame record, the draw t
 and the placement matrices, runs the plan's passes between the fresh estimator and
 shading (probe, three claim and resolve rounds, scan, setup, rays, finish, integrate,
 each only when the plan has it), and binds the table to shading at lighting binding
-20. Refused for now: the cell filter, software rays, and settings or a light count
-that change within a sequence. Bounce is described below.
+20. Refused for now: software rays, and settings or a light count that change within
+a sequence. Bounce and the cell filter are described below.
 
 **Replays** (`tests/ara_backend/cases/gi_cache.rs`, reference in
 `gi_cache_reference.rs`), on a 12 m floor with a 12 m wall under a uniform sky:
@@ -1552,9 +1552,24 @@ runs of the 12-frame moving sequence are identical in every table word and pixel
 (14,516 cells after the first frame, 23,613 after the twelfth, the gathers' hit cells
 included).
 
-**The cell filter** is wired into the pass list but refused: `gi_filter` reflects,
-emits and compiles (`cache_kernels_reflect_validate_and_compile`), and has no replay.
-Renderlab's default settings have it on, so it is next.
+**The cell filter.** With bounce on and filter bits set, `gi_filter` runs once every
+value of the frame is written and before cell shading reads them; the sources buffer
+(22 words a slot) is then table-sized. Renderlab's default settings (bounce, filter
+bits 15) are now a configuration the backend runs.
+`filtered_cells_are_the_weighted_mean_of_their_unfiltered_neighbourhood` reads the
+sources back and recomputes `gi_filter_cell` on the CPU for every valid cell in each
+of six frames: the tent-, normal- and plane-weighted mean of the cell's own value and
+its tangent neighbours', found by level, bin and lattice coordinates from the cold
+records, for the sky SH and for the bounce SH. In the last frame all 2,495 valid cells
+agree to f16 precision, with 6.9 neighbours a cell; the filter moves 2,465 of them,
+so agreeing with it is not agreeing with the unfiltered value. **Not exercised:**
+contrast refine (bit 2) never fires on that scene or, by the cell counts, on M5-A, so
+its split flag is only checked to stay clear, and with an environment map its
+openness reads the diffuse cube, which the reference does not model.
+
+`ara_frame --filter` (implies `--bounce`) is the cache at Renderlab's defaults but for
+the 2^17-slot table; on Metal two runs of the 12-frame moving sequence are identical
+in every table word and pixel.
 
 One adapter defect surfaced with these kernels: the SPIR-V path's textual rewrite of
 resource names decided "struct member" by looking back over comments, so a table
