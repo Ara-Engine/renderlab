@@ -109,7 +109,8 @@ const LC_STRIDE:u32={STRIDE}u;
 const LC_ROW:u32={ROW}u;
 const LC_SLOTS:u32={MAX_SLOTS}u;
 // view: world to view (forward -Z). proj: x and y projection scales, near (metres), slices
-// per log2 unit. info: x lights, y clustered, z TR1 sample. far: x camera far, y shadow near.
+// per log2 unit. info: x lights, y clustered, z TR1 sample, w restart disk rays. far: x camera
+// far, y shadow near.
 // shadows: pooled map layers.
 struct LcFrame {{ view:mat4x4<f32>, proj:vec4<f32>, info:vec4<u32>, far:vec4<f32>, shadows:array<mat4x4<f32>,{}>, tiles:array<vec4<f32>,{MAX_SLOTS}> }};
 ",
@@ -120,6 +121,31 @@ pub(crate) const KERNEL: &str = include_str!("../shaders/light_cluster.wgsl");
 const API: &str = include_str!("../shaders/light_cluster_api.wgsl");
 /// Local-light visibility: hard at radius zero, four disk rays otherwise (LC2).
 const RAY: &str = include_str!("../shaders/local_light_ray.wgsl");
+/// P-RELIT's per-pixel restart budget for local lights (U-SPECK2, docs/speck2.md), on traced
+/// ray stages: a camera receiver the resolve restarts this frame (`rl_restarts`) has no
+/// history to average its penumbrae, so its soft local lights trace `LcFrame.info.w` disk
+/// rays instead of four. Every other composition gets the empty stub.
+const RESTART_BUDGET: &str = "fn rl_local_budget(world:vec3<f32>) { let restart=rl_light_frame.info.w; if restart<=4u { return; } if rl_restarts(world) { rl_local_rays=restart; } }\n";
+/// Whether the resolve restarts a static receiver at `world` this frame: the resolve's own
+/// tests (shaders/temporal_zones.wgsl) on the same record, for the estimators that give a
+/// restarted receiver more samples (local-light disk rays here, glossy strata in
+/// shaders/reflections.wgsl). Traced stages only: the others have no frame record.
+const RESTARTS: &str = "fn rl_restarts(world:vec3<f32>)->bool { return rl_zone_caster_shadow(world) || rl_zone_relit(world); }\n";
+const RESTART_BUDGET_STUB: &str = "fn rl_local_budget(world:vec3<f32>) {}\n";
+/// Disk rays a restarted receiver traces per soft local light (`LcFrame.info.w`).
+const RESTART_RAYS: u32 = 16;
+/// The count in force. Measurement switch: `RENDERLAB_LOCAL_RESTART_RAYS` replaces it for a
+/// process (4 or less switches the budget off).
+fn restart_rays() -> u32 {
+    static RAYS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *RAYS.get_or_init(|| {
+        std::env::var("RENDERLAB_LOCAL_RESTART_RAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(RESTART_RAYS)
+            .min(64)
+    })
+}
 const MAP: &str = "fn rl_local_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 { let slot=(light.kind.w&0xffffu)-1u; if slot>=LC_SLOTS { return 1.0; } if rl_light_frame.tiles[slot].z<=0.0 { return 1.0; } return mix(1.0,rl_local_shadow_map(light,receiver,l),rl_light_frame.tiles[slot].w); }\n";
 
 /// The acceleration structure a composed head binds for shading, if any: the hardware
@@ -140,7 +166,23 @@ pub(crate) fn shading_api(head: &str, traced: bool) -> String {
         Some(scene) => RAY.replace("LC_SCENE", scene),
         None => MAP.to_owned(),
     };
-    format!("{}{API}{visibility}", constants())
+    // Only traced stages see the frame's restart zones (`primary_frame.zones`), and only ray
+    // stages trace disk rays.
+    let budget = if traced && !head.is_empty() {
+        let zones = crate::renderer::primary_ray_gpu::temporal_reconstruction::zones_source(
+            "primary_frame.zones",
+        )
+        .replace("tr1_", "rl_zone_");
+        let budget = if ray_scene(head, traced).is_some() {
+            RESTART_BUDGET
+        } else {
+            RESTART_BUDGET_STUB
+        };
+        format!("{budget}{RESTARTS}{zones}")
+    } else {
+        RESTART_BUDGET_STUB.to_owned()
+    };
+    format!("{}{API}{visibility}{budget}", constants())
 }
 
 fn luminance(rgb: [f32; 3]) -> f32 {
@@ -441,6 +483,7 @@ pub(crate) fn header(
     }
     words[20] = count;
     words[21] = u32::from(enabled);
+    words[23] = restart_rays();
     words[24] = far.to_bits();
     for (layer, m) in layers.iter().enumerate() {
         for (k, v) in m.to_cols_array().into_iter().enumerate() {

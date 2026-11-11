@@ -33,7 +33,22 @@ const RL_UNTRACED:f32=0.5;
 const RL_GLOSSY_RAYS:u32=4u;
 const RL_GLOSSY_MAX:u32=16u;
 const RL_RAYS_PER_ROUGHNESS:f32=48.0;
+// A receiver the resolve restarts this frame (rl_restarts: a changed local light's restart
+// sphere, a moving caster's swept shadow) shows this frame's strata alone, so its glossy
+// lobe traces primary_frame.reflection.w times the strata (1 or less: the ordinary count;
+// U-SPECK2, docs/speck2.md).
 const RL_FAR:f32=1.0e6;
+// Lone-stratum bound (U-SPECK2, docs/speck2.md). A glossy pixel's estimate is the mean of at
+// most 16 strata, and temporal reconstruction averages some 16 frames of it: about 256
+// samples. A target one ray in tens of thousands strikes (a lamp's bulb seen from across a
+// yard, hundreds of times brighter than the rest of its lobe) cannot average out at that
+// count; each strike is a white pixel that lasts as long as its history. So the brightest
+// stratum counts for at most primary_frame.reflection.z times the luminance of all the
+// others together (1: at most half the estimate; 0: no bound). Two strata on the same
+// feature bound nothing, so a feature the lobe resolves keeps its energy; what the bound
+// removes is the mean of targets too rare to draw (measured in docs/speck2.md). Mirror
+// rays (one ray, the exact image) are never bound.
+const RL_LUMA:vec3<f32>=vec3<f32>(0.2126,0.7152,0.0722);
 
 var<private> rl_specular:vec4<f32>;
 // Shading a reflection hit: light visibility traces its own shadow ray (rl_hit_shadow),
@@ -118,7 +133,11 @@ fn rl_hit_input(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,width:f32,spread:f
     let material=primary_materials[hit.batch].value;
     let positions=array<vec3<f32>,3>(ta.position,tb.position,tc.position);
     let info=primary_placements[hit.placement];
-    let receiver=Receiver(receiver_world,geometric,vec2<i32>(pixel),info&0x1fffffffu,primary_epsilon(positions,hit.placement),(info&0x20000000u)!=0u);
+    // The hit's shadow origin is offset toward each light (shadow_origin's `thin` side, as
+    // rl_hit_shadow's): its viewed side is the reflection ray's, not the camera's, and the
+    // camera-side offset started a hit's local-light rays inside every surface that faces
+    // away from the camera (U-SPECK2, docs/speck2.md).
+    let receiver=Receiver(receiver_world,geometric,vec2<i32>(pixel),info&0x1fffffffu,primary_epsilon(positions,hit.placement),true);
     // DC1's world-space decals project onto hits as onto camera receivers.
     let input=decal_prepare(SurfaceInput(world,e1*bary_gradients[0].x+e2*bary_gradients[0].y,e1*bary_gradients[1].x+e2*bary_gradients[1].y,source_geometric,
         a.normal*w.x+b.normal*w.y+c.normal*w.z,normal_dx,normal_dy,a.tangent*w.x+b.tangent*w.y+c.tangent*w.z,a.handedness,
@@ -153,7 +172,9 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let width=pixel_angle*length(input.world-input.eye);
     let curvature=2.0*max(length(input.normal_dx),length(input.normal_dy))/max(length(input.normal),1e-30);
     let mirror=rough<RL_MIRROR;
-    let count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
+    var count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
+    let restart_strata=primary_frame.reflection.w;
+    if !mirror && restart_strata>1.0 && rl_restarts(input.world) {count*=u32(restart_strata);}
     let cone_alpha=select(alpha*inverseSqrt(f32(count)),0.0,mirror);
     let spread=pixel_angle+curvature+2.0*cone_alpha;
     let basis=rl_basis(n);
@@ -164,6 +185,8 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let rotation=f32(seed>>8u)*(1.0/16777216.0);
     let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
     var sum=vec3<f32>(0.0);
+    // The brightest stratum (rgb) and its luminance (w), for the lone-stratum bound.
+    var top=vec4<f32>(0.0);
     var valid=0u;
     var shaded=false;
     // PP1/SK1 integration: reuse the function-scope query above. Naga 30 emits an
@@ -202,12 +225,19 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
             radiance=rl_sky(d,cone_alpha);
         }
         sum+=radiance;
+        let level=dot(radiance,RL_LUMA);
+        if level>top.w {top=vec4<f32>(radiance,level);}
         valid+=1u;
     }
     rl_reflection_hit=false;
     rl_hit_variance=0.0;
     if shaded {rl_load_parameters(batch);}
     if valid==0u {return;}
+    let lone=primary_frame.reflection.z;
+    if lone>0.0 && valid>1u {
+        let rest=max(dot(sum,RL_LUMA)-top.w,0.0)*lone;
+        if top.w>rest {sum-=top.rgb*(1.0-rest/top.w);}
+    }
     rl_specular=vec4<f32>(sum/f32(valid),traced);
 }
 // ---- end of M7-R1 traced reflections ----
