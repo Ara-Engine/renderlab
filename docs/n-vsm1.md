@@ -201,6 +201,31 @@ What is still worse than `Surface`:
 
 What is better: the cut frame (159 ms to 1.6 ms on the fox scene), every frame's cost (23.6 to 1.7 ms after the cut), no sampling noise, a slightly steadier flight, S3 leaks, and the fox scene's picture against RT after the cut (1.38-1.51 against 1.54-1.75).
 
+## Part 3 (2026-11-11, after the part 2 merge at main `934d8e9`): one screen, nothing landed
+
+Brief: the two-layer leak at page raster, the penumbra bias and S3 flips, cost by skipping, S4/S5 rescored, Showcase. **None of the five is done.** This section records the one experiment that ran and what the next session should start from. The code is `2035f19`'s; the default recommendation is unchanged (keep `Surface`).
+
+### The rectangle on S2 is not the least column thickness (M)
+
+Root saw a clean one-signed rectangle in Disk's S2 error (`review-s2-penumbra.jpg`) and asked for a page, level or window boundary to be ruled out first. My first suspect was different: a sheet hovering 2 to 5 texels over the floor (S2's tiles) with a 4-texel least thickness becomes a block standing on the floor. Screened on one test binary through `RENDERLAB_VD`, S1 and S2, unchanged scorers:
+
+| Variant | S1 partial RMS | S2 partial RMS | S2 camera-track leaks |
+|---|---|---|---|
+| `2035f19` (4 texels) | .137 / .136 | .093-.098 | 87, 8, 92 |
+| Thickness at most a quarter of the height above the receiver | .134 / .133 | .093-.098 | 88, 8, 92 |
+| The same, with the neighbour rule for closed columns too | .134 / .133 | .093-.098 | 88, 8, 92 |
+| 0.25 texel, neighbour rule for all | .133 / .132 | .092-.097 | 88, 8, 93 |
+| Surface | .082 / .080 | .073-.075 | 0 |
+
+**Rejected: thickness moves the error by 2 to 3 percent.** The variants were not kept. Root's own suspects (a page, level or window boundary under that rectangle) are **not yet tested**.
+
+### Where to start next
+
+1. **The rectangle.** Dump Disk's count beside the film's for S2 `shadow-step` frame 16 and overlay the receiver level (`vsm_level_in`) and the page grid. If the rectangle follows a page or level edge, the request radius in `vd_mark` or the level hand-over in `vd_map` is the place; if it follows a tile, it is the near field (the one-texel bias against sheets hovering 0.2 to 5 mm, and the six-pixel screen samples).
+2. **S1 and S2 may be the map's resolution, not the integration (I).** Their partial pixels are the one-to-two-pixel transitions of contact shadows, where a map-only answer is a texel off and an exact walk is not. If so, the cheap answer is an exact test only for receivers whose mask is neither empty nor full and whose lowest occluder is within a few texels (Hybrid's queue, sized by this test), and its cost is what has to be measured.
+3. **Two-layer leak.** Widening undersides cannot serve both lookups: `Surface` needs the hidden caster's triangle as a candidate, so it needs a real third layer (8 bytes per texel per level: 268 MiB more at eight levels of 2048 texels, on top of 536 MiB for two; one more raster pass over stale pages). A widened underside (4 bytes per texel, 134 MiB) would fix Disk alone. Neither is built or measured.
+4. **Cost.** Untouched since part 2: the map windows are 1.0 ms of the 1.19 ms lookup.
+
 ## For the ara-gpu backend
 
 - **New uniform buffer:** `VdFrame`, 1,120 bytes, at the disk lookup's group 0 binding 50 (world-to-clip matrix, image size and jitter index, 65 two-word masks, 64 sample positions). No new buffer or texture kind, sampler or device feature.
