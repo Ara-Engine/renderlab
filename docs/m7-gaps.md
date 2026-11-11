@@ -306,6 +306,15 @@ DC1: [projected box decals](m7-dc1.md) modify resolved surface inputs before pro
 
 ## Reflections
 
+- **M8 P-GLOSSY (2026-11-11, parked, [p-glossy.md](p-glossy.md)): glossy is Showcase's
+  largest non-RT cost and the fix is half landed.** Shared 4 strata (branch `t3/p-glossy`,
+  screen `traced=4`) halve Showcase non-RT shading (11.4 against 23.5-24.1 ms on pure main)
+  and take RT from 8.69 to 5.77 ms, with held and moving frames equal to base. Open: the
+  branch's restructured entry and workgroup exchange cost 8-12 ms at 16 strata (bisect
+  prepared as lease F); the cut frame shows faint mottle in place of base's specks; 71% of
+  Showcase's glossy pixels sit at roughness 0.4-0.5, where one ray is visibly worse. Hits'
+  sun walks are about 8 ms of the 16-strata cost and closest-hit walks about 17 ms.
+
 - **M8 P-R2 (2026-11-10): workgroup ray compaction rejected before implementation.**
   The 1080p 8x4 ray-loop count replay gives max/mean 1.0797 on game-base (both
   paths) and 1.1433 on ara-pbr (both paths), below the required 1.4 gate.
