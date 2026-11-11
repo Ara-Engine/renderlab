@@ -285,7 +285,14 @@ fn reconstruction_accumulates_jittered_samples_into_edge_coverage() -> Result<()
         // Short pixels by how far their centre is from the card's outline, in pixels:
         // within one, two, three, further; and how many of them lie on the card.
         let (mut rings, mut inside) = ([0usize; 4], 0usize);
-        for (i, _) in all.enumerate().filter(|(_, w)| *w < samples - 0.01) {
+        // And those on the image's own border, with the sum of their weights.
+        let (mut border, mut border_weight) = (0usize, 0f32);
+        for (i, w) in all.enumerate().filter(|(_, w)| *w < samples - 0.01) {
+            let (x, y) = (i as u32 % SIZE[0], i as u32 / SIZE[0]);
+            if x == 0 || y == 0 || x == SIZE[0] - 1 || y == SIZE[1] - 1 {
+                border += 1;
+                border_weight += w;
+            }
             let centre = [i as u32 % SIZE[0], i as u32 / SIZE[0]].map(|c| c as f32 + 0.5);
             let signed = (0..2)
                 .map(|a| (outline[0][a] - centre[a]).max(centre[a] - outline[1][a]))
@@ -296,7 +303,8 @@ fn reconstruction_accumulates_jittered_samples_into_edge_coverage() -> Result<()
         let short: usize = rings.iter().sum();
         ensure!(
             (mean / samples - 1.).abs() < 0.01 && least >= 1.,
-            "frame {index}: weights {least} to {most}, mean {mean}; {short} pixels short of {samples} by {deficit:.0} samples in all; {rings:?} of them within 1, 2, 3 and more pixels of the card's outline, {inside} on the card"
+            "frame {index}: weights {least} to {most}, mean {mean}; {short} pixels short of {samples} by {deficit:.0} samples in all; {rings:?} of them within 1, 2, 3 and more pixels of the card's outline, {inside} on the card; {border} on the image's border with a mean weight of {:.2}",
+            border_weight / border.max(1) as f32
         );
         // Away from the edges the shading is smooth, so jittered samples agree with the
         // pixel-centre one.
