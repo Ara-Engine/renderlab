@@ -139,6 +139,7 @@ impl Engine {
         self.renderer.select_view(view)?;
         self.apply_look(at)?;
         let mode = self.views[at].desc.view_mode;
+        self.prepare_view_ids(self.views[at].desc.outputs.ids)?;
         self.render_selected(color, camera, mode)
     }
     /// The view's own output, as its last `render_view` left it.
@@ -243,11 +244,6 @@ impl Engine {
 fn validate(desc: &ViewDesc) -> Result<(), Error> {
     if desc.width == 0 || desc.height == 0 {
         return Err(Error::InvalidInput("view extent must be nonzero"));
-    }
-    if desc.outputs.ids {
-        return Err(Error::InvalidInput(
-            "view id output is not built yet (U-IDS, docs/design-id-output.md)",
-        ));
     }
     Ok(())
 }

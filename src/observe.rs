@@ -161,6 +161,12 @@ pub struct Events {
     /// Cumulative observations dropped because the caller did not drain events.
     pub dropped: u64,
     pub poll_cpu: Duration,
+    /// Finished id readbacks (`Engine::request_ids`), in request order.
+    pub ids: Vec<crate::IdReadback>,
+    /// Id requests whose copy did not map within `ID_TICKS` ticks, each reported once.
+    pub ids_lost: Vec<crate::IdsLost>,
+    /// Cumulative id events dropped because more than `KEPT_ID_EVENTS` waited for a poll.
+    pub ids_dropped: u64,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TimingStatus {

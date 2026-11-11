@@ -284,6 +284,13 @@ pub(super) struct Targets {
     aa: Depth,
     generation: u64,
 }
+impl Targets {
+    /// The view's opaque view depth (R32Float, `dot(world - eye, forward)` of the
+    /// unjittered camera), after a transparent pass ran; the ID pass tests glass against it.
+    pub(super) fn opaque_depth(&self) -> &wgpu::TextureView {
+        &self.depth.view
+    }
+}
 struct GlassPipelines {
     program: u64,
     key: [u8; 32],
