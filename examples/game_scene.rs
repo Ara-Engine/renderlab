@@ -25,7 +25,10 @@
 //! which replaces the ground with the registered quarry scans and its RLE2 sky (manifest
 //! keys `asset`, `limits`, `environment`, `exposure_stops`). `--diag KEY=VALUE` (repeatable)
 //! sets estimator switches the public settings do not expose, for bisecting image defects
-//! (P-FLAT, docs/p-flat.md; keys in `Diag::parse`).
+//! (P-FLAT, docs/p-flat.md; keys in `Diag::parse`). P-RELIT's scene events (docs/p-relit.md)
+//! happen at frame 24: `fire=off` or `fire=on` switches the fire light, `fire=move` circles
+//! it from the first frame, `glow=step` dims the lamp bulbs' emission to a tenth, and `cut=1`
+//! jumps the camera a third of the way round its orbit with `Engine::cut`.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -69,6 +72,8 @@ fn tinted_program(tint: f32) -> String {
     )
 }
 const FPS: f32 = 30.0;
+/// The frame of P-RELIT's scene events (`--diag fire=off|on`, `glow=step`, `cut=1`).
+const EVENT_FRAME: u32 = 24;
 /// The scene's latitude for `Sun::at_hour`, radians.
 const LATITUDE: f32 = 0.7;
 
@@ -294,13 +299,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Scene switches (`flicker=0`: a steady fire light; `lamp=post`: v0.1.0's lamp placement,
     // with each soft source inside its own fixture; `sun=0`: no sun) stay here; the rest are
     // estimator switches.
-    let (scene_keys, estimator_keys): (Vec<_>, Vec<_>) = args
-        .diag
-        .iter()
-        .cloned()
-        .partition(|(k, _)| matches!(k.as_str(), "flicker" | "lamp" | "sun"));
+    let (scene_keys, estimator_keys): (Vec<_>, Vec<_>) =
+        args.diag.iter().cloned().partition(|(k, _)| {
+            matches!(
+                k.as_str(),
+                "flicker" | "lamp" | "sun" | "fire" | "glow" | "cut"
+            )
+        });
     let diag = Diag::parse(&estimator_keys)?;
-    let steady_fire = scene_keys.iter().any(|(k, v)| k == "flicker" && v == "0");
+    let scene_key = |key: &str, value: &str| scene_keys.iter().any(|(k, v)| k == key && v == value);
+    let steady_fire = scene_key("flicker", "0");
+    let (fire_off, fire_on, fire_moves) = (
+        scene_key("fire", "off"),
+        scene_key("fire", "on"),
+        scene_key("fire", "move"),
+    );
+    let (glow_steps, cuts) = (scene_key("glow", "step"), scene_key("cut", "1"));
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
     // A soft source must clear its own fixture, or every receiver sees it partly blocked: a
@@ -682,9 +696,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keep the courtyard's point/spot/fire sources; night mode adds 24 LC3 lanterns.
     // The facade shadows every contributing RT local, or up to 128 cached map lights.
     // Source radii retain soft penumbrae on both paths.
-    let lanterns = |t: f32| {
+    let lanterns = |t: f32, frame: u32| {
         let ft = if steady_fire { 0.0 } else { t };
-        let flicker = 0.85 + 0.1 * (23.0 * ft).sin() + 0.05 * (37.0 * ft + 1.0).sin();
+        // P-RELIT: the fire switched off or on at the event frame.
+        let lit = if frame < EVENT_FRAME {
+            !fire_on
+        } else {
+            !fire_off
+        };
+        let flicker = if lit {
+            0.85 + 0.1 * (23.0 * ft).sin() + 0.05 * (37.0 * ft + 1.0).sin()
+        } else {
+            0.0
+        };
+        // P-RELIT: the fire light circling its brazier, 0.6 m out.
+        let fire_offset = if fire_moves {
+            0.6 * Vec3::new((3.0 * t).cos(), 0.0, (3.0 * t).sin())
+        } else {
+            Vec3::ZERO
+        };
         let mut lights = vec![
             Light::Point {
                 position: arch_lamp - Vec3::new(0.0, arch_drop, 0.0),
@@ -710,7 +740,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 source_radius: 0.1,
             },
             Light::Point {
-                position: flame + Vec3::new(0.0, 0.3, 0.0),
+                position: flame + Vec3::new(0.0, 0.3, 0.0) + fire_offset,
                 candela: [
                     24_000.0 * flicker * lamp_scale,
                     12_000.0 * flicker * lamp_scale,
@@ -793,7 +823,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ground = at(3.0 * walk.sin(), 0.0, -1.0 + 3.0 * walk.cos());
         let heading = walk.cos().atan2(-walk.sin());
         let focus = hero.update(&mut engine, ground, heading, t)?;
-        engine.set_lights(&diag.lights(lanterns(t)))?;
+        engine.set_lights(&diag.lights(lanterns(t, frame)))?;
+        if glow_steps && frame == EVENT_FRAME {
+            let dim = [6_000.0, 4_000.0, 1_800.0].map(|v| v * lamp_scale);
+            engine.set_material_parameters(bulb, &[("glow", Value::Vec3(dim))])?;
+        }
         engine.set_transform(
             spinner,
             Mat4::from_translation(at(-2.5, 0.6 + 0.3 * (2.0 * t).sin(), 3.0))
@@ -801,7 +835,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 * Mat4::from_rotation_x(0.6 * t),
         )?;
         // Fly path: a slow orbit that descends and closes in on the hero.
-        let orbit = 0.6 + 0.25 * t;
+        let cut = cuts && frame >= EVENT_FRAME;
+        if cuts && frame == EVENT_FRAME {
+            engine.cut();
+        }
+        let orbit = 0.6 + 0.25 * t + if cut { 2.1 } else { 0.0 };
         let radius = 14.0 - 4.0 * (t / 2.0).min(1.0);
         let eye = anchor
             + Vec3::new(
@@ -927,7 +965,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "debug_build": cfg!(debug_assertions), "size": args.size, "exposure_stops": exposure,
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),
         "fox": args.fox, "hour": args.hour,
-        "night_lanterns": args.night_lanterns, "local_lights": diag.lights(lanterns(0.0)).len(),
+        "night_lanterns": args.night_lanterns, "local_lights": diag.lights(lanterns(0.0, 0)).len(),
         "diag": args.diag, "lamp_head": post_lamp.to_array(),
         "local_shadow_count":engine.settings().local_shadows.count,
         "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
