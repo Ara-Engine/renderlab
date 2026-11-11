@@ -842,3 +842,19 @@ The tests were only ever verified on the RTX 4070 SUPER; docs/camera-depth.md re
   - If they pass there, the difference is RADV raster precision, or the tests' thresholds depend on the vendor. Fix the threshold, or the depth bias on thin grazing blockers, so non-NVIDIA hardware is covered.
   - If they also fail there, the bug is on main.
 - **Harness note:** about 84 shadow tests that are ignored by default also fail under `--include-ignored` in one process. They need fixture variables, `--release`, or one process per test, because a second validation-logger install poisons a `Once`. Run them one per process.
+
+## Showcase non-RT through Ara, first render on the RTX (2026-11-11)
+
+Ara main d2d990f26, Renderlab pin 901c1d2, RTX 4070 SUPER, 1080p, sky map, quiet slot. This is the baseline for the glossy unit and for P-SPLIT's cold-start case.
+- **Start:** the first `ara capture` timed out at 120 s with no frame. The pipeline cache grew during compilation (31.8 -> 32.4 MiB), so persistence works through Ara. The second try also took about two minutes in total, against 35 s for the game scene after a kill: Showcase compiles more program kernels (mixed list, glass, toon).
+- **Frame:** 40.5 ms GPU per frame over 120 frames, against 3.0 ms for Ara's own renderer.
+
+  | Pass | ms |
+  |---|---|
+  | shading | 33.4 (82% of the frame) |
+  | visibility | 2.0 |
+  | receivers | 0.5 |
+  | reconstruction | 0.5 |
+
+  This is before P-SKY, which should take part of the shading cost. The rest is the glossy unit's target.
+- **Picture:** complete and correct. Stability mean change is 0.008; 0.1% of 16x16 blocks flicker.
