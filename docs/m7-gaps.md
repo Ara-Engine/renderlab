@@ -933,7 +933,21 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
 
 ## Specks after a game-scene cut (root, 2026-11-11)
 
-**OPEN (owner: root looks once now; the cut unit at the latest).** In the game scene on non-RT, the frames after a camera cut (frames 25 and 28 of P-RELIT's cut case, 720p) show single-pixel bright specks scattered on the open ground. They are in the no-history control, in main and in the P-RELIT branch alike, so they predate P-RELIT. Stray white pixels after cuts are on the owner's watch list. Next: check RT, find which pass writes them (GI gather cap after a cold cache, or glossy), and how many frames they last.
+**OPEN (owner: root, a clamp experiment; the cut unit at the latest). Cause found: GI cache fireflies in newly seen cells, on both paths.** Game scene with the fox, 720p, cut at frame 24, main 575596b, RTX 4070 SUPER. After the cut the open ground shows soft bright blotches a few pixels across (GI-cell sized), not single pixels.
+
+Pixels on the open ground more than 10 codes above their 21-pixel median:
+
+| Frame | 23 | 24 (cut) | 25 | 26 | 28 | 30 | 34 | 38 | 39 |
+|---|---|---|---|---|---|---|---|---|---|
+| Non-RT | 122 | 230 | 603 | 1080 | 1217 | 1035 | 613 | 517 | 517 |
+| Non-RT, GI off | 118 | 210 | 212 | 137 | 73 | 31 | 1 | 0 | 0 |
+| RT | 122 | 235 | 580 | 1039 | 1134 | 934 | 538 | 458 | 450 |
+| RT, GI off | 120 | 217 | 180 | 114 | 42 | 3 | 0 | 0 | 0 |
+
+- Reflections off and particles off change nothing after the cut (identical counts to the default).
+- The blotches peak four frames after the cut and are still there fifteen frames later, at about 40% of the peak and no longer falling.
+- `shaders/gi_cache.wgsl` has no clamp on a rare bright sample entering a young cell. The scene's small bright emitters (bulbs, the fire) are the likely source; see the emission-firefly note under GI.
+- **Next:** clamp a new sample against the cell's history or its neighbours' mean while the cell is young, and check the same sequence plus the quarry cut. Unreal's cut shows no such blotches, so this is a visible loss on cuts.
 
 ## RT cost of a small transparent surface (Ara integration thread, Showcase, 2026-11-11)
 
