@@ -20,14 +20,15 @@ use super::{
 };
 use crate::{
     Camera, Decal, EmitterDescriptor, Error, FrameId, FrameReport, Light, Mat4, MaterialDescriptor,
-    MeshData, PrimaryVisibility, SoftShadows, Value, Vertex,
+    MeshData, PrimaryVisibility, RenderScale, SoftShadows, Value, Vertex, ViewId,
     asset::{
         Asset, Primitive, Sampler, TangentStream, Texture as TextureData,
         environment::PreparedEnvironment, skin::Influence,
     },
     engine::{
         AssetHandles, Background, EmitterId, EnvironmentId, Image, MaterialDesc, MaterialId,
-        MeshId, ObjectId, ProgramId, Quality, Scene, Settings, Sky, Sun, TextureId,
+        MeshId, ObjectId, ProgramId, Quality, Scene, Settings, Sky, Sun, TextureId, ViewDesc,
+        ViewLook,
         settings::{atmosphere, lighting},
         state::{MaterialEntry, Residency, State},
     },
@@ -152,6 +153,11 @@ pub struct Engine {
     /// Frame sequences a resize or a settings or readback change ended, released at the
     /// next call that has the device.
     ended: Vec<forward::Frames>,
+    /// This layer renders one view (docs/design-views.md: views are not ported here): its
+    /// handle once created, and its look and render scale.
+    view: Option<ViewId>,
+    look: ViewLook,
+    render_scale: RenderScale,
 }
 
 /// One draw of a frame.
@@ -200,6 +206,9 @@ impl Engine {
             readback: true,
             refusals: Vec::new(),
             ended: Vec::new(),
+            view: None,
+            look: ViewLook::default(),
+            render_scale: RenderScale::Native,
         };
         engine.refuse_settings(&settings);
         Ok(engine)
@@ -287,24 +296,16 @@ impl Engine {
         if asked.sky_light != 1.0 {
             self.refuse("set_settings", "sky_light");
         }
-        if !asked.post.enabled {
-            self.refuse("set_settings", "post.enabled");
-        }
         // Every field named here is one this layer reads; a field added to `Settings`
         // later is missing from the list and so compares against its default.
         #[allow(clippy::needless_update)]
         let known = Settings {
-            quality: asked.quality,
             global_illumination: asked.global_illumination,
             temporal_reconstruction: asked.temporal_reconstruction,
-            render_scale: asked.render_scale,
-            exposure: asked.exposure,
             aerial_perspective: asked.aerial_perspective,
             height_fog: asked.height_fog,
             volumetric_fog: asked.volumetric_fog,
             local_shadows: asked.local_shadows,
-            post: asked.post,
-            reflections: asked.reflections,
             sky_light: asked.sky_light,
             ..Settings::default()
         };
@@ -624,22 +625,12 @@ impl Engine {
     }
 
     pub fn set_sun(&mut self, sun: Option<Sun>) -> Result<(), Error> {
-        lighting(
-            sun,
-            &self.state.lights,
-            self.state.sky,
-            self.state.settings.exposure,
-        )?;
+        lighting(sun, &self.state.lights, self.state.sky, self.look.exposure)?;
         self.state.sun = sun;
         Ok(())
     }
     pub fn set_lights(&mut self, lights: &[Light]) -> Result<(), Error> {
-        lighting(
-            self.state.sun,
-            lights,
-            self.state.sky,
-            self.state.settings.exposure,
-        )?;
+        lighting(self.state.sun, lights, self.state.sky, self.look.exposure)?;
         self.state.lights = lights.to_vec();
         Ok(())
     }
@@ -672,7 +663,6 @@ impl Engine {
     }
     pub fn set_settings(&mut self, settings: Settings) -> Result<(), Error> {
         atmosphere(self.state.sky, &settings).validate()?;
-        settings.post.validate()?;
         self.refuse_settings(&settings);
         if settings != self.state.settings {
             self.restart();
@@ -701,6 +691,7 @@ impl Engine {
             "call Engine::resize before Engine::render",
         ))?;
         let settings = self.state.settings;
+        let look = self.look.clone();
         let [opaque, transparent] = Self::placed(&self.state)?;
         // The frame's texture table covers its opaque objects alone.
         if transparent.iter().any(|p| {
@@ -723,12 +714,8 @@ impl Engine {
             // The sun's shadow planning wants a disk.
             angular_radius: 0.04,
         });
-        let (lit, shadows) = lighting(
-            Some(sun),
-            &self.state.lights,
-            self.state.sky,
-            settings.exposure,
-        )?;
+        let (lit, shadows) =
+            lighting(Some(sun), &self.state.lights, self.state.sky, look.exposure)?;
         let sun_shadows = shadows.requests.first().and_then(|r| match r {
             crate::ShadowRequest::Directional { split_ends } => Some(SunShadows {
                 split_ends: split_ends.clone(),
@@ -825,23 +812,23 @@ impl Engine {
             size,
             atmosphere: media,
             sun_shadows: sun_shadows.as_ref(),
-            primary: match settings.quality {
+            primary: match look.quality {
                 Quality::Realtime => Primary::TracedInteractive,
                 Quality::Reference => Primary::Traced,
             },
-            post: Some(settings.post),
+            post: Some(look.post),
             indirect: settings.global_illumination.then(|| Indirect {
                 settings: crate::IndirectSettings::default(),
                 read_table: false,
             }),
             reconstruction: settings.temporal_reconstruction.then(|| Reconstruct {
                 settings: crate::Reconstruction {
-                    scale: settings.render_scale,
+                    scale: self.render_scale,
                     ..Default::default()
                 },
                 read_history: false,
             }),
-            reflections: Some(settings.reflections),
+            reflections: Some(look.reflections),
             textures: textured.then_some(SceneTextures {
                 objects: &textures,
                 anisotropy_clamp: 1,
@@ -871,6 +858,7 @@ impl Engine {
         self.last = Some(images);
         self.frame += 1;
         Ok(FrameReport {
+            view: self.view.unwrap_or(ViewId(0)),
             frame: FrameId(self.frame),
             revision: crate::Revision(0),
             cpu: Default::default(),
@@ -886,7 +874,7 @@ impl Engine {
                 ..Default::default()
             },
             primary: PrimaryVisibility::Traced,
-            soft_shadows: match settings.quality {
+            soft_shadows: match look.quality {
                 Quality::Realtime => SoftShadows::Interactive,
                 Quality::Reference => SoftShadows::Exact,
             },
@@ -911,6 +899,80 @@ impl Engine {
             height: size[1],
             rgba8: display,
         })
+    }
+    // ---- One view (docs/design-views.md). This layer is not ported to views: it renders
+    // a single view, and the view calls map onto `resize`, `render`, `cut` and `capture`.
+
+    /// The view: a second is refused.
+    pub fn create_view(&mut self, desc: &ViewDesc) -> Result<ViewId, Error> {
+        if self.view.is_some() {
+            return Err(Error::InvalidInput("the ara-gpu layer renders one view"));
+        }
+        self.set_look(desc)?;
+        let view = ViewId(0);
+        self.view = Some(view);
+        Ok(view)
+    }
+    pub fn set_view(&mut self, view: ViewId, desc: &ViewDesc) -> Result<(), Error> {
+        self.check_view(view)?;
+        self.set_look(desc)
+    }
+    pub fn remove_view(&mut self, view: ViewId) -> Result<(), Error> {
+        self.check_view(view)?;
+        self.view = None;
+        Ok(())
+    }
+    pub fn render_view(
+        &mut self,
+        gpu: &mut GpuDevice,
+        view: ViewId,
+        camera: &Camera,
+    ) -> Result<FrameReport, Error> {
+        self.check_view(view)?;
+        self.render(gpu, camera)
+    }
+    pub fn cut_view(&mut self, view: ViewId) {
+        if self.view == Some(view) {
+            self.cut();
+        }
+    }
+    pub fn capture_view(&mut self, view: ViewId) -> Result<Image, Error> {
+        self.check_view(view)?;
+        self.capture()
+    }
+    /// One engine frame: its particle step (this layer has no particles).
+    pub fn tick(&mut self, seconds: f32) -> Result<(), Error> {
+        self.set_particle_step(seconds)
+    }
+    fn check_view(&self, view: ViewId) -> Result<(), Error> {
+        if self.view != Some(view) {
+            return Err(Error::InvalidInput("unknown or removed view"));
+        }
+        Ok(())
+    }
+    /// The view's size, look and render scale. A change of look or scale starts a new
+    /// frame sequence, as a settings change does.
+    fn set_look(&mut self, desc: &ViewDesc) -> Result<(), Error> {
+        desc.look.post.validate()?;
+        if desc.outputs.ids {
+            return Err(Error::InvalidInput("the ara-gpu layer has no id output"));
+        }
+        if desc.view_mode != crate::ViewMode::Lit {
+            self.refuse("create_view", "view_mode");
+        }
+        if !desc.look.post.enabled {
+            self.refuse("create_view", "look.post.enabled");
+        }
+        if desc.look.colour_lut.is_some() {
+            self.refuse("create_view", "look.colour_lut");
+        }
+        self.resize(desc.width, desc.height)?;
+        if desc.look != self.look || desc.render_scale != self.render_scale {
+            self.restart();
+        }
+        self.look = desc.look.clone();
+        self.render_scale = desc.render_scale;
+        Ok(())
     }
 }
 
@@ -972,9 +1034,6 @@ impl Scene for Bound<'_> {
     ) -> Result<EmitterId, Error> {
         self.engine.create_emitter(desc, sprite)
     }
-    fn set_particle_step(&mut self, seconds: f32) -> Result<(), Error> {
-        self.engine.set_particle_step(seconds)
-    }
     fn spawn(
         &mut self,
         mesh: MeshId,
@@ -1004,16 +1063,25 @@ impl Scene for Bound<'_> {
     fn settings(&self) -> Settings {
         self.engine.settings()
     }
-    fn resize(&mut self, width: u32, height: u32) -> Result<(), Error> {
-        self.engine.resize(width, height)
+    fn tick(&mut self, seconds: f32) -> Result<(), Error> {
+        self.engine.tick(seconds)
     }
-    fn render(&mut self, camera: &Camera) -> Result<FrameReport, Error> {
-        self.engine.render(self.gpu, camera)
+    fn create_view(&mut self, desc: &ViewDesc) -> Result<ViewId, Error> {
+        self.engine.create_view(desc)
     }
-    fn cut(&mut self) {
-        self.engine.cut()
+    fn set_view(&mut self, view: ViewId, desc: &ViewDesc) -> Result<(), Error> {
+        self.engine.set_view(view, desc)
     }
-    fn capture(&mut self) -> Result<Image, Error> {
-        self.engine.capture()
+    fn remove_view(&mut self, view: ViewId) -> Result<(), Error> {
+        self.engine.remove_view(view)
+    }
+    fn render_view(&mut self, view: ViewId, camera: &Camera) -> Result<FrameReport, Error> {
+        self.engine.render_view(self.gpu, view, camera)
+    }
+    fn cut_view(&mut self, view: ViewId) {
+        self.engine.cut_view(view)
+    }
+    fn capture_view(&mut self, view: ViewId) -> Result<Image, Error> {
+        self.engine.capture_view(view)
     }
 }

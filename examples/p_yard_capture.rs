@@ -167,9 +167,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             path: render_path,
             experimental_ray_query: ack,
             settings: Settings {
-                exposure: Exposure::Manual {
-                    stops: spec.exposure_stops,
-                },
                 // The matched Unreal levels and the path-traced references have no medium.
                 aerial_perspective: false,
                 height_fog: None,
@@ -187,7 +184,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..Default::default()
         },
     )?;
-    engine.resize(spec.size[0], spec.size[1])?;
+    let view = engine.create_view(&ViewDesc {
+        look: ViewLook {
+            exposure: Exposure::Manual {
+                stops: spec.exposure_stops,
+            },
+            ..Default::default()
+        },
+        ..ViewDesc::new(spec.size[0], spec.size[1])
+    })?;
     engine
         .renderer_mut()
         .set_environment_limits(renderlab::EnvironmentLimits {
@@ -302,7 +307,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             .filter_map(|k| k.split_once('='))
             .map(|(k, v)| (k.to_owned(), v.to_owned()))
             .collect();
-        diag::Diag::parse(&keys)?.apply(&mut engine, render_path, RenderScale::Native)?;
+        diag::Diag::parse(&keys)?.apply(
+            &mut engine,
+            render_path,
+            RenderScale::Native,
+            Quality::Realtime,
+        )?;
     }
     let ready_ms = begin.elapsed().as_secs_f64() * 1e3;
     let mut counts = p_still::Counts::start(&mut engine);
@@ -315,7 +325,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             engine.set_transform(object, Mat4::from_translation(Vec3::from_array(*offset)))?;
         }
         if frame.cut {
-            engine.cut();
+            engine.cut_view(view);
         }
         let camera = Camera::look_at(
             Vec3::from_array(frame.eye),
@@ -326,7 +336,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             spec.far,
         )?;
         let start = Instant::now();
-        let report = engine.render(&camera)?;
+        engine.tick(1.0 / 60.0)?;
+        let report = engine.render_view(view, &camera)?;
         let cpu_ms = start.elapsed().as_secs_f64() * 1e3;
         // One frame in flight, as Unreal's -csvGpuStats runs; the GPU span is unaffected.
         engine.device().poll(wgpu::PollType::Wait {
@@ -366,7 +377,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         );
         gpu.extend(engine.poll()?.gpu.into_iter().map(gpu_row));
     }
-    engine.capture()?;
+    engine.capture_view(view)?;
     gpu.extend(engine.poll()?.gpu.into_iter().map(gpu_row));
     fs::write(
         out.join("engine.json"),

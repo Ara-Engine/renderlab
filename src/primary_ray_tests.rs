@@ -536,7 +536,7 @@ impl Probe {
         let targets = if diagnostic {
             [&self.raster_world.view, &self.raster_ids.view]
         } else {
-            let t = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+            let t = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
             [&*t.world.view, &*t.normal.view]
         };
         let attachments = targets.map(|view| {
@@ -554,7 +554,7 @@ impl Probe {
             label: Some("primary probe receiver control"),
             color_attachments: &attachments,
             depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                view: &r.depth.as_ref().unwrap().view,
+                view: &r.view.depth.as_ref().unwrap().view,
                 depth_ops: Some(wgpu::Operations {
                     load: wgpu::LoadOp::Clear(0.0),
                     store: wgpu::StoreOp::Store,
@@ -661,7 +661,8 @@ fn gpu_primary_ray_quarry_probe() {
             let world = read_texture(&r, &probe.raster_world.texture);
             let production = read_texture(
                 &r,
-                &r.fresh
+                &r.view
+                    .fresh
                     .as_ref()
                     .unwrap()
                     .targets

@@ -5,11 +5,11 @@ use super::*;
 use renderlab::{
     Camera, LocalShadows, ReflectionSettings, Value, Vec3,
     backend_ara::engine::{Engine, Refusal},
-    engine::{RenderScale, Settings},
+    engine::{Settings, ViewDesc, ViewLook},
 };
 #[path = "../../../support/ara_game_scene.rs"]
 mod scene;
-use scene::{GLOW, Options, STOPS, animate, build, eye, hero, settings};
+use scene::{GLOW, Options, STOPS, animate, build, eye, hero, look, settings};
 
 const SIZE: [u32; 2] = [480, 270];
 
@@ -19,13 +19,25 @@ fn direct() -> Settings {
     Settings {
         global_illumination: false,
         temporal_reconstruction: false,
-        render_scale: RenderScale::Native,
-        reflections: ReflectionSettings::off(),
         local_shadows: LocalShadows {
             count: 0,
             ..Default::default()
         },
         ..settings()
+    }
+}
+/// The scene's look without reflections, for `direct`.
+fn direct_look() -> ViewLook {
+    ViewLook {
+        reflections: ReflectionSettings::off(),
+        ..look()
+    }
+}
+/// The one view at the test's size with `look`.
+fn view(look: ViewLook) -> ViewDesc {
+    ViewDesc {
+        look,
+        ..ViewDesc::new(SIZE[0], SIZE[1])
     }
 }
 
@@ -47,7 +59,7 @@ fn first_frames(
     gpu: &mut GpuDevice,
     toon_hero: bool,
 ) -> Result<[Vec<[f32; 3]>; 2]> {
-    engine.resize(SIZE[0], SIZE[1])?;
+    engine.create_view(&view(direct_look()))?;
     let built = build(
         &mut engine.on(gpu),
         Options {
@@ -204,7 +216,7 @@ fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
 
     // The scene's own settings, and its animation.
     let mut engine = Engine::new(ShaderCache::new(path.join("shaders"))?, settings())?;
-    engine.resize(SIZE[0], SIZE[1])?;
+    engine.create_view(&view(look()))?;
     let built = build(&mut engine.on(&mut gpu), Options::default())?;
     let mut report = None;
     for frame in 0..6 {

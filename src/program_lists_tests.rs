@@ -207,6 +207,7 @@ fn gpu_cc1_codegen() {
         let module_ms = started.elapsed().as_secs_f64() * 1e3;
         let started = std::time::Instant::now();
         let _pipeline = r
+            .view
             .primary
             .as_ref()
             .unwrap()
@@ -925,7 +926,8 @@ fn gpu_draws_above_64() {
         let rgba = read_rgba(&r, &target);
         let hit = read_rgba(
             &r,
-            &r.primary
+            &r.view
+                .primary
                 .as_ref()
                 .unwrap()
                 .targets

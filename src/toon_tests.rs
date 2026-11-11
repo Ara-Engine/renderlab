@@ -315,7 +315,8 @@ fn hdr(r: &mut Renderer) -> Vec<u8> {
 fn counts(r: &Renderer) -> Vec<u8> {
     let mut counts = read_texture(
         r,
-        &r.fresh
+        &r.view
+            .fresh
             .as_ref()
             .unwrap()
             .targets
@@ -325,7 +326,7 @@ fn counts(r: &Renderer) -> Vec<u8> {
             .texture,
     );
     if r.primary_mode == PrimaryVisibility::Traced {
-        let primary = r.primary.as_ref().unwrap();
+        let primary = r.view.primary.as_ref().unwrap();
         let t = primary.targets.as_ref().unwrap();
         let tiles = read_texture(r, &t.tiles.texture);
         let s = primary.scene.map(|v| v as usize);
@@ -450,7 +451,7 @@ fn seed_pipelines(r: &Renderer) -> Vec<Owned<wgpu::ComputePipeline>> {
     });
     (0..4)
         .map(|seed| {
-            r.primary.as_ref().unwrap().interactive_pipeline(
+            r.view.primary.as_ref().unwrap().interactive_pipeline(
                 &r.device,
                 &r.ledger,
                 &module,

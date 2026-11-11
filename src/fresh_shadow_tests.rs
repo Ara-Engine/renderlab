@@ -378,7 +378,7 @@ fn compare(
     render(r, color, camera, draws);
     let computed = capture(r);
     let depth = r.test_capture_full(color).1;
-    let targets = r.fresh.as_ref().unwrap().targets.as_ref().unwrap();
+    let targets = r.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
     let world = read_texture(r, &targets.world.texture);
     let normal = read_texture(r, &targets.normal.texture);
     let counts = read_texture(r, &targets.visibility.texture);
@@ -623,7 +623,7 @@ fn gpu_fresh_thin_contact_moving_view_equivalence() {
     );
     r.set_shadows(&Shadows::default()).unwrap();
     r.collect().unwrap();
-    assert!(r.fresh.as_ref().unwrap().targets.is_none());
+    assert!(r.view.fresh.as_ref().unwrap().targets.is_none());
 }
 
 #[allow(dead_code)]
@@ -911,6 +911,7 @@ fn gpu_fresh_geometry_cost_screen() {
         source: wgpu::ShaderSource::Wgsl(trivial.as_str().into()),
     });
     let mut probe = r
+        .view
         .fresh
         .as_ref()
         .unwrap()
@@ -1024,7 +1025,7 @@ fn gpu_fresh_compute_cost_screen() {
                 label: Some(&v.name),
                 source: wgpu::ShaderSource::Wgsl(source.into()),
             });
-            let pipeline = r.fresh.as_ref().unwrap().compute_pipeline(
+            let pipeline = r.view.fresh.as_ref().unwrap().compute_pipeline(
                 &r.device,
                 &r.ledger,
                 &module,
@@ -1041,6 +1042,7 @@ fn gpu_fresh_compute_cost_screen() {
         r.encode_fresh_compute(&mut encoder, pipeline, tile, None);
         r.queue.submit([encoder.finish()]);
         let texture = &r
+            .view
             .fresh
             .as_ref()
             .unwrap()

@@ -62,7 +62,7 @@ fn outputs(r: &Renderer, kind: Kind) -> Vec<Vec<u8>> {
     if kind == Kind::Shade {
         vec![read_texture(
             r,
-            &r.lighting.hdr.as_ref().unwrap().resolved.texture,
+            &r.view.hdr.as_ref().unwrap().resolved.texture,
         )]
     } else {
         interactive_outputs(r).to_vec()
@@ -126,7 +126,7 @@ fn step(r: &Renderer, base: &[String; 2], shading: &[String; 2], spec: &serde_js
             other => panic!("unknown check {other}"),
         }
     }
-    let primary = r.primary.as_ref().unwrap();
+    let primary = r.view.primary.as_ref().unwrap();
     let descriptor = wgpu::ShaderModuleDescriptor {
         label: Some("climb soft module"),
         source: wgpu::ShaderSource::Wgsl(sources[1].as_str().into()),
@@ -193,7 +193,7 @@ fn gpu_interactive_climb_screen() {
     traced_frame(&mut r, &color, &camera, &mut asset, true);
     r.test_drain("climb screen inputs");
     let public = interactive_outputs(&r);
-    let public_hdr = read_texture(&r, &r.lighting.hdr.as_ref().unwrap().resolved.texture);
+    let public_hdr = read_texture(&r, &r.view.hdr.as_ref().unwrap().resolved.texture);
     let base = primary_ray_gpu::shader_sources(SOURCE).unwrap();
     let shading = primary_ray_gpu::shading_sources(SOURCE, crate::STANDARD_PROGRAM).unwrap();
     let production = [

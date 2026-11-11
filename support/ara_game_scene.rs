@@ -10,7 +10,7 @@ use renderlab::{
     Camera, Decal, DecalBlend, DecalTexture, DecalTextureKind, DecalTextures, EmitterDescriptor,
     Error, Light, Mat4, MeshData, PostSettings, Transparency, Value, Vec3, Vertex, VolumetricFog,
     cutout::{AlphaMask, cutout},
-    engine::{Exposure, MaterialDesc, MaterialId, ObjectId, Scene, Settings, Sun},
+    engine::{Exposure, MaterialDesc, MaterialId, ObjectId, Scene, Settings, Sun, ViewLook},
 };
 use std::f32::consts::PI;
 
@@ -377,8 +377,7 @@ pub fn build<S: Scene>(scene: &mut S, options: Options) -> Result<Built, Error> 
         scene.spawn(sphere, toon, Mat4::IDENTITY)?,
     ];
     scene.set_sun(Sun::at_hour(HOUR, LATITUDE))?;
-    // Fire and smoke over the brazier.
-    scene.set_particle_step(1. / FPS)?;
+    // Fire and smoke over the brazier, stepped by `animate`'s tick.
     let flame = brazier + at(0., 0.65, 0.);
     if options.particles {
         scene.create_emitter(
@@ -485,7 +484,9 @@ pub fn eye(t: f32) -> Vec3 {
 }
 /// TEMPORARY copy of the example's per-frame animation: the hero's walk, the lanterns'
 /// flicker, the spinning crate and the fly path. Returns the frame's camera.
+/// One frame: the engine's tick (its particle step) and the frame's poses and camera.
 pub fn animate<S: Scene>(scene: &mut S, built: &Built, frame: u32) -> Result<Camera, Error> {
+    scene.tick(1. / FPS)?;
     let t = frame as f32 / FPS;
     let spheres = hero(t);
     for (object, (centre, radius)) in built.hero.iter().zip(spheres) {
@@ -535,13 +536,19 @@ pub fn animate<S: Scene>(scene: &mut S, built: &Built, frame: u32) -> Result<Cam
     )
 }
 
-/// The example's settings: its haze, its bloom, its exposure, everything else default.
+/// The example's settings: its haze, everything else default.
 pub fn settings() -> Settings {
     Settings {
         volumetric_fog: Some(VolumetricFog {
             extra_density: 0.0015,
             ..Default::default()
         }),
+        ..Default::default()
+    }
+}
+/// The example's view look: its bloom and its exposure, everything else default.
+pub fn look() -> ViewLook {
+    ViewLook {
         post: PostSettings {
             bloom: 0.06,
             ..Default::default()

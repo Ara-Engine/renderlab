@@ -239,9 +239,7 @@ pub(super) struct TransparencyState {
     next_emitter: u64,
     gpu: Option<Gpu>,
     glass: Vec<GlassPipelines>,
-    targets: Option<Targets>,
     shadow_key: Option<[u8; 32]>,
-    reflections: Option<reflection::GlassReflections>,
 }
 
 struct Gpu {
@@ -278,7 +276,7 @@ struct ParticlePipelines {
     sort: Owned<wgpu::ComputePipeline>,
     draw: Owned<wgpu::RenderPipeline>,
 }
-struct Targets {
+pub(super) struct Targets {
     color: Depth,
     depth: Depth,
     aa: Depth,
@@ -1472,12 +1470,7 @@ impl Renderer {
         if !traced && self.options.samples != SampleCount::One {
             return Ok(());
         }
-        let Some(size) = self
-            .lighting
-            .hdr
-            .as_ref()
-            .map(|h| h.resolved.texture.size())
-        else {
+        let Some(size) = self.view.hdr.as_ref().map(|h| h.resolved.texture.size()) else {
             return Ok(());
         };
         if self.transparency.gpu.is_none() {
@@ -1489,14 +1482,14 @@ impl Renderer {
         let scopes = OperationScopes::new(&self.device);
         // Targets at the HDR size: the colour behind a transparent draw and opaque depth.
         if self
-            .transparency
-            .targets
+            .view
+            .transparency_targets
             .as_ref()
             .is_none_or(|t| t.color.texture.size() != size)
         {
             let generation = self
-                .transparency
-                .targets
+                .view
+                .transparency_targets
                 .as_ref()
                 .map_or(0, |t| t.generation + 1);
             let color = self.tp_target(
@@ -1540,7 +1533,7 @@ impl Renderer {
                     u64::from(size.width) * u64::from(size.height) * 32,
                 ),
             };
-            self.transparency.targets = Some(Targets {
+            self.view.transparency_targets = Some(Targets {
                 color,
                 depth,
                 aa,
@@ -1563,7 +1556,7 @@ impl Renderer {
             self.transparency.gpu.as_mut().unwrap().particles = Some(pipelines);
         }
         if traced && self.transparency.gpu.as_ref().unwrap().hit_depth.is_none() {
-            let primary = self.primary.as_ref().unwrap();
+            let primary = self.view.primary.as_ref().unwrap();
             let bindings = self.tp_layout(
                 "TP1 hit depth",
                 &[
@@ -1602,16 +1595,16 @@ impl Renderer {
         let reflect =
             reflect && std::env::var("RENDERLAB_TP2_PROFILE").map_or(true, |s| s.is_empty());
         if reflect {
-            let primary = self.primary.as_ref().unwrap();
+            let primary = self.view.primary.as_ref().unwrap();
             let program = self.program_slot(primary.program);
             let key = reflection::key(&self.source, &program.source, program.layout.is_some());
             if self
-                .transparency
-                .reflections
+                .view
+                .transparency_reflections
                 .as_ref()
                 .is_none_or(|r| r.position.texture.size() != size || r.key != key)
             {
-                self.transparency.reflections = Some(self.tp_reflections(size)?);
+                self.view.transparency_reflections = Some(self.tp_reflections(size)?);
             }
             // MP1 integration: R1 shades foreign-program hits with the first opaque
             // program's response and parameters, as MP1's existing fallback does.
@@ -1623,8 +1616,8 @@ impl Renderer {
             let bytes: Vec<u8> = slots.iter().flat_map(|s| s.to_ne_bytes()).collect();
             self.queue.write_buffer(
                 &self
-                    .transparency
-                    .reflections
+                    .view
+                    .transparency_reflections
                     .as_ref()
                     .unwrap()
                     .program_slots,
@@ -1704,10 +1697,16 @@ impl Renderer {
             size: [size.width, size.height],
             sun,
             fit,
-            step: self.transparency.step,
+            // A later view of the tick moves nothing: its update only relights the
+            // particles for its own sun map fit (`tp_incident`).
+            step: if self.tick_work {
+                self.transparency.step
+            } else {
+                0.0
+            },
             reflect,
             scene: if traced {
-                self.primary.as_ref().unwrap().scene
+                self.view.primary.as_ref().unwrap().scene
             } else {
                 [0; 4]
             },
@@ -1756,9 +1755,16 @@ impl Renderer {
                 .copy_from_slice(&thickness.to_ne_bytes());
         }
         self.queue.write_buffer(&gpu.draws, 0, &draw_slots);
-        // Emitters' spawns for this step.
+        // Emitters' spawns for this step: once per tick (`Renderer::begin_tick`); a later view
+        // of the same tick spawns nothing.
         let step = f64::from(self.transparency.step);
         for e in &mut self.transparency.emitters {
+            if !self.tick_work {
+                let textured = e.sprite.is_some();
+                let none = e.params.uniform(e.spawned as u32, 0, 0, textured, 0.0);
+                self.queue.write_buffer(&e.uniform, 0, &none);
+                continue;
+            }
             // A new emitter's first step spawns its prewarm span (no longer than a life:
             // older particles would be dead), spread over that span, plus its burst.
             // The burst is born this step; rate births fill the prewarm window (or the
@@ -1789,12 +1795,12 @@ impl Renderer {
             );
         }
         // ---- GPU ----
-        let hdr = self.lighting.hdr.as_ref().unwrap();
-        let targets = self.transparency.targets.as_ref().unwrap();
+        let hdr = self.view.hdr.as_ref().unwrap();
+        let targets = self.view.transparency_targets.as_ref().unwrap();
         // 1. Opaque view depth.
         {
             let group = if traced {
-                let primary = self.primary.as_ref().unwrap();
+                let primary = self.view.primary.as_ref().unwrap();
                 let t = primary.targets.as_ref().unwrap();
                 let (bindings, _) = gpu.hit_depth.as_ref().unwrap();
                 let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1819,6 +1825,7 @@ impl Renderer {
                 Some(group)
             } else {
                 let depth_view = self
+                    .view
                     .depth
                     .as_ref()
                     .unwrap()
@@ -1845,7 +1852,14 @@ impl Renderer {
                 timestamp_writes: None,
             });
             if traced {
-                let arrays = self.primary.as_ref().unwrap().virtual_geometry().unwrap().1;
+                let arrays = self
+                    .view
+                    .primary
+                    .as_ref()
+                    .unwrap()
+                    .virtual_geometry()
+                    .unwrap()
+                    .1;
                 pass.set_pipeline(&gpu.hit_depth.as_ref().unwrap().1);
                 pass.set_bind_group(1, arrays, &[]);
             } else {
@@ -1934,8 +1948,8 @@ impl Renderer {
             wgpu::BindGroupEntry {
                 binding: 38,
                 resource: wgpu::BindingResource::TextureView(
-                    self.transparency
-                        .reflections
+                    self.view
+                        .transparency_reflections
                         .as_ref()
                         .filter(|_| reflect)
                         .map_or(&targets.color.view, |r| &r.radiance.view),
@@ -1965,7 +1979,7 @@ impl Renderer {
         });
         // TP2: reflection hits use the existing opaque geometry, materials and R1 shader.
         let reflection_group = reflect.then(|| {
-            let reflection = self.transparency.reflections.as_ref().unwrap();
+            let reflection = self.view.transparency_reflections.as_ref().unwrap();
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TP2 glass reflections"),
                 layout: &reflection.layout,
@@ -1985,6 +1999,7 @@ impl Renderer {
                     wgpu::BindGroupEntry {
                         binding: 10,
                         resource: self
+                            .view
                             .primary
                             .as_ref()
                             .unwrap()
@@ -2077,7 +2092,7 @@ impl Renderer {
                     size,
                 );
                 if let (Item::Draw(i), Some(group)) = (&items[index].1, &reflection_group) {
-                    let reflection = self.transparency.reflections.as_ref().unwrap();
+                    let reflection = self.view.transparency_reflections.as_ref().unwrap();
                     let draw = transparent[*i];
                     let program = draw.material.map_or(default_program, |m| m.program.id());
                     let set = self
@@ -2133,8 +2148,13 @@ impl Renderer {
                         label: Some("TP2 R1 glass reflection"),
                         timestamp_writes: None,
                     });
-                    let (arrays, materials) =
-                        self.primary.as_ref().unwrap().shading_groups().unwrap();
+                    let (arrays, materials) = self
+                        .view
+                        .primary
+                        .as_ref()
+                        .unwrap()
+                        .shading_groups()
+                        .unwrap();
                     pass.set_pipeline(&reflection.pipeline);
                     pass.set_bind_group(0, group, &[]);
                     pass.set_bind_group(1, arrays, &[]);
