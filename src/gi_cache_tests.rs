@@ -3390,6 +3390,164 @@ fn gpu_software_hit_normals_follow_instance_transforms() {
     assert!(n.dot(normal) > 0.9999, "normal {n} against {normal}");
 }
 
+/// The rays aimed around a local light and the fixed directions split one integral (U-SPECK,
+/// docs/speck.md): under a ceiling of radiance 1 with a lamp 0.3 m below it, a cell gathers
+/// the same light with the aimed rays as the fixed directions alone gather without them,
+/// whatever the cell's own angle. Runs shaders/gi_near.wgsl itself against a stub scene.
+#[test]
+#[ignore = "GPU; shared GPU lease"]
+fn gpu_near_light_rays_keep_the_gathered_light() {
+    let (device, queue) = no_rt_device();
+    const CELLS: u32 = 32;
+    let stub = "
+struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<f32>, kind:vec4<u32>, source:vec4<f32> };
+struct Lighting { count:u32 };
+var<private> lighting:Lighting;
+var<private> lights:array<Light,1>;
+var<private> near_rays:u32;
+const GI_H_FLAGS:u32=2u;
+const GI_H_NEAR_RAYS:u32=15u;
+const GI_F_ROTATE:u32=4u;
+const GI_GATHER_LANES:u32=64u;
+const GI_HIT_MISSING:f32=0.5;
+const GI_HIT_CHANGING:f32=0.75;
+const GI_HIT_NONE:f32=0.25;
+fn gi_word(i:u32) -> u32 { return select(GI_F_ROTATE,near_rays,i==GI_H_NEAR_RAYS); }
+var<private> gi_gather_sh:array<vec3<f32>,4>;
+var<private> gi_y:array<f32,9>;
+fn gi_sh_basis(d:vec3<f32>) {
+    gi_y[0]=0.282095;
+    gi_y[1]=0.488603*d.y; gi_y[2]=0.488603*d.z; gi_y[3]=0.488603*d.x;
+}
+fn gi_basis(n:vec3<f32>) -> mat3x3<f32> {
+    let s=select(-1.0,1.0,n.z>=0.0);
+    let a=-1.0/(s+n.z);
+    let b=n.x*n.y*a;
+    return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
+}
+// The scene: a ceiling at y = 3 over a cell at the origin, radiance 1 everywhere.
+struct GiHit { hit:bool, t:f32, normal:vec3<f32>, inst:u32, tri:vec3<u32>, bary:vec2<f32> };
+fn gi_closest(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHit {
+    let t=(3.0-origin.y)/max(direction.y,1e-9);
+    return GiHit(direction.y>1e-6 && t<=tmax,t,vec3<f32>(0.0,-1.0,0.0),0u,vec3<u32>(0u),vec2<f32>(0.0));
+}
+fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bool) -> vec4<f32> {
+    return vec4<f32>(1.0);
+}
+@group(0) @binding(0) var<storage,read_write> gi_out:array<f32,9>;
+// The band-0 coefficient a cell gathers: the fixed directions as the gather kernels trace
+// them (gi_gather), then every lane's aimed rays. x: both, y: the fixed directions' part.
+fn gather(key:vec2<u32>) -> vec2<f32> {
+    let n=vec3<f32>(0.0,1.0,0.0);
+    let origin=vec3<f32>(0.0);
+    let frame=gi_basis(n);
+    for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]=vec3<f32>(0.0); }
+    for(var k=0u;k<64u;k+=1u) {
+        let z=1.0-(f32(k)+0.5)/64.0;
+        let r=sqrt(max(1.0-z*z,0.0));
+        let phi=f32(k)*2.399963229728653+f32(key.y>>8u)*(6.283185307179586/16777216.0);
+        let d=frame*vec3<f32>(r*cos(phi),r*sin(phi),z);
+        let h=gi_closest(origin,d,0.0,1e20);
+        if !h.hit || gi_near_owner(origin,n,origin+d*h.t)!=0xffffffffu { continue; }
+        gi_sh_basis(d);
+        gi_gather_sh[0]+=vec3<f32>(6.283185307179586/64.0)*gi_y[0];
+    }
+    let fixed=gi_gather_sh[0].x;
+    for(var lane=0u;lane<GI_GATHER_LANES;lane+=1u) { _=gi_near_gather(lane,origin,n,key,0u,false); }
+    return vec2<f32>(gi_gather_sh[0].x,fixed);
+}
+@compute @workgroup_size(1) fn main() {
+    lights[0]=Light(vec4<f32>(0.6,2.7,0.3,14.0),vec4<f32>(0.0),vec4<f32>(1.0,1.0,1.0,0.0),vec4<u32>(1u,0u,0u,0u),vec4<f32>(0.1,0.0,0.0,0.0));
+    lighting.count=1u;
+    for(var on=0u;on<2u;on+=1u) {
+        near_rays=16u*on;
+        var sum=0.0;
+        var least=1e30;
+        var most=0.0;
+        var fixed=0.0;
+        for(var cell=0u;cell<CELLSu;cell+=1u) {
+            let g=gather(vec2<u32>(0u,cell*0x9e3779b9u));
+            sum+=g.x; least=min(least,g.x); most=max(most,g.x); fixed+=g.y;
+        }
+        gi_out[on*4u]=sum/f32(CELLSu); gi_out[on*4u+1u]=least; gi_out[on*4u+2u]=most; gi_out[on*4u+3u]=fixed/f32(CELLSu);
+    }
+}"
+    .replace("CELLSu", &format!("{CELLS}u"));
+    let source = [&stub, include_str!("../shaders/gi_near.wgsl")].join("\n");
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("near-light rays"),
+        source: wgpu::ShaderSource::Wgsl(source.into()),
+    });
+    let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("near-light rays"),
+        layout: None,
+        module: &module,
+        entry_point: Some("main"),
+        compilation_options: Default::default(),
+        cache: None,
+    });
+    let buffer = |usage| {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 36,
+            usage,
+            mapped_at_creation: false,
+        })
+    };
+    let out = buffer(wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC);
+    let read = buffer(wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST);
+    let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: None,
+        layout: &pipeline.get_bind_group_layout(0),
+        entries: &[wgpu::BindGroupEntry {
+            binding: 0,
+            resource: out.as_entire_binding(),
+        }],
+    });
+    let mut encoder = device.create_command_encoder(&Default::default());
+    {
+        let mut pass = encoder.begin_compute_pass(&Default::default());
+        pass.set_pipeline(&pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.dispatch_workgroups(1, 1, 1);
+    }
+    encoder.copy_buffer_to_buffer(&out, 0, &read, 0, 36);
+    queue.submit([encoder.finish()]);
+    let slice = read.slice(..);
+    slice.map_async(wgpu::MapMode::Read, |_| {});
+    device.poll(WAIT).unwrap();
+    let got: Vec<f32> = slice
+        .get_mapped_range()
+        .unwrap()
+        .chunks_exact(4)
+        .map(|w| f32::from_le_bytes(w.try_into().unwrap()))
+        .collect();
+    // Every direction meets the ceiling: 2 pi times the band-0 basis.
+    let full = 2.0 * std::f32::consts::PI * 0.282095;
+    let [off, off_least, off_most, _] = got[0..4] else {
+        unreachable!()
+    };
+    let [on, least, most, fixed] = got[4..8] else {
+        unreachable!()
+    };
+    assert!(
+        (off - full).abs() < 1e-3 * full && (off_most - off_least) < 1e-3 * full,
+        "without aimed rays the fixed directions gather the ceiling: {off} ({off_least}..{off_most}) against {full}"
+    );
+    assert!(
+        fixed < 0.985 * full,
+        "the lamp's near region must hold part of the ceiling: fixed directions kept {fixed} of {full}"
+    );
+    assert!(
+        (on - full).abs() < 0.02 * full,
+        "mean with aimed rays {on} against {full}"
+    );
+    assert!(
+        least > 0.9 * full && most < 1.1 * full,
+        "per cell {least}..{most} against {full}"
+    );
+}
+
 // ---- M7 G2: bounce light on the registered quarry (docs/m7-g2.md) ----
 #[allow(dead_code, clippy::duplicate_mod)]
 #[path = "../examples/m4/cameras.rs"]

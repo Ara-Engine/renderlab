@@ -950,6 +950,7 @@ impl Engine {
             if let Some(report) =
                 renderer.try_render_view(color, camera, &mut draws, ViewMode::Lit)?
             {
+                settings::log_indirect(renderer)?;
                 return Ok(report);
             }
             if Instant::now() > deadline {

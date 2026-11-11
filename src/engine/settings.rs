@@ -333,6 +333,93 @@ pub(crate) fn ablated(mut s: Settings) -> Settings {
     s
 }
 
+/// Measurement overrides of the GI cache's tuning (U-SPECK, docs/speck.md): `RENDERLAB_GI`
+/// lists `key=value` pairs separated by `;`, applied over the engine's own choice whatever
+/// the embedder asks for, so a defect seen through an embedder can be bisected there:
+/// `lookup=nearest|trilinear`, `filter`, `filter_edge`, `rotate`, `bounce`, `directions`,
+/// `cell_pixels`, `level_blend`, `gathers`, `gather_cells`, `claim_cells`, `near_light_rays`,
+/// `slots_log2`, `evict_frames`. Unset, it changes nothing. An unknown key, a pair without `=`
+/// or a value that does not parse is an error, named on stderr: a mistyped switch must not
+/// pass for a measurement of the default.
+fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error> {
+    let Ok(list) = std::env::var("RENDERLAB_GI") else {
+        return Ok(s);
+    };
+    for pair in list.split(';').map(str::trim).filter(|p| !p.is_empty()) {
+        let Some((key, value)) = pair.split_once('=') else {
+            eprintln!("RENDERLAB_GI: `{pair}` is not key=value");
+            return Err(Error::InvalidInput("RENDERLAB_GI: a pair is not key=value"));
+        };
+        let number = value.parse::<u32>().ok();
+        let real = value.parse::<f32>().ok();
+        match (key, number, real) {
+            ("lookup", ..) if value == "nearest" => s.lookup = crate::IndirectLookup::Nearest,
+            ("lookup", ..) if value == "trilinear" => s.lookup = crate::IndirectLookup::Trilinear,
+            ("filter", Some(v), _) => s.filter = v,
+            ("filter_edge", _, Some(v)) => s.filter_edge = v,
+            ("rotate", Some(v), _) => s.rotate_directions = v != 0,
+            ("bounce", Some(v), _) => s.bounce = v != 0,
+            ("directions", Some(v), _) => s.directions = v,
+            ("cell_pixels", _, Some(v)) => s.cell_pixels = v,
+            ("level_blend", _, Some(v)) => s.level_blend = v,
+            ("gathers", Some(v), _) => s.gathers = v,
+            ("gather_cells", Some(v), _) => s.gather_cells = v,
+            ("claim_cells", Some(v), _) => s.claim_cells = v,
+            ("near_light_rays", Some(v), _) => s.near_light_rays = v,
+            ("slots_log2", Some(v), _) => s.slots_log2 = v,
+            ("evict_frames", Some(v), _) => s.evict_frames = v,
+            _ => {
+                eprintln!("RENDERLAB_GI: unknown key or unreadable value in `{pair}`");
+                return Err(Error::InvalidInput(
+                    "RENDERLAB_GI: unknown key or unreadable value",
+                ));
+            }
+        }
+    }
+    Ok(s)
+}
+
+/// With `RENDERLAB_GI_LOG=<file>` set, appends one JSON line of the GI cache's counters after
+/// each frame the engine renders (a blocking readback: measurement only).
+pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("RENDERLAB_GI_LOG") else {
+        return Ok(());
+    };
+    let Some(c) = r.indirect_counters()? else {
+        return Ok(());
+    };
+    let line = format!(
+        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"table_bytes\":{}}}\n",
+        c.misses,
+        c.miss_overflow,
+        c.created,
+        c.full,
+        c.lost,
+        c.orphans,
+        c.traces,
+        c.invalidated,
+        c.splits,
+        c.local_overflow,
+        c.shades,
+        c.gathers,
+        c.gather_rays,
+        c.gather_misses,
+        c.gather_requests,
+        c.gather_deferred,
+        c.claim_deferred,
+        c.bounce_queued,
+        c.evicted,
+        c.evicted_recent,
+        r.indirect_stats().table_bytes,
+    );
+    // A log that cannot be written is not a rendering error.
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+    Ok(())
+}
+
 /// Applies `settings` to the renderer's estimators on `path`. Called only on change:
 /// re-applying identical GI settings is cheap, but the engine does not rely on it.
 pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> Result<(), Error> {
@@ -346,7 +433,7 @@ pub(crate) fn apply(r: &mut Renderer, path: RenderPath, settings: &Settings) -> 
         ));
     }
     r.set_indirect(if settings.global_illumination {
-        IndirectSettings::default()
+        indirect_measured(IndirectSettings::default())?
     } else {
         IndirectSettings::off()
     })?;

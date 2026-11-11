@@ -304,7 +304,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.diag.iter().cloned().partition(|(k, _)| {
             matches!(
                 k.as_str(),
-                "flicker" | "lamp" | "sun" | "fire" | "glow" | "cut" | "hold" | "bulb"
+                "flicker" | "lamp" | "sun" | "fire" | "glow" | "cut" | "hold" | "bulb" | "field"
             )
         });
     // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
@@ -323,6 +323,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let (glow_steps, cuts) = (scene_key("glow", "step"), scene_key("cut", "1"));
     let hold = scene_key("hold", "1");
+    // U-SPECK (docs/speck.md): `field=1` scatters 300 small bright boxes and a pale slab over
+    // an empty quarter of the ground and walks the camera 4 m across it while turning 12
+    // degrees, whatever `--frames` is: the cell mosaic Ara's Outpost showed on flat ground.
+    let field = scene_key("field", "1");
     let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
@@ -537,6 +541,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let at = |x: f32, y: f32, z: f32| anchor + Vec3::new(x, y, z);
     let boxed = |center: Vec3, size: Vec3| Mat4::from_translation(center) * Mat4::from_scale(size);
+    // The field walk: from FIELD_EYE, 4 m along FIELD_WALK.
+    const FIELD_EYE: Vec3 = Vec3::new(-6.0, 1.6, -6.0);
+    const FIELD_WALK: Vec3 = Vec3::new(-0.707_106_77, 0.0, -0.707_106_77);
+    if field {
+        let magenta = material(&mut engine, [0.75, 0.08, 0.75], 0.0, 0.6)?;
+        let slab = material(&mut engine, [0.35, 0.65, 0.85], 0.0, 0.7)?;
+        engine.spawn(
+            cube,
+            slab,
+            boxed(at(-10.5, 0.03, -8.0), Vec3::new(4.0, 0.06, 4.0)),
+        )?;
+        // A fixed scatter (xorshift), clear of the camera's walk.
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32
+        };
+        for _ in 0..300 {
+            let (x, z, size) = (-29.0 + 24.0 * next(), -29.0 + 24.0 * next(), 0.3 + 0.9 * next());
+            let along = (Vec3::new(x, 0.0, z) - FIELD_EYE).dot(FIELD_WALK).clamp(0.0, 4.0);
+            let aside = Vec3::new(x, 0.0, z) - (FIELD_EYE + along * FIELD_WALK);
+            if aside.length() - FIELD_EYE.y > 2.5 || aside.length() > 6.0 {
+                engine.spawn(
+                    cube,
+                    magenta,
+                    boxed(at(x, 0.5 * size, z), Vec3::splat(size)),
+                )?;
+            }
+        }
+    }
     // The arch: two pillars and a lintel.
     for x in [-2.2, 2.2] {
         engine.spawn(
@@ -867,6 +903,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let target = focus.lerp(anchor + Vec3::Y, 0.5);
         let (eye, target) = if hold {
             *held_pose.get_or_insert((eye, target))
+        } else if field {
+            // `--still` stays at the walk's start.
+            let along = if args.still {
+                0.0
+            } else {
+                frame as f32 / (args.frames.max(2) - 1) as f32
+            };
+            let eye = anchor + FIELD_EYE + 4.0 * along * FIELD_WALK;
+            let look = Mat4::from_rotation_y((12.0 * along).to_radians()).transform_vector3(FIELD_WALK);
+            (eye, eye + 10.0 * look - Vec3::new(0.0, 2.2, 0.0))
         } else {
             (eye, target)
         };
