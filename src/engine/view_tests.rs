@@ -74,7 +74,9 @@ fn engine(gi: bool) -> (Engine, ObjectId) {
     (engine, last.unwrap())
 }
 
-/// View 0 orbits by `turn` radians; view 1 stays still.
+/// View 0 orbits by `turn` radians; view 1 stays still. Both eyes are 2 m up: the
+/// atmosphere's sky light is placed once per tick at the first view's altitude, so views at
+/// other heights differ from an engine of their own by at most one level of sky light.
 fn cameras(turn: f32) -> [Camera; 2] {
     [
         Camera::look_at(
@@ -86,7 +88,7 @@ fn cameras(turn: f32) -> [Camera; 2] {
             200.0,
         ),
         Camera::look_at(
-            Vec3::new(-4.0, 3.0, -3.0),
+            Vec3::new(-4.0, 2.0, -3.0),
             Vec3::ZERO,
             Vec3::Y,
             0.8,

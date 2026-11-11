@@ -497,6 +497,12 @@ impl Renderer {
             self.atmosphere.procedural = None;
             return;
         }
+        // It lights the world (image-based light, the GI cache), so one camera places it per
+        // tick: the tick's first view's altitude. Later views of the tick keep it, or the
+        // views' heights would relight the cache every tick (docs/design-views.md).
+        if !self.tick_work && mine && self.atmosphere.procedural.is_some() {
+            return;
+        }
         let key = ProceduralKey {
             sun: self.atmosphere_sun(),
             medium: s.medium,
