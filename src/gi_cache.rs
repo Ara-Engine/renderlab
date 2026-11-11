@@ -322,6 +322,13 @@ pub struct IndirectSettings {
     /// The filter's tent: weight 1 at the centre, this on the four edge neighbours and its
     /// square on the four corners (0-1).
     pub filter_edge: f32,
+    /// Rays a gather aims around each local light in range (U-SPECK, docs/speck.md; 0-64).
+    /// The fixed directions cannot resolve a small surface close to a lamp, whose radiance
+    /// grows as the inverse square of its distance to the light: the few cells whose
+    /// direction met it showed as bright blobs. With this set, hits nearer a light than a
+    /// third of the cell's distance to it are left to these rays, which sample that region
+    /// where it is bright; the two sets estimate the same integral. 0 turns it off.
+    pub near_light_rays: u32,
 }
 impl Default for IndirectSettings {
     /// On by default since G2b (Islam's overnight push, 2026-11-08; docs/m7-g2b.md): G2's
@@ -368,6 +375,9 @@ impl Default for IndirectSettings {
             // G3 (docs/m7-g3.md): sky and bounce filtered, contrast refine and bounce fill.
             filter: 15,
             filter_edge: 0.5,
+            // The CPU replay (tools/speck/replay.py): 16 keep the mean within 1 % and remove
+            // the blobs; 8 leave the lintel's bounce 8 % high.
+            near_light_rays: 16,
         }
     }
 }
@@ -394,7 +404,8 @@ impl IndirectSettings {
             && (1..=7).contains(&self.gathers)
             && [1, 2, 4].contains(&self.gather_stride)
             && self.filter <= 15
-            && (0.0..=1.0).contains(&self.filter_edge);
+            && (0.0..=1.0).contains(&self.filter_edge)
+            && self.near_light_rays <= 64;
         if valid {
             Ok(())
         } else {
@@ -962,6 +973,7 @@ impl Planner {
         };
         let spread = cut_phases > 1 && since_clear < cut_phases;
         header[14] = if spread { cut_phases } else { 0 };
+        header[15] = s.near_light_rays;
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;

@@ -943,7 +943,7 @@ The unit stopped at 04:15 UTC when the account's Opus rate limit ran out; nothin
 
 ## Specks after a game-scene cut (root, 2026-11-11)
 
-**OPEN (owner: root, a clamp experiment; the cut unit at the latest). Cause found: GI cache fireflies in newly seen cells, on both paths.** Game scene with the fox, 720p, cut at frame 24, main 575596b, RTX 4070 SUPER. After the cut the open ground shows soft bright blotches a few pixels across (GI-cell sized), not single pixels.
+**FIXED on `t3/speck` (U-SPECK, [speck.md](speck.md) section 2), pending merge. Cause: the arch lamp's bulb, a small white surface 0.13 m from its own light, met by a few cells' fixed gather directions; not a cut effect (the same blobs fill every moving frame). Rays aimed around each local light now gather such surfaces: at 1080p, 4 frames after the cut, blob pixels fall from 17,431 to 8,788 (RT) and 17,858 to 8,399 (non-RT), the GI-off level, with no region of the settled frame changed by more than 0.14 codes. The notes below are the first diagnosis.** Game scene with the fox, 720p, cut at frame 24, main 575596b, RTX 4070 SUPER. After the cut the open ground shows soft bright blotches a few pixels across (GI-cell sized), not single pixels.
 
 Pixels on the open ground more than 10 codes above their 21-pixel median:
 
@@ -1044,3 +1044,11 @@ A still scene whose cache lighting key never changes stays below its converged b
 - **Next:** one test build without `--locked` (Cargo.lock lacks the new dependency), fix compile errors, three short leases for the GPU tests and the lib suite, then the game scene against main's frames.
 - **Ara side, after it lands:** `texture::prepare` passes each KTX2 level's blocks (`Bc7`/`Bc7Srgb`, `Bc5` under `NormalLinear`) and keeps a decode only for mean colours, masks, decals and the splat atlas.
 - **For the ara-gpu backend:** new formats BC7 unorm and sRGB, BC5; the BC device feature; the material's `normal_mapped` word is 0, 1 or 2; `rl_normal_texel` is new in program_api.wgsl.
+
+## Editor after ara-render (2026-11-11)
+
+Islam decided on 2026-11-11 to delete ara-render now with no fallback ([ara-render-replacement.md](ara-render-replacement.md)). The ids (U-IDS, `t3/ids`) and views per `Engine` (RL#39) are tonight's floor. What the editor loses with the old renderer and will ask of Renderlab next, ranked by what an editor user meets first (coordinator's order):
+1. **Scene view modes.** Unlit, wireframe, and the debug views (base colour, normal, roughness, metalness, emission, occlusion, lighting only, already specified as `ViewMode` in docs/design-id-output.md and not built). Wireframe is new: the non-RT path draws a visibility buffer, so wireframe needs its own line pass or an edge test on the visibility buffer's barycentrics; both paths. Judged against a reference image per mode.
+2. **Asset previews and thumbnails.** A small offscreen view of one object with its own look and lighting. The views API covers the view; open: a preview scene separate from the level (a second `Engine`, or a scene subset per view), the cost of creating and rendering a tiny view, and thumbnail readback.
+3. **Material graphs.** Ara's graph-to-WGSL compiler against Renderlab's program API; Renderlab owes vertex colour, a second UV set and an occlusion input reaching programs on both paths (row 4 of the replacement order).
+4. Everything else in the replacement order (BC7/BC5 upload, large levels on non-RT, light shapes, atmosphere features, decal maps) keeps its rank there; anything only ara-render drew that is not in this list becomes a row here when the Ara side finds it.
