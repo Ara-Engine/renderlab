@@ -41,6 +41,9 @@ fn cache_kernels_reflect_validate_and_compile() -> Result<()> {
                 (1, 2),
                 (1, 3),
                 (1, 5),
+                // Rays aimed around local lights (U-SPECK's near-light rays).
+                (3, 0),
+                (3, 1),
             ],
         ),
         (Entry::Claim, [64, 1, 1], &[]),

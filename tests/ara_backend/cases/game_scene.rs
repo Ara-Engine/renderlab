@@ -331,13 +331,20 @@ fn two_views_each_draw_what_one_view_alone_draws() -> Result<()> {
     };
     let both = run(&[0, 1])?;
     let [alone_path, alone_across] = [run(&[0])?, run(&[1])?];
+    // Half-float values that differ, of all of them.
+    let differing =
+        |a: &[u8], b: &[u8]| a.chunks(2).zip(b.chunks(2)).filter(|(x, y)| x != y).count();
     ensure!(
         both[0] == alone_path[0],
-        "the fly-path view differs from the same camera alone"
+        "the fly-path view differs from the same camera alone in {} of {} values",
+        differing(&both[0], &alone_path[0]),
+        both[0].len() / 2
     );
     ensure!(
         both[1] == alone_across[0],
-        "the view across the scene differs from the same camera alone"
+        "the view across the scene differs from the same camera alone in {} of {} values",
+        differing(&both[1], &alone_across[0]),
+        both[1].len() / 2
     );
     ensure!(both[0] != both[1], "the two cameras drew the same image");
 
