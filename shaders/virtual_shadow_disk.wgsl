@@ -424,8 +424,8 @@ fn vd_map() {
                 for(var cx=a.x;cx<=b.x;cx+=1) {
                     vd_texel(vec2<i32>(cx,y),level,1,origin+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*texel,texel,lo,hi,margin);
                 }
+                if vd_full() {return;}
             }
-            if vd_full() {return;}
         }
         lo=hi;
     }
@@ -451,8 +451,11 @@ fn vd_map() {
                 let t=height-p.z;
                 if t<=lo {continue;}
                 if VD_MIP_POINT {
+                    // The cell's texel, unless the cell's highest is under the cone there.
                     let at=vec2<i32>(cx,y)*step+vec2<i32>(step/2);
-                    vd_texel(at,last,step,origin+(vec2<f32>(at)+vec2<f32>(0.5))*texel,cell,lo,hi,margin);
+                    let c=origin+(vec2<f32>(at)+vec2<f32>(0.5))*texel;
+                    if t*slope<=length(max(abs(c-p.xy)-vec2<f32>(0.5*cell),vec2<f32>(0.0))) {continue;}
+                    vd_texel(at,last,step,c,cell,lo,hi,margin);
                     continue;
                 }
                 let c=origin+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*cell;
