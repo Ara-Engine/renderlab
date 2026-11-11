@@ -1648,9 +1648,35 @@ and `tr1_resolve`, with the history in `forward::Frames` and the plan shared. Th
 budget is computed and nothing consumes it. (2) Interactive shadows with the rotated
 kernels and the budget. (3) Render scale.
 
-**Built so far:** `tr1_resolve` composed as `resolve_source` composes it reflects its
-17 inputs, emits MSL and SPIR-V that validates, and compiles natively
-(`temporal_resolve_reflects_validates_and_compiles`). No adapter gap.
+**Step 1 is built.** `tr1_resolve` composed as `resolve_source` composes it reflects
+its 17 inputs, emits MSL and SPIR-V that validates, and compiles natively
+(`temporal_resolve_reflects_validates_and_compiles`); it needed no adapter change.
+
+The plan is Renderlab's own: `prepare_reconstruction`'s device-free part is
+`temporal_reconstruction::Planner::prepare` (its own PR on Renderlab main, merged
+into this branch), which the backend calls with the camera, lights, scene motion and
+settings. `temporal::History` owns the three history image pairs, the planner and the
+sample index, and lives in `forward::Frames` beside the cache. With
+`ForwardScene::reconstruction` a traced frame is drawn through the camera jittered by
+its sample of the sequence (post and the cache's still key keep it unjittered), the
+primary frame record carries the rotation word and the planner's sampling words, and
+after shading the HDR target is copied aside and resolved in place. A cut restarts the
+history and keeps the sample index, as `cut_reconstruction` does. Refused: render
+scale below native, and settings or a size that change within a sequence. The ray
+budget is planned but nothing consumes it until Interactive shadows are assembled.
+
+Two tests on a bright card over a dark floor, seen from straight above:
+
+| Test | What it holds the resolve to |
+|---|---|
+| `reconstruction_accumulates_jittered_samples_into_edge_coverage` | The first frame restarts at weight one and equals the unreconstructed frame. Each later frame adds one sample to the mean weight, within 1%, and leaves smooth regions at the plain frame's value within 0.1%. After 48 frames the pixel the card's left edge crosses holds 0.290 of the card's radiance where the card covers 0.290 of its area, and the top-edge pixel 0.749 where it covers 0.753: 48 jittered point samples have become coverage. Bound 0.03. |
+| `reconstruction_history_survives_a_pan_and_restarts_on_cuts_and_sun_turns` | A camera panning half a pixel a frame never restarts and the floor's weight keeps growing through reprojection. A cut and a 0.2 rad sun turn each restart every pixel, with weights back within the spatial start's window, and the frame after a restart adds one sample again. Two runs of the pan give identical images and history. |
+
+`ara_frame --reconstruction` is the level on either layer, combinable with the cache
+levels. On Metal, M5-A with the cache at its defaults and reconstruction on is
+identical across two 16-frame moving runs. **Not compared with wgpu.** What these
+tests cannot see is the resolve's filter weights away from a straight edge, or its
+rejection rules under object motion; those need the cross-layer comparison.
 
 ## Cube-array environment lookups (Renderlab main's P-SKY)
 

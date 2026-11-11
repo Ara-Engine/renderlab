@@ -239,6 +239,7 @@ impl Yard {
                     primary: Primary::Traced,
                     post: None,
                     indirect,
+                    reconstruction: None,
                 },
             )?;
             let red = images

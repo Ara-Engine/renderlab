@@ -42,7 +42,9 @@
 //! turns the cache's bounce light on as well (gathers, light visibility and cell
 //! shading). `--filter` implies `--bounce` and adds the cell filter at its default
 //! bits, which makes the cache Renderlab's default configuration but for the table
-//! size. `--crevice` adds a slot to the scene, two 1.2 m walls 7 cm apart on the floor
+//! size. `--reconstruction` implies `--traced` and turns temporal reconstruction on at its
+//! default settings and native scale: each frame is rendered through a jittered camera
+//! and resolved against its history, so only a sequence shows it. `--crevice` adds a slot to the scene, two 1.2 m walls 7 cm apart on the floor
 //! with their open end toward the camera: the filter's contrast refine fires on the
 //! floor cells inside it, which nothing in M5-A itself makes it do.
 //!
@@ -79,7 +81,7 @@ fn main() -> Result<(), Failure> {
     let mut sun_shadows = false;
     let mut traced = false;
     let (mut gi, mut bounce, mut filter, mut still) = (false, false, false, false);
-    let mut crevice = false;
+    let (mut crevice, mut reconstruction) = (false, false);
     let mut frames = 1usize;
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -90,6 +92,7 @@ fn main() -> Result<(), Failure> {
             "--gi" => (sun_shadows, traced, gi) = (true, true, true),
             "--bounce" => (sun_shadows, traced, gi, bounce) = (true, true, true, true),
             "--crevice" => crevice = true,
+            "--reconstruction" => (sun_shadows, traced, reconstruction) = (true, true, true),
             "--filter" => {
                 (sun_shadows, traced, gi, bounce, filter) = (true, true, true, true, true)
             }
@@ -158,6 +161,7 @@ fn main() -> Result<(), Failure> {
         bounce,
         filter,
         crevice,
+        reconstruction,
         still,
         frames,
     };
@@ -189,6 +193,8 @@ struct Level {
     filter: bool,
     /// The scene has the slot that makes contrast refine fire.
     crevice: bool,
+    /// Temporal reconstruction at its defaults, on a traced frame.
+    reconstruction: bool,
     /// Every frame from pose 0.
     still: bool,
     frames: usize,
@@ -299,7 +305,11 @@ fn wgpu_frame(
         } else {
             IndirectSettings::off()
         })?;
-        r.set_reconstruction(Reconstruction::off())?;
+        r.set_reconstruction(if level.reconstruction {
+            Reconstruction::default()
+        } else {
+            Reconstruction::off()
+        })?;
         r.set_reflections(ReflectionSettings::off())?;
         r.set_post_settings(traced_post())?;
     }
@@ -409,7 +419,9 @@ fn ara_frame(
     level: Level,
     output: &Path,
 ) -> Result<Vec<Frame>, Failure> {
-    use renderlab::backend_ara::{cache::ShaderCache, forward, gi_cache::Indirect};
+    use renderlab::backend_ara::{
+        cache::ShaderCache, forward, gi_cache::Indirect, temporal::Reconstruct,
+    };
     let Level {
         atmosphere,
         sun_shadows,
@@ -470,6 +482,10 @@ fn ara_frame(
                 indirect: gi.then(|| Indirect {
                     settings: cache_settings(level),
                     read_table: true,
+                }),
+                reconstruction: level.reconstruction.then(|| Reconstruct {
+                    settings: renderlab::Reconstruction::default(),
+                    read_history: false,
                 }),
             },
         )?;
@@ -586,9 +602,10 @@ fn write(
         // Compact: a sequence's grids are large, and this file travels as text.
         serde_json::to_vec(&serde_json::json!({
             "scene": format!(
-                "M5-A authored v1{}, {}, local shadows off, default post",
+                "M5-A authored v1{}, {}, local shadows off, default post{}",
                 if level.crevice { " with a slot between two walls" } else { "" },
-                if level.still { "every frame from pose 0" } else { "camera path from pose 0" }
+                if level.still { "every frame from pose 0" } else { "camera path from pose 0" },
+                if level.reconstruction { ", temporal reconstruction at its defaults" } else { "" }
             ),
                                     "primary": match (level.traced, level.gi, level.bounce) {
                 (true, true, true) if level.filter => "traced, exact soft shadows, radiance cache with bounce and the cell filter (2^17 slots), no reconstruction, reflections or motion blur",

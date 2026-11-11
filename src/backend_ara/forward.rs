@@ -39,11 +39,15 @@ use super::{
     receiver_raster::{ReceiverDraw, ReceiverTargets, Receivers},
     shader::{self, InputKey, InputKind, Pass, Program, SampleType, ShaderInput},
     sky::SkyPass,
+    temporal::{History, Reconstruct},
     toon::{MeshAttachments, ToonDraw, ToonPass},
     transfer,
     volumes::VolumePasses,
 };
-use crate::{light_cluster as lc, lighting::PackedLighting, renderer::shadow_gpu};
+use crate::{
+    light_cluster as lc, lighting::PackedLighting,
+    renderer::primary_ray_gpu::temporal_reconstruction as tr, renderer::shadow_gpu,
+};
 use anyhow::{Context, Result, bail, ensure};
 use ara_gpu::{
     AccelerationStructure, Access, Device, GpuDevice, Queue, Resource,
@@ -88,6 +92,9 @@ pub struct ForwardScene<'a> {
     /// The world radiance cache, on `Primary::Traced` frames only. `None` or disabled
     /// settings publish it as off: programs read the unoccluded environment.
     pub indirect: Option<Indirect>,
+    /// Temporal reconstruction, on `Primary::Traced` frames only: the frame is rendered
+    /// through a jittered camera and resolved against its history.
+    pub reconstruction: Option<Reconstruct>,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -125,6 +132,9 @@ pub struct ForwardImages {
     /// With the cell filter and `read_table`: its sources, 22 words a slot (hot words 1
     /// to 22 as written before filtering).
     pub indirect_raw: Option<Vec<u32>>,
+    /// With `Reconstruct::read_history`: the history colour this frame wrote, RGBA32F
+    /// (exposed mean, accumulated weight), and whether the frame restarted every pixel.
+    pub reconstruction_history: Option<(Vec<f32>, bool)>,
 }
 
 /// The post `Settings` record at this output height for the post frame with this
@@ -365,26 +375,35 @@ pub struct Frames {
     transforms: Vec<crate::Mat4>,
     /// The radiance cache, allocated by the first frame that asks for it.
     gi: Option<Cache>,
+    /// Temporal reconstruction's history, allocated the same way.
+    tr1: Option<History>,
 }
 impl Frames {
     /// Forgets history: the next frame is a first frame after a cut. The cache keeps
     /// its buffers and starts from an empty table, as `Renderer::reset_indirect`.
     pub fn cut(&mut self) {
-        let mut gi = self.gi.take();
+        let (mut gi, mut tr1) = (self.gi.take(), self.tr1.take());
         if let Some(cache) = &mut gi {
             cache.reset();
         }
+        if let Some(history) = &mut tr1 {
+            history.cut();
+        }
         *self = Self {
             gi,
+            tr1,
             ..Self::default()
         };
     }
     /// Releases what the sequence kept on the GPU.
     pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
-        match self.gi {
-            Some(cache) => cache.retire(gpu),
-            None => Ok(()),
+        if let Some(cache) = self.gi {
+            cache.retire(gpu)?;
         }
+        if let Some(history) = self.tr1 {
+            history.retire(gpu)?;
+        }
+        Ok(())
     }
     /// The serial the next post frame's `Settings` record carries.
     pub fn next_post_serial(&self) -> u32 {
@@ -399,15 +418,21 @@ impl Frames {
     ) -> Result<ForwardImages> {
         // The cache outlives a failed frame. Its planner may already have planned that
         // frame (and consumed a pending clear), so it starts from an empty table again.
-        let mut gi = self.gi.take();
-        let next = frame(self, &mut gi, gpu, cache, scene);
-        if let (Err(_), Some(cache)) = (&next, &mut gi) {
-            cache.reset();
+        let (mut gi, mut tr1) = (self.gi.take(), self.tr1.take());
+        let next = frame(self, &mut gi, &mut tr1, gpu, cache, scene);
+        if next.is_err() {
+            if let Some(cache) = &mut gi {
+                cache.reset();
+            }
+            if let Some(history) = &mut tr1 {
+                history.cut();
+            }
         }
-        self.gi = gi;
+        (self.gi, self.tr1) = (gi, tr1);
         let (images, left) = next?;
         *self = Self {
             gi: self.gi.take(),
+            tr1: self.tr1.take(),
             ..left
         };
         Ok(images)
@@ -419,6 +444,7 @@ impl Frames {
 fn frame(
     history: &Frames,
     gi: &mut Option<Cache>,
+    tr1: &mut Option<History>,
     gpu: &mut GpuDevice,
     cache: &ShaderCache,
     scene: &ForwardScene<'_>,
@@ -430,6 +456,7 @@ fn frame(
         shadow_bases: Vec::new(),
         transforms: scene.objects.iter().map(|o| o.transform).collect(),
         gi: None,
+        tr1: None,
     };
     ensure!(!scene.objects.is_empty(), "forward frame needs an object");
     ensure!(
@@ -457,6 +484,30 @@ fn frame(
         indirect.is_none() || deferred_path,
         "the radiance cache runs on traced frames"
     );
+    // `render_view`: a reconstructed frame draws everything through the camera jittered
+    // by its sample of the sequence; post and the cache's still key use it unjittered.
+    let reconstruct = scene.reconstruction.filter(|r| r.settings.enabled);
+    ensure!(
+        reconstruct.is_none() || deferred_path,
+        "temporal reconstruction runs on traced frames"
+    );
+    if let Some(r) = reconstruct {
+        ensure!(
+            tr1.as_ref().is_none_or(|h| h.matches(r.settings, size)),
+            "reconstruction settings or size changed within a sequence, which is not assembled yet"
+        );
+        if tr1.is_none() {
+            *tr1 = Some(History::new(gpu, cache, r.settings, size)?);
+        }
+    }
+    let sample = tr1
+        .as_ref()
+        .filter(|_| reconstruct.is_some())
+        .map(History::index);
+    let view = match sample {
+        Some(k) => scene.camera.jittered(tr::sample_offset(k)),
+        None => scene.camera,
+    };
     let program = if deferred_path {
         primary_shade::hardware_soft_program(crate::program::STANDARD_PROGRAM)?
     } else {
@@ -487,7 +538,7 @@ fn frame(
     // Lighting group 3: records, the eye/count/environment/exposure uniform and the
     // cluster frame, packed by Renderlab's own writers.
     let packed = PackedLighting::new(scene.lighting, lc::MAX_CLUSTERED as u32)?;
-    let eye = scene.camera.view().inverse().w_axis.truncate();
+    let eye = view.view().inverse().w_axis.truncate();
     let mut uniform = [0u8; 48];
     uniform[..32].copy_from_slice(&packed.uniform(eye));
     let mut records = packed.records.clone();
@@ -526,7 +577,7 @@ fn frame(
             let mut frame = shadow_gpu::plan_frame(
                 &shadows,
                 &history.shadow_bases,
-                &scene.camera,
+                &view,
                 size,
                 &scene.lighting.lights,
                 &bounds,
@@ -585,7 +636,7 @@ fn frame(
         h.update(&uniform[32..40]);
         h.finalize().into()
     };
-    let mut frame = lc::header(&scene.camera, size, packed.count, true, &[]);
+    let mut frame = lc::header(&view, size, packed.count, true, &[]);
     frame[100..104].copy_from_slice(&crate::LocalShadows::default().near.to_ne_bytes());
     let cluster_inputs = ClusterInputs {
         lights: StorageBuffer::new(gpu, &records)?,
@@ -596,9 +647,7 @@ fn frame(
     clusters.record(&mut graph, &mut rec, &cluster_inputs, &lists)?;
 
     let mut camera = [0u8; 80];
-    camera[..64].copy_from_slice(&crate::mesh::matrix_bytes(
-        scene.camera.matrix(size[0], size[1]),
-    ));
+    camera[..64].copy_from_slice(&crate::mesh::matrix_bytes(view.matrix(size[0], size[1])));
     camera[64..68].copy_from_slice(&(crate::ViewMode::Lit as u32).to_ne_bytes());
     let camera = StorageBuffer::new(gpu, &camera)?;
     let lighting = StorageBuffer::new(gpu, &uniform)?;
@@ -616,7 +665,7 @@ fn frame(
             illuminance,
             exposure: packed.exposure,
         },
-        scene.camera,
+        view,
         size,
         grid,
     )?;
@@ -793,10 +842,12 @@ fn frame(
     // `Renderer::prepare_primary`: the frame and region records, the placement table,
     // the placement transforms and the targets of a traced frame.
     let mut gi_frame = None;
+    // The reconstruction's frame record and the copy of the frame's shaded samples.
+    let mut tr1_records = None;
     let deferred = if deferred_path {
         let trace_program = primary_trace::Entry::Receivers.program()?;
         let fresh_program = fresh_visibility::traced_program()?;
-        let matrix = scene.camera.matrix(size[0], size[1]);
+        let matrix = view.matrix(size[0], size[1]);
         let inverse = matrix.inverse();
         ensure!(inverse.is_finite(), "traced camera inverse is nonfinite");
         let rect = crate::renderer::primary_ray_gpu::scene_pixels(&bounds, matrix, size);
@@ -838,6 +889,86 @@ fn frame(
         } else {
             matrices.clone()
         };
+        // `prepare_reconstruction`, through the renderer's own planner.
+        if let (Some(r), Some(k), Some(images)) = (reconstruct, sample, tr1.as_mut()) {
+            staging.extend(images.begin(gpu, &mut graph, &mut rec)?);
+            let bits = |m: &crate::Mat4| m.to_cols_array().map(f32::to_bits);
+            let rigid_motion = history.transforms.len() == left.transforms.len()
+                && history
+                    .transforms
+                    .iter()
+                    .zip(&left.transforms)
+                    .any(|(a, b)| bits(a) != bits(b));
+            let scene_bounds = bounds
+                .iter()
+                .copied()
+                .reduce(|a, b| crate::shadow_plan::Bounds {
+                    min: a.min.min(b.min),
+                    max: a.max.max(b.max),
+                });
+            // The sun's request, as the shadow frame above gives it to the planner.
+            let mut first = scene.sun_shadows.is_some();
+            let requests: Vec<_> = scene
+                .lighting
+                .lights
+                .iter()
+                .map(|l| match (l, scene.sun_shadows) {
+                    (crate::Light::Directional { .. }, Some(sun)) if std::mem::take(&mut first) => {
+                        crate::ShadowRequest::Directional {
+                            split_ends: sun.split_ends.clone(),
+                        }
+                    }
+                    _ => crate::ShadowRequest::None,
+                })
+                .collect();
+            // `reconstruction_key`: what restarts history when it changes. Local lights'
+            // candela is left out, as there, so a flicker continues under the box.
+            let key: [u8; 32] = {
+                use sha2::Digest;
+                let lights: Vec<_> = scene
+                    .lighting
+                    .lights
+                    .iter()
+                    .cloned()
+                    .map(tr::without_candela)
+                    .collect();
+                let mut h = sha2::Sha256::new();
+                h.update(format!("{:?}{:?}{lights:?}", r.settings, scene.sun_shadows).as_bytes());
+                h.update((scene.objects.len() as u64).to_le_bytes());
+                h.update(environment_digest);
+                h.update([u8::from(indirect.is_some())]);
+                h.finalize().into()
+            };
+            let planned = images.plan(tr::PlanInputs {
+                settings: r.settings,
+                budget: crate::ReconstructionShadowBudget::default(),
+                rendered_frames: history.count,
+                index: k,
+                key,
+                lights: &scene.lighting.lights,
+                requests: &requests,
+                directional_disk_angle: scene.sun_shadows.map_or(0., |s| s.disk_angle),
+                matrix: scene.camera.unjittered().matrix(size[0], size[1]),
+                eye,
+                jitter: view.jitter(),
+                exposure: packed.exposure,
+                background: clear,
+                visible_sky: settings.sky,
+                pixel_angle: 2.0 * (0.5 * scene.camera.fov_y()).tan() / size[1] as f32,
+                scene_bounds,
+                skin_bounds: None,
+                skin_revisions: vec![],
+                rigid_motion,
+                listing: false,
+            });
+            // The rotation word, then the sampling words the planner budgets.
+            frame[84..88].copy_from_slice(&tr::rotation(k).to_ne_bytes());
+            frame[112..128].copy_from_slice(&planned.sampling);
+            let record = StorageBuffer::new(gpu, &planned.frame)?;
+            graph.import(Resource::Buffer(record.buffer), Access::HostWrite);
+            let samples = Texture::new(gpu, size, Format::Rgba16Float, false, false)?;
+            tr1_records = Some((record, samples));
+        }
         // `prepare_gi`, after `prepare_primary`: allocate on the first frame that asks.
         if let Some(indirect) = indirect {
             ensure!(
@@ -854,7 +985,7 @@ fn frame(
                     &mut graph,
                     &mut rec,
                     CacheScene {
-                        camera: scene.camera,
+                        camera: view,
                         size,
                         bounds: bounds
                             .iter()
@@ -935,6 +1066,11 @@ fn frame(
             specs.extend(stage.inputs().iter().cloned());
         }
     }
+    // The history as this frame's resolve sees it; `tr1` itself advances at the end.
+    let resolve = tr1.as_ref().zip(tr1_records.as_ref());
+    if let Some((images, _)) = resolve {
+        specs.extend(images.program().inputs().iter().cloned());
+    }
     if let Some(traced) = &traced {
         specs.extend(shader::inputs(Pass::ReceiverRaster)?);
         specs.extend(traced.program.inputs().iter().cloned());
@@ -965,6 +1101,7 @@ fn frame(
                     || (gi.is_some()
                         && (spec.key == key(3, 20)
                             || (spec.key.group == 0 && (30..=37).contains(&spec.key.binding))))
+                    || (resolve.is_some() && spec.key == key(0, 40))
                     || buffers.contains_key(&spec.key)
                 {
                     continue;
@@ -978,6 +1115,9 @@ fn frame(
                 dimension, sample, ..
             } => {
                 if spec.key == key(3, 24)
+                    || (resolve.is_some()
+                        && spec.key.group == 0
+                        && (41..=47).contains(&spec.key.binding))
                     || provided(sky.as_ref(), traced.as_ref(), deferred.as_ref(), spec.key)
                         .is_some()
                     || inputs.contains_key(&spec.key)
@@ -1185,6 +1325,35 @@ fn frame(
             }
             None => None,
         };
+    // The resolve: its frame record, the copied samples, the history sides the parity
+    // selects and the HDR target it rewrites; the rest from the traced frame.
+    let resolve_packet = match resolve {
+        Some((images, (record, samples))) => {
+            let values = images
+                .program()
+                .inputs()
+                .iter()
+                .map(|spec| {
+                    Ok((
+                        spec.key,
+                        match (spec.key.group, spec.key.binding) {
+                            (0, 40) => Input::Buffer(record),
+                            (0, 41) => Input::Image(samples),
+                            (0, 46) => Input::Image(&output),
+                            _ => match images.input(spec.key) {
+                                Some(image) => Input::Image(image),
+                                None => shared.input(spec, None)?,
+                            },
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let packet = HeapBindings::for_program(gpu, images.program(), &values)?;
+            packet.import(&mut graph);
+            Some(packet)
+        }
+        None => None,
+    };
     // The traced frame's three packets: none of them belongs to one object.
     let mut deferred_packets = Vec::new();
     if let Some(deferred) = &deferred {
@@ -1228,6 +1397,21 @@ fn frame(
                 [groups[0] * threads[0], groups[1] * threads[1], 1],
             )?;
         }
+    }
+    // `encode_reconstruction`: keep the shaded samples, then resolve into the HDR target.
+    if let (Some((images, (_, samples))), Some(packet)) = (resolve, &resolve_packet) {
+        graph.node(
+            &mut rec,
+            &[
+                (Resource::Image(output.image), Access::CopySource),
+                (Resource::Image(samples.image), Access::CopyDestination),
+            ],
+        )?;
+        rec.push(Command::CopyImage {
+            source: output.image,
+            destination: samples.image,
+        });
+        images.record(&mut graph, &mut rec, packet)?;
     }
     let draws: Vec<_> = geometries
         .iter()
@@ -1323,6 +1507,16 @@ fn frame(
     {
         Some(raw) => Some(transfer::readback_buffer(
             gpu, &mut graph, &mut rec, raw.buffer, 0, raw.len,
+        )?),
+        None => None,
+    };
+    let history_read = match resolve.filter(|_| reconstruct.is_some_and(|r| r.read_history)) {
+        Some((images, _)) => Some(transfer::readback(
+            gpu,
+            &mut graph,
+            &mut rec,
+            images.written().image,
+            u64::from(size[0]) * u64::from(size[1]) * 16,
         )?),
         None => None,
     };
@@ -1474,6 +1668,11 @@ fn frame(
             .map(|b| gpu.read(b))
             .transpose()?
             .map(|bytes| bytemuck::pod_collect_to_vec(&bytes)),
+        reconstruction_history: history_read
+            .map(|b| gpu.read(b))
+            .transpose()?
+            .map(|bytes| bytemuck::pod_collect_to_vec(&bytes))
+            .zip(resolve.map(|(images, _)| images.reset())),
     };
 
     if let Some((passes, bloom, surface)) = tail {
@@ -1493,8 +1692,17 @@ fn frame(
         .chain(deferred_packets)
         .chain(gi_packets)
         .chain(gi_shade_packet)
+        .chain(resolve_packet)
     {
         packet.retire(gpu, &mut graph)?;
+    }
+    if let Some((record, samples)) = tr1_records {
+        record.retire(gpu)?;
+        post_images.push(samples);
+        // The frame is recorded and submitted: the history moves to its next sample.
+        if let Some(images) = tr1.as_mut() {
+            images.advance(history_read.is_some());
+        }
     }
     if let Some(records) = gi_frame {
         records.retire(gpu)?;
@@ -1576,6 +1784,7 @@ fn frame(
         .chain(table_read)
         .chain(outgoing_read)
         .chain(raw_read)
+        .chain(history_read)
         .chain([read])
     {
         gpu.retire(Resource::Buffer(buffer))?;
