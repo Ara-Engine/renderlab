@@ -14,8 +14,12 @@
 //! `--time dusk|noon`, `--sun-speed DEGREES_PER_SECOND` (advances the time of day, 15 degrees
 //! an hour) with `--sun-after FRAME`, `--still` (frozen camera and objects), `--timing-frames
 //! N` (a drained timing segment), `--night-lanterns` (27 dim local sources),
-//! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT), `--sky
-//! uniform`, `--no-volumetric-fog`, `--no-gi`, `--no-temporal`, `--no-post`,
+//! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT),
+//! `--atmosphere-light K` (`Settings::sky_light`: the atmosphere lights at K), `--sky
+//! uniform`, `--sky map` or `map-flat` (Showcase's gradient sky as a prepared map, or the
+//! same layout at its mean radiance; support/gradient_sky.rs, face size `--sky-face N`;
+//! `--sky-light K` lights with the map at K while drawing it at 1, `Background::ScaledSky`),
+//! `--no-volumetric-fog`, `--no-gi`, `--no-temporal`, `--no-post`,
 //! `--no-reflections` (every program keeps its untraced estimate), `--render-scale`,
 //! `--exposure`, and `--quarry MANIFEST`,
 //! which replaces the ground with the registered quarry scans and its RLE2 sky (manifest
@@ -33,6 +37,8 @@ mod diag;
 #[path = "../support/environment_controls.rs"]
 #[allow(dead_code)]
 mod environment_controls;
+#[path = "../support/gradient_sky.rs"]
+mod gradient_sky;
 #[path = "../support/limits.rs"]
 mod policy;
 
@@ -78,6 +84,11 @@ struct Args {
     temporal: bool,
     scale: RenderScale,
     uniform_sky: bool,
+    /// `--sky map` (Some(false)) or `map-flat` (Some(true)): support/gradient_sky.rs.
+    sky_map: Option<bool>,
+    sky_face: u32,
+    /// `--sky-light K`: the map lights at K and is drawn at 1 (`Background::ScaledSky`).
+    sky_light: Option<f32>,
     volumetric_fog: Option<bool>,
     post: bool,
     glass: bool,
@@ -87,6 +98,8 @@ struct Args {
     hour: f32,
     fox: Option<PathBuf>,
     sun_speed: f32,
+    /// `--atmosphere-light K`: `Settings::sky_light`, the atmosphere's light over its look.
+    atmosphere_light: f32,
     sun_after: u32,
     still: bool,
     timing_frames: u32,
@@ -110,6 +123,9 @@ impl Args {
             temporal: true,
             scale: RenderScale::Native,
             uniform_sky: false,
+            sky_map: None,
+            sky_face: 64,
+            sky_light: None,
             volumetric_fog: None,
             post: true,
             glass: true,
@@ -119,6 +135,7 @@ impl Args {
             hour: 17.5,
             fox: std::env::var_os("RENDERLAB_FOX_GLB").map(PathBuf::from),
             sun_speed: 0.0,
+            atmosphere_light: 1.0,
             sun_after: 0,
             still: false,
             timing_frames: 0,
@@ -159,14 +176,21 @@ impl Args {
                 "--reload-probe" => a.reload_probe = true,
                 "--no-gi" => a.gi = false,
                 "--sky" => {
-                    a.uniform_sky = match value()?.as_str() {
-                        "atmosphere" => false,
-                        "uniform" => true,
+                    (a.uniform_sky, a.sky_map) = match value()?.as_str() {
+                        "atmosphere" => (false, None),
+                        "uniform" => (true, None),
+                        "map" => (false, Some(false)),
+                        "map-flat" => (false, Some(true)),
                         other => {
-                            return Err(format!("--sky atmosphere|uniform, not {other}").into());
+                            return Err(format!(
+                                "--sky atmosphere|uniform|map|map-flat, not {other}"
+                            )
+                            .into());
                         }
                     }
                 }
+                "--sky-face" => a.sky_face = value()?.parse()?,
+                "--sky-light" => a.sky_light = Some(value()?.parse()?),
                 "--volumetric-fog" => a.volumetric_fog = Some(true),
                 "--no-volumetric-fog" => a.volumetric_fog = Some(false),
                 "--no-temporal" => a.temporal = false,
@@ -185,6 +209,7 @@ impl Args {
                     }
                 }
                 "--sun-speed" => a.sun_speed = value()?.parse()?,
+                "--atmosphere-light" => a.atmosphere_light = value()?.parse()?,
                 "--sun-after" => a.sun_after = value()?.parse()?,
                 "--still" => a.still = true,
                 "--night-lanterns" => a.night_lanterns = true,
@@ -321,6 +346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 },
                 exposure: Exposure::Manual { stops: exposure },
+                sky_light: args.atmosphere_light,
                 reflections: if args.reflections {
                     ReflectionSettings::default()
                 } else {
@@ -466,6 +492,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             // constant blue sky for comparison.
             if args.uniform_sky {
                 engine.set_sky(Sky::Uniform([3500.0, 5000.0, 7500.0]))?;
+            } else if let Some(flat) = args.sky_map {
+                let map =
+                    engine.create_environment(&gradient_sky::prepare(args.sky_face, flat)?)?;
+                engine.set_sky(Sky::Map {
+                    map,
+                    rotation_y: 0.0,
+                    intensity: args.sky_light.unwrap_or(1.0),
+                    background: match args.sky_light {
+                        Some(_) => Background::ScaledSky(1.0),
+                        None => Background::Sky,
+                    },
+                })?;
             }
             Vec3::ZERO
         }

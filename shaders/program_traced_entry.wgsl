@@ -77,13 +77,17 @@ const PRIMARY_CLEAR_TILE=16u;
 }
 // A primary miss: `clear` (the lit clear colour), or with the visible sky on
 // (primary_frame.sided.w, Renderer::set_visible_environment) the selected map along the
-// pixel's camera ray at level 0, exposed and scaled as the lighting it provides.
+// pixel's camera ray at level 0, exposed, at the radiance scale whose f32 bits sided.w
+// holds: the lighting's own intensity unless set_visible_environment_scale differs.
 fn primary_miss(id:vec2<u32>,size:vec2<u32>,clear:vec4<f32>)->vec4<f32> {
     let ray=primary_ray(id,size);
     let d=normalize(ray.far-ray.near);
     // AT1: the atmosphere's sky (shaders/atmosphere_api.wgsl) unless the visible map is on.
     if primary_frame.sided.w==0u {return atmosphere_backdrop(d,clear);}
-    return vec4<f32>(environment_product(environment_radiance(environment_direction(d),0.0),vec3<f32>(1.0)),1.0);
+    let radiance=environment_radiance(environment_direction(d),0.0);
+    let scale=bitcast<f32>(primary_frame.sided.w);
+    if scale==lighting.map.z {return vec4<f32>(environment_product(radiance,vec3<f32>(1.0)),1.0);}
+    return vec4<f32>(exposed_product(radiance,vec3<f32>(scale)),1.0);
 }
 // One pixel inside the image: its hit record shaded, or the clear colour for a miss.
 // The program sees the same receiver frame as on raster, with explicit footprints.

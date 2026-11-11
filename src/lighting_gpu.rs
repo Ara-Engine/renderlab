@@ -47,6 +47,7 @@ pub(super) struct LightingGpu {
     _dfg_allocation: Allocation,
     sampler: Owned<wgpu::Sampler>,
     dummy_environment: crate::environment::EnvironmentCube,
+    environment_sampler: Owned<wgpu::Sampler>,
     /// The empty environment lobe table, bound when the selected map has none.
     dummy_lobes: crate::environment::EnvironmentCube,
     active: Option<LightBuffer>,
@@ -111,6 +112,13 @@ impl LightingGpu {
                     computed(cube_entry(6)),
                     computed(cube_entry(7)),
                     computed(cube_entry(9)),
+                    // The environment cubes' bilinear sampler (shaders/scene.wgsl).
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 11,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                     // The selected map's environment lobe table, read by the M7-ES1
                     // inputs (shaders/environment_lobes.wgsl).
                     computed(lobe_entry(10)),
@@ -290,6 +298,18 @@ impl LightingGpu {
             ResourceKind::Sampler,
         );
         let dummy_environment = super::environment_gpu::dummy_cube(device, queue, ledger);
+        // Bilinear within a level, exact integer levels (a legacy chain's mips); cube
+        // sampling filters across face edges and corners.
+        let environment_sampler = ledger.own(
+            device.create_sampler(&wgpu::SamplerDescriptor {
+                label: Some("environment field bilinear"),
+                mag_filter: wgpu::FilterMode::Linear,
+                min_filter: wgpu::FilterMode::Linear,
+                mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+                ..Default::default()
+            }),
+            ResourceKind::Sampler,
+        );
         let dummy_lobes = super::environment_gpu::dummy_lobes(device, queue, ledger);
         let limits = device.limits();
         let clusters = super::light_cluster_gpu::LightClusters::new(device, ledger);
@@ -310,6 +330,7 @@ impl LightingGpu {
             _dfg_allocation: ledger.allocate(AllocationKind::Lut, DFG.len() as u64),
             sampler,
             dummy_environment,
+            environment_sampler,
             dummy_lobes,
             active: None,
             retired: vec![],
@@ -562,6 +583,12 @@ impl Renderer {
                                 ),
                             },
                             wgpu::BindGroupEntry {
+                                binding: 11,
+                                resource: wgpu::BindingResource::Sampler(
+                                    &state.environment_sampler,
+                                ),
+                            },
+                            wgpu::BindGroupEntry {
                                 binding: 10,
                                 resource: wgpu::BindingResource::TextureView(
                                     self.environment
@@ -806,8 +833,8 @@ fn lobe_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
 fn cube_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     let mut entry = texture_entry(binding);
     entry.ty = wgpu::BindingType::Texture {
-        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-        view_dimension: wgpu::TextureViewDimension::D2Array,
+        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+        view_dimension: wgpu::TextureViewDimension::CubeArray,
         multisampled: false,
     };
     entry

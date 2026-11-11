@@ -1,5 +1,7 @@
 # Showcase sky-map shading: causes to screen next
 
+> **Screened in [p-sky.md](p-sky.md) (2026-11-11, Radeon 760M).** The first and fourth causes hold: the manual cube filter, and its seam path in particular. The second holds too, because the compiler does not sink the discarded miss lookup. Filtered cube-array lookups plus a miss-only sky lookup halve the map's premium on both paths. The image is unchanged up to filter-weight rounding. The format change (third cause) was measured at −1.5 ms on that GPU and has not been taken.
+
 Standalone expansion of the initial note in [the cut study](design-cuts.md), against main **`7bd8b9a`**, after **v0.1.3**. No builds, GPU work or new measurements. **M** means measured in the linked repo report; **R** means reported by repository code or a named source, not a timing measurement; **E** means an estimate or proposed screening parameter. Identifiers and line numbers are not measurements.
 
 **Start with a post-banking hit/miss lookup split, then inspect the generated shader's handling of an overwritten sky value.** The dominant hypothesis is repeated manual environment filtering inside glossy-ray and hit shading, rather than the sky background itself. Do not lower glossy ray counts as the first way to make that lookup cheaper: count also changes each ray's cone and the reflected highlight/noise problem.

@@ -324,8 +324,8 @@ fn at_jitter(k:u32) -> vec3<f32> {
 // ---- Procedural environment source (Atmosphere::environment) ----
 // The sky (no sun disk) as an environment in the legacy mip-chain layout scene.wgsl reads:
 // a prefiltered specular chain whose level i holds GGX roughness i/(levels-1), and a diffuse
-// irradiance cube, both unexposed (cd/m2 and lux) in the cube convention of
-// environment_face_direction.
+// irradiance cube, both unexposed (cd/m2 and lux) in WebGPU's cube convention, which
+// scene.wgsl's cube-array lookups sample.
 @group(0) @binding(16) var at_specular_out:texture_storage_2d_array<rgba32float,write>;
 @group(0) @binding(17) var at_diffuse_out:texture_storage_2d_array<rgba32float,write>;
 // src/atmosphere_gpu.rs ENVIRONMENT_SIZE and ENVIRONMENT_LEVELS must match.

@@ -137,9 +137,13 @@ struct Light { position_range:vec4<f32>, travel_outer:vec4<f32>, rgb_inner:vec4<
 @group(3) @binding(1) var<storage,read> lights:array<Light>;
 @group(3) @binding(2) var dfg:texture_2d<f32>;
 @group(3) @binding(3) var dfg_sampler:sampler;
-@group(3) @binding(6) var environment_diffuse:texture_2d_array<f32>;
-@group(3) @binding(7) var environment_specular:texture_2d_array<f32>;
-@group(3) @binding(9) var environment_specular_second:texture_2d_array<f32>;
+// The prepared environment as cube arrays (cube i is layers 6i..6i+5; WebGPU face order
+// +X, -X, +Y, -Y, +Z, -Z), sampled with hardware filtering: seamless across face edges
+// and corners, bilinear within a level, exact integer levels (P-SKY, docs/p-sky.md).
+@group(3) @binding(6) var environment_diffuse:texture_cube_array<f32>;
+@group(3) @binding(7) var environment_specular:texture_cube_array<f32>;
+@group(3) @binding(9) var environment_specular_second:texture_cube_array<f32>;
+@group(3) @binding(11) var environment_sampler:sampler;
 struct ShadowView {
     world_to_clip:mat4x4<f32>,
     // Directional camera-depth interval or local radial interval; normalized and world bias.
@@ -253,73 +257,9 @@ fn exposed_product(a:vec3<f32>, b:vec3<f32>) -> vec3<f32> {
 fn environment_direction(world:vec3<f32>) -> vec3<f32> {
     return vec3<f32>(lighting.map.x*world.x-lighting.map.y*world.z,world.y,lighting.map.y*world.x+lighting.map.x*world.z);
 }
-// Identical face selection and three-face corner support to the accepted reconstruction probe.
-fn environment_face_uv(d:vec3<f32>) -> vec3<f32> {
-    let a=abs(d);
-    if a.x>=a.y && a.x>=a.z {
-        if d.x>0.0 { return vec3<f32>(0.0,-d.z/a.x,-d.y/a.x); }
-        return vec3<f32>(1.0,d.z/a.x,-d.y/a.x);
-    }
-    if a.y>=a.z {
-        if d.y>0.0 { return vec3<f32>(2.0,d.x/a.y,d.z/a.y); }
-        return vec3<f32>(3.0,d.x/a.y,-d.z/a.y);
-    }
-    if d.z>0.0 { return vec3<f32>(4.0,d.x/a.z,-d.y/a.z); }
-    return vec3<f32>(5.0,-d.x/a.z,-d.y/a.z);
-}
-fn environment_face_direction(face:i32, uv:vec2<f32>) -> vec3<f32> {
-    switch face {
-        case 0: { return vec3<f32>(1.0,-uv.y,-uv.x); }
-        case 1: { return vec3<f32>(-1.0,-uv.y,uv.x); }
-        case 2: { return vec3<f32>(uv.x,1.0,uv.y); }
-        case 3: { return vec3<f32>(uv.x,-1.0,-uv.y); }
-        case 4: { return vec3<f32>(uv.x,-uv.y,1.0); }
-        default: { return vec3<f32>(-uv.x,-uv.y,-1.0); }
-    }
-}
-fn environment_remap(tex:texture_2d_array<f32>, face:i32, p:vec2<i32>, size:i32, mip:i32, bank:i32) -> vec3<f32> {
-    if all(p>=vec2<i32>(0)) && all(p<vec2<i32>(size)) { return textureLoad(tex,p,bank+face,mip).rgb; }
-    let d=environment_face_direction(face,2.0*(vec2<f32>(p)+vec2<f32>(0.5))/f32(size)-vec2<f32>(1.0));
-    let next=environment_face_uv(d);
-    let q=clamp(vec2<i32>((next.yz+vec2<f32>(1.0))*f32(size)*0.5),vec2<i32>(0),vec2<i32>(size-1));
-    return textureLoad(tex,q,bank+i32(next.x),mip).rgb;
-}
-fn environment_tap(tex:texture_2d_array<f32>, face:i32, p:vec2<i32>, size:i32, mip:i32, bank:i32) -> vec3<f32> {
-    let outside_x=p.x<0 || p.x>=size;
-    let outside_y=p.y<0 || p.y>=size;
-    if !(outside_x && outside_y) { return environment_remap(tex,face,p,size,mip,bank); }
-    let q=clamp(p,vec2<i32>(0),vec2<i32>(size-1));
-    var sum=vec3<f32>(0.0);
-    // Share corner remapping without putting ordinary taps through a sample loop.
-    for (var i=0; i<3; i++) {
-        let point=vec2<i32>(select(q.x,p.x,i==1),select(q.y,p.y,i==2));
-        let value=environment_remap(tex,face,point,size,mip,bank);
-        if i==0 { sum=value; } else { sum+=value; }
-    }
-    return sum/3.0;
-}
-fn environment_bilinear(tex:texture_2d_array<f32>, d:vec3<f32>, mip:i32, bank:i32) -> vec3<f32> {
-    let size=i32(textureDimensions(tex,mip).x);
-    let face=environment_face_uv(d);
-    let xy=(face.yz+vec2<f32>(1.0))*f32(size)*0.5-vec2<f32>(0.5);
-    let p=vec2<i32>(floor(xy));
-    let t=fract(xy);
-    // P-NRT2: a footprint inside its face (almost every lookup) reads its four texels as
-    // environment_remap's in-face branch does, in straight-line loads the GPU issues together
-    // instead of four branchy taps; the same texels and the same blend.
-    if all(p>=vec2<i32>(0)) && all(p<vec2<i32>(size-1)) {
-        let layer=bank+i32(face.x);
-        let a=textureLoad(tex,p,layer,mip).rgb;
-        let b=textureLoad(tex,p+vec2<i32>(1,0),layer,mip).rgb;
-        let c=textureLoad(tex,p+vec2<i32>(0,1),layer,mip).rgb;
-        let e=textureLoad(tex,p+vec2<i32>(1,1),layer,mip).rgb;
-        return (a*(1.0-t.x)+b*t.x)*(1.0-t.y)+(c*(1.0-t.x)+e*t.x)*t.y;
-    }
-    let a=environment_tap(tex,i32(face.x),p,size,mip,bank);
-    let b=environment_tap(tex,i32(face.x),p+vec2<i32>(1,0),size,mip,bank);
-    let c=environment_tap(tex,i32(face.x),p+vec2<i32>(0,1),size,mip,bank);
-    let e=environment_tap(tex,i32(face.x),p+vec2<i32>(1,1),size,mip,bank);
-    return (a*(1.0-t.x)+b*t.x)*(1.0-t.y)+(c*(1.0-t.x)+e*t.x)*t.y;
+// The prepared diffuse irradiance toward source-space direction d.
+fn environment_diffuse_at(d:vec3<f32>) -> vec3<f32> {
+    return textureSampleLevel(environment_diffuse,environment_sampler,d,0,0.0).rgb;
 }
 // A legacy chain's level count; a chain with banked narrow levels adds 0.5 (P-SHOW2).
 fn environment_legacy_levels() -> f32 { return floor(lighting.map.w); }
@@ -333,13 +273,11 @@ fn environment_level(d:vec3<f32>, level:i32) -> vec3<f32> {
     let legacy=lighting.map.w>0.0;
     if legacy && fract(lighting.map.w)>0.0 {
         let start=environment_bank_start();
-        if level>=start { return environment_bilinear(environment_specular_second,d,0,(level-start)*6); }
+        if level>=start { return textureSampleLevel(environment_specular_second,environment_sampler,d,level-start,0.0).rgb; }
     }
-    let second=!legacy && level>=42;
-    let mip=select(0,level,legacy);
-    let bank=select((level-select(0,42,second))*6,0,legacy);
-    if second { return environment_bilinear(environment_specular_second,d,mip,bank); }
-    return environment_bilinear(environment_specular,d,mip,bank);
+    if legacy { return textureSampleLevel(environment_specular,environment_sampler,d,0,f32(level)).rgb; }
+    if level>=42 { return textureSampleLevel(environment_specular_second,environment_sampler,d,level-42,0.0).rgb; }
+    return textureSampleLevel(environment_specular,environment_sampler,d,level,0.0).rgb;
 }
 fn environment_legacy_lod(d:vec3<f32>, lod:f32) -> vec3<f32> {
     let n=environment_legacy_levels();

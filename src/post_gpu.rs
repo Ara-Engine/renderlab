@@ -1,7 +1,7 @@
 //! PP1 owns its output textures. Nothing here writes HDR or reconstruction history.
 use super::primary_ray_gpu::Buffer;
 use super::*;
-use crate::post::{ColourLut, PostSettings, Tonemapper};
+use crate::post::{ColourLut, PostSettings};
 
 pub(super) struct PostGpu {
     size: wgpu::Extent3d,
@@ -528,41 +528,12 @@ impl PostGpu {
         r.queue.write_buffer(&self.frame.value, 0, &frame);
         self.previous = Some((r.frames + 1, current));
         self.serial = self.serial.wrapping_add(1);
-        let d = s.depth_of_field.unwrap_or_default();
-        let focal = d.focal_length_mm * 0.001;
-        let scale = focal * focal / (d.f_number * (d.focus_distance_m - focal))
-            * self.size.height as f32
-            / (d.sensor_height_mm * 0.001)
-            * 0.5;
-        // Neutral at 6500 K; bounded RGB camera adaptation, separate from exposure.
-        let warmth = (6500.0 / s.white_balance_kelvin).ln();
-        let white = [
-            (warmth * 0.35).exp(),
-            (-s.tint * 0.15).exp(),
-            (-warmth * 0.35).exp(),
-        ];
-        let values = [
-            s.bloom,
-            s.shutter_angle_degrees / 720.0,
-            s.max_motion_radius_px,
-            (self.serial & 0x00ff_ffff) as f32,
-            d.focus_distance_m,
-            scale,
-            d.max_radius_px,
-            u32::from(s.depth_of_field.is_some()) as f32,
-            s.contrast,
-            s.saturation,
-            s.vignette,
-            s.grain,
-            white[0],
-            white[1],
-            white[2],
-            u32::from(s.tonemapper == Tonemapper::Filmic) as f32,
-            s.chromatic_aberration_px,
-            if self.lut_custom { s.lut_strength } else { 0.0 },
-            self.lut.texture.width() as f32,
-            0.0,
-        ];
+        let values = s.record(
+            self.serial,
+            self.size.height,
+            self.lut.texture.width(),
+            self.lut_custom,
+        );
         let bytes: Vec<_> = values.into_iter().flat_map(f32::to_ne_bytes).collect();
         r.queue.write_buffer(&self.settings.value, 0, &bytes);
         use wgpu::BindingResource as R;

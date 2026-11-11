@@ -803,7 +803,7 @@ var<private> gi_cell_sh:array<vec3<f32>,10>;
 fn gi_store_sh(slot:u32) {
     if lighting.map.w!=0.0 {
         let n=gi_unpack_normal(gi_table[gi_cold(slot)+GI_C_NORMAL]);
-        let exact=environment_bilinear(environment_diffuse,environment_direction(n),0,0);
+        let exact=environment_diffuse_at(environment_direction(n));
         let open=gi_cell_sh[9];
         // Guarded: a near-black or degenerate sum keeps its own value.
         let s=select(vec3<f32>(1.0),clamp(exact/max(open,vec3<f32>(1e-30)),vec3<f32>(0.25),vec3<f32>(4.0)),
@@ -1934,7 +1934,7 @@ fn gi_filter_cell(slot:u32) {
         gi_sh_basis(n);
         open=PI;
         if lighting.map.w!=0.0 {
-            open=dot(environment_bilinear(environment_diffuse,environment_direction(n),0,0),vec3<f32>(1.0/3.0));
+            open=dot(environment_diffuse_at(environment_direction(n)),vec3<f32>(1.0/3.0));
         }
         open_c=gi_raw_openness(slot,open);
     }

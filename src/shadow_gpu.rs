@@ -10,7 +10,7 @@ pub(super) struct ShadowDraw<'a> {
     pub indices: std::ops::Range<u32>,
     pub slot: u32,
 }
-pub(super) struct ShadowFrame {
+pub(crate) struct ShadowFrame {
     pub views: Vec<ShadowView>,
     pub light_ranges: Vec<[u32; 2]>,
     bases: Vec<Option<DMat4>>,
@@ -307,121 +307,134 @@ impl ShadowState {
         lights: &[Light],
         bounds: &[Bounds],
     ) -> Result<ShadowFrame, Error> {
-        let mut views = vec![];
-        let mut light_ranges = vec![[0, 0]; lights.len()];
-        let mut bases = vec![None; lights.len()];
-        for (index, (light, request)) in lights.iter().zip(&self.settings.requests).enumerate() {
-            let first = views.len() as u32;
-            match (light, request) {
-                (_, ShadowRequest::None) => {}
-                (Light::Directional { travel, .. }, ShadowRequest::Directional { split_ends }) => {
-                    let basis = plan::transported_orientation(
-                        *travel,
-                        self.bases.get(index).copied().flatten(),
-                    )?;
-                    views.extend(plan::directional_oriented(
-                        camera,
-                        viewport,
-                        basis,
-                        split_ends,
-                        self.settings.resolution,
-                        bounds,
-                    )?);
-                    bases[index] = Some(basis);
-                }
-                (
-                    Light::Spot {
-                        position,
-                        travel,
-                        outer,
-                        ..
-                    },
-                    ShadowRequest::Spot { near, far },
-                ) => {
-                    validate_local_casters(*position, *near, bounds)?;
-                    let basis = plan::transported_orientation(
-                        *travel,
-                        self.bases.get(index).copied().flatten(),
-                    )?;
-                    views.push(plan::spot_oriented(
-                        *position,
-                        basis,
-                        *outer,
-                        LocalRange {
-                            near: *near,
-                            far: *far,
-                        },
-                        self.settings.resolution,
-                        bounds,
-                    )?);
-                    bases[index] = Some(basis);
-                }
-                (Light::Point { position, .. }, ShadowRequest::Point { near, far }) => {
-                    validate_local_casters(*position, *near, bounds)?;
-                    views.extend(plan::point(
-                        *position,
-                        LocalRange {
-                            near: *near,
-                            far: *far,
-                        },
-                        self.settings.resolution,
-                        bounds,
-                    )?);
-                }
-                _ => unreachable!("validated whole shadow/light set"),
+        plan_frame(
+            &self.settings,
+            &self.bases,
+            camera,
+            viewport,
+            lights,
+            bounds,
+        )
+    }
+}
+
+/// The CPU half of a shadow frame: views for every requested light, their packed
+/// records and each light's view range. `previous` holds the last frame's light
+/// orientations (empty on a first frame). The wgpu renderer and the ara-gpu backend
+/// both plan through this.
+pub(crate) fn plan_frame(
+    settings: &crate::Shadows,
+    previous: &[Option<glam::DMat4>],
+    camera: &Camera,
+    viewport: [u32; 2],
+    lights: &[Light],
+    bounds: &[Bounds],
+) -> Result<ShadowFrame, Error> {
+    let mut views = vec![];
+    let mut light_ranges = vec![[0, 0]; lights.len()];
+    let mut bases = vec![None; lights.len()];
+    for (index, (light, request)) in lights.iter().zip(&settings.requests).enumerate() {
+        let first = views.len() as u32;
+        match (light, request) {
+            (_, ShadowRequest::None) => {}
+            (Light::Directional { travel, .. }, ShadowRequest::Directional { split_ends }) => {
+                let basis =
+                    plan::transported_orientation(*travel, previous.get(index).copied().flatten())?;
+                views.extend(plan::directional_oriented(
+                    camera,
+                    viewport,
+                    basis,
+                    split_ends,
+                    settings.resolution,
+                    bounds,
+                )?);
+                bases[index] = Some(basis);
             }
-            light_ranges[index] = [first, views.len() as u32 - first];
+            (
+                Light::Spot {
+                    position,
+                    travel,
+                    outer,
+                    ..
+                },
+                ShadowRequest::Spot { near, far },
+            ) => {
+                validate_local_casters(*position, *near, bounds)?;
+                let basis =
+                    plan::transported_orientation(*travel, previous.get(index).copied().flatten())?;
+                views.push(plan::spot_oriented(
+                    *position,
+                    basis,
+                    *outer,
+                    LocalRange {
+                        near: *near,
+                        far: *far,
+                    },
+                    settings.resolution,
+                    bounds,
+                )?);
+                bases[index] = Some(basis);
+            }
+            (Light::Point { position, .. }, ShadowRequest::Point { near, far }) => {
+                validate_local_casters(*position, *near, bounds)?;
+                views.extend(plan::point(
+                    *position,
+                    LocalRange {
+                        near: *near,
+                        far: *far,
+                    },
+                    settings.resolution,
+                    bounds,
+                )?);
+            }
+            _ => unreachable!("validated whole shadow/light set"),
         }
-        let mut records = Vec::with_capacity(views.len() * VIEW_BYTES as usize);
-        // The final row is camera-forward depth, shared by raster metadata and sampling.
-        let camera_depth = -camera.view().transpose().z_axis;
-        for view in &views {
-            debug_assert_eq!(view.resolution, self.settings.resolution);
-            debug_assert!(view.world_to_view.is_finite() && view.view_to_clip.is_finite());
-            debug_assert!(view.depth[1] > view.depth[0]);
-            records.extend_from_slice(&matrix_bytes(raster_depth_matrix(view)));
-            let (near, far) = match view.kind {
-                plan::ViewKind::Cascade { near, far } => (near, far),
-                _ => (0.0, 0.0),
-            };
-            for value in [
-                near,
-                far,
-                self.settings.depth_bias,
-                self.settings.normal_bias,
-            ]
+        light_ranges[index] = [first, views.len() as u32 - first];
+    }
+    let mut records = Vec::with_capacity(views.len() * VIEW_BYTES as usize);
+    // The final row is camera-forward depth, shared by raster metadata and sampling.
+    let camera_depth = -camera.view().transpose().z_axis;
+    for view in &views {
+        debug_assert_eq!(view.resolution, settings.resolution);
+        debug_assert!(view.world_to_view.is_finite() && view.view_to_clip.is_finite());
+        debug_assert!(view.depth[1] > view.depth[0]);
+        records.extend_from_slice(&matrix_bytes(raster_depth_matrix(view)));
+        let (near, far) = match view.kind {
+            plan::ViewKind::Cascade { near, far } => (near, far),
+            _ => (0.0, 0.0),
+        };
+        for value in [near, far, settings.depth_bias, settings.normal_bias]
             .into_iter()
             .chain(camera_depth.to_array())
             .chain([
                 view.world_units_per_texel.unwrap_or(0.0),
                 0.0,
-                self.settings.directional_disk_angle.tan(),
+                settings.directional_disk_angle.tan(),
                 0.0,
-            ]) {
-                records.extend_from_slice(&value.to_ne_bytes());
-            }
+            ])
+        {
+            records.extend_from_slice(&value.to_ne_bytes());
         }
-        for (request, &[first, count]) in self.settings.requests.iter().zip(&light_ranges) {
-            if let ShadowRequest::Point { near, far } | ShadowRequest::Spot { near, far } = request
-            {
-                for layer in first..first + count {
-                    let offset = layer as usize * VIEW_BYTES as usize + 64;
-                    records[offset..offset + 4].copy_from_slice(&near.to_ne_bytes());
-                    records[offset + 4..offset + 8].copy_from_slice(&far.to_ne_bytes());
-                }
-            }
-        }
-        Ok(ShadowFrame {
-            views,
-            light_ranges,
-            bases,
-            records,
-        })
     }
+    for (request, &[first, count]) in settings.requests.iter().zip(&light_ranges) {
+        if let ShadowRequest::Point { near, far } | ShadowRequest::Spot { near, far } = request {
+            for layer in first..first + count {
+                let offset = layer as usize * VIEW_BYTES as usize + 64;
+                records[offset..offset + 4].copy_from_slice(&near.to_ne_bytes());
+                records[offset + 4..offset + 8].copy_from_slice(&far.to_ne_bytes());
+            }
+        }
+    }
+    Ok(ShadowFrame {
+        views,
+        light_ranges,
+        bases,
+        records,
+    })
 }
 
 /// F64 affine corners plus outward f32 rounding retain the full submitted geometry.
-pub(super) fn world_bounds(bounds: Aabb, model: Mat4) -> Result<Bounds, Error> {
+pub(crate) fn world_bounds(bounds: Aabb, model: Mat4) -> Result<Bounds, Error> {
     let mut min = glam::DVec3::splat(f64::INFINITY);
     let mut max = glam::DVec3::splat(f64::NEG_INFINITY);
     for i in 0..8 {
