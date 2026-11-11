@@ -216,6 +216,7 @@ pub struct Settings {
     pub local_shadows: LocalShadows,      // cached map budget, maximum face size, near; positive enables all-light RT
     pub post: PostSettings,               // bloom, motion blur, DOF, tone mapper, grading
     pub reflections: ReflectionSettings,  // traced reflections: enabled, max_roughness
+    pub sky_light: f32,                   // the atmosphere's light over its look (1)
 }
 ```
 
@@ -225,6 +226,7 @@ pub struct Settings {
 - `local_shadows` (LC3): `LocalShadows { count, resolution, near }`, default 128 cached atlas lights with a 1024-square maximum face and 0.02 m near plane. Counts 0-128 are accepted; zero turns automatic local shadows off, and any positive value enables every contributing RT local. Map tiles can be smaller than the maximum (down to 128-square at the default), retain their placement/resolution while selected, and redraw when the light or intersecting casters move. Selection changes fade out/in over eight frames each. Penumbrae come from each light's `source_radius`. The default six-layer depth atlas uses 384 MiB; maximum face size must not exceed one quarter of the device's 2D texture limit.
 - `post` (PP1): `PostSettings` with `enabled`, `bloom`, `motion_blur`, `shutter_angle_degrees`, `depth_of_field: Option<DepthOfField>`, `tonemapper: Tonemapper`, white balance, `contrast`, `saturation`, `vignette`, `grain`, chromatic aberration and `lut_strength`. It is on by default; `enabled: false` presents the plain tone-mapped image. `Engine::set_colour_lut(Option<ColourLut>)` sets the grading LUT.
 - `reflections` (R1n): `ReflectionSettings { enabled, max_roughness }`; `ReflectionSettings::off()` leaves every program its untraced estimate.
+- `sky_light`: how brightly `Sky::Atmosphere` lights the scene relative to how it looks (an engine's sky-light strength). It scales the procedural environment the atmosphere lights through (image-based light, GI and reflected sky); the drawn sky, the sun and the fog keep their physical values. Default 1; finite and nonnegative. A `Sky::Map` uses its own `intensity` with `Background::ScaledSky`. The two run in opposite directions: an engine that lights at K and draws at 1 sets `sky_light = K` for the atmosphere, or `intensity = K` with `Background::ScaledSky(1.0)` for a map. `set_settings` rejects a non-finite or negative value before changing anything. Fog in-scattering and aerial perspective are not scaled.
 - `set_settings` applies a change only when something changed, and validates before touching the renderer. It overwrites any overlapping tuning made through `renderer_mut()`.
 
 Defaults follow each feature unit's default ruling, not the facade's opinion. With G2b and AT1 merged:

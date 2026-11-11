@@ -891,6 +891,11 @@ impl Engine {
             return Ok(());
         }
         settings::atmosphere(self.sky, &settings).validate()?;
+        // Validate before touching the renderer (docs/api.md): a rejected sky_light must
+        // leave the stored settings unchanged, or later set_sun/set_sky/light edits fail.
+        if !(settings.sky_light.is_finite() && settings.sky_light >= 0.0) {
+            return Err(Error::InvalidInput("sky light must be finite and nonnegative"));
+        }
         settings::apply(&mut self.renderer, self.path, &settings)?;
         self.settings = settings;
         // Exposure and the view-path media live with the lighting and atmosphere.
@@ -912,7 +917,22 @@ impl Engine {
         let atmosphere = settings::atmosphere(self.sky, &self.settings);
         atmosphere.validate()?;
         let (map, parameters) = match self.sky {
-            Sky::Atmosphere(_) | Sky::Uniform(_) => (None, EnvironmentParameters::default()),
+            Sky::Atmosphere(_) => {
+                let sky_light = self.settings.sky_light;
+                if !(sky_light.is_finite() && sky_light >= 0.0) {
+                    return Err(Error::InvalidInput(
+                        "sky light must be finite and nonnegative",
+                    ));
+                }
+                // The atmosphere's procedural environment lights at this intensity; its
+                // drawn sky does not read it.
+                let parameters = EnvironmentParameters {
+                    intensity: sky_light,
+                    ..EnvironmentParameters::default()
+                };
+                (None, parameters)
+            }
+            Sky::Uniform(_) => (None, EnvironmentParameters::default()),
             Sky::Map {
                 map,
                 rotation_y,

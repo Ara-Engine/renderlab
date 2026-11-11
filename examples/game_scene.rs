@@ -14,7 +14,8 @@
 //! `--time dusk|noon`, `--sun-speed DEGREES_PER_SECOND` (advances the time of day, 15 degrees
 //! an hour) with `--sun-after FRAME`, `--still` (frozen camera and objects), `--timing-frames
 //! N` (a drained timing segment), `--night-lanterns` (27 dim local sources),
-//! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT), `--sky
+//! `--local-shadow-count N` (0-128 map lights, positive enables all-light RT),
+//! `--atmosphere-light K` (`Settings::sky_light`: the atmosphere lights at K), `--sky
 //! uniform`, `--sky map` or `map-flat` (Showcase's gradient sky as a prepared map, or the
 //! same layout at its mean radiance; support/gradient_sky.rs, face size `--sky-face N`;
 //! `--sky-light K` lights with the map at K while drawing it at 1, `Background::ScaledSky`),
@@ -97,6 +98,8 @@ struct Args {
     hour: f32,
     fox: Option<PathBuf>,
     sun_speed: f32,
+    /// `--atmosphere-light K`: `Settings::sky_light`, the atmosphere's light over its look.
+    atmosphere_light: f32,
     sun_after: u32,
     still: bool,
     timing_frames: u32,
@@ -132,6 +135,7 @@ impl Args {
             hour: 17.5,
             fox: std::env::var_os("RENDERLAB_FOX_GLB").map(PathBuf::from),
             sun_speed: 0.0,
+            atmosphere_light: 1.0,
             sun_after: 0,
             still: false,
             timing_frames: 0,
@@ -205,6 +209,7 @@ impl Args {
                     }
                 }
                 "--sun-speed" => a.sun_speed = value()?.parse()?,
+                "--atmosphere-light" => a.atmosphere_light = value()?.parse()?,
                 "--sun-after" => a.sun_after = value()?.parse()?,
                 "--still" => a.still = true,
                 "--night-lanterns" => a.night_lanterns = true,
@@ -341,6 +346,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ..Default::default()
                 },
                 exposure: Exposure::Manual { stops: exposure },
+                sky_light: args.atmosphere_light,
                 reflections: if args.reflections {
                     ReflectionSettings::default()
                 } else {

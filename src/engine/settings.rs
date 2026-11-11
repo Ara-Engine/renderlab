@@ -195,6 +195,12 @@ pub struct Settings {
     /// for programs that declare `reflection_lobe`: on by default up to roughness 0.5.
     /// `ReflectionSettings::off()` leaves every program its untraced estimate.
     pub reflections: crate::ReflectionSettings,
+    /// How brightly the physical atmosphere's sky lights the scene, relative to how it
+    /// looks (an engine's sky-light strength): it scales the procedural environment the
+    /// atmosphere lights through (image-based light, GI and reflected sky), not the sky
+    /// drawn, the sun or the fog. 1, the default, is physical; finite and nonnegative.
+    /// [`Sky::Map`] has its own `intensity` and `Background::ScaledSky`.
+    pub sky_light: f32,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -210,6 +216,7 @@ impl Default for Settings {
             local_shadows: LocalShadows::default(),
             post: PostSettings::default(),
             reflections: crate::ReflectionSettings::default(),
+            sky_light: 1.0,
         }
     }
 }
