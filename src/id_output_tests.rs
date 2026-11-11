@@ -339,8 +339,18 @@ fn ids_match_a_cpu_ray_cast_and_hold_still_under_jitter(path: RenderPath) {
         }
         (last, last_cpu) = (gpu, cpu);
     }
-    let worse = (0..flips.len()).filter(|&i| flips[i] > cpu_flips[i].max(1)).count();
-    assert_eq!(worse, 0, "pixels that flipped more often than the edges crossing them");
+    let worse: Vec<usize> = (0..flips.len()).filter(|&i| flips[i] > cpu_flips[i].max(1)).collect();
+    let mut kinds = std::collections::BTreeMap::new();
+    for &i in &worse {
+        *kinds.entry((flips[i], cpu_flips[i])).or_insert(0) += 1;
+    }
+    let w = SIZE[0] as usize;
+    let at: Vec<(usize, usize)> = worse.iter().take(8).map(|&i| (i % w, i / w)).collect();
+    assert!(
+        worse.is_empty(),
+        "{path:?}: {} pixels flipped more often than the edges crossing them; (gpu flips, cast flips) -> pixels {kinds:?}; first at {at:?}",
+        worse.len()
+    );
     // Spawning and despawning renumber placements: after a run of still frames, the very
     // next frame's ids follow the new placements (history restarts with them).
     let still = camera(0.0);

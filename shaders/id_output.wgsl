@@ -162,14 +162,14 @@ fn id_settle(p:vec2<u32>,here:vec2<u32>)->u32 {
 // to unorm8 conversion need not round to nearest, and k / 255 can land a hair under k, which
 // a truncating conversion stores as k - 1; a quarter step stores k under either rule.
 @group(0) @binding(0) var handoff_ids:texture_2d_array<u32>;
-struct HandoffLayer { layer:u32, pad:vec3<u32> };
-@group(0) @binding(2) var<uniform> handoff:HandoffLayer;
+// x: the layer. A vec4 is the 16 bytes the layout binds (a struct of u32 and vec3<u32> is 32).
+@group(0) @binding(2) var<uniform> handoff:vec4<u32>;
 @vertex fn handoff_vs(@builtin(vertex_index) i:u32)->@builtin(position) vec4<f32> {
     let p=array<vec2<f32>,3>(vec2<f32>(-1.0,-1.0),vec2<f32>(3.0,-1.0),vec2<f32>(-1.0,3.0));
     return vec4<f32>(p[i],0.0,1.0);
 }
 @fragment fn handoff_ids_fs(@builtin(position) p:vec4<f32>)->@location(0) vec4<f32> {
-    let id=textureLoad(handoff_ids,vec2<i32>(p.xy),i32(handoff.layer),0).x;
+    let id=textureLoad(handoff_ids,vec2<i32>(p.xy),i32(handoff.x),0).x;
     let bytes=vec4<f32>(vec4<u32>(id&0xffu,(id>>8u)&0xffu,(id>>16u)&0xffu,id>>24u));
     return (bytes+vec4<f32>(0.25))/255.0;
 }
