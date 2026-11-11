@@ -173,6 +173,14 @@ impl History {
     pub(crate) fn program(&self) -> &Program {
         &self.program
     }
+    /// The anchors and silhouette slots this frame writes (`written_slots`): the id
+    /// output's settled surfaces read them.
+    pub(crate) fn written_slots(&self) -> (&Texture, &Texture) {
+        (
+            &self.anchor[self.plan.parity],
+            &self.layer[self.plan.parity],
+        )
+    }
     /// The colour history this frame writes.
     pub(crate) fn written(&self) -> &Texture {
         &self.colour[self.plan.parity]

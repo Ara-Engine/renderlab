@@ -256,6 +256,34 @@ pub struct ForwardScene<'a> {
     /// The display-linear 3D colour LUT the post pass applies at `post.lut_strength`
     /// (`Renderer::set_colour_lut`); `None` is the identity, at strength zero.
     pub colour_lut: Option<&'a crate::post::ColourLut>,
+    /// Object ids, on traced frames: each output pixel's settled opaque id and its front
+    /// id are resolved into the sequence's id texture (`Frames::ids`). `None` writes none.
+    pub ids: Option<IdScene<'a>>,
+}
+
+/// A frame's object-id tables (`object_ids::TagTables`), in the frame's placement order:
+/// every opaque object's placements, then every transparent object's.
+#[derive(Clone, Copy)]
+pub struct IdScene<'a> {
+    /// Per placement: (first range, range count).
+    pub entries: &'a [[u32; 2]],
+    /// Sorted, disjoint (first primitive, count, id, 0) per entry.
+    pub ranges: &'a [[u32; 4]],
+}
+
+/// The id targets a sequence keeps: the ids of its last frame with ids (R32Uint, two
+/// layers: opaque, front, at the output's size), the settled (placement + 1, primitive)
+/// of the last two frames, which ping-pong, and the camera the last ids were taken from.
+struct IdTargets {
+    size: [u32; 2],
+    ids: Texture,
+    settled: [Texture; 2],
+    parity: usize,
+    camera: Option<[f32; 16]>,
+    /// The packed RGBA8 image `Frames::pack_ids` writes, at the same size.
+    packed: Texture,
+    /// Whether `pack_ids` wrote it (it is then in `CopySource`).
+    packed_written: bool,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -832,6 +860,8 @@ struct Kept {
     /// Volumetric fog's cells at their grid: this frame's raw cells, and the resolved
     /// cells of the two most recent frames (each frame's history is the other).
     fog: Option<([u32; 2], [Texture; 3])>,
+    /// The object ids of the last frame that resolved them.
+    ids: Option<IdTargets>,
     /// The Interactive trace's repair queue: a header, then room for every pixel.
     repairs: Option<StorageBuffer>,
     /// The 2D targets the last frame made and released, for the next frame to take.
@@ -896,6 +926,14 @@ impl Frames {
         for texture in self.kept.textures.into_values() {
             gpu.retire(Resource::Image(texture.image))?;
         }
+        for texture in self
+            .kept
+            .ids
+            .into_iter()
+            .flat_map(|t| [t.ids, t.packed, t.settled[0], t.settled[1]])
+        {
+            gpu.retire(Resource::Image(texture.image))?;
+        }
         for texture in self.kept.fog.into_iter().flat_map(|(_, cells)| cells) {
             gpu.retire(Resource::Image(texture.image))?;
         }
@@ -906,6 +944,117 @@ impl Frames {
             gpu.retire(ara_gpu::Resource::Image(output.image))?;
         }
         self.kept.targets.retire(gpu)
+    }
+    /// The id texture of the last frame that resolved ids (`ForwardScene::ids`): R32Uint,
+    /// layer 0 the opaque ids and layer 1 the front ids, at the output's size, left read.
+    pub fn ids(&self) -> Option<&Texture> {
+        self.kept.ids.as_ref().map(|t| &t.ids)
+    }
+    /// Packs `layer` (0 opaque, 1 front) of the last ids into the sequence's RGBA8 image,
+    /// bit-exact little-endian (R = bits 0-7 ... A = 24-31), and returns it, left in
+    /// `CopySource` for a presenter; waits for the GPU.
+    pub fn pack_ids(
+        &mut self,
+        gpu: &mut GpuDevice,
+        cache: &ShaderCache,
+        layer: u32,
+    ) -> Result<&Texture> {
+        let targets = self.kept.ids.as_mut().context("no frame resolved ids")?;
+        ensure!(layer < 2, "an id layer is 0 (opaque) or 1 (front)");
+        let mut graph = Graph::default();
+        let mut rec = gpu.begin(Queue::Graphics);
+        graph.import(Resource::Image(targets.ids.image), Access::ShaderRead);
+        if targets.camera.is_some() && targets.packed_written {
+            graph.import(Resource::Image(targets.packed.image), Access::CopySource);
+        }
+        let uniform = StorageBuffer::new(gpu, &[layer, 0, 0, 0].map(u32::to_le_bytes).concat())?;
+        graph.import(Resource::Buffer(uniform.buffer), Access::HostWrite);
+        let values = shader::inputs(Pass::IdPack)?
+            .iter()
+            .map(|spec| {
+                Ok((
+                    spec.key,
+                    match spec.key.binding {
+                        0 => Input::Image(&targets.ids),
+                        1 => Input::Image(&targets.packed),
+                        2 => Input::Buffer(&uniform),
+                        _ => bail!("the id pack cannot supply {}", spec.name),
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let bindings = HeapBindings::new(gpu, Pass::IdPack, &values)?;
+        bindings.import(&mut graph);
+        let size = targets.size;
+        Kernel::new(gpu, cache, Pass::IdPack)?.record(
+            &mut graph,
+            &mut rec,
+            &bindings,
+            [size[0], size[1], 1],
+        )?;
+        graph.node(
+            &mut rec,
+            &[(Resource::Image(targets.packed.image), Access::CopySource)],
+        )?;
+        let record = bindings.release();
+        let point = gpu.submit(rec.finish(), &[])?;
+        gpu.resolve(point)?;
+        record.retire(gpu)?;
+        uniform.retire(gpu)?;
+        targets.packed_written = true;
+        Ok(&targets.packed)
+    }
+    /// Reads back `rect` ([x, y, width, height]) of the last ids: (opaque, front) per
+    /// pixel, row by row; waits for the GPU.
+    pub fn read_ids(&mut self, gpu: &mut GpuDevice, rect: [u32; 4]) -> Result<Vec<[u32; 2]>> {
+        let targets = self.kept.ids.as_ref().context("no frame resolved ids")?;
+        let [x, y, w, h] = rect;
+        ensure!(
+            w > 0 && h > 0 && x + w <= targets.size[0] && y + h <= targets.size[1],
+            "id rectangle outside the last ids"
+        );
+        let layer_bytes = u64::from(w) * u64::from(h) * 4;
+        let buffer = gpu.create_readback_buffer(layer_bytes * 2)?;
+        let mut graph = Graph::default();
+        let mut rec = gpu.begin(Queue::Graphics);
+        graph.import(Resource::Image(targets.ids.image), Access::ShaderRead);
+        graph.node(
+            &mut rec,
+            &[
+                (Resource::Image(targets.ids.image), Access::CopySource),
+                (Resource::Buffer(buffer), Access::CopyDestination),
+            ],
+        )?;
+        rec.push(Command::BeginPass("ara::IdReadback".into()));
+        rec.push(Command::ReadImageRegion {
+            source: targets.ids.image,
+            destination: buffer,
+            buffer_offset: 0,
+            region: ara_gpu::texture::ImageRegion {
+                mip: 0,
+                origin: [x, y, 0],
+                extent: [w, h, 1],
+                base_layer: 0,
+                layer_count: 2,
+            },
+        });
+        rec.push(Command::EndPass);
+        graph.node(
+            &mut rec,
+            &[
+                (Resource::Image(targets.ids.image), Access::ShaderRead),
+                (Resource::Buffer(buffer), Access::HostRead),
+            ],
+        )?;
+        let point = gpu.submit(rec.finish(), &[])?;
+        gpu.resolve(point)?;
+        let bytes = gpu.read(buffer)?;
+        gpu.retire(Resource::Buffer(buffer))?;
+        let word =
+            |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
+        Ok((0..(w * h) as usize)
+            .map(|i| [word(i * 4), word(layer_bytes as usize + i * 4)])
+            .collect())
     }
     /// The last frame's displayed image (sRGB-encoded RGBA8, the output's size), kept on
     /// the device until the frame after next draws over it, and left in `CopySource`:
@@ -1024,6 +1173,7 @@ fn frame(
         map: kept_map,
         textures: kept_textures,
         fog: kept_fog,
+        ids: kept_ids,
         repairs: kept_repairs,
         // Taken out and made active for this frame by `Frames::render`.
         targets: _,
@@ -3483,6 +3633,166 @@ fn frame(
         )?),
         None => None,
     };
+    // `encode_ids`: the output's settled and front object ids, after reconstruction and
+    // the panes. Front ids through glass are not resolved (no glass raster yet): front is
+    // the opaque id.
+    let mut id_records = Vec::new();
+    if let (Some(ids), Some(deferred)) = (scene.ids, &deferred) {
+        let reconstructed = resolve.is_some();
+        let id_size = if reconstructed { target } else { size };
+        if kept_ids.as_ref().is_none_or(|t| t.size != id_size) {
+            if let Some(old) = kept_ids.take() {
+                for texture in [old.ids, old.packed, old.settled[0], old.settled[1]] {
+                    gpu.retire(Resource::Image(texture.image))?;
+                }
+            }
+            let settled = [
+                Texture::new(gpu, id_size, Format::Rg32Uint, true, false)?,
+                Texture::new(gpu, id_size, Format::Rg32Uint, true, false)?,
+            ];
+            *kept_ids = Some(IdTargets {
+                size: id_size,
+                ids: Texture::array(gpu, id_size, 2, Format::R32Uint, true, false)?,
+                settled,
+                parity: 0,
+                camera: None,
+                packed: Texture::new(gpu, id_size, Format::Rgba8, true, false)?,
+                packed_written: false,
+            });
+            // The previous settled side is read before any frame wrote it.
+            let side = &kept_ids.as_ref().context("made above")?.settled;
+            for texture in side {
+                staging.push(transfer::upload(
+                    gpu,
+                    &mut graph,
+                    &mut rec,
+                    texture.image,
+                    &vec![0; (id_size[0] * id_size[1] * 8) as usize],
+                )?);
+            }
+        } else if let Some(t) = kept_ids.as_ref() {
+            for texture in [&t.ids, &t.settled[0], &t.settled[1]] {
+                graph.import(Resource::Image(texture.image), Access::ShaderRead);
+            }
+        }
+        let targets = kept_ids.as_mut().context("made above")?;
+        let continued = targets.camera.is_some()
+            && reconstructed
+            && resolve.is_some_and(|(images, _)| !images.reset());
+        let camera = scene
+            .camera
+            .unjittered()
+            .matrix(id_size[0], id_size[1])
+            .to_cols_array();
+        let still = targets.camera == Some(camera);
+        targets.camera = Some(camera);
+        targets.parity = 1 - targets.parity;
+        // Moved placements: a transform that changed since the last frame, or a skinned one.
+        let placements = left.transforms.len();
+        let mut moved = vec![0u32; placements.div_ceil(32).max(1)];
+        let mut at = 0;
+        for (index, _) in scene.objects.iter().enumerate() {
+            for _ in placed(index) {
+                let changed = skin(index).is_some()
+                    || history.transforms.get(at).is_none_or(|p| {
+                        p.to_cols_array().map(f32::to_bits)
+                            != left.transforms[at].to_cols_array().map(f32::to_bits)
+                    });
+                if changed {
+                    moved[at / 32] |= 1 << (at % 32);
+                }
+                at += 1;
+            }
+        }
+        let flags =
+            u32::from(reconstructed) | if still { 2 } else { 0 } | if continued { 4 } else { 0 };
+        let frame_words = [id_size[0], id_size[1], flags, placements as u32, 8, 4, 0, 0];
+        let words = |w: &[u32]| -> Vec<u8> { w.iter().flat_map(|v| v.to_le_bytes()).collect() };
+        let entries = if ids.entries.is_empty() {
+            vec![[0u32; 2]]
+        } else {
+            ids.entries.to_vec()
+        };
+        let ranges = if ids.ranges.is_empty() {
+            vec![[0u32; 4]]
+        } else {
+            ids.ranges.to_vec()
+        };
+        let buffers = [
+            StorageBuffer::new(gpu, &words(&frame_words))?,
+            StorageBuffer::new(gpu, &words(entries.as_flattened()))?,
+            StorageBuffer::new(gpu, &words(&moved))?,
+            StorageBuffer::new(gpu, &words(ranges.as_flattened()))?,
+        ];
+        for buffer in &buffers {
+            graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+        }
+        let zeros = [
+            Texture::new(gpu, [1, 1], Format::Rg32Uint, false, false)?,
+            Texture::new(gpu, [1, 1], Format::Rgba32Uint, false, false)?,
+            Texture::new(gpu, [1, 1], Format::R32Uint, false, false)?,
+        ];
+        for (texture, bytes) in zeros.iter().zip([8, 16, 4]) {
+            staging.push(transfer::upload(
+                gpu,
+                &mut graph,
+                &mut rec,
+                texture.image,
+                &vec![0; bytes],
+            )?);
+        }
+        let (anchors, layers) = match resolve {
+            Some((images, _)) => images.written_slots(),
+            None => (&zeros[0], &zeros[1]),
+        };
+        let (previous, written) = (
+            &targets.settled[1 - targets.parity],
+            &targets.settled[targets.parity],
+        );
+        let values = shader::inputs(Pass::IdResolve)?
+            .iter()
+            .map(|spec| {
+                let value = match spec.key.binding {
+                    0 => Input::Buffer(&buffers[0]),
+                    1 => Input::Image(&deferred.hit),
+                    2 => Input::Image(&deferred.tiles),
+                    3 => Input::Image(anchors),
+                    4 => Input::Image(layers),
+                    5 => Input::Buffer(&buffers[1]),
+                    6 => Input::Buffer(&buffers[2]),
+                    7 => Input::Image(&zeros[2]),
+                    8 => Input::Image(previous),
+                    9 => Input::Image(written),
+                    10 => Input::Image(&targets.ids),
+                    11 => Input::Buffer(&buffers[3]),
+                    _ => bail!("the id pass cannot supply {}", spec.name),
+                };
+                Ok((spec.key, value))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let bindings = HeapBindings::new(gpu, Pass::IdResolve, &values)?;
+        bindings.import(&mut graph);
+        Kernel::new(gpu, cache, Pass::IdResolve)?.record(
+            &mut graph,
+            &mut rec,
+            &bindings,
+            [id_size[0], id_size[1], 1],
+        )?;
+        // What the next frame and the id calls between frames find: both read.
+        graph.node(
+            &mut rec,
+            &[
+                (Resource::Image(targets.ids.image), Access::ShaderRead),
+                (Resource::Image(written.image), Access::ShaderRead),
+            ],
+        )?;
+        id_records.push(bindings.release());
+        id_records.extend(buffers);
+        for texture in zeros {
+            super::image::release(gpu, texture.image)?;
+        }
+    }
+
     // The post tail, in `PostGpu::encode` order. Each stage reads the one before it.
     let mut post_images = Vec::new();
     let mut post_buffers = Vec::new();
@@ -3878,6 +4188,9 @@ fn frame(
 
     atmosphere.retire(gpu, &mut graph)?;
     cluster_inputs.retire(gpu)?;
+    for record in id_records {
+        record.retire(gpu)?;
+    }
     for record in fog_records {
         record.retire(gpu)?;
     }
