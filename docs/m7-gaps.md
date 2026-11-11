@@ -1003,3 +1003,7 @@ Pixels on the open ground more than 10 codes above their 21-pixel median:
 ## One pixel at a bulb's rim differs between the two GPU layers under TR1 (ara-gpu port, 2026-11-11)
 
 **UNCONFIRMED as a renderer fault; nothing to do yet.** The ara-gpu port (draft PR #3 at 3d7eeed) matches the wgpu renderer on the game scene on the Radeon (worst HDR cell 0.1%) and on the RTX, except one pixel at a bulb's rim: (588, 178) at pose 11 with `--supported`, wgpu (0.3843, 0.2228, 0.1062) against the port's (0.4619, 0.2976, 0.1720), neighbours equal to 0.0001. It goes away with temporal reconstruction off. The port's author is locating the decision in the resolve that lands differently. If it is a float comparison in `shaders/temporal_resolve.wgsl` that two correct GPUs may round apart, as the native-scale test was, the fix is root's.
+
+## First frame of a brand-new view: page raster (quarry window, 2026-11-11)
+
+**OPEN (owner: the page-structure unit after N-VSM2).** With no cached page, Renderlab's first non-RT frame rasterises the whole visible clipmap: 56-57 ms of page raster on the quarry at 1080p. Unreal's first frame spends 1.9 ms in shadow depths. A cut inside an area already seen costs 0.16 ms, so this is the hitch that remains on a cut to somewhere never seen, and at start-up. Candidates: spread first-view page raster over a few frames with a coarse level answering meanwhile; a sparse page pool that rasterises only requested pages.
