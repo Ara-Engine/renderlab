@@ -46,3 +46,29 @@ Beating Ara is the first step. The standing goal is still Unreal's quality at 2x
 | P-SHC | First-new-shader hitch and cold startup |
 
 GPU memory gets its own unit once the profiles show where it goes.
+
+## Non-RT architecture change (2026-11-11)
+
+Islam, about 10:00 UTC: "use unreal's architecture then, honestly Idc if we use it or no, as long as we can beat their performance by a mile, and beat their quality by a good mile too".
+
+**Why.** The 2026-11-06 design ([non-rt-path.md](non-rt-path.md), decisions 1 and 3) made non-RT trace the same rays as RT in software and rejected shadow maps and distance fields. About thirty rounds then tuned a per-pixel software triangle walk. Unreal reaches about 4 ms on the matched quarry by doing much less work; Renderlab non-RT is 2.1x slower still, 2.6x slower moving and 10.5x slower on a cut.
+
+**What changes.**
+- Unreal's non-RT architecture is the starting point. The final image against Unreal decides, still, in motion and after cuts.
+- Screen-space steps, shadow maps, distance fields and reuse are all allowed if the image passes.
+- Superseded: non-rt-path.md decisions 1 and 3, and the AGENTS.md rule against screen-space techniques for core lighting and shadows.
+- Aim: far faster than Unreal (3x stays the direction) and visibly better, with no ghosting and Unreal's failure reel fixed.
+
+**Order.**
+1. Finish P-RELIT. Its saving is mostly non-RT.
+2. Profile Unreal pass by pass: software Lumen at Epic and VSM on the matched quarry, still, moving and cut, from the p-yard UE package. The result is a per-pass budget table next to Renderlab's, so each later unit has a target pass and a number.
+3. Non-RT sun shadows: cached virtual shadow maps as the default, building on [design-nonrt-sun-shadows.md](design-nonrt-sun-shadows.md), with geometry rescue only where maps would leak or lose contact. Target: Unreal's VSM, 0.50 ms moving on the quarry, or better. This replaces S4 and the march on still, moving and cut frames.
+4. Non-RT GI and glossy, Lumen-class: a surface cache or cards traced at low rate, screen traces with a world fallback, rough glossy read from the radiance cache, traced rays only for smooth reflections. Resampled reuse is allowed. P-GLOSSY folds into this and does not restart in its old form.
+5. Cuts: mostly expected to fall out of persistent caches (Unreal's cut costs nothing extra). Fix what is left after 3 and 4.
+
+**Rules for the track.**
+- Non-RT is the only Renderlab feature track until it beats software Lumen at Epic on the quarry (still, moving and cut) and on Showcase. RT gets fixes only.
+- It gets the PC GPU first; Ara captures run between its leases.
+- Each unit is gated on side-by-side images against Unreal from the failure reel, plus timing. Keep every faster change that is not visibly worse.
+- Unreal's source may be studied for the method, but no Epic code goes into this repository. Godot, AMD Capsaicin, Bevy and O3DE code may be copied with attribution after checking each licence; record what was taken in THIRD_PARTY_NOTICES.md.
+- The non-RT path stays first-class and shading stays programmable.
