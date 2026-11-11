@@ -6,7 +6,16 @@ Scope after root's steers: (A) first, the quarry crack flashes P-FLICKER left; (
 
 ## Result
 
-(filled in below as steps land)
+| Step | Result | Verdict |
+|---|---|---|
+| A. Crack flashes: capture TR1's per-pixel continuation mask | 64% of the >20-code step energy sits on the 13% of quarry pixels where TR1 rejected history taps, all along the scan's crack folds. Bright fresh samples are not the cause: a fresh-sample clamp leaves flicker at 4.32 | **MERGE** the measurement switch (production source unchanged). Fix not attempted, per root's steer: the next flicker unit |
+| B1. Trust-policy fan-out | Every program module compiles checked. A source-only edit to a glass program now changes 2 binaries, down from 24 (census) | **MERGE** |
+| B2. GI-cell and glass reflected-hit modules compiled program text unchecked | Both now go through the one program-module entry and compile checked | **MERGE** (with B1) |
+| Frame-time cost of B1/B2 (quarry, interleaved) | None measurable: RT still 3.01-3.15 vs 3.03-3.19 ms, non-RT still 8.03-8.24 vs 8.17-8.36 ms (checked vs old) | — |
+| B3. Census tool (draft PR #11) | Merged in with main; 1,168 of 1,171 records emitted. Its `program-bins` entry predates main's `PRIMARY_BATCHES` prefix and fails to parse | **MERGE** the tool; the one stale entry is an open gap |
+| Kernel split | Not started: P-SKY took the cold game scene to about 11 s and Showcase through Ara to 24-25 s (root) | Deferred by root |
+
+No new resource kind, binding shape, texture view, sampler, storage format or device feature. No planner signature or per-frame record changes (`shadow_gpu::plan_frame`, `PostSettings::record`, `prepare_gi` untouched).
 
 ## A. Crack flashes
 
@@ -57,12 +66,46 @@ The strict one-frame spikes (86 a frame on the clip) are 75% bilinear 1-3, 20% s
 
 **C:** before, `program_gpu::module` compiled the exact bundled standard program with the engine API (unchecked) and any other text checked, so the first edit of the standard program changed the check mode of all 24 of its kernels (P-PIPE, census PR #11). GI cell shading (`gi_cache.rs`) and the glass reflected-hit kernel (`transparency_reflection.rs`) compose program text but used the engine API.
 
-Change: every module composed from program text compiles checked: the standard and toon programs, user programs, TP1 glass, GI cell shading and glass reflected hits. An edit now recompiles only the kernels whose text it changes.
+Change: every module composed from program text compiles checked: the standard and toon programs, user programs, TP1 glass, GI cell shading and glass reflected hits. They all go through one entry, `PipelineDevice::create_program_module` (src/pipeline_compilation.rs). An edit now recompiles only the kernels whose text it changes. A measurement switch, `RENDERLAB_P_SPLIT_STANDARD_UNCHECKED`, restores the old standard-program policy for A/Bs.
 
-## Census
+**Frame time (M).** Lease `split-l2`, quarry yardstick at 1080p, one binary (`4ae6fdb`, `p_yard_capture` SHA-256 `3211a659…`), four interleaved visits per path (old policy, checked, old, checked). GPU span p50 in ms, with the ratio to Unreal Epic (HW Lumen 4.50 / 4.57 / 4.52 ms; SW Lumen 4.02 / 4.12 / 4.11):
 
-## Cold start
+| | old policy (2 visits) | checked (2 visits) | checked vs Epic |
+|---|---|---|---|
+| RT still | 3.19 / 3.03 | 3.15 / 3.01 | 1.43-1.49x faster |
+| RT moving | 3.96 / 3.98 | 3.95 / 3.96 | 1.15-1.16x faster |
+| RT cut | 12.28 / 12.39 | 12.38 / 12.36 | 2.7x slower |
+| non-RT still | 8.36 / 8.17 | 8.24 / 8.03 | 2.0-2.05x slower |
+| non-RT moving | 10.44 / 10.33 | 10.30 / 10.22 | 2.5x slower |
+| non-RT cut | 42.74 / 44.34 | 42.77 / 43.97 | 10.4-10.7x slower |
+
+The checked kernels are within visit-to-visit noise of the unchecked ones, and if anything faster. The image is unchanged in principle: runtime checks change results only on out-of-range accesses (C). The identity captures from this lease (`idu`/`idc`) were not on disk afterwards (their `engine.json` files are there, the HDR dumps are not), so HDR identity is **not verified** here.
+
+## Census (M)
+
+The census tool from draft PR #11 is merged in, conflict-resolved against main (`visibility_buffer.rs`). Its catalogue now records the checked API for every program-composed module, GI cell and glass reflection included. Run inside `split-l2` on `4ae6fdb` (after P-SKY): 1,168 records, 3 failures. The failures are all the same stale entry: `program-bins` includes `program_bins.wgsl` raw, but main now prepends `const PRIMARY_BATCHES` in `program_lists::bin_source`. The fix is to call that composer from the catalogue; it is listed as open.
+
+| Default policy, user edit | Before (PR #11, main ff19aef) | After (this branch) |
+|---|---:|---:|
+| standard → glass tint: binaries changed | 24 (2 from the edit, 22 from the check-mode switch) | **2** (the two `fs_transparent`) |
+| standard → toon: binaries changed | 39 of 193, 4 removed | 39 of 192, 4 removed |
+| largest program kernel (non-RT list, soft, streamed, checked) | 232,912 B | 225,764 B (after P-SKY) |
+
+## Cold start (M)
+
+`game_scene` (1280x720, two frames), candidate `4ae6fdb`, one compile in flight, fresh NVIDIA and application caches for cold, profiled (`RENDERLAB_STARTUP_PROFILE`):
+
+| Game scene | Cold first image | Warm | Peak private (cold) | Program kernels (cold) | All other pipelines |
+|---|---:|---:|---:|---|---:|
+| RT | 10.9 s | 0.88 s | 1.25 GB | 2.7 s + 1.5 s | 5.7 s (64) |
+| non-RT | 9.9 s | 0.90 s | 1.97 GB | 2.3 s + 1.3 s | 5.5 s (94) |
+
+Against P-PIPE (main before P-SKY): 143 / 125 s cold and 5.2-6.1 GB peak; the standard program's list kernel took 91-96 s. P-SKY did that (root measured it at about 11 s too); checked compilation does not add measurably. Showcase through Ara after P-SKY: 25 s RT, 24 s non-RT cold, including settle and 60 frames (root's measurement; not rerun here). A start after a kill was not measured on this base.
 
 ## Hardware, build, process
 
-- RTX 4070 SUPER, NVIDIA 617.14, Ryzen 7 7800X3D, 32 GB, Windows 11 Pro 26300.
+- RTX 4070 SUPER, NVIDIA 617.14, Ryzen 7 7800X3D, 32 GB, Windows 11 Pro 26300. Release builds, two Cargo jobs; lib tests dev profile.
+- Binaries: crack lease `1375b18` (SHA-256 `1467b02b…`, 179 s build); A/B lease `4ae6fdb` (`p_yard_capture` `3211a659…` and `game_scene`, 55 s); lib test binary at `4ae6fdb` (176 s). Lib tests in `split-l2`: **209 passed, 0 failed, 168 ignored**.
+- Leases (n8-run, `--quarry-lease`): `crack-l1` 65 s, `split-l2` 296 s. Free RAM at their starts: 16-18 GiB.
+- Time: the unit started at 00:00 UTC. About 3 h 30 min went to the GPU and build queue (ara-integration and root's P-SKY checks went first by order). Implementation and analysis took about 1 h 30 min; GPU time was about 6 min.
+- Cleanup: raw HDR dumps and the Cargo target deleted; `D:/Coding/renderlab-work/p-split` keeps logs, JSON summaries, the census `results.json` and the mask PNGs.
