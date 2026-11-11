@@ -166,6 +166,7 @@ impl Card {
                     textures: None,
                     local_shadows: None,
                     transparent: &[],
+                    programs: None,
                 },
             )?;
             ensure!(

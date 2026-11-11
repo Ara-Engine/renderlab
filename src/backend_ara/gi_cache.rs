@@ -241,6 +241,7 @@ impl Cache {
         cache: &ShaderCache,
         settings: crate::IndirectSettings,
         lights: u32,
+        material: &str,
     ) -> Result<Self> {
         settings
             .validate()
@@ -249,10 +250,11 @@ impl Cache {
             settings.enabled && !settings.force_software,
             "the cache is assembled on hardware rays only"
         );
-        let standard = crate::program::STANDARD_PROGRAM;
+        // `Renderer::gi_shade_pipeline`: cells are shaded by the frame's program, which
+        // must read the cache and say how it scatters light back into it.
         ensure!(
-            crate::program::uses_indirect(standard) && crate::program::reflects(standard),
-            "the standard program no longer reads the cache or reflects into it"
+            crate::program::uses_indirect(material) && crate::program::reflects(material),
+            "the frame's program does not read the cache or reflect into it"
         );
         let slots = 1u32 << settings.slots_log2;
         let sizes = Sizes::of(slots, lights, &settings);
@@ -265,7 +267,7 @@ impl Cache {
             })
             .collect::<Result<Vec<_>>>()?;
         let shade = if settings.bounce {
-            let program = shade_program(standard, settings.directions)?;
+            let program = shade_program(material, settings.directions)?;
             let kernel = Kernel::from_program(gpu, cache, &program)?;
             Some((program, kernel))
         } else {

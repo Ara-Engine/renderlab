@@ -111,6 +111,7 @@ impl Scene {
             textures: None,
             local_shadows,
             transparent: &[],
+            programs: None,
         }
     }
     fn objects(&self) -> [ForwardObject<'_>; 2] {

@@ -781,6 +781,7 @@ fn ara_frame(
                 }),
                 local_shadows: level.local_shadows.then(renderlab::LocalShadows::default),
                 transparent: &[],
+                programs: None,
             },
         )?;
         // The planner budgets shadow rays on every reconstructed frame; only the

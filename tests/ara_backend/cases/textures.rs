@@ -95,6 +95,7 @@ fn floor(
             }),
             local_shadows: None,
             transparent: &[],
+            programs: None,
         },
     )?;
     Ok(images

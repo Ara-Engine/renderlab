@@ -124,6 +124,7 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
                 textures: None,
                 local_shadows: None,
                 transparent: &transparent,
+                programs: None,
             },
         )?;
         Ok(images

@@ -244,6 +244,7 @@ impl Yard {
                     textures: None,
                     local_shadows: None,
                     transparent: &[],
+                    programs: None,
                 },
             )?;
             let red = images

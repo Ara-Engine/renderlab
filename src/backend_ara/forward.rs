@@ -104,6 +104,24 @@ pub struct ObjectTextures<'a> {
     /// material's `normal_scale` applies.
     pub normal: Option<NormalMap<'a>>,
 }
+/// A material's shading program as the engine names one: its WGSL (`surface`, `shade`
+/// and the hooks it declares, as `shaders/programs/standard.wgsl`) and the named values
+/// of its `Parameters` block; members not named keep the program's defaults.
+#[derive(Clone, Copy)]
+pub struct ObjectProgram<'a> {
+    pub source: &'a str,
+    pub parameters: &'a [(&'a str, crate::Value)],
+}
+/// The scene's shading programs, on traced frames.
+#[derive(Clone, Copy)]
+pub struct ScenePrograms<'a> {
+    /// One entry per object, in `ForwardScene::objects` order; `None` is the standard
+    /// program. One program a frame for now: every object must name the same source
+    /// (or none); a frame of several programs is shaded by per-program lists, which
+    /// are not assembled yet.
+    pub objects: &'a [Option<ObjectProgram<'a>>],
+}
+
 /// The scene's material textures.
 #[derive(Clone, Copy)]
 pub struct SceneTextures<'a> {
@@ -158,6 +176,11 @@ pub struct ForwardScene<'a> {
     /// no traced reflection in a pane, no tinted shadow of a pane on opaque surfaces,
     /// and no particles. A frame below native scale skips them, as the renderer does.
     pub transparent: &'a [ForwardObject<'a>],
+    /// The objects' shading programs and their parameters, on traced frames only: the
+    /// mesh pass composes the standard program alone. `None` is the standard program
+    /// for every object. The program shades camera hits, reflection hits and, with
+    /// bounce, the radiance cache's cells, as the renderer composes it at each stage.
+    pub programs: Option<ScenePrograms<'a>>,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -329,6 +352,8 @@ struct Arrays<'a> {
     tangents: Vec<&'a StorageBuffer>,
     absent: Vec<&'a StorageBuffer>,
     materials: Vec<&'a StorageBuffer>,
+    /// Each draw's `Parameters` block; empty when the program declares none.
+    parameters: Vec<&'a StorageBuffer>,
     /// Per sampler-array key; a key without an entry takes `default_samplers`.
     samplers: BTreeMap<InputKey, Vec<SamplerDesc>>,
     default_samplers: Vec<SamplerDesc>,
@@ -397,6 +422,7 @@ impl<'a> Shared<'a> {
                     (1, 3) => &self.arrays.indices,
                     (1, 4) => &self.arrays.tangents,
                     (2, 10) => &self.arrays.materials,
+                    (2, 17) => &self.arrays.parameters,
                     _ => &self.arrays.absent,
                 })
             }
@@ -752,8 +778,49 @@ fn frame(
         Some(k) => scene.camera.jittered(tr::sample_offset(k)),
         None => scene.camera,
     };
+    // The frame's one shading program and each object's parameter values.
+    let object_program = |index: usize| scene.programs.and_then(|p| *p.objects.get(index)?);
+    if let Some(programs) = scene.programs {
+        ensure!(
+            deferred_path && programs.objects.len() == scene.objects.len(),
+            "scene programs are assembled on traced frames, one entry per object"
+        );
+    }
+    let material_source = {
+        let mut sources = (0..scene.objects.len())
+            .map(|i| object_program(i).map_or(crate::program::STANDARD_PROGRAM, |p| p.source));
+        let first = sources.next().context("no object")?;
+        ensure!(
+            sources.all(|s| s == first),
+            "a frame of several shading programs is not assembled yet"
+        );
+        first
+    };
+    // `Engine::create_program`: the program must compose and validate, and its
+    // `Parameters` block is reflected from it.
+    let parameter_layout = {
+        let parameters = crate::program::declares_parameters(material_source);
+        let composed = crate::program::compose(
+            include_str!("../../shaders/scene.wgsl"),
+            material_source,
+            crate::program::Stage::Raster,
+            parameters,
+        );
+        crate::program::analyse("scene program", material_source, &composed)
+            .map_err(|e| anyhow::anyhow!("scene program: {e}"))?
+            .parameters
+    };
+    for index in 0..scene.objects.len() {
+        if let Some(program) = object_program(index) {
+            crate::program::ParameterLayout::check(
+                parameter_layout.as_ref(),
+                program.parameters.iter().map(|(n, v)| (*n, v.clone())),
+            )
+            .map_err(|e| anyhow::anyhow!("object {index}'s parameters: {e}"))?;
+        }
+    }
     let program = if deferred_path {
-        primary_shade::hardware_soft_program(crate::program::STANDARD_PROGRAM)?
+        primary_shade::hardware_soft_program(material_source)?
     } else {
         standard_program(scene.sun_shadows.is_some())?
     };
@@ -1262,6 +1329,14 @@ fn frame(
                         .concat(),
                 );
                 h.update(&uniform[32..48]);
+                // The program, and each object's parameter values (`state.program` and
+                // the materials' uploads in the renderer's key).
+                h.update(material_source.as_bytes());
+                for index in 0..scene.objects.len() {
+                    if let Some(program) = object_program(index) {
+                        h.update(format!("{:?}", program.parameters).as_bytes());
+                    }
+                }
                 h.finalize().into()
             };
             let planned = images.plan(tr::PlanInputs {
@@ -1309,7 +1384,13 @@ fn frame(
                 "indirect settings changed within a sequence, which is not assembled yet"
             );
             if gi.is_none() {
-                *gi = Some(Cache::new(gpu, cache, indirect.settings, packed.count)?);
+                *gi = Some(Cache::new(
+                    gpu,
+                    cache,
+                    indirect.settings,
+                    packed.count,
+                    material_source,
+                )?);
             }
             gi_frame = Some(
                 gi.as_mut().context("allocated above")?.prepare(
@@ -1336,7 +1417,7 @@ fn frame(
                             let mut h = sha2::Sha256::new();
                             h.update(format!("{:?}", scene.lighting.lights).as_bytes());
                             h.update(environment_digest);
-                            h.update(crate::program::STANDARD_PROGRAM.as_bytes());
+                            h.update(material_source.as_bytes());
                             h.finalize().into()
                         },
                     },
@@ -1543,6 +1624,7 @@ fn frame(
 
     let mut geometries = Vec::new();
     let mut materials = Vec::new();
+    let mut parameter_blocks = Vec::new();
     for (index, object) in scene.objects.iter().enumerate() {
         if !deferred_path {
             let geometry = MeshGeometry::new(
@@ -1562,6 +1644,18 @@ fn frame(
         let material = StorageBuffer::new(gpu, &record)?;
         graph.import(Resource::Buffer(material.buffer), Access::HostWrite);
         materials.push(material);
+        // `MaterialParameters`: the program's defaults with this object's named values.
+        if parameter_layout.is_some() {
+            let values: Vec<(String, crate::Value)> = object_program(index)
+                .map_or(&[][..], |p| p.parameters)
+                .iter()
+                .map(|(name, value)| ((*name).to_owned(), value.clone()))
+                .collect();
+            let block = crate::program::ParameterLayout::pack(parameter_layout.as_ref(), &values);
+            let block = StorageBuffer::new(gpu, &block)?;
+            graph.import(Resource::Buffer(block.buffer), Access::HostWrite);
+            parameter_blocks.push(block);
+        }
     }
     // `try_upload_texture` and `sampler_descriptor` for each object's texture slots.
     let mut object_textures: Vec<[Option<(Texture, SamplerDesc)>; 3]> = Vec::new();
@@ -1676,6 +1770,10 @@ fn frame(
         // The renderer pads with its default material; padded slots are never read.
         arrays.materials = (0..draws)
             .map(|i| materials.get(i).unwrap_or(&materials[0]))
+            .collect();
+        // Parameter blocks likewise, where the program declares `Parameters`.
+        arrays.parameters = (0..draws)
+            .filter_map(|i| parameter_blocks.get(i).or(parameter_blocks.first()))
             .collect();
         arrays.default_samplers = vec![SamplerDesc::default(); draws];
         // Base colour at 11 and 12, metallic-roughness at 13 and 14, the normal map at 15
@@ -2523,6 +2621,7 @@ fn frame(
     }
     for buffer in materials
         .into_iter()
+        .chain(parameter_blocks)
         .chain(buffers.into_values())
         .chain([camera, lighting])
     {
