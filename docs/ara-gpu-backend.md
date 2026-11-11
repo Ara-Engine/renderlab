@@ -1353,7 +1353,32 @@ cargo run --example ara_frame -- --compare out/wgpu-seq out/ara-seq
 ```
 
 On this Mac a four-frame sequence with the sky and sun shadows is byte-identical
-across two runs. No wgpu sequence has been produced yet.
+across two runs.
+
+### Cross-layer result: the traced frame and an eight-frame sequence
+
+Reference: wgpu at 65119b7 on the Radeon 760M (RADV). Ara: the M5 Pro on Metal under
+API and shader validation at df365bc (frame code unchanged since 65119b7). M5-A at
+960x640 with the physical sky.
+
+| Run | HDR max | HDR mean | HDR pixels over 1% / 5% | Display identical | Display worst |
+|---|---:|---:|---:|---:|---:|
+| Traced frame (`--traced`) | 3.43% | 0.050% | 2 / 0 | 91.0% | 1 level |
+| Mesh pass with sun shadows, frame 8 of 8 | 54% | 0.051% | 16 / 1 | 90.3% | 24 levels |
+
+The traced frames agree across the two layers to within a ray or two of 256 in the
+penumbra: the worst pixel, (150, 368), is 0.0542 against 0.0561 with identical
+neighbours. So the handful of silhouette pixels where the traced frame and the mesh
+pass differ on one layer are the two algorithms' difference, not the layer's.
+
+In the sequence every one of the eight frames' grid means agrees within 0.1% in HDR
+and one display level, which covers motion blur with a real previous camera for the
+first time. The last frame has one pixel far out, (152, 332): it lies on the edge
+between a panel and the lit floor, and the two GPUs' rasterisers put that pixel
+centre on different sides (0.527 on Vulkan, 0.293 on Metal; the neighbours above and
+below match). Three displayed pixels differ by more than one level, all at that
+edge. That is a rasterisation difference between Metal and Vulkan at a triangle
+edge, which the mesh pass will always have and the traced frame does not.
 
 ## GI cache: scope before porting
 

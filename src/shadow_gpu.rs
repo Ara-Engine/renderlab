@@ -22,7 +22,8 @@ impl ShadowFrame {
         &self.records
     }
     /// The light orientations this plan transported, which the next frame's plan
-    /// starts from.
+    /// starts from. The wgpu renderer takes the field itself after submitting.
+    #[cfg(feature = "backend-ara")]
     pub(crate) fn bases(&self) -> &[Option<DMat4>] {
         &self.bases
     }
