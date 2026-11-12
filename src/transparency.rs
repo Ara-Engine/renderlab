@@ -10,14 +10,17 @@ use std::sync::Arc;
 /// paths; it remains outside the world radiance cache's receiver geometry. Coverage is `opacity * base-colour alpha * texture alpha * vertex
 /// alpha`. A program declaring `fn transmittance(s: Surface, input: SurfaceInput) ->
 /// vec3<f32>` returns the per-channel fraction of the light behind it that it passes to
-/// the eye; its `shade` is then added on top (the standard program: Fresnel, tint and its
-/// diffuse share scaled by coverage). Other programs blend by coverage:
+/// the eye; its `shade` is then added on top (the standard program: Fresnel, its diffuse
+/// share scaled by coverage, and a base-colour tint only for glass, an `ior` above one; at
+/// an `ior` of one it blends as glTF BLEND does). Other programs blend by coverage:
 /// `coverage * shade + (1 - coverage) * behind`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Transparency {
     /// Coverage factor in [0, 1], multiplied with the base-colour alpha.
     pub opacity: f32,
-    /// Index of refraction in [1, 3]: Fresnel reflectance and the thin-slab refraction.
+    /// Index of refraction in [1, 3]: Fresnel reflectance and the thin-slab refraction. Above
+    /// one the standard program treats the pane as coloured glass (its base colour tints the
+    /// light it passes, and its sun shadow); one is a plain blended film, untinted.
     pub ior: f32,
     /// Thin-slab thickness in metres: the lateral shift of the light seen through it.
     /// Zero keeps the background unshifted.

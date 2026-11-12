@@ -1,7 +1,8 @@
 // ---- cache-terminated reflection hits (RENDERLAB_RL_CACHE_HITS, src/program.rs) ----
-// Composed after shaders/reflections.wgsl on traced stages whose program reads the world
-// radiance cache, only while the switch names a minimum roughness; every other module gets
-// a stub that returns no value, so its hits shade as before.
+// Composed after shaders/reflections.wgsl on traced stages (hardware and software reflection
+// traces: the software seam passes the traversal's own distance) whose program reads the
+// world radiance cache, only while the switch names a minimum roughness; every other module
+// gets a stub that returns no value, so its hits shade as before.
 // A glossy hit whose ray cone at the hit is at least as wide as the cache's cell there
 // reads that cell's outgoing radiance (gi_shade_entry.wgsl: the program's emission plus its
 // Lambertian reflection of the sky, the bounce and the lights its visibility ray reached)

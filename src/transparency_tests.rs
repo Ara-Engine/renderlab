@@ -244,9 +244,15 @@ fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
     return ViewData(s.base,s.n,s.rough,s.metal,vec3<f32>(0.0),1.0);
 }
 ", ""),
-        ("    // TP1: a transparent surface reflects diffusely over its coverage only.
-    let base=s.base*s.alpha;",
+        ("    // TP1: a transparent surface reflects diffusely over its coverage only. A plain blended
+    // film (IOR one) blends all of its light by coverage instead (`coverage * colour`, glTF
+    // BLEND), so a faint film keeps no full-strength specular sheen.
+    let film=transparent_material(input.material) && transparent_ior(input.material)<=1.0;
+    let base=select(s.base*s.alpha,s.base,film);",
          "    let base=s.base;"),
+        ("    // A plain blended film's light, blended by coverage (above).
+    if film { exposed*=s.alpha; }
+", ""),
     ] {
         assert_eq!(s.matches(from).count(), 1, "{from}");
         s = s.replace(from, to);

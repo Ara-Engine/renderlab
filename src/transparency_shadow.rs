@@ -6,6 +6,8 @@ use std::hash::{Hash, Hasher};
 const SIZE: u32 = 1024;
 const BYTES: u64 = 96;
 const API: &str = include_str!("../shaders/transparency_shadow.wgsl");
+/// The layers reduced to two per texel, which shading reads (audit 3.5).
+const REDUCE: &str = include_str!("../shaders/transmission_reduce.wgsl");
 const DRAW: &str = r#"
 struct TpTransmission { matrix:mat4x4<f32>, sun:vec4<f32>, info:vec4<f32> };
 @group(0) @binding(30) var<uniform> tx:TpTransmission;
@@ -22,7 +24,13 @@ struct TxVertex { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f3
     let f0=(ior-1.0)/(ior+1.0);
     let normal=normalize(cross(dpdx(input.world),dpdy(input.world)));
     let fresnel=f0*f0+(1.0-f0*f0)*pow(1.0-clamp(abs(dot(normal,tx.sun.xyz)),0.0,1.0),5.0);
-    return vec4<f32>((1.0-coverage)*(1.0-fresnel)*clamp(sampled.rgb,vec3<f32>(0.0),vec3<f32>(1.0)),input.position.z);
+    // As the standard program's transmittance: glass (IOR above one) passes what its
+    // coverage and Fresnel leave, tinted by its base colour; a plain blended film passes what
+    // its coverage leaves, untinted.
+    let glass=ior>1.0;
+    let tint=select(vec3<f32>(1.0),clamp(sampled.rgb,vec3<f32>(0.0),vec3<f32>(1.0)),glass);
+    let passed=(1.0-coverage)*select(1.0,1.0-fresnel,glass);
+    return vec4<f32>(passed*tint,input.position.z);
 }
 "#;
 
@@ -48,7 +56,12 @@ pub(crate) fn binding_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
 }
 pub(in crate::renderer) struct TransmissionShadow {
     pub uniform: Owned<wgpu::Buffer>,
-    pub map: Depth,
+    /// One layer per transparent draw: its nearest sheet's light and depth.
+    map: Depth,
+    /// `map` reduced to two layers per texel (shaders/transmission_reduce.wgsl); shading
+    /// binds this at 27 and its record counts min(draws, 2) layers.
+    pub reduced: Depth,
+    reduce: Option<(Owned<wgpu::ComputePipeline>, Owned<wgpu::BindGroup>)>,
     pub generation: u64,
     pub hash: [u8; 32],
     layers: Vec<Owned<wgpu::TextureView>>,
@@ -69,10 +82,13 @@ impl TransmissionShadow {
             }),
             ResourceKind::Buffer,
         );
-        let map = map(device, ledger, 1, 1);
+        let map = map(device, ledger, 1, 1, MAP_USAGE);
+        let reduced = map_like(device, ledger, &map, 1);
         Self {
             uniform,
             map,
+            reduced,
+            reduce: None,
             generation: 0,
             hash: [0; 32],
             layers: vec![],
@@ -84,7 +100,22 @@ impl TransmissionShadow {
         }
     }
 }
-fn map(device: &wgpu::Device, ledger: &Ledger, size: u32, layers: u32) -> Depth {
+const MAP_USAGE: wgpu::TextureUsages =
+    wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::RENDER_ATTACHMENT);
+const REDUCED_USAGE: wgpu::TextureUsages =
+    wgpu::TextureUsages::TEXTURE_BINDING.union(wgpu::TextureUsages::STORAGE_BINDING);
+/// The two-layer reduced map at `map`'s size (`size` overrides it before the first map).
+fn map_like(device: &wgpu::Device, ledger: &Ledger, map: &Depth, size: u32) -> Depth {
+    let size = size.max(map.texture.width());
+    self::map(device, ledger, size, 2, REDUCED_USAGE)
+}
+fn map(
+    device: &wgpu::Device,
+    ledger: &Ledger,
+    size: u32,
+    layers: u32,
+    usage: wgpu::TextureUsages,
+) -> Depth {
     let texture = ledger.own(
         device.create_texture(&wgpu::TextureDescriptor {
             label: Some("TP2 coloured transmission"),
@@ -97,7 +128,7 @@ fn map(device: &wgpu::Device, ledger: &Ledger, size: u32, layers: u32) -> Depth 
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
             format: wgpu::TextureFormat::Rgba16Float,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            usage,
             view_formats: &[],
         }),
         ResourceKind::Texture,
@@ -149,7 +180,8 @@ impl Renderer {
         let matrix = fit.map_or(Mat4::IDENTITY, |f| f.matrix);
         let mut data = bytes_of(&matrix.to_cols_array());
         let toward = -sun.unwrap_or(Vec3::Z);
-        data.extend(bytes_of(&toward.extend(count as f32).to_array()));
+        // Shading reads the reduced map: min(draws, 2) layers.
+        data.extend(bytes_of(&toward.extend(count.min(2) as f32).to_array()));
         data.extend(bytes_of(&[
             fit.map_or(0.0, |f| f.bias) * 2.0,
             0.0,
@@ -194,7 +226,8 @@ impl Renderer {
             return Ok(());
         }
         if self.lighting.transmission.layers.len() != count {
-            let map = map(&self.device, &self.ledger, SIZE, count as u32);
+            let map = map(&self.device, &self.ledger, SIZE, count as u32, MAP_USAGE);
+            let reduced = map_like(&self.device, &self.ledger, &map, SIZE);
             let layers = (0..count)
                 .map(|i| {
                     self.ledger.own(
@@ -219,8 +252,11 @@ impl Renderer {
                 wgpu::TextureUsages::RENDER_ATTACHMENT,
                 4,
             );
+            let reduce = self.tp_reduce(&map, &reduced);
             let state = &mut self.lighting.transmission;
             state.map = map;
+            state.reduced = reduced;
+            state.reduce = Some(reduce);
             state.layers = layers;
             state.depth = Some(depth);
             state.generation += 1;
@@ -338,5 +374,53 @@ impl Renderer {
             // directly instead of the camera's compact visible ID vertex stream.
             pass.draw_indexed(0..draw.mesh.index_count, 0, 0..draw.instances.len() as u32);
         }
+        // The layers reduced to two per texel, which shading reads.
+        if let Some((pipeline, group)) = &state.reduce {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("TP2 transmission reduce"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, &**group, &[]);
+            pass.dispatch_workgroups(SIZE.div_ceil(8), SIZE.div_ceil(8), 1);
+        }
+    }
+    /// The reduction's pipeline and its group over `map` (read) and `reduced` (written).
+    fn tp_reduce(
+        &self,
+        map: &Depth,
+        reduced: &Depth,
+    ) -> (Owned<wgpu::ComputePipeline>, Owned<wgpu::BindGroup>) {
+        let module = self.tp_module("TP2 transmission reduce", REDUCE);
+        let pipeline = self.ledger.own(
+            self.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("TP2 transmission reduce"),
+                    layout: None,
+                    module: &module,
+                    entry_point: Some("tx_reduce"),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
+            ResourceKind::ComputePipeline,
+        );
+        let group = self.ledger.own(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("TP2 transmission reduce"),
+                layout: &pipeline.get_bind_group_layout(0),
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&map.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::TextureView(&reduced.view),
+                    },
+                ],
+            }),
+            ResourceKind::BindGroup,
+        );
+        (pipeline, group)
     }
 }
