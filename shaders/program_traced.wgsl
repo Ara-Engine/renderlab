@@ -27,14 +27,17 @@ fn sample_normal_map(input:SurfaceInput) -> vec4<f32> {
     return sample_normal_map_grad(input,input.uv,input.uv_dx,input.uv_dy);
 }
 fn sample_base_color_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>) -> vec4<f32> {
+    if !rl_term(RL_TERM_TEXTURES) { return vec4<f32>(1.0); }
     let i=input.receiver.slot;
     return textureSampleGrad(primary_base_color[i],primary_base_sampler[i],uv,dx,dy);
 }
 fn sample_metallic_roughness_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>) -> vec4<f32> {
+    if !rl_term(RL_TERM_TEXTURES) { return vec4<f32>(1.0); }
     let i=input.receiver.slot;
     return textureSampleGrad(primary_metallic_roughness[i],primary_mr_sampler[i],uv,dx,dy);
 }
 fn sample_normal_layer_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>, layer:i32) -> vec4<f32> {
+    if !rl_term(RL_TERM_TEXTURES) { return vec4<f32>(0.5,0.5,1.0,0.0); }
     let i=input.receiver.slot;
     return textureSampleGrad(primary_normal_map[i],primary_normal_sampler[i],uv,layer,dx,dy);
 }

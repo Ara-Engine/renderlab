@@ -14,11 +14,13 @@ use crate::program::{self, Stage};
 /// The line of shaders/program_api.wgsl that each part's module rewrites.
 const ALL_TERMS: &str = "const RL_SHADE_TERMS:u32=0xffffffffu;";
 /// Each part's pass-log name and the RL_TERM_* bits it keeps.
-pub(crate) const PARTS: [(&str, u32); 5] = [
+pub(crate) const PARTS: [(&str, u32); 7] = [
     ("shading.without_lights", !1),
     ("shading.without_shadows", !2),
     ("shading.without_transmission", !4),
     ("shading.without_reflections", !8),
+    ("shading.without_textures", !16),
+    ("shading.without_brdf", !32),
     ("shading.base", 0),
 ];
 
