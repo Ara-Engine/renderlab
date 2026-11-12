@@ -364,6 +364,34 @@ pub(super) fn admit_draws(
     Ok(())
 }
 
+/// The sun an RT renderer gets under the `RENDERLAB_RT_PRIMARY` measurement switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RtPrimarySun {
+    /// Hardware sun rays from the visibility buffer's receivers (the fresh kernel), this many
+    /// disk directions per pixel: 8, 32 or 256.
+    Rays(u32),
+    /// The non-RT sun: the cached clipmap lookup (`SoftShadows::Virtual`).
+    Virtual,
+}
+
+/// U-FIXED step 1 measurement switch (docs/frame-cost-ara-scenes.md section 0):
+/// `RENDERLAB_RT_PRIMARY=vb` gives the RT path the raster visibility buffer instead of camera
+/// rays, with 8 hardware sun rays per pixel from its receivers; `vb:32` and `vb:256` trace more,
+/// `vb:virtual` takes the non-RT clipmap sun. Unset (or anything else): traced primaries.
+pub(crate) fn rt_primary_switch() -> Option<RtPrimarySun> {
+    let value = std::env::var("RENDERLAB_RT_PRIMARY").ok()?;
+    match value.as_str() {
+        "vb" => Some(RtPrimarySun::Rays(8)),
+        "vb:virtual" => Some(RtPrimarySun::Virtual),
+        other => other
+            .strip_prefix("vb:")?
+            .parse()
+            .ok()
+            .filter(|n| [8, 32, 256].contains(n))
+            .map(RtPrimarySun::Rays),
+    }
+}
+
 impl super::view::ViewState {
     /// This view's TR1 history restarts on its next reconstructed frame.
     pub(super) fn cut_reconstruction(&mut self) {
@@ -380,6 +408,21 @@ impl Renderer {
     /// diagnostic frames use Exact, as reported by `FrameReport::soft_shadows`.
     /// Leaving `Temporal` releases its film history after in-flight frames.
     pub fn set_soft_shadows(&mut self, mode: crate::SoftShadows) {
+        // U-FIXED step 1: a visibility-buffer RT renderer has no Interactive kernels; the
+        // measurement switch names the sun it gets instead.
+        let mode = match rt_primary_switch() {
+            Some(sun)
+                if mode == crate::SoftShadows::Interactive
+                    && self.primary_mode == PrimaryVisibility::VisibilityBuffer
+                    && self.hardware_shadows.is_some() =>
+            {
+                match sun {
+                    RtPrimarySun::Rays(_) => crate::SoftShadows::Exact,
+                    RtPrimarySun::Virtual => crate::SoftShadows::Virtual,
+                }
+            }
+            _ => mode,
+        };
         if mode != crate::SoftShadows::Temporal
             && let Some(state) = &mut self.view.primary
             && let Some(film) = state.film.take()
@@ -1420,7 +1463,17 @@ impl PrimaryState {
             interactive_full: deferred.then(|| {
                 self.interactive_pipeline(device, ledger, &soft, &[("FRESH_DIRECTIONS", 8.0)])
             }),
-            fresh: self.fresh_pipeline(device, ledger, &soft, "fresh_compute", &[]),
+            // Under the U-FIXED measurement switch the fresh pass traces fewer directions.
+            fresh: match rt_primary_switch() {
+                Some(RtPrimarySun::Rays(n)) if n != 256 => self.fresh_pipeline(
+                    device,
+                    ledger,
+                    &soft,
+                    "fresh_compute",
+                    &[("FRESH_DIRECTIONS", f64::from(n))],
+                ),
+                _ => self.fresh_pipeline(device, ledger, &soft, "fresh_compute", &[]),
+            },
             interactive: self.interactive_entry(
                 device,
                 ledger,
@@ -2459,7 +2512,12 @@ impl Renderer {
         pipeline: &wgpu::ComputePipeline,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let tile = fresh_shadow_gpu::TILE;
+        // fresh_compute's 8-direction variant covers 8x4 receivers per workgroup.
+        let tile = if rt_primary_switch() == Some(RtPrimarySun::Rays(8)) {
+            [8, 4]
+        } else {
+            fresh_shadow_gpu::TILE
+        };
         #[cfg(test)]
         let tile = self
             .view

@@ -340,11 +340,16 @@ impl Engine {
             }),
             PRELUDE,
         )?;
+        // RENDERLAB_RT_PRIMARY (measurement, U-FIXED): the RT path on the visibility buffer.
+        let rt_primary = match crate::renderer::primary_ray_gpu::rt_primary_switch() {
+            Some(_) => PrimaryVisibility::VisibilityBuffer,
+            None => PrimaryVisibility::Traced,
+        };
         if path == RenderPath::HardwareRt {
-            renderer.set_primary_visibility(PrimaryVisibility::Traced)?;
+            renderer.set_primary_visibility(rt_primary)?;
         }
         let expected = match path {
-            RenderPath::HardwareRt => PrimaryVisibility::Traced,
+            RenderPath::HardwareRt => rt_primary,
             RenderPath::NonRt => PrimaryVisibility::VisibilityBuffer,
         };
         if renderer.primary_visibility() != expected {
