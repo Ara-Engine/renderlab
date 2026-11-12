@@ -201,6 +201,11 @@ fn cache_hit_reflections_compose() {
         assert_eq!(source.matches(stub).count(), 1);
         let lookup = crate::program::CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", "0.35");
         let on = source.replacen(stub, &lookup, 1);
+        // Software hits pass the traversal's own distance (U-RTVIS's `rs` seam).
+        assert_eq!(
+            on.contains("rl_cache_hit(record,origin,d,rs.t,"),
+            head != &hard
+        );
         let module = naga::front::wgsl::parse_str(&on)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on)));
         naga::valid::Validator::new(
