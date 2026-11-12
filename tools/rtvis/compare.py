@@ -7,9 +7,8 @@ Per RT clip and frame: the mean and largest per-channel difference on against of
 the pixels more than 2 and 8 codes apart, and their 64x64 tile with the most changed pixels.
 For the still forest clip (camera and objects frozen, cut at 24) each variant's cut frame and
 the five after it are also scored against frame 59, the settled image of the same pose: mean
-absolute error over the image and over penumbra pixels (where the settled frames 23 and 59
-are neither the image's darkest nor brightest tenth of luminance... approximated as pixels
-whose settled luminance differs from its 15x15 median by more than 4 codes). CROPS_DIR gets
+absolute error over the image and over edge pixels (penumbrae and silhouettes: the settled
+luminance differs from its 5x5 box mean by more than 4 codes). CROPS_DIR gets
 native-resolution crops (256x256) of the most changed tile, on | off | settled, per frame.
 """
 import sys
