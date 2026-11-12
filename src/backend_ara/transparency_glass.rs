@@ -57,7 +57,7 @@ fn pane_section(name: &str) -> Result<&'static str> {
     Ok(&PANE[from..from + to + end.len()])
 }
 /// The traced glass material's pane id raster: which of the pane's triangles covers each
-/// of a pixel's four samples (`tp_pane_id_vs`, `tp_pane_id_fs`).
+/// of a pixel's four samples (the glass module's `vs`, `tp_pane_id_fs`).
 pub fn pane_id_program(material: &str) -> Result<Program> {
     static KEPT: Memo<[u8; 32], Program> = Memo::new();
     KEPT.get(memo::digest(material), || {
@@ -67,9 +67,8 @@ pub fn pane_id_program(material: &str) -> Result<Program> {
 pub(crate) fn pane_id_source(material: &str) -> Result<String> {
     // `tp_pane_id_fs` reads the triangle's index, an extension WGSL enables up front.
     Ok(format!(
-        "enable primitive_index;\n{}\n{}\n{}\n",
+        "enable primitive_index;\n{}\n{}\n",
         traced_source(material)?,
-        pane_section("PANE_COMMON")?,
         pane_section("PANE_RASTER")?
     ))
 }
@@ -276,8 +275,8 @@ impl Glass {
     }
 }
 
-/// The pane id raster's pipeline (`pane_id_program`): one sample's triangle ids into an
-/// R32Uint target, one sample (no multisampling), no depth, no blending.
+/// The pane id raster's pipeline (`pane_id_program`): triangle ids into a four-sample R32Uint
+/// target, no depth, no blending: the glass raster's coverage.
 pub struct PaneIds {
     pipeline: Pipeline,
     contract: [u8; 32],
@@ -293,13 +292,14 @@ impl PaneIds {
         state.depth_test = false;
         state.depth_write = false;
         state.blend = false;
-        state.raster.samples = SampleCount::One;
+        state.raster.samples = SampleCount::Four;
         Ok(Self {
             pipeline: cache.program_state(gpu, program, state)?,
             contract: program.contract(),
         })
     }
-    /// Draws one pane into `target` (R32Uint at the frame's size), cleared to 0 first.
+    /// Draws one pane into `target` (four-sample R32Uint at the frame's size), cleared to 0
+    /// first.
     pub fn record(
         &self,
         graph: &mut Graph,
@@ -339,8 +339,8 @@ mod tests {
     use super::*;
 
     /// The pane entries compose with the standard program on the traced head, validate, and
-    /// reflect what the frame binds: the id raster its sample record, the shading its
-    /// pane geometry, the four id images and the output.
+    /// reflect what the frame binds: the id raster the opaque depth, the shading its pane
+    /// geometry, the id raster's image, the output and its record.
     #[test]
     fn pane_programs_compose_validate_and_reflect_their_inputs() {
         let ids = pane_id_program(crate::STANDARD_PROGRAM).unwrap();
@@ -350,8 +350,8 @@ mod tests {
                 .iter()
                 .any(|i| i.key.group == 0 && i.key.binding == binding)
         };
-        assert!(bound(&ids, 77) && bound(&ids, 32));
-        for binding in 70..=77 {
+        assert!(bound(&ids, 32));
+        for binding in [70, 71, 72, 76, 77] {
             assert!(bound(&shade, binding), "the shading binds {binding}");
         }
     }

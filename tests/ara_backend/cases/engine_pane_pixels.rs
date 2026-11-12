@@ -6,6 +6,7 @@ use renderlab::{
     backend_ara::engine::Engine,
     engine::{Exposure, MaterialDesc, Settings, Sky, Sun, ViewDesc},
 };
+#[allow(dead_code, clippy::duplicate_mod)]
 #[path = "../../../support/ara_game_scene.rs"]
 mod scene;
 use scene::{Options, animate, build, look};
@@ -86,9 +87,7 @@ fn quad(half: f32, z: f32) -> [Vertex; 4] {
 
 /// The game scene's fly path for eight frames (its glass pane in view, with the cache,
 /// reconstruction under its jitter, fog and post on), drawn with per-pixel panes and with the
-/// glass raster: every frame matches within a code but for at most one pixel in 2000 on the
-/// pane's edges, where a coverage sample on the edge falls to the other side (measured: 8 on
-/// the cold first frame, at most 7 codes; none after).
+/// glass raster: every pixel of every frame, the cold first one included, within a code.
 #[test]
 fn per_pixel_panes_draw_the_game_scene_as_the_glass_raster_does_in_motion() -> Result<()> {
     let path = root("engine-pane-pixels");
@@ -123,7 +122,7 @@ fn per_pixel_panes_draw_the_game_scene_as_the_glass_raster_does_in_motion() -> R
         let (over, worst) = compare(a, b);
         println!("game scene frame {frame}: {over} pixels over a code, at most {worst}");
         ensure!(
-            over * 2000 <= a.len() / 4 && worst <= 12,
+            over == 0,
             "frame {frame}: {over} pixels differ by more than a code, up to {worst}"
         );
     }
@@ -136,8 +135,8 @@ fn per_pixel_panes_draw_the_game_scene_as_the_glass_raster_does_in_motion() -> R
 /// pane seen through it, before a coloured backdrop, from a camera that moves each frame (with
 /// reconstruction's jitter). Several panes on one pixel keep their order and blend, and the
 /// light refracted through both balls and the pane is the glass raster's within a code but for
-/// at most one pixel in 2000, on silhouettes where one of a pixel's four samples falls to the
-/// other side (measured: 12 to 20 pixels a frame of 129,600, at most 11 codes).
+/// at most one pixel in 2000, within three (measured: 6 to 19 pixels a frame of 129,600, at
+/// most 3 codes: interpolation at grazing angles, which the refraction lookup magnifies).
 #[test]
 fn per_pixel_panes_keep_glass_on_glass_in_motion() -> Result<()> {
     let path = root("engine-pane-overlap");
@@ -245,7 +244,7 @@ fn per_pixel_panes_keep_glass_on_glass_in_motion() -> Result<()> {
         let (over, worst) = compare(a, b);
         println!("glass on glass frame {frame}: {over} pixels over a code, at most {worst}");
         ensure!(
-            over * 2000 <= a.len() / 4 && worst <= 12,
+            over * 2000 <= a.len() / 4 && worst <= 3,
             "frame {frame}: {over} pixels differ by more than a code, up to {worst}"
         );
     }

@@ -552,20 +552,13 @@ struct Panes {
     /// Far to near.
     panes: Vec<Pane>,
 }
-/// Per-pixel pane shading's programs and targets (`shaders/pane_pixels.wgsl`): for each pane
-/// program its id raster and its shading kernel, and the four sample id targets.
+/// Per-pixel pane shading's programs and target (`shaders/pane_pixels.wgsl`): for each pane
+/// program its id raster and its shading kernel, and the id raster's target.
 struct PanePixels {
     programs: Vec<(Program, PaneIds, Program, Kernel)>,
-    /// R32Uint at the frame's size: the triangle (plus one) under each coverage sample.
-    ids: [Texture; 4],
+    /// Four-sample R32Uint at the frame's size: the triangle (plus one) under each sample.
+    ids: Texture,
 }
-/// The four-sample pattern's positions in a pixel (the standard 4x one), in pixels.
-const PANE_SAMPLES: [[f32; 2]; 4] = [
-    [0.375, 0.125],
-    [0.875, 0.375],
-    [0.125, 0.625],
-    [0.625, 0.875],
-];
 /// The pixels a pane's world bounds project to through `camera` at `size`, two pixels wider
 /// on each side; the whole frame when a corner lies behind the eye.
 fn pane_rect(
@@ -606,9 +599,7 @@ fn pane_rect(
 impl Panes {
     fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
         if let Some(pixels) = self.pixels {
-            for ids in pixels.ids {
-                super::image::release(gpu, ids.image)?;
-            }
+            super::image::release(gpu, pixels.ids.image)?;
         }
         self.target.retire(gpu, graph)?;
         self.camera.retire(gpu)?;
@@ -2712,6 +2703,10 @@ fn frame(
                     SampleType::Float => (Format::Rgba16Float, 8),
                     SampleType::Uint => (Format::R32Uint, 4),
                     SampleType::Depth => (Format::Depth32Float, 4),
+                    // Only the pane shading reads one, and it binds its own.
+                    SampleType::UintMultisampled => {
+                        bail!("no frame default for the multisampled image {}", spec.name)
+                    }
                 };
                 // The defaults `Renderer::new_configured` creates, and the prepared DFG.
                 let (format, extent, bytes) = match (spec.key.group, spec.key.binding) {
@@ -3599,10 +3594,19 @@ fn frame(
                     let kernel = Kernel::from_program(gpu, cache, &shade)?;
                     pixel_programs.push((ids, raster, shade, kernel));
                 }
-                let mut target = || Texture::new(gpu, size, Format::R32Uint, false, true);
                 Some(PanePixels {
                     programs: pixel_programs,
-                    ids: [target()?, target()?, target()?, target()?],
+                    ids: Texture::shaped(
+                        gpu,
+                        size,
+                        Format::R32Uint,
+                        false,
+                        true,
+                        ara_gpu::texture::ImageShape {
+                            samples: SampleCount::Four,
+                            ..Default::default()
+                        },
+                    )?,
                 })
             } else {
                 None
@@ -3624,43 +3628,20 @@ fn frame(
         _ => None,
     };
     // Per-pixel panes' records (`PanePixels` in pane_pixels.wgsl), made before the packets
-    // that read them: for each pane, its four samples' then its shading's.
-    let mut pane_records: Vec<[StorageBuffer; 5]> = Vec::new();
+    // that read them: each pane's rectangle and placement slot (0: each pane is its own
+    // geometry).
+    let mut pane_records: Vec<StorageBuffer> = Vec::new();
     if let Some(t) = panes.as_ref().filter(|t| t.pixels.is_some()) {
         for pane in &t.panes {
-            let record = |gpu: &mut GpuDevice, offset: [f32; 4]| {
-                let mut bytes = Vec::with_capacity(48);
-                for v in offset {
-                    bytes.extend(v.to_le_bytes());
-                }
-                // The rectangle, then the placement slot (0: each pane is its own geometry).
-                for v in pane.rect.into_iter().chain([0; 4]) {
-                    bytes.extend(v.to_le_bytes());
-                }
-                StorageBuffer::new(gpu, &bytes)
-            };
-            // Each sample's offset in clip units, which lands it on the pixel centre, and
-            // from it to the pixel centre in pixels.
-            let offset = |k: usize| {
-                let [x, y] = PANE_SAMPLES[k];
-                [
-                    2. * (0.5 - x) / size[0] as f32,
-                    -2. * (0.5 - y) / size[1] as f32,
-                    0.5 - x,
-                    0.5 - y,
-                ]
-            };
-            let records = [
-                record(gpu, offset(0))?,
-                record(gpu, offset(1))?,
-                record(gpu, offset(2))?,
-                record(gpu, offset(3))?,
-                record(gpu, [0.; 4])?,
-            ];
-            for buffer in &records {
-                graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
-            }
-            pane_records.push(records);
+            let words: Vec<u8> = pane
+                .rect
+                .into_iter()
+                .chain([0; 4])
+                .flat_map(u32::to_le_bytes)
+                .collect();
+            let record = StorageBuffer::new(gpu, &words)?;
+            graph.import(Resource::Buffer(record.buffer), Access::HostWrite);
+            pane_records.push(record);
         }
     }
     let mut pane_packets = Vec::new();
@@ -3727,32 +3708,15 @@ fn frame(
                     continue;
                 }
                 let (id_program, raster, shade_program, kernel) = &pixels.programs[pane.program];
-                let records = &pane_records[at];
-                for (k, buffer) in records[..4].iter().enumerate() {
-                    let values = id_program
-                        .inputs()
-                        .iter()
-                        .map(|spec| {
-                            Ok((
-                                spec.key,
-                                match (spec.key.group, spec.key.binding) {
-                                    (0, 77) => Input::Buffer(buffer),
-                                    _ => glass_input(spec)?,
-                                },
-                            ))
-                        })
-                        .collect::<Result<Vec<_>>>()?;
-                    let packet = HeapBindings::for_program(gpu, id_program, &values)?;
-                    packet.import(&mut graph);
-                    raster.record(
-                        &mut graph,
-                        &mut rec,
-                        &packet,
-                        &pane.geometry,
-                        &pixels.ids[k],
-                    )?;
-                    pane_packets.push(packet);
-                }
+                let values = id_program
+                    .inputs()
+                    .iter()
+                    .map(|spec| Ok((spec.key, glass_input(spec)?)))
+                    .collect::<Result<Vec<_>>>()?;
+                let packet = HeapBindings::for_program(gpu, id_program, &values)?;
+                packet.import(&mut graph);
+                raster.record(&mut graph, &mut rec, &packet, &pane.geometry, &pixels.ids)?;
+                pane_packets.push(packet);
                 let values = shade_program
                     .inputs()
                     .iter()
@@ -3762,9 +3726,9 @@ fn frame(
                             match (spec.key.group, spec.key.binding) {
                                 (0, 70) => Input::Buffer(pane.geometry.vertices()),
                                 (0, 71) => Input::Buffer(pane.geometry.indices()),
-                                (0, k @ 72..=75) => Input::Image(&pixels.ids[(k - 72) as usize]),
+                                (0, 72) => Input::Image(&pixels.ids),
                                 (0, 76) => Input::Image(&output),
-                                (0, 77) => Input::Buffer(&records[4]),
+                                (0, 77) => Input::Buffer(&pane_records[at]),
                                 _ => glass_input(spec)?,
                             },
                         ))
@@ -4421,7 +4385,7 @@ fn frame(
     }
     for buffer in materials
         .into_iter()
-        .chain(pane_records.into_iter().flatten())
+        .chain(pane_records)
         .chain(parameter_blocks)
         .chain(buffers.into_values())
         .chain([camera, lighting])

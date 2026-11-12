@@ -1,48 +1,35 @@
 // ---- PANE_COMMON ----
 // Per-pixel pane shading on the ara-gpu port (transparency_glass.rs `pane_*`), appended to
 // the glass module `transparency_gpu::glass_source` composes. One pane at a time, far to
-// near, as the glass raster draws them: four cheap rasters find the pane's triangle under
-// each of a pixel's four coverage samples, then one dispatch shades each distinct triangle
-// once at the pixel centre and averages the samples against the colour behind the pane,
-// as the four-sample target and its resolve do. Cost follows covered pixels, not
-// triangles.
-// offset: this raster's sample offset in clip units (xy) and from the sample to the pixel
-// centre in pixels (zw). rect: the pane's pixels
-// [x0, y0, x1, y1). info.x: the instance slot of the pane's single placement.
-struct PanePixels { offset:vec4<f32>, rect:vec4<u32>, info:vec4<u32> };
-@group(0) @binding(77) var<storage,read> pane:PanePixels;
+// near, as the glass raster draws them: a four-sample raster of the pane's triangle ids
+// (each sample the last triangle in draw order that covers it, as on the glass raster's
+// four-sample target), then one dispatch shades each distinct triangle under a pixel's
+// samples once at the pixel centre and averages the samples against the colour behind the
+// pane, as that target's resolve does. Cost follows covered pixels, not triangles.
 // ---- end PANE_COMMON ----
 
 // ---- PANE_RASTER ----
-// The pane's vertices shifted so that one coverage sample's position lands on the pixel
-// centre: a 1x raster then covers what that sample covers.
-@vertex fn tp_pane_id_vs(input:VertexInput) -> VertexOutput {
-    var output=vertex_output(input);
-    output.position=vec4<f32>(output.position.xy+pane.offset.xy*output.position.w,output.position.zw);
-    return output;
-}
-// The triangle under this sample, plus one; the glass entry's two discards apply, the
-// depth one at the pixel centre as the glass fragment takes it (it discards all of a
-// triangle's samples in the pixel or none). With depth testing off the last triangle in
-// draw order wins, as on the four-sample target.
+// The triangle under each sample, plus one, from the glass entry's vertex stage (`vs`); the
+// glass entry's two discards apply as it takes them, per fragment at the pixel centre.
+// With depth testing off the last triangle in draw order wins each sample.
 @fragment fn tp_pane_id_fs(input:RasterInput, @builtin(front_facing) front:bool, @builtin(primitive_index) primitive:u32) -> @location(0) u32 {
     let source_front=front==(input.winding>0.0);
     if material.double_sided==0u && !source_front { discard; }
     let pixel=vec2<i32>(input.position.xy);
-    let centre=input.world+dpdx(input.world)*pane.offset.z+dpdy(input.world)*pane.offset.w;
-    let depth=dot(centre-tp.eye.xyz,tp.forward.xyz);
+    let depth=dot(input.world-tp.eye.xyz,tp.forward.xyz);
     if depth>textureLoad(tp_depth,pixel,0).x { discard; }
     return primitive+1u;
 }
 // ---- end PANE_RASTER ----
 
 // ---- PANE_COMPUTE ----
+// rect: the pane's pixels [x0, y0, x1, y1). info.x: the instance slot of its placement.
+struct PanePixels { rect:vec4<u32>, info:vec4<u32> };
+@group(0) @binding(77) var<storage,read> pane:PanePixels;
 @group(0) @binding(70) var<storage,read> pane_vertices:array<vec4<f32>>;
 @group(0) @binding(71) var<storage,read> pane_indices:array<u32>;
-@group(0) @binding(72) var pane_id0:texture_2d<u32>;
-@group(0) @binding(73) var pane_id1:texture_2d<u32>;
-@group(0) @binding(74) var pane_id2:texture_2d<u32>;
-@group(0) @binding(75) var pane_id3:texture_2d<u32>;
+// The pane's four-sample id raster.
+@group(0) @binding(72) var pane_ids:texture_multisampled_2d<u32>;
 @group(0) @binding(76) var pane_out:texture_storage_2d<rgba16float,write>;
 // Which sign of a triangle's area in pixels the pipeline's front faces have.
 const PANE_FRONT_NEGATIVE:bool=true;
@@ -111,8 +98,8 @@ fn pane_shade_triangle(t:u32,p:vec2<u32>)->vec4<f32> {
     let p=pane.rect.xy+id.xy;
     if any(p>=pane.rect.zw) { return; }
     let pixel=vec2<i32>(p);
-    let ids=array<u32,4>(textureLoad(pane_id0,pixel,0).x,textureLoad(pane_id1,pixel,0).x,
-        textureLoad(pane_id2,pixel,0).x,textureLoad(pane_id3,pixel,0).x);
+    let ids=array<u32,4>(textureLoad(pane_ids,pixel,0).x,textureLoad(pane_ids,pixel,1).x,
+        textureLoad(pane_ids,pixel,2).x,textureLoad(pane_ids,pixel,3).x);
     if (ids[0]|ids[1]|ids[2]|ids[3])==0u { return; }
     let behind=textureLoad(tp_color,pixel,0);
     var seen=array<u32,4>();

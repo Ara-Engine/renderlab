@@ -318,12 +318,22 @@ fn validate_image(
     sample: SampleType,
     name: &str,
 ) -> Result<()> {
+    let samples = if sample == SampleType::UintMultisampled {
+        ara_gpu::texture::SampleCount::Four
+    } else {
+        ara_gpu::texture::SampleCount::One
+    };
     ensure!(
-        t.view.dimension == dimension && t.shape.samples == ara_gpu::texture::SampleCount::One,
-        "image {name} has the wrong view dimension"
+        t.view.dimension == dimension && t.shape.samples == samples,
+        "image {name} has the wrong view dimension or sample count"
     );
     let actual = match t.format {
         Format::Depth16Unorm | Format::Depth32Float => SampleType::Depth,
+        Format::R32Uint | Format::Rg32Uint | Format::Rgba32Uint
+            if t.shape.samples == ara_gpu::texture::SampleCount::Four =>
+        {
+            SampleType::UintMultisampled
+        }
         Format::R32Uint | Format::Rg32Uint | Format::Rgba32Uint => SampleType::Uint,
         Format::Rgba8
         | Format::Rgba8Srgb

@@ -585,8 +585,6 @@ impl Pass {
             "tp_particle_vs"
         } else if matches!(self, Self::AtmosphereBackdrop) {
             "vs_sky"
-        } else if matches!(self, Self::PaneId) {
-            "tp_pane_id_vs"
         } else {
             "vs"
         }
