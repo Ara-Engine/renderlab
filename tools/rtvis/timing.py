@@ -157,6 +157,29 @@ PLANS["topdefault"] = [
     (f"{name}-default{v}-{k}", extra, {} if v == "1" else TOP("0"))
     for k in (1, 2) for name, extra in TOP_CLIPS[1:] for v in ("1", "0")
 ] + [(f"{name}-n", extra[:-2] + ["--frames", "12"], {"RTVIS_GI_LOG": "1"}) for name, extra in TOP_CLIPS]
+# Non-RT `atmosphere` (U-RTVIS): the forest walk and the game flight, frames pipelined as
+# game_scene runs them, then synchronous (`--every 1`: each frame's capture waits for the GPU,
+# as a capturing embedder does), and the forest synchronous without the media. `cpu.wait` is the
+# GPU's wait for the CPU's GI and post preparation between the early and late submits.
+NONRT_GAME = ["--path", "nonrt", "--frames", "40"]
+NONRT_WALK = ["--path", "nonrt", "--diag", "forest=1", *LOW, "--frames", "40"]
+PLANS["atmos"] = [
+    ("a-forest-piped", NONRT_WALK, {}),
+    ("a-forest-sync", NONRT_WALK + ["--every", "1"], {}),
+    ("a-forest-sync-nomedia", NONRT_WALK + ["--every", "1"], {"RENDERLAB_ABLATE": "media"}),
+    ("a-game-piped", NONRT_GAME, {}),
+    ("a-game-sync", NONRT_GAME + ["--every", "1"], {}),
+]
+# Shading ablations (RENDERLAB_ABLATE), both paths: the forest walk and the game flight.
+PLANS["ablate"] = [
+    (f"s-{scene}-{path}-{what or 'base'}", ["--path", path, *extra, "--frames", "40"],
+     {"RENDERLAB_ABLATE": what} if what else {})
+    for scene, extra in [("forest", ["--diag", "forest=1", *LOW]), ("game", [])]
+    for path in ("rt", "nonrt")
+    for what in (None, "reflections", "local_shadows", "gi")
+]
+# Byte identity of a measurement-only change: the non-RT game flight, every frame hashed.
+PLANS["ident"] = [("p-game-ident", ["--path", "nonrt", "--frames", "30", "--every", "1"], {})]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
