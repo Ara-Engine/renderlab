@@ -374,3 +374,44 @@ Next candidates, by the measured cost:
    software sun ray and the full light loop.
 3. **Untraced estimate above a roughness** (traced to 0.3 saves about 9.6 ms of non-RT game
    shading). It needs a picture check against the path tracer for light leaking on rough metal.
+
+## Reflections with history (2026-11-12, not merged)
+A glossy receiver whose reprojected history is trusted traces one stratum of its fixed set a
+frame, rotating from a per-pixel offset, and folds it into a per-pixel ping-pong record. The
+record holds the mean, the mean-square luminance and the count, up to the set's count. It traces
+the full set, as today, on:
+- a cut, reset or moved/skinned placement;
+- a restart sphere (`rl_restarts`);
+- no matching record (placement and clip depth within 2%);
+- a stratum whose luminance is more than 4 sigma plus 10% off the stored mean.
+
+Mirrors are unchanged. The history is in shaders/reflections_history.wgsl, bound only in the wgpu
+renderer's primary shading modules (group 0, bindings 53/54); film and Ara keep the stubs.
+`RENDERLAB_RL_HISTORY=0` restores the full set every frame, and `RENDERLAB_RL_HISTORY_TUNE`
+(strata, cap, moving, sigma) sets the measurement constants.
+
+**Cost** (same binary, interleaved twice; `shading` medians in ms):
+
+| | off | history | never reject |
+|---|---|---|---|
+| game flight, non-RT | 14.7 | 13.0 | 12.6 |
+| game held still, non-RT | 11.7 | 10.1 | 9.8 |
+| game flight, RT | 9.8 | 9.1 | 8.9-9.7 |
+| game held still, RT | 7.9 | 7.2 | 7.05 |
+| Showcase-like band, non-RT, 720p moving | 13.4 | 5.8 (4 strata: 7.7) | |
+| Showcase-like band, RT, 720p moving | 3.57 | 3.05 (4 strata: 3.4) | |
+
+The Showcase-like band is reflection_matched `--stage --metal-balls`. The game glossy band is
+small: about 10k pixels change, around the gold sphere.
+
+**Picture, the gate not met:** moving glossy surfaces show grain against both the path tracer and
+the history off. One stratum a frame folded over 8-16 frames is far fewer effective samples than
+16 strata a frame under TR1.
+- Error against the path tracer in the most-changed 64x64 tile (aluminium ball and turntable,
+  frame 16), both paths: 3.1 off, 7.9 with one stratum a frame, 5.75 with four.
+- Still frames are about equal.
+- Crops: D:/Coding/renderlab-work/unit-rtvis/crops-hist2 (off | variants | path tracer) and
+  crops-histpics (the game's gold sphere, on | off).
+
+Getting the moving picture back needs spatial reuse across neighbours, which is
+docs/design-reflection-pass.md's resolve.
