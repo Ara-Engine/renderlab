@@ -1,0 +1,82 @@
+//! Reflection hit shading (docs/design-reflection-pass.md): the reduced-rate reflection
+//! pass's hits, shaded as their own compacted pass instead of inside the camera shading
+//! groups, so a SIMD group no longer pays for its pixel with the most strata.
+//!
+//! U-RTVIS's `rl_trace` appends one record per hit to the list H ([`HEADER_BYTES`], then
+//! [`RECORD_BYTES`] each). This pass bins the records by the hit's program, then shades each
+//! bin with that program's hit module (`program::compose_hits`: the traced module with the
+//! `reflection_hits` entry of shaders/reflection_hits.wgsl) and writes the radiance into
+//! the sample image R at each record's slot, which `rl_resolve` accumulates.
+
+/// The hit-shading entry, appended to a program's traced module by `program::compose_hits`.
+pub(crate) const ENTRY: &str = include_str!("../shaders/reflection_hits.wgsl");
+/// H's header: the record count, then the dispatch arguments.
+pub(crate) const HEADER_BYTES: u64 = 16;
+/// One hit record: three `vec4<u32>` (the design's word table).
+pub(crate) const RECORD_BYTES: u64 = 48;
+/// Workgroups per dispatch row (shaders/reflection_hits.wgsl `RL_HITS_ROW`).
+pub(crate) const ROW: u32 = 65535;
+/// Lanes per workgroup.
+pub(crate) const LANES: u32 = 64;
+/// Group-0 bindings of the hit entry: H, R, the bin uniform and the binned record order.
+pub(crate) const BINDINGS: [u32; 4] = [64, 65, 66, 67];
+
+/// Workgroups for `n` records: min(n, ROW) x ceil(n / ROW) rows of [`LANES`] records.
+pub(crate) fn groups(n: u32) -> [u32; 3] {
+    let groups = n.div_ceil(LANES);
+    [groups.min(ROW), groups.div_ceil(ROW), 1]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::program::{self, Stage};
+
+    /// Every program's hit module composes and validates on both paths' heads, traced and
+    /// streamed, with the `reflection_hits` entry, including a program that traces no lobe
+    /// of its own (toon): any program's draw can be hit.
+    #[test]
+    fn hit_modules_validate_on_both_heads() {
+        const SCENE: &str = include_str!("../shaders/scene.wgsl");
+        let rt = super::super::primary_ray_gpu::shading_heads(SCENE).unwrap();
+        let (_, non_rt) = super::super::primary_ray_gpu::non_rt_sources(SCENE).unwrap();
+        for (label, source) in [
+            ("standard", program::STANDARD_PROGRAM),
+            ("toon", include_str!("../shaders/programs/toon.wgsl")),
+        ] {
+            let parameters = program::declares_parameters(source);
+            for head in rt.iter().chain(&non_rt) {
+                for stage in [Stage::Traced, Stage::TracedStreamed] {
+                    let composed = program::compose_hits(head, source, stage, parameters);
+                    assert_eq!(&composed.source[composed.program.clone()], source);
+                    let module =
+                        naga::front::wgsl::parse_str(&composed.source).unwrap_or_else(|e| {
+                            panic!("{label}: {}", e.emit_to_string(&composed.source))
+                        });
+                    naga::valid::Validator::new(
+                        naga::valid::ValidationFlags::all(),
+                        naga::valid::Capabilities::all(),
+                    )
+                    .validate(&module)
+                    .unwrap_or_else(|e| {
+                        panic!("{label} {stage:?}: {}", e.emit_to_string(&composed.source))
+                    });
+                    assert!(
+                        module
+                            .entry_points
+                            .iter()
+                            .any(|e| e.name == "reflection_hits"),
+                        "{label}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_covers_every_record() {
+        assert_eq!(groups(0), [0, 0, 1]);
+        assert_eq!(groups(1), [1, 1, 1]);
+        assert_eq!(groups(64 * 65535 + 1), [65535, 2, 1]);
+    }
+}

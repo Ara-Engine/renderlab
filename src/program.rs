@@ -159,10 +159,12 @@ fn rl_hit_switches(source: String) -> String {
 
 /// The reflection API text for `program` on `head` at `stage`, and whether it traces: empty
 /// for programs that name neither hook nor input, so their modules are unchanged.
-fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
+/// `hits` composes the traced block whatever the program declares, for the hit-shading
+/// module (`compose_hits`): any program's draw can be hit.
+fn reflection_api(head: &str, program: &str, stage: Stage, hits: bool) -> (String, bool) {
     let names = tokens(program);
-    let lobe = names.windows(2).any(|w| w == ["fn", "reflection_lobe"]);
-    let reads = names.contains(&"specular_incident");
+    let lobe = hits || names.windows(2).any(|w| w == ["fn", "reflection_lobe"]);
+    let reads = hits || names.contains(&"specular_incident");
     if !lobe && !reads {
         return (String::new(), false);
     }
@@ -503,6 +505,10 @@ pub(crate) struct Composed {
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
+    compose_stage(head, program, stage, parameters, false)
+}
+/// `compose`, or with `hits` the hit-shading module (`compose_hits`).
+fn compose_stage(head: &str, program: &str, stage: Stage, parameters: bool, hits: bool) -> Composed {
     let streamed;
     let cell_entry;
     let (api, binding, entry) = match stage {
@@ -562,7 +568,12 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     } else {
         crate::atmosphere::api_source()
     };
-    let (mut reflection, traces) = reflection_api(head, program, stage);
+    let (mut reflection, traces) = reflection_api(head, program, stage, hits);
+    // The hit module of a program that traces no lobe: its own pixels never trace, but the
+    // reflection block names the hook.
+    if hits && !declares(program, "fn", "reflection_lobe") {
+        reflection.push_str(REFLECTION_LOBE_STUB);
+    }
     if traces {
         // M7-R1: the indirect inputs' cache-off state, which reads the open environment.
         reflection.push_str(match (indirect_calls, specular) {
@@ -604,7 +615,12 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             source.push_str(traced_hit_helpers());
         }
     }
-    if traces {
+    if hits {
+        // The stage's entry as written (its decode helpers are the hits' too; its own entry
+        // point goes unused), then the hit entry.
+        source.push_str(entry);
+        source.push_str(crate::renderer::reflection_hits::ENTRY);
+    } else if traces {
         // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
         source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
@@ -668,6 +684,20 @@ pub(crate) fn view_variant(
     Ok(source)
 }
 // ---- end of view modes ----
+
+// ---- Reflection hit shading (docs/design-reflection-pass.md) ----
+/// `reflection_lobe` for a program that declares none: no lobe.
+const REFLECTION_LOBE_STUB: &str = "fn reflection_lobe(s:Surface,input:SurfaceInput)->SpecularLobe { return SpecularLobe(vec3<f32>(0.0,0.0,1.0),0.0,0.0); }\n";
+/// The hit-shading module of `program` on a traced stage: `compose`'s text with the reflection
+/// block composed whatever the program declares, and the `reflection_hits` entry
+/// (shaders/reflection_hits.wgsl) after the stage's entry, whose decode helpers it shares.
+/// Hits run the same hit code as the inline path: `rl_hit_input`, the program's `surface`
+/// and `shade`, its lights.
+pub(crate) fn compose_hits(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
+    debug_assert!(matches!(stage, Stage::Traced | Stage::TracedStreamed));
+    compose_stage(head, program, stage, parameters, true)
+}
+// ---- end of reflection hit shading ----
 
 // ---- MP1 per-program dispatch (docs/m7-mp1.md) ----
 /// The tile-list shading entry of mixed-program frames (`primary_shade_list`).

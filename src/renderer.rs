@@ -44,6 +44,8 @@ pub use virtual_shadow_gpu::{
 };
 #[path = "program_gpu.rs"]
 mod program_gpu;
+#[path = "reflection_hits.rs"]
+pub(crate) mod reflection_hits;
 #[path = "shade_detail.rs"]
 pub(crate) mod shade_detail;
 pub(crate) use program_gpu::ProgramReload;
