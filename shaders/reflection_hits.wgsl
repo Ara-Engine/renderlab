@@ -16,14 +16,6 @@ struct RlHitBin { base:u32, frame:u32, _pad0:u32, _pad1:u32 };
 // Workgroups per dispatch row; src/reflection_hits.rs ROW must match.
 const RL_HITS_ROW=65535u;
 
-// The record's direction: octahedral, snorm16 x2 (rl_trace's encoding).
-fn rl_hits_direction(word:u32)->vec3<f32> {
-    let e=unpack2x16snorm(word);
-    var v=vec3<f32>(e.x,e.y,1.0-abs(e.x)-abs(e.y));
-    if v.z<0.0 { v=vec3<f32>((1.0-abs(v.yx))*select(vec2<f32>(-1.0),vec2<f32>(1.0),v.xy>=vec2<f32>(0.0)),v.z); }
-    return normalize(v);
-}
-
 @compute @workgroup_size(64) fn reflection_hits(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     // The dispatch is min(n, ROW) x ceil(n / ROW) groups of 64; the surplus lanes return.
     let index=(group.x+group.y*RL_HITS_ROW)*64u+lane;
@@ -35,7 +27,7 @@ fn rl_hits_direction(word:u32)->vec3<f32> {
     let pixel=vec2<u32>(a.x&0xffffu,a.x>>16u);
     let slot=a.y;
     let origin=bitcast<vec3<f32>>(vec3<u32>(b.w,c.x,c.y));
-    let d=rl_hits_direction(c.z);
+    let d=rl_oct_decode(c.z);
     let cone=unpack2x16float(c.w);
     // The inline loop's per-hit state (rl_reflection_prepare): this hit's share of its
     // pixel's strata, and its path regularization.
