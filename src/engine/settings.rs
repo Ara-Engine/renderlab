@@ -139,7 +139,10 @@ impl Default for Exposure {
 #[non_exhaustive]
 pub enum Quality {
     /// Each path's measured real-time configuration: on hardware RT, traced primaries
-    /// with eight sun-disk directions per pixel (`SoftShadows::Interactive`); without RT,
+    /// with the Interactive sun (`SoftShadows::Interactive`): with TR1, 32 sun-disk directions
+    /// per pixel while the view moves (256 after a cut, 64 at a restart) and 8 once a still
+    /// view has settled, receivers within a moving caster's shadow keeping the restart
+    /// count (`ReconstructionShadowBudget`); without RT,
     /// the visibility buffer with the cached sun clipmap (`SoftShadows::Virtual`, Surface
     /// lookup).
     #[default]
@@ -376,6 +379,7 @@ fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error>
             ("level_blend", _, Some(v)) => s.level_blend = v,
             ("gathers", Some(v), _) => s.gathers = v,
             ("gather_cells", Some(v), _) => s.gather_cells = v,
+            ("relight_cells", Some(v), _) => s.relight_cells = v,
             ("claim_cells", Some(v), _) => s.claim_cells = v,
             ("near_light_rays", Some(v), _) => s.near_light_rays = v,
             ("slots_log2", Some(v), _) => s.slots_log2 = v,

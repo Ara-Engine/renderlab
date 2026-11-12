@@ -21,7 +21,8 @@ var<private> es_visibility:vec3<f32>;
 fn es_prepare(input:SurfaceInput) {
     es_visibility=vec3<f32>(1.0);
     if gi_word(GI_H_ENABLED)==0u || !gi_rx_valid { return; }
-    let n=unit_normal(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal));
+    // gi_prepare's bin-source normal of this receiver (set whenever gi_rx_valid is).
+    let n=gi_rx_normal;
     let open=gi_open_irradiance(n);
     let ratio=clamp(gi_rx_sky_irradiance(n)/max(open,vec3<f32>(1e-30)),vec3<f32>(0.0),vec3<f32>(1.0));
     es_visibility=select(vec3<f32>(1.0),ratio,open>vec3<f32>(1e-20));

@@ -939,8 +939,8 @@ impl Renderer {
     }
 
     /// Creates the camera volume's kernel groups that are missing (the injection's again
-    /// when the scene TLAS changed). `scene` is the frame's TLAS generation
-    /// (`tlas_builds + hardware_build`), the key the other TLAS consumers use.
+    /// when the scene TLAS changed). `scene` is the generation of the frame's TLAS
+    /// object (`HardwareState::scene_generation`), the key the other TLAS consumers use.
     fn atmosphere_volume_groups(&mut self, injection: bool, scene: u64) {
         let (device, ledger) = (&self.device, &self.ledger);
         let a = &self.atmosphere;

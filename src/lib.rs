@@ -34,6 +34,7 @@ mod normal;
 // Entity-ID output's device-free half (docs/design-id-output.md).
 mod object_ids;
 mod observe;
+mod pane_pixels;
 mod pass_timeline;
 // PP1 public camera/display settings; implementation stays in the tone stage.
 mod post;

@@ -849,9 +849,10 @@ impl Renderer {
         let instance_bindings = ledger.own(
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("fixed instance ABI"),
+                // Compute: per-pixel pane shading builds its vertices from the same placements.
                 entries: &[0, 1].map(|binding| wgpu::BindGroupLayoutEntry {
                     binding,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,
@@ -2533,14 +2534,14 @@ impl Renderer {
         }
         let traced = self.primary_mode != PrimaryVisibility::Raster && view_mode == ViewMode::Lit;
         if traced {
+            // U-FIXED: RT renderers trace the Interactive sun from the buffer's receivers.
             if self.primary_mode == PrimaryVisibility::VisibilityBuffer
-                && matches!(
-                    self.view.soft_mode,
-                    SoftShadows::Interactive | SoftShadows::Temporal
-                )
+                && (self.view.soft_mode == SoftShadows::Temporal
+                    || (self.view.soft_mode == SoftShadows::Interactive
+                        && self.hardware_shadows.is_none()))
             {
                 return Err(Error::InvalidInput(
-                    "visibility-buffer primaries support Virtual or Exact soft shadows; Interactive and Temporal require traced primaries",
+                    "visibility-buffer primaries support Virtual or Exact soft shadows, and Interactive on RT renderers; Temporal requires traced primaries",
                 ));
             }
             if self.primary_mode == PrimaryVisibility::Traced
@@ -2947,7 +2948,6 @@ impl Renderer {
         camera: &Camera,
         color: &wgpu::Texture,
         eligible: bool,
-        hardware_build: bool,
         traced: bool,
     ) -> Result<(), Error> {
         // Traced and visibility-buffer frames feed the cache; every other lit frame
@@ -2956,7 +2956,7 @@ impl Renderer {
         let scene_generation = self
             .hardware_shadows
             .as_ref()
-            .map_or(0, |h| h.stats.tlas_builds + u64::from(hardware_build));
+            .map_or(0, |h| h.scene_generation());
         let result = self.prepare_gi(
             draws,
             camera,
@@ -3188,7 +3188,7 @@ impl Renderer {
         }
         if soft {
             let scopes = OperationScopes::new(&self.device);
-            self.ensure_fresh_targets(color.size(), hardware_build);
+            self.ensure_fresh_targets(color.size());
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
             }
@@ -3199,7 +3199,7 @@ impl Renderer {
             let scene_generation = self
                 .hardware_shadows
                 .as_ref()
-                .map_or(0, |h| h.stats.tlas_builds + u64::from(hardware_build));
+                .map_or(0, |h| h.scene_generation());
             let mut primary = UploadBytes::default();
             let result = self.prepare_primary(draws, camera, soft, scene_generation, &mut primary);
             if let Some(error) = scopes.finish() {
@@ -3249,7 +3249,6 @@ impl Renderer {
                 camera,
                 color,
                 traced && !temporal,
-                hardware_build,
                 traced,
             )?;
         }
@@ -3269,7 +3268,7 @@ impl Renderer {
         let scene_generation = self
             .hardware_shadows
             .as_ref()
-            .map_or(0, |h| h.stats.tlas_builds + u64::from(hardware_build));
+            .map_or(0, |h| h.scene_generation());
         let timed = self.timing_status == TimingStatus::Enabled;
         // The timeline moves out while marks are encoded, so they never borrow `self`.
         let mut marks = self.pass_timeline.take();
@@ -3283,7 +3282,7 @@ impl Renderer {
         };
         mark(&mut encoder, "skinning");
         if self.tick_work {
-            self.encode_skinning(&mut encoder, draws, hardware_build);
+            self.encode_skinning(&mut encoder, draws, hardware_build, &mut mark);
         }
         if let Some(frame) = &local_lights {
             mark(&mut encoder, "light_clusters");
@@ -3386,7 +3385,7 @@ impl Renderer {
                     let submitted_at = Instant::now();
                     self.queue.submit([early]);
                     early_submit = submitted_at.elapsed();
-                    self.prepare_cache_and_post(draws, camera, color, true, hardware_build, true)?;
+                    self.prepare_cache_and_post(draws, camera, color, true, true)?;
                 }
                 let shading = if soft {
                     primary_ray_gpu::Shading::Soft
