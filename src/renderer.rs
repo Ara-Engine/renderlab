@@ -2604,16 +2604,10 @@ impl Renderer {
         let camera_bytes = matrix_bytes(matrix);
         let shadow_start = Instant::now();
         let mut shadow_frame = if self.view.shadows.enabled(view_mode) {
-            let bounds = draws
-                .iter()
-                .flat_map(|draw| {
-                    draw.instances
-                        .state
-                        .models
-                        .iter()
-                        .map(move |&model| shadow_gpu::world_bounds(draw.mesh.bounds, model))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut bounds = Vec::new();
+            for draw in draws.iter() {
+                bounds.extend_from_slice(&draw.instances.state.world_bounds(draw.mesh.bounds)?);
+            }
             Some(self.view.shadows.plan(
                 camera,
                 [color.width(), color.height()],
