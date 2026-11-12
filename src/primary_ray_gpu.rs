@@ -1873,9 +1873,7 @@ impl Renderer {
         // Every traced frame's camera rays read the rectangle: O(placements) per frame.
         let mut bounds = vec![];
         for d in draws {
-            for &model in &d.instances.state.models {
-                bounds.push(shadow_gpu::world_bounds(d.mesh.bounds, model)?);
-            }
+            bounds.extend_from_slice(&d.instances.state.world_bounds(d.mesh.bounds)?);
         }
         let scene = scene_pixels(&bounds, matrix, [size.width, size.height]);
         // Whole trace tiles, so shading reads only tile flags its trace wrote.

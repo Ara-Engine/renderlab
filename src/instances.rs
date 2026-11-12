@@ -73,6 +73,16 @@ pub(crate) struct InstanceState {
     pub ids: Vec<u32>,
     key: Option<VisibilityKey>,
     transformed_bounds: Vec<HomogeneousWorldBounds>,
+    /// The world bounds of every placement under one local box, kept until the placements or
+    /// the box change (`Self::world_bounds`).
+    world_bounds: std::sync::Mutex<Option<WorldBoundsCache>>,
+}
+
+/// `InstanceState::world_bounds`'s memory: the edit count and local box it was built for.
+struct WorldBoundsCache {
+    edits: u64,
+    local: [u32; 6],
+    bounds: Arc<Vec<crate::shadow_plan::Bounds>>,
 }
 impl InstanceState {
     pub fn validate(models: &[Mat4], max_instances: u32) -> Result<(), Error> {
@@ -105,7 +115,43 @@ impl InstanceState {
             ids: (0..models.len() as u32).collect(),
             key: None,
             transformed_bounds: Vec::new(),
+            world_bounds: std::sync::Mutex::new(None),
         }
+    }
+    /// The conservative world box of `local` under each placement, in slot order. Several
+    /// passes ask every frame (the shadow plan, the GI cache, the camera rays); the boxes are
+    /// computed when the placements or `local` changed, not per pass per frame.
+    pub(crate) fn world_bounds(
+        &self,
+        local: Aabb,
+    ) -> Result<Arc<Vec<crate::shadow_plan::Bounds>>, Error> {
+        let key = [
+            local.min[0].to_bits(),
+            local.min[1].to_bits(),
+            local.min[2].to_bits(),
+            local.max[0].to_bits(),
+            local.max[1].to_bits(),
+            local.max[2].to_bits(),
+        ];
+        let mut cache = self
+            .world_bounds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache.as_ref().filter(|c| c.edits == self.edits && c.local == key) {
+            return Ok(Arc::clone(&cached.bounds));
+        }
+        let bounds = Arc::new(
+            self.models
+                .iter()
+                .map(|&model| crate::renderer::shadow_gpu::world_bounds(local, model))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        *cache = Some(WorldBoundsCache {
+            edits: self.edits,
+            local: key,
+            bounds: Arc::clone(&bounds),
+        });
+        Ok(bounds)
     }
     fn set(&mut self, slot: usize, model: Mat4) -> Result<(), Error> {
         if slot >= self.models.len() || !model.is_finite() {

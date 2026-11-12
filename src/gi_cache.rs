@@ -2324,7 +2324,7 @@ impl Renderer {
         if programs.len() > 1 {
             let mut built = vec![];
             for id in programs {
-                if !crate::program::reflects(&self.program_slot(id).source) {
+                if !self.program_slot(id).traits.reflects {
                     continue;
                 }
                 let mut existing = std::mem::take(&mut self.gi.mixed);
@@ -2340,7 +2340,7 @@ impl Renderer {
             self.gi.mixed = built;
             return Ok(any);
         }
-        if !crate::program::reflects(&self.program_slot(id).source) {
+        if !self.program_slot(id).traits.reflects {
             return Ok(false);
         }
         let key = self.gi_shade_key(id, software, streamed);
@@ -2940,7 +2940,7 @@ impl Renderer {
         let rows = draws.iter().enumerate().map(|(b, d)| {
             let n = d.instances.len() as u32;
             let program = d.material.map_or(self.standard.id(), |m| m.program.id());
-            let selector = if mixed && crate::program::reflects(&self.program_slot(program).source)
+            let selector = if mixed && self.program_slot(program).traits.reflects
             {
                 cell_selector(program)
             } else {
@@ -2959,8 +2959,7 @@ impl Renderer {
         // Moved casters: placements whose world bounds changed, as swept boxes.
         let mut bounds = vec![];
         for d in draws {
-            for &model in &d.instances.state.models {
-                let b = shadow_gpu::world_bounds(d.mesh.bounds, model)?;
+            for b in d.instances.state.world_bounds(d.mesh.bounds)?.iter() {
                 bounds.push([b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z]);
             }
         }
@@ -2988,9 +2987,9 @@ impl Renderer {
                 }
                 h.finalize().into()
             };
-            let mut sources = self.program_slot(state.program).source.as_bytes().to_vec();
+            let mut sources = self.program_slot(state.program).digest.to_vec();
             for &program in state.programs.iter().skip(1) {
-                sources.extend(self.program_slot(program).source.as_bytes());
+                sources.extend(self.program_slot(program).digest);
             }
             let id_bytes: Vec<u8> = ids.iter().flat_map(|i| i.to_le_bytes()).collect();
             let parts = [
@@ -3015,10 +3014,10 @@ impl Renderer {
             // TP2: transparent sun attenuation changes the cells' direct illumination.
             h.update(self.lighting.transmission.hash);
             h.update(environment);
-            h.update(self.program_slot(state.program).source.as_bytes());
+            h.update(self.program_slot(state.program).digest);
             // MP1: every program of a mixed frame.
             for &program in state.programs.iter().skip(1) {
-                h.update(self.program_slot(program).source.as_bytes());
+                h.update(self.program_slot(program).digest);
             }
             h.update(ids.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<_>>());
             h.finalize().into()

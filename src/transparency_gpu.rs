@@ -1167,7 +1167,7 @@ impl Renderer {
             ResourceKind::RenderPipeline,
         );
         ParticlePipelines {
-            prelude: Sha256::digest(self.source.as_bytes()).into(),
+            prelude: self.source_digest,
             update,
             sort,
             draw,
@@ -1176,7 +1176,7 @@ impl Renderer {
 
     /// The module source of `program`'s transparent pipelines on this renderer's
     /// sun-visibility path, and its identity.
-    fn tp_glass_source(&self, program: u64, rt: bool) -> (String, [u8; 32]) {
+    fn tp_glass_source(&self, program: u64, rt: bool) -> String {
         let slot = self.program_slot(program);
         let head = if rt {
             self.hardware_source.as_deref().unwrap()
@@ -1208,8 +1208,27 @@ impl Renderer {
             }
             source
         };
-        let key = Sha256::digest(source.as_bytes()).into();
-        (source, key)
+        source
+    }
+    /// The identity of `program`'s transparent pipelines on this renderer's sun-visibility
+    /// path, from the digests kept with the sources: the composed source is only built when
+    /// the pipelines are (this runs every frame for every transparent program).
+    fn tp_glass_key(&self, program: u64, rt: bool) -> [u8; 32] {
+        let slot = self.program_slot(program);
+        let head = if rt {
+            self.hardware_digest.unwrap()
+        } else {
+            self.source_digest
+        };
+        let mut hash = Sha256::new();
+        hash.update(head);
+        hash.update(slot.digest);
+        hash.update([u8::from(rt), u8::from(slot.layout.is_some())]);
+        #[cfg(test)]
+        if let Some(variant) = &self.transparency.profile {
+            hash.update(variant.as_bytes());
+        }
+        hash.finalize().into()
     }
     /// The transparent pipelines of `program` from its module source.
     fn tp_glass_pipelines(
@@ -1641,7 +1660,7 @@ impl Renderer {
             });
         }
         // The prelude-composed particle kernels follow prelude reloads.
-        let prelude: [u8; 32] = Sha256::digest(self.source.as_bytes()).into();
+        let prelude: [u8; 32] = self.source_digest;
         if !self.transparency.emitters.is_empty()
             && self
                 .transparency
@@ -1689,7 +1708,7 @@ impl Renderer {
             && traced
             && transparent.iter().any(|draw| {
                 let program = draw.material.map_or(self.standard.id(), |m| m.program.id());
-                crate::program::declares_reflection(&self.program_slot(program).source)
+                self.program_slot(program).traits.declares_reflection
             });
         #[cfg(test)]
         let reflect =
@@ -1697,7 +1716,7 @@ impl Renderer {
         if reflect {
             let primary = self.view.primary.as_ref().unwrap();
             let program = self.program_slot(primary.program);
-            let key = reflection::key(&self.source, &program.source, program.layout.is_some());
+            let key = reflection::key(&self.source_digest, &program.digest, program.layout.is_some());
             if self
                 .view
                 .transparency_reflections
@@ -1735,7 +1754,7 @@ impl Renderer {
         programs.sort_unstable();
         programs.dedup();
         for program in programs {
-            let (source, key) = self.tp_glass_source(program, rt);
+            let key = self.tp_glass_key(program, rt);
             if self
                 .transparency
                 .glass
@@ -1744,6 +1763,7 @@ impl Renderer {
             {
                 continue;
             }
+            let source = self.tp_glass_source(program, rt);
             let pipelines = match self.tp_glass_pipelines(program, rt, &source, key) {
                 Err(Error::Fault(Fault(message))) => return Err(self.fail(message)),
                 other => other?,
@@ -1761,7 +1781,7 @@ impl Renderer {
                     continue;
                 }
                 let program = self.transparency.glass[at].program;
-                let (source, _) = self.tp_glass_source(program, rt);
+                let source = self.tp_glass_source(program, rt);
                 let pane = match self.tp_pane_pipelines(program, rt, &source) {
                     Err(Error::Fault(Fault(message))) => return Err(self.fail(message)),
                     other => other?,
