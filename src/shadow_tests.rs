@@ -110,6 +110,7 @@ fn gpu_shadow_offscreen_local_and_reload() {
                     candela: [3200.; 3],
                     range: None,
                     source_radius: 0.0,
+                    cast_shadows: None,
                 },
                 ShadowRequest::Point {
                     near: 0.001,
@@ -125,6 +126,7 @@ fn gpu_shadow_offscreen_local_and_reload() {
                     inner: 0.3,
                     outer: 0.6,
                     source_radius: 0.0,
+                    cast_shadows: None,
                 },
                 ShadowRequest::Spot {
                     near: 0.001,
@@ -516,6 +518,7 @@ fn gpu_shadow_planar_receiver_motion() {
                                 inner: 0.3,
                                 outer: 0.6,
                                 source_radius: 0.0,
+                                cast_shadows: None,
                             },
                             ShadowRequest::Spot {
                                 near: 0.05,
@@ -528,6 +531,7 @@ fn gpu_shadow_planar_receiver_motion() {
                                 candela: [32000.; 3],
                                 range: None,
                                 source_radius: 0.0,
+                                cast_shadows: None,
                             },
                             ShadowRequest::Point {
                                 near: 0.05,
@@ -662,6 +666,7 @@ fn gpu_shadow_admission_and_resources() {
                 candela: [100.; 3],
                 range: None,
                 source_radius: 0.0,
+                cast_shadows: None,
             }],
             ..Default::default()
         },

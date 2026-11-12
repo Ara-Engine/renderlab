@@ -186,18 +186,21 @@ fn forward_lit_frame_matches_closed_form_photometry() -> Result<()> {
             candela: [100.; 3],
             range: None,
             source_radius: 0.0,
+            cast_shadows: None,
         },
         Light::Point {
             position: Vec3::Z * 2.,
             candela: [100.; 3],
             range: None,
             source_radius: 0.0,
+            cast_shadows: None,
         },
         Light::Point {
             position: Vec3::Z,
             candela: [100.; 3],
             range: Some(0.9),
             source_radius: 0.0,
+            cast_shadows: None,
         },
         Light::Spot {
             position: Vec3::Z * 2.,
@@ -207,6 +210,7 @@ fn forward_lit_frame_matches_closed_form_photometry() -> Result<()> {
             inner: 0.25,
             outer: 0.5,
             source_radius: 0.0,
+            cast_shadows: None,
         },
     ];
     let mut worst = 0f64;
@@ -332,6 +336,7 @@ fn forward_frame_display_matches_cpu_post_replay_of_its_hdr() -> Result<()> {
                         candela: [60., 40., 20.],
                         range: Some(6.),
                         source_radius: 0.0,
+                        cast_shadows: None,
                     },
                 ],
                 environment: [20., 25., 40.],
@@ -1248,6 +1253,7 @@ fn frames_carry_the_previous_camera_into_motion_blur() -> Result<()> {
                 candela: [60., 40., 20.],
                 range: Some(6.),
                 source_radius: 0.0,
+                cast_shadows: None,
             },
         ],
         environment: [20., 25., 40.],

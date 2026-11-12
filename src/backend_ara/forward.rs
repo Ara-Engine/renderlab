@@ -659,6 +659,8 @@ struct Shared<'a> {
     traced: Option<&'a Traced>,
     /// The radiance cache's table where the cache runs; otherwise a zero header binds.
     gi_table: Option<&'a StorageBuffer>,
+    /// The cache's outgoing radiance, for cache-terminated reflection hits; otherwise zeros.
+    gi_outgoing: Option<&'a StorageBuffer>,
     buffers: &'a BTreeMap<InputKey, StorageBuffer>,
     images: &'a BTreeMap<InputKey, Texture>,
 }
@@ -699,6 +701,7 @@ impl<'a> Shared<'a> {
                 (3, 50) => &self.atmosphere.record,
                 (3, 5) if self.traced.is_some() => &self.traced.context("checked")?.records,
                 (3, 20) if self.gi_table.is_some() => self.gi_table.context("checked")?,
+                (3, 28) if self.gi_outgoing.is_some() => self.gi_outgoing.context("checked")?,
                 _ => &self.buffers[&spec.key],
             }),
             (InputKind::BufferArray { .. }, group, binding) => {
@@ -984,6 +987,9 @@ struct Kept {
     ids: Option<IdTargets>,
     /// The Interactive trace's repair queue: a header, then room for every pixel.
     repairs: Option<StorageBuffer>,
+    /// Which point and spot lights trace shadow rays (`LocalShadows::rays`), kept from
+    /// frame to frame for their fades.
+    rays: lc::RaySelection,
     /// The 2D targets the last frame made and released, for the next frame to take.
     targets: super::image::pool::Pool,
     /// The displayed images, two so a frame draws into the one not on screen while a
@@ -1022,8 +1028,9 @@ impl Frames {
         }
     }
     /// Forgets history: the next frame is a first frame after a cut. The cache keeps
-    /// its buffers and starts from an empty table, as `Renderer::reset_indirect`. The
-    /// meshes and the atmosphere's tables stay as they are.
+    /// its buffers and starts from an empty table, as `Renderer::reset_indirect`, and the
+    /// ray-shadowed lights are chosen afresh. The meshes and the atmosphere's tables stay
+    /// as they are.
     pub fn cut(&mut self) {
         if let Some(cache) = &mut self.kept.gi {
             cache.reset();
@@ -1031,6 +1038,8 @@ impl Frames {
         if let Some(history) = &mut self.kept.tr1 {
             history.cut();
         }
+        // The cut frame's shadowed lights start at full strength.
+        self.kept.rays = lc::RaySelection::default();
         self.carried = Carried::default();
     }
     /// Releases what the sequence kept on the GPU, after its frames in flight finish.
@@ -1341,6 +1350,7 @@ fn frame(
         fog: kept_fog,
         ids: kept_ids,
         repairs: kept_repairs,
+        rays: ray_selection,
         // Taken out and made active for this frame by `Frames::render`.
         targets: _,
         outputs,
@@ -1744,23 +1754,25 @@ fn frame(
         }
         h.finalize().into()
     };
-    // `prepare_light_clusters` on a frame whose shading traces local shadows: every
-    // point and spot light's record names itself, and needs no map slot.
+    // `prepare_light_clusters` on a frame whose shading traces local shadows: the ray
+    // budget's point and spot lights name themselves (`RaySelection`), with no map slot.
     let local_shadows = scene.local_shadows.filter(|s| s.count > 0);
     ensure!(
         local_shadows.is_none() || deferred_path,
         "local-light shadows are assembled on traced frames only"
     );
-    if local_shadows.is_some() {
-        for (index, (record, light)) in records
+    if let Some(settings) = &local_shadows {
+        let vp = scene.camera.matrix(size[0], size[1]);
+        let eye = scene.camera.view().inverse().w_axis.truncate();
+        let words = ray_selection.words(&scene.lighting.lights, vp, eye, settings);
+        for (record, word) in records
             .as_chunks_mut::<{ crate::lighting::LIGHT_BYTES }>()
             .0
             .iter_mut()
-            .zip(&scene.lighting.lights)
-            .enumerate()
+            .zip(words)
         {
-            if lc::sphere(light).is_some() {
-                record[60..64].copy_from_slice(&((index as u32 & 0xffff) + 1).to_ne_bytes());
+            if word != 0 {
+                record[60..64].copy_from_slice(&word.to_ne_bytes());
             }
         }
     }
@@ -2746,6 +2758,7 @@ fn frame(
                             .contains(&spec.key))
                     || (gi.is_some()
                         && (spec.key == key(3, 20)
+                            || spec.key == key(3, 28)
                             || (spec.key.group == 0 && (30..=37).contains(&spec.key.binding))))
                     || (resolve.is_some() && spec.key == key(0, 40))
                     || buffers.contains_key(&spec.key)
@@ -3161,6 +3174,7 @@ fn frame(
         map,
         traced: traced.as_ref(),
         gi_table: gi.map(|(cache, _)| cache.table()),
+        gi_outgoing: gi.map(|(cache, _)| cache.outgoing_radiance()),
         buffers: &buffers,
         images: &inputs,
     };

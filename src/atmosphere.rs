@@ -26,7 +26,7 @@ pub struct Atmosphere {
     /// (`Renderer::set_environment(None, ..)`), the renderer generates the environment from
     /// this sky (diffuse irradiance and a prefiltered specular chain, without the sun disk), so
     /// image-based light and the world radiance cache take their sky from it. Updated in place
-    /// when the sun, medium or camera altitude changes; GI relights progressively without
+    /// when the sun, medium or camera altitude (in 100 m steps) changes; GI relights progressively without
     /// losing geometric visibility. A selected captured map wins.
     pub environment: bool,
     pub medium: AtmosphereMedium,
