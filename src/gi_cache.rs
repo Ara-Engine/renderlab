@@ -1478,6 +1478,11 @@ pub(super) struct GiState {
     /// GI_C_MATERIAL); the draw table last uploaded.
     draw_ids: Vec<(wgpu::Buffer, wgpu::Buffer)>,
     draw_table: Vec<u32>,
+    /// The light key's parts last frame (lights, environment, programs, draw ids, decals and
+    /// transmission), and which of them changed this frame as bits 0-4: what relit the cache
+    /// (`RENDERLAB_GI_LOG` field `relight_parts`; measurement only).
+    key_parts: Option<[[u8; 32]; 5]>,
+    pub(crate) relight_parts: u32,
     shade: Option<ShadePipeline>,
     /// MP1: mixed-program frames' cell shading, one pipeline per reflecting program of the
     /// frame (`mixed_cell_entry`), used instead of `shade` while `mixed_active`.
@@ -1519,6 +1524,8 @@ impl GiState {
             stats: IndirectStats::default(),
             draw_ids: vec![],
             draw_table: vec![],
+            key_parts: None,
+            relight_parts: 0,
             shade: None,
             mixed: vec![],
             mixed_active: false,
@@ -1696,6 +1703,11 @@ fn uint_texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
 impl Renderer {
     /// A camera cut that keeps the cache (`Engine::cut_view`): with `cut_refill` on, the
     /// next frames refill coarse-first under the claim budget (docs/design-gi-cut-refill.md).
+    /// Which parts of the GI light key changed on the last frame, bits 0-4: lights,
+    /// environment, programs, draw ids, decals and transmission (measurement only).
+    pub(crate) fn indirect_relight_parts(&self) -> u32 {
+        self.gi.relight_parts
+    }
     pub fn mark_indirect_cut(&mut self) {
         self.gi.planner.camera_cut();
     }
@@ -2949,6 +2961,34 @@ impl Renderer {
         };
         // Bounce (G2): the lights, the environment, the frame's program and its draws'
         // materials (stable ids) form the lighting key.
+        // Which part of the light key changed since the last frame (measurement only).
+        if bounce {
+            let state = self.view.primary.as_ref().unwrap();
+            let part = |bytes: &[&[u8]]| -> [u8; 32] {
+                let mut h = Sha256::new();
+                for b in bytes {
+                    h.update(b);
+                }
+                h.finalize().into()
+            };
+            let mut sources = self.program_slot(state.program).source.as_bytes().to_vec();
+            for &program in state.programs.iter().skip(1) {
+                sources.extend(self.program_slot(program).source.as_bytes());
+            }
+            let id_bytes: Vec<u8> = ids.iter().flat_map(|i| i.to_le_bytes()).collect();
+            let parts = [
+                part(&[format!("{:?}", self.lighting.source_lights).as_bytes()]),
+                part(&[&environment]),
+                part(&[&sources]),
+                part(&[&id_bytes]),
+                part(&[&self.lighting.decals.hash, &self.lighting.transmission.hash]),
+            ];
+            self.gi.relight_parts = match &self.gi.key_parts {
+                Some(old) => (0..5).filter(|&i| old[i] != parts[i]).fold(0, |m, i| m | 1 << i),
+                None => 0,
+            };
+            self.gi.key_parts = Some(parts);
+        }
         let light_key: Option<[u8; 32]> = bounce.then(|| {
             let state = self.view.primary.as_ref().unwrap();
             let mut h = Sha256::new();
