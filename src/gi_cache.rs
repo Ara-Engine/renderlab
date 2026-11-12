@@ -1364,6 +1364,9 @@ impl Planner {
         // A view whose every input is unchanged has nothing to trace once its cells
         // exist: after IDLE_AFTER identical frames the passes stop (still frames cost
         // nothing). Rotation and partial cells keep working every frame.
+        // The placements' digest, once: both keys below read it (about 1 MB of transforms a
+        // frame on Outpost was hashed twice).
+        let instances: [u8; 32] = Sha256::digest(instances).into();
         let idle_key: [u8; 32] = {
             let mut h = Sha256::new();
             h.update(still_matrix);
@@ -1491,6 +1494,9 @@ pub(super) struct GiState {
     /// (`RENDERLAB_GI_LOG` field `relight_parts`; measurement only).
     key_parts: Option<[[u8; 32]; 5]>,
     pub(crate) relight_parts: u32,
+    /// Every placement's world bounds as `prepare_gi` last computed them (reused while the
+    /// placements are unchanged).
+    bounds_cache: Vec<[f32; 6]>,
     shade: Option<ShadePipeline>,
     /// MP1: mixed-program frames' cell shading, one pipeline per reflecting program of the
     /// frame (`mixed_cell_entry`), used instead of `shade` while `mixed_active`.
@@ -1534,6 +1540,7 @@ impl GiState {
             draw_table: vec![],
             key_parts: None,
             relight_parts: 0,
+            bounds_cache: vec![],
             shade: None,
             mixed: vec![],
             mixed_active: false,
@@ -2592,7 +2599,8 @@ impl Renderer {
         Ok(())
     }
 
-    fn prepare_gi_arrays(&mut self, draws: &[PreparedDraw<'_>]) -> Result<(), Error> {
+    /// Uploads the placements; true when their bytes changed (or the arrays were rebuilt).
+    fn prepare_gi_arrays(&mut self, draws: &[PreparedDraw<'_>]) -> Result<bool, Error> {
         let keys: Vec<_> = draws
             .iter()
             .map(|d| {
@@ -2706,7 +2714,8 @@ impl Renderer {
             }
         }
         let a = self.gi.arrays.as_mut().unwrap();
-        if a.instances != instances {
+        let changed = a.instances != instances;
+        if changed {
             let (models, normals) = instances.split_at(instances.len() / 2);
             if !models.is_empty() {
                 self.queue.write_buffer(&a.models, 0, models);
@@ -2714,7 +2723,7 @@ impl Renderer {
             }
             a.instances = instances;
         }
-        Ok(())
+        Ok(changed)
     }
 
     /// Packs every draw's software geometry; false when a draw has none.
@@ -2955,15 +2964,21 @@ impl Renderer {
             self.gi.draw_table = table;
         }
         self.ensure_gi_pipelines(software)?;
-        self.prepare_gi_arrays(draws)?;
-        // Moved casters: placements whose world bounds changed, as swept boxes.
-        let mut bounds = vec![];
-        for d in draws {
-            for &model in &d.instances.state.models {
-                let b = shadow_gpu::world_bounds(d.mesh.bounds, model)?;
-                bounds.push([b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z]);
+        let placements_changed = self.prepare_gi_arrays(draws)?;
+        // Moved casters: placements whose world bounds changed, as swept boxes. Unchanged
+        // placement bytes (a rebuilt mesh rebuilds the arrays, so counts as changed) give the
+        // same bounds: they are computed again only when the placements change.
+        if placements_changed || self.gi.bounds_cache.is_empty() {
+            let mut bounds = vec![];
+            for d in draws {
+                for &model in &d.instances.state.models {
+                    let b = shadow_gpu::world_bounds(d.mesh.bounds, model)?;
+                    bounds.push([b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z]);
+                }
             }
+            self.gi.bounds_cache = bounds;
         }
+        let bounds = self.gi.bounds_cache.clone();
         let poses = crate::renderer::skinning::placement_poses(draws);
         // The environment as the cache sees it: which map, its content and its rotation.
         let environment: [u8; 32] = {
