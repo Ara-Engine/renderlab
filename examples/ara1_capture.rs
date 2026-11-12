@@ -140,12 +140,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     outer: spot.outer,
                     // Point sources, matching Ara's punctual lights (LC2 added radii).
                     source_radius: 0.0,
+                    cast_shadows: None,
                 },
                 None => Light::Point {
                     position: Vec3::from_array(light.position),
                     candela,
                     range: Some(light.range),
                     source_radius: 0.0,
+                    cast_shadows: None,
                 },
             }
         })

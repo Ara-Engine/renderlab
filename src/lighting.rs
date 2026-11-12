@@ -18,6 +18,9 @@ pub enum Light {
         range: Option<f32>,
         /// Emitter radius in metres. Zero keeps hard local shadows. Does not change candela.
         source_radius: f32,
+        /// Whether it casts shadows: None ranks it against the frame's shadow budget
+        /// (`LocalShadows`), Some(true) always shadows it, Some(false) never does.
+        cast_shadows: Option<bool>,
     },
     /// Cone half angles in radians; squared interpolation between their cosines.
     Spot {
@@ -29,6 +32,8 @@ pub enum Light {
         outer: f32,
         /// Emitter radius in metres, as for point lights.
         source_radius: f32,
+        /// Whether it casts shadows, as for point lights.
+        cast_shadows: Option<bool>,
     },
 }
 
@@ -82,6 +87,7 @@ impl PackedLighting {
                     candela,
                     range,
                     source_radius,
+                    ..
                 } => (
                     position,
                     range,
@@ -100,6 +106,7 @@ impl PackedLighting {
                     inner,
                     outer,
                     source_radius,
+                    ..
                 } => {
                     if !inner.is_finite()
                         || !outer.is_finite()
