@@ -1181,6 +1181,19 @@ impl Planner {
             settings.window
         };
         self.reset = continued.is_none() || self.cut || event_window < 1.0;
+        if std::env::var_os("RENDERLAB_TR1_KEY_LOG").is_some() {
+            let p = self.previous.as_ref();
+            eprintln!(
+                "tr1 plan: frame {} previous {:?} key same {:?} suns {:?}/{} cut {} turn {turn} window {event_window} reset {}",
+                i.frame,
+                p.map(|p| p.frame),
+                p.map(|p| p.key == key),
+                p.map(|p| p.suns.len()),
+                suns.len(),
+                self.cut,
+                self.reset
+            );
+        }
         self.sun_turned = if self.reset {
             0.0
         } else {
@@ -1751,7 +1764,7 @@ impl Renderer {
         // Not `models` or `normals` (MQ1): transform edits of existing placements keep the
         // primary tables, so placement slots are stable; new placements change `instances`
         // and `geometry_generation`.
-        for v in [
+        let uploads = [
             own(u.environment, others.environment, mine.environment),
             own(u.geometry, others.geometry, mine.geometry),
             own(u.lut, others.lut, mine.lut),
@@ -1760,8 +1773,29 @@ impl Renderer {
             // MV1: transform/derived-normal uploads move surfaces; they no longer
             // reset all history. Placement identity/topology stays in the key above.
             own(u.instances, others.instances, mine.instances),
-        ] {
+        ];
+        for v in uploads {
             hash.update(v.to_ne_bytes());
+        }
+        // Measurement (U-FIXED): `RENDERLAB_TR1_KEY_LOG` prints the key's parts each frame, to
+        // name the part that restarts every pixel.
+        if std::env::var_os("RENDERLAB_TR1_KEY_LOG").is_some() {
+            eprintln!(
+                "tr1 key: revision {} program {} programs {:?} geometry {} bindings {} shadows {:?} virtual {:?} modes {:?} {:?} lights {lights:?} environment {:?} uniform {:?} visible {} sky {} uploads {uploads:?}",
+                self.revision.0,
+                state.program,
+                state.programs,
+                state.geometry_generation,
+                state.reconstruction_bindings_generation,
+                self.view.shadows.settings,
+                self.view.virtual_settings,
+                self.view.soft_mode,
+                self.primary_mode,
+                self.lighting.pending.environment,
+                self.environment.uniform(),
+                self.environment.visible,
+                self.atmosphere_sky_visible(),
+            );
         }
         hash.finalize().into()
     }
