@@ -1075,3 +1075,13 @@ Islam decided on 2026-11-11 to delete ara-render now with no fallback ([ara-rend
 
 ## View tests create adapters inside the lib suite (root, 2026-11-11)
 - **OPEN:** `engine::view_tests` (RL#39) are not `#[ignore]`d GPU tests: they create a Vulkan adapter inside `cargo test --lib`. On the RTX under `--test-threads=2`, `a_moving_view_and_moving_objects_leave_each_view_as_if_alone` failed once at adapter creation (`InvalidInput("no Vulkan adapter")`, before any frame); run alone, all four pass. Either mark them as GPU tests (ignored in the CPU suite, run in leases) or serialise their adapter creation.
+
+## GI cache after the 2026-11-11 speck work (U-SPECK, U-SPECK2; root, 2026-11-12)
+Merged: the near-light rays (lamp blobs), the pressure eviction (the Outpost cell mosaic), cone-sized gather hit cells, the white-speck bound and restart budgets, and the tools (docs/speck.md, docs/speck2.md). Open, ranked by what a user meets first:
+1. **Radeon still-frame checkerboard at a 4 degree sun** (Ara's Outpost, Radeon 760M, old pin). Not seen on the RTX at the same sun on either path with any lookup (root's sun4 sheet). U-SPECK's reading, unreproduced: first gathers starved on software rays at 8,192 cells a frame behind a long queue. `gather_pixels_first` (off) is the first thing to try on the Radeon; `RENDERLAB_GI_LOG` there would confirm.
+2. **a2: moving objects get about 70% of their bounce** (walking hero 12 codes under the path tracer, 5 of them from motion). Next: hits on a mover read the cell at the hit's previous-frame position (previous transforms in the cache's kernels), or new cells on movers are gathered the frame they are made. `mover_hit_levels` (off) recovers about 1.5 codes at a cost of specks.
+3. **Churn on cuts when the table cannot hold the views a cut alternates between:** 99.8% of evictions are cells seen within 8 frames, and non-RT pays +4.4 ms on a forced small table. Decide an age floor or a pixel-read stamp from Outpost's cut clip on main with `RENDERLAB_GI_LOG` (pending from the integration thread).
+4. **A 7-code static bounce gap on the hero beside the gold sphere** (frozen scene). Not investigated; guess: bounce off shiny metal.
+5. **Relight scope:** a flickering light re-queues an eighth of every cell each frame, whatever it reaches.
+6. **Unmeasured:** the near-light rays' cost (scenes with many local lights: Showcase, Outpost), the quarry A/B of the eviction (needs a 14 GiB window), the bound and restart budgets' cost (U-SPECK2).
+7. **Emitter link for MIS:** bulb glints on rough metal are dropped by the lone-stratum bound (U-SPECK2); linking a light to its visible emitter would let both be sampled without the bound.
