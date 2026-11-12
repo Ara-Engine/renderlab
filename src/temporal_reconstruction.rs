@@ -562,7 +562,13 @@ pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
                 1,
             )
             .replacen(loop_seam, "for(var j=first;j<first+count;j+=1u)", 1);
-        format!("{probe}\n{SUN_HISTORY_SOURCE}")
+        let tolerance = sun_history_tolerance();
+        let history = SUN_HISTORY_SOURCE.replacen(
+            "(d<=2u || d>=4093u)",
+            &format!("(d<={tolerance}u || d>={}u)", 4096 - tolerance),
+            1,
+        );
+        format!("{probe}\n{history}")
     } else {
         HELD_SUN.to_owned()
     };
@@ -578,7 +584,23 @@ const SUN_HISTORY_SOURCE: &str = include_str!("../shaders/primary_sun_history.wg
 /// 5.37 ms in all three rounds of the clock-held pin lease (perf16), Outpost RT 13.78 -> 14.33.
 pub(crate) fn sun_history() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_SUN_HISTORY").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| {
+        std::env::var("RENDERLAB_SUN_HISTORY").is_ok_and(|v| v == "1" || v == "reuse0")
+    })
+}
+/// Measurement (U-FIXED, Showcase's cost): `RENDERLAB_SUN_HISTORY=reuse0` compiles and stores
+/// the history but never reuses it, so every receiver traces the budget through its code.
+fn sun_history_reuse() -> bool {
+    std::env::var("RENDERLAB_SUN_HISTORY").map_or(true, |v| v != "reuse0")
+}
+/// Measurement: `RENDERLAB_SUN_HISTORY_TOL=N` accepts a reprojected history within N depth
+/// codes (1/256 octave each) instead of 2.
+fn sun_history_tolerance() -> u32 {
+    std::env::var("RENDERLAB_SUN_HISTORY_TOL")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| (1..=512).contains(n))
+        .unwrap_or(2)
 }
 /// U-FIXED: `trace_source_held`'s module plus `primary_vb_sun`, the RT sun traced from the
 /// visibility buffer's receivers with the same budget, rotation and stops.
@@ -1434,7 +1456,8 @@ impl Planner {
             && (turn == 0.0 || turn <= 4.0 * step)
             && !listed
             && suns.len() == 1
-            && sun_history();
+            && sun_history()
+            && sun_history_reuse();
         let mut bytes = Vec::with_capacity(HELD_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
         for w in [
