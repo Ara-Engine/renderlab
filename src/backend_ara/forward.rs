@@ -1028,7 +1028,8 @@ impl Frames {
     }
     /// Packs `layer` (0 opaque, 1 front) of the last ids into the sequence's RGBA8 image,
     /// bit-exact little-endian (R = bits 0-7 ... A = 24-31), and returns it, left in
-    /// `CopySource` for a presenter; waits for the GPU.
+    /// `CopySource` for a presenter. Returns once the pack is submitted: work that reads the
+    /// image on this device's queue runs after it.
     pub fn pack_ids(
         &mut self,
         gpu: &mut GpuDevice,
@@ -1073,8 +1074,8 @@ impl Frames {
             &[(Resource::Image(targets.packed.image), Access::CopySource)],
         )?;
         let record = bindings.release();
-        let point = gpu.submit(rec.finish(), &[])?;
-        gpu.resolve(point)?;
+        gpu.submit(rec.finish(), &[])?;
+        // Reclaimed once the submission completes.
         record.retire(gpu)?;
         uniform.retire(gpu)?;
         targets.packed_written = true;
