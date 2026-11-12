@@ -3411,7 +3411,7 @@ impl Renderer {
                     .map(|(arrays, materials)| gi_cache::ShadeGroups {
                         arrays,
                         materials,
-                        lighting: self.lighting.bind(),
+                        lighting: self.lighting.cell_bind(),
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
