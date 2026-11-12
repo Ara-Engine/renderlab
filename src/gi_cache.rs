@@ -342,6 +342,13 @@ pub struct IndirectSettings {
     /// pixel there would read. 0 gives every hit the pixels' level, as before: those cells
     /// were most of the table.
     pub hit_cone_cells: f32,
+    /// When more cells wait for a gather than a frame's budget (`gather_cells`), the cells
+    /// pixels read this frame rotate over the budget alone and the rest share a quarter of it
+    /// more; and the rotation's period is the smallest that fits the budget, not the next
+    /// power of two (U-SPECK, docs/speck.md). Off, every queued cell waits its turn alike, as
+    /// before: after a start or a cut the picture then shows cells without bounce light beside
+    /// gathered ones for as long as the whole queue takes.
+    pub gather_pixels_first: bool,
 }
 impl Default for IndirectSettings {
     /// On by default since G2b (Islam's overnight push, 2026-11-08; docs/m7-g2b.md): G2's
@@ -396,6 +403,7 @@ impl Default for IndirectSettings {
             // same at 0, 16, 8 and 4; the spinning crate moves toward the reference as the
             // cells grow, most at 4; and the field walk creates half the cells.
             hit_cone_cells: 4.0,
+            gather_pixels_first: true,
         }
     }
 }
@@ -1046,6 +1054,12 @@ impl Planner {
             0.0
         };
         header[27] = spread.to_bits();
+        // The most cells pixels read in a frame: the view's pixels over a cell's.
+        header[28] = if s.gather_pixels_first {
+            ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
+        } else {
+            0
+        };
         Begun {
             header,
             since_clear,

@@ -1742,8 +1742,13 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
             if l==base { cause=GI_W_GATHER_ABSENT; orphan=tertiary; }
             continue;
         }
-        // A gather keeps the cells it reads alive, like a pixel (the race is benign).
-        gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);
+        // A gather keeps the cells it reads alive, as a pixel does, with last frame's stamp:
+        // this frame's stays the probe's, which says a pixel read the cell (gi_gather_now).
+        // Every gather that stamps a cell stores the same value, and none replaces the
+        // probe's, so the stamps do not depend on thread order.
+        if gi_table[gi_cold(slot)+GI_C_SEEN]+1u<gi_word(GI_H_FRAME) {
+            gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME)-1u;
+        }
         let o=gi_outgoing[slot];
         if o.w>0.0 {
             let settled=select(GI_HIT_CHANGING,GI_HIT_FINAL,o.w>=1.0);
@@ -1784,8 +1789,31 @@ fn gi_gather_period(count:u32) -> u32 {
     let cap=gi_word(GI_H_GATHER_CELLS);
     var p=1u;
     if cap==0u { return p; }
+    // Pixels first (below) uses the whole budget: the smallest period that fits, not the next
+    // power of two, which left up to half of it unused.
+    if gi_word(GI_H_PIXEL_CELLS)!=0u { return clamp((count+cap-1u)/cap,1u,GI_GATHER_PERIOD_MAX); }
     while p<GI_GATHER_PERIOD_MAX && count>cap*p { p*=2u; }
     return p;
+}
+// Whether a queued cell is gathered this frame, `period` being gi_gather_period of the queue.
+// The rotation serves slot % period == frame % period, so with more cells queued than a frame
+// gathers a cell waits up to `period` frames, whoever needs it. Most of a long queue is cells
+// gathers made for their hits; the cells pixels read then waited as long as those for the
+// bounce light the picture shows, dark beside their gathered neighbours for a second after a
+// start or a cut and longer on a slow device (docs/speck.md). So the cells a pixel read this
+// frame (the probe's stamp) rotate over the budget alone, at most GI_H_PIXEL_CELLS of them,
+// and the rest share a quarter of it more: a frame gathers at most 1.25 budgets. A fixed rule
+// on the cell's own state; no cell is ranked against another (W2).
+fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
+    let frame=gi_word(GI_H_FRAME);
+    let pixels=gi_word(GI_H_PIXEL_CELLS);
+    let cap=gi_word(GI_H_GATHER_CELLS);
+    if pixels==0u || cap==0u || period<=1u { return slot%period==frame%period; }
+    let seen=min(period,max((min(pixels,count)+cap-1u)/cap,1u));
+    if seen==period { return slot%period==frame%period; }
+    if gi_table[gi_cold(slot)+GI_C_SEEN]==frame { return slot%seen==frame%seen; }
+    let rest=clamp((4u*count+cap-1u)/cap,1u,GI_GATHER_PERIOD_MAX);
+    return slot%rest==frame%rest;
 }
 // The hits near a local light are gathered by rays aimed around it (gi_near.wgsl,
 // docs/speck.md): gi_near_owner names the light a hit belongs to, gi_near_gather traces them.
@@ -1806,7 +1834,7 @@ fn gi_gather_period(count:u32) -> u32 {
         let state=gi_table[cold+GI_C_STATE];
         let queued=gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u
             && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
-        let live=queued && slot%period==phase;
+        let live=queued && gi_gather_now(slot,period,count);
         // Every lane reads the same slot, so `live` is the workgroup's: broadcast as a uniform
         // value (the load carries the barrier that ordered lane 0's resets), so a cell outside
         // this frame's slot group, or not queued, skips the sums and their reduction, which

@@ -33,7 +33,7 @@ var<workgroup> gi_drain_base:u32;
             let state=gi_table[cold+GI_C_STATE];
             let queued=gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u
                 && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
-            if queued && slot%period==phase {
+            if queued && gi_gather_now(slot,period,count) {
                 // This frame's slot group: gathered below by the whole workgroup.
                 gi_wg_list[atomicAdd(&gi_wg_listed,1u)]=slot;
             } else if queued {
