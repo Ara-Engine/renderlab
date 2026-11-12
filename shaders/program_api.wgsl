@@ -59,6 +59,13 @@ fn light_count() -> u32 { return rl_light_total(); }
 
 // The receiver's i-th light: the fixed light loop's direction and attenuation arithmetic.
 fn light_sample(i:u32, input:SurfaceInput) -> LightSample {
+    let s=light_sample_untinted(i,input);
+    return LightSample(s.index,s.direction,s.attenuation,s.intensity*light_transmission(s,input));
+}
+// `light_sample` before the light passes through transparent panes: its intensity is the
+// light's own. A program that tests visibility first multiplies `light_transmission` in
+// only where the light arrives, as the standard program does.
+fn light_sample_untinted(i:u32, input:SurfaceInput) -> LightSample {
     let index=rl_light_index(i);
     let light=lights[index];
     var l=-light.travel_outer.xyz;
@@ -82,9 +89,17 @@ fn light_sample(i:u32, input:SurfaceInput) -> LightSample {
             attenuation*=cone*cone;
         }
     }
-    // TP2: coloured transparent shadows filter sun incidence on both opaque paths.
-    let transmission=select(vec3<f32>(1.0),transparent_sun_transmission(input.world,l),light.kind.x==0u && light.kind.z!=0u);
-    return LightSample(index,l,attenuation,light.rgb_inner.xyz*transmission);
+    return LightSample(index,l,attenuation,light.rgb_inner.xyz);
+}
+// TP2: the share of `s`'s light the transparent panes between it and the receiver pass:
+// coloured shadows on the sun, on both opaque paths; 1 for every other light. Only the
+// sun's lookup is evaluated (`select` would evaluate it for every light).
+fn light_transmission(s:LightSample, input:SurfaceInput) -> vec3<f32> {
+    let light=lights[s.index];
+    if light.kind.x==0u && light.kind.z!=0u {
+        return transparent_sun_transmission(input.world,s.direction);
+    }
+    return vec3<f32>(1.0);
 }
 
 // World-space visibility of the sampled light from this receiver, 1 when unshadowed:
