@@ -327,6 +327,12 @@ fn gi_viewed_side(n:vec3<f32>) -> vec3<f32> {
 fn indirect_irradiance(input:SurfaceInput, n:vec3<f32>) -> vec3<f32> {
     if gi_word(GI_H_ENABLED)==0u || !gi_rx_valid { return gi_open_irradiance(n); }
     let m=gi_viewed_side(n);
-    return gi_rx_sky_irradiance(m)+gi_rx_bounce_irradiance(m);
+    // gi_rx_sky_irradiance(m) + gi_rx_bounce_irradiance(m), with the one basis both evaluate.
+    gi_sh_basis(m);
+    var sky=vec3<f32>(0.0);
+    for(var i=0u;i<9u;i+=1u) { sky+=gi_band_weight(i)*gi_y[i]*gi_rx_sky[i]; }
+    var bounce=vec3<f32>(0.0);
+    for(var i=0u;i<4u;i+=1u) { bounce+=gi_band_weight(i)*gi_y[i]*gi_rx_bounce[i]; }
+    return gi_sky_scale(max(sky,vec3<f32>(0.0)))+max(bounce,vec3<f32>(0.0));
 }
 // ---- end of the indirect-light inputs ----
