@@ -162,12 +162,16 @@ pub struct FrameTimes {
     pub record: std::time::Duration,
     /// Of `record`: the scene's mesh buffers and acceleration structures.
     pub geometry: std::time::Duration,
-    /// From submission until the GPU has finished the frame.
+    /// From submission until the GPU has finished the frame. On a sequence
+    /// `without_images`: the device span of the newest frame the GPU has finished since
+    /// the last report (this frame when it reads anything back, else an earlier one, and
+    /// zero when none finished).
     pub gpu: std::time::Duration,
     /// Reading the images back and releasing the frame's resources.
     pub finish: std::time::Duration,
-    /// On a sequence `without_images`: the GPU's own time in each labelled pass, in
-    /// milliseconds from the device's timestamps, summed by label in first-run order.
+    /// On a sequence `without_images`: the GPU's own time in each labelled pass of the
+    /// frame `gpu` describes, in milliseconds from the device's timestamps, summed by
+    /// label in first-run order.
     /// What `gpu` holds beyond their sum is unlabelled: acceleration-structure builds,
     /// uploads, copies and fills, and the gaps between passes.
     pub passes: Vec<(String, f64)>,
@@ -870,6 +874,10 @@ struct Kept {
     /// presenter may still read the other; `shown` is the last frame's.
     outputs: [Option<Texture>; 2],
     shown: Option<usize>,
+    /// Frames submitted without waiting for the GPU, oldest first (`settle`).
+    in_flight: std::collections::VecDeque<ara_gpu::GpuCompletion>,
+    /// The newest finished frame's device span and passes, until a frame reports them.
+    done: Option<(std::time::Duration, Vec<(String, f64)>)>,
 }
 /// A sequence of frames: what each hands to the next, and what stays on the GPU (the
 /// radiance cache, the reconstruction's history, named meshes with their bottom-level
@@ -888,6 +896,9 @@ impl Frames {
     /// A sequence whose frames are rendered and not read back: for timing, where the
     /// copies to the CPU are not the frame's work. Tables and history asked for by
     /// `Indirect::read_table` and `Reconstruct::read_history` still come back.
+    /// A frame that reads nothing back returns without waiting for the GPU: one
+    /// earlier frame may still run while the next records, and its times arrive with
+    /// a later frame (`FrameTimes::gpu`).
     pub fn without_images() -> Self {
         Self {
             blind: true,
@@ -906,8 +917,9 @@ impl Frames {
         }
         self.carried = Carried::default();
     }
-    /// Releases what the sequence kept on the GPU.
-    pub fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
+    /// Releases what the sequence kept on the GPU, after its frames in flight finish.
+    pub fn retire(mut self, gpu: &mut GpuDevice) -> Result<()> {
+        settle(gpu, &mut self.kept.in_flight, &mut self.kept.done, 0)?;
         if let Some(cache) = self.kept.gi {
             cache.retire(gpu)?;
         }
@@ -1118,6 +1130,43 @@ impl Frames {
     }
 }
 
+/// Consumes the frames in `in_flight` the GPU has finished, oldest first, waiting for
+/// the oldest while more than `keep` remain, and leaves the newest finished frame's
+/// device span and passes (summed by label, in first-run order) in `done`.
+fn settle(
+    gpu: &mut GpuDevice,
+    in_flight: &mut std::collections::VecDeque<ara_gpu::GpuCompletion>,
+    done: &mut Option<(std::time::Duration, Vec<(String, f64)>)>,
+    keep: usize,
+) -> Result<()> {
+    loop {
+        let waiting = in_flight.len() > keep;
+        let Some(front) = in_flight.front_mut() else {
+            return Ok(());
+        };
+        let finished = if waiting {
+            Some(gpu.wait_completion(front)?)
+        } else {
+            gpu.poll_completion(front)?
+        };
+        let Some(finished) = finished else {
+            return Ok(());
+        };
+        let span = front
+            .timing_window()
+            .map_or(0., ara_gpu::commands::TimestampSpan::milliseconds);
+        let mut passes: Vec<(String, f64)> = Vec::new();
+        for pass in finished {
+            match passes.iter_mut().find(|(label, _)| *label == pass.pass) {
+                Some((_, total)) => *total += pass.milliseconds,
+                None => passes.push((pass.pass, pass.milliseconds)),
+            }
+        }
+        *done = Some((std::time::Duration::from_secs_f64(span / 1000.), passes));
+        in_flight.pop_front();
+    }
+}
+
 /// A pane's world bounds, least and greatest corner.
 fn pane_bounds(object: &ForwardObject<'_>) -> Result<(crate::Vec3, crate::Vec3)> {
     let local = crate::visibility::Aabb::from_positions(object.vertices.iter().map(|v| v.position))
@@ -1179,7 +1228,11 @@ fn frame(
         targets: _,
         outputs,
         shown: shown_output,
+        in_flight,
+        done,
     } = kept;
+    // At most one earlier frame stays in flight while this one records.
+    settle(gpu, in_flight, done, 1)?;
     let started = std::time::Instant::now();
     let mut times = FrameTimes::default();
     ensure!(
@@ -4033,26 +4086,32 @@ fn frame(
     let submitted = std::time::Instant::now();
     if blind {
         // A timed frame: one completion scope around its submission returns every
-        // pass's device timestamps when it is done.
+        // pass's device timestamps when it is done. A frame that reads nothing back
+        // leaves it in flight and returns: the next frame records while it runs, and
+        // the GPU times reported are the newest finished frame's.
+        let reads_back = read.is_some()
+            || samples_read.is_some()
+            || reads.iter().any(Option::is_some)
+            || table_read.is_some()
+            || outgoing_read.is_some()
+            || raw_read.is_some()
+            || history_read.is_some()
+            || probe_read.is_some();
         gpu.begin_deferred_completion_on_current_queue()?;
         let submission = gpu.submit(rec.finish(), &[]);
-        let mut completion = gpu.end_deferred_completion()?;
+        in_flight.push_back(gpu.end_deferred_completion()?);
         submission?;
-        for pass in gpu.wait_completion(&mut completion)? {
-            match times
-                .passes
-                .iter_mut()
-                .find(|(label, _)| *label == pass.pass)
-            {
-                Some((_, total)) => *total += pass.milliseconds,
-                None => times.passes.push((pass.pass, pass.milliseconds)),
-            }
+        settle(gpu, in_flight, done, if reads_back { 0 } else { 2 })?;
+        if let Some((span, passes)) = done.take() {
+            times.gpu = span;
+            times.passes = passes;
         }
     } else {
+        settle(gpu, in_flight, done, 0)?;
         let point = gpu.submit(rec.finish(), &[])?;
         gpu.wait(point)?;
+        times.gpu = submitted.elapsed();
     }
-    times.gpu = submitted.elapsed();
     let finishing = std::time::Instant::now();
     let mut images = ForwardImages {
         times,
