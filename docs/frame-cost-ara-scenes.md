@@ -34,7 +34,8 @@ The floor adds to about 2 ms, not 1: a visibility buffer, a reconstruction and p
 | pass | today RT / non-RT | floor target | full target | mechanism |
 |---|---|---|---|---|
 | visibility (RT: camera and sun rays) | 12.7 / 0.95 | 1.0 / 1.0 | 1.5 / 1.0 | RT: why the held sun budget doesn't engage (a sun moving with the day cycle is the suspect: `relight_parts` capture); raster primaries; foliage LOD and size culls (Ara #137) |
-| shading | 17.0 / 24-34 | 2.0 | 3.5 | 21 hard rays per pixel at most today; `cast_shadows` off for the markers (Ara's flag, RL#51); light importance |
+| shading without reflections (base, camera GI lookup, 22 lights) | at most 8.4 / 5.5 (shading at cutoff 0.25, which still traces below 0.25) | 2.0 | 2.8 | 21 hard rays per pixel at most today; `cast_shadows` off for the markers (Ara's flag, RL#51); light importance; the GI lookup's share as on Showcase |
+| reflections | about 8.6 / about 26 (shading 17.0 -> 8.4 RT and 31.3 -> 5.5 non-RT from cutoff 0.5 to 0.25) | 0 (off) | 0.7 / 0.7 | trace where it can show (below); steps 1 and 3 for the pixels that still trace. The picture barely depends on it: at cutoff 0.25, full-frame PSNR 51.9 dB, crops 54-60, ground crop identical, no popping |
 | sun shadow (non-RT) | in visibility / 5.1 | 1.0 | 1.0 | foliage as non-casters or culled (object flags), page pool |
 | GI (all stages) | 9.1 / 23-54 | 0 (off) | 2.0 | the relight cause (every cell requeued every frame while moving), then the gather budget |
 | atmosphere | 1.9 / 3.9-13.6 | 0.5 | 0.5 | name the part (`cpu.wait` suspected: CPU GI preparation with 1,108 instances) |
@@ -42,6 +43,23 @@ The floor adds to about 2 ms, not 1: a visibility buffer, a reconstruction and p
 | transparency | 1.5 / 0.4 | 0.3 | 0.3 | |
 | skinning, post | 0.4 / 0.2 | 0.3 | 0.3 | |
 | **frame** | **44.4 / 69-82** | **about 6-7** | **about 9-10** | |
+
+**Reflections: the cost isn't where the picture is.** The roughness sweeps on the RTX (Ara #138, ara-integration perf/table-lease6sc.md and table-lease6op.md, moving, cutoff 0.5 / 0.35 / 0.25):
+
+| | 0.5 | 0.35 | 0.25 | picture at 0.35 |
+|---|---|---|---|---|
+| Showcase RT frame (shading) | 30.4 (22.5) | 20.3 (10.4) | 19.0 | copper ball loses its ground reflection and rim, marble its band: visibly worse |
+| Showcase non-RT frame | 35.1 | 27.4 | 20.0 | same |
+| Outpost RT frame (shading) | 48.2 (17.0) | 47.0 | 36.3 (8.4) | unchanged (PSNR 52.3, crops 54-60) |
+| Outpost non-RT frame (shading) | 74.0 (31.3) | 48.4 (9.7) | 43.6 (5.5) | unchanged |
+
+Outpost's rough-glossy ground and props pay the full strata (about 22 ms of non-RT shading for the 0.35-0.5 band, 9 ms of RT shading for 0.25-0.35) for reflections that don't show, while Showcase's two balls need the same band. So a roughness number is the wrong switch. Each pixel decides whether its traced result can differ visibly from the untraced estimate, and traces only if it can. This sits on top of steps 1 and 3.
+
+1. **A bound before any ray.** The visible change a trace can make is the lobe's reflectance (F0 and the DFG term, which the program already computes) times how far the traced incident light can sit from the estimate. That second factor is bounded from what the receiver's GI cell holds (its bounce light, its sky visibility, the brightest outgoing cell value nearby) and the environment's maximum in the lobe. Where reflectance times that bound stays under half an output code after exposure and tone mapping, the pixel doesn't trace. A rough dielectric (F0 0.04) under even light falls out here. Copper (F0 about 0.6-0.9) next to dark ground doesn't. Cost: a few loads in the shading pass, no ray.
+2. **A measured difference for pixels that pass the bound.** Step 3's accumulator keeps each traced pixel's traced-minus-estimate in output codes. A pixel whose difference has stayed under one code for 8 frames drops to one ray every 8 frames, and its history holds the traced value. It comes back to the full rate on disocclusion, a cut, a light, environment or GI-key change (the cache's `relight_parts`), or as soon as one sparse ray shows a difference over one code. Being wrong costs at most one code until the next sparse ray, under 8 frames.
+3. **The resolve stays per hit:** a cone wider than the hit cell reads the GI cache's cell (`gi_hit_radiance`), narrower cones shade the hit (`reflection_hits`), as given to U-RTVIS on 2026-11-12.
+
+The threshold is in output codes, so a skipped pixel is under one code of what a full trace gives, measured against the trace itself, not against a roughness. The gate is still crops against the path-traced reference, still and moving. Expected result: Outpost reflections go from about 26 ms (non-RT) and 8.6 ms (RT) to under 1 ms, because most of its band falls out at test 1 or 2. Showcase keeps its traced balls and lands on step 3's about 2 ms. Owner: U-RTVIS (reflections*, gi_cache.wgsl). The bound gets the reflectance from the program, through the lobe the program already declares. `reflection_lobe`'s `weight` (today 1.0 in standard.wgsl, and greater than 0 to request rays) becomes the lobe's reflectance, so the standard program returns the luminance of `f0*ab.x+ab.y`. The engine still knows nothing about any one lighting model, and a program that wants rays everywhere declares a weight of 1.
 
 **Owners:** reflections (U-RTVIS: strata, trace, accumulator; Mac: hit shading), the camera GI lookup (Mac), local-light shadows and `cast_shadows` (Mac, RL#51), the relight cause and the held-budget question on Outpost (root, through the integration and bridge threads; the fix lands with U-RTVIS), object flags and foliage culls (U-RTVIS after reflections; Ara #137 for LODs), the unexplained per-pass costs (visibility on RT, atmosphere, TR1, transparency, skinning): root prices them once the features-off capture lands.
 
