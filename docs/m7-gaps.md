@@ -1084,6 +1084,7 @@ Merged: the near-light rays (lamp blobs), the pressure eviction (the Outpost cel
 4. **A 7-code static bounce gap on the hero beside the gold sphere** (frozen scene). Not investigated; guess: bounce off shiny metal.
 5. **Relight scope:** a flickering light re-queues an eighth of every cell each frame, whatever it reaches.
 6. **Unmeasured:** the near-light rays' cost (scenes with many local lights: Showcase, Outpost), the quarry A/B of the eviction (needs a 14 GiB window), the bound and restart budgets' cost (U-SPECK2).
+8. **a1, cell mottle on flat surfaces:** about a code of cell-sized mottle remains on flat walls and ground under the sky (docs/speck.md section 6); not worked further.
 7. **Emitter link for MIS:** bulb glints on rough metal are dropped by the lone-stratum bound (U-SPECK2); linking a light to its visible emitter would let both be sampled without the bound.
 
 ## Outpost frame cost by pass, and the order of attack (root, 2026-11-12)
