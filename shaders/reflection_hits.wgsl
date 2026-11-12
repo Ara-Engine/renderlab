@@ -16,6 +16,16 @@ const RL_HITS_ROW=65535u;
 // mixed-program frame runs each program's module over all of H, and each keeps the hits on
 // its own draws (program::compose_hits with lists replaces this function).
 fn rl_hits_mine(placement:u32)->bool { return true; }
+// The hit's distance from `origin`: H's records carry none (rl_trace keeps it in D, which this
+// stage does not bind), so it comes from the record's barycentric point.
+fn rl_hits_distance(record:vec4<u32>,origin:vec3<f32>)->f32 {
+    let hit=primary_decode(record);
+    let ta=primary_input(hit.batch,hit.ia,hit.placement);
+    let tb=primary_input(hit.batch,hit.ib,hit.placement);
+    let tc=primary_input(hit.batch,hit.ic,hit.placement);
+    let w=vec3<f32>(1.0-hit.bary.x-hit.bary.y,hit.bary);
+    return distance(world_position(ta.position*w.x+tb.position*w.y+tc.position*w.z,hit.placement).xyz,origin);
+}
 
 @compute @workgroup_size(64) fn reflection_hits(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     // The dispatch is min(g, ROW) x ceil(g / ROW) groups of 64; the surplus lanes return.
@@ -38,7 +48,8 @@ fn rl_hits_mine(placement:u32)->bool { return true; }
     let alpha=unpack2x16float(a.z>>16u).x;
     // A rough lobe's hit whose cone covers the radiance cache's cell there takes the cell's
     // outgoing radiance (RENDERLAB_RL_CACHE_HITS, reflection_cache_hits.wgsl), as inline hits do.
-    let cached=rl_cache_hit(record,origin,cone.x,cone.y,sqrt(alpha));
+    let t=rl_hits_distance(record,origin);
+    let cached=rl_cache_hit(record,origin,d,t,cone.x+cone.y*t,sqrt(alpha));
     if cached.w>0.0 {
         textureStore(rl_hit_samples_out,at_slot,vec4<f32>(rl_finite(expose(cached.rgb)),1.0));
         return;
