@@ -91,6 +91,9 @@ const GI_H_CLAIM_CELLS:u32=22u;
 // tent's edge weight (f32; corners take its square).
 const GI_H_FILTER:u32=24u;
 const GI_H_FILTER_EDGE:u32=25u;
+// Nonzero: a full bucket gives up its least recently seen cell to a miss (gi_claim_miss;
+// src/gi_cache.rs IndirectSettings::pressure_eviction).
+const GI_H_PRESSURE:u32=26u;
 const GI_FILTER_SKY:u32=1u;
 const GI_FILTER_BOUNCE:u32=2u;
 // Bit 2: contrast refine (gi_filter_cell), with the sky filter.

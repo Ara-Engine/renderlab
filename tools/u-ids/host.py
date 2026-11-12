@@ -218,8 +218,8 @@ def build(args):
     code, stopped = 1, False
     try:
         with (WORK / "build.log").open("w") as log:
-            code, stopped = run_guarded(command, cwd=REPO, stdout=log, stderr=sp.STDOUT,
-                          env=os.environ | {"CARGO_TARGET_DIR": str(TARGET), "CARGO_BUILD_JOBS": "8", "TMP": str(WORK / "tmp"), "TEMP": str(WORK / "tmp")})
+            code, stopped = run_guarded(command, cwd=os.environ.get("U_IDS_TREE", str(REPO)), stdout=log, stderr=sp.STDOUT,
+                          env=os.environ | {"CARGO_TARGET_DIR": os.environ.get("U_IDS_TARGET", str(TARGET)), "CARGO_BUILD_JOBS": "8", "TMP": str(WORK / "tmp"), "TEMP": str(WORK / "tmp")})
     finally:
         if json.loads((BUILD_SLOT / "owner.json").read_text())["token"] == token:
             (BUILD_SLOT / "owner.json").unlink()

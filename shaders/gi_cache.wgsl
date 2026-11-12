@@ -142,6 +142,8 @@ const GI_W_CLAIM_DEFERRED:u32=43u;
 // of them seen within the last eight frames: cells the view may still be reading.
 const GI_W_EVICTED:u32=44u;
 const GI_W_EVICTED_RECENT:u32=45u;
+// Pixels' misses that found no slot (GI_W_FULL counts every band's), once per claim round.
+const GI_W_FULL_PIXEL:u32=46u;
 // Ray item capacity, a multiple of 32 (src/gi_cache.rs RAY_ITEMS).
 const GI_RAY_ITEMS:u32=2097152u;
 // Per-slot claim words, after the counters (src/gi_cache.rs COUNTER_WORDS).
@@ -660,13 +662,15 @@ fn gi_claim_miss(index:u32) {
     // two frames, a gather's hit cell only one unseen for much longer, so gathers cannot push
     // out cells the view still reads. The seen stamps are complete before the claim rounds
     // (the probe and the gathers write them), so the choice does not depend on thread order.
-    if oldest!=0xffffffffu && oldest_age>=gi_pressure_age(gi_miss_band(base)) {
+    let band=gi_miss_band(base);
+    if gi_word(GI_H_PRESSURE)!=0u && oldest!=0xffffffffu && oldest_age>=gi_pressure_age(band) {
         atomicStore(&gi_work[base+5u],oldest);
         atomicMax(&gi_work[GI_W_CLAIMS+oldest],gi_miss_claim(base));
         return;
     }
     atomicStore(&gi_work[base+5u],GI_UNCLAIMED);
     atomicAdd(&gi_work[GI_W_FULL],1u);
+    if band>=GI_BAND_PIXEL { atomicAdd(&gi_work[GI_W_FULL_PIXEL],1u); }
 }
 // Frames a cell must have gone unseen before a miss of `band` may take its slot in a full
 // bucket (gi_claim_miss).

@@ -106,8 +106,13 @@ pub trait Scene {
         transform: Mat4,
     ) -> Result<ObjectId, Error>;
     fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error>;
-    /// The embedder's ids for an object's primitive ranges `(first, count, id)`.
-    fn set_object_ids(&mut self, object: ObjectId, ranges: &[(u32, u32, u32)]) -> Result<(), Error>;
+    /// The embedder's ids for an object's primitive ranges `(first, count, id)`. A layer
+    /// without an id output (the ara-gpu backend until it ports one) keeps the default,
+    /// which accepts and ignores them.
+    fn set_object_ids(&mut self, object: ObjectId, ranges: &[(u32, u32, u32)]) -> Result<(), Error> {
+        let _ = (object, ranges);
+        Ok(())
+    }
     fn set_decals(&mut self, decals: &[Decal]) -> Result<(), Error>;
 
     fn set_sun(&mut self, sun: Option<Sun>) -> Result<(), Error>;
@@ -129,9 +134,16 @@ pub trait Scene {
     fn capture_view(&mut self, view: ViewId) -> Result<Image, Error>;
     /// Queues a readback of a rectangle of the view's last frame's ids; the result arrives
     /// in `poll` (`Events::ids`).
-    fn request_ids(&mut self, view: ViewId, rect: IdRect) -> Result<IdRequest, Error>;
-    /// Nonblocking progress: completed frames, GPU timings and finished id readbacks.
-    fn poll(&mut self) -> Result<Events, Error>;
+    /// A layer without an id output keeps the default, which refuses the request.
+    fn request_ids(&mut self, view: ViewId, rect: IdRect) -> Result<IdRequest, Error> {
+        let _ = (view, rect);
+        Err(Error::InvalidInput("object ids are not implemented on this GPU layer"))
+    }
+    /// Nonblocking progress: completed frames, GPU timings and finished id readbacks. The
+    /// default reports nothing.
+    fn poll(&mut self) -> Result<Events, Error> {
+        Ok(Events::default())
+    }
 }
 
 impl Scene for Engine {

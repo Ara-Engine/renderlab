@@ -329,6 +329,13 @@ pub struct IndirectSettings {
     /// third of the cell's distance to it are left to these rays, which sample that region
     /// where it is bright; the two sets estimate the same integral. 0 turns it off.
     pub near_light_rays: u32,
+    /// A miss whose bucket has no free slot takes the bucket's least recently seen cell
+    /// (U-SPECK, docs/speck.md): a pixel's cell one unseen for two frames, a gather's hit cell
+    /// one unseen for 16 (or 32) frames. Without it a table that fills before `evict_frames`
+    /// frees anything, as a moving camera in a large scene fills it, leaves new cells
+    /// uncreated and their pixels on lone or coarser cells: a blocky mosaic. Off only to
+    /// measure.
+    pub pressure_eviction: bool,
 }
 impl Default for IndirectSettings {
     /// On by default since G2b (Islam's overnight push, 2026-11-08; docs/m7-g2b.md): G2's
@@ -378,6 +385,7 @@ impl Default for IndirectSettings {
             // The CPU replay (tools/speck/replay.py): 16 keep the mean within 1 % and remove
             // the blobs; 8 leave the lintel's bounce 8 % high.
             near_light_rays: 16,
+            pressure_eviction: true,
         }
     }
 }
@@ -529,6 +537,8 @@ pub struct IndirectCounters {
     /// docs/speck.md), and those of them seen within the last eight frames.
     pub evicted: u32,
     pub evicted_recent: u32,
+    /// Pixels' misses that found no slot, once per claim round (`full` counts every band's).
+    pub full_pixel: u32,
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -1015,6 +1025,7 @@ impl Planner {
         };
         header[24] = filter;
         header[25] = s.filter_edge.to_bits();
+        header[26] = u32::from(s.pressure_eviction);
         Begun {
             header,
             since_clear,
@@ -2058,6 +2069,7 @@ impl Renderer {
             claim_deferred: w[43],
             evicted: w[44],
             evicted_recent: w[45],
+            full_pixel: w[46],
         }))
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
