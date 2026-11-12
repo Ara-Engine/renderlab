@@ -177,6 +177,9 @@ fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2
     if material.double_sided==0u && !source_front { discard; }
     let depth=dot(input.world-tp.eye.xyz,tp.forward.xyz);
     if depth>textureLoad(tp_depth,pixel,0).x { discard; }
+    // LC1: walk this fragment's light cluster, as the opaque entries do; unprepared, every
+    // light in the scene is walked.
+    rl_lights_prepare(input.world);
     rl_indirect_prepare(surface_input);
     let lit=rl_finite(shade(surface_output,surface_input));
     let behind=tp_behind(input.world,refraction_normal,geometric,pixel,depth,transparent_ior(material));

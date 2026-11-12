@@ -31,6 +31,22 @@ fn validate(label: &str, source: &str) {
     .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
 }
 
+/// The glass entry walks its fragment's light cluster, as the opaque entries do: it
+/// prepares the cluster before it shades, on both heads.
+#[test]
+fn glass_prepares_its_light_cluster_before_shading() {
+    let hardware = crate::hardware_shadows::shader_source(SOURCE, SampleCount::One).unwrap();
+    for (head, rt) in [(SOURCE.to_owned(), false), (hardware, true)] {
+        let source = glass_source(&head, rt, crate::STANDARD_PROGRAM, false);
+        let entry = &source[source.find("@fragment fn fs_transparent(").unwrap()..];
+        let prepare = entry.find("rl_lights_prepare(input.world);").unwrap();
+        assert!(
+            prepare < entry.find("shade(surface_output").unwrap(),
+            "rt {rt}"
+        );
+    }
+}
+
 #[test]
 fn tp1_modules_validate() {
     let toon = include_str!("../shaders/programs/toon.wgsl");
