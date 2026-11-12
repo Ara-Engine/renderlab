@@ -81,8 +81,16 @@ impl ReflectionSettings {
     /// (0 when disabled, so nothing is traced), y where it starts to fall, z the lone-stratum
     /// bound (0: none), w the strata multiple of restarted receivers.
     pub(crate) fn frame_words(&self) -> [f32; 4] {
+        // U-RTVIS measurement switch: `RENDERLAB_REFLECTION_ROUGH` replaces max_roughness.
+        static ROUGH: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+        let rough = *ROUGH.get_or_init(|| {
+            std::env::var("RENDERLAB_REFLECTION_ROUGH")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .filter(|v: &f32| (0.0..=1.0).contains(v))
+        });
         let end = if self.enabled {
-            self.max_roughness
+            rough.unwrap_or(self.max_roughness)
         } else {
             0.0
         };

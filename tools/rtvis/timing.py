@@ -235,6 +235,25 @@ PLANS["refill4move"] = [
     (f"p-{name}-move-refill{v}", extra + ["--frames", "36", "--every", "1"], REFILL(v))
     for name, extra in REFILL4_CLIPS for v in ("1", "0")
 ]
+# Reflections (2026-11-12): where their cost goes by band, the game flight and night lanterns.
+REFL_VARIANTS = [("base", {}), ("strata8", {"RENDERLAB_RL_HIT": "strata=8"}), ("strata4", {"RENDERLAB_RL_HIT": "strata=4"}),
+                 ("rough03", {"RENDERLAB_REFLECTION_ROUGH": "0.3"}), ("rough01", {"RENDERLAB_REFLECTION_ROUGH": "0.1"}),
+                 ("off", {"RENDERLAB_ABLATE": "reflections"})]
+REFL_CLIPS = [("game", ["--fox", FOX]), ("night", ["--fox", FOX, "--night-lanterns"])]
+PLANS["refl"] = [
+    (f"x-{path}-{name}-{v}", ["--path", path, *extra, "--frames", "60"], env)
+    for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v, env in REFL_VARIANTS
+]
+# Half the glossy strata a frame (RENDERLAB_RL_HALF): timing, and the game's pictures.
+HALF = lambda v: {"RENDERLAB_RL_HALF": v}
+PLANS["half"] = [
+    (f"h-{path}-{name}-half{v}-{k}", ["--path", path, *extra, "--frames", "60"], HALF(v))
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v in ("1", "0")
+]
+PLANS["halfpics"] = [
+    (f"p-{path}-{kind}-half{v}", ["--path", path, "--fox", FOX, *extra, "--frames", "48", "--every", "1"], HALF(v))
+    for path in ("nonrt", "rt") for kind, extra in (("flight", []), ("hold", ["--diag", "hold=1"])) for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
@@ -323,6 +342,26 @@ def gi(out):
             print(f"  {k:16}" + " ".join(f"{v:6.1f}" for v in vals))
 
 
+def switch_matched(exe, out, key, name, spp="4096"):
+    """`split_matched` for any on/off switch: environment `key` 1 or 0, runs named `name`1/0."""
+    out = Path(out)
+    env = environment()
+    code = 0
+    runs = [(f"m-{path}-{kind}-{name}{v}", ["--path", path, "--matched", "--lamp", "1", *extra], {key: v})
+            for kind, extra in [("moving", ["--write-frames", "16,32,47"]), ("still", ["--freeze", "32", "--write-frames", "47"])]
+            for path in ("rt", "nonrt") for v in ("1", "0")]
+    runs.append(("m-reference", ["--path", "rt", "--lamp", "1", "--reference", spp, "--write-frames", "16,32,47"], {}))
+    for run, extra, more in runs:
+        d = out / run
+        d.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run([exe, *extra, "--out", str(d)], cwd=REPO, capture_output=True, text=True,
+                           timeout=900, env=env | more)
+        (d / "stderr.txt").write_text(r.stderr[-20000:])
+        print(run, "exit", r.returncode, flush=True)
+        code = max(code, r.returncode)
+    return code
+
+
 def split_matched(exe, out, spp="4096"):
     """reflection_matched with its arch lamp (a shadowed local light), RENDERLAB_RL_SPLIT on and
     off, both paths: the moving flight's frames 16, 32 and 47, and the pose of frame 32 held still
@@ -383,6 +422,8 @@ if __name__ == "__main__":
         hashes(*sys.argv[2:4])
     if sys.argv[1] == "gi":
         gi(sys.argv[2])
+    if sys.argv[1] == "switch_matched":
+        raise SystemExit(switch_matched(*sys.argv[2:6]))
     if sys.argv[1] == "split_matched":
         raise SystemExit(split_matched(*sys.argv[2:5]))
     if sys.argv[1] == "matched":

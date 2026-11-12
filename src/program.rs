@@ -104,6 +104,17 @@ const RL_SPLIT: [(&str, &str); 4] = [
         "        return soft/f32(visited);\n",
     ),
 ];
+/// U-RTVIS: `RENDERLAB_RL_HALF=1` traces half of a glossy receiver's strata a frame
+/// (reflections.wgsl RL_HALF_STRATA).
+fn rl_half(source: String) -> String {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("RENDERLAB_RL_HALF").is_ok_and(|v| v == "1")) {
+        return source;
+    }
+    let from = "const RL_HALF_STRATA:bool=false;";
+    assert_eq!(source.matches(from).count(), 1, "RENDERLAB_RL_HALF seam");
+    source.replacen(from, "const RL_HALF_STRATA:bool=true;", 1)
+}
 fn rl_split(mut source: String) -> String {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var("RENDERLAB_RL_SPLIT").map_or(true, |v| v != "0")) {
@@ -121,13 +132,20 @@ fn rl_split(mut source: String) -> String {
 }
 /// U-RTVIS measurement switches (`RENDERLAB_RL_HIT`, a comma list), reflection hits only:
 /// `local` leaves shadowed local lights unshadowed, `sun` skips the hit's sun shadow ray,
-/// `nolights` gives every light zero incidence, `black` skips the hit's `surface` and `shade`.
+/// `nolights` gives every light zero incidence, `black` skips the hit's `surface` and `shade`,
+/// `strata=N` caps a glossy pixel's strata at N (RL_GLOSSY_MAX, 16).
 /// They change the picture; unset, nothing changes.
 fn rl_hit_switches(source: String) -> String {
     static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let list = LIST.get_or_init(|| std::env::var("RENDERLAB_RL_HIT").unwrap_or_default());
     let mut source = source;
     for switch in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(n) = switch.strip_prefix("strata=") {
+            let from = "const RL_GLOSSY_MAX:u32=16u;";
+            assert_eq!(source.matches(from).count(), 1, "RENDERLAB_RL_HIT strata");
+            source = source.replacen(from, &format!("const RL_GLOSSY_MAX:u32={n}u;"), 1);
+            continue;
+        }
         let (from, to) = match switch {
             "local" => (
                 "    if lights[s.index].kind.w!=0u { return rl_local_shadow(",
@@ -588,7 +606,7 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
             1,
         );
-        source = rl_split(rl_hit_switches(source));
+        source = rl_half(rl_split(rl_hit_switches(source)));
     }
     let start = source.len();
     source.push_str(program);

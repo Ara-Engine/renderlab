@@ -33,6 +33,12 @@ const RL_UNTRACED:f32=0.5;
 const RL_GLOSSY_RAYS:u32=4u;
 const RL_GLOSSY_MAX:u32=16u;
 const RL_RAYS_PER_ROUGHNESS:f32=48.0;
+// U-RTVIS: with temporal reconstruction's rotation, a glossy receiver of at least 8 strata
+// traces every other stratum of its fixed set a frame (even frames the even ones), so two
+// consecutive frames trace the whole set, each stratum with main's direction and cone. Mirrors,
+// smaller sets, restarted receivers and frames without rotation trace every stratum.
+// src/program.rs switches it (RENDERLAB_RL_HALF).
+const RL_HALF_STRATA:bool=false;
 // A receiver the resolve restarts this frame (rl_restarts: a changed local light's restart
 // sphere, a moving caster's swept shadow) shows this frame's strata alone, so its glossy
 // lobe traces primary_frame.reflection.w times the strata (1 or less: the ordinary count;
@@ -178,7 +184,8 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let mirror=rough<RL_MIRROR;
     var count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
     let restart_strata=primary_frame.reflection.w;
-    if !mirror && restart_strata>1.0 && rl_restarts(input.world) {count*=u32(restart_strata);}
+    let restarted=!mirror && restart_strata>1.0 && rl_restarts(input.world);
+    if restarted {count*=u32(restart_strata);}
     let cone_alpha=select(alpha*inverseSqrt(f32(count)),0.0,mirror);
     let spread=pixel_angle+curvature+2.0*cone_alpha;
     let basis=rl_basis(n);
@@ -188,6 +195,10 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let seed=rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y^(frame*0x85ebca6bu)));
     let rotation=f32(seed>>8u)*(1.0/16777216.0);
     let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
+    // RL_HALF_STRATA: this frame's half of the set; the rotation word is 8 x (frame mod 32).
+    let half=RL_HALF_STRATA && !mirror && !restarted && count>=8u && frame!=0u;
+    let step=select(1u,2u,half);
+    let first=select(0u,(frame/8u)&1u,half);
     var sum=vec3<f32>(0.0);
     // The brightest stratum (rgb) and its luminance (w), for the lone-stratum bound.
     var top=vec4<f32>(0.0);
@@ -206,9 +217,9 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     // highlight widens by about sqrt(2) of the receiver's own lobe; its energy is unchanged.
     // Mirror rays from flat receivers stay near exact.
     rl_hit_variance=8.0*spread*spread;
-    rl_hit_strata=count;
-    for(var k=0u;k<count;k+=1u) {
-        rl_hit_stratum=k;
+    rl_hit_strata=(count-first+step-1u)/step;
+    for(var k=first;k<count;k+=step) {
+        rl_hit_stratum=k/step;
         var d=reflect(-v,n);
         if !mirror {
             let u=vec2<f32>((f32(k)+radial)/f32(count),fract(rotation+f32(k)*0.6180339887));
