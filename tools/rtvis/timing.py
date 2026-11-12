@@ -115,6 +115,9 @@ def report(out):
     for d in sorted(p for p in out.iterdir() if (p / "passes.jsonl").exists()):
         r = rows(d / "passes.jsonl")
         moving = [x for x in r if 8 <= x["frame"] <= 22 or x["frame"] >= 40]
+        if not moving:
+            print(f"{d.name:22} n={len(r):3} (no moving frames; see stderr.txt)")
+            continue
         parts = sorted({k for x in r for k in x["passes"] if k.startswith("visibility")})
         med = lambda key, xs: st.median(x["passes"].get(key, 0.0) for x in xs)
         line = f"{d.name:22} n={len(r):3} frame {st.median(x['span'] for x in moving):6.2f}"

@@ -406,6 +406,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sky_light: args.atmosphere_light,
                 ..Default::default()
             }),
+            // `forest=1` puts 9000 leaf cards on one mesh-material pair.
+            limits: {
+                let limits = EngineDescriptor::default().limits;
+                Limits {
+                    max_instances: if forest { 16384 } else { limits.max_instances },
+                    ..limits
+                }
+            },
             ..Default::default()
         },
     )?;

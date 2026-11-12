@@ -41,8 +41,9 @@ The other traces: sun shadow rays (`fresh_shadows.wgsl`) are `FORCE_OPAQUE |
 TERMINATE_ON_FIRST_HIT`; GI, reflection, atmosphere and reference rays are `FORCE_OPAQUE`. The
 one non-opaque query left on opaque scenes is the receiver repair's edge probe
 (`primary_trace.wgsl` `primary_repair`, only for receivers near a triangle edge of a mesh without
-adjacency, over a few epsilons). Splitting opaque and single-sided instances onto TLAS mask
-bits would only pay once single-sided casters are allowed on shadowed frames; it is not built.
+adjacency, over a few epsilons): minor, left as it is. Splitting opaque and single-sided
+instances onto TLAS mask bits would only pay once single-sided casters are allowed on shadowed
+frames; step 2 is dropped (root, 2026-11-12).
 
 ## Step 3: cold frames probe first (`COLD_PROBE_STOP`)
 
