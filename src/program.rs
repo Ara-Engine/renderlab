@@ -125,6 +125,7 @@ fn rl_history_tune(mut source: String) -> String {
     for (key, value) in list.split(',').filter_map(|s| s.trim().split_once('=')) {
         let (name, ty, text) = match key {
             "strata" => ("RL_HISTORY_STRATA", "u32", format!("{value}u")),
+            "rough_strata" => ("RL_HISTORY_ROUGH_STRATA", "u32", format!("{value}u")),
             "cap" => ("RL_HISTORY_CAP", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
             "moving" => ("RL_HISTORY_MOVING", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
             "sigma" => ("RL_HISTORY_SIGMA", "f32", format!("{:?}", value.parse::<f32>().unwrap())),

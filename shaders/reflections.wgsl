@@ -75,6 +75,10 @@ fn rl_cast(origin:vec3<f32>,d:vec3<f32>,tmin:f32)->RlCast {
 // previous frame keeps at most that / RL_HISTORY_MOVING (its reflection moves with the
 // parallax). src/program.rs RENDERLAB_RL_HISTORY_TUNE sets them for measurement.
 const RL_HISTORY_STRATA:u32=1u;
+// Rough lobes (perceptual roughness RL_HISTORY_ROUGH and up) trace RL_HISTORY_ROUGH_STRATA strata a
+// frame instead: their reflection is noisier per stratum.
+const RL_HISTORY_ROUGH_STRATA:u32=1u;
+const RL_HISTORY_ROUGH:f32=0.3;
 const RL_HISTORY_CAP:f32=1.0;
 const RL_HISTORY_MOVING:f32=2.0;
 // A stratum disagrees with the history when its luminance is more than RL_HISTORY_SIGMA
@@ -271,7 +275,8 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     if RL_HISTORY && !mirror && !restarted && frame!=0u && !rl_restarts(input.world) {hist=rl_history_lookup(receiver,input.world,pixel,reflect(-v,n));}
     var trusted=hist.w>0.0;
     // Fixed per-pixel offset, so `stride` consecutive frames visit every stratum once.
-    let stride=max(count/max(RL_HISTORY_STRATA,1u),1u);
+    let per_frame=select(RL_HISTORY_STRATA,RL_HISTORY_ROUGH_STRATA,rough>=RL_HISTORY_ROUGH);
+    let stride=max(count/max(per_frame,1u),1u);
     let one=(rl_history_index()+(rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y))&0xffffu))%stride;
     var sum=vec3<f32>(0.0);
     // The brightest stratum (rgb) and its luminance (w), for the lone-stratum bound.
