@@ -1,13 +1,13 @@
 // ---- GI tile lookup (src/program.rs GiTiles; RENDERLAB_GI_TILE=0 turns it off) ----
-// The camera's cache lookup once per 4x4 pixel tile instead of once per pixel. A compact
-// pre-pass (gi_tile_lookups, one thread per tile) decodes the receiver at the tile's inner
-// pixel (4i+1, 4j+1, clamped to the image) and runs the usual lookup (gi_prepare), so a
-// sixteenth of the pixels pay a lookup's latency. Shading then reads its tile's record
-// (gi_tile_take): a pixel that agrees with it (the record a hit with a value, one cache bin,
-// normals within GI_TILE_COS, the pixel within GI_TILE_PLANE of the eye distance from the
-// record's tangent plane) takes its sums; any other pixel (edges, contacts, bin changes,
-// a tile whose inner pixel missed) looks itself up as before. The SH is still evaluated at
-// each pixel's own normal, so only the cache's spatial sampling coarsens, to the tile.
+// The camera's cache lookup once per 4x4 tile corner instead of once per pixel. A compact
+// pre-pass (gi_tile_lookups, one thread per corner pixel (4i, 4j), clamped to the image)
+// decodes each corner's receiver and runs the usual lookup (gi_prepare), so about a
+// sixteenth of the pixels pay a lookup's latency. Shading then reads its tile's four corner
+// records (gi_tile_take): a pixel that agrees with all four (each a hit with a value, one
+// cache bin, normals within GI_TILE_COS, the pixel within GI_TILE_PLANE of the eye distance
+// from the corners' bilinear surface) blends their sums bilinearly, so the cache's field
+// stays continuous across tiles; any other pixel (edges, contacts, bin changes) looks
+// itself up as before. The SH is still evaluated at each pixel's own normal.
 // Composed into traced stages only, with the records at group 0 binding 68.
 //
 // Record, 32 words: 0-19 the 27 sky and 12 bounce SH halves (gi_rx_sky, gi_rx_bounce),
@@ -18,8 +18,8 @@ const GI_TILE_WORDS:u32=32u;
 const GI_TILE_COS:f32=0.95;
 const GI_TILE_PLANE:f32=0.01;
 
-// The tiles across the image, one per 4x4 pixels.
-fn gi_tile_grid(size:vec2<u32>) -> vec2<u32> { return (size+vec2<u32>(3u))/4u; }
+// The corners across the image: one per 4 pixels, plus the far edge.
+fn gi_tile_grid(size:vec2<u32>) -> vec2<u32> { return (size+vec2<u32>(3u))/4u+vec2<u32>(1u); }
 fn gi_oct(n:vec3<f32>) -> u32 {
     let p=n.xy/(abs(n.x)+abs(n.y)+abs(n.z));
     let q=select(p,(vec2<f32>(1.0)-abs(p.yx))*select(vec2<f32>(-1.0),vec2<f32>(1.0),p>=vec2<f32>(0.0)),n.z<0.0);
@@ -57,10 +57,10 @@ fn gi_pixel_receiver(id:vec2<u32>) -> GiReceiver {
     let grid=gi_tile_grid(size);
     let index=gid.x+gid.y*groups.x*64u;
     if index>=grid.x*grid.y { return; }
-    let tile=vec2<u32>(index%grid.x,index/grid.x);
+    let corner=vec2<u32>(index%grid.x,index/grid.x);
     let at=index*GI_TILE_WORDS;
     var flags=0u;
-    let r=gi_pixel_receiver(min(tile*4u+vec2<u32>(1u),size-vec2<u32>(1u)));
+    let r=gi_pixel_receiver(min(corner*4u,size-vec2<u32>(1u)));
     if r.valid && gi_word(GI_H_ENABLED)!=0u {
         var input:SurfaceInput;
         input.world=r.receiver.world;
@@ -81,37 +81,43 @@ fn gi_pixel_receiver(id:vec2<u32>) -> GiReceiver {
     gi_tile_records[at+25u]=flags;
 }
 
-// The traced entries' gi_prepare with tile records: the tile's sums where the pixel agrees
-// with its record, its own lookup otherwise.
+// The traced entries' gi_prepare with corner records: the bilinear blend of the tile's four
+// corners where the pixel agrees with all of them, its own lookup otherwise.
 fn gi_tile_take(input:SurfaceInput) {
     // Without the cache the records are not written (and may be a placeholder buffer).
     if gi_word(GI_H_ENABLED)==0u { gi_prepare(input); return; }
     let grid=gi_tile_grid(textureDimensions(primary_hit));
-    let tile=input.pixel/4u;
-    let at=(tile.y*grid.x+tile.x)*GI_TILE_WORDS;
+    let p=input.pixel;
+    let tile=p/4u;
+    let f=vec2<f32>(p%4u)/4.0;
     let world=input.receiver.world;
     let n=unit_normal(gi_bin_source(gi_viewed_normal(world,input.receiver.geometric),input.normal));
-    let r=vec3<f32>(bitcast<f32>(gi_tile_records[at+20u]),bitcast<f32>(gi_tile_records[at+21u]),bitcast<f32>(gi_tile_records[at+22u]));
-    let rn=gi_unoct(gi_tile_records[at+23u]);
-    if gi_tile_records[at+25u]!=3u || gi_tile_records[at+24u]!=gi_bin(n) || dot(rn,n)<GI_TILE_COS
-        || abs(dot(world-r,rn))>GI_TILE_PLANE*distance(world,lighting.eye) {
+    let bin=gi_bin(n);
+    var at=array<u32,4>();
+    var corners=array<vec3<f32>,4>();
+    var ok=true;
+    for(var k=0u;k<4u;k+=1u) {
+        let c=tile+vec2<u32>(k&1u,k>>1u);
+        at[k]=(c.y*grid.x+c.x)*GI_TILE_WORDS;
+        corners[k]=vec3<f32>(bitcast<f32>(gi_tile_records[at[k]+20u]),bitcast<f32>(gi_tile_records[at[k]+21u]),bitcast<f32>(gi_tile_records[at[k]+22u]));
+        if gi_tile_records[at[k]+25u]!=3u || gi_tile_records[at[k]+24u]!=bin || dot(gi_unoct(gi_tile_records[at[k]+23u]),n)<GI_TILE_COS { ok=false; }
+    }
+    let expected=mix(mix(corners[0],corners[1],f.x),mix(corners[2],corners[3],f.x),f.y);
+    if !ok || distance(expected,world)>GI_TILE_PLANE*distance(world,lighting.eye) {
         gi_prepare(input);
         return;
     }
-    for(var i=0u;i<9u;i+=1u) {
-        let x=i*3u;
-        let a=unpack2x16float(gi_tile_records[at+(x>>1u)]);
-        let b=unpack2x16float(gi_tile_records[at+((x+1u)>>1u)]);
-        let c=unpack2x16float(gi_tile_records[at+((x+2u)>>1u)]);
-        gi_rx_sky[i]=vec3<f32>(select(a.x,a.y,(x&1u)!=0u),select(b.x,b.y,((x+1u)&1u)!=0u),select(c.x,c.y,((x+2u)&1u)!=0u));
+    let weight=array<f32,4>((1.0-f.x)*(1.0-f.y),f.x*(1.0-f.y),(1.0-f.x)*f.y,f.x*f.y);
+    var h=array<f32,40>();
+    for(var k=0u;k<4u;k+=1u) {
+        for(var i=0u;i<20u;i+=1u) {
+            let pair=unpack2x16float(gi_tile_records[at[k]+i]);
+            h[i*2u]+=weight[k]*pair.x;
+            h[i*2u+1u]+=weight[k]*pair.y;
+        }
     }
-    for(var i=0u;i<4u;i+=1u) {
-        let x=27u+i*3u;
-        let a=unpack2x16float(gi_tile_records[at+(x>>1u)]);
-        let b=unpack2x16float(gi_tile_records[at+((x+1u)>>1u)]);
-        let c=unpack2x16float(gi_tile_records[at+((x+2u)>>1u)]);
-        gi_rx_bounce[i]=vec3<f32>(select(a.x,a.y,(x&1u)!=0u),select(b.x,b.y,((x+1u)&1u)!=0u),select(c.x,c.y,((x+2u)&1u)!=0u));
-    }
+    for(var i=0u;i<9u;i+=1u) { gi_rx_sky[i]=vec3<f32>(h[i*3u],h[i*3u+1u],h[i*3u+2u]); }
+    for(var i=0u;i<4u;i+=1u) { gi_rx_bounce[i]=vec3<f32>(h[27u+i*3u],h[28u+i*3u],h[29u+i*3u]); }
     gi_rx_normal=n;
     gi_rx_valid=true;
 }

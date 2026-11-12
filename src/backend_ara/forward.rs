@@ -3167,8 +3167,8 @@ fn frame(
             }
         }
     }
-    // One 32-word record per 4x4 tile (gi_tiles.wgsl gi_tile_grid).
-    let tile_grid = [size[0].div_ceil(4), size[1].div_ceil(4)];
+    // One 32-word record per 4x4 tile corner (gi_tiles.wgsl gi_tile_grid).
+    let tile_grid = [size[0].div_ceil(4) + 1, size[1].div_ceil(4) + 1];
     let gi_tiles = match (&tile_program, gi) {
         (Some(_), Some(_)) => Some(StorageBuffer::device(
             gpu,
