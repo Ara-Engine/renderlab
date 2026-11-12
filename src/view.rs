@@ -84,6 +84,8 @@ pub(super) struct ViewState {
     pub last_frame: u64,
     /// What this view's primary preparation uploaded (its geometry and instance tables).
     pub primary_uploads: crate::UploadBytes,
+    /// The view's optional outputs: entity ids and its view mode (`id_output.rs`).
+    pub outputs: super::id_output::ViewOutputs,
 }
 impl ViewState {
     pub fn new(
@@ -123,6 +125,7 @@ impl ViewState {
             transparency_reflections: None,
             last_frame: 0,
             primary_uploads: Default::default(),
+            outputs: Default::default(),
         }
     }
 }

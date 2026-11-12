@@ -61,6 +61,12 @@ pub(crate) mod skinning;
 // TP1 transparent pass and particles (docs/m7-tp1.md).
 #[path = "transparency_gpu.rs"]
 pub(crate) mod transparency_gpu;
+// Entity-ID output (docs/design-id-output.md).
+#[path = "id_output.rs"]
+pub(crate) mod id_output;
+// View modes as shading-stage switches (docs/design-id-output.md).
+#[path = "view_modes.rs"]
+pub(crate) mod view_modes;
 pub use gi_cache::{
     IndirectCounters, IndirectLookup, IndirectProfile, IndirectSettings, IndirectStats,
     ProbeCounters,
@@ -2443,6 +2449,8 @@ impl Renderer {
         view_mode: ViewMode,
     ) -> Result<Option<FrameReport>, Error> {
         self.check_fault()?;
+        // Hit-record frames shade every view mode through the lit frame (view_modes.rs).
+        let view_mode = self.frame_view_mode(view_mode);
         self.sync_view_shadows();
         let preparation_start = Instant::now();
         // TP1: the transparent pass runs after reconstruction, with the unjittered camera.
@@ -2454,6 +2462,7 @@ impl Renderer {
         // reconstructed, so their frames are not jittered either.
         self.view.reconstruction_frame = (self.view.reconstruction.enabled
             && view_mode == ViewMode::Lit
+            && !self.view.outputs.modes.data()
             && self.primary_mode != PrimaryVisibility::Raster
             && self.view.soft_mode != crate::SoftShadows::Temporal)
             .then_some(self.view.reconstruction_index);
@@ -3388,7 +3397,11 @@ impl Renderer {
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
                 mark(&mut encoder, "shading");
-                self.encode_primary_shading(&mut encoder, shading, stamps(0));
+                if self.view.outputs.modes.shades() {
+                    self.encode_view_shading(&mut encoder, shading, stamps(0))?;
+                } else {
+                    self.encode_primary_shading(&mut encoder, shading, stamps(0));
+                }
             }
             if reconstructed {
                 mark(&mut encoder, "tr1");
@@ -3543,16 +3556,23 @@ impl Renderer {
         }
         // TP1: transparent draws and particles, after opaque shading and reconstruction.
         // Upscaled frames skip them (docs/m7-gaps.md, Transparency).
-        if lit && self.view.upscale.is_none() {
+        if lit && self.view.upscale.is_none() && !self.view.outputs.modes.data() {
             mark(&mut encoder, "transparency");
             self.encode_transparency(&mut encoder, draws, transparent, traced)?;
+        }
+        if traced && self.view.outputs.ids.enabled() {
+            mark(&mut encoder, "ids");
+            self.encode_ids(&mut encoder, draws, transparent, reconstructed);
         }
         // TR1b upscaling: present writes the caller's target, not the internal one.
         let output_view = self.view.upscale.as_ref().map(|u| {
             self.ledger
                 .attachment(u.output.create_view(&Default::default()))
         });
-        if lit && self.view.hdr.is_some() {
+        if lit && self.view.hdr.is_some() && self.view.outputs.modes.data() {
+            mark(&mut encoder, "post");
+            self.encode_view_present(&mut encoder, output_view.as_ref().unwrap_or(&view));
+        } else if lit && self.view.hdr.is_some() {
             mark(&mut encoder, "post");
             self.encode_hdr_present(
                 &mut encoder,

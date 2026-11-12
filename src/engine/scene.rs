@@ -5,14 +5,17 @@
 //! documented API (docs/api.md): nothing that uses an `Engine` needs this trait in scope.
 //! It holds the calls a scene shared between layers uses, and no more. Device and window
 //! calls (`Engine::device`, `render_view_to`, `view_output`, `present`, `reload_program`
-//! and their kin) are the wgpu engine's alone (docs/design-views.md).
+//! and their kin) are the wgpu engine's alone (docs/design-views.md), as are
+//! `Engine::view_ids` and `render_view_ids_to` (wgpu textures): the trait carries ids only as
+//! CPU values (`set_object_ids`, `request_ids` and the `poll` event).
 use super::{AssetHandles, EmitterId};
 use super::{
     Engine, EnvironmentId, Image, MaterialDesc, MaterialId, MeshId, ObjectId, ProgramId, Settings,
     SkinnedHandles, Sky, Sun, TextureId, ViewDesc, ViewId, asset_material,
 };
 use crate::{
-    Camera, Decal, EmitterDescriptor, Error, FrameReport, Light, Mat4, MeshData, Value,
+    Camera, Decal, EmitterDescriptor, Error, Events, FrameReport, IdRect, IdRequest, Light, Mat4,
+    MeshData, Value,
     asset::{
         Asset, Primitive, Texture as TextureData,
         environment::PreparedEnvironment,
@@ -103,6 +106,8 @@ pub trait Scene {
         transform: Mat4,
     ) -> Result<ObjectId, Error>;
     fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error>;
+    /// The embedder's ids for an object's primitive ranges `(first, count, id)`.
+    fn set_object_ids(&mut self, object: ObjectId, ranges: &[(u32, u32, u32)]) -> Result<(), Error>;
     fn set_decals(&mut self, decals: &[Decal]) -> Result<(), Error>;
 
     fn set_sun(&mut self, sun: Option<Sun>) -> Result<(), Error>;
@@ -122,6 +127,11 @@ pub trait Scene {
     fn render_view(&mut self, view: ViewId, camera: &Camera) -> Result<FrameReport, Error>;
     fn cut_view(&mut self, view: ViewId);
     fn capture_view(&mut self, view: ViewId) -> Result<Image, Error>;
+    /// Queues a readback of a rectangle of the view's last frame's ids; the result arrives
+    /// in `poll` (`Events::ids`).
+    fn request_ids(&mut self, view: ViewId, rect: IdRect) -> Result<IdRequest, Error>;
+    /// Nonblocking progress: completed frames, GPU timings and finished id readbacks.
+    fn poll(&mut self) -> Result<Events, Error>;
 }
 
 impl Scene for Engine {
@@ -179,6 +189,9 @@ impl Scene for Engine {
     fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error> {
         Engine::set_transform(self, object, transform)
     }
+    fn set_object_ids(&mut self, object: ObjectId, ranges: &[(u32, u32, u32)]) -> Result<(), Error> {
+        Engine::set_object_ids(self, object, ranges)
+    }
     fn set_decals(&mut self, decals: &[Decal]) -> Result<(), Error> {
         Engine::set_decals(self, decals)
     }
@@ -217,5 +230,11 @@ impl Scene for Engine {
     }
     fn capture_view(&mut self, view: ViewId) -> Result<Image, Error> {
         Engine::capture_view(self, view)
+    }
+    fn request_ids(&mut self, view: ViewId, rect: IdRect) -> Result<IdRequest, Error> {
+        Engine::request_ids(self, view, rect)
+    }
+    fn poll(&mut self) -> Result<Events, Error> {
+        Engine::poll(self)
     }
 }
