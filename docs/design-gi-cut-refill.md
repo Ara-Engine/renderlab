@@ -118,3 +118,21 @@ image; edge pixels):
 2. Non-RT without the phase spread: claims capped, but each new cell traces all its directions at
    once, since the top level made a full trace cheap.
 3. A larger non-RT cap, so the backlog drains in about two frames.
+
+**Option 2, measured (2026-11-12, one lease, parked):** the claim cap stays until the backlog
+drains, but each new cell traces all its directions on the frame it is claimed (no phase spread;
+`cut_refill` still off by default, `RENDERLAB_GI=cut_refill=1` enables it). Mean error against
+the settled image, on / off (whole image; edge pixels):
+
+| | cut | +2 | +4 | +8 |
+|---|---|---|---|---|
+| non-RT forest | 2.66 / 3.68; 9.05 / 9.03 | 2.39 / 2.94; 6.90 / 6.51 | 2.28 / 2.47; 6.02 / 5.43 | 1.83 / 1.78; 4.24 / 3.62 |
+| non-RT game | 1.65 / 1.71 | 0.43 / 0.45 | 0.34 / 0.33 | 0.22 / 0.20 |
+| RT forest | 5.07 / 6.22 | 4.40 / 5.00 | 3.49 / 4.18 | 2.52 / 2.96 |
+
+The whole-image error now converges like off, but non-RT forest edges stay 17 % worse at +8.
+The non-RT forest turn's cut frame took 65.6 ms with the refill on against 96.4 / 96.9 off
+(the first visit's on run had a 359 ms first-use spike), not the 52 ms bar. The lease's
+contention guard tripped on the last clip (RT game still, refill off), so the RT game row and
+blobs.py are missing. Parked: the cut-frame saving is about a third of the off cost, and edge
+convergence is still behind.
