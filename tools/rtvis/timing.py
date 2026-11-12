@@ -377,6 +377,12 @@ PLANS["rlprobe"] = [
      PASS("1") | {"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"{path}-{name}.json")})
     for path in ("nonrt", "rt") for name, extra in (("flight", ["--fox", FOX]), ("quarry", ["--quarry", QUARRY]))
 ]
+# The no-lag resolve (step 1) and four strata a frame on rough lobes (step 2), Showcase-like timing.
+NL_VARIANTS = (("base", {}), ("nl", RP), ("nl4", RP | {"RENDERLAB_RL_HISTORY_TUNE": "rough_strata=4"}))
+PLANS["nlshow"] = [
+    (f"m-{path}-show-{v}-{k}", ["--path", path, *SHOW], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in NL_VARIANTS
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
