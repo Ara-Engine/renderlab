@@ -2959,8 +2959,7 @@ impl Renderer {
         // Moved casters: placements whose world bounds changed, as swept boxes.
         let mut bounds = vec![];
         for d in draws {
-            for &model in &d.instances.state.models {
-                let b = shadow_gpu::world_bounds(d.mesh.bounds, model)?;
+            for b in d.instances.state.world_bounds(d.mesh.bounds)?.iter() {
                 bounds.push([b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z]);
             }
         }
