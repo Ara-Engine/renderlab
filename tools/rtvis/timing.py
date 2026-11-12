@@ -201,6 +201,20 @@ PLANS["splitpics"] = [
     (f"p-{path}-{kind}-split{v}", ["--path", path, "--fox", FOX, *extra, "--frames", "48", "--every", "1"], SPLIT(v))
     for path in ("nonrt", "rt") for kind, extra in (("flight", []), ("hold", ["--diag", "hold=1"])) for v in ("1", "0")
 ]
+# Local soft shadows (light_cluster_api.wgsl): the gather fast path on (1) or off (0), and the
+# filter skipped (measurement), non-RT, the game flight with the Fox and the night lanterns.
+GATHER = lambda v: {"RENDERLAB_LOCAL_GATHER": v}
+PCF_CLIPS = [("game", ["--path", "nonrt", "--fox", FOX]), ("night", ["--path", "nonrt", "--fox", FOX, "--night-lanterns"])]
+PLANS["pcf"] = [
+    (f"g-{name}-{v}-{k}", extra + ["--frames", "60"], GATHER(v) if v != "skip" else {"RENDERLAB_LOCAL_PCF": "skip"})
+    for k in (1, 2) for name, extra in PCF_CLIPS for v in ("1", "0", "skip") if k == 1 or v != "skip"
+]
+PLANS["pcfpics"] = [
+    (f"p-{name}-gather{v}", extra + ["--frames", "40", "--every", "1"], GATHER(v))
+    for name, extra in PCF_CLIPS for v in ("1", "0")
+]
+# Item 2 (2026-11-12): the forest cut on non-RT with the instance top level, cut_refill off/on.
+PLANS["refill2"] = [(n, e, m) for n, e, m in PLANS["refill"] if n.startswith("nonrt-forest")]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS

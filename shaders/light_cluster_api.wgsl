@@ -67,6 +67,12 @@ fn rl_local_matrix(layer:u32) -> mat4x4<f32> {
 // point light's cube face, compared on the receiver's own plane (as hard_shadow does) and
 // filtered with blocker-search PCF for positive radii, 3x3 bilinear PCF (16 loads)
 // at zero radius. Outside every map is lit.
+// U-RTVIS: a PCSS filter tap whose 2x2 texels lie inside its face compares them inline, against
+// the same receiver-plane reference rl_local_tap computes and in its order: the same visibility
+// bits, without rl_local_tap's per-call matrix, tile and cube-edge work. src/light_cluster.rs turns these off for measurement
+// (RENDERLAB_LOCAL_GATHER=0: four rl_local_tap calls a tap; RENDERLAB_LOCAL_PCF=skip: no filter).
+const RL_LOCAL_GATHER:bool=true;
+const RL_LOCAL_SKIP:bool=false;
 fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     // kind.w: pooled slot + 1 in the low 16 bits; bit 16 marks a six-face (cube) slot.
     let slot=(light.kind.w&0xffffu)-1u;
@@ -117,6 +123,7 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
             if result.x<0.5 && result.y>0.0 { blocker_sum+=result.y; blockers+=1.0; }
         }
         if blockers==0.0 { return 1.0; }
+        if RL_LOCAL_SKIP { return 0.5; }
         let blocker=blocker_sum/blockers;
         let penumbra=min(source*max(clip.w-blocker,0.0)/max(blocker*clip.w,1e-6),vec2<f32>(96.0));
         var soft=0.0;
@@ -124,6 +131,23 @@ fn rl_local_shadow_map(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
             let tap=t+rl_local_disk(k,24u)*max(penumbra,vec2<f32>(0.5));
             let base=floor(tap);
             let fraction=tap-base;
+            let corner=vec2<i32>(base);
+            if RL_LOCAL_GATHER && all(corner>=vec2<i32>(0)) && all(corner+vec2<i32>(1)<vec2<i32>(extent)) {
+                // The 2x2 texels lie inside this face: rl_local_tap's comparison without its
+                // per-call matrix, tile and cube-edge work.
+                let origin=corner+vec2<i32>(rl_light_frame.tiles[slot].xy);
+                for(var j=0u;j<2u;j+=1u) {
+                    for(var i=0u;i<2u;i+=1u) {
+                        let weight=select(1.0-fraction.x,fraction.x,i==1u)*select(1.0-fraction.y,fraction.y,j==1u);
+                        let coordinate=corner+vec2<i32>(i32(i),i32(j));
+                        let tap_ndc=((vec2<f32>(coordinate)+vec2<f32>(0.5))/extent-vec2<f32>(0.5))*vec2<f32>(2.0,-2.0);
+                        let reference=ndc.z+dot(slope,tap_ndc-ndc.xy)+bias;
+                        let stored=textureLoad(rl_local_depth,origin+vec2<i32>(i32(i),i32(j)),i32(layer%6u),0);
+                        soft+=weight*select(0.0,1.0,reference>=stored);
+                    }
+                }
+                continue;
+            }
             for(var j=0u;j<2u;j+=1u) {
                 for(var i=0u;i<2u;i+=1u) {
                     let weight=select(1.0-fraction.x,fraction.x,i==1u)*select(1.0-fraction.y,fraction.y,j==1u);

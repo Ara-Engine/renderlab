@@ -182,7 +182,31 @@ pub(crate) fn shading_api(head: &str, traced: bool) -> String {
     } else {
         RESTART_BUDGET_STUB.to_owned()
     };
-    format!("{}{API}{visibility}{budget}", constants())
+    format!("{}{}{visibility}{budget}", constants(), measured_api())
+}
+
+/// U-RTVIS measurement switches on the local soft shadow (shaders/light_cluster_api.wgsl):
+/// `RENDERLAB_LOCAL_GATHER=0` reads each PCF tap's texels one at a time, as before the gather
+/// path; `RENDERLAB_LOCAL_PCF=skip` returns 0.5 wherever the blocker search found a blocker
+/// (no filter; it changes the picture). Unset, the API is the file as written.
+fn measured_api() -> String {
+    let flag = |key: &str, value: &str| std::env::var(key).is_ok_and(|v| v == value);
+    let mut api = API.to_owned();
+    if flag("RENDERLAB_LOCAL_GATHER", "0") {
+        api = api.replacen(
+            "const RL_LOCAL_GATHER:bool=true;",
+            "const RL_LOCAL_GATHER:bool=false;",
+            1,
+        );
+    }
+    if flag("RENDERLAB_LOCAL_PCF", "skip") {
+        api = api.replacen(
+            "const RL_LOCAL_SKIP:bool=false;",
+            "const RL_LOCAL_SKIP:bool=true;",
+            1,
+        );
+    }
+    api
 }
 
 fn luminance(rgb: [f32; 3]) -> f32 {
