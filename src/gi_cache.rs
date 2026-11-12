@@ -349,6 +349,10 @@ pub struct IndirectSettings {
     /// turn alike: after a start or a cut the picture then shows cells without bounce light
     /// beside gathered ones for as long as the whole queue takes.
     pub gather_pixels_first: bool,
+    /// Levels above the pixels' that a gather hit on something that moved this frame reads
+    /// at least (U-SPECK, docs/speck.md; 0 to 4, 0 off). A moving surface leaves a fine cell
+    /// before the cell has a value, so its hits found none and it sent no bounce light.
+    pub mover_hit_levels: u32,
 }
 impl Default for IndirectSettings {
     /// On by default since G2b (Islam's overnight push, 2026-11-08; docs/m7-g2b.md): G2's
@@ -407,6 +411,10 @@ impl Default for IndirectSettings {
             // it halves frame 16's distance from the settled frame on RT, for a quarter more
             // gathers over the flight, and non-RT's first eight frames are slightly worse.
             gather_pixels_first: false,
+            // Off: at 2 the path tracer's walking hero is 1.5-1.9 codes closer underneath at one
+            // frame and 0.9-1.4 codes farther at another, and the game scene's spinning cube
+            // gains isolated specks (docs/speck.md section 10).
+            mover_hit_levels: 0,
         }
     }
 }
@@ -435,6 +443,7 @@ impl IndirectSettings {
             && self.filter <= 15
             && (0.0..=1.0).contains(&self.filter_edge)
             && self.near_light_rays <= 64
+            && self.mover_hit_levels <= 4
             && (self.hit_cone_cells == 0.0 || (1.0..=64.0).contains(&self.hit_cone_cells));
         if valid {
             Ok(())
@@ -1057,6 +1066,7 @@ impl Planner {
             0.0
         };
         header[27] = spread.to_bits();
+        header[29] = s.mover_hit_levels;
         // The most cells pixels read in a frame: the view's pixels over a cell's.
         header[28] = if s.gather_pixels_first {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32

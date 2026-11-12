@@ -1719,11 +1719,29 @@ var<private> gi_hit_spread:f32;
 // there is far below what the ray resolves, and those cells were most of the table: a moving
 // camera made several times more of them than pixels read (docs/speck.md). Near a contact the
 // cone is narrow and the pixels' level stands.
+// A hit on something that moved this frame (inside a moved caster's swept bounds) reads a
+// cell at least GI_H_MOVER_LEVELS coarser than the pixels'. A moving surface crosses a fine
+// cell in a frame or two, so the cell a ray meets there was made this frame, after the
+// gathers, or not at all: it has no value, and a moving object sent no bounce light, least
+// of all to itself (the path tracer's walking hero is 5 codes brighter underneath than ours
+// was, docs/speck.md). The surface stays inside the coarser cell for several frames, and
+// that cell is probed and shaded again every frame it moves.
 fn gi_hit_level(world:vec3<f32>, t:f32) -> u32 {
-    let pixel=gi_level(world);
-    if gi_hit_spread<=0.0 { return pixel; }
-    let cone=max(log2(max(gi_hit_spread*t,1e-30)/gi_header_f32(GI_H_MIN_EDGE)),0.0);
-    return max(pixel,min(u32(ceil(cone)),gi_word(GI_H_LEVELS)-1u));
+    let last=gi_word(GI_H_LEVELS)-1u;
+    var level=gi_level(world);
+    if gi_hit_spread>0.0 {
+        let cone=max(log2(max(gi_hit_spread*t,1e-30)/gi_header_f32(GI_H_MIN_EDGE)),0.0);
+        level=max(level,min(u32(ceil(cone)),last));
+    }
+    let lift=gi_word(GI_H_MOVER_LEVELS);
+    if lift!=0u {
+        for(var m=0u;m<gi_frame.counts.x;m+=1u) {
+            if all(world>=gi_frame.boxes[m*2u].xyz) && all(world<=gi_frame.boxes[m*2u+1u].xyz) {
+                return max(level,min(gi_level(world)+lift,last));
+            }
+        }
+    }
+    return level;
 }
 fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bool) -> vec4<f32> {
     let r=gi_hit_receiver(origin,d,h);

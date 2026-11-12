@@ -73,6 +73,10 @@ SWITCHES = {
     "rotation": ([], {"RENDERLAB_GI": "gather_pixels_first=0"}),
     "pixels-first": ([], {"RENDERLAB_GI": "gather_pixels_first=1"}),
     "uncapped": ([], {"RENDERLAB_GI": "gather_cells=4294967295"}),
+    # Gather hits on moving objects read coarser cells (IndirectSettings::mover_hit_levels).
+    "mover0": ([], {"RENDERLAB_GI": "mover_hit_levels=0"}),
+    "mover2": ([], {"RENDERLAB_GI": "mover_hit_levels=2"}),
+    "mover3": ([], {"RENDERLAB_GI": "mover_hit_levels=3"}),
 }
 FLIGHT = ["--frames", "180", "--diag", "cut=1"]
 STILL = ["--still", "--frames", "96", "--every", "95", "--diag", "flicker=0"]
