@@ -80,6 +80,8 @@ pub enum Pass {
     PrimaryShadeTiles,
     /// Original mixed-program deferred shading of listed primary tiles.
     PrimaryShadeList,
+    /// A program's reflection hits: one bin of H (src/reflection_hits.rs).
+    ReflectionHits,
     /// Original software raster of projected cluster triangles into packed visibility.
     VisibilitySoftware,
     /// Original procedural hardware raster of cluster IDs, with reversed-Z depth.
@@ -267,6 +269,11 @@ impl Pass {
                 .expect("original traced composition remains valid")
                 .into()
             }
+            Self::ReflectionHits => crate::backend_ara::primary_shade::hits_source(include_str!(
+                "../shaders/traced_material.wgsl"
+            ))
+            .expect("hit composition remains valid")
+            .into(),
             Self::HandleArrayProbe => include_str!("../shaders/handle_array_probe.wgsl").into(),
             Self::BufferArrayProbe => include_str!("../shaders/buffer_array_probe.wgsl").into(),
             Self::PrimaryCheck => {
@@ -514,6 +521,7 @@ impl Pass {
             self,
             Self::PrimaryShadeTiles
                 | Self::PrimaryShadeList
+                | Self::ReflectionHits
                 | Self::TransparencyGlass
                 | Self::PaneId
                 | Self::PaneShade
@@ -545,6 +553,7 @@ impl Pass {
                 | Self::PrimaryRayProbe
                 | Self::PrimaryShadeTiles
                 | Self::PrimaryShadeList
+                | Self::ReflectionHits
                 | Self::HandleArrayProbe
                 | Self::BufferArrayProbe
                 | Self::VisibilitySoftware
@@ -657,6 +666,7 @@ impl Pass {
             Self::PrimaryRayProbe => "primary_probe",
             Self::PrimaryShadeTiles => "primary_shade_tiles",
             Self::PrimaryShadeList => "primary_shade_list",
+            Self::ReflectionHits => "reflection_hits",
             Self::PrimaryCheck => "primary_check_interactive",
             Self::TransparencyHitDepth => "tp_depth_hits",
             Self::PostPrimarySurface => "post_primary_surface",

@@ -59,6 +59,42 @@ fn programs_emit_valid_spirv_at_the_region_and_list_entries() -> Result<()> {
     Ok(())
 }
 
+/// Each program's reflection-hit module (`program::compose_hits`), toon's included though it
+/// traces no lobe of its own: SPIR-V that validates, Metal source, and the hit entry's
+/// four bindings (H, the sample image R, the bin uniform and the binned order) reflected
+/// for the heap.
+#[test]
+fn hit_programs_compile_and_reflect_their_bindings() -> Result<()> {
+    use renderlab::backend_ara::primary_shade::hardware_soft_hits_program;
+    use renderlab::backend_ara::shader::{InputKey, InputKind};
+    let toon = include_str!("../../../examples/game_toon.wgsl");
+    for (name, source) in [
+        ("standard", renderlab::STANDARD_PROGRAM),
+        ("game", GAME),
+        ("toon", toon),
+    ] {
+        let program = hardware_soft_hits_program(source)?;
+        forward_cases::validate_spirv(&program, &format!("{name}-hits"))?;
+        let kind = |binding| {
+            program
+                .inputs()
+                .iter()
+                .find(|i| i.key == InputKey { group: 0, binding })
+                .map(|i| i.kind)
+        };
+        ensure!(
+            matches!(kind(64), Some(InputKind::Buffer { .. }))
+                && matches!(kind(65), Some(InputKind::StorageImage { .. }))
+                && kind(66).is_some()
+                && matches!(kind(67), Some(InputKind::Buffer { .. })),
+            "{name}: hit bindings {:?}",
+            [64, 65, 66, 67].map(kind)
+        );
+        program.msl()?;
+    }
+    Ok(())
+}
+
 fn quad(half: f32, z: f32) -> [Vertex; 4] {
     [[-half, -half], [half, -half], [half, half], [-half, half]].map(|[x, y]| Vertex {
         position: [x, y, z],
