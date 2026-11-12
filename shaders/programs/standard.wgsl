@@ -162,5 +162,7 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
         let intensity=light.intensity*light_transmission(light,input);
         exposed=min(exposed+exposed_product(intensity,response*attenuation),vec3<f32>(65504.0));
     }
-    return select(exposed,exposed*s.alpha,film);
+    // A plain blended film's light, blended by coverage (above).
+    if film { exposed*=s.alpha; }
+    return exposed;
 }
