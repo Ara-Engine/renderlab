@@ -603,6 +603,7 @@ mod tests {
             candela: [100.0; 3],
             range: Some(5.0),
             source_radius: 0.125,
+            cast_shadows: None,
         };
         let soft = Sun::default();
         // LC1: a soft sun renders with local lights.

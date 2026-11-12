@@ -1978,6 +1978,7 @@ mod tests {
     fn local_light_identity_ignores_only_candela() {
         let spot =
             |y: f32, candela: [f32; 3], range: f32, outer: f32, source_radius: f32| Light::Spot {
+                cast_shadows: None,
                 position: Vec3::new(3.0, y, 3.0),
                 travel: Vec3::NEG_Y,
                 candela,
@@ -2045,6 +2046,7 @@ mod tests {
             candela: [24_000.0 * scale, 12_000.0 * scale, 4_000.0 * scale],
             range: Some(10.0),
             source_radius: 0.25,
+            cast_shadows: None,
         }
     }
 
@@ -2242,6 +2244,7 @@ mod tests {
             candela: [(2_000.0 + 500.0 * k as f32) * scale; 3],
             range: Some(8.0),
             source_radius: 0.05,
+            cast_shadows: None,
         };
         let hall = |scale: f32| (0..12).map(|k| torch(k, scale)).collect::<Vec<_>>();
         let mut plan = Planner::new();

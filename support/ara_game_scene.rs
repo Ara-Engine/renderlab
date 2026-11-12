@@ -502,6 +502,7 @@ pub fn animate<S: Scene>(scene: &mut S, built: &Built, frame: u32) -> Result<Cam
             candela: [30_000., 21_000., 11_000.],
             range: Some(14.),
             source_radius: 0.12,
+            cast_shadows: None,
         },
         Light::Spot {
             position: built.post_lamp - Vec3::new(0., 0.15, 0.),
@@ -511,12 +512,14 @@ pub fn animate<S: Scene>(scene: &mut S, built: &Built, frame: u32) -> Result<Cam
             inner: 0.3,
             outer: 0.6,
             source_radius: 0.1,
+            cast_shadows: None,
         },
         Light::Point {
             position: built.flame + Vec3::new(0., 0.3, 0.),
             candela: [24_000., 12_000., 4_000.].map(|c| c * flicker),
             range: Some(10.),
             source_radius: 0.25,
+            cast_shadows: None,
         },
     ];
     scene.set_lights(if built.lanterns { &lanterns } else { &[] })?;

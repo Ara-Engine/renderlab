@@ -184,6 +184,9 @@ pub(super) struct LightClusters {
     /// The lights this view's camera wants maps for, by rank, as of its last lit frame:
     /// its part of the union the shared selection serves (`LocalMaps`).
     desired: Vec<Option<u32>>,
+    /// Traced frames' choice of ray-shadowed lights (`LocalShadows::rays`), kept across
+    /// frames for its fades.
+    rays: lc::RaySelection,
     pub stats: LightClusterStats,
     /// The frame uniform as last written: unchanged frames upload nothing.
     published: Vec<u8>,
@@ -304,6 +307,7 @@ impl LightClusters {
             bind: None,
             generation: 0,
             desired: vec![],
+            rays: lc::RaySelection::default(),
             stats: LightClusterStats::default(),
             published: vec![],
         }
@@ -403,6 +407,11 @@ impl Renderer {
             view.clusters.enabled = enabled;
         }
     }
+    /// A camera cut for the selected view: its ray-shadowed lights are chosen afresh, at
+    /// full strength (`LocalShadows::rays`).
+    pub(crate) fn cut_light_selection(&mut self) {
+        self.view.clusters.rays = lc::RaySelection::default();
+    }
     pub fn light_cluster_stats(&self) -> LightClusterStats {
         self.view.clusters.stats.clone()
     }
@@ -436,6 +445,11 @@ impl Renderer {
         let all_rays = !maps && count > 0;
         #[cfg(test)]
         let all_rays = all_rays && !state.legacy_limit;
+        // Rays address the light directly and need no map slot: the ray budget's words.
+        let ray_words = all_rays.then(|| {
+            let vp = camera.matrix(viewport[0], viewport[1]);
+            state.rays.words(lights, vp, eye, &state.settings)
+        });
         let slots = if count > 0 && !all_rays {
             let desired = lc::select(
                 lights,
@@ -482,9 +496,8 @@ impl Renderer {
             .chunks_exact_mut(crate::lighting::LIGHT_BYTES)
             .enumerate()
         {
-            let w = if all_rays && lc::sphere(&lights[index]).is_some() {
-                // Rays address the light directly and need neither a map slot nor selection.
-                (index as u32 & 0xffff) + 1
+            let w = if let Some(words) = &ray_words {
+                words[index]
             } else {
                 slots
                     .iter()
@@ -685,12 +698,10 @@ impl Renderer {
         }
         let stats = &mut state.stats;
         stats.clustered = clustered;
-        stats.shadowed = if all_rays {
-            lights
-                .iter()
-                .enumerate()
-                .filter(|(_, l)| lc::sphere(l).is_some())
-                .map(|(i, _)| Some(i as u32))
+        stats.shadowed = if let Some(words) = &ray_words {
+            (0..lights.len() as u32)
+                .filter(|&i| words[i as usize] != 0)
+                .map(Some)
                 .collect()
         } else {
             slots.clone()
