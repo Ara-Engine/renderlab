@@ -19,10 +19,12 @@ pub(crate) struct ReflectionReload {
     pub(crate) layout: Owned<wgpu::PipelineLayout>,
     pub(crate) key: [u8; 32],
 }
-pub(super) fn key(head: &str, program: &str, parameters: bool) -> [u8; 32] {
+/// The identity of the reflection pipeline built from a prelude and a program, from their
+/// SHA-256 digests (kept with the sources: this runs every frame).
+pub(super) fn key(head: &[u8; 32], program: &[u8; 32], parameters: bool) -> [u8; 32] {
     let mut hash = Sha256::new();
-    hash.update(head.as_bytes());
-    hash.update(program.as_bytes());
+    hash.update(head);
+    hash.update(program);
     hash.update([u8::from(parameters)]);
     hash.finalize().into()
 }
@@ -102,7 +104,11 @@ impl Renderer {
         Ok(Some(ReflectionReload {
             source: source(&head, text, parameters),
             layout: self.tp_pipeline_layout("background glass reflection ABI", &groups.each_ref()),
-            key: key(&self.source, text, parameters),
+            key: key(
+                &self.source_digest,
+                &Sha256::digest(text.as_bytes()).into(),
+                parameters,
+            ),
         }))
     }
 
@@ -134,7 +140,7 @@ impl Renderer {
         let program = self.program_slot(primary.program);
         let head = primary_ray_gpu::transparent_reflection_head(&self.source)?;
         let source = source(&head, &program.source, program.layout.is_some());
-        let key = key(&self.source, &program.source, program.layout.is_some());
+        let key = key(&self.source_digest, &program.digest, program.layout.is_some());
         let program_slots = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("TP2 reflected hit program slots"),
