@@ -274,3 +274,54 @@ Picture:
   chrome mirror sphere and the lamps differ by at most 1 code; the gold sphere by at most 9 codes
   on 16-17 pixels near its highlight, not visible side by side.
 - blobs.py: the same counts on and off on every clip.
+
+## Non-RT local soft shadows: the filter taps (2026-11-12)
+`rl_local_shadow_map`'s soft shadow (shaders/light_cluster_api.wgsl) runs a 12-tap blocker search,
+then 24 bilinear PCF taps of 4 texels each.
+
+Footprints: the search radius is `source x (1/near - 1/d)` and the filter's `source x (1/blocker
+- 1/d)` with blocker >= near, both capped at 96 texels. So the filter always lies inside the search
+footprint. The search is 12 point samples, though, not a cover. Its existing fully-lit exit
+(`blockers==0`) can miss a thin blocker between samples, and an umbra exit from the same samples
+would be no more exact. An exact early-out needs a conservative depth bound over the filter's
+whole footprint: a min/max mip chain of the shadow atlas, rebuilt when the cached maps update. A
+filter whose texels all have stored depth above its largest reference is umbra; one whose texels
+all lie below its smallest reference is lit. Cube-face edges would keep the full path. Not built.
+
+Built instead (exact): a filter tap whose 2x2 texels lie inside its face compares them inline,
+with the same receiver-plane reference and the same accumulation order, skipping
+`rl_local_tap`'s per-call matrix, tile and cube-edge work. A first version read the four texels
+with one `textureGather`; it differed by 1 code on 3-20 pixels from frame 25 of the game flight
+(its corner coordinate can select the neighbouring block), so the shipped version loads each
+texel at its exact coordinate.
+`RENDERLAB_LOCAL_GATHER=0` restores the four calls; `RENDERLAB_LOCAL_PCF=skip` measures the
+filter's share.
+
+Non-RT, 60 frames, shading medians, ms (same binary, interleaved twice; reference run 28.05):
+
+| | inline (new) | four calls (main) | filter skipped |
+|---|---|---|---|
+| game flight with the Fox | 16.6 / 17.3 | 17.6 / 20.6 | 13.6 |
+| night lanterns (`--night-lanterns`) | 36.5 / 37.8 | 45.9 / 43.5 | 30.0 |
+
+Every frame of both clips (40) is byte-identical with the inline compare on and off.
+
+## The forest cut with the instance top level, cut_refill off and on (2026-11-12)
+Non-RT, `--diag forest=1 --diag cut=turn`, the cut at frame 24, two visits each, ms (frame 25 was
+untimed in three runs):
+
+| | 23 | cut | +1 | +2 | +3 | +4 | +5 |
+|---|---|---|---|---|---|---|---|
+| off: frame | 33.6 / 37.2 | 94.9 / 99.6 | - | 63.8 / 62.8 | 66.2 / 68.8 | 65.9 / 63.6 | 67.3 / 62.6 |
+| off: gi_update | 3.5 / 3.5 | 43.5 / 45.9 | - | 11.1 / 11.1 | 10.3 / 11.0 | 10.3 / 10.1 | 9.5 / 9.5 |
+| on: frame | 33.8 / 35.1 | 55.4 / 53.2 | 62.8 / - | 65.5 / 61.9 | 65.8 / 60.4 | 127.8 / 114.6 | 68.8 / 73.7 |
+| on: gi_update | 3.7 / 3.9 | 4.1 / 4.4 | 5.0 / - | 6.2 / 6.1 | 7.5 / 8.1 | 61.4 / 57.4 | 13.0 / 13.4 |
+
+The turned view is heavier (about 63 ms against 34 before the cut, with or without the refill).
+- **Off:** the cut costs about 30 ms over the view's own frame (43-46 ms of `gi_update`), down
+  from about 1,300 ms before the top level.
+- **On:** the cut frame is quiet, but cut+4 is larger than today's cut frame (57-61 ms of
+  `gi_update`) because the cap ends after four frames.
+
+The rework (cap until drained) would spread about 45 ms of cell creation over several frames. It
+is still worth doing, at a smaller stake than before.
