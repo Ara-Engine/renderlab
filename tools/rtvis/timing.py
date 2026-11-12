@@ -404,15 +404,17 @@ def pair_matched(exe, out, name, key, value, spp="4096"):
 
 def multi_matched(exe, out, key, *values, spp="4096"):
     """reflection_matched with `key` at each value (runs m-PATH-KIND-vVALUE; "-" leaves it unset),
-    both paths, moving frames 16/32/47 and the held pose of frame 32, then the path tracer."""
+    both paths, moving frames 16/32/47 and the held pose of frame 32, then the path tracer.
+    RTVIS_MATCHED_EXTRA (space-separated) adds scene options to every run, the reference too."""
     out = Path(out)
     env = environment()
+    scene = os.environ.get("RTVIS_MATCHED_EXTRA", "").split()
     code = 0
-    runs = [(f"m-{path}-{kind}-v{v}", ["--path", path, "--matched", "--lamp", "1", *extra], {} if v == "-" else {key: v})
+    runs = [(f"m-{path}-{kind}-v{v}", ["--path", path, "--matched", "--lamp", "1", *scene, *extra], {} if v == "-" else {key: v})
             for kind, extra in [("moving", ["--write-frames", "16,32,47"]), ("still", ["--freeze", "32", "--write-frames", "47"])]
             for path in ("rt", "nonrt") for v in values]
     if not (out / "m-reference" / "frame-047.png").exists():
-        runs.append(("m-reference", ["--path", "rt", "--lamp", "1", "--reference", spp, "--write-frames", "16,32,47"], {}))
+        runs.append(("m-reference", ["--path", "rt", "--lamp", "1", *scene, "--reference", spp, "--write-frames", "16,32,47"], {}))
     for run, extra, more in runs:
         d = out / run
         d.mkdir(parents=True, exist_ok=True)
