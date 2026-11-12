@@ -31,19 +31,30 @@ fn rl_hits_mine(placement:u32)->bool { return true; }
     let origin=bitcast<vec3<f32>>(vec3<u32>(b.w,c.x,c.y));
     let d=rl_oct_decode(c.z);
     let cone=unpack2x16float(c.w);
+    let record=vec4<u32>(a.w,b.x,b.y,b.z);
+    let width=textureDimensions(rl_hit_samples_out).x;
+    let at_slot=vec2<i32>(vec2<u32>(slot%width,slot/width));
+    // Word 2: stratum (bits 0-7), strata (8-15), the lobe's GGX alpha as f16 (16-31).
+    let alpha=unpack2x16float(a.z>>16u).x;
+    // A rough lobe's hit whose cone covers the radiance cache's cell there takes the cell's
+    // outgoing radiance (RENDERLAB_RL_CACHE_HITS, reflection_cache_hits.wgsl), as inline hits do.
+    let cached=rl_cache_hit(record,origin,cone.x,cone.y,sqrt(alpha));
+    if cached.w>0.0 {
+        textureStore(rl_hit_samples_out,at_slot,vec4<f32>(rl_finite(expose(cached.rgb)),1.0));
+        return;
+    }
     // The inline loop's per-hit state (rl_reflection_prepare): this hit's share of its
     // pixel's strata, and its path regularization.
     rl_indirect_open();
     rl_reflection_hit=true;
-    rl_hit_stratum=a.z&0xffffu;
-    rl_hit_strata=max(a.z>>16u,1u);
+    rl_hit_stratum=a.z&0xffu;
+    rl_hit_strata=max((a.z>>8u)&0xffu,1u);
     rl_hit_variance=8.0*cone.y*cone.y;
-    let h=rl_hit_input(vec4<u32>(a.w,b.x,b.y,b.z),origin,d,cone.x,cone.y,pixel);
+    let h=rl_hit_input(record,origin,d,cone.x,cone.y,pixel);
     // LC1 at the hit: its own cluster where that walk is exact, as inline hits take it.
     rl_hit_lights_prepare(h.input.world);
     rl_load_parameters(h.batch);
     let hs=surface(h.input);
     let radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);
-    let width=textureDimensions(rl_hit_samples_out).x;
-    textureStore(rl_hit_samples_out,vec2<i32>(vec2<u32>(slot%width,slot/width)),vec4<f32>(radiance,1.0));
+    textureStore(rl_hit_samples_out,at_slot,vec4<f32>(radiance,1.0));
 }
