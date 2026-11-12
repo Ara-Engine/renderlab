@@ -104,16 +104,29 @@ const RL_SPLIT: [(&str, &str); 4] = [
         "        return soft/f32(visited);\n",
     ),
 ];
-/// U-RTVIS: `RENDERLAB_RL_HALF=1` traces half of a glossy receiver's strata a frame
-/// (reflections.wgsl RL_HALF_STRATA).
-fn rl_half(source: String) -> String {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var("RENDERLAB_RL_HALF").is_ok_and(|v| v == "1")) {
+/// U-RTVIS: `RENDERLAB_RL_SUBSET=D@R` traces every D-th stratum a frame of a glossy receiver of
+/// roughness at least R (reflections.wgsl RL_SUBSET). `RENDERLAB_RL_HALF=1` is the parked
+/// halving, `2@0.15`.
+fn rl_subset(source: String) -> String {
+    static SPEC: std::sync::OnceLock<Option<(u32, f32)>> = std::sync::OnceLock::new();
+    let spec = SPEC.get_or_init(|| {
+        let text = std::env::var("RENDERLAB_RL_SUBSET").ok().or_else(|| {
+            (std::env::var("RENDERLAB_RL_HALF").as_deref() == Ok("1")).then(|| "2@0.15".into())
+        })?;
+        let (d, r) = text.split_once('@').unwrap_or((&text, "0"));
+        Some((d.trim().parse().ok()?, r.trim().parse().ok()?))
+    });
+    let Some((divisor, rough)) = *spec else {
         return source;
-    }
-    let from = "const RL_HALF_STRATA:bool=false;";
-    assert_eq!(source.matches(from).count(), 1, "RENDERLAB_RL_HALF seam");
-    source.replacen(from, "const RL_HALF_STRATA:bool=true;", 1)
+    };
+    let pairs = [
+        ("const RL_SUBSET:u32=1u;".to_owned(), format!("const RL_SUBSET:u32={divisor}u;")),
+        ("const RL_SUBSET_ROUGH:f32=0.0;".to_owned(), format!("const RL_SUBSET_ROUGH:f32={rough:?};")),
+    ];
+    pairs.into_iter().fold(source, |source, (from, to)| {
+        assert_eq!(source.matches(&from).count(), 1, "RENDERLAB_RL_SUBSET seam");
+        source.replacen(&from, &to, 1)
+    })
 }
 fn rl_split(mut source: String) -> String {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -606,7 +619,7 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
             1,
         );
-        source = rl_half(rl_split(rl_hit_switches(source)));
+        source = rl_subset(rl_split(rl_hit_switches(source)));
     }
     let start = source.len();
     source.push_str(program);
