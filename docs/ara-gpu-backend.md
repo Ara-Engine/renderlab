@@ -44,6 +44,16 @@ The working notes this page replaces (every port step, its tests and its measure
   there. `on(gpu)` gives the engine and the device together as an `engine::Scene`.
   What it cannot honour it records once as a `Refusal { call, what }` and draws the
   rest.
+- **Frames in flight:** with read-back off (`set_readback(false)`), `render_view` returns
+  once its frame is submitted. One earlier frame may still run on the GPU while the next
+  records. Its times (`images(view).times`) are the newest finished frame's, one or two
+  frames late. A frame that reads anything back still waits for itself, and the calls
+  that read the GPU (`view_ids_packed`, `request_ids`, `capture_view`) wait for every
+  frame before them.
+- **Histograms:** `view_histogram(gpu, view, HistogramDesc)` bins the view's displayed
+  image by log luminance on the GPU and returns at once. `histograms(gpu)` hands over the
+  readings the GPU has finished, in order, at most four in flight. It is an exposure
+  meter's look at a frame without reading the frame back.
 
 ## What draws
 

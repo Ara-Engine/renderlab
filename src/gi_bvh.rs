@@ -4,14 +4,16 @@
 //! (`build`), or a cooked near field's far-field cut (`renderlab_asset::near_field`,
 //! docs/m7-g1c.md), whose placements also carry per-vertex near-field masks. `layout` and
 //! `mesh_words` pack the meshes' records and those masks into one storage buffer behind a
-//! flat instance list (a top level rebuilt on the CPU when transforms change,
-//! `instance_words`), which shaders/gi_rays_software.wgsl traverses.
+//! list of instance records (rebuilt on the CPU when transforms change, `instance_words`) and
+//! the top-level BVH over them (src/instance_bvh.rs, U-RTVIS), which
+//! shaders/gi_rays_software.wgsl traverses.
 //! P-MEM: the runtime upload omits fields that traversal never reads. Cooked BVHs,
 //! child/triangle order, position bits and near-field mask indices stay unchanged.
 use crate::asset::cluster_bvh::Bvh;
 use crate::{Error, Mat4};
 
-/// Words before the instance records; shaders/gi_rays_software.wgsl reads count at 0.
+/// Words before the instance records; shaders/gi_rays_software.wgsl reads the count at 0 and
+/// the top level's base and root at 1 and 2 (src/instance_bvh.rs).
 pub(crate) const HEADER_WORDS: usize = 16;
 /// One instance record; WGSL GI_INSTANCE_WORDS must match. Words 0-11 world-to-object
 /// rows, 12-17 world bounds, 18-21 the mesh's array offsets, 22 its root, 23 the
@@ -96,10 +98,11 @@ fn bounds(points: impl Iterator<Item = [f32; 3]>) -> ([f32; 3], [f32; 3]) {
     )
 }
 
-/// Word offsets of each mesh's arrays after the instance records, then the base word of
-/// each of its near placements' masks, and the total.
+/// Word offsets of each mesh's arrays after the instance records and their top level, then
+/// the base word of each of its near placements' masks, and the total.
 pub(crate) fn layout(meshes: &[&Blas], instances: usize) -> (Vec<[u32; 4]>, Vec<Vec<u32>>, usize) {
-    let mut at = HEADER_WORDS + instances * INSTANCE_WORDS;
+    let mut at =
+        HEADER_WORDS + instances * INSTANCE_WORDS + crate::instance_bvh::reserve(instances);
     let offsets = meshes
         .iter()
         .map(|b| {
@@ -298,7 +301,10 @@ mod tests {
         let (offsets, near, total) = layout(&[&blas], 2);
         let words = mesh_words(&[&blas], &offsets, &near, total);
         assert_eq!(words.len(), total);
-        assert_eq!(offsets[0][0] as usize, HEADER_WORDS + 2 * INSTANCE_WORDS);
+        assert_eq!(
+            offsets[0][0] as usize,
+            HEADER_WORDS + 2 * INSTANCE_WORDS + crate::instance_bvh::reserve(2)
+        );
         // Every field consumed by software traversal survives bit for bit; removed
         // node errors, leaf metadata and position.w are absent from the runtime ABI.
         let [nodes, leaves, positions, indices] = offsets[0].map(|v| v as usize);

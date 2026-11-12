@@ -61,102 +61,144 @@ fn gi_near_base(inst:u32) -> u32 {
     if inst>=gi_geometry[0] { return 0u; }
     return gi_geometry[16u+inst*GI_INSTANCE_WORDS+23u];
 }
-// Closest hit (or, with `any`, the first found) in (tmin, tmax) over every instance.
+// U-RTVIS: the bound instance i tests hits against. The flat loop visited instances in index
+// order and kept the first hit at a distance, so an equal-distance hit in a lower-index instance
+// than the current best must still win when a top level visits it later: one ulp above best.t.
+// In index order (i above best.inst, or no hit) this is best.t, the flat loop's bound exactly.
+fn gi_limit(best:GiHit, i:u32) -> f32 {
+    return select(best.t,bitcast<f32>(bitcast<u32>(best.t)+1u),best.hit && i<best.inst);
+}
+// One instance's part of gi_traverse: its world box, then its BVH, updating best. True when an
+// any-hit ray found a blocker.
+fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>, tmin:f32, any_hit:bool,
+    best:ptr<function,GiHit>, stack:ptr<function,array<u32,GI_BVH_STACK>>) -> bool {
+    let r=16u+i*GI_INSTANCE_WORDS;
+    if !gi_slab(origin,world_inv,gi_gv(r+12u),gi_gv(r+15u),tmin,gi_limit(*best,i)) { return false; }
+    let r0=vec4<f32>(gi_gv(r),gi_gf(r+3u));let r1=vec4<f32>(gi_gv(r+4u),gi_gf(r+7u));let r2=vec4<f32>(gi_gv(r+8u),gi_gf(r+11u));
+    // Unnormalized object-space direction: t is the same parameter in both spaces.
+    let o=vec3<f32>(dot(r0,vec4<f32>(origin,1.0)),dot(r1,vec4<f32>(origin,1.0)),dot(r2,vec4<f32>(origin,1.0)));
+    let d=vec3<f32>(dot(r0.xyz,direction),dot(r1.xyz,direction),dot(r2.xyz,direction));
+    let inv=gi_safe_inverse(d);
+    let nodes=gi_geometry[r+18u];let leaves=gi_geometry[r+19u];
+    let positions=gi_geometry[r+20u];let indices=gi_geometry[r+21u];
+    (*stack)[0]=gi_geometry[r+22u];
+    var sp=1u;
+    while sp>0u {
+        sp-=1u;
+        let child=(*stack)[sp];
+        if (child&GI_BVH_LEAF)!=0u {
+            // P-MEM runtime layout: only leaf index offset/count are uploaded.
+            let l=leaves+(child&~GI_BVH_LEAF)*2u;
+            let first=gi_geometry[l];let count=gi_geometry[l+1u];
+            // Two triangles a step: both triangles' indices, then both triangles'
+            // positions, load before either is tested, so a leaf costs half the dependent
+            // round trips. They are tested in leaf order, the second against the first's
+            // best.t: the same hits as one at a time. A lone last triangle loads itself
+            // twice and tests once.
+            for(var k=0u;k<count;k+=6u) {
+                let x=indices+first+k;
+                let two=k+3u<count;
+                let y=select(x,x+3u,two);
+                let ia=gi_geometry[x];let ib=gi_geometry[x+1u];let ic=gi_geometry[x+2u];
+                let ja=gi_geometry[y];let jb=gi_geometry[y+1u];let jc=gi_geometry[y+2u];
+                let a=gi_gv(positions+ia*3u);
+                let b=gi_gv(positions+ib*3u);
+                let c=gi_gv(positions+ic*3u);
+                let a2=gi_gv(positions+ja*3u);
+                let b2=gi_gv(positions+jb*3u);
+                let c2=gi_gv(positions+jc*3u);
+                let h=gi_triangle(o,d,a,b,c,tmin,gi_limit(*best,i));
+                if h.x>=0.0 {
+                    // The source-winding normal through the inverse transpose. r0-r2 are
+                    // the world-to-object rows, so the matrix with them as columns is it.
+                    let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b-a,c-a);
+                    *best=GiHit(true,h.x,unit_normal(n),i,vec3<u32>(ia,ib,ic),h.yz);
+                    if any_hit { return true; }
+                }
+                if two {
+                    let h2=gi_triangle(o,d,a2,b2,c2,tmin,gi_limit(*best,i));
+                    if h2.x>=0.0 {
+                        let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b2-a2,c2-a2);
+                        *best=GiHit(true,h2.x,unit_normal(n),i,vec3<u32>(ja,jb,jc),h2.yz);
+                        if any_hit { return true; }
+                    }
+                }
+            }
+            continue;
+        }
+        let n=nodes+child*16u;
+        let origin_q=gi_gv(n);let step=gi_gv(n+3u);
+        // The four children's entry distances (misses above best.t), then pushed far to
+        // near so the nearest is visited first: closest-hit rays shrink best.t early and
+        // first-hit rays reach a blocker sooner. The order is fixed by the distances.
+        var t0=3.4028235e38;var t1=3.4028235e38;var t2=3.4028235e38;var t3=3.4028235e38;
+        let c0=gi_geometry[n+6u];let c1=gi_geometry[n+7u];let c2=gi_geometry[n+8u];let c3=gi_geometry[n+9u];
+        let lx=gi_geometry[n+10u];let ly=gi_geometry[n+11u];let lz=gi_geometry[n+12u];
+        let hx=gi_geometry[n+13u];let hy=gi_geometry[n+14u];let hz=gi_geometry[n+15u];
+        for(var s=0u;s<4u;s+=1u) {
+            let next=select(select(select(c3,c2,s==2u),c1,s==1u),c0,s==0u);
+            if next==GI_BVH_EMPTY { continue; }
+            let shift=8u*s;
+            let lq=vec3<f32>(vec3<u32>(lx>>shift,ly>>shift,lz>>shift)&vec3<u32>(0xffu));
+            let hq=vec3<f32>(vec3<u32>(hx>>shift,hy>>shift,hz>>shift)&vec3<u32>(0xffu));
+            let t=gi_slab_near(o,inv,origin_q+step*lq,origin_q+step*hq,tmin,gi_limit(*best,i));
+            if s==0u { t0=t; } else if s==1u { t1=t; } else if s==2u { t2=t; } else { t3=t; }
+        }
+        // Four-element sorting network on (distance, child), descending. Distances are
+        // nonnegative, so their bits order like the floats; children stay integers.
+        var a0=vec2<u32>(bitcast<u32>(t0),c0);var a1=vec2<u32>(bitcast<u32>(t1),c1);
+        var a2=vec2<u32>(bitcast<u32>(t2),c2);var a3=vec2<u32>(bitcast<u32>(t3),c3);
+        if a0.x<a1.x { let x=a0;a0=a1;a1=x; }
+        if a2.x<a3.x { let x=a2;a2=a3;a3=x; }
+        if a0.x<a2.x { let x=a0;a0=a2;a2=x; }
+        if a1.x<a3.x { let x=a1;a1=a3;a3=x; }
+        if a1.x<a2.x { let x=a1;a1=a2;a2=x; }
+        for(var s=0u;s<4u;s+=1u) {
+            let e=select(select(select(a3,a2,s==2u),a1,s==1u),a0,s==0u);
+            if bitcast<f32>(e.x)<=gi_limit(*best,i) && sp<GI_BVH_STACK {
+                (*stack)[sp]=e.y;
+                sp+=1u;
+            }
+        }
+    }
+    return false;
+}
+const GI_TOP_STACK:u32=32u;
+// Closest hit (or, with `any`, the first found) in (tmin, tmax) over every instance: through
+// the top-level BVH over the instances' world boxes (src/instance_bvh.rs, header word 1 its
+// base, 2 its root), or the flat list when there is none (RENDERLAB_INSTANCE_BVH=0).
 fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hit:bool) -> GiHit {
     var best=GiHit(false,tmax,vec3<f32>(0.0),0xffffffffu,vec3<u32>(0u),vec2<f32>(0.0));
     var stack:array<u32,GI_BVH_STACK>;
     let world_inv=gi_safe_inverse(direction);
     let instances=gi_geometry[0];
-    for(var i=0u;i<instances;i+=1u) {
-        let r=16u+i*GI_INSTANCE_WORDS;
-        if !gi_slab(origin,world_inv,gi_gv(r+12u),gi_gv(r+15u),tmin,best.t) { continue; }
-        let r0=vec4<f32>(gi_gv(r),gi_gf(r+3u));let r1=vec4<f32>(gi_gv(r+4u),gi_gf(r+7u));let r2=vec4<f32>(gi_gv(r+8u),gi_gf(r+11u));
-        // Unnormalized object-space direction: t is the same parameter in both spaces.
-        let o=vec3<f32>(dot(r0,vec4<f32>(origin,1.0)),dot(r1,vec4<f32>(origin,1.0)),dot(r2,vec4<f32>(origin,1.0)));
-        let d=vec3<f32>(dot(r0.xyz,direction),dot(r1.xyz,direction),dot(r2.xyz,direction));
-        let inv=gi_safe_inverse(d);
-        let nodes=gi_geometry[r+18u];let leaves=gi_geometry[r+19u];
-        let positions=gi_geometry[r+20u];let indices=gi_geometry[r+21u];
-        stack[0]=gi_geometry[r+22u];
-        var sp=1u;
-        while sp>0u {
-            sp-=1u;
-            let child=stack[sp];
-            if (child&GI_BVH_LEAF)!=0u {
-                // P-MEM runtime layout: only leaf index offset/count are uploaded.
-                let l=leaves+(child&~GI_BVH_LEAF)*2u;
-                let first=gi_geometry[l];let count=gi_geometry[l+1u];
-                // Two triangles a step: both triangles' indices, then both triangles'
-                // positions, load before either is tested, so a leaf costs half the dependent
-                // round trips. They are tested in leaf order, the second against the first's
-                // best.t: the same hits as one at a time. A lone last triangle loads itself
-                // twice and tests once.
-                for(var k=0u;k<count;k+=6u) {
-                    let x=indices+first+k;
-                    let two=k+3u<count;
-                    let y=select(x,x+3u,two);
-                    let ia=gi_geometry[x];let ib=gi_geometry[x+1u];let ic=gi_geometry[x+2u];
-                    let ja=gi_geometry[y];let jb=gi_geometry[y+1u];let jc=gi_geometry[y+2u];
-                    let a=gi_gv(positions+ia*3u);
-                    let b=gi_gv(positions+ib*3u);
-                    let c=gi_gv(positions+ic*3u);
-                    let a2=gi_gv(positions+ja*3u);
-                    let b2=gi_gv(positions+jb*3u);
-                    let c2=gi_gv(positions+jc*3u);
-                    let h=gi_triangle(o,d,a,b,c,tmin,best.t);
-                    if h.x>=0.0 {
-                        // The source-winding normal through the inverse transpose. r0-r2 are
-                        // the world-to-object rows, so the matrix with them as columns is it.
-                        let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b-a,c-a);
-                        best=GiHit(true,h.x,unit_normal(n),i,vec3<u32>(ia,ib,ic),h.yz);
-                        if any_hit { return best; }
-                    }
-                    if two {
-                        let h2=gi_triangle(o,d,a2,b2,c2,tmin,best.t);
-                        if h2.x>=0.0 {
-                            let n=mat3x3<f32>(r0.xyz,r1.xyz,r2.xyz)*cross(b2-a2,c2-a2);
-                            best=GiHit(true,h2.x,unit_normal(n),i,vec3<u32>(ja,jb,jc),h2.yz);
-                            if any_hit { return best; }
-                        }
-                    }
-                }
-                continue;
-            }
-            let n=nodes+child*16u;
-            let origin_q=gi_gv(n);let step=gi_gv(n+3u);
-            // The four children's entry distances (misses above best.t), then pushed far to
-            // near so the nearest is visited first: closest-hit rays shrink best.t early and
-            // first-hit rays reach a blocker sooner. The order is fixed by the distances.
-            var t0=3.4028235e38;var t1=3.4028235e38;var t2=3.4028235e38;var t3=3.4028235e38;
-            let c0=gi_geometry[n+6u];let c1=gi_geometry[n+7u];let c2=gi_geometry[n+8u];let c3=gi_geometry[n+9u];
-            let lx=gi_geometry[n+10u];let ly=gi_geometry[n+11u];let lz=gi_geometry[n+12u];
-            let hx=gi_geometry[n+13u];let hy=gi_geometry[n+14u];let hz=gi_geometry[n+15u];
-            for(var s=0u;s<4u;s+=1u) {
-                let next=select(select(select(c3,c2,s==2u),c1,s==1u),c0,s==0u);
-                if next==GI_BVH_EMPTY { continue; }
-                let shift=8u*s;
-                let lq=vec3<f32>(vec3<u32>(lx>>shift,ly>>shift,lz>>shift)&vec3<u32>(0xffu));
-                let hq=vec3<f32>(vec3<u32>(hx>>shift,hy>>shift,hz>>shift)&vec3<u32>(0xffu));
-                let t=gi_slab_near(o,inv,origin_q+step*lq,origin_q+step*hq,tmin,best.t);
-                if s==0u { t0=t; } else if s==1u { t1=t; } else if s==2u { t2=t; } else { t3=t; }
-            }
-            // Four-element sorting network on (distance, child), descending. Distances are
-            // nonnegative, so their bits order like the floats; children stay integers.
-            var a0=vec2<u32>(bitcast<u32>(t0),c0);var a1=vec2<u32>(bitcast<u32>(t1),c1);
-            var a2=vec2<u32>(bitcast<u32>(t2),c2);var a3=vec2<u32>(bitcast<u32>(t3),c3);
-            if a0.x<a1.x { let x=a0;a0=a1;a1=x; }
-            if a2.x<a3.x { let x=a2;a2=a3;a3=x; }
-            if a0.x<a2.x { let x=a0;a0=a2;a2=x; }
-            if a1.x<a3.x { let x=a1;a1=a3;a3=x; }
-            if a1.x<a2.x { let x=a1;a1=a2;a2=x; }
-            for(var s=0u;s<4u;s+=1u) {
-                let e=select(select(select(a3,a2,s==2u),a1,s==1u),a0,s==0u);
-                if bitcast<f32>(e.x)<=best.t && sp<GI_BVH_STACK {
-                    stack[sp]=e.y;
-                    sp+=1u;
-                }
-            }
+    let top=gi_geometry[1];
+    if top==0u {
+        for(var i=0u;i<instances;i+=1u) {
+            if gi_instance(i,origin,direction,world_inv,tmin,any_hit,&best,&stack) { return best; }
         }
+        return best;
+    }
+    var nodes:array<u32,GI_TOP_STACK>;
+    nodes[0]=gi_geometry[2];
+    var sp=1u;
+    while sp>0u {
+        sp-=1u;
+        let item=nodes[sp];
+        if (item&GI_BVH_LEAF)!=0u {
+            if gi_instance(item&~GI_BVH_LEAF,origin,direction,world_inv,tmin,any_hit,&best,&stack) { return best; }
+            continue;
+        }
+        // Both children's boxes against a bound that keeps equal-distance ties (gi_limit).
+        let n=top+item*16u;
+        let bound=select(best.t,bitcast<f32>(bitcast<u32>(best.t)+1u),best.hit);
+        let t0=gi_slab_near(origin,world_inv,gi_gv(n),gi_gv(n+3u),tmin,bound);
+        let t1=gi_slab_near(origin,world_inv,gi_gv(n+6u),gi_gv(n+9u),tmin,bound);
+        let c0=gi_geometry[n+12u];let c1=gi_geometry[n+13u];
+        // The nearer child is popped first.
+        let near=t0<=t1;
+        if select(t0,t1,near)<=bound && sp<GI_TOP_STACK { nodes[sp]=select(c0,c1,near);sp+=1u; }
+        if select(t1,t0,near)<=bound && sp<GI_TOP_STACK { nodes[sp]=select(c1,c0,near);sp+=1u; }
     }
     return best;
 }

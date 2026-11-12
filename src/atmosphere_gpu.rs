@@ -1062,7 +1062,15 @@ impl Renderer {
     /// The atmosphere kernels for this frame, after the TLAS build and before shading: the
     /// fixed LUTs when the medium changed, the sky view and its mean, the aerial
     /// perspective, then volumetric fog.
-    pub(super) fn encode_atmosphere(&mut self, encoder: &mut wgpu::CommandEncoder, scene: u64) {
+    /// The atmosphere's passes. `mark` names their parts for RENDERLAB_PASS_LOG_DETAIL
+    /// (`atmosphere.aerial`, `.inject`, `.temporal`, `.integrate`; the sky LUTs and environment
+    /// stay in `atmosphere`).
+    pub(super) fn encode_atmosphere(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        scene: u64,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
+    ) {
         if !self.atmosphere.active {
             return;
         }
@@ -1105,34 +1113,53 @@ impl Renderer {
             pass.dispatch_workgroups(2, 2, 6);
             p.written = true;
         }
-        pass.set_pipeline(&k.aerial);
-        pass.set_bind_group(0, &**v.aerial.as_ref().unwrap(), &[]);
-        pass.dispatch_workgroups(v.grid[0].div_ceil(8), v.grid[1].div_ceil(8), 1);
+        drop(pass);
+        // U-RTVIS: one pass a part, so the pass log can name each (dispatch order unchanged).
+        let mut part = |encoder: &mut wgpu::CommandEncoder,
+                        name: &'static str,
+                        pipeline: &wgpu::ComputePipeline,
+                        group: &wgpu::BindGroup,
+                        groups: [u32; 3]| {
+            mark(encoder, name);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(name),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
+        };
+        let plane = [v.grid[0].div_ceil(8), v.grid[1].div_ceil(8), 1];
+        let cells = [
+            v.grid[0].div_ceil(4),
+            v.grid[1].div_ceil(4),
+            FROXEL_SLICES / 4,
+        ];
+        part(
+            encoder,
+            "atmosphere.aerial",
+            &k.aerial,
+            v.aerial.as_ref().unwrap(),
+            plane,
+        );
         if let (Some((inject, _)), Some(integrate)) = (&v.inject, &v.integrate) {
             let i = (av.frame % 2) as usize;
-            pass.set_pipeline(if v.inject.as_ref().unwrap().1.virtual_map {
+            let injection = if v.inject.as_ref().unwrap().1.virtual_map {
                 k.inject_virtual.as_ref().unwrap()
             } else {
                 &k.inject
-            });
-            pass.set_bind_group(0, &*inject[i], &[]);
-            pass.dispatch_workgroups(
-                v.grid[0].div_ceil(4),
-                v.grid[1].div_ceil(4),
-                FROXEL_SLICES / 4,
+            };
+            part(encoder, "atmosphere.inject", injection, &inject[i], cells);
+            let temporal = &v.temporal.as_ref().unwrap()[i];
+            part(encoder, "atmosphere.temporal", &k.temporal, temporal, cells);
+            part(
+                encoder,
+                "atmosphere.integrate",
+                &k.integrate,
+                &integrate[i],
+                plane,
             );
-            pass.set_pipeline(&k.temporal);
-            pass.set_bind_group(0, &*v.temporal.as_ref().unwrap()[i], &[]);
-            pass.dispatch_workgroups(
-                v.grid[0].div_ceil(4),
-                v.grid[1].div_ceil(4),
-                FROXEL_SLICES / 4,
-            );
-            pass.set_pipeline(&k.integrate);
-            pass.set_bind_group(0, &*integrate[i], &[]);
-            pass.dispatch_workgroups(v.grid[0].div_ceil(8), v.grid[1].div_ceil(8), 1);
         }
-        drop(pass);
         av.frame = av.frame.wrapping_add(1);
     }
 

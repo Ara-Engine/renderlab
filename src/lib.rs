@@ -24,6 +24,7 @@ mod decal;
 mod environment_lobes;
 mod gi_bvh;
 mod hardware_shadows;
+mod instance_bvh;
 mod instances;
 mod light_cluster;
 mod lighting;

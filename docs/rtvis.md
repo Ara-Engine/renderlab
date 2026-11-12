@@ -182,3 +182,41 @@ written; tools/rtvis/compare.py, tools/blobs.py):
   the same blobs per frame on and off (frame 0: 10714 px on, 11144 off).
 - Native-resolution crops of the most-changed tiles (on | off | settled) show no visible
   difference: D:/Coding/renderlab-work/unit-rtvis/crops.
+
+## Non-RT `atmosphere` on the fixtures (2026-11-12)
+Outpost spends 6.8 ms of a 100 ms non-RT frame in `atmosphere` and Showcase 2.5 ms. The
+fixtures spend 0.3 ms. With the stage now split under `RENDERLAB_PASS_LOG_DETAIL` (sky LUTs and
+environment stay in `atmosphere`; `.aerial`, `.inject`, `.temporal`, `.integrate`; one pass a
+part, byte-identical), medians in ms:
+
+| non-RT, sun 4 deg, fog on | sky | aerial | inject | temporal | integrate | cpu.wait |
+|---|---|---|---|---|---|---|
+| forest walk, frames pipelined | 0.09 | 0.04 | 0.15 | 0.03 | 0.03 | 0.04 |
+| forest walk, synchronous (`--every 1`) | 0.16 | 0.07 | 0.39 | 0.08 | 0.13 | 0.25 |
+| game flight, pipelined | 0.09 | 0.04 | 0.13 | 0.03 | 0.02 | 0.02 |
+
+Not reproduced, and the obvious scene-size causes are ruled out on the fixtures. The procedural
+environment's key holds the camera's altitude, so a camera that changes height rewrites the cube
+chain every frame, but the game flight's descent does exactly that at 0.3 ms. The froxel grid
+follows the resolution, not the scene. The new `cpu.wait` part marks the end of the early
+command buffer: before it, the GPU's wait for the CPU's GI and post preparation between the two
+submits was counted in `atmosphere` on non-RT, and in `visibility` on RT. game_scene keeps frames
+in flight, so it never waits there, but an embedder that captures or paces each frame can. What
+to look at next is one Outpost capture with `RENDERLAB_PASS_LOG_DETAIL=1`: `cpu.wait` large means
+the CPU's GI preparation (cheaper per-frame instance records), sky large means LUTs or
+environment rebuilt each frame (quantise the key), inject large means the fog's sun lookups.
+
+## Shading ablations on the fixtures (`RENDERLAB_ABLATE`, 2026-11-12)
+Shading stage medians, ms, frames 8-39, one visit each (frame span in brackets):
+
+| | base | reflections off | local_shadows off | gi off |
+|---|---|---|---|---|
+| game flight, RT | 9.2 (21.6) | 4.1 (16.4) | 5.2 (17.5) | 7.1 (13.2) |
+| game flight, non-RT | 18.6 (34.5) | 6.9 (22.9) | 7.8 (23.7) | 18.0 (22.6) |
+| forest walk, RT | 3.7 (21.1) | 3.7 (21.2) | 3.4 (20.8) | 1.9 (11.0) |
+| forest walk, non-RT | 4.2 (38.5) | 4.2 (38.6) | 2.7 (36.7) | 3.4 (11.4; 5 timed frames) |
+
+The game flight stands in for a reflective, lamp-lit scene: on non-RT, reflections and local
+shadows each take 11-12 ms of its 18.6 ms of shading. The two do not add up, so they share
+work (reflection hits shade with local shadows). The forest walk has no mirrors or lamps in
+view and is not a shading stand-in.

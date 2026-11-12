@@ -3028,10 +3028,16 @@ impl Renderer {
         let same = state.reflections.as_ref().is_some_and(|r| {
             r.meshes.len() == meshes.len()
                 && r.meshes.iter().zip(&meshes).all(|(a, b)| Arc::ptr_eq(a, b))
-                && r.records.len()
-                    == crate::reflection_software::HEADER_WORDS
-                        + traced.len() * crate::reflection_software::INSTANCE_WORDS
+                && r.records.len() == crate::reflection_software::records_words(traced.len())
         });
+        let previous = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .reflections
+            .as_ref()
+            .map_or(vec![], |r| r.records.clone());
         let records = |bases: &[[u32; 2]]| {
             let rows: Vec<_> = traced
                 .iter()
@@ -3043,6 +3049,14 @@ impl Renderer {
                 crate::reflection_software::HEADER_WORDS
                     + traced.len() * crate::reflection_software::INSTANCE_WORDS,
                 0,
+            );
+            // U-RTVIS: the top level over the written records (src/instance_bvh.rs).
+            crate::instance_bvh::place(
+                &mut words,
+                crate::reflection_software::HEADER_WORDS,
+                crate::reflection_software::INSTANCE_WORDS,
+                traced.len(),
+                &previous,
             );
             words
         };
