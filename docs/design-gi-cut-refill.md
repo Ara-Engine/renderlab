@@ -39,3 +39,37 @@ Expected on the Outpost cut, from the costs above: gi_update on the cut frame bo
 ## Not in this change
 - Seeding new cells from the surface cache: kept as the fallback if the coarse level shows.
 - The RT cut frame (visibility 13.6 -> 62.3 ms): that is the sun-shadow restart, U-RTVIS's step 3.
+
+## Measured (U-RTVIS, 2026-11-12): not ready as a default
+RTX 4070 SUPER, 1080p, release game_scene at main 776dcd0f, `RENDERLAB_GI="cut_refill=0|1"`, same
+binary, two interleaved visits (one on RT). Cuts: the game flight's orbit jump (`--diag cut=1`)
+and the forest walk turned 150 degrees in place (`--diag forest=1 --diag cut=turn`, new), both
+through `Engine::cut_view` at frame 24 (game_scene does call it). Tools: tools/rtvis/timing.py
+`refill`/`refillpics`/`gi`, tools/rtvis/compare.py `refill`, tools/blobs.py.
+
+`gi_update`, ms, from the frame before the cut (23) to cut+5; both visits agreed within 10 %:
+
+| | 23 | cut | +1 | +2 | +3 | +4 | +5 |
+|---|---|---|---|---|---|---|---|
+| non-RT forest, off | 54 | **1016** | 301 | 210 | 187 | 190 | 184 |
+| non-RT forest, on | 55 | 72 | 74 | 93 | 114 | **1307-1471** | 236 |
+| non-RT game, off | 4.1 | **8.4** | 4.8 | 4.7 | 4.7 | 4.9 | 4.8 |
+| non-RT game, on | 4.1 | 4.2 | 4.0 | 4.0 | 4.0 | **8.3** | 4.9 |
+| RT game, off | 2.5 | 3.7 | 2.9 | 2.9 | 2.9 | 2.9 | 2.9 |
+| RT game, on | 2.5 | 2.7 | 2.6 | 2.5 | 2.5 | 3.8 | 3.0 |
+
+- **Cost: the spike moves, it does not shrink.** The claim cap and the cut phases apply only
+  while `since_event < COARSE_CUT_FRAMES` (gi_cache.rs `cut_capped`, `spread`); at cut+4 the cap
+  returns to uncapped and every missing fine cell is created and fully traced in one frame. On
+  the forest that frame is larger than today's cut frame (1307-1471 against 1016 ms).
+- **Picture: blocks.** During the coarse frames the coarse cells show as rectangles on lit flat
+  faces: the game scene's arch lintel at cut+1, the forest's wall at cut+2, a blockier mottle on
+  the forest ground (crops: D:/Coding/renderlab-work/unit-rtvis/crops-refill, left on, right off).
+  blobs.py on the non-RT forest: cut frame 17,107 blob px on against 12,808 off; frame 0, where
+  the first frame's refill window also applies, 51,071 against 11,820. The game scene is even.
+  After the handover (cut+4 on) the frames match off closely.
+- **Suggested next step:** keep the claim cap and the per-cell direction spread until the
+  backlog after the cut drains (a frame whose claims stayed under the cap), not for a fixed four
+  frames, and answer pixels whose fine cell is missing from something finer than one coarser
+  level (the surface-cache seed listed under "Not in this change", or the cut frame's own
+  neighbouring cells), since the coarse level is what shows as blocks.
