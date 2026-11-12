@@ -139,6 +139,8 @@ pub enum Pass {
     IdResolve,
     /// One id layer packed bit-exact into an RGBA8 image (`shaders/id_pack.wgsl`).
     IdPack,
+    /// A displayed image's luminance histogram (`shaders/view_histogram.wgsl`).
+    ViewHistogram,
     /// Forty-step transmittance LUT.
     AtmosphereTransmittance,
     /// Multiple-scattering transfer LUT.
@@ -466,6 +468,7 @@ impl Pass {
                     .into()
             }
             Self::IdPack => include_str!("../shaders/id_pack.wgsl").into(),
+            Self::ViewHistogram => include_str!("../shaders/view_histogram.wgsl").into(),
             _ => POST.into(),
         }
     }
@@ -511,6 +514,7 @@ impl Pass {
                 | Self::AtmosphereFogTemporal
                 | Self::IdResolve
                 | Self::IdPack
+                | Self::ViewHistogram
                 | Self::PrimaryTrace
                 | Self::PrimaryTraceReceivers
                 | Self::PrimaryInteractive(_)
@@ -658,6 +662,7 @@ impl Pass {
             Self::AtmosphereFogTemporal => "at_fog_temporal",
             Self::IdResolve => "id_resolve",
             Self::IdPack => "id_pack",
+            Self::ViewHistogram => "view_histogram",
             Self::AtmosphereTransmittance => "at_transmittance_lut",
             Self::AtmosphereMultiscatter => "at_multiscatter_lut",
             Self::AtmosphereSky => "at_skyview_lut",

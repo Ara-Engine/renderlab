@@ -146,6 +146,8 @@ pub struct Engine {
     events: crate::Events,
     /// Id requests made so far: the next one's name.
     requests: u64,
+    /// Histograms in flight (`view_histogram`), oldest first.
+    histograms: Vec<super::histogram::Pending>,
     /// Meshes created so far: the next one's identity.
     meshes: u64,
     /// Materials created so far: the next one's identity.
@@ -218,6 +220,7 @@ impl Engine {
             ids: Default::default(),
             events: Default::default(),
             requests: 0,
+            histograms: Vec::new(),
             meshes: 0,
             materials: 0,
             environments: 0,
@@ -303,10 +306,59 @@ impl Engine {
     pub fn view_output(&self, view: ViewId) -> Option<&super::image::Texture> {
         self.view(view).ok()?.frames.output()
     }
+    /// Bins `view`'s last displayed image on the GPU as `desc` says and returns without
+    /// waiting; the reading comes from [`histograms`](Self::histograms) once the GPU has
+    /// finished it, usually a frame later. Refused while four are in flight, or before the
+    /// view has displayed a frame.
+    pub fn view_histogram(
+        &mut self,
+        gpu: &mut GpuDevice,
+        view: ViewId,
+        desc: super::histogram::HistogramDesc,
+    ) -> Result<u64, Error> {
+        if self.histograms.len() >= 4 {
+            return Err(Error::InvalidInput("four histograms are already in flight"));
+        }
+        let at = self.view_index(view)?;
+        let frame = FrameId(self.views[at].frame);
+        let image = self.views[at]
+            .frames
+            .output()
+            .ok_or(Error::InvalidInput("the view has displayed no frame yet"))?;
+        let submitted = super::histogram::submit(gpu, &self.cache, image, desc).map_err(fault)?;
+        self.requests += 1;
+        self.histograms.push(super::histogram::Pending::new(
+            self.requests,
+            view,
+            frame,
+            submitted,
+        ));
+        Ok(self.requests)
+    }
+    /// The histograms the GPU has finished since the last call, in request order.
+    pub fn histograms(
+        &mut self,
+        gpu: &mut GpuDevice,
+    ) -> Result<Vec<super::histogram::HistogramReading>, Error> {
+        let mut finished = Vec::new();
+        while let Some(pending) = self.histograms.first() {
+            match pending.take(gpu).map_err(fault)? {
+                Some(reading) => {
+                    finished.push(reading);
+                    self.histograms.remove(0);
+                }
+                None => break,
+            }
+        }
+        Ok(finished)
+    }
     /// Releases what the engine keeps on `gpu` (its frame sequences and pipelines) and
     /// stays usable: the scene is kept, and the next frame starts a new sequence and
     /// makes its pipelines again. What a host calls before it destroys the device.
     pub fn release(&mut self, gpu: &mut GpuDevice) -> anyhow::Result<()> {
+        for pending in self.histograms.drain(..) {
+            pending.drop_unread(gpu)?;
+        }
         self.restart();
         self.release_ended(gpu)?;
         std::mem::take(&mut self.targets).retire(gpu)?;
