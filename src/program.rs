@@ -202,8 +202,9 @@ pub(crate) const SOFTWARE_REFLECTION_GEOMETRY: &str =
 const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_software.wgsl");
 /// R1's two ray queries and their software replacements: the hit's light visibility, and
 /// the reflection ray itself, which yields the same hit record. The queries' declarations
-/// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed. Software hits have
-/// no hit distance, so they never read the radiance cache (reflection_cache_hits.wgsl).
+/// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed. The software hit keeps
+/// rs_trace's result (`rs`, U-RTVIS's seam): cache-terminated hits read its distance `rs.t`
+/// where the hardware path reads `hit.t`.
 const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 3] = [
     (
         "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,tmax,origin,l));\n    while rayQueryProceed(&query) {}\n    return select(1.0,0.0,rayQueryGetCommittedIntersection(&query).kind!=0u);\n",
@@ -211,11 +212,11 @@ const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 3] = [
     ),
     (
         "        rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));\n        while rayQueryProceed(&query) {}\n        let hit=rayQueryGetCommittedIntersection(&query);\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.kind!=0u {\n            let record=vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics));\n",
-        "        let hit=rs_closest(origin,d,receiver.epsilon,RL_FAR);\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.x!=0u {\n            let record=hit;\n",
+        "        let rs=rs_trace(origin,d,receiver.epsilon,RL_FAR,false);\n        let hit=rs.record;\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.x!=0u {\n            let record=hit;\n",
     ),
     (
         "            let cached=rl_cache_hit(record,origin,d,hit.t,width+spread*hit.t,rough);\n",
-        "            let cached=vec4<f32>(0.0);\n",
+        "            let cached=rl_cache_hit(record,origin,d,rs.t,width+spread*rs.t,rough);\n",
     ),
 ];
 /// Cache-terminated reflection hits (shaders/reflection_cache_hits.wgsl): a rough lobe's hit
@@ -604,14 +605,11 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             (true, false) => "fn rl_indirect_open() { gi_rx_valid=false; }\n",
             _ => "fn rl_indirect_open() {}\n",
         });
-        // Software hits have no hit distance; their seam never calls the lookup.
-        let hardware = reflection.contains("rayQueryInitialize");
-        reflection.push_str(
-            &match cache_hits_rough().filter(|_| indirect_calls && hardware) {
-                Some(rough) => CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", &format!("{rough:?}")),
-                None => CACHE_HITS_STUB.to_owned(),
-            },
-        );
+        // Hardware and software traces alike (the software seam passes rs_trace's distance).
+        reflection.push_str(&match cache_hits_rough().filter(|_| indirect_calls) {
+            Some(rough) => CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", &format!("{rough:?}")),
+            None => CACHE_HITS_STUB.to_owned(),
+        });
     }
     let view = declares(program, "fn", "view_dependence");
     let view_api = if view { VIEW_API } else { "" };
