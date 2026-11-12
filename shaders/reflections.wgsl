@@ -264,8 +264,11 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     rl_hit_variance=0.0;
     if shaded {rl_load_parameters(batch);}
     if valid==0u {return;}
+    // The bound needs a full lobe's strata (RL_GLOSSY_RAYS or more traced): over the one to
+    // three a weak reflector traces (RL_FULL_STRATA) it clamped ordinary variation, not rare
+    // targets (with two, the brighter held to the dimmer), and darkened the estimate.
     let lone=primary_frame.reflection.z;
-    if lone>0.0 && valid>1u {
+    if lone>0.0 && valid>1u && count>=RL_GLOSSY_RAYS {
         let rest=max(dot(sum,RL_LUMA)-top.w,0.0)*lone;
         if top.w>rest {sum-=top.rgb*(1.0-rest/top.w);}
     }
