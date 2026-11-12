@@ -1267,9 +1267,13 @@ impl Planner {
         // Bounce (G2): lighting events. The lights, the environment, the frame's program and
         // its draws' materials (stable ids) form the lighting key. A step after still frames
         // relights every cell (shaded this frame, then `gathers` gathers); a change on
-        // consecutive frames, a moved caster, and the `period` frames after either relight one
-        // fixed slot group a frame, one gather each (W2: a fixed rotation). The period holds
-        // that work to about `relight_cells` slots a frame (relight_period).
+        // consecutive frames and the `period` frames after it relight one fixed slot group a
+        // frame, one gather each (W2: a fixed rotation). The period holds that work to about
+        // `relight_cells` slots a frame (relight_period). A moved caster relights nothing
+        // globally: the scan re-traces the cells whose directions cross its swept bounds
+        // (gi_reach) and reshades those whose light rays it crosses (gi_light_reached), and
+        // their gathers carry the change to the cells that see them. Before this, any moving
+        // or deforming mesh (a skinned character, every frame) relit an eighth of the table.
         let mut relight = 0u32;
         let period = relight_period(c.slots, s.relight_cells);
         // Bounce (gathers, cell shading) is the tick's; later views trace their new cells
@@ -1277,12 +1281,11 @@ impl Planner {
         let bounce = bounce && tick;
         if bounce {
             let changed = self.light_key.is_some() && self.light_key != light_key;
-            let caster = !boxes.is_empty() && s.invalidate_casters;
             let all = changed && !self.light_streak;
-            let spread = !all && (changed || caster || self.relight_catchup > 0);
+            let spread = !all && (changed || self.relight_catchup > 0);
             self.relight_catchup = if all {
                 0
-            } else if changed || caster {
+            } else if changed {
                 period
             } else {
                 self.relight_catchup.saturating_sub(1)
@@ -2966,8 +2969,10 @@ impl Renderer {
         };
         // Bounce (G2): the lights, the environment, the frame's program and its draws'
         // materials (stable ids) form the lighting key.
-        // Which part of the light key changed since the last frame (measurement only).
-        if bounce {
+        // Which part of the light key changed since the last frame (measurement only: five
+        // more SHA-256 passes over the lights and program text, so only with RENDERLAB_GI_LOG).
+        static PARTS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if bounce && *PARTS.get_or_init(|| std::env::var_os("RENDERLAB_GI_LOG").is_some()) {
             let state = self.view.primary.as_ref().unwrap();
             let part = |bytes: &[&[u8]]| -> [u8; 32] {
                 let mut h = Sha256::new();
