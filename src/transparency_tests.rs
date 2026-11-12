@@ -280,6 +280,21 @@ fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
     s
 }
 
+/// A glass draw's instances share a raster pass until one overlaps an instance already in it,
+/// so a pane in front of another of the same draw is drawn over it, not over the colour from
+/// before the draw. Each span carries the rectangle the next one copies as its colour behind.
+#[test]
+fn overlapping_glass_instances_draw_one_over_another() {
+    let (a, b, c, d) = ([0, 0, 10, 10], [20, 0, 30, 10], [5, 5, 15, 15], [40, 0, 50, 10]);
+    assert_eq!(
+        instance_spans(&[a, b, c, d]),
+        vec![(0..2, [0, 0, 30, 10]), (2..4, [5, 0, 50, 15])]
+    );
+    assert_eq!(instance_spans(&[a, b, d]), vec![(0..3, [0, 0, 50, 10])]);
+    assert_eq!(instance_spans(&[a, a, a]).len(), 3);
+    assert_eq!(instance_spans(&[]), vec![(0..0, [0; 4])]);
+}
+
 #[test]
 fn pre_tp1_standard_is_exact() {
     use sha2::Digest;
