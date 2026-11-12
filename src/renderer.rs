@@ -1817,7 +1817,6 @@ impl Renderer {
         self.submissions += 1;
         if let (Some(hardware), Some(acceleration)) = (&mut self.hardware_shadows, &acceleration) {
             hardware.mesh_submitted(
-                &self.device,
                 &self.ledger,
                 acceleration.clone(),
                 self.submissions,
@@ -3689,7 +3688,6 @@ impl Renderer {
                     && seen.insert(Arc::as_ptr(a))
                 {
                     self.hardware_shadows.as_mut().unwrap().dynamic_submitted(
-                        &self.device,
                         &self.ledger,
                         a.clone(),
                         self.submissions,
@@ -3697,7 +3695,6 @@ impl Renderer {
                 }
             }
             self.hardware_shadows.as_mut().unwrap().scene_submitted(
-                &self.device,
                 &self.ledger,
                 self.submissions,
             );
