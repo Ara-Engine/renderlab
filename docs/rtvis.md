@@ -415,3 +415,32 @@ the history off. One stratum a frame folded over 8-16 frames is far fewer effect
 
 Getting the moving picture back needs spatial reuse across neighbours, which is
 docs/design-reflection-pass.md's resolve.
+
+### History while still, and the spatial resolve (2026-11-12, both off)
+Moving frames with the history read only under a still camera are byte-identical to main:
+- game flight (48 frames) and night lanterns (30 frames), both paths;
+- reflection_matched `--stage --metal-balls` frames 16/32/47, both paths.
+
+The lib suite passed with it on: 247 passed.
+
+Still frames are slightly further from the path tracer than main. The three most-changed 64x64
+tiles at the held pose (frame 47 of `--freeze 32`), RT:
+
+| | main | history | history, cap 16 | resolve | resolve, cap 16 |
+|---|---|---|---|---|---|
+| still | 7.71 / 11.72 / 2.17 | 8.11 / 12.11 / 2.90 | 8.11 / 11.99 / 2.83 | 7.79 / 12.07 / 2.53 | 7.73 / 11.95 / 2.36 |
+| moving, frame 16 | 3.12 / 4.37 / 6.41 | = main | = main | 6.64 / 7.16 / 9.11 | 8.19 / 7.76 / 9.93 |
+
+Non-RT is the same within 0.15. The resolve (`RENDERLAB_RL_RESOLVE=1`) also reads the history
+under motion. It averages each trusted pixel's new mean with its neighbours' previous means,
+edge-aware and clamped.
+
+Inline in the shading entry, a pixel can filter only the previous frame's neighbours, not this
+frame's samples. With one stratum a frame, that is far from main's 16 strata under TR1 while
+moving. Both are off by default. Moving glossy quality at a reduced ray count needs:
+- this frame's samples filtered after they exist, which is the reflection pass's resolve
+  (docs/design-reflection-pass.md);
+- reprojection by the reflected point.
+
+Crops: D:/Coding/renderlab-work/unit-rtvis/crops-gate2 (main | on | cap16 | res | res16 | path
+tracer).

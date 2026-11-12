@@ -35,8 +35,8 @@ const RL_GLOSSY_MAX:u32=16u;
 const RL_RAYS_PER_ROUGHNESS:f32=48.0;
 // U-RTVIS reflection history: without it (these stubs) every glossy receiver traces its full
 // set each frame. The wgpu renderer's primary shading modules replace the block with
-// shaders/reflections_history.wgsl (src/program.rs with_reflection_history;
-// RENDERLAB_RL_HISTORY=0 keeps the stubs). It reads history only under a still camera.
+// shaders/reflections_history.wgsl when RENDERLAB_RL_HISTORY=1 (src/program.rs
+// with_reflection_history; off by default). It reads history only under a still camera.
 // ---- rl history stubs ----
 const RL_HISTORY:bool=false;
 var<private> rl_hist_m2:f32;
