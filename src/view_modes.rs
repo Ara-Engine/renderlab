@@ -123,11 +123,11 @@ impl Renderer {
             Stage::Traced
         };
         let parameters = program::declares_parameters(&slot.source);
-        let composed = if list {
+        let composed = program::with_reflection_history(if list {
             program::compose_list(head, &slot.source, stage, parameters)
         } else {
             program::compose(head, &slot.source, stage, parameters)
-        };
+        });
         let source = program::view_variant(&composed.source, &slot.source, mode)?;
         let scopes = super::OperationScopes::new(&self.device);
         let descriptor = wgpu::ShaderModuleDescriptor {

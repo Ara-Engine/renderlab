@@ -986,7 +986,7 @@ impl Renderer {
             .iter()
             .map(|&id| {
                 let source = &self.program_slot(id).source;
-                program::compose_list(head, source, stage, program::declares_parameters(source))
+                program::with_reflection_history(program::compose_list(head, source, stage, program::declares_parameters(source)))
             })
             .collect();
         let abi = self.program_abi();
@@ -1054,8 +1054,8 @@ impl Renderer {
         for slot in &self.programs {
             let parameters = program::declares_parameters(&slot.source);
             let sources = [
-                program::compose(&heads[0], &slot.source, Stage::Traced, parameters),
-                program::compose(&heads[1], &slot.source, Stage::Traced, parameters),
+                program::with_reflection_history(program::compose(&heads[0], &slot.source, Stage::Traced, parameters)),
+                program::with_reflection_history(program::compose(&heads[1], &slot.source, Stage::Traced, parameters)),
                 film_accumulation::compose_shading(&temporal, &slot.source, parameters),
             ];
             let scopes = OperationScopes::new(&self.device);
