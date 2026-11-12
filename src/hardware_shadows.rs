@@ -78,8 +78,8 @@ pub struct HardwareShadowStats {
     /// Named allocator attribution for this renderer's live structures. Labels are
     /// unique across renderers, but these bytes do not establish physical residency.
     pub observed_as_bytes: Option<u64>,
-    /// All currently reported wgpu scratch allocations immediately after the latest
-    /// build submission; may include other internal work. None means unavailable.
+    /// All wgpu scratch allocations live when these stats are read (builds still in flight
+    /// keep theirs); may include other internal work. None means unavailable or none live.
     pub observed_build_scratch_bytes: Option<u64>,
 }
 
