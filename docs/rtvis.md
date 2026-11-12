@@ -483,3 +483,31 @@ Needed before it can hold:
 - a tighter clamp, with the per-pixel temporal variance kept;
 - the displayed value taken after this frame's resolve, not the previous one: shading reads the
   resolved specular in a second pass, or the lobe pre-pass.
+
+### The resolve, steps 1-2 and history length (2026-11-12 22:30 UTC, all off)
+- **Step 1, no lag** (e9b46f31): the shading runs twice with a phase uniform, a pre-pass that
+  leaves samples, then rl_resolve, then the shading pass showing this frame's resolved value.
+- **Step 2** (dd8fb6e4): 4 strata a frame on lobes of roughness 0.3 and up.
+- **History length** (`RENDERLAB_RL_RESOLVE_TUNE`).
+
+Worst RT tiles against the path tracer, `reflection_matched --stage --metal-balls` (non-RT the
+same within 0.1):
+
+| | today | step 1 | + step 2 (cap 16) | cap 4, clamp 1.0 | cap 2, clamp 0.75 |
+|---|---|---|---|---|---|
+| moving 16: gold / tile 2 / tile 3 | 3.12 / 5.78 / 5.93 | 8.07 / - / - | 7.05 / 7.18 / 8.23 | 4.27 / 6.67 / 6.86 | 3.31 / 6.54 / 6.55 |
+| moving 47: tile 1 / gold / tile 3 | 9.75 / 3.20 / 3.94 | 13.84 / 9.79 / - | 13.84 / 8.53 / 6.09 | 11.55 / 4.88 / 5.10 | 11.18 / 3.63 / 4.89 |
+| still: tile 1 / tile 2 / tile 3 | 7.71 / 2.80 / 5.70 | 9.30 / 3.95 / - | 9.30 / 3.95 / 6.19 | 8.56 / 3.50 / 6.16 | 8.30 / 3.36 / 6.17 |
+
+Most of the remaining error is stale history; a 2-frame history with a 0.75-sigma clamp comes
+close. Crops (D:/Coding/renderlab-work/unit-rtvis/crops-nl2: today | cap 16 | c4 | c2 | path
+tracer): c2 keeps slight blotches at the gold sphere's reflected crate and rim, and slight grain
+on the turntable. Next is the variance-guided a-trous (step 3) on top of c2.
+
+Cost (Showcase-like scene, 1080p moving, frame medians; the reference read 39.5 ms, so these are
+relative only):
+
+| | today | resolve |
+|---|---|---|
+| non-RT frame | 83 ms | 76.6-76.8 ms |
+| RT frame | 30.1 ms | 29.2 ms |
