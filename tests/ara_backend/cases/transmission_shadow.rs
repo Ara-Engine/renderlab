@@ -267,7 +267,12 @@ fn transmission_layers_reduce_to_the_nearest_and_the_rest() -> Result<()> {
     let clear = [1.0f32; 4];
     let layers: [[[f32; 4]; 4]; 3] = [
         [[0.5, 0.5, 0.5, 0.25], clear, [0.5, 0.25, 1.0, 0.75], clear],
-        [[0.25, 1.0, 0.5, 0.5], clear, [1.0, 0.5, 0.5, 0.125], [0.5, 0.5, 0.5, 0.5]],
+        [
+            [0.25, 1.0, 0.5, 0.5],
+            clear,
+            [1.0, 0.5, 0.5, 0.125],
+            [0.5, 0.5, 0.5, 0.5],
+        ],
         [[0.75, 0.5, 1.0, 0.125], clear, clear, clear],
     ];
     let size = [4, 1];
@@ -276,12 +281,21 @@ fn transmission_layers_reduce_to_the_nearest_and_the_rest() -> Result<()> {
     let mut graph = Graph::default();
     let mut rec = gpu.begin(Queue::Graphics);
     let pixels: Vec<[f32; 4]> = layers.iter().flatten().copied().collect();
-    let staging = upload(&mut gpu, &mut graph, &mut rec, input.image, &half_bytes(&pixels))?;
+    let staging = upload(
+        &mut gpu,
+        &mut graph,
+        &mut rec,
+        input.image,
+        &half_bytes(&pixels),
+    )?;
     let key = |binding| InputKey { group: 0, binding };
     let inputs = HeapBindings::new(
         &mut gpu,
         Pass::TransmissionReduce,
-        &[(key(0), Input::Image(&input)), (key(1), Input::Image(&output))],
+        &[
+            (key(0), Input::Image(&input)),
+            (key(1), Input::Image(&output)),
+        ],
     )?;
     inputs.import(&mut graph);
     kernel.record(&mut graph, &mut rec, &inputs, [size[0], size[1], 1])?;
@@ -312,9 +326,17 @@ fn transmission_layers_reduce_to_the_nearest_and_the_rest() -> Result<()> {
                 second = second.min(t[3]);
             }
         }
-        ensure!(got[x] == near, "texel {x}: nearest {:?}, want {near:?}", got[x]);
+        ensure!(
+            got[x] == near,
+            "texel {x}: nearest {:?}, want {near:?}",
+            got[x]
+        );
         let behind = [rest[0], rest[1], rest[2], second];
-        ensure!(got[4 + x] == behind, "texel {x}: rest {:?}, want {behind:?}", got[4 + x]);
+        ensure!(
+            got[4 + x] == behind,
+            "texel {x}: rest {:?}, want {behind:?}",
+            got[4 + x]
+        );
     }
     inputs.retire(&mut gpu, &mut graph)?;
     for b in [staging, read] {

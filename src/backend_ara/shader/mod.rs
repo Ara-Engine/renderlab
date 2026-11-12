@@ -320,7 +320,9 @@ impl Pass {
             Self::ProgramBins => {
                 crate::renderer::primary_ray_gpu::program_lists::bin_source().into()
             }
-            Self::TransmissionReduce => include_str!("../../../shaders/transmission_reduce.wgsl").into(),
+            Self::TransmissionReduce => {
+                include_str!("../../../shaders/transmission_reduce.wgsl").into()
+            }
             Self::HzbBase | Self::HzbReduce => {
                 include_str!("../../../shaders/visibility_buffer_hzb.wgsl").into()
             }
