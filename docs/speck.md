@@ -264,3 +264,30 @@ A fixed gather direction stands for a cone about 0.36 of the hit's distance wide
 ### For the ara-gpu port
 
 `Planner::begin` writes header word 27 (an f32: the hit cell's edge over the hit's distance); `IndirectSettings` has `hit_cone_cells`. No new buffer, texture or binding.
+
+## 9. The gather queue (open)
+
+A cell gets its sky term the frame it is made and its bounce light only after gathers: one gather after its hit cells have values, then up to two more as theirs settle. A frame gathers at most 32,768 cells (`gather_cells`); with more queued, the rotation serves slot % period == frame % period, the period being the next power of two that fits.
+
+### What a held camera shows (M, leases `speck-early`, `speck-first`, `speck-uncapped`, 1080p, the game scene with a steady fire, binary `dfc6fab3`)
+
+Distance of frame N from frame 32 of the same held camera, 120 px regions, 8-bit codes (mean, and the worst region):
+
+| | Frame 4 | Frame 8 | Frame 16 |
+|---|---|---|---|
+| RT | -0.91, 7.07 | -0.51, 4.03 | -0.18, 1.52 |
+| Non-RT (its sky term takes four frames first) | -1.14, 9.66 | -0.74, 6.25 | -0.28, 2.40 |
+| RT, no gather budget (`RENDERLAB_GI=gather_cells=4294967295`) | -0.55, 4.19 | -0.26, 2.08 | -0.09, 0.86 |
+| Non-RT, no gather budget | -1.18, 9.95 | -0.54, 4.64 | -0.18, 1.69 |
+
+- With the budget about 120,000 cells wait from frame 1 and about 30,000 are gathered a frame until frame 12; without it the queue is empty by frame 6 (RT), at up to 111,566 gathers in one frame.
+- **A bound for any schedule:** with no budget at all the held camera is still 2.1 codes from its settled frame in the worst region at frame 8, and 0.9 at frame 16. About half of the early darkness is therefore not the queue. What the other half is has not been found (TR1's history is a guess).
+- On the field walk's first pose 315,000 cells still wait at frame 16 and a frame gathers only about 19,700: the power-of-two period leaves up to half the budget unused.
+
+### Tried and dropped: a new pixel cell's first gather sooner (M)
+
+Gathering a pixel's cell that has no bounce value yet at 4, 16 or 64 times the rotation's rate changed nothing for the better: frame 8's worst region went from 4.03 to 4.72 codes on RT and from 6.25 to 7.18 on non-RT, and on the field pose frame 16 went from 2.10 to 3.82. Frame 1 then gathers 92,162 cells whose hit cells have no values yet, and the gathers that matter come no sooner. Not kept.
+
+### In progress, not merged (`230f157b`)
+
+The cells pixels read this frame rotate over the budget alone and the rest share a quarter of it more; the period is the smallest that fits the budget. Its early-frame and cut timings are not in yet.
