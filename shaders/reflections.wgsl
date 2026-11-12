@@ -270,7 +270,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     var valid=0u;
     var shaded=false;
     var squares=0.0;
-    // The traced strata's hit distances (RT only: software hits carry none), for the resolve's
+    // The traced strata's hit distances (software: the traversal's own), for the resolve's
     // reprojection by the reflected point.
     var rl_dist=0.0;var rl_dist_n=0.0;
     // PP1/SK1 integration: reuse the function-scope query above. Naga 30 emits an

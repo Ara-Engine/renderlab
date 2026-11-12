@@ -93,7 +93,7 @@ fn rl_history_placement_moved(slot:u32)->bool {
 }
 // The receiver's stored mean (rgb) and count (w, 0: no usable history).
 // RL_VIRTUAL (with RL_RESOLVE_PASS): a lobe below RL_VIRTUAL_ROUGH reads its history where its
-// reflected point (the receiver plus the mirror direction times the stored hit distance) was in
+// reflected point (the receiver plus the mirror direction times the stored hit distance, both paths) was in
 // the previous frame, if the same placement is there at a similar depth; otherwise, and for
 // rougher lobes and misses, where its surface point was.
 const RL_VIRTUAL:bool=true;
