@@ -72,9 +72,32 @@ pub(crate) const LIGHT_GROUPS: u32 = 1024;
 pub(crate) const FILTER_GROUPS: u32 = 1024;
 /// Unfiltered hot words 1-22 per slot, the filter's sources (shaders/gi_cache.wgsl gi_raw).
 const RAW_WORDS: u64 = 22;
-/// Slot groups a lighting, environment or caster change spreads relighting over while it
-/// keeps changing (and for as many frames after), as ENVIRONMENT_PERIOD does for the sky.
+/// The fewest slot groups a lighting or caster change spreads relighting over while it keeps
+/// changing (and for as many frames after), as ENVIRONMENT_PERIOD does for the sky.
 const RELIGHT_PERIOD: u32 = 8;
+/// The most slot groups (the shader reads the period and phase as bytes).
+const RELIGHT_PERIOD_MAX: u32 = 128;
+/// Table slots a continuing change relights a frame by default (`IndirectSettings::relight_cells`
+/// 0). With RELIGHT_PERIOD alone a 2^20-slot table relit 131k slots a frame, each reshaded and
+/// gathered once, for as long as anything moved or the sun drifted (Outpost's day cycle: GI
+/// 9.6 ms RT and 28.7 non-RT, 2026-11-12). Bounce then follows a continuing change within
+/// `period` frames (128 on 2^20 slots: about 2 s at 60 Hz); a step after still frames still
+/// relights every cell at once.
+const RELIGHT_CELLS: u32 = 8192;
+
+/// The relight rotation's period for a table of `slots`: the smallest power of two from
+/// RELIGHT_PERIOD to RELIGHT_PERIOD_MAX that holds a slot group to `cells` (0: RELIGHT_CELLS;
+/// u32::MAX: RELIGHT_PERIOD, the rate before the budget).
+fn relight_period(slots: u32, cells: u32) -> u32 {
+    let cells = match cells {
+        0 => RELIGHT_CELLS,
+        c => c,
+    };
+    slots
+        .div_ceil(cells.max(1))
+        .next_power_of_two()
+        .clamp(RELIGHT_PERIOD, RELIGHT_PERIOD_MAX)
+}
 /// Pixels per probe tile side (shaders/gi_cache.wgsl GI_PROBE_TILE).
 const PROBE_TILE: u32 = 8;
 /// The probe tile side; test builds that screen shader variants (RENDERLAB_GI_SHADERS) may
@@ -298,6 +321,11 @@ pub struct IndirectSettings {
     /// frames. 0 picks the default budget (GATHER_CELLS);
     /// u32::MAX gathers every queued cell each frame.
     pub gather_cells: u32,
+    /// The most table slots a continuing lighting or caster change relights a frame (reshaded,
+    /// then gathered once): the relight rotation's period is the table's slots over this, a
+    /// power of two from 8 to 128. 0 picks the default (RELIGHT_CELLS, 8192); u32::MAX keeps
+    /// the period at 8, the rate before the budget.
+    pub relight_cells: u32,
     /// Gather stride S (G2b; 1, 2 or 4): a gather traces the blocked directions k % S == 0 of
     /// the cell's fixed set, each weighted S times a direction's solid angle, so it costs 1/S of
     /// the rays. Bounce light is smoother than sky visibility; the subset is fixed per cell.
@@ -402,6 +430,7 @@ impl Default for IndirectSettings {
             bounce: true,
             gathers: 3,
             gather_cells: 0,
+            relight_cells: 0,
             gather_stride: 1,
             claim_cells: u32::MAX,
             // G3 (docs/m7-g3.md): sky and bounce filtered, contrast refine and bounce fill.
@@ -1238,9 +1267,11 @@ impl Planner {
         // Bounce (G2): lighting events. The lights, the environment, the frame's program and
         // its draws' materials (stable ids) form the lighting key. A step after still frames
         // relights every cell (shaded this frame, then `gathers` gathers); a change on
-        // consecutive frames, a moved caster, and the RELIGHT_PERIOD frames after either
-        // relight one fixed slot group a frame, one gather each (W2: a fixed rotation).
+        // consecutive frames, a moved caster, and the `period` frames after either relight one
+        // fixed slot group a frame, one gather each (W2: a fixed rotation). The period holds
+        // that work to about `relight_cells` slots a frame (relight_period).
         let mut relight = 0u32;
+        let period = relight_period(c.slots, s.relight_cells);
         // Bounce (gathers, cell shading) is the tick's; later views trace their new cells
         // into the tick's next gather queue.
         let bounce = bounce && tick;
@@ -1252,7 +1283,7 @@ impl Planner {
             self.relight_catchup = if all {
                 0
             } else if changed || caster {
-                RELIGHT_PERIOD
+                period
             } else {
                 self.relight_catchup.saturating_sub(1)
             };
@@ -1260,8 +1291,8 @@ impl Planner {
             if all {
                 relight = 1 << 31;
             } else if spread {
-                self.relight_phase = (self.relight_phase + 1) % RELIGHT_PERIOD;
-                relight = RELIGHT_PERIOD | (self.relight_phase << 8);
+                self.relight_phase = (self.relight_phase + 1) % period;
+                relight = period | (self.relight_phase << 8);
             }
             if relight != 0 {
                 flags |= 16;
@@ -3370,6 +3401,20 @@ mod tests {
 
     /// `cut_refill`: a camera cut opens a clear's refill window (claim cap, coarse cells,
     /// cut phases) for COARSE_CUT_FRAMES frames; off, a cut changes no header word.
+    #[test]
+    fn the_relight_rotation_holds_a_slot_group_to_the_budget() {
+        // 2^20 slots at the default 8192: 128 groups of 8192.
+        assert_eq!(relight_period(1 << 20, 0), 128);
+        // Small tables keep the old period of 8; huge ones stop at 128 (one byte in the shader).
+        assert_eq!(relight_period(1 << 14, 0), 8);
+        assert_eq!(relight_period(1 << 21, 0), 128);
+        // An explicit budget rounds the period up to a power of two.
+        assert_eq!(relight_period(1 << 20, 65536), 16);
+        assert_eq!(relight_period(1 << 20, 50000), 32);
+        // u32::MAX keeps the rate before the budget.
+        assert_eq!(relight_period(1 << 20, u32::MAX), 8);
+    }
+
     #[test]
     fn a_camera_cut_opens_the_refill_window_only_with_cut_refill() {
         let config = |cut_refill: bool| PlanConfig {
