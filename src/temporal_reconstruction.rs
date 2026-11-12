@@ -484,8 +484,10 @@ pub(in crate::renderer) struct Pipelines {
 pub(crate) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
     trace_source_with(soft_kernels, PENUMBRA_LISTING)
 }
-/// `trace_source` with the held budget's per-pixel history (HELD_SOURCE) in its two trace
-/// entries, on their HELD_* bindings: the wgpu renderer's module. Without listing only.
+/// `trace_source` with a per-pixel sun history in its two trace entries, on their HELD_*
+/// bindings: the wgpu renderer's module. Without listing only. Each entry's sun is
+/// `primary_sun` and its history word `primary_sun_store`: the sun visibility history
+/// (SUN_HISTORY_SOURCE, U-FIXED) by default, or U-RTVIS's held stop (`RENDERLAB_SUN_HISTORY=0`).
 pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
     let source = trace_source_with(soft_kernels, false)?;
     let estimate = "        visible=fresh_estimate(receiver,id.xy,size.x,0u);\n    }\n    textureStore(fresh_output,p,vec4<u32>(select((256u/tr1_rays)*visible,256u,visible==FRESH_SKIP)));";
@@ -505,13 +507,13 @@ pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
             estimate,
             &estimate
                 .replacen(
-                    "        visible=",
-                    "        rtvis_hold(receiver,trace.record.x-1u);\n        visible=",
+                    "        visible=fresh_estimate(receiver,id.xy,size.x,0u);",
+                    "        visible=primary_sun(receiver,trace.record.x-1u,id.xy,size.x);",
                     1,
                 )
                 .replacen(
                     "    textureStore(",
-                    "    rtvis_store(p,visible);\n    textureStore(",
+                    "    primary_sun_store(p,visible);\n    textureStore(",
                     1,
                 ),
         )
@@ -530,13 +532,51 @@ pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
             r,
             &r.replacen(
                 "{return;}",
-                &format!("{{if {inside} {{rtvis_store(vec2<i32>(id.xy),FRESH_SKIP);}}return;}}"),
+                &format!(
+                    "{{if {inside} {{primary_sun_store(vec2<i32>(id.xy),FRESH_SKIP);}}return;}}"
+                ),
                 1,
             ),
             1,
         );
     }
-    Ok(format!("{source}\n{HELD_SOURCE}"))
+    let sun = if sun_history() {
+        // The probes: this module's own fresh_estimate before TR1's seams, renamed, over
+        // `count` directions of the sequence from `first`.
+        let begin = soft_kernels.find("fn fresh_estimate(").unwrap();
+        let end = begin + soft_kernels[begin..].find("\n}\n").unwrap() + 3;
+        let header =
+            "fn fresh_estimate(receiver:Receiver, pixel:vec2<u32>, width:u32, lane:u32) -> u32 {";
+        let loop_seam =
+            "for(var j=lane;j<FRESH_DIRECTIONS;j+=select(FRESH_LANES,1u,FRESH_DIRECTIONS==8u))";
+        let probe = &soft_kernels[begin..end];
+        if !probe.starts_with(header) || probe.matches(loop_seam).count() != 1 {
+            return Err(Error::InvalidInput(
+                "the sun visibility history requires the fresh estimator's header and loop",
+            ));
+        }
+        let probe = probe
+            .replacen(
+                header,
+                "fn sun_probe(receiver:Receiver, pixel:vec2<u32>, width:u32, first:u32, count:u32) -> u32 {",
+                1,
+            )
+            .replacen(loop_seam, "for(var j=first;j<first+count;j+=1u)", 1);
+        format!("{probe}\n{SUN_HISTORY_SOURCE}")
+    } else {
+        HELD_SUN.to_owned()
+    };
+    Ok(format!("{source}\n{HELD_SOURCE}\n{sun}"))
+}
+/// U-RTVIS's held stop as the trace entries' `primary_sun`.
+const HELD_SUN: &str = "fn primary_sun(receiver:Receiver,slot:u32,pixel:vec2<u32>,width:u32)->u32 {rtvis_hold(receiver,slot);return fresh_estimate(receiver,pixel,width,0u);}
+fn primary_sun_store(p:vec2<i32>,visible:u32) {rtvis_store(p,visible);}";
+const SUN_HISTORY_SOURCE: &str = include_str!("../shaders/primary_sun_history.wgsl");
+/// U-FIXED measurement switch: `RENDERLAB_SUN_HISTORY=0` keeps the held stop instead of the
+/// sun visibility history (A/B against the old budget).
+pub(crate) fn sun_history() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_SUN_HISTORY").map_or(true, |v| v != "0"))
 }
 /// U-FIXED: `trace_source_held`'s module plus `primary_vb_sun`, the RT sun traced from the
 /// visibility buffer's receivers with the same budget, rotation and stops.
@@ -639,9 +679,10 @@ fn cold_probes() -> bool {
 pub(crate) const HELD_PROBES: u32 = 8;
 pub(crate) const HELD_STREAK: u32 = 4;
 /// The held budget's frame record (HELD_SOURCE `RtvisHeld`): the previous unjittered camera
-/// matrix, the words (enabled, probes, streak), and the moving placements' swept bounds with
-/// the sun's direction and widened disk tangent.
-pub(crate) const HELD_BYTES: usize = 128;
+/// matrix, the words (enabled, probes, streak, and the sun visibility history's use), the
+/// moving placements' swept bounds with the sun's direction and widened disk tangent, and
+/// this frame's unjittered camera matrix.
+pub(crate) const HELD_BYTES: usize = 192;
 const HELD_STOP: &str = "if j==tr1_held_probes && tr1_rays==primary_frame.sampling.x && visible==select(0u,j,tr1_held_lit) {tr1_rays=j;break;}";
 const HELD_SOURCE: &str = include_str!("../shaders/rtvis_held.wgsl");
 /// U-RTVIS measurement switch: `RENDERLAB_HELD_PROBES=0` traces every receiver's whole moving
@@ -1314,7 +1355,7 @@ impl Planner {
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
         let held = self.held_record(
             (i.moving_bounds, i.directional_disk_angle),
-            previous_matrix,
+            (previous_matrix, matrix),
             turn,
             &suns,
             listed,
@@ -1344,7 +1385,7 @@ impl Planner {
     fn held_record(
         &self,
         (moving_bounds, disk_angle): (Option<crate::shadow_plan::Bounds>, f32),
-        previous_matrix: Mat4,
+        (previous_matrix, matrix): (Mat4, Mat4),
         turn: f32,
         suns: &[Vec3],
         listed: bool,
@@ -1355,9 +1396,16 @@ impl Planner {
             && suns.len() == 1
             && held_probes()
             && HELD_PROBES < self.shadow_rays;
+        // U-FIXED: the sun visibility history continues on the same frames, at any budget.
+        let history = !self.reset && turn == 0.0 && !listed && suns.len() == 1 && sun_history();
         let mut bytes = Vec::with_capacity(HELD_BYTES);
         bytes.extend_from_slice(&matrix_bytes(previous_matrix));
-        for w in [u32::from(enabled), HELD_PROBES, HELD_STREAK, 0] {
+        for w in [
+            u32::from(enabled),
+            HELD_PROBES,
+            HELD_STREAK,
+            u32::from(history),
+        ] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
         // The swept-shadow test of shaders/temporal_zones.wgsl over the moving bounds.
@@ -1381,6 +1429,7 @@ impl Planner {
         for v in values {
             bytes.extend_from_slice(&v.to_ne_bytes());
         }
+        bytes.extend_from_slice(&matrix_bytes(matrix));
         debug_assert_eq!(bytes.len(), HELD_BYTES);
         bytes
     }
@@ -2405,15 +2454,20 @@ mod tests {
         // cold probes' check, and records uncovered pixels as no history.
         let held = trace_source_held(&kernels[1]).unwrap();
         assert_eq!(
-            held.matches("rtvis_hold(receiver,trace.record.x-1u);")
+            held.matches("visible=primary_sun(receiver,trace.record.x-1u,id.xy,size.x);")
                 .count(),
             2
         );
-        assert_eq!(held.matches("rtvis_store(p,visible);").count(), 2);
+        assert_eq!(held.matches("primary_sun_store(p,visible);").count(), 2);
         assert_eq!(
-            held.matches("rtvis_store(vec2<i32>(id.xy),FRESH_SKIP);")
+            held.matches("primary_sun_store(vec2<i32>(id.xy),FRESH_SKIP);")
                 .count(),
             2
+        );
+        // U-FIXED: the sun visibility history's probes trace `count` directions from `first`.
+        assert_eq!(
+            held.matches("for(var j=first;j<first+count;j+=1u)").count(),
+            usize::from(sun_history())
         );
         assert!(held.contains(&format!(
             "{COLD_PROBE_STOP}\n        {HELD_STOP}\n        {}",
@@ -2442,8 +2496,8 @@ mod tests {
             .map(|m| resolve.replace(RESOLVE, &mask_resolve(m)));
         // U-FIXED: the visibility-buffer sun asks and records once more, on the budget's estimate.
         let vb_sun = vb_sun_source(&kernels[1]).unwrap();
-        assert_eq!(vb_sun.matches("rtvis_hold(receiver,slot);").count(), 1);
-        assert_eq!(vb_sun.matches("rtvis_store(p,visible);").count(), 3);
+        assert_eq!(vb_sun.matches("primary_sun(receiver,slot,id.xy,size.x)").count(), 1);
+        assert_eq!(vb_sun.matches("primary_sun_store(p,visible);").count(), 3);
         let resolve_clone = resolve.clone();
         for source in [resolve, off, held, trace, PENUMBRA_LIST.to_owned(), vb_sun]
             .into_iter()
