@@ -849,9 +849,10 @@ impl Renderer {
         let instance_bindings = ledger.own(
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("fixed instance ABI"),
+                // Compute: per-pixel pane shading builds its vertices from the same placements.
                 entries: &[0, 1].map(|binding| wgpu::BindGroupLayoutEntry {
                     binding,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::COMPUTE,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Storage { read_only: true },
                         has_dynamic_offset: false,

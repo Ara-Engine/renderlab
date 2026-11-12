@@ -1311,6 +1311,216 @@ fn gpu_tp2_fixture() {
     }
 }
 
+/// Per-pixel panes (src/transparency_panes.rs) against the glass raster on one renderer: a
+/// sunlit floor, a red card and a glass pane cut into 512 triangles, 48 frames each way.
+/// The pictures agree within a few codes, as on the ara-gpu port (RL#48), and the pane
+/// path really ran (it built its pipelines). `RENDERLAB_TP1_OUT` keeps both pictures.
+#[test]
+#[ignore = "GPU; hardware ray queries and PRIMITIVE_INDEX; RENDERLAB_TP1_PATH rt|nonrt"]
+fn gpu_pane_pixels_match_the_raster() {
+    let path = env("RENDERLAB_TP1_PATH").unwrap_or_else(|| "rt".into());
+    let rt = path != "nonrt";
+    let (device, queue) = device(rt);
+    if !device.features().contains(wgpu::Features::PRIMITIVE_INDEX) {
+        eprintln!("PRIMITIVE_INDEX unavailable: per-pixel panes cannot run here");
+        return;
+    }
+    let mut r = if rt {
+        Renderer::new_with_hardware_shadows(
+            device,
+            queue,
+            FORMAT,
+            Limits::default(),
+            Default::default(),
+            HardwareShadowOptions::default(),
+            SOURCE,
+        )
+        .unwrap()
+    } else {
+        Renderer::new_with_options(
+            device,
+            queue,
+            FORMAT,
+            Limits::default(),
+            Default::default(),
+            SOURCE,
+        )
+        .unwrap()
+    };
+    r.set_primary_visibility(if rt {
+        PrimaryVisibility::Traced
+    } else {
+        PrimaryVisibility::VisibilityBuffer
+    })
+    .unwrap();
+    r.set_lighting_and_shadows(
+        &Lighting {
+            lights: vec![Light::Directional {
+                travel: Vec3::new(0.25, 0.5, -1.0),
+                lux: [20000.; 3],
+            }],
+            environment: [80.; 3],
+            exposure_stops: -12.0,
+        },
+        &Shadows {
+            requests: vec![ShadowRequest::Directional {
+                split_ends: vec![30.],
+            }],
+            directional_disk_angle: 0.01,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    r.set_atmosphere(crate::Atmosphere::off()).unwrap();
+    let (width, height) = (768, 512);
+    let target = r.device().create_texture(&wgpu::TextureDescriptor {
+        label: Some("pane pixels"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: FORMAT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let floor_vertices = [
+        vertex([-6., -5., 0.], [0., 0., 1.], [0., 0.]),
+        vertex([6., -5., 0.], [0., 0., 1.], [1., 0.]),
+        vertex([6., 7., 0.], [0., 0., 1.], [1., 1.]),
+        vertex([-6., 7., 0.], [0., 0., 1.], [0., 1.]),
+    ];
+    let floor_mesh = upload_mesh(&mut r, &floor_vertices, &[0, 1, 2, 0, 2, 3]);
+    let (card_vertices, card_indices) = pane(3.4, 2.6, 1);
+    let card_mesh = upload_mesh(&mut r, &card_vertices, &card_indices);
+    let (vertices, indices) = pane(3.4, 2.6, 16);
+    let pane_mesh = upload_mesh(&mut r, &vertices, &indices);
+    let ground = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [0.75, 0.75, 0.75, 1.],
+            double_sided: true,
+            roughness: 0.7,
+            ..Default::default()
+        },
+    );
+    let red = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [0.8, 0.02, 0.01, 1.],
+            double_sided: true,
+            roughness: 0.8,
+            ..Default::default()
+        },
+    );
+    let glass = create_material(
+        &mut r,
+        &MaterialDescriptor {
+            base_color: [0.35, 0.85, 0.5, 1.],
+            double_sided: true,
+            thin: true,
+            roughness: 0.015,
+            transparency: Some(crate::Transparency {
+                opacity: 0.08,
+                ior: 1.5,
+                thickness: 0.02,
+            }),
+            ..Default::default()
+        },
+    );
+    let mut floor = upload_instances(&mut r, &[Mat4::IDENTITY]);
+    let mut card =
+        upload_instances(
+            &mut r,
+            &[Mat4::from_translation(Vec3::new(-1.0, -2.5, 0.8))
+                * Mat4::from_scale(Vec3::splat(0.35))],
+        );
+    // Two pane instances, one in front of the other, so instances shade in order.
+    let mut panes_instances = upload_instances(
+        &mut r,
+        &[
+            Mat4::IDENTITY,
+            Mat4::from_translation(Vec3::new(0.6, -1.2, 0.3)),
+        ],
+    );
+    let camera = Camera::look_at(
+        Vec3::new(4., -7., 4.),
+        Vec3::new(0., 0.7, 0.8),
+        Vec3::Z,
+        55f32.to_radians(),
+        0.05,
+        50.,
+    )
+    .unwrap();
+    let mut pictures = Vec::new();
+    for pixels in [true, false] {
+        r.transparency.pane_pixels = Some(pixels);
+        for _ in 0..48 {
+            let mut draws = vec![
+                Draw::new(&floor_mesh, &mut floor).with_material(&ground),
+                Draw::new(&card_mesh, &mut card).with_material(&red),
+                Draw::new(&pane_mesh, &mut panes_instances).with_material(&glass),
+            ];
+            while r
+                .try_render_view(&target, &camera, &mut draws, ViewMode::Lit)
+                .unwrap()
+                .is_none()
+            {
+                r.test_drain("pane pixels admission");
+            }
+        }
+        r.test_drain("pane pixels capture");
+        if pixels {
+            assert!(
+                r.transparency.glass.iter().any(|g| g.pane.is_some()),
+                "the pane path did not build its pipelines"
+            );
+        }
+        pictures.push(read_texture(&r, &target, 4));
+    }
+    if let Some(out) = env("RENDERLAB_TP1_OUT") {
+        let out = PathBuf::from(out);
+        std::fs::create_dir_all(&out).unwrap();
+        write_png(
+            &out.join(format!("{path}-pane-pixels.png")),
+            width,
+            height,
+            &pictures[0],
+        );
+        write_png(
+            &out.join(format!("{path}-pane-raster.png")),
+            width,
+            height,
+            &pictures[1],
+        );
+    }
+    let (mut over_one, mut worst) = (0usize, 0u8);
+    for (a, b) in pictures[0]
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(pictures[1].as_chunks::<4>().0)
+    {
+        let d = a
+            .iter()
+            .zip(b)
+            .take(3)
+            .map(|(x, y)| x.abs_diff(*y))
+            .max()
+            .unwrap();
+        worst = worst.max(d);
+        over_one += usize::from(d > 1);
+    }
+    eprintln!("pane pixels against the raster ({path}): {over_one} px over 1 code, worst {worst}");
+    assert!(
+        worst <= 4 && over_one * 1000 <= (width * height) as usize,
+        "{over_one} px over 1 code, worst {worst}"
+    );
+}
+
 /// Reads an emitter's particles back: (position, age) and (velocity, lifetime) per slot.
 fn read_particles(r: &Renderer, emitter: usize) -> Vec<([f32; 4], [f32; 4])> {
     let e = &r.transparency.emitters[emitter];
