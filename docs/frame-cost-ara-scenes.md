@@ -27,6 +27,46 @@ Today's numbers: Ara lease 5 (Renderlab 835701d4, clean, five rounds) and earlie
 | post | 0.2 | 0.64 | 0.2 | 0.2 | | |
 | **frame** | **29.8 / 35.2** | **4.0 / 4.5** | **about 1.5-2** | **about 4** | | |
 
+**The measured floor (2026-11-12, perf7, ara-integration perf/table-floor.md):** Ara main 4ff23f14a, pin 835701d4, 1080p, moving, 5 interleaved rounds, clean lease. Unity URP on the same scene: 0.66 ms.
+
+| Showcase, ms (RT / non-RT) | default | reflections, gi off | + local_shadows, media off | + post, tr1 off (the floor) | floor target |
+|---|---|---|---|---|---|
+| frame | 29.41 / 34.72 | 12.39 / 8.20 | 11.72 / 8.51 | **9.41 / 5.06** | 1.5-2 |
+| visibility | 3.78 / 0.50 | 4.27 / 0.89 | 4.27 / 0.93 | 3.17 / 0.95 | 0.3 / 0.3 |
+| sun_shadow (non-RT) | - / 0.46 | - / 0.69 | - / 0.70 | - / 0.71 | - / 0.3 |
+| skinning (RT: plus the BLAS update) | 0.78 / 0.05 | 1.28 / 0.07 | 1.23 / 0.07 | 1.53 / 0.07 | 0.1 |
+| shading | 22.02 / 27.06 | 3.18 / 2.57 | 2.72 / 2.40 | 3.26 / 2.57 | 0.4 |
+| transparency | 0.68 / 0.45 | 0.95 / 0.73 | 0.88 / 0.74 | 1.30 / 0.70 | 0.2 |
+| tr1 | 1.41 / 1.10 | 2.19 / 2.29 | 2.19 / 2.58 | 0 | 0.4 (on) |
+| atmosphere | 0 / 3.57 | 0 / 0.31 | 0 / 0.51 | 0 / 0.02 | 0.2 |
+| gi | 0.82 / 1.34 | 0 | 0 | 0 | - |
+| still GPU / wall per frame | 19.96 / 22.96 (RT) | 5.16 / 8.43 | 4.97 / 7.71 | 3.58 / 6.70 (RT), 2.87 / 5.67 (non-RT) | wall = GPU |
+
+At the floor the frame is 14 times URP on RT and 8 times on non-RT. Four fixed costs, paid by every scene, make up most of it:
+
+1. **Base shading, 2.6-3.3 ms** for a sun and two unshadowed spots, against 0.65 ms for the quarry's whole stage. What it contains is not priced on the RTX yet. On the M5, textures are 0.8 and the BRDF 1.3, and the rest is the entry and the decode. Candidates where Showcase differs from the quarry:
+   - textured materials, sampled with derivatives from the visibility-buffer decode (the quarry has vertex colours);
+   - specular AA;
+   - the per-light panes transmission lookup (`light_transmission`);
+   - the cluster walk;
+   - the environment terms (DFG, prefiltered map);
+   - one program's entry over several Ara materials through MP1's slot table.
+
+   Mechanism: price it first, with RL#50's term switches (`shading.without_*` under `RENDERLAB_PASS_LOG_DETAIL`) at the floor row on the RTX, then cut the largest terms. Owner: the Mac GPU thread (program_api.wgsl, programs/*). It can start the price while `reflection_hits` waits for `rl_trace`. Target 0.4-0.6.
+2. **RT visibility 3.17 ms and skinning 1.53 ms, against non-RT's 0.95 and 0.07.** RT traces a camera ray per pixel. Non-RT rasterizes a visibility buffer and pays 0.71 for the sun.
+   - Mechanism (a): the visibility buffer on the RT path too (`PrimaryVisibility::VisibilityBuffer` exists; engine/mod.rs picks `Traced` for `HardwareRt`), with hardware sun rays from the buffer's positions. The held and cold probe logic moves with it; today it exists only under `Traced` (primary_ray_gpu.rs HeldTargets).
+   - Mechanism (b): skinned BLAS updated in place (refit, allow-update flags) instead of rebuilt. Find why skinning grows from 0.78 to 1.53 as other passes switch off: if it is waiting on or overlapping other work, the cost is not the skinning itself.
+   - Worth about 3.5 ms of the 9.4. Owner: proposed new unit U-FIXED (below). Target: visibility 0.3 plus the sun's 0.3, skinning 0.1-0.2.
+3. **Transparency, 1.30 / 0.70 ms** for five glass and three blend primitives. Mechanism: the per-pixel pane shading RL#48 gave the ara-gpu port (8.06 to 0.63 ms on the M5), on the wgpu path too. Owner: the Mac GPU thread, after `reflection_hits`. Target 0.2.
+4. **TR1, 2.2-2.6 ms when on, against 0.53 on the quarry**, plus 1.1 ms of RT visibility: visibility is 4.27 with TR1 and 3.17 without. Shading does not run at a reduced rate with TR1 (3.18 on, 3.26 off), so on this scene TR1 is a pure cost.
+   - **What it buys:** anti-aliasing of edges and specular, and the history every stochastic pass relies on: the held and cold sun probes, the reflection strata, GI noise, soft local shadows. In the full frame it is structural; at the features-off floor it buys only anti-aliasing.
+   - Mechanism: price TR1's parts on Showcase (detail marks): motion vectors for the skinned meshes, the history of transparent pixels, disocclusion on many small objects. Find why jitter costs RT visibility 1.1 ms. Native-rate shading with a cheap AA (SMAA or FXAA, about 0.2-0.3 ms at 1080p) is measured only as a named comparison, judged on crops for aliasing and flicker against the reference. TR1 stays the default unless that alternative is visibly no worse in motion.
+   - Owner: U-FIXED. Target 0.4-0.5.
+
+Also measured:
+- **Non-RT atmosphere shares work with GI:** 3.57 ms with GI on, 0.31 with it off. The `atmosphere.*` and `cpu.wait` detail marks name the part. Owner: U-RTVIS (atmosphere*), with GI on Outpost.
+- **CPU:** the still wall frame is about twice the GPU frame at the floor (3.58 ms GPU against 6.70 wall on RT, 2.87 against 5.67 on non-RT, 0.30 of it handoff). So about 3 ms a frame goes to CPU and presenter work. `FrameReport::cpu` (src/observe.rs: preparation, visibility, packing, upload, encode, submit, poll, and the shadow parts) gives Renderlab's share once the integration thread logs it beside the wall time and the bridge's own extraction and sync time. That limit binds once the GPU frame is under about 6 ms. Owner: root reads the split, then assigns.
+
 The floor adds to about 2 ms, not 1: a visibility buffer, a reconstruction and post at the quarry's own costs already take about 1 ms. Going below needs TR1 and post priced against URP's (no temporal reconstruction, MSAA instead), which is a picture question for later.
 
 **Outpost** (98 mesh instances of 53 models plus about 14M foliage triangles a frame, 3.1M prop triangles, 1,108 instances for software rays, 22 lights: sun plus 21 shadowed local lights, twelve of them 65 lm 3 m markers, all radius 0, 1 skinned character):
