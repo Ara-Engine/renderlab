@@ -1336,7 +1336,7 @@ impl Renderer {
             .as_ref()
             .is_none_or(|t| t.world.texture.size() != size)
         {
-            self.ensure_fresh_targets(size, false);
+            self.ensure_fresh_targets(size);
         }
         let primary = self
             .view

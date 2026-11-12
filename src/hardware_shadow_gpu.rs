@@ -59,15 +59,10 @@ struct Placement {
     blas: Arc<BlasAllocation>,
     model: [u32; 16],
 }
-impl Placement {
-    fn same(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.mesh, &other.mesh)
-            && Arc::ptr_eq(&self.blas, &other.blas)
-            && self.model == other.model
-    }
-}
 struct SceneAcceleration {
     tlas: Owned<wgpu::Tlas>,
+    /// Built with ALLOW_UPDATE for skinned placements.
+    dynamic: bool,
     bind: Owned<wgpu::BindGroup>,
     placements: Vec<Placement>,
     _estimated: Allocation,
@@ -91,6 +86,8 @@ pub(super) struct HardwareState {
     pending: Vec<(u64, PendingBuild)>,
     renderer_label: u64,
     next_label: u64,
+    /// Counts TLAS objects (not builds): bind groups over the scene key on it.
+    generation: u64,
     accounting_available: bool,
     pub stats: HardwareShadowStats,
 }
@@ -182,6 +179,7 @@ impl HardwareState {
             pending: vec![],
             renderer_label: NEXT_RENDERER_LABEL.fetch_add(1, Ordering::Relaxed),
             next_label: 0,
+            generation: 0,
             accounting_available: device.generate_allocator_report().is_some(),
             stats: HardwareShadowStats::default(),
         }
@@ -434,33 +432,61 @@ impl HardwareState {
         let mut placements =
             Self::placements(draws, device.limits().max_tlas_instance_count, casters)?;
         let (scene, scratch) = scene_estimate(placements.len())?;
+        // Each mesh once; placements take a compacted BLAS only when one was published.
+        let compactions = self.stats.blas_compactions;
+        let mut meshes = std::collections::HashSet::new();
         for placement in &placements {
-            self.compact_mesh(&placement.mesh, gpu, ledger, scene + scratch);
+            if meshes.insert(Arc::as_ptr(&placement.mesh)) {
+                self.compact_mesh(&placement.mesh, gpu, ledger, scene + scratch);
+            }
         }
-        for placement in &mut placements {
-            placement.blas = placement.mesh.blas.lock().unwrap().clone();
+        if self.stats.blas_compactions != compactions {
+            for placement in &mut placements {
+                placement.blas = placement.mesh.blas.lock().unwrap().clone();
+            }
         }
-        if !placements.iter().any(|p| p.mesh.dynamic)
-            && self.active.as_ref().is_some_and(|active| {
-                active.placements.len() == placements.len()
-                    && active
-                        .placements
-                        .iter()
-                        .zip(&placements)
-                        .all(|(a, b)| a.same(b))
-            })
-        {
-            return Ok(false);
+        let dynamic_scene = placements.iter().any(|p| p.mesh.dynamic);
+        // U-FIXED (audit 3.11): the same meshes and BLAS generations rebuild into the
+        // active TLAS object; only moved placements rewrite their instance. Queue order
+        // keeps earlier flights' reads before this build, as for the skinned BLASes.
+        let reusable = self.active.as_ref().is_some_and(|active| {
+            active.dynamic == dynamic_scene
+                && active.placements.len() == placements.len()
+                && active.placements.iter().zip(&placements).all(|(a, b)| {
+                    Arc::ptr_eq(&a.mesh, &b.mesh) && Arc::ptr_eq(&a.blas, &b.blas)
+                })
+        });
+        if reusable {
+            let active = self.active.as_ref().unwrap();
+            let moved: Vec<usize> = (0..placements.len())
+                .filter(|&i| active.placements[i].model != placements[i].model)
+                .collect();
+            if moved.is_empty() && !dynamic_scene {
+                return Ok(false);
+            }
+            let dynamic_scratch = Self::dynamic_scratch(&placements)?;
+            self.admit(
+                ledger,
+                scratch
+                    .checked_add(dynamic_scratch)
+                    .ok_or(Error::InvalidInput("TLAS estimate overflow"))?,
+            )?;
+            let active = self.active.as_mut().unwrap();
+            for &i in &moved {
+                let p = &placements[i];
+                let model = Mat4::from_cols_array(&p.model.map(f32::from_bits));
+                active.tlas[i] = Some(wgpu::TlasInstance::new(
+                    &p.blas.blas,
+                    row_transform(model),
+                    i as u32,
+                    255,
+                ));
+            }
+            active.placements = placements;
+            return Ok(true);
         }
         let (estimate, scratch) = scene_estimate(placements.len())?;
-        let mut dynamic = std::collections::HashSet::new();
-        let dynamic_scratch = placements
-            .iter()
-            .filter(|p| p.mesh.dynamic && dynamic.insert(Arc::as_ptr(&p.mesh)))
-            .try_fold(0u64, |n, p| {
-                n.checked_add(mesh_estimate(u64::from(p.mesh.size.index_count.unwrap()) / 3)?.1)
-                    .ok_or(Error::InvalidInput("dynamic BLAS scratch overflow"))
-            })?;
+        let dynamic_scratch = Self::dynamic_scratch(&placements)?;
         self.admit(
             ledger,
             estimate
@@ -469,8 +495,8 @@ impl HardwareState {
                 .ok_or(Error::InvalidInput("TLAS estimate overflow"))?,
         )?;
         let label = self.label("TLAS");
-        // wgpu 30 implements TLAS rebuild, not refit. Only changed placements reach here;
-        // immutable BLAS geometry is always reused. A new generation protects prior flights.
+        // wgpu 30 implements TLAS rebuild, not refit. A changed placement count, mesh or
+        // BLAS generation needs a new object; immutable BLAS geometry is always reused.
         let mut tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
             label: Some(&label),
             max_instances: placements.len().max(1) as u32,
@@ -512,8 +538,10 @@ impl HardwareState {
             ResourceKind::BindGroup,
         );
         let observed = self.observed(device, ledger, &label);
+        self.generation += 1;
         let next = SceneAcceleration {
             tlas: ledger.own(tlas, ResourceKind::Tlas),
+            dynamic: dynamic_scene,
             bind,
             placements,
             _estimated: ledger.allocate(AllocationKind::HardwareAsEstimate, estimate),
@@ -553,6 +581,22 @@ impl HardwareState {
                     .try_fold(0u64, |sum, a| sum.checked_add(a.size))
                     .filter(|n| *n > 0)
             });
+    }
+    /// Scratch for the skinned BLASes this scene rebuilds, each mesh once.
+    fn dynamic_scratch(placements: &[Placement]) -> Result<u64, Error> {
+        let mut dynamic = std::collections::HashSet::new();
+        placements
+            .iter()
+            .filter(|p| p.mesh.dynamic && dynamic.insert(Arc::as_ptr(&p.mesh)))
+            .try_fold(0u64, |n, p| {
+                n.checked_add(mesh_estimate(u64::from(p.mesh.size.index_count.unwrap()) / 3)?.1)
+                    .ok_or(Error::InvalidInput("dynamic BLAS scratch overflow"))
+            })
+    }
+    /// The active TLAS object's generation, counting one prepared this frame: the key for
+    /// bind groups over the scene. Rebuilds into the same object keep it.
+    pub fn scene_generation(&self) -> u64 {
+        self.generation
     }
     pub fn scene(&self) -> &wgpu::Tlas {
         &self.active.as_ref().unwrap().tlas

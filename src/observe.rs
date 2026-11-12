@@ -346,6 +346,12 @@ impl<T> Deref for Owned<T> {
         &self.resource
     }
 }
+/// In-place updates of an owned resource (a TLAS's instances rebuilt into the same object).
+impl<T> std::ops::DerefMut for Owned<T> {
+    fn deref_mut(&mut self) -> &mut T {
+        &mut self.resource
+    }
+}
 /// Another handle to the same resource, counted as one more live handle: a view's state
 /// shares the renderer's layouts this way (`Renderer::create_view`).
 impl<T: Clone> Clone for Owned<T> {
