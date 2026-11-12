@@ -595,6 +595,9 @@ pub struct Renderer {
     primary_hash: [u8; 32],
     /// Last installed prelude WGSL, composed again when traced visibility is selected.
     source: String,
+    /// SHA-256 of `source` and of its hardware-shadow composition, kept for the per-frame keys.
+    source_digest: [u8; 32],
+    hardware_digest: Option<[u8; 32]>,
     /// Its hardware-shadow and fresh compositions, where this renderer has those paths.
     hardware_source: Option<String>,
     fresh_source: Option<String>,
@@ -1121,6 +1124,10 @@ impl Renderer {
             transparency: Default::default(),
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
+            source_digest: Sha256::digest(wgsl.as_bytes()).into(),
+            hardware_digest: hardware_source
+                .as_deref()
+                .map(|s| Sha256::digest(s.as_bytes()).into()),
             hardware_source,
             fresh_source,
             primary_sources: None,
@@ -1498,7 +1505,11 @@ impl Renderer {
             self.programs[i].pipelines.install(variant, pair);
         }
         wgsl.clone_into(&mut self.source);
+        self.source_digest = Sha256::digest(wgsl.as_bytes()).into();
         self.view.visibility_buffer = None;
+        self.hardware_digest = hardware_source
+            .as_deref()
+            .map(|s| Sha256::digest(s.as_bytes()).into());
         self.hardware_source = hardware_source;
         self.fresh_source = fresh_source;
         self.primary_sources = primary_sources;
