@@ -96,6 +96,15 @@ impl MeshGeometry {
         }
     }
     /// Model storage for programmable shader input packets.
+    /// The 48-byte vertex records, readable as storage (`[position, normal.x]`,
+    /// `[normal.yz, uv]`, `colour` per vertex).
+    pub fn vertices(&self) -> &StorageBuffer {
+        &self.buffers[0]
+    }
+    /// The triangle list's indices, readable as storage.
+    pub fn indices(&self) -> &StorageBuffer {
+        &self.buffers[1]
+    }
     pub fn models(&self) -> &StorageBuffer {
         &self.buffers[3]
     }

@@ -86,7 +86,7 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<MetalProgram> {
     aux.push_str("\nstruct AraWriteCubeImageEntry {ulong unused; texture2d_array<float, access::write> texture; ulong metadata;};\n");
     aux.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
     aux.push_str("\nstruct AraWriteUintArrayEntry {ulong unused; texture2d_array<uint, access::write> texture; ulong metadata;};\nstruct AraReadUintArrayEntry {ulong unused; texture2d_array<uint> texture; ulong metadata;};\n");
-    aux.push_str("\nstruct AraReadArrayEntry {ulong unused; texture2d_array<float> texture; ulong metadata;};\nstruct AraDepthArrayEntry {ulong unused; depth2d_array<float> texture; ulong metadata;};\nstruct AraReadUintImageEntry {ulong unused; texture2d<uint> texture; ulong metadata;};\n");
+    aux.push_str("\nstruct AraReadArrayEntry {ulong unused; texture2d_array<float> texture; ulong metadata;};\nstruct AraDepthArrayEntry {ulong unused; depth2d_array<float> texture; ulong metadata;};\nstruct AraReadUintImageEntry {ulong unused; texture2d<uint> texture; ulong metadata;};\nstruct AraReadUintMsEntry {ulong unused; texture2d_ms<uint> texture; ulong metadata;};\n");
     if module
         .types
         .iter()
@@ -128,6 +128,7 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<MetalProgram> {
         Pass::MeshDiagnostic
             | Pass::MeshToon
             | Pass::TransparencyGlass
+            | Pass::PaneId
             | Pass::ReceiverRaster
             | Pass::ShadowRaster
             | Pass::TransparencySunShadow
@@ -239,6 +240,11 @@ fn wrap(
             (
                 "ara_front".into(),
                 Some("bool ara_front [[front_facing]]".into()),
+            )
+        } else if attribute.contains("primitive_id") {
+            (
+                "ara_primitive".into(),
+                Some("uint ara_primitive [[primitive_id]]".into()),
             )
         } else if attribute.contains("vertex_id") {
             (

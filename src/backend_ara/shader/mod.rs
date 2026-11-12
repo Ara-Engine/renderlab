@@ -70,6 +70,10 @@ pub enum Pass {
     TransparencySeed,
     /// Original caller-programmed transparent pane composition.
     TransparencyGlass,
+    /// A traced glass pane's triangle under one coverage sample (`pane_pixels.wgsl`).
+    PaneId,
+    /// A traced glass pane shaded per pixel from its sample ids (`pane_pixels.wgsl`).
+    PaneShade,
     /// Original scene fallback Reinhard presenter.
     FallbackPresent,
     /// Original single-program deferred shading of primary tiles.
@@ -227,6 +231,16 @@ impl Pass {
             Self::TransparencyGlass => crate::backend_ara::transparency_glass::source(
                 include_str!("../shaders/glass_material.wgsl"),
             )
+            .into(),
+            Self::PaneId => crate::backend_ara::transparency_glass::pane_id_source(include_str!(
+                "../shaders/glass_material.wgsl"
+            ))
+            .expect("embedded pane id composition")
+            .into(),
+            Self::PaneShade => crate::backend_ara::transparency_glass::pane_shade_source(
+                include_str!("../shaders/glass_material.wgsl"),
+            )
+            .expect("embedded pane shading composition")
             .into(),
             Self::TransparencySeed => {
                 crate::renderer::transparency_gpu::section("TP_AA_SEED").into()
@@ -480,6 +494,7 @@ impl Pass {
                 | Self::ShadowRaster
                 | Self::ReceiverRaster
                 | Self::TransparencyGlass
+                | Self::PaneId
                 | Self::TransparencySeed
                 | Self::FallbackPresent
                 | Self::VisibilityHardware
@@ -494,7 +509,11 @@ impl Pass {
     pub(crate) fn program_only(self) -> bool {
         matches!(
             self,
-            Self::PrimaryShadeTiles | Self::PrimaryShadeList | Self::TransparencyGlass
+            Self::PrimaryShadeTiles
+                | Self::PrimaryShadeList
+                | Self::TransparencyGlass
+                | Self::PaneId
+                | Self::PaneShade
         )
     }
     pub(super) fn indirect(self) -> bool {
@@ -508,6 +527,8 @@ impl Pass {
                 | Self::GiCache(_)
                 | Self::ReceiverRaster
                 | Self::TransparencyGlass
+                | Self::PaneId
+                | Self::PaneShade
                 | Self::TransparencySeed
                 | Self::FallbackPresent
                 | Self::AtmosphereFogInject
@@ -543,7 +564,7 @@ impl Pass {
     pub(super) fn metal_version(self) -> (u8, u8) {
         if matches!(
             self,
-            Self::MeshToon | Self::TransparencyGlass | Self::ReceiverRaster
+            Self::MeshToon | Self::TransparencyGlass | Self::PaneId | Self::ReceiverRaster
         ) {
             (4, 0)
         } else {
@@ -622,6 +643,8 @@ impl Pass {
             Self::GiCache(entry) => entry.name(),
             Self::ReceiverRaster => "fs_receiver",
             Self::TransparencyGlass => "fs_transparent",
+            Self::PaneId => "tp_pane_id_fs",
+            Self::PaneShade => "tp_pane_shade",
             Self::TransparencySeed => "tp_seed_fs",
             Self::FallbackPresent => "fs_present",
             Self::PrimaryTrace => "primary_trace",

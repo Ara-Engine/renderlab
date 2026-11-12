@@ -19,6 +19,8 @@ pub enum SampleType {
     Uint,
     /// Depth sampling.
     Depth,
+    /// Unsigned integer texels of a four-sample image, read per sample.
+    UintMultisampled,
 }
 /// Runtime validation of each heap publication's native interpretation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -197,6 +199,10 @@ pub(super) fn from_module(module: &naga::Module) -> Result<Vec<ShaderInput>> {
                                 kind: ScalarKind::Uint,
                                 multi: false,
                             } => SampleType::Uint,
+                            ImageClass::Sampled {
+                                kind: ScalarKind::Uint,
+                                multi: true,
+                            } if dimension == ViewDimension::D2 => SampleType::UintMultisampled,
                             ImageClass::Depth { multi: false } => SampleType::Depth,
                             _ => bail!("unported image class for {:?}", g.name),
                         };
@@ -273,6 +279,7 @@ pub(super) fn image_entry(dimension: ViewDimension, sample: SampleType) -> Resul
     Ok(match (dimension, sample) {
         (ViewDimension::D2, SampleType::Float) => "TextureEntry",
         (ViewDimension::D2, SampleType::Uint) => "AraReadUintImageEntry",
+        (ViewDimension::D2, SampleType::UintMultisampled) => "AraReadUintMsEntry",
         (ViewDimension::D2, SampleType::Depth) => "AraDepthEntry",
         (ViewDimension::D2Array, SampleType::Float) => "AraReadArrayEntry",
         (ViewDimension::D2Array, SampleType::Uint) => "AraReadUintArrayEntry",

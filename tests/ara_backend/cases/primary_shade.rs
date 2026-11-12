@@ -142,6 +142,9 @@ fn programmable_primary_tiles_and_lists_native_replay_against_cpu() -> Result<()
                         }
                     }
                     SampleType::Depth => Format::Depth32Float,
+                    SampleType::UintMultisampled => {
+                        anyhow::bail!("unexpected multisampled image in non-RT shading")
+                    }
                 };
                 let (size, layers) = if spec.key == key(0, 7) {
                     (f.size, 1)
