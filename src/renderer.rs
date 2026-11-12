@@ -44,6 +44,8 @@ pub use virtual_shadow_gpu::{
 };
 #[path = "program_gpu.rs"]
 mod program_gpu;
+#[path = "shade_detail.rs"]
+pub(crate) mod shade_detail;
 pub(crate) use program_gpu::ProgramReload;
 use program_gpu::{Preludes, ProgramAbi, ProgramSlot};
 #[path = "texture_residency.rs"]
@@ -618,6 +620,8 @@ pub struct Renderer {
     timing: Option<Timing>,
     /// Named stage timings for measurement (`RENDERLAB_PASS_LOG`, src/pass_timeline.rs).
     pass_timeline: Option<crate::pass_timeline::PassTimeline>,
+    /// The shading stage's parts for the pass log's detail (src/shade_detail.rs).
+    shade_detail: Option<shade_detail::ShadeDetail>,
     timing_status: TimingStatus,
     timing_failures: u64,
     timed_frames: u64,
@@ -1127,6 +1131,7 @@ impl Renderer {
             scratch: Vec::new(),
             slots,
             pass_timeline,
+            shade_detail: None,
             timing,
             timing_status: if enabled {
                 TimingStatus::Enabled
@@ -3053,6 +3058,9 @@ impl Renderer {
                 usize::from(soft),
             )?;
         }
+        if traced && !temporal {
+            self.ensure_shade_detail(&programs, streaming, usize::from(soft))?;
+        }
         // Feedback growth is spread over frames; raster and temporal frames need theirs now.
         if streaming {
             self.apply_residency(&[], texture_residency::STEP_BYTES);
@@ -3400,6 +3408,9 @@ impl Renderer {
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
+                if !self.view.outputs.modes.shades() {
+                    self.encode_shade_detail(&mut encoder, shading, &mut mark);
+                }
                 mark(&mut encoder, "shading");
                 if self.view.outputs.modes.shades() {
                     self.encode_view_shading(&mut encoder, shading, stamps(0))?;

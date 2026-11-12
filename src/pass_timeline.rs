@@ -101,6 +101,11 @@ impl PassTimeline {
         }
     }
 
+    /// Whether dotted part names are marked (`RENDERLAB_PASS_LOG_DETAIL`).
+    pub(crate) fn detail(&self) -> bool {
+        self.detail
+    }
+
     /// Starts stage `name` at this point of `encoder`'s work.
     pub(crate) fn mark(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         let Some(i) = self.current else { return };

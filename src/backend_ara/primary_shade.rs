@@ -42,36 +42,63 @@ pub(crate) fn source(material: &str, list: bool) -> Result<String> {
 /// local-light shadow rays. It needs a ray-query device. Compiled natively on Metal
 /// with the standard program; not yet executed against a reference.
 pub fn hardware_soft_program(material: &str) -> Result<Program> {
+    hardware_soft_part(material, ALL_TERMS)
+}
+/// `hardware_soft_program` keeping only the `terms` shading terms: the pass log's detail
+/// parts (src/shade_detail.rs).
+pub(crate) fn hardware_soft_part(material: &str, terms: u32) -> Result<Program> {
     static KEPT: Memo<[u8; 32], Program> = Memo::new();
-    KEPT.get(memo::digest(material), || {
-        hardware_soft_program_uncached(material)
+    KEPT.get(memo::digest(&format!("{terms}:{material}")), || {
+        hardware_soft_program_uncached(material, terms)
     })
 }
-fn hardware_soft_program_uncached(material: &str) -> Result<Program> {
+/// Every shading term (`RL_SHADE_TERMS` as shaders/program_api.wgsl declares it).
+const ALL_TERMS: u32 = u32::MAX;
+fn hardware_soft_program_uncached(material: &str, terms: u32) -> Result<Program> {
     let [_, head] =
         crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
     let parameters = crate::program::declares_parameters(material);
-    Ok(Program::new(
-        Pass::PrimaryShadeTiles,
-        crate::program::compose(&head, material, crate::program::Stage::Traced, parameters).source,
-    )?
-    .checked())
+    let source =
+        crate::program::compose(&head, material, crate::program::Stage::Traced, parameters).source;
+    Ok(Program::new(Pass::PrimaryShadeTiles, with_terms(source, terms))?.checked())
+}
+/// `source` unchanged with every term, else through `shade_detail::without_terms`.
+fn with_terms(source: String, terms: u32) -> String {
+    if terms == ALL_TERMS {
+        source
+    } else {
+        crate::renderer::shade_detail::without_terms(&source, terms)
+    }
 }
 /// The list entry on the same hardware soft head: one program's share of a frame of
 /// several programs, shading the tiles the binning pass listed for its slot
 /// (`program::compose_list`, as `ProgramPipelines::list` compiles it).
 pub fn hardware_soft_list_program(material: &str) -> Result<Program> {
-    static KEPT: Memo<[u8; 32], Program> = Memo::new();
-    KEPT.get(memo::digest(material), || list_program_uncached(material))
+    hardware_soft_list_part(material, ALL_TERMS)
 }
-fn list_program_uncached(material: &str) -> Result<Program> {
+/// `hardware_soft_list_program` keeping only the `terms` shading terms.
+pub(crate) fn hardware_soft_list_part(material: &str, terms: u32) -> Result<Program> {
+    static KEPT: Memo<[u8; 32], Program> = Memo::new();
+    KEPT.get(memo::digest(&format!("{terms}:{material}")), || {
+        list_program_uncached(material, terms)
+    })
+}
+fn list_program_uncached(material: &str, terms: u32) -> Result<Program> {
     let [_, head] =
         crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
     let parameters = crate::program::declares_parameters(material);
     Ok(Program::new(
         Pass::PrimaryShadeList,
-        crate::program::compose_list(&head, material, crate::program::Stage::Traced, parameters)
+        with_terms(
+            crate::program::compose_list(
+                &head,
+                material,
+                crate::program::Stage::Traced,
+                parameters,
+            )
             .source,
+            terms,
+        ),
     )?
     .checked())
 }
