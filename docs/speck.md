@@ -291,3 +291,43 @@ Gathering a pixel's cell that has no bounce value yet at 4, 16 or 64 times the r
 ### In progress, not merged (`230f157b`)
 
 The cells pixels read this frame rotate over the budget alone and the rest share a quarter of it more; the period is the smallest that fits the budget. Its early-frame and cut timings are not in yet.
+
+### A camera cut every frame: what the eviction costs (M, leases `speck-cuts-time3`, `speck-cuts-time17b`)
+
+`game_scene --diag field=1 --diag cut=every`: the field walk with every frame a cut to another point of the walk, 120 frames, 1080p, the eviction off against on (`RENDERLAB_GI=pressure_eviction=0|1`), interleaved twice; GPU span p50 from `RENDERLAB_PASS_LOG` (`tools/speck/timing.py cuts`). Both leases opened with the reference run (this unit's s8 binary on the non-RT field walk, 28.8 ms by root's timing) and read 28.37 and 28.71 ms. **Caveat:** the binary is this branch at `11fe4fc5` plus the cut fix, with the then-unmerged `gather_pixels_first` on; the off/on comparison is same-binary, the absolute times are not main's.
+
+| | Non-RT off | Non-RT on | RT off | RT on |
+|---|---:|---:|---:|---:|
+| Default table: frame, ms (two visits) | 28.30 / 28.38 | 28.46 / 28.26 | 42.56 / 42.68 | 42.59 / 42.68 |
+| ... GI stages, ms | 20.0 | 20.1 | 10.2 | 10.2 |
+| ... evicted under pressure in 120 frames | 0 | 8,593 | 0 | 7,963 |
+| ... pixels' failed inserts | 29,044 | 693 | 44,819 | 1,106 |
+| Forced 2^17 table: frame, ms | 20.49 / 20.52 | 24.84 / 25.00 | 39.25 / 39.31 | 39.48 / 39.57 |
+| ... GI stages, ms | 10.45 | 14.9 | 4.70 | 4.98 |
+| ... evicted under pressure | 0 | 1,976,229 | 0 | 1,963,342 |
+| ... cells created | 131,072 | 2,107,301 | 131,072 | 2,094,414 |
+
+- At the default size the eviction costs nothing here, even with a cut every frame: cone-sized hit cells keep the table at about 640,000 cells, and the cuts stay within one field, so the views share cells. This fixture does not reproduce Outpost's churn.
+- With the table forced to 2^17 it does: 99.8 % of the evicted cells had been seen within 8 frames (Outpost's cut clip before the cone cells: 94 %). That churn costs 4.4 ms a frame on non-RT (`gi_update` 1.32 to 3.77 ms, `gi_gather` 6.57 to 8.77) and 0.2 ms on RT. It is real work, about 17,000 cells a frame made, traced and gathered, on cells another cut needs back within 8 frames. With the eviction off that table stops creating cells and shows the mosaic.
+- An age floor would cut the work and bring the mosaic back in those frames. Whether Outpost still needs one after the cone cells is open: its cut clip is being rerun on main with the log.
+
+### Pixels' cells first in the gather budget (M, lease `speck-pixfirst3`; `IndirectSettings::gather_pixels_first`, off by default)
+
+The cells pixels read this frame (the probe's stamp) rotate over the budget alone, at most the view's pixels over a cell's, and the rest share a quarter of it more; the rotation's period is the smallest that fits the budget, not the next power of two. Held camera, distance of frame N from frame 32 (mean, worst 120 px region):
+
+| | Frame 4 | Frame 8 | Frame 16 |
+|---|---|---|---|
+| Game scene, RT: rotation | -0.91, 7.07 | -0.51, 4.03 | -0.18, 1.52 |
+| ... pixels first | -0.85, 6.38 | -0.47, 3.56 | -0.16, 1.36 |
+| Game scene, non-RT: rotation | -1.14, 9.66 | -0.74, 6.25 | -0.28, 2.40 |
+| ... pixels first | -1.14, 9.70 | -0.71, 6.03 | -0.26, 2.29 |
+| Field pose, RT: rotation | -1.98, 5.90 | -1.38, 3.94 | -0.76, 2.10 |
+| ... pixels first | -2.03, 6.27 | -1.06, 3.26 | -0.37, 1.12 |
+| ... no budget (the bound) | -1.32, 4.05 | -0.62, 1.83 | -0.21, 0.63 |
+| Field pose, non-RT: rotation | -2.65, 9.24 | -1.76, 5.59 | -0.89, 2.83 |
+| ... pixels first | -3.03, 10.41 | -1.87, 6.10 | -0.66, 2.08 |
+| ... no budget | -3.39, 11.61 | -1.55, 4.84 | -0.53, 1.58 |
+
+- Where most queued cells are gather hit cells (the field pose) frame 16 is twice as close to the settled frame on RT and a quarter closer on non-RT. On the game scene, whose queue is mostly pixels' cells already, it changes little. Non-RT's frames 4 and 8 on the field pose are slightly worse; not explained.
+- It uses the budget in full: the field pose gathers about 29,500 cells a frame against 19,700, and the flight 5.28 million gathers against 4.27 million (+23 %). Its cost has not been timed.
+- Off by default until it is judged on a large scene (Outpost, the Radeon still): `RENDERLAB_GI=gather_pixels_first=1`. Off, nothing changes: the gathers' stamps and the rotation are as before.
