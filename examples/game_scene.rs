@@ -348,6 +348,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // an empty quarter of the ground and walks the camera 4 m across it while turning 12
     // degrees, whatever `--frames` is: the cell mosaic Ara's Outpost showed on flat ground.
     let field = scene_key("field", "1");
+    // `cut=every` with the field walk: every frame is a camera cut to another point of the
+    // walk (a fixed shuffle of its frames), as Ara's every-frame-cut clip at Outpost's hangar.
+    let cut_every = scene_key("cut", "every");
     let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
@@ -940,12 +943,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let (eye, target) = if hold {
             *held_pose.get_or_insert((eye, target))
         } else if field {
-            // `--still` stays at the walk's start.
+            // `--still` stays at the walk's start; `cut=every` jumps about the walk.
+            let steps = args.frames.max(2) - 1;
             let along = if args.still {
                 0.0
+            } else if cut_every {
+                (frame * 37 % (steps + 1)) as f32 / steps as f32
             } else {
-                frame as f32 / (args.frames.max(2) - 1) as f32
+                frame as f32 / steps as f32
             };
+            if cut_every && frame > 0 {
+                engine.cut();
+            }
             let eye = anchor + FIELD_EYE + 4.0 * along * FIELD_WALK;
             let look = Mat4::from_rotation_y((12.0 * along).to_radians()).transform_vector3(FIELD_WALK);
             (eye, eye + 10.0 * look - Vec3::new(0.0, 2.2, 0.0))
