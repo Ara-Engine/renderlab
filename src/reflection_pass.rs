@@ -100,7 +100,7 @@ impl TraceAbi {
 
 /// The pass's per-view resources: L (full resolution), the pass uniform, H, R and D (one texel
 /// per 2x2 quad).
-pub(super) struct PassTargets {
+pub struct PassTargets {
     pub lobe_a: Depth,
     pub lobe_b: Depth,
     pub frame: Buffer,
