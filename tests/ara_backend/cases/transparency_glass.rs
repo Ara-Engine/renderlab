@@ -73,6 +73,8 @@ fn programmable_transparent_glass_native_replay_against_cpu() -> Result<()> {
         let mr = Texture::new(&mut gpu, [1, 1], Format::Rgba16Float, false, false)?;
         let transmittance = Texture::new(&mut gpu, [1, 1], Format::Rgba16Float, false, false)?;
         let aerial = Texture::volume(&mut gpu, 1, Format::Rgba16Float)?;
+        // The light cluster's lists, unread: no cluster is prepared.
+        let cluster_lists = Texture::new(&mut gpu, [1, 1], Format::R32Uint, false, false)?;
         let aa = MsaaColor::new(&mut gpu, fixture.size)?;
         let mut staging = Vec::new();
         for (texture, bytes) in [
@@ -85,6 +87,7 @@ fn programmable_transparent_glass_native_replay_against_cpu() -> Result<()> {
             (&mr, half_bytes(&fixture.metallic_roughness.pixels)),
             (&transmittance, half_bytes(&[[1.; 4]])),
             (&aerial, half_bytes(&[[0., 0., 0., 1.]])),
+            (&cluster_lists, vec![0; 4]),
         ] {
             staging.push(upload(
                 &mut gpu,
@@ -103,7 +106,18 @@ fn programmable_transparent_glass_native_replay_against_cpu() -> Result<()> {
         .into_iter()
         .map(|w| StorageBuffer::new(&mut gpu, bytemuck::cast_slice(w)))
         .collect::<Result<_>>()?;
-        for b in &common {
+        // The light cluster's frame, all zero: no cluster is prepared (`info.y` is 0), so
+        // each fragment walks every light, as the scalar reference does.
+        let cluster_bytes = program
+            .inputs()
+            .iter()
+            .find_map(|s| match (s.key.group, s.key.binding, s.kind) {
+                (3, 23, InputKind::Buffer { minimum, .. }) => Some(minimum as usize),
+                _ => None,
+            })
+            .unwrap_or(16);
+        let cluster_frame = StorageBuffer::new(&mut gpu, &vec![0; cluster_bytes])?;
+        for b in common.iter().chain([&cluster_frame]) {
             graph.import(Resource::Buffer(b.buffer), Access::HostWrite);
         }
         let seed_packet = HeapBindings::new(
@@ -188,6 +202,8 @@ fn programmable_transparent_glass_native_replay_against_cpu() -> Result<()> {
                         (2, 5) => Input::Image(&normal),
                         (2, 7) => Input::Buffer(&params),
                         (3, 0) => Input::Buffer(&common[2]),
+                        (3, 23) => Input::Buffer(&cluster_frame),
+                        (3, 24) => Input::Image(&cluster_lists),
                         (3, 50) => Input::Buffer(&common[3]),
                         (3, 51) => Input::Image(&transmittance),
                         (3, 53) => Input::Image(&aerial),
@@ -249,12 +265,21 @@ fn programmable_transparent_glass_native_replay_against_cpu() -> Result<()> {
         for geometry in geometries {
             geometry.retire(&mut gpu, &mut graph)?;
         }
-        for b in common.into_iter().chain(records) {
+        for b in common.into_iter().chain([cluster_frame]).chain(records) {
             b.retire(&mut gpu)?;
         }
-        for t in [background, behind, depth, normal, mr, transmittance, aerial]
-            .into_iter()
-            .chain(bases)
+        for t in [
+            background,
+            behind,
+            depth,
+            normal,
+            mr,
+            transmittance,
+            aerial,
+            cluster_lists,
+        ]
+        .into_iter()
+        .chain(bases)
         {
             gpu.retire(Resource::Image(t.image))?;
         }
