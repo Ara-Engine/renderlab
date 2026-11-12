@@ -302,6 +302,25 @@ impl Renderer {
     }
 }
 
+/// rl_resolve's source; `RENDERLAB_RL_RESOLVE_TUNE=cap=C,clamp=K,wide=R` (measurement) replaces
+/// its RL_RESOLVE_CAP, RL_RESOLVE_CLAMP and RL_RESOLVE_WIDE.
+fn resolve_source() -> String {
+    let mut source = include_str!("../shaders/reflections_resolve.wgsl").to_owned();
+    let list = std::env::var("RENDERLAB_RL_RESOLVE_TUNE").unwrap_or_default();
+    for (key, value) in list.split(',').filter_map(|s| s.trim().split_once('=')) {
+        let name = match key {
+            "cap" => "RL_RESOLVE_CAP",
+            "clamp" => "RL_RESOLVE_CLAMP",
+            "wide" => "RL_RESOLVE_WIDE",
+            _ => continue,
+        };
+        let prefix = format!("const {name}:f32=");
+        let at = source.find(&prefix).expect("RENDERLAB_RL_RESOLVE_TUNE seam");
+        let end = at + source[at..].find(';').unwrap();
+        source.replace_range(at..end, &format!("{prefix}{:?}", value.parse::<f32>().unwrap()));
+    }
+    source
+}
 /// rl_resolve (RENDERLAB_RL_RESOLVE_PASS=1, shaders/reflections_resolve.wgsl): its layout and
 /// kernel, over the reflection history texture and its frame record. No program code.
 #[derive(Clone)]
@@ -339,7 +358,7 @@ impl ResolveKit {
         let module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("reflection resolve"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/reflections_resolve.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(resolve_source().into()),
             }),
             ResourceKind::ShaderModule,
         );

@@ -383,6 +383,14 @@ PLANS["nlshow"] = [
     (f"m-{path}-show-{v}-{k}", ["--path", path, *SHOW], env)
     for k in (1, 2) for path in ("nonrt", "rt") for v, env in NL_VARIANTS
 ]
+# The resolve's history length and clamp (RENDERLAB_RL_RESOLVE_TUNE) with four rough strata.
+NL4 = RP | {"RENDERLAB_RL_HISTORY_TUNE": "rough_strata=4"}
+PLANS["nltune"] = [
+    (f"m-{path}-show-{v}", ["--path", path, *SHOW], env)
+    for path in ("nonrt", "rt")
+    for v, env in (("c4k1", NL4 | {"RENDERLAB_RL_RESOLVE_TUNE": "cap=4,clamp=1.0"}),
+                   ("c2k075", NL4 | {"RENDERLAB_RL_RESOLVE_TUNE": "cap=2,clamp=0.75"}))
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
