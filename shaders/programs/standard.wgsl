@@ -32,18 +32,20 @@ fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
     return ViewData(s.base,s.n,s.rough,s.metal,vec3<f32>(0.0),1.0);
 }
 
-// TP1: the share of the light behind a transparent surface that reaches the eye: what
-// its coverage and Fresnel reflectance leave. A pane with an index of refraction above one
-// is coloured glass, and its base colour also tints what passes. At one (no interface: a
-// plain alpha-blended film, as Ara declares a glTF BLEND material) the light behind passes
-// untinted, so the surface blends as `coverage * colour + (1 - coverage) * behind`.
+// TP1: the share of the light behind a transparent surface that reaches the eye. A pane
+// with an index of refraction above one is coloured glass: what its coverage and Fresnel
+// reflectance leave, tinted by its base colour. At one (no interface: a plain alpha-blended
+// film, as Ara declares a glTF BLEND material) it is what the coverage leaves, untinted and
+// at every angle, as glTF, Unity and Unreal blend (`shade` blends the film's own light by
+// coverage to match).
 fn transmittance(s:Surface, input:SurfaceInput) -> vec3<f32> {
+    let ior=transparent_ior(input.material);
+    if ior<=1.0 { return vec3<f32>(1.0-s.alpha); }
     var v=unit_normal(input.eye-input.world);
     if dot(v,v)<0.5 { v=s.n; }
-    let ior=transparent_ior(input.material);
     let f0=((ior-1.0)/(ior+1.0))*((ior-1.0)/(ior+1.0));
     let fresnel=f0+(1.0-f0)*pow(1.0-clamp(abs(dot(s.n,v)),0.0,1.0),5.0);
-    return (1.0-s.alpha)*(1.0-fresnel)*select(vec3<f32>(1.0),s.base,ior>1.0);
+    return (1.0-s.alpha)*(1.0-fresnel)*s.base;
 }
 
 // One environment lobe's GGX specular response, with exact Fresnel and visibility at its
@@ -103,8 +105,11 @@ fn scatter(s:Surface, input:SurfaceInput, wi:vec3<f32>, wo:vec3<f32>) -> vec3<f3
 
 fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     let n=s.n;
-    // TP1: a transparent surface reflects diffusely over its coverage only.
-    let base=s.base*s.alpha;
+    // TP1: a transparent surface reflects diffusely over its coverage only. A plain blended
+    // film (IOR one) blends all of its light by coverage instead (`coverage * colour`, glTF
+    // BLEND), so a faint film keeps no full-strength specular sheen.
+    let film=transparent_material(input.material) && transparent_ior(input.material)<=1.0;
+    let base=select(s.base*s.alpha,s.base,film);
     let metal=s.metal;
     let rough=s.rough;
     var v=unit_normal(input.eye-input.world);
@@ -157,5 +162,5 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
         let intensity=light.intensity*light_transmission(light,input);
         exposed=min(exposed+exposed_product(intensity,response*attenuation),vec3<f32>(65504.0));
     }
-    return exposed;
+    return select(exposed,exposed*s.alpha,film);
 }

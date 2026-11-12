@@ -36,8 +36,8 @@ fn quad(half: f32, z: f32, centre: [f32; 2]) -> [Vertex; 4] {
 ///
 /// - `T` is the standard program's transmittance: what the pane's coverage leaves,
 ///   times what Schlick's Fresnel reflectance at the pixel's view angle leaves, times
-///   the tint: the base colour through glass (IOR above one), none through a plain
-///   blended film (IOR one). `S` is the same at the sun's angle to the pane.
+///   the base colour as tint, for glass (IOR above one); for a plain blended film (IOR
+///   one) only what its coverage leaves. `S` is the same at the sun's angle to the pane.
 /// - Outside every pane and every shadow the frame is the bare floor's, bit for bit.
 ///   Outside every pane but inside a shadow, the floor keeps `S` of its light.
 /// - At a pane's edge over unshadowed floor the four coverage samples leave whole
@@ -193,13 +193,14 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
         (0.6 - (at.x - centre[0]).abs().max((at.y - centre[1]).abs())) * pixels_per_metre(z)
     };
     let transmittance = |pane: Pane<'_>, ray: DVec3| -> [f64; 3] {
+        // A plain blended film (IOR one): what its coverage leaves, at every angle.
+        if pane.ior <= 1. {
+            return [1. - f64::from(pane.opacity); 3];
+        }
         let f0 = ((pane.ior - 1.) / (pane.ior + 1.)).powi(2);
         let fresnel = f0 + (1. - f0) * (1. - ray.z.abs()).powi(5);
-        let tinted = pane.ior > 1.;
-        pane.tint.map(|tint| {
-            let tint = if tinted { f64::from(tint) } else { 1. };
-            (1. - f64::from(pane.opacity)) * (1. - fresnel) * tint
-        })
+        pane.tint
+            .map(|tint| (1. - f64::from(pane.opacity)) * (1. - fresnel) * f64::from(tint))
     };
     // Toward the sun, a metre up: the lighting's `travel` reversed.
     let sunward = DVec3::new(-0.6, -0.1, 1.);
