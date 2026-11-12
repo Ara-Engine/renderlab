@@ -141,9 +141,46 @@ pub(crate) fn rl_resolve_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE").is_ok_and(|v| v == "1"))
 }
-/// `composed` with the reflection history in place of its stubs, when it traces reflections and
-/// the history is on; the program's byte range moves with the replaced block before it.
-pub(crate) fn with_reflection_history(mut composed: Composed) -> Composed {
+/// U-RTVIS reflection pass (src/reflection_pass.rs): `RENDERLAB_RL_PASS=1` writes glossy
+/// receivers' lobes from primary shading (shaders/reflections_lobe.wgsl, group 0 bindings 56-58)
+/// and runs `rl_trace` after it. Off by default.
+const REFLECTION_LOBE: &str = include_str!("../shaders/reflections_lobe.wgsl");
+const RL_PASS_STUBS: [&str; 2] = ["// ---- rl pass stubs ----\n", "// ---- end of rl pass stubs ----\n"];
+const REFLECTION_TRACE: &str = include_str!("../shaders/reflections_trace.wgsl");
+pub(crate) fn rl_pass_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_PASS").is_ok_and(|v| v == "1"))
+}
+/// `rl_trace`'s module on a traced shading `head`: the standard program's traced composition
+/// (the reflection block's helpers, with its stubs) and the trace entries.
+pub(crate) fn rl_trace_source(head: &str) -> String {
+    let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
+    format!("{}\n{REFLECTION_TRACE}", composed.source)
+}
+/// `composed` with the block between `markers` replaced by `text`, moving the program's range.
+fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Composed {
+    let Some(begin) = composed.source.find(markers[0]) else {
+        return composed;
+    };
+    let end = composed.source[begin..].find(markers[1]).unwrap() + begin + markers[1].len();
+    assert!(end <= composed.program.start, "reflection stubs precede the program");
+    composed.source.replace_range(begin..end, text);
+    let shift = text.len() as isize - (end - begin) as isize;
+    let moved = |at: usize| (at as isize + shift) as usize;
+    composed.program = moved(composed.program.start)..moved(composed.program.end);
+    composed
+}
+/// `composed` with the reflection history and the reflection pass's lobe in place of their
+/// stubs, each while its switch is on (wgpu primary shading modules only).
+pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
+    let composed = if rl_pass_on() {
+        replace_block(composed, RL_PASS_STUBS, REFLECTION_LOBE)
+    } else {
+        composed
+    };
+    with_history_block(composed)
+}
+fn with_history_block(mut composed: Composed) -> Composed {
     if !rl_history_on() {
         return composed;
     }
@@ -270,7 +307,11 @@ const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_softw
 /// the reflection ray itself, which yields the same hit record. The queries' declarations
 /// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed. Software hits have
 /// no hit distance, so they never read the radiance cache (reflection_cache_hits.wgsl).
-const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 3] = [
+const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 4] = [
+    (
+        "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,tmin,RL_FAR,origin,d));\n    while rayQueryProceed(&query) {}\n    let hit=rayQueryGetCommittedIntersection(&query);\n    if hit.kind==0u {return RlCast(vec4<u32>(0u),-1.0);}\n    return RlCast(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),hit.t);\n",
+        "    let hit=rs_trace(origin,d,tmin,RL_FAR,false);\n    return RlCast(hit.record,select(-1.0,hit.t,hit.record.x!=0u));\n",
+    ),
     (
         "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,tmax,origin,l));\n    while rayQueryProceed(&query) {}\n    return select(1.0,0.0,rayQueryGetCommittedIntersection(&query).kind!=0u);\n",
         "    return select(1.0,0.0,rs_blocked(origin,l,receiver.epsilon,tmax));\n",

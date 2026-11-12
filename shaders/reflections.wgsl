@@ -48,6 +48,23 @@ fn rl_history_resolve(mean:vec3<f32>,folded:f32,count:f32)->vec3<f32> { return m
 // ---- end of rl history stubs ----
 // The receiver's perceptual roughness, for the history's resolve.
 var<private> rl_hist_rough:f32;
+// U-RTVIS reflection pass: without it (these stubs) no lobe is written. The wgpu primary shading
+// modules replace the block with shaders/reflections_lobe.wgsl while RENDERLAB_RL_PASS=1.
+// ---- rl pass stubs ----
+const RL_PASS:bool=false;
+fn rl_lobe_store(pixel:vec2<u32>,origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:vec3<f32>,alpha:f32,width:f32,spread:f32) {}
+// ---- end of rl pass stubs ----
+// One closest-hit reflection ray: the hit record (x 0: a miss) and its distance (-1 for a miss).
+// Software heads trace the same ray in software (src/program.rs SOFTWARE_REFLECTION_SEAMS).
+struct RlCast {record:vec4<u32>,t:f32};
+fn rl_cast(origin:vec3<f32>,d:vec3<f32>,tmin:f32)->RlCast {
+    var query:ray_query;
+    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,tmin,RL_FAR,origin,d));
+    while rayQueryProceed(&query) {}
+    let hit=rayQueryGetCommittedIntersection(&query);
+    if hit.kind==0u {return RlCast(vec4<u32>(0u),-1.0);}
+    return RlCast(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),hit.t);
+}
 // A trusted receiver traces RL_HISTORY_STRATA strata of its set a frame (every
 // count/RL_HISTORY_STRATA-th, from an offset turning with the frame) and folds them into a
 // history of at most RL_HISTORY_CAP x count strata; one that moved over a pixel since the
@@ -233,6 +250,8 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let seed=rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y^(frame*0x85ebca6bu)));
     let rotation=f32(seed>>8u)*(1.0/16777216.0);
     let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
+    // The reflection pass's lobe (RL_PASS): glossy receivers only; mirrors stay inline.
+    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}
     // Reflection history: a trusted glossy receiver traces one stratum, rotating with the
     // frame from a per-pixel offset, and the full set only when that stratum disagrees.
     var hist=vec4<f32>(0.0);

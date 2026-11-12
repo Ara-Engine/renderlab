@@ -3410,11 +3410,16 @@ impl Renderer {
                 if !self.view.outputs.modes.shades() {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
+                // U-RTVIS: the reflection pass's kernels (RENDERLAB_RL_PASS=1; nothing otherwise).
+                self.ensure_reflection_trace(shading)?;
+                self.write_reflection_pass_frame();
                 mark(&mut encoder, "shading");
                 if self.view.outputs.modes.shades() {
                     self.encode_view_shading(&mut encoder, shading, stamps(0))?;
                 } else {
                     self.encode_primary_shading(&mut encoder, shading, stamps(0));
+                    mark(&mut encoder, "reflection.trace");
+                    self.encode_reflection_trace(&mut encoder, shading);
                 }
             }
             if reconstructed {

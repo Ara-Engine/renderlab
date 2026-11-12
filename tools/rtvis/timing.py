@@ -338,6 +338,16 @@ PLANS["resgame"] = [
     (f"g-{path}-flight-{v}-{k}", ["--path", path, "--fox", FOX, "--frames", "60"], env)
     for k in (1, 2) for path in ("nonrt", "rt") for v, env in RES_VARIANTS
 ]
+# The reflection pass's first stage (RENDERLAB_RL_PASS=1: lobes and rl_trace, the picture
+# still inline): byte identity on against off (`hashes OUT rlpass`) and the trace's cost.
+PASS = lambda v: {"RENDERLAB_RL_PASS": v}
+PLANS["rlpass"] = [
+    (f"p-{path}-flight-rlpass{v}", ["--path", path, "--fox", FOX, "--frames", "40", "--every", "1"], PASS(v))
+    for path in ("nonrt", "rt") for v in ("1", "0")
+]
+PLANS["rlpassshow"] = [
+    (f"t-{path}-show-pass{v}", ["--path", path, *SHOW], PASS(v)) for path in ("nonrt", "rt") for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
