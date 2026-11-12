@@ -3,7 +3,7 @@
 `done.json` and is skipped on a rerun.
 
     py -3 -B tools/speck/ablate.py GAME_EXE OUT [--every N] [--only name,name]
-                                   [--flight] [--stills] [--field] [--field-still]
+                                   [--flight] [--stills] [--field] [--field-still] [--early] [--field-early]
                                    [--lib-test LIB_EXE NAME[,NAME]]
 
 `--stills` also renders each switch from a frozen camera with a steady fire (`--still`, 96
@@ -68,6 +68,15 @@ SWITCHES = {
     "cone16": ([], {"RENDERLAB_GI": "hit_cone_cells=16"}),
     "cone8": ([], {"RENDERLAB_GI": "hit_cone_cells=8"}),
     "cone4": ([], {"RENDERLAB_GI": "hit_cone_cells=4"}),
+    # The gather budget: every queued cell alike (as before), or the cells pixels read first
+    # (IndirectSettings::gather_pixels_first); and the bound on any schedule, no budget at all.
+    "rotation": ([], {"RENDERLAB_GI": "gather_pixels_first=0"}),
+    "pixels-first": ([], {"RENDERLAB_GI": "gather_pixels_first=1"}),
+    "uncapped": ([], {"RENDERLAB_GI": "gather_cells=4294967295"}),
+    # Gather hits on moving objects read coarser cells (IndirectSettings::mover_hit_levels).
+    "mover0": ([], {"RENDERLAB_GI": "mover_hit_levels=0"}),
+    "mover2": ([], {"RENDERLAB_GI": "mover_hit_levels=2"}),
+    "mover3": ([], {"RENDERLAB_GI": "mover_hit_levels=3"}),
 }
 FLIGHT = ["--frames", "180", "--diag", "cut=1"]
 STILL = ["--still", "--frames", "96", "--every", "95", "--diag", "flicker=0"]
@@ -96,9 +105,12 @@ def main():
             print("lib tests failed or did not run:", missing, flush=True)
             return r.returncode or 1
     worst = 0
-    chosen = [m for m in ("--flight", "--stills", "--field", "--field-still") if m in sys.argv] or ["--flight"]
+    chosen = [m for m in ("--flight", "--stills", "--field", "--field-still", "--early", "--field-early") if m in sys.argv] or ["--flight"]
     table = {"--flight": ("", FLIGHT + ["--every", every]), "--stills": ("still-", STILL), "--field": ("field-", FIELD),
-             "--field-still": ("fieldstill-", FIELD + ["--still"])}
+             "--field-still": ("fieldstill-", FIELD + ["--still"]),
+             # A held camera's first 33 frames, every fourth written: how soon cells get their bounce.
+             "--early": ("early-", ["--still", "--frames", "33", "--every", "4", "--diag", "flicker=0"]),
+             "--field-early": ("fieldearly-", ["--still", "--frames", "33", "--every", "4", "--diag", "field=1"])}
     modes = [table[m] for m in chosen]
     for prefix, mode in modes:
         for name in only:

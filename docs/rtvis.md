@@ -1,0 +1,116 @@
+# U-RTVIS: the RT path's visibility pass on large scenes
+
+Outpost (Ara, RTX 4070 SUPER, 1080p) spends 12.5 ms of a 35 ms frame in `visibility` while
+moving and 62 ms on the frame after a camera cut, against 4-5 ms on Showcase (docs/m7-gaps.md,
+2026-11-12). This unit finds what that pass pays for and cuts it.
+
+## What `visibility` is on RT
+
+With temporal reconstruction on (the default), `visibility` is the reconstruction's fused
+Interactive trace (`encode_reconstruction_interactive`, src/primary_ray_gpu.rs): one dispatch
+per 8x4 tile that traces each pixel's camera ray, builds its receiver, and traces the sun's
+shadow directions for it, followed by the near-edge repair passes. The shadow budget per
+receiver comes from `ReconstructionShadowBudget` (src/temporal_reconstruction.rs):
+
+| frame | directions per receiver |
+|---|---|
+| cold: first frame, `cut_view` | `cold_rays` 256 |
+| reset: key change, sun turn | `reset_rays` 64 |
+| moving or young history | `active_rays` 32 |
+| still for `settle_frames` (16) | `held_rays` 8 |
+
+So a moving camera traces 32 sun rays per pixel every frame, and a cut 256. Fitting root's
+cut1 capture (13.6 ms at 32, 62.3 ms at 256) to `a + b x rays` gives b = 0.22 ms per ray per
+pixel and a = 6.6 ms that the budget does not touch (camera rays, receivers, repair).
+
+`RENDERLAB_PASS_LOG_DETAIL=1` now splits the pass: `visibility` is the fused trace;
+`visibility.repair`, `.check`, `.retry` and `.penumbra` are the passes after it.
+
+## Suspect 1 (single-sided draws) does not apply to shadowed frames
+
+`shaders/primary_trace.wgsl` traces camera rays non-opaque only when `primary_frame.sided` is
+set, that is when some draw is single-sided. A shadowed frame never has one:
+`hardware_shadow_gpu.rs` (`placements`, `casters`) refuses single-sided materials whenever the
+frame casts hardware shadows, and Ara's Renderlab bridge sets `double_sided: true` on every
+material for that reason (ara-renderlab `scene.rs`, "Renderlab's shadowed paths need
+double-sided materials today"). Outpost's camera rays are already `RAY_FLAG_FORCE_OPAQUE`, so
+`RENDERLAB_DIAG_ALL_OPAQUE=1` cannot change its timing; the game scene's unchanged 5.40 ms
+agrees.
+
+The other traces: sun shadow rays (`fresh_shadows.wgsl`) are `FORCE_OPAQUE |
+TERMINATE_ON_FIRST_HIT`; GI, reflection, atmosphere and reference rays are `FORCE_OPAQUE`. The
+one non-opaque query left on opaque scenes is the receiver repair's edge probe
+(`primary_trace.wgsl` `primary_repair`, only for receivers near a triangle edge of a mesh without
+adjacency, over a few epsilons): minor, left as it is. Splitting opaque and single-sided
+instances onto TLAS mask bits would only pay once single-sided casters are allowed on shadowed
+frames; step 2 is dropped (root, 2026-11-12).
+
+## Step 3: cold frames probe first (`COLD_PROBE_STOP`)
+
+On a cold frame every receiver first traces the moving budget's directions (`active_rays`,
+32: the same first 32 of the cold sequence, in the same order). A receiver whose 32 probes
+all agree stops there and stores 0 or 256; the rest continue through all 256 directions, so
+their estimate is main's exactly. Planner: `probe_rays = active_rays` on cold frames without
+P-RTS listing (`sampling.y`); the trace module stops at `j == sampling.y` when
+`sampling.y < sampling.x` and the count so far is 0 or j. `RENDERLAB_COLD_PROBES=0` restores
+the full budget everywhere (measurement switch).
+
+Error: a receiver with true visibility v is called unanimous with probability about v^32
+(or (1-v)^32), and is then off by 1-v (or v). The expected error (1-v) v^32 peaks at v =
+32/33 at 1.1 % of full visibility; the largest single-pixel error is under 3 % with about 37 %
+odds, at the outer rim of penumbrae. The 256-ray estimate's own noise there is about 1.1 % (one
+standard deviation), so the cut frame's error stays at the size of main's grain. Low-
+discrepancy probes (R2 over the disk) find any occluder that covers more than a few percent of
+the disk. Following frames are unbiased (32 rays each, no stop) and average the cut frame's
+error away as its history weight falls.
+
+Not chosen: spreading the cold budget over frames (each frame weighs 1 in the resolve whatever
+its rays, so a 64-ray cut frame has twice main's noise and the next frames are no better);
+answering the cut from a sun map (the RT path keeps none); P-RTS's 8+8 probes with a listing
+pass (missed thin rims, docs/p-rts.md).
+
+## Ara (Mac port) flags
+
+- Shared planner: `Planner::prepare` (src/temporal_reconstruction.rs) sets `probe_rays` on cold
+  frames; both backends plan through it.
+- Shared trace module text: `trace_source` adds `COLD_PROBE_STOP`; src/backend_ara builds its
+  trace kernel from the same function.
+- No new buffer, texture, binding or TLAS mask; `PrimaryFrame`'s layout is unchanged
+  (`sampling.y`, the probe count, now also means the cold probes when listing is off).
+
+## Results (RTX 4070 SUPER, 1080p RT, release game_scene, 2026-11-12)
+
+Every lease opened with the reference run (default game scene, RT, 1080p): frame median 26.67,
+26.54 and 26.84 ms. Medians over moving frames (8-22, 40-119), ms; "cut" is frame 24's
+`visibility` (`--diag cut=1`). Repro runs set `RENDERLAB_COLD_PROBES=0` (main's cold budget).
+
+| run (tools/rtvis/timing.py) | frame | visibility | cut |
+|---|---|---|---|
+| forest, sun 4 deg (`--hour 17.651`), two visits | 26.0 | 9.56 / 9.59 | 74.1 / 74.3 |
+| forest, moving budget 8 (`shadow-budget=256,64,8,8,16`), two visits | 19.1 / 19.0 | 2.62 / 2.62 | 74.2 |
+| forest, no sun (`sun=0`) | 14.8 | 0.41 | 0.4 |
+| forest, noon | 21.7 | 5.64 | 42.3 |
+| forest, 720p | 15.2 | 4.29 | 33.1 |
+| field walk, sun 4 deg | 16.6 | 3.94 | 29.2 |
+| field walk, `RENDERLAB_DIAG_ALL_OPAQUE=1` | 16.6 | 3.93 | 29.3 |
+
+- The pass is almost all sun-shadow rays: 0.29 ms per direction per pixel on the forest
+  (9.56 at 32, 2.62 at 8, 74 at 256), and 0.3-0.4 ms for camera rays, receivers and repair
+  (no sun: 0.41). Rasterising primary visibility on RT (step 4) would save at most that.
+- It scales with pixels (720p 4.29 against 1080p 9.56, 2.23x for 2.25x the pixels), and a
+  low sun costs 1.7x noon (longer, grazing rays through foliage and over terrain).
+- `ALL_OPAQUE` changes nothing (field walk 3.94 against 3.93), as expected on a shadowed frame.
+
+**Step 3, cold probes** (same binary, `RENDERLAB_COLD_PROBES` 1 against 0, interleaved twice):
+forest cut frame `visibility` 74.1 -> 10.3 ms and frame span 88.2 -> 24.5 ms (a moving frame
+is 9.6 / 24.3); moving frames unchanged (9.57 / 9.56). Picture (`pictures` plan, every frame
+written; tools/rtvis/compare.py, tools/blobs.py):
+- Non-RT: byte-identical, all 40 frames of the game scene's cut clip.
+- RT: frame 0 (also cold) and the cut frame differ from main by a mean of 0.001-0.002 codes;
+  at most 138-450 pixels move more than 8 codes on frame 0 and on the forest's cut frame,
+  fading within about 15 frames. Against the settled image of the same pose (the forest held
+  still, frame 59), the cut frame's mean error is 0.732 with the stop and 0.731 without, and
+  5.695 against 5.680 on edge pixels; frames 25-30 agree as closely. tools/blobs.py counts
+  the same blobs per frame on and off (frame 0: 10714 px on, 11144 off).
+- Native-resolution crops of the most-changed tiles (on | off | settled) show no visible
+  difference: D:/Coding/renderlab-work/unit-rtvis/crops.

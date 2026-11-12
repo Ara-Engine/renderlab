@@ -502,12 +502,19 @@ fn trace_source_with(soft_kernels: &str, listing: bool) -> Result<String, Error>
         // Exact pipelines keep their override, direction sequence and normalization.
         // P-RELIT: each receiver traces the frame's budget, or the restart count where the
         // resolve will restart it (tr1_zone_rays); its count is normalised by its own rays.
+        // U-RTVIS: below the budget, a receiver whose first sampling.y directions agree
+        // stops there (COLD_PROBE_STOP).
         return Ok(format!(
             "{}\nvar<private> tr1_rays:u32=8u;\n{}",
             source
                 .replace(
                     loop_seam,
                     "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u)",
+                )
+                .replacen(
+                    ROTATION_SEAM.1,
+                    &format!("{COLD_PROBE_STOP}\n        {}", ROTATION_SEAM.1),
+                    1,
                 )
                 .replace("256u/FRESH_DIRECTIONS", "256u/tr1_rays"),
             zones_source("primary_frame.zones")
@@ -547,6 +554,17 @@ fn trace_source_with(soft_kernels: &str, listing: bool) -> Result<String, Error>
     ))
 }
 const PENUMBRA_TRACE: &str = include_str!("../shaders/primary_penumbra.wgsl");
+/// U-RTVIS (docs/rtvis.md): on frames whose probe count (sampling.y) is below the budget
+/// (sampling.x), a receiver stops after the probes when they all agree, and its count is
+/// normalised by the probes alone (0 or 256). Others continue to the whole budget, in
+/// main's direction order, so their estimate is main's exactly.
+const COLD_PROBE_STOP: &str = "if j==primary_frame.sampling.y && primary_frame.sampling.y<primary_frame.sampling.x && (visible==0u || visible==j) {tr1_rays=j;break;}";
+/// U-RTVIS measurement switch: `RENDERLAB_COLD_PROBES=0` traces every receiver's whole cold
+/// budget on cuts and first frames, as before the probe stop.
+fn cold_probes() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_COLD_PROBES").map_or(true, |v| v != "0"))
+}
 /// P-RTS (docs/p-rts.md). Listing frames probe PROBE_DISK of the budget's own directions
 /// and PROBE_DISK more over a cone PROBE_CONE times the sun's. The wide probes find thin
 /// slivers at a small sun's rim (an occluder clipping the disk also covers a large cap of
@@ -891,7 +909,9 @@ pub(crate) struct Planner {
     /// counts.y); 0 when no zone is up or the frame's count is already as large.
     pub restart_rays: u32,
     /// P-RTS: directions every receiver traces first; below `shadow_rays`, only listed
-    /// penumbra pixels trace the full budget (docs/p-rts.md).
+    /// penumbra pixels trace the full budget (docs/p-rts.md). Without listing (U-RTVIS,
+    /// docs/rtvis.md), cold frames probe `active_rays` and receivers whose probes disagree
+    /// trace the full budget.
     pub probe_rays: u32,
 }
 impl Planner {
@@ -1109,14 +1129,19 @@ impl Planner {
             0
         };
         // Listing pays only where the budget exceeds both probe sets.
-        self.probe_rays = if listing && PENUMBRA_LISTING && self.shadow_rays > 2 * PROBE_DISK {
+        let listed = listing && PENUMBRA_LISTING;
+        self.probe_rays = if listed && self.shadow_rays > 2 * PROBE_DISK {
             2 * PROBE_DISK
+        } else if !listed && cold && cold_probes() && i.budget.active_rays < self.shadow_rays {
+            // U-RTVIS: a cut or first frame traces the moving count everywhere, and the cold
+            // budget only where those directions disagree (COLD_PROBE_STOP).
+            i.budget.active_rays
         } else {
             self.shadow_rays
         };
         // Listing frames probe a cone PROBE_CONE times the sun's; frames without listing
         // keep the exact budget directions (x 1.0 is exact).
-        let (disk, widen) = if self.probe_rays < self.shadow_rays {
+        let (disk, widen) = if listed && self.probe_rays < self.shadow_rays {
             (PROBE_DISK, PROBE_CONE)
         } else {
             (0, 1.0)
@@ -1943,11 +1968,24 @@ mod tests {
         });
         assert!(spheres(&after)[0].1 < 1.6, "{:?}", spheres(&after));
         plan.cut = true;
-        plan.prepare(PlanInputs {
+        let cut = plan.prepare(PlanInputs {
             key: [8; 32],
             ..inputs(&[fire(0.9)], 7)
         });
         assert_eq!(plan.shadow_rays, budget.cold_rays);
+        // U-RTVIS: the cut probes the moving count first (sampling.y), with no P-RTS cone.
+        assert_eq!(plan.probe_rays, budget.active_rays);
+        let word =
+            |k: usize| u32::from_ne_bytes(cut.sampling[4 * k..4 * k + 4].try_into().unwrap());
+        assert_eq!(
+            [word(0), word(1), word(2), word(3)],
+            [budget.cold_rays, budget.active_rays, 0, 1f32.to_bits()]
+        );
+        plan.prepare(PlanInputs {
+            key: [8; 32],
+            ..inputs(&[fire(0.9)], 8)
+        });
+        assert_eq!(plan.probe_rays, plan.shadow_rays);
     }
 
     /// P-RELIT: a light switched off restarts everything it lit above the budget, and a zero
@@ -2126,6 +2164,11 @@ mod tests {
             "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u)"
         ));
         assert!(off.contains("256u/tr1_rays") && !off.contains("256u/FRESH_DIRECTIONS"));
+        // U-RTVIS: the probe stop is the budget loop's first statement.
+        assert!(off.contains(&format!(
+            "j<tr1_rays;j+=1u) {{\n        {COLD_PROBE_STOP}\n        {}",
+            ROTATION_SEAM.1
+        )));
         assert!(!off.contains("primary_penumbra_trace"));
         let trace = trace_source_with(&kernels[1], true).unwrap();
         assert!(trace.contains(

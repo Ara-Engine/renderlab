@@ -1683,7 +1683,14 @@ impl Renderer {
         );
         self.view.primary.as_mut().unwrap().program =
             programs.first().copied().unwrap_or(self.standard.id());
-        let sided = placements.iter().any(|p| p & 1 << 30 != 0);
+        // One single-sided draw makes every primary ray non-opaque (each candidate runs the
+        // facing test in the shader). `RENDERLAB_DIAG_ALL_OPAQUE=1` traces as if every draw
+        // were double-sided, to measure that cost through an embedder (measurement only:
+        // single-sided back faces then show).
+        static ALL_OPAQUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let all_opaque = *ALL_OPAQUE
+            .get_or_init(|| std::env::var("RENDERLAB_DIAG_ALL_OPAQUE").is_ok_and(|v| v == "1"));
+        let sided = !all_opaque && placements.iter().any(|p| p & 1 << 30 != 0);
         let matrix = camera.matrix(size.width, size.height);
         let inverse = matrix.inverse();
         if !inverse.is_finite() {
@@ -2388,14 +2395,23 @@ impl Renderer {
             full: p.interactive_full.as_deref(),
             penumbra: None,
         };
-        self.encode_interactive_kernels(encoder, pipeline, kernels, tile, timestamp_writes);
+        self.encode_interactive_kernels(
+            encoder,
+            pipeline,
+            kernels,
+            tile,
+            timestamp_writes,
+            &mut |_, _| {},
+        );
     }
     /// The reconstruction's rotated Interactive kernels on production's passes and groups;
-    /// the near-edge check traces no direction, so it stays production's.
+    /// the near-edge check traces no direction, so it stays production's. `mark` names each
+    /// pass after the fused trace as a `visibility.*` part (`RENDERLAB_PASS_LOG_DETAIL`).
     pub(super) fn encode_reconstruction_interactive(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
         let p = self.pipeline.primary.as_ref().unwrap();
         let t = p.reconstruction.as_ref().unwrap().trace.as_ref().unwrap();
@@ -2417,7 +2433,14 @@ impl Renderer {
                 .filter(|_| listed)
                 .map(|[list, trace]| [&**list, &**trace]),
         };
-        self.encode_interactive_kernels(encoder, &t.trace, kernels, TRACE_TILE, timestamp_writes);
+        self.encode_interactive_kernels(
+            encoder,
+            &t.trace,
+            kernels,
+            TRACE_TILE,
+            timestamp_writes,
+            mark,
+        );
     }
     fn encode_interactive_kernels(
         &self,
@@ -2426,6 +2449,7 @@ impl Renderer {
         kernels: InteractiveKernels<'_>,
         tile: [u32; 2],
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
         let state = self.view.primary.as_ref().unwrap();
         let size = state.targets.as_ref().unwrap().hit.texture.size();
@@ -2502,6 +2526,7 @@ impl Renderer {
                 .filter(|s| {
                     s.beginning_of_pass_write_index.is_some() || s.end_of_pass_write_index.is_some()
                 });
+            mark(encoder, "visibility.repair");
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("retained two-pass receiver correction"),
                 timestamp_writes: stamps,
@@ -2514,6 +2539,7 @@ impl Renderer {
             drop(pass);
             if let Some([list, trace]) = penumbra {
                 let [list_group, trace_group] = bindings.penumbra.as_ref().unwrap();
+                mark(encoder, "visibility.penumbra");
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("P-RTS penumbra list"),
                     timestamp_writes: None,
@@ -2563,6 +2589,7 @@ impl Renderer {
                         None
                     },
                 });
+            mark(encoder, "visibility.check");
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("near-edge arithmetic check"),
                 timestamp_writes: end,
@@ -2583,6 +2610,7 @@ impl Renderer {
                     .end_of_pass_write_index
                     .map(|i| i + if split_timestamps { 4 } else { 0 }),
             });
+            mark(encoder, "visibility.retry");
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("sparse fallback and replacement visibility"),
                 timestamp_writes: stamps,

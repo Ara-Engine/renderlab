@@ -822,8 +822,10 @@ fn filtered_cells_are_the_weighted_mean_of_their_unfiltered_neighbourhood() -> R
         last = replay_filter(index, frame)?;
     }
     eprintln!("last frame: {last:?}");
+    // Coverage floor: the yard's default cache filtered 1,799 cells on Metal once gather hits
+    // read cone-sized cells (U-SPECK step 2, hit_cone_cells 4; above 2,000 before it).
     ensure!(
-        last.valid >= 2000
+        last.valid >= 1500
             && last.moved * 10 >= last.valid * 9
             && last.bounced == last.valid
             && last.neighbours > 6 * last.valid

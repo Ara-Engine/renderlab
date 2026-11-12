@@ -35,6 +35,9 @@
 //! both render from one engine and each frame records both hashes, so a run of `a` or `b`
 //! alone checks that each view matches a single-view engine; `ai` is `a` with a second view
 //! created and never rendered. `--cut-b FRAME` jumps view b's camera and cuts it there.
+//! `--diag forest=1` (U-RTVIS, docs/rtvis.md) swaps the flat ground for a 200 m rolling
+//! terrain under trees and bushes of cutout cards and walks the field walk's camera
+//! through it: Outpost's layered ground and foliage, for the RT visibility pass's cost.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -325,7 +328,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         args.diag.iter().cloned().partition(|(k, _)| {
             matches!(
                 k.as_str(),
-                "flicker" | "lamp" | "sun" | "fire" | "glow" | "cut" | "hold" | "bulb" | "field"
+                "flicker"
+                    | "lamp"
+                    | "sun"
+                    | "fire"
+                    | "glow"
+                    | "cut"
+                    | "hold"
+                    | "bulb"
+                    | "field"
+                    | "forest"
             )
         });
     // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
@@ -348,6 +360,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // an empty quarter of the ground and walks the camera 4 m across it while turning 12
     // degrees, whatever `--frames` is: the cell mosaic Ara's Outpost showed on flat ground.
     let field = scene_key("field", "1");
+    // `cut=every` with the field walk: every frame is a camera cut to another point of the
+    // walk (a fixed shuffle of its frames), as Ara's every-frame-cut clip at Outpost's hangar.
+    let cut_every = scene_key("cut", "every");
+    let forest = scene_key("forest", "1");
     let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
@@ -390,6 +406,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sky_light: args.atmosphere_light,
                 ..Default::default()
             }),
+            // `forest=1` puts 9000 leaf cards on one mesh-material pair.
+            limits: {
+                let limits = EngineDescriptor::default().limits;
+                Limits {
+                    max_instances: if forest { 16384 } else { limits.max_instances },
+                    ..limits
+                }
+            },
             ..Default::default()
         },
     )?;
@@ -552,7 +576,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, 0.95)?;
-            let plane = engine.create_mesh(&mesh(&plane_geometry(60.0, 8)))?;
+            let plane = if forest {
+                engine.create_mesh(&mesh(&terrain_geometry(FOREST_SIZE, 400)))?
+            } else {
+                engine.create_mesh(&mesh(&plane_geometry(60.0, 8)))?
+            };
             engine.spawn(plane, ground, Mat4::IDENTITY)?;
             // The physical atmosphere is the default sky (AT1); `--sky uniform` swaps in a
             // constant blue sky for comparison.
@@ -604,6 +632,52 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     cube,
                     magenta,
                     boxed(at(x, 0.5 * size, z), Vec3::splat(size)),
+                )?;
+            }
+        }
+    }
+    if forest && quarry.is_none() {
+        let bark = material(&mut engine, [0.3, 0.22, 0.15], 0.0, 0.85)?;
+        let mut seed = 0x6a09_e667_u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32
+        };
+        let mut spot = |clearing: f32| loop {
+            let (x, z) = (FOREST_SIZE * (next() - 0.5), FOREST_SIZE * (next() - 0.5));
+            if forest_clear(x, z) >= clearing {
+                return (Vec3::new(x, forest_height(x, z), z), next());
+            }
+        };
+        // Trees: a trunk and four crossed canopy cards from 3 m up.
+        for _ in 0..900 {
+            let (p, r) = spot(1.0);
+            let scale = 1.8 + 0.8 * r;
+            engine.spawn(
+                cube,
+                bark,
+                boxed(p + Vec3::new(0.0, 2.5, 0.0), Vec3::new(0.35, 5.0, 0.35)),
+            )?;
+            for k in 0..4 {
+                engine.spawn(
+                    bush,
+                    leaves,
+                    Mat4::from_translation(p + Vec3::new(0.0, 3.0, 0.0))
+                        * Mat4::from_rotation_y(r * PI + k as f32 * PI / 4.0)
+                        * Mat4::from_scale(Vec3::splat(scale)),
+                )?;
+            }
+        }
+        // Bushes: three crossed cards each, closer in.
+        for _ in 0..1800 {
+            let (p, r) = spot(0.5);
+            for k in 0..3 {
+                engine.spawn(
+                    bush,
+                    leaves,
+                    Mat4::from_translation(p) * Mat4::from_rotation_y(r * PI + k as f32 * PI / 3.0),
                 )?;
             }
         }
@@ -939,13 +1013,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let target = focus.lerp(anchor + Vec3::Y, 0.5);
         let (eye, target) = if hold {
             *held_pose.get_or_insert((eye, target))
-        } else if field {
-            // `--still` stays at the walk's start.
+        } else if field || forest {
+            // `--still` stays at the walk's start; `cut=every` jumps about the walk.
+            let steps = args.frames.max(2) - 1;
             let along = if args.still {
                 0.0
+            } else if cut_every {
+                (frame * 37 % (steps + 1)) as f32 / steps as f32
             } else {
-                frame as f32 / (args.frames.max(2) - 1) as f32
+                frame as f32 / steps as f32
             };
+            if cut_every && frame > 0 {
+                engine.cut_view(view);
+            }
             let eye = anchor + FIELD_EYE + 4.0 * along * FIELD_WALK;
             let look = Mat4::from_rotation_y((12.0 * along).to_radians()).transform_vector3(FIELD_WALK);
             (eye, eye + 10.0 * look - Vec3::new(0.0, 2.2, 0.0))
@@ -1393,6 +1473,48 @@ fn sphere_geometry(segments: u32, rings: u32) -> Geometry {
     g
 }
 /// A square in the XZ plane facing +Y, `size` metres across, `cells` quads per side.
+/// `forest=1`: the terrain's side in metres.
+const FOREST_SIZE: f32 = 200.0;
+/// 0 within 14 m of the courtyard or 3 m of the field walk, rising to 1 over the next 10 m:
+/// where `forest=1` keeps the ground flat and the foliage away.
+fn forest_clear(x: f32, z: f32) -> f32 {
+    // The field walk's start and direction on the ground (FIELD_EYE, FIELD_WALK).
+    let (start, walk) = (
+        Vec3::new(-6.0, 0.0, -6.0),
+        Vec3::new(-0.707_106_77, 0.0, -0.707_106_77),
+    );
+    let p = Vec3::new(x, 0.0, z);
+    let along = (p - start).dot(walk).clamp(0.0, 4.0);
+    let smooth = |a: f32, b: f32, d: f32| {
+        let t = ((d - a) / (b - a)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    smooth(14.0, 24.0, p.length()).min(smooth(3.0, 13.0, (p - start - along * walk).length()))
+}
+/// Rolling hills 0.8-7 m high outside the clearings.
+fn forest_height(x: f32, z: f32) -> f32 {
+    let hills = 2.5 * (0.11 * x).sin() * (0.13 * z).cos()
+        + 1.2 * (0.31 * x + 0.17 * z).sin()
+        + 0.4 * (0.9 * x - 0.7 * z).sin();
+    (hills + 4.0) * forest_clear(x, z)
+}
+/// `forest_height` over a `size` metre square of `cells` by `cells` quads.
+fn terrain_geometry(size: f32, cells: u32) -> Geometry {
+    let mut g = plane_geometry(size, cells);
+    let step = size / cells as f32;
+    for v in &mut g.vertices {
+        let [x, _, z] = v.position;
+        let h = |dx: f32, dz: f32| forest_height(x + dx, z + dz);
+        v.position[1] = h(0.0, 0.0);
+        let normal = Vec3::new(
+            h(-step, 0.0) - h(step, 0.0),
+            2.0 * step,
+            h(0.0, -step) - h(0.0, step),
+        );
+        v.normal = normal.normalize().to_array();
+    }
+    g
+}
 fn plane_geometry(size: f32, cells: u32) -> Geometry {
     let mut g = Geometry {
         vertices: Vec::new(),

@@ -94,6 +94,9 @@ fn shader() -> String {
         source.push_str(&function(api, name));
         source.push('\n');
     }
+    // The standard program's `view_data` returns the API's view-mode record.
+    source.push_str(api.lines().find(|l| l.starts_with("struct ViewData")).unwrap());
+    source.push('\n');
     // TP2: this isolated reference adapter has no transparent casters.
     source.push_str("fn transparent_sun_transmission(world:vec3<f32>, direction:vec3<f32>)->vec3<f32> { return vec3<f32>(1.0); }\n");
     let standard = crate::STANDARD_PROGRAM

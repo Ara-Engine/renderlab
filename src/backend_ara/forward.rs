@@ -60,7 +60,7 @@ use anyhow::{Context, Result, bail, ensure};
 use ara_gpu::{
     AccelerationStructure, Access, Device, GpuDevice, Queue, Resource,
     acceleration::{AccelerationDesc, AccelerationInstance},
-    commands::Command,
+    commands::{Command, Recorder},
     descriptors::Format,
     sampler::{Filter, SamplerDesc},
     texture::{SampleCount, ViewDimension},
@@ -368,7 +368,71 @@ struct ResidentMesh {
     /// Vertex and index counts, to hold an identity to one geometry.
     counts: [usize; 2],
 }
+/// A per-placement table's bytes, or zeros the size of its largest record (256 bytes)
+/// when the frame places nothing: a storage buffer cannot be empty and its reflected
+/// binding holds one element, and these tables are read only through a hit, which an
+/// empty frame (`render_with`'s masked stand-in instance) never has.
+fn per_placement(bytes: &[u8]) -> std::borrow::Cow<'_, [u8]> {
+    if bytes.is_empty() {
+        std::borrow::Cow::Owned(vec![0; 256])
+    } else {
+        std::borrow::Cow::Borrowed(bytes)
+    }
+}
+
 impl ResidentMesh {
+    /// Uploads a mesh's vertices (48-byte records) and indices and records its BLAS
+    /// build into `rec`; the buffers enter `graph` as host-written.
+    fn build(
+        gpu: &mut GpuDevice,
+        graph: &mut Graph,
+        rec: &mut Recorder,
+        vertices: &[crate::Vertex],
+        indices: &[u32],
+    ) -> Result<Self> {
+        let usage = ara_gpu::vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+            | ara_gpu::vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+        let vertex_bytes: Vec<u8> = vertices
+            .iter()
+            .flat_map(|v| {
+                v.position
+                    .into_iter()
+                    .chain(v.normal)
+                    .chain(v.uv)
+                    .chain(v.color)
+            })
+            .flat_map(f32::to_le_bytes)
+            .collect();
+        let vertex_buffer = StorageBuffer::with_usage(gpu, &vertex_bytes, usage)?;
+        let index_buffer = StorageBuffer::with_usage(gpu, bytemuck::cast_slice(indices), usage)?;
+        let blas = gpu.create_acceleration_structure(&AccelerationDesc::Triangles {
+            vertices: vertex_buffer.buffer,
+            vertex_count: vertices.len() as u32,
+            vertex_stride: 48,
+            indices: index_buffer.buffer,
+            index_count: indices.len() as u32,
+        })?;
+        for buffer in [&vertex_buffer, &index_buffer] {
+            graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+        }
+        graph.node(
+            rec,
+            &[
+                (Resource::Buffer(vertex_buffer.buffer), Access::AsInput),
+                (Resource::Buffer(index_buffer.buffer), Access::AsInput),
+                (Resource::AccelerationStructure(blas), Access::AsBuild),
+            ],
+        )?;
+        rec.push(Command::BeginPass("ara::BuildBlas".into()));
+        rec.push(Command::BuildAccelerationStructure(blas));
+        rec.push(Command::EndPass);
+        Ok(Self {
+            vertices: vertex_buffer,
+            indices: index_buffer,
+            blas,
+            counts: [vertices.len(), indices.len()],
+        })
+    }
     fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
         gpu.retire(Resource::AccelerationStructure(self.blas))?;
         self.vertices.retire(gpu)?;
@@ -1274,7 +1338,6 @@ fn frame(
         fog: None,
         fog_frame: history.fog_frame,
     };
-    ensure!(!scene.objects.is_empty(), "forward frame needs an object");
     ensure!(
         scene.objects.iter().all(|o| {
             o.material.base_color_texture.is_none()
@@ -1324,8 +1387,11 @@ fn frame(
         !deferred_path || scene.sun_shadows.is_some(),
         "a traced frame needs sun shadows"
     );
-    // `prepare_cache_and_post`: only traced frames feed the cache.
-    let indirect = scene.indirect.filter(|i| i.settings.enabled);
+    // `prepare_cache_and_post`: only traced frames feed the cache, and an empty frame
+    // has no surface to cache (its misses read the sky directly).
+    let indirect = scene
+        .indirect
+        .filter(|i| i.settings.enabled && !scene.objects.is_empty());
     ensure!(
         indirect.is_none() || deferred_path,
         "the radiance cache runs on traced frames"
@@ -1390,6 +1456,10 @@ fn frame(
             slot as u32
         })
         .collect();
+    // An empty frame still shades its misses: through the standard program.
+    if sources.is_empty() {
+        sources.push(crate::program::STANDARD_PROGRAM);
+    }
     ensure!(
         sources.len() <= crate::renderer::primary_ray_gpu::program_lists::MAX_FRAME_PROGRAMS,
         "a frame shades at most MAX_FRAME_PROGRAMS programs"
@@ -1879,9 +1949,6 @@ fn frame(
     let geometry_started = std::time::Instant::now();
     let traced = match &shadow_frame {
         Some(frame) => {
-            let usage =
-                ara_gpu::vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
-                    | ara_gpu::vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
             ensure!(
                 scene.meshes.is_none_or(|m| m.len() == scene.objects.len())
                     && scene
@@ -1934,52 +2001,13 @@ fn frame(
                         Geometry::Resident(key)
                     }
                     _ => {
-                        let vertex_bytes: Vec<u8> = object
-                            .vertices
-                            .iter()
-                            .flat_map(|v| {
-                                v.position
-                                    .into_iter()
-                                    .chain(v.normal)
-                                    .chain(v.uv)
-                                    .chain(v.color)
-                            })
-                            .flat_map(f32::to_le_bytes)
-                            .collect();
-                        let vertices = StorageBuffer::with_usage(gpu, &vertex_bytes, usage)?;
-                        let indices = StorageBuffer::with_usage(
+                        let mesh = ResidentMesh::build(
                             gpu,
-                            bytemuck::cast_slice(object.indices),
-                            usage,
-                        )?;
-                        let blas =
-                            gpu.create_acceleration_structure(&AccelerationDesc::Triangles {
-                                vertices: vertices.buffer,
-                                vertex_count: object.vertices.len() as u32,
-                                vertex_stride: 48,
-                                indices: indices.buffer,
-                                index_count: object.indices.len() as u32,
-                            })?;
-                        for buffer in [&vertices, &indices] {
-                            graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
-                        }
-                        graph.node(
+                            &mut graph,
                             &mut rec,
-                            &[
-                                (Resource::Buffer(vertices.buffer), Access::AsInput),
-                                (Resource::Buffer(indices.buffer), Access::AsInput),
-                                (Resource::AccelerationStructure(blas), Access::AsBuild),
-                            ],
+                            object.vertices,
+                            object.indices,
                         )?;
-                        rec.push(Command::BeginPass("ara::BuildBlas".into()));
-                        rec.push(Command::BuildAccelerationStructure(blas));
-                        rec.push(Command::EndPass);
-                        let mesh = ResidentMesh {
-                            vertices,
-                            indices,
-                            blas,
-                            counts,
-                        };
                         match key {
                             Some(key) => {
                                 named.insert(key);
@@ -2005,6 +2033,30 @@ fn frame(
                     });
                 }
                 geometry.push(place);
+            }
+            // An empty scene still traces: against one triangle no ray sees (mask 0),
+            // since a TLAS needs an instance. Its misses draw the sky.
+            if instances.is_empty() {
+                let corner = |position| crate::Vertex {
+                    position,
+                    normal: [0., 1., 0.],
+                    uv: [0., 0.],
+                    color: [1.; 4],
+                };
+                let vertices = [[0., 0., 0.], [1., 0., 0.], [0., 0., 1.]].map(corner);
+                transient.push(ResidentMesh::build(
+                    gpu,
+                    &mut graph,
+                    &mut rec,
+                    &vertices,
+                    &[0, 1, 2],
+                )?);
+                instances.push(AccelerationInstance {
+                    geometry: transient[transient.len() - 1].blas,
+                    transform: [1., 0., 0., 0., 0., 1., 0., 0., 0., 0., 1., 0.],
+                    custom_index: 0,
+                    mask: 0,
+                });
             }
             // A mesh no object names any more leaves the GPU.
             let unnamed: Vec<u64> = resident
@@ -2436,10 +2488,16 @@ fn frame(
             .collect();
         let placement_buffer = StorageBuffer::new(
             gpu,
-            bytemuck::cast_slice(&crate::primary_ray::placement_words(&placements, &batches)),
+            &per_placement(bytemuck::cast_slice(&crate::primary_ray::placement_words(
+                &placements,
+                &batches,
+            ))),
         )?;
-        let models = StorageBuffer::new(gpu, &[matrices.as_slice(), &previous].concat())?;
-        let normals = StorageBuffer::new(gpu, &normal_bytes)?;
+        let models = StorageBuffer::new(
+            gpu,
+            &per_placement(&[matrices.as_slice(), &previous].concat()),
+        )?;
+        let normals = StorageBuffer::new(gpu, &per_placement(&normal_bytes))?;
         let absent = StorageBuffer::new(gpu, &[0; 48])?;
         // `repair_bytes`: the queue's header, then room for every pixel. The sequence
         // keeps it; each frame clears its header before the trace, as the renderer
@@ -2960,6 +3018,12 @@ fn frame(
             })
             .collect();
         // The renderer pads with its default material; padded slots are never read.
+        // An empty frame has no material of its own: the default one pads its slots.
+        if materials.is_empty() {
+            let material = StorageBuffer::new(gpu, &crate::MaterialDescriptor::default().bytes())?;
+            graph.import(Resource::Buffer(material.buffer), Access::HostWrite);
+            materials.push(material);
+        }
         arrays.materials = (0..draws)
             .map(|i| materials.get(i).unwrap_or(&materials[0]))
             .collect();

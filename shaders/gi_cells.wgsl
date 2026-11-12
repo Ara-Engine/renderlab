@@ -97,6 +97,13 @@ const GI_H_PRESSURE:u32=26u;
 // A gather hit's cell edge over the hit's distance along the ray (f32; 0: the cell a pixel
 // there would read): src/gi_cache.rs IndirectSettings::hit_cone_cells.
 const GI_H_HIT_SPREAD:u32=27u;
+// Nonzero: the cells pixels read this frame are gathered ahead of the rest, and the value is
+// the most cells pixels read in a frame (the view's pixels over a cell's): gi_gather_now,
+// src/gi_cache.rs IndirectSettings::gather_pixels_first.
+const GI_H_PIXEL_CELLS:u32=28u;
+// Levels above the pixels' that a gather hit inside a moved caster's swept bounds reads at
+// least (gi_hit_level; 0: none): src/gi_cache.rs IndirectSettings::mover_hit_levels.
+const GI_H_MOVER_LEVELS:u32=29u;
 const GI_FILTER_SKY:u32=1u;
 const GI_FILTER_BOUNCE:u32=2u;
 // Bit 2: contrast refine (gi_filter_cell), with the sky filter.

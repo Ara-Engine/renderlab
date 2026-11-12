@@ -342,6 +342,25 @@ pub struct IndirectSettings {
     /// pixel there would read. 0 gives every hit the pixels' level, as before: those cells
     /// were most of the table.
     pub hit_cone_cells: f32,
+    /// When more cells wait for a gather than a frame's budget (`gather_cells`), the cells
+    /// pixels read this frame rotate over the budget alone and the rest share a quarter of it
+    /// more; and the rotation's period is the smallest that fits the budget, not the next
+    /// power of two (U-SPECK, docs/speck.md). Off (the default), every queued cell waits its
+    /// turn alike: after a start or a cut the picture then shows cells without bounce light
+    /// beside gathered ones for as long as the whole queue takes.
+    pub gather_pixels_first: bool,
+    /// Levels above the pixels' that a gather hit on something that moved this frame reads
+    /// at least (U-SPECK, docs/speck.md; 0 to 4, 0 off). A moving surface leaves a fine cell
+    /// before the cell has a value, so its hits found none and it sent no bounce light.
+    pub mover_hit_levels: u32,
+    /// A camera cut refills like a cleared table (root, docs/design-gi-cut-refill.md; off by
+    /// default until measured): for COARSE_CUT_FRAMES frames after `Planner::camera_cut`, pixels
+    /// read cells one level coarser and new cells are capped at the per-path claim budget
+    /// (CLAIM_CELLS_*), and for the cut-phase window a new cell traces one group of its
+    /// directions a frame (`cut_phases`). Before this, only a cleared table (`reset_indirect`)
+    /// did so; a camera cut through `cut_view` keeps the table, and Outpost's one cut created
+    /// 193k cells in one frame (non-RT gi_update 3 -> 145 ms).
+    pub cut_refill: bool,
 }
 impl Default for IndirectSettings {
     /// On by default since G2b (Islam's overnight push, 2026-11-08; docs/m7-g2b.md): G2's
@@ -393,9 +412,18 @@ impl Default for IndirectSettings {
             near_light_rays: 16,
             pressure_eviction: true,
             // Against the path tracer (docs/speck.md section 8): the field walk's error is the
-            // same at 0, 16, 8 and 4; the spinning crate moves toward the reference as the
+            // same at 0, 16, 8 and 4; the walking hero moves toward the reference as the
             // cells grow, most at 4; and the field walk creates half the cells.
             hit_cone_cells: 4.0,
+            // Off until judged on a large scene (docs/speck.md section 9): on the field pose
+            // it halves frame 16's distance from the settled frame on RT, for a quarter more
+            // gathers over the flight, and non-RT's first eight frames are slightly worse.
+            gather_pixels_first: false,
+            // Off: at 2 the path tracer's walking hero is 1.5-1.9 codes closer underneath at one
+            // frame and 0.9-1.4 codes farther at another, and the game scene's spinning cube
+            // gains isolated specks (docs/speck.md section 10).
+            mover_hit_levels: 0,
+            cut_refill: false,
         }
     }
 }
@@ -424,6 +452,7 @@ impl IndirectSettings {
             && self.filter <= 15
             && (0.0..=1.0).contains(&self.filter_edge)
             && self.near_light_rays <= 64
+            && self.mover_hit_levels <= 4
             && (self.hit_cone_cells == 0.0 || (1.0..=64.0).contains(&self.hit_cone_cells));
         if valid {
             Ok(())
@@ -831,6 +860,8 @@ pub(crate) struct Begun {
     /// The table's header words (written at its start every frame).
     pub(crate) header: [u32; HEADER_WORDS as usize],
     since_clear: u32,
+    /// Frames since the later of a clear and (with `cut_refill`) a camera cut.
+    since_event: u32,
     cut_phases: u32,
     filter: u32,
 }
@@ -890,6 +921,8 @@ pub(crate) struct Planner {
     pending_clear: bool,
     /// Frames since the cache was last emptied.
     since_clear: u32,
+    /// Frames since the last camera cut (`camera_cut`); u32::MAX before any.
+    since_cut: u32,
     environment_streak: bool,
     environment_catchup: u32,
     environment_phase: u32,
@@ -913,6 +946,7 @@ impl Default for Planner {
             frame: 0,
             pending_clear: false,
             since_clear: u32::MAX,
+            since_cut: u32::MAX,
             environment_streak: false,
             environment_catchup: 0,
             environment_phase: 0,
@@ -940,6 +974,11 @@ impl Planner {
     pub(crate) fn reset(&mut self) {
         self.pending_clear = true;
         self.frame = 0;
+    }
+    /// A camera cut that keeps the table (`Engine::cut_view`): with `cut_refill`, the next
+    /// frames refill as after a clear (coarse cells first, capped claims, cut phases).
+    pub(crate) fn camera_cut(&mut self) {
+        self.since_cut = 0;
     }
     /// A new table: forget what the old one was planned from and start it empty.
     pub(crate) fn reallocated(&mut self) {
@@ -985,7 +1024,14 @@ impl Planner {
         } else {
             self.since_clear
         };
-        let coarse = s.claim_cells != u32::MAX && since_clear < COARSE_CUT_FRAMES;
+        // With `cut_refill`, a camera cut opens the same refill window as a clear.
+        let since_event = if s.cut_refill {
+            since_clear.min(self.since_cut)
+        } else {
+            since_clear
+        };
+        let cut_capped = s.cut_refill && since_event < COARSE_CUT_FRAMES;
+        let coarse = (s.claim_cells != u32::MAX || cut_capped) && since_event < COARSE_CUT_FRAMES;
         let footprint = 2.0 * (c.fov_y * 0.5).tan() / c.size[1] as f32
             * s.cell_pixels
             * if coarse { 2.0 } else { 1.0 };
@@ -1005,7 +1051,7 @@ impl Planner {
             0 => 1,
             phases => phases,
         };
-        let spread = cut_phases > 1 && since_clear < cut_phases;
+        let spread = cut_phases > 1 && since_event < cut_phases;
         header[14] = if spread { cut_phases } else { 0 };
         header[15] = s.near_light_rays;
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
@@ -1024,6 +1070,8 @@ impl Planner {
         header[22] = match s.claim_cells {
             0 if software => CLAIM_CELLS_SOFTWARE,
             0 => CLAIM_CELLS_HARDWARE,
+            u32::MAX if cut_capped && software => CLAIM_CELLS_SOFTWARE,
+            u32::MAX if cut_capped => CLAIM_CELLS_HARDWARE,
             u32::MAX => 0,
             cells => cells,
         };
@@ -1046,9 +1094,17 @@ impl Planner {
             0.0
         };
         header[27] = spread.to_bits();
+        header[29] = s.mover_hit_levels;
+        // The most cells pixels read in a frame: the view's pixels over a cell's.
+        header[28] = if s.gather_pixels_first {
+            ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
+        } else {
+            0
+        };
         Begun {
             header,
             since_clear,
+            since_event,
             cut_phases,
             filter,
         }
@@ -1066,7 +1122,7 @@ impl Planner {
     ) -> Finished {
         let s = c.settings;
         let layout = WorkLayout::of_counts(c.slots, c.misses);
-        let (since_clear, cut_phases, filter) = (begun.since_clear, begun.cut_phases, begun.filter);
+        let (since_event, cut_phases, filter) = (begun.since_event, begun.cut_phases, begun.filter);
         let FrameInputs {
             bounds,
             poses,
@@ -1143,7 +1199,7 @@ impl Planner {
         // Partially traced cells re-queue: form 2 always; the cut refill on the frames after
         // its first, and one frame past its window, where a cell still partial (made late in
         // the window) traces every remaining direction.
-        let refill = cut_phases > 1 && (1..=cut_phases).contains(&since_clear);
+        let refill = cut_phases > 1 && (1..=cut_phases).contains(&since_event);
         if tick && (s.direction_phases > 1 || refill) {
             flags |= 8;
         }
@@ -1353,6 +1409,7 @@ impl Planner {
     pub(crate) fn advance(&mut self, begun: &Begun, environment_only: bool) {
         if !environment_only {
             self.since_clear = begun.since_clear.saturating_add(1);
+            self.since_cut = self.since_cut.saturating_add(1);
             self.frame = self.frame.wrapping_add(1);
         }
     }
@@ -1608,6 +1665,11 @@ fn uint_texture(binding: u32) -> wgpu::BindGroupLayoutEntry {
 }
 
 impl Renderer {
+    /// A camera cut that keeps the cache (`Engine::cut_view`): with `cut_refill` on, the
+    /// next frames refill coarse-first under the claim budget (docs/design-gi-cut-refill.md).
+    pub fn mark_indirect_cut(&mut self) {
+        self.gi.planner.camera_cut();
+    }
     // SK1: refresh software-ray geometry in the admitted pose. Keep local swept-box
     // invalidation rather than clearing every cell merely because a mesh deformed.
     pub(super) fn update_skinned_indirect(
@@ -3253,6 +3315,43 @@ mod tests {
     use super::*;
     use crate::program::{Stage, compose, uses_indirect};
     const PRELUDE: &str = include_str!("../shaders/scene.wgsl");
+
+    /// `cut_refill`: a camera cut opens a clear's refill window (claim cap, coarse cells,
+    /// cut phases) for COARSE_CUT_FRAMES frames; off, a cut changes no header word.
+    #[test]
+    fn a_camera_cut_opens_the_refill_window_only_with_cut_refill() {
+        let config = |cut_refill: bool| PlanConfig {
+            settings: IndirectSettings { cut_refill, ..IndirectSettings::default() },
+            slots: 1 << 20,
+            misses: 1 << 16,
+            cold_words: 4,
+            raw_slots: 1 << 20,
+            software: true,
+            field: false,
+            profiling: false,
+            near_bins: 0,
+            eye: Vec3::ZERO,
+            fov_y: 1.0,
+            size: [1920, 1080],
+        };
+        for cut_refill in [false, true] {
+            let c = config(cut_refill);
+            let mut planner = Planner::default();
+            let steady = planner.begin(&c, true, true, true);
+            planner.advance(&steady, false);
+            planner.camera_cut();
+            for frame in 0..COARSE_CUT_FRAMES + 1 {
+                let begun = planner.begin(&c, true, true, true);
+                let in_window = cut_refill && frame < COARSE_CUT_FRAMES;
+                let claims = if in_window { CLAIM_CELLS_SOFTWARE } else { 0 };
+                assert_eq!(begun.header[22], claims, "cut_refill {cut_refill}, frame {frame}");
+                let coarse = f32::from_bits(begun.header[4]) > f32::from_bits(steady.header[4]);
+                assert_eq!(coarse, in_window, "cut_refill {cut_refill}, frame {frame}");
+                assert_eq!(begun.header[14] != 0, cut_refill && frame < 4, "phases, frame {frame}");
+                planner.advance(&begun, false);
+            }
+        }
+    }
 
     fn validate(label: &str, source: &str) {
         let module = naga::front::wgsl::parse_str(source)

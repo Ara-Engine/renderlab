@@ -1075,3 +1075,53 @@ Islam decided on 2026-11-11 to delete ara-render now with no fallback ([ara-rend
 
 ## View tests create adapters inside the lib suite (root, 2026-11-11)
 - **OPEN:** `engine::view_tests` (RL#39) are not `#[ignore]`d GPU tests: they create a Vulkan adapter inside `cargo test --lib`. On the RTX under `--test-threads=2`, `a_moving_view_and_moving_objects_leave_each_view_as_if_alone` failed once at adapter creation (`InvalidInput("no Vulkan adapter")`, before any frame); run alone, all four pass. Either mark them as GPU tests (ignored in the CPU suite, run in leases) or serialise their adapter creation.
+
+## GI cache after the 2026-11-11 speck work (U-SPECK, U-SPECK2; root, 2026-11-12)
+Merged: the near-light rays (lamp blobs), the pressure eviction (the Outpost cell mosaic), cone-sized gather hit cells, the white-speck bound and restart budgets, and the tools (docs/speck.md, docs/speck2.md). Open, ranked by what a user meets first:
+1. **Radeon still-frame checkerboard at a 4 degree sun** (Ara's Outpost, Radeon 760M, old pin). Not seen on the RTX at the same sun on either path with any lookup (root's sun4 sheet). U-SPECK's reading, unreproduced: first gathers starved on software rays at 8,192 cells a frame behind a long queue. `gather_pixels_first` (off) is the first thing to try on the Radeon; `RENDERLAB_GI_LOG` there would confirm.
+2. **a2: moving objects get about 70% of their bounce** (walking hero 12 codes under the path tracer, 5 of them from motion). Next: hits on a mover read the cell at the hit's previous-frame position (previous transforms in the cache's kernels), or new cells on movers are gathered the frame they are made. `mover_hit_levels` (off) recovers about 1.5 codes at a cost of specks.
+3. **Churn on cuts when the table cannot hold the views a cut alternates between:** 99.8% of evictions are cells seen within 8 frames, and non-RT pays +4.4 ms on a forced small table. Decide an age floor or a pixel-read stamp from Outpost's cut clip on main with `RENDERLAB_GI_LOG` (pending from the integration thread).
+4. **A 7-code static bounce gap on the hero beside the gold sphere** (frozen scene). Not investigated; guess: bounce off shiny metal.
+5. **Relight scope:** a flickering light re-queues an eighth of every cell each frame, whatever it reaches.
+6. **Unmeasured:** the near-light rays' cost (scenes with many local lights: Showcase, Outpost), the quarry A/B of the eviction (needs a 14 GiB window), the bound and restart budgets' cost (U-SPECK2).
+8. **a1, cell mottle on flat surfaces:** about a code of cell-sized mottle remains on flat walls and ground under the sky (docs/speck.md section 6); not worked further.
+7. **Emitter link for MIS:** bulb glints on rough metal are dropped by the lone-stratum bound (U-SPECK2); linking a light to its visible emitter would let both be sampled without the bound.
+
+## Outpost frame cost by pass, and the order of attack (root, 2026-11-12)
+Per-pass medians from the Ara integration thread's Outpost captures (Ara main 5ca351470, Renderlab 5955d4a with cone-sized hit cells, RTX 4070 SUPER, 1080p, player, GPU to itself; frames 8+; `RENDERLAB_PASS_LOG`), ms. A = smooth move (191 frames), C = a cut every frame (119).
+
+| pass | A RT | A non-RT | C RT | C non-RT |
+|---|---|---|---|---|
+| gi_gather | 2.88 | 45.21 | 2.75 | 59.63 |
+| shading | 11.64 | 32.85 | 12.35 | 46.26 |
+| visibility | 12.48 | 0.96 | 12.32 | 0.99 |
+| sun_shadow | (in shading) | 5.36 | (in shading) | 5.41 |
+| gi_cell_shading | 0.61 | 5.00 | 0.23 | 2.51 |
+| gi_update | 0.41 | 3.28 | 0.09 | 3.92 |
+| atmosphere | 1.22 | 3.31 | 1.03 | 2.37 |
+| gi_integrate | 2.23 | 1.92 | 0.78 | 0.81 |
+| transparency | 1.32 | 0.40 | 1.05 | 0.41 |
+| tr1 | 1.23 | 1.11 | 0.60 | 0.61 |
+| everything else | 1.3 | 0.7 | 0.9 | 0.6 |
+| **frame span** | **35.4** | **100.7** | **33.0** | **125.2** |
+
+Order of attack, by visible impact against Unreal (its whole quarry frame is 4.5 ms):
+1. **Non-RT GI gather, 45-60 ms:** software rays against Outpost's triangles. The biggest single gap in the project. Direction: a cheaper ray representation for gathers (a distance field or a coarse proxy, as Unreal's software Lumen uses) instead of the full triangle BVH, plus a per-frame gather budget in time rather than cells. A study first, then a unit.
+2. **Non-RT shading, 33-46 ms:** not yet split. Needs a capture with `RENDERLAB_PASS_LOG_DETAIL=1` (local-light soft shadows on software rays, software reflections and the sun lookup's parts are the suspects).
+3. **RT primary visibility, 12.5 ms**, against 0.96 ms for the non-RT path's raster visibility buffer on the same scene. Tracing primary rays through Outpost's TLAS costs 12 times the raster. Rasterising primary visibility on the RT path too (keeping rays for shadows, GI and reflections) should take about 11 ms off RT. That is the cheapest large win.
+4. **RT shading, 11.6-12.4 ms:** also needs the detail split (traced sun and local-light shadows, reflections).
+5. **Non-RT sun shadow, 5.4 ms** on Outpost against 0.22 ms on the quarry: page raster of Outpost's casters. The page-pool unit (N-POOL, briefed) is the planned fix.
+6. **Cuts:** the cache is rebuilt, not pressured (creation and eviction unchanged by cone cells). Folded into 1 (cheaper gathers) and the GI order item "churn on cuts".
+
+## One camera cut on Outpost, by pass, and the ranked frame-cost backlog (root, 2026-11-12)
+Ara integration capture `cut1` (Ara c71731f73, Renderlab 5955d4a, player 1080p, RTX to itself, one cut at frame 60 of 120; picture clean on both paths, a little extra fine grain for about five frames). Per-pass ms from its `RENDERLAB_PASS_LOG`:
+- **RT, the frame before → the cut frame → +1:** frame 33.1 → 98.4 → 44.9. Visibility 13.6 → **62.3** → 13.3; shading 10.4 → 18.7 → 18.4 (the new view's steady is heavier); GI stages about 5 → 14 → 9. So the cut's non-GI 84 ms is almost all the visibility pass, not pipeline, BLAS or streaming (the TLAS and skinning stages stay near 0). On RT that pass also traces the sun's shadow rays, and on a cut every pixel restarts with no shadow history, so it traces its full direction budget at once. If the single-sided flag makes every ray non-opaque (the open `RENDERLAB_DIAG_ALL_OPAQUE` capture), each of those rays is expensive too.
+- **Non-RT:** frame 90.2 → 265.3 → 230.8 → 175.0 → 128.4 (+5). **gi_update 3.2 → 144.5 → 64.0 → 27.4 → 9.4**, gi_gather 35 → 35 → **76** → 59 → 38; shading 34 → 59 and stays (the new view). 193k cells are created on the cut frame and about 0.75 µs each goes into gi_update (their first update, the sky term on software rays), then the gathers for them follow over the next frames.
+
+Ranked by what a player sees and feels against Unreal (its whole quarry frame is 4.5 ms; a cut costs it nothing extra):
+1. **RT visibility** (Outpost 13-26 ms steady, 62 ms on a cut): opaque and single-sided instances traced separately (confirm with the `RENDERLAB_DIAG_ALL_OPAQUE` capture), then raster primary visibility on the RT path; on cuts, spread the shadow restart over frames or answer the first frame from the cached sun map.
+2. **Non-RT GI gather** (45-60 ms steady): a cheaper ray representation for gathers and a time budget.
+3. **Non-RT cut refill** (gi_update 145 ms, then about five frames over 120 ms): a per-frame creation budget, coarser cells first, with pixels reading the coarser level until their own cell exists. The picture bar: no more grain than today's five frames, no blocks.
+4. **Shading stage, both paths** (Outpost non-RT 34-59 ms; Showcase RT 16.9, non-RT 21.8): not yet split; one capture each with `RENDERLAB_PASS_LOG_DETAIL=1`.
+5. **Non-RT sun shadow** (5-8 ms on Outpost): the page-pool unit.
+6. **Transparent pane pass:** under 1 ms on the RTX (Showcase 0.44-0.71); 8 ms on the M5 is the port's, built port-side first.
