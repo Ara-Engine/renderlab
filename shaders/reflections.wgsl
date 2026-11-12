@@ -224,6 +224,8 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         var radiance=vec3<f32>(0.0);
         if hit.kind!=0u {
             let h=rl_hit_input(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),origin,d,width,spread,pixel);
+            // LC1 at the hit: its own cluster where that walk is exact (the same sum).
+            rl_hit_lights_prepare(h.input.world);
             rl_load_parameters(h.batch);
             let hs=surface(h.input);
             radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);
@@ -237,6 +239,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         valid+=1u;
     }
     rl_reflection_hit=false;
+    rl_hit_lights_clear();
     rl_hit_strata=1u;
     rl_hit_variance=0.0;
     if shaded {rl_load_parameters(batch);}

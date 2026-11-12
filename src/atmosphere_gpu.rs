@@ -212,6 +212,9 @@ struct Procedural {
     written: bool,
 }
 
+/// The procedural environment's altitude step (km): cameras within one step share a map.
+const PROCEDURAL_ALTITUDE_STEP_KM: f32 = 0.1;
+
 #[derive(Debug, PartialEq)]
 struct ProceduralKey {
     sun: Option<(Vec3, [f32; 3])>,
@@ -503,10 +506,18 @@ impl Renderer {
         if !self.tick_work && mine && self.atmosphere.procedural.is_some() {
             return;
         }
+        // The camera's altitude in PROCEDURAL_ALTITUDE_STEP_KM steps: the sky the map holds
+        // changes over kilometres, while a walking or flying camera's height changes every
+        // frame. An unquantized height bumped the environment's content revision on every
+        // moving frame and the GI cache relit for it (Outpost, 2026-11-12: the environment
+        // part of the light key changed on 112 of 119 moving frames).
+        let altitude_km = ((eye.y - s.medium.ground_height) * 1e-3 / PROCEDURAL_ALTITUDE_STEP_KM)
+            .round()
+            * PROCEDURAL_ALTITUDE_STEP_KM;
         let key = ProceduralKey {
             sun: self.atmosphere_sun(),
             medium: s.medium,
-            altitude: ((eye.y - s.medium.ground_height) * 1e-3).clamp(
+            altitude: altitude_km.clamp(
                 1e-3,
                 s.medium.top_radius_km - s.medium.ground_radius_km - 1e-3,
             ),
