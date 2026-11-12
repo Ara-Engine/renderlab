@@ -125,6 +125,6 @@ fn rl_history_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,mean:vec3<f32>,m2:f
     let m=min(mean,vec3<f32>(65504.0));
     textureStore(rl_history,p,base,vec4<u32>(pack2x16float(m.rg)));
     textureStore(rl_history,p,base+1,vec4<u32>(pack2x16float(vec2<f32>(m.b,min(m2,65504.0)))));
-    textureStore(rl_history,p,base+2,vec4<u32>(select(0u,((slot+1u)&0xffffffu)|(u32(count)<<24u),count>0.0)));
+    textureStore(rl_history,p,base+2,vec4<u32>(select(0u,((slot+1u)&0xffffffu)|(min(u32(count),255u)<<24u),count>0.0)));
     textureStore(rl_history,p,base+3,vec4<u32>(bitcast<u32>(w)));
 }
