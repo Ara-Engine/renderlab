@@ -3283,7 +3283,7 @@ impl Renderer {
         };
         mark(&mut encoder, "skinning");
         if self.tick_work {
-            self.encode_skinning(&mut encoder, draws, hardware_build);
+            self.encode_skinning(&mut encoder, draws, hardware_build, &mut mark);
         }
         if let Some(frame) = &local_lights {
             mark(&mut encoder, "light_clusters");

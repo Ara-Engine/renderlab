@@ -26,21 +26,31 @@ struct BlasAllocation {
 }
 impl MeshAcceleration {
     pub(super) fn encode(&self, encoder: &mut wgpu::CommandEncoder) {
-        let blas = self.blas.lock().unwrap();
-        let entry = wgpu::BlasBuildEntry {
-            blas: &blas.blas,
-            geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
-                size: &self.size,
-                vertex_buffer: &self.vertex,
-                first_vertex: 0,
-                vertex_stride: 48,
-                index_buffer: Some(&self.index),
-                first_index: Some(0),
-                transform_buffer: None,
-                transform_buffer_offset: None,
-            }]),
-        };
-        encoder.build_acceleration_structures([&entry], std::iter::empty());
+        Self::encode_all(encoder, &[self]);
+    }
+    /// Builds every mesh's BLAS from its current vertices in one call (one barrier batch).
+    pub(super) fn encode_all(encoder: &mut wgpu::CommandEncoder, meshes: &[&Self]) {
+        let guards: Vec<_> = meshes.iter().map(|m| m.blas.lock().unwrap()).collect();
+        let entries: Vec<_> = meshes
+            .iter()
+            .zip(&guards)
+            .map(|(mesh, blas)| wgpu::BlasBuildEntry {
+                blas: &blas.blas,
+                geometry: wgpu::BlasGeometries::TriangleGeometries(vec![
+                    wgpu::BlasTriangleGeometry {
+                        size: &mesh.size,
+                        vertex_buffer: &mesh.vertex,
+                        first_vertex: 0,
+                        vertex_stride: 48,
+                        index_buffer: Some(&mesh.index),
+                        first_index: Some(0),
+                        transform_buffer: None,
+                        transform_buffer_offset: None,
+                    },
+                ]),
+            })
+            .collect();
+        encoder.build_acceleration_structures(&entries, std::iter::empty());
     }
 }
 
