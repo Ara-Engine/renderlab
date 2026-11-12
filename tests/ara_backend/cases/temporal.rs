@@ -659,6 +659,75 @@ fn interactive_trace_entries_reflect_validate_and_compile() -> Result<()> {
     Ok(())
 }
 
+/// With cold probes off (`RENDERLAB_COLD_PROBES=0`) the cold reconstructed Interactive frame
+/// is the exact frame in every pixel: the 256-direction cold path stays pinned while the
+/// default (probes on) is held to its tolerance below. The switch is read once a process, so
+/// this runs that check in a process of its own rather than setting it in this one.
+#[test]
+fn the_cold_frame_is_the_exact_frame_with_cold_probes_off() -> Result<()> {
+    let name = format!(
+        "{}::the_cold_frame_is_exact_without_probes",
+        module_path!()
+            .split_once("::")
+            .map_or(module_path!(), |(_, m)| m)
+    );
+    let out = std::process::Command::new(std::env::current_exe()?)
+        .args(["--ignored", "--exact", &name, "--test-threads=1"])
+        .env("RENDERLAB_COLD_PROBES", "0")
+        .output()?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    ensure!(
+        out.status.success() && stdout.contains("1 passed"),
+        "{name} with cold probes off:\n{stdout}\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    Ok(())
+}
+
+/// The check `the_cold_frame_is_the_exact_frame_with_cold_probes_off` runs in its own process.
+#[test]
+#[ignore = "run in its own process by the_cold_frame_is_the_exact_frame_with_cold_probes_off"]
+fn the_cold_frame_is_exact_without_probes() -> Result<()> {
+    ensure!(
+        std::env::var("RENDERLAB_COLD_PROBES").as_deref() == Ok("0"),
+        "run through the_cold_frame_is_the_exact_frame_with_cold_probes_off"
+    );
+    let path = root("interactive-cold-exact");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let (mut scene, camera) = interactive_fixture()?;
+    let mut first = |primary: Primary| -> Result<Vec<f32>> {
+        scene.primary = primary;
+        let mut history = Frames::default();
+        let out = scene.frames(&mut gpu, &cache, &mut history, reconstructed(), &[camera])?;
+        history.retire(&mut gpu)?;
+        Ok(out.into_iter().next().context("one frame")?.0)
+    };
+    let exact = first(Primary::Traced)?;
+    let fast = first(Primary::TracedInteractive)?;
+    let differing = exact.iter().zip(&fast).filter(|(a, b)| a != b).count();
+    ensure!(
+        differing == 0,
+        "{differing} values of the cold reconstructed frame differ from the exact frame"
+    );
+    cache.retire(&mut gpu)?;
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// The Interactive fixture: a card's shadow under a slanted sun with a wide disk, and the
+/// camera that sees it.
+fn interactive_fixture() -> Result<(Card, Camera)> {
+    let mut scene = Card::new();
+    scene.lighting.lights = vec![Light::Directional {
+        travel: Vec3::new(-0.6, 0., -1.),
+        lux: [1000.; 3],
+    }];
+    scene.shadows.disk_angle = 0.08;
+    Ok((scene, Card::camera([0.03, 0.02])?))
+}
+
 /// The Interactive frame against the exact one, under a slanted sun with a wide disk.
 /// - Without reconstruction it traces eight sun directions a pixel where the exact
 ///   frame traces 256: the two agree bit for bit wherever the exact frame is fully lit
@@ -676,13 +745,7 @@ fn interactive_frame_is_the_exact_frame_outside_the_penumbra_and_on_a_cold_start
     let path = root("interactive-frame");
     let mut gpu = GpuDevice::new(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
-    let mut scene = Card::new();
-    scene.lighting.lights = vec![Light::Directional {
-        travel: Vec3::new(-0.6, 0., -1.),
-        lux: [1000.; 3],
-    }];
-    scene.shadows.disk_angle = 0.08;
-    let camera = Card::camera([0.03, 0.02])?;
+    let (mut scene, camera) = interactive_fixture()?;
     let mut render =
         |primary: Primary, tr: Option<Reconstruct>, n: usize| -> Result<Vec<Vec<f32>>> {
             scene.primary = primary;
@@ -739,7 +802,9 @@ fn interactive_frame_is_the_exact_frame_outside_the_penumbra_and_on_a_cold_start
         }
         cold_differing += 1;
         ensure!(
-            *a > umbra + 1e-3 * contrast && *a < lit - 1e-3 * contrast && (a - b).abs() < 0.5 * contrast,
+            *a > umbra + 1e-3 * contrast
+                && *a < lit - 1e-3 * contrast
+                && (a - b).abs() < 0.5 * contrast,
             "the cold reconstructed frame differs outside the penumbra or by too much: {a} against {b}"
         );
     }
@@ -747,6 +812,24 @@ fn interactive_frame_is_the_exact_frame_outside_the_penumbra_and_on_a_cold_start
         cold_differing * 1000 <= cold_exact.len(),
         "{cold_differing} of {} cold pixels differ from the exact frame (more than 0.1%)",
         cold_exact.len()
+    );
+    // The cold probes' measured tolerance, in display codes of the lit floor (255 there):
+    // a mean difference of at most 0.01 codes, and at most 0.1% of pixels over 8 codes.
+    let codes = |a: &f32, b: &f32| (a - b).abs() / lit * 255.;
+    let mean = cold_exact
+        .iter()
+        .zip(&cold_fast)
+        .map(|(a, b)| codes(a, b))
+        .sum::<f32>()
+        / cold_exact.len() as f32;
+    let over = cold_exact
+        .iter()
+        .zip(&cold_fast)
+        .filter(|(a, b)| codes(a, b) > 8.)
+        .count();
+    ensure!(
+        mean <= 0.01 && over * 1000 <= cold_exact.len(),
+        "the cold frame differs by {mean} codes on average, {over} pixels over 8 codes"
     );
     let mut later = (0, 0f32);
     for (a, b) in exact_sequence.iter().zip(&fast_sequence).skip(1) {
