@@ -2323,6 +2323,7 @@ fn frame(
                 }),
                 skin_revisions: skin_revisions.clone(),
                 rigid_motion,
+                moving_bounds: None,
                 listing: false,
             });
             // The rotation word (zero with `rotate_directions` off), then the sampling

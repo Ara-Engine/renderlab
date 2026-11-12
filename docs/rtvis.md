@@ -69,7 +69,72 @@ its rays, so a 64-ray cut frame has twice main's noise and the next frames are n
 answering the cut from a sun map (the RT path keeps none); P-RTS's 8+8 probes with a listing
 pass (missed thin rims, docs/p-rts.md).
 
+## Step 5: the held budget on moving frames (`HELD_STOP`)
+
+Moving frames trace `active_rays` (32) per receiver; on the forest that is 9.6 ms, almost all
+of it in fully lit or fully shadowed pixels. The held budget lets those pixels stop early,
+only where the picture already knows the answer:
+
+- A receiver stops after `HELD_PROBES` (8) directions when they agree with its history, and its
+  history is saturated: every texel of the reprojected 3x3 in the previous frame's held history
+  has been unanimously lit, or unanimously shadowed, for at least `HELD_STREAK` (4) frames. The
+  stop stores 0 or 256 exactly as a full unanimous estimate would.
+- Never on: frames that restart history (cut, first frame, reset, any sun turn: the cold rule
+  covers cuts), restart-zone receivers (`tr1_rays` above the frame's budget), receivers whose
+  placement moved or is skinned (their reprojection would read another surface's history),
+  receivers in the swept sun shadow of any placement that moved or is skinned (the planner's
+  `moving_bounds`, both transforms, tested as `tr1_caster_shadow` tests SK1's bounds), the
+  image's border pixels, P-RTS listing frames, and the repair and retry entries (they keep
+  the full budget).
+- History word per pixel, written by both trace entries every reconstructed frame (stop on or
+  off): `class << 8 | streak`, class 1 all blocked, 2 all clear, 0 otherwise (fractional,
+  miss, skip, uncovered tile); the streak continues when the reprojected centre texel had the
+  same class.
+
+Why a rim pixel does not lock in: a receiver with true visibility 0.97 needs 32-direction
+estimates that all come back clear, in itself and its eight neighbours, four frames running,
+before it may stop; its inner neighbours (lower visibility) almost never do, so penumbrae keep
+the full budget. A moving caster's shadow cannot leave a stale patch on saturated ground: the
+ground in its swept shadow traces the full budget on every frame that it moves.
+`RENDERLAB_HELD_PROBES=0` disables the stop (history is still written): main's picture.
+
+Results (RTX 4070 SUPER, 1080p RT, release game_scene; same binary, the stop on against off,
+interleaved twice; the lease's reference run 26.58 ms against 26.7 expected):
+
+| moving frames, medians | visibility on | off | frame on | off |
+|---|---|---|---|---|
+| forest walk, sun 4 deg | 2.72 / 2.73 | 9.57 / 9.60 | 18.96 / 18.99 | 25.92 / 25.97 |
+| game flight with the Fox | 4.60 / 4.63 | 5.39 / 5.41 | 30.22 / 30.38 | 30.99 / 31.07 |
+
+The forest saves nearly all it could (an 8-direction budget everywhere costs 2.62). The game
+scene saves less: the walking Fox and the spinning crate move every frame, and the ground in
+their swept sun shadow keeps the full budget.
+
+Picture (`heldpics` plan, every frame of 60; tools/rtvis/compare.py `held`, tools/blobs.py):
+- Non-RT: byte-identical, all 60 frames of the game flight.
+- RT, stop on against off: frames 0-3 identical (the streak is not yet reached), then at most
+  7-8 codes on at most 9 pixels a frame; no pixel more than 8 codes in any clip (forest walk,
+  game flight). Whole-frame difference maps x16 are black.
+- Moving casters over saturated ground (`--diag hold=1`: the camera held at its first pose while
+  the Fox walks and the crate spins): at most 2 codes anywhere, and the Fox's shadow region is
+  byte-identical at frames 10, 30 and 50 (crops-held/fox-shadow-hold-on-off-diff16.png).
+- blobs.py: the same blob counts frame for frame, on and off, in all three clips.
+- Against the path tracer (reflection_matched `--matched` against `--reference 4096`, frames 16,
+  32, 47 of its moving flight with the spinning crate and bobbing hero): mean error 0.799 /
+  0.943 / 1.108 codes over the image and 6.967 / 7.685 / 8.452 on edges, identical on and off;
+  on and off differ by at most 1 code.
+
 ## Ara (Mac port) flags
+
+- U-RTVIS step 5 (held budget), wgpu renderer only. New per-view resources:
+  two `R32Uint` textures at the trace (internal) resolution, ping-ponged by the
+  reconstruction's parity (8 MB each at 1080p), and a 128-byte uniform (`RtvisHeld`:
+  previous unjittered matrix, words, moving bounds, sun direction and disk). New group-0
+  bindings 50 (uniform), 51 (`texture_2d<u32>`, previous history) and 52
+  (`texture_storage_2d<r32uint, write>`, this frame's) on a new layout used by the
+  reconstruction's two trace entries only. Shared planner: `PlanInputs::moving_bounds` and
+  `Planned::held`. The port keeps `trace_source` (no held seams) and passes
+  `moving_bounds: None`; it needs the textures, bindings and `trace_source_held` to adopt it.
 
 - Shared planner: `Planner::prepare` (src/temporal_reconstruction.rs) sets `probe_rays` on cold
   frames; both backends plan through it.
