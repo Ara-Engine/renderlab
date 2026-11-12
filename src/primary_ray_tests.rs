@@ -197,10 +197,15 @@ fn cache_hit_reflections_compose() {
     let stage = crate::program::Stage::Traced;
     for head in std::iter::once(&hard).chain(&software) {
         let source = crate::program::compose(head, crate::STANDARD_PROGRAM, stage, false).source;
-        let stub = crate::program::CACHE_HITS_STUB;
-        assert_eq!(source.matches(stub).count(), 1);
-        let lookup = crate::program::CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", "0.35");
-        let on = source.replacen(stub, &lookup, 1);
+        // With RENDERLAB_RL_CACHE_HITS set the module already holds the lookup.
+        let on = if crate::program::cache_hits_rough().is_some() {
+            source
+        } else {
+            let stub = crate::program::CACHE_HITS_STUB;
+            assert_eq!(source.matches(stub).count(), 1);
+            let lookup = crate::program::CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", "0.35");
+            source.replacen(stub, &lookup, 1)
+        };
         // Software hits pass the traversal's own distance (U-RTVIS's `rs` seam).
         assert_eq!(
             on.contains("rl_cache_hit(record,origin,d,rs.t,"),
