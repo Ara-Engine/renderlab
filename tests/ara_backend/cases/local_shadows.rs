@@ -77,6 +77,7 @@ impl Scene {
             lux: [50.; 3],
         }];
         lights.extend(radius.map(|source_radius| Light::Point {
+            cast_shadows: None,
             position: LAMP.as_vec3(),
             candela: [4000.; 3],
             range: None,

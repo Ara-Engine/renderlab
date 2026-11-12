@@ -179,6 +179,7 @@ impl Engine {
         self.renderer.reset_atmosphere_history();
         self.renderer.mark_camera_cut();
         self.renderer.mark_indirect_cut();
+        self.renderer.cut_light_selection();
     }
     /// The engine's views in creation order (removal reorders).
     pub fn views(&self) -> impl Iterator<Item = ViewId> + '_ {

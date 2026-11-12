@@ -364,6 +364,39 @@ pub(super) fn admit_draws(
     Ok(())
 }
 
+/// The sun an RT renderer gets under the `RENDERLAB_RT_PRIMARY` measurement switch.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RtPrimarySun {
+    /// The Interactive sun from its receivers: `primary_vb_sun` with TR1's budget, rotation
+    /// and stops, or the 8-direction fresh prefix without TR1.
+    Interactive,
+    /// Hardware sun rays from the visibility buffer's receivers (the fresh kernel), this many
+    /// disk directions per pixel: 8, 32 or 256.
+    Rays(u32),
+    /// The non-RT sun: the cached clipmap lookup (`SoftShadows::Virtual`).
+    Virtual,
+}
+
+/// U-FIXED step 1 measurement switch (docs/frame-cost-ara-scenes.md section 0):
+/// `RENDERLAB_RT_PRIMARY=vb` gives the RT path the raster visibility buffer instead of camera
+/// rays, with the Interactive sun traced from its receivers (`primary_vb_sun`); `vb:8`,
+/// `vb:32` and `vb:256` trace that many fixed directions per pixel instead (no rotation or
+/// stops), `vb:virtual` takes the non-RT clipmap sun. Unset (or anything else): traced
+/// primaries.
+pub(crate) fn rt_primary_switch() -> Option<RtPrimarySun> {
+    let value = std::env::var("RENDERLAB_RT_PRIMARY").ok()?;
+    match value.as_str() {
+        "vb" => Some(RtPrimarySun::Interactive),
+        "vb:virtual" => Some(RtPrimarySun::Virtual),
+        other => other
+            .strip_prefix("vb:")?
+            .parse()
+            .ok()
+            .filter(|n| [8, 32, 256].contains(n))
+            .map(RtPrimarySun::Rays),
+    }
+}
+
 impl super::view::ViewState {
     /// This view's TR1 history restarts on its next reconstructed frame.
     pub(super) fn cut_reconstruction(&mut self) {
@@ -380,6 +413,22 @@ impl Renderer {
     /// diagnostic frames use Exact, as reported by `FrameReport::soft_shadows`.
     /// Leaving `Temporal` releases its film history after in-flight frames.
     pub fn set_soft_shadows(&mut self, mode: crate::SoftShadows) {
+        // U-FIXED step 1: a visibility-buffer RT renderer has no Interactive kernels; the
+        // measurement switch names the sun it gets instead.
+        let mode = match rt_primary_switch() {
+            Some(sun)
+                if mode == crate::SoftShadows::Interactive
+                    && self.primary_mode == PrimaryVisibility::VisibilityBuffer
+                    && self.hardware_shadows.is_some() =>
+            {
+                match sun {
+                    RtPrimarySun::Interactive => mode,
+                    RtPrimarySun::Rays(_) => crate::SoftShadows::Exact,
+                    RtPrimarySun::Virtual => crate::SoftShadows::Virtual,
+                }
+            }
+            _ => mode,
+        };
         if mode != crate::SoftShadows::Temporal
             && let Some(state) = &mut self.view.primary
             && let Some(film) = state.film.take()
@@ -720,6 +769,8 @@ struct Bindings {
     /// U-RTVIS: `interactive` plus the held history; entry k writes history k and reads
     /// the other (the reconstruction's parity).
     held: Option<[Owned<wgpu::BindGroup>; 2]>,
+    /// U-FIXED: `primary_vb_sun`'s groups; entry k writes history k and reads the other.
+    vb_sun: Option<[Owned<wgpu::BindGroup>; 2]>,
     repair: Option<Owned<wgpu::BindGroup>>,
     check: Option<Owned<wgpu::BindGroup>>,
     /// P-RTS: penumbra list and trace.
@@ -744,6 +795,9 @@ pub(super) struct PrimaryPipelines {
     pub trace: [Owned<wgpu::ComputePipeline>; 2],
     /// The production 256-ray estimator with hit-record coverage.
     pub fresh: Owned<wgpu::ComputePipeline>,
+    /// U-FIXED: the same estimator's 8-direction prefix (8x4 receivers per group), the
+    /// Interactive sun of visibility-buffer RT frames without TR1.
+    pub fresh_eight: Owned<wgpu::ComputePipeline>,
     /// Interactive soft frames: camera rays and their 8-direction counts in one dispatch.
     pub interactive: Owned<wgpu::ComputePipeline>,
     /// Temporal soft frames: the jittered, direction-rotated Interactive trace and the
@@ -759,7 +813,7 @@ pub(super) struct PrimaryPipelines {
 }
 impl PrimaryPipelines {
     pub(super) fn count(&self) -> u64 {
-        4 + u64::from(self.interactive_repair.is_some())
+        5 + u64::from(self.interactive_repair.is_some())
             + u64::from(self.interactive_retry.is_some())
             + u64::from(self.interactive_full.is_some())
     }
@@ -805,6 +859,10 @@ pub(super) struct PrimaryState {
     /// U-RTVIS: `interactive_bindings` plus the held budget's record and history pair.
     held_bindings: Owned<wgpu::BindGroupLayout>,
     held_layout: Owned<wgpu::PipelineLayout>,
+    /// U-FIXED: `primary_vb_sun` (the visibility buffer's receivers, the frame words and the
+    /// held record and history pair), the per-draw arrays and lighting.
+    vb_sun_bindings: Owned<wgpu::BindGroupLayout>,
+    vb_sun_layout: Owned<wgpu::PipelineLayout>,
     repair_bindings: Owned<wgpu::BindGroupLayout>,
     repair_layout: Owned<wgpu::PipelineLayout>,
     check_bindings: Owned<wgpu::BindGroupLayout>,
@@ -1008,6 +1066,21 @@ impl PrimaryState {
                 ],
             ]
             .concat(),
+        );
+        let vb_sun_bindings = group(
+            "primary visibility-buffer sun, held shadow budget",
+            &[
+                scene(2),
+                texture(3, wgpu::TextureSampleType::Float { filterable: false }),
+                texture(4, wgpu::TextureSampleType::Float { filterable: false }),
+                image(5, F::R32Uint),
+                texture(7, wgpu::TextureSampleType::Uint),
+                frame,
+                texture(21, wgpu::TextureSampleType::Uint),
+                uniform(50, temporal_reconstruction::HELD_BYTES as u64),
+                texture(51, wgpu::TextureSampleType::Uint),
+                image(52, F::R32Uint),
+            ],
         );
         let repair_bindings = group(
             "primary deferred edge repair",
@@ -1246,6 +1319,16 @@ impl PrimaryState {
                 ],
             ),
             held_bindings,
+            vb_sun_layout: layout(
+                "primary visibility-buffer sun ABI",
+                &[
+                    Some(&vb_sun_bindings),
+                    Some(&array_bindings),
+                    None,
+                    Some(lighting),
+                ],
+            ),
+            vb_sun_bindings,
             film_layouts: FilmLayouts::new(
                 device,
                 ledger,
@@ -1332,6 +1415,8 @@ impl PrimaryState {
             interactive_layout: self.interactive_layout.clone(),
             held_bindings: self.held_bindings.clone(),
             held_layout: self.held_layout.clone(),
+            vb_sun_bindings: self.vb_sun_bindings.clone(),
+            vb_sun_layout: self.vb_sun_layout.clone(),
             repair_bindings: self.repair_bindings.clone(),
             repair_layout: self.repair_layout.clone(),
             check_bindings: self.check_bindings.clone(),
@@ -1445,7 +1530,24 @@ impl PrimaryState {
             interactive_full: deferred.then(|| {
                 self.interactive_pipeline(device, ledger, &soft, &[("FRESH_DIRECTIONS", 8.0)])
             }),
-            fresh: self.fresh_pipeline(device, ledger, &soft, "fresh_compute", &[]),
+            // Under the U-FIXED measurement switch the fresh pass traces fewer directions.
+            fresh: match rt_primary_switch() {
+                Some(RtPrimarySun::Rays(n)) if n != 256 => self.fresh_pipeline(
+                    device,
+                    ledger,
+                    &soft,
+                    "fresh_compute",
+                    &[("FRESH_DIRECTIONS", f64::from(n))],
+                ),
+                _ => self.fresh_pipeline(device, ledger, &soft, "fresh_compute", &[]),
+            },
+            fresh_eight: self.fresh_pipeline(
+                device,
+                ledger,
+                &soft,
+                "fresh_compute",
+                &[("FRESH_DIRECTIONS", 8.0)],
+            ),
             interactive: self.interactive_entry(
                 device,
                 ledger,
@@ -1685,6 +1787,15 @@ impl PrimaryState {
         constants: &[(&str, f64)],
     ) -> Owned<wgpu::ComputePipeline> {
         self.entry_on(device, ledger, module, entry, constants, &self.held_layout)
+    }
+    /// U-FIXED: `primary_vb_sun` of `vb_sun_source`'s module, on the VB sun layout.
+    pub(super) fn vb_sun_entry(
+        &self,
+        device: &PipelineDevice,
+        ledger: &Ledger,
+        module: &wgpu::ShaderModule,
+    ) -> Owned<wgpu::ComputePipeline> {
+        self.entry_on(device, ledger, module, "primary_vb_sun", &[], &self.vb_sun_layout)
     }
     fn entry_on(
         &self,
@@ -2084,6 +2195,10 @@ impl Renderer {
             && self.view.soft_mode == SoftShadows::Interactive
             && repair_bytes <= self.device.limits().max_storage_buffer_binding_size
             && repair_bytes <= self.device.limits().max_buffer_size;
+        // The held budget's history: traced frames, and (U-FIXED) visibility-buffer RT frames.
+        let wants_held = self.primary_mode == PrimaryVisibility::Traced
+            || (self.primary_mode == PrimaryVisibility::VisibilityBuffer
+                && self.hardware_shadows.is_some());
         if self
             .view
             .primary
@@ -2091,7 +2206,11 @@ impl Renderer {
             .unwrap()
             .targets
             .as_ref()
-            .is_none_or(|t| t.hit.texture.size() != size || t.defer_edges != defer_edges)
+            .is_none_or(|t| {
+                t.hit.texture.size() != size
+                    || t.defer_edges != defer_edges
+                    || t.held.is_some() != wants_held
+            })
         {
             let target = |label, size: wgpu::Extent3d, format: wgpu::TextureFormat| {
                 let texture = self.ledger.own(
@@ -2163,7 +2282,7 @@ impl Renderer {
                 },
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
             );
-            let held = (self.primary_mode == PrimaryVisibility::Traced).then(|| HeldTargets {
+            let held = wants_held.then(|| HeldTargets {
                 history: ["held shadow history A", "held shadow history B"]
                     .map(|label| target(label, size, wgpu::TextureFormat::R32Uint)),
                 frame: Buffer::new(
@@ -2413,6 +2532,25 @@ impl Renderer {
                         )
                     })
                 }),
+                vb_sun: fresh.zip(t.held.as_ref()).map(|(f, h)| {
+                    [0, 1].map(|k| {
+                        group(
+                            &state.vb_sun_bindings,
+                            &[
+                                scene.clone(),
+                                (3, R::TextureView(&f.world.view)),
+                                (4, R::TextureView(&f.normal.view)),
+                                (5, R::TextureView(&f.visibility.view)),
+                                (7, hit.clone()),
+                                uniform.clone(),
+                                (21, tiles.clone()),
+                                (50, h.frame.value.as_entire_binding()),
+                                (51, R::TextureView(&h.history[1 - k].view)),
+                                (52, R::TextureView(&h.history[k].view)),
+                            ],
+                        )
+                    })
+                }),
                 repair: fresh.map(|f| {
                     group(
                         &state.repair_bindings,
@@ -2527,7 +2665,20 @@ impl Renderer {
         pipeline: &wgpu::ComputePipeline,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
-        let tile = fresh_shadow_gpu::TILE;
+        // U-FIXED: visibility-buffer RT frames' Interactive sun from the buffer's receivers.
+        if self.primary_mode == PrimaryVisibility::VisibilityBuffer
+            && self.hardware_shadows.is_some()
+            && self.view.soft_mode == SoftShadows::Interactive
+        {
+            self.encode_vb_sun(encoder, timestamp_writes);
+            return;
+        }
+        // fresh_compute's 8-direction variant covers 8x4 receivers per workgroup.
+        let tile = if rt_primary_switch() == Some(RtPrimarySun::Rays(8)) {
+            [8, 4]
+        } else {
+            fresh_shadow_gpu::TILE
+        };
         #[cfg(test)]
         let tile = self
             .view
@@ -2537,6 +2688,39 @@ impl Renderer {
             .test_fresh_tile
             .unwrap_or(tile);
         self.encode_primary_fresh_tile(encoder, pipeline, tile, timestamp_writes);
+    }
+
+    /// Visibility-buffer RT frames' Interactive sun: `primary_vb_sun` on reconstructed frames
+    /// (TR1's budget, rotation, cold and held stops, history `parity`), else the 8-direction
+    /// fresh prefix. Both read the receivers the buffer's resolve wrote.
+    fn encode_vb_sun(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
+    ) {
+        let p = self.pipeline.primary.as_ref().unwrap();
+        let state = self.view.primary.as_ref().unwrap();
+        let reconstructed = p
+            .reconstruction
+            .as_ref()
+            .and_then(|r| r.vb_sun.as_deref())
+            .filter(|_| self.view.reconstruction_frame.is_some())
+            .zip(state.bindings.as_ref().and_then(|b| b.vb_sun.as_ref()))
+            .zip(self.view.reconstruction_state.as_ref());
+        let Some(((pipeline, groups), r)) = reconstructed else {
+            self.encode_primary_fresh_tile(encoder, &p.fresh_eight, [8, 4], timestamp_writes);
+            return;
+        };
+        let size = state.targets.as_ref().unwrap().hit.texture.size();
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("visibility-buffer RT sun"),
+            timestamp_writes,
+        });
+        pass.set_pipeline(pipeline);
+        pass.set_bind_group(0, &*groups[r.plan.parity], &[]);
+        pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
+        pass.set_bind_group(3, self.lighting.bind(), &[]);
+        pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(4), 1);
     }
 
     /// Interactive soft frames: camera rays, hit records and 8-direction counts in one

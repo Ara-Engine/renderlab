@@ -129,6 +129,19 @@ impl Kernel {
         arguments: &StorageBuffer,
         offset: u64,
     ) -> Result<()> {
+        let label = format!("ara::{:?}", self.pass);
+        self.record_indirect_labelled(graph, rec, inputs, arguments, offset, label)
+    }
+    /// `record_indirect` under another pass label.
+    pub(crate) fn record_indirect_labelled(
+        &self,
+        graph: &mut Graph,
+        rec: &mut Recorder,
+        inputs: &HeapBindings<'_>,
+        arguments: &StorageBuffer,
+        offset: u64,
+        label: String,
+    ) -> Result<()> {
         ensure!(
             inputs.pass() == self.pass
                 && inputs.contract() == self.contract
@@ -148,7 +161,7 @@ impl Kernel {
                 arguments: arguments.buffer,
                 offset,
             },
-            format!("ara::{:?}", self.pass),
+            label,
         );
         Ok(())
     }

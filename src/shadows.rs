@@ -261,6 +261,7 @@ mod tests {
                     candela: [1.; 3],
                     range: None,
                     source_radius: 0.0,
+                    cast_shadows: None,
                 }],
                 limits()
             )
@@ -283,6 +284,7 @@ mod tests {
             inner: 0.1,
             outer: std::f32::consts::FRAC_PI_2,
             source_radius: 0.0,
+            cast_shadows: None,
         };
         assert!(Shadows::default().validate(&[light], limits()).is_ok());
         let s = Shadows {

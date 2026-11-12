@@ -355,7 +355,7 @@ pub(super) struct Compiled {
 /// A program module, from the cache or newly created. Program modules always compile checked,
 /// the bundled standard program included (P-SPLIT): one check mode for every program means an
 /// edit recompiles only the kernels its text changes, not every kernel the program has.
-fn module(abi: &ProgramAbi<'_>, label: &str, composed: &Composed) -> Module {
+pub(super) fn module(abi: &ProgramAbi<'_>, label: &str, composed: &Composed) -> Module {
     if let Some(module) = abi.modules.get(&composed.source) {
         return module;
     }
@@ -373,7 +373,7 @@ fn module(abi: &ProgramAbi<'_>, label: &str, composed: &Composed) -> Module {
     // otherwise disappear on a later hit. Cache only after this module's scopes pass.
     module
 }
-fn scope_error(label: &str, error: wgpu::Error, traced: &[Composed]) -> Error {
+pub(super) fn scope_error(label: &str, error: wgpu::Error, traced: &[Composed]) -> Error {
     match error {
         wgpu::Error::Validation { .. } => traced
             .iter()

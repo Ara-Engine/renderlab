@@ -41,9 +41,16 @@ const WIDE_SPOT: f32 = 1.0;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LocalShadows {
     /// Map budget, at most 128 local lights, ranked by projected influence and energy.
-    /// RT shadows every contributing clustered local light when this is nonzero.
     /// Zero disables automatic local shadows on both paths.
     pub count: u32,
+    /// Ray budget on traced (RT) frames: the `rays` most important point and spot lights
+    /// (the maps' ranking) trace shadow rays and the rest light unshadowed, fading over
+    /// eight frames as they change places. With no more candidates than this, every light
+    /// traces at full strength. `u32::MAX`, the default, shadows every light; the
+    /// measurement switch `RENDERLAB_LOCAL_RAY_BUDGET` (a count, or `all`) overrides it.
+    /// On Outpost every light the budget drops is one a pixel shows: 8 saves nothing there
+    /// and 4 changes 28 thousand pixels for 1 ms on the M5.
+    pub rays: u32,
     /// Maximum map-face resolution. The atlas is four times this wide; smaller lights
     /// receive smaller cached tiles. Held tiles keep their resolution to avoid shimmer.
     pub resolution: u32,
@@ -55,6 +62,7 @@ impl Default for LocalShadows {
     fn default() -> Self {
         Self {
             count: 128,
+            rays: u32::MAX,
             resolution: 1024,
             near: 0.02,
         }
@@ -209,6 +217,116 @@ fn measured_api() -> String {
     api
 }
 
+/// The ray budget in force: None shadows every light. Measurement switch:
+/// `RENDERLAB_LOCAL_RAY_BUDGET` replaces `rays` for a process (`all` for no budget).
+pub(crate) fn ray_budget(settings: &LocalShadows) -> Option<u32> {
+    static FORCED: std::sync::OnceLock<Option<Option<u32>>> = std::sync::OnceLock::new();
+    let forced = FORCED.get_or_init(|| {
+        let value = std::env::var("RENDERLAB_LOCAL_RAY_BUDGET").ok()?;
+        Some(if value == "all" {
+            None
+        } else {
+            value.parse().ok()
+        })
+    });
+    let rays = forced.unwrap_or(Some(settings.rays));
+    rays.filter(|r| *r != u32::MAX)
+}
+
+/// A ray-shadowed light's `kind.w`: its index plus one, and its fade in the top byte in
+/// 255ths (0 meaning full strength; shaders/local_light_ray.wgsl `rl_local_fade`). Zero
+/// strength leaves it unshadowed.
+pub(crate) fn ray_word(index: u32, strength: f32) -> u32 {
+    let word = (index & 0xffff) + 1;
+    if strength >= 1.0 {
+        word
+    } else if strength > 0.0 {
+        word | ((strength * 255.0).round().clamp(1.0, 254.0) as u32) << 24
+    } else {
+        0
+    }
+}
+
+/// A light's own shadow choice (`cast_shadows`); None for directional lights.
+fn casts(light: &Light) -> Option<bool> {
+    match *light {
+        Light::Directional { .. } => None,
+        Light::Point { cast_shadows, .. } | Light::Spot { cast_shadows, .. } => cast_shadows,
+    }
+}
+
+/// Which point and spot lights trace shadow rays on traced frames, kept across frames so a
+/// light entering or leaving the budget fades (`transition`) instead of popping.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct RaySelection {
+    slots: Vec<Option<u32>>,
+    strengths: Vec<f32>,
+    started: bool,
+}
+impl RaySelection {
+    /// Each light's `kind.w` for this traced frame (`ray_word`; 0 unshadowed). Lights that
+    /// set `cast_shadows: Some(false)` never trace and `Some(true)` always do; the rest are
+    /// ranked as the maps rank them when there are more than the budget. The first frame
+    /// starts every chosen light at full strength.
+    pub fn words(
+        &mut self,
+        lights: &[Light],
+        view_projection: glam::Mat4,
+        eye: Vec3,
+        settings: &LocalShadows,
+    ) -> Vec<u32> {
+        let mut words = vec![0; lights.len()];
+        let candidates: Vec<u32> = lights
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| sphere(l).is_some() && casts(l) != Some(false))
+            .map(|(i, _)| i as u32)
+            .collect();
+        let budget = ray_budget(settings);
+        let Some(budget) = budget.filter(|b| (*b as usize) < candidates.len()) else {
+            // Every candidate fits: full strength, as without a budget. Kept as the slots a
+            // later over-budget frame transitions from.
+            for &index in &candidates {
+                words[index as usize] = ray_word(index, 1.0);
+            }
+            if let Some(budget) = budget {
+                self.slots = (0..budget as usize)
+                    .map(|s| candidates.get(s).copied())
+                    .collect();
+                self.strengths = self
+                    .slots
+                    .iter()
+                    .map(|s| f32::from(u8::from(s.is_some())))
+                    .collect();
+            }
+            self.started = true;
+            return words;
+        };
+        let desired = select(lights, view_projection, eye, &self.slots, budget);
+        let (slots, strengths) = if self.started {
+            transition(&self.slots, &self.strengths, &desired, budget)
+        } else {
+            let full = desired
+                .iter()
+                .map(|s| f32::from(u8::from(s.is_some())))
+                .collect();
+            (desired, full)
+        };
+        (self.slots, self.strengths, self.started) = (slots, strengths, true);
+        for (slot, light) in self.slots.iter().enumerate() {
+            if let Some(light) = *light {
+                words[light as usize] = ray_word(light, self.strengths[slot]);
+            }
+        }
+        for (index, light) in lights.iter().enumerate() {
+            if casts(light) == Some(true) && sphere(light).is_some() {
+                words[index] = ray_word(index as u32, 1.0);
+            }
+        }
+        words
+    }
+}
+
 fn luminance(rgb: [f32; 3]) -> f32 {
     0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
 }
@@ -278,6 +396,12 @@ fn select_ranked(
         .enumerate()
         .filter_map(|(index, light)| {
             let (position, candela, range, _) = local(light)?;
+            // A light's own choice wins: never shadowed, or always ranked first.
+            match casts(light) {
+                Some(false) => return None,
+                Some(true) => return Some((f32::MAX, index as u32)),
+                None => {}
+            }
             let radius = range.unwrap_or(f32::INFINITY);
             let visible = planes.iter().all(|p| {
                 let length = p.truncate().length();

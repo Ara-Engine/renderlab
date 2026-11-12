@@ -24,6 +24,8 @@ use glam::Vec4;
 pub(crate) mod reflection;
 #[path = "transparency_shadow.rs"]
 pub(crate) mod transmission_shadow;
+#[path = "transparency_panes.rs"]
+mod panes;
 
 const SHADER: &str = include_str!("../shaders/transparency.wgsl");
 /// Square sun shadow map of the transparent receivers' footprint.
@@ -232,6 +234,9 @@ mod tp1_tests;
 pub(super) struct TransparencyState {
     #[cfg(test)]
     profile: Option<String>,
+    /// Per-pixel panes for this renderer; None reads `RENDERLAB_PANES` (`panes::wanted`).
+    #[cfg(test)]
+    pub(super) pane_pixels: Option<bool>,
     pub stats: TransparencyStats,
     /// Particle simulation step per lit frame, seconds.
     pub step: f32,
@@ -256,6 +261,9 @@ struct Gpu {
     /// Indexed as above; the RT entry exists only on hardware-shadow renderers.
     glass_bindings: Vec<Owned<wgpu::BindGroupLayout>>,
     glass_layouts: Vec<Owned<wgpu::PipelineLayout>>,
+    /// Per-pixel panes (`panes`): the glass group plus the pane's own bindings, by path.
+    pane_bindings: Vec<Owned<wgpu::BindGroupLayout>>,
+    pane_layouts: Vec<Owned<wgpu::PipelineLayout>>,
     shadow_group: Owned<wgpu::BindGroup>,
     shadow_pipeline: Owned<wgpu::RenderPipeline>,
     raster_depth_bindings: Owned<wgpu::BindGroupLayout>,
@@ -282,6 +290,8 @@ pub(super) struct Targets {
     color: Depth,
     depth: Depth,
     aa: Depth,
+    /// Per-pixel panes' four-sample triangle ids (`panes`), when they are on.
+    pane_ids: Option<Depth>,
     generation: u64,
 }
 impl Targets {
@@ -297,6 +307,8 @@ struct GlassPipelines {
     /// By tangent stream.
     pipelines: [Owned<wgpu::RenderPipeline>; 2],
     lobe: [Owned<wgpu::RenderPipeline>; 2],
+    /// Per-pixel pane pipelines, built the first time a frame shades panes per pixel.
+    pane: Option<panes::PanePipelines>,
 }
 struct EmitterSlot {
     id: u64,
@@ -844,6 +856,24 @@ impl Renderer {
                 )
             })
             .collect();
+        let pane_bindings: Vec<_> = paths
+            .iter()
+            .map(|&rt| self.tp_layout("TP1 pane group 0", &panes::layout_entries(glass_entries(rt))))
+            .collect();
+        let pane_layouts: Vec<_> = pane_bindings
+            .iter()
+            .map(|bindings| {
+                self.tp_pipeline_layout(
+                    "TP1 pane shading",
+                    &[
+                        bindings,
+                        &self.instance_bindings,
+                        &self.material_bindings,
+                        &self.lighting.bindings,
+                    ],
+                )
+            })
+            .collect();
         // Shadow map: depth only, every opaque instance.
         let shadow_bindings = self.tp_layout(
             "TP1 shadow group 0",
@@ -1031,6 +1061,8 @@ impl Renderer {
             _white: white_texture,
             glass_bindings,
             glass_layouts,
+            pane_bindings,
+            pane_layouts,
             shadow_group,
             shadow_pipeline,
             raster_depth_bindings,
@@ -1277,6 +1309,7 @@ impl Renderer {
             key,
             pipelines,
             lobe,
+            pane: None,
         })
     }
 
@@ -1571,10 +1604,39 @@ impl Renderer {
                     u64::from(size.width) * u64::from(size.height) * 32,
                 ),
             };
+            let pane_ids = self.tp_pane_pixels().then(|| {
+                let texture = self.ledger.own(
+                    self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("TP pane ids"),
+                        size,
+                        mip_level_count: 1,
+                        sample_count: 4,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::R32Uint,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::TEXTURE_BINDING,
+                        view_formats: &[],
+                    }),
+                    ResourceKind::Texture,
+                );
+                let view = self.ledger.own(
+                    texture.create_view(&Default::default()),
+                    ResourceKind::TextureView,
+                );
+                Depth {
+                    texture,
+                    view,
+                    _allocation: self.ledger.allocate(
+                        AllocationKind::Target,
+                        u64::from(size.width) * u64::from(size.height) * 16,
+                    ),
+                }
+            });
             self.view.transparency_targets = Some(Targets {
                 color,
                 depth,
                 aa,
+                pane_ids,
                 generation,
             });
         }
@@ -1688,6 +1750,24 @@ impl Renderer {
             };
             self.transparency.glass.retain(|g| g.program != program);
             self.transparency.glass.push(pipelines);
+        }
+        // Per-pixel panes: the id raster and shading of each program, once its glass set exists.
+        let pixel_panes = self.tp_pane_pixels()
+            && traced
+            && self.device.features().contains(wgpu::Features::PRIMITIVE_INDEX);
+        if pixel_panes {
+            for at in 0..self.transparency.glass.len() {
+                if self.transparency.glass[at].pane.is_some() {
+                    continue;
+                }
+                let program = self.transparency.glass[at].program;
+                let (source, _) = self.tp_glass_source(program, rt);
+                let pane = match self.tp_pane_pipelines(program, rt, &source) {
+                    Err(Error::Fault(Fault(message))) => return Err(self.fail(message)),
+                    other => other?,
+                };
+                self.transparency.glass[at].pane = Some(pane);
+            }
         }
         // ---- CPU: the frame block, the sun map fit and the draw order ----
         let camera = self.transparency.camera.unwrap();
@@ -2191,6 +2271,77 @@ impl Renderer {
                 })
             })
             .collect();
+        // Per-pixel panes (`panes`): a record (rectangle and model slot) per instance of each
+        // glass draw, at its dynamic offset, and a pane group per draw. Draws with a tangent
+        // stream keep the raster: the pane shading builds vertices without tangents.
+        let mut pane_records: Vec<Vec<(u32, [u32; 4])>> = vec![Vec::new(); transparent.len()];
+        let mut pane_groups: Vec<Option<wgpu::BindGroup>> =
+            (0..transparent.len()).map(|_| None).collect();
+        let mut pane_bytes = Vec::new();
+        if pixel_panes && targets.pane_ids.is_some() {
+            for (i, draw) in transparent.iter().enumerate() {
+                if draw.mesh.tangent.is_some() {
+                    continue;
+                }
+                let state = &draw.instances.state;
+                for (model, slot) in state.models.iter().zip(&state.ids) {
+                    let rect = panes::rect(&draw.mesh.bounds, *model, matrix, [size.width, size.height]);
+                    let at = pane_bytes.len();
+                    pane_bytes.extend(panes::record(rect, *slot));
+                    pane_bytes.resize(at + panes::RECORD as usize, 0);
+                    pane_records[i].push((at as u32, rect));
+                }
+            }
+        }
+        let pane_buffer = (!pane_bytes.is_empty()).then(|| {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("TP pane records"),
+                size: pane_bytes.len() as u64,
+                usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            self.queue.write_buffer(&buffer, 0, &pane_bytes);
+            buffer
+        });
+        if let (Some(buffer), Some(ids)) = (&pane_buffer, &targets.pane_ids) {
+            for (i, draw) in transparent.iter().enumerate() {
+                if pane_records[i].is_empty() {
+                    continue;
+                }
+                let mut entries = glass_entries.clone();
+                entries.extend([
+                    wgpu::BindGroupEntry {
+                        binding: 70,
+                        resource: draw.mesh.vertex.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 71,
+                        resource: draw.mesh.index.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 72,
+                        resource: wgpu::BindingResource::TextureView(&ids.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 76,
+                        resource: wgpu::BindingResource::TextureView(&hdr.resolved.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 77,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer,
+                            offset: 0,
+                            size: wgpu::BufferSize::new(panes::RECORD_BYTES),
+                        }),
+                    },
+                ]);
+                pane_groups[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("TP pane group 0"),
+                    layout: &gpu.pane_bindings[usize::from(rt)],
+                    entries: &entries,
+                }));
+            }
+        }
         // 4. Back to front. Each transparent draw first copies the colour behind it.
         let hdr_view = &hdr.resolved.view;
         let aa_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -2201,16 +2352,49 @@ impl Renderer {
                 resource: wgpu::BindingResource::TextureView(&targets.color.view),
             }],
         });
+        // The colour behind a draw is the HDR target as the draws before it left it. After the
+        // first full copy, only what those draws wrote can differ, so later draws copy just that
+        // region (`dirty`, the union of their conservative screen rectangles; the whole view for
+        // particles and for a draw with a corner behind the eye). The same bytes reach every
+        // pixel any draw reads, refraction offsets included (audit 2026-11-12, 3.2: a full-frame
+        // copy per transparent draw).
+        let view_rect = [0, 0, size.width, size.height];
+        let union = |a: [u32; 4], b: [u32; 4]| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])];
+        let draw_rects: Vec<[u32; 4]> = transparent
+            .iter()
+            .map(|draw| {
+                let state = &draw.instances.state;
+                state
+                    .models
+                    .iter()
+                    .map(|model| panes::rect(&draw.mesh.bounds, *model, matrix, [size.width, size.height]))
+                    .reduce(union)
+                    .unwrap_or([0, 0, 0, 0])
+            })
+            .collect();
+        let mut copied = false;
+        let mut dirty: Option<[u32; 4]> = None;
         let mut index = 0;
         while index < items.len() {
             let glass = matches!(items[index].1, Item::Draw(_));
             let aa = glass && glass_samples() == 4;
             if glass {
-                encoder.copy_texture_to_texture(
-                    hdr.resolved.texture.as_image_copy(),
-                    targets.color.texture.as_image_copy(),
-                    size,
-                );
+                let region = if copied { dirty } else { Some(view_rect) };
+                if let Some(r) = region.filter(|r| r[2] > r[0] && r[3] > r[1]) {
+                    let origin = wgpu::Origin3d { x: r[0], y: r[1], z: 0 };
+                    let mut from = hdr.resolved.texture.as_image_copy();
+                    from.origin = origin;
+                    let mut to = targets.color.texture.as_image_copy();
+                    to.origin = origin;
+                    let extent = wgpu::Extent3d {
+                        width: r[2] - r[0],
+                        height: r[3] - r[1],
+                        depth_or_array_layers: 1,
+                    };
+                    encoder.copy_texture_to_texture(from, to, extent);
+                }
+                copied = true;
+                dirty = None;
                 if let (Item::Draw(i), Some(group)) = (&items[index].1, &reflection_group) {
                     let reflection = self.view.transparency_reflections.as_ref().unwrap();
                     let draw = transparent[*i];
@@ -2283,6 +2467,86 @@ impl Renderer {
                     pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
                 }
             }
+            // Per-pixel panes: each instance in draw order, its ids then its shading over what
+            // the previous instance left; the first one's colour behind was copied above.
+            let pane_group = match &items[index].1 {
+                Item::Draw(i) => pane_groups[*i].as_ref().map(|group| (*i, group)),
+                Item::Emitter(_) => None,
+            };
+            if let Some((i, group)) = pane_group {
+                let draw = transparent[i];
+                let program = draw.material.map_or(default_program, |m| m.program.id());
+                let set = self
+                    .transparency
+                    .glass
+                    .iter()
+                    .find(|g| g.program == program)
+                    .unwrap();
+                let pane = set.pane.as_ref().unwrap();
+                let material = draw
+                    .material
+                    .unwrap_or(self.default_material.as_ref().unwrap());
+                let ids = targets.pane_ids.as_ref().unwrap();
+                for (k, &(at, rect)) in pane_records[i].iter().enumerate() {
+                    if rect[2] <= rect[0] || rect[3] <= rect[1] {
+                        continue;
+                    }
+                    if k > 0 {
+                        let origin = wgpu::Origin3d { x: rect[0], y: rect[1], z: 0 };
+                        let extent = wgpu::Extent3d {
+                            width: rect[2] - rect[0],
+                            height: rect[3] - rect[1],
+                            depth_or_array_layers: 1,
+                        };
+                        let mut from = hdr.resolved.texture.as_image_copy();
+                        from.origin = origin;
+                        let mut to = targets.color.texture.as_image_copy();
+                        to.origin = origin;
+                        encoder.copy_texture_to_texture(from, to, extent);
+                    }
+                    {
+                        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                            label: Some("TP pane ids"),
+                            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                                view: &ids.view,
+                                depth_slice: None,
+                                resolve_target: None,
+                                ops: wgpu::Operations {
+                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    store: wgpu::StoreOp::Store,
+                                },
+                            })],
+                            ..Default::default()
+                        });
+                        pass.set_pipeline(&pane.ids[0]);
+                        pass.set_bind_group(0, glass_group.as_ref().unwrap(), &[(i as u64 * SLOT) as u32]);
+                        pass.set_bind_group(1, &*draw.instances.bind, &[]);
+                        pass.set_bind_group(2, &*material.bind, &[]);
+                        pass.set_bind_group(3, self.lighting.bind(), &[]);
+                        pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
+                        pass.set_vertex_buffer(1, draw.instances.id_buffer.slice(..));
+                        pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..draw.mesh.index_count, 0, k as u32..k as u32 + 1);
+                    }
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("TP pane shading"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&pane.shade);
+                    pass.set_bind_group(0, group, &[(i as u64 * SLOT) as u32, at]);
+                    pass.set_bind_group(1, &*draw.instances.bind, &[]);
+                    pass.set_bind_group(2, &*material.bind, &[]);
+                    pass.set_bind_group(3, self.lighting.bind(), &[]);
+                    pass.dispatch_workgroups(
+                        (rect[2] - rect[0]).div_ceil(8),
+                        (rect[3] - rect[1]).div_ceil(8),
+                        1,
+                    );
+                }
+                dirty = Some(dirty.map_or(draw_rects[i], |d| union(d, draw_rects[i])));
+                index += 1;
+                continue;
+            }
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TP1 transparent"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2311,6 +2575,12 @@ impl Renderer {
             }
             pass.set_bind_group(3, self.lighting.bind(), &[]);
             loop {
+                // What this pass writes: the draw's rectangle, the whole view for particles.
+                let written = match items[index].1 {
+                    Item::Draw(i) => draw_rects[i],
+                    Item::Emitter(_) => view_rect,
+                };
+                dirty = Some(dirty.map_or(written, |d| union(d, written)));
                 match items[index].1 {
                     Item::Draw(i) => {
                         let draw = transparent[i];

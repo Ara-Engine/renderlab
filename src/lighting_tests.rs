@@ -15,6 +15,7 @@ fn lighting_validation_and_packing() {
                 candela: [20.; 3],
                 range: Some(2.),
                 source_radius: 0.0,
+                cast_shadows: None,
             },
             Light::Spot {
                 position: Vec3::Y,
@@ -24,6 +25,7 @@ fn lighting_validation_and_packing() {
                 inner: 0.25,
                 outer: 0.5,
                 source_radius: 0.0,
+                cast_shadows: None,
             },
         ],
         ..Default::default()
@@ -43,6 +45,7 @@ fn lighting_validation_and_packing() {
         candela: [22.; 3],
         range: Some(3.),
         source_radius: 0.0,
+        cast_shadows: None,
     };
     let edit = PackedLighting::new(&value, 3).unwrap();
     let span = dirty_span(&packed.records, &edit.records).unwrap();
@@ -69,12 +72,14 @@ fn lighting_validation_and_packing() {
             candela: [1.; 3],
             range: None,
             source_radius: 0.0,
+            cast_shadows: None,
         },
         Light::Point {
             position: Vec3::ZERO,
             candela: [1.; 3],
             range: Some(0.),
             source_radius: 0.0,
+            cast_shadows: None,
         },
         Light::Spot {
             position: Vec3::ZERO,
@@ -84,6 +89,7 @@ fn lighting_validation_and_packing() {
             inner: 0.5,
             outer: 0.5,
             source_radius: 0.0,
+            cast_shadows: None,
         },
     ] {
         value.lights = vec![light];
@@ -95,6 +101,7 @@ fn lighting_validation_and_packing() {
             candela: [1.; 3],
             range: None,
             source_radius: radius,
+            cast_shadows: None,
         }];
         assert!(PackedLighting::new(&value, 3).is_err());
     }
@@ -105,6 +112,7 @@ fn lighting_validation_and_packing() {
                 candela: [1.; 3],
                 range: None,
                 source_radius: 0.25,
+                cast_shadows: None,
             }
         } else {
             Light::Spot {
@@ -115,6 +123,7 @@ fn lighting_validation_and_packing() {
                 inner: 0.2,
                 outer: 0.5,
                 source_radius: 0.25,
+                cast_shadows: None,
             }
         }];
         let p = PackedLighting::new(&value, 3).unwrap();
@@ -329,6 +338,7 @@ fn gpu_lit_edits_and_bundle_recovery() {
                     candela: [1.; 3],
                     range: None,
                     source_radius: 0.0,
+                    cast_shadows: None,
                 };
                 count
             ],
@@ -427,6 +437,7 @@ fn gpu_lit_edits_and_bundle_recovery() {
                     candela: [1e5; 3],
                     range: None,
                     source_radius: 0.0,
+                    cast_shadows: None,
                 },
             ],
             environment: [1.; 3],
@@ -571,18 +582,21 @@ fn gpu_lit_photometry_1x_4x() {
                     candela: [100.; 3],
                     range: None,
                     source_radius: 0.0,
+                    cast_shadows: None,
                 },
                 Light::Point {
                     position: Vec3::Z * 2.,
                     candela: [100.; 3],
                     range: None,
                     source_radius: 0.0,
+                    cast_shadows: None,
                 },
                 Light::Point {
                     position: Vec3::Z,
                     candela: [100.; 3],
                     range: Some(0.9),
                     source_radius: 0.0,
+                    cast_shadows: None,
                 },
                 Light::Spot {
                     position: Vec3::Z * 2.,
@@ -592,6 +606,7 @@ fn gpu_lit_photometry_1x_4x() {
                     inner: 0.25,
                     outer: 0.5,
                     source_radius: 0.0,
+                    cast_shadows: None,
                 },
             ];
             for light in lights {

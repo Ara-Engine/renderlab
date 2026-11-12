@@ -984,6 +984,9 @@ struct Kept {
     ids: Option<IdTargets>,
     /// The Interactive trace's repair queue: a header, then room for every pixel.
     repairs: Option<StorageBuffer>,
+    /// Which point and spot lights trace shadow rays (`LocalShadows::rays`), kept from
+    /// frame to frame for their fades.
+    rays: lc::RaySelection,
     /// The 2D targets the last frame made and released, for the next frame to take.
     targets: super::image::pool::Pool,
     /// The displayed images, two so a frame draws into the one not on screen while a
@@ -1022,8 +1025,9 @@ impl Frames {
         }
     }
     /// Forgets history: the next frame is a first frame after a cut. The cache keeps
-    /// its buffers and starts from an empty table, as `Renderer::reset_indirect`. The
-    /// meshes and the atmosphere's tables stay as they are.
+    /// its buffers and starts from an empty table, as `Renderer::reset_indirect`, and the
+    /// ray-shadowed lights are chosen afresh. The meshes and the atmosphere's tables stay
+    /// as they are.
     pub fn cut(&mut self) {
         if let Some(cache) = &mut self.kept.gi {
             cache.reset();
@@ -1031,6 +1035,8 @@ impl Frames {
         if let Some(history) = &mut self.kept.tr1 {
             history.cut();
         }
+        // The cut frame's shadowed lights start at full strength.
+        self.kept.rays = lc::RaySelection::default();
         self.carried = Carried::default();
     }
     /// Releases what the sequence kept on the GPU, after its frames in flight finish.
@@ -1341,6 +1347,7 @@ fn frame(
         fog: kept_fog,
         ids: kept_ids,
         repairs: kept_repairs,
+        rays: ray_selection,
         // Taken out and made active for this frame by `Frames::render`.
         targets: _,
         outputs,
@@ -1547,6 +1554,26 @@ fn frame(
     } else {
         Vec::new()
     };
+    // The pass log's shading parts (src/shade_detail.rs): each part's tiled program, or its
+    // list programs in slot order.
+    let shade_parts = if deferred_path && crate::renderer::shade_detail::wanted() {
+        crate::renderer::shade_detail::PARTS
+            .iter()
+            .map(|&(name, terms)| {
+                let programs = if sources.len() > 1 {
+                    sources
+                        .iter()
+                        .map(|source| primary_shade::hardware_soft_list_part(source, terms))
+                        .collect::<Result<Vec<_>>>()?
+                } else {
+                    vec![primary_shade::hardware_soft_part(material_source, terms)?]
+                };
+                Ok((name, programs))
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
     let pass = if deferred_path {
         None
     } else {
@@ -1724,23 +1751,25 @@ fn frame(
         }
         h.finalize().into()
     };
-    // `prepare_light_clusters` on a frame whose shading traces local shadows: every
-    // point and spot light's record names itself, and needs no map slot.
+    // `prepare_light_clusters` on a frame whose shading traces local shadows: the ray
+    // budget's point and spot lights name themselves (`RaySelection`), with no map slot.
     let local_shadows = scene.local_shadows.filter(|s| s.count > 0);
     ensure!(
         local_shadows.is_none() || deferred_path,
         "local-light shadows are assembled on traced frames only"
     );
-    if local_shadows.is_some() {
-        for (index, (record, light)) in records
+    if let Some(settings) = &local_shadows {
+        let vp = scene.camera.matrix(size[0], size[1]);
+        let eye = scene.camera.view().inverse().w_axis.truncate();
+        let words = ray_selection.words(&scene.lighting.lights, vp, eye, settings);
+        for (record, word) in records
             .as_chunks_mut::<{ crate::lighting::LIGHT_BYTES }>()
             .0
             .iter_mut()
-            .zip(&scene.lighting.lights)
-            .enumerate()
+            .zip(words)
         {
-            if lc::sphere(light).is_some() {
-                record[60..64].copy_from_slice(&((index as u32 & 0xffff) + 1).to_ne_bytes());
+            if word != 0 {
+                record[60..64].copy_from_slice(&word.to_ne_bytes());
             }
         }
     }
@@ -2628,7 +2657,10 @@ fn frame(
     let mut specs = program.inputs().to_vec();
     // A list program reads what its own source reads; its record and the lists are the
     // frame's own.
-    for list in &list_programs {
+    for list in list_programs
+        .iter()
+        .chain(shade_parts.iter().flat_map(|(_, programs)| programs))
+    {
         specs.extend(
             list.inputs()
                 .iter()
@@ -3381,6 +3413,31 @@ fn frame(
             list_packets.push(packet);
         }
     }
+    // Each shading part's kernels and packets, bound as the frame's own shading binds them.
+    let mut part_records = Vec::new();
+    for (name, programs) in shade_parts.iter() {
+        let mut slots = Vec::new();
+        for (slot, program) in programs.iter().enumerate() {
+            let values = program
+                .inputs()
+                .iter()
+                .map(|spec| {
+                    Ok((
+                        spec.key,
+                        match (&program_lists, spec.key.group, spec.key.binding) {
+                            (Some(lists), 0, 38) => Input::Buffer(&lists.slots[slot].2),
+                            (Some(lists), 0, 39) => Input::Buffer(&lists.entries),
+                            _ => shared.input(spec, None)?,
+                        },
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let packet = HeapBindings::for_program(gpu, program, &values)?;
+            packet.import(&mut graph);
+            slots.push((Kernel::from_program(gpu, cache, program)?, packet));
+        }
+        part_records.push((*name, slots));
+    }
     if let Some(deferred) = &deferred {
         // `encode_primary_visibility`, `encode_primary_fresh`, the cache's passes
         // (`GiState::encode`), then `encode_primary_shading`.
@@ -3404,6 +3461,40 @@ fn frame(
                     &gi_packets,
                     &gi_shade_packets,
                 )?;
+            }
+            // The pass log's shading parts replay the shading first; the frame's own
+            // shading below rewrites every pixel (src/shade_detail.rs).
+            if std::ptr::eq(kernel, &deferred.shade) {
+                for (name, slots) in &part_records {
+                    match &program_lists {
+                        Some(lists) => {
+                            lists.bins.record_labelled(
+                                &mut graph,
+                                &mut rec,
+                                &list_packets[0],
+                                &lists.dispatch,
+                                name.to_string(),
+                            )?;
+                            for (slot, (part, packet)) in slots.iter().enumerate() {
+                                part.record_indirect_labelled(
+                                    &mut graph,
+                                    &mut rec,
+                                    packet,
+                                    &lists.arguments,
+                                    slot as u64 * 16,
+                                    name.to_string(),
+                                )?;
+                            }
+                        }
+                        None => slots[0].0.record_labelled(
+                            &mut graph,
+                            &mut rec,
+                            &slots[0].1,
+                            [groups[0] * threads[0], groups[1] * threads[1], 1],
+                            name.to_string(),
+                        )?,
+                    }
+                }
             }
             // The repair runs over the queue the trace filled, from its own counts.
             // `encode_program_lists`: binning, then each program's list from the counts

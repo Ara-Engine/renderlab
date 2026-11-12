@@ -474,6 +474,8 @@ pub(in crate::renderer) struct TraceKernels {
 /// Pipelines of the reconstruction, compiled by its first frame after each prelude.
 pub(in crate::renderer) struct Pipelines {
     pub trace: Option<TraceKernels>,
+    /// U-FIXED: visibility-buffer RT frames' sun (`vb_sun_source`), on the VB sun layout.
+    pub vb_sun: Option<Owned<wgpu::ComputePipeline>>,
     pub resolve: Owned<wgpu::ComputePipeline>,
 }
 
@@ -535,6 +537,15 @@ pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
         );
     }
     Ok(format!("{source}\n{HELD_SOURCE}"))
+}
+/// U-FIXED: `trace_source_held`'s module plus `primary_vb_sun`, the RT sun traced from the
+/// visibility buffer's receivers with the same budget, rotation and stops.
+pub(crate) fn vb_sun_source(soft_kernels: &str) -> Result<String, Error> {
+    Ok(format!(
+        "{}\n{}",
+        trace_source_held(soft_kernels)?,
+        include_str!("../shaders/primary_vb_sun.wgsl")
+    ))
 }
 /// The reconstruction's trace module; `listing` adds P-RTS's probes and penumbra pass,
 /// otherwise the module is main's (every receiver traces the budget).
@@ -819,6 +830,7 @@ impl PrimaryState {
         ledger: &Ledger,
         resolve: &str,
         trace: Option<(&str, &PrimaryPipelines)>,
+        vb_sun: Option<&str>,
     ) -> Pipelines {
         let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("temporal reconstruction"),
@@ -883,7 +895,18 @@ impl PrimaryState {
                     .then(|| self.penumbra_pipelines(device, ledger, &soft)),
             }
         });
-        Pipelines { trace, resolve }
+        let vb_sun = vb_sun.map(|source| {
+            let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("visibility-buffer RT sun"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            });
+            self.vb_sun_entry(device, ledger, &module)
+        });
+        Pipelines {
+            trace,
+            vb_sun,
+            resolve,
+        }
     }
 }
 
@@ -1192,9 +1215,12 @@ impl Planner {
         let still = !self.reset
             && previous_matrix.to_cols_array().map(f32::to_bits)
                 == matrix.to_cols_array().map(f32::to_bits);
-        // MV1 motion-source integration: rigid/deforming casters must not enter
-        // RTDEF2's settled shadow budget just because the camera is stationary.
-        let sampling_still = still && turn == 0.0 && !rigid_motion && shadow_bounds.is_none();
+        // MV1 motion-source integration: rigid casters must not enter RTDEF2's settled
+        // shadow budget just because the camera is stationary. A deforming caster's swept
+        // shadow does not hold the whole frame at the moving count (audit 3.3): receivers it
+        // can reach trace the restart count per pixel (`restart_rays`, tr1_zone_rays) and
+        // every other receiver settles.
+        let sampling_still = still && turn == 0.0 && !rigid_motion;
         self.held_frames = if sampling_still {
             self.held_frames.saturating_add(1)
         } else {
@@ -1681,6 +1707,9 @@ impl Renderer {
         // which a visibility-buffer frame compiled before did not build.
         let traced =
             self.hardware_shadows.is_some() && self.primary_mode == PrimaryVisibility::Traced;
+        // U-FIXED: visibility-buffer RT frames trace their sun with `primary_vb_sun`.
+        let vb = self.hardware_shadows.is_some()
+            && self.primary_mode == PrimaryVisibility::VisibilityBuffer;
         if self
             .pipeline
             .primary
@@ -1688,15 +1717,19 @@ impl Renderer {
             .unwrap()
             .reconstruction
             .as_ref()
-            .is_some_and(|p| p.trace.is_some() || !traced)
+            .is_some_and(|p| (p.trace.is_some() || !traced) && (p.vb_sun.is_some() || !vb))
         {
             return Ok(());
         }
         let resolve = resolve_source(&self.source)?;
+        let soft = &self.primary_sources.as_ref().unwrap().0[1];
         let trace = if traced {
-            Some(trace_source_held(
-                &self.primary_sources.as_ref().unwrap().0[1],
-            )?)
+            Some(trace_source_held(soft)?)
+        } else {
+            None
+        };
+        let vb_sun = if vb {
+            Some(vb_sun_source(soft)?)
         } else {
             None
         };
@@ -1712,6 +1745,7 @@ impl Renderer {
                 &self.ledger,
                 &resolve,
                 trace.as_deref().map(|s| (s, production)),
+                vb_sun.as_deref(),
             );
         if let Some(error) = scopes.finish() {
             return Err(match error {
@@ -1719,7 +1753,7 @@ impl Renderer {
                 _ => self.fail(error.to_string()),
             });
         }
-        self.pipelines.created += 1 + pipelines.trace.as_ref().map_or(0, |t| {
+        self.pipelines.created += 1 + u64::from(pipelines.vb_sun.is_some()) + pipelines.trace.as_ref().map_or(0, |t| {
             1 + u64::from(t.repair.is_some())
                 + u64::from(t.retry.is_some())
                 + u64::from(t.full.is_some())
@@ -1743,7 +1777,7 @@ impl Renderer {
             .primary
             .as_ref()
             .unwrap()
-            .reconstruction_pipelines(&self.device, &self.ledger, &source, None);
+            .reconstruction_pipelines(&self.device, &self.ledger, &source, None, None);
         assert!(
             scopes.finish().is_none(),
             "static-control resolve must compile"
@@ -1996,6 +2030,7 @@ mod tests {
     fn local_light_identity_ignores_only_candela() {
         let spot =
             |y: f32, candela: [f32; 3], range: f32, outer: f32, source_radius: f32| Light::Spot {
+                cast_shadows: None,
                 position: Vec3::new(3.0, y, 3.0),
                 travel: Vec3::NEG_Y,
                 candela,
@@ -2063,6 +2098,7 @@ mod tests {
             candela: [24_000.0 * scale, 12_000.0 * scale, 4_000.0 * scale],
             range: Some(10.0),
             source_radius: 0.25,
+            cast_shadows: None,
         }
     }
 
@@ -2260,6 +2296,7 @@ mod tests {
             candela: [(2_000.0 + 500.0 * k as f32) * scale; 3],
             range: Some(8.0),
             source_radius: 0.05,
+            cast_shadows: None,
         };
         let hall = |scale: f32| (0..12).map(|k| torch(k, scale)).collect::<Vec<_>>();
         let mut plan = Planner::new();
@@ -2424,8 +2461,12 @@ mod tests {
         // The measurement-only mask modes (mask_resolve) must stay valid as TR1 changes.
         let masks = ["tr1-mask", "tr1-raw", "tr1-window"]
             .map(|m| resolve.replace(RESOLVE, &mask_resolve(m)));
+        // U-FIXED: the visibility-buffer sun asks and records once more, on the budget's estimate.
+        let vb_sun = vb_sun_source(&kernels[1]).unwrap();
+        assert_eq!(vb_sun.matches("rtvis_hold(receiver,slot);").count(), 1);
+        assert_eq!(vb_sun.matches("rtvis_store(p,visible);").count(), 3);
         let resolve_clone = resolve.clone();
-        for source in [resolve, off, held, trace, PENUMBRA_LIST.to_owned()]
+        for source in [resolve, off, held, trace, PENUMBRA_LIST.to_owned(), vb_sun]
             .into_iter()
             .chain(masks)
             .chain([fresh_clamp_resolve(&resolve_clone, 0.5)])

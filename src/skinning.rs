@@ -451,13 +451,18 @@ impl Renderer {
         }
         Ok(uploads)
     }
+    /// Deforms every posed mesh, then (RT, `build_acceleration`) rebuilds their BLASes in
+    /// one batch after all deforms; `mark` names that batch `skinning.blas`
+    /// (`RENDERLAB_PASS_LOG_DETAIL`).
     pub(super) fn encode_skinning(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         draws: &[PreparedDraw<'_>],
         build_acceleration: bool,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
         let mut seen = std::collections::HashSet::new();
+        let mut accelerations = Vec::new();
         for d in draws {
             let Some(s) = &d.mesh.skin else {
                 continue;
@@ -485,8 +490,12 @@ impl Renderer {
             }
             s.first.store(false, Ordering::Relaxed);
             if build_acceleration && let Some(acceleration) = &d.mesh.acceleration {
-                acceleration.encode(encoder);
+                accelerations.push(&**acceleration);
             }
+        }
+        if !accelerations.is_empty() {
+            mark(encoder, "skinning.blas");
+            hardware_shadow_gpu::MeshAcceleration::encode_all(encoder, &accelerations);
         }
     }
 }
