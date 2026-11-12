@@ -331,3 +331,44 @@ The cells pixels read this frame (the probe's stamp) rotate over the budget alon
 - Where most queued cells are gather hit cells (the field pose) frame 16 is twice as close to the settled frame on RT and a quarter closer on non-RT. On the game scene, whose queue is mostly pixels' cells already, it changes little. Non-RT's frames 4 and 8 on the field pose are slightly worse; not explained.
 - It uses the budget in full: the field pose gathers about 29,500 cells a frame against 19,700, and the flight 5.28 million gathers against 4.27 million (+23 %). Its cost has not been timed.
 - Off by default until it is judged on a large scene (Outpost, the Radeon still): `RENDERLAB_GI=gather_pixels_first=1`. Off, nothing changes: the gathers' stamps and the rotation are as before.
+
+## 10. a2: a moving object's bounce light (open)
+
+The test case is the walking hero of `examples/reflection_matched.rs` (two spheres beside the gold sphere), which the path tracer renders: `tools/speck/crate.py` runs the matched 48-frame flight against 8,192-sample references at frames 16, 32 and 47, with any `RENDERLAB_GI` override, a `RENDERLAB_ABLATE` feature (`NAME=@tr1`), or the scene held at frame 47's time (`NAME` beginning `freeze`). Numbers are the hero's 80 px regions against the reference, 8-bit codes, negative = too dark; RT / non-RT.
+
+### What is missing (M, leases `speck-crate`, `speck-crate2`, `speck-mover2`, 1280x720)
+
+| Frame 47, the hero's lower region | Moving | Scene frozen |
+|---|---:|---:|
+| Default | -12.4 / -12.2 | -7.1 / -7.8 |
+| Bounce off (`bounce=0`) | -22.9 / -22.9 | -21.8 / -21.9 |
+| Temporal reconstruction off | -12.2 / -12.1 | -6.6 / -6.5 |
+| Reflections off | -11.3 / -11.0 | -6.2 / -7.6 |
+
+- Frozen, bounce supplies 14.7 codes there; moving, 10.5. The sky term is the same either way (within 1.1 codes), and temporal reconstruction and reflections are not involved. So a moving object receives about 70 % of its bounce light: **5 of the 12 codes are motion (a2)**.
+- The other 7 codes are there with nothing moving: a separate, static gap (the hero stands beside the gold sphere; the cache under-reports shiny metals' bounce, [m7-gaps.md](m7-gaps.md)). Not investigated here.
+- No existing knob closes the motion part: coarser cells everywhere (`cell_pixels=16`: -10.0 / -9.7), no gather budget (-12.3 / -12.4), the filter off (-13.5), nearest lookup (-12.4).
+
+### Tried and dropped: a coarser bounce fallback for the object's own pixels (M, lease `speck-mover`)
+
+A pixel inside a moved caster's swept bounds also requested the cell two levels coarser, and the lookup fell back to it when its level and the next had no gathered bounce. The hero did not move at all (-12.4 / -12.2 at frame 47), nor the game scene's spinning cube. So the object's pixels are not short of gathered cells. Reverted.
+
+### Tried, kept as a switch, off: gather hits on moving objects read coarser cells (M, leases `speck-moverhit`, `speck-moverhit-game`)
+
+The reading that fits the table above is that the light is missing at the hits: a gather ray that meets a moving surface finds a cell made this frame or not at all, with no value, so a moving object sends no bounce light, least of all to itself. `IndirectSettings::mover_hit_levels` (header word 29; `RENDERLAB_GI=mover_hit_levels=2`) makes a hit inside a moved caster's swept bounds read a cell at least that many levels above the pixels', which the surface stays inside for several frames.
+
+| Hero regions | 0 (off) | 2 | 3 | Frozen |
+|---|---:|---:|---:|---:|
+| Frame 16 | -4.1 / -3.7 | -5.0 / -5.1 | -5.1 / -5.1 | |
+| Frame 32 | -6.6 / -6.5 | -6.1 / -6.2 | -6.4 / -6.5 | |
+| Frame 47, upper | -4.4 / -4.5 | -4.2 / -4.2 | -4.2 / -4.2 | -3.2 / -3.5 |
+| Frame 47, lower | -12.4 / -12.2 | -10.9 / -10.3 | -11.3 / -10.9 | -7.1 / -7.8 |
+
+- It moves the worst region 1.5-1.9 codes toward the reference and frame 16's region 0.9-1.4 codes away; the frame's RMS goes 1.78 to 1.69 at frame 47 and 1.12 to 1.16 at frame 16. On the game flight the spinning cube's shaded face brightens by about 2 codes and its isolated specks rise from 5 to 14 (frame 21, RT). Mixed, so it is off by default. At 0 the flight's 27 written frames are byte-identical to the previous build's on both paths, and the settled still is byte-identical at 0 and 2.
+- It confirms the direction (hits on movers lack values) without closing the gap: 3.8 of the 5.3 codes remain at frame 47.
+
+### What is left to try
+
+- A hit on a moving object reading the cell at the hit's previous-frame position (the cell that was made and shaded last frame), which needs the previous transforms in the cache's kernels.
+- New cells on moving objects gathered in the frame they are made, since their hits are mostly the static world and have values.
+- The Radeon still's robot (dark blocks) has not been reproduced; that it is this defect is an inference.

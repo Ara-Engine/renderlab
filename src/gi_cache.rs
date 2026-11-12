@@ -411,7 +411,10 @@ impl Default for IndirectSettings {
             // it halves frame 16's distance from the settled frame on RT, for a quarter more
             // gathers over the flight, and non-RT's first eight frames are slightly worse.
             gather_pixels_first: false,
-            mover_hit_levels: 2,
+            // Off: at 2 the path tracer's walking hero is 1.5-1.9 codes closer underneath at one
+            // frame and 0.9-1.4 codes farther at another, and the game scene's spinning cube
+            // gains isolated specks (docs/speck.md section 10).
+            mover_hit_levels: 0,
         }
     }
 }
