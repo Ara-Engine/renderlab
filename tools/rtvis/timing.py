@@ -105,7 +105,7 @@ def hashes(out):
     for on in sorted(out.glob("p-*-cold1")):
         off = on.with_name(on.name[:-1] + "0")
         a, b = (json.loads((d / "run.json").read_text())["frames"] for d in (on, off))
-        differ = [x["frame"] for x, y in zip(a, b) if x.get("image_hash") != y.get("image_hash")]
+        differ = [x["frame"] for x, y in zip(a, b) if x["rgba8_sha256"] != y["rgba8_sha256"]]
         print(f"{on.name[:-6]:16} frames {len(a)}  differing {len(differ)}: {differ[:12]}{' ...' if len(differ) > 12 else ''}")
 
 

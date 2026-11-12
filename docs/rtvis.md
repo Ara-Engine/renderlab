@@ -78,6 +78,39 @@ pass (missed thin rims, docs/p-rts.md).
 - No new buffer, texture, binding or TLAS mask; `PrimaryFrame`'s layout is unchanged
   (`sampling.y`, the probe count, now also means the cold probes when listing is off).
 
-## Results
+## Results (RTX 4070 SUPER, 1080p RT, release game_scene, 2026-11-12)
 
-Pending the first lease.
+Every lease opened with the reference run (default game scene, RT, 1080p): frame median 26.67,
+26.54 and 26.84 ms. Medians over moving frames (8-22, 40-119), ms; "cut" is frame 24's
+`visibility` (`--diag cut=1`). Repro runs set `RENDERLAB_COLD_PROBES=0` (main's cold budget).
+
+| run (tools/rtvis/timing.py) | frame | visibility | cut |
+|---|---|---|---|
+| forest, sun 4 deg (`--hour 17.651`), two visits | 26.0 | 9.56 / 9.59 | 74.1 / 74.3 |
+| forest, moving budget 8 (`shadow-budget=256,64,8,8,16`), two visits | 19.1 / 19.0 | 2.62 / 2.62 | 74.2 |
+| forest, no sun (`sun=0`) | 14.8 | 0.41 | 0.4 |
+| forest, noon | 21.7 | 5.64 | 42.3 |
+| forest, 720p | 15.2 | 4.29 | 33.1 |
+| field walk, sun 4 deg | 16.6 | 3.94 | 29.2 |
+| field walk, `RENDERLAB_DIAG_ALL_OPAQUE=1` | 16.6 | 3.93 | 29.3 |
+
+- The pass is almost all sun-shadow rays: 0.29 ms per direction per pixel on the forest
+  (9.56 at 32, 2.62 at 8, 74 at 256), and 0.3-0.4 ms for camera rays, receivers and repair
+  (no sun: 0.41). Rasterising primary visibility on RT (step 4) would save at most that.
+- It scales with pixels (720p 4.29 against 1080p 9.56, 2.23x for 2.25x the pixels), and a
+  low sun costs 1.7x noon (longer, grazing rays through foliage and over terrain).
+- `ALL_OPAQUE` changes nothing (field walk 3.94 against 3.93), as expected on a shadowed frame.
+
+**Step 3, cold probes** (same binary, `RENDERLAB_COLD_PROBES` 1 against 0, interleaved twice):
+forest cut frame `visibility` 74.1 -> 10.3 ms and frame span 88.2 -> 24.5 ms (a moving frame
+is 9.6 / 24.3); moving frames unchanged (9.57 / 9.56). Picture (`pictures` plan, every frame
+written; tools/rtvis/compare.py, tools/blobs.py):
+- Non-RT: byte-identical, all 40 frames of the game scene's cut clip.
+- RT: frame 0 (also cold) and the cut frame differ from main by a mean of 0.001-0.002 codes;
+  at most 138-450 pixels move more than 8 codes on frame 0 and on the forest's cut frame,
+  fading within about 15 frames. Against the settled image of the same pose (the forest held
+  still, frame 59), the cut frame's mean error is 0.732 with the stop and 0.731 without, and
+  5.695 against 5.680 on edge pixels; frames 25-30 agree as closely. tools/blobs.py counts
+  the same blobs per frame on and off (frame 0: 10714 px on, 11144 off).
+- Native-resolution crops of the most-changed tiles (on | off | settled) show no visible
+  difference: D:/Coding/renderlab-work/unit-rtvis/crops.
