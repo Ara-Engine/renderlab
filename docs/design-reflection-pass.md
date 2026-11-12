@@ -297,3 +297,28 @@ Notes:
 - **Parity:** a hit from H matches the inline hit to within the direction's snorm16 error,
   which the Mac measures at pixel rate. It is acceptable unless a crop shows more than one
   output code.
+
+## First stage on t3/rtvis (2026-11-12, `RENDERLAB_RL_PASS=1`, off by default)
+`rl_trace` runs and writes H, R and D, but the picture still comes from the inline trace: the
+accumulator and resolve come later. Code: src/reflection_pass.rs, shaders/reflections_lobe.wgsl,
+shaders/reflections_trace.wgsl, and `rl_cast` in reflections.wgsl.
+- **Lobe output L, written by primary shading for glossy receivers (mirrors stay inline):**
+  - binding 56, `rgba32float`: ray origin, and `pack2x16float`(cone width at the origin, spread
+    per metre before the stratum's sub-cone) as f32 bits;
+  - binding 57, `rgba32uint`: octahedral lobe normal, view direction and geometric side, then
+    `pack2x16float`(GGX alpha, frame tag);
+  - binding 58: the pass uniform (frame counter, slot width, on, 0). The tag is the frame counter
+    mod 2048; `rl_trace` ignores texels with another tag (stale or not glossy).
+  - This replaces the doc's earlier single-texture L: the origin is stored, not rebuilt.
+- **`rl_trace`** (8x8 slots a group) picks a glossy pixel of the quad: frame + hash(slot) mod 4
+  first, then the next positions. It takes stratum (frame + hash(pixel)) mod count of today's
+  set, with today's VNDF direction, radial and rotation. It casts with `rl_cast` (RT ray query;
+  the software BVH on non-RT), and its `tmin` is 1e-4 x the origin's distance from the world
+  origin, not the receiver's own epsilon.
+  - It clears R and D at every slot, writes a miss's sky into R (a = 1), and writes the hit or
+    miss distance into D (binding 59; -1 a miss, -2 no ray).
+  - It appends a hit's 48-byte record to H (binding 64) with one atomic per workgroup.
+- **`rl_hit_args`** (one invocation, after `rl_trace`) writes H's words 1-3: `reflection_hits`'
+  dispatch arguments for 64-record groups, rows of at most 65535.
+- **Order:** the frame's shading, then `rl_trace`, then `rl_hit_args`. The pass log stage is
+  `reflection.trace`. `reflection_hits` and `rl_resolve` go after it.
