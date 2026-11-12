@@ -139,7 +139,19 @@ reflection was kept on disk).
   the resident meshes, textures and sky map, and the radiance cache (the wgpu engine
   shares the cache table and keeps a `ViewPlan` per view). View modes other than lit
   are refused.
-- **Ids** (docs/design-id-output.md): not built; `Outputs::ids` is refused as on wgpu.
+- **Ids** (docs/design-id-output.md): a view with `outputs.ids` gets #41's id pass
+  (`shaders/id_output.wgsl` up to the handoff) after reconstruction, with the same tag
+  tables, settled ping-pong and two-layer R32Uint id texture. The calls are
+  `set_object_ids`, `request_ids`, `poll`, `view_ids` and `view_ids_packed`. Where it
+  differs from wgpu:
+  - the packed RGBA8 image is a compute pass (`shaders/id_pack.wgsl`) into a storage
+    image, not a render pass, with the same `(k + 0.25) / 255` bytes;
+  - `request_ids` reads back at once, and its event arrives at the next `poll`;
+  - the front layer is the opaque one: glass front ids are not ported.
+
+  The test draws a tagged floor, a tagged raised square, an untagged square and sky, on
+  the exact and the reconstructed frame; each reads its id, and the packed image is the
+  readback's bytes at every pixel.
 
 ## Fixture
 

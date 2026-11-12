@@ -255,6 +255,7 @@ impl Yard {
                     sky_map: None,
                     skins: None,
                     colour_lut: None,
+                    ids: None,
                 },
             )?;
             let red = images

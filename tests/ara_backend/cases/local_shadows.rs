@@ -118,6 +118,7 @@ impl Scene {
             sky_map: None,
             skins: None,
             colour_lut: None,
+            ids: None,
         }
     }
     fn objects(&self) -> [ForwardObject<'_>; 2] {

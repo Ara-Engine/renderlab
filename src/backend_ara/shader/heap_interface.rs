@@ -275,6 +275,7 @@ pub(super) fn image_entry(dimension: ViewDimension, sample: SampleType) -> Resul
         (ViewDimension::D2, SampleType::Uint) => "AraReadUintImageEntry",
         (ViewDimension::D2, SampleType::Depth) => "AraDepthEntry",
         (ViewDimension::D2Array, SampleType::Float) => "AraReadArrayEntry",
+        (ViewDimension::D2Array, SampleType::Uint) => "AraReadUintArrayEntry",
         (ViewDimension::D2Array, SampleType::Depth) => "AraDepthArrayEntry",
         (ViewDimension::D3, SampleType::Float) => "AraVolumeEntry",
         (ViewDimension::CubeArray, SampleType::Float) => "AraCubeArrayEntry",
@@ -361,6 +362,7 @@ pub(super) fn storage_format(format: naga::StorageFormat) -> Result<Format> {
         naga::StorageFormat::R32Uint => Format::R32Uint,
         naga::StorageFormat::Rg32Uint => Format::Rg32Uint,
         naga::StorageFormat::Rgba32Uint => Format::Rgba32Uint,
+        naga::StorageFormat::Rgba8Unorm => Format::Rgba8,
         _ => bail!("unported storage-image format {format:?}"),
     })
 }
@@ -372,6 +374,7 @@ pub(super) fn storage_wgsl(format: Format) -> Result<&'static str> {
         Format::R32Uint => "r32uint",
         Format::Rg32Uint => "rg32uint",
         Format::Rgba32Uint => "rgba32uint",
+        Format::Rgba8 => "rgba8unorm",
         _ => bail!("unported storage-image format"),
     })
 }
@@ -380,11 +383,15 @@ pub(super) fn storage_entry(dimension: ViewDimension, format: Format) -> Result<
         (ViewDimension::D2, Format::R32Uint | Format::Rg32Uint | Format::Rgba32Uint) => {
             "AraWriteUintImageEntry"
         }
-        (ViewDimension::D2, Format::R32Float | Format::Rgba16Float | Format::Rgba32Float) => {
-            "AraWriteImageEntry"
-        }
+        (
+            ViewDimension::D2,
+            Format::R32Float | Format::Rgba16Float | Format::Rgba32Float | Format::Rgba8,
+        ) => "AraWriteImageEntry",
         (ViewDimension::D2Array, Format::R32Float | Format::Rgba16Float | Format::Rgba32Float) => {
             "AraWriteCubeImageEntry"
+        }
+        (ViewDimension::D2Array, Format::R32Uint | Format::Rg32Uint | Format::Rgba32Uint) => {
+            "AraWriteUintArrayEntry"
         }
         (ViewDimension::D3, Format::R32Float | Format::Rgba16Float | Format::Rgba32Float) => {
             "AraWriteVolumeEntry"
