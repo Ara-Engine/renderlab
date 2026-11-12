@@ -241,7 +241,7 @@ fn an_empty_scene_renders_on_both_paths() {
         engine.set_sun(Some(Sun::at(0.6, 2.2))).unwrap();
         let view = engine.create_view(&desc()).unwrap();
         let [near, _] = cameras(0.0);
-        let mut frame = |engine: &mut Engine| {
+        let frame = |engine: &mut Engine| {
             engine.tick(1.0 / 60.0).unwrap();
             engine.render_view(view, &near).unwrap();
         };
