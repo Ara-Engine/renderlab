@@ -216,6 +216,26 @@ fn pre_tp1_standard() -> String {
         exposed=min(exposed+exposed_product(intensity,response*attenuation),vec3<f32>(65504.0));",
             "        exposed=min(exposed+exposed_product(light.intensity,response*attenuation),vec3<f32>(65504.0));",
         ),
+        // The trace decision's reflectance weight: the frozen program asks with weight one.
+        (
+            " their mean exposed radiance, with the traced fraction in w. The weight is the luminance of
+// the reflectance `shade` multiplies that radiance by, so the engine can skip pixels where
+// what the trace could change stays invisible (stone's F0 of 0.04 against a chrome ball's 1).
+fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
+    var v=unit_normal(input.eye-input.world);
+    if dot(v,v)<0.5 { v=s.n; }
+    let film=transparent_material(input.material) && transparent_ior(input.material)<=1.0;
+    let base=select(s.base*s.alpha,s.base,film);
+    let ab=environment_dfg(dot(s.n,v),s.rough);
+    let f0=vec3<f32>(0.04)*(1.0-s.metal)+base*s.metal;
+    let reflectance=f0*ab.x+vec3<f32>(ab.y);
+    return SpecularLobe(s.n,s.rough*s.rough,dot(reflectance,vec3<f32>(0.2126,0.7152,0.0722)));
+}",
+            " their mean exposed radiance, with the traced fraction in w.
+fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
+    return SpecularLobe(s.n,s.rough*s.rough,1.0);
+}",
+        ),
     ] {
         assert_eq!(s.matches(from).count(), 1, "{from}");
         s = s.replace(from, to);
