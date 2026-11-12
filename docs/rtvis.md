@@ -145,6 +145,9 @@ Picture (`heldpics` plan, every frame of 60; tools/rtvis/compare.py `held`, tool
 
 ## Results (RTX 4070 SUPER, 1080p RT, release game_scene, 2026-11-12)
 
+The forest's terrain was one 320k-triangle mesh for these runs; since the GI study it is the same
+vertices in 16 tiles (the non-RT Virtual sun map's 32-bit packing).
+
 Every lease opened with the reference run (default game scene, RT, 1080p): frame median 26.67,
 26.54 and 26.84 ms. Medians over moving frames (8-22, 40-119), ms; "cut" is frame 24's
 `visibility` (`--diag cut=1`). Repro runs set `RENDERLAB_COLD_PROBES=0` (main's cold budget).
