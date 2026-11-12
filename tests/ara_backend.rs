@@ -499,6 +499,9 @@ mod engine_fog_cases;
 #[path = "ara_backend/cases/engine_ids.rs"]
 mod engine_id_cases;
 
+#[path = "ara_backend/cases/engine_empty.rs"]
+mod engine_empty_cases;
+
 #[path = "ara_backend/cases/resident_meshes.rs"]
 mod resident_mesh_cases;
 

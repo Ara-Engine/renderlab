@@ -11,11 +11,14 @@ pub struct StorageBuffer {
     pub(crate) slot: u32,
 }
 impl StorageBuffer {
-    /// Upload a nonempty, four-byte-aligned record outside frame encoding.
+    /// Upload a nonempty, four-byte-aligned record outside frame encoding. A refusal
+    /// names the caller.
+    #[track_caller]
     pub fn new(gpu: &mut GpuDevice, bytes: &[u8]) -> Result<Self> {
         Self::with_usage(gpu, bytes, vk::BufferUsageFlags::empty())
     }
     /// Add vertex/AS roles to a storage record; AS roles require an RT-enabled device.
+    #[track_caller]
     pub fn with_usage(
         gpu: &mut GpuDevice,
         bytes: &[u8],
@@ -23,7 +26,9 @@ impl StorageBuffer {
     ) -> Result<Self> {
         ensure!(
             !bytes.is_empty() && bytes.len().is_multiple_of(4),
-            "storage records need aligned bytes"
+            "storage records need aligned bytes ({} bytes, at {})",
+            bytes.len(),
+            std::panic::Location::caller()
         );
         let buffer = gpu.create_buffer(
             bytes.len() as u64,
@@ -51,10 +56,12 @@ impl StorageBuffer {
     }
     /// Device-local storage of `len` bytes with undefined contents: fill or update it in
     /// a command list before anything reads it. For buffers the GPU keeps across frames.
+    #[track_caller]
     pub fn device(gpu: &mut GpuDevice, len: u64) -> Result<Self> {
         Self::device_with_usage(gpu, len, vk::BufferUsageFlags::empty())
     }
     /// [`device`](Self::device) with further roles, such as indirect arguments.
+    #[track_caller]
     pub fn device_with_usage(
         gpu: &mut GpuDevice,
         len: u64,
@@ -62,7 +69,8 @@ impl StorageBuffer {
     ) -> Result<Self> {
         ensure!(
             len > 0 && len.is_multiple_of(4),
-            "storage records need aligned bytes"
+            "storage records need aligned bytes ({len} bytes, at {})",
+            std::panic::Location::caller()
         );
         let buffer = gpu.create_buffer(
             len,

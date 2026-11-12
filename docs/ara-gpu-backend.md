@@ -69,6 +69,9 @@ exact one):
 - Post: bloom, motion blur, depth of field, tone mapping and grading, with the colour
   LUT.
 - A scene without a sun.
+- A scene without objects (a new, empty scene): its sky, fog and grade, with ids of
+  `ID_NONE`. Its trace runs against one triangle no ray sees (mask 0), since a TLAS needs
+  an instance; the radiance cache sits that frame out, having no surface to cache.
 
 Refused by the engine entry, and reported:
 
