@@ -1085,3 +1085,29 @@ Merged: the near-light rays (lamp blobs), the pressure eviction (the Outpost cel
 5. **Relight scope:** a flickering light re-queues an eighth of every cell each frame, whatever it reaches.
 6. **Unmeasured:** the near-light rays' cost (scenes with many local lights: Showcase, Outpost), the quarry A/B of the eviction (needs a 14 GiB window), the bound and restart budgets' cost (U-SPECK2).
 7. **Emitter link for MIS:** bulb glints on rough metal are dropped by the lone-stratum bound (U-SPECK2); linking a light to its visible emitter would let both be sampled without the bound.
+
+## Outpost frame cost by pass, and the order of attack (root, 2026-11-12)
+Per-pass medians from the Ara integration thread's Outpost captures (Ara main 5ca351470, Renderlab 5955d4a with cone-sized hit cells, RTX 4070 SUPER, 1080p, player, GPU to itself; frames 8+; `RENDERLAB_PASS_LOG`), ms. A = smooth move (191 frames), C = a cut every frame (119).
+
+| pass | A RT | A non-RT | C RT | C non-RT |
+|---|---|---|---|---|
+| gi_gather | 2.88 | 45.21 | 2.75 | 59.63 |
+| shading | 11.64 | 32.85 | 12.35 | 46.26 |
+| visibility | 12.48 | 0.96 | 12.32 | 0.99 |
+| sun_shadow | (in shading) | 5.36 | (in shading) | 5.41 |
+| gi_cell_shading | 0.61 | 5.00 | 0.23 | 2.51 |
+| gi_update | 0.41 | 3.28 | 0.09 | 3.92 |
+| atmosphere | 1.22 | 3.31 | 1.03 | 2.37 |
+| gi_integrate | 2.23 | 1.92 | 0.78 | 0.81 |
+| transparency | 1.32 | 0.40 | 1.05 | 0.41 |
+| tr1 | 1.23 | 1.11 | 0.60 | 0.61 |
+| everything else | 1.3 | 0.7 | 0.9 | 0.6 |
+| **frame span** | **35.4** | **100.7** | **33.0** | **125.2** |
+
+Order of attack, by visible impact against Unreal (its whole quarry frame is 4.5 ms):
+1. **Non-RT GI gather, 45-60 ms:** software rays against Outpost's triangles. The biggest single gap in the project. Direction: a cheaper ray representation for gathers (a distance field or a coarse proxy, as Unreal's software Lumen uses) instead of the full triangle BVH, plus a per-frame gather budget in time rather than cells. A study first, then a unit.
+2. **Non-RT shading, 33-46 ms:** not yet split. Needs a capture with `RENDERLAB_PASS_LOG_DETAIL=1` (local-light soft shadows on software rays, software reflections and the sun lookup's parts are the suspects).
+3. **RT primary visibility, 12.5 ms**, against 0.96 ms for the non-RT path's raster visibility buffer on the same scene. Tracing primary rays through Outpost's TLAS costs 12 times the raster. Rasterising primary visibility on the RT path too (keeping rays for shadows, GI and reflections) should take about 11 ms off RT. That is the cheapest large win.
+4. **RT shading, 11.6-12.4 ms:** also needs the detail split (traced sun and local-light shadows, reflections).
+5. **Non-RT sun shadow, 5.4 ms** on Outpost against 0.22 ms on the quarry: page raster of Outpost's casters. The page-pool unit (N-POOL, briefed) is the planned fix.
+6. **Cuts:** the cache is rebuilt, not pressured (creation and eviction unchanged by cone cells). Folded into 1 (cheaper gathers) and the GI order item "churn on cuts".
