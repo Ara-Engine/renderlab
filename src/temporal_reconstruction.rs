@@ -477,8 +477,64 @@ pub(in crate::renderer) struct Pipelines {
     pub resolve: Owned<wgpu::ComputePipeline>,
 }
 
+/// The Ara port's trace module (src/backend_ara); the wgpu renderer uses `trace_source_held`.
+#[cfg_attr(not(feature = "backend-ara"), allow(dead_code))]
 pub(crate) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
     trace_source_with(soft_kernels, PENUMBRA_LISTING)
+}
+/// `trace_source` with the held budget's per-pixel history (HELD_SOURCE) in its two trace
+/// entries, on their HELD_* bindings: the wgpu renderer's module. Without listing only.
+pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
+    let source = trace_source_with(soft_kernels, false)?;
+    let estimate = "        visible=fresh_estimate(receiver,id.xy,size.x,0u);\n    }\n    textureStore(fresh_output,p,vec4<u32>(select((256u/tr1_rays)*visible,256u,visible==FRESH_SKIP)));";
+    let returns = [
+        "if !inside || covered==0u {return;}",
+        "if !in_bounds || covered==0u {return;}",
+    ];
+    if source.matches(estimate).count() != 2
+        || returns.iter().any(|r| source.matches(r).count() != 1)
+    {
+        return Err(Error::InvalidInput(
+            "the held shadow budget requires the Interactive trace entries' seams",
+        ));
+    }
+    let mut source = source
+        .replace(
+            estimate,
+            &estimate
+                .replacen(
+                    "        visible=",
+                    "        rtvis_hold(receiver,trace.record.x-1u);\n        visible=",
+                    1,
+                )
+                .replacen(
+                    "    textureStore(",
+                    "    rtvis_store(p,visible);\n    textureStore(",
+                    1,
+                ),
+        )
+        .replacen(
+            "        let direction=fresh_direction(j+",
+            &format!("        {HELD_STOP}\n        let direction=fresh_direction(j+"),
+            1,
+        );
+    for r in returns {
+        let inside = if r.contains("in_bounds") {
+            "in_bounds"
+        } else {
+            "inside"
+        };
+        source = source.replacen(
+            r,
+            &r.replacen(
+                "{return;}",
+                &format!("{{if {inside} {{rtvis_store(vec2<i32>(id.xy),FRESH_SKIP);}}return;}}"),
+                1,
+            ),
+            1,
+        );
+    }
+    Ok(format!("{source}\n{HELD_SOURCE}"))
 }
 /// The reconstruction's trace module; `listing` adds P-RTS's probes and penumbra pass,
 /// otherwise the module is main's (every receiver traces the budget).
@@ -564,6 +620,24 @@ const COLD_PROBE_STOP: &str = "if j==primary_frame.sampling.y && primary_frame.s
 fn cold_probes() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_COLD_PROBES").map_or(true, |v| v != "0"))
+}
+/// U-RTVIS held budget (docs/rtvis.md): on frames that continue history, a still receiver
+/// whose reprojected 3x3 shadow history has been unanimously lit or unanimously shadowed for
+/// HELD_STREAK frames traces HELD_PROBES directions first, and stops there when they agree
+/// with that history. Every other receiver traces the frame's budget, in main's order.
+pub(crate) const HELD_PROBES: u32 = 8;
+pub(crate) const HELD_STREAK: u32 = 4;
+/// The held budget's frame record (HELD_SOURCE `RtvisHeld`): the previous unjittered camera
+/// matrix, the words (enabled, probes, streak), and the moving placements' swept bounds with
+/// the sun's direction and widened disk tangent.
+pub(crate) const HELD_BYTES: usize = 128;
+const HELD_STOP: &str = "if j==tr1_held_probes && tr1_rays==primary_frame.sampling.x && visible==select(0u,j,tr1_held_lit) {tr1_rays=j;break;}";
+const HELD_SOURCE: &str = include_str!("../shaders/rtvis_held.wgsl");
+/// U-RTVIS measurement switch: `RENDERLAB_HELD_PROBES=0` traces every receiver's whole moving
+/// budget, as before the held stop. The history is written either way.
+fn held_probes() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_HELD_PROBES").map_or(true, |v| v != "0"))
 }
 /// P-RTS (docs/p-rts.md). Listing frames probe PROBE_DISK of the budget's own directions
 /// and PROBE_DISK more over a cone PROBE_CONE times the sun's. The wide probes find thin
@@ -770,7 +844,8 @@ impl PrimaryState {
             let modern = production.interactive_retry.is_some();
             let deferred = production.interactive_repair.is_some();
             TraceKernels {
-                trace: self.interactive_entry(
+                // U-RTVIS: both trace entries carry the held history (trace_source_held).
+                trace: self.held_entry(
                     device,
                     ledger,
                     &soft,
@@ -800,7 +875,9 @@ impl PrimaryState {
                         &eight,
                     )
                 }),
-                full: deferred.then(|| self.interactive_pipeline(device, ledger, &soft, &eight)),
+                full: deferred.then(|| {
+                    self.held_entry(device, ledger, &soft, "primary_trace_interactive", &eight)
+                }),
                 // The penumbra pass follows the retained two-pass repair only.
                 penumbra: (deferred && !modern && PENUMBRA_LISTING)
                     .then(|| self.penumbra_pipelines(device, ledger, &soft)),
@@ -873,6 +950,9 @@ pub(crate) struct PlanInputs<'a> {
     pub(crate) skin_bounds: Option<crate::shadow_plan::Bounds>,
     pub(crate) skin_revisions: Vec<u64>,
     pub(crate) rigid_motion: bool,
+    /// U-RTVIS: the world bounds of every placement that moved or is skinned, at both its
+    /// previous and current transforms; no held stop inside their swept sun shadow.
+    pub(crate) moving_bounds: Option<crate::shadow_plan::Bounds>,
     /// P-RTS: the penumbra pass is compiled and edges are deferred.
     pub(crate) listing: bool,
 }
@@ -882,6 +962,8 @@ pub(crate) struct PlanInputs<'a> {
 pub(crate) struct Planned {
     pub(crate) frame: Vec<u8>,
     pub(crate) sampling: Vec<u8>,
+    /// U-RTVIS: the held budget's `RtvisHeld` record (HELD_BYTES).
+    pub(crate) held: Vec<u8>,
 }
 impl Planned {
     /// The frame's `Tr1Zones` record (`ZONES_BYTES`), which the sun-shadow passes also bind:
@@ -1204,6 +1286,13 @@ impl Planner {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
+        let held = self.held_record(
+            (i.moving_bounds, i.directional_disk_angle),
+            previous_matrix,
+            turn,
+            &suns,
+            listed,
+        );
         self.previous = Some(Previous {
             frame: i.frame,
             matrix,
@@ -1220,7 +1309,54 @@ impl Planner {
         Planned {
             frame: bytes,
             sampling: words,
+            held,
         }
+    }
+    /// U-RTVIS: the `RtvisHeld` record. The stop is on for a frame that continues every
+    /// pixel's history (no reset or cut), with the sun unturned, one shadowing sun, no P-RTS
+    /// listing and a budget above HELD_PROBES.
+    fn held_record(
+        &self,
+        (moving_bounds, disk_angle): (Option<crate::shadow_plan::Bounds>, f32),
+        previous_matrix: Mat4,
+        turn: f32,
+        suns: &[Vec3],
+        listed: bool,
+    ) -> Vec<u8> {
+        let enabled = !self.reset
+            && turn == 0.0
+            && !listed
+            && suns.len() == 1
+            && held_probes()
+            && HELD_PROBES < self.shadow_rays;
+        let mut bytes = Vec::with_capacity(HELD_BYTES);
+        bytes.extend_from_slice(&matrix_bytes(previous_matrix));
+        for w in [u32::from(enabled), HELD_PROBES, HELD_STREAK, 0] {
+            bytes.extend_from_slice(&w.to_ne_bytes());
+        }
+        // The swept-shadow test of shaders/temporal_zones.wgsl over the moving bounds.
+        let toward = suns.first().map_or(Vec3::ONE, |t| {
+            (-*t).map(|c| {
+                if c.abs() < 1e-6 {
+                    1e-6f32.copysign(c)
+                } else {
+                    c
+                }
+            })
+        });
+        let spread = disk_angle.tan() * 1.01 + 1e-4;
+        let values = moving_bounds.map_or([0.; 12], |b| {
+            let margin = Vec3::splat(1e-4) + b.min.abs().max(b.max.abs()) * 1e-5;
+            let (lo, hi) = (b.min - margin, b.max + margin);
+            [
+                lo.x, lo.y, lo.z, 1., hi.x, hi.y, hi.z, 1., toward.x, toward.y, toward.z, spread,
+            ]
+        });
+        for v in values {
+            bytes.extend_from_slice(&v.to_ne_bytes());
+        }
+        debug_assert_eq!(bytes.len(), HELD_BYTES);
+        bytes
     }
 }
 
@@ -1545,7 +1681,9 @@ impl Renderer {
         }
         let resolve = resolve_source(&self.source)?;
         let trace = if traced {
-            Some(trace_source(&self.primary_sources.as_ref().unwrap().0[1])?)
+            Some(trace_source_held(
+                &self.primary_sources.as_ref().unwrap().0[1],
+            )?)
         } else {
             None
         };
@@ -1651,6 +1789,7 @@ impl Renderer {
         let mut skin_bounds = None;
         let mut skin_revisions = vec![];
         let mut rigid_motion = false;
+        let mut moving_bounds = None;
         for d in draws {
             if let Some(s) = &d.mesh.skin {
                 skin_revisions.push(s.revision);
@@ -1663,6 +1802,14 @@ impl Renderer {
                 let moved = model.to_cols_array().map(f32::to_bits)
                     != previous_model.to_cols_array().map(f32::to_bits);
                 rigid_motion |= moved;
+                // U-RTVIS: no held stop in a moving or skinned placement's swept shadow.
+                if moved || d.mesh.skin.is_some() {
+                    for m in [model, previous_model] {
+                        if let Ok(b) = shadow_gpu::world_bounds(d.mesh.bounds, m) {
+                            moving_bounds = Some(union(moving_bounds, b));
+                        }
+                    }
+                }
                 if let Ok(b) = shadow_gpu::world_bounds(d.mesh.bounds, model) {
                     scene_bounds = Some(union(scene_bounds, b));
                     if d.mesh.skin.is_some() {
@@ -1708,6 +1855,7 @@ impl Renderer {
                 skin_bounds,
                 skin_revisions,
                 rigid_motion,
+                moving_bounds,
                 listing,
             });
         // PrimaryFrame.sampling is private engine state; no material/shading ABI changes.
@@ -1726,6 +1874,11 @@ impl Renderer {
             .write_buffer(&state.frame.value, 0, &planned.frame);
         self.uploads.view_settings += FRAME_BYTES as u64;
         self.uploads.write_calls += 1;
+        if let Some(held) = primary.targets.as_ref().and_then(|t| t.held.as_ref()) {
+            self.queue.write_buffer(&held.frame.value, 0, &planned.held);
+            self.uploads.view_settings += HELD_BYTES as u64;
+            self.uploads.write_calls += 1;
+        }
         // The resolve writes the frame's HDR target, or the upscaled output.
         let hdr = &self.view.hdr.as_ref().unwrap().resolved;
         let out = self.view.upscale.as_ref().map_or(hdr, |u| &u.hdr);
@@ -1881,6 +2034,7 @@ mod tests {
             skin_bounds: None,
             skin_revisions: vec![],
             rigid_motion: false,
+            moving_bounds: None,
             listing: false,
         }
     }
@@ -1986,6 +2140,49 @@ mod tests {
             ..inputs(&[fire(0.9)], 8)
         });
         assert_eq!(plan.probe_rays, plan.shadow_rays);
+    }
+
+    /// U-RTVIS: the held stop is on only on frames that continue every pixel's history under
+    /// an unturned sun, and carries the previous matrix and the moving placements' bounds.
+    #[test]
+    fn held_record_follows_history_and_sun() {
+        let sun = |x: f32| Light::Directional {
+            travel: Vec3::new(x, -1.0, 0.3),
+            lux: [1.0; 3],
+        };
+        let enabled = |p: &Planned| u32::from_ne_bytes(p.held[64..68].try_into().unwrap());
+        let mut plan = Planner::new();
+        let first = plan.prepare(inputs(&[sun(0.2)], 0));
+        assert_eq!((enabled(&first), first.held.len()), (0, HELD_BYTES));
+        let moving = plan.prepare(PlanInputs {
+            moving_bounds: Some(crate::shadow_plan::Bounds {
+                min: Vec3::splat(-1.0),
+                max: Vec3::splat(1.0),
+            }),
+            ..inputs(&[sun(0.2)], 1)
+        });
+        assert_eq!(enabled(&moving), 1);
+        // The previous frame's matrix, then probes and streak, then the bounds' flag.
+        assert_eq!(
+            moving.held[..64],
+            matrix_bytes(Mat4::from_translation(Vec3::ZERO))
+        );
+        let word = |p: &Planned, k: usize| {
+            u32::from_ne_bytes(p.held[64 + 4 * k..68 + 4 * k].try_into().unwrap())
+        };
+        assert_eq!(
+            [word(&moving, 1), word(&moving, 2)],
+            [HELD_PROBES, HELD_STREAK]
+        );
+        assert_eq!(
+            f32::from_ne_bytes(moving.held[92..96].try_into().unwrap()),
+            1.0
+        );
+        let turned = plan.prepare(inputs(&[sun(0.25)], 2));
+        assert_eq!(enabled(&turned), 0);
+        plan.cut = true;
+        let cut = plan.prepare(inputs(&[sun(0.25)], 3));
+        assert_eq!(enabled(&cut), 0);
     }
 
     /// P-RELIT: a light switched off restarts everything it lit above the budget, and a zero
@@ -2170,6 +2367,24 @@ mod tests {
             ROTATION_SEAM.1
         )));
         assert!(!off.contains("primary_penumbra_trace"));
+        // U-RTVIS: the held module asks and records in both trace entries, stops after the
+        // cold probes' check, and records uncovered pixels as no history.
+        let held = trace_source_held(&kernels[1]).unwrap();
+        assert_eq!(
+            held.matches("rtvis_hold(receiver,trace.record.x-1u);")
+                .count(),
+            2
+        );
+        assert_eq!(held.matches("rtvis_store(p,visible);").count(), 2);
+        assert_eq!(
+            held.matches("rtvis_store(vec2<i32>(id.xy),FRESH_SKIP);")
+                .count(),
+            2
+        );
+        assert!(held.contains(&format!(
+            "{COLD_PROBE_STOP}\n        {HELD_STOP}\n        {}",
+            ROTATION_SEAM.1
+        )));
         let trace = trace_source_with(&kernels[1], true).unwrap();
         assert!(trace.contains(
             "fresh_direction(select(j,j-primary_frame.sampling.z,wide)+primary_frame.sided.y"
@@ -2192,7 +2407,7 @@ mod tests {
         let masks = ["tr1-mask", "tr1-raw", "tr1-window"]
             .map(|m| resolve.replace(RESOLVE, &mask_resolve(m)));
         let resolve_clone = resolve.clone();
-        for source in [resolve, off, trace, PENUMBRA_LIST.to_owned()]
+        for source in [resolve, off, held, trace, PENUMBRA_LIST.to_owned()]
             .into_iter()
             .chain(masks)
             .chain([fresh_clamp_resolve(&resolve_clone, 0.5)])

@@ -1,7 +1,8 @@
 """U-RTVIS step-3 picture comparison: the cold probe stop on against off (tools/rtvis/timing.py
 `pictures`), CPU only.
 
-    py -3 -B tools/rtvis/compare.py PICS_DIR [CROPS_DIR]
+    py -3 -B tools/rtvis/compare.py PICS_DIR [CROPS_DIR] [SWITCH]   # SWITCH cold (default) or held
+    py -3 -B tools/rtvis/compare.py vsref MATCHED_DIR [CROPS_DIR]    # held on/off against the path tracer
 
 Per RT clip and frame: the mean and largest per-channel difference on against off (0-255),
 the pixels more than 2 and 8 codes apart, and their 64x64 tile with the most changed pixels.
@@ -17,7 +18,6 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-CLIPS = ("p-forest-still", "p-forest-walk", "p-game-rt")
 
 
 def load(d, f):
@@ -51,13 +51,14 @@ def crop(images, y, x, out):
     Image.fromarray(strip).save(out)
 
 
-def main(pics, crops=None):
+def main(pics, crops=None, switch="cold"):
     pics = Path(pics)
     crops = Path(crops) if crops else None
     if crops:
         crops.mkdir(parents=True, exist_ok=True)
-    for clip in CLIPS:
-        on, off = pics / f"{clip}-cold1", pics / f"{clip}-cold0"
+    clips = sorted(d.name[: -len(switch) - 2] for d in pics.glob(f"p-*-{switch}1") if "nonrt" not in d.name)
+    for clip in clips:
+        on, off = pics / f"{clip}-{switch}1", pics / f"{clip}-{switch}0"
         frames = sorted(int(p.stem[6:]) for p in on.glob("frame-*.png") if p.stem[6:].isdigit())
         settled = load(off, frames[-1]) if clip == "p-forest-still" else None
         print(f"== {clip}: frame mean max >2 >8 (tile y,x,n)")
@@ -73,7 +74,38 @@ def main(pics, crops=None):
             print(line)
             if crops and (f in (0, 23, 24, 25, 26, 27, 28, 29, frames[len(frames) // 2], frames[-1])):
                 crop([a, b] + ([settled] if settled is not None else []), y, x, crops / f"{clip}-{f:03d}.png")
+            if crops and switch == "held" and f in (10, 20, 30, 40, 50, frames[-1]):
+                # The whole frame's difference, x16, beside the frame: where the stop changed it.
+                heat = np.repeat((np.abs(a - b).max(axis=2, keepdims=True) * 16).clip(0, 255), 3, axis=2)
+                small = lambda i: i[::2, ::2]
+                Image.fromarray(np.concatenate([small(a), small(heat)], axis=1).astype(np.uint8)).save(
+                    crops / f"{clip}-{f:03d}-diff16.png")
+
+
+def vsref(matched, crops=None):
+    """reflection_matched frames, held on and off, against the path tracer at the same pose."""
+    matched = Path(matched)
+    crops = Path(crops) if crops else None
+    if crops:
+        crops.mkdir(parents=True, exist_ok=True)
+    print("frame: mean abs error vs path tracer, all / edges (on, off); on-off max, >2")
+    for p in sorted((matched / "m-reference").glob("frame-*.png")):
+        if p.stem.endswith(("-a", "-b")):
+            continue
+        f = int(p.stem[6:])
+        ref = load(matched / "m-reference", f)
+        a, b = load(matched / "m-held1", f), load(matched / "m-held0", f)
+        m = edges(ref)
+        ea, eb = np.abs(a - ref).max(axis=2), np.abs(b - ref).max(axis=2)
+        d = np.abs(a - b).max(axis=2)
+        print(f"{f:3d}: on {ea.mean():.3f}/{ea[m].mean():.3f}  off {eb.mean():.3f}/{eb[m].mean():.3f}  on-off max {d.max()} >2 {(d > 2).sum()}")
+        if crops:
+            y, x, _ = tile_of(d > 2) if (d > 2).any() else tile_of(m)
+            crop([a, b, ref], y, x, crops / f"matched-{f:03d}.png")
 
 
 if __name__ == "__main__":
-    main(*sys.argv[1:3])
+    if sys.argv[1] == "vsref":
+        vsref(*sys.argv[2:4])
+    else:
+        main(*sys.argv[1:4])

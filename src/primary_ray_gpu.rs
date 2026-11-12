@@ -252,7 +252,7 @@ pub(super) fn shading_sources(wgsl: &str, program: &str) -> Result<[String; 2], 
 
 #[cfg(test)]
 pub(super) fn compile_structure_reconstruction_trace(kernels: &str) -> Result<String, Error> {
-    temporal_reconstruction::trace_source(kernels)
+    temporal_reconstruction::trace_source_held(kernels)
 }
 
 #[cfg(test)]
@@ -681,6 +681,13 @@ pub(super) struct Targets {
     /// P-RTS: pixels listed for the full shadow budget (header, then pixel indices).
     pub penumbra: Buffer,
     defer_edges: bool,
+    /// U-RTVIS: the held budget's per-pixel history (R32Uint, ping-ponged by the
+    /// reconstruction's parity) and its frame record; traced primaries only.
+    pub held: Option<HeldTargets>,
+}
+pub(super) struct HeldTargets {
+    pub history: [Depth; 2],
+    pub frame: Buffer,
 }
 /// Group-0 bindings for one hit/HDR/fresh/TLAS combination.
 struct Bindings {
@@ -698,6 +705,9 @@ struct Bindings {
     fresh: Option<Owned<wgpu::BindGroup>>,
     /// Soft frames: the fused Interactive trace and visibility.
     interactive: Option<Owned<wgpu::BindGroup>>,
+    /// U-RTVIS: `interactive` plus the held history; entry k writes history k and reads
+    /// the other (the reconstruction's parity).
+    held: Option<[Owned<wgpu::BindGroup>; 2]>,
     repair: Option<Owned<wgpu::BindGroup>>,
     check: Option<Owned<wgpu::BindGroup>>,
     /// P-RTS: penumbra list and trace.
@@ -753,6 +763,8 @@ pub(super) struct InteractiveKernels<'a> {
     full: Option<&'a wgpu::ComputePipeline>,
     /// P-RTS: list and trace, on frames whose budget exceeds their probe count.
     penumbra: Option<[&'a wgpu::ComputePipeline; 2]>,
+    /// U-RTVIS: the trace pass's group 0 when it is not `Bindings::interactive`.
+    group: Option<&'a wgpu::BindGroup>,
 }
 
 /// Which traced shading pipeline and bindings a frame uses.
@@ -778,6 +790,9 @@ pub(super) struct PrimaryState {
     fresh_layout: Owned<wgpu::PipelineLayout>,
     interactive_bindings: Owned<wgpu::BindGroupLayout>,
     interactive_layout: Owned<wgpu::PipelineLayout>,
+    /// U-RTVIS: `interactive_bindings` plus the held budget's record and history pair.
+    held_bindings: Owned<wgpu::BindGroupLayout>,
+    held_layout: Owned<wgpu::PipelineLayout>,
     repair_bindings: Owned<wgpu::BindGroupLayout>,
     repair_layout: Owned<wgpu::PipelineLayout>,
     check_bindings: Owned<wgpu::BindGroupLayout>,
@@ -946,26 +961,41 @@ impl PrimaryState {
             entries.extend_from_slice(extra);
             group("primary trace", &entries)
         });
+        let interactive_entries = [
+            scene(TRACE_SCENE),
+            scene(2),
+            frame,
+            image(13, F::Rgba32Uint),
+            image(5, F::R32Uint),
+            image(20, F::R32Uint),
+            buffer(
+                24,
+                wgpu::BufferBindingType::Storage { read_only: false },
+                52,
+            ),
+            buffer(
+                27,
+                wgpu::BufferBindingType::Storage { read_only: false },
+                16,
+            ),
+        ];
         let interactive_bindings = group(
             "primary Interactive trace and visibility",
+            &interactive_entries,
+        );
+        // U-RTVIS: the reconstruction's trace entries also read the previous held history
+        // and write this frame's (shaders/rtvis_held.wgsl).
+        let held_bindings = group(
+            "primary Interactive trace, held shadow budget",
             &[
-                scene(TRACE_SCENE),
-                scene(2),
-                frame,
-                image(13, F::Rgba32Uint),
-                image(5, F::R32Uint),
-                image(20, F::R32Uint),
-                buffer(
-                    24,
-                    wgpu::BufferBindingType::Storage { read_only: false },
-                    52,
-                ),
-                buffer(
-                    27,
-                    wgpu::BufferBindingType::Storage { read_only: false },
-                    16,
-                ),
-            ],
+                &interactive_entries[..],
+                &[
+                    uniform(50, temporal_reconstruction::HELD_BYTES as u64),
+                    texture(51, wgpu::TextureSampleType::Uint),
+                    image(52, F::R32Uint),
+                ],
+            ]
+            .concat(),
         );
         let repair_bindings = group(
             "primary deferred edge repair",
@@ -1181,6 +1211,16 @@ impl PrimaryState {
                     Some(lighting),
                 ],
             ),
+            held_layout: layout(
+                "primary Interactive trace ABI, held shadow budget",
+                &[
+                    Some(&held_bindings),
+                    Some(&array_bindings),
+                    None,
+                    Some(lighting),
+                ],
+            ),
+            held_bindings,
             film_layouts: FilmLayouts::new(
                 device,
                 ledger,
@@ -1265,6 +1305,8 @@ impl PrimaryState {
             fresh_layout: self.fresh_layout.clone(),
             interactive_bindings: self.interactive_bindings.clone(),
             interactive_layout: self.interactive_layout.clone(),
+            held_bindings: self.held_bindings.clone(),
+            held_layout: self.held_layout.clone(),
             repair_bindings: self.repair_bindings.clone(),
             repair_layout: self.repair_layout.clone(),
             check_bindings: self.check_bindings.clone(),
@@ -1601,16 +1643,37 @@ impl PrimaryState {
         entry: &str,
         constants: &[(&str, f64)],
     ) -> Owned<wgpu::ComputePipeline> {
+        let layout = match entry {
+            "primary_check_interactive" => &self.check_layout,
+            "primary_retry_interactive" | "primary_repair_interactive" => &self.repair_layout,
+            _ => &self.interactive_layout,
+        };
+        self.entry_on(device, ledger, module, entry, constants, layout)
+    }
+    /// U-RTVIS: a trace entry of `trace_source_held`'s module, on the held layout.
+    pub(super) fn held_entry(
+        &self,
+        device: &PipelineDevice,
+        ledger: &Ledger,
+        module: &wgpu::ShaderModule,
+        entry: &str,
+        constants: &[(&str, f64)],
+    ) -> Owned<wgpu::ComputePipeline> {
+        self.entry_on(device, ledger, module, entry, constants, &self.held_layout)
+    }
+    fn entry_on(
+        &self,
+        device: &PipelineDevice,
+        ledger: &Ledger,
+        module: &wgpu::ShaderModule,
+        entry: &str,
+        constants: &[(&str, f64)],
+        layout: &wgpu::PipelineLayout,
+    ) -> Owned<wgpu::ComputePipeline> {
         ledger.own(
             device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some(entry),
-                layout: Some(match entry {
-                    "primary_check_interactive" => &self.check_layout,
-                    "primary_retry_interactive" | "primary_repair_interactive" => {
-                        &self.repair_layout
-                    }
-                    _ => &self.interactive_layout,
-                }),
+                layout: Some(layout),
                 module,
                 entry_point: Some(entry),
                 compilation_options: wgpu::PipelineCompilationOptions {
@@ -2075,12 +2138,23 @@ impl Renderer {
                 },
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
             );
+            let held = (self.primary_mode == PrimaryVisibility::Traced).then(|| HeldTargets {
+                history: ["held shadow history A", "held shadow history B"]
+                    .map(|label| target(label, size, wgpu::TextureFormat::R32Uint)),
+                frame: Buffer::new(
+                    self,
+                    "held shadow budget record",
+                    temporal_reconstruction::HELD_BYTES as u64,
+                    wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                ),
+            });
             let next = Targets {
                 repairs,
                 repair_args,
                 retries,
                 penumbra,
                 defer_edges,
+                held,
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
                     "primary hard receiver epsilon",
@@ -2251,6 +2325,26 @@ impl Renderer {
                         ],
                     )
                 }),
+                held: fresh.zip(t.held.as_ref()).map(|(f, h)| {
+                    [0, 1].map(|k| {
+                        group(
+                            &state.held_bindings,
+                            &[
+                                trace_scene.clone(),
+                                scene.clone(),
+                                uniform.clone(),
+                                (13, hit.clone()),
+                                (5, R::TextureView(&f.visibility.view)),
+                                (20, tiles.clone()),
+                                (24, t.repairs.value.as_entire_binding()),
+                                (27, t.repair_args.value.as_entire_binding()),
+                                (50, h.frame.value.as_entire_binding()),
+                                (51, R::TextureView(&h.history[1 - k].view)),
+                                (52, R::TextureView(&h.history[k].view)),
+                            ],
+                        )
+                    })
+                }),
                 repair: fresh.map(|f| {
                     group(
                         &state.repair_bindings,
@@ -2394,6 +2488,7 @@ impl Renderer {
             retry: p.interactive_retry.as_deref(),
             full: p.interactive_full.as_deref(),
             penumbra: None,
+            group: None,
         };
         self.encode_interactive_kernels(
             encoder,
@@ -2432,6 +2527,14 @@ impl Renderer {
                 .as_ref()
                 .filter(|_| listed)
                 .map(|[list, trace]| [&**list, &**trace]),
+            // U-RTVIS: the held trace entries write history `parity` and read the other.
+            group: self
+                .view
+                .primary
+                .as_ref()
+                .and_then(|s| s.bindings.as_ref()?.held.as_ref())
+                .zip(self.view.reconstruction_state.as_ref())
+                .map(|(groups, r)| &*groups[r.plan.parity]),
         };
         self.encode_interactive_kernels(
             encoder,
@@ -2497,7 +2600,10 @@ impl Renderer {
             timestamp_writes: begin,
         });
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(0, &**bindings.interactive.as_ref().unwrap(), &[]);
+        let group = kernels
+            .group
+            .unwrap_or_else(|| bindings.interactive.as_ref().unwrap());
+        pass.set_bind_group(0, group, &[]);
         pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
         pass.dispatch_workgroups(
