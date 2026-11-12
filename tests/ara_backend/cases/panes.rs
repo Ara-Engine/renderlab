@@ -50,13 +50,23 @@ fn quad(half: f32, z: f32, centre: [f32; 2]) -> [Vertex; 4] {
 ///   order the two panes' own light would swap roles, a difference the test measures
 ///   and requires to be large against its tolerance.
 /// - The mesh pass refuses panes.
-///
-/// It holds for two glass panes, and with the near one a black blended film at IOR one,
-/// which passes half the light behind it untinted (it passed none when the base colour
-/// tinted every pane: a black alpha-blended glTF material drew solid black).
 #[test]
 fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
-    let path = root("panes");
+    pane_model(false)
+}
+
+/// The same model with the near pane a black alpha-blended film (IOR one, opacity 0.1, as
+/// Ara declares a glTF BLEND material): it shows 90% of the background behind it, untinted,
+/// and its shadow passes 90% of the sun. Before the films' rule the base colour tinted
+/// every pane, so a black film at alpha 0.1 drew solid black.
+#[test]
+fn a_black_film_at_alpha_0_1_shows_90_percent_of_the_background() -> Result<()> {
+    pane_model(true)
+}
+
+/// The pane model's checks, with the near pane glass or (`film`) a black blended film.
+fn pane_model(film: bool) -> Result<()> {
+    let path = root(if film { "panes-film" } else { "panes" });
     let mut gpu = GpuDevice::new(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
     let floor = quad(8., 0., [0.; 2]);
@@ -68,9 +78,9 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
         tint: [0.8, 0.9, 1.0],
         ior: IOR,
     };
-    let film = Pane {
+    let black_film = Pane {
         vertices: &near,
-        opacity: 0.5,
+        opacity: 0.1,
         tint: [0.; 3],
         ior: 1.,
     };
@@ -217,7 +227,12 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
             * pixels_per_metre(at.z)
     };
     let mut report = String::new();
-    for (fixture, near) in [("glass", glass), ("black film", film)] {
+    let fixture = if film {
+        ("black film", black_film)
+    } else {
+        ("glass", glass)
+    };
+    for (fixture, near) in [fixture] {
         // Each pane alone over the darker floor, for the far pane's own light.
         let alone = [
             frame(0.2, &[near], Primary::Traced)?,
