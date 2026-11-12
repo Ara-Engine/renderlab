@@ -101,6 +101,44 @@ Outpost's rough-glossy ground and props pay the full strata (about 22 ms of non-
 
 The threshold is in output codes, so a skipped pixel is under one code of what a full trace gives, measured against the trace itself, not against a roughness. The gate is still crops against the path-traced reference, still and moving. Expected result: Outpost reflections go from about 26 ms (non-RT) and 8.6 ms (RT) to under 1 ms, because most of its band falls out at test 1 or 2. Showcase keeps its traced balls and lands on step 3's about 2 ms. Owner: U-RTVIS (reflections*, gi_cache.wgsl). The bound gets the reflectance from the program, through the lobe the program already declares. `reflection_lobe`'s `weight` (today 1.0 in standard.wgsl, and greater than 0 to request rays) becomes the lobe's reflectance, so the standard program returns the luminance of `f0*ab.x+ab.y`. The engine still knows nothing about any one lighting model, and a program that wants rays everywhere declares a weight of 1.
 
+**The measured Outpost floor (2026-11-12, perf7-op, same method as Showcase; reference 10.78 open / 11.78 close, a browser at 5-8% late in the lease, so ranges are wide):** Unity URP on Outpost: 5.07 ms GPU, 5.06 wall.
+
+| Outpost, ms (RT / non-RT) | default | reflections, gi off | + local_shadows, media off | + post, tr1 off (the floor) |
+|---|---|---|---|---|
+| frame | 49.25 / 69.90 | 28.67 / 17.66 | 30.42 / 18.18 | **25.76 / 15.61** |
+| visibility | 16.04 / 0.96 | 11.37 / 2.13 | 14.04 / 2.36 | 11.21 / 2.30 |
+| sun_shadow (non-RT) | - / 2.28 | - / 5.69 | - / 6.95 | - / 6.24 |
+| shading | 17.05 / 23.66 | 6.78 / 4.84 | 5.86 / 4.40 | 7.29 / 4.68 |
+| gi | 9.55 / 28.69 | 0 | 0 | 0 |
+| atmosphere | 2.01 / 8.10 | 3.34 / 0.80 | 0.41 / 0.36 | 0.47 / 0.39 |
+| transparency | 1.50 / 0.39 | 2.09 / 0.82 | 2.53 / 0.88 | 5.97 / 0.88 |
+| tr1 | 1.93 / 1.11 | 3.07 / 2.71 | 3.57 / 2.93 | 0 |
+| skinning, tlas | 0.46 (RT) | | | 0.46 + 0.45 |
+| still GPU / wall per frame | 33.80 / 50.86 (RT), 63.61 / 78.38 (non-RT) | 7.63 / 23.70, 10.35 / 25.64 | 9.89 / 28.49, 9.21 / 22.85 | 7.97 / 27.98, 8.11 / 18.40 |
+
+**Read the moving floor as partly CPU-bound before splitting it by pass.** Three stages grow as features switch off: RT transparency 1.50 to 5.97, non-RT sun shadow 2.28 to 6.24, non-RT visibility 0.96 to 2.30. And the still frames show 8 ms of GPU against 18-28 ms of wall time. Both fit the GPU waiting for the CPU at the frame's split between its early and late command buffers. Without `RENDERLAB_PASS_LOG_DETAIL`, that wait is booked to the stage marked before it (the `cpu.wait` mark, src/renderer.rs ~3376). So some of the moving floor's visibility, transparency and sun-shadow time may be waiting, not work. The next capture runs with the detail marks so `cpu.wait` gets its own column.
+
+Items, by size:
+1. **CPU, about 15-20 ms a frame outside the GPU at the floor** (still wall 18-28 ms against 8 ms of GPU; default RT 50.9 wall against 33.8 GPU; handoff 0.3). This is likely Outpost's largest single item: even a zero-cost GPU frame would leave about 20 ms. It splits two ways:
+   - Renderlab's half, from `FrameReport::cpu` (src/observe.rs): preparation, visibility, packing, upload, encode, submit, poll, and the shadow parts.
+   - The bridge's own half: extraction and sync.
+
+   Suspects from the code, all per instance per frame with about 8,000 instances (1,108 for software rays):
+   - The GI planner computes world bounds for every instance (src/gi_cache.rs ~2920).
+   - The GI and software-reflection instance records are rebuilt every frame and then compared with the last frame's (gi_cache.rs ~2793-2828, primary_ray_gpu.rs ~3054).
+   - Shadow caster assignment.
+   - Packing and uploading instance data that has not changed.
+   - The TLAS instance list on RT.
+   - Per-draw encode.
+   - Readbacks and polls.
+
+   Mechanism: measure before cutting. A moving lease logs `FrameReport::cpu` beside the wall time, and a CPU sampling profile (Windows Performance Recorder, dev build with symbols) of the same run names the hot functions; then per-instance work moves to "only when it changes". Owner: root measures and assigns. Fixing it needs an owner: U-FIXED after its visibility step, or a third unit if the coordinator agrees.
+2. **RT visibility, 11.2 ms at the floor:** traced camera rays through 14M foliage triangles. The visibility buffer on the RT path (U-FIXED step 1-2) is worth about 9-10 ms here if the 11.2 is work and not a wait; step 1's price on a foliage fixture answers that.
+3. **Non-RT sun shadow, 6.2 ms:** foliage as shadow casters into the virtual shadow map, less any wait share. Mechanism: object flags (`casts_shadows`, `max_distance`) for foliage and far props, then page-pool limits. Owner: U-RTVIS (virtual_shadow*) after reflections; the flags need the bridge to pass them.
+4. **Base shading, 7.3 / 4.7 ms** with no GI, reflections or local shadows: the same price as on Showcase (item 1 of the Showcase list), larger here. Owner: the Mac GPU thread.
+5. **RT transparency, 6.0 ms with TR1 off and 2.5 with it on.** Check the wait share first; then it is the same per-pixel pane shading as Showcase's item 3. Owner: U-FIXED for the TR1 interaction, the Mac thread for the pane shading.
+6. **Local shadows and media, nothing measurable at the floor.** With reflections off, the 21 shadowed lights cost less than this plan assumed, so `cast_shadows` on the twelve markers is a small item here.
+
 **Owners:** reflections (U-RTVIS: strata, trace, accumulator; Mac: hit shading), the camera GI lookup (Mac), local-light shadows and `cast_shadows` (Mac, RL#51), the relight cause and the held-budget question on Outpost (root, through the integration and bridge threads; the fix lands with U-RTVIS), object flags and foliage culls (U-RTVIS after reflections; Ara #137 for LODs), the unexplained per-pass costs (visibility on RT, atmosphere, TR1, transparency, skinning): root prices them once the features-off capture lands.
 
 ## 1. The three scenes, pass by pass (1080p, RTX 4070 SUPER, camera moving, ms, medians)
