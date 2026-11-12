@@ -218,3 +218,49 @@ fn views_are_created_resized_and_removed_independently() {
     let d = engine.create_view(&ids).unwrap();
     engine.render_view(d, &far).unwrap();
 }
+
+/// An engine with no objects at all (a new project's empty scene) renders sky on both paths,
+/// through cuts, a spawn and a despawn back to empty. GPU test: run in a lease.
+#[test]
+#[ignore]
+fn an_empty_scene_renders_on_both_paths() {
+    for path in [RenderPath::NonRt, RenderPath::HardwareRt] {
+        let adapter = headless_adapter().unwrap();
+        // SAFETY: the test suite's documented experimental-feature acknowledgement.
+        let experimental_ray_query =
+            (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
+        let mut engine = Engine::new(
+            &adapter,
+            EngineDescriptor {
+                path,
+                experimental_ray_query,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        engine.set_sun(Some(Sun::at(0.6, 2.2))).unwrap();
+        let view = engine.create_view(&desc()).unwrap();
+        let [near, _] = cameras(0.0);
+        let mut frame = |engine: &mut Engine| {
+            engine.tick(1.0 / 60.0).unwrap();
+            engine.render_view(view, &near).unwrap();
+        };
+        for _ in 0..3 {
+            frame(&mut engine);
+        }
+        let sky = engine.capture_view(view).unwrap();
+        assert!(sky.rgba8.chunks(4).any(|p| p[..3] != [0, 0, 0]), "{path:?}: an empty scene drew black");
+        engine.cut_view(view);
+        frame(&mut engine);
+        let (vertices, indices) = cube([0.0, -0.05, 0.0], [6.0, 0.05, 6.0]);
+        let mesh = engine.create_mesh(&MeshData { vertices: &vertices, indices: &indices }).unwrap();
+        let material = engine.create_material(&MaterialDesc::default()).unwrap();
+        let floor = engine.spawn(mesh, material, Mat4::IDENTITY).unwrap();
+        frame(&mut engine);
+        engine.despawn(floor).unwrap();
+        for _ in 0..3 {
+            frame(&mut engine);
+        }
+        engine.capture_view(view).unwrap();
+    }
+}
