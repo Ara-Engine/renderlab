@@ -36,7 +36,18 @@ fn rl_slot_of(batch:u32)->u32 { return rl_list.programs[batch>>2u][batch&3u]; }
         return;
     }
     let id=region.xy+tile*4u+local.xy;
-    if any(id>=size) {return;}
+    let inside=all(id<size);
+    // GI tiles (Mac thread): this 4x4 tile's cache lookup before the lanes diverge, over
+    // the pixels this program shades (gi_api.wgsl gi_tile_step).
+    if gi_tiles_on() {
+        var mine=false;
+        if inside && textureLoad(primary_tiles,id/PRIMARY_TILE,0).x!=0u {
+            let record=textureLoad(primary_hit,vec2<i32>(id),0);
+            mine=record.x!=0u && rl_slot_of(primary_placements[record.x-1u]&0x1fffffffu)==rl_list.slot;
+        }
+        rl_gi_tile_pixel(id,local.xy,4u,mine);
+    }
+    if !inside {return;}
     let misses=(entry&RL_LIST_MISSES)!=0u;
     if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x==0u {
         if misses {textureStore(primary_hdr,vec2<i32>(id),primary_miss(id,size,primary_frame.clear));}

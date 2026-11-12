@@ -246,6 +246,29 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
     let _ = name;
     builtin.into()
 }
+/// How the traced shading entries read the camera's cache lookup (`RENDERLAB_GI_TILE`):
+/// per pixel (the default), `pass` once per 4x4 tile corner in a pre-pass
+/// (shaders/gi_tiles.wgsl), or `step` per tile inside the shading kernel (gi_api.wgsl
+/// `gi_tile_step`; measured slower, kept for the record).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GiTiles {
+    Pixel,
+    Pass,
+    Step,
+}
+pub(crate) fn gi_tile_mode() -> GiTiles {
+    static MODE: std::sync::OnceLock<GiTiles> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("RENDERLAB_GI_TILE").as_deref() {
+        Ok("pass") => GiTiles::Pass,
+        Ok("step") => GiTiles::Step,
+        _ => GiTiles::Pixel,
+    })
+}
+fn gi_tiles() -> bool {
+    gi_tile_mode() == GiTiles::Step
+}
+/// The corner pre-pass and its take (`GiTiles::Pass`), traced stages only.
+const GI_TILE_CORNERS: &str = include_str!("../shaders/gi_tiles.wgsl");
 fn indirect_api() -> String {
     let mut source = gi_shader("gi_cells.wgsl", INDIRECT_API[0]).into_owned();
     // `RENDERLAB_GI_KEEP=0` samples the receiver's level again for the rest term instead of
@@ -543,23 +566,45 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         ),
     };
     let indirect_calls = uses_indirect(program);
-    // Cell shading reads the cache's own definitions whatever the program calls.
+    // Cell shading reads the cache's own definitions whatever the program calls. Without
+    // them the shading entries' GI tile step (gi_api.wgsl) does nothing.
     let mut indirect = if indirect_calls || stage == Stage::Cell {
         indirect_api()
     } else {
-        String::new()
+        concat!(
+            "fn gi_tiles_on() -> bool { return false; }\n",
+            "fn gi_tile_step(lane:vec2<u32>, row:u32, valid:bool, receiver:Receiver, normal:vec3<f32>) {}\n",
+        )
+        .to_owned()
     };
     // Each entry calls this once per receiver before `surface`: the receiver's one cache
     // lookup for programs that call an indirect input, and the specular visibility from it
     // for those that read the specular inputs.
     let specular = tokens(program).iter().any(|t| SPECULAR_INPUTS.contains(t));
-    indirect.push_str(match (indirect_calls, specular) {
-        (true, true) => {
+    // The traced entries' tile step has already looked the receiver up (GI tiles): take it.
+    let traced_stage = matches!(stage, Stage::Traced | Stage::TracedStreamed);
+    let take = gi_tiles() && traced_stage;
+    let corners = gi_tile_mode() == GiTiles::Pass && traced_stage && indirect_calls;
+    if corners {
+        indirect.push_str(GI_TILE_CORNERS);
+        indirect.push_str(if specular {
+            "fn rl_indirect_prepare(input:SurfaceInput) { gi_corner_take(input); es_prepare(input); }\n"
+        } else {
+            "fn rl_indirect_prepare(input:SurfaceInput) { gi_corner_take(input); }\n"
+        });
+    } else {
+        indirect.push_str(match (indirect_calls, specular, take) {
+        (true, true, false) => {
             "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); es_prepare(input); }\n"
         }
-        (true, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
+        (true, false, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
+        (true, true, true) => {
+            "fn rl_indirect_prepare(input:SurfaceInput) { gi_tile_take(input); es_prepare(input); }\n"
+        }
+        (true, false, true) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_tile_take(input); }\n",
         _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
     });
+    }
     // LC1: the light loop's clusters and local shadows, traced where the head binds rays.
     // Cell shading never calls light_visibility; it composes the map variant.
     let lights = crate::light_cluster::shading_api(
