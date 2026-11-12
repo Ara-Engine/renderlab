@@ -208,6 +208,13 @@ struct Surface { n:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32, alpha:f32 };
         ("    let alpha=transparent_coverage(material,material.base_color.a*sampled.a*input.color.a);
     return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x,alpha);",
          "    return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x);"),
+        // RL#41's view modes added `view_data` after `surface`; the frozen program has none.
+        ("
+// The data view modes show this program's resolved inputs, decals included.
+fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
+    return ViewData(s.base,s.n,s.rough,s.metal,vec3<f32>(0.0),1.0);
+}
+", ""),
         ("    // TP1: a transparent surface reflects diffusely over its coverage only.
     let base=s.base*s.alpha;",
          "    let base=s.base;"),

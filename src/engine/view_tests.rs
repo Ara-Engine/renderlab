@@ -214,5 +214,7 @@ fn views_are_created_resized_and_removed_independently() {
         outputs: Outputs { ids: true },
         ..desc()
     };
-    assert!(engine.create_view(&ids).is_err(), "ids wait for U-IDS");
+    // Ids per view (RL#41): a view with ids is created and renders like any other.
+    let d = engine.create_view(&ids).unwrap();
+    engine.render_view(d, &far).unwrap();
 }
