@@ -1612,7 +1612,7 @@ impl Renderer {
                         mip_level_count: 1,
                         sample_count: 4,
                         dimension: wgpu::TextureDimension::D2,
-                        format: wgpu::TextureFormat::R32Uint,
+                        format: panes::ID_FORMAT,
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                             | wgpu::TextureUsages::TEXTURE_BINDING,
                         view_formats: &[],
