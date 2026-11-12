@@ -1410,12 +1410,13 @@ impl Planner {
             && held_probes()
             && HELD_PROBES < self.shadow_rays;
         // U-FIXED: the sun visibility history continues on frames that continue history, at
-        // any budget, while the sun turns less than half a turn step a frame; each receiver's
-        // history expires after 8 steps (SUN_HISTORY_TURN of the disk half-angle).
+        // any budget. Each receiver's history expires after 8 turn steps (SUN_HISTORY_TURN of
+        // the disk half-angle); a frame turning more than 4 steps drops every history, so the
+        // 16-step code never wraps onto a live one.
         let window = SUN_HISTORY_TURN * disk_angle;
         let step = window / 8.0;
         let history = !self.reset
-            && (turn == 0.0 || turn <= 0.5 * step)
+            && (turn == 0.0 || turn <= 4.0 * step)
             && !listed
             && suns.len() == 1
             && sun_history();
