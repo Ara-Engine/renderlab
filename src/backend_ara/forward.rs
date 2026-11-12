@@ -659,6 +659,8 @@ struct Shared<'a> {
     traced: Option<&'a Traced>,
     /// The radiance cache's table where the cache runs; otherwise a zero header binds.
     gi_table: Option<&'a StorageBuffer>,
+    /// The cache's outgoing radiance, for cache-terminated reflection hits; otherwise zeros.
+    gi_outgoing: Option<&'a StorageBuffer>,
     buffers: &'a BTreeMap<InputKey, StorageBuffer>,
     images: &'a BTreeMap<InputKey, Texture>,
 }
@@ -699,6 +701,7 @@ impl<'a> Shared<'a> {
                 (3, 50) => &self.atmosphere.record,
                 (3, 5) if self.traced.is_some() => &self.traced.context("checked")?.records,
                 (3, 20) if self.gi_table.is_some() => self.gi_table.context("checked")?,
+                (3, 28) if self.gi_outgoing.is_some() => self.gi_outgoing.context("checked")?,
                 _ => &self.buffers[&spec.key],
             }),
             (InputKind::BufferArray { .. }, group, binding) => {
@@ -2755,6 +2758,7 @@ fn frame(
                             .contains(&spec.key))
                     || (gi.is_some()
                         && (spec.key == key(3, 20)
+                            || spec.key == key(3, 28)
                             || (spec.key.group == 0 && (30..=37).contains(&spec.key.binding))))
                     || (resolve.is_some() && spec.key == key(0, 40))
                     || buffers.contains_key(&spec.key)
@@ -3170,6 +3174,7 @@ fn frame(
         map,
         traced: traced.as_ref(),
         gi_table: gi.map(|(cache, _)| cache.table()),
+        gi_outgoing: gi.map(|(cache, _)| cache.outgoing_radiance()),
         buffers: &buffers,
         images: &inputs,
     };
