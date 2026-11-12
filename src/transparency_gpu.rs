@@ -247,6 +247,8 @@ pub(super) struct TransparencyState {
     gpu: Option<Gpu>,
     glass: Vec<GlassPipelines>,
     shadow_key: Option<[u8; 32]>,
+    /// The sun map fit last computed and what it was computed from (`encode_transparency`).
+    fit_memo: Option<([u8; 32], Option<ShadowFit>)>,
 }
 
 struct Gpu {
@@ -1781,33 +1783,54 @@ impl Renderer {
         });
         let mut receivers: Vec<(Vec3, Vec3)> = Vec::new();
         for draw in &transparent {
-            for &model in &draw.instances.state.models {
-                let b = shadow_gpu::world_bounds(draw.mesh.bounds, model)?;
+            for b in draw.instances.state.world_bounds(draw.mesh.bounds)?.iter() {
                 receivers.push((b.min, b.max));
             }
         }
         receivers.extend(self.transparency.emitters.iter().map(|e| e.params.bounds()));
-        // Every opaque caster's world bounds, in draw then instance order.
-        let casters: Vec<(Vec3, Vec3)> = opaque
-            .iter()
-            .flat_map(|draw| {
-                draw.instances.state.models.iter().filter_map(|&model| {
-                    shadow_gpu::world_bounds(draw.mesh.bounds, model)
-                        .ok()
-                        .map(|b| (b.min, b.max))
-                })
-            })
-            .collect();
-        let fit = sun.and_then(|(travel, _)| shadow_fit(travel, &receivers, &casters));
+        // What the opaque casters are: each draw's mesh and placements by name (the collection
+        // and its edit count), not matrix by matrix (8,195 matrices on Ara's Outpost).
+        let mut casters_key = Sha256::new();
+        for draw in opaque {
+            casters_key.update((Arc::as_ptr(&draw.mesh.vertex) as usize).to_ne_bytes());
+            let (id, edits) = draw.instances.state.revision();
+            casters_key.update(id.to_ne_bytes());
+            casters_key.update(edits.to_ne_bytes());
+        }
+        let casters_key: [u8; 32] = casters_key.finalize().into();
+        // The fit depends on the sun, the receivers and the casters only: reused while those are
+        // the same (a moving camera changes none of them).
+        let fit_inputs: [u8; 32] = {
+            let mut h = Sha256::new();
+            if let Some((travel, _)) = sun {
+                h.update(bytes_of(&travel.to_array()));
+            }
+            for (min, max) in &receivers {
+                h.update(bytes_of(&min.to_array()));
+                h.update(bytes_of(&max.to_array()));
+            }
+            h.update(casters_key);
+            h.finalize().into()
+        };
+        let fit = match &self.transparency.fit_memo {
+            Some((inputs, fit)) if *inputs == fit_inputs => *fit,
+            _ => {
+                // Every opaque caster's world bounds, in draw then instance order.
+                let mut casters: Vec<(Vec3, Vec3)> = Vec::new();
+                for draw in opaque {
+                    if let Ok(boxes) = draw.instances.state.world_bounds(draw.mesh.bounds) {
+                        casters.extend(boxes.iter().map(|b| (b.min, b.max)));
+                    }
+                }
+                let fit = sun.and_then(|(travel, _)| shadow_fit(travel, &receivers, &casters));
+                self.transparency.fit_memo = Some((fit_inputs, fit));
+                fit
+            }
+        };
         let shadow = fit.map_or(Mat4::IDENTITY, |f| f.matrix);
         let mut key = Sha256::new();
         key.update(bytes_of(&shadow.to_cols_array()));
-        for draw in opaque {
-            key.update((Arc::as_ptr(&draw.mesh.vertex) as usize).to_ne_bytes());
-            for model in &draw.instances.state.models {
-                key.update(bytes_of(&model.to_cols_array()));
-            }
-        }
+        key.update(casters_key);
         let key: [u8; 32] = key.finalize().into();
         let render_shadow = fit.is_some() && self.transparency.shadow_key != Some(key);
         let bytes = frame_block(&FrameInputs {
