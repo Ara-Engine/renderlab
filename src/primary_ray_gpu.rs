@@ -751,8 +751,9 @@ pub(super) struct RlHistoryTargets {
 /// resources take 54-63; the Mac's reflection_hits takes 64-67 (docs/design-reflection-pass.md).
 const RL_HISTORY_FRAME: u32 = 55;
 const RL_HISTORY: u32 = 54;
-/// Two halves of four, then rl_resolve's sample and seen-history layers (8-15).
-const RL_HISTORY_LAYERS: u32 = 16;
+/// Two halves of four, rl_resolve's sample and seen-history layers (8-15), the halves' hit
+/// distances (16, 17) and the sample's (18).
+const RL_HISTORY_LAYERS: u32 = 19;
 pub(super) struct HeldTargets {
     pub history: [Depth; 2],
     pub frame: Buffer,

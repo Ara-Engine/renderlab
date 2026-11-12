@@ -42,11 +42,11 @@ const RL_HISTORY:bool=false;
 var<private> rl_hist_m2:f32;
 var<private> rl_hist_moved:bool;
 fn rl_history_index()->u32 { return 0u; }
-fn rl_history_lookup(receiver:Receiver,world:vec3<f32>,pixel:vec2<u32>)->vec4<f32> { return vec4<f32>(0.0); }
+fn rl_history_lookup(receiver:Receiver,world:vec3<f32>,pixel:vec2<u32>,reflected:vec3<f32>)->vec4<f32> { return vec4<f32>(0.0); }
 fn rl_history_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,mean:vec3<f32>,m2:f32,count:f32) {}
 fn rl_history_resolve(mean:vec3<f32>,folded:f32,count:f32)->vec3<f32> { return mean; }
 const RL_RESOLVE_PASS:bool=false;
-fn rl_sample_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,sample:vec3<f32>,m2:f32,full:bool,count:f32,rough:f32,seen:vec3<f32>,seen_m2:f32) {}
+fn rl_sample_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,sample:vec3<f32>,m2:f32,full:bool,count:f32,rough:f32,seen:vec3<f32>,seen_m2:f32,dist:f32) {}
 // ---- end of rl history stubs ----
 // The receiver's perceptual roughness, for the history's resolve.
 var<private> rl_hist_rough:f32;
@@ -259,7 +259,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     var hist=vec4<f32>(0.0);
     rl_hist_rough=rough;
     // A restart sphere or swept shadow (rl_restarts) always traces the full set.
-    if RL_HISTORY && !mirror && !restarted && frame!=0u && !rl_restarts(input.world) {hist=rl_history_lookup(receiver,input.world,pixel);}
+    if RL_HISTORY && !mirror && !restarted && frame!=0u && !rl_restarts(input.world) {hist=rl_history_lookup(receiver,input.world,pixel,reflect(-v,n));}
     var trusted=hist.w>0.0;
     // Fixed per-pixel offset, so `stride` consecutive frames visit every stratum once.
     let stride=max(count/max(RL_HISTORY_STRATA,1u),1u);
@@ -270,6 +270,9 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     var valid=0u;
     var shaded=false;
     var squares=0.0;
+    // The traced strata's hit distances (RT only: software hits carry none), for the resolve's
+    // reprojection by the reflected point.
+    var rl_dist=0.0;var rl_dist_n=0.0;
     // PP1/SK1 integration: reuse the function-scope query above. Naga 30 emits an
     // illegal opaque null for loop-local/conditionally initialized query variables.
     rl_reflection_hit=true;
@@ -287,7 +290,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let first=select(0u,one,trusted);
     let step=select(1u,stride,trusted);
     rl_hit_strata=select(count,(count-first+stride-1u)/stride,trusted);
-    sum=vec3<f32>(0.0);top=vec4<f32>(0.0);valid=0u;squares=0.0;
+    sum=vec3<f32>(0.0);top=vec4<f32>(0.0);valid=0u;squares=0.0;rl_dist=0.0;rl_dist_n=0.0;
     for(var k=first;k<count;k+=step) {
         rl_hit_stratum=select(k,k/stride,trusted);
         var d=reflect(-v,n);
@@ -304,6 +307,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         var radiance=vec3<f32>(0.0);
         if hit.kind!=0u {
             let record=vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics));
+            rl_dist+=hit.t;rl_dist_n+=1.0;
             // A rough lobe's cone wider than the radiance cache's cell at the hit reads that
             // cell's outgoing radiance instead of shading the hit (reflection_cache_hits.wgsl).
             let cached=rl_cache_hit(record,origin,d,hit.t,width+spread*hit.t,rough);
@@ -346,7 +350,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         // rl_resolve folds this frame's sample; the receiver shows the resolved history.
         let fresh=select(hist.rgb,sum/f32(max(valid,1u)),valid>0u);
         let fresh_m2=select(rl_hist_m2,squares/f32(max(valid,1u)),valid>0u);
-        rl_sample_store(pixel,slot,input.world,fresh,fresh_m2,false,hist.w,rough,hist.rgb,rl_hist_m2);
+        rl_sample_store(pixel,slot,input.world,fresh,fresh_m2,false,hist.w,rough,hist.rgb,rl_hist_m2,select(0.0,rl_dist/rl_dist_n,rl_dist_n>0.0));
         rl_specular=vec4<f32>(hist.rgb,traced);
         return;
     }
@@ -382,7 +386,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let mean=sum/f32(valid);
     // The full set seeds the history as count strata, with their spread.
     if RL_RESOLVE_PASS && !mirror {
-        rl_sample_store(pixel,slot,input.world,mean,squares/f32(valid),true,f32(count),rough,vec3<f32>(0.0),0.0);
+        rl_sample_store(pixel,slot,input.world,mean,squares/f32(valid),true,f32(count),rough,vec3<f32>(0.0),0.0,select(0.0,rl_dist/rl_dist_n,rl_dist_n>0.0));
     } else if RL_HISTORY && !mirror {rl_history_store(pixel,slot,input.world,mean,squares/f32(valid),f32(count));}
     rl_specular=vec4<f32>(mean,traced);
 }

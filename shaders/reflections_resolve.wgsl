@@ -16,14 +16,15 @@ const RL_RESOLVE_CLAMP:f32=1.5;
 // The most frames a resolved history keeps.
 const RL_RESOLVE_CAP:f32=16.0;
 
-struct RlSample { rgb:vec3<f32>, m2:f32, slot:u32, rough:f32, depth:f32, full:bool, fresh:bool };
+struct RlSample { rgb:vec3<f32>, m2:f32, slot:u32, rough:f32, depth:f32, full:bool, fresh:bool, dist:f32 };
 fn rl_sample(p:vec2<i32>)->RlSample {
     let fresh=textureLoad(rl_history,p,15).x==rl_history_frame.words.z+1u;
     let rg=unpack2x16float(textureLoad(rl_history,p,8).x);
     let bm=unpack2x16float(textureLoad(rl_history,p,9).x);
     let id=textureLoad(rl_history,p,10).x;
     let w=bitcast<f32>(textureLoad(rl_history,p,11).x);
-    return RlSample(vec3<f32>(rg,bm.x),bm.y,id&0xffffffu,f32(id>>24u)/255.0,abs(w),w<0.0,fresh);
+    let dist=bitcast<f32>(textureLoad(rl_history,p,18).x);
+    return RlSample(vec3<f32>(rg,bm.x),bm.y,id&0xffffffu,f32(id>>24u)/255.0,abs(w),w<0.0,fresh,dist);
 }
 
 @compute @workgroup_size(8,8) fn rl_resolve(@builtin(global_invocation_id) id:vec3<u32>) {
@@ -34,13 +35,15 @@ fn rl_sample(p:vec2<i32>)->RlSample {
     if !s.fresh {return;}
     let base=i32(4u*rl_history_frame.words.y);
     var mean=s.rgb;var m2=s.m2;var count=1.0;
+    // The stored hit distance (0: none or a miss): this frame's neighbourhood mean of hits.
+    var dist=s.dist;
     if s.full {
         count=f32(textureLoad(rl_history,p,14).x);
     } else {
         // This frame's samples around p: one surface only.
         let wide=s.rough>=RL_RESOLVE_WIDE;
         let r=select(1,2,wide);
-        var sum=vec4<f32>(0.0);var moments=vec2<f32>(0.0);
+        var sum=vec4<f32>(0.0);var moments=vec2<f32>(0.0);var dists=vec2<f32>(0.0);
         for(var y=-r;y<=r;y+=1) {
             for(var x=-r;x<=r;x+=1) {
                 let q=p+vec2<i32>(x,y);
@@ -54,9 +57,11 @@ fn rl_sample(p:vec2<i32>)->RlSample {
                 sum+=vec4<f32>(n.rgb*w,w);
                 let l=dot(n.rgb,RL_LUMA);
                 moments+=vec2<f32>(l,select(l*l,n.m2,n.full))*w;
+                if n.dist>0.0 {dists+=vec2<f32>(n.dist*w,w);}
             }
         }
         let spatial=sum.rgb/sum.w;
+        dist=select(0.0,dists.x/dists.y,dists.y>0.0);
         let mu=moments.x/sum.w;
         let sigma=sqrt(max(moments.y/sum.w-mu*mu,0.0));
         // The history the shading read, clamped to this frame's neighbourhood.
@@ -76,4 +81,5 @@ fn rl_sample(p:vec2<i32>)->RlSample {
     textureStore(rl_history,p,base+1,vec4<u32>(pack2x16float(vec2<f32>(m.b,min(m2,65504.0)))));
     textureStore(rl_history,p,base+2,vec4<u32>(((s.slot)&0xffffffu)|(min(u32(count),255u)<<24u)));
     textureStore(rl_history,p,base+3,vec4<u32>(bitcast<u32>(s.depth)));
+    textureStore(rl_history,p,16+i32(rl_history_frame.words.y),vec4<u32>(bitcast<u32>(dist)));
 }

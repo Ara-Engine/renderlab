@@ -30,7 +30,8 @@ const RL_RESOLVE:bool=false;
 // 10 (slot+1) | roughness x 255 << 24, 11 clip w (negative: a full set), 12 the history's rg,
 // 13 its (b, mean luminance^2), 14 its count (a full set's strata), 15 the frame counter + 1.
 const RL_RESOLVE_PASS:bool=false;
-fn rl_sample_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,sample:vec3<f32>,m2:f32,full:bool,count:f32,rough:f32,seen:vec3<f32>,seen_m2:f32) {
+fn rl_sample_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,sample:vec3<f32>,m2:f32,full:bool,count:f32,rough:f32,seen:vec3<f32>,seen_m2:f32,dist:f32) {
+    textureStore(rl_history,vec2<i32>(pixel),18,vec4<u32>(bitcast<u32>(dist)));
     let p=vec2<i32>(pixel);
     let w=(camera.view_projection*vec4<f32>(world,1.0)).w;
     let m=min(sample,vec3<f32>(65504.0));
@@ -91,7 +92,13 @@ fn rl_history_placement_moved(slot:u32)->bool {
         ||any(bitcast<vec4<u32>>(a[2])!=bitcast<vec4<u32>>(b[2]))||any(bitcast<vec4<u32>>(a[3])!=bitcast<vec4<u32>>(b[3]));
 }
 // The receiver's stored mean (rgb) and count (w, 0: no usable history).
-fn rl_history_lookup(receiver:Receiver,world:vec3<f32>,pixel:vec2<u32>)->vec4<f32> {
+// RL_VIRTUAL (with RL_RESOLVE_PASS): a lobe below RL_VIRTUAL_ROUGH reads its history where its
+// reflected point (the receiver plus the mirror direction times the stored hit distance) was in
+// the previous frame, if the same placement is there at a similar depth; otherwise, and for
+// rougher lobes and misses, where its surface point was.
+const RL_VIRTUAL:bool=true;
+const RL_VIRTUAL_ROUGH:f32=0.3;
+fn rl_history_lookup(receiver:Receiver,world:vec3<f32>,pixel:vec2<u32>,reflected:vec3<f32>)->vec4<f32> {
     rl_hist_m2=0.0;rl_hist_moved=false;rl_hist_neigh=vec4<f32>(0.0);
     if rl_history_frame.words.x==0u {return vec4<f32>(0.0);}
     let slot=receiver.slot;
@@ -109,8 +116,20 @@ fn rl_history_lookup(receiver:Receiver,world:vec3<f32>,pixel:vec2<u32>)->vec4<f3
     if (id&0xffffffu)!=slot+1u {return vec4<f32>(0.0);}
     let w=bitcast<f32>(textureLoad(rl_history,q,base+3).x);
     if abs(w-c.w)>0.02*c.w {return vec4<f32>(0.0);}
-    let rg=unpack2x16float(textureLoad(rl_history,q,base).x);
-    let bm=unpack2x16float(textureLoad(rl_history,q,base+1).x);
+    var at_q=q;
+    if RL_RESOLVE_PASS && RL_VIRTUAL && rl_hist_rough<RL_VIRTUAL_ROUGH {
+        let dist=bitcast<f32>(textureLoad(rl_history,q,16+i32(1u-rl_history_frame.words.y)).x);
+        if dist>0.0 {
+            let v=rl_history_frame.previous*vec4<f32>(fma(reflected,vec3<f32>(dist),world),1.0);
+            if v.w>0.0 {
+                let qv=vec2<i32>(floor(fma(v.xy/v.w,vec2<f32>(0.5,-0.5),vec2<f32>(0.5))*vec2<f32>(size)));
+                if all(qv>=vec2<i32>(0)) && all(qv<size) && (textureLoad(rl_history,qv,base+2).x&0xffffffu)==slot+1u
+                    && abs(bitcast<f32>(textureLoad(rl_history,qv,base+3).x)-c.w)<=0.1*c.w {at_q=qv;}
+            }
+        }
+    }
+    let rg=unpack2x16float(textureLoad(rl_history,at_q,base).x);
+    let bm=unpack2x16float(textureLoad(rl_history,at_q,base+1).x);
     // Stored radiance is exposed: carry it to this frame's exposure.
     let scale=bitcast<f32>(rl_history_frame.words.w);
     rl_hist_m2=bm.y*scale*scale;
@@ -128,7 +147,7 @@ fn rl_history_lookup(receiver:Receiver,world:vec3<f32>,pixel:vec2<u32>)->vec4<f3
             if l>hi {own*=hi/l;} else if l<lo && l>0.0 {own*=lo/l;}
         }
     }
-    return vec4<f32>(own,f32(id>>24u));
+    return vec4<f32>(own,f32(textureLoad(rl_history,at_q,base+2).x>>24u));
 }
 // The receiver's output: its new mean with the neighbourhood gathered by the lookup
 // (RL_RESOLVE), the centre tap weighed by its own history count; otherwise its mean.

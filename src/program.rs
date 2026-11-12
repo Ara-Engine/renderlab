@@ -316,7 +316,9 @@ const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_softw
 /// the reflection ray itself, which yields the same hit record. The queries' declarations
 /// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed. Software hits have
 /// no hit distance, so they never read the radiance cache (reflection_cache_hits.wgsl).
-const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 4] = [
+const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 5] = [
+    // The resolve's hit distance: software hits carry none (surface reprojection only).
+    ("            rl_dist+=hit.t;rl_dist_n+=1.0;\n", ""),
     (
         "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,tmin,RL_FAR,origin,d));\n    while rayQueryProceed(&query) {}\n    let hit=rayQueryGetCommittedIntersection(&query);\n    if hit.kind==0u {return RlCast(vec4<u32>(0u),-1.0);}\n    return RlCast(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),hit.t);\n",
         "    let hit=rs_trace(origin,d,tmin,RL_FAR,false);\n    return RlCast(hit.record,select(-1.0,hit.t,hit.record.x!=0u));\n",
