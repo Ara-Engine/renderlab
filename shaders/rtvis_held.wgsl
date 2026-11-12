@@ -3,7 +3,10 @@
 // `rtvis_hold` before its receiver's estimate and records the result with `rtvis_store`.
 // History word per pixel: class << 8 | streak, class 1 every direction blocked, 2 every
 // direction clear, 0 anything else (fractional, a miss, a skip, a moving receiver's start).
-struct RtvisHeld { previous:mat4x4<f32>, words:vec4<u32>, lo:vec4<f32>, hi:vec4<f32>, light:vec4<f32> };
+// words: enabled, probes, streak, and (U-FIXED) the sun visibility history's use this frame;
+// current: this frame's unjittered camera matrix (the history's depth codes); sun.x: the
+// sun visibility history's turn step (primary_sun_history.wgsl).
+struct RtvisHeld { previous:mat4x4<f32>, words:vec4<u32>, lo:vec4<f32>, hi:vec4<f32>, light:vec4<f32>, current:mat4x4<f32>, sun:vec4<u32> };
 @group(0) @binding(50) var<uniform> rtvis_held:RtvisHeld;
 @group(0) @binding(51) var rtvis_history_in:texture_2d<u32>;
 @group(0) @binding(52) var rtvis_history_out:texture_storage_2d<r32uint,write>;
