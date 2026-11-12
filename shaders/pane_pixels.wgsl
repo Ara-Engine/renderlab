@@ -12,13 +12,18 @@
 // The triangle under each sample, plus one, from the glass entry's vertex stage (`vs`); the
 // glass entry's two discards apply as it takes them, per fragment at the pixel centre.
 // With depth testing off the last triangle in draw order wins each sample.
-@fragment fn tp_pane_id_fs(input:RasterInput, @builtin(front_facing) front:bool, @builtin(primitive_index) primitive:u32) -> @location(0) u32 {
+// The id's encoding in the four-sample target: one u32 (R32Uint) on the ara-gpu port. wgpu
+// guarantees no multisampled R32Uint, so its panes write two u16 halves to Rg16Uint
+// (transparency_panes.rs `sources` swaps these two lines and tp_pane_id).
+alias PaneId=u32;
+fn tp_pane_id_out(id:u32)->PaneId { return id; }
+@fragment fn tp_pane_id_fs(input:RasterInput, @builtin(front_facing) front:bool, @builtin(primitive_index) primitive:u32) -> @location(0) PaneId {
     let source_front=front==(input.winding>0.0);
     if material.double_sided==0u && !source_front { discard; }
     let pixel=vec2<i32>(input.position.xy);
     let depth=dot(input.world-tp.eye.xyz,tp.forward.xyz);
     if depth>textureLoad(tp_depth,pixel,0).x { discard; }
-    return primitive+1u;
+    return tp_pane_id_out(primitive+1u);
 }
 // ---- end PANE_RASTER ----
 
@@ -30,6 +35,8 @@ struct PanePixels { rect:vec4<u32>, info:vec4<u32> };
 @group(0) @binding(71) var<storage,read> pane_indices:array<u32>;
 // The pane's four-sample id raster.
 @group(0) @binding(72) var pane_ids:texture_multisampled_2d<u32>;
+// Sample k's id, in tp_pane_id_out's encoding.
+fn tp_pane_id(pixel:vec2<i32>,k:i32)->u32 { return textureLoad(pane_ids,pixel,k).x; }
 @group(0) @binding(76) var pane_out:texture_storage_2d<rgba16float,write>;
 // Which sign of a triangle's area in pixels the pipeline's front faces have.
 const PANE_FRONT_NEGATIVE:bool=true;
@@ -98,8 +105,7 @@ fn pane_shade_triangle(t:u32,p:vec2<u32>)->vec4<f32> {
     let p=pane.rect.xy+id.xy;
     if any(p>=pane.rect.zw) { return; }
     let pixel=vec2<i32>(p);
-    let ids=array<u32,4>(textureLoad(pane_ids,pixel,0).x,textureLoad(pane_ids,pixel,1).x,
-        textureLoad(pane_ids,pixel,2).x,textureLoad(pane_ids,pixel,3).x);
+    let ids=array<u32,4>(tp_pane_id(pixel,0),tp_pane_id(pixel,1),tp_pane_id(pixel,2),tp_pane_id(pixel,3));
     if (ids[0]|ids[1]|ids[2]|ids[3])==0u { return; }
     let behind=textureLoad(tp_color,pixel,0);
     var seen=array<u32,4>();
