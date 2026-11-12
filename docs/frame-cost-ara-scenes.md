@@ -1,6 +1,49 @@
-# Why Showcase and Outpost are slow, and the plan to 16.7 ms
+# Why Showcase and Outpost are slow, and the plan to URP-class frames
 
-Root, 2026-11-12, after Islam's word ("fix the performance... scenes running on 10 fps on a RTX 4070 super"). Bar set by the coordinator: Showcase and Outpost at 1080p on the RTX 4070 SUPER, camera moving, both paths, at or under 16.7 ms, with no visible loss. This page is the evidence and the plan; it fills in as captures land.
+Root, 2026-11-12, after Islam's word ("fix the performance... scenes running on 10 fps on a RTX 4070 super"). First bar: 16.7 ms. **The direction moved the same day**, when Islam saw Unity's URP on the same scenes (built player, 1920x1080, D3D12, this RTX, the same camera path; preliminary: exposure and sky not matched, no GI, no traced reflections, MSAA 4x): Showcase 0.63 ms GPU, Outpost 4.78 ms, against Renderlab 29.8 / 35.2 and 44.4 / 69-82. His words: "the difference is crazy see that 0. something that what I think we should be going towards". It is a goal, not a rule; the method is ours, and the picture rule (no visible loss against a reference, still, moving, after cuts) stays.
+
+**Targets (root's reading with the coordinator's):**
+1. **The feature-matched floor:** with GI and reflections off, within about 1.5x of URP on both scenes on both paths: Showcase about 1 ms, Outpost about 7 ms.
+2. **The extras:** GI and traced reflections together about 3 ms on top of the floor, so Showcase lands near 4 ms with everything on, the class of Renderlab's own quarry frame.
+3. **Cost follows the scene:** anything paid per pixel whatever the scene holds is the first thing to find. The quarry is a heavier scene than Showcase and costs about 7 times less.
+
+## 0. Per-pass targets (1080p, RTX 4070 SUPER, camera moving, ms)
+Today's numbers: Ara lease 5 (Renderlab 835701d4, clean, five rounds) and earlier detail captures; "floor" is GI and reflections off. Quarry for comparison: docs/unreal-pass-budget.md (non-RT with the Disk lookup).
+
+**Showcase** (43 instances, 380k triangles, sun and two spots with no radius, 2 skinned characters, 5 glass and 3 blend primitives, glossy and mirror balls):
+
+| pass | today RT / non-RT | quarry | floor target | full target | mechanism | why above the quarry today |
+|---|---|---|---|---|---|---|
+| visibility (RT: camera and sun rays) | 3.7-5.5 / 0.5 | 1.45 / 0.65 | 0.3 / 0.3 | 0.4 / 0.3 | RT: raster primaries (the non-RT visibility buffer) and the sun from the held budget or the cached map; the two skinned characters keep their swept shadows on the full budget today | skinned movers and their swept shadows keep the full 32 sun directions; the quarry has no movers |
+| shading: base (entry, decode, material, BRDF) | about 6.5 (M5) | 0.65 total | 0.4 | 0.4 | material work is small (textures 0.8, BRDF 1.3 on the M5); the rest is the entry and decode, to be priced on the RTX | the quarry's shading is 0.65 for the whole stage |
+| shading: camera GI lookup | about 4-6 | (in 0.65) | 0 (off) | under 1 | Mac: the repeated sample (1.2-1.9 ms found), then the second level and fills | per pixel, two levels of 8 hashed corners each |
+| shading: camera lights | about 4 | 0 (sun only) | 0.3 | 0.3 | one hard ray per spot already; `cast_shadows`; cluster walk | two spots reaching most of the view |
+| shading: reflections | about 17-19 | 0 (rough rock, untraced) | 0 (off) | about 2 | U-RTVIS: fewer strata (step 1), one ray per pixel or quad with an accumulator (step 3); Mac: compacted hit shading; `max_roughness` ruling pending | 96% of rays from 12.6% of pixels at 15.2 strata each |
+| atmosphere | 0 (elsewhere) / 2.5-2.7 | small | 0.2 | 0.2 | find the part (`cpu.wait` suspected) | fixtures 0.34 ms |
+| TR1 | 1.3 / 1.0 | 0.53 | 0.4 | 0.5 | after-cut frames cost 5.7 on RT (lease data): find why | |
+| transparency | 0.9 / 0.4 | none | 0.2 | 0.2 | per-pixel panes (as the port did, 8.06 -> 0.63 on the M5) if the RTX shows a cost | no glass in the quarry |
+| skinning | 0.7-0.8 / 0.05 | none | 0.1 | 0.1 | two characters; RT also refits their BLAS each frame | no skinned meshes in the quarry |
+| GI passes (update, gather, cells) | 0.8 / 1.6 | 0.7 / 1.8 | 0 (off) | 0.5 | already small | |
+| post | 0.2 | 0.64 | 0.2 | 0.2 | | |
+| **frame** | **29.8 / 35.2** | **4.0 / 4.5** | **about 1.5-2** | **about 4** | | |
+
+The floor adds to about 2 ms, not 1: a visibility buffer, a reconstruction and post at the quarry's own costs already take about 1 ms. Going below needs TR1 and post priced against URP's (no temporal reconstruction, MSAA instead), which is a picture question for later.
+
+**Outpost** (98 mesh instances of 53 models plus about 14M foliage triangles a frame, 3.1M prop triangles, 1,108 instances for software rays, 22 lights: sun plus 21 shadowed local lights, twelve of them 65 lm 3 m markers, all radius 0, 1 skinned character):
+
+| pass | today RT / non-RT | floor target | full target | mechanism |
+|---|---|---|---|---|
+| visibility (RT: camera and sun rays) | 12.7 / 0.95 | 1.0 / 1.0 | 1.5 / 1.0 | RT: why the held sun budget doesn't engage (a sun moving with the day cycle is the suspect: `relight_parts` capture); raster primaries; foliage LOD and size culls (Ara #137) |
+| shading | 17.0 / 24-34 | 2.0 | 3.5 | 21 hard rays per pixel at most today; `cast_shadows` off for the markers (Ara's flag, RL#51); light importance |
+| sun shadow (non-RT) | in visibility / 5.1 | 1.0 | 1.0 | foliage as non-casters or culled (object flags), page pool |
+| GI (all stages) | 9.1 / 23-54 | 0 (off) | 2.0 | the relight cause (every cell requeued every frame while moving), then the gather budget |
+| atmosphere | 1.9 / 3.9-13.6 | 0.5 | 0.5 | name the part (`cpu.wait` suspected: CPU GI preparation with 1,108 instances) |
+| TR1 | 1.6 / 1.1 | 0.5 | 0.5 | |
+| transparency | 1.5 / 0.4 | 0.3 | 0.3 | |
+| skinning, post | 0.4 / 0.2 | 0.3 | 0.3 | |
+| **frame** | **44.4 / 69-82** | **about 6-7** | **about 9-10** | |
+
+**Owners:** reflections (U-RTVIS: strata, trace, accumulator; Mac: hit shading), the camera GI lookup (Mac), local-light shadows and `cast_shadows` (Mac, RL#51), the relight cause and the held-budget question on Outpost (root, through the integration and bridge threads; the fix lands with U-RTVIS), object flags and foliage culls (U-RTVIS after reflections; Ara #137 for LODs), the unexplained per-pass costs (visibility on RT, atmosphere, TR1, transparency, skinning): root prices them once the features-off capture lands.
 
 ## 1. The three scenes, pass by pass (1080p, RTX 4070 SUPER, camera moving, ms, medians)
 Quarry: Renderlab's own matched quarry (docs/unreal-pass-budget.md, before the Disk default; the Disk lookup has since cut the non-RT sun pass to 0.22 ms and the moving frame to 4.53 ms). Showcase and Outpost: Ara's player through `RENDERLAB_PASS_LOG`, Renderlab pin f3d0605 or 5955d4a (Ara integration captures `root-detail-*`, `mo-u2-*`). None of tonight's merges below are in these numbers.
