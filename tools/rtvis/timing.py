@@ -309,6 +309,23 @@ PLANS["histshow"] = [
     (f"s-{path}-{v}-{k}", ["--path", path, *SHOW], env)
     for k in (1, 2) for path in ("nonrt", "rt") for v, env in HIST_TUNES[:3]
 ]
+# History-only-while-still gate: moving game frames (flight, night lanterns) for a byte
+# check against main's binary (same plan, run with each exe), and still timing.
+PLANS["gatemoving"] = [
+    (f"p-{path}-{name}", ["--path", path, *extra, "--every", "1"], {})
+    for path in ("nonrt", "rt")
+    for name, extra in (("flight", ["--fox", FOX, "--frames", "48"]), ("night", ["--fox", FOX, "--night-lanterns", "--frames", "30"]))
+]
+GATE_VARIANTS = (("off", {"RENDERLAB_RL_HISTORY": "0"}), ("on", {}), ("cap4", {"RENDERLAB_RL_HISTORY_TUNE": "cap=4"}))
+# Run with reflection_matched (the Showcase-like band held at frame 32) and game_scene (hold=1).
+PLANS["gateshow"] = [
+    (f"s-{path}-show-{v}-{k}", ["--path", path, *SHOW, "--freeze", "32"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in GATE_VARIANTS
+]
+PLANS["gatehold"] = [
+    (f"s-{path}-hold-{v}-{k}", ["--path", path, "--fox", FOX, "--diag", "hold=1", "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in GATE_VARIANTS
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS

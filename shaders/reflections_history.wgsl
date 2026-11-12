@@ -8,7 +8,7 @@
 // 0 pack2x16float(r,g), 1 pack2x16float(b, mean luminance^2), 2 (slot+1) | count << 24,
 // 3 the receiver's clip w (f32 bits).
 struct RlHistoryFrame { previous:mat4x4<f32>, words:vec4<u32> };
-// words: x 1 when this frame may read the history (TR1 continues it: no cut or reset),
+// words: x 1 when this frame may read the history (a still camera, no cut or reset),
 // y the half this frame writes, z the frame counter, w the exposure factor (f32 bits)
 // carrying stored radiance to this frame.
 @group(0) @binding(53) var<uniform> rl_history_frame:RlHistoryFrame;

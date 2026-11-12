@@ -106,13 +106,14 @@ const RL_SPLIT: [(&str, &str); 4] = [
 ];
 /// U-RTVIS reflection history (shaders/reflections_history.wgsl): the wgpu renderer's primary
 /// shading modules bind it (group 0, bindings 53 and 54), so only they replace the stubs.
-/// Off by default (its moving glossy picture is grainier, docs/rtvis.md): `RENDERLAB_RL_HISTORY=1`
-/// composes it; unset or `0` keeps the stubs, every glossy receiver tracing its full set.
+/// It reads history only while the camera holds still (temporal_reconstruction.rs), so moving
+/// frames trace as without it. `RENDERLAB_RL_HISTORY=0` keeps the stubs: every glossy receiver
+/// traces its full set every frame.
 const REFLECTION_HISTORY: &str = include_str!("../shaders/reflections_history.wgsl");
 const RL_HISTORY_STUBS: [&str; 2] = ["// ---- rl history stubs ----\n", "// ---- end of rl history stubs ----\n"];
 pub(crate) fn rl_history_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY").map_or(true, |v| v != "0"))
 }
 /// U-RTVIS measurement: `RENDERLAB_RL_HISTORY_TUNE=strata=S,cap=C,moving=M,sigma=K` replaces
 /// reflections.wgsl's RL_HISTORY_STRATA, _CAP, _MOVING and _SIGMA.

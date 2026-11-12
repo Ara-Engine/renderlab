@@ -991,7 +991,7 @@ pub(crate) struct Planned {
     pub(crate) rl_history: Vec<u8>,
 }
 /// U-RTVIS: `RlHistoryFrame` (shaders/reflections_history.wgsl): the previous unjittered
-/// view-projection, then whether this frame continues history, the half it writes, the frame
+/// view-projection, then whether this frame reads history (a still camera), the half it writes, the frame
 /// counter and the exposure factor carrying stored radiance to this frame.
 pub(crate) const RL_HISTORY_BYTES: usize = 80;
 impl Planned {
@@ -1327,7 +1327,9 @@ impl Planner {
         );
         let mut rl_history = Vec::with_capacity(RL_HISTORY_BYTES);
         rl_history.extend_from_slice(&matrix_bytes(previous_matrix));
-        let continues = continued.is_some() && !self.reset;
+        // Read only while the camera holds (TR1's bit-equal `still`, no reset): a moving frame
+        // traces every glossy receiver's full set, exactly as without the history.
+        let continues = continued.is_some() && still;
         for w in [u32::from(continues), (i.frame & 1) as u32, i.frame as u32, scale.to_bits()] {
             rl_history.extend_from_slice(&w.to_ne_bytes());
         }
