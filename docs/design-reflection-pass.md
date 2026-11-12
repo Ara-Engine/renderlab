@@ -1,7 +1,7 @@
 # Reflection pass: trace, hit shading and resolve (design, 2026-11-12)
 
-Status: proposal by U-RTVIS for review by the Mac GPU thread. Neither side builds against it
-until the review is in. Ruling (root, 2026-11-12):
+Status: agreed (the Mac GPU thread's review, 2026-11-12, with the changes under "Review
+outcome"); both sides build against it. Ruling (root, 2026-11-12):
 - U-RTVIS owns strata selection, the trace, the lobe side output, and the reduced-rate pass's
   accumulator and resolve.
 - The Mac thread owns hit shading as its own compacted pass on both backends
@@ -255,11 +255,30 @@ Target: reflections at about 3 ms in all.
   Any of these blocks a default change.
 - **Timing:** same binary, interleaved twice, with the reference run.
 
-## Open points for the review
-1. Is 48 B per record right for `reflection_hits`, or does it want the ray rebuilt from L and
-   the stratum to save bandwidth?
-2. Who clears R(N)? Proposed: `rl_trace`, so `reflection_hits` writes only real hits.
-3. Should misses get records too, so `reflection_hits` owns all sample radiance? Proposed: no.
-   Misses are cheap and resolved in `rl_trace`.
-4. Order and bins: if `reflection_hits` wants records bucketed by batch, `rl_trace` can append
-   per-batch counts in a second header (bounded by the batch count) at little cost.
+## Review outcome (the Mac GPU thread, 2026-11-12)
+1. **Records stay 48 B.** `reflection_hits` rebuilds each hit with `rl_hit_input` from words
+   3-11, and takes the hit distance from the rebuilt point, so it does not read D(N). D(N)
+   stays for the resolve.
+2. **`rl_trace` clears R(N).** `reflection_hits` writes rgb and a = 1 only at its records'
+   slots, so record order never changes a result.
+3. **No records for misses.**
+4. **No per-batch header from `rl_trace`.** `reflection_hits` bins by program inside its own
+   pass: placement, then batch, then program slot through MP1's slot table, then prefix,
+   scatter, and one indirect dispatch per program. Per-batch counts from `rl_trace` would only
+   be a nice-to-have, never a dependency.
+
+Notes:
+- **Mixed-program frames:** list frames now shade inline hits with the camera pixel's list
+  program (`LIST_HIT_PARAMETERS`). Binning by program shades each hit with its own program.
+  That is correct, but it changes the picture on mixed frames only, and the Mac flags it with
+  crops. Single-program frames (Showcase on wgpu) are unchanged.
+- **One hit function:** inline hits and `reflection_hits` run the same code. `rl_hit_input`
+  and the `rl_hit_*` privates stay in reflections.wgsl with this doc's signatures, and the Mac
+  composes its pass from them.
+- **`rl_hit_offset`:** `reflection_hits` computes it from record word 2 and the frame; inline
+  hits get it from the U-RTVIS seam. The Mac's shared shadow decision then replaces the
+  `RL_SPLIT` seams.
+- **Ara port:** `reflection_hits` binds H (read) and R(N) as `rgba16float` storage (write),
+  plus the shading entry's groups.
+- **Parity first:** the Mac builds `reflection_hits` to match inline hits first, with a
+  byte-matching harness against them at pixel rate.
