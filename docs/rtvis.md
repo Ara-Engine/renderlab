@@ -387,7 +387,7 @@ the full set, as today, on:
 
 Mirrors are unchanged. The history is in shaders/reflections_history.wgsl, bound only in the wgpu
 renderer's primary shading modules (group 0, bindings 53/54); film and Ara keep the stubs.
-`RENDERLAB_RL_HISTORY=0` restores the full set every frame, and `RENDERLAB_RL_HISTORY_TUNE`
+It is off by default; `RENDERLAB_RL_HISTORY=1` enables it, and `RENDERLAB_RL_HISTORY_TUNE`
 (strata, cap, moving, sigma) sets the measurement constants.
 
 **Cost** (same binary, interleaved twice; `shading` medians in ms):

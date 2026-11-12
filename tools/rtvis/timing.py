@@ -271,7 +271,7 @@ PLANS["rough"] = [
     (f"r-{path}-{name}-r{v}-{k}", ["--path", path, *extra, "--frames", "60"], {"RENDERLAB_REFLECTION_ROUGH": v})
     for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v in ROUGH_VALUES
 ]
-# Reflection history (RENDERLAB_RL_HISTORY, on by default; reflections_history.wgsl): timing on
+# Reflection history (RENDERLAB_RL_HISTORY=1, off by default; reflections_history.wgsl): timing on
 # the game flight and night lanterns, and the game's flight and cut pictures, both paths.
 HIST = lambda v: {"RENDERLAB_RL_HISTORY": v}
 PLANS["histsmoke"] = [(f"q-{path}-smoke", ["--path", path, "--frames", "6"], HIST("1")) for path in ("rt", "nonrt")]
@@ -285,17 +285,18 @@ PLANS["histpics"] = [
     for kind, extra in (("flight", ["--frames", "48"]), ("cut", ["--diag", "cut=1", "--frames", "36"]))
     for v in ("1", "0")
 ]
-HIST_TUNES = [("off", {"RENDERLAB_RL_HISTORY": "0"}), ("s1", {}),
-              ("s4c1", {"RENDERLAB_RL_HISTORY_TUNE": "strata=4,cap=1,moving=1"}),
-              ("s4c4", {"RENDERLAB_RL_HISTORY_TUNE": "strata=4,cap=4,moving=4"})]
+ON = {"RENDERLAB_RL_HISTORY": "1"}
+HIST_TUNES = [("off", {"RENDERLAB_RL_HISTORY": "0"}), ("s1", ON),
+              ("s4c1", ON | {"RENDERLAB_RL_HISTORY_TUNE": "strata=4,cap=1,moving=1"}),
+              ("s4c4", ON | {"RENDERLAB_RL_HISTORY_TUNE": "strata=4,cap=4,moving=4"})]
 PLANS["histtune"] = [
     (f"t-{path}-{name}-{v}-{k}", ["--path", path, *extra, "--frames", "60"], env)
     for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v, env in HIST_TUNES
 ]
 # Diagnosis: never reject (sigma huge), against off and the default, game flight both paths;
 # and the game held still (hold=1), where every glossy pixel's history should be trusted.
-HIST_DIAG = [("off", {"RENDERLAB_RL_HISTORY": "0"}), ("s1", {}),
-             ("norej", {"RENDERLAB_RL_HISTORY_TUNE": "sigma=1000000000"})]
+HIST_DIAG = [("off", {"RENDERLAB_RL_HISTORY": "0"}), ("s1", ON),
+             ("norej", ON | {"RENDERLAB_RL_HISTORY_TUNE": "sigma=1000000000"})]
 PLANS["histdiag"] = [
     (f"d-{path}-{name}-{v}-{k}", ["--path", path, "--fox", FOX, *extra, "--frames", "60"], env)
     for k in (1, 2) for path in ("nonrt", "rt") for name, extra in (("game", []), ("hold", ["--diag", "hold=1"]))
