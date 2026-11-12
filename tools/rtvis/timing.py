@@ -180,6 +180,27 @@ PLANS["ablate"] = [
 ]
 # Byte identity of a measurement-only change: the non-RT game flight, every frame hashed.
 PLANS["ident"] = [("p-game-ident", ["--path", "nonrt", "--frames", "30", "--every", "1"], {})]
+# Reflection-hit shading split (RENDERLAB_RL_HIT, reflection hits only): the game flight.
+RL_VARIANTS = [("base", {}), ("local", {"RENDERLAB_RL_HIT": "local"}), ("sun", {"RENDERLAB_RL_HIT": "sun"}),
+               ("nolights", {"RENDERLAB_RL_HIT": "nolights"}), ("black", {"RENDERLAB_RL_HIT": "black"}),
+               ("noreflections", {"RENDERLAB_ABLATE": "reflections"})]
+PLANS["rlhit"] = [
+    (f"r-{path}-{name}-{k}", ["--path", path, "--fox", FOX, "--frames", "60"], env)
+    for path, visits in (("nonrt", (1, 2)), ("rt", (1,)))
+    for k in visits
+    for name, env in RL_VARIANTS
+    if k in visits
+]
+# The stratum split of reflection hits' local-light visibility (RENDERLAB_RL_SPLIT).
+SPLIT = lambda v: {"RENDERLAB_RL_SPLIT": v}
+PLANS["rlsplit"] = [
+    (f"q-{path}-split{v}-{k}", ["--path", path, "--fox", FOX, "--frames", "60"], SPLIT(v))
+    for k in (1, 2) for path in ("nonrt", "rt") for v in ("1", "0")
+]
+PLANS["splitpics"] = [
+    (f"p-{path}-{kind}-split{v}", ["--path", path, "--fox", FOX, *extra, "--frames", "48", "--every", "1"], SPLIT(v))
+    for path in ("nonrt", "rt") for kind, extra in (("flight", []), ("hold", ["--diag", "hold=1"])) for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
@@ -268,6 +289,28 @@ def gi(out):
             print(f"  {k:16}" + " ".join(f"{v:6.1f}" for v in vals))
 
 
+def split_matched(exe, out, spp="4096"):
+    """reflection_matched with its arch lamp (a shadowed local light), RENDERLAB_RL_SPLIT on and
+    off, both paths: the moving flight's frames 16, 32 and 47, and the pose of frame 32 held still
+    for 48 frames (`--freeze 32`, frame 47 written); then the path tracer at those poses."""
+    out = Path(out)
+    env = environment()
+    code = 0
+    runs = [(f"m-{path}-{kind}-split{v}", ["--path", path, "--matched", "--lamp", "1", *extra], SPLIT(v))
+            for kind, extra in [("moving", ["--write-frames", "16,32,47"]), ("still", ["--freeze", "32", "--write-frames", "47"])]
+            for path in ("rt", "nonrt") for v in ("1", "0")]
+    runs.append(("m-reference", ["--path", "rt", "--lamp", "1", "--reference", spp, "--write-frames", "16,32,47"], {}))
+    for name, extra, more in runs:
+        d = out / name
+        d.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run([exe, *extra, "--out", str(d)], cwd=REPO, capture_output=True, text=True,
+                           timeout=900, env=env | more)
+        (d / "stderr.txt").write_text(r.stderr[-20000:])
+        print(name, "exit", r.returncode, flush=True)
+        code = max(code, r.returncode)
+    return code
+
+
 def hashes(out, switch="cold"):
     """Per picture clip: the frames whose hashes differ between the stop on and off."""
     out = Path(out)
@@ -306,5 +349,7 @@ if __name__ == "__main__":
         hashes(*sys.argv[2:4])
     if sys.argv[1] == "gi":
         gi(sys.argv[2])
+    if sys.argv[1] == "split_matched":
+        raise SystemExit(split_matched(*sys.argv[2:5]))
     if sys.argv[1] == "matched":
         raise SystemExit(matched(*sys.argv[2:5]))

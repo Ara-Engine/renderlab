@@ -220,3 +220,57 @@ The game flight stands in for a reflective, lamp-lit scene: on non-RT, reflectio
 shadows each take 11-12 ms of its 18.6 ms of shading. The two do not add up, so they share
 work (reflection hits shade with local shadows). The forest walk has no mirrors or lamps in
 view and is not a shading stand-in.
+
+## Reflection hits: where their shading goes, and the stratum split (2026-11-12)
+A reflection ray that hits runs the hit's program (`surface`, `shade`) in full. Glossy pixels
+trace 4-16 strata, mirrors one. In `shade`'s light loop (`light_visibility`, shaders/program_api.wgsl)
+shadowed local lights go to `rl_local_shadow` exactly as at a camera receiver: on RT at least 4
+disk-sampled rays a light, on non-RT the cached atlas map's PCSS (12 blocker taps, then 24
+bilinear PCF taps, about 108 texel reads). The sun gets one hard ray (`rl_hit_shadow`, software
+`rs_blocked` on non-RT). GI at hits reads the open environment, with no cache lookup.
+
+Split with `RENDERLAB_RL_HIT` (measurement only, reflection hits only; src/program.rs). Game
+flight with the Fox, 1080p, frames 8-59, `shading` medians in ms, non-RT two visits, RT one:
+
+| switch at hits | non-RT shading | RT shading |
+|---|---|---|
+| none (main) | 21.7-21.8 | 10.95 |
+| `local`: shadowed local lights unshadowed | 13.5 | 7.75 |
+| `sun`: no sun shadow ray | 19.2 | 9.50 |
+| `nolights`: every light zero incidence | 11.0 | 6.60 |
+| `black`: no `surface`/`shade` | 10.3 | 5.10 |
+| reflections off (`RENDERLAB_ABLATE`) | 7.1 | 4.86 |
+
+On non-RT, reflections cost 14.7 ms: 3.2 tracing and hit setup, 11.5 hit shading. Of the hit
+shading, 10.8 is the lights, almost all their visibility: 8.3 local-light shadow maps and 2.6
+the sun's ray. RT has the same shape at half the size.
+
+The change, `RENDERLAB_RL_SPLIT` (on by default; `=0` restores every sample at every hit):
+a glossy pixel's strata are averaged into one value. So stratum k of n evaluates every n-th
+local-light disk ray (RT) or PCF tap (non-RT PCSS), from an offset that turns with the frame.
+Together the strata cover each sample about once instead of each repeating all of them. One
+stratum (mirrors) and camera receivers take every sample, exactly as before. The blocker
+search, which sets the penumbra's width, stays whole.
+
+Other options and their picture risk against the path tracer:
+- Skipping local shadows on rough lobes leaks lamp light into reflected shadows.
+- Shading reflection hits once per tile blurs reflections across pixels.
+- Caching hit shading in the GI cells loses reflected detail.
+- Sharing the primary hit's light cluster leaves visibility, the cost, untouched.
+
+Cost (same binary, interleaved twice, reference 25.80 ms against 26.7): game flight `shading`,
+non-RT 21.86 / 21.99 off against 15.67 / 15.85 on (-6.2 ms, frame 41.8 to 35.6); RT 10.87 /
+10.78 against 9.89 / 10.41.
+
+Picture:
+- reflection_matched with its arch lamp (`--lamp 1`), both paths, moving (frames 16, 32, 47)
+  and still (`--freeze 32`, frame 47): split on against off differs by at most 1-4 codes on 0-2
+  pixels a frame. The error against the path tracer is the same on and off: RT moving 0.837 /
+  1.001 / 1.183, still 0.976; non-RT 0.848 / 1.006 / 1.189, still 1.078.
+- Game flight and game scene with the camera held (`hold=1`), every frame of 48, both paths:
+  at most 24 (non-RT) and 62 (RT) pixels a frame differ by more than 2 codes. Over 48 frames
+  1-20 pixels differ by more than 8. The largest difference is 15.
+- Crops (D:/Coding/renderlab-work/unit-rtvis/crops-splitgame, on | off | difference x16): the
+  chrome mirror sphere and the lamps differ by at most 1 code; the gold sphere by at most 9 codes
+  on 16-17 pixels near its highlight, not visible side by side.
+- blobs.py: the same counts on and off on every clip.

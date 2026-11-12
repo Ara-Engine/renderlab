@@ -54,6 +54,10 @@ var<private> rl_specular:vec4<f32>;
 // Shading a reflection hit: light visibility traces its own shadow ray (rl_hit_shadow),
 // because the frame's visibility inputs belong to the primary receivers.
 var<private> rl_reflection_hit:bool;
+// U-RTVIS: the stratum a reflection hit is shaded for, of this pixel's rl_hit_strata. Light
+// visibility at hits splits its samples across the strata (src/program.rs RL_SPLIT).
+var<private> rl_hit_stratum:u32;
+var<private> rl_hit_strata:u32=1u;
 
 // Mean exposed radiance arriving over the declared lobe (rgb) and the traced fraction (w):
 // 1 inside the traced bands, fading to 0 across the rough cutoff. w = 0 means untraced.
@@ -202,7 +206,9 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     // highlight widens by about sqrt(2) of the receiver's own lobe; its energy is unchanged.
     // Mirror rays from flat receivers stay near exact.
     rl_hit_variance=8.0*spread*spread;
+    rl_hit_strata=count;
     for(var k=0u;k<count;k+=1u) {
+        rl_hit_stratum=k;
         var d=reflect(-v,n);
         if !mirror {
             let u=vec2<f32>((f32(k)+radial)/f32(count),fract(rotation+f32(k)*0.6180339887));
@@ -230,6 +236,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         valid+=1u;
     }
     rl_reflection_hit=false;
+    rl_hit_strata=1u;
     rl_hit_variance=0.0;
     if shaded {rl_load_parameters(batch);}
     if valid==0u {return;}

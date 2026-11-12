@@ -79,6 +79,83 @@ const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";
 const REFLECTION_VISIBILITY: &str = "    if rl_reflection_hit {return rl_hit_shadow(lights[s.index],input.receiver,s.direction);}\n";
+/// U-RTVIS: a reflection hit's local-light visibility takes its share of the estimate's
+/// samples. A glossy pixel averages `rl_hit_strata` hits; stratum k of them evaluates every
+/// count-th disk ray (RT, local_light_ray.wgsl) or PCF tap (non-RT PCSS, light_cluster_api.wgsl)
+/// from an offset turning with the frame, so the pixel's strata together cover each sample about
+/// once instead of every stratum repeating all of them. One stratum (mirrors) and camera
+/// receivers take every sample, as before. The blocker search, which sets the penumbra's
+/// width, stays whole. `RENDERLAB_RL_SPLIT=0` keeps every sample at every hit.
+const RL_SPLIT: [(&str, &str); 4] = [
+    (
+        "    for(var i=0u;i<samples;i+=1u) {\n",
+        "    let rl_step=select(1u,min(rl_hit_strata,samples),rl_reflection_hit);\n    var visited=0u;\n    for(var i=select(0u,(rl_hit_stratum+rl_light_frame.info.z)%rl_step,rl_reflection_hit);i<samples;i+=rl_step) {\n        visited+=1u;\n",
+    ),
+    (
+        "    return lit/f32(samples);\n",
+        "    return lit/f32(visited);\n",
+    ),
+    (
+        "        for(var k=0u;k<24u;k+=1u) {\n",
+        "        let rl_step=select(1u,min(rl_hit_strata,24u),rl_reflection_hit);\n        var visited=0u;\n        for(var k=select(0u,(rl_hit_stratum+rl_light_frame.info.z)%rl_step,rl_reflection_hit);k<24u;k+=rl_step) {\n            visited+=1u;\n",
+    ),
+    (
+        "        return soft/24.0;\n",
+        "        return soft/f32(visited);\n",
+    ),
+];
+fn rl_split(mut source: String) -> String {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("RENDERLAB_RL_SPLIT").map_or(true, |v| v != "0")) {
+        return source;
+    }
+    // Ray heads compose the disk rays, map heads the PCSS; each pair appears once or not at all.
+    for pair in RL_SPLIT.chunks(2) {
+        if source.matches(pair[0].0).count() == 1 && source.matches(pair[1].0).count() == 1 {
+            for (from, to) in pair {
+                source = source.replacen(from, to, 1);
+            }
+        }
+    }
+    source
+}
+/// U-RTVIS measurement switches (`RENDERLAB_RL_HIT`, a comma list), reflection hits only:
+/// `local` leaves shadowed local lights unshadowed, `sun` skips the hit's sun shadow ray,
+/// `nolights` gives every light zero incidence, `black` skips the hit's `surface` and `shade`.
+/// They change the picture; unset, nothing changes.
+fn rl_hit_switches(source: String) -> String {
+    static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let list = LIST.get_or_init(|| std::env::var("RENDERLAB_RL_HIT").unwrap_or_default());
+    let mut source = source;
+    for switch in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        let (from, to) = match switch {
+            "local" => (
+                "    if lights[s.index].kind.w!=0u { return rl_local_shadow(",
+                "    if rl_reflection_hit && lights[s.index].kind.w!=0u { return 1.0; }\n    if lights[s.index].kind.w!=0u { return rl_local_shadow(",
+            ),
+            "sun" => (
+                "    if rl_reflection_hit {return rl_hit_shadow(lights[s.index],input.receiver,s.direction);}\n",
+                "    if rl_reflection_hit {return 1.0;}\n",
+            ),
+            "nolights" => (
+                "    return LightSample(index,l,attenuation,",
+                "    return LightSample(index,l,select(attenuation,0.0,rl_reflection_hit),",
+            ),
+            "black" => (
+                "            let hs=surface(h.input);\n            radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n",
+                "            radiance=vec3<f32>(0.0);\n",
+            ),
+            _ => continue,
+        };
+        assert_eq!(
+            source.matches(from).count(),
+            1,
+            "RENDERLAB_RL_HIT seam {switch}"
+        );
+        source = source.replacen(from, to, 1);
+    }
+    source
+}
 
 /// The reflection API text for `program` on `head` at `stage`, and whether it traces: empty
 /// for programs that name neither hook nor input, so their modules are unchanged.
@@ -511,6 +588,7 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
             1,
         );
+        source = rl_split(rl_hit_switches(source));
     }
     let start = source.len();
     source.push_str(program);
