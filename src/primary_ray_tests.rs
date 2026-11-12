@@ -188,25 +188,38 @@ fn primary_modules_compile_and_kernels_hold_no_program() {
 }
 
 /// Cache-terminated reflection hits (`RENDERLAB_RL_CACHE_HITS`): the standard program's
-/// hardware traced module carries the stub once, and with the lookup in its place (as the
-/// switch composes it) it is still valid WGSL.
+/// hardware and software (non-RT) traced modules carry the stub once, and with the lookup in
+/// its place (as the switch composes it) they are still valid WGSL.
 #[test]
 fn cache_hit_reflections_compose() {
     let [hard, _] = primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, software) = primary_ray_gpu::non_rt_sources(SOURCE).unwrap();
     let stage = crate::program::Stage::Traced;
-    let source = crate::program::compose(&hard, crate::STANDARD_PROGRAM, stage, false).source;
-    let stub = crate::program::CACHE_HITS_STUB;
-    assert_eq!(source.matches(stub).count(), 1);
-    let lookup = crate::program::CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", "0.35");
-    let on = source.replacen(stub, &lookup, 1);
-    let module =
-        naga::front::wgsl::parse_str(&on).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on)));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on)));
+    for head in std::iter::once(&hard).chain(&software) {
+        let source = crate::program::compose(head, crate::STANDARD_PROGRAM, stage, false).source;
+        // With RENDERLAB_RL_CACHE_HITS set the module already holds the lookup.
+        let on = if crate::program::cache_hits_rough().is_some() {
+            source
+        } else {
+            let stub = crate::program::CACHE_HITS_STUB;
+            assert_eq!(source.matches(stub).count(), 1);
+            let lookup = crate::program::CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", "0.35");
+            source.replacen(stub, &lookup, 1)
+        };
+        // Software hits pass the traversal's own distance (U-RTVIS's `rs` seam).
+        assert_eq!(
+            on.contains("rl_cache_hit(record,origin,d,rs.t,"),
+            head != &hard
+        );
+        let module = naga::front::wgsl::parse_str(&on)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on)));
+    }
 }
 
 /// Traced frames trace only `scene_pixels`: every pixel-centre segment from near

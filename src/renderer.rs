@@ -141,6 +141,32 @@ pub(crate) fn test_record_capture(kind: &str, bytes: &[u8]) {
     std::fs::write(dir.join(format!("{test}-{index:04}-{kind}.bin")), bytes).unwrap();
 }
 
+/// `RENDERLAB_SUBMIT_LOG` prints one line per submitted frame: how long finishing the encoder,
+/// the early submission of a split frame and the last `queue.submit` took, and how many flights
+/// were alive. For finding out whether a submit waits on an older frame (a pipelined present).
+/// `1` prints to stderr; any other value is a file the lines are appended to (for a host that
+/// does not forward stderr).
+fn submit_log(line: impl FnOnce() -> String) {
+    static ON: OnceLock<Option<String>> = OnceLock::new();
+    let Some(target) = ON
+        .get_or_init(|| std::env::var("RENDERLAB_SUBMIT_LOG").ok().filter(|v| !v.is_empty()))
+        .as_deref()
+    else {
+        return;
+    };
+    let line = line();
+    if target == "1" {
+        eprintln!("{line}");
+    } else if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(target)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 #[cfg(test)]
 impl Renderer {
     /// Reloads the standard program, as edits of its file do.
@@ -3411,7 +3437,7 @@ impl Renderer {
                     .map(|(arrays, materials)| gi_cache::ShadeGroups {
                         arrays,
                         materials,
-                        lighting: self.lighting.bind(),
+                        lighting: self.lighting.cell_bind(),
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
@@ -3674,16 +3700,31 @@ impl Renderer {
         encoder.on_submitted_work_done(move || {
             let _ = callback.set(());
         });
+        let finish_start = Instant::now();
         let commands = encoder.finish();
+        let finish = finish_start.elapsed();
         self.check_fault()?;
         let encode = encode_start.elapsed() - cpu.shadow_encode - early_submit;
         let submitted_at = Instant::now();
+        // The flights still alive when this frame is submitted: a frame that waits inside
+        // `queue.submit` for an older one shows here with the older one counted.
+        let alive = self.occupied();
         let index = self.queue.submit([commands]);
         if let Some(mut t) = marks {
             t.submitted();
             self.pass_timeline = Some(t);
         }
         let submit = submitted_at.elapsed() + early_submit;
+        submit_log(|| {
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.;
+            format!(
+                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2}",
+                self.submissions + 1,
+                ms(finish),
+                ms(early_submit),
+                ms(submit - early_submit),
+            )
+        });
         self.submissions += 1;
         if lit {
             self.atmosphere_submitted(camera, [color.width(), color.height()]);
@@ -3761,7 +3802,9 @@ impl Renderer {
             revision: self.revision,
             cpu: CpuFrame {
                 encode,
+                finish,
                 submit,
+                early_submit,
                 ..cpu
             },
             uploads,
