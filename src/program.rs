@@ -303,7 +303,11 @@ fn indirect_api() -> String {
         source.push_str(&api.replacen(from, "const GI_KEEP_LEVEL:bool=false;", 1));
     }
     source.push_str(&gi_shader("environment_lobes.wgsl", INDIRECT_API[2]));
-    source
+    // PRICING ONLY (t3/gi-price): RENDERLAB_GI_PRICE=<bits> (gi_api.wgsl GI_PRICE).
+    match std::env::var("RENDERLAB_GI_PRICE").ok().and_then(|v| v.parse::<u32>().ok()) {
+        Some(bits) => source.replacen("const GI_PRICE:u32=0u;", &format!("const GI_PRICE:u32={bits}u;"), 1),
+        None => source,
+    }
 }
 
 /// Source of a shading program: WGSL without bindings that defines

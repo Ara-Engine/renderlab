@@ -20,7 +20,7 @@ const ES_BINS:f32=128.0;
 var<private> es_visibility:vec3<f32>;
 fn es_prepare(input:SurfaceInput) {
     es_visibility=vec3<f32>(1.0);
-    if gi_word(GI_H_ENABLED)==0u || !gi_rx_valid { return; }
+    if gi_word(GI_H_ENABLED)==0u || !gi_rx_valid || (GI_PRICE&32u)!=0u { return; }
     // gi_prepare's bin-source normal of this receiver (set whenever gi_rx_valid is).
     let n=gi_rx_normal;
     let open=gi_open_irradiance(n);

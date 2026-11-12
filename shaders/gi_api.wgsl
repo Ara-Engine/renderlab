@@ -26,7 +26,7 @@ fn gi_hot_find(key:vec2<u32>) -> GiHot {
     // Word 0 of the next record, as the x of its first vector (gi_hot_load's r0).
     let next=gi_table[(GI_HEADER+next_slot*GI_HOT_WORDS)>>2u].x;
     if (first.r0.x&GI_KEY_BITS)==key.x { return first; }
-    if first.r0.x==0u { return none; }
+    if first.r0.x==0u || (GI_PRICE&1u)!=0u { return none; }
     if (next&GI_KEY_BITS)==key.x { return gi_hot_load(next_slot); }
     if next==0u { return none; }
     for(var i=2u;i<GI_BUCKET;i+=1u) {
@@ -49,6 +49,11 @@ var<private> gi_lv_bounce:array<vec3<f32>,4>;
 // and the cells a level switch creates as the camera closes in (the nearest surfaces first,
 // such as an arch's near edge) showed as dark streaks for those frames (docs/m7-g2c.md).
 var<private> gi_lv_bw:f32;
+// PRICING ONLY (branch t3/gi-price, not for main): RENDERLAB_GI_PRICE bits drop parts of the
+// lookup to split its cost. 1 no hash walk past the start slot, 2 one level (no level blend),
+// 4 no coarser fill, 8 nearest cell, 16 L1 sky sums, 32 no environment-lobe visibility,
+// 64 no refine into split cells, 128 no lookup at all (the open environment).
+const GI_PRICE:u32=0u;
 // The receiver's bin-source normal (its viewed vertex normal), against which each cell's query
 // normal is weighed (gi_prepare).
 var<private> gi_rx_normal:vec3<f32>;
@@ -78,6 +83,7 @@ fn gi_hot_add(h:GiHot, w_in:f32) -> f32 {
     gi_lv_sky[1]+=s*vec3<f32>(p1.y,p2.x,p2.y);
     gi_lv_sky[2]+=s*vec3<f32>(p3.x,p3.y,p4.x);
     gi_lv_sky[3]+=s*vec3<f32>(p4.y,p5.x,p5.y);
+    if (GI_PRICE&16u)!=0u { return w; }
     gi_lv_sky[4]+=s*vec3<f32>(p6.x,p6.y,p7.x);
     gi_lv_sky[5]+=s*vec3<f32>(p7.y,p8.x,p8.y);
     gi_lv_sky[6]+=s*vec3<f32>(p9.x,p9.y,p10.x);
@@ -113,7 +119,7 @@ fn gi_sample(world:vec3<f32>, level:u32, bin:u32) -> f32 {
     for(var i=0u;i<4u;i+=1u) { gi_lv_bounce[i]=vec3<f32>(0.0); }
     gi_lv_bw=0.0;
     let u=gi_lattice(world,gi_edge(level),bin);
-    if (gi_word(GI_H_FLAGS)&GI_F_TRILINEAR)==0u {
+    if (gi_word(GI_H_FLAGS)&GI_F_TRILINEAR)==0u || (GI_PRICE&8u)!=0u {
         let h=gi_hot_find(gi_key(level,bin,vec3<i32>(floor(u))));
         gi_note_split(h,1.0);
         return gi_hot_add(h,1.0);
@@ -157,7 +163,7 @@ fn gi_sample_refined(world:vec3<f32>, level:u32, bin:u32) -> f32 {
     for(var step=0u;step<3u;step+=1u) {
         let s=gi_sample(world,sample_level,bin);
         if step==0u {
-            if GI_REFINE==0u || !gi_sampled_split || level==0u {return s;}
+            if GI_REFINE==0u || !gi_sampled_split || level==0u || (GI_PRICE&64u)!=0u {return s;}
             if GI_KEEP_LEVEL { gi_keep_level(); first=s; }
             sample_level=level-1u;
         } else if step==1u {
@@ -215,7 +221,7 @@ fn gi_prepare(input:SurfaceInput) {
     gi_rx_valid=false;
     for(var i=0u;i<9u;i+=1u) { gi_rx_sky[i]=vec3<f32>(0.0); }
     for(var i=0u;i<4u;i+=1u) { gi_rx_bounce[i]=vec3<f32>(0.0); }
-    if gi_word(GI_H_ENABLED)==0u { return; }
+    if gi_word(GI_H_ENABLED)==0u || (GI_PRICE&128u)!=0u { return; }
     let world=input.receiver.world;
     // The bin comes from the interpolated vertex normal, as gi_probe requests it.
     let source=gi_bin_source(gi_viewed_normal(world,input.receiver.geometric),input.normal);
@@ -227,7 +233,7 @@ fn gi_prepare(input:SurfaceInput) {
     var total=0.0;
     for(var j=0u;j<2u;j+=1u) {
         let w=select(1.0-pick.t,pick.t,j==1u);
-        if w<=0.0 || (j==1u && pick.hi==pick.lo) { continue; }
+        if w<=0.0 || (j==1u && pick.hi==pick.lo) || (j==1u && (GI_PRICE&2u)!=0u) { continue; }
         let level=select(pick.lo,pick.hi,j==1u);
         let s=gi_sample_refined(world,level,bin);
         if s<=1e-6 { continue; }
@@ -241,8 +247,8 @@ fn gi_prepare(input:SurfaceInput) {
         let bw=gi_lv_bounce_weight(s);
         let last=level+1u>=levels;
         // A full term is normalized over its own corners; bounce full implies sky full.
-        let sky_full=s>=0.999 || last;
-        let bounce_full=bw>=0.999 || last;
+        let sky_full=s>=0.999 || last || (GI_PRICE&4u)!=0u;
+        let bounce_full=bw>=0.999 || last || (GI_PRICE&4u)!=0u;
         if bounce_full {
             gi_rx_add(w/s,gi_share(w,bw));
             continue;
