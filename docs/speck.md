@@ -237,7 +237,7 @@ A fixed gather direction stands for a cone about 0.36 of the hit's distance wide
 | RT: cells waiting for a gather at the end | 492,559 | 326,302 | 243,863 | 214,918 |
 
 - The walk's error against the reference does not depend on the setting; the cells created fall by 44 % at 4.
-- **The one place the picture moves is the spinning crate, and it moves toward the reference.** On the example's own 48-frame flight (8,192-sample references at frames 16, 32 and 47), the only regions a setting changes by more than 0.75 codes are one or two a frame, on the crate. Their distance from the reference, cells 0 against 4: frame 16, 4.95 to 4.07 codes (RT) and 4.98 to 3.71 (non-RT); frame 32, 8.16 to 6.58 and 8.07 to 6.50; frame 47, 11.35 to 8.44 and 11.42 to 8.37. 16 and 8 lie between. The crate is still 4-8 codes from the reference: that is a2, a moving object's cells.
+- **The one place the picture moves is the walking hero, and it moves toward the reference.** On the example's own 48-frame flight (8,192-sample references at frames 16, 32 and 47), the only regions a setting changes by more than 0.75 codes are one or two a frame, on the hero (the two spheres walking beside the gold sphere; `D:/Coding/renderlab-work/unit-speck/sheets/cone-flight-moved-f047.png`). Their distance from the reference, cells 0 against 4: frame 16, 4.95 to 4.07 codes (RT) and 4.98 to 3.71 (non-RT); frame 32, 8.16 to 6.58 and 8.07 to 6.50; frame 47, 11.35 to 8.44 and 11.42 to 8.37. 16 and 8 lie between. The hero's underside is still 4-8 codes too dark: that is a2, a moving object's cells. (This entry first named the spinning crate; the regions were not inspected then. They are the hero.)
 
 ### On the game scene (M, lease `speck-cone-game`, 1080p, one binary, cells 0 against 4)
 
@@ -252,7 +252,7 @@ A fixed gather direction stands for a cone about 0.36 of the hit's distance wide
 | Flight: median blob pixels | 9,198 | 9,787 | 10,059 | 9,428 |
 
 - **Settled still** (frozen camera, steady fire, frame 95), 120 px regions, cells 0 against 4: largest change 0.42 codes RT, 0.44 non-RT (worst channel 0.89 and 0.97); no region over 1 code.
-- **Flight frames 56, 98 and 175:** at most 0.71 codes RT, 0.90 non-RT. Frame 21 has one region over 1 code, +4.9 codes: the spinning cube's shaded face (`D:/Coding/renderlab-work/unit-speck/sheets/cone-cube-f021.png`), the same object the reference check above covers.
+- **Flight frames 56, 98 and 175:** at most 0.71 codes RT, 0.90 non-RT. Frame 21 has one region over 1 code, +4.9 codes: the spinning cube's shaded face (`D:/Coding/renderlab-work/unit-speck/sheets/cone-cube-f021.png`), a moving object as the hero in the reference check above is; the cube itself has no reference yet.
 - The pixels' failed inserts rise a little while everything else falls (about 70 a frame on the field walk, of some 100,000 pixel cells). Not explained yet; a coarse hit cell is read by many gathers, so it is seldom old enough for a pixel's miss to take.
 - Lib tests: "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 396 filtered out".
 
