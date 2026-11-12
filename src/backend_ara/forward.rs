@@ -659,8 +659,8 @@ struct Shared<'a> {
     traced: Option<&'a Traced>,
     /// The radiance cache's table where the cache runs; otherwise a zero header binds.
     gi_table: Option<&'a StorageBuffer>,
-    /// GI tiles' corner records, where the frame runs the corner pass.
-    gi_corners: Option<&'a StorageBuffer>,
+    /// The GI tile lookups' records, where the frame runs the tile pre-pass.
+    gi_tiles: Option<&'a StorageBuffer>,
     buffers: &'a BTreeMap<InputKey, StorageBuffer>,
     images: &'a BTreeMap<InputKey, Texture>,
 }
@@ -701,7 +701,7 @@ impl<'a> Shared<'a> {
                 (3, 50) => &self.atmosphere.record,
                 (3, 5) if self.traced.is_some() => &self.traced.context("checked")?.records,
                 (3, 20) if self.gi_table.is_some() => self.gi_table.context("checked")?,
-                (0, 68) if self.gi_corners.is_some() => self.gi_corners.context("checked")?,
+                (0, 68) if self.gi_tiles.is_some() => self.gi_tiles.context("checked")?,
                 _ => &self.buffers[&spec.key],
             }),
             (InputKind::BufferArray { .. }, group, binding) => {
@@ -1549,12 +1549,13 @@ fn frame(
         standard_program(scene.sun_shadows.is_some())?
     };
     // A traced frame of several programs: each one's list entry, in slot order.
-    // GI tiles (`RENDERLAB_GI_TILE=pass`): the corner lookups' pass on the frame's first
-    // program's traced module, before shading (shaders/gi_tiles.wgsl).
-    let corners_program = (deferred_path
-        && crate::program::gi_tile_mode() == crate::program::GiTiles::Pass)
-        .then(|| primary_shade::gi_tile_corners_program(material_source))
-        .transpose()?;
+    // GI tiles (shaders/gi_tiles.wgsl): the tiles' cache lookups before shading, where a
+    // frame program reads the cache (`RENDERLAB_GI_TILE=0` looks up every pixel instead).
+    let tile_program = (deferred_path
+        && crate::program::gi_tiles()
+        && sources.iter().any(|s| crate::program::uses_indirect(s)))
+    .then(primary_shade::gi_tile_program)
+    .transpose()?;
     let list_programs = if deferred_path && sources.len() > 1 {
         sources
             .iter()
@@ -3166,12 +3167,12 @@ fn frame(
             }
         }
     }
-    // One 32-word record per 4x4 tile corner (gi_tiles.wgsl gi_corner_grid).
-    let corner_grid = [(size[0] + 3) / 4 + 1, (size[1] + 3) / 4 + 1];
-    let gi_corners = match (&corners_program, gi) {
+    // One 32-word record per 4x4 tile (gi_tiles.wgsl gi_tile_grid).
+    let tile_grid = [size[0].div_ceil(4), size[1].div_ceil(4)];
+    let gi_tiles = match (&tile_program, gi) {
         (Some(_), Some(_)) => Some(StorageBuffer::device(
             gpu,
-            u64::from(corner_grid[0]) * u64::from(corner_grid[1]) * 128,
+            u64::from(tile_grid[0]) * u64::from(tile_grid[1]) * 128,
         )?),
         _ => None,
     };
@@ -3188,7 +3189,7 @@ fn frame(
         map,
         traced: traced.as_ref(),
         gi_table: gi.map(|(cache, _)| cache.table()),
-        gi_corners: gi_corners.as_ref(),
+        gi_tiles: gi_tiles.as_ref(),
         buffers: &buffers,
         images: &inputs,
     };
@@ -3338,8 +3339,8 @@ fn frame(
             deferred_packets.push(packet);
         }
     }
-    // GI tiles: the corner pass's kernel and packet.
-    let corners = match (&corners_program, &gi_corners) {
+    // GI tiles: the pre-pass's kernel and packet.
+    let tile_lookups = match (&tile_program, &gi_tiles) {
         (Some(program), Some(_)) => {
             let values = program
                 .inputs()
@@ -3486,17 +3487,6 @@ fn frame(
                 .zip(deferred.groups)
                 .zip(threads)
         {
-            // GI tiles: the corners' lookups, after the cache's passes and before shading.
-            if let (Some((corner_kernel, corner_packet)), true) =
-                (&corners, std::ptr::eq(kernel, &deferred.shade))
-            {
-                corner_kernel.record(
-                    &mut graph,
-                    &mut rec,
-                    corner_packet,
-                    [corner_grid[0] * corner_grid[1], 1, 1],
-                )?;
-            }
             if let (Some((cache, records)), true) = (gi, std::ptr::eq(kernel, &deferred.shade)) {
                 cache.record(
                     &mut graph,
@@ -3504,6 +3494,17 @@ fn frame(
                     records,
                     &gi_packets,
                     &gi_shade_packets,
+                )?;
+            }
+            // GI tiles: the tiles' lookups, after the cache's passes and before shading.
+            if let (Some((tile_kernel, tile_packet)), true) =
+                (&tile_lookups, std::ptr::eq(kernel, &deferred.shade))
+            {
+                tile_kernel.record(
+                    &mut graph,
+                    &mut rec,
+                    tile_packet,
+                    [tile_grid[0] * tile_grid[1], 1, 1],
                 )?;
             }
             // The pass log's shading parts replay the shading first; the frame's own
@@ -4515,7 +4516,7 @@ fn frame(
         .chain(pane_packets)
         .chain(transmission_packets)
         .chain(list_packets)
-        .chain(corners.map(|(_, packet)| packet))
+        .chain(tile_lookups.map(|(_, packet)| packet))
     {
         packet.retire(gpu, &mut graph)?;
     }
@@ -4626,7 +4627,7 @@ fn frame(
     if let Some(probe) = probe {
         probe.retire(gpu)?;
     }
-    if let Some(buffer) = gi_corners {
+    if let Some(buffer) = gi_tiles {
         buffer.retire(gpu)?;
     }
     gpu.collect()?;

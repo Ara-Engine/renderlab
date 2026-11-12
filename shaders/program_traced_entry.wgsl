@@ -68,41 +68,12 @@ const PRIMARY_CLEAR_TILE=16u;
     }
     if group.x>=shaded.x {return;}
     let id=grid+vec3<u32>(region.xy,0u);
-    let inside=!(any(id.xy>=size) || any(id.xy>=region.zw));
-    let covered=inside && textureLoad(primary_tiles,id.xy/PRIMARY_TILE,0).x!=0u;
-    // GI tiles (Mac thread): the cache lookup once per continuous 4x4 tile, before the
-    // lanes diverge (gi_api.wgsl gi_tile_step).
-    if gi_tiles_on() {rl_gi_tile_pixel(id.xy,vec2<u32>(lane%8u,lane/8u),8u,covered);}
-    if !inside {return;}
-    if !covered {
+    if any(id.xy>=size) || any(id.xy>=region.zw) {return;}
+    if textureLoad(primary_tiles,id.xy/PRIMARY_TILE,0).x==0u {
         textureStore(primary_hdr,vec2<i32>(id.xy),primary_miss(id.xy,size,primary_frame.clear));
         return;
     }
     primary_shade_pixel(id.xy,size);
-}
-// GI tiles (Mac thread): one lane's receiver for gi_tile_step, as primary_shade_pixel
-// builds it (the hit's receiver point and interpolated vertex normal); not a hit when
-// `shaded` is false or the record is empty.
-fn rl_gi_tile_pixel(id:vec2<u32>,lane:vec2<u32>,row:u32,shaded:bool) {
-    var receiver:Receiver;
-    var normal=vec3<f32>(0.0);
-    var valid=false;
-    if shaded {
-        let pixel=vec2<i32>(id);
-        let record=textureLoad(primary_hit,pixel,0);
-        if record.x!=0u {
-            let hit=primary_decode(record);
-            let ta=primary_input(hit.batch,hit.ia,hit.placement);let tb=primary_input(hit.batch,hit.ib,hit.placement);
-            let tc=primary_input(hit.batch,hit.ic,hit.placement);
-            let a=primary_vertex(hit,ta,hit.ia);let b=primary_vertex(hit,tb,hit.ib);let c=primary_vertex(hit,tc,hit.ic);
-            let w=vec3<f32>(1.0-hit.bary.x-hit.bary.y,hit.bary);
-            let receiver_world=world_position(receiver_point(ta.position,tb.position,tc.position,w),hit.placement).xyz;
-            normal=a.normal*w.x+b.normal*w.y+c.normal*w.z;
-            receiver=primary_receiver(receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),hit.placement,pixel);
-            valid=true;
-        }
-    }
-    gi_tile_step(lane,row,valid,receiver,normal);
 }
 // A primary miss: `clear` (the lit clear colour), or with the visible sky on
 // (primary_frame.sided.w, Renderer::set_visible_environment) the selected map along the

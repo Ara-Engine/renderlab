@@ -77,11 +77,12 @@ pub(crate) fn hardware_soft_source(material: &str) -> Result<String> {
     let parameters = crate::program::declares_parameters(material);
     Ok(crate::program::compose(&head, material, crate::program::Stage::Traced, parameters).source)
 }
-/// The GI tile corners' pass on `material`'s traced module (`RENDERLAB_GI_TILE=pass`).
-pub fn gi_tile_corners_program(material: &str) -> Result<Program> {
+/// The GI tile lookups' pre-pass (shaders/gi_tiles.wgsl), from the standard program's
+/// traced module: the lookup is engine code, the same whatever the frame's programs.
+pub fn gi_tile_program() -> Result<Program> {
     static KEPT: Memo<[u8; 32], Program> = Memo::new();
-    KEPT.get(memo::digest(material), || {
-        Ok(Program::new(Pass::GiTileCorners, hardware_soft_source(material)?)?.checked())
+    KEPT.get(memo::digest(crate::STANDARD_PROGRAM), || {
+        Ok(Program::new(Pass::GiTileLookups, hardware_soft_source(crate::STANDARD_PROGRAM)?)?.checked())
     })
 }
 /// The list entry on the same hardware soft head: one program's share of a frame of
