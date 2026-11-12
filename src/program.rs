@@ -208,8 +208,8 @@ fn rl_hit_switches(source: String) -> String {
                 "    return LightSample(index,l,select(attenuation,0.0,rl_reflection_hit),",
             ),
             "black" => (
-                "            let hs=surface(h.input);\n            radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n",
-                "            radiance=vec3<f32>(0.0);\n",
+                "                let hs=surface(h.input);\n                radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n",
+                "                radiance=vec3<f32>(0.0);\n",
             ),
             _ => continue,
         };
@@ -268,17 +268,38 @@ pub(crate) const SOFTWARE_REFLECTION_GEOMETRY: &str =
 const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_software.wgsl");
 /// R1's two ray queries and their software replacements: the hit's light visibility, and
 /// the reflection ray itself, which yields the same hit record. The queries' declarations
-/// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed.
-const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 2] = [
+/// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed. Software hits have
+/// no hit distance, so they never read the radiance cache (reflection_cache_hits.wgsl).
+const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 3] = [
     (
         "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,tmax,origin,l));\n    while rayQueryProceed(&query) {}\n    return select(1.0,0.0,rayQueryGetCommittedIntersection(&query).kind!=0u);\n",
         "    return select(1.0,0.0,rs_blocked(origin,l,receiver.epsilon,tmax));\n",
     ),
     (
-        "        rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));\n        while rayQueryProceed(&query) {}\n        let hit=rayQueryGetCommittedIntersection(&query);\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.kind!=0u {\n            let h=rl_hit_input(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),origin,d,width,spread,pixel);\n",
-        "        let hit=rs_closest(origin,d,receiver.epsilon,RL_FAR);\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.x!=0u {\n            let h=rl_hit_input(hit,origin,d,width,spread,pixel);\n",
+        "        rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));\n        while rayQueryProceed(&query) {}\n        let hit=rayQueryGetCommittedIntersection(&query);\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.kind!=0u {\n            let record=vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics));\n",
+        "        let hit=rs_closest(origin,d,receiver.epsilon,RL_FAR);\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.x!=0u {\n            let record=hit;\n",
+    ),
+    (
+        "            let cached=rl_cache_hit(record,origin,d,hit.t,width+spread*hit.t,rough);\n",
+        "            let cached=vec4<f32>(0.0);\n",
     ),
 ];
+/// Cache-terminated reflection hits (shaders/reflection_cache_hits.wgsl): a rough lobe's hit
+/// whose cone covers the radiance cache's cell there reads the cell's outgoing radiance
+/// instead of shading the hit. Off unless `RENDERLAB_RL_CACHE_HITS` names the minimum
+/// perceptual roughness (0-1); off, every module keeps the stub and its hits shade as before.
+pub(crate) const CACHE_HITS: &str = include_str!("../shaders/reflection_cache_hits.wgsl");
+pub(crate) const CACHE_HITS_STUB: &str = "fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> { return vec4<f32>(0.0); }\n";
+/// The `RENDERLAB_RL_CACHE_HITS` minimum roughness, read once per process.
+pub(crate) fn cache_hits_rough() -> Option<f32> {
+    static ROUGH: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *ROUGH.get_or_init(|| {
+        std::env::var("RENDERLAB_RL_CACHE_HITS")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|r| (0.0..=1.0).contains(r))
+    })
+}
 /// R1's ray-query declaration line.
 const SOFTWARE_REFLECTION_QUERY: &str = "var query:ray_query;\n";
 /// R1's reflection block traced in software: the same lobe, strata, cone footprints, hit
@@ -649,6 +670,14 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             (true, false) => "fn rl_indirect_open() { gi_rx_valid=false; }\n",
             _ => "fn rl_indirect_open() {}\n",
         });
+        // Software hits have no hit distance; their seam never calls the lookup.
+        let hardware = reflection.contains("rayQueryInitialize");
+        reflection.push_str(
+            &match cache_hits_rough().filter(|_| indirect_calls && hardware) {
+                Some(rough) => CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", &format!("{rough:?}")),
+                None => CACHE_HITS_STUB.to_owned(),
+            },
+        );
     }
     let view = declares(program, "fn", "view_dependence");
     let view_api = if view { VIEW_API } else { "" };

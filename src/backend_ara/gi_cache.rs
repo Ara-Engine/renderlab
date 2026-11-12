@@ -434,6 +434,11 @@ impl Cache {
     pub(crate) fn table(&self) -> &StorageBuffer {
         &self.table
     }
+    /// Every slot's outgoing radiance (w 0 until cell shading writes it), which
+    /// cache-terminated reflection hits read (shaders/reflection_cache_hits.wgsl).
+    pub(crate) fn outgoing_radiance(&self) -> &StorageBuffer {
+        &self.outgoing
+    }
     /// Every slot's outgoing radiance (bounce), for reading back.
     pub(crate) fn outgoing(&self) -> Option<&StorageBuffer> {
         self.settings.bounce.then_some(&self.outgoing)

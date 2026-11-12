@@ -1,0 +1,82 @@
+// U-FIXED sun visibility history (audit 3.3), appended to the reconstruction's held trace
+// module in place of the held stop (temporal_reconstruction.rs `trace_source_held`). Each
+// receiver keeps its own sun visibility, reprojected through the previous unjittered camera:
+// a visible fraction and a sample count. A receiver nothing nearby moves (a still, unskinned
+// placement outside every moving caster's swept shadow and every restart zone) with a
+// matching history traces SUN_HISTORY_PROBES new directions of TR1's rotating sequence. A
+// fully lit or fully shadowed history whose probes agree is kept; one whose probes disagree
+// traces the frame's whole budget; a penumbra adds the probes to its average. Every other
+// receiver traces the budget as before (cold probes included) and starts its history there.
+// A turning sun (Outpost's day cycle) keeps a history while the sun has turned less than the
+// planner's window since that pixel's last budget trace (`rtvis_held.sun.x`: the frame's turn
+// step, 16 per window turn; a history is good for 8 steps, staggered per pixel so they do not
+// all retrace on one frame).
+// History word (rtvis_history_*): visible fraction (10 bits) << 22 | turn step (4) << 18 |
+// count (6) << 12 | depth code (12); 0 is none.
+const SUN_HISTORY_PROBES:u32=4u;
+const SUN_HISTORY_MAX:u32=32u;
+// This receiver's next history word, written by primary_sun_store.
+var<private> sun_history_next:u32;
+
+// log2 of the camera-space w in 1/256 octaves, 12 bits: a reprojected texel within two codes
+// (about 0.5% of the depth) is the same surface. Coarser codes let a neighbouring leaf of
+// close-up foliage pass for the receiver.
+fn sun_history_depth(w:f32)->u32 {return u32(i32(round(log2(max(w,1e-6))*256.0)))&4095u;}
+fn sun_history_word(visible:f32,step:u32,count:u32,depth:u32)->u32 {
+    return (u32(round(clamp(visible,0.0,1.0)*1023.0))<<22u)|((step&15u)<<18u)|(min(count,63u)<<12u)|depth;
+}
+
+// The receiver's sun visibility in 256ths (tr1_rays 256), or the budget's count over tr1_rays.
+fn primary_sun(receiver:Receiver,slot:u32,pixel:vec2<u32>,width:u32)->u32 {
+    sun_history_next=0u;
+    let here=rtvis_held.current*vec4<f32>(receiver.world,1.0);
+    let depth=sun_history_depth(here.w);
+    let batch=primary_placements[slot]&0x1fffffffu;
+    let still=!batch_skinned(primary_batch_info(batch)) && !rtvis_moved(slot)
+        && !rtvis_swept(receiver.world)
+        && tr1_zone_rays(receiver.world,primary_frame.sampling.x)==primary_frame.sampling.x;
+    var found=0u;
+    if rtvis_held.words.w!=0u && still {
+        let c=rtvis_held.previous*vec4<f32>(receiver.world,1.0);
+        let size=vec2<i32>(textureDimensions(rtvis_history_in));
+        if c.w>0.0 {
+            let q=vec2<i32>(floor(fma(c.xy/c.w,vec2<f32>(0.5,-0.5),vec2<f32>(0.5))*vec2<f32>(size)));
+            if all(q>=vec2<i32>(0)) && all(q<size) {
+                let h=textureLoad(rtvis_history_in,q,0).x;
+                let d=(h-sun_history_depth(c.w))&4095u;
+                let age=(rtvis_held.sun.x-(h>>18u))&15u;
+                if ((h>>12u)&63u)!=0u && (d<=2u || d>=4093u) && age<8u {found=h;}
+            }
+        }
+    }
+    if found!=0u {
+        let count=(found>>12u)&63u;
+        let step=(found>>18u)&15u;
+        let kept=f32(found>>22u)/1023.0;
+        let v=sun_probe(receiver,pixel,width,primary_frame.sided.y,SUN_HISTORY_PROBES);
+        if v!=FRESH_SKIP {
+            let lit=(found>>22u)==1023u;let dark=(found>>22u)==0u;
+            if (lit && v==SUN_HISTORY_PROBES) || (dark && v==0u) {
+                tr1_rays=256u;
+                sun_history_next=sun_history_word(kept,step,count+SUN_HISTORY_PROBES,depth);
+                return select(0u,256u,lit);
+            }
+            if !lit && !dark {
+                let n=f32(count);
+                let next=(kept*n+f32(v))/(n+f32(SUN_HISTORY_PROBES));
+                tr1_rays=256u;
+                sun_history_next=sun_history_word(next,step,min(count+SUN_HISTORY_PROBES,SUN_HISTORY_MAX),depth);
+                return u32(round(next*256.0));
+            }
+        }
+    }
+    // No usable history, or a uniform history its probes contradict: the frame's budget. The
+    // new history's step is set back by up to 7 per pixel, staggering its expiry.
+    let visible=fresh_estimate(receiver,pixel,width,0u);
+    if still && visible!=FRESH_SKIP {
+        let step=rtvis_held.sun.x-(fresh_hash((pixel.x+pixel.y*width)^0x2545f491u)&7u);
+        sun_history_next=sun_history_word(f32(visible)/f32(tr1_rays),step,min(tr1_rays,SUN_HISTORY_MAX),depth);
+    }
+    return visible;
+}
+fn primary_sun_store(p:vec2<i32>,visible:u32) {textureStore(rtvis_history_out,p,vec4<u32>(sun_history_next));}

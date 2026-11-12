@@ -164,7 +164,10 @@ def state(owned=()):
         launcher = "\\riot client\\" in path or name.startswith(("riotclient", "steam", "epicgameslauncher"))
         if not launcher and (any(g in name for g in GAMES) or any(s in path for s in ("\\steamapps\\common\\", "\\epic games\\", "\\riot games\\", "\\xboxgames\\"))):
             games.append(p)
-        renderer_path = ("\\renderlab-work\\" in path or "\\renderlab\\" in path) and any(s in path for s in ("\\deps\\", "\\builds\\", "\\release\\", "\\debug\\"))
+        # Ara's .NET script compile server lives under renderlab-work's Ara trees but never
+        # touches the GPU; counting it as a renderer stopped every lease (2026-11-12 15:52).
+        compile_server = name.startswith("ara.compileserver")
+        renderer_path = not compile_server and ("\\renderlab-work\\" in path or "\\renderlab\\" in path) and any(s in path for s in ("\\deps\\", "\\builds\\", "\\release\\", "\\debug\\"))
         if "unrealeditor" in name or "ue5editor" in name or name == "unrealgame.exe" or name.startswith(("renderlab", "fresh-tests", "primary-tests", "screen-", "quarry-resets", "m6-shadows")) or (renderer_path and name.endswith(".exe")):
             gpu.append(p)
         if name in ("cargo.exe", "rustc.exe", "clippy-driver.exe", "link.exe", "unrealbuildtool.exe"):

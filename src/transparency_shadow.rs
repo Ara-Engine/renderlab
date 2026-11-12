@@ -156,9 +156,12 @@ impl Renderer {
             0.0,
             0.0,
         ]));
-        let mut key = Sha256::new();
-        key.update(&data);
-        key.update(self.source.as_bytes());
+        // The draws alone (U-FIXED): a sun turn re-renders the map but restarts no history;
+        // TR1 caps its windows by the turn, as for opaque shadows. With the sun in the cut
+        // key, a day-cycle sun restarted every pixel every frame.
+        let mut scene = Sha256::new();
+        scene.update(self.source.as_bytes());
+        scene.update(count.to_ne_bytes());
         for d in transparent {
             let mut identity = std::collections::hash_map::DefaultHasher::new();
             (**d.mesh.vertex).hash(&mut identity);
@@ -166,19 +169,24 @@ impl Renderer {
             if let Some(material) = d.material {
                 (*material._uniform).hash(&mut identity);
             }
-            key.update(identity.finish().to_ne_bytes());
+            scene.update(identity.finish().to_ne_bytes());
             for m in &d.instances.state.models {
-                key.update(bytes_of(&m.to_cols_array()));
+                scene.update(bytes_of(&m.to_cols_array()));
             }
         }
-        let key: [u8; 32] = key.finalize().into();
-        // The coloured sun map is scene state: every view's history restarts.
-        if self.lighting.transmission.hash != key {
+        let scene: [u8; 32] = scene.finalize().into();
+        let key: [u8; 32] = Sha256::new()
+            .chain_update(&data)
+            .chain_update(scene)
+            .finalize()
+            .into();
+        // The coloured sun map's casters are scene state: every view's history restarts.
+        if self.lighting.transmission.hash != scene {
             for view in self.views_mut() {
                 view.cut_reconstruction();
             }
         }
-        self.lighting.transmission.hash = key;
+        self.lighting.transmission.hash = scene;
         self.queue
             .write_buffer(&self.lighting.transmission.uniform, 0, &data);
         self.lighting.transmission.render = false;

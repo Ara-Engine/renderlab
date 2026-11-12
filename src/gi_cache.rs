@@ -1559,6 +1559,13 @@ impl GiState {
     pub fn shading_table(&self) -> &wgpu::Buffer {
         self.resources.as_ref().map_or(&*self.dummy, |r| &*r.table)
     }
+    /// Every slot's outgoing radiance, which cache-terminated reflection hits read
+    /// (shaders/reflection_cache_hits.wgsl); the zero dummy while the cache has no resources.
+    pub fn shading_outgoing(&self) -> &wgpu::Buffer {
+        self.resources
+            .as_ref()
+            .map_or(&*self.dummy, |r| &*r.outgoing)
+    }
     pub fn collect(&mut self, completed: u64) {
         self.retired.retain(|(last, _)| *last > completed);
     }
