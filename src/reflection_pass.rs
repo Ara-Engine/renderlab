@@ -507,3 +507,14 @@ impl Renderer {
         let _ = std::fs::write(&p.path, json);
     }
 }
+
+impl Renderer {
+    /// Sets the resolve's shading phase (0 the pre-pass, 1 the shading pass) for the next
+    /// shading dispatch.
+    pub(crate) fn encode_reflection_phase(&self, encoder: &mut wgpu::CommandEncoder, phase: u64) {
+        let Some(t) = self.view.primary.as_ref().and_then(|s| s.targets.as_ref()) else {
+            return;
+        };
+        encoder.copy_buffer_to_buffer(&t.rl_history.phases.value, 16 * phase, &t.rl_history.phase.value, 0, 16);
+    }
+}

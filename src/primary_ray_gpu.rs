@@ -751,11 +751,15 @@ pub(super) struct Targets {
 pub(super) struct RlHistoryTargets {
     pub history: Depth,
     pub frame: Buffer,
+    /// The resolve's shading phase (binding 60) and its two values (0, then 1, 16 bytes each).
+    pub phase: Buffer,
+    pub phases: Buffer,
 }
 /// The reflection history's group-0 bindings in primary shading. U-RTVIS's shading-entry
 /// resources take 54-63; the Mac's reflection_hits takes 64-67 (docs/design-reflection-pass.md).
 const RL_HISTORY_FRAME: u32 = 55;
 const RL_HISTORY: u32 = 54;
+const RL_PHASE: u32 = 60;
 /// Two halves of four, rl_resolve's sample and seen-history layers (8-15), the halves' hit
 /// distances (16, 17) and the sample's (18).
 const RL_HISTORY_LAYERS: u32 = 19;
@@ -1189,6 +1193,8 @@ impl PrimaryState {
                     view_dimension: wgpu::TextureViewDimension::D2Array,
                 },
             ));
+            // U-RTVIS: the reflection resolve's shading phase (reflections_history.wgsl).
+            entries.push(uniform(RL_PHASE, 16));
             // U-RTVIS: the reflection pass's lobe output (reflection_pass.rs).
             if reflection_pass::on() {
                 entries.extend(reflection_pass::shade_entries());
@@ -2366,6 +2372,23 @@ impl Renderer {
                         temporal_reconstruction::RL_HISTORY_BYTES as u64,
                         wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                     ),
+                    phase: Buffer::new(
+                        self,
+                        "reflection shading phase",
+                        16,
+                        wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    ),
+                    phases: {
+                        let phases = Buffer::new(
+                            self,
+                            "reflection shading phases",
+                            32,
+                            wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                        );
+                        let words: Vec<u8> = [0u32, 0, 0, 0, 1, 0, 0, 0].iter().flat_map(|w| w.to_ne_bytes()).collect();
+                        self.queue.write_buffer(&phases.value, 0, &words);
+                        phases
+                    },
                 }
             };
             let next = Targets {
@@ -2487,6 +2510,7 @@ impl Renderer {
                     visibility,
                     (RL_HISTORY_FRAME, t.rl_history.frame.value.as_entire_binding()),
                     (RL_HISTORY, R::TextureView(&t.rl_history.history.view)),
+                    (RL_PHASE, t.rl_history.phase.value.as_entire_binding()),
                 ];
                 // U-RTVIS: the reflection pass's lobe output.
                 if let Some(pass) = &t.rl_pass {

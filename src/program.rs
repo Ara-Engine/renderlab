@@ -74,7 +74,9 @@ const REFLECTION_STUB: &str = "struct SpecularLobe { normal:vec3<f32>, alpha:f32
 /// read the open environment state (`rl_indirect_open`).
 const REFLECTION_ENTRY_SEAM: &str =
     "    rl_indirect_prepare(surface_input);\n    let surface_output=surface(surface_input);\n";
-const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    rl_indirect_prepare(surface_input);\n";
+/// U-RTVIS: in the reflection resolve's pre-pass (`rl_prepass`, RENDERLAB_RL_RESOLVE_PASS=1) the
+/// entry stops after the receiver's reflection, before its indirect inputs and `shade`.
+const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    if rl_prepass() {return;}\n    rl_indirect_prepare(surface_input);\n";
 /// Reflection hits trace their own light visibility: the frame's belongs to its receivers.
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";

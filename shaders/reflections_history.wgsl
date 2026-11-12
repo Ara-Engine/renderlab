@@ -30,6 +30,19 @@ const RL_RESOLVE:bool=false;
 // 10 (slot+1) | roughness x 255 << 24, 11 clip w (negative: a full set), 12 the history's rg,
 // 13 its (b, mean luminance^2), 14 its count (a full set's strata), 15 the frame counter + 1.
 const RL_RESOLVE_PASS:bool=false;
+// x: 0 for the pre-pass shading dispatch, 1 for the shading pass (set by a buffer copy between
+// the two; src/reflection_pass.rs encode_resolved_shading).
+@group(0) @binding(60) var<uniform> rl_phase:vec4<u32>;
+fn rl_prepass()->bool { return RL_RESOLVE_PASS && rl_phase.x==0u; }
+// This frame's resolved value at `pixel` (rgb, w 1), or w 0 where the pre-pass left no sample.
+fn rl_resolved(pixel:vec2<u32>)->vec4<f32> {
+    let p=vec2<i32>(pixel);
+    if textureLoad(rl_history,p,15).x!=rl_history_frame.words.z+1u {return vec4<f32>(0.0);}
+    let base=i32(4u*rl_history_frame.words.y);
+    let rg=unpack2x16float(textureLoad(rl_history,p,base).x);
+    let b=unpack2x16float(textureLoad(rl_history,p,base+1).x).x;
+    return vec4<f32>(rg,b,1.0);
+}
 fn rl_sample_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,sample:vec3<f32>,m2:f32,full:bool,count:f32,rough:f32,seen:vec3<f32>,seen_m2:f32,dist:f32) {
     textureStore(rl_history,vec2<i32>(pixel),18,vec4<u32>(bitcast<u32>(dist)));
     let p=vec2<i32>(pixel);

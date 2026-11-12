@@ -46,6 +46,8 @@ fn rl_history_lookup(receiver:Receiver,world:vec3<f32>,pixel:vec2<u32>,reflected
 fn rl_history_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,mean:vec3<f32>,m2:f32,count:f32) {}
 fn rl_history_resolve(mean:vec3<f32>,folded:f32,count:f32)->vec3<f32> { return mean; }
 const RL_RESOLVE_PASS:bool=false;
+fn rl_prepass()->bool { return false; }
+fn rl_resolved(pixel:vec2<u32>)->vec4<f32> { return vec4<f32>(0.0); }
 fn rl_sample_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,sample:vec3<f32>,m2:f32,full:bool,count:f32,rough:f32,seen:vec3<f32>,seen_m2:f32,dist:f32) {}
 // ---- end of rl history stubs ----
 // The receiver's perceptual roughness, for the history's resolve.
@@ -239,6 +241,13 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let width=pixel_angle*length(input.world-input.eye);
     let curvature=2.0*max(length(input.normal_dx),length(input.normal_dy))/max(length(input.normal),1e-30);
     let mirror=rough<RL_MIRROR;
+    // The resolve's two shading dispatches: the pre-pass traces glossy lobes only (mirrors stay
+    // in the shading pass); the shading pass shows this frame's resolved value where it exists.
+    if RL_RESOLVE_PASS && mirror && rl_prepass() {return;}
+    if RL_RESOLVE_PASS && !mirror && !rl_prepass() {
+        let resolved=rl_resolved(pixel);
+        if resolved.w>0.0 {rl_specular=vec4<f32>(resolved.rgb,traced);return;}
+    }
     var count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
     let restart_strata=primary_frame.reflection.w;
     let restarted=!mirror && restart_strata>1.0 && rl_restarts(input.world);
