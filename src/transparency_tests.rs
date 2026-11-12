@@ -207,6 +207,11 @@ fn pre_tp1_standard() -> String {
             "        let attenuation=light.attenuation*light_visibility(input,light);",
         ),
         (
+            "        if !rl_term(RL_TERM_BRDF) {response=vec3<f32>(1.0/PI);}
+",
+            "",
+        ),
+        (
             "        let intensity=light.intensity*light_transmission(light,input);
         exposed=min(exposed+exposed_product(intensity,response*attenuation),vec3<f32>(65504.0));",
             "        exposed=min(exposed+exposed_product(light.intensity,response*attenuation),vec3<f32>(65504.0));",

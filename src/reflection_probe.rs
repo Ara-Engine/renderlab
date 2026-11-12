@@ -99,6 +99,13 @@ fn shader() -> String {
     // The standard program's `view_data` returns the API's view-mode record.
     source.push_str(api.lines().find(|l| l.starts_with("struct ViewData")).unwrap());
     source.push('\n');
+    // RL#50: the shading terms' constant gates, which the API's light helpers read.
+    for line in api.lines().filter(|l| {
+        l.starts_with("const RL_SHADE_TERMS") || l.starts_with("const RL_TERM_") || l.starts_with("fn rl_term(")
+    }) {
+        source.push_str(line);
+        source.push('\n');
+    }
     // TP2: this isolated reference adapter has no transparent casters.
     source.push_str("fn transparent_sun_transmission(world:vec3<f32>, direction:vec3<f32>)->vec3<f32> { return vec3<f32>(1.0); }\n");
     let standard = crate::STANDARD_PROGRAM
