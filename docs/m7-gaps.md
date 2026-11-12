@@ -1112,3 +1112,16 @@ Order of attack, by visible impact against Unreal (its whole quarry frame is 4.5
 4. **RT shading, 11.6-12.4 ms:** also needs the detail split (traced sun and local-light shadows, reflections).
 5. **Non-RT sun shadow, 5.4 ms** on Outpost against 0.22 ms on the quarry: page raster of Outpost's casters. The page-pool unit (N-POOL, briefed) is the planned fix.
 6. **Cuts:** the cache is rebuilt, not pressured (creation and eviction unchanged by cone cells). Folded into 1 (cheaper gathers) and the GI order item "churn on cuts".
+
+## One camera cut on Outpost, by pass, and the ranked frame-cost backlog (root, 2026-11-12)
+Ara integration capture `cut1` (Ara c71731f73, Renderlab 5955d4a, player 1080p, RTX to itself, one cut at frame 60 of 120; picture clean on both paths, a little extra fine grain for about five frames). Per-pass ms from its `RENDERLAB_PASS_LOG`:
+- **RT, the frame before → the cut frame → +1:** frame 33.1 → 98.4 → 44.9. Visibility 13.6 → **62.3** → 13.3; shading 10.4 → 18.7 → 18.4 (the new view's steady is heavier); GI stages about 5 → 14 → 9. So the cut's non-GI 84 ms is almost all the visibility pass, not pipeline, BLAS or streaming (the TLAS and skinning stages stay near 0). On RT that pass also traces the sun's shadow rays, and on a cut every pixel restarts with no shadow history, so it traces its full direction budget at once. If the single-sided flag makes every ray non-opaque (the open `RENDERLAB_DIAG_ALL_OPAQUE` capture), each of those rays is expensive too.
+- **Non-RT:** frame 90.2 → 265.3 → 230.8 → 175.0 → 128.4 (+5). **gi_update 3.2 → 144.5 → 64.0 → 27.4 → 9.4**, gi_gather 35 → 35 → **76** → 59 → 38; shading 34 → 59 and stays (the new view). 193k cells are created on the cut frame and about 0.75 µs each goes into gi_update (their first update, the sky term on software rays), then the gathers for them follow over the next frames.
+
+Ranked by what a player sees and feels against Unreal (its whole quarry frame is 4.5 ms; a cut costs it nothing extra):
+1. **RT visibility** (Outpost 13-26 ms steady, 62 ms on a cut): opaque and single-sided instances traced separately (confirm with the `RENDERLAB_DIAG_ALL_OPAQUE` capture), then raster primary visibility on the RT path; on cuts, spread the shadow restart over frames or answer the first frame from the cached sun map.
+2. **Non-RT GI gather** (45-60 ms steady): a cheaper ray representation for gathers and a time budget.
+3. **Non-RT cut refill** (gi_update 145 ms, then about five frames over 120 ms): a per-frame creation budget, coarser cells first, with pixels reading the coarser level until their own cell exists. The picture bar: no more grain than today's five frames, no blocks.
+4. **Shading stage, both paths** (Outpost non-RT 34-59 ms; Showcase RT 16.9, non-RT 21.8): not yet split; one capture each with `RENDERLAB_PASS_LOG_DETAIL=1`.
+5. **Non-RT sun shadow** (5-8 ms on Outpost): the page-pool unit.
+6. **Transparent pane pass:** under 1 ms on the RTX (Showcase 0.44-0.71); 8 ms on the M5 is the port's, built port-side first.
