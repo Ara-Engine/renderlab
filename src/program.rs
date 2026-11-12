@@ -171,14 +171,34 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
         .into_iter()
         .find(|name| head.contains(&format!("var {name}:acceleration_structure;")));
     let traced = lobe && reads && matches!(stage, Stage::Traced | Stage::TracedStreamed);
-    match scene.filter(|_| traced) {
-        Some(scene) => (REFLECTION_API.replace("RL_SCENE", scene), true),
+    let api = match scene.filter(|_| traced) {
+        Some(scene) => REFLECTION_API.replace("RL_SCENE", scene),
         // M7-R1n: non-RT heads that declare the software geometry trace it instead.
-        None if traced && head.contains(SOFTWARE_REFLECTION_GEOMETRY) => {
-            (software_reflection_api(), true)
+        None if traced && head.contains(SOFTWARE_REFLECTION_GEOMETRY) => software_reflection_api(),
+        None => return (REFLECTION_STUB.to_owned(), false),
+    };
+    let api = match full_strata_weight() {
+        Some(weight) => {
+            let line = format!("const RL_FULL_STRATA:f32={weight:?};");
+            api.replace(FULL_STRATA, &line)
         }
-        None => (REFLECTION_STUB.to_owned(), false),
-    }
+        None => api,
+    };
+    (api, true)
+}
+/// The glossy strata's full-count weight as shaders/reflections.wgsl declares it.
+const FULL_STRATA: &str = "const RL_FULL_STRATA:f32=0.5;";
+/// `RENDERLAB_RL_FULL_STRATA` overrides the reflectance weight from which a glossy lobe traces
+/// all its strata (shaders/reflections.wgsl `RL_FULL_STRATA`); 0 traces every lobe's full
+/// count, as before the weight. Read once per process; for comparisons, not a setting.
+fn full_strata_weight() -> Option<f32> {
+    static WEIGHT: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *WEIGHT.get_or_init(|| {
+        std::env::var("RENDERLAB_RL_FULL_STRATA")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|w| *w >= 0.0)
+    })
 }
 // ---- end of M7-R1 reflections ----
 
@@ -1141,6 +1161,18 @@ mod tests {
     use super::*;
     const PRELUDE: &str = include_str!("../shaders/scene.wgsl");
     const TOON: &str = "struct Parameters { shadow_tint: vec3<f32>, bands: f32, rim_color: vec3<f32>, rim_power: f32, fill: f32, flat_shaded: u32 };\nstruct Surface { albedo: vec3<f32>, n: vec3<f32> };\nfn surface(input: SurfaceInput) -> Surface {\n    var n=input.geometric;\n    if params.flat_shaded==0u { n=normalize(input.normal); }\n    return Surface(input.material.base_color.rgb*sample_base_color(input).rgb,n);\n}\nfn shade(s: Surface, input: SurfaceInput) -> vec3<f32> {\n    var lit=ambient(s.n)*params.fill;\n    for(var i=0u;i<light_count();i+=1u) {\n        let light=light_sample(i,input);\n        let incident=max(dot(s.n,light.direction),0.0)*light_visibility(input,light);\n        let band=floor(incident*params.bands)/params.bands;\n        lit+=light.intensity*light.attenuation*band;\n    }\n    return expose(s.albedo*lit/PI);\n}\n";
+
+    /// `RENDERLAB_RL_FULL_STRATA` rewrites one constant, which the strata count reads on
+    /// both the hardware and the software trace (the software API is the hardware one with
+    /// its queries swapped).
+    #[test]
+    fn the_glossy_strata_follow_the_lobe_weight_on_both_traces() {
+        let rule = "if RL_FULL_STRATA>0.0 && !mirror {count=max(1u,u32(ceil(f32(count)*min(lobe.weight/RL_FULL_STRATA,1.0))));}";
+        for api in [REFLECTION_API.to_owned(), software_reflection_api()] {
+            assert_eq!(api.matches(FULL_STRATA).count(), 1);
+            assert_eq!(api.matches(rule).count(), 1);
+        }
+    }
 
     fn raster(program: &str) -> Composed {
         compose(
