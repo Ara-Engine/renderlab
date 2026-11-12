@@ -345,9 +345,9 @@ pub struct IndirectSettings {
     /// When more cells wait for a gather than a frame's budget (`gather_cells`), the cells
     /// pixels read this frame rotate over the budget alone and the rest share a quarter of it
     /// more; and the rotation's period is the smallest that fits the budget, not the next
-    /// power of two (U-SPECK, docs/speck.md). Off, every queued cell waits its turn alike, as
-    /// before: after a start or a cut the picture then shows cells without bounce light beside
-    /// gathered ones for as long as the whole queue takes.
+    /// power of two (U-SPECK, docs/speck.md). Off (the default), every queued cell waits its
+    /// turn alike: after a start or a cut the picture then shows cells without bounce light
+    /// beside gathered ones for as long as the whole queue takes.
     pub gather_pixels_first: bool,
 }
 impl Default for IndirectSettings {
@@ -403,7 +403,10 @@ impl Default for IndirectSettings {
             // same at 0, 16, 8 and 4; the spinning crate moves toward the reference as the
             // cells grow, most at 4; and the field walk creates half the cells.
             hit_cone_cells: 4.0,
-            gather_pixels_first: true,
+            // Off until judged on a large scene (docs/speck.md section 9): on the field pose
+            // it halves frame 16's distance from the settled frame on RT, for a quarter more
+            // gathers over the flight, and non-RT's first eight frames are slightly worse.
+            gather_pixels_first: false,
         }
     }
 }

@@ -1,7 +1,7 @@
 """U-SPECK timing of the game scene's flight (one lease): `near_light_rays` 0 against 16.
 
     py -3 -B tools/speck/timing.py run GAME_EXE OUT     # inside a lease
-    py -3 -B tools/speck/timing.py cuts GAME_EXE OUT    # inside a lease: the field walk, a cut every frame
+    py -3 -B tools/speck/timing.py cuts GAME_EXE OUT [--gi "slots_log2=17"]   # inside a lease: the field walk, a cut every frame
     py -3 -B tools/speck/timing.py report OUT           # CPU
 
 Each lease opens with the reference run (this unit's s8 binary on the non-RT field walk, whose
@@ -73,18 +73,19 @@ CUT_RUNS = [(path, name, visit) for visit in (1, 2) for path in ("nonrt", "rt") 
 CUT_SETTING = {"off": "pressure_eviction=0", "on": "pressure_eviction=1"}
 
 
-def cuts(game, out):
+def cuts(game, out, extra=""):
+    """`extra`: more RENDERLAB_GI pairs for every run (`slots_log2=17;` forces a full table)."""
     env = environment()
     code = reference(out, env)
     for path, name, visit in CUT_RUNS:
         code = max(code, fly(game, out / f"{path}-{name}-{visit}", path, ["--frames", "120", "--diag", "field=1", "--diag", "cut=every"], 120,
-                             env | {"RENDERLAB_GI": CUT_SETTING[name]}))
+                             env | {"RENDERLAB_GI": extra + CUT_SETTING[name]}))
     # Not timed: the same four runs once more with the cache's counters logged.
     for path in ("nonrt", "rt"):
         for name in ("off", "on"):
             folder = out / f"{path}-{name}-log"
             code = max(code, fly(game, folder, path, ["--frames", "120", "--diag", "field=1", "--diag", "cut=every"], 120,
-                                 env | {"RENDERLAB_GI": CUT_SETTING[name], "RENDERLAB_GI_LOG": str(folder / "gi.jsonl")}))
+                                 env | {"RENDERLAB_GI": extra + CUT_SETTING[name], "RENDERLAB_GI_LOG": str(folder / "gi.jsonl")}))
     return code
 
 
@@ -125,5 +126,6 @@ if __name__ == "__main__":
     if mode == "run":
         raise SystemExit(run(sys.argv[2], target))
     if mode == "cuts":
-        raise SystemExit(cuts(sys.argv[2], target))
+        extra = sys.argv[sys.argv.index("--gi") + 1] + ";" if "--gi" in sys.argv else ""
+        raise SystemExit(cuts(sys.argv[2], Path(sys.argv[3]), extra))
     (cuts_report if (target / "rt-on-1").exists() else report)(target)

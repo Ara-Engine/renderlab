@@ -1742,11 +1742,14 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
             if l==base { cause=GI_W_GATHER_ABSENT; orphan=tertiary; }
             continue;
         }
-        // A gather keeps the cells it reads alive, as a pixel does, with last frame's stamp:
-        // this frame's stays the probe's, which says a pixel read the cell (gi_gather_now).
-        // Every gather that stamps a cell stores the same value, and none replaces the
-        // probe's, so the stamps do not depend on thread order.
-        if gi_table[gi_cold(slot)+GI_C_SEEN]+1u<gi_word(GI_H_FRAME) {
+        // A gather keeps the cells it reads alive, like a pixel (the race is benign). With
+        // pixels first (gi_gather_now) it stores last frame's stamp instead: this frame's
+        // stays the probe's, which says a pixel read the cell. Every gather that stamps a
+        // cell stores the same value, and none replaces the probe's, so those stamps do not
+        // depend on thread order.
+        if gi_word(GI_H_PIXEL_CELLS)==0u {
+            gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);
+        } else if gi_table[gi_cold(slot)+GI_C_SEEN]+1u<gi_word(GI_H_FRAME) {
             gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME)-1u;
         }
         let o=gi_outgoing[slot];
