@@ -66,6 +66,10 @@ const CLAIM_CELLS_SOFTWARE: u32 = 20480;
 /// the cells cover the view within the claim budget, and the finer cells that follow fall back
 /// to them until they exist (G2b).
 const COARSE_CUT_FRAMES: u32 = 4;
+/// `cut_refill` (U-RTVIS, docs/design-gi-cut-refill.md): the most frames after a cut that keep
+/// the claim cap. The cap defers nothing once a frame's misses fit under it (gi_claim_period),
+/// so it ends when the backlog drains; this bounds a scene that never drains.
+const CUT_REFILL_FRAMES: u32 = 32;
 pub(crate) const LIGHT_GROUPS: u32 = 1024;
 /// The cell-space filter's fixed grid (G3): nine items (a changed cell and its eight
 /// neighbours) per cell shading queue entry.
@@ -382,12 +386,14 @@ pub struct IndirectSettings {
     /// before the cell has a value, so its hits found none and it sent no bounce light.
     pub mover_hit_levels: u32,
     /// A camera cut refills like a cleared table (root, docs/design-gi-cut-refill.md; off by
-    /// default until measured): for COARSE_CUT_FRAMES frames after `Planner::camera_cut`, pixels
-    /// read cells one level coarser and new cells are capped at the per-path claim budget
-    /// (CLAIM_CELLS_*), and for the cut-phase window a new cell traces one group of its
-    /// directions a frame (`cut_phases`). Before this, only a cleared table (`reset_indirect`)
-    /// did so; a camera cut through `cut_view` keeps the table, and Outpost's one cut created
-    /// 193k cells in one frame (non-RT gi_update 3 -> 145 ms).
+    /// default until measured): until the cut's backlog of missing cells drains (at most
+    /// CUT_REFILL_FRAMES frames after `Planner::camera_cut` or a clear), new cells are capped at
+    /// the per-path claim budget (CLAIM_CELLS_*); each new cell traces all its directions on
+    /// the frame it is claimed (no `cut_phases` spread: partial cells converged visibly slower).
+    /// Pixels read their own level throughout; a missing cell takes the lookup's usual
+    /// fallbacks. Before this, a camera
+    /// cut through `cut_view` kept the table, and Outpost's one cut created 193k cells in one
+    /// frame (non-RT gi_update 3 -> 145 ms).
     pub cut_refill: bool,
 }
 impl Default for IndirectSettings {
@@ -1062,8 +1068,11 @@ impl Planner {
         } else {
             since_clear
         };
-        let cut_capped = s.cut_refill && since_event < COARSE_CUT_FRAMES;
-        let coarse = (s.claim_cells != u32::MAX || cut_capped) && since_event < COARSE_CUT_FRAMES;
+        // U-RTVIS: the cut refill caps claims until its backlog drains (CUT_REFILL_FRAMES) and
+        // no longer reads one level coarser (coarse cells showed as blocks); an explicit
+        // `claim_cells` keeps G2b's coarse start after a clear.
+        let cut_capped = s.cut_refill && since_event < CUT_REFILL_FRAMES;
+        let coarse = s.claim_cells != u32::MAX && since_event < COARSE_CUT_FRAMES;
         let footprint = 2.0 * (c.fov_y * 0.5).tan() / c.size[1] as f32
             * s.cell_pixels
             * if coarse { 2.0 } else { 1.0 };
@@ -1083,8 +1092,15 @@ impl Planner {
             0 => 1,
             phases => phases,
         };
-        let spread = cut_phases > 1 && since_event < cut_phases;
-        header[14] = if spread { cut_phases } else { 0 };
+        // The cut refill traces every new cell's directions at once (U-RTVIS: spreading them
+        // left non-RT cells partial for frames, as dark blotches).
+        header[14] = if s.cut_refill {
+            0
+        } else if cut_phases > 1 && since_event < cut_phases {
+            cut_phases
+        } else {
+            0
+        };
         header[15] = s.near_light_rays;
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
@@ -1228,10 +1244,10 @@ impl Planner {
         if !boxes.is_empty() && s.invalidate_casters {
             flags |= 1;
         }
-        // Partially traced cells re-queue: form 2 always; the cut refill on the frames after
+        // Partially traced cells re-queue: form 2 always; a clear's phases on the frames after
         // its first, and one frame past its window, where a cell still partial (made late in
-        // the window) traces every remaining direction.
-        let refill = cut_phases > 1 && (1..=cut_phases).contains(&since_event);
+        // the window) traces every remaining direction. The cut refill makes no partial cells.
+        let refill = !s.cut_refill && cut_phases > 1 && (1..=cut_phases).contains(&since_event);
         if tick && (s.direction_phases > 1 || refill) {
             flags |= 8;
         }
@@ -3411,8 +3427,8 @@ mod tests {
     use crate::program::{Stage, compose, uses_indirect};
     const PRELUDE: &str = include_str!("../shaders/scene.wgsl");
 
-    /// `cut_refill`: a camera cut opens a clear's refill window (claim cap, coarse cells,
-    /// cut phases) for COARSE_CUT_FRAMES frames; off, a cut changes no header word.
+    /// `cut_refill`: a camera cut opens a refill window (the claim cap) for CUT_REFILL_FRAMES
+    /// frames, with no coarse read and no direction spread; off, a cut changes no header word.
     #[test]
     fn the_relight_rotation_holds_a_slot_group_to_the_budget() {
         // 2^20 slots at the default 8192: 128 groups of 8192.
@@ -3449,14 +3465,15 @@ mod tests {
             let steady = planner.begin(&c, true, true, true);
             planner.advance(&steady, false);
             planner.camera_cut();
-            for frame in 0..COARSE_CUT_FRAMES + 1 {
+            for frame in 0..CUT_REFILL_FRAMES + 1 {
                 let begun = planner.begin(&c, true, true, true);
-                let in_window = cut_refill && frame < COARSE_CUT_FRAMES;
+                let in_window = cut_refill && frame < CUT_REFILL_FRAMES;
                 let claims = if in_window { CLAIM_CELLS_SOFTWARE } else { 0 };
                 assert_eq!(begun.header[22], claims, "cut_refill {cut_refill}, frame {frame}");
-                let coarse = f32::from_bits(begun.header[4]) > f32::from_bits(steady.header[4]);
-                assert_eq!(coarse, in_window, "cut_refill {cut_refill}, frame {frame}");
-                assert_eq!(begun.header[14] != 0, cut_refill && frame < 4, "phases, frame {frame}");
+                // No coarse read either way: the footprint is the steady frame's.
+                assert_eq!(begun.header[4], steady.header[4], "frame {frame}");
+                // No phase spread with the refill; off, the cut is no reset either.
+                assert_eq!(begun.header[14], 0, "phases, frame {frame}");
                 planner.advance(&begun, false);
             }
         }

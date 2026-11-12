@@ -325,3 +325,52 @@ The turned view is heavier (about 63 ms against 34 before the cut, with or witho
 
 The rework (cap until drained) would spread about 45 ms of cell creation over several frames. It
 is still worth doing, at a smaller stake than before.
+
+## Reflections: cost by band, and halving the glossy strata (2026-11-12, after Islam's priority change)
+Game flight with the Fox and night lanterns (`--night-lanterns`), 1080p, frames 8-59, `shading`
+medians in ms. One visit, reference run 28.6 (7 % high: compare within the table only):
+
+| | base | strata <= 8 | strata <= 4 | traced to 0.3 | traced to 0.1 | reflections off |
+|---|---|---|---|---|---|---|
+| non-RT game | 25.3 | 16.3 | 11.2 | 15.7 | 6.6 | 5.6 |
+| non-RT night | 54.1 | 42.6 | 22.5 | 25.8 | 13.6 | 12.5 |
+| RT game | 10.5 | 9.3 | 8.2 | 8.6 | 5.9 | 5.2 |
+| RT night | 18.6 | 16.5 | 13.9 | 15.3 | 11.9 | 11.9 |
+
+Switches: `RENDERLAB_RL_HIT=strata=N` caps a glossy pixel's strata (RL_GLOSSY_MAX, 16);
+`RENDERLAB_REFLECTION_ROUGH` replaces `max_roughness`.
+
+- **Non-RT is where reflections cost:** about 20 ms of the game's shading and about 42 ms of the
+  night lanterns', against 5-7 ms on RT. A non-RT stratum costs about four times an RT one: a
+  software ray, the hit's software sun ray and its light loop.
+- **The cost follows the strata count:** RQ1 raised the count to 12-16 because four strata
+  smeared moving glossy metal.
+
+Tried: `RENDERLAB_RL_HALF=1` (reflections.wgsl RL_HALF_STRATA, off). With reconstruction's
+rotation, a glossy receiver of 8 or more strata traces every other stratum of its fixed set a
+frame, so two frames cover the whole set with main's directions. Same binary, interleaved twice
+(reference 28.03 ms):
+
+| | half off | half on |
+|---|---|---|
+| non-RT game | 27.0 / 27.2 | 23.5 / 22.8 |
+| non-RT night | 50.7 / 52.4 | 47.0 / 47.0 |
+| RT game | 11.1 / 11.5 | 10.8 / 11.0 |
+| RT night | 23.0 / 23.3 | 22.2 / 22.6 |
+
+Against the path tracer (reflection_matched with its arch lamp, both paths), the whole-image
+error barely moves (moving 0.840 / 1.003 / 1.188 on against 0.837 / 1.001 / 1.183 off). In the
+most-changed tile, the gold sphere, it is 5-7 % higher while moving (frame 47: 10.52 against
+9.79) and 4 % higher still. The reflected crate on the gold sphere is slightly smudgier in
+motion (crops: D:/Coding/renderlab-work/unit-rtvis/crops-half, on | off | path tracer). Kept
+off: about 4 ms for a visible softening on moving rough metal.
+
+Next candidates, by the measured cost:
+1. **Shared strata across a 2x2 quad**, where neighbours are the same surface and the lobe is
+   wide. Each pixel traces a quarter and the quad averages. This needs the traced shading entry
+   to keep uniform control flow up to a workgroup barrier, or a separate reflection pass, so it
+   touches the shading entry's structure.
+2. **Cheaper non-RT hits.** A non-RT stratum is about four times an RT one; its hit runs the
+   software sun ray and the full light loop.
+3. **Untraced estimate above a roughness** (traced to 0.3 saves about 9.6 ms of non-RT game
+   shading). It needs a picture check against the path tracer for light leaking on rough metal.
