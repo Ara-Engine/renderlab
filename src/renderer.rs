@@ -650,17 +650,20 @@ pub struct Renderer {
 }
 
 // Native wgpu scope futures are immediately ready. This never polls for GPU completion.
+// The guards are held innermost first: an operation that returns or unwinds before `finish`
+// drops them in array order, and an unpopped guard pops its scope on drop, so they must pop
+// in the reverse of their push order (wgpu panics with "Mismatched pop_error_scope" otherwise,
+// hiding the operation's own error).
 pub(crate) struct OperationScopes([wgpu::ErrorScopeGuard; 3]);
 impl OperationScopes {
     fn new(device: &wgpu::Device) -> Self {
-        Self([
-            device.push_error_scope(wgpu::ErrorFilter::Validation),
-            device.push_error_scope(wgpu::ErrorFilter::OutOfMemory),
-            device.push_error_scope(wgpu::ErrorFilter::Internal),
-        ])
+        let validation = device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let oom = device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal = device.push_error_scope(wgpu::ErrorFilter::Internal);
+        Self([internal, oom, validation])
     }
     fn finish(self) -> Option<wgpu::Error> {
-        let [validation, oom, internal] = self.0;
+        let [internal, oom, validation] = self.0;
         let internal = pollster::block_on(internal.pop());
         let oom = pollster::block_on(oom.pop());
         let validation = pollster::block_on(validation.pop());

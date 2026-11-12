@@ -181,6 +181,9 @@ impl Renderer {
     ) -> Result<PanePipelines, Error> {
         let slot = self.program_slot(program);
         let (ids_source, shade_source) = sources(glass).map_err(Error::Shader)?;
+        let gpu = self.transparency.gpu.as_ref().ok_or_else(|| {
+            Error::Fault(Fault("pane pipelines before the transparency pass's resources".into()))
+        })?;
         let scopes = OperationScopes::new(&self.device);
         let module = |label: &str, source: String| {
             let label = format!("{label} {}", slot.label);
@@ -195,7 +198,6 @@ impl Renderer {
         };
         let ids_module = module("TP pane ids", ids_source);
         let shade_module = module("TP pane shading", shade_source);
-        let gpu = self.transparency.gpu.as_ref().unwrap();
         let ids = [false, true].map(|tangent| {
             self.ledger.own(
                 self.device
