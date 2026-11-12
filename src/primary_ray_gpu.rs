@@ -684,7 +684,19 @@ pub(super) struct Targets {
     /// U-RTVIS: the held budget's per-pixel history (R32Uint, ping-ponged by the
     /// reconstruction's parity) and its frame record; traced primaries only.
     pub held: Option<HeldTargets>,
+    /// U-RTVIS: the reflection history (shaders/reflections_history.wgsl), both paths.
+    pub rl_history: RlHistoryTargets,
 }
+/// Per pixel two halves of four r32uint layers, and the frame record (written by
+/// `prepare_reconstruction`; zero, so never read, without reconstruction).
+pub(super) struct RlHistoryTargets {
+    pub history: Depth,
+    pub frame: Buffer,
+}
+/// The reflection history's group-0 bindings in primary shading.
+const RL_HISTORY_FRAME: u32 = 53;
+const RL_HISTORY: u32 = 54;
+const RL_HISTORY_LAYERS: u32 = 8;
 pub(super) struct HeldTargets {
     pub history: [Depth; 2],
     pub frame: Buffer,
@@ -1069,6 +1081,19 @@ impl PrimaryState {
                 // M7-R1: Soft shading traces reflection rays on the shared TLAS.
                 entries.push(scene(2));
             }
+            // U-RTVIS: the reflection history (program::with_reflection_history).
+            entries.push(uniform(
+                RL_HISTORY_FRAME,
+                temporal_reconstruction::RL_HISTORY_BYTES as u64,
+            ));
+            entries.push(entry(
+                RL_HISTORY,
+                wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::ReadWrite,
+                    format: F::R32Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                },
+            ));
             // M7-R1n: non-RT shading traces them in software (reflection_software.rs), read
             // as vec4 words (P-NRT), so a binding holds at least one.
             if !device
@@ -2148,6 +2173,46 @@ impl Renderer {
                     wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 ),
             });
+            let rl_history = {
+                let layers = wgpu::Extent3d {
+                    depth_or_array_layers: RL_HISTORY_LAYERS,
+                    ..size
+                };
+                let texture = self.ledger.own(
+                    self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("reflection history"),
+                        size: layers,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::R32Uint,
+                        usage: wgpu::TextureUsages::STORAGE_BINDING,
+                        view_formats: &[],
+                    }),
+                    ResourceKind::Texture,
+                );
+                let view = self.ledger.own(
+                    texture.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(wgpu::TextureViewDimension::D2Array),
+                        ..Default::default()
+                    }),
+                    ResourceKind::TextureView,
+                );
+                let bytes = u64::from(size.width) * u64::from(size.height) * 4 * u64::from(RL_HISTORY_LAYERS);
+                RlHistoryTargets {
+                    history: Depth {
+                        texture,
+                        view,
+                        _allocation: self.ledger.allocate(AllocationKind::Target, bytes),
+                    },
+                    frame: Buffer::new(
+                        self,
+                        "reflection history record",
+                        temporal_reconstruction::RL_HISTORY_BYTES as u64,
+                        wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    ),
+                }
+            };
             let next = Targets {
                 repairs,
                 repair_args,
@@ -2155,6 +2220,7 @@ impl Renderer {
                 penumbra,
                 defer_edges,
                 held,
+                rl_history,
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
                     "primary hard receiver epsilon",
@@ -2263,6 +2329,8 @@ impl Renderer {
                     (21, tiles.clone()),
                     (22, region.as_entire_binding()),
                     visibility,
+                    (RL_HISTORY_FRAME, t.rl_history.frame.value.as_entire_binding()),
+                    (RL_HISTORY, R::TextureView(&t.rl_history.history.view)),
                 ];
                 if matches!(shading, Shading::Hard) {
                     entries.push((23, R::TextureView(&t.epsilon.view)));

@@ -104,29 +104,31 @@ const RL_SPLIT: [(&str, &str); 4] = [
         "        return soft/f32(visited);\n",
     ),
 ];
-/// U-RTVIS: `RENDERLAB_RL_SUBSET=D@R` traces every D-th stratum a frame of a glossy receiver of
-/// roughness at least R (reflections.wgsl RL_SUBSET). `RENDERLAB_RL_HALF=1` is the parked
-/// halving, `2@0.15`.
-fn rl_subset(source: String) -> String {
-    static SPEC: std::sync::OnceLock<Option<(u32, f32)>> = std::sync::OnceLock::new();
-    let spec = SPEC.get_or_init(|| {
-        let text = std::env::var("RENDERLAB_RL_SUBSET").ok().or_else(|| {
-            (std::env::var("RENDERLAB_RL_HALF").as_deref() == Ok("1")).then(|| "2@0.15".into())
-        })?;
-        let (d, r) = text.split_once('@').unwrap_or((&text, "0"));
-        Some((d.trim().parse().ok()?, r.trim().parse().ok()?))
-    });
-    let Some((divisor, rough)) = *spec else {
-        return source;
+/// U-RTVIS reflection history (shaders/reflections_history.wgsl): the wgpu renderer's primary
+/// shading modules bind it (group 0, bindings 53 and 54), so only they replace the stubs.
+/// `RENDERLAB_RL_HISTORY=0` keeps the stubs: every glossy receiver traces its full set.
+const REFLECTION_HISTORY: &str = include_str!("../shaders/reflections_history.wgsl");
+const RL_HISTORY_STUBS: [&str; 2] = ["// ---- rl history stubs ----\n", "// ---- end of rl history stubs ----\n"];
+pub(crate) fn rl_history_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY").map_or(true, |v| v != "0"))
+}
+/// `composed` with the reflection history in place of its stubs, when it traces reflections and
+/// the history is on; the program's byte range moves with the replaced block before it.
+pub(crate) fn with_reflection_history(mut composed: Composed) -> Composed {
+    if !rl_history_on() {
+        return composed;
+    }
+    let Some(begin) = composed.source.find(RL_HISTORY_STUBS[0]) else {
+        return composed;
     };
-    let pairs = [
-        ("const RL_SUBSET:u32=1u;".to_owned(), format!("const RL_SUBSET:u32={divisor}u;")),
-        ("const RL_SUBSET_ROUGH:f32=0.0;".to_owned(), format!("const RL_SUBSET_ROUGH:f32={rough:?};")),
-    ];
-    pairs.into_iter().fold(source, |source, (from, to)| {
-        assert_eq!(source.matches(&from).count(), 1, "RENDERLAB_RL_SUBSET seam");
-        source.replacen(&from, &to, 1)
-    })
+    let end = composed.source[begin..].find(RL_HISTORY_STUBS[1]).unwrap() + begin + RL_HISTORY_STUBS[1].len();
+    assert!(end <= composed.program.start, "the history stubs precede the program");
+    composed.source.replace_range(begin..end, REFLECTION_HISTORY);
+    let shift = REFLECTION_HISTORY.len() as isize - (end - begin) as isize;
+    let moved = |at: usize| (at as isize + shift) as usize;
+    composed.program = moved(composed.program.start)..moved(composed.program.end);
+    composed
 }
 fn rl_split(mut source: String) -> String {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -619,7 +621,7 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
             1,
         );
-        source = rl_subset(rl_split(rl_hit_switches(source)));
+        source = rl_split(rl_hit_switches(source));
     }
     let start = source.len();
     source.push_str(program);

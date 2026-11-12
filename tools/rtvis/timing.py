@@ -271,6 +271,20 @@ PLANS["rough"] = [
     (f"r-{path}-{name}-r{v}-{k}", ["--path", path, *extra, "--frames", "60"], {"RENDERLAB_REFLECTION_ROUGH": v})
     for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v in ROUGH_VALUES
 ]
+# Reflection history (RENDERLAB_RL_HISTORY, on by default; reflections_history.wgsl): timing on
+# the game flight and night lanterns, and the game's flight and cut pictures, both paths.
+HIST = lambda v: {"RENDERLAB_RL_HISTORY": v}
+PLANS["histsmoke"] = [(f"q-{path}-smoke", ["--path", path, "--frames", "6"], HIST("1")) for path in ("rt", "nonrt")]
+PLANS["hist"] = [
+    (f"h-{path}-{name}-hist{v}-{k}", ["--path", path, *extra, "--frames", "60"], HIST(v))
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v in ("1", "0")
+]
+PLANS["histpics"] = [
+    (f"p-{path}-{kind}-hist{v}", ["--path", path, "--fox", FOX, *extra, "--every", "1"], HIST(v))
+    for path in ("nonrt", "rt")
+    for kind, extra in (("flight", ["--frames", "48"]), ("cut", ["--diag", "cut=1", "--frames", "36"]))
+    for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS

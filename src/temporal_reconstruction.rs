@@ -964,7 +964,13 @@ pub(crate) struct Planned {
     pub(crate) sampling: Vec<u8>,
     /// U-RTVIS: the held budget's `RtvisHeld` record (HELD_BYTES).
     pub(crate) held: Vec<u8>,
+    /// U-RTVIS: the reflection history's `RlHistoryFrame` record (RL_HISTORY_BYTES).
+    pub(crate) rl_history: Vec<u8>,
 }
+/// U-RTVIS: `RlHistoryFrame` (shaders/reflections_history.wgsl): the previous unjittered
+/// view-projection, then whether this frame continues history, the half it writes, the frame
+/// counter and the exposure factor carrying stored radiance to this frame.
+pub(crate) const RL_HISTORY_BYTES: usize = 80;
 impl Planned {
     /// The frame's `Tr1Zones` record (`ZONES_BYTES`), which the sun-shadow passes also bind:
     /// `PrimaryFrame::zones` and `VsmFrame::zones`.
@@ -1293,6 +1299,12 @@ impl Planner {
             &suns,
             listed,
         );
+        let mut rl_history = Vec::with_capacity(RL_HISTORY_BYTES);
+        rl_history.extend_from_slice(&matrix_bytes(previous_matrix));
+        let continues = continued.is_some() && !self.reset;
+        for w in [u32::from(continues), (i.frame & 1) as u32, i.frame as u32, scale.to_bits()] {
+            rl_history.extend_from_slice(&w.to_ne_bytes());
+        }
         self.previous = Some(Previous {
             frame: i.frame,
             matrix,
@@ -1310,6 +1322,7 @@ impl Planner {
             frame: bytes,
             sampling: words,
             held,
+            rl_history,
         }
     }
     /// U-RTVIS: the `RtvisHeld` record. The stop is on for a frame that continues every
@@ -1874,6 +1887,11 @@ impl Renderer {
             .write_buffer(&state.frame.value, 0, &planned.frame);
         self.uploads.view_settings += FRAME_BYTES as u64;
         self.uploads.write_calls += 1;
+        if let Some(history) = primary.targets.as_ref().map(|t| &t.rl_history) {
+            self.queue.write_buffer(&history.frame.value, 0, &planned.rl_history);
+            self.uploads.view_settings += RL_HISTORY_BYTES as u64;
+            self.uploads.write_calls += 1;
+        }
         if let Some(held) = primary.targets.as_ref().and_then(|t| t.held.as_ref()) {
             self.queue.write_buffer(&held.frame.value, 0, &planned.held);
             self.uploads.view_settings += HELD_BYTES as u64;

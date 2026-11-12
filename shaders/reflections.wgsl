@@ -33,14 +33,25 @@ const RL_UNTRACED:f32=0.5;
 const RL_GLOSSY_RAYS:u32=4u;
 const RL_GLOSSY_MAX:u32=16u;
 const RL_RAYS_PER_ROUGHNESS:f32=48.0;
-// U-RTVIS: with temporal reconstruction's rotation, a glossy receiver of roughness at least
-// RL_SUBSET_ROUGH and at least 2 x RL_SUBSET strata traces every RL_SUBSET-th stratum of its
-// fixed set a frame, from an offset turning with the frame, so RL_SUBSET consecutive frames
-// trace the whole set, each stratum with main's direction and cone; the history averages them.
-// Mirrors, narrower lobes, restarted receivers and frames without rotation trace every stratum.
-// src/program.rs switches it (RENDERLAB_RL_SUBSET=D@R; 1: off).
-const RL_SUBSET:u32=1u;
-const RL_SUBSET_ROUGH:f32=0.0;
+// U-RTVIS reflection history: without it (these stubs) every glossy receiver traces its full
+// set each frame. The wgpu renderer's primary shading modules replace the block with
+// shaders/reflections_history.wgsl (src/program.rs rl_history_source; RENDERLAB_RL_HISTORY=0
+// keeps the stubs).
+// ---- rl history stubs ----
+const RL_HISTORY:bool=false;
+var<private> rl_hist_m2:f32;
+var<private> rl_hist_moved:bool;
+fn rl_history_index()->u32 { return 0u; }
+fn rl_history_lookup(receiver:Receiver,world:vec3<f32>,pixel:vec2<u32>)->vec4<f32> { return vec4<f32>(0.0); }
+fn rl_history_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,mean:vec3<f32>,m2:f32,count:f32) {}
+// ---- end of rl history stubs ----
+// A trusted history's moving cap: a receiver that moved over a pixel since the previous frame
+// folds at most count / RL_HISTORY_MOVING strata (its reflection moves with the parallax).
+const RL_HISTORY_MOVING:f32=2.0;
+// A stratum disagrees with the history when its luminance is more than RL_HISTORY_SIGMA
+// standard deviations (the stored strata spread) plus RL_HISTORY_SLACK of the mean away.
+const RL_HISTORY_SIGMA:f32=4.0;
+const RL_HISTORY_SLACK:f32=0.1;
 // A receiver the resolve restarts this frame (rl_restarts: a changed local light's restart
 // sphere, a moving caster's swept shadow) shows this frame's strata alone, so its glossy
 // lobe traces primary_frame.reflection.w times the strata (1 or less: the ordinary count;
@@ -197,15 +208,20 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let seed=rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y^(frame*0x85ebca6bu)));
     let rotation=f32(seed>>8u)*(1.0/16777216.0);
     let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
-    // RL_SUBSET: this frame's share of the set; the rotation word is 8 x (frame mod 32).
-    let subset=RL_SUBSET>1u && !mirror && !restarted && frame!=0u && rough>=RL_SUBSET_ROUGH && count>=2u*RL_SUBSET;
-    let step=select(1u,RL_SUBSET,subset);
-    let first=select(0u,(frame/8u)%step,subset);
+    // Reflection history: a trusted glossy receiver traces one stratum, rotating with the
+    // frame from a per-pixel offset, and the full set only when that stratum disagrees.
+    var hist=vec4<f32>(0.0);
+    // A restart sphere or swept shadow (rl_restarts) always traces the full set.
+    if RL_HISTORY && !mirror && !restarted && frame!=0u && !rl_restarts(input.world) {hist=rl_history_lookup(receiver,input.world,pixel);}
+    var trusted=hist.w>0.0;
+    // Fixed per-pixel offset, so `count` consecutive frames visit every stratum once.
+    let one=(rl_history_index()+(rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y))&0xffffu))%count;
     var sum=vec3<f32>(0.0);
     // The brightest stratum (rgb) and its luminance (w), for the lone-stratum bound.
     var top=vec4<f32>(0.0);
     var valid=0u;
     var shaded=false;
+    var squares=0.0;
     // PP1/SK1 integration: reuse the function-scope query above. Naga 30 emits an
     // illegal opaque null for loop-local/conditionally initialized query variables.
     rl_reflection_hit=true;
@@ -219,9 +235,13 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     // highlight widens by about sqrt(2) of the receiver's own lobe; its energy is unchanged.
     // Mirror rays from flat receivers stay near exact.
     rl_hit_variance=8.0*spread*spread;
-    rl_hit_strata=(count-first+step-1u)/step;
+    for(var attempt=0u;attempt<2u;attempt+=1u) {
+    let first=select(0u,one,trusted);
+    let step=select(1u,count,trusted);
+    rl_hit_strata=select(count,1u,trusted);
+    sum=vec3<f32>(0.0);top=vec4<f32>(0.0);valid=0u;squares=0.0;
     for(var k=first;k<count;k+=step) {
-        rl_hit_stratum=k/step;
+        rl_hit_stratum=select(k,0u,trusted);
         var d=reflect(-v,n);
         if !mirror {
             let u=vec2<f32>((f32(k)+radial)/f32(count),fract(rotation+f32(k)*0.6180339887));
@@ -246,20 +266,53 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         sum+=radiance;
         let level=dot(radiance,RL_LUMA);
         if level>top.w {top=vec4<f32>(radiance,level);}
+        squares+=level*level;
         valid+=1u;
+    }
+    // The one stratum against the stored mean: within its noise it folds in; beyond it, the
+    // history is not trusted and the full set traces now (never blend in doubt).
+    if !trusted || valid==0u {break;}
+    let mean_level=dot(hist.rgb,RL_LUMA);
+    let sigma=sqrt(max(rl_hist_m2-mean_level*mean_level,0.0));
+    if abs(dot(sum,RL_LUMA)-mean_level)<=RL_HISTORY_SIGMA*sigma+RL_HISTORY_SLACK*mean_level+1e-4 {break;}
+    trusted=false;
     }
     rl_reflection_hit=false;
     rl_hit_strata=1u;
     rl_hit_variance=0.0;
     if shaded {rl_load_parameters(batch);}
-    if valid==0u {return;}
-    // A subset's other strata stand for the whole set's: the bound compares the brightest
-    // with step times the subset's rest, about what the full set's rest would be.
-    let lone=primary_frame.reflection.z*f32(step);
+    let slot=receiver.slot;
+    if trusted {
+        var mean=hist.rgb;var m2=rl_hist_m2;var folded=hist.w;
+        if valid>0u {
+            // The lone-stratum bound, against the set the history stands for.
+            let lone=primary_frame.reflection.z;
+            var fresh=sum;
+            let level=dot(fresh,RL_LUMA);
+            let most=lone*f32(count-1u)*mean_level_of(hist.rgb);
+            if lone>0.0 && level>most {fresh*=most/level;}
+            let cap=select(f32(count),max(f32(count)/RL_HISTORY_MOVING,2.0),rl_hist_moved);
+            folded=min(folded+1.0,cap);
+            mean=mix(mean,fresh,1.0/folded);
+            m2=mix(m2,squares,1.0/folded);
+        }
+        rl_history_store(pixel,slot,input.world,mean,m2,folded);
+        rl_specular=vec4<f32>(mean,traced);
+        return;
+    }
+    if valid==0u {
+        if RL_HISTORY && !mirror {rl_history_store(pixel,slot,input.world,vec3<f32>(0.0),0.0,0.0);}
+        return;
+    }
+    let lone=primary_frame.reflection.z;
     if lone>0.0 && valid>1u {
         let rest=max(dot(sum,RL_LUMA)-top.w,0.0)*lone;
         if top.w>rest {sum-=top.rgb*(1.0-rest/top.w);}
     }
-    rl_specular=vec4<f32>(sum/f32(valid),traced);
+    let mean=sum/f32(valid);
+    // The full set seeds the history as count strata, with their spread.
+    if RL_HISTORY && !mirror {rl_history_store(pixel,slot,input.world,mean,squares/f32(valid),f32(count));}
+    rl_specular=vec4<f32>(mean,traced);
 }
+fn mean_level_of(c:vec3<f32>)->f32 { return dot(c,RL_LUMA); }
 // ---- end of M7-R1 traced reflections ----

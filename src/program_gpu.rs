@@ -408,7 +408,7 @@ pub(super) fn compile_program(
         .traced
         .into_iter()
         .flatten()
-        .map(|head| program::compose(head, source, Stage::Traced, parameters))
+        .map(|head| program::with_reflection_history(program::compose(head, source, Stage::Traced, parameters)))
         .collect();
     // The temporal module follows the Soft one; naga checks it in the same transaction.
     if let Some(heads) = preludes.traced {
@@ -924,7 +924,7 @@ impl Renderer {
         let slot = self.program_slot(id);
         let parameters = program::declares_parameters(&slot.source);
         let sources = [0, 1]
-            .map(|i| program::compose(&heads[i], &slot.source, Stage::TracedStreamed, parameters));
+            .map(|i| program::with_reflection_history(program::compose(&heads[i], &slot.source, Stage::TracedStreamed, parameters)));
         let abi = self.program_abi();
         let scopes = OperationScopes::new(&self.device);
         // Modules are cheap (naga); only the pipeline this frame shades with compiles.
