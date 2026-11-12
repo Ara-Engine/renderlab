@@ -271,6 +271,83 @@ PLANS["rough"] = [
     (f"r-{path}-{name}-r{v}-{k}", ["--path", path, *extra, "--frames", "60"], {"RENDERLAB_REFLECTION_ROUGH": v})
     for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v in ROUGH_VALUES
 ]
+# Reflection history (RENDERLAB_RL_HISTORY=1, off by default; reflections_history.wgsl): timing on
+# the game flight and night lanterns, and the game's flight and cut pictures, both paths.
+HIST = lambda v: {"RENDERLAB_RL_HISTORY": v}
+PLANS["histsmoke"] = [(f"q-{path}-smoke", ["--path", path, "--frames", "6"], HIST("1")) for path in ("rt", "nonrt")]
+PLANS["hist"] = [
+    (f"h-{path}-{name}-hist{v}-{k}", ["--path", path, *extra, "--frames", "60"], HIST(v))
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v in ("1", "0")
+]
+PLANS["histpics"] = [
+    (f"p-{path}-{kind}-hist{v}", ["--path", path, "--fox", FOX, *extra, "--every", "1"], HIST(v))
+    for path in ("nonrt", "rt")
+    for kind, extra in (("flight", ["--frames", "48"]), ("cut", ["--diag", "cut=1", "--frames", "36"]))
+    for v in ("1", "0")
+]
+ON = {"RENDERLAB_RL_HISTORY": "1"}
+HIST_TUNES = [("off", {"RENDERLAB_RL_HISTORY": "0"}), ("s1", ON),
+              ("s4c1", ON | {"RENDERLAB_RL_HISTORY_TUNE": "strata=4,cap=1,moving=1"}),
+              ("s4c4", ON | {"RENDERLAB_RL_HISTORY_TUNE": "strata=4,cap=4,moving=4"})]
+PLANS["histtune"] = [
+    (f"t-{path}-{name}-{v}-{k}", ["--path", path, *extra, "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v, env in HIST_TUNES
+]
+# Diagnosis: never reject (sigma huge), against off and the default, game flight both paths;
+# and the game held still (hold=1), where every glossy pixel's history should be trusted.
+HIST_DIAG = [("off", {"RENDERLAB_RL_HISTORY": "0"}), ("s1", ON),
+             ("norej", ON | {"RENDERLAB_RL_HISTORY_TUNE": "sigma=1000000000"})]
+PLANS["histdiag"] = [
+    (f"d-{path}-{name}-{v}-{k}", ["--path", path, "--fox", FOX, *extra, "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in (("game", []), ("hold", ["--diag", "hold=1"]))
+    for v, env in HIST_DIAG
+]
+# The Showcase-like glossy band (reflection_matched --stage --metal-balls, 1280x720, moving):
+# shading with the history off, on, and four strata a frame. Run with the reflection_matched exe.
+SHOW = ["--matched", "--lamp", "1", "--stage", "--metal-balls", "--write-frames", "47"]
+PLANS["histshow"] = [
+    (f"s-{path}-{v}-{k}", ["--path", path, *SHOW], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in HIST_TUNES[:3]
+]
+# History-only-while-still gate: moving game frames (flight, night lanterns) for a byte
+# check against main's binary (same plan, run with each exe), and still timing.
+PLANS["gatemoving"] = [
+    (f"p-{path}-{name}", ["--path", path, *extra, "--every", "1"], {})
+    for path in ("nonrt", "rt")
+    for name, extra in (("flight", ["--fox", FOX, "--frames", "48"]), ("night", ["--fox", FOX, "--night-lanterns", "--frames", "30"]))
+]
+GATE_VARIANTS = (("off", {"RENDERLAB_RL_HISTORY": "0"}), ("on", {}), ("cap4", {"RENDERLAB_RL_HISTORY_TUNE": "cap=4"}))
+# Run with reflection_matched (the Showcase-like band held at frame 32) and game_scene (hold=1).
+PLANS["gateshow"] = [
+    (f"s-{path}-show-{v}-{k}", ["--path", path, *SHOW, "--freeze", "32"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in GATE_VARIANTS
+]
+PLANS["gatehold"] = [
+    (f"s-{path}-hold-{v}-{k}", ["--path", path, "--fox", FOX, "--diag", "hold=1", "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in GATE_VARIANTS
+]
+# The history's spatial resolve under motion (RENDERLAB_RL_RESOLVE=1): the Showcase-like band
+# moving (run with reflection_matched) and the game flight (game_scene), against the default.
+RES_VARIANTS = (("base", {}), ("res", {"RENDERLAB_RL_RESOLVE": "1"}),
+                ("res4", {"RENDERLAB_RL_RESOLVE": "1", "RENDERLAB_RL_HISTORY_TUNE": "strata=4"}))
+PLANS["resshow"] = [
+    (f"m-{path}-show-{v}-{k}", ["--path", path, *SHOW], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in RES_VARIANTS
+]
+PLANS["resgame"] = [
+    (f"g-{path}-flight-{v}-{k}", ["--path", path, "--fox", FOX, "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in RES_VARIANTS
+]
+# The reflection pass's first stage (RENDERLAB_RL_PASS=1: lobes and rl_trace, the picture
+# still inline): byte identity on against off (`hashes OUT rlpass`) and the trace's cost.
+PASS = lambda v: {"RENDERLAB_RL_PASS": v}
+PLANS["rlpass"] = [
+    (f"p-{path}-flight-rlpass{v}", ["--path", path, "--fox", FOX, "--frames", "40", "--every", "1"], PASS(v))
+    for path in ("nonrt", "rt") for v in ("1", "0")
+]
+PLANS["rlpassshow"] = [
+    (f"t-{path}-show-pass{v}", ["--path", path, *SHOW], PASS(v)) for path in ("nonrt", "rt") for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
@@ -404,15 +481,17 @@ def pair_matched(exe, out, name, key, value, spp="4096"):
 
 def multi_matched(exe, out, key, *values, spp="4096"):
     """reflection_matched with `key` at each value (runs m-PATH-KIND-vVALUE; "-" leaves it unset),
-    both paths, moving frames 16/32/47 and the held pose of frame 32, then the path tracer."""
+    both paths, moving frames 16/32/47 and the held pose of frame 32, then the path tracer.
+    RTVIS_MATCHED_EXTRA (space-separated) adds scene options to every run, the reference too."""
     out = Path(out)
     env = environment()
+    scene = os.environ.get("RTVIS_MATCHED_EXTRA", "").split()
     code = 0
-    runs = [(f"m-{path}-{kind}-v{v}", ["--path", path, "--matched", "--lamp", "1", *extra], {} if v == "-" else {key: v})
+    runs = [(f"m-{path}-{kind}-v{v}", ["--path", path, "--matched", "--lamp", "1", *scene, *extra], {} if v == "-" else {key: v})
             for kind, extra in [("moving", ["--write-frames", "16,32,47"]), ("still", ["--freeze", "32", "--write-frames", "47"])]
             for path in ("rt", "nonrt") for v in values]
     if not (out / "m-reference" / "frame-047.png").exists():
-        runs.append(("m-reference", ["--path", "rt", "--lamp", "1", "--reference", spp, "--write-frames", "16,32,47"], {}))
+        runs.append(("m-reference", ["--path", "rt", "--lamp", "1", *scene, "--reference", spp, "--write-frames", "16,32,47"], {}))
     for run, extra, more in runs:
         d = out / run
         d.mkdir(parents=True, exist_ok=True)

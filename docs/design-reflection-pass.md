@@ -1,7 +1,7 @@
 # Reflection pass: trace, hit shading and resolve (design, 2026-11-12)
 
-Status: proposal by U-RTVIS for review by the Mac GPU thread. Neither side builds against it
-until the review is in. Ruling (root, 2026-11-12):
+Status: agreed (the Mac GPU thread's review, 2026-11-12, with the changes under "Review
+outcome"); both sides build against it. Ruling (root, 2026-11-12):
 - U-RTVIS owns strata selection, the trace, the lobe side output, and the reduced-rate pass's
   accumulator and resolve.
 - The Mac thread owns hit shading as its own compacted pass on both backends
@@ -109,7 +109,7 @@ One storage buffer:
 | 4 | hit primitive index |
 | 5, 6 | hit barycentrics, f32 bits (the inline `bitcast<vec2<u32>>(hit.barycentrics)`) |
 | 7, 8, 9 | ray origin, f32 bits (world) |
-| 10 | ray direction, octahedral snorm16 x2 |
+| 10 | ray direction, octahedral snorm16 x2: `rl_oct_encode` / `rl_oct_decode` in reflections.wgsl, the one pair both sides use (decode: unpack2x16snorm, fold z < 0 as (1 - abs(v.yx)) x sign, normalize) |
 | 11 | `pack2x16float(cone width at the origin, total spread per metre)`: `rl_hit_input`'s `width` and `spread`, the sub-cone included |
 
 - **Hit point and distance:** `reflection_hits` rebuilds the hit input exactly as the inline
@@ -255,11 +255,70 @@ Target: reflections at about 3 ms in all.
   Any of these blocks a default change.
 - **Timing:** same binary, interleaved twice, with the reference run.
 
-## Open points for the review
-1. Is 48 B per record right for `reflection_hits`, or does it want the ray rebuilt from L and
-   the stratum to save bandwidth?
-2. Who clears R(N)? Proposed: `rl_trace`, so `reflection_hits` writes only real hits.
-3. Should misses get records too, so `reflection_hits` owns all sample radiance? Proposed: no.
-   Misses are cheap and resolved in `rl_trace`.
-4. Order and bins: if `reflection_hits` wants records bucketed by batch, `rl_trace` can append
-   per-batch counts in a second header (bounded by the batch count) at little cost.
+## Review outcome (the Mac GPU thread, 2026-11-12)
+1. **Records stay 48 B.** `reflection_hits` rebuilds each hit with `rl_hit_input` from words
+   3-11, and takes the hit distance from the rebuilt point, so it does not read D(N). D(N)
+   stays for the resolve.
+2. **`rl_trace` clears R(N).** `reflection_hits` writes rgb and a = 1 only at its records'
+   slots, so record order never changes a result.
+3. **No records for misses.**
+4. **No per-batch header from `rl_trace`.** `reflection_hits` bins by program inside its own
+   pass: placement, then batch, then program slot through MP1's slot table, then prefix,
+   scatter, and one indirect dispatch per program. Per-batch counts from `rl_trace` would only
+   be a nice-to-have, never a dependency.
+
+Notes:
+- **Mixed-program frames:** list frames now shade inline hits with the camera pixel's list
+  program (`LIST_HIT_PARAMETERS`). Binning by program shades each hit with its own program.
+  That is correct, but it changes the picture on mixed frames only, and the Mac flags it with
+  crops. Single-program frames (Showcase on wgpu) are unchanged.
+- **One hit function:** inline hits and `reflection_hits` run the same code. `rl_hit_input`
+  and the `rl_hit_*` privates stay in reflections.wgsl with this doc's signatures, and the Mac
+  composes its pass from them.
+- **`rl_hit_offset`:** `reflection_hits` computes it from record word 2 and the frame; inline
+  hits get it from the U-RTVIS seam. The Mac's shared shadow decision then replaces the
+  `RL_SPLIT` seams.
+- **Ara port:** `reflection_hits` binds H (read) and R(N) as `rgba16float` storage (write),
+  plus the shading entry's groups.
+- **Parity first:** the Mac builds `reflection_hits` to match inline hits first, with a
+  byte-matching harness against them at pixel rate.
+
+## Bindings and hit state (agreed with the Mac GPU thread, 2026-11-12)
+- **Group 0, U-RTVIS's shading-entry resources:** 54-63. Taken so far: 54 the reflection history
+  texture and 55 its frame record (shaders/reflections_history.wgsl); L, S and A take the next
+  ones.
+- **Group 0, the Mac's `reflection_hits`:** 64 H (storage, read), 65 R (`rgba16float` storage,
+  write), 66 its bin uniform, 67 the binned order.
+- **Hit state:** `reflection_hits` sets `rl_reflection_hit`, sets `rl_hit_stratum` and
+  `rl_hit_strata` from word 2, and sets `rl_hit_variance` = 8 spread^2 from word 11's spread.
+  So `rl_trace` keeps word 2 as (stratum, strata) and word 11 as (cone width at the origin,
+  total spread per metre), exactly as inline. The `RL_SPLIT` seams keep working until both
+  sides move to `rl_hit_samples` / `rl_hit_offset`.
+- **Parity:** a hit from H matches the inline hit to within the direction's snorm16 error,
+  which the Mac measures at pixel rate. It is acceptable unless a crop shows more than one
+  output code.
+
+## First stage on t3/rtvis (2026-11-12, `RENDERLAB_RL_PASS=1`, off by default)
+`rl_trace` runs and writes H, R and D, but the picture still comes from the inline trace: the
+accumulator and resolve come later. Code: src/reflection_pass.rs, shaders/reflections_lobe.wgsl,
+shaders/reflections_trace.wgsl, and `rl_cast` in reflections.wgsl.
+- **Lobe output L, written by primary shading for glossy receivers (mirrors stay inline):**
+  - binding 56, `rgba32float`: ray origin, and `pack2x16float`(cone width at the origin, spread
+    per metre before the stratum's sub-cone) as f32 bits;
+  - binding 57, `rgba32uint`: octahedral lobe normal, view direction and geometric side, then
+    `pack2x16float`(GGX alpha, frame tag);
+  - binding 58: the pass uniform (frame counter, slot width, on, 0). The tag is the frame counter
+    mod 2048; `rl_trace` ignores texels with another tag (stale or not glossy).
+  - This replaces the doc's earlier single-texture L: the origin is stored, not rebuilt.
+- **`rl_trace`** (8x8 slots a group) picks a glossy pixel of the quad: frame + hash(slot) mod 4
+  first, then the next positions. It takes stratum (frame + hash(pixel)) mod count of today's
+  set, with today's VNDF direction, radial and rotation. It casts with `rl_cast` (RT ray query;
+  the software BVH on non-RT), and its `tmin` is 1e-4 x the origin's distance from the world
+  origin, not the receiver's own epsilon.
+  - It clears R and D at every slot, writes a miss's sky into R (a = 1), and writes the hit or
+    miss distance into D (binding 59; -1 a miss, -2 no ray).
+  - It appends a hit's 48-byte record to H (binding 64) with one atomic per workgroup.
+- **`rl_hit_args`** (one invocation, after `rl_trace`) writes H's words 1-3: `reflection_hits`'
+  dispatch arguments for 64-record groups, rows of at most 65535.
+- **Order:** the frame's shading, then `rl_trace`, then `rl_hit_args`. The pass log stage is
+  `reflection.trace`. `reflection_hits` and `rl_resolve` go after it.

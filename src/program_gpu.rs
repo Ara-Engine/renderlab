@@ -408,7 +408,7 @@ pub(super) fn compile_program(
         .traced
         .into_iter()
         .flatten()
-        .map(|head| program::compose(head, source, Stage::Traced, parameters))
+        .map(|head| program::with_reflection_history(program::compose(head, source, Stage::Traced, parameters)))
         .collect();
     // The temporal module follows the Soft one; naga checks it in the same transaction.
     if let Some(heads) = preludes.traced {
@@ -924,7 +924,7 @@ impl Renderer {
         let slot = self.program_slot(id);
         let parameters = program::declares_parameters(&slot.source);
         let sources = [0, 1]
-            .map(|i| program::compose(&heads[i], &slot.source, Stage::TracedStreamed, parameters));
+            .map(|i| program::with_reflection_history(program::compose(&heads[i], &slot.source, Stage::TracedStreamed, parameters)));
         let abi = self.program_abi();
         let scopes = OperationScopes::new(&self.device);
         // Modules are cheap (naga); only the pipeline this frame shades with compiles.
@@ -986,7 +986,7 @@ impl Renderer {
             .iter()
             .map(|&id| {
                 let source = &self.program_slot(id).source;
-                program::compose_list(head, source, stage, program::declares_parameters(source))
+                program::with_reflection_history(program::compose_list(head, source, stage, program::declares_parameters(source)))
             })
             .collect();
         let abi = self.program_abi();
@@ -1054,8 +1054,8 @@ impl Renderer {
         for slot in &self.programs {
             let parameters = program::declares_parameters(&slot.source);
             let sources = [
-                program::compose(&heads[0], &slot.source, Stage::Traced, parameters),
-                program::compose(&heads[1], &slot.source, Stage::Traced, parameters),
+                program::with_reflection_history(program::compose(&heads[0], &slot.source, Stage::Traced, parameters)),
+                program::with_reflection_history(program::compose(&heads[1], &slot.source, Stage::Traced, parameters)),
                 film_accumulation::compose_shading(&temporal, &slot.source, parameters),
             ];
             let scopes = OperationScopes::new(&self.device);

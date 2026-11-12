@@ -104,29 +104,101 @@ const RL_SPLIT: [(&str, &str); 4] = [
         "        return soft/f32(visited);\n",
     ),
 ];
-/// U-RTVIS: `RENDERLAB_RL_SUBSET=D@R` traces every D-th stratum a frame of a glossy receiver of
-/// roughness at least R (reflections.wgsl RL_SUBSET). `RENDERLAB_RL_HALF=1` is the parked
-/// halving, `2@0.15`.
-fn rl_subset(source: String) -> String {
-    static SPEC: std::sync::OnceLock<Option<(u32, f32)>> = std::sync::OnceLock::new();
-    let spec = SPEC.get_or_init(|| {
-        let text = std::env::var("RENDERLAB_RL_SUBSET").ok().or_else(|| {
-            (std::env::var("RENDERLAB_RL_HALF").as_deref() == Ok("1")).then(|| "2@0.15".into())
-        })?;
-        let (d, r) = text.split_once('@').unwrap_or((&text, "0"));
-        Some((d.trim().parse().ok()?, r.trim().parse().ok()?))
-    });
-    let Some((divisor, rough)) = *spec else {
-        return source;
+/// U-RTVIS reflection history (shaders/reflections_history.wgsl): the wgpu renderer's primary
+/// shading modules bind it (group 0, bindings 54 and 55), so only they replace the stubs.
+/// Off by default: under a still camera its held glossy picture is slightly grainier than
+/// main's (docs/rtvis.md). `RENDERLAB_RL_HISTORY=1` composes it; it then reads history only
+/// while the camera holds still (temporal_reconstruction.rs), so moving frames trace as without it.
+const REFLECTION_HISTORY: &str = include_str!("../shaders/reflections_history.wgsl");
+const RL_HISTORY_STUBS: [&str; 2] = ["// ---- rl history stubs ----\n", "// ---- end of rl history stubs ----\n"];
+pub(crate) fn rl_history_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY").is_ok_and(|v| v == "1"))
+}
+/// U-RTVIS measurement: `RENDERLAB_RL_HISTORY_TUNE=strata=S,cap=C,moving=M,sigma=K` replaces
+/// reflections.wgsl's RL_HISTORY_STRATA, _CAP, _MOVING and _SIGMA.
+fn rl_history_tune(mut source: String) -> String {
+    static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let list = LIST.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY_TUNE").unwrap_or_default());
+    for (key, value) in list.split(',').filter_map(|s| s.trim().split_once('=')) {
+        let (name, ty, text) = match key {
+            "strata" => ("RL_HISTORY_STRATA", "u32", format!("{value}u")),
+            "cap" => ("RL_HISTORY_CAP", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
+            "moving" => ("RL_HISTORY_MOVING", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
+            "sigma" => ("RL_HISTORY_SIGMA", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
+            _ => continue,
+        };
+        let prefix = format!("const {name}:{ty}=");
+        let at = source.find(&prefix).expect("RENDERLAB_RL_HISTORY_TUNE seam");
+        let end = at + source[at..].find(';').unwrap();
+        source.replace_range(at..end, &format!("{prefix}{text}"));
+    }
+    source
+}
+/// U-RTVIS: `RENDERLAB_RL_RESOLVE=1` reads the history under a moving camera too, through the
+/// spatial resolve (reflections_history.wgsl RL_RESOLVE). Off by default.
+pub(crate) fn rl_resolve_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE").is_ok_and(|v| v == "1"))
+}
+/// U-RTVIS reflection pass (src/reflection_pass.rs): `RENDERLAB_RL_PASS=1` writes glossy
+/// receivers' lobes from primary shading (shaders/reflections_lobe.wgsl, group 0 bindings 56-58)
+/// and runs `rl_trace` after it. Off by default.
+const REFLECTION_LOBE: &str = include_str!("../shaders/reflections_lobe.wgsl");
+const RL_PASS_STUBS: [&str; 2] = ["// ---- rl pass stubs ----\n", "// ---- end of rl pass stubs ----\n"];
+const REFLECTION_TRACE: &str = include_str!("../shaders/reflections_trace.wgsl");
+pub(crate) fn rl_pass_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_PASS").is_ok_and(|v| v == "1"))
+}
+/// `rl_trace`'s module on a traced shading `head`: the standard program's traced composition
+/// (the reflection block's helpers, with its stubs) and the trace entries.
+pub(crate) fn rl_trace_source(head: &str) -> String {
+    let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
+    format!("{}\n{REFLECTION_TRACE}", composed.source)
+}
+/// `composed` with the block between `markers` replaced by `text`, moving the program's range.
+fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Composed {
+    let Some(begin) = composed.source.find(markers[0]) else {
+        return composed;
     };
-    let pairs = [
-        ("const RL_SUBSET:u32=1u;".to_owned(), format!("const RL_SUBSET:u32={divisor}u;")),
-        ("const RL_SUBSET_ROUGH:f32=0.0;".to_owned(), format!("const RL_SUBSET_ROUGH:f32={rough:?};")),
-    ];
-    pairs.into_iter().fold(source, |source, (from, to)| {
-        assert_eq!(source.matches(&from).count(), 1, "RENDERLAB_RL_SUBSET seam");
-        source.replacen(&from, &to, 1)
-    })
+    let end = composed.source[begin..].find(markers[1]).unwrap() + begin + markers[1].len();
+    assert!(end <= composed.program.start, "reflection stubs precede the program");
+    composed.source.replace_range(begin..end, text);
+    let shift = text.len() as isize - (end - begin) as isize;
+    let moved = |at: usize| (at as isize + shift) as usize;
+    composed.program = moved(composed.program.start)..moved(composed.program.end);
+    composed
+}
+/// `composed` with the reflection history and the reflection pass's lobe in place of their
+/// stubs, each while its switch is on (wgpu primary shading modules only).
+pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
+    let composed = if rl_pass_on() {
+        replace_block(composed, RL_PASS_STUBS, REFLECTION_LOBE)
+    } else {
+        composed
+    };
+    with_history_block(composed)
+}
+fn with_history_block(mut composed: Composed) -> Composed {
+    if !rl_history_on() {
+        return composed;
+    }
+    let Some(begin) = composed.source.find(RL_HISTORY_STUBS[0]) else {
+        return composed;
+    };
+    let end = composed.source[begin..].find(RL_HISTORY_STUBS[1]).unwrap() + begin + RL_HISTORY_STUBS[1].len();
+    assert!(end <= composed.program.start, "the history stubs precede the program");
+    let history = if rl_resolve_on() {
+        REFLECTION_HISTORY.replacen("const RL_RESOLVE:bool=false;", "const RL_RESOLVE:bool=true;", 1)
+    } else {
+        REFLECTION_HISTORY.to_owned()
+    };
+    composed.source.replace_range(begin..end, &history);
+    let shift = history.len() as isize - (end - begin) as isize;
+    let moved = |at: usize| (at as isize + shift) as usize;
+    composed.program = moved(composed.program.start)..moved(composed.program.end);
+    composed
 }
 fn rl_split(mut source: String) -> String {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -237,7 +309,11 @@ const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_softw
 /// the reflection ray itself, which yields the same hit record. The queries' declarations
 /// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed. Software hits have
 /// no hit distance, so they never read the radiance cache (reflection_cache_hits.wgsl).
-const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 3] = [
+const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 4] = [
+    (
+        "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,tmin,RL_FAR,origin,d));\n    while rayQueryProceed(&query) {}\n    let hit=rayQueryGetCommittedIntersection(&query);\n    if hit.kind==0u {return RlCast(vec4<u32>(0u),-1.0);}\n    return RlCast(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),hit.t);\n",
+        "    let hit=rs_trace(origin,d,tmin,RL_FAR,false);\n    return RlCast(hit.record,select(-1.0,hit.t,hit.record.x!=0u));\n",
+    ),
     (
         "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,tmax,origin,l));\n    while rayQueryProceed(&query) {}\n    return select(1.0,0.0,rayQueryGetCommittedIntersection(&query).kind!=0u);\n",
         "    return select(1.0,0.0,rs_blocked(origin,l,receiver.epsilon,tmax));\n",
@@ -670,7 +746,7 @@ fn compose_stage(head: &str, program: &str, stage: Stage, parameters: bool, hits
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
             1,
         );
-        source = rl_subset(rl_split(rl_hit_switches(source)));
+        source = rl_history_tune(rl_split(rl_hit_switches(source)));
     }
     let start = source.len();
     source.push_str(program);
