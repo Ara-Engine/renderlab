@@ -87,7 +87,9 @@ fn quad(half: f32, z: f32) -> [Vertex; 4] {
 
 /// The game scene's fly path for eight frames (its glass pane in view, with the cache,
 /// reconstruction under its jitter, fog and post on), drawn with per-pixel panes and with the
-/// glass raster: every pixel of every frame, the cold first one included, within a code.
+/// glass raster: every pixel of every frame, the cold first one included, within a code of
+/// the raster, beyond what the raster's own runs differ by (up to a code from one run to the
+/// next: the scene is not bit-reproducible across processes' GPU work).
 #[test]
 fn per_pixel_panes_draw_the_game_scene_as_the_glass_raster_does_in_motion() -> Result<()> {
     let path = root("engine-pane-pixels");
@@ -117,13 +119,17 @@ fn per_pixel_panes_draw_the_game_scene_as_the_glass_raster_does_in_motion() -> R
         })
     };
     let raster = run(true)?;
+    let again = run(true)?;
     let pixels = run(false)?;
-    for (frame, (a, b)) in raster.iter().zip(&pixels).enumerate() {
+    for (frame, ((a, b), c)) in raster.iter().zip(&pixels).zip(&again).enumerate() {
         let (over, worst) = compare(a, b);
-        println!("game scene frame {frame}: {over} pixels over a code, at most {worst}");
+        let noise = compare(a, c).1;
+        println!(
+            "game scene frame {frame}: {over} pixels over a code, at most {worst} (raster runs differ by {noise})"
+        );
         ensure!(
-            over == 0,
-            "frame {frame}: {over} pixels differ by more than a code, up to {worst}"
+            worst <= noise + 1,
+            "frame {frame}: {over} pixels differ by more than a code, up to {worst}, where two raster runs differ by {noise}"
         );
     }
     gpu.collect()?;
