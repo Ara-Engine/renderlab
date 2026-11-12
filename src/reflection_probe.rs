@@ -82,6 +82,8 @@ fn shader() -> String {
     for name in [
         "light_count",
         "light_sample",
+        "light_sample_untinted",
+        "light_transmission",
         "light_visibility",
         "expose",
         "rl_finite",
