@@ -70,6 +70,20 @@ fn with_terms(source: String, terms: u32) -> String {
         crate::renderer::shade_detail::without_terms(&source, terms)
     }
 }
+/// The hardware soft head's traced module of `material` (`hardware_soft_program`'s text).
+pub(crate) fn hardware_soft_source(material: &str) -> Result<String> {
+    let [_, head] =
+        crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
+    let parameters = crate::program::declares_parameters(material);
+    Ok(crate::program::compose(&head, material, crate::program::Stage::Traced, parameters).source)
+}
+/// The GI tile corners' pass on `material`'s traced module (`RENDERLAB_GI_TILE=pass`).
+pub fn gi_tile_corners_program(material: &str) -> Result<Program> {
+    static KEPT: Memo<[u8; 32], Program> = Memo::new();
+    KEPT.get(memo::digest(material), || {
+        Ok(Program::new(Pass::GiTileCorners, hardware_soft_source(material)?)?.checked())
+    })
+}
 /// The list entry on the same hardware soft head: one program's share of a frame of
 /// several programs, shading the tiles the binning pass listed for its slot
 /// (`program::compose_list`, as `ProgramPipelines::list` compiles it).
