@@ -107,22 +107,6 @@ fn rl_hit_shadow(light:Light,receiver:Receiver,l:vec3<f32>)->f32 {
     return select(1.0,0.0,rayQueryGetCommittedIntersection(&query).kind!=0u);
 }
 
-// A hit record's world point, from its barycentrics as rl_hit_input places the hit, and its
-// triangle's geometric normal. The distance from the ray's origin to `world` is the ray's
-// length on hardware and software traces alike, which carry none of their own: cache-
-// terminated hits (reflection_cache_hits.wgsl) take their cone there, and U-RTVIS's resolve
-// reprojects non-RT hits with it.
-struct RlHitPoint {world:vec3<f32>,geometric:vec3<f32>};
-fn rl_hit_point(record:vec4<u32>)->RlHitPoint {
-    let hit=primary_decode(record);
-    let ta=primary_input(hit.batch,hit.ia,hit.placement);
-    let tb=primary_input(hit.batch,hit.ib,hit.placement);
-    let tc=primary_input(hit.batch,hit.ic,hit.placement);
-    let w=vec3<f32>(1.0-hit.bary.x-hit.bary.y,hit.bary);
-    let world=world_position(ta.position*w.x+tb.position*w.y+tc.position*w.z,hit.placement).xyz;
-    return RlHitPoint(world,primary_geometric(ta.position,tb.position,tc.position,hit.placement));
-}
-
 struct RlHit {input:SurfaceInput,batch:u32,visible:bool};
 // A reflection hit's receiver, built as the traced entry builds a camera hit's, with the
 // reflection origin as its eye and a ray-cone footprint: `width` metres at the origin,
@@ -242,7 +226,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
             let record=vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics));
             // A rough lobe's cone wider than the radiance cache's cell at the hit reads that
             // cell's outgoing radiance instead of shading the hit (reflection_cache_hits.wgsl).
-            let cached=rl_cache_hit(record,origin,width,spread,rough);
+            let cached=rl_cache_hit(record,origin,d,hit.t,width+spread*hit.t,rough);
             if cached.w>0.0 {
                 radiance=rl_finite(expose(cached.rgb));
             } else {
