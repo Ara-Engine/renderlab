@@ -3222,7 +3222,8 @@ pub(crate) fn mixed_cell_entry(source: &str, id: u64) -> String {
 // ---- end of MP1 per-program cell shading ----
 
 /// What cell shading (G2) binds besides its own group 0: traced shading's geometry (group 1)
-/// and materials (group 2), and lighting's shading group, whose binding 20 is the real table.
+/// and materials (group 2), and lighting's cell-shading group (`cell_bind`), whose binding 20
+/// is the real table and whose binding 28 is never the outgoing radiance cell shading writes.
 pub(super) struct ShadeGroups<'a> {
     pub arrays: &'a wgpu::BindGroup,
     pub materials: &'a wgpu::BindGroup,
