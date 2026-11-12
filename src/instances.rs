@@ -188,6 +188,17 @@ impl InstanceState {
             _ => &self.models,
         }
     }
+    /// Whether the placements may differ from the ones `view` submitted in `previous_frame`:
+    /// false when it submitted them at the current edit count (an accepted edit is the only way
+    /// a model changes), so a caller comparing them one by one for motion can skip the walk.
+    /// False too when that frame did not draw these instances (`previous_models` then is the
+    /// current placement).
+    pub fn edited_since_submit(&self, view: u64, previous_frame: u64) -> bool {
+        match self.motion.iter().find(|m| m.view == view) {
+            Some(m) if m.frame == previous_frame => m.edits != self.edits,
+            _ => false,
+        }
+    }
     /// Called only after `view` successfully submitted `frame`; backpressure keeps history.
     pub fn motion_submitted(&mut self, view: u64, frame: u64) {
         let edits = self.edits;
@@ -391,6 +402,20 @@ mod tests {
         assert_eq!(s.previous_models(0, 3), [Mat4::IDENTITY; 2]);
         s.motion_submitted(0, 4);
         assert_eq!(s.previous_models(0, 4), [Mat4::IDENTITY; 2]);
+    }
+    #[test]
+    fn edited_since_submit_follows_accepted_edits() {
+        let mut s = InstanceState::new(&[Mat4::IDENTITY; 2]);
+        // No submission yet, or a frame that did not draw these: nothing to compare.
+        assert!(!s.edited_since_submit(0, 0));
+        s.motion_submitted(0, 1);
+        assert!(!s.edited_since_submit(0, 1));
+        assert!(!s.edited_since_submit(0, 7));
+        s.set(1, Mat4::from_translation(Vec3::Y)).unwrap();
+        assert!(s.edited_since_submit(0, 1));
+        // Submitting the edited placement clears it.
+        s.motion_submitted(0, 2);
+        assert!(!s.edited_since_submit(0, 2));
     }
     #[test]
     fn each_view_keeps_its_own_previous_placement() {
