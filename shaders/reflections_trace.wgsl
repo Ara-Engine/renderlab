@@ -26,7 +26,7 @@ var<workgroup> rl_group_base:u32;
     let size=textureDimensions(rl_lobe_b);
     let inside=all(id.xy<slots);
     var record=vec4<u32>(0u);var origin=vec3<f32>(0.0);var d=vec3<f32>(0.0);var cone=vec2<f32>(0.0);
-    var pixel=vec2<u32>(0u);var stratum=0u;var strata=0u;var hit=false;
+    var pixel=vec2<u32>(0u);var stratum=0u;var strata=0u;var hit=false;var lobe_alpha=0.0;
     if inside {
         textureStore(rl_samples,vec2<i32>(id.xy),vec4<f32>(0.0));
         textureStore(rl_ray_distance,vec2<i32>(id.xy),vec4<f32>(-2.0));
@@ -45,7 +45,7 @@ var<workgroup> rl_group_base:u32;
             origin=a.xyz;
             let ws=unpack2x16float(bitcast<u32>(a.w));
             let n=rl_oct_decode(b.x);let v=rl_oct_decode(b.y);let side=rl_oct_decode(b.z);
-            let alpha=at.x;let rough=sqrt(alpha);
+            let alpha=at.x;let rough=sqrt(alpha);lobe_alpha=alpha;
             strata=clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX);
             stratum=(rl_pass_frame.x+(rl_hash((p.x*0x9e3779b1u)^rl_hash(p.y))&0xffffu))%strata;
             let cone_alpha=alpha*inverseSqrt(f32(strata));
@@ -83,7 +83,9 @@ var<workgroup> rl_group_base:u32;
     if hit {
         let at=(workgroupUniformLoad(&rl_group_base)+index)*3u;
         let slot=id.y*slots.x+id.x;
-        rl_hits.records[at]=vec4<u32>(pixel.x|(pixel.y<<16u),slot,stratum|(strata<<16u),record.x);
+        // Word 2: stratum | strata << 8 | the lobe's GGX alpha as f16 << 16 (strata <= RL_GLOSSY_MAX).
+        let word2=stratum|(strata<<8u)|(pack2x16float(vec2<f32>(lobe_alpha,0.0))<<16u);
+        rl_hits.records[at]=vec4<u32>(pixel.x|(pixel.y<<16u),slot,word2,record.x);
         rl_hits.records[at+1u]=vec4<u32>(record.y,record.z,record.w,bitcast<u32>(origin.x));
         rl_hits.records[at+2u]=vec4<u32>(bitcast<u32>(origin.y),bitcast<u32>(origin.z),rl_oct_encode(d),pack2x16float(cone));
     }

@@ -104,7 +104,7 @@ One storage buffer:
 |---|---|
 | 0 | pixel: x in the low 16 bits, y in the high 16 |
 | 1 | slot index (y x slot width + x) |
-| 2 | `stratum` (low 16 bits), `strata` count (high 16): the share for `rl_hit_samples` / `rl_hit_offset` |
+| 2 | `stratum` (bits 0-7), `strata` count (bits 8-15; at most RL_GLOSSY_MAX, 16), the lobe's GGX alpha as f16 (bits 16-31: `pack2x16float(vec2(alpha, 0)) << 16`; the Mac's cache-terminated hits gate on its roughness). Changed 2026-11-12 from stratum and strata in 16 bits each |
 | 3 | hit placement + 1 (as `instance_custom_data + 1`, the primary record's x) |
 | 4 | hit primitive index |
 | 5, 6 | hit barycentrics, f32 bits (the inline `bitcast<vec2<u32>>(hit.barycentrics)`) |
@@ -290,9 +290,9 @@ Notes:
 - **Group 0, the Mac's `reflection_hits`:** 64 H (storage, read), 65 R (`rgba16float` storage,
   write), 66 its bin uniform, 67 the binned order.
 - **Hit state:** `reflection_hits` sets `rl_reflection_hit`, sets `rl_hit_stratum` and
-  `rl_hit_strata` from word 2, and sets `rl_hit_variance` = 8 spread^2 from word 11's spread.
-  So `rl_trace` keeps word 2 as (stratum, strata) and word 11 as (cone width at the origin,
-  total spread per metre), exactly as inline. The `RL_SPLIT` seams keep working until both
+  `rl_hit_strata` from word 2 (bits 0-7 and 8-15; bits 16-31 carry the lobe's alpha as f16),
+  and sets `rl_hit_variance` = 8 spread^2 from word 11's spread. Word 11 is (cone width at the
+  origin, total spread per metre), exactly as inline. The `RL_SPLIT` seams keep working until both
   sides move to `rl_hit_samples` / `rl_hit_offset`.
 - **Parity:** a hit from H matches the inline hit to within the direction's snorm16 error,
   which the Mac measures at pixel rate. It is acceptable unless a crop shows more than one

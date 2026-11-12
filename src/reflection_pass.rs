@@ -295,3 +295,103 @@ impl Renderer {
         self.queue.write_buffer(&pass.frame.value, 0, &bytes);
     }
 }
+
+/// rl_resolve (RENDERLAB_RL_RESOLVE_PASS=1, shaders/reflections_resolve.wgsl): its layout and
+/// kernel, over the reflection history texture and its frame record. No program code.
+#[derive(Clone)]
+pub(super) struct ResolveKit {
+    group: Owned<wgpu::BindGroupLayout>,
+    pipeline: Owned<wgpu::ComputePipeline>,
+}
+impl ResolveKit {
+    pub fn new(device: &PipelineDevice, ledger: &Ledger) -> Self {
+        let group = ledger.own(
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("reflection resolve"),
+                entries: &[
+                    entry(
+                        RL_HISTORY,
+                        wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadWrite,
+                            format: wgpu::TextureFormat::R32Uint,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                        },
+                    ),
+                    uniform(RL_HISTORY_FRAME, temporal_reconstruction::RL_HISTORY_BYTES as u64),
+                ],
+            }),
+            ResourceKind::BindGroupLayout,
+        );
+        let layout = ledger.own(
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("reflection resolve ABI"),
+                bind_group_layouts: &[Some(&group)],
+                immediate_size: 0,
+            }),
+            ResourceKind::PipelineLayout,
+        );
+        let module = ledger.own(
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("reflection resolve"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/reflections_resolve.wgsl").into()),
+            }),
+            ResourceKind::ShaderModule,
+        );
+        let pipeline = ledger.own(
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("reflection resolve"),
+                layout: Some(&layout),
+                module: &module,
+                entry_point: Some("rl_resolve"),
+                compilation_options: Default::default(),
+                cache: None,
+            }),
+            ResourceKind::ComputePipeline,
+        );
+        Self { group, pipeline }
+    }
+}
+
+impl Renderer {
+    pub(super) fn rl_resolve_group(&self, kit: &ResolveKit, history: &RlHistoryTargets) -> Owned<wgpu::BindGroup> {
+        self.ledger.own(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("reflection resolve"),
+                layout: &kit.group,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: RL_HISTORY,
+                        resource: wgpu::BindingResource::TextureView(&history.history.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: RL_HISTORY_FRAME,
+                        resource: history.frame.value.as_entire_binding(),
+                    },
+                ],
+            }),
+            ResourceKind::BindGroup,
+        )
+    }
+
+    /// rl_resolve after the frame's shading: nothing unless RENDERLAB_RL_RESOLVE_PASS=1.
+    pub(crate) fn encode_reflection_resolve(&self, encoder: &mut wgpu::CommandEncoder) {
+        let Some(state) = self.view.primary.as_ref() else {
+            return;
+        };
+        let (Some(kit), Some(group), Some(t)) = (
+            state.rl_resolve.as_ref(),
+            state.bindings.as_ref().and_then(|b| b.rl_resolve.as_ref()),
+            state.targets.as_ref(),
+        ) else {
+            return;
+        };
+        let size = t.hit.texture.size();
+        let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("reflection resolve"),
+            timestamp_writes: None,
+        });
+        compute.set_pipeline(&kit.pipeline);
+        compute.set_bind_group(0, &**group, &[]);
+        compute.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+    }
+}

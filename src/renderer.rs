@@ -3424,6 +3424,8 @@ impl Renderer {
                     self.encode_view_shading(&mut encoder, shading, stamps(0))?;
                 } else {
                     self.encode_primary_shading(&mut encoder, shading, stamps(0));
+                    mark(&mut encoder, "reflection.resolve");
+                    self.encode_reflection_resolve(&mut encoder);
                     mark(&mut encoder, "reflection.trace");
                     self.encode_reflection_trace(&mut encoder, shading);
                     mark(&mut encoder, "reflection.hits");
