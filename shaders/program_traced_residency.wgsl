@@ -53,7 +53,6 @@ fn sample_base_color_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec
     return textureSampleGrad(primary_base_color[i],primary_base_sampler[i],uv,dx,dy);
 }
 fn sample_metallic_roughness_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>) -> vec4<f32> {
-    if !rl_term(RL_TERM_TEXTURES) { return vec4<f32>(1.0); }
     let i=input.receiver.slot;
     let word=primary_residency.slots[3u*i+1u];
     if word!=0u {

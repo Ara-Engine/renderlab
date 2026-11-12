@@ -19,8 +19,9 @@ const RL_TERM_SHADOWS:u32=2u;
 const RL_TERM_TRANSMISSION:u32=4u;
 // Traced reflections (`specular_incident`), shaders/reflections.wgsl.
 const RL_TERM_REFLECTIONS:u32=8u;
-// The material's texture fetches on traced stages (shaders/program_traced*.wgsl): without
-// it base colour and metallic-roughness read 1 and normal maps read flat.
+// The material's base colour and normal map fetches on traced stages
+// (shaders/program_traced*.wgsl): without it base colour reads 1 and normal maps read flat.
+// Metallic-roughness keeps its fetch: it decides how much reflection work a pixel does.
 const RL_TERM_TEXTURES:u32=16u;
 // The light loop's BRDF evaluation (shaders/programs/standard.wgsl): without it each
 // light's response is a constant Lambert lobe.
