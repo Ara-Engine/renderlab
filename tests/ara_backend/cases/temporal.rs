@@ -727,9 +727,26 @@ fn interactive_frame_is_the_exact_frame_outside_the_penumbra_and_on_a_cold_start
     );
     let exact_sequence = render(Primary::Traced, reconstructed(), 24)?;
     let fast_sequence = render(Primary::TracedInteractive, reconstructed(), 24)?;
+    // Cold probes (U-RTVIS, main 80d70614): a cold frame's pixel stops after 32 sun
+    // directions when they agree, so it can differ from the exact frame only where the exact
+    // frame is partly shadowed, and by less than half the shadow's contrast. Everywhere else
+    // the cold reconstructed frame is the exact frame.
+    let (cold_exact, cold_fast) = (reds(&exact_sequence[0]), reds(&fast_sequence[0]));
+    let mut cold_differing = 0;
+    for (a, b) in cold_exact.iter().zip(&cold_fast) {
+        if a == b {
+            continue;
+        }
+        cold_differing += 1;
+        ensure!(
+            *a > umbra + 1e-3 * contrast && *a < lit - 1e-3 * contrast && (a - b).abs() < 0.5 * contrast,
+            "the cold reconstructed frame differs outside the penumbra or by too much: {a} against {b}"
+        );
+    }
     ensure!(
-        exact_sequence[0] == fast_sequence[0],
-        "the cold reconstructed frame is not the exact frame"
+        cold_differing * 1000 <= cold_exact.len(),
+        "{cold_differing} of {} cold pixels differ from the exact frame (more than 0.1%)",
+        cold_exact.len()
     );
     let mut later = (0, 0f32);
     for (a, b) in exact_sequence.iter().zip(&fast_sequence).skip(1) {
