@@ -124,7 +124,7 @@ struct Fixture {
 }
 
 fn fixture(path: RenderPath) -> Fixture {
-    let adapter = headless_adapter().unwrap();
+    let adapter = test_adapter();
     // SAFETY: the test suite's documented experimental-feature acknowledgement.
     let experimental_ray_query =
         (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
@@ -518,7 +518,7 @@ fn cast_hits(shapes: &[Shape], camera: Camera) -> Vec<Option<(usize, usize)>> {
 }
 
 fn view_modes_match_their_cpu_reference(path: RenderPath) {
-    let adapter = headless_adapter().unwrap();
+    let adapter = test_adapter();
     // SAFETY: the test suite's documented experimental-feature acknowledgement.
     let experimental_ray_query =
         (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });

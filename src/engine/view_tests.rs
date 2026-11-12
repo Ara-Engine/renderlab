@@ -39,7 +39,7 @@ fn cube(c: [f32; 3], h: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
 /// An engine with a ground, a red wall (bounce light) and a crate under the default sun,
 /// and the crate's object.
 fn engine(gi: bool) -> (Engine, ObjectId) {
-    let adapter = headless_adapter().unwrap();
+    let adapter = test_adapter();
     let settings = Settings {
         global_illumination: gi,
         ..Default::default()
@@ -225,7 +225,7 @@ fn views_are_created_resized_and_removed_independently() {
 #[ignore]
 fn an_empty_scene_renders_on_both_paths() {
     for path in [RenderPath::NonRt, RenderPath::HardwareRt] {
-        let adapter = headless_adapter().unwrap();
+        let adapter = test_adapter();
         // SAFETY: the test suite's documented experimental-feature acknowledgement.
         let experimental_ray_query =
             (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
