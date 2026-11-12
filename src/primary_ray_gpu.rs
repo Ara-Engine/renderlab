@@ -761,8 +761,8 @@ const RL_HISTORY_FRAME: u32 = 55;
 const RL_HISTORY: u32 = 54;
 const RL_PHASE: u32 = 60;
 /// Two halves of four, rl_resolve's sample and seen-history layers (8-15), the halves' hit
-/// distances (16, 17) and the sample's (18).
-const RL_HISTORY_LAYERS: u32 = 19;
+/// distances (16, 17), the sample's (18) and the a-trous filter's two buffers (19-22).
+const RL_HISTORY_LAYERS: u32 = 23;
 pub(super) struct HeldTargets {
     pub history: [Depth; 2],
     pub frame: Buffer,

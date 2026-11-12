@@ -312,6 +312,7 @@ fn resolve_source() -> String {
             "cap" => "RL_RESOLVE_CAP",
             "clamp" => "RL_RESOLVE_CLAMP",
             "wide" => "RL_RESOLVE_WIDE",
+            "sigma" => "RL_ATROUS_SIGMA",
             _ => continue,
         };
         let prefix = format!("const {name}:f32=");
@@ -327,6 +328,8 @@ fn resolve_source() -> String {
 pub(super) struct ResolveKit {
     group: Owned<wgpu::BindGroupLayout>,
     pipeline: Owned<wgpu::ComputePipeline>,
+    /// The a-trous passes, steps 1, 2 and 4.
+    atrous: [Owned<wgpu::ComputePipeline>; 3],
 }
 impl ResolveKit {
     pub fn new(device: &PipelineDevice, ledger: &Ledger) -> Self {
@@ -362,18 +365,24 @@ impl ResolveKit {
             }),
             ResourceKind::ShaderModule,
         );
-        let pipeline = ledger.own(
-            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                label: Some("reflection resolve"),
-                layout: Some(&layout),
-                module: &module,
-                entry_point: Some("rl_resolve"),
-                compilation_options: Default::default(),
-                cache: None,
-            }),
-            ResourceKind::ComputePipeline,
-        );
-        Self { group, pipeline }
+        let pipeline = |entry| {
+            ledger.own(
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("reflection resolve"),
+                    layout: Some(&layout),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
+                ResourceKind::ComputePipeline,
+            )
+        };
+        Self {
+            group,
+            pipeline: pipeline("rl_resolve"),
+            atrous: ["rl_atrous1", "rl_atrous2", "rl_atrous4"].map(pipeline),
+        }
     }
 }
 
@@ -415,9 +424,11 @@ impl Renderer {
             label: Some("reflection resolve"),
             timestamp_writes: None,
         });
-        compute.set_pipeline(&kit.pipeline);
         compute.set_bind_group(0, &**group, &[]);
-        compute.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+        for pipeline in std::iter::once(&kit.pipeline).chain(&kit.atrous) {
+            compute.set_pipeline(pipeline);
+            compute.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+        }
     }
 }
 

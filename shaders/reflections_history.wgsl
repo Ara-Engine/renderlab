@@ -38,9 +38,9 @@ fn rl_prepass()->bool { return RL_RESOLVE_PASS && rl_phase.x==0u; }
 fn rl_resolved(pixel:vec2<u32>)->vec4<f32> {
     let p=vec2<i32>(pixel);
     if textureLoad(rl_history,p,15).x!=rl_history_frame.words.z+1u {return vec4<f32>(0.0);}
-    let base=i32(4u*rl_history_frame.words.y);
-    let rg=unpack2x16float(textureLoad(rl_history,p,base).x);
-    let b=unpack2x16float(textureLoad(rl_history,p,base+1).x).x;
+    // The a-trous filter's last pass (reflections_resolve.wgsl, layers 21-22).
+    let rg=unpack2x16float(textureLoad(rl_history,p,21).x);
+    let b=unpack2x16float(textureLoad(rl_history,p,22).x).x;
     return vec4<f32>(rg,b,1.0);
 }
 fn rl_sample_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,sample:vec3<f32>,m2:f32,full:bool,count:f32,rough:f32,seen:vec3<f32>,seen_m2:f32,dist:f32) {

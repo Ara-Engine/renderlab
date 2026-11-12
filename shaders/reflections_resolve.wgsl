@@ -12,9 +12,9 @@ struct RlHistoryFrame { previous:mat4x4<f32>, words:vec4<u32> };
 const RL_LUMA:vec3<f32>=vec3<f32>(0.2126,0.7152,0.0722);
 const RL_RESOLVE_WIDE:f32=0.3;
 const RL_RESOLVE_DEPTH:f32=0.02;
-const RL_RESOLVE_CLAMP:f32=1.5;
+const RL_RESOLVE_CLAMP:f32=0.75;
 // The most frames a resolved history keeps.
-const RL_RESOLVE_CAP:f32=16.0;
+const RL_RESOLVE_CAP:f32=2.0;
 
 struct RlSample { rgb:vec3<f32>, m2:f32, slot:u32, rough:f32, depth:f32, full:bool, fresh:bool, dist:f32 };
 fn rl_sample(p:vec2<i32>)->RlSample {
@@ -77,9 +77,69 @@ fn rl_sample(p:vec2<i32>)->RlSample {
         m2=mix(hbm.y,moments.y/sum.w,1.0/count);
     }
     let m=min(mean,vec3<f32>(65504.0));
+    // The a-trous filter's input (layers 19, 20): the blended mean and its luminance variance.
+    let lm=dot(m,RL_LUMA);
+    textureStore(rl_history,p,RL_ATROUS_A,vec4<u32>(pack2x16float(m.rg)));
+    textureStore(rl_history,p,RL_ATROUS_A+1,vec4<u32>(pack2x16float(vec2<f32>(m.b,min(max(m2-lm*lm,0.0),65504.0)))));
     textureStore(rl_history,p,base,vec4<u32>(pack2x16float(m.rg)));
     textureStore(rl_history,p,base+1,vec4<u32>(pack2x16float(vec2<f32>(m.b,min(m2,65504.0)))));
     textureStore(rl_history,p,base+2,vec4<u32>(((s.slot)&0xffffffu)|(min(u32(count),255u)<<24u)));
     textureStore(rl_history,p,base+3,vec4<u32>(bitcast<u32>(s.depth)));
     textureStore(rl_history,p,16+i32(rl_history_frame.words.y),vec4<u32>(bitcast<u32>(dist)));
+}
+
+// ---- a-trous (step 3): three edge-aware passes over the resolved means, steps 1, 2 and 4 ----
+// A 5x5 B3-spline kernel at each step, weighted by the same placement, clip depth within
+// RL_ATROUS_DEPTH, and luminance within RL_ATROUS_SIGMA standard deviations of the centre's
+// variance (carried through the passes). Lobes under RL_ATROUS_SMOOTH take the first pass only.
+// Layers: 19-20 (A) and 21-22 (B): rg, then (b, luminance variance). The shading pass shows B.
+const RL_ATROUS_A:i32=19;
+const RL_ATROUS_B:i32=21;
+const RL_ATROUS_SIGMA:f32=4.0;
+const RL_ATROUS_DEPTH:f32=0.04;
+const RL_ATROUS_SMOOTH:f32=0.1;
+fn rl_atrous_tap(i:i32)->f32 { return select(select(3.0/8.0,1.0/4.0,abs(i)==1),1.0/16.0,abs(i)==2); }
+fn rl_atrous(p:vec2<i32>,step:i32,src:i32,dst:i32) {
+    let size=vec2<i32>(textureDimensions(rl_history));
+    let s=rl_sample(p);
+    if !s.fresh {return;}
+    let rg=unpack2x16float(textureLoad(rl_history,p,src).x);
+    let bv=unpack2x16float(textureLoad(rl_history,p,src+1).x);
+    let c=vec3<f32>(rg,bv.x);
+    if step>1 && s.rough<RL_ATROUS_SMOOTH {
+        textureStore(rl_history,p,dst,vec4<u32>(pack2x16float(c.rg)));
+        textureStore(rl_history,p,dst+1,vec4<u32>(pack2x16float(bv)));
+        return;
+    }
+    let lc=dot(c,RL_LUMA);
+    let scale=RL_ATROUS_SIGMA*sqrt(bv.y)+1e-3;
+    var sum=vec3<f32>(0.0);var weight=0.0;var variance=0.0;
+    for(var y=-2;y<=2;y+=1) {
+        for(var x=-2;x<=2;x+=1) {
+            let q=p+vec2<i32>(x,y)*step;
+            if any(q<vec2<i32>(0)) || any(q>=size) {continue;}
+            let n=rl_sample(q);
+            if !n.fresh || n.slot!=s.slot || abs(n.depth-s.depth)>RL_ATROUS_DEPTH*s.depth {continue;}
+            let nrg=unpack2x16float(textureLoad(rl_history,q,src).x);
+            let nbv=unpack2x16float(textureLoad(rl_history,q,src+1).x);
+            let v=vec3<f32>(nrg,nbv.x);
+            let w=rl_atrous_tap(x)*rl_atrous_tap(y)*exp(-abs(dot(v,RL_LUMA)-lc)/scale);
+            sum+=v*w;weight+=w;variance+=w*w*nbv.y;
+        }
+    }
+    let out=min(sum/weight,vec3<f32>(65504.0));
+    textureStore(rl_history,p,dst,vec4<u32>(pack2x16float(out.rg)));
+    textureStore(rl_history,p,dst+1,vec4<u32>(pack2x16float(vec2<f32>(out.b,min(variance/(weight*weight),65504.0)))));
+}
+@compute @workgroup_size(8,8) fn rl_atrous1(@builtin(global_invocation_id) id:vec3<u32>) {
+    if any(id.xy>=textureDimensions(rl_history)) {return;}
+    rl_atrous(vec2<i32>(id.xy),1,RL_ATROUS_A,RL_ATROUS_B);
+}
+@compute @workgroup_size(8,8) fn rl_atrous2(@builtin(global_invocation_id) id:vec3<u32>) {
+    if any(id.xy>=textureDimensions(rl_history)) {return;}
+    rl_atrous(vec2<i32>(id.xy),2,RL_ATROUS_B,RL_ATROUS_A);
+}
+@compute @workgroup_size(8,8) fn rl_atrous4(@builtin(global_invocation_id) id:vec3<u32>) {
+    if any(id.xy>=textureDimensions(rl_history)) {return;}
+    rl_atrous(vec2<i32>(id.xy),4,RL_ATROUS_A,RL_ATROUS_B);
 }
