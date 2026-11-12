@@ -444,3 +444,42 @@ moving. Both are off by default. Moving glossy quality at a reduced ray count ne
 
 Crops: D:/Coding/renderlab-work/unit-rtvis/crops-gate2 (main | on | cap16 | res | res16 | path
 tracer).
+
+### rl_resolve as a pass, first screen (2026-11-12 22:00 UTC, off)
+`RENDERLAB_RL_HISTORY=1 RENDERLAB_RL_RESOLVE_PASS=1`, b91d0a44 + ae471b4e + d940a6d7:
+- A trusted glossy receiver shows the previous frame's resolved value, reprojected by the
+  reflected point below roughness 0.3, and traces one rotated stratum inline.
+- rl_resolve then filters this frame's samples (3x3/5x5 binomial, same placement and depth),
+  clamps the history to 1.5 sigma and blends (cap 16).
+
+It fails the gate, worse than today both still and moving (reflection_matched `--stage
+--metal-balls`, three most-changed tiles against the path tracer):
+
+| | today | resolve pass |
+|---|---|---|
+| RT moving 16 | 3.12 / 6.41 / 4.37 | 8.38 / 10.28 / 7.74 |
+| RT moving 47 | 3.20 / 9.75 / 2.10 | 10.07 / 14.00 / 5.75 |
+| RT still 47 | 7.71 / 3.13 / 2.80 | 9.22 / 4.31 / 3.89 |
+
+Non-RT is the same within 0.1. The crops (D:/Coding/renderlab-work/unit-rtvis/crops-rp3,
+today | resolve | path tracer) show two faults:
+- **Gold sphere (0.25):** blotchy, mottled reflected patches. One sample per pixel a frame,
+  filtered over 3x3 and clamped loosely, leaves stale or misplaced history where the
+  reflected-point reprojection lands on the curved surface.
+- **Turntable (0.35) and aluminium ball (0.42):** grain.
+
+Cost (Showcase-like scene, 1080p moving, `shading` medians; that lease's reference run read
+39.6 ms against 26.7, so these are relative only):
+
+| | today | resolve pass |
+|---|---|---|
+| non-RT shading | 13.5 | 5.45 |
+| RT shading | 3.85 | 2.82 |
+
+Needed before it can hold:
+- more samples for rough lobes (4 strata a frame or more);
+- a wider, variance-guided a-trous filter (2-3 iterations, radius from the lobe's screen
+  footprint);
+- a tighter clamp, with the per-pixel temporal variance kept;
+- the displayed value taken after this frame's resolve, not the previous one: shading reads the
+  resolved specular in a second pass, or the lobe pre-pass.
