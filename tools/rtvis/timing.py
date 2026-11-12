@@ -304,7 +304,8 @@ PLANS["histdiag"] = [
 ]
 # The Showcase-like glossy band (reflection_matched --stage --metal-balls, 1280x720, moving):
 # shading with the history off, on, and four strata a frame. Run with the reflection_matched exe.
-SHOW = ["--matched", "--lamp", "1", "--stage", "--metal-balls", "--write-frames", "47"]
+# Timing only: the one written frame is frame 0, outside the measured frames.
+SHOW = ["--matched", "--lamp", "1", "--stage", "--metal-balls", "--write-frames", "0"]
 PLANS["histshow"] = [
     (f"s-{path}-{v}-{k}", ["--path", path, *SHOW], env)
     for k in (1, 2) for path in ("nonrt", "rt") for v, env in HIST_TUNES[:3]
