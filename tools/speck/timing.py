@@ -4,9 +4,8 @@
     py -3 -B tools/speck/timing.py cuts GAME_EXE OUT    # inside a lease: the field walk, a cut every frame
     py -3 -B tools/speck/timing.py report OUT           # CPU
 
-`run` opens with the reference run (N-VSM2's: bin/n3's game scene on non-RT `Disk`, 96 frames
-at 1080p, whose sun lookup stage reads about 1.21 ms; more than 10 % off and the lease is not
-a measurement), then flies the flight (180 frames, cut at 24, no frame written) on each path
+Each lease opens with the reference run (this unit's s8 binary on the non-RT field walk, whose
+frame root timed at 28.8 ms; more than 10 % off and the lease is not a measurement). `run` then flies the flight (180 frames, cut at 24, no frame written) on each path
 with the rays off and on, twice, alternating, with RENDERLAB_PASS_LOG's per-pass GPU timeline.
 `report` prints, per path and setting, the median GPU span and GI pass times over the moving
 frames (8-23 and 40-179) and over the 16 frames from the cut.
@@ -21,8 +20,11 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 WORK = Path("D:/Coding/renderlab-work/unit-speck")
 FOX = "D:/Coding/renderlab-work/m7-sk1/Fox.glb"
-REFERENCE = "D:/Coding/renderlab-work/n-vsm1/bin/n3/game_scene.exe"
-EXPECTED_LOOKUP_MS = 1.21
+# The reference run: this unit's s8 binary (dfc6fab3) on the non-RT field walk, whose frame root
+# timed at 28.8 ms (2026-11-12, interleaved twice). N-VSM2's bin/n3, the earlier reference, was
+# deleted in that night's disk cleanup.
+REFERENCE = str(WORK / "bin/s8/game_scene.exe")
+EXPECTED_FRAME_MS = 28.8
 RUNS = [(path, rays, visit) for visit in (1, 2) for path in ("nonrt", "rt") for rays in (0, 16)]
 
 
@@ -49,11 +51,11 @@ def environment():
 
 def reference(out, env):
     """The lease's opening reference run; returns its exit code."""
-    code = fly(REFERENCE, out / "reference", "nonrt", ["--diag", "vsm-lookup=disk"], 96, env)
-    lookup = st.median(r["passes"].get("sun_shadow.lookup", 0.0) for r in rows(out / "reference/passes.jsonl")[8:])
-    ok = 0.9 * EXPECTED_LOOKUP_MS <= lookup <= 1.1 * EXPECTED_LOOKUP_MS
-    (out / "reference.json").write_text(json.dumps(dict(sun_lookup_ms=lookup, expected_ms=EXPECTED_LOOKUP_MS, within_10_percent=ok)))
-    print(f"reference sun lookup {lookup:.3f} ms (expected {EXPECTED_LOOKUP_MS}): {'ok' if ok else 'MORE THAN 10% OFF'}", flush=True)
+    code = fly(REFERENCE, out / "reference", "nonrt", ["--diag", "field=1"], 120, env)
+    frame = st.median(r["span"] for r in rows(out / "reference/passes.jsonl")[8:])
+    ok = 0.9 * EXPECTED_FRAME_MS <= frame <= 1.1 * EXPECTED_FRAME_MS
+    (out / "reference.json").write_text(json.dumps(dict(frame_ms=frame, expected_ms=EXPECTED_FRAME_MS, within_10_percent=ok)))
+    print(f"reference frame {frame:.2f} ms (expected {EXPECTED_FRAME_MS}): {'ok' if ok else 'MORE THAN 10% OFF'}", flush=True)
     return code
 
 
