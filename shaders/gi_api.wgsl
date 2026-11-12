@@ -128,24 +128,6 @@ fn gi_sample(world:vec3<f32>, level:u32, bin:u32) -> f32 {
     }
     return total;
 }
-// U-RTVIS: the receiver's level sums and bounce weight, kept across the coarser fill's gi_sample (which
-// overwrites gi_lv_*) for the rest term after it. Restoring them gives the same sums as
-// sampling the level again, without its finds (GI_KEEP_LEVEL; src/program.rs
-// RENDERLAB_GI_KEEP=0 samples again).
-const GI_KEEP_LEVEL:bool=true;
-var<private> gi_kept_sky:array<vec3<f32>,9>;
-var<private> gi_kept_bounce:array<vec3<f32>,4>;
-var<private> gi_kept_bw:f32;
-fn gi_keep_level() {
-    for(var i=0u;i<9u;i+=1u) { gi_kept_sky[i]=gi_lv_sky[i]; }
-    for(var i=0u;i<4u;i+=1u) { gi_kept_bounce[i]=gi_lv_bounce[i]; }
-    gi_kept_bw=gi_lv_bw;
-}
-fn gi_restore_level() {
-    for(var i=0u;i<9u;i+=1u) { gi_lv_sky[i]=gi_kept_sky[i]; }
-    for(var i=0u;i<4u;i+=1u) { gi_lv_bounce[i]=gi_kept_bounce[i]; }
-    gi_lv_bw=gi_kept_bw;
-}
 // gi_sample, read at the finer level where it meets split cells (GI_REFINE 1), keeping the
 // finer level when it has a value: the same walk gi_probe requests. The level sums hold the
 // level whose weight it returns.
@@ -153,17 +135,13 @@ fn gi_sample_refined(world:vec3<f32>, level:u32, bin:u32) -> f32 {
     // CC1: one sampler call site, preserving the original level/finer/restore walk.
     // Repeating its body here multiplies the driver's inlined lookup graph.
     var sample_level=level;
-    var first=0.0;
     for(var step=0u;step<3u;step+=1u) {
         let s=gi_sample(world,sample_level,bin);
         if step==0u {
             if GI_REFINE==0u || !gi_sampled_split || level==0u {return s;}
-            // U-RTVIS: keep the level's sums for an empty finer level (GI_KEEP_LEVEL).
-            if GI_KEEP_LEVEL { gi_keep_level(); first=s; }
             sample_level=level-1u;
         } else if step==1u {
             if s>1e-6 {return s;}
-            if GI_KEEP_LEVEL { gi_restore_level(); gi_sampled_split=true; return first; }
             sample_level=level;
         } else {return s;}
     }
@@ -247,7 +225,6 @@ fn gi_prepare(input:SurfaceInput) {
             continue;
         }
         gi_rx_add(select(w,w/s,sky_full),w);
-        if GI_KEEP_LEVEL { gi_keep_level(); }
         let c=gi_sample(world,level+1u,bin);
         let cb=gi_lv_bounce_weight(c);
         let sky_fill=!sky_full && c>1e-6;
@@ -255,8 +232,8 @@ fn gi_prepare(input:SurfaceInput) {
         gi_rx_add(select(0.0,w*(1.0-s)/c,sky_fill),select(0.0,w*(1.0-bw)/cb,bounce_fill));
         if (sky_full || sky_fill) && bounce_fill { continue; }
         // No coarser value for a term: the level's own corners take that term's rest, as
-        // without the fill. The fill overwrote the level sums: restore them.
-        if GI_KEEP_LEVEL { gi_restore_level(); } else { _ = gi_sample_refined(world,level,bin); }
+        // without the fill.
+        _ = gi_sample_refined(world,level,bin);
         gi_rx_add(select(w*(1.0-s)/s,0.0,sky_full || sky_fill),select(gi_share(w*(1.0-bw),bw),0.0,bounce_fill));
     }
     if total>0.0 {
