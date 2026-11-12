@@ -305,4 +305,119 @@ fn indirect_irradiance(input:SurfaceInput, n:vec3<f32>) -> vec3<f32> {
     let m=gi_viewed_side(n);
     return gi_rx_sky_irradiance(m)+gi_rx_bounce_irradiance(m);
 }
+
+// ---- GI tiles (RENDERLAB_GI_TILE; the Mac thread's) ----
+// The camera lookup once per 4x4 tile of a continuous surface instead of once per pixel.
+// The traced shading entries call gi_tile_step with uniform control flow before they
+// diverge: each lane publishes its receiver, one lane per tile classifies it (every pixel
+// a hit, one cache bin, normals within GI_TILE_COS of the tile's first, positions within
+// GI_TILE_PLANE of the eye distance from the bilinear surface through the corners), the
+// four corner pixels run the usual lookup, and every pixel of a continuous tile then takes
+// the corners' sums blended bilinearly (gi_prepare reads them through gi_tile_*). Edges,
+// corners, contacts and bin changes fail the test and read per pixel as before. The SH is
+// still evaluated at each pixel's own normal, so shading detail is unchanged; only the
+// cache's spatial sampling becomes a bilinear patch over the tile.
+const GI_TILE:bool=false;
+const GI_TILE_COS:f32=0.95;
+const GI_TILE_PLANE:f32=0.01;
+var<private> gi_tile_ready:bool;
+var<private> gi_tile_sky:array<vec3<f32>,9>;
+var<private> gi_tile_bounce:array<vec3<f32>,4>;
+// Up to 32 lanes (two 4x4 tiles side by side) and their eight corner lookups.
+var<workgroup> gi_wg_world:array<vec4<f32>,32>;
+var<workgroup> gi_wg_normal:array<vec4<f32>,32>;
+var<workgroup> gi_wg_ok:array<u32,2>;
+var<workgroup> gi_wg_sky:array<array<vec3<f32>,9>,8>;
+var<workgroup> gi_wg_bounce:array<array<vec3<f32>,4>,8>;
+var<workgroup> gi_wg_valid:array<u32,8>;
+fn gi_tiles_on() -> bool { return GI_TILE; }
+// `lane`: the invocation in a workgroup `row` lanes wide (4 or 8, rows of 4); `valid`: its
+// pixel is a hit this module shades, with `receiver` and interpolated `normal`.
+fn gi_tile_step(lane:vec2<u32>, row:u32, valid:bool, receiver:Receiver, normal:vec3<f32>) {
+    let me=lane.y*row+lane.x;
+    let t=lane.x/4u;
+    let local=vec2<u32>(lane.x%4u,lane.y);
+    let on=valid && gi_word(GI_H_ENABLED)!=0u;
+    var n=vec3<f32>(0.0);
+    var bin=0u;
+    if on {
+        n=unit_normal(gi_bin_source(gi_viewed_normal(receiver.world,receiver.geometric),normal));
+        bin=gi_bin(n);
+    }
+    gi_wg_world[me]=vec4<f32>(receiver.world,select(0.0,1.0,on));
+    gi_wg_normal[me]=vec4<f32>(n,bitcast<f32>(bin));
+    workgroupBarrier();
+    if local.x==0u && local.y==0u {
+        let base=t*4u;
+        let w00=gi_wg_world[base];let w30=gi_wg_world[base+3u];
+        let w03=gi_wg_world[3u*row+base];let w33=gi_wg_world[3u*row+base+3u];
+        let n0=gi_wg_normal[base];
+        let tolerance=GI_TILE_PLANE*distance(w00.xyz,lighting.eye);
+        var ok=true;
+        for(var y=0u;y<4u;y+=1u) {
+            for(var x=0u;x<4u;x+=1u) {
+                let i=y*row+base+x;
+                let p=gi_wg_world[i];
+                let q=gi_wg_normal[i];
+                let f=vec2<f32>(f32(x),f32(y))/3.0;
+                let expected=mix(mix(w00.xyz,w30.xyz,f.x),mix(w03.xyz,w33.xyz,f.x),f.y);
+                if p.w==0.0 || bitcast<u32>(q.w)!=bitcast<u32>(n0.w) || dot(q.xyz,n0.xyz)<GI_TILE_COS
+                    || distance(expected,p.xyz)>tolerance { ok=false; }
+            }
+        }
+        gi_wg_ok[t]=select(0u,1u,ok);
+    }
+    workgroupBarrier();
+    // The module's one lookup call site, in two passes: first a continuous tile's corners
+    // and every pixel of a tile that is not (it keeps its own value), then the inner pixels
+    // of a continuous tile whose corners found no value.
+    let ok=gi_wg_ok[t]!=0u;
+    let corner=(local.x==0u || local.x==3u) && (local.y==0u || local.y==3u);
+    let slot=t*4u+select(0u,1u,local.x==3u)+select(0u,2u,local.y==3u);
+    let c=t*4u;
+    var blended=false;
+    for(var round=0u;round<2u;round+=1u) {
+        var need=on && (corner || !ok);
+        if round==1u {
+            blended=ok && (gi_wg_valid[c]&gi_wg_valid[c+1u]&gi_wg_valid[c+2u]&gi_wg_valid[c+3u])!=0u;
+            need=on && ok && !corner && !blended;
+        }
+        if need {
+            var input:SurfaceInput;
+            input.world=receiver.world;
+            input.normal=normal;
+            input.receiver=receiver;
+            gi_prepare(input);
+            gi_tile_ready=gi_rx_valid;
+            for(var i=0u;i<9u;i+=1u) { gi_tile_sky[i]=gi_rx_sky[i]; }
+            for(var i=0u;i<4u;i+=1u) { gi_tile_bounce[i]=gi_rx_bounce[i]; }
+            if round==0u && ok && corner {
+                for(var i=0u;i<9u;i+=1u) { gi_wg_sky[slot][i]=gi_rx_sky[i]; }
+                for(var i=0u;i<4u;i+=1u) { gi_wg_bounce[slot][i]=gi_rx_bounce[i]; }
+                gi_wg_valid[slot]=select(0u,1u,gi_rx_valid);
+            }
+        }
+        workgroupBarrier();
+    }
+    if on && blended && !corner {
+        let f=vec2<f32>(local)/3.0;
+        for(var i=0u;i<9u;i+=1u) {
+            gi_tile_sky[i]=mix(mix(gi_wg_sky[c][i],gi_wg_sky[c+1u][i],f.x),mix(gi_wg_sky[c+2u][i],gi_wg_sky[c+3u][i],f.x),f.y);
+        }
+        for(var i=0u;i<4u;i+=1u) {
+            gi_tile_bounce[i]=mix(mix(gi_wg_bounce[c][i],gi_wg_bounce[c+1u][i],f.x),mix(gi_wg_bounce[c+2u][i],gi_wg_bounce[c+3u][i],f.x),f.y);
+        }
+        gi_tile_ready=true;
+    }
+}
+// The traced entries' gi_prepare when tiles run (src/program.rs): the value gi_tile_step
+// left, or the open environment where its lookup found none, as gi_prepare would.
+fn gi_tile_take(input:SurfaceInput) {
+    gi_rx_valid=gi_tile_ready;
+    if !gi_tile_ready { return; }
+    for(var i=0u;i<9u;i+=1u) { gi_rx_sky[i]=gi_tile_sky[i]; }
+    for(var i=0u;i<4u;i+=1u) { gi_rx_bounce[i]=gi_tile_bounce[i]; }
+    gi_rx_normal=unit_normal(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal));
+}
+// ---- end of GI tiles ----
 // ---- end of the indirect-light inputs ----

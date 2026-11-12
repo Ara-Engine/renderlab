@@ -246,9 +246,22 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
     let _ = name;
     builtin.into()
 }
+/// Whether the traced shading entries read the camera's cache lookup once per continuous
+/// 4x4 tile (gi_api.wgsl `gi_tile_step`). `RENDERLAB_GI_TILE=0` keeps it per pixel.
+fn gi_tiles() -> bool {
+    static TILES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *TILES.get_or_init(|| std::env::var("RENDERLAB_GI_TILE").is_ok_and(|v| v == "step"))
+}
 fn indirect_api() -> String {
     let mut source = gi_shader("gi_cells.wgsl", INDIRECT_API[0]).into_owned();
-    source.push_str(&gi_shader("gi_api.wgsl", INDIRECT_API[1]));
+    let api = gi_shader("gi_api.wgsl", INDIRECT_API[1]);
+    if gi_tiles() {
+        let from = "const GI_TILE:bool=false;";
+        assert_eq!(api.matches(from).count(), 1, "RENDERLAB_GI_TILE seam");
+        source.push_str(&api.replacen(from, "const GI_TILE:bool=true;", 1));
+    } else {
+        source.push_str(&api);
+    }
     source.push_str(&gi_shader("environment_lobes.wgsl", INDIRECT_API[2]));
     source
 }
@@ -532,21 +545,32 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         ),
     };
     let indirect_calls = uses_indirect(program);
-    // Cell shading reads the cache's own definitions whatever the program calls.
+    // Cell shading reads the cache's own definitions whatever the program calls. Without
+    // them the shading entries' GI tile step (gi_api.wgsl) does nothing.
     let mut indirect = if indirect_calls || stage == Stage::Cell {
         indirect_api()
     } else {
-        String::new()
+        concat!(
+            "fn gi_tiles_on() -> bool { return false; }\n",
+            "fn gi_tile_step(lane:vec2<u32>, row:u32, valid:bool, receiver:Receiver, normal:vec3<f32>) {}\n",
+        )
+        .to_owned()
     };
     // Each entry calls this once per receiver before `surface`: the receiver's one cache
     // lookup for programs that call an indirect input, and the specular visibility from it
     // for those that read the specular inputs.
     let specular = tokens(program).iter().any(|t| SPECULAR_INPUTS.contains(t));
-    indirect.push_str(match (indirect_calls, specular) {
-        (true, true) => {
+    // The traced entries' tile step has already looked the receiver up (GI tiles): take it.
+    let take = gi_tiles() && matches!(stage, Stage::Traced | Stage::TracedStreamed);
+    indirect.push_str(match (indirect_calls, specular, take) {
+        (true, true, false) => {
             "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); es_prepare(input); }\n"
         }
-        (true, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
+        (true, false, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
+        (true, true, true) => {
+            "fn rl_indirect_prepare(input:SurfaceInput) { gi_tile_take(input); es_prepare(input); }\n"
+        }
+        (true, false, true) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_tile_take(input); }\n",
         _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
     });
     // LC1: the light loop's clusters and local shadows, traced where the head binds rays.
