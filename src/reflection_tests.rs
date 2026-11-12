@@ -56,6 +56,9 @@ fn reflection_composition_contract() {
                     .count(),
                 1
             );
+            // U-RTVIS: hits split the local lights' disk rays across the pixel's strata.
+            assert!(source.contains("min(rl_hit_strata,samples)"));
+            assert!(source.contains("return lit/f32(visited);"));
         }
     }
     // Both halves are needed to trace; either alone composes the stub.

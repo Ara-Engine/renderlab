@@ -23,6 +23,11 @@ fn software_reflection_composition() {
         assert_eq!(source.matches(call).count(), 1);
         assert!(source.contains("fn rs_trace(") && !source.contains("ray_query"));
         assert!(source.contains("if rl_reflection_hit {return rl_hit_shadow("));
+        // U-RTVIS: hits split the PCSS filter taps across the pixel's strata.
+        assert!(
+            source.contains("min(rl_hit_strata,24u)")
+                && source.contains("return soft/f32(visited);")
+        );
         // Both paths read the global bands (ReflectionSettings).
         assert!(source.contains("let bands=primary_frame.reflection;"));
         let module = naga::front::wgsl::parse_str(&source)
