@@ -549,7 +549,7 @@ impl Renderer {
                             wgpu::BindGroupEntry {
                                 binding: 27,
                                 resource: wgpu::BindingResource::TextureView(
-                                    &state.transmission.map.view,
+                                    &state.transmission.reduced.view,
                                 ),
                             },
                             wgpu::BindGroupEntry {

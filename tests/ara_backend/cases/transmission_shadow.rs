@@ -8,6 +8,7 @@ use ara_gpu::{
 use renderlab::backend_ara::{
     bindings::{HeapBindings, Input},
     buffer::StorageBuffer,
+    kernel::Kernel,
     mesh::MeshGeometry,
     shader::InputKey,
     shadow_raster::ShadowDraw,
@@ -245,6 +246,82 @@ fn colored_transmission_shadow_layers_native_replay_against_cpu() -> Result<()> 
         for t in bases.into_iter().chain([output, depth]) {
             gpu.retire(Resource::Image(t.image))?;
         }
+    }
+    cache.retire(&mut gpu)?;
+    gpu.collect()?;
+    gpu.assert_clean()?;
+    Ok(())
+}
+
+/// TP2's layers reduced to two per texel (shaders/transmission_reduce.wgsl, audit 3.5): the
+/// nearest sheet, then the product of the others at the second-nearest depth, against the
+/// same reduction on the CPU. Every value is exact in f16, so the comparison is exact.
+#[test]
+fn transmission_layers_reduce_to_the_nearest_and_the_rest() -> Result<()> {
+    let path = root("transmission-reduce");
+    let mut gpu = GpuDevice::new_raster(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let kernel = Kernel::new(&mut gpu, &cache, Pass::TransmissionReduce)?;
+    // Three layers over four texels: rgb transmitted light, alpha depth; `clear` is full
+    // light at the far depth, as an untouched texel holds.
+    let clear = [1.0f32; 4];
+    let layers: [[[f32; 4]; 4]; 3] = [
+        [[0.5, 0.5, 0.5, 0.25], clear, [0.5, 0.25, 1.0, 0.75], clear],
+        [[0.25, 1.0, 0.5, 0.5], clear, [1.0, 0.5, 0.5, 0.125], [0.5, 0.5, 0.5, 0.5]],
+        [[0.75, 0.5, 1.0, 0.125], clear, clear, clear],
+    ];
+    let size = [4, 1];
+    let input = Texture::array(&mut gpu, size, 3, Format::Rgba16Float, false, false)?;
+    let output = Texture::array(&mut gpu, size, 2, Format::Rgba16Float, true, false)?;
+    let mut graph = Graph::default();
+    let mut rec = gpu.begin(Queue::Graphics);
+    let pixels: Vec<[f32; 4]> = layers.iter().flatten().copied().collect();
+    let staging = upload(&mut gpu, &mut graph, &mut rec, input.image, &half_bytes(&pixels))?;
+    let key = |binding| InputKey { group: 0, binding };
+    let inputs = HeapBindings::new(
+        &mut gpu,
+        Pass::TransmissionReduce,
+        &[(key(0), Input::Image(&input)), (key(1), Input::Image(&output))],
+    )?;
+    inputs.import(&mut graph);
+    kernel.record(&mut graph, &mut rec, &inputs, [size[0], size[1], 1])?;
+    let read = readback(&mut gpu, &mut graph, &mut rec, output.image, 4 * 2 * 8)?;
+    let point = gpu.submit(rec.finish(), &[])?;
+    gpu.wait(point)?;
+    let got: Vec<[f32; 4]> = gpu
+        .read(read)?
+        .as_chunks::<8>()
+        .0
+        .iter()
+        .map(|p| {
+            std::array::from_fn(|c| {
+                f16::from_bits(u16::from_le_bytes([p[c * 2], p[c * 2 + 1]])).to_f32()
+            })
+        })
+        .collect();
+    for x in 0..4 {
+        let (mut near, mut rest, mut second) = (clear, [1.0f32; 3], 1.0f32);
+        for layer in &layers {
+            let t = layer[x];
+            if t[3] < near[3] {
+                (0..3).for_each(|c| rest[c] *= near[c]);
+                second = near[3];
+                near = t;
+            } else {
+                (0..3).for_each(|c| rest[c] *= t[c]);
+                second = second.min(t[3]);
+            }
+        }
+        ensure!(got[x] == near, "texel {x}: nearest {:?}, want {near:?}", got[x]);
+        let behind = [rest[0], rest[1], rest[2], second];
+        ensure!(got[4 + x] == behind, "texel {x}: rest {:?}, want {behind:?}", got[4 + x]);
+    }
+    inputs.retire(&mut gpu, &mut graph)?;
+    for b in [staging, read] {
+        gpu.retire(Resource::Buffer(b))?;
+    }
+    for t in [input, output] {
+        gpu.retire(Resource::Image(t.image))?;
     }
     cache.retire(&mut gpu)?;
     gpu.collect()?;
