@@ -313,6 +313,7 @@ fn resolve_source() -> String {
             "clamp" => "RL_RESOLVE_CLAMP",
             "wide" => "RL_RESOLVE_WIDE",
             "sigma" => "RL_ATROUS_SIGMA",
+            "footprint" => "RL_ATROUS_FOOTPRINT",
             _ => continue,
         };
         let prefix = format!("const {name}:f32=");

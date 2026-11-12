@@ -16,7 +16,7 @@ const RL_RESOLVE_CLAMP:f32=0.75;
 // The most frames a resolved history keeps.
 const RL_RESOLVE_CAP:f32=2.0;
 
-struct RlSample { rgb:vec3<f32>, m2:f32, slot:u32, rough:f32, depth:f32, full:bool, fresh:bool, dist:f32 };
+struct RlSample { rgb:vec3<f32>, m2:f32, slot:u32, rough:f32, depth:f32, full:bool, fresh:bool, dist:f32, footprint:f32 };
 fn rl_sample(p:vec2<i32>)->RlSample {
     let fresh=textureLoad(rl_history,p,15).x==rl_history_frame.words.z+1u;
     let rg=unpack2x16float(textureLoad(rl_history,p,8).x);
@@ -24,7 +24,8 @@ fn rl_sample(p:vec2<i32>)->RlSample {
     let id=textureLoad(rl_history,p,10).x;
     let w=bitcast<f32>(textureLoad(rl_history,p,11).x);
     let dist=bitcast<f32>(textureLoad(rl_history,p,18).x);
-    return RlSample(vec3<f32>(rg,bm.x),bm.y,id&0xffffffu,f32(id>>24u)/255.0,abs(w),w<0.0,fresh,dist);
+    let footprint=unpack2x16float(textureLoad(rl_history,p,14).x>>16u).x;
+    return RlSample(vec3<f32>(rg,bm.x),bm.y,id&0xffffffu,f32(id>>24u)/255.0,abs(w),w<0.0,fresh,dist,footprint);
 }
 
 @compute @workgroup_size(8,8) fn rl_resolve(@builtin(global_invocation_id) id:vec3<u32>) {
@@ -38,7 +39,7 @@ fn rl_sample(p:vec2<i32>)->RlSample {
     // The stored hit distance (0: none or a miss): this frame's neighbourhood mean of hits.
     var dist=s.dist;
     if s.full {
-        count=f32(textureLoad(rl_history,p,14).x);
+        count=f32(textureLoad(rl_history,p,14).x&0xffu);
     } else {
         // This frame's samples around p: one surface only.
         let wide=s.rough>=RL_RESOLVE_WIDE;
@@ -67,7 +68,7 @@ fn rl_sample(p:vec2<i32>)->RlSample {
         // The history the shading read, clamped to this frame's neighbourhood.
         let hrg=unpack2x16float(textureLoad(rl_history,p,12).x);
         let hbm=unpack2x16float(textureLoad(rl_history,p,13).x);
-        let seen=f32(textureLoad(rl_history,p,14).x);
+        let seen=f32(textureLoad(rl_history,p,14).x&0xffu);
         var history=vec3<f32>(hrg,hbm.x);
         let l=dot(history,RL_LUMA);
         let lo=max(mu-RL_RESOLVE_CLAMP*sigma,0.0);let hi=mu+RL_RESOLVE_CLAMP*sigma+1e-4;
@@ -98,6 +99,8 @@ const RL_ATROUS_B:i32=21;
 const RL_ATROUS_SIGMA:f32=4.0;
 const RL_ATROUS_DEPTH:f32=0.04;
 const RL_ATROUS_SMOOTH:f32=0.1;
+// The share of the lobe's screen footprint the a-trous span may reach.
+const RL_ATROUS_FOOTPRINT:f32=1.0;
 fn rl_atrous_tap(i:i32)->f32 { return select(select(3.0/8.0,1.0/4.0,abs(i)==1),1.0/16.0,abs(i)==2); }
 fn rl_atrous(p:vec2<i32>,step:i32,src:i32,dst:i32) {
     let size=vec2<i32>(textureDimensions(rl_history));
@@ -106,7 +109,9 @@ fn rl_atrous(p:vec2<i32>,step:i32,src:i32,dst:i32) {
     let rg=unpack2x16float(textureLoad(rl_history,p,src).x);
     let bv=unpack2x16float(textureLoad(rl_history,p,src+1).x);
     let c=vec3<f32>(rg,bv.x);
-    if step>1 && s.rough<RL_ATROUS_SMOOTH {
+    // A pass whose span (2 x step pixels each side) exceeds the lobe's own screen footprint would
+    // blur the reflection beyond what the lobe does: skip it (the first pass is always kept).
+    if step>1 && (s.rough<RL_ATROUS_SMOOTH || f32(2*step)>s.footprint*RL_ATROUS_FOOTPRINT) {
         textureStore(rl_history,p,dst,vec4<u32>(pack2x16float(c.rg)));
         textureStore(rl_history,p,dst+1,vec4<u32>(pack2x16float(bv)));
         return;

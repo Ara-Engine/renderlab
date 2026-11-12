@@ -52,6 +52,9 @@ fn rl_sample_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,sample:vec3<f32>,m2:
 // ---- end of rl history stubs ----
 // The receiver's perceptual roughness, for the history's resolve.
 var<private> rl_hist_rough:f32;
+// The lobe's footprint in screen pixels (about 2 alpha times the hit distance over the pixel's
+// width at the receiver; 64 for a miss): the resolve's a-trous passes stay inside it.
+var<private> rl_footprint:f32;
 // U-RTVIS reflection pass: without it (these stubs) no lobe is written. The wgpu primary shading
 // modules replace the block with shaders/reflections_lobe.wgsl while RENDERLAB_RL_PASS=1.
 // ---- rl pass stubs ----
@@ -364,6 +367,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         // rl_resolve folds this frame's sample; the receiver shows the resolved history.
         let fresh=select(hist.rgb,sum/f32(max(valid,1u)),valid>0u);
         let fresh_m2=select(rl_hist_m2,squares/f32(max(valid,1u)),valid>0u);
+        rl_footprint=select(64.0,2.0*alpha*(rl_dist/max(rl_dist_n,1.0))/max(width,1e-6),rl_dist_n>0.0);
         rl_sample_store(pixel,slot,input.world,fresh,fresh_m2,false,hist.w,rough,hist.rgb,rl_hist_m2,select(0.0,rl_dist/rl_dist_n,rl_dist_n>0.0));
         rl_specular=vec4<f32>(hist.rgb,traced);
         return;
@@ -400,6 +404,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let mean=sum/f32(valid);
     // The full set seeds the history as count strata, with their spread.
     if RL_RESOLVE_PASS && !mirror {
+        rl_footprint=select(64.0,2.0*alpha*(rl_dist/max(rl_dist_n,1.0))/max(width,1e-6),rl_dist_n>0.0);
         rl_sample_store(pixel,slot,input.world,mean,squares/f32(valid),true,f32(count),rough,vec3<f32>(0.0),0.0,select(0.0,rl_dist/rl_dist_n,rl_dist_n>0.0));
     } else if RL_HISTORY && !mirror {rl_history_store(pixel,slot,input.world,mean,squares/f32(valid),f32(count));}
     rl_specular=vec4<f32>(mean,traced);

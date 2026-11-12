@@ -55,7 +55,8 @@ fn rl_sample_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,sample:vec3<f32>,m2:
     textureStore(rl_history,p,11,vec4<u32>(bitcast<u32>(select(w,-w,full))));
     textureStore(rl_history,p,12,vec4<u32>(pack2x16float(h.rg)));
     textureStore(rl_history,p,13,vec4<u32>(pack2x16float(vec2<f32>(h.b,min(seen_m2,65504.0)))));
-    textureStore(rl_history,p,14,vec4<u32>(u32(count)));
+    // Layer 14: the count (low 8 bits) and the lobe's screen footprint in pixels (f16, high 16).
+    textureStore(rl_history,p,14,vec4<u32>(min(u32(count),255u)|(pack2x16float(vec2<f32>(min(rl_footprint,65504.0),0.0))<<16u)));
     textureStore(rl_history,p,15,vec4<u32>(rl_history_frame.words.z+1u));
 }
 const RL_RESOLVE_WIDE:f32=0.3;
