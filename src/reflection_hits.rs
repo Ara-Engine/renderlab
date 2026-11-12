@@ -21,6 +21,17 @@ pub(crate) const LANES: u32 = 64;
 /// Group-0 bindings of the hit entry: H, R, the bin uniform and the binned record order.
 pub(crate) const BINDINGS: [u32; 4] = [64, 65, 66, 67];
 
+/// The binning kernel (shaders/reflection_hit_bins.wgsl): each record's index into its
+/// program's bin at `slot * stride` (the bin's length, then indices), with the bin's
+/// indirect dispatch arguments. Program-agnostic, compiled once.
+pub(crate) fn bin_source() -> String {
+    format!(
+        "const PRIMARY_BATCHES:u32={}u;\n{}",
+        crate::TRACED_DRAWS,
+        include_str!("../shaders/reflection_hit_bins.wgsl")
+    )
+}
+
 /// Workgroups for `n` records: min(n, ROW) x ceil(n / ROW) rows of [`LANES`] records.
 pub(crate) fn groups(n: u32) -> [u32; 3] {
     let groups = n.div_ceil(LANES);
@@ -71,6 +82,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn the_binning_kernel_validates() {
+        let source = bin_source();
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
     }
 
     #[test]
