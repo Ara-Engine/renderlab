@@ -265,6 +265,12 @@ PLANS["subsetpics"] = [
     (f"p-{path}-{kind}-sub{v.replace('@', 'r')}", ["--path", path, "--fox", FOX, *extra, "--frames", "48", "--every", "1"], SUBSET(v))
     for path in ("nonrt", "rt") for kind, extra in (("flight", []), ("hold", ["--diag", "hold=1"])) for v in (SUBSET_ON, "1")
 ]
+# The traced band's end (RENDERLAB_REFLECTION_ROUGH replaces max_roughness, default 0.5): timing.
+ROUGH_VALUES = ("0.5", "0.35", "0.25")
+PLANS["rough"] = [
+    (f"r-{path}-{name}-r{v}-{k}", ["--path", path, *extra, "--frames", "60"], {"RENDERLAB_REFLECTION_ROUGH": v})
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v in ROUGH_VALUES
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
@@ -396,6 +402,28 @@ def pair_matched(exe, out, name, key, value, spp="4096"):
     return code
 
 
+def multi_matched(exe, out, key, *values, spp="4096"):
+    """reflection_matched with `key` at each value (runs m-PATH-KIND-vVALUE; "-" leaves it unset),
+    both paths, moving frames 16/32/47 and the held pose of frame 32, then the path tracer."""
+    out = Path(out)
+    env = environment()
+    code = 0
+    runs = [(f"m-{path}-{kind}-v{v}", ["--path", path, "--matched", "--lamp", "1", *extra], {} if v == "-" else {key: v})
+            for kind, extra in [("moving", ["--write-frames", "16,32,47"]), ("still", ["--freeze", "32", "--write-frames", "47"])]
+            for path in ("rt", "nonrt") for v in values]
+    if not (out / "m-reference" / "frame-047.png").exists():
+        runs.append(("m-reference", ["--path", "rt", "--lamp", "1", "--reference", spp, "--write-frames", "16,32,47"], {}))
+    for run, extra, more in runs:
+        d = out / run
+        d.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run([exe, *extra, "--out", str(d)], cwd=REPO, capture_output=True, text=True,
+                           timeout=900, env=env | more)
+        (d / "stderr.txt").write_text(r.stderr[-20000:])
+        print(run, "exit", r.returncode, flush=True)
+        code = max(code, r.returncode)
+    return code
+
+
 def split_matched(exe, out, spp="4096"):
     """reflection_matched with its arch lamp (a shadowed local light), RENDERLAB_RL_SPLIT on and
     off, both paths: the moving flight's frames 16, 32 and 47, and the pose of frame 32 held still
@@ -456,6 +484,8 @@ if __name__ == "__main__":
         hashes(*sys.argv[2:4])
     if sys.argv[1] == "gi":
         gi(sys.argv[2])
+    if sys.argv[1] == "multi_matched":
+        raise SystemExit(multi_matched(*sys.argv[2:]))
     if sys.argv[1] == "pair_matched":
         raise SystemExit(pair_matched(*sys.argv[2:7]))
     if sys.argv[1] == "switch_matched":
