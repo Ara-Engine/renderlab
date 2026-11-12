@@ -845,7 +845,8 @@ impl Engine {
     }
     /// One id layer of the view's last frame packed bit-exact into an RGBA8 image (R =
     /// bits 0-7 ... A = bits 24-31), left in `CopySource` for a presenter to copy: what
-    /// `render_view_ids_to` writes into a caller's texture on the wgpu engine.
+    /// `render_view_ids_to` writes into a caller's texture on the wgpu engine. Returns once
+    /// the pack is submitted, without waiting for the GPU.
     pub fn view_ids_packed(
         &mut self,
         gpu: &mut GpuDevice,
