@@ -18,7 +18,7 @@ members = ["viewer", "crates/asset", "crates/cook"]
 
 [dependencies]
 # Ara main (6f03c10, with #65: image robustness and workgroup zeroing reported in DeviceInfo); disabled in default wgpu builds.
-ara-gpu = { git = "https://github.com/Ara-Engine/ara", rev = "6f03c10ab6191bfeb16654708595989ef8f7eafd", optional = true }
+ara-gpu = { git = "https://github.com/Ara-Engine/ara", rev = "e9f3404adaa95f69215619a68064ea38bcc6eae1", optional = true }
 anyhow = { version = "1", optional = true }
 serde_json = { version = "1", optional = true }
 half = { version = "2.7", optional = true }
@@ -75,7 +75,7 @@ opt-level = 2
 opt-level = 2
 
 [target.'cfg(target_os = "macos")'.dependencies]
-ara-window = { package = "ara-sdl3-src", git = "https://github.com/Ara-Engine/ara", rev = "6f03c10ab6191bfeb16654708595989ef8f7eafd", optional = true }
+ara-window = { package = "ara-sdl3-src", git = "https://github.com/Ara-Engine/ara", rev = "e9f3404adaa95f69215619a68064ea38bcc6eae1", optional = true }
 
 [[example]]
 name = "ara_post"

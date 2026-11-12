@@ -253,6 +253,37 @@ pub struct ForwardScene<'a> {
     /// (its `meshes` identity still names its draw), its batch word says it is skinned,
     /// and the reconstruction and the cache see its pose change. `None` is all rigid.
     pub skins: Option<&'a [Option<Skin<'a>>]>,
+    /// The display-linear 3D colour LUT the post pass applies at `post.lut_strength`
+    /// (`Renderer::set_colour_lut`); `None` is the identity, at strength zero.
+    pub colour_lut: Option<&'a crate::post::ColourLut>,
+    /// Object ids, on traced frames: each output pixel's settled opaque id and its front
+    /// id are resolved into the sequence's id texture (`Frames::ids`). `None` writes none.
+    pub ids: Option<IdScene<'a>>,
+}
+
+/// A frame's object-id tables (`object_ids::TagTables`), in the frame's placement order:
+/// every opaque object's placements, then every transparent object's.
+#[derive(Clone, Copy)]
+pub struct IdScene<'a> {
+    /// Per placement: (first range, range count).
+    pub entries: &'a [[u32; 2]],
+    /// Sorted, disjoint (first primitive, count, id, 0) per entry.
+    pub ranges: &'a [[u32; 4]],
+}
+
+/// The id targets a sequence keeps: the ids of its last frame with ids (R32Uint, two
+/// layers: opaque, front, at the output's size), the settled (placement + 1, primitive,
+/// pending primitive, its streak; Rgba32Uint) of the last two frames, which ping-pong, and the camera the last ids were taken from.
+struct IdTargets {
+    size: [u32; 2],
+    ids: Texture,
+    settled: [Texture; 2],
+    parity: usize,
+    camera: Option<[f32; 16]>,
+    /// The packed RGBA8 image `Frames::pack_ids` writes, at the same size.
+    packed: Texture,
+    /// Whether `pack_ids` wrote it (it is then in `CopySource`).
+    packed_written: bool,
 }
 
 /// Which of the renderer's frame families draws the scene.
@@ -319,6 +350,7 @@ pub struct ForwardImages {
 pub fn post_record(settings: &crate::PostSettings, height: u32, serial: u32) -> [f32; 20] {
     settings.record(serial, height, LUT_SIDE, false)
 }
+/// The identity LUT's side, as the renderer starts with it.
 const LUT_SIDE: u32 = 2;
 /// `atmosphere_gpu::FROXEL_TILE`: output pixels per camera-volume cell.
 const FROXEL_TILE: u32 = 8;
@@ -590,6 +622,34 @@ impl<'a> Shared<'a> {
         })
     }
 }
+/// A fog pass's packet: the scene its rays trace, the atmosphere record, a linear
+/// sampler, and its volumes by binding.
+fn fog_packet<'a>(
+    pass: Pass,
+    scene: &'a Scene,
+    record: &'a StorageBuffer,
+    images: &[(u32, &'a Texture)],
+) -> Result<Vec<(InputKey, Input<'a>)>> {
+    shader::inputs(pass)?
+        .iter()
+        .map(|spec| {
+            let value = match (spec.kind, spec.key.binding) {
+                (InputKind::AccelerationStructure, _) => Input::Scene(scene),
+                (InputKind::Buffer { .. }, 0) => Input::Buffer(record),
+                (InputKind::Sampler { .. }, _) => Input::Sampler(SamplerDesc::default()),
+                (_, binding) => Input::Image(
+                    images
+                        .iter()
+                        .find(|(b, _)| *b == binding)
+                        .with_context(|| format!("fog pass cannot supply {}", spec.name))?
+                        .1,
+                ),
+            };
+            Ok((spec.key, value))
+        })
+        .collect()
+}
+
 /// The atmosphere's and the shadow passes' images where they ran, and the sky map's.
 fn provided<'a>(
     sky: Option<&'a Sky<'a>>,
@@ -775,6 +835,11 @@ struct Carried {
     shadow_bases: Vec<Option<glam::DMat4>>,
     /// The last frame's object transforms, for traced frames' previous matrices.
     transforms: Vec<crate::Mat4>,
+    /// Volumetric fog's history source: the last lit frame's view-projection and eye,
+    /// and the key its fog was integrated under (`FogHistory`).
+    fog: Option<(crate::Mat4, crate::Vec3, [u8; 32])>,
+    /// Frames the atmosphere has encoded (`Atmosphere::frame`).
+    fog_frame: u32,
 }
 /// What a sequence keeps on the GPU from frame to frame.
 #[derive(Default)]
@@ -792,6 +857,11 @@ struct Kept {
     /// The textures the last frame named by identity (`ObjectTexture::key`), by
     /// identity and slot: a slot fixes the format and view.
     textures: BTreeMap<(u64, usize), Texture>,
+    /// Volumetric fog's cells at their grid: this frame's raw cells, and the resolved
+    /// cells of the two most recent frames (each frame's history is the other).
+    fog: Option<([u32; 2], [Texture; 3])>,
+    /// The object ids of the last frame that resolved them.
+    ids: Option<IdTargets>,
     /// The Interactive trace's repair queue: a header, then room for every pixel.
     repairs: Option<StorageBuffer>,
     /// The 2D targets the last frame made and released, for the next frame to take.
@@ -856,6 +926,17 @@ impl Frames {
         for texture in self.kept.textures.into_values() {
             gpu.retire(Resource::Image(texture.image))?;
         }
+        for texture in self
+            .kept
+            .ids
+            .into_iter()
+            .flat_map(|t| [t.ids, t.packed, t.settled[0], t.settled[1]])
+        {
+            gpu.retire(Resource::Image(texture.image))?;
+        }
+        for texture in self.kept.fog.into_iter().flat_map(|(_, cells)| cells) {
+            gpu.retire(Resource::Image(texture.image))?;
+        }
         if let Some(repairs) = self.kept.repairs {
             repairs.retire(gpu)?;
         }
@@ -863,6 +944,117 @@ impl Frames {
             gpu.retire(ara_gpu::Resource::Image(output.image))?;
         }
         self.kept.targets.retire(gpu)
+    }
+    /// The id texture of the last frame that resolved ids (`ForwardScene::ids`): R32Uint,
+    /// layer 0 the opaque ids and layer 1 the front ids, at the output's size, left read.
+    pub fn ids(&self) -> Option<&Texture> {
+        self.kept.ids.as_ref().map(|t| &t.ids)
+    }
+    /// Packs `layer` (0 opaque, 1 front) of the last ids into the sequence's RGBA8 image,
+    /// bit-exact little-endian (R = bits 0-7 ... A = 24-31), and returns it, left in
+    /// `CopySource` for a presenter; waits for the GPU.
+    pub fn pack_ids(
+        &mut self,
+        gpu: &mut GpuDevice,
+        cache: &ShaderCache,
+        layer: u32,
+    ) -> Result<&Texture> {
+        let targets = self.kept.ids.as_mut().context("no frame resolved ids")?;
+        ensure!(layer < 2, "an id layer is 0 (opaque) or 1 (front)");
+        let mut graph = Graph::default();
+        let mut rec = gpu.begin(Queue::Graphics);
+        graph.import(Resource::Image(targets.ids.image), Access::ShaderRead);
+        if targets.camera.is_some() && targets.packed_written {
+            graph.import(Resource::Image(targets.packed.image), Access::CopySource);
+        }
+        let uniform = StorageBuffer::new(gpu, &[layer, 0, 0, 0].map(u32::to_le_bytes).concat())?;
+        graph.import(Resource::Buffer(uniform.buffer), Access::HostWrite);
+        let values = shader::inputs(Pass::IdPack)?
+            .iter()
+            .map(|spec| {
+                Ok((
+                    spec.key,
+                    match spec.key.binding {
+                        0 => Input::Image(&targets.ids),
+                        1 => Input::Image(&targets.packed),
+                        2 => Input::Buffer(&uniform),
+                        _ => bail!("the id pack cannot supply {}", spec.name),
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let bindings = HeapBindings::new(gpu, Pass::IdPack, &values)?;
+        bindings.import(&mut graph);
+        let size = targets.size;
+        Kernel::new(gpu, cache, Pass::IdPack)?.record(
+            &mut graph,
+            &mut rec,
+            &bindings,
+            [size[0], size[1], 1],
+        )?;
+        graph.node(
+            &mut rec,
+            &[(Resource::Image(targets.packed.image), Access::CopySource)],
+        )?;
+        let record = bindings.release();
+        let point = gpu.submit(rec.finish(), &[])?;
+        gpu.resolve(point)?;
+        record.retire(gpu)?;
+        uniform.retire(gpu)?;
+        targets.packed_written = true;
+        Ok(&targets.packed)
+    }
+    /// Reads back `rect` ([x, y, width, height]) of the last ids: (opaque, front) per
+    /// pixel, row by row; waits for the GPU.
+    pub fn read_ids(&mut self, gpu: &mut GpuDevice, rect: [u32; 4]) -> Result<Vec<[u32; 2]>> {
+        let targets = self.kept.ids.as_ref().context("no frame resolved ids")?;
+        let [x, y, w, h] = rect;
+        ensure!(
+            w > 0 && h > 0 && x + w <= targets.size[0] && y + h <= targets.size[1],
+            "id rectangle outside the last ids"
+        );
+        let layer_bytes = u64::from(w) * u64::from(h) * 4;
+        let buffer = gpu.create_readback_buffer(layer_bytes * 2)?;
+        let mut graph = Graph::default();
+        let mut rec = gpu.begin(Queue::Graphics);
+        graph.import(Resource::Image(targets.ids.image), Access::ShaderRead);
+        graph.node(
+            &mut rec,
+            &[
+                (Resource::Image(targets.ids.image), Access::CopySource),
+                (Resource::Buffer(buffer), Access::CopyDestination),
+            ],
+        )?;
+        rec.push(Command::BeginPass("ara::IdReadback".into()));
+        rec.push(Command::ReadImageRegion {
+            source: targets.ids.image,
+            destination: buffer,
+            buffer_offset: 0,
+            region: ara_gpu::texture::ImageRegion {
+                mip: 0,
+                origin: [x, y, 0],
+                extent: [w, h, 1],
+                base_layer: 0,
+                layer_count: 2,
+            },
+        });
+        rec.push(Command::EndPass);
+        graph.node(
+            &mut rec,
+            &[
+                (Resource::Image(targets.ids.image), Access::ShaderRead),
+                (Resource::Buffer(buffer), Access::HostRead),
+            ],
+        )?;
+        let point = gpu.submit(rec.finish(), &[])?;
+        gpu.resolve(point)?;
+        let bytes = gpu.read(buffer)?;
+        gpu.retire(Resource::Buffer(buffer))?;
+        let word =
+            |at: usize| u32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"));
+        Ok((0..(w * h) as usize)
+            .map(|i| [word(i * 4), word(layer_bytes as usize + i * 4)])
+            .collect())
     }
     /// The last frame's displayed image (sRGB-encoded RGBA8, the output's size), kept on
     /// the device until the frame after next draws over it, and left in `CopySource`:
@@ -886,10 +1078,22 @@ impl Frames {
         scene: &ForwardScene<'_>,
     ) -> Result<ForwardImages> {
         let mut targets = std::mem::take(&mut self.kept.targets);
-        let result = super::image::pool::active(&mut targets, gpu, |gpu| {
+        let result = self.render_with(gpu, cache, scene, &mut targets);
+        self.kept.targets = targets;
+        result
+    }
+    /// [`render`](Self::render) taking its 2D targets from `targets`, a pool other
+    /// sequences share (an engine's views): the sequence's own pool is not used.
+    pub(crate) fn render_with(
+        &mut self,
+        gpu: &mut GpuDevice,
+        cache: &ShaderCache,
+        scene: &ForwardScene<'_>,
+        targets: &mut super::image::pool::Pool,
+    ) -> Result<ForwardImages> {
+        let result = super::image::pool::active(targets, gpu, |gpu| {
             frame(&self.carried, &mut self.kept, self.blind, gpu, cache, scene)
         });
-        self.kept.targets = targets;
         match result {
             Ok((images, carried)) => {
                 self.carried = carried;
@@ -968,6 +1172,8 @@ fn frame(
         sky: tables,
         map: kept_map,
         textures: kept_textures,
+        fog: kept_fog,
+        ids: kept_ids,
         repairs: kept_repairs,
         // Taken out and made active for this frame by `Frames::render`.
         targets: _,
@@ -1012,6 +1218,8 @@ fn frame(
         transforms: (0..scene.objects.len())
             .flat_map(|i| placed(i).iter().copied())
             .collect(),
+        fog: None,
+        fog_frame: history.fog_frame,
     };
     ensure!(!scene.objects.is_empty(), "forward frame needs an object");
     ensure!(
@@ -1303,8 +1511,8 @@ fn frame(
     });
     if settings.active() {
         ensure!(
-            settings.volumetric_fog.is_none(),
-            "forward frame does not assemble volumetric fog yet"
+            settings.volumetric_fog.is_none() || deferred_path,
+            "volumetric fog is assembled on traced frames only (its sun rays need the scene)"
         );
         if let (true, Some((toward, _))) = (settings.sun_transmittance, sun) {
             records = crate::atmosphere::scale_directional(
@@ -1385,7 +1593,36 @@ fn frame(
         [1, 1]
     };
     let (toward_sun, illuminance) = sun.unwrap_or((crate::Vec3::Y, [0.; 3]));
-    let atmosphere = AtmosphereParameters::for_camera_with_sun(
+    // Volumetric fog reuses the last frame's cells while nothing they were integrated
+    // under changed: the renderer drops its history on any geometry, placement or pose
+    // upload, a new grid, and a change of sun, exposure or environment.
+    let fogged = settings.active() && settings.volumetric_fog.is_some();
+    let fog_key: [u8; 32] = {
+        use sha2::Digest;
+        let mut h = sha2::Sha256::new();
+        h.update(format!("{sun:?}{grid:?}{:?}", packed.exposure).as_bytes());
+        h.update(environment_digest);
+        for transform in &left.transforms {
+            h.update(bytemuck::cast_slice(&transform.to_cols_array()));
+        }
+        h.update(format!("{poses:?}").as_bytes());
+        if let Some(meshes) = scene.meshes {
+            h.update(bytemuck::cast_slice(meshes));
+        }
+        h.finalize().into()
+    };
+    let fog_history = crate::backend_ara::atmosphere::FogHistory {
+        previous: history
+            .fog
+            .filter(|(_, _, key)| fogged && *key == fog_key)
+            .map(|(matrix, eye, _)| (matrix, eye)),
+        frame: history.fog_frame,
+    };
+    if settings.active() {
+        left.fog_frame = history.fog_frame.wrapping_add(1);
+        left.fog = fogged.then(|| (view.matrix(size[0], size[1]), eye, fog_key));
+    }
+    let atmosphere = AtmosphereParameters::for_frame(
         gpu,
         settings,
         AtmosphereSun {
@@ -1396,6 +1633,7 @@ fn frame(
         view,
         size,
         grid,
+        fog_history,
     )?;
     for buffer in [&camera, &lighting, &atmosphere.record] {
         graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
@@ -1763,6 +2001,72 @@ fn frame(
         None => None,
     };
 
+    // The fog passes' packet records, retired with the frame.
+    let mut fog_records = Vec::new();
+    // `encode_atmosphere`'s volumetric fog, after the scene its sun rays trace: raw cells,
+    // then the resolved cells against the other frame's, then the camera volume's fog
+    // slices from them.
+    if let (true, Some(sky), Some(traced)) = (fogged, &sky, &traced) {
+        let made = kept_fog.as_ref().is_none_or(|(at, _)| *at != grid);
+        if made {
+            if let Some((_, cells)) = kept_fog.take() {
+                for texture in cells {
+                    gpu.retire(Resource::Image(texture.image))?;
+                }
+            }
+            let mut cell =
+                || Texture::volume_shape(gpu, [grid[0], grid[1], 64], Format::Rgba16Float, true);
+            let cells = [cell()?, cell()?, cell()?];
+            // wgpu zero-initialises them; the first frame's history is read regardless.
+            for texture in &cells {
+                staging.push(transfer::upload(
+                    gpu,
+                    &mut graph,
+                    &mut rec,
+                    texture.image,
+                    &vec![0; (grid[0] * grid[1] * 64 * 8) as usize],
+                )?);
+            }
+            *kept_fog = Some((grid, cells));
+        }
+        let (_, cells) = kept_fog.as_ref().context("made above")?;
+        if !made {
+            for texture in cells {
+                graph.import(Resource::Image(texture.image), Access::ShaderRead);
+            }
+        }
+        let parity = (history.fog_frame % 2) as usize;
+        let (raw, resolved, previous) = (&cells[0], &cells[1 + parity], &cells[2 - parity]);
+        let extent = [grid[0], grid[1], 64];
+        for (pass, images) in [
+            (Pass::AtmosphereFogInject, vec![(15, raw)]),
+            (
+                Pass::AtmosphereFogTemporal,
+                vec![(5, previous), (6, raw), (15, resolved)],
+            ),
+        ] {
+            let kernel = Kernel::new(gpu, cache, pass)?;
+            let values = fog_packet(pass, &traced.scene, &atmosphere.record, &images)?;
+            let bindings = HeapBindings::new(gpu, pass, &values)?;
+            bindings.import(&mut graph);
+            kernel.record(&mut graph, &mut rec, &bindings, extent)?;
+            fog_records.push(bindings.release());
+        }
+        let (_, volume, _) = tables
+            .as_ref()
+            .and_then(|t| t.volumes.as_ref())
+            .context("the camera volume")?;
+        VolumePasses::new(gpu, cache)?.record(
+            &mut graph,
+            &mut rec,
+            Pass::AtmosphereFogIntegrate,
+            &atmosphere,
+            sky.luts,
+            resolved,
+            volume,
+        )?;
+    }
+
     // Every other reflected input, of any program this frame runs, is a feature that is
     // off. The wgpu renderer binds zero-filled buffers and zero-initialised textures there.
     // `Renderer::lit_clear`: the uniform environment, exposed, in f64. The sky
@@ -1938,7 +2242,7 @@ fn frame(
             let planned = images.plan(tr::PlanInputs {
                 settings: r.settings,
                 budget: crate::ReconstructionShadowBudget::default(),
-                // One view: its previous frame is the history's last.
+                // One sequence draws one view: its frames are consecutive.
                 previous_frame: history.count,
                 frame: history.count + 1,
                 index: k,
@@ -3329,6 +3633,166 @@ fn frame(
         )?),
         None => None,
     };
+    // `encode_ids`: the output's settled and front object ids, after reconstruction and
+    // the panes. Front ids through glass are not resolved (no glass raster yet): front is
+    // the opaque id.
+    let mut id_records = Vec::new();
+    if let (Some(ids), Some(deferred)) = (scene.ids, &deferred) {
+        let reconstructed = resolve.is_some();
+        let id_size = if reconstructed { target } else { size };
+        if kept_ids.as_ref().is_none_or(|t| t.size != id_size) {
+            if let Some(old) = kept_ids.take() {
+                for texture in [old.ids, old.packed, old.settled[0], old.settled[1]] {
+                    gpu.retire(Resource::Image(texture.image))?;
+                }
+            }
+            let settled = [
+                Texture::new(gpu, id_size, Format::Rgba32Uint, true, false)?,
+                Texture::new(gpu, id_size, Format::Rgba32Uint, true, false)?,
+            ];
+            *kept_ids = Some(IdTargets {
+                size: id_size,
+                ids: Texture::array(gpu, id_size, 2, Format::R32Uint, true, false)?,
+                settled,
+                parity: 0,
+                camera: None,
+                packed: Texture::new(gpu, id_size, Format::Rgba8, true, false)?,
+                packed_written: false,
+            });
+            // The previous settled side is read before any frame wrote it.
+            let side = &kept_ids.as_ref().context("made above")?.settled;
+            for texture in side {
+                staging.push(transfer::upload(
+                    gpu,
+                    &mut graph,
+                    &mut rec,
+                    texture.image,
+                    &vec![0; (id_size[0] * id_size[1] * 16) as usize],
+                )?);
+            }
+        } else if let Some(t) = kept_ids.as_ref() {
+            for texture in [&t.ids, &t.settled[0], &t.settled[1]] {
+                graph.import(Resource::Image(texture.image), Access::ShaderRead);
+            }
+        }
+        let targets = kept_ids.as_mut().context("made above")?;
+        let continued = targets.camera.is_some()
+            && reconstructed
+            && resolve.is_some_and(|(images, _)| !images.reset());
+        let camera = scene
+            .camera
+            .unjittered()
+            .matrix(id_size[0], id_size[1])
+            .to_cols_array();
+        let still = targets.camera == Some(camera);
+        targets.camera = Some(camera);
+        targets.parity = 1 - targets.parity;
+        // Moved placements: a transform that changed since the last frame, or a skinned one.
+        let placements = left.transforms.len();
+        let mut moved = vec![0u32; placements.div_ceil(32).max(1)];
+        let mut at = 0;
+        for (index, _) in scene.objects.iter().enumerate() {
+            for _ in placed(index) {
+                let changed = skin(index).is_some()
+                    || history.transforms.get(at).is_none_or(|p| {
+                        p.to_cols_array().map(f32::to_bits)
+                            != left.transforms[at].to_cols_array().map(f32::to_bits)
+                    });
+                if changed {
+                    moved[at / 32] |= 1 << (at % 32);
+                }
+                at += 1;
+            }
+        }
+        let flags =
+            u32::from(reconstructed) | if still { 2 } else { 0 } | if continued { 4 } else { 0 };
+        let frame_words = [id_size[0], id_size[1], flags, placements as u32, 8, 4, 0, 0];
+        let words = |w: &[u32]| -> Vec<u8> { w.iter().flat_map(|v| v.to_le_bytes()).collect() };
+        let entries = if ids.entries.is_empty() {
+            vec![[0u32; 2]]
+        } else {
+            ids.entries.to_vec()
+        };
+        let ranges = if ids.ranges.is_empty() {
+            vec![[0u32; 4]]
+        } else {
+            ids.ranges.to_vec()
+        };
+        let buffers = [
+            StorageBuffer::new(gpu, &words(&frame_words))?,
+            StorageBuffer::new(gpu, &words(entries.as_flattened()))?,
+            StorageBuffer::new(gpu, &words(&moved))?,
+            StorageBuffer::new(gpu, &words(ranges.as_flattened()))?,
+        ];
+        for buffer in &buffers {
+            graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+        }
+        let zeros = [
+            Texture::new(gpu, [1, 1], Format::Rg32Uint, false, false)?,
+            Texture::new(gpu, [1, 1], Format::Rgba32Uint, false, false)?,
+            Texture::new(gpu, [1, 1], Format::R32Uint, false, false)?,
+        ];
+        for (texture, bytes) in zeros.iter().zip([8, 16, 4]) {
+            staging.push(transfer::upload(
+                gpu,
+                &mut graph,
+                &mut rec,
+                texture.image,
+                &vec![0; bytes],
+            )?);
+        }
+        let (anchors, layers) = match resolve {
+            Some((images, _)) => images.written_slots(),
+            None => (&zeros[0], &zeros[1]),
+        };
+        let (previous, written) = (
+            &targets.settled[1 - targets.parity],
+            &targets.settled[targets.parity],
+        );
+        let values = shader::inputs(Pass::IdResolve)?
+            .iter()
+            .map(|spec| {
+                let value = match spec.key.binding {
+                    0 => Input::Buffer(&buffers[0]),
+                    1 => Input::Image(&deferred.hit),
+                    2 => Input::Image(&deferred.tiles),
+                    3 => Input::Image(anchors),
+                    4 => Input::Image(layers),
+                    5 => Input::Buffer(&buffers[1]),
+                    6 => Input::Buffer(&buffers[2]),
+                    7 => Input::Image(&zeros[2]),
+                    8 => Input::Image(previous),
+                    9 => Input::Image(written),
+                    10 => Input::Image(&targets.ids),
+                    11 => Input::Buffer(&buffers[3]),
+                    _ => bail!("the id pass cannot supply {}", spec.name),
+                };
+                Ok((spec.key, value))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let bindings = HeapBindings::new(gpu, Pass::IdResolve, &values)?;
+        bindings.import(&mut graph);
+        Kernel::new(gpu, cache, Pass::IdResolve)?.record(
+            &mut graph,
+            &mut rec,
+            &bindings,
+            [id_size[0], id_size[1], 1],
+        )?;
+        // What the next frame and the id calls between frames find: both read.
+        graph.node(
+            &mut rec,
+            &[
+                (Resource::Image(targets.ids.image), Access::ShaderRead),
+                (Resource::Image(written.image), Access::ShaderRead),
+            ],
+        )?;
+        id_records.push(bindings.release());
+        id_records.extend(buffers);
+        for texture in zeros {
+            super::image::release(gpu, texture.image)?;
+        }
+    }
+
     // The post tail, in `PostGpu::encode` order. Each stage reads the one before it.
     let mut post_images = Vec::new();
     let mut post_buffers = Vec::new();
@@ -3338,8 +3802,15 @@ fn frame(
         settings.validate()?;
         let passes = PostPasses::new(gpu, cache, Format::Rgba32Float)?;
         left.post_serial = history.post_serial.wrapping_add(1);
-        let record =
-            SettingsRecord::new(gpu, &post_record(&settings, target[1], left.post_serial))?;
+        let record = SettingsRecord::new(
+            gpu,
+            &settings.record(
+                left.post_serial,
+                target[1],
+                scene.colour_lut.map_or(LUT_SIDE, |l| l.size),
+                scene.colour_lut.is_some(),
+            ),
+        )?;
         // `PostGpu::prepare`: the previous camera counts only from the frame before.
         let previous_camera = history
             .post_camera
@@ -3350,15 +3821,32 @@ fn frame(
             scene.camera.unjittered().matrix(size[0], size[1]),
         ));
         graph.import(Resource::Buffer(record.buffer), Access::HostWrite);
-        let lut = Texture::volume(gpu, LUT_SIDE, Format::Rgba16Float)?;
-        let identity: Vec<u8> = (0..LUT_SIDE.pow(3))
-            .flat_map(|i| {
-                [i & 1, (i >> 1) & 1, i >> 2, 1].map(|v| half::f16::from_f32(v as f32).to_bits())
+        // `PostGpu::write_lut`: RGBA8 texels of the LUT, or of the identity.
+        let identity;
+        let colour_lut = match scene.colour_lut {
+            Some(lut) => {
+                lut.validate()
+                    .map_err(|e| anyhow::anyhow!("colour LUT: {e}"))?;
+                lut
+            }
+            None => {
+                identity = crate::post::ColourLut::identity(LUT_SIDE)
+                    .map_err(|e| anyhow::anyhow!("identity LUT: {e}"))?;
+                &identity
+            }
+        };
+        let lut = Texture::volume(gpu, colour_lut.size, Format::Rgba8)?;
+        let texels: Vec<u8> = colour_lut
+            .rgb
+            .iter()
+            .flat_map(|v| {
+                v.map(|x| (x * 255.0).round() as u8)
+                    .into_iter()
+                    .chain([255])
             })
-            .flat_map(u16::to_le_bytes)
             .collect();
         post_buffers.push(transfer::upload(
-            gpu, &mut graph, &mut rec, lut.image, &identity,
+            gpu, &mut graph, &mut rec, lut.image, &texels,
         )?);
         let mut surface = None;
         if settings.motion_blur || settings.depth_of_field.is_some() {
@@ -3700,6 +4188,12 @@ fn frame(
 
     atmosphere.retire(gpu, &mut graph)?;
     cluster_inputs.retire(gpu)?;
+    for record in id_records {
+        record.retire(gpu)?;
+    }
+    for record in fog_records {
+        record.retire(gpu)?;
+    }
     for buffer in previous_buffers.into_iter().flatten() {
         buffer.retire(gpu)?;
     }

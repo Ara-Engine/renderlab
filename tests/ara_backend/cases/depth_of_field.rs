@@ -114,6 +114,8 @@ fn fixture_frame(
             programs: None,
             sky_map: None,
             skins: None,
+            colour_lut: None,
+            ids: None,
         },
     )
 }

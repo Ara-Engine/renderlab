@@ -155,6 +155,8 @@ fn a_program_shades_each_object_with_its_own_parameters() -> Result<()> {
                 }),
                 sky_map: None,
                 skins: None,
+                colour_lut: None,
+                ids: None,
             },
         )?;
         Ok(images
@@ -548,6 +550,8 @@ fn two_programs_in_one_frame_each_light_their_own_cells() -> Result<()> {
                     }),
                     sky_map: None,
                     skins: None,
+                    colour_lut: None,
+                    ids: None,
                 },
             );
             match (image, &mut cards) {

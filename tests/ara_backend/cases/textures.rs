@@ -114,6 +114,8 @@ fn floor_in(
         programs: None,
         sky_map: None,
         skins: None,
+        colour_lut: None,
+        ids: None,
     };
     let images = match sequence {
         Some(frames) => frames.render(gpu, cache, &scene)?,

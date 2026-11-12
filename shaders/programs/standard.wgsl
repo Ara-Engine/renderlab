@@ -27,6 +27,11 @@ fn surface(input:SurfaceInput) -> Surface {
     return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x,alpha);
 }
 
+// The data view modes show this program's resolved inputs, decals included.
+fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
+    return ViewData(s.base,s.n,s.rough,s.metal,vec3<f32>(0.0),1.0);
+}
+
 // TP1: the share of the light behind a transparent surface that reaches the eye: what
 // its coverage and Fresnel reflectance leave, filtered by the base colour as tint.
 fn transmittance(s:Surface, input:SurfaceInput) -> vec3<f32> {

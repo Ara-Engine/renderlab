@@ -120,6 +120,12 @@ fn environment_reflection(direction:vec3<f32>, roughness:f32) -> vec3<f32> {
     return environment_radiance(environment_direction(direction),roughness);
 }
 
+// View modes (docs/design-id-output.md): what the data view modes show of a surface. A
+// program may declare `fn view_data(s:Surface, input:SurfaceInput) -> ViewData` from its
+// own surface; without it the engine shows the material inputs (base colour, normal map,
+// metallic-roughness, the `emission` hook, no occlusion). Only view-mode frames call it.
+struct ViewData { base_color:vec3<f32>, normal:vec3<f32>, roughness:f32, metallic:f32, emission:vec3<f32>, occlusion:f32 };
+
 // TP1 transparency (docs/m7-tp1.md): the material's last word packs a transparent
 // material's opacity and IOR as halves; opaque materials store zero.
 fn transparent_material(material:Material) -> bool { return material.pad!=0u; }

@@ -34,7 +34,7 @@ const FLAG_HEIGHT_FOG: u32 = 8;
 const FLAG_VOLUMETRIC: u32 = 16;
 
 /// Hardware renderers shadow the froxels' sun with one ray each against the scene TLAS.
-const HARDWARE_VISIBILITY: &str = "@group(0) @binding(20) var at_scene:acceleration_structure;
+pub(crate) const HARDWARE_VISIBILITY: &str = "@group(0) @binding(20) var at_scene:acceleration_structure;
 fn at_sun_visible(p:vec3<f32>) -> f32 {
     var query:ray_query;
     rayQueryInitialize(&query,at_scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,255u,0.02,1e5,p,atmosphere.sun.xyz));

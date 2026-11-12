@@ -539,6 +539,58 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     }
 }
 
+// ---- View modes (docs/design-id-output.md) ----
+/// The traced entry's lit store, which a view-mode module replaces.
+const VIEW_STORE_SEAM: &str = "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,id,size)));";
+const VIEW_STORE: &str = "textureStore(primary_hdr,pixel,rl_view_store(surface_output,surface_input));";
+/// Data modes show misses as zero; the lit miss is kept under another name.
+const VIEW_MISS_SEAM: &str = "fn primary_miss(id:vec2<u32>,size:vec2<u32>,clear:vec4<f32>)->vec4<f32> {";
+const VIEW_MISS: &str = include_str!("../shaders/program_view.wgsl");
+
+/// A traced or list shading module of `program` (`compose` or `compose_list` output) that
+/// stores `mode`'s value instead of the lit colour: the shading-stage switch of a view mode.
+/// Everything before the store (the receiver, `surface`, the engine's prepared inputs) is
+/// the lit module's. `LightingOnly` keeps the lit miss; data modes store zero there.
+pub(crate) fn view_variant(
+    composed: &str,
+    program: &str,
+    mode: crate::ViewMode,
+) -> Result<String, Error> {
+    let seams = [VIEW_STORE_SEAM, VIEW_MISS_SEAM].map(|s| composed.matches(s).count());
+    if seams != [1, 1] {
+        return Err(Error::Shader(format!(
+            "view mode {mode:?}: the traced entry's store or miss changed ({seams:?} matches)"
+        )));
+    }
+    let data = if declares(program, "fn", "view_data") {
+        "return view_data(s,input);".to_owned()
+    } else {
+        let emission = if declares(program, "fn", "emission") {
+            "emission(s,input)"
+        } else {
+            "vec3<f32>(0.0)"
+        };
+        format!(
+            "let m=input.material;let base=sample_base_color(input);let mr=sample_metallic_roughness(input);\n    return ViewData(clamp(m.base_color.rgb*input.color.rgb*base.rgb,vec3<f32>(0.0),vec3<f32>(1.0)),material_normal(input),clamp(m.roughness*mr.g,0.0,1.0),clamp(m.metallic*mr.b,0.0,1.0),{emission},1.0);"
+        )
+    };
+    // Programs without the indirect inputs light from the open environment.
+    let ambient = if uses_indirect(program) {
+        "indirect_irradiance(input,n)"
+    } else {
+        "ambient(n)"
+    };
+    let mut source = composed
+        .replacen(VIEW_STORE_SEAM, VIEW_STORE, 1)
+        .replacen(VIEW_MISS_SEAM, &VIEW_MISS_SEAM.replace("primary_miss", "rl_lit_miss"), 1);
+    source.push_str(&format!(
+        "\nconst RL_VIEW_MODE:u32={}u;\nfn rl_view_data(s:Surface,input:SurfaceInput)->ViewData {{\n    {data}\n}}\nfn rl_view_ambient(n:vec3<f32>,input:SurfaceInput)->vec3<f32> {{ return {ambient}; }}\n{VIEW_MISS}",
+        mode as u32
+    ));
+    Ok(source)
+}
+// ---- end of view modes ----
+
 // ---- MP1 per-program dispatch (docs/m7-mp1.md) ----
 /// The tile-list shading entry of mixed-program frames (`primary_shade_list`).
 const TRACED_LIST_ENTRY: &str = include_str!("../shaders/program_traced_list.wgsl");

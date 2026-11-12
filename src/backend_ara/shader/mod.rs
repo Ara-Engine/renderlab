@@ -130,6 +130,15 @@ pub enum Pass {
     AtmosphereAerial,
     /// Sixty-four cumulative fog slices from resolved visibility/extinction.
     AtmosphereFogIntegrate,
+    /// Raw fog cells: sun visibility by one ray a sample against the scene, and
+    /// extinction (VF1's hardware source, `atmosphere_gpu::HARDWARE_VISIBILITY`).
+    AtmosphereFogInject,
+    /// Fog cells against their reprojected history, bounded by their neighbours.
+    AtmosphereFogTemporal,
+    /// Each output pixel's settled opaque and front object ids (`id_output.wgsl`).
+    IdResolve,
+    /// One id layer packed bit-exact into an RGBA8 image (`shaders/id_pack.wgsl`).
+    IdPack,
     /// Forty-step transmittance LUT.
     AtmosphereTransmittance,
     /// Multiple-scattering transfer LUT.
@@ -385,6 +394,37 @@ impl Pass {
                 )
                 .into()
             }
+            Self::AtmosphereFogInject | Self::AtmosphereFogTemporal => {
+                let kernels = include_str!("../../../shaders/atmosphere.wgsl");
+                let head = kernels
+                    .split_once("@compute")
+                    .expect("atmosphere declarations")
+                    .0;
+                let (start, end) = if self == Self::AtmosphereFogInject {
+                    ("// Low-discrepancy offset", "// A plain min/max envelope")
+                } else {
+                    (
+                        "// A plain min/max envelope",
+                        "// Volumetric fog integration",
+                    )
+                };
+                let start = kernels.find(start).expect("fog kernel start");
+                let end = kernels.find(end).expect("fog kernel end");
+                let (enable, visibility) = if self == Self::AtmosphereFogInject {
+                    (
+                        "enable wgpu_ray_query;\n",
+                        crate::renderer::atmosphere_gpu::HARDWARE_VISIBILITY,
+                    )
+                } else {
+                    ("", "")
+                };
+                format!(
+                    "{enable}{}{head}{visibility}{}",
+                    include_str!("../../../shaders/atmosphere_common.wgsl"),
+                    &kernels[start..end]
+                )
+                .into()
+            }
             Self::AtmosphereAerial => {
                 let kernels = include_str!("../../../shaders/atmosphere.wgsl");
                 let end = kernels
@@ -417,6 +457,15 @@ impl Pass {
             }
             Self::Tone => TONE.into(),
             Self::Display => include_str!("../shaders/display.wgsl").into(),
+            Self::IdResolve => {
+                let source = include_str!("../../../shaders/id_output.wgsl");
+                source
+                    .split_once("// ---- Handoff:")
+                    .expect("the id output has a handoff part")
+                    .0
+                    .into()
+            }
+            Self::IdPack => include_str!("../shaders/id_pack.wgsl").into(),
             _ => POST.into(),
         }
     }
@@ -458,6 +507,10 @@ impl Pass {
                 | Self::TransparencyGlass
                 | Self::TransparencySeed
                 | Self::FallbackPresent
+                | Self::AtmosphereFogInject
+                | Self::AtmosphereFogTemporal
+                | Self::IdResolve
+                | Self::IdPack
                 | Self::PrimaryTrace
                 | Self::PrimaryTraceReceivers
                 | Self::PrimaryInteractive(_)
@@ -601,6 +654,10 @@ impl Pass {
             Self::AtmosphereBackdrop => "fs_sky",
             Self::AtmosphereAerial => "at_aerial_volume",
             Self::AtmosphereFogIntegrate => "at_fog_integrate",
+            Self::AtmosphereFogInject => "at_fog_inject",
+            Self::AtmosphereFogTemporal => "at_fog_temporal",
+            Self::IdResolve => "id_resolve",
+            Self::IdPack => "id_pack",
             Self::AtmosphereTransmittance => "at_transmittance_lut",
             Self::AtmosphereMultiscatter => "at_multiscatter_lut",
             Self::AtmosphereSky => "at_skyview_lut",
