@@ -8,8 +8,8 @@
 @group(3) @binding(24) var rl_cluster_lists:texture_2d<u32>;
 @group(3) @binding(25) var rl_local_depth:texture_depth_2d_array;
 // x: this receiver's cluster, y: its light count, z: 1 once the entry has prepared the
-// receiver. Unprepared stages (cell shading, film accumulation) and receivers outside the
-// grid walk every light in order.
+// receiver (or rl_hit_lights_prepare a reflection hit). Unprepared stages (cell shading,
+// film accumulation) and receivers outside the grid walk every light in order.
 var<private> rl_light_list:vec3<u32>;
 // Disk rays per soft local light for this receiver on ray-traced stages (0: the ordinary
 // four). rl_local_budget raises it where the resolve restarts the receiver's history;
@@ -19,21 +19,47 @@ var<private> rl_local_rays:u32;
 fn rl_cluster_word(c:u32, k:u32) -> u32 {
     return textureLoad(rl_cluster_lists,vec2<u32>((c%LC_ROW)*LC_STRIDE+k,c/LC_ROW),0).x;
 }
+// The cluster holding `world` (x) and its view depth (y, as bits), or x = LC_CLUSTERS
+// beyond the grid's sides or before its near plane. Depths past the last slice clamp into it.
+fn rl_light_cell(world:vec3<f32>) -> vec2<u32> {
+    let proj=rl_light_frame.proj;
+    let v=rl_light_frame.view*vec4<f32>(world,1.0);
+    let depth=-v.z;
+    if !(depth>proj.z) { return vec2<u32>(LC_CLUSTERS,0u); }
+    let ndc=vec2<f32>(proj.x*v.x,proj.y*v.y)/depth;
+    if any(abs(ndc)>vec2<f32>(1.0)) { return vec2<u32>(LC_CLUSTERS,0u); }
+    let tx=min(u32((ndc.x*0.5+0.5)*f32(LC_X)),LC_X-1u);
+    let ty=min(u32((0.5-ndc.y*0.5)*f32(LC_Y)),LC_Y-1u);
+    let tz=min(u32(max(log2(depth/proj.z)*proj.w,0.0)),LC_Z-1u);
+    return vec2<u32>((tz*LC_Y+ty)*LC_X+tx,bitcast<u32>(depth));
+}
 // The generated entries call this once per receiver, before `shade`.
 fn rl_lights_prepare(world:vec3<f32>) {
     rl_local_budget(world);
     if rl_light_frame.info.y==0u { return; }
-    let proj=rl_light_frame.proj;
-    let v=rl_light_frame.view*vec4<f32>(world,1.0);
-    let depth=-v.z;
-    if !(depth>proj.z) { return; }
-    let ndc=vec2<f32>(proj.x*v.x,proj.y*v.y)/depth;
-    if any(abs(ndc)>vec2<f32>(1.0)) { return; }
-    let tx=min(u32((ndc.x*0.5+0.5)*f32(LC_X)),LC_X-1u);
-    let ty=min(u32((0.5-ndc.y*0.5)*f32(LC_Y)),LC_Y-1u);
-    let tz=min(u32(max(log2(depth/proj.z)*proj.w,0.0)),LC_Z-1u);
-    let c=(tz*LC_Y+ty)*LC_X+tx;
+    let c=rl_light_cell(world).x;
+    if c>=LC_CLUSTERS { return; }
     rl_light_list=vec3<u32>(c,rl_cluster_word(c,0u)&0xffffu,1u);
+}
+// A reflection hit's lights (shaders/reflections.wgsl), before its `shade`: the cluster of
+// the hit's own point where that walk is exact, else every light in order. Exact means the
+// point lies inside the grid and before the camera's far plane (the last slice's boxes end
+// there; the lookup clamps farther points into it), and the cluster kept every light it
+// met (no LC_MAX truncation). The cluster then omits only lights whose range ends before
+// the point, which contribute exactly zero, so the hit's sum is the full walk's. No
+// restart budget: hits keep four disk rays. The hit loop clears it with
+// rl_hit_lights_clear before the camera receiver prepares its own.
+fn rl_hit_lights_prepare(world:vec3<f32>) {
+    rl_light_list.z=0u;
+    if rl_light_frame.info.y==0u { return; }
+    let cell=rl_light_cell(world);
+    if cell.x>=LC_CLUSTERS || !(bitcast<f32>(cell.y)<rl_light_frame.far.x) { return; }
+    let word=rl_cluster_word(cell.x,0u);
+    if (word>>16u)!=(word&0xffffu) { return; }
+    rl_light_list=vec3<u32>(cell.x,word&0xffffu,1u);
+}
+fn rl_hit_lights_clear() {
+    rl_light_list.z=0u;
 }
 fn rl_light_total() -> u32 {
     return select(lighting.count,rl_light_list.y,rl_light_list.z!=0u);
