@@ -128,6 +128,7 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<MetalProgram> {
         Pass::MeshDiagnostic
             | Pass::MeshToon
             | Pass::TransparencyGlass
+            | Pass::PaneId
             | Pass::ReceiverRaster
             | Pass::ShadowRaster
             | Pass::TransparencySunShadow
@@ -239,6 +240,11 @@ fn wrap(
             (
                 "ara_front".into(),
                 Some("bool ara_front [[front_facing]]".into()),
+            )
+        } else if attribute.contains("primitive_id") {
+            (
+                "ara_primitive".into(),
+                Some("uint ara_primitive [[primitive_id]]".into()),
             )
         } else if attribute.contains("vertex_id") {
             (

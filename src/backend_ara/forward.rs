@@ -47,7 +47,7 @@ use super::{
     toon::{MeshAttachments, ToonDraw, ToonPass},
     transfer,
     transmission_shadow::Transmission,
-    transparency_glass::{self, Glass},
+    transparency_glass::{self, Glass, PaneIds},
     transparency_seed::{MsaaColor, Seed},
     volumes::VolumePasses,
 };
@@ -526,6 +526,8 @@ struct Pane {
     slot: StorageBuffer,
     /// Its program's index in `Panes::programs`.
     program: usize,
+    /// The pixels its bounds project to, [x0, y0, x1, y1): what per-pixel shading visits.
+    rect: [u32; 4],
 }
 /// What a traced frame's transparent panes add: `encode_transparency`'s targets,
 /// records and pipelines.
@@ -534,6 +536,9 @@ struct Panes {
     seed: Seed,
     /// Each distinct pane program composed for the glass pass, with its pipeline.
     programs: Vec<(Program, Glass)>,
+    /// Per-pixel pane shading (`PanePixels`), in place of the glass raster unless
+    /// `RENDERLAB_ARA_PANES=raster`.
+    pixels: Option<PanePixels>,
     target: MsaaColor,
     /// The pass's camera block and `TpFrame`, from the unjittered camera.
     camera: StorageBuffer,
@@ -547,8 +552,55 @@ struct Panes {
     /// Far to near.
     panes: Vec<Pane>,
 }
+/// Per-pixel pane shading's programs and targets (`shaders/pane_pixels.wgsl`): for each pane
+/// program its id raster and its shading kernel, and the four sample id targets.
+struct PanePixels {
+    programs: Vec<(Program, PaneIds, Program, Kernel)>,
+    /// R32Uint at the frame's size: the triangle (plus one) under each coverage sample.
+    ids: [Texture; 4],
+}
+/// The four-sample pattern's positions in a pixel (the standard 4x one), in pixels.
+const PANE_SAMPLES: [[f32; 2]; 4] = [[0.375, 0.125], [0.875, 0.375], [0.125, 0.625], [0.625, 0.875]];
+/// The pixels a pane's world bounds project to through `camera` at `size`, two pixels wider
+/// on each side; the whole frame when a corner lies behind the eye.
+fn pane_rect(bounds: (crate::Vec3, crate::Vec3), camera: &crate::Camera, size: [u32; 2]) -> [u32; 4] {
+    let m = camera.matrix(size[0], size[1]);
+    let (lo, hi) = bounds;
+    let (mut a, mut b) = ([f32::MAX; 2], [f32::MIN; 2]);
+    for corner in 0..8 {
+        let p = crate::Vec3::new(
+            if corner & 1 == 0 { lo.x } else { hi.x },
+            if corner & 2 == 0 { lo.y } else { hi.y },
+            if corner & 4 == 0 { lo.z } else { hi.z },
+        );
+        let clip = m * p.extend(1.);
+        if clip.w <= 1e-6 {
+            return [0, 0, size[0], size[1]];
+        }
+        let px = [
+            (clip.x / clip.w * 0.5 + 0.5) * size[0] as f32,
+            (0.5 - clip.y / clip.w * 0.5) * size[1] as f32,
+        ];
+        for k in 0..2 {
+            a[k] = a[k].min(px[k]);
+            b[k] = b[k].max(px[k]);
+        }
+    }
+    let clamp = |v: f32, n: u32| v.clamp(0., n as f32) as u32;
+    [
+        clamp(a[0].floor() - 2., size[0]),
+        clamp(a[1].floor() - 2., size[1]),
+        clamp(b[0].ceil() + 2., size[0]),
+        clamp(b[1].ceil() + 2., size[1]),
+    ]
+}
 impl Panes {
     fn retire(self, gpu: &mut GpuDevice, graph: &mut Graph) -> Result<()> {
+        if let Some(pixels) = self.pixels {
+            for ids in pixels.ids {
+                super::image::release(gpu, ids.image)?;
+            }
+        }
         self.target.retire(gpu, graph)?;
         self.camera.retire(gpu)?;
         self.frame.retire(gpu)?;
@@ -3519,18 +3571,38 @@ fn frame(
                     material,
                     slot,
                     program,
+                    rect: pane_rect(pane_bounds(object)?, &scene.camera, size),
                 });
             }
             let mut programs = Vec::new();
-            for source in sources {
+            for source in &sources {
                 let program = transparency_glass::traced_program(source)?;
                 let glass = Glass::new(gpu, cache, &program)?;
                 programs.push((program, glass));
             }
+            let per_pixel = std::env::var("RENDERLAB_ARA_PANES").map_or(true, |v| v != "raster");
+            let pixels = if per_pixel {
+                let mut pixel_programs = Vec::new();
+                for source in &sources {
+                    let ids = transparency_glass::pane_id_program(source)?;
+                    let raster = PaneIds::new(gpu, cache, &ids)?;
+                    let shade = transparency_glass::pane_shade_program(source)?;
+                    let kernel = Kernel::from_program(gpu, cache, &shade)?;
+                    pixel_programs.push((ids, raster, shade, kernel));
+                }
+                let mut target = || Texture::new(gpu, size, Format::R32Uint, false, true);
+                Some(PanePixels {
+                    programs: pixel_programs,
+                    ids: [target()?, target()?, target()?, target()?],
+                })
+            } else {
+                None
+            };
             Some(Panes {
                 hit_depth: Kernel::new(gpu, cache, Pass::TransparencyHitDepth)?,
                 seed: Seed::new(gpu, cache)?,
                 programs,
+                pixels,
                 target: MsaaColor::new(gpu, size)?,
                 camera,
                 frame,
@@ -3542,6 +3614,46 @@ fn frame(
         }
         _ => None,
     };
+    // Per-pixel panes' records (`PanePixels` in pane_pixels.wgsl), made before the packets
+    // that read them: for each pane, its four samples' then its shading's.
+    let mut pane_records: Vec<[StorageBuffer; 5]> = Vec::new();
+    if let Some(t) = panes.as_ref().filter(|t| t.pixels.is_some()) {
+        for pane in &t.panes {
+            let record = |gpu: &mut GpuDevice, offset: [f32; 4]| {
+                let mut bytes = Vec::with_capacity(48);
+                for v in offset {
+                    bytes.extend(v.to_le_bytes());
+                }
+                // The rectangle, then the placement slot (0: each pane is its own geometry).
+                for v in pane.rect.into_iter().chain([0; 4]) {
+                    bytes.extend(v.to_le_bytes());
+                }
+                StorageBuffer::new(gpu, &bytes)
+            };
+            // Each sample's offset in clip units, which lands it on the pixel centre, and
+            // from it to the pixel centre in pixels.
+            let offset = |k: usize| {
+                let [x, y] = PANE_SAMPLES[k];
+                [
+                    2. * (0.5 - x) / size[0] as f32,
+                    -2. * (0.5 - y) / size[1] as f32,
+                    0.5 - x,
+                    0.5 - y,
+                ]
+            };
+            let records = [
+                record(gpu, offset(0))?,
+                record(gpu, offset(1))?,
+                record(gpu, offset(2))?,
+                record(gpu, offset(3))?,
+                record(gpu, [0.; 4])?,
+            ];
+            for buffer in &records {
+                graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+            }
+            pane_records.push(records);
+        }
+    }
     let mut pane_packets = Vec::new();
     if let (Some(t), Some(deferred)) = (&panes, deferred.as_ref()) {
         let values = shader::inputs(Pass::TransparencyHitDepth)?
@@ -3564,7 +3676,7 @@ fn frame(
         t.hit_depth
             .record(&mut graph, &mut rec, &packet, [size[0], size[1], 1])?;
         pane_packets.push(packet);
-        for pane in &t.panes {
+        for (at, pane) in t.panes.iter().enumerate() {
             graph.node(
                 &mut rec,
                 &[
@@ -3578,6 +3690,77 @@ fn frame(
                 destination: pane.behind.image,
             });
             rec.push(Command::EndPass);
+            // The glass entry's inputs, shared by the per-pixel passes.
+            let glass_input = |spec: &shader::ShaderInput| -> Result<Input<'_>> {
+                Ok(match (spec.kind, spec.key.group, spec.key.binding) {
+                    (_, 0, 0) => Input::Buffer(&t.camera),
+                    (_, 0, 30) => Input::Buffer(&t.frame),
+                    (_, 0, 31) => Input::Image(&pane.behind),
+                    (_, 0, 32) => Input::Image(&t.depth),
+                    // `TP1 linear clamp`.
+                    (_, 0, 33) => Input::Sampler(SamplerDesc {
+                        mip: Filter::Nearest,
+                        ..SamplerDesc::default()
+                    }),
+                    (_, 0, 37) => Input::Buffer(&pane.slot),
+                    (_, 0, 38) => Input::Image(&t.reflected),
+                    (_, 2, 1) => Input::Image(&t.defaults[0]),
+                    (_, 2, 3) => Input::Image(&t.defaults[1]),
+                    (_, 2, 5) => Input::Image(&t.defaults[2]),
+                    _ => shared.input(spec, Some((&pane.geometry, &pane.material)))?,
+                })
+            };
+            if let Some(pixels) = &t.pixels {
+                // Per pixel: the triangle under each coverage sample, then one shading
+                // dispatch over the pane's rectangle into the output (see PanePixels).
+                let [x0, y0, x1, y1] = pane.rect;
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
+                let (id_program, raster, shade_program, kernel) = &pixels.programs[pane.program];
+                let records = &pane_records[at];
+                for (k, buffer) in records[..4].iter().enumerate() {
+                    let values = id_program
+                        .inputs()
+                        .iter()
+                        .map(|spec| {
+                            Ok((
+                                spec.key,
+                                match (spec.key.group, spec.key.binding) {
+                                    (0, 77) => Input::Buffer(buffer),
+                                    _ => glass_input(spec)?,
+                                },
+                            ))
+                        })
+                        .collect::<Result<Vec<_>>>()?;
+                    let packet = HeapBindings::for_program(gpu, id_program, &values)?;
+                    packet.import(&mut graph);
+                    raster.record(&mut graph, &mut rec, &packet, &pane.geometry, &pixels.ids[k])?;
+                    pane_packets.push(packet);
+                }
+                let values = shade_program
+                    .inputs()
+                    .iter()
+                    .map(|spec| {
+                        Ok((
+                            spec.key,
+                            match (spec.key.group, spec.key.binding) {
+                                (0, 70) => Input::Buffer(pane.geometry.vertices()),
+                                (0, 71) => Input::Buffer(pane.geometry.indices()),
+                                (0, k @ 72..=75) => Input::Image(&pixels.ids[(k - 72) as usize]),
+                                (0, 76) => Input::Image(&output),
+                                (0, 77) => Input::Buffer(&records[4]),
+                                _ => glass_input(spec)?,
+                            },
+                        ))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                let packet = HeapBindings::for_program(gpu, shade_program, &values)?;
+                packet.import(&mut graph);
+                kernel.record(&mut graph, &mut rec, &packet, [x1 - x0, y1 - y0, 1])?;
+                pane_packets.push(packet);
+                continue;
+            }
             let seed = HeapBindings::new(
                 gpu,
                 Pass::TransparencySeed,
@@ -3590,28 +3773,7 @@ fn frame(
             let values = program
                 .inputs()
                 .iter()
-                .map(|spec| {
-                    Ok((
-                        spec.key,
-                        match (spec.kind, spec.key.group, spec.key.binding) {
-                            (_, 0, 0) => Input::Buffer(&t.camera),
-                            (_, 0, 30) => Input::Buffer(&t.frame),
-                            (_, 0, 31) => Input::Image(&pane.behind),
-                            (_, 0, 32) => Input::Image(&t.depth),
-                            // `TP1 linear clamp`.
-                            (_, 0, 33) => Input::Sampler(SamplerDesc {
-                                mip: Filter::Nearest,
-                                ..SamplerDesc::default()
-                            }),
-                            (_, 0, 37) => Input::Buffer(&pane.slot),
-                            (_, 0, 38) => Input::Image(&t.reflected),
-                            (_, 2, 1) => Input::Image(&t.defaults[0]),
-                            (_, 2, 3) => Input::Image(&t.defaults[1]),
-                            (_, 2, 5) => Input::Image(&t.defaults[2]),
-                            _ => shared.input(spec, Some((&pane.geometry, &pane.material)))?,
-                        },
-                    ))
-                })
+                .map(|spec| Ok((spec.key, glass_input(spec)?)))
                 .collect::<Result<Vec<_>>>()?;
             let packet = HeapBindings::for_program(gpu, program, &values)?;
             packet.import(&mut graph);
@@ -4244,6 +4406,7 @@ fn frame(
     }
     for buffer in materials
         .into_iter()
+        .chain(pane_records.into_iter().flatten())
         .chain(parameter_blocks)
         .chain(buffers.into_values())
         .chain([camera, lighting])
