@@ -1709,12 +1709,28 @@ const GI_HIT_FINAL:f32=1.0;
 const GI_HIT_CHANGING:f32=0.75;
 const GI_HIT_MISSING:f32=0.5;
 const GI_HIT_NONE:f32=0.25;
+// A gather hit's cell edge over the hit's distance along the ray, for the hits that follow (0:
+// the pixels' level). The gather kernels set it: the fixed directions' share of the cone's
+// footprint, and 0 for the rays aimed around a light.
+var<private> gi_hit_spread:f32;
+// The level a gather hit at `world`, a distance t along its ray, reads and requests: the level
+// a pixel there would read, or the coarser one whose cells are gi_hit_spread * t on an edge.
+// A fixed direction stands for a cone 0.36 t wide at the hit (64 directions), so a 4 px cell
+// there is far below what the ray resolves, and those cells were most of the table: a moving
+// camera made several times more of them than pixels read (docs/speck.md). Near a contact the
+// cone is narrow and the pixels' level stands.
+fn gi_hit_level(world:vec3<f32>, t:f32) -> u32 {
+    let pixel=gi_level(world);
+    if gi_hit_spread<=0.0 { return pixel; }
+    let cone=max(log2(max(gi_hit_spread*t,1e-30)/gi_header_f32(GI_H_MIN_EDGE)),0.0);
+    return max(pixel,min(u32(ceil(cone)),gi_word(GI_H_LEVELS)-1u));
+}
 fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bool) -> vec4<f32> {
     let r=gi_hit_receiver(origin,d,h);
     let world=r.world;
     let bin=gi_bin(r.vertex);
     let levels=gi_word(GI_H_LEVELS);
-    let base=gi_level(world);
+    let base=gi_hit_level(world,h.t);
     var cause=0u;
     // The hit level's cell is an orphan: the levels above it are its final fallback.
     var orphan=false;
@@ -1814,6 +1830,8 @@ fn gi_gather_period(count:u32) -> u32 {
             var changing=0u;
             var rays=0u;
             let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
+            // The fixed directions' hits read cells sized to the ray's cone (gi_hit_radiance).
+            gi_hit_spread=gi_header_f32(GI_H_HIT_SPREAD);
             for(var k=lane;k<GI_DIRECTIONS;k+=GI_GATHER_LANES) {
                 if k%stride!=0u || (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
                 let d=gi_direction(frame,c.key,k);
@@ -1829,6 +1847,8 @@ fn gi_gather_period(count:u32) -> u32 {
                 let radiance=o.rgb*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
                 for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=radiance*gi_y[i]; }
             }
+            // The aimed rays resolve what is near a light: their hits keep the pixels' level.
+            gi_hit_spread=0.0;
             let aimed=gi_near_gather(lane,origin,n,c.key,band,tertiary);
             rays+=aimed.x;
             missing+=aimed.y;

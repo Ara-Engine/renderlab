@@ -200,7 +200,7 @@ It is the existing eviction with an age that yields under pressure. The seen sta
 ### Table size and what else it costs
 
 - The table is 192 MiB at 2^20 (192 bytes a slot), plus 16 MiB of outgoing radiance, 88 MiB of filter sources and 4 MiB of claim words. 2^21 adds about 300 MiB and does not fit the non-RT device as one buffer (384 MiB against its 256 MiB limit).
-- The capacity change that fits both paths is to give gather hits coarser cells (one sized to the ray's cone at the hit, not to 4 px at the hit's distance from the camera): the table's need falls toward the pixels' 100,000 cells. It changes bounce values and needs the reference check. Not done yet.
+- The capacity change that fits both paths is to give gather hits coarser cells, sized to the ray's cone at the hit: section 8.
 
 ### Measurement switches (both through any embedder)
 
@@ -215,4 +215,52 @@ The work buffer's counters grew from 44 to 48 words (`COUNTER_WORDS`; `GI_W_CLAI
 
 - The Outpost rerun with the log (integration thread).
 - The same-binary before/after on the quarry.
-- The capacity change above, and the starved gather queue ([m7-gaps.md](m7-gaps.md)).
+- The starved gather queue ([m7-gaps.md](m7-gaps.md)).
+
+## 8. Gather hit cells sized to the ray's cone
+
+A fixed gather direction stands for a cone about 0.36 of the hit's distance wide (64 directions), yet a hit read, and requested, the cell a pixel there would read: 4 px at the hit's distance from the camera. Those cells were most of the table (section 7). A hit now reads and requests a cell sized to the cone: `IndirectSettings::hit_cone_cells` cells across the cone's width, never finer than the pixels' level (`shaders/gi_cache.wgsl`, `gi_hit_level`; header word 27 holds the cell edge over the hit's distance). Near a contact the cone is narrow and the pixels' level stands. The rays aimed around a light keep the pixels' level: they resolve small things. Default 4; 0 is the old behaviour (`RENDERLAB_GI=hit_cone_cells=0`).
+
+### Against the path tracer (M, leases `speck-cone`, `speck-cone-flight`, 1280x720, both paths)
+
+`examples/reflection_matched.rs --field` is the field walk in the matched scene (uniform sky, sun, no fog), which `renderlab::reference` path-traces (16,384 samples at frames 60 and 119). `tools/speck/cone.py` runs and scores it: 80 px region means, 8-bit display codes.
+
+| Field walk | Cells 0 | 16 | 8 | 4 |
+|---|---:|---:|---:|---:|
+| RT, frame 60: RMS against the reference | 0.43 | 0.42 | 0.42 | 0.42 |
+| RT, frame 119 | 0.42 | 0.41 | 0.40 | 0.40 |
+| Non-RT, frame 60 | 0.44 | 0.43 | 0.43 | 0.42 |
+| Non-RT, frame 119 | 0.44 | 0.43 | 0.42 | 0.42 |
+| Largest change of a region against cells 0 (either path, either frame) | - | 0.21 | 0.22 | 0.28 |
+| RT: cells created over the walk | 620,054 | 432,919 | 390,129 | 346,278 |
+| RT: evicted under pressure | 10,692 | 1,174 | 614 | 267 |
+| RT: cells waiting for a gather at the end | 492,559 | 326,302 | 243,863 | 214,918 |
+
+- The walk's error against the reference does not depend on the setting; the cells created fall by 44 % at 4.
+- **The one place the picture moves is the spinning crate, and it moves toward the reference.** On the example's own 48-frame flight (8,192-sample references at frames 16, 32 and 47), the only regions a setting changes by more than 0.75 codes are one or two a frame, on the crate. Their distance from the reference, cells 0 against 4: frame 16, 4.95 to 4.07 codes (RT) and 4.98 to 3.71 (non-RT); frame 32, 8.16 to 6.58 and 8.07 to 6.50; frame 47, 11.35 to 8.44 and 11.42 to 8.37. 16 and 8 lie between. The crate is still 4-8 codes from the reference: that is a2, a moving object's cells.
+
+### On the game scene (M, lease `speck-cone-game`, 1080p, one binary, cells 0 against 4)
+
+| | RT 0 | RT 4 | Non-RT 0 | Non-RT 4 |
+|---|---:|---:|---:|---:|
+| Field walk: cells created in 120 frames | 1,168,406 | 623,733 | 1,176,983 | 652,289 |
+| ... evicted under pressure | 199,062 | 11,109 | 202,753 | 14,117 |
+| ... pixels' failed inserts (once per claim round) | 4,378 | 8,298 | 4,920 | 11,534 |
+| Flight: cells created in 180 frames | 1,189,721 | 735,240 | 1,195,485 | 740,530 |
+| ... evicted under pressure | 213,687 | 22,362 | 217,008 | 23,193 |
+| ... pixels' failed inserts | 362 | 1,226 | 373 | 1,236 |
+| Flight: median blob pixels | 9,198 | 9,787 | 10,059 | 9,428 |
+
+- **Settled still** (frozen camera, steady fire, frame 95), 120 px regions, cells 0 against 4: largest change 0.42 codes RT, 0.44 non-RT (worst channel 0.89 and 0.97); no region over 1 code.
+- **Flight frames 56, 98 and 175:** at most 0.71 codes RT, 0.90 non-RT. Frame 21 has one region over 1 code, +4.9 codes: the spinning cube's shaded face (`D:/Coding/renderlab-work/unit-speck/sheets/cone-cube-f021.png`), the same object the reference check above covers.
+- The pixels' failed inserts rise a little while everything else falls (about 70 a frame on the field walk, of some 100,000 pixel cells). Not explained yet; a coarse hit cell is read by many gathers, so it is seldom old enough for a pixel's miss to take.
+- Lib tests: "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 396 filtered out".
+
+### Not measured
+
+- Cost: fewer cells are created, traced and shaded, so the cache's own work should fall; no timing lease has run.
+- The quarry, and the full lib suite (the bounce gates there were tuned at the pixels' level).
+
+### For the ara-gpu port
+
+`Planner::begin` writes header word 27 (an f32: the hit cell's edge over the hit's distance); `IndirectSettings` has `hit_cone_cells`. No new buffer, texture or binding.

@@ -64,6 +64,10 @@ SWITCHES = {
     # The same binary without the eviction under pressure (IndirectSettings::pressure_eviction).
     "pressure-off": ([], {"RENDERLAB_GI": "pressure_eviction=0"}),
     "slots17-pressure-off": ([], {"RENDERLAB_GI": "slots_log2=17;pressure_eviction=0"}),
+    # Gather hit cells sized to the ray's cone (IndirectSettings::hit_cone_cells): cells across it.
+    "cone16": ([], {"RENDERLAB_GI": "hit_cone_cells=16"}),
+    "cone8": ([], {"RENDERLAB_GI": "hit_cone_cells=8"}),
+    "cone4": ([], {"RENDERLAB_GI": "hit_cone_cells=4"}),
 }
 FLIGHT = ["--frames", "180", "--diag", "cut=1"]
 STILL = ["--still", "--frames", "96", "--every", "95", "--diag", "flicker=0"]

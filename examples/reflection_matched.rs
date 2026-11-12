@@ -94,6 +94,9 @@ struct Args {
     /// `--lamp SCALE`: the game example's arch lamp, a white bulb with its point light 0.25 m
     /// below, at SCALE times its candela.
     lamp: Option<f32>,
+    /// `--field`: the game example's field walk (`--diag field=1` there): 300 boxes and a
+    /// pale slab, the camera walking 4 m while turning 12 degrees over the run's frames.
+    field: bool,
     stage: bool,
     glass_balls: bool,
     metal_balls: bool,
@@ -133,6 +136,7 @@ impl Args {
             hour: None,
             diag: Vec::new(),
             lamp: None,
+            field: false,
             stage: false,
             glass_balls: false,
             metal_balls: false,
@@ -191,6 +195,7 @@ impl Args {
                 "--freeze" => a.freeze = Some(value()?.parse()?),
                 "--hour" => a.hour = Some(value()?.parse()?),
                 "--lamp" => a.lamp = Some(value()?.parse()?),
+                "--field" => a.field = true,
                 "--stage" => a.stage = true,
                 "--glass-balls" => a.glass_balls = true,
                 "--metal-balls" => a.metal_balls = true,
@@ -477,6 +482,42 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         stone,
         boxed(at(0.0, 4.4, -3.0), Vec3::new(5.2, 0.8, 1.0)),
     )?;
+    // U-SPECK (docs/speck.md): the game example's field (its `--diag field=1`), the same
+    // boxes, slab and walk, recorded for the reference.
+    const FIELD_EYE: Vec3 = Vec3::new(-6.0, 1.6, -6.0);
+    const FIELD_WALK: Vec3 = Vec3::new(-0.707_106_77, 0.0, -0.707_106_77);
+    if args.field {
+        let magenta = material(&mut engine, [0.75, 0.08, 0.75], 0.0, 0.6)?;
+        let slab = material(&mut engine, [0.35, 0.65, 0.85], 0.0, 0.7)?;
+        spawn(
+            &mut engine,
+            &mut placed,
+            cube,
+            slab,
+            boxed(at(-10.5, 0.03, -8.0), Vec3::new(4.0, 0.06, 4.0)),
+        )?;
+        let mut seed = 0x9e37_79b9_u32;
+        let mut next = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            seed as f32 / u32::MAX as f32
+        };
+        for _ in 0..300 {
+            let (x, z, size) = (-29.0 + 24.0 * next(), -29.0 + 24.0 * next(), 0.3 + 0.9 * next());
+            let along = (Vec3::new(x, 0.0, z) - FIELD_EYE).dot(FIELD_WALK).clamp(0.0, 4.0);
+            let aside = Vec3::new(x, 0.0, z) - (FIELD_EYE + along * FIELD_WALK);
+            if aside.length() - FIELD_EYE.y > 2.5 || aside.length() > 6.0 {
+                spawn(
+                    &mut engine,
+                    &mut placed,
+                    cube,
+                    magenta,
+                    boxed(at(x, 0.5 * size, z), Vec3::splat(size)),
+                )?;
+            }
+        }
+    }
     // U-SPECK (docs/speck.md): the game example's arch lamp, a white bulb hanging under the
     // lintel with its point light 0.25 m below it, so the bulb's underside is 0.13 m from the
     // light: the small bright surface the GI gather must resolve. The reference has no point
@@ -730,6 +771,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 radius * orbit.cos(),
             );
         let target = hero.lerp(anchor + Vec3::Y, 0.5);
+        let (eye, target) = if args.field {
+            let along = frame as f32 / (args.frames.max(2) - 1) as f32;
+            let eye = anchor + FIELD_EYE + 4.0 * along * FIELD_WALK;
+            let look =
+                Mat4::from_rotation_y((12.0 * along).to_radians()).transform_vector3(FIELD_WALK);
+            (eye, eye + 10.0 * look - Vec3::new(0.0, 2.2, 0.0))
+        } else {
+            (eye, target)
+        };
         if let Some(traced) = &traced {
             let begin = Instant::now();
             let (noise, invalid) = traced.render(
