@@ -100,7 +100,7 @@ impl TraceAbi {
 
 /// The pass's per-view resources: L (full resolution), the pass uniform, H, R and D (one texel
 /// per 2x2 quad).
-pub struct PassTargets {
+pub(in crate::renderer) struct PassTargets {
     pub lobe_a: Depth,
     pub lobe_b: Depth,
     pub frame: Buffer,
@@ -476,7 +476,10 @@ impl Renderer {
             submission_index: None,
             timeout: Some(std::time::Duration::from_secs(20)),
         });
-        let data = p.staging.slice(..).get_mapped_range();
+        // wgpu 30 returns the mapped view as a Result; a probe that cannot map reports nothing.
+        let Ok(data) = p.staging.slice(..).get_mapped_range() else {
+            return;
+        };
         let count = u32::from_ne_bytes(data[0..4].try_into().unwrap());
         let [w, h] = p.slots;
         let (mut hits, mut written, mut lit, mut misses, mut sky) = (0u64, 0u64, 0u64, 0u64, 0u64);

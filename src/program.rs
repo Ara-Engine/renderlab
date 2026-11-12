@@ -271,10 +271,12 @@ fn rl_hit_switches(source: String) -> String {
 
 /// The reflection API text for `program` on `head` at `stage`, and whether it traces: empty
 /// for programs that name neither hook nor input, so their modules are unchanged.
-fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
+/// `hits` composes the traced block whatever the program declares, for the hit-shading
+/// module (`compose_hits`): any program's draw can be hit.
+fn reflection_api(head: &str, program: &str, stage: Stage, hits: bool) -> (String, bool) {
     let names = tokens(program);
-    let lobe = names.windows(2).any(|w| w == ["fn", "reflection_lobe"]);
-    let reads = names.contains(&"specular_incident");
+    let lobe = hits || names.windows(2).any(|w| w == ["fn", "reflection_lobe"]);
+    let reads = hits || names.contains(&"specular_incident");
     if !lobe && !reads {
         return (String::new(), false);
     }
@@ -314,8 +316,9 @@ pub(crate) const SOFTWARE_REFLECTION_GEOMETRY: &str =
 const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_software.wgsl");
 /// R1's two ray queries and their software replacements: the hit's light visibility, and
 /// the reflection ray itself, which yields the same hit record. The queries' declarations
-/// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed. Software hits have
-/// no hit distance, so they never read the radiance cache (reflection_cache_hits.wgsl).
+/// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed. The software hit keeps
+/// rs_trace's result (`rs`, U-RTVIS's seam): the resolve and cache-terminated hits read its
+/// distance `rs.t` where the hardware path reads `hit.t`.
 const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 5] = [
     // The resolve's hit distance: the software traversal's own (`rs`, the loop seam below; the
     // cache-terminated hits can read `rs.t` the same way).
@@ -334,7 +337,7 @@ const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 5] = [
     ),
     (
         "            let cached=rl_cache_hit(record,origin,d,hit.t,width+spread*hit.t,rough);\n",
-        "            let cached=vec4<f32>(0.0);\n",
+        "            let cached=rl_cache_hit(record,origin,d,rs.t,width+spread*rs.t,rough);\n",
     ),
 ];
 /// Cache-terminated reflection hits (shaders/reflection_cache_hits.wgsl): a rough lobe's hit
@@ -654,6 +657,16 @@ pub(crate) struct Composed {
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
+    compose_stage(head, program, stage, parameters, false)
+}
+/// `compose`, or with `hits` the hit-shading module (`compose_hits`).
+fn compose_stage(
+    head: &str,
+    program: &str,
+    stage: Stage,
+    parameters: bool,
+    hits: bool,
+) -> Composed {
     let streamed;
     let cell_entry;
     let (api, binding, entry) = match stage {
@@ -713,7 +726,12 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     } else {
         crate::atmosphere::api_source()
     };
-    let (mut reflection, traces) = reflection_api(head, program, stage);
+    let (mut reflection, traces) = reflection_api(head, program, stage, hits);
+    // The hit module of a program that traces no lobe: its own pixels never trace, but the
+    // reflection block names the hook.
+    if hits && !declares(program, "fn", "reflection_lobe") {
+        reflection.push_str(REFLECTION_LOBE_STUB);
+    }
     if traces {
         // M7-R1: the indirect inputs' cache-off state, which reads the open environment.
         reflection.push_str(match (indirect_calls, specular) {
@@ -723,14 +741,11 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             (true, false) => "fn rl_indirect_open() { gi_rx_valid=false; }\n",
             _ => "fn rl_indirect_open() {}\n",
         });
-        // Software hits have no hit distance; their seam never calls the lookup.
-        let hardware = reflection.contains("rayQueryInitialize");
-        reflection.push_str(
-            &match cache_hits_rough().filter(|_| indirect_calls && hardware) {
-                Some(rough) => CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", &format!("{rough:?}")),
-                None => CACHE_HITS_STUB.to_owned(),
-            },
-        );
+        // Hardware and software traces alike (the software seam passes rs_trace's distance).
+        reflection.push_str(&match cache_hits_rough().filter(|_| indirect_calls) {
+            Some(rough) => CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", &format!("{rough:?}")),
+            None => CACHE_HITS_STUB.to_owned(),
+        });
     }
     let view = declares(program, "fn", "view_dependence");
     let view_api = if view { VIEW_API } else { "" };
@@ -763,7 +778,12 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             source.push_str(traced_hit_helpers());
         }
     }
-    if traces {
+    if hits {
+        // The stage's entry as written (its decode helpers are the hits' too; its own entry
+        // point goes unused), then the hit entry.
+        source.push_str(entry);
+        source.push_str(crate::renderer::reflection_hits::ENTRY);
+    } else if traces {
         // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
         source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
@@ -827,6 +847,42 @@ pub(crate) fn view_variant(
     Ok(source)
 }
 // ---- end of view modes ----
+
+// ---- Reflection hit shading (docs/design-reflection-pass.md) ----
+/// `reflection_lobe` for a program that declares none: no lobe.
+const REFLECTION_LOBE_STUB: &str = "fn reflection_lobe(s:Surface,input:SurfaceInput)->SpecularLobe { return SpecularLobe(vec3<f32>(0.0,0.0,1.0),0.0,0.0); }\n";
+/// The hit-shading module of `program` on a traced stage: `compose`'s text with the reflection
+/// block composed whatever the program declares, and the `reflection_hits` entry
+/// (shaders/reflection_hits.wgsl) after the stage's entry, whose decode helpers it shares.
+/// Hits run the same hit code as the inline path: `rl_hit_input`, the program's `surface`
+/// and `shade`, its lights.
+/// With `lists` (a mixed-program frame, shaded per program on MP1's list ABI) the module
+/// also declares MP1's slot uniform and keeps only the hits on its own slot's draws.
+pub(crate) fn compose_hits(
+    head: &str,
+    program: &str,
+    stage: Stage,
+    parameters: bool,
+    lists: bool,
+) -> Composed {
+    debug_assert!(matches!(stage, Stage::Traced | Stage::TracedStreamed));
+    let mut composed = compose_stage(head, program, stage, parameters, true);
+    if lists {
+        assert_eq!(
+            composed.source.matches(HITS_MINE).count(),
+            1,
+            "reflection_hits seam"
+        );
+        composed.source = composed.source.replacen(HITS_MINE, HITS_MINE_LIST, 1);
+    }
+    composed
+}
+/// shaders/reflection_hits.wgsl's per-program filter, and its mixed-frame replacement: the
+/// hit's draw's frame slot against this dispatch's (program_traced_list.wgsl RlList, at
+/// binding 38 with a dynamic offset per slot).
+const HITS_MINE: &str = "fn rl_hits_mine(placement:u32)->bool { return true; }\n";
+const HITS_MINE_LIST: &str = "struct RlList { slot:u32, base:u32, capacity:u32, flags:u32, programs:array<vec4<u32>,PRIMARY_BATCHES/4> };\n@group(0) @binding(38) var<uniform> rl_list:RlList;\nfn rl_hits_mine(placement:u32)->bool { let batch=primary_placements[placement]&0x1fffffffu; return rl_list.programs[batch>>2u][batch&3u]==rl_list.slot; }\n";
+// ---- end of reflection hit shading ----
 
 // ---- MP1 per-program dispatch (docs/m7-mp1.md) ----
 /// The tile-list shading entry of mixed-program frames (`primary_shade_list`).

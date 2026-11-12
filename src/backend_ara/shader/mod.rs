@@ -80,6 +80,8 @@ pub enum Pass {
     PrimaryShadeTiles,
     /// Original mixed-program deferred shading of listed primary tiles.
     PrimaryShadeList,
+    /// A program's reflection hits: one bin of H (src/reflection_hits.rs).
+    ReflectionHits,
     /// Original software raster of projected cluster triangles into packed visibility.
     VisibilitySoftware,
     /// Original procedural hardware raster of cluster IDs, with reversed-Z depth.
@@ -100,6 +102,8 @@ pub enum Pass {
     VisibilityReset,
     /// Mixed-program tile lists and indirect dispatch arguments.
     ProgramBins,
+    /// Reflection hit records binned by their hit's program (src/reflection_hits.rs).
+    ReflectionHitBins,
     /// Base reversed-Z minimum depth from the visibility buffer.
     HzbBase,
     /// Minimum reduction from the previous image mip.
@@ -265,6 +269,11 @@ impl Pass {
                 .expect("original traced composition remains valid")
                 .into()
             }
+            Self::ReflectionHits => crate::backend_ara::primary_shade::hits_source(include_str!(
+                "../shaders/traced_material.wgsl"
+            ))
+            .expect("hit composition remains valid")
+            .into(),
             Self::HandleArrayProbe => include_str!("../shaders/handle_array_probe.wgsl").into(),
             Self::BufferArrayProbe => include_str!("../shaders/buffer_array_probe.wgsl").into(),
             Self::PrimaryCheck => {
@@ -318,6 +327,7 @@ impl Pass {
             Self::ProgramBins => {
                 crate::renderer::primary_ray_gpu::program_lists::bin_source().into()
             }
+            Self::ReflectionHitBins => crate::renderer::reflection_hits::bin_source().into(),
             Self::HzbBase | Self::HzbReduce => {
                 include_str!("../../../shaders/visibility_buffer_hzb.wgsl").into()
             }
@@ -511,6 +521,7 @@ impl Pass {
             self,
             Self::PrimaryShadeTiles
                 | Self::PrimaryShadeList
+                | Self::ReflectionHits
                 | Self::TransparencyGlass
                 | Self::PaneId
                 | Self::PaneShade
@@ -542,6 +553,7 @@ impl Pass {
                 | Self::PrimaryRayProbe
                 | Self::PrimaryShadeTiles
                 | Self::PrimaryShadeList
+                | Self::ReflectionHits
                 | Self::HandleArrayProbe
                 | Self::BufferArrayProbe
                 | Self::VisibilitySoftware
@@ -556,6 +568,7 @@ impl Pass {
                 | Self::HzbBase
                 | Self::HzbReduce
                 | Self::ProgramBins
+                | Self::ReflectionHitBins
                 | Self::VisibilityCull
                 | Self::VisibilityFinish
                 | Self::VisibilityReset
@@ -653,6 +666,7 @@ impl Pass {
             Self::PrimaryRayProbe => "primary_probe",
             Self::PrimaryShadeTiles => "primary_shade_tiles",
             Self::PrimaryShadeList => "primary_shade_list",
+            Self::ReflectionHits => "reflection_hits",
             Self::PrimaryCheck => "primary_check_interactive",
             Self::TransparencyHitDepth => "tp_depth_hits",
             Self::PostPrimarySurface => "post_primary_surface",
@@ -664,6 +678,7 @@ impl Pass {
             Self::VisibilityFinish => "finish",
             Self::VisibilityReset => "reset",
             Self::ProgramBins => "program_bins",
+            Self::ReflectionHitBins => "reflection_hit_bins",
             Self::HzbBase => "base",
             Self::HzbReduce => "reduce",
             Self::ParticleBillboard => "tp_particle_fs",

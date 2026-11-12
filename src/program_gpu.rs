@@ -92,6 +92,11 @@ pub(crate) struct ProgramPipelines {
     pub fresh: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     /// By `Shading`.
     pub traced: [Option<Owned<wgpu::ComputePipeline>>; 2],
+    /// The reflection pass's hit shading (`program::compose_hits`), single-program then
+    /// mixed-program (on MP1's list ABI), by `Shading`: built by the first frame with
+    /// `RENDERLAB_RL_PASS=1` that shades with it (primary_ray_gpu reflection_hits_gpu.rs),
+    /// dropped with `traced`.
+    pub hits: [[Option<Owned<wgpu::ComputePipeline>>; 2]; 2],
     pub temporal: Option<Owned<wgpu::ComputePipeline>>,
     /// Traced shading whose sampling helpers record texture residency requests
     /// (`Renderer::ensure_streamed`), by `Shading`: built only when a frame streams

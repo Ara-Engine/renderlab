@@ -70,6 +70,28 @@ fn with_terms(source: String, terms: u32) -> String {
         crate::renderer::shade_detail::without_terms(&source, terms)
     }
 }
+/// A program's reflection-hit module on the hardware soft head (`program::compose_hits`):
+/// the traced module with the `reflection_hits` entry, which shades one bin of H.
+pub fn hardware_soft_hits_program(material: &str) -> Result<Program> {
+    static KEPT: Memo<[u8; 32], Program> = Memo::new();
+    KEPT.get(memo::digest(material), || {
+        Ok(Program::new(Pass::ReflectionHits, hits_source(material)?)?.checked())
+    })
+}
+/// The hit module's text (`Pass::ReflectionHits`).
+pub(crate) fn hits_source(material: &str) -> Result<String> {
+    let [_, head] =
+        crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
+    let parameters = crate::program::declares_parameters(material);
+    Ok(crate::program::compose_hits(
+        &head,
+        material,
+        crate::program::Stage::Traced,
+        parameters,
+        false,
+    )
+    .source)
+}
 /// The list entry on the same hardware soft head: one program's share of a frame of
 /// several programs, shading the tiles the binning pass listed for its slot
 /// (`program::compose_list`, as `ProgramPipelines::list` compiles it).

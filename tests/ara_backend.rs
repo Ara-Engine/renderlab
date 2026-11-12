@@ -256,6 +256,8 @@ mod hzb_cases;
 
 #[path = "ara_backend/cases/program_bins.rs"]
 mod program_bins_cases;
+#[path = "ara_backend/cases/reflection_hit_bins.rs"]
+mod reflection_hit_bins_cases;
 #[path = "ara_backend/program_bins.rs"]
 mod program_bins_reference;
 
