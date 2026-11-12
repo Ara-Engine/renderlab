@@ -98,6 +98,32 @@ the full budget. A moving caster's shadow cannot leave a stale patch on saturate
 ground in its swept shadow traces the full budget on every frame that it moves.
 `RENDERLAB_HELD_PROBES=0` disables the stop (history is still written): main's picture.
 
+Results (RTX 4070 SUPER, 1080p RT, release game_scene; same binary, the stop on against off,
+interleaved twice; the lease's reference run 26.58 ms against 26.7 expected):
+
+| moving frames, medians | visibility on | off | frame on | off |
+|---|---|---|---|---|
+| forest walk, sun 4 deg | 2.72 / 2.73 | 9.57 / 9.60 | 18.96 / 18.99 | 25.92 / 25.97 |
+| game flight with the Fox | 4.60 / 4.63 | 5.39 / 5.41 | 30.22 / 30.38 | 30.99 / 31.07 |
+
+The forest saves nearly all it could (an 8-direction budget everywhere costs 2.62). The game
+scene saves less: the walking Fox and the spinning crate move every frame, and the ground in
+their swept sun shadow keeps the full budget.
+
+Picture (`heldpics` plan, every frame of 60; tools/rtvis/compare.py `held`, tools/blobs.py):
+- Non-RT: byte-identical, all 60 frames of the game flight.
+- RT, stop on against off: frames 0-3 identical (the streak is not yet reached), then at most
+  7-8 codes on at most 9 pixels a frame; no pixel more than 8 codes in any clip (forest walk,
+  game flight). Whole-frame difference maps x16 are black.
+- Moving casters over saturated ground (`--diag hold=1`: the camera held at its first pose while
+  the Fox walks and the crate spins): at most 2 codes anywhere, and the Fox's shadow region is
+  byte-identical at frames 10, 30 and 50 (crops-held/fox-shadow-hold-on-off-diff16.png).
+- blobs.py: the same blob counts frame for frame, on and off, in all three clips.
+- Against the path tracer (reflection_matched `--matched` against `--reference 4096`, frames 16,
+  32, 47 of its moving flight with the spinning crate and bobbing hero): mean error 0.799 /
+  0.943 / 1.108 codes over the image and 6.967 / 7.685 / 8.452 on edges, identical on and off;
+  on and off differ by at most 1 code.
+
 ## Ara (Mac port) flags
 
 - U-RTVIS step 5 (held budget), wgpu renderer only. New per-view resources:
