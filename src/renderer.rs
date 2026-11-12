@@ -2533,14 +2533,14 @@ impl Renderer {
         }
         let traced = self.primary_mode != PrimaryVisibility::Raster && view_mode == ViewMode::Lit;
         if traced {
+            // U-FIXED: RT renderers trace the Interactive sun from the buffer's receivers.
             if self.primary_mode == PrimaryVisibility::VisibilityBuffer
-                && matches!(
-                    self.view.soft_mode,
-                    SoftShadows::Interactive | SoftShadows::Temporal
-                )
+                && (self.view.soft_mode == SoftShadows::Temporal
+                    || (self.view.soft_mode == SoftShadows::Interactive
+                        && self.hardware_shadows.is_none()))
             {
                 return Err(Error::InvalidInput(
-                    "visibility-buffer primaries support Virtual or Exact soft shadows; Interactive and Temporal require traced primaries",
+                    "visibility-buffer primaries support Virtual or Exact soft shadows, and Interactive on RT renderers; Temporal requires traced primaries",
                 ));
             }
             if self.primary_mode == PrimaryVisibility::Traced
