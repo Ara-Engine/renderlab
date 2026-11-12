@@ -3,15 +3,19 @@
 // H; this entry shades them with the same hit code the inline path runs (rl_hit_input, the
 // program's surface and shade, its lights through its own cluster and light_visibility) and
 // writes each one's exposed radiance into the sample image R at the record's slot. Hits read
-// the open environment, as inline hits do. First stage: single-program frames, one indirect
-// dispatch over all of H with rl_hit_args's arguments (mixed-program frames bin by program,
-// shaders/reflection_hit_bins.wgsl, in a later stage).
+// the open environment, as inline hits do. One indirect dispatch over all of H with
+// rl_hit_args's arguments per frame program; in a mixed-program frame each program's module
+// keeps its own draws' hits (rl_hits_mine).
 // H: a 16-byte header (count, dispatch x, y, z), then three vec4<u32> per record.
 @group(0) @binding(64) var<storage,read> rl_hit_records:array<vec4<u32>>;
 // R: one texel per slot (a 2x2 quad); rgb the radiance, a = 1 written.
 @group(0) @binding(65) var rl_hit_samples_out:texture_storage_2d<rgba16float,write>;
 // Workgroups per dispatch row (rl_hit_args's RL_HIT_GROUP-record groups, rows of 65535).
 const RL_HITS_ROW=65535u;
+// Whether this module shades the hit on `placement`: every hit in a single-program frame. A
+// mixed-program frame runs each program's module over all of H, and each keeps the hits on
+// its own draws (program::compose_hits with lists replaces this function).
+fn rl_hits_mine(placement:u32)->bool { return true; }
 
 @compute @workgroup_size(64) fn reflection_hits(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     // The dispatch is min(g, ROW) x ceil(g / ROW) groups of 64; the surplus lanes return.
@@ -19,6 +23,7 @@ const RL_HITS_ROW=65535u;
     if index>=rl_hit_records[0].x {return;}
     let at=1u+index*3u;
     let a=rl_hit_records[at];
+    if !rl_hits_mine(a.w-1u) {return;}
     let b=rl_hit_records[at+1u];
     let c=rl_hit_records[at+2u];
     let pixel=vec2<u32>(a.x&0xffffu,a.x>>16u);

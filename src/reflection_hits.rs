@@ -77,8 +77,13 @@ mod tests {
         ] {
             let parameters = program::declares_parameters(source);
             for head in rt.iter().chain(&non_rt) {
-                for stage in [Stage::Traced, Stage::TracedStreamed] {
-                    let composed = program::compose_hits(head, source, stage, parameters);
+                for (stage, lists) in [Stage::Traced, Stage::TracedStreamed]
+                    .into_iter()
+                    .flat_map(|stage| [(stage, false), (stage, true)])
+                {
+                    let composed = program::compose_hits(head, source, stage, parameters, lists);
+                    // Mixed frames keep only their own slot's hits (MP1's RlList at 38).
+                    assert_eq!(composed.source.contains("rl_list.slot"), lists);
                     assert_eq!(&composed.source[composed.program.clone()], source);
                     let module =
                         naga::front::wgsl::parse_str(&composed.source).unwrap_or_else(|e| {

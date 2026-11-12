@@ -83,10 +83,14 @@ pub(crate) fn hits_source(material: &str) -> Result<String> {
     let [_, head] =
         crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
     let parameters = crate::program::declares_parameters(material);
-    Ok(
-        crate::program::compose_hits(&head, material, crate::program::Stage::Traced, parameters)
-            .source,
+    Ok(crate::program::compose_hits(
+        &head,
+        material,
+        crate::program::Stage::Traced,
+        parameters,
+        false,
     )
+    .source)
 }
 /// The list entry on the same hardware soft head: one program's share of a frame of
 /// several programs, shading the tiles the binning pass listed for its slot

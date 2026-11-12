@@ -647,7 +647,13 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     compose_stage(head, program, stage, parameters, false)
 }
 /// `compose`, or with `hits` the hit-shading module (`compose_hits`).
-fn compose_stage(head: &str, program: &str, stage: Stage, parameters: bool, hits: bool) -> Composed {
+fn compose_stage(
+    head: &str,
+    program: &str,
+    stage: Stage,
+    parameters: bool,
+    hits: bool,
+) -> Composed {
     let streamed;
     let cell_entry;
     let (api, binding, entry) = match stage {
@@ -840,10 +846,32 @@ const REFLECTION_LOBE_STUB: &str = "fn reflection_lobe(s:Surface,input:SurfaceIn
 /// (shaders/reflection_hits.wgsl) after the stage's entry, whose decode helpers it shares.
 /// Hits run the same hit code as the inline path: `rl_hit_input`, the program's `surface`
 /// and `shade`, its lights.
-pub(crate) fn compose_hits(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
+/// With `lists` (a mixed-program frame, shaded per program on MP1's list ABI) the module
+/// also declares MP1's slot uniform and keeps only the hits on its own slot's draws.
+pub(crate) fn compose_hits(
+    head: &str,
+    program: &str,
+    stage: Stage,
+    parameters: bool,
+    lists: bool,
+) -> Composed {
     debug_assert!(matches!(stage, Stage::Traced | Stage::TracedStreamed));
-    compose_stage(head, program, stage, parameters, true)
+    let mut composed = compose_stage(head, program, stage, parameters, true);
+    if lists {
+        assert_eq!(
+            composed.source.matches(HITS_MINE).count(),
+            1,
+            "reflection_hits seam"
+        );
+        composed.source = composed.source.replacen(HITS_MINE, HITS_MINE_LIST, 1);
+    }
+    composed
 }
+/// shaders/reflection_hits.wgsl's per-program filter, and its mixed-frame replacement: the
+/// hit's draw's frame slot against this dispatch's (program_traced_list.wgsl RlList, at
+/// binding 38 with a dynamic offset per slot).
+const HITS_MINE: &str = "fn rl_hits_mine(placement:u32)->bool { return true; }\n";
+const HITS_MINE_LIST: &str = "struct RlList { slot:u32, base:u32, capacity:u32, flags:u32, programs:array<vec4<u32>,PRIMARY_BATCHES/4> };\n@group(0) @binding(38) var<uniform> rl_list:RlList;\nfn rl_hits_mine(placement:u32)->bool { let batch=primary_placements[placement]&0x1fffffffu; return rl_list.programs[batch>>2u][batch&3u]==rl_list.slot; }\n";
 // ---- end of reflection hit shading ----
 
 // ---- MP1 per-program dispatch (docs/m7-mp1.md) ----
