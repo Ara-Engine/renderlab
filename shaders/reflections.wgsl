@@ -45,8 +45,13 @@ fn rl_history_index()->u32 { return 0u; }
 fn rl_history_lookup(receiver:Receiver,world:vec3<f32>,pixel:vec2<u32>)->vec4<f32> { return vec4<f32>(0.0); }
 fn rl_history_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,mean:vec3<f32>,m2:f32,count:f32) {}
 // ---- end of rl history stubs ----
-// A trusted history's moving cap: a receiver that moved over a pixel since the previous frame
-// folds at most count / RL_HISTORY_MOVING strata (its reflection moves with the parallax).
+// A trusted receiver traces RL_HISTORY_STRATA strata of its set a frame (every
+// count/RL_HISTORY_STRATA-th, from an offset turning with the frame) and folds them into a
+// history of at most RL_HISTORY_CAP x count strata; one that moved over a pixel since the
+// previous frame keeps at most that / RL_HISTORY_MOVING (its reflection moves with the
+// parallax). src/program.rs RENDERLAB_RL_HISTORY_TUNE sets them for measurement.
+const RL_HISTORY_STRATA:u32=1u;
+const RL_HISTORY_CAP:f32=1.0;
 const RL_HISTORY_MOVING:f32=2.0;
 // A stratum disagrees with the history when its luminance is more than RL_HISTORY_SIGMA
 // standard deviations (the stored strata spread) plus RL_HISTORY_SLACK of the mean away.
@@ -214,8 +219,9 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     // A restart sphere or swept shadow (rl_restarts) always traces the full set.
     if RL_HISTORY && !mirror && !restarted && frame!=0u && !rl_restarts(input.world) {hist=rl_history_lookup(receiver,input.world,pixel);}
     var trusted=hist.w>0.0;
-    // Fixed per-pixel offset, so `count` consecutive frames visit every stratum once.
-    let one=(rl_history_index()+(rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y))&0xffffu))%count;
+    // Fixed per-pixel offset, so `stride` consecutive frames visit every stratum once.
+    let stride=max(count/max(RL_HISTORY_STRATA,1u),1u);
+    let one=(rl_history_index()+(rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y))&0xffffu))%stride;
     var sum=vec3<f32>(0.0);
     // The brightest stratum (rgb) and its luminance (w), for the lone-stratum bound.
     var top=vec4<f32>(0.0);
@@ -237,11 +243,11 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     rl_hit_variance=8.0*spread*spread;
     for(var attempt=0u;attempt<2u;attempt+=1u) {
     let first=select(0u,one,trusted);
-    let step=select(1u,count,trusted);
-    rl_hit_strata=select(count,1u,trusted);
+    let step=select(1u,stride,trusted);
+    rl_hit_strata=select(count,(count-first+stride-1u)/stride,trusted);
     sum=vec3<f32>(0.0);top=vec4<f32>(0.0);valid=0u;squares=0.0;
     for(var k=first;k<count;k+=step) {
-        rl_hit_stratum=select(k,0u,trusted);
+        rl_hit_stratum=select(k,k/stride,trusted);
         var d=reflect(-v,n);
         if !mirror {
             let u=vec2<f32>((f32(k)+radial)/f32(count),fract(rotation+f32(k)*0.6180339887));
@@ -273,8 +279,9 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     // history is not trusted and the full set traces now (never blend in doubt).
     if !trusted || valid==0u {break;}
     let mean_level=dot(hist.rgb,RL_LUMA);
-    let sigma=sqrt(max(rl_hist_m2-mean_level*mean_level,0.0));
-    if abs(dot(sum,RL_LUMA)-mean_level)<=RL_HISTORY_SIGMA*sigma+RL_HISTORY_SLACK*mean_level+1e-4 {break;}
+    // The subset mean's noise: the strata spread over the subset's size.
+    let sigma=sqrt(max(rl_hist_m2-mean_level*mean_level,0.0)/f32(valid));
+    if abs(dot(sum,RL_LUMA)/f32(valid)-mean_level)<=RL_HISTORY_SIGMA*sigma+RL_HISTORY_SLACK*mean_level+1e-4 {break;}
     trusted=false;
     }
     rl_reflection_hit=false;
@@ -287,14 +294,16 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         if valid>0u {
             // The lone-stratum bound, against the set the history stands for.
             let lone=primary_frame.reflection.z;
+            // The brightest stratum against the set the history stands for.
             var fresh=sum;
-            let level=dot(fresh,RL_LUMA);
             let most=lone*f32(count-1u)*mean_level_of(hist.rgb);
-            if lone>0.0 && level>most {fresh*=most/level;}
-            let cap=select(f32(count),max(f32(count)/RL_HISTORY_MOVING,2.0),rl_hist_moved);
-            folded=min(folded+1.0,cap);
-            mean=mix(mean,fresh,1.0/folded);
-            m2=mix(m2,squares,1.0/folded);
+            if lone>0.0 && top.w>most {fresh-=top.rgb*(1.0-most/top.w);}
+            let full=RL_HISTORY_CAP*f32(count);
+            let cap=select(full,max(full/RL_HISTORY_MOVING,2.0),rl_hist_moved);
+            let n=f32(valid);
+            folded=min(folded+n,cap);
+            mean=mix(mean,fresh/n,n/folded);
+            m2=mix(m2,squares/n,n/folded);
         }
         rl_history_store(pixel,slot,input.world,mean,m2,folded);
         rl_specular=vec4<f32>(mean,traced);

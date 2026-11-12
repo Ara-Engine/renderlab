@@ -113,6 +113,26 @@ pub(crate) fn rl_history_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY").map_or(true, |v| v != "0"))
 }
+/// U-RTVIS measurement: `RENDERLAB_RL_HISTORY_TUNE=strata=S,cap=C,moving=M,sigma=K` replaces
+/// reflections.wgsl's RL_HISTORY_STRATA, _CAP, _MOVING and _SIGMA.
+fn rl_history_tune(mut source: String) -> String {
+    static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let list = LIST.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY_TUNE").unwrap_or_default());
+    for (key, value) in list.split(',').filter_map(|s| s.trim().split_once('=')) {
+        let (name, ty, text) = match key {
+            "strata" => ("RL_HISTORY_STRATA", "u32", format!("{value}u")),
+            "cap" => ("RL_HISTORY_CAP", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
+            "moving" => ("RL_HISTORY_MOVING", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
+            "sigma" => ("RL_HISTORY_SIGMA", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
+            _ => continue,
+        };
+        let prefix = format!("const {name}:{ty}=");
+        let at = source.find(&prefix).expect("RENDERLAB_RL_HISTORY_TUNE seam");
+        let end = at + source[at..].find(';').unwrap();
+        source.replace_range(at..end, &format!("{prefix}{text}"));
+    }
+    source
+}
 /// `composed` with the reflection history in place of its stubs, when it traces reflections and
 /// the history is on; the program's byte range moves with the replaced block before it.
 pub(crate) fn with_reflection_history(mut composed: Composed) -> Composed {
@@ -621,7 +641,7 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
             1,
         );
-        source = rl_split(rl_hit_switches(source));
+        source = rl_history_tune(rl_split(rl_hit_switches(source)));
     }
     let start = source.len();
     source.push_str(program);

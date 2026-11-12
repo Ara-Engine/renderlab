@@ -285,6 +285,13 @@ PLANS["histpics"] = [
     for kind, extra in (("flight", ["--frames", "48"]), ("cut", ["--diag", "cut=1", "--frames", "36"]))
     for v in ("1", "0")
 ]
+HIST_TUNES = [("off", {"RENDERLAB_RL_HISTORY": "0"}), ("s1", {}),
+              ("s4c1", {"RENDERLAB_RL_HISTORY_TUNE": "strata=4,cap=1,moving=1"}),
+              ("s4c4", {"RENDERLAB_RL_HISTORY_TUNE": "strata=4,cap=4,moving=4"})]
+PLANS["histtune"] = [
+    (f"t-{path}-{name}-{v}-{k}", ["--path", path, *extra, "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v, env in HIST_TUNES
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
