@@ -2352,16 +2352,49 @@ impl Renderer {
                 resource: wgpu::BindingResource::TextureView(&targets.color.view),
             }],
         });
+        // The colour behind a draw is the HDR target as the draws before it left it. After the
+        // first full copy, only what those draws wrote can differ, so later draws copy just that
+        // region (`dirty`, the union of their conservative screen rectangles; the whole view for
+        // particles and for a draw with a corner behind the eye). The same bytes reach every
+        // pixel any draw reads, refraction offsets included (audit 2026-11-12, 3.2: a full-frame
+        // copy per transparent draw).
+        let view_rect = [0, 0, size.width, size.height];
+        let union = |a: [u32; 4], b: [u32; 4]| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])];
+        let draw_rects: Vec<[u32; 4]> = transparent
+            .iter()
+            .map(|draw| {
+                let state = &draw.instances.state;
+                state
+                    .models
+                    .iter()
+                    .map(|model| panes::rect(&draw.mesh.bounds, *model, matrix, [size.width, size.height]))
+                    .reduce(union)
+                    .unwrap_or([0, 0, 0, 0])
+            })
+            .collect();
+        let mut copied = false;
+        let mut dirty: Option<[u32; 4]> = None;
         let mut index = 0;
         while index < items.len() {
             let glass = matches!(items[index].1, Item::Draw(_));
             let aa = glass && glass_samples() == 4;
             if glass {
-                encoder.copy_texture_to_texture(
-                    hdr.resolved.texture.as_image_copy(),
-                    targets.color.texture.as_image_copy(),
-                    size,
-                );
+                let region = if copied { dirty } else { Some(view_rect) };
+                if let Some(r) = region.filter(|r| r[2] > r[0] && r[3] > r[1]) {
+                    let origin = wgpu::Origin3d { x: r[0], y: r[1], z: 0 };
+                    let mut from = hdr.resolved.texture.as_image_copy();
+                    from.origin = origin;
+                    let mut to = targets.color.texture.as_image_copy();
+                    to.origin = origin;
+                    let extent = wgpu::Extent3d {
+                        width: r[2] - r[0],
+                        height: r[3] - r[1],
+                        depth_or_array_layers: 1,
+                    };
+                    encoder.copy_texture_to_texture(from, to, extent);
+                }
+                copied = true;
+                dirty = None;
                 if let (Item::Draw(i), Some(group)) = (&items[index].1, &reflection_group) {
                     let reflection = self.view.transparency_reflections.as_ref().unwrap();
                     let draw = transparent[*i];
@@ -2510,6 +2543,7 @@ impl Renderer {
                         1,
                     );
                 }
+                dirty = Some(dirty.map_or(draw_rects[i], |d| union(d, draw_rects[i])));
                 index += 1;
                 continue;
             }
@@ -2541,6 +2575,12 @@ impl Renderer {
             }
             pass.set_bind_group(3, self.lighting.bind(), &[]);
             loop {
+                // What this pass writes: the draw's rectangle, the whole view for particles.
+                let written = match items[index].1 {
+                    Item::Draw(i) => draw_rects[i],
+                    Item::Emitter(_) => view_rect,
+                };
+                dirty = Some(dirty.map_or(written, |d| union(d, written)));
                 match items[index].1 {
                     Item::Draw(i) => {
                         let draw = transparent[i];
