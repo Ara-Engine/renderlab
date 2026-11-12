@@ -255,6 +255,7 @@ mod tests {
             candela: [1.; 3],
             range: None,
             source_radius: 0.0,
+            cast_shadows: None,
         };
         assert!(
             validate_requests(

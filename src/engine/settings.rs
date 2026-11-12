@@ -379,6 +379,7 @@ fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error>
             ("level_blend", _, Some(v)) => s.level_blend = v,
             ("gathers", Some(v), _) => s.gathers = v,
             ("gather_cells", Some(v), _) => s.gather_cells = v,
+            ("relight_cells", Some(v), _) => s.relight_cells = v,
             ("claim_cells", Some(v), _) => s.claim_cells = v,
             ("near_light_rays", Some(v), _) => s.near_light_rays = v,
             ("slots_log2", Some(v), _) => s.slots_log2 = v,
@@ -606,6 +607,7 @@ mod tests {
             candela: [100.0; 3],
             range: Some(5.0),
             source_radius: 0.125,
+            cast_shadows: None,
         };
         let soft = Sun::default();
         // LC1: a soft sun renders with local lights.

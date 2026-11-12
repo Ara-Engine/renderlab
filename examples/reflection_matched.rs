@@ -543,6 +543,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             candela,
             range: None,
             source_radius: LAMP_SOURCE_RADIUS,
+            cast_shadows: None,
         }]))?;
     }
     // A red wall beside it, whose colour should bleed onto the ground and hero.
