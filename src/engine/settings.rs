@@ -138,8 +138,10 @@ impl Default for Exposure {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum Quality {
-    /// Each path's measured real-time configuration: on hardware RT, traced primaries
-    /// with the Interactive sun (`SoftShadows::Interactive`): with TR1, 32 sun-disk directions
+    /// Each path's measured real-time configuration: on hardware RT, the visibility buffer
+    /// (traced primaries where the adapter lacks its 64-bit raster atomics, or with
+    /// `RENDERLAB_RT_PRIMARY=traced`) and the Interactive sun traced from its receivers
+    /// (`SoftShadows::Interactive`, with the sun visibility history): with TR1, 32 sun-disk directions
     /// per pixel while the view moves (256 after a cut, 64 at a restart) and 8 once a still
     /// view has settled, receivers within a moving caster's shadow keeping the restart
     /// count (`ReconstructionShadowBudget`); without RT,

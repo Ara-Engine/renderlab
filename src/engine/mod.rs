@@ -314,6 +314,15 @@ impl Engine {
             ));
         }
         let (device, queue) = device::request_device(adapter, path)?;
+        // The RT path's camera visibility: the visibility buffer where the device has its
+        // raster atomics (the default), else traced camera rays (`rt_primary_switch`).
+        let rt_primary = if crate::renderer::primary_ray_gpu::rt_primary_switch().is_some()
+            && device.features().contains(crate::VISIBILITY_RASTER_FEATURES)
+        {
+            PrimaryVisibility::VisibilityBuffer
+        } else {
+            PrimaryVisibility::Traced
+        };
         let options = RendererOptions {
             samples: SampleCount::One,
             anisotropy_clamp: descriptor.texture_anisotropy,
@@ -340,11 +349,6 @@ impl Engine {
             }),
             PRELUDE,
         )?;
-        // RENDERLAB_RT_PRIMARY (measurement, U-FIXED): the RT path on the visibility buffer.
-        let rt_primary = match crate::renderer::primary_ray_gpu::rt_primary_switch() {
-            Some(_) => PrimaryVisibility::VisibilityBuffer,
-            None => PrimaryVisibility::Traced,
-        };
         if path == RenderPath::HardwareRt {
             renderer.set_primary_visibility(rt_primary)?;
         }

@@ -364,7 +364,7 @@ pub(super) fn admit_draws(
     Ok(())
 }
 
-/// The sun an RT renderer gets under the `RENDERLAB_RT_PRIMARY` measurement switch.
+/// The sun of an RT renderer on the visibility buffer (`rt_primary_switch`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum RtPrimarySun {
     /// The Interactive sun from its receivers: `primary_vb_sun` with TR1's budget, rotation
@@ -377,15 +377,17 @@ pub(crate) enum RtPrimarySun {
     Virtual,
 }
 
-/// U-FIXED step 1 measurement switch (docs/frame-cost-ara-scenes.md section 0):
-/// `RENDERLAB_RT_PRIMARY=vb` gives the RT path the raster visibility buffer instead of camera
-/// rays, with the Interactive sun traced from its receivers (`primary_vb_sun`); `vb:8`,
-/// `vb:32` and `vb:256` trace that many fixed directions per pixel instead (no rotation or
-/// stops), `vb:virtual` takes the non-RT clipmap sun. Unset (or anything else): traced
-/// primaries.
+/// The RT path's camera visibility (U-FIXED, docs/frame-cost-ara-scenes.md section 0): the
+/// raster visibility buffer with the Interactive sun traced from its receivers
+/// (`primary_vb_sun`) by default; None is traced camera rays. `RENDERLAB_RT_PRIMARY` switches
+/// it for A/B: `traced` (camera rays), `vb:8`, `vb:32` and `vb:256` (that many fixed sun
+/// directions per pixel, no rotation or stops) and `vb:virtual` (the non-RT clipmap sun).
 pub(crate) fn rt_primary_switch() -> Option<RtPrimarySun> {
-    let value = std::env::var("RENDERLAB_RT_PRIMARY").ok()?;
+    let Ok(value) = std::env::var("RENDERLAB_RT_PRIMARY") else {
+        return Some(RtPrimarySun::Interactive);
+    };
     match value.as_str() {
+        "traced" => None,
         "vb" => Some(RtPrimarySun::Interactive),
         "vb:virtual" => Some(RtPrimarySun::Virtual),
         other => other

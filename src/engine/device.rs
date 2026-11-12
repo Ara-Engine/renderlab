@@ -5,8 +5,9 @@ use crate::Error;
 /// features to the same quality bar; neither is a fallback.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum RenderPath {
-    /// Hardware ray queries: traced primary visibility, traced sun visibility and
-    /// hardware GI rays. Needs [`ExperimentalRayQuery`] at engine creation.
+    /// Hardware ray queries: a visibility buffer for camera visibility (traced primaries
+    /// where the adapter lacks its 64-bit raster atomics), traced sun visibility and hardware
+    /// GI rays. Needs [`ExperimentalRayQuery`] at engine creation.
     HardwareRt,
     /// No ray-tracing hardware: a visibility buffer with software rasterization, the
     /// cached sun clipmap (`SoftShadows::Virtual`) and software GI rays. Needs 64-bit
@@ -113,12 +114,15 @@ pub(crate) fn request_device(
             | wgpu::Features::PRIMITIVE_INDEX);
     let (features, required_limits, experimental_features) = match path {
         RenderPath::HardwareRt => (
-            // RENDERLAB_RT_PRIMARY (measurement): the visibility buffer's 64-bit raster atomics.
-            if crate::renderer::primary_ray_gpu::rt_primary_switch().is_some() {
-                rt_features() | crate::VISIBILITY_RASTER_FEATURES | crate::VIRTUAL_FEATURES
-            } else {
-                rt_features()
-            },
+            // The RT path's visibility buffer needs 64-bit raster atomics; adapters without
+            // them keep traced primaries (`rt_primary_switch`, Engine::new).
+            rt_features()
+                | (adapter.features()
+                    & if crate::renderer::primary_ray_gpu::rt_primary_switch().is_some() {
+                        crate::VISIBILITY_RASTER_FEATURES | crate::VIRTUAL_FEATURES
+                    } else {
+                        wgpu::Features::empty()
+                    }),
             rt_limits(&limits),
             // SAFETY: only reached with the caller's `ExperimentalRayQuery` acknowledgment
             // (`Engine::new` checks the descriptor's path before calling this).
