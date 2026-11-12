@@ -44,20 +44,20 @@ fn rtvis_hold(receiver:Receiver,slot:u32) {
     let q=vec2<i32>(floor(fma(c.xy/c.w,vec2<f32>(0.5,-0.5),vec2<f32>(0.5))*vec2<f32>(size)));
     if any(q<vec2<i32>(1)) || any(q>=size-vec2<i32>(1)) {return;}
     rtvis_centre=textureLoad(rtvis_history_in,q,0).x;
-    let class=rtvis_centre>>8u;
-    if rtvis_held.words.x==0u || class==0u || rtvis_swept(receiver.world) {return;}
+    let cls=rtvis_centre>>8u;
+    if rtvis_held.words.x==0u || cls==0u || rtvis_swept(receiver.world) {return;}
     for(var k=0;k<9;k+=1) {
         let h=textureLoad(rtvis_history_in,q+vec2<i32>(k%3-1,k/3-1),0).x;
-        if (h>>8u)!=class || (h&0xffu)<rtvis_held.words.z {return;}
+        if (h>>8u)!=cls || (h&0xffu)<rtvis_held.words.z {return;}
     }
-    tr1_held_probes=rtvis_held.words.y;tr1_held_lit=class==2u;
+    tr1_held_probes=rtvis_held.words.y;tr1_held_lit=cls==2u;
 }
 // This frame's history word at p from the receiver's count over tr1_rays directions.
 fn rtvis_store(p:vec2<i32>,visible:u32) {
     var h=0u;
     if visible!=FRESH_SKIP && (visible==0u || visible==tr1_rays) {
-        let class=select(2u,1u,visible==0u);
-        h=(class<<8u)|select(1u,min((rtvis_centre&0xffu)+1u,255u),(rtvis_centre>>8u)==class);
+        let cls=select(2u,1u,visible==0u);
+        h=(cls<<8u)|select(1u,min((rtvis_centre&0xffu)+1u,255u),(rtvis_centre>>8u)==cls);
     }
     textureStore(rtvis_history_out,p,vec4<u32>(h));
 }
