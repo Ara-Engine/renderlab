@@ -28,7 +28,8 @@
 //! (P-FLAT, docs/p-flat.md; keys in `Diag::parse`). P-RELIT's scene events (docs/p-relit.md)
 //! happen at frame 24: `fire=off` or `fire=on` switches the fire light, `fire=move` circles
 //! it from the first frame, `glow=step` dims the lamp bulbs' emission to a tenth, and `cut=1`
-//! jumps the camera a third of the way round its orbit with `Engine::cut_view`. `hold=1` keeps
+//! jumps the camera a third of the way round its orbit with `Engine::cut_view`; `cut=turn` cuts
+//! the field or forest walk there by turning it 150 degrees in place. `hold=1` keeps
 //! the camera at its first pose while the lights, the hero and the objects animate.
 //! `--views a|b|ab|ai` (docs/design-views.md) picks which of two views render each tick: `a`
 //! is the fly path, `b` a second camera across the scene, still unless `--b-orbit`. With `ab`
@@ -36,8 +37,9 @@
 //! alone checks that each view matches a single-view engine; `ai` is `a` with a second view
 //! created and never rendered. `--cut-b FRAME` jumps view b's camera and cuts it there.
 //! `--diag forest=1` (U-RTVIS, docs/rtvis.md) swaps the flat ground for a 200 m rolling
-//! terrain under trees and bushes of cutout cards and walks the field walk's camera
+//! terrain (16 tiles) under trees and bushes of cutout cards and walks the field walk's camera
 //! through it: Outpost's layered ground and foliage, for the RT visibility pass's cost.
+//! `forest=bare` is the same terrain and walk without the foliage.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -363,7 +365,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `cut=every` with the field walk: every frame is a camera cut to another point of the
     // walk (a fixed shuffle of its frames), as Ara's every-frame-cut clip at Outpost's hangar.
     let cut_every = scene_key("cut", "every");
-    let forest = scene_key("forest", "1");
+    // `cut=turn` (U-RTVIS, the GI cut refill): the field or forest walk turns 150 degrees in
+    // place at the event frame, with `cut_view`, onto ground and trees it has not seen.
+    let cut_turn = scene_key("cut", "turn");
+    // `forest=bare`: the same terrain and walk without the trees and bushes.
+    let bare = scene_key("forest", "bare");
+    let forest = scene_key("forest", "1") || bare;
     let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
@@ -576,12 +583,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         None => {
             let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, 0.95)?;
-            let plane = if forest {
-                engine.create_mesh(&mesh(&terrain_geometry(FOREST_SIZE, 400)))?
+            if forest {
+                for tile in terrain_tiles(FOREST_SIZE, 400, 4) {
+                    let tile = engine.create_mesh(&mesh(&tile))?;
+                    engine.spawn(tile, ground, Mat4::IDENTITY)?;
+                }
             } else {
-                engine.create_mesh(&mesh(&plane_geometry(60.0, 8)))?
-            };
-            engine.spawn(plane, ground, Mat4::IDENTITY)?;
+                let plane = engine.create_mesh(&mesh(&plane_geometry(60.0, 8)))?;
+                engine.spawn(plane, ground, Mat4::IDENTITY)?;
+            }
             // The physical atmosphere is the default sky (AT1); `--sky uniform` swaps in a
             // constant blue sky for comparison.
             if args.uniform_sky {
@@ -636,7 +646,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
-    if forest && quarry.is_none() {
+    if forest && !bare && quarry.is_none() {
         let bark = material(&mut engine, [0.3, 0.22, 0.15], 0.0, 0.85)?;
         let mut seed = 0x6a09_e667_u32;
         let mut next = || {
@@ -999,7 +1009,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         // Fly path: a slow orbit that descends and closes in on the hero.
         let cut = cuts && frame >= EVENT_FRAME;
-        if cuts && frame == EVENT_FRAME {
+        if (cuts || cut_turn) && frame == EVENT_FRAME {
             engine.cut_view(view);
         }
         let orbit = 0.6 + 0.25 * t + if cut { 2.1 } else { 0.0 };
@@ -1027,7 +1037,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 engine.cut_view(view);
             }
             let eye = anchor + FIELD_EYE + 4.0 * along * FIELD_WALK;
-            let look = Mat4::from_rotation_y((12.0 * along).to_radians()).transform_vector3(FIELD_WALK);
+            let turn = if cut_turn && frame >= EVENT_FRAME { 150.0 } else { 0.0 };
+            let look = Mat4::from_rotation_y((12.0 * along + turn).to_radians())
+                .transform_vector3(FIELD_WALK);
             (eye, eye + 10.0 * look - Vec3::new(0.0, 2.2, 0.0))
         } else {
             (eye, target)
@@ -1514,6 +1526,27 @@ fn terrain_geometry(size: f32, cells: u32) -> Geometry {
         v.normal = normal.normalize().to_array();
     }
     g
+}
+/// `terrain_geometry` cut into `tiles` by `tiles` meshes of the same vertices, as an engine
+/// streams terrain in chunks (and so the non-RT Virtual sun map's 32-bit placement and
+/// primitive packing fits the forest).
+fn terrain_tiles(size: f32, cells: u32, tiles: u32) -> Vec<Geometry> {
+    let full = terrain_geometry(size, cells);
+    let (row, n) = (cells + 1, cells / tiles);
+    let mut out = Vec::new();
+    for tz in 0..tiles {
+        for tx in 0..tiles {
+            let mut g = plane_geometry(1.0, n);
+            for z in 0..=n {
+                for x in 0..=n {
+                    let at = (tz * n + z) * row + tx * n + x;
+                    g.vertices[(z * (n + 1) + x) as usize] = full.vertices[at as usize];
+                }
+            }
+            out.push(g);
+        }
+    }
+    out
 }
 fn plane_geometry(size: f32, cells: u32) -> Geometry {
     let mut g = Geometry {

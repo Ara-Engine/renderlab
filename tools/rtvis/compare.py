@@ -56,7 +56,7 @@ def main(pics, crops=None, switch="cold"):
     crops = Path(crops) if crops else None
     if crops:
         crops.mkdir(parents=True, exist_ok=True)
-    clips = sorted(d.name[: -len(switch) - 2] for d in pics.glob(f"p-*-{switch}1") if "nonrt" not in d.name)
+    clips = sorted(d.name[: -len(switch) - 2] for d in pics.glob(f"p-*-{switch}1") if switch == "refill" or "nonrt" not in d.name)
     for clip in clips:
         on, off = pics / f"{clip}-{switch}1", pics / f"{clip}-{switch}0"
         frames = sorted(int(p.stem[6:]) for p in on.glob("frame-*.png") if p.stem[6:].isdigit())
@@ -72,7 +72,10 @@ def main(pics, crops=None, switch="cold"):
                 ea, eb = np.abs(a - settled).max(axis=2), np.abs(b - settled).max(axis=2)
                 line += f" | vs settled: on {ea.mean():.3f}/{ea[m].mean():.3f}  off {eb.mean():.3f}/{eb[m].mean():.3f} (all/edges)"
             print(line)
-            if crops and (f in (0, 23, 24, 25, 26, 27, 28, 29, frames[len(frames) // 2], frames[-1])):
+            shown = (0, 23, 24, 25, 26, 27, 28, 29, frames[len(frames) // 2], frames[-1])
+            if switch == "refill":
+                shown = (3, 4, 23, *range(24, 35), frames[-1])
+            if crops and f in shown:
                 crop([a, b] + ([settled] if settled is not None else []), y, x, crops / f"{clip}-{f:03d}.png")
             if crops and switch == "held" and f in (10, 20, 30, 40, 50, frames[-1]):
                 # The whole frame's difference, x16, beside the frame: where the stop changed it.

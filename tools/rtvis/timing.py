@@ -85,6 +85,42 @@ PLANS = {
         for v in ("1", "0")
     ],
 }
+# GI cut refill (docs/design-gi-cut-refill.md): RENDERLAB_GI cut_refill off (0) or on (1), with
+# main's cold and held stops. The game flight cuts with an orbit jump, the forest walk by
+# turning 150 degrees in place (`cut=turn`); both call Engine::cut_view at frame 24.
+REFILL = lambda v: {"RENDERLAB_GI": f"cut_refill={v}", "RENDERLAB_COLD_PROBES": "1", "RENDERLAB_HELD_PROBES": "1"}
+REFILL_CLIPS = [
+    ("nonrt-game", ["--path", "nonrt", "--diag", "cut=1"]),
+    ("nonrt-forest", ["--path", "nonrt", "--diag", "forest=1", "--diag", "cut=turn", *LOW]),
+    ("rt-game", ["--diag", "cut=1"]),
+]
+PLANS["refill"] = [
+    (f"{name}-refill{v}-{k}", extra, REFILL(v))
+    for k in (1, 2)
+    for name, extra in REFILL_CLIPS
+    if k == 1 or name.startswith("nonrt")
+    for v in ("1", "0")
+]
+# The non-RT GI gather study (docs/rtvis.md): the forest walk's moving frames (no cut) at the
+# defaults, with fewer rays per gather, with a quarter of the gather budget, and without the
+# foliage, against the game flight; `-n` runs also log the GI cache's counters (a blocking
+# readback, so they are not timed).
+NONRT_FOREST = ["--path", "nonrt", "--diag", "forest=1", *LOW, "--frames", "60"]
+PLANS["gather"] = [
+    ("g-forest", NONRT_FOREST, {}),
+    ("g-forest-stride4", NONRT_FOREST, {"RENDERLAB_GI": "gather_stride=4"}),
+    ("g-forest-cells8k", NONRT_FOREST, {"RENDERLAB_GI": "gather_cells=8192"}),
+    ("g-bare", ["--path", "nonrt", "--diag", "forest=bare", *LOW, "--frames", "60"], {}),
+    ("g-game", ["--path", "nonrt", "--frames", "60"], {}),
+    ("g-forest-n", NONRT_FOREST, {"RTVIS_GI_LOG": "1"}),
+    ("g-bare-n", ["--path", "nonrt", "--diag", "forest=bare", *LOW, "--frames", "60"], {"RTVIS_GI_LOG": "1"}),
+    ("g-game-n", ["--path", "nonrt", "--frames", "60"], {"RTVIS_GI_LOG": "1"}),
+]
+PLANS["refillpics"] = [
+    (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
+    for name, extra in REFILL_CLIPS
+    for v in ("1", "0")
+]
 MATCHED_FRAMES = "16,32,47"
 
 
@@ -129,8 +165,12 @@ def fly(game, out, extra, env, frames=120):
     # Later flags win in game_scene's parser: `extra` may override the path, size and frames.
     args = [game, "--path", "rt", "--size", "1920x1080", "--frames", str(frames), "--every", "1000",
             *extra, "--out", str(out), "--pipeline-cache", str(WORK / "cache")]
+    extra_env = {"RENDERLAB_PASS_LOG": str(log), "RENDERLAB_PASS_LOG_DETAIL": "1"}
+    if env.get("RTVIS_GI_LOG") == "1":
+        (out / "gi.jsonl").unlink(missing_ok=True)
+        extra_env["RENDERLAB_GI_LOG"] = str(out / "gi.jsonl")
     r = subprocess.run(args, cwd=REPO, capture_output=True, text=True, timeout=600,
-                       env=env | {"RENDERLAB_PASS_LOG": str(log), "RENDERLAB_PASS_LOG_DETAIL": "1"})
+                       env=env | extra_env)
     (out / "stderr.txt").write_text(r.stderr[-20000:])
     print(out.name, "exit", r.returncode, flush=True)
     return r.returncode
@@ -147,6 +187,21 @@ def run(game, out, plan="repro"):
     for name, extra, more in PLANS[plan]:
         code = max(code, fly(game, out / name, extra, env | more))
     return code
+
+
+def gi(out):
+    """Per run: frame span and the GI stages from the frame before the cut (game frame 23) to
+    ten frames after it (34); the pass log counts frames from 1."""
+    out = Path(out)
+    keys = ("span", "gi_update", "gi_gather", "gi_claim", "gi_integrate", "gi_cell_shading", "shading")
+    for d in sorted(p for p in out.iterdir() if (p / "passes.jsonl").exists() and p.name != "reference"):
+        r = {x["frame"]: x for x in rows(d / "passes.jsonl")}
+        print(f"== {d.name}  (frames 23..34; moving median before the cut: "
+              f"{st.median(r[f]['span'] for f in range(9, 24) if f in r):.1f} ms)")
+        for k in keys:
+            vals = [(r[f + 1]["span"] if k == "span" else r[f + 1]["passes"].get(k, 0.0)) if f + 1 in r else float("nan")
+                    for f in range(23, 35)]
+            print(f"  {k:16}" + " ".join(f"{v:6.1f}" for v in vals))
 
 
 def hashes(out, switch="cold"):
@@ -185,5 +240,7 @@ if __name__ == "__main__":
         report(sys.argv[2])
     if sys.argv[1] == "hashes":
         hashes(*sys.argv[2:4])
+    if sys.argv[1] == "gi":
+        gi(sys.argv[2])
     if sys.argv[1] == "matched":
         raise SystemExit(matched(*sys.argv[2:5]))
