@@ -106,8 +106,11 @@ pub(crate) fn request_device(
     path: RenderPath,
 ) -> Result<(wgpu::Device, wgpu::Queue), Error> {
     let limits = adapter.limits();
-    let optional =
-        adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::PIPELINE_CACHE);
+    // PRIMITIVE_INDEX: per-pixel pane shading's id raster (src/transparency_panes.rs).
+    let optional = adapter.features()
+        & (wgpu::Features::TIMESTAMP_QUERY
+            | wgpu::Features::PIPELINE_CACHE
+            | wgpu::Features::PRIMITIVE_INDEX);
     let (features, required_limits, experimental_features) = match path {
         RenderPath::HardwareRt => (
             rt_features(),
