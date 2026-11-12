@@ -61,10 +61,10 @@ var<workgroup> rl_group_base:u32;
             d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
             if dot(d,side)>0.0 {
                 let epsilon=max(1e-4*length(origin),1e-5);
-                let cast=rl_cast(origin,d,epsilon);
-                textureStore(rl_ray_distance,vec2<i32>(id.xy),vec4<f32>(cast.t));
-                if cast.record.x!=0u {
-                    record=cast.record;hit=true;
+                let traced=rl_cast(origin,d,epsilon);
+                textureStore(rl_ray_distance,vec2<i32>(id.xy),vec4<f32>(traced.t));
+                if traced.record.x!=0u {
+                    record=traced.record;hit=true;
                 } else {
                     textureStore(rl_samples,vec2<i32>(id.xy),vec4<f32>(rl_sky(d,cone_alpha),1.0));
                 }
