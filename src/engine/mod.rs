@@ -276,6 +276,28 @@ pub fn headless_adapter() -> Result<wgpu::Adapter, Error> {
     .map_err(|_| Error::InvalidInput("no Vulkan adapter"))
 }
 
+/// The lib suite's one Vulkan adapter, shared by every test that builds an `Engine`. Each
+/// `headless_adapter` call creates an instance and enumerates the devices; with other GPU
+/// tests creating devices on the suite's second thread, an enumeration occasionally found no
+/// adapter on the RTX (U-RTVIS, 2026-11-12). Enumerating once, with retries, removes that.
+#[cfg(test)]
+pub(crate) fn test_adapter() -> &'static wgpu::Adapter {
+    static ADAPTER: std::sync::OnceLock<wgpu::Adapter> = std::sync::OnceLock::new();
+    ADAPTER.get_or_init(|| {
+        let mut tries = 0;
+        loop {
+            match headless_adapter() {
+                Ok(adapter) => break adapter,
+                Err(e) if tries == 9 => panic!("{e}"),
+                Err(_) => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        }
+    })
+}
+
 impl Engine {
     /// Creates the device for `descriptor.path` on `adapter` (check
     /// [`Capabilities::query`] first) and configures that path's renderer.

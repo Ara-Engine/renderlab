@@ -3304,7 +3304,7 @@ impl Renderer {
         }
         if lit && !virtual_frame {
             mark(&mut encoder, "atmosphere");
-            self.encode_atmosphere(&mut encoder, scene_generation);
+            self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
         }
         if fresh {
             mark(&mut encoder, "sun_shadow");
@@ -3352,7 +3352,7 @@ impl Renderer {
                     self.encode_virtual(&mut encoder, stamps(8), &mut mark);
                     // VF1 samples the freshly generated Virtual depth pages.
                     mark(&mut encoder, "atmosphere");
-                    self.encode_atmosphere(&mut encoder, scene_generation);
+                    self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
                 } else {
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                         self.encode_visibility_buffer(&mut encoder, soft, stamps(6));
@@ -3365,6 +3365,10 @@ impl Renderer {
                     }
                 }
                 if split {
+                    // RENDERLAB_PASS_LOG_DETAIL: from the end of the early commands to the
+                    // first late pass, the GPU waits for the CPU's GI and post preparation.
+                    // Without this part that wait lands in the stage marked last (U-RTVIS).
+                    mark(&mut encoder, "cpu.wait");
                     let late_encoder =
                         self.device
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
