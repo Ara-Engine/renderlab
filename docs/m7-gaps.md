@@ -1125,3 +1125,11 @@ Ranked by what a player sees and feels against Unreal (its whole quarry frame is
 4. **Shading stage, both paths** (Outpost non-RT 34-59 ms; Showcase RT 16.9, non-RT 21.8): not yet split; one capture each with `RENDERLAB_PASS_LOG_DETAIL=1`.
 5. **Non-RT sun shadow** (5-8 ms on Outpost): the page-pool unit.
 6. **Transparent pane pass:** under 1 ms on the RTX (Showcase 0.44-0.71); 8 ms on the M5 is the port's, built port-side first.
+
+## wgpu on Apple (Mac thread, M5 Pro, Renderlab 776dcd0; root, 2026-11-12)
+The ara-gpu port (`src/backend_ara`) is the only Renderlab that runs on Apple. Through wgpu:
+- **Metal backend:** no ray queries (`rt=false`), so only the non-RT path could run. The non-RT path fails at pipeline creation: `vsm_clear`'s 64-bit atomic stores come out of naga's MSL as `atomic_store_explicit` on `unsigned long`, which Metal's compiler rejects ("no matching function for call to atomic_store_explicit").
+- **Vulkan through MoltenVK or KosmicKrisp (SDK 1.4.363):** "adapter lacks this render path's features or limits" on both paths.
+- `headless_adapter` asks for `Backends::VULKAN` only; reaching Metal at all needed a local change to ask for `Backends::METAL`.
+
+Not ranked against the frame-cost backlog: Apple is served by the port, by decision (docs/ara-render-replacement.md, D40). Worth fixing only if a wgpu-Metal comparison table needs the non-RT path to run: 32-bit atomics (two words, or a packed 32-bit key) in `vsm_clear` and the other 64-bit atomic users, and `headless_adapter` taking a backend list.
