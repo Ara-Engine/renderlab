@@ -10,6 +10,7 @@ pub mod cache;
 pub mod environment;
 pub mod fallback_present;
 pub mod graph;
+pub mod histogram;
 pub mod hzb;
 pub mod image;
 pub mod kernel;
