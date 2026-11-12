@@ -14,7 +14,9 @@ pub(crate) const ENTRY: &str = include_str!("../shaders/reflection_hits.wgsl");
 pub(crate) const HEADER_BYTES: u64 = 16;
 /// One hit record: three `vec4<u32>` (the design's word table).
 pub(crate) const RECORD_BYTES: u64 = 48;
-/// Lanes per workgroup.
+/// Lanes per workgroup. The port's binning runner reads it (wgpu's mixed frames filter per
+/// program instead, reflection_hits_gpu.rs).
+#[cfg(any(test, feature = "backend-ara"))]
 pub(crate) const LANES: u32 = 64;
 /// Group-0 bindings of the hit entry: H (read) and R (written), in the traced shading group
 /// while the reflection pass is on (U-RTVIS's L is at 56-58 there).
@@ -49,7 +51,9 @@ pub(crate) fn shade_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
 
 /// The binning kernel (shaders/reflection_hit_bins.wgsl): each record's index into its
 /// program's bin at `slot * stride` (the bin's length, then indices), with the bin's
-/// indirect dispatch arguments. Program-agnostic, compiled once.
+/// indirect dispatch arguments. Program-agnostic, compiled once. The port's binning runner
+/// only (wgpu's mixed frames filter per program instead).
+#[cfg(any(test, feature = "backend-ara"))]
 pub(crate) fn bin_source() -> String {
     format!(
         "const PRIMARY_BATCHES:u32={}u;\n{}",
@@ -120,5 +124,33 @@ mod tests {
         )
         .validate(&module)
         .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+    /// The reflection pass's other modules validate on both paths' heads: each head's traced
+    /// shading of the standard program (with the lobe output while `RENDERLAB_RL_PASS=1`) and
+    /// U-RTVIS's `rl_trace` module (`rl_trace` and `rl_hit_args`). Run it with the variable
+    /// set to cover the pass's composition.
+    #[test]
+    fn pass_modules_validate_on_both_heads() {
+        const SCENE: &str = include_str!("../shaders/scene.wgsl");
+        let rt = super::super::primary_ray_gpu::shading_heads(SCENE).unwrap();
+        let (_, non_rt) = super::super::primary_ray_gpu::non_rt_sources(SCENE).unwrap();
+        let parameters = program::declares_parameters(program::STANDARD_PROGRAM);
+        for head in rt.iter().chain(&non_rt) {
+            let shading =
+                program::compose(head, program::STANDARD_PROGRAM, Stage::Traced, parameters).source;
+            for (label, source) in [
+                ("shading", shading),
+                ("trace", program::rl_trace_source(head)),
+            ] {
+                let module = naga::front::wgsl::parse_str(&source)
+                    .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&source)));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&source)));
+            }
+        }
     }
 }
