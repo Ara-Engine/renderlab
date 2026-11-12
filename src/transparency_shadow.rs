@@ -22,7 +22,10 @@ struct TxVertex { @builtin(position) position:vec4<f32>, @location(0) uv:vec2<f3
     let f0=(ior-1.0)/(ior+1.0);
     let normal=normalize(cross(dpdx(input.world),dpdy(input.world)));
     let fresnel=f0*f0+(1.0-f0*f0)*pow(1.0-clamp(abs(dot(normal,tx.sun.xyz)),0.0,1.0),5.0);
-    return vec4<f32>((1.0-coverage)*(1.0-fresnel)*clamp(sampled.rgb,vec3<f32>(0.0),vec3<f32>(1.0)),input.position.z);
+    // Tinted by the base colour only through glass (IOR above one), as the standard
+    // program's transmittance: a plain blended film passes its sun light untinted.
+    let tint=select(vec3<f32>(1.0),clamp(sampled.rgb,vec3<f32>(0.0),vec3<f32>(1.0)),ior>1.0);
+    return vec4<f32>((1.0-coverage)*(1.0-fresnel)*tint,input.position.z);
 }
 "#;
 

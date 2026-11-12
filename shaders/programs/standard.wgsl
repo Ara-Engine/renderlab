@@ -33,14 +33,17 @@ fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
 }
 
 // TP1: the share of the light behind a transparent surface that reaches the eye: what
-// its coverage and Fresnel reflectance leave, filtered by the base colour as tint.
+// its coverage and Fresnel reflectance leave. A pane with an index of refraction above one
+// is coloured glass, and its base colour also tints what passes. At one (no interface: a
+// plain alpha-blended film, as Ara declares a glTF BLEND material) the light behind passes
+// untinted, so the surface blends as `coverage * colour + (1 - coverage) * behind`.
 fn transmittance(s:Surface, input:SurfaceInput) -> vec3<f32> {
     var v=unit_normal(input.eye-input.world);
     if dot(v,v)<0.5 { v=s.n; }
     let ior=transparent_ior(input.material);
     let f0=((ior-1.0)/(ior+1.0))*((ior-1.0)/(ior+1.0));
     let fresnel=f0+(1.0-f0)*pow(1.0-clamp(abs(dot(s.n,v)),0.0,1.0),5.0);
-    return (1.0-s.alpha)*(1.0-fresnel)*s.base;
+    return (1.0-s.alpha)*(1.0-fresnel)*select(vec3<f32>(1.0),s.base,ior>1.0);
 }
 
 // One environment lobe's GGX specular response, with exact Fresnel and visibility at its
