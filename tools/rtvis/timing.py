@@ -342,9 +342,15 @@ PLANS["resgame"] = [
 # The reflection pass's first stage (RENDERLAB_RL_PASS=1: lobes and rl_trace, the picture
 # still inline): byte identity on against off (`hashes OUT rlpass`) and the trace's cost.
 PASS = lambda v: {"RENDERLAB_RL_PASS": v}
+# The game flight shades two programs (game, toon); the quarry is the single-program case.
+PASS_CLIPS = (("flight", ["--fox", FOX, "--frames", "40"]), ("quarry", ["--quarry", QUARRY, "--frames", "20"]))
 PLANS["rlpass"] = [
-    (f"p-{path}-flight-rlpass{v}", ["--path", path, "--fox", FOX, "--frames", "40", "--every", "1"], PASS(v))
-    for path in ("nonrt", "rt") for v in ("1", "0")
+    (f"p-{path}-{name}-rlpass{v}", ["--path", path, *extra, "--every", "1"], PASS(v))
+    for path in ("nonrt", "rt") for name, extra in PASS_CLIPS for v in ("1", "0")
+]
+PLANS["rlpasstime"] = [
+    (f"t-{path}-{name}-pass{v}", ["--path", path, *extra], PASS(v))
+    for path in ("nonrt", "rt") for name, extra in PASS_CLIPS for v in ("1", "0")
 ]
 PLANS["rlpassshow"] = [
     (f"t-{path}-show-pass{v}", ["--path", path, *SHOW], PASS(v)) for path in ("nonrt", "rt") for v in ("1", "0")
@@ -369,7 +375,7 @@ PROBE_DIR = WORK / "probe"
 PLANS["rlprobe"] = [
     (f"q-{path}-{name}-probe", ["--path", path, *extra, "--frames", "40"],
      PASS("1") | {"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"{path}-{name}.json")})
-    for path in ("nonrt", "rt") for name, extra in (("flight", ["--fox", FOX]), ("show", ["--fox", FOX, "--night-lanterns"]))
+    for path in ("nonrt", "rt") for name, extra in (("flight", ["--fox", FOX]), ("quarry", ["--quarry", QUARRY]))
 ]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
