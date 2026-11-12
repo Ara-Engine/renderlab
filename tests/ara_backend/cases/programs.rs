@@ -84,11 +84,9 @@ fn hit_programs_compile_and_reflect_their_bindings() -> Result<()> {
         };
         ensure!(
             matches!(kind(64), Some(InputKind::Buffer { .. }))
-                && matches!(kind(65), Some(InputKind::StorageImage { .. }))
-                && kind(66).is_some()
-                && matches!(kind(67), Some(InputKind::Buffer { .. })),
+                && matches!(kind(65), Some(InputKind::StorageImage { .. })),
             "{name}: hit bindings {:?}",
-            [64, 65, 66, 67].map(kind)
+            [64, 65].map(kind)
         );
         program.msl()?;
     }

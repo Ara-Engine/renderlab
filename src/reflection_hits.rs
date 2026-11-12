@@ -14,12 +14,38 @@ pub(crate) const ENTRY: &str = include_str!("../shaders/reflection_hits.wgsl");
 pub(crate) const HEADER_BYTES: u64 = 16;
 /// One hit record: three `vec4<u32>` (the design's word table).
 pub(crate) const RECORD_BYTES: u64 = 48;
-/// Workgroups per dispatch row (shaders/reflection_hits.wgsl `RL_HITS_ROW`).
-pub(crate) const ROW: u32 = 65535;
 /// Lanes per workgroup.
 pub(crate) const LANES: u32 = 64;
-/// Group-0 bindings of the hit entry: H, R, the bin uniform and the binned record order.
-pub(crate) const BINDINGS: [u32; 4] = [64, 65, 66, 67];
+/// Group-0 bindings of the hit entry: H (read) and R (written), in the traced shading group
+/// while the reflection pass is on (U-RTVIS's L is at 56-58 there).
+pub(crate) const HITS: u32 = 64;
+pub(crate) const SAMPLES: u32 = 65;
+
+/// The traced shading layout's hit entries: H read-only, R write-only.
+pub(crate) fn shade_entries() -> [wgpu::BindGroupLayoutEntry; 2] {
+    [
+        wgpu::BindGroupLayoutEntry {
+            binding: HITS,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(HEADER_BYTES + RECORD_BYTES),
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: SAMPLES,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: wgpu::TextureFormat::Rgba16Float,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            },
+            count: None,
+        },
+    ]
+}
 
 /// The binning kernel (shaders/reflection_hit_bins.wgsl): each record's index into its
 /// program's bin at `slot * stride` (the bin's length, then indices), with the bin's
@@ -30,12 +56,6 @@ pub(crate) fn bin_source() -> String {
         crate::TRACED_DRAWS,
         include_str!("../shaders/reflection_hit_bins.wgsl")
     )
-}
-
-/// Workgroups for `n` records: min(n, ROW) x ceil(n / ROW) rows of [`LANES`] records.
-pub(crate) fn groups(n: u32) -> [u32; 3] {
-    let groups = n.div_ceil(LANES);
-    [groups.min(ROW), groups.div_ceil(ROW), 1]
 }
 
 #[cfg(test)]
@@ -95,12 +115,5 @@ mod tests {
         )
         .validate(&module)
         .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-    }
-
-    #[test]
-    fn dispatch_covers_every_record() {
-        assert_eq!(groups(0), [0, 0, 1]);
-        assert_eq!(groups(1), [1, 1, 1]);
-        assert_eq!(groups(64 * 65535 + 1), [65535, 2, 1]);
     }
 }

@@ -25,6 +25,9 @@ pub(crate) mod program_lists;
 // U-RTVIS: the reflection pass's rl_trace (docs/design-reflection-pass.md).
 #[path = "reflection_pass.rs"]
 pub(crate) mod reflection_pass;
+// The Mac thread's reflection_hits after rl_trace (docs/design-reflection-pass.md).
+#[path = "reflection_hits_gpu.rs"]
+mod reflection_hits_gpu;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
@@ -499,6 +502,7 @@ impl Renderer {
                     slot.modules.temporal = None;
                     slot.modules.streamed = None;
                     slot.pipelines.traced = Default::default();
+                    slot.pipelines.hits = Default::default();
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
@@ -550,6 +554,7 @@ impl Renderer {
                     slot.modules.temporal = Some(temporal);
                     slot.modules.streamed = None;
                     slot.pipelines.traced = Default::default();
+                    slot.pipelines.hits = Default::default();
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
@@ -1181,6 +1186,8 @@ impl PrimaryState {
             // U-RTVIS: the reflection pass's lobe output (reflection_pass.rs).
             if reflection_pass::on() {
                 entries.extend(reflection_pass::shade_entries());
+                // The Mac thread's reflection_hits: H and R (reflection_hits_gpu.rs).
+                entries.extend(super::reflection_hits::shade_entries());
             }
             // M7-R1n: non-RT shading traces them in software (reflection_software.rs), read
             // as vec4 words (P-NRT), so a binding holds at least one.
@@ -2477,6 +2484,9 @@ impl Renderer {
                     entries.push((reflection_pass::LOBE_A, R::TextureView(&pass.lobe_a.view)));
                     entries.push((reflection_pass::LOBE_B, R::TextureView(&pass.lobe_b.view)));
                     entries.push((reflection_pass::PASS_FRAME, pass.frame.value.as_entire_binding()));
+                    // The Mac thread's reflection_hits reads H and writes R.
+                    entries.push((super::reflection_hits::HITS, pass.hits.value.as_entire_binding()));
+                    entries.push((super::reflection_hits::SAMPLES, R::TextureView(&pass.samples.view)));
                 }
                 if matches!(shading, Shading::Hard) {
                     entries.push((23, R::TextureView(&t.epsilon.view)));
