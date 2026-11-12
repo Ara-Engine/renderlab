@@ -1268,7 +1268,9 @@ fn gi_setup_directions(slot:u32, cell:u32) -> u32 {
         gi_table[cold+GI_C_BITS+w]=gi_table[cold+GI_C_BITS+w]&~near;
     }
     // Cut refill: the first direction group with untraced directions, one a frame.
-    let spread=gi_word(GI_H_SPREAD);
+    let raw_spread=gi_word(GI_H_SPREAD);
+    var spread=raw_spread&0xffu;
+    if (raw_spread&GI_SPREAD_WHILE_DEFERRING)!=0u && gi_claim_period()<=1u { spread=0u; }
     var group=0xffffffffu;
     if spread>1u {
         for(var g=0u;g<spread && group==0xffffffffu;g+=1u) {

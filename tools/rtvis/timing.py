@@ -215,6 +215,26 @@ PLANS["pcfpics"] = [
 ]
 # Item 2 (2026-11-12): the forest cut on non-RT with the instance top level, cut_refill off/on.
 PLANS["refill2"] = [(n, e, m) for n, e, m in PLANS["refill"] if n.startswith("nonrt-forest")]
+# The cut refill rework (cap until drained, phases while deferring, no coarse read): forest turn
+# and game jump, both paths, timing and pictures (still: frame 59 is the settled reference).
+REFILL4_CLIPS = [
+    ("nonrt-forest", ["--path", "nonrt", "--diag", "forest=1", "--diag", "cut=turn", *LOW]),
+    ("rt-forest", ["--diag", "forest=1", "--diag", "cut=turn", *LOW]),
+    ("nonrt-game", ["--path", "nonrt", "--diag", "cut=1"]),
+    ("rt-game", ["--diag", "cut=1"]),
+]
+PLANS["refill4"] = [
+    (f"{name}-refill{v}-{k}", extra + ["--frames", "60"], REFILL(v))
+    for k in (1, 2) for name, extra in REFILL4_CLIPS for v in ("1", "0")
+]
+PLANS["refill4still"] = [
+    (f"p-{name}-still-refill{v}", extra + ["--still", "--frames", "60", "--every", "1"], REFILL(v))
+    for name, extra in REFILL4_CLIPS for v in ("1", "0")
+]
+PLANS["refill4move"] = [
+    (f"p-{name}-move-refill{v}", extra + ["--frames", "36", "--every", "1"], REFILL(v))
+    for name, extra in REFILL4_CLIPS for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
