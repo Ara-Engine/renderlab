@@ -8,8 +8,13 @@ its median frame span is recorded and compared with REFERENCE_MS once that is se
 10 % off: the lease is not a measurement). PLAN `repro` (step 1) then walks `--diag forest=1`
 (and the field walk) with a camera cut at frame 24, interleaving the default shadow budget
 with an 8-ray one, the sun off, a high sun and 720p. Every run logs RENDERLAB_PASS_LOG with
-its `visibility.*` parts. `report` prints per run the median frame span, `visibility` and its
-parts over the moving frames (8-22 and 40-119), and the frames from 22 to 30 around the cut.
+its `visibility.*` parts. PLAN `cold` (step 3) times the forest walk's cut with the cold probe
+stop on and off (RENDERLAB_COLD_PROBES), twice, interleaved. PLAN `pictures` writes every
+frame of short single-cut clips with the stop on and off: the forest held still (cut at 24,
+settled before and after), the forest walk, and the game scene's orbit jump on both paths.
+`report` prints per run the median frame span, `visibility` and its parts over the moving
+frames (8-22 and 40-119), and the frames from 22 to 30 around the cut; `hashes` compares the
+picture runs' per-frame hashes, on against off.
 """
 import json
 import os
@@ -38,6 +43,20 @@ PLANS = {
         ("forest-low-2", FOREST + LOW, {}),
         ("forest-low-b8-2", FOREST + LOW + EIGHT, {}),
     ],
+    "cold": [
+        (f"forest-low-cold{v}-{k}", FOREST + LOW, {"RENDERLAB_COLD_PROBES": v})
+        for k in (1, 2) for v in ("1", "0")
+    ],
+    "pictures": [
+        (f"{name}-cold{v}", extra, {"RENDERLAB_COLD_PROBES": v})
+        for name, extra in [
+            ("p-forest-still", FOREST + LOW + ["--still", "--frames", "60", "--every", "1"]),
+            ("p-forest-walk", FOREST + LOW + ["--frames", "40", "--every", "1"]),
+            ("p-game-rt", CUT + ["--frames", "40", "--every", "1"]),
+            ("p-game-nonrt", CUT + ["--path", "nonrt", "--frames", "40", "--every", "1"]),
+        ]
+        for v in ("1", "0")
+    ],
 }
 
 
@@ -56,6 +75,7 @@ def fly(game, out, extra, env, frames=120):
     out.mkdir(parents=True, exist_ok=True)
     log = out / "passes.jsonl"
     log.unlink(missing_ok=True)
+    # Later flags win in game_scene's parser: `extra` may override the path, size and frames.
     args = [game, "--path", "rt", "--size", "1920x1080", "--frames", str(frames), "--every", "1000",
             *extra, "--out", str(out), "--pipeline-cache", str(WORK / "cache")]
     r = subprocess.run(args, cwd=REPO, capture_output=True, text=True, timeout=600,
@@ -76,6 +96,16 @@ def run(game, out, plan="repro"):
     for name, extra, more in PLANS[plan]:
         code = max(code, fly(game, out / name, extra, env | more))
     return code
+
+
+def hashes(out):
+    """Per picture clip: the frames whose hashes differ between the stop on and off."""
+    out = Path(out)
+    for on in sorted(out.glob("p-*-cold1")):
+        off = on.with_name(on.name[:-1] + "0")
+        a, b = (json.loads((d / "run.json").read_text())["frames"] for d in (on, off))
+        differ = [x["frame"] for x, y in zip(a, b) if x.get("image_hash") != y.get("image_hash")]
+        print(f"{on.name[:-6]:16} frames {len(a)}  differing {len(differ)}: {differ[:12]}{' ...' if len(differ) > 12 else ''}")
 
 
 def report(out):
@@ -99,3 +129,5 @@ if __name__ == "__main__":
         raise SystemExit(run(*sys.argv[2:5]))
     if sys.argv[1] == "report":
         report(sys.argv[2])
+    if sys.argv[1] == "hashes":
+        hashes(sys.argv[2])
