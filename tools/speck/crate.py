@@ -42,7 +42,9 @@ def run(exe, out, variants):
             # A NAME beginning `freeze` holds the scene and camera at frame 47's time (`--freeze 47`):
             # the same picture with nothing moving.
             held = ["--freeze", "47"] if name.startswith("freeze") else []
-            steps.append((f"{path}-{name}", ["--path", path, "--matched", *held], {"RENDERLAB_GI": gi} if gi else {}))
+            # GI of the form `@feature` is RENDERLAB_ABLATE=feature (e.g. `@tr1`), not a GI override.
+            extra = {"RENDERLAB_ABLATE": gi[1:]} if gi.startswith("@") else {"RENDERLAB_GI": gi} if gi else {}
+            steps.append((f"{path}-{name}", ["--path", path, "--matched", *held], extra))
     worst = 0
     for name, args, extra in steps:
         folder = out / name
