@@ -116,6 +116,47 @@ PLANS["gather"] = [
     ("g-bare-n", ["--path", "nonrt", "--diag", "forest=bare", *LOW, "--frames", "60"], {"RTVIS_GI_LOG": "1"}),
     ("g-game-n", ["--path", "nonrt", "--frames", "60"], {"RTVIS_GI_LOG": "1"}),
 ]
+# The software rays' top-level BVH (src/instance_bvh.rs): RENDERLAB_INSTANCE_BVH on (1) or off
+# (0, the flat instance loop), non-RT, interleaved twice. The forest and bare forest turn 150
+# degrees at frame 24 (`cut=turn`), so a run has moving frames and a cut.
+TOP = lambda v: {"RENDERLAB_INSTANCE_BVH": v}
+TOP_CLIPS = [
+    ("forest", ["--path", "nonrt", "--diag", "forest=1", "--diag", "cut=turn", *LOW, "--frames", "60"]),
+    ("bare", ["--path", "nonrt", "--diag", "forest=bare", "--diag", "cut=turn", *LOW, "--frames", "60"]),
+    ("game", ["--path", "nonrt", "--frames", "60"]),
+]
+PLANS["top"] = [
+    (f"{name}-top{v}-{k}", extra, TOP(v)) for k in (1, 2) for name, extra in TOP_CLIPS for v in ("1", "0")
+]
+# Byte identity: every frame's hash, on against off (`hashes OUT top`).
+PLANS["toppics"] = [
+    (f"p-{name}-top{v}", extra + ["--every", "1"], TOP(v))
+    for name, extra in [
+        ("game", ["--path", "nonrt", "--frames", "60"]),
+        ("forest", ["--path", "nonrt", "--diag", "forest=1", "--diag", "cut=turn", *LOW, "--frames", "30"]),
+    ]
+    for v in ("1", "0")
+]
+QUARRY = "D:/Coding/renderlab-work/mq1/quarry-manifest.json"
+PLANS["topquarry"] = [
+    (f"p-quarry-top{v}", ["--path", "nonrt", "--quarry", QUARRY, "--frames", "20", "--every", "1"], TOP(v))
+    for v in ("1", "0")
+]
+# Run-to-run repeatability of one binary (`main` against itself): the forest walk and the quarry, twice.
+PLANS["repeat"] = [
+    (f"p-{name}-run{k}", extra + ["--every", "1"], {})
+    for k in (1, 2)
+    for name, extra in [
+        ("forest", ["--path", "nonrt", "--diag", "forest=1", "--diag", "cut=turn", *LOW, "--frames", "30"]),
+        ("quarry", ["--path", "nonrt", "--quarry", QUARRY, "--frames", "20"]),
+    ]
+]
+# MIN_INSTANCES: the default (unset) against the flat loop on the small scenes, and the instance
+# counts the GI log reports (`-n` runs).
+PLANS["topdefault"] = [
+    (f"{name}-default{v}-{k}", extra, {} if v == "1" else TOP("0"))
+    for k in (1, 2) for name, extra in TOP_CLIPS[1:] for v in ("1", "0")
+] + [(f"{name}-n", extra[:-2] + ["--frames", "12"], {"RTVIS_GI_LOG": "1"}) for name, extra in TOP_CLIPS]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS

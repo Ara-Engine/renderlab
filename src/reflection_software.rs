@@ -7,7 +7,8 @@
 //! `(placement + 1, primitive, barycentrics)` record a hardware ray query returns and R1's
 //! hit reconstruction (`rl_hit_input`) shades it unchanged. Each frame packs the meshes and
 //! a flat instance list (world-to-object rows, world bounds, the placement slot) into one
-//! storage buffer. Rays are per-pixel work items traversed from the top: no cells, no hit
+//! storage buffer, with a top-level BVH over the instance records (src/instance_bvh.rs,
+//! U-RTVIS). Rays are per-pixel work items traversed from the top: no cells, no hit
 //! registration, no shared projection (P0's W8 and C7, docs/m7-p0-claims.md).
 use crate::Mat4;
 
@@ -24,7 +25,8 @@ const NODE_WORDS: usize = 16;
 const TRIANGLE_WORDS: usize = 12;
 /// A child ID's leaf tag: `LEAF | first_triangle << 3 | count`.
 const LEAF: u32 = 0x8000_0000;
-/// Words before the instance records; WGSL RS_HEADER_WORDS must match. Word 0 is the count.
+/// Words before the instance records; WGSL RS_HEADER_WORDS must match. Word 0 is the count,
+/// words 1 and 2 the top level's base word and root (src/instance_bvh.rs).
 pub(crate) const HEADER_WORDS: usize = 8;
 /// One instance record; WGSL RS_INSTANCE_WORDS must match. Words 0-11 world-to-object rows,
 /// 12-14 world lo, 15-17 world hi, 18 node base word, 19 triangle base word, 20 root child,
@@ -156,10 +158,14 @@ pub(crate) struct Packed {
     pub bases: Vec<[u32; 2]>,
     pub words: Vec<u32>,
 }
-/// Packs `meshes` (distinct) behind room for `instances` records; the header and records
-/// stay zero until `instance_words` fills them.
+/// Words of the header, `instances` records and their top level, before the meshes.
+pub(crate) fn records_words(instances: usize) -> usize {
+    HEADER_WORDS + instances * INSTANCE_WORDS + crate::instance_bvh::reserve(instances)
+}
+/// Packs `meshes` (distinct) behind room for `instances` records and their top level; the
+/// header, records and top level stay zero until `instance_words` fills them.
 pub(crate) fn pack(meshes: &[&Blas], instances: usize) -> Packed {
-    let mut at = HEADER_WORDS + instances * INSTANCE_WORDS;
+    let mut at = records_words(instances);
     let total = at + meshes.iter().map(|b| b.words()).sum::<usize>();
     let mut words = vec![0u32; total.max(HEADER_WORDS)];
     let bases = meshes
