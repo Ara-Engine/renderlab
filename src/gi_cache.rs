@@ -400,7 +400,7 @@ impl Default for IndirectSettings {
             near_light_rays: 16,
             pressure_eviction: true,
             // Against the path tracer (docs/speck.md section 8): the field walk's error is the
-            // same at 0, 16, 8 and 4; the spinning crate moves toward the reference as the
+            // same at 0, 16, 8 and 4; the walking hero moves toward the reference as the
             // cells grow, most at 4; and the field walk creates half the cells.
             hit_cone_cells: 4.0,
             // Off until judged on a large scene (docs/speck.md section 9): on the field pose
