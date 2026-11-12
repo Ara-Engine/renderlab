@@ -76,7 +76,12 @@ pub struct CpuFrame {
     pub packing: Duration,
     pub upload: Duration,
     pub encode: Duration,
+    /// Part of `encode`: finishing the last command encoder into a command buffer.
+    pub finish: Duration,
     pub submit: Duration,
+    /// Part of `submit`: the first queue submission of a frame that submits twice (GI and post
+    /// preparation run between the two). The last `queue.submit` is `submit - early_submit`.
+    pub early_submit: Duration,
     pub poll: Duration,
 }
 #[derive(Debug)]
