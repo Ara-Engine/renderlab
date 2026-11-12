@@ -1683,7 +1683,14 @@ impl Renderer {
         );
         self.view.primary.as_mut().unwrap().program =
             programs.first().copied().unwrap_or(self.standard.id());
-        let sided = placements.iter().any(|p| p & 1 << 30 != 0);
+        // One single-sided draw makes every primary ray non-opaque (each candidate runs the
+        // facing test in the shader). `RENDERLAB_DIAG_ALL_OPAQUE=1` traces as if every draw
+        // were double-sided, to measure that cost through an embedder (measurement only:
+        // single-sided back faces then show).
+        static ALL_OPAQUE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let all_opaque = *ALL_OPAQUE
+            .get_or_init(|| std::env::var("RENDERLAB_DIAG_ALL_OPAQUE").is_ok_and(|v| v == "1"));
+        let sided = !all_opaque && placements.iter().any(|p| p & 1 << 30 != 0);
         let matrix = camera.matrix(size.width, size.height);
         let inverse = matrix.inverse();
         if !inverse.is_finite() {
