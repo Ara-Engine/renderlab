@@ -63,6 +63,7 @@ impl Diag {
                 "gi-light-rays" => indirect.near_light_rays = v.parse()?,
                 "gi-pressure" => indirect.pressure_eviction = on(v),
                 "gi-hit-cells" => indirect.hit_cone_cells = v.parse()?,
+                "gi-pixels-first" => indirect.gather_pixels_first = on(v),
                 key if key.starts_with("tr-") => {
                     let r = d.reconstruction.get_or_insert_with(Reconstruction::default);
                     match key {
