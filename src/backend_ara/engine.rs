@@ -912,8 +912,10 @@ impl Engine {
         self.release_ended(gpu)?;
         let at = self.view_index(view)?;
         let desc = self.views[at].desc.clone();
-        let (size, look) = ([desc.width, desc.height], &desc.look);
-        let settings = self.state.settings;
+        // `RENDERLAB_ABLATE` switches features off whatever the embedder asks, as on wgpu.
+        let look = crate::engine::settings::ablated_look(desc.look.clone());
+        let (size, look) = ([desc.width, desc.height], &look);
+        let settings = crate::engine::settings::ablated(self.state.settings);
         let [opaque, transparent] = Self::placed(&self.state)?;
         // The frame's texture table covers its opaque objects alone.
         if transparent.iter().any(|p| {
