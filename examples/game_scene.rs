@@ -953,7 +953,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 frame as f32 / steps as f32
             };
             if cut_every && frame > 0 {
-                engine.cut();
+                engine.cut_view(view);
             }
             let eye = anchor + FIELD_EYE + 4.0 * along * FIELD_WALK;
             let look = Mat4::from_rotation_y((12.0 * along).to_radians()).transform_vector3(FIELD_WALK);
