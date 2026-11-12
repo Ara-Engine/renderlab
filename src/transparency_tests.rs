@@ -297,7 +297,10 @@ fn device(rt: bool) -> (wgpu::Device, wgpu::Queue) {
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
     let a = adapter.limits();
-    let timing = adapter.features() & wgpu::Features::TIMESTAMP_QUERY;
+    // PRIMITIVE_INDEX where the adapter has it: the per-pixel pane tests need it (the engine's
+    // device requests it the same way, src/engine/device.rs).
+    let timing = adapter.features()
+        & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::PRIMITIVE_INDEX);
     if rt {
         assert_eq!(
             std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref(),
