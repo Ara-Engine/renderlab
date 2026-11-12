@@ -101,6 +101,9 @@ const GI_H_HIT_SPREAD:u32=27u;
 // the most cells pixels read in a frame (the view's pixels over a cell's): gi_gather_now,
 // src/gi_cache.rs IndirectSettings::gather_pixels_first.
 const GI_H_PIXEL_CELLS:u32=28u;
+// Levels above the pixels' that a gather hit inside a moved caster's swept bounds reads at
+// least (gi_hit_level; 0: none): src/gi_cache.rs IndirectSettings::mover_hit_levels.
+const GI_H_MOVER_LEVELS:u32=29u;
 const GI_FILTER_SKY:u32=1u;
 const GI_FILTER_BOUNCE:u32=2u;
 // Bit 2: contrast refine (gi_filter_cell), with the sky filter.
@@ -138,11 +141,6 @@ const GI_F_FIELD:u32=2u;
 const GI_F_ROTATE:u32=4u;
 // Probe statistics (the work counters from GI_W_P_TILES), kept on profiled frames only.
 const GI_F_STATS:u32=8u;
-// A pixel inside a moved caster's swept bounds also requests the cell GI_MOVER_LEVELS coarser,
-// and a receiver without gathered bounce at its level or the next reads that one (gi_probe,
-// gi_prepare): src/gi_cache.rs IndirectSettings::mover_fill.
-const GI_F_MOVER_FILL:u32=16u;
-const GI_MOVER_LEVELS:u32=2u;
 
 // Table layout after the header: the hot records, then the cold records.
 // Hot record: word 0 is key a (31 bits) with GI_VALID set while the SH is current and

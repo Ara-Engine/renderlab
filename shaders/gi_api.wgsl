@@ -228,19 +228,8 @@ fn gi_prepare(input:SurfaceInput) {
         let c=gi_sample(world,level+1u,bin);
         let cb=gi_lv_bounce_weight(c);
         let sky_fill=!sky_full && c>1e-6;
-        var bounce_fill=cb>1e-6;
+        let bounce_fill=cb>1e-6;
         gi_rx_add(select(0.0,w*(1.0-s)/c,sky_fill),select(0.0,w*(1.0-bw)/cb,bounce_fill));
-        // No gathered bounce at the next level either: the cell GI_MOVER_LEVELS coarser, which
-        // a moving object's pixels request (gi_probe) because their own cells are seldom
-        // gathered before the surface has left them.
-        if !bounce_fill && (gi_word(GI_H_FLAGS)&GI_F_MOVER_FILL)!=0u && level+GI_MOVER_LEVELS<levels {
-            let d=gi_sample(world,level+GI_MOVER_LEVELS,bin);
-            let db=gi_lv_bounce_weight(d);
-            if db>1e-6 {
-                gi_rx_add(0.0,w*(1.0-bw)/db);
-                bounce_fill=true;
-            }
-        }
         if (sky_full || sky_fill) && bounce_fill { continue; }
         // No coarser value for a term: the level's own corners take that term's rest, as
         // without the fill.
