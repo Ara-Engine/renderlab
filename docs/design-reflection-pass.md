@@ -109,7 +109,7 @@ One storage buffer:
 | 4 | hit primitive index |
 | 5, 6 | hit barycentrics, f32 bits (the inline `bitcast<vec2<u32>>(hit.barycentrics)`) |
 | 7, 8, 9 | ray origin, f32 bits (world) |
-| 10 | ray direction, octahedral snorm16 x2 |
+| 10 | ray direction, octahedral snorm16 x2: `rl_oct_encode` / `rl_oct_decode` in reflections.wgsl, the one pair both sides use (decode: unpack2x16snorm, fold z < 0 as (1 - abs(v.yx)) x sign, normalize) |
 | 11 | `pack2x16float(cone width at the origin, total spread per metre)`: `rl_hit_input`'s `width` and `spread`, the sub-cone included |
 
 - **Hit point and distance:** `reflection_hits` rebuilds the hit input exactly as the inline
@@ -282,3 +282,18 @@ Notes:
   plus the shading entry's groups.
 - **Parity first:** the Mac builds `reflection_hits` to match inline hits first, with a
   byte-matching harness against them at pixel rate.
+
+## Bindings and hit state (agreed with the Mac GPU thread, 2026-11-12)
+- **Group 0, U-RTVIS's shading-entry resources:** 54-63. Taken so far: 54 the reflection history
+  texture and 55 its frame record (shaders/reflections_history.wgsl); L, S and A take the next
+  ones.
+- **Group 0, the Mac's `reflection_hits`:** 64 H (storage, read), 65 R (`rgba16float` storage,
+  write), 66 its bin uniform, 67 the binned order.
+- **Hit state:** `reflection_hits` sets `rl_reflection_hit`, sets `rl_hit_stratum` and
+  `rl_hit_strata` from word 2, and sets `rl_hit_variance` = 8 spread^2 from word 11's spread.
+  So `rl_trace` keeps word 2 as (stratum, strata) and word 11 as (cone width at the origin,
+  total spread per metre), exactly as inline. The `RL_SPLIT` seams keep working until both
+  sides move to `rl_hit_samples` / `rl_hit_offset`.
+- **Parity:** a hit from H matches the inline hit to within the direction's snorm16 error,
+  which the Mac measures at pixel rate. It is acceptable unless a crop shows more than one
+  output code.

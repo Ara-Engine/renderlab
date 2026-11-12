@@ -105,7 +105,7 @@ const RL_SPLIT: [(&str, &str); 4] = [
     ),
 ];
 /// U-RTVIS reflection history (shaders/reflections_history.wgsl): the wgpu renderer's primary
-/// shading modules bind it (group 0, bindings 53 and 54), so only they replace the stubs.
+/// shading modules bind it (group 0, bindings 54 and 55), so only they replace the stubs.
 /// It reads history only while the camera holds still (temporal_reconstruction.rs), so moving
 /// frames trace as without it. `RENDERLAB_RL_HISTORY=0` keeps the stubs: every glossy receiver
 /// traces its full set every frame.

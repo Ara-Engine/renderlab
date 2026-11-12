@@ -742,8 +742,9 @@ pub(super) struct RlHistoryTargets {
     pub history: Depth,
     pub frame: Buffer,
 }
-/// The reflection history's group-0 bindings in primary shading.
-const RL_HISTORY_FRAME: u32 = 53;
+/// The reflection history's group-0 bindings in primary shading. U-RTVIS's shading-entry
+/// resources take 54-63; the Mac's reflection_hits takes 64-67 (docs/design-reflection-pass.md).
+const RL_HISTORY_FRAME: u32 = 55;
 const RL_HISTORY: u32 = 54;
 const RL_HISTORY_LAYERS: u32 = 8;
 pub(super) struct HeldTargets {

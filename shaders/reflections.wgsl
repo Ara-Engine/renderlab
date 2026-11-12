@@ -90,6 +90,22 @@ var<private> rl_hit_strata:u32=1u;
 // 1 inside the traced bands, fading to 0 across the rough cutoff. w = 0 means untraced.
 fn specular_incident(input:SurfaceInput)->vec4<f32> { return rl_specular; }
 
+// A unit direction as an octahedral snorm16x2 word, and back: reflection hit records' word 10
+// (docs/design-reflection-pass.md), shared by rl_trace and the Mac's reflection_hits. The round
+// trip is within the snorm16 step, about 1e-4 rad.
+fn rl_oct_encode(d:vec3<f32>)->u32 {
+    let p=d.xy/(abs(d.x)+abs(d.y)+abs(d.z));
+    let sign=select(vec2<f32>(-1.0),vec2<f32>(1.0),p>=vec2<f32>(0.0));
+    let folded=select((vec2<f32>(1.0)-abs(p.yx))*sign,p,d.z>=0.0);
+    return pack2x16snorm(folded);
+}
+fn rl_oct_decode(word:u32)->vec3<f32> {
+    let e=unpack2x16snorm(word);
+    let z=1.0-abs(e.x)-abs(e.y);
+    let sign=select(vec2<f32>(-1.0),vec2<f32>(1.0),e>=vec2<f32>(0.0));
+    let xy=select((vec2<f32>(1.0)-abs(e.yx))*sign,e,z>=0.0);
+    return normalize(vec3<f32>(xy,z));
+}
 fn rl_hash(input:u32)->u32 {
     var x=input;x=(x^(x>>16u))*0x7feb352du;x=(x^(x>>15u))*0x846ca68bu;return x^(x>>16u);
 }

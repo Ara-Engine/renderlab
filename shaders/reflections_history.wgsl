@@ -11,7 +11,7 @@ struct RlHistoryFrame { previous:mat4x4<f32>, words:vec4<u32> };
 // words: x 1 when this frame may read the history (a still camera, no cut or reset),
 // y the half this frame writes, z the frame counter, w the exposure factor (f32 bits)
 // carrying stored radiance to this frame.
-@group(0) @binding(53) var<uniform> rl_history_frame:RlHistoryFrame;
+@group(0) @binding(55) var<uniform> rl_history_frame:RlHistoryFrame;
 @group(0) @binding(54) var rl_history:texture_storage_2d_array<r32uint,read_write>;
 const RL_HISTORY:bool=true;
 // The stored record's mean-square luminance, and whether the receiver moved over a pixel.
