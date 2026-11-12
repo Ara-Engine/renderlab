@@ -387,7 +387,7 @@ impl FreshState {
     }
 }
 impl Renderer {
-    pub(super) fn ensure_fresh_targets(&mut self, size: wgpu::Extent3d, hardware_build: bool) {
+    pub(super) fn ensure_fresh_targets(&mut self, size: wgpu::Extent3d) {
         // Traced frames write the same receivers from compute.
         let receiver_usage = wgpu::TextureUsages::RENDER_ATTACHMENT
             | if self.view.primary.is_some() {
@@ -484,7 +484,7 @@ impl Renderer {
         let Some(hardware) = self.hardware_shadows.as_ref() else {
             return;
         };
-        let scene_generation = hardware.stats.tlas_builds + u64::from(hardware_build);
+        let scene_generation = hardware.scene_generation();
         if t.compute
             .as_ref()
             .is_none_or(|b| b.scene_generation != scene_generation)

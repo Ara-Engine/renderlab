@@ -113,7 +113,12 @@ pub(crate) fn request_device(
             | wgpu::Features::PRIMITIVE_INDEX);
     let (features, required_limits, experimental_features) = match path {
         RenderPath::HardwareRt => (
-            rt_features(),
+            // RENDERLAB_RT_PRIMARY (measurement): the visibility buffer's 64-bit raster atomics.
+            if crate::renderer::primary_ray_gpu::rt_primary_switch().is_some() {
+                rt_features() | crate::VISIBILITY_RASTER_FEATURES | crate::VIRTUAL_FEATURES
+            } else {
+                rt_features()
+            },
             rt_limits(&limits),
             // SAFETY: only reached with the caller's `ExperimentalRayQuery` acknowledgment
             // (`Engine::new` checks the descriptor's path before calling this).

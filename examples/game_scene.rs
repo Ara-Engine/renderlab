@@ -30,7 +30,9 @@
 //! it from the first frame, `glow=step` dims the lamp bulbs' emission to a tenth, and `cut=1`
 //! jumps the camera a third of the way round its orbit with `Engine::cut_view`; `cut=turn` cuts
 //! the field or forest walk there by turning it 150 degrees in place. `hold=1` keeps
-//! the camera at its first pose while the lights, the hero and the objects animate.
+//! the camera at its first pose while the lights, the hero and the objects animate;
+//! `hold=pose` (U-FIXED) also keeps the objects and the hero's placement still while the
+//! Fox plays its walk in place, so the skinned mesh is the only mover.
 //! `--views a|b|ab|ai` (docs/design-views.md) picks which of two views render each tick: `a`
 //! is the fly path, `b` a second camera across the scene, still unless `--b-orbit`. With `ab`
 //! both render from one engine and each frame records both hashes, so a run of `a` or `b`
@@ -357,7 +359,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         scene_key("fire", "move"),
     );
     let (glow_steps, cuts) = (scene_key("glow", "step"), scene_key("cut", "1"));
-    let hold = scene_key("hold", "1");
+    let pose_only = scene_key("hold", "pose");
+    let hold = scene_key("hold", "1") || pose_only;
     // U-SPECK (docs/speck.md): `field=1` scatters 300 small bright boxes and a pale slab over
     // an empty quarter of the ground and walks the camera 4 m across it while turning 12
     // degrees, whatever `--frames` is: the cell mosaic Ara's Outpost showed on flat ground.
@@ -996,7 +999,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         let sun_update_ms = sun_update.elapsed().as_secs_f64() * 1e3;
         // The hero walks a circle through the arch.
-        let walk = 0.35 * t;
+        let walk = if pose_only { 0.0 } else { 0.35 * t };
         let ground = at(3.0 * walk.sin(), 0.0, -1.0 + 3.0 * walk.cos());
         let heading = walk.cos().atan2(-walk.sin());
         let focus = hero.update(&mut engine, ground, heading, t)?;
@@ -1005,11 +1008,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let dim = [6_000.0, 4_000.0, 1_800.0].map(|v| v * lamp_scale);
             engine.set_material_parameters(bulb, &[("glow", Value::Vec3(dim))])?;
         }
+        let spin = if pose_only { 0.0 } else { t };
         engine.set_transform(
             spinner,
-            Mat4::from_translation(at(-2.5, 0.6 + 0.3 * (2.0 * t).sin(), 3.0))
-                * Mat4::from_rotation_y(1.5 * t)
-                * Mat4::from_rotation_x(0.6 * t),
+            Mat4::from_translation(at(-2.5, 0.6 + 0.3 * (2.0 * spin).sin(), 3.0))
+                * Mat4::from_rotation_y(1.5 * spin)
+                * Mat4::from_rotation_x(0.6 * spin),
         )?;
         // Fly path: a slow orbit that descends and closes in on the hero.
         let cut = cuts && frame >= EVENT_FRAME;
