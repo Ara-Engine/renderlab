@@ -134,7 +134,9 @@ impl Renderer {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format,
-                    usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 }),
                 ResourceKind::Texture,
@@ -161,7 +163,10 @@ impl Renderer {
                 self,
                 "reflection hit records",
                 HITS_HEADER + u64::from(slots[0]) * u64::from(slots[1]) * RECORD_BYTES,
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
             ),
             samples: target("reflection samples", slots[0], slots[1], F::Rgba16Float),
             distance: target("reflection ray distance", slots[0], slots[1], F::R32Float),
@@ -260,6 +265,7 @@ impl Renderer {
             return;
         };
         let g = state.geometry.as_ref().unwrap();
+        self.rl_probe(encoder, pass);
         encoder.clear_buffer(&pass.hits.value, 0, Some(HITS_HEADER));
         let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reflection trace"),
@@ -393,5 +399,108 @@ impl Renderer {
         compute.set_pipeline(&kit.pipeline);
         compute.set_bind_group(0, &**group, &[]);
         compute.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+    }
+}
+
+// ---- measurement only: RENDERLAB_RL_PROBE=<json path> ----
+/// The frame whose H, R and D the probe reads: copied at the start of the next frame's trace,
+/// after every stage of the probed frame (rl_trace, rl_hit_args, reflection_hits) has written them.
+const PROBE_FRAME: u64 = 30;
+struct Probe {
+    staging: wgpu::Buffer,
+    rows: [u64; 2],
+    slots: [u32; 2],
+    path: String,
+}
+static PROBE: std::sync::Mutex<Option<Probe>> = std::sync::Mutex::new(None);
+fn f16_to_f32(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exponent = i32::from((h >> 10) & 0x1f);
+    let mantissa = f32::from(h & 0x3ff);
+    sign * match exponent {
+        0 => mantissa * 2f32.powi(-24),
+        31 => f32::INFINITY,
+        e => (1.0 + mantissa / 1024.0) * 2f32.powi(e - 15),
+    }
+}
+impl Renderer {
+    /// Copies the probed frame's H count, R and D (frame PROBE_FRAME + 1), then reads them on the
+    /// frame after and writes counts as JSON: slots with a hit, those whose R reflection_hits
+    /// wrote (a = 1) and whose radiance is non-zero, and misses with a sky sample.
+    fn rl_probe(&self, encoder: &mut wgpu::CommandEncoder, pass: &PassTargets) {
+        static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let Some(path) = PATH.get_or_init(|| std::env::var("RENDERLAB_RL_PROBE").ok()) else {
+            return;
+        };
+        let mut probe = PROBE.lock().unwrap();
+        if self.frames == PROBE_FRAME + 1 && probe.is_none() {
+            let [w, h] = pass.slots;
+            let rows = [u64::from(w * 8).next_multiple_of(256), u64::from(w * 4).next_multiple_of(256)];
+            let size = 256 + (rows[0] + rows[1]) * u64::from(h);
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("reflection probe"),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(&pass.hits.value, 0, &staging, 0, HITS_HEADER);
+            let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+            for (texture, offset, row) in [
+                (&pass.samples.texture, 256, rows[0]),
+                (&pass.distance.texture, 256 + rows[0] * u64::from(h), rows[1]),
+            ] {
+                encoder.copy_texture_to_buffer(
+                    texture.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &staging,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset,
+                            bytes_per_row: Some(row as u32),
+                            rows_per_image: Some(h),
+                        },
+                    },
+                    extent,
+                );
+            }
+            *probe = Some(Probe { staging, rows, slots: pass.slots, path: path.clone() });
+            return;
+        }
+        if self.frames != PROBE_FRAME + 2 {
+            return;
+        }
+        let Some(p) = probe.take() else {
+            return;
+        };
+        p.staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(20)),
+        });
+        let data = p.staging.slice(..).get_mapped_range();
+        let count = u32::from_ne_bytes(data[0..4].try_into().unwrap());
+        let [w, h] = p.slots;
+        let (mut hits, mut written, mut lit, mut misses, mut sky) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        for y in 0..u64::from(h) {
+            for x in 0..u64::from(w) {
+                let r = (256 + y * p.rows[0] + x * 8) as usize;
+                let d = (256 + p.rows[0] * u64::from(h) + y * p.rows[1] + x * 4) as usize;
+                let texel: Vec<f32> = (0..4)
+                    .map(|i| f16_to_f32(u16::from_ne_bytes(data[r + 2 * i..r + 2 * i + 2].try_into().unwrap())))
+                    .collect();
+                let distance = f32::from_ne_bytes(data[d..d + 4].try_into().unwrap());
+                if distance > 0.0 {
+                    hits += 1;
+                    written += u64::from(texel[3] == 1.0);
+                    lit += u64::from(texel[0] + texel[1] + texel[2] > 0.0);
+                } else if distance == -1.0 {
+                    misses += 1;
+                    sky += u64::from(texel[3] == 1.0);
+                }
+            }
+        }
+        let json = format!(
+            "{{\"frame\":{PROBE_FRAME},\"records\":{count},\"hit_slots\":{hits},\"hit_written\":{written},\"hit_nonzero\":{lit},\"miss_slots\":{misses},\"miss_sky\":{sky}}}\n"
+        );
+        let _ = std::fs::write(&p.path, json);
     }
 }
