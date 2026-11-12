@@ -223,13 +223,21 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         // branch overwrites (P-SKY, docs/p-sky.md).
         var radiance=vec3<f32>(0.0);
         if hit.kind!=0u {
-            let h=rl_hit_input(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),origin,d,width,spread,pixel);
-            // LC1 at the hit: its own cluster where that walk is exact (the same sum).
-            rl_hit_lights_prepare(h.input.world);
-            rl_load_parameters(h.batch);
-            let hs=surface(h.input);
-            radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);
-            shaded=true;
+            let record=vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics));
+            // A rough lobe's cone wider than the radiance cache's cell at the hit reads that
+            // cell's outgoing radiance instead of shading the hit (reflection_cache_hits.wgsl).
+            let cached=rl_cache_hit(record,origin,d,hit.t,width+spread*hit.t,rough);
+            if cached.w>0.0 {
+                radiance=rl_finite(expose(cached.rgb));
+            } else {
+                let h=rl_hit_input(record,origin,d,width,spread,pixel);
+                // LC1 at the hit: its own cluster where that walk is exact (the same sum).
+                rl_hit_lights_prepare(h.input.world);
+                rl_load_parameters(h.batch);
+                let hs=surface(h.input);
+                radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);
+                shaded=true;
+            }
         } else {
             radiance=rl_sky(d,cone_alpha);
         }

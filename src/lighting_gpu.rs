@@ -220,6 +220,21 @@ impl LightingGpu {
                 ]
                 .into_iter()
                 .chain(super::transparency_gpu::transmission_shadow::binding_entries())
+                // Cache-terminated reflection hits read the cache's outgoing radiance
+                // (shaders/reflection_cache_hits.wgsl), only while the switch is on: off,
+                // the layout and its per-stage storage count are unchanged.
+                .chain(
+                    crate::program::cache_hits_rough().map(|_| wgpu::BindGroupLayoutEntry {
+                        binding: 28,
+                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    }),
+                )
                 .collect::<Vec<_>>(),
             }),
             ResourceKind::BindGroupLayout,
@@ -520,7 +535,7 @@ impl Renderer {
                 }),
                 ResourceKind::Buffer,
             );
-            let group = |label, table: &wgpu::Buffer| {
+            let group = |label, table: &wgpu::Buffer, outgoing: &wgpu::Buffer| {
                 self.ledger.own(
                     self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some(label),
@@ -657,13 +672,29 @@ impl Renderer {
                                     &self.view.atmosphere.volume.camera.view,
                                 ),
                             },
-                        ],
+                        ]
+                        .into_iter()
+                        .chain(
+                            crate::program::cache_hits_rough().map(|_| wgpu::BindGroupEntry {
+                                binding: 28,
+                                resource: outgoing.as_entire_binding(),
+                            }),
+                        )
+                        .collect::<Vec<_>>(),
                     }),
                     ResourceKind::BindGroup,
                 )
             };
-            let bind = group("lighting", self.gi.shading_table());
-            let kernel = group("lighting, indirect cache kernels", &self.gi.dummy);
+            let bind = group(
+                "lighting",
+                self.gi.shading_table(),
+                self.gi.shading_outgoing(),
+            );
+            let kernel = group(
+                "lighting, indirect cache kernels",
+                &self.gi.dummy,
+                &self.gi.dummy,
+            );
             let next = LightBuffer {
                 shadow_generation: self.view.shadows.stats.resource_generation,
                 cluster_generation: (self.view.clusters.generation, self.local_maps.generation),
