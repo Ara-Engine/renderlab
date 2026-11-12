@@ -429,10 +429,25 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> 
         if abs(dot(r.geometric,toward))<1e-4*length(toward) { bins|=1u<<gi_bin(-n); }
         // Every pixel inserts its own requests. (Skipping pixels whose tile neighbour
         // requests the identical cells is exact but measured only ~5 us faster.)
+        // A moving object's surface crosses its cells in a frame or two, sooner than a new
+        // cell gets its first gather, so its pixels found no gathered bounce at their level
+        // and showed dark blocks (docs/speck.md). Inside a moved caster's swept bounds a
+        // pixel also requests the cell GI_MOVER_LEVELS coarser, which the surface takes
+        // several frames to cross and the lookup falls back to (gi_prepare).
+        var coarser=pick.lo;
+        if (gi_word(GI_H_FLAGS)&GI_F_MOVER_FILL)!=0u {
+            for(var m=0u;m<gi_frame.counts.x;m+=1u) {
+                if all(r.world>=gi_frame.boxes[m*2u].xyz) && all(r.world<=gi_frame.boxes[m*2u+1u].xyz) {
+                    coarser=min(pick.lo+GI_MOVER_LEVELS,gi_word(GI_H_LEVELS)-1u);
+                    break;
+                }
+            }
+        }
         for(var b=0u;b<6u;b+=1u) {
             if (bins&(1u<<b))==0u { continue; }
             gi_request_cells(gi_request_desc(r.world,pick.lo,b));
             if pick.hi!=pick.lo { gi_request_cells(gi_request_desc(r.world,pick.hi,b)); }
+            if coarser!=pick.lo && coarser!=pick.hi { gi_request_cells(gi_request_desc(r.world,coarser,b)); }
         }
     }
     workgroupBarrier();

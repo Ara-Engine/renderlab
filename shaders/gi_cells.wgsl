@@ -138,6 +138,11 @@ const GI_F_FIELD:u32=2u;
 const GI_F_ROTATE:u32=4u;
 // Probe statistics (the work counters from GI_W_P_TILES), kept on profiled frames only.
 const GI_F_STATS:u32=8u;
+// A pixel inside a moved caster's swept bounds also requests the cell GI_MOVER_LEVELS coarser,
+// and a receiver without gathered bounce at its level or the next reads that one (gi_probe,
+// gi_prepare): src/gi_cache.rs IndirectSettings::mover_fill.
+const GI_F_MOVER_FILL:u32=16u;
+const GI_MOVER_LEVELS:u32=2u;
 
 // Table layout after the header: the hot records, then the cold records.
 // Hot record: word 0 is key a (31 bits) with GI_VALID set while the SH is current and

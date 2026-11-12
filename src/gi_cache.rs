@@ -349,6 +349,12 @@ pub struct IndirectSettings {
     /// turn alike: after a start or a cut the picture then shows cells without bounce light
     /// beside gathered ones for as long as the whole queue takes.
     pub gather_pixels_first: bool,
+    /// A coarser bounce fallback where things move (U-SPECK, docs/speck.md): a pixel inside a
+    /// moved caster's swept bounds also requests the cell two levels coarser, and a receiver
+    /// whose own level and the next have no gathered bounce reads that one. A moving
+    /// object's surface leaves its cells before they are gathered; without this its pixels
+    /// show dark blocks.
+    pub mover_fill: bool,
 }
 impl Default for IndirectSettings {
     /// On by default since G2b (Islam's overnight push, 2026-11-08; docs/m7-g2b.md): G2's
@@ -407,6 +413,7 @@ impl Default for IndirectSettings {
             // it halves frame 16's distance from the settled frame on RT, for a quarter more
             // gathers over the flight, and non-RT's first eight frames are slightly worse.
             gather_pixels_first: false,
+            mover_fill: true,
         }
     }
 }
@@ -987,7 +994,8 @@ impl Planner {
         header[2] = u32::from(s.lookup == IndirectLookup::Trilinear)
             | (u32::from(field) << 1)
             | (u32::from(s.rotate_directions) << 2)
-            | (u32::from(c.profiling) << 3);
+            | (u32::from(c.profiling) << 3)
+            | (u32::from(s.mover_fill) << 4);
         header[3] = self.frame;
         // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
         // are uncapped.

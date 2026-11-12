@@ -39,7 +39,10 @@ def run(exe, out, variants):
     steps = [("reference", ["--path", "rt", "--reference", "8192"], {})]
     for name, gi in variants:
         for path in ("rt", "nonrt"):
-            steps.append((f"{path}-{name}", ["--path", path, "--matched"], {"RENDERLAB_GI": gi} if gi else {}))
+            # A NAME beginning `freeze` holds the scene and camera at frame 47's time (`--freeze 47`):
+            # the same picture with nothing moving.
+            held = ["--freeze", "47"] if name.startswith("freeze") else []
+            steps.append((f"{path}-{name}", ["--path", path, "--matched", *held], {"RENDERLAB_GI": gi} if gi else {}))
     worst = 0
     for name, args, extra in steps:
         folder = out / name
