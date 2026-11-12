@@ -1209,9 +1209,12 @@ impl Planner {
         let still = !self.reset
             && previous_matrix.to_cols_array().map(f32::to_bits)
                 == matrix.to_cols_array().map(f32::to_bits);
-        // MV1 motion-source integration: rigid/deforming casters must not enter
-        // RTDEF2's settled shadow budget just because the camera is stationary.
-        let sampling_still = still && turn == 0.0 && !rigid_motion && shadow_bounds.is_none();
+        // MV1 motion-source integration: rigid casters must not enter RTDEF2's settled
+        // shadow budget just because the camera is stationary. A deforming caster's swept
+        // shadow does not hold the whole frame at the moving count (audit 3.3): receivers it
+        // can reach trace the restart count per pixel (`restart_rays`, tr1_zone_rays) and
+        // every other receiver settles.
+        let sampling_still = still && turn == 0.0 && !rigid_motion;
         self.held_frames = if sampling_still {
             self.held_frames.saturating_add(1)
         } else {
