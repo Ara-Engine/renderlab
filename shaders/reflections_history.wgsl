@@ -24,6 +24,26 @@ var<private> rl_hist_moved:bool;
 // its history count. Its own history is first clamped to the neighbourhood's mean plus or minus
 // RL_RESOLVE_CLAMP standard deviations. Records stay unfiltered, so the blur never accumulates.
 const RL_RESOLVE:bool=false;
+// RL_RESOLVE_PASS (RENDERLAB_RL_RESOLVE_PASS=1): the stored history is rl_resolve's output
+// (shaders/reflections_resolve.wgsl). A trusted receiver shows it and leaves this frame's
+// sample and the history it read for the resolve: layers 8 rg, 9 (b, mean luminance^2),
+// 10 (slot+1) | roughness x 255 << 24, 11 clip w (negative: a full set), 12 the history's rg,
+// 13 its (b, mean luminance^2), 14 its count (a full set's strata), 15 the frame counter + 1.
+const RL_RESOLVE_PASS:bool=false;
+fn rl_sample_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,sample:vec3<f32>,m2:f32,full:bool,count:f32,rough:f32,seen:vec3<f32>,seen_m2:f32) {
+    let p=vec2<i32>(pixel);
+    let w=(camera.view_projection*vec4<f32>(world,1.0)).w;
+    let m=min(sample,vec3<f32>(65504.0));
+    let h=min(seen,vec3<f32>(65504.0));
+    textureStore(rl_history,p,8,vec4<u32>(pack2x16float(m.rg)));
+    textureStore(rl_history,p,9,vec4<u32>(pack2x16float(vec2<f32>(m.b,min(m2,65504.0)))));
+    textureStore(rl_history,p,10,vec4<u32>(((slot+1u)&0xffffffu)|(u32(clamp(rough,0.0,1.0)*255.0)<<24u)));
+    textureStore(rl_history,p,11,vec4<u32>(bitcast<u32>(select(w,-w,full))));
+    textureStore(rl_history,p,12,vec4<u32>(pack2x16float(h.rg)));
+    textureStore(rl_history,p,13,vec4<u32>(pack2x16float(vec2<f32>(h.b,min(seen_m2,65504.0)))));
+    textureStore(rl_history,p,14,vec4<u32>(u32(count)));
+    textureStore(rl_history,p,15,vec4<u32>(rl_history_frame.words.z+1u));
+}
 const RL_RESOLVE_WIDE:f32=0.3;
 const RL_RESOLVE_DEPTH:f32=0.02;
 const RL_RESOLVE_CLAMP:f32=2.0;

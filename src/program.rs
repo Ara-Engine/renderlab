@@ -140,6 +140,13 @@ fn rl_history_tune(mut source: String) -> String {
 pub(crate) fn rl_resolve_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE").is_ok_and(|v| v == "1"))
+        || rl_resolve_pass_on()
+}
+/// U-RTVIS: `RENDERLAB_RL_RESOLVE_PASS=1` (with the history on) shows rl_resolve's output, a pass
+/// after shading (shaders/reflections_resolve.wgsl), and reads history under motion too.
+pub(crate) fn rl_resolve_pass_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE_PASS").is_ok_and(|v| v == "1"))
 }
 /// U-RTVIS reflection pass (src/reflection_pass.rs): `RENDERLAB_RL_PASS=1` writes glossy
 /// receivers' lobes from primary shading (shaders/reflections_lobe.wgsl, group 0 bindings 56-58)
@@ -189,7 +196,9 @@ fn with_history_block(mut composed: Composed) -> Composed {
     };
     let end = composed.source[begin..].find(RL_HISTORY_STUBS[1]).unwrap() + begin + RL_HISTORY_STUBS[1].len();
     assert!(end <= composed.program.start, "the history stubs precede the program");
-    let history = if rl_resolve_on() {
+    let history = if rl_resolve_pass_on() {
+        REFLECTION_HISTORY.replacen("const RL_RESOLVE_PASS:bool=false;", "const RL_RESOLVE_PASS:bool=true;", 1)
+    } else if rl_resolve_on() {
         REFLECTION_HISTORY.replacen("const RL_RESOLVE:bool=false;", "const RL_RESOLVE:bool=true;", 1)
     } else {
         REFLECTION_HISTORY.to_owned()

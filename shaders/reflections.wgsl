@@ -45,6 +45,8 @@ fn rl_history_index()->u32 { return 0u; }
 fn rl_history_lookup(receiver:Receiver,world:vec3<f32>,pixel:vec2<u32>)->vec4<f32> { return vec4<f32>(0.0); }
 fn rl_history_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,mean:vec3<f32>,m2:f32,count:f32) {}
 fn rl_history_resolve(mean:vec3<f32>,folded:f32,count:f32)->vec3<f32> { return mean; }
+const RL_RESOLVE_PASS:bool=false;
+fn rl_sample_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,sample:vec3<f32>,m2:f32,full:bool,count:f32,rough:f32,seen:vec3<f32>,seen_m2:f32) {}
 // ---- end of rl history stubs ----
 // The receiver's perceptual roughness, for the history's resolve.
 var<private> rl_hist_rough:f32;
@@ -340,6 +342,14 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     rl_hit_variance=0.0;
     if shaded {rl_load_parameters(batch);}
     let slot=receiver.slot;
+    if trusted && RL_RESOLVE_PASS {
+        // rl_resolve folds this frame's sample; the receiver shows the resolved history.
+        let fresh=select(hist.rgb,sum/f32(max(valid,1u)),valid>0u);
+        let fresh_m2=select(rl_hist_m2,squares/f32(max(valid,1u)),valid>0u);
+        rl_sample_store(pixel,slot,input.world,fresh,fresh_m2,false,hist.w,rough,hist.rgb,rl_hist_m2);
+        rl_specular=vec4<f32>(hist.rgb,traced);
+        return;
+    }
     if trusted {
         var mean=hist.rgb;var m2=rl_hist_m2;var folded=hist.w;
         if valid>0u {
@@ -371,7 +381,9 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     }
     let mean=sum/f32(valid);
     // The full set seeds the history as count strata, with their spread.
-    if RL_HISTORY && !mirror {rl_history_store(pixel,slot,input.world,mean,squares/f32(valid),f32(count));}
+    if RL_RESOLVE_PASS && !mirror {
+        rl_sample_store(pixel,slot,input.world,mean,squares/f32(valid),true,f32(count),rough,vec3<f32>(0.0),0.0);
+    } else if RL_HISTORY && !mirror {rl_history_store(pixel,slot,input.world,mean,squares/f32(valid),f32(count));}
     rl_specular=vec4<f32>(mean,traced);
 }
 fn mean_level_of(c:vec3<f32>)->f32 { return dot(c,RL_LUMA); }

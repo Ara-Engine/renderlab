@@ -348,6 +348,21 @@ PLANS["rlpass"] = [
 PLANS["rlpassshow"] = [
     (f"t-{path}-show-pass{v}", ["--path", path, *SHOW], PASS(v)) for path in ("nonrt", "rt") for v in ("1", "0")
 ]
+# rl_resolve as a pass (RENDERLAB_RL_HISTORY=1 RENDERLAB_RL_RESOLVE_PASS=1) against the base.
+RP = {"RENDERLAB_RL_HISTORY": "1", "RENDERLAB_RL_RESOLVE_PASS": "1"}
+RP_VARIANTS = (("base", {}), ("rp", RP))
+PLANS["rpshow"] = [
+    (f"m-{path}-show-{v}-{k}", ["--path", path, *SHOW], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in RP_VARIANTS
+]
+PLANS["rpgame"] = [
+    (f"g-{path}-flight-{v}-{k}", ["--path", path, "--fox", FOX, "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in RP_VARIANTS
+]
+PLANS["rppics"] = [
+    (f"p-{path}-cut-rp{int(v == 'rp')}", ["--path", path, "--fox", FOX, "--diag", "cut=1", "--frames", "36", "--every", "1"], env)
+    for path in ("nonrt", "rt") for v, env in RP_VARIANTS
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS

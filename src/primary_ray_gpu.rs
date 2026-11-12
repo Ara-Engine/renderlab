@@ -751,7 +751,8 @@ pub(super) struct RlHistoryTargets {
 /// resources take 54-63; the Mac's reflection_hits takes 64-67 (docs/design-reflection-pass.md).
 const RL_HISTORY_FRAME: u32 = 55;
 const RL_HISTORY: u32 = 54;
-const RL_HISTORY_LAYERS: u32 = 8;
+/// Two halves of four, then rl_resolve's sample and seen-history layers (8-15).
+const RL_HISTORY_LAYERS: u32 = 16;
 pub(super) struct HeldTargets {
     pub history: [Depth; 2],
     pub frame: Buffer,
@@ -786,6 +787,8 @@ struct Bindings {
     list: [Option<Owned<wgpu::BindGroup>>; 2],
     /// U-RTVIS: rl_trace's group 0 while RENDERLAB_RL_PASS=1.
     rl_trace: Option<Owned<wgpu::BindGroup>>,
+    /// U-RTVIS: rl_resolve's group while RENDERLAB_RL_RESOLVE_PASS=1.
+    rl_resolve: Option<Owned<wgpu::BindGroup>>,
 }
 enum Retired {
     Targets(#[allow(dead_code)] Box<Targets>),
@@ -863,6 +866,8 @@ pub(super) struct PrimaryState {
     /// U-RTVIS: rl_trace's layouts while RENDERLAB_RL_PASS=1, and its kernels per `Shading`.
     rl_trace: Option<reflection_pass::TraceAbi>,
     rl_pipelines: [Option<reflection_pass::TracePipelines>; 2],
+    /// U-RTVIS: rl_resolve while RENDERLAB_RL_RESOLVE_PASS=1.
+    rl_resolve: Option<reflection_pass::ResolveKit>,
     fresh_bindings: Owned<wgpu::BindGroupLayout>,
     fresh_layout: Owned<wgpu::PipelineLayout>,
     interactive_bindings: Owned<wgpu::BindGroupLayout>,
@@ -1389,6 +1394,8 @@ impl PrimaryState {
             rl_trace: reflection_pass::on()
                 .then(|| reflection_pass::TraceAbi::new(device, ledger, &array_bindings, lighting)),
             rl_pipelines: [None, None],
+            rl_resolve: crate::program::rl_resolve_pass_on()
+                .then(|| reflection_pass::ResolveKit::new(device, ledger)),
             array_bindings,
             material_bindings,
             frame: None,
@@ -1429,6 +1436,7 @@ impl PrimaryState {
             shade_bindings: self.shade_bindings.clone(),
             rl_trace: self.rl_trace.clone(),
             rl_pipelines: self.rl_pipelines.clone(),
+            rl_resolve: self.rl_resolve.clone(),
             fresh_bindings: self.fresh_bindings.clone(),
             fresh_layout: self.fresh_layout.clone(),
             interactive_bindings: self.interactive_bindings.clone(),
@@ -2636,6 +2644,10 @@ impl Renderer {
                     };
                     self.rl_trace_group(abi, pass, frame.as_entire_binding(), geometry)
                 }),
+                rl_resolve: state
+                    .rl_resolve
+                    .as_ref()
+                    .map(|kit| self.rl_resolve_group(kit, &t.rl_history)),
                 key,
             };
             let state = self.view.primary.as_mut().unwrap();
