@@ -364,6 +364,13 @@ PLANS["rppics"] = [
     (f"p-{path}-cut-rp{int(v == 'rp')}", ["--path", path, "--fox", FOX, "--diag", "cut=1", "--frames", "36", "--every", "1"], env)
     for path in ("nonrt", "rt") for v, env in RP_VARIANTS
 ]
+# The pass's probe (RENDERLAB_RL_PROBE, measurement only): frame 30's H count and R/D slot counts.
+PROBE_DIR = WORK / "probe"
+PLANS["rlprobe"] = [
+    (f"q-{path}-{name}-probe", ["--path", path, *extra, "--frames", "40"],
+     PASS("1") | {"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"{path}-{name}.json")})
+    for path in ("nonrt", "rt") for name, extra in (("flight", ["--fox", FOX]), ("show", ["--fox", FOX, "--night-lanterns"]))
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
