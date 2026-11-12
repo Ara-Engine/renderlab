@@ -67,8 +67,9 @@ def rows(log):
 def environment():
     drop = ("VK_INSTANCE_LAYERS", "VK_LAYER_PATH", "RENDERLAB_GI", "RENDERLAB_DIAG_ALL_OPAQUE")
     env = {k: v for k, v in os.environ.items() if k not in drop}
+    # Main's cold budget unless a run sets the probe stop (step 3) itself.
     return env | {"RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK": "I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK",
-                  "TMP": str(WORK / "tmp"), "TEMP": str(WORK / "tmp")}
+                  "TMP": str(WORK / "tmp"), "TEMP": str(WORK / "tmp"), "RENDERLAB_COLD_PROBES": "0"}
 
 
 def fly(game, out, extra, env, frames=120):
