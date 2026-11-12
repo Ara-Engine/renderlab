@@ -60,6 +60,9 @@ struct Motion {
 }
 
 pub(crate) struct InstanceState {
+    /// Unique per collection for the process's life: with `edits` it names the placements, so a
+    /// pass can key its cached work on both instead of hashing every matrix (`Self::revision`).
+    id: u64,
     pub models: Vec<Mat4>,
     /// Per view, the placement it last submitted (motion vectors' previous frame).
     motion: Vec<Motion>,
@@ -103,7 +106,9 @@ impl InstanceState {
             .map(crate::normal::NormalTransform::new)
             .collect();
         let invalid_normals = normals.iter().filter(|n| !n.valid()).count();
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             models: models.to_vec(),
             motion: Vec::new(),
             edits: 0,
@@ -198,6 +203,11 @@ impl InstanceState {
             Some(m) if m.frame == previous_frame => m.edits != self.edits,
             _ => false,
         }
+    }
+    /// Names these exact placements: the collection and its accepted-edit count. Equal while
+    /// no model changed, and different for any change or any other collection.
+    pub fn revision(&self) -> (u64, u64) {
+        (self.id, self.edits)
     }
     /// Called only after `view` successfully submitted `frame`; backpressure keeps history.
     pub fn motion_submitted(&mut self, view: u64, frame: u64) {
@@ -416,6 +426,17 @@ mod tests {
         // Submitting the edited placement clears it.
         s.motion_submitted(0, 2);
         assert!(!s.edited_since_submit(0, 2));
+    }
+    #[test]
+    fn revision_changes_with_every_accepted_edit_and_differs_per_collection() {
+        let mut s = InstanceState::new(&[Mat4::IDENTITY; 2]);
+        let other = InstanceState::new(&[Mat4::IDENTITY; 2]);
+        let first = s.revision();
+        assert_ne!(first, other.revision());
+        assert_eq!(first, s.revision());
+        s.set(1, Mat4::from_translation(Vec3::Y)).unwrap();
+        assert_ne!(first, s.revision());
+        assert_eq!(s.revision().0, first.0);
     }
     #[test]
     fn each_view_keeps_its_own_previous_placement() {
