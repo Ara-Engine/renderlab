@@ -42,11 +42,15 @@ pub const VISIBILITY_RASTER_FEATURES: wgpu::Features =
 /// sampled textures per stage (LC1: the lighting group's AT1 sky and LC1 cluster/shadow
 /// textures take the temporal film layout to 18). Cache-terminated reflection hits
 /// (`RENDERLAB_RL_CACHE_HITS`, src/program.rs) bind one more read-only storage buffer to the
-/// lighting group, so the switch asks for fourteen; an adapter with thirteen cannot run it.
+/// lighting group, so the switch asks for one more; so does the reflection pass
+/// (`RENDERLAB_RL_PASS=1`), whose hit list H joins the traced shading group. An adapter with
+/// thirteen runs neither.
 /// No acceleration-structure limits are raised. Check these against the adapter limits
 /// before requesting a device; devices below them keep the portable raster path.
 pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
-    let storage = 13 + u32::from(crate::program::cache_hits_rough().is_some());
+    let storage = 13
+        + u32::from(crate::program::cache_hits_rough().is_some())
+        + u32::from(crate::program::rl_pass_on());
     wgpu::Limits {
         max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(5),
         max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(storage),
@@ -171,8 +175,10 @@ mod tests {
     #[test]
     fn visibility_and_traced_limits_include_virtual_lighting() {
         let limits = visibility_limits(wgpu::Limits::default());
-        // Fourteen while RENDERLAB_RL_CACHE_HITS is set (one more lighting buffer).
-        let storage = 13 + u32::from(crate::program::cache_hits_rough().is_some());
+        // One more each while RENDERLAB_RL_CACHE_HITS or RENDERLAB_RL_PASS is set.
+        let storage = 13
+            + u32::from(crate::program::cache_hits_rough().is_some())
+            + u32::from(crate::program::rl_pass_on());
         assert_eq!(limits.max_storage_buffers_per_shader_stage, storage);
         assert_eq!(limits.max_sampled_textures_per_shader_stage, 24);
         assert_eq!(
