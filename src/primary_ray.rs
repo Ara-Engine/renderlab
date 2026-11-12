@@ -40,13 +40,16 @@ pub const VISIBILITY_RASTER_FEATURES: wgpu::Features =
 /// coverage and receiver epsilon), thirteen storage buffers per stage for the Virtual
 /// shadow lookup, including SK1 history, radiance-cache and DC1 decal tables, and 24
 /// sampled textures per stage (LC1: the lighting group's AT1 sky and LC1 cluster/shadow
-/// textures take the temporal film layout to 18). No acceleration-structure limits are
-/// raised. Check these against the adapter limits
+/// textures take the temporal film layout to 18). Cache-terminated reflection hits
+/// (`RENDERLAB_RL_CACHE_HITS`, src/program.rs) bind one more read-only storage buffer to the
+/// lighting group, so the switch asks for fourteen; an adapter with thirteen cannot run it.
+/// No acceleration-structure limits are raised. Check these against the adapter limits
 /// before requesting a device; devices below them keep the portable raster path.
 pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
+    let storage = 13 + u32::from(crate::program::cache_hits_rough().is_some());
     wgpu::Limits {
         max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(5),
-        max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(13),
+        max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(storage),
         max_sampled_textures_per_shader_stage: limits.max_sampled_textures_per_shader_stage.max(24),
         max_binding_array_elements_per_shader_stage: limits
             .max_binding_array_elements_per_shader_stage
@@ -168,11 +171,13 @@ mod tests {
     #[test]
     fn visibility_and_traced_limits_include_virtual_lighting() {
         let limits = visibility_limits(wgpu::Limits::default());
-        assert_eq!(limits.max_storage_buffers_per_shader_stage, 13);
+        // Fourteen while RENDERLAB_RL_CACHE_HITS is set (one more lighting buffer).
+        let storage = 13 + u32::from(crate::program::cache_hits_rough().is_some());
+        assert_eq!(limits.max_storage_buffers_per_shader_stage, storage);
         assert_eq!(limits.max_sampled_textures_per_shader_stage, 24);
         assert_eq!(
             traced_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage,
-            13
+            storage
         );
         let higher = wgpu::Limits {
             max_storage_buffers_per_shader_stage: 16,
