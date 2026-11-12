@@ -8,12 +8,13 @@ use renderlab::{
 
 const SIZE: [u32; 2] = [128, 96];
 const IOR: f64 = 1.5;
-/// A pane: its square, its coverage and its tint.
+/// A pane: its square, its coverage, its base colour and its index of refraction.
 #[derive(Clone, Copy)]
 struct Pane<'a> {
     vertices: &'a [Vertex; 4],
     opacity: f32,
     tint: [f32; 3],
+    ior: f64,
 }
 
 fn quad(half: f32, z: f32, centre: [f32; 2]) -> [Vertex; 4] {
@@ -35,7 +36,8 @@ fn quad(half: f32, z: f32, centre: [f32; 2]) -> [Vertex; 4] {
 ///
 /// - `T` is the standard program's transmittance: what the pane's coverage leaves,
 ///   times what Schlick's Fresnel reflectance at the pixel's view angle leaves, times
-///   the tint. `S` is the same at the sun's angle to the pane.
+///   the base colour as tint, for glass (IOR above one); for a plain blended film (IOR
+///   one) only what its coverage leaves. `S` is the same at the sun's angle to the pane.
 /// - Outside every pane and every shadow the frame is the bare floor's, bit for bit.
 ///   Outside every pane but inside a shadow, the floor keeps `S` of its light.
 /// - At a pane's edge over unshadowed floor the four coverage samples leave whole
@@ -48,6 +50,10 @@ fn quad(half: f32, z: f32, centre: [f32; 2]) -> [Vertex; 4] {
 ///   order the two panes' own light would swap roles, a difference the test measures
 ///   and requires to be large against its tolerance.
 /// - The mesh pass refuses panes.
+///
+/// It holds for two glass panes, and with the near one a black blended film at IOR one,
+/// which passes half the light behind it untinted (it passed none when the base colour
+/// tinted every pane: a black alpha-blended glTF material drew solid black).
 #[test]
 fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
     let path = root("panes");
@@ -56,15 +62,23 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
     let floor = quad(8., 0., [0.; 2]);
     // The near pane over the middle, the far one under its right half and beyond.
     let (near, far) = (quad(0.6, 1.5, [0.; 2]), quad(0.6, 0.75, [0.7, 0.]));
-    let near = Pane {
+    let glass = Pane {
         vertices: &near,
         opacity: 0.25,
         tint: [0.8, 0.9, 1.0],
+        ior: IOR,
+    };
+    let film = Pane {
+        vertices: &near,
+        opacity: 0.5,
+        tint: [0.; 3],
+        ior: 1.,
     };
     let far = Pane {
         vertices: &far,
         opacity: 0.5,
         tint: [1.0, 0.6, 0.5],
+        ior: IOR,
     };
     let lighting = Lighting {
         lights: vec![Light::Directional {
@@ -106,7 +120,7 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
                     pane.tint,
                     Some(Transparency {
                         opacity: pane.opacity,
-                        ior: IOR as f32,
+                        ior: pane.ior as f32,
                         thickness: 0.,
                     }),
                 ),
@@ -179,7 +193,11 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
         (0.6 - (at.x - centre[0]).abs().max((at.y - centre[1]).abs())) * pixels_per_metre(z)
     };
     let transmittance = |pane: Pane<'_>, ray: DVec3| -> [f64; 3] {
-        let f0 = ((IOR - 1.) / (IOR + 1.)).powi(2);
+        // A plain blended film (IOR one): what its coverage leaves, at every angle.
+        if pane.ior <= 1. {
+            return [1. - f64::from(pane.opacity); 3];
+        }
+        let f0 = ((pane.ior - 1.) / (pane.ior + 1.)).powi(2);
         let fresnel = f0 + (1. - f0) * (1. - ray.z.abs()).powi(5);
         pane.tint
             .map(|tint| (1. - f64::from(pane.opacity)) * (1. - fresnel) * f64::from(tint))
@@ -198,149 +216,157 @@ fn a_pane_passes_what_its_coverage_fresnel_and_tint_leave() -> Result<()> {
             .max((crossing.y - centre[1]).abs()))
             * pixels_per_metre(at.z)
     };
-    // Each pane alone over the darker floor, for the far pane's own light.
-    let alone = [
-        frame(0.2, &[near], Primary::Traced)?,
-        frame(0.2, &[far], Primary::Traced)?,
-    ];
     let mut report = String::new();
-    for (name, panes) in [
-        ("one pane", vec![near]),
-        ("two panes, near first", vec![near, far]),
-        ("two panes, far first", vec![far, near]),
-    ] {
-        let through = [
-            frame(0.2, &panes, Primary::Traced)?,
-            frame(0.6, &panes, Primary::Traced)?,
+    for (fixture, near) in [("glass", glass), ("black film", film)] {
+        // Each pane alone over the darker floor, for the far pane's own light.
+        let alone = [
+            frame(0.2, &[near], Primary::Traced)?,
+            frame(0.2, &[far], Primary::Traced)?,
         ];
-        let (mut interior, mut outside, mut edges, mut both, mut worst) = (0, 0, 0, 0, 0f64);
-        let mut shaded = 0;
-        // Under both panes: how far the frame is from the right order, and how far the
-        // wrong order would have been from it.
-        let (mut ordered, mut swapped) = (0f64, 0f64);
-        let two = panes.len() == 2;
-        for (i, &ray) in rays.iter().enumerate() {
-            let (x, y) = (i as u32 % SIZE[0], i as u32 / SIZE[0]);
-            let far_depth = |d: f64| if two { d } else { f64::NEG_INFINITY };
-            let depths = [
-                inside(ray, 1.5, [0., 0.]),
-                far_depth(inside(ray, 0.75, [0.7, 0.])),
+        for (name, panes) in [
+            ("one pane", vec![near]),
+            ("two panes, near first", vec![near, far]),
+            ("two panes, far first", vec![far, near]),
+        ] {
+            let name = format!("{fixture}, {name}");
+            let through = [
+                frame(0.2, &panes, Primary::Traced)?,
+                frame(0.6, &panes, Primary::Traced)?,
             ];
-            // The floor point this pixel sees, and each pane's shadow on it.
-            let ground = eye + ray * (-eye.z / ray.z);
-            let shadows = [
-                shadowed(ground, 1.5, [0., 0.]),
-                far_depth(shadowed(ground, 0.75, [0.7, 0.])),
-            ];
-            let passed: [f64; 3] = std::array::from_fn(|c| {
-                f64::from(through[1][i][c] - through[0][i][c])
-                    / f64::from(bare[1][i][c] - bare[0][i][c])
-            });
-            let (one, other) = (transmittance(near, ray), transmittance(far, ray));
-            // The sun's passage: its angle to a pane is the same everywhere.
-            let sun = [
-                transmittance(near, sunward.normalize()),
-                transmittance(far, sunward.normalize()),
-            ];
-            // Pixels a shadow's edge crosses are left out everywhere.
-            if shadows.iter().any(|d| d.abs() <= 1.5) {
-                continue;
-            }
-            let lit: [f64; 3] = std::array::from_fn(|c| {
-                (0..2)
-                    .filter(|p| shadows[*p] > 0.)
-                    .map(|p| sun[p][c])
-                    .product()
-            });
-            if depths.iter().all(|d| *d < -1.5) {
-                if shadows.iter().all(|d| *d < 0.) {
-                    outside += 1;
-                    ensure!(
-                        through[0][i] == bare[0][i] && through[1][i] == bare[1][i],
-                        "{name}: pixel ({x}, {y}) outside every pane and shadow is not the bare floor's"
-                    );
-                } else {
-                    shaded += 1;
-                    for c in 0..3 {
-                        worst = worst.max((passed[c] - lit[c]).abs());
+            let (mut interior, mut outside, mut edges, mut both, mut worst) = (0, 0, 0, 0, 0f64);
+            let mut shaded = 0;
+            // Under both panes: how far the frame is from the right order, and how far the
+            // wrong order would have been from it.
+            let (mut ordered, mut swapped) = (0f64, 0f64);
+            let two = panes.len() == 2;
+            for (i, &ray) in rays.iter().enumerate() {
+                let (x, y) = (i as u32 % SIZE[0], i as u32 / SIZE[0]);
+                let far_depth = |d: f64| if two { d } else { f64::NEG_INFINITY };
+                let depths = [
+                    inside(ray, 1.5, [0., 0.]),
+                    far_depth(inside(ray, 0.75, [0.7, 0.])),
+                ];
+                // The floor point this pixel sees, and each pane's shadow on it.
+                let ground = eye + ray * (-eye.z / ray.z);
+                let shadows = [
+                    shadowed(ground, 1.5, [0., 0.]),
+                    far_depth(shadowed(ground, 0.75, [0.7, 0.])),
+                ];
+                let passed: [f64; 3] = std::array::from_fn(|c| {
+                    f64::from(through[1][i][c] - through[0][i][c])
+                        / f64::from(bare[1][i][c] - bare[0][i][c])
+                });
+                let (one, other) = (transmittance(near, ray), transmittance(far, ray));
+                // The sun's passage: its angle to a pane is the same everywhere.
+                let sun = [
+                    transmittance(near, sunward.normalize()),
+                    transmittance(far, sunward.normalize()),
+                ];
+                // Pixels a shadow's edge crosses are left out everywhere.
+                if shadows.iter().any(|d| d.abs() <= 1.5) {
+                    continue;
+                }
+                let lit: [f64; 3] = std::array::from_fn(|c| {
+                    (0..2)
+                        .filter(|p| shadows[*p] > 0.)
+                        .map(|p| sun[p][c])
+                        .product()
+                });
+                if depths.iter().all(|d| *d < -1.5) {
+                    if shadows.iter().all(|d| *d < 0.) {
+                        outside += 1;
                         ensure!(
-                            (passed[c] - lit[c]).abs() < 0.01,
-                            "{name}: floor pixel ({x}, {y}) in a pane's shadow keeps {:.4} of channel {c}, expected {:.4}",
-                            passed[c],
-                            lit[c]
+                            through[0][i] == bare[0][i] && through[1][i] == bare[1][i],
+                            "{name}: pixel ({x}, {y}) outside every pane and shadow is not the bare floor's"
+                        );
+                    } else {
+                        shaded += 1;
+                        for c in 0..3 {
+                            worst = worst.max((passed[c] - lit[c]).abs());
+                            ensure!(
+                                (passed[c] - lit[c]).abs() < 0.01,
+                                "{name}: floor pixel ({x}, {y}) in a pane's shadow keeps {:.4} of channel {c}, expected {:.4}",
+                                passed[c],
+                                lit[c]
+                            );
+                        }
+                    }
+                } else if depths.iter().all(|d| d.abs() > 1.5) {
+                    // Whole pixels: inside one pane or both.
+                    let count = depths.iter().filter(|d| **d > 0.).count() as i32;
+                    interior += 1;
+                    both += usize::from(count == 2);
+                    let under = [depths[0] > 0., depths[1] > 0.];
+                    // Where the view ray meets the far pane, and the near pane's shadow there.
+                    let on_far = eye + ray * ((0.75 - eye.z) / ray.z);
+                    let far_shadow = shadowed(on_far, 1.5, [0., 0.]);
+                    for c in 0..3 {
+                        let expected = [one[c], other[c]]
+                            .into_iter()
+                            .zip(under)
+                            .map(|(t, covers)| if covers { t } else { 1. })
+                            .product::<f64>()
+                            * lit[c];
+                        if count == 2 && far_shadow.abs() > 1.5 {
+                            // Each pane's own light is its frame alone less the floor's
+                            // light it passed, under its own shadow alone.
+                            let floor = f64::from(bare[0][i][c]);
+                            let alone_shadow =
+                                |p: usize| if shadows[p] > 0. { sun[p][c] } else { 1. };
+                            let own_near =
+                                f64::from(alone[0][i][c]) - one[c] * floor * alone_shadow(0);
+                            let own_far =
+                                f64::from(alone[1][i][c]) - other[c] * floor * alone_shadow(1);
+                            let on_far_lit = if far_shadow > 0. { sun[0][c] } else { 1. };
+                            let got = f64::from(through[0][i][c]);
+                            let right = own_near
+                                + one[c] * (own_far * on_far_lit + other[c] * floor * lit[c]);
+                            let wrong = own_far * on_far_lit
+                                + other[c] * (own_near + one[c] * floor * lit[c]);
+                            ordered = ordered.max((got - right).abs());
+                            swapped = swapped.max((right - wrong).abs());
+                        }
+                        worst = worst.max((passed[c] - expected).abs());
+                        ensure!(
+                            (passed[c] - expected).abs() < 0.01,
+                            "{name}: pixel ({x}, {y}) inside {count} pane(s) passes {:.4} of channel {c}, expected {expected:.4}",
+                            passed[c]
                         );
                     }
-                }
-            } else if depths.iter().all(|d| d.abs() > 1.5) {
-                // Whole pixels: inside one pane or both.
-                let count = depths.iter().filter(|d| **d > 0.).count() as i32;
-                interior += 1;
-                both += usize::from(count == 2);
-                let under = [depths[0] > 0., depths[1] > 0.];
-                // Where the view ray meets the far pane, and the near pane's shadow there.
-                let on_far = eye + ray * ((0.75 - eye.z) / ray.z);
-                let far_shadow = shadowed(on_far, 1.5, [0., 0.]);
-                for c in 0..3 {
-                    let expected = [one[c], other[c]]
-                        .into_iter()
-                        .zip(under)
-                        .map(|(t, covers)| if covers { t } else { 1. })
-                        .product::<f64>()
-                        * lit[c];
-                    if count == 2 && far_shadow.abs() > 1.5 {
-                        // Each pane's own light is its frame alone less the floor's
-                        // light it passed, under its own shadow alone.
-                        let floor = f64::from(bare[0][i][c]);
-                        let alone_shadow = |p: usize| if shadows[p] > 0. { sun[p][c] } else { 1. };
-                        let own_near = f64::from(alone[0][i][c]) - one[c] * floor * alone_shadow(0);
-                        let own_far =
-                            f64::from(alone[1][i][c]) - other[c] * floor * alone_shadow(1);
-                        let on_far_lit = if far_shadow > 0. { sun[0][c] } else { 1. };
-                        let got = f64::from(through[0][i][c]);
-                        let right =
-                            own_near + one[c] * (own_far * on_far_lit + other[c] * floor * lit[c]);
-                        let wrong =
-                            own_far * on_far_lit + other[c] * (own_near + one[c] * floor * lit[c]);
-                        ordered = ordered.max((got - right).abs());
-                        swapped = swapped.max((right - wrong).abs());
-                    }
-                    worst = worst.max((passed[c] - expected).abs());
+                } else if depths[0].abs() < 0.4
+                    && depths[1] < -1.5
+                    && shadows.iter().all(|d| *d < 0.)
+                {
+                    // The near pane's own edge over bare, unshadowed floor: quarters of its
+                    // coverage.
+                    let covered = (1. - passed[1]) / (1. - one[1]) * 4.;
                     ensure!(
-                        (passed[c] - expected).abs() < 0.01,
-                        "{name}: pixel ({x}, {y}) inside {count} pane(s) passes {:.4} of channel {c}, expected {expected:.4}",
-                        passed[c]
+                        (covered - covered.round()).abs() < 0.08
+                            && (0. ..=4.).contains(&covered.round()),
+                        "{name}: edge pixel ({x}, {y}) is covered {covered:.3} quarters"
                     );
+                    edges += usize::from(covered.round() > 0.5 && covered.round() < 3.5);
                 }
-            } else if depths[0].abs() < 0.4 && depths[1] < -1.5 && shadows.iter().all(|d| *d < 0.) {
-                // The near pane's own edge over bare, unshadowed floor: quarters of its
-                // coverage.
-                let covered = (1. - passed[1]) / (1. - one[1]) * 4.;
-                ensure!(
-                    (covered - covered.round()).abs() < 0.08
-                        && (0. ..=4.).contains(&covered.round()),
-                    "{name}: edge pixel ({x}, {y}) is covered {covered:.3} quarters"
-                );
-                edges += usize::from(covered.round() > 0.5 && covered.round() < 3.5);
             }
+            ensure!(
+                panes.len() == 1 || (ordered < 0.004 && swapped > 10. * ordered.max(1e-3)),
+                "{name}: under both panes the frame is {ordered:.4} from far-then-near, and the other order would differ by {swapped:.4}"
+            );
+            ensure!(
+                interior > 1000
+                    && outside > 5000
+                    && edges > 10
+                    && shaded > 20
+                    && (panes.len() == 1 || both > 200),
+                "{name}: the fixture lost its regions: {interior} inside, {outside} outside, {shaded} in a shadow alone, {edges} partly covered, {both} under both"
+            );
+            report += &format!(
+                "{name}: {interior} inside and {shaded} in a shadow alone within {worst:.4}, {edges} edge pixels on quarters, {both} under both ({ordered:.4} from far-then-near, the other order {swapped:.4} away); "
+            );
         }
-        ensure!(
-            panes.len() == 1 || (ordered < 0.004 && swapped > 10. * ordered.max(1e-3)),
-            "{name}: under both panes the frame is {ordered:.4} from far-then-near, and the other order would differ by {swapped:.4}"
-        );
-        ensure!(
-            interior > 1000
-                && outside > 5000
-                && edges > 10
-                && shaded > 20
-                && (panes.len() == 1 || both > 200),
-            "{name}: the fixture lost its regions: {interior} inside, {outside} outside, {shaded} in a shadow alone, {edges} partly covered, {both} under both"
-        );
-        report += &format!(
-            "{name}: {interior} inside and {shaded} in a shadow alone within {worst:.4}, {edges} edge pixels on quarters, {both} under both ({ordered:.4} from far-then-near, the other order {swapped:.4} away); "
-        );
     }
     ensure!(
-        frame(0.2, &[near], Primary::Raster).is_err(),
+        frame(0.2, &[glass], Primary::Raster).is_err(),
         "the mesh pass accepted a transparent pane"
     );
     eprintln!("panes: {report}");

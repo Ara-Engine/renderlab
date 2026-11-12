@@ -1364,6 +1364,9 @@ impl Planner {
         // A view whose every input is unchanged has nothing to trace once its cells
         // exist: after IDLE_AFTER identical frames the passes stop (still frames cost
         // nothing). Rotation and partial cells keep working every frame.
+        // The placements' digest, once: both keys below read it (about 1 MB of transforms a
+        // frame on Outpost was hashed twice).
+        let instances: [u8; 32] = Sha256::digest(instances).into();
         let idle_key: [u8; 32] = {
             let mut h = Sha256::new();
             h.update(still_matrix);

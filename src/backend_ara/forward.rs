@@ -1987,9 +1987,10 @@ fn frame(
     };
     // TP2 (`prepare_transmission`): the panes' coloured sun shadow on everything opaque.
     // A sun map over the panes' own footprint holds, in one layer a pane, the light its
-    // nearest sheet passes and that sheet's depth. Its record is `TpTransmission`: the
-    // map's matrix, the direction toward the sun with the layer count, twice the fit's
-    // bias. Without panes or a sun the record stays zero and shading reads full light.
+    // nearest sheet passes and that sheet's depth; shading reads it reduced to two layers
+    // (shaders/transmission_reduce.wgsl). Its record is `TpTransmission`: the map's matrix,
+    // the direction toward the sun with the reduced layer count, twice the fit's bias.
+    // Without panes or a sun the record stays zero and shading reads full light.
     let transmission_record: Option<Vec<u8>> =
         match scene.lighting.lights.iter().find_map(|l| match l {
             crate::Light::Directional { travel, .. } => Some(travel.normalize()),
@@ -2005,7 +2006,7 @@ fn frame(
                     let mut record = crate::mesh::matrix_bytes(fit.matrix).to_vec();
                     record.extend(
                         (-travel)
-                            .extend(scene.transparent.len() as f32)
+                            .extend(scene.transparent.len().min(2) as f32)
                             .to_array()
                             .into_iter()
                             .chain([fit.bias * 2.0, 0.0, 0.0, 0.0])
@@ -2691,8 +2692,9 @@ fn frame(
     }
     let mut buffers = BTreeMap::new();
     let mut inputs = BTreeMap::new();
-    // The transmission record and map are what every program reads at (3, 26) and
-    // (3, 27); each pane's geometry and material are drawn into its layer below.
+    // The transmission record and reduced map are what every program reads at (3, 26) and
+    // (3, 27); each pane's geometry and material are drawn into its own layer below, and
+    // the layers are reduced to two.
     const TRANSMISSION_SIZE: [u32; 2] = [1024; 2];
     let mut transmission = None;
     if let Some(record) = &transmission_record {
@@ -2701,15 +2703,16 @@ fn frame(
         buffers.insert(key(3, 26), record);
         inputs.insert(
             key(3, 27),
-            Texture::array(
-                gpu,
-                TRANSMISSION_SIZE,
-                scene.transparent.len() as u32,
-                Format::Rgba16Float,
-                false,
-                true,
-            )?,
+            Texture::array(gpu, TRANSMISSION_SIZE, 2, Format::Rgba16Float, true, false)?,
         );
+        let layers = Texture::array(
+            gpu,
+            TRANSMISSION_SIZE,
+            scene.transparent.len() as u32,
+            Format::Rgba16Float,
+            false,
+            true,
+        )?;
         let mut panes = Vec::new();
         for object in scene.transparent {
             let geometry = MeshGeometry::new(
@@ -2736,6 +2739,7 @@ fn frame(
             base,
             depth,
             depth_views,
+            layers,
         ));
     }
     for spec in &specs {
@@ -2893,8 +2897,7 @@ fn frame(
     }
     // `encode_transmission`: each pane into its own layer, cleared to full light.
     let mut transmission_packets = Vec::new();
-    if let Some((pass, panes, base, _, depth_views)) = &transmission {
-        let map = &inputs[&key(3, 27)];
+    if let Some((pass, panes, base, _, depth_views, map)) = &transmission {
         for (layer, (geometry, material)) in panes.iter().enumerate() {
             let packet = HeapBindings::new(
                 gpu,
@@ -2922,6 +2925,23 @@ fn frame(
             )?;
             transmission_packets.push(packet);
         }
+        // The layers reduced to two per texel, which shading reads (audit 3.5).
+        let reduce = HeapBindings::new(
+            gpu,
+            Pass::TransmissionReduce,
+            &[
+                (key(0, 0), Input::Image(map)),
+                (key(0, 1), Input::Image(&inputs[&key(3, 27)])),
+            ],
+        )?;
+        reduce.import(&mut graph);
+        Kernel::new(gpu, cache, Pass::TransmissionReduce)?.record(
+            &mut graph,
+            &mut rec,
+            &reduce,
+            [TRANSMISSION_SIZE[0], TRANSMISSION_SIZE[1], 1],
+        )?;
+        transmission_packets.push(reduce);
     }
     // `try_upload_texture` and `sampler_descriptor` for each object's texture slots. A
     // texture with an identity is uploaded by the first frame that names it and kept;
@@ -4482,12 +4502,12 @@ fn frame(
     if let Some(panes) = panes {
         panes.retire(gpu, &mut graph)?;
     }
-    if let Some((_, panes, base, depth, _)) = transmission {
+    if let Some((_, panes, base, depth, _, layers)) = transmission {
         for (geometry, material) in panes {
             geometry.retire(gpu, &mut graph)?;
             material.retire(gpu)?;
         }
-        for image in [base, depth] {
+        for image in [base, depth, layers] {
             super::image::release(gpu, image.image)?;
         }
     }
