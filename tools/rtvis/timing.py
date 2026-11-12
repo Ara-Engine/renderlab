@@ -326,6 +326,18 @@ PLANS["gatehold"] = [
     (f"s-{path}-hold-{v}-{k}", ["--path", path, "--fox", FOX, "--diag", "hold=1", "--frames", "60"], env)
     for k in (1, 2) for path in ("nonrt", "rt") for v, env in GATE_VARIANTS
 ]
+# The history's spatial resolve under motion (RENDERLAB_RL_RESOLVE=1): the Showcase-like band
+# moving (run with reflection_matched) and the game flight (game_scene), against the default.
+RES_VARIANTS = (("base", {}), ("res", {"RENDERLAB_RL_RESOLVE": "1"}),
+                ("res4", {"RENDERLAB_RL_RESOLVE": "1", "RENDERLAB_RL_HISTORY_TUNE": "strata=4"}))
+PLANS["resshow"] = [
+    (f"m-{path}-show-{v}-{k}", ["--path", path, *SHOW], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in RES_VARIANTS
+]
+PLANS["resgame"] = [
+    (f"g-{path}-flight-{v}-{k}", ["--path", path, "--fox", FOX, "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in RES_VARIANTS
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS

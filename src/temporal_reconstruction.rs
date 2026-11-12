@@ -1329,7 +1329,7 @@ impl Planner {
         rl_history.extend_from_slice(&matrix_bytes(previous_matrix));
         // Read only while the camera holds (TR1's bit-equal `still`, no reset): a moving frame
         // traces every glossy receiver's full set, exactly as without the history.
-        let continues = continued.is_some() && still;
+        let continues = continued.is_some() && (still || (!self.reset && crate::program::rl_resolve_on()));
         for w in [u32::from(continues), (i.frame & 1) as u32, i.frame as u32, scale.to_bits()] {
             rl_history.extend_from_slice(&w.to_ne_bytes());
         }

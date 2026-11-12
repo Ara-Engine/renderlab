@@ -44,7 +44,10 @@ var<private> rl_hist_moved:bool;
 fn rl_history_index()->u32 { return 0u; }
 fn rl_history_lookup(receiver:Receiver,world:vec3<f32>,pixel:vec2<u32>)->vec4<f32> { return vec4<f32>(0.0); }
 fn rl_history_store(pixel:vec2<u32>,slot:u32,world:vec3<f32>,mean:vec3<f32>,m2:f32,count:f32) {}
+fn rl_history_resolve(mean:vec3<f32>,folded:f32,count:f32)->vec3<f32> { return mean; }
 // ---- end of rl history stubs ----
+// The receiver's perceptual roughness, for the history's resolve.
+var<private> rl_hist_rough:f32;
 // A trusted receiver traces RL_HISTORY_STRATA strata of its set a frame (every
 // count/RL_HISTORY_STRATA-th, from an offset turning with the frame) and folds them into a
 // history of at most RL_HISTORY_CAP x count strata; one that moved over a pixel since the
@@ -217,6 +220,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     // Reflection history: a trusted glossy receiver traces one stratum, rotating with the
     // frame from a per-pixel offset, and the full set only when that stratum disagrees.
     var hist=vec4<f32>(0.0);
+    rl_hist_rough=rough;
     // A restart sphere or swept shadow (rl_restarts) always traces the full set.
     if RL_HISTORY && !mirror && !restarted && frame!=0u && !rl_restarts(input.world) {hist=rl_history_lookup(receiver,input.world,pixel);}
     var trusted=hist.w>0.0;
@@ -307,7 +311,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
             m2=mix(m2,squares/n,n/folded);
         }
         rl_history_store(pixel,slot,input.world,mean,m2,folded);
-        rl_specular=vec4<f32>(mean,traced);
+        rl_specular=vec4<f32>(rl_history_resolve(mean,folded,f32(count)),traced);
         return;
     }
     if valid==0u {

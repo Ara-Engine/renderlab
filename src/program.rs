@@ -135,6 +135,12 @@ fn rl_history_tune(mut source: String) -> String {
     }
     source
 }
+/// U-RTVIS: `RENDERLAB_RL_RESOLVE=1` reads the history under a moving camera too, through the
+/// spatial resolve (reflections_history.wgsl RL_RESOLVE). Off by default.
+pub(crate) fn rl_resolve_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE").is_ok_and(|v| v == "1"))
+}
 /// `composed` with the reflection history in place of its stubs, when it traces reflections and
 /// the history is on; the program's byte range moves with the replaced block before it.
 pub(crate) fn with_reflection_history(mut composed: Composed) -> Composed {
@@ -146,8 +152,13 @@ pub(crate) fn with_reflection_history(mut composed: Composed) -> Composed {
     };
     let end = composed.source[begin..].find(RL_HISTORY_STUBS[1]).unwrap() + begin + RL_HISTORY_STUBS[1].len();
     assert!(end <= composed.program.start, "the history stubs precede the program");
-    composed.source.replace_range(begin..end, REFLECTION_HISTORY);
-    let shift = REFLECTION_HISTORY.len() as isize - (end - begin) as isize;
+    let history = if rl_resolve_on() {
+        REFLECTION_HISTORY.replacen("const RL_RESOLVE:bool=false;", "const RL_RESOLVE:bool=true;", 1)
+    } else {
+        REFLECTION_HISTORY.to_owned()
+    };
+    composed.source.replace_range(begin..end, &history);
+    let shift = history.len() as isize - (end - begin) as isize;
     let moved = |at: usize| (at as isize + shift) as usize;
     composed.program = moved(composed.program.start)..moved(composed.program.end);
     composed
