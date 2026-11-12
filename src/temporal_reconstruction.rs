@@ -487,7 +487,7 @@ pub(crate) fn trace_source(soft_kernels: &str) -> Result<String, Error> {
 /// `trace_source` with a per-pixel sun history in its two trace entries, on their HELD_*
 /// bindings: the wgpu renderer's module. Without listing only. Each entry's sun is
 /// `primary_sun` and its history word `primary_sun_store`: the sun visibility history
-/// (SUN_HISTORY_SOURCE, U-FIXED) by default, or U-RTVIS's held stop (`RENDERLAB_SUN_HISTORY=0`).
+/// (SUN_HISTORY_SOURCE, U-FIXED, with `RENDERLAB_SUN_HISTORY=1`), or U-RTVIS's held stop (the default).
 pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
     let source = trace_source_with(soft_kernels, false)?;
     let estimate = "        visible=fresh_estimate(receiver,id.xy,size.x,0u);\n    }\n    textureStore(fresh_output,p,vec4<u32>(select((256u/tr1_rays)*visible,256u,visible==FRESH_SKIP)));";
@@ -572,11 +572,13 @@ pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
 const HELD_SUN: &str = "fn primary_sun(receiver:Receiver,slot:u32,pixel:vec2<u32>,width:u32)->u32 {rtvis_hold(receiver,slot);return fresh_estimate(receiver,pixel,width,0u);}
 fn primary_sun_store(p:vec2<i32>,visible:u32) {rtvis_store(p,visible);}";
 const SUN_HISTORY_SOURCE: &str = include_str!("../shaders/primary_sun_history.wgsl");
-/// U-FIXED measurement switch: `RENDERLAB_SUN_HISTORY=0` keeps the held stop instead of the
-/// sun visibility history (A/B against the old budget).
+/// U-FIXED's sun visibility history, opt-in with `RENDERLAB_SUN_HISTORY=1`; the default is the
+/// held stop. Off by default since 2026-11-12: on Ara's Showcase RT (two skinned characters keep
+/// receivers in restart zones) it added a history pass without saving rays, visibility 4.00 ->
+/// 5.37 ms in all three rounds of the clock-held pin lease (perf16), Outpost RT 13.78 -> 14.33.
 pub(crate) fn sun_history() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_SUN_HISTORY").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_SUN_HISTORY").is_ok_and(|v| v == "1"))
 }
 /// U-FIXED: `trace_source_held`'s module plus `primary_vb_sun`, the RT sun traced from the
 /// visibility buffer's receivers with the same budget, rotation and stops.
