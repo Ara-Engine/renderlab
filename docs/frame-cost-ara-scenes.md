@@ -50,9 +50,11 @@ All byte-identical or within run-to-run noise on the picture, except where state
 | 7 | Outpost non-RT | atmosphere | 3.9-6.8 → under 1 | depends on which part (sky, inject, CPU wait): detail capture pending | none expected | U-RTVIS after the capture |
 | 8 | Outpost non-RT | sun shadow | 5.1 (max 38.6) → about 1 | page pool (N-POOL brief) or Outpost's caster set | none expected | after 1-7 |
 
-**File ownership, so nobody collides:**
-- **Mac GPU thread:** `shaders/program_api.wgsl` (the light loop and its helpers), `shaders/programs/*.wgsl`, `shaders/light_cluster*.wgsl`, `shaders/local_light_ray.wgsl`, `src/light_cluster*.rs`.
-- **U-RTVIS:** `shaders/reflections*.wgsl`, `src/reflection*.rs`, `shaders/gi_*.wgsl`, `src/gi_cache.rs`, `src/instance_bvh.rs`, `shaders/primary_*.wgsl`, `shaders/virtual_shadow*.wgsl`, `shaders/atmosphere*.wgsl`, `src/atmosphere_gpu.rs`, `examples/game_scene.rs` (additive `--diag` only).
+**Update, 2026-11-12 afternoon (RTX lease 5, clean, five rounds):** Showcase RT 29.8 ms, non-RT 35.2; Outpost RT 44.4. `RENDERLAB_RL_SPLIT=0` is within noise everywhere (lease 3's 3-6 ms was noise). `RENDERLAB_ABLATE=gi` saves a steady 6 ms on Showcase on both paths while the GI passes are 0.8-1.6 ms: the camera GI lookup inside shading (`gi_prepare`/`es_prepare`, about 4 ms on the M5) is the second-largest Showcase item after reflections. Reflections: 96% of Showcase's reflection rays come from the 12.6% of pixels at 9-16 strata (roughness about 0.33 up to the traced cutoff; Mac counting build).
+
+**File ownership, so nobody collides** (revised 2026-11-12 afternoon):
+- **Mac GPU thread:** `shaders/program_api.wgsl` (the light loop and its helpers), `shaders/programs/*.wgsl`, `shaders/light_cluster*.wgsl`, `shaders/local_light_ray.wgsl`, `src/light_cluster*.rs`, `src/lighting.rs`; the camera GI lookup in `shaders/gi_api.wgsl` (`gi_prepare`, `es_prepare`, `gi_sample_refined`); the compacted reflection hit-shading pass (new `shaders/reflection_hits.wgsl`, `src/reflection_hits.rs`) against U-RTVIS's interface (docs/design-reflection-pass.md).
+- **U-RTVIS:** `shaders/reflections*.wgsl`, `src/reflection*.rs` (strata selection, the trace, the lobe output, the reduced-rate pass and its accumulator), the GI cache's update, gather and cell shading (`shaders/gi_cache.wgsl`, `gi_cells.wgsl`, `gi_near.wgsl`, `gi_rays_*.wgsl`, `src/gi_cache.rs`), `src/instance_bvh.rs`, `shaders/primary_*.wgsl`, `shaders/virtual_shadow*.wgsl`, `shaders/atmosphere*.wgsl`, `src/atmosphere_gpu.rs`, `examples/game_scene.rs` (additive `--diag` only).
 - **Root:** docs, records, merges, tools/blobs.py, scripts.
 - **Linux bridge thread:** Ara's `crates/ara-renderlab` only; Renderlab API additions it needs go through root.
 - **PC integration thread:** measurements only; no Renderlab changes.
