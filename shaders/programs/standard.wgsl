@@ -150,6 +150,7 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
         let attenuation=light.attenuation*visibility;
         var response=brdf(n,v,light.direction,base,metal,rough);
         if SPECULAR_AA {response=specular_brdf(input,light.direction,base,metal,rough);}
+        if !rl_term(RL_TERM_BRDF) {response=vec3<f32>(1.0/PI);}
         let intensity=light.intensity*light_transmission(light,input);
         exposed=min(exposed+exposed_product(intensity,response*attenuation),vec3<f32>(65504.0));
     }

@@ -7,6 +7,27 @@
 // (src/program.rs). Programs see only their own receiver and footprint differentials,
 // with no neighbouring lighting or screen buffers.
 
+// The shading terms this module evaluates, as RL_TERM_* bits. Every frame's module keeps
+// all of them, so each test below folds away. The pass log's detail (src/shade_detail.rs)
+// rewrites this one line to time copies that leave terms out.
+const RL_SHADE_TERMS:u32=0xffffffffu;
+// The light loop: `light_count` is 0 without it.
+const RL_TERM_LIGHTS:u32=1u;
+// Opaque visibility of each light (shadow rays, maps and local-light shadows).
+const RL_TERM_SHADOWS:u32=2u;
+// Transparent panes' transmission of the sun.
+const RL_TERM_TRANSMISSION:u32=4u;
+// Traced reflections (`specular_incident`), shaders/reflections.wgsl.
+const RL_TERM_REFLECTIONS:u32=8u;
+// The material's base colour and normal map fetches on traced stages
+// (shaders/program_traced*.wgsl): without it base colour reads 1 and normal maps read flat.
+// Metallic-roughness keeps its fetch: it decides how much reflection work a pixel does.
+const RL_TERM_TEXTURES:u32=16u;
+// The light loop's BRDF evaluation (shaders/programs/standard.wgsl): without it each
+// light's response is a constant Lambert lobe.
+const RL_TERM_BRDF:u32=32u;
+fn rl_term(term:u32) -> bool { return (RL_SHADE_TERMS&term)!=0u; }
+
 // Everything a program may read about its receiver. Raster frames fill it from
 // interpolants and quad derivatives, traced frames from the exact pixel-centre hit.
 struct SurfaceInput {
@@ -55,7 +76,10 @@ struct LightSample { index:u32, direction:vec3<f32>, attenuation:f32, intensity:
 // Point and spot lights beyond their range contribute exactly zero, so the loop's sum is
 // unchanged by the culling. Stages without a cluster walk every light. The count varies
 // per receiver: keep implicit-derivative sampling outside the light loop.
-fn light_count() -> u32 { return rl_light_total(); }
+fn light_count() -> u32 {
+    if !rl_term(RL_TERM_LIGHTS) { return 0u; }
+    return rl_light_total();
+}
 
 // The receiver's i-th light: the fixed light loop's direction and attenuation arithmetic.
 fn light_sample(i:u32, input:SurfaceInput) -> LightSample {
@@ -96,6 +120,7 @@ fn light_sample_untinted(i:u32, input:SurfaceInput) -> LightSample {
 // sun's lookup is evaluated (`select` would evaluate it for every light).
 fn light_transmission(s:LightSample, input:SurfaceInput) -> vec3<f32> {
     let light=lights[s.index];
+    if !rl_term(RL_TERM_TRANSMISSION) { return vec3<f32>(1.0); }
     if light.kind.x==0u && light.kind.z!=0u {
         return transparent_sun_transmission(input.world,s.direction);
     }
@@ -109,7 +134,7 @@ fn light_transmission(s:LightSample, input:SurfaceInput) -> vec3<f32> {
 // may contain receivers outside a light's exact range/cone; those samples have no
 // incidence and need no visibility work. This assumes no BRDF or receiver hemisphere.
 fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {
-    if s.attenuation==0.0 { return 1.0; }
+    if s.attenuation==0.0 || !rl_term(RL_TERM_SHADOWS) { return 1.0; }
     if lights[s.index].kind.w!=0u { return rl_local_shadow(lights[s.index],input.receiver,s.direction); }
     return hard_shadow(lights[s.index],input.receiver,s.direction);
 }

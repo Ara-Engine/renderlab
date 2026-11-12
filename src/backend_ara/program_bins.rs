@@ -43,7 +43,8 @@ impl ProgramBins {
     ) -> Result<()> {
         self.record_labelled(graph, rec, inputs, dispatch, "ara::ProgramBins".into())
     }
-    fn record_labelled(
+    /// `record` under another pass label (the pass log's shading parts).
+    pub(crate) fn record_labelled(
         &self,
         graph: &mut Graph,
         rec: &mut Recorder,
