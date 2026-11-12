@@ -100,6 +100,8 @@ pub enum Pass {
     VisibilityReset,
     /// Mixed-program tile lists and indirect dispatch arguments.
     ProgramBins,
+    /// Reflection hit records binned by their hit's program (src/reflection_hits.rs).
+    ReflectionHitBins,
     /// Base reversed-Z minimum depth from the visibility buffer.
     HzbBase,
     /// Minimum reduction from the previous image mip.
@@ -318,6 +320,7 @@ impl Pass {
             Self::ProgramBins => {
                 crate::renderer::primary_ray_gpu::program_lists::bin_source().into()
             }
+            Self::ReflectionHitBins => crate::renderer::reflection_hits::bin_source().into(),
             Self::HzbBase | Self::HzbReduce => {
                 include_str!("../../../shaders/visibility_buffer_hzb.wgsl").into()
             }
@@ -556,6 +559,7 @@ impl Pass {
                 | Self::HzbBase
                 | Self::HzbReduce
                 | Self::ProgramBins
+                | Self::ReflectionHitBins
                 | Self::VisibilityCull
                 | Self::VisibilityFinish
                 | Self::VisibilityReset
@@ -664,6 +668,7 @@ impl Pass {
             Self::VisibilityFinish => "finish",
             Self::VisibilityReset => "reset",
             Self::ProgramBins => "program_bins",
+            Self::ReflectionHitBins => "reflection_hit_bins",
             Self::HzbBase => "base",
             Self::HzbReduce => "reduce",
             Self::ParticleBillboard => "tp_particle_fs",
