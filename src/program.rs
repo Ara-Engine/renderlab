@@ -279,7 +279,18 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
 }
 fn indirect_api() -> String {
     let mut source = gi_shader("gi_cells.wgsl", INDIRECT_API[0]).into_owned();
-    source.push_str(&gi_shader("gi_api.wgsl", INDIRECT_API[1]));
+    // U-RTVIS: `RENDERLAB_GI_KEEP=0` samples the receiver's level again for the rest term
+    // instead of restoring its kept sums (gi_api.wgsl GI_KEEP_LEVEL); same picture.
+    static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let keep = *KEEP.get_or_init(|| std::env::var("RENDERLAB_GI_KEEP").map_or(true, |v| v != "0"));
+    let api = gi_shader("gi_api.wgsl", INDIRECT_API[1]);
+    if keep {
+        source.push_str(&api);
+    } else {
+        let from = "const GI_KEEP_LEVEL:bool=true;";
+        assert_eq!(api.matches(from).count(), 1, "RENDERLAB_GI_KEEP seam");
+        source.push_str(&api.replacen(from, "const GI_KEEP_LEVEL:bool=false;", 1));
+    }
     source.push_str(&gi_shader("environment_lobes.wgsl", INDIRECT_API[2]));
     source
 }

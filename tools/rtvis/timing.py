@@ -265,6 +265,21 @@ PLANS["subsetpics"] = [
     (f"p-{path}-{kind}-sub{v.replace('@', 'r')}", ["--path", path, "--fox", FOX, *extra, "--frames", "48", "--every", "1"], SUBSET(v))
     for path in ("nonrt", "rt") for kind, extra in (("flight", []), ("hold", ["--diag", "hold=1"])) for v in (SUBSET_ON, "1")
 ]
+# The GI receiver's kept level sums (RENDERLAB_GI_KEEP; gi_api.wgsl GI_KEEP_LEVEL): timing on the
+# game flight, night lanterns and quarry, and byte identity (`hashes OUT keep`) on both paths.
+KEEP = lambda v: {"RENDERLAB_GI_KEEP": v}
+KEEP_CLIPS = REFL_CLIPS + [("quarry", ["--quarry", QUARRY])]
+PLANS["keep"] = [
+    (f"k-{path}-{name}-keep{v}-{k}", ["--path", path, *extra, "--frames", "60"], KEEP(v))
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in KEEP_CLIPS for v in ("1", "0")
+]
+PLANS["keeppics"] = [
+    (f"p-{path}-{name}-keep{v}", ["--path", path, *extra, "--every", "1"], KEEP(v))
+    for path in ("nonrt", "rt")
+    for name, extra in (("game", ["--frames", "60"]), ("night", ["--fox", FOX, "--night-lanterns", "--frames", "30"]),
+                        ("quarry", ["--quarry", QUARRY, "--frames", "20"]))
+    for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
