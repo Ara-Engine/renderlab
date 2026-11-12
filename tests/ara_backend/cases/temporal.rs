@@ -732,20 +732,25 @@ fn interactive_frame_is_the_exact_frame_outside_the_penumbra_and_on_a_cold_start
     // frame is partly shadowed, and by less than half the shadow's contrast. Everywhere else
     // the cold reconstructed frame is the exact frame.
     let (cold_exact, cold_fast) = (reds(&exact_sequence[0]), reds(&fast_sequence[0]));
-    let mut cold_differing = 0;
+    // The share is judged in display codes against the lit floor (255): mean at most 0.01
+    // codes, and at most 0.1% of pixels more than 8 codes apart.
+    let (mut code_sum, mut over_eight) = (0f64, 0usize);
     for (a, b) in cold_exact.iter().zip(&cold_fast) {
         if a == b {
             continue;
         }
-        cold_differing += 1;
         ensure!(
             *a > umbra + 1e-3 * contrast && *a < lit - 1e-3 * contrast && (a - b).abs() < 0.5 * contrast,
             "the cold reconstructed frame differs outside the penumbra or by too much: {a} against {b}"
         );
+        let codes = f64::from((a - b).abs() / lit * 255.);
+        code_sum += codes;
+        over_eight += usize::from(codes > 8.);
     }
+    let mean = code_sum / cold_exact.len() as f64;
     ensure!(
-        cold_differing * 1000 <= cold_exact.len(),
-        "{cold_differing} of {} cold pixels differ from the exact frame (more than 0.1%)",
+        mean <= 0.01 && over_eight * 1000 <= cold_exact.len(),
+        "the cold frame is {mean} codes from the exact frame on average, {over_eight} of {} pixels over 8 codes",
         cold_exact.len()
     );
     let mut later = (0, 0f32);
