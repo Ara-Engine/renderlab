@@ -30,19 +30,43 @@ pub(super) struct PanePipelines {
     pub shade: Owned<wgpu::ComputePipeline>,
 }
 
+/// The pane id target's format: wgpu guarantees four-sample `Rg16Uint` on every adapter but
+/// not `R32Uint` (the port's), so ids are stored as two u16 halves (`ID_SEAMS`).
+pub(super) const ID_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg16Uint;
+/// shaders/pane_pixels.wgsl's id encoding and its wgpu replacement.
+const ID_SEAMS: [(&str, &str); 3] = [
+    ("alias PaneId=u32;\n", "alias PaneId=vec2<u32>;\n"),
+    (
+        "fn tp_pane_id_out(id:u32)->PaneId { return id; }\n",
+        "fn tp_pane_id_out(id:u32)->PaneId { return vec2<u32>(id&0xffffu,id>>16u); }\n",
+    ),
+    (
+        "fn tp_pane_id(pixel:vec2<i32>,k:i32)->u32 { return textureLoad(pane_ids,pixel,k).x; }\n",
+        "fn tp_pane_id(pixel:vec2<i32>,k:i32)->u32 { let t=textureLoad(pane_ids,pixel,k); return t.x|(t.y<<16u); }\n",
+    ),
+];
+/// `section` with the wgpu id encoding.
+fn wgpu_section(name: &str) -> Result<String, String> {
+    let mut text = crate::pane_pixels::section(name)?.to_owned();
+    for (from, to) in ID_SEAMS {
+        text = text.replace(from, to);
+    }
+    Ok(text)
+}
+
 /// The pane id raster's and the pane shading's module sources, from a program's glass
 /// module (`glass_source`).
 pub(super) fn sources(glass: &str) -> Result<(String, String), String> {
     let ids = format!(
         "enable primitive_index;\n{glass}\n{}\n",
-        crate::pane_pixels::section("PANE_RASTER")?
+        wgpu_section("PANE_RASTER")?
     );
     let explicit = crate::pane_pixels::explicit_sampling(glass)?;
     let shade = format!(
         "{explicit}\n{}\n{}\n{}\n",
         crate::pane_pixels::fragment(&explicit)?,
         crate::pane_pixels::section("PANE_COMMON")?,
-        crate::pane_pixels::section("PANE_COMPUTE")?
+        wgpu_section("PANE_COMPUTE")?
     );
     Ok((ids, shade))
 }
@@ -172,7 +196,7 @@ impl Renderer {
         wanted()
     }
     /// `program`'s pane pipelines from its glass module `glass` on path `rt`: the id raster
-    /// (the glass entry's vertex stages into four-sample R32Uint, no blending) and the shading.
+    /// (the glass entry's vertex stages into four-sample `ID_FORMAT`, no blending) and the shading.
     pub(super) fn tp_pane_pipelines(
         &self,
         program: u64,
@@ -181,6 +205,9 @@ impl Renderer {
     ) -> Result<PanePipelines, Error> {
         let slot = self.program_slot(program);
         let (ids_source, shade_source) = sources(glass).map_err(Error::Shader)?;
+        let gpu = self.transparency.gpu.as_ref().ok_or_else(|| {
+            Error::Fault(Fault("pane pipelines before the transparency pass's resources".into()))
+        })?;
         let scopes = OperationScopes::new(&self.device);
         let module = |label: &str, source: String| {
             let label = format!("{label} {}", slot.label);
@@ -195,7 +222,6 @@ impl Renderer {
         };
         let ids_module = module("TP pane ids", ids_source);
         let shade_module = module("TP pane shading", shade_source);
-        let gpu = self.transparency.gpu.as_ref().unwrap();
         let ids = [false, true].map(|tangent| {
             self.ledger.own(
                 self.device
@@ -228,7 +254,7 @@ impl Renderer {
                             module: &ids_module,
                             entry_point: Some("tp_pane_id_fs"),
                             compilation_options: Default::default(),
-                            targets: &[Some(wgpu::TextureFormat::R32Uint.into())],
+                            targets: &[Some(ID_FORMAT.into())],
                         }),
                         primitive: wgpu::PrimitiveState {
                             cull_mode: None,
@@ -286,6 +312,9 @@ mod tests {
                 crate::program::declares_parameters(crate::STANDARD_PROGRAM),
             );
             let (ids, shade) = sources(&glass).unwrap();
+            // wgpu's two-halves id encoding replaced the port's in both modules.
+            assert!(ids.contains("alias PaneId=vec2<u32>;") && !ids.contains("alias PaneId=u32;"));
+            assert!(shade.contains("return t.x|(t.y<<16u);"));
             for (label, source) in [("ids", ids), ("shade", shade)] {
                 let module = naga::front::wgsl::parse_str(&source)
                     .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(&source)));
