@@ -65,7 +65,15 @@ exact one):
   does, and keep a two-frame history that the same changes invalidate.
 - The radiance cache (GI) and traced reflections.
 - Temporal reconstruction at every render scale.
-- Transparent panes with their coloured sun shadows.
+- Transparent panes with their coloured sun shadows. A pane is shaded per pixel
+  (`shaders/pane_pixels.wgsl`): four 1x rasters, each offset to one of the 4x pattern's
+  sample positions, find the triangle under each sample (the glass entry's discards, the
+  depth one at the pixel centre). One compute dispatch over the pane's screen rectangle
+  then shades each distinct triangle once at the pixel centre, with `fs_transparent`'s own
+  body and explicit derivatives, and averages the samples against the colour behind.
+  That is what the four-sample glass raster gives, at a cost that follows covered pixels:
+  on Showcase on the M5, 0.65 ms where the raster took 8. `RENDERLAB_ARA_PANES=raster`
+  draws them with the glass raster.
 - Post: bloom, motion blur, depth of field, tone mapping and grading, with the colour
   LUT.
 - A scene without a sun.

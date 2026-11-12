@@ -230,9 +230,9 @@ impl Pass {
                 include_str!("../shaders/glass_material.wgsl"),
             )
             .into(),
-            Self::PaneId => crate::backend_ara::transparency_glass::pane_id_source(
-                include_str!("../shaders/glass_material.wgsl"),
-            )
+            Self::PaneId => crate::backend_ara::transparency_glass::pane_id_source(include_str!(
+                "../shaders/glass_material.wgsl"
+            ))
             .expect("embedded pane id composition")
             .into(),
             Self::PaneShade => crate::backend_ara::transparency_glass::pane_shade_source(

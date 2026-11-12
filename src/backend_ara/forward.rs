@@ -560,10 +560,19 @@ struct PanePixels {
     ids: [Texture; 4],
 }
 /// The four-sample pattern's positions in a pixel (the standard 4x one), in pixels.
-const PANE_SAMPLES: [[f32; 2]; 4] = [[0.375, 0.125], [0.875, 0.375], [0.125, 0.625], [0.625, 0.875]];
+const PANE_SAMPLES: [[f32; 2]; 4] = [
+    [0.375, 0.125],
+    [0.875, 0.375],
+    [0.125, 0.625],
+    [0.625, 0.875],
+];
 /// The pixels a pane's world bounds project to through `camera` at `size`, two pixels wider
 /// on each side; the whole frame when a corner lies behind the eye.
-fn pane_rect(bounds: (crate::Vec3, crate::Vec3), camera: &crate::Camera, size: [u32; 2]) -> [u32; 4] {
+fn pane_rect(
+    bounds: (crate::Vec3, crate::Vec3),
+    camera: &crate::Camera,
+    size: [u32; 2],
+) -> [u32; 4] {
     let m = camera.matrix(size[0], size[1]);
     let (lo, hi) = bounds;
     let (mut a, mut b) = ([f32::MAX; 2], [f32::MIN; 2]);
@@ -3735,7 +3744,13 @@ fn frame(
                         .collect::<Result<Vec<_>>>()?;
                     let packet = HeapBindings::for_program(gpu, id_program, &values)?;
                     packet.import(&mut graph);
-                    raster.record(&mut graph, &mut rec, &packet, &pane.geometry, &pixels.ids[k])?;
+                    raster.record(
+                        &mut graph,
+                        &mut rec,
+                        &packet,
+                        &pane.geometry,
+                        &pixels.ids[k],
+                    )?;
                     pane_packets.push(packet);
                 }
                 let values = shade_program

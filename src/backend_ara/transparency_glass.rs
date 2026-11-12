@@ -158,9 +158,9 @@ fn function_span(text: &str) -> Result<usize> {
 /// from the composed glass module, so it follows the shared entry as it changes.
 fn pane_fragment(glass: &str) -> Result<String> {
     let head = "@fragment fn fs_transparent(input:RasterInput, triangle:RasterTriangle, @builtin(front_facing) front:bool) -> @location(0) vec4<f32> {";
-    let start = glass
-        .find(head)
-        .ok_or_else(|| anyhow::anyhow!("the glass module's fs_transparent changed its signature"))?;
+    let start = glass.find(head).ok_or_else(|| {
+        anyhow::anyhow!("the glass module's fs_transparent changed its signature")
+    })?;
     let body = &glass[start + head.len()..];
     let mut depth = 1usize;
     let mut end = None;
@@ -284,7 +284,10 @@ pub struct PaneIds {
 }
 impl PaneIds {
     pub fn new(gpu: &mut GpuDevice, cache: &ShaderCache, program: &Program) -> Result<Self> {
-        ensure!(program.pass() == Pass::PaneId, "wrong pane id program family");
+        ensure!(
+            program.pass() == Pass::PaneId,
+            "wrong pane id program family"
+        );
         let mut state = mesh_state(Format::R32Uint);
         state.depth_format = None;
         state.depth_test = false;
