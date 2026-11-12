@@ -431,6 +431,10 @@ impl Cache {
             .collect())
     }
     /// The table, for shading (lighting binding 20) and for reading back.
+    /// The work words: this frame's counters first (`shared::COUNTER_WORDS`), then queues.
+    pub(crate) fn work(&self) -> &StorageBuffer {
+        &self.work
+    }
     pub(crate) fn table(&self) -> &StorageBuffer {
         &self.table
     }

@@ -3919,6 +3919,23 @@ fn frame(
         )?),
         None => None,
     };
+    // `RENDERLAB_GI_LOG`, as the wgpu engine writes it (src/engine/settings.rs
+    // `log_indirect`): this frame's cache counters, read back with the frame.
+    let gi_log = std::env::var_os("RENDERLAB_GI_LOG");
+    let counters_read = match gi.filter(|_| gi_log.is_some()) {
+        Some((cache, _)) => Some((
+            transfer::readback_buffer(
+                gpu,
+                &mut graph,
+                &mut rec,
+                cache.work().buffer,
+                0,
+                crate::renderer::gi_cache::COUNTER_WORDS * 4,
+            )?,
+            cache.table().len,
+        )),
+        None => None,
+    };
     let table_read = match gi.filter(|_| indirect.is_some_and(|i| i.read_table)) {
         Some((cache, _)) => Some(transfer::readback_buffer(
             gpu,
@@ -4385,7 +4402,8 @@ fn frame(
             || outgoing_read.is_some()
             || raw_read.is_some()
             || history_read.is_some()
-            || probe_read.is_some();
+            || probe_read.is_some()
+            || counters_read.is_some();
         gpu.begin_deferred_completion_on_current_queue()?;
         let submission = gpu.submit(rec.finish(), &[]);
         in_flight.push_back(gpu.end_deferred_completion()?);
@@ -4402,6 +4420,9 @@ fn frame(
         times.gpu = submitted.elapsed();
     }
     let finishing = std::time::Instant::now();
+    if let (Some((buffer, table_bytes)), Some(path)) = (counters_read, &gi_log) {
+        log_indirect(path, &gpu.read(buffer)?, table_bytes);
+    }
     let mut images = ForwardImages {
         times,
         hdr: read
@@ -4565,6 +4586,7 @@ fn frame(
         .chain(raw_read)
         .chain(history_read)
         .chain(probe_read)
+        .chain(counters_read.map(|(buffer, _)| buffer))
         .chain(read)
     {
         gpu.retire(Resource::Buffer(buffer))?;
@@ -4575,4 +4597,24 @@ fn frame(
     gpu.collect()?;
     images.times.finish = finishing.elapsed();
     Ok((images, left))
+}
+
+/// Appends one JSON line of this frame's cache counters to `path` (`RENDERLAB_GI_LOG`), with
+/// the wgpu engine's field names (src/engine/settings.rs `log_indirect`; src/gi_cache.rs
+/// `indirect_counters` for the word order). Measurement only: a log that cannot be written
+/// is not a rendering error. The port has no `relight_parts` or instance count.
+fn log_indirect(path: &std::ffi::OsStr, bytes: &[u8], table_bytes: u64) {
+    use std::io::Write;
+    let w: Vec<u32> = bytes.as_chunks::<4>().0.iter().map(|b| u32::from_le_bytes(*b)).collect();
+    if w.len() < 47 {
+        return;
+    }
+    let line = format!(
+        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"full_pixel\":{},\"table_bytes\":{}}}\n",
+        w[0], w[3], w[7], w[4], w[10], w[5], w[1], w[8], w[15], w[6], w[32], w[33], w[34], w[35],
+        w[36], w[42], w[43], w[38], w[44], w[45], w[46], table_bytes,
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
+    }
 }
