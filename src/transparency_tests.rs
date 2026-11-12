@@ -191,6 +191,30 @@ fn frame_block_packs_the_fields_where_the_shader_reads_them() {
 
 fn pre_tp1_standard() -> String {
     let mut s = crate::STANDARD_PROGRAM.to_owned();
+    // Undo RL#47's visibility-first light loop (pane transmission sampled only for lit
+    // samples): the frozen program samples the tinted light and multiplies visibility in.
+    for (from, to) in [
+        (
+            "        let light=light_sample_untinted(i,input);",
+            "        let light=light_sample(i,input);",
+        ),
+        (
+            "        let visibility=light_visibility(input,light);
+        // An unlit sample adds an exact zero (exposed_product keeps zeros), so it skips the
+        // panes' transmission lookup and the BRDF.
+        if visibility==0.0 { continue; }
+        let attenuation=light.attenuation*visibility;",
+            "        let attenuation=light.attenuation*light_visibility(input,light);",
+        ),
+        (
+            "        let intensity=light.intensity*light_transmission(light,input);
+        exposed=min(exposed+exposed_product(intensity,response*attenuation),vec3<f32>(65504.0));",
+            "        exposed=min(exposed+exposed_product(light.intensity,response*attenuation),vec3<f32>(65504.0));",
+        ),
+    ] {
+        assert_eq!(s.matches(from).count(), 1, "{from}");
+        s = s.replace(from, to);
+    }
     // Undo P-LTS's later exact-zero work rejection as well: this oracle must keep
     // testing the frozen pre-TP1 program, rather than changing its expected digest.
     let start = s
