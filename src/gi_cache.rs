@@ -473,6 +473,9 @@ pub struct IndirectStats {
     pub near_bytes: u64,
     /// Instances whose transform matched a cooked near field in the last software frame.
     pub near_instances: u32,
+    /// Software-ray instances (U-RTVIS): records the GI cache's rays may visit, the merged
+    /// near-field world counting as one. Each ray tested every one before the top level.
+    pub instances: u32,
     /// Frames that ran the cache passes.
     pub frames: u64,
     /// The last such frame traced software rays.
@@ -2798,6 +2801,15 @@ impl Renderer {
             let r = gi_bvh::HEADER_WORDS + i * gi_bvh::INSTANCE_WORDS + 24;
             head[r..r + 3].copy_from_slice(words);
         }
+        // U-RTVIS: the top level over the records (rebuilt only when they change).
+        crate::instance_bvh::place(
+            &mut head,
+            gi_bvh::HEADER_WORDS,
+            gi_bvh::INSTANCE_WORDS,
+            records.len(),
+            &p.head,
+        );
+        self.gi.stats.instances = records.len() as u32;
         if p.head != head {
             let raw: Vec<u8> = head.iter().flat_map(|w| w.to_le_bytes()).collect();
             self.queue.write_buffer(&p.buffer, 0, &raw);
