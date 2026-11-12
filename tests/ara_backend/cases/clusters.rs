@@ -27,12 +27,14 @@ fn packed_light_clusters_native_replay_against_cpu() -> Result<()> {
             candela: [1.; 3],
             range: Some(3.),
             source_radius: 0.,
+            cast_shadows: None,
         },
         Light::Point {
             position: Vec3::new(100., 100., 100.),
             candela: [1.; 3],
             range: Some(1.),
             source_radius: 0.,
+            cast_shadows: None,
         },
         Light::Spot {
             position: Vec3::new(1., 2., 0.),
@@ -42,6 +44,7 @@ fn packed_light_clusters_native_replay_against_cpu() -> Result<()> {
             inner: 0.1,
             outer: 0.3,
             source_radius: 0.,
+            cast_shadows: None,
         },
         Light::Spot {
             position: Vec3::new(-3., 1., -4.),
@@ -51,12 +54,14 @@ fn packed_light_clusters_native_replay_against_cpu() -> Result<()> {
             inner: 0.3,
             outer: 1.0,
             source_radius: 0.,
+            cast_shadows: None,
         },
         Light::Point {
             position: Vec3::ZERO,
             candela: [1.; 3],
             range: None,
             source_radius: 0.,
+            cast_shadows: None,
         },
     ];
     let overflow = (0..133)

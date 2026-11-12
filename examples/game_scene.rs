@@ -897,6 +897,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ],
                 range: Some(14.0),
                 source_radius: 0.12,
+                cast_shadows: None,
             },
             Light::Spot {
                 position: post_lamp - Vec3::new(0.0, 0.15, 0.0),
@@ -910,6 +911,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 inner: 0.3,
                 outer: 0.6,
                 source_radius: 0.1,
+                cast_shadows: None,
             },
             Light::Point {
                 position: flame + Vec3::new(0.0, 0.3, 0.0) + fire_offset,
@@ -920,6 +922,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ],
                 range: Some(10.0),
                 source_radius: 0.25,
+                cast_shadows: None,
             },
         ];
         if args.night_lanterns {
@@ -928,6 +931,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 candela: [22.0, 12.0, 4.0],
                 range: Some(4.0),
                 source_radius: 0.06,
+                cast_shadows: None,
             }));
         }
         lights

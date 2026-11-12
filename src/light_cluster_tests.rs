@@ -57,6 +57,7 @@ fn night_lights(count: usize) -> Vec<Light> {
                 inner: 0.25,
                 outer: 0.55,
                 source_radius: 0.0,
+                cast_shadows: None,
             }
         } else {
             Light::Point {
@@ -64,6 +65,7 @@ fn night_lights(count: usize) -> Vec<Light> {
                 candela: rgb.map(|c| c * candela),
                 range,
                 source_radius: 0.0,
+                cast_shadows: None,
             }
         });
     }
@@ -91,6 +93,7 @@ fn night_lights(count: usize) -> Vec<Light> {
                 inner: 0.35,
                 outer: 0.7,
                 source_radius: 0.0,
+                cast_shadows: None,
             }
         } else {
             Light::Point {
@@ -98,6 +101,7 @@ fn night_lights(count: usize) -> Vec<Light> {
                 candela: rgb.map(|c| c * 60.0),
                 range: Some(7.0),
                 source_radius: 0.0,
+                cast_shadows: None,
             }
         });
     }
@@ -184,6 +188,7 @@ fn shadowed_lights_rank_by_screen_influence_and_keep_their_slots() {
         candela: [candela; 3],
         range: Some(5.0),
         source_radius: 0.0,
+        cast_shadows: None,
     };
     let lights = vec![
         Light::Directional {
@@ -213,6 +218,86 @@ fn shadowed_lights_rank_by_screen_influence_and_keep_their_slots() {
     );
     assert!(lc::select(&lights, vp, eye, &[], 0).is_empty());
     assert_eq!(lc::matrices(&lights[1], 0.02).len(), 6);
+}
+
+/// The RT ray budget (`LocalShadows::rays`): under it every light traces at full strength,
+/// exactly the words of no budget; over it the ranking chooses, a first frame at full
+/// strength, and a light that loses its place fades out over eight frames before the one
+/// that took it fades in. `cast_shadows` overrides the ranking both ways.
+#[test]
+fn the_ray_budget_ranks_fades_and_honours_each_lights_choice() {
+    let camera = test_camera();
+    let vp = camera.matrix(1920, 1080);
+    let eye = Vec3::new(5.2, 3.4, 6.2);
+    let point = |x: f32, candela: f32, cast_shadows: Option<bool>| Light::Point {
+        position: Vec3::new(x, 1.0, 0.0),
+        candela: [candela; 3],
+        range: Some(5.0),
+        source_radius: 0.0,
+        cast_shadows,
+    };
+    let sun = Light::Directional {
+        travel: -Vec3::Y,
+        lux: [1.0; 3],
+    };
+    let settings = |rays: u32| LocalShadows {
+        rays,
+        ..LocalShadows::default()
+    };
+    // Under the budget: every point light's word is its index plus one, the sun none.
+    let few = vec![sun, point(0.0, 100.0, None), point(1.0, 50.0, None)];
+    let mut selection = lc::RaySelection::default();
+    assert_eq!(selection.words(&few, vp, eye, &settings(8)), [0, 2, 3]);
+    // Over it: the two brightest at full strength on the first frame.
+    let mut lights = vec![
+        sun,
+        point(0.0, 100.0, None),
+        point(1.0, 50.0, None),
+        point(-1.0, 80.0, None),
+    ];
+    let mut selection = lc::RaySelection::default();
+    assert_eq!(
+        selection.words(&lights, vp, eye, &settings(2)),
+        [0, 2, 0, 4]
+    );
+    // Light 2 outshines light 3: 3 fades out over eight frames, its slot is then 2's,
+    // and 2 fades in over the next eight; nothing pops and 1 never changes.
+    lights[2] = point(1.0, 400.0, None);
+    let mut faded = vec![];
+    for _ in 0..17 {
+        let words = selection.words(&lights, vp, eye, &settings(2));
+        assert_eq!(words[1], 2);
+        faded.push((
+            words[2] >> 24,
+            words[2] & 0xffff,
+            words[3] >> 24,
+            words[3] & 0xffff,
+        ));
+    }
+    assert_eq!(faded[0], (0, 0, 223, 4), "3 starts fading at 7/8");
+    assert_eq!(faded[6], (0, 0, 32, 4));
+    assert_eq!(faded[7].2, 0, "3 is out after eight frames");
+    assert_eq!(faded[7].3, 0);
+    assert_eq!(faded[8], (32, 3, 0, 0), "2 fades in once 3's slot is free");
+    assert_eq!(faded[15], (0, 3, 0, 0), "2 at full strength");
+    // `cast_shadows`: Some(false) never traces, Some(true) always does, past the budget.
+    let chosen = vec![
+        sun,
+        point(0.0, 1000.0, Some(false)),
+        point(1.0, 1.0, Some(true)),
+        point(-1.0, 80.0, None),
+        point(2.0, 70.0, None),
+    ];
+    let mut selection = lc::RaySelection::default();
+    let words = selection.words(&chosen, vp, eye, &settings(1));
+    assert_eq!(
+        words,
+        [0, 0, 3, 0, 0],
+        "the forced light takes the one place"
+    );
+    let words = selection.words(&chosen, vp, eye, &settings(2));
+    assert_eq!(words[1], 0);
+    assert_eq!(words[2], 3);
 }
 
 #[test]
@@ -251,6 +336,7 @@ fn screen_influence_prioritizes_large_pools_at_equal_camera_illuminance() {
         candela: [20.0; 3],
         range: Some(range),
         source_radius: 0.0,
+        cast_shadows: None,
     };
     let lights = [point(0.1), point(3.0)];
     assert_eq!(
@@ -1163,6 +1249,7 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
                     inner: 0.5,
                     outer: 0.8,
                     source_radius: radius,
+                    cast_shadows: None,
                 }
             } else {
                 Light::Point {
@@ -1170,6 +1257,7 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
                     candela: [10.0; 3],
                     range: Some(10.0),
                     source_radius: radius,
+                    cast_shadows: None,
                 }
             };
             r.set_lighting_and_shadows(
@@ -1266,6 +1354,7 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
                 candela: [10.0; 3],
                 range: Some(10.0),
                 source_radius: 0.08,
+                cast_shadows: None,
             },
             64,
         ));
@@ -1348,12 +1437,14 @@ fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {
                         candela: [if swapped { 1.0 } else { 100.0 }; 3],
                         range: Some(10.0),
                         source_radius: 0.0,
+                        cast_shadows: None,
                     },
                     Light::Point {
                         position: Vec3::new(-1.0, 0.6, 3.0),
                         candela: [if swapped { 100.0 } else { 1.0 }; 3],
                         range: Some(10.0),
                         source_radius: 0.0,
+                        cast_shadows: None,
                     },
                 ]
             };

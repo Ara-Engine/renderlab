@@ -80,6 +80,7 @@ impl Fixture {
                         candela: [100.; 3],
                         range: Some(6.),
                         source_radius: 0.0,
+                        cast_shadows: None,
                     },
                     Light::Spot {
                         position: Vec3::new(2., 3., 2.),
@@ -89,6 +90,7 @@ impl Fixture {
                         inner: 0.25,
                         outer: 0.5,
                         source_radius: 0.0,
+                        cast_shadows: None,
                     },
                 ],
                 environment: [4., 5., 8.],

@@ -112,6 +112,7 @@ pub fn parse_with_shadows(source: &str) -> Result<(Lighting, Shadows), serde_jso
                     candela,
                     range,
                     source_radius,
+                    cast_shadows: None,
                 },
                 Source::Spot {
                     position,
@@ -127,6 +128,7 @@ pub fn parse_with_shadows(source: &str) -> Result<(Lighting, Shadows), serde_jso
                     candela,
                     range,
                     source_radius,
+                    cast_shadows: None,
                     inner,
                     outer,
                 },

@@ -77,6 +77,7 @@ fn only_directional_records_scale() {
                 candela: [1.0; 3],
                 range: None,
                 source_radius: 0.0,
+                cast_shadows: None,
             },
         ],
         ..Default::default()
