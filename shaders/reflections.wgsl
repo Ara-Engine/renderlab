@@ -61,7 +61,11 @@ var<private> rl_footprint:f32;
 // modules replace the block with shaders/reflections_lobe.wgsl while RENDERLAB_RL_PASS=1.
 // ---- rl pass stubs ----
 const RL_PASS:bool=false;
-fn rl_lobe_store(pixel:vec2<u32>,origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:vec3<f32>,alpha:f32,width:f32,spread:f32) {}
+// The deferred composite (RENDERLAB_RL_PASS=1 with RENDERLAB_RL_DEFERRED=1): glossy receivers leave
+// their lobe to rl_trace and the composite adds w x reflectance x the traced estimate after
+// shading; `specular_incident` keeps w with rgb 0 (src/reflection_pass.rs sets it per frame).
+fn rl_composite()->bool { return false; }
+fn rl_lobe_store(pixel:vec2<u32>,origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:vec3<f32>,alpha:f32,width:f32,spread:f32,count:u32) {}
 // ---- end of rl pass stubs ----
 // One closest-hit reflection ray: the hit record (x 0: a miss) and its distance (-1 for a miss).
 // Software heads trace the same ray in software (src/program.rs SOFTWARE_REFLECTION_SEAMS).
@@ -287,8 +291,12 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let seed=rl_hash((pixel.x*0x9e3779b1u)^rl_hash(pixel.y^(frame*0x85ebca6bu)));
     let rotation=f32(seed>>8u)*(1.0/16777216.0);
     let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
-    // The reflection pass's lobe (RL_PASS): glossy receivers only; mirrors stay inline.
-    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}
+    // The reflection pass's lobe (RL_PASS): glossy receivers only; mirrors stay inline. With the
+    // composite, the glossy estimate comes after shading: rgb 0 here, the traced fraction kept.
+    if RL_PASS && !mirror {
+        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);
+        if rl_composite() {rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;}
+    }
     // Reflection history: a trusted glossy receiver traces one stratum, rotating with the
     // frame from a per-pixel offset, and the full set only when that stratum disagrees.
     var hist=vec4<f32>(0.0);

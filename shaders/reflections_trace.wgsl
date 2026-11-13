@@ -30,7 +30,7 @@ var<workgroup> rl_group_base:u32;
     if inside {
         textureStore(rl_samples,vec2<i32>(id.xy),vec4<f32>(0.0));
         textureStore(rl_ray_distance,vec2<i32>(id.xy),vec4<f32>(-2.0));
-        let tag=f32(rl_pass_frame.x%2048u);
+        let tag=rl_pass_frame.x%2048u;
         let start=(rl_pass_frame.x+rl_hash(id.x*0x9e3779b1u^rl_hash(id.y)))&3u;
         var found=false;
         for(var i=0u;i<4u && !found;i+=1u) {
@@ -38,8 +38,8 @@ var<workgroup> rl_group_base:u32;
             let p=id.xy*2u+vec2<u32>(k&1u,k>>1u);
             if any(p>=size) {continue;}
             let b=textureLoad(rl_lobe_b,p,0);
-            let at=unpack2x16float(b.w);
-            if at.y!=tag || !(at.x>0.0) {continue;}
+            let at=vec2<f32>(unpack2x16float(b.w&0xffffu).x,0.0);
+            if ((b.w>>16u)&0x7ffu)!=tag || !(at.x>0.0) {continue;}
             found=true;pixel=p;
             let a=textureLoad(rl_lobe_a,p,0);
             origin=a.xyz;
@@ -90,10 +90,88 @@ var<workgroup> rl_group_base:u32;
         rl_hits.records[at+2u]=vec4<u32>(bitcast<u32>(origin.y),bitcast<u32>(origin.z),rl_oct_encode(d),pack2x16float(cone));
     }
 }
+// ---- the deferred composite's trace (RENDERLAB_RL_DEFERRED=1): every glossy pixel's full set ----
+// One invocation per pixel: a glossy pixel whose lobe this frame wrote takes a contiguous range of
+// sample slots for its strata (L's count: today's faded set, directions and cones), records it in
+// the range image, clears its slots, writes a miss's sky into its slot and appends a hit's record
+// (slot = its slot) for reflection_hits. reflections_composite.wgsl sums the range.
+// x glossy pixels, y slots taken, z pixels without room, w 0 (the probe reads them).
+struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, overflow:atomic<u32>, unused:u32 };
+@group(0) @binding(60) var<storage,read_write> rl_trace_stats:RlTraceStats;
+// Per pixel: its first slot and its slot count (0: no traced reflection).
+@group(0) @binding(61) var rl_ranges:texture_storage_2d<rg32uint,write>;
+var<workgroup> rl_group_slots:atomic<u32>;
+var<workgroup> rl_group_first:u32;
+@compute @workgroup_size(8,8) fn rl_trace_pixels(@builtin(global_invocation_id) id:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    if lane==0u {atomicStore(&rl_group_slots,0u);}
+    workgroupBarrier();
+    let size=textureDimensions(rl_lobe_b);
+    let inside=all(id.xy<size);
+    var count=0u;var b=vec4<u32>(0u);
+    if inside {
+        b=textureLoad(rl_lobe_b,id.xy,0);
+        let alpha=unpack2x16float(b.w&0xffffu).x;
+        if ((b.w>>16u)&0x7ffu)==rl_pass_frame.x%2048u && alpha>0.0 {count=b.w>>27u;}
+    }
+    // One atomic per workgroup on the frame's slot count.
+    let offset=atomicAdd(&rl_group_slots,count);
+    workgroupBarrier();
+    if lane==0u {
+        let n=atomicLoad(&rl_group_slots);
+        rl_group_first=select(0u,atomicAdd(&rl_trace_stats.slots,n),n>0u);
+    }
+    let first=workgroupUniformLoad(&rl_group_first)+offset;
+    let samples=textureDimensions(rl_samples);
+    let capacity=samples.x*samples.y;
+    if count>0u && first+count>capacity {atomicAdd(&rl_trace_stats.overflow,1u);count=0u;}
+    if !inside {return;}
+    textureStore(rl_ranges,vec2<i32>(id.xy),vec4<u32>(first,count,0u,0u));
+    if count==0u {return;}
+    atomicAdd(&rl_trace_stats.pixels,1u);
+    let p=id.xy;
+    let a=textureLoad(rl_lobe_a,p,0);
+    let origin=a.xyz;
+    let ws=unpack2x16float(bitcast<u32>(a.w));
+    let n=rl_oct_decode(b.x);let v=rl_oct_decode(b.y);let side=rl_oct_decode(b.z);
+    let alpha=unpack2x16float(b.w&0xffffu).x;
+    let cone_alpha=alpha*inverseSqrt(f32(count));
+    let cone=vec2<f32>(ws.x,ws.y+2.0*cone_alpha);
+    // The inline loop's directions: the frame's radial offset and the pixel's rotation.
+    let frame=primary_frame.sided.y;
+    let seed=rl_hash((p.x*0x9e3779b1u)^rl_hash(p.y^(frame*0x85ebca6bu)));
+    let rotation=f32(seed>>8u)*(1.0/16777216.0);
+    let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
+    let basis=rl_basis(n);
+    let local_v=vec3<f32>(dot(v,basis[0]),dot(v,basis[1]),dot(v,basis[2]));
+    let width=samples.x;
+    let epsilon=max(1e-4*length(origin),1e-5);
+    for(var k=0u;k<count;k+=1u) {
+        let slot=first+k;
+        let at=vec2<i32>(vec2<u32>(slot%width,slot/width));
+        textureStore(rl_samples,at,vec4<f32>(0.0));
+        let u=vec2<f32>((f32(k)+radial)/f32(count),fract(rotation+f32(k)*0.6180339887));
+        let d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
+        if dot(d,side)<=0.0 {continue;}
+        let traced=rl_cast(origin,d,epsilon);
+        if traced.record.x==0u {
+            textureStore(rl_samples,at,vec4<f32>(rl_sky(d,cone_alpha),1.0));
+            continue;
+        }
+        let index=atomicAdd(&rl_hits.count,1u);
+        if index>=(arrayLength(&rl_hits.records)/3u) {continue;}
+        let r=index*3u;
+        let word2=k|(count<<8u)|(pack2x16float(vec2<f32>(alpha,0.0))<<16u);
+        rl_hits.records[r]=vec4<u32>(p.x|(p.y<<16u),slot,word2,traced.record.x);
+        rl_hits.records[r+1u]=vec4<u32>(traced.record.y,traced.record.z,traced.record.w,bitcast<u32>(origin.x));
+        rl_hits.records[r+2u]=vec4<u32>(bitcast<u32>(origin.y),bitcast<u32>(origin.z),rl_oct_encode(d),pack2x16float(cone));
+    }
+}
 // reflection_hits' indirect arguments from H's count: RL_HIT_GROUP records a group, rows of
 // at most 65535 groups (wgpu skips larger dimensions).
 @compute @workgroup_size(1) fn rl_hit_args() {
-    let groups=(atomicLoad(&rl_hits.count)+RL_HIT_GROUP-1u)/RL_HIT_GROUP;
+    let written=min(atomicLoad(&rl_hits.count),arrayLength(&rl_hits.records)/3u);
+    atomicStore(&rl_hits.count,written);
+    let groups=(written+RL_HIT_GROUP-1u)/RL_HIT_GROUP;
     rl_hits.args[0]=min(groups,65535u);
     rl_hits.args[1]=(groups+65534u)/65535u;
     rl_hits.args[2]=1u;

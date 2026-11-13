@@ -3470,6 +3470,9 @@ impl Renderer {
                     self.encode_reflection_trace(&mut encoder, shading);
                     mark(&mut encoder, "reflection.hits");
                     self.encode_reflection_hits(&mut encoder, shading);
+                    // U-RTVIS: the deferred composite (RENDERLAB_RL_DEFERRED=1 with the pass).
+                    mark(&mut encoder, "reflection.composite");
+                    self.encode_reflection_composite(&mut encoder, shading);
                 }
             }
             if reconstructed {

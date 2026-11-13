@@ -12,6 +12,14 @@ pub(super) const LOBE_A: u32 = 56;
 pub(super) const LOBE_B: u32 = 57;
 pub(super) const PASS_FRAME: u32 = 58;
 const DISTANCE: u32 = 59;
+/// The deferred composite's trace (rl_trace_pixels): its counters and per-pixel slot ranges.
+const STATS: u32 = 60;
+const RANGES: u32 = 61;
+/// With the composite, R holds every glossy pixel's strata: this many slots a row, and at most
+/// this many slots (two a pixel at 1080p; a frame needing more drops whole pixels, counted).
+const SAMPLE_ROW: u32 = 2048;
+const SAMPLE_SLOTS_MAX: u64 = 1 << 22;
+const RECORDS_MAX: u64 = 1 << 21;
 pub(super) const HITS: u32 = 64;
 pub(super) const SAMPLES: u32 = 65;
 /// H: the count and three dispatch arguments, then 48-byte records.
@@ -73,6 +81,8 @@ impl TraceAbi {
                 HITS_HEADER + RECORD_BYTES,
             ),
             image(SAMPLES, F::Rgba16Float),
+            buffer(STATS, wgpu::BufferBindingType::Storage { read_only: false }, 16),
+            image(RANGES, F::Rg32Uint),
         ];
         entries.push(if ray_query {
             scene(2)
@@ -108,6 +118,10 @@ pub(in crate::renderer) struct PassTargets {
     pub samples: Depth,
     pub distance: Depth,
     pub slots: [u32; 2],
+    /// The composite's trace: per-pixel slot ranges, its counters, and the composite's uniform.
+    pub ranges: Depth,
+    pub stats: Buffer,
+    pub composite: Buffer,
 }
 
 /// `rl_trace` and `rl_hit_args`, compiled from a head's standard-program traced module.
@@ -115,6 +129,9 @@ pub(in crate::renderer) struct PassTargets {
 pub(super) struct TracePipelines {
     trace: Owned<wgpu::ComputePipeline>,
     args: Owned<wgpu::ComputePipeline>,
+    pixels: Owned<wgpu::ComputePipeline>,
+    /// The deferred composite: its group layout and additive render pipeline.
+    composite: Option<(Owned<wgpu::BindGroupLayout>, Owned<wgpu::RenderPipeline>)>,
 }
 
 impl Renderer {
@@ -150,6 +167,19 @@ impl Renderer {
             }
         };
         let slots = [size.width.div_ceil(2), size.height.div_ceil(2)];
+        // The composite traces every glossy pixel's set: R and H sized for that, not one a quad.
+        let composite = crate::program::rl_deferred();
+        let full = (2 * u64::from(size.width) * u64::from(size.height)).min(SAMPLE_SLOTS_MAX);
+        let samples = if composite {
+            [SAMPLE_ROW, (full as u32).div_ceil(SAMPLE_ROW)]
+        } else {
+            slots
+        };
+        let records = if composite {
+            full.min(RECORDS_MAX)
+        } else {
+            u64::from(slots[0]) * u64::from(slots[1])
+        };
         PassTargets {
             lobe_a: target("reflection lobe A", size.width, size.height, F::Rgba32Float),
             lobe_b: target("reflection lobe B", size.width, size.height, F::Rgba32Uint),
@@ -162,15 +192,28 @@ impl Renderer {
             hits: Buffer::new(
                 self,
                 "reflection hit records",
-                HITS_HEADER + u64::from(slots[0]) * u64::from(slots[1]) * RECORD_BYTES,
+                HITS_HEADER + records * RECORD_BYTES,
                 wgpu::BufferUsages::STORAGE
                     | wgpu::BufferUsages::INDIRECT
                     | wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC,
             ),
-            samples: target("reflection samples", slots[0], slots[1], F::Rgba16Float),
+            samples: target("reflection samples", samples[0], samples[1], F::Rgba16Float),
             distance: target("reflection ray distance", slots[0], slots[1], F::R32Float),
             slots,
+            ranges: target("reflection sample ranges", size.width, size.height, F::Rg32Uint),
+            stats: Buffer::new(
+                self,
+                "reflection trace counters",
+                16,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            ),
+            composite: Buffer::new(
+                self,
+                "reflection composite frame",
+                16,
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            ),
         }
     }
 
@@ -191,6 +234,8 @@ impl Renderer {
             (DISTANCE, R::TextureView(&pass.distance.view)),
             (HITS, pass.hits.value.as_entire_binding()),
             (SAMPLES, R::TextureView(&pass.samples.view)),
+            (STATS, pass.stats.value.as_entire_binding()),
+            (RANGES, R::TextureView(&pass.ranges.view)),
             scene,
         ];
         let entries: Vec<_> = entries
@@ -241,9 +286,12 @@ impl Renderer {
                 ResourceKind::ComputePipeline,
             )
         };
+        let composite = crate::program::rl_deferred().then(|| self.rl_composite_kit());
         let pipelines = TracePipelines {
             trace: pipeline("rl_trace"),
             args: pipeline("rl_hit_args"),
+            pixels: pipeline("rl_trace_pixels"),
+            composite,
         };
         if let Some(error) = scopes.finish() {
             return Err(Error::Shader(format!("reflection trace: {error}")));
@@ -267,6 +315,7 @@ impl Renderer {
         let g = state.geometry.as_ref().unwrap();
         self.rl_probe(encoder, pass);
         encoder.clear_buffer(&pass.hits.value, 0, Some(HITS_HEADER));
+        encoder.clear_buffer(&pass.stats.value, 0, None);
         let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reflection trace"),
             timestamp_writes: None,
@@ -274,12 +323,19 @@ impl Renderer {
         compute.set_bind_group(0, &**group, &[]);
         compute.set_bind_group(1, &*g.arrays, &[]);
         compute.set_bind_group(3, self.lighting.bind(), &[]);
-        compute.set_pipeline(&pipelines.trace);
-        compute.dispatch_workgroups(
-            pass.slots[0].div_ceil(SLOT_GROUP[0]),
-            pass.slots[1].div_ceil(SLOT_GROUP[1]),
-            1,
-        );
+        if pipelines.composite.is_some() {
+            // The composite: every glossy pixel's set, one invocation a pixel.
+            let size = pass.lobe_b.texture.size();
+            compute.set_pipeline(&pipelines.pixels);
+            compute.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+        } else {
+            compute.set_pipeline(&pipelines.trace);
+            compute.dispatch_workgroups(
+                pass.slots[0].div_ceil(SLOT_GROUP[0]),
+                pass.slots[1].div_ceil(SLOT_GROUP[1]),
+                1,
+            );
+        }
         compute.set_pipeline(&pipelines.args);
         compute.dispatch_workgroups(1, 1, 1);
     }
@@ -296,9 +352,17 @@ impl Renderer {
         else {
             return;
         };
-        let words = [self.frames as u32, pass.slots[0], 1, 0];
+        let composite = u32::from(crate::program::rl_deferred());
+        let words = [self.frames as u32, pass.slots[0], 1, composite];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
         self.queue.write_buffer(&pass.frame.value, 0, &bytes);
+        if composite != 0 {
+            // The lone-stratum bound and the strata it needs (reflections.wgsl RL_GLOSSY_RAYS).
+            let lone = self.view.reflections.frame_words()[2];
+            let words = [lone, 4.0, 0.0, 0.0];
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+            self.queue.write_buffer(&pass.composite.value, 0, &bytes);
+        }
     }
 }
 
@@ -476,11 +540,15 @@ impl Renderer {
                 mapped_at_creation: false,
             });
             encoder.copy_buffer_to_buffer(&pass.hits.value, 0, &staging, 0, HITS_HEADER);
+            // The composite's trace counters (glossy pixels, slots, pixels without room).
+            encoder.copy_buffer_to_buffer(&pass.stats.value, 0, &staging, 16, 16);
+            let composite = crate::program::rl_deferred();
             let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
-            for (texture, offset, row) in [
+            // With the composite R is a slot list, not a quad image: only the counters are read.
+            for (texture, offset, row) in if composite { vec![] } else { vec![
                 (&pass.samples.texture, 256, rows[0]),
                 (&pass.distance.texture, 256 + rows[0] * u64::from(h), rows[1]),
-            ] {
+            ] } {
                 encoder.copy_texture_to_buffer(
                     texture.as_image_copy(),
                     wgpu::TexelCopyBufferInfo {
@@ -513,6 +581,19 @@ impl Renderer {
             return;
         };
         let count = u32::from_ne_bytes(data[0..4].try_into().unwrap());
+        let word = |i: usize| u32::from_ne_bytes(data[16 + 4 * i..20 + 4 * i].try_into().unwrap());
+        let (pixels, slots, overflow) = (word(0), word(1), word(2));
+        if crate::program::rl_deferred() {
+            // The strata counter: trace slots (strata) and hit records per glossy pixel.
+            let per = |n: u32| if pixels > 0 { f64::from(n) / f64::from(pixels) } else { 0.0 };
+            let json = format!(
+                "{{\"frame\":{PROBE_FRAME},\"glossy_pixels\":{pixels},\"slots\":{slots},\"records\":{count},\"overflow_pixels\":{overflow},\"strata_per_glossy_pixel\":{:.3},\"records_per_glossy_pixel\":{:.3}}}\n",
+                per(slots),
+                per(count)
+            );
+            let _ = std::fs::write(&p.path, json);
+            return;
+        }
         let [w, h] = p.slots;
         let (mut hits, mut written, mut lit, mut misses, mut sky) = (0u64, 0u64, 0u64, 0u64, 0u64);
         for y in 0..u64::from(h) {
@@ -548,5 +629,141 @@ impl Renderer {
             return;
         };
         encoder.copy_buffer_to_buffer(&t.rl_history.phases.value, 16 * phase, &t.rl_history.phase.value, 0, 16);
+    }
+}
+
+// ---- the deferred reflection composite (RENDERLAB_RL_DEFERRED=1 with RENDERLAB_RL_PASS=1) ----
+impl Renderer {
+    /// The composite's group layout and its additive render pipeline into the HDR target.
+    fn rl_composite_kit(&self) -> (Owned<wgpu::BindGroupLayout>, Owned<wgpu::RenderPipeline>) {
+        let texture = |binding, sample_type| wgpu::BindGroupLayoutEntry {
+            binding,
+            visibility: wgpu::ShaderStages::FRAGMENT,
+            ty: wgpu::BindingType::Texture {
+                sample_type,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        };
+        let group = self.ledger.own(
+            self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("reflection composite"),
+                entries: &[
+                    texture(0, wgpu::TextureSampleType::Uint),
+                    texture(1, wgpu::TextureSampleType::Float { filterable: false }),
+                    texture(2, wgpu::TextureSampleType::Float { filterable: false }),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(16),
+                        },
+                        count: None,
+                    },
+                ],
+            }),
+            ResourceKind::BindGroupLayout,
+        );
+        let layout = self.ledger.own(
+            self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("reflection composite ABI"),
+                bind_group_layouts: &[Some(&group)],
+                immediate_size: 0,
+            }),
+            ResourceKind::PipelineLayout,
+        );
+        let module = self.ledger.own(
+            self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("reflection composite"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/reflections_composite.wgsl").into()),
+            }),
+            ResourceKind::ShaderModule,
+        );
+        let pipeline = self.ledger.own(
+            self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("reflection composite"),
+                layout: Some(&layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("rl_composite_vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("rl_composite_fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        // Colour adds; alpha (TR1's view hint) stays.
+                        blend: Some(wgpu::BlendState {
+                            color: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::One,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                            alpha: wgpu::BlendComponent {
+                                src_factor: wgpu::BlendFactor::Zero,
+                                dst_factor: wgpu::BlendFactor::One,
+                                operation: wgpu::BlendOperation::Add,
+                            },
+                        }),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            }),
+            ResourceKind::RenderPipeline,
+        );
+        (group, pipeline)
+    }
+
+    /// The composite after reflection_hits: each glossy pixel's strata mean, times its
+    /// reflectance and w, added into the HDR target before TR1.
+    pub(crate) fn encode_reflection_composite(&self, encoder: &mut wgpu::CommandEncoder, shading: Shading) {
+        let Some(state) = self.view.primary.as_ref() else {
+            return;
+        };
+        let (Some(pipelines), Some(t)) = (state.rl_pipelines[shading as usize].as_ref(), state.targets.as_ref()) else {
+            return;
+        };
+        let (Some((layout, pipeline)), Some(pass), Some(deferred), Some(hdr)) =
+            (pipelines.composite.as_ref(), t.rl_pass.as_ref(), t.deferred.as_ref(), self.view.hdr.as_ref())
+        else {
+            return;
+        };
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("reflection composite"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&pass.ranges.view) },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&pass.samples.view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&deferred[0].view) },
+                wgpu::BindGroupEntry { binding: 3, resource: pass.composite.value.as_entire_binding() },
+            ],
+        });
+        let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("reflection composite"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &hdr.resolved.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        render.set_pipeline(pipeline);
+        render.set_bind_group(0, &group, &[]);
+        render.draw(0..3, 0..1);
     }
 }

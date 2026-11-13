@@ -81,6 +81,13 @@ fn large_buffers(adapter: &wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
         max_buffer_size: adapter.max_buffer_size,
         max_storage_buffer_binding_size: adapter.max_storage_buffer_binding_size,
+        // U-RTVIS: the deferred reflection composite's shading stage writes the HDR target, the
+        // reflection history, its lobe output (2), the hit samples and RL#79's two side outputs:
+        // more storage textures than the 5 the paths ask for. Take what the adapter allows, capped
+        // (the RTX allows far more); visibility_limits and traced_limits still raise to their own
+        // floors where an adapter reports less.
+        max_storage_textures_per_shader_stage: adapter.max_storage_textures_per_shader_stage.min(16),
+        max_storage_buffers_per_shader_stage: adapter.max_storage_buffers_per_shader_stage.min(24),
         ..Default::default()
     }
 }
