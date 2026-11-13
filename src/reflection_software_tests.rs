@@ -500,14 +500,25 @@ fn the_reflection_pass_belongs_to_the_marked_renderer() {
         false,
     ));
     assert!(!off.source.contains("rl_composite") && !off.source.contains("RL_DEFERRED_PROGRAM"));
-    let module = naga::front::wgsl::parse_str(&on.source)
-        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on.source)));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on.source)));
+    // Mixed-program frames shade with MP1's list modules, whose program list (binding 38) once
+    // shared the glossy list's names: both compositions must validate.
+    let list = with_reflection_history(crate::program::compose_list(
+        &marked,
+        crate::STANDARD_PROGRAM,
+        Stage::Traced,
+        false,
+    ));
+    assert!(list.source.contains("rl_room_reserve(count,traced,lobe.weight)"));
+    for source in [&on.source, &list.source] {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    }
 }
 
 /// The regression the per-renderer default guards: a non-RT engine's renderer runs the pass and
