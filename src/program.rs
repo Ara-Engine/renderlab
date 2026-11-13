@@ -100,8 +100,12 @@ const SHADE_COUNT_SITES: [(&str, &str, bool); 6] = [
     ("        let c=gi_sample(world,level+1u,bin);\n", "        rl_sc_fill+=1u;\n", true),
     ("    let s2=gi_sample_refined(world,pick.lo,gi_second_bin(source));\n", "    rl_sc_fallback+=1u;\n", true),
 ];
-/// The traced entry's lit store: the pixel's counts go in after it (its `shade` has run).
-const SHADE_COUNT_STORE: &str = "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,id,size)));";
+/// The traced entry's lit store, before and after the entry's camera ray moved into the hint's
+/// arguments: the pixel's counts go in after it (its `shade` has run).
+const SHADE_COUNT_STORES: [&str; 2] = [
+    "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,id,size)));",
+    "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,view_ray)));",
+];
 /// `source` with the counts (`shade_count_on`): the sites and the API before the program
 /// (`late` false), the store's count after it (`late` true). Unchanged off, or where the
 /// module has no traced entry.
@@ -110,10 +114,13 @@ fn with_shade_counts(mut source: String, late: bool) -> String {
         return source;
     }
     if late {
-        if !source.contains("fn rl_shade_count()") || !source.contains(SHADE_COUNT_STORE) {
+        let Some(store) = SHADE_COUNT_STORES.iter().find(|s| source.contains(**s)) else {
+            return source;
+        };
+        if !source.contains("fn rl_shade_count()") {
             return source;
         }
-        return source.replacen(SHADE_COUNT_STORE, &format!("{SHADE_COUNT_STORE}rl_shade_count();"), 1);
+        return source.replacen(store, &format!("{store}rl_shade_count();"), 1);
     }
     for (site, count, before) in SHADE_COUNT_SITES {
         if source.matches(site).count() == 1 {
@@ -124,47 +131,152 @@ fn with_shade_counts(mut source: String, late: bool) -> String {
     source.push_str(SHADE_COUNT_API);
     source
 }
-/// `RENDERLAB_SHADE_CUT` (measurement only, off by default): a comma list of engine inputs
-/// whose function returns at once in every composed module, to split shading's fixed cost:
-/// `gi_lookup` (the receiver's cache lookup: the open environment instead), `es1` (no dominant
-/// environment lobes), `mq2` (the view hint is 1), `decals` (none project), `atmosphere`
-/// (surfaces leave unfogged). Each changes the picture; unset, nothing changes.
-fn shade_cuts(mut source: String, late: bool) -> String {
+/// `RENDERLAB_SHADE_CUT` (measurement only, off by default): a comma list of cuts, each an
+/// early return composed into every traced shading module (tiles and list, RT and non-RT, both
+/// backends), to split shading's fixed cost. Each changes the picture on purpose; unset,
+/// nothing changes. Engine inputs (the function returns at once):
+/// - `gi_lookup`: no cache lookup at the receiver (the open environment instead);
+/// - `es1`: no dominant environment lobes;
+/// - `env_specular`: `indirect_radiance` is zero (no environment or bounce specular);
+/// - `mq2`: the view hint is 1;
+/// - `decals`: none project;
+/// - `atmosphere`: surfaces leave unfogged.
+///
+/// Entry exits (the pixel stores a value that depends on everything computed so far, so that
+/// work stays, and returns): `exit_entry` before the hit record loads (dispatch, tile or list
+/// bookkeeping, one store); `exit_decode` after hit decode, vertex fetch, attribute
+/// interpolation and footprints; `exit_material` after the material record, the program's
+/// parameters (dropped by the compiler unless read), decals and the receiver. Differences
+/// between successive exits split the floor; the full module is the last step.
+fn shade_cuts(source: String, late: bool) -> String {
     static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let list = LIST.get_or_init(|| std::env::var("RENDERLAB_SHADE_CUT").unwrap_or_default());
-    for cut in list.split(',').map(str::trim).filter(|c| !c.is_empty()) {
-        let (head, early) = match cut {
-            "gi_lookup" => (
-                "    if gi_word(GI_H_ENABLED)==0u { return; }\n    let world=input.receiver.world;\n",
-                "    if true { return; }\n",
-            ),
-            "es1" => ("fn environment_lobe_count() -> u32 {\n", "    if true { return 0u; }\n"),
-            "mq2" => (
-                "fn tr1_view_hint(s:Surface,input:SurfaceInput,pixel:vec2<u32>,size:vec2<u32>)->f32 {\n",
-                "    if true { return 1.0; }\n",
-            ),
-            "decals" => (
-                "fn decal_prepare(input:SurfaceInput)->SurfaceInput {\n",
-                "    if true { return input; }\n",
-            ),
-            "atmosphere" => (
-                "fn atmosphere_surface(c:vec3<f32>, p:vec3<f32>) -> vec3<f32> {\n",
-                "    if true { return c; }\n",
-            ),
-            _ => continue,
-        };
-        // MQ2's hint follows the program (VIEW_HINT); the others precede it.
-        if late != (cut == "mq2") {
+    shade_cuts_named(source, late, list)
+}
+/// One `RENDERLAB_SHADE_CUT` cut: its name, the heads it may sit at (first match wins), its
+/// early return, whether that goes before the head, and whether the head follows the program
+/// (`late`: MQ2's hint and the entry). Entry exits look only inside `primary_shade_pixel`:
+/// reflection hits' `rl_hit_input` repeats the entry's decode.
+struct ShadeCut {
+    name: &'static str,
+    heads: &'static [&'static str],
+    early: &'static str,
+    before: bool,
+    late: bool,
+}
+/// Where the entry exits' heads are searched from.
+const SHADE_CUT_ENTRY: &str = "fn primary_shade_pixel(";
+/// Every cut, in the order `shade_cuts` documents them.
+pub(crate) const SHADE_CUT_NAMES: [&str; 9] = [
+    "gi_lookup",
+    "es1",
+    "env_specular",
+    "mq2",
+    "decals",
+    "atmosphere",
+    "exit_entry",
+    "exit_decode",
+    "exit_material",
+];
+const SHADE_CUTS: [ShadeCut; 9] = [
+    ShadeCut {
+        name: "gi_lookup",
+        heads: &[
+            "    if gi_word(GI_H_ENABLED)==0u { return; }\n    let world=input.receiver.world;\n",
+        ],
+        early: "    if true { return; }\n",
+        before: true,
+        late: false,
+    },
+    ShadeCut {
+        name: "es1",
+        heads: &["fn environment_lobe_count() -> u32 {\n"],
+        early: "    if true { return 0u; }\n",
+        before: false,
+        late: false,
+    },
+    ShadeCut {
+        name: "env_specular",
+        heads: &[
+            "fn indirect_radiance(input:SurfaceInput, direction:vec3<f32>, roughness:f32) -> vec3<f32> {\n",
+        ],
+        early: "    if true { return vec3<f32>(0.0); }\n",
+        before: false,
+        late: false,
+    },
+    ShadeCut {
+        name: "mq2",
+        // Before and after the entry's camera ray moved into the hint's arguments.
+        heads: &[
+            "fn tr1_view_hint(s:Surface,input:SurfaceInput,pixel:vec2<u32>,size:vec2<u32>)->f32 {\n",
+            "fn tr1_view_hint(s:Surface,input:SurfaceInput,ray:PrimaryRay)->f32 {\n",
+        ],
+        early: "    if true { return 1.0; }\n",
+        before: false,
+        late: true,
+    },
+    ShadeCut {
+        name: "decals",
+        heads: &["fn decal_prepare(input:SurfaceInput)->SurfaceInput {\n"],
+        early: "    if true { return input; }\n",
+        before: false,
+        late: false,
+    },
+    ShadeCut {
+        name: "atmosphere",
+        heads: &["fn atmosphere_surface(c:vec3<f32>, p:vec3<f32>) -> vec3<f32> {\n"],
+        early: "    if true { return c; }\n",
+        before: false,
+        late: false,
+    },
+    ShadeCut {
+        name: "exit_entry",
+        heads: &["    let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);\n"],
+        early: "    if true {textureStore(primary_hdr,vec2<i32>(id),vec4<f32>(0.25,0.25,0.25,1.0));return;}\n",
+        before: true,
+        late: true,
+    },
+    ShadeCut {
+        name: "exit_decode",
+        heads: &[
+            "    let normal_dy=(b.normal-a.normal)*bary_gradients[1].x+(c.normal-a.normal)*bary_gradients[1].y;\n",
+        ],
+        early: "    if true {textureStore(primary_hdr,pixel,vec4<f32>(fract(input.world+receiver_world+input.normal+input.tangent+normal_dx+normal_dy+geometric+input.color.xyz+vec3<f32>(input.uv+gradients[0]+gradients[1]+input.position.xy,input.position.z+input.winding+input.handedness)),1.0));return;}\n",
+        before: false,
+        late: true,
+    },
+    ShadeCut {
+        name: "exit_material",
+        heads: &["decal_none()));\n"],
+        early: "    if true {let q=surface_input.material;textureStore(primary_hdr,pixel,vec4<f32>(fract(surface_input.world+surface_input.world_dx+surface_input.world_dy+surface_input.normal+surface_input.receiver.world+q.base_color.xyz+vec3<f32>(q.metallic,q.roughness,q.normal_scale+f32(q.double_sided+q.thin+q.normal_mapped+q.normal_variance))),1.0));return;}\n",
+        before: false,
+        late: true,
+    },
+];
+/// `shade_cuts` with the comma list `list` in place of the environment's.
+pub(crate) fn shade_cuts_named(mut source: String, late: bool, list: &str) -> String {
+    for name in list.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+        let Some(cut) = SHADE_CUTS.iter().find(|c| c.name == name && c.late == late) else {
             continue;
-        }
-        if source.matches(head).count() == 1 {
-            // gi_lookup's return goes before the lookup; the others open their function.
-            source = if cut == "gi_lookup" {
-                source.replacen(head, &format!("{early}{head}"), 1)
-            } else {
-                source.replacen(head, &format!("{head}{early}"), 1)
+        };
+        let from = if cut.name.starts_with("exit_") {
+            let Some(at) = source.find(SHADE_CUT_ENTRY) else {
+                continue;
             };
-        }
+            at
+        } else {
+            0
+        };
+        let Some(head) = cut
+            .heads
+            .iter()
+            .find(|h| source[from..].matches(**h).count() == 1)
+        else {
+            continue;
+        };
+        let at = from + source[from..].find(head).expect("the head was counted");
+        let at = if cut.before { at } else { at + head.len() };
+        source.insert_str(at, cut.early);
     }
     source
 }
