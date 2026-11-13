@@ -401,6 +401,14 @@ PLANS["candgame"] = [
     (f"g-{path}-flight-{v}-{k}", ["--path", path, "--fox", FOX, "--frames", "60"], env)
     for k in (1, 2) for path in ("nonrt", "rt") for v, env in (("base", {}), ("cand", CAND))
 ]
+# The candidate's merge gate: the game flight and a cut, the default (history + resolve) against
+# RENDERLAB_RL_HISTORY=0 (today's inline full set), both paths (`compare.py PICS CROPS gate`).
+PLANS["gatepics2"] = [
+    (f"p-{path}-{name}-gate{v}", ["--path", path, "--fox", FOX, *extra, "--every", "1"], {} if v == "1" else {"RENDERLAB_RL_HISTORY": "0"})
+    for path in ("nonrt", "rt")
+    for name, extra in (("flight", ["--frames", "48"]), ("cut", ["--diag", "cut=1", "--frames", "36"]))
+    for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS

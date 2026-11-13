@@ -56,7 +56,7 @@ def main(pics, crops=None, switch="cold"):
     crops = Path(crops) if crops else None
     if crops:
         crops.mkdir(parents=True, exist_ok=True)
-    clips = sorted(d.name[: -len(switch) - 2] for d in pics.glob(f"p-*-{switch}1") if switch in ("refill", "split", "subset", "hist") or "nonrt" not in d.name)
+    clips = sorted(d.name[: -len(switch) - 2] for d in pics.glob(f"p-*-{switch}1") if switch in ("refill", "split", "subset", "hist", "gate") or "nonrt" not in d.name)
     for clip in clips:
         on, off = pics / f"{clip}-{switch}1", pics / f"{clip}-{switch}0"
         frames = sorted(int(p.stem[6:]) for p in on.glob("frame-*.png") if p.stem[6:].isdigit())
