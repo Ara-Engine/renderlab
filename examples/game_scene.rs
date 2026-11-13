@@ -48,7 +48,10 @@
 //! `--diag forest=1` (U-RTVIS, docs/rtvis.md) swaps the flat ground for a 200 m rolling
 //! terrain (16 tiles) under trees and bushes of cutout cards and walks the field walk's camera
 //! through it: Outpost's layered ground and foliage, for the RT visibility pass's cost.
-//! `forest=bare` is the same terrain and walk without the foliage.
+//! `forest=bare` is the same terrain and walk without the foliage. `--diag floor=R` gives the
+//! flat ground perceptual roughness R (0.95 otherwise): a glossy floor for the reflection strata.
+//! `--diag program=standard` puts the scene's `game` materials on the standard program, which
+//! reports its reflectance to the deferred reflection composite (RENDERLAB_RL_DEFERRED=1).
 //! `--diag far=1` (U-FIXED) holds a camera 40 m up over a 2.4 km ground with columns at 80,
 //! 200, 300 and 800 m whose sun shadows cross the view (the sun's coverage, Ara #185 item 33);
 //! `far=move` slides that camera sideways 0.25 m a frame (far shadows in motion).
@@ -366,6 +369,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     | "field"
                     | "forest"
                     | "fox"
+                    | "floor"
+                    | "program"
                     | "far"
                     | "casts"
             )
@@ -404,6 +409,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `forest=bare`: the same terrain and walk without the trees and bushes.
     let bare = scene_key("forest", "bare");
     let forest = scene_key("forest", "1") || bare;
+    let floor = scene_keys
+        .iter()
+        .find(|(k, _)| k == "floor")
+        .map_or(0.95, |(_, v)| {
+            v.parse::<f32>().expect("--diag floor=<roughness>")
+        });
     // `far=1` (U-FIXED, the sun's coverage, Ara #185 item 33): a 2.4 km ground and columns
     // at 80, 200, 300 and 800 m north of a camera 40 m up with a 2 km far plane, whose shadows
     // cross the view: sun shadows at game-scale distances, on both paths. `far=move` slides the
@@ -520,6 +531,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     let game_program = game_program.as_deref().unwrap_or(GAME_PROGRAM);
     let program = engine.create_program("game", game_program)?;
+    let standard = scene_keys.iter().any(|(k, v)| k == "program" && v == "standard");
     let toon_program = engine.create_program("toon", TOON_PROGRAM)?;
     let programs_seconds = start.elapsed().as_secs_f64();
     let material = |engine: &mut Engine, color: [f32; 3], metallic: f32, roughness: f32| {
@@ -527,7 +539,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             base_color: [color[0], color[1], color[2], 1.0],
             metallic,
             roughness,
-            program: Some(program),
+            program: (!standard).then_some(program),
             ..Default::default()
         })
     };
@@ -628,7 +640,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec3::new(0.0, 0.6, -0.15)
         }
         None => {
-            let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, 0.95)?;
+            let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, floor)?;
             if forest {
                 for tile in terrain_tiles(FOREST_SIZE, 400, 4) {
                     let tile = engine.create_mesh(&mesh(&tile))?;

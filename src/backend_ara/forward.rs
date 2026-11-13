@@ -396,9 +396,10 @@ pub struct ForwardImages {
     /// MEASUREMENT ONLY: with `RENDERLAB_ARA_PROBE_RESOLVE` set, the resolve's
     /// one-pixel trace (`resolve_probe::describe` reads it).
     pub resolve_probe: Option<Vec<[f32; 4]>>,
-    /// With `RENDERLAB_RL_DEFERRED=1`, until the composite reads them on the GPU: the
-    /// deferred reflections' outputs as RGBA16F (`program::deferred_variant`: reflectance
-    /// and traced fraction; untraced specular and the inline traced luminance).
+    /// With `RENDERLAB_RL_DEFERRED=diag` only (identity tests): the deferred reflections'
+    /// outputs as RGBA16F (`program::deferred_variant`: reflectance and traced fraction;
+    /// untraced specular and the inline traced luminance). Never read back otherwise, so a
+    /// player with frames in flight never waits on them.
     pub deferred_reflections: Option<[Vec<u8>; 2]>,
 }
 
@@ -546,8 +547,8 @@ struct Deferred {
     scene: [u32; 4],
     /// That rectangle widened to whole trace tiles, as the region record holds it.
     region_rect: [u32; 4],
-    /// RENDERLAB_MATERIAL_PASS: the material record (program.rs MATERIAL_RECORD_BINDINGS), an
-    /// rgba32uint and an rg32uint image of the frame's size; None while the pass is off.
+    /// RENDERLAB_MATERIAL_PASS: the material record (program.rs MATERIAL_RECORD_BINDINGS), a
+    /// pair of rgba32uint images of the frame's size; None while the pass is off.
     material: Option<[Texture; 2]>,
     epsilon: Texture,
     frame: StorageBuffer,
@@ -2773,7 +2774,7 @@ fn frame(
             material: if material_on {
                 Some([
                     Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
-                    Texture::new(gpu, size, Format::Rg32Uint, true, false)?,
+                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
                 ])
             } else {
                 None
@@ -4358,8 +4359,10 @@ fn frame(
         )?),
         None => None,
     };
+    // Only identity tests read the deferred outputs back: both exist with
+    // RENDERLAB_RL_DEFERRED=diag (the untraced output is declared only then).
     let deferred_read = match (inputs.get(&key(0, 62)), inputs.get(&key(0, 63))) {
-        (Some(reflectance), Some(untraced)) => Some([
+        (Some(reflectance), Some(untraced)) if crate::program::rl_deferred_diag() => Some([
             transfer::readback(
                 gpu,
                 &mut graph,
