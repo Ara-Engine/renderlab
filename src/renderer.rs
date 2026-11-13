@@ -4016,7 +4016,8 @@ impl Renderer {
         if let Some(hardware) = &mut self.hardware_shadows {
             hardware.collect(
                 self.completed_submission,
-                (&self.device, &self.queue),
+                &self.device,
+                &self.queue,
                 &self.ledger,
             );
         }

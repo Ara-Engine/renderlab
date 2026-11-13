@@ -594,7 +594,15 @@ impl HardwareState {
     pub fn bind(&self) -> &wgpu::BindGroup {
         &self.active.as_ref().unwrap().bind
     }
-    pub fn collect(&mut self, completed: u64, gpu: (&wgpu::Device, &wgpu::Queue), ledger: &Ledger) {
+    /// `queue` is dereferenced (waiting for a submit thread's frame) only when a completed
+    /// upload is compacted: a device poll after a frame must not wait for its submission.
+    pub(crate) fn collect(
+        &mut self,
+        completed: u64,
+        device: &wgpu::Device,
+        queue: &crate::ordered_queue::OrderedQueue,
+        ledger: &Ledger,
+    ) {
         let meshes: Vec<_> = self
             .pending
             .iter()
@@ -606,7 +614,7 @@ impl HardwareState {
         // Compact completed uploads incrementally, rather than overlapping every
         // original BLAS with every compacted copy at the first rendered frame.
         for mesh in meshes {
-            self.compact_mesh(&mesh, gpu, ledger, 0);
+            self.compact_mesh(&mesh, (device, &**queue), ledger, 0);
         }
     }
     pub fn release_scene(&mut self, last_submission: u64) {
