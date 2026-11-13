@@ -249,6 +249,11 @@ def main():
         if not take_timing_hold(a.label):
             print("DEFERRED: the GPU or another timing lease is busy; a timing lease holds the build slots only once it can run", flush=True)
             return 3
+    elif TIMING_HOLD.exists():
+        # A timing lease that took the hold is draining builds and owns the next GPU turn (root, 2026-11-13:
+        # an ordinary lease took the lock inside a waiting timing hold and the timing lease lost its turn).
+        print("DEFERRED: a timing lease holds timing-hold and runs next", flush=True)
+        return 3
     if a.contended_screen:
         a.runtime_memory_mbytes = 3072
         a.record_resources = True

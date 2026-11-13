@@ -1423,6 +1423,10 @@ fn log_material_slots(readers: &[bool]) {
 }
 /// One frame after `history`, over what the sequence keeps on the GPU; returns its
 /// images and what it hands to the next frame.
+/// RENDERLAB_GI_PASS=1 (src/gi_receiver_pass.rs): the GI lookup pass is wired for wgpu only.
+/// Composition would make the port's shading read its binding 68, which nothing here allocates
+/// or writes, so the port refuses the switch at `Engine::new` and at every frame.
+pub(crate) const GI_PASS_REFUSAL: &str = "RENDERLAB_GI_PASS=1: the GI lookup pass is not wired on the ara-gpu port yet (its binding 68 has no target or dispatch here); unset it";
 fn frame(
     history: &Carried,
     kept: &mut Kept,
@@ -1431,6 +1435,7 @@ fn frame(
     cache: &ShaderCache,
     scene: &ForwardScene<'_>,
 ) -> Result<(ForwardImages, Carried)> {
+    ensure!(!crate::renderer::primary_ray_gpu::gi_receiver_pass::on(), GI_PASS_REFUSAL);
     let Kept {
         gi,
         tr1,
