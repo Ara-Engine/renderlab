@@ -700,7 +700,11 @@ struct Arrays {
     normals: Owned<wgpu::Buffer>,
     _placements: Owned<wgpu::Buffer>,
     _absent: Owned<wgpu::Buffer>,
-    instances: Vec<u8>,
+    /// The placements the buffers hold, by name: each draw's collection and accepted-edit count
+    /// (`InstanceState::revision`), and the same as bytes for the planner's idle keys. Equal
+    /// revisions mean equal transforms, so nothing is packed, compared or hashed per matrix.
+    revisions: Vec<(u64, u64)>,
+    revision_bytes: Vec<u8>,
     bind: Owned<wgpu::BindGroup>,
 }
 /// Software-ray geometry: every draw's mesh records and near masks, and the flat instance
@@ -919,7 +923,9 @@ pub(crate) struct FrameInputs<'a> {
     /// The view the idle keys hash: its matrix bytes, then its extent bytes.
     pub(crate) still_matrix: [u8; 64],
     pub(crate) still_extent: Vec<u8>,
-    /// The placement transforms' bytes as the geometry arrays hold them.
+    /// Bytes that differ whenever a placement transform does: the idle keys hash them. The
+    /// renderer passes each draw's collection and edit count (`InstanceState::revision`) instead
+    /// of every matrix; the Ara backend passes the matrices themselves.
     pub(crate) instances: &'a [u8],
     /// Every skinned draw's revision, little-endian, in draw order.
     pub(crate) skin_revisions: Vec<u8>,
@@ -1380,6 +1386,9 @@ impl Planner {
         // A view whose every input is unchanged has nothing to trace once its cells
         // exist: after IDLE_AFTER identical frames the passes stop (still frames cost
         // nothing). Rotation and partial cells keep working every frame.
+        // The placements' digest, once: both keys below read it (about 1 MB of transforms a
+        // frame on Outpost was hashed twice).
+        let instances: [u8; 32] = Sha256::digest(instances).into();
         let idle_key: [u8; 32] = {
             let mut h = Sha256::new();
             h.update(still_matrix);
@@ -2340,7 +2349,7 @@ impl Renderer {
         if programs.len() > 1 {
             let mut built = vec![];
             for id in programs {
-                if !crate::program::reflects(&self.program_slot(id).source) {
+                if !self.program_slot(id).traits.reflects {
                     continue;
                 }
                 let mut existing = std::mem::take(&mut self.gi.mixed);
@@ -2356,7 +2365,7 @@ impl Renderer {
             self.gi.mixed = built;
             return Ok(any);
         }
-        if !crate::program::reflects(&self.program_slot(id).source) {
+        if !self.program_slot(id).traits.reflects {
             return Ok(false);
         }
         let key = self.gi_shade_key(id, software, streamed);
@@ -2700,7 +2709,8 @@ impl Renderer {
                 normals,
                 _placements: table,
                 _absent: absent,
-                instances: vec![],
+                revisions: vec![],
+                revision_bytes: vec![],
                 bind,
             };
             if let Some(old) = self.gi.arrays.replace(next) {
@@ -2709,26 +2719,34 @@ impl Renderer {
                     .push((self.submissions, Retired::Arrays(old)));
             }
         }
-        // The same bytes the traced shading tables publish, in placement order.
-        let mut instances = vec![];
-        for d in draws {
-            for model in &d.instances.state.models {
-                instances.extend_from_slice(&matrix_bytes(*model));
-            }
-        }
-        for d in draws {
-            for normal in &d.instances.state.normals {
-                instances.extend_from_slice(&normal.bytes());
-            }
-        }
+        let revisions: Vec<(u64, u64)> = draws
+            .iter()
+            .map(|d| d.instances.state.revision())
+            .collect();
         let a = self.gi.arrays.as_mut().unwrap();
-        if a.instances != instances {
+        if a.revisions != revisions {
+            // The same bytes the traced shading tables publish, in placement order.
+            let mut instances = vec![];
+            for d in draws {
+                for model in &d.instances.state.models {
+                    instances.extend_from_slice(&matrix_bytes(*model));
+                }
+            }
+            for d in draws {
+                for normal in &d.instances.state.normals {
+                    instances.extend_from_slice(&normal.bytes());
+                }
+            }
             let (models, normals) = instances.split_at(instances.len() / 2);
             if !models.is_empty() {
                 self.queue.write_buffer(&a.models, 0, models);
                 self.queue.write_buffer(&a.normals, 0, normals);
             }
-            a.instances = instances;
+            a.revision_bytes = revisions
+                .iter()
+                .flat_map(|(id, edits)| id.to_ne_bytes().into_iter().chain(edits.to_ne_bytes()))
+                .collect();
+            a.revisions = revisions;
         }
         Ok(())
     }
@@ -2956,7 +2974,7 @@ impl Renderer {
         let rows = draws.iter().enumerate().map(|(b, d)| {
             let n = d.instances.len() as u32;
             let program = d.material.map_or(self.standard.id(), |m| m.program.id());
-            let selector = if mixed && crate::program::reflects(&self.program_slot(program).source)
+            let selector = if mixed && self.program_slot(program).traits.reflects
             {
                 cell_selector(program)
             } else {
@@ -2975,8 +2993,7 @@ impl Renderer {
         // Moved casters: placements whose world bounds changed, as swept boxes.
         let mut bounds = vec![];
         for d in draws {
-            for &model in &d.instances.state.models {
-                let b = shadow_gpu::world_bounds(d.mesh.bounds, model)?;
+            for b in d.instances.state.world_bounds(d.mesh.bounds)?.iter() {
                 bounds.push([b.min.x, b.min.y, b.min.z, b.max.x, b.max.y, b.max.z]);
             }
         }
@@ -3004,9 +3021,9 @@ impl Renderer {
                 }
                 h.finalize().into()
             };
-            let mut sources = self.program_slot(state.program).source.as_bytes().to_vec();
+            let mut sources = self.program_slot(state.program).digest.to_vec();
             for &program in state.programs.iter().skip(1) {
-                sources.extend(self.program_slot(program).source.as_bytes());
+                sources.extend(self.program_slot(program).digest);
             }
             let id_bytes: Vec<u8> = ids.iter().flat_map(|i| i.to_le_bytes()).collect();
             let parts = [
@@ -3031,10 +3048,10 @@ impl Renderer {
             // TP2: transparent sun attenuation changes the cells' direct illumination.
             h.update(self.lighting.transmission.hash);
             h.update(environment);
-            h.update(self.program_slot(state.program).source.as_bytes());
+            h.update(self.program_slot(state.program).digest);
             // MP1: every program of a mixed frame.
             for &program in state.programs.iter().skip(1) {
-                h.update(self.program_slot(program).source.as_bytes());
+                h.update(self.program_slot(program).digest);
             }
             h.update(ids.iter().flat_map(|i| i.to_le_bytes()).collect::<Vec<_>>());
             h.finalize().into()
@@ -3070,7 +3087,7 @@ impl Renderer {
                 region,
                 still_matrix: matrix_bytes(still.0.matrix(size[0], size[1])),
                 still_extent: still.1,
-                instances: &self.gi.arrays.as_ref().unwrap().instances,
+                instances: &self.gi.arrays.as_ref().unwrap().revision_bytes,
                 skin_revisions,
             },
         );
@@ -3236,7 +3253,8 @@ pub(crate) fn mixed_cell_entry(source: &str, id: u64) -> String {
 // ---- end of MP1 per-program cell shading ----
 
 /// What cell shading (G2) binds besides its own group 0: traced shading's geometry (group 1)
-/// and materials (group 2), and lighting's shading group, whose binding 20 is the real table.
+/// and materials (group 2), and lighting's cell-shading group (`cell_bind`), whose binding 20
+/// is the real table and whose binding 28 is never the outgoing radiance cell shading writes.
 pub(super) struct ShadeGroups<'a> {
     pub arrays: &'a wgpu::BindGroup,
     pub materials: &'a wgpu::BindGroup,

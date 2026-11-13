@@ -216,6 +216,26 @@ fn pre_tp1_standard() -> String {
         exposed=min(exposed+exposed_product(intensity,response*attenuation),vec3<f32>(65504.0));",
             "        exposed=min(exposed+exposed_product(light.intensity,response*attenuation),vec3<f32>(65504.0));",
         ),
+        // The trace decision's reflectance weight: the frozen program asks with weight one.
+        (
+            " their mean exposed radiance, with the traced fraction in w. The weight is the luminance of
+// the reflectance `shade` multiplies that radiance by, so the engine can skip pixels where
+// what the trace could change stays invisible (stone's F0 of 0.04 against a chrome ball's 1).
+fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
+    var v=unit_normal(input.eye-input.world);
+    if dot(v,v)<0.5 { v=s.n; }
+    let film=transparent_material(input.material) && transparent_ior(input.material)<=1.0;
+    let base=select(s.base*s.alpha,s.base,film);
+    let ab=environment_dfg(dot(s.n,v),s.rough);
+    let f0=vec3<f32>(0.04)*(1.0-s.metal)+base*s.metal;
+    let reflectance=f0*ab.x+vec3<f32>(ab.y);
+    return SpecularLobe(s.n,s.rough*s.rough,dot(reflectance,vec3<f32>(0.2126,0.7152,0.0722)));
+}",
+            " their mean exposed radiance, with the traced fraction in w.
+fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
+    return SpecularLobe(s.n,s.rough*s.rough,1.0);
+}",
+        ),
     ] {
         assert_eq!(s.matches(from).count(), 1, "{from}");
         s = s.replace(from, to);
@@ -244,9 +264,15 @@ fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
     return ViewData(s.base,s.n,s.rough,s.metal,vec3<f32>(0.0),1.0);
 }
 ", ""),
-        ("    // TP1: a transparent surface reflects diffusely over its coverage only.
-    let base=s.base*s.alpha;",
+        ("    // TP1: a transparent surface reflects diffusely over its coverage only. A plain blended
+    // film (IOR one) blends all of its light by coverage instead (`coverage * colour`, glTF
+    // BLEND), so a faint film keeps no full-strength specular sheen.
+    let film=transparent_material(input.material) && transparent_ior(input.material)<=1.0;
+    let base=select(s.base*s.alpha,s.base,film);",
          "    let base=s.base;"),
+        ("    // A plain blended film's light, blended by coverage (above).
+    if film { exposed*=s.alpha; }
+", ""),
     ] {
         assert_eq!(s.matches(from).count(), 1, "{from}");
         s = s.replace(from, to);
@@ -272,6 +298,24 @@ fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
     let end = start + s[start..].find("\n}").unwrap() + 2;
     s.replace_range(start..end, "");
     s
+}
+
+/// A glass draw's instances share a raster pass until one overlaps an instance already in it,
+/// so a pane in front of another of the same draw is drawn over it, not over the colour from
+/// before the draw. Each span carries the rectangle the next one copies as its colour behind.
+#[test]
+fn overlapping_glass_instances_draw_one_over_another() {
+    let (a, b, c, d) = ([0, 0, 10, 10], [20, 0, 30, 10], [5, 5, 15, 15], [40, 0, 50, 10]);
+    assert_eq!(
+        instance_spans(&[a, b, c, d]),
+        vec![(0..2, [0, 0, 30, 10]), (2..4, [5, 0, 50, 15])]
+    );
+    assert_eq!(instance_spans(&[a, b, d]), vec![(0..3, [0, 0, 50, 10])]);
+    assert_eq!(instance_spans(&[a, a, a]).len(), 3);
+    assert_eq!(instance_spans(&[]), vec![(0..0, [0; 4])]);
+    // Past the span bound the draw is one pass, as before spans.
+    assert_eq!(instance_spans(&[a; 5]), vec![(0..5, a)]);
+    assert_eq!(instance_spans(&[b; 65]), vec![(0..65, b)]);
 }
 
 #[test]

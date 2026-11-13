@@ -11,7 +11,9 @@
 // ---- PANE_RASTER ----
 // The triangle under each sample, plus one, from the glass entry's vertex stage (`vs`); the
 // glass entry's two discards apply as it takes them, per fragment at the pixel centre.
-// With depth testing off the last triangle in draw order wins each sample.
+// With depth testing off the last triangle in draw order wins each sample. The top bit is
+// the raster's own front_facing, which the shading passes to the glass entry: a winding
+// convention fixed in WGSL held on the port and flipped the panes on wgpu.
 // The id's encoding in the four-sample target: one u32 (R32Uint) on the ara-gpu port. wgpu
 // guarantees no multisampled R32Uint, so its panes write two u16 halves to Rg16Uint
 // (transparency_panes.rs `sources` swaps these two lines and tp_pane_id).
@@ -23,7 +25,7 @@ fn tp_pane_id_out(id:u32)->PaneId { return id; }
     let pixel=vec2<i32>(input.position.xy);
     let depth=dot(input.world-tp.eye.xyz,tp.forward.xyz);
     if depth>textureLoad(tp_depth,pixel,0).x { discard; }
-    return tp_pane_id_out(primitive+1u);
+    return tp_pane_id_out((primitive+1u)|select(0u,0x80000000u,front));
 }
 // ---- end PANE_RASTER ----
 
@@ -38,8 +40,6 @@ struct PanePixels { rect:vec4<u32>, info:vec4<u32> };
 // Sample k's id, in tp_pane_id_out's encoding.
 fn tp_pane_id(pixel:vec2<i32>,k:i32)->u32 { return textureLoad(pane_ids,pixel,k).x; }
 @group(0) @binding(76) var pane_out:texture_storage_2d<rgba16float,write>;
-// Which sign of a triangle's area in pixels the pipeline's front faces have.
-const PANE_FRONT_NEGATIVE:bool=true;
 // The raster's dpdx and dpdy of the interpolants the glass entry differentiates.
 struct PaneDerivatives { world_x:vec3<f32>, world_y:vec3<f32>, normal_x:vec3<f32>, normal_y:vec3<f32>, uv_x:vec2<f32>, uv_y:vec2<f32> };
 // One vertex as the raster's vertex stage outputs it: 48-byte records (position, normal,
@@ -78,8 +78,9 @@ fn pane_interpolate(v0:VertexOutput,v1:VertexOutput,v2:VertexOutput,w:vec3<f32>,
 // Triangle t shaded at pixel p's centre by the glass entry's own body (`tp_pane_fragment`,
 // derived from `fs_transparent`). Derivatives are the fine ones of p's 2x2 quad: the
 // difference to the horizontal and vertical neighbour on the same triangle's plane.
-// Alpha below zero: the glass entry discarded the fragment.
-fn pane_shade_triangle(t:u32,p:vec2<u32>)->vec4<f32> {
+// `front` is the raster's front_facing for the triangle (the id's top bit). Alpha below
+// zero: the glass entry discarded the fragment.
+fn pane_shade_triangle(t:u32,p:vec2<u32>,front:bool)->vec4<f32> {
     let v0=pane_vertex(pane_indices[t*3u]);
     let v1=pane_vertex(pane_indices[t*3u+1u]);
     let v2=pane_vertex(pane_indices[t*3u+2u]);
@@ -93,10 +94,8 @@ fn pane_shade_triangle(t:u32,p:vec2<u32>)->vec4<f32> {
     let d=PaneDerivatives(sx*(across.world-here.world),sy*(down.world-here.world),
         sx*(across.normal-here.normal),sy*(down.normal-here.normal),
         sx*(across.uv-here.uv),sy*(down.uv-here.uv));
-    // The raster's front_facing, from the triangle's winding in pixels (y down).
-    let area=(s1.x-s0.x)*(s2.y-s0.y)-(s2.x-s0.x)*(s1.y-s0.y);
     let triangle=RasterTriangle(array<vec3<f32>,3>(v0.receiver_vertex,v1.receiver_vertex,v2.receiver_vertex));
-    return tp_pane_fragment(here,triangle,(area<0.0)==PANE_FRONT_NEGATIVE,d);
+    return tp_pane_fragment(here,triangle,front,d);
 }
 // One pixel of the pane's rectangle: the mean of its four samples, each the triangle
 // under it shaded or the colour behind the pane. A pixel no sample covers is left as is
@@ -121,7 +120,7 @@ fn pane_shade_triangle(t:u32,p:vec2<u32>)->vec4<f32> {
             if seen[j]==id { colour=shaded[j]; found=true; }
         }
         if !found {
-            colour=pane_shade_triangle(id-1u,p);
+            colour=pane_shade_triangle((id&0x7fffffffu)-1u,p,(id>>31u)!=0u);
             seen[count]=id;shaded[count]=colour;count+=1u;
         }
         sum+=select(colour,behind,colour.w<0.0);

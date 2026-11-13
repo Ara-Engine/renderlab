@@ -305,7 +305,6 @@ impl HardwareState {
     }
     pub fn mesh_submitted(
         &mut self,
-        device: &wgpu::Device,
         ledger: &Ledger,
         mesh: Arc<MeshAcceleration>,
         submission: u64,
@@ -328,17 +327,15 @@ impl HardwareState {
             },
         ));
         self.stats.blas_builds += 1;
-        self.observe_scratch(device);
     }
     // SK1: retain and account each pose build's scratch through its submission.
     pub fn dynamic_submitted(
         &mut self,
-        device: &wgpu::Device,
         ledger: &Ledger,
         mesh: Arc<MeshAcceleration>,
         submission: u64,
     ) {
-        self.mesh_submitted(device, ledger, mesh, submission);
+        self.mesh_submitted(ledger, mesh, submission);
         self.stats.blas_builds -= 1;
         self.stats.blas_updates += 1;
     }
@@ -558,7 +555,7 @@ impl HardwareState {
             [&*self.active.as_ref().unwrap().tlas],
         );
     }
-    pub fn scene_submitted(&mut self, device: &wgpu::Device, ledger: &Ledger, submission: u64) {
+    pub fn scene_submitted(&mut self, ledger: &Ledger, submission: u64) {
         let scratch = scene_estimate(self.active.as_ref().unwrap().placements.len())
             .unwrap()
             .1;
@@ -570,17 +567,6 @@ impl HardwareState {
             },
         ));
         self.stats.tlas_builds += 1;
-        self.observe_scratch(device);
-    }
-    fn observe_scratch(&mut self, device: &wgpu::Device) {
-        self.stats.observed_build_scratch_bytes =
-            device.generate_allocator_report().and_then(|r| {
-                r.allocations
-                    .iter()
-                    .filter(|a| a.name == "(wgpu) scratch buffer")
-                    .try_fold(0u64, |sum, a| sum.checked_add(a.size))
-                    .filter(|n| *n > 0)
-            });
     }
     /// Scratch for the skinned BLASes this scene rebuilds, each mesh once.
     fn dynamic_scratch(placements: &[Placement]) -> Result<u64, Error> {
@@ -628,7 +614,9 @@ impl HardwareState {
             self.retired.push((last_submission, active));
         }
     }
-    pub fn stats(&self, ledger: &Ledger) -> HardwareShadowStats {
+    /// The allocator report behind `observed_build_scratch_bytes` walks every allocation, so it
+    /// runs here, when a caller reads the stats, not on every build (U-FIXED).
+    pub fn stats(&self, ledger: &Ledger, device: &wgpu::Device) -> HardwareShadowStats {
         let owned = ledger.snapshot();
         HardwareShadowStats {
             active_instances: self
@@ -642,6 +630,13 @@ impl HardwareState {
             observed_as_bytes: self
                 .accounting_available
                 .then_some(owned.hardware_as_observed_bytes.live),
+            observed_build_scratch_bytes: device.generate_allocator_report().and_then(|r| {
+                r.allocations
+                    .iter()
+                    .filter(|a| a.name == "(wgpu) scratch buffer")
+                    .try_fold(0u64, |sum, a| sum.checked_add(a.size))
+                    .filter(|n| *n > 0)
+            }),
             ..self.stats
         }
     }
@@ -652,7 +647,7 @@ impl Renderer {
     pub fn hardware_shadow_stats(&self) -> Option<HardwareShadowStats> {
         self.hardware_shadows
             .as_ref()
-            .map(|s| s.stats(&self.ledger))
+            .map(|s| s.stats(&self.ledger, &self.device))
     }
     pub(crate) fn reject_virtual_hardware_shadows(&self, mode: ViewMode) -> Result<(), Error> {
         if self.hardware_shadows.is_some() && self.view.shadows.enabled(mode) {

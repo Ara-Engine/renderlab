@@ -58,6 +58,8 @@ pub enum Pass {
     TemporalResolve,
     /// Original colored transmission layer from one transparent object.
     TransmissionShadow,
+    /// TP2's sun map reduced to two layers per texel (shaders/transmission_reduce.wgsl).
+    TransmissionReduce,
     /// Original vertex-only transparency sun-shadow depth raster.
     TransparencySunShadow,
     /// Original source-sided shadow depth raster.
@@ -328,6 +330,9 @@ impl Pass {
                 crate::renderer::primary_ray_gpu::program_lists::bin_source().into()
             }
             Self::ReflectionHitBins => crate::renderer::reflection_hits::bin_source().into(),
+            Self::TransmissionReduce => {
+                include_str!("../../../shaders/transmission_reduce.wgsl").into()
+            }
             Self::HzbBase | Self::HzbReduce => {
                 include_str!("../../../shaders/visibility_buffer_hzb.wgsl").into()
             }
@@ -567,6 +572,7 @@ impl Pass {
                 | Self::ParticleBillboard
                 | Self::HzbBase
                 | Self::HzbReduce
+                | Self::TransmissionReduce
                 | Self::ProgramBins
                 | Self::ReflectionHitBins
                 | Self::VisibilityCull
@@ -681,6 +687,7 @@ impl Pass {
             Self::ReflectionHitBins => "reflection_hit_bins",
             Self::HzbBase => "base",
             Self::HzbReduce => "reduce",
+            Self::TransmissionReduce => "tx_reduce",
             Self::ParticleBillboard => "tp_particle_fs",
             Self::ParticleUpdate => "tp_particles_update",
             Self::MeshToon => "fs_lit",

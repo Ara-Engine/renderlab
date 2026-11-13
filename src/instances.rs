@@ -60,6 +60,9 @@ struct Motion {
 }
 
 pub(crate) struct InstanceState {
+    /// Unique per collection for the process's life: with `edits` it names the placements, so a
+    /// pass can key its cached work on both instead of hashing every matrix (`Self::revision`).
+    id: u64,
     pub models: Vec<Mat4>,
     /// Per view, the placement it last submitted (motion vectors' previous frame).
     motion: Vec<Motion>,
@@ -73,6 +76,16 @@ pub(crate) struct InstanceState {
     pub ids: Vec<u32>,
     key: Option<VisibilityKey>,
     transformed_bounds: Vec<HomogeneousWorldBounds>,
+    /// The world bounds of every placement under one local box, kept until the placements or
+    /// the box change (`Self::world_bounds`).
+    world_bounds: std::sync::Mutex<Option<WorldBoundsCache>>,
+}
+
+/// `InstanceState::world_bounds`'s memory: the edit count and local box it was built for.
+struct WorldBoundsCache {
+    edits: u64,
+    local: [u32; 6],
+    bounds: Arc<Vec<crate::shadow_plan::Bounds>>,
 }
 impl InstanceState {
     pub fn validate(models: &[Mat4], max_instances: u32) -> Result<(), Error> {
@@ -93,7 +106,9 @@ impl InstanceState {
             .map(crate::normal::NormalTransform::new)
             .collect();
         let invalid_normals = normals.iter().filter(|n| !n.valid()).count();
+        static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self {
+            id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             models: models.to_vec(),
             motion: Vec::new(),
             edits: 0,
@@ -105,7 +120,46 @@ impl InstanceState {
             ids: (0..models.len() as u32).collect(),
             key: None,
             transformed_bounds: Vec::new(),
+            world_bounds: std::sync::Mutex::new(None),
         }
+    }
+    /// The conservative world box of `local` under each placement, in slot order. Several
+    /// passes ask every frame (the shadow plan, the GI cache, the camera rays); the boxes are
+    /// computed when the placements or `local` changed, not per pass per frame.
+    pub(crate) fn world_bounds(
+        &self,
+        local: Aabb,
+    ) -> Result<Arc<Vec<crate::shadow_plan::Bounds>>, Error> {
+        let key = [
+            local.min[0].to_bits(),
+            local.min[1].to_bits(),
+            local.min[2].to_bits(),
+            local.max[0].to_bits(),
+            local.max[1].to_bits(),
+            local.max[2].to_bits(),
+        ];
+        let mut cache = self
+            .world_bounds
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(cached) = cache
+            .as_ref()
+            .filter(|c| c.edits == self.edits && c.local == key)
+        {
+            return Ok(Arc::clone(&cached.bounds));
+        }
+        let bounds = Arc::new(
+            self.models
+                .iter()
+                .map(|&model| crate::renderer::shadow_gpu::world_bounds(local, model))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        *cache = Some(WorldBoundsCache {
+            edits: self.edits,
+            local: key,
+            bounds: Arc::clone(&bounds),
+        });
+        Ok(bounds)
     }
     fn set(&mut self, slot: usize, model: Mat4) -> Result<(), Error> {
         if slot >= self.models.len() || !model.is_finite() {
@@ -138,6 +192,22 @@ impl InstanceState {
             Some(m) if m.frame == previous_frame => &m.previous,
             _ => &self.models,
         }
+    }
+    /// Whether the placements may differ from the ones `view` submitted in `previous_frame`:
+    /// false when it submitted them at the current edit count (an accepted edit is the only way
+    /// a model changes), so a caller comparing them one by one for motion can skip the walk.
+    /// False too when that frame did not draw these instances (`previous_models` then is the
+    /// current placement).
+    pub fn edited_since_submit(&self, view: u64, previous_frame: u64) -> bool {
+        match self.motion.iter().find(|m| m.view == view) {
+            Some(m) if m.frame == previous_frame => m.edits != self.edits,
+            _ => false,
+        }
+    }
+    /// Names these exact placements: the collection and its accepted-edit count. Equal while
+    /// no model changed, and different for any change or any other collection.
+    pub fn revision(&self) -> (u64, u64) {
+        (self.id, self.edits)
     }
     /// Called only after `view` successfully submitted `frame`; backpressure keeps history.
     pub fn motion_submitted(&mut self, view: u64, frame: u64) {
@@ -299,6 +369,30 @@ mod tests {
         max: [0.1; 3],
     };
     #[test]
+    fn world_bounds_are_computed_once_per_edit_and_per_local_box() {
+        let a = Mat4::from_translation(Vec3::new(1.0, 0.0, 0.0));
+        let mut s = InstanceState::new(&[a, Mat4::IDENTITY]);
+        let first = s.world_bounds(BOUNDS).unwrap();
+        assert_eq!(first.len(), 2);
+        assert!(first[0].min.x > 0.8 && first[1].max.x < 0.2);
+        // Asked again (another pass of the frame): the same boxes, not computed again.
+        assert!(Arc::ptr_eq(&first, &s.world_bounds(BOUNDS).unwrap()));
+        // Another local box is another answer.
+        let wide = Aabb {
+            min: [-1.0; 3],
+            max: [1.0; 3],
+        };
+        assert!(s.world_bounds(wide).unwrap()[1].max.x > 0.9);
+        // An accepted edit is another answer; a no-op edit is not.
+        s.set(1, Mat4::IDENTITY).unwrap();
+        let again = s.world_bounds(wide).unwrap();
+        s.set(1, Mat4::from_translation(Vec3::new(0.0, 5.0, 0.0)))
+            .unwrap();
+        let moved = s.world_bounds(wide).unwrap();
+        assert!(!Arc::ptr_eq(&again, &moved));
+        assert!(moved[1].min.y > 3.9);
+    }
+    #[test]
     fn motion_history_tracks_submissions_and_initializes_the_first_pose() {
         let mut s = InstanceState::new(&[Mat4::IDENTITY; 2]);
         let a = Mat4::from_translation(Vec3::X);
@@ -318,6 +412,31 @@ mod tests {
         assert_eq!(s.previous_models(0, 3), [Mat4::IDENTITY; 2]);
         s.motion_submitted(0, 4);
         assert_eq!(s.previous_models(0, 4), [Mat4::IDENTITY; 2]);
+    }
+    #[test]
+    fn edited_since_submit_follows_accepted_edits() {
+        let mut s = InstanceState::new(&[Mat4::IDENTITY; 2]);
+        // No submission yet, or a frame that did not draw these: nothing to compare.
+        assert!(!s.edited_since_submit(0, 0));
+        s.motion_submitted(0, 1);
+        assert!(!s.edited_since_submit(0, 1));
+        assert!(!s.edited_since_submit(0, 7));
+        s.set(1, Mat4::from_translation(Vec3::Y)).unwrap();
+        assert!(s.edited_since_submit(0, 1));
+        // Submitting the edited placement clears it.
+        s.motion_submitted(0, 2);
+        assert!(!s.edited_since_submit(0, 2));
+    }
+    #[test]
+    fn revision_changes_with_every_accepted_edit_and_differs_per_collection() {
+        let mut s = InstanceState::new(&[Mat4::IDENTITY; 2]);
+        let other = InstanceState::new(&[Mat4::IDENTITY; 2]);
+        let first = s.revision();
+        assert_ne!(first, other.revision());
+        assert_eq!(first, s.revision());
+        s.set(1, Mat4::from_translation(Vec3::Y)).unwrap();
+        assert_ne!(first, s.revision());
+        assert_eq!(s.revision().0, first.0);
     }
     #[test]
     fn each_view_keeps_its_own_previous_placement() {

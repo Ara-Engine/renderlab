@@ -13,8 +13,10 @@
 // Temporal integration is TR1's: its frame rotation word turns the glossy strata.
 
 // The program's specular lobe: GGX about `normal` with alpha (perceptual roughness
-// squared), and `weight` > 0 to request rays. Non-GGX styles declare their nearest GGX
-// lobe or none (m7-design 3.4, constraint 1).
+// squared), and `weight` > 0 to request rays: the luminance of the reflectance `shade`
+// multiplies `specular_incident` by, which sets the glossy strata (RL_FULL_STRATA); a
+// program that cannot say declares 1. Non-GGX styles declare their nearest GGX lobe or none
+// (m7-design 3.4, constraint 1).
 struct SpecularLobe { normal:vec3<f32>, alpha:f32, weight:f32 };
 
 // Perceptual-roughness bands: one mirror ray below RL_MIRROR; fixed VNDF strata to
@@ -104,6 +106,15 @@ const RL_FAR:f32=1.0e6;
 // removes is the mean of targets too rare to draw (measured in docs/speck2.md). Mirror
 // rays (one ray, the exact image) are never bound.
 const RL_LUMA:vec3<f32>=vec3<f32>(0.2126,0.7152,0.0722);
+// Glossy strata follow the reflectance the program declares (`SpecularLobe.weight`, the
+// luminance its `shade` multiplies `specular_incident` by): a lobe weighted RL_FULL_STRATA or
+// more traces all its strata, a weaker one proportionally fewer, at least one. Each stratum
+// reaches the image scaled by that weight, so a weak reflector's extra grain is that much
+// fainter, and TR1 averages it over frames. Every lobe in the traced bands still traces, so
+// no pixel switches between traced and untraced as the view or the scene moves. On Glint's
+// start view (a stone deck in the glossy band) shading falls from 25 to 12 ms with 98% of
+// the pixels unchanged (U-SKIP). RENDERLAB_RL_FULL_STRATA overrides it (src/program.rs).
+const RL_FULL_STRATA:f32=0.25;
 
 var<private> rl_specular:vec4<f32>;
 // Shading a reflection hit: light visibility traces its own shadow ray (rl_hit_shadow),
@@ -256,6 +267,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         if resolved.w>0.0 {rl_specular=vec4<f32>(resolved.rgb,traced);return;}
     }
     var count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
+    if RL_FULL_STRATA>0.0 && !mirror {count=max(1u,u32(ceil(f32(count)*min(lobe.weight/RL_FULL_STRATA,1.0))));}
     let restart_strata=primary_frame.reflection.w;
     let restarted=!mirror && restart_strata>1.0 && rl_restarts(input.world);
     if restarted {count*=u32(restart_strata);}
@@ -396,8 +408,11 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         if RL_HISTORY && !mirror {rl_history_store(pixel,slot,input.world,vec3<f32>(0.0),0.0,0.0);}
         return;
     }
+    // The bound needs a full lobe's strata (RL_GLOSSY_RAYS or more traced): over the one to
+    // three a weak reflector traces (RL_FULL_STRATA) it clamped ordinary variation, not rare
+    // targets (with two, the brighter held to the dimmer), and darkened the estimate.
     let lone=primary_frame.reflection.z;
-    if lone>0.0 && valid>1u {
+    if lone>0.0 && valid>1u && count>=RL_GLOSSY_RAYS {
         let rest=max(dot(sum,RL_LUMA)-top.w,0.0)*lone;
         if top.w>rest {sum-=top.rgb*(1.0-rest/top.w);}
     }

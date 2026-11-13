@@ -247,6 +247,8 @@ pub(super) struct TransparencyState {
     gpu: Option<Gpu>,
     glass: Vec<GlassPipelines>,
     shadow_key: Option<[u8; 32]>,
+    /// The sun map fit last computed and what it was computed from (`encode_transparency`).
+    fit_memo: Option<([u8; 32], Option<ShadowFit>)>,
 }
 
 struct Gpu {
@@ -1167,7 +1169,7 @@ impl Renderer {
             ResourceKind::RenderPipeline,
         );
         ParticlePipelines {
-            prelude: Sha256::digest(self.source.as_bytes()).into(),
+            prelude: self.source_digest,
             update,
             sort,
             draw,
@@ -1176,7 +1178,7 @@ impl Renderer {
 
     /// The module source of `program`'s transparent pipelines on this renderer's
     /// sun-visibility path, and its identity.
-    fn tp_glass_source(&self, program: u64, rt: bool) -> (String, [u8; 32]) {
+    fn tp_glass_source(&self, program: u64, rt: bool) -> String {
         let slot = self.program_slot(program);
         let head = if rt {
             self.hardware_source.as_deref().unwrap()
@@ -1208,8 +1210,27 @@ impl Renderer {
             }
             source
         };
-        let key = Sha256::digest(source.as_bytes()).into();
-        (source, key)
+        source
+    }
+    /// The identity of `program`'s transparent pipelines on this renderer's sun-visibility
+    /// path, from the digests kept with the sources: the composed source is only built when
+    /// the pipelines are (this runs every frame for every transparent program).
+    fn tp_glass_key(&self, program: u64, rt: bool) -> [u8; 32] {
+        let slot = self.program_slot(program);
+        let head = if rt {
+            self.hardware_digest.unwrap()
+        } else {
+            self.source_digest
+        };
+        let mut hash = Sha256::new();
+        hash.update(head);
+        hash.update(slot.digest);
+        hash.update([u8::from(rt), u8::from(slot.layout.is_some())]);
+        #[cfg(test)]
+        if let Some(variant) = &self.transparency.profile {
+            hash.update(variant.as_bytes());
+        }
+        hash.finalize().into()
     }
     /// The transparent pipelines of `program` from its module source.
     fn tp_glass_pipelines(
@@ -1641,7 +1662,7 @@ impl Renderer {
             });
         }
         // The prelude-composed particle kernels follow prelude reloads.
-        let prelude: [u8; 32] = Sha256::digest(self.source.as_bytes()).into();
+        let prelude: [u8; 32] = self.source_digest;
         if !self.transparency.emitters.is_empty()
             && self
                 .transparency
@@ -1689,7 +1710,7 @@ impl Renderer {
             && traced
             && transparent.iter().any(|draw| {
                 let program = draw.material.map_or(self.standard.id(), |m| m.program.id());
-                crate::program::declares_reflection(&self.program_slot(program).source)
+                self.program_slot(program).traits.declares_reflection
             });
         #[cfg(test)]
         let reflect =
@@ -1697,7 +1718,7 @@ impl Renderer {
         if reflect {
             let primary = self.view.primary.as_ref().unwrap();
             let program = self.program_slot(primary.program);
-            let key = reflection::key(&self.source, &program.source, program.layout.is_some());
+            let key = reflection::key(&self.source_digest, &program.digest, program.layout.is_some());
             if self
                 .view
                 .transparency_reflections
@@ -1735,7 +1756,7 @@ impl Renderer {
         programs.sort_unstable();
         programs.dedup();
         for program in programs {
-            let (source, key) = self.tp_glass_source(program, rt);
+            let key = self.tp_glass_key(program, rt);
             if self
                 .transparency
                 .glass
@@ -1744,6 +1765,7 @@ impl Renderer {
             {
                 continue;
             }
+            let source = self.tp_glass_source(program, rt);
             let pipelines = match self.tp_glass_pipelines(program, rt, &source, key) {
                 Err(Error::Fault(Fault(message))) => return Err(self.fail(message)),
                 other => other?,
@@ -1761,7 +1783,7 @@ impl Renderer {
                     continue;
                 }
                 let program = self.transparency.glass[at].program;
-                let (source, _) = self.tp_glass_source(program, rt);
+                let source = self.tp_glass_source(program, rt);
                 let pane = match self.tp_pane_pipelines(program, rt, &source) {
                     Err(Error::Fault(Fault(message))) => return Err(self.fail(message)),
                     other => other?,
@@ -1781,33 +1803,54 @@ impl Renderer {
         });
         let mut receivers: Vec<(Vec3, Vec3)> = Vec::new();
         for draw in &transparent {
-            for &model in &draw.instances.state.models {
-                let b = shadow_gpu::world_bounds(draw.mesh.bounds, model)?;
+            for b in draw.instances.state.world_bounds(draw.mesh.bounds)?.iter() {
                 receivers.push((b.min, b.max));
             }
         }
         receivers.extend(self.transparency.emitters.iter().map(|e| e.params.bounds()));
-        // Every opaque caster's world bounds, in draw then instance order.
-        let casters: Vec<(Vec3, Vec3)> = opaque
-            .iter()
-            .flat_map(|draw| {
-                draw.instances.state.models.iter().filter_map(|&model| {
-                    shadow_gpu::world_bounds(draw.mesh.bounds, model)
-                        .ok()
-                        .map(|b| (b.min, b.max))
-                })
-            })
-            .collect();
-        let fit = sun.and_then(|(travel, _)| shadow_fit(travel, &receivers, &casters));
+        // What the opaque casters are: each draw's mesh and placements by name (the collection
+        // and its edit count), not matrix by matrix (8,195 matrices on Ara's Outpost).
+        let mut casters_key = Sha256::new();
+        for draw in opaque {
+            casters_key.update((Arc::as_ptr(&draw.mesh.vertex) as usize).to_ne_bytes());
+            let (id, edits) = draw.instances.state.revision();
+            casters_key.update(id.to_ne_bytes());
+            casters_key.update(edits.to_ne_bytes());
+        }
+        let casters_key: [u8; 32] = casters_key.finalize().into();
+        // The fit depends on the sun, the receivers and the casters only: reused while those are
+        // the same (a moving camera changes none of them).
+        let fit_inputs: [u8; 32] = {
+            let mut h = Sha256::new();
+            if let Some((travel, _)) = sun {
+                h.update(bytes_of(&travel.to_array()));
+            }
+            for (min, max) in &receivers {
+                h.update(bytes_of(&min.to_array()));
+                h.update(bytes_of(&max.to_array()));
+            }
+            h.update(casters_key);
+            h.finalize().into()
+        };
+        let fit = match &self.transparency.fit_memo {
+            Some((inputs, fit)) if *inputs == fit_inputs => *fit,
+            _ => {
+                // Every opaque caster's world bounds, in draw then instance order.
+                let mut casters: Vec<(Vec3, Vec3)> = Vec::new();
+                for draw in opaque {
+                    if let Ok(boxes) = draw.instances.state.world_bounds(draw.mesh.bounds) {
+                        casters.extend(boxes.iter().map(|b| (b.min, b.max)));
+                    }
+                }
+                let fit = sun.and_then(|(travel, _)| shadow_fit(travel, &receivers, &casters));
+                self.transparency.fit_memo = Some((fit_inputs, fit));
+                fit
+            }
+        };
         let shadow = fit.map_or(Mat4::IDENTITY, |f| f.matrix);
         let mut key = Sha256::new();
         key.update(bytes_of(&shadow.to_cols_array()));
-        for draw in opaque {
-            key.update((Arc::as_ptr(&draw.mesh.vertex) as usize).to_ne_bytes());
-            for model in &draw.instances.state.models {
-                key.update(bytes_of(&model.to_cols_array()));
-            }
-        }
+        key.update(casters_key);
         let key: [u8; 32] = key.finalize().into();
         let render_shadow = fit.is_some() && self.transparency.shadow_key != Some(key);
         let bytes = frame_block(&FrameInputs {
@@ -2547,86 +2590,133 @@ impl Renderer {
                 index += 1;
                 continue;
             }
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("TP1 transparent"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: if aa { &targets.aa.view } else { hdr_view },
-                    depth_slice: None,
-                    resolve_target: aa.then_some(hdr_view),
-                    ops: wgpu::Operations {
-                        load: if aa {
-                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
-                        } else {
-                            wgpu::LoadOp::Load
-                        },
-                        store: if aa {
-                            wgpu::StoreOp::Discard
-                        } else {
-                            wgpu::StoreOp::Store
-                        },
-                    },
-                })],
-                ..Default::default()
-            });
-            if aa {
-                pass.set_pipeline(&gpu.aa_seed);
-                pass.set_bind_group(0, &aa_group, &[]);
-                pass.draw(0..3, 0..1);
-            }
-            pass.set_bind_group(3, self.lighting.bind(), &[]);
-            loop {
-                // What this pass writes: the draw's rectangle, the whole view for particles.
-                let written = match items[index].1 {
-                    Item::Draw(i) => draw_rects[i],
-                    Item::Emitter(_) => view_rect,
-                };
-                dirty = Some(dirty.map_or(written, |d| union(d, written)));
-                match items[index].1 {
-                    Item::Draw(i) => {
-                        let draw = transparent[i];
-                        let program = draw.material.map_or(default_program, |m| m.program.id());
-                        let set = self
-                            .transparency
-                            .glass
-                            .iter()
-                            .find(|g| g.program == program)
-                            .unwrap();
-                        let material = draw
-                            .material
-                            .unwrap_or(self.default_material.as_ref().unwrap());
-                        pass.set_pipeline(&set.pipelines[usize::from(draw.mesh.tangent.is_some())]);
-                        pass.set_bind_group(
-                            0,
-                            glass_group.as_ref().unwrap(),
-                            &[(i as u64 * SLOT) as u32],
-                        );
-                        pass.set_bind_group(1, &*draw.instances.bind, &[]);
-                        pass.set_bind_group(2, &*material.bind, &[]);
-                        pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
-                        pass.set_vertex_buffer(1, draw.instances.id_buffer.slice(..));
-                        if let Some(t) = &draw.mesh.tangent {
-                            pass.set_vertex_buffer(2, t.slice(..));
-                        }
-                        pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(
-                            0..draw.mesh.index_count,
-                            0,
-                            0..draw.instances.state.ids.len() as u32,
-                        );
-                    }
-                    Item::Emitter(i) => {
-                        let e = &self.transparency.emitters[i];
-                        pass.set_pipeline(&gpu.particles.as_ref().unwrap().draw);
-                        pass.set_bind_group(0, &draw_groups[i], &[]);
-                        pass.set_bind_group(1, &*gpu.empty, &[]);
-                        pass.set_bind_group(2, &*gpu.empty, &[]);
-                        pass.draw(0..6, 0..e.params.capacity);
+            // A glass draw's instances share one pass until one overlaps an instance already
+            // in it: each span then draws over what the spans before it left, as per-pixel panes
+            // and the ara-gpu port's raster do. In one pass a front pane overwrote the pane
+            // behind it with the colour from before the draw.
+            let spans = match items[index].1 {
+                Item::Draw(i)
+                    if glass && transparent[i].instances.state.models.len() <= SPAN_INSTANCES =>
+                {
+                    let draw = transparent[i];
+                    let screen = [size.width, size.height];
+                    let rects: Vec<_> = (draw.instances.state.models.iter())
+                        .map(|m| panes::rect(&draw.mesh.bounds, *m, matrix, screen))
+                        .collect();
+                    instance_spans(&rects)
+                }
+                _ => vec![(0..u32::MAX, view_rect)],
+            };
+            let first = index;
+            for (s, (span, _)) in spans.iter().enumerate() {
+                index = first;
+                if s > 0 {
+                    let r = spans[s - 1].1;
+                    if r[2] > r[0] && r[3] > r[1] {
+                        let origin = wgpu::Origin3d {
+                            x: r[0],
+                            y: r[1],
+                            z: 0,
+                        };
+                        let mut from = hdr.resolved.texture.as_image_copy();
+                        from.origin = origin;
+                        let mut to = targets.color.texture.as_image_copy();
+                        to.origin = origin;
+                        let extent = wgpu::Extent3d {
+                            width: r[2] - r[0],
+                            height: r[3] - r[1],
+                            depth_or_array_layers: 1,
+                        };
+                        encoder.copy_texture_to_texture(from, to, extent);
                     }
                 }
-                index += 1;
-                // A transparent draw next needs the colour this pass has written so far.
-                if index == items.len() || glass || matches!(items[index].1, Item::Draw(_)) {
-                    break;
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("TP1 transparent"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: if aa { &targets.aa.view } else { hdr_view },
+                        depth_slice: None,
+                        resolve_target: aa.then_some(hdr_view),
+                        ops: wgpu::Operations {
+                            load: if aa {
+                                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                            } else {
+                                wgpu::LoadOp::Load
+                            },
+                            store: if aa {
+                                wgpu::StoreOp::Discard
+                            } else {
+                                wgpu::StoreOp::Store
+                            },
+                        },
+                    })],
+                    ..Default::default()
+                });
+                if aa {
+                    pass.set_pipeline(&gpu.aa_seed);
+                    pass.set_bind_group(0, &aa_group, &[]);
+                    pass.draw(0..3, 0..1);
+                }
+                pass.set_bind_group(3, self.lighting.bind(), &[]);
+                loop {
+                    // What this pass writes: the draw's rectangle, the whole view for particles.
+                    let written = match items[index].1 {
+                        Item::Draw(i) => draw_rects[i],
+                        Item::Emitter(_) => view_rect,
+                    };
+                    dirty = Some(dirty.map_or(written, |d| union(d, written)));
+                    match items[index].1 {
+                        Item::Draw(i) => {
+                            let draw = transparent[i];
+                            let program = draw.material.map_or(default_program, |m| m.program.id());
+                            let set = self
+                                .transparency
+                                .glass
+                                .iter()
+                                .find(|g| g.program == program)
+                                .unwrap();
+                            let material = draw
+                                .material
+                                .unwrap_or(self.default_material.as_ref().unwrap());
+                            pass.set_pipeline(
+                                &set.pipelines[usize::from(draw.mesh.tangent.is_some())],
+                            );
+                            pass.set_bind_group(
+                                0,
+                                glass_group.as_ref().unwrap(),
+                                &[(i as u64 * SLOT) as u32],
+                            );
+                            pass.set_bind_group(1, &*draw.instances.bind, &[]);
+                            pass.set_bind_group(2, &*material.bind, &[]);
+                            pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
+                            pass.set_vertex_buffer(1, draw.instances.id_buffer.slice(..));
+                            if let Some(t) = &draw.mesh.tangent {
+                                pass.set_vertex_buffer(2, t.slice(..));
+                            }
+                            pass.set_index_buffer(
+                                draw.mesh.index.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            let count = draw.instances.state.ids.len() as u32;
+                            pass.draw_indexed(
+                                0..draw.mesh.index_count,
+                                0,
+                                span.start.min(count)..span.end.min(count),
+                            );
+                        }
+                        Item::Emitter(i) => {
+                            let e = &self.transparency.emitters[i];
+                            pass.set_pipeline(&gpu.particles.as_ref().unwrap().draw);
+                            pass.set_bind_group(0, &draw_groups[i], &[]);
+                            pass.set_bind_group(1, &*gpu.empty, &[]);
+                            pass.set_bind_group(2, &*gpu.empty, &[]);
+                            pass.draw(0..6, 0..e.params.capacity);
+                        }
+                    }
+                    index += 1;
+                    // A transparent draw next needs the colour this pass has written so far.
+                    if index == items.len() || glass || matches!(items[index].1, Item::Draw(_)) {
+                        break;
+                    }
                 }
             }
         }
@@ -2649,6 +2739,54 @@ impl Renderer {
         stats.frames += 1;
         Ok(())
     }
+}
+
+/// Instances above which a glass draw is not split into spans (see `instance_spans`).
+const SPAN_INSTANCES: usize = 64;
+/// Spans above which a glass draw is drawn in one pass instead.
+const MAX_SPANS: usize = 4;
+
+/// A glass draw's instances in draw order, split into spans that one raster pass can draw
+/// together: a span ends before the first instance whose pixel rectangle (`panes::rect`)
+/// overlaps one already in it. Each span comes with the union of its rectangles, which the
+/// next span copies from the HDR target as the colour behind it.
+///
+/// Each span is a render pass with a region copy and, under MSAA, a full-target seed and
+/// resolve. So a draw with more than `SPAN_INSTANCES` instances (foliage, fences) or more
+/// than `MAX_SPANS` spans is drawn in one pass, as before RL#72. Unbounded, Ara Outpost RT
+/// went from 35 to 163 ms a frame (2026-11-13).
+fn instance_spans(rects: &[[u32; 4]]) -> Vec<(std::ops::Range<u32>, [u32; 4])> {
+    let overlaps =
+        |a: &[u32; 4], b: &[u32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
+    let cover = |rects: &[[u32; 4]]| {
+        let union = |a: [u32; 4], b: [u32; 4]| {
+            [
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[2].max(b[2]),
+                a[3].max(b[3]),
+            ]
+        };
+        rects.iter().copied().reduce(union).unwrap_or_default()
+    };
+    let one = || vec![(0..rects.len() as u32, cover(rects))];
+    if rects.len() > SPAN_INSTANCES {
+        return one();
+    }
+    let mut spans = Vec::new();
+    let mut start = 0;
+    for (k, rect) in rects.iter().enumerate() {
+        if rects[start..k].iter().any(|r| overlaps(r, rect)) {
+            if spans.len() + 1 == MAX_SPANS {
+                return one();
+            }
+            spans.push((start as u32..k as u32, cover(&rects[start..k])));
+            start = k;
+        }
+    }
+    let cover = cover(&rects[start..]);
+    spans.push((start as u32..rects.len() as u32, cover));
+    spans
 }
 
 fn frame_entry(frame: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {

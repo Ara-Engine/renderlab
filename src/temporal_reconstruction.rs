@@ -1958,6 +1958,18 @@ impl Renderer {
             if let Some(s) = &d.mesh.skin {
                 skin_revisions.push(s.revision);
             }
+            // Nothing edited since this view's last frame and no skin: no placement moved, and
+            // the scene box is the union of the collection's cached world boxes.
+            let state = &d.instances.state;
+            if d.mesh.skin.is_none()
+                && !state.edited_since_submit(self.view_key.0, self.view.last_frame)
+                && let Ok(boxes) = state.world_bounds(d.mesh.bounds)
+            {
+                for &b in boxes.iter() {
+                    scene_bounds = Some(union(scene_bounds, b));
+                }
+                continue;
+            }
             for (&model, &previous_model) in d.instances.state.models.iter().zip(
                 d.instances
                     .state

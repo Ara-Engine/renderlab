@@ -20,6 +20,9 @@ pub(super) struct LightBuffer {
     /// The same group with the indirect cache's header-only table at binding 20: the
     /// cache kernels write the real table through their own group 0 (gi_cache.rs).
     kernel: Owned<wgpu::BindGroup>,
+    /// While cache-terminated hits are on (binding 28), the group cell shading binds: the
+    /// zero dummy at 28, because cell shading writes the outgoing radiance it would read.
+    cell: Option<Owned<wgpu::BindGroup>>,
     _allocation: Allocation,
 }
 pub(super) struct Hdr {
@@ -362,6 +365,13 @@ impl LightingGpu {
     pub fn kernel_bind(&self) -> &wgpu::BindGroup {
         &self.active.as_ref().unwrap().kernel
     }
+    /// The group the indirect cache's cell shading binds (gi_cache.rs `ShadeGroups`): `bind`,
+    /// except that cache-terminated hits' outgoing radiance (binding 28) is the zero dummy,
+    /// since cell shading writes that buffer. Cell modules never compose the lookup.
+    pub fn cell_bind(&self) -> &wgpu::BindGroup {
+        let active = self.active.as_ref().unwrap();
+        active.cell.as_deref().unwrap_or(&active.bind)
+    }
     /// The light records the bind groups hold (LC1's culling kernel reads them too).
     pub fn light_buffer(&self) -> &wgpu::Buffer {
         &self.active.as_ref().unwrap().buffer
@@ -549,7 +559,7 @@ impl Renderer {
                             wgpu::BindGroupEntry {
                                 binding: 27,
                                 resource: wgpu::BindingResource::TextureView(
-                                    &state.transmission.map.view,
+                                    &state.transmission.reduced.view,
                                 ),
                             },
                             wgpu::BindGroupEntry {
@@ -695,6 +705,13 @@ impl Renderer {
                 &self.gi.dummy,
                 &self.gi.dummy,
             );
+            let cell = crate::program::cache_hits_rough().map(|_| {
+                group(
+                    "lighting, indirect cache cell shading",
+                    self.gi.shading_table(),
+                    &self.gi.dummy,
+                )
+            });
             let next = LightBuffer {
                 shadow_generation: self.view.shadows.stats.resource_generation,
                 cluster_generation: (self.view.clusters.generation, self.local_maps.generation),
@@ -707,6 +724,7 @@ impl Renderer {
                 buffer,
                 bind,
                 kernel,
+                cell,
                 _allocation: self.ledger.allocate(AllocationKind::Light, needed),
             };
             if let Some(old) = state.active.replace(next) {

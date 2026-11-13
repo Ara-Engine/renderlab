@@ -143,6 +143,32 @@ pub(crate) fn test_record_capture(kind: &str, bytes: &[u8]) {
     std::fs::write(dir.join(format!("{test}-{index:04}-{kind}.bin")), bytes).unwrap();
 }
 
+/// `RENDERLAB_SUBMIT_LOG` prints one line per submitted frame: how long finishing the encoder,
+/// the early submission of a split frame and the last `queue.submit` took, and how many flights
+/// were alive. For finding out whether a submit waits on an older frame (a pipelined present).
+/// `1` prints to stderr; any other value is a file the lines are appended to (for a host that
+/// does not forward stderr).
+fn submit_log(line: impl FnOnce() -> String) {
+    static ON: OnceLock<Option<String>> = OnceLock::new();
+    let Some(target) = ON
+        .get_or_init(|| std::env::var("RENDERLAB_SUBMIT_LOG").ok().filter(|v| !v.is_empty()))
+        .as_deref()
+    else {
+        return;
+    };
+    let line = line();
+    if target == "1" {
+        eprintln!("{line}");
+    } else if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(target)
+    {
+        use std::io::Write;
+        let _ = writeln!(file, "{line}");
+    }
+}
+
 #[cfg(test)]
 impl Renderer {
     /// Reloads the standard program, as edits of its file do.
@@ -597,6 +623,9 @@ pub struct Renderer {
     primary_hash: [u8; 32],
     /// Last installed prelude WGSL, composed again when traced visibility is selected.
     source: String,
+    /// SHA-256 of `source` and of its hardware-shadow composition, kept for the per-frame keys.
+    source_digest: [u8; 32],
+    hardware_digest: Option<[u8; 32]>,
     /// Its hardware-shadow and fresh compositions, where this renderer has those paths.
     hardware_source: Option<String>,
     fresh_source: Option<String>,
@@ -1123,6 +1152,10 @@ impl Renderer {
             transparency: Default::default(),
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
+            source_digest: Sha256::digest(wgsl.as_bytes()).into(),
+            hardware_digest: hardware_source
+                .as_deref()
+                .map(|s| Sha256::digest(s.as_bytes()).into()),
             hardware_source,
             fresh_source,
             primary_sources: None,
@@ -1500,7 +1533,11 @@ impl Renderer {
             self.programs[i].pipelines.install(variant, pair);
         }
         wgsl.clone_into(&mut self.source);
+        self.source_digest = Sha256::digest(wgsl.as_bytes()).into();
         self.view.visibility_buffer = None;
+        self.hardware_digest = hardware_source
+            .as_deref()
+            .map(|s| Sha256::digest(s.as_bytes()).into());
         self.hardware_source = hardware_source;
         self.fresh_source = fresh_source;
         self.primary_sources = primary_sources;
@@ -1822,7 +1859,6 @@ impl Renderer {
         self.submissions += 1;
         if let (Some(hardware), Some(acceleration)) = (&mut self.hardware_shadows, &acceleration) {
             hardware.mesh_submitted(
-                &self.device,
                 &self.ledger,
                 acceleration.clone(),
                 self.submissions,
@@ -2595,16 +2631,10 @@ impl Renderer {
         let camera_bytes = matrix_bytes(matrix);
         let shadow_start = Instant::now();
         let mut shadow_frame = if self.view.shadows.enabled(view_mode) {
-            let bounds = draws
-                .iter()
-                .flat_map(|draw| {
-                    draw.instances
-                        .state
-                        .models
-                        .iter()
-                        .map(move |&model| shadow_gpu::world_bounds(draw.mesh.bounds, model))
-                })
-                .collect::<Result<Vec<_>, _>>()?;
+            let mut bounds = Vec::new();
+            for draw in draws.iter() {
+                bounds.extend_from_slice(&draw.instances.state.world_bounds(draw.mesh.bounds)?);
+            }
             Some(self.view.shadows.plan(
                 camera,
                 [color.width(), color.height()],
@@ -3408,7 +3438,7 @@ impl Renderer {
                     .map(|(arrays, materials)| gi_cache::ShadeGroups {
                         arrays,
                         materials,
-                        lighting: self.lighting.bind(),
+                        lighting: self.lighting.cell_bind(),
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
@@ -3691,16 +3721,31 @@ impl Renderer {
         encoder.on_submitted_work_done(move || {
             let _ = callback.set(());
         });
+        let finish_start = Instant::now();
         let commands = encoder.finish();
+        let finish = finish_start.elapsed();
         self.check_fault()?;
         let encode = encode_start.elapsed() - cpu.shadow_encode - early_submit;
         let submitted_at = Instant::now();
+        // The flights still alive when this frame is submitted: a frame that waits inside
+        // `queue.submit` for an older one shows here with the older one counted.
+        let alive = self.occupied();
         let index = self.queue.submit([commands]);
         if let Some(mut t) = marks {
             t.submitted();
             self.pass_timeline = Some(t);
         }
         let submit = submitted_at.elapsed() + early_submit;
+        submit_log(|| {
+            let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.;
+            format!(
+                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2}",
+                self.submissions + 1,
+                ms(finish),
+                ms(early_submit),
+                ms(submit - early_submit),
+            )
+        });
         self.submissions += 1;
         if lit {
             self.atmosphere_submitted(camera, [color.width(), color.height()]);
@@ -3714,7 +3759,6 @@ impl Renderer {
                     && seen.insert(Arc::as_ptr(a))
                 {
                     self.hardware_shadows.as_mut().unwrap().dynamic_submitted(
-                        &self.device,
                         &self.ledger,
                         a.clone(),
                         self.submissions,
@@ -3722,7 +3766,6 @@ impl Renderer {
                 }
             }
             self.hardware_shadows.as_mut().unwrap().scene_submitted(
-                &self.device,
                 &self.ledger,
                 self.submissions,
             );
@@ -3778,7 +3821,9 @@ impl Renderer {
             revision: self.revision,
             cpu: CpuFrame {
                 encode,
+                finish,
                 submit,
+                early_submit,
                 ..cpu
             },
             uploads,

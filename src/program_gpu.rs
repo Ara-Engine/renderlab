@@ -286,6 +286,23 @@ impl ProgramModules {
     }
 }
 
+/// What a program's text declares (`ProgramSlot::traits`).
+#[derive(Clone, Copy)]
+pub(super) struct ProgramTraits {
+    /// Its cell shading calls hooks (`program::reflects`).
+    pub reflects: bool,
+    /// It declares a reflection lobe that reads the incident (`program::declares_reflection`).
+    pub declares_reflection: bool,
+}
+impl ProgramTraits {
+    pub fn of(source: &str) -> Self {
+        Self {
+            reflects: program::reflects(source),
+            declares_reflection: program::declares_reflection(source),
+        }
+    }
+}
+
 pub(super) struct ProgramSlot {
     pub id: u64,
     /// The renderer keeps the standard program's handle; other slots retire when theirs
@@ -293,6 +310,12 @@ pub(super) struct ProgramSlot {
     pub handle: Weak<ProgramShared>,
     pub label: String,
     pub source: String,
+    /// SHA-256 of `source`, kept with it so the per-frame keys built from the source (the glass
+    /// and reflection pipelines', the GI light key) hash 32 bytes, not the program.
+    pub digest: [u8; 32],
+    /// What the program's text declares, scanned once here: the GI cache and the transparent
+    /// pass ask per draw every frame (`program::reflects`, `program::declares_reflection`).
+    pub traits: ProgramTraits,
     pub layout: Option<ParameterLayout>,
     pub modules: ProgramModules,
     pub pipelines: ProgramPipelines,
@@ -563,6 +586,8 @@ pub(super) fn standard_slot(
         handle: Arc::downgrade(&handle.0),
         label: "standard".into(),
         source: STANDARD_PROGRAM.into(),
+        digest: Sha256::digest(STANDARD_PROGRAM.as_bytes()).into(),
+        traits: ProgramTraits::of(STANDARD_PROGRAM),
         layout: compiled.layout,
         modules: compiled.modules,
         pipelines: ProgramPipelines::default(),
@@ -644,6 +669,8 @@ impl Renderer {
             handle: Arc::downgrade(&handle.0),
             label: d.label.into(),
             source: d.source.into(),
+            digest: Sha256::digest(d.source.as_bytes()).into(),
+            traits: ProgramTraits::of(d.source),
             layout: compiled.layout,
             modules: compiled.modules,
             pipelines: ProgramPipelines::default(),
@@ -696,6 +723,8 @@ impl Renderer {
         }
         slot.install_parameters(compiled.layout, &self.queue, &mut self.uploads);
         source.clone_into(&mut slot.source);
+        slot.digest = Sha256::digest(source.as_bytes()).into();
+        slot.traits = ProgramTraits::of(source);
         self.update_hashes();
         self.revision.0 += 1;
         ReloadReport {
