@@ -173,6 +173,7 @@ impl Card {
                     programs: None,
                     sky_map: None,
                     skins: None,
+                    casts: None,
                     colour_lut: None,
                     ids: None,
                 },
