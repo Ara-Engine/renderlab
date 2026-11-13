@@ -196,6 +196,9 @@ impl Renderer {
             self.program_slot(id).pipelines.material[mixed as usize][state.requests as usize][si]
                 .as_ref()
         };
+        if mixed && !state.programs.iter().any(|&id| pair(id).is_some()) {
+            return false;
+        }
         if !mixed {
             let Some(p) = pair(state.program) else {
                 return false;
@@ -278,67 +281,82 @@ mod tests {
         let scene = include_str!("../shaders/scene.wgsl");
         let rt = shading_heads(scene).unwrap();
         let nonrt = non_rt_sources(scene).unwrap().1;
-        for head in rt.iter().chain(&nonrt) {
-            for list in [false, true] {
-                for stage in [Stage::Traced, Stage::TracedStreamed] {
-                    for (role, write) in [(MaterialRole::Write, true), (MaterialRole::Read, false)]
-                    {
-                        let source = if list {
-                            program::compose_list(head, crate::STANDARD_PROGRAM, stage, false)
-                        } else {
-                            program::compose(head, crate::STANDARD_PROGRAM, stage, false)
-                        };
-                        let source =
-                            program::material_variant(source, crate::STANDARD_PROGRAM, role)
+        for program_source in [
+            crate::STANDARD_PROGRAM,
+            include_str!("../examples/game_scene.wgsl"),
+        ] {
+            for head in rt.iter().chain(&nonrt) {
+                for list in [false, true] {
+                    for stage in [Stage::Traced, Stage::TracedStreamed] {
+                        for (role, write) in
+                            [(MaterialRole::Write, true), (MaterialRole::Read, false)]
+                        {
+                            let source = if list {
+                                program::compose_list(
+                                    head,
+                                    program_source,
+                                    stage,
+                                    program::declares_parameters(program_source),
+                                )
+                            } else {
+                                program::compose(
+                                    head,
+                                    program_source,
+                                    stage,
+                                    program::declares_parameters(program_source),
+                                )
+                            };
+                            let source = program::material_variant(source, program_source, role)
                                 .unwrap()
                                 .source;
-                        let module = naga::front::wgsl::parse_str(&source)
+                            let module = naga::front::wgsl::parse_str(&source)
+                                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+                            naga::valid::Validator::new(
+                                naga::valid::ValidationFlags::all(),
+                                naga::valid::Capabilities::all(),
+                            )
+                            .validate(&module)
                             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-                        naga::valid::Validator::new(
-                            naga::valid::ValidationFlags::all(),
-                            naga::valid::Capabilities::all(),
-                        )
-                        .validate(&module)
-                        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-                        for layout in entries(write) {
-                            let global = module
-                                .global_variables
-                                .iter()
-                                .find(|(_, g)| {
-                                    g.binding.as_ref().is_some_and(|b| {
-                                        b.group == 0 && b.binding == layout.binding
+                            for layout in entries(write) {
+                                let global = module
+                                    .global_variables
+                                    .iter()
+                                    .find(|(_, g)| {
+                                        g.binding.as_ref().is_some_and(|b| {
+                                            b.group == 0 && b.binding == layout.binding
+                                        })
                                     })
-                                })
-                                .unwrap()
-                                .1;
-                            let naga::TypeInner::Image { class, .. } =
-                                module.types[global.ty].inner
-                            else {
-                                panic!("record is an image")
-                            };
-                            match (layout.ty, class) {
-                                (
-                                    wgpu::BindingType::StorageTexture {
-                                        access: wgpu::StorageTextureAccess::WriteOnly,
-                                        format: wgpu::TextureFormat::Rgba32Uint,
-                                        ..
-                                    },
-                                    naga::ImageClass::Storage {
-                                        format: naga::StorageFormat::Rgba32Uint,
-                                        access,
-                                    },
-                                ) => assert_eq!(access, naga::StorageAccess::STORE),
-                                (
-                                    wgpu::BindingType::Texture {
-                                        sample_type: wgpu::TextureSampleType::Uint,
-                                        ..
-                                    },
-                                    naga::ImageClass::Sampled {
-                                        kind: naga::ScalarKind::Uint,
-                                        ..
-                                    },
-                                ) => {}
-                                other => panic!("record ABI mismatch: {other:?}"),
+                                    .unwrap()
+                                    .1;
+                                let naga::TypeInner::Image { class, .. } =
+                                    module.types[global.ty].inner
+                                else {
+                                    panic!("record is an image")
+                                };
+                                match (layout.ty, class) {
+                                    (
+                                        wgpu::BindingType::StorageTexture {
+                                            access: wgpu::StorageTextureAccess::WriteOnly,
+                                            format: wgpu::TextureFormat::Rgba32Uint,
+                                            ..
+                                        },
+                                        naga::ImageClass::Storage {
+                                            format: naga::StorageFormat::Rgba32Uint,
+                                            access,
+                                        },
+                                    ) => assert_eq!(access, naga::StorageAccess::STORE),
+                                    (
+                                        wgpu::BindingType::Texture {
+                                            sample_type: wgpu::TextureSampleType::Uint,
+                                            ..
+                                        },
+                                        naga::ImageClass::Sampled {
+                                            kind: naga::ScalarKind::Uint,
+                                            ..
+                                        },
+                                    ) => {}
+                                    other => panic!("record ABI mismatch: {other:?}"),
+                                }
                             }
                         }
                     }
@@ -347,4 +365,3 @@ mod tests {
         }
     }
 }
-

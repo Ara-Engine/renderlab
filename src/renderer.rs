@@ -3231,7 +3231,7 @@ impl Renderer {
         }
         if traced && !temporal {
             self.ensure_shade_detail(&programs, streaming, usize::from(soft))?;
-            if !streaming {
+            if !streaming && !crate::program::material_pass_on() {
                 self.prepare_lean(&programs, programs.len() > 1, usize::from(soft));
             }
         }
