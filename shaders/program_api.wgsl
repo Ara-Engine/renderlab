@@ -76,8 +76,8 @@ struct LightSample { index:u32, direction:vec3<f32>, attenuation:f32, intensity:
 // in by declaring `fn material_out(s:Surface, input:SurfaceInput) -> MaterialRecord` and its
 // inverse `fn material_in(m:MaterialRecord, input:SurfaceInput) -> Surface`; programs that
 // do not keep evaluating `surface` inside their shading kernel. `normal` is the shading
-// normal (unit), `base` linear base colour, `alpha` coverage, `emission` exposed-unit
-// emitted radiance, `view_share`/`view_alpha` MQ2's view dependence, `model` the lighting
+// normal (unit), `base` linear base colour, `alpha` coverage, `emission` emitted radiance
+// (unexposed, as the program's own glow), `view_share`/`view_alpha` MQ2's view dependence, `model` the lighting
 // model (0: the standard metallic-roughness model).
 struct MaterialRecord { normal:vec3<f32>, base:vec3<f32>, alpha:f32, metallic:f32, roughness:f32, emission:vec3<f32>, view_share:f32, view_alpha:f32, model:u32 };
 

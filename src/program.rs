@@ -1758,7 +1758,8 @@ const MATERIAL_SEAM: &str = "    let surface_output=surface(surface_input);\n";
 /// The record's packing, shared by both roles (24 bytes a pixel):
 /// - word 0 (rgba32uint): x the shading normal (octahedral, 2 x unorm16); y the base colour
 ///   (3 x unorm10); z coverage, metallic and MQ2's view share (3 x unorm8, the top byte spare);
-///   w the emission (rgb9e5);
+///   w the emission times this frame's exposure (rgb9e5: unexposed emitters such as
+///   Glint's 40,000-nit glow pass its 65,408 ceiling);
 /// - word 1 (rg32uint): x the receiver's geometric normal (octahedral); y the lighting model
 ///   (low 8 bits), MQ2's lobe alpha (unorm8 at bit 8) and the roughness (unorm16 at bit 16:
 ///   glossy reflections move visibly with 8 bits near zero). Model 255 marks a pixel whose
@@ -1805,7 +1806,7 @@ const MATERIAL_WRITE: &str = r#"@group(0) @binding(75) var rl_material0:texture_
 @group(0) @binding(78) var rl_material1:texture_storage_2d<rg32uint,write>;
 fn rl_material_store(pixel:vec2<i32>,m:MaterialRecord,input:SurfaceInput) {
     let scalars=pack4x8unorm(vec4<f32>(m.alpha,m.metallic,m.view_share,0.0));
-    textureStore(rl_material0,pixel,vec4<u32>(rl_mr_oct(m.normal),rl_mr_unorm10(m.base),scalars,rl_mr_rgb9e5(m.emission)));
+    textureStore(rl_material0,pixel,vec4<u32>(rl_mr_oct(m.normal),rl_mr_unorm10(m.base),scalars,rl_mr_rgb9e5(m.emission*lighting.exposure)));
     let model=(m.model&255u)|(u32(round(clamp(m.view_alpha,0.0,1.0)*255.0))<<8u)|(u32(round(clamp(m.roughness,0.0,1.0)*65535.0))<<16u);
     textureStore(rl_material1,pixel,vec4<u32>(rl_mr_oct(input.geometric),model,0u,0u));
 }
@@ -1817,7 +1818,7 @@ fn rl_material_load(pixel:vec2<i32>)->MaterialRecord {
     let a=textureLoad(rl_material0,pixel,0);
     let b=textureLoad(rl_material1,pixel,0);
     let scalars=unpack4x8unorm(a.z);
-    return MaterialRecord(rl_mr_oct_decode(a.x),rl_mr_unorm10_decode(a.y),scalars.x,scalars.y,f32(b.y>>16u)/65535.0,rl_mr_rgb9e5_decode(a.w),scalars.z,f32((b.y>>8u)&255u)/255.0,b.y&255u);
+    return MaterialRecord(rl_mr_oct_decode(a.x),rl_mr_unorm10_decode(a.y),scalars.x,scalars.y,f32(b.y>>16u)/65535.0,rl_mr_rgb9e5_decode(a.w)/lighting.exposure,scalars.z,f32((b.y>>8u)&255u)/255.0,b.y&255u);
 }
 "#;
 /// The material pass's (`Write`) or the record-reading shading's (`Read`) variant of a traced

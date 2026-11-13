@@ -445,7 +445,14 @@ fn ara_emissive_edit_of_the_standard_program_still_composes() {
                 "    return exposed;",
                 "    return min(exposed+exposed_product(s.glow,vec3<f32>(1.0)),vec3<f32>(65504.0));",
             )
+            // Its glow through the material record's emission.
+            .replace(
+                "s.n,s.base,s.alpha,s.metal,s.rough,vec3<f32>(0.0),",
+                "s.n,s.base,s.alpha,s.metal,s.rough,s.glow,",
+            )
+            .replace("    s.alpha=m.alpha;\n    return s;", "    s.alpha=m.alpha;\n    s.glow=m.emission;\n    return s;")
     );
+    assert!(emissive.contains("s.glow=m.emission;") && emissive.contains("s.rough,s.glow,"));
     let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
     for head in &rt {
         let composed = || compose(head, &emissive, Stage::Traced, true);
