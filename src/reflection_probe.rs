@@ -86,6 +86,9 @@ fn shader() -> String {
         "light_sample_untinted",
         "light_transmission",
         "light_visibility",
+        // The engine's display bound: its stub here, so the probe always traces.
+        "light_visibility_within",
+        "rl_lb_skip",
         "expose",
         "reflection_report",
         "rl_finite",
@@ -104,7 +107,10 @@ fn shader() -> String {
     source.push('\n');
     // RL#50: the shading terms' constant gates, which the API's light helpers read.
     for line in api.lines().filter(|l| {
-        l.starts_with("const RL_SHADE_TERMS") || l.starts_with("const RL_TERM_") || l.starts_with("fn rl_term(")
+        l.starts_with("const RL_SHADE_TERMS")
+            || l.starts_with("const RL_TERM_")
+            || l.starts_with("fn rl_term(")
+            || l.starts_with("const RL_LB_SKIPPED")
     }) {
         source.push_str(line);
         source.push('\n');

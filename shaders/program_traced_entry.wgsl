@@ -116,8 +116,10 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     let source_front=dot(geometric,lighting.eye-input.world)>=0.0;
     let m=models[hit.placement];let linear=mat3x3<f32>(m[0].xyz,m[1].xyz,m[2].xyz);
     let e1=linear*(tb.position-ta.position);let e2=linear*(tc.position-ta.position);
-    let gradients=primary_gradients(primary_ray(id,size),input.world,geometric,e1,e2,tb.uv-ta.uv,tc.uv-ta.uv);
-    let bary_gradients=primary_gradients(primary_ray(id,size),input.world,geometric,e1,e2,vec2<f32>(1.0,0.0),vec2<f32>(0.0,1.0));
+    // The pixel's camera ray, once: both footprints and MQ2's view hint use it.
+    let view_ray=primary_ray(id,size);
+    let gradients=primary_gradients(view_ray,input.world,geometric,e1,e2,tb.uv-ta.uv,tc.uv-ta.uv);
+    let bary_gradients=primary_gradients(view_ray,input.world,geometric,e1,e2,vec2<f32>(1.0,0.0),vec2<f32>(0.0,1.0));
     let normal_dx=(b.normal-a.normal)*bary_gradients[0].x+(c.normal-a.normal)*bary_gradients[0].y;
     let normal_dy=(b.normal-a.normal)*bary_gradients[1].x+(c.normal-a.normal)*bary_gradients[1].y;
     // Raster's front_facing and derivative normal, which points away from the camera;
@@ -142,5 +144,5 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     if material.double_sided==0u && !lit_front {textureStore(primary_hdr,pixel,vec4<f32>(0.0));return;}
     // AT1: the program's exposed output through the camera's fog and aerial perspective.
     // MQ2: alpha is the program's view dependence for TR1 (1 when undeclared).
-    textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,id,size)));
+    textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,view_ray)));
 }

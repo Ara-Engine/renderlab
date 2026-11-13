@@ -377,3 +377,96 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
     // The soft RT head and both non-RT heads trace reflections; the hard RT head does not.
     assert!(validated >= 3, "{validated} traced heads validated");
 }
+
+/// Lean shading (`program::lean_variant`): on every traced shading head the lean module is the
+/// full one plus the two early returns (decals, atmosphere), keeps the
+/// program's range on the program's text, and validates.
+#[test]
+fn lean_modules_differ_only_by_their_early_returns() {
+    use crate::program::{Stage, compose, compose_list, lean_variant};
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            // As the wgpu worker (lean_gpu.rs) and the full pipelines compose them.
+            let compose = |head: &str| {
+                crate::program::with_reflection_history(if list {
+                    compose_list(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
+                } else {
+                    compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
+                })
+            };
+            let full = compose(head);
+            let lean = lean_variant(compose(head));
+            assert_eq!(&lean.source[lean.program.clone()], crate::STANDARD_PROGRAM);
+            let returns = [
+                "    if true { return input; }\n",
+                "    if true { return c; }\n",
+            ];
+            let mut stripped = lean.source.clone();
+            for early in returns {
+                assert_eq!(stripped.matches(early).count(), 1, "{early}");
+                stripped = stripped.replacen(early, "", 1);
+            }
+            assert_eq!(stripped, full.source);
+            let module = naga::front::wgsl::parse_str(&lean.source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&lean.source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&lean.source)));
+        }
+    }
+}
+
+/// RENDERLAB_LIGHT_BOUND: the engine's bound behind `light_visibility_within` composes into
+/// every traced module (tiles and list, RT and non-RT heads) in both modes, adding or dropping
+/// skipped lights. The program's text is untouched (the standard program calls
+/// `light_visibility_within`; toon keeps `light_visibility`, so it is never bounded), each
+/// receiver's skipped total resets in `rl_lights_prepare`, reflection hits never skip, and the
+/// modules validate.
+#[test]
+fn light_bound_composes_and_validates() {
+    use crate::program::{LightBound, Stage, compose, compose_list, declares_parameters, with_light_bound};
+    let toon = include_str!("../shaders/programs/toon.wgsl");
+    assert!(crate::STANDARD_PROGRAM.contains("light_visibility_within("));
+    assert!(!toon.contains("light_visibility_within("));
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let mut validated = 0;
+    for head in rt.iter().chain(&non_rt) {
+        for program in [crate::STANDARD_PROGRAM, toon] {
+            let parameters = declares_parameters(program);
+            for list in [false, true] {
+                for (sum, drop) in [(false, false), (true, false), (true, true)] {
+                    let full = if list {
+                        compose_list(head, program, Stage::Traced, parameters)
+                    } else {
+                        compose(head, program, Stage::Traced, parameters)
+                    };
+                    let bound = LightBound { sum, codes: 0.25, drop };
+                    let edited = with_light_bound(full, bound);
+                    let source = &edited.source;
+                    assert_eq!(&source[edited.program.clone()], program);
+                    assert!(source.contains("rl_lb_skipped=total;"), "the bound replaced its stub");
+                    assert!(source.contains("fn rl_lights_prepare(world:vec3<f32>) {\n    rl_lb_skipped=vec3<f32>(0.0);\n"));
+                    if source.contains("var<private> rl_reflection_hit:bool;") {
+                        assert!(source.contains("    if rl_reflection_hit { return false; }\n"));
+                    }
+                    let module = naga::front::wgsl::parse_str(source)
+                        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                    naga::valid::Validator::new(
+                        naga::valid::ValidationFlags::all(),
+                        naga::valid::Capabilities::all(),
+                    )
+                    .validate(&module)
+                    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                    validated += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 2 * 3);
+}

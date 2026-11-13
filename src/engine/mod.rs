@@ -464,6 +464,22 @@ impl Engine {
         self.state.remove_mesh(mesh).map(drop)
     }
 
+    /// Uploads a block-compressed texture as shipped (`renderlab_asset::CompressedTexture`:
+    /// BC7 colour or data, BC5 normals), fully resident. Errors on a device without
+    /// `compressed_textures`; upload RGBA8 (`create_texture`) there.
+    pub fn create_compressed_texture(
+        &mut self,
+        data: renderlab_asset::CompressedTexture,
+    ) -> Result<TextureId, Error> {
+        let texture = self.admit("texture upload admission timed out", |r| {
+            r.try_upload_compressed_texture(&data)
+        })?;
+        Ok(self.state.textures.insert(texture))
+    }
+    /// Whether this device samples BC7 and BC5, so `create_compressed_texture` works.
+    pub fn compressed_textures(&self) -> bool {
+        self.renderer.compressed_textures()
+    }
     /// Uploads a prepared texture (every mip level; see `renderlab_asset::Texture`).
     pub fn create_texture(&mut self, data: TextureData) -> Result<TextureId, Error> {
         let data = Arc::new(data);
