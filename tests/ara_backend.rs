@@ -300,6 +300,8 @@ mod transparency_hit_depth_reference;
 mod primary_check_cases;
 #[path = "ara_backend/cases/lean_shading.rs"]
 mod lean_shading_cases;
+#[path = "ara_backend/cases/readback_ring.rs"]
+mod readback_ring_cases;
 #[path = "ara_backend/primary_check_reference.rs"]
 mod primary_check_reference;
 
