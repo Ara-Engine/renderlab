@@ -1014,7 +1014,10 @@ pub(crate) fn list_entry(per: u32) -> String {
             format!("    let index=(group.x+group.y*RL_LIST_ROW)*{per}u+local.z;\n"),
         ),
         // A clear block's 16 columns: one per lane of the entry's own slice.
-        ("vec2<u32>(lane,0u)", "vec2<u32>(local.x+local.y*4u,0u)".to_owned()),
+        (
+            "vec2<u32>(lane,0u)",
+            "vec2<u32>(local.x+local.y*4u,0u)".to_owned(),
+        ),
     ] {
         assert_eq!(source.matches(find).count(), 1, "list lanes: {find}");
         source = source.replacen(find, &replace, 1);

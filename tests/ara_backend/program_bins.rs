@@ -154,7 +154,12 @@ pub fn reference(fixture: &Fixture) -> Expected {
             if count == 0 {
                 [0; 4]
             } else {
-                [groups.min(DISPATCH_ROW), groups.div_ceil(DISPATCH_ROW), 1, 0]
+                [
+                    groups.min(DISPATCH_ROW),
+                    groups.div_ceil(DISPATCH_ROW),
+                    1,
+                    0,
+                ]
             }
         })
         .collect();
