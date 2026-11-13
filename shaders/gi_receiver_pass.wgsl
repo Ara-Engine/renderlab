@@ -1,28 +1,26 @@
-// GI receiver lookup output: 48 bytes/pixel, 2 f32 scales + 39 snorm8 coefficients.
-// Sky and bounce stay separate so the shading stage preserves their separate clamps.
-struct GiPrepared { scales:vec2<f32>, packed:array<u32,10> };
+// GI receiver output: 48 bytes/pixel, two f32 scales and 39 snorm8 coefficients.
+// Three vector words retain the original byte layout, with coalesced loads/stores.
+struct GiPrepared { r0:vec4<u32>, r1:vec4<u32>, r2:vec4<u32> };
 @group(0) @binding(68) var<storage,read_write> gi_prepared:array<GiPrepared>;
-fn gi_pass_component(i:u32) -> f32 {
-    if i<27u { return gi_rx_sky[i/3u][i%3u]; }
-    if i<39u { return gi_rx_bounce[(i-27u)/3u][(i-27u)%3u]; }
-    return 0.0;
-}
 fn gi_pass_load(input:SurfaceInput,id:vec2<u32>,size:vec2<u32>) {
     let at=id.y*size.x+id.x;
-    let scales=gi_prepared[at].scales;
+    let a=gi_prepared[at].r0;let b=gi_prepared[at].r1;let c=gi_prepared[at].r2;
+    let scales=bitcast<vec2<f32>>(a.xy);
     gi_rx_valid=scales.x>=0.0;
     gi_rx_normal=unit_normal(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal));
-    for(var i=0u;i<39u;i+=1u) {
-        let value=unpack4x8snorm(gi_prepared[at].packed[i/4u])[i%4u]*select(scales.x,scales.y,i>=27u);
-        // Dynamic vector stores are unreliable on NVIDIA: construct whole RGB vectors below.
-        if i%3u==0u {
-            let b=i+1u;let c=i+2u;
-            let y=unpack4x8snorm(gi_prepared[at].packed[b/4u])[b%4u]*select(scales.x,scales.y,b>=27u);
-            let z=unpack4x8snorm(gi_prepared[at].packed[c/4u])[c%4u]*select(scales.x,scales.y,c>=27u);
-            if i<27u { gi_rx_sky[i/3u]=vec3<f32>(value,y,z); }
-            else { gi_rx_bounce[(i-27u)/3u]=vec3<f32>(value,y,z); }
-        }
-    }
+    gi_rx_sky[0u]=vec3<f32>(unpack4x8snorm(a.z).x,unpack4x8snorm(a.z).y,unpack4x8snorm(a.z).z)*scales.x;
+    gi_rx_sky[1u]=vec3<f32>(unpack4x8snorm(a.z).w,unpack4x8snorm(a.w).x,unpack4x8snorm(a.w).y)*scales.x;
+    gi_rx_sky[2u]=vec3<f32>(unpack4x8snorm(a.w).z,unpack4x8snorm(a.w).w,unpack4x8snorm(b.x).x)*scales.x;
+    gi_rx_sky[3u]=vec3<f32>(unpack4x8snorm(b.x).y,unpack4x8snorm(b.x).z,unpack4x8snorm(b.x).w)*scales.x;
+    gi_rx_sky[4u]=vec3<f32>(unpack4x8snorm(b.y).x,unpack4x8snorm(b.y).y,unpack4x8snorm(b.y).z)*scales.x;
+    gi_rx_sky[5u]=vec3<f32>(unpack4x8snorm(b.y).w,unpack4x8snorm(b.z).x,unpack4x8snorm(b.z).y)*scales.x;
+    gi_rx_sky[6u]=vec3<f32>(unpack4x8snorm(b.z).z,unpack4x8snorm(b.z).w,unpack4x8snorm(b.w).x)*scales.x;
+    gi_rx_sky[7u]=vec3<f32>(unpack4x8snorm(b.w).y,unpack4x8snorm(b.w).z,unpack4x8snorm(b.w).w)*scales.x;
+    gi_rx_sky[8u]=vec3<f32>(unpack4x8snorm(c.x).x,unpack4x8snorm(c.x).y,unpack4x8snorm(c.x).z)*scales.x;
+    gi_rx_bounce[0u]=vec3<f32>(unpack4x8snorm(c.x).w,unpack4x8snorm(c.y).x,unpack4x8snorm(c.y).y)*scales.y;
+    gi_rx_bounce[1u]=vec3<f32>(unpack4x8snorm(c.y).z,unpack4x8snorm(c.y).w,unpack4x8snorm(c.z).x)*scales.y;
+    gi_rx_bounce[2u]=vec3<f32>(unpack4x8snorm(c.z).y,unpack4x8snorm(c.z).z,unpack4x8snorm(c.z).w)*scales.y;
+    gi_rx_bounce[3u]=vec3<f32>(unpack4x8snorm(c.w).x,unpack4x8snorm(c.w).y,unpack4x8snorm(c.w).z)*scales.y;
 }
 // ---- GI receiver compute entry ----
 @compute @workgroup_size(8,4) fn gi_receiver_pass(@builtin(global_invocation_id) grid:vec3<u32>) {
@@ -44,15 +42,31 @@ fn gi_pass_load(input:SurfaceInput,id:vec2<u32>,size:vec2<u32>) {
     gi_prepare(input);
     let at=id.y*size.x+id.x;
     var sky=0.0;var bounce=0.0;
-    for(var i=0u;i<39u;i+=1u) {
-        if i<27u {sky=max(sky,abs(gi_pass_component(i)));}
-        else {bounce=max(bounce,abs(gi_pass_component(i)));}
-    }
-    gi_prepared[at].scales=vec2<f32>(select(-1.0,sky,gi_rx_valid),bounce);
-    for(var k=0u;k<10u;k+=1u) {
-        let i=k*4u;
-        let scales=vec4<f32>(select(sky,bounce,i>=27u),select(sky,bounce,i+1u>=27u),select(sky,bounce,i+2u>=27u),select(sky,bounce,i+3u>=27u));
-        let values=vec4<f32>(gi_pass_component(i),gi_pass_component(i+1u),gi_pass_component(i+2u),gi_pass_component(i+3u));
-        gi_prepared[at].packed[k]=pack4x8snorm(values/max(scales,vec4<f32>(1e-30)));
-    }
+    sky=max(sky,max(max(abs(gi_rx_sky[0u]).x,abs(gi_rx_sky[0u]).y),abs(gi_rx_sky[0u]).z));
+    sky=max(sky,max(max(abs(gi_rx_sky[1u]).x,abs(gi_rx_sky[1u]).y),abs(gi_rx_sky[1u]).z));
+    sky=max(sky,max(max(abs(gi_rx_sky[2u]).x,abs(gi_rx_sky[2u]).y),abs(gi_rx_sky[2u]).z));
+    sky=max(sky,max(max(abs(gi_rx_sky[3u]).x,abs(gi_rx_sky[3u]).y),abs(gi_rx_sky[3u]).z));
+    sky=max(sky,max(max(abs(gi_rx_sky[4u]).x,abs(gi_rx_sky[4u]).y),abs(gi_rx_sky[4u]).z));
+    sky=max(sky,max(max(abs(gi_rx_sky[5u]).x,abs(gi_rx_sky[5u]).y),abs(gi_rx_sky[5u]).z));
+    sky=max(sky,max(max(abs(gi_rx_sky[6u]).x,abs(gi_rx_sky[6u]).y),abs(gi_rx_sky[6u]).z));
+    sky=max(sky,max(max(abs(gi_rx_sky[7u]).x,abs(gi_rx_sky[7u]).y),abs(gi_rx_sky[7u]).z));
+    sky=max(sky,max(max(abs(gi_rx_sky[8u]).x,abs(gi_rx_sky[8u]).y),abs(gi_rx_sky[8u]).z));
+    bounce=max(bounce,max(max(abs(gi_rx_bounce[0u]).x,abs(gi_rx_bounce[0u]).y),abs(gi_rx_bounce[0u]).z));
+    bounce=max(bounce,max(max(abs(gi_rx_bounce[1u]).x,abs(gi_rx_bounce[1u]).y),abs(gi_rx_bounce[1u]).z));
+    bounce=max(bounce,max(max(abs(gi_rx_bounce[2u]).x,abs(gi_rx_bounce[2u]).y),abs(gi_rx_bounce[2u]).z));
+    bounce=max(bounce,max(max(abs(gi_rx_bounce[3u]).x,abs(gi_rx_bounce[3u]).y),abs(gi_rx_bounce[3u]).z));
+    let ss=max(sky,1e-30);let bs=max(bounce,1e-30);
+    let q0=pack4x8snorm(vec4<f32>(gi_rx_sky[0u].x,gi_rx_sky[0u].y,gi_rx_sky[0u].z,gi_rx_sky[1u].x)/vec4<f32>(ss,ss,ss,ss));
+    let q1=pack4x8snorm(vec4<f32>(gi_rx_sky[1u].y,gi_rx_sky[1u].z,gi_rx_sky[2u].x,gi_rx_sky[2u].y)/vec4<f32>(ss,ss,ss,ss));
+    let q2=pack4x8snorm(vec4<f32>(gi_rx_sky[2u].z,gi_rx_sky[3u].x,gi_rx_sky[3u].y,gi_rx_sky[3u].z)/vec4<f32>(ss,ss,ss,ss));
+    let q3=pack4x8snorm(vec4<f32>(gi_rx_sky[4u].x,gi_rx_sky[4u].y,gi_rx_sky[4u].z,gi_rx_sky[5u].x)/vec4<f32>(ss,ss,ss,ss));
+    let q4=pack4x8snorm(vec4<f32>(gi_rx_sky[5u].y,gi_rx_sky[5u].z,gi_rx_sky[6u].x,gi_rx_sky[6u].y)/vec4<f32>(ss,ss,ss,ss));
+    let q5=pack4x8snorm(vec4<f32>(gi_rx_sky[6u].z,gi_rx_sky[7u].x,gi_rx_sky[7u].y,gi_rx_sky[7u].z)/vec4<f32>(ss,ss,ss,ss));
+    let q6=pack4x8snorm(vec4<f32>(gi_rx_sky[8u].x,gi_rx_sky[8u].y,gi_rx_sky[8u].z,gi_rx_bounce[0u].x)/vec4<f32>(ss,ss,ss,bs));
+    let q7=pack4x8snorm(vec4<f32>(gi_rx_bounce[0u].y,gi_rx_bounce[0u].z,gi_rx_bounce[1u].x,gi_rx_bounce[1u].y)/vec4<f32>(bs,bs,bs,bs));
+    let q8=pack4x8snorm(vec4<f32>(gi_rx_bounce[1u].z,gi_rx_bounce[2u].x,gi_rx_bounce[2u].y,gi_rx_bounce[2u].z)/vec4<f32>(bs,bs,bs,bs));
+    let q9=pack4x8snorm(vec4<f32>(gi_rx_bounce[3u].x,gi_rx_bounce[3u].y,gi_rx_bounce[3u].z,0.0)/vec4<f32>(bs,bs,bs,bs));
+    gi_prepared[at].r0=vec4<u32>(bitcast<vec2<u32>>(vec2<f32>(select(-1.0,sky,gi_rx_valid),bounce)),q0,q1);
+    gi_prepared[at].r1=vec4<u32>(q2,q3,q4,q5);
+    gi_prepared[at].r2=vec4<u32>(q6,q7,q8,q9);
 }
