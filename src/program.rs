@@ -290,11 +290,11 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
 }
 /// Whether the traced shading entries read the camera's cache lookup once per 4x4 tile
 /// (shaders/gi_tiles.wgsl: a pre-pass looks each tile up, and pixels that agree with it take
-/// its sums) instead of once per pixel. On by default; `RENDERLAB_GI_TILE=0` restores the
-/// per-pixel lookup. Read once per process.
+/// its sums) instead of once per pixel. Off by default, so the per-pixel lookup composes
+/// exactly as before; `RENDERLAB_GI_TILE=1` turns it on. Read once per process.
 pub(crate) fn gi_tiles() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_TILE").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_TILE").is_ok_and(|v| v == "1"))
 }
 /// The tile pre-pass and its take, traced stages only.
 pub(crate) const GI_TILES: &str = include_str!("../shaders/gi_tiles.wgsl");
@@ -608,7 +608,14 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     let specular = tokens(program).iter().any(|t| SPECULAR_INPUTS.contains(t));
     let tiles = gi_tiles() && indirect_calls && stage == Stage::Traced;
     if tiles {
-        indirect.push_str(GI_TILES);
+        // MEASUREMENT: RENDERLAB_GI_TILE_VARY overrides the corners' agreement tolerance.
+        match std::env::var("RENDERLAB_GI_TILE_VARY").ok().and_then(|v| v.parse::<f32>().ok()) {
+            Some(v) => indirect.push_str(&GI_TILES.replace(
+                "const GI_TILE_VARY:f32=0.03;",
+                &format!("const GI_TILE_VARY:f32={v:?};"),
+            )),
+            None => indirect.push_str(GI_TILES),
+        }
     }
     let lookup = if tiles { "gi_tile_take" } else { "gi_prepare" };
     indirect.push_str(&match (indirect_calls, specular) {

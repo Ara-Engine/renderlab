@@ -52,6 +52,12 @@ fn gi_pixel_receiver(id:vec2<u32>) -> GiReceiver {
     return out;
 }
 
+// Whether two lookups' band-0 coefficients differ by under GI_TILE_VARY of the larger, in
+// every channel (and within a small absolute floor, where both are dark).
+const GI_TILE_VARY:f32=0.03;
+fn gi_tile_close(a:vec3<f32>,b:vec3<f32>)->bool {
+    return all(abs(a-b)<=max(GI_TILE_VARY*max(abs(a),abs(b)),vec3<f32>(1e-4)));
+}
 @compute @workgroup_size(64) fn gi_tile_lookups(@builtin(global_invocation_id) gid:vec3<u32>, @builtin(num_workgroups) groups:vec3<u32>) {
     let size=textureDimensions(primary_hit);
     let grid=gi_tile_grid(size);
@@ -60,14 +66,31 @@ fn gi_pixel_receiver(id:vec2<u32>) -> GiReceiver {
     let tile=vec2<u32>(index%grid.x,index/grid.x);
     let at=index*GI_TILE_WORDS;
     var flags=0u;
-    let r=gi_pixel_receiver(min(tile*4u+vec2<u32>(1u),size-vec2<u32>(1u)));
-    if r.valid && gi_word(GI_H_ENABLED)!=0u {
+    // Two lookups at the tile's opposite corners. Where they disagree (a contact, an edge, a
+    // steep gradient between cache cells) no pixel takes the tile: one record would step at
+    // the tile's 4 pixels. Where they agree the record is their mean.
+    let last=size-vec2<u32>(1u);
+    let r=gi_pixel_receiver(min(tile*4u,last));
+    let q=gi_pixel_receiver(min(tile*4u+vec2<u32>(3u),last));
+    if r.valid && q.valid && gi_word(GI_H_ENABLED)!=0u {
         var input:SurfaceInput;
+        input.world=q.receiver.world;
+        input.normal=q.normal;
+        input.receiver=q.receiver;
+        gi_prepare(input);
+        let q_valid=gi_rx_valid;
+        let q_bin=gi_bin(gi_rx_normal);
+        let q_sky=gi_rx_sky;
+        let q_bounce=gi_rx_bounce;
         input.world=r.receiver.world;
         input.normal=r.normal;
         input.receiver=r.receiver;
         gi_prepare(input);
-        flags=select(1u,3u,gi_rx_valid);
+        let agree=gi_rx_valid && q_valid && q_bin==gi_bin(gi_rx_normal)
+            && gi_tile_close(gi_rx_sky[0],q_sky[0]) && gi_tile_close(gi_rx_bounce[0],q_bounce[0]);
+        flags=select(1u,3u,agree);
+        for(var i=0u;i<9u;i+=1u) { gi_rx_sky[i]=0.5*(gi_rx_sky[i]+q_sky[i]); }
+        for(var i=0u;i<4u;i+=1u) { gi_rx_bounce[i]=0.5*(gi_rx_bounce[i]+q_bounce[i]); }
         var h=array<f32,40>();
         for(var i=0u;i<9u;i+=1u) { h[i*3u]=gi_rx_sky[i].x;h[i*3u+1u]=gi_rx_sky[i].y;h[i*3u+2u]=gi_rx_sky[i].z; }
         for(var i=0u;i<4u;i+=1u) { h[27u+i*3u]=gi_rx_bounce[i].x;h[28u+i*3u]=gi_rx_bounce[i].y;h[29u+i*3u]=gi_rx_bounce[i].z; }
