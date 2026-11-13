@@ -1,52 +1,79 @@
 # Material pass and the material record
 
-`RENDERLAB_MATERIAL_PASS=1` (off by default) splits primary shading in two. A material pass decodes each pixel's hit, runs the program's `surface` and writes a material record. Shading then rebuilds `Surface` from the record instead of running `surface` again. A program opts in by declaring `material_out` / `material_in` (`MaterialRecord`, shaders/program_api.wgsl). The standard program does; any other program keeps its single kernel.
+`RENDERLAB_MATERIAL_PASS=1` (off by default) splits primary shading in two:
+- **The material pass** decodes each pixel's hit, runs the program's `surface` and writes the material record.
+- **Shading** rebuilds `Surface` from the record instead of running `surface` again.
 
-The code is in `src/program.rs`, section "Material pass" (`material_variant`, `MATERIAL_PACKING`); the port dispatch is in `src/backend_ara/forward.rs` (`material_records`). The wgpu wiring is not built yet.
+A program opts in by declaring `material_out` / `material_in` (`MaterialRecord`, shaders/program_api.wgsl); the standard program does. A program without them still gets a receiver-only record: model 255, the interpolated normal as its shading normal, material fields zero, and its `surface` does not run. Its shading keeps the single kernel. The port logs how many program slots shade from the record and how many keep the single kernel.
 
-## Record (32 bytes a pixel, group 0 bindings 75 and 78, two rgba32uint images)
+The code is in `src/program.rs`, section "Material pass" (`material_variant`, `MATERIAL_PACKING`). The port's dispatch is in `src/backend_ara/forward.rs` (`material_records`); the wgpu wiring is Renderlab #98.
+
+## Record (48 bytes a pixel, three rgba32uint images, group 0 bindings 75, 78 and 74)
 
 | word | x | y | z | w |
 |---|---|---|---|---|
-| 0 | shading normal, octahedral 2 x unorm16 | base red, green (unorm16 each) | base blue (unorm16), coverage and metallic (unorm8 each) | emission x exposure, rgb9e5 |
-| 1 | geometric normal, octahedral | model (8 bits), MQ2 lobe alpha (unorm8), roughness (unorm16, rounded up) | MQ2 view share (unorm16), 16 bits spare | spare |
+| 0 (75) | shading normal, octahedral 2 x unorm16 | base red, green (unorm16 each) | base blue (unorm16), coverage and metallic (unorm8 each) | emission x exposure, rgb9e5 |
+| 1 (78) | the receiver's geometric normal (`Receiver::geometric`), octahedral 2 x unorm16 | model (8 bits), MQ2 lobe alpha (unorm8), roughness (unorm16, rounded up) | MQ2 view share (unorm16), TR1 view hint (f16, `tr1_view_hint`) | slot (bits 0-27), near a triangle edge (28), `thin` (29), source-front (30), lit-front (31) |
+| 2 (74) | trace point x (f32) | trace point y | trace point z | epsilon as an f32 exponent (bits 0-7; 0 = the 1e-5 floor), interpolated vertex normal (octahedral 2 x 12, bits 8-31) |
 
-- Model 255 marks a pixel whose program keeps its own `shade`.
-- Roughness is rounded up so that the decoded value is never below the evaluated one. A value authored at a threshold, such as `LocalShadows::unshadowed_hits_from`, stays on its side of it.
-- The first record was 24 bytes, with a 10-bit base colour and nearest-rounded roughness. It failed three port cases with the pass on (Linux Radeon; two of them on the M5 as well):
+- **Memory:** 100 MB at 1080p, on top of the 16-byte hit image, which visibility, the material pass, the standard program's shading and TR1/ids still read. The GI pass's 48-byte target can keep only its lookup result once it reads the receiver from words 1 and 2.
+- **Model 255:** a pixel whose program has no mapping (it keeps its own `shade`).
+- **Roughness is rounded up,** so the decoded value is never below the evaluated one. A value authored at a threshold, such as `LocalShadows::unshadowed_hits_from`, stays on its side of it.
+- **The first record (24 bytes)** had a 10-bit base colour and nearest-rounded roughness. It failed three port cases with the pass on (Linux Radeon; two also on the M5):
   - the 10-bit base moved every pixel of a flat floor by one f16 step;
-  - it also turned a texture's sRGB decode difference of a hair into a whole step;
+  - it turned a texture's sRGB decode difference of a hair into a whole step;
   - roughness at the threshold decoded just below it.
-- Even an f32 octahedral normal does not round-trip bit for bit, so some pixels still move by one f16 step with the pass on. `traced_frame_agrees_with_the_mesh_pass_over_misses_sky_and_post` therefore counts only differences past one step while the pass is on.
+- **No compact record is bit-exact.** Even an f32 octahedral normal does not round-trip bit for bit, so some pixels still move by one f16 step with the pass on. `traced_frame_agrees_with_the_mesh_pass_over_misses_sky_and_post` counts only differences past one step while the pass is on.
+
+### The receiver (words 1 and 2)
+
+The receiver is what the sun, GI and light-visibility passes and shading read instead of decoding the hit: `rl_mr_receiver` gives `Receiver`, `rl_mr_vertex_normal` the interpolated normal, `rl_mr_near` the edge mark. `RENDERLAB_MATERIAL_DEBUG=receiver` (the port case `the_record_rebuilds_the_receiver`) holds it against the sun path's receiver for a fresh camera ray, edge repair included, on the M5:
+- **Exact:** on all 16,137 hits, toon and standard, the trace point, slot, `thin`, both sides and the epsilon are bit for bit wherever the repair leaves the hit.
+- **Geometric normal:** within 3.2e-5 rad.
+- **Interpolated normal (12 bits):** within 8.1e-4 rad (0.047 degrees). Today shading's GI and ES lookups still bin by the decoded normal; the GI pass will read this one, so a cell boundary within 0.047 degrees of a normal can flip which cell it reads.
+- **Repaired edges:** 2 pixels in the case are moved by the repair. The record carries shading's barycentric point there and the near-edge mark, so a reader that needs the sun path's point repairs those hits itself (`MATERIAL_TRACE_RECEIVER` is the sun path's `primary_penumbra_receiver`, body for body). The writer does not run the repair: its ray-query code made the pass 0.56 ms (Showcase) and 0.74 ms (Glint) slower on the M5 for a handful of pixels. The sun pass already carries that code.
+
+Order in an interactive port frame: trace (raw hit; near-edge pixels queued) → `primary_repair_interactive` (repaired hit record) → material pass → shading. On the port the sun's rays are inside the trace (visibility) stage, before the material pass. Getting the desktop's order (material before sun) needs #94's sun pass ported, as a pass after the material pass reading words 1 and 2; it isn't built.
+
+### What shading still reads after `surface` (the audit)
+
+- **The specular filter** (`specular_brdf`, U1b method 7, per light): the interpolated normal and its derivatives, the tangent frame, `source_front`, the footprint and, for normal-mapped materials, uv and its gradients with up to 256 normal-map samples. It is light-dependent, so the standard program's shading keeps its vertex attribute fetch. That is what the standard path keeps.
+- **`material_normal` per light inside the filter:** taken from the record's shading normal (`rl_material_use`, set after the reflection hits are shaded, which use their own surfaces).
+- **GI and ES lookups (`gi_prepare` / `es_prepare`):** the interpolated normal. They ride on shading's attribute fetch today; the GI pass reads word 2.
+- **`rl_reflection_prepare`:** the interpolated normal and its derivatives (lobe curvature). They ride on the filter's fetch.
+- **MQ2's `tr1_view_hint`:** computed in the material pass and stored in word 1.
+- **Decals:** only through `material_normal`, so covered by the record.
+
+### What the receiver-only record closes off
+
+A program with its own `shade` cannot change the receiver the sun, GI and light passes see. Point and normals come from geometry and the interpolated normal, not from the program. A program that displaces or bends its shading normal gets that only in its own `shade`. If a program later needs a custom receiver normal, that is a material output, not shader code. Custom `shade` stays supported.
 
 ## Cost (M5, Ara main, Showcase at EV 10 / Glint goal at EV 13.5, medians of 3 interleaved rounds)
 
-`RENDERLAB_MATERIAL_PROBE` (measurement only) splits the cost. All figures are ms, Showcase / Glint.
+`RENDERLAB_MATERIAL_PROBE` (measurement only) splits the cost. All figures are ms.
 
-| | Showcase | Glint |
-|---|---|---|
-| shading, pass off | 7.37 | 6.71 |
-| shading, pass on (32 B) | 7.07 | 6.19 |
-| material pass | 1.00 | 0.91 |
-| └ dispatch and list walk (`empty`) | < 0.10 | 0.11 |
-| └ hit decode (`decode` - `empty`) | 0.72-0.75 | 0.69 |
-| └ `surface` and packing (`nostore` - `decode`) | 0.16 | 0.10 |
-| └ store (full - `nostore`) | 0.01 | 0.00 |
-| record load and unpack in shading (`loadplus` - off) | 0.49 | 0.13 |
-| vertex attributes still read by shading (on - `readlean`) | 0.25 | 0.28 |
-| position side of the decode, alone (`readpos`, includes the list walk) | 0.63 | 0.60 |
+| | Showcase, 32 B | Glint, 32 B | Showcase, 48 B | Glint, 48 B |
+|---|---|---|---|---|
+| shading, pass off | 7.37 | 6.71 | 7.37 | 6.68 |
+| shading, pass on | 7.07 | 6.19 | 6.89 | 5.99 |
+| material pass | 1.00 | 0.91 | 1.20 | 1.11 |
+| └ launch and list walk (`empty`) | < 0.10 | 0.11 | < 0.10 | 0.11 |
+| └ hit decode (`decode` - `empty`) | 0.72-0.75 | 0.69 | 0.72-0.75 | 0.69 |
+| └ `surface`, packing, near-edge test (`nostore` - `decode`) | 0.16 | 0.10 | 0.23 | 0.16 |
+| └ store (full - `nostore`) | 0.01 | 0.00 | 0.15 | 0.15 |
+| record load and unpack in shading (`loadplus` - off) | 0.49 | 0.13 | 0.24 | 0.03 |
+| vertex attributes still read by shading (on - `readlean`) | 0.25 | 0.28 | | |
+| position side of the decode, alone (`readpos`, includes the list walk) | 0.63 | 0.60 | | |
 
 What these show:
-- **The store is free.** Going from 24 to 32 bytes changed neither the pass nor the read measurably (the 24-byte record read 0.47 / 0.15).
-- **`surface` costs 0.10-0.16 ms in the lean pass and about 0.6 ms inside the shading kernel.** The split's gain so far is occupancy.
-- **What runs twice is the hit decode.** The pass needs all of it, to run `surface`. Shading still needs its position side (receiver, footprint, geometric normal) and some vertex attributes.
+- **The writer is decode-bound on the M5:** about 0.7 ms of 1.1-1.2, against 0.1 for launch and list walk. On the RTX (#98), 0.20 of its 0.25 ms is launch and list.
+- **The third word's store is 0.15 ms;** the first two words stored for about nothing.
+- **Shading saved 0.19 / 0.21 ms** from taking the per-light `material_normal` and MQ2's hint from the record.
+- **Net per frame:** Showcase +0.72 ms (7.37 against 6.89 + 1.20), Glint +0.42 (6.68 against 5.99 + 1.11). The 32-byte record was +0.70 / +0.39, so the extra 16 bytes cost the frame about nothing.
+- **The pass pays once the passes after it** (sun, GI, light visibility) **stop decoding hits:** each of them saves its own decode.
 
-## Decision: the material pass becomes the decode-once pass
+## Decision: the material pass is the decode-once pass
 
-The record grows by one rgba32uint word: the trace point (xyz, f32) and the receiver's vertex-precision epsilon (f32). Word 1's spare w carries the slot (29 bits), `thin` and the front-face bits. Every reader builds `Receiver` and a thin `SurfaceInput` from words 1 and 2 plus the pixel's camera ray, without touching the hit image or vertex buffers: shading, the GI lookup, local-light visibility and the sun pass. The footprint (`world_dx` / `world_dy`) is the neighbouring pixels' rays against the plane (trace point, geometric normal).
+A separate decode pass writing a G-buffer before the material pass would cost more. The material pass needs the whole decode anyway, for `surface`. A decode pass would have to write uv, gradients, tangent frame, colour and normal (60 bytes or more) for one reader, and reads, not stores, are what cost.
 
-A separate decode pass writing a G-buffer before the material pass would cost more. The material pass needs the whole decode anyway, for `surface`. A decode pass would have to write uv, gradients, tangent frame, colour and normal (60 bytes or more) for one reader, and the reads are what cost here (0.13-0.49 ms per record in shading), not the stores.
-
-Before shading can drop its decode, the vertex attributes it still reads must come from the record or from `surface`'s output. `readlean` (attributes constant) changes Showcase by up to 50 codes, so something after `surface` reads uv, colour, the interpolated normal or decals. That audit comes first.
-
-Expected effect: shading saves its decode, about 0.75 ms (position side plus attributes), minus 16 more bytes read. That would turn Showcase's +0.70 ms net (7.37 against 7.07 + 1.00) to about even, and Glint's +0.39 to about -0.35. Each of the GI, light-visibility and sun passes then saves its own decode.
+Words 1 and 2 carry the receiver for every hit, whatever its program. A pass reading them runs one path for all pixels and never decodes a hit; only shading branches (model 255: the program's own shading). The rejected alternative, a hit-decode fallback inside each reader, would put the decode back into every pass.

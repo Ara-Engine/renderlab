@@ -58,10 +58,10 @@ seam a material graph plugs into later.
 | Word | Fields |
 |------|--------|
 | 0 (75) | shading normal (octahedral 2 x 16); base colour (3 x unorm16); coverage, metallic (2 x unorm8); emission (rgb9e5) |
-| 1 (78) | the receiver's geometric normal (octahedral 2 x 16); lighting model (8 bits, 255 = own `shade`), MQ2 lobe alpha, roughness (unorm16, rounded up); MQ2 view share and TR1 view hint; slot, `thin`, source-front and lit-front bits |
-| 2 (74) | the receiver's trace point (3 x f32, as the sun path builds it, after the edge repair); its epsilon (an f32 exponent); the interpolated vertex normal (octahedral 2 x 12) |
+| 1 (78) | the receiver's geometric normal (octahedral 2 x 16); lighting model (8 bits, 255 = own `shade`), MQ2 lobe alpha, roughness (unorm16, rounded up); MQ2 view share and TR1 view hint; slot, near-edge, `thin`, source-front and lit-front bits |
+| 2 (74) | the receiver's trace point (3 x f32, shading's; at near-edge hits a reader that needs the sun path's repaired point repairs it); its epsilon (an f32 exponent); the interpolated vertex normal (octahedral 2 x 12) |
 
-The material pass is the decode-once pass. Words 1 and 2 are the receiver that the sun, GI and light-visibility passes and shading read instead of decoding the hit. The standard program's per-light specular filter still fetches vertex attributes in shading; that is what the standard path keeps (docs/design-material-pass.md).
+The material pass is the decode-once pass, for every hit whatever its program (model 255 and a receiver-only record without the mapping). Words 1 and 2 are the receiver that the sun, GI and light-visibility passes and shading read instead of decoding the hit. The standard program's per-light specular filter still fetches vertex attributes in shading; that is what the standard path keeps (docs/design-material-pass.md).
 
 ### On the ara-gpu port
 
