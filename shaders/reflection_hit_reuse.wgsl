@@ -18,8 +18,22 @@ struct RlReuseFrame {
 // The history TR1 reads this frame: exposed mean and sample weight; placement + 1 (bits 0-22),
 // viewed side (bit 23), MQ2's view hint code (bits 24-31, temporal_resolve.wgsl
 // tr1_view_code) and view distance (f32 bits in y).
+// TR1's two history sides (67/68 side 0, 73/74 side 1) and which one its resolve reads this
+// frame (75 x): parity-free bindings for cached groups. A backend that binds the read side to
+// both pairs leaves 75 at zero.
 @group(0) @binding(67) var rl_reuse_colour:texture_2d<f32>;
 @group(0) @binding(68) var rl_reuse_anchor:texture_2d<u32>;
+@group(0) @binding(73) var rl_reuse_colour_1:texture_2d<f32>;
+@group(0) @binding(74) var rl_reuse_anchor_1:texture_2d<u32>;
+@group(0) @binding(75) var<uniform> rl_reuse_side:vec4<u32>;
+fn rl_reuse_colour_at(q:vec2<i32>)->vec4<f32> {
+    if rl_reuse_side.x==0u {return textureLoad(rl_reuse_colour,q,0);}
+    return textureLoad(rl_reuse_colour_1,q,0);
+}
+fn rl_reuse_anchor_at(q:vec2<i32>)->vec4<u32> {
+    if rl_reuse_side.x==0u {return textureLoad(rl_reuse_anchor,q,0);}
+    return textureLoad(rl_reuse_anchor_1,q,0);
+}
 // Tunables (RENDERLAB_RL_HIT_REUSE_TUNE): the same-surface test's relative and absolute view
 // distance tolerance, the history weight floor, the fallback view test's roughness floor, the
 // atmosphere's transmittance floor, and the measurement mode (0 reuse; 1 reused hits 1 and
@@ -40,6 +54,13 @@ const RL_REUSE_VIEW:f32=0.5;
 fn rl_reuse_view(code:u32)->f32 {
     return select(exp2((f32(code)-81.0)/10.0),0.0,code==0u);
 }
+// 6 without the hint: only non-metal hits at least RL_REUSE_ROUGH rough, whose own view
+// dependence is small. With the hint, src/program.rs composes `return true;` here, so modules
+// without the material group (the trace kernel) never name it.
+fn rl_reuse_material(batch:u32)->bool {
+    let material=primary_materials[batch].value;
+    return material.metallic<0.1 && material.roughness>=RL_REUSE_ROUGH;
+}
 // The placement's previous transform (object_motion.wgsl: the model table's second half).
 fn rl_reuse_previous_model(slot:u32)->mat4x4<f32> {
     return models[arrayLength(&models)/2u+slot];
@@ -52,10 +73,7 @@ fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>)->vec4<f32> {
     let hit=primary_decode(record);
     // Skinned hits shade (their previous surface needs SK1's previous vertices).
     if batch_skinned(primary_batch_info(hit.batch)) {return vec4<f32>(0.0);}
-    // 6 without the hint: only non-metal hits at least RL_REUSE_ROUGH rough, whose own view
-    // dependence is small.
-    let material=primary_materials[hit.batch].value;
-    if !RL_REUSE_HINT && (material.metallic>=0.1 || material.roughness<RL_REUSE_ROUGH) {return vec4<f32>(0.0);}
+    if !rl_reuse_material(hit.batch) {return vec4<f32>(0.0);}
     let ta=primary_input(hit.batch,hit.ia,hit.placement);
     let tb=primary_input(hit.batch,hit.ib,hit.placement);
     let tc=primary_input(hit.batch,hit.ic,hit.placement);
@@ -84,11 +102,11 @@ fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>)->vec4<f32> {
     for(var k=0u;k<4u;k+=1u) {
         let o=vec2<i32>(i32(k&1u),i32(k>>1u));
         let q=base+o;
-        let anchor=textureLoad(rl_reuse_anchor,q,0);
+        let anchor=rl_reuse_anchor_at(q);
         let seen=bitcast<f32>(anchor.y);
         if (anchor.x&0x7fffffu)!=hit.placement+1u || abs(seen-distance)>distance*RL_REUSE_DEPTH+RL_REUSE_SLACK {continue;}
         if RL_REUSE_HINT && turn*rl_reuse_view(anchor.x>>24u)>RL_REUSE_VIEW {continue;}
-        let colour=textureLoad(rl_reuse_colour,q,0);
+        let colour=rl_reuse_colour_at(q);
         if !(colour.w>=RL_REUSE_WEIGHT) {continue;}
         let b=select(1.0-f.x,f.x,o.x==1)*select(1.0-f.y,f.y,o.y==1);
         sum+=colour.rgb*b;weight+=b;valid+=1u;

@@ -28,6 +28,9 @@ pub(crate) mod reflection_pass;
 // The Mac thread's reflection_hits after rl_trace (docs/design-reflection-pass.md).
 #[path = "reflection_hits_gpu.rs"]
 mod reflection_hits_gpu;
+// The Mac thread's S4a hit reuse inputs (docs/design-hit-reuse.md).
+#[path = "hit_reuse_gpu.rs"]
+mod hit_reuse_gpu;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
@@ -774,7 +777,8 @@ pub(super) struct HeldTargets {
 /// Group-0 bindings for one hit/HDR/fresh/TLAS combination.
 struct Bindings {
     /// Hit records, HDR, fresh targets, TLAS and list-buffer generations, then M7-R1n's
-    /// software reflection geometry generation.
+    /// software reflection geometry generation, then S4a's TR1 history identity (never its
+    /// parity: hit_reuse_gpu binds both sides).
     key: (
         wgpu::Texture,
         wgpu::Texture,
@@ -782,6 +786,7 @@ struct Bindings {
         u64,
         u64,
         u64,
+        Option<wgpu::Texture>,
     ),
     trace: [Option<Owned<wgpu::BindGroup>>; 2],
     fresh: Option<Owned<wgpu::BindGroup>>,
@@ -936,6 +941,8 @@ pub(super) struct PrimaryState {
     /// M7-R1n: non-RT frames' software reflection geometry (reflection_software.rs).
     reflections: Option<SoftwareReflections>,
     bindings: Option<Bindings>,
+    /// S4a: the hit reuse side uniform and stand-ins (hit_reuse_gpu.rs), with the switch.
+    reuse: Option<hit_reuse_gpu::ReuseInputs>,
     /// Counts rebuilds of `geometry` and `bindings`: temporal history depends on both.
     geometry_generation: u64,
     bindings_generation: u64,
@@ -1217,6 +1224,8 @@ impl PrimaryState {
             if crate::program::rl_deferred() {
                 entries.extend([image(62, F::Rgba16Float), image(63, F::Rgba16Float)]);
             }
+            // S4a: TR1's record and both history sides (hit_reuse_gpu.rs).
+            entries.extend(hit_reuse_gpu::layout_entries());
             entries
         });
         let shade_bindings = shade_entries
@@ -1433,6 +1442,7 @@ impl PrimaryState {
             geometry: None,
             reflections: None,
             bindings: None,
+            reuse: None,
             geometry_generation: 0,
             bindings_generation: 0,
             reconstruction_bindings_generation: 0,
@@ -1497,6 +1507,7 @@ impl PrimaryState {
             geometry: None,
             reflections: None,
             bindings: None,
+            reuse: None,
             geometry_generation: 0,
             bindings_generation: 0,
             reconstruction_bindings_generation: 0,
@@ -2426,11 +2437,14 @@ impl Renderer {
             }
         }
         self.prepare_program_lists(programs, &slots, [size.width, size.height], uploads);
+        // S4a: the side TR1 reads this frame, before prepare_reconstruction flips it.
+        self.prepare_hit_reuse();
         let state = self.view.primary.as_ref().unwrap();
         let t = state.targets.as_ref().unwrap();
         let hdr = &self.view.hdr.as_ref().unwrap().resolved;
         let fresh = soft.then(|| self.view.fresh.as_ref().unwrap().targets.as_ref().unwrap());
         let lists = state.lists.as_ref();
+        let (reuse, reuse_history) = self.hit_reuse_entries();
         let key = (
             (*t.hit.texture).clone(),
             (*hdr.texture).clone(),
@@ -2438,6 +2452,7 @@ impl Renderer {
             scene_generation,
             lists.map_or(0, |l| l.generation),
             state.reflections.as_ref().map_or(0, |r| r.generation),
+            reuse_history,
         );
         if state.bindings.as_ref().is_none_or(|b| b.key != key) {
             let reconstruction_changed = state
@@ -2546,6 +2561,7 @@ impl Renderer {
                     entries.push((62, R::TextureView(&reflectance.view)));
                     entries.push((63, R::TextureView(&untraced.view)));
                 }
+                entries.extend(reuse.iter().cloned());
                 // MP1: the same group plus the slot table and tile lists.
                 let list = lists.map(|l| {
                     let mut entries = entries.clone();
@@ -2692,7 +2708,7 @@ impl Renderer {
                         Some(g) => (SOFTWARE_REFLECTIONS, g.as_entire_binding()),
                         None => reflection_scene.clone(),
                     };
-                    self.rl_trace_group(abi, pass, frame.as_entire_binding(), geometry)
+                    self.rl_trace_group(abi, pass, frame.as_entire_binding(), geometry, &reuse)
                 }),
                 rl_resolve: state
                     .rl_resolve

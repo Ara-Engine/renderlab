@@ -749,8 +749,9 @@ impl<'a> Shared<'a> {
                 Input::Image(match (group, binding) {
                     (3, 24) => self.lists,
                     (0, 18) => self.output,
-                    (0, 67) if self.reuse.is_some() => self.reuse.context("checked")?.1,
-                    (0, 68) if self.reuse.is_some() => self.reuse.context("checked")?.2,
+                    // The read side binds to both pairs; 75 (the side) stays zero.
+                    (0, 67 | 73) if self.reuse.is_some() => self.reuse.context("checked")?.1,
+                    (0, 68 | 74) if self.reuse.is_some() => self.reuse.context("checked")?.2,
                     _ => provided(self.sky, self.map, self.traced, self.deferred, spec.key)
                         .or_else(|| self.images.get(&spec.key))
                         .with_context(|| format!("forward frame cannot supply {}", spec.name))?,
@@ -2805,7 +2806,7 @@ fn frame(
                 if spec.key == key(3, 24)
                     || (resolve.is_some()
                         && spec.key.group == 0
-                        && matches!(spec.key.binding, 41..=47 | 67 | 68))
+                        && matches!(spec.key.binding, 41..=47 | 67 | 68 | 73 | 74))
                     || provided(
                         sky.as_ref(),
                         map,

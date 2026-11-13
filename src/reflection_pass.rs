@@ -84,9 +84,16 @@ impl TraceAbi {
                 HITS_HEADER + RECORD_BYTES,
             ),
             image(SAMPLES, F::Rgba16Float),
-            buffer(STATS, wgpu::BufferBindingType::Storage { read_only: false }, 16),
+            // S4a's `reused` follows the four counters (20 bytes in the shader).
+            buffer(
+                STATS,
+                wgpu::BufferBindingType::Storage { read_only: false },
+                if crate::program::hit_reuse().is_some() { 32 } else { 16 },
+            ),
             image(RANGES, F::Rg32Uint),
         ];
+        // The Mac thread's S4a: hits reused before the H append (hit_reuse_gpu.rs).
+        entries.extend(super::hit_reuse_gpu::layout_entries());
         entries.push(if ray_query {
             scene(2)
         } else {
@@ -216,10 +223,11 @@ impl Renderer {
             distance: target("reflection ray distance", slots[0], slots[1], F::R32Float),
             slots,
             ranges: target("reflection sample ranges", size.width, size.height, F::Rg32Uint),
+            // Four words, then S4a's `reused` (the room's readback copies the first 16 bytes).
             stats: Buffer::new(
                 self,
                 "reflection trace counters",
-                16,
+                32,
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             ),
             composite: Buffer::new(
@@ -250,6 +258,7 @@ impl Renderer {
         pass: &PassTargets,
         frame: wgpu::BindingResource<'_>,
         scene: (u32, wgpu::BindingResource<'_>),
+        reuse: &[(u32, wgpu::BindingResource<'_>)],
     ) -> Owned<wgpu::BindGroup> {
         use wgpu::BindingResource as R;
         let entries = [
@@ -266,6 +275,7 @@ impl Renderer {
         ];
         let entries: Vec<_> = entries
             .into_iter()
+            .chain(reuse.iter().cloned())
             .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource })
             .collect();
         self.ledger.own(
@@ -575,8 +585,9 @@ impl Renderer {
                 mapped_at_creation: false,
             });
             encoder.copy_buffer_to_buffer(&pass.hits.value, 0, &staging, 0, HITS_HEADER);
-            // The composite's trace counters (glossy pixels, slots, pixels without room).
-            encoder.copy_buffer_to_buffer(&pass.stats.value, 0, &staging, 16, 16);
+            // The composite's trace counters (glossy pixels, slots, pixels without room), then
+            // S4a's reused hits.
+            encoder.copy_buffer_to_buffer(&pass.stats.value, 0, &staging, 16, 32);
             let composite = crate::program::rl_deferred();
             let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
             // With the composite R is a slot list, not a quad image: only the counters are read.
@@ -618,11 +629,15 @@ impl Renderer {
         let count = u32::from_ne_bytes(data[0..4].try_into().unwrap());
         let word = |i: usize| u32::from_ne_bytes(data[16 + 4 * i..20 + 4 * i].try_into().unwrap());
         let (pixels, slots, requested, dropped) = (word(0), word(1), word(2), word(3));
+        // S4a: hits reused before the H append, beside the records appended (`count`).
+        let reused = crate::program::hit_reuse()
+            .map(|_| format!(",\"reused\":{},\"appended\":{count}", word(4)))
+            .unwrap_or_default();
         if crate::program::rl_deferred() {
             // The strata counter: trace slots (strata) and hit records per glossy pixel.
             let per = |n: u32| if pixels > 0 { f64::from(n) / f64::from(pixels) } else { 0.0 };
             let json = format!(
-                "{{\"frame\":{PROBE_FRAME},\"glossy_pixels\":{pixels},\"strata_requested\":{requested},\"slots\":{slots},\"records\":{count},\"records_dropped\":{dropped},\"scaled\":{},\"strata_per_glossy_pixel\":{:.3},\"records_per_glossy_pixel\":{:.3}}}\n",
+                "{{\"frame\":{PROBE_FRAME},\"glossy_pixels\":{pixels},\"strata_requested\":{requested},\"slots\":{slots},\"records\":{count},\"records_dropped\":{dropped},\"scaled\":{},\"strata_per_glossy_pixel\":{:.3},\"records_per_glossy_pixel\":{:.3}{reused}}}\n",
                 requested > slots,
                 per(slots),
                 per(count)

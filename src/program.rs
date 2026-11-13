@@ -96,6 +96,12 @@ pub(crate) struct HitReuse {
     hint: bool,
     view: f32,
 }
+impl HitReuse {
+    /// Whether the view test reads MQ2's hint from TR1's anchors (no material group needed).
+    pub(crate) fn hint(&self) -> bool {
+        self.hint
+    }
+}
 pub(crate) fn hit_reuse() -> Option<HitReuse> {
     static REUSE: std::sync::OnceLock<Option<HitReuse>> = std::sync::OnceLock::new();
     *REUSE.get_or_init(|| {
@@ -184,6 +190,17 @@ fn with_hit_reuse(source: String, reuse: HitReuse) -> String {
             "const RL_REUSE_MODE:u32=0u;",
             &format!("const RL_REUSE_MODE:u32={}u;", reuse.mode),
         );
+    if reuse.hint {
+        // The hint replaces the material fallback: modules without the material group (the
+        // trace kernel) must not name it.
+        const FALLBACK: &str = "    let material=primary_materials[batch].value;\n    return material.metallic<0.1 && material.roughness>=RL_REUSE_ROUGH;\n";
+        assert_eq!(
+            module.matches(FALLBACK).count(),
+            1,
+            "hit reuse: the fallback"
+        );
+        module = module.replacen(FALLBACK, "    return true;\n", 1);
+    }
     if !source.contains("fn tr1_relit(") {
         module.push_str(
             &crate::renderer::primary_ray_gpu::temporal_reconstruction::zones_source(
@@ -193,9 +210,45 @@ fn with_hit_reuse(source: String, reuse: HitReuse) -> String {
     }
     source.replacen(HOOK, "fn rl_cache_hit_inner(", 1).replacen(
         PROGRAM,
-        &format!("{module}{PROGRAM}"),
+        &format!("{REUSE_BLOCK}{module}{REUSE_BLOCK_END}{PROGRAM}"),
         1,
     )
+}
+/// The markers around everything `with_hit_reuse` inserts before the program.
+const REUSE_BLOCK: &str = "// ---- hit reuse block ----\n";
+const REUSE_BLOCK_END: &str = "// ---- end of hit reuse block ----\n";
+/// `composed` without the hit reuse (its block out, the cache-hit hook back under its own
+/// name), the program's range moved back by the block: for modules whose pipelines do not
+/// bind TR1's histories (TP2's glass hits, film shading). Unchanged when the switch is off.
+pub(crate) fn without_hit_reuse(mut composed: Composed) -> Composed {
+    let Some(begin) = composed.source.find(REUSE_BLOCK) else {
+        return composed;
+    };
+    let end = composed.source[begin..]
+        .find(REUSE_BLOCK_END)
+        .map(|at| begin + at + REUSE_BLOCK_END.len())
+        .expect("hit reuse block end");
+    assert!(
+        end <= composed.program.start,
+        "the hit reuse block precedes the program"
+    );
+    composed.source.replace_range(begin..end, "");
+    let mut moved = end - begin;
+    // The hook's own name back, also before the program.
+    const INNER: &str = "fn rl_cache_hit_inner(";
+    const HOOK: &str = "fn rl_cache_hit(";
+    let at = composed
+        .source
+        .find(INNER)
+        .expect("hit reuse: the renamed hook");
+    assert!(
+        at < composed.program.start - moved,
+        "the hook precedes the program"
+    );
+    composed.source.replace_range(at..at + INNER.len(), HOOK);
+    moved += INNER.len() - HOOK.len();
+    composed.program = composed.program.start - moved..composed.program.end - moved;
+    composed
 }
 /// Reflection hits trace their own light visibility: the frame's belongs to its receivers.
 const REFLECTION_VISIBILITY_SEAM: &str =
@@ -292,8 +345,39 @@ pub(crate) fn rl_pass_on() -> bool {
 /// (the reflection block's helpers, with its stubs) and the trace entries.
 pub(crate) fn rl_trace_source(head: &str) -> String {
     let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
-    format!("{}\n{REFLECTION_TRACE}", composed.source)
+    let mut trace = REFLECTION_TRACE.to_owned();
+    if let Some(reuse) = hit_reuse() {
+        // S4a before compaction: the counters gain `reused` after U-RTVIS's four words (the
+        // probe reads it; the room's readback keeps reading the first 16 bytes).
+        const STATS: &str = "struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32> };";
+        assert_eq!(
+            trace.matches(STATS).count(),
+            1,
+            "hit reuse: the trace counters"
+        );
+        trace = trace.replacen(
+            STATS,
+            "struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32>, reused:atomic<u32> };",
+            1,
+        );
+        // A reused hit writes R at its slot as reflection_hits writes a shaded one (exposed,
+        // rl_finite, a = 1) and skips the H append. The trace kernel has no material group, so
+        // only the hint's view test runs here; without it, hits go to H as before.
+        if reuse.hint() {
+            assert_eq!(
+                trace.matches(TRACE_REUSE_SEAM).count(),
+                1,
+                "hit reuse: the trace seam"
+            );
+            trace = trace.replacen(TRACE_REUSE_SEAM, TRACE_REUSE, 1);
+        }
+    }
+    format!("{}\n{trace}", composed.source)
 }
+/// U-RTVIS's marker in `rl_trace_pixels`, just before the H append (kept by
+/// `trace_hit_reuse_seam_stays_before_the_h_append`).
+const TRACE_REUSE_SEAM: &str = "        // ---- rl trace hit reuse seam ----\n";
+const TRACE_REUSE: &str = "        let reused=rl_hit_reuse(traced.record,d);\n        if reused.w>0.0 {\n            textureStore(rl_samples,at,vec4<f32>(rl_finite(expose(reused.rgb)),1.0));\n            atomicAdd(&rl_trace_stats.reused,1u);\n            continue;\n        }\n";
 /// `composed` with the block between `markers` replaced by `text`, moving the program's range.
 fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Composed {
     let Some(begin) = composed.source.find(markers[0]) else {

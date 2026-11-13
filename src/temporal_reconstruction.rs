@@ -1649,6 +1649,26 @@ impl ReconstructionState {
     fn size(&self) -> wgpu::Extent3d {
         self.sample.texture.size()
     }
+    /// S4a (hit_reuse_gpu.rs): the frame record, both history sides' colour and anchor views,
+    /// side 0's texture (the bindings' identity), and `plan.parity`. Read before this frame's
+    /// `plan` flips it, that parity is the side the frame's resolve reads.
+    pub(in crate::renderer) fn reuse_sources(
+        &self,
+    ) -> (
+        &wgpu::Buffer,
+        [&wgpu::TextureView; 2],
+        [&wgpu::TextureView; 2],
+        &wgpu::Texture,
+        usize,
+    ) {
+        (
+            &self.frame.value,
+            [&self.colour[0].view, &self.colour[1].view],
+            [&self.anchor[0].view, &self.anchor[1].view],
+            &self.colour[0].texture,
+            self.plan.parity,
+        )
+    }
     /// The colour history this frame wrote (exposed mean, sample weight; Rgba32Float).
     #[cfg(test)]
     pub(in crate::renderer) fn written_colour(&self) -> &wgpu::Texture {
