@@ -323,6 +323,9 @@ struct GlassPipelines {
     /// By tangent stream.
     pipelines: [Owned<wgpu::RenderPipeline>; 2],
     lobe: [Owned<wgpu::RenderPipeline>; 2],
+    /// Films (`crate::program::declares_films`): `film_source`'s module blended premultiplied
+    /// over the target, by tangent stream; None for programs that do not declare films.
+    films: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     /// Per-pixel pane pipelines, built the first time a frame shades panes per pixel.
     pane: Option<panes::PanePipelines>,
 }
@@ -1270,7 +1273,7 @@ impl Renderer {
         );
         let gpu = self.transparency.gpu.as_ref().unwrap();
         let layout = &gpu.glass_layouts[usize::from(rt)];
-        let make = |tangent: bool, lobe: bool| {
+        let make_with = |module: &wgpu::ShaderModule, tangent: bool, lobe: bool, blend: bool| {
             let targets = if lobe {
                 vec![
                     Some(wgpu::TextureFormat::Rgba32Float.into()),
@@ -1278,7 +1281,11 @@ impl Renderer {
                     Some(wgpu::TextureFormat::Rgba16Float.into()),
                 ]
             } else {
-                vec![Some(wgpu::TextureFormat::Rgba16Float.into())]
+                vec![Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    blend: blend.then_some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })]
             };
             self.ledger.own(
                 self.device
@@ -1286,7 +1293,7 @@ impl Renderer {
                         label: Some("TP1 transparent"),
                         layout: Some(layout),
                         vertex: wgpu::VertexState {
-                            module: &module,
+                            module,
                             entry_point: Some(if tangent { "vs_tangent" } else { "vs" }),
                             compilation_options: Default::default(),
                             buffers: &[
@@ -1308,7 +1315,7 @@ impl Renderer {
                             ],
                         },
                         fragment: Some(wgpu::FragmentState {
-                            module: &module,
+                            module,
                             entry_point: Some(if lobe { "fs_tp_lobe" } else { "fs_transparent" }),
                             compilation_options: Default::default(),
                             targets: &targets,
@@ -1328,8 +1335,21 @@ impl Renderer {
                 ResourceKind::RenderPipeline,
             )
         };
+        let make = |tangent: bool, lobe: bool| make_with(&module, tangent, lobe, false);
         let pipelines = [false, true].map(|t| make(t, false));
         let lobe = [false, true].map(|t| make(t, true));
+        let films = crate::program::declares_films(&slot.source).then(|| {
+            let label = format!("TP1 films {}", slot.label);
+            let films = self.ledger.own(
+                self.device
+                    .create_program_module(wgpu::ShaderModuleDescriptor {
+                        label: Some(&label),
+                        source: wgpu::ShaderSource::Wgsl(film_source(source).into()),
+                    }),
+                ResourceKind::ShaderModule,
+            );
+            [false, true].map(|t| make_with(&films, t, false, true))
+        });
         if let Some(error) = scopes.finish() {
             return Err(match error {
                 wgpu::Error::Validation { .. } => Error::Shader(format!(
@@ -1344,6 +1364,7 @@ impl Renderer {
             key,
             pipelines,
             lobe,
+            films,
             pane: None,
         })
     }
@@ -2331,13 +2352,29 @@ impl Renderer {
         // Per-pixel panes (`panes`): a record (rectangle and model slot) per instance of each
         // glass draw, at its dynamic offset, and a pane group per draw. Draws with a tangent
         // stream keep the raster: the pane shading builds vertices without tangents.
+        // Films (IOR one, no thickness) of programs that declare them blend in hardware:
+        // consecutive films share one pass, each draw's instances far to near (`film_ids`).
+        let films: Vec<bool> = transparent
+            .iter()
+            .map(|draw| {
+                let program = draw.material.map_or(default_program, |m| m.program.id());
+                draw.material
+                    .and_then(|m| m.transparency)
+                    .is_some_and(|t| t.ior <= 1.0 && t.thickness == 0.0)
+                    && self
+                        .transparency
+                        .glass
+                        .iter()
+                        .any(|g| g.program == program && g.films.is_some())
+            })
+            .collect();
         let mut pane_records: Vec<Vec<(u32, [u32; 4])>> = vec![Vec::new(); transparent.len()];
         let mut pane_groups: Vec<Option<wgpu::BindGroup>> =
             (0..transparent.len()).map(|_| None).collect();
         let mut pane_bytes = Vec::new();
         if pixel_panes && targets.pane_ids.is_some() {
             for (i, draw) in transparent.iter().enumerate() {
-                if draw.mesh.tangent.is_some() {
+                if films[i] || draw.mesh.tangent.is_some() {
                     continue;
                 }
                 let state = &draw.instances.state;
@@ -2429,6 +2466,29 @@ impl Renderer {
                     .unwrap_or([0, 0, 0, 0])
             })
             .collect();
+        // A film draw's instances far to near, so overlapping instances blend in order.
+        let film_ids: Vec<Option<wgpu::Buffer>> = transparent
+            .iter()
+            .enumerate()
+            .map(|(i, draw)| {
+                let state = &draw.instances.state;
+                (films[i] && state.ids.len() > 1).then(|| {
+                    let depth = |k: usize| (state.models[k].w_axis.truncate() - eye).dot(forward);
+                    let mut order: Vec<usize> = (0..state.ids.len()).collect();
+                    order.sort_by(|a, b| depth(*b).total_cmp(&depth(*a)));
+                    let ids: Vec<u32> = order.iter().map(|&k| state.ids[k]).collect();
+                    wgpu::util::DeviceExt::create_buffer_init(
+                        &*self.device,
+                        &wgpu::util::BufferInitDescriptor {
+                            label: Some("TP film instance order"),
+                            contents: bytemuck::cast_slice(&ids),
+                            usage: wgpu::BufferUsages::VERTEX,
+                        },
+                    )
+                })
+            })
+            .collect();
+        let film_at = |k: usize| matches!(items.get(k).map(|item| &item.1), Some(Item::Draw(j)) if films[*j]);
         let mut copied = false;
         let mut dirty: Option<[u32; 4]> = None;
         let mut index = 0;
@@ -2452,16 +2512,21 @@ impl Renderer {
                 }
                 copied = true;
                 dirty = None;
-                if let (Item::Draw(i), Some(group)) = (&items[index].1, &reflection_group) {
+                if let (Item::Draw(first), Some(group)) = (&items[index].1, &reflection_group) {
                     let reflection = self.view.transparency_reflections.as_ref().unwrap();
-                    let draw = transparent[*i];
-                    let program = draw.material.map_or(default_program, |m| m.program.id());
-                    let set = self
-                        .transparency
-                        .glass
-                        .iter()
-                        .find(|g| g.program == program)
-                        .unwrap();
+                    // A run of films shares one lobe pass and one trace: where films overlap,
+                    // each reads the reflection of the one drawn last there.
+                    let run: Vec<usize> = if films[*first] {
+                        (index..items.len())
+                            .take_while(|&k| film_at(k))
+                            .map(|k| match items[k].1 {
+                                Item::Draw(j) => j,
+                                Item::Emitter(_) => unreachable!("film_at"),
+                            })
+                            .collect()
+                    } else {
+                        vec![*first]
+                    };
                     {
                         let attachments = [
                             &reflection.position.view,
@@ -2484,26 +2549,42 @@ impl Renderer {
                             color_attachments: &attachments,
                             ..Default::default()
                         });
-                        pass.set_pipeline(&set.lobe[usize::from(draw.mesh.tangent.is_some())]);
-                        pass.set_bind_group(
-                            0,
-                            glass_group.as_ref().unwrap(),
-                            &[(*i as u64 * SLOT) as u32],
-                        );
-                        pass.set_bind_group(1, &*draw.instances.bind, &[]);
-                        pass.set_bind_group(2, &*draw.material.unwrap().bind, &[]);
                         pass.set_bind_group(3, self.lighting.bind(), &[]);
-                        pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
-                        pass.set_vertex_buffer(1, draw.instances.id_buffer.slice(..));
-                        if let Some(t) = &draw.mesh.tangent {
-                            pass.set_vertex_buffer(2, t.slice(..));
+                        for &i in &run {
+                            let draw = transparent[i];
+                            let program = draw.material.map_or(default_program, |m| m.program.id());
+                            let set = self
+                                .transparency
+                                .glass
+                                .iter()
+                                .find(|g| g.program == program)
+                                .unwrap();
+                            pass.set_pipeline(&set.lobe[usize::from(draw.mesh.tangent.is_some())]);
+                            pass.set_bind_group(
+                                0,
+                                glass_group.as_ref().unwrap(),
+                                &[(i as u64 * SLOT) as u32],
+                            );
+                            pass.set_bind_group(1, &*draw.instances.bind, &[]);
+                            pass.set_bind_group(2, &*draw.material.unwrap().bind, &[]);
+                            pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
+                            pass.set_vertex_buffer(1, match &film_ids[i] {
+                                Some(order) => order.slice(..),
+                                None => draw.instances.id_buffer.slice(..),
+                            });
+                            if let Some(t) = &draw.mesh.tangent {
+                                pass.set_vertex_buffer(2, t.slice(..));
+                            }
+                            pass.set_index_buffer(
+                                draw.mesh.index.slice(..),
+                                wgpu::IndexFormat::Uint32,
+                            );
+                            pass.draw_indexed(
+                                0..draw.mesh.index_count,
+                                0,
+                                0..draw.instances.state.ids.len() as u32,
+                            );
                         }
-                        pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
-                        pass.draw_indexed(
-                            0..draw.mesh.index_count,
-                            0,
-                            0..draw.instances.state.ids.len() as u32,
-                        );
                     }
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("TP2 R1 glass reflection"),
@@ -2610,7 +2691,9 @@ impl Renderer {
             // behind it with the colour from before the draw.
             let spans = match items[index].1 {
                 Item::Draw(i)
-                    if glass && transparent[i].instances.state.models.len() <= SPAN_INSTANCES =>
+                    if glass
+                        && !films[i]
+                        && transparent[i].instances.state.models.len() <= SPAN_INSTANCES =>
                 {
                     let draw = transparent[i];
                     let screen = [size.width, size.height];
@@ -2691,9 +2774,11 @@ impl Renderer {
                             let material = draw
                                 .material
                                 .unwrap_or(self.default_material.as_ref().unwrap());
-                            pass.set_pipeline(
-                                &set.pipelines[usize::from(draw.mesh.tangent.is_some())],
-                            );
+                            let pipelines = match (&set.films, films[i]) {
+                                (Some(films), true) => films,
+                                _ => &set.pipelines,
+                            };
+                            pass.set_pipeline(&pipelines[usize::from(draw.mesh.tangent.is_some())]);
                             pass.set_bind_group(
                                 0,
                                 glass_group.as_ref().unwrap(),
@@ -2702,7 +2787,10 @@ impl Renderer {
                             pass.set_bind_group(1, &*draw.instances.bind, &[]);
                             pass.set_bind_group(2, &*material.bind, &[]);
                             pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
-                            pass.set_vertex_buffer(1, draw.instances.id_buffer.slice(..));
+                            pass.set_vertex_buffer(1, match &film_ids[i] {
+                                Some(order) => order.slice(..),
+                                None => draw.instances.id_buffer.slice(..),
+                            });
                             if let Some(t) = &draw.mesh.tangent {
                                 pass.set_vertex_buffer(2, t.slice(..));
                             }
@@ -2727,8 +2815,13 @@ impl Renderer {
                         }
                     }
                     index += 1;
-                    // A transparent draw next needs the colour this pass has written so far.
-                    if index == items.len() || glass || matches!(items[index].1, Item::Draw(_)) {
+                    // A transparent draw next needs the colour this pass has written so far,
+                    // unless this pass and the next draw are both films: they blend over it.
+                    let films_on = film_at(index - 1) && film_at(index);
+                    if index == items.len()
+                        || (glass && !films_on)
+                        || (!glass && matches!(items[index].1, Item::Draw(_)))
+                    {
                         break;
                     }
                 }
