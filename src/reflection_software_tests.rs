@@ -993,11 +993,6 @@ fn material_pass_probes_compose_and_validate() {
             MaterialProbe::ReadPos,
             "rl_material_probe_position(surface_input,receiver_world)",
         ),
-        (
-            MaterialRole::Write,
-            MaterialProbe::PlainReceiver,
-            "fn rl_mr_trace_receiver(record:vec4<u32>",
-        ),
     ];
     let program = crate::STANDARD_PROGRAM;
     let parameters = crate::program::declares_parameters(program);

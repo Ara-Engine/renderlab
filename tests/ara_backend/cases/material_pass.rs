@@ -39,12 +39,14 @@ fn material_pass_compile_seconds() -> Result<()> {
 
 /// The record's receiver (words 1 and 2) against the sun path's receiver for a fresh camera
 /// ray (its edge repair included), through `RENDERLAB_MATERIAL_DEBUG=receiver` (program.rs
-/// `material_debug`): the trace point, slot, `thin`, both sides and the epsilon come back bit
-/// for bit, at repaired edges too; the geometric normal within its octahedral 2 x 16 bits and
-/// the interpolated vertex normal (against this pixel's decode) within 2 x 12. A floor, a wall
-/// folded along a crease the middle column's rays land on, and a far wall whose epsilon is above the 1e-5 floor. Runs with
-/// `RENDERLAB_MATERIAL_PASS=1 RENDERLAB_MATERIAL_DEBUG=receiver` (read once per process);
-/// without them it says so and passes.
+/// `material_debug`): wherever the repair leaves the hit, the trace point, slot, `thin`, both
+/// sides and the epsilon come back bit for bit and the geometric normal within its octahedral
+/// 2 x 16 bits; wherever the repair moves the point, the record marks the hit near an edge
+/// (the reader repairs it, as the sun path does). The interpolated vertex normal (against this
+/// pixel's decode) is within 2 x 12 bits. A floor, a wall folded along a crease the middle
+/// column's rays land on, a corrugated sheet, a steep valley and a far wall whose epsilon is
+/// above the 1e-5 floor. Runs with `RENDERLAB_MATERIAL_PASS=1 RENDERLAB_MATERIAL_DEBUG=receiver`
+/// (read once per process); without them it says so and passes.
 #[test]
 fn the_record_rebuilds_the_receiver() -> Result<()> {
     use renderlab::{
@@ -241,7 +243,7 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
         hits > (SIZE[0] * SIZE[1] / 2) as usize,
         "too few hits ({hits})"
     );
-    ensure!(edges > 0, "no pixel reached a repaired edge");
+    ensure!(edges > 0, "no pixel reached an edge the repair moves");
     ensure!(
         worst[0] == 0.0,
         "the trace point, slot, thin or a side moved ({})",
