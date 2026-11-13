@@ -189,6 +189,13 @@ fn reflection_report(reflectance:vec3<f32>, untraced:vec3<f32>) {}
 fn rl_finite(c:vec3<f32>) -> vec3<f32> {
     return min(select(vec3<f32>(0.0),c,c>=vec3<f32>(0.0)),vec3<f32>(65504.0));
 }
+// A normal-map sample in the map's 0-1 encoding. BC5 maps (`normal_mapped` 2) hold X and Y
+// only: Z is rebuilt as the unit normal's from the filtered X and Y, and alpha reads 1.
+fn rl_normal_texel(input:SurfaceInput, s:vec4<f32>) -> vec4<f32> {
+    if input.material.normal_mapped!=2u { return s; }
+    let xy=s.xy*2.0-vec2<f32>(1.0);
+    return vec4<f32>(s.xy,sqrt(max(1.0-dot(xy,xy),0.0))*0.5+0.5,1.0);
+}
 // The standard material normal, including tangent repair, finite normal scale,
 // mirrored handedness and source-back reversal. Safe on meshes without tangents.
 // Call uniformly in raster stages, like the mesh-uv sampling helpers.
