@@ -1,5 +1,5 @@
 // GI receiver output: 48 bytes/pixel, two f32 scales and 39 snorm8 coefficients.
-// Three vector words retain the original byte layout, with coalesced loads/stores.
+// Three vector words retain the original byte layout, with vector loads/stores.
 struct GiPrepared { r0:vec4<u32>, r1:vec4<u32>, r2:vec4<u32> };
 @group(0) @binding(68) var<storage,read_write> gi_prepared:array<GiPrepared>;
 fn gi_pass_load(input:SurfaceInput,id:vec2<u32>,size:vec2<u32>) {
