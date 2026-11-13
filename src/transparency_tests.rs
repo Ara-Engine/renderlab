@@ -1544,28 +1544,82 @@ fn gpu_pane_pixels_match_the_raster() {
             &pictures[1],
         );
     }
-    let (mut over_one, mut worst) = (0usize, 0u8);
-    for (a, b) in pictures[0]
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .zip(pictures[1].as_chunks::<4>().0)
-    {
-        let d = a
-            .iter()
-            .zip(b)
-            .take(3)
-            .map(|(x, y)| x.abs_diff(*y))
-            .max()
-            .unwrap();
-        worst = worst.max(d);
-        over_one += usize::from(d > 1);
-    }
-    eprintln!("pane pixels against the raster ({path}): {over_one} px over 1 code, worst {worst}");
+    let parity = pane_parity(&pictures[0], &pictures[1], width, height);
+    eprintln!("pane pixels against the raster ({path}): {parity:?}");
     assert!(
-        worst <= 4 && over_one * 1000 <= (width * height) as usize,
-        "{over_one} px over 1 code, worst {worst}"
+        parity.interior_worst <= 4
+            && parity.interior_over_one * 1000 <= (width * height) as usize
+            && parity.edge_outside == 0,
+        "{parity:?}"
     );
+}
+
+/// How per-pixel panes (`pixels`) compare with the glass raster (`raster`), both RGBA8 of
+/// `width` x `height`. Interior pixels must match within a few codes. At an edge (the
+/// raster changes by more than 8 codes within 2 px) the two shade the same triangles at the
+/// pixel centre but may disagree on which triangle a coverage sample hits, which moves the
+/// pixel by that sample's share of the local contrast: an edge pixel is allowed half its
+/// contrast (two of four samples) plus 2 codes.
+#[derive(Debug, Default, PartialEq)]
+struct PaneParity {
+    interior_over_one: usize,
+    interior_worst: u8,
+    edge_pixels: usize,
+    /// Edge pixels further from the raster than their bound.
+    edge_outside: usize,
+}
+fn pane_parity(pixels: &[u8], raster: &[u8], width: u32, height: u32) -> PaneParity {
+    let (w, h) = (width as i32, height as i32);
+    let at = |image: &[u8], x: i32, y: i32| -> [u8; 3] {
+        let i = ((y * w + x) * 4) as usize;
+        [image[i], image[i + 1], image[i + 2]]
+    };
+    let diff = |a: [u8; 3], b: [u8; 3]| (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0);
+    let mut parity = PaneParity::default();
+    for y in 0..h {
+        for x in 0..w {
+            let here = at(raster, x, y);
+            let mut contrast = 0u8;
+            for dy in -2..=2 {
+                for dx in -2..=2 {
+                    let (nx, ny) = (x + dx, y + dy);
+                    if (0..w).contains(&nx) && (0..h).contains(&ny) {
+                        contrast = contrast.max(diff(here, at(raster, nx, ny)));
+                    }
+                }
+            }
+            let d = diff(at(pixels, x, y), here);
+            if contrast > 8 {
+                parity.edge_pixels += 1;
+                parity.edge_outside += usize::from(u32::from(d) > u32::from(contrast) / 2 + 2);
+            } else {
+                parity.interior_worst = parity.interior_worst.max(d);
+                parity.interior_over_one += usize::from(d > 1);
+            }
+        }
+    }
+    parity
+}
+
+/// `pane_parity` holds edges to a share of their contrast and the interior to a few codes.
+#[test]
+fn pane_parity_bounds_edges_by_their_contrast() {
+    let (width, height) = (8u32, 4u32);
+    // A dark left half, a light right half: an edge at x = 4.
+    let raster: Vec<u8> = (0..width * height)
+        .flat_map(|i| {
+            let v = if i % width < 4 { 20 } else { 220 };
+            [v, v, v, 255]
+        })
+        .collect();
+    let mut pixels = raster.clone();
+    // One edge pixel off by a quarter of the step (one sample): within its bound.
+    pixels[(1 * width + 4) as usize * 4] = 170;
+    let parity = pane_parity(&pixels, &raster, width, height);
+    assert_eq!((parity.edge_outside, parity.interior_worst), (0, 0));
+    // An edge pixel off by the whole step is outside its bound.
+    pixels[(2 * width + 3) as usize * 4] = 220;
+    assert_eq!(pane_parity(&pixels, &raster, width, height).edge_outside, 1);
 }
 
 /// Reads an emitter's particles back: (position, age) and (velocity, lifetime) per slot.
