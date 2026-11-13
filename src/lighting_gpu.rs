@@ -226,6 +226,50 @@ impl LightingGpu {
                 // Cache-terminated reflection hits read the cache's outgoing radiance
                 // (shaders/reflection_cache_hits.wgsl), only while the switch is on: off,
                 // the layout and its per-stage storage count are unchanged.
+                // The local-light visibility history (shaders/local_light_history.wgsl), only
+                // while its switch is on: off, the layout is unchanged.
+                .chain(
+                    crate::light_cluster::local_shadow_budget()
+                        .then(|| {
+                            let entry = |binding, ty| wgpu::BindGroupLayoutEntry {
+                                binding,
+                                visibility: wgpu::ShaderStages::FRAGMENT
+                                    | wgpu::ShaderStages::COMPUTE,
+                                ty,
+                                count: None,
+                            };
+                            [
+                                entry(
+                                    31,
+                                    wgpu::BindingType::Buffer {
+                                        ty: wgpu::BufferBindingType::Uniform,
+                                        has_dynamic_offset: false,
+                                        min_binding_size: wgpu::BufferSize::new(
+                                            crate::light_cluster::LOCAL_RECORD_BYTES as u64,
+                                        ),
+                                    },
+                                ),
+                                entry(
+                                    32,
+                                    wgpu::BindingType::Texture {
+                                        sample_type: wgpu::TextureSampleType::Uint,
+                                        view_dimension: wgpu::TextureViewDimension::D2,
+                                        multisampled: false,
+                                    },
+                                ),
+                                entry(
+                                    33,
+                                    wgpu::BindingType::StorageTexture {
+                                        access: wgpu::StorageTextureAccess::WriteOnly,
+                                        format: wgpu::TextureFormat::Rgba32Uint,
+                                        view_dimension: wgpu::TextureViewDimension::D2,
+                                    },
+                                ),
+                            ]
+                        })
+                        .into_iter()
+                        .flatten(),
+                )
                 .chain(
                     crate::program::cache_hits_rough().map(|_| wgpu::BindGroupLayoutEntry {
                         binding: 28,
@@ -684,6 +728,26 @@ impl Renderer {
                             },
                         ]
                         .into_iter()
+                        .chain(self.view.clusters.local.iter().flat_map(|history| {
+                            [
+                                wgpu::BindGroupEntry {
+                                    binding: 31,
+                                    resource: history.record.as_entire_binding(),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 32,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &history.read_view,
+                                    ),
+                                },
+                                wgpu::BindGroupEntry {
+                                    binding: 33,
+                                    resource: wgpu::BindingResource::TextureView(
+                                        &history.written_view,
+                                    ),
+                                },
+                            ]
+                        }))
                         .chain(
                             crate::program::cache_hits_rough().map(|_| wgpu::BindGroupEntry {
                                 binding: 28,

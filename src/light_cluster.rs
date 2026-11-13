@@ -245,6 +245,81 @@ pub(crate) fn shading_api(head: &str, traced: bool) -> String {
     )
 }
 
+/// The history's frame record (shaders/local_light_history.wgsl `RlLocalRecord`): the
+/// previous and current unjittered view-projections, the words (history continues, moving
+/// boxes, frame number) and the moving boxes.
+pub(crate) fn local_record(
+    previous: Option<crate::Mat4>,
+    current: crate::Mat4,
+    continues: bool,
+    stamp: u64,
+    boxes: &[crate::shadow_plan::Bounds],
+) -> Vec<u8> {
+    let boxes = merged_boxes(boxes);
+    let mut bytes = Vec::with_capacity(LOCAL_RECORD_BYTES);
+    for m in [previous.unwrap_or(current), current] {
+        bytes.extend(m.to_cols_array().iter().flat_map(|v| v.to_ne_bytes()));
+    }
+    for w in [
+        u32::from(continues && previous.is_some()),
+        boxes.len() as u32,
+        stamp as u32,
+        0,
+    ] {
+        bytes.extend_from_slice(&w.to_ne_bytes());
+    }
+    for k in 0..LOCAL_BOXES {
+        let (lo, hi) = boxes
+            .get(k)
+            .map_or(([0.; 3], [0.; 3]), |b| (b.min.to_array(), b.max.to_array()));
+        for v in [lo[0], lo[1], lo[2], 0., hi[0], hi[1], hi[2], 0.] {
+            bytes.extend_from_slice(&f32::to_ne_bytes(v));
+        }
+    }
+    debug_assert_eq!(bytes.len(), LOCAL_RECORD_BYTES);
+    bytes
+}
+/// Moving boxes the record holds.
+pub(crate) const LOCAL_BOXES: usize = 4;
+pub(crate) const LOCAL_RECORD_BYTES: usize = 128 + 16 + LOCAL_BOXES * 32;
+/// At most LOCAL_BOXES boxes covering `boxes`: up to 16 merge pairwise, smallest union
+/// first; more become one union.
+pub(crate) fn merged_boxes(
+    boxes: &[crate::shadow_plan::Bounds],
+) -> Vec<crate::shadow_plan::Bounds> {
+    use crate::shadow_plan::Bounds;
+    let union = |a: &Bounds, b: &Bounds| Bounds {
+        min: a.min.min(b.min),
+        max: a.max.max(b.max),
+    };
+    let volume = |b: &Bounds| (b.max - b.min).max(glam::Vec3::ZERO).element_product();
+    if boxes.len() > 16 {
+        return boxes
+            .iter()
+            .copied()
+            .reduce(|a, b| union(&a, &b))
+            .into_iter()
+            .collect();
+    }
+    let mut boxes = boxes.to_vec();
+    while boxes.len() > LOCAL_BOXES {
+        let mut best = (0, 1, f32::INFINITY);
+        for i in 0..boxes.len() {
+            for j in i + 1..boxes.len() {
+                let grown =
+                    volume(&union(&boxes[i], &boxes[j])) - volume(&boxes[i]) - volume(&boxes[j]);
+                if grown < best.2 {
+                    best = (i, j, grown);
+                }
+            }
+        }
+        let merged = union(&boxes[best.0], &boxes[best.1]);
+        boxes.swap_remove(best.1);
+        boxes[best.0] = merged;
+    }
+    boxes
+}
+
 /// U-RTVIS measurement switches on the local soft shadow (shaders/light_cluster_api.wgsl):
 /// `RENDERLAB_LOCAL_GATHER=0` reads each PCF tap's texels one at a time, as before the gather
 /// path; `RENDERLAB_LOCAL_PCF=skip` returns 0.5 wherever the blocker search found a blocker

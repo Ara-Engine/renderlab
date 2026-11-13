@@ -1152,3 +1152,31 @@ Tiles only qualify where GI barely varies, and there the pre-pass costs about wh
 - The bound: on the RTX the whole lookup is 1.29 ms of game_scene RT shading. Nearest cell (one record per pixel, picture changed) saves 0.6, so no one-record scheme can recover more.
 - Unexplained: with tiles on, the temporal resolve read about 0.7 ms higher (0.54 -> 1.27 ms on Showcase).
 - The remaining idea: a slimmer record, reading fewer coefficients per lookup than an update writes. Price it from the RTX Showcase split before building.
+
+## Local-shadow budget: a held visibility history for camera receivers (Mac GPU thread, 2026-11-13; opt-in)
+
+`RENDERLAB_LOCAL_SHADOW_BUDGET=1` (off by default until the RTX and Ara A/B decides; shaders/local_light_history.wgsl). Every Ara sample's local lights are hard spots (source radius 0, one ray per light per pixel), so fewer disk rays save nothing. The saving has to come from tracing no ray at all where nothing can change a shadow. Each camera receiver keeps up to four ray-shadowed lights' visibility, reprojected through the previous unjittered camera like U-FIXED's sun history:
+- **Held:** a fully lit or fully shadowed history of at least 16 agreeing samples traces no ray. It is re-checked one frame in 32, staggered per 8x8 block and light.
+- **Traced:** edges and penumbrae trace and average every frame.
+- **Restarts:** relit zones; a moving or skinned placement's box (both poses, grown by the light's radius) on the receiver-to-light segment; a TR1 reset or cut; disocclusion (depth code and frame stamp).
+
+What decided the shape (M5, three interleaved rounds):
+- Per-pixel re-checks left a tracing lane in about 99% of SIMD groups.
+- An eager lookup cost every pixel about 0.3 ms.
+- Two slots left Outpost's third and fourth spots tracing every frame.
+
+| M5 shading ms | Today | Budget | Bound (no camera-receiver local rays) |
+|---|---|---|---|
+| Showcase | 17.65 | 17.62 | 15.41 |
+| Outpost | 24.81 | 24.08 | 19.48 |
+
+Pictures against today:
+- **Still** (Showcase with 50x spots and a dimmed sun; the jogger walks under the rim spot): at most 0.01% of pixels differ by 2 codes or more.
+- **Cut:** at most 0.02%.
+- **Outpost's pulsing lights, still camera:** identical.
+- **Moving camera:** at most 0.08% (0.03% by 4 or more); pops in 0.05-0.08% of pixels per frame pair. These are one-pixel slivers on thin silhouettes (a lantern frame, a strap), where a neighbouring surface's held history passes the depth test.
+
+Still tracing on Outpost:
+- the yard the player robot can shadow;
+- the pulsing cache lights, whose relit spheres restart every frame. Their visibility does not change with intensity, but the restart rule keeps them;
+- shadow edges and the re-check blocks.

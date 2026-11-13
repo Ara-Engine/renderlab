@@ -2743,7 +2743,7 @@ fn frame(
             let current = scene.camera.unjittered().matrix(size[0], size[1]);
             let record = StorageBuffer::new(
                 gpu,
-                &super::light_cluster::local_record(
+                &lc::local_record(
                     history.local_camera,
                     current,
                     continues,
