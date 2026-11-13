@@ -72,7 +72,8 @@ const TR1_UPSCALE_INTERPOLATION:u32=16u;
 @group(0) @binding(43) var tr1_anchor_in:texture_2d<u32>;
 @group(0) @binding(44) var tr1_colour_out:texture_storage_2d<rgba32float,write>;
 // Anchor of the first slot. x: placement + 1 (zero is background) in bits 0..22, the
-// viewed side in bit 23; y: the latest sample's view distance, f32 bits.
+// viewed side in bit 23, MQ2's view hint as tr1_view_code in bits 24..31 (for the history's
+// readers; TR1 itself reads it from the sample); y: the latest sample's view distance, f32 bits.
 @group(0) @binding(45) var tr1_anchor_out:texture_storage_2d<rg32uint,write>;
 // The reconstructed image (the frame's HDR target).
 @group(0) @binding(46) var tr1_output:texture_storage_2d<rgba16float,write>;
@@ -592,8 +593,23 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
     return vec4<f32>(sample,1.0);
 }
 
+// MQ2's view dependence (Tr1Surface.view: the hint minus 1, shaders/temporal_view.wgsl) in 8
+// bits, for readers of the history that shade no sample of their own (reflection-hit reuse,
+// docs/design-hit-reuse.md): 0 when view-independent (view 0), otherwise
+// k = clamp(ceil(10 log2(view)) + 81, 1, 255): ten codes an octave, view 2^-8 at k 1, 1 at
+// k 81, MQ2's 60000 cap at k 240. Read back as view = exp2((k - 81) / 10): never below the
+// stored value (a smaller view reads as 2^-8), at most 2^0.1 (7%) above it, so a reader's
+// view test errs toward shading.
+fn tr1_view_code(view:f32)->u32 {
+    if !(view>0.0) {return 0u;}
+    return u32(clamp(ceil(10.0*log2(view))+81.0,1.0,255.0));
+}
+// The first slot's anchor word x for surface s.
+fn tr1_anchor_word(s:Tr1Surface)->u32 {
+    return (s.id&TR1_ID)|((s.side&1u)<<23u)|(tr1_view_code(s.view)<<24u);
+}
 fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
-    textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u),bitcast<u32>(s.distance),0u,0u));
+    textureStore(tr1_anchor_out,p,vec4<u32>(tr1_anchor_word(s),bitcast<u32>(s.distance),0u,0u));
     textureStore(tr1_colour_out,p,film);
     textureStore(tr1_layer_out,p,vec4<u32>(TR1_NONE,0u,0u,0u));
     textureStore(tr1_output,p,vec4<f32>(film.xyz,1.0));
@@ -743,7 +759,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     // Whole coverage shows one layer exactly: mix's arithmetic is not exact at its ends when
     // the layers differ by orders of magnitude (a bright sky behind rock).
     let film=select(select(mix(back,front,coverage),back,coverage<=0.0),front,coverage>=1.0);
-    textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u),bitcast<u32>(s.distance),0u,0u));
+    textureStore(tr1_anchor_out,p,vec4<u32>(tr1_anchor_word(s),bitcast<u32>(s.distance),0u,0u));
     textureStore(tr1_colour_out,p,mine);
     let first_coverage=select(1.0-coverage,coverage,occluder_is_s);
     textureStore(tr1_layer_out,p,vec4<u32>((u.id&TR1_ID)|((u.side&1u)<<23u)|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s),pack2x16float(theirs.xy),
