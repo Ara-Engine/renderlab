@@ -470,6 +470,7 @@ fn gi_dedup_composes_and_validates() {
         }
     }
     assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 4);
+}
 
 /// Lean shading (`program::lean_variant`): on every traced shading head the lean module is the
 /// full one plus the two early returns (decals, atmosphere), keeps the

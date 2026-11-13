@@ -1382,6 +1382,14 @@ fn report_shade_counts(
             w[8], w[9], w[10], w[11], w[12], w[13]
         );
     }
+    // Lights tested for visibility from camera receivers (standard program), and those whose
+    // unshadowed contribution is under half a display code (program.rs rl_light_bound).
+    if w.len() >= 70 && w[64] != 0 {
+        eprintln!(
+            "light_bound frame={frame} tested={} under_half_code_black={} under_half_code_running={} local_tested={} local_black={} local_running={}",
+            w[64], w[65], w[66], w[67], w[68], w[69]
+        );
+    }
     let pixels = w[0].max(1) as f64;
     let mean = |i: usize| w[i] as f64 / pixels;
     let percentile = |from: usize, bins: usize, q: f64| {

@@ -89,8 +89,24 @@ pub(crate) fn shade_count_on() -> bool {
     *ON.get_or_init(|| std::env::var("RENDERLAB_SHADE_COUNT").is_ok_and(|v| v == "1"))
 }
 /// The counts buffer's u32 words (`shade_count_on`).
-pub(crate) const SHADE_COUNT_WORDS: usize = 64;
-const SHADE_COUNT_API: &str = "// RENDERLAB_SHADE_COUNT=1 (program.rs shade_count_on).\n@group(0) @binding(80) var<storage,read_write> rl_shade_counts:array<atomic<u32>,64>;\nvar<private> rl_sc_vis:u32;\nvar<private> rl_sc_finds:u32;\nvar<private> rl_sc_adds:u32;\nvar<private> rl_sc_refine:u32;\nvar<private> rl_sc_fill:u32;\nvar<private> rl_sc_fallback:u32;\nfn rl_shade_count() {\n    let lights=light_count();\n    atomicAdd(&rl_shade_counts[0],1u);atomicAdd(&rl_shade_counts[1],lights);atomicAdd(&rl_shade_counts[2],rl_sc_vis);\n    atomicAdd(&rl_shade_counts[3],rl_sc_finds);atomicAdd(&rl_shade_counts[4],rl_sc_adds);atomicAdd(&rl_shade_counts[5],rl_sc_refine);\n    atomicAdd(&rl_shade_counts[6],rl_sc_fill);atomicAdd(&rl_shade_counts[7],rl_sc_fallback);\n    atomicAdd(&rl_shade_counts[16u+min(rl_sc_vis,31u)],1u);atomicAdd(&rl_shade_counts[48u+min(lights,15u)],1u);\n}\n";
+pub(crate) const SHADE_COUNT_WORDS: usize = 80;
+const SHADE_COUNT_API: &str = "// RENDERLAB_SHADE_COUNT=1 (program.rs shade_count_on).\n@group(0) @binding(80) var<storage,read_write> rl_shade_counts:array<atomic<u32>,80>;\nvar<private> rl_sc_vis:u32;\nvar<private> rl_sc_finds:u32;\nvar<private> rl_sc_adds:u32;\nvar<private> rl_sc_refine:u32;\nvar<private> rl_sc_fill:u32;\nvar<private> rl_sc_fallback:u32;\nfn rl_shade_count() {\n    let lights=light_count();\n    atomicAdd(&rl_shade_counts[0],1u);atomicAdd(&rl_shade_counts[1],lights);atomicAdd(&rl_shade_counts[2],rl_sc_vis);\n    atomicAdd(&rl_shade_counts[3],rl_sc_finds);atomicAdd(&rl_shade_counts[4],rl_sc_adds);atomicAdd(&rl_shade_counts[5],rl_sc_refine);\n    atomicAdd(&rl_shade_counts[6],rl_sc_fill);atomicAdd(&rl_shade_counts[7],rl_sc_fallback);\n    atomicAdd(&rl_shade_counts[16u+min(rl_sc_vis,31u)],1u);atomicAdd(&rl_shade_counts[48u+min(lights,15u)],1u);\n}\n\
+// A light about to be tested for visibility from a camera receiver (standard program): its
+// unshadowed exposed contribution c against half a display code, sRGB only (the tone curve is
+// not applied). Words 64-66: all such lights, c under half a code at black, c under half a code
+// at the pixel's running sum `sum`; 67-69: the same for local shadowed lights.\n\
+fn rl_light_bound(light:LightSample, response:vec3<f32>, input:SurfaceInput, sum:vec3<f32>) {\n\
+    let c=exposed_product(light.intensity*light_transmission(light,input),response);\n\
+    let black=all(c<vec3<f32>(0.5/255.0/12.92));\n\
+    let level=max(sum,vec3<f32>(0.0031308));\n\
+    let step=(0.5/255.0)/(1.055/2.4*pow(level,vec3<f32>(1.0/2.4-1.0)));\n\
+    let running=all(c<step);\n\
+    let base=select(64u,67u,lights[light.index].kind.w!=0u);\n\
+    atomicAdd(&rl_shade_counts[base],1u);\n\
+    if black {atomicAdd(&rl_shade_counts[base+1u],1u);}\n\
+    if running {atomicAdd(&rl_shade_counts[base+2u],1u);}\n\
+    if lights[light.index].kind.w!=0u {atomicAdd(&rl_shade_counts[64],1u);if black {atomicAdd(&rl_shade_counts[65],1u);} if running {atomicAdd(&rl_shade_counts[66],1u);}}\n\
+}\n";
 /// Each counted site: the text it follows (or, for `before`, precedes) and the count it adds.
 const SHADE_COUNT_SITES: [(&str, &str, bool); 8] = [
     // How each receiver find ends (words 8-12: start slot found or empty, next slot found or
@@ -133,7 +149,18 @@ fn with_shade_counts(mut source: String, late: bool) -> String {
         if !source.contains("fn rl_shade_count()") {
             return source;
         }
-        return source.replacen(store, &format!("{store}rl_shade_count();"), 1);
+        let mut source = source.replacen(store, &format!("{store}rl_shade_count();"), 1);
+        // The standard program's light loop: each light's bound before its visibility.
+        const LOOP: &str = "        let visibility=light_visibility(input,light);\n";
+        const RESPONSE: &str = "        var response=brdf(n,v,light.direction,base,metal,rough);\n";
+        if source.matches(LOOP).count() == 1 && source.contains(RESPONSE) {
+            source = source.replacen(
+                LOOP,
+                &format!("        rl_light_bound(light,brdf(n,v,light.direction,base,metal,rough)*light.attenuation,input,exposed);\n{LOOP}"),
+                1,
+            );
+        }
+        return source;
     }
     for (site, count, before) in SHADE_COUNT_SITES {
         if source.matches(site).count() == 1 {
