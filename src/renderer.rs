@@ -3580,7 +3580,7 @@ impl Renderer {
                         mark(&mut encoder, "sun_shadow");
                         self.encode_virtual(&mut encoder, stamps(8), &mut mark);
                         mark(&mut encoder, "atmosphere");
-                        self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
+                        self.encode_atmosphere(&mut encoder, scene_generation, &mut mark, shadow_draws);
                     } else if soft {
                         mark(&mut encoder, "sun_shadow");
                         self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
