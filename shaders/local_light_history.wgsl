@@ -128,6 +128,15 @@ fn rl_local_recheck(receiver:Receiver, id:u32)->bool {
     let seed=rl_local_hash(block.x^rl_local_hash(block.y^(id*0x9e3779b9u)));
     return ((rl_local_record.words.z+seed)%RL_LOCAL_HOLD)==0u;
 }
+// Slot k's cached visibility (negative before it is traced), read and written through
+// select chains: a store into a private vector at a runtime index can silently do nothing on
+// NVIDIA through naga, which would keep every pixel tracing.
+fn rl_local_cached_at(k:u32)->f32 {
+    return select(select(select(rl_local_cached.w,rl_local_cached.z,k==2u),rl_local_cached.y,k==1u),rl_local_cached.x,k==0u);
+}
+fn rl_local_cache(k:u32, visible:f32) {
+    rl_local_cached=select(rl_local_cached,vec4<f32>(visible),vec4<u32>(k)==vec4<u32>(0u,1u,2u,3u));
+}
 fn rl_local_visibility(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     let id=light.kind.w&0xffffu;
     if RL_LOCAL_SHOW==6u && rl_local_live {return 1.0;}
@@ -138,7 +147,8 @@ fn rl_local_visibility(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
         if RL_LOCAL_SHOW==7u {return 1e4;}
         return rl_local_rays_visibility(light,receiver,l);
     }
-    if rl_local_cached[slot]>=0.0 {return rl_local_cached[slot];}
+    let cached=rl_local_cached_at(slot);
+    if cached>=0.0 {return cached;}
     let soft=light.source.x>0.0;
     let still=!rl_local_moving(light,receiver.world);
     let found=select(0u,rl_local_found_half(id),still);
@@ -186,7 +196,7 @@ fn rl_local_visibility(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
         if still {half=rl_local_half(visible,min(samples,RL_LOCAL_HISTORY_MAX));}
     }
     if slot>=2u {rl_local_next.w|=half<<(16u*(slot&1u));} else {rl_local_next.z|=half<<(16u*(slot&1u));}
-    rl_local_cached[slot]=visible;
+    rl_local_cache(slot,visible);
     if (RL_LOCAL_SHOW==1u && served) || (RL_LOCAL_SHOW==2u && !still) || (RL_LOCAL_SHOW==4u && count!=0u) || (RL_LOCAL_SHOW==5u && held) || (RL_LOCAL_SHOW==8u && !held) {return 1e4;}
     return visible;
 }
