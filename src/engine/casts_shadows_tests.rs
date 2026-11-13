@@ -8,10 +8,10 @@ use super::*;
 const SIZE: [u32; 2] = [160, 96];
 
 /// The fitting about a light 1 m up over a 12 m floor, no sun, after eight frames: a point
-/// light in a 1 m shade, or (`spot`) a spot aimed down in a 0.5 x 0.3 x 0.5 m head. `None`
-/// leaves the fitting out, `Some(casts)` places it with that flag. Returns the frame and the
-/// fitting's screen rectangle.
-fn lamp(path: RenderPath, shade: Option<bool>, spot: bool) -> (Image, [usize; 4]) {
+/// light in a 1 m shade, or (`spot`) a wide spot aimed down in a 0.5 x 0.3 x 0.5 m head. `None`
+/// leaves the fitting out, `Some(casts)` places it with that flag; `lit` false leaves the light
+/// out (the sky's share of the floor). Returns the frame and the fitting's screen rectangle.
+fn lamp(path: RenderPath, shade: Option<bool>, spot: bool, lit: bool) -> (Image, [usize; 4]) {
     let adapter = test_adapter();
     // SAFETY: the test suite's documented experimental-feature acknowledgement.
     let experimental_ray_query =
@@ -60,26 +60,33 @@ fn lamp(path: RenderPath, shade: Option<bool>, spot: bool) -> (Image, [usize; 4]
     }
     engine.set_sun(None).unwrap();
     engine
-        .set_lights(&[if spot {
-            Light::Spot {
-                position: Vec3::from(centre),
-                travel: Vec3::NEG_Y,
-                candela: [1000.0; 3],
-                range: None,
-                inner: 0.35,
-                outer: 0.6,
-                source_radius: 0.0,
-                cast_shadows: Some(true),
-            }
-        } else {
-            Light::Point {
-                position: Vec3::from(centre),
-                candela: [1000.0; 3],
-                range: None,
-                source_radius: 0.0,
-                cast_shadows: Some(true),
-            }
-        }])
+        .set_lights(
+            &[if !lit {
+                None
+            } else if spot {
+                Some(Light::Spot {
+                    position: Vec3::from(centre),
+                    travel: Vec3::NEG_Y,
+                    candela: [1000.0; 3],
+                    range: None,
+                    inner: 0.9,
+                    outer: 1.2,
+                    source_radius: 0.0,
+                    cast_shadows: Some(true),
+                })
+            } else {
+                Some(Light::Point {
+                    position: Vec3::from(centre),
+                    candela: [1000.0; 3],
+                    range: None,
+                    source_radius: 0.0,
+                    cast_shadows: Some(true),
+                })
+            }]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>(),
+        )
         .unwrap();
     let view = engine
         .create_view(&ViewDesc {
@@ -142,24 +149,26 @@ fn mean(image: &Image, [x0, y0, x1, y1]: [usize; 4], inside: bool) -> f64 {
     sum as f64 / n.max(1) as f64
 }
 
-/// Outside the box: a casting box leaves the floor in its own shadow, a non-casting one lights
-/// it as if the box were absent; inside it, both draw the box.
+/// Outside the box, the lamp's own share of the floor (over the sky's): a casting box blocks
+/// it, a non-casting one lets it out as if the box were absent; inside it, both draw the box.
 fn check(path: RenderPath, spot: bool) {
-    let (open, rect) = lamp(path, None, spot);
-    let (lit, _) = lamp(path, Some(false), spot);
-    let (shut, _) = lamp(path, Some(true), spot);
+    let (open, rect) = lamp(path, None, spot, true);
+    let (lit, _) = lamp(path, Some(false), spot, true);
+    let (shut, _) = lamp(path, Some(true), spot, true);
+    let (sky, _) = lamp(path, None, spot, false);
+    let sky = mean(&sky, rect, false);
     let floor = [
-        mean(&open, rect, false),
-        mean(&lit, rect, false),
-        mean(&shut, rect, false),
+        mean(&open, rect, false) - sky,
+        mean(&lit, rect, false) - sky,
+        mean(&shut, rect, false) - sky,
     ];
     assert!(
-        floor[0] > 20.0,
-        "{path:?}: the open lamp lights the floor ({floor:?})"
+        floor[0] > 10.0,
+        "{path:?}: the open lamp lights the floor ({floor:?} over sky {sky})"
     );
     assert!(
-        floor[2] < 0.3 * floor[0],
-        "{path:?}: a casting shade blocks its light ({floor:?})"
+        floor[2] < 0.2 * floor[0],
+        "{path:?}: a casting fitting blocks its light ({floor:?} over sky {sky})"
     );
     let difference = {
         let [x0, y0, x1, y1] = rect;
