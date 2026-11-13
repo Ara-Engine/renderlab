@@ -50,6 +50,9 @@
 //! `--diag far=1` (U-FIXED) holds a camera 40 m up over a 2.4 km ground with columns at 80,
 //! 200, 300 and 800 m whose sun shadows cross the view (the sun's coverage, Ara #185 item 33);
 //! `far=move` slides that camera sideways 0.25 m a frame (far shadows in motion).
+//! `far=low` puts the camera 1.7 m up with a body-sized box 0.3 m beside it and columns at 50,
+//! 200 and 1000 m (the clipmap's reach from a caster at the lens); `far=box` puts the same eye
+//! inside a diagonal wall's bounds instead. `lowmove` and `boxmove` slide them with the caster.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -399,9 +402,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `far=1` (U-FIXED, the sun's coverage, Ara #185 item 33): a 2.4 km ground and columns
     // at 80, 200, 300 and 800 m north of a camera 40 m up with a 2 km far plane, whose shadows
     // cross the view: sun shadows at game-scale distances, on both paths. `far=move` slides the
-    // camera east 0.25 m a frame.
-    let far_move = scene_key("far", "move");
-    let far = scene_key("far", "1") || far_move;
+    // camera east 0.25 m a frame. `far=low`/`lowmove`: the camera 1.7 m up, 8 m south of the
+    // arch, with a body-sized box 0.3 m east of the eye (out of view) moving with it, and
+    // columns at 50, 200 and 1000 m. `far=box`/`boxmove`: the same eye 1.4 m from a 6 m wall
+    // turned 45 degrees behind its left, whose bounds hold the eye (out of view too).
+    let far_low = scene_key("far", "low") || scene_key("far", "lowmove");
+    let far_box = scene_key("far", "box") || scene_key("far", "boxmove");
+    let far_move = ["move", "lowmove", "boxmove"]
+        .iter()
+        .any(|v| scene_key("far", v));
+    let far = scene_key("far", "1") || far_move || far_low || far_box;
     let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
@@ -724,15 +734,34 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // `far=low`/`box`: the caster beside the eye at a slide of `x` metres east.
+    let far_caster = |x: f32| {
+        if far_box {
+            Mat4::from_translation(at(x - 1.0, 1.5, 9.0))
+                * Mat4::from_rotation_y(-PI / 4.0)
+                * Mat4::from_scale(Vec3::new(6.0, 3.0, 0.1))
+        } else {
+            boxed(at(x + 0.5, 0.9, 8.0), Vec3::new(0.4, 1.8, 0.3))
+        }
+    };
+    let mut far_body = None;
     if far {
         let column = material(&mut engine, [0.7, 0.7, 0.72], 0.0, 0.8)?;
-        for d in [80.0f32, 200.0, 300.0, 800.0] {
+        let distances: &[f32] = if far_low || far_box {
+            &[50.0, 200.0, 1000.0]
+        } else {
+            &[80.0, 200.0, 300.0, 800.0]
+        };
+        for &d in distances {
             let (width, height) = (d / 25.0, d / 8.0);
             engine.spawn(
                 cube,
                 column,
                 boxed(at(-0.15 * d, 0.5 * height, -d), Vec3::new(width, height, width)),
             )?;
+        }
+        if far_low || far_box {
+            far_body = Some(engine.spawn(cube, column, far_caster(0.0))?);
         }
     }
     // The arch: two pillars and a lintel.
@@ -1138,8 +1167,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let (eye, target, far_plane) = if far {
             let slide = Vec3::new(if far_move { 0.25 * frame as f32 } else { 0.0 }, 0.0, 0.0);
+            if let Some(body) = far_body {
+                engine.set_transform(body, far_caster(slide.x))?;
+            }
+            let eye = if far_body.is_some() {
+                Vec3::new(0.0, 1.7, 8.0)
+            } else {
+                Vec3::new(0.0, 40.0, 0.0)
+            };
             (
-                anchor + slide + Vec3::new(0.0, 40.0, 0.0),
+                anchor + slide + eye,
                 anchor + slide + Vec3::new(0.0, 0.0, -400.0),
                 2000.0,
             )
@@ -1212,6 +1249,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "draws": report.scene.draws, "triangles": report.scene.triangles, "written": written,
             "rgba8_sha256": image_hash, "t": t, "eye": eye.to_array(), "target": target.to_array(),
             "hdr_sha256": hdr_hash, "view": &args.views[..1], "b_rgba8_sha256": second_hash,
+            // The non-RT sun clipmap's ladder and its reach (receiver counts lag a frame or two).
+            "clipmap": {
+                let v = engine.renderer().virtual_shadow_stats();
+                serde_json::json!({
+                    "levels": v.levels, "finest_level": v.finest_level, "skipped_levels": v.skipped_levels,
+                    "nearest_receiver": v.nearest_receiver, "receivers": v.receivers,
+                    "unplaced_receivers": v.unplaced_receivers,
+                })
+            },
         }));
         last_camera = Some(camera);
         last_camera_b = Some(camera_b);
