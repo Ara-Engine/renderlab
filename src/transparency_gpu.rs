@@ -2316,14 +2316,17 @@ impl Renderer {
             .collect();
         // Per-pixel panes (`panes`): a record (rectangle and model slot) per instance of each
         // glass draw, at its dynamic offset, and a pane group per draw. Draws with a tangent
-        // stream keep the raster: the pane shading builds vertices without tangents.
+        // stream keep the raster (the pane shading builds vertices without tangents), and so do
+        // draws of more than `panes::MAX_INSTANCES` instances.
         let mut pane_records: Vec<Vec<(u32, [u32; 4])>> = vec![Vec::new(); transparent.len()];
         let mut pane_groups: Vec<Option<wgpu::BindGroup>> =
             (0..transparent.len()).map(|_| None).collect();
         let mut pane_bytes = Vec::new();
         if pixel_panes && targets.pane_ids.is_some() {
             for (i, draw) in transparent.iter().enumerate() {
-                if draw.mesh.tangent.is_some() {
+                if draw.mesh.tangent.is_some()
+                    || draw.instances.state.models.len() > panes::MAX_INSTANCES
+                {
                     continue;
                 }
                 let state = &draw.instances.state;
