@@ -11,13 +11,49 @@ fn composition(
     list: bool,
     role: MaterialRole,
 ) -> Option<program::Composed> {
+    composition_control(head, source, stage, list, role, reader_control_on())
+}
+
+fn reader_control_on() -> bool {
+    std::env::var("RENDERLAB_MATERIAL_READER_CONTROL").as_deref() == Ok("1")
+}
+
+// The record rounds roughness upward. Include the code containing 0.05 so
+// the control cannot miss a low-roughness pixel at the quantized boundary.
+const READER_SEAM: &str =
+    "    let surface_output=material_in(rl_material_load(pixel),surface_input);\n";
+const READER_CONTROL: &str = "    let rl_control_record=rl_material_load(pixel);\n\
+    var surface_output:Surface;\n\
+    if rl_control_record.roughness<=3277.0/65535.0 {\n\
+        surface_output=surface(surface_input);\n\
+        rl_material_n=material_out(surface_output,surface_input).normal;\n\
+        rl_material_view_hint=tr1_view_hint(surface_output,surface_input,view_ray);\n\
+    } else {\n\
+        surface_output=material_in(rl_control_record,surface_input);\n\
+    }\n";
+
+fn composition_control(
+    head: &str,
+    source: &str,
+    stage: Stage,
+    list: bool,
+    role: MaterialRole,
+    control: bool,
+) -> Option<program::Composed> {
     let parameters = program::declares_parameters(source);
     let full = if list {
         program::compose_list(head, source, stage, parameters)
     } else {
         program::compose(head, source, stage, parameters)
     };
-    program::material_variant(program::with_reflection_history(full), source, role)
+    let mut composed =
+        program::material_variant(program::with_reflection_history(full), source, role)?;
+    if control && role == MaterialRole::Read {
+        let entry = composed.source.find("fn primary_shade_pixel(")?;
+        let at = entry + composed.source[entry..].find(READER_SEAM)?;
+        composed.source.replace_range(at..at + READER_SEAM.len(), READER_CONTROL);
+    }
+    Some(composed)
 }
 
 pub(super) fn entries(
@@ -310,12 +346,18 @@ mod tests {
             for head in rt.iter().chain(&nonrt) {
                 for list in [false, true] {
                     for stage in [Stage::Traced, Stage::TracedStreamed] {
-                        for (role, write) in
-                            [(MaterialRole::Write, true), (MaterialRole::Read, false)]
+                        for (role, write, control) in [
+                            (MaterialRole::Write, true, false),
+                            (MaterialRole::Read, false, false),
+                            (MaterialRole::Read, false, true),
+                        ]
                         {
-                            let source = composition(head, program_source, stage, list, role)
+                            let source = composition_control(head, program_source, stage, list, role, control)
                                 .unwrap()
                                 .source;
+                            if control {
+                                assert!(source.contains(READER_CONTROL));
+                            }
                             let module = naga::front::wgsl::parse_str(&source)
                                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
                             naga::valid::Validator::new(
