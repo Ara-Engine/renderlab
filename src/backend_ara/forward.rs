@@ -399,7 +399,8 @@ pub struct ForwardImages {
     /// With `RENDERLAB_RL_DEFERRED=diag` only (identity tests): the deferred reflections'
     /// outputs as RGBA16F (`program::deferred_variant`: reflectance and traced fraction;
     /// untraced specular and the inline traced luminance). Never read back otherwise, so a
-    /// player with frames in flight never waits on them.
+    /// player with frames in flight never waits on them; with diag the frame waits for them, as
+    /// for any readback.
     pub deferred_reflections: Option<[Vec<u8>; 2]>,
 }
 
@@ -4800,7 +4801,8 @@ fn frame(
             || outgoing_read.is_some()
             || raw_read.is_some()
             || history_read.is_some()
-            || probe_read.is_some();
+            || probe_read.is_some()
+            || deferred_read.is_some();
         gpu.begin_deferred_completion_on_current_queue()?;
         let submission = gpu.submit(rec.finish(), &[]);
         in_flight.push_back(gpu.end_deferred_completion()?);
