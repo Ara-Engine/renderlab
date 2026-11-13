@@ -347,6 +347,10 @@ pub struct ForwardImages {
     /// MEASUREMENT ONLY: with `RENDERLAB_ARA_PROBE_RESOLVE` set, the resolve's
     /// one-pixel trace (`resolve_probe::describe` reads it).
     pub resolve_probe: Option<Vec<[f32; 4]>>,
+    /// With `RENDERLAB_RL_DEFERRED=1`, until the composite reads them on the GPU: the
+    /// deferred reflections' outputs as RGBA16F (`program::deferred_variant`: reflectance
+    /// and traced fraction; untraced specular and the inline traced luminance).
+    pub deferred_reflections: Option<[Vec<u8>; 2]>,
 }
 
 /// The post `Settings` record at this output height for the post frame with this
@@ -2856,6 +2860,16 @@ fn frame(
             InputKind::Sampler { comparison } => {
                 ensure!(!comparison, "unexpected comparison sampler {}", spec.name)
             }
+            // Deferred reflections' inputs (`program::deferred_variant`): the shading entry
+            // writes them per pixel; the composite after shading reads them.
+            InputKind::StorageImage { .. }
+                if traced.is_some()
+                    && matches!((spec.key.group, spec.key.binding), (0, 62) | (0, 63)) =>
+            {
+                if let std::collections::btree_map::Entry::Vacant(slot) = inputs.entry(spec.key) {
+                    slot.insert(Texture::new(gpu, size, Format::Rgba16Float, true, false)?);
+                }
+            }
             InputKind::AccelerationStructure | InputKind::StorageImage { .. }
                 if traced.is_some() => {}
             InputKind::BufferArray { .. } | InputKind::SamplerArray { .. }
@@ -4084,6 +4098,25 @@ fn frame(
         )?),
         None => None,
     };
+    let deferred_read = match (inputs.get(&key(0, 62)), inputs.get(&key(0, 63))) {
+        (Some(reflectance), Some(untraced)) => Some([
+            transfer::readback(
+                gpu,
+                &mut graph,
+                &mut rec,
+                reflectance.image,
+                u64::from(reflectance.size[0]) * u64::from(reflectance.size[1]) * 8,
+            )?,
+            transfer::readback(
+                gpu,
+                &mut graph,
+                &mut rec,
+                untraced.image,
+                u64::from(untraced.size[0]) * u64::from(untraced.size[1]) * 8,
+            )?,
+        ]),
+        _ => None,
+    };
     let history_read = match resolve.filter(|_| reconstruct.is_some_and(|r| r.read_history)) {
         Some((images, _)) => Some(transfer::readback(
             gpu,
@@ -4548,6 +4581,10 @@ fn frame(
             .map(|b| gpu.read(b))
             .transpose()?
             .map(|bytes| bytemuck::pod_collect_to_vec(&bytes)),
+        deferred_reflections: match deferred_read {
+            Some([a, b]) => Some([gpu.read(a)?, gpu.read(b)?]),
+            None => None,
+        },
         reconstruction_history: history_read
             .map(|b| gpu.read(b))
             .transpose()?
