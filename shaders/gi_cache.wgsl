@@ -1450,7 +1450,9 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
             // direction is known its blocked directions are gathered GI_H_GATHERS times.
             if gi_bounce_on() {
                 gi_queue_shade(slot);
-                if all_known { gi_schedule(slot,gi_word(GI_H_GATHERS)); }
+                // A cell made for a gather's hit takes GI_H_HIT_GATHERS (U-RTVIS: the fan-out).
+                let hit_made=(gi_table[cold+GI_C_STATE]&GI_SECONDARY)!=0u && gi_word(GI_H_HIT_GATHERS)!=0u;
+                if all_known { gi_schedule(slot,select(gi_word(GI_H_GATHERS),gi_word(GI_H_HIT_GATHERS),hit_made)); }
             }
         }
         // Lane 0 of each cell has read its bits before the next cells clear them.

@@ -139,8 +139,8 @@ impl Default for Exposure {
 #[non_exhaustive]
 pub enum Quality {
     /// Each path's measured real-time configuration: on hardware RT, traced primaries
-    /// with the Interactive sun (`SoftShadows::Interactive`): with TR1, 32 sun-disk directions
-    /// per pixel while the view moves (256 after a cut, 64 at a restart) and 8 once a still
+    /// with the Interactive sun (`SoftShadows::Interactive`): with TR1, 16 sun-disk directions
+    /// per pixel while the view moves (256 after a cut, 32 at a restart) and 8 once a still
     /// view has settled, receivers within a moving caster's shadow keeping the restart
     /// count (`ReconstructionShadowBudget`); without RT,
     /// the visibility buffer with the cached sun clipmap (`SoftShadows::Virtual`, Surface
@@ -352,7 +352,7 @@ pub(crate) fn ablated(mut s: Settings) -> Settings {
 /// `lookup=nearest|trilinear`, `filter`, `filter_edge`, `rotate`, `bounce`, `directions`,
 /// `cell_pixels`, `level_blend`, `gathers`, `gather_cells`, `claim_cells`, `near_light_rays`,
 /// `slots_log2`, `evict_frames`, `pressure_eviction`, `hit_cone_cells`, `gather_pixels_first`,
-/// `mover_hit_levels`, `cut_refill`.
+/// `mover_hit_levels`, `cut_refill`, `hit_gathers`.
 /// Unset, it changes nothing. An unknown key, a pair without `=`
 /// or a value that does not parse is an error, named on stderr: a mistyped switch must not
 /// pass for a measurement of the default.
@@ -389,6 +389,7 @@ fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error>
             ("gather_pixels_first", Some(v), _) => s.gather_pixels_first = v != 0,
             ("mover_hit_levels", Some(v), _) => s.mover_hit_levels = v,
             ("cut_refill", Some(v), _) => s.cut_refill = v != 0,
+            ("hit_gathers", Some(v), _) => s.hit_gathers = v,
             _ => {
                 eprintln!("RENDERLAB_GI: unknown key or unreadable value in `{pair}`");
                 return Err(Error::InvalidInput(

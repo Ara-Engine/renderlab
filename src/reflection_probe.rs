@@ -86,6 +86,7 @@ fn shader() -> String {
         "light_transmission",
         "light_visibility",
         "expose",
+        "reflection_report",
         "rl_finite",
         "material_normal",
         // TP1: the standard program's transparency inputs.

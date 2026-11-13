@@ -1,23 +1,31 @@
-//! Per-pixel pane shading on the wgpu renderer (`RENDERLAB_PANES=pixels`), the design the
-//! ara-gpu port ships (RL#48): instead of rasterizing a glass draw's triangles with the full
-//! lit fragment shader, which runs once per covered quad of every sub-pixel triangle, each
-//! pane instance gets a four-sample raster of its triangle ids, then one compute dispatch
-//! over its screen rectangle shades each distinct triangle under a pixel's samples once at
-//! the pixel centre and averages the samples against the colour behind, as the glass
-//! target's resolve does. The shading body is `fs_transparent`'s own, rewritten with explicit
-//! derivatives (src/pane_pixels.rs), so it follows the shared entry.
+//! Per-pixel pane shading on the wgpu renderer (the default; `RENDERLAB_PANES=raster` keeps the
+//! glass raster), the design the ara-gpu port ships (RL#48): instead of rasterizing a glass
+//! draw's triangles with the full lit fragment shader, which runs once per covered quad of
+//! every sub-pixel triangle, each pane instance gets a four-sample raster of its triangle
+//! ids, then one compute dispatch over its screen rectangle shades each distinct triangle
+//! under a pixel's samples once at the pixel centre and averages the samples against the
+//! colour behind, as the glass target's resolve does. The shading body is `fs_transparent`'s
+//! own, rewritten with explicit derivatives (src/pane_pixels.rs), so it follows the shared
+//! entry.
 //!
 //! Instances of one draw shade one at a time, in the order the raster draws them, each over
 //! what the previous left in the HDR target.
 use super::*;
 use glam::Vec2;
 
-/// Whether panes shade per pixel: `RENDERLAB_PANES=pixels`. Off (the glass raster) by
-/// default until the RTX gate confirms the picture. Needs `Features::PRIMITIVE_INDEX`.
+/// Whether panes shade per pixel: yes unless `RENDERLAB_PANES=raster`, as on the ara-gpu port
+/// (`RENDERLAB_ARA_PANES`). Traced frames on a device with `Features::PRIMITIVE_INDEX` only;
+/// the raster draws them otherwise. On Ara's Glint start view the port's glass rails cost
+/// 9.6 ms through the raster and 1.3 ms per pixel (M5).
 pub(super) fn wanted() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_PANES").is_ok_and(|v| v == "pixels"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_PANES").map_or(true, |v| v != "raster"))
 }
+
+/// Instances above which a glass draw keeps the raster: per-pixel panes encode an id pass, a
+/// dispatch and a region copy per instance, so a fence or foliage draw of hundreds would cost
+/// what RL#72's unbounded spans did (Ara Outpost RT, 2026-11-13). Window panes stay well under.
+pub(super) const MAX_INSTANCES: usize = 64;
 
 /// One pane record (shaders/pane_pixels.wgsl `PanePixels`): the instance's pixel rectangle
 /// and its model slot, at a dynamic offset of this stride.
