@@ -3375,6 +3375,9 @@ impl Renderer {
                 .as_ref()
                 .map_or(0, |h| h.scene_generation());
             let mut primary = UploadBytes::default();
+            // U-RTVIS: the reflection composite's room grows to the content before this frame's
+            // bindings are built (a growth drops them; prepare_primary rebuilds them).
+            self.rl_room_grow();
             let result = self.prepare_primary(draws, camera, soft, scene_generation, &mut primary);
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
@@ -3588,6 +3591,12 @@ impl Renderer {
                 self.ensure_gi_receiver_pass(shading)?;
                 mark(&mut encoder, "gi_receiver");
                 self.encode_gi_receiver_pass(&mut encoder, shading);
+                // Visibility feeds both the optional detail probes and final shading.
+                if primary_ray_gpu::light_vis_pass::on() {
+                    self.ensure_light_vis(shading)?;
+                    mark(&mut encoder, "light_visibility");
+                    self.encode_light_vis(&mut encoder, shading);
+                }
                 if !self.view.outputs.modes.shades() {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
@@ -3616,6 +3625,9 @@ impl Renderer {
                     self.encode_reflection_trace(&mut encoder, shading);
                     mark(&mut encoder, "reflection.hits");
                     self.encode_reflection_hits(&mut encoder, shading);
+                    // U-RTVIS: the deferred composite (RENDERLAB_RL_DEFERRED=1 with the pass).
+                    mark(&mut encoder, "reflection.composite");
+                    self.encode_reflection_composite(&mut encoder, shading);
                 }
             }
             if reconstructed {
@@ -3877,6 +3889,9 @@ impl Renderer {
         // `queue.submit` for an older one shows here with the older one counted.
         let alive = self.occupied();
         let index = self.queue.submit([commands]);
+        if let Some(virtual_shadows) = self.view.virtual_shadows.as_mut() {
+            virtual_shadows.submitted();
+        }
         if let Some(mut t) = marks {
             t.submitted();
             self.pass_timeline = Some(t);
