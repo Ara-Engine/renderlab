@@ -759,6 +759,15 @@ impl Engine {
     pub fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error> {
         self.state.set_transform(object, transform)
     }
+    /// Whether an object blocks light (default true), as the wgpu engine's `set_casts_shadows`.
+    /// Stored on its batch (`Batch::casts`); this layer's shadow casters do not read it yet
+    /// (instance masks, the atlas and the clipmap follow in the port).
+    pub fn set_casts_shadows(&mut self, object: ObjectId, casts: bool) -> Result<(), Error> {
+        self.state.set_casts_shadows(object, casts)
+    }
+    pub fn casts_shadows(&self, object: ObjectId) -> Result<bool, Error> {
+        self.state.casts_shadows(object)
+    }
     pub fn set_decals(&mut self, decals: &[Decal]) -> Result<(), Error> {
         if !decals.is_empty() {
             self.refuse("set_decals", "decals");
