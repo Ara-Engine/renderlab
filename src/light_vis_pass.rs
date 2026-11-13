@@ -185,9 +185,15 @@ mod tests {
                     let c = if on() { c } else { apply_enabled(c, true) };
                     assert_eq!(&c.source[c.program.clone()], source);
                     let source = c.source;
-                    let deferred = source
-                        .contains("rl_specular")
-                        .then(|| program::deferred_variant(&source));
+                    let deferred = (source.contains("rl_specular")
+                        && !program::rl_deferred_for(&head))
+                    .then(|| {
+                        program::deferred_variant(program::Composed {
+                            source: source.clone(),
+                            program: c.program,
+                        })
+                        .source
+                    });
                     for source in std::iter::once(source.as_str()).chain(deferred.as_deref()) {
                         let module = naga::front::wgsl::parse_str(source)
                             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
@@ -205,7 +211,10 @@ mod tests {
     #[test]
     fn glass_hits_remain_inline() {
         let head = transparent_reflection_head(include_str!("../shaders/scene.wgsl")).unwrap();
-        let program = program::glass_hit_program(crate::STANDARD_PROGRAM);
+        let program = program::glass_hit_program(
+            crate::STANDARD_PROGRAM,
+            program::rl_deferred_for(&head),
+        );
         let c = apply_enabled(
             program::compose(&head, &program, Stage::Traced, false),
             true,
