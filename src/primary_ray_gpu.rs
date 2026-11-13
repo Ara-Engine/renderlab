@@ -663,6 +663,88 @@ const TRACE_SCENE: u32 = 19;
 /// (`program::SOFTWARE_REFLECTION_GEOMETRY`).
 const SOFTWARE_REFLECTIONS: u32 = 36;
 /// The shared TLAS: binding 2 for shadow rays, `TRACE_SCENE` for camera rays.
+/// What the primary shading layout depends on beyond its visibility input: the reflection pass,
+/// the software reflection geometry (non-RT), the deferred composite and its diagnostic output.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ShadeSwitches {
+    pub pass: bool,
+    pub software: bool,
+    pub deferred: bool,
+    pub diag: bool,
+}
+impl ShadeSwitches {
+    fn of(device: &wgpu::Device) -> Self {
+        ShadeSwitches {
+            pass: reflection_pass::on(device),
+            software: !device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
+            deferred: reflection_pass::deferred(device),
+            diag: crate::program::rl_deferred_diag(),
+        }
+    }
+}
+/// The primary shading layout's entries for a `visibility` input (binding 2's TLAS for the hard
+/// head, 6's visibility texture for the soft one) under `switches`. Pure, so tests check every
+/// combination for clashing bindings without a device.
+pub(super) fn shade_layout_entries(
+    visibility: wgpu::BindGroupLayoutEntry,
+    switches: ShadeSwitches,
+) -> Vec<wgpu::BindGroupLayoutEntry> {
+    use wgpu::TextureFormat as F;
+    let uint = wgpu::TextureSampleType::Uint;
+    let mut entries = vec![
+        uniform(0, 80),
+        texture(7, uint),
+        uniform(10, FRAME_BYTES as u64),
+        image(18, F::Rgba16Float),
+        texture(21, uint),
+        read(22, 16),
+        visibility,
+    ];
+    if visibility.binding == 2 {
+        entries.push(texture(
+            23,
+            wgpu::TextureSampleType::Float { filterable: false },
+        ));
+    } else {
+        // M7-R1: Soft shading traces reflection rays on the shared TLAS.
+        entries.push(scene(2));
+    }
+    // U-RTVIS: the reflection history (program::with_reflection_history).
+    entries.push(uniform(
+        RL_HISTORY_FRAME,
+        temporal_reconstruction::RL_HISTORY_BYTES as u64,
+    ));
+    entries.push(entry(
+        RL_HISTORY,
+        wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::ReadWrite,
+            format: F::R32Uint,
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+        },
+    ));
+    // U-RTVIS: the reflection resolve's shading phase (reflections_history.wgsl).
+    entries.push(uniform(RL_PHASE, 16));
+    // U-RTVIS: the reflection pass's lobe output (reflection_pass.rs).
+    if switches.pass {
+        entries.extend(reflection_pass::shade_entries());
+        // The Mac thread's reflection_hits: H and R (reflection_hits_gpu.rs).
+        entries.extend(super::reflection_hits::shade_entries());
+    }
+    // M7-R1n: non-RT shading traces them in software (reflection_software.rs), read
+    // as vec4 words (P-NRT), so a binding holds at least one.
+    if switches.software {
+        entries.push(read(SOFTWARE_REFLECTIONS, 16));
+    }
+    // Deferred reflections' outputs (`Targets::deferred`).
+    if switches.deferred {
+        entries.push(image(62, F::Rgba16Float));
+        // The untraced output only for identity tests (RENDERLAB_RL_DEFERRED=diag).
+        if switches.diag {
+            entries.push(image(63, F::Rgba16Float));
+        }
+    }
+    entries
+}
 fn scene(binding: u32) -> wgpu::BindGroupLayoutEntry {
     entry(
         binding,
@@ -774,17 +856,6 @@ pub(super) struct RlHistoryTargets {
 const RL_HISTORY_FRAME: u32 = 55;
 const RL_HISTORY: u32 = 54;
 const RL_PHASE: u32 = 60;
-/// The primary shading layout's bindings besides the reflection pass's own (its shade entries
-/// above, `reflection_pass::shade_entries`): the camera, frame, hit, HDR, tiles, region,
-/// visibility and scene, the reflection history and phase, the software reflection geometry,
-/// the Mac thread's H and R, and RL#79's outputs. Tests check the pass's numbers stay clear.
-#[cfg(test)]
-pub(crate) fn shading_layout_bindings() -> Vec<u32> {
-    let mut taken = vec![0, 2, 6, 7, 10, 18, 21, 22, 23, RL_HISTORY, RL_HISTORY_FRAME, RL_PHASE];
-    taken.extend([SOFTWARE_REFLECTIONS, 62, 63]);
-    taken.extend(reflection_hits::shade_entries().map(|e| e.binding));
-    taken
-}
 /// Two halves of four, rl_resolve's sample and seen-history layers (8-15), the halves' hit
 /// distances (16, 17), the sample's (18) and the a-trous filter's two buffers (19-22).
 const RL_HISTORY_LAYERS: u32 = 23;
@@ -1187,62 +1258,7 @@ impl PrimaryState {
             ],
         );
         let shade_entries = [scene(2), texture(6, uint)].map(|visibility| {
-            let mut entries = vec![
-                camera,
-                texture(7, uint),
-                frame,
-                image(18, F::Rgba16Float),
-                texture(21, uint),
-                read(22, 16),
-                visibility,
-            ];
-            if visibility.binding == 2 {
-                entries.push(texture(
-                    23,
-                    wgpu::TextureSampleType::Float { filterable: false },
-                ));
-            } else {
-                // M7-R1: Soft shading traces reflection rays on the shared TLAS.
-                entries.push(scene(2));
-            }
-            // U-RTVIS: the reflection history (program::with_reflection_history).
-            entries.push(uniform(
-                RL_HISTORY_FRAME,
-                temporal_reconstruction::RL_HISTORY_BYTES as u64,
-            ));
-            entries.push(entry(
-                RL_HISTORY,
-                wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::ReadWrite,
-                    format: F::R32Uint,
-                    view_dimension: wgpu::TextureViewDimension::D2Array,
-                },
-            ));
-            // U-RTVIS: the reflection resolve's shading phase (reflections_history.wgsl).
-            entries.push(uniform(RL_PHASE, 16));
-            // U-RTVIS: the reflection pass's lobe output (reflection_pass.rs).
-            if reflection_pass::on(device) {
-                entries.extend(reflection_pass::shade_entries());
-                // The Mac thread's reflection_hits: H and R (reflection_hits_gpu.rs).
-                entries.extend(super::reflection_hits::shade_entries());
-            }
-            // M7-R1n: non-RT shading traces them in software (reflection_software.rs), read
-            // as vec4 words (P-NRT), so a binding holds at least one.
-            if !device
-                .features()
-                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
-            {
-                entries.push(read(SOFTWARE_REFLECTIONS, 16));
-            }
-            // Deferred reflections' outputs (`Targets::deferred`).
-            if reflection_pass::deferred(device) {
-                entries.push(image(62, F::Rgba16Float));
-                // The untraced output only for identity tests (RENDERLAB_RL_DEFERRED=diag).
-                if crate::program::rl_deferred_diag() {
-                    entries.push(image(63, F::Rgba16Float));
-                }
-            }
-            entries
+            shade_layout_entries(visibility, ShadeSwitches::of(device))
         });
         let shade_bindings = shade_entries
             .each_ref()

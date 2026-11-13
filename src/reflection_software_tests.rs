@@ -550,24 +550,49 @@ fn deferred_untraced_output_only_with_diag() {
     }
 }
 
-/// The reflection pass's shading-layout entries take binding numbers the primary shading
-/// layout's other entries do not (60 is the resolve's phase uniform; a clash failed device
-/// layout creation on the non-RT default, which naga cannot see).
+/// The primary shading layout, with the pass on or off, deferred or not, diagnostic or not, on
+/// both visibility inputs and both paths' geometry: no binding number twice. (The pass's room
+/// counters once took 60, the resolve's phase, and every pass-on start failed to create the
+/// layout; naga cannot see a layout clash.)
 #[test]
-fn reflection_pass_shading_bindings_are_their_own() {
-    use crate::renderer::primary_ray_gpu::reflection_pass::shade_entries;
-    let taken = crate::renderer::primary_ray_gpu::shading_layout_bindings();
-    let mut seen = std::collections::HashSet::new();
-    for entry in shade_entries() {
-        assert!(
-            !taken.contains(&entry.binding),
-            "binding {} is taken",
-            entry.binding
-        );
-        assert!(
-            seen.insert(entry.binding),
-            "binding {} twice",
-            entry.binding
-        );
+fn the_primary_shading_layout_has_no_clashing_bindings() {
+    use crate::renderer::primary_ray_gpu::{ShadeSwitches, shade_layout_entries};
+    let visibilities = [
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::AccelerationStructure {
+                vertex_return: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 6,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+    ];
+    for visibility in visibilities {
+        for bits in 0..16u32 {
+            let switches = ShadeSwitches {
+                pass: bits & 1 != 0,
+                software: bits & 2 != 0,
+                deferred: bits & 4 != 0,
+                diag: bits & 8 != 0,
+            };
+            let mut seen = std::collections::HashSet::new();
+            for entry in shade_layout_entries(visibility, switches) {
+                assert!(
+                    seen.insert(entry.binding),
+                    "binding {} twice under {switches:?}",
+                    entry.binding
+                );
+            }
+        }
     }
 }
