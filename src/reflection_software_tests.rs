@@ -487,7 +487,7 @@ fn the_reflection_pass_belongs_to_the_marked_renderer() {
         Stage::Traced,
         false,
     ));
-    assert!(on.source.contains("rl_room_reserve(count)"));
+    assert!(on.source.contains("rl_room_reserve(count,traced,lobe.weight)"));
     assert!(on.source.contains("const RL_DEFERRED_PROGRAM:bool=true;"));
     assert_eq!(&on.source[on.program.clone()], crate::STANDARD_PROGRAM);
     let off = with_reflection_history(compose(
@@ -505,4 +505,29 @@ fn the_reflection_pass_belongs_to_the_marked_renderer() {
     )
     .validate(&module)
     .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on.source)));
+}
+
+/// The regression the per-renderer default guards: a non-RT engine's renderer runs the pass and
+/// marks only its own heads, so heads composed after it exists (the Ara port's, a test's) keep the
+/// inline path whatever the order of tests or engines in the process.
+#[test]
+fn an_engine_default_leaves_other_compositions_inline() {
+    use crate::program::{Stage, compose, with_reflection_history};
+    if crate::program::rl_pass_env().is_some() || crate::program::rl_deferred_env().is_some() {
+        return;
+    }
+    let engine = crate::engine::Engine::new(
+        crate::engine::test_adapter(),
+        crate::engine::EngineDescriptor::default(),
+    )
+    .unwrap();
+    let (_, heads) = non_rt_sources(SOURCE).unwrap();
+    for head in &heads {
+        let source =
+            with_reflection_history(compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false))
+                .source;
+        assert!(!source.contains("rl_composite") && !source.contains("RL_DEFERRED_PROGRAM"));
+        assert!(!source.contains("rl_deferred_store"));
+    }
+    drop(engine);
 }

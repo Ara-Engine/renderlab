@@ -13,14 +13,27 @@
 // (shading leaves glossy reflections to it).
 @group(0) @binding(58) var<uniform> rl_pass_frame:vec4<u32>;
 // The trace counters (reflection_pass.rs STATS), cleared each frame before shading: word 2 sums
-// every glossy receiver's requested strata, so the room grows to the content.
-@group(0) @binding(60) var<storage,read_write> rl_room_stats:array<atomic<u32>,4>;
+// every glossy receiver's requested strata, so the room grows to the content; word 6 counts the
+// receivers that did not fit (inline that frame). Words 4 and 5 are the Mac thread's S4a.
+// Measurement runs (RL_ROOM_HISTOGRAM, src/program.rs) add: 7 and 8, the strata and receivers
+// whose traced fraction is under 5 %; 9 and 10, those whose traced fraction x reflectance weight
+// is under 0.005.
+@group(0) @binding(60) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;
+const RL_ROOM_HISTOGRAM:bool=false;
 const RL_PASS:bool=true;
 fn rl_composite()->bool { return rl_pass_frame.w!=0u; }
 // Inline overflow: a glossy receiver reserves its strata in the composite's room; one that does
 // not fit keeps its inline estimate this frame (no lobe), so no frame is ever scaled. Which
 // receivers overflow on such a frame follows the GPU's order; both estimators have the same mean.
-fn rl_room_reserve(count:u32)->bool { return atomicAdd(&rl_room_stats[2],count)+count<=rl_pass_frame.y; }
+fn rl_room_reserve(count:u32,traced:f32,weight:f32)->bool {
+    if RL_ROOM_HISTOGRAM {
+        if traced<0.05 {atomicAdd(&rl_room_stats[7],count);atomicAdd(&rl_room_stats[8],1u);}
+        if traced*weight<0.005 {atomicAdd(&rl_room_stats[9],count);atomicAdd(&rl_room_stats[10],1u);}
+    }
+    if atomicAdd(&rl_room_stats[2],count)+count<=rl_pass_frame.y {return true;}
+    atomicAdd(&rl_room_stats[6],1u);
+    return false;
+}
 // Whether this module's program reports its reflectance for the deferred composite (it declares
 // `const RL_DEFERRED`; src/program.rs `pass_block` sets it for deferred_variant modules). Under
 // the composite only such programs leave their glossy lobes to the pass; every other program
