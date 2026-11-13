@@ -25,9 +25,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 WORK = Path("D:/Coding/renderlab-work/unit-rtvis")
-# The default game scene on RT at 1080p, frame span median (ms): leases of 2026-11-12 measured
-# 26.67, 26.54 and 26.84.
-REFERENCE_MS = 26.7
+# The default game scene on RT at 1080p, frame span median (ms): this branch's references of
+# 2026-11-13 read 61.6-61.8 (root's bar; the span is CPU-bound, cpu.wait about 0.03 ms).
+REFERENCE_MS = 61.7
 FOX = "D:/Coding/renderlab-work/m7-sk1/Fox.glb"
 # Held-budget runs (step 5): main's cold probes on, the held stop on (1) or off (0).
 HELD = lambda v: {"RENDERLAB_COLD_PROBES": "1", "RENDERLAB_HELD_PROBES": v}
@@ -472,6 +472,10 @@ PLANS["comp4d"] = (
        for v in ("1", "0") if k == 1 or name == "flight"]
     + [("reference-end", [], {})]
 )
+# comp4d split in two leases: pictures (identity, standard composite vs inline, probe), then
+# timing with the reference again at the end.
+PLANS["comppicsd"] = [x for x in PLANS["comp4d"] if x[0][0] in "pq"]
+PLANS["comptimed"] = [x for x in PLANS["comp4d"] if x[0][0] == "t" or x[0] == "reference-end"]
 # The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
 # flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,
 # paint 0.35), moving and still; `compare.py` crops the reflected edges, binary against binary.

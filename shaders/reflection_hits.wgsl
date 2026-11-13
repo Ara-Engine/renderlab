@@ -55,9 +55,11 @@ fn rl_hits_distance(record:vec4<u32>,origin:vec3<f32>)->f32 {
         return;
     }
     // The inline loop's per-hit state (rl_reflection_prepare): this hit's share of its
-    // pixel's strata, and its path regularization.
+    // pixel's strata, its path regularization, and the reflecting lobe's roughness (rough
+    // enough lobes light local lights unshadowed at their hits, LocalShadows).
     rl_indirect_open();
     rl_reflection_hit=true;
+    rl_hist_rough=sqrt(alpha);
     rl_hit_stratum=a.z&0xffu;
     rl_hit_strata=max((a.z>>8u)&0xffu,1u);
     rl_hit_variance=8.0*cone.y*cone.y;

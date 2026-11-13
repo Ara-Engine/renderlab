@@ -16,12 +16,13 @@ const DISTANCE: u32 = 59;
 const STATS: u32 = 60;
 const RANGES: u32 = 61;
 /// With the composite, R holds every glossy pixel's strata (this many slots a row) and H one
-/// record a slot: the room. It starts at ROOM_START and grows to the content (the count pass's
-/// requested total, read back a frame or two late) up to ROOM_PER_PIXEL a pixel; a frame asking
-/// for more than the room scales every pixel's strata to fit (rl_trace_count, rl_trace_pixels),
-/// at least one each, so no pixel loses its reflection while the room grows.
+/// record a slot: the room. It starts at a slot a screen pixel, so a view's first frames are not
+/// scaled unless it asks for more (2,073,600 slots at 1080p: 16 strata over 6 % of the screen),
+/// and grows to the content (the count pass's requested total, read back a frame or two late)
+/// up to ROOM_PER_PIXEL a pixel; a frame asking for more than the room scales every pixel's
+/// strata to fit (rl_trace_count, rl_trace_pixels), at least one each, so no pixel loses its
+/// reflection while the room grows.
 const SAMPLE_ROW: u32 = 2048;
-const ROOM_START: u64 = 1 << 18;
 const ROOM_PER_PIXEL: u64 = 4;
 pub(super) const HITS: u32 = 64;
 pub(super) const SAMPLES: u32 = 65;
@@ -183,7 +184,7 @@ impl Renderer {
         // The composite traces every glossy pixel's set into a room sized to the content (it
         // starts small and grows); the quad trace keeps one slot and record a quad.
         let composite = crate::program::rl_deferred();
-        let room = ROOM_START.min(ROOM_PER_PIXEL * u64::from(size.width) * u64::from(size.height));
+        let room = u64::from(size.width) * u64::from(size.height);
         let samples = if composite {
             [SAMPLE_ROW, (room as u32).div_ceil(SAMPLE_ROW)]
         } else {
