@@ -107,10 +107,48 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
     );
     let quad_indices: &[u32] = &[0, 1, 2, 0, 2, 3];
     let crease_indices: &[u32] = &[2, 0, 1, 2, 1, 3, 0, 4, 5, 0, 5, 1];
+    // A corrugated sheet in front of the crease, ridges across the view, seen at a grazing
+    // angle: each ridge's far facet overlaps its near one in projection, where traversal can
+    // return the farther facet and the edge repair moves the point.
+    let (mut sheet, mut sheet_indices) = (Vec::new(), Vec::<u32>::new());
+    for i in 0..=40u32 {
+        let y = -1.0 + 0.05 * i as f32;
+        let z = if i % 2 == 0 { 0.0 } else { 0.04 };
+        for x in [-2.0f32, 2.0] {
+            sheet.push(Vertex {
+                position: [x, y, z],
+                normal: up,
+                uv: [0.; 2],
+                color: [1.; 4],
+            });
+        }
+        if i > 0 {
+            let (a, b, c, d) = (2 * i - 2, 2 * i - 1, 2 * i, 2 * i + 1);
+            sheet_indices.extend([a, b, d, a, d, c]);
+        }
+    }
+    // A steep, narrow valley along the middle column's plane (receiver_fold_tests' fold,
+    // slope 64): its two facets share the bottom edge the column's rays land on.
+    let extent = 1.0 / (1.0f32 + 64.0 * 64.0).sqrt();
+    let valley: Vec<Vertex> = [
+        [0., -1., 0.],
+        [extent, -1., 64. * extent],
+        [0., 1.5, 0.],
+        [-extent, -1., 64. * extent],
+    ]
+    .map(|position| Vertex {
+        position,
+        normal: up,
+        uv: [0.; 2],
+        color: [1.; 4],
+    })
+    .to_vec();
     let objects = [
         (&floor, quad_indices),
         (&crease, crease_indices),
         (&far, quad_indices),
+        (&sheet, sheet_indices.as_slice()),
+        (&valley, quad_indices),
     ]
     .map(|(vertices, indices)| ForwardObject {
         vertices,

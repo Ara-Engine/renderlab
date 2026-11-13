@@ -1405,6 +1405,20 @@ fn parameter_layout(source: &str) -> Result<Option<crate::program::ParameterLayo
     Ok(layout)
 }
 
+/// RENDERLAB_MATERIAL_PASS=1: one log line whenever a frame's split changes, saying how many
+/// program slots take the record path and how many keep the single kernel (a program without
+/// `material_out` / `material_in` falls back silently otherwise).
+fn log_material_slots(writers: &[Option<shader::Program>]) {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+    let record = writers.iter().filter(|w| w.is_some()).count();
+    let single = writers.len() - record;
+    let split = ((record as u64) << 32) | single as u64;
+    if LAST.swap(split, std::sync::atomic::Ordering::Relaxed) != split {
+        eprintln!(
+            "material pass: {record} program slot(s) take the record path, {single} keep the single kernel"
+        );
+    }
+}
 /// One frame after `history`, over what the sequence keeps on the GPU; returns its
 /// images and what it hands to the next frame.
 fn frame(
@@ -1684,6 +1698,9 @@ fn frame(
     } else {
         Vec::new()
     };
+    if material_on {
+        log_material_slots(&material_programs);
+    }
     // The pass log's shading parts (src/shade_detail.rs): each part's tiled program, or its
     // list programs in slot order.
     let shade_parts = if deferred_path && crate::renderer::shade_detail::wanted() {

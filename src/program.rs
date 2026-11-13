@@ -2152,7 +2152,7 @@ pub(crate) fn material_pass_on() -> bool {
 /// sun path's receiver for a fresh camera ray (`primary_raw_closest`, then the edge repair):
 /// x the trace point's largest error (plus 1000 when the slot, `thin` or either side differs),
 /// y the epsilon's error, z the geometric normal's angle (negative, minus 1e-6, where the
-/// record's point is not shading's own barycentric one: a repaired edge) and w minus (1e-6
+/// sun path's edge repair moved the fresh trace's point) and w minus (1e-6
 /// plus) the interpolated vertex normal's angle against this pixel's decode, in radians
 /// (tests/ara_backend material_pass).
 fn material_debug() -> Option<&'static str> {
@@ -2323,6 +2323,39 @@ fn rl_mr_trace_receiver(record:vec4<u32>,point:vec3<f32>,positions:array<vec3<f3
     return rl_mr_trace_receiver_of(PrimaryTrace(record,point,positions),id,size);
 }
 "#;
+/// The trace module's edge repair for a shading module (shaders/primary_trace.wgsl through
+/// `primary_repair`, with `primary_raw_closest` for the receiver check, and
+/// primary_interactive.wgsl's `primary_near_edge`): its functions and `primary_scene`, without
+/// the trace's outputs and entry points or the vertex and index arrays, which the shading
+/// module declares under the same names.
+fn material_trace_helpers() -> &'static str {
+    static TEXT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TEXT.get_or_init(|| {
+        let trace = include_str!("../shaders/primary_trace.wgsl");
+        let scene = trace
+            .lines()
+            .find(|l| l.contains("var primary_scene:"))
+            .expect("primary_trace.wgsl declares primary_scene");
+        let start = trace.find("struct PrimaryTrace").expect("primary_trace.wgsl's PrimaryTrace");
+        let end = trace.find("fn primary_scene_trace(").expect("primary_trace.wgsl's scene trace");
+        let functions: Vec<&str> = trace[start..end]
+            .lines()
+            .filter(|l| {
+                !l.starts_with("@group(")
+                    && !l.starts_with("struct PrimaryVertices")
+                    && !l.starts_with("struct PrimaryIndices")
+            })
+            .collect();
+        let interactive = include_str!("../shaders/primary_interactive.wgsl");
+        let near = interactive.find("fn primary_near_edge(").expect("primary_near_edge");
+        let near_end = near + interactive[near..].find("\n}\n").expect("primary_near_edge's end") + 3;
+        format!(
+            "// RENDERLAB_MATERIAL_PASS: the trace module's edge repair (program.rs material_trace_helpers).\n{scene}\n{}\n{}",
+            functions.join("\n"),
+            &interactive[near..near_end]
+        )
+    })
+}
 const MATERIAL_PLAIN_RECEIVER: &str = r#"fn rl_mr_trace_receiver(record:vec4<u32>,point:vec3<f32>,positions:array<vec3<f32>,3>,id:vec2<u32>,size:vec2<u32>)->Receiver {
     return primary_receiver(point,positions,record.x-1u,vec2<i32>(id));
 }
@@ -2349,9 +2382,9 @@ fn rl_material_receiver_error(pixel:vec2<i32>,input:SurfaceInput,source_front:bo
     let angle=atan2(length(cross(r.geometric,d.geometric)),dot(r.geometric,d.geometric));
     let n=normalize(input.normal);let v=rl_mr_vertex_normal(c);
     let vertex=atan2(length(cross(v,n)),dot(v,n));
-    // z is negative where the record's point is not shading's barycentric one (a repaired edge);
+    // z is negative where the sun path's repair moved the fresh trace's point (an edge pixel);
     // w is negative on hits, so they are told from misses (whose alpha is 0 or 1).
-    let edge=any(r.world!=input.receiver.world);
+    let edge=rl_mr_reference_edge(id,size);
     return vec4<f32>(max(moved.x,max(moved.y,moved.z))+select(1000.0,0.0,same),abs(r.epsilon-d.epsilon),select(angle,-1e-6-angle,edge),-1e-6-vertex);
 }
 fn rl_material_load(pixel:vec2<i32>)->MaterialRecord {
@@ -2430,13 +2463,28 @@ pub(crate) fn material_variant_with(
         MaterialRole::Write => MATERIAL_WRITE,
         MaterialRole::Read => MATERIAL_READ,
     });
-    let repairs = composed.source.contains("fn primary_near_edge(");
+    // Ray-traced heads get the trace module's edge repair, so the record carries the sun
+    // path's receiver; the others (no camera rays) store the trace point's receiver.
+    let repairs = composed.source.contains("enable wgpu_ray_query_vertex_return;")
+        && composed.source.contains("var<storage,read> primary_indices:");
+    if repairs {
+        composed.source.push_str(material_trace_helpers());
+        // The soft head's own rays need no `ray_query`; the repair's probes do. The
+        // directive precedes everything, so the program's range moves by its length.
+        if !composed.source.contains("enable wgpu_ray_query;") {
+            const ENABLE: &str = "enable wgpu_ray_query;\n";
+            composed.source.insert_str(0, ENABLE);
+            composed.program = composed.program.start + ENABLE.len()..composed.program.end + ENABLE.len();
+        }
+    }
     composed.source.push_str(if repairs { MATERIAL_TRACE_RECEIVER } else { MATERIAL_PLAIN_RECEIVER });
     if role == MaterialRole::Read {
-        composed.source.push_str(if repairs && composed.source.contains("fn primary_raw_closest(") {
-            "fn rl_mr_reference_receiver(id:vec2<u32>,size:vec2<u32>,input:SurfaceInput)->Receiver { return rl_mr_trace_receiver_of(primary_raw_closest(id,size),id,size); }\n"
+        composed.source.push_str(if repairs {
+            "fn rl_mr_reference_receiver(id:vec2<u32>,size:vec2<u32>,input:SurfaceInput)->Receiver { return rl_mr_trace_receiver_of(primary_raw_closest(id,size),id,size); }\n\
+             fn rl_mr_reference_edge(id:vec2<u32>,size:vec2<u32>)->bool { let raw=primary_raw_closest(id,size); return raw.record.x!=0u && any(rl_mr_trace_receiver_of(raw,id,size).world!=raw.point); }\n"
         } else {
-            "fn rl_mr_reference_receiver(id:vec2<u32>,size:vec2<u32>,input:SurfaceInput)->Receiver { return input.receiver; }\n"
+            "fn rl_mr_reference_receiver(id:vec2<u32>,size:vec2<u32>,input:SurfaceInput)->Receiver { return input.receiver; }\n\
+             fn rl_mr_reference_edge(id:vec2<u32>,size:vec2<u32>)->bool { return false; }\n"
         });
     }
     if probe.is_some() {

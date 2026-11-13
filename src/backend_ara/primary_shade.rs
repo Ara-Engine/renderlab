@@ -159,8 +159,13 @@ pub(crate) fn hardware_soft_material(
         } else {
             Pass::PrimaryShadeTiles
         };
+        // The variant carries the trace's edge repair, which the port runs without
+        // hit-vertex return (primary_trace.rs `portable_trace`).
         crate::program::material_variant(composed, material, role)
-            .map(|c| Ok(Program::new(pass, c.source)?.checked()))
+            .map(|c| {
+                let source = super::primary_trace::without_vertex_return(&c.source);
+                Ok(Program::new(pass, source)?.checked())
+            })
             .transpose()
     })
 }
