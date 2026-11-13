@@ -44,6 +44,7 @@ impl Scene {
                 source_meshes[p.mesh as usize]
                     .iter()
                     .map(move |&(mesh, material)| Instance {
+                        casts_shadows: true,
                         mesh,
                         material,
                         transform: Mat4::from_cols_array_2d(&p.transform),

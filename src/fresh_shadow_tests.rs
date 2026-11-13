@@ -696,6 +696,7 @@ struct Variant {
     tile: [u32; 2],
 }
 
+// The frozen baseline's text (support/fresh_screen_baseline.wgsl predates the shadow mask).
 const RAY_INIT: &str =
     "rayQueryInitialize(&query,fresh_scene,RayDesc(0u,255u,tmin,tmax,origin,direction));";
 const ENTRY_TAIL: &str = "fn fresh_compute(@builtin(global_invocation_id) id:vec3<u32>) {";
