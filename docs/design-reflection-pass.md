@@ -343,3 +343,89 @@ structure shades once.
   something else keeps the inline path.
 - **Interface to settle with the Mac:** the reflectance output's form (rgb or luminance weight)
   and its binding, in U-RTVIS's 54-63 range.
+
+## S2: one ray per glossy pixel, resolved (design, 2026-11-13)
+Target: Showcase glossy reflections at no more than 1.5 ms on both paths, with no visible loss
+still or moving. The Mac's split (M5 port, 720p, 99f5d395): one shaded stratum a glossy pixel
+costs 1.43 ms over glossy-off (0.57 trace and fixed, 0.86 hit shading), against 5.70 for
+today's 16. So the resolve has to stay lean, about 0.1-0.3 ms.
+
+**Where it runs.** In the compacted deferred path only (RL_PASS=1, RL_DEFERRED=1), and only
+for programs that report their reflectance (`RL_DEFERRED_PROGRAM`). Every other program, and
+mirrors (roughness under RL_MIRROR), keep their inline path. The shading kernel stays as it is:
+the resolve is its own pass, which is why it can't bloat shading the way the history did on
+Glint.
+
+**The sample.** Each glossy pixel traces one VNDF stratum a frame. The stratum index is
+`(frame + hash(pixel)) mod count`, where count is today's faded and thinned strata count, so
+`count` frames visit every stratum once. The trace writes one sample a pixel, screen-sized:
+- **incident radiance, rgb:** demodulated by construction, because the composite multiplies by
+  w x reflectance (binding 62);
+- **hit distance** t (a miss marks itself);
+- **direction**, as an octahedral word (the VNDF pdf is recomputed from it and the pixel's lobe);
+- **the hit's motion:** the hit's previous world position from its H record (placement,
+  primitive, barycentrics). It is rebuilt with object_motion.wgsl's `motion_previous_world` and,
+  for skinned meshes, `motion_previous_vertex`: the same helpers TR1 uses, so the Fox counts.
+
+The resolve never asks how the hit got its colour. That keeps it independent of
+`reflection_hits`, of the Mac's S4a (last frame's lit HDR at on-screen hits), and of any later
+hit cache.
+
+**Temporal (anti-ghosting first).**
+1. **Reproject by the reflected virtual point.** The point is the receiver plus the reflected
+   direction times t; its previous position uses the hit's previous world position, not just
+   the receiver's. The receiver must also pass TR1's surface tests (same placement, depth and
+   normal).
+2. **Reject on the hit's own motion.** If the hit moved more than its footprint (the cone width
+   at t, about pixel width plus 2 alpha t), the pixel restarts. So a moving reflected object
+   never drags last frame's reflection along the floor. A receiver that moved over a pixel
+   restarts too.
+3. **Hard reset** on the planner's cut and reset (temporal_reconstruction `cut`/`reset`), at
+   respawn, and in `rl_restarts` zones. Today's 2x restart strata become a reset.
+4. **Variance clamp.** Before blending, history is clamped to the current frame's neighbourhood
+   mean plus or minus k sigma (YCoCg), with the neighbourhood sized to the resolve's footprint.
+   This replaces the lone-stratum bound: a lone bright stratum is clamped against its
+   neighbours instead of within its own set.
+5. **History length:** capped by roughness. Near-mirrors (0.05-0.1) keep a short history (their
+   trails show most); rough lobes keep up to about 16 frames. Any rejection resets the length to
+   1.
+
+**Spatial (one pass).** About 8 rotated taps inside the lobe's screen footprint. The footprint
+is 2 alpha t over the pixel's world width, clamped to a maximum radius.
+- **Each neighbour's sample is reweighted to this pixel's lobe:** this pixel's GGX value at the
+  neighbour's direction over the neighbour's VNDF pdf. It is rejected on placement, depth,
+  normal, hit-distance ratio, or lobes that differ too much.
+- **This is not resampled reuse** (no reservoirs), just a ratio estimator over neighbours.
+- **One pass, not three a-trous passes.** The a-trous passes only return if the gate shows
+  grain.
+
+**Composite.** As today: w x reflectance x resolved, added before TR1. TR1 then sees a stable
+reflection, so its motion box stays narrow. That was RQ1's failure mode with four strata.
+
+**Bytes at 1080p.**
+- **Current sample:** 16 B a pixel (radiance, t, direction, motion).
+- **History:** 12 B a pixel (radiance, length, the previous virtual depth).
+- **Lobe:** 32 B a pixel today; storing it per glossy pixel is the next cut.
+- **Gone:** H shrinks to one record a glossy pixel, and R's room goes away.
+- **Total:** about 60 B a pixel, roughly 125 MB at 1080p, against today's 235 MB. Compacting
+  the lobe per glossy pixel takes it lower.
+
+**Gate (root, 2026-11-13).**
+- **Scenes:** a moving camera, a moving reflected object (Glint's sliders and ball, Showcase's
+  figure, the game flight's Fox in a glossy floor via `--diag floor=0.2`), and a cut.
+- **Crops:** along the moving object's reflected edge over the frames after it moves, against
+  today's inline result.
+- **Rule:** no default if any trail is visible.
+
+**Ray budget inside S2 (approved 2026-11-13).** After shading, the trace kernel reads the
+pixel's own shaded radiance (the HDR target before the composite) and its reflectance (binding
+62). It skips the pixel's ray when even a bound on what the reflection could add moves the
+displayed value by less than half a code at this frame's exposure. The bound is the larger of two
+terms:
+- the prefiltered environment in the reflected direction, at the lobe's roughness;
+- a per-frame scalar: the brightest emitter radiance, the sun's radiance reflected off the
+  brightest sunlit surface, and the previous frame's on-screen maximum.
+
+The test uses the current frame's exposure, so a cut into a bright scene can't skip a highlight
+on its first frame. A skipped pixel resets its history. It lands as a would-skip counter first,
+then a switch gated on crops of reflected highlights, still and moving.
