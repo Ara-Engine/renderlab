@@ -416,3 +416,16 @@ reflection, so its motion box stays narrow. That was RQ1's failure mode with fou
 - **Crops:** along the moving object's reflected edge over the frames after it moves, against
   today's inline result.
 - **Rule:** no default if any trail is visible.
+
+**Ray budget inside S2 (approved 2026-11-13).** After shading, the trace kernel reads the
+pixel's own shaded radiance (the HDR target before the composite) and its reflectance (binding
+62). It skips the pixel's ray when even a bound on what the reflection could add moves the
+displayed value by less than half a code at this frame's exposure. The bound is the larger of two
+terms:
+- the prefiltered environment in the reflected direction, at the lobe's roughness;
+- a per-frame scalar: the brightest emitter radiance, the sun's radiance reflected off the
+  brightest sunlit surface, and the previous frame's on-screen maximum.
+
+The test uses the current frame's exposure, so a cut into a bright scene can't skip a highlight
+on its first frame. A skipped pixel resets its history. It lands as a would-skip counter first,
+then a switch gated on crops of reflected highlights, still and moving.
