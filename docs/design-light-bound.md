@@ -36,3 +36,19 @@ The bound covers the tone curve and sRGB only. White balance (`white.rgb`, which
 ## Failure to look for
 
 In `sum` mode, a light whose c sits near the bound can be skipped on one frame and traced on the next, as the running sum moves. A skipped shadow would then flicker in and out. The 30-frame moving strip compares frame-to-frame change against the full picture's for exactly this. `black` mode does not depend on order.
+
+## Measured on the M5 port (2026-11-13)
+
+Ara b50edafbd, 1280x720, 32 lanes, Ara's default frame, `PrimaryShadeList` ms, medians of 3 interleaved rounds. "Skipped" is the share of local shadowed lights tested whose ray was skipped (frame 48). The difference columns compare against the closest of three full captures, in display codes.
+
+| | Showcase ms | skipped | max / mean diff, pixels > 1 code | Glint goal ms | skipped | max / mean diff, pixels > 1 code |
+|---|---|---|---|---|---|---|
+| full | 7.74 | — | — | 6.72 | — | — |
+| black 0.5 | 7.66 | 84% | 1 / 0.004, 0 | 6.78 | 23% | 1 / 0.000, 0 |
+| sum 0.5 | 7.82 | 96% | 1 / 0.007, 0 | **5.89** | 99.9% | 1 / 0.001, 0 |
+| black 0.25 | 7.78 | 69% | 1 / 0.002, 0 | 6.83 | 16% | 0 |
+| black 0.5, drop | 7.51 | 84% | 1 / 0.034, 0 | 6.76 | 23% | 0 |
+
+In 30-frame, 6° yaw strips, every frame of `black` and `sum` stays within 1 code of the full frame, on both scenes. Two full strips agree exactly on Showcase, and within 1 code with no flags on Glint. Some pixels' frame-to-frame change differs from full's by 2 codes: Showcase `black` 694 distinct pixels, `sum` 853; Glint `sum` 73, `black` 0. Each pixel is flagged about once over the clip (one pixel three times), so these are scattered rounding flips of a sub-code bias as the view moves, not a shadow toggling in and out.
+
+Skipping most of Showcase's local rays saves little on the M5. The test computes each light's c (BRDF and transmission) before its ray, and a lane that skips still waits for the lanes in its SIMD group that trace. Glint's `sum` row is where the bound pays.

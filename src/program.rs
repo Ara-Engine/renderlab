@@ -782,8 +782,16 @@ var<private> rl_lb_skipped:vec3<f32>;\n\
 fn rl_lb_slope(x:f32) -> f32 {{\n    if x<0.0087 {{ return RL_LB_PEAK; }}\n    let d=x*(2.43*x+0.59)+0.14;\n    let t=min((x*(2.51*x+0.03))/d,1.0);\n    if t>=1.0 {{ return 0.0; }}\n    let dt=((5.02*x+0.03)*d-(2.51*x*x+0.03*x)*(4.86*x+0.59))/(d*d);\n    let ds=select(1.055/2.4*pow(t,1.0/2.4-1.0),12.92,t<=0.0031308);\n    return ds*dt;\n}}\n\
 fn rl_lb_skip(light:LightSample, c:vec3<f32>, sum:vec3<f32>) -> bool {{\n    if lights[light.index].kind.w==0u {{ return false; }}\n{tested}    let total=rl_lb_skipped+c;\n    var slope=vec3<f32>(RL_LB_PEAK);\n    if RL_LB_SUM {{ slope=vec3<f32>(rl_lb_slope(sum.x),rl_lb_slope(sum.y),rl_lb_slope(sum.z)); }}\n    if all(total*slope<vec3<f32>(RL_LB_CODES/255.0)) {{ rl_lb_skipped=total;{skipped_count} return true; }}\n    return false;\n}}\n",
         sum = bound.sum,
-        tested = if counted { "    atomicAdd(&rl_shade_counts[14],1u);\n" } else { "" },
-        skipped_count = if counted { " atomicAdd(&rl_shade_counts[15],1u);" } else { "" },
+        tested = if counted {
+            "    atomicAdd(&rl_shade_counts[14],1u);\n"
+        } else {
+            ""
+        },
+        skipped_count = if counted {
+            " atomicAdd(&rl_shade_counts[15],1u);"
+        } else {
+            ""
+        },
         codes = bound.codes,
         skipped = if bound.drop { 0.0f32 } else { 1.0f32 },
     );

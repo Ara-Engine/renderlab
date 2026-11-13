@@ -395,11 +395,18 @@ fn light_bound_composes_and_validates() {
                 } else {
                     compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
                 };
-                let bound = LightBound { sum, codes: 0.25, drop };
+                let bound = LightBound {
+                    sum,
+                    codes: 0.25,
+                    drop,
+                };
                 let edited = with_light_bound(full, bound);
                 let program = &edited.source[edited.program.clone()];
                 assert!(program.contains("if !rl_lb_skip(light,rl_lb_c,exposed)"));
-                assert!(program.ends_with(&crate::STANDARD_PROGRAM[crate::STANDARD_PROGRAM.len() - 40..]));
+                assert!(
+                    program
+                        .ends_with(&crate::STANDARD_PROGRAM[crate::STANDARD_PROGRAM.len() - 40..])
+                );
                 let source = &edited.source;
                 let module = naga::front::wgsl::parse_str(source)
                     .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
