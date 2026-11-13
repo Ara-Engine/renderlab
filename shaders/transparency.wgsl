@@ -148,7 +148,12 @@ fn tp_behind(world:vec3<f32>, shading:vec3<f32>, geometric:vec3<f32>, pixel:vec2
             // Continue to the opaque surface's depth behind this pixel.
             let along=max(opaque-dot(exit-tp.eye.xyz,tp.forward.xyz),0.0)/max(dot(t2,tp.forward.xyz),0.05);
             let seen=exit+t2*along;
-            let clip=tp.view_projection*vec4<f32>(seen,1.0);
+            // Projected through the camera the glass rasterises with (jittered), as `here` and
+            // the colour behind are. The frame's unjittered matrix (tp.view_projection) put the
+            // fetch up to half a pixel (the jitter) from `here`, so a depth test that flipped at
+            // a hard edge behind the glass jumped the colour across it (RL#80, the floor's far
+            // edge through two panes).
+            let clip=camera.view_projection*vec4<f32>(seen,1.0);
             if clip.w>0.0 {
                 let shifted=vec2<f32>(clip.x/clip.w*0.5+0.5,0.5-clip.y/clip.w*0.5);
                 let p=vec2<i32>(clamp(shifted*tp.size.xy,vec2<f32>(0.0),tp.size.xy-vec2<f32>(1.0)));
