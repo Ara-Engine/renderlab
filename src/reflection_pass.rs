@@ -16,7 +16,6 @@ const LIST_HEADER: u64 = 16;
 const LIST_ENTRY_BYTES: u64 = 48;
 pub(super) const PASS_FRAME: u32 = 58;
 /// The list's indirect arguments: the trace's dispatch, then the composite's draw (32 bytes).
-const LIST_ARGS: u32 = 59;
 /// The trace counters (rl_trace_pixels).
 pub(super) const STATS: u32 = 60;
 /// The same counters in the primary shading layout, where 60 is the resolve's phase uniform
@@ -97,13 +96,16 @@ pub(super) fn shade_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
 }
 
 /// The trace's group 0 and pipeline layout: the frame uniform, the shared TLAS (RT) or the
-/// software reflection geometry (non-RT), L, the pass uniform, the list's arguments, H, R, the
-/// counters and the receivers' epsilon; groups 1 and 3 are the traced geometry tables and the
-/// lighting.
+/// software reflection geometry (non-RT), L, the pass uniform, H, R, the counters and the
+/// receivers' epsilon; groups 1 and 3 are the traced geometry tables and the lighting.
+/// `rl_list_args` alone also binds group 2, the list's indirect arguments (`args_layout`): the
+/// trace's indirect dispatch reads that buffer, so no other dispatch may bind it read-write.
 #[derive(Clone)]
 pub(super) struct TraceAbi {
     group: Owned<wgpu::BindGroupLayout>,
     layout: Owned<wgpu::PipelineLayout>,
+    args_group: Owned<wgpu::BindGroupLayout>,
+    args_layout: Owned<wgpu::PipelineLayout>,
 }
 impl TraceAbi {
     pub fn new(
@@ -119,7 +121,6 @@ impl TraceAbi {
             uniform(10, FRAME_BYTES as u64),
             read(LIST, LIST_HEADER + LIST_ENTRY_BYTES),
             uniform(PASS_FRAME, 16),
-            buffer(LIST_ARGS, write, 32),
             buffer(HITS, write, HITS_HEADER + RECORD_BYTES),
             image(SAMPLES, F::Rgba16Float),
             buffer(STATS, write, 16),
@@ -145,7 +146,22 @@ impl TraceAbi {
             }),
             ResourceKind::PipelineLayout,
         );
-        Self { group, layout }
+        let args_group = ledger.own(
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("reflection list arguments"),
+                entries: &[buffer(0, write, 32)],
+            }),
+            ResourceKind::BindGroupLayout,
+        );
+        let args_layout = ledger.own(
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("reflection list arguments ABI"),
+                bind_group_layouts: &[Some(&group), Some(arrays), Some(&args_group), Some(lighting)],
+                immediate_size: 0,
+            }),
+            ResourceKind::PipelineLayout,
+        );
+        Self { group, layout, args_group, args_layout }
     }
 }
 
@@ -269,7 +285,6 @@ impl Renderer {
             (10, frame),
             (LIST, pass.list.value.as_entire_binding()),
             (PASS_FRAME, pass.frame.value.as_entire_binding()),
-            (LIST_ARGS, pass.list_args.value.as_entire_binding()),
             (HITS, pass.hits.value.as_entire_binding()),
             (SAMPLES, R::TextureView(&pass.samples.view)),
             (STATS, pass.stats.value.as_entire_binding()),
@@ -311,11 +326,11 @@ impl Renderer {
             }),
             ResourceKind::ShaderModule,
         );
-        let pipeline = |entry| {
+        let pipeline = |entry, layout: &wgpu::PipelineLayout| {
             self.ledger.own(
                 self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some("reflection trace"),
-                    layout: Some(&abi.layout),
+                    layout: Some(layout),
                     module: &module,
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
@@ -325,9 +340,9 @@ impl Renderer {
             )
         };
         let pipelines = TracePipelines {
-            list_args: pipeline("rl_list_args"),
-            pixels: pipeline("rl_trace_pixels"),
-            args: pipeline("rl_hit_args"),
+            list_args: pipeline("rl_list_args", &abi.args_layout),
+            pixels: pipeline("rl_trace_pixels", &abi.layout),
+            args: pipeline("rl_hit_args", &abi.layout),
             composite: self.rl_composite_kit(),
         };
         if let Some(error) = scopes.finish() {
@@ -343,10 +358,11 @@ impl Renderer {
         let Some(state) = self.view.primary.as_ref() else {
             return;
         };
-        let (Some(pipelines), Some(pass), Some(group)) = (
+        let (Some(pipelines), Some(pass), Some(group), Some(abi)) = (
             state.rl_pipelines[shading as usize].as_ref(),
             state.targets.as_ref().and_then(|t| t.rl_pass.as_ref()),
             state.bindings.as_ref().and_then(|b| b.rl_trace.as_ref()),
+            state.rl_trace.as_ref(),
         ) else {
             return;
         };
@@ -357,12 +373,22 @@ impl Renderer {
             compute.set_bind_group(1, &*g.arrays, &[]);
             compute.set_bind_group(3, self.lighting.bind(), &[]);
         };
-        // The arguments first, in their own pass: the trace reads them as indirect arguments.
+        // The arguments first, in their own pass and group: the trace reads them as indirect
+        // arguments. One entry, rebuilt each frame (the buffer outlives room growth).
+        let args = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("reflection list arguments"),
+            layout: &abi.args_group,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: pass.list_args.value.as_entire_binding(),
+            }],
+        });
         let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reflection list arguments"),
             timestamp_writes: None,
         });
         bind(&mut compute);
+        compute.set_bind_group(2, &args, &[]);
         compute.set_pipeline(&pipelines.list_args);
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
