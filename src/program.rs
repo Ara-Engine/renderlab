@@ -82,9 +82,12 @@ const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=
 /// instead of being shaded, when it passes the reuse test (shaders/reflection_hit_reuse.wgsl).
 /// `mask`, `all` and `none` are its measurement forms: reused hits 1 and the rest 0, every hit
 /// 1, every hit 0, so the frame's reused share is (mask - none) / (all - none).
-/// `RENDERLAB_RL_HIT_REUSE_TUNE=depth=D,slack=S,weight=W,rough=R,transmit=T,hint=H,view=V` sets
-/// the test's tolerances (defaults 0.01, 0.02 m, 4, 0.5, 0.5, 1, 0.5 px); `hint=0` replaces the
-/// MQ2-hint view test with the non-metal roughness floor. Read once per process.
+/// `RENDERLAB_RL_HIT_REUSE_TUNE=depth=D,slack=S,weight=W,rough=R,transmit=T,hint=H,view=V,foot=F`
+/// sets the test's tolerances (defaults 0.01, 0.02 m, 4, 0.5, 0.5, 1, 0.5 px, 0); `hint=0`
+/// replaces the MQ2-hint view test with the non-metal roughness floor; `foot=F` > 0 scales the
+/// view bound on known non-metal hits to F receiving-cone footprints, never under `view`
+/// (`footprint=F` is the same key). Metal
+/// hits never reuse where the material is bound. Read once per process.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HitReuse {
     mode: u32,
@@ -95,6 +98,7 @@ pub(crate) struct HitReuse {
     transmit: f32,
     hint: bool,
     view: f32,
+    foot: f32,
 }
 impl HitReuse {
     /// Whether the view test reads MQ2's hint from TR1's anchors (no material group needed).
@@ -121,6 +125,7 @@ pub(crate) fn hit_reuse() -> Option<HitReuse> {
             transmit: 0.5,
             hint: true,
             view: 0.5,
+            foot: 0.0,
         };
         let tune = std::env::var("RENDERLAB_RL_HIT_REUSE_TUNE").unwrap_or_default();
         for (name, value) in tune.split(',').filter_map(|kv| kv.split_once('=')) {
@@ -135,6 +140,7 @@ pub(crate) fn hit_reuse() -> Option<HitReuse> {
                 "transmit" => reuse.transmit = value,
                 "hint" => reuse.hint = value != 0.0,
                 "view" => reuse.view = value,
+                "foot" | "footprint" => reuse.foot = value,
                 _ => {}
             }
         }
@@ -185,6 +191,10 @@ fn with_hit_reuse(source: String, reuse: HitReuse) -> String {
         .replace(
             "const RL_REUSE_VIEW:f32=0.5;",
             &format!("const RL_REUSE_VIEW:f32={:?};", reuse.view),
+        )
+        .replace(
+            "const RL_REUSE_FOOT:f32=0.0;",
+            &format!("const RL_REUSE_FOOT:f32={:?};", reuse.foot),
         )
         .replace(
             "const RL_REUSE_MODE:u32=0u;",
@@ -344,7 +354,7 @@ pub(crate) fn rl_pass_on() -> bool {
 /// `rl_trace`'s module on a traced shading `head`: the standard program's traced composition
 /// (the reflection block's helpers, with its stubs) and the trace entries.
 pub(crate) fn rl_trace_source(head: &str) -> String {
-    let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
+    let mut source = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false).source;
     let mut trace = REFLECTION_TRACE.to_owned();
     if let Some(reuse) = hit_reuse() {
         // S4a before compaction: the counters gain `reused` after U-RTVIS's four words (the
@@ -371,13 +381,22 @@ pub(crate) fn rl_trace_source(head: &str) -> String {
             );
             trace = trace.replacen(TRACE_REUSE_SEAM, TRACE_REUSE, 1);
         }
+        // No material group here: the hit's class is unknown (no footprint scaling).
+        const METAL: &str =
+            "    return select(0u,1u,primary_materials[batch].value.metallic>=0.1);\n";
+        assert_eq!(
+            source.matches(METAL).count(),
+            1,
+            "hit reuse: the material class"
+        );
+        source = source.replacen(METAL, "    return 2u;\n", 1);
     }
-    format!("{}\n{trace}", composed.source)
+    format!("{source}\n{trace}")
 }
 /// U-RTVIS's marker in `rl_trace_pixels`, just before the H append (kept by
 /// `trace_hit_reuse_seam_stays_before_the_h_append`).
 const TRACE_REUSE_SEAM: &str = "        // ---- rl trace hit reuse seam ----\n";
-const TRACE_REUSE: &str = "        let reused=rl_hit_reuse(traced.record,d);\n        if reused.w>0.0 {\n            textureStore(rl_samples,at,vec4<f32>(rl_finite(expose(reused.rgb)),1.0));\n            atomicAdd(&rl_trace_stats.reused,1u);\n            continue;\n        }\n";
+const TRACE_REUSE: &str = "        let reused=rl_hit_reuse(traced.record,d,cone.x+cone.y*traced.t);\n        if reused.w>0.0 {\n            textureStore(rl_samples,at,vec4<f32>(rl_finite(expose(reused.rgb)),1.0));\n            atomicAdd(&rl_trace_stats.reused,1u);\n            continue;\n        }\n";
 /// `composed` with the block between `markers` replaced by `text`, moving the program's range.
 fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Composed {
     let Some(begin) = composed.source.find(markers[0]) else {

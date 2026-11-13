@@ -49,6 +49,16 @@ const RL_REUSE_MODE:u32=0u;
 // pixels of its own image); without it, only non-metal hits at least RL_REUSE_ROUGH rough.
 const RL_REUSE_HINT:bool=true;
 const RL_REUSE_VIEW:f32=0.5;
+// RL_REUSE_FOOT > 0: on a known non-metal hit, the bound grows to RL_REUSE_FOOT times the
+// receiving cone's footprint at the hit in last frame's pixels there (a glossy reflection blurs
+// the hit over that footprint), never below RL_REUSE_VIEW: a mirror-like receiver's cone is
+// near zero, so it keeps the half-pixel bound, since a sharp reflection shows a wrong hit exactly.
+const RL_REUSE_FOOT:f32=0.0;
+// The hit's material class: 0 non-metal, 1 metal (never reused), 2 unknown (the trace kernel
+// binds no material group: no footprint scaling, the hint's bound alone).
+fn rl_reuse_metal(batch:u32)->u32 {
+    return select(0u,1u,primary_materials[batch].value.metallic>=0.1);
+}
 // MQ2's hint - 1 from its anchor code: 0 for code 0 (view-independent), else ten codes an
 // octave about code 81 (temporal_resolve.wgsl tr1_view_code; never below the stored value).
 fn rl_reuse_view(code:u32)->f32 {
@@ -67,13 +77,15 @@ fn rl_reuse_previous_model(slot:u32)->mat4x4<f32> {
 }
 // The hit's radiance from last frame's resolved colour (unexposed, as the cache hook returns
 // it), with w 1; w 0 when the hit must be shaded.
-fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>)->vec4<f32> {
+fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>,footprint:f32)->vec4<f32> {
     // 1. A bound TR1 frame that does not restart (cuts, first frames and reset events never reuse).
     if !(rl_reuse_frame.jitter.z>0.0) || rl_reuse_frame.flags.x!=0u {return vec4<f32>(0.0);}
     let hit=primary_decode(record);
     // Skinned hits shade (their previous surface needs SK1's previous vertices).
     if batch_skinned(primary_batch_info(hit.batch)) {return vec4<f32>(0.0);}
     if !rl_reuse_material(hit.batch) {return vec4<f32>(0.0);}
+    let metal=rl_reuse_metal(hit.batch);
+    if metal==1u {return vec4<f32>(0.0);}
     let ta=primary_input(hit.batch,hit.ia,hit.placement);
     let tb=primary_input(hit.batch,hit.ib,hit.placement);
     let tc=primary_input(hit.batch,hit.ic,hit.placement);
@@ -96,6 +108,9 @@ fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>)->vec4<f32> {
     let distance=length(rl_reuse_frame.previous_eye.xyz-previous);
     // 6 with the hint: the turn between last frame's view of the point and this ray's.
     let turn=acos(clamp(dot(-d,(rl_reuse_frame.previous_eye.xyz-previous)/max(distance,1e-6)),-1.0,1.0));
+    // The footprint in last frame's pixels at the hit (previous_eye.w: radians per pixel).
+    let pixels=footprint/max(distance*rl_reuse_frame.previous_eye.w,1e-6);
+    let bound=select(RL_REUSE_VIEW,max(RL_REUSE_VIEW,RL_REUSE_FOOT*pixels),RL_REUSE_FOOT>0.0 && metal==0u);
     // 5. The same surface at each bilinear texel (placement and view distance); 7. a history
     // old enough.
     var sum=vec3<f32>(0.0);var weight=0.0;var valid=0u;
@@ -105,7 +120,7 @@ fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>)->vec4<f32> {
         let anchor=rl_reuse_anchor_at(q);
         let seen=bitcast<f32>(anchor.y);
         if (anchor.x&0x7fffffu)!=hit.placement+1u || abs(seen-distance)>distance*RL_REUSE_DEPTH+RL_REUSE_SLACK {continue;}
-        if RL_REUSE_HINT && turn*rl_reuse_view(anchor.x>>24u)>RL_REUSE_VIEW {continue;}
+        if RL_REUSE_HINT && turn*rl_reuse_view(anchor.x>>24u)>bound {continue;}
         let colour=rl_reuse_colour_at(q);
         if !(colour.w>=RL_REUSE_WEIGHT) {continue;}
         let b=select(1.0-f.x,f.x,o.x==1)*select(1.0-f.y,f.y,o.y==1);
@@ -124,7 +139,7 @@ fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>)->vec4<f32> {
 }
 // The cache-hit hook, reuse first (RL_REUSE_MODE's measurement forms short-circuit it).
 fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> {
-    let reused=rl_hit_reuse(record,d);
+    let reused=rl_hit_reuse(record,d,cone);
     if RL_REUSE_MODE==2u {return vec4<f32>(vec3<f32>(1.0/lighting.exposure),1.0);}
     if RL_REUSE_MODE==3u {return vec4<f32>(0.0,0.0,0.0,1.0);}
     if reused.w>0.0 {return reused;}
