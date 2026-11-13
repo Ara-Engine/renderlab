@@ -43,15 +43,18 @@ fn material_pass_compile_seconds() -> Result<()> {
 /// sides and the epsilon come back bit for bit and the geometric normal within its octahedral
 /// 2 x 16 bits; wherever the repair moves the point, the record marks the hit near an edge
 /// (the reader repairs it, as the sun path does). The interpolated vertex normal (against this
-/// pixel's decode) is within 2 x 12 bits. A floor, a wall folded along a crease the middle
-/// column's rays land on, a corrugated sheet, a steep valley and a far wall whose epsilon is
+/// pixel's decode) is within 2 x 12 bits. The toon program (no record mapping) has model 255
+/// and the same receiver; the standard program's pixels do not. A floor, a wall folded along a
+/// crease the middle column's rays land on (toon), a corrugated sheet, a steep valley and a far wall whose epsilon is
 /// above the 1e-5 floor. Runs with `RENDERLAB_MATERIAL_PASS=1 RENDERLAB_MATERIAL_DEBUG=receiver`
 /// (read once per process); without them it says so and passes.
 #[test]
 fn the_record_rebuilds_the_receiver() -> Result<()> {
     use renderlab::{
         Camera, Light, Lighting, Mat4, MaterialDescriptor, Vec3, Vertex,
-        backend_ara::forward::{ForwardObject, ForwardScene, Primary, SunShadows, render},
+        backend_ara::forward::{
+            ForwardObject, ForwardScene, ObjectProgram, Primary, ScenePrograms, SunShadows, render,
+        },
     };
     let set = |name: &str, value: &str| std::env::var(name).as_deref() == Ok(value);
     if !(set("RENDERLAB_MATERIAL_PASS", "1") && set("RENDERLAB_MATERIAL_DEBUG", "receiver")) {
@@ -202,7 +205,21 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
             textures: None,
             local_shadows: None,
             transparent: &[],
-            programs: None,
+            // The folded wall draws with the toon program, which has no record mapping: a
+            // receiver-only record (model 255) beside the standard program's full one.
+            programs: Some(ScenePrograms {
+                objects: &[
+                    None,
+                    Some(ObjectProgram {
+                        source: include_str!("../../../shaders/programs/toon.wgsl"),
+                        parameters: &[],
+                    }),
+                    None,
+                    None,
+                    None,
+                ],
+                transparent: &[],
+            }),
             sky_map: None,
             skins: None,
             casts: None,
@@ -211,7 +228,7 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
         },
     )?;
     // Hits write minus (1e-6 plus) the vertex normal's angle in w; misses write alpha 0 or 1.
-    let (mut worst, mut hits, mut edges) = ([0f32; 4], 0, 0);
+    let (mut worst, mut hits, mut edges, mut unmapped) = ([0f32; 4], 0, 0, 0);
     for pixel in images.hdr.as_chunks::<8>().0 {
         let value = |c: usize| {
             f16::from_bits(u16::from_le_bytes([pixel[2 * c], pixel[2 * c + 1]])).to_f32()
@@ -223,8 +240,10 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
         // z is negative (minus 1e-6) at repaired edges, where the record's point is the
         // repair's rather than shading's barycentric one.
         edges += usize::from(value(2) < 0.0);
+        // x is negative (minus 1e-6) on the toon program's pixels.
+        unmapped += usize::from(value(0) < 0.0);
         for (c, worst) in worst.iter_mut().enumerate() {
-            *worst = worst.max(if c >= 2 && value(c) < 0.0 {
+            *worst = worst.max(if value(c) < 0.0 && c != 1 {
                 -value(c) - 1e-6
             } else {
                 value(c)
@@ -232,7 +251,7 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
         }
     }
     println!(
-        "record receiver: {hits} hits, {edges} at repaired edges; trace point {:e}, epsilon {:e}, geometric normal {:.2e} rad, vertex normal {:.2e} rad ({:.3} deg)",
+        "record receiver: {hits} hits ({unmapped} toon), {edges} at repaired edges; trace point {:e}, epsilon {:e}, geometric normal {:.2e} rad, vertex normal {:.2e} rad ({:.3} deg)",
         worst[0],
         worst[1],
         worst[2],
@@ -245,8 +264,12 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
     );
     ensure!(edges > 0, "no pixel reached an edge the repair moves");
     ensure!(
+        unmapped > 0 && unmapped < hits,
+        "toon and standard pixels both drawn ({unmapped} of {hits})"
+    );
+    ensure!(
         worst[0] == 0.0,
-        "the trace point, slot, thin or a side moved, or a moved point lacks the near-edge mark ({})",
+        "the trace point, slot, thin or a side moved, a moved point lacks the near-edge mark, or a model is wrong ({})",
         worst[0]
     );
     ensure!(worst[1] == 0.0, "the epsilon moved ({})", worst[1]);

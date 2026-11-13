@@ -1407,16 +1407,17 @@ fn parameter_layout(source: &str) -> Result<Option<crate::program::ParameterLayo
 }
 
 /// RENDERLAB_MATERIAL_PASS=1: one log line whenever a frame's split changes, saying how many
-/// program slots take the record path and how many keep the single kernel (a program without
-/// `material_out` / `material_in` falls back silently otherwise).
-fn log_material_slots(writers: &[Option<shader::Program>]) {
+/// program slots shade from the record and how many keep the single kernel (a program without
+/// `material_out` / `material_in`: the material pass writes only its receiver). `readers` is
+/// whether each slot has a record-reading shading module.
+fn log_material_slots(readers: &[bool]) {
     static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
-    let record = writers.iter().filter(|w| w.is_some()).count();
-    let single = writers.len() - record;
+    let record = readers.iter().filter(|r| **r).count();
+    let single = readers.len() - record;
     let split = ((record as u64) << 32) | single as u64;
     if LAST.swap(split, std::sync::atomic::Ordering::Relaxed) != split {
         eprintln!(
-            "material pass: {record} program slot(s) take the record path, {single} keep the single kernel"
+            "material pass: {record} program slot(s) shade from the record, {single} keep the single kernel (receiver only)"
         );
     }
 }
@@ -1700,7 +1701,16 @@ fn frame(
         Vec::new()
     };
     if material_on {
-        log_material_slots(&material_programs);
+        let list = sources.len() > 1;
+        let frame_sources: &[&str] = if list { &sources } else { &sources[..1] };
+        let readers = frame_sources
+            .iter()
+            .map(|source| {
+                primary_shade::hardware_soft_material(source, list, crate::program::MaterialRole::Read)
+                    .map(|reader| reader.is_some())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        log_material_slots(&readers);
     }
     // The pass log's shading parts (src/shade_detail.rs): each part's tiled program, or its
     // list programs in slot order.

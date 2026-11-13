@@ -2150,7 +2150,10 @@ pub(crate) fn material_pass_on() -> bool {
 /// record-reading shading shows that record field as the pixel's colour, unlit, so the record
 /// can be checked against the scene. `receiver` writes the record's receiver against the
 /// sun path's receiver for a fresh camera ray (`primary_raw_closest`, then the edge repair):
-/// x the trace point's largest error (plus 1000 when the slot, `thin` or either side differs),
+/// x the trace point's largest error (plus 1000 when the slot, `thin` or either side differs,
+/// 2000 when a point the repair moved lacks the near-edge mark, 4000 when the model is 255 on a
+/// mapped program's pixel or not 255 on an unmapped one's; negated, minus 1e-6, on the pixels
+/// of programs without the mapping, whose debug reader replaces their own shading),
 /// y the epsilon's error, z the geometric normal's angle (negative, minus 1e-6, where the
 /// sun path's edge repair moved the fresh trace's point) and w minus (1e-6
 /// plus) the interpolated vertex normal's angle against this pixel's decode, in radians
@@ -2350,7 +2353,11 @@ fn rl_material_receiver_error(pixel:vec2<i32>,input:SurfaceInput,source_front:bo
     let vertex=atan2(length(cross(v,n)),dot(v,n));
     // z is negative where the repair moved the point; w is negative on hits, so they are
     // told from misses (whose alpha is 0 or 1).
-    return vec4<f32>(max(error.x,max(error.y,error.z))+select(1000.0,0.0,same)+select(0.0,2000.0,moved && !near),select(abs(r.epsilon-d.epsilon),0.0,moved),select(angle,-1e-6-angle,moved),-1e-6-vertex);
+    // +4000 where the model is not 255 exactly on the pixels of programs without the mapping.
+    // x is negative (minus 1e-6) on the pixels of programs without the mapping.
+    let model_right=((b.y&255u)==255u)==RL_MATERIAL_UNMAPPED;
+    let x=max(error.x,max(error.y,error.z))+select(1000.0,0.0,same)+select(0.0,2000.0,moved && !near)+select(4000.0,0.0,model_right);
+    return vec4<f32>(select(x,-1e-6-x,RL_MATERIAL_UNMAPPED),select(abs(r.epsilon-d.epsilon),0.0,moved),select(angle,-1e-6-angle,moved),-1e-6-vertex);
 }
 "#;
 /// The trace module's edge repair for a shading module (shaders/primary_trace.wgsl through
@@ -2420,9 +2427,12 @@ fn rl_material_load(pixel:vec2<i32>)->MaterialRecord {
 }
 "#;
 /// The material pass's (`Write`) or the record-reading shading's (`Read`) variant of a traced
-/// tiles or list module of `program` (`compose`, `compose_list`), or None when the program
-/// declares no record mapping. The entry's `surface` evaluation is replaced: `Write` stores
-/// the record and returns there; `Read` rebuilds the surface from it. The edits follow the
+/// tiles or list module of `program` (`compose`, `compose_list`). The entry's `surface`
+/// evaluation is replaced: `Write` stores the record and returns there; `Read` rebuilds the
+/// surface from it. A program without the record mapping (`material_out` / `material_in`) gets
+/// a receiver-only writer (every hit has a receiver for the passes after this one: model 255,
+/// the interpolated normal as its shading normal, the material fields zero; its `surface` does
+/// not run) and no reader (None: it keeps its single shading kernel). The edits follow the
 /// program, so its range is unchanged.
 pub(crate) fn material_variant(
     composed: Composed,
@@ -2440,7 +2450,11 @@ pub(crate) fn material_variant_with(
     debug: Option<&str>,
     probe: Option<MaterialProbe>,
 ) -> Option<Composed> {
-    if !(declares(program, "fn", "material_out") && declares(program, "fn", "material_in")) {
+    let mapped = declares(program, "fn", "material_out") && declares(program, "fn", "material_in");
+    // The receiver check also covers programs without the mapping: their debug reader writes
+    // the check in place of their own shading.
+    let receiver_check = debug.is_some_and(|d| d.contains("rl_material_receiver_error"));
+    if !mapped && role == MaterialRole::Read && !receiver_check {
         return None;
     }
     let entry = composed.source.find("fn primary_shade_pixel(")?;
@@ -2450,6 +2464,10 @@ pub(crate) fn material_variant_with(
     }
     let at = entry + tail.find(MATERIAL_SEAM).expect("counted");
     let replace = match (role, debug) {
+        (MaterialRole::Write, _) if !mapped => MATERIAL_RECEIVER_ONLY.to_owned(),
+        (MaterialRole::Read, Some(field)) if !mapped => format!(
+            "    textureStore(primary_hdr,pixel,{field});\n    return;\n    let surface_output=surface(surface_input);\n"
+        ),
         (MaterialRole::Write, _) if probe == Some(MaterialProbe::NoStore) => "    let surface_output=surface(surface_input);\n    rl_material_probe_store(pixel,material_out(surface_output,surface_input),surface_input);\n    return;\n".to_owned(),
         (MaterialRole::Write, _) if probe == Some(MaterialProbe::Decode) => "    if rl_material_probe_input(surface_input)==0x9e3779b9u { textureStore(rl_material0,pixel,vec4<u32>(1u)); textureStore(rl_material1,pixel,vec4<u32>(1u)); textureStore(rl_material2,pixel,vec4<u32>(1u)); }\n    return;\n    let surface_output=surface(surface_input);\n".to_owned(),
         (MaterialRole::Write, _) => "    let surface_output=surface(surface_input);\n    rl_material_store(pixel,material_out(surface_output,surface_input),surface_input,rl_mr_near_edge(record,receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),surface_input.receiver.epsilon),tr1_view_hint(surface_output,surface_input,view_ray),source_front,lit_front);\n    return;\n".to_owned(),
@@ -2464,7 +2482,7 @@ pub(crate) fn material_variant_with(
     composed
         .source
         .replace_range(at..at + MATERIAL_SEAM.len(), &replace);
-    if role == MaterialRole::Read {
+    if role == MaterialRole::Read && mapped {
         composed = material_reader_edits(composed, entry)?;
     }
     // The reader's filter edit precedes the entry and moves it.
@@ -2494,7 +2512,8 @@ pub(crate) fn material_variant_with(
     }
     // The receiver check traces a fresh camera ray and repairs it as the sun path does: the
     // trace module's helpers, only in that debug view's module.
-    if role == MaterialRole::Read && debug.is_some_and(|d| d.contains("rl_material_receiver_error")) {
+    if role == MaterialRole::Read && receiver_check {
+        composed.source.push_str(&format!("const RL_MATERIAL_UNMAPPED:bool={};\n", !mapped));
         if rays {
             composed.source.push_str(material_trace_helpers());
             // The soft head's own rays need no `ray_query`; the repair's probes do. The
@@ -2526,6 +2545,10 @@ pub(crate) fn material_variant_with(
     }
     Some(composed)
 }
+/// The writer's seam for a program without the record mapping: the receiver words, model 255,
+/// the interpolated normal (the geometric one where it is degenerate) as the shading normal,
+/// zero material fields and a neutral MQ2 hint; its shading evaluates `surface` itself.
+const MATERIAL_RECEIVER_ONLY: &str = "    let rl_n=select(normalize(surface_input.normal),surface_input.geometric,dot(surface_input.normal,surface_input.normal)<=1e-12);\n    rl_material_store(pixel,MaterialRecord(rl_n,vec3<f32>(0.0),0.0,0.0,0.0,vec3<f32>(0.0),0.0,0.0,255u),surface_input,rl_mr_near_edge(record,receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),surface_input.receiver.epsilon),1.0,source_front,lit_front);\n    return;\n    let surface_output=surface(surface_input);\n";
 /// The specular filter's per-light evaluation of the receiver's mapped normal (normal map and
 /// decal normals), which the reader takes from the record's shading normal instead.
 const MATERIAL_FILTER_NORMAL: &str =

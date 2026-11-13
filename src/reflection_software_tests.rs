@@ -865,7 +865,17 @@ fn material_pass_variants_compose_and_validate() {
                     compose(head, program, Stage::Traced, parameters)
                 }
             };
-            assert!(material_variant(full(toon), toon, MaterialRole::Write).is_none());
+            // A program without the mapping: a receiver-only writer, no reader.
+            assert!(material_variant(full(toon), toon, MaterialRole::Read).is_none());
+            let receiver_only = material_variant(full(toon), toon, MaterialRole::Write)
+                .expect("every program gets a receiver writer");
+            assert!(receiver_only.source.contains("255u),surface_input,rl_mr_near_edge("));
+            assert_eq!(&receiver_only.source[receiver_only.program.clone()], toon);
+            let module = naga::front::wgsl::parse_str(&receiver_only.source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&receiver_only.source)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&receiver_only.source)));
             for role in [MaterialRole::Write, MaterialRole::Read] {
                 let edited =
                     material_variant(full(crate::STANDARD_PROGRAM), crate::STANDARD_PROGRAM, role)
@@ -941,6 +951,23 @@ fn material_pass_debug_views_compose_and_validate() {
                 };
                 let field = material_debug_field(name);
                 let edited = material_variant_with(full, program, MaterialRole::Read, field, None).expect("standard maps the record");
+                if name == "receiver" {
+                    // A program without the mapping gets the receiver check's reader too.
+                    let toon = include_str!("../shaders/programs/toon.wgsl");
+                    let toon_full = if list {
+                        compose_list(head, toon, Stage::Traced, crate::program::declares_parameters(toon))
+                    } else {
+                        compose(head, toon, Stage::Traced, crate::program::declares_parameters(toon))
+                    };
+                    let checked = material_variant_with(toon_full, toon, MaterialRole::Read, field, None)
+                        .expect("the receiver check covers unmapped programs");
+                    assert!(checked.source.contains("const RL_MATERIAL_UNMAPPED:bool=true;"));
+                    let module = naga::front::wgsl::parse_str(&checked.source)
+                        .unwrap_or_else(|e| panic!("toon receiver: {}", e.emit_to_string(&checked.source)));
+                    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                        .validate(&module)
+                        .unwrap_or_else(|e| panic!("toon receiver: {}", e.emit_to_string(&checked.source)));
+                }
                 let source = &edited.source;
                 assert_eq!(&source[edited.program.clone()], program);
                 let module = naga::front::wgsl::parse_str(source)
