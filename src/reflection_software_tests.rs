@@ -37,11 +37,27 @@ fn software_reflection_composition() {
             assert!(source.contains("var<workgroup> rs_top:array<u32,1024>;"));
             assert!(source.contains("lane:u32) {\n    rs_lane=lane;\n"));
             assert!(!source.contains("(*stack)") && !source.contains("var nodes:"));
+            // Interleaved: a warp's lanes at one depth on consecutive words (distinct banks).
+            let interleaved = source.contains("rs_stack[sp*32u+rs_lane]");
+            assert_eq!(interleaved, crate::program::rs_stack_interleaved() == Some(true));
         }
         if crate::program::rs_box_fma() {
             assert!(source.contains("let a=fma(lo,inv,-oi);let b=fma(hi,inv,-oi);"));
             assert!(source.contains("let world_oi=origin*world_inv;"));
             assert!(!source.contains("rs_box(origin,world_inv,"));
+        }
+        if crate::program::rs_count_on() {
+            assert!(source.contains("@binding(69) var<storage,read_write> rs_counts:"));
+            assert!(source.contains("fn rs_trace_walk(") && source.contains("rs_c_inst+=1u;"));
+        }
+        // Unset, the walk is main's: no switch's text at all.
+        let unset = !crate::program::rs_stack_workgroup()
+            && !crate::program::rs_box_fma()
+            && !crate::program::rs_count_on();
+        if unset {
+            assert!(source.contains("    var stack:array<u32,RS_STACK>;\n"));
+            assert!(source.contains("    let a=(lo-o)*inv;let b=(hi-o)*inv;\n"));
+            assert!(!source.contains("rs_counts") && !source.contains("rs_lane"));
         }
         let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
@@ -64,6 +80,23 @@ fn software_reflection_composition() {
             }),
         )
         .unwrap();
+        // The mixed-program list module joins the same walk with its own entry (binding 39 is
+        // its entries): it must validate under every switch too.
+        let list =
+            crate::program::compose_list(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
+                .source;
+        let module = naga::front::wgsl::parse_str(&list)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&list)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&list)));
+        if crate::program::rs_count_on() {
+            assert_eq!(list.matches("@binding(69)").count(), 1);
+            assert_eq!(list.matches("@binding(39)").count(), 1);
+        }
         let toon = compose(
             head,
             include_str!("../shaders/programs/toon.wgsl"),

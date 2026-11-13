@@ -653,6 +653,9 @@ const TRACE_SCENE: u32 = 19;
 /// M7-R1n: non-RT shading's software reflection geometry
 /// (`program::SOFTWARE_REFLECTION_GEOMETRY`).
 const SOFTWARE_REFLECTIONS: u32 = 36;
+/// RENDERLAB_RS_COUNT=1: the software rays' counts (program.rs `rs_count_on`); 69 is free in
+/// every module that composes the software walk (39 is the program lists' entries).
+const RS_COUNTS: u32 = 69;
 /// The shared TLAS: binding 2 for shadow rays, `TRACE_SCENE` for camera rays.
 fn scene(binding: u32) -> wgpu::BindGroupLayoutEntry {
     entry(
@@ -935,6 +938,8 @@ pub(super) struct PrimaryState {
     geometry: Option<Geometry>,
     /// M7-R1n: non-RT frames' software reflection geometry (reflection_software.rs).
     reflections: Option<SoftwareReflections>,
+    /// RENDERLAB_RS_COUNT=1 (measurement): the software rays' counts (`RsCounts`).
+    rs_counts: Option<RsCounts>,
     bindings: Option<Bindings>,
     /// Counts rebuilds of `geometry` and `bindings`: temporal history depends on both.
     geometry_generation: u64,
@@ -1212,6 +1217,13 @@ impl PrimaryState {
                 .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             {
                 entries.push(read(SOFTWARE_REFLECTIONS, 16));
+                if crate::program::rs_count_on() {
+                    entries.push(buffer(
+                        RS_COUNTS,
+                        wgpu::BufferBindingType::Storage { read_only: false },
+                        u64::from(crate::program::RS_COUNT_WORDS) * 4,
+                    ));
+                }
             }
             // Deferred reflections' outputs (`Targets::deferred`).
             if crate::program::rl_deferred() {
@@ -1432,6 +1444,7 @@ impl PrimaryState {
             targets: None,
             geometry: None,
             reflections: None,
+            rs_counts: None,
             bindings: None,
             geometry_generation: 0,
             bindings_generation: 0,
@@ -1496,6 +1509,7 @@ impl PrimaryState {
             targets: None,
             geometry: None,
             reflections: None,
+            rs_counts: None,
             bindings: None,
             geometry_generation: 0,
             bindings_generation: 0,
@@ -2507,6 +2521,7 @@ impl Renderer {
             let reflection_geometry = hardware
                 .is_none()
                 .then(|| &*state.reflections.as_ref().unwrap().buffer.value);
+            let rs_counts = state.rs_counts.as_ref().map(|c| &*c.buffer);
             let shade = |shading: Shading,
                          visibility: (u32, R<'_>)|
              -> [Option<Owned<wgpu::BindGroup>>; 2] {
@@ -2540,6 +2555,9 @@ impl Renderer {
                 // M7-R1n: software reflection geometry on non-RT renderers.
                 if let Some(geometry) = &reflection_geometry {
                     entries.push((SOFTWARE_REFLECTIONS, geometry.as_entire_binding()));
+                    if let Some(counts) = rs_counts {
+                        entries.push((RS_COUNTS, counts.as_entire_binding()));
+                    }
                 }
                 // Deferred reflections' outputs (`Targets::deferred`).
                 if let Some([reflectance, untraced]) = &t.deferred {
@@ -3337,6 +3355,100 @@ impl Renderer {
 /// distinct drawn mesh's BVH once, behind the frame's instance records. Repacked when the
 /// drawn meshes or the number of traced instances change; transform edits rewrite only the
 /// records.
+/// RENDERLAB_RS_COUNT=1 (measurement only): the counts buffer the non-RT shading's software
+/// rays add into (binding 69, program.rs RS_COUNT_WORDS) and its readback. Each frame's
+/// prepare reads back what the previous rendered frame counted, prints it as one
+/// `rs_counts` line of name=value pairs, and clears it. Counts are per rendered frame; the
+/// counting itself (registers and a few atomics per ray, a blocking readback per frame)
+/// changes the frame time, so a counting run gives counts, never milliseconds.
+pub(super) struct RsCounts {
+    buffer: Owned<wgpu::Buffer>,
+    read: Owned<wgpu::Buffer>,
+    frames: u64,
+}
+impl Renderer {
+    fn report_rs_counts(&mut self) {
+        let bytes = u64::from(crate::program::RS_COUNT_WORDS) * 4;
+        let state = self.view.primary.as_mut().unwrap();
+        let Some(counts) = state.rs_counts.as_mut() else {
+            let buffer = |label, usage| {
+                self.ledger.own(
+                    self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some(label),
+                        size: bytes,
+                        usage,
+                        mapped_at_creation: false,
+                    }),
+                    ResourceKind::Buffer,
+                )
+            };
+            let counts = RsCounts {
+                buffer: buffer(
+                    "software ray counts",
+                    wgpu::BufferUsages::STORAGE
+                        | wgpu::BufferUsages::COPY_SRC
+                        | wgpu::BufferUsages::COPY_DST,
+                ),
+                read: buffer(
+                    "software ray counts readback",
+                    wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                ),
+                frames: 0,
+            };
+            self.queue
+                .write_buffer(&counts.buffer, 0, &vec![0; bytes as usize]);
+            state.rs_counts = Some(counts);
+            return;
+        };
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("software ray counts readback"),
+            });
+        encoder.copy_buffer_to_buffer(&counts.buffer, 0, &counts.read, 0, bytes);
+        self.queue.submit([encoder.finish()]);
+        let slice = counts.read.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        let waited = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(20)),
+        });
+        let mapped = waited.ok().and_then(|_| slice.get_mapped_range().ok());
+        if let Some(view) = mapped {
+            let words: Vec<u32> = view
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|w| u32::from_ne_bytes(*w))
+                .collect();
+            drop(view);
+            let pair = |i: usize| u64::from(words[i]) | u64::from(words[i + 1]) << 32;
+            let mut line = format!("rs_counts frame={}", counts.frames);
+            for (set, name) in [(0, "closest"), (10, "anyhit")] {
+                for (k, field) in ["rays", "blas_nodes", "triangles", "tlas_nodes", "instances"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    line.push_str(&format!(" {name}_{field}={}", pair(set + 2 * k)));
+                }
+            }
+            let bins = |from: usize, n: usize| {
+                words[from..from + n]
+                    .iter()
+                    .map(u32::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            line.push_str(&format!(" closest_visits_by2={}", bins(20, 64)));
+            line.push_str(&format!(" closest_instances={}", bins(84, 32)));
+            eprintln!("{line}");
+            counts.read.unmap();
+        }
+        self.queue
+            .write_buffer(&counts.buffer, 0, &vec![0; bytes as usize]);
+        counts.frames += 1;
+    }
+}
 pub(super) struct SoftwareReflections {
     buffer: Buffer,
     meshes: Vec<Arc<crate::reflection_software::Blas>>,
@@ -3351,6 +3463,9 @@ impl Renderer {
         draws: &[PreparedDraw<'_>],
         uploads: &mut UploadBytes,
     ) {
+        if crate::program::rs_count_on() {
+            self.report_rs_counts();
+        }
         let mut meshes: Vec<Arc<crate::reflection_software::Blas>> = vec![];
         let mut traced = vec![];
         let mut slot = 0u32;

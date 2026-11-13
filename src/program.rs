@@ -468,8 +468,21 @@ pub(crate) fn rs_box_fma() -> bool {
 /// builtin take it (`with_rs_stack`); RS_LANES covers the largest group. A raster entry in the
 /// same module must not reach the traversal (a workgroup variable there fails validation).
 pub(crate) fn rs_stack_workgroup() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_RS_STACK").is_ok_and(|v| v == "workgroup"))
+    rs_stack_interleaved().is_some()
+}
+/// `RENDERLAB_RS_STACK`: Some(false) for `workgroup` (each lane's slice contiguous, entry
+/// `lane * 32 + sp`), Some(true) for `interleaved` (entry `sp * RS_LANES + lane`: a warp's
+/// lanes at one depth hit consecutive words, so distinct banks; the contiguous slices put a
+/// warp's 32 lanes in one bank). None: private stacks, as main.
+pub(crate) fn rs_stack_interleaved() -> Option<bool> {
+    static MODE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *MODE.get_or_init(
+        || match std::env::var("RENDERLAB_RS_STACK").ok()?.as_str() {
+            "workgroup" => Some(false),
+            "interleaved" => Some(true),
+            _ => None,
+        },
+    )
 }
 const RS_LANES: u32 = 32;
 const RS_STACK_EDITS: [(&str, &str); 8] = [
@@ -549,6 +562,14 @@ fn with_rs_stack(mut composed: Composed) -> Composed {
         head = head
             .replace("RS_STACK_SLOTS", &(32 * RS_LANES).to_string())
             .replace("RS_TOP_STACK_SLOTS", &(32 * RS_LANES).to_string());
+        if rs_stack_interleaved() == Some(true) {
+            let lanes = format!("{RS_LANES}u");
+            head = head
+                .replace("rs_lane*RS_STACK+sp]", &format!("sp*{lanes}+rs_lane]"))
+                .replace("rs_lane*RS_TOP_STACK+sp]", &format!("sp*{lanes}+rs_lane]"))
+                .replace("rs_lane*RS_STACK]", "rs_lane]")
+                .replace("rs_lane*RS_TOP_STACK]", "rs_lane]");
+        }
     }
     let (from, to) = RS_STACK_MANY[2];
     let tail = tail.replace(to, from).replace(from, to);
@@ -559,8 +580,68 @@ fn with_rs_stack(mut composed: Composed) -> Composed {
     composed.program = start..end;
     composed
 }
+/// `RENDERLAB_RS_COUNT=1` (measurement, off by default; wgpu non-RT): every software ray
+/// counts its BLAS node visits, triangle tests, TLAS node visits and instances entered in
+/// registers and adds them once, as it returns, into `rs_counts` (binding 69), which the
+/// renderer clears and prints each rendered frame (primary_ray_gpu.rs `RsCounts`). The extra
+/// arithmetic and atomics change the frame time: read counts from a counting run, never ms.
+pub(crate) fn rs_count_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RS_COUNT").is_ok_and(|v| v == "1"))
+}
+/// The counts buffer's u32 words: two sets (closest-hit rays, any-hit rays) of five carried
+/// (lo, hi) totals (rays, BLAS nodes, triangle tests, TLAS nodes, instances entered), then
+/// closest rays' node visits (BLAS + TLAS) in 64 bins of 2, then their instances entered in
+/// 32 bins of 1 (the last bins hold everything above).
+pub(crate) const RS_COUNT_WORDS: u32 = 116;
+const RS_COUNT_DECLARATIONS: &str = "// RENDERLAB_RS_COUNT=1: the frame's software-ray counts (program.rs RS_COUNT_WORDS).\n@group(0) @binding(69) var<storage,read_write> rs_counts:array<atomic<u32>,116>;\nvar<private> rs_c_blas:u32;\nvar<private> rs_c_tris:u32;\nvar<private> rs_c_tlas:u32;\nvar<private> rs_c_inst:u32;\n";
+const RS_COUNT_EDITS: [(&str, &str); 5] = [
+    (
+        "    let r0=rs_q(r);let r1=rs_q(r+1u);let r2=rs_q(r+2u);\n",
+        "    rs_c_inst+=1u;\n    let r0=rs_q(r);let r1=rs_q(r+1u);let r2=rs_q(r+2u);\n",
+    ),
+    (
+        "                    let x=triangles+(start+k)*3u;\n",
+        "                    rs_c_tris+=1u;\n                    let x=triangles+(start+k)*3u;\n",
+    ),
+    (
+        "            let n=nodes+child*4u;\n",
+        "            rs_c_blas+=1u;\n            let n=nodes+child*4u;\n",
+    ),
+    (
+        "        let n=(head.y>>2u)+item*4u;\n",
+        "        rs_c_tlas+=1u;\n        let n=(head.y>>2u)+item*4u;\n",
+    ),
+    (
+        "fn rs_trace(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32,any_hit:bool)->RsHit {",
+        "fn rs_trace_walk(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32,any_hit:bool)->RsHit {",
+    ),
+];
+const RS_COUNT_WRAPPER: (&str, &str) = (
+    "// R1's ray-query seams on the software path.\n",
+    "// RENDERLAB_RS_COUNT=1: total `v` into the carried (lo, hi) pair at word i.\nfn rs_add(i:u32,v:u32) {\n    if v==0u {return;}\n    let old=atomicAdd(&rs_counts[i],v);\n    if old+v<old {atomicAdd(&rs_counts[i+1u],1u);}\n}\n// The walk, counted: one ray's counts into the frame's totals as it returns.\nfn rs_trace(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32,any_hit:bool)->RsHit {\n    rs_c_blas=0u;rs_c_tris=0u;rs_c_tlas=0u;rs_c_inst=0u;\n    let hit=rs_trace_walk(origin,direction,tmin,tmax,any_hit);\n    let base=select(0u,10u,any_hit);\n    rs_add(base,1u);rs_add(base+2u,rs_c_blas);rs_add(base+4u,rs_c_tris);rs_add(base+6u,rs_c_tlas);rs_add(base+8u,rs_c_inst);\n    if !any_hit {\n        atomicAdd(&rs_counts[20u+min((rs_c_blas+rs_c_tlas)/2u,63u)],1u);\n        atomicAdd(&rs_counts[84u+min(rs_c_inst,31u)],1u);\n    }\n    return hit;\n}\n// R1's ray-query seams on the software path.\n",
+);
 fn software_reflection_api() -> String {
     let mut api = format!("{SOFTWARE_REFLECTION_API}{REFLECTION_API}");
+    if rs_count_on() {
+        for (from, to) in RS_COUNT_EDITS {
+            assert_eq!(
+                api.matches(from).count(),
+                1,
+                "RENDERLAB_RS_COUNT seam {from}"
+            );
+            api = api.replacen(from, to, 1);
+        }
+        assert_eq!(
+            api.matches(RS_COUNT_WRAPPER.0).count(),
+            1,
+            "RENDERLAB_RS_COUNT seam"
+        );
+        api = format!(
+            "{RS_COUNT_DECLARATIONS}{}",
+            api.replacen(RS_COUNT_WRAPPER.0, RS_COUNT_WRAPPER.1, 1)
+        );
+    }
     if std::env::var("RENDERLAB_RS_DIVIDE").is_ok_and(|v| v == "defer") {
         assert_eq!(api.matches(RS_DIVIDE.0).count(), 1, "RENDERLAB_RS_DIVIDE seam");
         api = api.replacen(RS_DIVIDE.0, RS_DIVIDE.1, 1);
