@@ -30,6 +30,7 @@ fn software_reflection_composition() {
         );
         // Both paths read the global bands (ReflectionSettings).
         assert!(source.contains("let bands=primary_frame.reflection;"));
+        hit_lod_seams(&source);
         let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         let info = naga::valid::Validator::new(
@@ -64,7 +65,34 @@ fn software_reflection_composition() {
         let source = compose(&head, crate::STANDARD_PROGRAM, Stage::Traced, false).source;
         assert!(source.contains("rayQueryInitialize(&query,") && !source.contains("rs_trace"));
         assert!(source.contains("let bands=primary_frame.reflection;"));
+        hit_lod_seams(&source);
     }
+}
+
+/// RENDERLAB_HIT_LOD's seams in a composed standard module: with the switch, a module that
+/// traces reflections carries the program-visible `reflection_cone`, the flat normal map at wide
+/// hits and no environment lobes there, and validates; without it, none of its text.
+fn hit_lod_seams(source: &str) {
+    if crate::program::hit_lod().is_none() {
+        assert!(!source.contains("rl_hit_lod") && !source.contains("reflection_cone"));
+        return;
+    }
+    if !source.contains("rl_reflection_prepare(") {
+        return;
+    }
+    assert!(source.contains("fn reflection_cone(input:SurfaceInput)->f32"));
+    assert!(source.contains("    if rl_hit_lod() { return vec4<f32>(0.5,0.5,1.0,"));
+    assert!(
+        source.contains("fn environment_lobe_count() -> u32 {\n    if rl_hit_lod() { return 0u; }")
+    );
+    let module = naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
 }
 
 fn device() -> (wgpu::Device, wgpu::Queue) {

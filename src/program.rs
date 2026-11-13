@@ -81,6 +81,48 @@ const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";
 const REFLECTION_VISIBILITY: &str = "    if rl_reflection_hit {return rl_hit_shadow(lights[s.index],input.receiver,s.direction);}\n";
+/// `RENDERLAB_HIT_LOD=<roughness>` (measurement, off by default): a reflection hit reached
+/// from a lobe at least that rough (perceptual; `rl_hist_rough`) gets cheaper engine inputs,
+/// whatever its program: `sample_normal_map` returns the flat normal (a wide cone averages the
+/// map's detail away) and `environment_lobe_count` returns 0 (the dominant-lobe refinement is
+/// skipped; the prefiltered specular stays, so metals keep their reflection). Programs also
+/// see `reflection_cone(input)`, the reflecting lobe's roughness at a hit and 0 for camera
+/// receivers, to lower their own detail; one that ignores it shades as before on cheaper
+/// inputs. Hits already sample textures at the cone's mip (their uv gradients follow it).
+pub(crate) fn hit_lod() -> Option<f32> {
+    static FROM: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *FROM.get_or_init(|| std::env::var("RENDERLAB_HIT_LOD").ok()?.parse().ok())
+}
+const HIT_LOD_API: &str = "// RENDERLAB_HIT_LOD (program.rs `hit_lod`).\nconst RL_HIT_LOD:f32=RL_HIT_LOD_FROM;\nfn rl_hit_lod()->bool { return rl_reflection_hit && rl_hist_rough>=RL_HIT_LOD; }\n// The perceptual roughness of the lobe whose reflection this point is shading: 0 for camera\n// receivers and mirror lobes, larger as the reflecting cone widens.\nfn reflection_cone(input:SurfaceInput)->f32 { return select(0.0,rl_hist_rough,rl_reflection_hit); }\n";
+const HIT_LOD_SEAMS: [(&str, &str); 2] = [
+    (
+        "fn sample_normal_map(input:SurfaceInput) -> vec4<f32> {\n",
+        "fn sample_normal_map(input:SurfaceInput) -> vec4<f32> {\n    if rl_hit_lod() { return vec4<f32>(0.5,0.5,1.0,select(1.0,0.0,input.material.normal_variance==2u)); }\n",
+    ),
+    (
+        "fn environment_lobe_count() -> u32 {\n",
+        "fn environment_lobe_count() -> u32 {\n    if rl_hit_lod() { return 0u; }\n",
+    ),
+];
+/// `source` (a tracing module) with the hit LOD's API and seams; each seam applies where its
+/// function is composed (the lobes only with the indirect API).
+fn with_hit_lod(source: String, from: f32) -> String {
+    const PROGRAM: &str = "// ---- program ----\n";
+    assert_eq!(source.matches(PROGRAM).count(), 1, "hit LOD program seam");
+    let mut source = source.replacen(
+        PROGRAM,
+        &format!(
+            "{}{PROGRAM}",
+            HIT_LOD_API.replace("RL_HIT_LOD_FROM", &format!("{from:?}"))
+        ),
+        1,
+    );
+    for (from, to) in HIT_LOD_SEAMS {
+        assert!(source.matches(from).count() <= 1, "hit LOD seam {from}");
+        source = source.replacen(from, to, 1);
+    }
+    source
+}
 /// A shadowed local light's visibility in `light_visibility`, where reflection hits from a
 /// lobe at least `LocalShadows::unshadowed_hits_from` rough skip it (the cluster frame's
 /// far.z; `rl_hist_rough` is the reflecting lobe's perceptual roughness, set before its hits).
@@ -802,6 +844,9 @@ fn compose_stage(
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
             1,
         );
+        if let Some(from) = hit_lod() {
+            source = with_hit_lod(source, from);
+        }
         // `LocalShadows::unshadowed_hits_from`: rough enough hits light local lights unshadowed.
         assert_eq!(source.matches(LOCAL_VISIBILITY_SEAM).count(), 1);
         source = source.replacen(
