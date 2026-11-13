@@ -1,9 +1,11 @@
-//! U-RTVIS reflection pass, first stage (docs/design-reflection-pass.md): `rl_trace` after the
-//! frame's shading. While `RENDERLAB_RL_PASS=1`, primary shading writes each glossy receiver's
-//! lobe (L, shaders/reflections_lobe.wgsl), and `rl_trace` (shaders/reflections_trace.wgsl)
-//! traces one ray per 2x2 quad from it. It writes misses' sky radiance into R and appends hit
-//! records to H for the Mac thread's `reflection_hits`, then writes H's dispatch arguments. The
-//! picture still comes from the inline trace; the accumulator and resolve come later.
+//! U-RTVIS reflection pass (docs/design-reflection-pass.md): the traces after the frame's
+//! shading. With the pass (on by default on the non-RT path; RENDERLAB_RL_PASS=0 forces it off,
+//! =1 forces it on RT too), primary shading writes each glossy receiver's lobe (L,
+//! shaders/reflections_lobe.wgsl). With the deferred composite (the non-RT default, or
+//! RENDERLAB_RL_DEFERRED=1), `rl_trace_pixels` traces every reporting program's glossy pixel's
+//! strata into R (misses' sky) and H (hits, shaded by the Mac thread's `reflection_hits`), and the
+//! composite adds w x reflectance x their mean before TR1. Without it `rl_trace` traces one ray
+//! per 2x2 quad and the picture comes from the inline trace.
 //! A child of primary_ray_gpu (its targets, layouts and bindings).
 use super::*;
 
@@ -13,19 +15,19 @@ pub(super) const LOBE_B: u32 = 57;
 pub(super) const PASS_FRAME: u32 = 58;
 const DISTANCE: u32 = 59;
 /// The deferred composite's trace (rl_trace_pixels): its counters and per-pixel slot ranges.
-const STATS: u32 = 60;
+pub(super) const STATS: u32 = 60;
 const RANGES: u32 = 61;
 /// The receivers' own ray epsilon (the primary trace's or visibility resolve's per-pixel
 /// `receiver.epsilon`): the compacted trace starts its rays there, as the inline loop does.
 const RECEIVER_EPSILON: u32 = 79;
 /// With the composite, R holds every glossy pixel's strata (this many slots a row) and H one
-/// record a slot: the room. It starts at a slot a screen pixel, so a view's first frames are not
-/// scaled unless it asks for more (2,073,600 slots at 1080p: 16 strata over 6 % of the screen),
-/// and grows to the content (the count pass's requested total, read back a frame or two late)
-/// up to ROOM_PER_PIXEL a pixel; a frame asking for more than the room scales every pixel's
-/// strata to fit (rl_trace_count, rl_trace_pixels), at least one each, so no pixel loses its
-/// reflection while the room grows.
+/// record a slot: the room. It starts at ROOM_START slots and grows to the content (the frame's
+/// requested strata, summed at shading, read back a frame or two late) up to ROOM_PER_PIXEL a
+/// pixel. A glossy receiver that does not fit keeps its inline estimate that frame
+/// (`rl_room_reserve`, reflections_lobe.wgsl), so no frame is ever scaled: a glossier view or
+/// a cut costs inline time on its overflow pixels until the room grows, at today's picture.
 const SAMPLE_ROW: u32 = 2048;
+const ROOM_START: u64 = 1 << 18;
 const ROOM_PER_PIXEL: u64 = 4;
 pub(super) const HITS: u32 = 64;
 pub(super) const SAMPLES: u32 = 65;
@@ -34,13 +36,33 @@ const HITS_HEADER: u64 = 16;
 const RECORD_BYTES: u64 = 48;
 const SLOT_GROUP: [u32; 2] = [8, 8];
 
-/// `RENDERLAB_RL_PASS=1` (src/program.rs).
-pub(crate) fn on() -> bool {
-    crate::program::rl_pass_on()
+/// The shading stage's storage buffers and textures the pass and composite need beyond the
+/// visibility path's (src/primary_ray.rs visibility_limits): H and the trace counters; the lobes,
+/// R and the deferred outputs.
+pub(crate) const STORAGE_BUFFERS: u32 = 2;
+pub(crate) const STORAGE_TEXTURES: u32 = 12;
+/// Whether this device's renderer runs the pass and the composite by default: the non-RT path
+/// (no ray queries; its reflections trace in software) on a device whose limits hold them.
+pub(crate) fn default_on(device: &wgpu::Device) -> bool {
+    let limits = device.limits();
+    !device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+        && limits.max_storage_buffers_per_shader_stage
+            >= crate::visibility_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage
+                + STORAGE_BUFFERS
+        && limits.max_storage_textures_per_shader_stage >= STORAGE_TEXTURES
+}
+/// Whether the pass runs on this device's renderer: RENDERLAB_RL_PASS when set, else its default.
+pub(crate) fn on(device: &wgpu::Device) -> bool {
+    crate::program::rl_pass_env().unwrap_or_else(|| default_on(device))
+}
+/// Whether this device's renderer hands reporting programs' glossy reflections to the composite.
+pub(crate) fn deferred(device: &wgpu::Device) -> bool {
+    crate::program::rl_deferred_env().unwrap_or_else(|| default_on(device))
 }
 
-/// The shading layout's lobe entries (write-only storage) and frame uniform.
-pub(super) fn shade_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
+/// The shading layout's lobe entries (write-only storage), frame uniform and the trace counters
+/// (the composite's room reservations, `rl_room_reserve`).
+pub(super) fn shade_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
     use wgpu::TextureFormat as F;
     let write = |binding, format| {
         entry(
@@ -56,6 +78,7 @@ pub(super) fn shade_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
         write(LOBE_A, F::Rgba32Float),
         write(LOBE_B, F::Rgba32Uint),
         uniform(PASS_FRAME, 16),
+        buffer(STATS, wgpu::BufferBindingType::Storage { read_only: false }, 16),
     ]
 }
 
@@ -94,7 +117,7 @@ impl TraceAbi {
                 wgpu::BufferBindingType::Storage { read_only: false },
                 if crate::program::hit_reuse().is_some() { 32 } else { 16 },
             ),
-            image(RANGES, F::Rg32Uint),
+            image(RANGES, F::R32Uint),
             texture(RECEIVER_EPSILON, wgpu::TextureSampleType::Float { filterable: false }),
         ];
         // The Mac thread's S4a: hits reused before the H append (hit_reuse_gpu.rs).
@@ -154,7 +177,6 @@ pub(super) struct TracePipelines {
     trace: Owned<wgpu::ComputePipeline>,
     args: Owned<wgpu::ComputePipeline>,
     pixels: Owned<wgpu::ComputePipeline>,
-    count: Owned<wgpu::ComputePipeline>,
     /// The deferred composite: its group layout and additive render pipeline.
     composite: Option<(Owned<wgpu::BindGroupLayout>, Owned<wgpu::RenderPipeline>)>,
 }
@@ -194,8 +216,8 @@ impl Renderer {
         let slots = [size.width.div_ceil(2), size.height.div_ceil(2)];
         // The composite traces every glossy pixel's set into a room sized to the content (it
         // starts small and grows); the quad trace keeps one slot and record a quad.
-        let composite = crate::program::rl_deferred();
-        let room = u64::from(size.width) * u64::from(size.height);
+        let composite = deferred(&self.device);
+        let room = ROOM_START.min(ROOM_PER_PIXEL * u64::from(size.width) * u64::from(size.height));
         let samples = if composite {
             [SAMPLE_ROW, (room as u32).div_ceil(SAMPLE_ROW)]
         } else {
@@ -225,9 +247,14 @@ impl Renderer {
                     | wgpu::BufferUsages::COPY_SRC,
             ),
             samples: target("reflection samples", samples[0], samples[1], F::Rgba16Float),
-            distance: target("reflection ray distance", slots[0], slots[1], F::R32Float),
+            // D is the quad trace's alone: one texel under the composite.
+            distance: if composite {
+                target("reflection ray distance", 1, 1, F::R32Float)
+            } else {
+                target("reflection ray distance", slots[0], slots[1], F::R32Float)
+            },
             slots,
-            ranges: target("reflection sample ranges", size.width, size.height, F::Rg32Uint),
+            ranges: target("reflection sample ranges", size.width, size.height, F::R32Uint),
             // Four words, then S4a's `reused` (the room's readback copies the first 16 bytes).
             stats: Buffer::new(
                 self,
@@ -329,12 +356,11 @@ impl Renderer {
                 ResourceKind::ComputePipeline,
             )
         };
-        let composite = crate::program::rl_deferred().then(|| self.rl_composite_kit());
+        let composite = deferred(&self.device).then(|| self.rl_composite_kit());
         let pipelines = TracePipelines {
             trace: pipeline("rl_trace"),
             args: pipeline("rl_hit_args"),
             pixels: pipeline("rl_trace_pixels"),
-            count: pipeline("rl_trace_count"),
             composite,
         };
         if let Some(error) = scopes.finish() {
@@ -357,9 +383,10 @@ impl Renderer {
             return;
         };
         let g = state.geometry.as_ref().unwrap();
-        self.rl_probe(encoder, pass);
+        if pipelines.composite.is_none() {
+            self.rl_probe(encoder, pass);
+        }
         encoder.clear_buffer(&pass.hits.value, 0, Some(HITS_HEADER));
-        encoder.clear_buffer(&pass.stats.value, 0, None);
         let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reflection trace"),
             timestamp_writes: None,
@@ -371,13 +398,12 @@ impl Renderer {
             // The composite: every glossy pixel's set, one invocation a pixel.
             let size = pass.lobe_b.texture.size();
             let groups = [size.width.div_ceil(8), size.height.div_ceil(8)];
-            compute.set_pipeline(&pipelines.count);
-            compute.dispatch_workgroups(groups[0], groups[1], 1);
             compute.set_pipeline(&pipelines.pixels);
             compute.dispatch_workgroups(groups[0], groups[1], 1);
             compute.set_pipeline(&pipelines.args);
             compute.dispatch_workgroups(1, 1, 1);
             drop(compute);
+            self.rl_probe(encoder, pass);
             self.rl_room_copy(encoder, pass);
             return;
         } else {
@@ -404,10 +430,14 @@ impl Renderer {
         else {
             return;
         };
-        let composite = u32::from(crate::program::rl_deferred());
-        let words = [self.frames as u32, pass.slots[0], 1, composite];
+        let composite = u32::from(deferred(&self.device));
+        // y: the composite's room (rl_room_reserve), or the quad trace's grid width.
+        let y = if composite != 0 { pass.room as u32 } else { pass.slots[0] };
+        let words = [self.frames as u32, y, 1, composite];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
         self.queue.write_buffer(&pass.frame.value, 0, &bytes);
+        // The counters start each frame at zero before shading reserves into them.
+        self.queue.write_buffer(&pass.stats.value, 0, &[0; 16]);
         if composite != 0 {
             // The lone-stratum bound and the strata it needs (reflections.wgsl RL_GLOSSY_RAYS).
             let lone = self.view.reflections.frame_words()[2];
@@ -595,7 +625,7 @@ impl Renderer {
             // The composite's trace counters (glossy pixels, slots, pixels without room), then
             // S4a's reused hits.
             encoder.copy_buffer_to_buffer(&pass.stats.value, 0, &staging, 16, 32);
-            let composite = crate::program::rl_deferred();
+            let composite = deferred(&self.device);
             let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
             // With the composite R is a slot list, not a quad image: only the counters are read.
             for (texture, offset, row) in if composite { vec![] } else { vec![
@@ -646,7 +676,7 @@ impl Renderer {
                 )
             })
             .unwrap_or_default();
-        if crate::program::rl_deferred() {
+        if deferred(&self.device) {
             // The strata counter: trace slots (strata) and hit records per glossy pixel.
             let per = |n: u32| if pixels > 0 { f64::from(n) / f64::from(pixels) } else { 0.0 };
             let json = format!(

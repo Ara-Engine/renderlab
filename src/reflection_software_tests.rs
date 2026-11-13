@@ -347,7 +347,7 @@ fn gpu_r1n_mirror_identity() {
 fn deferred_standard(head: &str) -> crate::program::Composed {
     use crate::program::{Stage, compose, deferred_variant};
     let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
-    if crate::program::rl_deferred() {
+    if crate::program::rl_deferred_for(head) {
         composed
     } else {
         deferred_variant(composed)
@@ -386,7 +386,7 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
         assert!(passed.contains(
             "rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);"
         ));
-        if !crate::program::rl_deferred() && !crate::program::rl_pass_on() {
+        if !crate::program::rl_deferred_for(head) && !crate::program::rl_pass_for(head) {
             let plain = crate::program::pass_block(compose(
                 head,
                 crate::STANDARD_PROGRAM,
@@ -468,6 +468,43 @@ fn trace_hit_reuse_seam_stays_before_the_h_append() {
         1
     );
     assert_eq!(trace.matches(seam).count(), 1);
+}
+
+/// The non-RT default belongs to the renderer whose device runs the pass: its heads carry
+/// `PASS_HEAD_MARK`, and only modules composed on them take the pass and the composite (with
+/// inline overflow). Heads composed elsewhere (the Ara port, tests) keep the inline path.
+#[test]
+fn the_reflection_pass_belongs_to_the_marked_renderer() {
+    use crate::program::{PASS_HEAD_MARK, Stage, compose, with_reflection_history};
+    if crate::program::rl_pass_env().is_some() || crate::program::rl_deferred_env().is_some() {
+        return;
+    }
+    let (_, heads) = non_rt_sources(SOURCE).unwrap();
+    let marked = format!("{}{PASS_HEAD_MARK}", heads[1]);
+    let on = with_reflection_history(compose(
+        &marked,
+        crate::STANDARD_PROGRAM,
+        Stage::Traced,
+        false,
+    ));
+    assert!(on.source.contains("rl_room_reserve(count)"));
+    assert!(on.source.contains("const RL_DEFERRED_PROGRAM:bool=true;"));
+    assert_eq!(&on.source[on.program.clone()], crate::STANDARD_PROGRAM);
+    let off = with_reflection_history(compose(
+        &heads[1],
+        crate::STANDARD_PROGRAM,
+        Stage::Traced,
+        false,
+    ));
+    assert!(!off.source.contains("rl_composite") && !off.source.contains("RL_DEFERRED_PROGRAM"));
+    let module = naga::front::wgsl::parse_str(&on.source)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on.source)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on.source)));
 }
 
 /// RENDERLAB_RL_HIT_REUSE (S4a): with the switch, every traced module that names the cache-hit
