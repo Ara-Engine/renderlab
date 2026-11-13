@@ -410,6 +410,7 @@ fn gpu_es1_sky_plane() {
                     ..Default::default()
                 }],
                 instances: vec![reference::Instance {
+                    casts_shadows: true,
                     mesh: 0,
                     material: 0,
                     transform: Mat4::IDENTITY,

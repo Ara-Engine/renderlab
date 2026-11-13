@@ -32,6 +32,28 @@ pub enum SoftShadows {
     Virtual,
 }
 
+/// The acceleration-structure instance mask bit of a placement that blocks light
+/// (`Instances::set_casts_shadows`), and the cull mask of every shadow ray. WGSL declares it
+/// as `SHADOW_CASTER_MASK` in shaders/scene.wgsl; modules without scene.wgsl prepend
+/// `SHADOW_CASTER_MASK_WGSL`. Camera, reflection and bounce rays cull with 0xFF.
+pub(crate) const SHADOW_CASTER_MASK: u32 = 0x01;
+/// `source` with `SHADOW_CASTER_MASK_WGSL` after its leading `enable` directives (which WGSL
+/// puts before every declaration), for a module without shaders/scene.wgsl.
+pub(crate) fn with_shadow_caster_mask(source: &str) -> String {
+    let at: usize = source
+        .split_inclusive('\n')
+        .take_while(|line| line.trim_start().starts_with("enable "))
+        .map(str::len)
+        .sum();
+    format!(
+        "{}{SHADOW_CASTER_MASK_WGSL}{}",
+        &source[..at],
+        &source[at..]
+    )
+}
+/// `SHADOW_CASTER_MASK`'s WGSL declaration, as shaders/scene.wgsl has it.
+pub(crate) const SHADOW_CASTER_MASK_WGSL: &str = "const SHADOW_CASTER_MASK:u32=1u;\n";
+
 /// Entries correspond exactly to the current `Lighting::lights` vector.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ShadowRequest {

@@ -73,6 +73,8 @@ fn gi_limit(best:GiHit, i:u32) -> f32 {
 fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>, tmin:f32, any_hit:bool,
     best:ptr<function,GiHit>, stack:ptr<function,array<u32,GI_BVH_STACK>>) -> bool {
     let r=16u+i*GI_INSTANCE_WORDS;
+    // Word 27: casts no shadow (src/gi_bvh.rs). Light visibility passes through it.
+    if any_hit && gi_geometry[r+27u]!=0u { return false; }
     if !gi_slab(origin,world_inv,gi_gv(r+12u),gi_gv(r+15u),tmin,gi_limit(*best,i)) { return false; }
     let r0=vec4<f32>(gi_gv(r),gi_gf(r+3u));let r1=vec4<f32>(gi_gv(r+4u),gi_gf(r+7u));let r2=vec4<f32>(gi_gv(r+8u),gi_gf(r+11u));
     // Unnormalized object-space direction: t is the same parameter in both spaces.

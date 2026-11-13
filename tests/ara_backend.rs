@@ -306,6 +306,10 @@ mod primary_check_reference;
 #[path = "ara_backend/cases/handle_arrays.rs"]
 mod handle_array_cases;
 
+#[path = "ara_backend/cases/material_pass.rs"]
+mod material_pass_cases;
+#[path = "ara_backend/cases/casts_shadows.rs"]
+mod casts_shadows_cases;
 #[path = "ara_backend/cases/primary_shade.rs"]
 mod primary_shade_cases;
 #[path = "ara_backend/primary_shade_reference.rs"]

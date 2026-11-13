@@ -604,9 +604,15 @@ impl Renderer {
             }
             // Hash each caster once, then include only intersecting casters in a map's
             // key. A distant moving object no longer invalidates the entire atlas.
+            // A placement that casts no shadow is never a candidate: toggling it changes the
+            // casters, and so the key, of every map it reaches.
             let mut candidates = vec![];
             for (d, draw) in draws.iter().enumerate() {
-                for (i, model) in draw.instances.state.models.iter().enumerate() {
+                let state = &draw.instances.state;
+                for (i, model) in state.models.iter().enumerate() {
+                    if !state.casts_shadows(i) {
+                        continue;
+                    }
                     let Ok(bounds) = shadow_gpu::world_bounds(draw.mesh.bounds, *model) else {
                         continue;
                     };

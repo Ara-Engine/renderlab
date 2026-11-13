@@ -1211,3 +1211,6 @@ Reflection hits trace a shadow ray for every shadowed local light. Glossy lobes 
 - RTX night lanterns: the worst frame has 0.01% of pixels over 8 codes (max 65), scattered over glossy crates and the arch, with both mirror spheres unchanged at 1:1.
 - RTX game flight: max 8 codes.
 - 0.35 gave the same picture at 8.62 ms.
+
+## Local light inside a closed casting fitting: non-RT blocks about a quarter (U-FIXED, 2026-11-13)
+`engine::casts_shadows_tests` (cs2, bin of 42001938): a point light inside a closed 1 m shade and a downward spot inside a 0.5 x 0.3 x 0.5 m head, no sky. With RT a casting fitting blocks all of the lamp's light on the floor. Without RT it blocks about a quarter (floor share over the sky: point 49.4 open, 37.0 casting; spot 29.1 open, 22.9 casting), so the local shadow atlas lets most of a fully enclosed light through. Not caused by `set_casts_shadows`: a non-casting fitting matches the open lamp on both paths (49.5 and 29.2). Not yet diagnosed: the maps' near plane is 2 cm and no shadow pipeline culls faces. Outpost's floodlights (heads 5-23 cm from the light) are the content case; with `castShadows: false` on their heads (Ara #191) they no longer depend on it.
