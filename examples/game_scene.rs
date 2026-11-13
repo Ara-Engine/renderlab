@@ -1119,6 +1119,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let keep_frames = std::env::var("RENDERLAB_SCENE_KEEP_FRAMES").ok()
         .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>())
         .transpose()?;
+    let drain = std::env::var("RENDERLAB_SCENE_DRAIN").is_ok_and(|v| v == "1");
     for frame in 0..args.frames {
         let t = if args.still { 0.0 } else { frame as f32 / FPS };
         let sun_update = Instant::now();
@@ -1253,6 +1254,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             None => None,
         };
+        if drain {
+            engine.device().poll(wgpu::PollType::wait_indefinitely())?;
+            engine.poll()?;
+        }
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
         let written = keep_frames.as_ref().map_or(frame % args.every == 0 || frame + 1 == args.frames, |keep| keep.contains(&frame));
         let mut image_hash = None;
