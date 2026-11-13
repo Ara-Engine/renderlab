@@ -2560,6 +2560,9 @@ pub(crate) fn material_variant_with(
     }
     // The reader's filter edit precedes the entry and moves it.
     let entry = composed.source.find("fn primary_shade_pixel(")?;
+    if role == MaterialRole::Read && probe == Some(MaterialProbe::NoDecode) && mapped {
+        composed = material_no_decode(composed, entry)?;
+    }
     if role == MaterialRole::Read && probe == Some(MaterialProbe::ReadLean) {
         for (from, to) in MATERIAL_PROBE_LEAN {
             let at = entry + composed.source[entry..].find(from)?;
@@ -2652,6 +2655,42 @@ fn material_reader_edits(mut composed: Composed, entry: usize) -> Option<Compose
     }
     Some(composed)
 }
+/// The `nodecode` probe's entry edits: the `SurfaceInput` from the record, and the entry's
+/// later reads of the decoded point and side from it, so the vertex fetch is dead code.
+fn material_no_decode(mut composed: Composed, entry: usize) -> Option<Composed> {
+    let start = entry + composed.source[entry..].find("    let surface_input=decal_prepare(SurfaceInput(")?;
+    let end = start + composed.source[start..].find("decal_none()));\n")? + "decal_none()));\n".len();
+    composed.source.replace_range(start..end, "    let surface_input=rl_material_input(pixel,id,size,material);\n");
+    let tail_start = start;
+    let tail_end = tail_start + composed.source[tail_start..].find("\n}\n")?;
+    let tail = composed.source[tail_start..tail_end]
+        .replace("surface_input.world", "\u{1}")
+        .replace("input.world", "surface_input.world")
+        .replace('\u{1}', "surface_input.world")
+        .replace("!lit_front", "!surface_input.source_front");
+    composed.source.replace_range(tail_start..tail_end, &tail);
+    composed.source.push_str(MATERIAL_NO_DECODE);
+    Some(composed)
+}
+const MATERIAL_NO_DECODE: &str = r#"// RENDERLAB_MATERIAL_PROBE=nodecode: the reader's SurfaceInput from the record alone.
+fn rl_material_plane_point(p:vec2<u32>,size:vec2<u32>,point:vec3<f32>,n:vec3<f32>)->vec3<f32> {
+    let ray=primary_ray(p,size);let d=ray.far-ray.near;
+    return ray.near+d*(dot(point-ray.near,n)/dot(d,n));
+}
+fn rl_material_input(pixel:vec2<i32>,id:vec2<u32>,size:vec2<u32>,material:Material)->SurfaceInput {
+    let b=textureLoad(rl_material1,pixel,0);let c=textureLoad(rl_material2,pixel,0);
+    let r=rl_mr_receiver(b,c,pixel);
+    let source_front=((b.w>>30u)&1u)!=0u;let lit_front=(b.w>>31u)!=0u;
+    let rg=select(r.geometric,-r.geometric,source_front);
+    let geometric=select(rg,-rg,lit_front);
+    let dx=rl_material_plane_point(id+vec2<u32>(1u,0u),size,r.world,r.geometric)-r.world;
+    let dy=rl_material_plane_point(id+vec2<u32>(0u,1u),size,r.world,r.geometric)-r.world;
+    let n=rl_mr_vertex_normal(c);
+    let t=normalize(select(vec3<f32>(1.0,0.0,0.0),vec3<f32>(0.0,1.0,0.0),abs(n.x)>0.9)-n*dot(n,select(vec3<f32>(1.0,0.0,0.0),vec3<f32>(0.0,1.0,0.0),abs(n.x)>0.9)));
+    return SurfaceInput(r.world,dx,dy,geometric,n,vec3<f32>(0.0),vec3<f32>(0.0),t,1.0,vec2<f32>(0.0),vec2<f32>(0.0),vec2<f32>(0.0),vec4<f32>(1.0),
+        lit_front,lighting.eye,id,material,r,decal_none());
+}
+"#;
 /// `RENDERLAB_MATERIAL_PROBE` (measurement only, with the pass on): variants that split the
 /// material pass's cost. The writer's `empty` returns before the hit's decode (dispatch and list
 /// walk); `decode` decodes the hit and stops before `surface`; `nostore` evaluates and packs the
@@ -2659,7 +2698,10 @@ fn material_reader_edits(mut composed: Composed, entry: usize) -> Option<Compose
 /// kernel does and also loads and unpacks the record; `readlean` shades as usual but with
 /// the hit's vertex attributes (uv, colour, normal, tangent, their derivatives, decals)
 /// constant, so only the position side of the decode is left; `readpos` returns after
-/// that position side (world point, footprint, geometric normal, shadow receiver). Each keeps its work live by comparing a
+/// that position side (world point, footprint, geometric normal, shadow receiver); `nodecode`
+/// builds the reader's `SurfaceInput` from words 1 and 2 alone, with no vertex fetch (the
+/// footprint from the neighbouring pixels' rays against the receiver's plane; the normal's
+/// derivatives, tangent and uv zero), the most a decode-free reader can save. Each keeps its work live by comparing a
 /// hash of its result with a value it never takes; the pictures are wrong by design.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MaterialProbe {
@@ -2669,6 +2711,7 @@ pub(crate) enum MaterialProbe {
     LoadPlus,
     ReadLean,
     ReadPos,
+    NoDecode,
 }
 fn material_probe() -> Option<MaterialProbe> {
     static PROBE: std::sync::OnceLock<Option<MaterialProbe>> = std::sync::OnceLock::new();
@@ -2680,6 +2723,7 @@ fn material_probe() -> Option<MaterialProbe> {
             "loadplus" => Some(MaterialProbe::LoadPlus),
         "readlean" => Some(MaterialProbe::ReadLean),
         "readpos" => Some(MaterialProbe::ReadPos),
+        "nodecode" => Some(MaterialProbe::NoDecode),
             _ => None,
         },
     )

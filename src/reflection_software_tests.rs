@@ -1023,6 +1023,11 @@ fn material_pass_probes_compose_and_validate() {
         ),
         (
             MaterialRole::Read,
+            MaterialProbe::NoDecode,
+            "let surface_input=rl_material_input(pixel,id,size,material);",
+        ),
+        (
+            MaterialRole::Read,
             MaterialProbe::ReadPos,
             "rl_material_probe_position(surface_input,receiver_world)",
         ),
