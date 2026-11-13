@@ -501,7 +501,13 @@ fn material_pass_variants_compose_and_validate() {
                 assert_eq!(&source[edited.program.clone()], crate::STANDARD_PROGRAM);
                 match role {
                     MaterialRole::Write => assert!(source.contains("rl_material_store(pixel,")),
-                    MaterialRole::Read => assert!(source.contains("material_in(rl_material_load(pixel)")),
+                    MaterialRole::Read => {
+                        assert!(source.contains("material_in(rl_material_load(pixel)"));
+                        // The receiver's shade takes the record's normal and MQ2 hint.
+                        assert!(source.contains("rl_material_use=true;"));
+                        assert!(source.contains("rl_material_view_hint)"));
+                        assert!(source.contains("if rl_material_use {n=rl_material_n;}"));
+                    }
                 }
                 let module = naga::front::wgsl::parse_str(source)
                     .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
@@ -516,6 +522,36 @@ fn material_pass_variants_compose_and_validate() {
         }
     }
     assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 2);
+}
+
+/// Every `RENDERLAB_MATERIAL_DEBUG` view composes and validates on every head, tiles and lists.
+#[test]
+fn material_pass_debug_views_compose_and_validate() {
+    use crate::program::{MaterialRole, Stage, compose, compose_list, material_debug_field, material_variant_with};
+    let program = crate::STANDARD_PROGRAM;
+    let parameters = crate::program::declares_parameters(program);
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            for name in ["base", "normal", "roughness", "metallic", "receiver"] {
+                let full = if list {
+                    compose_list(head, program, Stage::Traced, parameters)
+                } else {
+                    compose(head, program, Stage::Traced, parameters)
+                };
+                let field = material_debug_field(name);
+                let edited = material_variant_with(full, program, MaterialRole::Read, field, None).expect("standard maps the record");
+                let source = &edited.source;
+                assert_eq!(&source[edited.program.clone()], program);
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+                naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                    .validate(&module)
+                    .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            }
+        }
+    }
 }
 
 /// The measurement probes (`RENDERLAB_MATERIAL_PROBE`) compose and validate on every head,
