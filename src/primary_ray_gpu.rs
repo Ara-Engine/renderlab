@@ -3252,7 +3252,8 @@ impl Renderer {
             for (t, &margin) in m._textures.iter().zip(&m.margins) {
                 match t.0.storage {
                     TextureStorage::Full(_) => {
-                        key.push((Arc::as_ptr(&t.0) as usize, 0));
+                        // A BC5 map's variance layer replaces its view (normal_variance_lazy).
+                        key.push((Arc::as_ptr(&t.0) as usize, u64::from(t.0.variance_layer())));
                         words.push(0);
                         ids.push(None);
                     }

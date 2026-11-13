@@ -216,8 +216,10 @@ fn rl_finite(c:vec3<f32>) -> vec3<f32> {
 }
 // A BC5 normal-map sample (`normal_mapped` 2) in the map's 0-1 encoding: BC5 holds X and Y,
 // so Z is rebuilt as the unit normal's from the filtered X and Y, and alpha carries the map's
-// variance layer (`variance`, its layer 1's red: NormalVarianceLinear's A, computed at upload
-// from the top level's normals, src/normal_variance_bc.rs; the material reads variance code 1).
+// variance layer (`variance`, its layer 1's red: NormalVarianceLinear's A from the top level's
+// normals, src/normal_variance_bc.rs). The layer exists only once a program reads normal
+// variance (`program::reads_normal_variance`); until then the map has one layer, the material
+// reads variance code 0 and `variance` is 0.
 fn rl_normal_texel(s:vec4<f32>, variance:f32) -> vec4<f32> {
     let xy=s.xy*2.0-vec2<f32>(1.0);
     return vec4<f32>(s.xy,sqrt(max(1.0-dot(xy,xy),0.0))*0.5+0.5,variance);
