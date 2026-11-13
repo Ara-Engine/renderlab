@@ -573,6 +573,33 @@ fn every_list_head_module_validates() {
     }
 }
 
+/// The speck bisect's pass switches (`RENDERLAB_RL_HIT=missblack|hitblack|lone`) each find their
+/// seam exactly once in the module they edit, and the edited modules still validate.
+#[test]
+fn pass_switch_seams_hold() {
+    use crate::program::{RL_PASS_SEAMS, Stage, compose_hits, rl_trace_source};
+    let head = &crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap()[0];
+    let modules = [
+        rl_trace_source(head),
+        compose_hits(head, crate::STANDARD_PROGRAM, Stage::Traced, false, false).source,
+        include_str!("../shaders/reflections_composite.wgsl").to_owned(),
+    ];
+    for ((name, from, to), module) in RL_PASS_SEAMS.iter().zip(&modules) {
+        // Under the switch the seam is already replaced; either way exactly one of the two.
+        let seen = module.matches(from).count() + module.matches(to).count();
+        assert_eq!(seen, 1, "{name}");
+        let edited = module.replacen(from, to, 1);
+        let parsed = naga::front::wgsl::parse_str(&edited)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&edited)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&parsed)
+        .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&edited)));
+    }
+}
+
 /// The regression the per-renderer default guards: a non-RT engine's renderer runs the pass and
 /// marks only its own heads, so heads composed after it exists (the Ara port's, a test's) keep the
 /// inline path whatever the order of tests or engines in the process.

@@ -11,8 +11,10 @@ struct RlGlossyEntries { count:u32, header:array<u32,3>, entries:array<vec4<u32>
 @group(0) @binding(56) var<storage,read> rl_glossy:RlGlossyEntries;
 @group(0) @binding(58) var<uniform> rl_pass_frame:vec4<u32>;
 // The list's indirect arguments (rl_list_args): rl_trace_pixels' dispatch (x, y, z), then the
-// composite's draw (vertex count, instance count, first vertex, first instance).
-@group(0) @binding(59) var<storage,read_write> rl_list_arguments:array<u32,8>;
+// composite's draw (vertex count, instance count, first vertex, first instance). Their own group,
+// bound only by rl_list_args: the trace's dispatch reads them as indirect arguments, which may not
+// share a dispatch with a read-write binding of the same buffer.
+@group(2) @binding(0) var<storage,read_write> rl_list_arguments:array<u32,8>;
 // H: count, the three dispatch arguments of reflection_hits (RL_HIT_GROUP-wide groups), then
 // 48-byte records (three vec4<u32>).
 struct RlHits { count:atomic<u32>, args:array<u32,3>, records:array<vec4<u32>> };
