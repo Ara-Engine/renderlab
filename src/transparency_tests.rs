@@ -1545,12 +1545,22 @@ fn gpu_pane_pixels_match_the_raster() {
         );
     }
     let parity = pane_parity(&pictures[0], &pictures[1], width, height);
-    eprintln!("pane pixels against the raster ({path}): {parity:?}");
+    eprintln!(
+        "pane pixels against the raster ({path}): interior over one {}, interior worst {}, edge pixels {}, edge outside {}",
+        parity.interior_over_one, parity.interior_worst, parity.edge_pixels, parity.edge_outside
+    );
+    for miss in &parity.misses {
+        eprintln!("  {path} edge pixel outside its bound: {miss:?}");
+    }
     assert!(
         parity.interior_worst <= 4
             && parity.interior_over_one * 1000 <= (width * height) as usize
             && parity.edge_outside == 0,
-        "{parity:?}"
+        "pane pixels against the raster ({path}): interior over one {}, interior worst {}, edge outside {} of {} (each listed above)",
+        parity.interior_over_one,
+        parity.interior_worst,
+        parity.edge_outside,
+        parity.edge_pixels
     );
 }
 
@@ -1567,7 +1577,22 @@ struct PaneParity {
     edge_pixels: usize,
     /// Edge pixels further from the raster than their bound.
     edge_outside: usize,
+    /// The first EDGE_MISSES of them, for the report.
+    misses: Vec<EdgeMiss>,
 }
+/// An edge pixel outside its bound: where, how far from the raster, its contrast within 1
+/// and 2 px, both colours, and the raster's darkest and brightest within 1 px (whether it
+/// sits on the edge itself or beside it, and which side each picture took).
+#[derive(Debug, PartialEq)]
+struct EdgeMiss {
+    at: [i32; 2],
+    delta: u8,
+    contrast: [u8; 2],
+    pixel: [u8; 3],
+    raster: [u8; 3],
+    raster_range: [[u8; 3]; 2],
+}
+const EDGE_MISSES: usize = 64;
 fn pane_parity(pixels: &[u8], raster: &[u8], width: u32, height: u32) -> PaneParity {
     let (w, h) = (width as i32, height as i32);
     let at = |image: &[u8], x: i32, y: i32| -> [u8; 3] {
@@ -1579,19 +1604,38 @@ fn pane_parity(pixels: &[u8], raster: &[u8], width: u32, height: u32) -> PanePar
     for y in 0..h {
         for x in 0..w {
             let here = at(raster, x, y);
-            let mut contrast = 0u8;
-            for dy in -2..=2 {
-                for dx in -2..=2 {
+            let (mut contrast, mut near) = (0u8, 0u8);
+            let (mut low, mut high) = ([255u8; 3], [0u8; 3]);
+            for dy in -2..=2i32 {
+                for dx in -2..=2i32 {
                     let (nx, ny) = (x + dx, y + dy);
                     if (0..w).contains(&nx) && (0..h).contains(&ny) {
-                        contrast = contrast.max(diff(here, at(raster, nx, ny)));
+                        let there = at(raster, nx, ny);
+                        contrast = contrast.max(diff(here, there));
+                        if dx.abs() <= 1 && dy.abs() <= 1 {
+                            near = near.max(diff(here, there));
+                            low = std::array::from_fn(|c| low[c].min(there[c]));
+                            high = std::array::from_fn(|c| high[c].max(there[c]));
+                        }
                     }
                 }
             }
             let d = diff(at(pixels, x, y), here);
             if contrast > 8 {
                 parity.edge_pixels += 1;
-                parity.edge_outside += usize::from(u32::from(d) > u32::from(contrast) / 2 + 2);
+                if u32::from(d) > u32::from(contrast) / 2 + 2 {
+                    parity.edge_outside += 1;
+                    if parity.misses.len() < EDGE_MISSES {
+                        parity.misses.push(EdgeMiss {
+                            at: [x, y],
+                            delta: d,
+                            contrast: [near, contrast],
+                            pixel: at(pixels, x, y),
+                            raster: here,
+                            raster_range: [low, high],
+                        });
+                    }
+                }
             } else {
                 parity.interior_worst = parity.interior_worst.max(d);
                 parity.interior_over_one += usize::from(d > 1);
@@ -1614,7 +1658,7 @@ fn pane_parity_bounds_edges_by_their_contrast() {
         .collect();
     let mut pixels = raster.clone();
     // One edge pixel off by a quarter of the step (one sample): within its bound.
-    pixels[(1 * width + 4) as usize * 4] = 170;
+    pixels[(width + 4) as usize * 4] = 170; // row 1, x 4
     let parity = pane_parity(&pixels, &raster, width, height);
     assert_eq!((parity.edge_outside, parity.interior_worst), (0, 0));
     // An edge pixel off by the whole step is outside its bound.
