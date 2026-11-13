@@ -102,14 +102,15 @@ impl ReadbackRing {
             .iter()
             .enumerate()
             .filter_map(|(i, s)| match s.state {
-                State::Pending { frame, point } if done(point) => Some((frame, i)),
+                State::Pending { frame, point } if done(point) => Some((frame, i, point)),
                 _ => None,
             })
-            .max();
-        let Some((frame, at)) = newest else {
+            .max_by_key(|(frame, i, _)| (*frame, *i));
+        let Some((frame, at, point)) = newest else {
             return Ok(None);
         };
-        let bytes = gpu.read(self.slots[at].buffer)?;
+        // Read against the copy's own submission: `read` would also wait on the other queue.
+        let bytes = gpu.read_completed(self.slots[at].buffer, point)?;
         for slot in &mut self.slots {
             if let State::Pending { point, .. } = slot.state
                 && done(point)
