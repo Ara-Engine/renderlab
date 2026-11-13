@@ -215,7 +215,7 @@ pub(crate) fn rl_deferred_for(source: &str) -> bool {
 /// (the reflection block's helpers, with its stubs) and the trace entries.
 pub(crate) fn rl_trace_source(head: &str) -> String {
     let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
-    format!("{}\n{REFLECTION_TRACE}", composed.source)
+    rl_pass_switches(format!("{}\n{REFLECTION_TRACE}", composed.source))
 }
 /// `composed` with the block between `markers` replaced by `text`, moving the program's range.
 fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Composed {
@@ -413,6 +413,41 @@ fn rl_hit_switches(source: String) -> String {
     }
     source
 }
+/// The pass's own modules under the same list (measurement only, RT speck bisect): `missblack`
+/// stores black for `rl_trace_pixels`' misses instead of the sky, `hitblack` stores black for
+/// `reflection_hits`' hits, `lone` makes the composite apply the lone-stratum bound whenever two
+/// strata are valid. Each applies where its seam is (trace, hits, composite); unset, nothing changes.
+pub(crate) fn rl_pass_switches(source: String) -> String {
+    static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let list = LIST.get_or_init(|| std::env::var("RENDERLAB_RL_HIT").unwrap_or_default());
+    let mut source = source;
+    for switch in list.split(',').map(str::trim) {
+        let Some((_, from, to)) = RL_PASS_SEAMS.iter().find(|(name, ..)| *name == switch) else {
+            continue;
+        };
+        assert!(source.matches(from).count() <= 1, "RENDERLAB_RL_HIT pass seam {switch}");
+        source = source.replacen(from, to, 1);
+    }
+    source
+}
+/// `rl_pass_switches`' seams: switch, text, replacement.
+pub(crate) const RL_PASS_SEAMS: [(&str, &str, &str); 3] = [
+    (
+        "missblack",
+        "textureStore(rl_samples,at,vec4<f32>(rl_sky(d,cone_alpha),1.0));",
+        "textureStore(rl_samples,at,vec4<f32>(0.0,0.0,0.0,1.0));",
+    ),
+    (
+        "hitblack",
+        "    let radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n    textureStore(rl_hit_samples_out",
+        "    let radiance=vec3<f32>(0.0);\n    textureStore(rl_hit_samples_out",
+    ),
+    (
+        "lone",
+        "if lone>0.0 && valid>1u && f32(count)>=rl_composite_frame.y {",
+        "if lone>0.0 && valid>1u {",
+    ),
+];
 
 /// The reflection API text for `program` on `head` at `stage`, and whether it traces: empty
 /// for programs that name neither hook nor input, so their modules are unchanged.
@@ -1138,6 +1173,8 @@ pub(crate) fn compose_hits(
             }
         }
     }
+    // The hit entry follows the program, so the range stays.
+    composed.source = rl_pass_switches(composed.source);
     composed
 }
 /// `RENDERLAB_RL_HIT_OWN_PROGRAM=1` (measurement, off by default): in a mixed-program frame each
