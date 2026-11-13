@@ -60,6 +60,11 @@ prefix. Stopping those saves exactly 80,230 × 24 = 1,925,520 queries (17.006%).
 ## Picture and validation
 
 - Picture/census base: main `c5d16feb` plus this change (`a3144255`).
+- On the merged head, the focused module test compares the disabled schedule's
+  generated sun module byte-for-byte with the unchanged main `vb_sun_source`
+  builder. It runs with `RENDERLAB_SUN_ZONE_STOP=0`. Together with the earlier
+  c5 frame hashes, this is the switch-off proof; no separate main `91b4527b`
+  control executable is built or assumed.
 - Switch off: all 34 moving frames match the accepted control's PNG hashes in
   flight and night lanterns on both paths.
 - Switch on: RT flight has two differing frames, at most five pixels by one
@@ -86,7 +91,9 @@ Frozen release binaries: main `91b4527b` plus this change, built before merging
 `fdf2fb05`. Control has `RENDERLAB_SUN_PASS=1`, `RENDERLAB_SUN_ZONE_STOP=0`;
 candidate changes only `RENDERLAB_SUN_ZONE_STOP=1`. These rows isolate the stop
 from the measurement split's overhead; they do not compare the fused default
-against the split. No probe or detailed pass-log ablation is enabled.
+against the split. Every control row is the option-off run of the same own
+binary, not a separate main executable. No probe or detailed pass-log ablation
+is enabled.
 
 RTX 4070 SUPER, Vulkan, driver 617.14, 2026-11-13, exclusive timing lease
 `u-sunrt-matrix-timing-42`: exit 0, 146.85 seconds, no watchdog failures.
@@ -138,3 +145,4 @@ it makes no performance claim. Evidence: `pass-starts-summary.json`,
 `final-off-identity.json` and the lease log under the unit evidence directory.
 Later main merges through `d786f5a6` contain port/runner changes only and do
 not change the tested wgpu renderer.
+The light-visibility starts use `RENDERLAB_LIGHT_VIS_PASS=1`.

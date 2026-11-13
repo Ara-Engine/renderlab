@@ -57,6 +57,11 @@ mod tests {
     fn split_sun_keeps_the_reconstructed_estimator() {
         let kernels = shader_sources(include_str!("../shaders/scene.wgsl")).unwrap();
         let source = temporal_reconstruction::vb_sun_source(&kernels[1]).unwrap();
+        // vb_sun_source is main's unchanged module builder. The disabled seam
+        // must preserve every byte, independently of the older picture baseline.
+        if !zone_stop() {
+            assert_eq!(schedule_source(source.clone()).as_bytes(), source.as_bytes());
+        }
         assert!(source.contains("visible=primary_sun(receiver,slot,id.xy,size.x);"));
         assert!(source.contains("primary_sun_store(p,visible);"));
         assert!(source.contains("tr1_held_probes"));
