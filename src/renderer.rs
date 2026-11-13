@@ -146,6 +146,20 @@ pub(crate) fn test_record_capture(kind: &str, bytes: &[u8]) {
 /// were alive. For finding out whether a submit waits on an older frame (a pipelined present).
 /// `1` prints to stderr; any other value is a file the lines are appended to (for a host that
 /// does not forward stderr).
+/// `RENDERLAB_PRESUBMIT_POLL=1` (measurement): polls the device right before each of a frame's
+/// submits, so wgpu's cleanup of completed submissions, which `Queue::submit` otherwise runs
+/// inside itself (wgpu-core `device.maintain` after submitting), is timed apart from the submit
+/// (`early_poll` / `late_poll` in `RENDERLAB_SUBMIT_LOG`). Unset, nothing is polled.
+fn presubmit_poll(device: &wgpu::Device) -> std::time::Duration {
+    static ON: OnceLock<bool> = OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("RENDERLAB_PRESUBMIT_POLL").is_ok_and(|v| v == "1")) {
+        return std::time::Duration::ZERO;
+    }
+    let start = Instant::now();
+    let _ = device.poll(wgpu::PollType::Poll);
+    start.elapsed()
+}
+
 pub(crate) fn submit_log(line: impl FnOnce() -> String) {
     static ON: OnceLock<Option<String>> = OnceLock::new();
     let Some(target) = ON
@@ -3278,6 +3292,7 @@ impl Renderer {
         // both halves run in the same queue order, so the frame's results are unchanged.
         let split = lit && traced && !temporal;
         let mut early_submit = std::time::Duration::ZERO;
+        let mut early_poll = std::time::Duration::ZERO;
         if lit && !split {
             self.prepare_cache_and_post(
                 draws,
@@ -3417,6 +3432,7 @@ impl Renderer {
                                 label: Some("mesh frame, late"),
                             });
                     let early = std::mem::replace(&mut encoder, late_encoder).finish();
+                    early_poll = presubmit_poll(&self.device);
                     let submitted_at = Instant::now();
                     self.queue.submit([early]);
                     early_submit = submitted_at.elapsed();
@@ -3713,11 +3729,16 @@ impl Renderer {
         };
         let finish = finish_start.elapsed();
         self.check_fault()?;
-        let encode = encode_start.elapsed() - cpu.shadow_encode - early_submit;
-        let submitted_at = Instant::now();
+        let encode = encode_start.elapsed() - cpu.shadow_encode - early_submit - early_poll;
         // The flights still alive when this frame is submitted: a frame that waits inside
         // `queue.submit` for an older one shows here with the older one counted.
         let alive = self.occupied();
+        let late_poll = if commands.is_some() {
+            presubmit_poll(&self.device)
+        } else {
+            std::time::Duration::ZERO
+        };
+        let submitted_at = Instant::now();
         let index = match commands {
             Some(commands) => Some(self.queue.submit([commands])),
             None => {
@@ -3730,14 +3751,17 @@ impl Renderer {
             self.pass_timeline = Some(t);
         }
         let submit = submitted_at.elapsed() + early_submit;
+        let queue_uses = crate::ordered_queue::take_uses();
         submit_log(|| {
             let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.;
             format!(
-                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2}",
+                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2} early_poll={:.2} late_poll={:.2} queue_uses={queue_uses}",
                 self.submissions + 1,
                 ms(finish),
                 ms(early_submit),
                 ms(submit - early_submit),
+                ms(early_poll),
+                ms(late_poll),
             )
         });
         self.submissions += 1;

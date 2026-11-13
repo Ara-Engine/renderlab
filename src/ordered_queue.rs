@@ -106,10 +106,20 @@ impl OrderedQueue {
     }
 }
 
+/// Queue uses since the last `take_uses` (writes, texture writes, submits): what a frame hands
+/// wgpu, each `write_buffer` a staging buffer that a later submit's cleanup frees
+/// (`RENDERLAB_SUBMIT_LOG`'s `queue_uses`).
+static USES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn take_uses() -> u64 {
+    USES.swap(0, std::sync::atomic::Ordering::Relaxed)
+}
+
 impl Deref for OrderedQueue {
     type Target = wgpu::Queue;
     #[track_caller]
     fn deref(&self) -> &wgpu::Queue {
+        USES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         self.join();
         &self.queue
     }
