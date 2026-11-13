@@ -4,6 +4,7 @@ py -3 -B scripts/m6-film-run.py --label build -- cargo test -p renderlab --lib -
 py -3 -B scripts/m6-film-run.py --label thin-policy --manifest <json> -- <test-binary> renderer::fresh_shadow_tests::primary_ray_gpu_tests::film_reference_tests::gpu_film_reference --ignored --exact --nocapture --test-threads=1
 """
 import argparse
+import atexit
 import ctypes
 from ctypes import wintypes
 import datetime
@@ -60,9 +61,16 @@ def resource_sample():
 
 
 # The environment may only tighten these. The one sanctioned raise is --quarry-lease
-# (coordinator, 2026-11-10): child cap 12 GiB, 14 GiB to start, machine floor still 8 GiB.
+# (coordinator, 2026-11-10): child cap 12 GiB, 14 GiB to start. Machine floor 5 GiB, non-timing
+# leases start at 8,000 MB (coordinator, 2026-11-13: the PC is handed over; up to three builds
+# run beside leases, the newest child stops first).
 WATCH_CHILD_MBYTES = min(8192.0, float(os.environ.get("RENDERLAB_WATCH_CHILD_MB", 8192)))
-WATCH_FREE_MBYTES = max(8192.0, float(os.environ.get("RENDERLAB_WATCH_FREE_MB", 8192)))
+WATCH_FREE_MBYTES = max(5120.0, float(os.environ.get("RENDERLAB_WATCH_FREE_MB", 5120)))
+WORK = Path("D:/Coding/renderlab-work")
+# A timing lease holds every build slot: no build starts while TIMING_HOLD exists, and the lease
+# waits (at most 10 minutes) for the running builds to finish before it takes the GPU lock.
+BUILD_SLOTS = [WORK / "build-slot.lock", WORK / "build-slot-2.lock", WORK / "build-slot-3.lock"]
+TIMING_HOLD = WORK / "timing-hold"
 QUARRY_CHILD_MBYTES = 12288.0
 QUARRY_PREFLIGHT_MBYTES = 14336.0
 
@@ -179,23 +187,68 @@ def state(owned=()):
     return dict(utc=utc(), available_mbytes=mb, games=games, gpu_processes=gpu, builds=builds, gpu=smi.stdout.strip())
 
 
+def timing_lease_running():
+    """Another lease holds the GPU, or another tool marks a build slot with a timing lease's label."""
+    if LOCK.exists():
+        return True
+    for slot in BUILD_SLOTS:
+        try:
+            if "timing" in json.loads((slot / "owner.json").read_text()).get("label", ""):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def take_timing_hold(label):
+    """Take TIMING_HOLD (atomic mkdir), then wait at most 10 minutes for the running builds' slots
+    to clear. Released at exit. False (the caller defers) if another timing lease holds it or the GPU
+    is busy: a waiting timing lease must not hold every build slot while another lease runs."""
+    if timing_lease_running():
+        return False
+    try:
+        TIMING_HOLD.mkdir()
+    except FileExistsError:
+        return False
+    (TIMING_HOLD / "owner.json").write_text(json.dumps(dict(owner=OWNER, label=label, utc=utc(), pid=os.getpid())))
+    def release():
+        shutil.rmtree(TIMING_HOLD, ignore_errors=True)
+    atexit.register(release)
+    deadline = time.monotonic() + 600
+    while any(s.exists() for s in BUILD_SLOTS) and time.monotonic() < deadline:
+        time.sleep(2)
+    held = [s.name for s in BUILD_SLOTS if s.exists()]
+    if held:
+        print("timing lease: build slots still held after 10 minutes:", held, flush=True)
+    return True
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--label", required=True)
     p.add_argument("--manifest", type=Path)
     p.add_argument("--minutes", type=float, default=10)
     p.add_argument("--wait-seconds", type=float, default=0, help="bounded resource queue wait, at most 45 seconds")
-    p.add_argument("--runtime-memory-mbytes", type=float, default=6144,
-                   help="runtime available-memory floor; 0 permits owned allocation transients (preflight always requires 6144)")
+    p.add_argument("--runtime-memory-mbytes", type=float, default=5120,
+                   help="runtime available-memory floor; 0 permits owned allocation transients (preflight requires 8000)")
     p.add_argument("--no-build-contention", action="store_true", help="defer/abort performance runs if any compiler or linker is active")
     p.add_argument("--contended-screen", action="store_true", help="authorized screen only: 5 GiB preflight, 3 GiB runtime, marked contended")
     p.add_argument("--record-resources", action="store_true", help="attach 10 Hz memory/rustc context to each timing sample")
     p.add_argument("--fast-check", action="store_true", help="correctness batch: 4 GiB preflight, 2 GiB runtime abort")
     p.add_argument("--quarry-lease", action="store_true",
                    help="full-quarry lease: watchdog child cap 12 GiB (machine floor stays 8 GiB), starts only at 14 GiB available")
+    p.add_argument("--timing", action="store_true",
+                   help="timing lease: holds all three build slots (waits up to 10 minutes for running builds), at most 5 minutes, no build contention")
     p.add_argument("command", nargs=argparse.REMAINDER)
     a = p.parse_args()
-    preflight_floor = PREFLIGHT_MEMORY_MBYTES if PREFLIGHT_MEMORY_MBYTES is not None else (5120 if a.contended_screen else 6144)
+    preflight_floor = PREFLIGHT_MEMORY_MBYTES if PREFLIGHT_MEMORY_MBYTES is not None else (5120 if a.contended_screen else 8000)
+    if a.timing:
+        if a.minutes > 5:
+            p.error("a timing lease is at most 5 minutes")
+        a.no_build_contention = True
+        if not take_timing_hold(a.label):
+            print("DEFERRED: the GPU or another timing lease is busy; a timing lease holds the build slots only once it can run", flush=True)
+            return 3
     if a.contended_screen:
         a.runtime_memory_mbytes = 3072
         a.record_resources = True
@@ -253,7 +306,16 @@ def main():
     try:
         pre = state()
         save(runs / f"{a.label}-preflight.json", pre)
-        if pre["games"] or pre["gpu_processes"] or pre["available_mbytes"] < preflight_floor or (a.no_build_contention and pre["builds"]):
+        # Headless GPU work may run while Islam plays (AGENTS.md, 2026-11-12): a game is contention to
+        # record, not a reason to stop. The lease opens no windows and sends no input.
+        if pre["games"]:
+            print("contended: a game is running:", [g["Name"] for g in pre["games"]], flush=True)
+            # Game-time bars (coordinator, 2026-11-13): the machine floor is 6 GiB, not 8, while a game
+            # runs, the bars PC integration's leases ran on beside VALORANT. Not for quarry leases.
+            if not a.quarry_lease:
+                WATCH_FREE_MBYTES = min(WATCH_FREE_MBYTES, 6144.0)
+                print(f"game-time bars: machine floor {WATCH_FREE_MBYTES:g} MiB", flush=True)
+        if pre["gpu_processes"] or pre["available_mbytes"] < preflight_floor or (a.no_build_contention and pre["builds"]):
             print("DEFERRED: preflight", json.dumps(pre), flush=True)
             return 3
         env = os.environ.copy()
@@ -286,7 +348,7 @@ def main():
                     try:
                         s = state((child.pid,))
                         samples.append(s)
-                        if s["games"] or s["gpu_processes"] or s["available_mbytes"] < a.runtime_memory_mbytes or (a.no_build_contention and s["builds"]):
+                        if s["gpu_processes"] or s["available_mbytes"] < a.runtime_memory_mbytes or (a.no_build_contention and s["builds"]):
                             failure.append(f"contention or available memory below {a.runtime_memory_mbytes:g} MiB")
                             terminate_owned_tree()
                             return

@@ -77,6 +77,9 @@ pub(crate) struct TextureInner {
     pub renderer: Arc<()>,
     pub role: TextureRole,
     pub storage: TextureStorage,
+    /// The block format of a compressed upload (`Renderer::try_upload_compressed_texture`);
+    /// None for texel uploads. BC5 normal maps hold X and Y only.
+    pub block: Option<renderlab_asset::BlockFormat>,
 }
 pub(crate) enum TextureStorage {
     /// Every level, immutable after upload.
@@ -212,12 +215,23 @@ impl MaterialDescriptor<'_> {
         bytes[24..28].copy_from_slice(&u32::from(self.double_sided).to_ne_bytes());
         bytes[28..32].copy_from_slice(&u32::from(self.thin).to_ne_bytes());
         bytes[32..36].copy_from_slice(&self.normal_scale.to_ne_bytes());
-        bytes[36..40].copy_from_slice(&u32::from(self.normal_texture.is_some()).to_ne_bytes());
+        // 1: a normal map; 2: a BC5 one, whose Z the shading programs rebuild
+        // (program_api.wgsl rl_normal_texel).
+        let normal_mapped = self.normal_texture.map_or(0u32, |t| {
+            if t.texture.0.block == Some(renderlab_asset::BlockFormat::Bc5) {
+                2
+            } else {
+                1
+            }
+        });
+        bytes[36..40].copy_from_slice(&normal_mapped.to_ne_bytes());
         let variance = self
             .normal_texture
             .map_or(0u32, |t| match t.texture.0.role {
                 TextureRole::NormalVarianceLinear => 1,
                 TextureRole::NormalSlopeMoments => 2,
+                // BC5 maps carry their variance in layer 1 (rl_normal_texel's alpha).
+                _ if t.texture.0.block == Some(renderlab_asset::BlockFormat::Bc5) => 1,
                 _ => 0,
             });
         bytes[40..44].copy_from_slice(&variance.to_ne_bytes());
