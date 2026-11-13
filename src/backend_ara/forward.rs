@@ -79,11 +79,54 @@ pub struct ForwardObject<'a> {
     pub material: crate::MaterialDescriptor<'a>,
 }
 
-/// One texture slot: the asset the wgpu renderer would take through
-/// `try_upload_texture`, with every mip level, and its `TextureBinding` sampler.
+/// A block-compressed texture as the frames upload it: what the wgpu renderer makes of a
+/// `CompressedTexture` in `try_upload_compressed_texture`.
+#[derive(Clone, Debug)]
+pub struct BlockTexture {
+    pub format: crate::asset::BlockFormat,
+    /// The base level's width and height: multiples of 4.
+    pub size: [u32; 2],
+    /// Array layers, each with every level's blocks down to 1x1. One layer; a BC5 normal
+    /// map has two, the map and its variance layer (`normal_variance_bc`), which the
+    /// shading programs read as layer 1.
+    pub layers: Vec<Vec<Vec<u8>>>,
+}
+impl BlockTexture {
+    /// The upload for `data`, which the caller has validated
+    /// (`CompressedTexture::validate`). A BC5 map gains its variance layer here, once.
+    pub fn new(data: crate::asset::CompressedTexture) -> Self {
+        let variance = (data.format == crate::asset::BlockFormat::Bc5)
+            .then(|| crate::normal_variance_bc::variance_layer(&data));
+        Self {
+            format: data.format,
+            size: [data.width, data.height],
+            layers: std::iter::once(data.mips).chain(variance).collect(),
+        }
+    }
+}
+/// A texture slot's levels: RGBA8 texels, or block-compressed levels as shipped.
+#[derive(Clone, Copy)]
+pub enum TextureSource<'a> {
+    /// The asset the wgpu renderer would take through `try_upload_texture`.
+    Texels(&'a crate::asset::Texture),
+    /// Needs a device that samples BC (`DeviceInfo::texture_compression_bc`).
+    Blocks(&'a BlockTexture),
+}
+impl<'a> From<&'a crate::asset::Texture> for TextureSource<'a> {
+    fn from(texels: &'a crate::asset::Texture) -> Self {
+        Self::Texels(texels)
+    }
+}
+impl<'a> From<&'a BlockTexture> for TextureSource<'a> {
+    fn from(blocks: &'a BlockTexture) -> Self {
+        Self::Blocks(blocks)
+    }
+}
+/// One texture slot: every mip level of the texture (`TextureSource`) and its
+/// `TextureBinding` sampler.
 #[derive(Clone, Copy)]
 pub struct ObjectTexture<'a> {
-    pub data: &'a crate::asset::Texture,
+    pub data: TextureSource<'a>,
     pub sampler: crate::asset::Sampler,
     /// Its identity to the frames, which keep it on the GPU for as long as the frames of
     /// a sequence keep naming it (`Frames`); an identity must always name the same
@@ -104,8 +147,9 @@ pub struct Skin<'a> {
 /// (`try_upload_mesh_with_tangents`), which it refuses to draw one without the other.
 #[derive(Clone, Copy)]
 pub struct NormalMap<'a> {
-    /// `TextureRole::NormalLinear`. The variance and slope-moment roles are not
-    /// assembled.
+    /// `TextureRole::NormalLinear`, or a BC5 block texture, whose Z the shading programs
+    /// rebuild and whose variance layer they read. The variance and slope-moment texel
+    /// roles are not assembled.
     pub texture: ObjectTexture<'a>,
     /// One frame per vertex of the object's mesh.
     pub tangents: &'a crate::asset::TangentStream,
@@ -248,6 +292,11 @@ pub struct ForwardScene<'a> {
     /// renderer `Draw` over its `Instances`). A frame holds `TRACED_DRAWS` draws and
     /// any number of placements. `None` draws each object once at its `transform`.
     pub instances: Option<&'a [&'a [crate::Mat4]]>,
+    /// Per object, whether each of its placements (`instances`' order) blocks light
+    /// (`set_casts_shadows`): a non-caster is left out of shadow rays (its acceleration
+    /// instance lacks `SHADOW_CASTER_MASK`) and of the shadow plan. `None`: every placement
+    /// casts.
+    pub casts: Option<&'a [&'a [bool]]>,
     /// A prepared environment map that lights the scene in place of the uniform
     /// environment (`Sky::Map`), kept on the GPU while frames go on naming its key.
     /// The atmosphere's procedural environment must be off.
@@ -347,9 +396,10 @@ pub struct ForwardImages {
     /// MEASUREMENT ONLY: with `RENDERLAB_ARA_PROBE_RESOLVE` set, the resolve's
     /// one-pixel trace (`resolve_probe::describe` reads it).
     pub resolve_probe: Option<Vec<[f32; 4]>>,
-    /// With `RENDERLAB_RL_DEFERRED=1`, until the composite reads them on the GPU: the
-    /// deferred reflections' outputs as RGBA16F (`program::deferred_variant`: reflectance
-    /// and traced fraction; untraced specular and the inline traced luminance).
+    /// With `RENDERLAB_RL_DEFERRED=diag` only (identity tests): the deferred reflections'
+    /// outputs as RGBA16F (`program::deferred_variant`: reflectance and traced fraction;
+    /// untraced specular and the inline traced luminance). Never read back otherwise, so a
+    /// player with frames in flight never waits on them.
     pub deferred_reflections: Option<[Vec<u8>; 2]>,
 }
 
@@ -497,6 +547,9 @@ struct Deferred {
     scene: [u32; 4],
     /// That rectangle widened to whole trace tiles, as the region record holds it.
     region_rect: [u32; 4],
+    /// RENDERLAB_MATERIAL_PASS: the material record (program.rs MATERIAL_RECORD_BINDINGS), a
+    /// pair of rgba32uint images of the frame's size; None while the pass is off.
+    material: Option<[Texture; 2]>,
     epsilon: Texture,
     frame: StorageBuffer,
     region: StorageBuffer,
@@ -799,6 +852,12 @@ fn provided<'a>(
         (0, 13) | (0, 7) => deferred.map(|d| &d.hit),
         (0, 20) | (0, 21) => deferred.map(|d| &d.tiles),
         (0, 23) => deferred.map(|d| &d.epsilon),
+        (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[0] => {
+            deferred?.material.as_ref().map(|m| &m[0])
+        }
+        (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[1] => {
+            deferred?.material.as_ref().map(|m| &m[1])
+        }
         (0, 3) | (0, 16) => traced.map(|t| &t.world),
         (0, 4) | (0, 17) => traced.map(|t| &t.normal),
         (0, 5) | (0, 6) => traced.map(|t| &t.visibility),
@@ -1390,6 +1449,18 @@ fn frame(
             None => std::slice::from_ref(&scene.objects[index].transform),
         }
     };
+    ensure!(
+        scene.casts.is_none_or(|casts| {
+            casts.len() == scene.objects.len()
+                && casts
+                    .iter()
+                    .enumerate()
+                    .all(|(index, list)| list.len() == placed(index).len())
+        }),
+        "shadow casting is given per placement, one list per object"
+    );
+    // Whether placement `k` of object `index` blocks light (`ForwardScene::casts`).
+    let casts = |index: usize, k: usize| scene.casts.is_none_or(|lists| lists[index][k]);
     // Each object's previous pose, where it is skinned.
     let skin = |index: usize| scene.skins.and_then(|s| s.get(index).copied().flatten());
     ensure!(
@@ -1556,8 +1627,31 @@ fn frame(
             .map_err(|e| anyhow::anyhow!("object {index}'s parameters: {e}"))?;
         }
     }
+    // Lean shading (program::FrameInputs): the port projects no decals; media follow the
+    // atmosphere's flags.
+    let lean = crate::program::FrameInputs {
+        decals: false,
+        media: scene.atmosphere.aerial_perspective
+            || scene.atmosphere.height_fog.is_some()
+            || scene.atmosphere.volumetric_fog.is_some(),
+    }
+    .lean()
+        && crate::program::lean_on();
+    // RENDERLAB_MATERIAL_PASS (program.rs material_pass_on): programs with the record mapping
+    // shade from the material record, which a material pass writes first.
+    let material_on = deferred_path && crate::program::material_pass_on();
+    let reading = |source: &str, list: bool| -> Result<Option<shader::Program>> {
+        if material_on {
+            primary_shade::hardware_soft_material(source, list, crate::program::MaterialRole::Read)
+        } else {
+            Ok(None)
+        }
+    };
     let program = if deferred_path {
-        primary_shade::hardware_soft_program(material_source)?
+        match reading(material_source, false)? {
+            Some(program) => program,
+            None => primary_shade::hardware_soft_part(material_source, primary_shade::ALL_TERMS, lean)?,
+        }
     } else {
         standard_program(scene.sun_shadows.is_some())?
     };
@@ -1565,7 +1659,24 @@ fn frame(
     let list_programs = if deferred_path && sources.len() > 1 {
         sources
             .iter()
-            .map(|source| primary_shade::hardware_soft_list_program(source))
+            .map(|source| match reading(source, true)? {
+                Some(program) => Ok(program),
+                None => primary_shade::hardware_soft_list_part(source, primary_shade::ALL_TERMS, lean),
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    // The material pass: per slot (one for a single-program frame), the program's record
+    // writer, or None where the program keeps its single kernel.
+    let material_programs = if material_on {
+        let list = sources.len() > 1;
+        let frame_sources: &[&str] = if list { &sources } else { &sources[..1] };
+        frame_sources
+            .iter()
+            .map(|source| {
+                primary_shade::hardware_soft_material(source, list, crate::program::MaterialRole::Write)
+            })
             .collect::<Result<Vec<_>>>()?
     } else {
         Vec::new()
@@ -1579,10 +1690,10 @@ fn frame(
                 let programs = if sources.len() > 1 {
                     sources
                         .iter()
-                        .map(|source| primary_shade::hardware_soft_list_part(source, terms))
+                        .map(|source| primary_shade::hardware_soft_list_part(source, terms, lean))
                         .collect::<Result<Vec<_>>>()?
                 } else {
-                    vec![primary_shade::hardware_soft_part(material_source, terms)?]
+                    vec![primary_shade::hardware_soft_part(material_source, terms, lean)?]
                 };
                 Ok((name, programs))
             })
@@ -1600,14 +1711,16 @@ fn frame(
             Format::Rgba16Float,
         )?)
     };
-    let (mut bounds, mut skin_bounds) = (Vec::new(), Vec::new());
+    // Per placement, its world bounds and whether it blocks light (the shadow plan's casters).
+    let (mut bounds, mut skin_bounds, mut casters) = (Vec::new(), Vec::new(), Vec::new());
     for (index, object) in scene.objects.iter().enumerate() {
         let local =
             crate::visibility::Aabb::from_positions(object.vertices.iter().map(|v| v.position))
                 .context("empty mesh")?;
-        for transform in placed(index) {
+        for (k, transform) in placed(index).iter().enumerate() {
             let world = shadow_gpu::world_bounds(local, *transform)?;
             bounds.push(world);
+            casters.push(casts(index, k));
             if skin(index).is_some() {
                 skin_bounds.push(world);
             }
@@ -1705,6 +1818,7 @@ fn frame(
                 size,
                 &scene.lighting.lights,
                 &bounds,
+                &casters,
             )?;
             frame.prepare_hardware_bias(&records)?;
             left.shadow_bases = frame.bases().to_vec();
@@ -2127,13 +2241,20 @@ fn frame(
                 };
                 // `hardware_shadow_gpu`: one instance per placement, in draw then
                 // instance order, named by its place in that order.
-                for transform in placed(index) {
+                // Every ray sees bit 0x02; shadow rays cull by `SHADOW_CASTER_MASK`, which a
+                // placement that casts no shadow lacks.
+                for (k, transform) in placed(index).iter().enumerate() {
                     let m = transform.to_cols_array_2d();
+                    let caster = if casts(index, k) {
+                        crate::shadows::SHADOW_CASTER_MASK as u8
+                    } else {
+                        0
+                    };
                     instances.push(AccelerationInstance {
                         geometry: place.of(resident, &transient).blas,
                         transform: std::array::from_fn(|i| m[i % 4][i / 4]),
                         custom_index: instances.len() as u32,
-                        mask: 255,
+                        mask: 0x02 | caster,
                     });
                 }
                 geometry.push(place);
@@ -2650,6 +2771,14 @@ fn frame(
             hit: Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
             scene: rect,
             region_rect: region,
+            material: if material_on {
+                Some([
+                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
+                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
+                ])
+            } else {
+                None
+            },
             tiles: Texture::new(gpu, trace_groups, Format::R32Uint, true, false)?,
             epsilon: Texture::new(gpu, size, Format::R32Float, true, false)?,
             frame,
@@ -2898,10 +3027,24 @@ fn frame(
             geometry.import(&mut graph);
             geometries.push(geometry);
         }
-        // `MaterialDescriptor::bytes` reads `normal_mapped` off its own texture binding,
-        // which names a wgpu texture and stays empty here.
+        // `MaterialDescriptor::bytes` reads `normal_mapped` and the variance code off its
+        // own texture binding, which names a wgpu texture and stays empty here. As there:
+        // 1 is a normal map; 2 a BC5 one, whose Z the programs rebuild
+        // (`rl_normal_texel`) and whose variance is its second layer (variance code 1).
         let mut record = object.material.bytes();
-        record[36..40].copy_from_slice(&u32::from(normal_map(index).is_some()).to_ne_bytes());
+        let bc5 = normal_map(index).is_some_and(|map| {
+            matches!(map.texture.data, TextureSource::Blocks(blocks)
+                if blocks.format == crate::asset::BlockFormat::Bc5)
+        });
+        let normal_mapped = match normal_map(index) {
+            None => 0u32,
+            Some(_) if bc5 => 2,
+            Some(_) => 1,
+        };
+        record[36..40].copy_from_slice(&normal_mapped.to_ne_bytes());
+        if bc5 {
+            record[40..44].copy_from_slice(&1u32.to_ne_bytes());
+        }
         let material = StorageBuffer::new(gpu, &record)?;
         graph.import(Resource::Buffer(material.buffer), Access::HostWrite);
         materials.push(material);
@@ -3010,22 +3153,53 @@ fn frame(
             .enumerate()
             {
                 let Some(texture) = texture else { continue };
-                let first = texture
-                    .data
-                    .mips
-                    .first()
-                    .context("texture without a level")?;
-                ensure!(
-                    texture.data.role == role,
-                    "texture slot holds a {:?} texture",
-                    texture.data.role
-                );
+                // What the slot uploads: base size, levels, GPU format and array layers.
+                let (extent, levels, format, layers) = match texture.data {
+                    TextureSource::Texels(data) => {
+                        let first = data.mips.first().context("texture without a level")?;
+                        ensure!(
+                            data.role == role,
+                            "texture slot holds a {:?} texture",
+                            data.role
+                        );
+                        ([first.width, first.height], data.mips.len(), format, 1)
+                    }
+                    TextureSource::Blocks(blocks) => {
+                        use crate::asset::BlockFormat as B;
+                        let levels = blocks.layers.first().map_or(0, Vec::len);
+                        ensure!(
+                            blocks.format.role() == role,
+                            "texture slot holds a {:?} texture",
+                            blocks.format
+                        );
+                        ensure!(
+                            levels > 0
+                                && blocks.layers.iter().all(|layer| layer.len() == levels)
+                                && (blocks.layers.len() == 1
+                                    || dimension == ViewDimension::D2Array),
+                            "a block texture's layers hold the same levels, and only the \
+                             normal slot is an array"
+                        );
+                        ensure!(
+                            gpu.info().texture_compression_bc,
+                            "the device does not sample block-compressed textures"
+                        );
+                        let format = match blocks.format {
+                            B::Bc7Srgb => Format::Bc7Srgb,
+                            B::Bc7Linear => Format::Bc7,
+                            B::Bc5 => Format::Bc5,
+                        };
+                        (blocks.size, levels, format, blocks.layers.len() as u32)
+                    }
+                };
                 let named = texture.key.map(|key| (key, slot));
                 let image = match named.and_then(|named| kept_textures.get(&named)) {
                     Some(kept) => {
                         ensure!(
-                            kept.size == [first.width, first.height]
-                                && kept.shape.mip_levels == texture.data.mips.len() as u32,
+                            kept.size == extent
+                                && kept.shape.mip_levels == levels as u32
+                                && kept.format == format
+                                && kept.shape.layers == layers,
                             "texture identity {:?} named another texture before",
                             texture.key
                         );
@@ -3038,25 +3212,58 @@ fn frame(
                     None => {
                         let image = Texture::sampled_mips(
                             gpu,
-                            [first.width, first.height],
-                            texture.data.mips.len() as u32,
+                            extent,
+                            levels as u32,
+                            layers,
                             format,
                             dimension,
                         )?;
-                        for (level, mip) in texture.data.mips.iter().enumerate() {
-                            ensure!(
-                                mip.rgba8.len() == mip.width as usize * mip.height as usize * 4,
-                                "texture level {level} is not tightly packed RGBA8"
-                            );
-                            staging.push(transfer::upload_mip(
-                                gpu,
-                                &mut graph,
-                                &mut rec,
-                                image.image,
-                                level as u32,
-                                [mip.width, mip.height],
-                                &mip.rgba8,
-                            )?);
+                        match texture.data {
+                            TextureSource::Texels(data) => {
+                                for (level, mip) in data.mips.iter().enumerate() {
+                                    ensure!(
+                                        mip.rgba8.len()
+                                            == mip.width as usize * mip.height as usize * 4,
+                                        "texture level {level} is not tightly packed RGBA8"
+                                    );
+                                    staging.push(transfer::upload_mip(
+                                        gpu,
+                                        &mut graph,
+                                        &mut rec,
+                                        image.image,
+                                        level as u32,
+                                        0,
+                                        [mip.width, mip.height],
+                                        &mip.rgba8,
+                                    )?);
+                                }
+                            }
+                            // Blocks go up as shipped: each level's true texel extent,
+                            // whole 4x4 blocks of bytes (one block under 4x4 texels).
+                            TextureSource::Blocks(blocks) => {
+                                for (layer, chain) in blocks.layers.iter().enumerate() {
+                                    for (level, bytes) in chain.iter().enumerate() {
+                                        let size = extent.map(|n| (n >> level).max(1));
+                                        ensure!(
+                                            bytes.len() as u64
+                                                == crate::asset::BlockFormat::level_bytes(
+                                                    size[0], size[1]
+                                                ),
+                                            "texture level {level} is not whole 4x4 blocks"
+                                        );
+                                        staging.push(transfer::upload_mip(
+                                            gpu,
+                                            &mut graph,
+                                            &mut rec,
+                                            image.image,
+                                            level as u32,
+                                            layer as u32,
+                                            size,
+                                            bytes,
+                                        )?);
+                                    }
+                                }
+                            }
                         }
                         match named {
                             Some(named) => {
@@ -3068,11 +3275,7 @@ fn frame(
                         image
                     }
                 };
-                let sampler = sampler_desc(
-                    texture.sampler,
-                    textures.anisotropy_clamp,
-                    texture.data.mips.len(),
-                )?;
+                let sampler = sampler_desc(texture.sampler, textures.anisotropy_clamp, levels)?;
                 slots[slot] = Some((image, sampler));
             }
             object_textures.push(slots);
@@ -3491,6 +3694,32 @@ fn frame(
         }
         part_records.push((*name, slots));
     }
+    // RENDERLAB_MATERIAL_PASS: per slot, the material pass's kernel and packet (bound as that
+    // slot's shading is), or None where the program keeps its single kernel.
+    let mut material_records = Vec::new();
+    for (slot, program) in material_programs.iter().enumerate() {
+        let Some(program) = program else {
+            material_records.push(None);
+            continue;
+        };
+        let values = program
+            .inputs()
+            .iter()
+            .map(|spec| {
+                Ok((
+                    spec.key,
+                    match (&program_lists, spec.key.group, spec.key.binding) {
+                        (Some(lists), 0, 38) => Input::Buffer(&lists.slots[slot].2),
+                        (Some(lists), 0, 39) => Input::Buffer(&lists.entries),
+                        _ => shared.input(spec, None)?,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let packet = HeapBindings::for_program(gpu, program, &values)?;
+        packet.import(&mut graph);
+        material_records.push(Some((Kernel::from_program(gpu, cache, program)?, packet)));
+    }
     if let Some(deferred) = &deferred {
         // `encode_primary_visibility`, `encode_primary_fresh`, the cache's passes
         // (`GiState::encode`), then `encode_primary_shading`.
@@ -3556,6 +3785,19 @@ fn frame(
                 lists
                     .bins
                     .record(&mut graph, &mut rec, &list_packets[0], &lists.dispatch)?;
+                // The material pass writes each opted-in slot's record before any slot shades.
+                for (slot, record) in material_records.iter().enumerate() {
+                    if let Some((kernel, packet)) = record {
+                        kernel.record_indirect_labelled(
+                            &mut graph,
+                            &mut rec,
+                            packet,
+                            &lists.arguments,
+                            slot as u64 * 16,
+                            "ara::PrimaryMaterialList".into(),
+                        )?;
+                    }
+                }
                 for (slot, ((_, kernel, _), packet)) in
                     lists.slots.iter().zip(&list_packets[1..]).enumerate()
                 {
@@ -3575,12 +3817,26 @@ fn frame(
                 .filter(|_| std::ptr::eq(kernel, &deferred.fresh))
             {
                 Some(queue) => kernel.record_indirect(&mut graph, &mut rec, packet, queue, 0)?,
-                None => kernel.record(
-                    &mut graph,
-                    &mut rec,
-                    packet,
-                    [groups[0] * threads[0], groups[1] * threads[1], 1],
-                )?,
+                None => {
+                    // The material pass writes the record before the single program shades.
+                    if let (true, Some(Some((material, record)))) =
+                        (std::ptr::eq(kernel, &deferred.shade), material_records.first())
+                    {
+                        material.record_labelled(
+                            &mut graph,
+                            &mut rec,
+                            record,
+                            [groups[0] * threads[0], groups[1] * threads[1], 1],
+                            "ara::PrimaryMaterialTiles".into(),
+                        )?;
+                    }
+                    kernel.record(
+                        &mut graph,
+                        &mut rec,
+                        packet,
+                        [groups[0] * threads[0], groups[1] * threads[1], 1],
+                    )?
+                }
             }
         }
     }
@@ -4103,8 +4359,10 @@ fn frame(
         )?),
         None => None,
     };
+    // Only identity tests read the deferred outputs back: both exist with
+    // RENDERLAB_RL_DEFERRED=diag (the untraced output is declared only then).
     let deferred_read = match (inputs.get(&key(0, 62)), inputs.get(&key(0, 63))) {
-        (Some(reflectance), Some(untraced)) => Some([
+        (Some(reflectance), Some(untraced)) if crate::program::rl_deferred_diag() => Some([
             transfer::readback(
                 gpu,
                 &mut graph,
@@ -4671,6 +4929,7 @@ fn frame(
             buffer.retire(gpu)?;
         }
         post_images.extend([deferred.hit, deferred.tiles, deferred.epsilon]);
+        post_images.extend(deferred.material.into_iter().flatten());
     }
     if let Some(traced) = traced {
         traced.scene.retire(gpu)?;

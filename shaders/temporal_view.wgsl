@@ -9,12 +9,12 @@
 // twice the shading normal's turn per pixel (curvature, as R1's ray cone) and twice the
 // declared lobe's alpha. A view turn of theta radians then slides the view-dependent part by
 // about theta * (hint - 1) pixels of its own image, share-weighted. 1 means view-independent.
-fn tr1_view_hint(s:Surface,input:SurfaceInput,pixel:vec2<u32>,size:vec2<u32>)->f32 {
+// `ray` is the pixel's camera ray, which the entry computes once (primary_ray).
+fn tr1_view_hint(s:Surface,input:SurfaceInput,ray:PrimaryRay)->f32 {
     let d=view_dependence(s,input);
     let share=clamp(d.share,0.0,1.0);
     if !(share>0.0) {return 1.0;}
-    let camera=primary_ray(pixel,size);
-    let pixel_angle=length(camera.dx_far-camera.dx_near)/max(length(camera.far-camera.near),1e-30);
+    let pixel_angle=length(ray.dx_far-ray.dx_near)/max(length(ray.far-ray.near),1e-30);
     let curvature=2.0*max(length(input.normal_dx),length(input.normal_dy))/max(length(input.normal),1e-30);
     let width=pixel_angle+curvature+2.0*clamp(d.alpha,0.0,1.0);
     // Below binary16's largest finite value.

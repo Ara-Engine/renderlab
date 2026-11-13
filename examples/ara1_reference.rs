@@ -89,6 +89,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     for p in &a.placements {
         for &(mesh, material) in &mesh_map[p.mesh as usize] {
             instances.push(reference::Instance {
+                casts_shadows: true,
                 mesh,
                 material,
                 transform: Mat4::from_cols_array_2d(&p.transform),

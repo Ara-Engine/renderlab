@@ -298,12 +298,18 @@ mod transparency_hit_depth_reference;
 
 #[path = "ara_backend/cases/primary_check.rs"]
 mod primary_check_cases;
+#[path = "ara_backend/cases/lean_shading.rs"]
+mod lean_shading_cases;
 #[path = "ara_backend/primary_check_reference.rs"]
 mod primary_check_reference;
 
 #[path = "ara_backend/cases/handle_arrays.rs"]
 mod handle_array_cases;
 
+#[path = "ara_backend/cases/material_pass.rs"]
+mod material_pass_cases;
+#[path = "ara_backend/cases/casts_shadows.rs"]
+mod casts_shadows_cases;
 #[path = "ara_backend/cases/primary_shade.rs"]
 mod primary_shade_cases;
 #[path = "ara_backend/primary_shade_reference.rs"]
@@ -522,3 +528,5 @@ mod resident_mesh_cases;
 
 #[path = "ara_backend/cases/textures.rs"]
 mod texture_cases;
+#[path = "ara_backend/cases/compressed_textures.rs"]
+mod compressed_texture_cases;

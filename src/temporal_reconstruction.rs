@@ -1851,9 +1851,11 @@ impl Renderer {
         // which a visibility-buffer frame compiled before did not build.
         let traced =
             self.hardware_shadows.is_some() && self.primary_mode == PrimaryVisibility::Traced;
-        // U-FIXED: visibility-buffer RT frames trace their sun with `primary_vb_sun`.
+        // Visibility-buffer RT frames and SUN_PASS's split traced frames share the
+        // same reconstructed sun estimator over exact published receivers.
         let vb = self.hardware_shadows.is_some()
-            && self.primary_mode == PrimaryVisibility::VisibilityBuffer;
+            && (self.primary_mode == PrimaryVisibility::VisibilityBuffer
+                || (traced && super::sun_vis_pass::enabled()));
         if self
             .pipeline
             .primary
@@ -2715,7 +2717,7 @@ mod tests {
                 );
                 assert_eq!(
                     source
-                        .matches("tr1_view_hint(surface_output,surface_input,id,size)")
+                        .matches("tr1_view_hint(surface_output,surface_input,view_ray)")
                         .count(),
                     usize::from(traced)
                 );

@@ -132,6 +132,7 @@ fn a_normal_mapped_floor_is_the_floor_tilted_to_that_normal() -> Result<()> {
                 programs: None,
                 sky_map: None,
                 skins: None,
+                casts: None,
                 colour_lut: None,
                 ids: None,
             },
@@ -179,7 +180,7 @@ fn a_normal_mapped_floor_is_the_floor_tilted_to_that_normal() -> Result<()> {
             Primary::Traced,
             Some(NormalMap {
                 texture: ObjectTexture {
-                    data: &map,
+                    data: (&map).into(),
                     sampler: Sampler::default(),
                     key: None,
                 },
@@ -232,7 +233,7 @@ fn a_normal_mapped_floor_is_the_floor_tilted_to_that_normal() -> Result<()> {
     let normal = |tangents| {
         Some(NormalMap {
             texture: ObjectTexture {
-                data: &map,
+                data: (&map).into(),
                 sampler: Sampler::default(),
                 key: None,
             },

@@ -388,7 +388,7 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
     // LC1's own visibility variant in each module: one inline ray, or the pooled maps.
     let ray = |module: &str, scene: &str| {
         module.contains(&format!(
-            "rayQueryInitialize(&lc_query,{scene},RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT,255u,receiver.epsilon,tmax,origin,delta/distance))"
+            "rayQueryInitialize(&lc_query,{scene},RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK,receiver.epsilon,tmax,origin,delta/distance))"
         ))
     };
     let map = |module: &str| {

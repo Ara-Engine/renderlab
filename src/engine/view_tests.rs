@@ -5,7 +5,7 @@ use super::*;
 
 const SIZE: [u32; 2] = [160, 96];
 
-fn cube(c: [f32; 3], h: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
+pub(super) fn cube(c: [f32; 3], h: [f32; 3]) -> (Vec<Vertex>, Vec<u32>) {
     let (mut vertices, mut indices) = (vec![], vec![]);
     for axis in 0..3 {
         for sign in [-1.0f32, 1.0] {

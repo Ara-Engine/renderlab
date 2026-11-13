@@ -2201,8 +2201,140 @@ impl Renderer {
             self.uploads.write_calls += 1;
         }
         Texture(Arc::new(crate::material::TextureInner {
+            block: None,
             renderer: self.identity.clone(),
             role: data.role,
+            storage: crate::material::TextureStorage::Full(Box::new(
+                crate::material::FullTexture {
+                    _texture: texture,
+                    view,
+                    _allocation: self.ledger.allocate(AllocationKind::Texture, bytes),
+                },
+            )),
+        }))
+    }
+    /// A block-compressed texture (`asset::CompressedTexture`): its levels as shipped, fully
+    /// resident, in the format's role. Needs `Features::TEXTURE_COMPRESSION_BC` on the device
+    /// (`compressed_textures`); without it the host uploads RGBA8 (`try_upload_texture`).
+    pub fn try_upload_compressed_texture(
+        &mut self,
+        data: &asset::CompressedTexture,
+    ) -> Result<Option<Texture>, Error> {
+        self.check_fault()?;
+        if !self.compressed_textures() {
+            return Err(Error::InvalidInput(
+                "compressed textures need TEXTURE_COMPRESSION_BC; upload RGBA8 instead",
+            ));
+        }
+        let started = Instant::now();
+        let bytes = data
+            .validate(self.device.limits().max_texture_dimension_2d)
+            .map_err(|e| Error::InvalidInput(e.0))?;
+        if bytes > self.limits.max_texture_bytes {
+            return Err(Error::InvalidInput("texture exceeds max_texture_bytes"));
+        }
+        let preparation = started.elapsed();
+        let poll = self.collect()?;
+        if self.occupied() >= FLIGHTS - 1 {
+            self.busy_uploads += 1;
+            return Ok(None);
+        }
+        let slot = self.free_slot().unwrap();
+        let started = Instant::now();
+        let scopes = OperationScopes::new(&self.device);
+        let texture = self.create_compressed_texture(data, bytes);
+        if let Some(error) = scopes.finish() {
+            return Err(self.fail(error.to_string()));
+        }
+        self.submit_upload(slot);
+        self.upload_cpu = CpuFrame {
+            preparation,
+            poll,
+            upload: started.elapsed(),
+            ..Default::default()
+        };
+        self.check_fault()?;
+        Ok(Some(texture))
+    }
+    /// Whether the device samples BC7 and BC5 (`try_upload_compressed_texture`).
+    pub fn compressed_textures(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+    }
+    fn create_compressed_texture(
+        &mut self,
+        data: &asset::CompressedTexture,
+        bytes: u64,
+    ) -> Texture {
+        let role = data.format.role();
+        // BC5 normal maps add their variance layer (src/normal_variance_bc.rs).
+        let layers: Vec<Vec<Vec<u8>>> = if data.format == asset::BlockFormat::Bc5 {
+            vec![
+                data.mips.clone(),
+                crate::normal_variance_bc::variance_layer(data),
+            ]
+        } else {
+            vec![data.mips.clone()]
+        };
+        let bytes = bytes * layers.len() as u64;
+        let texture = self.ledger.own(
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("immutable material texture, block-compressed"),
+                size: wgpu::Extent3d {
+                    width: data.width,
+                    height: data.height,
+                    depth_or_array_layers: layers.len() as u32,
+                },
+                mip_level_count: data.mips.len() as u32,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: texture_residency::block_texture_format(data.format),
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            }),
+            ResourceKind::Texture,
+        );
+        let view = self.ledger.own(
+            texture.create_view(&texture_residency::texture_view_descriptor(role)),
+            ResourceKind::TextureView,
+        );
+        let block = asset::BlockFormat::BLOCK;
+        for (layer, levels) in layers.iter().enumerate() {
+            for (level, blocks) in levels.iter().enumerate() {
+                let (w, h) = data.level_size(level as u32);
+                // Copies cover the level's physical size: whole blocks, also under 4x4 texels.
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        mip_level: level as u32,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer as u32,
+                        },
+                        ..texture.as_image_copy()
+                    },
+                    blocks,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(asset::BlockFormat::row_bytes(w)),
+                        rows_per_image: None,
+                    },
+                    wgpu::Extent3d {
+                        width: w.div_ceil(block) * block,
+                        height: h.div_ceil(block) * block,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                self.uploads.textures += blocks.len() as u64;
+                self.uploads.texture_writes += 1;
+                self.uploads.write_calls += 1;
+            }
+        }
+        Texture(Arc::new(crate::material::TextureInner {
+            block: Some(data.format),
+            renderer: self.identity.clone(),
+            role,
             storage: crate::material::TextureStorage::Full(Box::new(
                 crate::material::FullTexture {
                     _texture: texture,
@@ -2632,14 +2764,18 @@ impl Renderer {
         let shadow_start = Instant::now();
         let mut shadow_frame = if self.view.shadows.enabled(view_mode) {
             let mut bounds = Vec::new();
+            let mut casts = Vec::new();
             for draw in draws.iter() {
-                bounds.extend_from_slice(&draw.instances.state.world_bounds(draw.mesh.bounds)?);
+                let state = &draw.instances.state;
+                bounds.extend_from_slice(&state.world_bounds(draw.mesh.bounds)?);
+                casts.extend((0..state.models.len()).map(|slot| state.casts_shadows(slot)));
             }
             Some(self.view.shadows.plan(
                 camera,
                 [color.width(), color.height()],
                 &self.lighting.source_lights,
                 &bounds,
+                &casts,
             )?)
         } else {
             None
@@ -3095,6 +3231,9 @@ impl Renderer {
         }
         if traced && !temporal {
             self.ensure_shade_detail(&programs, streaming, usize::from(soft))?;
+            if !streaming {
+                self.prepare_lean(&programs, programs.len() > 1, usize::from(soft));
+            }
         }
         // Feedback growth is spread over frames; raster and temporal frames need theirs now.
         if streaming {
@@ -3236,6 +3375,9 @@ impl Renderer {
                 .as_ref()
                 .map_or(0, |h| h.scene_generation());
             let mut primary = UploadBytes::default();
+            // U-RTVIS: the reflection composite's room grows to the content before this frame's
+            // bindings are built (a growth drops them; prepare_primary rebuilds them).
+            self.rl_room_grow();
             let result = self.prepare_primary(draws, camera, soft, scene_generation, &mut primary);
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
@@ -3379,7 +3521,11 @@ impl Renderer {
                     && p.reconstruction.as_ref().is_some_and(|r| r.trace.is_some())
                     && self.view.reconstruction.rotate_directions
                 {
-                    self.encode_reconstruction_interactive(&mut encoder, stamps(6), &mut mark);
+                    if primary_ray_gpu::sun_vis_pass::enabled() {
+                        self.encode_sun_split(&mut encoder, stamps(6), stamps(8), &mut mark);
+                    } else {
+                        self.encode_reconstruction_interactive(&mut encoder, stamps(6), &mut mark);
+                    }
                 } else if interactive {
                     let tile = primary_ray_gpu::TRACE_TILE;
                     self.encode_primary_interactive(&mut encoder, &p.interactive, tile, stamps(6));
@@ -3442,6 +3588,9 @@ impl Renderer {
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
+                self.ensure_gi_receiver_pass(shading)?;
+                mark(&mut encoder, "gi_receiver");
+                self.encode_gi_receiver_pass(&mut encoder, shading);
                 if !self.view.outputs.modes.shades() {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
@@ -3470,6 +3619,9 @@ impl Renderer {
                     self.encode_reflection_trace(&mut encoder, shading);
                     mark(&mut encoder, "reflection.hits");
                     self.encode_reflection_hits(&mut encoder, shading);
+                    // U-RTVIS: the deferred composite (RENDERLAB_RL_DEFERRED=1 with the pass).
+                    mark(&mut encoder, "reflection.composite");
+                    self.encode_reflection_composite(&mut encoder, shading);
                 }
             }
             if reconstructed {

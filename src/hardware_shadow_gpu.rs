@@ -54,10 +54,17 @@ impl MeshAcceleration {
     }
 }
 
+/// TLAS instance masks. Every placement carries `MASK_VISIBLE`, and those that block light
+/// (`Instances::set_casts_shadows`) also `SHADOW_CASTER_MASK`, which every shadow ray culls
+/// with; camera, reflection and bounce rays cull with 0xFF.
+const MASK_SHADOW: u8 = crate::shadows::SHADOW_CASTER_MASK as u8;
+const MASK_VISIBLE: u8 = 0x02;
+
 struct Placement {
     mesh: Arc<MeshAcceleration>,
     blas: Arc<BlasAllocation>,
     model: [u32; 16],
+    mask: u8,
 }
 struct SceneAcceleration {
     tlas: Owned<wgpu::Tlas>,
@@ -370,11 +377,18 @@ impl HardwareState {
                     "hardware shadows require nonsingular affine instance transforms",
                 ));
             }
-            for model in &draw.instances.state.models {
+            let state = &draw.instances.state;
+            for (slot, model) in state.models.iter().enumerate() {
+                let shadow = if state.casts_shadows(slot) {
+                    MASK_SHADOW
+                } else {
+                    0
+                };
                 placements.push(Placement {
                     blas: mesh.blas.lock().unwrap().clone(),
                     mesh: mesh.clone(),
                     model: model.to_cols_array().map(f32::to_bits),
+                    mask: MASK_VISIBLE | shadow,
                 });
             }
         }
@@ -456,7 +470,10 @@ impl HardwareState {
         if reusable {
             let active = self.active.as_ref().unwrap();
             let moved: Vec<usize> = (0..placements.len())
-                .filter(|&i| active.placements[i].model != placements[i].model)
+                .filter(|&i| {
+                    active.placements[i].model != placements[i].model
+                        || active.placements[i].mask != placements[i].mask
+                })
                 .collect();
             if moved.is_empty() && !dynamic_scene {
                 return Ok(false);
@@ -476,7 +493,7 @@ impl HardwareState {
                     &p.blas.blas,
                     row_transform(model),
                     i as u32,
-                    255,
+                    p.mask,
                 ));
             }
             active.placements = placements;
@@ -514,7 +531,7 @@ impl HardwareState {
                 &p.blas.blas,
                 row_transform(model),
                 i as u32,
-                255,
+                p.mask,
             ));
         }
         let bind = ledger.own(

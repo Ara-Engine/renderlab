@@ -10,8 +10,9 @@
 use super::{
     cache::ShaderCache,
     forward::{
-        self, ForwardImages, ForwardObject, ForwardScene, NormalMap, ObjectProgram, ObjectTexture,
-        ObjectTextures, Primary, ScenePrograms, SceneTextures, Skin, SunShadows,
+        self, BlockTexture, ForwardImages, ForwardObject, ForwardScene, NormalMap, ObjectProgram,
+        ObjectTexture, ObjectTextures, Primary, ScenePrograms, SceneTextures, Skin, SunShadows,
+        TextureSource,
     },
     gi_cache::Indirect,
     skinned::Skinned,
@@ -99,16 +100,32 @@ struct Material {
     parameters: Vec<(String, Value)>,
 }
 
+/// A texture as the host gave it: RGBA8 levels (`create_texture`), or block-compressed
+/// levels as shipped (`create_compressed_texture`).
+#[derive(Clone)]
+enum Stored {
+    Texels(Arc<TextureData>),
+    Blocks(Arc<BlockTexture>),
+}
+impl Stored {
+    fn source(&self) -> TextureSource<'_> {
+        match self {
+            Self::Texels(texels) => TextureSource::Texels(texels),
+            Self::Blocks(blocks) => TextureSource::Blocks(blocks),
+        }
+    }
+}
+
 /// A material's texture slot: the texture's identity to the frames, the texture and
 /// the sampler.
-type MaterialTexture = (u64, Arc<TextureData>, Sampler);
+type MaterialTexture = (u64, Stored, Sampler);
 
 /// What this layer keeps for each resource: the data its frames are rebuilt from.
 struct Kept;
 impl Residency for Kept {
     type Mesh = Mesh;
     /// Its identity to the frames, and the texture.
-    type Texture = (u64, Arc<TextureData>);
+    type Texture = (u64, Stored);
     type Program = Arc<Program>;
     type Material = Material;
     /// Its identity to the frames, and the map.
@@ -117,6 +134,10 @@ impl Residency for Kept {
     /// Nothing is kept resident between frames, so no batch is ever live.
     type Instances = ();
     fn set_instance(_: &mut (), _: usize, _: Mat4) -> Result<(), Error> {
+        Ok(())
+    }
+    /// The frames read `Batch::casts` when they are rebuilt.
+    fn set_instance_casts_shadows(_: &mut (), _: usize, _: bool) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -156,6 +177,10 @@ pub struct Engine {
     environments: u64,
     /// Textures created so far: the next one's identity.
     textures: u64,
+    /// The largest block-compressed texture side the frames' device takes, once the
+    /// engine has seen that device and it samples BC (`adopt_device`); None before, and
+    /// on a device without BC.
+    block_textures: Option<u32>,
     /// Whether frames are read back (`set_readback`).
     readback: bool,
     refusals: Vec<Refusal>,
@@ -192,6 +217,8 @@ struct Placed<'a> {
     mesh: u64,
     /// Every transform it is placed at.
     placements: &'a [Mat4],
+    /// Whether each placement blocks light (`Batch::casts`, `set_casts_shadows`).
+    casts: &'a [bool],
     /// A skinned mesh's pose before this one, and its pose revision.
     skin: Option<Skin<'a>>,
 }
@@ -225,6 +252,7 @@ impl Engine {
             materials: 0,
             environments: 0,
             textures: 0,
+            block_textures: None,
             readback: true,
             refusals: Vec::new(),
             ended: Vec::new(),
@@ -371,7 +399,42 @@ impl Engine {
     }
     /// The engine and `gpu` together as a [`Scene`], for code written against the trait.
     pub fn on<'a>(&'a mut self, gpu: &'a mut GpuDevice) -> Bound<'a> {
+        self.adopt_device(gpu);
         Bound { engine: self, gpu }
+    }
+    /// Records what `gpu`, the device every frame of this engine uses, can do. The
+    /// engine's state is device-free, so `compressed_textures` is false until this has
+    /// run: a host that uploads textures before its first frame calls it first. `on` and
+    /// `render_view` call it too.
+    pub fn adopt_device(&mut self, gpu: &GpuDevice) {
+        let info = gpu.info();
+        self.block_textures = info
+            .texture_compression_bc
+            .then_some(info.max_image_dimension);
+    }
+    /// Whether the frames' device samples BC7 and BC5, so `create_compressed_texture`
+    /// works (`adopt_device`).
+    pub fn compressed_textures(&self) -> bool {
+        self.block_textures.is_some()
+    }
+    /// A block-compressed texture as shipped (`renderlab_asset::CompressedTexture`: BC7
+    /// colour or data, BC5 normals), as `crate::engine::Engine::create_compressed_texture`.
+    /// A BC5 map gains its variance layer here. Errors where `compressed_textures` is
+    /// false; upload RGBA8 (`create_texture`) there.
+    pub fn create_compressed_texture(
+        &mut self,
+        data: crate::asset::CompressedTexture,
+    ) -> Result<TextureId, Error> {
+        let Some(max_dimension) = self.block_textures else {
+            return Err(Error::InvalidInput(
+                "compressed textures need a device that samples BC; upload RGBA8 instead",
+            ));
+        };
+        data.validate(max_dimension)
+            .map_err(|e| Error::InvalidInput(e.0))?;
+        self.textures += 1;
+        let blocks = Stored::Blocks(Arc::new(BlockTexture::new(data)));
+        Ok(self.state.textures.insert((self.textures, blocks)))
     }
 
     fn refuse(&mut self, call: &'static str, what: &'static str) {
@@ -433,7 +496,7 @@ impl Engine {
                     "normal-mapped draw requires tangent stream",
                 ));
             }
-            let placed = |transform, placements| Placed {
+            let placed = |transform, placements, casts| Placed {
                 vertices,
                 indices,
                 tangents: tangents.as_ref(),
@@ -441,6 +504,7 @@ impl Engine {
                 transform,
                 mesh: *key,
                 placements,
+                casts,
                 skin,
             };
             if material.transparency.is_some() {
@@ -448,10 +512,13 @@ impl Engine {
                     batch
                         .models
                         .iter()
-                        .map(|model| placed(*model, std::slice::from_ref(model))),
+                        .zip(&batch.casts)
+                        .map(|(model, casts)| {
+                            placed(*model, std::slice::from_ref(model), std::slice::from_ref(casts))
+                        }),
                 );
             } else if let Some(first) = batch.models.first() {
-                opaque.push(placed(*first, &batch.models[..]));
+                opaque.push(placed(*first, &batch.models[..], &batch.casts[..]));
             }
         }
         Ok([opaque, transparent])
@@ -460,7 +527,7 @@ impl Engine {
 
 fn texture(slot: &Option<MaterialTexture>) -> Option<ObjectTexture<'_>> {
     slot.as_ref().map(|(key, data, sampler)| ObjectTexture {
-        data,
+        data: data.source(),
         sampler: *sampler,
         key: Some(*key),
     })
@@ -562,7 +629,8 @@ impl Engine {
     }
     pub fn create_texture(&mut self, data: TextureData) -> Result<TextureId, Error> {
         self.textures += 1;
-        Ok(self.state.textures.insert((self.textures, Arc::new(data))))
+        let texels = Stored::Texels(Arc::new(data));
+        Ok(self.state.textures.insert((self.textures, texels)))
     }
     pub fn create_program(&mut self, label: &str, source: &str) -> Result<ProgramId, Error> {
         let program = Program::new(label, source)?;
@@ -696,6 +764,15 @@ impl Engine {
     }
     pub fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error> {
         self.state.set_transform(object, transform)
+    }
+    /// Whether an object blocks light (default true), as the wgpu engine's `set_casts_shadows`.
+    /// Stored on its batch (`Batch::casts`); this layer's shadow casters do not read it yet
+    /// (instance masks, the atlas and the clipmap follow in the port).
+    pub fn set_casts_shadows(&mut self, object: ObjectId, casts: bool) -> Result<(), Error> {
+        self.state.set_casts_shadows(object, casts)
+    }
+    pub fn casts_shadows(&self, object: ObjectId) -> Result<bool, Error> {
+        self.state.casts_shadows(object)
     }
     pub fn set_decals(&mut self, decals: &[Decal]) -> Result<(), Error> {
         if !decals.is_empty() {
@@ -909,6 +986,7 @@ impl Engine {
         view: ViewId,
         camera: &Camera,
     ) -> Result<FrameReport, Error> {
+        self.adopt_device(gpu);
         self.release_ended(gpu)?;
         let at = self.view_index(view)?;
         let desc = self.views[at].desc.clone();
@@ -974,6 +1052,7 @@ impl Engine {
         let keys: Vec<u64> = opaque.iter().map(|p| p.mesh).collect();
         let material_keys: Vec<u64> = opaque.iter().map(|p| p.material.key).collect();
         let placements: Vec<&[Mat4]> = opaque.iter().map(|p| p.placements).collect();
+        let casts: Vec<&[bool]> = opaque.iter().map(|p| p.casts).collect();
         let skins: Vec<Option<Skin<'_>>> = opaque.iter().map(|p| p.skin).collect();
         // The view's ids: the tag tables in the frame's placement order, every opaque
         // placement's entry and then every transparent one's (`prepare_view_ids`).
@@ -1091,6 +1170,7 @@ impl Engine {
             instances: Some(&placements),
             sky_map,
             skins: Some(&skins),
+            casts: Some(&casts),
             colour_lut: look.colour_lut.as_ref(),
             ids: id_entries
                 .as_ref()
@@ -1145,6 +1225,15 @@ impl std::ops::Deref for Bound<'_> {
     type Target = Engine;
     fn deref(&self) -> &Engine {
         self.engine
+    }
+}
+impl Bound<'_> {
+    /// `Engine::create_compressed_texture`, on the bound device.
+    pub fn create_compressed_texture(
+        &mut self,
+        data: crate::asset::CompressedTexture,
+    ) -> Result<TextureId, Error> {
+        self.engine.create_compressed_texture(data)
     }
 }
 impl Scene for Bound<'_> {

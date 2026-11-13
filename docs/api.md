@@ -111,9 +111,9 @@ loop {
 
 ## Objects
 
-`spawn(mesh, material, transform) -> ObjectId`, `set_transform(object, Mat4)`, `transform(object)`, `despawn(object)`.
+`spawn(mesh, material, transform) -> ObjectId`, `set_transform(object, Mat4)`, `transform(object)`, `set_casts_shadows(object, bool)`, `casts_shadows(object)`, `despawn(object)`.
 
-Objects that share a mesh and a material are drawn together as one instanced draw. Moving an object is a transform write on the next frame. Spawning or despawning re-uploads that group's transforms on the next frame. One group holds at most `limits.max_instances` objects (raise it in the descriptor for large crowds or forests).
+An object casts shadows unless `set_casts_shadows(object, false)` turns it off: it is still drawn, reflected and lit, and it still receives shadows, but no shadow test sees it (a lamp's shade or glass around its light). Objects that share a mesh and a material are drawn together as one instanced draw. Moving an object is a transform write on the next frame. Spawning or despawning re-uploads that group's transforms on the next frame. One group holds at most `limits.max_instances` objects (raise it in the descriptor for large crowds or forests).
 
 ## Skinned characters
 

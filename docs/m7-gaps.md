@@ -331,6 +331,7 @@ From M7-R1 ([m7-r1.md](m7-r1.md)). Scores are whole-reflector display RMS at -14
    - **Transforms are rewritten whole** each frame they change; there is no refit and no moving-object special case.
 2. **Raster primaries get no traced reflections.** The RT device's code default is still raster primaries (IQ1, RT1d), and only traced-primary frames trace reflections. Raster frames keep the environment estimate, as non-RT does.
 3. **Hits on another program's object** (MP1, [m7-mp1.md](m7-mp1.md)): mixed-program frames now render on both paths, but such a hit is shaded by the reflecting surface's program with the hit's material inputs, not by the hit's own program (Programs, below). The toon program is still untested as a reflection-hit program in production; only R0b's probe has tested it.
+   - **A known inaccuracy, with its fix ready (U-RTVIS, 2026-11-13).** The fallback drops a hit's program parameters: Ara's emitters are a separate emissive program whose `glow` is a parameter, so near-mirrors and chrome reflect lit emitters unlit (Glint, Ara main f134c989f: the lit coral ring and chevrons, drawn by the bridge's emissive program, in the polished pad discs and inlay at roughness 0.06, the goal's polished court and the chrome). The compacted reflection pass can shade each hit with its own program (`RENDERLAB_RL_HIT_OWN_PROGRAM=1`, measurement only); by default it copies the fallback so the non-RT default draws today's picture. Turning own-program shading on is a visible change and goes to Islam as a crop pair first.
 4. **One bounce.** Hits take their own untraced specular. RF7 (facing glossy panels) misses at 23.3 vs UE HW-Hit Epic 20.2; its recursive panel-to-panel reflections are missing.
 5. **Rough band (roughness ≥ 0.5) is untraced.** RF8's wet rocks miss at 7.9 vs 3.9 (traced 0.3/0.4 bands 6.8/7.5; untraced 0.5 band 9.3). RF2's 0.5/0.7/1 spheres miss at 15.9/13.1/10.4 vs 15.3/11.9/5.5, with no local colour bleed, which needs the cache's bounce in `indirect_radiance` (G2b).
 6. **RF2's mirror spheres** miss at roughness 0 and 0.05: 14.1/15.0 vs 11.6/14.4. The reference split noise is 4.8 codes, so this ranking isn't certified.
@@ -433,6 +434,28 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 - The internal size is rounded per axis, so targets whose size isn't divisible by 3 (quality) or 2 (performance) render at a very slightly different aspect.
 - The capable 1x RT viewer now renders traced primaries with TR1 (RTDEF2). Upscaling presets remain library settings; the viewer has no preset flag.
 
+**Thin lines crawl in a held view (PC integration, Glint start view, 2026-11-13).** The view is settled and the camera held. The flicker map gives each pixel's largest luma change over 7 consecutive jittered frame pairs:
+- **Non-RT:** 110 pixels change by 16 codes or more between consecutive frames, and 1,177 by 4 or more.
+- **RT:** 20 and 582.
+
+98% of the worst pixels sit on the two thin dark-blue guard-rail lines running to the vanishing point (three clusters hold 101 of the 110), plus ring outlines and the ball's rim. It's a crawl along sub-pixel lines, not noise on surfaces. Sheets: `D:/Coding/renderlab-work/ara-integration/perf/glint/runtorun/start-flicker-nonrt.png` and `start-flicker-rt.png` (frame | marked | map).
+
+The leading guess, unconfirmed, is sub-pixel lines that the temporal resolve can't hold, worse where the shadow and GI inputs on those edges are noisier.
+
+**Cheap split first**, on the same held view:
+- TR1 off;
+- sharpen / upscale off;
+- the sun's and GI's contributions frozen.
+
+That shows which input moves. **Known methods to try after:**
+- coverage-aware history for sub-pixel lines, extending TR1b's straight-edge transport;
+- a thin-feature mask that widens the history clamp;
+- analytic line coverage in the visibility buffer.
+
+Islam names aliasing and ghosting as the defects he most wants gone. No unit owns this yet.
+
+**Glint goal run-to-run (non-RT, PC integration, 2026-11-13).** Two runs differ in 67,380 pixels; 96% are off by exactly 1 code, 56 by more than 16, and the largest region is 37 px. The likeliest cause (U-RTVIS, from the code) is GI miss-list overflow: `gi_request_one` (`shaders/gi_cache.wgsl:1705`) and the pixel path (`:484`) keep whichever requests arrive first once `gi_frame.counts.w` is reached. N8o made the claim among surviving requests deterministic, but not which requests survive. Fix: choose survivors by key (for example, the lowest keys per bucket, as claims do), not by arrival. To confirm, check the `miss_overflow` counter on the goal frames.
+
 **Reference instrument.** The visible-sky references were traced by a release-profile test binary; on fixed resources its first renders differ from later ones by ≤2 ULP, which the bounded-AS policy's late fixed-resource control does not see. A dev-profile build of the same source (U0b's profile) reproduces quarry-final byte for byte on 8 independent and 4 fixed replays. The sky references stay accepted under the policy; a dev-profile re-trace was stopped by the overnight no-new-references rule.
 
 ## GI
@@ -470,6 +493,11 @@ G3 ([m7-g3.md](m7-g3.md)) added a fixed-weight cell-space filter of the sky and 
   - **Shading workgroups are 4x4** (`primary_shade_tiles`, 16 invocations, half a 32-lane warp on NVIDIA). The lookup is latency-bound at that occupancy. Not GI's file; recorded for the shading owners.
   - **Nsight attribution for GI failed** in P-GI's trace (the real-time shader profiler attributed samples only to the traced-primary pipeline); the ablation table in p-gi.md section 2 stands in for it.
 - **Moving objects mottle.** In the courtyard (`examples/game_scene.rs`), the spinning crate shows blocky light and dark patches on both paths in frames 008-032, and it is clean with `--no-gi` (RD1, [m7-rd1.md](m7-rd1.md) section 3; not investigated further).
+- **Small bright emitters blotch the bounce (Atelier night, 2026-11-13).** Ara #142's night courtyard (`levels/atelier_night.scene`, lit only by glowing lantern glass through the cache while its lamps are blocked by their fittings) shows bright mottled blotches tens of pixels across on the floor and walls: `coord-batch/atelier/night.png`, and `nightdolly_a/b/c.png` (three dolly frames 3.9 cm apart). Seen on the M5's ara-gpu port, ray-hardware path; not yet on wgpu or non-RT. They are world-fixed (dolly crops correlate 0.980 at the floor's own shift), steady (mean frame change 1.5/255) and never settle (still against 60 held frames: 0.02/255).
+  - **Cause (code):** a cell's bounce estimate is deterministic. Its 64 gather directions are a spiral rotated only by the cell's key (`gi_direction`), every gather re-traces them, and each gather replaces the value (W1), so nothing accumulates. A small emitter is hit by 0 or 1-2 of them at about 0.1 sr each, and a hit reads a whole cell whose query point lies on the glass (`gs_shade`'s `rl_emission`). Neighbouring cells therefore differ by that whole term, for good. Light-list entries get aimed rays (`gi_near_gather`); emissive meshes do not.
+  - **Fix approved, not built: (c) emissive proxies** ([design-emissive-proxies.md](design-emissive-proxies.md)). Small bright emitters become point lights in the light list, with power and colour reduced on the GPU from the program's own `emission` hook, and their emission leaves the gather. Queued after S1 and `set_casts_shadows`, with a `glow=gi` reproduction in `examples/game_scene.rs` first and a crop pair for Islam before any default.
+  - **Limits recorded in that note:** long thin emitters (strip lights) and flat one-sided panels stay with the gather until (a), sampling emissive triangles in the gather. (b), a per-update clamp, is dropped.
+  - **(d), the general fix for the fixed per-cell bias:** rotate the gather directions per gather and keep a running mean that resets on events (DDGI and Lumen-style probe rotation with hysteresis). It affects every indirect light, not only emitters. It changes every GI picture and the idle rule (which would need a converged count), so it gets its own design note, crop pairs and gate after (c).
 - **Other units' harnesses.** `src/reference_r0a_tests.rs` asserts the cache starts off, and `src/iq1_tests.rs` uses `IndirectSettings::default()` to mean off. Both need `IndirectSettings::off()`.
 
 G2c ([m7-g2c.md](m7-g2c.md)) fixed API1's game-scene ground speckles (glossy and mirror cells sent their sun highlight in every direction) and arch-edge streaks (not-yet-gathered cells read as zero bounce at level switches). What it leaves:
@@ -529,6 +557,7 @@ From MP1 ([m7-mp1.md](m7-mp1.md)): per-object shading programs on both paths, by
 8. **Unverified:** mixed frames with streamed textures (`TextureResidency` other than `Full`; composed and naga-checked, never rendered), mixed frames with RT1d's visibility filter, motion and disocclusion across program boundaries under TR1 (only static frames and the example's fly path were inspected), and Hard (inline-ray) shading in mixed frames (the gates use Interactive and Virtual).
 9. **Memory with many photoreal programs.** The eight-standard-program quarry run took available memory below the lease guard's 2 GiB twice (32 GB machine, other units running), where the toon-program run bottomed at 5.1 GiB. Not diagnosed: concurrent list-pipeline compiles, per-program GI cell pipelines and per-switch material churn are candidates.
 10. **No Unreal comparison** of per-object materials: Unreal assigns materials per mesh natively; the 2x speed gate on matched workloads was not measured for mixed frames.
+11. **No specular anti-aliasing from normal maps by default** (root, 2026-11-13). `standard.wgsl` has `SPECULAR_AA=false`: the 256-sample `filtered_brdf` passes quality but misses the speed floor. No default program calls `material_normal_variance` or `filtered_roughness`, so highlights on bumpy metals can sparkle under minification and in motion, on RGBA8 and BC5 alike. Candidate: `filtered_roughness` alone, which widens roughness by the map's normal variance (the cheap Toksvig form, one variance fetch a pixel; today only `specular_aa_tests.rs` calls it). It is a picture change (highlights on rough normal maps broaden slightly at distance), so it goes to Islam as a moving crop pair, not as a default. Scheduled after list lanes and S1. It is also what would make compressed textures' BC4 variance layer pay for itself; until then that layer should be built only when a loaded program reads normal variance.
 
 
 ## Startup
@@ -1188,3 +1217,6 @@ Reflection hits trace a shadow ray for every shadowed local light. Glossy lobes 
 - RTX night lanterns: the worst frame has 0.01% of pixels over 8 codes (max 65), scattered over glossy crates and the arch, with both mirror spheres unchanged at 1:1.
 - RTX game flight: max 8 codes.
 - 0.35 gave the same picture at 8.62 ms.
+
+## Local light inside a closed casting fitting: non-RT blocks about a quarter (U-FIXED, 2026-11-13)
+`engine::casts_shadows_tests` (cs2, bin of 42001938): a point light inside a closed 1 m shade and a downward spot inside a 0.5 x 0.3 x 0.5 m head, no sky. With RT a casting fitting blocks all of the lamp's light on the floor. Without RT it blocks about a quarter (floor share over the sky: point 49.4 open, 37.0 casting; spot 29.1 open, 22.9 casting), so the local shadow atlas lets most of a fully enclosed light through. Not caused by `set_casts_shadows`: a non-casting fitting matches the open lamp on both paths (49.5 and 29.2). Not yet diagnosed: the maps' near plane is 2 cm and no shadow pipeline culls faces. Outpost's floodlights (heads 5-23 cm from the light) are the content case; with `castShadows: false` on their heads (Ara #191) they no longer depend on it.

@@ -35,6 +35,13 @@ impl Instances {
     pub fn set(&mut self, slot: usize, model: Mat4) -> Result<(), Error> {
         self.state.set(slot, model)
     }
+    /// Whether the placement in `slot` blocks light (default true). A non-casting placement is
+    /// drawn, reflected, bounced and shaded as before, and receives shadows, but no shadow test
+    /// on either path sees it: shadow rays and any-hit walks skip it, and the sun clipmap, the
+    /// cascades and the local shadow atlas leave it out. No GPU work; unchanged values are no-ops.
+    pub fn set_casts_shadows(&mut self, slot: usize, casts: bool) -> Result<(), Error> {
+        self.state.set_casts_shadows(slot, casts)
+    }
 }
 
 #[derive(PartialEq, Eq)]
@@ -64,6 +71,8 @@ pub(crate) struct InstanceState {
     /// pass can key its cached work on both instead of hashing every matrix (`Self::revision`).
     id: u64,
     pub models: Vec<Mat4>,
+    /// One bit per slot: the placement casts no shadow (`Instances::set_casts_shadows`).
+    no_shadow: Vec<u64>,
     /// Per view, the placement it last submitted (motion vectors' previous frame).
     motion: Vec<Motion>,
     /// Counts accepted edits, so a view knows whether `models` changed since it submitted.
@@ -110,6 +119,7 @@ impl InstanceState {
         Self {
             id: NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             models: models.to_vec(),
+            no_shadow: vec![0; models.len().div_ceil(64)],
             motion: Vec::new(),
             edits: 0,
             normals,
@@ -160,6 +170,29 @@ impl InstanceState {
             bounds: Arc::clone(&bounds),
         });
         Ok(bounds)
+    }
+    /// Whether the placement in `slot` blocks light (`Instances::set_casts_shadows`).
+    pub fn casts_shadows(&self, slot: usize) -> bool {
+        self.no_shadow[slot / 64] & (1 << (slot % 64)) == 0
+    }
+    /// Whether any placement casts no shadow (consumers skip the per-slot test otherwise).
+    pub fn any_non_casting(&self) -> bool {
+        self.no_shadow.iter().any(|&w| w != 0)
+    }
+    /// The non-casting bits, 64 slots a word: a cache key for shadow caster lists.
+    pub fn non_casting(&self) -> &[u64] {
+        &self.no_shadow
+    }
+    /// A change counts as an edit, so passes keyed on `revision` see it; transforms stay clean.
+    fn set_casts_shadows(&mut self, slot: usize, casts: bool) -> Result<(), Error> {
+        if slot >= self.models.len() {
+            return Err(Error::InvalidInput("instance slot outside collection"));
+        }
+        if self.casts_shadows(slot) != casts {
+            self.no_shadow[slot / 64] ^= 1 << (slot % 64);
+            self.edits += 1;
+        }
+        Ok(())
     }
     fn set(&mut self, slot: usize, model: Mat4) -> Result<(), Error> {
         if slot >= self.models.len() || !model.is_finite() {

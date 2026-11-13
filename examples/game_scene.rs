@@ -43,10 +43,15 @@
 //! both render from one engine and each frame records both hashes, so a run of `a` or `b`
 //! alone checks that each view matches a single-view engine; `ai` is `a` with a second view
 //! created and never rendered. `--cut-b FRAME` jumps view b's camera and cuts it there.
+//! `--diag casts=toggle` (U-FIXED, `Engine::set_casts_shadows`): the crates stop casting shadows
+//! at frame 12 and cast again from frame 24, on the flight's moving camera.
 //! `--diag forest=1` (U-RTVIS, docs/rtvis.md) swaps the flat ground for a 200 m rolling
 //! terrain (16 tiles) under trees and bushes of cutout cards and walks the field walk's camera
 //! through it: Outpost's layered ground and foliage, for the RT visibility pass's cost.
-//! `forest=bare` is the same terrain and walk without the foliage.
+//! `forest=bare` is the same terrain and walk without the foliage. `--diag floor=R` gives the
+//! flat ground perceptual roughness R (0.95 otherwise): a glossy floor for the reflection strata.
+//! `--diag program=standard` puts the scene's `game` materials on the standard program, which
+//! reports its reflectance to the deferred reflection composite (RENDERLAB_RL_DEFERRED=1).
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -358,6 +363,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     | "field"
                     | "forest"
                     | "fox"
+                    | "floor"
+                    | "program"
+                    | "casts"
             )
         });
     // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
@@ -379,6 +387,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let two_foxes = scene_key("fox", "2");
     let hold_cut = scene_key("hold", "cut");
     let hold = scene_key("hold", "1") || pose_only || hold_cut;
+    // `casts=toggle`: the crates' shadow casting off at frame 12, on again at frame 24.
+    let casts_toggle = scene_key("casts", "toggle");
     // U-SPECK (docs/speck.md): `field=1` scatters 300 small bright boxes and a pale slab over
     // an empty quarter of the ground and walks the camera 4 m across it while turning 12
     // degrees, whatever `--frames` is: the cell mosaic Ara's Outpost showed on flat ground.
@@ -392,6 +402,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `forest=bare`: the same terrain and walk without the trees and bushes.
     let bare = scene_key("forest", "bare");
     let forest = scene_key("forest", "1") || bare;
+    let floor = scene_keys
+        .iter()
+        .find(|(k, _)| k == "floor")
+        .map_or(0.95, |(_, v)| {
+            v.parse::<f32>().expect("--diag floor=<roughness>")
+        });
     let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
@@ -495,6 +511,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     let game_program = game_program.as_deref().unwrap_or(GAME_PROGRAM);
     let program = engine.create_program("game", game_program)?;
+    let standard = scene_keys.iter().any(|(k, v)| k == "program" && v == "standard");
     let toon_program = engine.create_program("toon", TOON_PROGRAM)?;
     let programs_seconds = start.elapsed().as_secs_f64();
     let material = |engine: &mut Engine, color: [f32; 3], metallic: f32, roughness: f32| {
@@ -502,7 +519,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             base_color: [color[0], color[1], color[2], 1.0],
             metallic,
             roughness,
-            program: Some(program),
+            program: (!standard).then_some(program),
             ..Default::default()
         })
     };
@@ -603,7 +620,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec3::new(0.0, 0.6, -0.15)
         }
         None => {
-            let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, 0.95)?;
+            let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, floor)?;
             if forest {
                 for tile in terrain_tiles(FOREST_SIZE, 400, 4) {
                     let tile = engine.create_mesh(&mesh(&tile))?;
@@ -733,17 +750,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         boxed(at(-5.5, 1.5, 0.0), Vec3::new(0.3, 3.0, 6.0)),
     )?;
     // A stack of crates.
+    let mut crates = vec![];
     for (x, y, z, turn) in [
         (4.0, 0.5, 1.0, 0.1),
         (5.1, 0.5, 1.3, -0.25),
         (4.5, 1.5, 1.1, 0.4),
         (4.2, 0.5, 2.3, 0.0),
     ] {
-        engine.spawn(
+        crates.push(engine.spawn(
             cube,
             wood,
             Mat4::from_translation(at(x, y, z)) * Mat4::from_rotation_y(turn),
-        )?;
+        )?);
     }
     engine.spawn(sphere, gold, boxed(at(1.8, 1.0, 3.2), Vec3::splat(1.0)))?;
     if args.glass {
@@ -1065,6 +1083,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if glow_steps && frame == EVENT_FRAME {
             let dim = [6_000.0, 4_000.0, 1_800.0].map(|v| v * lamp_scale);
             engine.set_material_parameters(bulb, &[("glow", Value::Vec3(dim))])?;
+        }
+        if casts_toggle && (frame == 12 || frame == 24) {
+            for &object in &crates {
+                engine.set_casts_shadows(object, frame == 24)?;
+            }
         }
         let spin = if pose_only { 0.0 } else { t };
         engine.set_transform(
