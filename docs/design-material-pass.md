@@ -8,13 +8,30 @@ A program opts in by declaring `material_out` / `material_in` (`MaterialRecord`,
 
 The code is in `src/program.rs`, section "Material pass" (`material_variant`, `MATERIAL_PACKING`). The port's dispatch is in `src/backend_ara/forward.rs` (`material_records`); the wgpu wiring is Renderlab #98.
 
-## Record (48 bytes a pixel, three rgba32uint images, group 0 bindings 75, 78 and 74)
+## Record (48 bytes a pixel: one rgba32uint 2D array at group 0 binding 75, receiver first)
+
+The record is one array texture, so a producer or reader binds one storage or sampled image. Its layer order puts the receiver first:
+
+| layer | word | contents |
+|---|---|---|
+| 0 | 1 | geometric normal, model, MQ2, slot and flags |
+| 1 | 2 | the receiver's point, epsilon and interpolated normal |
+| 2 | 0 | the material |
+
+- **A receiver-only producer** (the trace tail) allocates 2 layers (`MATERIAL_RECEIVER_LAYERS`) and writes layers 0-1.
+- **The full writer** allocates 3 (`MATERIAL_RECORD_LAYERS`).
+- **Readers** declare `@group(0) @binding(75) var rl_material:texture_2d_array<u32>;` and `textureLoad(rl_material, pixel, layer, 0)`. A receiver reader touches layers 0 and 1 only; record-reading shading also reads layer 2.
+- **Producers** declare `texture_storage_2d_array<rgba32uint, write>` at the same binding.
+
+On the M5 the array's stores and loads cost the same as three separate textures (the timing is in the trace-tail PR); 78 and 74 are free again.
+
+Per word:
 
 | word | x | y | z | w |
 |---|---|---|---|---|
-| 0 (75) | shading normal, octahedral 2 x unorm16 | base red, green (unorm16 each) | base blue (unorm16), coverage and metallic (unorm8 each) | emission x exposure, rgb9e5 |
-| 1 (78) | the receiver's geometric normal (`Receiver::geometric`), octahedral 2 x unorm16 | model (8 bits), MQ2 lobe alpha (unorm8), roughness (unorm16, rounded up) | MQ2 view share (unorm16), TR1 view hint (f16, `tr1_view_hint`) | slot (bits 0-27), near a triangle edge (28), `thin` (29), source-front (30), lit-front (31) |
-| 2 (74) | trace point x (f32) | trace point y | trace point z | epsilon as an f32 exponent (bits 0-7; 0 = the 1e-5 floor), interpolated vertex normal (octahedral 2 x 12, bits 8-31) |
+| 0 (layer 2) | shading normal, octahedral 2 x unorm16 | base red, green (unorm16 each) | base blue (unorm16), coverage and metallic (unorm8 each) | emission x exposure, rgb9e5 |
+| 1 (layer 0) | the receiver's geometric normal (`Receiver::geometric`), octahedral 2 x unorm16 | model (8 bits), MQ2 lobe alpha (unorm8), roughness (unorm16, rounded up) | MQ2 view share (unorm16), TR1 view hint (f16, `tr1_view_hint`) | slot (bits 0-27), near a triangle edge (28), `thin` (29), source-front (30), lit-front (31) |
+| 2 (layer 1) | trace point x (f32) | trace point y | trace point z | epsilon as an f32 exponent (bits 0-7; 0 = the 1e-5 floor), interpolated vertex normal (octahedral 2 x 12, bits 8-31) |
 
 - **Memory:** 100 MB at 1080p, on top of the 16-byte hit image, which visibility, the material pass, the standard program's shading and TR1/ids still read. The GI pass's 48-byte target can keep only its lookup result once it reads the receiver from words 1 and 2.
 - **Model 255:** a pixel whose program has no mapping (it keeps its own `shade`).
@@ -42,7 +59,7 @@ The port case `misses_carry_the_sentinel_after_the_camera_moves` (a wall, then t
 - the 11,328 pixels shading never visits (fast-cleared tiles of sky), read back from word 1 (`ForwardImages::material_receiver`, filled only under the receiver check);
 - no hit carries it.
 
-**For a producer of the receiver words** (the material pass's writer, a trace kernel's tail, either engine), the shared WGSL is in `MATERIAL_PACKING`, and `program::material_trace_writes()` composes it with the record's bindings for a trace module:
+**For a producer of the receiver words** (the material pass's writer, a trace kernel's tail, either engine), the shared WGSL is in `MATERIAL_PACKING`, and `program::material_trace_writes()` composes it with the record's binding (75, the storage array) for a trace module:
 - `rl_mr_receiver_words(receiver, vertex_normal, source_front, lit_front, near) -> RlReceiverWords { b, c }` packs words 1 and 2. The producer supplies the `Receiver` as `primary_receiver` builds it, the interpolated vertex normal (any length), the shading entry's two sides (equal for a trace: its lit front reduces to its source front) and the near-edge flag. The writer then adds word 1's material fields (y, z); a trace leaves them zero.
 - `RL_MR_MISS_WORD1` is word 1 on a pixel without a hit (word 2 zero there); `rl_mr_miss(b)` tests it.
 - `rl_mr_trace_vertex_normal(trace)` is the interpolated normal as the shading entry builds it, from `primary_vertices`, `primary_indices` and `normals`.
@@ -53,10 +70,10 @@ The port case `the_writer_and_the_trace_tail_write_the_same_receiver_words` hold
 
 | field | the writer (#107) | the trace tail |
 |---|---|---|
-| word 0 (material) | defined | not written |
-| word 1 x (geometric normal), w (slot, near-edge, `thin`, sides) | defined | defined |
-| word 1 y (model, lobe alpha, roughness), z (view share, TR1 hint) | defined; model 255 = own `shade` | exactly zero |
-| word 2 (point, epsilon, interpolated normal) | defined | defined |
+| word 0 (material, layer 2) | defined | not allocated (2 layers) |
+| word 1 (layer 0) x (geometric normal), w (slot, near-edge, `thin`, sides) | defined | defined |
+| word 1 (layer 0) y (model, lobe alpha, roughness), z (view share, TR1 hint) | defined; model 255 = own `shade` | exactly zero |
+| word 2 (layer 1: point, epsilon, interpolated normal) | defined | defined |
 
 The rule: **readers of words 1 and 2 never read word 1's y or z.** Only record-reading primary shading reads them, and it runs from the record only under the writer. The producers' case asserts that the tail's y and z are exactly zero, so a reader that broke the rule would read 0, never a stale value.
 

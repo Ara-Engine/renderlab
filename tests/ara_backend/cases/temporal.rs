@@ -633,8 +633,8 @@ fn interactive_trace_entries_reflect_validate_and_compile() -> Result<()> {
         (Interactive::Full, [8, 4, 1], &[(0, 20)]),
         (Interactive::Repair, [32, 1, 1], &[(0, 26)]),
     ];
-    // RENDERLAB_MATERIAL_PASS=1: the camera traces write the material record's words 1 and 2
-    // (binding 78 and 74: the miss sentinel), and with `tracetail` the repair rewrites them.
+    // RENDERLAB_MATERIAL_PASS=1: the camera traces write the material record's receiver layers
+    // (binding 75: the miss sentinel), and with `tracetail` the repair rewrites them.
     let set = |name: &str, value: &str| std::env::var(name).as_deref() == Ok(value);
     let record = set("RENDERLAB_MATERIAL_PASS", "1");
     let tail = record && set("RENDERLAB_MATERIAL_PROBE", "tracetail");
@@ -644,7 +644,7 @@ fn interactive_trace_entries_reflect_validate_and_compile() -> Result<()> {
             let mut keys = common.to_vec();
             keys.extend_from_slice(extra);
             if record && (entry != Interactive::Repair || tail) {
-                keys.extend([(0, 74), (0, 78)]);
+                keys.push((0, 75));
             }
             keys.sort_unstable();
             let reflected: Vec<_> = program

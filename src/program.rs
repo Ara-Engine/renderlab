@@ -2248,8 +2248,15 @@ pub(crate) fn material_debug_field(name: &str) -> Option<&'static str> {
         _ => None,
     }
 }
-/// The record's group 0 bindings, words 0, 1 and 2: three rgba32uint images of the frame's size.
-pub(crate) const MATERIAL_RECORD_BINDINGS: [u32; 3] = [75, 78, 74];
+/// The record's group 0 binding: one rgba32uint 2D array of the frame's size, receiver first.
+/// Layer 0 is word 1 and layer 1 word 2 (the receiver, `MATERIAL_RECEIVER_LAYERS`), layer 2
+/// word 0 (the material, `MATERIAL_RECORD_LAYERS` in all). A receiver-only producer (the trace
+/// tail) allocates and writes the first two; the material pass's writer all three.
+pub(crate) const MATERIAL_RECORD_BINDING: u32 = 75;
+/// The receiver's layers (words 1 and 2), first in the array.
+pub(crate) const MATERIAL_RECEIVER_LAYERS: u32 = 2;
+/// Every layer of the full record (the receiver's, then word 0).
+pub(crate) const MATERIAL_RECORD_LAYERS: u32 = 3;
 /// Which side of the record a module is: the material pass writes it, shading reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum MaterialRole {
@@ -2258,7 +2265,8 @@ pub(crate) enum MaterialRole {
 }
 /// The entry's own evaluation of the program's surface, which the variants replace.
 const MATERIAL_SEAM: &str = "    let surface_output=surface(surface_input);\n";
-/// The record's packing, shared by both roles (48 bytes a pixel):
+/// The record's packing, shared by both roles (48 bytes a pixel, binding 75's layers: word 1 is
+/// layer 0, word 2 layer 1, word 0 layer 2; `MATERIAL_RECORD_BINDING`):
 /// - word 0 (rgba32uint): x the shading normal (octahedral, 2 x unorm16); y the base colour's
 ///   red and green and z's low half its blue (3 x unorm16: 10 bits moved every pixel of a
 ///   flat floor by an f16 step, and turned a texture's decode difference of a hair into a
@@ -2384,14 +2392,12 @@ fn rl_mr_rgb9e5_decode(u:u32)->vec3<f32> {
 }
 "#;
 /// The writing side: the images and the store.
-const MATERIAL_WRITE: &str = r#"@group(0) @binding(75) var rl_material0:texture_storage_2d<rgba32uint,write>;
-@group(0) @binding(78) var rl_material1:texture_storage_2d<rgba32uint,write>;
-@group(0) @binding(74) var rl_material2:texture_storage_2d<rgba32uint,write>;
+const MATERIAL_WRITE: &str = r#"@group(0) @binding(75) var rl_material:texture_storage_2d_array<rgba32uint,write>;
 fn rl_material_store(pixel:vec2<i32>,m:MaterialRecord,input:SurfaceInput,near:bool,hint:f32,source_front:bool,lit_front:bool) {
     let w=rl_mr_pack(m,input,near,hint,source_front,lit_front);
-    textureStore(rl_material0,pixel,w.a);
-    textureStore(rl_material1,pixel,w.b);
-    textureStore(rl_material2,pixel,w.c);
+    textureStore(rl_material,pixel,2,w.a);
+    textureStore(rl_material,pixel,0,w.b);
+    textureStore(rl_material,pixel,1,w.c);
 }
 "#;
 /// The receiver the sun path builds for a hit (shaders/primary_penumbra.wgsl
@@ -2426,10 +2432,10 @@ fn rl_mr_trace_receiver(record:vec4<u32>,point:vec3<f32>,positions:array<vec3<f3
 /// the sun path's for a fresh camera ray.
 const MATERIAL_RECEIVER_CHECK: &str = r#"// RENDERLAB_MATERIAL_DEBUG=receiver (program.rs material_debug).
 fn rl_material_receiver_error(pixel:vec2<i32>,input:SurfaceInput,source_front:bool,lit_front:bool)->vec4<f32> {
-    let b=textureLoad(rl_material1,pixel,0);let c=textureLoad(rl_material2,pixel,0);
+    let b=textureLoad(rl_material,pixel,0,0);let c=textureLoad(rl_material,pixel,1,0);
     let r=rl_mr_receiver(b,c,pixel);
     // The reference is the sun path's: a fresh camera ray, then its edge repair.
-    let id=vec2<u32>(pixel);let size=textureDimensions(rl_material1);
+    let id=vec2<u32>(pixel);let size=textureDimensions(rl_material);
     let d=rl_mr_reference_receiver(id,size,input);
     // Where the repair moved the point the record must either hold the repaired point (a
     // trace that wrote it after repairing) or mark the hit near an edge (+2000 if neither);
@@ -2500,17 +2506,15 @@ fn material_near_edge(rays: bool) -> String {
     )
 }
 /// The reading side: the images and the load.
-const MATERIAL_READ: &str = r#"@group(0) @binding(75) var rl_material0:texture_2d<u32>;
-@group(0) @binding(78) var rl_material1:texture_2d<u32>;
+const MATERIAL_READ: &str = r#"@group(0) @binding(75) var rl_material:texture_2d_array<u32>;
 // The record's shading normal and MQ2 hint, for the engine code after `surface` (the
 // specular filter's per-light `material_normal`, the entry's TR1 store).
 var<private> rl_material_n:vec3<f32>;
 var<private> rl_material_view_hint:f32;
 var<private> rl_material_use:bool;
-@group(0) @binding(74) var rl_material2:texture_2d<u32>;
 fn rl_material_load(pixel:vec2<i32>)->MaterialRecord {
-    let b=textureLoad(rl_material1,pixel,0);
-    let m=rl_mr_unpack(textureLoad(rl_material0,pixel,0),b);
+    let b=textureLoad(rl_material,pixel,0,0);
+    let m=rl_mr_unpack(textureLoad(rl_material,pixel,2,0),b);
     rl_material_n=m.normal;
     rl_material_view_hint=rl_mr_hint(b);
     return m;
@@ -2560,7 +2564,7 @@ pub(crate) fn material_variant_with(
             "    textureStore(primary_hdr,pixel,{field});\n    return;\n    let surface_output=surface(surface_input);\n"
         ),
         (MaterialRole::Write, _) if probe == Some(MaterialProbe::NoStore) => "    let surface_output=surface(surface_input);\n    rl_material_probe_store(pixel,material_out(surface_output,surface_input),surface_input);\n    return;\n".to_owned(),
-        (MaterialRole::Write, _) if probe == Some(MaterialProbe::Decode) => "    if rl_material_probe_input(surface_input)==0x9e3779b9u { textureStore(rl_material0,pixel,vec4<u32>(1u)); textureStore(rl_material1,pixel,vec4<u32>(1u)); textureStore(rl_material2,pixel,vec4<u32>(1u)); }\n    return;\n    let surface_output=surface(surface_input);\n".to_owned(),
+        (MaterialRole::Write, _) if probe == Some(MaterialProbe::Decode) => "    if rl_material_probe_input(surface_input)==0x9e3779b9u { textureStore(rl_material,pixel,2,vec4<u32>(1u)); textureStore(rl_material,pixel,0,vec4<u32>(1u)); textureStore(rl_material,pixel,1,vec4<u32>(1u)); }\n    return;\n    let surface_output=surface(surface_input);\n".to_owned(),
         (MaterialRole::Write, _) => "    let surface_output=surface(surface_input);\n    rl_material_store(pixel,material_out(surface_output,surface_input),surface_input,rl_mr_near_edge(record,receiver_world,array<vec3<f32>,3>(ta.position,tb.position,tc.position),surface_input.receiver.epsilon),tr1_view_hint(surface_output,surface_input,view_ray),source_front,lit_front);\n    return;\n".to_owned(),
         (MaterialRole::Read, None) if probe == Some(MaterialProbe::LoadPlus) => "    var surface_output=surface(surface_input);\n    let rl_probe=rl_material_load(pixel);\n    if rl_material_probe_record(rl_probe)==0x9e3779b9u { surface_output=material_in(rl_probe,surface_input); }\n".to_owned(),
         (MaterialRole::Read, None) if probe == Some(MaterialProbe::ReadPos) => "    if rl_material_probe_position(surface_input,receiver_world)==0x9e3779b9u { textureStore(primary_hdr,pixel,vec4<f32>(0.0)); }\n    return;\n    let surface_output=material_in(rl_material_load(pixel),surface_input);\n".to_owned(),
@@ -2617,7 +2621,7 @@ pub(crate) fn material_variant_with(
         let at = entry + composed.source[entry..].find(MISS)?;
         composed.source.replace_range(
             at..at + MISS.len(),
-            "textureStore(primary_hdr,pixel,vec4<f32>(select(9000.0,0.0,rl_mr_miss(textureLoad(rl_material1,pixel,0))),0.0,0.0,3.0));return;}",
+            "textureStore(primary_hdr,pixel,vec4<f32>(select(9000.0,0.0,rl_mr_miss(textureLoad(rl_material,pixel,0,0))),0.0,0.0,3.0));return;}",
         );
         if rays {
             composed.source.push_str(material_trace_helpers());
@@ -2713,13 +2717,12 @@ pub(crate) fn material_trace_writes() -> String {
     };
     format!(
         r#"// RENDERLAB_MATERIAL_PASS (program.rs material_trace_writes): the record's receiver words.
-@group(0) @binding(78) var rl_material1:texture_storage_2d<rgba32uint,write>;
-@group(0) @binding(74) var rl_material2:texture_storage_2d<rgba32uint,write>;
+@group(0) @binding(75) var rl_material:texture_storage_2d_array<rgba32uint,write>;
 {}{}{}{}
 {}
 {}
 // The miss sentinel (`rl_mr_miss`).
-fn rl_receiver_miss(p:vec2<i32>) {{ textureStore(rl_material1,p,RL_MR_MISS_WORD1); textureStore(rl_material2,p,vec4<u32>(0u)); }}
+fn rl_receiver_miss(p:vec2<i32>) {{ textureStore(rl_material,p,0,RL_MR_MISS_WORD1); textureStore(rl_material,p,1,vec4<u32>(0u)); }}
 // The interpolated vertex normal of a trace's hit, as shading's entry builds it, from the
 // vertex, index and normal-transform arrays (producers that have them).
 fn rl_mr_trace_vertex_normal(trace:PrimaryTrace)->vec3<f32> {{
@@ -2739,10 +2742,10 @@ fn rl_mr_trace_vertex_normal(trace:PrimaryTrace)->vec3<f32> {{
 // entry are one value (its lit front reduces to its source front), tested against the near
 // plane's point on this pixel's camera ray, which is on the eye's side of the receiver plane.
 fn rl_receiver_store(p:vec2<i32>,trace:PrimaryTrace,receiver:Receiver) {{
-    let front=dot(receiver.geometric,primary_ray(vec2<u32>(p),vec2<u32>(textureDimensions(rl_material1))).near-receiver.world)>=0.0;
+    let front=dot(receiver.geometric,primary_ray(vec2<u32>(p),vec2<u32>(textureDimensions(rl_material))).near-receiver.world)>=0.0;
     let w=rl_mr_receiver_words(receiver,rl_mr_trace_vertex_normal(trace),front,front,false);
-    textureStore(rl_material1,p,w.b);
-    textureStore(rl_material2,p,w.c);
+    textureStore(rl_material,p,0,w.b);
+    textureStore(rl_material,p,1,w.c);
 }}
 "#,
         wgsl_function(MATERIAL_PACKING, "rl_mr_oct"),
@@ -2776,7 +2779,7 @@ fn rl_material_plane_point(p:vec2<u32>,size:vec2<u32>,point:vec3<f32>,n:vec3<f32
     return ray.near+d*(dot(point-ray.near,n)/dot(d,n));
 }
 fn rl_material_input(pixel:vec2<i32>,id:vec2<u32>,size:vec2<u32>,material:Material)->SurfaceInput {
-    let b=textureLoad(rl_material1,pixel,0);let c=textureLoad(rl_material2,pixel,0);
+    let b=textureLoad(rl_material,pixel,0,0);let c=textureLoad(rl_material,pixel,1,0);
     let r=rl_mr_receiver(b,c,pixel);
     let source_front=((b.w>>30u)&1u)!=0u;let lit_front=(b.w>>31u)!=0u;
     let rg=select(r.geometric,-r.geometric,source_front);
@@ -2867,7 +2870,7 @@ const MATERIAL_PROBE_LEAN: [(&str, &str); 3] = [
 const MATERIAL_PROBE_STORE: &str = r#"fn rl_material_probe_store(pixel:vec2<i32>,m:MaterialRecord,input:SurfaceInput) {
     let w=rl_mr_pack(m,input,false,1.0,true,true);
     let h=w.a^(w.b*vec4<u32>(3u,5u,7u,11u))^(w.c*vec4<u32>(13u,17u,19u,23u));
-    if (h.x^h.y^h.z^h.w)==0x9e3779b9u { textureStore(rl_material0,pixel,w.a); textureStore(rl_material1,pixel,w.b); textureStore(rl_material2,pixel,w.c); }
+    if (h.x^h.y^h.z^h.w)==0x9e3779b9u { textureStore(rl_material,pixel,2,w.a); textureStore(rl_material,pixel,0,w.b); textureStore(rl_material,pixel,1,w.c); }
 }
 "#;
 // ---- end of material pass ----

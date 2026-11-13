@@ -403,7 +403,8 @@ pub struct ForwardImages {
     /// for any readback.
     pub deferred_reflections: Option<[Vec<u8>; 2]>,
     /// With `RENDERLAB_MATERIAL_DEBUG=receiver` only (the material record's cases): words 1 and
-    /// 2 of the material record (rgba32uint, 16 bytes a pixel each), read back after the frame,
+    /// 2 of the material record (its layers 0 and 1, rgba32uint, 16 bytes a pixel each), read
+    /// back after the frame,
     /// so a case can check pixels shading never visits (the miss sentinel on fast-cleared
     /// tiles) and compare producers.
     pub material_receiver: Option<[Vec<u8>; 2]>,
@@ -553,9 +554,10 @@ struct Deferred {
     scene: [u32; 4],
     /// That rectangle widened to whole trace tiles, as the region record holds it.
     region_rect: [u32; 4],
-    /// RENDERLAB_MATERIAL_PASS: the material record (program.rs MATERIAL_RECORD_BINDINGS), a
-    /// words 0, 1 and 2 as rgba32uint images of the frame's size; None while the pass is off.
-    material: Option<[Texture; 3]>,
+    /// RENDERLAB_MATERIAL_PASS: the material record (program.rs `MATERIAL_RECORD_BINDING`), one
+    /// rgba32uint 2D array of the frame's size: the receiver's two layers, and word 0's third
+    /// unless the trace writes the receiver alone (`tracetail`); None while the pass is off.
+    material: Option<Texture>,
     epsilon: Texture,
     frame: StorageBuffer,
     region: StorageBuffer,
@@ -858,15 +860,7 @@ fn provided<'a>(
         (0, 13) | (0, 7) => deferred.map(|d| &d.hit),
         (0, 20) | (0, 21) => deferred.map(|d| &d.tiles),
         (0, 23) => deferred.map(|d| &d.epsilon),
-        (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[0] => {
-            deferred?.material.as_ref().map(|m| &m[0])
-        }
-        (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[1] => {
-            deferred?.material.as_ref().map(|m| &m[1])
-        }
-        (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[2] => {
-            deferred?.material.as_ref().map(|m| &m[2])
-        }
+        (0, b) if b == crate::program::MATERIAL_RECORD_BINDING => deferred?.material.as_ref(),
         (0, 3) | (0, 16) => traced.map(|t| &t.world),
         (0, 4) | (0, 17) => traced.map(|t| &t.normal),
         (0, 5) | (0, 6) => traced.map(|t| &t.visibility),
@@ -2816,11 +2810,12 @@ fn frame(
             scene: rect,
             region_rect: region,
             material: if material_on {
-                Some([
-                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
-                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
-                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
-                ])
+                let layers = if crate::program::material_trace_tail() {
+                    crate::program::MATERIAL_RECEIVER_LAYERS
+                } else {
+                    crate::program::MATERIAL_RECORD_LAYERS
+                };
+                Some(Texture::array(gpu, size, layers, Format::Rgba32Uint, true, false)?)
             } else {
                 None
             },
@@ -4406,17 +4401,17 @@ fn frame(
     };
     // The material record's words 1 and 2, for its cases (RENDERLAB_MATERIAL_DEBUG=receiver).
     let material_read = match deferred.as_ref().and_then(|d| d.material.as_ref()) {
-        Some(words) if crate::program::material_receiver_check() => {
-            let mut read = |word: &Texture| {
-                transfer::readback(
-                    gpu,
-                    &mut graph,
-                    &mut rec,
-                    word.image,
-                    u64::from(word.size[0]) * u64::from(word.size[1]) * 16,
-                )
+        Some(record) if crate::program::material_receiver_check() => {
+            let layer = u64::from(record.size[0]) * u64::from(record.size[1]) * 16;
+            let layers = if crate::program::material_trace_tail() {
+                crate::program::MATERIAL_RECEIVER_LAYERS
+            } else {
+                crate::program::MATERIAL_RECORD_LAYERS
             };
-            Some([read(&words[1])?, read(&words[2])?])
+            Some((
+                transfer::readback(gpu, &mut graph, &mut rec, record.image, layer * u64::from(layers))?,
+                layer as usize,
+            ))
         }
         _ => None,
     };
@@ -4911,8 +4906,12 @@ fn frame(
             Some([a, b]) => Some([gpu.read(a)?, gpu.read(b)?]),
             None => None,
         },
+        // The array's layers in order: the receiver's (words 1 and 2) first.
         material_receiver: match material_read {
-            Some([a, b]) => Some([gpu.read(a)?, gpu.read(b)?]),
+            Some((buffer, layer)) => {
+                let bytes = gpu.read(buffer)?;
+                Some([bytes[..layer].to_vec(), bytes[layer..2 * layer].to_vec()])
+            }
             None => None,
         },
         reconstruction_history: history_read
@@ -4996,7 +4995,7 @@ fn frame(
             buffer.retire(gpu)?;
         }
         post_images.extend([deferred.hit, deferred.tiles, deferred.epsilon]);
-        post_images.extend(deferred.material.into_iter().flatten());
+        post_images.extend(deferred.material);
     }
     if let Some(traced) = traced {
         traced.scene.retire(gpu)?;

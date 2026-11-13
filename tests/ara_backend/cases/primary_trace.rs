@@ -125,16 +125,18 @@ fn production_primary_trace_and_receivers_native_replay_against_cpu() -> Result<
         (17, Format::Rgba32Float, f.size),
         (20, Format::R32Uint, f.dispatch()[..2].try_into()?),
         (23, Format::R32Float, f.size),
-        // RENDERLAB_MATERIAL_PASS=1: the trace also writes the material record's receiver
-        // words (the miss sentinel; with `tracetail` the receiver).
-        (74, Format::Rgba32Uint, f.size),
-        (78, Format::Rgba32Uint, f.size),
     ] {
         images.insert(
             key(0, binding),
             Texture::new(&mut gpu, size, format, true, false)?,
         );
     }
+    // RENDERLAB_MATERIAL_PASS=1: the trace also writes the material record's receiver layers
+    // (binding 75, one array: the miss sentinel; with `tracetail` the receiver).
+    images.insert(
+        key(0, 75),
+        Texture::array(&mut gpu, f.size, 3, Format::Rgba32Uint, true, false)?,
+    );
     let jobs = [
         (0usize, 0usize, Entry::Trace),
         (0, 1, Entry::Receivers),
