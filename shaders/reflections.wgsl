@@ -67,6 +67,10 @@ const RL_PASS:bool=false;
 fn rl_composite()->bool { return false; }
 fn rl_lobe_store(pixel:vec2<u32>,origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:vec3<f32>,alpha:f32,width:f32,spread:f32,count:u32) {}
 // ---- end of rl pass stubs ----
+// Whether this module's program reports its reflectance for the deferred composite (it declares
+// `const RL_DEFERRED`; src/program.rs deferred_variant sets it). Under the composite only such
+// programs leave their glossy lobes to the pass; every other program keeps its inline estimate.
+const RL_DEFERRED_PROGRAM:bool=false;
 // One closest-hit reflection ray: the hit record (x 0: a miss) and its distance (-1 for a miss).
 // Software heads trace the same ray in software (src/program.rs SOFTWARE_REFLECTION_SEAMS).
 struct RlCast {record:vec4<u32>,t:f32};
@@ -292,8 +296,9 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let rotation=f32(seed>>8u)*(1.0/16777216.0);
     let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
     // The reflection pass's lobe (RL_PASS): glossy receivers only; mirrors stay inline. With the
-    // composite, the glossy estimate comes after shading: rgb 0 here, the traced fraction kept.
-    if RL_PASS && !mirror {
+    // composite, the glossy estimate comes after shading: rgb 0 here, the traced fraction kept;
+    // a program that does not report its reflectance keeps the inline path (no lobe, no zero).
+    if RL_PASS && !mirror && (RL_DEFERRED_PROGRAM || !rl_composite()) {
         rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);
         if rl_composite() {rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;}
     }

@@ -377,6 +377,14 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
             source.contains("rl_deferred_clear(pixel);")
                 && source.contains("rl_deferred_store(pixel,input.world);")
         );
+        // The composite takes this program's glossy lobes; a program that does not report
+        // (toon) keeps its inline estimate.
+        assert!(source.contains("const RL_DEFERRED_PROGRAM:bool=true;"));
+        if !crate::program::rl_deferred() {
+            assert!(composed.contains("const RL_DEFERRED_PROGRAM:bool=false;"));
+        }
+        let toon = compose(head, toon, Stage::Traced, false).source;
+        assert!(toon.contains("const RL_DEFERRED_PROGRAM:bool=false;"));
         let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         naga::valid::Validator::new(
