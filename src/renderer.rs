@@ -3031,6 +3031,9 @@ impl Renderer {
         scene: SceneCounts,
         mut cpu: CpuFrame,
     ) -> Result<Option<FrameReport>, Error> {
+        // Measurement: the allocator report by resource label before this frame's work, after
+        // `self.frames` frames (src/memory_report.rs; 0 is the loaded scene alone).
+        crate::memory_report::maybe_write(&self.device, self.frames);
         // Both callers have admitted this slot. No camera/mode/lighting staging on busy.
         // Frames that move placements, geometry or poses: every view's fog history restarts
         // at its next frame (`prepare_atmosphere`).
