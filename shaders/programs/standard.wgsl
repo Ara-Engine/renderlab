@@ -122,8 +122,16 @@ fn scatter(s:Surface, input:SurfaceInput, wi:vec3<f32>, wo:vec3<f32>) -> vec3<f3
 fn material_out(s:Surface, input:SurfaceInput) -> MaterialRecord {
     return MaterialRecord(s.n,s.base,s.alpha,s.metal,s.rough,vec3<f32>(0.0),0.0,0.0,0u);
 }
+// By field, so a program built from this one with more Surface fields (Ara's emissive
+// program adds `glow`) still compiles; those fields stay zero.
 fn material_in(m:MaterialRecord, input:SurfaceInput) -> Surface {
-    return Surface(m.normal,m.base,m.metallic,m.roughness,m.alpha);
+    var s:Surface;
+    s.n=m.normal;
+    s.base=m.base;
+    s.metal=m.metallic;
+    s.rough=m.roughness;
+    s.alpha=m.alpha;
+    return s;
 }
 
 fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {

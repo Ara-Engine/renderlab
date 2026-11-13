@@ -424,3 +424,44 @@ fn material_pass_variants_compose_and_validate() {
     }
     assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 2);
 }
+
+/// Ara's emissive program is the standard program with a `glow` field added to `Surface`
+/// (crates/ara-renderlab/src/scene.rs `emissive_source`, these same three edits). It must keep
+/// composing and validating, alone and as both material-pass variants: a positional `Surface`
+/// constructor in the standard program broke it once.
+#[test]
+fn ara_emissive_edit_of_the_standard_program_still_composes() {
+    use crate::program::{MaterialRole, Stage, compose, material_variant};
+    let standard = crate::STANDARD_PROGRAM;
+    for edit in ["alpha:f32 };", "decal_mr.x,alpha);", "    return exposed;"] {
+        assert_eq!(standard.matches(edit).count(), 1, "Ara's edit point {edit}");
+    }
+    let emissive = format!(
+        "struct Parameters {{ glow:vec3<f32> }};\nconst DEFAULT_PARAMETERS:Parameters = Parameters(vec3<f32>(0.0));\n{}",
+        standard
+            .replace("alpha:f32 };", "alpha:f32, glow:vec3<f32> };")
+            .replace("decal_mr.x,alpha);", "decal_mr.x,alpha,params.glow);")
+            .replace(
+                "    return exposed;",
+                "    return min(exposed+exposed_product(s.glow,vec3<f32>(1.0)),vec3<f32>(65504.0));",
+            )
+    );
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    for head in &rt {
+        let composed = || compose(head, &emissive, Stage::Traced, true);
+        let mut sources = vec![composed().source];
+        for role in [MaterialRole::Write, MaterialRole::Read] {
+            sources.push(material_variant(composed(), &emissive, role).unwrap().source);
+        }
+        for source in &sources {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        }
+    }
+}
