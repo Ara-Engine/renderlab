@@ -19,6 +19,8 @@ pub(super) struct Atlas {
     resolution: u32,
     slots: u32,
     cube_layers: bool,
+    /// The texture's width and height (`lc::fitted_extent`): the tiles' bounding box.
+    extent: [u32; 2],
     clear: Option<Owned<wgpu::RenderPipeline>>,
     _allocation: Allocation,
 }
@@ -31,21 +33,19 @@ impl Atlas {
         resolution: u32,
         slots: u32,
         cube_layers: bool,
+        extent: [u32; 2],
     ) -> Self {
         let (size, layers) = if slots == 0 {
-            (1, 1)
+            ([1, 1], 1)
         } else {
-            (
-                lc::atlas_extent(resolution),
-                if cube_layers { 6 } else { 1 },
-            )
+            (extent, if cube_layers { 6 } else { 1 })
         };
         let texture = ledger.own(
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("LC1 local shadow maps"),
                 size: wgpu::Extent3d {
-                    width: size,
-                    height: size,
+                    width: size[0],
+                    height: size[1],
                     depth_or_array_layers: layers,
                 },
                 mip_level_count: 1,
@@ -108,7 +108,7 @@ impl Atlas {
             }
             uniforms = Some(buffer);
         }
-        let bytes = u64::from(layers) * 4 * u64::from(size).pow(2)
+        let bytes = u64::from(layers) * 4 * u64::from(size[0]) * u64::from(size[1])
             + uniforms.as_ref().map_or(0, |u| u.size());
         let clear = (slots > 0).then(|| {
             let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
@@ -158,6 +158,7 @@ impl Atlas {
             resolution,
             slots,
             cube_layers,
+            extent: size,
             clear,
             _allocation: ledger.allocate(AllocationKind::Shadow, bytes),
         }
@@ -347,7 +348,7 @@ pub(super) struct LocalMaps {
 impl LocalMaps {
     pub fn new(device: &PipelineDevice, ledger: &Ledger) -> Self {
         Self {
-            atlas: Atlas::new(device, ledger, None, 1, 0, false),
+            atlas: Atlas::new(device, ledger, None, 1, 0, false, [1, 1]),
             retired: vec![],
             generation: 0,
             keys: vec![],
@@ -585,9 +586,14 @@ impl Renderer {
                 .iter()
                 .flatten()
                 .any(|&i| lc::cube(&lights[i as usize]));
+            // The tiles' bounding box: a new tile beyond it grows the texture (every map is
+            // drawn again, at the same places); otherwise the texture keeps its size.
+            let extent = lc::fitted_extent(&shared.tiles, state.settings.resolution);
             if shared.atlas.slots != count
                 || shared.atlas.resolution != state.settings.resolution
                 || shared.atlas.cube_layers != cube_layers
+                || shared.atlas.extent[0] < extent[0]
+                || shared.atlas.extent[1] < extent[1]
             {
                 let next = Atlas::new(
                     &self.device,
@@ -596,6 +602,7 @@ impl Renderer {
                     state.settings.resolution,
                     count,
                     cube_layers,
+                    extent,
                 );
                 let old = std::mem::replace(&mut shared.atlas, next);
                 shared.retired.push((self.submissions, old));
@@ -722,7 +729,8 @@ impl Renderer {
             vec![1.0; stats.shadowed.len()]
         };
         stats.atlas_bytes = if maps {
-            6 * 4 * u64::from(lc::atlas_extent(shared.atlas.resolution)).pow(2)
+            let layers = if shared.atlas.cube_layers { 6 } else { 1 };
+            layers * 4 * u64::from(shared.atlas.extent[0]) * u64::from(shared.atlas.extent[1])
         } else {
             0
         };
