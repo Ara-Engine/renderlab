@@ -51,7 +51,7 @@ pub const VISIBILITY_RASTER_FEATURES: wgpu::Features =
 pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
     let storage = 13
         + u32::from(crate::program::cache_hits_rough().is_some())
-        + u32::from(crate::program::rl_pass_any());
+        + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
     wgpu::Limits {
         max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(5),
         max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(storage),
@@ -179,7 +179,7 @@ mod tests {
         // One more each while RENDERLAB_RL_CACHE_HITS or RENDERLAB_RL_PASS is set.
         let storage = 13
             + u32::from(crate::program::cache_hits_rough().is_some())
-            + u32::from(crate::program::rl_pass_any());
+            + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
         assert_eq!(limits.max_storage_buffers_per_shader_stage, storage);
         assert_eq!(limits.max_sampled_textures_per_shader_stage, 24);
         assert_eq!(

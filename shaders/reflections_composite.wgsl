@@ -17,7 +17,9 @@ const RL_LUMA:vec3<f32>=vec3<f32>(0.2126,0.7152,0.0722);
 }
 @fragment fn rl_composite_fs(@builtin(position) at:vec4<f32>)->@location(0) vec4<f32> {
     let p=vec2<i32>(at.xy);
-    let range=textureLoad(rl_ranges,p,0).xy;
+    // First slot << 5 | slot count (rl_trace_pixels).
+    let word=textureLoad(rl_ranges,p,0).x;
+    let range=vec2<u32>(word>>5u,word&31u);
     if range.y==0u {return vec4<f32>(0.0);}
     let reflectance=textureLoad(rl_reflectance,p,0);
     if !(reflectance.a>0.0) {return vec4<f32>(0.0);}

@@ -176,40 +176,29 @@ fn env_switch(name: &str) -> Option<bool> {
         _ => None,
     }
 }
-fn rl_pass_env() -> Option<bool> {
+pub(crate) fn rl_pass_env() -> Option<bool> {
     static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     *ON.get_or_init(|| env_switch("RENDERLAB_RL_PASS"))
 }
-fn rl_deferred_env() -> Option<bool> {
+pub(crate) fn rl_deferred_env() -> Option<bool> {
     static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     *ON.get_or_init(|| env_switch("RENDERLAB_RL_DEFERRED"))
 }
-/// The non-RT path's default for the compacted reflection pass and its deferred composite: on
-/// once a non-RT engine device that can hold them is created (`set_non_rt_pass_default`), off
-/// otherwise (RT, tests without an engine device, adapters below the pass's storage limits).
-static NON_RT_PASS_DEFAULT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-pub(crate) fn set_non_rt_pass_default(on: bool) {
-    let _ = NON_RT_PASS_DEFAULT.set(on);
+/// The mark a renderer whose device runs the compacted reflection pass by default (the non-RT
+/// path where the adapter holds it; reflection_pass.rs `default_on`) appends to its own traced
+/// shading heads. Composition reads it from the head, so the default belongs to that renderer:
+/// heads composed elsewhere (the Ara port, tests) carry no mark and keep the inline path.
+pub(crate) const PASS_HEAD_MARK: &str =
+    "\n// renderlab: this renderer runs the compacted reflection pass and its deferred composite\n";
+/// Whether a module composed on `source` (a head, or a module composed on one) runs the pass:
+/// RENDERLAB_RL_PASS when set, otherwise its renderer's mark.
+pub(crate) fn rl_pass_for(source: &str) -> bool {
+    rl_pass_env().unwrap_or(source.contains(PASS_HEAD_MARK))
 }
-/// Whether the compacted reflection pass runs on a path (`non_rt`: the non-RT path's software
-/// reflections; RT keeps the inline loop unless RENDERLAB_RL_PASS=1).
-pub(crate) fn rl_pass(non_rt: bool) -> bool {
-    rl_pass_env().unwrap_or(non_rt && NON_RT_PASS_DEFAULT.get().copied().unwrap_or(false))
-}
-/// Whether the path's reporting programs hand their glossy reflections to the deferred
-/// composite: RENDERLAB_RL_DEFERRED when set, otherwise with the non-RT pass's default.
-pub(crate) fn rl_deferred_for(non_rt: bool) -> bool {
-    rl_deferred_env().unwrap_or(non_rt && rl_pass(non_rt))
-}
-/// Either path may run the pass in this process (device limits ask for its bindings).
-pub(crate) fn rl_pass_any() -> bool {
-    rl_pass(true) || rl_pass(false)
-}
-/// A composed module's (or head's) path: hardware heads declare their TLAS; non-RT heads do not.
-pub(crate) fn non_rt_source(source: &str) -> bool {
-    !["hardware_scene", "fresh_scene"]
-        .into_iter()
-        .any(|name| source.contains(&format!("var {name}:acceleration_structure;")))
+/// Whether reporting programs composed on `source` hand their glossy reflections to the deferred
+/// composite: RENDERLAB_RL_DEFERRED when set, otherwise its renderer's mark.
+pub(crate) fn rl_deferred_for(source: &str) -> bool {
+    rl_deferred_env().unwrap_or(source.contains(PASS_HEAD_MARK))
 }
 /// `rl_trace`'s module on a traced shading `head`: the standard program's traced composition
 /// (the reflection block's helpers, with its stubs) and the trace entries.
@@ -234,7 +223,7 @@ fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Comp
 /// stubs, each while its switch is on (wgpu primary shading modules only). Unset, the module's
 /// text is the default's (reflections.wgsl as composed).
 pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
-    let composed = if rl_pass(non_rt_source(&composed.source)) {
+    let composed = if rl_pass_for(&composed.source) {
         pass_block(composed)
     } else {
         composed
@@ -242,11 +231,12 @@ pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
     with_history_block(composed)
 }
 /// reflections.wgsl's lobe store, and its replacement under the pass: with the deferred
-/// composite a reporting program's glossy receiver leaves its estimate to the composite (rgb 0,
-/// the traced fraction kept); every other program keeps the inline path (no lobe, no zero).
+/// composite a reporting program's glossy receiver that fits the room (`rl_room_reserve`) leaves
+/// its estimate to the composite (rgb 0, the traced fraction kept); every other program, and a
+/// receiver that does not fit, keeps the inline path (no lobe, no zero).
 const PASS_GATE: [&str; 2] = [
     "    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}\n",
-    "    if RL_PASS && !mirror && (RL_DEFERRED_PROGRAM || !rl_composite()) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        if rl_composite() {rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;}\n    }\n",
+    "    if RL_PASS && !mirror && (RL_DEFERRED_PROGRAM || !rl_composite()) && (!rl_composite() || rl_room_reserve(count)) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        if rl_composite() {rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;}\n    }\n",
 ];
 const DEFERRED_PROGRAM_FLAG: [&str; 2] = [
     "const RL_DEFERRED_PROGRAM:bool=false;",
@@ -917,7 +907,7 @@ fn compose_stage(
         // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
         source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
-        if rl_deferred_for(non_rt_source(head)) && declares(program, "const", "RL_DEFERRED") {
+        if rl_deferred_for(head) && declares(program, "const", "RL_DEFERRED") {
             return deferred_variant(Composed {
                 source,
                 program: program_range,

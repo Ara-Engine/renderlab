@@ -81,28 +81,52 @@ fn large_buffers(adapter: &wgpu::Limits) -> wgpu::Limits {
     wgpu::Limits {
         max_buffer_size: adapter.max_buffer_size,
         max_storage_buffer_binding_size: adapter.max_storage_buffer_binding_size,
-        // U-RTVIS: the deferred reflection composite's shading stage writes the HDR target, the
-        // reflection history, its lobe output (2), the hit samples and RL#79's two side outputs:
-        // more storage textures than the 5 the paths ask for. Take what the adapter allows, capped
-        // (the RTX allows far more); visibility_limits and traced_limits still raise to their own
-        // floors where an adapter reports less.
-        // Only with the composite (the non-RT default, or RENDERLAB_RL_DEFERRED=1): otherwise the
-        // device keeps the default limits.
-        ..if crate::program::rl_deferred_for(true) || crate::program::rl_deferred_for(false) {
-            wgpu::Limits {
-                max_storage_textures_per_shader_stage: adapter.max_storage_textures_per_shader_stage.min(16),
-                max_storage_buffers_per_shader_stage: adapter.max_storage_buffers_per_shader_stage.min(24),
-                ..Default::default()
-            }
-        } else {
-            Default::default()
-        }
+        ..Default::default()
     }
 }
 fn non_rt_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
-    crate::visibility_limits(large_buffers(adapter))
+    // U-RTVIS: the non-RT renderer runs the compacted reflection pass and its deferred composite
+    // by default where the adapter holds their bindings (reflection_pass.rs `default_on` reads
+    // the device's limits); RENDERLAB_RL_PASS=0 keeps the visibility path's own limits.
+    let limits = crate::visibility_limits(large_buffers(adapter));
+    if crate::program::rl_pass_env() == Some(false) {
+        return limits;
+    }
+    pass_limits(limits, adapter)
+}
+/// `limits` raised for the reflection pass and composite where `adapter` holds them (otherwise
+/// unchanged, and the renderer keeps the inline path).
+fn pass_limits(limits: wgpu::Limits, adapter: &wgpu::Limits) -> wgpu::Limits {
+    use crate::renderer::primary_ray_gpu::reflection_pass::{STORAGE_BUFFERS, STORAGE_TEXTURES};
+    let buffers = crate::visibility_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage
+        + STORAGE_BUFFERS;
+    let fits = adapter.max_storage_buffers_per_shader_stage >= buffers
+        && adapter.max_storage_textures_per_shader_stage >= STORAGE_TEXTURES;
+    if !fits {
+        return limits;
+    }
+    // What the adapter allows, capped (the RTX allows far more): the composite's shading stage
+    // writes the HDR target, the reflection history, its lobes and RL#79's outputs, beside H, R
+    // and the counters.
+    wgpu::Limits {
+        max_storage_buffers_per_shader_stage: limits
+            .max_storage_buffers_per_shader_stage
+            .max(adapter.max_storage_buffers_per_shader_stage.min(24)),
+        max_storage_textures_per_shader_stage: limits
+            .max_storage_textures_per_shader_stage
+            .max(adapter.max_storage_textures_per_shader_stage.min(16)),
+        ..limits
+    }
 }
 fn rt_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
+    // RT keeps the inline loop; RENDERLAB_RL_PASS=1 asks for the pass's bindings too (A/B).
+    let limits = rt_path_limits(adapter);
+    if crate::program::rl_pass_env() == Some(true) {
+        return pass_limits(limits, adapter);
+    }
+    limits
+}
+fn rt_path_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
     crate::traced_limits(wgpu::Limits {
         max_blas_primitive_count: adapter.max_blas_primitive_count,
         max_blas_geometry_count: 1,
@@ -121,16 +145,6 @@ pub(crate) fn request_device(
     path: RenderPath,
 ) -> Result<(wgpu::Device, wgpu::Queue), Error> {
     let limits = adapter.limits();
-    // U-RTVIS: the non-RT path runs the compacted reflection pass and its deferred composite by
-    // default where the adapter holds their bindings (one more storage buffer than the
-    // visibility path's 13, cache hits aside; the composite's storage textures). Set before the
-    // limits below read it. RENDERLAB_RL_PASS=0 forces it off.
-    if path == RenderPath::NonRt {
-        crate::program::set_non_rt_pass_default(
-            limits.max_storage_buffers_per_shader_stage >= 15
-                && limits.max_storage_textures_per_shader_stage >= 12,
-        );
-    }
     // PRIMITIVE_INDEX: per-pixel pane shading's id raster (src/transparency_panes.rs).
     let optional = adapter.features()
         & (wgpu::Features::TIMESTAMP_QUERY
