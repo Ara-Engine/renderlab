@@ -40,7 +40,7 @@ Units running tonight (2026-11-13), each behind a switch, default off:
 | the Mac (`t3/material-pass`) | P1 material record | `RENDERLAB_MATERIAL_PASS=1` | bindings 75, 78 |
 | U-GIPASS | P2 GI receiver lookup | `RENDERLAB_GI_PASS` | binding 68, prepared SH (sky L2 + bounce L1), 48 B/px |
 | U-LVIS | P3a local-light visibility | `RENDERLAB_LIGHT_VIS_PASS` | binding 73, unorm8 x 16 slots |
-| U-SUNRT | P3b RT sun visibility (merged, #94) | `RENDERLAB_SUN_PASS` | no binding of its own (reuses `primary_trace_receivers` / `primary_vb_sun`); 80+ if one is ever needed |
+| U-SUNRT | P3b RT sun visibility (PR #94, default off) | `RENDERLAB_SUN_PASS` | no binding of its own (reuses `primary_trace_receivers` / `primary_vb_sun`); 80+ if one is ever needed |
 | U-RTVIS | P4 reflections (S1) | `RENDERLAB_RL_PASS`, `RENDERLAB_RL_DEFERRED` (non-RT default on the list head) | glossy list 56, room counters 69, receiver epsilon 79 |
 
 A program with its own `shade` keeps today's single kernel as the fallback: it runs in its own
