@@ -793,7 +793,8 @@ impl Engine {
     /// Replaces the local lights (point and spot). The most important lights shadow
     /// automatically; `source_radius` sets their penumbra size (zero keeps hard shadows).
     pub fn set_lights(&mut self, lights: &[Light]) -> Result<(), Error> {
-        let previous = std::mem::replace(&mut self.state.lights, lights.to_vec());
+        let lights = lights_multiplied(lights);
+        let previous = std::mem::replace(&mut self.state.lights, lights);
         self.apply_lighting()
             .inspect_err(|_| self.state.lights = previous)
     }
@@ -1135,4 +1136,48 @@ fn stash(kept: &mut Events, new: Events) {
     keep(&mut kept.gpu, new.gpu, &mut kept.dropped);
     kept.dropped += new.dropped;
     kept.poll_cpu += new.poll_cpu;
+}
+
+/// `RENDERLAB_LIGHTS_X=N` (measurement only, never merged): each local light becomes N copies
+/// at 1/N of its candela, offset by up to 5 cm in a small spiral, so the light loop and local
+/// shadows do N times the work while the picture stays about as bright.
+fn lights_multiplied(lights: &[Light]) -> Vec<Light> {
+    let n = std::env::var("RENDERLAB_LIGHTS_X")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|n| *n > 1);
+    let Some(n) = n else {
+        return lights.to_vec();
+    };
+    let offset = |k: u32| {
+        let a = k as f32 * 2.399_963;
+        let r = 0.05 * (k as f32 / n as f32).sqrt();
+        glam::Vec3::new(r * a.cos(), r * a.sin(), 0.5 * r * (a * 0.5).sin())
+    };
+    let scale = |c: [f32; 3]| c.map(|v| v / n as f32);
+    lights
+        .iter()
+        .flat_map(|light| {
+            (0..n).map(move |k| match *light {
+                Light::Point { position, candela, range, source_radius, cast_shadows } => Light::Point {
+                    position: position + offset(k),
+                    candela: scale(candela),
+                    range,
+                    source_radius,
+                    cast_shadows,
+                },
+                Light::Spot { position, travel, candela, range, inner, outer, source_radius, cast_shadows } => Light::Spot {
+                    position: position + offset(k),
+                    travel,
+                    candela: scale(candela),
+                    range,
+                    inner,
+                    outer,
+                    source_radius,
+                    cast_shadows,
+                },
+                other => other,
+            })
+        })
+        .collect()
 }
