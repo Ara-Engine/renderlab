@@ -146,7 +146,7 @@ pub(crate) fn test_record_capture(kind: &str, bytes: &[u8]) {
 /// were alive. For finding out whether a submit waits on an older frame (a pipelined present).
 /// `1` prints to stderr; any other value is a file the lines are appended to (for a host that
 /// does not forward stderr).
-fn submit_log(line: impl FnOnce() -> String) {
+pub(crate) fn submit_log(line: impl FnOnce() -> String) {
     static ON: OnceLock<Option<String>> = OnceLock::new();
     let Some(target) = ON
         .get_or_init(|| std::env::var("RENDERLAB_SUBMIT_LOG").ok().filter(|v| !v.is_empty()))
