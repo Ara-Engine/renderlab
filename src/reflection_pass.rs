@@ -45,7 +45,9 @@ fn room_fixed() -> Option<u64> {
     })
 }
 /// Measurement: `RENDERLAB_RL_ROOM_LOG=PATH` appends each read-back frame's counters (requested
-/// strata, slots, receivers that did not fit, the room) to PATH, one JSON line a frame.
+/// strata, slots, receivers that did not fit, the room) and the device's memory at that moment
+/// (hal buffer and texture bytes and object counts, the allocator's bytes) to PATH, one JSON
+/// line a frame: an in-clip creep shows which kind of resource grows.
 fn room_log() -> Option<&'static str> {
     static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     PATH.get_or_init(|| std::env::var("RENDERLAB_RL_ROOM_LOG").ok()).as_deref()
@@ -918,8 +920,24 @@ impl Renderer {
                     requested = requested.max(u64::from(word(2)));
                     if let Some(path) = room_log() {
                         use std::io::Write;
+                        let hal = self.device.get_internal_counters().hal;
+                        let allocator = self
+                            .device
+                            .generate_allocator_report()
+                            .map_or((0, 0), |a| (a.total_allocated_bytes, a.total_reserved_bytes));
+                        let memory = format!(
+                            ",\"buffer_bytes\":{},\"texture_bytes\":{},\"buffers\":{},\"textures\":{},\"bind_groups\":{},\"allocations\":{},\"allocated_bytes\":{},\"reserved_bytes\":{}",
+                            hal.buffer_memory.read(),
+                            hal.texture_memory.read(),
+                            hal.buffers.read(),
+                            hal.textures.read(),
+                            hal.bind_groups.read(),
+                            hal.memory_allocations.read(),
+                            allocator.0,
+                            allocator.1
+                        );
                         let line = format!(
-                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"traced_under_5pc\":[{},{}],\"contribution_under_0005\":[{},{}]}}\n",
+                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"traced_under_5pc\":[{},{}],\"contribution_under_0005\":[{},{}]{memory}}}\n",
                             r.frame.load(SeqCst),
                             word(2),
                             word(1),

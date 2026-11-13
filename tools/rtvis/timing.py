@@ -492,8 +492,9 @@ PLANS["rtbisect"] = [
 # respawn under a still camera (hold=cut; the event at frame 24), and RT unset vs off (identity).
 OFF = {"RENDERLAB_RL_PASS": "0"}
 PLANS["comp5"] = (
-    [(f"q-nonrt-{name}-{tag}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "60"],
-      env | ({"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"comp5-{name}.json")} if tag == "default" else {}))
+    [(f"q-nonrt-{name}-{tag}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "120"],
+      env | ({"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"comp5-{name}.json"),
+              "RENDERLAB_RL_ROOM_LOG": str(PROBE_DIR / f"comp5-{name}-memory.jsonl")} if tag == "default" else {}))
      for name, extra in (("flight", []), ("night", ["--night-lanterns"])) for tag, env in (("default", {}), ("off", OFF))]
     + [(f"p-nonrt-{name}-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "40", "--every", "1"],
         {} if v == "1" else OFF)
