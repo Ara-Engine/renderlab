@@ -1172,3 +1172,25 @@ TR1's resolve (shaders/temporal_resolve.wgsl, one dispatch `tr1_resolve`, about 
 Candidate cuts, both picture-sensitive (motion, disocclusion and cut crops):
 1. One bicubic fetch from a filtered colour history (5 bilinear taps, as common TAA does) instead of 4 + 12 point taps, with the depth test on the 2x2 footprint only.
 2. Skip the anchor depth test for pixels whose own surface is unmoved and whose 2x2 footprint shows the same placement this frame and last.
+
+## Local-light shadows at reflection hits: dropped on glossy lobes (`LocalShadows::unshadowed_hits_from`, RL#85, 2026-11-13)
+
+Reflection hits trace a shadow ray for every shadowed local light. Glossy lobes average a missing local shadow away; near-mirror lobes show it. So hits from lobes at least 0.3 rough (perceptual) light local lights unshadowed. The sun keeps its ray, and camera receivers keep every shadow.
+
+- **Why not every hit.** On the RTX night lanterns (game_scene RT), dropping them at every hit saved 2.08 ms of shading (9.47 → 7.39) but lifted the chrome (roughness 0.02) and gold (0.25) spheres' reflected lantern shadows: about 1% of pixels over 8 codes, max 118.
+- **Why 0.3.** 0.2 would have left gold's hits unshadowed. 0.3 sits above gold and inside R1's fully traced band (to 0.35).
+- **Why not a per-hit contribution cut.** Deciding per hit cost another walk of the hit's lights. That was +5.3 ms with the bisection form and +1.17 ms with the one-walk form in Outpost's hangar, which cut nothing.
+
+| Shading ms | never (2) | 0.2 | default 0.3 | every hit (0) |
+|---|---|---|---|---|
+| M5 Showcase | 17.56 | 16.53 | 16.60 | 16.37 |
+| M5 Outpost | 24.92 | 24.76 | | 24.77 |
+| M5 Outpost hangar | 27.35 | 25.63 | 26.19 | 25.63 |
+| RTX game_scene night lanterns | 9.49 | | 8.57 | 7.39 (never 9.47) |
+| RTX game flight | 5.18 | | 4.90 | |
+
+**Pictures at the default:**
+- M5 scenes: at most 0.1% of pixels move by one code.
+- RTX night lanterns: the worst frame has 0.01% of pixels over 8 codes (max 65), scattered over glossy crates and the arch, with both mirror spheres unchanged at 1:1.
+- RTX game flight: max 8 codes.
+- 0.35 gave the same picture at 8.62 ms.

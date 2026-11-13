@@ -414,6 +414,9 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
             "traced {k}"
         );
         assert!(module.contains("let samples=select(1u,max(rl_local_rays,4u),radius>0.0);"));
+        // Reflection hits from rough enough lobes skip local shadows
+        // (`LocalShadows::unshadowed_hits_from`).
+        assert!(module.contains("if rl_reflection_hit && lights[s.index].kind.w!=0u && rl_light_frame.far.z!=0.0 && rl_hist_rough+1.0>=rl_light_frame.far.z { return 1.0; }"));
         validate(&format!("traced {k}"), &module);
     }
     let non_rt = primary_ray_gpu::non_rt_sources(SOURCE).unwrap().1;
