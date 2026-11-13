@@ -278,10 +278,13 @@ pub(crate) fn lighting(
             travel: sun.travel,
             lux: sun.illuminance,
         });
-        // Cascade ends for the raster shadow maps the paths still build for coverage;
-        // traced and Virtual visibility are not bounded by them (the shipping split set).
+        // Cascade ends (the shipping split set). The last end is every sun lookup's coverage
+        // limit: traced rays, the Virtual/Disk lookups and the raster maps all shade a
+        // receiver farther from the camera as fully lit (fresh_estimate's FRESH_SKIP). The
+        // 1 km cascade carries game-scale sun shadows (Glint's pylons on its clouds, at
+        // 40-150 m, were unshadowed under a 40 m end); the near three keep their texels.
         requests.push(ShadowRequest::Directional {
-            split_ends: vec![4.0, 12.0, 40.0],
+            split_ends: vec![4.0, 12.0, 40.0, 1000.0],
         });
         requests.extend(lights.iter().map(|_| ShadowRequest::None));
     }
