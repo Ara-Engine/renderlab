@@ -626,7 +626,7 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
         return uploads;
     };
     if cache.key.len() != draws.len()
-        || !cache.key.iter().zip(draws).all(|((data, count), d)| {
+        || !cache.key.iter().zip(draws).all(|((data, count, _), d)| {
             d.mesh.clusters.as_ref().is_some_and(|c| {
                 std::ptr::eq(data.as_ptr(), Arc::as_ptr(&c.data)) && *count == d.instances.len()
             })
@@ -644,6 +644,8 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
             let b = d.mesh.bounds;
             let mut data = Vec::with_capacity(mesh.clusters.len() * d.instances.len() * 16);
             for instance in 0..d.instances.len() {
+                // The whole record again, with its casts-no-shadow word (`ClusterInstances`).
+                let no_shadow = u32::from(!d.instances.state.casts_shadows(instance));
                 for c in &mesh.clusters {
                     data.extend(b.min.map(f32::to_bits));
                     data.push(c.vertices);
@@ -659,7 +661,7 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
                         c.primitives,
                         c.counts,
                         placement + instance as u32,
-                        0,
+                        no_shadow,
                         0,
                         0,
                     ]);
