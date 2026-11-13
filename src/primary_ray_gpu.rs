@@ -416,6 +416,9 @@ impl super::view::ViewState {
         if let Some(state) = &mut self.reconstruction_state {
             state.plan.cut = true;
         }
+        if let Some(state) = &mut self.virtual_shadows {
+            state.cut();
+        }
     }
 }
 impl Renderer {
