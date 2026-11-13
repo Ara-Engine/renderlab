@@ -35,8 +35,16 @@ pub(super) fn layout_entry() -> wgpu::BindGroupLayoutEntry {
     )
 }
 /// One composition seam; the disabled branch returns the original module untouched.
-pub(crate) fn apply(mut composed: program::Composed, traced: bool) -> program::Composed {
-    if !traced || !on() || composed.source.contains("struct FilmFrame") {
+pub(crate) fn apply(composed: program::Composed, traced: bool) -> program::Composed {
+    apply_enabled(composed, traced && on())
+}
+fn apply_enabled(mut composed: program::Composed, enabled: bool) -> program::Composed {
+    // Glass hit modules truncate the camera entry and have no cache binding. Their
+    // receivers are secondary hits, so keep their visibility inline, like film.
+    if !enabled
+        || composed.source.contains("struct FilmFrame")
+        || composed.source.contains("fn rl_glass_requires_incident(")
+    {
         return composed;
     }
     let marker = "// ---- program ----\n";
@@ -167,7 +175,9 @@ mod tests {
             for head in heads {
                 for source in [crate::STANDARD_PROGRAM, PASS_PROGRAM] {
                     let c = program::compose(&head, source, Stage::Traced, false);
-                    let source = entry_enabled(compose_enabled(c.source, true), true);
+                    let c = if on() { c } else { apply_enabled(c, true) };
+                    assert_eq!(&c.source[c.program.clone()], source);
+                    let source = c.source;
                     let module = naga::front::wgsl::parse_str(&source)
                         .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
                     naga::valid::Validator::new(
@@ -179,6 +189,29 @@ mod tests {
                 }
             }
         }
+    }
+    #[test]
+    fn glass_hits_remain_inline() {
+        let head = transparent_reflection_head(include_str!("../shaders/scene.wgsl")).unwrap();
+        let program = program::glass_hit_program(crate::STANDARD_PROGRAM);
+        let c = apply_enabled(
+            program::compose(&head, &program, Stage::Traced, false),
+            true,
+        );
+        assert!(!c.source.contains("fn rl_lvis_lookup("));
+        let source = super::super::super::transparency_gpu::reflection::source(
+            &head,
+            crate::STANDARD_PROGRAM,
+            false,
+        );
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
     }
     #[test]
     fn off_is_byte_identical_and_on_has_one_seam() {
