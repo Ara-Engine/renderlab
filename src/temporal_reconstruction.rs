@@ -880,7 +880,17 @@ impl PrimaryState {
                     texture(21, uint),
                     read(40, FRAME_BUFFER_BYTES as u64),
                     texture(41, float),
-                    texture(42, float),
+                    // Filterable, and a linear sampler at 49, for measurement variants that fetch the
+                    // colour history with hardware bilinear taps (RENDERLAB_TR1_SHADER); the
+                    // shipped resolve reads it with textureLoad. Rgba32Float filters on both paths
+                    // (RECEIVER_FEATURES carries FLOAT32_FILTERABLE).
+                    texture(42, wgpu::TextureSampleType::Float { filterable: true }),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 49,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                     texture(43, uint),
                     image(44, F::Rgba32Float),
                     image(45, F::Rg32Uint),
@@ -2121,6 +2131,12 @@ impl Renderer {
         let frame = &primary.frame.as_ref().unwrap().0.value;
         let hdr = &self.view.hdr.as_ref().unwrap().resolved;
         let out = self.view.upscale.as_ref().map_or(hdr, |u| &u.hdr);
+        let linear = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("temporal reconstruction history, linear"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         [0, 1].map(|written| {
             let read = 1 - written;
             let entries = [
@@ -2136,6 +2152,7 @@ impl Renderer {
                 (47, R::TextureView(&state.layer[read].view)),
                 (48, R::TextureView(&state.layer[written].view)),
                 (46, R::TextureView(&out.view)),
+                (49, R::Sampler(&linear)),
             ]
             .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource });
             self.ledger.own(
