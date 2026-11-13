@@ -981,6 +981,49 @@ const HITS_MINE_LIST: &str = "struct RlList { slot:u32, base:u32, capacity:u32, 
 // ---- MP1 per-program dispatch (docs/m7-mp1.md) ----
 /// The tile-list shading entry of mixed-program frames (`primary_shade_list`).
 const TRACED_LIST_ENTRY: &str = include_str!("../shaders/program_traced_list.wgsl");
+/// `RENDERLAB_LIST_LANES`: lanes per list-shading workgroup, 16 (one 4x4 list entry), 32 (two,
+/// the default since M8-LIST-LANES-32) or 64 (four entries, one per z slice). Warps and SIMD
+/// groups are 32 wide and never span workgroups, so 16 leaves half of every one idle. Each entry
+/// is still shaded by exactly one slice, so the picture does not depend on it. The binning
+/// kernel's indirect arguments follow (`program_lists::bin_source`).
+pub(crate) fn list_entries_per_group() -> u32 {
+    static PER: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *PER.get_or_init(|| match std::env::var("RENDERLAB_LIST_LANES").as_deref() {
+        Ok("16") => 1,
+        Err(_) | Ok("32") => 2,
+        Ok("64") => 4,
+        Ok(other) => {
+            eprintln!("RENDERLAB_LIST_LANES: `{other}` is not 16, 32 or 64; using 32");
+            2
+        }
+    })
+}
+/// The list entry with `per` list entries per workgroup (`list_entries_per_group`).
+pub(crate) fn list_entry(per: u32) -> String {
+    if per == 1 {
+        return TRACED_LIST_ENTRY.to_owned();
+    }
+    let mut source = TRACED_LIST_ENTRY.to_owned();
+    for (find, replace) in [
+        (
+            "@compute @workgroup_size(4,4) fn primary_shade_list(",
+            format!("@compute @workgroup_size(4,4,{per}) fn primary_shade_list("),
+        ),
+        (
+            "    let index=group.x+group.y*RL_LIST_ROW;\n",
+            format!("    let index=(group.x+group.y*RL_LIST_ROW)*{per}u+local.z;\n"),
+        ),
+        // A clear block's 16 columns: one per lane of the entry's own slice.
+        (
+            "vec2<u32>(lane,0u)",
+            "vec2<u32>(local.x+local.y*4u,0u)".to_owned(),
+        ),
+    ] {
+        assert_eq!(source.matches(find).count(), 1, "list lanes: {find}");
+        source = source.replacen(find, &replace, 1);
+    }
+    source
+}
 /// R1's hit shading loads the hit's parameter block, which belongs to the hit's program.
 // TP2 integration: match the call independently of LF/CRLF checkout endings.
 const LIST_HIT_PARAMETERS_SEAM: &str = "rl_load_parameters(h.batch);";
@@ -1004,7 +1047,7 @@ pub(crate) fn compose_list(head: &str, program: &str, stage: Stage, parameters: 
     let (engine, rest) = source.split_at(range.start);
     let edited = engine.replacen(LIST_HIT_PARAMETERS_SEAM, LIST_HIT_PARAMETERS, 1);
     let shift = edited.len() - engine.len();
-    source = format!("{edited}{rest}{TRACED_LIST_ENTRY}");
+    source = format!("{edited}{rest}{}", list_entry(list_entries_per_group()));
     Composed {
         source,
         program: range.start + shift..range.end + shift,
