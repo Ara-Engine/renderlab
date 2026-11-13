@@ -136,3 +136,108 @@ The non-RT forest turn's cut frame took 65.6 ms with the refill on against 96.4 
 contention guard tripped on the last clip (RT game still, refill off), so the RT game row and
 blobs.py are missing. Parked: the cut-frame saving is about a third of the off cost, and edge
 convergence is still behind.
+
+## Bounded software refill experiment (2026-11-13, default off)
+
+`RENDERLAB_GI_BOUNDED_REFILL=1` keeps software claim and gather budgets active, including
+after the old 32/64-frame cut windows. Small queues naturally fit without deferral. Hardware
+planning and shader composition stay unchanged; switch-off software composition also stays
+unchanged. There is no new per-pixel record, binding or allocation.
+
+The existing 32,768 default is **cells per frame on average**, not rays. The slot rotation
+can overshoot it, especially when the pixel-priority path adds a quarter budget for background
+cells. A cell traces up to 64/128 fixed directions plus up to `near_light_rays + 1` rays per
+eligible local light. This explains why the cap does not imply a small post-cut ray cost.
+
+The experiment uses the existing full-direction claim refill (no coarse pixel footprint or
+partial sky) and parent-bounce stand-in. Its gather target is `cut_gather_ms` (3 when unset),
+using the existing 1,000 software cells/ms calibration. That is a tuning estimate, **not a
+time guarantee**. A smaller explicit `gather_cells` remains effective. A frame-local ticket
+in spare work-counter word 47 enforces the target as a hard ceiling on admitted software
+gathers, after the existing slot/pixel selection. Header word 32 carries the ceiling. Rejected
+cells retain their gather count and requeue. The still-view idle allowance accounts for the
+smaller budget so it does not stop while the longer queue is still draining.
+
+This bounds work instead of dropping rays from an admitted cell. Bounce can still settle
+more slowly; the earlier forest edge regression above remains a specific picture risk.
+Outpost needs off/on cut and post-cut timing, per-frame admission counts, and frame-matched
+picture/settling comparisons before any default change.
+
+### Budget and the waiting picture
+
+On software, the ceiling is `max(64, floor(cut_gather_ms * 1000))` cells per frame,
+reduced by a smaller explicit `gather_cells`. With only the switch set it is 3,000.
+`RENDERLAB_GI=cut_gather_ms=3;parent_standin=1` remains the existing comparison:
+its time-derived target expires after 64 cut frames and has no hard admission ticket.
+The bounded switch also keeps the default 20,480-cell claim target active. Neither target
+is a wall-time deadline or a ray limit; geometry and nearby lights change each cell's cost.
+
+An admitted gather keeps the default directions, stride, near-light rays and SH reduction.
+A rejected candidate is requeued without consuming a gather. Total work is not guaranteed
+identical: changing the schedule changes when secondary cells are requested, retries and
+early completion, and how long still-view work remains active. The parent stand-in changes
+the temporary value, not an admitted cell's ray count.
+
+A waiting pixel reads existing valid cache values. A new cell can copy a valid same-bin
+parent's bounce until its first gather. The lookup fills missing bounce from available
+coarser levels; if no bounce value exists it contributes zero. If no agreeing sky value
+exists either, the fallback is open-environment irradiance. This is not a guarantee against
+dark or blotchy waiting pixels; their duration must be checked in the post-cut images.
+
+There is no default frame-40 queue flush. New secondary requests can first grow the queue;
+later a shrinking queue can cross a slot-period boundary and admit more cells per frame.
+The cliff then comes when the queue drains. Timelines must join pass samples by renderer
+frame ID: the optional pass log can omit in-flight frames and complete them out of order.
+
+### Measured fixture limits (RTX 4070 SUPER, 1920 x 1080)
+
+Two interleaved visits per configuration and path, 400 still frames before the cut; the
+next 40 frames have complete GPU timestamp coverage joined by renderer frame ID. Timing
+used isolated `--timing` leases, no PNG/counter readbacks, and an explicit per-frame drain
+to retain every timestamp. These are drained GPU service times, not normal pipelined wall
+throughput. Pictures/counters were separate ordinary leases. Binary base: main `91b4527b`
+plus this experiment and the example measurement controls (build `772198af`).
+
+`settings` is `RENDERLAB_GI=cut_gather_ms=3;parent_standin=1`; `bounded` sets only
+`RENDERLAB_GI_BOUNDED_REFILL=1`. Default leaves both unset. Values pool the two visits.
+
+| Path / fixture | Configuration | Worst frame ms | p95 frame ms | Worst gather ms |
+|---|---|---:|---:|---:|
+| nonrt / cut | default | 14.22 | 12.61 | 3.73 |
+| nonrt / cut | settings | 13.40 | 8.81 | 0.59 |
+| nonrt / cut | bounded | 10.97 | 9.89 | 0.62 |
+| nonrt / forest | default | 122.14 | 57.77 | 43.14 |
+| nonrt / forest | settings | 150.17 | 33.55 | 6.34 |
+| nonrt / forest | bounded | 82.77 | 31.86 | 3.91 |
+| rt / cut | default | 11.13 | 7.63 | 0.87 |
+| rt / cut | settings | 11.07 | 6.85 | 0.46 |
+| rt / cut | bounded | 11.13 | 7.82 | 0.85 |
+| rt / forest | default | 146.40 | 15.75 | 2.48 |
+| rt / forest | settings | 143.56 | 14.15 | 1.65 |
+| rt / forest | bounded | 171.20 | 15.78 | 1.97 |
+
+The full-frame twice-steady target is **not met** on forest. Its first-view atmosphere
+and cell creation spikes remain, including on hardware where bounded changes no GI code.
+The gather ceiling does not bound these other passes. On software, the forest queue still
+has roughly 299,000 cells at +70 with bounded, versus 5 with default; the ceiling spreads
+work rather than eliminating it.
+
+Inspected software forest images show dark cell-shaped patches on the red pillar with
+bounded immediately after the cut. Whole-frame mean error can improve while those patches
+get worse, so a mean-only settling score does not certify this picture. This remains an
+experiment, default off. Actual Outpost results and pictures decide any later default.
+
+Whole-image RGB mean absolute error against the default run's late 32-frame mean,
+first offset with eight consecutive frames at or below two display codes:
+
+| Path / fixture | Default | Existing settings | Bounded |
+|---|---:|---:|---:|
+| nonrt / cut | 0 | 0 | 0 |
+| nonrt / forest | 6 | 15 | 2 |
+| rt / cut | 0 | 0 | 0 |
+| rt / forest | 9 | 9 | 9 |
+
+This is a **mean-error metric**, not a maximum-pixel threshold: no row meets an
+every-pixel-within-two-codes threshold through +70. For software forest at +70,
+bounded has 174,220 pixels over two codes and 18,814 over eight, versus default's
+38,717 and 7,755. The inspected pillar patches prevent a picture-pass claim.
