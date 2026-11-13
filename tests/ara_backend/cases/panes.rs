@@ -562,3 +562,122 @@ fn a_pane_carried_away_relights_the_cells_it_shaded() -> Result<()> {
     gpu.assert_clean()?;
     Ok(())
 }
+
+/// Glint's contact-shadow kit: two black blended films lying on the floor, a large one at
+/// alpha 0.09 and a small one at 0.17 on top, a millimetre apart. Where both cover the
+/// floor it passes 0.91 x 0.83 of the floor's light; where only the large one does, 0.91.
+/// Measured as the ratio of two frames with different floors (the films' own light
+/// cancels), so it holds whatever path draws the films: blended in hardware, or each over a
+/// copy of the target (`RENDERLAB_FILMS=copy`).
+#[test]
+fn stacked_films_on_the_floor_pass_the_product_of_their_coverage() -> Result<()> {
+    let path = root("films-stacked");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    let floor = quad(8., 0., [0.; 2]);
+    let (penumbra, core) = (quad(0.5, 0.001, [0.; 2]), quad(0.2, 0.002, [0.; 2]));
+    // The environment lights the floor; the traced frame needs a sun, kept a millionth as
+    // bright so the films' sun shadows do not count.
+    let lighting = Lighting {
+        lights: vec![Light::Directional {
+            travel: Vec3::new(0.6, 0.1, -1.).normalize(),
+            lux: [2e-4; 3],
+        }],
+        environment: [200.; 3],
+        exposure_stops: -6.,
+    };
+    let shadows = SunShadows {
+        split_ends: vec![8.],
+        disk_angle: 0.02,
+    };
+    let eye = Vec3::new(0., 0., 4.);
+    let camera = Camera::look_at(eye, Vec3::ZERO, Vec3::Y, 55f32.to_radians(), 0.1, 100.)?;
+    let mut frame = |albedo: f32, films: &[(&[Vertex; 4], f32)]| -> Result<Vec<[f32; 3]>> {
+        let material = |base: [f32; 3], transparency| MaterialDescriptor {
+            base_color: [base[0], base[1], base[2], 1.],
+            metallic: 0.,
+            roughness: 0.95,
+            double_sided: true,
+            transparency,
+            ..Default::default()
+        };
+        let objects = [ForwardObject {
+            vertices: &floor,
+            indices: &[0, 1, 2, 0, 2, 3],
+            transform: Mat4::IDENTITY,
+            material: material([albedo; 3], None),
+        }];
+        let transparent: Vec<_> = films
+            .iter()
+            .map(|(vertices, opacity)| ForwardObject {
+                vertices: *vertices,
+                indices: &[0, 1, 2, 0, 2, 3],
+                transform: Mat4::IDENTITY,
+                material: material(
+                    [0.; 3],
+                    Some(Transparency {
+                        opacity: *opacity,
+                        ior: 1.,
+                        thickness: 0.,
+                    }),
+                ),
+            })
+            .collect();
+        let images = render(
+            &mut gpu,
+            &cache,
+            &ForwardScene {
+                meshes: None,
+                materials: None,
+                instances: None,
+                objects: &objects,
+                lighting: &lighting,
+                camera,
+                size: SIZE,
+                atmosphere: renderlab::Atmosphere::off(),
+                sun_shadows: Some(&shadows),
+                primary: Primary::Traced,
+                post: None,
+                indirect: None,
+                reconstruction: None,
+                reflections: None,
+                textures: None,
+                local_shadows: None,
+                transparent: &transparent,
+                programs: None,
+                sky_map: None,
+                skins: None,
+                colour_lut: None,
+                ids: None,
+            },
+        )?;
+        Ok(images
+            .hdr
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|p| {
+                std::array::from_fn(|c| {
+                    f16::from_bits(u16::from_le_bytes([p[2 * c], p[2 * c + 1]])).to_f32()
+                })
+            })
+            .collect())
+    };
+    let films = [(&penumbra, 0.09), (&core, 0.17)];
+    let bare = [frame(0.2, &[])?, frame(0.6, &[])?];
+    let lit = [frame(0.2, &films)?, frame(0.6, &films)?];
+    // The fraction of the floor's light a pixel passes, from the two floors' difference.
+    let passed = |x: u32, y: u32| -> f32 {
+        let i = (y * SIZE[0] + x) as usize;
+        let ratio = |c: usize| (lit[1][i][c] - lit[0][i][c]) / (bare[1][i][c] - bare[0][i][c]);
+        (ratio(0) + ratio(1) + ratio(2)) / 3.
+    };
+    // The core is about 4.6 pixels across from the middle, the penumbra 11.5.
+    let (core, ring) = (passed(64, 48), passed(72, 48));
+    println!("stacked films: core passes {core:.4} (want 0.7553), ring {ring:.4} (want 0.91)");
+    ensure!(
+        (core - 0.91 * 0.83).abs() < 0.01 && (ring - 0.91).abs() < 0.01,
+        "stacked films pass {core:.4} in the core (want 0.7553) and {ring:.4} in the ring (want 0.91)"
+    );
+    Ok(())
+}

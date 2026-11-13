@@ -178,12 +178,7 @@ pub(crate) fn film_source(glass: &str) -> String {
     let film = "    return vec4<f32>(rl_finite(atmosphere_surface(rl_finite(lit),input.world)-passed*fog),1.0-passed.x);\n";
     assert_eq!(glass.matches(behind).count(), 1, "film seam: the colour behind");
     assert_eq!(glass.matches(composite).count(), 1, "film seam: the composite");
-    let out = glass.replacen(behind, "", 1).replacen(composite, film, 1);
-    if std::env::var_os("TMP_FILM_NORAY").is_some() {
-        let out = replace_function(&out, "hard_shadow", "fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 { return 1.0; }");
-        return replace_function(&out, "light_visibility", "fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 { return 1.0; }");
-    }
-    out
+    glass.replacen(behind, "", 1).replacen(composite, film, 1)
 }
 /// The particle simulation and draw modules, after `prelude` for its environment helpers
 /// and AT1's camera fog and aerial perspective.

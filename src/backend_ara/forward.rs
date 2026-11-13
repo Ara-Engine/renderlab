@@ -520,6 +520,9 @@ struct ProgramLists {
     dispatch: BinDispatch,
 }
 
+/// Consecutive films (`Pane::film`) from which a run blends in one pass instead of pane by
+/// pane (`encode` below; measured on the M5, Ara's Outpost and Glint).
+const FILM_RUN: usize = 8;
 /// One transparent pane's own resources.
 struct Pane {
     /// The colour behind it: the HDR target copied before it draws.
@@ -3856,16 +3859,26 @@ fn frame(
             .record(&mut graph, &mut rec, &packet, [size[0], size[1], 1])?;
         pane_packets.push(packet);
         // Films whose program declares them blend in hardware: a run of consecutive films takes
-        // one copy and one seed, each film blends into the seeded samples, and one resolve.
-        let film = |at: usize| {
-            t.panes
-                .get(at)
-                .is_some_and(|p| p.film && t.films[p.program].is_some())
-        };
-        if std::env::var_os("TMP_FILMS").is_some() {
-            let runs: Vec<String> = t.panes.iter().enumerate().map(|(i, p)| format!("{}{}:{}", if film(i) {"F"} else {"g"}, p.program, (p.rect[2].saturating_sub(p.rect[0]))*(p.rect[3].saturating_sub(p.rect[1])))).collect();
-            eprintln!("TMP films {}", runs.join(" "));
+        // one copy and one seed, each film blends into the seeded samples in one render pass,
+        // and one resolve. Only runs of FILM_RUN or more: Metal's fragment stage shades a film
+        // pixel about 15x slower than the per-pixel kernel (docs/m7-gaps.md), so the batch pays
+        // only where it saves many panes' copy, id raster and dispatch (Ara's Outpost: about
+        // 125 films, 22 ms to 1.5 ms on the M5; Glint's three contact-shadow films cost more
+        // blended). A pane's rectangle is no estimate of its pixels: a pane with a corner
+        // behind the eye takes the whole view.
+        let filmish = |p: &Pane| p.film && t.films[p.program].is_some();
+        let mut batched = vec![false; t.panes.len()];
+        let mut start = 0;
+        while start < t.panes.len() {
+            let end = (start..t.panes.len())
+                .find(|&i| !filmish(&t.panes[i]))
+                .unwrap_or(t.panes.len());
+            if end - start >= FILM_RUN {
+                batched[start..end].fill(true);
+            }
+            start = end.max(start + 1);
         }
+        let film = |at: usize| batched.get(at).copied().unwrap_or(false);
         let mut film_packets: Vec<(usize, HeapBindings)> = Vec::new();
         for (at, pane) in t.panes.iter().enumerate() {
             let is_film = film(at);

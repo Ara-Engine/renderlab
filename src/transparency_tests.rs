@@ -31,6 +31,26 @@ fn validate(label: &str, source: &str) {
     .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
 }
 
+/// Films (`crate::program::declares_films`): the standard program declares them and the toon
+/// program does not; a film's glass module validates on both heads, reads no colour behind
+/// (binding 31) and returns premultiplied light with alpha one minus its transmittance.
+#[test]
+fn film_modules_validate_on_both_heads() {
+    let toon = include_str!("../shaders/programs/toon.wgsl");
+    assert!(crate::program::declares_films(crate::STANDARD_PROGRAM));
+    assert!(!crate::program::declares_films(toon));
+    let program = crate::STANDARD_PROGRAM;
+    let hardware = crate::hardware_shadows::shader_source(SOURCE, SampleCount::One).unwrap();
+    for (name, glass) in [
+        ("map", glass_source(SOURCE, false, program, false)),
+        ("rt", glass_source(&hardware, true, program, false)),
+    ] {
+        let film = film_source(&glass);
+        assert!(!film.contains("tp_behind(input.world") && film.contains(",1.0-passed.x);"));
+        validate(&format!("film {name}"), &film);
+    }
+}
+
 #[test]
 fn tp1_modules_validate() {
     let toon = include_str!("../shaders/programs/toon.wgsl");
