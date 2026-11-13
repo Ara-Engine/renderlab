@@ -509,6 +509,13 @@ PLANS["comp5"] = (
         if v == "1" else OFF)
        for name, extra in (("flight", []), ("night", ["--night-lanterns"])) for v in ("1", "0")]
 )
+# comp6: comp5 on the glossy-pixel list, plus the coordinator's finding 2: the non-RT default
+# against RENDERLAB_RL_PASS=0 on a view with no glossy lobes (the game program's flight) and with
+# few (the standard program's), 60 frames, two rounds, the reflection.* stages in the pass log.
+PLANS["comp6"] = PLANS["comp5"] + [
+    (f"t-nonrt-{name}-{tag}-{k}", ["--path", "nonrt", "--fox", FOX, *extra, "--frames", "60"], env)
+    for k in (1, 2) for name, extra in (("zero", []), ("few", STD)) for tag, env in (("default", {}), ("off", OFF))
+]
 # The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
 # flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,
 # paint 0.35), moving and still; `compare.py` crops the reflected edges, binary against binary.
