@@ -476,6 +476,8 @@ PLANS["comp4d"] = (
 # timing with the reference again at the end.
 PLANS["comppicsd"] = [x for x in PLANS["comp4d"] if x[0][0] in "pq"]
 PLANS["comptimed"] = [x for x in PLANS["comp4d"] if x[0][0] == "t" or x[0] == "reference-end"]
+# comp4g: the RT standard-program pictures (moving and still) first, then the timing.
+PLANS["comp4g"] = [x for x in PLANS["comp4d"] if x[0].startswith("p-rt-std")] + PLANS["comptimed"]
 # The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
 # flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,
 # paint 0.35), moving and still; `compare.py` crops the reflected edges, binary against binary.
