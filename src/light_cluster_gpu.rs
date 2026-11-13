@@ -567,6 +567,7 @@ impl Renderer {
             .map_or(0u32, |k| k.wrapping_add(1) as u32);
         header[88..92].copy_from_slice(&sample.to_ne_bytes());
         header[100..104].copy_from_slice(&state.settings.near.to_ne_bytes());
+        header[104..108].copy_from_slice(&lc::unshadowed_hits_word(&state.settings).to_ne_bytes());
         if let Some(span) = crate::lighting::dirty_span(&state.published, &header) {
             self.queue
                 .write_buffer(&state.frame, span.start as u64, &header[span.clone()]);
