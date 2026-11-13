@@ -2595,7 +2595,9 @@ impl Renderer {
             // and the ara-gpu port's raster do. In one pass a front pane overwrote the pane
             // behind it with the colour from before the draw.
             let spans = match items[index].1 {
-                Item::Draw(i) if glass => {
+                Item::Draw(i)
+                    if glass && transparent[i].instances.state.models.len() <= SPAN_INSTANCES =>
+                {
                     let draw = transparent[i];
                     let screen = [size.width, size.height];
                     let rects: Vec<_> = (draw.instances.state.models.iter())
@@ -2739,10 +2741,20 @@ impl Renderer {
     }
 }
 
+/// Instances above which a glass draw is not split into spans (see `instance_spans`).
+const SPAN_INSTANCES: usize = 64;
+/// Spans above which a glass draw is drawn in one pass instead.
+const MAX_SPANS: usize = 4;
+
 /// A glass draw's instances in draw order, split into spans that one raster pass can draw
 /// together: a span ends before the first instance whose pixel rectangle (`panes::rect`)
 /// overlaps one already in it. Each span comes with the union of its rectangles, which the
 /// next span copies from the HDR target as the colour behind it.
+///
+/// Each span is a render pass with a region copy and, under MSAA, a full-target seed and
+/// resolve. So a draw with more than `SPAN_INSTANCES` instances (foliage, fences) or more
+/// than `MAX_SPANS` spans is drawn in one pass, as before RL#72. Unbounded, Ara Outpost RT
+/// went from 35 to 163 ms a frame (2026-11-13).
 fn instance_spans(rects: &[[u32; 4]]) -> Vec<(std::ops::Range<u32>, [u32; 4])> {
     let overlaps =
         |a: &[u32; 4], b: &[u32; 4]| a[0] < b[2] && b[0] < a[2] && a[1] < b[3] && b[1] < a[3];
@@ -2757,10 +2769,17 @@ fn instance_spans(rects: &[[u32; 4]]) -> Vec<(std::ops::Range<u32>, [u32; 4])> {
         };
         rects.iter().copied().reduce(union).unwrap_or_default()
     };
+    let one = || vec![(0..rects.len() as u32, cover(rects))];
+    if rects.len() > SPAN_INSTANCES {
+        return one();
+    }
     let mut spans = Vec::new();
     let mut start = 0;
     for (k, rect) in rects.iter().enumerate() {
         if rects[start..k].iter().any(|r| overlaps(r, rect)) {
+            if spans.len() + 1 == MAX_SPANS {
+                return one();
+            }
             spans.push((start as u32..k as u32, cover(&rects[start..k])));
             start = k;
         }

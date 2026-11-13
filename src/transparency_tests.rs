@@ -313,6 +313,9 @@ fn overlapping_glass_instances_draw_one_over_another() {
     assert_eq!(instance_spans(&[a, b, d]), vec![(0..3, [0, 0, 50, 10])]);
     assert_eq!(instance_spans(&[a, a, a]).len(), 3);
     assert_eq!(instance_spans(&[]), vec![(0..0, [0; 4])]);
+    // Past the span bound the draw is one pass, as before spans.
+    assert_eq!(instance_spans(&[a; 5]), vec![(0..5, a)]);
+    assert_eq!(instance_spans(&[b; 65]), vec![(0..65, b)]);
 }
 
 #[test]
