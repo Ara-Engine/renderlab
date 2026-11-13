@@ -20,12 +20,12 @@ In the standard program's light loop, the bound runs per receiver (`shade` call)
 1. Let c = the light's unshadowed exposed contribution: intensity × transmission × BRDF × attenuation × exposure.
 2. Let `total` = c plus the contributions of lights already skipped at this receiver.
 3. If `total × slope < codes / 255` in every channel, the light's shadow ray is skipped and `total` is kept.
-4. A skipped light is either added unshadowed (`RENDERLAB_LIGHT_BOUND_SKIP=unshadowed`, the default) or dropped (`drop`). Either way, its error is at most its c, so a receiver's error from all its skipped lights is under `codes` display codes.
+4. A skipped light either adds the c computed for the test, which is exactly the value the loop adds at visibility 1 (`RENDERLAB_LIGHT_BOUND_SKIP=unshadowed`, the default), or adds nothing (`drop`). Either way, its error is at most its c, so a receiver's error from all its skipped lights is under `codes` display codes.
 
 `slope` is the derivative of Ara's display transform: the Filmic curve (Narkowicz's ACES fit, `Tonemapper::Filmic`), then sRGB, in display units per exposed unit.
 
 - `black` (order-free): the transform's steepest slope, 6.38 at x ≈ 0.0087. The slope at zero (2.77) would be 2.3× too loose on dark-mid pixels, because a skipped light adds to whatever value the receiver ends at.
-- `sum` (order-dependent): the steepest slope at or above the loop's running sum. The receiver's final value is never lower than the running sum. Below the peak the slope still rises, so the peak is used there; above it the slope only falls (checked numerically), so it is the slope at the running sum.
+- `sum` (order-dependent): the steepest slope at or above the loop's running sum. The receiver's final value is never lower than the running sum. Below the peak the slope still rises, so the peak is used there; above it the slope only falls (checked numerically), so it is the slope at the running sum. The shader uses a bound without `pow`: `min(6.443, 0.2888/x, 0.1082/x², 0.7648/x³)`, fitted with a 1% margin. It never understates the slope and overstates it by at most 1.6× (1.0–1.13× above x = 0.18). Looser only skips less.
 
 `RENDERLAB_LIGHT_BOUND_CODES` sets the size (default 0.5; 0.25 for the tighter row).
 

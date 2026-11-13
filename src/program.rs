@@ -712,10 +712,11 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
 /// skipped at this receiver, stays under `RENDERLAB_LIGHT_BOUND_CODES` display codes (default
 /// 0.5) skips its shadow ray. The bound goes through Ara's display transform: the Filmic
 /// (Narkowicz ACES fit) curve and sRGB. `black` uses the curve's steepest slope (order-free:
-/// valid whatever the receiver's final value); `sum` uses the steepest slope at or above the
-/// light loop's running sum (the final value is never lower; order-dependent). A skipped light
-/// is added unshadowed (`RENDERLAB_LIGHT_BOUND_SKIP=unshadowed`, default) or dropped (`drop`):
-/// either way its error is at most its c. Applies to the standard program's light loop.
+/// valid whatever the receiver's final value); `sum` uses a pow-free upper bound of the slope at
+/// or above the light loop's running sum (the final value is never lower; order-dependent). A
+/// skipped light adds the c computed for the test, the value the loop adds at visibility 1
+/// (`RENDERLAB_LIGHT_BOUND_SKIP=unshadowed`, default), or nothing (`drop`): either way its
+/// error is at most its c. Applies to the standard program's light loop.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LightBound {
     /// The `sum` mode (else `black`).
@@ -763,7 +764,7 @@ pub(crate) fn with_light_bound(mut composed: Composed, bound: LightBound) -> Com
         )
         .replacen(
             LB_VISIBILITY,
-            "        // RENDERLAB_LIGHT_BOUND (program.rs light_bound): skip the shadow test while the\n        // skipped contributions stay under the display bound.\n        let rl_lb_c=exposed_product(light.intensity*light_transmission(light,input),brdf(n,v,light.direction,base,metal,rough)*light.attenuation);\n        var visibility=RL_LB_SKIPPED;\n        if !rl_lb_skip(light,rl_lb_c,exposed) { visibility=light_visibility(input,light); }\n",
+            "        // RENDERLAB_LIGHT_BOUND (program.rs light_bound): a light whose contribution keeps the\n        // skipped total under the display bound skips its shadow test. Unshadowed, it adds the\n        // contribution computed for the test: the value the loop adds at visibility 1.\n        var rl_lb_r=brdf(n,v,light.direction,base,metal,rough);\n        if SPECULAR_AA {rl_lb_r=specular_brdf(input,light.direction,base,metal,rough);}\n        if !rl_term(RL_TERM_BRDF) {rl_lb_r=vec3<f32>(1.0/PI);}\n        let rl_lb_c=exposed_product(light.intensity*light_transmission(light,input),rl_lb_r*light.attenuation);\n        if rl_lb_skip(light,rl_lb_c,exposed) {\n            if !RL_LB_DROP { exposed=min(exposed+rl_lb_c,vec3<f32>(65504.0)); }\n            continue;\n        }\n        let visibility=light_visibility(input,light);\n",
             1,
         );
     // With RENDERLAB_SHADE_COUNT's counters composed in (measurement builds), words 14 and 15
@@ -773,14 +774,14 @@ pub(crate) fn with_light_bound(mut composed: Composed, bound: LightBound) -> Com
         "// RENDERLAB_LIGHT_BOUND (program.rs light_bound).\n\
 const RL_LB_SUM:bool={sum};\n\
 const RL_LB_CODES:f32={codes:?};\n\
-const RL_LB_SKIPPED:f32={skipped:?};\n\
+const RL_LB_DROP:bool={drop};\n\
 // The Filmic curve's (Narkowicz) display slope peaks at 6.3796 codes/255 per unit at x=0.0087\n\
 // and only falls above it.\n\
-const RL_LB_PEAK:f32=6.3796;\n\
+const RL_LB_PEAK:f32=6.443;\n\
 var<private> rl_lb_skipped:vec3<f32>;\n\
 // d(sRGB(filmic(x)))/dx, the steepest it gets at or above x.\n\
-fn rl_lb_slope(x:f32) -> f32 {{\n    if x<0.0087 {{ return RL_LB_PEAK; }}\n    let d=x*(2.43*x+0.59)+0.14;\n    let t=min((x*(2.51*x+0.03))/d,1.0);\n    if t>=1.0 {{ return 0.0; }}\n    let dt=((5.02*x+0.03)*d-(2.51*x*x+0.03*x)*(4.86*x+0.59))/(d*d);\n    let ds=select(1.055/2.4*pow(t,1.0/2.4-1.0),12.92,t<=0.0031308);\n    return ds*dt;\n}}\n\
-fn rl_lb_skip(light:LightSample, c:vec3<f32>, sum:vec3<f32>) -> bool {{\n    if lights[light.index].kind.w==0u {{ return false; }}\n{tested}    let total=rl_lb_skipped+c;\n    var slope=vec3<f32>(RL_LB_PEAK);\n    if RL_LB_SUM {{ slope=vec3<f32>(rl_lb_slope(sum.x),rl_lb_slope(sum.y),rl_lb_slope(sum.z)); }}\n    if all(total*slope<vec3<f32>(RL_LB_CODES/255.0)) {{ rl_lb_skipped=total;{skipped_count} return true; }}\n    return false;\n}}\n",
+fn rl_lb_slope(x:vec3<f32>) -> vec3<f32> {{\n    let r=1.0/max(x,vec3<f32>(0.0087));\n    return min(min(vec3<f32>(RL_LB_PEAK),0.2888*r),min(0.1082*r*r,0.7648*r*r*r));\n}}\n\
+fn rl_lb_skip(light:LightSample, c:vec3<f32>, sum:vec3<f32>) -> bool {{\n    if lights[light.index].kind.w==0u {{ return false; }}\n{tested}    let total=rl_lb_skipped+c;\n    var slope=vec3<f32>(RL_LB_PEAK);\n    if RL_LB_SUM {{ slope=rl_lb_slope(sum); }}\n    if all(total*slope<vec3<f32>(RL_LB_CODES/255.0)) {{ rl_lb_skipped=total;{skipped_count} return true; }}\n    return false;\n}}\n",
         sum = bound.sum,
         tested = if counted {
             "    atomicAdd(&rl_shade_counts[14],1u);\n"
@@ -793,7 +794,7 @@ fn rl_lb_skip(light:LightSample, c:vec3<f32>, sum:vec3<f32>) -> bool {{\n    if 
             ""
         },
         codes = bound.codes,
-        skipped = if bound.drop { 0.0f32 } else { 1.0f32 },
+        drop = bound.drop,
     );
     let start = composed.program.start;
     composed.source = format!(
