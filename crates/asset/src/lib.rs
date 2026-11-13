@@ -209,6 +209,83 @@ pub struct Mip {
     pub rgba8: Vec<u8>,
 }
 
+/// Block compression of a [`CompressedTexture`]'s levels: 4x4-texel blocks of 16 bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockFormat {
+    /// BC7, sRGB-encoded colour: a base colour texture.
+    Bc7Srgb,
+    /// BC7, linear: a metallic-roughness (or other data) texture.
+    Bc7Linear,
+    /// BC5, two linear channels: a tangent-space normal map's X and Y (Z is rebuilt).
+    Bc5,
+}
+impl BlockFormat {
+    pub const BLOCK: u32 = 4;
+    pub const BLOCK_BYTES: u32 = 16;
+    /// The role a texture of this format serves.
+    pub fn role(self) -> TextureRole {
+        match self {
+            Self::Bc7Srgb => TextureRole::BaseColorSrgb,
+            Self::Bc7Linear => TextureRole::MetallicRoughnessLinear,
+            Self::Bc5 => TextureRole::NormalLinear,
+        }
+    }
+    /// Bytes in one row of blocks of a level `width` texels wide (a level under 4 texels
+    /// still takes a whole block).
+    pub fn row_bytes(width: u32) -> u32 {
+        width.div_ceil(Self::BLOCK) * Self::BLOCK_BYTES
+    }
+    /// Bytes of a `width` x `height` level: whole blocks, rows tightly packed.
+    pub fn level_bytes(width: u32, height: u32) -> u64 {
+        u64::from(Self::row_bytes(width)) * u64::from(height.div_ceil(Self::BLOCK))
+    }
+}
+
+/// A material texture as GPU block data, uploaded as shipped (no decode, no regenerated mips).
+/// Level i is `max(1, width >> i)` x `max(1, height >> i)` texels, stored as whole 4x4 blocks
+/// (`BlockFormat::level_bytes`), rows tightly packed; the chain runs to 1x1. The base level's
+/// width and height are multiples of 4 (the GPU's rule for block-compressed textures); a host
+/// with other sizes, or on an adapter without BC (`Engine::compressed_textures`), uploads RGBA8.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CompressedTexture {
+    pub format: BlockFormat,
+    pub width: u32,
+    pub height: u32,
+    pub mips: Vec<Vec<u8>>,
+}
+impl CompressedTexture {
+    /// Level `level`'s size in texels.
+    pub fn level_size(&self, level: u32) -> (u32, u32) {
+        ((self.width >> level).max(1), (self.height >> level).max(1))
+    }
+    /// The chain's bytes, after checking the base size, that the chain runs to 1x1 and every
+    /// level's byte count.
+    pub fn validate(&self, max_dimension: u32) -> Result<u64> {
+        let (w, h) = (self.width, self.height);
+        if w == 0 || h == 0 || w > max_dimension || h > max_dimension {
+            return Err(Error("compressed texture dimensions exceed device limit"));
+        }
+        if w % BlockFormat::BLOCK != 0 || h % BlockFormat::BLOCK != 0 {
+            return Err(Error(
+                "compressed texture base level is not whole 4x4 blocks",
+            ));
+        }
+        let levels = 32 - w.max(h).leading_zeros();
+        if self.mips.len() as u32 != levels {
+            return Err(Error("compressed texture mip chain must run to 1x1"));
+        }
+        let mut bytes = 0u64;
+        for (level, data) in self.mips.iter().enumerate() {
+            let (lw, lh) = self.level_size(level as u32);
+            if data.len() as u64 != BlockFormat::level_bytes(lw, lh) {
+                return Err(Error("compressed texture level bytes mismatch"));
+            }
+            bytes += data.len() as u64;
+        }
+        Ok(bytes)
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wrap {
     Clamp,

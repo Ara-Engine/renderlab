@@ -36,6 +36,7 @@ mod object_ids;
 mod observe;
 mod pane_pixels;
 mod pass_timeline;
+mod normal_variance_bc;
 // PP1 public camera/display settings; implementation stays in the tone stage.
 mod post;
 mod primary_ray;

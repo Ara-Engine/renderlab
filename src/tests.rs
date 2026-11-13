@@ -52,6 +52,16 @@ pub(super) fn device(timing: bool) -> (wgpu::Device, wgpu::Queue) {
     };
     request(&adapter, features)
 }
+/// The suite device with `extra` features, or None where the adapter lacks them.
+pub(super) fn device_with(extra: wgpu::Features) -> Option<(wgpu::Device, wgpu::Queue)> {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        flags: wgpu::InstanceFlags::debugging(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    adapter.features().contains(extra).then(|| request(&adapter, extra))
+}
 /// `RENDERLAB_TEST_PRIMARY=traced` reruns the lit suites on traced primary visibility:
 /// 1x renderers become hardware renderers with it selected; 4x renderers stay raster.
 pub(super) fn traced_suite() -> bool {
