@@ -196,7 +196,7 @@ fn pre_tp1_standard() -> String {
     for (from, to) in [
         // The deferred reflections' declaration and report (RL_DEFERRED).
         (
-            "// RL_DEFERRED: `shade` is linear in `specular_incident` about its untraced estimate, mixing
+            "// RL_DEFERRED: `shade` is linear in `specular_incident.rgb` at fixed w, mixing
 // `traced x reflectance` in by the traced fraction, and reports both (reflection_report).
 const RL_DEFERRED:bool=true;
 ",

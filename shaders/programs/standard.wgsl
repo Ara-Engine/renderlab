@@ -82,7 +82,7 @@ fn lobe_weight(sharpness:f32, rough:f32) -> f32 {
 // their mean exposed radiance, with the traced fraction in w. The weight is the luminance of
 // the reflectance `shade` multiplies that radiance by, so the engine can skip pixels where
 // what the trace could change stays invisible (stone's F0 of 0.04 against a chrome ball's 1).
-// RL_DEFERRED: `shade` is linear in `specular_incident` about its untraced estimate, mixing
+// RL_DEFERRED: `shade` is linear in `specular_incident.rgb` at fixed w, mixing
 // `traced x reflectance` in by the traced fraction, and reports both (reflection_report).
 const RL_DEFERRED:bool=true;
 fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
