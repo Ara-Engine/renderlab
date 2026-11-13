@@ -257,6 +257,11 @@ def main():
         # record, not a reason to stop. The lease opens no windows and sends no input.
         if pre["games"]:
             print("contended: a game is running:", [g["Name"] for g in pre["games"]], flush=True)
+            # Game-time bars (coordinator, 2026-11-13): the machine floor is 6 GiB, not 8, while a game
+            # runs, the bars PC integration's leases ran on beside VALORANT. Not for quarry leases.
+            if not a.quarry_lease:
+                WATCH_FREE_MBYTES = min(WATCH_FREE_MBYTES, 6144.0)
+                print(f"game-time bars: machine floor {WATCH_FREE_MBYTES:g} MiB", flush=True)
         if pre["gpu_processes"] or pre["available_mbytes"] < preflight_floor or (a.no_build_contention and pre["builds"]):
             print("DEFERRED: preflight", json.dumps(pre), flush=True)
             return 3
