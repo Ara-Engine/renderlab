@@ -33,9 +33,15 @@ pub(super) fn key(head: &[u8; 32], program: &[u8; 32], parameters: bool) -> [u8;
 /// instead of a camera hit. The wgpu renderer and the ara-gpu backend both compile it.
 pub(crate) fn source(head: &str, program: &str, parameters: bool) -> String {
     let program = crate::program::glass_hit_program(program);
-    let mut s = crate::program::compose(head, &program, crate::program::Stage::Traced, parameters)
-        .source
-        .replace("\r\n", "\n");
+    // Glass hits' groups do not bind TR1's histories: no S4a hit reuse here.
+    let mut s = crate::program::without_hit_reuse(crate::program::compose(
+        head,
+        &program,
+        crate::program::Stage::Traced,
+        parameters,
+    ))
+    .source
+    .replace("\r\n", "\n");
     // Only the hit reconstruction helpers from the generated camera entry are needed.
     s.truncate(s.find("// primary_frame.scene widened").unwrap());
     s = s

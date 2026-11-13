@@ -674,6 +674,10 @@ struct Shared<'a> {
     gi_table: Option<&'a StorageBuffer>,
     /// The cache's outgoing radiance, for cache-terminated reflection hits; otherwise zeros.
     gi_outgoing: Option<&'a StorageBuffer>,
+    /// RENDERLAB_RL_HIT_REUSE (shaders/reflection_hit_reuse.wgsl): TR1's frame record and the
+    /// colour and anchor histories its resolve reads this frame; without TR1, zeros bind and
+    /// no hit reuses.
+    reuse: Option<(&'a StorageBuffer, &'a Texture, &'a Texture)>,
     buffers: &'a BTreeMap<InputKey, StorageBuffer>,
     images: &'a BTreeMap<InputKey, Texture>,
 }
@@ -715,6 +719,7 @@ impl<'a> Shared<'a> {
                 (3, 5) if self.traced.is_some() => &self.traced.context("checked")?.records,
                 (3, 20) if self.gi_table.is_some() => self.gi_table.context("checked")?,
                 (3, 28) if self.gi_outgoing.is_some() => self.gi_outgoing.context("checked")?,
+                (0, 66) if self.reuse.is_some() => self.reuse.context("checked")?.0,
                 _ => &self.buffers[&spec.key],
             }),
             (InputKind::BufferArray { .. }, group, binding) => {
@@ -744,6 +749,9 @@ impl<'a> Shared<'a> {
                 Input::Image(match (group, binding) {
                     (3, 24) => self.lists,
                     (0, 18) => self.output,
+                    // The read side binds to both pairs; 75 (the side) stays zero.
+                    (0, 67 | 73) if self.reuse.is_some() => self.reuse.context("checked")?.1,
+                    (0, 68 | 74) if self.reuse.is_some() => self.reuse.context("checked")?.2,
                     _ => provided(self.sky, self.map, self.traced, self.deferred, spec.key)
                         .or_else(|| self.images.get(&spec.key))
                         .with_context(|| format!("forward frame cannot supply {}", spec.name))?,
@@ -2782,7 +2790,7 @@ fn frame(
                         && (spec.key == key(3, 20)
                             || spec.key == key(3, 28)
                             || (spec.key.group == 0 && (30..=37).contains(&spec.key.binding))))
-                    || (resolve.is_some() && spec.key == key(0, 40))
+                    || (resolve.is_some() && [key(0, 40), key(0, 66)].contains(&spec.key))
                     || buffers.contains_key(&spec.key)
                 {
                     continue;
@@ -2798,7 +2806,7 @@ fn frame(
                 if spec.key == key(3, 24)
                     || (resolve.is_some()
                         && spec.key.group == 0
-                        && (41..=47).contains(&spec.key.binding))
+                        && matches!(spec.key.binding, 41..=47 | 67 | 68 | 73 | 74))
                     || provided(
                         sky.as_ref(),
                         map,
@@ -3223,6 +3231,14 @@ fn frame(
         traced: traced.as_ref(),
         gi_table: gi.map(|(cache, _)| cache.table()),
         gi_outgoing: gi.map(|(cache, _)| cache.outgoing_radiance()),
+        reuse: match resolve {
+            Some((images, (record, _))) => Some((
+                record,
+                images.input(key(0, 42)).context("TR1's colour history")?,
+                images.input(key(0, 43)).context("TR1's anchors")?,
+            )),
+            None => None,
+        },
         buffers: &buffers,
         images: &inputs,
     };

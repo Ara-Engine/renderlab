@@ -77,6 +77,189 @@ const REFLECTION_ENTRY_SEAM: &str =
 /// U-RTVIS: in the reflection resolve's pre-pass (`rl_prepass`, RENDERLAB_RL_RESOLVE_PASS=1) the
 /// entry stops after the receiver's reflection, before its indirect inputs and `shade`.
 const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    if rl_prepass() {return;}\n    rl_indirect_prepare(surface_input);\n";
+/// `RENDERLAB_RL_HIT_REUSE` (S4a, docs/design-hit-reuse.md; off by default): `1` lets a
+/// reflection hit take TR1's resolved colour where its own surface point was last frame,
+/// instead of being shaded, when it passes the reuse test (shaders/reflection_hit_reuse.wgsl).
+/// `mask`, `all` and `none` are its measurement forms: reused hits 1 and the rest 0, every hit
+/// 1, every hit 0, so the frame's reused share is (mask - none) / (all - none).
+/// `RENDERLAB_RL_HIT_REUSE_TUNE=depth=D,slack=S,weight=W,rough=R,transmit=T,hint=H,view=V,foot=F`
+/// sets the test's tolerances (defaults 0.01, 0.02 m, 4, 0.5, 0.5, 1, 0.5 px, 0); `hint=0`
+/// replaces the MQ2-hint view test with the non-metal roughness floor; `foot=F` > 0 scales the
+/// view bound on known non-metal hits to F receiving-cone footprints, never under `view`
+/// (`footprint=F` is the same key). Metal
+/// hits never reuse where the material is bound. Read once per process.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HitReuse {
+    mode: u32,
+    depth: f32,
+    slack: f32,
+    weight: f32,
+    rough: f32,
+    transmit: f32,
+    hint: bool,
+    view: f32,
+    foot: f32,
+}
+impl HitReuse {
+    /// Whether the view test reads MQ2's hint from TR1's anchors (no material group needed).
+    pub(crate) fn hint(&self) -> bool {
+        self.hint
+    }
+}
+pub(crate) fn hit_reuse() -> Option<HitReuse> {
+    static REUSE: std::sync::OnceLock<Option<HitReuse>> = std::sync::OnceLock::new();
+    *REUSE.get_or_init(|| {
+        let mode = match std::env::var("RENDERLAB_RL_HIT_REUSE").ok()?.as_str() {
+            "1" => 0,
+            "mask" => 1,
+            "all" => 2,
+            "none" => 3,
+            _ => return None,
+        };
+        let mut reuse = HitReuse {
+            mode,
+            depth: 0.01,
+            slack: 0.02,
+            weight: 4.0,
+            rough: 0.5,
+            transmit: 0.5,
+            hint: true,
+            view: 0.5,
+            foot: 0.0,
+        };
+        let tune = std::env::var("RENDERLAB_RL_HIT_REUSE_TUNE").unwrap_or_default();
+        for (name, value) in tune.split(',').filter_map(|kv| kv.split_once('=')) {
+            let Ok(value) = value.trim().parse::<f32>() else {
+                continue;
+            };
+            match name.trim() {
+                "depth" => reuse.depth = value,
+                "slack" => reuse.slack = value,
+                "weight" => reuse.weight = value,
+                "rough" => reuse.rough = value,
+                "transmit" => reuse.transmit = value,
+                "hint" => reuse.hint = value != 0.0,
+                "view" => reuse.view = value,
+                "foot" | "footprint" => reuse.foot = value,
+                _ => {}
+            }
+        }
+        Some(reuse)
+    })
+}
+const HIT_REUSE: &str = include_str!("../shaders/reflection_hit_reuse.wgsl");
+/// `source` (a tracing module) with the reuse test ahead of its cache-hit hook, the hook renamed
+/// `rl_cache_hit_inner`, and TR1's restart-zone tests over the frame record where absent.
+fn with_hit_reuse(source: String, reuse: HitReuse) -> String {
+    const HOOK: &str = "fn rl_cache_hit(";
+    const PROGRAM: &str = "// ---- program ----\n";
+    assert_eq!(
+        source.matches(HOOK).count(),
+        1,
+        "hit reuse: the cache-hit hook"
+    );
+    assert_eq!(
+        source.matches(PROGRAM).count(),
+        1,
+        "hit reuse: the program seam"
+    );
+    let mut module = HIT_REUSE
+        .replace(
+            "const RL_REUSE_DEPTH:f32=0.01;",
+            &format!("const RL_REUSE_DEPTH:f32={:?};", reuse.depth),
+        )
+        .replace(
+            "const RL_REUSE_SLACK:f32=0.02;",
+            &format!("const RL_REUSE_SLACK:f32={:?};", reuse.slack),
+        )
+        .replace(
+            "const RL_REUSE_WEIGHT:f32=4.0;",
+            &format!("const RL_REUSE_WEIGHT:f32={:?};", reuse.weight),
+        )
+        .replace(
+            "const RL_REUSE_ROUGH:f32=0.5;",
+            &format!("const RL_REUSE_ROUGH:f32={:?};", reuse.rough),
+        )
+        .replace(
+            "const RL_REUSE_TRANSMIT:f32=0.5;",
+            &format!("const RL_REUSE_TRANSMIT:f32={:?};", reuse.transmit),
+        )
+        .replace(
+            "const RL_REUSE_HINT:bool=true;",
+            &format!("const RL_REUSE_HINT:bool={};", reuse.hint),
+        )
+        .replace(
+            "const RL_REUSE_VIEW:f32=0.5;",
+            &format!("const RL_REUSE_VIEW:f32={:?};", reuse.view),
+        )
+        .replace(
+            "const RL_REUSE_FOOT:f32=0.0;",
+            &format!("const RL_REUSE_FOOT:f32={:?};", reuse.foot),
+        )
+        .replace(
+            "const RL_REUSE_MODE:u32=0u;",
+            &format!("const RL_REUSE_MODE:u32={}u;", reuse.mode),
+        );
+    if reuse.hint {
+        // The hint replaces the material fallback: modules without the material group (the
+        // trace kernel) must not name it.
+        const FALLBACK: &str = "    let material=primary_materials[batch].value;\n    return material.metallic<0.1 && material.roughness>=RL_REUSE_ROUGH;\n";
+        assert_eq!(
+            module.matches(FALLBACK).count(),
+            1,
+            "hit reuse: the fallback"
+        );
+        module = module.replacen(FALLBACK, "    return true;\n", 1);
+    }
+    if !source.contains("fn tr1_relit(") {
+        module.push_str(
+            &crate::renderer::primary_ray_gpu::temporal_reconstruction::zones_source(
+                "primary_frame.zones",
+            ),
+        );
+    }
+    source.replacen(HOOK, "fn rl_cache_hit_inner(", 1).replacen(
+        PROGRAM,
+        &format!("{REUSE_BLOCK}{module}{REUSE_BLOCK_END}{PROGRAM}"),
+        1,
+    )
+}
+/// The markers around everything `with_hit_reuse` inserts before the program.
+const REUSE_BLOCK: &str = "// ---- hit reuse block ----\n";
+const REUSE_BLOCK_END: &str = "// ---- end of hit reuse block ----\n";
+/// `composed` without the hit reuse (its block out, the cache-hit hook back under its own
+/// name), the program's range moved back by the block: for modules whose pipelines do not
+/// bind TR1's histories (TP2's glass hits, film shading). Unchanged when the switch is off.
+pub(crate) fn without_hit_reuse(mut composed: Composed) -> Composed {
+    let Some(begin) = composed.source.find(REUSE_BLOCK) else {
+        return composed;
+    };
+    let end = composed.source[begin..]
+        .find(REUSE_BLOCK_END)
+        .map(|at| begin + at + REUSE_BLOCK_END.len())
+        .expect("hit reuse block end");
+    assert!(
+        end <= composed.program.start,
+        "the hit reuse block precedes the program"
+    );
+    composed.source.replace_range(begin..end, "");
+    let mut moved = end - begin;
+    // The hook's own name back, also before the program.
+    const INNER: &str = "fn rl_cache_hit_inner(";
+    const HOOK: &str = "fn rl_cache_hit(";
+    let at = composed
+        .source
+        .find(INNER)
+        .expect("hit reuse: the renamed hook");
+    assert!(
+        at < composed.program.start - moved,
+        "the hook precedes the program"
+    );
+    composed.source.replace_range(at..at + INNER.len(), HOOK);
+    moved += INNER.len() - HOOK.len();
+    composed.program = composed.program.start - moved..composed.program.end - moved;
+    composed
+}
 /// Reflection hits trace their own light visibility: the frame's belongs to its receivers.
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";
@@ -171,9 +354,49 @@ pub(crate) fn rl_pass_on() -> bool {
 /// `rl_trace`'s module on a traced shading `head`: the standard program's traced composition
 /// (the reflection block's helpers, with its stubs) and the trace entries.
 pub(crate) fn rl_trace_source(head: &str) -> String {
-    let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
-    format!("{}\n{REFLECTION_TRACE}", composed.source)
+    let mut source = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false).source;
+    let mut trace = REFLECTION_TRACE.to_owned();
+    if let Some(reuse) = hit_reuse() {
+        // S4a before compaction: the counters gain `reused` after U-RTVIS's four words (the
+        // probe reads it; the room's readback keeps reading the first 16 bytes).
+        const STATS: &str = "struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32> };";
+        assert_eq!(
+            trace.matches(STATS).count(),
+            1,
+            "hit reuse: the trace counters"
+        );
+        trace = trace.replacen(
+            STATS,
+            "struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32>, reused:atomic<u32> };",
+            1,
+        );
+        // A reused hit writes R at its slot as reflection_hits writes a shaded one (exposed,
+        // rl_finite, a = 1) and skips the H append. The trace kernel has no material group, so
+        // only the hint's view test runs here; without it, hits go to H as before.
+        if reuse.hint() {
+            assert_eq!(
+                trace.matches(TRACE_REUSE_SEAM).count(),
+                1,
+                "hit reuse: the trace seam"
+            );
+            trace = trace.replacen(TRACE_REUSE_SEAM, TRACE_REUSE, 1);
+        }
+        // No material group here: the hit's class is unknown (no footprint scaling).
+        const METAL: &str =
+            "    return select(0u,1u,primary_materials[batch].value.metallic>=0.1);\n";
+        assert_eq!(
+            source.matches(METAL).count(),
+            1,
+            "hit reuse: the material class"
+        );
+        source = source.replacen(METAL, "    return 2u;\n", 1);
+    }
+    format!("{source}\n{trace}")
 }
+/// U-RTVIS's marker in `rl_trace_pixels`, just before the H append (kept by
+/// `trace_hit_reuse_seam_stays_before_the_h_append`).
+const TRACE_REUSE_SEAM: &str = "        // ---- rl trace hit reuse seam ----\n";
+const TRACE_REUSE: &str = "        let reused=rl_hit_reuse(traced.record,d,cone.x+cone.y*traced.t);\n        if reused.w>0.0 {\n            textureStore(rl_samples,at,vec4<f32>(rl_finite(expose(reused.rgb)),1.0));\n            atomicAdd(&rl_trace_stats.reused,1u);\n            continue;\n        }\n";
 /// `composed` with the block between `markers` replaced by `text`, moving the program's range.
 fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Composed {
     let Some(begin) = composed.source.find(markers[0]) else {
@@ -842,6 +1065,9 @@ fn compose_stage(
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
             1,
         );
+        if let Some(reuse) = hit_reuse() {
+            source = with_hit_reuse(source, reuse);
+        }
         // `LocalShadows::unshadowed_hits_from`: rough enough hits light local lights unshadowed.
         assert_eq!(source.matches(LOCAL_VISIBILITY_SEAM).count(), 1);
         source = source.replacen(
@@ -1023,6 +1249,24 @@ pub(crate) fn compose_hits(
             "reflection_hits seam"
         );
         composed.source = composed.source.replacen(HITS_MINE, HITS_MINE_LIST, 1);
+    }
+    if hit_reuse().is_some() {
+        // S4a at the hit stage: count the hits the hook reused (word 5 of the trace counters,
+        // after U-RTVIS's four and the trace stage's `reused`). Both edits follow the program.
+        const CACHED: &str = "        textureStore(rl_hit_samples_out,at_slot,vec4<f32>(rl_finite(expose(cached.rgb)),1.0));\n";
+        assert_eq!(
+            composed.source.matches(CACHED).count(),
+            1,
+            "hit reuse: the hit count seam"
+        );
+        composed.source = composed.source.replacen(
+            CACHED,
+            &format!("{CACHED}        if rl_reused {{atomicAdd(&rl_hit_stats[5],1u);}}\n"),
+            1,
+        );
+        composed.source.push_str(
+            "@group(0) @binding(78) var<storage,read_write> rl_hit_stats:array<atomic<u32>,8>;\n",
+        );
     }
     composed
 }

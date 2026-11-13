@@ -109,7 +109,13 @@ pub(crate) fn shading_head(soft_head: &str) -> Result<String, Error> {
 /// composition, with every store of its entry routed through `film_store`. The program's
 /// byte range, which diagnostics map lines through, is unchanged.
 pub(crate) fn compose_shading(head: &str, source: &str, parameters: bool) -> Composed {
-    film_shading(program::compose(head, source, Stage::Traced, parameters))
+    // Film pipelines do not bind TR1's histories: no S4a hit reuse here.
+    film_shading(program::without_hit_reuse(program::compose(
+        head,
+        source,
+        Stage::Traced,
+        parameters,
+    )))
 }
 /// `composed` (a traced composition on a `shading_head`) with its entry's stores routed
 /// through `film_store`: the entry is split off at the program's end.

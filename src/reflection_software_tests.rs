@@ -469,3 +469,94 @@ fn trace_hit_reuse_seam_stays_before_the_h_append() {
     );
     assert_eq!(trace.matches(seam).count(), 1);
 }
+
+/// RENDERLAB_RL_HIT_REUSE (S4a): with the switch, every traced module that names the cache-hit
+/// hook (inline strata on every traced head, and the compacted pass's hit module) carries the
+/// reuse test ahead of the renamed hook and validates; without it, none of its text.
+#[test]
+fn hit_reuse_composes_on_every_traced_module() {
+    use crate::program::{Stage, compose, compose_hits};
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let mut modules: Vec<String> = rt
+        .iter()
+        .chain(&non_rt)
+        .map(|head| compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false).source)
+        .collect();
+    modules.push(compose_hits(&rt[1], crate::STANDARD_PROGRAM, Stage::Traced, false, false).source);
+    let mut checked = 0;
+    for source in &modules {
+        if !source.contains("rl_cache_hit") {
+            continue;
+        }
+        checked += 1;
+        if crate::program::hit_reuse().is_none() {
+            assert!(!source.contains("rl_hit_reuse") && !source.contains("rl_cache_hit_inner"));
+            continue;
+        }
+        assert_eq!(source.matches("fn rl_cache_hit(").count(), 1);
+        assert_eq!(source.matches("fn rl_cache_hit_inner(").count(), 1);
+        assert_eq!(source.matches("fn tr1_relit(").count(), 1);
+        // Only the hit module counts its reused hits (binding 78).
+        assert_eq!(
+            source.contains("atomicAdd(&rl_hit_stats[5],1u);"),
+            source.contains("fn reflection_hits(")
+        );
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    }
+    assert!(checked >= 3, "{checked} traced modules name the hook");
+}
+
+/// S4a before compaction: under RENDERLAB_RL_HIT_REUSE with the hint, the trace kernel's
+/// marker becomes the reuse call (a reused hit writes R and skips the H append, counted in
+/// `reused`) and the module validates; unset, the trace text is U-RTVIS's. The modules whose
+/// pipelines do not bind TR1's histories (film shading, TP2's glass hits) carry no reuse, and
+/// the film module's program range still names the program.
+#[test]
+fn hit_reuse_reaches_the_trace_kernel_and_skips_film_and_glass() {
+    let validate = |source: &str| {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    };
+    let reuse = crate::program::hit_reuse();
+    for head in crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap() {
+        let trace = crate::program::rl_trace_source(&head);
+        let seam = trace.contains("// ---- rl trace hit reuse seam ----");
+        let call = trace.contains("atomicAdd(&rl_trace_stats.reused,1u);");
+        match reuse {
+            Some(r) if r.hint() => assert!(call && !seam),
+            _ => assert!(seam && !call),
+        }
+        if reuse.is_some() {
+            validate(&trace);
+        }
+    }
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let temporal = film_accumulation::shading_head(&non_rt[1]).unwrap();
+    let film = film_accumulation::compose_shading(&temporal, crate::STANDARD_PROGRAM, false);
+    assert!(!film.source.contains("rl_hit_reuse") && !film.source.contains("rl_cache_hit_inner"));
+    assert_eq!(&film.source[film.program.clone()], crate::STANDARD_PROGRAM);
+    let head = crate::renderer::primary_ray_gpu::transparent_reflection_head(SOURCE).unwrap();
+    let glass = crate::renderer::transparency_gpu::reflection::source(
+        &head,
+        crate::STANDARD_PROGRAM,
+        false,
+    );
+    assert!(!glass.contains("rl_hit_reuse") && !glass.contains("rl_cache_hit_inner"));
+    if reuse.is_some() {
+        validate(&film.source);
+    }
+}
