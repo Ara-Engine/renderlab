@@ -30,20 +30,7 @@ fn software_reflection_composition() {
         );
         // Both paths read the global bands (ReflectionSettings).
         assert!(source.contains("let bands=primary_frame.reflection;"));
-        // The traversal's measurement switches, when set: workgroup stacks sliced by the
-        // entry's lane, and the fused box test.
-        if crate::program::rs_stack_workgroup() {
-            assert!(source.contains("var<workgroup> rs_stack:array<u32,1024>;"));
-            assert!(source.contains("var<workgroup> rs_top:array<u32,1024>;"));
-            assert!(source.contains("lane:u32) {\n    rs_lane=lane;\n"));
-            assert!(!source.contains("(*stack)") && !source.contains("var nodes:"));
-            // Interleaved: a warp's lanes at one depth on consecutive words (distinct banks).
-            let interleaved = source.contains("rs_stack[sp*32u+rs_lane]");
-            assert_eq!(
-                interleaved,
-                crate::program::rs_stack_interleaved() == Some(true)
-            );
-        }
+        // The traversal's measurement switches, when set: the fused box test.
         if crate::program::rs_box_fma() {
             assert!(source.contains("let a=fma(lo,inv,-oi);let b=fma(hi,inv,-oi);"));
             assert!(source.contains("let world_oi=origin*world_inv;"));
@@ -54,13 +41,13 @@ fn software_reflection_composition() {
             assert!(source.contains("fn rs_trace_walk(") && source.contains("rs_c_inst+=1u;"));
         }
         // Unset, the walk is main's: no switch's text at all.
-        let unset = !crate::program::rs_stack_workgroup()
-            && !crate::program::rs_box_fma()
-            && !crate::program::rs_count_on();
+        let unset = !crate::program::rs_box_fma()
+            && !crate::program::rs_count_on()
+            && !crate::reflection_software::bvh4();
         if unset {
             assert!(source.contains("    var stack:array<u32,RS_STACK>;\n"));
             assert!(source.contains("    let a=(lo-o)*inv;let b=(hi-o)*inv;\n"));
-            assert!(!source.contains("rs_counts") && !source.contains("rs_lane"));
+            assert!(!source.contains("rs_counts") && !source.contains("RS_EMPTY"));
         }
         let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));

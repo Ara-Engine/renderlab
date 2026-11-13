@@ -221,7 +221,7 @@ fn top_level_variants_keep_every_closest_hit() {
     let (meshes, placed) = course(600);
     let blases: Vec<Blas> = meshes
         .iter()
-        .map(|(p, i)| Blas::build(p, i).unwrap())
+        .map(|(p, i)| Blas::build2(p, i).unwrap())
         .collect();
     let refs: Vec<&Blas> = blases.iter().collect();
     let packed = pack(&refs, placed.len());

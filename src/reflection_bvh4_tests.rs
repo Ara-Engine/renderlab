@@ -26,9 +26,10 @@ fn triangle(b: &Blas, x: usize, o: Vec3, d: Vec3) -> Option<Hit> {
     let t = e2.dot(q) / det;
     (u >= 0.0 && v >= 0.0 && u + v <= 1.0 && t > 0.0).then_some((w[9], u, v, t))
 }
+/// The WGSL BVH4 rule: the nearer hit, and at an equal distance the lower primitive.
 fn better(best: Option<Hit>, h: Option<Hit>) -> Option<Hit> {
     match (best, h) {
-        (Some(b), Some(h)) if h.3 < b.3 => Some(h),
+        (Some(b), Some(h)) if h.3 < b.3 || (h.3 == b.3 && h.0 < b.0) => Some(h),
         (None, h) => h,
         (b, _) => b,
     }
@@ -194,10 +195,11 @@ fn reflection_bvh4_keeps_primitive_identity() {
     );
 }
 
-/// The walk's closest hit is the brute-force closest over every record, distance bit for bit
-/// (the same per-triangle arithmetic), on a grid and on overlapping soups; a different
-/// primitive only where another record has the same distance. The BVH2 agrees. The stack
-/// stays within the WGSL's 48 entries.
+/// The walk's closest hit is the brute-force closest over every record, bit for bit (the same
+/// per-triangle arithmetic, and at an equal distance the lower primitive, whatever order the
+/// walk met them in), on a grid, through its shared edges and on overlapping soups. The BVH2
+/// finds the same distance, a different primitive only at a tie (it keeps the first found).
+/// The stack stays within the WGSL's 48 entries.
 #[test]
 fn reflection_bvh4_finds_every_closest_hit() {
     for (name, (positions, indices)) in [
@@ -206,18 +208,41 @@ fn reflection_bvh4_finds_every_closest_hit() {
         ("dense soup", soup(20000, 11)),
     ] {
         let b4 = Blas::build4(&positions, &indices).unwrap();
-        let b2 = Blas::build(&positions, &indices).unwrap();
+        let b2 = Blas::build2(&positions, &indices).unwrap();
         let levels = depth(&b4, b4.root);
         assert!(
             levels <= crate::asset::near_field::MAX_SAH_DEPTH,
             "{name}: depth {levels}"
         );
         let mut hits = 0;
-        for (o, d) in rays(3000, 3) {
+        let mut ties = 0;
+        // Through shared edges: the midpoint of each quad's diagonal and of its lower edge.
+        let edges = (name == "grid").then(|| {
+            (0..indices.len() / 6).flat_map(|q| {
+                let p = |k: usize| Vec3::from(positions[indices[q * 6 + k] as usize]);
+                [(p(0) + p(2)) * 0.5, (p(0) + p(1)) * 0.5].map(|target| {
+                    (
+                        target + Vec3::new(0.25, 0.5, 4.0),
+                        Vec3::new(-0.25, -0.5, -4.0),
+                    )
+                })
+            })
+        });
+        for (o, d) in rays(3000, 3).into_iter().chain(edges.into_iter().flatten()) {
             let truth = brute(&b4, o, d);
             let (found, deepest) = walk(&b4, o, d);
             assert!(deepest <= 48, "{name}: stack {deepest}");
             let old = super::tests::closest(&b2, o.to_array(), d.to_array());
+            if let (Some(a), Some(f)) = (truth, found) {
+                assert_eq!(
+                    (a.0, a.1.to_bits(), a.2.to_bits(), a.3.to_bits()),
+                    (f.0, f.1.to_bits(), f.2.to_bits(), f.3.to_bits()),
+                    "{name}: bvh4 hit"
+                );
+            }
+            if let (Some(a), Some(h)) = (truth, old) {
+                ties += (a.0 != h.0) as usize;
+            }
             for (label, h) in [("bvh4", found), ("bvh2", old)] {
                 match (truth, h) {
                     (None, None) => {}
@@ -240,5 +265,6 @@ fn reflection_bvh4_finds_every_closest_hit() {
             hits += truth.is_some() as usize;
         }
         assert!(hits > 300, "{name}: only {hits} hits");
+        eprintln!("{name}: {hits} hits, {ties} ties the BVH2 resolved to another primitive");
     }
 }

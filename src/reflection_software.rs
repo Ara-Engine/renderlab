@@ -60,20 +60,21 @@ pub(crate) struct Blas {
 }
 
 impl Blas {
-    /// Median-split BVH2 over `indices` (a triangle list into `positions`), or the BVH4 under
-    /// `RENDERLAB_RS_BVH=4` (`bvh4`). Deterministic: ties on the split axis break by triangle
-    /// index. None for an empty list.
+    /// The mesh's reflection BLAS over `indices` (a triangle list into `positions`): the BVH4
+    /// under `RENDERLAB_RS_BVH=4` (`bvh4`), else the BVH2. None for an empty list.
     pub(crate) fn build(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
+        if bvh4() {
+            Self::build4(positions, indices)
+        } else {
+            Self::build2(positions, indices)
+        }
+    }
+    /// The median-split BVH2, whatever the switch (tests that read its layout build it).
+    /// Deterministic: ties on the split axis break by triangle index.
+    pub(crate) fn build2(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
         let count = indices.len() / 3;
         if count == 0 || count >= (1 << 28) {
             return None;
-        }
-        // The BVH4 leaf tag keeps four bits for the count, 27 for the first triangle.
-        if bvh4() {
-            if count >= 1 << 27 {
-                return None;
-            }
-            return Self::build4(positions, indices);
         }
         let corner = |t: usize, k: usize| positions[indices[t * 3 + k] as usize];
         let centroids: Vec<[f32; 3]> = (0..count)
@@ -103,6 +104,11 @@ impl Blas {
     /// today's record, in the leaf order the builder returns. None where the asset builder
     /// rejects the list (an index or position out of range).
     fn build4(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
+        // The leaf tag keeps four bits for the count, 27 for the first triangle.
+        let count = indices.len() / 3;
+        if count == 0 || count >= 1 << 27 {
+            return None;
+        }
         let (bvh, order) =
             crate::asset::near_field::build_bvh_sah_order(positions, indices).ok()?;
         let mut triangles = Vec::with_capacity(order.len() * TRIANGLE_WORDS);
@@ -412,7 +418,7 @@ mod tests {
                 indices.extend([i, i + 1, i + w + 1, i, i + w + 1, i + w]);
             }
         }
-        let b = Blas::build(&positions, &indices).unwrap();
+        let b = Blas::build2(&positions, &indices).unwrap();
         let mut seen: Vec<u32> = b.triangles.chunks(TRIANGLE_WORDS).map(|t| t[9]).collect();
         seen.sort_unstable();
         assert_eq!(seen, (0..indices.len() as u32 / 3).collect::<Vec<_>>());
@@ -428,7 +434,7 @@ mod tests {
             assert!((t_hit - 1.0).abs() < 1e-4);
         }
         // Deterministic: a rebuild is word-identical.
-        let again = Blas::build(&positions, &indices).unwrap();
+        let again = Blas::build2(&positions, &indices).unwrap();
         assert_eq!((b.nodes, b.triangles), (again.nodes, again.triangles));
     }
 
@@ -468,7 +474,7 @@ mod tests {
     fn reflection_bvh_depth_fits_the_traversal_stack() {
         let (positions, indices) = grid(512);
         let triangles = indices.len() / 3;
-        let b = Blas::build(&positions, &indices).unwrap();
+        let b = Blas::build2(&positions, &indices).unwrap();
         let d = depth(&b, b.root);
         let balanced = (triangles.div_ceil(LEAF_TRIANGLES) as f64).log2().ceil() as usize;
         assert!(
@@ -573,7 +579,7 @@ mod tests {
     #[test]
     fn fma_box_test_finds_the_same_closest_hits() {
         let (positions, indices) = grid(48);
-        let b = Blas::build(&positions, &indices).unwrap();
+        let b = Blas::build2(&positions, &indices).unwrap();
         let mut state = 0x9e3779b97f4a7c15u64;
         let mut next = || {
             state ^= state << 13;
@@ -609,7 +615,7 @@ mod tests {
     /// Instance records hold the inverse rows and a world box enclosing the transformed mesh.
     #[test]
     fn reflection_instance_records() {
-        let b = Blas::build(&[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], &[0, 1, 2]).unwrap();
+        let b = Blas::build2(&[[0.0; 3], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], &[0, 1, 2]).unwrap();
         let model = Mat4::from_scale_rotation_translation(
             glam::Vec3::splat(2.0),
             glam::Quat::from_rotation_y(0.5),
