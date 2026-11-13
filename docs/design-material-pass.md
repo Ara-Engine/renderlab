@@ -42,6 +42,13 @@ The port case `misses_carry_the_sentinel_after_the_camera_moves` (a wall, then t
 - the 11,328 pixels shading never visits (fast-cleared tiles of sky), read back from word 1 (`ForwardImages::material_receiver`, filled only under the receiver check);
 - no hit carries it.
 
+**For a producer of the receiver words** (the material pass's writer, a trace kernel's tail, either engine), the shared WGSL is in `MATERIAL_PACKING`, and `program::material_trace_writes()` composes it with the record's bindings for a trace module:
+- `rl_mr_receiver_words(receiver, vertex_normal, source_front, lit_front, near) -> RlReceiverWords { b, c }` packs words 1 and 2. The producer supplies the `Receiver` as `primary_receiver` builds it, the interpolated vertex normal (any length), the shading entry's two sides (equal for a trace: its lit front reduces to its source front) and the near-edge flag. The writer then adds word 1's material fields (y, z); a trace leaves them zero.
+- `RL_MR_MISS_WORD1` is word 1 on a pixel without a hit (word 2 zero there); `rl_mr_miss(b)` tests it.
+- `rl_mr_trace_vertex_normal(trace)` is the interpolated normal as the shading entry builds it, from `primary_vertices`, `primary_indices` and `normals`.
+
+The port case `the_writer_and_the_trace_tail_write_the_same_receiver_words` holds the two producers to the same bits: 16,135 hits and 3,344 misses identical in words 1 and 2. The exceptions, by design: the 2 pixels the repair moves, the near-edge mark, and word 1's material fields.
+
 **What word 2's point means depends on the producer.** Readers follow one rule:
 
 | producer | word 2's point | near-edge mark (word 1, bit 28) |
