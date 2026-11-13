@@ -8,7 +8,7 @@ pub enum SoftShadows {
     #[default]
     Exact,
     /// Eight directions on the legacy unreconstructed path. With TR1, the engine's
-    /// `ReconstructionShadowBudget` raises cold/moving sampling (256/32 rays by
+    /// `ReconstructionShadowBudget` raises cold/moving sampling (256/16 rays by
     /// default), returning to eight after a stable hold. Shading stays programmable.
     Interactive,
     /// Opt-in temporal film accumulation (docs/m6-temporal-primaries.md): each frame
