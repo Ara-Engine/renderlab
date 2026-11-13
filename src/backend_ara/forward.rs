@@ -1372,6 +1372,14 @@ fn report_shade_counts(
         .iter()
         .map(|b| u64::from(u32::from_le_bytes(*b)))
         .collect();
+    // The list entry's lanes (program.rs with_list_counts): tile entries, other-program
+    // lanes, shading lanes, lanes outside the image.
+    if w[8] != 0 {
+        eprintln!(
+            "list_lanes frame={frame} entries={} other_program={} shaded={} outside={}",
+            w[8], w[9], w[10], w[11]
+        );
+    }
     let pixels = w[0].max(1) as f64;
     let mean = |i: usize| w[i] as f64 / pixels;
     let percentile = |from: usize, bins: usize, q: f64| {

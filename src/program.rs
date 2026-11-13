@@ -1488,6 +1488,7 @@ pub(crate) fn compose_list(head: &str, program: &str, stage: Stage, parameters: 
     let edited = engine.replacen(LIST_HIT_PARAMETERS_SEAM, LIST_HIT_PARAMETERS, 1);
     let shift = edited.len() - engine.len();
     source = format!("{edited}{rest}{}", list_entry_now());
+    source = with_list_counts(source);
     Composed {
         source,
         program: range.start + shift..range.end + shift,
@@ -2160,4 +2161,40 @@ const DEFAULT_PARAMETERS:Parameters = Parameters(
             format!("struct Parameters {{ a: array<vec4<f32>, 17> }};\n{STANDARD_PROGRAM}");
         assert!(rejection("standard", &oversized).contains("Parameters"));
     }
+}
+
+/// With RENDERLAB_SHADE_COUNT's counters composed in (measurement builds), the list entry
+/// counts in words 8-11: region tile entries processed, lanes that leave because their pixel
+/// is another program's, lanes that shade, lanes outside the image. Misses are the rest.
+fn with_list_counts(mut source: String) -> String {
+    if !source.contains("fn rl_shade_count()") {
+        return source;
+    }
+    let Some(entry) = source.find("fn primary_shade_list(") else {
+        return source;
+    };
+    for (find, replace) in [
+        (
+            "    let id=rl_list_pixel(tile,local.xy);\n",
+            "    let id=rl_list_pixel(tile,local.xy);\n    if all(local.xy==vec2<u32>(0u)) {atomicAdd(&rl_shade_counts[8],1u);}\n",
+        ),
+        (
+            "    if any(id>=size) {return;}\n",
+            "    if any(id>=size) {atomicAdd(&rl_shade_counts[11],1u);return;}\n",
+        ),
+        (
+            "!=rl_list.slot {return;}\n",
+            "!=rl_list.slot {atomicAdd(&rl_shade_counts[9],1u);return;}\n",
+        ),
+        (
+            "    primary_shade_pixel(id,size);\n}",
+            "    atomicAdd(&rl_shade_counts[10],1u);\n    primary_shade_pixel(id,size);\n}",
+        ),
+    ] {
+        let tail = &source[entry..];
+        assert_eq!(tail.matches(find).count(), 1, "list counts: {find}");
+        let at = entry + tail.find(find).expect("counted");
+        source.replace_range(at..at + find.len(), replace);
+    }
+    source
 }
