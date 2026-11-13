@@ -10,6 +10,8 @@ mod film_reference_tests;
 
 #[path = "reload_tests.rs"]
 mod reload_tests;
+#[path = "lean_gpu_tests.rs"]
+mod lean_gpu_tests;
 #[path = "visibility_buffer_tests.rs"]
 mod visibility_buffer_tests;
 
