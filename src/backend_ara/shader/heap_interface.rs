@@ -66,12 +66,15 @@ pub enum InputKind {
         /// Selects the comparison heap when true.
         comparison: bool,
     },
-    /// Write-only storage image, with an exact portable format.
+    /// Storage image, with an exact portable format: write-only, or read-write when the
+    /// shader declares `read_write` (it loads and stores the same image in one dispatch).
     StorageImage {
         /// Shader view dimension.
         dimension: ViewDimension,
         /// Declared storage texel format.
         format: Format,
+        /// The shader also loads from it (`read_write`).
+        read: bool,
     },
     /// Immutable regular or comparison sampler.
     Sampler {
@@ -173,8 +176,9 @@ pub(super) fn from_module(module: &naga::Module) -> Result<Vec<ShaderInput>> {
                             _ => bail!("unported image dimension for {:?}", g.name),
                         };
                         if let ImageClass::Storage { format, access } = class {
+                            let read_write = naga::StorageAccess::LOAD | naga::StorageAccess::STORE;
                             ensure!(
-                                access == naga::StorageAccess::STORE,
+                                access == naga::StorageAccess::STORE || access == read_write,
                                 "unported storage-image access"
                             );
                             inputs.push(ShaderInput {
@@ -186,6 +190,7 @@ pub(super) fn from_module(module: &naga::Module) -> Result<Vec<ShaderInput>> {
                                 kind: InputKind::StorageImage {
                                     dimension,
                                     format: storage_format(format)?,
+                                    read: access == read_write,
                                 },
                             });
                             continue;
@@ -385,7 +390,20 @@ pub(super) fn storage_wgsl(format: Format) -> Result<&'static str> {
         _ => bail!("unported storage-image format"),
     })
 }
-pub(super) fn storage_entry(dimension: ViewDimension, format: Format) -> Result<&'static str> {
+pub(super) fn storage_entry(
+    dimension: ViewDimension,
+    format: Format,
+    read: bool,
+) -> Result<&'static str> {
+    if read {
+        // Read-write entries: the same heap slot, viewed with access::read_write.
+        return Ok(match (dimension, format) {
+            (ViewDimension::D2, Format::R32Uint) => "AraReadWriteUintImageEntry",
+            (ViewDimension::D2Array, Format::R32Uint) => "AraReadWriteUintArrayEntry",
+            (ViewDimension::D2, Format::R32Float) => "AraReadWriteImageEntry",
+            _ => bail!("unported read-write storage image {dimension:?} {format:?}"),
+        });
+    }
     Ok(match (dimension, format) {
         (ViewDimension::D2, Format::R32Uint | Format::Rg32Uint | Format::Rgba32Uint) => {
             "AraWriteUintImageEntry"

@@ -155,8 +155,13 @@ fn write(path: &std::path::Path, reflected: &Reflected) -> Result<()> {
                 InputKind::SamplerArray { count, comparison } => {
                     json!({"kind": "SamplerArray", "count": count, "comparison": comparison})
                 }
-                InputKind::StorageImage { dimension, format } => json!({"kind": "StorageImage",
-                    "dimension": format!("{dimension:?}"), "format": format!("{format:?}")}),
+                InputKind::StorageImage {
+                    dimension,
+                    format,
+                    read,
+                } => json!({"kind": "StorageImage",
+                    "dimension": format!("{dimension:?}"), "format": format!("{format:?}"),
+                    "read": read}),
                 InputKind::Sampler { comparison } => {
                     json!({"kind": "Sampler", "comparison": comparison})
                 }
@@ -237,6 +242,8 @@ fn read(path: &std::path::Path) -> Result<Reflected> {
                     "StorageImage" => InputKind::StorageImage {
                         dimension: named(&DIMENSIONS, &k["dimension"])?,
                         format: named(&FORMATS, &k["format"])?,
+                        // Records from before read-write images are write-only.
+                        read: k["read"].as_bool().unwrap_or(false),
                     },
                     "Sampler" => InputKind::Sampler {
                         comparison: flag(k, "comparison")?,

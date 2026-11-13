@@ -484,6 +484,9 @@ mod pane_cases;
 #[path = "ara_backend/cases/deferred_reflections.rs"]
 mod deferred_reflection_cases;
 
+#[path = "ara_backend/cases/read_write_images.rs"]
+mod read_write_image_cases;
+
 #[path = "ara_backend/cases/programs.rs"]
 mod program_cases;
 

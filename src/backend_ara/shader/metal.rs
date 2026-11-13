@@ -86,6 +86,9 @@ pub(crate) fn from_source(pass: Pass, wgsl: &str) -> Result<MetalProgram> {
     aux.push_str("\nstruct AraWriteCubeImageEntry {ulong unused; texture2d_array<float, access::write> texture; ulong metadata;};\n");
     aux.push_str("\nstruct AraWriteUintImageEntry {ulong unused; texture2d<uint, access::write> texture; ulong metadata;};\n");
     aux.push_str("\nstruct AraWriteUintArrayEntry {ulong unused; texture2d_array<uint, access::write> texture; ulong metadata;};\nstruct AraReadUintArrayEntry {ulong unused; texture2d_array<uint> texture; ulong metadata;};\n");
+    // Read-write views of storage-heap slots (r32 formats: every Apple GPU reads and writes
+    // them in one dispatch).
+    aux.push_str("\nstruct AraReadWriteUintImageEntry {ulong unused; texture2d<uint, access::read_write> texture; ulong metadata;};\nstruct AraReadWriteUintArrayEntry {ulong unused; texture2d_array<uint, access::read_write> texture; ulong metadata;};\nstruct AraReadWriteImageEntry {ulong unused; texture2d<float, access::read_write> texture; ulong metadata;};\n");
     aux.push_str("\nstruct AraReadArrayEntry {ulong unused; texture2d_array<float> texture; ulong metadata;};\nstruct AraDepthArrayEntry {ulong unused; depth2d_array<float> texture; ulong metadata;};\nstruct AraReadUintImageEntry {ulong unused; texture2d<uint> texture; ulong metadata;};\nstruct AraReadUintMsEntry {ulong unused; texture2d_ms<uint> texture; ulong metadata;};\n");
     if module
         .types
@@ -311,9 +314,13 @@ fn wrap(
                         "samplers"
                     }
                 ),
-                super::InputKind::StorageImage { dimension, format } => format!(
+                super::InputKind::StorageImage {
+                    dimension,
+                    format,
+                    read,
+                } => format!(
                     "((device {}*)top.storage_images)[{slot}].texture",
-                    super::heap_interface::storage_entry(dimension, format)?
+                    super::heap_interface::storage_entry(dimension, format, read)?
                 ),
                 super::InputKind::Image { dimension, sample } => format!(
                     "((device {}*)top.textures)[{slot}].texture",
