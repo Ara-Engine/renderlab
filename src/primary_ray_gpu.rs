@@ -741,14 +741,14 @@ pub(super) struct Targets {
     /// U-RTVIS: the held budget's per-pixel history (R32Uint, ping-ponged by the
     /// reconstruction's parity) and its frame record; traced primaries only.
     pub held: Option<HeldTargets>,
-    /// U-RTVIS: the reflection history (shaders/reflections_history.wgsl), both paths.
-    pub rl_history: RlHistoryTargets,
-    /// U-RTVIS: the reflection pass's L, H, R and D while RENDERLAB_RL_PASS=1.
-    pub rl_pass: Option<reflection_pass::PassTargets>,
     /// Deferred reflections (`program::deferred_variant`, `RENDERLAB_RL_DEFERRED=1`): each
     /// glossy pixel's reflectance with its traced fraction, and its untraced specular,
     /// written by shading at bindings 62 and 63 for the composite after it.
     pub deferred: Option<[Depth; 2]>,
+    /// U-RTVIS: the reflection history (shaders/reflections_history.wgsl), both paths.
+    pub rl_history: RlHistoryTargets,
+    /// U-RTVIS: the reflection pass's L, H, R and D while RENDERLAB_RL_PASS=1.
+    pub rl_pass: Option<reflection_pass::PassTargets>,
 }
 /// Per pixel two halves of four r32uint layers, and the frame record (written by
 /// `prepare_reconstruction`; zero, so never read, without reconstruction).
