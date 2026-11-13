@@ -124,3 +124,65 @@ fn list_program_uncached(material: &str, terms: u32) -> Result<Program> {
     )?
     .checked())
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::program::{Composed, Stage, compose, compose_hits, compose_list};
+
+    /// Every traced shading module the port compiles for the standard program (the hardware
+    /// soft head's tiles, list and hit modules, and the non-RT head's) validates, under
+    /// whatever composition switches the process runs with (`RENDERLAB_RL_DEFERRED=1`,
+    /// `RENDERLAB_HIT_LOD`, ...); with `RL_DEFERRED` the deferred modules carry its outputs.
+    /// Each module's program range names the program's text (not yet with `RL_DEFERRED`: its
+    /// range shift is U-RTVIS's fix on t3/rtvis; drop the condition once that is merged).
+    #[test]
+    fn port_traced_modules_validate_under_the_process_switches() {
+        let scene = include_str!("../../shaders/scene.wgsl");
+        let [_, soft] = crate::renderer::primary_ray_gpu::shading_heads(scene).unwrap();
+        let (_, [non_rt, _]) = crate::renderer::primary_ray_gpu::non_rt_sources(scene).unwrap();
+        let program = crate::STANDARD_PROGRAM;
+        let modules: [(&str, Composed); 5] = [
+            ("soft tiles", compose(&soft, program, Stage::Traced, false)),
+            (
+                "soft list",
+                compose_list(&soft, program, Stage::Traced, false),
+            ),
+            (
+                "soft hits",
+                compose_hits(&soft, program, Stage::Traced, false, false),
+            ),
+            (
+                "non-RT tiles",
+                compose(&non_rt, program, Stage::Traced, false),
+            ),
+            (
+                "non-RT list",
+                compose_list(&non_rt, program, Stage::Traced, false),
+            ),
+        ];
+        for (name, composed) in &modules {
+            let source = &composed.source;
+            if !crate::program::rl_deferred() {
+                assert_eq!(
+                    &source[composed.program.clone()],
+                    program,
+                    "{name}: program range"
+                );
+            }
+            if crate::program::rl_deferred() && !name.ends_with("hits") {
+                assert!(
+                    source.contains("rl_deferred_store(pixel,input.world);"),
+                    "{name}"
+                );
+            }
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+        }
+    }
+}

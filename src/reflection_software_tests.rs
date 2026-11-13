@@ -388,7 +388,12 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
             continue;
         }
         validated += 1;
-        let source = deferred_variant(&composed);
+        // With RENDERLAB_RL_DEFERRED=1 `compose` has already made the deferred module.
+        let source = if crate::program::rl_deferred() {
+            composed
+        } else {
+            deferred_variant(&composed)
+        };
         assert!(
             source.contains("rl_deferred_clear(pixel);")
                 && source.contains("rl_deferred_store(pixel,input.world);")
