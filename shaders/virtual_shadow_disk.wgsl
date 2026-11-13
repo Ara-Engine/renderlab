@@ -75,7 +75,10 @@ const VD_MIPS:u32=5u;
 // TR1 averages the two levels where the 2x step was a line. The band is that fraction of an
 // octave below a footprint boundary, and that fraction of the half window inside a window edge.
 // Changes from level i to i + 1 for i below VD_BAND_FROM keep the plain choice; 0 turns it off.
-override VD_BAND:f32=0.125;
+// Off by default (rl1, 2026-11-13): the far-tail seam is the occluder height-band step in
+// vd_map, not a receiver level change, so this left it unchanged while adding short dashed
+// edges where a band crossed a shadow edge. Screens: RENDERLAB_VD=VD_BAND=0.125.
+override VD_BAND:f32=0.0;
 override VD_BAND_FROM:u32=0u;
 
 // ---- Page requests ----
