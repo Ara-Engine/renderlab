@@ -17,6 +17,10 @@ use crate::gi_bvh::{self, Blas};
 use crate::primary_ray::{TRACED_DRAWS, placement_table};
 #[path = "gi_bounded_refill.rs"]
 mod bounded_refill;
+#[path = "gi_refill_priority.rs"]
+mod priority;
+#[path = "gi_refill_feedback.rs"]
+mod refill_feedback;
 
 pub(crate) const HEADER_WORDS: u64 = 64;
 /// Keep the original admission policy: packing storage must not change the chosen
@@ -697,6 +701,7 @@ struct Layouts {
 }
 struct Pipelines {
     software: bool,
+    priority: Option<priority::Pipelines>,
     directions: u32,
     probe: Owned<wgpu::ComputePipeline>,
     claim: Owned<wgpu::ComputePipeline>,
@@ -883,6 +888,9 @@ struct Profile {
     period: f32,
     /// Cache frames profiled so far.
     written: u64,
+    stamps: u32,
+    stride: u64,
+    priority: bool,
 }
 /// What `prepare_gi` decided for this frame.
 pub(crate) struct Plan {
@@ -1225,7 +1233,7 @@ impl Planner {
         view: &mut ViewPlan,
         inputs: FrameInputs<'_>,
     ) -> Finished {
-        let s = bounded_refill::settings(c.settings, begun.header[bounded_refill::HEADER_LIMIT] != 0);
+        let s = bounded_refill::settings(c.settings, begun.header[bounded_refill::HEADER_LIMIT] != 0 && begun.header[34] == 0);
         let layout = WorkLayout::of_counts(c.slots, c.misses);
         let (since_event, cut_phases, filter) = (begun.since_event, begun.cut_phases, begun.filter);
         let FrameInputs {
@@ -1556,6 +1564,7 @@ pub(super) struct GiState {
     packed: Option<Packed>,
     plan: Option<Plan>,
     profile: Option<Profile>,
+    refill_feedback: Option<refill_feedback::State>,
     groups: Option<Groups>,
     retired: Vec<(u64, Retired)>,
     stats: IndirectStats,
@@ -1605,6 +1614,7 @@ impl GiState {
             plan: None,
             planner: Planner::default(),
             profile: None,
+            refill_feedback: None,
             groups: None,
             retired: vec![],
             stats: IndirectStats::default(),
@@ -1636,7 +1646,8 @@ impl GiState {
 /// The kernel module: built-in prelude, primary ray helpers, cell definitions, one ray
 /// source and the kernels.
 pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
-    kernel_source_bounded(software, directions, bounded_refill::on())
+    let priority = software && priority::on();
+    priority::source(kernel_source_bounded(software, directions, bounded_refill::on() && !priority), priority)
 }
 fn kernel_source_bounded(software: bool, directions: u32, bounded: bool) -> String {
     let enables = if software {
@@ -2133,15 +2144,18 @@ impl Renderer {
         if self.gi.profile.is_some() {
             return;
         }
+        let priority = priority::on();
+        let stamps = PROFILE_STAMPS + if priority { 2 * (2 + 2 * CLAIM_ROUNDS) } else { 0 };
+        let stride = (u64::from(stamps) * 8).div_ceil(PROFILE_STRIDE) * PROFILE_STRIDE;
         let queries = self.ledger.own(
             self.device.create_query_set(&wgpu::QuerySetDescriptor {
                 label: Some("indirect cache passes"),
                 ty: wgpu::QueryType::Timestamp,
-                count: PROFILE_STAMPS * PROFILE_RING as u32,
+                count: stamps * PROFILE_RING as u32,
             }),
             ResourceKind::QuerySet,
         );
-        let bytes = PROFILE_STRIDE * PROFILE_RING;
+        let bytes = stride * PROFILE_RING;
         let buffer = |label, usage| {
             self.ledger.own(
                 self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2165,6 +2179,9 @@ impl Renderer {
             ),
             period: self.queue.get_timestamp_period(),
             written: 0,
+            stamps,
+            stride,
+            priority,
         });
     }
     /// Blocks until the GPU is idle and reads the last profiled frame's pass times.
@@ -2183,7 +2200,7 @@ impl Renderer {
             0,
             &profile.readback,
             0,
-            PROFILE_STRIDE * PROFILE_RING,
+            profile.stride * PROFILE_RING,
         );
         self.queue.submit([encoder.finish()]);
         let slice = profile.readback.slice(..);
@@ -2201,20 +2218,22 @@ impl Renderer {
         let first = profile.written.saturating_sub(PROFILE_RING);
         Ok((first..profile.written)
             .map(|frame| {
-                let at = ((frame % PROFILE_RING) * PROFILE_STRIDE / 8) as usize;
+                let at = ((frame % PROFILE_RING) * profile.stride / 8) as usize;
                 let pass = |i: usize| {
                     words[at + 2 * i + 1].saturating_sub(words[at + 2 * i]) as f64 * period
                 };
                 IndirectProfile {
                     probe: pass(0),
-                    claim: (0..rounds).map(|k| pass(1 + 2 * k)).sum(),
-                    resolve: (0..rounds).map(|k| pass(2 + 2 * k)).sum(),
+                    claim: (0..rounds).map(|k| pass(1 + 2 * k)).sum::<f64>()
+                        + if profile.priority { (0..rounds).map(|k|pass(PROFILE_STAMPS as usize/2+2+2*k)).sum() } else {0.0},
+                    resolve: (0..rounds).map(|k| pass(2 + 2 * k)).sum::<f64>()
+                        + if profile.priority { (0..rounds).map(|k|pass(PROFILE_STAMPS as usize/2+3+2*k)).sum() } else {0.0},
                     scan: pass(1 + 2 * rounds),
                     setup: pass(2 + 2 * rounds),
                     rays: pass(3 + 2 * rounds),
                     finish: pass(4 + 2 * rounds),
                     integrate: pass(5 + 2 * rounds),
-                    gather: pass(6 + 2 * rounds),
+                    gather: pass(6 + 2 * rounds) + if profile.priority {pass(PROFILE_STAMPS as usize/2)+pass(PROFILE_STAMPS as usize/2+1)} else {0.0},
                     light: pass(7 + 2 * rounds),
                     shade: pass(8 + 2 * rounds),
                     filter: pass(9 + 2 * rounds),
@@ -2646,11 +2665,13 @@ impl Renderer {
             )
         };
         let main = &layouts.pipelines[usize::from(software)];
+        let priority = software && priority::on();
         let pipelines = Pipelines {
             software,
+            priority: priority.then(|| priority::Pipelines::new(|name|compute(name, main))),
             directions,
             probe: compute("gi_probe", main),
-            claim: compute("gi_claim", main),
+            claim: compute(if priority { "gi_priority_claim_visible" } else { "gi_claim" }, main),
             resolve: compute("gi_resolve", main),
             resolve_last: compute("gi_resolve_last", main),
             scan: compute("gi_scan", main),
@@ -2659,7 +2680,9 @@ impl Renderer {
             finish: compute("gi_finish", main),
             integrate: compute("gi_integrate", main),
             gather: compute(
-                if software {
+                if priority {
+                    "gi_priority_gather_empty"
+                } else if software {
                     "gi_gather_batched"
                 } else {
                     "gi_gather"
@@ -3008,6 +3031,17 @@ impl Renderer {
         // Bounce (G2): the setting is on and this frame's program reflects light. A change
         // empties the table, so no cell keeps bounce light from another program's frames.
         let bounce = run && self.gi.settings.bounce && self.ensure_gi_shade(software)?;
+        if run && software && priority::on() {
+            if let priority::Mode::Milliseconds(target) = priority::mode() {
+                if self.gi.refill_feedback.is_none() {
+                    if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+                        return Err(Error::InvalidInput("GI refill time target requires timestamp queries"));
+                    }
+                    self.gi.refill_feedback = Some(refill_feedback::State::new(&self.device,&self.queue,&self.ledger));
+                }
+                self.gi.refill_feedback.as_mut().unwrap().collect(target);
+            }
+        }
         let r = self.gi.resources.as_ref().unwrap();
         let config = PlanConfig {
             settings: self.gi.settings,
@@ -3026,7 +3060,12 @@ impl Renderer {
         // The cache's per-tick work runs in the tick's first frame whose plan is not idle, so
         // a moving view beside a still one still relights and gathers.
         let tick = !self.explicit_ticks || self.gi_tick != self.tick;
-        let begun = self.gi.planner.begin(&config, run, bounce, tick);
+        let mut begun = self.gi.planner.begin(&config, run, bounce, tick);
+        if software && priority::on() {
+            let fallback = priority::Controller::default();
+            let controller = self.gi.refill_feedback.as_ref().map_or(&fallback,|f|&f.controller);
+            controller.header(&mut begun.header, priority::mode());
+        }
         let raw: Vec<u8> = begun.header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
         if !run {
@@ -3368,7 +3407,7 @@ impl GiState {
         let ring = self
             .profile
             .as_ref()
-            .map_or(0, |p| (p.written % PROFILE_RING) as u32 * PROFILE_STAMPS);
+            .map_or(0, |p| (p.written % PROFILE_RING) as u32 * p.stamps);
         let stamps = |i: u32| {
             queries.map(|q| wgpu::ComputePassTimestampWrites {
                 query_set: q,
@@ -3413,18 +3452,34 @@ impl GiState {
         // for the claim rounds that follow.
         let b = 6 + 2 * CLAIM_ROUNDS;
         mark(encoder, "gi_gather");
+        if let Some(feedback) = &mut self.refill_feedback { feedback.begin(encoder); }
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
             main_pass(encoder, "indirect cache gather", &p.gather, b, grid);
+            if let Some(priority) = &p.priority {
+                main_pass(encoder,"indirect visible gather",&priority.gather_later,PROFILE_STAMPS/2,grid);
+                main_pass(encoder,"indirect background gather",&priority.gather_background,PROFILE_STAMPS/2+1,grid);
+            }
         }
+        if let Some(feedback) = &self.refill_feedback { feedback.mark(encoder,1); feedback.mark(encoder,2); }
         mark(encoder, "gi_claim");
+        if p.priority.is_some() { encoder.clear_buffer(&r.work,47*4,Some(4)); }
         if traced || profiling {
             for k in 0..CLAIM_ROUNDS {
                 let grid = traced.then_some([CLAIM_GROUPS, 1]);
                 main_pass(encoder, "indirect cache claim", &p.claim, 1 + 2 * k, grid);
-                let last = k + 1 == CLAIM_ROUNDS;
+                let last = k + 1 == CLAIM_ROUNDS && p.priority.is_none();
                 let resolve = if last { &p.resolve_last } else { &p.resolve };
                 main_pass(encoder, "indirect cache resolve", resolve, 2 + 2 * k, grid);
+            }
+            if let Some(priority) = &p.priority {
+                for k in 0..CLAIM_ROUNDS {
+                    let grid = traced.then_some([CLAIM_GROUPS,1]);
+                    let stamp = PROFILE_STAMPS/2+2+2*k;
+                    main_pass(encoder,"indirect background claim",&priority.claim_background,stamp,grid);
+                    let resolve = if k+1==CLAIM_ROUNDS {&p.resolve_last} else {&p.resolve};
+                    main_pass(encoder,"indirect background resolve",resolve,stamp+1,grid);
+                }
             }
         }
         let s = 1 + 2 * CLAIM_ROUNDS;
@@ -3442,6 +3497,7 @@ impl GiState {
             let finish = cells.filter(|_| traced);
             main_pass(encoder, "indirect cache finish", &p.finish, s + 3, finish);
         }
+        if let Some(feedback) = &mut self.refill_feedback { feedback.finish(encoder,&r.work); }
         mark(encoder, "gi_integrate");
         if plan.integrate || profiling {
             let groups = cells.filter(|_| plan.integrate);
@@ -3491,13 +3547,22 @@ impl GiState {
                 }
             }
         }
+        if let Some(profile) = self.profile.as_ref() {
+            if profile.priority && p.priority.is_none() {
+                for i in PROFILE_STAMPS/2..profile.stamps/2 {
+                    encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("indirect priority profile (inactive)"), timestamp_writes: stamps(i),
+                    });
+                }
+            }
+        }
         if let Some(profile) = self.profile.as_mut() {
             let slot = profile.written % PROFILE_RING;
             encoder.resolve_query_set(
                 &profile.queries,
-                ring..ring + PROFILE_STAMPS,
+                ring..ring + profile.stamps,
                 &profile.resolve,
-                slot * PROFILE_STRIDE,
+                slot * profile.stride,
             );
             profile.written += 1;
         }
