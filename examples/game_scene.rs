@@ -110,6 +110,9 @@ struct Args {
     volumetric_fog: Option<bool>,
     post: bool,
     glass: bool,
+    /// `--glass-crowd N`: N more panes of the glass draw, overlapping on screen (one draw of
+    /// many overlapping instances, as Ara Outpost's foliage and fences). A frame-time gate case.
+    glass_crowd: u32,
     particles: bool,
     local_shadows: bool,
     reflections: bool,
@@ -152,6 +155,7 @@ impl Args {
             volumetric_fog: None,
             post: true,
             glass: true,
+            glass_crowd: 0,
             particles: true,
             local_shadows: true,
             reflections: true,
@@ -222,6 +226,7 @@ impl Args {
                 "--no-temporal" => a.temporal = false,
                 "--no-post" => a.post = false,
                 "--no-glass" => a.glass = false,
+                "--glass-crowd" => a.glass_crowd = value()?.parse()?,
                 "--no-particles" => a.particles = false,
                 "--no-local-shadows" => a.local_shadows = false,
                 "--no-reflections" => a.reflections = false,
@@ -737,6 +742,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 * Mat4::from_rotation_y(0.8)
                 * Mat4::from_scale(Vec3::new(2.2, 1.6, 0.04)),
         )?;
+        // Panes stepping back and sideways from the first, so each overlaps the ones before.
+        for k in 1..=args.glass_crowd {
+            let t = k as f32 * 0.07;
+            engine.spawn(
+                cube,
+                glass,
+                Mat4::from_translation(at(5.4 - t, 0.8 + 0.3 * (t * 3.0).sin(), 3.6 - t))
+                    * Mat4::from_rotation_y(0.8)
+                    * Mat4::from_scale(Vec3::new(2.2, 1.6, 0.04)),
+            )?;
+        }
     }
     // Bushes: three crossed cutout cards each.
     for (x, z) in [(-4.0, -2.2), (3.6, -3.8), (6.2, -0.6)] {
