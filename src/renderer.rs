@@ -3588,6 +3588,11 @@ impl Renderer {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
                 // U-RTVIS: the reflection pass's kernels (RENDERLAB_RL_PASS=1; nothing otherwise).
+                self.ensure_material_pass(shading)?;
+                if crate::program::material_pass_on() && !self.view.outputs.modes.shades() {
+                    mark(&mut encoder, "material");
+                    self.encode_material_shading(&mut encoder, shading, None, true);
+                }
                 self.ensure_reflection_trace(shading)?;
                 self.ensure_reflection_hits(shading)?;
                 self.write_reflection_pass_frame();
