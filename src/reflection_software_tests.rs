@@ -360,7 +360,8 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
             continue;
         }
         validated += 1;
-        let source = deferred_variant(&composed);
+        let source =
+            deferred_variant(compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false)).source;
         assert!(
             source.contains("rl_deferred_clear(pixel);")
                 && source.contains("rl_deferred_store(pixel,input.world);")
@@ -376,4 +377,35 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
     }
     // The soft RT head and both non-RT heads trace reflections; the hard RT head does not.
     assert!(validated >= 3, "{validated} traced heads validated");
+}
+
+/// Deferred reflections under temporal shading: `deferred_variant` drops the program API's
+/// report stub, before the program, so the program's range moves with it; temporal shading
+/// splits the entry off at the program's end (a stale range cut the next block's first line,
+/// and every RENDERLAB_RL_DEFERRED=1 run failed to create its shading module).
+#[test]
+fn deferred_temporal_shading_keeps_the_program_range_and_validates() {
+    use crate::program::{Stage, compose, deferred_variant};
+    use crate::renderer::primary_ray_gpu::film_accumulation;
+    let soft = &crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap()[1];
+    let head = film_accumulation::shading_head(soft).unwrap();
+    let composed = deferred_variant(compose(
+        &head,
+        crate::STANDARD_PROGRAM,
+        Stage::Traced,
+        false,
+    ));
+    assert_eq!(
+        &composed.source[composed.program.clone()],
+        crate::STANDARD_PROGRAM
+    );
+    let source = film_accumulation::film_shading(composed).source;
+    let module = naga::front::wgsl::parse_str(&source)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
 }

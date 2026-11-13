@@ -835,7 +835,10 @@ fn compose_stage(
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
         source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
         if rl_deferred() && declares(program, "const", "RL_DEFERRED") {
-            source = deferred_variant(&source);
+            return deferred_variant(Composed {
+                source,
+                program: program_range,
+            });
         }
     } else {
         source.push_str(entry);
@@ -865,12 +868,19 @@ const DEFERRED_CLEAR_SEAM: &str =
 /// program's reflectance and untraced specular, and the entry writes them through the pixel's
 /// fog and aerial perspective, with the traced fraction (binding 62: reflectance rgb and w;
 /// 63: untraced specular). Every pixel the entry visits starts cleared, so misses and culled
-/// faces leave zero.
-pub(crate) fn deferred_variant(composed: &str) -> String {
+/// faces leave zero. The program's range moves with the removed report stub, which precedes
+/// it (temporal shading splits the module at the program's end).
+pub(crate) fn deferred_variant(composed: Composed) -> Composed {
+    let Composed { source, program } = composed;
     for seam in [DEFERRED_REPORT_STUB, DEFERRED_CLEAR_SEAM, VIEW_STORE_SEAM] {
-        assert_eq!(composed.matches(seam).count(), 1, "deferred seam {seam}");
+        assert_eq!(source.matches(seam).count(), 1, "deferred seam {seam}");
     }
-    let mut source = composed
+    assert!(
+        source.find(DEFERRED_REPORT_STUB).unwrap() < program.start,
+        "the report stub precedes the program"
+    );
+    let shift = DEFERRED_REPORT_STUB.len();
+    let mut source = source
         .replacen(DEFERRED_REPORT_STUB, "", 1)
         .replacen(
             DEFERRED_CLEAR_SEAM,
@@ -883,7 +893,10 @@ pub(crate) fn deferred_variant(composed: &str) -> String {
             1,
         );
     source.push_str(DEFERRED_API);
-    source
+    Composed {
+        source,
+        program: program.start - shift..program.end - shift,
+    }
 }
 
 // ---- View modes (docs/design-id-output.md) ----
