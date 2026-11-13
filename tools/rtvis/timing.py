@@ -487,6 +487,21 @@ PLANS["rtbisect"] = [
      COMP(v) | ({"RENDERLAB_RL_HIT": hit} if hit else {}))
     for name, hit in BISECT for v in ("1", "0")
 ]
+# comp5: the non-RT default (no switches) against RENDERLAB_RL_PASS=0 (main's path): bytes and
+# the probe (60 frames, flight and lanterns), pictures moving, with planner cuts (cut=1) and a
+# respawn under a still camera (hold=cut; the event at frame 24), and RT unset vs off (identity).
+OFF = {"RENDERLAB_RL_PASS": "0"}
+PLANS["comp5"] = (
+    [(f"q-nonrt-{name}-{tag}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "60"],
+      env | ({"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"comp5-{name}.json")} if tag == "default" else {}))
+     for name, extra in (("flight", []), ("night", ["--night-lanterns"])) for tag, env in (("default", {}), ("off", OFF))]
+    + [(f"p-nonrt-{name}-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "40", "--every", "1"],
+        {} if v == "1" else OFF)
+       for name, extra in (("flight", []), ("cut", ["--diag", "cut=1"]), ("holdcut", ["--diag", "hold=cut"]))
+       for v in ("1", "0")]
+    + [(f"p-rt-ident-comp{v}", ["--path", "rt", "--fox", FOX, *STD, "--frames", "30", "--every", "1"],
+        {} if v == "1" else OFF) for v in ("1", "0")]
+)
 # The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
 # flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,
 # paint 0.35), moving and still; `compare.py` crops the reflected edges, binary against binary.
