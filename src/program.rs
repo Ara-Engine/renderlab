@@ -177,6 +177,7 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
         None if traced && head.contains(SOFTWARE_REFLECTION_GEOMETRY) => software_reflection_api(),
         None => return (REFLECTION_STUB.to_owned(), false),
     };
+    let api = price_reflections(api);
     let api = match full_strata_weight() {
         Some(weight) => {
             let line = format!("const RL_FULL_STRATA:f32={weight:?};");
@@ -185,6 +186,37 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
         None => api,
     };
     (api, true)
+}
+/// PRICING ONLY (branch t3/rl-price, not for main): `RENDERLAB_RL_TMP=<bits>` drops parts of
+/// the reflection trace on both heads to split its cost. 1 hits read as misses (the trace
+/// stays, the hit decode and shading go), 2 no closest-hit trace (every ray a miss), 4 a black
+/// sky for misses, 8 one stratum per lobe. Unset, the text is unchanged.
+fn price_reflections(api: String) -> String {
+    let Some(bits) = std::env::var("RENDERLAB_RL_TMP").ok().and_then(|v| v.parse::<u32>().ok())
+    else {
+        return api;
+    };
+    let mut api = format!("const RL_TMP:u32={bits}u;\n{api}");
+    for (from, to) in [
+        ("        if hit.kind!=0u {\n", "        if hit.kind!=0u && (RL_TMP&1u)==0u {\n"),
+        ("        if hit.x!=0u {\n", "        if hit.x!=0u && (RL_TMP&1u)==0u {\n"),
+        (
+            "RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d)",
+            "RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,select(RL_FAR,receiver.epsilon*1.0001,(RL_TMP&2u)!=0u),origin,d)",
+        ),
+        (
+            "        let rs=rs_trace(origin,d,receiver.epsilon,RL_FAR,false);\n",
+            "        var rs=RsHit(RL_FAR,vec4<u32>(0u));\n        if (RL_TMP&2u)==0u { rs=rs_trace(origin,d,receiver.epsilon,RL_FAR,false); }\n",
+        ),
+        (
+            "            radiance=rl_sky(d,cone_alpha);\n",
+            "            radiance=select(rl_sky(d,cone_alpha),vec3<f32>(0.0),(RL_TMP&4u)!=0u);\n",
+        ),
+        ("    let cone_alpha=select(", "    if (RL_TMP&8u)!=0u {count=1u;}\n    let cone_alpha=select("),
+    ] {
+        api = api.replacen(from, to, 1);
+    }
+    api
 }
 /// The glossy strata's full-count weight as shaders/reflections.wgsl declares it.
 const FULL_STRATA: &str = "const RL_FULL_STRATA:f32=0.25;";
