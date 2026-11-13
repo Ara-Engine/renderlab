@@ -347,6 +347,10 @@ pub struct ForwardImages {
     /// MEASUREMENT ONLY: with `RENDERLAB_ARA_PROBE_RESOLVE` set, the resolve's
     /// one-pixel trace (`resolve_probe::describe` reads it).
     pub resolve_probe: Option<Vec<[f32; 4]>>,
+    /// With `RENDERLAB_RL_DEFERRED=1`, until the composite reads them on the GPU: the
+    /// deferred reflections' outputs as RGBA16F (`program::deferred_variant`: reflectance
+    /// and traced fraction; untraced specular and the inline traced luminance).
+    pub deferred_reflections: Option<[Vec<u8>; 2]>,
 }
 
 /// The post `Settings` record at this output height for the post frame with this
@@ -520,6 +524,9 @@ struct ProgramLists {
     dispatch: BinDispatch,
 }
 
+/// Consecutive films (`Pane::film`) from which a run blends in one pass instead of pane by
+/// pane (`encode` below; measured on the M5, Ara's Outpost and Glint).
+const FILM_RUN: usize = 8;
 /// One transparent pane's own resources.
 struct Pane {
     /// The colour behind it: the HDR target copied before it draws.
@@ -532,6 +539,9 @@ struct Pane {
     program: usize,
     /// The pixels its bounds project to, [x0, y0, x1, y1): what per-pixel shading visits.
     rect: [u32; 4],
+    /// A film (index of refraction one, no thickness): blended in hardware when its program
+    /// declares films (`Panes::films`), in one seeded pass with the films next to it.
+    film: bool,
 }
 /// What a traced frame's transparent panes add: `encode_transparency`'s targets,
 /// records and pipelines.
@@ -540,6 +550,9 @@ struct Panes {
     seed: Seed,
     /// Each distinct pane program composed for the glass pass, with its pipeline.
     programs: Vec<(Program, Glass)>,
+    /// The same programs' film pipelines (`transparency_glass::film_program`), for programs
+    /// that declare films.
+    films: Vec<Option<(Program, Glass)>>,
     /// Per-pixel pane shading (`PanePixels`), in place of the glass raster unless
     /// `RENDERLAB_ARA_PANES=raster`.
     pixels: Option<PanePixels>,
@@ -2847,6 +2860,16 @@ fn frame(
             InputKind::Sampler { comparison } => {
                 ensure!(!comparison, "unexpected comparison sampler {}", spec.name)
             }
+            // Deferred reflections' inputs (`program::deferred_variant`): the shading entry
+            // writes them per pixel; the composite after shading reads them.
+            InputKind::StorageImage { .. }
+                if traced.is_some()
+                    && matches!((spec.key.group, spec.key.binding), (0, 62) | (0, 63)) =>
+            {
+                if let std::collections::btree_map::Entry::Vacant(slot) = inputs.entry(spec.key) {
+                    slot.insert(Texture::new(gpu, size, Format::Rgba16Float, true, false)?);
+                }
+            }
             InputKind::AccelerationStructure | InputKind::StorageImage { .. }
                 if traced.is_some() => {}
             InputKind::BufferArray { .. } | InputKind::SamplerArray { .. }
@@ -3746,13 +3769,25 @@ fn frame(
                     slot,
                     program,
                     rect: pane_rect(pane_bounds(object)?, &scene.camera, size),
+                    film: object
+                        .material
+                        .transparency
+                        .is_some_and(|t| t.ior <= 1.0 && t.thickness == 0.0),
                 });
             }
             let mut programs = Vec::new();
+            let mut films = Vec::new();
             for source in &sources {
                 let program = transparency_glass::traced_program(source)?;
                 let glass = Glass::new(gpu, cache, &program)?;
                 programs.push((program, glass));
+                films.push(match transparency_glass::film_program(source)? {
+                    Some(program) => {
+                        let glass = Glass::film(gpu, cache, &program)?;
+                        Some((program, glass))
+                    }
+                    None => None,
+                });
             }
             let per_pixel = std::env::var("RENDERLAB_ARA_PANES").map_or(true, |v| v != "raster");
             let pixels = if per_pixel {
@@ -3785,6 +3820,7 @@ fn frame(
                 hit_depth: Kernel::new(gpu, cache, Pass::TransparencyHitDepth)?,
                 seed: Seed::new(gpu, cache)?,
                 programs,
+                films,
                 pixels,
                 target: MsaaColor::new(gpu, size)?,
                 camera,
@@ -3836,20 +3872,46 @@ fn frame(
         t.hit_depth
             .record(&mut graph, &mut rec, &packet, [size[0], size[1], 1])?;
         pane_packets.push(packet);
+        // Films whose program declares them blend in hardware: a run of consecutive films takes
+        // one copy and one seed, each film blends into the seeded samples in one render pass,
+        // and one resolve. Only runs of FILM_RUN or more: Metal's fragment stage shades a film
+        // pixel about 15x slower than the per-pixel kernel (docs/m7-gaps.md), so the batch pays
+        // only where it saves many panes' copy, id raster and dispatch (Ara's Outpost: about
+        // 125 films, 22 ms to 1.5 ms on the M5; Glint's three contact-shadow films cost more
+        // blended). A pane's rectangle is no estimate of its pixels: a pane with a corner
+        // behind the eye takes the whole view.
+        let filmish = |p: &Pane| p.film && t.films[p.program].is_some();
+        let mut batched = vec![false; t.panes.len()];
+        let mut start = 0;
+        while start < t.panes.len() {
+            let end = (start..t.panes.len())
+                .find(|&i| !filmish(&t.panes[i]))
+                .unwrap_or(t.panes.len());
+            if end - start >= FILM_RUN {
+                batched[start..end].fill(true);
+            }
+            start = end.max(start + 1);
+        }
+        let film = |at: usize| batched.get(at).copied().unwrap_or(false);
+        let mut film_packets: Vec<(usize, HeapBindings)> = Vec::new();
         for (at, pane) in t.panes.iter().enumerate() {
-            graph.node(
-                &mut rec,
-                &[
-                    (Resource::Image(output.image), Access::CopySource),
-                    (Resource::Image(pane.behind.image), Access::CopyDestination),
-                ],
-            )?;
-            rec.push(Command::BeginPass("ara::CopyImage".into()));
-            rec.push(Command::CopyImage {
-                source: output.image,
-                destination: pane.behind.image,
-            });
-            rec.push(Command::EndPass);
+            let is_film = film(at);
+            let opens = !is_film || at == 0 || !film(at - 1);
+            if opens {
+                graph.node(
+                    &mut rec,
+                    &[
+                        (Resource::Image(output.image), Access::CopySource),
+                        (Resource::Image(pane.behind.image), Access::CopyDestination),
+                    ],
+                )?;
+                rec.push(Command::BeginPass("ara::CopyImage".into()));
+                rec.push(Command::CopyImage {
+                    source: output.image,
+                    destination: pane.behind.image,
+                });
+                rec.push(Command::EndPass);
+            }
             // The glass entry's inputs, shared by the per-pixel passes.
             let glass_input = |spec: &shader::ShaderInput| -> Result<Input<'_>> {
                 Ok(match (spec.kind, spec.key.group, spec.key.binding) {
@@ -3870,6 +3932,43 @@ fn frame(
                     _ => shared.input(spec, Some((&pane.geometry, &pane.material)))?,
                 })
             };
+            if is_film {
+                if opens {
+                    let seed = HeapBindings::new(
+                        gpu,
+                        Pass::TransparencySeed,
+                        &[(key(0, 31), Input::Image(&pane.behind))],
+                    )?;
+                    seed.import(&mut graph);
+                    t.seed.record(&mut graph, &mut rec, &seed, &t.target)?;
+                    pane_packets.push(seed);
+                }
+                let (program, _) = t.films[pane.program].as_ref().expect("a film's pipeline");
+                let values = program
+                    .inputs()
+                    .iter()
+                    .map(|spec| Ok((spec.key, glass_input(spec)?)))
+                    .collect::<Result<Vec<_>>>()?;
+                let packet = HeapBindings::for_program(gpu, program, &values)?;
+                packet.import(&mut graph);
+                film_packets.push((at, packet));
+                if !film(at + 1) {
+                    // The run, far to near, in one render pass; then one resolve.
+                    let films: Vec<_> = film_packets
+                        .iter()
+                        .map(|(at, packet)| {
+                            let pane = &t.panes[*at];
+                            let glass =
+                                &t.films[pane.program].as_ref().expect("a film's pipeline").1;
+                            (glass, packet, &pane.geometry)
+                        })
+                        .collect();
+                    transparency_glass::record_films(&mut graph, &mut rec, &films, &t.target)?;
+                    t.target.resolve_to(&mut graph, &mut rec, &output)?;
+                    pane_packets.extend(film_packets.drain(..).map(|(_, packet)| packet));
+                }
+                continue;
+            }
             if let Some(pixels) = &t.pixels {
                 // Per pixel: the triangle under each coverage sample, then one shading
                 // dispatch over the pane's rectangle into the output (see PanePixels).
@@ -3998,6 +4097,25 @@ fn frame(
             super::resolve_probe::BYTES,
         )?),
         None => None,
+    };
+    let deferred_read = match (inputs.get(&key(0, 62)), inputs.get(&key(0, 63))) {
+        (Some(reflectance), Some(untraced)) => Some([
+            transfer::readback(
+                gpu,
+                &mut graph,
+                &mut rec,
+                reflectance.image,
+                u64::from(reflectance.size[0]) * u64::from(reflectance.size[1]) * 8,
+            )?,
+            transfer::readback(
+                gpu,
+                &mut graph,
+                &mut rec,
+                untraced.image,
+                u64::from(untraced.size[0]) * u64::from(untraced.size[1]) * 8,
+            )?,
+        ]),
+        _ => None,
     };
     let history_read = match resolve.filter(|_| reconstruct.is_some_and(|r| r.read_history)) {
         Some((images, _)) => Some(transfer::readback(
@@ -4463,6 +4581,10 @@ fn frame(
             .map(|b| gpu.read(b))
             .transpose()?
             .map(|bytes| bytemuck::pod_collect_to_vec(&bytes)),
+        deferred_reflections: match deferred_read {
+            Some([a, b]) => Some([gpu.read(a)?, gpu.read(b)?]),
+            None => None,
+        },
         reconstruction_history: history_read
             .map(|b| gpu.read(b))
             .transpose()?

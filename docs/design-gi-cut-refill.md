@@ -73,3 +73,66 @@ through `Engine::cut_view` at frame 24 (game_scene does call it). Tools: tools/r
   frames, and answer pixels whose fine cell is missing from something finer than one coarser
   level (the surface-cache seed listed under "Not in this change", or the cut frame's own
   neighbouring cells), since the coarse level is what shows as blocks.
+
+## Rework (U-RTVIS, 2026-11-12): cap until drained, no coarse read. Not ready as a default.
+Changed behind `cut_refill` (still off):
+- **Claim cap:** published for up to `CUT_REFILL_FRAMES` (32) frames after a cut or clear instead
+  of 4. `gi_claim_period` already stops deferring once a frame's misses fit under the cap, so the
+  cap ends when the backlog drains; the 32 frames bound a scene that never drains.
+- **Cut phases:** the direction spread carries `SPREAD_WHILE_DEFERRING` (0x100 in `GI_H_SPREAD`).
+  `gi_setup_directions` spreads a new cell's directions only on frames whose claims were split,
+  and partial cells re-queue through the window and one frame past it.
+- **No coarse read:** pixels read their own level; a missing cell takes the lookup's fallbacks.
+  An explicit `claim_cells` keeps G2b's coarse start.
+- **Off is main:** with `cut_refill` off, every header word is main's.
+
+**Cost** (main + top-level BVH, RTX 4070 SUPER, 1080p, same binary, two interleaved visits): the
+forest `cut=turn` non-RT cut frame goes from 94-106 ms to 52.6 ms. Its gi_update goes from
+44.7 to 3.4 ms, then stays at 6-10 ms over +2..+8 (off: 9-11), with no later spike. The game
+jump non-RT cut-frame gi_update goes from 8.8 to 4.4-4.6 ms, at most 7.5 on a later frame. RT
+changes little (forest cut gi_update 5.0 to 2.6). One visit's first refill frame showed 381 ms
+of `cpu.wait`: a first-use shader compile, gone on the second visit.
+
+**Picture, the bar not met on non-RT:** still clips (camera frozen, the cut turns or jumps the
+view, frame 59 of the off run as the settled image). Mean error against it, on / off (whole
+image; edge pixels):
+
+| | cut | +2 | +4 | +8 |
+|---|---|---|---|---|
+| non-RT forest | 2.86 / 3.68; 9.24 / 9.03 | 2.65 / 2.94; 7.19 / 6.51 | 2.65 / 2.47; 6.44 / 5.43 | 2.37 / 1.78; 4.86 / 3.62 |
+| non-RT game | 1.71 / 1.71 | 0.67 / 0.45 | 0.59 / 0.33 | 0.39 / 0.20 |
+| RT forest | 5.07 / 6.22 | 4.40 / 5.00 | 3.49 / 4.18 | 2.52 / 2.96 |
+| RT game | 1.70 / 1.70 | 0.46 / 0.48 | 0.35 / 0.36 | 0.23 / 0.23 |
+
+- **RT:** as good or better everywhere.
+- **Non-RT:** converges more slowly. The forest wall shows dark cell-sized blotches with the
+  refill on that persist past +8 (crops: D:/Coding/renderlab-work/unit-rtvis/crops-rf4,
+  nonrt-forest-still-centre.png, on | off | settled). blobs.py runs a few percent higher with it
+  on over +1..+8.
+- **Cause:** new cells arrive over several frames with partial direction sets. A cell's first
+  sky term is then noisier, and its bounce gathers start later than when every cell was created
+  and fully traced on the cut frame.
+
+**Next options:**
+1. RT only: the refill passes there.
+2. Non-RT without the phase spread: claims capped, but each new cell traces all its directions at
+   once, since the top level made a full trace cheap.
+3. A larger non-RT cap, so the backlog drains in about two frames.
+
+**Option 2, measured (2026-11-12, one lease, parked):** the claim cap stays until the backlog
+drains, but each new cell traces all its directions on the frame it is claimed (no phase spread;
+`cut_refill` still off by default, `RENDERLAB_GI=cut_refill=1` enables it). Mean error against
+the settled image, on / off (whole image; edge pixels):
+
+| | cut | +2 | +4 | +8 |
+|---|---|---|---|---|
+| non-RT forest | 2.66 / 3.68; 9.05 / 9.03 | 2.39 / 2.94; 6.90 / 6.51 | 2.28 / 2.47; 6.02 / 5.43 | 1.83 / 1.78; 4.24 / 3.62 |
+| non-RT game | 1.65 / 1.71 | 0.43 / 0.45 | 0.34 / 0.33 | 0.22 / 0.20 |
+| RT forest | 5.07 / 6.22 | 4.40 / 5.00 | 3.49 / 4.18 | 2.52 / 2.96 |
+
+The whole-image error now converges like off, but non-RT forest edges stay 17 % worse at +8.
+The non-RT forest turn's cut frame took 65.6 ms with the refill on against 96.4 / 96.9 off
+(the first visit's on run had a 359 ms first-use spike), not the 52 ms bar. The lease's
+contention guard tripped on the last clip (RT game still, refill off), so the RT game row and
+blobs.py are missing. Parked: the cut-frame saving is about a third of the off cost, and edge
+convergence is still behind.

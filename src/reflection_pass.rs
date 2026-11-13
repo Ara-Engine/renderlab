@@ -1,0 +1,551 @@
+//! U-RTVIS reflection pass, first stage (docs/design-reflection-pass.md): `rl_trace` after the
+//! frame's shading. While `RENDERLAB_RL_PASS=1`, primary shading writes each glossy receiver's
+//! lobe (L, shaders/reflections_lobe.wgsl), and `rl_trace` (shaders/reflections_trace.wgsl)
+//! traces one ray per 2x2 quad from it. It writes misses' sky radiance into R and appends hit
+//! records to H for the Mac thread's `reflection_hits`, then writes H's dispatch arguments. The
+//! picture still comes from the inline trace; the accumulator and resolve come later.
+//! A child of primary_ray_gpu (its targets, layouts and bindings).
+use super::*;
+
+/// Group-0 bindings (U-RTVIS 54-63; the Mac's reflection_hits reads H and R at 64 and 65).
+pub(super) const LOBE_A: u32 = 56;
+pub(super) const LOBE_B: u32 = 57;
+pub(super) const PASS_FRAME: u32 = 58;
+const DISTANCE: u32 = 59;
+pub(super) const HITS: u32 = 64;
+pub(super) const SAMPLES: u32 = 65;
+/// H: the count and three dispatch arguments, then 48-byte records.
+const HITS_HEADER: u64 = 16;
+const RECORD_BYTES: u64 = 48;
+const SLOT_GROUP: [u32; 2] = [8, 8];
+
+/// `RENDERLAB_RL_PASS=1` (src/program.rs).
+pub(crate) fn on() -> bool {
+    crate::program::rl_pass_on()
+}
+
+/// The shading layout's lobe entries (write-only storage) and frame uniform.
+pub(super) fn shade_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
+    use wgpu::TextureFormat as F;
+    let write = |binding, format| {
+        entry(
+            binding,
+            wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            },
+        )
+    };
+    [
+        write(LOBE_A, F::Rgba32Float),
+        write(LOBE_B, F::Rgba32Uint),
+        uniform(PASS_FRAME, 16),
+    ]
+}
+
+/// `rl_trace`'s group 0 and pipeline layout: the frame uniform, the shared TLAS (RT) or the
+/// software reflection geometry (non-RT), L, the pass uniform, D, H and R; groups 1 and 3 are
+/// the traced geometry tables and the lighting.
+#[derive(Clone)]
+pub(super) struct TraceAbi {
+    group: Owned<wgpu::BindGroupLayout>,
+    layout: Owned<wgpu::PipelineLayout>,
+}
+impl TraceAbi {
+    pub fn new(
+        device: &PipelineDevice,
+        ledger: &Ledger,
+        arrays: &wgpu::BindGroupLayout,
+        lighting: &wgpu::BindGroupLayout,
+    ) -> Self {
+        use wgpu::TextureFormat as F;
+        let ray_query = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        let mut entries = vec![
+            uniform(10, FRAME_BYTES as u64),
+            texture(LOBE_A, wgpu::TextureSampleType::Float { filterable: false }),
+            texture(LOBE_B, wgpu::TextureSampleType::Uint),
+            uniform(PASS_FRAME, 16),
+            image(DISTANCE, F::R32Float),
+            buffer(
+                HITS,
+                wgpu::BufferBindingType::Storage { read_only: false },
+                HITS_HEADER + RECORD_BYTES,
+            ),
+            image(SAMPLES, F::Rgba16Float),
+        ];
+        entries.push(if ray_query {
+            scene(2)
+        } else {
+            read(SOFTWARE_REFLECTIONS, 16)
+        });
+        let group = ledger.own(
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("reflection trace"),
+                entries: &entries,
+            }),
+            ResourceKind::BindGroupLayout,
+        );
+        let layout = ledger.own(
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("reflection trace ABI"),
+                bind_group_layouts: &[Some(&group), Some(arrays), None, Some(lighting)],
+                immediate_size: 0,
+            }),
+            ResourceKind::PipelineLayout,
+        );
+        Self { group, layout }
+    }
+}
+
+/// The pass's per-view resources: L (full resolution), the pass uniform, H, R and D (one texel
+/// per 2x2 quad).
+pub(in crate::renderer) struct PassTargets {
+    pub lobe_a: Depth,
+    pub lobe_b: Depth,
+    pub frame: Buffer,
+    pub hits: Buffer,
+    pub samples: Depth,
+    pub distance: Depth,
+    pub slots: [u32; 2],
+}
+
+/// `rl_trace` and `rl_hit_args`, compiled from a head's standard-program traced module.
+#[derive(Clone)]
+pub(super) struct TracePipelines {
+    trace: Owned<wgpu::ComputePipeline>,
+    args: Owned<wgpu::ComputePipeline>,
+}
+
+impl Renderer {
+    /// The pass targets for a `size` view.
+    pub(super) fn rl_pass_targets(&self, size: wgpu::Extent3d) -> PassTargets {
+        use wgpu::TextureFormat as F;
+        let target = |label, width: u32, height: u32, format: wgpu::TextureFormat| {
+            let texture = self.ledger.own(
+                self.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width,
+                        height,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                }),
+                ResourceKind::Texture,
+            );
+            let view = self.ledger.own(texture.create_view(&Default::default()), ResourceKind::TextureView);
+            let bytes = u64::from(width) * u64::from(height) * u64::from(format.block_copy_size(None).unwrap());
+            Depth {
+                texture,
+                view,
+                _allocation: self.ledger.allocate(AllocationKind::Target, bytes),
+            }
+        };
+        let slots = [size.width.div_ceil(2), size.height.div_ceil(2)];
+        PassTargets {
+            lobe_a: target("reflection lobe A", size.width, size.height, F::Rgba32Float),
+            lobe_b: target("reflection lobe B", size.width, size.height, F::Rgba32Uint),
+            frame: Buffer::new(
+                self,
+                "reflection pass frame",
+                16,
+                wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            ),
+            hits: Buffer::new(
+                self,
+                "reflection hit records",
+                HITS_HEADER + u64::from(slots[0]) * u64::from(slots[1]) * RECORD_BYTES,
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::INDIRECT
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
+            ),
+            samples: target("reflection samples", slots[0], slots[1], F::Rgba16Float),
+            distance: target("reflection ray distance", slots[0], slots[1], F::R32Float),
+            slots,
+        }
+    }
+
+    /// The pass's group 0 for these targets and the frame's ray geometry.
+    pub(super) fn rl_trace_group(
+        &self,
+        abi: &TraceAbi,
+        pass: &PassTargets,
+        frame: wgpu::BindingResource<'_>,
+        scene: (u32, wgpu::BindingResource<'_>),
+    ) -> Owned<wgpu::BindGroup> {
+        use wgpu::BindingResource as R;
+        let entries = [
+            (10, frame),
+            (LOBE_A, R::TextureView(&pass.lobe_a.view)),
+            (LOBE_B, R::TextureView(&pass.lobe_b.view)),
+            (PASS_FRAME, pass.frame.value.as_entire_binding()),
+            (DISTANCE, R::TextureView(&pass.distance.view)),
+            (HITS, pass.hits.value.as_entire_binding()),
+            (SAMPLES, R::TextureView(&pass.samples.view)),
+            scene,
+        ];
+        let entries: Vec<_> = entries
+            .into_iter()
+            .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource })
+            .collect();
+        self.ledger.own(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("reflection trace"),
+                layout: &abi.group,
+                entries: &entries,
+            }),
+            ResourceKind::BindGroup,
+        )
+    }
+
+    /// Compiles the pass's kernels for `shading`'s head the first time a frame needs them.
+    pub(crate) fn ensure_reflection_trace(&mut self, shading: Shading) -> Result<(), Error> {
+        let Some(state) = self.view.primary.as_ref() else {
+            return Ok(());
+        };
+        let Some(abi) = state.rl_trace.as_ref() else {
+            return Ok(());
+        };
+        if state.rl_pipelines[shading as usize].is_some() {
+            return Ok(());
+        }
+        let head = &self.primary_sources.as_ref().unwrap().1[shading as usize];
+        let source = crate::program::rl_trace_source(head);
+        let scopes = OperationScopes::new(&self.device);
+        let module = self.ledger.own(
+            self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("reflection trace"),
+                source: wgpu::ShaderSource::Wgsl(source.into()),
+            }),
+            ResourceKind::ShaderModule,
+        );
+        let pipeline = |entry| {
+            self.ledger.own(
+                self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("reflection trace"),
+                    layout: Some(&abi.layout),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
+                ResourceKind::ComputePipeline,
+            )
+        };
+        let pipelines = TracePipelines {
+            trace: pipeline("rl_trace"),
+            args: pipeline("rl_hit_args"),
+        };
+        if let Some(error) = scopes.finish() {
+            return Err(Error::Shader(format!("reflection trace: {error}")));
+        }
+        self.view.primary.as_mut().unwrap().rl_pipelines[shading as usize] = Some(pipelines);
+        Ok(())
+    }
+
+    /// `rl_trace` then `rl_hit_args`, after the frame's shading; nothing while the pass is off.
+    pub(crate) fn encode_reflection_trace(&self, encoder: &mut wgpu::CommandEncoder, shading: Shading) {
+        let Some(state) = self.view.primary.as_ref() else {
+            return;
+        };
+        let (Some(pipelines), Some(pass), Some(group)) = (
+            state.rl_pipelines[shading as usize].as_ref(),
+            state.targets.as_ref().and_then(|t| t.rl_pass.as_ref()),
+            state.bindings.as_ref().and_then(|b| b.rl_trace.as_ref()),
+        ) else {
+            return;
+        };
+        let g = state.geometry.as_ref().unwrap();
+        self.rl_probe(encoder, pass);
+        encoder.clear_buffer(&pass.hits.value, 0, Some(HITS_HEADER));
+        let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("reflection trace"),
+            timestamp_writes: None,
+        });
+        compute.set_bind_group(0, &**group, &[]);
+        compute.set_bind_group(1, &*g.arrays, &[]);
+        compute.set_bind_group(3, self.lighting.bind(), &[]);
+        compute.set_pipeline(&pipelines.trace);
+        compute.dispatch_workgroups(
+            pass.slots[0].div_ceil(SLOT_GROUP[0]),
+            pass.slots[1].div_ceil(SLOT_GROUP[1]),
+            1,
+        );
+        compute.set_pipeline(&pipelines.args);
+        compute.dispatch_workgroups(1, 1, 1);
+    }
+
+    /// This frame's pass uniform: the frame counter (the lobes' tag), the slot grid's width,
+    /// and the pass on.
+    pub(crate) fn write_reflection_pass_frame(&self) {
+        let Some(pass) = self
+            .view
+            .primary
+            .as_ref()
+            .and_then(|s| s.targets.as_ref())
+            .and_then(|t| t.rl_pass.as_ref())
+        else {
+            return;
+        };
+        let words = [self.frames as u32, pass.slots[0], 1, 0];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+        self.queue.write_buffer(&pass.frame.value, 0, &bytes);
+    }
+}
+
+/// rl_resolve's source; `RENDERLAB_RL_RESOLVE_TUNE=cap=C,clamp=K,wide=R` (measurement) replaces
+/// its RL_RESOLVE_CAP, RL_RESOLVE_CLAMP and RL_RESOLVE_WIDE.
+fn resolve_source() -> String {
+    let mut source = include_str!("../shaders/reflections_resolve.wgsl").to_owned();
+    let list = std::env::var("RENDERLAB_RL_RESOLVE_TUNE").unwrap_or_default();
+    for (key, value) in list.split(',').filter_map(|s| s.trim().split_once('=')) {
+        let name = match key {
+            "cap" => "RL_RESOLVE_CAP",
+            "clamp" => "RL_RESOLVE_CLAMP",
+            "wide" => "RL_RESOLVE_WIDE",
+            "sigma" => "RL_ATROUS_SIGMA",
+            "footprint" => "RL_ATROUS_FOOTPRINT",
+            _ => continue,
+        };
+        let prefix = format!("const {name}:f32=");
+        let at = source.find(&prefix).expect("RENDERLAB_RL_RESOLVE_TUNE seam");
+        let end = at + source[at..].find(';').unwrap();
+        source.replace_range(at..end, &format!("{prefix}{:?}", value.parse::<f32>().unwrap()));
+    }
+    source
+}
+/// rl_resolve (RENDERLAB_RL_RESOLVE_PASS=1, shaders/reflections_resolve.wgsl): its layout and
+/// kernel, over the reflection history texture and its frame record. No program code.
+#[derive(Clone)]
+pub(super) struct ResolveKit {
+    group: Owned<wgpu::BindGroupLayout>,
+    pipeline: Owned<wgpu::ComputePipeline>,
+    /// The a-trous passes, steps 1, 2 and 4.
+    atrous: [Owned<wgpu::ComputePipeline>; 3],
+}
+impl ResolveKit {
+    pub fn new(device: &PipelineDevice, ledger: &Ledger) -> Self {
+        let group = ledger.own(
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("reflection resolve"),
+                entries: &[
+                    entry(
+                        RL_HISTORY,
+                        wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::ReadWrite,
+                            format: wgpu::TextureFormat::R32Uint,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                        },
+                    ),
+                    uniform(RL_HISTORY_FRAME, temporal_reconstruction::RL_HISTORY_BYTES as u64),
+                ],
+            }),
+            ResourceKind::BindGroupLayout,
+        );
+        let layout = ledger.own(
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("reflection resolve ABI"),
+                bind_group_layouts: &[Some(&group)],
+                immediate_size: 0,
+            }),
+            ResourceKind::PipelineLayout,
+        );
+        let module = ledger.own(
+            device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("reflection resolve"),
+                source: wgpu::ShaderSource::Wgsl(resolve_source().into()),
+            }),
+            ResourceKind::ShaderModule,
+        );
+        let pipeline = |entry| {
+            ledger.own(
+                device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("reflection resolve"),
+                    layout: Some(&layout),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: Default::default(),
+                    cache: None,
+                }),
+                ResourceKind::ComputePipeline,
+            )
+        };
+        Self {
+            group,
+            pipeline: pipeline("rl_resolve"),
+            atrous: ["rl_atrous1", "rl_atrous2", "rl_atrous4"].map(pipeline),
+        }
+    }
+}
+
+impl Renderer {
+    pub(super) fn rl_resolve_group(&self, kit: &ResolveKit, history: &RlHistoryTargets) -> Owned<wgpu::BindGroup> {
+        self.ledger.own(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("reflection resolve"),
+                layout: &kit.group,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: RL_HISTORY,
+                        resource: wgpu::BindingResource::TextureView(&history.history.view),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: RL_HISTORY_FRAME,
+                        resource: history.frame.value.as_entire_binding(),
+                    },
+                ],
+            }),
+            ResourceKind::BindGroup,
+        )
+    }
+
+    /// rl_resolve after the frame's shading: nothing unless RENDERLAB_RL_RESOLVE_PASS=1.
+    pub(crate) fn encode_reflection_resolve(&self, encoder: &mut wgpu::CommandEncoder) {
+        let Some(state) = self.view.primary.as_ref() else {
+            return;
+        };
+        let (Some(kit), Some(group), Some(t)) = (
+            state.rl_resolve.as_ref(),
+            state.bindings.as_ref().and_then(|b| b.rl_resolve.as_ref()),
+            state.targets.as_ref(),
+        ) else {
+            return;
+        };
+        let size = t.hit.texture.size();
+        let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("reflection resolve"),
+            timestamp_writes: None,
+        });
+        compute.set_bind_group(0, &**group, &[]);
+        for pipeline in std::iter::once(&kit.pipeline).chain(&kit.atrous) {
+            compute.set_pipeline(pipeline);
+            compute.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+        }
+    }
+}
+
+// ---- measurement only: RENDERLAB_RL_PROBE=<json path> ----
+/// The frame whose H, R and D the probe reads: copied at the start of the next frame's trace,
+/// after every stage of the probed frame (rl_trace, rl_hit_args, reflection_hits) has written them.
+const PROBE_FRAME: u64 = 30;
+struct Probe {
+    staging: wgpu::Buffer,
+    rows: [u64; 2],
+    slots: [u32; 2],
+    path: String,
+}
+static PROBE: std::sync::Mutex<Option<Probe>> = std::sync::Mutex::new(None);
+fn f16_to_f32(h: u16) -> f32 {
+    let sign = if h & 0x8000 != 0 { -1.0 } else { 1.0 };
+    let exponent = i32::from((h >> 10) & 0x1f);
+    let mantissa = f32::from(h & 0x3ff);
+    sign * match exponent {
+        0 => mantissa * 2f32.powi(-24),
+        31 => f32::INFINITY,
+        e => (1.0 + mantissa / 1024.0) * 2f32.powi(e - 15),
+    }
+}
+impl Renderer {
+    /// Copies the probed frame's H count, R and D (frame PROBE_FRAME + 1), then reads them on the
+    /// frame after and writes counts as JSON: slots with a hit, those whose R reflection_hits
+    /// wrote (a = 1) and whose radiance is non-zero, and misses with a sky sample.
+    fn rl_probe(&self, encoder: &mut wgpu::CommandEncoder, pass: &PassTargets) {
+        static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+        let Some(path) = PATH.get_or_init(|| std::env::var("RENDERLAB_RL_PROBE").ok()) else {
+            return;
+        };
+        let mut probe = PROBE.lock().unwrap();
+        if self.frames == PROBE_FRAME + 1 && probe.is_none() {
+            let [w, h] = pass.slots;
+            let rows = [u64::from(w * 8).next_multiple_of(256), u64::from(w * 4).next_multiple_of(256)];
+            let size = 256 + (rows[0] + rows[1]) * u64::from(h);
+            let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("reflection probe"),
+                size,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(&pass.hits.value, 0, &staging, 0, HITS_HEADER);
+            let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
+            for (texture, offset, row) in [
+                (&pass.samples.texture, 256, rows[0]),
+                (&pass.distance.texture, 256 + rows[0] * u64::from(h), rows[1]),
+            ] {
+                encoder.copy_texture_to_buffer(
+                    texture.as_image_copy(),
+                    wgpu::TexelCopyBufferInfo {
+                        buffer: &staging,
+                        layout: wgpu::TexelCopyBufferLayout {
+                            offset,
+                            bytes_per_row: Some(row as u32),
+                            rows_per_image: Some(h),
+                        },
+                    },
+                    extent,
+                );
+            }
+            *probe = Some(Probe { staging, rows, slots: pass.slots, path: path.clone() });
+            return;
+        }
+        if self.frames != PROBE_FRAME + 2 {
+            return;
+        }
+        let Some(p) = probe.take() else {
+            return;
+        };
+        p.staging.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        let _ = self.device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: Some(std::time::Duration::from_secs(20)),
+        });
+        // wgpu 30 returns the mapped view as a Result; a probe that cannot map reports nothing.
+        let Ok(data) = p.staging.slice(..).get_mapped_range() else {
+            return;
+        };
+        let count = u32::from_ne_bytes(data[0..4].try_into().unwrap());
+        let [w, h] = p.slots;
+        let (mut hits, mut written, mut lit, mut misses, mut sky) = (0u64, 0u64, 0u64, 0u64, 0u64);
+        for y in 0..u64::from(h) {
+            for x in 0..u64::from(w) {
+                let r = (256 + y * p.rows[0] + x * 8) as usize;
+                let d = (256 + p.rows[0] * u64::from(h) + y * p.rows[1] + x * 4) as usize;
+                let texel: Vec<f32> = (0..4)
+                    .map(|i| f16_to_f32(u16::from_ne_bytes(data[r + 2 * i..r + 2 * i + 2].try_into().unwrap())))
+                    .collect();
+                let distance = f32::from_ne_bytes(data[d..d + 4].try_into().unwrap());
+                if distance > 0.0 {
+                    hits += 1;
+                    written += u64::from(texel[3] == 1.0);
+                    lit += u64::from(texel[0] + texel[1] + texel[2] > 0.0);
+                } else if distance == -1.0 {
+                    misses += 1;
+                    sky += u64::from(texel[3] == 1.0);
+                }
+            }
+        }
+        let json = format!(
+            "{{\"frame\":{PROBE_FRAME},\"records\":{count},\"hit_slots\":{hits},\"hit_written\":{written},\"hit_nonzero\":{lit},\"miss_slots\":{misses},\"miss_sky\":{sky}}}\n"
+        );
+        let _ = std::fs::write(&p.path, json);
+    }
+}
+
+impl Renderer {
+    /// Sets the resolve's shading phase (0 the pre-pass, 1 the shading pass) for the next
+    /// shading dispatch.
+    pub(crate) fn encode_reflection_phase(&self, encoder: &mut wgpu::CommandEncoder, phase: u64) {
+        let Some(t) = self.view.primary.as_ref().and_then(|s| s.targets.as_ref()) else {
+            return;
+        };
+        encoder.copy_buffer_to_buffer(&t.rl_history.phases.value, 16 * phase, &t.rl_history.phase.value, 0, 16);
+    }
+}

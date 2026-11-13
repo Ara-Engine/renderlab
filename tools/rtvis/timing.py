@@ -215,6 +215,200 @@ PLANS["pcfpics"] = [
 ]
 # Item 2 (2026-11-12): the forest cut on non-RT with the instance top level, cut_refill off/on.
 PLANS["refill2"] = [(n, e, m) for n, e, m in PLANS["refill"] if n.startswith("nonrt-forest")]
+# The cut refill rework (cap until drained, phases while deferring, no coarse read): forest turn
+# and game jump, both paths, timing and pictures (still: frame 59 is the settled reference).
+REFILL4_CLIPS = [
+    ("nonrt-forest", ["--path", "nonrt", "--diag", "forest=1", "--diag", "cut=turn", *LOW]),
+    ("rt-forest", ["--diag", "forest=1", "--diag", "cut=turn", *LOW]),
+    ("nonrt-game", ["--path", "nonrt", "--diag", "cut=1"]),
+    ("rt-game", ["--diag", "cut=1"]),
+]
+PLANS["refill4"] = [
+    (f"{name}-refill{v}-{k}", extra + ["--frames", "60"], REFILL(v))
+    for k in (1, 2) for name, extra in REFILL4_CLIPS for v in ("1", "0")
+]
+PLANS["refill4still"] = [
+    (f"p-{name}-still-refill{v}", extra + ["--still", "--frames", "60", "--every", "1"], REFILL(v))
+    for name, extra in REFILL4_CLIPS for v in ("1", "0")
+]
+PLANS["refill4move"] = [
+    (f"p-{name}-move-refill{v}", extra + ["--frames", "36", "--every", "1"], REFILL(v))
+    for name, extra in REFILL4_CLIPS for v in ("1", "0")
+]
+# Reflections (2026-11-12): where their cost goes by band, the game flight and night lanterns.
+REFL_VARIANTS = [("base", {}), ("strata8", {"RENDERLAB_RL_HIT": "strata=8"}), ("strata4", {"RENDERLAB_RL_HIT": "strata=4"}),
+                 ("rough03", {"RENDERLAB_REFLECTION_ROUGH": "0.3"}), ("rough01", {"RENDERLAB_REFLECTION_ROUGH": "0.1"}),
+                 ("off", {"RENDERLAB_ABLATE": "reflections"})]
+REFL_CLIPS = [("game", ["--fox", FOX]), ("night", ["--fox", FOX, "--night-lanterns"])]
+PLANS["refl"] = [
+    (f"x-{path}-{name}-{v}", ["--path", path, *extra, "--frames", "60"], env)
+    for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v, env in REFL_VARIANTS
+]
+# Half the glossy strata a frame (RENDERLAB_RL_HALF): timing, and the game's pictures.
+HALF = lambda v: {"RENDERLAB_RL_HALF": v}
+PLANS["half"] = [
+    (f"h-{path}-{name}-half{v}-{k}", ["--path", path, *extra, "--frames", "60"], HALF(v))
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v in ("1", "0")
+]
+PLANS["halfpics"] = [
+    (f"p-{path}-{kind}-half{v}", ["--path", path, "--fox", FOX, *extra, "--frames", "48", "--every", "1"], HALF(v))
+    for path in ("nonrt", "rt") for kind, extra in (("flight", []), ("hold", ["--diag", "hold=1"])) for v in ("1", "0")
+]
+# Wide-lobe strata subsets (RENDERLAB_RL_SUBSET=D@R; "1" is off): timing, and the game's pictures.
+SUBSET = lambda v: {"RENDERLAB_RL_SUBSET": v}
+SUBSET_ON = "4@0.3"
+PLANS["subset"] = [
+    (f"s-{path}-{name}-sub{v.replace('@', 'r')}-{k}", ["--path", path, *extra, "--frames", "60"], SUBSET(v))
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v in (SUBSET_ON, "1")
+]
+PLANS["subsetpics"] = [
+    (f"p-{path}-{kind}-sub{v.replace('@', 'r')}", ["--path", path, "--fox", FOX, *extra, "--frames", "48", "--every", "1"], SUBSET(v))
+    for path in ("nonrt", "rt") for kind, extra in (("flight", []), ("hold", ["--diag", "hold=1"])) for v in (SUBSET_ON, "1")
+]
+# The traced band's end (RENDERLAB_REFLECTION_ROUGH replaces max_roughness, default 0.5): timing.
+ROUGH_VALUES = ("0.5", "0.35", "0.25")
+PLANS["rough"] = [
+    (f"r-{path}-{name}-r{v}-{k}", ["--path", path, *extra, "--frames", "60"], {"RENDERLAB_REFLECTION_ROUGH": v})
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v in ROUGH_VALUES
+]
+# Reflection history (RENDERLAB_RL_HISTORY=1, off by default; reflections_history.wgsl): timing on
+# the game flight and night lanterns, and the game's flight and cut pictures, both paths.
+HIST = lambda v: {"RENDERLAB_RL_HISTORY": v}
+PLANS["histsmoke"] = [(f"q-{path}-smoke", ["--path", path, "--frames", "6"], HIST("1")) for path in ("rt", "nonrt")]
+PLANS["hist"] = [
+    (f"h-{path}-{name}-hist{v}-{k}", ["--path", path, *extra, "--frames", "60"], HIST(v))
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v in ("1", "0")
+]
+PLANS["histpics"] = [
+    (f"p-{path}-{kind}-hist{v}", ["--path", path, "--fox", FOX, *extra, "--every", "1"], HIST(v))
+    for path in ("nonrt", "rt")
+    for kind, extra in (("flight", ["--frames", "48"]), ("cut", ["--diag", "cut=1", "--frames", "36"]))
+    for v in ("1", "0")
+]
+ON = {"RENDERLAB_RL_HISTORY": "1"}
+HIST_TUNES = [("off", {"RENDERLAB_RL_HISTORY": "0"}), ("s1", ON),
+              ("s4c1", ON | {"RENDERLAB_RL_HISTORY_TUNE": "strata=4,cap=1,moving=1"}),
+              ("s4c4", ON | {"RENDERLAB_RL_HISTORY_TUNE": "strata=4,cap=4,moving=4"})]
+PLANS["histtune"] = [
+    (f"t-{path}-{name}-{v}-{k}", ["--path", path, *extra, "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in REFL_CLIPS for v, env in HIST_TUNES
+]
+# Diagnosis: never reject (sigma huge), against off and the default, game flight both paths;
+# and the game held still (hold=1), where every glossy pixel's history should be trusted.
+HIST_DIAG = [("off", {"RENDERLAB_RL_HISTORY": "0"}), ("s1", ON),
+             ("norej", ON | {"RENDERLAB_RL_HISTORY_TUNE": "sigma=1000000000"})]
+PLANS["histdiag"] = [
+    (f"d-{path}-{name}-{v}-{k}", ["--path", path, "--fox", FOX, *extra, "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in (("game", []), ("hold", ["--diag", "hold=1"]))
+    for v, env in HIST_DIAG
+]
+# The Showcase-like glossy band (reflection_matched --stage --metal-balls, 1280x720, moving):
+# shading with the history off, on, and four strata a frame. Run with the reflection_matched exe.
+# Timing only: the one written frame is frame 0, outside the measured frames.
+SHOW = ["--matched", "--lamp", "1", "--stage", "--metal-balls", "--write-frames", "0"]
+PLANS["histshow"] = [
+    (f"s-{path}-{v}-{k}", ["--path", path, *SHOW], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in HIST_TUNES[:3]
+]
+# History-only-while-still gate: moving game frames (flight, night lanterns) for a byte
+# check against main's binary (same plan, run with each exe), and still timing.
+PLANS["gatemoving"] = [
+    (f"p-{path}-{name}", ["--path", path, *extra, "--every", "1"], {})
+    for path in ("nonrt", "rt")
+    for name, extra in (("flight", ["--fox", FOX, "--frames", "48"]), ("night", ["--fox", FOX, "--night-lanterns", "--frames", "30"]))
+]
+GATE_VARIANTS = (("off", {"RENDERLAB_RL_HISTORY": "0"}), ("on", {}), ("cap4", {"RENDERLAB_RL_HISTORY_TUNE": "cap=4"}))
+# Run with reflection_matched (the Showcase-like band held at frame 32) and game_scene (hold=1).
+PLANS["gateshow"] = [
+    (f"s-{path}-show-{v}-{k}", ["--path", path, *SHOW, "--freeze", "32"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in GATE_VARIANTS
+]
+PLANS["gatehold"] = [
+    (f"s-{path}-hold-{v}-{k}", ["--path", path, "--fox", FOX, "--diag", "hold=1", "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in GATE_VARIANTS
+]
+# The history's spatial resolve under motion (RENDERLAB_RL_RESOLVE=1): the Showcase-like band
+# moving (run with reflection_matched) and the game flight (game_scene), against the default.
+RES_VARIANTS = (("base", {}), ("res", {"RENDERLAB_RL_RESOLVE": "1"}),
+                ("res4", {"RENDERLAB_RL_RESOLVE": "1", "RENDERLAB_RL_HISTORY_TUNE": "strata=4"}))
+PLANS["resshow"] = [
+    (f"m-{path}-show-{v}-{k}", ["--path", path, *SHOW], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in RES_VARIANTS
+]
+PLANS["resgame"] = [
+    (f"g-{path}-flight-{v}-{k}", ["--path", path, "--fox", FOX, "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in RES_VARIANTS
+]
+# The reflection pass's first stage (RENDERLAB_RL_PASS=1: lobes and rl_trace, the picture
+# still inline): byte identity on against off (`hashes OUT rlpass`) and the trace's cost.
+PASS = lambda v: {"RENDERLAB_RL_PASS": v}
+# The game flight shades two programs (game, toon); the quarry is the single-program case.
+PASS_CLIPS = (("flight", ["--fox", FOX, "--frames", "40"]), ("quarry", ["--quarry", QUARRY, "--frames", "20"]))
+PLANS["rlpass"] = [
+    (f"p-{path}-{name}-rlpass{v}", ["--path", path, *extra, "--every", "1"], PASS(v))
+    for path in ("nonrt", "rt") for name, extra in PASS_CLIPS for v in ("1", "0")
+]
+PLANS["rlpasstime"] = [
+    (f"t-{path}-{name}-pass{v}", ["--path", path, *extra], PASS(v))
+    for path in ("nonrt", "rt") for name, extra in PASS_CLIPS for v in ("1", "0")
+]
+PLANS["rlpassshow"] = [
+    (f"t-{path}-show-pass{v}", ["--path", path, *SHOW], PASS(v)) for path in ("nonrt", "rt") for v in ("1", "0")
+]
+# rl_resolve as a pass (RENDERLAB_RL_HISTORY=1 RENDERLAB_RL_RESOLVE_PASS=1) against the base.
+RP = {"RENDERLAB_RL_HISTORY": "1", "RENDERLAB_RL_RESOLVE_PASS": "1"}
+RP_VARIANTS = (("base", {}), ("rp", RP))
+PLANS["rpshow"] = [
+    (f"m-{path}-show-{v}-{k}", ["--path", path, *SHOW], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in RP_VARIANTS
+]
+PLANS["rpgame"] = [
+    (f"g-{path}-flight-{v}-{k}", ["--path", path, "--fox", FOX, "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in RP_VARIANTS
+]
+PLANS["rppics"] = [
+    (f"p-{path}-cut-rp{int(v == 'rp')}", ["--path", path, "--fox", FOX, "--diag", "cut=1", "--frames", "36", "--every", "1"], env)
+    for path in ("nonrt", "rt") for v, env in RP_VARIANTS
+]
+# The pass's probe (RENDERLAB_RL_PROBE, measurement only): frame 30's H count and R/D slot counts.
+PROBE_DIR = WORK / "probe"
+PLANS["rlprobe"] = [
+    (f"q-{path}-{name}-probe", ["--path", path, *extra, "--frames", "40"],
+     PASS("1") | {"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"{path}-{name}.json")})
+    for path in ("nonrt", "rt") for name, extra in (("flight", ["--fox", FOX]), ("quarry", ["--quarry", QUARRY]))
+]
+# The no-lag resolve (step 1) and four strata a frame on rough lobes (step 2), Showcase-like timing.
+NL_VARIANTS = (("base", {}), ("nl", RP), ("nl4", RP | {"RENDERLAB_RL_HISTORY_TUNE": "rough_strata=4"}))
+PLANS["nlshow"] = [
+    (f"m-{path}-show-{v}-{k}", ["--path", path, *SHOW], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in NL_VARIANTS
+]
+# The resolve's history length and clamp (RENDERLAB_RL_RESOLVE_TUNE) with four rough strata.
+NL4 = RP | {"RENDERLAB_RL_HISTORY_TUNE": "rough_strata=4"}
+PLANS["nltune"] = [
+    (f"m-{path}-show-{v}", ["--path", path, *SHOW], env)
+    for path in ("nonrt", "rt")
+    for v, env in (("c4k1", NL4 | {"RENDERLAB_RL_RESOLVE_TUNE": "cap=4,clamp=1.0"}),
+                   ("c2k075", NL4 | {"RENDERLAB_RL_RESOLVE_TUNE": "cap=2,clamp=0.75"}))
+]
+# The resolve candidate (history, resolve pass, footprint 0.03, 4 strata a frame on every glossy lobe).
+CAND = RP | {"RENDERLAB_RL_HISTORY_TUNE": "strata=4,rough_strata=4", "RENDERLAB_RL_RESOLVE_TUNE": "footprint=0.03"}
+PLANS["candshow"] = [
+    (f"m-{path}-show-{v}-{k}", ["--path", path, *SHOW], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in (("base", {}), ("cand", CAND))
+]
+PLANS["candgame"] = [
+    (f"g-{path}-flight-{v}-{k}", ["--path", path, "--fox", FOX, "--frames", "60"], env)
+    for k in (1, 2) for path in ("nonrt", "rt") for v, env in (("base", {}), ("cand", CAND))
+]
+# The candidate's merge gate: the game flight and a cut, the default (history + resolve) against
+# RENDERLAB_RL_HISTORY=0 (today's inline full set), both paths (`compare.py PICS CROPS gate`).
+PLANS["gatepics2"] = [
+    (f"p-{path}-{name}-gate{v}", ["--path", path, "--fox", FOX, *extra, "--every", "1"], {"RENDERLAB_RL_HISTORY": v})
+    for path in ("nonrt", "rt")
+    for name, extra in (("flight", ["--frames", "48"]), ("cut", ["--diag", "cut=1", "--frames", "36"]))
+    for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
@@ -303,6 +497,73 @@ def gi(out):
             print(f"  {k:16}" + " ".join(f"{v:6.1f}" for v in vals))
 
 
+def switch_matched(exe, out, key, name, spp="4096"):
+    """`split_matched` for any on/off switch: environment `key` 1 or 0, runs named `name`1/0."""
+    out = Path(out)
+    env = environment()
+    code = 0
+    runs = [(f"m-{path}-{kind}-{name}{v}", ["--path", path, "--matched", "--lamp", "1", *extra], {key: v})
+            for kind, extra in [("moving", ["--write-frames", "16,32,47"]), ("still", ["--freeze", "32", "--write-frames", "47"])]
+            for path in ("rt", "nonrt") for v in ("1", "0")]
+    runs.append(("m-reference", ["--path", "rt", "--lamp", "1", "--reference", spp, "--write-frames", "16,32,47"], {}))
+    for run, extra, more in runs:
+        d = out / run
+        d.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run([exe, *extra, "--out", str(d)], cwd=REPO, capture_output=True, text=True,
+                           timeout=900, env=env | more)
+        (d / "stderr.txt").write_text(r.stderr[-20000:])
+        print(run, "exit", r.returncode, flush=True)
+        code = max(code, r.returncode)
+    return code
+
+
+def pair_matched(exe, out, name, key, value, spp="4096"):
+    """reflection_matched with `key`=`value` (runs `name`1) against main (`name`0), both paths,
+    moving frames 16/32/47 and the held pose of frame 32, then the path tracer at those poses."""
+    out = Path(out)
+    env = environment()
+    code = 0
+    runs = [(f"m-{path}-{kind}-{name}{v}", ["--path", path, "--matched", "--lamp", "1", *extra],
+             {key: value} if v == "1" else {})
+            for kind, extra in [("moving", ["--write-frames", "16,32,47"]), ("still", ["--freeze", "32", "--write-frames", "47"])]
+            for path in ("rt", "nonrt") for v in ("1", "0")]
+    if not (out / "m-reference" / "frame-047.png").exists():
+        runs.append(("m-reference", ["--path", "rt", "--lamp", "1", "--reference", spp, "--write-frames", "16,32,47"], {}))
+    for run, extra, more in runs:
+        d = out / run
+        d.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run([exe, *extra, "--out", str(d)], cwd=REPO, capture_output=True, text=True,
+                           timeout=900, env=env | more)
+        (d / "stderr.txt").write_text(r.stderr[-20000:])
+        print(run, "exit", r.returncode, flush=True)
+        code = max(code, r.returncode)
+    return code
+
+
+def multi_matched(exe, out, key, *values, spp="4096"):
+    """reflection_matched with `key` at each value (runs m-PATH-KIND-vVALUE; "-" leaves it unset),
+    both paths, moving frames 16/32/47 and the held pose of frame 32, then the path tracer.
+    RTVIS_MATCHED_EXTRA (space-separated) adds scene options to every run, the reference too."""
+    out = Path(out)
+    env = environment()
+    scene = os.environ.get("RTVIS_MATCHED_EXTRA", "").split()
+    code = 0
+    runs = [(f"m-{path}-{kind}-v{v}", ["--path", path, "--matched", "--lamp", "1", *scene, *extra], {} if v == "-" else {key: v})
+            for kind, extra in [("moving", ["--write-frames", "16,32,47"]), ("still", ["--freeze", "32", "--write-frames", "47"])]
+            for path in ("rt", "nonrt") for v in values]
+    if not (out / "m-reference" / "frame-047.png").exists():
+        runs.append(("m-reference", ["--path", "rt", "--lamp", "1", *scene, "--reference", spp, "--write-frames", "16,32,47"], {}))
+    for run, extra, more in runs:
+        d = out / run
+        d.mkdir(parents=True, exist_ok=True)
+        r = subprocess.run([exe, *extra, "--out", str(d)], cwd=REPO, capture_output=True, text=True,
+                           timeout=900, env=env | more)
+        (d / "stderr.txt").write_text(r.stderr[-20000:])
+        print(run, "exit", r.returncode, flush=True)
+        code = max(code, r.returncode)
+    return code
+
+
 def split_matched(exe, out, spp="4096"):
     """reflection_matched with its arch lamp (a shadowed local light), RENDERLAB_RL_SPLIT on and
     off, both paths: the moving flight's frames 16, 32 and 47, and the pose of frame 32 held still
@@ -363,6 +624,12 @@ if __name__ == "__main__":
         hashes(*sys.argv[2:4])
     if sys.argv[1] == "gi":
         gi(sys.argv[2])
+    if sys.argv[1] == "multi_matched":
+        raise SystemExit(multi_matched(*sys.argv[2:]))
+    if sys.argv[1] == "pair_matched":
+        raise SystemExit(pair_matched(*sys.argv[2:7]))
+    if sys.argv[1] == "switch_matched":
+        raise SystemExit(switch_matched(*sys.argv[2:6]))
     if sys.argv[1] == "split_matched":
         raise SystemExit(split_matched(*sys.argv[2:5]))
     if sys.argv[1] == "matched":
