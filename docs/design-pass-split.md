@@ -56,25 +56,31 @@ seam a material graph plugs into later.
 
 24 bytes a pixel in group 0, bindings 75 and 78: 50 MB at 1080p, 199 MB at 4K.
 
+As merged on main 95259a28 (`src/program.rs`, `MATERIAL_WRITE` and `rl_material_store`):
+
 | Word | Field | Encoding |
 |------|-------|----------|
-| rgba32uint .x | shading normal | octahedral, 2 x 16 bits |
-| rgba32uint .y | base colour + coverage | rgb8 + u8 |
-| rgba32uint .z | metallic, roughness + flags / slot / model | 2 x u8 + u16 |
-| rgba32uint .w | emission | rgb9e5 |
-| rg32uint .x | geometric normal | octahedral, 2 x 16 bits |
-| rg32uint .y | MQ2 view share, lobe alpha | 2 x u8 (16 bits spare) |
+| word 0 (binding 75, rgba32uint) .x | shading normal | octahedral |
+| word 0 .y | base colour | unorm10 |
+| word 0 .z | lobe alpha, metallic, MQ2 view share | pack4x8unorm (one byte spare) |
+| word 0 .w | emission (times exposure) | rgb9e5 |
+| word 1 (binding 78, rg32uint) .x | geometric normal | octahedral |
+| word 1 .y | the lighting model | u32 |
 
-The flags carry double-sided/front, thin, the transmission/IOR class, normal-mapped and the
-lighting model, so later passes can skip pixels whose program keeps its own `shade`.
+The model lets later passes skip pixels whose program keeps its own `shade`.
 
 **Decode once (coordinator, 2026-11-13).** The Mac measured about 0.75 ms of hit decode still in
 shading after the material pass, so the material pass becomes the pass that decodes each pixel's
 hit once for everything after it, rather than a separate G-buffer pass in front of it:
 
-- **One more record word, rgba32uint: the receiver.** The trace point's xyz as f32 and the
-  receiver epsilon. Word 1's .w takes the program slot and the thin and front bits (the Mac's
-  layout). That makes the record 40 bytes a pixel: 83 MB at 1080p.
+- **Word 1 (binding 78) becomes rgba32uint:**
+  - .x: the geometric normal (octahedral);
+  - .y: the model, the MQ2 alpha and the roughness;
+  - .z: the MQ2 view share;
+  - .w: spare until now; it takes the program slot and the thin and front bits.
+- **A new third word, rgba32uint (binding to be announced): the receiver.** It holds only the
+  trace point's xyz as f32 and the receiver epsilon.
+- **Size:** three rgba32uint words, 48 bytes a pixel: 100 MB at 1080p.
 - **Every later pass reads it.** Each builds its `Receiver` and a thin `SurfaceInput` from the
   record, without touching the hit image or the vertex buffers. Footprints come from the pixel's
   neighbouring camera rays against the receiver's plane.
