@@ -416,10 +416,15 @@ impl Renderer {
     ) {
         let state = self.view.primary.as_ref().unwrap();
         self.encode_program_lists_with(encoder, shading, timestamp_writes, |k| {
-            let list = &self.program_slot(state.programs[k]).pipelines.list;
-            list[usize::from(state.requests)][shading as usize]
-                .as_ref()
-                .unwrap()
+            let id = state.programs[k];
+            let list = &self.program_slot(id).pipelines.list;
+            // Each program's lean list once it landed; until then its full one.
+            self.lean_pipeline(id, true, shading as usize)
+                .unwrap_or_else(|| {
+                    list[usize::from(state.requests)][shading as usize]
+                        .as_ref()
+                        .unwrap()
+                })
         });
     }
     /// `encode_program_lists` with the pipeline of the frame's `k`th program from `pipeline`

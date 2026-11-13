@@ -433,6 +433,28 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 - The internal size is rounded per axis, so targets whose size isn't divisible by 3 (quality) or 2 (performance) render at a very slightly different aspect.
 - The capable 1x RT viewer now renders traced primaries with TR1 (RTDEF2). Upscaling presets remain library settings; the viewer has no preset flag.
 
+**Thin lines crawl in a held view (PC integration, Glint start view, 2026-11-13).** The view is settled and the camera held. The flicker map gives each pixel's largest luma change over 7 consecutive jittered frame pairs:
+- **Non-RT:** 110 pixels change by 16 codes or more between consecutive frames, and 1,177 by 4 or more.
+- **RT:** 20 and 582.
+
+98% of the worst pixels sit on the two thin dark-blue guard-rail lines running to the vanishing point (three clusters hold 101 of the 110), plus ring outlines and the ball's rim. It's a crawl along sub-pixel lines, not noise on surfaces. Sheets: `D:/Coding/renderlab-work/ara-integration/perf/glint/runtorun/start-flicker-nonrt.png` and `start-flicker-rt.png` (frame | marked | map).
+
+The leading guess, unconfirmed, is sub-pixel lines that the temporal resolve can't hold, worse where the shadow and GI inputs on those edges are noisier.
+
+**Cheap split first**, on the same held view:
+- TR1 off;
+- sharpen / upscale off;
+- the sun's and GI's contributions frozen.
+
+That shows which input moves. **Known methods to try after:**
+- coverage-aware history for sub-pixel lines, extending TR1b's straight-edge transport;
+- a thin-feature mask that widens the history clamp;
+- analytic line coverage in the visibility buffer.
+
+Islam names aliasing and ghosting as the defects he most wants gone. No unit owns this yet.
+
+**Glint goal run-to-run (non-RT, PC integration, 2026-11-13).** Two runs differ in 67,380 pixels; 96% are off by exactly 1 code, 56 by more than 16, and the largest region is 37 px. The likeliest cause (U-RTVIS, from the code) is GI miss-list overflow: `gi_request_one` (`shaders/gi_cache.wgsl:1705`) and the pixel path (`:484`) keep whichever requests arrive first once `gi_frame.counts.w` is reached. N8o made the claim among surviving requests deterministic, but not which requests survive. Fix: choose survivors by key (for example, the lowest keys per bucket, as claims do), not by arrival. To confirm, check the `miss_overflow` counter on the goal frames.
+
 **Reference instrument.** The visible-sky references were traced by a release-profile test binary; on fixed resources its first renders differ from later ones by ≤2 ULP, which the bounded-AS policy's late fixed-resource control does not see. A dev-profile build of the same source (U0b's profile) reproduces quarry-final byte for byte on 8 independent and 4 fixed replays. The sky references stay accepted under the policy; a dev-profile re-trace was stopped by the overnight no-new-references rule.
 
 ## GI
