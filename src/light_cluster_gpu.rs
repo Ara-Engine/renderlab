@@ -164,6 +164,85 @@ impl Atlas {
     }
 }
 
+/// The camera receivers' local-light visibility history (`lc::local_shadow_budget`,
+/// shaders/local_light_history.wgsl), group 3 bindings 31 to 33: the frame record, the
+/// image shading reads and the image it writes. Each frame first copies the written image
+/// into the read one, so the lighting group binds the same images every frame.
+pub(super) struct LocalHistory {
+    pub record: Owned<wgpu::Buffer>,
+    read: Owned<wgpu::Texture>,
+    pub read_view: Owned<wgpu::TextureView>,
+    written: Owned<wgpu::Texture>,
+    pub written_view: Owned<wgpu::TextureView>,
+    size: [u32; 2],
+    /// This frame's unjittered view-projection (set by `prepare_light_clusters`), the one
+    /// the last frame wrote under, and frames prepared so far.
+    current: Mat4,
+    previous: Option<Mat4>,
+    frame: u64,
+    _allocation: Allocation,
+}
+impl LocalHistory {
+    fn new(device: &PipelineDevice, ledger: &Ledger, size: [u32; 2]) -> Self {
+        let record = ledger.own(
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("local-light history record"),
+                size: lc::LOCAL_RECORD_BYTES as u64,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            ResourceKind::Buffer,
+        );
+        let image = |label, usage| {
+            let texture = ledger.own(
+                device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some(label),
+                    size: wgpu::Extent3d {
+                        width: size[0],
+                        height: size[1],
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: wgpu::TextureFormat::Rgba32Uint,
+                    usage,
+                    view_formats: &[],
+                }),
+                ResourceKind::Texture,
+            );
+            let view = ledger.own(
+                texture.create_view(&Default::default()),
+                ResourceKind::TextureView,
+            );
+            (texture, view)
+        };
+        let (read, read_view) = image(
+            "local-light history (read)",
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        );
+        let (written, written_view) = image(
+            "local-light history (written)",
+            wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
+        );
+        Self {
+            record,
+            read,
+            read_view,
+            written,
+            written_view,
+            size,
+            current: Mat4::IDENTITY,
+            previous: None,
+            frame: 0,
+            _allocation: ledger.allocate(
+                AllocationKind::Light,
+                u64::from(size[0]) * u64::from(size[1]) * 32 + lc::LOCAL_RECORD_BYTES as u64,
+            ),
+        }
+    }
+}
+
 pub(super) struct LightClusters {
     #[cfg(test)]
     pub legacy_limit: bool,
@@ -190,6 +269,9 @@ pub(super) struct LightClusters {
     pub stats: LightClusterStats,
     /// The frame uniform as last written: unchanged frames upload nothing.
     published: Vec<u8>,
+    /// With `lc::local_shadow_budget`, at the view's shading size (1x1 until its first lit
+    /// frame).
+    pub local: Option<LocalHistory>,
     _allocation: Allocation,
 }
 /// One admitted frame's culling dispatch and map redraws.
@@ -310,6 +392,7 @@ impl LightClusters {
             rays: lc::RaySelection::default(),
             stats: LightClusterStats::default(),
             published: vec![],
+            local: lc::local_shadow_budget().then(|| LocalHistory::new(device, ledger, [1, 1])),
         }
     }
     /// A new view's clusters: these settings, its own grid and kernel bindings, and
@@ -427,6 +510,24 @@ impl Renderer {
         maps: bool,
         uploads: &mut UploadBytes,
     ) -> LocalFrame {
+        // The local-light history at this view's shading size (a new one rebinds the
+        // lighting group), and this frame's unjittered camera.
+        if lc::local_shadow_budget() {
+            if self
+                .view
+                .clusters
+                .local
+                .as_ref()
+                .is_none_or(|h| h.size != viewport)
+            {
+                self.view.clusters.local =
+                    Some(LocalHistory::new(&self.device, &self.ledger, viewport));
+                self.view.clusters.generation += 1;
+            }
+            let history = self.view.clusters.local.as_mut().expect("allocated above");
+            history.current = camera.unjittered().matrix(viewport[0], viewport[1]);
+            history.frame += 1;
+        }
         let lights = &self.lighting.source_lights;
         let state = &mut self.view.clusters;
         let shared = &mut self.local_maps;
@@ -742,6 +843,40 @@ impl Renderer {
         frame: &LocalFrame,
         draws: &[PreparedDraw<'_>],
     ) {
+        // The local-light history's record, after TR1's plan: it continues on frames whose
+        // reconstruction continues. The last frame's written image becomes this frame's read
+        // one before shading writes again.
+        let inputs = self.view.clusters.local.is_some().then(|| {
+            let continues = self.view.reconstruction_frame.is_some()
+                && self
+                    .view
+                    .reconstruction_state
+                    .as_ref()
+                    .is_some_and(|s| !s.plan.reset);
+            (continues, self.local_moving_boxes(draws))
+        });
+        if let (Some((continues, boxes)), Some(history)) =
+            (inputs, self.view.clusters.local.as_mut())
+        {
+            let record = lc::local_record(
+                history.previous,
+                history.current,
+                continues,
+                history.frame,
+                &boxes,
+            );
+            self.queue.write_buffer(&history.record, 0, &record);
+            encoder.copy_texture_to_texture(
+                history.written.as_image_copy(),
+                history.read.as_image_copy(),
+                wgpu::Extent3d {
+                    width: history.size[0],
+                    height: history.size[1],
+                    depth_or_array_layers: 1,
+                },
+            );
+            history.previous = Some(history.current);
+        }
         let generation = self.lighting.generation;
         let lights = self.lighting.light_buffer().clone();
         let state = &mut self.view.clusters;
@@ -828,5 +963,42 @@ impl Renderer {
                 pass.draw_indexed(0..draw.mesh.index_count, 0, slot..slot + 1);
             }
         }
+    }
+}
+
+impl Renderer {
+    /// The local-light history's moving boxes: each placement that moved since the view's
+    /// last frame, or is skinned, over both its transforms (as TR1's planner gathers
+    /// `moving_bounds`, one box per placement).
+    fn local_moving_boxes(&self, draws: &[PreparedDraw<'_>]) -> Vec<crate::shadow_plan::Bounds> {
+        let mut boxes = Vec::new();
+        for d in draws {
+            let state = &d.instances.state;
+            if d.mesh.skin.is_none()
+                && !state.edited_since_submit(self.view_key.0, self.view.last_frame)
+            {
+                continue;
+            }
+            for (&model, &previous) in state
+                .models
+                .iter()
+                .zip(state.previous_models(self.view_key.0, self.view.last_frame))
+            {
+                let moved = model.to_cols_array().map(f32::to_bits)
+                    != previous.to_cols_array().map(f32::to_bits);
+                if !moved && d.mesh.skin.is_none() {
+                    continue;
+                }
+                let both =
+                    [model, previous].map(|m| shadow_gpu::world_bounds(d.mesh.bounds, m).ok());
+                if let [Some(a), Some(b)] = both {
+                    boxes.push(crate::shadow_plan::Bounds {
+                        min: a.min.min(b.min),
+                        max: a.max.max(b.max),
+                    });
+                }
+            }
+        }
+        boxes
     }
 }

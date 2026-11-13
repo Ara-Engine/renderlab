@@ -413,7 +413,9 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
             budget(&module) && !stub(&module) && zones(&module),
             "traced {k}"
         );
-        assert!(module.contains("let samples=select(1u,max(rl_local_rays,4u),radius>0.0);"));
+        assert!(
+            module.contains("let samples=select(1u,max(rl_local_rays,4u),light.source.x>0.0);")
+        );
         validate(&format!("traced {k}"), &module);
     }
     let non_rt = primary_ray_gpu::non_rt_sources(SOURCE).unwrap().1;
@@ -1580,4 +1582,32 @@ fn write_presented_png(
         .unwrap()
         .write_image_data(&bytes)
         .unwrap();
+}
+
+/// The moving boxes the local-light history tests are at most `lc::LOCAL_BOXES` and cover every
+/// moving placement: two far groups stay apart, and a crowd past 16 becomes one union.
+#[test]
+fn merged_boxes_cover_every_moving_placement() {
+    let cube = |x: f32, z: f32| crate::shadow_plan::Bounds {
+        min: glam::Vec3::new(x, 0., z),
+        max: glam::Vec3::new(x + 1., 1., z + 1.),
+    };
+    let covers = |merged: &[crate::shadow_plan::Bounds], b: &crate::shadow_plan::Bounds| {
+        merged
+            .iter()
+            .any(|m| m.min.cmple(b.min).all() && m.max.cmpge(b.max).all())
+    };
+    let groups: Vec<_> = (0..6)
+        .map(|k| cube(k as f32 * 0.5, 0.))
+        .chain((0..3).map(|k| cube(100. + k as f32, 50.)))
+        .collect();
+    let merged = lc::merged_boxes(&groups);
+    assert!(merged.len() <= lc::LOCAL_BOXES);
+    assert!(groups.iter().all(|b| covers(&merged, b)));
+    // No box spans both groups.
+    assert!(merged.iter().all(|m| m.max.x < 50. || m.min.x > 50.));
+    let crowd: Vec<_> = (0..20).map(|k| cube(k as f32 * 3., 0.)).collect();
+    let merged = lc::merged_boxes(&crowd);
+    assert_eq!(merged.len(), 1);
+    assert!(crowd.iter().all(|b| covers(&merged, b)));
 }

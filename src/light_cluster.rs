@@ -140,6 +140,44 @@ const RESTART_BUDGET: &str = "fn rl_local_budget(world:vec3<f32>) { let restart=
 /// shaders/reflections.wgsl). Traced stages only: the others have no frame record.
 const RESTARTS: &str = "fn rl_restarts(world:vec3<f32>)->bool { return rl_zone_caster_shadow(world) || rl_zone_relit(world); }\n";
 const RESTART_BUDGET_STUB: &str = "fn rl_local_budget(world:vec3<f32>) {}\n";
+/// The camera receivers' local-light visibility history (shaders/local_light_history.wgsl),
+/// on traced ray stages with `local_shadow_budget`; the stubs everywhere else.
+const HISTORY: &str = include_str!("../shaders/local_light_history.wgsl");
+const HISTORY_STUB: &str = "fn rl_local_history_prepare(world:vec3<f32>) {}\nfn rl_local_history_store(pixel:vec2<i32>) {}\n";
+const VISIBILITY_STUB: &str = "fn rl_local_visibility(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 { return rl_local_rays_visibility(light,receiver,l); }\n";
+/// Opt-in with `RENDERLAB_LOCAL_SHADOW_BUDGET=1`, until the RTX and Ara A/B decides: camera
+/// receivers keep their soft local lights' visibility from frame to frame and trace one
+/// probe ray per light where nothing moving can change it (HISTORY). Off, every receiver
+/// traces its budget each frame.
+pub(crate) fn local_shadow_budget() -> bool {
+    budget_mode().is_some()
+}
+/// `RENDERLAB_LOCAL_SHADOW_BUDGET`: `1` on; measurement only, `show`, `moving`, `found` and
+/// `hold` (a light shades 10^4 times over where the history serves it, the moving test sends it
+/// to the budget, a history was found, or it is held without rays), `overhead` (the history
+/// kept, never served), `norays` (camera receivers trace no local rays) and `unslotted` (a
+/// light shades 10^4 times over where it finds no history slot) and `traced` (where it traced a
+/// ray this frame).
+fn budget_mode() -> Option<u32> {
+    static MODE: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| {
+        match std::env::var("RENDERLAB_LOCAL_SHADOW_BUDGET")
+            .ok()?
+            .as_str()
+        {
+            "1" => Some(0),
+            "show" => Some(1),
+            "moving" => Some(2),
+            "overhead" => Some(3),
+            "found" => Some(4),
+            "hold" => Some(5),
+            "norays" => Some(6),
+            "unslotted" => Some(7),
+            "traced" => Some(8),
+            _ => None,
+        }
+    })
+}
 /// Disk rays a restarted receiver traces per soft local light (`LcFrame.info.w`).
 const RESTART_RAYS: u32 = 16;
 /// The count in force. Measurement switch: `RENDERLAB_LOCAL_RESTART_RAYS` replaces it for a
@@ -170,9 +208,19 @@ pub(crate) fn ray_scene(head: &str, traced: bool) -> Option<&'static str> {
 }
 /// The shading-side API composed into every program module (src/program.rs).
 pub(crate) fn shading_api(head: &str, traced: bool) -> String {
-    let visibility = match ray_scene(head, traced) {
+    let rays = ray_scene(head, traced);
+    let visibility = match rays {
         Some(scene) => RAY.replace("LC_SCENE", scene),
         None => MAP.to_owned(),
+    };
+    let history = match rays {
+        Some(_) if traced && !head.is_empty() && local_shadow_budget() => HISTORY.replacen(
+            "const RL_LOCAL_SHOW:u32=0u;",
+            &format!("const RL_LOCAL_SHOW:u32={}u;", budget_mode().unwrap_or(0)),
+            1,
+        ),
+        Some(_) => format!("{VISIBILITY_STUB}{HISTORY_STUB}"),
+        None => HISTORY_STUB.to_owned(),
     };
     // Only traced stages see the frame's restart zones (`primary_frame.zones`), and only ray
     // stages trace disk rays.
@@ -181,7 +229,7 @@ pub(crate) fn shading_api(head: &str, traced: bool) -> String {
             "primary_frame.zones",
         )
         .replace("tr1_", "rl_zone_");
-        let budget = if ray_scene(head, traced).is_some() {
+        let budget = if rays.is_some() {
             RESTART_BUDGET
         } else {
             RESTART_BUDGET_STUB
@@ -190,7 +238,86 @@ pub(crate) fn shading_api(head: &str, traced: bool) -> String {
     } else {
         RESTART_BUDGET_STUB.to_owned()
     };
-    format!("{}{}{visibility}{budget}", constants(), measured_api())
+    format!(
+        "{}{}{visibility}{history}{budget}",
+        constants(),
+        measured_api()
+    )
+}
+
+/// The history's frame record (shaders/local_light_history.wgsl `RlLocalRecord`): the
+/// previous and current unjittered view-projections, the words (history continues, moving
+/// boxes, frame number) and the moving boxes.
+pub(crate) fn local_record(
+    previous: Option<crate::Mat4>,
+    current: crate::Mat4,
+    continues: bool,
+    stamp: u64,
+    boxes: &[crate::shadow_plan::Bounds],
+) -> Vec<u8> {
+    let boxes = merged_boxes(boxes);
+    let mut bytes = Vec::with_capacity(LOCAL_RECORD_BYTES);
+    for m in [previous.unwrap_or(current), current] {
+        bytes.extend(m.to_cols_array().iter().flat_map(|v| v.to_ne_bytes()));
+    }
+    for w in [
+        u32::from(continues && previous.is_some()),
+        boxes.len() as u32,
+        stamp as u32,
+        0,
+    ] {
+        bytes.extend_from_slice(&w.to_ne_bytes());
+    }
+    for k in 0..LOCAL_BOXES {
+        let (lo, hi) = boxes
+            .get(k)
+            .map_or(([0.; 3], [0.; 3]), |b| (b.min.to_array(), b.max.to_array()));
+        for v in [lo[0], lo[1], lo[2], 0., hi[0], hi[1], hi[2], 0.] {
+            bytes.extend_from_slice(&f32::to_ne_bytes(v));
+        }
+    }
+    debug_assert_eq!(bytes.len(), LOCAL_RECORD_BYTES);
+    bytes
+}
+/// Moving boxes the record holds.
+pub(crate) const LOCAL_BOXES: usize = 4;
+pub(crate) const LOCAL_RECORD_BYTES: usize = 128 + 16 + LOCAL_BOXES * 32;
+/// At most LOCAL_BOXES boxes covering `boxes`: up to 16 merge pairwise, smallest union
+/// first; more become one union.
+pub(crate) fn merged_boxes(
+    boxes: &[crate::shadow_plan::Bounds],
+) -> Vec<crate::shadow_plan::Bounds> {
+    use crate::shadow_plan::Bounds;
+    let union = |a: &Bounds, b: &Bounds| Bounds {
+        min: a.min.min(b.min),
+        max: a.max.max(b.max),
+    };
+    let volume = |b: &Bounds| (b.max - b.min).max(glam::Vec3::ZERO).element_product();
+    if boxes.len() > 16 {
+        return boxes
+            .iter()
+            .copied()
+            .reduce(|a, b| union(&a, &b))
+            .into_iter()
+            .collect();
+    }
+    let mut boxes = boxes.to_vec();
+    while boxes.len() > LOCAL_BOXES {
+        let mut best = (0, 1, f32::INFINITY);
+        for i in 0..boxes.len() {
+            for j in i + 1..boxes.len() {
+                let grown =
+                    volume(&union(&boxes[i], &boxes[j])) - volume(&boxes[i]) - volume(&boxes[j]);
+                if grown < best.2 {
+                    best = (i, j, grown);
+                }
+            }
+        }
+        let merged = union(&boxes[best.0], &boxes[best.1]);
+        boxes.swap_remove(best.1);
+        boxes[best.0] = merged;
+    }
+    boxes
 }
 
 /// U-RTVIS measurement switches on the local soft shadow (shaders/light_cluster_api.wgsl):

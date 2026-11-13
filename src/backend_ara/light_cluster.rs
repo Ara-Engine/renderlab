@@ -124,3 +124,69 @@ impl LightClusters {
         Ok(())
     }
 }
+
+/// The camera receivers' local-light visibility history (`lc::local_shadow_budget`,
+/// shaders/local_light_history.wgsl): two RGBA32U images at the shading size. Frame `n`
+/// writes image `n % 2` and reads the other, which frame `n - 1` wrote.
+pub(crate) struct LocalHistory {
+    images: [Texture; 2],
+    /// What each image was last used as; None before it holds anything.
+    last: [Option<Access>; 2],
+}
+impl LocalHistory {
+    pub(crate) fn new(gpu: &mut GpuDevice, size: [u32; 2]) -> Result<Self> {
+        Ok(Self {
+            images: [
+                Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
+                Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
+            ],
+            last: [None; 2],
+        })
+    }
+    pub(crate) fn size(&self) -> [u32; 2] {
+        self.images[0].size
+    }
+    /// Declares both images to this frame's graph, zero-filling them on first use. Retire
+    /// the returned staging buffers after the frame's list is submitted.
+    pub(crate) fn begin(
+        &mut self,
+        gpu: &mut GpuDevice,
+        graph: &mut Graph,
+        rec: &mut Recorder,
+    ) -> Result<Vec<ara_gpu::Buffer>> {
+        let mut staging = Vec::new();
+        for (image, last) in self.images.iter().zip(self.last) {
+            match last {
+                Some(access) => graph.import(Resource::Image(image.image), access),
+                None => {
+                    let texels = image.size[0] as usize * image.size[1] as usize;
+                    staging.push(super::transfer::upload(
+                        gpu,
+                        graph,
+                        rec,
+                        image.image,
+                        &vec![0; texels * 16],
+                    )?)
+                }
+            }
+        }
+        Ok(staging)
+    }
+    /// Frame `frame`'s (read, written) images: bindings (3, 32) and (3, 33).
+    pub(crate) fn images(&self, frame: u64) -> (&Texture, &Texture) {
+        let write = (frame % 2) as usize;
+        (&self.images[1 - write], &self.images[write])
+    }
+    /// Frame `frame` is recorded: its written image was last a storage target.
+    pub(crate) fn advance(&mut self, frame: u64) {
+        let write = (frame % 2) as usize;
+        self.last[write] = Some(Access::Storage);
+        self.last[1 - write] = Some(Access::ShaderRead);
+    }
+    pub(crate) fn retire(self, gpu: &mut GpuDevice) -> Result<()> {
+        for image in self.images {
+            super::image::release(gpu, image.image)?;
+        }
+        Ok(())
+    }
+}
