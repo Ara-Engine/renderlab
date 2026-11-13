@@ -3256,7 +3256,7 @@ impl Renderer {
         }
         if traced && !temporal {
             self.ensure_shade_detail(&programs, streaming, usize::from(soft))?;
-            if !streaming {
+            if !streaming && !crate::program::material_pass_on() {
                 self.prepare_lean(&programs, programs.len() > 1, usize::from(soft));
             }
         }
@@ -3438,7 +3438,7 @@ impl Renderer {
             }
         }
         // P-NRT3: lit traced frames submit their first half (skinning, clusters, shadows,
-        // atmosphere, visibility and sun visibility) before the GI cache and post are prepared
+        // atmosphere, visibility, optional materials and sun visibility) before GI/post preparation
         // and the second half is encoded, so the GPU starts while the CPU still works. Every
         // queue write of the late preparation and encoding lands before the second submit and
         // touches only buffers the first half does not read (GI cache, post, transparency), and
@@ -3475,7 +3475,7 @@ impl Renderer {
         // The timeline moves out while marks are encoded, so they never borrow `self`.
         let mut marks = self.pass_timeline.take();
         if let Some(t) = &mut marks {
-            t.begin();
+            t.begin(&self.device);
         }
         let mut mark = |encoder: &mut wgpu::CommandEncoder, name: &'static str| {
             if let Some(t) = &mut marks {
@@ -3536,12 +3536,56 @@ impl Renderer {
                         end_of_pass_write_index: Some(slot as u32 * 10 + first + 1),
                     })
             };
+            let shading = if soft {
+                primary_ray_gpu::Shading::Soft
+            } else {
+                primary_ray_gpu::Shading::Hard
+            };
+            let material = crate::program::material_pass_on() && !temporal;
+            if material {
+                self.ensure_material_pass(shading)?;
+            }
             let p = self.pipeline.primary.as_ref().unwrap();
             mark(&mut encoder, "visibility");
             if temporal {
                 self.encode_film(&mut encoder, stamps(6), stamps(0));
             } else {
-                if interactive
+                if material {
+                    // Publish hits without sun work so every receiver pass can consume
+                    // the material record after this one decode. The switch-off branch
+                    // below retains its existing fused visibility/sun kernels.
+                    if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
+                        self.encode_visibility_buffer(&mut encoder, soft, stamps(6));
+                    } else {
+                        self.encode_primary_visibility(&mut encoder, soft, stamps(6));
+                    }
+                    if streaming {
+                        self.encode_request_clear(&mut encoder);
+                    }
+                    mark(&mut encoder, "material");
+                    self.encode_material_shading(&mut encoder, shading, None, true);
+                    if interactive {
+                        mark(&mut encoder, "sun_shadow");
+                        if reconstructed && self.view.reconstruction.rotate_directions {
+                            self.encode_vb_sun(&mut encoder, stamps(8));
+                        } else {
+                            self.encode_primary_fresh_tile(
+                                &mut encoder,
+                                &p.fresh_eight,
+                                [8, 4],
+                                stamps(8),
+                            );
+                        }
+                    } else if soft && self.view.soft_mode == crate::SoftShadows::Virtual {
+                        mark(&mut encoder, "sun_shadow");
+                        self.encode_virtual(&mut encoder, stamps(8), &mut mark);
+                        mark(&mut encoder, "atmosphere");
+                        self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
+                    } else if soft {
+                        mark(&mut encoder, "sun_shadow");
+                        self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
+                    }
+                } else if interactive
                     && reconstructed
                     && p.reconstruction.as_ref().is_some_and(|r| r.trace.is_some())
                     && self.view.reconstruction.rotate_directions
@@ -3593,12 +3637,7 @@ impl Renderer {
                     early_submit = submitted_at.elapsed();
                     self.prepare_cache_and_post(draws, camera, color, true, true)?;
                 }
-                let shading = if soft {
-                    primary_ray_gpu::Shading::Soft
-                } else {
-                    primary_ray_gpu::Shading::Hard
-                };
-                if streaming {
+                if streaming && !material {
                     self.encode_request_clear(&mut encoder);
                 }
                 let shade = self

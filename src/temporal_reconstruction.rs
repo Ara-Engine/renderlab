@@ -1087,6 +1087,9 @@ pub(crate) struct Planner {
     pub cut: bool,
     /// The last prepared frame restarted every pixel.
     pub reset: bool,
+    /// U-FIXED: frames of history behind the last prepared frame: 0 on a restart, then
+    /// counting up. The Disk lookup holds its height-band dither until history exists.
+    pub history_frames: u32,
     held_frames: u32,
     /// U-FIXED: the sun's turn (radians) summed since the last restart; the sun visibility
     /// history's turn step counts it.
@@ -1109,6 +1112,7 @@ impl Planner {
             previous: None,
             cut: false,
             reset: true,
+            history_frames: 0,
             held_frames: 0,
             sun_turned: 0.0,
             shadow_rays: 8,
@@ -1229,6 +1233,11 @@ impl Planner {
                 self.reset
             );
         }
+        self.history_frames = if self.reset {
+            0
+        } else {
+            self.history_frames.saturating_add(1)
+        };
         self.sun_turned = if self.reset {
             0.0
         } else {
@@ -1855,7 +1864,7 @@ impl Renderer {
         // same reconstructed sun estimator over exact published receivers.
         let vb = self.hardware_shadows.is_some()
             && (self.primary_mode == PrimaryVisibility::VisibilityBuffer
-                || (traced && super::sun_vis_pass::enabled()));
+                || (traced && (super::sun_vis_pass::enabled() || crate::program::material_pass_on())));
         if self
             .pipeline
             .primary
@@ -2324,6 +2333,7 @@ mod tests {
             ..inputs(&[fire(0.91)], 5)
         });
         assert!(plan.reset);
+        assert_eq!(plan.history_frames, 0);
         assert_eq!(
             (plan.shadow_rays, plan.restart_rays),
             (budget.reset_rays, 0)
@@ -2333,12 +2343,14 @@ mod tests {
             ..inputs(&[fire(0.9)], 6)
         });
         assert!(spheres(&after)[0].1 < 1.6, "{:?}", spheres(&after));
+        assert_eq!(plan.history_frames, 1);
         plan.cut = true;
         let cut = plan.prepare(PlanInputs {
             key: [8; 32],
             ..inputs(&[fire(0.9)], 7)
         });
         assert_eq!(plan.shadow_rays, budget.cold_rays);
+        assert_eq!(plan.history_frames, 0);
         // U-RTVIS: the cut probes the moving count first (sampling.y), with no P-RTS cone.
         assert_eq!(plan.probe_rays, budget.active_rays);
         let word =
