@@ -2327,16 +2327,29 @@ fn rl_mr_epsilon(e:f32)->u32 {
 }
 fn rl_mr_epsilon_decode(code:u32)->f32 { return select(1e-5,bitcast<f32>(code<<23u),code!=0u); }
 // `hint` MQ2's `tr1_view_hint`; `source_front` and `lit_front` the traced entry's sides.
+// Words 1 and 2 of a hit's receiver, for every producer: the material pass's writer (which
+// adds word 1's material fields y and z) and a trace kernel's tail, on either engine. The
+// producer supplies the receiver as `primary_receiver` builds it, the interpolated vertex
+// normal (any length), both sides of the shading entry and whether the hit is near an edge
+// (shading's barycentric point there may not be the sun path's: `rl_mr_near`).
+struct RlReceiverWords { b:vec4<u32>, c:vec4<u32> };
+fn rl_mr_receiver_words(receiver:Receiver,vertex_normal:vec3<f32>,source_front:bool,lit_front:bool,near:bool)->RlReceiverWords {
+    return RlReceiverWords(
+        vec4<u32>(rl_mr_oct(receiver.geometric),0u,0u,
+            (receiver.slot&0x0fffffffu)|select(0u,1u<<28u,near)|select(0u,1u<<29u,receiver.thin)|select(0u,1u<<30u,source_front)|select(0u,1u<<31u,lit_front)),
+        vec4<u32>(bitcast<vec3<u32>>(receiver.world),rl_mr_epsilon(receiver.epsilon)|(rl_mr_oct12(vertex_normal)<<8u)));
+}
+// Word 1 of a pixel without a camera hit (`rl_mr_miss`); word 2 is zero there.
+const RL_MR_MISS_WORD1:vec4<u32>=vec4<u32>(0u,0u,0u,0xffffffffu);
 // `near` the hit is near a triangle edge (`rl_mr_near_edge`).
 fn rl_mr_pack(m:MaterialRecord,input:SurfaceInput,near:bool,hint:f32,source_front:bool,lit_front:bool)->RlMaterialWords {
-    let receiver=input.receiver;
+    let r=rl_mr_receiver_words(input.receiver,input.normal,source_front,lit_front,near);
     let model=(m.model&255u)|(u32(round(clamp(m.view_alpha,0.0,1.0)*255.0))<<8u)|(rl_mr_unorm16_up(m.roughness)<<16u);
     let scalars=pack4x8unorm(vec4<f32>(0.0,0.0,m.alpha,m.metallic))&0xffff0000u;
     return RlMaterialWords(
         vec4<u32>(rl_mr_oct(m.normal),rl_mr_unorm16(m.base.x)|(rl_mr_unorm16(m.base.y)<<16u),rl_mr_unorm16(m.base.z)|scalars,rl_mr_rgb9e5(m.emission*lighting.exposure)),
-        vec4<u32>(rl_mr_oct(receiver.geometric),model,rl_mr_unorm16(m.view_share)|(pack2x16float(vec2<f32>(hint,0.0))<<16u),
-            (receiver.slot&0x0fffffffu)|select(0u,1u<<28u,near)|select(0u,1u<<29u,receiver.thin)|select(0u,1u<<30u,source_front)|select(0u,1u<<31u,lit_front)),
-        vec4<u32>(bitcast<vec3<u32>>(receiver.world),rl_mr_epsilon(receiver.epsilon)|(rl_mr_oct12(input.normal)<<8u)));
+        vec4<u32>(r.b.x,model,rl_mr_unorm16(m.view_share)|(pack2x16float(vec2<f32>(hint,0.0))<<16u),r.b.w),
+        r.c);
 }
 // What a later pass reads instead of decoding the hit: the receiver (words 1 and 2), MQ2's
 // hint (word 1), the interpolated vertex normal (word 2).
@@ -2692,17 +2705,23 @@ fn wgsl_function<'a>(text: &'a str, name: &str) -> &'a str {
 /// dispatch covers the whole image), and with `tracetail` the receiver words on hits. Uses the
 /// record's own encoders (`MATERIAL_PACKING`).
 pub(crate) fn material_trace_writes() -> String {
+    let line = |prefix: &str| -> &str {
+        MATERIAL_PACKING
+            .lines()
+            .find(|l| l.starts_with(prefix))
+            .unwrap_or_else(|| panic!("{prefix}"))
+    };
     format!(
         r#"// RENDERLAB_MATERIAL_PASS (program.rs material_trace_writes): the record's receiver words.
 @group(0) @binding(78) var rl_material1:texture_storage_2d<rgba32uint,write>;
 @group(0) @binding(74) var rl_material2:texture_storage_2d<rgba32uint,write>;
-{}{}{}{}// The miss sentinel: word 1.w all ones (slot 0x0fffffff; `rl_mr_miss`).
-fn rl_receiver_miss(p:vec2<i32>) {{ textureStore(rl_material1,p,vec4<u32>(0u,0u,0u,0xffffffffu)); textureStore(rl_material2,p,vec4<u32>(0u)); }}
-// A hit's receiver words: the trace's receiver, the interpolated vertex normal as shading's
-// entry builds it, and both sides (the entry's lit front equals its source front). The point
-// is the sun path's (the repair kernel rewrites the hits it moves), so no hit is marked near
-// an edge: the mark asks a reader to repair, and these need none.
-fn rl_receiver_store(p:vec2<i32>,trace:PrimaryTrace,receiver:Receiver) {{
+{}{}{}{}
+{}
+{}// The miss sentinel (`rl_mr_miss`).
+fn rl_receiver_miss(p:vec2<i32>) {{ textureStore(rl_material1,p,RL_MR_MISS_WORD1); textureStore(rl_material2,p,vec4<u32>(0u)); }}
+// The interpolated vertex normal of a trace's hit, as shading's entry builds it, from the
+// vertex, index and normal-transform arrays (producers that have them).
+fn rl_mr_trace_vertex_normal(trace:PrimaryTrace)->vec3<f32> {{
     let slot=trace.record.x-1u;let batch=primary_placements[slot]&0x1fffffffu;let base=trace.record.y*3u;
     let bary=bitcast<vec2<f32>>(trace.record.zw);let w=vec3<f32>(1.0-bary.x-bary.y,bary);
     let m=normals[slot];let nm=mat3x3<f32>(m.x.xyz,m.y.xyz,m.z.xyz);
@@ -2712,17 +2731,25 @@ fn rl_receiver_store(p:vec2<i32>,trace:PrimaryTrace,receiver:Receiver) {{
         let a=primary_vertices[batch].data[i*3u];let b=primary_vertices[batch].data[i*3u+1u];
         n+=unit_normal(nm*unit_normal(vec3<f32>(a.w,b.xy)))*w[k];
     }}
-    // The near plane's point on this pixel's camera ray is on the eye's side of the receiver's
-    // plane, so this is the entry's `dot(geometric,eye-world)>=0` without the lighting uniform.
+    return n;
+}}
+// A hit's receiver words from the trace: its point is the sun path's (the repair kernel
+// rewrites the hits it moves), so no hit is marked near an edge. Both sides of the shading
+// entry are one value (its lit front reduces to its source front), tested against the near
+// plane's point on this pixel's camera ray, which is on the eye's side of the receiver plane.
+fn rl_receiver_store(p:vec2<i32>,trace:PrimaryTrace,receiver:Receiver) {{
     let front=dot(receiver.geometric,primary_ray(vec2<u32>(p),vec2<u32>(textureDimensions(rl_material1))).near-receiver.world)>=0.0;
-    textureStore(rl_material1,p,vec4<u32>(rl_mr_oct(receiver.geometric),0u,0u,(slot&0x0fffffffu)|select(0u,1u<<29u,receiver.thin)|select(0u,3u<<30u,front)));
-    textureStore(rl_material2,p,vec4<u32>(bitcast<vec3<u32>>(receiver.world),rl_mr_epsilon(receiver.epsilon)|(rl_mr_oct12(n)<<8u)));
+    let w=rl_mr_receiver_words(receiver,rl_mr_trace_vertex_normal(trace),front,front,false);
+    textureStore(rl_material1,p,w.b);
+    textureStore(rl_material2,p,w.c);
 }}
 "#,
         wgsl_function(MATERIAL_PACKING, "rl_mr_oct"),
         wgsl_function(MATERIAL_PACKING, "rl_mr_oct12"),
         wgsl_function(MATERIAL_PACKING, "rl_mr_epsilon"),
-        ""
+        line("struct RlReceiverWords"),
+        wgsl_function(MATERIAL_PACKING, "rl_mr_receiver_words"),
+        format!("{}\n", line("const RL_MR_MISS_WORD1")),
     )
 }
 /// The `nodecode` probe's entry edits: the `SurfaceInput` from the record, and the entry's

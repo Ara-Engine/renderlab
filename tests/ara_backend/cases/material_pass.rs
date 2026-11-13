@@ -37,35 +37,19 @@ fn material_pass_compile_seconds() -> Result<()> {
     Ok(())
 }
 
-/// The record's receiver (words 1 and 2) against the sun path's receiver for a fresh camera
-/// ray (its edge repair included), through `RENDERLAB_MATERIAL_DEBUG=receiver` (program.rs
-/// `material_debug`): wherever the repair leaves the hit, the trace point, slot, `thin`, both
-/// sides and the epsilon come back bit for bit and the geometric normal within its octahedral
-/// 2 x 16 bits; wherever the repair moves the point, the record marks the hit near an edge
-/// (the reader repairs it, as the sun path does). The interpolated vertex normal (against this
-/// pixel's decode) is within 2 x 12 bits. The toon program (no record mapping) has model 255
-/// and the same receiver; the standard program's pixels do not. A floor, a wall folded along a
-/// crease the middle column's rays land on (toon), a corrugated sheet, a steep valley and a far wall whose epsilon is
-/// above the 1e-5 floor. Runs with `RENDERLAB_MATERIAL_PASS=1 RENDERLAB_MATERIAL_DEBUG=receiver`
-/// (read once per process); without them it says so and passes.
-#[test]
-fn the_record_rebuilds_the_receiver() -> Result<()> {
+/// The receiver case's frame (`the_record_rebuilds_the_receiver`, and the producers'
+/// comparison): a floor, a wall folded along a crease the middle column's rays land on (toon),
+/// a corrugated sheet, a steep valley and a far wall, at `RECEIVER_SIZE`.
+fn receiver_frame(name: &str) -> Result<renderlab::backend_ara::forward::ForwardImages> {
     use renderlab::{
         Camera, Light, Lighting, Mat4, MaterialDescriptor, Vec3, Vertex,
         backend_ara::forward::{
             ForwardObject, ForwardScene, ObjectProgram, Primary, ScenePrograms, SunShadows, render,
         },
     };
-    let set = |name: &str, value: &str| std::env::var(name).as_deref() == Ok(value);
-    if !(set("RENDERLAB_MATERIAL_PASS", "1") && set("RENDERLAB_MATERIAL_DEBUG", "receiver")) {
-        println!(
-            "record receiver: RENDERLAB_MATERIAL_PASS=1 RENDERLAB_MATERIAL_DEBUG=receiver not set, nothing checked"
-        );
-        return Ok(());
-    }
+    const SIZE: [u32; 2] = RECEIVER_SIZE;
     // Odd width: the middle column's camera ray lies in the plane x = 0, the crease's.
-    const SIZE: [u32; 2] = [161, 121];
-    let path = root("material-receiver");
+    let path = root(name);
     let mut gpu = GpuDevice::new(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
     let quad = |corners: [[f32; 3]; 4], normals: [[f32; 3]; 4]| -> Vec<Vertex> {
@@ -166,7 +150,7 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
             ..Default::default()
         },
     });
-    let images = render(
+    render(
         &mut gpu,
         &cache,
         &ForwardScene {
@@ -226,7 +210,33 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
             colour_lut: None,
             ids: None,
         },
-    )?;
+    )
+}
+// Odd width: the middle column's camera ray lies in the plane x = 0, the crease's.
+const RECEIVER_SIZE: [u32; 2] = [161, 121];
+
+/// The record's receiver (words 1 and 2) against the sun path's receiver for a fresh camera
+/// ray (its edge repair included), through `RENDERLAB_MATERIAL_DEBUG=receiver` (program.rs
+/// `material_debug`): wherever the repair leaves the hit, the trace point, slot, `thin`, both
+/// sides and the epsilon come back bit for bit and the geometric normal within its octahedral
+/// 2 x 16 bits; wherever the repair moves the point, the record marks the hit near an edge
+/// (the reader repairs it, as the sun path does). The interpolated vertex normal (against this
+/// pixel's decode) is within 2 x 12 bits. The toon program (no record mapping) has model 255
+/// and the same receiver; the standard program's pixels do not. A floor, a wall folded along a
+/// crease the middle column's rays land on (toon), a corrugated sheet, a steep valley and a far wall whose epsilon is
+/// above the 1e-5 floor. Runs with `RENDERLAB_MATERIAL_PASS=1 RENDERLAB_MATERIAL_DEBUG=receiver`
+/// (read once per process); without them it says so and passes.
+#[test]
+fn the_record_rebuilds_the_receiver() -> Result<()> {
+    let set = |name: &str, value: &str| std::env::var(name).as_deref() == Ok(value);
+    if !(set("RENDERLAB_MATERIAL_PASS", "1") && set("RENDERLAB_MATERIAL_DEBUG", "receiver")) {
+        println!(
+            "record receiver: RENDERLAB_MATERIAL_PASS=1 RENDERLAB_MATERIAL_DEBUG=receiver not set, nothing checked"
+        );
+        return Ok(());
+    }
+    const SIZE: [u32; 2] = RECEIVER_SIZE;
+    let images = receiver_frame("material-receiver")?;
     // Hits write minus (1e-6 plus) the vertex normal's angle in w; misses write alpha 0 or 1.
     let (mut worst, mut hits, mut edges, mut unmapped) = ([0f32; 4], 0, 0, 0);
     let (mut misses, mut stale) = (0, 0);
@@ -391,7 +401,9 @@ fn misses_carry_the_sentinel_after_the_camera_moves() -> Result<()> {
                 ids: None,
             },
         )?;
-        let words = images.material_receiver.context("word 1 read back")?;
+        let [words, _] = images
+            .material_receiver
+            .context("words 1 and 2 read back")?;
         Ok(images
             .hdr
             .as_chunks::<8>()
@@ -454,6 +466,104 @@ fn misses_carry_the_sentinel_after_the_camera_moves() -> Result<()> {
     ensure!(
         hits_marked == 0,
         "{hits_marked} hits carry the miss sentinel"
+    );
+    Ok(())
+}
+
+/// The two producers of the receiver words write the same bits for the same frame: the
+/// material pass's writer and the trace tail (`RENDERLAB_MATERIAL_PROBE=tracetail`), packing
+/// through the shared `rl_mr_receiver_words`. Words 1 (geometric normal, slot, `thin`, sides)
+/// and 2 (trace point, epsilon, interpolated normal) are compared bit for bit on every pixel,
+/// with three differences by design: the pixels the edge repair moves (the tail holds the
+/// repaired point, the writer shading's, marked), the near-edge mark itself (the writer marks
+/// every near-edge hit, the tail none), and word 1's material fields (y and z: the tail writes
+/// none). The producer is read once per process, so the case renders the receiver frame in two
+/// child runs of itself; it needs no switch of its own.
+#[test]
+fn the_writer_and_the_trace_tail_write_the_same_receiver_words() -> Result<()> {
+    const NAME: &str =
+        "material_pass_cases::the_writer_and_the_trace_tail_write_the_same_receiver_words";
+    let pixels = (RECEIVER_SIZE[0] * RECEIVER_SIZE[1]) as usize;
+    // In a child run: write words 1 and 2 and the moved-pixel mask, then stop.
+    if let Ok(dump) = std::env::var("RL_RECEIVER_DUMP") {
+        let images = receiver_frame("material-producers")?;
+        let [word1, word2] = images
+            .material_receiver
+            .context("words 1 and 2 read back")?;
+        // The receiver check writes z < 0 on hits whose point the repair moved (w < 0: a hit).
+        let moved: Vec<u8> = images
+            .hdr
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|p| {
+                let c = |k: usize| {
+                    f16::from_bits(u16::from_le_bytes([p[2 * k], p[2 * k + 1]])).to_f32()
+                };
+                u8::from(c(3) < 0.0 && c(2) < 0.0)
+            })
+            .collect();
+        std::fs::write(dump, [word1, word2, moved].concat())?;
+        return Ok(());
+    }
+    let dir = root("material-producers");
+    std::fs::create_dir_all(&dir)?;
+    let run = |tail: bool| -> Result<Vec<u8>> {
+        let dump = dir.join(if tail { "tail.bin" } else { "writer.bin" });
+        let status = std::process::Command::new(std::env::current_exe()?)
+            .args([NAME, "--exact", "--test-threads=1"])
+            .env("RENDERLAB_MATERIAL_PASS", "1")
+            .env("RENDERLAB_MATERIAL_DEBUG", "receiver")
+            .env(
+                "RENDERLAB_MATERIAL_PROBE",
+                if tail { "tracetail" } else { "" },
+            )
+            .env("RL_RECEIVER_DUMP", &dump)
+            .status()?;
+        ensure!(
+            status.success(),
+            "the {} run failed",
+            if tail { "trace-tail" } else { "writer" }
+        );
+        let bytes = std::fs::read(&dump)?;
+        ensure!(bytes.len() == pixels * 33, "dump size {}", bytes.len());
+        Ok(bytes)
+    };
+    let (writer, tail) = (run(false)?, run(true)?);
+    let word = |bytes: &[u8], base: usize, i: usize| -> [u32; 4] {
+        let at = base + i * 16;
+        std::array::from_fn(|k| {
+            u32::from_le_bytes(bytes[at + 4 * k..at + 4 * k + 4].try_into().unwrap())
+        })
+    };
+    let (mut hits, mut misses, mut moved, mut differ) = (0, 0, 0, 0);
+    for i in 0..pixels {
+        let (w1, t1) = (word(&writer, 0, i), word(&tail, 0, i));
+        let (w2, t2) = (word(&writer, pixels * 16, i), word(&tail, pixels * 16, i));
+        if writer[pixels * 32 + i] != 0 || tail[pixels * 32 + i] != 0 {
+            moved += 1;
+            continue;
+        }
+        if w1[3] == u32::MAX {
+            misses += 1;
+        } else {
+            hits += 1;
+        }
+        let mark = !(1u32 << 28);
+        if w1[0] != t1[0] || w1[3] & mark != t1[3] & mark || w2 != t2 {
+            differ += 1;
+        }
+    }
+    println!(
+        "receiver producers: {hits} hits and {misses} misses compared, {moved} moved by the repair skipped, {differ} differ"
+    );
+    ensure!(
+        hits > 10000 && misses > 0,
+        "too little compared ({hits} hits, {misses} misses)"
+    );
+    ensure!(
+        differ == 0,
+        "{differ} pixels' receiver words differ between the producers"
     );
     Ok(())
 }

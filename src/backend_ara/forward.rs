@@ -402,10 +402,11 @@ pub struct ForwardImages {
     /// player with frames in flight never waits on them; with diag the frame waits for them, as
     /// for any readback.
     pub deferred_reflections: Option<[Vec<u8>; 2]>,
-    /// With `RENDERLAB_MATERIAL_DEBUG=receiver` only (the material record's cases): word 1 of
-    /// the material record (rgba32uint, 16 bytes a pixel), read back after the frame, so a
-    /// case can check pixels shading never visits (the miss sentinel on fast-cleared tiles).
-    pub material_receiver: Option<Vec<u8>>,
+    /// With `RENDERLAB_MATERIAL_DEBUG=receiver` only (the material record's cases): words 1 and
+    /// 2 of the material record (rgba32uint, 16 bytes a pixel each), read back after the frame,
+    /// so a case can check pixels shading never visits (the miss sentinel on fast-cleared
+    /// tiles) and compare producers.
+    pub material_receiver: Option<[Vec<u8>; 2]>,
 }
 
 /// The post `Settings` record at this output height for the post frame with this
@@ -4403,15 +4404,20 @@ fn frame(
         )?),
         None => None,
     };
-    // The material record's word 1, for its cases (RENDERLAB_MATERIAL_DEBUG=receiver).
+    // The material record's words 1 and 2, for its cases (RENDERLAB_MATERIAL_DEBUG=receiver).
     let material_read = match deferred.as_ref().and_then(|d| d.material.as_ref()) {
-        Some(words) if crate::program::material_receiver_check() => Some(transfer::readback(
-            gpu,
-            &mut graph,
-            &mut rec,
-            words[1].image,
-            u64::from(words[1].size[0]) * u64::from(words[1].size[1]) * 16,
-        )?),
+        Some(words) if crate::program::material_receiver_check() => {
+            let mut read = |word: &Texture| {
+                transfer::readback(
+                    gpu,
+                    &mut graph,
+                    &mut rec,
+                    word.image,
+                    u64::from(word.size[0]) * u64::from(word.size[1]) * 16,
+                )
+            };
+            Some([read(&words[1])?, read(&words[2])?])
+        }
         _ => None,
     };
     // Only identity tests read the deferred outputs back: both exist with
@@ -4905,7 +4911,10 @@ fn frame(
             Some([a, b]) => Some([gpu.read(a)?, gpu.read(b)?]),
             None => None,
         },
-        material_receiver: material_read.map(|b| gpu.read(b)).transpose()?,
+        material_receiver: match material_read {
+            Some([a, b]) => Some([gpu.read(a)?, gpu.read(b)?]),
+            None => None,
+        },
         reconstruction_history: history_read
             .map(|b| gpu.read(b))
             .transpose()?
