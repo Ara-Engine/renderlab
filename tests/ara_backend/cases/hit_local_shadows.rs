@@ -1,5 +1,6 @@
-//! `LocalShadows::reflection_hits` on the port: off, reflection hits light local lights
-//! unshadowed while camera receivers keep their shadows.
+//! `LocalShadows::unshadowed_hits_from` on the port: reflection hits from rough enough lobes
+//! light local lights unshadowed, near-mirror ones keep their shadows, and camera receivers
+//! keep every shadow.
 use super::*;
 use renderlab::{
     Camera, Light, Lighting, LocalShadows, Mat4, MaterialDescriptor, ReflectionSettings, Vec3,
@@ -9,11 +10,12 @@ use renderlab::{
 
 const SIZE: [u32; 2] = [128, 96];
 
-/// A spot lights a wall and a small card shadows part of it; a near-mirror floor reflects
-/// the wall. With `reflection_hits` off the reflected shadow lifts, so the traced frame
-/// changes, while a frame without reflections (camera receivers only) is byte-identical.
+/// A spot lights a wall and a small card shadows part of it; a floor reflects the wall.
+/// Dropping hit shadows everywhere (0) lifts the reflected shadow; at the default (0.2) a
+/// near-mirror floor (roughness 0.05) keeps it, as if never dropped, while a glossy floor
+/// (0.3) drops it. A frame without reflections is byte-identical whatever the setting.
 #[test]
-fn reflection_hits_can_light_local_lights_unshadowed() -> Result<()> {
+fn reflection_hits_drop_local_shadows_from_rough_lobes_only() -> Result<()> {
     let path = root("hit-local-shadows");
     let mut gpu = GpuDevice::new(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
@@ -75,7 +77,8 @@ fn reflection_hits_can_light_local_lights_unshadowed() -> Result<()> {
         0.1,
         100.,
     )?;
-    let mut frame = |reflections: Option<ReflectionSettings>, hits: bool| {
+    // (reflections, unshadowed_hits_from, floor roughness)
+    let mut frame = |reflections: Option<ReflectionSettings>, from: f32, floor_rough: f32| {
         let material = |base: f32, metallic: f32, roughness: f32| MaterialDescriptor {
             base_color: [base, base, base, 1.],
             metallic,
@@ -84,7 +87,7 @@ fn reflection_hits_can_light_local_lights_unshadowed() -> Result<()> {
             ..Default::default()
         };
         let objects = [
-            (&floor, material(0.9, 1., 0.05)),
+            (&floor, material(0.9, 1., floor_rough)),
             (&wall, material(0.8, 0., 0.6)),
             (&card, material(0.8, 0., 0.6)),
         ]
@@ -114,7 +117,7 @@ fn reflection_hits_can_light_local_lights_unshadowed() -> Result<()> {
                 reflections,
                 textures: None,
                 local_shadows: Some(LocalShadows {
-                    reflection_hits: hits,
+                    unshadowed_hits_from: from,
                     ..Default::default()
                 }),
                 transparent: &[],
@@ -126,23 +129,42 @@ fn reflection_hits_can_light_local_lights_unshadowed() -> Result<()> {
             },
         )
     };
-    let shadowed = frame(Some(ReflectionSettings::default()), true)?.hdr;
-    let unshadowed = frame(Some(ReflectionSettings::default()), false)?.hdr;
-    let changed = shadowed
-        .as_chunks::<8>()
-        .0
-        .iter()
-        .zip(unshadowed.as_chunks::<8>().0)
-        .filter(|(a, b)| a != b)
-        .count();
-    println!("reflection hits unshadowed: {changed} pixels changed");
-    ensure!(
-        changed > 20,
-        "reflection hits kept the reflected spot shadow ({changed} pixels changed)"
+    let changed = |a: &[u8], b: &[u8]| {
+        a.as_chunks::<8>()
+            .0
+            .iter()
+            .zip(b.as_chunks::<8>().0)
+            .filter(|(a, b)| a != b)
+            .count()
+    };
+    const NEVER: f32 = 2.0;
+    let traced = Some(ReflectionSettings::default());
+    let mirror_never = frame(traced, NEVER, 0.05)?.hdr;
+    let mirror_all = changed(&mirror_never, &frame(traced, 0.0, 0.05)?.hdr);
+    let mirror_default = changed(&mirror_never, &frame(traced, 0.2, 0.05)?.hdr);
+    let glossy_default = changed(
+        &frame(traced, NEVER, 0.3)?.hdr,
+        &frame(traced, 0.2, 0.3)?.hdr,
+    );
+    println!(
+        "hit local shadows: mirror floor {mirror_all} px change dropped everywhere, \
+         {mirror_default} at the default; glossy floor {glossy_default} at the default"
     );
     ensure!(
-        frame(None, true)?.hdr == frame(None, false)?.hdr,
-        "camera receivers changed with `reflection_hits`"
+        mirror_all > 20,
+        "dropping every hit's local shadows kept the reflected spot shadow ({mirror_all} px)"
+    );
+    ensure!(
+        mirror_default == 0,
+        "a near-mirror lobe lost its hit shadows at the default ({mirror_default} px)"
+    );
+    ensure!(
+        glossy_default > 20,
+        "a glossy lobe kept its hit shadows at the default ({glossy_default} px)"
+    );
+    ensure!(
+        frame(None, NEVER, 0.05)?.hdr == frame(None, 0.0, 0.05)?.hdr,
+        "camera receivers changed with `unshadowed_hits_from`"
     );
     Ok(())
 }

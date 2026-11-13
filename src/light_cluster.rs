@@ -57,11 +57,14 @@ pub struct LocalShadows {
     /// Near plane of each local shadow view in metres. Casters closer to the light are
     /// not drawn into its maps (rays have no near plane).
     pub near: f32,
-    /// Whether reflection hits shade local lights with their shadows. Off, a hit lights
-    /// them unshadowed; the sun keeps its ray and camera receivers keep every shadow. On
-    /// Showcase, Outpost and its hangar, off changed at most 0.1% of pixels by one code
-    /// and saved 1.1, 0.06 and 1.7 ms of M5 shading (docs/m7-gaps.md).
-    pub reflection_hits: bool,
+    /// The reflecting lobe's perceptual roughness from which reflection hits light local
+    /// lights unshadowed. Glossy lobes average a missing shadow away; near-mirror lobes show
+    /// it (the night lanterns' chrome and gold spheres lost their reflected lantern shadows,
+    /// up to 118 codes). 0.2, the default, drops them at glossy hits and keeps them at
+    /// near-mirror ones; 0 drops them at every hit; above 1 keeps them everywhere. The sun
+    /// keeps its ray and camera receivers keep every shadow (docs/m7-gaps.md).
+    /// `RENDERLAB_HIT_UNSHADOWED_FROM` overrides it for measurement.
+    pub unshadowed_hits_from: f32,
 }
 impl Default for LocalShadows {
     fn default() -> Self {
@@ -70,8 +73,25 @@ impl Default for LocalShadows {
             rays: u32::MAX,
             resolution: 1024,
             near: 0.02,
-            reflection_hits: true,
+            unshadowed_hits_from: 0.2,
         }
+    }
+}
+/// The cluster frame's far.z for `settings`: 1 plus `unshadowed_hits_from` where some hits
+/// drop local shadows, 0 where none do (so a frame that never sets the word keeps them).
+/// Measurement switch: `RENDERLAB_HIT_UNSHADOWED_FROM=<roughness>` replaces the setting.
+pub(crate) fn unshadowed_hits_word(settings: &LocalShadows) -> f32 {
+    static FORCED: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    let forced = FORCED.get_or_init(|| {
+        std::env::var("RENDERLAB_HIT_UNSHADOWED_FROM")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    });
+    let from = forced.unwrap_or(settings.unshadowed_hits_from);
+    if (0.0..=1.0).contains(&from) {
+        1.0 + from
+    } else {
+        0.0
     }
 }
 impl LocalShadows {
@@ -124,8 +144,8 @@ const LC_ROW:u32={ROW}u;
 const LC_SLOTS:u32={MAX_SLOTS}u;
 // view: world to view (forward -Z). proj: x and y projection scales, near (metres), slices
 // per log2 unit. info: x lights, y clustered, z TR1 sample, w restart disk rays. far: x camera
-// far, y shadow near, z 1 where reflection hits light local lights unshadowed
-// (`LocalShadows::reflection_hits` off).
+// far, y shadow near, z 1 plus the lobe roughness from which reflection hits light local
+// lights unshadowed (0: never; `unshadowed_hits_word`).
 // shadows: pooled map layers.
 struct LcFrame {{ view:mat4x4<f32>, proj:vec4<f32>, info:vec4<u32>, far:vec4<f32>, shadows:array<mat4x4<f32>,{}>, tiles:array<vec4<f32>,{MAX_SLOTS}> }};
 ",
