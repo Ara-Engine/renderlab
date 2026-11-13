@@ -755,6 +755,12 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         Some(mode) => mask_resolve(mode),
         None => RESOLVE.to_owned(),
     };
+    // Measurement only (U-FIXED, TR1's cost split): `RENDERLAB_TR1_SHADER=PATH` reads the resolve
+    // (shaders/temporal_resolve.wgsl's text, same entry and layouts) from a variant file.
+    if let Some(path) = std::env::var_os("RENDERLAB_TR1_SHADER") {
+        resolve = std::fs::read_to_string(&path)
+            .map_err(|_| Error::InvalidInput("RENDERLAB_TR1_SHADER: unreadable file"))?;
+    }
     if let Ok(k) = std::env::var("RENDERLAB_P_SPLIT_FRESH_CLAMP") {
         resolve = fresh_clamp_resolve(
             &resolve,
