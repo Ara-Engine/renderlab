@@ -409,6 +409,33 @@ PLANS["gatepics2"] = [
     for name, extra in (("flight", ["--frames", "48"]), ("cut", ["--diag", "cut=1", "--frames", "36"]))
     for v in ("1", "0")
 ]
+# Byte identity with main on moving frames (run with each binary; `bin_compare.py A B`).
+PLANS["identmain"] = [
+    (f"p-{path}-{name}", ["--path", path, *extra, "--every", "1"], {})
+    for path in ("nonrt", "rt")
+    for name, extra in (("flight", ["--fox", FOX, "--frames", "48"]), ("night", ["--fox", FOX, "--night-lanterns", "--frames", "30"]))
+]
+# Where a cut's frame time goes (pass log detail and the GI log): the game cut and the forest
+# turn, both paths, twice (`timing.py gi OUT`).
+PLANS["cutsplit"] = [
+    (f"{name}-{path}-{k}", ["--path", path, *extra, "--frames", "40"], {"RTVIS_GI_LOG": "1"})
+    for k in (1, 2) for path in ("nonrt", "rt")
+    for name, extra in (("game", ["--diag", "cut=1"]), ("forest", ["--diag", "forest=1", "--diag", "cut=turn", *LOW]))
+]
+# Item (2), the post-cut gather time budget with parent stand-ins (`RENDERLAB_GI`) against the
+# default (hit_gathers=1 already): frame times (`timing.py gi OUT`) and every frame's picture
+# around the cut (`compare.py PICS CROPS cutgi`).
+CUTGI = lambda v: {"RENDERLAB_GI": "cut_gather_ms=3;parent_standin=1"} if v == "1" else {}
+CUTGI_CLIPS = (("game", ["--diag", "cut=1"]), ("forest", ["--diag", "forest=1", "--diag", "cut=turn", *LOW]),
+               ("respawn", ["--fox", FOX, "--diag", "hold=cut"]))
+PLANS["cutgi"] = [
+    (f"{name}-{path}-cutgi{v}", ["--path", path, *extra, "--frames", "40"], CUTGI(v) | {"RTVIS_GI_LOG": "1"})
+    for path in ("nonrt", "rt") for name, extra in CUTGI_CLIPS for v in ("1", "0")
+]
+PLANS["cutgipics"] = [
+    (f"p-{path}-{name}-cutgi{v}", ["--path", path, *extra, "--frames", "60" if name == "respawn" else "34", "--every", "1"], CUTGI(v))
+    for path in ("nonrt", "rt") for name, extra in CUTGI_CLIPS for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS

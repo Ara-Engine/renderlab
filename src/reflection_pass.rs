@@ -314,6 +314,7 @@ fn resolve_source() -> String {
             "wide" => "RL_RESOLVE_WIDE",
             "sigma" => "RL_ATROUS_SIGMA",
             "footprint" => "RL_ATROUS_FOOTPRINT",
+            "sharp" => "RL_RESOLVE_SHARP",
             _ => continue,
         };
         let prefix = format!("const {name}:f32=");
