@@ -350,7 +350,7 @@ fn full_strata_weight() -> Option<f32> {
 pub(crate) const VIEW_API: &str = "struct ViewDependence { alpha:f32, share:f32 };\n";
 const VIEW_HINT: &str = include_str!("../shaders/temporal_view.wgsl");
 /// The traced entry's hint for programs that declare nothing: view-independent.
-const VIEW_STUB: &str = "fn tr1_view_hint(s:Surface,input:SurfaceInput,pixel:vec2<u32>,size:vec2<u32>)->f32 { return 1.0; }\n";
+const VIEW_STUB: &str = "fn tr1_view_hint(s:Surface,input:SurfaceInput,ray:PrimaryRay)->f32 { return 1.0; }\n";
 // ---- end of MQ2 view dependence ----
 
 // ---- M7-R1n software reflections (docs/m7-r1n.md) ----
@@ -892,7 +892,7 @@ pub(crate) fn deferred_variant(composed: &str) -> String {
 
 // ---- View modes (docs/design-id-output.md) ----
 /// The traced entry's lit store, which a view-mode module replaces.
-const VIEW_STORE_SEAM: &str = "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,id,size)));";
+const VIEW_STORE_SEAM: &str = "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,view_ray)));";
 const VIEW_STORE: &str = "textureStore(primary_hdr,pixel,rl_view_store(surface_output,surface_input));";
 /// Data modes show misses as zero; the lit miss is kept under another name.
 const VIEW_MISS_SEAM: &str = "fn primary_miss(id:vec2<u32>,size:vec2<u32>,clear:vec4<f32>)->vec4<f32> {";
