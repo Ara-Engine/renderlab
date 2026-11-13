@@ -117,6 +117,9 @@ fn rl_split(mut source: String) -> String {
             }
         }
     }
+    if std::env::var_os("TMP_ONE").is_some() {
+        source = source.replace("let rl_step=select(1u,min(rl_hit_strata,samples),rl_reflection_hit);", "let rl_step=select(1u,samples,rl_reflection_hit);");
+    }
     source
 }
 /// U-RTVIS measurement switches (`RENDERLAB_RL_HIT`, a comma list), reflection hits only:
@@ -140,6 +143,30 @@ fn rl_hit_switches(source: String) -> String {
             "nolights" => (
                 "    return LightSample(index,l,attenuation,",
                 "    return LightSample(index,l,select(attenuation,0.0,rl_reflection_hit),",
+            ),
+            "weaklocal" => (
+                "    if lights[s.index].kind.w!=0u { return rl_local_shadow(",
+                "    if rl_hit_weak && lights[s.index].kind.w!=0u { return 1.0; }\n    if lights[s.index].kind.w!=0u { return rl_local_shadow(",
+            ),
+            "weaksun" => (
+                "    if rl_reflection_hit {return rl_hit_shadow(lights[s.index],input.receiver,s.direction);}\n",
+                "    if rl_hit_weak {return 1.0;}\n    if rl_reflection_hit {return rl_hit_shadow(lights[s.index],input.receiver,s.direction);}\n",
+            ),
+            "weaklights" => (
+                "    return LightSample(index,l,attenuation,",
+                "    return LightSample(index,l,select(attenuation,0.0,rl_hit_weak),",
+            ),
+            "weakblack" => (
+                "                let hs=surface(h.input);\n                radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n",
+                "                if !rl_hit_weak {\n                let hs=surface(h.input);\n                radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n                }\n",
+            ),
+            "weakcache" => (
+                "    if rough<RL_CACHE_ROUGH || gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }\n",
+                "    if (rough<RL_CACHE_ROUGH && !rl_hit_weak) || gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }\n",
+            ),
+            "weakcone" => (
+                "    if cone<gi_edge(base) { return vec4<f32>(0.0); }\n",
+                "    if cone<gi_edge(base) && !rl_hit_weak { return vec4<f32>(0.0); }\n",
             ),
             "black" => (
                 "                let hs=surface(h.input);\n                radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n",
@@ -172,7 +199,13 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
         .find(|name| head.contains(&format!("var {name}:acceleration_structure;")));
     let traced = lobe && reads && matches!(stage, Stage::Traced | Stage::TracedStreamed);
     let api = match scene.filter(|_| traced) {
-        Some(scene) => REFLECTION_API.replace("RL_SCENE", scene),
+        Some(scene) => {
+            let api = REFLECTION_API.replace("RL_SCENE", scene);
+            match std::env::var("RENDERLAB_RL_TMP") {
+                Ok(v) => api.replacen("const RL_TMP:u32=0u;", &format!("const RL_TMP:u32={v}u;"), 1),
+                Err(_) => api,
+            }
+        }
         // M7-R1n: non-RT heads that declare the software geometry trace it instead.
         None if traced && head.contains(SOFTWARE_REFLECTION_GEOMETRY) => software_reflection_api(),
         None => return (REFLECTION_STUB.to_owned(), false),

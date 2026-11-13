@@ -60,6 +60,8 @@ const RL_LUMA:vec3<f32>=vec3<f32>(0.2126,0.7152,0.0722);
 // start view (a stone deck in the glossy band) shading falls from 25 to 12 ms with 98% of
 // the pixels unchanged (U-SKIP). RENDERLAB_RL_FULL_STRATA overrides it (src/program.rs).
 const RL_FULL_STRATA:f32=0.25;
+// TMP measurement (local only): 1 hits read as misses, 2 no ray query (sky), 4 black sky, 8 one stratum.
+const RL_TMP:u32=0u;
 
 var<private> rl_specular:vec4<f32>;
 // Shading a reflection hit: light visibility traces its own shadow ray (rl_hit_shadow),
@@ -69,6 +71,8 @@ var<private> rl_reflection_hit:bool;
 // visibility at hits splits its samples across the strata (src/program.rs RL_SPLIT).
 var<private> rl_hit_stratum:u32;
 var<private> rl_hit_strata:u32=1u;
+// TMP: the hit comes from a thinned lobe (weight under RL_FULL_STRATA).
+var<private> rl_hit_weak:bool=false;
 
 // Mean exposed radiance arriving over the declared lobe (rgb) and the traced fraction (w):
 // 1 inside the traced bands, fading to 0 across the rough cutoff. w = 0 means untraced.
@@ -190,6 +194,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     let mirror=rough<RL_MIRROR;
     var count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
     if RL_FULL_STRATA>0.0 && !mirror {count=max(1u,u32(ceil(f32(count)*min(lobe.weight/RL_FULL_STRATA,1.0))));}
+    if (RL_TMP&8u)!=0u {count=1u;}
     let restart_strata=primary_frame.reflection.w;
     if !mirror && restart_strata>1.0 && rl_restarts(input.world) {count*=u32(restart_strata);}
     let cone_alpha=select(alpha*inverseSqrt(f32(count)),0.0,mirror);
@@ -220,6 +225,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     // Mirror rays from flat receivers stay near exact.
     rl_hit_variance=8.0*spread*spread;
     rl_hit_strata=count;
+    rl_hit_weak=RL_FULL_STRATA>0.0 && lobe.weight<RL_FULL_STRATA;
     for(var k=0u;k<count;k+=1u) {
         rl_hit_stratum=k;
         var d=reflect(-v,n);
@@ -228,9 +234,13 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
             d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
         }
         if dot(d,side)<=0.0 {continue;}
+        var hit:RayIntersection;
+        if (RL_TMP&2u)==0u {
         rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));
         while rayQueryProceed(&query) {}
-        let hit=rayQueryGetCommittedIntersection(&query);
+        hit=rayQueryGetCommittedIntersection(&query);
+        }
+        if (RL_TMP&1u)!=0u {hit.kind=0u;}
         // Only a miss looks up the sky: the compiler does not sink a lookup the hit
         // branch overwrites (P-SKY, docs/p-sky.md).
         var radiance=vec3<f32>(0.0);
@@ -251,7 +261,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
                 shaded=true;
             }
         } else {
-            radiance=rl_sky(d,cone_alpha);
+            radiance=select(rl_sky(d,cone_alpha),vec3<f32>(0.0),(RL_TMP&4u)!=0u);
         }
         sum+=radiance;
         let level=dot(radiance,RL_LUMA);
@@ -259,6 +269,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
         valid+=1u;
     }
     rl_reflection_hit=false;
+    rl_hit_weak=false;
     rl_hit_lights_clear();
     rl_hit_strata=1u;
     rl_hit_variance=0.0;
