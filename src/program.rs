@@ -82,12 +82,13 @@ const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=
 /// instead of being shaded, when it passes the reuse test (shaders/reflection_hit_reuse.wgsl).
 /// `mask`, `all` and `none` are its measurement forms: reused hits 1 and the rest 0, every hit
 /// 1, every hit 0, so the frame's reused share is (mask - none) / (all - none).
-/// `RENDERLAB_RL_HIT_REUSE_TUNE=depth=D,slack=S,weight=W,rough=R,transmit=T,hint=H,view=V,foot=F`
-/// sets the test's tolerances (defaults 0.01, 0.02 m, 4, 0.5, 0.5, 1, 0.5 px, 0); `hint=0`
-/// replaces the MQ2-hint view test with the non-metal roughness floor; `foot=F` > 0 scales the
-/// view bound on known non-metal hits to F receiving-cone footprints, never under `view`
-/// (`footprint=F` is the same key). Metal
-/// hits never reuse where the material is bound. Read once per process.
+/// `RENDERLAB_RL_HIT_REUSE_TUNE=depth=D,slack=S,weight=W,rough=R,transmit=T,hint=H,view=V,foot=F,metal=M`
+/// sets the test's tolerances (defaults 0.01, 0.02 m, 4, 0.5, 0.5, 1, 0.5 px, 0, 1); `hint=0`
+/// replaces the MQ2-hint view test with the non-metal roughness floor; `foot=F` > 0 (or
+/// `footprint=F`) scales the view bound on known non-metal hits to F receiving-cone footprints,
+/// never under `view`. Metal hits never reuse where the material is bound; `metal=0` lifts that
+/// exclusion, and the footprint scaling then applies to every hit (metals, and the trace
+/// kernel's unknown class). Read once per process.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HitReuse {
     mode: u32,
@@ -99,6 +100,7 @@ pub(crate) struct HitReuse {
     hint: bool,
     view: f32,
     foot: f32,
+    metal: bool,
 }
 impl HitReuse {
     /// Whether the view test reads MQ2's hint from TR1's anchors (no material group needed).
@@ -126,6 +128,7 @@ pub(crate) fn hit_reuse() -> Option<HitReuse> {
             hint: true,
             view: 0.5,
             foot: 0.0,
+            metal: true,
         };
         let tune = std::env::var("RENDERLAB_RL_HIT_REUSE_TUNE").unwrap_or_default();
         for (name, value) in tune.split(',').filter_map(|kv| kv.split_once('=')) {
@@ -141,6 +144,7 @@ pub(crate) fn hit_reuse() -> Option<HitReuse> {
                 "hint" => reuse.hint = value != 0.0,
                 "view" => reuse.view = value,
                 "foot" | "footprint" => reuse.foot = value,
+                "metal" => reuse.metal = value != 0.0,
                 _ => {}
             }
         }
@@ -191,6 +195,10 @@ fn with_hit_reuse(source: String, reuse: HitReuse) -> String {
         .replace(
             "const RL_REUSE_VIEW:f32=0.5;",
             &format!("const RL_REUSE_VIEW:f32={:?};", reuse.view),
+        )
+        .replace(
+            "const RL_REUSE_METAL:bool=true;",
+            &format!("const RL_REUSE_METAL:bool={};", reuse.metal),
         )
         .replace(
             "const RL_REUSE_FOOT:f32=0.0;",

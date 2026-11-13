@@ -54,6 +54,10 @@ const RL_REUSE_VIEW:f32=0.5;
 // the hit over that footprint), never below RL_REUSE_VIEW: a mirror-like receiver's cone is
 // near zero, so it keeps the half-pixel bound, since a sharp reflection shows a wrong hit exactly.
 const RL_REUSE_FOOT:f32=0.0;
+// Whether metal hits are excluded (the default). Off (`metal=0`), every class reuses under the
+// hint's bound, and the footprint scaling applies to every hit, metals and the trace kernel's
+// unknown class included.
+const RL_REUSE_METAL:bool=true;
 // The hit's material class: 0 non-metal, 1 metal (never reused), 2 unknown (the trace kernel
 // binds no material group: no footprint scaling, the hint's bound alone).
 fn rl_reuse_metal(batch:u32)->u32 {
@@ -84,7 +88,7 @@ fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>,footprint:f32)->vec4<f32> {
     if batch_skinned(primary_batch_info(hit.batch)) {return vec4<f32>(0.0);}
     if !rl_reuse_material(hit.batch) {return vec4<f32>(0.0);}
     let metal=rl_reuse_metal(hit.batch);
-    if metal==1u {return vec4<f32>(0.0);}
+    if RL_REUSE_METAL && metal==1u {return vec4<f32>(0.0);}
     let ta=primary_input(hit.batch,hit.ia,hit.placement);
     let tb=primary_input(hit.batch,hit.ib,hit.placement);
     let tc=primary_input(hit.batch,hit.ic,hit.placement);
@@ -105,7 +109,7 @@ fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>,footprint:f32)->vec4<f32> {
 fn rl_reuse_at(world:vec3<f32>,previous:vec3<f32>,placement:u32,d:vec3<f32>,footprint:f32,metal:u32)->vec4<f32> {
     // 1. A bound TR1 frame that does not restart (cuts, first frames and reset events never reuse).
     if !(rl_reuse_frame.jitter.z>0.0) || rl_reuse_frame.flags.x!=0u {return vec4<f32>(0.0);}
-    if metal==1u {return vec4<f32>(0.0);}
+    if RL_REUSE_METAL && metal==1u {return vec4<f32>(0.0);}
     // 2. Outside this frame's restart zones: changed lights, a moving caster's swept shadow.
     if tr1_relit(world) || tr1_caster_shadow(world) {return vec4<f32>(0.0);}
     // 4. In last frame's view.
@@ -122,7 +126,7 @@ fn rl_reuse_at(world:vec3<f32>,previous:vec3<f32>,placement:u32,d:vec3<f32>,foot
     let turn=acos(clamp(dot(-d,(rl_reuse_frame.previous_eye.xyz-previous)/max(distance,1e-6)),-1.0,1.0));
     // The footprint in last frame's pixels at the hit (previous_eye.w: radians per pixel).
     let pixels=footprint/max(distance*rl_reuse_frame.previous_eye.w,1e-6);
-    let bound=select(RL_REUSE_VIEW,max(RL_REUSE_VIEW,RL_REUSE_FOOT*pixels),RL_REUSE_FOOT>0.0 && metal==0u);
+    let bound=select(RL_REUSE_VIEW,max(RL_REUSE_VIEW,RL_REUSE_FOOT*pixels),RL_REUSE_FOOT>0.0 && (metal==0u || !RL_REUSE_METAL));
     // 5. The same surface at each bilinear texel (placement and view distance); 7. a history
     // old enough.
     var sum=vec3<f32>(0.0);var weight=0.0;var valid=0u;
