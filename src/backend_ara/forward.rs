@@ -3944,7 +3944,8 @@ fn frame(
                         .iter()
                         .map(|(at, packet)| {
                             let pane = &t.panes[*at];
-                            let glass = &t.films[pane.program].as_ref().expect("a film's pipeline").1;
+                            let glass =
+                                &t.films[pane.program].as_ref().expect("a film's pipeline").1;
                             (glass, packet, &pane.geometry)
                         })
                         .collect();

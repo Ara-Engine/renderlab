@@ -320,6 +320,16 @@ fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
     s
 }
 
+/// A film draw's instances draw far to near along the view axis, whatever their order in the
+/// collection, and equally far instances keep their order.
+#[test]
+fn film_instances_draw_far_to_near() {
+    let at = |z: f32| Mat4::from_translation(Vec3::new(0., 0., z));
+    let models = [at(-2.), at(-8.), at(-5.), at(-8.)];
+    let order = far_to_near(&models, &[10, 11, 12, 13], Vec3::ZERO, -Vec3::Z);
+    assert_eq!(order, vec![11, 13, 12, 10]);
+}
+
 /// A glass draw's instances share a raster pass until one overlaps an instance already in it,
 /// so a pane in front of another of the same draw is drawn over it, not over the colour from
 /// before the draw. Each span carries the rectangle the next one copies as its colour behind.

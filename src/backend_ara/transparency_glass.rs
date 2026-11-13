@@ -156,7 +156,12 @@ impl Glass {
         );
         // A film's module reads no colour behind (31); every glass module reads depth (32).
         ensure!(
-            inputs.image(InputKey { group: 0, binding: 32 }).is_some(),
+            inputs
+                .image(InputKey {
+                    group: 0,
+                    binding: 32
+                })
+                .is_some(),
             "transparent depth input missing"
         );
         for binding in [31, 32] {
@@ -207,7 +212,10 @@ pub fn record_films(
             "incompatible film packet"
         );
         let depth = inputs
-            .image(InputKey { group: 0, binding: 32 })
+            .image(InputKey {
+                group: 0,
+                binding: 32,
+            })
             .ok_or_else(|| anyhow::anyhow!("film depth input missing"))?;
         ensure!(depth.size == target.size(), "film depth viewport mismatch");
         uses.extend(inputs.uses());

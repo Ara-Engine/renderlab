@@ -8,7 +8,9 @@
 //! 3. particle simulation and a one-workgroup bitonic sort per emitter;
 //! 4. transparent draws and emitters back to front by object. A transparent draw copies
 //!    the HDR colour behind it first, then composites its program's `shade` over the
-//!    refracted copy.
+//!    refracted copy. Films (IOR one, no thickness, of a program that declares `FILMS`)
+//!    blend in hardware instead (`film_source`): consecutive films share one pass over one
+//!    copy, each draw's instances far to near (`far_to_near`).
 //!
 //! Transparent draws compose the material's own program (`surface`, `shade` and the
 //! optional `transmittance` hook). Their sun visibility is the renderer's hardware ray on
@@ -176,8 +178,16 @@ pub(crate) fn film_source(glass: &str) -> String {
     let behind = "    let behind=tp_behind(input.world,refraction_normal,geometric,pixel,depth,transparent_ior(material));\n";
     let composite = "    return vec4<f32>(rl_finite(atmosphere_surface(rl_finite(lit),input.world)+passed*max(behind-fog,vec3<f32>(0.0))),1.0);\n";
     let film = "    return vec4<f32>(rl_finite(atmosphere_surface(rl_finite(lit),input.world)-passed*fog),1.0-passed.x);\n";
-    assert_eq!(glass.matches(behind).count(), 1, "film seam: the colour behind");
-    assert_eq!(glass.matches(composite).count(), 1, "film seam: the composite");
+    assert_eq!(
+        glass.matches(behind).count(),
+        1,
+        "film seam: the colour behind"
+    );
+    assert_eq!(
+        glass.matches(composite).count(),
+        1,
+        "film seam: the composite"
+    );
     glass.replacen(behind, "", 1).replacen(composite, film, 1)
 }
 /// The particle simulation and draw modules, after `prelude` for its environment helpers
@@ -2473,10 +2483,7 @@ impl Renderer {
             .map(|(i, draw)| {
                 let state = &draw.instances.state;
                 (films[i] && state.ids.len() > 1).then(|| {
-                    let depth = |k: usize| (state.models[k].w_axis.truncate() - eye).dot(forward);
-                    let mut order: Vec<usize> = (0..state.ids.len()).collect();
-                    order.sort_by(|a, b| depth(*b).total_cmp(&depth(*a)));
-                    let ids: Vec<u32> = order.iter().map(|&k| state.ids[k]).collect();
+                    let ids = far_to_near(&state.models, &state.ids, eye, forward);
                     wgpu::util::DeviceExt::create_buffer_init(
                         &*self.device,
                         &wgpu::util::BufferInitDescriptor {
@@ -2488,7 +2495,8 @@ impl Renderer {
                 })
             })
             .collect();
-        let film_at = |k: usize| matches!(items.get(k).map(|item| &item.1), Some(Item::Draw(j)) if films[*j]);
+        let film_at =
+            |k: usize| matches!(items.get(k).map(|item| &item.1), Some(Item::Draw(j)) if films[*j]);
         let mut copied = false;
         let mut dirty: Option<[u32; 4]> = None;
         let mut index = 0;
@@ -2568,10 +2576,13 @@ impl Renderer {
                             pass.set_bind_group(1, &*draw.instances.bind, &[]);
                             pass.set_bind_group(2, &*draw.material.unwrap().bind, &[]);
                             pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
-                            pass.set_vertex_buffer(1, match &film_ids[i] {
-                                Some(order) => order.slice(..),
-                                None => draw.instances.id_buffer.slice(..),
-                            });
+                            pass.set_vertex_buffer(
+                                1,
+                                match &film_ids[i] {
+                                    Some(order) => order.slice(..),
+                                    None => draw.instances.id_buffer.slice(..),
+                                },
+                            );
                             if let Some(t) = &draw.mesh.tangent {
                                 pass.set_vertex_buffer(2, t.slice(..));
                             }
@@ -2787,10 +2798,13 @@ impl Renderer {
                             pass.set_bind_group(1, &*draw.instances.bind, &[]);
                             pass.set_bind_group(2, &*material.bind, &[]);
                             pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
-                            pass.set_vertex_buffer(1, match &film_ids[i] {
-                                Some(order) => order.slice(..),
-                                None => draw.instances.id_buffer.slice(..),
-                            });
+                            pass.set_vertex_buffer(
+                                1,
+                                match &film_ids[i] {
+                                    Some(order) => order.slice(..),
+                                    None => draw.instances.id_buffer.slice(..),
+                                },
+                            );
                             if let Some(t) = &draw.mesh.tangent {
                                 pass.set_vertex_buffer(2, t.slice(..));
                             }
@@ -2852,6 +2866,16 @@ impl Renderer {
 const SPAN_INSTANCES: usize = 64;
 /// Spans above which a glass draw is drawn in one pass instead.
 const MAX_SPANS: usize = 4;
+
+/// A film draw's instance ids (`ids`, one per placement in `models`) ordered far to near
+/// along the view's `forward` axis from `eye`, by placement origin, so overlapping instances
+/// blend back to front. Ties keep their order.
+fn far_to_near(models: &[Mat4], ids: &[u32], eye: Vec3, forward: Vec3) -> Vec<u32> {
+    let depth = |k: usize| (models[k].w_axis.truncate() - eye).dot(forward);
+    let mut order: Vec<usize> = (0..ids.len()).collect();
+    order.sort_by(|a, b| depth(*b).total_cmp(&depth(*a)));
+    order.into_iter().map(|k| ids[k]).collect()
+}
 
 /// A glass draw's instances in draw order, split into spans that one raster pass can draw
 /// together: a span ends before the first instance whose pixel rectangle (`panes::rect`)
