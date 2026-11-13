@@ -1152,6 +1152,7 @@ fn compose_stage(
             source.push_str(traced_hit_helpers());
         }
     }
+    let mut deferred = false;
     if hits {
         // The stage's entry as written (its decode helpers are the hits' too; its own entry
         // point goes unused), then the hit entry.
@@ -1161,20 +1162,23 @@ fn compose_stage(
         // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
         source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
-        if rl_deferred_for(head) && declares(program, "const", "RL_DEFERRED") {
-            return deferred_variant(Composed {
-                source,
-                program: program_range,
-            });
-        }
+        deferred = rl_deferred_for(head) && declares(program, "const", "RL_DEFERRED");
     } else {
         source.push_str(entry);
     }
+    // Every module takes the GI pass's splice, deferred ones included: the GI receiver kernel
+    // (gi_receiver_pass.rs) relies on the definitions it appends.
     source = crate::renderer::primary_ray_gpu::gi_receiver_pass::shade_source(source, matches!(stage, Stage::Traced | Stage::TracedStreamed) && indirect_calls, specular);
-    crate::renderer::primary_ray_gpu::light_vis_pass::apply(
+    // Light visibility (light_vis_pass.rs) and then the deferred variant, for every module.
+    let composed = crate::renderer::primary_ray_gpu::light_vis_pass::apply(
         Composed { source, program: program_range },
         matches!(stage, Stage::Traced | Stage::TracedStreamed),
-    )
+    );
+    if deferred {
+        deferred_variant(composed)
+    } else {
+        composed
+    }
 }
 
 // ---- Deferred reflections (the program side; U-RTVIS's composite reads them) ----
@@ -1569,6 +1573,30 @@ pub(crate) fn glass_hit_program(program: &str, deferred: bool) -> String {
     source.push_str("\nfn rl_glass_requires_incident(input:SurfaceInput)->vec4<f32> {return specular_incident(input);}\n");
     source
 }
+/// Whether a shading program's own source (as installed, before compose) calls the program
+/// API's normal variance: `material_normal_variance(`, `filtered_roughness(` or
+/// `filtered_brdf(`, as whole identifiers, outside `//` comments and not as their `fn`
+/// definitions. A BC5 normal map has its variance layer only while an installed program does
+/// (src/normal_variance_lazy.rs). Shared by the wgpu renderer and the ara-gpu port; it errs
+/// towards true, which only costs a layer.
+pub(crate) fn reads_normal_variance(program_source: &str) -> bool {
+    const NAMES: [&str; 3] = [
+        "material_normal_variance",
+        "filtered_roughness",
+        "filtered_brdf",
+    ];
+    program_source.lines().any(|line| {
+        let code = line.split("//").next().unwrap_or("");
+        NAMES.iter().any(|name| {
+            code.match_indices(name).any(|(at, _)| {
+                let before = code[..at].chars().next_back();
+                let after = code[at + name.len()..].trim_start();
+                let word = before.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+                word && after.starts_with('(') && !code[..at].trim_end().ends_with("fn")
+            })
+        })
+    })
+}
 pub(crate) fn declares_parameters(program: &str) -> bool {
     declares(program, "struct", "Parameters")
 }
@@ -1873,6 +1901,51 @@ pub(crate) fn standard_returning(value: &str) -> String {
 "
         ),
     )
+}
+
+#[cfg(test)]
+#[test]
+fn reads_normal_variance_finds_calls_only() {
+    assert!(!reads_normal_variance(include_str!(
+        "../shaders/programs/standard.wgsl"
+    )));
+    assert!(!reads_normal_variance(include_str!(
+        "../shaders/programs/toon.wgsl"
+    )));
+    for name in [
+        "material_normal_variance",
+        "filtered_roughness",
+        "filtered_brdf",
+    ] {
+        assert!(
+            reads_normal_variance(&format!("    let v={name}(input);")),
+            "{name}"
+        );
+        assert!(
+            reads_normal_variance(&format!("let v = {name} (input);")),
+            "{name}"
+        );
+        assert!(
+            !reads_normal_variance(&format!("// let v={name}(input);")),
+            "{name}"
+        );
+        assert!(
+            !reads_normal_variance(&format!("fn {name}(input:SurfaceInput) -> f32 {{")),
+            "{name}"
+        );
+        assert!(
+            !reads_normal_variance(&format!("let v=my_{name}(input);")),
+            "{name}"
+        );
+        assert!(
+            !reads_normal_variance(&format!("let {name}_scale=1.0;")),
+            "{name}"
+        );
+    }
+    // The API's own definitions: a composed module would always match a plain search.
+    assert!(!reads_normal_variance(include_str!(
+        "../shaders/program_api.wgsl"
+    )));
 }
 
 #[cfg(test)]

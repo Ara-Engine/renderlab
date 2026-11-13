@@ -521,12 +521,12 @@ fn the_reflection_pass_belongs_to_the_marked_renderer() {
     }
 }
 
-/// Every module the list head builds validates under this process's switches: each path's heads,
+/// Every module the engine builds validates under this process's switches: each path's heads,
 /// marked and not, the standard and toon programs, single-program and MP1 list shading, traced and
 /// streamed, through `with_reflection_history`; the hit modules (single and list); the trace
-/// module. The switches are read once per process, so run it once per set: unset, and
-/// RENDERLAB_RL_DEFERRED=diag with RENDERLAB_RL_HIT_OWN_PROGRAM=1 (and the stub branch's
-/// RENDERLAB_RL_INLINE_STUB=1). Cheap: catches name clashes before a GPU lease does.
+/// module; the GI receiver kernel while its pass runs. The switches are read once per process,
+/// so tools/rtvis/switch_pairs.py runs it once per pair of pass switches. Cheap: catches name
+/// clashes and missing definitions before a GPU lease does.
 #[test]
 fn every_list_head_module_validates() {
     use crate::program::{
@@ -552,6 +552,12 @@ fn every_list_head_module_validates() {
     };
     for (h, head) in heads.iter().enumerate() {
         validate(&format!("head {h} trace"), &rl_trace_source(head));
+        // The GI receiver kernel, built only while its pass runs (RENDERLAB_GI_PASS=1): the
+        // deferred variant once dropped the definitions it relies on.
+        if crate::renderer::primary_ray_gpu::gi_receiver_pass::on() {
+            let kernel = crate::renderer::primary_ray_gpu::gi_receiver_pass::kernel_module(head);
+            validate(&format!("head {h} GI receiver"), &kernel.source);
+        }
         for (name, program) in [
             ("standard", crate::STANDARD_PROGRAM),
             ("toon", include_str!("../shaders/programs/toon.wgsl")),
