@@ -21,6 +21,16 @@ pub(crate) fn entry() -> wgpu::BindGroupLayoutEntry {
         count: None,
     }
 }
+/// The GI receiver kernel's module on a traced shading `head`, exactly as the engine compiles
+/// it: the standard program's traced composition (which carries the shading-side definitions
+/// `shade_source` appends) and the kernel half of gi_receiver_pass.wgsl.
+pub(crate) fn kernel_module(head: &str) -> program::Composed {
+    let mut composed = program::compose(head, program::STANDARD_PROGRAM, Stage::Traced, false);
+    composed
+        .source
+        .push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
+    composed
+}
 pub(crate) fn shade_source(source: String, eligible: bool, specular: bool) -> String {
     shade_source_for(source, eligible, specular, on())
 }
@@ -89,10 +99,7 @@ impl Renderer {
             return Ok(());
         }
         let head = &self.primary_sources.as_ref().unwrap().1[shading as usize];
-        let mut composed = program::compose(head, program::STANDARD_PROGRAM, Stage::Traced, false);
-        composed
-            .source
-            .push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
+        let composed = kernel_module(head);
         let abi = self.program_abi();
         let scopes = OperationScopes::new(&self.device);
         let module = super::program_gpu::module(&abi, "GI receiver", &composed);
@@ -211,6 +218,20 @@ mod tests {
             source.push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
             let module = naga::front::wgsl::parse_str(&source)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+            let record = module
+                .types
+                .iter()
+                .find(|(_, t)| t.name.as_deref() == Some("GiPrepared"))
+                .unwrap()
+                .1;
+            let naga::TypeInner::Struct { members, span } = &record.inner else {
+                panic!("GI record must be a struct")
+            };
+            assert_eq!(*span, BYTES as u32);
+            assert_eq!(
+                members.iter().map(|m| m.offset).collect::<Vec<_>>(),
+                [0, 16, 32]
+            );
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
                 naga::valid::Capabilities::all(),

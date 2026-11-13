@@ -423,7 +423,7 @@ impl Renderer {
     /// The texture's current view: its own, or its resident levels.
     pub(crate) fn texture_view<'a>(&'a self, texture: &'a Texture) -> &'a wgpu::TextureView {
         match &texture.0.storage {
-            TextureStorage::Full(full) => &full.view,
+            TextureStorage::Full(full) => full.variance.get().map_or(&full.view, |v| &v.view),
             TextureStorage::Streamed(id) => &self.residency.entry(*id).resident.view,
         }
     }
