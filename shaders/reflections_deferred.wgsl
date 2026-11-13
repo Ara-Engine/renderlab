@@ -11,15 +11,21 @@
 @group(0) @binding(62) var rl_deferred_reflectance:texture_storage_2d<rgba16float,write>;
 @group(0) @binding(63) var rl_deferred_untraced:texture_storage_2d<rgba16float,write>;
 var<private> rl_reported:array<vec3<f32>,2>;
+// Every pixel cleared and written (diag: the port's fixture and identity tests read the whole
+// image); otherwise only glossy receivers write the reflectance, the composite reading only this
+// frame's listed pixels (src/program.rs deferred_api).
+const RL_DEFERRED_FULL:bool=true;
 fn reflection_report(reflectance:vec3<f32>, untraced:vec3<f32>) {
     rl_reported[0]=reflectance;
     rl_reported[1]=untraced;
 }
 fn rl_deferred_clear(pixel:vec2<i32>) {
+    if !RL_DEFERRED_FULL {return;}
     textureStore(rl_deferred_reflectance,pixel,vec4<f32>(0.0));
     textureStore(rl_deferred_untraced,pixel,vec4<f32>(0.0));
 }
 fn rl_deferred_store(pixel:vec2<i32>, world:vec3<f32>) {
+    if !RL_DEFERRED_FULL && !(rl_specular.w>0.0) {return;}
     let t=atmosphere_surface(vec3<f32>(1.0),world)-atmosphere_surface(vec3<f32>(0.0),world);
     textureStore(rl_deferred_reflectance,pixel,vec4<f32>(rl_reported[0]*t,rl_specular.w));
     textureStore(rl_deferred_untraced,pixel,vec4<f32>(rl_reported[1]*t,dot(rl_specular.rgb,RL_LUMA)));
