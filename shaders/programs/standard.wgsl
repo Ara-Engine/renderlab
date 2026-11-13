@@ -37,7 +37,9 @@ fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
 // reflectance leave, tinted by its base colour. At one (no interface: a plain alpha-blended
 // film, as Ara declares a glTF BLEND material) it is what the coverage leaves, untinted and
 // at every angle, as glTF, Unity and Unreal blend (`shade` blends the film's own light by
-// coverage to match).
+// coverage to match). FILMS declares exactly that for an IOR of one and no thickness, so the
+// engine may blend such draws in hardware (docs/api.md).
+const FILMS:bool=true;
 fn transmittance(s:Surface, input:SurfaceInput) -> vec3<f32> {
     let ior=transparent_ior(input.material);
     if ior<=1.0 { return vec3<f32>(1.0-s.alpha); }

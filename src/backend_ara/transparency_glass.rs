@@ -28,6 +28,20 @@ pub fn traced_program(material: &str) -> Result<Program> {
 fn traced_program_uncached(material: &str) -> Result<Program> {
     Ok(Program::new(Pass::TransparencyGlass, traced_source(material)?)?.checked())
 }
+/// A film's traced glass program (`transparency_gpu::film_source`): `fs_transparent` ends in
+/// what premultiplied blending adds over the colour behind, for `Glass::film`. None for a
+/// program that does not declare films (`crate::program::declares_films`).
+pub fn film_program(material: &str) -> Result<Option<Program>> {
+    if !crate::program::declares_films(material) {
+        return Ok(None);
+    }
+    static KEPT: Memo<[u8; 32], Program> = Memo::new();
+    KEPT.get(memo::digest(material), || {
+        let source = crate::renderer::transparency_gpu::film_source(&traced_source(material)?);
+        Ok(Program::new(Pass::TransparencyGlass, source)?.checked())
+    })
+    .map(Some)
+}
 /// The glass module on the ray-traced head (`traced_program`'s source).
 fn traced_source(material: &str) -> Result<String> {
     let head = crate::hardware_shadows::shader_source(
@@ -98,6 +112,19 @@ pub struct Glass {
 impl Glass {
     /// Compile caller-authored material WGSL with depth disabled, as on Renderlab.
     pub fn new(gpu: &mut GpuDevice, cache: &ShaderCache, program: &Program) -> Result<Self> {
+        Self::with_blend(gpu, cache, program, false)
+    }
+    /// A film's pipeline (`film_program`): the same raster, blended premultiplied over the
+    /// coverage samples Seed filled, so consecutive films draw into one seeded target.
+    pub fn film(gpu: &mut GpuDevice, cache: &ShaderCache, program: &Program) -> Result<Self> {
+        Self::with_blend(gpu, cache, program, true)
+    }
+    fn with_blend(
+        gpu: &mut GpuDevice,
+        cache: &ShaderCache,
+        program: &Program,
+        blend: bool,
+    ) -> Result<Self> {
         ensure!(
             program.pass() == Pass::TransparencyGlass,
             "wrong transparent program family"
@@ -106,7 +133,7 @@ impl Glass {
         state.depth_format = None;
         state.depth_test = false;
         state.depth_write = false;
-        state.blend = false;
+        state.blend = blend;
         state.raster.samples = SampleCount::Four;
         Ok(Self {
             pipeline: cache.program_state(gpu, program, state)?,
@@ -127,14 +154,23 @@ impl Glass {
             inputs.pass() == Pass::TransparencyGlass && inputs.contract() == self.contract,
             "incompatible transparent packet"
         );
+        // A film's module reads no colour behind (31); every glass module reads depth (32).
+        ensure!(
+            inputs
+                .image(InputKey {
+                    group: 0,
+                    binding: 32
+                })
+                .is_some(),
+            "transparent depth input missing"
+        );
         for binding in [31, 32] {
-            let image = inputs
-                .image(InputKey { group: 0, binding })
-                .ok_or_else(|| anyhow::anyhow!("transparent color/depth input missing"))?;
-            ensure!(
-                image.size == target.size(),
-                "transparent color/depth viewport mismatch"
-            );
+            if let Some(image) = inputs.image(InputKey { group: 0, binding }) {
+                ensure!(
+                    image.size == target.size(),
+                    "transparent color/depth viewport mismatch"
+                );
+            }
         }
         graph.require_initialized(Resource::Image(target.image()))?;
         let mut uses = inputs.uses();
@@ -157,6 +193,53 @@ impl Glass {
         rec.push(Command::EndPass);
         Ok(())
     }
+}
+
+/// A run of films (`Glass::film` pipelines with their packets and geometry) in one render pass
+/// over the seeded coverage samples, far to near. A pass per film reloaded and stored the
+/// whole four-sample target each time: about 2.4 ms a film at 720p on the M5.
+pub fn record_films(
+    graph: &mut Graph,
+    rec: &mut Recorder,
+    films: &[(&Glass, &HeapBindings<'_>, &MeshGeometry)],
+    target: &MsaaColor,
+) -> Result<()> {
+    graph.require_initialized(Resource::Image(target.image()))?;
+    let mut uses = Vec::new();
+    for (glass, inputs, geometry) in films {
+        ensure!(
+            inputs.pass() == Pass::TransparencyGlass && inputs.contract() == glass.contract,
+            "incompatible film packet"
+        );
+        let depth = inputs
+            .image(InputKey {
+                group: 0,
+                binding: 32,
+            })
+            .ok_or_else(|| anyhow::anyhow!("film depth input missing"))?;
+        ensure!(depth.size == target.size(), "film depth viewport mismatch");
+        uses.extend(inputs.uses());
+        uses.extend(geometry.raster_uses().map(super::graph::ResourceUse::from));
+    }
+    uses.push((Resource::Image(target.image()), Access::Color).into());
+    graph.node_uses(rec, &uses)?;
+    rec.push(Command::BeginPass("ara::TransparentFilms".into()));
+    rec.push(Command::BeginRendering {
+        colors: vec![Attachment {
+            image: target.image(),
+            clear: None,
+        }],
+        depth: None,
+        size: target.size(),
+    });
+    for (glass, inputs, geometry) in films {
+        rec.push(Command::Pipeline(glass.pipeline));
+        rec.push(Command::Constants(inputs.roots()));
+        geometry.draw(rec);
+    }
+    rec.push(Command::EndRendering);
+    rec.push(Command::EndPass);
+    Ok(())
 }
 
 /// The pane id raster's pipeline (`pane_id_program`): triangle ids into a four-sample R32Uint

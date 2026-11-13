@@ -31,6 +31,26 @@ fn validate(label: &str, source: &str) {
     .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
 }
 
+/// Films (`crate::program::declares_films`): the standard program declares them and the toon
+/// program does not; a film's glass module validates on both heads, reads no colour behind
+/// (binding 31) and returns premultiplied light with alpha one minus its transmittance.
+#[test]
+fn film_modules_validate_on_both_heads() {
+    let toon = include_str!("../shaders/programs/toon.wgsl");
+    assert!(crate::program::declares_films(crate::STANDARD_PROGRAM));
+    assert!(!crate::program::declares_films(toon));
+    let program = crate::STANDARD_PROGRAM;
+    let hardware = crate::hardware_shadows::shader_source(SOURCE, SampleCount::One).unwrap();
+    for (name, glass) in [
+        ("map", glass_source(SOURCE, false, program, false)),
+        ("rt", glass_source(&hardware, true, program, false)),
+    ] {
+        let film = film_source(&glass);
+        assert!(!film.contains("tp_behind(input.world") && film.contains(",1.0-passed.x);"));
+        validate(&format!("film {name}"), &film);
+    }
+}
+
 #[test]
 fn tp1_modules_validate() {
     let toon = include_str!("../shaders/programs/toon.wgsl");
@@ -298,6 +318,16 @@ fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
     let end = start + s[start..].find("\n}").unwrap() + 2;
     s.replace_range(start..end, "");
     s
+}
+
+/// A film draw's instances draw far to near along the view axis, whatever their order in the
+/// collection, and equally far instances keep their order.
+#[test]
+fn film_instances_draw_far_to_near() {
+    let at = |z: f32| Mat4::from_translation(Vec3::new(0., 0., z));
+    let models = [at(-2.), at(-8.), at(-5.), at(-8.)];
+    let order = far_to_near(&models, &[10, 11, 12, 13], Vec3::ZERO, -Vec3::Z);
+    assert_eq!(order, vec![11, 13, 12, 10]);
 }
 
 /// A glass draw's instances share a raster pass until one overlaps an instance already in it,
