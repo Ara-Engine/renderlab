@@ -150,7 +150,19 @@ fn with_shade_counts(mut source: String, late: bool) -> String {
 /// between successive exits split the floor; the full module is the last step.
 fn shade_cuts(source: String, late: bool) -> String {
     static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    let list = LIST.get_or_init(|| std::env::var("RENDERLAB_SHADE_CUT").unwrap_or_default());
+    let list = LIST.get_or_init(|| {
+        let list = std::env::var("RENDERLAB_SHADE_CUT").unwrap_or_default();
+        // A misspelt cut would measure the full module: say so once.
+        for name in list.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+            if !SHADE_CUT_NAMES.contains(&name) {
+                eprintln!(
+                    "RENDERLAB_SHADE_CUT: unknown cut `{name}`; known: {}",
+                    SHADE_CUT_NAMES.join(",")
+                );
+            }
+        }
+        list
+    });
     shade_cuts_named(source, late, list)
 }
 /// One `RENDERLAB_SHADE_CUT` cut: its name, the heads it may sit at (first match wins), its
