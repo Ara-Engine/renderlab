@@ -388,12 +388,13 @@ fn lean_modules_differ_only_by_their_early_returns() {
     let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
     for head in rt.iter().chain(&non_rt) {
         for list in [false, true] {
+            // As the wgpu worker (lean_gpu.rs) and the full pipelines compose them.
             let compose = |head: &str| {
-                if list {
+                crate::program::with_reflection_history(if list {
                     compose_list(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
                 } else {
                     compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
-                }
+                })
             };
             let full = compose(head);
             let lean = lean_variant(compose(head));
