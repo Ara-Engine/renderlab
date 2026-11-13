@@ -983,6 +983,11 @@ pub(crate) fn rl_deferred() -> bool {
 const DEFERRED_REPORT_STUB: &str =
     "fn reflection_report(reflectance:vec3<f32>, untraced:vec3<f32>) {}";
 const DEFERRED_API: &str = include_str!("../shaders/reflections_deferred.wgsl");
+/// The reflection block's flag that this module's program reports (shaders/reflections.wgsl).
+const DEFERRED_PROGRAM_FLAG: [&str; 2] = [
+    "const RL_DEFERRED_PROGRAM:bool=false;",
+    "const RL_DEFERRED_PROGRAM:bool=true;",
+];
 /// The traced entry's pixel, where a deferred module first clears its outputs.
 const DEFERRED_CLEAR_SEAM: &str =
     "let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);";
@@ -991,20 +996,28 @@ const DEFERRED_CLEAR_SEAM: &str =
 /// program's reflectance and untraced specular, and the entry writes them through the pixel's
 /// fog and aerial perspective, with the traced fraction (binding 62: reflectance rgb and w;
 /// 63: untraced specular). Every pixel the entry visits starts cleared, so misses and culled
-/// faces leave zero. The program's range moves with the removed report stub, which precedes
-/// it (temporal shading splits the module at the program's end).
+/// faces leave zero, and the reflection block's `RL_DEFERRED_PROGRAM` turns on (the composite
+/// takes this program's glossy lobes). The engine text before the program and the entry after it
+/// are edited apart, so the program's range follows the edits (temporal shading splits the
+/// module at the program's end).
 pub(crate) fn deferred_variant(composed: Composed) -> Composed {
     let Composed { source, program } = composed;
-    for seam in [DEFERRED_REPORT_STUB, DEFERRED_CLEAR_SEAM, VIEW_STORE_SEAM] {
-        assert_eq!(source.matches(seam).count(), 1, "deferred seam {seam}");
+    let (engine, rest) = source.split_at(program.start);
+    let (text, entry) = rest.split_at(program.len());
+    for (part, seam) in [
+        (engine, DEFERRED_REPORT_STUB),
+        (engine, DEFERRED_PROGRAM_FLAG[0]),
+        (entry, DEFERRED_CLEAR_SEAM),
+        (entry, VIEW_STORE_SEAM),
+    ] {
+        assert_eq!(part.matches(seam).count(), 1, "deferred seam {seam}");
     }
-    assert!(
-        source.find(DEFERRED_REPORT_STUB).unwrap() < program.start,
-        "the report stub precedes the program"
+    let engine = engine.replacen(DEFERRED_REPORT_STUB, "", 1).replacen(
+        DEFERRED_PROGRAM_FLAG[0],
+        DEFERRED_PROGRAM_FLAG[1],
+        1,
     );
-    let shift = DEFERRED_REPORT_STUB.len();
-    let mut source = source
-        .replacen(DEFERRED_REPORT_STUB, "", 1)
+    let entry = entry
         .replacen(
             DEFERRED_CLEAR_SEAM,
             &format!("{DEFERRED_CLEAR_SEAM}\n    rl_deferred_clear(pixel);"),
@@ -1015,10 +1028,10 @@ pub(crate) fn deferred_variant(composed: Composed) -> Composed {
             &format!("{VIEW_STORE_SEAM}\n    rl_deferred_store(pixel,input.world);"),
             1,
         );
-    source.push_str(DEFERRED_API);
+    let start = engine.len();
     Composed {
-        source,
-        program: program.start - shift..program.end - shift,
+        source: format!("{engine}{text}{entry}{DEFERRED_API}"),
+        program: start..start + text.len(),
     }
 }
 
@@ -1236,8 +1249,26 @@ pub(crate) fn declares_reflection(program: &str) -> bool {
 }
 // TP2 traces a separately rasterized glass lobe. Opaque hits still run their own
 // program, even when that program never asks for reflections of its own.
+/// Glass hits never report to the deferred reflection composite (their module keeps no camera
+/// entry, and its glossy lobes stay inline), so the program's `RL_DEFERRED` opt-in is renamed
+/// away: `compose` then leaves the module undeferred under RENDERLAB_RL_DEFERRED=1.
 pub(crate) fn glass_hit_program(program: &str) -> String {
-    let mut source = program.to_owned();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut source = String::with_capacity(program.len());
+    let mut rest = program;
+    while let Some(at) = rest.find("RL_DEFERRED") {
+        let end = at + "RL_DEFERRED".len();
+        let whole = (at == 0 || !ident(rest.as_bytes()[at - 1]))
+            && rest.as_bytes().get(end).is_none_or(|&b| !ident(b));
+        source.push_str(&rest[..at]);
+        source.push_str(if whole {
+            "RL_GLASS_UNDEFERRED"
+        } else {
+            "RL_DEFERRED"
+        });
+        rest = &rest[end..];
+    }
+    source.push_str(rest);
     if !declares(program, "fn", "reflection_lobe") {
         source.push_str("\nfn reflection_lobe(s:Surface,input:SurfaceInput)->SpecularLobe {return SpecularLobe(input.geometric,0.0,0.0);}\n");
     }

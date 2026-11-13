@@ -455,6 +455,23 @@ PLANS["comptime"] = [
 ]
 # One lease, one reference run: the composite's probe, pictures and timing in a single call.
 PLANS["comp4"] = PLANS["compprobe"] + PLANS["comppics"] + PLANS["comptime"]
+# comp4d: non-deferred programs untouched (default scene, switches on vs off, byte-identical),
+# the composite on the standard program (`--diag program=standard`) against inline, moving and
+# still, its probe and timing, then the reference again (a lease's timing counts only if both
+# references are within 10 %).
+STD = ["--diag", "program=standard"]
+PLANS["comp4d"] = (
+    [(f"p-{path}-ident-comp{v}", ["--path", path, "--fox", FOX, "--frames", "30", "--every", "1"], COMP(v))
+     for path in ("nonrt", "rt") for v in ("1", "0")]
+    + [(f"p-{path}-std{kind}-comp{v}", ["--path", path, "--fox", FOX, *STD, *still, "--frames", "40", "--every", "1"], COMP(v))
+       for path in ("nonrt", "rt") for kind, still in (("flight", []), ("still", ["--still"])) for v in ("1", "0")]
+    + [(f"q-{path}-std-comp", ["--path", path, "--fox", FOX, *STD, "--frames", "40"],
+        COMP("1") | {"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"comp-{path}-std.json")}) for path in ("nonrt", "rt")]
+    + [(f"t-{path}-{name}-comp{v}-{k}", ["--path", path, "--fox", FOX, *STD, *extra, "--frames", "60"], COMP(v))
+       for k in (1, 2) for path in ("nonrt", "rt") for name, extra in (("flight", []), ("night", ["--night-lanterns"]))
+       for v in ("1", "0") if k == 1 or name == "flight"]
+    + [("reference-end", [], {})]
+)
 # The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
 # flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,
 # paint 0.35), moving and still; `compare.py` crops the reflected edges, binary against binary.
