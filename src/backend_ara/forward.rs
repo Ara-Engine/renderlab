@@ -1013,6 +1013,9 @@ struct Kept {
     in_flight: std::collections::VecDeque<ara_gpu::GpuCompletion>,
     /// The newest finished frame's device span and passes, until a frame reports them.
     done: Option<(std::time::Duration, Vec<(String, f64)>)>,
+    /// `RENDERLAB_SHADE_COUNT=1` (measurement): each frame's shading counts, read back a
+    /// frame or two late through a ring so frames in flight never wait on them.
+    shade_counts: Option<super::readback_ring::ReadbackRing>,
 }
 /// A sequence of frames: what each hands to the next, and what stays on the GPU (the
 /// radiance cache, the reconstruction's history, named meshes with their bottom-level
@@ -1089,6 +1092,9 @@ impl Frames {
         }
         if let Some(repairs) = self.kept.repairs {
             repairs.retire(gpu)?;
+        }
+        if let Some(ring) = self.kept.shade_counts {
+            ring.retire(gpu)?;
         }
         for output in self.kept.outputs.into_iter().flatten() {
             gpu.retire(ara_gpu::Resource::Image(output.image))?;
@@ -1343,6 +1349,57 @@ fn parameter_layout(source: &str) -> Result<Option<crate::program::ParameterLayo
     Ok(layout)
 }
 
+/// RENDERLAB_SHADE_COUNT=1: marks this frame's ring slot submitted, then prints the newest
+/// completed frame's counts as one `shade_counts` line of name=value pairs (means a shaded
+/// pixel, and the 95th percentile of lights reaching visibility).
+fn report_shade_counts(
+    gpu: &mut GpuDevice,
+    ring: &mut Option<super::readback_ring::ReadbackRing>,
+    submitted: Option<ara_gpu::TimelinePoint>,
+) -> Result<()> {
+    let Some(ring) = ring.as_mut() else {
+        return Ok(());
+    };
+    if let Some(point) = submitted {
+        ring.submitted(point);
+    }
+    let Some((frame, bytes)) = ring.take(gpu)? else {
+        return Ok(());
+    };
+    let w: Vec<u64> = bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|b| u64::from(u32::from_le_bytes(*b)))
+        .collect();
+    let pixels = w[0].max(1) as f64;
+    let mean = |i: usize| w[i] as f64 / pixels;
+    let percentile = |from: usize, bins: usize, q: f64| {
+        let total: u64 = w[from..from + bins].iter().sum();
+        let mut seen = 0;
+        for (bin, n) in w[from..from + bins].iter().enumerate() {
+            seen += n;
+            if seen as f64 >= q * total as f64 {
+                return bin;
+            }
+        }
+        bins - 1
+    };
+    eprintln!(
+        "shade_counts frame={frame} pixels={} cluster_lights={:.2} cluster_lights_p95={} visibility={:.2} visibility_p95={} gi_finds={:.2} gi_decodes={:.2} gi_refine={:.3} gi_fill={:.3} gi_fallback={:.3}",
+        w[0],
+        mean(1),
+        percentile(48, 16, 0.95),
+        mean(2),
+        percentile(16, 32, 0.95),
+        mean(3),
+        mean(4),
+        mean(5),
+        mean(6),
+        mean(7)
+    );
+    Ok(())
+}
 /// One frame after `history`, over what the sequence keeps on the GPU; returns its
 /// images and what it hands to the next frame.
 fn frame(
@@ -1370,6 +1427,7 @@ fn frame(
         shown: shown_output,
         in_flight,
         done,
+        shade_counts,
     } = kept;
     // At most one earlier frame stays in flight while this one records.
     settle(gpu, in_flight, done, 1)?;
@@ -4092,6 +4150,21 @@ fn frame(
         )?),
         None => None,
     };
+    // RENDERLAB_SHADE_COUNT=1: this frame's counts into the ring (program.rs shade_count_on).
+    let counts_recorded = match buffers.get(&key(0, 80)).filter(|_| crate::program::shade_count_on()) {
+        Some(counts) => {
+            if shade_counts.is_none() {
+                *shade_counts = Some(super::readback_ring::ReadbackRing::new(
+                    gpu,
+                    (crate::program::SHADE_COUNT_WORDS * 4) as u64,
+                    3,
+                )?);
+            }
+            let ring = shade_counts.as_mut().context("the shade count ring")?;
+            ring.record(&mut graph, &mut rec, counts.buffer, 0, history.count + 1)?
+        }
+        None => false,
+    };
     let probe_read = match &probe {
         Some(probe) => Some(transfer::readback_buffer(
             gpu,
@@ -4546,7 +4619,8 @@ fn frame(
         gpu.begin_deferred_completion_on_current_queue()?;
         let submission = gpu.submit(rec.finish(), &[]);
         in_flight.push_back(gpu.end_deferred_completion()?);
-        submission?;
+        let point = submission?;
+        report_shade_counts(gpu, shade_counts, counts_recorded.then_some(point))?;
         settle(gpu, in_flight, done, if reads_back { 0 } else { 2 })?;
         if let Some((span, passes)) = done.take() {
             times.gpu = span;
@@ -4556,6 +4630,7 @@ fn frame(
         settle(gpu, in_flight, done, 0)?;
         let point = gpu.submit(rec.finish(), &[])?;
         gpu.wait(point)?;
+        report_shade_counts(gpu, shade_counts, counts_recorded.then_some(point))?;
         times.gpu = submitted.elapsed();
     }
     let finishing = std::time::Instant::now();

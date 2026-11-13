@@ -23,6 +23,7 @@ pub mod post_surface;
 pub mod primary_check;
 pub mod primary_shade;
 pub mod primary_trace;
+pub mod readback_ring;
 pub mod program_bins;
 pub mod reflection_hits;
 pub mod shader;

@@ -77,6 +77,53 @@ const REFLECTION_ENTRY_SEAM: &str =
 /// U-RTVIS: in the reflection resolve's pre-pass (`rl_prepass`, RENDERLAB_RL_RESOLVE_PASS=1) the
 /// entry stops after the receiver's reflection, before its indirect inputs and `shade`.
 const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    if rl_prepass() {return;}\n    rl_indirect_prepare(surface_input);\n";
+/// `RENDERLAB_SHADE_COUNT=1` (measurement only, off by default; the Ara port binds it): every
+/// shaded pixel adds what its shading did into `rl_shade_counts` (group 0 binding 80):
+/// pixels, lights in its cluster, lights that reached visibility (one shadow evaluation each),
+/// GI hash finds, GI cell decodes, finer-level refines, coarser fills and second-bin fallbacks,
+/// then per-pixel histograms of lights reaching visibility (32 bins) and of cluster lights
+/// (16 bins). The port reads it back through its frames-in-flight ring and prints one
+/// `shade_counts` line per completed frame. The atomics change the time: counts only.
+pub(crate) fn shade_count_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_SHADE_COUNT").is_ok_and(|v| v == "1"))
+}
+/// The counts buffer's u32 words (`shade_count_on`).
+pub(crate) const SHADE_COUNT_WORDS: usize = 64;
+const SHADE_COUNT_API: &str = "// RENDERLAB_SHADE_COUNT=1 (program.rs shade_count_on).\n@group(0) @binding(80) var<storage,read_write> rl_shade_counts:array<atomic<u32>,64>;\nvar<private> rl_sc_vis:u32;\nvar<private> rl_sc_finds:u32;\nvar<private> rl_sc_adds:u32;\nvar<private> rl_sc_refine:u32;\nvar<private> rl_sc_fill:u32;\nvar<private> rl_sc_fallback:u32;\nfn rl_shade_count() {\n    let lights=light_count();\n    atomicAdd(&rl_shade_counts[0],1u);atomicAdd(&rl_shade_counts[1],lights);atomicAdd(&rl_shade_counts[2],rl_sc_vis);\n    atomicAdd(&rl_shade_counts[3],rl_sc_finds);atomicAdd(&rl_shade_counts[4],rl_sc_adds);atomicAdd(&rl_shade_counts[5],rl_sc_refine);\n    atomicAdd(&rl_shade_counts[6],rl_sc_fill);atomicAdd(&rl_shade_counts[7],rl_sc_fallback);\n    atomicAdd(&rl_shade_counts[16u+min(rl_sc_vis,31u)],1u);atomicAdd(&rl_shade_counts[48u+min(lights,15u)],1u);\n}\n";
+/// Each counted site: the text it follows (or, for `before`, precedes) and the count it adds.
+const SHADE_COUNT_SITES: [(&str, &str, bool); 6] = [
+    ("    if s.attenuation==0.0 || !rl_term(RL_TERM_SHADOWS) { return 1.0; }\n", "    rl_sc_vis+=1u;\n", false),
+    ("fn gi_hot_find(key:vec2<u32>) -> GiHot {\n", "    rl_sc_finds+=1u;\n", false),
+    ("fn gi_hot_add(h:GiHot, w_in:f32) -> f32 {\n", "    rl_sc_adds+=1u;\n", false),
+    ("            sample_level=level-1u;\n", "            rl_sc_refine+=1u;\n", false),
+    ("        let c=gi_sample(world,level+1u,bin);\n", "        rl_sc_fill+=1u;\n", true),
+    ("    let s2=gi_sample_refined(world,pick.lo,gi_second_bin(source));\n", "    rl_sc_fallback+=1u;\n", true),
+];
+/// The traced entry's lit store: the pixel's counts go in after it (its `shade` has run).
+const SHADE_COUNT_STORE: &str = "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,id,size)));";
+/// `source` with the counts (`shade_count_on`): the sites and the API before the program
+/// (`late` false), the store's count after it (`late` true). Unchanged off, or where the
+/// module has no traced entry.
+fn with_shade_counts(mut source: String, late: bool) -> String {
+    if !shade_count_on() {
+        return source;
+    }
+    if late {
+        if !source.contains("fn rl_shade_count()") || !source.contains(SHADE_COUNT_STORE) {
+            return source;
+        }
+        return source.replacen(SHADE_COUNT_STORE, &format!("{SHADE_COUNT_STORE}rl_shade_count();"), 1);
+    }
+    for (site, count, before) in SHADE_COUNT_SITES {
+        if source.matches(site).count() == 1 {
+            let edit = if before { format!("{count}{site}") } else { format!("{site}{count}") };
+            source = source.replacen(site, &edit, 1);
+        }
+    }
+    source.push_str(SHADE_COUNT_API);
+    source
+}
 /// `RENDERLAB_SHADE_CUT` (measurement only, off by default): a comma list of engine inputs
 /// whose function returns at once in every composed module, to split shading's fixed cost:
 /// `gi_lookup` (the receiver's cache lookup: the open environment instead), `es1` (no dominant
@@ -861,6 +908,9 @@ fn compose_stage(
     }
     // Every cut's function precedes the program, so its range is taken after them.
     source = shade_cuts(source, false);
+    if traces {
+        source = with_shade_counts(source, false);
+    }
     let start = source.len();
     source.push_str(program);
     let program_range = start..source.len();
@@ -891,7 +941,7 @@ fn compose_stage(
         source.push_str(entry);
     }
     Composed {
-        source: shade_cuts(source, true),
+        source: with_shade_counts(shade_cuts(source, true), true),
         program: program_range,
     }
 }
