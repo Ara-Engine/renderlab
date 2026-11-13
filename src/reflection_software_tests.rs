@@ -445,7 +445,9 @@ fn light_bound_composes_and_validates() {
                 };
                 let edited = with_light_bound(full, bound);
                 let program = &edited.source[edited.program.clone()];
-                assert!(program.contains("if !rl_lb_skip(light,rl_lb_c,exposed)"));
+                assert!(program.contains("if rl_lb_skip(light,rl_lb_c,exposed) {"));
+                // A skipped light adds the contribution computed for its test, or nothing.
+                assert!(program.contains("if !RL_LB_DROP { exposed=min(exposed+rl_lb_c,"));
                 assert!(
                     program
                         .ends_with(&crate::STANDARD_PROGRAM[crate::STANDARD_PROGRAM.len() - 40..])
