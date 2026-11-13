@@ -113,6 +113,9 @@ struct Args {
     /// `--glass-crowd N`: N more panes of the glass draw, overlapping on screen (one draw of
     /// many overlapping instances, as Ara Outpost's foliage and fences). A frame-time gate case.
     glass_crowd: u32,
+    /// `--crowd-films`: the crowd's panes are films (IOR 1, no thickness: plain blended
+    /// coverage, as Outpost's fences, foliage and windows), one draw of their own.
+    crowd_films: bool,
     particles: bool,
     local_shadows: bool,
     reflections: bool,
@@ -156,6 +159,7 @@ impl Args {
             post: true,
             glass: true,
             glass_crowd: 0,
+            crowd_films: false,
             particles: true,
             local_shadows: true,
             reflections: true,
@@ -227,6 +231,7 @@ impl Args {
                 "--no-post" => a.post = false,
                 "--no-glass" => a.glass = false,
                 "--glass-crowd" => a.glass_crowd = value()?.parse()?,
+                "--crowd-films" => a.crowd_films = true,
                 "--no-particles" => a.particles = false,
                 "--no-local-shadows" => a.local_shadows = false,
                 "--no-reflections" => a.reflections = false,
@@ -742,12 +747,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 * Mat4::from_rotation_y(0.8)
                 * Mat4::from_scale(Vec3::new(2.2, 1.6, 0.04)),
         )?;
+        let crowd = if args.crowd_films {
+            engine.create_material(&MaterialDesc {
+                base_color: [0.35, 0.45, 0.3, 1.0],
+                roughness: 0.6,
+                transparency: Some(Transparency {
+                    opacity: 0.3,
+                    ior: 1.0,
+                    thickness: 0.0,
+                }),
+                ..Default::default()
+            })?
+        } else {
+            glass
+        };
         // Panes stepping back and sideways from the first, so each overlaps the ones before.
         for k in 1..=args.glass_crowd {
             let t = k as f32 * 0.07;
             engine.spawn(
                 cube,
-                glass,
+                crowd,
                 Mat4::from_translation(at(5.4 - t, 0.8 + 0.3 * (t * 3.0).sin(), 3.6 - t))
                     * Mat4::from_rotation_y(0.8)
                     * Mat4::from_scale(Vec3::new(2.2, 1.6, 0.04)),
