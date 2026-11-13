@@ -1171,10 +1171,10 @@ fn compose_stage(
         source.push_str(entry);
     }
     source = crate::renderer::primary_ray_gpu::gi_receiver_pass::shade_source(source, matches!(stage, Stage::Traced | Stage::TracedStreamed) && indirect_calls, specular);
-    Composed {
-        source,
-        program: program_range,
-    }
+    crate::renderer::primary_ray_gpu::light_vis_pass::apply(
+        Composed { source, program: program_range },
+        matches!(stage, Stage::Traced | Stage::TracedStreamed),
+    )
 }
 
 // ---- Deferred reflections (the program side; U-RTVIS's composite reads them) ----
