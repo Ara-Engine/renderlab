@@ -1,6 +1,5 @@
-//! Measurement split of RT primary visibility and reconstructed sun visibility.
-//! Reuses the exact receiver trace and the visibility-buffer sun kernel: no new
-//! estimator, direction sequence, history policy or material ABI.
+//! RT camera/sun visibility split and optional unanimous stop in relighting zones.
+//! Reuses the exact receiver trace, estimator, direction sequence and material ABI.
 use super::*;
 #[path = "sun_rays_probe.rs"]
 mod probe;
@@ -34,7 +33,7 @@ fn with_zone_stop(source: String) -> String {
 
 impl Renderer {
     /// The camera pass publishes corrected float32 receivers. The following sun
-    /// pass consumes those records with TR1's unchanged rotation and stopping rules.
+    /// pass consumes those records with TR1's rotation and guarded stopping rules.
     pub(in crate::renderer) fn encode_sun_split(
         &self,
         encoder: &mut wgpu::CommandEncoder,
