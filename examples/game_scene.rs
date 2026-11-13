@@ -1242,6 +1242,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             write_png(&args.out.join(format!("frame-{frame:03}.png")), &image)?;
         }
+        // The non-RT sun clipmap's ladder and its reach (receiver counts lag a frame or two).
+        let v = engine.renderer().virtual_shadow_stats();
+        let clipmap = serde_json::json!({
+            "levels": v.levels, "finest_level": v.finest_level, "skipped_levels": v.skipped_levels,
+            "nearest_receiver": v.nearest_receiver, "receivers": v.receivers,
+            "unplaced_receivers": v.unplaced_receivers, "nearest_unplaced": v.nearest_unplaced,
+        });
         frames.push(serde_json::json!({
             "frame": frame, "renderer_frame": report.frame.0, "cpu_render_ms": cpu_ms,
             "sun_hour": hour, "cpu_sun_update_ms": sun_update_ms,
@@ -1249,15 +1256,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "draws": report.scene.draws, "triangles": report.scene.triangles, "written": written,
             "rgba8_sha256": image_hash, "t": t, "eye": eye.to_array(), "target": target.to_array(),
             "hdr_sha256": hdr_hash, "view": &args.views[..1], "b_rgba8_sha256": second_hash,
-            // The non-RT sun clipmap's ladder and its reach (receiver counts lag a frame or two).
-            "clipmap": {
-                let v = engine.renderer().virtual_shadow_stats();
-                serde_json::json!({
-                    "levels": v.levels, "finest_level": v.finest_level, "skipped_levels": v.skipped_levels,
-                    "nearest_receiver": v.nearest_receiver, "receivers": v.receivers,
-                    "unplaced_receivers": v.unplaced_receivers, "nearest_unplaced": v.nearest_unplaced,
-                })
-            },
+            "clipmap": clipmap,
         }));
         last_camera = Some(camera);
         last_camera_b = Some(camera_b);
