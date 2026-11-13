@@ -1188,3 +1188,8 @@ Reflection hits trace a shadow ray for every shadowed local light. Glossy lobes 
 - RTX night lanterns: the worst frame has 0.01% of pixels over 8 codes (max 65), scattered over glossy crates and the arch, with both mirror spheres unchanged at 1:1.
 - RTX game flight: max 8 codes.
 - 0.35 gave the same picture at 8.62 ms.
+
+## Sun shadows stopped 40 m from the camera (U-FIXED, 2026-11-13; Ara #185 item 33)
+The engine's shipping sun request ended its cascades at 40 m (`[4, 12, 40]`, src/engine/settings.rs), and the final split end is every sun lookup's coverage limit: `fresh_estimate` (the traced path, all its budgets) and the Virtual, Disk, VSM, sunvis and cache lookups shade a receiver outside every cascade's camera-depth range as fully lit. Glint's decks shadowed the clouds within 40 m and its pylons, beyond it, did not. The settings comment claimed traced and Virtual visibility were not bounded by the splits; no doc or decision record repeated it.
+- Fix (t3/fixed-sun-range): a fourth cascade to 1 km, `[4, 12, 40, 1000]`; the near three keep their texels. A correctness fix (coordinator): it merges on its picture and records the frame-time rise per scene as shadows Unreal already draws. `RENDERLAB_SUN_SPLITS=4,12,40` restores the old set for A/B; `game_scene --diag far=1` / `far=move` are the repro.
+- 1 km is a first number. The durable form follows the view: the last end at the camera's far plane (`Camera::far()` exists) or the scene's extent from the camera, resolved per frame where the shadow frame is planned (shadow_gpu::plan_frame, shared by wgpu and the port). Not built: the request is a fixed setting today, and a per-frame end changes the API's "the final split is the coverage limit" contract for explicit requests.
