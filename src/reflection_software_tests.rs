@@ -39,7 +39,10 @@ fn software_reflection_composition() {
             assert!(!source.contains("(*stack)") && !source.contains("var nodes:"));
             // Interleaved: a warp's lanes at one depth on consecutive words (distinct banks).
             let interleaved = source.contains("rs_stack[sp*32u+rs_lane]");
-            assert_eq!(interleaved, crate::program::rs_stack_interleaved() == Some(true));
+            assert_eq!(
+                interleaved,
+                crate::program::rs_stack_interleaved() == Some(true)
+            );
         }
         if crate::program::rs_box_fma() {
             assert!(source.contains("let a=fma(lo,inv,-oi);let b=fma(hi,inv,-oi);"));

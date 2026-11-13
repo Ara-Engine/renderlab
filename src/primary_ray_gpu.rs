@@ -3439,8 +3439,15 @@ impl Renderer {
                     .collect::<Vec<_>>()
                     .join(",")
             };
-            line.push_str(&format!(" closest_visits_by2={}", bins(20, 64)));
-            line.push_str(&format!(" closest_instances={}", bins(84, 32)));
+            for (k, field) in ["empty_instances", "grazed_instances", "empty_blas_nodes"]
+                .into_iter()
+                .enumerate()
+            {
+                line.push_str(&format!(" closest_{field}={}", pair(20 + 2 * k)));
+            }
+            // Half-octave bins: 0, 1, 2, 3, 4-5, 6-7, 8-11, ..., 1536-2047, 2048-3071, 3072+.
+            line.push_str(&format!(" closest_visits_half_octave={}", bins(28, 24)));
+            line.push_str(&format!(" closest_instances={}", bins(52, 64)));
             eprintln!("{line}");
             counts.read.unmap();
         }
@@ -3507,7 +3514,9 @@ impl Renderer {
                 .iter()
                 .map(|&(slot, model, mesh)| (slot, model, &*meshes[mesh], bases[mesh]))
                 .collect();
-            let mut words = crate::reflection_software::instance_words(&rows);
+            // A repack's meshes may reuse the last pack's bases: only the same pack keeps boxes.
+            let kept: &[u32] = if same { &previous } else { &[] };
+            let mut words = crate::reflection_software::instance_words(&rows, kept);
             // Records of singular models stay reserved (and untraced).
             words.resize(
                 crate::reflection_software::HEADER_WORDS

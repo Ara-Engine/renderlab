@@ -40,6 +40,9 @@ pub(crate) struct Blas {
     root: u32,
     lo: [f32; 3],
     hi: [f32; 3],
+    /// `RENDERLAB_TLAS=tight`: the object boxes its instances' world boxes are made from
+    /// (`instance_bvh::hull`; empty without the switch).
+    hull: Vec<crate::instance_bvh::Bounds>,
 }
 
 impl Blas {
@@ -65,12 +68,19 @@ impl Blas {
         };
         let mut order: Vec<u32> = (0..count as u32).collect();
         let (root, lo, hi) = builder.subtree(&mut order);
+        let hull = if crate::instance_bvh::tlas().tight {
+            let points: Vec<[f32; 3]> = indices.iter().map(|&i| positions[i as usize]).collect();
+            crate::instance_bvh::hull(&points)
+        } else {
+            vec![]
+        };
         Some(Self {
             nodes: builder.nodes,
             triangles: builder.triangles,
             root,
             lo,
             hi,
+            hull,
         })
     }
     fn words(&self) -> usize {
@@ -184,10 +194,17 @@ pub(crate) fn pack(meshes: &[&Blas], instances: usize) -> Packed {
 }
 
 /// The header and instance records: per traced instance its placement slot, model, mesh and
-/// that mesh's bases from `pack`. Singular models are skipped (they draw nothing).
-pub(crate) fn instance_words(records: &[(u32, Mat4, &Blas, [u32; 2])]) -> Vec<u32> {
+/// that mesh's bases from `pack`. Singular models are skipped (they draw nothing). Under
+/// `RENDERLAB_TLAS=tight` a record's world box comes from its mesh's hull, and is copied from
+/// `previous` (the last frame's words for the same pack, or empty) when the record's rows and
+/// mesh words are unchanged, so only moved instances pay the hull's 128 corners.
+pub(crate) fn instance_words(
+    records: &[(u32, Mat4, &Blas, [u32; 2])],
+    previous: &[u32],
+) -> Vec<u32> {
     let mut out = vec![0u32; HEADER_WORDS];
     let mut count = 0u32;
+    let tight = crate::instance_bvh::tlas().tight;
     for &(slot, model, blas, [nodes, triangles]) in records {
         if model.determinant() == 0.0 {
             continue;
@@ -196,32 +213,40 @@ pub(crate) fn instance_words(records: &[(u32, Mat4, &Blas, [u32; 2])]) -> Vec<u3
         if !inverse.is_finite() {
             continue;
         }
+        let at = out.len();
         let rows = inverse.transpose();
         for r in 0..3 {
             out.extend(rows.col(r).to_array().map(f32::to_bits));
         }
-        let (lo, hi) = world_bounds(&model, blas.lo, blas.hi);
-        out.extend(lo.iter().chain(&hi).map(|v| v.to_bits()));
-        out.extend([nodes, triangles, blas.root, slot, 0, 0]);
+        let mesh = [nodes, triangles, blas.root, slot];
+        let kept = previous
+            .get(at..at + INSTANCE_WORDS)
+            .filter(|p| tight && p[..12] == out[at..at + 12] && p[18..22] == mesh)
+            .map(|p| p[12..18].to_vec());
+        match kept {
+            Some(words) => out.extend(words),
+            None => {
+                let (lo, hi) = if tight && !blas.hull.is_empty() {
+                    world_bounds(&model, &blas.hull)
+                } else {
+                    world_bounds(&model, &[(blas.lo, blas.hi)])
+                };
+                out.extend(lo.iter().chain(&hi).map(|v| v.to_bits()));
+            }
+        }
+        out.extend(mesh);
+        out.extend([0, 0]);
         count += 1;
     }
     out[0] = count;
     out
 }
 
-/// The world box of an object box under `model`, widened by a relative margin that covers
+/// The world box of object `boxes` under `model`, widened by a relative margin that covers
 /// the traversal's f32 transform of the ray (the BVH is tested in object space; this box
 /// only rejects whole instances).
-fn world_bounds(model: &Mat4, lo: [f32; 3], hi: [f32; 3]) -> ([f32; 3], [f32; 3]) {
-    let corners = (0..8).map(|i| {
-        let p = glam::Vec3::new(
-            if i & 1 != 0 { hi[0] } else { lo[0] },
-            if i & 2 != 0 { hi[1] } else { lo[1] },
-            if i & 4 != 0 { hi[2] } else { lo[2] },
-        );
-        model.transform_point3(p).to_array()
-    });
-    let (lo, hi) = bounds(corners);
+fn world_bounds(model: &Mat4, boxes: &[crate::instance_bvh::Bounds]) -> ([f32; 3], [f32; 3]) {
+    let (lo, hi) = crate::instance_bvh::world_box(model, boxes);
     let margin = (0..3)
         .map(|i| hi[i].abs().max(lo[i].abs()).max(hi[i] - lo[i]))
         .fold(0.0f32, f32::max)
@@ -230,12 +255,15 @@ fn world_bounds(model: &Mat4, lo: [f32; 3], hi: [f32; 3]) -> ([f32; 3], [f32; 3]
 }
 
 #[cfg(test)]
+#[path = "reflection_tlas_tests.rs"]
+mod tlas_tests;
+#[cfg(test)]
 mod tests {
     use super::*;
 
     /// CPU replay of the WGSL traversal (shaders/reflections_software.wgsl): the closest
     /// hit's (primitive, u, v, t) in object space.
-    fn closest(b: &Blas, o: [f32; 3], d: [f32; 3]) -> Option<(u32, f32, f32, f32)> {
+    pub(super) fn closest(b: &Blas, o: [f32; 3], d: [f32; 3]) -> Option<(u32, f32, f32, f32)> {
         let v =
             |w: &[u32], i: usize| -> [f32; 3] { std::array::from_fn(|k| f32::from_bits(w[i + k])) };
         let mut best: Option<(u32, f32, f32, f32)> = None;
@@ -519,10 +547,13 @@ mod tests {
             glam::Vec3::new(3.0, -1.0, 4.0),
         );
         let packed = pack(&[&b], 1);
-        let words = instance_words(&[
-            (5, model, &b, packed.bases[0]),
-            (6, Mat4::ZERO, &b, packed.bases[0]),
-        ]);
+        let words = instance_words(
+            &[
+                (5, model, &b, packed.bases[0]),
+                (6, Mat4::ZERO, &b, packed.bases[0]),
+            ],
+            &[],
+        );
         assert_eq!(words.len(), HEADER_WORDS + INSTANCE_WORDS);
         assert_eq!(words[0], 1);
         let r = &words[HEADER_WORDS..];

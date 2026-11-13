@@ -3290,7 +3290,7 @@ fn gpu_software_hit_normals_follow_instance_transforms() {
     );
     let (offsets, near, total) = gi_bvh::layout(&[&blas], 1);
     let mut words = gi_bvh::mesh_words(&[&blas], &offsets, &near, total);
-    let head = gi_bvh::instance_words(&[(model, &blas, offsets[0], 0)]).unwrap();
+    let head = gi_bvh::instance_words(&[(model, &blas, offsets[0], 0)], &[]).unwrap();
     words[..head.len()].copy_from_slice(&head);
     let normal = model
         .inverse()

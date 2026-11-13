@@ -595,15 +595,23 @@ pub(crate) fn rs_count_on() -> bool {
     *ON.get_or_init(|| std::env::var("RENDERLAB_RS_COUNT").is_ok_and(|v| v == "1"))
 }
 /// The counts buffer's u32 words: two sets (closest-hit rays, any-hit rays) of five carried
-/// (lo, hi) totals (rays, BLAS nodes, triangle tests, TLAS nodes, instances entered), then
-/// closest rays' node visits (BLAS + TLAS) in 64 bins of 2, then their instances entered in
-/// 32 bins of 1 (the last bins hold everything above).
+/// (lo, hi) totals (rays, BLAS nodes, triangle tests, TLAS nodes, instances entered); then for
+/// closest rays three more pairs: entered instances that end without improving the hit
+/// (empty), the empty ones whose walk stopped at the root (grazed: the world box let the ray
+/// in, the object-space root's children did not), and the BLAS nodes spent in empty
+/// instances; two pad words; closest rays' node visits (BLAS + TLAS) in 24 half-octave bins
+/// (0, 1, 2, 3, 4-5, 6-7, 8-11, ..., 1536-2047, 2048-3071, then 3072 and above); their instances
+/// entered in 64 bins of 1 (the last holds everything above).
 pub(crate) const RS_COUNT_WORDS: u32 = 116;
-const RS_COUNT_DECLARATIONS: &str = "// RENDERLAB_RS_COUNT=1: the frame's software-ray counts (program.rs RS_COUNT_WORDS).\n@group(0) @binding(69) var<storage,read_write> rs_counts:array<atomic<u32>,116>;\nvar<private> rs_c_blas:u32;\nvar<private> rs_c_tris:u32;\nvar<private> rs_c_tlas:u32;\nvar<private> rs_c_inst:u32;\n";
-const RS_COUNT_EDITS: [(&str, &str); 5] = [
+const RS_COUNT_DECLARATIONS: &str = "// RENDERLAB_RS_COUNT=1: the frame's software-ray counts (program.rs RS_COUNT_WORDS).\n@group(0) @binding(69) var<storage,read_write> rs_counts:array<atomic<u32>,116>;\nvar<private> rs_c_blas:u32;\nvar<private> rs_c_tris:u32;\nvar<private> rs_c_tlas:u32;\nvar<private> rs_c_inst:u32;\nvar<private> rs_c_empty:u32;\nvar<private> rs_c_grazed:u32;\nvar<private> rs_c_empty_blas:u32;\n// The half-octave bin of v: 0, 1, then two bins an octave.\nfn rs_half_octave(v:u32)->u32 {\n    if v<2u {return v;}\n    let lb=firstLeadingBit(v);\n    return min(2u*lb+((v>>(lb-1u))&1u),23u);\n}\n";
+const RS_COUNT_EDITS: [(&str, &str); 6] = [
     (
         "    let r0=rs_q(r);let r1=rs_q(r+1u);let r2=rs_q(r+2u);\n",
-        "    rs_c_inst+=1u;\n    let r0=rs_q(r);let r1=rs_q(r+1u);let r2=rs_q(r+2u);\n",
+        "    rs_c_inst+=1u;let rs_c_at=rs_c_blas;\n    let r0=rs_q(r);let r1=rs_q(r+1u);let r2=rs_q(r+2u);\n",
+    ),
+    (
+        "    return false;\n}\nconst RS_TOP_STACK",
+        "    if *best_i!=i {\n        rs_c_empty+=1u;rs_c_empty_blas+=rs_c_blas-rs_c_at;\n        if rs_c_blas-rs_c_at<=1u {rs_c_grazed+=1u;}\n    }\n    return false;\n}\nconst RS_TOP_STACK",
     ),
     (
         "                    let x=triangles+(start+k)*3u;\n",
@@ -624,7 +632,7 @@ const RS_COUNT_EDITS: [(&str, &str); 5] = [
 ];
 const RS_COUNT_WRAPPER: (&str, &str) = (
     "// R1's ray-query seams on the software path.\n",
-    "// RENDERLAB_RS_COUNT=1: total `v` into the carried (lo, hi) pair at word i.\nfn rs_add(i:u32,v:u32) {\n    if v==0u {return;}\n    let old=atomicAdd(&rs_counts[i],v);\n    if old+v<old {atomicAdd(&rs_counts[i+1u],1u);}\n}\n// The walk, counted: one ray's counts into the frame's totals as it returns.\nfn rs_trace(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32,any_hit:bool)->RsHit {\n    rs_c_blas=0u;rs_c_tris=0u;rs_c_tlas=0u;rs_c_inst=0u;\n    let hit=rs_trace_walk(origin,direction,tmin,tmax,any_hit);\n    let base=select(0u,10u,any_hit);\n    rs_add(base,1u);rs_add(base+2u,rs_c_blas);rs_add(base+4u,rs_c_tris);rs_add(base+6u,rs_c_tlas);rs_add(base+8u,rs_c_inst);\n    if !any_hit {\n        atomicAdd(&rs_counts[20u+min((rs_c_blas+rs_c_tlas)/2u,63u)],1u);\n        atomicAdd(&rs_counts[84u+min(rs_c_inst,31u)],1u);\n    }\n    return hit;\n}\n// R1's ray-query seams on the software path.\n",
+    "// RENDERLAB_RS_COUNT=1: total `v` into the carried (lo, hi) pair at word i.\nfn rs_add(i:u32,v:u32) {\n    if v==0u {return;}\n    let old=atomicAdd(&rs_counts[i],v);\n    if old+v<old {atomicAdd(&rs_counts[i+1u],1u);}\n}\n// The walk, counted: one ray's counts into the frame's totals as it returns.\nfn rs_trace(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32,any_hit:bool)->RsHit {\n    rs_c_blas=0u;rs_c_tris=0u;rs_c_tlas=0u;rs_c_inst=0u;rs_c_empty=0u;rs_c_grazed=0u;rs_c_empty_blas=0u;\n    let hit=rs_trace_walk(origin,direction,tmin,tmax,any_hit);\n    let base=select(0u,10u,any_hit);\n    rs_add(base,1u);rs_add(base+2u,rs_c_blas);rs_add(base+4u,rs_c_tris);rs_add(base+6u,rs_c_tlas);rs_add(base+8u,rs_c_inst);\n    if !any_hit {\n        rs_add(20u,rs_c_empty);rs_add(22u,rs_c_grazed);rs_add(24u,rs_c_empty_blas);\n        atomicAdd(&rs_counts[28u+rs_half_octave(rs_c_blas+rs_c_tlas)],1u);\n        atomicAdd(&rs_counts[52u+min(rs_c_inst,63u)],1u);\n    }\n    return hit;\n}\n// R1's ray-query seams on the software path.\n",
 );
 fn software_reflection_api() -> String {
     let mut api = format!("{SOFTWARE_REFLECTION_API}{REFLECTION_API}");

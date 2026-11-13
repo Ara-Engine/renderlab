@@ -2913,7 +2913,7 @@ impl Renderer {
             }
         }
         self.gi.stats.near_instances = records.iter().filter(|r| r.3 != 0).count() as u32;
-        let mut head = gi_bvh::instance_words(&records)?;
+        let mut head = gi_bvh::instance_words(&records, &p.head)?;
         for (i, words) in identities.iter().enumerate() {
             let r = gi_bvh::HEADER_WORDS + i * gi_bvh::INSTANCE_WORDS + 24;
             head[r..r + 3].copy_from_slice(words);

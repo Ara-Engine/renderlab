@@ -50,6 +50,9 @@ pub(crate) struct Blas {
     /// (`set_indirect_geometry`), so its triangles are the render triangles that sun visibility
     /// may test exactly (src/sunvis_s4.rs).
     pub exact: bool,
+    /// `RENDERLAB_TLAS=tight`: the object boxes its instances' world boxes are made from
+    /// (`instance_bvh::hull` over every level's positions; empty without the switch).
+    pub hull: Vec<crate::instance_bvh::Bounds>,
 }
 impl Blas {
     /// Level `level` of `bvh` (a zero-error regular build has one).
@@ -60,6 +63,12 @@ impl Blas {
             .ok_or(Error::InvalidInput("indirect geometry level"))?
             .root;
         let (lo, hi) = bounds(bvh.positions.iter().map(|p| [p[0], p[1], p[2]]));
+        let hull = if crate::instance_bvh::tlas().tight {
+            let points: Vec<[f32; 3]> = bvh.positions.iter().map(|p| [p[0], p[1], p[2]]).collect();
+            crate::instance_bvh::hull(&points)
+        } else {
+            vec![]
+        };
         Ok(Self {
             bvh,
             root,
@@ -67,6 +76,7 @@ impl Blas {
             hi,
             near: vec![],
             exact: false,
+            hull,
         })
     }
     fn words(&self) -> usize {
@@ -175,9 +185,13 @@ pub(crate) fn mesh_words(
 
 /// The header and instance records: per placement, world-to-object rows, the world
 /// bounds of its mesh, that mesh's array offsets and root, and its near-field mask base.
+/// Under `RENDERLAB_TLAS=tight` the bounds come from the mesh's hull, copied from `previous`
+/// (the same pack's last words, or empty) when the record's rows and mesh words are unchanged.
 pub(crate) fn instance_words(
     instances: &[(Mat4, &Blas, [u32; 4], u32)],
+    previous: &[u32],
 ) -> Result<Vec<u32>, Error> {
+    let tight = crate::instance_bvh::tlas().tight;
     let mut words = vec![0u32; HEADER_WORDS + instances.len() * INSTANCE_WORDS];
     words[0] = instances.len() as u32;
     for (i, (model, blas, offsets, near)) in instances.iter().enumerate() {
@@ -192,31 +206,31 @@ pub(crate) fn instance_words(
             words[r + row * 4..r + row * 4 + 4]
                 .copy_from_slice(&inverse.row(row).to_array().map(f32::to_bits));
         }
-        // World bounds from the eight transformed corners, rounded outward.
-        let mut lo = [f32::INFINITY; 3];
-        let mut hi = [f32::NEG_INFINITY; 3];
-        for c in 0..8 {
-            let p = glam::Vec3::from(std::array::from_fn(|a| {
-                if c & (1 << a) == 0 {
-                    blas.lo[a]
-                } else {
-                    blas.hi[a]
-                }
-            }));
-            let w = model.transform_point3(p);
-            for a in 0..3 {
-                lo[a] = lo[a].min(w[a]);
-                hi[a] = hi[a].max(w[a]);
-            }
+        words[r + 18..r + 22].copy_from_slice(offsets);
+        words[r + 22] = blas.root;
+        words[r + 23] = *near;
+        let kept = previous
+            .get(r..r + 24)
+            .filter(|p| tight && p[..12] == words[r..r + 12] && p[18..24] == words[r + 18..r + 24]);
+        if let Some(p) = kept {
+            let boxes = p[12..18].to_vec();
+            words[r + 12..r + 18].copy_from_slice(&boxes);
+            continue;
         }
+        // World bounds from the transformed corners (of the hull's boxes under `tight`, else
+        // the object box), rounded outward.
+        let object = [(blas.lo, blas.hi)];
+        let boxes = if tight && !blas.hull.is_empty() {
+            &blas.hull[..]
+        } else {
+            &object[..]
+        };
+        let (lo, hi) = crate::instance_bvh::world_box(model, boxes);
         for a in 0..3 {
             let pad = 1e-5 * (1.0 + lo[a].abs().max(hi[a].abs()));
             words[r + 12 + a] = (lo[a] - pad).to_bits();
             words[r + 15 + a] = (hi[a] + pad).to_bits();
         }
-        words[r + 18..r + 22].copy_from_slice(offsets);
-        words[r + 22] = blas.root;
-        words[r + 23] = *near;
     }
     Ok(words)
 }
@@ -346,10 +360,13 @@ mod tests {
         let moved = Mat4::from_translation(glam::Vec3::new(5.0, 1e-3, 0.0));
         assert_eq!(blas.near_base(&model, &near[0]), base as u32);
         assert_eq!(blas.near_base(&moved, &near[0]), 0);
-        let head = instance_words(&[
-            (model, &blas, offsets[0], base as u32),
-            (Mat4::IDENTITY, &blas, offsets[0], 0),
-        ])
+        let head = instance_words(
+            &[
+                (model, &blas, offsets[0], base as u32),
+                (Mat4::IDENTITY, &blas, offsets[0], 0),
+            ],
+            &[],
+        )
         .unwrap();
         assert_eq!(head[0], 2);
         assert_eq!(head[HEADER_WORDS + 23], base as u32);
@@ -362,7 +379,7 @@ mod tests {
             .map(|&w| f32::from_bits(w))
             .collect();
         assert!((row0[0] * 5.0 + row0[3]).abs() < 1e-6);
-        assert!(instance_words(&[(Mat4::ZERO, &blas, offsets[0], 0)]).is_err());
+        assert!(instance_words(&[(Mat4::ZERO, &blas, offsets[0], 0)], &[]).is_err());
         assert!(build(&[[0.0; 3]], &[0, 0]).is_err());
     }
 }
