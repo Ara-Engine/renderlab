@@ -422,6 +422,19 @@ PLANS["cutsplit"] = [
     for k in (1, 2) for path in ("nonrt", "rt")
     for name, extra in (("game", ["--diag", "cut=1"]), ("forest", ["--diag", "forest=1", "--diag", "cut=turn", *LOW]))
 ]
+# Item (2), the post-cut gather time budget with parent stand-ins (`RENDERLAB_GI`) against the
+# default (hit_gathers=1 already): frame times (`timing.py gi OUT`) and every frame's picture
+# around the cut (`compare.py PICS CROPS cutgi`).
+CUTGI = lambda v: {"RENDERLAB_GI": "cut_gather_ms=3;parent_standin=1"} if v == "1" else {}
+CUTGI_CLIPS = (("game", ["--diag", "cut=1"]), ("forest", ["--diag", "forest=1", "--diag", "cut=turn", *LOW]))
+PLANS["cutgi"] = [
+    (f"{name}-{path}-cutgi{v}", ["--path", path, *extra, "--frames", "40"], CUTGI(v) | {"RTVIS_GI_LOG": "1"})
+    for path in ("nonrt", "rt") for name, extra in CUTGI_CLIPS for v in ("1", "0")
+]
+PLANS["cutgipics"] = [
+    (f"p-{path}-{name}-cutgi{v}", ["--path", path, *extra, "--frames", "34", "--every", "1"], CUTGI(v))
+    for path in ("nonrt", "rt") for name, extra in CUTGI_CLIPS for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
