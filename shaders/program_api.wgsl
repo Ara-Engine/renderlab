@@ -138,6 +138,21 @@ fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {
     if lights[s.index].kind.w!=0u { return rl_local_shadow(lights[s.index],input.receiver,s.direction); }
     return hard_shadow(lights[s.index],input.receiver,s.direction);
 }
+// `light_visibility`, unless the engine's display bound (RENDERLAB_LIGHT_BOUND,
+// docs/design-light-bound.md) judges this light's unshadowed exposed contribution
+// `unshadowed`, with those already skipped at this receiver, too small to change a display
+// code against the receiver's running exposed sum `sum`: then it casts nothing and returns 1
+// (0 when skipped lights are dropped). Off, and wherever the bound does not apply (reflection
+// hits, untraced stages), it is exactly `light_visibility`. A program that keeps calling
+// `light_visibility` always traces.
+fn light_visibility_within(input:SurfaceInput, s:LightSample, unshadowed:vec3<f32>, sum:vec3<f32>) -> f32 {
+    if rl_lb_skip(s,unshadowed,sum) { return RL_LB_SKIPPED; }
+    return light_visibility(input,s);
+}
+// ---- light bound (program.rs with_light_bound replaces this block on traced stages) ----
+const RL_LB_SKIPPED:f32=1.0;
+fn rl_lb_skip(s:LightSample, c:vec3<f32>, sum:vec3<f32>) -> bool { return false; }
+// ---- end of light bound ----
 
 // Unexposed environment irradiance (lux) around n: the prepared diffuse field, or pi
 // times the constant environment.

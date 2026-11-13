@@ -1,6 +1,6 @@
 # Light bound: skipping shadow rays that cannot change a display code
 
-Status: a measurement switch, off by default (`RENDERLAB_LIGHT_BOUND`, program.rs `light_bound`). It is a bounded picture change, not exact, so it goes to Islam as a crop pair before it can become a default.
+Status: an engine switch, off by default (`RENDERLAB_LIGHT_BOUND`, program.rs `light_bound`), behind the program API's `light_visibility_within`. It is a bounded picture change, not exact, so it goes to Islam as a crop pair before it can become a default.
 
 ## Why
 
@@ -12,6 +12,15 @@ On the M5 port at 32 lanes (Ara b50edafbd, reflections ablated, frame 48), most 
 | Glint goal | 96k | 17.0% | 97.8% |
 
 Those counts used sRGB alone (no tone curve). Shadows cost 0.95 ms (Showcase) and 1.27 ms (Glint) of the shading pass there.
+
+## Where it lives
+
+The bound is in the engine, not in any one program's text. The program API has `light_visibility_within(input, light, unshadowed, sum)` beside `light_visibility`. A program passes the light's unshadowed exposed contribution and its running sum. The engine either casts the shadow ray as `light_visibility` does, or, when the bound allows, casts nothing and returns 1 (unshadowed) or 0 (drop).
+
+- The standard program uses it. While the bound is off, the contribution it computes for the call is unused and compiled away, so the picture is unchanged.
+- A program that keeps calling `light_visibility` (toon, any third-party program) always traces: it is bounded fully or not at all.
+- The skipped total is per receiver: `rl_lights_prepare` resets it.
+- The bound never applies while a reflection hit is shaded, inline or in the reflection pass's hit modules, because a hit's running sum is not the pixel's. It also never applies to the GI cache's cells, or to any untraced stage.
 
 ## The rule
 
@@ -37,7 +46,13 @@ The bound covers the tone curve and sRGB only. White balance (`white.rgb`, which
 
 In `sum` mode, a light whose c sits near the bound can be skipped on one frame and traced on the next, as the running sum moves. A skipped shadow would then flicker in and out. The 30-frame moving strip compares frame-to-frame change against the full picture's for exactly this. `black` mode does not depend on order.
 
+## Which lights the rows measure
+
+On the Renderlab path a mesh's `castShadows: false` is ignored today, so a lamp whose light sits inside its own glass or shade is shadowed by it and lights nothing (until `Engine::set_casts_shadows` lands). Where the measured scenes' local lights are such lamps (Showcase, Outpost's hangar), the rows below measure mostly fixture-blocked lights: c is their unshadowed contribution, but the full picture has them dark. Glint's four local lights are standalone point lights at the gates and the goal ("Gate light" ×3, "Goal light"), with no fixture mesh on their entities; whether any sits inside a gate's geometry has not been checked. The bound's worth has to be re-read on a scene whose lamps light.
+
 ## Measured on the M5 port (2026-11-13)
+
+The rows in this section were taken before the bound moved into the engine, while it still applied at inline reflection hits. They are superseded by the rows after it.
 
 Ara b50edafbd, 1280x720, 32 lanes, Ara's default frame, `PrimaryShadeList` ms, medians of 3 interleaved rounds. "Skipped" is the share of local shadowed lights tested whose ray was skipped (frame 48). The difference columns compare against the closest of three full captures, in display codes.
 
