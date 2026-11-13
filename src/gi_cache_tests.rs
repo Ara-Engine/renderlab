@@ -168,6 +168,7 @@ fn reference_scene(sv: &Sv, moved: &[(usize, Mat4)], specular: f32) -> reference
             .iter()
             .enumerate()
             .map(|(i, m)| reference::Instance {
+                casts_shadows: true,
                 mesh: i,
                 material: m.material,
                 transform: moved
@@ -2433,6 +2434,7 @@ fn quarry_reference(
                     (0..source.meshes[m].primitives.len()).map(move |k| (m, k, transform))
                 })
                 .map(|(m, k, transform)| reference::Instance {
+                    casts_shadows: true,
                     mesh: first[m] + k,
                     material: 0,
                     transform,

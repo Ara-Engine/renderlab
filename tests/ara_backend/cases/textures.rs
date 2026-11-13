@@ -114,6 +114,7 @@ pub(super) fn floor_in(
         programs: None,
         sky_map: None,
         skins: None,
+        casts: None,
         colour_lut: None,
         ids: None,
     };

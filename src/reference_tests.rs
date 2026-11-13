@@ -18,6 +18,7 @@ fn quad(half: f32, y: f32) -> Mesh {
 }
 fn instance(mesh: usize, material: usize) -> Instance {
     Instance {
+        casts_shadows: true,
         mesh,
         material,
         transform: Mat4::IDENTITY,
@@ -153,7 +154,9 @@ fn split_half_error_matches_its_definition() {
 
 #[test]
 fn shader_validates_with_ray_queries() {
-    let module = naga::front::wgsl::parse_str(SHADER).expect("WGSL parses");
+    // As the tracer builds it: the shadow ray's cull mask after the directives.
+    let module = naga::front::wgsl::parse_str(&crate::shadows::with_shadow_caster_mask(SHADER))
+        .expect("WGSL parses");
     naga::valid::Validator::new(
         naga::valid::ValidationFlags::all(),
         naga::valid::Capabilities::all(),
