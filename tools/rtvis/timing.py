@@ -426,13 +426,14 @@ PLANS["cutsplit"] = [
 # default (hit_gathers=1 already): frame times (`timing.py gi OUT`) and every frame's picture
 # around the cut (`compare.py PICS CROPS cutgi`).
 CUTGI = lambda v: {"RENDERLAB_GI": "cut_gather_ms=3;parent_standin=1"} if v == "1" else {}
-CUTGI_CLIPS = (("game", ["--diag", "cut=1"]), ("forest", ["--diag", "forest=1", "--diag", "cut=turn", *LOW]))
+CUTGI_CLIPS = (("game", ["--diag", "cut=1"]), ("forest", ["--diag", "forest=1", "--diag", "cut=turn", *LOW]),
+               ("respawn", ["--fox", FOX, "--diag", "hold=cut"]))
 PLANS["cutgi"] = [
     (f"{name}-{path}-cutgi{v}", ["--path", path, *extra, "--frames", "40"], CUTGI(v) | {"RTVIS_GI_LOG": "1"})
     for path in ("nonrt", "rt") for name, extra in CUTGI_CLIPS for v in ("1", "0")
 ]
 PLANS["cutgipics"] = [
-    (f"p-{path}-{name}-cutgi{v}", ["--path", path, *extra, "--frames", "34", "--every", "1"], CUTGI(v))
+    (f"p-{path}-{name}-cutgi{v}", ["--path", path, *extra, "--frames", "60" if name == "respawn" else "34", "--every", "1"], CUTGI(v))
     for path in ("nonrt", "rt") for name, extra in CUTGI_CLIPS for v in ("1", "0")
 ]
 PLANS["refillpics"] = [
