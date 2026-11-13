@@ -1912,7 +1912,7 @@ fn material_debug() -> Option<&'static str> {
         _ => None,
     })
 }
-/// The record's group 0 bindings: an rgba32uint and an rg32uint image of the frame's size.
+/// The record's group 0 bindings: two rgba32uint images of the frame's size.
 pub(crate) const MATERIAL_RECORD_BINDINGS: [u32; 2] = [75, 78];
 /// Which side of the record a module is: the material pass writes it, shading reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1922,15 +1922,19 @@ pub(crate) enum MaterialRole {
 }
 /// The entry's own evaluation of the program's surface, which the variants replace.
 const MATERIAL_SEAM: &str = "    let surface_output=surface(surface_input);\n";
-/// The record's packing, shared by both roles (24 bytes a pixel):
-/// - word 0 (rgba32uint): x the shading normal (octahedral, 2 x unorm16); y the base colour
-///   (3 x unorm10); z coverage, metallic and MQ2's view share (3 x unorm8, the top byte spare);
-///   w the emission times this frame's exposure (rgb9e5: unexposed emitters such as
-///   Glint's 40,000-nit glow pass its 65,408 ceiling);
-/// - word 1 (rg32uint): x the receiver's geometric normal (octahedral); y the lighting model
-///   (low 8 bits), MQ2's lobe alpha (unorm8 at bit 8) and the roughness (unorm16 at bit 16:
-///   glossy reflections move visibly with 8 bits near zero). Model 255 marks a pixel whose
-///   program keeps its own `shade`.
+/// The record's packing, shared by both roles (32 bytes a pixel):
+/// - word 0 (rgba32uint): x the shading normal (octahedral, 2 x unorm16); y the base colour's
+///   red and green and z's low half its blue (3 x unorm16: 10 bits moved every pixel of a
+///   flat floor by an f16 step, and turned a texture's decode difference of a hair into a
+///   whole step); z's high half coverage and metallic (2 x unorm8); w the emission times this
+///   frame's exposure (rgb9e5: unexposed emitters such as Glint's 40,000-nit glow pass its
+///   65,408 ceiling);
+/// - word 1 (rgba32uint): x the receiver's geometric normal (octahedral); y the lighting model
+///   (low 8 bits), MQ2's lobe alpha (unorm8 at bit 8) and the roughness (unorm16 at bit 16,
+///   rounded up so the decoded value is never below the evaluated one: a roughness authored at
+///   a threshold such as `LocalShadows::unshadowed_hits_from` stays on its side); z MQ2's view
+///   share (unorm16, high half spare); w spare. Model 255 marks a pixel whose program keeps
+///   its own `shade`.
 const MATERIAL_PACKING: &str = r#"// RENDERLAB_MATERIAL_PASS (program.rs material_pass_on): the material record's packing.
 fn rl_mr_oct(n:vec3<f32>)->u32 {
     let a=n/max(abs(n.x)+abs(n.y)+abs(n.z),1e-30);
@@ -1945,12 +1949,28 @@ fn rl_mr_oct_decode(u:u32)->vec3<f32> {
     n=vec3<f32>(n.x+select(t,-t,n.x>=0.0),n.y+select(t,-t,n.y>=0.0),n.z);
     return normalize(n);
 }
-fn rl_mr_unorm10(c:vec3<f32>)->u32 {
-    let q=vec3<u32>(round(clamp(c,vec3<f32>(0.0),vec3<f32>(1.0))*1023.0));
-    return q.x|(q.y<<10u)|(q.z<<20u);
+fn rl_mr_unorm16(v:f32)->u32 { return u32(round(clamp(v,0.0,1.0)*65535.0)); }
+// Decoding multiplies by the constant's reciprocal, in both modules alike, so the upward
+// rounding below checks itself against the decode the reader will run.
+fn rl_mr_unorm16_decode(q:u32)->f32 { return f32(q&65535u)*(1.0/65535.0); }
+fn rl_mr_unorm16_up(v:f32)->u32 {
+    let c=clamp(v,0.0,1.0);
+    var q=u32(ceil(c*65535.0));
+    if rl_mr_unorm16_decode(q)<c { q=min(q+1u,65535u); }
+    return q;
 }
-fn rl_mr_unorm10_decode(u:u32)->vec3<f32> {
-    return vec3<f32>(f32(u&1023u),f32((u>>10u)&1023u),f32((u>>20u)&1023u))/1023.0;
+struct RlMaterialWords { a:vec4<u32>, b:vec4<u32> };
+fn rl_mr_pack(m:MaterialRecord,input:SurfaceInput)->RlMaterialWords {
+    let model=(m.model&255u)|(u32(round(clamp(m.view_alpha,0.0,1.0)*255.0))<<8u)|(rl_mr_unorm16_up(m.roughness)<<16u);
+    let scalars=pack4x8unorm(vec4<f32>(0.0,0.0,m.alpha,m.metallic))&0xffff0000u;
+    return RlMaterialWords(
+        vec4<u32>(rl_mr_oct(m.normal),rl_mr_unorm16(m.base.x)|(rl_mr_unorm16(m.base.y)<<16u),rl_mr_unorm16(m.base.z)|scalars,rl_mr_rgb9e5(m.emission*lighting.exposure)),
+        vec4<u32>(rl_mr_oct(input.geometric),model,rl_mr_unorm16(m.view_share),0u));
+}
+fn rl_mr_unpack(a:vec4<u32>,b:vec4<u32>)->MaterialRecord {
+    let scalars=unpack4x8unorm(a.z);
+    let base=vec3<f32>(rl_mr_unorm16_decode(a.y),rl_mr_unorm16_decode(a.y>>16u),rl_mr_unorm16_decode(a.z));
+    return MaterialRecord(rl_mr_oct_decode(a.x),base,scalars.z,scalars.w,rl_mr_unorm16_decode(b.y>>16u),rl_mr_rgb9e5_decode(a.w)/lighting.exposure,rl_mr_unorm16_decode(b.z),f32((b.y>>8u)&255u)/255.0,b.y&255u);
 }
 // Shared-exponent rgb9e5 (as the D3D/Vulkan format), for emission.
 fn rl_mr_rgb9e5(c:vec3<f32>)->u32 {
@@ -1970,22 +1990,18 @@ fn rl_mr_rgb9e5_decode(u:u32)->vec3<f32> {
 "#;
 /// The writing side: the images and the store.
 const MATERIAL_WRITE: &str = r#"@group(0) @binding(75) var rl_material0:texture_storage_2d<rgba32uint,write>;
-@group(0) @binding(78) var rl_material1:texture_storage_2d<rg32uint,write>;
+@group(0) @binding(78) var rl_material1:texture_storage_2d<rgba32uint,write>;
 fn rl_material_store(pixel:vec2<i32>,m:MaterialRecord,input:SurfaceInput) {
-    let scalars=pack4x8unorm(vec4<f32>(m.alpha,m.metallic,m.view_share,0.0));
-    textureStore(rl_material0,pixel,vec4<u32>(rl_mr_oct(m.normal),rl_mr_unorm10(m.base),scalars,rl_mr_rgb9e5(m.emission*lighting.exposure)));
-    let model=(m.model&255u)|(u32(round(clamp(m.view_alpha,0.0,1.0)*255.0))<<8u)|(u32(round(clamp(m.roughness,0.0,1.0)*65535.0))<<16u);
-    textureStore(rl_material1,pixel,vec4<u32>(rl_mr_oct(input.geometric),model,0u,0u));
+    let w=rl_mr_pack(m,input);
+    textureStore(rl_material0,pixel,w.a);
+    textureStore(rl_material1,pixel,w.b);
 }
 "#;
 /// The reading side: the images and the load.
 const MATERIAL_READ: &str = r#"@group(0) @binding(75) var rl_material0:texture_2d<u32>;
 @group(0) @binding(78) var rl_material1:texture_2d<u32>;
 fn rl_material_load(pixel:vec2<i32>)->MaterialRecord {
-    let a=textureLoad(rl_material0,pixel,0);
-    let b=textureLoad(rl_material1,pixel,0);
-    let scalars=unpack4x8unorm(a.z);
-    return MaterialRecord(rl_mr_oct_decode(a.x),rl_mr_unorm10_decode(a.y),scalars.x,scalars.y,f32(b.y>>16u)/65535.0,rl_mr_rgb9e5_decode(a.w)/lighting.exposure,scalars.z,f32((b.y>>8u)&255u)/255.0,b.y&255u);
+    return rl_mr_unpack(textureLoad(rl_material0,pixel,0),textureLoad(rl_material1,pixel,0));
 }
 "#;
 /// The material pass's (`Write`) or the record-reading shading's (`Read`) variant of a traced
@@ -2125,11 +2141,9 @@ const MATERIAL_PROBE_LEAN: [(&str, &str); 3] = [
 ];
 /// `nostore`: `rl_material_store`'s packing, stored only on a hash it never takes.
 const MATERIAL_PROBE_STORE: &str = r#"fn rl_material_probe_store(pixel:vec2<i32>,m:MaterialRecord,input:SurfaceInput) {
-    let scalars=pack4x8unorm(vec4<f32>(m.alpha,m.metallic,m.view_share,0.0));
-    let a=vec4<u32>(rl_mr_oct(m.normal),rl_mr_unorm10(m.base),scalars,rl_mr_rgb9e5(m.emission*lighting.exposure));
-    let model=(m.model&255u)|(u32(round(clamp(m.view_alpha,0.0,1.0)*255.0))<<8u)|(u32(round(clamp(m.roughness,0.0,1.0)*65535.0))<<16u);
-    let b=vec2<u32>(rl_mr_oct(input.geometric),model);
-    if (a.x^(a.y*3u)^(a.z*5u)^(a.w*7u)^(b.x*11u)^(b.y*13u))==0x9e3779b9u { textureStore(rl_material0,pixel,a); textureStore(rl_material1,pixel,vec4<u32>(b,0u,0u)); }
+    let w=rl_mr_pack(m,input);
+    let h=w.a^(w.b*vec4<u32>(3u,5u,7u,11u));
+    if (h.x^h.y^h.z^h.w)==0x9e3779b9u { textureStore(rl_material0,pixel,w.a); textureStore(rl_material1,pixel,w.b); }
 }
 "#;
 // ---- end of material pass ----

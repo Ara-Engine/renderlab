@@ -546,8 +546,8 @@ struct Deferred {
     scene: [u32; 4],
     /// That rectangle widened to whole trace tiles, as the region record holds it.
     region_rect: [u32; 4],
-    /// RENDERLAB_MATERIAL_PASS: the material record (program.rs MATERIAL_RECORD_BINDINGS), an
-    /// rgba32uint and an rg32uint image of the frame's size; None while the pass is off.
+    /// RENDERLAB_MATERIAL_PASS: the material record (program.rs MATERIAL_RECORD_BINDINGS), a
+    /// pair of rgba32uint images of the frame's size; None while the pass is off.
     material: Option<[Texture; 2]>,
     epsilon: Texture,
     frame: StorageBuffer,
@@ -2773,7 +2773,7 @@ fn frame(
             material: if material_on {
                 Some([
                     Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
-                    Texture::new(gpu, size, Format::Rg32Uint, true, false)?,
+                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
                 ])
             } else {
                 None
