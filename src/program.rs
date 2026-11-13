@@ -844,6 +844,7 @@ fn compose_stage(
     } else {
         source.push_str(entry);
     }
+    source = crate::renderer::primary_ray_gpu::gi_receiver_pass::shade_source(source, matches!(stage, Stage::Traced | Stage::TracedStreamed) && indirect_calls, specular);
     Composed {
         source,
         program: program_range,
