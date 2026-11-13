@@ -1322,6 +1322,30 @@ pub(crate) fn glass_hit_program(program: &str) -> String {
     source.push_str("\nfn rl_glass_requires_incident(input:SurfaceInput)->vec4<f32> {return specular_incident(input);}\n");
     source
 }
+/// Whether a shading program's own source (as installed, before compose) calls the program
+/// API's normal variance: `material_normal_variance(`, `filtered_roughness(` or
+/// `filtered_brdf(`, as whole identifiers, outside `//` comments and not as their `fn`
+/// definitions. A BC5 normal map has its variance layer only while an installed program does
+/// (src/normal_variance_lazy.rs). Shared by the wgpu renderer and the ara-gpu port; it errs
+/// towards true, which only costs a layer.
+pub(crate) fn reads_normal_variance(program_source: &str) -> bool {
+    const NAMES: [&str; 3] = [
+        "material_normal_variance",
+        "filtered_roughness",
+        "filtered_brdf",
+    ];
+    program_source.lines().any(|line| {
+        let code = line.split("//").next().unwrap_or("");
+        NAMES.iter().any(|name| {
+            code.match_indices(name).any(|(at, _)| {
+                let before = code[..at].chars().next_back();
+                let after = code[at + name.len()..].trim_start();
+                let word = before.is_none_or(|c| !(c.is_alphanumeric() || c == '_'));
+                word && after.starts_with('(') && !code[..at].trim_end().ends_with("fn")
+            })
+        })
+    })
+}
 pub(crate) fn declares_parameters(program: &str) -> bool {
     declares(program, "struct", "Parameters")
 }
@@ -1626,6 +1650,51 @@ pub(crate) fn standard_returning(value: &str) -> String {
 "
         ),
     )
+}
+
+#[cfg(test)]
+#[test]
+fn reads_normal_variance_finds_calls_only() {
+    assert!(!reads_normal_variance(include_str!(
+        "../shaders/programs/standard.wgsl"
+    )));
+    assert!(!reads_normal_variance(include_str!(
+        "../shaders/programs/toon.wgsl"
+    )));
+    for name in [
+        "material_normal_variance",
+        "filtered_roughness",
+        "filtered_brdf",
+    ] {
+        assert!(
+            reads_normal_variance(&format!("    let v={name}(input);")),
+            "{name}"
+        );
+        assert!(
+            reads_normal_variance(&format!("let v = {name} (input);")),
+            "{name}"
+        );
+        assert!(
+            !reads_normal_variance(&format!("// let v={name}(input);")),
+            "{name}"
+        );
+        assert!(
+            !reads_normal_variance(&format!("fn {name}(input:SurfaceInput) -> f32 {{")),
+            "{name}"
+        );
+        assert!(
+            !reads_normal_variance(&format!("let v=my_{name}(input);")),
+            "{name}"
+        );
+        assert!(
+            !reads_normal_variance(&format!("let {name}_scale=1.0;")),
+            "{name}"
+        );
+    }
+    // The API's own definitions: a composed module would always match a plain search.
+    assert!(!reads_normal_variance(include_str!(
+        "../shaders/program_api.wgsl"
+    )));
 }
 
 #[cfg(test)]
