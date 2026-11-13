@@ -18,10 +18,28 @@ const LIST_TILE: [u32; 2] = [4, 4];
 const INFO_BYTES: u64 = 16 + 4 * TRACED_DRAWS as u64;
 /// Standalone binning shares the composed shading draw-table ABI.
 pub(crate) fn bin_source() -> String {
-    format!(
-        "const PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}",
-        include_str!("../shaders/program_bins.wgsl")
-    )
+    bin_source_for(crate::program::list_entries_per_group())
+}
+/// `bin_source` for list shading of `per` entries per workgroup: a list of n entries
+/// dispatches ceil(n / per) workgroups.
+pub(crate) fn bin_source_for(per: u32) -> String {
+    let source = include_str!("../shaders/program_bins.wgsl");
+    const ARGS: &str = "    atomicMax(&bins_args[slot*4u],min(at+1u,BINS_ROW));\n    atomicMax(&bins_args[slot*4u+1u],at/BINS_ROW+1u);\n";
+    assert_eq!(
+        source.matches(ARGS).count(),
+        1,
+        "the binning kernel's dispatch arguments"
+    );
+    let source = if per == 1 {
+        source.to_owned()
+    } else {
+        source.replacen(
+            ARGS,
+            &format!("    atomicMax(&bins_args[slot*4u],min(at/{per}u+1u,BINS_ROW));\n    atomicMax(&bins_args[slot*4u+1u],(at/{per}u)/BINS_ROW+1u);\n"),
+            1,
+        )
+    };
+    format!("const PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{source}")
 }
 
 /// Indirect arguments per slot: x, y, z and a pad word.
@@ -490,7 +508,10 @@ mod tests {
             .validate(&module)
             .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
         };
-        validate("bins", &bin_source());
+        // RENDERLAB_LIST_LANES 16, 32 and 64.
+        for per in [1, 2, 4] {
+            validate(&format!("bins {per}"), &bin_source_for(per));
+        }
         let prelude = include_str!("../shaders/scene.wgsl");
         let heads = shading_heads(prelude).unwrap();
         for (label, program) in [
@@ -506,6 +527,22 @@ mod tests {
                     let list = crate::program::compose_list(head, program, stage, parameters);
                     assert_eq!(&list.source[list.program.clone()], program);
                     validate(&format!("{label} {i} {stage:?}"), &list.source);
+                    let entry =
+                        crate::program::list_entry(crate::program::list_entries_per_group());
+                    // The other widths than the environment's (RENDERLAB_LIST_LANES).
+                    for per in [1, 2, 4]
+                        .into_iter()
+                        .filter(|&per| per != crate::program::list_entries_per_group())
+                    {
+                        let wide =
+                            list.source
+                                .replacen(&entry, &crate::program::list_entry(per), 1);
+                        assert_ne!(wide, list.source);
+                        validate(
+                            &format!("{label} {i} {stage:?} {per} entries a group"),
+                            &wide,
+                        );
+                    }
                     let single = crate::program::compose(head, program, stage, parameters).source;
                     assert!(list.source.contains("fn primary_shade_list("));
                     assert!(!single.contains("primary_shade_list"));
