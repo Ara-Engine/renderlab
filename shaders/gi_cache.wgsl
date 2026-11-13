@@ -1675,7 +1675,7 @@ fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
     for(var i=id.x;i<count;i+=groups.x*64u) {
         let slot=atomicLoad(&gi_work[gi_frame.bounce.w+i]);
         let cold=gi_cold(slot);
-        gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_SHADE;
+        gi_table[cold+GI_C_STATE]=(gi_table[cold+GI_C_STATE]&~GI_SHADE)|GI_LIT;
         let q=gi_point(cold);
         let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
         let edge=gi_edge(gi_table[cold+GI_C_DEF]&0xffu);

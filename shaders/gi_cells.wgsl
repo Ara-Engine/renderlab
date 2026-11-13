@@ -202,7 +202,12 @@ const GI_GATHER_MASK:u32=0x7000u;
 const GI_RETRY:u32=512u;
 // Made for a secondary cell's gather: requests nothing (GI_SECONDARY is set too).
 const GI_TERTIARY:u32=1024u;
-const GI_KEEP:u32=GI_SPLIT|GI_SHADE|GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_RETRY|GI_GATHER_MASK;
+// gi_light has written the light bits (GI_C_LIGHTS) from the current query point: set there,
+// absent on a new cell and dropped with a new query point (re-probe, orphan), kept across
+// re-traces of the same point. Reflection hits that read the bits need it
+// (reflection_hit_visibility.wgsl).
+const GI_LIT:u32=2048u;
+const GI_KEEP:u32=GI_SPLIT|GI_SHADE|GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_RETRY|GI_GATHER_MASK|GI_LIT;
 
 // Each module defines gi_word(i), the table's word i: the kernels index a u32 array,
 // shading a vec4 array (gi_api.wgsl) so records load whole.

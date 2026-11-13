@@ -386,6 +386,55 @@ const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 5] = [
 /// perceptual roughness (0-1); off, every module keeps the stub and its hits shade as before.
 pub(crate) const CACHE_HITS: &str = include_str!("../shaders/reflection_cache_hits.wgsl");
 pub(crate) const CACHE_HITS_STUB: &str = "fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> { return vec4<f32>(0.0); }\n";
+/// Reflection-hit light visibility from the radiance cache's cells
+/// (shaders/reflection_hit_visibility.wgsl): hits from lobes at least `rough` read each shadowed
+/// light's visibility bit from their cell instead of tracing; with `cone`, only where the ray
+/// cone covers the hit's pixel-level cell. Off unless `RENDERLAB_RL_HIT_VIS=ROUGH[,cone]`
+/// names it; off, nothing is composed and hits trace as before. Measurement (S4).
+const HIT_VISIBILITY: &str = include_str!("../shaders/reflection_hit_visibility.wgsl");
+const HIT_VISIBILITY_FN: &str = "fn rl_hit_vis(index:u32) -> f32 {";
+#[derive(Clone, Copy)]
+struct HitVisibility {
+    rough: f32,
+    cone: bool,
+}
+fn hit_visibility() -> Option<HitVisibility> {
+    static VIS: std::sync::OnceLock<Option<HitVisibility>> = std::sync::OnceLock::new();
+    *VIS.get_or_init(|| {
+        let value = std::env::var("RENDERLAB_RL_HIT_VIS").ok()?;
+        let (rough, cone) = match value.split_once(',') {
+            Some((rough, "cone")) => (rough, true),
+            Some(_) => return None,
+            None => (value.as_str(), false),
+        };
+        let rough = rough.trim().parse::<f32>().ok().filter(|r| (0.0..=1.0).contains(r))?;
+        Some(HitVisibility { rough, cone })
+    })
+}
+/// The two seams: each hit finds its cell after its lights (both trace paths keep that line),
+/// and `light_visibility` reads the cell's bit for a light a hit would trace (a shadowed local
+/// light, or a light whose hard ray rl_hit_shadow traces), ahead of the rough-hit skip.
+fn with_hit_visibility(source: String) -> String {
+    const HIT: &str = "                rl_hit_lights_prepare(h.input.world);\n";
+    const VISIBILITY: &str = "    if lights[s.index].kind.w!=0u || lights[s.index].kind.z!=0u {\n        if rl_reflection_hit { let cached=rl_hit_vis(s.index); if cached>=0.0 { return cached; } }\n    }\n";
+    assert_eq!(
+        source.matches(HIT).count(),
+        1,
+        "RENDERLAB_RL_HIT_VIS hit seam"
+    );
+    assert_eq!(
+        source.matches(HIT_LOCAL_UNSHADOWED).count(),
+        1,
+        "RENDERLAB_RL_HIT_VIS visibility seam"
+    );
+    source
+        .replacen(
+            HIT,
+            &format!("{HIT}                rl_hit_vis_prepare(h.input.world,origin,width+spread*distance(origin,h.input.world),rough,h.input.receiver.geometric);\n"),
+            1,
+        )
+        .replacen(HIT_LOCAL_UNSHADOWED, &format!("{VISIBILITY}{HIT_LOCAL_UNSHADOWED}"), 1)
+}
 /// The `RENDERLAB_RL_CACHE_HITS` minimum roughness, read once per process.
 pub(crate) fn cache_hits_rough() -> Option<f32> {
     static ROUGH: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
@@ -786,6 +835,16 @@ fn compose_stage(
             Some(rough) => CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", &format!("{rough:?}")),
             None => CACHE_HITS_STUB.to_owned(),
         });
+        if let Some(vis) = hit_visibility().filter(|_| indirect_calls) {
+            reflection.push_str(
+                &HIT_VISIBILITY
+                    .replace("RL_HIT_VIS_ROUGH_MIN", &format!("{:?}", vis.rough))
+                    .replace(
+                        "RL_HIT_VIS_CONE_ON",
+                        if vis.cone { "true" } else { "false" },
+                    ),
+            );
+        }
     }
     let view = declares(program, "fn", "view_dependence");
     let view_api = if view { VIEW_API } else { "" };
@@ -809,6 +868,9 @@ fn compose_stage(
             &format!("{HIT_LOCAL_UNSHADOWED}{LOCAL_VISIBILITY_SEAM}"),
             1,
         );
+        if source.contains(HIT_VISIBILITY_FN) {
+            source = with_hit_visibility(source);
+        }
         source = rl_history_tune(rl_split(rl_hit_switches(source)));
     }
     let start = source.len();
