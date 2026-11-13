@@ -92,7 +92,20 @@ pub(crate) fn shade_count_on() -> bool {
 pub(crate) const SHADE_COUNT_WORDS: usize = 64;
 const SHADE_COUNT_API: &str = "// RENDERLAB_SHADE_COUNT=1 (program.rs shade_count_on).\n@group(0) @binding(80) var<storage,read_write> rl_shade_counts:array<atomic<u32>,64>;\nvar<private> rl_sc_vis:u32;\nvar<private> rl_sc_finds:u32;\nvar<private> rl_sc_adds:u32;\nvar<private> rl_sc_refine:u32;\nvar<private> rl_sc_fill:u32;\nvar<private> rl_sc_fallback:u32;\nfn rl_shade_count() {\n    let lights=light_count();\n    atomicAdd(&rl_shade_counts[0],1u);atomicAdd(&rl_shade_counts[1],lights);atomicAdd(&rl_shade_counts[2],rl_sc_vis);\n    atomicAdd(&rl_shade_counts[3],rl_sc_finds);atomicAdd(&rl_shade_counts[4],rl_sc_adds);atomicAdd(&rl_shade_counts[5],rl_sc_refine);\n    atomicAdd(&rl_shade_counts[6],rl_sc_fill);atomicAdd(&rl_shade_counts[7],rl_sc_fallback);\n    atomicAdd(&rl_shade_counts[16u+min(rl_sc_vis,31u)],1u);atomicAdd(&rl_shade_counts[48u+min(lights,15u)],1u);\n}\n";
 /// Each counted site: the text it follows (or, for `before`, precedes) and the count it adds.
-const SHADE_COUNT_SITES: [(&str, &str, bool); 6] = [
+const SHADE_COUNT_SITES: [(&str, &str, bool); 8] = [
+    // How each receiver find ends (words 8-12: start slot found or empty, next slot found or
+    // empty, walked on) and the walk's steps (word 13). Shares words 8-15 with
+    // RENDERLAB_GI_DEDUP's served counts: do not count both.
+    (
+        "    if (first.r0.x&GI_KEY_BITS)==key.x { return first; }\n",
+        "    if (first.r0.x&GI_KEY_BITS)==key.x {atomicAdd(&rl_shade_counts[8],1u);} else if first.r0.x==0u {atomicAdd(&rl_shade_counts[9],1u);} else if (next&GI_KEY_BITS)==key.x {atomicAdd(&rl_shade_counts[10],1u);} else if next==0u {atomicAdd(&rl_shade_counts[11],1u);} else {atomicAdd(&rl_shade_counts[12],1u);}\n",
+        true,
+    ),
+    (
+        "        let word=gi_word(gi_hot(slot));\n        if (word&GI_KEY_BITS)==key.x { return gi_hot_load(slot); }\n",
+        "        atomicAdd(&rl_shade_counts[13],1u);\n",
+        true,
+    ),
     ("    if s.attenuation==0.0 || !rl_term(RL_TERM_SHADOWS) { return 1.0; }\n", "    rl_sc_vis+=1u;\n", false),
     ("fn gi_hot_find(key:vec2<u32>) -> GiHot {\n", "    rl_sc_finds+=1u;\n", false),
     ("fn gi_hot_add(h:GiHot, w_in:f32) -> f32 {\n", "    rl_sc_adds+=1u;\n", false),

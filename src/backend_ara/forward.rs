@@ -1376,6 +1376,11 @@ fn report_shade_counts(
     // their own (program.rs with_gi_dedup); zero without the switch.
     if w[8..16].iter().any(|&n| n != 0) {
         eprintln!("gi_dedup_served frame={frame} by_round={:?}", &w[8..16]);
+        // Without the dedup the same words count how finds end (program.rs SHADE_COUNT_SITES).
+        eprintln!(
+            "gi_probe frame={frame} slot0_found={} slot0_empty={} slot1_found={} slot1_empty={} walked={} walk_steps={}",
+            w[8], w[9], w[10], w[11], w[12], w[13]
+        );
     }
     let pixels = w[0].max(1) as f64;
     let mean = |i: usize| w[i] as f64 / pixels;
