@@ -162,3 +162,29 @@ This bounds work instead of dropping rays from an admitted cell. Bounce can stil
 more slowly; the earlier forest edge regression above remains a specific picture risk.
 Outpost needs off/on cut and post-cut timing, per-frame admission counts, and frame-matched
 picture/settling comparisons before any default change.
+
+### Budget and the waiting picture
+
+On software, the ceiling is `max(64, floor(cut_gather_ms * 1000))` cells per frame,
+reduced by a smaller explicit `gather_cells`. With only the switch set it is 3,000.
+`RENDERLAB_GI=cut_gather_ms=3;parent_standin=1` remains the existing comparison:
+its time-derived target expires after 64 cut frames and has no hard admission ticket.
+The bounded switch also keeps the default 20,480-cell claim target active. Neither target
+is a wall-time deadline or a ray limit; geometry and nearby lights change each cell's cost.
+
+An admitted gather keeps the default directions, stride, near-light rays and SH reduction.
+A rejected candidate is requeued without consuming a gather. Total work is not guaranteed
+identical: changing the schedule changes when secondary cells are requested, retries and
+early completion, and how long still-view work remains active. The parent stand-in changes
+the temporary value, not an admitted cell's ray count.
+
+A waiting pixel reads existing valid cache values. A new cell can copy a valid same-bin
+parent's bounce until its first gather. The lookup fills missing bounce from available
+coarser levels; if no bounce value exists it contributes zero. If no agreeing sky value
+exists either, the fallback is open-environment irradiance. This is not a guarantee against
+dark or blotchy waiting pixels; their duration must be checked in the post-cut images.
+
+There is no default frame-40 queue flush. New secondary requests can first grow the queue;
+later a shrinking queue can cross a slot-period boundary and admit more cells per frame.
+The cliff then comes when the queue drains. Timelines must join pass samples by renderer
+frame ID: the optional pass log can omit in-flight frames and complete them out of order.
