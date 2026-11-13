@@ -1425,6 +1425,7 @@ fn log_material_slots(readers: &[bool]) {
 /// Composition would make the port's shading read its binding 68, which nothing here allocates
 /// or writes, so the port refuses the switch at `Engine::new` and at every frame.
 pub(crate) const GI_PASS_REFUSAL: &str = "RENDERLAB_GI_PASS=1: the GI lookup pass is not wired on the ara-gpu port yet (its binding 68 has no target or dispatch here); unset it";
+pub(crate) const FOG_MAP_REFUSAL: &str = "RENDERLAB_ATMOSPHERE_PASS=map: the dedicated fog shadow map is wired on wgpu only; unset it on the ara-gpu port";
 /// One frame after `history`, over what the sequence keeps on the GPU; returns its
 /// images and what it hands to the next frame.
 fn frame(
@@ -1436,6 +1437,8 @@ fn frame(
     scene: &ForwardScene<'_>,
 ) -> Result<(ForwardImages, Carried)> {
     ensure!(!crate::renderer::primary_ray_gpu::gi_receiver_pass::on(), GI_PASS_REFUSAL);
+    ensure!(crate::renderer::atmosphere_gpu::options::mode()
+        != crate::renderer::atmosphere_gpu::options::Mode::Map, FOG_MAP_REFUSAL);
     let Kept {
         gi,
         tr1,
@@ -2404,8 +2407,14 @@ fn frame(
         let parity = (history.fog_frame % 2) as usize;
         let (raw, resolved, previous) = (&cells[0], &cells[1 + parity], &cells[2 - parity]);
         let extent = [grid[0], grid[1], 64];
+        let mut injection_images = vec![(15, raw)];
+        if crate::renderer::atmosphere_gpu::options::mode()
+            == crate::renderer::atmosphere_gpu::options::Mode::Quarter
+        {
+            injection_images.push((5, previous));
+        }
         for (pass, images) in [
-            (Pass::AtmosphereFogInject, vec![(15, raw)]),
+            (Pass::AtmosphereFogInject, injection_images),
             (
                 Pass::AtmosphereFogTemporal,
                 vec![(5, previous), (6, raw), (15, resolved)],

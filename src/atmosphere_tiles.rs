@@ -3,15 +3,10 @@ const ORIGINAL: &str = "@compute @workgroup_size(4,4,4) fn at_fog_inject";
 const COHERENT: &str = "@compute @workgroup_size(8,4,2) fn at_fog_inject";
 
 fn enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_ATMOSPHERE_TILE").is_ok_and(|v| v == "8x4"))
+    super::options::mode() == super::options::Mode::Coherent
 }
 
-pub(crate) fn source(source: String) -> String {
-    source_for(source, enabled())
-}
-
-fn source_for(source: String, tiled: bool) -> String {
+pub(super) fn source_for(source: String, tiled: bool) -> String {
     if !tiled {
         return source;
     }

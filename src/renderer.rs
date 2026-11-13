@@ -2957,7 +2957,9 @@ impl Renderer {
             });
         }
         let shadow_start = Instant::now();
-        let shadow_draws = if shadow_frame.is_some() {
+        let shadow_draws = if shadow_frame.is_some()
+            || (view_mode == ViewMode::Lit && self.atmosphere_map_requested())
+        {
             draws
                 .iter()
                 .flat_map(|draw| {
@@ -3298,7 +3300,7 @@ impl Renderer {
                 &mut uploads,
             ));
             // AT1: the camera volume and uniform the lighting group binds.
-            self.prepare_atmosphere(camera, [color.width(), color.height()], &mut uploads)?;
+            self.prepare_atmosphere(camera, [color.width(), color.height()], &mut uploads, shadow_draws)?;
             // TP2: publish the coloured sun map before binding the frame's lighting.
             self.prepare_transmission(transparent)?;
             self.upload_lighting(camera.view().inverse().w_axis.truncate(), &mut uploads);
@@ -3511,7 +3513,7 @@ impl Renderer {
         }
         if lit && !virtual_frame {
             mark(&mut encoder, "atmosphere");
-            self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
+            self.encode_atmosphere(&mut encoder, scene_generation, &mut mark, shadow_draws);
         }
         if fresh {
             mark(&mut encoder, "sun_shadow");
@@ -3563,7 +3565,7 @@ impl Renderer {
                     self.encode_virtual(&mut encoder, stamps(8), &mut mark);
                     // VF1 samples the freshly generated Virtual depth pages.
                     mark(&mut encoder, "atmosphere");
-                    self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
+                    self.encode_atmosphere(&mut encoder, scene_generation, &mut mark, shadow_draws);
                 } else {
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                         self.encode_visibility_buffer(&mut encoder, soft, stamps(6));

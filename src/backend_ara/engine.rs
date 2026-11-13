@@ -241,6 +241,11 @@ impl Engine {
         if crate::renderer::primary_ray_gpu::gi_receiver_pass::on() {
             return Err(Error::InvalidInput(super::forward::GI_PASS_REFUSAL));
         }
+        if crate::renderer::atmosphere_gpu::options::mode()
+            == crate::renderer::atmosphere_gpu::options::Mode::Map
+        {
+            return Err(Error::InvalidInput(super::forward::FOG_MAP_REFUSAL));
+        }
         let standard = Arc::new(Program::new("standard", crate::STANDARD_PROGRAM)?);
         let mut engine = Self {
             cache,

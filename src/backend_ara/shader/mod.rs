@@ -461,7 +461,7 @@ impl Pass {
                     &kernels[start..end]
                 );
                 let source = if self == Self::AtmosphereFogInject {
-                    crate::renderer::atmosphere_gpu::fog_tile_source(source)
+                    crate::renderer::atmosphere_gpu::fog_injection_source(source)
                 } else {
                     source
                 };

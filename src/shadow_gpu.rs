@@ -313,6 +313,63 @@ impl ShadowState {
             bytes,
         }
     }
+    /// Upload a view-local shadow plan without changing the renderer's light records.
+    pub(super) fn upload_frame(
+        &mut self,
+        frame: &ShadowFrame,
+        gpu: (&wgpu::Device, &wgpu::Queue, &Ledger),
+        raster: bool,
+        last_submission: u64,
+        uploads: &mut UploadBytes,
+    ) -> Result<(), String> {
+        let (device, queue, ledger) = gpu;
+        let state = self;
+        if state.active.resolution != state.settings.resolution
+            || state.active.views as usize != frame.views.len()
+            || state.active.raster != raster
+        {
+            let scopes = OperationScopes::new(device);
+            let next = ShadowState::resources(
+                device,
+                ledger,
+                &state.bindings,
+                state.limits,
+                state.settings.resolution,
+                frame.views.len() as u32,
+                raster,
+            );
+            if let Some(error) = scopes.finish() {
+                return Err(error.to_string());
+            }
+            let old = std::mem::replace(&mut state.active, next);
+            state.retired.push((last_submission, old));
+            state.stats.resource_generation += 1;
+        }
+        queue
+            .write_buffer(&state.active.records, 0, &frame.records);
+        uploads.shadows += frame.records.len() as u64;
+        uploads.write_calls += 1;
+        if !raster {
+            return Ok(());
+        }
+        let stride = VIEW_BYTES.div_ceil(u64::from(state.limits.uniform_alignment))
+            * u64::from(state.limits.uniform_alignment);
+        let mut uniforms = vec![0; frame.views.len() * stride as usize];
+        for (dst, src) in uniforms
+            .chunks_exact_mut(stride as usize)
+            .zip(frame.records.chunks_exact(VIEW_BYTES as usize))
+        {
+            dst[..VIEW_BYTES as usize].copy_from_slice(src);
+        }
+        queue
+            .write_buffer(&state.active.uniforms, 0, &uniforms);
+        uploads.shadows += uniforms.len() as u64;
+        uploads.write_calls += 1;
+        Ok(())
+    }
+    pub(super) fn remember_bases(&mut self, frame: &ShadowFrame) {
+        self.bases.clone_from(&frame.bases);
+    }
     pub fn sample_view(&self) -> &wgpu::TextureView {
         &self.active.sample_view
     }
@@ -727,48 +784,14 @@ impl Renderer {
         let Some(frame) = frame else {
             return Ok(());
         };
-        if state.active.resolution != state.settings.resolution
-            || state.active.views as usize != frame.views.len()
-            || state.active.raster != raster
-        {
-            let scopes = OperationScopes::new(&self.device);
-            let next = ShadowState::resources(
-                &self.device,
-                &self.ledger,
-                &state.bindings,
-                state.limits,
-                state.settings.resolution,
-                frame.views.len() as u32,
-                raster,
-            );
-            if let Some(error) = scopes.finish() {
-                return Err(self.fail(error.to_string()));
-            }
-            let old = std::mem::replace(&mut state.active, next);
-            state.retired.push((self.submissions, old));
-            state.stats.resource_generation += 1;
-        }
-        self.queue
-            .write_buffer(&state.active.records, 0, &frame.records);
-        uploads.shadows += frame.records.len() as u64;
-        uploads.write_calls += 1;
-        if !raster {
-            return Ok(());
-        }
-        let stride = VIEW_BYTES.div_ceil(u64::from(state.limits.uniform_alignment))
-            * u64::from(state.limits.uniform_alignment);
-        let mut uniforms = vec![0; frame.views.len() * stride as usize];
-        for (dst, src) in uniforms
-            .chunks_exact_mut(stride as usize)
-            .zip(frame.records.chunks_exact(VIEW_BYTES as usize))
-        {
-            dst[..VIEW_BYTES as usize].copy_from_slice(src);
-        }
-        self.queue
-            .write_buffer(&state.active.uniforms, 0, &uniforms);
-        uploads.shadows += uniforms.len() as u64;
-        uploads.write_calls += 1;
-        Ok(())
+        let result = state.upload_frame(
+            frame,
+            (&self.device, &self.queue, &self.ledger),
+            raster,
+            self.submissions,
+            uploads,
+        );
+        result.map_err(|message| self.fail(message))
     }
     pub(super) fn encode_shadows(
         &self,
@@ -778,24 +801,35 @@ impl Renderer {
         slot: usize,
         timed: bool,
     ) {
+        let timestamps = self.timing.as_ref().filter(|_| timed)
+            .map(|t| (&*t.queries, slot));
+        self.encode_shadow_state(encoder, &self.view.shadows, frame, draws, timestamps);
+    }
+    /// The same caster pipeline for a separately owned shadow map.
+    pub(super) fn encode_shadow_state(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        state: &ShadowState,
+        frame: &ShadowFrame,
+        draws: &[ShadowDraw<'_>],
+        timestamps: Option<(&wgpu::QuerySet, usize)>,
+    ) {
         for (index, view) in frame.views.iter().enumerate() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow generation"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &self.view.shadows.active.layers[index],
+                    view: &state.active.layers[index],
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),
                         store: wgpu::StoreOp::Store,
                     }),
                     stencil_ops: None,
                 }),
-                timestamp_writes: self
-                    .timing
-                    .as_ref()
-                    .filter(|_| timed && (index == 0 || index + 1 == frame.views.len()))
-                    .map(|t| wgpu::RenderPassTimestampWrites {
-                        query_set: &t.queries,
+                timestamp_writes: timestamps
+                    .filter(|_| index == 0 || index + 1 == frame.views.len())
+                    .map(|(queries, slot)| wgpu::RenderPassTimestampWrites {
+                        query_set: queries,
                         beginning_of_pass_write_index: (index == 0).then_some(slot as u32 * 10 + 4),
                         end_of_pass_write_index: (index + 1 == frame.views.len())
                             .then_some(slot as u32 * 10 + 5),
@@ -803,7 +837,7 @@ impl Renderer {
                 ..Default::default()
             });
             pass.set_pipeline(&self.pipeline.shadow);
-            pass.set_bind_group(0, &*self.view.shadows.active.binds[index], &[]);
+            pass.set_bind_group(0, &*state.active.binds[index], &[]);
             let (mut instances, mut material, mut mesh) = (None, None, None);
             for &caster in &view.caster_indices {
                 let draw = &draws[caster];

@@ -7,9 +7,26 @@
 use super::*;
 use crate::atmosphere::{Atmosphere, AtmosphereMedium};
 use crate::pipeline_compilation::PipelineDevice;
+#[path = "atmosphere_map.rs"]
+mod map;
+#[path = "atmosphere_options.rs"]
+pub(crate) mod options;
+#[path = "atmosphere_quarter.rs"]
+mod quarter;
 #[path = "atmosphere_tiles.rs"]
 mod tiles;
-pub(crate) use tiles::source as fog_tile_source;
+
+pub(crate) fn fog_injection_source(source: String) -> String {
+    fog_injection_source_for(source, options::mode())
+}
+
+fn fog_injection_source_for(source: String, mode: options::Mode) -> String {
+    match mode {
+        options::Mode::Coherent => tiles::source_for(source, true),
+        options::Mode::Quarter => quarter::source(source),
+        options::Mode::Default | options::Mode::Map => source,
+    }
+}
 
 const COMMON: &str = include_str!("../shaders/atmosphere_common.wgsl");
 const KERNELS: &str = include_str!("../shaders/atmosphere.wgsl");
@@ -48,7 +65,12 @@ fn at_sun_visible(p:vec3<f32>) -> f32 {
 const MAP_VISIBILITY: &str = include_str!("../shaders/atmosphere_shadow_map.wgsl");
 
 fn kernel_source(hardware: bool) -> String {
-    fog_tile_source(format!(
+    kernel_source_for(hardware, options::mode())
+}
+
+fn kernel_source_for(hardware: bool, mode: options::Mode) -> String {
+    let hardware = hardware && mode != options::Mode::Map;
+    let source = format!(
         "{}{COMMON}{KERNELS}{}",
         if hardware {
             "enable wgpu_ray_query;\n"
@@ -64,14 +86,21 @@ fn kernel_source(hardware: bool) -> String {
         } else {
             MAP_VISIBILITY.to_owned()
         },
-    ))
+    );
+    if hardware || mode == options::Mode::Coherent {
+        fog_injection_source_for(source, mode)
+    } else {
+        source
+    }
 }
 
 fn virtual_kernel_source() -> String {
-    fog_tile_source(format!(
-        "{COMMON}{KERNELS}{}",
-        Renderer::atmosphere_shadow_source()
-    ))
+    let source = format!("{COMMON}{KERNELS}{}", Renderer::atmosphere_shadow_source());
+    if options::mode() == options::Mode::Coherent {
+        tiles::source_for(source, true)
+    } else {
+        source
+    }
 }
 
 fn sky_source() -> String {
@@ -255,6 +284,7 @@ pub(super) struct AtmosphereGpu {
 /// What a view owns of the atmosphere: its camera volume and fog histories, and their
 /// reprojection state. The LUTs, kernels and the procedural sky are the renderer's.
 pub(super) struct AtmosphereView {
+    shadow_map: Option<map::FogMap>,
     pub volume: Volume,
     /// The last encoded frame's view-projection and eye, for froxel reprojection.
     previous: Option<(Mat4, Vec3)>,
@@ -269,6 +299,7 @@ impl AtmosphereView {
     /// `generations`: the view's first generation (`ViewId::generations`).
     pub fn new(device: &PipelineDevice, ledger: &Ledger, generations: u64) -> Self {
         Self {
+            shadow_map: None,
             volume: Volume::new(device, ledger, [1, 1], false),
             previous: None,
             history_key: None,
@@ -649,6 +680,7 @@ impl Renderer {
         camera: &Camera,
         size: [u32; 2],
         uploads: &mut UploadBytes,
+        casters: &[super::shadow_gpu::ShadowDraw<'_>],
     ) -> Result<(), Error> {
         let s = self.atmosphere.settings;
         self.atmosphere.active = s.active();
@@ -659,6 +691,7 @@ impl Renderer {
             return Ok(());
         }
         self.ensure_atmosphere_kernels()?;
+        self.prepare_fog_map(camera, size, casters, uploads)?;
         let tile = FROXEL_TILE;
         #[cfg(test)]
         let tile = self.atmosphere.test_fog_quality.map_or(tile, |q| q.0);
@@ -778,11 +811,11 @@ impl Renderer {
         f.extend(matrix.inverse().to_cols_array());
         f.extend(previous.to_cols_array());
         let mut bytes: Vec<u8> = f.iter().flat_map(|v| v.to_ne_bytes()).collect();
-        let source = u32::from(self.hardware_shadows.is_some());
+        let source = u32::from(self.hardware_shadows.is_some() && !self.atmosphere_map_requested());
         for v in [av.volume.grid[0], av.volume.grid[1], av.frame, source] {
             bytes.extend(v.to_ne_bytes());
         }
-        let range = self
+        let mut range = self
             .lighting
             .source_lights
             .iter()
@@ -791,6 +824,15 @@ impl Renderer {
             .map_or([0, 0], |r| {
                 [52, 56].map(|i| u32::from_ne_bytes(r[i..i + 4].try_into().unwrap()))
             });
+        if self.atmosphere_map_requested() {
+            range = self
+                .view
+                .atmosphere
+                .shadow_map
+                .as_ref()
+                .and_then(|m| m.frame.as_ref())
+                .map_or([0, 0], |f| f.light_ranges[0]);
+        }
         for v in [
             size[0] as f32,
             size[1] as f32,
@@ -963,9 +1005,11 @@ impl Renderer {
     /// when the scene TLAS changed). `scene` is the generation of the frame's TLAS
     /// object (`HardwareState::scene_generation`), the key the other TLAS consumers use.
     fn atmosphere_volume_groups(&mut self, injection: bool, scene: u64) {
+        let maps = self.atmosphere_map_requested();
         let (device, ledger) = (&self.device, &self.ledger);
         let a = &self.atmosphere;
         let k = a.kernels.as_ref().unwrap();
+        let fog_map = self.view.atmosphere.shadow_map.as_ref().filter(|_| maps);
         let v = &mut self.view.atmosphere.volume;
         let uniform = wgpu::BindGroupEntry {
             binding: 0,
@@ -1010,7 +1054,11 @@ impl Renderer {
             }));
         }
         // Aerial perspective alone needs no shadow resources.
-        let tlas = self.hardware_shadows.as_ref().map(|h| h.scene());
+        let tlas = self
+            .hardware_shadows
+            .as_ref()
+            .filter(|_| !maps)
+            .map(|h| h.scene());
         let virtual_buffers = (self.hardware_shadows.is_none()
             && self.primary_mode == PrimaryVisibility::VisibilityBuffer
             && self.view.soft_mode == SoftShadows::Virtual
@@ -1024,7 +1072,10 @@ impl Renderer {
             // replaces it in place (`HardwareState::active`), so an address key kept binding
             // the previous TLAS: stale fog shadows, and a validation fault once a skinned
             // BLAS was refit after that TLAS's build. Key on the scene generation instead.
-            generation: tlas.map_or(self.view.shadows.stats.resource_generation, |_| scene),
+            generation: fog_map.map_or_else(
+                || tlas.map_or(self.view.shadows.stats.resource_generation, |_| scene),
+                |m| m.state.stats.resource_generation,
+            ),
             buffers: virtual_buffers.map_or_else(Vec::new, |b| b.map(Clone::clone).to_vec()),
         };
         if v.integrate.is_none() {
@@ -1044,8 +1095,11 @@ impl Renderer {
             }));
         }
         if injection && v.inject.as_ref().is_none_or(|(_, old)| *old != key) {
-            let groups = [0, 1].map(|_| {
+            let groups = [0, 1].map(|i| {
                 let mut entries = vec![uniform.clone(), view(15, &raw.view)];
+                if tlas.is_some() && options::mode() == options::Mode::Quarter {
+                    entries.extend([sampler.clone(), view(5, &scatter[1 - i].view)]);
+                }
                 if let Some(tlas) = tlas {
                     entries.push(wgpu::BindGroupEntry {
                         binding: 20,
@@ -1059,10 +1113,11 @@ impl Renderer {
                         }
                     }));
                 } else {
-                    entries.push(view(21, self.view.shadows.sample_view()));
+                    let state = fog_map.map_or(&self.view.shadows, |m| &m.state);
+                    entries.push(view(21, state.sample_view()));
                     entries.push(wgpu::BindGroupEntry {
                         binding: 22,
-                        resource: self.view.shadows.records().as_entire_binding(),
+                        resource: state.records().as_entire_binding(),
                     });
                 }
                 group(
@@ -1091,10 +1146,12 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         scene: u64,
         mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
+        casters: &[super::shadow_gpu::ShadowDraw<'_>],
     ) {
         if !self.atmosphere.active {
             return;
         }
+        self.encode_fog_map(encoder, casters, mark);
         // Virtual's resources exist after prepare_virtual, and its pages have been
         // encoded before this call. Raster depth and the TLAS are ready here too.
         self.atmosphere_volume_groups(true, scene);

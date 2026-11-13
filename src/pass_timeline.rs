@@ -12,8 +12,8 @@
 //! `sun_shadow.raster`); without it those marks are skipped, so the part's time stays in
 //! the stage before it. The reflection pass's stages (`ALWAYS`) are kept either way: every
 //! reflection table reads them from the default log.
-//! `RENDERLAB_PASS_LOG_DETAIL=atmosphere` records only atmosphere parts and avoids
-//! the full mode's seven shading replays.
+//! `RENDERLAB_PASS_LOG_DETAIL=atmosphere` records atmosphere parts and the split
+//! submission's CPU wait, avoiding the full mode's seven shading replays.
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
@@ -119,7 +119,10 @@ impl PassTimeline {
     /// Starts stage `name` at this point of `encoder`'s work.
     pub(crate) fn mark(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         let Some(i) = self.current else { return };
-        let atmosphere = self.atmosphere_detail && name.starts_with("atmosphere.");
+        // Keep the split-submission wait separate; attributing it to the previous
+        // atmosphere stage would misidentify a CPU hitch as fog work after cuts.
+        let atmosphere = self.atmosphere_detail
+            && (name.starts_with("atmosphere.") || name == "cpu.wait");
         if name.contains('.') && !self.detail && !atmosphere && !ALWAYS.contains(&name) {
             return;
         }
