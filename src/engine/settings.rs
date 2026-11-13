@@ -415,6 +415,35 @@ fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error>
     Ok(s)
 }
 
+/// With `RENDERLAB_VSM_LOG=<file>` set, appends one JSON line of the non-RT sun clipmap's ladder
+/// and reach after each frame the engine renders: its levels, finest absolute level, octaves
+/// skipped far out, and the Disk mark pass's nearest receiver (metres), receivers and receivers
+/// no level's window held (shaded without the map), from a frame or two earlier. Measurement
+/// only; no readback of its own.
+pub(crate) fn log_clipmap(r: &Renderer) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("RENDERLAB_VSM_LOG") else {
+        return;
+    };
+    let v = r.virtual_shadow_stats();
+    let line = format!(
+        "{{\"levels\":{},\"finest_level\":{},\"skipped_levels\":{},\"nearest_receiver\":{},\"receivers\":{},\"unplaced_receivers\":{}}}\n",
+        v.levels,
+        v.finest_level,
+        v.skipped_levels,
+        v.nearest_receiver.map_or("null".into(), |d| d.to_string()),
+        v.receivers,
+        v.unplaced_receivers,
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+
 /// With `RENDERLAB_GI_LOG=<file>` set, appends one JSON line of the GI cache's counters after
 /// each frame the engine renders (a blocking readback: measurement only).
 pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
