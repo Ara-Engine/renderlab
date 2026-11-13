@@ -15,11 +15,11 @@ const DISTANCE: u32 = 59;
 /// The deferred composite's trace (rl_trace_pixels): its counters and per-pixel slot ranges.
 const STATS: u32 = 60;
 const RANGES: u32 = 61;
-/// With the composite, R holds every glossy pixel's strata: this many slots a row, and at most
-/// this many slots (two a pixel at 1080p; a frame needing more drops whole pixels, counted).
+/// With the composite, R holds every glossy pixel's strata: this many slots a row, and two
+/// slots a pixel (records the same). A frame asking for more scales every pixel's strata to fit
+/// (rl_trace_count, rl_trace_pixels), at least one each: no pixel loses its reflection.
 const SAMPLE_ROW: u32 = 2048;
-const SAMPLE_SLOTS_MAX: u64 = 1 << 22;
-const RECORDS_MAX: u64 = 1 << 21;
+const SLOTS_PER_PIXEL: u64 = 2;
 pub(super) const HITS: u32 = 64;
 pub(super) const SAMPLES: u32 = 65;
 /// H: the count and three dispatch arguments, then 48-byte records.
@@ -130,6 +130,7 @@ pub(super) struct TracePipelines {
     trace: Owned<wgpu::ComputePipeline>,
     args: Owned<wgpu::ComputePipeline>,
     pixels: Owned<wgpu::ComputePipeline>,
+    count: Owned<wgpu::ComputePipeline>,
     /// The deferred composite: its group layout and additive render pipeline.
     composite: Option<(Owned<wgpu::BindGroupLayout>, Owned<wgpu::RenderPipeline>)>,
 }
@@ -169,14 +170,16 @@ impl Renderer {
         let slots = [size.width.div_ceil(2), size.height.div_ceil(2)];
         // The composite traces every glossy pixel's set: R and H sized for that, not one a quad.
         let composite = crate::program::rl_deferred();
-        let full = (2 * u64::from(size.width) * u64::from(size.height)).min(SAMPLE_SLOTS_MAX);
+        let full = SLOTS_PER_PIXEL * u64::from(size.width) * u64::from(size.height);
         let samples = if composite {
             [SAMPLE_ROW, (full as u32).div_ceil(SAMPLE_ROW)]
         } else {
             slots
         };
+        // H: one record a pixel (48 B each, about 99 MB at 1080p); the room is the smaller of
+        // the two, so frames averaging more than one stratum a pixel are scaled to fit.
         let records = if composite {
-            full.min(RECORDS_MAX)
+            u64::from(size.width) * u64::from(size.height)
         } else {
             u64::from(slots[0]) * u64::from(slots[1])
         };
@@ -291,6 +294,7 @@ impl Renderer {
             trace: pipeline("rl_trace"),
             args: pipeline("rl_hit_args"),
             pixels: pipeline("rl_trace_pixels"),
+            count: pipeline("rl_trace_count"),
             composite,
         };
         if let Some(error) = scopes.finish() {
@@ -326,8 +330,11 @@ impl Renderer {
         if pipelines.composite.is_some() {
             // The composite: every glossy pixel's set, one invocation a pixel.
             let size = pass.lobe_b.texture.size();
+            let groups = [size.width.div_ceil(8), size.height.div_ceil(8)];
+            compute.set_pipeline(&pipelines.count);
+            compute.dispatch_workgroups(groups[0], groups[1], 1);
             compute.set_pipeline(&pipelines.pixels);
-            compute.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+            compute.dispatch_workgroups(groups[0], groups[1], 1);
         } else {
             compute.set_pipeline(&pipelines.trace);
             compute.dispatch_workgroups(
@@ -582,12 +589,13 @@ impl Renderer {
         };
         let count = u32::from_ne_bytes(data[0..4].try_into().unwrap());
         let word = |i: usize| u32::from_ne_bytes(data[16 + 4 * i..20 + 4 * i].try_into().unwrap());
-        let (pixels, slots, overflow) = (word(0), word(1), word(2));
+        let (pixels, slots, requested, dropped) = (word(0), word(1), word(2), word(3));
         if crate::program::rl_deferred() {
             // The strata counter: trace slots (strata) and hit records per glossy pixel.
             let per = |n: u32| if pixels > 0 { f64::from(n) / f64::from(pixels) } else { 0.0 };
             let json = format!(
-                "{{\"frame\":{PROBE_FRAME},\"glossy_pixels\":{pixels},\"slots\":{slots},\"records\":{count},\"overflow_pixels\":{overflow},\"strata_per_glossy_pixel\":{:.3},\"records_per_glossy_pixel\":{:.3}}}\n",
+                "{{\"frame\":{PROBE_FRAME},\"glossy_pixels\":{pixels},\"strata_requested\":{requested},\"slots\":{slots},\"records\":{count},\"records_dropped\":{dropped},\"scaled\":{},\"strata_per_glossy_pixel\":{:.3},\"records_per_glossy_pixel\":{:.3}}}\n",
+                requested > slots,
                 per(slots),
                 per(count)
             );

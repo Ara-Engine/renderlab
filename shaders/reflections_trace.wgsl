@@ -95,23 +95,47 @@ var<workgroup> rl_group_base:u32;
 // sample slots for its strata (L's count: today's faded set, directions and cones), records it in
 // the range image, clears its slots, writes a miss's sky into its slot and appends a hit's record
 // (slot = its slot) for reflection_hits. reflections_composite.wgsl sums the range.
-// x glossy pixels, y slots taken, z pixels without room, w 0 (the probe reads them).
-struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, overflow:atomic<u32>, unused:u32 };
+// x glossy pixels, y slots taken, z strata requested (the count pass), w hit records dropped
+// for want of room (their strata stay out of the pixel's mean; the probe reads all four).
+struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32> };
 @group(0) @binding(60) var<storage,read_write> rl_trace_stats:RlTraceStats;
 // Per pixel: its first slot and its slot count (0: no traced reflection).
 @group(0) @binding(61) var rl_ranges:texture_storage_2d<rg32uint,write>;
 var<workgroup> rl_group_slots:atomic<u32>;
 var<workgroup> rl_group_first:u32;
+// A pixel's strata count from L this frame (0: no traced reflection).
+fn rl_pixel_count(p:vec2<u32>)->u32 {
+    let b=textureLoad(rl_lobe_b,p,0);
+    let alpha=unpack2x16float(b.w&0xffffu).x;
+    if ((b.w>>16u)&0x7ffu)!=rl_pass_frame.x%2048u || !(alpha>0.0) {return 0u;}
+    return b.w>>27u;
+}
+// The count pass: the frame's requested strata, so rl_trace_pixels can fit them to the room.
+@compute @workgroup_size(8,8) fn rl_trace_count(@builtin(global_invocation_id) id:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    if lane==0u {atomicStore(&rl_group_slots,0u);}
+    workgroupBarrier();
+    if all(id.xy<textureDimensions(rl_lobe_b)) {atomicAdd(&rl_group_slots,rl_pixel_count(id.xy));}
+    workgroupBarrier();
+    if lane==0u {atomicAdd(&rl_trace_stats.requested,atomicLoad(&rl_group_slots));}
+}
 @compute @workgroup_size(8,8) fn rl_trace_pixels(@builtin(global_invocation_id) id:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     if lane==0u {atomicStore(&rl_group_slots,0u);}
     workgroupBarrier();
     let size=textureDimensions(rl_lobe_b);
     let inside=all(id.xy<size);
     var count=0u;var b=vec4<u32>(0u);
+    let samples=textureDimensions(rl_samples);
+    // The room: R's slots and H's records (a hit needs one of each).
+    let capacity=min(samples.x*samples.y,arrayLength(&rl_hits.records)/3u);
     if inside {
         b=textureLoad(rl_lobe_b,id.xy,0);
-        let alpha=unpack2x16float(b.w&0xffffu).x;
-        if ((b.w>>16u)&0x7ffu)==rl_pass_frame.x%2048u && alpha>0.0 {count=b.w>>27u;}
+        count=rl_pixel_count(id.xy);
+        // A frame asking for more strata than the room scales every pixel's set alike (at least
+        // one each), so no pixel loses its reflection; the room holds one a pixel.
+        let requested=atomicLoad(&rl_trace_stats.requested);
+        if count>0u && requested>capacity {
+            count=max(1u,u32(f32(count)*f32(capacity)/f32(requested)));
+        }
     }
     // One atomic per workgroup on the frame's slot count.
     let offset=atomicAdd(&rl_group_slots,count);
@@ -121,9 +145,9 @@ var<workgroup> rl_group_first:u32;
         rl_group_first=select(0u,atomicAdd(&rl_trace_stats.slots,n),n>0u);
     }
     let first=workgroupUniformLoad(&rl_group_first)+offset;
-    let samples=textureDimensions(rl_samples);
-    let capacity=samples.x*samples.y;
-    if count>0u && first+count>capacity {atomicAdd(&rl_trace_stats.overflow,1u);count=0u;}
+    // Rounding can leave the last pixels a little past the room: they keep what fits, at least
+    // nothing is dropped whole while one slot remains (the room is at least a slot a pixel).
+    if count>0u && first+count>capacity {count=select(0u,capacity-first,first<capacity);}
     if !inside {return;}
     textureStore(rl_ranges,vec2<i32>(id.xy),vec4<u32>(first,count,0u,0u));
     if count==0u {return;}
@@ -158,7 +182,8 @@ var<workgroup> rl_group_first:u32;
             continue;
         }
         let index=atomicAdd(&rl_hits.count,1u);
-        if index>=(arrayLength(&rl_hits.records)/3u) {continue;}
+        // No record: the slot stays unwritten (a = 0) and out of the pixel's mean, never black.
+        if index>=(arrayLength(&rl_hits.records)/3u) {atomicAdd(&rl_trace_stats.dropped,1u);continue;}
         let r=index*3u;
         let word2=k|(count<<8u)|(pack2x16float(vec2<f32>(alpha,0.0))<<16u);
         rl_hits.records[r]=vec4<u32>(p.x|(p.y<<16u),slot,word2,traced.record.x);
