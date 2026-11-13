@@ -453,6 +453,19 @@ PLANS["comptime"] = [
     (f"t-{path}-{name}-comp{v}-{k}", ["--path", path, *extra, "--frames", "60"], COMP(v))
     for k in (1, 2) for path in ("nonrt", "rt") for name, extra in COMP_CLIPS for v in ("1", "0")
 ]
+# The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
+# flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,
+# paint 0.35), moving and still; `compare.py` crops the reflected edges, binary against binary.
+SLOPE_CLIPS = (("floor", ["--fox", FOX, "--diag", "floor=0.2"]), ("flight", ["--fox", FOX]))
+PLANS["slopepics"] = [
+    (f"p-{path}-{name}-{kind}", ["--path", path, *extra, *still, "--frames", "40", "--every", "1"], {})
+    for path in ("nonrt", "rt") for name, extra in SLOPE_CLIPS
+    for kind, still in (("moving", []), ("still", ["--still"]))
+]
+PLANS["slopetime"] = [
+    (f"t-{path}-{name}-{k}", ["--path", path, *extra, "--frames", "60"], {})
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in SLOPE_CLIPS
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS

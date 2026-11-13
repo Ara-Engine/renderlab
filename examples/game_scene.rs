@@ -46,7 +46,8 @@
 //! `--diag forest=1` (U-RTVIS, docs/rtvis.md) swaps the flat ground for a 200 m rolling
 //! terrain (16 tiles) under trees and bushes of cutout cards and walks the field walk's camera
 //! through it: Outpost's layered ground and foliage, for the RT visibility pass's cost.
-//! `forest=bare` is the same terrain and walk without the foliage.
+//! `forest=bare` is the same terrain and walk without the foliage. `--diag floor=R` gives the
+//! flat ground perceptual roughness R (0.95 otherwise): a glossy floor for the reflection strata.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -358,6 +359,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     | "field"
                     | "forest"
                     | "fox"
+                    | "floor"
             )
         });
     // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
@@ -392,6 +394,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `forest=bare`: the same terrain and walk without the trees and bushes.
     let bare = scene_key("forest", "bare");
     let forest = scene_key("forest", "1") || bare;
+    let floor = scene_keys
+        .iter()
+        .find(|(k, _)| k == "floor")
+        .map_or(0.95, |(_, v)| {
+            v.parse::<f32>().expect("--diag floor=<roughness>")
+        });
     let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
@@ -603,7 +611,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec3::new(0.0, 0.6, -0.15)
         }
         None => {
-            let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, 0.95)?;
+            let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, floor)?;
             if forest {
                 for tile in terrain_tiles(FOREST_SIZE, 400, 4) {
                     let tile = engine.create_mesh(&mesh(&tile))?;
