@@ -1112,6 +1112,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut last_camera_b = None;
     let mut first_image_seconds = None;
     let mut reload = None;
+    // Measurement-only controls: hold the unchanged scene before a late cut, and read back
+    // only post-cut/reference frames without changing the frames the engine renders.
+    let event_frame = std::env::var("RENDERLAB_SCENE_EVENT_FRAME")
+        .map_or(Ok(EVENT_FRAME), |v| v.parse::<u32>())?;
+    let keep_frames = std::env::var("RENDERLAB_SCENE_KEEP_FRAMES").ok()
+        .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>())
+        .transpose()?;
+    let drain = std::env::var("RENDERLAB_SCENE_DRAIN").is_ok_and(|v| v == "1");
     for frame in 0..args.frames {
         let t = if args.still { 0.0 } else { frame as f32 / FPS };
         let sun_update = Instant::now();
@@ -1131,7 +1139,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             second.update(&mut engine, ground, behind.cos().atan2(-behind.sin()), t + 0.4)?;
         }
         engine.set_lights(&diag.lights(lanterns(t, frame)))?;
-        if glow_steps && frame == EVENT_FRAME {
+        if glow_steps && frame == event_frame {
             let dim = [6_000.0, 4_000.0, 1_800.0].map(|v| v * lamp_scale);
             engine.set_material_parameters(bulb, &[("glow", Value::Vec3(dim))])?;
         }
@@ -1148,8 +1156,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 * Mat4::from_rotation_x(0.6 * spin),
         )?;
         // Fly path: a slow orbit that descends and closes in on the hero.
-        let cut = (cuts || hold_cut) && frame >= EVENT_FRAME;
-        if (cuts || cut_turn || hold_cut) && frame == EVENT_FRAME {
+        let cut = (cuts || hold_cut) && frame >= event_frame;
+        if (cuts || cut_turn || hold_cut) && frame == event_frame {
             engine.cut_view(view);
             // `hold=cut`: the held pose moves to the cut's pose and holds there.
             if hold_cut {
@@ -1181,7 +1189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 engine.cut_view(view);
             }
             let eye = anchor + FIELD_EYE + 4.0 * along * FIELD_WALK;
-            let turn = if cut_turn && frame >= EVENT_FRAME { 150.0 } else { 0.0 };
+            let turn = if cut_turn && frame >= event_frame { 150.0 } else { 0.0 };
             let look = Mat4::from_rotation_y((12.0 * along + turn).to_radians())
                 .transform_vector3(FIELD_WALK);
             (eye, eye + 10.0 * look - Vec3::new(0.0, 2.2, 0.0))
@@ -1235,7 +1243,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let second_hash = match second {
             Some(second) => {
                 engine.render_view(second, &camera_b)?;
-                let written = frame % args.every == 0 || frame + 1 == args.frames;
+                let written = keep_frames.as_ref().map_or(frame % args.every == 0 || frame + 1 == args.frames, |keep| keep.contains(&frame));
                 written
                     .then(|| -> Result<_, Box<dyn std::error::Error>> {
                         let image = engine.capture_view(second)?;
@@ -1246,8 +1254,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             None => None,
         };
+        if drain {
+            engine.device().poll(wgpu::PollType::wait_indefinitely())?;
+            engine.poll()?;
+        }
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
-        let written = frame % args.every == 0 || frame + 1 == args.frames;
+        let written = keep_frames.as_ref().map_or(frame % args.every == 0 || frame + 1 == args.frames, |keep| keep.contains(&frame));
         let mut image_hash = None;
         let mut hdr_hash = None;
         if written {

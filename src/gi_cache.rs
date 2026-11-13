@@ -15,6 +15,8 @@
 use super::*;
 use crate::gi_bvh::{self, Blas};
 use crate::primary_ray::{TRACED_DRAWS, placement_table};
+#[path = "gi_bounded_refill.rs"]
+mod bounded_refill;
 
 pub(crate) const HEADER_WORDS: u64 = 64;
 /// Keep the original admission policy: packing storage must not change the chosen
@@ -1067,6 +1069,16 @@ impl Planner {
     /// does the cache's per-tick work; later views of the tick only probe, claim and trace
     /// their new cells, and change none of the engine's history.
     pub(crate) fn begin(&mut self, c: &PlanConfig, run: bool, bounce: bool, tick: bool) -> Begun {
+        self.begin_bounded(c, run, bounce, tick, bounded_refill::on())
+    }
+    fn begin_bounded(
+        &mut self,
+        c: &PlanConfig,
+        run: bool,
+        bounce: bool,
+        tick: bool,
+        enabled: bool,
+    ) -> Begun {
         if run && tick {
             if self.bounce_last.is_some_and(|b| b != bounce) {
                 self.pending_clear = true;
@@ -1074,7 +1086,8 @@ impl Planner {
             self.bounce_last = Some(bounce);
         }
         let eye = c.eye;
-        let s = c.settings;
+        let bounded = enabled && c.software;
+        let s = bounded_refill::settings(c.settings, bounded);
         let software = c.software;
         let layout = WorkLayout::of_counts(c.slots, c.misses);
         let mut header = [0u32; HEADER_WORDS as usize];
@@ -1104,7 +1117,7 @@ impl Planner {
         // U-RTVIS: the cut refill caps claims until its backlog drains (CUT_REFILL_FRAMES) and
         // no longer reads one level coarser (coarse cells showed as blocks); an explicit
         // `claim_cells` keeps G2b's coarse start after a clear.
-        let cut_capped = s.cut_refill && since_event < CUT_REFILL_FRAMES;
+        let cut_capped = s.cut_refill && (bounded || since_event < CUT_REFILL_FRAMES);
         let coarse = s.claim_cells != u32::MAX && since_event < COARSE_CUT_FRAMES;
         let footprint = 2.0 * (c.fov_y * 0.5).tan() / c.size[1] as f32
             * s.cell_pixels
@@ -1145,7 +1158,7 @@ impl Planner {
         header[30] = s.hit_gathers;
         header[31] = u32::from(s.parent_standin);
         // U-RTVIS: a cut's gathers held to a time budget, the cells pixels read first.
-        let cut_window = s.cut_gather_ms > 0.0 && self.since_cut < CUT_GATHER_FRAMES;
+        let cut_window = s.cut_gather_ms > 0.0 && (bounded || self.since_cut < CUT_GATHER_FRAMES);
         let per_ms = if software { GATHERS_PER_MS_SOFTWARE } else { GATHERS_PER_MS_HARDWARE };
         header[20] = match s.gather_cells {
             _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
@@ -1153,7 +1166,12 @@ impl Planner {
             u32::MAX => 0,
             cells => cells,
         };
+        if bounded && !matches!(s.gather_cells, 0 | u32::MAX) {
+            header[20] = header[20].min(s.gather_cells);
+        }
         header[21] = s.gather_stride;
+        // The opt-in software gather kernel enforces this ceiling with a frame-local ticket.
+        header[bounded_refill::HEADER_LIMIT] = if bounded { header[20] } else { 0 };
         header[22] = match s.claim_cells {
             0 if software => CLAIM_CELLS_SOFTWARE,
             0 => CLAIM_CELLS_HARDWARE,
@@ -1207,7 +1225,7 @@ impl Planner {
         view: &mut ViewPlan,
         inputs: FrameInputs<'_>,
     ) -> Finished {
-        let s = c.settings;
+        let s = bounded_refill::settings(c.settings, begun.header[bounded_refill::HEADER_LIMIT] != 0);
         let layout = WorkLayout::of_counts(c.slots, c.misses);
         let (since_event, cut_phases, filter) = (begun.since_event, begun.cut_phases, begun.filter);
         let FrameInputs {
@@ -1460,6 +1478,8 @@ impl Planner {
         // A gather cap spreads a cut's gathers over more frames: still frames keep running
         // until a spread of up to 64 slot groups per gather generation can have drained.
         let idle_after = match (bounce, s.gather_cells) {
+            (true, _) if begun.header[bounded_refill::HEADER_LIMIT] != 0 => IDLE_AFTER_BOUNCE
+                + c.slots.div_ceil(begun.header[bounded_refill::HEADER_LIMIT]).max(64) * (s.gathers + 1),
             (false, _) => IDLE_AFTER,
             (true, u32::MAX) => IDLE_AFTER_BOUNCE,
             (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
@@ -1616,6 +1636,9 @@ impl GiState {
 /// The kernel module: built-in prelude, primary ray helpers, cell definitions, one ray
 /// source and the kernels.
 pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
+    kernel_source_bounded(software, directions, bounded_refill::on())
+}
+fn kernel_source_bounded(software: bool, directions: u32, bounded: bool) -> String {
     let enables = if software {
         "enable wgpu_binding_array;\n"
     } else {
@@ -1671,9 +1694,12 @@ pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
     // Keep the hardware module unchanged, including its original gather entry.
     if software {
         kernels.push('\n');
-        kernels.push_str(&gi_shader(
-            "gi_gather_software.wgsl",
-            include_str!("../shaders/gi_gather_software.wgsl"),
+        kernels.push_str(&bounded_refill::gather_source(
+            gi_shader(
+                "gi_gather_software.wgsl",
+                include_str!("../shaders/gi_gather_software.wgsl"),
+            ).into_owned(),
+            bounded,
         ));
     }
     format!(
