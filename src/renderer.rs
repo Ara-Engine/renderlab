@@ -584,7 +584,9 @@ pub struct Renderer {
     explicit_ticks: bool,
     tick_work: bool,
     device: PipelineDevice,
-    queue: wgpu::Queue,
+    /// Derefs to `wgpu::Queue`; with RENDERLAB_SUBMIT_THREAD, each use first waits for the
+    /// frame the submit thread is still submitting.
+    queue: crate::ordered_queue::OrderedQueue,
     format: wgpu::TextureFormat,
     options: RendererOptions,
     limits: Limits,
@@ -1115,7 +1117,7 @@ impl Renderer {
             explicit_ticks: false,
             tick_work: true,
             device,
-            queue,
+            queue: crate::ordered_queue::OrderedQueue::new(queue),
             format: color_format,
             options,
             limits,
@@ -3699,8 +3701,16 @@ impl Renderer {
         encoder.on_submitted_work_done(move || {
             let _ = callback.set(());
         });
+        // RENDERLAB_SUBMIT_THREAD: the submit thread finishes and submits the late half while
+        // this returns (ordered_queue.rs); a verified frame needs its submission index here.
+        let threaded = self.queue.threaded() && !verify;
         let finish_start = Instant::now();
-        let commands = encoder.finish();
+        let mut late = Some(encoder);
+        let commands = if threaded {
+            None
+        } else {
+            late.take().map(wgpu::CommandEncoder::finish)
+        };
         let finish = finish_start.elapsed();
         self.check_fault()?;
         let encode = encode_start.elapsed() - cpu.shadow_encode - early_submit;
@@ -3708,7 +3718,13 @@ impl Renderer {
         // The flights still alive when this frame is submitted: a frame that waits inside
         // `queue.submit` for an older one shows here with the older one counted.
         let alive = self.occupied();
-        let index = self.queue.submit([commands]);
+        let index = match commands {
+            Some(commands) => Some(self.queue.submit([commands])),
+            None => {
+                self.queue.submit_later(late.take().unwrap());
+                None
+            }
+        };
         if let Some(mut t) = marks {
             t.submitted();
             self.pass_timeline = Some(t);
@@ -3791,6 +3807,7 @@ impl Renderer {
         self.camera_shadow = Some(camera_bytes);
         self.view_mode = view_mode;
         if verify {
+            let index = index.expect("a verified frame is submitted inline");
             self.verify_frame(slot, index, draws, soft, &view)?;
         }
         Ok(Some(FrameReport {

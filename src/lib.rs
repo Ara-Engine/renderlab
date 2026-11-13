@@ -47,6 +47,7 @@ mod receiver_adjacency;
 /// M7 reference path tracer (measurement tooling for the GI and reflection gates).
 pub mod reference;
 mod reflection_software;
+mod ordered_queue;
 mod reflections;
 mod renderer;
 #[path = "program_vulkan.rs"]
