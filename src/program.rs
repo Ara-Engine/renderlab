@@ -1336,9 +1336,8 @@ pub(crate) fn compose_hits(
         composed.source = composed.source.replacen(HITS_MINE, HITS_MINE_LIST, 1);
     }
     // S4a at the hit stage: count the hits the hook reused in word 5 of the pass's counters
-    // (U-RTVIS's ROOM_STATS, binding 69 on the shading side: `rl_room_stats`, which the pass block
-    // declares; word 4 is the trace
-    // stage's `reused`). The edit follows the program.
+    // (U-RTVIS's ROOM_STATS, binding 69 on the shading side: `rl_room_stats`, which the pass
+    // block declares; word 4 is the trace stage's `reused`). The edit follows the program.
     if hit_reuse().is_some() && composed.source.contains(ROOM_STATS) {
         const CACHED: &str = "        textureStore(rl_hit_samples_out,at_slot,vec4<f32>(rl_finite(expose(cached.rgb)),1.0));\n";
         assert_eq!(
