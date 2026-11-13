@@ -125,6 +125,10 @@ fn production_primary_trace_and_receivers_native_replay_against_cpu() -> Result<
         (17, Format::Rgba32Float, f.size),
         (20, Format::R32Uint, f.dispatch()[..2].try_into()?),
         (23, Format::R32Float, f.size),
+        // RENDERLAB_MATERIAL_PASS=1: the trace also writes the material record's receiver
+        // words (the miss sentinel; with `tracetail` the receiver).
+        (74, Format::Rgba32Uint, f.size),
+        (78, Format::Rgba32Uint, f.size),
     ] {
         images.insert(
             key(0, binding),

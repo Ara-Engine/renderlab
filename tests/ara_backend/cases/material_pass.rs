@@ -293,8 +293,10 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
 
 /// The miss sentinel after a camera move: a forward frame sequence (one program, so
 /// shading visits the misses of every covered tile) looks at a wall, then turns up past its
-/// top edge. Every miss the second frame shades holds the sentinel in word 1, the pixels the
-/// wall covered a frame earlier included. Runs with
+/// top edge. In the second frame every miss holds the sentinel in word 1: those shading
+/// visits (the debug reader checks them), the pixels the wall covered a frame earlier
+/// included, and those it never visits (fast-cleared tiles of sky, read back from word 1).
+/// No hit carries it. Runs with
 /// `RENDERLAB_MATERIAL_PASS=1 RENDERLAB_MATERIAL_DEBUG=receiver`.
 #[test]
 fn misses_carry_the_sentinel_after_the_camera_moves() -> Result<()> {
@@ -343,8 +345,16 @@ fn misses_carry_the_sentinel_after_the_camera_moves() -> Result<()> {
         disk_angle: 0.02,
     };
     let mut frames = Frames::default();
-    // Each pixel: Some(sentinel held) on a shaded miss, None otherwise.
-    let mut frame = |frames: &mut Frames, target: Vec3| -> Result<Vec<Option<bool>>> {
+    // Each pixel as the debug reader left it, with word 1 read back: shading writes w < 0 on a
+    // hit and w 3 on a miss (x 0 where word 1 holds the sentinel); a pixel it never visits
+    // (fast-cleared tiles of sky, the region's exterior) keeps the clear value.
+    #[derive(Clone, Copy, PartialEq)]
+    enum Seen {
+        Hit,
+        Miss { sentinel_seen: bool },
+        Unshaded,
+    }
+    let mut frame = |frames: &mut Frames, target: Vec3| -> Result<Vec<(Seen, bool)>> {
         let images = frames.render(
             &mut gpu,
             &cache,
@@ -381,40 +391,69 @@ fn misses_carry_the_sentinel_after_the_camera_moves() -> Result<()> {
                 ids: None,
             },
         )?;
+        let words = images.material_receiver.context("word 1 read back")?;
         Ok(images
             .hdr
             .as_chunks::<8>()
             .0
             .iter()
-            .map(|p| {
+            .zip(words.as_chunks::<16>().0)
+            .map(|(p, w)| {
                 let c = |k: usize| {
                     f16::from_bits(u16::from_le_bytes([p[2 * k], p[2 * k + 1]])).to_f32()
                 };
-                (c(3) == 3.0).then_some(c(0) == 0.0)
+                let seen = if c(3) < 0.0 {
+                    Seen::Hit
+                } else if c(3) == 3.0 {
+                    Seen::Miss {
+                        sentinel_seen: c(0) == 0.0,
+                    }
+                } else {
+                    Seen::Unshaded
+                };
+                (
+                    seen,
+                    u32::from_le_bytes([w[12], w[13], w[14], w[15]]) == u32::MAX,
+                )
             })
             .collect())
     };
-    let hits = |f: &[Option<bool>]| f.iter().filter(|p| p.is_none()).count();
     let first = frame(&mut frames, Vec3::new(0., 5., 0.))?;
     let second = frame(&mut frames, Vec3::new(0., 5., 5.))?;
+    let count = |f: &dyn Fn(&(Seen, bool)) -> bool| second.iter().filter(|p| f(p)).count();
     let uncovered = first
         .iter()
         .zip(&second)
-        .filter(|(a, b)| a.is_none() && b.is_some())
+        .filter(|(a, b)| a.0 == Seen::Hit && b.0 != Seen::Hit)
         .count();
-    let misses = second.iter().filter(|p| p.is_some()).count();
-    let held = second.iter().filter(|p| **p == Some(true)).count();
+    let misses = count(&|p| matches!(p.0, Seen::Miss { .. }));
+    let seen_bad = count(&|p| {
+        p.0 == Seen::Miss {
+            sentinel_seen: false,
+        }
+    });
+    let unshaded = count(&|p| p.0 == Seen::Unshaded);
+    let unshaded_bad = count(&|p| p.0 == Seen::Unshaded && !p.1);
+    let hits_marked = count(&|p| p.0 == Seen::Hit && p.1);
     println!(
-        "miss sentinel: first frame {} non-miss px, second {}; {uncovered} went from the wall to the sky; {held} of {misses} shaded misses hold the sentinel",
-        hits(&first),
-        hits(&second)
+        "miss sentinel: {uncovered} pixels went from the wall to the sky; {misses} shaded misses ({seen_bad} without the sentinel), {unshaded} never shaded ({unshaded_bad} without it), {hits_marked} hits carrying it"
     );
-    // Only covered tiles are shaded (tiles of sky alone are fast-cleared, their sentinel
-    // written by the same whole-image trace dispatch but not visible to the check).
     ensure!(
         uncovered > 50,
-        "the camera move uncovered too few shaded pixels ({uncovered})"
+        "the camera move uncovered too few pixels ({uncovered})"
     );
-    ensure!(held == misses, "{} misses lack the sentinel", misses - held);
+    ensure!(
+        misses > 0 && seen_bad == 0,
+        "{seen_bad} of {misses} shaded misses lack the sentinel"
+    );
+    ensure!(unshaded > 0, "no fast-cleared pixel in the frame");
+    ensure!(
+        unshaded_bad == 0,
+        "{unshaded_bad} of {unshaded} fast-cleared pixels lack the sentinel"
+    );
+    ensure!(
+        hits_marked == 0,
+        "{hits_marked} hits carry the miss sentinel"
+    );
     Ok(())
 }

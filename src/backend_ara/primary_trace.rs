@@ -42,7 +42,7 @@ pub(crate) fn source() -> Result<String> {
 }
 /// RENDERLAB_MATERIAL_PASS=1, the non-interactive trace (`primary_trace_receivers`, whose hits
 /// are repaired already): the miss sentinel on every pixel without a hit, and with `tail` the
-/// receiver words on hits (no near-edge mark: the point is the repaired one).
+/// receiver words on hits (the point is the repaired one).
 fn material_receivers_edits(trace: String, tail: bool) -> Result<String> {
     let mut edits: Vec<(&str, &str)> = vec![(
         "    if !primary_tile_covered(trace.record.x!=0u,id.xy,group.xy) || any(id.xy>=size) {return;}\n    let p=vec2<i32>(id.xy);\n    textureStore(primary_hit_output,p,trace.record);",
@@ -51,7 +51,7 @@ fn material_receivers_edits(trace: String, tail: bool) -> Result<String> {
     if tail {
         edits.push((
             "    let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);\n    textureStore(primary_world_output,",
-            "    let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);\n    rl_receiver_store(p,trace,receiver,false);\n    textureStore(primary_world_output,",
+            "    let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);\n    rl_receiver_store(p,trace,receiver);\n    textureStore(primary_world_output,",
         ));
     }
     let mut trace = trace;
@@ -172,15 +172,15 @@ fn material_trace_edits(soft: String, tail: bool) -> Result<String> {
         edits.extend([
             (
                 "        let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);\n        visible=fresh_estimate(",
-                "        let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);\n        rl_receiver_store(p,trace,receiver,primary_near_edge(trace,receiver.epsilon));\n        visible=fresh_estimate(".to_owned(),
+                "        let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);\n        rl_receiver_store(p,trace,receiver);\n        visible=fresh_estimate(".to_owned(),
             ),
             (
                 "trace.record.x,trace.record.y,trace.record.z,trace.record.w);\n        }\n",
-                "trace.record.x,trace.record.y,trace.record.z,trace.record.w);\n        }\n        rl_receiver_store(p,trace,receiver,near_edge);\n".to_owned(),
+                "trace.record.x,trace.record.y,trace.record.z,trace.record.w);\n        }\n        rl_receiver_store(p,trace,receiver);\n".to_owned(),
             ),
             (
                 "    let receiver=primary_receiver(trace.point,trace.positions,slot,p);\n",
-                "    let receiver=primary_receiver(trace.point,trace.positions,slot,p);\n    rl_receiver_store(p,trace,receiver,true);\n".to_owned(),
+                "    let receiver=primary_receiver(trace.point,trace.positions,slot,p);\n    rl_receiver_store(p,trace,receiver);\n".to_owned(),
             ),
         ]);
     }

@@ -2699,8 +2699,10 @@ pub(crate) fn material_trace_writes() -> String {
 {}{}{}{}// The miss sentinel: word 1.w all ones (slot 0x0fffffff; `rl_mr_miss`).
 fn rl_receiver_miss(p:vec2<i32>) {{ textureStore(rl_material1,p,vec4<u32>(0u,0u,0u,0xffffffffu)); textureStore(rl_material2,p,vec4<u32>(0u)); }}
 // A hit's receiver words: the trace's receiver, the interpolated vertex normal as shading's
-// entry builds it, and both sides (the entry's lit front equals its source front).
-fn rl_receiver_store(p:vec2<i32>,trace:PrimaryTrace,receiver:Receiver,near:bool) {{
+// entry builds it, and both sides (the entry's lit front equals its source front). The point
+// is the sun path's (the repair kernel rewrites the hits it moves), so no hit is marked near
+// an edge: the mark asks a reader to repair, and these need none.
+fn rl_receiver_store(p:vec2<i32>,trace:PrimaryTrace,receiver:Receiver) {{
     let slot=trace.record.x-1u;let batch=primary_placements[slot]&0x1fffffffu;let base=trace.record.y*3u;
     let bary=bitcast<vec2<f32>>(trace.record.zw);let w=vec3<f32>(1.0-bary.x-bary.y,bary);
     let m=normals[slot];let nm=mat3x3<f32>(m.x.xyz,m.y.xyz,m.z.xyz);
@@ -2710,8 +2712,10 @@ fn rl_receiver_store(p:vec2<i32>,trace:PrimaryTrace,receiver:Receiver,near:bool)
         let a=primary_vertices[batch].data[i*3u];let b=primary_vertices[batch].data[i*3u+1u];
         n+=unit_normal(nm*unit_normal(vec3<f32>(a.w,b.xy)))*w[k];
     }}
-    let front=dot(receiver.geometric,lighting.eye-receiver.world)>=0.0;
-    textureStore(rl_material1,p,vec4<u32>(rl_mr_oct(receiver.geometric),0u,0u,(slot&0x0fffffffu)|select(0u,1u<<28u,near)|select(0u,1u<<29u,receiver.thin)|select(0u,3u<<30u,front)));
+    // The near plane's point on this pixel's camera ray is on the eye's side of the receiver's
+    // plane, so this is the entry's `dot(geometric,eye-world)>=0` without the lighting uniform.
+    let front=dot(receiver.geometric,primary_ray(vec2<u32>(p),vec2<u32>(textureDimensions(rl_material1))).near-receiver.world)>=0.0;
+    textureStore(rl_material1,p,vec4<u32>(rl_mr_oct(receiver.geometric),0u,0u,(slot&0x0fffffffu)|select(0u,1u<<29u,receiver.thin)|select(0u,3u<<30u,front)));
     textureStore(rl_material2,p,vec4<u32>(bitcast<vec3<u32>>(receiver.world),rl_mr_epsilon(receiver.epsilon)|(rl_mr_oct12(n)<<8u)));
 }}
 "#,

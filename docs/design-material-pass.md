@@ -35,7 +35,21 @@ The receiver is what the sun, GI and light-visibility passes and shading read in
 
 Order in an interactive port frame: trace (raw hit; near-edge pixels queued) → `primary_repair_interactive` (repaired hit record) → material pass → shading. **The port keeps the camera ray and the sun's rays together in the trace kernel,** which has the hit in hand, so a separate sun kernel would buy nothing there by itself. The record feeds GI, the lights and shading. The desktop runs visibility → material → sun → GI → light visibility → shading (#98).
 
-**Misses:** with the pass on, the camera-hit trace kernels write a miss sentinel on every pixel without a hit: word 1.w all ones, so the slot reads `0x0fffffff` (`rl_mr_miss`, from word 1 alone). This covers the region's exterior too: the trace dispatches over the whole image, so the fast-clear blocks are written in the same kernel. The port cases `misses_carry_the_sentinel_after_the_camera_moves` (a wall, then the sky beside it) and the receiver case check every miss shading visits. The stores cost nothing measurable in the trace kernel.
+**Misses:** with the pass on, the camera-hit trace kernels write a miss sentinel on every pixel without a hit: word 1.w all ones, so the slot reads `0x0fffffff` (`rl_mr_miss`, from word 1 alone). This covers the region's exterior too: the trace dispatches over the whole image, so the fast-clear blocks are written in the same kernel. The stores cost nothing measurable in the trace kernel.
+
+The port case `misses_carry_the_sentinel_after_the_camera_moves` (a wall, then the camera turns past its top) asserts it, under both producers:
+- the 110 misses shading visits, the pixels the wall covered a frame earlier among them;
+- the 11,328 pixels shading never visits (fast-cleared tiles of sky), read back from word 1 (`ForwardImages::material_receiver`, filled only under the receiver check);
+- no hit carries it.
+
+**What word 2's point means depends on the producer.** Readers follow one rule:
+
+| producer | word 2's point | near-edge mark (word 1, bit 28) |
+|---|---|---|
+| the material pass's writer (#107) | shading's barycentric point | set where the hit is near an edge; there the sun path's repair may move the point |
+| the trace tail (`tracetail`, the port's plan) | the sun path's point: the repair kernel rewrites the hits it moves | never set |
+
+The rule: **a marked hit's point is shading's.** A reader that needs the sun path's point (the sun pass) repairs a marked hit from the hit image, as `primary_penumbra_receiver` does. Every other reader uses word 2 as it is. Unmarked points are never repaired, so a repaired point is never repaired again; the trace tail marks nothing. GI, the lights and shading may read word 2 as is under either producer; the sun pass must honour the mark.
 
 ### What shading still reads after `surface` (the audit)
 
