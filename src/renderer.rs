@@ -3577,6 +3577,9 @@ impl Renderer {
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
+                self.ensure_gi_receiver_pass(shading)?;
+                mark(&mut encoder, "gi_receiver");
+                self.encode_gi_receiver_pass(&mut encoder, shading);
                 if !self.view.outputs.modes.shades() {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
@@ -3584,9 +3587,6 @@ impl Renderer {
                 self.ensure_reflection_trace(shading)?;
                 self.ensure_reflection_hits(shading)?;
                 self.write_reflection_pass_frame();
-                self.ensure_gi_receiver_pass(shading)?;
-                mark(&mut encoder, "gi_receiver");
-                self.encode_gi_receiver_pass(&mut encoder, shading);
                 mark(&mut encoder, "shading");
                 if self.view.outputs.modes.shades() {
                     self.encode_view_shading(&mut encoder, shading, stamps(0))?;
