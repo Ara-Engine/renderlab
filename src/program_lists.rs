@@ -209,6 +209,15 @@ impl PrimaryState {
     pub fn list_shade_layout(&self, shading: Shading) -> &wgpu::BindGroupLayout {
         &self.list_layouts.shade[shading as usize]
     }
+    /// The list shading ABI of `Shading` index `shading`, which the reflection pass's
+    /// mixed-frame hit pipelines share (reflection_hits_gpu.rs).
+    pub(super) fn list_layout(&self, shading: usize) -> &wgpu::PipelineLayout {
+        &self.list_layouts.layouts[shading]
+    }
+    /// The list group's dynamic-offset stride between frame slots, once lists exist.
+    pub(super) fn list_stride(&self) -> Option<u32> {
+        self.lists.as_ref().map(|l| l.stride)
+    }
     /// Whether the prepared frame shades per program (`encode_program_lists`).
     pub fn mixed(&self) -> bool {
         self.programs.len() > 1
