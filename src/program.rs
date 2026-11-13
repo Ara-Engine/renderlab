@@ -77,6 +77,111 @@ const REFLECTION_ENTRY_SEAM: &str =
 /// U-RTVIS: in the reflection resolve's pre-pass (`rl_prepass`, RENDERLAB_RL_RESOLVE_PASS=1) the
 /// entry stops after the receiver's reflection, before its indirect inputs and `shade`.
 const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    if rl_prepass() {return;}\n    rl_indirect_prepare(surface_input);\n";
+/// `RENDERLAB_RL_HIT_REUSE` (S4a, docs/design-hit-reuse.md; off by default): `1` lets a
+/// reflection hit take TR1's resolved colour where its own surface point was last frame,
+/// instead of being shaded, when it passes the reuse test (shaders/reflection_hit_reuse.wgsl).
+/// `mask`, `all` and `none` are its measurement forms: reused hits 1 and the rest 0, every hit
+/// 1, every hit 0, so the frame's reused share is (mask - none) / (all - none).
+/// `RENDERLAB_RL_HIT_REUSE_TUNE=depth=D,slack=S,weight=W,rough=R,transmit=T` sets the test's
+/// tolerances (defaults 0.01, 0.02 m, 4, 0.5, 0.5). Read once per process.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct HitReuse {
+    mode: u32,
+    depth: f32,
+    slack: f32,
+    weight: f32,
+    rough: f32,
+    transmit: f32,
+}
+pub(crate) fn hit_reuse() -> Option<HitReuse> {
+    static REUSE: std::sync::OnceLock<Option<HitReuse>> = std::sync::OnceLock::new();
+    *REUSE.get_or_init(|| {
+        let mode = match std::env::var("RENDERLAB_RL_HIT_REUSE").ok()?.as_str() {
+            "1" => 0,
+            "mask" => 1,
+            "all" => 2,
+            "none" => 3,
+            _ => return None,
+        };
+        let mut reuse = HitReuse {
+            mode,
+            depth: 0.01,
+            slack: 0.02,
+            weight: 4.0,
+            rough: 0.5,
+            transmit: 0.5,
+        };
+        let tune = std::env::var("RENDERLAB_RL_HIT_REUSE_TUNE").unwrap_or_default();
+        for (name, value) in tune.split(',').filter_map(|kv| kv.split_once('=')) {
+            let Ok(value) = value.trim().parse::<f32>() else {
+                continue;
+            };
+            match name.trim() {
+                "depth" => reuse.depth = value,
+                "slack" => reuse.slack = value,
+                "weight" => reuse.weight = value,
+                "rough" => reuse.rough = value,
+                "transmit" => reuse.transmit = value,
+                _ => {}
+            }
+        }
+        Some(reuse)
+    })
+}
+const HIT_REUSE: &str = include_str!("../shaders/reflection_hit_reuse.wgsl");
+/// `source` (a tracing module) with the reuse test ahead of its cache-hit hook, the hook renamed
+/// `rl_cache_hit_inner`, and TR1's restart-zone tests over the frame record where absent.
+fn with_hit_reuse(source: String, reuse: HitReuse) -> String {
+    const HOOK: &str = "fn rl_cache_hit(";
+    const PROGRAM: &str = "// ---- program ----\n";
+    assert_eq!(
+        source.matches(HOOK).count(),
+        1,
+        "hit reuse: the cache-hit hook"
+    );
+    assert_eq!(
+        source.matches(PROGRAM).count(),
+        1,
+        "hit reuse: the program seam"
+    );
+    let mut module = HIT_REUSE
+        .replace(
+            "const RL_REUSE_DEPTH:f32=0.01;",
+            &format!("const RL_REUSE_DEPTH:f32={:?};", reuse.depth),
+        )
+        .replace(
+            "const RL_REUSE_SLACK:f32=0.02;",
+            &format!("const RL_REUSE_SLACK:f32={:?};", reuse.slack),
+        )
+        .replace(
+            "const RL_REUSE_WEIGHT:f32=4.0;",
+            &format!("const RL_REUSE_WEIGHT:f32={:?};", reuse.weight),
+        )
+        .replace(
+            "const RL_REUSE_ROUGH:f32=0.5;",
+            &format!("const RL_REUSE_ROUGH:f32={:?};", reuse.rough),
+        )
+        .replace(
+            "const RL_REUSE_TRANSMIT:f32=0.5;",
+            &format!("const RL_REUSE_TRANSMIT:f32={:?};", reuse.transmit),
+        )
+        .replace(
+            "const RL_REUSE_MODE:u32=0u;",
+            &format!("const RL_REUSE_MODE:u32={}u;", reuse.mode),
+        );
+    if !source.contains("fn tr1_relit(") {
+        module.push_str(
+            &crate::renderer::primary_ray_gpu::temporal_reconstruction::zones_source(
+                "primary_frame.zones",
+            ),
+        );
+    }
+    source.replacen(HOOK, "fn rl_cache_hit_inner(", 1).replacen(
+        PROGRAM,
+        &format!("{module}{PROGRAM}"),
+        1,
+    )
+}
 /// Reflection hits trace their own light visibility: the frame's belongs to its receivers.
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";
@@ -802,6 +907,9 @@ fn compose_stage(
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
             1,
         );
+        if let Some(reuse) = hit_reuse() {
+            source = with_hit_reuse(source, reuse);
+        }
         // `LocalShadows::unshadowed_hits_from`: rough enough hits light local lights unshadowed.
         assert_eq!(source.matches(LOCAL_VISIBILITY_SEAM).count(), 1);
         source = source.replacen(
