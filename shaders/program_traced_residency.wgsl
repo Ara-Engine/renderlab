@@ -77,5 +77,7 @@ fn sample_normal_layer_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:v
         }
         rl_record(input.pixel,3u*i+2u,word,probe);
     }
-    return rl_normal_texel(input,textureSampleGrad(primary_normal_map[i],primary_normal_sampler[i],uv,layer,dx,dy));
+    let s=textureSampleGrad(primary_normal_map[i],primary_normal_sampler[i],uv,layer,dx,dy);
+    if input.material.normal_mapped!=2u || layer!=0 { return s; }
+    return rl_normal_texel(s,textureSampleGrad(primary_normal_map[i],primary_normal_sampler[i],uv,1,dx,dy).r);
 }

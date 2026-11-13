@@ -2268,13 +2268,23 @@ impl Renderer {
         bytes: u64,
     ) -> Texture {
         let role = data.format.role();
+        // BC5 normal maps add their variance layer (src/normal_variance_bc.rs).
+        let layers: Vec<Vec<Vec<u8>>> = if data.format == asset::BlockFormat::Bc5 {
+            vec![
+                data.mips.clone(),
+                crate::normal_variance_bc::variance_layer(data),
+            ]
+        } else {
+            vec![data.mips.clone()]
+        };
+        let bytes = bytes * layers.len() as u64;
         let texture = self.ledger.own(
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("immutable material texture, block-compressed"),
                 size: wgpu::Extent3d {
                     width: data.width,
                     height: data.height,
-                    depth_or_array_layers: 1,
+                    depth_or_array_layers: layers.len() as u32,
                 },
                 mip_level_count: data.mips.len() as u32,
                 sample_count: 1,
@@ -2290,29 +2300,36 @@ impl Renderer {
             ResourceKind::TextureView,
         );
         let block = asset::BlockFormat::BLOCK;
-        for (level, blocks) in data.mips.iter().enumerate() {
-            let (w, h) = data.level_size(level as u32);
-            // Copies cover the level's physical size: whole blocks, also under 4x4 texels.
-            self.queue.write_texture(
-                wgpu::TexelCopyTextureInfo {
-                    mip_level: level as u32,
-                    ..texture.as_image_copy()
-                },
-                blocks,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(asset::BlockFormat::row_bytes(w)),
-                    rows_per_image: None,
-                },
-                wgpu::Extent3d {
-                    width: w.div_ceil(block) * block,
-                    height: h.div_ceil(block) * block,
-                    depth_or_array_layers: 1,
-                },
-            );
-            self.uploads.textures += blocks.len() as u64;
-            self.uploads.texture_writes += 1;
-            self.uploads.write_calls += 1;
+        for (layer, levels) in layers.iter().enumerate() {
+            for (level, blocks) in levels.iter().enumerate() {
+                let (w, h) = data.level_size(level as u32);
+                // Copies cover the level's physical size: whole blocks, also under 4x4 texels.
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        mip_level: level as u32,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer as u32,
+                        },
+                        ..texture.as_image_copy()
+                    },
+                    blocks,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(asset::BlockFormat::row_bytes(w)),
+                        rows_per_image: None,
+                    },
+                    wgpu::Extent3d {
+                        width: w.div_ceil(block) * block,
+                        height: h.div_ceil(block) * block,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                self.uploads.textures += blocks.len() as u64;
+                self.uploads.texture_writes += 1;
+                self.uploads.write_calls += 1;
+            }
         }
         Texture(Arc::new(crate::material::TextureInner {
             block: Some(data.format),

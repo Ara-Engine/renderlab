@@ -230,6 +230,8 @@ impl MaterialDescriptor<'_> {
             .map_or(0u32, |t| match t.texture.0.role {
                 TextureRole::NormalVarianceLinear => 1,
                 TextureRole::NormalSlopeMoments => 2,
+                // BC5 maps carry their variance in layer 1 (rl_normal_texel's alpha).
+                _ if t.texture.0.block == Some(renderlab_asset::BlockFormat::Bc5) => 1,
                 _ => 0,
             });
         bytes[40..44].copy_from_slice(&variance.to_ne_bytes());
