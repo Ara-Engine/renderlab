@@ -85,11 +85,13 @@ fn large_buffers(adapter: &wgpu::Limits) -> wgpu::Limits {
     }
 }
 fn non_rt_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
-    // U-RTVIS: the non-RT renderer runs the compacted reflection pass and its deferred composite
-    // by default where the adapter holds their bindings (reflection_pass.rs `default_on` reads
-    // the device's limits); RENDERLAB_RL_PASS=0 keeps the visibility path's own limits.
+    // U-RTVIS: the compacted reflection pass and its deferred composite need raised limits where
+    // they run: with RENDERLAB_RL_PASS=1, or by default once reflection_pass.rs `NON_RT_DEFAULT`
+    // is on (`default_on` reads the device's limits). Otherwise the visibility path's own limits.
     let limits = crate::visibility_limits(large_buffers(adapter));
-    if crate::program::rl_pass_env() == Some(false) {
+    let wanted = crate::program::rl_pass_env()
+        .unwrap_or(crate::renderer::primary_ray_gpu::reflection_pass::NON_RT_DEFAULT);
+    if !wanted {
         return limits;
     }
     pass_limits(limits, adapter)
