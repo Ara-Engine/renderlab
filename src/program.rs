@@ -74,7 +74,9 @@ const REFLECTION_STUB: &str = "struct SpecularLobe { normal:vec3<f32>, alpha:f32
 /// read the open environment state (`rl_indirect_open`).
 const REFLECTION_ENTRY_SEAM: &str =
     "    rl_indirect_prepare(surface_input);\n    let surface_output=surface(surface_input);\n";
-const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    rl_indirect_prepare(surface_input);\n";
+/// U-RTVIS: in the reflection resolve's pre-pass (`rl_prepass`, RENDERLAB_RL_RESOLVE_PASS=1) the
+/// entry stops after the receiver's reflection, before its indirect inputs and `shade`.
+const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    if rl_prepass() {return;}\n    rl_indirect_prepare(surface_input);\n";
 /// Reflection hits trace their own light visibility: the frame's belongs to its receivers.
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";
@@ -104,6 +106,114 @@ const RL_SPLIT: [(&str, &str); 4] = [
         "        return soft/f32(visited);\n",
     ),
 ];
+/// U-RTVIS reflection history (shaders/reflections_history.wgsl): the wgpu renderer's primary
+/// shading modules bind it (group 0, bindings 54 and 55), so only they replace the stubs.
+/// Off by default (unset: today's inline full set every frame). `RENDERLAB_RL_HISTORY=1` turns on
+/// the candidate, with the resolve pass (`rl_resolve_pass_on`): glossy receivers trace four strata
+/// a frame into the history and rl_resolve (docs/rtvis.md).
+const REFLECTION_HISTORY: &str = include_str!("../shaders/reflections_history.wgsl");
+const RL_HISTORY_STUBS: [&str; 2] = ["// ---- rl history stubs ----\n", "// ---- end of rl history stubs ----\n"];
+pub(crate) fn rl_history_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY").is_ok_and(|v| v == "1"))
+}
+/// U-RTVIS measurement: `RENDERLAB_RL_HISTORY_TUNE=strata=S,cap=C,moving=M,sigma=K` replaces
+/// reflections.wgsl's RL_HISTORY_STRATA, _CAP, _MOVING and _SIGMA.
+fn rl_history_tune(mut source: String) -> String {
+    static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let list = LIST.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY_TUNE").unwrap_or_default());
+    for (key, value) in list.split(',').filter_map(|s| s.trim().split_once('=')) {
+        let (name, ty, text) = match key {
+            "strata" => ("RL_HISTORY_STRATA", "u32", format!("{value}u")),
+            "rough_strata" => ("RL_HISTORY_ROUGH_STRATA", "u32", format!("{value}u")),
+            "cap" => ("RL_HISTORY_CAP", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
+            "moving" => ("RL_HISTORY_MOVING", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
+            "sigma" => ("RL_HISTORY_SIGMA", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
+            _ => continue,
+        };
+        let prefix = format!("const {name}:{ty}=");
+        let at = source.find(&prefix).expect("RENDERLAB_RL_HISTORY_TUNE seam");
+        let end = at + source[at..].find(';').unwrap();
+        source.replace_range(at..end, &format!("{prefix}{text}"));
+    }
+    source
+}
+/// U-RTVIS: `RENDERLAB_RL_RESOLVE=1` reads the history under a moving camera too, through the
+/// spatial resolve (reflections_history.wgsl RL_RESOLVE). Off by default.
+pub(crate) fn rl_resolve_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE").is_ok_and(|v| v == "1"))
+        || rl_resolve_pass_on()
+}
+/// U-RTVIS: with the history on, the frame's shading shows rl_resolve's output (a pre-pass, the
+/// resolve, then the shading pass; shaders/reflections_resolve.wgsl) and reads history under
+/// motion too. On whenever the history is; `RENDERLAB_RL_RESOLVE_PASS=0` keeps the history to
+/// still frames.
+pub(crate) fn rl_resolve_pass_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE_PASS").map_or(true, |v| v != "0"))
+}
+/// U-RTVIS reflection pass (src/reflection_pass.rs): `RENDERLAB_RL_PASS=1` writes glossy
+/// receivers' lobes from primary shading (shaders/reflections_lobe.wgsl, group 0 bindings 56-58)
+/// and runs `rl_trace` after it. Off by default.
+const REFLECTION_LOBE: &str = include_str!("../shaders/reflections_lobe.wgsl");
+const RL_PASS_STUBS: [&str; 2] = ["// ---- rl pass stubs ----\n", "// ---- end of rl pass stubs ----\n"];
+const REFLECTION_TRACE: &str = include_str!("../shaders/reflections_trace.wgsl");
+pub(crate) fn rl_pass_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_PASS").is_ok_and(|v| v == "1"))
+}
+/// `rl_trace`'s module on a traced shading `head`: the standard program's traced composition
+/// (the reflection block's helpers, with its stubs) and the trace entries.
+pub(crate) fn rl_trace_source(head: &str) -> String {
+    let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
+    format!("{}\n{REFLECTION_TRACE}", composed.source)
+}
+/// `composed` with the block between `markers` replaced by `text`, moving the program's range.
+fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Composed {
+    let Some(begin) = composed.source.find(markers[0]) else {
+        return composed;
+    };
+    let end = composed.source[begin..].find(markers[1]).unwrap() + begin + markers[1].len();
+    assert!(end <= composed.program.start, "reflection stubs precede the program");
+    composed.source.replace_range(begin..end, text);
+    let shift = text.len() as isize - (end - begin) as isize;
+    let moved = |at: usize| (at as isize + shift) as usize;
+    composed.program = moved(composed.program.start)..moved(composed.program.end);
+    composed
+}
+/// `composed` with the reflection history and the reflection pass's lobe in place of their
+/// stubs, each while its switch is on (wgpu primary shading modules only).
+pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
+    let composed = if rl_pass_on() {
+        replace_block(composed, RL_PASS_STUBS, REFLECTION_LOBE)
+    } else {
+        composed
+    };
+    with_history_block(composed)
+}
+fn with_history_block(mut composed: Composed) -> Composed {
+    if !rl_history_on() {
+        return composed;
+    }
+    let Some(begin) = composed.source.find(RL_HISTORY_STUBS[0]) else {
+        return composed;
+    };
+    let end = composed.source[begin..].find(RL_HISTORY_STUBS[1]).unwrap() + begin + RL_HISTORY_STUBS[1].len();
+    assert!(end <= composed.program.start, "the history stubs precede the program");
+    let history = if rl_resolve_pass_on() {
+        REFLECTION_HISTORY.replacen("const RL_RESOLVE_PASS:bool=false;", "const RL_RESOLVE_PASS:bool=true;", 1)
+    } else if rl_resolve_on() {
+        REFLECTION_HISTORY.replacen("const RL_RESOLVE:bool=false;", "const RL_RESOLVE:bool=true;", 1)
+    } else {
+        REFLECTION_HISTORY.to_owned()
+    };
+    composed.source.replace_range(begin..end, &history);
+    let shift = history.len() as isize - (end - begin) as isize;
+    let moved = |at: usize| (at as isize + shift) as usize;
+    composed.program = moved(composed.program.start)..moved(composed.program.end);
+    composed
+}
 fn rl_split(mut source: String) -> String {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if !*ON.get_or_init(|| std::env::var("RENDERLAB_RL_SPLIT").map_or(true, |v| v != "0")) {
@@ -121,13 +231,22 @@ fn rl_split(mut source: String) -> String {
 }
 /// U-RTVIS measurement switches (`RENDERLAB_RL_HIT`, a comma list), reflection hits only:
 /// `local` leaves shadowed local lights unshadowed, `sun` skips the hit's sun shadow ray,
-/// `nolights` gives every light zero incidence, `black` skips the hit's `surface` and `shade`.
-/// They change the picture; unset, nothing changes.
+/// `nolights` gives every light zero incidence, `black` skips the hit's `surface` and `shade`,
+/// `strata=N` caps a glossy pixel's strata at N (RL_GLOSSY_MAX, 16).
+/// Two act on every pixel, camera receivers included, to split lights and shadows between
+/// primary pixels and reflection hits: `alllights` (every light zero incidence) and
+/// `allshadows` (every light fully visible). They change the picture; unset, nothing changes.
 fn rl_hit_switches(source: String) -> String {
     static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let list = LIST.get_or_init(|| std::env::var("RENDERLAB_RL_HIT").unwrap_or_default());
     let mut source = source;
     for switch in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(n) = switch.strip_prefix("strata=") {
+            let from = "const RL_GLOSSY_MAX:u32=16u;";
+            assert_eq!(source.matches(from).count(), 1, "RENDERLAB_RL_HIT strata");
+            source = source.replacen(from, &format!("const RL_GLOSSY_MAX:u32={n}u;"), 1);
+            continue;
+        }
         let (from, to) = match switch {
             "local" => (
                 "    if lights[s.index].kind.w!=0u { return rl_local_shadow(",
@@ -140,6 +259,14 @@ fn rl_hit_switches(source: String) -> String {
             "nolights" => (
                 "    return LightSample(index,l,attenuation,",
                 "    return LightSample(index,l,select(attenuation,0.0,rl_reflection_hit),",
+            ),
+            "alllights" => (
+                "    return LightSample(index,l,attenuation,",
+                "    return LightSample(index,l,0.0,",
+            ),
+            "allshadows" => (
+                "fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {",
+                "fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 { return 1.0; }\nfn rl_unused_visibility(input:SurfaceInput, s:LightSample) -> f32 {",
             ),
             "black" => (
                 "                let hs=surface(h.input);\n                radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n",
@@ -159,10 +286,12 @@ fn rl_hit_switches(source: String) -> String {
 
 /// The reflection API text for `program` on `head` at `stage`, and whether it traces: empty
 /// for programs that name neither hook nor input, so their modules are unchanged.
-fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
+/// `hits` composes the traced block whatever the program declares, for the hit-shading
+/// module (`compose_hits`): any program's draw can be hit.
+fn reflection_api(head: &str, program: &str, stage: Stage, hits: bool) -> (String, bool) {
     let names = tokens(program);
-    let lobe = names.windows(2).any(|w| w == ["fn", "reflection_lobe"]);
-    let reads = names.contains(&"specular_incident");
+    let lobe = hits || names.windows(2).any(|w| w == ["fn", "reflection_lobe"]);
+    let reads = hits || names.contains(&"specular_incident");
     if !lobe && !reads {
         return (String::new(), false);
     }
@@ -223,9 +352,16 @@ const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_softw
 /// R1's two ray queries and their software replacements: the hit's light visibility, and
 /// the reflection ray itself, which yields the same hit record. The queries' declarations
 /// (`SOFTWARE_REFLECTION_QUERY`, wherever R1 declares them) are removed. The software hit keeps
-/// rs_trace's result (`rs`, U-RTVIS's seam): cache-terminated hits read its distance `rs.t`
-/// where the hardware path reads `hit.t`.
-const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 3] = [
+/// rs_trace's result (`rs`, U-RTVIS's seam): the resolve and cache-terminated hits read its
+/// distance `rs.t` where the hardware path reads `hit.t`.
+const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 5] = [
+    // The resolve's hit distance: the software traversal's own (`rs`, the loop seam below; the
+    // cache-terminated hits can read `rs.t` the same way).
+    ("            rl_dist+=hit.t;rl_dist_n+=1.0;\n", "            rl_dist+=rs.t;rl_dist_n+=1.0;\n"),
+    (
+        "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,tmin,RL_FAR,origin,d));\n    while rayQueryProceed(&query) {}\n    let hit=rayQueryGetCommittedIntersection(&query);\n    if hit.kind==0u {return RlCast(vec4<u32>(0u),-1.0);}\n    return RlCast(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),hit.t);\n",
+        "    let hit=rs_trace(origin,d,tmin,RL_FAR,false);\n    return RlCast(hit.record,select(-1.0,hit.t,hit.record.x!=0u));\n",
+    ),
     (
         "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,tmax,origin,l));\n    while rayQueryProceed(&query) {}\n    return select(1.0,0.0,rayQueryGetCommittedIntersection(&query).kind!=0u);\n",
         "    return select(1.0,0.0,rs_blocked(origin,l,receiver.epsilon,tmax));\n",
@@ -556,6 +692,16 @@ pub(crate) struct Composed {
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
+    compose_stage(head, program, stage, parameters, false)
+}
+/// `compose`, or with `hits` the hit-shading module (`compose_hits`).
+fn compose_stage(
+    head: &str,
+    program: &str,
+    stage: Stage,
+    parameters: bool,
+    hits: bool,
+) -> Composed {
     let streamed;
     let cell_entry;
     let (api, binding, entry) = match stage {
@@ -615,7 +761,12 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     } else {
         crate::atmosphere::api_source()
     };
-    let (mut reflection, traces) = reflection_api(head, program, stage);
+    let (mut reflection, traces) = reflection_api(head, program, stage, hits);
+    // The hit module of a program that traces no lobe: its own pixels never trace, but the
+    // reflection block names the hook.
+    if hits && !declares(program, "fn", "reflection_lobe") {
+        reflection.push_str(REFLECTION_LOBE_STUB);
+    }
     if traces {
         // M7-R1: the indirect inputs' cache-off state, which reads the open environment.
         reflection.push_str(match (indirect_calls, specular) {
@@ -646,7 +797,7 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
             1,
         );
-        source = rl_split(rl_hit_switches(source));
+        source = rl_history_tune(rl_split(rl_hit_switches(source)));
     }
     let start = source.len();
     source.push_str(program);
@@ -662,10 +813,18 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             source.push_str(traced_hit_helpers());
         }
     }
-    if traces {
+    if hits {
+        // The stage's entry as written (its decode helpers are the hits' too; its own entry
+        // point goes unused), then the hit entry.
+        source.push_str(entry);
+        source.push_str(crate::renderer::reflection_hits::ENTRY);
+    } else if traces {
         // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
         source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
+        if rl_deferred() && declares(program, "const", "RL_DEFERRED") {
+            source = deferred_variant(&source);
+        }
     } else {
         source.push_str(entry);
     }
@@ -673,6 +832,46 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         source,
         program: program_range,
     }
+}
+
+// ---- Deferred reflections (the program side; U-RTVIS's composite reads them) ----
+/// Whether traced shading writes the deferred reflection composite's inputs:
+/// `RENDERLAB_RL_DEFERRED=1`, off by default. Read once per process.
+pub(crate) fn rl_deferred() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_DEFERRED").is_ok_and(|v| v == "1"))
+}
+/// The program API's report, which deferred modules replace with `DEFERRED_REPORT`.
+const DEFERRED_REPORT_STUB: &str =
+    "fn reflection_report(reflectance:vec3<f32>, untraced:vec3<f32>) {}";
+const DEFERRED_API: &str = include_str!("../shaders/reflections_deferred.wgsl");
+/// The traced entry's pixel, where a deferred module first clears its outputs.
+const DEFERRED_CLEAR_SEAM: &str =
+    "let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);";
+/// A traced shading module (`compose` output) of a program that declares `const
+/// RL_DEFERRED`, made to write the deferred composite's inputs: the report keeps the
+/// program's reflectance and untraced specular, and the entry writes them through the pixel's
+/// fog and aerial perspective, with the traced fraction (binding 62: reflectance rgb and w;
+/// 63: untraced specular). Every pixel the entry visits starts cleared, so misses and culled
+/// faces leave zero.
+pub(crate) fn deferred_variant(composed: &str) -> String {
+    for seam in [DEFERRED_REPORT_STUB, DEFERRED_CLEAR_SEAM, VIEW_STORE_SEAM] {
+        assert_eq!(composed.matches(seam).count(), 1, "deferred seam {seam}");
+    }
+    let mut source = composed
+        .replacen(DEFERRED_REPORT_STUB, "", 1)
+        .replacen(
+            DEFERRED_CLEAR_SEAM,
+            &format!("{DEFERRED_CLEAR_SEAM}\n    rl_deferred_clear(pixel);"),
+            1,
+        )
+        .replacen(
+            VIEW_STORE_SEAM,
+            &format!("{VIEW_STORE_SEAM}\n    rl_deferred_store(pixel,input.world);"),
+            1,
+        );
+    source.push_str(DEFERRED_API);
+    source
 }
 
 // ---- View modes (docs/design-id-output.md) ----
@@ -726,6 +925,42 @@ pub(crate) fn view_variant(
     Ok(source)
 }
 // ---- end of view modes ----
+
+// ---- Reflection hit shading (docs/design-reflection-pass.md) ----
+/// `reflection_lobe` for a program that declares none: no lobe.
+const REFLECTION_LOBE_STUB: &str = "fn reflection_lobe(s:Surface,input:SurfaceInput)->SpecularLobe { return SpecularLobe(vec3<f32>(0.0,0.0,1.0),0.0,0.0); }\n";
+/// The hit-shading module of `program` on a traced stage: `compose`'s text with the reflection
+/// block composed whatever the program declares, and the `reflection_hits` entry
+/// (shaders/reflection_hits.wgsl) after the stage's entry, whose decode helpers it shares.
+/// Hits run the same hit code as the inline path: `rl_hit_input`, the program's `surface`
+/// and `shade`, its lights.
+/// With `lists` (a mixed-program frame, shaded per program on MP1's list ABI) the module
+/// also declares MP1's slot uniform and keeps only the hits on its own slot's draws.
+pub(crate) fn compose_hits(
+    head: &str,
+    program: &str,
+    stage: Stage,
+    parameters: bool,
+    lists: bool,
+) -> Composed {
+    debug_assert!(matches!(stage, Stage::Traced | Stage::TracedStreamed));
+    let mut composed = compose_stage(head, program, stage, parameters, true);
+    if lists {
+        assert_eq!(
+            composed.source.matches(HITS_MINE).count(),
+            1,
+            "reflection_hits seam"
+        );
+        composed.source = composed.source.replacen(HITS_MINE, HITS_MINE_LIST, 1);
+    }
+    composed
+}
+/// shaders/reflection_hits.wgsl's per-program filter, and its mixed-frame replacement: the
+/// hit's draw's frame slot against this dispatch's (program_traced_list.wgsl RlList, at
+/// binding 38 with a dynamic offset per slot).
+const HITS_MINE: &str = "fn rl_hits_mine(placement:u32)->bool { return true; }\n";
+const HITS_MINE_LIST: &str = "struct RlList { slot:u32, base:u32, capacity:u32, flags:u32, programs:array<vec4<u32>,PRIMARY_BATCHES/4> };\n@group(0) @binding(38) var<uniform> rl_list:RlList;\nfn rl_hits_mine(placement:u32)->bool { let batch=primary_placements[placement]&0x1fffffffu; return rl_list.programs[batch>>2u][batch&3u]==rl_list.slot; }\n";
+// ---- end of reflection hit shading ----
 
 // ---- MP1 per-program dispatch (docs/m7-mp1.md) ----
 /// The tile-list shading entry of mixed-program frames (`primary_shade_list`).
@@ -835,6 +1070,17 @@ pub(crate) fn uses_indirect(program: &str) -> bool {
 /// input: SurfaceInput) -> vec3<f32>` (docs/m7-tp1.md).
 pub(crate) fn declares_transmittance(program: &str) -> bool {
     declares(program, "fn", "transmittance")
+}
+/// Whether `program` declares `const FILMS`: for a transparent material with an index of
+/// refraction of one and no thickness (a film: Ara's glTF BLEND), its `transmittance` is
+/// exactly `1 - coverage` in every channel and its `shade` is already scaled by coverage, so
+/// the engine draws such materials with hardware blending over what is behind them instead
+/// of reading a copy of it (docs/api.md). Programs without it keep the copy path.
+pub(crate) fn declares_films(program: &str) -> bool {
+    static COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // `RENDERLAB_FILMS=copy` draws films on the copy path, as before (A/B).
+    let copy = *COPY.get_or_init(|| std::env::var("RENDERLAB_FILMS").is_ok_and(|v| v == "copy"));
+    !copy && declares(program, "const", "FILMS") && declares_transmittance(program)
 }
 // TP2: the forward glass pass supplies the declared lobe to R1 separately.
 pub(crate) fn declares_reflection(program: &str) -> bool {

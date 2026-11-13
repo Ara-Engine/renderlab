@@ -257,6 +257,8 @@ mod hzb_cases;
 
 #[path = "ara_backend/cases/program_bins.rs"]
 mod program_bins_cases;
+#[path = "ara_backend/cases/reflection_hit_bins.rs"]
+mod reflection_hit_bins_cases;
 #[path = "ara_backend/program_bins.rs"]
 mod program_bins_reference;
 
@@ -478,6 +480,9 @@ mod depth_of_field_cases;
 
 #[path = "ara_backend/cases/panes.rs"]
 mod pane_cases;
+
+#[path = "ara_backend/cases/deferred_reflections.rs"]
+mod deferred_reflection_cases;
 
 #[path = "ara_backend/cases/programs.rs"]
 mod program_cases;

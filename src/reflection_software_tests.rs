@@ -341,3 +341,39 @@ fn gpu_r1n_mirror_identity() {
         "ReflectionSettings::off() kept the reflection"
     );
 }
+
+/// Deferred reflections (`program::deferred_variant`): the standard program declares
+/// `RL_DEFERRED`, the toon program does not, and the standard program's traced module with
+/// the deferred inputs validates on the RT and both non-RT shading heads. It clears both
+/// outputs where the entry starts and writes them after `shade`, through the fog.
+#[test]
+fn deferred_reflection_modules_validate_on_every_traced_head() {
+    use crate::program::{Stage, compose, deferred_variant};
+    let toon = include_str!("../shaders/programs/toon.wgsl");
+    assert!(!toon.contains("RL_DEFERRED"));
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let mut validated = 0;
+    for head in rt.iter().chain(&non_rt) {
+        let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false).source;
+        if !composed.contains("rl_specular") {
+            continue;
+        }
+        validated += 1;
+        let source = deferred_variant(&composed);
+        assert!(
+            source.contains("rl_deferred_clear(pixel);")
+                && source.contains("rl_deferred_store(pixel,input.world);")
+        );
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+    // The soft RT head and both non-RT heads trace reflections; the hard RT head does not.
+    assert!(validated >= 3, "{validated} traced heads validated");
+}

@@ -37,7 +37,9 @@ fn view_data(s:Surface, input:SurfaceInput) -> ViewData {
 // reflectance leave, tinted by its base colour. At one (no interface: a plain alpha-blended
 // film, as Ara declares a glTF BLEND material) it is what the coverage leaves, untinted and
 // at every angle, as glTF, Unity and Unreal blend (`shade` blends the film's own light by
-// coverage to match).
+// coverage to match). FILMS declares exactly that for an IOR of one and no thickness, so the
+// engine may blend such draws in hardware (docs/api.md).
+const FILMS:bool=true;
 fn transmittance(s:Surface, input:SurfaceInput) -> vec3<f32> {
     let ior=transparent_ior(input.material);
     if ior<=1.0 { return vec3<f32>(1.0-s.alpha); }
@@ -82,6 +84,9 @@ fn lobe_weight(sharpness:f32, rough:f32) -> f32 {
 // their mean exposed radiance, with the traced fraction in w. The weight is the luminance of
 // the reflectance `shade` multiplies that radiance by, so the engine can skip pixels where
 // what the trace could change stays invisible (stone's F0 of 0.04 against a chrome ball's 1).
+// RL_DEFERRED: `shade` is linear in `specular_incident.rgb` at fixed w, mixing
+// `traced x reflectance` in by the traced fraction, and reports both (reflection_report).
+const RL_DEFERRED:bool=true;
 fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
     var v=unit_normal(input.eye-input.world);
     if dot(v,v)<0.5 { v=s.n; }
@@ -149,6 +154,7 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     }
     // Where the engine traced the lobe (mirror and glossy bands on traced frames), its
     // incident radiance replaces the untraced estimate, faded across the rough cutoff.
+    reflection_report(reflectance,specular);
     let traced=specular_incident(input);
     if traced.w>0.0 {
         specular=mix(specular,min(traced.rgb*reflectance,vec3<f32>(65504.0)),traced.w);

@@ -22,6 +22,12 @@ pub(crate) mod temporal_reconstruction;
 // MP1: per-program deferred shading of mixed-program frames.
 #[path = "program_lists.rs"]
 pub(crate) mod program_lists;
+// U-RTVIS: the reflection pass's rl_trace (docs/design-reflection-pass.md).
+#[path = "reflection_pass.rs"]
+pub(crate) mod reflection_pass;
+// The Mac thread's reflection_hits after rl_trace (docs/design-reflection-pass.md).
+#[path = "reflection_hits_gpu.rs"]
+mod reflection_hits_gpu;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
@@ -496,6 +502,7 @@ impl Renderer {
                     slot.modules.temporal = None;
                     slot.modules.streamed = None;
                     slot.pipelines.traced = Default::default();
+                    slot.pipelines.hits = Default::default();
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
@@ -547,6 +554,7 @@ impl Renderer {
                     slot.modules.temporal = Some(temporal);
                     slot.modules.streamed = None;
                     slot.pipelines.traced = Default::default();
+                    slot.pipelines.hits = Default::default();
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
@@ -733,7 +741,32 @@ pub(super) struct Targets {
     /// U-RTVIS: the held budget's per-pixel history (R32Uint, ping-ponged by the
     /// reconstruction's parity) and its frame record; traced primaries only.
     pub held: Option<HeldTargets>,
+    /// Deferred reflections (`program::deferred_variant`, `RENDERLAB_RL_DEFERRED=1`): each
+    /// glossy pixel's reflectance with its traced fraction, and its untraced specular,
+    /// written by shading at bindings 62 and 63 for the composite after it.
+    pub deferred: Option<[Depth; 2]>,
+    /// U-RTVIS: the reflection history (shaders/reflections_history.wgsl), both paths.
+    pub rl_history: RlHistoryTargets,
+    /// U-RTVIS: the reflection pass's L, H, R and D while RENDERLAB_RL_PASS=1.
+    pub rl_pass: Option<reflection_pass::PassTargets>,
 }
+/// Per pixel two halves of four r32uint layers, and the frame record (written by
+/// `prepare_reconstruction`; zero, so never read, without reconstruction).
+pub(super) struct RlHistoryTargets {
+    pub history: Depth,
+    pub frame: Buffer,
+    /// The resolve's shading phase (binding 60) and its two values (0, then 1, 16 bytes each).
+    pub phase: Buffer,
+    pub phases: Buffer,
+}
+/// The reflection history's group-0 bindings in primary shading. U-RTVIS's shading-entry
+/// resources take 54-63; the Mac's reflection_hits takes 64-67 (docs/design-reflection-pass.md).
+const RL_HISTORY_FRAME: u32 = 55;
+const RL_HISTORY: u32 = 54;
+const RL_PHASE: u32 = 60;
+/// Two halves of four, rl_resolve's sample and seen-history layers (8-15), the halves' hit
+/// distances (16, 17), the sample's (18) and the a-trous filter's two buffers (19-22).
+const RL_HISTORY_LAYERS: u32 = 23;
 pub(super) struct HeldTargets {
     pub history: [Depth; 2],
     pub frame: Buffer,
@@ -766,6 +799,10 @@ struct Bindings {
     shade: [Option<Owned<wgpu::BindGroup>>; 2],
     /// MP1: `shade` plus the program list bindings, while list buffers exist.
     list: [Option<Owned<wgpu::BindGroup>>; 2],
+    /// U-RTVIS: rl_trace's group 0 while RENDERLAB_RL_PASS=1.
+    rl_trace: Option<Owned<wgpu::BindGroup>>,
+    /// U-RTVIS: rl_resolve's group while RENDERLAB_RL_RESOLVE_PASS=1.
+    rl_resolve: Option<Owned<wgpu::BindGroup>>,
 }
 enum Retired {
     Targets(#[allow(dead_code)] Box<Targets>),
@@ -840,6 +877,11 @@ pub(super) struct PrimaryState {
     pub test_film_materialize: bool,
     trace_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     shade_bindings: [Owned<wgpu::BindGroupLayout>; 2],
+    /// U-RTVIS: rl_trace's layouts while RENDERLAB_RL_PASS=1, and its kernels per `Shading`.
+    rl_trace: Option<reflection_pass::TraceAbi>,
+    rl_pipelines: [Option<reflection_pass::TracePipelines>; 2],
+    /// U-RTVIS: rl_resolve while RENDERLAB_RL_RESOLVE_PASS=1.
+    rl_resolve: Option<reflection_pass::ResolveKit>,
     fresh_bindings: Owned<wgpu::BindGroupLayout>,
     fresh_layout: Owned<wgpu::PipelineLayout>,
     interactive_bindings: Owned<wgpu::BindGroupLayout>,
@@ -1142,6 +1184,27 @@ impl PrimaryState {
                 // M7-R1: Soft shading traces reflection rays on the shared TLAS.
                 entries.push(scene(2));
             }
+            // U-RTVIS: the reflection history (program::with_reflection_history).
+            entries.push(uniform(
+                RL_HISTORY_FRAME,
+                temporal_reconstruction::RL_HISTORY_BYTES as u64,
+            ));
+            entries.push(entry(
+                RL_HISTORY,
+                wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::ReadWrite,
+                    format: F::R32Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                },
+            ));
+            // U-RTVIS: the reflection resolve's shading phase (reflections_history.wgsl).
+            entries.push(uniform(RL_PHASE, 16));
+            // U-RTVIS: the reflection pass's lobe output (reflection_pass.rs).
+            if reflection_pass::on() {
+                entries.extend(reflection_pass::shade_entries());
+                // The Mac thread's reflection_hits: H and R (reflection_hits_gpu.rs).
+                entries.extend(super::reflection_hits::shade_entries());
+            }
             // M7-R1n: non-RT shading traces them in software (reflection_software.rs), read
             // as vec4 words (P-NRT), so a binding holds at least one.
             if !device
@@ -1149,6 +1212,10 @@ impl PrimaryState {
                 .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             {
                 entries.push(read(SOFTWARE_REFLECTIONS, 16));
+            }
+            // Deferred reflections' outputs (`Targets::deferred`).
+            if crate::program::rl_deferred() {
+                entries.extend([image(62, F::Rgba16Float), image(63, F::Rgba16Float)]);
             }
             entries
         });
@@ -1346,6 +1413,11 @@ impl PrimaryState {
             fresh_bindings,
             trace_bindings: trace,
             shade_bindings,
+            rl_trace: reflection_pass::on()
+                .then(|| reflection_pass::TraceAbi::new(device, ledger, &array_bindings, lighting)),
+            rl_pipelines: [None, None],
+            rl_resolve: crate::program::rl_resolve_pass_on()
+                .then(|| reflection_pass::ResolveKit::new(device, ledger)),
             array_bindings,
             material_bindings,
             frame: None,
@@ -1384,6 +1456,9 @@ impl PrimaryState {
             test_film_materialize: self.test_film_materialize,
             trace_bindings: self.trace_bindings.clone(),
             shade_bindings: self.shade_bindings.clone(),
+            rl_trace: self.rl_trace.clone(),
+            rl_pipelines: self.rl_pipelines.clone(),
+            rl_resolve: self.rl_resolve.clone(),
             fresh_bindings: self.fresh_bindings.clone(),
             fresh_layout: self.fresh_layout.clone(),
             interactive_bindings: self.interactive_bindings.clone(),
@@ -2265,6 +2340,63 @@ impl Renderer {
                     wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 ),
             });
+            let rl_history = {
+                let layers = wgpu::Extent3d {
+                    depth_or_array_layers: RL_HISTORY_LAYERS,
+                    ..size
+                };
+                let texture = self.ledger.own(
+                    self.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("reflection history"),
+                        size: layers,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::R32Uint,
+                        usage: wgpu::TextureUsages::STORAGE_BINDING,
+                        view_formats: &[],
+                    }),
+                    ResourceKind::Texture,
+                );
+                let view = self.ledger.own(
+                    texture.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: Some(wgpu::TextureViewDimension::D2Array),
+                        ..Default::default()
+                    }),
+                    ResourceKind::TextureView,
+                );
+                let bytes = u64::from(size.width) * u64::from(size.height) * 4 * u64::from(RL_HISTORY_LAYERS);
+                RlHistoryTargets {
+                    history: Depth {
+                        texture,
+                        view,
+                        _allocation: self.ledger.allocate(AllocationKind::Target, bytes),
+                    },
+                    frame: Buffer::new(
+                        self,
+                        "reflection history record",
+                        temporal_reconstruction::RL_HISTORY_BYTES as u64,
+                        wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    ),
+                    phase: Buffer::new(
+                        self,
+                        "reflection shading phase",
+                        16,
+                        wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    ),
+                    phases: {
+                        let phases = Buffer::new(
+                            self,
+                            "reflection shading phases",
+                            32,
+                            wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
+                        );
+                        let words: Vec<u8> = [0u32, 0, 0, 0, 1, 0, 0, 0].iter().flat_map(|w| w.to_ne_bytes()).collect();
+                        self.queue.write_buffer(&phases.value, 0, &words);
+                        phases
+                    },
+                }
+            };
             let next = Targets {
                 repairs,
                 repair_args,
@@ -2272,6 +2404,8 @@ impl Renderer {
                 penumbra,
                 defer_edges,
                 held,
+                rl_history,
+                rl_pass: reflection_pass::on().then(|| self.rl_pass_targets(size)),
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
                     "primary hard receiver epsilon",
@@ -2279,6 +2413,10 @@ impl Renderer {
                     wgpu::TextureFormat::R32Float,
                 ),
                 tiles: target("primary tile coverage", tiles, wgpu::TextureFormat::R32Uint),
+                deferred: crate::program::rl_deferred().then(|| {
+                    ["deferred reflectance", "deferred untraced specular"]
+                        .map(|label| target(label, size, wgpu::TextureFormat::Rgba16Float))
+                }),
             };
             let state = self.view.primary.as_mut().unwrap();
             if let Some(old) = state.targets.replace(next) {
@@ -2380,7 +2518,19 @@ impl Renderer {
                     (21, tiles.clone()),
                     (22, region.as_entire_binding()),
                     visibility,
+                    (RL_HISTORY_FRAME, t.rl_history.frame.value.as_entire_binding()),
+                    (RL_HISTORY, R::TextureView(&t.rl_history.history.view)),
+                    (RL_PHASE, t.rl_history.phase.value.as_entire_binding()),
                 ];
+                // U-RTVIS: the reflection pass's lobe output.
+                if let Some(pass) = &t.rl_pass {
+                    entries.push((reflection_pass::LOBE_A, R::TextureView(&pass.lobe_a.view)));
+                    entries.push((reflection_pass::LOBE_B, R::TextureView(&pass.lobe_b.view)));
+                    entries.push((reflection_pass::PASS_FRAME, pass.frame.value.as_entire_binding()));
+                    // The Mac thread's reflection_hits reads H and writes R.
+                    entries.push((super::reflection_hits::HITS, pass.hits.value.as_entire_binding()));
+                    entries.push((super::reflection_hits::SAMPLES, R::TextureView(&pass.samples.view)));
+                }
                 if matches!(shading, Shading::Hard) {
                     entries.push((23, R::TextureView(&t.epsilon.view)));
                 } else {
@@ -2390,6 +2540,11 @@ impl Renderer {
                 // M7-R1n: software reflection geometry on non-RT renderers.
                 if let Some(geometry) = &reflection_geometry {
                     entries.push((SOFTWARE_REFLECTIONS, geometry.as_entire_binding()));
+                }
+                // Deferred reflections' outputs (`Targets::deferred`).
+                if let Some([reflectance, untraced]) = &t.deferred {
+                    entries.push((62, R::TextureView(&reflectance.view)));
+                    entries.push((63, R::TextureView(&untraced.view)));
                 }
                 // MP1: the same group plus the slot table and tile lists.
                 let list = lists.map(|l| {
@@ -2531,6 +2686,18 @@ impl Renderer {
                 }),
                 shade,
                 list,
+                // U-RTVIS: rl_trace's group (reflection_pass.rs).
+                rl_trace: state.rl_trace.as_ref().zip(t.rl_pass.as_ref()).map(|(abi, pass)| {
+                    let geometry = match &reflection_geometry {
+                        Some(g) => (SOFTWARE_REFLECTIONS, g.as_entire_binding()),
+                        None => reflection_scene.clone(),
+                    };
+                    self.rl_trace_group(abi, pass, frame.as_entire_binding(), geometry)
+                }),
+                rl_resolve: state
+                    .rl_resolve
+                    .as_ref()
+                    .map(|kit| self.rl_resolve_group(kit, &t.rl_history)),
                 key,
             };
             let state = self.view.primary.as_mut().unwrap();

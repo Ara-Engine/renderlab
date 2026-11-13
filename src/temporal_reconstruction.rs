@@ -378,6 +378,11 @@ const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 /// Engine-side sampling for reconstructed Interactive shadows. New targets/cuts use
 /// `cold_rays`, scene-history restarts use `reset_rays`, and moving/young history uses
 /// `active_rays`. After `settle_frames` unchanged frames it uses `held_rays`.
+/// U-FIXED (2026-11-13): moving 16 and restart 32, down from 32 and 64. The rotated directions
+/// accumulate through TR1's history; on the game flight with two Foxes the sun's cost fell from
+/// 5.37 to 2.90 ms with no visible change (crops within 28 px over 8 codes of 32/64 after the
+/// first frame, cut included). 8/16 halves it again but grains long soft penumbrae for a few
+/// frames after a cut; the knobs (`with_env_knobs`) A/B both on Ara.
 /// Materials still receive the same visibility value and shading inputs.
 /// P-RTS penumbra listing (`PENUMBRA_LISTING`, off by default; docs/p-rts.md) would trace
 /// the budget only near shadow edges; with it off every receiver traces the budget.
@@ -393,14 +398,36 @@ impl Default for ReconstructionShadowBudget {
     fn default() -> Self {
         Self {
             cold_rays: 256,
-            reset_rays: 64,
-            active_rays: 32,
+            reset_rays: 32,
+            active_rays: 16,
             held_rays: 8,
             settle_frames: 16,
         }
     }
 }
 impl ReconstructionShadowBudget {
+    /// U-FIXED measurement knobs for A/B runs without a rebuild (the integration thread on
+    /// Ara): `RENDERLAB_SUN_MOVING_RAYS=N` replaces `active_rays` (moving and young history)
+    /// and `RENDERLAB_SUN_RESTART_RAYS=N` replaces `reset_rays` (restarts, including the
+    /// receivers in a moving caster's swept shadow). N is a power of two in 8..=256; other
+    /// values are ignored.
+    pub(crate) fn with_env_knobs(self) -> Self {
+        static KNOBS: std::sync::OnceLock<(Option<u32>, Option<u32>)> = std::sync::OnceLock::new();
+        let (moving, restart) = *KNOBS.get_or_init(|| {
+            let knob = |name| {
+                std::env::var(name)
+                    .ok()
+                    .and_then(|v| v.parse::<u32>().ok())
+                    .filter(|n| (8..=256).contains(n) && n.is_power_of_two())
+            };
+            (knob("RENDERLAB_SUN_MOVING_RAYS"), knob("RENDERLAB_SUN_RESTART_RAYS"))
+        });
+        Self {
+            active_rays: moving.unwrap_or(self.active_rays),
+            reset_rays: restart.unwrap_or(self.reset_rays),
+            ..self
+        }
+    }
     fn validate(self) -> Result<(), Error> {
         if [
             self.cold_rays,
@@ -1034,7 +1061,13 @@ pub(crate) struct Planned {
     pub(crate) sampling: Vec<u8>,
     /// U-RTVIS: the held budget's `RtvisHeld` record (HELD_BYTES).
     pub(crate) held: Vec<u8>,
+    /// U-RTVIS: the reflection history's `RlHistoryFrame` record (RL_HISTORY_BYTES).
+    pub(crate) rl_history: Vec<u8>,
 }
+/// U-RTVIS: `RlHistoryFrame` (shaders/reflections_history.wgsl): the previous unjittered
+/// view-projection, then whether this frame reads history (a still camera), the half it writes, the frame
+/// counter and the exposure factor carrying stored radiance to this frame.
+pub(crate) const RL_HISTORY_BYTES: usize = 80;
 impl Planned {
     /// The frame's `Tr1Zones` record (`ZONES_BYTES`), which the sun-shadow passes also bind:
     /// `PrimaryFrame::zones` and `VsmFrame::zones`.
@@ -1388,6 +1421,14 @@ impl Planner {
             &suns,
             listed,
         );
+        let mut rl_history = Vec::with_capacity(RL_HISTORY_BYTES);
+        rl_history.extend_from_slice(&matrix_bytes(previous_matrix));
+        // Read only while the camera holds (TR1's bit-equal `still`, no reset): a moving frame
+        // traces every glossy receiver's full set, exactly as without the history.
+        let continues = continued.is_some() && (still || (!self.reset && crate::program::rl_resolve_on()));
+        for w in [u32::from(continues), (i.frame & 1) as u32, i.frame as u32, scale.to_bits()] {
+            rl_history.extend_from_slice(&w.to_ne_bytes());
+        }
         self.previous = Some(Previous {
             frame: i.frame,
             matrix,
@@ -1405,6 +1446,7 @@ impl Planner {
             frame: bytes,
             sampling: words,
             held,
+            rl_history,
         }
     }
     /// U-RTVIS: the `RtvisHeld` record. The stop is on for a frame that continues every
@@ -1997,7 +2039,7 @@ impl Renderer {
             .plan
             .prepare(PlanInputs {
                 settings: self.view.reconstruction,
-                budget: self.reconstruction_shadow_budget,
+                budget: self.reconstruction_shadow_budget.with_env_knobs(),
                 previous_frame: self.view.last_frame,
                 frame: self.frames + 1,
                 index,
@@ -2035,6 +2077,11 @@ impl Renderer {
             .write_buffer(&state.frame.value, 0, &planned.frame);
         self.uploads.view_settings += FRAME_BYTES as u64;
         self.uploads.write_calls += 1;
+        if let Some(history) = primary.targets.as_ref().map(|t| &t.rl_history) {
+            self.queue.write_buffer(&history.frame.value, 0, &planned.rl_history);
+            self.uploads.view_settings += RL_HISTORY_BYTES as u64;
+            self.uploads.write_calls += 1;
+        }
         if let Some(held) = primary.targets.as_ref().and_then(|t| t.held.as_ref()) {
             self.queue.write_buffer(&held.frame.value, 0, &planned.held);
             self.uploads.view_settings += HELD_BYTES as u64;
