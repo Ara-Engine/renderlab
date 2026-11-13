@@ -82,8 +82,9 @@ const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=
 /// instead of being shaded, when it passes the reuse test (shaders/reflection_hit_reuse.wgsl).
 /// `mask`, `all` and `none` are its measurement forms: reused hits 1 and the rest 0, every hit
 /// 1, every hit 0, so the frame's reused share is (mask - none) / (all - none).
-/// `RENDERLAB_RL_HIT_REUSE_TUNE=depth=D,slack=S,weight=W,rough=R,transmit=T` sets the test's
-/// tolerances (defaults 0.01, 0.02 m, 4, 0.5, 0.5). Read once per process.
+/// `RENDERLAB_RL_HIT_REUSE_TUNE=depth=D,slack=S,weight=W,rough=R,transmit=T,hint=H,view=V` sets
+/// the test's tolerances (defaults 0.01, 0.02 m, 4, 0.5, 0.5, 1, 0.5 px); `hint=0` replaces the
+/// MQ2-hint view test with the non-metal roughness floor. Read once per process.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HitReuse {
     mode: u32,
@@ -92,6 +93,8 @@ pub(crate) struct HitReuse {
     weight: f32,
     rough: f32,
     transmit: f32,
+    hint: bool,
+    view: f32,
 }
 pub(crate) fn hit_reuse() -> Option<HitReuse> {
     static REUSE: std::sync::OnceLock<Option<HitReuse>> = std::sync::OnceLock::new();
@@ -110,6 +113,8 @@ pub(crate) fn hit_reuse() -> Option<HitReuse> {
             weight: 4.0,
             rough: 0.5,
             transmit: 0.5,
+            hint: true,
+            view: 0.5,
         };
         let tune = std::env::var("RENDERLAB_RL_HIT_REUSE_TUNE").unwrap_or_default();
         for (name, value) in tune.split(',').filter_map(|kv| kv.split_once('=')) {
@@ -122,6 +127,8 @@ pub(crate) fn hit_reuse() -> Option<HitReuse> {
                 "weight" => reuse.weight = value,
                 "rough" => reuse.rough = value,
                 "transmit" => reuse.transmit = value,
+                "hint" => reuse.hint = value != 0.0,
+                "view" => reuse.view = value,
                 _ => {}
             }
         }
@@ -164,6 +171,14 @@ fn with_hit_reuse(source: String, reuse: HitReuse) -> String {
         .replace(
             "const RL_REUSE_TRANSMIT:f32=0.5;",
             &format!("const RL_REUSE_TRANSMIT:f32={:?};", reuse.transmit),
+        )
+        .replace(
+            "const RL_REUSE_HINT:bool=true;",
+            &format!("const RL_REUSE_HINT:bool={};", reuse.hint),
+        )
+        .replace(
+            "const RL_REUSE_VIEW:f32=0.5;",
+            &format!("const RL_REUSE_VIEW:f32={:?};", reuse.view),
         )
         .replace(
             "const RL_REUSE_MODE:u32=0u;",

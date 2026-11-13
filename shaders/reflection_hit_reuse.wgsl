@@ -16,7 +16,8 @@ struct RlReuseFrame {
 };
 @group(0) @binding(66) var<storage,read> rl_reuse_frame:RlReuseFrame;
 // The history TR1 reads this frame: exposed mean and sample weight; placement + 1 (bits 0-22),
-// viewed side (bit 23), and view distance (f32 bits in y).
+// viewed side (bit 23), MQ2's view hint code (bits 24-31, temporal_resolve.wgsl
+// tr1_view_code) and view distance (f32 bits in y).
 @group(0) @binding(67) var rl_reuse_colour:texture_2d<f32>;
 @group(0) @binding(68) var rl_reuse_anchor:texture_2d<u32>;
 // Tunables (RENDERLAB_RL_HIT_REUSE_TUNE): the same-surface test's relative and absolute view
@@ -29,22 +30,32 @@ const RL_REUSE_WEIGHT:f32=4.0;
 const RL_REUSE_ROUGH:f32=0.5;
 const RL_REUSE_TRANSMIT:f32=0.5;
 const RL_REUSE_MODE:u32=0u;
+// The view test: with RL_REUSE_HINT, each texel's MQ2 hint bounds how far the view-dependent
+// part slides between last frame's camera direction and this ray's (under RL_REUSE_VIEW
+// pixels of its own image); without it, only non-metal hits at least RL_REUSE_ROUGH rough.
+const RL_REUSE_HINT:bool=true;
+const RL_REUSE_VIEW:f32=0.5;
+// MQ2's hint - 1 from its anchor code: 0 for code 0 (view-independent), else ten codes an
+// octave about code 81 (temporal_resolve.wgsl tr1_view_code; never below the stored value).
+fn rl_reuse_view(code:u32)->f32 {
+    return select(exp2((f32(code)-81.0)/10.0),0.0,code==0u);
+}
 // The placement's previous transform (object_motion.wgsl: the model table's second half).
 fn rl_reuse_previous_model(slot:u32)->mat4x4<f32> {
     return models[arrayLength(&models)/2u+slot];
 }
 // The hit's radiance from last frame's resolved colour (unexposed, as the cache hook returns
 // it), with w 1; w 0 when the hit must be shaded.
-fn rl_hit_reuse(record:vec4<u32>)->vec4<f32> {
+fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>)->vec4<f32> {
     // 1. A bound TR1 frame that does not restart (cuts, first frames and reset events never reuse).
     if !(rl_reuse_frame.jitter.z>0.0) || rl_reuse_frame.flags.x!=0u {return vec4<f32>(0.0);}
     let hit=primary_decode(record);
     // Skinned hits shade (their previous surface needs SK1's previous vertices).
     if batch_skinned(primary_batch_info(hit.batch)) {return vec4<f32>(0.0);}
-    // 6, without MQ2's hint in the history: only non-metal hits at least RL_REUSE_ROUGH rough,
-    // whose own view dependence is small.
+    // 6 without the hint: only non-metal hits at least RL_REUSE_ROUGH rough, whose own view
+    // dependence is small.
     let material=primary_materials[hit.batch].value;
-    if material.metallic>=0.1 || material.roughness<RL_REUSE_ROUGH {return vec4<f32>(0.0);}
+    if !RL_REUSE_HINT && (material.metallic>=0.1 || material.roughness<RL_REUSE_ROUGH) {return vec4<f32>(0.0);}
     let ta=primary_input(hit.batch,hit.ia,hit.placement);
     let tb=primary_input(hit.batch,hit.ib,hit.placement);
     let tc=primary_input(hit.batch,hit.ic,hit.placement);
@@ -65,6 +76,8 @@ fn rl_hit_reuse(record:vec4<u32>)->vec4<f32> {
     let base=vec2<i32>(floor(at));
     let f=at-floor(at);
     let distance=length(rl_reuse_frame.previous_eye.xyz-previous);
+    // 6 with the hint: the turn between last frame's view of the point and this ray's.
+    let turn=acos(clamp(dot(-d,(rl_reuse_frame.previous_eye.xyz-previous)/max(distance,1e-6)),-1.0,1.0));
     // 5. The same surface at each bilinear texel (placement and view distance); 7. a history
     // old enough.
     var sum=vec3<f32>(0.0);var weight=0.0;var valid=0u;
@@ -74,6 +87,7 @@ fn rl_hit_reuse(record:vec4<u32>)->vec4<f32> {
         let anchor=textureLoad(rl_reuse_anchor,q,0);
         let seen=bitcast<f32>(anchor.y);
         if (anchor.x&0x7fffffu)!=hit.placement+1u || abs(seen-distance)>distance*RL_REUSE_DEPTH+RL_REUSE_SLACK {continue;}
+        if RL_REUSE_HINT && turn*rl_reuse_view(anchor.x>>24u)>RL_REUSE_VIEW {continue;}
         let colour=textureLoad(rl_reuse_colour,q,0);
         if !(colour.w>=RL_REUSE_WEIGHT) {continue;}
         let b=select(1.0-f.x,f.x,o.x==1)*select(1.0-f.y,f.y,o.y==1);
@@ -92,7 +106,7 @@ fn rl_hit_reuse(record:vec4<u32>)->vec4<f32> {
 }
 // The cache-hit hook, reuse first (RL_REUSE_MODE's measurement forms short-circuit it).
 fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> {
-    let reused=rl_hit_reuse(record);
+    let reused=rl_hit_reuse(record,d);
     if RL_REUSE_MODE==2u {return vec4<f32>(vec3<f32>(1.0/lighting.exposure),1.0);}
     if RL_REUSE_MODE==3u {return vec4<f32>(0.0,0.0,0.0,1.0);}
     if reused.w>0.0 {return reused;}
