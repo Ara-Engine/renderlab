@@ -178,6 +178,20 @@ fn two_views_differ_from_single_view_engines_only_by_the_shared_gi_cache() {
     assert!(a < 1.0 && b < 1.0, "mean byte difference {a} and {b}");
 }
 
+/// Memory cut 1 through the engine: its settings reach the renderer through `set_indirect`,
+/// which must leave an `auto_slots` table to the first frame, sized to the scene (three boxes:
+/// the 2^16 floor), not allocate the 2^20 cap.
+#[test]
+fn the_engine_sizes_the_gi_table_to_its_scene() {
+    let (mut engine, _) = engine(true);
+    let view = engine.create_view(&desc()).unwrap();
+    for _ in 0..3 {
+        engine.tick(1.0 / 60.0).unwrap();
+        engine.render_view(view, &cameras(0.0)[0]).unwrap();
+    }
+    assert_eq!(engine.renderer().indirect_stats().slots, 1 << 16);
+}
+
 #[test]
 fn views_are_created_resized_and_removed_independently() {
     let (mut engine, _) = engine(true);

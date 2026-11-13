@@ -1912,19 +1912,34 @@ impl Renderer {
         Ok(true)
     }
     /// Selects world radiance cache settings. Enabling allocates the table (all
-    /// slots empty); a new slot count reallocates it. Takes effect on the next lit
-    /// traced or visibility-buffer frame whose programs call `indirect_irradiance`.
+    /// slots empty); a new slot count reallocates it. With `auto_slots` (and no
+    /// `RENDERLAB_GI_SLOTS`), the first eligible frame sizes it to its scene instead
+    /// (`prepare_gi`), and a table already sized keeps its size, within the new cap. Takes
+    /// effect on the next lit traced or visibility-buffer frame whose programs call
+    /// `indirect_irradiance`.
     pub fn set_indirect(&mut self, settings: IndirectSettings) -> Result<(), Error> {
         self.check_fault()?;
         settings.validate()?;
-        let slots = self.gi_slots(settings.slots_log2);
+        let slots = match forced_slots_log2() {
+            Some(log2) => Some(self.gi_slots(log2)),
+            None if settings.auto_slots => self
+                .gi
+                .resources
+                .as_ref()
+                .map(|r| r.slots.min(self.gi_slots(settings.slots_log2))),
+            None => Some(self.gi_slots(settings.slots_log2)),
+        };
         // The filter's sources are sized by the setting (G3).
-        let raw_slots = if settings.filter != 0 { slots } else { 1 };
-        let reallocate = settings.enabled
-            && self.gi.resources.as_ref().is_none_or(|r| {
-                r.slots != slots || r.raw_slots != raw_slots || r.directions != settings.directions
-            });
-        if reallocate {
+        let raw_slots = |slots| if settings.filter != 0 { slots } else { 1 };
+        let reallocate = slots.filter(|&slots| {
+            settings.enabled
+                && self.gi.resources.as_ref().is_none_or(|r| {
+                    r.slots != slots
+                        || r.raw_slots != raw_slots(slots)
+                        || r.directions != settings.directions
+                })
+        });
+        if let Some(slots) = reallocate {
             let previous = std::mem::replace(&mut self.gi.settings, settings);
             let allocated = self.allocate_gi(slots);
             self.gi.settings = previous;
