@@ -143,4 +143,5 @@ fn primary_shade_pixel(id:vec2<u32>,size:vec2<u32>) {
     // AT1: the program's exposed output through the camera's fog and aerial perspective.
     // MQ2: alpha is the program's view dependence for TR1 (1 when undeclared).
     textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,id,size)));
+    rl_local_history_store(pixel);
 }

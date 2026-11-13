@@ -36,6 +36,7 @@ fn rl_light_cell(world:vec3<f32>) -> vec2<u32> {
 // The generated entries call this once per receiver, before `shade`.
 fn rl_lights_prepare(world:vec3<f32>) {
     rl_local_budget(world);
+    rl_local_history_prepare(world);
     if rl_light_frame.info.y==0u { return; }
     let c=rl_light_cell(world).x;
     if c>=LC_CLUSTERS { return; }

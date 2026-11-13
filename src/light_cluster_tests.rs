@@ -413,7 +413,9 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
             budget(&module) && !stub(&module) && zones(&module),
             "traced {k}"
         );
-        assert!(module.contains("let samples=select(1u,max(rl_local_rays,4u),radius>0.0);"));
+        assert!(
+            module.contains("let samples=select(1u,max(rl_local_rays,4u),light.source.x>0.0);")
+        );
         validate(&format!("traced {k}"), &module);
     }
     let non_rt = primary_ray_gpu::non_rt_sources(SOURCE).unwrap().1;

@@ -663,6 +663,8 @@ struct Shared<'a> {
     gi_outgoing: Option<&'a StorageBuffer>,
     buffers: &'a BTreeMap<InputKey, StorageBuffer>,
     images: &'a BTreeMap<InputKey, Texture>,
+    /// The local-light history's (read, written) images, when it runs.
+    local: Option<(&'a Texture, &'a Texture)>,
 }
 impl<'a> Shared<'a> {
     /// One reflected input of any of the frame's programs, for one object or none.
@@ -730,6 +732,8 @@ impl<'a> Shared<'a> {
             (InputKind::Image { .. } | InputKind::StorageImage { .. }, group, binding) => {
                 Input::Image(match (group, binding) {
                     (3, 24) => self.lists,
+                    (3, 32) if self.local.is_some() => self.local.context("checked")?.0,
+                    (3, 33) if self.local.is_some() => self.local.context("checked")?.1,
                     (0, 18) => self.output,
                     _ => provided(self.sky, self.map, self.traced, self.deferred, spec.key)
                         .or_else(|| self.images.get(&spec.key))
@@ -963,6 +967,9 @@ struct Carried {
     fog: Option<(crate::Mat4, crate::Vec3, [u8; 32])>,
     /// Frames the atmosphere has encoded (`Atmosphere::frame`).
     fog_frame: u32,
+    /// The last traced frame's unjittered view-projection, which the local-light visibility
+    /// history reprojects through (`lc::local_shadow_budget`).
+    local_camera: Option<crate::Mat4>,
 }
 /// What a sequence keeps on the GPU from frame to frame.
 #[derive(Default)]
@@ -971,6 +978,8 @@ struct Kept {
     gi: Option<Cache>,
     /// Temporal reconstruction's history, allocated the same way.
     tr1: Option<History>,
+    /// The local-light visibility history, on traced frames with `lc::local_shadow_budget`.
+    local: Option<super::light_cluster::LocalHistory>,
     /// The meshes the last frame named by identity (`ForwardScene::meshes`).
     meshes: BTreeMap<u64, ResidentMesh>,
     /// The atmosphere's tables, made by the first frame with an active atmosphere.
@@ -1049,6 +1058,9 @@ impl Frames {
             cache.retire(gpu)?;
         }
         if let Some(history) = self.kept.tr1 {
+            history.retire(gpu)?;
+        }
+        if let Some(history) = self.kept.local {
             history.retire(gpu)?;
         }
         for mesh in self.kept.meshes.into_values() {
@@ -1343,6 +1355,7 @@ fn frame(
     let Kept {
         gi,
         tr1,
+        local: local_history,
         meshes: resident,
         sky: tables,
         map: kept_map,
@@ -1400,6 +1413,7 @@ fn frame(
             .collect(),
         fog: None,
         fog_frame: history.fog_frame,
+        local_camera: None,
     };
     ensure!(
         scene.objects.iter().all(|o| {
@@ -1485,6 +1499,15 @@ fn frame(
         );
         if tr1.is_none() {
             *tr1 = Some(History::new(gpu, cache, r.settings, target)?);
+        }
+    }
+    if lc::local_shadow_budget() && deferred_path {
+        ensure!(
+            local_history.as_ref().is_none_or(|h| h.size() == size),
+            "the shading size changed within a sequence, which is not assembled yet"
+        );
+        if local_history.is_none() {
+            *local_history = Some(super::light_cluster::LocalHistory::new(gpu, size)?);
         }
     }
     let sample = tr1
@@ -1588,16 +1611,35 @@ fn frame(
         )?)
     };
     let (mut bounds, mut skin_bounds) = (Vec::new(), Vec::new());
+    // The local-light history's moving boxes: each placement that moved since the last frame,
+    // or is skinned, over both its poses.
+    let mut moving_boxes = Vec::new();
+    let mut at = 0;
     for (index, object) in scene.objects.iter().enumerate() {
         let local =
             crate::visibility::Aabb::from_positions(object.vertices.iter().map(|v| v.position))
                 .context("empty mesh")?;
+        let posed = skin(index).and_then(|k| {
+            crate::visibility::Aabb::from_positions(k.previous.iter().map(|v| v.position))
+        });
         for transform in placed(index) {
             let world = shadow_gpu::world_bounds(local, *transform)?;
             bounds.push(world);
             if skin(index).is_some() {
                 skin_bounds.push(world);
             }
+            let before = history.transforms.get(at).copied();
+            at += 1;
+            let bits = |m: &crate::Mat4| m.to_cols_array().map(f32::to_bits);
+            if skin(index).is_none() && before.is_some_and(|b| bits(&b) == bits(transform)) {
+                continue;
+            }
+            let previous =
+                shadow_gpu::world_bounds(posed.unwrap_or(local), before.unwrap_or(*transform))?;
+            moving_boxes.push(crate::shadow_plan::Bounds {
+                min: world.min.min(previous.min),
+                max: world.max.max(previous.max),
+            });
         }
     }
     // Per placement, the skinned draw's identity and pose revision (`PlacementPose`), and
@@ -2692,6 +2734,30 @@ fn frame(
     }
     let mut buffers = BTreeMap::new();
     let mut inputs = BTreeMap::new();
+    // The local-light history's record (3, 31) and images (3, 32 and 33). It continues on
+    // frames whose reconstruction continues: only those turn the probes' disk sequence.
+    let local = match local_history.as_mut() {
+        Some(kept) if deferred_path => {
+            staging.extend(kept.begin(gpu, &mut graph, &mut rec)?);
+            let continues = reconstruct.is_some() && tr1.as_ref().is_some_and(|t| !t.reset());
+            let current = scene.camera.unjittered().matrix(size[0], size[1]);
+            let record = StorageBuffer::new(
+                gpu,
+                &super::light_cluster::local_record(
+                    history.local_camera,
+                    current,
+                    continues,
+                    left.count,
+                    &moving_boxes,
+                ),
+            )?;
+            graph.import(Resource::Buffer(record.buffer), Access::HostWrite);
+            buffers.insert(key(3, 31), record);
+            left.local_camera = Some(current);
+            Some(kept.images(left.count))
+        }
+        _ => None,
+    };
     // The transmission record and reduced map are what every program reads at (3, 26) and
     // (3, 27); each pane's geometry and material are drawn into its own layer below, and
     // the layers are reduced to two.
@@ -2778,6 +2844,7 @@ fn frame(
                 dimension, sample, ..
             } => {
                 if spec.key == key(3, 24)
+                    || (local.is_some() && spec.key == key(3, 32))
                     || (resolve.is_some()
                         && spec.key.group == 0
                         && (41..=47).contains(&spec.key.binding))
@@ -3197,6 +3264,7 @@ fn frame(
         gi_outgoing: gi.map(|(cache, _)| cache.outgoing_radiance()),
         buffers: &buffers,
         images: &inputs,
+        local,
     };
     // One lit packet per object on the raster path (none when traced: no geometries).
     let mut packets = Vec::new();
@@ -4525,6 +4593,9 @@ fn frame(
         if let Some(images) = tr1.as_mut() {
             images.advance(history_read.is_some());
         }
+    }
+    if let Some(kept) = local_history.as_mut().filter(|_| deferred_path) {
+        kept.advance(left.count);
     }
     if let Some(records) = gi_frame {
         records.retire(gpu)?;
