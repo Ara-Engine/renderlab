@@ -59,6 +59,8 @@ impl Default for Material {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Instance {
+    /// Whether it blocks light (the engine's `set_casts_shadows`): shadow rays skip it if not.
+    pub casts_shadows: bool,
     pub mesh: usize,
     pub material: usize,
     pub transform: Mat4,
@@ -551,7 +553,7 @@ fn render_repeats(
             &blases[i.mesh],
             row_transform(i.transform),
             slot as u32,
-            0xff,
+            if i.casts_shadows { 0x03 } else { 0x02 },
         ));
     }
     let mut encoder = device.create_command_encoder(&Default::default());

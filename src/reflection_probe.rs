@@ -304,7 +304,7 @@ impl Probe {
                 &blases[i.mesh],
                 row_transform(i.transform),
                 slot as u32,
-                0xff,
+                if i.casts_shadows { 0x03 } else { 0x02 },
             ));
         }
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -918,11 +918,13 @@ fn identity_fixture() -> (Scene, View) {
         ],
         instances: vec![
             Instance {
+                casts_shadows: true,
                 mesh: 0,
                 material: 0,
                 transform: Mat4::IDENTITY,
             },
             Instance {
+                casts_shadows: true,
                 mesh: 1,
                 material: 1,
                 transform: Mat4::IDENTITY,

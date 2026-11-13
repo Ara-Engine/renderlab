@@ -18,6 +18,7 @@ fn quad(half: f32, y: f32) -> Mesh {
 }
 fn instance(mesh: usize, material: usize) -> Instance {
     Instance {
+        casts_shadows: true,
         mesh,
         material,
         transform: Mat4::IDENTITY,

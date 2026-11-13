@@ -17,7 +17,8 @@ use crate::{Error, Mat4};
 pub(crate) const HEADER_WORDS: usize = 16;
 /// One instance record; WGSL GI_INSTANCE_WORDS must match. Words 0-11 world-to-object
 /// rows, 12-17 world bounds, 18-21 the mesh's array offsets, 22 its root, 23 the
-/// instance's near-field mask base (0: none, the instance is traced over whole rays).
+/// instance's near-field mask base (0: none, the instance is traced over whole rays); 24-26
+/// its material identity (src/gi_cache.rs), 27 1 if it casts no shadow (any-hit rays skip it).
 pub(crate) const INSTANCE_WORDS: usize = 32;
 const NODE_WORDS: usize = 16;
 const LEAF_WORDS: usize = 2;

@@ -188,7 +188,7 @@ fn rl_hit_shadow(light:Light,receiver:Receiver,l:vec3<f32>)->f32 {
     var tmax=RL_FAR;
     if light.kind.x!=0u {tmax=max(distance(light.position_range.xyz,origin)-receiver.epsilon,0.0);}
     if tmax<=receiver.epsilon {return 1.0;}
-    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,tmax,origin,l));
+    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,1u,receiver.epsilon,tmax,origin,l));
     while rayQueryProceed(&query) {}
     return select(1.0,0.0,rayQueryGetCommittedIntersection(&query).kind!=0u);
 }

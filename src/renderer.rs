@@ -2632,14 +2632,18 @@ impl Renderer {
         let shadow_start = Instant::now();
         let mut shadow_frame = if self.view.shadows.enabled(view_mode) {
             let mut bounds = Vec::new();
+            let mut casts = Vec::new();
             for draw in draws.iter() {
-                bounds.extend_from_slice(&draw.instances.state.world_bounds(draw.mesh.bounds)?);
+                let state = &draw.instances.state;
+                bounds.extend_from_slice(&state.world_bounds(draw.mesh.bounds)?);
+                casts.extend((0..state.models.len()).map(|slot| state.casts_shadows(slot)));
             }
             Some(self.view.shadows.plan(
                 camera,
                 [color.width(), color.height()],
                 &self.lighting.source_lights,
                 &bounds,
+                &casts,
             )?)
         } else {
             None

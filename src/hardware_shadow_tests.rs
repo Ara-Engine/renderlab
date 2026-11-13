@@ -589,3 +589,53 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
         r.test_drain("analytical hardware MSAA complete");
     }
 }
+
+/// Every shadow ray culls with the shadow mask (`hardware_shadow_gpu::MASK_SHADOW`), so a
+/// placement that casts no shadow is invisible to it: each ray query that stops at its first
+/// hit, and the fresh-visibility kernel, whose flags are a variable. Camera, reflection and
+/// bounce rays keep 0xFF.
+#[test]
+fn every_shadow_ray_query_culls_with_the_shadow_mask() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources: Vec<(String, String)> = std::fs::read_dir(root.join("shaders"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "wgsl"))
+        .map(|p| {
+            (
+                p.display().to_string(),
+                std::fs::read_to_string(&p).unwrap(),
+            )
+        })
+        .collect();
+    for file in ["src/program.rs", "src/atmosphere_gpu.rs"] {
+        sources.push((
+            file.into(),
+            std::fs::read_to_string(root.join(file)).unwrap(),
+        ));
+    }
+    let mut shadow_rays = 0;
+    for (file, text) in &sources {
+        for (at, _) in text.match_indices("RayDesc(") {
+            let call = &text[at..at + text[at..].find(')').unwrap()];
+            let shadow =
+                call.contains("TERMINATE_ON_FIRST_HIT") || file.ends_with("fresh_shadows.wgsl");
+            let mask = call.split(',').nth(1).unwrap().trim();
+            if shadow {
+                shadow_rays += 1;
+                assert_eq!(
+                    mask, "1u",
+                    "{file}: a shadow ray must cull with the shadow mask: {call}"
+                );
+            } else {
+                assert_eq!(
+                    mask, "255u",
+                    "{file}: only shadow rays cull non-casters: {call}"
+                );
+            }
+        }
+    }
+    // fresh_shadows, hardware_shadows, local_light_ray, reflections (and its program template),
+    // gi_rays_hardware, the atmosphere and the reference tracer.
+    assert_eq!(shadow_rays, 8);
+}

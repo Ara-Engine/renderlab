@@ -3366,9 +3366,10 @@ impl Renderer {
                         meshes.len() - 1
                     })
             });
-            for model in &d.instances.state.models {
+            let state = &d.instances.state;
+            for (i, model) in state.models.iter().enumerate() {
                 if let Some(mesh) = mesh {
-                    traced.push((slot, *model, mesh));
+                    traced.push((slot, *model, mesh, state.casts_shadows(i)));
                 }
                 slot += 1;
             }
@@ -3390,7 +3391,9 @@ impl Renderer {
         let records = |bases: &[[u32; 2]]| {
             let rows: Vec<_> = traced
                 .iter()
-                .map(|&(slot, model, mesh)| (slot, model, &*meshes[mesh], bases[mesh]))
+                .map(|&(slot, model, mesh, casts)| {
+                    (slot, model, &*meshes[mesh], bases[mesh], casts)
+                })
                 .collect();
             let mut words = crate::reflection_software::instance_words(&rows);
             // Records of singular models stay reserved (and untraced).

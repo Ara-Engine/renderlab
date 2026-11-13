@@ -12,6 +12,8 @@
 //! [`Renderer`] stays available through [`Engine::renderer_mut`] as the expert API: its
 //! tuning surface changes as features are measured, while this module stays stable
 //! (docs/api.md lists what is frozen).
+#[cfg(test)]
+mod casts_shadows_tests;
 mod device;
 pub(crate) mod ids;
 mod scene;
@@ -228,6 +230,13 @@ impl Residency for Handles {
     type Instances = Instances;
     fn set_instance(instances: &mut Instances, slot: usize, transform: Mat4) -> Result<(), Error> {
         instances.set(slot, transform)
+    }
+    fn set_instance_casts_shadows(
+        instances: &mut Instances,
+        slot: usize,
+        casts: bool,
+    ) -> Result<(), Error> {
+        instances.set_casts_shadows(slot, casts)
     }
 }
 
@@ -750,6 +759,15 @@ impl Engine {
         self.state
             .spawn(mesh, material, transform, self.limits.max_instances)
     }
+    /// Whether an object blocks light (default true). A non-casting object is drawn, reflected,
+    /// bounced and shaded as before and still receives shadows, but no shadow test on either
+    /// path sees it: the shade or glass around a lamp's light, for example.
+    pub fn set_casts_shadows(&mut self, object: ObjectId, casts: bool) -> Result<(), Error> {
+        self.state.set_casts_shadows(object, casts)
+    }
+    pub fn casts_shadows(&self, object: ObjectId) -> Result<bool, Error> {
+        self.state.casts_shadows(object)
+    }
     /// Moves an object: a transform write on the next frame, no reallocation.
     pub fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error> {
         self.state.set_transform(object, transform)
@@ -919,9 +937,13 @@ impl Engine {
             let batch = self.state.batches.get(id)?;
             if batch.instances.is_none() {
                 let models = batch.models.clone();
-                let instances = self.admit("instance upload admission timed out", |r| {
+                let casts = batch.casts.clone();
+                let mut instances = self.admit("instance upload admission timed out", |r| {
                     r.try_upload_instances(&models)
                 })?;
+                for (slot, _) in casts.iter().enumerate().filter(|(_, c)| !**c) {
+                    instances.set_casts_shadows(slot, false)?;
+                }
                 self.state.batches.get_mut(id)?.instances = Some(instances);
             }
         }

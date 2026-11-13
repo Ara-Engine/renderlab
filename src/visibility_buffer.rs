@@ -473,7 +473,9 @@ fn words(values: impl IntoIterator<Item = u32>) -> Vec<u8> {
 }
 /// Every draw's clusters once per placement, in traced placement order (16 words each,
 /// visibility_buffer.wgsl's `Cluster`), and the draws' LOD groups (8 words each), uploaded.
-/// N1c's primaries and N8c's shadow page raster both cull this table.
+/// N1c's primaries and N8c's shadow page raster both cull this table. Word 13 (`pad0`) is 1
+/// for a placement that casts no shadow (`Instances::set_casts_shadows`): the shadow raster
+/// skips it, the primaries ignore it.
 pub(super) struct ClusterInstances {
     pub count: u32,
     pub clusters: Arc<Buffer>,
@@ -484,7 +486,7 @@ pub(super) struct ClusterInstances {
 #[derive(Default)]
 pub(super) struct ClusterInstanceCache(std::sync::Mutex<Option<CachedClusterInstances>>);
 struct CachedClusterInstances {
-    key: Vec<(std::sync::Weak<Owned<wgpu::Buffer>>, usize)>,
+    key: Vec<(std::sync::Weak<Owned<wgpu::Buffer>>, usize, Vec<u64>)>,
     count: u32,
     clusters: std::sync::Weak<Buffer>,
     groups: std::sync::Weak<Buffer>,
@@ -494,11 +496,17 @@ impl ClusterInstances {
         let mut cache = r.cluster_instances.0.lock().unwrap();
         if let Some(cached) = cache.as_ref()
             && cached.key.len() == draws.len()
-            && cached.key.iter().zip(draws).all(|((data, count), d)| {
-                d.mesh.clusters.as_ref().is_some_and(|c| {
-                    std::ptr::eq(data.as_ptr(), Arc::as_ptr(&c.data)) && *count == d.instances.len()
+            && cached
+                .key
+                .iter()
+                .zip(draws)
+                .all(|((data, count, non_casting), d)| {
+                    d.mesh.clusters.as_ref().is_some_and(|c| {
+                        std::ptr::eq(data.as_ptr(), Arc::as_ptr(&c.data))
+                            && *count == d.instances.len()
+                            && non_casting == d.instances.state.non_casting()
+                    })
                 })
-            })
             && let (Some(clusters), Some(groups)) =
                 (cached.clusters.upgrade(), cached.groups.upgrade())
         {
@@ -520,7 +528,8 @@ impl ClusterInstances {
                 groups.extend(g.map(f32::to_bits));
                 groups.extend([0; 3]);
             }
-            for _ in 0..d.instances.len() {
+            for slot in 0..d.instances.len() {
+                let no_shadow = u32::from(!d.instances.state.casts_shadows(slot));
                 for c in &mesh.clusters {
                     let bounds = if d.mesh.skin.is_some() {
                         d.mesh.bounds
@@ -542,7 +551,7 @@ impl ClusterInstances {
                         c.primitives,
                         c.counts,
                         placement,
-                        0,
+                        no_shadow,
                         0,
                         0,
                     ]);
@@ -588,6 +597,7 @@ impl ClusterInstances {
                     (
                         Arc::downgrade(&d.mesh.clusters.as_ref().unwrap().data),
                         d.instances.len(),
+                        d.instances.state.non_casting().to_vec(),
                     )
                 })
                 .collect(),

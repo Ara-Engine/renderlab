@@ -119,6 +119,10 @@ impl Residency for Kept {
     fn set_instance(_: &mut (), _: usize, _: Mat4) -> Result<(), Error> {
         Ok(())
     }
+    /// The frames read `Batch::casts` when they are rebuilt.
+    fn set_instance_casts_shadows(_: &mut (), _: usize, _: bool) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// The scene and its frames on ara-gpu, on a device the caller owns (Ara's own, so a

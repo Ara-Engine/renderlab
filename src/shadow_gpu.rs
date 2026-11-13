@@ -325,21 +325,30 @@ impl ShadowState {
     pub fn enabled(&self, mode: ViewMode) -> bool {
         mode == ViewMode::Lit && self.settings.enabled()
     }
+    /// `bounds` and `casts` are per placement; a placement that casts no shadow
+    /// (`Instances::set_casts_shadows`) is left out of every view's casters.
     pub fn plan(
         &self,
         camera: &Camera,
         viewport: [u32; 2],
         lights: &[Light],
         bounds: &[Bounds],
+        casts: &[bool],
     ) -> Result<ShadowFrame, Error> {
-        plan_frame(
+        let mut frame = plan_frame(
             &self.settings,
             &self.bases,
             camera,
             viewport,
             lights,
             bounds,
-        )
+        )?;
+        if casts.contains(&false) {
+            for view in &mut frame.views {
+                view.caster_indices.retain(|&i| casts[i]);
+            }
+        }
+        Ok(frame)
     }
 }
 

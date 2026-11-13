@@ -697,7 +697,7 @@ struct Variant {
 }
 
 const RAY_INIT: &str =
-    "rayQueryInitialize(&query,fresh_scene,RayDesc(0u,255u,tmin,tmax,origin,direction));";
+    "rayQueryInitialize(&query,fresh_scene,RayDesc(0u,1u,tmin,tmax,origin,direction));";
 const ENTRY_TAIL: &str = "fn fresh_compute(@builtin(global_invocation_id) id:vec3<u32>) {";
 const STORE: &str = "    textureStore(fresh_output,p,vec4<u32>(visible));";
 
