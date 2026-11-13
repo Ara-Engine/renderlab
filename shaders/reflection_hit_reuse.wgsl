@@ -54,10 +54,10 @@ const RL_REUSE_VIEW:f32=0.5;
 // the hit over that footprint), never below RL_REUSE_VIEW: a mirror-like receiver's cone is
 // near zero, so it keeps the half-pixel bound, since a sharp reflection shows a wrong hit exactly.
 const RL_REUSE_FOOT:f32=0.0;
-// Whether metal hits are excluded (the default). Off (`metal=0`), every class reuses under the
-// hint's bound, and the footprint scaling applies to every hit, metals and the trace kernel's
+// Whether metal hits are excluded (`metal=1`). Off (the default), every class reuses under the
+// hint's bound, and any footprint scaling applies to every hit, metals and the trace kernel's
 // unknown class included.
-const RL_REUSE_METAL:bool=true;
+const RL_REUSE_METAL:bool=false;
 // The hit's material class: 0 non-metal, 1 metal (never reused), 2 unknown (the trace kernel
 // binds no material group: no footprint scaling, the hint's bound alone).
 fn rl_reuse_metal(batch:u32)->u32 {

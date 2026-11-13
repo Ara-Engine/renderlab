@@ -10,9 +10,7 @@ const FRAME: u32 = 66;
 const COLOUR: [u32; 2] = [67, 73];
 const ANCHOR: [u32; 2] = [68, 74];
 const SIDE: u32 = 75;
-/// The trace counters again, in the hit group: the hit kernel adds the hits its hook reused
-/// (word 5).
-const HIT_STATS: u32 = 78;
+
 /// The prefix of TR1's frame record the reuse test reads (RlReuseFrame: three matrices and
 /// seven vec4 words).
 const FRAME_PREFIX_BYTES: u64 = 3 * 64 + 7 * 16;
@@ -31,23 +29,6 @@ pub(super) fn layout_entries() -> Vec<wgpu::BindGroupLayoutEntry> {
         texture(ANCHOR[1], S::Uint),
         uniform(SIDE, 16),
     ]
-}
-
-/// The hit group's counter entry: with the switch and the reflection pass.
-pub(super) fn hit_stats_entry() -> Option<wgpu::BindGroupLayoutEntry> {
-    (crate::program::hit_reuse().is_some() && reflection_pass::on()).then(|| {
-        buffer(
-            HIT_STATS,
-            wgpu::BufferBindingType::Storage { read_only: false },
-            32,
-        )
-    })
-}
-/// The hit group's counter binding (the pass's trace counters), with the switch.
-pub(super) fn hit_stats_binding(stats: &wgpu::Buffer) -> Option<(u32, wgpu::BindingResource<'_>)> {
-    crate::program::hit_reuse()
-        .is_some()
-        .then(|| (HIT_STATS, stats.as_entire_binding()))
 }
 
 /// The side uniform and the stand-ins bound while TR1 has no histories.

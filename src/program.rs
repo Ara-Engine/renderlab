@@ -83,12 +83,13 @@ const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=
 /// `mask`, `all` and `none` are its measurement forms: reused hits 1 and the rest 0, every hit
 /// 1, every hit 0, so the frame's reused share is (mask - none) / (all - none).
 /// `RENDERLAB_RL_HIT_REUSE_TUNE=depth=D,slack=S,weight=W,rough=R,transmit=T,hint=H,view=V,foot=F,metal=M`
-/// sets the test's tolerances (defaults 0.01, 0.02 m, 4, 0.5, 0.5, 1, 0.5 px, 0, 1); `hint=0`
-/// replaces the MQ2-hint view test with the non-metal roughness floor; `foot=F` > 0 (or
-/// `footprint=F`) scales the view bound on known non-metal hits to F receiving-cone footprints,
-/// never under `view`. Metal hits never reuse where the material is bound; `metal=0` lifts that
-/// exclusion, and the footprint scaling then applies to every hit (metals, and the trace
-/// kernel's unknown class). Read once per process.
+/// sets the test's tolerances (defaults 0.01, 0.02 m, 4, 0.5, 0.5, 1, 0.5 px, 0, 0); `hint=0`
+/// replaces the MQ2-hint view test with the non-metal roughness floor. Metal hits reuse under
+/// the hint's bound like any other (`metal=1` excludes them where the material is bound).
+/// `foot=F` (or `footprint=F`) > 0 scales the view bound to F receiving-cone footprints, never
+/// under `view`; it stays off because it admits view-dependent highlights and sheen as an
+/// amplitude error the receiving lobe does not average out (docs/metal0-m5.md). Read once per
+/// process.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct HitReuse {
     mode: u32,
@@ -127,8 +128,10 @@ pub(crate) fn hit_reuse() -> Option<HitReuse> {
             transmit: 0.5,
             hint: true,
             view: 0.5,
+            // Off: footprint scaling admits camera-direction highlights and sheen, an amplitude
+            // error the receiving lobe does not average out (docs/metal0-m5.md's stills).
             foot: 0.0,
-            metal: true,
+            metal: false,
         };
         let tune = std::env::var("RENDERLAB_RL_HIT_REUSE_TUNE").unwrap_or_default();
         for (name, value) in tune.split(',').filter_map(|kv| kv.split_once('=')) {
@@ -197,7 +200,7 @@ fn with_hit_reuse(source: String, reuse: HitReuse) -> String {
             &format!("const RL_REUSE_VIEW:f32={:?};", reuse.view),
         )
         .replace(
-            "const RL_REUSE_METAL:bool=true;",
+            "const RL_REUSE_METAL:bool=false;",
             &format!("const RL_REUSE_METAL:bool={};", reuse.metal),
         )
         .replace(
@@ -1332,9 +1335,10 @@ pub(crate) fn compose_hits(
         );
         composed.source = composed.source.replacen(HITS_MINE, HITS_MINE_LIST, 1);
     }
-    if hit_reuse().is_some() {
-        // S4a at the hit stage: count the hits the hook reused (word 5 of the trace counters,
-        // after U-RTVIS's four and the trace stage's `reused`). Both edits follow the program.
+    // S4a at the hit stage: count the hits the hook reused in word 5 of the pass's counters
+    // (U-RTVIS's binding 60, `rl_room_stats`, which the pass block declares; word 4 is the trace
+    // stage's `reused`). The edit follows the program.
+    if hit_reuse().is_some() && composed.source.contains(ROOM_STATS) {
         const CACHED: &str = "        textureStore(rl_hit_samples_out,at_slot,vec4<f32>(rl_finite(expose(cached.rgb)),1.0));\n";
         assert_eq!(
             composed.source.matches(CACHED).count(),
@@ -1343,15 +1347,15 @@ pub(crate) fn compose_hits(
         );
         composed.source = composed.source.replacen(
             CACHED,
-            &format!("{CACHED}        if rl_reused {{atomicAdd(&rl_hit_stats[5],1u);}}\n"),
+            &format!("{CACHED}        if rl_reused {{atomicAdd(&rl_room_stats[5],1u);}}\n"),
             1,
-        );
-        composed.source.push_str(
-            "@group(0) @binding(78) var<storage,read_write> rl_hit_stats:array<atomic<u32>,8>;\n",
         );
     }
     composed
 }
+/// The pass block's declaration of the counters (shaders/reflections_lobe.wgsl).
+const ROOM_STATS: &str =
+    "@group(0) @binding(60) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;";
 /// shaders/reflection_hits.wgsl's per-program filter, and its mixed-frame replacement: the
 /// hit's draw's frame slot against this dispatch's (program_traced_list.wgsl RlList, at
 /// binding 38 with a dynamic offset per slot).
