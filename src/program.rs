@@ -108,14 +108,14 @@ const RL_SPLIT: [(&str, &str); 4] = [
 ];
 /// U-RTVIS reflection history (shaders/reflections_history.wgsl): the wgpu renderer's primary
 /// shading modules bind it (group 0, bindings 54 and 55), so only they replace the stubs.
-/// On by default, with the resolve pass (`rl_resolve_pass_on`): glossy receivers trace four
-/// strata a frame into the history and rl_resolve (docs/rtvis.md). `RENDERLAB_RL_HISTORY=0`
-/// keeps the stubs: every glossy receiver traces its full set every frame.
+/// Off by default (unset: today's inline full set every frame). `RENDERLAB_RL_HISTORY=1` turns on
+/// the candidate, with the resolve pass (`rl_resolve_pass_on`): glossy receivers trace four strata
+/// a frame into the history and rl_resolve (docs/rtvis.md).
 const REFLECTION_HISTORY: &str = include_str!("../shaders/reflections_history.wgsl");
 const RL_HISTORY_STUBS: [&str; 2] = ["// ---- rl history stubs ----\n", "// ---- end of rl history stubs ----\n"];
 pub(crate) fn rl_history_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY").is_ok_and(|v| v == "1"))
 }
 /// U-RTVIS measurement: `RENDERLAB_RL_HISTORY_TUNE=strata=S,cap=C,moving=M,sigma=K` replaces
 /// reflections.wgsl's RL_HISTORY_STRATA, _CAP, _MOVING and _SIGMA.
@@ -147,7 +147,8 @@ pub(crate) fn rl_resolve_on() -> bool {
 }
 /// U-RTVIS: with the history on, the frame's shading shows rl_resolve's output (a pre-pass, the
 /// resolve, then the shading pass; shaders/reflections_resolve.wgsl) and reads history under
-/// motion too. On by default; `RENDERLAB_RL_RESOLVE_PASS=0` keeps the history to still frames.
+/// motion too. On whenever the history is; `RENDERLAB_RL_RESOLVE_PASS=0` keeps the history to
+/// still frames.
 pub(crate) fn rl_resolve_pass_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE_PASS").map_or(true, |v| v != "0"))
