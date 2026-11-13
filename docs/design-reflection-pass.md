@@ -322,3 +322,24 @@ shaders/reflections_trace.wgsl, and `rl_cast` in reflections.wgsl.
   dispatch arguments for 64-record groups, rows of at most 65535.
 - **Order:** the frame's shading, then `rl_trace`, then `rl_hit_args`. The pass log stage is
   `reflection.trace`. `reflection_hits` and `rl_resolve` go after it.
+
+## Next: a deferred reflection composite (plan, 2026-11-13)
+The resolve's pre-pass runs `surface` a second time for every pixel, and that is most of what is
+left of its cost: Showcase-like RT reflections take 3.2 ms against today's 3.8. The known
+structure shades once.
+- **The shading pass**, run once, writes its colour as today: `shade` sees the untraced estimate
+  (`specular_incident` with w = 0). It also writes two side outputs per glossy pixel:
+  - the untraced specular it used (rgb);
+  - the lobe's reflectance: rgb, or the luminance `weight` the Mac is making the standard
+    program declare.
+  It also writes L (the lobe) as rl_trace already reads it.
+- **After shading:** rl_trace (or the inline one-stratum sample), the Mac's `reflection_hits`, and
+  rl_resolve with its a-trous passes.
+- **A composite pass** adds w x (reflectance x resolved - untraced specular) per pixel, w being
+  today's traced fraction (1 inside the traced band, fading to 0 at max_roughness).
+- **Programmability:** the program still decides the reflectance it reports and the untraced
+  estimate. The composite assumes `shade` is linear in `specular_incident` about that estimate,
+  which the standard program is (`mix(specular, traced x reflectance, w)`). A program that wants
+  something else keeps the inline path.
+- **Interface to settle with the Mac:** the reflectance output's form (rgb or luminance weight)
+  and its binding, in U-RTVIS's 54-63 range.
