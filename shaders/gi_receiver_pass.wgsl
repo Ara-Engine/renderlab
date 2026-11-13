@@ -8,19 +8,29 @@ fn gi_pass_load(input:SurfaceInput,id:vec2<u32>,size:vec2<u32>) {
     let scales=bitcast<vec2<f32>>(a.xy);
     gi_rx_valid=scales.x>=0.0;
     gi_rx_normal=unit_normal(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal));
-    gi_rx_sky[0u]=vec3<f32>(unpack4x8snorm(a.z).x,unpack4x8snorm(a.z).y,unpack4x8snorm(a.z).z)*scales.x;
-    gi_rx_sky[1u]=vec3<f32>(unpack4x8snorm(a.z).w,unpack4x8snorm(a.w).x,unpack4x8snorm(a.w).y)*scales.x;
-    gi_rx_sky[2u]=vec3<f32>(unpack4x8snorm(a.w).z,unpack4x8snorm(a.w).w,unpack4x8snorm(b.x).x)*scales.x;
-    gi_rx_sky[3u]=vec3<f32>(unpack4x8snorm(b.x).y,unpack4x8snorm(b.x).z,unpack4x8snorm(b.x).w)*scales.x;
-    gi_rx_sky[4u]=vec3<f32>(unpack4x8snorm(b.y).x,unpack4x8snorm(b.y).y,unpack4x8snorm(b.y).z)*scales.x;
-    gi_rx_sky[5u]=vec3<f32>(unpack4x8snorm(b.y).w,unpack4x8snorm(b.z).x,unpack4x8snorm(b.z).y)*scales.x;
-    gi_rx_sky[6u]=vec3<f32>(unpack4x8snorm(b.z).z,unpack4x8snorm(b.z).w,unpack4x8snorm(b.w).x)*scales.x;
-    gi_rx_sky[7u]=vec3<f32>(unpack4x8snorm(b.w).y,unpack4x8snorm(b.w).z,unpack4x8snorm(b.w).w)*scales.x;
-    gi_rx_sky[8u]=vec3<f32>(unpack4x8snorm(c.x).x,unpack4x8snorm(c.x).y,unpack4x8snorm(c.x).z)*scales.x;
-    gi_rx_bounce[0u]=vec3<f32>(unpack4x8snorm(c.x).w,unpack4x8snorm(c.y).x,unpack4x8snorm(c.y).y)*scales.y;
-    gi_rx_bounce[1u]=vec3<f32>(unpack4x8snorm(c.y).z,unpack4x8snorm(c.y).w,unpack4x8snorm(c.z).x)*scales.y;
-    gi_rx_bounce[2u]=vec3<f32>(unpack4x8snorm(c.z).y,unpack4x8snorm(c.z).z,unpack4x8snorm(c.z).w)*scales.y;
-    gi_rx_bounce[3u]=vec3<f32>(unpack4x8snorm(c.w).x,unpack4x8snorm(c.w).y,unpack4x8snorm(c.w).z)*scales.y;
+    let p0=unpack4x8snorm(a.z);
+    let p1=unpack4x8snorm(a.w);
+    let p2=unpack4x8snorm(b.x);
+    let p3=unpack4x8snorm(b.y);
+    let p4=unpack4x8snorm(b.z);
+    let p5=unpack4x8snorm(b.w);
+    let p6=unpack4x8snorm(c.x);
+    let p7=unpack4x8snorm(c.y);
+    let p8=unpack4x8snorm(c.z);
+    let p9=unpack4x8snorm(c.w);
+    gi_rx_sky[0u]=vec3<f32>(p0.x,p0.y,p0.z)*scales.x;
+    gi_rx_sky[1u]=vec3<f32>(p0.w,p1.x,p1.y)*scales.x;
+    gi_rx_sky[2u]=vec3<f32>(p1.z,p1.w,p2.x)*scales.x;
+    gi_rx_sky[3u]=vec3<f32>(p2.y,p2.z,p2.w)*scales.x;
+    gi_rx_sky[4u]=vec3<f32>(p3.x,p3.y,p3.z)*scales.x;
+    gi_rx_sky[5u]=vec3<f32>(p3.w,p4.x,p4.y)*scales.x;
+    gi_rx_sky[6u]=vec3<f32>(p4.z,p4.w,p5.x)*scales.x;
+    gi_rx_sky[7u]=vec3<f32>(p5.y,p5.z,p5.w)*scales.x;
+    gi_rx_sky[8u]=vec3<f32>(p6.x,p6.y,p6.z)*scales.x;
+    gi_rx_bounce[0u]=vec3<f32>(p6.w,p7.x,p7.y)*scales.y;
+    gi_rx_bounce[1u]=vec3<f32>(p7.z,p7.w,p8.x)*scales.y;
+    gi_rx_bounce[2u]=vec3<f32>(p8.y,p8.z,p8.w)*scales.y;
+    gi_rx_bounce[3u]=vec3<f32>(p9.x,p9.y,p9.z)*scales.y;
 }
 // ---- GI receiver compute entry ----
 @compute @workgroup_size(8,4) fn gi_receiver_pass(@builtin(global_invocation_id) grid:vec3<u32>) {
