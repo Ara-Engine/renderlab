@@ -701,7 +701,105 @@ pub(crate) struct Composed {
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
-    compose_stage(head, program, stage, parameters, false)
+    let composed = compose_stage(head, program, stage, parameters, false);
+    match (stage, gi_dedup()) {
+        (Stage::Traced | Stage::TracedStreamed, Some(dedup)) => with_gi_dedup(composed, dedup),
+        _ => composed,
+    }
+}
+/// `RENDERLAB_GI_DEDUP` (prototype, off by default): the receiver's GI hash finds are shared
+/// across the SIMD group (subgroup) instead of each lane walking the table itself. Each round
+/// the first active lane finds its key and passes the result to every active lane with the
+/// same key, which return it; after `rounds` rounds (`RENDERLAB_GI_DEDUP_ROUNDS`, default 2)
+/// the lanes still unserved find their own. Every lane ends with the record its own find
+/// returns, so the picture is unchanged. `record` passes the 96-byte record (24 words a
+/// round); `slot` passes the found slot and each lane loads the record itself (one word).
+/// Needs subgroup operations: Apple GPUs always; on wgpu `Features::SUBGROUP`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GiDedup {
+    /// Pass the slot index instead of the record.
+    pub slot: bool,
+    /// Rounds before unserved lanes find their own.
+    pub rounds: u32,
+}
+pub(crate) fn gi_dedup() -> Option<GiDedup> {
+    static DEDUP: std::sync::OnceLock<Option<GiDedup>> = std::sync::OnceLock::new();
+    *DEDUP.get_or_init(|| {
+        let slot = match std::env::var("RENDERLAB_GI_DEDUP").ok()?.as_str() {
+            "record" => false,
+            "slot" => true,
+            other => {
+                eprintln!("RENDERLAB_GI_DEDUP: `{other}` is not record or slot; off");
+                return None;
+            }
+        };
+        let rounds = std::env::var("RENDERLAB_GI_DEDUP_ROUNDS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2u32)
+            .clamp(1, 32);
+        Some(GiDedup { slot, rounds })
+    })
+}
+/// The receiver's find as the table walks it (shaders/gi_api.wgsl), renamed for the shared
+/// wrapper.
+const GI_FIND: &str = "fn gi_hot_find(key:vec2<u32>) -> GiHot {\n";
+/// `composed` with `gi_hot_find` shared across the subgroup (`gi_dedup`): unchanged where the
+/// module has no receiver find.
+pub(crate) fn with_gi_dedup(mut composed: Composed, dedup: GiDedup) -> Composed {
+    const DIRECT: &str = "fn gi_hot_find_direct(key:vec2<u32>) -> GiHot {\n";
+    let Some(at) = composed.source.find(GI_FIND) else {
+        return composed;
+    };
+    // The find precedes the program (the engine's inputs), so the rename moves its range.
+    assert!(
+        composed.source.matches(GI_FIND).count() == 1 && at < composed.program.start,
+        "RENDERLAB_GI_DEDUP: the receiver find"
+    );
+    let source = composed.source.replacen(GI_FIND, DIRECT, 1);
+    let shift = DIRECT.len() - GI_FIND.len();
+    let rounds = dedup.rounds;
+    // The leader's result and how a served lane turns it into its record.
+    let (payload, lead, shuffle, take) = if dedup.slot {
+        (
+            "u32",
+            "gi_hot_slot(key)",
+            "subgroupShuffle(found,lane)",
+            "gi_dd_load(found)",
+        )
+    } else {
+        (
+            "GiHot",
+            "gi_hot_find_direct(key)",
+            "GiHot(subgroupShuffle(found.r0,lane),subgroupShuffle(found.r1,lane),subgroupShuffle(found.r2,lane),subgroupShuffle(found.r3,lane),subgroupShuffle(found.r4,lane),subgroupShuffle(found.r5,lane))",
+            "found",
+        )
+    };
+    // With RENDERLAB_SHADE_COUNT's counters composed in (measurement builds), words 8-15 hold
+    // how many lane finds were served in each round, the last one counting those that found
+    // their own.
+    let served = if composed.source.contains("fn rl_shade_count()") {
+        "atomicAdd(&rl_shade_counts[8u+min(round,7u)],1u);"
+    } else {
+        ""
+    };
+    let shared = format!(
+        "// RENDERLAB_GI_DEDUP (program.rs gi_dedup): finds shared across the subgroup.\n\
+// The slot `gi_hot_find_direct` returns the record of, or 0xffffffff: the same walk.\n\
+fn gi_hot_slot(key:vec2<u32>) -> u32 {{\n    let bucket=(key.x&gi_word(GI_H_MASK))&~(GI_BUCKET-1u);\n    for(var i=0u;i<GI_BUCKET;i+=1u) {{\n        let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));\n        let word=gi_word(gi_hot(slot));\n        if (word&GI_KEY_BITS)==key.x {{ return slot; }}\n        if word==0u {{ break; }}\n    }}\n    return 0xffffffffu;\n}}\n\
+// The record at `slot`, or none (gi_hot_slot's 0xffffffff).\n\
+fn gi_dd_load(slot:u32) -> GiHot {{\n    if slot==0xffffffffu {{ return GiHot(vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u)); }}\n    return gi_hot_load(slot);\n}}\n\
+// The lowest set lane of a ballot.\n\
+fn gi_dd_first(b:vec4<u32>) -> u32 {{\n    if b.x!=0u {{ return firstTrailingBit(b.x); }}\n    if b.y!=0u {{ return 32u+firstTrailingBit(b.y); }}\n    if b.z!=0u {{ return 64u+firstTrailingBit(b.z); }}\n    return 96u+firstTrailingBit(b.w);\n}}\n\
+// A lane served in round `round` (`rounds`: it found its own); measurement builds count it.\n\
+fn gi_dd_served(round:u32) {{{served}}}\n\
+fn gi_hot_find(key:vec2<u32>) -> GiHot {{\n    for(var round=0u;round<{rounds}u;round+=1u) {{\n        // The executing lanes elect their lowest: it finds its key for every lane sharing it.\n        let lead_key=subgroupBroadcastFirst(key);\n        let lane=gi_dd_first(subgroupBallot(true));\n        var found:{payload};\n        if subgroupExclusiveAdd(1u)==0u {{ found={lead}; }}\n        found={shuffle};\n        if all(key==lead_key) {{ gi_dd_served(round); return {take}; }}\n    }}\n    gi_dd_served({rounds}u);\n    return gi_hot_find_direct(key);\n}}\n"
+    );
+    // naga 30 takes the subgroup builtins without `enable subgroups;` (which it rejects as
+    // unimplemented); the validator's SUBGROUP capability and the device feature gate them.
+    composed.source = format!("{source}{shared}");
+    composed.program = composed.program.start + shift..composed.program.end + shift;
+    composed
 }
 /// `compose`, or with `hits` the hit-shading module (`compose_hits`).
 fn compose_stage(

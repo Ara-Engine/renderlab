@@ -377,3 +377,50 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
     // The soft RT head and both non-RT heads trace reflections; the hard RT head does not.
     assert!(validated >= 3, "{validated} traced heads validated");
 }
+
+/// RENDERLAB_GI_DEDUP: both forms, at one and three rounds, compose into the standard
+/// program's traced modules (tiles and list, RT and non-RT heads), keep the program's range,
+/// and validate with subgroup operations.
+#[test]
+fn gi_dedup_composes_and_validates() {
+    use crate::program::{GiDedup, Stage, compose, compose_list, with_gi_dedup};
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let mut validated = 0;
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            let full = if list {
+                compose_list(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
+            } else {
+                compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
+            };
+            for slot in [false, true] {
+                for rounds in [1, 3] {
+                    let copy = crate::program::Composed {
+                        source: full.source.clone(),
+                        program: full.program.clone(),
+                    };
+                    let shared = with_gi_dedup(copy, GiDedup { slot, rounds });
+                    assert_eq!(
+                        &shared.source[shared.program.clone()],
+                        crate::STANDARD_PROGRAM
+                    );
+                    assert!(shared.source.contains("subgroupBallot(true)"));
+                    assert_eq!(shared.source.matches("fn gi_hot_find_direct(").count(), 1);
+                    assert_eq!(shared.source.matches("fn gi_hot_find(").count(), 1);
+                    let source = &shared.source;
+                    let module = naga::front::wgsl::parse_str(source)
+                        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                    naga::valid::Validator::new(
+                        naga::valid::ValidationFlags::all(),
+                        naga::valid::Capabilities::all(),
+                    )
+                    .validate(&module)
+                    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                    validated += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 4);
+}
