@@ -101,6 +101,9 @@ fn shader() -> String {
     // The standard program's `view_data` returns the API's view-mode record.
     source.push_str(api.lines().find(|l| l.starts_with("struct ViewData")).unwrap());
     source.push('\n');
+    // Its material-pass mapping (`material_out`, `material_in`) names the API's record.
+    source.push_str(api.lines().find(|l| l.starts_with("struct MaterialRecord")).unwrap());
+    source.push('\n');
     // RL#50: the shading terms' constant gates, which the API's light helpers read.
     for line in api.lines().filter(|l| {
         l.starts_with("const RL_SHADE_TERMS") || l.starts_with("const RL_TERM_") || l.starts_with("fn rl_term(")
