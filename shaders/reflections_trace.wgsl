@@ -193,7 +193,9 @@ fn rl_pixel_count(p:vec2<u32>)->u32 {
 }
 // reflection_hits' indirect arguments from H's count: RL_HIT_GROUP records a group, rows of
 // at most 65535 groups (wgpu skips larger dimensions).
-@compute @workgroup_size(1) fn rl_hit_args() {
+@compute @workgroup_size(1) fn rl_hit_args(@builtin(local_invocation_index) lane:u32) {
+    // `lane` is unused: every compute entry of the module names its lane (the Mac thread's
+    // RENDERLAB_RS_STACK=workgroup rewrite sizes its stack slices from them).
     let written=min(atomicLoad(&rl_hits.count),arrayLength(&rl_hits.records)/3u);
     atomicStore(&rl_hits.count,written);
     let groups=(written+RL_HIT_GROUP-1u)/RL_HIT_GROUP;
