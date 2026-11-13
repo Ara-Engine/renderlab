@@ -3731,6 +3731,7 @@ impl Renderer {
         // `queue.submit` for an older one shows here with the older one counted.
         let alive = self.occupied();
         let index = self.queue.submit([commands]);
+        self.gi.submitted();
         if let Some(mut t) = marks {
             t.submitted();
             self.pass_timeline = Some(t);

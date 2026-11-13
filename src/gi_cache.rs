@@ -280,8 +280,13 @@ pub struct IndirectSettings {
     pub min_edge: f32,
     pub levels: u32,
     /// log2 of the slot count (each slot is 224 bytes in the table, plus 16 of outgoing
-    /// radiance and 4 of claim word).
+    /// radiance and 4 of claim word). With `auto_slots`, the most the table grows to.
     pub slots_log2: u32,
+    /// Memory cut 1 (U-FIXED): the table starts at a size from the scene's triangle count
+    /// (`scene_slots_log2`) and doubles, emptied, whenever a frame's claims find a bucket full
+    /// (the `full` counter, read back without waiting), up to `slots_log2`. Off: the table is
+    /// 2^`slots_log2` from the start. `RENDERLAB_GI_SLOTS=N` fixes 2^N either way (A/B).
+    pub auto_slots: bool,
     /// Fixed-rotation refresh (W2): a cell re-traces when (slot + frame) % period == 0.
     /// 0 disables it; events alone keep sky visibility current.
     pub rotation_period: u32,
@@ -441,6 +446,7 @@ impl Default for IndirectSettings {
             min_edge: 1.0 / 512.0,
             levels: 14,
             slots_log2: 20,
+            auto_slots: true,
             rotation_period: 0,
             evict_frames: 120,
             force_software: false,
@@ -548,6 +554,11 @@ pub struct IndirectStats {
     pub bounce_bytes: u64,
     /// The cell-space filter's unfiltered sources (G3), in bytes.
     pub filter_bytes: u64,
+    /// The table's slots, the times `auto_slots` doubled it, and the largest per-frame
+    /// bucket-full count read back since the last doubling.
+    pub slots: u32,
+    pub slot_doublings: u32,
+    pub peak_full: u32,
 }
 
 /// GPU microseconds per cache pass of the last profiled frame.
@@ -1553,8 +1564,101 @@ pub(super) struct GiState {
     mixed_active: bool,
     /// The CPU history and per-frame plan (shared with the ara-gpu backend).
     planner: Planner,
+    /// `auto_slots`: the bucket-full readback and a pending doubling.
+    watch: Option<FullWatch>,
+    grow: bool,
 }
 
+/// The `full` counter (work word 4) of recent cache frames, copied after their passes into a
+/// small ring of mappable buffers and read once mapped, a frame or two later: no frame waits.
+pub(crate) struct FullWatch {
+    ring: Vec<(wgpu::Buffer, WatchState)>,
+}
+enum WatchState {
+    Free,
+    Recorded,
+    Mapping(Arc<std::sync::OnceLock<bool>>),
+}
+impl FullWatch {
+    const RING: usize = 3;
+    fn new(device: &wgpu::Device) -> Self {
+        let ring = (0..Self::RING)
+            .map(|_| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("indirect cache full-bucket readback"),
+                    size: 8,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                (buffer, WatchState::Free)
+            })
+            .collect();
+        Self { ring }
+    }
+    /// After the cache passes: copies this frame's counter into a free entry, if any.
+    fn record(&mut self, encoder: &mut wgpu::CommandEncoder, work: &wgpu::Buffer) {
+        if let Some((buffer, state)) = self
+            .ring
+            .iter_mut()
+            .find(|(_, s)| matches!(s, WatchState::Free))
+        {
+            encoder.copy_buffer_to_buffer(work, 16, buffer, 0, 8);
+            *state = WatchState::Recorded;
+        }
+    }
+    /// After the frame's submission: maps what it recorded.
+    pub(crate) fn submitted(&mut self) {
+        for (buffer, state) in &mut self.ring {
+            if matches!(state, WatchState::Recorded) {
+                let done = Arc::new(std::sync::OnceLock::new());
+                let callback = done.clone();
+                buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    let _ = callback.set(r.is_ok());
+                });
+                *state = WatchState::Mapping(done);
+            }
+        }
+    }
+    /// The largest count among entries mapped since (after a device poll), if any.
+    fn collect(&mut self) -> Option<u32> {
+        let mut largest = None;
+        for (buffer, state) in &mut self.ring {
+            let WatchState::Mapping(done) = state else {
+                continue;
+            };
+            let Some(&ok) = done.get() else { continue };
+            if ok {
+                let full = buffer
+                    .slice(..)
+                    .get_mapped_range()
+                    .map(|v| u32::from_le_bytes(v[..4].try_into().unwrap()))
+                    .unwrap_or(0);
+                buffer.unmap();
+                largest = Some(largest.unwrap_or(0).max(full));
+            }
+            *state = WatchState::Free;
+        }
+        largest
+    }
+}
+
+/// `auto_slots`' starting size: about a quarter as many slots as the scene's drawn triangles
+/// (instances counted), between 2^16 and `cap`. Showcase (about 380k) starts at 2^17, Outpost
+/// (3.1M) and the quarry (13M) at the cap.
+pub(crate) fn scene_slots_log2(triangles: u64, cap: u32) -> u32 {
+    let log2 = 64 - triangles.max(1).leading_zeros();
+    log2.saturating_sub(2).clamp(16, cap.max(16))
+}
+/// `RENDERLAB_GI_SLOTS=N`: the table fixed at 2^N slots (measurement A/B).
+fn forced_slots_log2() -> Option<u32> {
+    static FORCED: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| {
+        std::env::var("RENDERLAB_GI_SLOTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n| (10..=21).contains(n))
+    })
+}
 impl GiState {
     pub fn new(device: &wgpu::Device, ledger: &Ledger) -> Self {
         let dummy = ledger.own(
@@ -1592,6 +1696,14 @@ impl GiState {
             shade: None,
             mixed: vec![],
             mixed_active: false,
+            watch: None,
+            grow: false,
+        }
+    }
+    /// After the frame's submission (Renderer::submit_frame): maps the full-bucket readback.
+    pub(crate) fn submitted(&mut self) {
+        if let Some(watch) = &mut self.watch {
+            watch.submitted();
         }
     }
     /// The table shading binds (lighting group 3, binding 20).
@@ -1930,6 +2042,7 @@ impl Renderer {
                 ],
             };
             self.gi.stats.table_bytes = table_bytes;
+            self.gi.stats.slots = slots;
             self.gi.stats.work_bytes = work_bytes;
             self.gi.stats.bounce_bytes =
                 outgoing_bytes + draws_bytes + (2 * (1 + u64::from(slots)) + u64::from(slots)) * 4;
@@ -2953,7 +3066,41 @@ impl Renderer {
             if !(self.gi.settings.enabled && eligible && self.gi_callers(draws)) {
                 return Ok(());
             }
-            self.allocate_gi(self.gi_slots(self.gi.settings.slots_log2))?;
+            let cap = self.gi.settings.slots_log2;
+            let log2 = match forced_slots_log2() {
+                Some(n) => n,
+                None if self.gi.settings.auto_slots => {
+                    let triangles: u64 = draws
+                        .iter()
+                        .map(|d| {
+                            u64::from(d.indices.len() as u32 / 3) * u64::from(d.slots.len() as u32)
+                        })
+                        .sum();
+                    scene_slots_log2(triangles, cap)
+                }
+                None => cap,
+            };
+            self.allocate_gi(self.gi_slots(log2))?;
+            self.gi.watch = (forced_slots_log2().is_none() && self.gi.settings.auto_slots)
+                .then(|| FullWatch::new(&self.device));
+            self.gi.grow = false;
+        }
+        // auto_slots: a full bucket since the last look doubles the table (emptied, so the
+        // cache refills as after a cut), up to slots_log2 and the device's binding limit.
+        if let Some(full) = self.gi.watch.as_mut().and_then(FullWatch::collect) {
+            self.gi.stats.peak_full = self.gi.stats.peak_full.max(full);
+            self.gi.grow |= full > 0;
+        }
+        if self.gi.grow {
+            self.gi.grow = false;
+            let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
+            let next = self.gi_slots((slots.trailing_zeros() + 1).min(self.gi.settings.slots_log2));
+            if next > slots {
+                self.allocate_gi(next)?;
+                self.gi.stats.slot_doublings += 1;
+                self.gi.stats.peak_full = 0;
+                self.gi.watch = Some(FullWatch::new(&self.device));
+            }
         }
         // LC2: changing light count may outgrow the bitset. Existing in-flight tables
         // retire normally; scheduling and cache lookup are otherwise unchanged.
@@ -2963,7 +3110,8 @@ impl Renderer {
                     < light_cold_words(self.lighting.pending.count, self.gi.settings.directions)
             })
         {
-            self.allocate_gi(self.gi_slots(self.gi.settings.slots_log2))?;
+            let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
+            self.allocate_gi(slots)?;
         }
         let hardware = self.hardware_shadows.is_some() && !self.gi.settings.force_software;
         let run = self.gi.settings.enabled && eligible && self.gi_callers(draws);
@@ -3465,6 +3613,9 @@ impl GiState {
                 slot * PROFILE_STRIDE,
             );
             profile.written += 1;
+        }
+        if let (Some(watch), Some(r)) = (self.watch.as_mut(), self.resources.as_ref()) {
+            watch.record(encoder, &r.work);
         }
     }
 }

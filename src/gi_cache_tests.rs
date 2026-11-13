@@ -4144,3 +4144,15 @@ fn g2_frame_times(r: &mut Renderer, frames: usize, skip: usize) -> Json {
         "shading_ms": rows.iter().map(|g| g.mesh_pass.as_secs_f64() * 1e3).collect::<Vec<_>>(),
     })
 }
+
+/// Memory cut 1: the table starts near a quarter as many slots as the scene's triangles,
+/// within 2^16 and the cap.
+#[test]
+fn indirect_table_starts_from_the_scene() {
+    use super::scene_slots_log2;
+    assert_eq!(scene_slots_log2(0, 20), 16);
+    assert_eq!(scene_slots_log2(380_089, 20), 17);
+    assert_eq!(scene_slots_log2(3_118_777, 20), 20);
+    assert_eq!(scene_slots_log2(13_034_903, 20), 20);
+    assert_eq!(scene_slots_log2(13_034_903, 19), 19);
+}
