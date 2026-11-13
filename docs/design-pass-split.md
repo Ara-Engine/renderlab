@@ -25,29 +25,48 @@ lookups run at the whole kernel's register count and occupancy.
 
 | # | Pass | Dispatch | Reads | Writes |
 |---|------|----------|-------|--------|
-| P1 | **Material** (per program, MP1 lists at 32 lanes) | covered pixels | hit record, mesh attributes, material parameters and textures, decals | material record; S1's glossy-list entry; emission |
-| P2 | **GI receiver lookup** | indirect over covered pixels, small register footprint | record (shading normal, flags), position (hit record + camera ray), cache tables | prepared irradiance and untraced specular (rgba16f x 2) |
-| P3 | **Lights and shadows** | coherent screen tiles | record, position, light clusters, shadow maps / VSM / ray query, P2's outputs | HDR (direct + indirect diffuse + untraced specular + emission, through fog); binding 62 (reflectance x fog transmittance, w) |
+| P1 | **Material** (per program, MP1 lists at 32 lanes) | covered pixels | hit record, mesh attributes, material parameters and textures, decals | material record (group 0, bindings 75 and 78); S1's glossy-list entry; emission |
+| P2 | **GI receiver lookup** | indirect over covered pixels, small register footprint | position (hit record + camera ray), the vertex normal for the cell bin, cache tables | prepared SH (binding 68, 48 B/px), evaluated by shading about the shading normal |
+| P3a | **Local-light visibility** | coherent screen tiles | position, light clusters, the local atlas or ray query | unorm8 visibility, 16 slots a pixel (binding 73) |
+| P3b | **RT sun visibility**, split from the fused camera visibility | covered pixels | position, TLAS | sun visibility (binding 74) |
+| P3 | **Lights** (the standard model) | coherent screen tiles | record, P2's SH, P3a/P3b's visibility, light clusters | HDR (direct + indirect diffuse + untraced specular + emission, through fog); binding 62 (reflectance x fog transmittance, w) |
 | P4 | **Reflections** (S1) | the glossy list, then hits, then the composite | list, record (lobe), TLAS or software BVH, binding 62 | HDR += w x reflectance x mean |
 | - | Unchanged | | | TR1, post |
+
+Units running tonight (2026-11-13), each behind a switch, default off:
+
+| Unit | Pass | Switch | Output |
+|------|------|--------|--------|
+| the Mac (`t3/material-pass`) | P1 material record | `RENDERLAB_MATERIAL_PASS=1` | bindings 75, 78 |
+| U-GIPASS | P2 GI receiver lookup | `RENDERLAB_GI_PASS` | binding 68, prepared SH, 48 B/px |
+| U-LVIS | P3a local-light visibility | `RENDERLAB_LIGHT_VIS_PASS` | binding 73, unorm8 x 16 slots |
+| U-SUNRT | P3b RT sun visibility | `RENDERLAB_SUN_PASS` | binding 74 |
+| U-RTVIS | P4 reflections (S1) | `RENDERLAB_RL_PASS`, `RENDERLAB_RL_DEFERRED` (non-RT default on the list head) | glossy list 56, room counters 69, receiver epsilon 79 |
 
 A program with its own `shade` keeps today's single kernel as the fallback: it runs in its own
 MP1 list, writes HDR directly, and sets a record flag so P2 and P3 skip its pixels.
 
-## 2. The material record (the Mac's layout, shared by port and wgpu)
+## 2. The material record (the Mac's `t3/material-pass`, shared by port and wgpu)
 
-24 bytes a pixel: one rgba32uint (16 B) plus one rg32uint (8 B). That is 50 MB at 1080p and
-199 MB at 4K.
+The seam exists: the Mac's branch `t3/material-pass`, switch `RENDERLAB_MATERIAL_PASS=1`
+(default off). A material entry runs the decode and the program's `surface` once a pixel and
+writes the record; the shading entry rebuilds `Surface` from it. Programs opt in through a
+declared mapping (the standard program does); the others keep the single kernel. It is also the
+seam a material graph plugs into later.
 
-| Field | Encoding | Bytes |
-|-------|----------|------:|
-| shading normal | octahedral, 2 x u16 | 4 |
-| geometric normal | octahedral, 2 x u16 | 4 |
-| base colour + coverage | rgb8 + u8 | 4 |
-| metallic, roughness | 2 x u8 | 2 |
-| emission | rgb9e5 | 4 |
-| flags (double-sided/front, thin, transmission/IOR class, normal-mapped, own-`shade`) + program slot | u16 + u16 | 4 |
-| MQ2 view share, lobe alpha | 2 x u8 | 2 |
+24 bytes a pixel in group 0, bindings 75 and 78: 50 MB at 1080p, 199 MB at 4K.
+
+| Word | Field | Encoding |
+|------|-------|----------|
+| rgba32uint .x | shading normal | octahedral, 2 x 16 bits |
+| rgba32uint .y | base colour + coverage | rgb8 + u8 |
+| rgba32uint .z | metallic, roughness + flags / slot / model | 2 x u8 + u16 |
+| rgba32uint .w | emission | rgb9e5 |
+| rg32uint .x | geometric normal | octahedral, 2 x 16 bits |
+| rg32uint .y | MQ2 view share, lobe alpha | 2 x u8 (16 bits spare) |
+
+The flags carry double-sided/front, thin, the transmission/IOR class, normal-mapped and the
+lighting model, so later passes can skip pixels whose program keeps its own `shade`.
 
 Position is not stored. It comes from the hit record's distance along the camera ray (traced
 primaries), or from depth (raster or the visibility buffer).
@@ -59,10 +78,11 @@ primaries), or from depth (raster or the visibility buffer).
 | Decals, normal mapping, `surface` | P1 |
 | Emission | P1 (in the record); P3 adds it |
 | MQ2 view share, lobe alpha, S1's list entry | P1 |
-| GI cache lookup (diffuse) | P2 |
+| GI cache lookup (diffuse) | P2 (prepared SH) |
 | ES1 blocked sky specular, environment specular for the untraced band | P2 (the same cell reads as the lookup, which is why they move together) |
 | Lights: cluster walk, standard model (Lambert + GGX from the record) | P3 |
-| Local shadows (atlas, ray query), sun (VSM, ray query) | P3 |
+| Local shadows (atlas, ray query) | P3a |
+| Sun: RT ray query | P3b; non-RT VSM stays in P3 until it is split too |
 | Fog and aerial perspective | P3 (writes transmittance into binding 62 for P4) |
 | Traced reflections | P4 |
 
@@ -75,7 +95,8 @@ nvidia-shader-cache-in-measurements).
 |------|----------------------|----------|
 | P1 material | per program and path | 10-20 s (no ray query, no light loop) |
 | P2 GI lookup | once per path | 5-15 s |
-| P3 lights and shadows | once per path | 30-50 s (ray query, cluster walk, shadow filters) |
+| P3a / P3b visibility | once per path each | 15-30 s (ray query or the atlas filters) |
+| P3 lights | once per path | 10-20 s (cluster walk, the standard model) |
 | P4 trace and hits | once per path (hits per program today) | already separate |
 
 For N programs that is about N x 15 + 60 s, against N x 80 s today. Only P1 grows with the
@@ -84,11 +105,9 @@ programs.
 ## 5. Migration order, one measurable step a night
 
 1. **The reflection pass (S1).** Already being built; it is the first piece.
-2. **The material pass and record.** P1 writes the record; the rest of today's kernel reads it
-   instead of running `surface`. It is a prerequisite of both candidates for the next step,
-   since the GI lookup and the lights both need the shading normal from the record.
-   - Measure: record write cost, and P1's compile seconds.
-3. **The GI receiver lookup (P2).** The RTX supports GI lookup over lights as the second split:
+2. **The GI receiver lookup (P2; U-GIPASS tonight).** It writes prepared SH that shading
+   evaluates about its own shading normal, so it does not wait for the material record. The
+   RTX supports GI lookup over lights as the second split:
    - GI lookups cost 0.65 / 0.94 ms on Showcase (RT / non-RT) and 2.08 / 3.87 ms on Glint goal;
    - lights with shadows cost 0.40 / 0.96 ms on Showcase;
    - on the M5 the lookup is 2.09 / 2.43 ms, 84-86 % dependent loads and latency-bound at the
@@ -96,7 +115,10 @@ programs.
      warps.
    - Measure: the lookup pass's ms against the kernel's drop, both paths, Showcase, Glint goal
      and the quarry.
-4. **Lights and shadows (P3)** as a program-independent tile pass.
+3. **The material pass and record (P1; the Mac's `t3/material-pass`).** The rest of today's
+   kernel rebuilds `Surface` from the record instead of running `surface`. Measure: the record's
+   write cost and P1's compile seconds.
+4. **Visibility, then lights (P3a U-LVIS and P3b U-SUNRT tonight; P3 after the record).**
    - M5 1.88 / 1.84 ms, of which shadows are 0.95 / 1.27. Per-tile coherence shapes ray-query
      divergence (the lanterns finding), and the light bound applies per tile.
    - Measure: the pass against the remaining kernel, and the lanterns scene.
@@ -108,9 +130,9 @@ programs.
 | Step | What it closes off (the own-`shade` fallback stays open) |
 |------|----------------------------------------------------------|
 | 1. Reflections | Traced reflections use a GGX lobe from the record's alpha and normal; a program's custom non-GGX lobe shape is not traced. |
-| 2. Material record | A program passes `shade` only the record's fields: no anisotropy, clearcoat, sheen, subsurface or custom per-pixel values. Each needs record growth or the fallback. |
-| 3. GI lookup | Indirect diffuse is prepared irradiance about the shading normal. A program can no longer query `indirect_radiance` in an arbitrary direction (back-lighting, wrap, thin transmission) except through the fallback. |
-| 4. Lights | Lights shade with the standard model. Wrap lighting, toon banding, retro-reflection and custom light response need the fallback until a material graph exists. |
+| 2. GI lookup | Indirect diffuse arrives as a prepared L1 SH per pixel. A program can still evaluate it in any direction (back-lighting, wrap, thin transmission), but only at L1 accuracy, and no longer queries the cache itself. |
+| 3. Material record | A program passes `shade` only the record's fields: no anisotropy, clearcoat, sheen, subsurface or custom per-pixel values. Each needs record growth or the fallback. Programs without a declared mapping keep the single kernel. |
+| 4. Visibility, then lights | Local and sun visibility become per-pixel slots computed before shading (16 local slots), so a program cannot cast its own visibility queries. Lights then shade with the standard model. Wrap lighting, toon banding, retro-reflection and custom light response need the fallback until a material graph exists. |
 | 5. Engine inputs | Decals and fog become fixed engine stages, not program-visible hooks. |
 
 Mixed frames run both kinds: standard-model pixels through P1-P4, fallback pixels in their own
