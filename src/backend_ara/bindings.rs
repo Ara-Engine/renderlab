@@ -161,7 +161,12 @@ impl<'a> HeapBindings<'a> {
                     }
                     start
                 }
-                (InputKind::StorageImage { dimension, format }, Input::Image(t)) => {
+                (
+                    InputKind::StorageImage {
+                        dimension, format, ..
+                    },
+                    Input::Image(t),
+                ) => {
                     ensure!(
                         t.view.dimension == dimension
                             && t.view.mip_count == 1

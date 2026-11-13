@@ -114,14 +114,23 @@ fn lower(
                     suffix: ")]]".into(),
                 });
             }
-            InputKind::StorageImage { dimension, format } => {
+            InputKind::StorageImage {
+                dimension,
+                format,
+                read,
+            } => {
                 let dim = match dimension {
                     ViewDimension::D2 => "2d",
                     ViewDimension::D2Array => "2d_array",
                     ViewDimension::D3 => "3d",
                     ViewDimension::CubeArray => anyhow::bail!("cube arrays are sampled only"),
                 };
-                declarations.push_str(&format!("@group(0) @binding({}) var ara_storage_{i}:binding_array<texture_storage_{dim}<{},write>>;\n",1600+i,super::heap_interface::storage_wgsl(format)?));
+                declarations.push_str(&format!(
+                    "@group(0) @binding({}) var ara_storage_{i}:binding_array<texture_storage_{dim}<{},{}>>;\n",
+                    1600 + i,
+                    super::heap_interface::storage_wgsl(format)?,
+                    if read { "read_write" } else { "write" }
+                ));
                 names.insert(input.name.as_str(), format!("ara_storage_{i}[{slot}]"));
             }
             InputKind::Sampler { comparison } | InputKind::SamplerArray { comparison, .. } => {
