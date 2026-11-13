@@ -381,6 +381,12 @@ pub struct IndirectSettings {
     /// turn alike: after a start or a cut the picture then shows cells without bounce light
     /// beside gathered ones for as long as the whole queue takes.
     pub gather_pixels_first: bool,
+    /// Gathers a cell made for a gather's hit gets (GI_SECONDARY, GI_TERTIARY; U-RTVIS). Pixel
+    /// cells keep `gathers`. A hit cell feeds other cells' bounce, not the picture directly, and
+    /// its own gathers request further cells: at `gathers` (3) a cut's queue fanned out to about
+    /// 330k gathers on Outpost's second view and drained only by frame 119. 0 (the default
+    /// until measured) gives them `gathers`, as before; `RENDERLAB_GI=hit_gathers=1` the cap.
+    pub hit_gathers: u32,
     /// Levels above the pixels' that a gather hit on something that moved this frame reads
     /// at least (U-SPECK, docs/speck.md; 0 to 4, 0 off). A moving surface leaves a fine cell
     /// before the cell has a value, so its hits found none and it sent no bounce light.
@@ -454,6 +460,7 @@ impl Default for IndirectSettings {
             // it halves frame 16's distance from the settled frame on RT, for a quarter more
             // gathers over the flight, and non-RT's first eight frames are slightly worse.
             gather_pixels_first: false,
+            hit_gathers: 0,
             // Off: at 2 the path tracer's walking hero is 1.5-1.9 codes closer underneath at one
             // frame and 0.9-1.4 codes farther at another, and the game scene's spinning cube
             // gains isolated specks (docs/speck.md section 10).
@@ -1115,6 +1122,7 @@ impl Planner {
         header[17] = u32::from(bounce);
         header[18] = layout.shade;
         header[19] = s.gathers;
+        header[30] = s.hit_gathers;
         header[20] = match s.gather_cells {
             0 => GATHER_CELLS,
             u32::MAX => 0,
