@@ -755,6 +755,10 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         Some(mode) => mask_resolve(mode),
         None => RESOLVE.to_owned(),
     };
+    let cycle = std::env::var("RENDERLAB_TR1_COVERAGE_CYCLE").is_ok_and(|v| v == "1");
+    if cycle || std::env::var("RENDERLAB_TR1_COVERAGE_UNORM").is_ok_and(|v| v == "1") {
+        resolve = coverage_resolve(&resolve, cycle);
+    }
     if let Ok(k) = std::env::var("RENDERLAB_P_SPLIT_FRESH_CLAMP") {
         resolve = fresh_clamp_resolve(
             &resolve,
@@ -768,6 +772,44 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         include_str!("../shaders/object_motion.wgsl"),
         zones_source("tr1.zones")
     ))
+}
+
+/// Coverage experiments only. Off, the resolve module is unchanged. Both encodings fit
+/// the existing integer second-layer word; colour and effective colour weight stay f16.
+pub(in crate::renderer) fn coverage_resolve(source: &str, cycle: bool) -> String {
+    let replace = |source: String, old: &str, new: &str| {
+        assert_eq!(source.matches(old).count(), 1, "TR1 coverage seam: {old}");
+        source.replace(old, new)
+    };
+    let mut source = replace(
+        source.to_owned(),
+        "let cw=unpack2x16float(l.w);",
+        "let cw=tr1_unpack_coverage(l.x,l.w);",
+    );
+    source = replace(
+        source,
+        "pack2x16float(vec2<f32>(first_coverage,coverage_weight))",
+        if cycle {
+            "tr1_pack_coverage(first_coverage,coverage_weight,counted)"
+        } else {
+            "tr1_pack_coverage(first_coverage,coverage_weight,false)"
+        },
+    );
+    if cycle {
+        source = replace(
+            source,
+            "    var front=theirs.xyz;var back=mine.xyz;",
+            "    let settled=tr1_cycle_coverage(p,s,u,occluder_is_s,c,coverage,coverage_weight);\n    coverage=settled.x;coverage_weight=settled.y;let counted=settled.z>0.0;\n    var front=theirs.xyz;var back=mine.xyz;",
+        );
+        source = replace(
+            source,
+            "|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s),pack2x16float(theirs.xy)",
+            "|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s)|select(0u,TR1_COVERAGE_COUNT,counted),pack2x16float(theirs.xy)",
+        );
+        source.push_str(include_str!("../shaders/temporal_coverage_cycle.wgsl"));
+    }
+    source.push_str(include_str!("../shaders/temporal_coverage_pack.wgsl"));
+    source
 }
 
 /// Measurement only (P-SPLIT crack flashes): a continued history's fresh sample is clamped to
@@ -1613,6 +1655,10 @@ impl ReconstructionState {
     #[cfg(test)]
     pub(in crate::renderer) fn test_history(&self) -> &wgpu::Texture {
         &self.colour[self.plan.parity].texture
+    }
+    #[cfg(test)]
+    pub(in crate::renderer) fn test_samples(&self) -> &wgpu::Texture {
+        &self.sample.texture
     }
     /// Histories at the output size; the copy of the frame's samples at the internal size
     /// (equal at native resolution).
@@ -2645,6 +2691,7 @@ mod tests {
             .into_iter()
             .chain(masks)
             .chain([fresh_clamp_resolve(&resolve_clone, 0.5)])
+            .chain([false, true].map(|cycle| coverage_resolve(&resolve_clone, cycle)))
         {
             let module = naga::front::wgsl::parse_str(&source).unwrap();
             naga::valid::Validator::new(
