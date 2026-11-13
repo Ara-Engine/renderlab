@@ -3518,7 +3518,11 @@ impl Renderer {
                     && p.reconstruction.as_ref().is_some_and(|r| r.trace.is_some())
                     && self.view.reconstruction.rotate_directions
                 {
-                    self.encode_reconstruction_interactive(&mut encoder, stamps(6), &mut mark);
+                    if primary_ray_gpu::sun_vis_pass::enabled() {
+                        self.encode_sun_split(&mut encoder, stamps(6), stamps(8), &mut mark);
+                    } else {
+                        self.encode_reconstruction_interactive(&mut encoder, stamps(6), &mut mark);
+                    }
                 } else if interactive {
                     let tile = primary_ray_gpu::TRACE_TILE;
                     self.encode_primary_interactive(&mut encoder, &p.interactive, tile, stamps(6));
