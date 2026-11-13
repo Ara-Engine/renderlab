@@ -1664,8 +1664,11 @@ fn frame(
     // RENDERLAB_MATERIAL_PASS (program.rs material_pass_on): programs with the record mapping
     // shade from the material record, which a material pass writes first.
     let material_on = deferred_path && crate::program::material_pass_on();
+    // RENDERLAB_MATERIAL_PROBE=tracetail: the trace kernels write the receiver words; the
+    // material pass's writer and reader do not run (the receiver check's reader excepted).
+    let trace_tail = material_on && crate::program::material_trace_tail();
     let reading = |source: &str, list: bool| -> Result<Option<shader::Program>> {
-        if material_on {
+        if material_on && (!trace_tail || crate::program::material_receiver_check()) {
             primary_shade::hardware_soft_material(source, list, crate::program::MaterialRole::Read)
         } else {
             Ok(None)
@@ -1693,7 +1696,7 @@ fn frame(
     };
     // The material pass: per slot (one for a single-program frame), the program's record
     // writer, or None where the program keeps its single kernel.
-    let material_programs = if material_on {
+    let material_programs = if material_on && !trace_tail {
         let list = sources.len() > 1;
         let frame_sources: &[&str] = if list { &sources } else { &sources[..1] };
         frame_sources
@@ -1705,7 +1708,7 @@ fn frame(
     } else {
         Vec::new()
     };
-    if material_on {
+    if material_on && !trace_tail {
         let list = sources.len() > 1;
         let frame_sources: &[&str] = if list { &sources } else { &sources[..1] };
         let readers = frame_sources

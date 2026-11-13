@@ -229,10 +229,17 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
     )?;
     // Hits write minus (1e-6 plus) the vertex normal's angle in w; misses write alpha 0 or 1.
     let (mut worst, mut hits, mut edges, mut unmapped) = ([0f32; 4], 0, 0, 0);
+    let (mut misses, mut stale) = (0, 0);
     for pixel in images.hdr.as_chunks::<8>().0 {
         let value = |c: usize| {
             f16::from_bits(u16::from_le_bytes([pixel[2 * c], pixel[2 * c + 1]])).to_f32()
         };
+        // Misses write w 3 and x 0 where word 1 holds the miss sentinel.
+        if value(3) == 3.0 {
+            misses += 1;
+            stale += usize::from(value(0) != 0.0);
+            continue;
+        }
         if value(3) >= 0.0 {
             continue;
         }
@@ -263,6 +270,8 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
         "too few hits ({hits})"
     );
     ensure!(edges > 0, "no pixel reached an edge the repair moves");
+    // Two programs shade from lists, which hold hits only; any miss shaded here is checked.
+    ensure!(stale == 0, "{stale} of {misses} misses lack the sentinel");
     ensure!(
         unmapped > 0 && unmapped < hits,
         "toon and standard pixels both drawn ({unmapped} of {hits})"
@@ -279,5 +288,133 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
         worst[2]
     );
     ensure!(worst[3] < 2e-3, "the vertex normal moved {} rad", worst[3]);
+    Ok(())
+}
+
+/// The miss sentinel after a camera move: a forward frame sequence (one program, so
+/// shading visits the misses of every covered tile) looks at a wall, then turns up past its
+/// top edge. Every miss the second frame shades holds the sentinel in word 1, the pixels the
+/// wall covered a frame earlier included. Runs with
+/// `RENDERLAB_MATERIAL_PASS=1 RENDERLAB_MATERIAL_DEBUG=receiver`.
+#[test]
+fn misses_carry_the_sentinel_after_the_camera_moves() -> Result<()> {
+    use renderlab::{
+        Camera, Light, Lighting, Mat4, MaterialDescriptor, Vec3, Vertex,
+        backend_ara::forward::{ForwardObject, ForwardScene, Frames, Primary, SunShadows},
+    };
+    let set = |name: &str, value: &str| std::env::var(name).as_deref() == Ok(value);
+    if !(set("RENDERLAB_MATERIAL_PASS", "1") && set("RENDERLAB_MATERIAL_DEBUG", "receiver")) {
+        println!(
+            "miss sentinel: RENDERLAB_MATERIAL_PASS=1 RENDERLAB_MATERIAL_DEBUG=receiver not set, nothing checked"
+        );
+        return Ok(());
+    }
+    const SIZE: [u32; 2] = [128, 96];
+    let path = root("material-sentinel");
+    let mut gpu = GpuDevice::new(&[], path.join("device"))?;
+    let cache = ShaderCache::new(path.join("shaders"))?;
+    // A 4 m wall square to the first camera, 5 m out.
+    let wall =
+        [[-2., 5., -2.], [2., 5., -2.], [2., 5., 2.], [-2., 5., 2.]].map(|position| Vertex {
+            position,
+            normal: [0., -1., 0.],
+            uv: [0.; 2],
+            color: [1.; 4],
+        });
+    let objects = [ForwardObject {
+        vertices: &wall,
+        indices: &[0, 1, 2, 0, 2, 3],
+        transform: Mat4::IDENTITY,
+        material: MaterialDescriptor {
+            double_sided: true,
+            ..Default::default()
+        },
+    }];
+    let lighting = Lighting {
+        lights: vec![Light::Directional {
+            travel: Vec3::new(0.3, 0.4, -1.).normalize(),
+            lux: [1.; 3],
+        }],
+        environment: [1.; 3],
+        exposure_stops: 0.,
+    };
+    let shadows = SunShadows {
+        split_ends: vec![32.],
+        disk_angle: 0.02,
+    };
+    let mut frames = Frames::default();
+    // Each pixel: Some(sentinel held) on a shaded miss, None otherwise.
+    let mut frame = |frames: &mut Frames, target: Vec3| -> Result<Vec<Option<bool>>> {
+        let images = frames.render(
+            &mut gpu,
+            &cache,
+            &ForwardScene {
+                meshes: None,
+                materials: None,
+                instances: None,
+                objects: &objects,
+                lighting: &lighting,
+                camera: Camera::look_at(
+                    Vec3::ZERO,
+                    target,
+                    Vec3::Z,
+                    60f32.to_radians(),
+                    0.1,
+                    100.,
+                )?,
+                size: SIZE,
+                atmosphere: renderlab::Atmosphere::off(),
+                sun_shadows: Some(&shadows),
+                primary: Primary::Traced,
+                post: None,
+                indirect: None,
+                reconstruction: None,
+                reflections: None,
+                textures: None,
+                local_shadows: None,
+                transparent: &[],
+                programs: None,
+                sky_map: None,
+                skins: None,
+                casts: None,
+                colour_lut: None,
+                ids: None,
+            },
+        )?;
+        Ok(images
+            .hdr
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|p| {
+                let c = |k: usize| {
+                    f16::from_bits(u16::from_le_bytes([p[2 * k], p[2 * k + 1]])).to_f32()
+                };
+                (c(3) == 3.0).then_some(c(0) == 0.0)
+            })
+            .collect())
+    };
+    let hits = |f: &[Option<bool>]| f.iter().filter(|p| p.is_none()).count();
+    let first = frame(&mut frames, Vec3::new(0., 5., 0.))?;
+    let second = frame(&mut frames, Vec3::new(0., 5., 5.))?;
+    let uncovered = first
+        .iter()
+        .zip(&second)
+        .filter(|(a, b)| a.is_none() && b.is_some())
+        .count();
+    let misses = second.iter().filter(|p| p.is_some()).count();
+    let held = second.iter().filter(|p| **p == Some(true)).count();
+    println!(
+        "miss sentinel: first frame {} non-miss px, second {}; {uncovered} went from the wall to the sky; {held} of {misses} shaded misses hold the sentinel",
+        hits(&first),
+        hits(&second)
+    );
+    // Only covered tiles are shaded (tiles of sky alone are fast-cleared, their sentinel
+    // written by the same whole-image trace dispatch but not visible to the check).
+    ensure!(
+        uncovered > 50,
+        "the camera move uncovered too few shaded pixels ({uncovered})"
+    );
+    ensure!(held == misses, "{} misses lack the sentinel", misses - held);
     Ok(())
 }
