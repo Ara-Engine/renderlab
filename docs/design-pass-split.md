@@ -28,7 +28,7 @@ lookups run at the whole kernel's register count and occupancy.
 | P1 | **Material, decode once** (per program, MP1 lists at 32 lanes) | covered pixels | hit record, vertex buffers, material parameters and textures, decals | material record with its receiver word (below); S1's glossy-list entry; emission |
 | P2 | **GI receiver lookup** | indirect over covered pixels, small register footprint | geometry only: the hit record and camera ray (position, the vertex normal for the cell bin), cache tables | prepared SH, sky L2 + bounce L1, 48 B/px (binding 68); shading evaluates it at its shading normal |
 | P3a | **Local-light visibility** | coherent screen tiles | position, light clusters, the local atlas or ray query | unorm8 visibility, 16 slots a pixel (binding 73) |
-| P3b | **RT sun visibility**, split from the fused camera visibility | covered pixels | position, TLAS | sun visibility (binding 74) |
+| P3b | **RT sun visibility**, split from the fused camera visibility | covered pixels | position, TLAS | sun visibility; no binding of its own (reuses `primary_trace_receivers` / `primary_vb_sun`), 80+ if one is ever needed |
 | P3 | **Lights** (the standard model) | coherent screen tiles | record, P2's SH, P3a/P3b's visibility, light clusters | HDR (direct + indirect diffuse + untraced specular + emission, through fog); binding 62 (reflectance x fog transmittance, w) |
 | P4 | **Reflections** (S1) | the glossy list, then hits, then the composite | list, record (lobe), TLAS or software BVH, binding 62 | HDR += w x reflectance x mean |
 | - | Unchanged | | | TR1, post |
@@ -40,7 +40,7 @@ Units running tonight (2026-11-13), each behind a switch, default off:
 | the Mac (`t3/material-pass`) | P1 material record | `RENDERLAB_MATERIAL_PASS=1` | bindings 75, 78 |
 | U-GIPASS | P2 GI receiver lookup | `RENDERLAB_GI_PASS` | binding 68, prepared SH (sky L2 + bounce L1), 48 B/px |
 | U-LVIS | P3a local-light visibility | `RENDERLAB_LIGHT_VIS_PASS` | binding 73, unorm8 x 16 slots |
-| U-SUNRT | P3b RT sun visibility | `RENDERLAB_SUN_PASS` | binding 74 |
+| U-SUNRT | P3b RT sun visibility (merged, #94) | `RENDERLAB_SUN_PASS` | no binding of its own (reuses `primary_trace_receivers` / `primary_vb_sun`); 80+ if one is ever needed |
 | U-RTVIS | P4 reflections (S1) | `RENDERLAB_RL_PASS`, `RENDERLAB_RL_DEFERRED` (non-RT default on the list head) | glossy list 56, room counters 69, receiver epsilon 79 |
 
 A program with its own `shade` keeps today's single kernel as the fallback: it runs in its own
