@@ -51,9 +51,9 @@ pub(super) struct ListLayouts {
     bins: Owned<wgpu::BindGroupLayout>,
     bins_layout: Owned<wgpu::PipelineLayout>,
     /// The shading group 0 plus the list bindings, indexed by `Shading`.
-    shade: [Owned<wgpu::BindGroupLayout>; 2],
-    layouts: [Owned<wgpu::PipelineLayout>; 2],
-    streamed_layouts: [Owned<wgpu::PipelineLayout>; 2],
+    pub(super) shade: [Owned<wgpu::BindGroupLayout>; 2],
+    pub(super) layouts: [Owned<wgpu::PipelineLayout>; 2],
+    pub(super) streamed_layouts: [Owned<wgpu::PipelineLayout>; 2],
 }
 impl ListLayouts {
     /// `shade` holds the single-program shading group's entries per `Shading`; the other
@@ -141,15 +141,15 @@ impl ListLayouts {
 pub(super) struct ProgramLists {
     /// Allocated slots (a power of two) and tiles per slot list.
     slots: u32,
-    capacity: u32,
+    pub(super) capacity: u32,
     /// Dynamic-offset stride of `info`.
-    stride: u32,
+    pub(super) stride: u32,
     info: Buffer,
-    entries: Buffer,
-    args: Buffer,
+    pub(super) entries: Buffer,
+    pub(super) args: Buffer,
     written: Vec<u8>,
     /// The binning group and what it binds: hit records and geometry generations.
-    bins: Option<(Owned<wgpu::BindGroup>, (wgpu::Texture, u64))>,
+    pub(super) bins: Option<(Owned<wgpu::BindGroup>, (wgpu::Texture, u64))>,
     pub generation: u64,
 }
 impl ProgramLists {
