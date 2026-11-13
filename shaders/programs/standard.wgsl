@@ -166,7 +166,12 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
         // BRDF also returns exact zero below its shading hemisphere. Keep that
         // material-specific decision here, leaving user programs unrestricted.
         if light.attenuation==0.0 || (!SPECULAR_AA && dot(n,light.direction)<=0.0) { continue; }
-        let visibility=light_visibility(input,light);
+        // Its unshadowed contribution, for the engine's display bound (light_visibility_within);
+        // unused, and so compiled away, while the bound is off.
+        var unshadowed=brdf(n,v,light.direction,base,metal,rough);
+        if SPECULAR_AA {unshadowed=specular_brdf(input,light.direction,base,metal,rough);}
+        if !rl_term(RL_TERM_BRDF) {unshadowed=vec3<f32>(1.0/PI);}
+        let visibility=light_visibility_within(input,light,exposed_product(light.intensity*light_transmission(light,input),unshadowed*light.attenuation),exposed);
         // An unlit sample adds an exact zero (exposed_product keeps zeros), so it skips the
         // panes' transmission lookup and the BRDF.
         if visibility==0.0 { continue; }

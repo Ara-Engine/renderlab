@@ -57,7 +57,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 [[package]]
 name = "ara-diag"
 version = "0.0.1-alpha"
-source = "git+https://github.com/Ara-Engine/ara?rev=e9f3404adaa95f69215619a68064ea38bcc6eae1#e9f3404adaa95f69215619a68064ea38bcc6eae1"
+source = "git+https://github.com/Ara-Engine/ara?rev=475759d5f4a550f333d06fe9a2f1da989aa67fc0#475759d5f4a550f333d06fe9a2f1da989aa67fc0"
 dependencies = [
  "serde",
  "serde_json",
@@ -66,7 +66,7 @@ dependencies = [
 [[package]]
 name = "ara-gpu"
 version = "0.0.1-alpha"
-source = "git+https://github.com/Ara-Engine/ara?rev=e9f3404adaa95f69215619a68064ea38bcc6eae1#e9f3404adaa95f69215619a68064ea38bcc6eae1"
+source = "git+https://github.com/Ara-Engine/ara?rev=475759d5f4a550f333d06fe9a2f1da989aa67fc0#475759d5f4a550f333d06fe9a2f1da989aa67fc0"
 dependencies = [
  "anyhow",
  "ara-diag",
@@ -92,7 +92,7 @@ dependencies = [
 [[package]]
 name = "ara-json"
 version = "0.0.1-alpha"
-source = "git+https://github.com/Ara-Engine/ara?rev=e9f3404adaa95f69215619a68064ea38bcc6eae1#e9f3404adaa95f69215619a68064ea38bcc6eae1"
+source = "git+https://github.com/Ara-Engine/ara?rev=475759d5f4a550f333d06fe9a2f1da989aa67fc0#475759d5f4a550f333d06fe9a2f1da989aa67fc0"
 dependencies = [
  "ryu",
  "serde",
@@ -102,7 +102,7 @@ dependencies = [
 [[package]]
 name = "ara-sdl3-src"
 version = "0.0.1-alpha"
-source = "git+https://github.com/Ara-Engine/ara?rev=e9f3404adaa95f69215619a68064ea38bcc6eae1#e9f3404adaa95f69215619a68064ea38bcc6eae1"
+source = "git+https://github.com/Ara-Engine/ara?rev=475759d5f4a550f333d06fe9a2f1da989aa67fc0#475759d5f4a550f333d06fe9a2f1da989aa67fc0"
 dependencies = [
  "cc",
  "sdl3-sys",
@@ -1414,6 +1414,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "paste"
+version = "1.0.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
+
+[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1636,6 +1642,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "texture2ddecoder",
  "wgpu",
  "windows",
 ]
@@ -1894,6 +1901,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "texture2ddecoder"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "427ae8ec7f2f0fdd3146b77cfa44bea880caf066f7e55398a8467afe2645c832"
+dependencies = [
+ "paste",
 ]
 
 [[package]]

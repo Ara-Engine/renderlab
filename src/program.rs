@@ -77,6 +77,65 @@ const REFLECTION_ENTRY_SEAM: &str =
 /// U-RTVIS: in the reflection resolve's pre-pass (`rl_prepass`, RENDERLAB_RL_RESOLVE_PASS=1) the
 /// entry stops after the receiver's reflection, before its indirect inputs and `shade`.
 const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    if rl_prepass() {return;}\n    rl_indirect_prepare(surface_input);\n";
+// ---- Lean shading: a module specialized for frames that use no decals and no media ----
+/// `RENDERLAB_LEAN=0` keeps the full module on every frame (A/B); on otherwise.
+pub(crate) fn lean_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_LEAN").map_or(true, |v| v != "0"))
+}
+/// Which engine inputs a frame uses that a traced shading module must keep. A frame using none
+/// of them shades with `lean_variant`'s module, byte-identical in its picture by construction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FrameInputs {
+    /// Any decal projects this frame (a non-empty decal table).
+    pub decals: bool,
+    /// Aerial perspective, height fog or volumetric fog (the atmosphere's media flags).
+    pub media: bool,
+}
+impl FrameInputs {
+    /// Whether the lean module shades this frame exactly as the full one does. One variant,
+    /// not a lattice: pane transmission stays in it (glass under a sun is common, and its
+    /// cut was not where the time was).
+    pub fn lean(self) -> bool {
+        !self.decals && !self.media
+    }
+}
+/// Each lean edit: the engine function it opens, and the early return that is exactly what the
+/// function returns when its input is unused (an empty decal table leaves the receiver's
+/// `decal_none`; no media flag leaves the colour). The dead body
+/// after the return is what the compiler drops, which is the point: idle feature code still
+/// costs registers (M5: decals 0.25 ms of shading with none in the scene).
+const LEAN_EDITS: [(&str, &str); 2] = [
+    (
+        "fn decal_prepare(input:SurfaceInput)->SurfaceInput {\n",
+        "    if true { return input; }\n",
+    ),
+    (
+        "fn atmosphere_surface(c:vec3<f32>, p:vec3<f32>) -> vec3<f32> {\n",
+        "    if true { return c; }\n",
+    ),
+];
+/// `composed` (a traced shading module) for frames whose `FrameInputs::lean` holds: each lean
+/// edit applied where its function is composed, the program's range moved past them.
+pub(crate) fn lean_variant(mut composed: Composed) -> Composed {
+    for (head, early) in LEAN_EDITS {
+        if composed.source.matches(head).count() != 1 {
+            continue;
+        }
+        let at = composed.source.find(head).map(|i| i + head.len());
+        let Some(at) = at else { continue };
+        assert!(
+            at <= composed.program.start || at >= composed.program.end,
+            "a lean edit inside the program"
+        );
+        composed.source.insert_str(at, early);
+        if at <= composed.program.start {
+            composed.program = composed.program.start + early.len()..composed.program.end + early.len();
+        }
+    }
+    composed
+}
+// ---- end of lean shading ----
 /// Reflection hits trace their own light visibility: the frame's belongs to its receivers.
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";
@@ -350,7 +409,7 @@ fn full_strata_weight() -> Option<f32> {
 pub(crate) const VIEW_API: &str = "struct ViewDependence { alpha:f32, share:f32 };\n";
 const VIEW_HINT: &str = include_str!("../shaders/temporal_view.wgsl");
 /// The traced entry's hint for programs that declare nothing: view-independent.
-const VIEW_STUB: &str = "fn tr1_view_hint(s:Surface,input:SurfaceInput,pixel:vec2<u32>,size:vec2<u32>)->f32 { return 1.0; }\n";
+const VIEW_STUB: &str = "fn tr1_view_hint(s:Surface,input:SurfaceInput,ray:PrimaryRay)->f32 { return 1.0; }\n";
 // ---- end of MQ2 view dependence ----
 
 // ---- M7-R1n software reflections (docs/m7-r1n.md) ----
@@ -701,7 +760,114 @@ pub(crate) struct Composed {
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
-    compose_stage(head, program, stage, parameters, false)
+    let composed = compose_stage(head, program, stage, parameters, false);
+    match (stage, light_bound()) {
+        (Stage::Traced | Stage::TracedStreamed, Some(bound)) => with_light_bound(composed, bound),
+        _ => composed,
+    }
+}
+/// `RENDERLAB_LIGHT_BOUND=black|sum` (off by default; a bounded picture change, not exact):
+/// the engine's `light_visibility_within(input, light, unshadowed, sum)` (program_api.wgsl)
+/// skips a local shadowed light's shadow ray while its unshadowed exposed contribution, added
+/// to those already skipped at this receiver, stays under `RENDERLAB_LIGHT_BOUND_CODES` display
+/// codes (default 0.5). The bound goes through Ara's display transform: the Filmic (Narkowicz
+/// ACES fit) curve and sRGB. `black` uses the curve's steepest slope (order-free); `sum` a
+/// pow-free upper bound of the slope at or above the receiver's running sum (order-dependent).
+/// A skipped light counts as unshadowed (`RENDERLAB_LIGHT_BOUND_SKIP=unshadowed`, default) or
+/// dark (`drop`): either way its error is at most its contribution. Traced stages only; never
+/// at reflection hits. A program that calls `light_visibility` is never bounded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LightBound {
+    /// The `sum` mode (else `black`).
+    pub sum: bool,
+    /// The bound in display codes.
+    pub codes: f32,
+    /// Skipped lights are dropped instead of added unshadowed.
+    pub drop: bool,
+}
+pub(crate) fn light_bound() -> Option<LightBound> {
+    static BOUND: std::sync::OnceLock<Option<LightBound>> = std::sync::OnceLock::new();
+    *BOUND.get_or_init(|| {
+        let sum = match std::env::var("RENDERLAB_LIGHT_BOUND").ok()?.as_str() {
+            "black" => false,
+            "sum" => true,
+            other => {
+                eprintln!("RENDERLAB_LIGHT_BOUND: `{other}` is not black or sum; off");
+                return None;
+            }
+        };
+        let codes = std::env::var("RENDERLAB_LIGHT_BOUND_CODES")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|c| *c > 0.0)
+            .unwrap_or(0.5);
+        let drop = std::env::var("RENDERLAB_LIGHT_BOUND_SKIP").is_ok_and(|v| v == "drop");
+        Some(LightBound { sum, codes, drop })
+    })
+}
+/// The program API's stub of the bound (shaders/program_api.wgsl), which `with_light_bound`
+/// replaces on traced stages.
+const LB_STUB: [&str; 2] = [
+    "// ---- light bound (program.rs with_light_bound replaces this block on traced stages) ----\n",
+    "// ---- end of light bound ----\n",
+];
+/// Where each receiver's skipped total starts over (shaders/light_cluster_api.wgsl).
+const LB_RESET: &str = "fn rl_lights_prepare(world:vec3<f32>) {\n";
+/// `composed` with the engine's light bound (`light_bound`) behind `light_visibility_within`:
+/// the API's stub replaced, the skipped total reset per receiver in `rl_lights_prepare`, and
+/// off while a reflection hit is shaded. Unchanged without the stub or the reset.
+pub(crate) fn with_light_bound(mut composed: Composed, bound: LightBound) -> Composed {
+    let source = &composed.source;
+    let (Some(begin), Some(reset)) = (source.find(LB_STUB[0]), source.find(LB_RESET)) else {
+        return composed;
+    };
+    let end = source[begin..].find(LB_STUB[1]).expect("the light bound stub ends") + begin + LB_STUB[1].len();
+    assert!(end <= composed.program.start && reset < composed.program.start, "the light bound precedes the program");
+    // With RENDERLAB_SHADE_COUNT's counters composed in (measurement builds), words 14 and 15
+    // count the local shadowed lights tested and those whose shadow ray was skipped.
+    let counted = source.contains("fn rl_shade_count()");
+    // Reflection hits always trace: their running sum is the hit's, not the pixel's.
+    let hits = if source.contains("var<private> rl_reflection_hit:bool;") {
+        "    if rl_reflection_hit { return false; }\n"
+    } else {
+        ""
+    };
+    let real = format!(
+        "// ---- light bound (program.rs light_bound) ----\n\
+const RL_LB_SUM:bool={sum};\n\
+const RL_LB_CODES:f32={codes:?};\n\
+const RL_LB_SKIPPED:f32={skipped:?};\n\
+// The Filmic curve's (Narkowicz) display slope peaks at 6.38 codes/255 per unit at x=0.0087\n\
+// and only falls above it; the bounds below carry a 1% margin.\n\
+const RL_LB_PEAK:f32=6.443;\n\
+// The contributions skipped at this receiver (reset by rl_lights_prepare).\n\
+var<private> rl_lb_skipped:vec3<f32>;\n\
+// An upper bound of d(sRGB(filmic(x)))/dx at or above x, per channel, without pow: the peak\n\
+// below 0.0087, else min(peak, 0.2888/x, 0.1082/x^2, 0.7648/x^3), fitted with a 1% margin\n\
+// (never under the slope; at most 1.6x over it). Looser only skips less.\n\
+fn rl_lb_slope(x:vec3<f32>) -> vec3<f32> {{\n    let r=1.0/max(x,vec3<f32>(0.0087));\n    return min(min(vec3<f32>(RL_LB_PEAK),0.2888*r),min(0.1082*r*r,0.7648*r*r*r));\n}}\n\
+fn rl_lb_skip(s:LightSample, c:vec3<f32>, sum:vec3<f32>) -> bool {{\n{hits}    if lights[s.index].kind.w==0u {{ return false; }}\n{tested}    let total=rl_lb_skipped+c;\n    var slope=vec3<f32>(RL_LB_PEAK);\n    if RL_LB_SUM {{ slope=rl_lb_slope(sum); }}\n    if all(total*slope<vec3<f32>(RL_LB_CODES/255.0)) {{ rl_lb_skipped=total;{skipped_count} return true; }}\n    return false;\n}}\n\
+// ---- end of light bound ----\n",
+        sum = bound.sum,
+        codes = bound.codes,
+        skipped = if bound.drop { 0.0f32 } else { 1.0f32 },
+        tested = if counted { "    atomicAdd(&rl_shade_counts[14],1u);\n" } else { "" },
+        skipped_count = if counted { " atomicAdd(&rl_shade_counts[15],1u);" } else { "" },
+    );
+    let mut source = composed.source.clone();
+    // The reset goes in after the block (it follows it in the source, or comes first).
+    let reset_line = "    rl_lb_skipped=vec3<f32>(0.0);\n";
+    if reset > begin {
+        source.insert_str(reset + LB_RESET.len(), reset_line);
+        source.replace_range(begin..end, &real);
+    } else {
+        source.replace_range(begin..end, &real);
+        source.insert_str(reset + LB_RESET.len(), reset_line);
+    }
+    let shift = source.len() - composed.source.len();
+    composed.program = composed.program.start + shift..composed.program.end + shift;
+    composed.source = source;
+    composed
 }
 /// `compose`, or with `hits` the hit-shading module (`compose_hits`).
 fn compose_stage(
@@ -892,7 +1058,7 @@ pub(crate) fn deferred_variant(composed: &str) -> String {
 
 // ---- View modes (docs/design-id-output.md) ----
 /// The traced entry's lit store, which a view-mode module replaces.
-const VIEW_STORE_SEAM: &str = "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,id,size)));";
+const VIEW_STORE_SEAM: &str = "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,view_ray)));";
 const VIEW_STORE: &str = "textureStore(primary_hdr,pixel,rl_view_store(surface_output,surface_input));";
 /// Data modes show misses as zero; the lit miss is kept under another name.
 const VIEW_MISS_SEAM: &str = "fn primary_miss(id:vec2<u32>,size:vec2<u32>,clear:vec4<f32>)->vec4<f32> {";
@@ -981,6 +1147,49 @@ const HITS_MINE_LIST: &str = "struct RlList { slot:u32, base:u32, capacity:u32, 
 // ---- MP1 per-program dispatch (docs/m7-mp1.md) ----
 /// The tile-list shading entry of mixed-program frames (`primary_shade_list`).
 const TRACED_LIST_ENTRY: &str = include_str!("../shaders/program_traced_list.wgsl");
+/// `RENDERLAB_LIST_LANES`: lanes per list-shading workgroup, 16 (one 4x4 list entry), 32 (two,
+/// the default since M8-LIST-LANES-32) or 64 (four entries, one per z slice). Warps and SIMD
+/// groups are 32 wide and never span workgroups, so 16 leaves half of every one idle. Each entry
+/// is still shaded by exactly one slice, so the picture does not depend on it. The binning
+/// kernel's indirect arguments follow (`program_lists::bin_source`).
+pub(crate) fn list_entries_per_group() -> u32 {
+    static PER: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *PER.get_or_init(|| match std::env::var("RENDERLAB_LIST_LANES").as_deref() {
+        Ok("16") => 1,
+        Err(_) | Ok("32") => 2,
+        Ok("64") => 4,
+        Ok(other) => {
+            eprintln!("RENDERLAB_LIST_LANES: `{other}` is not 16, 32 or 64; using 32");
+            2
+        }
+    })
+}
+/// The list entry with `per` list entries per workgroup (`list_entries_per_group`).
+pub(crate) fn list_entry(per: u32) -> String {
+    if per == 1 {
+        return TRACED_LIST_ENTRY.to_owned();
+    }
+    let mut source = TRACED_LIST_ENTRY.to_owned();
+    for (find, replace) in [
+        (
+            "@compute @workgroup_size(4,4) fn primary_shade_list(",
+            format!("@compute @workgroup_size(4,4,{per}) fn primary_shade_list("),
+        ),
+        (
+            "    let index=group.x+group.y*RL_LIST_ROW;\n",
+            format!("    let index=(group.x+group.y*RL_LIST_ROW)*{per}u+local.z;\n"),
+        ),
+        // A clear block's 16 columns: one per lane of the entry's own slice.
+        (
+            "vec2<u32>(lane,0u)",
+            "vec2<u32>(local.x+local.y*4u,0u)".to_owned(),
+        ),
+    ] {
+        assert_eq!(source.matches(find).count(), 1, "list lanes: {find}");
+        source = source.replacen(find, &replace, 1);
+    }
+    source
+}
 /// R1's hit shading loads the hit's parameter block, which belongs to the hit's program.
 // TP2 integration: match the call independently of LF/CRLF checkout endings.
 const LIST_HIT_PARAMETERS_SEAM: &str = "rl_load_parameters(h.batch);";
@@ -1004,7 +1213,7 @@ pub(crate) fn compose_list(head: &str, program: &str, stage: Stage, parameters: 
     let (engine, rest) = source.split_at(range.start);
     let edited = engine.replacen(LIST_HIT_PARAMETERS_SEAM, LIST_HIT_PARAMETERS, 1);
     let shift = edited.len() - engine.len();
-    source = format!("{edited}{rest}{TRACED_LIST_ENTRY}");
+    source = format!("{edited}{rest}{}", list_entry(list_entries_per_group()));
     Composed {
         source,
         program: range.start + shift..range.end + shift,

@@ -138,6 +138,21 @@ fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {
     if lights[s.index].kind.w!=0u { return rl_local_shadow(lights[s.index],input.receiver,s.direction); }
     return hard_shadow(lights[s.index],input.receiver,s.direction);
 }
+// `light_visibility`, unless the engine's display bound (RENDERLAB_LIGHT_BOUND,
+// docs/design-light-bound.md) judges this light's unshadowed exposed contribution
+// `unshadowed`, with those already skipped at this receiver, too small to change a display
+// code against the receiver's running exposed sum `sum`: then it casts nothing and returns 1
+// (0 when skipped lights are dropped). Off, and wherever the bound does not apply (reflection
+// hits, untraced stages), it is exactly `light_visibility`. A program that keeps calling
+// `light_visibility` always traces.
+fn light_visibility_within(input:SurfaceInput, s:LightSample, unshadowed:vec3<f32>, sum:vec3<f32>) -> f32 {
+    if rl_lb_skip(s,unshadowed,sum) { return RL_LB_SKIPPED; }
+    return light_visibility(input,s);
+}
+// ---- light bound (program.rs with_light_bound replaces this block on traced stages) ----
+const RL_LB_SKIPPED:f32=1.0;
+fn rl_lb_skip(s:LightSample, c:vec3<f32>, sum:vec3<f32>) -> bool { return false; }
+// ---- end of light bound ----
 
 // Unexposed environment irradiance (lux) around n: the prepared diffuse field, or pi
 // times the constant environment.
@@ -188,6 +203,14 @@ fn reflection_report(reflectance:vec3<f32>, untraced:vec3<f32>) {}
 // become 0; the identity on valid values.
 fn rl_finite(c:vec3<f32>) -> vec3<f32> {
     return min(select(vec3<f32>(0.0),c,c>=vec3<f32>(0.0)),vec3<f32>(65504.0));
+}
+// A BC5 normal-map sample (`normal_mapped` 2) in the map's 0-1 encoding: BC5 holds X and Y,
+// so Z is rebuilt as the unit normal's from the filtered X and Y, and alpha carries the map's
+// variance layer (`variance`, its layer 1's red: NormalVarianceLinear's A, computed at upload
+// from the top level's normals, src/normal_variance_bc.rs; the material reads variance code 1).
+fn rl_normal_texel(s:vec4<f32>, variance:f32) -> vec4<f32> {
+    let xy=s.xy*2.0-vec2<f32>(1.0);
+    return vec4<f32>(s.xy,sqrt(max(1.0-dot(xy,xy),0.0))*0.5+0.5,variance);
 }
 // The standard material normal, including tangent repair, finite normal scale,
 // mirrored handedness and source-back reversal. Safe on meshes without tangents.
