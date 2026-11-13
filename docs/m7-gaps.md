@@ -1163,3 +1163,6 @@ On the ara-gpu port (M5, Metal 4) the transparent glass entry (`fs_transparent`,
 - About half is the inline ray queries in the fragment stage (the glass's sun and local-light shadow rays). Stubbing them took the three films from 7.9 to 4.1 ms. The other half is unexplained; helper-lane and quad overhead on thin films is not measured.
 - Consequence: the port blends films in one pass only for runs of 8 or more (`FILM_RUN`, src/backend_ara/forward.rs). Shorter runs keep per-pixel panes.
 Next step if it matters: a Metal GPU capture of one film draw (occupancy, register spills, the intersector), and the same films with the ray queries hoisted into a compute pre-pass. Owner: the Mac GPU thread.
+
+## Memory: Ara's Outpost non-RT player peaks at 5.8-5.9 GiB private memory (2026-11-13, coordinator)
+On the RTX PC (31 GB) one Outpost non-RT player process peaks at 5.8-5.9 GiB of private memory; it repeatedly stopped the integration thread's pricing rows against the runner's 8 GiB machine floor. That is a large CPU-side footprint for one scene. Belongs beside the VRAM budget (memory-budget-vs-unreal): split it by owner (Ara's scene and cook data, Renderlab's CPU-side scene copies, staging and readback buffers, the wgpu-core tracker) before choosing what to shrink. Owner: unassigned; root to size it with the integration thread.
