@@ -117,6 +117,15 @@ fn rl_split(mut source: String) -> String {
             }
         }
     }
+    // `RENDERLAB_RL_HIT_TAPS=one` (candidate, off by default): every reflection hit takes one
+    // rotating sample of a local light's shadow (a disk ray, or a PCSS tap on map heads), as
+    // full lobes' hits already do and the sun's hit ray does, instead of a thinned lobe's one
+    // to three hits taking all of the pixel's samples between them.
+    if std::env::var("RENDERLAB_RL_HIT_TAPS").is_ok_and(|v| v == "one") {
+        source = source
+            .replace("min(rl_hit_strata,samples)", "samples")
+            .replace("min(rl_hit_strata,24u)", "24u");
+    }
     source
 }
 /// U-RTVIS measurement switches (`RENDERLAB_RL_HIT`, a comma list), reflection hits only:
@@ -269,8 +278,36 @@ pub(crate) fn cache_hits_rough() -> Option<f32> {
 const SOFTWARE_REFLECTION_QUERY: &str = "var query:ray_query;\n";
 /// R1's reflection block traced in software: the same lobe, strata, cone footprints, hit
 /// reconstruction, decals and program shading, with no ray queries.
+/// `RENDERLAB_RS_DIVIDE=defer` (candidate, off by default): the software traversal's triangle
+/// test compares u, v and t scaled by the determinant and divides only for a triangle it
+/// accepts, instead of once per tested triangle. Hits keep today's arithmetic; only a test at
+/// a rounding edge can decide differently.
+const RS_DIVIDE: (&str, &str) = (
+    "                    let inv_det=1.0/det;let s=o-w0.xyz;
+                    let u=dot(s,p)*inv_det;
+                    if u< -RS_EDGE || u>1.0+RS_EDGE {continue;}
+                    let q=cross(s,e1);let v=dot(d,q)*inv_det;
+                    if v< -RS_EDGE || u+v>1.0+RS_EDGE {continue;}
+                    let t=dot(e2,q)*inv_det;
+",
+    "                    let s=o-w0.xyz;
+                    let sg=select(-1.0,1.0,det>0.0);let ad=abs(det);
+                    let un=dot(s,p)*sg;
+                    if un< -RS_EDGE*ad || un>(1.0+RS_EDGE)*ad {continue;}
+                    let q=cross(s,e1);let vn=dot(d,q)*sg;
+                    if vn< -RS_EDGE*ad || un+vn>(1.0+RS_EDGE)*ad {continue;}
+                    if !(dot(e2,q)*sg>tmin*ad) {continue;}
+                    let inv_det=1.0/det;
+                    let u=dot(s,p)*inv_det;let v=dot(d,q)*inv_det;
+                    let t=dot(e2,q)*inv_det;
+",
+);
 fn software_reflection_api() -> String {
     let mut api = format!("{SOFTWARE_REFLECTION_API}{REFLECTION_API}");
+    if std::env::var("RENDERLAB_RS_DIVIDE").is_ok_and(|v| v == "defer") {
+        assert_eq!(api.matches(RS_DIVIDE.0).count(), 1, "RENDERLAB_RS_DIVIDE seam");
+        api = api.replacen(RS_DIVIDE.0, RS_DIVIDE.1, 1);
+    }
     assert!(
         api.contains(SOFTWARE_REFLECTION_QUERY),
         "R1 reflection seam moved"
