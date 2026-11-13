@@ -288,6 +288,16 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
     let _ = name;
     builtin.into()
 }
+/// Whether the traced shading entries read the camera's cache lookup once per 4x4 tile
+/// (shaders/gi_tiles.wgsl: a pre-pass looks each tile up, and pixels that agree with it take
+/// its sums) instead of once per pixel. On by default; `RENDERLAB_GI_TILE=0` restores the
+/// per-pixel lookup. Read once per process.
+pub(crate) fn gi_tiles() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_TILE").map_or(true, |v| v != "0"))
+}
+/// The tile pre-pass and its take, traced stages only.
+pub(crate) const GI_TILES: &str = include_str!("../shaders/gi_tiles.wgsl");
 fn indirect_api() -> String {
     let mut source = gi_shader("gi_cells.wgsl", INDIRECT_API[0]).into_owned();
     // `RENDERLAB_GI_KEEP=0` samples the receiver's level again for the rest term instead of
@@ -593,14 +603,20 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     };
     // Each entry calls this once per receiver before `surface`: the receiver's one cache
     // lookup for programs that call an indirect input, and the specular visibility from it
-    // for those that read the specular inputs.
+    // for those that read the specular inputs. Traced shading takes the GI tile pre-pass's
+    // lookup where the pixel agrees with its tile (shaders/gi_tiles.wgsl).
     let specular = tokens(program).iter().any(|t| SPECULAR_INPUTS.contains(t));
-    indirect.push_str(match (indirect_calls, specular) {
-        (true, true) => {
-            "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); es_prepare(input); }\n"
-        }
-        (true, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
-        _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
+    let tiles = gi_tiles() && indirect_calls && stage == Stage::Traced;
+    if tiles {
+        indirect.push_str(GI_TILES);
+    }
+    let lookup = if tiles { "gi_tile_take" } else { "gi_prepare" };
+    indirect.push_str(&match (indirect_calls, specular) {
+        (true, true) => format!(
+            "fn rl_indirect_prepare(input:SurfaceInput) {{ {lookup}(input); es_prepare(input); }}\n"
+        ),
+        (true, false) => format!("fn rl_indirect_prepare(input:SurfaceInput) {{ {lookup}(input); }}\n"),
+        _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n".to_owned(),
     });
     // LC1: the light loop's clusters and local shadows, traced where the head binds rays.
     // Cell shading never calls light_visibility; it composes the map variant.

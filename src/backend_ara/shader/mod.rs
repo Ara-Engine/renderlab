@@ -82,6 +82,8 @@ pub enum Pass {
     PrimaryShadeTiles,
     /// Original mixed-program deferred shading of listed primary tiles.
     PrimaryShadeList,
+    /// The GI tiles' cache lookups before shading (shaders/gi_tiles.wgsl).
+    GiTileLookups,
     /// Original software raster of projected cluster triangles into packed visibility.
     VisibilitySoftware,
     /// Original procedural hardware raster of cluster IDs, with reversed-Z depth.
@@ -267,6 +269,11 @@ impl Pass {
                 .expect("original traced composition remains valid")
                 .into()
             }
+            Self::GiTileLookups => crate::backend_ara::primary_shade::hardware_soft_source(
+                crate::STANDARD_PROGRAM,
+            )
+            .expect("traced composition remains valid")
+            .into(),
             Self::HandleArrayProbe => include_str!("../shaders/handle_array_probe.wgsl").into(),
             Self::BufferArrayProbe => include_str!("../shaders/buffer_array_probe.wgsl").into(),
             Self::PrimaryCheck => {
@@ -516,6 +523,7 @@ impl Pass {
             self,
             Self::PrimaryShadeTiles
                 | Self::PrimaryShadeList
+                | Self::GiTileLookups
                 | Self::TransparencyGlass
                 | Self::PaneId
                 | Self::PaneShade
@@ -547,6 +555,7 @@ impl Pass {
                 | Self::PrimaryRayProbe
                 | Self::PrimaryShadeTiles
                 | Self::PrimaryShadeList
+                | Self::GiTileLookups
                 | Self::HandleArrayProbe
                 | Self::BufferArrayProbe
                 | Self::VisibilitySoftware
@@ -659,6 +668,7 @@ impl Pass {
             Self::PrimaryRayProbe => "primary_probe",
             Self::PrimaryShadeTiles => "primary_shade_tiles",
             Self::PrimaryShadeList => "primary_shade_list",
+            Self::GiTileLookups => "gi_tile_lookups",
             Self::PrimaryCheck => "primary_check_interactive",
             Self::TransparencyHitDepth => "tp_depth_hits",
             Self::PostPrimarySurface => "post_primary_surface",

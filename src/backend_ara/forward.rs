@@ -661,6 +661,8 @@ struct Shared<'a> {
     gi_table: Option<&'a StorageBuffer>,
     /// The cache's outgoing radiance, for cache-terminated reflection hits; otherwise zeros.
     gi_outgoing: Option<&'a StorageBuffer>,
+    /// The GI tile lookups' records, where the frame runs the tile pre-pass.
+    gi_tiles: Option<&'a StorageBuffer>,
     buffers: &'a BTreeMap<InputKey, StorageBuffer>,
     images: &'a BTreeMap<InputKey, Texture>,
 }
@@ -702,6 +704,7 @@ impl<'a> Shared<'a> {
                 (3, 5) if self.traced.is_some() => &self.traced.context("checked")?.records,
                 (3, 20) if self.gi_table.is_some() => self.gi_table.context("checked")?,
                 (3, 28) if self.gi_outgoing.is_some() => self.gi_outgoing.context("checked")?,
+                (0, 68) if self.gi_tiles.is_some() => self.gi_tiles.context("checked")?,
                 _ => &self.buffers[&spec.key],
             }),
             (InputKind::BufferArray { .. }, group, binding) => {
@@ -1549,6 +1552,13 @@ fn frame(
         standard_program(scene.sun_shadows.is_some())?
     };
     // A traced frame of several programs: each one's list entry, in slot order.
+    // GI tiles (shaders/gi_tiles.wgsl): the tiles' cache lookups before shading, where a
+    // frame program reads the cache (`RENDERLAB_GI_TILE=0` looks up every pixel instead).
+    let tile_program = (deferred_path
+        && crate::program::gi_tiles()
+        && sources.iter().any(|s| crate::program::uses_indirect(s)))
+    .then(primary_shade::gi_tile_program)
+    .transpose()?;
     let list_programs = if deferred_path && sources.len() > 1 {
         sources
             .iter()
@@ -3181,6 +3191,15 @@ fn frame(
             }
         }
     }
+    // One 32-word record per 4x4 tile (gi_tiles.wgsl gi_tile_grid).
+    let tile_grid = [size[0].div_ceil(4), size[1].div_ceil(4)];
+    let gi_tiles = match (&tile_program, gi) {
+        (Some(_), Some(_)) => Some(StorageBuffer::device(
+            gpu,
+            u64::from(tile_grid[0]) * u64::from(tile_grid[1]) * 128,
+        )?),
+        _ => None,
+    };
     let shared = Shared {
         output: &output,
         deferred: deferred.as_ref(),
@@ -3195,6 +3214,7 @@ fn frame(
         traced: traced.as_ref(),
         gi_table: gi.map(|(cache, _)| cache.table()),
         gi_outgoing: gi.map(|(cache, _)| cache.outgoing_radiance()),
+        gi_tiles: gi_tiles.as_ref(),
         buffers: &buffers,
         images: &inputs,
     };
@@ -3344,6 +3364,20 @@ fn frame(
             deferred_packets.push(packet);
         }
     }
+    // GI tiles: the pre-pass's kernel and packet.
+    let tile_lookups = match (&tile_program, &gi_tiles) {
+        (Some(program), Some(_)) => {
+            let values = program
+                .inputs()
+                .iter()
+                .map(|spec| Ok((spec.key, shared.input(spec, None)?)))
+                .collect::<Result<Vec<_>>>()?;
+            let packet = HeapBindings::for_program(gpu, program, &values)?;
+            packet.import(&mut graph);
+            Some((Kernel::from_program(gpu, cache, program)?, packet))
+        }
+        _ => None,
+    };
     // MP1 (`prepare_program_lists`): with several programs, one list per slot.
     let program_lists = match &deferred {
         Some(deferred) if !list_programs.is_empty() => {
@@ -3485,6 +3519,17 @@ fn frame(
                     records,
                     &gi_packets,
                     &gi_shade_packets,
+                )?;
+            }
+            // GI tiles: the tiles' lookups, after the cache's passes and before shading.
+            if let (Some((tile_kernel, tile_packet)), true) =
+                (&tile_lookups, std::ptr::eq(kernel, &deferred.shade))
+            {
+                tile_kernel.record(
+                    &mut graph,
+                    &mut rec,
+                    tile_packet,
+                    [tile_grid[0] * tile_grid[1], 1, 1],
                 )?;
             }
             // The pass log's shading parts replay the shading first; the frame's own
@@ -4496,6 +4541,7 @@ fn frame(
         .chain(pane_packets)
         .chain(transmission_packets)
         .chain(list_packets)
+        .chain(tile_lookups.map(|(_, packet)| packet))
     {
         packet.retire(gpu, &mut graph)?;
     }
@@ -4605,6 +4651,9 @@ fn frame(
     }
     if let Some(probe) = probe {
         probe.retire(gpu)?;
+    }
+    if let Some(buffer) = gi_tiles {
+        buffer.retire(gpu)?;
     }
     gpu.collect()?;
     images.times.finish = finishing.elapsed();
