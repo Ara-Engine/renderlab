@@ -487,7 +487,10 @@ fn the_reflection_pass_belongs_to_the_marked_renderer() {
         Stage::Traced,
         false,
     ));
-    assert!(on.source.contains("rl_room_reserve(count,traced,lobe.weight)"));
+    assert!(
+        on.source
+            .contains("rl_room_reserve(count,traced,lobe.weight)")
+    );
     assert!(on.source.contains("const RL_DEFERRED_PROGRAM:bool=true;"));
     assert_eq!(&on.source[on.program.clone()], crate::STANDARD_PROGRAM);
     let off = with_reflection_history(compose(
@@ -530,4 +533,19 @@ fn an_engine_default_leaves_other_compositions_inline() {
         assert!(!source.contains("rl_deferred_store"));
     }
     drop(engine);
+}
+
+/// Binding 63 (the untraced specular, for identity tests) exists only with
+/// RENDERLAB_RL_DEFERRED=diag: without it the deferred module neither declares nor writes it,
+/// and the reflectance (62) the composite reads stays.
+#[test]
+fn deferred_untraced_output_only_with_diag() {
+    for head in crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap() {
+        let source = deferred_standard(&head).source;
+        assert!(source.contains("@group(0) @binding(62) var rl_deferred_reflectance"));
+        assert_eq!(
+            source.contains("rl_deferred_untraced"),
+            crate::program::rl_deferred_diag()
+        );
+    }
 }
