@@ -49,6 +49,19 @@ The port case `misses_carry_the_sentinel_after_the_camera_moves` (a wall, then t
 
 The port case `the_writer_and_the_trace_tail_write_the_same_receiver_words` holds the two producers to the same bits: 16,135 hits and 3,344 misses identical in words 1 and 2. The exceptions, by design: the 2 pixels the repair moves, the near-edge mark, and word 1's material fields.
 
+**Which fields each producer defines.** The tail and the writer are exclusive in a frame (`tracetail` turns the writer off).
+
+| field | the writer (#107) | the trace tail |
+|---|---|---|
+| word 0 (material) | defined | not written |
+| word 1 x (geometric normal), w (slot, near-edge, `thin`, sides) | defined | defined |
+| word 1 y (model, lobe alpha, roughness), z (view share, TR1 hint) | defined; model 255 = own `shade` | exactly zero |
+| word 2 (point, epsilon, interpolated normal) | defined | defined |
+
+The rule: **readers of words 1 and 2 never read word 1's y or z.** Only record-reading primary shading reads them, and it runs from the record only under the writer. The producers' case asserts that the tail's y and z are exactly zero, so a reader that broke the rule would read 0, never a stale value.
+
+**Word 2 is the surface point, unlifted.** Under the tail it is the repaired surface point. Any per-pass offset (the desktop sun's `LOD_LIFT`, a bias) is the reader's to apply, never stored. The port's trace kernels have no lift: `fresh_estimate` offsets the receiver inside its own locals, and `rl_receiver_store` stores the `Receiver` before that, as `primary_receiver` built it.
+
 **What word 2's point means depends on the producer.** Readers follow one rule:
 
 | producer | word 2's point | near-edge mark (word 1, bit 28) |

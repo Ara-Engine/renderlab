@@ -2717,7 +2717,8 @@ pub(crate) fn material_trace_writes() -> String {
 @group(0) @binding(74) var rl_material2:texture_storage_2d<rgba32uint,write>;
 {}{}{}{}
 {}
-{}// The miss sentinel (`rl_mr_miss`).
+{}
+// The miss sentinel (`rl_mr_miss`).
 fn rl_receiver_miss(p:vec2<i32>) {{ textureStore(rl_material1,p,RL_MR_MISS_WORD1); textureStore(rl_material2,p,vec4<u32>(0u)); }}
 // The interpolated vertex normal of a trace's hit, as shading's entry builds it, from the
 // vertex, index and normal-transform arrays (producers that have them).
@@ -2749,7 +2750,7 @@ fn rl_receiver_store(p:vec2<i32>,trace:PrimaryTrace,receiver:Receiver) {{
         wgsl_function(MATERIAL_PACKING, "rl_mr_epsilon"),
         line("struct RlReceiverWords"),
         wgsl_function(MATERIAL_PACKING, "rl_mr_receiver_words"),
-        format!("{}\n", line("const RL_MR_MISS_WORD1")),
+        line("const RL_MR_MISS_WORD1"),
     )
 }
 /// The `nodecode` probe's entry edits: the `SurfaceInput` from the record, and the entry's

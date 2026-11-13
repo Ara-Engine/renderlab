@@ -477,7 +477,8 @@ fn misses_carry_the_sentinel_after_the_camera_moves() -> Result<()> {
 /// with three differences by design: the pixels the edge repair moves (the tail holds the
 /// repaired point, the writer shading's, marked), the near-edge mark itself (the writer marks
 /// every near-edge hit, the tail none), and word 1's material fields (y and z: the tail writes
-/// none). The producer is read once per process, so the case renders the receiver frame in two
+/// none, and the case asserts they are exactly zero under it, as the rule that readers of the
+/// receiver never read them relies on). The producer is read once per process, so the case renders the receiver frame in two
 /// child runs of itself; it needs no switch of its own.
 #[test]
 fn the_writer_and_the_trace_tail_write_the_same_receiver_words() -> Result<()> {
@@ -536,7 +537,7 @@ fn the_writer_and_the_trace_tail_write_the_same_receiver_words() -> Result<()> {
             u32::from_le_bytes(bytes[at + 4 * k..at + 4 * k + 4].try_into().unwrap())
         })
     };
-    let (mut hits, mut misses, mut moved, mut differ) = (0, 0, 0, 0);
+    let (mut hits, mut misses, mut moved, mut differ, mut tail_material) = (0, 0, 0, 0, 0);
     for i in 0..pixels {
         let (w1, t1) = (word(&writer, 0, i), word(&tail, 0, i));
         let (w2, t2) = (word(&writer, pixels * 16, i), word(&tail, pixels * 16, i));
@@ -548,6 +549,10 @@ fn the_writer_and_the_trace_tail_write_the_same_receiver_words() -> Result<()> {
             misses += 1;
         } else {
             hits += 1;
+        }
+        // The tail writes no material: word 1's y and z are exactly zero under it.
+        if t1[1] != 0 || t1[2] != 0 {
+            tail_material += 1;
         }
         let mark = !(1u32 << 28);
         if w1[0] != t1[0] || w1[3] & mark != t1[3] & mark || w2 != t2 {
@@ -564,6 +569,10 @@ fn the_writer_and_the_trace_tail_write_the_same_receiver_words() -> Result<()> {
     ensure!(
         differ == 0,
         "{differ} pixels' receiver words differ between the producers"
+    );
+    ensure!(
+        tail_material == 0,
+        "{tail_material} pixels carry material fields under the trace tail"
     );
     Ok(())
 }
