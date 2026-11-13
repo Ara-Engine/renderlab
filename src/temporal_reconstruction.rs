@@ -31,8 +31,9 @@ pub struct Reconstruction {
     /// Bilinear resampling blur budget v_max (px²): a moving pixel's window is
     /// `1 + blur_budget / sum f(1 - f)` at fractional fetch offset f (T1b's rule).
     pub blur_budget: f32,
-    /// Window of moving pixels whose 4x4 history taps are all accepted, which resample by
-    /// Catmull-Rom (second-moment blur free) instead of bilinear.
+    /// Window of moving pixels whose 2x2 history taps are all accepted, which resample by
+    /// Catmull-Rom (second-moment blur free) instead of bilinear: five bilinear fetches over
+    /// 4x4, clamped to the 2x2 taps' range.
     pub sharp_window: f32,
     /// P-FLICKER (docs/p-flicker.md): Catmull-Rom resampling also blurs, by an amount that
     /// changes with the fetch fraction f every frame, so a fixed `sharp_window` shimmers on
@@ -755,6 +756,13 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         Some(mode) => mask_resolve(mode),
         None => RESOLVE.to_owned(),
     };
+    // Measurement only (U-FIXED, TR1's cost split): `RENDERLAB_TR1_SHADER=PATH` reads the resolve
+    // (shaders/temporal_resolve.wgsl's text, same entry and layouts) from a variant file, e.g. the
+    // 12-point-tap Catmull-Rom it replaced, for A/B (docs/m7-gaps.md).
+    if let Some(path) = std::env::var_os("RENDERLAB_TR1_SHADER") {
+        resolve = std::fs::read_to_string(&path)
+            .map_err(|_| Error::InvalidInput("RENDERLAB_TR1_SHADER: unreadable file"))?;
+    }
     if let Ok(k) = std::env::var("RENDERLAB_P_SPLIT_FRESH_CLAMP") {
         resolve = fresh_clamp_resolve(
             &resolve,
@@ -797,7 +805,7 @@ fn tr1_fresh_clamp(p:vec2<i32>,id:u32,x:vec3<f32>,size:vec2<u32>)->vec3<f32> {{
 /// Measurement only (P-SPLIT crack flashes): `RENDERLAB_P_STILL=tr1-mask|tr1-raw|tr1-window`
 /// writes how TR1 continued each pixel into the output's alpha, which nothing after TR1 reads
 /// as colour. History and every other target are production's; production compiles
-/// `RESOLVE` unchanged. Alpha: 1 restart (cut), 2 still, 3 Catmull-Rom (16 taps), 4 bilinear
+/// `RESOLVE` unchanged. Alpha: 1 restart (cut), 2 still, 3 Catmull-Rom (five bilinear fetches), 4 bilinear
 /// (4 taps), 5 bilinear (1-3 taps), 6 no tap (spatial start), 7 rejected (caster or relit
 /// light); +16 on silhouettes; 32 a third-surface pixel. `tr1-raw` writes this frame's sample
 /// as the colour, `tr1-window` the history weight and window before the sample (r, g).
@@ -874,7 +882,16 @@ impl PrimaryState {
                     texture(21, uint),
                     read(40, FRAME_BUFFER_BYTES as u64),
                     texture(41, float),
-                    texture(42, float),
+                    // Filterable, with a linear sampler at 49: Catmull-Rom fetches the colour
+                    // history with hardware bilinear taps. Rgba32Float filters on both paths
+                    // (RECEIVER_FEATURES carries FLOAT32_FILTERABLE).
+                    texture(42, wgpu::TextureSampleType::Float { filterable: true }),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 49,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
                     texture(43, uint),
                     image(44, F::Rgba32Float),
                     image(45, F::Rg32Uint),
@@ -2115,6 +2132,12 @@ impl Renderer {
         let frame = &primary.frame.as_ref().unwrap().0.value;
         let hdr = &self.view.hdr.as_ref().unwrap().resolved;
         let out = self.view.upscale.as_ref().map_or(hdr, |u| &u.hdr);
+        let linear = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("temporal reconstruction history, linear"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            ..Default::default()
+        });
         [0, 1].map(|written| {
             let read = 1 - written;
             let entries = [
@@ -2130,6 +2153,7 @@ impl Renderer {
                 (47, R::TextureView(&state.layer[read].view)),
                 (48, R::TextureView(&state.layer[written].view)),
                 (46, R::TextureView(&out.view)),
+                (49, R::Sampler(&linear)),
             ]
             .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource });
             self.ledger.own(

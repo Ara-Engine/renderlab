@@ -23,8 +23,9 @@ fn temporal_resolve_reflects_validates_and_compiles() -> Result<()> {
         .map(|i| (i.key.group, i.key.binding))
         .collect();
     // The hit records, the primary frame, the tiles, the TR1 frame record, the frame's
-    // samples, history in and out (colour, anchor, layer), the output; then the
-    // geometry arrays with previous models and previous skinned vertices.
+    // samples, history in and out (colour, anchor, layer), the output, the history's linear
+    // sampler (Catmull-Rom's bilinear fetches); then the geometry arrays with previous models
+    // and previous skinned vertices.
     let expected = [
         (0, 7),
         (0, 10),
@@ -38,6 +39,7 @@ fn temporal_resolve_reflects_validates_and_compiles() -> Result<()> {
         (0, 46),
         (0, 47),
         (0, 48),
+        (0, 49),
         (1, 0),
         (1, 2),
         (1, 3),

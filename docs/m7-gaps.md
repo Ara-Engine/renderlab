@@ -1167,6 +1167,19 @@ Next step if it matters: a Metal GPU capture of one film draw (occupancy, regist
 ## Memory: Ara's Outpost non-RT player peaks at 5.8-5.9 GiB private memory (2026-11-13, coordinator)
 On the RTX PC (31 GB) one Outpost non-RT player process peaks at 5.8-5.9 GiB of private memory; it repeatedly stopped the integration thread's pricing rows against the runner's 8 GiB machine floor. That is a large CPU-side footprint for one scene. Belongs beside the VRAM budget (memory-budget-vs-unreal): split it by owner (Ara's scene and cook data, Renderlab's CPU-side scene copies, staging and readback buffers, the wgpu-core tracker) before choosing what to shrink. Owner: unassigned; root to size it with the integration thread.
 
+## TR1's cost is the history fetch, not the surface decode (U-FIXED, 2026-11-13)
+TR1's resolve (shaders/temporal_resolve.wgsl, one dispatch `tr1_resolve`, about 0.9-1.1 ms on every Ara row) priced by variants through `RENDERLAB_TR1_SHADER` (src/temporal_reconstruction.rs `resolve_source`, measurement only), game flight with the Fox at 1080p, RTX 4070 SUPER, one round (runs/tr1a): the surface decode done twice adds 0.03 ms; the history reprojection (`tr1_history`) done twice adds 0.47-0.48 ms on both paths; removing the 3x3 colour box saves 0.06-0.07. So writing a surface texel from shading for TR1 (audit 3.8's first change) would save about 0.03 ms. The cost is the history taps: up to 16 per moving pixel (4 bilinear and 12 more for Catmull-Rom whenever the reprojection is fractional), each an anchor load, a colour load and a depth test.
+Candidate cuts, both picture-sensitive (motion, disocclusion and cut crops):
+1. One bicubic fetch from a filtered colour history (5 bilinear taps, as common TAA does) instead of 4 + 12 point taps, with the depth test on the 2x2 footprint only.
+2. Skip the anchor depth test for pixels whose own surface is unmoved and whose 2x2 footprint shows the same placement this frame and last.
+
+Cut 1 shipped (2026-11-13, root approved). TR1 went from 0.90 to 0.63 ms on both paths (RTX 1080p, game flight with the Fox, DETAIL, two rounds). Against the 12-tap fetch:
+- Still frames and the cut frame: byte-identical.
+- Moving flight, both paths: differences only on thin lit leaf edges, at most 58 codes and 0.02% of pixels over 8 codes. High-frequency energy is 0.986-0.999 of the old fetch's, not visible at 1:1.
+- Disocclusion (the Fox behind a pillar): at most 12 pixels over 8 codes. The clamp to the 2x2 range bounds the untested outer ring.
+
+The 12-tap fetch stays reachable for A/B as a variant file through `RENDERLAB_TR1_SHADER`. Cut 2 is not built.
+
 ## Local-light shadows at reflection hits: dropped on glossy lobes (`LocalShadows::unshadowed_hits_from`, RL#85, 2026-11-13)
 
 Reflection hits trace a shadow ray for every shadowed local light. Glossy lobes average a missing local shadow away; near-mirror lobes show it. So hits from lobes at least 0.3 rough (perceptual) light local lights unshadowed. The sun keeps its ray, and camera receivers keep every shadow.

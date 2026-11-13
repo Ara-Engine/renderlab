@@ -450,3 +450,42 @@ fn trace_hit_reuse_seam_stays_before_the_h_append() {
     );
     assert_eq!(trace.matches(seam).count(), 1);
 }
+
+/// RENDERLAB_RL_HIT_REUSE (S4a): with the switch, every traced module that names the cache-hit
+/// hook (inline strata on every traced head, and the compacted pass's hit module) carries the
+/// reuse test ahead of the renamed hook and validates; without it, none of its text.
+#[test]
+fn hit_reuse_composes_on_every_traced_module() {
+    use crate::program::{Stage, compose, compose_hits};
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let mut modules: Vec<String> = rt
+        .iter()
+        .chain(&non_rt)
+        .map(|head| compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false).source)
+        .collect();
+    modules.push(compose_hits(&rt[1], crate::STANDARD_PROGRAM, Stage::Traced, false, false).source);
+    let mut checked = 0;
+    for source in &modules {
+        if !source.contains("rl_cache_hit") {
+            continue;
+        }
+        checked += 1;
+        if crate::program::hit_reuse().is_none() {
+            assert!(!source.contains("rl_hit_reuse") && !source.contains("rl_cache_hit_inner"));
+            continue;
+        }
+        assert_eq!(source.matches("fn rl_cache_hit(").count(), 1);
+        assert_eq!(source.matches("fn rl_cache_hit_inner(").count(), 1);
+        assert_eq!(source.matches("fn tr1_relit(").count(), 1);
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    }
+    assert!(checked >= 3, "{checked} traced modules name the hook");
+}

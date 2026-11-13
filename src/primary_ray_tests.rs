@@ -201,10 +201,15 @@ fn cache_hit_reflections_compose() {
         let on = if crate::program::cache_hits_rough().is_some() {
             source
         } else {
-            let stub = crate::program::CACHE_HITS_STUB;
-            assert_eq!(source.matches(stub).count(), 1);
-            let lookup = crate::program::CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", "0.35");
-            source.replacen(stub, &lookup, 1)
+            // RENDERLAB_RL_HIT_REUSE renames the composed hook behind its reuse test.
+            let inner = |text: &str| match crate::program::hit_reuse() {
+                Some(_) => text.replacen("fn rl_cache_hit(", "fn rl_cache_hit_inner(", 1),
+                None => text.to_owned(),
+            };
+            let stub = inner(crate::program::CACHE_HITS_STUB);
+            assert_eq!(source.matches(&stub).count(), 1);
+            let lookup = inner(&crate::program::CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", "0.35"));
+            source.replacen(&stub, &lookup, 1)
         };
         // Software hits pass the traversal's own distance (U-RTVIS's `rs` seam).
         assert_eq!(

@@ -67,10 +67,13 @@ const TR1_UPSCALE_INTERPOLATION:u32=16u;
 @group(0) @binding(41) var tr1_sample:texture_2d<f32>;
 // The previous frame's first slot: exposed mean and sample weight, and its anchor.
 @group(0) @binding(42) var tr1_colour_in:texture_2d<f32>;
+// Linear filtering of tr1_colour_in: Catmull-Rom's five bilinear fetches (tr1_history).
+@group(0) @binding(49) var tr1_linear:sampler;
 @group(0) @binding(43) var tr1_anchor_in:texture_2d<u32>;
 @group(0) @binding(44) var tr1_colour_out:texture_storage_2d<rgba32float,write>;
 // Anchor of the first slot. x: placement + 1 (zero is background) in bits 0..22, the
-// viewed side in bit 23; y: the latest sample's view distance, f32 bits.
+// viewed side in bit 23, MQ2's view hint as tr1_view_code in bits 24..31 (for the history's
+// readers; TR1 itself reads it from the sample); y: the latest sample's view distance, f32 bits.
 @group(0) @binding(45) var tr1_anchor_out:texture_storage_2d<rg32uint,write>;
 // The reconstructed image (the frame's HDR target).
 @group(0) @binding(46) var tr1_output:texture_storage_2d<rgba16float,write>;
@@ -327,10 +330,12 @@ fn tr1_catmull_rom(t:f32)->vec4<f32> {
 }
 
 // Surface `s`'s continued history at this pixel: exposed mean (rgb) and weight (w), zero
-// weight when no tap shows it. Bilinear over the taps that show it, renormalised, with the
-// bilinear weighted sum of their weights; Catmull-Rom over 4x4 when every tap shows it,
-// limited to the inner taps' range (history only: the undershoot fix, not a current-frame
-// box). `window` is the window the fetch allows.
+// weight when no tap shows it. Bilinear over the 2x2 taps that show it, renormalised, with
+// the bilinear weighted sum of their weights. When all four show it, Catmull-Rom over 4x4 from
+// five hardware bilinear fetches (the corner taps dropped, as common TAA does), limited to the
+// inner taps' range (history only: the undershoot fix, not a current-frame box). Only the 2x2
+// footprint is tested for the surface; the clamp bounds what the untested outer ring adds.
+// `window` is the window the fetch allows.
 struct Tr1History { colour:vec3<f32>, weight:f32, window:f32 };
 // Whether surface s restarts this frame (shaders/temporal_zones.wgsl): a static receiver
 // whose light a moving caster's swept shadow can change (SK1), or any surface point in a
@@ -361,15 +366,12 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     var lo=vec3<f32>(3.4e38);
     var hi=vec3<f32>(-3.4e38);
     var shown=0u;
-    // The four bilinear taps' colours, for Catmull-Rom's inner taps.
-    var inner=array<vec3<f32>,4>();
     for(var i=0;i<4;i+=1) {
         let o=vec2<i32>(i&1,i>>1u);
         let x=tr1_tap(base+o,s,expected,size);
         if x.w>0.0 {
             let w=select(1.0-f.x,f.x,o.x!=0)*select(1.0-f.y,f.y,o.y!=0);
             let c=x.xyz*scale;
-            inner[i]=c;
             total+=w;
             colour=fma(c,vec3<f32>(w),colour);
             h.weight=fma(x.w,w,h.weight);
@@ -386,28 +388,27 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     h.window=tr1.windows.x;
     if blur>0.0 {h.window=min(h.window,1.0+tr1.windows.w/blur);}
     if shown==4u && (tr1.flags.y&TR1_CATMULL_ROM)!=0u && blur>0.0 {
-        let wx=tr1_catmull_rom(f.x);let wy=tr1_catmull_rom(f.y);
-        var sharp=vec3<f32>(0.0);
-        var outer=true;
-        for(var i=0;i<16 && outer;i+=1) {
-            let o=vec2<i32>(i&3,i>>2u)-vec2<i32>(1);
-            var c=vec3<f32>(0.0);
-            if all(o>=vec2<i32>(0)) && all(o<=vec2<i32>(1)) {
-                c=inner[o.y*2+o.x];
-            } else {
-                let x=tr1_tap(base+o,s,expected,size);
-                outer=x.w>0.0;
-                c=x.xyz*scale;
-            }
-            sharp=fma(c,vec3<f32>(wx[i&3]*wy[i>>2u]),sharp);
-        }
-        if outer {
-            h.colour=clamp(sharp,lo,hi);
-            h.window=min(tr1.windows.x,tr1.starts.x);
-            // P-FLICKER: Catmull-Rom's own blur still varies with f, so its window follows the
-            // same rule as bilinear's, with its own budget (0: the fixed window).
-            if tr1.resample.x>0.0 {h.window=min(h.window,1.0+tr1.resample.x/blur);}
-        }
+        // The middle two taps per axis merge into one bilinear fetch at their weighted
+        // centre: a cross of five fetches (centre, and one beyond each side), weights k0..k4.
+        // 12 validated point taps here cost TR1 0.27 of its 0.90 ms (docs/m7-gaps.md).
+        let w=tr1_catmull_rom(f.x);let v=tr1_catmull_rom(f.y);
+        let w12=vec2<f32>(w.y+w.z,v.y+v.z);
+        let centre=vec2<f32>(base)+vec2<f32>(0.5);
+        let p12=centre+vec2<f32>(w.z,v.z)/w12;
+        let p0=centre-vec2<f32>(1.0);let p3=centre+vec2<f32>(2.0);
+        let inv=vec2<f32>(1.0)/vec2<f32>(textureDimensions(tr1_colour_in));
+        let k0=w12.x*v.x;let k1=w.x*w12.y;let k2=w12.x*w12.y;let k3=w.w*w12.y;let k4=w12.x*v.w;
+        var sharp=textureSampleLevel(tr1_colour_in,tr1_linear,vec2<f32>(p12.x,p0.y)*inv,0.0).xyz*k0;
+        sharp=fma(textureSampleLevel(tr1_colour_in,tr1_linear,vec2<f32>(p0.x,p12.y)*inv,0.0).xyz,vec3<f32>(k1),sharp);
+        sharp=fma(textureSampleLevel(tr1_colour_in,tr1_linear,p12*inv,0.0).xyz,vec3<f32>(k2),sharp);
+        sharp=fma(textureSampleLevel(tr1_colour_in,tr1_linear,vec2<f32>(p3.x,p12.y)*inv,0.0).xyz,vec3<f32>(k3),sharp);
+        sharp=fma(textureSampleLevel(tr1_colour_in,tr1_linear,vec2<f32>(p12.x,p3.y)*inv,0.0).xyz,vec3<f32>(k4),sharp);
+        sharp=sharp*scale/(k0+k1+k2+k3+k4);
+        h.colour=clamp(sharp,lo,hi);
+        h.window=min(tr1.windows.x,tr1.starts.x);
+        // P-FLICKER: Catmull-Rom's own blur still varies with f, so its window follows the
+        // same rule as bilinear's, with its own budget (0: the fixed window).
+        if tr1.resample.x>0.0 {h.window=min(h.window,1.0+tr1.resample.x/blur);}
     }
     h.window=min(h.window,tr1.windows.y);
     // MQ2: view-dependent output (reflections) moves across its surface as the view
@@ -592,8 +593,23 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
     return vec4<f32>(sample,1.0);
 }
 
+// MQ2's view dependence (Tr1Surface.view: the hint minus 1, shaders/temporal_view.wgsl) in 8
+// bits, for readers of the history that shade no sample of their own (reflection-hit reuse,
+// docs/design-hit-reuse.md): 0 when view-independent (view 0), otherwise
+// k = clamp(ceil(10 log2(view)) + 81, 1, 255): ten codes an octave, view 2^-8 at k 1, 1 at
+// k 81, MQ2's 60000 cap at k 240. Read back as view = exp2((k - 81) / 10): never below the
+// stored value (a smaller view reads as 2^-8), at most 2^0.1 (7%) above it, so a reader's
+// view test errs toward shading.
+fn tr1_view_code(view:f32)->u32 {
+    if !(view>0.0) {return 0u;}
+    return u32(clamp(ceil(10.0*log2(view))+81.0,1.0,255.0));
+}
+// The first slot's anchor word x for surface s.
+fn tr1_anchor_word(s:Tr1Surface)->u32 {
+    return (s.id&TR1_ID)|((s.side&1u)<<23u)|(tr1_view_code(s.view)<<24u);
+}
 fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
-    textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u),bitcast<u32>(s.distance),0u,0u));
+    textureStore(tr1_anchor_out,p,vec4<u32>(tr1_anchor_word(s),bitcast<u32>(s.distance),0u,0u));
     textureStore(tr1_colour_out,p,film);
     textureStore(tr1_layer_out,p,vec4<u32>(TR1_NONE,0u,0u,0u));
     textureStore(tr1_output,p,vec4<f32>(film.xyz,1.0));
@@ -743,7 +759,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     // Whole coverage shows one layer exactly: mix's arithmetic is not exact at its ends when
     // the layers differ by orders of magnitude (a bright sky behind rock).
     let film=select(select(mix(back,front,coverage),back,coverage<=0.0),front,coverage>=1.0);
-    textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u),bitcast<u32>(s.distance),0u,0u));
+    textureStore(tr1_anchor_out,p,vec4<u32>(tr1_anchor_word(s),bitcast<u32>(s.distance),0u,0u));
     textureStore(tr1_colour_out,p,mine);
     let first_coverage=select(1.0-coverage,coverage,occluder_is_s);
     textureStore(tr1_layer_out,p,vec4<u32>((u.id&TR1_ID)|((u.side&1u)<<23u)|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s),pack2x16float(theirs.xy),
