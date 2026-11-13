@@ -73,14 +73,22 @@ The model lets later passes skip pixels whose program keeps its own `shade`.
 shading after the material pass, so the material pass becomes the pass that decodes each pixel's
 hit once for everything after it, rather than a separate G-buffer pass in front of it:
 
-- **Word 1 (binding 78) becomes rgba32uint:**
+- **Word 1 (binding 78) becomes rgba32uint**, arriving with the Mac's PR #95 (the 32-byte record;
+  main still has the 24-byte one above):
   - .x: the geometric normal (octahedral);
   - .y: the model, the MQ2 alpha and the roughness;
-  - .z: the MQ2 view share;
-  - .w: spare until now; it takes the program slot and the thin and front bits.
-- **A new third word, rgba32uint (binding to be announced): the receiver.** It holds only the
-  trace point's xyz as f32 and the receiver epsilon.
-- **Size:** three rgba32uint words, 48 bytes a pixel: 100 MB at 1080p.
+  - .z: the MQ2 view share (unorm16) and the MQ2 hint (f16; the material pass computes
+    `tr1_view_hint`);
+  - .w: the program slot (bits 0-28), thin (29), source_front (30) and lit_front (31).
+- **Word 2, new: the receiver.** Group 0, binding 74 (reserved), rgba32uint, frame size:
+  - .xyz: the trace point as f32 (`Receiver.world`);
+  - .w: the epsilon's exponent (bits 0-7) and the interpolated vertex normal, octahedral 2 x 12
+    bits (bits 8-31).
+- **Size:** three rgba32uint words, 48 bytes a pixel: 99.5 MB at 1080p.
+- **Group 0 bindings** (the Mac's count):
+  - taken: 0-60, 62-65, 68 (GI prepared), 69 and 79 (reflections, #90), 70-72, 76, 77 (panes),
+    73 (#91), 75 and 78 (the record);
+  - free: 61, 66, 67 and 80 up; 74 is reserved for word 2.
 - **Every later pass reads it.** Each builds its `Receiver` and a thin `SurfaceInput` from the
   record, without touching the hit image or the vertex buffers. Footprints come from the pixel's
   neighbouring camera rays against the receiver's plane.
@@ -89,7 +97,11 @@ hit once for everything after it, rather than a separate G-buffer pass in front 
   about -0.35. The GI, light-visibility and sun passes each drop their own decode.
 - **Until the word lands,** the pass units keep their own geometry reconstruction. Each then
   switches to the shared receiver read behind its own switch.
-- **The Mac checks first** what still reads vertex attributes after `surface`.
+- **The Mac checks first** what still reads vertex attributes after `surface`. One thing stays:
+  standard-program shading keeps its vertex attribute fetch for the per-light specular filter.
+  `filtered_brdf` reads the normal's derivatives and the tangent, and for normal-mapped
+  materials samples the normal map in a 16 x 16 quadrature per light. That is recorded as what
+  the standard path keeps, not routed through the record.
 
 ### The reflection pass and the receiver word
 
