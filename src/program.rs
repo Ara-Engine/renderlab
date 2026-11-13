@@ -273,7 +273,7 @@ fn rl_split(mut source: String) -> String {
 /// U-RTVIS measurement switches (`RENDERLAB_RL_HIT`, a comma list), reflection hits only:
 /// `local` leaves shadowed local lights unshadowed, `sun` skips the hit's sun shadow ray,
 /// `nolights` gives every light zero incidence, `black` skips the hit's `surface` and `shade`,
-/// `strata=N` caps a glossy pixel's strata at N (RL_GLOSSY_MAX, 16).
+/// `strata=N` caps a glossy pixel's strata at N (RL_GLOSSY_MAX; `strata=16` is RQ1's original cap).
 /// Two act on every pixel, camera receivers included, to split lights and shadows between
 /// primary pixels and reflection hits: `alllights` (every light zero incidence) and
 /// `allshadows` (every light fully visible). They change the picture; unset, nothing changes.
@@ -283,9 +283,13 @@ fn rl_hit_switches(source: String) -> String {
     let mut source = source;
     for switch in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         if let Some(n) = switch.strip_prefix("strata=") {
-            let from = "const RL_GLOSSY_MAX:u32=16u;";
-            assert_eq!(source.matches(from).count(), 1, "RENDERLAB_RL_HIT strata");
-            source = source.replacen(from, &format!("const RL_GLOSSY_MAX:u32={n}u;"), 1);
+            // Whatever the shipped default is (shaders/reflections.wgsl), `strata=16` restores
+            // RQ1's cap for A/Bs.
+            let key = "const RL_GLOSSY_MAX:u32=";
+            assert_eq!(source.matches(key).count(), 1, "RENDERLAB_RL_HIT strata");
+            let at = source.find(key).unwrap();
+            let end = at + source[at..].find(';').unwrap() + 1;
+            source.replace_range(at..end, &format!("{key}{n}u;"));
             continue;
         }
         let (from, to) = match switch {

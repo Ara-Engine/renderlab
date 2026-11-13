@@ -28,12 +28,16 @@ const RL_MIRROR:f32=0.05;
 const RL_TRACED:f32=0.35;
 const RL_UNTRACED:f32=0.5;
 // RQ1 (docs/m7-rq1.md): glossy strata grow with the lobe, ceil(RL_RAYS_PER_ROUGHNESS x
-// roughness) clamped to [RL_GLOSSY_RAYS, RL_GLOSSY_MAX]: 4 to roughness 0.08, 12 at 0.25,
-// 16 from 0.33. Wider lobes see more varied radiance; with four strata their per-frame grain
-// widened TR1's motion box and left blocky smears on moving glossy metals. The count
-// depends only on the declared lobe, so the estimate stays an unbiased stratified mean.
+// roughness) clamped to [RL_GLOSSY_RAYS, RL_GLOSSY_MAX]. RQ1 capped it at 16 (from roughness
+// 0.33): with four strata, per-frame grain widened TR1's motion box on a moving gold sphere.
+// M8 cap (2026-11-13, decisions M8-RL-STRATA-CAP-4): the cap is now 4, since TR1's history
+// since RQ1 holds the grain. Moving crops on Showcase (copper/mirror balls, stage floor,
+// lantern), game flight and night lanterns (RQ1's gold sphere) were not visibly worse, and
+// frame-to-frame change stayed within 1.3% of cap 16's. Showcase is about 2 ms a frame faster on
+// both paths. `RENDERLAB_RL_HIT=strata=16` restores the old cap for A/Bs. The count depends only
+// on the declared lobe, so the estimate stays an unbiased stratified mean.
 const RL_GLOSSY_RAYS:u32=4u;
-const RL_GLOSSY_MAX:u32=16u;
+const RL_GLOSSY_MAX:u32=4u;
 const RL_RAYS_PER_ROUGHNESS:f32=48.0;
 // U-RTVIS reflection history: without it (these stubs) every glossy receiver traces its full
 // set each frame. The wgpu renderer's primary shading modules replace the block with
