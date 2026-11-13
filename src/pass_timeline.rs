@@ -10,7 +10,8 @@
 //! Without the variable nothing is created and every call returns at once.
 //! `RENDERLAB_PASS_LOG_DETAIL` also keeps a stage's parts (names with a dot, such as
 //! `sun_shadow.raster`); without it those marks are skipped, so the part's time stays in
-//! the stage before it.
+//! the stage before it. The reflection pass's stages (`ALWAYS`) are kept either way: every
+//! reflection table reads them from the default log.
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
@@ -18,6 +19,9 @@ use std::sync::{Arc, OnceLock};
 /// QUERY_RESOLVE_BUFFER_ALIGNMENT (256 bytes): 64 marks are 512.
 const MARKS: u32 = 64;
 const _: () = assert!((MARKS as u64 * 8) % wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT == 0);
+/// Dotted stages the default log keeps: the compacted reflection pass's trace, hit shading and
+/// composite after `shading` (U-RTVIS; zero-length while the pass is off).
+const ALWAYS: [&str; 3] = ["reflection.trace", "reflection.hits", "reflection.composite"];
 /// Frames in flight before a frame goes untimed rather than waiting.
 const RING: usize = 4;
 
@@ -109,7 +113,7 @@ impl PassTimeline {
     /// Starts stage `name` at this point of `encoder`'s work.
     pub(crate) fn mark(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         let Some(i) = self.current else { return };
-        if name.contains('.') && !self.detail {
+        if name.contains('.') && !self.detail && !ALWAYS.contains(&name) {
             return;
         }
         let entry = &mut self.frames[i];

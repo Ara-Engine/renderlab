@@ -21,12 +21,12 @@ const SIZE: [u32; 2] = [128, 96];
 /// luminance stands for it in every channel. A glossy grey metal floor reflects a near-black
 /// wall, where the untraced estimate sees the bright sky.
 ///
-/// Runs with `RENDERLAB_RL_DEFERRED=1` (read once per process); without it the outputs are
-/// not composed and the test says so and passes.
+/// Runs with `RENDERLAB_RL_DEFERRED=diag` (read once per process: deferred reflections plus the
+/// untraced output this identity reads); without it the test says so and passes.
 #[test]
 fn deferred_outputs_reproduce_the_inline_traced_colour() -> Result<()> {
-    if std::env::var("RENDERLAB_RL_DEFERRED").as_deref() != Ok("1") {
-        println!("deferred reflections: RENDERLAB_RL_DEFERRED=1 not set, nothing checked");
+    if std::env::var("RENDERLAB_RL_DEFERRED").as_deref() != Ok("diag") {
+        println!("deferred reflections: RENDERLAB_RL_DEFERRED=diag not set, nothing checked");
         return Ok(());
     }
     let path = root("deferred-reflections");
