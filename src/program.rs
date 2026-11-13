@@ -136,6 +136,8 @@ fn with_shade_counts(mut source: String, late: bool) -> String {
 /// backends), to split shading's fixed cost. Each changes the picture on purpose; unset,
 /// nothing changes. Engine inputs (the function returns at once):
 /// - `gi_lookup`: no cache lookup at the receiver (the open environment instead);
+/// - `gi_no_decode`: the lookup's finds and weights as full, but no record's SH halves are
+///   unpacked or summed (the GI term's decode against its finds);
 /// - `es1`: no dominant environment lobes;
 /// - `env_specular`: `indirect_radiance` is zero (no environment or bounce specular);
 /// - `mq2`: the view hint is 1;
@@ -179,8 +181,9 @@ struct ShadeCut {
 /// Where the entry exits' heads are searched from.
 const SHADE_CUT_ENTRY: &str = "fn primary_shade_pixel(";
 /// Every cut, in the order `shade_cuts` documents them.
-pub(crate) const SHADE_CUT_NAMES: [&str; 9] = [
+pub(crate) const SHADE_CUT_NAMES: [&str; 10] = [
     "gi_lookup",
+    "gi_no_decode",
     "es1",
     "env_specular",
     "mq2",
@@ -190,7 +193,7 @@ pub(crate) const SHADE_CUT_NAMES: [&str; 9] = [
     "exit_decode",
     "exit_material",
 ];
-const SHADE_CUTS: [ShadeCut; 9] = [
+const SHADE_CUTS: [ShadeCut; 10] = [
     ShadeCut {
         name: "gi_lookup",
         heads: &[
@@ -198,6 +201,14 @@ const SHADE_CUTS: [ShadeCut; 9] = [
         ],
         early: "    if true { return; }\n",
         before: true,
+        late: false,
+    },
+    ShadeCut {
+        name: "gi_no_decode",
+        heads: &["    let w=w_in*gi_agreement(h);\n    if w<=0.0 { return 0.0; }\n"],
+        // The bounce weight still accumulates, so every level and fill decision is as full.
+        early: "    if true { if h.r4.x!=0u { gi_lv_bw+=w; } return w; }\n",
+        before: false,
         late: false,
     },
     ShadeCut {
