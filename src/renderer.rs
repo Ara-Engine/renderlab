@@ -3771,6 +3771,8 @@ impl Renderer {
             );
         }
         self.frames += 1;
+        // Measurement: the allocator report by resource label (src/memory_report.rs).
+        crate::memory_report::maybe_write(&self.device, self.frames);
         self.view.last_frame = self.frames;
         self.timed_frames += u64::from(timed);
         let frame = FrameId(self.frames);
