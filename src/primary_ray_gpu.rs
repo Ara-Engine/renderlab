@@ -17,6 +17,8 @@ pub(super) mod film_accumulation;
 use film_accumulation::{FilmLayouts, FilmState};
 #[path = "shadow_visibility_filter.rs"]
 mod shadow_visibility_filter;
+#[path = "sun_vis_pass.rs"]
+pub(super) mod sun_vis_pass;
 #[path = "temporal_reconstruction.rs"]
 pub(crate) mod temporal_reconstruction;
 // MP1: per-program deferred shading of mixed-program frames.
