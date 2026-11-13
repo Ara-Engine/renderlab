@@ -136,3 +136,29 @@ The non-RT forest turn's cut frame took 65.6 ms with the refill on against 96.4 
 contention guard tripped on the last clip (RT game still, refill off), so the RT game row and
 blobs.py are missing. Parked: the cut-frame saving is about a third of the off cost, and edge
 convergence is still behind.
+
+## Bounded software refill experiment (2026-11-13, default off)
+
+`RENDERLAB_GI_BOUNDED_REFILL=1` keeps software claim and gather budgets active, including
+after the old 32/64-frame cut windows. Small queues naturally fit without deferral. Hardware
+planning and shader composition stay unchanged; switch-off software composition also stays
+unchanged. There is no new per-pixel record, binding or allocation.
+
+The existing 32,768 default is **cells per frame on average**, not rays. The slot rotation
+can overshoot it, especially when the pixel-priority path adds a quarter budget for background
+cells. A cell traces up to 64/128 fixed directions plus up to `near_light_rays + 1` rays per
+eligible local light. This explains why the cap does not imply a small post-cut ray cost.
+
+The experiment uses the existing full-direction claim refill (no coarse pixel footprint or
+partial sky) and parent-bounce stand-in. Its gather target is `cut_gather_ms` (3 when unset),
+using the existing 1,000 software cells/ms calibration. That is a tuning estimate, **not a
+time guarantee**. A smaller explicit `gather_cells` remains effective. A frame-local ticket
+in spare work-counter word 47 enforces the target as a hard ceiling on admitted software
+gathers, after the existing slot/pixel selection. Header word 32 carries the ceiling. Rejected
+cells retain their gather count and requeue. The still-view idle allowance accounts for the
+smaller budget so it does not stop while the longer queue is still draining.
+
+This bounds work instead of dropping rays from an admitted cell. Bounce can still settle
+more slowly; the earlier forest edge regression above remains a specific picture risk.
+Outpost needs off/on cut and post-cut timing, per-frame admission counts, and frame-matched
+picture/settling comparisons before any default change.
