@@ -46,14 +46,21 @@ The camera and reflections still see the glass through its program as today.
 The proxy's power, colour and fit come from evaluating the program's own `emission` hook on the
 GPU, never from a CPU copy of a material constant:
 
-- **The reduction.** One compute dispatch per changed candidate: each triangle of the placement's
-  mesh is sampled at 4 stratified barycentric points (16 for triangles above 1% of the mesh's
-  area); each point runs the program's `surface` and `emission` with the interpolated vertex
-  inputs (UVs, normal, tangent) and the material's parameters and textures, as cell shading
-  composes them (`Stage::Cell`). Workgroup sums give, in object space: emitted power
-  Φ = Σ L·A·π (Lambertian emitter), the power-weighted centroid, the power-weighted mean colour,
-  the radius around the centroid that holds the triangles above 1% of the peak radiance, the
-  area-weighted mean normal and its spread, and the principal-axis ratio of the emitting area.
+- **The reduction.** One compute dispatch per changed candidate group (an object and one of its
+  emissive materials, below). Each triangle is sampled at stratified barycentric points, as many
+  as its texel footprint needs: its UV area times the bound emissive texture's size, between 4
+  and 64 points, and 4 when the material has no texture. Each point runs the program's `surface`
+  and `emission` with the interpolated vertex inputs (UVs, normal, tangent) and the material's
+  parameters and textures, as cell shading composes them (`Stage::Cell`). The dispatch writes
+  each triangle's reduced emission (mean radiance times area, rgb) to a small buffer.
+- **The fit is weighted by that per-triangle emission**, not by the mesh. Triangles are sorted by
+  emitted power, and the fit keeps the smallest set holding 95% of the group's power, dropping
+  any triangle under 2% of the brightest triangle's radiance. That way a third-party lamp whose
+  whole material emits but whose texture glows only in the bulb is fitted to the bulb's
+  triangles. From the kept set, in object space: emitted power Φ = Σ L·A·π (Lambertian), the
+  power-weighted centroid and mean colour, the radius around the centroid that holds every kept
+  triangle, the power-weighted mean normal and its spread, and the principal-axis ratio. A group
+  with no triangle above the threshold has no emitter and stays as it is.
 - **When it runs:** on the first frame a candidate is placed, and again whenever the material's
   parameters, a bound texture's revision, the program's source or the mesh change. Programs get
   no time input (`program_api.wgsl`: a program may declare `struct Parameters`, read as
@@ -78,6 +85,23 @@ GPU, never from a CPU copy of a material constant:
   follows at the reductions' pace, holding its last power in between; it never re-reduces
   without bound.
 
+### Grouping: one emitter per object, not per connected piece
+
+Kits are often unwelded boxes: Glint's route chevrons are 532 pieces, the hangar's festoon bulbs
+39, Outpost's campfire coals 34, each hoop band 48 (the Content thread's lamp audit,
+`coord-batch/lamp-audit/glow_*.txt`). A proxy per piece would mean hundreds of lights. So:
+
+- **The unit is the object**: one renderer (placement), and within it one emissive material's
+  triangles, reduced and fitted together, whatever their connectivity.
+- **One proxy per object when it fits**: the kept triangles pass the shape tests (compact, below)
+  and the bound. Outpost's coals (34 pieces in about a 0.5 m pile) are one sphere.
+- **Otherwise up to 4 proxies per object**: power-weighted k-means on the kept triangles'
+  centroids, k = 2, 3, 4 in turn, until every cluster passes the shape tests and the bound.
+  **Cap: 4 lights from one object.** Past the cap, the whole object stays with the gather, so
+  an object is never split between the two. The festoon string (39 bulbs along a line), Glint's
+  chevrons along the course and its hoop bands (rings) stay with the gather; that is recorded
+  as their limit, for (a) and (d).
+
 ### Shape and placement
 
 - **Sphere** (`Light::Point`, `source_radius` = the fitted radius, at the fitted centre) for
@@ -85,11 +109,39 @@ GPU, never from a CPU copy of a material constant:
   frame, so moving emitters move their proxy with no new reduction (skinned emitters re-reduce on
   their skin revision).
 - **Disc** (a one-sided cosine lobe) for flat, one-sided panels: the light model has no
-  cosine-lobe light today. Until one exists, flat one-sided small emitters stay with the gather
-  (a recorded limit, below), rather than radiating backwards as a sphere.
+  cosine-lobe light today. Until one exists, flat one-sided emitters stay with the gather rather
+  than radiating backwards as a sphere. That is not a minor limit: see "The hangar" below, where
+  it decides whether the disc light is a requirement.
 - **Long thin emitters** (principal-axis ratio above 4:1: strip lights, neon) fit neither and
   stay with the gather. They are a known limit for option (a) (sampling emissive triangles), and
   the proxy is not bent to fit them.
+
+### The hangar: flat panels are its main light
+
+Outpost's hangar is lit mainly by twelve ceiling light panels (0.99 m, flat, one-sided
+`diffuser`) and a bench fluorescent tube (0.88 m, flat and long). Under the shape limits above,
+all of them stay with the gather. What the hangar then shows:
+
+- **No direct shadows from its main light.** Gather light is cell-resolution indirect light, so
+  nothing under the panels casts a contact shadow; objects sit in an even wash.
+- **The same deterministic per-cell sampling as the night blotches.** From the floor about 5 m
+  below, a 0.99 m panel subtends about 0.12 sr, near one gather direction. Each cell's 64 fixed
+  rays hit each panel 0 to 2 times, so cells differ by whole panels' worth of light. Twelve
+  overlapping panels average some of that out, but a mottled floor at cell scale is the expected
+  result.
+
+**Ranking:** the hangar goes into the `glow=gi` reproduction's lease as a still (both paths, by
+PC integration's capture if the wgpu harness cannot load it). If it blotches or shows no
+shadows under the panels, **the disc light becomes a requirement of (c), built before the gate**,
+not a later item:
+
+- a one-sided cosine-lobe light (centre, normal, radius);
+- RT samples points on the disc itself;
+- non-RT maps it with the five cube faces of its hemisphere;
+- the cluster bounds it by its hemisphere;
+- its cost per receiver is about a spot light with a source radius.
+
+The bench tube (long) waits for (a) either way.
 
 ### 1. The bound, and the hand-over to the gather
 
@@ -116,8 +168,17 @@ each would become two shadowed lights (25 to 50 in the night scene). The bound p
 value are not enough to say "the glass is only seen": a small, bright glass passes the bound
 whatever its brightness, and dimming the emission to fail it dims the glass the camera sees.
 
-So, without a flag: **an authored local light inside the fitted sphere (centre distance below
-1.5 r) claims the emitter.** A claimed emitter gets no proxy and still leaves the gather (its
+So, without a flag: **an authored local light inside the fixture's own bounds claims it.** The
+fixture is the object after grouping: the claim test is the object's world box (all its
+emissive groups, expanded by 5 cm), or its fitted sphere, whichever holds the light. It is not
+the distance to one piece's centre: Outpost's floodlight spot sits 0.41 m from each of its four
+glass pieces (radius 0.25 m, so outside 1.5 r) but inside the head's box, so it claims the
+glass and the bulb together.
+
+Only an object that would otherwise become a proxy can be claimed. An object that stays with
+the gather (too large for the bound, long, flat, or past the 4-light cap) keeps its glow
+bouncing whatever light is inside its bounds. Glint's goal, 364 pieces up to 10.8 m with its
+goal light inside the box, is one. A claimed object gets no proxy and leaves the gather (its
 surfaces are dark to cell shading); the authored light is its light. An author then:
 
 - keeps the authored light, for "the glass is only seen, the lamp inside is the light"; its
@@ -140,8 +201,15 @@ So:
 - a light with zero intensity, or one disabled, does not claim. A light switched off at runtime
   releases its claim: the glass becomes a proxy again (after its reduction, at the same 2-frame
   latency as any change), and the reverse when it comes back on;
-- the Content thread's audit lists every glowing mesh with an authored light within 1.5 r in
-  Showcase and Outpost.
+- the Content thread's audit (`coord-batch/lamp-audit/glow_*.txt`) lists every glowing mesh and
+  its nearest authored light. Under the bounds rule its compact fixtures with a light inside
+  are claimed:
+  - Outpost's floodlights (glass and bulb), security light and mast beacon;
+  - the hangar's hanging lamps.
+
+  Showcase's emissive ball and water bottle have no light within 3 m, so they are proxied
+  wherever they pass the bound. Outpost's coals are proxied too, unless the fire light lies
+  inside the pile's bounds.
 
 No program and no per-material flag. Atelier stays at 25 shadowed lights either way; which one
 it should be, and the energy balance, is the Content thread's call. The fitting blocking the
@@ -212,7 +280,8 @@ light (LC2), and reflection hits light it through their own cluster walk.
 ## The gate
 
 Before any default: a crop pair for Islam of the `glow=gi` repro (both paths) and Atelier's night
-still, before and after, plus three consecutive moving frames; one claimed emitter per scene
+still, before and after, plus three consecutive moving frames; the hangar under its panels, before
+and after (with the disc light if the ranking above made it a requirement); one claimed emitter per scene
 (Atelier, Glint, Showcase), before and after; with the measured cost per proxy (RT rays, non-RT
 map draw and filter, cache rays), the first reduction's load cost per emitter, the reduction's
 cost per changed material, and the claimed glass's former bounce alongside.
