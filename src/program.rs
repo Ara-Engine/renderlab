@@ -1026,11 +1026,36 @@ pub(crate) struct Composed {
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
-    let composed = compose_stage(head, program, stage, parameters, false);
+    let composed = with_dfg_memo(compose_stage(head, program, stage, parameters, false));
     match (stage, gi_dedup()) {
         (Stage::Traced | Stage::TracedStreamed, Some(dedup)) => with_gi_dedup(composed, dedup),
         _ => composed,
     }
+}
+/// `RENDERLAB_DFG_MEMO=1` (off by default until its row exists; docs/design-mq2-hint.md (a)):
+/// the traced API's `environment_dfg` keeps its last arguments (as bits) and result in
+/// private variables, one per invocation, and a call with the same bits returns the kept value
+/// instead of sampling again. Same coordinates, same sample: the picture is unchanged. The
+/// standard program's `reflection_lobe`, `shade` and MQ2's `view_dependence` then sample once.
+pub(crate) fn dfg_memo_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_DFG_MEMO").is_ok_and(|v| v == "1"))
+}
+/// The traced API's DFG lookup (shaders/program_traced.wgsl).
+const DFG_TRACED: &str = "fn environment_dfg(n_dot_v:f32, roughness:f32) -> vec2<f32> {\n    let uv=(vec2<f32>(clamp(n_dot_v,0.0,1.0),roughness)*127.0+vec2<f32>(0.5))/128.0;\n    return textureSampleLevel(dfg,dfg_sampler,uv,0.0).rg;\n}\n";
+/// `composed` with the memoized DFG lookup (`dfg_memo_on`); unchanged without the traced one.
+/// The memo precedes the program, as the lookup did, so the program's range moves with it.
+fn with_dfg_memo(mut composed: Composed) -> Composed {
+    if !dfg_memo_on() || composed.source.matches(DFG_TRACED).count() != 1 {
+        return composed;
+    }
+    const MEMO: &str = "// RENDERLAB_DFG_MEMO (program.rs dfg_memo_on): this invocation's last lookup, by argument bits.\nvar<private> rl_dfg_kept:bool;\nvar<private> rl_dfg_key:vec2<u32>;\nvar<private> rl_dfg_value:vec2<f32>;\nfn environment_dfg(n_dot_v:f32, roughness:f32) -> vec2<f32> {\n    let key=vec2<u32>(bitcast<u32>(n_dot_v),bitcast<u32>(roughness));\n    if rl_dfg_kept && all(key==rl_dfg_key) { return rl_dfg_value; }\n    let uv=(vec2<f32>(clamp(n_dot_v,0.0,1.0),roughness)*127.0+vec2<f32>(0.5))/128.0;\n    let value=textureSampleLevel(dfg,dfg_sampler,uv,0.0).rg;\n    rl_dfg_kept=true;rl_dfg_key=key;rl_dfg_value=value;\n    return value;\n}\n";
+    let at = composed.source.find(DFG_TRACED).expect("counted");
+    assert!(at < composed.program.start, "the DFG lookup precedes the program");
+    composed.source = composed.source.replacen(DFG_TRACED, MEMO, 1);
+    let shift = MEMO.len() - DFG_TRACED.len();
+    composed.program = composed.program.start + shift..composed.program.end + shift;
+    composed
 }
 /// `RENDERLAB_GI_DEDUP` (prototype, off by default): the receiver's GI hash finds are shared
 /// across the SIMD group (subgroup) instead of each lane walking the table itself. Each round
