@@ -1746,7 +1746,7 @@ fn material_debug() -> Option<&'static str> {
     })
 }
 /// The record's group 0 bindings: an rgba32uint and an rg32uint image of the frame's size.
-pub(crate) const MATERIAL_RECORD_BINDINGS: [u32; 2] = [86, 87];
+pub(crate) const MATERIAL_RECORD_BINDINGS: [u32; 2] = [75, 78];
 /// Which side of the record a module is: the material pass writes it, shading reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum MaterialRole {
@@ -1799,8 +1799,8 @@ fn rl_mr_rgb9e5_decode(u:u32)->vec3<f32> {
 }
 "#;
 /// The writing side: the images and the store.
-const MATERIAL_WRITE: &str = r#"@group(0) @binding(86) var rl_material0:texture_storage_2d<rgba32uint,write>;
-@group(0) @binding(87) var rl_material1:texture_storage_2d<rg32uint,write>;
+const MATERIAL_WRITE: &str = r#"@group(0) @binding(75) var rl_material0:texture_storage_2d<rgba32uint,write>;
+@group(0) @binding(78) var rl_material1:texture_storage_2d<rg32uint,write>;
 fn rl_material_store(pixel:vec2<i32>,m:MaterialRecord,input:SurfaceInput) {
     let scalars=pack4x8unorm(vec4<f32>(m.alpha,m.metallic,m.roughness,m.view_share));
     textureStore(rl_material0,pixel,vec4<u32>(rl_mr_oct(m.normal),rl_mr_unorm10(m.base),scalars,rl_mr_rgb9e5(m.emission)));
@@ -1809,8 +1809,8 @@ fn rl_material_store(pixel:vec2<i32>,m:MaterialRecord,input:SurfaceInput) {
 }
 "#;
 /// The reading side: the images and the load.
-const MATERIAL_READ: &str = r#"@group(0) @binding(86) var rl_material0:texture_2d<u32>;
-@group(0) @binding(87) var rl_material1:texture_2d<u32>;
+const MATERIAL_READ: &str = r#"@group(0) @binding(75) var rl_material0:texture_2d<u32>;
+@group(0) @binding(78) var rl_material1:texture_2d<u32>;
 fn rl_material_load(pixel:vec2<i32>)->MaterialRecord {
     let a=textureLoad(rl_material0,pixel,0);
     let b=textureLoad(rl_material1,pixel,0);

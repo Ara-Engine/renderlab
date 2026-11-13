@@ -153,3 +153,11 @@ pub(crate) fn hardware_soft_material(
             .transpose()
     })
 }
+/// The material pass's record writer for `material` (`hardware_soft_material`, `Write`).
+pub fn hardware_soft_material_writer(material: &str, list: bool) -> Result<Option<Program>> {
+    hardware_soft_material(material, list, crate::program::MaterialRole::Write)
+}
+/// The record-reading shading for `material` (`hardware_soft_material`, `Read`).
+pub fn hardware_soft_material_reader(material: &str, list: bool) -> Result<Option<Program>> {
+    hardware_soft_material(material, list, crate::program::MaterialRole::Read)
+}
