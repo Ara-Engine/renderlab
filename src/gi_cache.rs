@@ -57,6 +57,12 @@ pub(crate) const GATHER_GROUPS: u32 = 4096;
 /// blotches for the first 8-16+ frames (Ara's Showcase). P-DEFECT gave them the hardware
 /// budget (P-GI and P-GATHER made software gathers cheaper since G2b; docs/p-defect.md).
 const GATHER_CELLS: u32 = 32768;
+/// `cut_gather_ms` (U-RTVIS): gathers per millisecond of GPU time, software rays (Outpost non-RT
+/// after a cut: about 0.95 ms per 1,000, ara-integration perf/table-outpost-view2.md) and
+/// hardware rays (assumed four times faster until measured), and the frames after a cut it holds.
+const GATHERS_PER_MS_SOFTWARE: f32 = 1000.0;
+const GATHERS_PER_MS_HARDWARE: f32 = 4000.0;
+const CUT_GATHER_FRAMES: u32 = 64;
 /// The per-path budgets of new cells (`IndirectSettings::claim_cells` 0, opt-in): about 3 ms of
 /// query points and rays a cut frame at G2b's measured costs (2 px cells: about 60 ns a new
 /// cell with hardware rays, 140 ns with software rays; docs/m7-g2b.md).
@@ -387,6 +393,13 @@ pub struct IndirectSettings {
     /// 330k gathers on Outpost's second view and drained only by frame 119. 0 (the default
     /// until measured) gives them `gathers`, as before; `RENDERLAB_GI=hit_gathers=1` the cap.
     pub hit_gathers: u32,
+    /// After a camera cut (U-RTVIS), for CUT_GATHER_FRAMES frames: gathers capped at about this
+    /// many milliseconds a frame (GATHERS_PER_MS_*), the cells pixels read first. 0 (the default
+    /// until gated) leaves `gather_cells`.
+    pub cut_gather_ms: f32,
+    /// A new cell takes its parent level's bounce value until its own first gather, so a cell
+    /// a capped gather has not reached reads a coarser estimate instead of none (U-RTVIS).
+    pub parent_standin: bool,
     /// Levels above the pixels' that a gather hit on something that moved this frame reads
     /// at least (U-SPECK, docs/speck.md; 0 to 4, 0 off). A moving surface leaves a fine cell
     /// before the cell has a value, so its hits found none and it sent no bounce light.
@@ -461,6 +474,8 @@ impl Default for IndirectSettings {
             // gathers over the flight, and non-RT's first eight frames are slightly worse.
             gather_pixels_first: false,
             hit_gathers: 0,
+            cut_gather_ms: 0.0,
+            parent_standin: false,
             // Off: at 2 the path tracer's walking hero is 1.5-1.9 codes closer underneath at one
             // frame and 0.9-1.4 codes farther at another, and the game scene's spinning cube
             // gains isolated specks (docs/speck.md section 10).
@@ -1123,7 +1138,12 @@ impl Planner {
         header[18] = layout.shade;
         header[19] = s.gathers;
         header[30] = s.hit_gathers;
+        header[31] = u32::from(s.parent_standin);
+        // U-RTVIS: a cut's gathers held to a time budget, the cells pixels read first.
+        let cut_window = s.cut_gather_ms > 0.0 && self.since_cut < CUT_GATHER_FRAMES;
+        let per_ms = if software { GATHERS_PER_MS_SOFTWARE } else { GATHERS_PER_MS_HARDWARE };
         header[20] = match s.gather_cells {
+            _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
             0 => GATHER_CELLS,
             u32::MAX => 0,
             cells => cells,
@@ -1158,7 +1178,7 @@ impl Planner {
         header[27] = spread.to_bits();
         header[29] = s.mover_hit_levels;
         // The most cells pixels read in a frame: the view's pixels over a cell's.
-        header[28] = if s.gather_pixels_first {
+        header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {
             0
