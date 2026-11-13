@@ -59,12 +59,18 @@ pub(crate) fn portable_trace() -> Result<String> {
                 == 1,
         "original primary hit-position seams changed"
     );
-    Ok(trace.replace("getCandidateHitVertexPositions(&query)",
+    Ok(without_vertex_return(trace))
+}
+/// `source` with the trace text's hit-vertex return replaced as `portable_trace` does: also
+/// for the material pass's modules, which carry the trace's edge repair
+/// (program.rs `material_trace_helpers`).
+pub(crate) fn without_vertex_return(source: &str) -> String {
+    source.replace("getCandidateHitVertexPositions(&query)",
         "primary_triangle_vertices(primary_placements[candidate.instance_custom_data]&0x1fffffffu,candidate.primitive_index)")
         .replace("getCommittedHitVertexPositions(&query)",
         "primary_triangle_vertices(primary_placements[hit.instance_custom_data]&0x1fffffffu,hit.primitive_index)")
         .replace("ray_query<vertex_return>","ray_query")
-        .replace("acceleration_structure<vertex_return>","acceleration_structure"))
+        .replace("acceleration_structure<vertex_return>","acceleration_structure")
 }
 
 /// The fused Interactive pass: each pixel's camera hit and its sun visibility in one

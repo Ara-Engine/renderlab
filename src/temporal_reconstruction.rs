@@ -1884,7 +1884,7 @@ impl Renderer {
             None
         };
         let vb_sun = if vb {
-            Some(vb_sun_source(soft)?)
+            Some(super::sun_vis_pass::schedule_source(vb_sun_source(soft)?))
         } else {
             None
         };
