@@ -325,3 +325,189 @@ The turned view is heavier (about 63 ms against 34 before the cut, with or witho
 
 The rework (cap until drained) would spread about 45 ms of cell creation over several frames. It
 is still worth doing, at a smaller stake than before.
+
+## Reflections: cost by band, and halving the glossy strata (2026-11-12, after Islam's priority change)
+Game flight with the Fox and night lanterns (`--night-lanterns`), 1080p, frames 8-59, `shading`
+medians in ms. One visit, reference run 28.6 (7 % high: compare within the table only):
+
+| | base | strata <= 8 | strata <= 4 | traced to 0.3 | traced to 0.1 | reflections off |
+|---|---|---|---|---|---|---|
+| non-RT game | 25.3 | 16.3 | 11.2 | 15.7 | 6.6 | 5.6 |
+| non-RT night | 54.1 | 42.6 | 22.5 | 25.8 | 13.6 | 12.5 |
+| RT game | 10.5 | 9.3 | 8.2 | 8.6 | 5.9 | 5.2 |
+| RT night | 18.6 | 16.5 | 13.9 | 15.3 | 11.9 | 11.9 |
+
+Switches: `RENDERLAB_RL_HIT=strata=N` caps a glossy pixel's strata (RL_GLOSSY_MAX, 16);
+`RENDERLAB_REFLECTION_ROUGH` replaces `max_roughness`.
+
+- **Non-RT is where reflections cost:** about 20 ms of the game's shading and about 42 ms of the
+  night lanterns', against 5-7 ms on RT. A non-RT stratum costs about four times an RT one: a
+  software ray, the hit's software sun ray and its light loop.
+- **The cost follows the strata count:** RQ1 raised the count to 12-16 because four strata
+  smeared moving glossy metal.
+
+Tried: `RENDERLAB_RL_HALF=1` (reflections.wgsl RL_HALF_STRATA, off). With reconstruction's
+rotation, a glossy receiver of 8 or more strata traces every other stratum of its fixed set a
+frame, so two frames cover the whole set with main's directions. Same binary, interleaved twice
+(reference 28.03 ms):
+
+| | half off | half on |
+|---|---|---|
+| non-RT game | 27.0 / 27.2 | 23.5 / 22.8 |
+| non-RT night | 50.7 / 52.4 | 47.0 / 47.0 |
+| RT game | 11.1 / 11.5 | 10.8 / 11.0 |
+| RT night | 23.0 / 23.3 | 22.2 / 22.6 |
+
+Against the path tracer (reflection_matched with its arch lamp, both paths), the whole-image
+error barely moves (moving 0.840 / 1.003 / 1.188 on against 0.837 / 1.001 / 1.183 off). In the
+most-changed tile, the gold sphere, it is 5-7 % higher while moving (frame 47: 10.52 against
+9.79) and 4 % higher still. The reflected crate on the gold sphere is slightly smudgier in
+motion (crops: D:/Coding/renderlab-work/unit-rtvis/crops-half, on | off | path tracer). Kept
+off: about 4 ms for a visible softening on moving rough metal.
+
+Next candidates, by the measured cost:
+1. **Shared strata across a 2x2 quad**, where neighbours are the same surface and the lobe is
+   wide. Each pixel traces a quarter and the quad averages. This needs the traced shading entry
+   to keep uniform control flow up to a workgroup barrier, or a separate reflection pass, so it
+   touches the shading entry's structure.
+2. **Cheaper non-RT hits.** A non-RT stratum is about four times an RT one; its hit runs the
+   software sun ray and the full light loop.
+3. **Untraced estimate above a roughness** (traced to 0.3 saves about 9.6 ms of non-RT game
+   shading). It needs a picture check against the path tracer for light leaking on rough metal.
+
+## Reflections with history (2026-11-12, not merged)
+A glossy receiver whose reprojected history is trusted traces one stratum of its fixed set a
+frame, rotating from a per-pixel offset, and folds it into a per-pixel ping-pong record. The
+record holds the mean, the mean-square luminance and the count, up to the set's count. It traces
+the full set, as today, on:
+- a cut, reset or moved/skinned placement;
+- a restart sphere (`rl_restarts`);
+- no matching record (placement and clip depth within 2%);
+- a stratum whose luminance is more than 4 sigma plus 10% off the stored mean.
+
+Mirrors are unchanged. The history is in shaders/reflections_history.wgsl, bound only in the wgpu
+renderer's primary shading modules (group 0, bindings 53/54); film and Ara keep the stubs.
+It is off by default; `RENDERLAB_RL_HISTORY=1` enables it, and `RENDERLAB_RL_HISTORY_TUNE`
+(strata, cap, moving, sigma) sets the measurement constants.
+
+**Cost** (same binary, interleaved twice; `shading` medians in ms):
+
+| | off | history | never reject |
+|---|---|---|---|
+| game flight, non-RT | 14.7 | 13.0 | 12.6 |
+| game held still, non-RT | 11.7 | 10.1 | 9.8 |
+| game flight, RT | 9.8 | 9.1 | 8.9-9.7 |
+| game held still, RT | 7.9 | 7.2 | 7.05 |
+| Showcase-like band, non-RT, 720p moving | 13.4 | 5.8 (4 strata: 7.7) | |
+| Showcase-like band, RT, 720p moving | 3.57 | 3.05 (4 strata: 3.4) | |
+
+The Showcase-like band is reflection_matched `--stage --metal-balls`. The game glossy band is
+small: about 10k pixels change, around the gold sphere.
+
+**Picture, the gate not met:** moving glossy surfaces show grain against both the path tracer and
+the history off. One stratum a frame folded over 8-16 frames is far fewer effective samples than
+16 strata a frame under TR1.
+- Error against the path tracer in the most-changed 64x64 tile (aluminium ball and turntable,
+  frame 16), both paths: 3.1 off, 7.9 with one stratum a frame, 5.75 with four.
+- Still frames are about equal.
+- Crops: D:/Coding/renderlab-work/unit-rtvis/crops-hist2 (off | variants | path tracer) and
+  crops-histpics (the game's gold sphere, on | off).
+
+Getting the moving picture back needs spatial reuse across neighbours, which is
+docs/design-reflection-pass.md's resolve.
+
+### History while still, and the spatial resolve (2026-11-12, both off)
+Moving frames with the history read only under a still camera are byte-identical to main:
+- game flight (48 frames) and night lanterns (30 frames), both paths;
+- reflection_matched `--stage --metal-balls` frames 16/32/47, both paths.
+
+The lib suite passed with it on: 247 passed.
+
+Still frames are slightly further from the path tracer than main. The three most-changed 64x64
+tiles at the held pose (frame 47 of `--freeze 32`), RT:
+
+| | main | history | history, cap 16 | resolve | resolve, cap 16 |
+|---|---|---|---|---|---|
+| still | 7.71 / 11.72 / 2.17 | 8.11 / 12.11 / 2.90 | 8.11 / 11.99 / 2.83 | 7.79 / 12.07 / 2.53 | 7.73 / 11.95 / 2.36 |
+| moving, frame 16 | 3.12 / 4.37 / 6.41 | = main | = main | 6.64 / 7.16 / 9.11 | 8.19 / 7.76 / 9.93 |
+
+Non-RT is the same within 0.15. The resolve (`RENDERLAB_RL_RESOLVE=1`) also reads the history
+under motion. It averages each trusted pixel's new mean with its neighbours' previous means,
+edge-aware and clamped.
+
+Inline in the shading entry, a pixel can filter only the previous frame's neighbours, not this
+frame's samples. With one stratum a frame, that is far from main's 16 strata under TR1 while
+moving. Both are off by default. Moving glossy quality at a reduced ray count needs:
+- this frame's samples filtered after they exist, which is the reflection pass's resolve
+  (docs/design-reflection-pass.md);
+- reprojection by the reflected point.
+
+Crops: D:/Coding/renderlab-work/unit-rtvis/crops-gate2 (main | on | cap16 | res | res16 | path
+tracer).
+
+### rl_resolve as a pass, first screen (2026-11-12 22:00 UTC, off)
+`RENDERLAB_RL_HISTORY=1 RENDERLAB_RL_RESOLVE_PASS=1`, b91d0a44 + ae471b4e + d940a6d7:
+- A trusted glossy receiver shows the previous frame's resolved value, reprojected by the
+  reflected point below roughness 0.3, and traces one rotated stratum inline.
+- rl_resolve then filters this frame's samples (3x3/5x5 binomial, same placement and depth),
+  clamps the history to 1.5 sigma and blends (cap 16).
+
+It fails the gate, worse than today both still and moving (reflection_matched `--stage
+--metal-balls`, three most-changed tiles against the path tracer):
+
+| | today | resolve pass |
+|---|---|---|
+| RT moving 16 | 3.12 / 6.41 / 4.37 | 8.38 / 10.28 / 7.74 |
+| RT moving 47 | 3.20 / 9.75 / 2.10 | 10.07 / 14.00 / 5.75 |
+| RT still 47 | 7.71 / 3.13 / 2.80 | 9.22 / 4.31 / 3.89 |
+
+Non-RT is the same within 0.1. The crops (D:/Coding/renderlab-work/unit-rtvis/crops-rp3,
+today | resolve | path tracer) show two faults:
+- **Gold sphere (0.25):** blotchy, mottled reflected patches. One sample per pixel a frame,
+  filtered over 3x3 and clamped loosely, leaves stale or misplaced history where the
+  reflected-point reprojection lands on the curved surface.
+- **Turntable (0.35) and aluminium ball (0.42):** grain.
+
+Cost (Showcase-like scene, 1080p moving, `shading` medians; that lease's reference run read
+39.6 ms against 26.7, so these are relative only):
+
+| | today | resolve pass |
+|---|---|---|
+| non-RT shading | 13.5 | 5.45 |
+| RT shading | 3.85 | 2.82 |
+
+Needed before it can hold:
+- more samples for rough lobes (4 strata a frame or more);
+- a wider, variance-guided a-trous filter (2-3 iterations, radius from the lobe's screen
+  footprint);
+- a tighter clamp, with the per-pixel temporal variance kept;
+- the displayed value taken after this frame's resolve, not the previous one: shading reads the
+  resolved specular in a second pass, or the lobe pre-pass.
+
+### The resolve, steps 1-2 and history length (2026-11-12 22:30 UTC, all off)
+- **Step 1, no lag** (e9b46f31): the shading runs twice with a phase uniform, a pre-pass that
+  leaves samples, then rl_resolve, then the shading pass showing this frame's resolved value.
+- **Step 2** (dd8fb6e4): 4 strata a frame on lobes of roughness 0.3 and up.
+- **History length** (`RENDERLAB_RL_RESOLVE_TUNE`).
+
+Worst RT tiles against the path tracer, `reflection_matched --stage --metal-balls` (non-RT the
+same within 0.1):
+
+| | today | step 1 | + step 2 (cap 16) | cap 4, clamp 1.0 | cap 2, clamp 0.75 |
+|---|---|---|---|---|---|
+| moving 16: gold / tile 2 / tile 3 | 3.12 / 5.78 / 5.93 | 8.07 / - / - | 7.05 / 7.18 / 8.23 | 4.27 / 6.67 / 6.86 | 3.31 / 6.54 / 6.55 |
+| moving 47: tile 1 / gold / tile 3 | 9.75 / 3.20 / 3.94 | 13.84 / 9.79 / - | 13.84 / 8.53 / 6.09 | 11.55 / 4.88 / 5.10 | 11.18 / 3.63 / 4.89 |
+| still: tile 1 / tile 2 / tile 3 | 7.71 / 2.80 / 5.70 | 9.30 / 3.95 / - | 9.30 / 3.95 / 6.19 | 8.56 / 3.50 / 6.16 | 8.30 / 3.36 / 6.17 |
+
+Most of the remaining error is stale history; a 2-frame history with a 0.75-sigma clamp comes
+close. Crops (D:/Coding/renderlab-work/unit-rtvis/crops-nl2: today | cap 16 | c4 | c2 | path
+tracer): c2 keeps slight blotches at the gold sphere's reflected crate and rim, and slight grain
+on the turntable. Next is the variance-guided a-trous (step 3) on top of c2.
+
+Cost (Showcase-like scene, 1080p moving, frame medians; the reference read 39.5 ms, so these are
+relative only):
+
+| | today | resolve |
+|---|---|---|
+| non-RT frame | 83 ms | 76.6-76.8 ms |
+| RT frame | 30.1 ms | 29.2 ms |

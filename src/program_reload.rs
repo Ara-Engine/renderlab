@@ -344,12 +344,12 @@ impl Renderer {
                     } else {
                         Stage::TracedStreamed
                     };
-                    let composed = program::compose_list(
+                    let composed = program::with_reflection_history(program::compose_list(
                         &traced.as_ref().unwrap()[recipe.shading],
                         &text,
                         stage,
                         program::declares_parameters(&text),
-                    );
+                    ));
                     let scopes = OperationScopes::new(&device);
                     let module = module(&abi, &label, &composed);
                     if let Some(error) = scopes.finish() {

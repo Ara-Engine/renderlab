@@ -44,6 +44,8 @@ pub use virtual_shadow_gpu::{
 };
 #[path = "program_gpu.rs"]
 mod program_gpu;
+#[path = "reflection_hits.rs"]
+pub(crate) mod reflection_hits;
 #[path = "shade_detail.rs"]
 pub(crate) mod shade_detail;
 pub(crate) use program_gpu::ProgramReload;
@@ -3443,11 +3445,31 @@ impl Renderer {
                 if !self.view.outputs.modes.shades() {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
+                // U-RTVIS: the reflection pass's kernels (RENDERLAB_RL_PASS=1; nothing otherwise).
+                self.ensure_reflection_trace(shading)?;
+                self.ensure_reflection_hits(shading)?;
+                self.write_reflection_pass_frame();
                 mark(&mut encoder, "shading");
                 if self.view.outputs.modes.shades() {
                     self.encode_view_shading(&mut encoder, shading, stamps(0))?;
                 } else {
+                    // U-RTVIS: with the resolve pass, a pre-pass shading dispatch leaves each glossy
+                    // receiver's sample, rl_resolve filters them, and the shading pass shows this
+                    // frame's resolved value (no lag).
+                    if crate::program::rl_resolve_pass_on() {
+                        mark(&mut encoder, "reflection.prepass");
+                        self.encode_reflection_phase(&mut encoder, 0);
+                        self.encode_primary_shading(&mut encoder, shading, None);
+                        mark(&mut encoder, "reflection.resolve");
+                        self.encode_reflection_resolve(&mut encoder);
+                        self.encode_reflection_phase(&mut encoder, 1);
+                        mark(&mut encoder, "shading");
+                    }
                     self.encode_primary_shading(&mut encoder, shading, stamps(0));
+                    mark(&mut encoder, "reflection.trace");
+                    self.encode_reflection_trace(&mut encoder, shading);
+                    mark(&mut encoder, "reflection.hits");
+                    self.encode_reflection_hits(&mut encoder, shading);
                 }
             }
             if reconstructed {
