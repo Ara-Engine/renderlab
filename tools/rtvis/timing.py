@@ -27,7 +27,7 @@ REPO = Path(__file__).resolve().parents[2]
 WORK = Path("D:/Coding/renderlab-work/unit-rtvis")
 # The default game scene on RT at 1080p, frame span median (ms): this branch's references of
 # 2026-11-13 read 61.6-61.8 (root's bar; the span is CPU-bound, cpu.wait about 0.03 ms).
-REFERENCE_MS = 61.7
+REFERENCE_MS = 19.1  # cp27, main 50539f01, 1920x1080, no detail profile (2026-11-13 s1a-s1c: 19.11-19.12)
 FOX = "D:/Coding/renderlab-work/m7-sk1/Fox.glb"
 # Held-budget runs (step 5): main's cold probes on, the held stop on (1) or off (0).
 HELD = lambda v: {"RENDERLAB_COLD_PROBES": "1", "RENDERLAB_HELD_PROBES": v}
