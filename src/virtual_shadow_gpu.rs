@@ -544,8 +544,16 @@ pub(super) struct VirtualState {
     retired_casters: Vec<(u64, Casters)>,
     levels: usize,
     /// The Disk mark pass's receiver counters (`Resources::reach`), read back a frame or two
-    /// late (recorded while encoding, which borrows the renderer shared).
-    reach: std::sync::Mutex<ReadbackRing>,
+    /// late (recorded while encoding, which borrows the renderer shared), tagged with the eye
+    /// and the view epoch of their frame.
+    reach: std::sync::Mutex<ReadbackRing<(glam::DVec3, u32)>>,
+    /// The nearest receiver's distance in the current view epoch and the eye it was measured
+    /// from (None after a cut until its own mark pass is read back).
+    seen: Option<(f64, glam::DVec3)>,
+    /// This frame's eye, for the counters' tag.
+    eye: glam::DVec3,
+    /// Camera cuts so far (`cut`): readbacks from an earlier view are ignored.
+    epoch: u32,
     /// Page requests depend only on the camera, the sun, the casters and the cache
     /// windows. A frame identical in all of them finds nothing stale, so it skips the
     /// request, compaction and raster passes and only runs the lookup.
@@ -921,6 +929,11 @@ impl VirtualState {
     /// After the frame's submission: maps the receiver counters it copied.
     pub(super) fn submitted(&mut self) {
         self.reach.get_mut().unwrap().submitted();
+    }
+    /// A camera cut: the nearest receiver seen so far belonged to the old view.
+    pub(super) fn cut(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.seen = None;
     }
     pub fn new(
         device: &PipelineDevice,
@@ -1379,6 +1392,9 @@ impl VirtualState {
                 REACH_BYTES,
                 3,
             )),
+            seen: None,
+            eye: glam::DVec3::ZERO,
+            epoch: 0,
             key: vec![],
             page_work: true,
             history_frames: 0,
@@ -1855,11 +1871,14 @@ impl Renderer {
         let s = state.settings;
         // The newest mark-pass counters mapped since the last frame (the ladder's finest level
         // follows the nearest receiver when the nearest caster cannot place it).
-        if let Some(words) = state.reach.get_mut().unwrap().collect().last() {
+        if let Some(((at, epoch), words)) = state.reach.get_mut().unwrap().collect().pop() {
             let word = |i: usize| u32::from_ne_bytes(words[i * 4..i * 4 + 4].try_into().unwrap());
             state.stats.nearest_receiver = (word(0) != 0).then(|| f32::from_bits(!word(0)));
             state.stats.receivers = word(1);
             state.stats.unplaced_receivers = word(2);
+            if epoch == state.epoch {
+                state.seen = state.stats.nearest_receiver.map(|d| (f64::from(d), at));
+            }
         }
         // N8n: the surface cache exists only while it is the lookup (wgpu keeps the table alive
         // for frames in flight).
@@ -2002,10 +2021,20 @@ impl Renderer {
             if let Some(end) = coverage {
                 coarsest = coarsest.min(level_of(end) + 1);
             }
-            if let Some(seen) = state.stats.nearest_receiver {
-                finest = finest.max(level_of(f64::from(seen)) - 1).min(coarsest);
+            // The nearest receiver last seen in this view, less the eye's travel since (a fast
+            // approach), one level under. Before one is seen (a cut, a first frame): the box
+            // level, raised so no step is over 4x. The ladder reaches the coverage end either
+            // way; the finest level only trades the near texel against the far steps.
+            let seen = state
+                .seen
+                .map(|(d, at)| (d - (eye - at).length()).max(f64::from(camera.near())));
+            finest = match seen {
+                Some(d) => finest.max(level_of(d) - 1),
+                None => finest.max(coarsest - 2 * (MAX_LEVELS as i32 - 1)),
             }
+            .min(coarsest);
         }
+        state.eye = eye;
         let rungs = ladder(finest, coarsest);
         let levels = rungs.len();
         state.stats.skipped_levels = (coarsest - finest + 1).max(1) as u32 - levels as u32;
@@ -3201,7 +3230,12 @@ impl Renderer {
             pass.dispatch_workgroups(1, 1, 1);
         }
         if state.settings.lookup == VirtualLookup::Disk {
-            state.reach.lock().unwrap().record(encoder, &r.reach, 0);
+            let tag = (state.eye, state.epoch);
+            state
+                .reach
+                .lock()
+                .unwrap()
+                .record(encoder, &r.reach, 0, tag);
         }
         mark(encoder, "sun_shadow.raster");
         for layer in 0..2 {
