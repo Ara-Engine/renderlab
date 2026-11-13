@@ -436,6 +436,23 @@ PLANS["cutgipics"] = [
     (f"p-{path}-{name}-cutgi{v}", ["--path", path, *extra, "--frames", "60" if name == "respawn" else "34", "--every", "1"], CUTGI(v))
     for path in ("nonrt", "rt") for name, extra in CUTGI_CLIPS for v in ("1", "0")
 ]
+# The deferred reflection composite (RENDERLAB_RL_PASS=1 RENDERLAB_RL_DEFERRED=1) against the
+# default: pictures (`compare.py PICS CROPS comp`), the strata counter (probe) and timing.
+COMP = lambda v: {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "1"} if v == "1" else {}
+COMP_CLIPS = (("flight", ["--fox", FOX]), ("night", ["--fox", FOX, "--night-lanterns"]))
+PLANS["comppics"] = [
+    (f"p-{path}-{name}-comp{v}", ["--path", path, *extra, "--frames", "40", "--every", "1"], COMP(v))
+    for path in ("nonrt", "rt") for name, extra in COMP_CLIPS for v in ("1", "0")
+]
+PLANS["compprobe"] = [
+    (f"q-{path}-{name}-comp", ["--path", path, *extra, "--frames", "40"],
+     COMP("1") | {"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"comp-{path}-{name}.json")})
+    for path in ("nonrt", "rt") for name, extra in COMP_CLIPS
+]
+PLANS["comptime"] = [
+    (f"t-{path}-{name}-comp{v}-{k}", ["--path", path, *extra, "--frames", "60"], COMP(v))
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in COMP_CLIPS for v in ("1", "0")
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
