@@ -850,7 +850,7 @@ pub(super) struct Targets {
     /// flag is set.
     pub hit: Depth,
     /// Material record textures, retained and retired with the hit image.
-    pub material: Option<[Depth; 2]>,
+    pub material: Option<[Depth; crate::program::MATERIAL_RECORD_BINDINGS.len()]>,
     /// Exact hard-receiver epsilon, computed from the returned hit vertices.
     pub epsilon: Depth,
     /// One flag per `TRACE_TILE` pixels: nonzero when a camera ray in the tile hit.
@@ -2491,7 +2491,7 @@ impl Renderer {
                 }
             };
             let next = Targets {
-                material: crate::program::material_pass_on().then(|| ["material record 0", "material record 1"].map(|label| target(label, size, wgpu::TextureFormat::Rgba32Uint))),
+                material: crate::program::material_pass_on().then(|| crate::program::MATERIAL_RECORD_BINDINGS.map(|_| target("material record", size, wgpu::TextureFormat::Rgba32Uint))),
                 light_vis: light_vis_pass::on().then(|| Buffer::new(
                     self, "local light visibility",
                     (u64::from(size.width) * u64::from(size.height) * light_vis_pass::PIXEL_BYTES)
@@ -2918,7 +2918,7 @@ impl Renderer {
     /// Visibility-buffer RT frames' Interactive sun: `primary_vb_sun` on reconstructed frames
     /// (TR1's budget, rotation, cold and held stops, history `parity`), else the 8-direction
     /// fresh prefix. Both read the receivers the buffer's resolve wrote.
-    fn encode_vb_sun(
+    pub(in crate::renderer) fn encode_vb_sun(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,

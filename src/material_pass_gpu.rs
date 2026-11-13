@@ -2,7 +2,27 @@
 use super::*;
 use crate::program::{self, MaterialRole, Stage};
 
-pub(super) fn entries(write: bool) -> [wgpu::BindGroupLayoutEntry; 2] {
+/// The engine's composition boundary, also used by the naga/layout checks. Keep
+/// reflection history/pass edits ahead of the shared material-record variant.
+fn composition(
+    head: &str,
+    source: &str,
+    stage: Stage,
+    list: bool,
+    role: MaterialRole,
+) -> Option<program::Composed> {
+    let parameters = program::declares_parameters(source);
+    let full = if list {
+        program::compose_list(head, source, stage, parameters)
+    } else {
+        program::compose(head, source, stage, parameters)
+    };
+    program::material_variant(program::with_reflection_history(full), source, role)
+}
+
+pub(super) fn entries(
+    write: bool,
+) -> [wgpu::BindGroupLayoutEntry; program::MATERIAL_RECORD_BINDINGS.len()] {
     program::MATERIAL_RECORD_BINDINGS.map(|binding| {
         if write {
             image(binding, wgpu::TextureFormat::Rgba32Uint)
@@ -90,19 +110,11 @@ impl Renderer {
             } else {
                 Stage::Traced
             };
-            let full = || {
-                let parameters = program::declares_parameters(&slot.source);
-                program::with_reflection_history(if mixed {
-                    program::compose_list(head, &slot.source, stage, parameters)
-                } else {
-                    program::compose(head, &slot.source, stage, parameters)
-                })
-            };
-            let Some(write) = program::material_variant(full(), &slot.source, MaterialRole::Write)
+            let Some(write) = composition(head, &slot.source, stage, mixed, MaterialRole::Write)
             else {
                 continue;
             };
-            let read = program::material_variant(full(), &slot.source, MaterialRole::Read).unwrap();
+            let read = composition(head, &slot.source, stage, mixed, MaterialRole::Read).unwrap();
             let abi = self.program_abi();
             let scopes = OperationScopes::new(&self.device);
             let state = self.view.primary.as_ref().unwrap();
@@ -291,22 +303,7 @@ mod tests {
                         for (role, write) in
                             [(MaterialRole::Write, true), (MaterialRole::Read, false)]
                         {
-                            let source = if list {
-                                program::compose_list(
-                                    head,
-                                    program_source,
-                                    stage,
-                                    program::declares_parameters(program_source),
-                                )
-                            } else {
-                                program::compose(
-                                    head,
-                                    program_source,
-                                    stage,
-                                    program::declares_parameters(program_source),
-                                )
-                            };
-                            let source = program::material_variant(source, program_source, role)
+                            let source = composition(head, program_source, stage, list, role)
                                 .unwrap()
                                 .source;
                             let module = naga::front::wgsl::parse_str(&source)
