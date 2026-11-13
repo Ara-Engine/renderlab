@@ -270,6 +270,9 @@ pub(super) struct TransparencyState {
     next_emitter: u64,
     gpu: Option<Gpu>,
     glass: Vec<GlassPipelines>,
+    /// Film draws' instance ids far to near (`far_to_near`), every multi-instance film draw's
+    /// at its own offset, rewritten each frame; grown, never shrunk. With its size in bytes.
+    film_order: Option<(Owned<wgpu::Buffer>, u64)>,
     shadow_key: Option<[u8; 32]>,
     /// The sun map fit last computed and what it was computed from (`encode_transparency`).
     fit_memo: Option<([u8; 32], Option<ShadowFit>)>,
@@ -2480,25 +2483,51 @@ impl Renderer {
                     .unwrap_or([0, 0, 0, 0])
             })
             .collect();
-        // A film draw's instances far to near, so overlapping instances blend in order.
-        let film_ids: Vec<Option<wgpu::Buffer>> = transparent
+        // A film draw's instances far to near, so overlapping instances blend in order: each
+        // multi-instance film draw's ids at its own range of one buffer, written this frame.
+        let mut order = Vec::new();
+        let film_ids: Vec<Option<std::ops::Range<u64>>> = transparent
             .iter()
             .enumerate()
             .map(|(i, draw)| {
                 let state = &draw.instances.state;
                 (films[i] && state.ids.len() > 1).then(|| {
-                    let ids = far_to_near(&state.models, &state.ids, eye, forward);
-                    wgpu::util::DeviceExt::create_buffer_init(
-                        &*self.device,
-                        &wgpu::util::BufferInitDescriptor {
-                            label: Some("TP film instance order"),
-                            contents: bytemuck::cast_slice(&ids),
-                            usage: wgpu::BufferUsages::VERTEX,
-                        },
-                    )
+                    let at = order.len() as u64;
+                    for id in far_to_near(&state.models, &state.ids, eye, forward) {
+                        order.extend(id.to_ne_bytes());
+                    }
+                    at..order.len() as u64
                 })
             })
             .collect();
+        if !order.is_empty() {
+            let needed = order.len() as u64;
+            if self
+                .transparency
+                .film_order
+                .as_ref()
+                .is_none_or(|(_, size)| *size < needed)
+            {
+                let size = needed.next_power_of_two().max(1024);
+                let buffer = self.ledger.own(
+                    self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("TP film instance order"),
+                        size,
+                        usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                    ResourceKind::Buffer,
+                );
+                self.transparency.film_order = Some((buffer, size));
+            }
+            let (buffer, _) = self.transparency.film_order.as_ref().expect("grown above");
+            self.queue.write_buffer(buffer, 0, &order);
+        }
+        let film_order = self
+            .transparency
+            .film_order
+            .as_ref()
+            .map(|(buffer, _)| &**buffer);
         let film_at =
             |k: usize| matches!(items.get(k).map(|item| &item.1), Some(Item::Draw(j)) if films[*j]);
         let mut copied = false;
@@ -2582,9 +2611,9 @@ impl Renderer {
                             pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
                             pass.set_vertex_buffer(
                                 1,
-                                match &film_ids[i] {
-                                    Some(order) => order.slice(..),
-                                    None => draw.instances.id_buffer.slice(..),
+                                match (&film_ids[i], film_order) {
+                                    (Some(range), Some(order)) => order.slice(range.clone()),
+                                    _ => draw.instances.id_buffer.slice(..),
                                 },
                             );
                             if let Some(t) = &draw.mesh.tangent {
@@ -2804,9 +2833,9 @@ impl Renderer {
                             pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
                             pass.set_vertex_buffer(
                                 1,
-                                match &film_ids[i] {
-                                    Some(order) => order.slice(..),
-                                    None => draw.instances.id_buffer.slice(..),
+                                match (&film_ids[i], film_order) {
+                                    (Some(range), Some(order)) => order.slice(range.clone()),
+                                    _ => draw.instances.id_buffer.slice(..),
                                 },
                             );
                             if let Some(t) = &draw.mesh.tangent {
