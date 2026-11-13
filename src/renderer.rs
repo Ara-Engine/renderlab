@@ -3227,6 +3227,9 @@ impl Renderer {
         }
         if traced && !temporal {
             self.ensure_shade_detail(&programs, streaming, usize::from(soft))?;
+            if !streaming {
+                self.prepare_lean(&programs, programs.len() > 1, usize::from(soft));
+            }
         }
         // Feedback growth is spread over frames; raster and temporal frames need theirs now.
         if streaming {

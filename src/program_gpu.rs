@@ -106,6 +106,10 @@ pub(crate) struct ProgramPipelines {
     /// streaming, then by `Shading` (`Renderer::ensure_lists`). Built by the first mixed
     /// frame that needs one.
     pub list: [[Option<Owned<wgpu::ComputePipeline>>; 2]; 2],
+    /// Lean shading (`program::lean_variant`) of frames without decals or media, tiles
+    /// then list, by `Shading`: compiled in the background by the first lean frame that
+    /// shades with it (primary_ray_gpu lean_gpu.rs), dropped with `traced`.
+    pub lean: [[Option<Owned<wgpu::ComputePipeline>>; 2]; 2],
 }
 impl ProgramPipelines {
     /// Tests: swaps probe shading pipelines in for both traced sets (both built).
