@@ -548,6 +548,16 @@ fn material_pass_probes_compose_and_validate() {
             MaterialProbe::LoadPlus,
             "rl_material_probe_record(rl_probe)",
         ),
+        (
+            MaterialRole::Read,
+            MaterialProbe::ReadLean,
+            "let surface_input=(SurfaceInput(",
+        ),
+        (
+            MaterialRole::Read,
+            MaterialProbe::ReadPos,
+            "rl_material_probe_position(surface_input,receiver_world)",
+        ),
     ];
     let program = crate::STANDARD_PROGRAM;
     let parameters = crate::program::declares_parameters(program);

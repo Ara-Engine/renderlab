@@ -2022,6 +2022,7 @@ pub(crate) fn material_variant_with(
         (MaterialRole::Write, _) if probe == Some(MaterialProbe::Decode) => "    if rl_material_probe_input(surface_input)==0x9e3779b9u { textureStore(rl_material0,pixel,vec4<u32>(1u)); textureStore(rl_material1,pixel,vec4<u32>(1u)); }\n    return;\n    let surface_output=surface(surface_input);\n".to_owned(),
         (MaterialRole::Write, _) => "    let surface_output=surface(surface_input);\n    rl_material_store(pixel,material_out(surface_output,surface_input),surface_input);\n    return;\n".to_owned(),
         (MaterialRole::Read, None) if probe == Some(MaterialProbe::LoadPlus) => "    var surface_output=surface(surface_input);\n    let rl_probe=rl_material_load(pixel);\n    if rl_material_probe_record(rl_probe)==0x9e3779b9u { surface_output=material_in(rl_probe,surface_input); }\n".to_owned(),
+        (MaterialRole::Read, None) if probe == Some(MaterialProbe::ReadPos) => "    if rl_material_probe_position(surface_input,receiver_world)==0x9e3779b9u { textureStore(primary_hdr,pixel,vec4<f32>(0.0)); }\n    return;\n    let surface_output=material_in(rl_material_load(pixel),surface_input);\n".to_owned(),
         (MaterialRole::Read, None) => "    let surface_output=material_in(rl_material_load(pixel),surface_input);\n".to_owned(),
         // The debug view: the record's field as the pixel's colour, before any lighting.
         (MaterialRole::Read, Some(field)) => format!(
@@ -2031,6 +2032,12 @@ pub(crate) fn material_variant_with(
     composed
         .source
         .replace_range(at..at + MATERIAL_SEAM.len(), &replace);
+    if role == MaterialRole::Read && probe == Some(MaterialProbe::ReadLean) {
+        for (from, to) in MATERIAL_PROBE_LEAN {
+            let at = entry + composed.source[entry..].find(from)?;
+            composed.source.replace_range(at..at + from.len(), to);
+        }
+    }
     if role == MaterialRole::Write && probe == Some(MaterialProbe::Empty) {
         // Before the hit's decode: only the dispatch and the list walk remain.
         let start = entry + composed.source[entry..].find('{')? + 1;
@@ -2055,7 +2062,10 @@ pub(crate) fn material_variant_with(
 /// material pass's cost. The writer's `empty` returns before the hit's decode (dispatch and list
 /// walk); `decode` decodes the hit and stops before `surface`; `nostore` evaluates and packs the
 /// record but does not store it. The reader's `loadplus` evaluates `surface` as the single
-/// kernel does and also loads and unpacks the record. Each keeps its work live by comparing a
+/// kernel does and also loads and unpacks the record; `readlean` shades as usual but with
+/// the hit's vertex attributes (uv, colour, normal, tangent, their derivatives, decals)
+/// constant, so only the position side of the decode is left; `readpos` returns after
+/// that position side (world point, footprint, geometric normal, shadow receiver). Each keeps its work live by comparing a
 /// hash of its result with a value it never takes; the pictures are wrong by design.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MaterialProbe {
@@ -2063,6 +2073,8 @@ pub(crate) enum MaterialProbe {
     Decode,
     NoStore,
     LoadPlus,
+    ReadLean,
+    ReadPos,
 }
 fn material_probe() -> Option<MaterialProbe> {
     static PROBE: std::sync::OnceLock<Option<MaterialProbe>> = std::sync::OnceLock::new();
@@ -2072,6 +2084,8 @@ fn material_probe() -> Option<MaterialProbe> {
             "decode" => Some(MaterialProbe::Decode),
             "nostore" => Some(MaterialProbe::NoStore),
             "loadplus" => Some(MaterialProbe::LoadPlus),
+        "readlean" => Some(MaterialProbe::ReadLean),
+        "readpos" => Some(MaterialProbe::ReadPos),
             _ => None,
         },
     )
@@ -2087,12 +2101,27 @@ fn rl_material_probe_input(s:SurfaceInput)->u32 {
         ^bitcast<u32>(s.handedness)^rl_probe2(s.uv)^rl_probe2(s.uv_dx)^rl_probe2(s.uv_dy)
         ^rl_probe3(s.color.xyz)^bitcast<u32>(s.color.w)^rl_probe3(s.material.base_color.xyz);
 }
+fn rl_material_probe_position(s:SurfaceInput,receiver:vec3<f32>)->u32 {
+    return rl_probe3(s.world)^rl_probe3(s.world_dx)^rl_probe3(s.world_dy)^rl_probe3(s.geometric)^rl_probe3(receiver);
+}
 fn rl_material_probe_record(m:MaterialRecord)->u32 {
     return rl_probe3(m.normal)^rl_probe3(m.base)^rl_probe3(m.emission)^bitcast<u32>(m.alpha)
         ^bitcast<u32>(m.metallic)^bitcast<u32>(m.roughness)^bitcast<u32>(m.view_share)
         ^bitcast<u32>(m.view_alpha)^m.model;
 }
 "#;
+/// `readlean`: the traced entry's SurfaceInput without the vertex attributes and decals.
+const MATERIAL_PROBE_LEAN: [(&str, &str); 3] = [
+    ("let surface_input=decal_prepare(SurfaceInput(", "let surface_input=(SurfaceInput("),
+    (
+        "source_geometric,input.normal,normal_dx,normal_dy,input.tangent,input.handedness,",
+        "source_geometric,source_geometric,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(1.0,0.0,0.0),1.0,",
+    ),
+    (
+        "input.uv,gradients[0],gradients[1],input.color,",
+        "vec2<f32>(0.5),vec2<f32>(0.0),vec2<f32>(0.0),vec4<f32>(1.0),",
+    ),
+];
 /// `nostore`: `rl_material_store`'s packing, stored only on a hash it never takes.
 const MATERIAL_PROBE_STORE: &str = r#"fn rl_material_probe_store(pixel:vec2<i32>,m:MaterialRecord,input:SurfaceInput) {
     let scalars=pack4x8unorm(vec4<f32>(m.alpha,m.metallic,m.view_share,0.0));
