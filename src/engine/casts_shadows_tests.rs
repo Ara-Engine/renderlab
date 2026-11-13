@@ -1,14 +1,17 @@
-//! `Engine::set_casts_shadows` on the GPU: a point light inside a closed opaque box, the lamp
-//! whose shade blocks all of its light. GPU tests: run in a lease (the RT one with --ignored).
+//! `Engine::set_casts_shadows` on the GPU: a light inside its own closed opaque fitting, which
+//! blocks all of its light: a point light in a shade, and a downward spot in a lamp head with
+//! walls 15-25 cm away (Outpost's floodlights sit 5-23 cm inside theirs). GPU tests: run in a
+//! lease (the RT ones with --ignored).
 use super::view_tests::cube;
 use super::*;
 
 const SIZE: [u32; 2] = [160, 96];
 
-/// The box (half size 0.5 m about the light, 1 m up) over a 12 m floor, lit by a point light at
-/// its centre and no sun, after eight frames: `None` leaves the box out, `Some(casts)` places it
-/// with that flag. Returns the frame and the box's screen rectangle.
-fn lamp(path: RenderPath, shade: Option<bool>) -> (Image, [usize; 4]) {
+/// The fitting about a light 1 m up over a 12 m floor, no sun, after eight frames: a point
+/// light in a 1 m shade, or (`spot`) a spot aimed down in a 0.5 x 0.3 x 0.5 m head. `None`
+/// leaves the fitting out, `Some(casts)` places it with that flag. Returns the frame and the
+/// fitting's screen rectangle.
+fn lamp(path: RenderPath, shade: Option<bool>, spot: bool) -> (Image, [usize; 4]) {
     let adapter = test_adapter();
     // SAFETY: the test suite's documented experimental-feature acknowledgement.
     let experimental_ray_query =
@@ -45,19 +48,37 @@ fn lamp(path: RenderPath, shade: Option<bool>) -> (Image, [usize; 4]) {
         [6.0, 0.05, 6.0],
         [0.7, 0.7, 0.7, 1.0],
     );
-    let (centre, half) = ([0.0, 1.0, 0.0], [0.5, 0.5, 0.5]);
+    let centre = [0.0, 1.0, 0.0];
+    let half = if spot {
+        [0.25, 0.15, 0.25]
+    } else {
+        [0.5, 0.5, 0.5]
+    };
     if let Some(casts) = shade {
         let shade = spawn(&mut engine, centre, half, [0.8, 0.8, 0.8, 1.0]);
         engine.set_casts_shadows(shade, casts).unwrap();
     }
     engine.set_sun(None).unwrap();
     engine
-        .set_lights(&[Light::Point {
-            position: Vec3::from(centre),
-            candela: [1000.0; 3],
-            range: None,
-            source_radius: 0.0,
-            cast_shadows: Some(true),
+        .set_lights(&[if spot {
+            Light::Spot {
+                position: Vec3::from(centre),
+                travel: Vec3::NEG_Y,
+                candela: [1000.0; 3],
+                range: None,
+                inner: 0.35,
+                outer: 0.6,
+                source_radius: 0.0,
+                cast_shadows: Some(true),
+            }
+        } else {
+            Light::Point {
+                position: Vec3::from(centre),
+                candela: [1000.0; 3],
+                range: None,
+                source_radius: 0.0,
+                cast_shadows: Some(true),
+            }
         }])
         .unwrap();
     let view = engine
@@ -123,10 +144,10 @@ fn mean(image: &Image, [x0, y0, x1, y1]: [usize; 4], inside: bool) -> f64 {
 
 /// Outside the box: a casting box leaves the floor in its own shadow, a non-casting one lights
 /// it as if the box were absent; inside it, both draw the box.
-fn check(path: RenderPath) {
-    let (open, rect) = lamp(path, None);
-    let (lit, _) = lamp(path, Some(false));
-    let (shut, _) = lamp(path, Some(true));
+fn check(path: RenderPath, spot: bool) {
+    let (open, rect) = lamp(path, None, spot);
+    let (lit, _) = lamp(path, Some(false), spot);
+    let (shut, _) = lamp(path, Some(true), spot);
     let floor = [
         mean(&open, rect, false),
         mean(&lit, rect, false),
@@ -165,11 +186,22 @@ fn check(path: RenderPath) {
 
 #[test]
 fn a_non_casting_lamp_shade_lets_its_light_out_without_rt() {
-    check(RenderPath::NonRt);
+    check(RenderPath::NonRt, false);
+}
+
+#[test]
+fn a_non_casting_spot_head_lets_its_light_out_without_rt() {
+    check(RenderPath::NonRt, true);
 }
 
 #[test]
 #[ignore]
 fn a_non_casting_lamp_shade_lets_its_light_out_with_rt() {
-    check(RenderPath::HardwareRt);
+    check(RenderPath::HardwareRt, false);
+}
+
+#[test]
+#[ignore]
+fn a_non_casting_spot_head_lets_its_light_out_with_rt() {
+    check(RenderPath::HardwareRt, true);
 }
