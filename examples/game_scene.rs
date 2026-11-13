@@ -47,6 +47,8 @@
 //! terrain (16 tiles) under trees and bushes of cutout cards and walks the field walk's camera
 //! through it: Outpost's layered ground and foliage, for the RT visibility pass's cost.
 //! `forest=bare` is the same terrain and walk without the foliage.
+//! `--diag far=1` (U-FIXED) holds a camera 40 m up over a 2.4 km ground with three columns at
+//! 100, 200 and 800 m whose sun shadows cross the view (the sun's coverage, Ara #185 item 33).
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -358,6 +360,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     | "field"
                     | "forest"
                     | "fox"
+                    | "far"
             )
         });
     // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
@@ -392,6 +395,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `forest=bare`: the same terrain and walk without the trees and bushes.
     let bare = scene_key("forest", "bare");
     let forest = scene_key("forest", "1") || bare;
+    // `far=1` (U-FIXED, the sun's coverage, Ara #185 item 33): a 2.4 km ground and three
+    // columns at 100, 200 and 800 m north of a camera 40 m up with a 2 km far plane, whose
+    // shadows cross the view: sun shadows at game-scale distances, on both paths.
+    let far = scene_key("far", "1");
     let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
@@ -610,7 +617,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     engine.spawn(tile, ground, Mat4::IDENTITY)?;
                 }
             } else {
-                let plane = engine.create_mesh(&mesh(&plane_geometry(60.0, 8)))?;
+                let size = if far { 2400.0 } else { 60.0 };
+                let plane = engine.create_mesh(&mesh(&plane_geometry(size, 8)))?;
                 engine.spawn(plane, ground, Mat4::IDENTITY)?;
             }
             // The physical atmosphere is the default sky (AT1); `--sky uniform` swaps in a
@@ -711,6 +719,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Mat4::from_translation(p) * Mat4::from_rotation_y(r * PI + k as f32 * PI / 3.0),
                 )?;
             }
+        }
+    }
+    if far {
+        let column = material(&mut engine, [0.7, 0.7, 0.72], 0.0, 0.8)?;
+        for d in [100.0f32, 200.0, 800.0] {
+            let (width, height) = (d / 25.0, d / 8.0);
+            engine.spawn(
+                cube,
+                column,
+                boxed(at(-0.15 * d, 0.5 * height, -d), Vec3::new(width, height, width)),
+            )?;
         }
     }
     // The arch: two pillars and a lintel.
@@ -1114,7 +1133,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             (eye, target)
         };
-        let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, 500.0)?;
+        let (eye, target, far_plane) = if far {
+            (
+                anchor + Vec3::new(0.0, 40.0, 0.0),
+                anchor + Vec3::new(0.0, 0.0, -400.0),
+                2000.0,
+            )
+        } else {
+            (eye, target, 500.0)
+        };
+        let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, far_plane)?;
         // View b: across the scene, still at its first pose unless `--b-orbit`, a third of
         // the way round from `--cut-b` on.
         let b_cut = args.cut_b.is_some_and(|f| frame >= f);

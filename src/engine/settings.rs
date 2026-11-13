@@ -284,7 +284,7 @@ pub(crate) fn lighting(
         // 1 km cascade carries game-scale sun shadows (Glint's pylons on its clouds, at
         // 40-150 m, were unshadowed under a 40 m end); the near three keep their texels.
         requests.push(ShadowRequest::Directional {
-            split_ends: vec![4.0, 12.0, 40.0, 1000.0],
+            split_ends: sun_splits(),
         });
         requests.extend(lights.iter().map(|_| ShadowRequest::None));
     }
@@ -302,6 +302,15 @@ pub(crate) fn lighting(
         },
         shadows,
     ))
+}
+
+/// The sun's cascade ends: the shipping set, or `RENDERLAB_SUN_SPLITS=A,B,...` (measurement:
+/// metres, increasing; e.g. `4,12,40` for the set before the 1 km cascade).
+fn sun_splits() -> Vec<f32> {
+    std::env::var("RENDERLAB_SUN_SPLITS")
+        .ok()
+        .and_then(|v| v.split(',').map(|s| s.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![4.0, 12.0, 40.0, 1000.0])
 }
 
 /// The renderer's atmosphere for a sky choice and the frame's media settings. Only
