@@ -551,6 +551,31 @@ PLANS["comp6b"] = (
     + [(f"t-nonrt-toon-{tag}-{k}", ["--path", "nonrt", "--fox", FOX, *STD, "--diag", "floor=0.2", "--frames", "60"], env)
        for k in (1, 2) for tag, env in (("default", {}), ("own", OWN))]
 )
+# S1 on main (#90, off by default since 2026-11-13): the pass forced on against off, the same
+# binary interleaved. Timing: both paths, flight / night lanterns / the standard program's few
+# lobes, 60 frames, two rounds, the room and probe on the non-RT flight and night "on" rows; and
+# the own-program switch's cost (the toon hero in a 0.2 glossy floor). Pictures: comp5's clips
+# (moving, planner cuts, a held cut) on non-RT, and the RT flight, every frame.
+PASS_ON = {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "1"}
+S1_CLIPS = (("flight", []), ("night", ["--night-lanterns"]), ("few", STD))
+PLANS["s1time"] = (
+    [(f"t-{path}-{name}-{tag}-{k}", ["--path", path, "--fox", FOX, *extra, "--frames", "60"],
+      env | ({"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"s1-{name}-{k}.json"),
+              "RENDERLAB_RL_ROOM_LOG": str(PROBE_DIR / f"s1-{name}-{k}-memory.jsonl")}
+             if tag == "on" and path == "nonrt" and name != "few" else {}))
+     for k in (1, 2) for path in ("nonrt", "rt") for name, extra in S1_CLIPS
+     for tag, env in (("on", PASS_ON), ("off", {}))]
+    + [(f"t-nonrt-toon-{tag}-{k}", ["--path", "nonrt", "--fox", FOX, *STD, "--diag", "floor=0.2", "--frames", "60"], env)
+       for k in (1, 2) for tag, env in (("on", PASS_ON), ("own", PASS_ON | OWN))]
+)
+PLANS["s1pics"] = (
+    [(f"p-nonrt-{name}-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "40", "--every", "1"],
+      PASS_ON if v == "1" else {})
+     for name, extra in (("flight", []), ("cut", ["--diag", "cut=1"]), ("holdcut", ["--diag", "hold=cut"]))
+     for v in ("1", "0")]
+    + [(f"p-rt-flight-comp{v}", ["--path", "rt", "--fox", FOX, *STD, "--frames", "40", "--every", "1"],
+        PASS_ON if v == "1" else {}) for v in ("1", "0")]
+)
 # The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
 # flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,
 # paint 0.35), moving and still; `compare.py` crops the reflected edges, binary against binary.
