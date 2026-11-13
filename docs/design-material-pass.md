@@ -35,7 +35,7 @@ The receiver is what the sun, GI and light-visibility passes and shading read in
 
 Order in an interactive port frame: trace (raw hit; near-edge pixels queued) → `primary_repair_interactive` (repaired hit record) → material pass → shading. **The port keeps the camera ray and the sun's rays together in the trace kernel,** which has the hit in hand, so a separate sun kernel would buy nothing there by itself. The record feeds GI, the lights and shading. The desktop runs visibility → material → sun → GI → light visibility → shading (#98).
 
-**Misses:** the writer runs only on hits, after the seam. Camera misses and the region-exterior fast-clear blocks leave the record as the previous frame wrote it. Today's readers check the hit image first, so this is harmless. Before any reader drops its hit read, the writer must store an explicit miss sentinel on every miss.
+**Misses:** with the pass on, the camera-hit trace kernels write a miss sentinel on every pixel without a hit: word 1.w all ones, so the slot reads `0x0fffffff` (`rl_mr_miss`, from word 1 alone). This covers the region's exterior too: the trace dispatches over the whole image, so the fast-clear blocks are written in the same kernel. The port cases `misses_carry_the_sentinel_after_the_camera_moves` (a wall, then the sky beside it) and the receiver case check every miss shading visits. The stores cost nothing measurable in the trace kernel.
 
 ### What shading still reads after `surface` (the audit)
 
@@ -73,6 +73,41 @@ What these show:
 - **Shading saved 0.19 / 0.21 ms** from taking the per-light `material_normal` and MQ2's hint from the record.
 - **Net per frame:** Showcase +0.72 ms (7.37 against 6.89 + 1.20), Glint +0.42 (6.68 against 5.99 + 1.11). The 32-byte record was +0.70 / +0.39, so the extra 16 bytes cost the frame about nothing.
 - **The pass pays once the passes after it** (sun, GI, light visibility) **stop decoding hits:** each of them saves its own decode.
+
+## Decode-free shading does not pay on the M5 (not built)
+
+What standard shading would need beyond words 0-2 to shade with no hit decode:
+- the vertex normal's two derivatives (6 x f16), for the specular filter's quadrature and reflection curvature;
+- for normal-mapped materials, the tangent (octahedral + handedness), uv (2 x f32) and its gradients (4 x f16), for the quadrature's normal-map samples.
+
+That is 28-32 more bytes; words 0-2 have no spare bits. The upper bound, `RENDERLAB_MATERIAL_PROBE=nodecode` (`SurfaceInput` from words 1 and 2 alone; derivatives, tangent and uv zero):
+
+| | Showcase | Glint |
+|---|---|---|
+| shading, full reader | 6.92 | 5.98 |
+| shading, `nodecode` (best case) | 6.37 (-0.55) | 5.46 (-0.52) |
+| net with the writer | +0.18 | -0.12 |
+| picture against the full reader | max 50 codes, 7,340 px over 1 | max 20, 161 px over 1 |
+
+The writer's own decode (about 0.7 ms) is a floor that shading can give back at most about 0.5 of, and the exact reader needs the extra words (0.15 ms per stored word, plus its read). So the fourth word is not built.
+
+## The port writes the receiver from the trace
+
+The trace kernels already have the hit in hand, with the receiver (point, geometric normal, epsilon, slot, `thin`) and the near-edge test. `RENDERLAB_MATERIAL_PROBE=tracetail` has them write words 1 and 2 as their tail:
+- **the interpolated normal:** the only addition, one more vertex load per vertex plus the normal transform;
+- **both sides:** the shading entry's lit front reduces to its source front;
+- **edge repair:** the repair kernel rewrites the words for the hits it moves, so the record holds the sun path's repaired point;
+- **material:** no word 0 and no separate writer kernel. Shading keeps its single kernel, decoding once as before.
+
+| | Showcase | Glint |
+|---|---|---|
+| trace kernel, pass off | 2.74 | 3.03 |
+| trace kernel, `tracetail` | 2.99 (+0.25) | 3.23 (+0.20) |
+| shading | 7.37, as off | 6.68, as off |
+| net | +0.25 | +0.20 |
+| picture against the pass off | byte-identical | byte-identical |
+
+The separate writer path is +0.72 / +0.42. On the port the receiver for the later passes costs a quarter to a half of that from the trace. Custom-program pixels get it the same way.
 
 ## Decision: the material pass is the decode-once pass
 
