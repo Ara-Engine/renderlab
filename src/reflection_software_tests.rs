@@ -377,3 +377,44 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
     // The soft RT head and both non-RT heads trace reflections; the hard RT head does not.
     assert!(validated >= 3, "{validated} traced heads validated");
 }
+
+/// RENDERLAB_SHADE_CUT (measurement): every named cut lands once in the standard program's
+/// traced modules on the RT and non-RT heads, and those modules validate; unset, none does.
+#[test]
+fn shade_cuts_land_when_named() {
+    use crate::program::{Stage, compose};
+    let list = std::env::var("RENDERLAB_SHADE_CUT").unwrap_or_default();
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    for head in rt.iter().chain(&non_rt) {
+        let source = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false).source;
+        for (cut, early) in [
+            ("gi_lookup", "    if true { return; }\n    if gi_word(GI_H_ENABLED)==0u { return; }"),
+            ("es1", "fn environment_lobe_count() -> u32 {\n    if true { return 0u; }"),
+            ("mq2", "->f32 {\n    if true { return 1.0; }"),
+            ("decals", "->SurfaceInput {\n    if true { return input; }"),
+            ("atmosphere", "-> vec3<f32> {\n    if true { return c; }"),
+        ] {
+            let named = list.split(',').any(|c| c.trim() == cut);
+            if named && source.contains(match cut {
+                "gi_lookup" => "fn gi_prepare(",
+                "es1" => "fn environment_lobe_count(",
+                "mq2" => "fn tr1_view_hint(",
+                "decals" => "fn decal_prepare(",
+                _ => "fn atmosphere_surface(",
+            }) {
+                assert!(source.contains(early), "cut {cut} did not land");
+            } else if !named {
+                assert!(!source.contains(early), "cut {cut} landed unasked");
+            }
+        }
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+}

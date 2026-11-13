@@ -356,7 +356,7 @@ pub(crate) fn ablated(mut s: Settings) -> Settings {
 /// Unset, it changes nothing. An unknown key, a pair without `=`
 /// or a value that does not parse is an error, named on stderr: a mistyped switch must not
 /// pass for a measurement of the default.
-fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error> {
+pub(crate) fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error> {
     let Ok(list) = std::env::var("RENDERLAB_GI") else {
         return Ok(s);
     };

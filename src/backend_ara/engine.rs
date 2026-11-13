@@ -1064,10 +1064,16 @@ impl Engine {
                 Quality::Reference => Primary::Traced,
             },
             post: Some(look.post),
-            indirect: settings.global_illumination.then(|| Indirect {
-                settings: crate::IndirectSettings::default(),
-                read_table: false,
-            }),
+            // `RENDERLAB_GI` tunes the cache whatever the embedder asks, as on wgpu.
+            indirect: match settings.global_illumination {
+                true => Some(Indirect {
+                    settings: crate::engine::settings::indirect_measured(
+                        crate::IndirectSettings::default(),
+                    )?,
+                    read_table: false,
+                }),
+                false => None,
+            },
             reconstruction: settings.temporal_reconstruction.then(|| Reconstruct {
                 settings: crate::Reconstruction {
                     scale: desc.render_scale,

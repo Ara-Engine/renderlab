@@ -77,6 +77,50 @@ const REFLECTION_ENTRY_SEAM: &str =
 /// U-RTVIS: in the reflection resolve's pre-pass (`rl_prepass`, RENDERLAB_RL_RESOLVE_PASS=1) the
 /// entry stops after the receiver's reflection, before its indirect inputs and `shade`.
 const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    if rl_prepass() {return;}\n    rl_indirect_prepare(surface_input);\n";
+/// `RENDERLAB_SHADE_CUT` (measurement only, off by default): a comma list of engine inputs
+/// whose function returns at once in every composed module, to split shading's fixed cost:
+/// `gi_lookup` (the receiver's cache lookup: the open environment instead), `es1` (no dominant
+/// environment lobes), `mq2` (the view hint is 1), `decals` (none project), `atmosphere`
+/// (surfaces leave unfogged). Each changes the picture; unset, nothing changes.
+fn shade_cuts(mut source: String, late: bool) -> String {
+    static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let list = LIST.get_or_init(|| std::env::var("RENDERLAB_SHADE_CUT").unwrap_or_default());
+    for cut in list.split(',').map(str::trim).filter(|c| !c.is_empty()) {
+        let (head, early) = match cut {
+            "gi_lookup" => (
+                "    if gi_word(GI_H_ENABLED)==0u { return; }\n    let world=input.receiver.world;\n",
+                "    if true { return; }\n",
+            ),
+            "es1" => ("fn environment_lobe_count() -> u32 {\n", "    if true { return 0u; }\n"),
+            "mq2" => (
+                "fn tr1_view_hint(s:Surface,input:SurfaceInput,pixel:vec2<u32>,size:vec2<u32>)->f32 {\n",
+                "    if true { return 1.0; }\n",
+            ),
+            "decals" => (
+                "fn decal_prepare(input:SurfaceInput)->SurfaceInput {\n",
+                "    if true { return input; }\n",
+            ),
+            "atmosphere" => (
+                "fn atmosphere_surface(c:vec3<f32>, p:vec3<f32>) -> vec3<f32> {\n",
+                "    if true { return c; }\n",
+            ),
+            _ => continue,
+        };
+        // MQ2's hint follows the program (VIEW_HINT); the others precede it.
+        if late != (cut == "mq2") {
+            continue;
+        }
+        if source.matches(head).count() == 1 {
+            // gi_lookup's return goes before the lookup; the others open their function.
+            source = if cut == "gi_lookup" {
+                source.replacen(head, &format!("{early}{head}"), 1)
+            } else {
+                source.replacen(head, &format!("{head}{early}"), 1)
+            };
+        }
+    }
+    source
+}
 /// Reflection hits trace their own light visibility: the frame's belongs to its receivers.
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";
@@ -815,6 +859,8 @@ fn compose_stage(
         );
         source = rl_history_tune(rl_split(rl_hit_switches(source)));
     }
+    // Every cut's function precedes the program, so its range is taken after them.
+    source = shade_cuts(source, false);
     let start = source.len();
     source.push_str(program);
     let program_range = start..source.len();
@@ -845,7 +891,7 @@ fn compose_stage(
         source.push_str(entry);
     }
     Composed {
-        source,
+        source: shade_cuts(source, true),
         program: program_range,
     }
 }
