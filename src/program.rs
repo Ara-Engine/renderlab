@@ -122,7 +122,9 @@ fn rl_split(mut source: String) -> String {
 /// U-RTVIS measurement switches (`RENDERLAB_RL_HIT`, a comma list), reflection hits only:
 /// `local` leaves shadowed local lights unshadowed, `sun` skips the hit's sun shadow ray,
 /// `nolights` gives every light zero incidence, `black` skips the hit's `surface` and `shade`.
-/// They change the picture; unset, nothing changes.
+/// Two act on every pixel, camera receivers included, to split lights and shadows between
+/// primary pixels and reflection hits: `alllights` (every light zero incidence) and
+/// `allshadows` (every light fully visible). They change the picture; unset, nothing changes.
 fn rl_hit_switches(source: String) -> String {
     static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let list = LIST.get_or_init(|| std::env::var("RENDERLAB_RL_HIT").unwrap_or_default());
@@ -140,6 +142,14 @@ fn rl_hit_switches(source: String) -> String {
             "nolights" => (
                 "    return LightSample(index,l,attenuation,",
                 "    return LightSample(index,l,select(attenuation,0.0,rl_reflection_hit),",
+            ),
+            "alllights" => (
+                "    return LightSample(index,l,attenuation,",
+                "    return LightSample(index,l,0.0,",
+            ),
+            "allshadows" => (
+                "fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {",
+                "fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 { return 1.0; }\nfn rl_unused_visibility(input:SurfaceInput, s:LightSample) -> f32 {",
             ),
             "black" => (
                 "                let hs=surface(h.input);\n                radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n",
