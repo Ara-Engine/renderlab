@@ -77,6 +77,65 @@ const REFLECTION_ENTRY_SEAM: &str =
 /// U-RTVIS: in the reflection resolve's pre-pass (`rl_prepass`, RENDERLAB_RL_RESOLVE_PASS=1) the
 /// entry stops after the receiver's reflection, before its indirect inputs and `shade`.
 const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=surface(surface_input);\n    rl_reflection_prepare(surface_output,surface_input,hit.batch,id,size);\n    if rl_prepass() {return;}\n    rl_indirect_prepare(surface_input);\n";
+// ---- Lean shading: a module specialized for frames that use no decals and no media ----
+/// `RENDERLAB_LEAN=0` keeps the full module on every frame (A/B); on otherwise.
+pub(crate) fn lean_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_LEAN").map_or(true, |v| v != "0"))
+}
+/// Which engine inputs a frame uses that a traced shading module must keep. A frame using none
+/// of them shades with `lean_variant`'s module, byte-identical in its picture by construction.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FrameInputs {
+    /// Any decal projects this frame (a non-empty decal table).
+    pub decals: bool,
+    /// Aerial perspective, height fog or volumetric fog (the atmosphere's media flags).
+    pub media: bool,
+}
+impl FrameInputs {
+    /// Whether the lean module shades this frame exactly as the full one does. One variant,
+    /// not a lattice: pane transmission stays in it (glass under a sun is common, and its
+    /// cut was not where the time was).
+    pub fn lean(self) -> bool {
+        !self.decals && !self.media
+    }
+}
+/// Each lean edit: the engine function it opens, and the early return that is exactly what the
+/// function returns when its input is unused (an empty decal table leaves the receiver's
+/// `decal_none`; no media flag leaves the colour). The dead body
+/// after the return is what the compiler drops, which is the point: idle feature code still
+/// costs registers (M5: decals 0.25 ms of shading with none in the scene).
+const LEAN_EDITS: [(&str, &str); 2] = [
+    (
+        "fn decal_prepare(input:SurfaceInput)->SurfaceInput {\n",
+        "    if true { return input; }\n",
+    ),
+    (
+        "fn atmosphere_surface(c:vec3<f32>, p:vec3<f32>) -> vec3<f32> {\n",
+        "    if true { return c; }\n",
+    ),
+];
+/// `composed` (a traced shading module) for frames whose `FrameInputs::lean` holds: each lean
+/// edit applied where its function is composed, the program's range moved past them.
+pub(crate) fn lean_variant(mut composed: Composed) -> Composed {
+    for (head, early) in LEAN_EDITS {
+        if composed.source.matches(head).count() != 1 {
+            continue;
+        }
+        let at = composed.source.find(head).map(|i| i + head.len());
+        let Some(at) = at else { continue };
+        assert!(
+            at <= composed.program.start || at >= composed.program.end,
+            "a lean edit inside the program"
+        );
+        composed.source.insert_str(at, early);
+        if at <= composed.program.start {
+            composed.program = composed.program.start + early.len()..composed.program.end + early.len();
+        }
+    }
+    composed
+}
+// ---- end of lean shading ----
 /// Reflection hits trace their own light visibility: the frame's belongs to its receivers.
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";

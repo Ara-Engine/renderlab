@@ -1556,8 +1556,18 @@ fn frame(
             .map_err(|e| anyhow::anyhow!("object {index}'s parameters: {e}"))?;
         }
     }
+    // Lean shading (program::FrameInputs): the port projects no decals; media follow the
+    // atmosphere's flags.
+    let lean = crate::program::FrameInputs {
+        decals: false,
+        media: scene.atmosphere.aerial_perspective
+            || scene.atmosphere.height_fog.is_some()
+            || scene.atmosphere.volumetric_fog.is_some(),
+    }
+    .lean()
+        && crate::program::lean_on();
     let program = if deferred_path {
-        primary_shade::hardware_soft_program(material_source)?
+        primary_shade::hardware_soft_part(material_source, primary_shade::ALL_TERMS, lean)?
     } else {
         standard_program(scene.sun_shadows.is_some())?
     };
@@ -1565,7 +1575,7 @@ fn frame(
     let list_programs = if deferred_path && sources.len() > 1 {
         sources
             .iter()
-            .map(|source| primary_shade::hardware_soft_list_program(source))
+            .map(|source| primary_shade::hardware_soft_list_part(source, primary_shade::ALL_TERMS, lean))
             .collect::<Result<Vec<_>>>()?
     } else {
         Vec::new()
@@ -1579,10 +1589,10 @@ fn frame(
                 let programs = if sources.len() > 1 {
                     sources
                         .iter()
-                        .map(|source| primary_shade::hardware_soft_list_part(source, terms))
+                        .map(|source| primary_shade::hardware_soft_list_part(source, terms, lean))
                         .collect::<Result<Vec<_>>>()?
                 } else {
-                    vec![primary_shade::hardware_soft_part(material_source, terms)?]
+                    vec![primary_shade::hardware_soft_part(material_source, terms, lean)?]
                 };
                 Ok((name, programs))
             })
