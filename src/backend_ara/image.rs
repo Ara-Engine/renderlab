@@ -208,21 +208,29 @@ impl Texture {
         }
         result
     }
-    /// One sampled 2D mip chain, filled level by level with `transfer::upload_mip`,
-    /// published as a 2D view or as a one-layer array (`ViewDimension::D2Array`).
+    /// One sampled 2D mip chain of `layers` array layers, filled level by level with
+    /// `transfer::upload_mip`, published whole as a 2D view (one layer) or as an array
+    /// (`ViewDimension::D2Array`, any layer count). `format` may be a block format.
     pub fn sampled_mips(
         gpu: &mut GpuDevice,
         size: [u32; 2],
         levels: u32,
+        layers: u32,
         format: Format,
         dimension: ViewDimension,
     ) -> Result<Self> {
         anyhow::ensure!(
-            matches!(dimension, ViewDimension::D2 | ViewDimension::D2Array),
-            "a sampled mip chain is one 2D layer"
+            layers > 0
+                && match dimension {
+                    ViewDimension::D2 => layers == 1,
+                    ViewDimension::D2Array => true,
+                    _ => false,
+                },
+            "a sampled mip chain is one 2D layer, or an array of them"
         );
         let shape = ImageShape {
             mip_levels: levels,
+            layers,
             ..Default::default()
         };
         let image = gpu.create_texture(&TextureDesc {
@@ -242,7 +250,7 @@ impl Texture {
             base_mip: 0,
             mip_count: levels,
             base_layer: 0,
-            layer_count: 1,
+            layer_count: layers,
         };
         match gpu.sampled_view(image, view) {
             Ok(slot) => Ok(Self {
@@ -252,7 +260,7 @@ impl Texture {
                 shape,
                 allocation: Subresources {
                     mips: levels,
-                    layers: 1,
+                    layers,
                 },
                 view,
                 sampled: slot.index,

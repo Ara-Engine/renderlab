@@ -522,3 +522,5 @@ mod resident_mesh_cases;
 
 #[path = "ara_backend/cases/textures.rs"]
 mod texture_cases;
+#[path = "ara_backend/cases/compressed_textures.rs"]
+mod compressed_texture_cases;
