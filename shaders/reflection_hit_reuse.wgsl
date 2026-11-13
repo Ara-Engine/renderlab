@@ -78,7 +78,6 @@ fn rl_reuse_previous_model(slot:u32)->mat4x4<f32> {
 // The hit's radiance from last frame's resolved colour (unexposed, as the cache hook returns
 // it), with w 1; w 0 when the hit must be shaded.
 fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>,footprint:f32)->vec4<f32> {
-    // 1. A bound TR1 frame that does not restart (cuts, first frames and reset events never reuse).
     if !(rl_reuse_frame.jitter.z>0.0) || rl_reuse_frame.flags.x!=0u {return vec4<f32>(0.0);}
     let hit=primary_decode(record);
     // Skinned hits shade (their previous surface needs SK1's previous vertices).
@@ -92,10 +91,23 @@ fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>,footprint:f32)->vec4<f32> {
     let w=vec3<f32>(1.0-hit.bary.x-hit.bary.y,hit.bary);
     let object=ta.position*w.x+tb.position*w.y+tc.position*w.z;
     let world=world_position(object,hit.placement).xyz;
-    // 2. Outside this frame's restart zones: changed lights, a moving caster's swept shadow.
-    if tr1_relit(world) || tr1_caster_shadow(world) {return vec4<f32>(0.0);}
     // 3. The hit's own previous position: the reflected surface's motion, not the receiver's.
     let previous=(rl_reuse_previous_model(hit.placement)*vec4<f32>(object,1.0)).xyz;
+    return rl_reuse_at(world,previous,hit.placement,d,footprint,metal);
+}
+// The verifier any hit can call once it knows its surface: `world` this frame, `previous` the
+// same surface point last frame, `placement` its draw placement, `d` the ray (the hit is seen
+// along -d), `footprint` the receiving cone's width at the hit (metres) and `metal` its class
+// (0 non-metal, 1 metal, 2 unknown). Runs tests 1, 2 and 4 to 7 and returns the hit's
+// radiance from TR1's history (unexposed) with w 1, or w 0 to shade it. A screen-march hit
+// passes the point it found last frame as `previous` (and `world`, for a static surface) and
+// the anchor's placement there.
+fn rl_reuse_at(world:vec3<f32>,previous:vec3<f32>,placement:u32,d:vec3<f32>,footprint:f32,metal:u32)->vec4<f32> {
+    // 1. A bound TR1 frame that does not restart (cuts, first frames and reset events never reuse).
+    if !(rl_reuse_frame.jitter.z>0.0) || rl_reuse_frame.flags.x!=0u {return vec4<f32>(0.0);}
+    if metal==1u {return vec4<f32>(0.0);}
+    // 2. Outside this frame's restart zones: changed lights, a moving caster's swept shadow.
+    if tr1_relit(world) || tr1_caster_shadow(world) {return vec4<f32>(0.0);}
     // 4. In last frame's view.
     let clip=rl_reuse_frame.previous*vec4<f32>(previous,1.0);
     if clip.w<=0.0 {return vec4<f32>(0.0);}
@@ -119,7 +131,7 @@ fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>,footprint:f32)->vec4<f32> {
         let q=base+o;
         let anchor=rl_reuse_anchor_at(q);
         let seen=bitcast<f32>(anchor.y);
-        if (anchor.x&0x7fffffu)!=hit.placement+1u || abs(seen-distance)>distance*RL_REUSE_DEPTH+RL_REUSE_SLACK {continue;}
+        if (anchor.x&0x7fffffu)!=placement+1u || abs(seen-distance)>distance*RL_REUSE_DEPTH+RL_REUSE_SLACK {continue;}
         if RL_REUSE_HINT && turn*rl_reuse_view(anchor.x>>24u)>bound {continue;}
         let colour=rl_reuse_colour_at(q);
         if !(colour.w>=RL_REUSE_WEIGHT) {continue;}
