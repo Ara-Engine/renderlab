@@ -25,7 +25,7 @@ lookups run at the whole kernel's register count and occupancy.
 
 | # | Pass | Dispatch | Reads | Writes |
 |---|------|----------|-------|--------|
-| P1 | **Material** (per program, MP1 lists at 32 lanes) | covered pixels | hit record, mesh attributes, material parameters and textures, decals | material record (group 0, bindings 75 and 78); S1's glossy-list entry; emission |
+| P1 | **Material, decode once** (per program, MP1 lists at 32 lanes) | covered pixels | hit record, vertex buffers, material parameters and textures, decals | material record with its receiver word (below); S1's glossy-list entry; emission |
 | P2 | **GI receiver lookup** | indirect over covered pixels, small register footprint | geometry only: the hit record and camera ray (position, the vertex normal for the cell bin), cache tables | prepared SH, sky L2 + bounce L1, 48 B/px (binding 68); shading evaluates it at its shading normal |
 | P3a | **Local-light visibility** | coherent screen tiles | position, light clusters, the local atlas or ray query | unorm8 visibility, 16 slots a pixel (binding 73) |
 | P3b | **RT sun visibility**, split from the fused camera visibility | covered pixels | position, TLAS | sun visibility (binding 74) |
@@ -68,8 +68,48 @@ seam a material graph plugs into later.
 The flags carry double-sided/front, thin, the transmission/IOR class, normal-mapped and the
 lighting model, so later passes can skip pixels whose program keeps its own `shade`.
 
-Position is not stored. It comes from the hit record's distance along the camera ray (traced
-primaries), or from depth (raster or the visibility buffer).
+**Decode once (coordinator, 2026-11-13).** The Mac measured about 0.75 ms of hit decode still in
+shading after the material pass, so the material pass becomes the pass that decodes each pixel's
+hit once for everything after it, rather than a separate G-buffer pass in front of it:
+
+- **One more record word, rgba32uint: the receiver.** The trace point's xyz as f32 and the
+  receiver epsilon. Word 1's .w takes the program slot and the thin and front bits (the Mac's
+  layout). That makes the record 40 bytes a pixel: 83 MB at 1080p.
+- **Every later pass reads it.** Each builds its `Receiver` and a thin `SurfaceInput` from the
+  record, without touching the hit image or the vertex buffers. Footprints come from the pixel's
+  neighbouring camera rays against the receiver's plane.
+- **Order:** visibility, then the material pass (decode once), then sun, GI, lights and shading.
+- **Expected on the M5:** Showcase from +0.70 ms net to about even, Glint goal from +0.39 to
+  about -0.35. The GI, light-visibility and sun passes each drop their own decode.
+- **Until the word lands,** the pass units keep their own geometry reconstruction. Each then
+  switches to the shared receiver read behind its own switch.
+- **The Mac checks first** what still reads vertex attributes after `surface`.
+
+### The reflection pass and the receiver word
+
+The reflection pass's own kernels never decode a hit, today or after the split. Shading packs
+what they need into the 48-byte glossy-list entry (the ray origin, the cone width and spread,
+the lobe normal, the view and side directions, alpha, the strata count, the pixel and its first
+slot).
+- `rl_trace_pixels` reads the entry and one per-pixel texel, the receiver epsilon (binding 79).
+- The composite reads the entry, the reflectance (binding 62) and its R slots.
+
+So the receiver word saves them no decode. What it does allow:
+
+- **The trace reads the receiver from the word.** Origin and epsilon come from the receiver word,
+  the lobe normal from the record's shading normal, the side from its geometric normal and front
+  bit, and the view direction from the pixel's camera ray. Binding 79 and its texture go away.
+- **The entry shrinks from 48 to 16 bytes:** the pixel, the first slot, alpha with the count,
+  and the cone width and spread.
+- **What that saves is small.** At game_scene's 29,610 glossy pixels, 32 bytes less per entry
+  is about 1 MB a frame of list writes in shading and reads in the trace and composite, plus one
+  texel per entry: under 0.05 ms (E). The larger win stays in shading itself, where the lobe store
+  writes a third of the bytes.
+- **Condition:** only pixels with a record can use it. Programs without a declared mapping keep
+  the single kernel and the full entry. The short entry is worth doing once every reporting
+  program has a record; until then the full entry stays, and nothing is gained by carrying both.
+- **Reflection hits** (`reflection_hits`) still decode their hit points from the vertex buffers:
+  a hit is not a screen pixel, so no record covers it.
 
 ## 3. Where things go
 
