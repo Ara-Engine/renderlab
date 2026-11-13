@@ -153,7 +153,7 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
             let pages=vsm.counts.y;
             let reach=vd_slope()*max(vsm.depth.w-p.z,0.0);
             // The lookup's height-band dither may take a band's top from the next coarser level.
-            let keep=1.0-select(0.0,VD_HBAND,vd.size.z>0.0);
+            let keep=1.0-select(0.0,VD_HBAND,vd_hband_on());
             for(var l=plain;l<vsm.counts.x;l+=1u) {
                 let texel=vsm_texel(l);
                 var r=min(reach,f32(VD_R)*texel)+2.0*texel;
@@ -228,8 +228,11 @@ override VD_MIP_POINT:bool=true;
 // its top VD_HBAND fraction to the next coarser one with a probability rising across it, per
 // pixel and TR1 frame, so TR1 averages the two texel sizes where an occluder's height above the
 // receiver crosses a band: the 2x step that slid along long far shadows. Only while TR1
-// jitters (vd.size.z > 0); 0: off, the bands as before.
+// jitters (vd.size.z > 0) and has VD_HBAND_AFTER frames of history (vd.size.w): a cut's first
+// frames keep the plain bands, since the dither shows as stipple until TR1 averages it. 0: off.
 override VD_HBAND:f32=0.25;
+override VD_HBAND_AFTER:f32=2.0;
+fn vd_hband_on()->bool {return VD_HBAND>0.0 && vd.size.z>0.0 && vd.size.w>=VD_HBAND_AFTER;}
 // Screens: 1 writes lit before any work (dispatch and page work only), 2 after the receiver's
 // setup, 3 skips the map windows.
 override VD_SKIP:u32=0u;
@@ -329,7 +332,7 @@ fn vd_prepare(id:vec2<u32>) {
     let l=-light.travel_outer.xyz;
     vd_px.valid=true;
     vd_px.band=1.0;
-    if VD_HBAND>0.0 && vd.size.z>0.0 {
+    if vd_hband_on() {
         // Interleaved gradient noise stepped by the golden ratio each TR1 frame.
         let ign=fract(52.9829189*fract(dot(vec2<f32>(id),vec2<f32>(0.06711056,0.00583715))));
         vd_px.band=1.0-VD_HBAND*fract(ign+0.61803398875*vd.size.z);
