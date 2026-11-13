@@ -407,7 +407,11 @@ fn hit_visibility() -> Option<HitVisibility> {
             Some(_) => return None,
             None => (value.as_str(), false),
         };
-        let rough = rough.trim().parse::<f32>().ok().filter(|r| (0.0..=1.0).contains(r))?;
+        let rough = rough
+            .trim()
+            .parse::<f32>()
+            .ok()
+            .filter(|r| (0.0..=1.0).contains(r))?;
         Some(HitVisibility { rough, cone })
     })
 }
