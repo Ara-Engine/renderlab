@@ -32,14 +32,18 @@ pub fn upload(
     rec.push(Command::EndPass);
     Ok(buffer)
 }
-/// Stage one mip level of a single-layer 2D image; retire the returned buffer after
-/// submitting its list. Upload every level before the image is read.
+/// Stage one mip level of one layer of a 2D image; retire the returned buffer after
+/// submitting its list. Upload every level of every layer before the image is read.
+/// `extent` is the level's size in texels; a block format's `bytes` are its whole
+/// blocks, rows tightly packed (ara-gpu takes the row pitch from the image's format).
+#[allow(clippy::too_many_arguments)]
 pub fn upload_mip(
     gpu: &mut GpuDevice,
     graph: &mut Graph,
     rec: &mut Recorder,
     image: Image,
     mip: u32,
+    layer: u32,
     extent: [u32; 2],
     bytes: &[u8],
 ) -> Result<Buffer> {
@@ -62,7 +66,7 @@ pub fn upload_mip(
             mip,
             origin: [0; 3],
             extent: [extent[0], extent[1], 1],
-            base_layer: 0,
+            base_layer: layer,
             layer_count: 1,
         },
     });

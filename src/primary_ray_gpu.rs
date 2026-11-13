@@ -31,6 +31,9 @@ pub(crate) mod gi_receiver_pass;
 #[path = "reflection_hits_gpu.rs"]
 mod reflection_hits_gpu;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
+// Lean shading's background-compiled pipelines (program::lean_variant).
+#[path = "lean_gpu.rs"]
+mod lean_gpu;
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
 /// `scene_pixels` rectangle, the sampling words, the reflection bands
@@ -508,6 +511,7 @@ impl Renderer {
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
+                    slot.pipelines.lean = Default::default();
                 }
                 self.primary_sources = None;
                 let submissions = self.submissions;
@@ -560,6 +564,7 @@ impl Renderer {
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
+                    slot.pipelines.lean = Default::default();
                 }
                 self.pipeline.primary = Some(pipelines);
                 self.primary_sources = Some((sources, heads));
@@ -954,6 +959,8 @@ pub(super) struct PrimaryState {
     /// This frame streams textures: it shades with the program's streamed pipelines,
     /// whose helpers record residency requests, and binds the residency state.
     pub requests: bool,
+    /// The lean pipeline compiling in the background and those that failed (lean_gpu.rs).
+    lean: lean_gpu::LeanState,
     retired: Vec<(u64, Retired)>,
 }
 
@@ -1431,6 +1438,7 @@ impl PrimaryState {
             absent: None,
             program: 0,
             programs: vec![],
+            lean: Default::default(),
             lists: None,
             bins: None,
             targets: None,
@@ -1496,6 +1504,7 @@ impl PrimaryState {
             absent: None,
             program: 0,
             programs: vec![],
+            lean: Default::default(),
             lists: None,
             targets: None,
             geometry: None,
@@ -3285,7 +3294,10 @@ impl Renderer {
         } else {
             &program.pipelines.traced
         };
-        let pipeline = set[shading as usize].as_ref().unwrap();
+        // The lean module once it landed; until then the full one, the same picture.
+        let pipeline = self
+            .lean_pipeline(state.program, false, shading as usize)
+            .unwrap_or_else(|| set[shading as usize].as_ref().unwrap());
         self.encode_primary_shade(encoder, pipeline, SHADE_TILE, shading, timestamp_writes);
     }
     /// The shading pass: `pipeline` over the scene region by `tile`, plus clear blocks
