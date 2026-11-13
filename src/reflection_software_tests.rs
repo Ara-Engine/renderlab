@@ -377,6 +377,15 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
             source.contains("rl_deferred_clear(pixel);")
                 && source.contains("rl_deferred_store(pixel,input.world);")
         );
+        // The composite takes this program's glossy lobes; a program that does not report
+        // keeps its inline estimate (toon traces none; glass_reflection_module_stays_inline
+        // covers a reflecting program that stays inline).
+        assert!(source.contains("const RL_DEFERRED_PROGRAM:bool=true;"));
+        if !crate::program::rl_deferred() {
+            assert!(composed.contains("const RL_DEFERRED_PROGRAM:bool=false;"));
+        }
+        let toon = compose(head, toon, Stage::Traced, false).source;
+        assert!(!toon.contains("const RL_DEFERRED_PROGRAM:bool=true;"));
         let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         naga::valid::Validator::new(
@@ -413,6 +422,18 @@ fn deferred_temporal_shading_keeps_the_program_range_and_validates() {
     )
     .validate(&module)
     .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+}
+
+/// Glass hits keep their reflections inline: their module (TP2's `tp_reflect`) drops the camera
+/// entry, so it never takes the deferred variant, whatever RENDERLAB_RL_DEFERRED says.
+#[test]
+fn glass_reflection_module_stays_inline() {
+    use crate::renderer::transparency_gpu::reflection;
+    let head = crate::renderer::primary_ray_gpu::transparent_reflection_head(SOURCE).unwrap();
+    let source = reflection::source(&head, crate::STANDARD_PROGRAM, false);
+    assert!(source.contains("const RL_DEFERRED_PROGRAM:bool=false;"));
+    assert!(source.contains("fn reflection_report("));
+    assert!(!source.contains("rl_deferred_store"));
 }
 
 /// RENDERLAB_RL_HIT_REUSE (S4a): with the switch, every traced module that names the cache-hit
