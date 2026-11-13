@@ -1366,6 +1366,11 @@ fn gpu_tp2_fixture() {
 #[ignore = "GPU; hardware ray queries and PRIMITIVE_INDEX; RENDERLAB_TP1_PATH rt|nonrt"]
 fn gpu_pane_pixels_match_the_raster() {
     let path = env("RENDERLAB_TP1_PATH").unwrap_or_else(|| "rt".into());
+    // Diagnosis of the edge residue (RL#80): `flat` glass has no thickness (no refraction
+    // offset), `far` moves the floor's far edge (y = 7, seen through both panes) out to y = 12,
+    // `single` keeps only the back pane. Unset, the scene as gated.
+    let variant = env("RENDERLAB_TP1_VARIANT").unwrap_or_default();
+    let far = if variant == "far" { 12. } else { 7. };
     let rt = path != "nonrt";
     let (device, queue) = device(rt);
     if !device.features().contains(wgpu::Features::PRIMITIVE_INDEX) {
@@ -1437,8 +1442,8 @@ fn gpu_pane_pixels_match_the_raster() {
     let floor_vertices = [
         vertex([-6., -5., 0.], [0., 0., 1.], [0., 0.]),
         vertex([6., -5., 0.], [0., 0., 1.], [1., 0.]),
-        vertex([6., 7., 0.], [0., 0., 1.], [1., 1.]),
-        vertex([-6., 7., 0.], [0., 0., 1.], [0., 1.]),
+        vertex([6., far, 0.], [0., 0., 1.], [1., 1.]),
+        vertex([-6., far, 0.], [0., 0., 1.], [0., 1.]),
     ];
     let floor_mesh = upload_mesh(&mut r, &floor_vertices, &[0, 1, 2, 0, 2, 3]);
     let (card_vertices, card_indices) = pane(3.4, 2.6, 1);
@@ -1473,7 +1478,7 @@ fn gpu_pane_pixels_match_the_raster() {
             transparency: Some(crate::Transparency {
                 opacity: 0.08,
                 ior: 1.5,
-                thickness: 0.02,
+                thickness: if variant == "flat" { 0.0 } else { 0.02 },
             }),
             ..Default::default()
         },
@@ -1486,13 +1491,12 @@ fn gpu_pane_pixels_match_the_raster() {
                 * Mat4::from_scale(Vec3::splat(0.35))],
         );
     // Two pane instances, one in front of the other, so instances shade in order.
-    let mut panes_instances = upload_instances(
-        &mut r,
-        &[
-            Mat4::IDENTITY,
-            Mat4::from_translation(Vec3::new(0.6, -1.2, 0.3)),
-        ],
-    );
+    let both = [
+        Mat4::IDENTITY,
+        Mat4::from_translation(Vec3::new(0.6, -1.2, 0.3)),
+    ];
+    let mut panes_instances =
+        upload_instances(&mut r, &both[..if variant == "single" { 1 } else { 2 }]);
     let camera = Camera::look_at(
         Vec3::new(4., -7., 4.),
         Vec3::new(0., 0.7, 0.8),
@@ -1546,7 +1550,7 @@ fn gpu_pane_pixels_match_the_raster() {
     }
     let parity = pane_parity(&pictures[0], &pictures[1], width, height);
     eprintln!(
-        "pane pixels against the raster ({path}): interior over one {}, interior worst {}, edge pixels {}, edge outside {}",
+        "pane pixels against the raster ({path} {variant}): interior over one {}, interior worst {}, edge pixels {}, edge outside {}",
         parity.interior_over_one, parity.interior_worst, parity.edge_pixels, parity.edge_outside
     );
     for miss in &parity.misses {
