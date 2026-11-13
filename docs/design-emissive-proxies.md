@@ -59,12 +59,24 @@ GPU, never from a CPU copy of a material constant:
   no time input (`program_api.wgsl`: a program may declare `struct Parameters`, read as
   `params`, and declares no bindings), so time-varying emission is always a material-parameter
   revision through `Engine::set_material_parameters`, which the CPU sees. The re-reduction keys
-  on those revisions; there is no periodic path.
+  on those revisions; there is no periodic path. **Constraint:** animated glow is CPU-driven
+  through parameters today; if programs ever gain a time input, this design needs a periodic
+  reduction.
 - **An emissive program with no texture** runs the same reduction; its result is uniform over
   the mesh, so the dispatch is tiny. No special case.
-- The results are read back asynchronously (double-buffered, 1-2 frames). Until a proxy's
-  first record lands, its placement stays with the gather, so the hand-over is a single frame
-  and never leaves the emitter counted by neither.
+- **The first reduction blocks:** at scene load and at material creation it runs and is read
+  back before the first frame that draws the placement, so there is never a blotchy gather frame
+  followed by a pop. Its load cost (ms per emitter: the dispatch plus one readback wait, batched
+  over all of a load's emitters into one submit and one wait) is measured with the gate.
+- **Later changes are asynchronous:** a revision queues a reduction, its record is read back
+  double-buffered, and the light follows the glass **2 frames** after the change (encode, then
+  map). Until then the light holds its last power and colour. The cost per changed material is
+  one dispatch over its mesh's samples, measured with the gate.
+- **Bounded per frame:** at most 4 reductions a frame, oldest pending revision first; a newer
+  revision of a placement already queued replaces its entry. A lamp flickered through
+  `set_material_parameters` every frame therefore costs at most its share of the 4 per frame and
+  follows at the reductions' pace, holding its last power in between; it never re-reduces
+  without bound.
 
 ### Shape and placement
 
@@ -116,6 +128,20 @@ surfaces are dark to cell shading); the authored light is its light. An author t
 What the author sees when a claim happens: the glass's own emission leaves the GI gather, so its
 glow no longer bounces; the claiming light provides that light instead. That is intended, and it
 matters to whoever balances the two intensities (the Content thread for Atelier).
+
+**Claims change today's pictures** wherever a glowing mesh sits near an authored light: Atelier
+day and night, Glint's lamps and ring lights, Showcase's lantern. Their glass's bounce disappears.
+So:
+
+- the gate's crop pairs include one claimed emitter per scene, before and after, besides the
+  proxied repro;
+- the reproduction measures how much light the claimed glass was adding (the bounce it gave
+  its surroundings, with the authored light off and on), and the note records the figure;
+- a light with zero intensity, or one disabled, does not claim. A light switched off at runtime
+  releases its claim: the glass becomes a proxy again (after its reduction, at the same 2-frame
+  latency as any change), and the reverse when it comes back on;
+- the Content thread's audit lists every glowing mesh with an authored light within 1.5 r in
+  Showcase and Outpost.
 
 No program and no per-material flag. Atelier stays at 25 shadowed lights either way; which one
 it should be, and the energy balance, is the Content thread's call. The fitting blocking the
@@ -186,8 +212,10 @@ light (LC2), and reflection hits light it through their own cluster walk.
 ## The gate
 
 Before any default: a crop pair for Islam of the `glow=gi` repro (both paths) and Atelier's night
-still, before and after, plus three consecutive moving frames, with the measured cost per proxy
-(RT rays, non-RT map draw and filter, cache rays, the reduction) alongside.
+still, before and after, plus three consecutive moving frames; one claimed emitter per scene
+(Atelier, Glint, Showcase), before and after; with the measured cost per proxy (RT rays, non-RT
+map draw and filter, cache rays), the first reduction's load cost per emitter, the reduction's
+cost per changed material, and the claimed glass's former bounce alongside.
 
 ## Related, not here
 
