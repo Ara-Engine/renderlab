@@ -3541,7 +3541,16 @@ impl Renderer {
                     self.encode_material_shading(&mut encoder, shading, None, true);
                     if interactive {
                         mark(&mut encoder, "sun_shadow");
-                        self.encode_vb_sun(&mut encoder, stamps(8));
+                        if reconstructed && self.view.reconstruction.rotate_directions {
+                            self.encode_vb_sun(&mut encoder, stamps(8));
+                        } else {
+                            self.encode_primary_fresh_tile(
+                                &mut encoder,
+                                &p.fresh_eight,
+                                [8, 4],
+                                stamps(8),
+                            );
+                        }
                     } else if soft && self.view.soft_mode == crate::SoftShadows::Virtual {
                         mark(&mut encoder, "sun_shadow");
                         self.encode_virtual(&mut encoder, stamps(8), &mut mark);
