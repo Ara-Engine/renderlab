@@ -409,6 +409,12 @@ PLANS["gatepics2"] = [
     for name, extra in (("flight", ["--frames", "48"]), ("cut", ["--diag", "cut=1", "--frames", "36"]))
     for v in ("1", "0")
 ]
+# Byte identity with main on moving frames (run with each binary; `bin_compare.py A B`).
+PLANS["identmain"] = [
+    (f"p-{path}-{name}", ["--path", path, *extra, "--every", "1"], {})
+    for path in ("nonrt", "rt")
+    for name, extra in (("flight", ["--fox", FOX, "--frames", "48"]), ("night", ["--fox", FOX, "--night-lanterns", "--frames", "30"]))
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
