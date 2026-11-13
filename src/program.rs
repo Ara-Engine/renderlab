@@ -246,7 +246,7 @@ fn rl_split(mut source: String) -> String {
 /// U-RTVIS measurement switches (`RENDERLAB_RL_HIT`, a comma list), reflection hits only:
 /// `local` leaves shadowed local lights unshadowed, `sun` skips the hit's sun shadow ray,
 /// `nolights` gives every light zero incidence, `black` skips the hit's `surface` and `shade`,
-/// `strata=N` caps a glossy pixel's strata at N (RL_GLOSSY_MAX, 16).
+/// `strata=N` caps a glossy pixel's strata at N (RL_GLOSSY_MAX; `strata=16` is RQ1's original cap).
 /// Two act on every pixel, camera receivers included, to split lights and shadows between
 /// primary pixels and reflection hits: `alllights` (every light zero incidence) and
 /// `allshadows` (every light fully visible). They change the picture; unset, nothing changes.
@@ -256,9 +256,13 @@ fn rl_hit_switches(source: String) -> String {
     let mut source = source;
     for switch in list.split(',').map(str::trim).filter(|s| !s.is_empty()) {
         if let Some(n) = switch.strip_prefix("strata=") {
-            let from = "const RL_GLOSSY_MAX:u32=16u;";
-            assert_eq!(source.matches(from).count(), 1, "RENDERLAB_RL_HIT strata");
-            source = source.replacen(from, &format!("const RL_GLOSSY_MAX:u32={n}u;"), 1);
+            // Whatever the shipped default is (shaders/reflections.wgsl), `strata=16` restores
+            // RQ1's cap for A/Bs.
+            let key = "const RL_GLOSSY_MAX:u32=";
+            assert_eq!(source.matches(key).count(), 1, "RENDERLAB_RL_HIT strata");
+            let at = source.find(key).unwrap();
+            let end = at + source[at..].find(';').unwrap() + 1;
+            source.replace_range(at..end, &format!("{key}{n}u;"));
             continue;
         }
         let (from, to) = match switch {
@@ -479,15 +483,26 @@ pub(crate) fn rs_stack_workgroup() -> bool {
 /// `lane * 32 + sp`), Some(true) for `interleaved` (entry `sp * RS_LANES + lane`: a warp's
 /// lanes at one depth hit consecutive words, so distinct banks; the contiguous slices put a
 /// warp's 32 lanes in one bank). None: private stacks, as main.
+/// Refused (private stacks, with a warning) when list shading groups are wider than
+/// `RS_LANES` (`RENDERLAB_LIST_LANES=64`): their lanes would overrun the slices, and 64 slices
+/// of both stacks fill wgpu's default 16 KiB of workgroup storage on their own.
 pub(crate) fn rs_stack_interleaved() -> Option<bool> {
     static MODE: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    *MODE.get_or_init(
-        || match std::env::var("RENDERLAB_RS_STACK").ok()?.as_str() {
+    *MODE.get_or_init(|| {
+        let mode = match std::env::var("RENDERLAB_RS_STACK").ok()?.as_str() {
             "workgroup" => Some(false),
             "interleaved" => Some(true),
             _ => None,
-        },
-    )
+        };
+        if mode.is_some() && 16 * list_entries_per_group() > RS_LANES {
+            eprintln!(
+                "RENDERLAB_RS_STACK: list groups of {} lanes exceed its {RS_LANES} slices; private stacks",
+                16 * list_entries_per_group()
+            );
+            return None;
+        }
+        mode
+    })
 }
 const RS_LANES: u32 = 32;
 const RS_STACK_EDITS: [(&str, &str); 8] = [
@@ -1246,6 +1261,49 @@ const HITS_MINE_LIST: &str = "struct RlList { slot:u32, base:u32, capacity:u32, 
 // ---- MP1 per-program dispatch (docs/m7-mp1.md) ----
 /// The tile-list shading entry of mixed-program frames (`primary_shade_list`).
 const TRACED_LIST_ENTRY: &str = include_str!("../shaders/program_traced_list.wgsl");
+/// `RENDERLAB_LIST_LANES`: lanes per list-shading workgroup, 16 (one 4x4 list entry, the
+/// default), 32 or 64 (two or four entries, one per z slice). Warps and SIMD groups are 32
+/// wide and never span workgroups, so 16 leaves half of every one idle. Each entry is still
+/// shaded by exactly one slice, so the picture does not depend on it. The binning kernel's
+/// indirect arguments follow (`program_lists::bin_source`).
+pub(crate) fn list_entries_per_group() -> u32 {
+    static PER: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *PER.get_or_init(|| match std::env::var("RENDERLAB_LIST_LANES").as_deref() {
+        Err(_) | Ok("16") => 1,
+        Ok("32") => 2,
+        Ok("64") => 4,
+        Ok(other) => {
+            eprintln!("RENDERLAB_LIST_LANES: `{other}` is not 16, 32 or 64; using 16");
+            1
+        }
+    })
+}
+/// The list entry with `per` list entries per workgroup (`list_entries_per_group`).
+pub(crate) fn list_entry(per: u32) -> String {
+    if per == 1 {
+        return TRACED_LIST_ENTRY.to_owned();
+    }
+    let mut source = TRACED_LIST_ENTRY.to_owned();
+    for (find, replace) in [
+        (
+            "@compute @workgroup_size(4,4) fn primary_shade_list(",
+            format!("@compute @workgroup_size(4,4,{per}) fn primary_shade_list("),
+        ),
+        (
+            "    let index=group.x+group.y*RL_LIST_ROW;\n",
+            format!("    let index=(group.x+group.y*RL_LIST_ROW)*{per}u+local.z;\n"),
+        ),
+        // A clear block's 16 columns: one per lane of the entry's own slice.
+        (
+            "vec2<u32>(lane,0u)",
+            "vec2<u32>(local.x+local.y*4u,0u)".to_owned(),
+        ),
+    ] {
+        assert_eq!(source.matches(find).count(), 1, "list lanes: {find}");
+        source = source.replacen(find, &replace, 1);
+    }
+    source
+}
 /// R1's hit shading loads the hit's parameter block, which belongs to the hit's program.
 // TP2 integration: match the call independently of LF/CRLF checkout endings.
 const LIST_HIT_PARAMETERS_SEAM: &str = "rl_load_parameters(h.batch);";
@@ -1269,7 +1327,7 @@ pub(crate) fn compose_list(head: &str, program: &str, stage: Stage, parameters: 
     let (engine, rest) = source.split_at(range.start);
     let edited = engine.replacen(LIST_HIT_PARAMETERS_SEAM, LIST_HIT_PARAMETERS, 1);
     let shift = edited.len() - engine.len();
-    source = format!("{edited}{rest}{TRACED_LIST_ENTRY}");
+    source = format!("{edited}{rest}{}", list_entry(list_entries_per_group()));
     with_rs_stack(Composed {
         source,
         program: range.start + shift..range.end + shift,
