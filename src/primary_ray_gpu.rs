@@ -28,6 +28,8 @@ pub(crate) mod reflection_pass;
 // The Mac thread's reflection_hits after rl_trace (docs/design-reflection-pass.md).
 #[path = "reflection_hits_gpu.rs"]
 mod reflection_hits_gpu;
+#[path = "light_vis_pass.rs"]
+pub(crate) mod light_vis_pass;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
@@ -724,6 +726,7 @@ pub(super) struct ResidencyGpu {
     pub ids: Vec<Option<u64>>,
 }
 pub(super) struct Targets {
+    light_vis: Option<Buffer>,
     /// Placement + 1 (zero is a miss), primitive, f32 barycentrics. Traced frames write
     /// them, with their receivers or Interactive counts, only in tiles whose `tiles`
     /// flag is set.
@@ -868,6 +871,7 @@ pub(crate) enum Shading {
 }
 
 pub(super) struct PrimaryState {
+    light_vis: [Option<light_vis_pass::Pipeline>; 2],
     #[cfg(test)]
     pub test_split_interactive_timestamps: bool,
     #[cfg(test)]
@@ -1213,6 +1217,9 @@ impl PrimaryState {
             {
                 entries.push(read(SOFTWARE_REFLECTIONS, 16));
             }
+            if light_vis_pass::on() {
+                entries.push(light_vis_pass::layout_entry());
+            }
             // Deferred reflections' outputs (`Targets::deferred`).
             if crate::program::rl_deferred() {
                 entries.extend([image(62, F::Rgba16Float), image(63, F::Rgba16Float)]);
@@ -1415,6 +1422,7 @@ impl PrimaryState {
             shade_bindings,
             rl_trace: reflection_pass::on()
                 .then(|| reflection_pass::TraceAbi::new(device, ledger, &array_bindings, lighting)),
+            light_vis: [None, None],
             rl_pipelines: [None, None],
             rl_resolve: crate::program::rl_resolve_pass_on()
                 .then(|| reflection_pass::ResolveKit::new(device, ledger)),
@@ -1457,6 +1465,7 @@ impl PrimaryState {
             trace_bindings: self.trace_bindings.clone(),
             shade_bindings: self.shade_bindings.clone(),
             rl_trace: self.rl_trace.clone(),
+            light_vis: self.light_vis.clone(),
             rl_pipelines: self.rl_pipelines.clone(),
             rl_resolve: self.rl_resolve.clone(),
             fresh_bindings: self.fresh_bindings.clone(),
@@ -2398,6 +2407,12 @@ impl Renderer {
                 }
             };
             let next = Targets {
+                light_vis: light_vis_pass::on().then(|| Buffer::new(
+                    self, "local light visibility",
+                    (u64::from(size.width) * u64::from(size.height) * light_vis_pass::PIXEL_BYTES)
+                        .min(u64::from(self.device.limits().max_storage_buffer_binding_size)),
+                    wgpu::BufferUsages::STORAGE,
+                )),
                 repairs,
                 repair_args,
                 retries,
@@ -2540,6 +2555,9 @@ impl Renderer {
                 // M7-R1n: software reflection geometry on non-RT renderers.
                 if let Some(geometry) = &reflection_geometry {
                     entries.push((SOFTWARE_REFLECTIONS, geometry.as_entire_binding()));
+                }
+                if let Some(buffer) = &t.light_vis {
+                    entries.push((light_vis_pass::BINDING, buffer.value.as_entire_binding()));
                 }
                 // Deferred reflections' outputs (`Targets::deferred`).
                 if let Some([reflectance, untraced]) = &t.deferred {
