@@ -157,7 +157,8 @@ impl History {
         self.plan.reset
     }
     /// The history image a resolve input names, after `plan`: the side the parity
-    /// selects is written (44, 45, 48), the other read (42, 43, 47).
+    /// selects is written (44, 45, 48), the other read (42, 43, 47). The colour history's
+    /// sampler (49) is the shared default: linear, clamped to the edge, as the renderer's.
     pub(crate) fn input(&self, key: InputKey) -> Option<&Texture> {
         let (write, read) = (self.plan.parity, 1 - self.plan.parity);
         Some(match (key.group, key.binding) {
