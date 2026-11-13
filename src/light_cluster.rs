@@ -59,9 +59,9 @@ pub struct LocalShadows {
     pub near: f32,
     /// The reflecting lobe's perceptual roughness from which reflection hits light local
     /// lights unshadowed. Glossy lobes average a missing shadow away; near-mirror lobes show
-    /// it (the night lanterns' chrome and gold spheres lost their reflected lantern shadows,
-    /// up to 118 codes). 0.2, the default, drops them at glossy hits and keeps them at
-    /// near-mirror ones; 0 drops them at every hit; above 1 keeps them everywhere. The sun
+    /// it (the night lanterns' chrome (0.02) and gold (0.25) spheres lost their reflected
+    /// lantern shadows, up to 118 codes). 0.3, the default, drops them at glossy hits and
+    /// keeps them at both spheres; 0 drops them at every hit; above 1 keeps them everywhere. The sun
     /// keeps its ray and camera receivers keep every shadow (docs/m7-gaps.md).
     /// `RENDERLAB_HIT_UNSHADOWED_FROM` overrides it for measurement.
     pub unshadowed_hits_from: f32,
@@ -73,7 +73,7 @@ impl Default for LocalShadows {
             rays: u32::MAX,
             resolution: 1024,
             near: 0.02,
-            unshadowed_hits_from: 0.2,
+            unshadowed_hits_from: 0.3,
         }
     }
 }

@@ -11,9 +11,9 @@ use renderlab::{
 const SIZE: [u32; 2] = [128, 96];
 
 /// A spot lights a wall and a small card shadows part of it; a floor reflects the wall.
-/// Dropping hit shadows everywhere (0) lifts the reflected shadow; at the default (0.2) a
+/// Dropping hit shadows everywhere (0) lifts the reflected shadow; at the default a
 /// near-mirror floor (roughness 0.05) keeps it, as if never dropped, while a glossy floor
-/// (0.3) drops it. A frame without reflections is byte-identical whatever the setting.
+/// as rough as the default threshold drops it. A frame without reflections is byte-identical whatever the setting.
 #[test]
 fn reflection_hits_drop_local_shadows_from_rough_lobes_only() -> Result<()> {
     let path = root("hit-local-shadows");
@@ -139,12 +139,13 @@ fn reflection_hits_drop_local_shadows_from_rough_lobes_only() -> Result<()> {
     };
     const NEVER: f32 = 2.0;
     let traced = Some(ReflectionSettings::default());
+    let from = LocalShadows::default().unshadowed_hits_from;
     let mirror_never = frame(traced, NEVER, 0.05)?.hdr;
     let mirror_all = changed(&mirror_never, &frame(traced, 0.0, 0.05)?.hdr);
-    let mirror_default = changed(&mirror_never, &frame(traced, 0.2, 0.05)?.hdr);
+    let mirror_default = changed(&mirror_never, &frame(traced, from, 0.05)?.hdr);
     let glossy_default = changed(
-        &frame(traced, NEVER, 0.3)?.hdr,
-        &frame(traced, 0.2, 0.3)?.hdr,
+        &frame(traced, NEVER, from)?.hdr,
+        &frame(traced, from, from)?.hdr,
     );
     println!(
         "hit local shadows: mirror floor {mirror_all} px change dropped everywhere, \
