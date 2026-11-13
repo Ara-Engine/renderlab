@@ -137,7 +137,7 @@ Final GPU starts use the `fdf2fb05`-based binary (release build 29.77 seconds).
 All eight new switch sets draw on both paths: alone and paired with GI,
 material, sun, light visibility, deferred reflections, reflection diagnostics
 and the combined reflection diagnostics. Ten additional standard-program
-starts cover each other merged pass and all passes together on both paths.
+starts cover each other merged pass flag and all flags together on both paths.
 All 26 starts exit 0, with no panic or validation error. Switch-off flight
 also matches the accepted reference on all 30 PNGs per path. Ordinary lease
 `u-sunrt-final-starts-01` exits 0 in 136.29 seconds with no watchdog failures;
@@ -146,3 +146,13 @@ it makes no performance claim. Evidence: `pass-starts-summary.json`,
 Later main merges through `d786f5a6` contain port/runner changes only and do
 not change the tested wgpu renderer.
 The light-visibility starts use `RENDERLAB_LIGHT_VIS_PASS=1`.
+
+Material coverage limitation: `program=standard` is accepted and recorded in
+the start's `run.json`, but these wgpu starts do not execute the material pass.
+On this head, only `backend_ara/forward.rs` calls `material_pass_on`, and only
+the Ara primary-shading route calls `material_variant`; its material dispatch
+is labelled `ara::PrimaryMaterialList`. The wgpu route accepts the flag without
+scheduling that pass. The 26 starts therefore certify flag combinations and
+the implemented wgpu passes, not joint sun/material execution. That gate must
+be repeated when material execution reaches wgpu or this sun option reaches
+Ara. An Ara material-only start would not close that gap.
