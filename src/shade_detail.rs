@@ -35,11 +35,13 @@ pub(super) struct ShadeDetail {
     pipelines: Vec<Vec<Owned<wgpu::ComputePipeline>>>,
 }
 
-/// Whether the pass log keeps parts (`RENDERLAB_PASS_LOG_DETAIL`), read once: the Ara
-/// backend, which has no log of its own, names its part dispatches by it.
+/// Whether full shading replays were requested. The atmosphere-only detail mode
+/// keeps its timestamps without compiling or dispatching these seven probes.
 pub(crate) fn wanted() -> bool {
     static WANTED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *WANTED.get_or_init(|| std::env::var_os("RENDERLAB_PASS_LOG_DETAIL").is_some())
+    *WANTED.get_or_init(|| {
+        std::env::var_os("RENDERLAB_PASS_LOG_DETAIL").is_some_and(|v| v != "atmosphere")
+    })
 }
 
 /// `source` with only the `terms` bits of RL_SHADE_TERMS kept.

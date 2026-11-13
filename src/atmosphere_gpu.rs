@@ -7,6 +7,9 @@
 use super::*;
 use crate::atmosphere::{Atmosphere, AtmosphereMedium};
 use crate::pipeline_compilation::PipelineDevice;
+#[path = "atmosphere_tiles.rs"]
+mod tiles;
+pub(crate) use tiles::source as fog_tile_source;
 
 const COMMON: &str = include_str!("../shaders/atmosphere_common.wgsl");
 const KERNELS: &str = include_str!("../shaders/atmosphere.wgsl");
@@ -45,7 +48,7 @@ fn at_sun_visible(p:vec3<f32>) -> f32 {
 const MAP_VISIBILITY: &str = include_str!("../shaders/atmosphere_shadow_map.wgsl");
 
 fn kernel_source(hardware: bool) -> String {
-    format!(
+    fog_tile_source(format!(
         "{}{COMMON}{KERNELS}{}",
         if hardware {
             "enable wgpu_ray_query;\n"
@@ -61,11 +64,14 @@ fn kernel_source(hardware: bool) -> String {
         } else {
             MAP_VISIBILITY.to_owned()
         },
-    )
+    ))
 }
 
 fn virtual_kernel_source() -> String {
-    format!("{COMMON}{KERNELS}{}", Renderer::atmosphere_shadow_source())
+    fog_tile_source(format!(
+        "{COMMON}{KERNELS}{}",
+        Renderer::atmosphere_shadow_source()
+    ))
 }
 
 fn sky_source() -> String {
@@ -1164,7 +1170,13 @@ impl Renderer {
             } else {
                 &k.inject
             };
-            part(encoder, "atmosphere.inject", injection, &inject[i], cells);
+            part(
+                encoder,
+                "atmosphere.inject",
+                injection,
+                &inject[i],
+                tiles::groups(v.grid),
+            );
             let temporal = &v.temporal.as_ref().unwrap()[i];
             part(encoder, "atmosphere.temporal", &k.temporal, temporal, cells);
             part(

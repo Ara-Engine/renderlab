@@ -12,6 +12,8 @@
 //! `sun_shadow.raster`); without it those marks are skipped, so the part's time stays in
 //! the stage before it. The reflection pass's stages (`ALWAYS`) are kept either way: every
 //! reflection table reads them from the default log.
+//! `RENDERLAB_PASS_LOG_DETAIL=atmosphere` records only atmosphere parts and avoids
+//! the full mode's seven shading replays.
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
@@ -43,6 +45,7 @@ pub(crate) struct PassTimeline {
     period: f64,
     /// Whether dotted part names are marked (`RENDERLAB_PASS_LOG_DETAIL`).
     detail: bool,
+    atmosphere_detail: bool,
     log: std::io::BufWriter<std::fs::File>,
 }
 
@@ -54,6 +57,8 @@ impl PassTimeline {
             return None;
         }
         let log = std::fs::File::create(path).ok()?;
+        let requested = std::env::var_os("RENDERLAB_PASS_LOG_DETAIL");
+        let atmosphere_detail = requested.as_deref().is_some_and(|v| v == "atmosphere");
         let bytes = u64::from(MARKS) * 8;
         let frames = (0..RING)
             .map(|_| Frame {
@@ -85,7 +90,8 @@ impl PassTimeline {
             next: 0,
             frame: 0,
             period: f64::from(queue.get_timestamp_period()),
-            detail: std::env::var_os("RENDERLAB_PASS_LOG_DETAIL").is_some(),
+            detail: requested.is_some() && !atmosphere_detail,
+            atmosphere_detail,
             log: std::io::BufWriter::new(log),
         })
     }
@@ -105,7 +111,7 @@ impl PassTimeline {
         }
     }
 
-    /// Whether dotted part names are marked (`RENDERLAB_PASS_LOG_DETAIL`).
+    /// Whether full detail, including shading replays, was requested.
     pub(crate) fn detail(&self) -> bool {
         self.detail
     }
@@ -113,7 +119,8 @@ impl PassTimeline {
     /// Starts stage `name` at this point of `encoder`'s work.
     pub(crate) fn mark(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         let Some(i) = self.current else { return };
-        if name.contains('.') && !self.detail && !ALWAYS.contains(&name) {
+        let atmosphere = self.atmosphere_detail && name.starts_with("atmosphere.");
+        if name.contains('.') && !self.detail && !atmosphere && !ALWAYS.contains(&name) {
             return;
         }
         let entry = &mut self.frames[i];

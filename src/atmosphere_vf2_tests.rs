@@ -292,6 +292,7 @@ fn gpu_shafts() {
             assert!(Instant::now() < until);
             r.test_drain("VF2 admission");
         }
+        r.poll().unwrap();
     };
     let mut log = json!({"path":path,"size":size,"scene":if windows {"two windows"} else {"slats"},"configs":{}});
     for (name, a) in [
@@ -426,6 +427,7 @@ fn gpu_shafts() {
         r.test_drain("VF2 timing");
         log["timing_ms"][name] = json!(start.elapsed().as_secs_f64() * 1e3 / 32.);
     }
+    r.poll().unwrap();
     std::fs::write(
         out.join("result.json"),
         serde_json::to_vec_pretty(&log).unwrap(),

@@ -455,12 +455,17 @@ impl Pass {
                 } else {
                     ("", String::new())
                 };
-                format!(
+                let source = format!(
                     "{enable}{}{head}{visibility}{}",
                     include_str!("../../../shaders/atmosphere_common.wgsl"),
                     &kernels[start..end]
-                )
-                .into()
+                );
+                let source = if self == Self::AtmosphereFogInject {
+                    crate::renderer::atmosphere_gpu::fog_tile_source(source)
+                } else {
+                    source
+                };
+                source.into()
             }
             Self::AtmosphereAerial => {
                 let kernels = include_str!("../../../shaders/atmosphere.wgsl");
