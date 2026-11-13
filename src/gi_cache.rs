@@ -3065,6 +3065,7 @@ impl Renderer {
             let fallback = priority::Controller::default();
             let controller = self.gi.refill_feedback.as_ref().map_or(&fallback,|f|&f.controller);
             controller.header(&mut begun.header, priority::mode());
+            priority::measurement_header(&mut begun.header);
         }
         let raw: Vec<u8> = begun.header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);

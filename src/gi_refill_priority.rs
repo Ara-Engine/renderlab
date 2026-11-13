@@ -2,6 +2,61 @@
 use super::*;
 use std::sync::OnceLock;
 
+/// Measurement only: replay the clean run's per-frame budgets during blocking captures,
+/// so PNG encoding/downclocking cannot change the time controller's picture workload.
+pub(super) fn measurement_header(header: &mut [u32; HEADER_WORDS as usize]) {
+    use std::io::Write;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static FRAME: AtomicUsize = AtomicUsize::new(0);
+    static REPLAY: OnceLock<Option<Vec<[u32; 2]>>> = OnceLock::new();
+    static TRACE: OnceLock<Option<std::sync::Mutex<std::fs::File>>> = OnceLock::new();
+    let frame = FRAME.fetch_add(1, Ordering::Relaxed);
+    let replay = REPLAY.get_or_init(|| {
+        std::env::var_os("RENDERLAB_GI_REFILL_REPLAY").map(|path| {
+            std::fs::read_to_string(path)
+                .expect("GI budget replay file")
+                .lines()
+                .enumerate()
+                .map(|(index, line)| {
+                    let row: Vec<u32> = line
+                        .split(',')
+                        .map(|s| s.parse().expect("GI replay integer"))
+                        .collect();
+                    assert_eq!(row.len(), 3, "GI replay frame,claims,gathers");
+                    assert_eq!(row[0] as usize, index, "GI replay frame order");
+                    [row[1], row[2]]
+                })
+                .collect()
+        })
+    });
+    if let Some(rows) = replay {
+        let [claims, gathers] = *rows
+            .get(frame)
+            .expect("GI budget replay ended before the capture");
+        assert!(
+            gathers >= 64 && (claims == 0 || claims >= 64),
+            "GI replay budget"
+        );
+        header[20] = gathers;
+        header[32] = gathers;
+        header[33] = claims;
+    }
+    let trace = TRACE.get_or_init(|| {
+        std::env::var_os("RENDERLAB_GI_REFILL_TRACE").map(|path| {
+            std::sync::Mutex::new(std::fs::File::create(path).expect("GI budget trace file"))
+        })
+    });
+    if let Some(file) = trace {
+        writeln!(
+            file.lock().unwrap(),
+            "{frame},{},{}",
+            header[33],
+            header[32]
+        )
+        .expect("GI budget trace write");
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Mode {
     Today,
