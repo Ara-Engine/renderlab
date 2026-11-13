@@ -1548,6 +1548,12 @@ fn gpu_pane_pixels_match_the_raster() {
     let mut pictures = Vec::new();
     for pixels in [true, false] {
         r.transparency.pane_pixels = Some(pixels);
+        // Both captures from a fresh history through the same 48 jitter phases: the second
+        // loop otherwise continued the index (frame 95 against 47, another sub-pixel offset)
+        // and the first loop's history, so an edge could resolve onto its neighbour's
+        // surface in one picture only (RL#80's edge misses).
+        r.cut_reconstruction();
+        r.view.reconstruction_index = 0;
         for _ in 0..48 {
             let mut draws = vec![
                 Draw::new(&floor_mesh, &mut floor).with_material(&ground),
