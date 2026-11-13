@@ -61,7 +61,10 @@ fn rl_sample(p:vec2<i32>)->RlSample {
                 if n.dist>0.0 {dists+=vec2<f32>(n.dist*w,w);}
             }
         }
-        let spatial=sum.rgb/sum.w;
+        // A lobe narrower than a pixel on screen keeps its own sample; the neighbourhood still
+        // sets the clamp below.
+        let sharp=RL_RESOLVE_SHARP>0.0 && s.footprint*RL_ATROUS_FOOTPRINT<1.0;
+        let spatial=select(sum.rgb/sum.w,s.rgb,sharp);
         dist=select(0.0,dists.x/dists.y,dists.y>0.0);
         let mu=moments.x/sum.w;
         let sigma=sqrt(max(moments.y/sum.w-mu*mu,0.0));
@@ -101,6 +104,10 @@ const RL_ATROUS_DEPTH:f32=0.04;
 const RL_ATROUS_SMOOTH:f32=0.1;
 // The share of the lobe's screen footprint the a-trous span may reach.
 const RL_ATROUS_FOOTPRINT:f32=0.03;
+// 1: the first a-trous pass and the resolve's spatial mean also stay inside that share of the
+// footprint, so a near reflection (a short hit distance: the crate in the gold sphere) keeps its
+// own sample's sharpness; 0: both always run (the measured candidate).
+const RL_RESOLVE_SHARP:f32=0.0;
 fn rl_atrous_tap(i:i32)->f32 { return select(select(3.0/8.0,1.0/4.0,abs(i)==1),1.0/16.0,abs(i)==2); }
 fn rl_atrous(p:vec2<i32>,step:i32,src:i32,dst:i32) {
     let size=vec2<i32>(textureDimensions(rl_history));
@@ -111,7 +118,7 @@ fn rl_atrous(p:vec2<i32>,step:i32,src:i32,dst:i32) {
     let c=vec3<f32>(rg,bv.x);
     // A pass whose span (2 x step pixels each side) exceeds the lobe's own screen footprint would
     // blur the reflection beyond what the lobe does: skip it (the first pass is always kept).
-    if step>1 && (s.rough<RL_ATROUS_SMOOTH || f32(2*step)>s.footprint*RL_ATROUS_FOOTPRINT) {
+    if (step>1 || RL_RESOLVE_SHARP>0.0) && (s.rough<RL_ATROUS_SMOOTH || f32(2*step)>s.footprint*RL_ATROUS_FOOTPRINT) {
         textureStore(rl_history,p,dst,vec4<u32>(pack2x16float(c.rg)));
         textureStore(rl_history,p,dst+1,vec4<u32>(pack2x16float(bv)));
         return;

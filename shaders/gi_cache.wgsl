@@ -1371,6 +1371,30 @@ fn gi_lane_reduce(cell:u32, lane:u32) {
         }
     }
 }
+// U-RTVIS: a new cell without a bounce value yet takes its parent's (the cell one level coarser
+// containing its centre, same bin) until its own first gather replaces it, so a cell a capped
+// gather has not reached reads a coarser estimate, never zero. The filter's raw source too.
+fn gi_parent_bounce(slot:u32) {
+    let cold=gi_cold(slot);
+    let hot=gi_hot(slot);
+    if gi_table[hot+GI_HOT_BOUNCE]!=0u { return; }
+    let def=gi_table[cold+GI_C_DEF];
+    let level=def&0xffu;
+    let bin=(def>>8u)&0xffu;
+    if level+1u>=gi_word(GI_H_LEVELS) { return; }
+    let c=bitcast<vec3<i32>>(vec3<u32>(gi_table[cold+GI_C_CELL],gi_table[cold+GI_C_CELL+1u],gi_table[cold+GI_C_CELL+2u]));
+    let edge=gi_edge(level);
+    let s=select(0.25,-0.25,(bin&1u)!=0u);
+    let centre=(vec3<f32>(c)+vec3<f32>(0.5)+gi_axis_mask(bin)*s)*edge;
+    let parent=gi_find(gi_key(level+1u,bin,vec3<i32>(floor(gi_lattice(centre,edge*2.0,bin)))));
+    if parent==0xffffffffu { return; }
+    let ph=gi_hot(parent);
+    if (gi_table[ph]&GI_VALID)==0u || gi_table[ph+GI_HOT_BOUNCE]==0u { return; }
+    for(var w=GI_HOT_BOUNCE;w<GI_HOT_BOUNCE+7u;w+=1u) {
+        gi_table[hot+w]=gi_table[ph+w];
+        if gi_filter_on(GI_FILTER_BOUNCE) { gi_raw[gi_raw_at(slot,w)]=gi_raw[gi_raw_at(parent,w)]; }
+    }
+}
 // A queue length as a uniform value: the workgroup's first invocation reads it.
 fn gi_uniform_count(index:u32, counter:u32) -> u32 {
     if index==0u { gi_wg_count=min(atomicLoad(&gi_work[counter]),gi_frame.offsets.x); }
@@ -1442,6 +1466,7 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
                 gi_table[cold+GI_C_PENDING+w]=0u;
             }
             gi_store_sh(slot);
+            if gi_bounce_on() && gi_word(GI_H_PARENT_STANDIN)!=0u { gi_parent_bounce(slot); }
             // The item base depends on allocation order: cleared, so the table is deterministic.
             gi_table[cold+GI_C_BASE]=0u;
             gi_table[cold+GI_C_STATE]=select(GI_TRACED|GI_PARTIAL,GI_TRACED,all_known)|(gi_table[cold+GI_C_STATE]&GI_KEEP);
