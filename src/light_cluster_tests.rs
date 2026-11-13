@@ -414,6 +414,8 @@ fn light_cluster_kernel_and_every_shading_head_validate() {
             "traced {k}"
         );
         assert!(module.contains("let samples=select(1u,max(rl_local_rays,4u),radius>0.0);"));
+        // Reflection hits skip local shadows when `LocalShadows::reflection_hits` is off.
+        assert!(module.contains("if rl_reflection_hit && lights[s.index].kind.w!=0u && rl_light_frame.far.z!=0.0 { return 1.0; }"));
         validate(&format!("traced {k}"), &module);
     }
     let non_rt = primary_ray_gpu::non_rt_sources(SOURCE).unwrap().1;

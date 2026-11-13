@@ -482,6 +482,9 @@ mod pane_cases;
 #[path = "ara_backend/cases/deferred_reflections.rs"]
 mod deferred_reflection_cases;
 
+#[path = "ara_backend/cases/hit_local_shadows.rs"]
+mod hit_local_shadow_cases;
+
 #[path = "ara_backend/cases/programs.rs"]
 mod program_cases;
 
