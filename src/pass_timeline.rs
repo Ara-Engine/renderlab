@@ -141,20 +141,21 @@ impl PassTimeline {
         let count = entry.names.len() as u32;
         let offset = u64::from(first) * 8;
         encoder.resolve_query_set(&self.queries, first..first + count, &self.resolve, offset);
-        encoder.copy_buffer_to_buffer(&self.resolve, offset, &entry.readback, 0, u64::from(count) * 8);
-    }
-
-    /// After the frame's final submission: maps its stamps.
-    pub(crate) fn submitted(&mut self) {
-        let Some(i) = self.current.take() else { return };
-        let entry = &mut self.frames[i];
+        let bytes = u64::from(count) * 8;
+        encoder.copy_buffer_to_buffer(&self.resolve, offset, &entry.readback, 0, bytes);
+        // Mapped by the submission itself, whichever thread submits it (RENDERLAB_SUBMIT_THREAD):
+        // a map_async after handing the encoder off would map the buffer before the copy into it.
         let done = Arc::new(OnceLock::new());
         let callback = done.clone();
-        let bytes = entry.names.len() as u64 * 8;
-        entry.readback.slice(..bytes).map_async(wgpu::MapMode::Read, move |r| {
+        encoder.map_buffer_on_submit(&entry.readback, wgpu::MapMode::Read, ..bytes, move |r| {
             let _ = callback.set(r);
         });
-        entry.mapped = Some(done);
+        self.frames[i].mapped = Some(done);
+    }
+
+    /// After the frame's final submission: the frame's marks are complete.
+    pub(crate) fn submitted(&mut self) {
+        self.current = None;
     }
 
     /// Writes every completed frame's line (call after a device poll).
