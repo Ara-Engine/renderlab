@@ -25,7 +25,7 @@ impl Renderer {
         let Some(state) = self.view.primary.as_ref() else {
             return Ok(());
         };
-        if !reflection_pass::on() || state.requests {
+        if !reflection_pass::on(self.device.features()) || state.requests {
             return Ok(());
         }
         let mixed = state.mixed();
@@ -91,7 +91,7 @@ impl Renderer {
         let Some(state) = self.view.primary.as_ref() else {
             return;
         };
-        if !reflection_pass::on() || state.requests {
+        if !reflection_pass::on(self.device.features()) || state.requests {
             return;
         }
         let (Some(pass), Some(bindings)) = (

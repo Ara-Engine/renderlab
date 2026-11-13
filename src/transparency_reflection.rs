@@ -32,7 +32,8 @@ pub(super) fn key(head: &[u8; 32], program: &[u8; 32], parameters: bool) -> [u8;
 /// (`transparent_reflection_head`), with the glass lobe read from the lobe pass's targets
 /// instead of a camera hit. The wgpu renderer and the ara-gpu backend both compile it.
 pub(crate) fn source(head: &str, program: &str, parameters: bool) -> String {
-    let program = crate::program::glass_hit_program(program);
+    let deferred = crate::program::rl_deferred_for(crate::program::non_rt_source(head));
+    let program = crate::program::glass_hit_program(program, deferred);
     let mut s = crate::program::compose(head, &program, crate::program::Stage::Traced, parameters)
         .source
         .replace("\r\n", "\n");

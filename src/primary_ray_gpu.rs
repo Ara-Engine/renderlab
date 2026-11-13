@@ -1200,7 +1200,7 @@ impl PrimaryState {
             // U-RTVIS: the reflection resolve's shading phase (reflections_history.wgsl).
             entries.push(uniform(RL_PHASE, 16));
             // U-RTVIS: the reflection pass's lobe output (reflection_pass.rs).
-            if reflection_pass::on() {
+            if reflection_pass::on(device.features()) {
                 entries.extend(reflection_pass::shade_entries());
                 // The Mac thread's reflection_hits: H and R (reflection_hits_gpu.rs).
                 entries.extend(super::reflection_hits::shade_entries());
@@ -1214,7 +1214,7 @@ impl PrimaryState {
                 entries.push(read(SOFTWARE_REFLECTIONS, 16));
             }
             // Deferred reflections' outputs (`Targets::deferred`).
-            if crate::program::rl_deferred() {
+            if reflection_pass::deferred(device.features()) {
                 entries.extend([image(62, F::Rgba16Float), image(63, F::Rgba16Float)]);
             }
             entries
@@ -1413,7 +1413,7 @@ impl PrimaryState {
             fresh_bindings,
             trace_bindings: trace,
             shade_bindings,
-            rl_trace: reflection_pass::on()
+            rl_trace: reflection_pass::on(device.features())
                 .then(|| reflection_pass::TraceAbi::new(device, ledger, &array_bindings, lighting)),
             rl_pipelines: [None, None],
             rl_resolve: crate::program::rl_resolve_pass_on()
@@ -2405,7 +2405,8 @@ impl Renderer {
                 defer_edges,
                 held,
                 rl_history,
-                rl_pass: reflection_pass::on().then(|| self.rl_pass_targets(size)),
+                rl_pass: reflection_pass::on(self.device.features())
+                    .then(|| self.rl_pass_targets(size)),
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
                     "primary hard receiver epsilon",
@@ -2413,7 +2414,7 @@ impl Renderer {
                     wgpu::TextureFormat::R32Float,
                 ),
                 tiles: target("primary tile coverage", tiles, wgpu::TextureFormat::R32Uint),
-                deferred: crate::program::rl_deferred().then(|| {
+                deferred: reflection_pass::deferred(self.device.features()).then(|| {
                     ["deferred reflectance", "deferred untraced specular"]
                         .map(|label| target(label, size, wgpu::TextureFormat::Rgba16Float))
                 }),

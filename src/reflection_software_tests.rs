@@ -347,7 +347,7 @@ fn gpu_r1n_mirror_identity() {
 fn deferred_standard(head: &str) -> crate::program::Composed {
     use crate::program::{Stage, compose, deferred_variant};
     let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
-    if crate::program::rl_deferred() {
+    if crate::program::rl_deferred_for(crate::program::non_rt_source(head)) {
         composed
     } else {
         deferred_variant(composed)
@@ -386,7 +386,8 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
         assert!(passed.contains(
             "rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);"
         ));
-        if !crate::program::rl_deferred() && !crate::program::rl_pass_on() {
+        let non_rt = crate::program::non_rt_source(head);
+        if !crate::program::rl_deferred_for(non_rt) && !crate::program::rl_pass(non_rt) {
             let plain = crate::program::pass_block(compose(
                 head,
                 crate::STANDARD_PROGRAM,

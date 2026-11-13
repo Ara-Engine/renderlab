@@ -165,8 +165,51 @@ const REFLECTION_LOBE: &str = include_str!("../shaders/reflections_lobe.wgsl");
 const RL_PASS_STUBS: [&str; 2] = ["// ---- rl pass stubs ----\n", "// ---- end of rl pass stubs ----\n"];
 const REFLECTION_TRACE: &str = include_str!("../shaders/reflections_trace.wgsl");
 pub(crate) fn rl_pass_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_PASS").is_ok_and(|v| v == "1"))
+    rl_pass_env() == Some(true)
+}
+/// `RENDERLAB_RL_PASS` / `RENDERLAB_RL_DEFERRED`: "1" forces a switch on (RT included, for A/B),
+/// "0" forces it off; unset follows the path's default. Read once per process.
+fn env_switch(name: &str) -> Option<bool> {
+    match std::env::var(name).as_deref() {
+        Ok("1") => Some(true),
+        Ok("0") => Some(false),
+        _ => None,
+    }
+}
+fn rl_pass_env() -> Option<bool> {
+    static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_switch("RENDERLAB_RL_PASS"))
+}
+fn rl_deferred_env() -> Option<bool> {
+    static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_switch("RENDERLAB_RL_DEFERRED"))
+}
+/// The non-RT path's default for the compacted reflection pass and its deferred composite: on
+/// once a non-RT engine device that can hold them is created (`set_non_rt_pass_default`), off
+/// otherwise (RT, tests without an engine device, adapters below the pass's storage limits).
+static NON_RT_PASS_DEFAULT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+pub(crate) fn set_non_rt_pass_default(on: bool) {
+    let _ = NON_RT_PASS_DEFAULT.set(on);
+}
+/// Whether the compacted reflection pass runs on a path (`non_rt`: the non-RT path's software
+/// reflections; RT keeps the inline loop unless RENDERLAB_RL_PASS=1).
+pub(crate) fn rl_pass(non_rt: bool) -> bool {
+    rl_pass_env().unwrap_or(non_rt && NON_RT_PASS_DEFAULT.get().copied().unwrap_or(false))
+}
+/// Whether the path's reporting programs hand their glossy reflections to the deferred
+/// composite: RENDERLAB_RL_DEFERRED when set, otherwise with the non-RT pass's default.
+pub(crate) fn rl_deferred_for(non_rt: bool) -> bool {
+    rl_deferred_env().unwrap_or(non_rt && rl_pass(non_rt))
+}
+/// Either path may run the pass in this process (device limits ask for its bindings).
+pub(crate) fn rl_pass_any() -> bool {
+    rl_pass(true) || rl_pass(false)
+}
+/// A composed module's (or head's) path: hardware heads declare their TLAS; non-RT heads do not.
+pub(crate) fn non_rt_source(source: &str) -> bool {
+    !["hardware_scene", "fresh_scene"]
+        .into_iter()
+        .any(|name| source.contains(&format!("var {name}:acceleration_structure;")))
 }
 /// `rl_trace`'s module on a traced shading `head`: the standard program's traced composition
 /// (the reflection block's helpers, with its stubs) and the trace entries.
@@ -191,7 +234,7 @@ fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Comp
 /// stubs, each while its switch is on (wgpu primary shading modules only). Unset, the module's
 /// text is the default's (reflections.wgsl as composed).
 pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
-    let composed = if rl_pass_on() {
+    let composed = if rl_pass(non_rt_source(&composed.source)) {
         pass_block(composed)
     } else {
         composed
@@ -874,7 +917,7 @@ fn compose_stage(
         // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
         source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
-        if rl_deferred() && declares(program, "const", "RL_DEFERRED") {
+        if rl_deferred_for(non_rt_source(head)) && declares(program, "const", "RL_DEFERRED") {
             return deferred_variant(Composed {
                 source,
                 program: program_range,
@@ -893,8 +936,7 @@ fn compose_stage(
 /// Whether traced shading writes the deferred reflection composite's inputs:
 /// `RENDERLAB_RL_DEFERRED=1`, off by default. Read once per process.
 pub(crate) fn rl_deferred() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_DEFERRED").is_ok_and(|v| v == "1"))
+    rl_deferred_env() == Some(true)
 }
 /// The program API's report, which deferred modules replace with `DEFERRED_REPORT`.
 const DEFERRED_REPORT_STUB: &str =
@@ -1163,11 +1205,11 @@ pub(crate) fn declares_reflection(program: &str) -> bool {
 /// entry, and its glossy lobes stay inline), so under RENDERLAB_RL_DEFERRED=1 the program's
 /// `RL_DEFERRED` opt-in is renamed away and `compose` leaves the module undeferred. Unset, the
 /// program's text is unchanged.
-pub(crate) fn glass_hit_program(program: &str) -> String {
+pub(crate) fn glass_hit_program(program: &str, deferred: bool) -> String {
     let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     let mut source = String::with_capacity(program.len());
     let mut rest = program;
-    while let Some(at) = rest.find("RL_DEFERRED").filter(|_| rl_deferred()) {
+    while let Some(at) = rest.find("RL_DEFERRED").filter(|_| deferred) {
         let end = at + "RL_DEFERRED".len();
         let whole = (at == 0 || !ident(rest.as_bytes()[at - 1]))
             && rest.as_bytes().get(end).is_none_or(|&b| !ident(b));
