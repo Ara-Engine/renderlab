@@ -518,6 +518,65 @@ fn material_pass_variants_compose_and_validate() {
     assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 2);
 }
 
+/// The measurement probes (`RENDERLAB_MATERIAL_PROBE`) compose and validate on every head,
+/// tiles and lists, each on its own role.
+#[test]
+fn material_pass_probes_compose_and_validate() {
+    use crate::program::{
+        MaterialProbe, MaterialRole, Stage, compose, compose_list, material_variant_with,
+    };
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let probes = [
+        (
+            MaterialRole::Write,
+            MaterialProbe::Empty,
+            "if size.x<0x7fffffffu { return; }",
+        ),
+        (
+            MaterialRole::Write,
+            MaterialProbe::Decode,
+            "rl_material_probe_input(surface_input)",
+        ),
+        (
+            MaterialRole::Write,
+            MaterialProbe::NoStore,
+            "rl_material_probe_store(pixel,",
+        ),
+        (
+            MaterialRole::Read,
+            MaterialProbe::LoadPlus,
+            "rl_material_probe_record(rl_probe)",
+        ),
+    ];
+    let program = crate::STANDARD_PROGRAM;
+    let parameters = crate::program::declares_parameters(program);
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            for (role, probe, marker) in probes {
+                let full = if list {
+                    compose_list(head, program, Stage::Traced, parameters)
+                } else {
+                    compose(head, program, Stage::Traced, parameters)
+                };
+                let edited = material_variant_with(full, program, role, None, Some(probe))
+                    .expect("standard maps the record");
+                let source = &edited.source;
+                assert!(source.contains(marker), "{probe:?}");
+                assert_eq!(&source[edited.program.clone()], program);
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|e| panic!("{probe:?}: {}", e.emit_to_string(source)));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{probe:?}: {}", e.emit_to_string(source)));
+            }
+        }
+    }
+}
+
 /// Ara's emissive program is the standard program with a `glow` field added to `Surface`
 /// (crates/ara-renderlab/src/scene.rs `emissive_source`, these same three edits). It must keep
 /// composing and validating, alone and as both material-pass variants: a positional `Surface`
