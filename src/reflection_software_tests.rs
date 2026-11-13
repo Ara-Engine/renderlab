@@ -610,3 +610,19 @@ fn reflection_composite_validates() {
     .validate(&module)
     .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
 }
+
+/// Mixed-program frames: by default a reflection hit is shaded by its receiver's program, with the
+/// hit's parameters only when the hit is that program's draw (inline's MP1 fallback), so the
+/// composite draws the inline picture; RENDERLAB_RL_HIT_OWN_PROGRAM=1 shades each hit with its own
+/// program instead.
+#[test]
+fn mixed_frame_hits_follow_inline_fallback_by_default() {
+    use crate::program::{Stage, compose_hits};
+    let soft = &crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap()[1];
+    let source = compose_hits(soft, crate::STANDARD_PROGRAM, Stage::Traced, false, true).source;
+    let fallback = source.contains("if rl_receiver==0u || !rl_hits_mine(rl_receiver-1u) {return;}")
+        && source.contains("rl_load_parameters(select(primary_placements[rl_receiver-1u]");
+    assert_eq!(fallback, !crate::program::hit_own_program());
+    let single = compose_hits(soft, crate::STANDARD_PROGRAM, Stage::Traced, false, false).source;
+    assert!(!single.contains("rl_receiver"));
+}

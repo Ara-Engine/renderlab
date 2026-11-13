@@ -509,13 +509,31 @@ PLANS["comp5"] = (
         if v == "1" else OFF)
        for name, extra in (("flight", []), ("night", ["--night-lanterns"])) for v in ("1", "0")]
 )
-# comp6: comp5 on the glossy-pixel list, plus the coordinator's finding 2: the non-RT default
-# against RENDERLAB_RL_PASS=0 on a view with no glossy lobes (the game program's flight) and with
-# few (the standard program's), 60 frames, two rounds, the reflection.* stages in the pass log.
-PLANS["comp6"] = PLANS["comp5"] + [
-    (f"t-nonrt-{name}-{tag}-{k}", ["--path", "nonrt", "--fox", FOX, *extra, "--frames", "60"], env)
-    for k in (1, 2) for name, extra in (("zero", []), ("few", STD)) for tag, env in (("default", {}), ("off", OFF))
-]
+# comp6 on the glossy-pixel list, in two leases.
+# comp6a, pictures: the limit (a floor at roughness 0.5, 0.499 and 0.501 under the night lanterns)
+# and a cross-program hit (the toon hero in a 0.2 glossy floor), each the non-RT default against
+# RENDERLAB_RL_PASS=0 (identical within noise: the w floor and inline's hit fallback), the same two
+# with RENDERLAB_RL_HIT_OWN_PROGRAM=1 (the evidence for Islam), then comp5's pictures.
+OWN = {"RENDERLAB_RL_HIT_OWN_PROGRAM": "1"}
+LIMIT_ROWS = [(f"floor{r.replace('.', '')}", ["--diag", f"floor={r}", "--night-lanterns"]) for r in ("0.5", "0.499", "0.501")]
+CROSS_ROWS = [("toon", ["--diag", "floor=0.2"])]
+PLANS["comp6a"] = (
+    [(f"p-nonrt-{name}-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "24", "--every", "1"],
+      {} if v == "1" else OFF)
+     for name, extra in LIMIT_ROWS + CROSS_ROWS for v in ("1", "0")]
+    + [(f"p-nonrt-{name}own-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "24", "--every", "1"],
+        OWN if v == "1" else OFF)
+       for name, extra in (LIMIT_ROWS[1], CROSS_ROWS[0]) for v in ("1", "0")]
+    + [x for x in PLANS["comp5"] if x[0].startswith("p-") and "fix" not in x[0]]
+)
+# comp6b, bytes and timing: comp5's probe and memory rows and its forced-overflow rows, plus the
+# coordinator's finding 2 (no glossy lobes: the game program's flight; few: the standard program's),
+# default against RENDERLAB_RL_PASS=0, 60 frames, two rounds, the reflection.* stages in the log.
+PLANS["comp6b"] = (
+    [x for x in PLANS["comp5"] if x[0].startswith("q-") or "fix" in x[0]]
+    + [(f"t-nonrt-{name}-{tag}-{k}", ["--path", "nonrt", "--fox", FOX, *extra, "--frames", "60"], env)
+       for k in (1, 2) for name, extra in (("zero", []), ("few", STD)) for tag, env in (("default", {}), ("off", OFF))]
+)
 # The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
 # flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,
 # paint 0.35), moving and still; `compare.py` crops the reflected edges, binary against binary.

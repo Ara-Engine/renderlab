@@ -25,6 +25,10 @@ struct RlList { count:atomic<u32>, header:array<u32,3>, entries:array<vec4<u32>>
 @group(0) @binding(69) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;
 const RL_ROOM_HISTOGRAM:bool=false;
 const RL_PASS:bool=true;
+// A receiver whose traced fraction is under this keeps today's inline estimate (no reservation, no
+// entry, no composite): it renders exactly as the default without the pass, and near-cutoff bands
+// (Glint's navy) stay out of the room.
+const RL_COMPOSITE_FLOOR:f32=0.05;
 // Whether this module's program reports its reflectance for the deferred composite (it declares
 // `const RL_DEFERRED`; src/program.rs `pass_block` sets it for deferred_variant modules). Only
 // such programs leave their glossy lobes to the pass; every other program keeps its inline

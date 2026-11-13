@@ -247,7 +247,7 @@ pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
 /// program, and a receiver that does not fit, keeps the inline path (no entry, no zero).
 const PASS_GATE: [&str; 2] = [
     "    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}\n",
-    "    if RL_PASS && !mirror && RL_DEFERRED_PROGRAM && rl_room_reserve(count,traced,lobe.weight) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;\n    }\n",
+    "    if RL_PASS && !mirror && RL_DEFERRED_PROGRAM && traced>=RL_COMPOSITE_FLOOR && rl_room_reserve(count,traced,lobe.weight) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;\n    }\n",
 ];
 const DEFERRED_PROGRAM_FLAG: [&str; 2] = [
     "const RL_DEFERRED_PROGRAM:bool=false;",
@@ -1098,9 +1098,39 @@ pub(crate) fn compose_hits(
             "reflection_hits seam"
         );
         composed.source = composed.source.replacen(HITS_MINE, HITS_MINE_LIST, 1);
+        // Inline's fallback (LIST_HIT_PARAMETERS) unless RENDERLAB_RL_HIT_OWN_PROGRAM=1: the
+        // receiver's program shades every hit of its pixels, with the hit's own parameter block
+        // only when the hit is that program's draw, so the composite draws inline's picture.
+        if !hit_own_program() {
+            for (seam, fallback) in HITS_RECEIVER_PROGRAM {
+                assert_eq!(composed.source.matches(seam).count(), 1, "reflection_hits seam {seam}");
+                composed.source = composed.source.replacen(seam, fallback, 1);
+            }
+        }
     }
     composed
 }
+/// `RENDERLAB_RL_HIT_OWN_PROGRAM=1` (measurement, off by default): in a mixed-program frame each
+/// hit is shaded by its own draw's program, with its own parameters. More correct than inline's
+/// fallback (an emitter's reflection glows), but a visible change (docs/m7-gaps.md, Programs).
+pub(crate) fn hit_own_program() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HIT_OWN_PROGRAM").is_ok_and(|v| v == "1"))
+}
+/// shaders/reflection_hits.wgsl's seams for inline's fallback in mixed frames: a record belongs to
+/// the module of its receiver's program (the primary hit at the record's pixel), and the hit's
+/// parameter block is used only when the hit's draw is that program's.
+const HITS_RECEIVER_PROGRAM: [(&str, &str); 2] = [
+    (
+        "    if !rl_hits_mine(a.w-1u) {return;}\n",
+        "    let rl_receiver=textureLoad(primary_hit,vec2<i32>(vec2<u32>(a.x&0xffffu,a.x>>16u)),0).x;\n    if rl_receiver==0u || !rl_hits_mine(rl_receiver-1u) {return;}\n",
+    ),
+    // The hit entry's own line (4 spaces), not the inline loop's (16), which the module also holds.
+    (
+        "\n    rl_load_parameters(h.batch);\n    let hs=surface(h.input);",
+        "\n    rl_load_parameters(select(primary_placements[rl_receiver-1u]&0x1fffffffu,h.batch,rl_list.programs[h.batch>>2u][h.batch&3u]==rl_list.slot));\n    let hs=surface(h.input);",
+    ),
+];
 /// shaders/reflection_hits.wgsl's per-program filter, and its mixed-frame replacement: the
 /// hit's draw's frame slot against this dispatch's (program_traced_list.wgsl RlList, at
 /// binding 38 with a dynamic offset per slot).
