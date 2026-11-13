@@ -119,6 +119,46 @@ fn rl_split(mut source: String) -> String {
     }
     source
 }
+/// The local-light shadow cut at reflection hits (shaders/hit_shadow_cut.wgsl), off by
+/// default: `RENDERLAB_RL_HIT_SHADOW_CUT=<fraction>` lets a hit skip the shadows of its
+/// weakest shadowed local lights while their summed unshadowed illuminance stays within that
+/// fraction of the hit's total (1/16 is the first candidate). The sun and camera receivers are
+/// never cut. Read once per process; a value outside (0, 1) is an error on stderr and off.
+fn hit_shadow_cut() -> Option<f32> {
+    static CUT: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+    *CUT.get_or_init(|| {
+        let value = std::env::var("RENDERLAB_RL_HIT_SHADOW_CUT").ok()?;
+        match value.parse::<f32>() {
+            Ok(f) if f > 0.0 && f < 1.0 => Some(f),
+            _ => {
+                eprintln!("RENDERLAB_RL_HIT_SHADOW_CUT={value}: expected a fraction in (0, 1); the cut is off");
+                None
+            }
+        }
+    })
+}
+/// `source` (a tracing module) with the hit shadow cut ahead of its local-light visibility
+/// and the cut's module before the program.
+fn with_hit_shadow_cut(source: String, fraction: f32) -> String {
+    const LOCAL: &str = "    if lights[s.index].kind.w!=0u { return rl_local_shadow(";
+    const PROGRAM: &str = "// ---- program ----\n";
+    assert_eq!(source.matches(LOCAL).count(), 1, "hit shadow cut seam");
+    assert_eq!(source.matches(PROGRAM).count(), 1, "hit shadow cut program seam");
+    let module = include_str!("../shaders/hit_shadow_cut.wgsl").replacen(
+        "const RL_HIT_SHADOW_CUT:f32=0.0625;",
+        &format!("const RL_HIT_SHADOW_CUT:f32={fraction:?};"),
+        1,
+    );
+    source
+        .replacen(
+            LOCAL,
+            &format!(
+                "    if rl_reflection_hit && lights[s.index].kind.w!=0u && rl_hit_shadow_cut(input,s) {{ return 1.0; }}\n{LOCAL}"
+            ),
+            1,
+        )
+        .replacen(PROGRAM, &format!("{module}{PROGRAM}"), 1)
+}
 /// U-RTVIS measurement switches (`RENDERLAB_RL_HIT`, a comma list), reflection hits only:
 /// `local` leaves shadowed local lights unshadowed, `sun` skips the hit's sun shadow ray,
 /// `nolights` gives every light zero incidence, `black` skips the hit's `surface` and `shade`.
@@ -656,6 +696,9 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
             1,
         );
+        if let Some(fraction) = hit_shadow_cut() {
+            source = with_hit_shadow_cut(source, fraction);
+        }
         source = rl_split(rl_hit_switches(source));
     }
     let start = source.len();
