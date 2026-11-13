@@ -3375,6 +3375,9 @@ impl Renderer {
                 .as_ref()
                 .map_or(0, |h| h.scene_generation());
             let mut primary = UploadBytes::default();
+            // U-RTVIS: the reflection composite's room grows to the content before this frame's
+            // bindings are built (a growth drops them; prepare_primary rebuilds them).
+            self.rl_room_grow();
             let result = self.prepare_primary(draws, camera, soft, scene_generation, &mut primary);
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
@@ -3616,6 +3619,9 @@ impl Renderer {
                     self.encode_reflection_trace(&mut encoder, shading);
                     mark(&mut encoder, "reflection.hits");
                     self.encode_reflection_hits(&mut encoder, shading);
+                    // U-RTVIS: the deferred composite (RENDERLAB_RL_DEFERRED=1 with the pass).
+                    mark(&mut encoder, "reflection.composite");
+                    self.encode_reflection_composite(&mut encoder, shading);
                 }
             }
             if reconstructed {

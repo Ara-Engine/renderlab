@@ -25,9 +25,9 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 WORK = Path("D:/Coding/renderlab-work/unit-rtvis")
-# The default game scene on RT at 1080p, frame span median (ms): leases of 2026-11-12 measured
-# 26.67, 26.54 and 26.84.
-REFERENCE_MS = 26.7
+# The default game scene on RT at 1080p, frame span median (ms): this branch's references of
+# 2026-11-13 read 61.6-61.8 (root's bar; the span is CPU-bound, cpu.wait about 0.03 ms).
+REFERENCE_MS = 61.7
 FOX = "D:/Coding/renderlab-work/m7-sk1/Fox.glb"
 # Held-budget runs (step 5): main's cold probes on, the held stop on (1) or off (0).
 HELD = lambda v: {"RENDERLAB_COLD_PROBES": "1", "RENDERLAB_HELD_PROBES": v}
@@ -435,6 +435,134 @@ PLANS["cutgi"] = [
 PLANS["cutgipics"] = [
     (f"p-{path}-{name}-cutgi{v}", ["--path", path, *extra, "--frames", "60" if name == "respawn" else "34", "--every", "1"], CUTGI(v))
     for path in ("nonrt", "rt") for name, extra in CUTGI_CLIPS for v in ("1", "0")
+]
+# The deferred reflection composite (RENDERLAB_RL_PASS=1 RENDERLAB_RL_DEFERRED=1) against the
+# default: pictures (`compare.py PICS CROPS comp`), the strata counter (probe) and timing.
+COMP = lambda v: {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "1"} if v == "1" else {}
+COMP_CLIPS = (("flight", ["--fox", FOX]), ("night", ["--fox", FOX, "--night-lanterns"]))
+PLANS["comppics"] = [
+    (f"p-{path}-{name}-comp{v}", ["--path", path, *extra, "--frames", "40", "--every", "1"], COMP(v))
+    for path in ("nonrt", "rt") for name, extra in COMP_CLIPS for v in ("1", "0")
+]
+PLANS["compprobe"] = [
+    (f"q-{path}-{name}-comp", ["--path", path, *extra, "--frames", "40"],
+     COMP("1") | {"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"comp-{path}-{name}.json")})
+    for path in ("nonrt", "rt") for name, extra in COMP_CLIPS
+]
+PLANS["comptime"] = [
+    (f"t-{path}-{name}-comp{v}-{k}", ["--path", path, *extra, "--frames", "60"], COMP(v))
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in COMP_CLIPS for v in ("1", "0")
+]
+# One lease, one reference run: the composite's probe, pictures and timing in a single call.
+PLANS["comp4"] = PLANS["compprobe"] + PLANS["comppics"] + PLANS["comptime"]
+# comp4d: non-deferred programs untouched (default scene, switches on vs off, byte-identical),
+# the composite on the standard program (`--diag program=standard`) against inline, moving and
+# still, its probe and timing, then the reference again (a lease's timing counts only if both
+# references are within 10 %).
+STD = ["--diag", "program=standard"]
+PLANS["comp4d"] = (
+    [(f"p-{path}-ident-comp{v}", ["--path", path, "--fox", FOX, "--frames", "30", "--every", "1"], COMP(v))
+     for path in ("nonrt", "rt") for v in ("1", "0")]
+    + [(f"p-{path}-std{kind}-comp{v}", ["--path", path, "--fox", FOX, *STD, *still, "--frames", "40", "--every", "1"], COMP(v))
+       for path in ("nonrt", "rt") for kind, still in (("flight", []), ("still", ["--still"])) for v in ("1", "0")]
+    + [(f"q-{path}-std-comp", ["--path", path, "--fox", FOX, *STD, "--frames", "40"],
+        COMP("1") | {"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"comp-{path}-std.json")}) for path in ("nonrt", "rt")]
+    + [(f"t-{path}-{name}-comp{v}-{k}", ["--path", path, "--fox", FOX, *STD, *extra, "--frames", "60"], COMP(v))
+       for k in (1, 2) for path in ("nonrt", "rt") for name, extra in (("flight", []), ("night", ["--night-lanterns"]))
+       for v in ("1", "0") if k == 1 or name == "flight"]
+    + [("reference-end", [], {})]
+)
+# comp4d split in two leases: pictures (identity, standard composite vs inline, probe), then
+# timing with the reference again at the end.
+PLANS["comppicsd"] = [x for x in PLANS["comp4d"] if x[0][0] in "pq"]
+PLANS["comptimed"] = [x for x in PLANS["comp4d"] if x[0][0] == "t" or x[0] == "reference-end"]
+# comp4g: the RT standard-program pictures (moving and still) first, then the timing.
+PLANS["comp4g"] = [x for x in PLANS["comp4d"] if x[0].startswith("p-rt-std")] + PLANS["comptimed"]
+# The RT speck bisect (root, 2026-11-13): the standard-program flight on RT, composite against
+# inline under each hit switch (RENDERLAB_RL_HIT, composed into both), frames 0/13/26/39.
+BISECT = (("base", ""), ("black", "black"), ("nolights", "nolights"), ("sun", "sun"),
+          ("local", "local"), ("s4", "strata=4"), ("s4black", "strata=4,black"))
+PLANS["rtbisect"] = [
+    (f"p-rt-{name}-comp{v}", ["--path", "rt", "--fox", FOX, *STD, "--frames", "40", "--every", "13"],
+     COMP(v) | ({"RENDERLAB_RL_HIT": hit} if hit else {}))
+    for name, hit in BISECT for v in ("1", "0")
+]
+# specks: RT, the pass forced on against off, under the pass's own switches (program.rs
+# rl_pass_switches; `black` above only blackened inline hits). The lamp cap at frames 0 and 13 of
+# the flight, and root's row: night lanterns' moving gold sphere, every frame of 34.
+SPECK_SWITCHES = (("plain", ""), ("missblack", "missblack"), ("lone", "lone"), ("hitblack", "hitblack"))
+PLANS["specks"] = (
+    [(f"s-rt-cap-off", ["--path", "rt", "--fox", FOX, *STD, "--frames", "14", "--every", "13"], {})]
+    + [(f"s-rt-cap-{name}", ["--path", "rt", "--fox", FOX, *STD, "--frames", "14", "--every", "13"],
+        COMP("1") | ({"RENDERLAB_RL_HIT": hit} if hit else {}))
+       for name, hit in SPECK_SWITCHES]
+    + [(f"s-rt-night-off", ["--path", "rt", "--fox", FOX, *STD, "--night-lanterns", "--frames", "34", "--every", "1"], {})]
+    + [(f"s-rt-night-{name}", ["--path", "rt", "--fox", FOX, *STD, "--night-lanterns", "--frames", "34", "--every", "1"],
+        COMP("1") | ({"RENDERLAB_RL_HIT": hit} if hit else {}))
+       for name, hit in SPECK_SWITCHES]
+)
+# comp5: the non-RT default (no switches) against RENDERLAB_RL_PASS=0 (main's path): bytes and
+# the probe (60 frames, flight and lanterns), pictures moving, with planner cuts (cut=1) and a
+# respawn under a still camera (hold=cut; the event at frame 24), and RT unset vs off (identity).
+OFF = {"RENDERLAB_RL_PASS": "0"}
+PLANS["comp5"] = (
+    [(f"q-nonrt-{name}-{tag}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "120"],
+      env | ({"RENDERLAB_RL_PROBE": str(PROBE_DIR / f"comp5-{name}.json"),
+              "RENDERLAB_RL_ROOM_LOG": str(PROBE_DIR / f"comp5-{name}-memory.jsonl")} if tag == "default" else {}))
+     for name, extra in (("flight", []), ("night", ["--night-lanterns"])) for tag, env in (("default", {}), ("off", OFF))]
+    + [(f"p-nonrt-{name}-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "40", "--every", "1"],
+        {} if v == "1" else OFF)
+       for name, extra in (("flight", []), ("cut", ["--diag", "cut=1"]), ("holdcut", ["--diag", "hold=cut"]))
+       for v in ("1", "0")]
+    + [(f"p-rt-ident-comp{v}", ["--path", "rt", "--fox", FOX, *STD, "--frames", "30", "--every", "1"],
+        {} if v == "1" else OFF) for v in ("1", "0")]
+    # Forced overflow (RENDERLAB_RL_ROOM=fixed:16384, no growth): a mixed composite/inline estimate
+    # every frame, with each frame's overflow count logged, against inline.
+    + [(f"p-nonrt-fix{name}-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "40", "--every", "1"],
+        {"RENDERLAB_RL_ROOM": "fixed:16384", "RENDERLAB_RL_ROOM_LOG": str(PROBE_DIR / f"comp5-fix{name}.jsonl")}
+        if v == "1" else OFF)
+       for name, extra in (("flight", []), ("night", ["--night-lanterns"])) for v in ("1", "0")]
+)
+# comp6 on the glossy-pixel list, in two leases.
+# comp6a, pictures: the limit (a floor at roughness 0.5, 0.499 and 0.501 under the night lanterns)
+# and a cross-program hit (the toon hero in a 0.2 glossy floor), each the non-RT default against
+# RENDERLAB_RL_PASS=0 (identical within noise: the w floor and inline's hit fallback), the same two
+# with RENDERLAB_RL_HIT_OWN_PROGRAM=1 (the evidence for Islam), then comp5's pictures.
+OWN = {"RENDERLAB_RL_HIT_OWN_PROGRAM": "1"}
+LIMIT_ROWS = [(f"floor{r.replace('.', '')}", ["--diag", f"floor={r}", "--night-lanterns"]) for r in ("0.5", "0.499", "0.501")]
+CROSS_ROWS = [("toon", ["--diag", "floor=0.2"])]
+PLANS["comp6a"] = (
+    [(f"p-nonrt-{name}-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "24", "--every", "1"],
+      {} if v == "1" else OFF)
+     for name, extra in LIMIT_ROWS + CROSS_ROWS for v in ("1", "0")]
+    + [(f"p-nonrt-{name}own-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "24", "--every", "1"],
+        OWN if v == "1" else OFF)
+       for name, extra in (LIMIT_ROWS[1], CROSS_ROWS[0]) for v in ("1", "0")]
+    + [x for x in PLANS["comp5"] if x[0].startswith("p-") and "fix" not in x[0]]
+)
+# comp6b, bytes and timing: comp5's probe and memory rows and its forced-overflow rows, plus the
+# coordinator's finding 2 (no glossy lobes: the game program's flight; few: the standard program's),
+# default against RENDERLAB_RL_PASS=0, 60 frames, two rounds, the reflection.* stages in the log.
+PLANS["comp6b"] = (
+    [x for x in PLANS["comp5"] if x[0].startswith("q-") or "fix" in x[0]]
+    + [(f"t-nonrt-{name}-{tag}-{k}", ["--path", "nonrt", "--fox", FOX, *extra, "--frames", "60"], env)
+       for k in (1, 2) for name, extra in (("zero", []), ("few", STD)) for tag, env in (("default", {}), ("off", OFF))]
+    # The own-program switch's cost: the toon hero in a 0.2 glossy floor (a mixed frame).
+    + [(f"t-nonrt-toon-{tag}-{k}", ["--path", "nonrt", "--fox", FOX, *STD, "--diag", "floor=0.2", "--frames", "60"], env)
+       for k in (1, 2) for tag, env in (("default", {}), ("own", OWN))]
+)
+# The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
+# flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,
+# paint 0.35), moving and still; `compare.py` crops the reflected edges, binary against binary.
+SLOPE_CLIPS = (("floor", ["--fox", FOX, "--diag", "floor=0.2"]), ("flight", ["--fox", FOX]))
+PLANS["slopepics"] = [
+    (f"p-{path}-{name}-{kind}", ["--path", path, *extra, *still, "--frames", "40", "--every", "1"], {})
+    for path in ("nonrt", "rt") for name, extra in SLOPE_CLIPS
+    for kind, still in (("moving", []), ("still", ["--still"]))
+]
+PLANS["slopetime"] = [
+    (f"t-{path}-{name}-{k}", ["--path", path, *extra, "--frames", "60"], {})
+    for k in (1, 2) for path in ("nonrt", "rt") for name, extra in SLOPE_CLIPS
 ]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
