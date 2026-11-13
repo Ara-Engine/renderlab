@@ -164,9 +164,6 @@ pub(crate) fn rl_resolve_pass_on() -> bool {
 const REFLECTION_LOBE: &str = include_str!("../shaders/reflections_lobe.wgsl");
 const RL_PASS_STUBS: [&str; 2] = ["// ---- rl pass stubs ----\n", "// ---- end of rl pass stubs ----\n"];
 const REFLECTION_TRACE: &str = include_str!("../shaders/reflections_trace.wgsl");
-pub(crate) fn rl_pass_on() -> bool {
-    rl_pass_env() == Some(true)
-}
 /// `RENDERLAB_RL_PASS` / `RENDERLAB_RL_DEFERRED`: "1" forces a switch on (RT included, for A/B),
 /// "0" forces it off; unset follows the path's default. Read once per process.
 fn env_switch(name: &str) -> Option<bool> {
@@ -244,13 +241,13 @@ pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
     };
     with_history_block(composed)
 }
-/// reflections.wgsl's lobe store, and its replacement under the pass: with the deferred
-/// composite a reporting program's glossy receiver that fits the room (`rl_room_reserve`) leaves
-/// its estimate to the composite (rgb 0, the traced fraction kept); every other program, and a
-/// receiver that does not fit, keeps the inline path (no lobe, no zero).
+/// reflections.wgsl's lobe store, and its replacement under the pass: a reporting program's
+/// glossy receiver that fits the room (`rl_room_reserve`) appends its lobe to the glossy-pixel
+/// list and leaves its estimate to the composite (rgb 0, the traced fraction kept); every other
+/// program, and a receiver that does not fit, keeps the inline path (no entry, no zero).
 const PASS_GATE: [&str; 2] = [
     "    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}\n",
-    "    if RL_PASS && !mirror && (RL_DEFERRED_PROGRAM || !rl_composite()) && (!rl_composite() || rl_room_reserve(count,traced,lobe.weight)) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        if rl_composite() {rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;}\n    }\n",
+    "    if RL_PASS && !mirror && RL_DEFERRED_PROGRAM && rl_room_reserve(count,traced,lobe.weight) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;\n    }\n",
 ];
 const DEFERRED_PROGRAM_FLAG: [&str; 2] = [
     "const RL_DEFERRED_PROGRAM:bool=false;",
@@ -948,8 +945,9 @@ fn compose_stage(
 }
 
 // ---- Deferred reflections (the program side; U-RTVIS's composite reads them) ----
-/// Whether traced shading writes the deferred reflection composite's inputs:
-/// `RENDERLAB_RL_DEFERRED=1`, off by default. Read once per process.
+/// Whether `RENDERLAB_RL_DEFERRED` forces the deferred variant on (1 or diag), whatever the
+/// renderer's default. The Mac thread's port test reads it.
+#[allow(dead_code)]
 pub(crate) fn rl_deferred() -> bool {
     rl_deferred_env() == Some(true)
 }
@@ -1016,7 +1014,10 @@ fn deferred_api() -> String {
         assert_eq!(api.matches(line).count(), 1, "deferred API line {line}");
         api = api.replacen(line, "", 1);
     }
-    api
+    // The reflectance only where the composite reads it (glossy receivers), never cleared.
+    let full = "const RL_DEFERRED_FULL:bool=true;";
+    assert_eq!(api.matches(full).count(), 1, "deferred API full switch");
+    api.replacen(full, "const RL_DEFERRED_FULL:bool=false;", 1)
 }
 
 // ---- View modes (docs/design-id-output.md) ----

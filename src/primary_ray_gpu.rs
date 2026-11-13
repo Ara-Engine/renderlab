@@ -2570,8 +2570,7 @@ impl Renderer {
                 ];
                 // U-RTVIS: the reflection pass's lobe output.
                 if let Some(pass) = &t.rl_pass {
-                    entries.push((reflection_pass::LOBE_A, R::TextureView(&pass.lobe_a.view)));
-                    entries.push((reflection_pass::LOBE_B, R::TextureView(&pass.lobe_b.view)));
+                    entries.push((reflection_pass::LIST, pass.list.value.as_entire_binding()));
                     entries.push((reflection_pass::PASS_FRAME, pass.frame.value.as_entire_binding()));
                     entries.push((reflection_pass::ROOM_STATS, pass.stats.value.as_entire_binding()));
                     // The Mac thread's reflection_hits reads H and writes R.

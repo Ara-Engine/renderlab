@@ -596,3 +596,17 @@ fn the_primary_shading_layout_has_no_clashing_bindings() {
         }
     }
 }
+
+/// The deferred composite's point shader (one point a glossy-pixel list entry) validates.
+#[test]
+fn reflection_composite_validates() {
+    let source = include_str!("../shaders/reflections_composite.wgsl");
+    let module = naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+}

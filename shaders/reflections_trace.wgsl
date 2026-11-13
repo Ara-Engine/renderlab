@@ -1,151 +1,73 @@
 // ---- U-RTVIS rl_trace (docs/design-reflection-pass.md) ----
 // Appended to a traced module of the standard program (src/reflection_pass.rs); it uses the
 // reflection block's helpers (rl_vndf, rl_basis, rl_hash, rl_sky, rl_cast, rl_oct_*) and no
-// program code. One invocation per slot, a 2x2 quad of the image: it picks one glossy pixel of
-// the quad whose lobe this frame wrote (L), rotating with the frame, and one stratum of that
-// pixel's fixed set, rotating with the frame from a per-pixel offset; traces the ray; writes a
-// miss's sky radiance into R and appends a hit's record to H. Every slot clears its R texel
-// first, so reflection_hits writes only real hits and record order never changes a result.
-@group(0) @binding(56) var rl_lobe_a:texture_2d<f32>;
-@group(0) @binding(57) var rl_lobe_b:texture_2d<u32>;
+// program code. After shading, the frame's glossy-pixel list (shaders/reflections_lobe.wgsl:
+// every reporting program's glossy receiver that fit the composite's room) is walked one entry an
+// invocation: the receiver's full strata set into its reserved slots of R (a miss's sky) and H (a
+// hit's record for reflection_hits). The composite then sums each entry's slots. Every kernel
+// sizes itself from the list's length, so a view with little to reflect costs little.
+// L: its length, then three vec4<u32> an entry (reflections_lobe.wgsl documents the layout).
+struct RlListEntries { count:u32, header:array<u32,3>, entries:array<vec4<u32>> };
+@group(0) @binding(56) var<storage,read> rl_list:RlListEntries;
 @group(0) @binding(58) var<uniform> rl_pass_frame:vec4<u32>;
-@group(0) @binding(59) var rl_ray_distance:texture_storage_2d<r32float,write>;
+// The list's indirect arguments (rl_list_args): rl_trace_pixels' dispatch (x, y, z), then the
+// composite's draw (vertex count, instance count, first vertex, first instance).
+@group(0) @binding(59) var<storage,read_write> rl_list_arguments:array<u32,8>;
 // H: count, the three dispatch arguments of reflection_hits (RL_HIT_GROUP-wide groups), then
 // 48-byte records (three vec4<u32>).
 struct RlHits { count:atomic<u32>, args:array<u32,3>, records:array<vec4<u32>> };
 @group(0) @binding(64) var<storage,read_write> rl_hits:RlHits;
 @group(0) @binding(65) var rl_samples:texture_storage_2d<rgba16float,write>;
 const RL_HIT_GROUP:u32=64u;
-var<workgroup> rl_group_count:atomic<u32>;
-var<workgroup> rl_group_base:u32;
-
-@compute @workgroup_size(8,8) fn rl_trace(@builtin(global_invocation_id) id:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
-    if lane==0u {atomicStore(&rl_group_count,0u);}
-    workgroupBarrier();
-    let slots=textureDimensions(rl_samples);
-    let size=textureDimensions(rl_lobe_b);
-    let inside=all(id.xy<slots);
-    var record=vec4<u32>(0u);var origin=vec3<f32>(0.0);var d=vec3<f32>(0.0);var cone=vec2<f32>(0.0);
-    var pixel=vec2<u32>(0u);var stratum=0u;var strata=0u;var hit=false;var lobe_alpha=0.0;
-    if inside {
-        textureStore(rl_samples,vec2<i32>(id.xy),vec4<f32>(0.0));
-        textureStore(rl_ray_distance,vec2<i32>(id.xy),vec4<f32>(-2.0));
-        let tag=rl_pass_frame.x%2048u;
-        let start=(rl_pass_frame.x+rl_hash(id.x*0x9e3779b1u^rl_hash(id.y)))&3u;
-        var found=false;
-        for(var i=0u;i<4u && !found;i+=1u) {
-            let k=(start+i)&3u;
-            let p=id.xy*2u+vec2<u32>(k&1u,k>>1u);
-            if any(p>=size) {continue;}
-            let b=textureLoad(rl_lobe_b,p,0);
-            let at=vec2<f32>(unpack2x16float(b.w&0xffffu).x,0.0);
-            if ((b.w>>16u)&0x7ffu)!=tag || !(at.x>0.0) {continue;}
-            found=true;pixel=p;
-            let a=textureLoad(rl_lobe_a,p,0);
-            origin=a.xyz;
-            let ws=unpack2x16float(bitcast<u32>(a.w));
-            let n=rl_oct_decode(b.x);let v=rl_oct_decode(b.y);let side=rl_oct_decode(b.z);
-            let alpha=at.x;let rough=sqrt(alpha);lobe_alpha=alpha;
-            strata=clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX);
-            stratum=(rl_pass_frame.x+(rl_hash((p.x*0x9e3779b1u)^rl_hash(p.y))&0xffffu))%strata;
-            let cone_alpha=alpha*inverseSqrt(f32(strata));
-            let spread=ws.y+2.0*cone_alpha;
-            cone=vec2<f32>(ws.x,spread);
-            let frame=primary_frame.sided.y;
-            let seed=rl_hash((p.x*0x9e3779b1u)^rl_hash(p.y^(frame*0x85ebca6bu)));
-            let rotation=f32(seed>>8u)*(1.0/16777216.0);
-            let radial=select(0.5,fract(f32(frame)*0.6180339887),frame!=0u);
-            let basis=rl_basis(n);
-            let local_v=vec3<f32>(dot(v,basis[0]),dot(v,basis[1]),dot(v,basis[2]));
-            let u=vec2<f32>((f32(stratum)+radial)/f32(strata),fract(rotation+f32(stratum)*0.6180339887));
-            d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
-            if dot(d,side)>0.0 {
-                let epsilon=max(1e-4*length(origin),1e-5);
-                let traced=rl_cast(origin,d,epsilon);
-                textureStore(rl_ray_distance,vec2<i32>(id.xy),vec4<f32>(traced.t));
-                if traced.record.x!=0u {
-                    record=traced.record;hit=true;
-                } else {
-                    textureStore(rl_samples,vec2<i32>(id.xy),vec4<f32>(rl_sky(d,cone_alpha),1.0));
-                }
-            }
-        }
-    }
-    // One atomic per workgroup on H's count, so the list keeps the trace tiles' order.
-    var index=0u;
-    if hit {index=atomicAdd(&rl_group_count,1u);}
-    workgroupBarrier();
-    if lane==0u {
-        let n=atomicLoad(&rl_group_count);
-        rl_group_base=select(0u,atomicAdd(&rl_hits.count,n),n>0u);
-    }
-    workgroupBarrier();
-    if hit {
-        let at=(workgroupUniformLoad(&rl_group_base)+index)*3u;
-        let slot=id.y*slots.x+id.x;
-        // Word 2: stratum | strata << 8 | the lobe's GGX alpha as f16 << 16 (strata <= RL_GLOSSY_MAX).
-        let word2=stratum|(strata<<8u)|(pack2x16float(vec2<f32>(lobe_alpha,0.0))<<16u);
-        rl_hits.records[at]=vec4<u32>(pixel.x|(pixel.y<<16u),slot,word2,record.x);
-        rl_hits.records[at+1u]=vec4<u32>(record.y,record.z,record.w,bitcast<u32>(origin.x));
-        rl_hits.records[at+2u]=vec4<u32>(bitcast<u32>(origin.y),bitcast<u32>(origin.z),rl_oct_encode(d),pack2x16float(cone));
-    }
-}
-// ---- the deferred composite's trace (RENDERLAB_RL_DEFERRED=1): every glossy pixel's full set ----
-// One invocation per pixel: a glossy pixel whose lobe this frame wrote takes a contiguous range of
-// sample slots for its strata (L's count: today's faded set, directions and cones), records it in
-// the range image, clears its slots, writes a miss's sky into its slot and appends a hit's record
-// (slot = its slot) for reflection_hits. reflections_composite.wgsl sums the range.
-// x glossy pixels, y slots taken, z strata requested (every glossy receiver's, summed at shading:
-// rl_room_reserve), w hit records dropped for want of room (their strata stay out of the pixel's
-// mean; the probe reads all four).
+// rl_trace_pixels' entries a workgroup, and workgroups a dispatch row (wgpu skips larger
+// dimensions).
+const RL_LIST_GROUP:u32=64u;
+const RL_LIST_ROW:u32=65535u;
+// x glossy pixels traced, y slots traced, z strata requested (every glossy receiver's, summed at
+// shading: rl_room_reserve), w hit records dropped for want of room (their strata stay out of the
+// pixel's mean). The buffer's later words are the shading side's and the Mac thread's
+// (reflections_lobe.wgsl); the probe reads them all. (The Mac thread's S4a composition rewrites
+// this declaration's exact text, so it stays on one line.)
 struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32> };
 @group(0) @binding(60) var<storage,read_write> rl_trace_stats:RlTraceStats;
-// Per pixel: its first slot << 5 | its slot count (at most 31; 0: no traced reflection).
-@group(0) @binding(61) var rl_ranges:texture_storage_2d<r32uint,write>;
 // The receivers' ray epsilon per pixel (reflection_pass.rs RECEIVER_EPSILON).
 @group(0) @binding(79) var rl_receiver_epsilon:texture_2d<f32>;
-var<workgroup> rl_group_slots:atomic<u32>;
-var<workgroup> rl_group_first:u32;
-// A pixel's strata count from L this frame (0: no traced reflection; a receiver that did not fit
-// the room wrote no lobe).
-fn rl_pixel_count(p:vec2<u32>)->u32 {
-    let b=textureLoad(rl_lobe_b,p,0);
-    let alpha=unpack2x16float(b.w&0xffffu).x;
-    if ((b.w>>16u)&0x7ffu)!=rl_pass_frame.x%2048u || !(alpha>0.0) {return 0u;}
-    return b.w>>27u;
+// The list's length (shading's appends; never past its capacity).
+fn rl_list_length()->u32 { return min(rl_list.count,rl_pass_frame.z); }
+
+// The trace's and the composite's indirect arguments from the list's length.
+@compute @workgroup_size(1) fn rl_list_args(@builtin(local_invocation_index) lane:u32) {
+    // `lane` is unused: every compute entry of the module names its lane (the Mac thread's
+    // RENDERLAB_RS_STACK=workgroup rewrite sizes its stack slices from them).
+    let entries=rl_list_length();
+    let groups=(entries+RL_LIST_GROUP-1u)/RL_LIST_GROUP;
+    rl_list_arguments[0]=min(groups,RL_LIST_ROW);
+    rl_list_arguments[1]=(groups+RL_LIST_ROW-1u)/RL_LIST_ROW;
+    rl_list_arguments[2]=1u;
+    rl_list_arguments[3]=0u;
+    rl_list_arguments[4]=entries;
+    rl_list_arguments[5]=1u;
+    rl_list_arguments[6]=0u;
+    rl_list_arguments[7]=0u;
 }
-@compute @workgroup_size(8,8) fn rl_trace_pixels(@builtin(global_invocation_id) id:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
-    if lane==0u {atomicStore(&rl_group_slots,0u);}
-    workgroupBarrier();
-    let size=textureDimensions(rl_lobe_b);
-    let inside=all(id.xy<size);
-    var count=0u;var b=vec4<u32>(0u);
+
+// One list entry an invocation: its receiver's full strata set (L's count: today's faded set,
+// directions and cones) into its reserved slots, a miss's sky into R and a hit's record into H.
+@compute @workgroup_size(64) fn rl_trace_pixels(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    let entry=(group.x+group.y*RL_LIST_ROW)*RL_LIST_GROUP+lane;
+    if entry>=rl_list_length() {return;}
+    let a=rl_list.entries[entry*3u];let b=rl_list.entries[entry*3u+1u];let c=rl_list.entries[entry*3u+2u];
+    let p=vec2<u32>(c.x&0xffffu,c.x>>16u);
+    let first=c.y;
+    let count=(b.w>>16u)&31u;
     let samples=textureDimensions(rl_samples);
-    // The room: R's slots and H's records (a hit needs one of each). The lobes shading stored all
-    // fit it (rl_room_reserve), so every pixel traces its whole set.
+    // A safeguard only: the reservations fit the room.
     let capacity=min(samples.x*samples.y,arrayLength(&rl_hits.records)/3u);
-    if inside {
-        b=textureLoad(rl_lobe_b,id.xy,0);
-        count=rl_pixel_count(id.xy);
-    }
-    // One atomic per workgroup on the frame's slot count.
-    let offset=atomicAdd(&rl_group_slots,count);
-    workgroupBarrier();
-    if lane==0u {
-        let n=atomicLoad(&rl_group_slots);
-        rl_group_first=select(0u,atomicAdd(&rl_trace_stats.slots,n),n>0u);
-    }
-    let first=workgroupUniformLoad(&rl_group_first)+offset;
-    // A safeguard only: the stored lobes fit the room.
-    if count>0u && first+count>capacity {count=select(0u,capacity-first,first<capacity);}
-    if !inside {return;}
-    textureStore(rl_ranges,vec2<i32>(id.xy),vec4<u32>((first<<5u)|count,0u,0u,0u));
-    if count==0u {return;}
+    if count==0u || first+count>capacity {return;}
     atomicAdd(&rl_trace_stats.pixels,1u);
-    let p=id.xy;
-    let a=textureLoad(rl_lobe_a,p,0);
-    let origin=a.xyz;
-    let ws=unpack2x16float(bitcast<u32>(a.w));
+    atomicAdd(&rl_trace_stats.slots,count);
+    let origin=bitcast<vec3<f32>>(a.xyz);
+    let ws=unpack2x16float(a.w);
     let n=rl_oct_decode(b.x);let v=rl_oct_decode(b.y);let side=rl_oct_decode(b.z);
     let alpha=unpack2x16float(b.w&0xffffu).x;
     let cone_alpha=alpha*inverseSqrt(f32(count));
