@@ -114,7 +114,17 @@ impl Renderer {
             else {
                 continue;
             };
-            let read = composition(head, &slot.source, stage, mixed, MaterialRole::Read).unwrap();
+            // Receiver-only writers (model 255 in the three-word schema) leave
+            // custom shading unchanged when the shared composer supplies no reader.
+            let read = composition(head, &slot.source, stage, mixed, MaterialRole::Read)
+                .unwrap_or_else(|| {
+                    let parameters = program::declares_parameters(&slot.source);
+                    program::with_reflection_history(if mixed {
+                        program::compose_list(head, &slot.source, stage, parameters)
+                    } else {
+                        program::compose(head, &slot.source, stage, parameters)
+                    })
+                });
             let abi = self.program_abi();
             let scopes = OperationScopes::new(&self.device);
             let state = self.view.primary.as_ref().unwrap();
