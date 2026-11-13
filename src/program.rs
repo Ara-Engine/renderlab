@@ -187,7 +187,7 @@ fn reflection_api(head: &str, program: &str, stage: Stage) -> (String, bool) {
     (api, true)
 }
 /// The glossy strata's full-count weight as shaders/reflections.wgsl declares it.
-const FULL_STRATA: &str = "const RL_FULL_STRATA:f32=0.25;";
+const FULL_STRATA: &str = "const RL_FULL_STRATA:f32=0.5;";
 /// `RENDERLAB_RL_FULL_STRATA` overrides the reflectance weight from which a glossy lobe traces
 /// all its strata (shaders/reflections.wgsl `RL_FULL_STRATA`); 0 traces every lobe's full
 /// count, as before the weight. Read once per process; for comparisons, not a setting.
