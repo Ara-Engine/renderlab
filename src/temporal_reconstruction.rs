@@ -378,6 +378,11 @@ const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 /// Engine-side sampling for reconstructed Interactive shadows. New targets/cuts use
 /// `cold_rays`, scene-history restarts use `reset_rays`, and moving/young history uses
 /// `active_rays`. After `settle_frames` unchanged frames it uses `held_rays`.
+/// U-FIXED (2026-11-13): moving 16 and restart 32, down from 32 and 64. The rotated directions
+/// accumulate through TR1's history; on the game flight with two Foxes the sun's cost fell from
+/// 5.37 to 2.90 ms with no visible change (crops within 28 px over 8 codes of 32/64 after the
+/// first frame, cut included). 8/16 halves it again but grains long soft penumbrae for a few
+/// frames after a cut; the knobs (`with_env_knobs`) A/B both on Ara.
 /// Materials still receive the same visibility value and shading inputs.
 /// P-RTS penumbra listing (`PENUMBRA_LISTING`, off by default; docs/p-rts.md) would trace
 /// the budget only near shadow edges; with it off every receiver traces the budget.
@@ -393,8 +398,8 @@ impl Default for ReconstructionShadowBudget {
     fn default() -> Self {
         Self {
             cold_rays: 256,
-            reset_rays: 64,
-            active_rays: 32,
+            reset_rays: 32,
+            active_rays: 16,
             held_rays: 8,
             settle_frames: 16,
         }
