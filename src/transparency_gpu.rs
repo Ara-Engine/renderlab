@@ -2361,7 +2361,8 @@ impl Renderer {
             .collect();
         // Per-pixel panes (`panes`): a record (rectangle and model slot) per instance of each
         // glass draw, at its dynamic offset, and a pane group per draw. Draws with a tangent
-        // stream keep the raster: the pane shading builds vertices without tangents.
+        // stream keep the raster (the pane shading builds vertices without tangents), and so do
+        // draws of more than `panes::MAX_INSTANCES` instances and films (below).
         // Films (IOR one, no thickness) of programs that declare them blend in hardware:
         // consecutive films share one pass, each draw's instances far to near (`film_ids`).
         let films: Vec<bool> = transparent
@@ -2384,7 +2385,10 @@ impl Renderer {
         let mut pane_bytes = Vec::new();
         if pixel_panes && targets.pane_ids.is_some() {
             for (i, draw) in transparent.iter().enumerate() {
-                if films[i] || draw.mesh.tangent.is_some() {
+                if films[i]
+                    || draw.mesh.tangent.is_some()
+                    || draw.instances.state.models.len() > panes::MAX_INSTANCES
+                {
                     continue;
                 }
                 let state = &draw.instances.state;
