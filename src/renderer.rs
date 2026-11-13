@@ -3591,6 +3591,12 @@ impl Renderer {
                 self.ensure_gi_receiver_pass(shading)?;
                 mark(&mut encoder, "gi_receiver");
                 self.encode_gi_receiver_pass(&mut encoder, shading);
+                // Visibility feeds both the optional detail probes and final shading.
+                if primary_ray_gpu::light_vis_pass::on() {
+                    self.ensure_light_vis(shading)?;
+                    mark(&mut encoder, "light_visibility");
+                    self.encode_light_vis(&mut encoder, shading);
+                }
                 if !self.view.outputs.modes.shades() {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
@@ -3883,6 +3889,9 @@ impl Renderer {
         // `queue.submit` for an older one shows here with the older one counted.
         let alive = self.occupied();
         let index = self.queue.submit([commands]);
+        if let Some(virtual_shadows) = self.view.virtual_shadows.as_mut() {
+            virtual_shadows.submitted();
+        }
         if let Some(mut t) = marks {
             t.submitted();
             self.pass_timeline = Some(t);

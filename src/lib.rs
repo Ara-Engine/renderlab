@@ -44,6 +44,7 @@ mod primary_ray;
 pub mod pipeline_compilation;
 mod program;
 pub mod program_watch;
+mod readback_ring;
 mod receiver_adjacency;
 /// M7 reference path tracer (measurement tooling for the GI and reflection gates).
 pub mod reference;
