@@ -107,10 +107,13 @@ pub(crate) fn request_device(
 ) -> Result<(wgpu::Device, wgpu::Queue), Error> {
     let limits = adapter.limits();
     // PRIMITIVE_INDEX: per-pixel pane shading's id raster (src/transparency_panes.rs).
+    // TEXTURE_COMPRESSION_BC: block-compressed material textures where the adapter samples
+    // them (`Engine::compressed_textures`); hosts upload RGBA8 elsewhere.
     let optional = adapter.features()
         & (wgpu::Features::TIMESTAMP_QUERY
             | wgpu::Features::PIPELINE_CACHE
-            | wgpu::Features::PRIMITIVE_INDEX);
+            | wgpu::Features::PRIMITIVE_INDEX
+            | wgpu::Features::TEXTURE_COMPRESSION_BC);
     let (features, required_limits, experimental_features) = match path {
         RenderPath::HardwareRt => (
             // RENDERLAB_RT_PRIMARY (measurement): the visibility buffer's 64-bit raster atomics.
