@@ -81,6 +81,11 @@ const REFLECTION_ENTRY: &str = "    rl_indirect_open();\n    let surface_output=
 const REFLECTION_VISIBILITY_SEAM: &str =
     "    return hard_shadow(lights[s.index],input.receiver,s.direction);\n";
 const REFLECTION_VISIBILITY: &str = "    if rl_reflection_hit {return rl_hit_shadow(lights[s.index],input.receiver,s.direction);}\n";
+/// A shadowed local light's visibility in `light_visibility`, where reflection hits from a
+/// lobe at least `LocalShadows::unshadowed_hits_from` rough skip it (the cluster frame's
+/// far.z; `rl_hist_rough` is the reflecting lobe's perceptual roughness, set before its hits).
+const LOCAL_VISIBILITY_SEAM: &str = "    if lights[s.index].kind.w!=0u { return rl_local_shadow(";
+const HIT_LOCAL_UNSHADOWED: &str = "    if rl_reflection_hit && lights[s.index].kind.w!=0u && rl_light_frame.far.z!=0.0 && rl_hist_rough+1.0>=rl_light_frame.far.z { return 1.0; }\n";
 /// U-RTVIS: a reflection hit's local-light visibility takes its share of the estimate's
 /// samples. A glossy pixel averages `rl_hit_strata` hits; stratum k of them evaluates every
 /// count-th disk ray (RT, local_light_ray.wgsl) or PCF tap (non-RT PCSS, light_cluster_api.wgsl)
@@ -1056,6 +1061,13 @@ fn compose_stage(
         source = source.replacen(
             REFLECTION_VISIBILITY_SEAM,
             &format!("{REFLECTION_VISIBILITY}{REFLECTION_VISIBILITY_SEAM}"),
+            1,
+        );
+        // `LocalShadows::unshadowed_hits_from`: rough enough hits light local lights unshadowed.
+        assert_eq!(source.matches(LOCAL_VISIBILITY_SEAM).count(), 1);
+        source = source.replacen(
+            LOCAL_VISIBILITY_SEAM,
+            &format!("{HIT_LOCAL_UNSHADOWED}{LOCAL_VISIBILITY_SEAM}"),
             1,
         );
         source = rl_history_tune(rl_split(rl_hit_switches(source)));

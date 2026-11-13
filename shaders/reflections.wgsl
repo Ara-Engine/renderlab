@@ -268,6 +268,13 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
     }
     var count=select(clamp(u32(ceil(RL_RAYS_PER_ROUGHNESS*rough)),RL_GLOSSY_RAYS,RL_GLOSSY_MAX),1u,mirror);
     if RL_FULL_STRATA>0.0 && !mirror {count=max(1u,u32(ceil(f32(count)*min(lobe.weight/RL_FULL_STRATA,1.0))));}
+    // The fade band (traced fraction w from 1 at bands.y to 0 at bands.x): strata scale with w, so
+    // the cost ramps down with the traced share instead of stepping off at max_roughness. The traced
+    // term's variance, about w^2/(count w) = w/count, falls to 0 at the cutoff (U-RTVIS; Glint's
+    // 0.45 navy bands traced 16 strata for a third of their weight). The history's stride
+    // (count / strata a frame) sees the faded count: a fixed count per roughness, so its rotation
+    // still visits every stratum once over stride frames.
+    if !mirror && traced<1.0 {count=max(1u,u32(ceil(f32(count)*traced)));}
     let restart_strata=primary_frame.reflection.w;
     let restarted=!mirror && restart_strata>1.0 && rl_restarts(input.world);
     if restarted {count*=u32(restart_strata);}

@@ -32,7 +32,10 @@
 //! the field or forest walk there by turning it 150 degrees in place. `hold=1` keeps
 //! the camera at its first pose while the lights, the hero and the objects animate;
 //! `hold=pose` (U-FIXED) also keeps the objects and the hero's placement still while the
-//! Fox plays its walk in place, so the skinned mesh is the only mover. `fox=2` (U-FIXED,
+//! Fox plays its walk in place, so the skinned mesh is the only mover. `hold=cut` (U-RTVIS)
+//! holds the first pose, jumps to the `cut=1` pose at frame 24 with `cut_view` and holds that,
+//! while the lights, the hero and the objects animate: a respawn under a still camera, as Ara's
+//! Skyward bridge cuts on every respawn. `fox=2` (U-FIXED,
 //! with `--fox`) adds a second Fox walking the same circle half a turn behind: two skinned
 //! characters, as on Ara's Showcase.
 //! `--views a|b|ab|ai` (docs/design-views.md) picks which of two views render each tick: `a`
@@ -374,7 +377,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (glow_steps, cuts) = (scene_key("glow", "step"), scene_key("cut", "1"));
     let pose_only = scene_key("hold", "pose");
     let two_foxes = scene_key("fox", "2");
-    let hold = scene_key("hold", "1") || pose_only;
+    let hold_cut = scene_key("hold", "cut");
+    let hold = scene_key("hold", "1") || pose_only || hold_cut;
     // U-SPECK (docs/speck.md): `field=1` scatters 300 small bright boxes and a pale slab over
     // an empty quarter of the ground and walks the camera 4 m across it while turning 12
     // degrees, whatever `--frames` is: the cell mosaic Ara's Outpost showed on flat ground.
@@ -1070,9 +1074,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 * Mat4::from_rotation_x(0.6 * spin),
         )?;
         // Fly path: a slow orbit that descends and closes in on the hero.
-        let cut = cuts && frame >= EVENT_FRAME;
-        if (cuts || cut_turn) && frame == EVENT_FRAME {
+        let cut = (cuts || hold_cut) && frame >= EVENT_FRAME;
+        if (cuts || cut_turn || hold_cut) && frame == EVENT_FRAME {
             engine.cut_view(view);
+            // `hold=cut`: the held pose moves to the cut's pose and holds there.
+            if hold_cut {
+                held_pose = None;
+            }
         }
         let orbit = 0.6 + 0.25 * t + if cut { 2.1 } else { 0.0 };
         let radius = 14.0 - 4.0 * (t / 2.0).min(1.0);

@@ -1795,6 +1795,11 @@ fn frame(
     frame[88..92].copy_from_slice(&turn.to_ne_bytes());
     let near = scene.local_shadows.unwrap_or_default().near;
     frame[100..104].copy_from_slice(&near.to_ne_bytes());
+    // No local shadows assembled: hits have none to drop.
+    let unshadowed = scene
+        .local_shadows
+        .map_or(0.0, |s| lc::unshadowed_hits_word(&s));
+    frame[104..108].copy_from_slice(&unshadowed.to_ne_bytes());
     let cluster_inputs = ClusterInputs {
         lights: StorageBuffer::new(gpu, &records)?,
         frame: StorageBuffer::new(gpu, &frame)?,

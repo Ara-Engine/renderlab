@@ -78,6 +78,8 @@ const GI_H_GATHERS:u32=19u;
 const GI_H_GATHER_CELLS:u32=20u;
 // Gathers a cell made for a gather's hit gets (0: GI_H_GATHERS; src/gi_cache.rs hit_gathers).
 const GI_H_HIT_GATHERS:u32=30u;
+// Nonzero: a new cell takes its parent level's bounce until its own first gather (U-RTVIS).
+const GI_H_PARENT_STANDIN:u32=31u;
 // Gather stride S (G2b; 1, 2 or 4): a gather traces the blocked directions k with k % S == 0,
 // each weighted S times a direction's solid angle: a fixed subset of the fixed directions.
 const GI_H_GATHER_STRIDE:u32=21u;
