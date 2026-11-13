@@ -377,3 +377,41 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
     // The soft RT head and both non-RT heads trace reflections; the hard RT head does not.
     assert!(validated >= 3, "{validated} traced heads validated");
 }
+
+/// RENDERLAB_LIGHT_BOUND: both modes, adding or dropping skipped lights, compose into the
+/// standard program's traced modules (tiles and list, RT and non-RT heads), keep the
+/// program's range on the edited program, and validate.
+#[test]
+fn light_bound_composes_and_validates() {
+    use crate::program::{LightBound, Stage, compose, compose_list, with_light_bound};
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let mut validated = 0;
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            for (sum, drop) in [(false, false), (true, false), (true, true)] {
+                let full = if list {
+                    compose_list(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
+                } else {
+                    compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
+                };
+                let bound = LightBound { sum, codes: 0.25, drop };
+                let edited = with_light_bound(full, bound);
+                let program = &edited.source[edited.program.clone()];
+                assert!(program.contains("if !rl_lb_skip(light,rl_lb_c,exposed)"));
+                assert!(program.ends_with(&crate::STANDARD_PROGRAM[crate::STANDARD_PROGRAM.len() - 40..]));
+                let source = &edited.source;
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                validated += 1;
+            }
+        }
+    }
+    assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 3);
+}
