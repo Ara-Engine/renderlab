@@ -430,7 +430,8 @@ const MAX_PIECES: u64 = 2 * crate::TRACED_DRAWS as u64;
 /// lists and the cluster data bindings. Rebuilt when the draw list changes.
 struct Casters {
     /// Each draw's index buffer and placement count.
-    key: Vec<(usize, usize)>,
+    /// Per draw: its mesh, its placement count and its non-casting bits.
+    key: Vec<(usize, usize, Vec<u64>)>,
     /// Bumped on every rebuild, so bind groups over these buffers follow.
     generation: u64,
     instances: ClusterInstances,
@@ -529,6 +530,8 @@ struct Cache {
     /// Grow-only caster height range along the light, which the depth encoding uses.
     heights: Option<[f64; 2]>,
     models: Vec<[u32; 16]>,
+    /// Per placement, whether it casts (`Instances::set_casts_shadows`).
+    casts: Vec<bool>,
     bounds: Vec<crate::shadow_plan::Bounds>,
     /// Skinned poses per placement (`skinning::placement_poses`).
     poses: Vec<crate::renderer::skinning::PlacementPose>,
@@ -1754,9 +1757,15 @@ impl Renderer {
 
     /// The draw list's caster clusters, rebuilt when its meshes or placement counts change.
     fn ensure_virtual_casters(&mut self, draws: &[PreparedDraw<'_>]) -> Result<(), Error> {
-        let key: Vec<(usize, usize)> = draws
+        let key: Vec<(usize, usize, Vec<u64>)> = draws
             .iter()
-            .map(|d| (Arc::as_ptr(&d.mesh.index) as usize, d.instances.len()))
+            .map(|d| {
+                (
+                    Arc::as_ptr(&d.mesh.index) as usize,
+                    d.instances.len(),
+                    d.instances.state.non_casting().to_vec(),
+                )
+            })
             .collect();
         let state = self.view.virtual_shadows.as_ref().unwrap();
         if state.casters.as_ref().is_some_and(|c| c.key == key) {
@@ -1947,10 +1956,13 @@ impl Renderer {
         // Placements in traced order: draw order, then instance slot.
         let mut models = vec![];
         let mut bounds = vec![];
+        let mut casts = vec![];
         for draw in draws {
-            for &model in &draw.instances.state.models {
+            let state = &draw.instances.state;
+            for (slot, &model) in state.models.iter().enumerate() {
                 models.push(model.to_cols_array().map(f32::to_bits));
                 bounds.push(shadow_gpu::world_bounds(draw.mesh.bounds, model)?);
+                casts.push(state.casts_shadows(slot));
             }
         }
         let placements = models.len();
@@ -1968,7 +1980,8 @@ impl Renderer {
         };
         let (mut zlo, mut zhi) = (f64::INFINITY, f64::NEG_INFINITY);
         let (mut near, mut far) = (f64::INFINITY, 0.0f64);
-        for b in &bounds {
+        // Only casters set the map's height range and the ladder's span.
+        for b in bounds.iter().zip(&casts).filter(|(_, c)| **c).map(|(b, _)| b) {
             for c in corners(b) {
                 let z = c.dot(l);
                 zlo = zlo.min(z);
@@ -1978,7 +1991,7 @@ impl Renderer {
             let nearest = eye.clamp(b.min.as_dvec3(), b.max.as_dvec3());
             near = near.min((nearest - eye).length());
         }
-        if bounds.is_empty() {
+        if !casts.contains(&true) {
             (zlo, zhi, near, far) = (0.0, 1.0, 1.0, 1.0);
         }
         let mut invalidated = [false; MAX_LEVELS];
@@ -2077,7 +2090,9 @@ impl Renderer {
             // only a new pose deforms (per placement, in placement order, collected once:
             // P-NRT's O(placements^2) find).
             for (p, model) in models.iter().enumerate() {
+                // A changed casting flag is a caster appearing or leaving in place.
                 if *model != cache.models[p]
+                    || casts[p] != cache.casts[p]
                     || crate::renderer::skinning::deformed(&cache.poses, &poses, p)
                 {
                     let [a0, a1] = rect(&cache.bounds[p]);
@@ -2095,6 +2110,7 @@ impl Renderer {
             }
         }
         cache.models = models;
+        cache.casts = casts;
         cache.bounds = bounds;
         cache.poses = poses;
         let pages = i64::from(s.pages);

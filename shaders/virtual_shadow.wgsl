@@ -256,6 +256,8 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
     let index=id.x+id.y*65535u*64u;
     if index>=vsm.counts.z {return;}
     let c=vsm_clusters[index];
+    // A placement that casts no shadow (pad0, src/visibility_buffer.rs) is never rasterized.
+    if c.pad0!=0u {return;}
     let m=models[c.placement];
     var lo=vec2<f32>(3.4e38);var hi=vec2<f32>(-3.4e38);
     for(var i=0u;i<8u;i+=1u) {

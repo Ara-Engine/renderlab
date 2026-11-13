@@ -433,6 +433,28 @@ Not fixed tonight; each needs either an exact coverage model at very high backgr
 - The internal size is rounded per axis, so targets whose size isn't divisible by 3 (quality) or 2 (performance) render at a very slightly different aspect.
 - The capable 1x RT viewer now renders traced primaries with TR1 (RTDEF2). Upscaling presets remain library settings; the viewer has no preset flag.
 
+**Thin lines crawl in a held view (PC integration, Glint start view, 2026-11-13).** The view is settled and the camera held. The flicker map gives each pixel's largest luma change over 7 consecutive jittered frame pairs:
+- **Non-RT:** 110 pixels change by 16 codes or more between consecutive frames, and 1,177 by 4 or more.
+- **RT:** 20 and 582.
+
+98% of the worst pixels sit on the two thin dark-blue guard-rail lines running to the vanishing point (three clusters hold 101 of the 110), plus ring outlines and the ball's rim. It's a crawl along sub-pixel lines, not noise on surfaces. Sheets: `D:/Coding/renderlab-work/ara-integration/perf/glint/runtorun/start-flicker-nonrt.png` and `start-flicker-rt.png` (frame | marked | map).
+
+The leading guess, unconfirmed, is sub-pixel lines that the temporal resolve can't hold, worse where the shadow and GI inputs on those edges are noisier.
+
+**Cheap split first**, on the same held view:
+- TR1 off;
+- sharpen / upscale off;
+- the sun's and GI's contributions frozen.
+
+That shows which input moves. **Known methods to try after:**
+- coverage-aware history for sub-pixel lines, extending TR1b's straight-edge transport;
+- a thin-feature mask that widens the history clamp;
+- analytic line coverage in the visibility buffer.
+
+Islam names aliasing and ghosting as the defects he most wants gone. No unit owns this yet.
+
+**Glint goal run-to-run (non-RT, PC integration, 2026-11-13).** Two runs differ in 67,380 pixels; 96% are off by exactly 1 code, 56 by more than 16, and the largest region is 37 px. The likeliest cause (U-RTVIS, from the code) is GI miss-list overflow: `gi_request_one` (`shaders/gi_cache.wgsl:1705`) and the pixel path (`:484`) keep whichever requests arrive first once `gi_frame.counts.w` is reached. N8o made the claim among surviving requests deterministic, but not which requests survive. Fix: choose survivors by key (for example, the lowest keys per bucket, as claims do), not by arrival. To confirm, check the `miss_overflow` counter on the goal frames.
+
 **Reference instrument.** The visible-sky references were traced by a release-profile test binary; on fixed resources its first renders differ from later ones by ≤2 ULP, which the bounded-AS policy's late fixed-resource control does not see. A dev-profile build of the same source (U0b's profile) reproduces quarry-final byte for byte on 8 independent and 4 fixed replays. The sky references stay accepted under the policy; a dev-profile re-trace was stopped by the overnight no-new-references rule.
 
 ## GI
@@ -1196,4 +1218,15 @@ The engine's shipping sun request ended its cascades at 40 m (`[4, 12, 40]`, src
 - Measured (sr1, 2026-11-13, game_scene 1920x1080 at 759c7b21's code, one binary, `RENDERLAB_SUN_SPLITS=4,12,40` as old; contended: VALORANT running, reference flight 34.3 ms against 23). Pictures: `--diag far=1`, old casts no column shadow at 80, 200, 300 or 800 m on either path, and new casts all four on both. The quarry (frames 0-39 every 10) is byte-identical old vs new on both paths: its views have no shadowed receivers past 40 m. In motion (`far=move`, 1:1 crops RT | non-RT): the near ends match. Non-RT's far tails show a diagonal seam where width and softness step, and it slides along the tail as the camera moves; RT's tails are continuous. Frame time, plain pairs, median GPU ms new vs old: game flight RT 41.16/41.24 vs 40.98/40.05, non-RT 75.44/74.92 vs 74.88/76.38 (non-RT sun_shadow 4.13/4.05 vs 4.02/3.95, about +0.1 ms); quarry RT 31.89 vs 31.67, non-RT 104.89 vs 105.97. No rise above the contended pair noise (about 1 ms) on either scene. Lib suite: 259 passed, 0 failed.
 - The splits set neither default path's texel; they only bound coverage. RT (`fresh_estimate`) uses the cascade to pick the receiver's range, clip each ray to its light-space box and orient its directions, and tests triangles exactly. Non-RT (`SoftShadows::Virtual`, `Disk`) picks a clipmap level from the receiver's pixel footprint (`vd_select`; a texel of half to one pixel, on a world-anchored grid, rasterized at texel centres). So the non-RT seam is not the cascade step. It is the clipmap's 2x level step, at every doubling of camera distance, so the boundaries are distance contours from the eye that cross a tail obliquely and move with the camera. It was already there at every boundary; the 1 km coverage makes it visible on far tails. A caster under one texel (a shadow under about one pixel at its receiver) lands only where it covers a texel centre: a dashed footprint, stable under camera translation within a level, changing where the receiver crosses a boundary. Fix in progress: dithering the level choice across a band, resolved by TR1.
 - Non-RT reach depends on the nearest caster, not only on the splits. The clipmap has at most 8 levels (`MAX_LEVELS`) and its finest is set by the nearest caster's bounds from the eye (`near`, the camera near plane when the eye is inside a box). The coarsest level's window then reaches about 55-110 times that distance (game_scene's 55 degree, 1080p camera), and receivers outside every window get no map and are lit. With the eye 40 m up, `far=1` puts that past 1 km. A character, weapon or wall within 0.5-0.9 m of the camera ends non-RT sun shadows at about 30-100 m. Fix in progress, with a `far=low` repro (eye at 1.7 m, a caster beside it).
+- Reach fix (t3/fixed-reach, rl1 2026-11-13): when the ladder would span more than 8 octaves, its coarsest level stops at the sun request's coverage end and its finest follows the nearest receiver the mark pass saw (less the eye's travel since, one level finer; a cut takes the box level raised so no step is over 4x); octaves far out are skipped. Results:
+  - `far=box` (eye inside a caster's box): receivers with no level 588,804 -> 0, pixels over 24 codes from RT 219,066 -> 10,404.
+  - `far=low`: 34,658 -> 0, and 16,506 -> 10,203.
+  - The flight and the quarry are byte-identical, old ladder against new.
+  - The box cut keeps its shadow on the cut frame.
+  - Timing, non-RT: flight unchanged; `far=lowmove` sun_shadow 2.2 -> 1.87 ms.
+
+  The far-tail seam remains: it is the occluder height-band step in `vd_map`, not a level change, so the receiver-level dither (`VD_BAND`, off by default) leaves it. The next try dithers the height-band edge.
 - 1 km is a first number. The durable form follows the view: the last end at the camera's far plane (`Camera::far()` exists) or the scene's extent from the camera, resolved per frame where the shadow frame is planned (shadow_gpu::plan_frame, shared by wgpu and the port). Not built: the request is a fixed setting today, and a per-frame end changes the API's "the final split is the coverage limit" contract for explicit requests.
+
+## Local light inside a closed casting fitting: non-RT blocks about a quarter (U-FIXED, 2026-11-13)
+`engine::casts_shadows_tests` (cs2, bin of 42001938): a point light inside a closed 1 m shade and a downward spot inside a 0.5 x 0.3 x 0.5 m head, no sky. With RT a casting fitting blocks all of the lamp's light on the floor. Without RT it blocks about a quarter (floor share over the sky: point 49.4 open, 37.0 casting; spot 29.1 open, 22.9 casting), so the local shadow atlas lets most of a fully enclosed light through. Not caused by `set_casts_shadows`: a non-casting fitting matches the open lamp on both paths (49.5 and 29.2). Not yet diagnosed: the maps' near plane is 2 cm and no shadow pipeline culls faces. Outpost's floodlights (heads 5-23 cm from the light) are the content case; with `castShadows: false` on their heads (Ara #191) they no longer depend on it.

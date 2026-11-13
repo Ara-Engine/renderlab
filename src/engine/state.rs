@@ -30,6 +30,12 @@ pub(crate) trait Residency {
         slot: usize,
         transform: Mat4,
     ) -> Result<(), Error>;
+    /// Writes one placement's shadow casting into a live batch (`Batch::casts`).
+    fn set_instance_casts_shadows(
+        instances: &mut Self::Instances,
+        slot: usize,
+        casts: bool,
+    ) -> Result<(), Error>;
 }
 
 /// A material and the program it names.
@@ -46,6 +52,8 @@ pub(crate) struct Batch<R: Residency> {
     pub mesh: MeshId,
     pub material: MaterialId,
     pub models: Vec<Mat4>,
+    /// Per slot, whether the object blocks light (`set_casts_shadows`; spawned true).
+    pub casts: Vec<bool>,
     pub objects: Vec<ObjectId>,
     /// None until the next frame uploads the current `models` (after spawn/despawn).
     pub instances: Option<R::Instances>,
@@ -154,6 +162,7 @@ impl<R: Residency> State<R> {
                     mesh,
                     material,
                     models: Vec::new(),
+                    casts: Vec::new(),
                     objects: Vec::new(),
                     instances: None,
                 });
@@ -170,6 +179,7 @@ impl<R: Residency> State<R> {
         let slot = entry.models.len();
         let object = self.objects.insert(ObjectEntry { batch, slot });
         entry.models.push(transform);
+        entry.casts.push(true);
         entry.objects.push(object);
         entry.instances = None;
         Ok(object)
@@ -187,6 +197,20 @@ impl<R: Residency> State<R> {
         entry.models[slot] = transform;
         Ok(())
     }
+    /// Whether an object blocks light; a live batch takes the write too.
+    pub fn set_casts_shadows(&mut self, object: ObjectId, casts: bool) -> Result<(), Error> {
+        let &ObjectEntry { batch, slot } = self.objects.get(object)?;
+        let entry = self.batches.get_mut(batch)?;
+        if let Some(instances) = &mut entry.instances {
+            R::set_instance_casts_shadows(instances, slot, casts)?;
+        }
+        entry.casts[slot] = casts;
+        Ok(())
+    }
+    pub fn casts_shadows(&self, object: ObjectId) -> Result<bool, Error> {
+        let entry = self.objects.get(object)?;
+        Ok(self.batches.get(entry.batch)?.casts[entry.slot])
+    }
     pub fn transform(&self, object: ObjectId) -> Result<Mat4, Error> {
         let entry = self.objects.get(object)?;
         Ok(self.batches.get(entry.batch)?.models[entry.slot])
@@ -197,6 +221,7 @@ impl<R: Residency> State<R> {
         let ObjectEntry { batch, slot } = self.objects.remove(object)?;
         let entry = self.batches.get_mut(batch)?;
         entry.models.swap_remove(slot);
+        entry.casts.swap_remove(slot);
         entry.objects.swap_remove(slot);
         entry.instances = None;
         if let Some(&moved) = entry.objects.get(slot) {
@@ -238,6 +263,13 @@ mod tests {
             instances.push((slot, transform));
             Ok(())
         }
+        fn set_instance_casts_shadows(
+            _: &mut Self::Instances,
+            _: usize,
+            _: bool,
+        ) -> Result<(), Error> {
+            Ok(())
+        }
     }
     fn at(x: f32) -> Mat4 {
         Mat4::from_translation(crate::Vec3::new(x, 0.0, 0.0))
@@ -275,6 +307,20 @@ mod tests {
         assert_eq!(state.batches.len(), 1);
         assert_eq!(state.remove_mesh(other).unwrap(), "sphere");
         assert!(state.spawn(other, material, at(0.0), 8).is_err());
+    }
+
+    #[test]
+    fn shadow_casting_is_per_object_and_moves_with_its_slot() {
+        let (mut state, mesh, material) = scene();
+        let a = state.spawn(mesh, material, at(1.0), 8).unwrap();
+        let b = state.spawn(mesh, material, at(2.0), 8).unwrap();
+        assert!(state.casts_shadows(a).unwrap() && state.casts_shadows(b).unwrap());
+        state.set_casts_shadows(b, false).unwrap();
+        // Despawning the first moves the last object, and its casting, into slot 0.
+        state.despawn(a).unwrap();
+        assert!(!state.casts_shadows(b).unwrap());
+        let batch = state.batches.ids().next().unwrap();
+        assert_eq!(state.batches.get(batch).unwrap().casts, [false]);
     }
 
     #[test]

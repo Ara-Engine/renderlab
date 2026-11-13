@@ -441,13 +441,19 @@ impl Pass {
                 };
                 let start = kernels.find(start).expect("fog kernel start");
                 let end = kernels.find(end).expect("fog kernel end");
+                // The hardware visibility's shadow ray culls by SHADOW_CASTER_MASK; this
+                // module has no shaders/scene.wgsl, so it declares the mask itself.
                 let (enable, visibility) = if self == Self::AtmosphereFogInject {
                     (
                         "enable wgpu_ray_query;\n",
-                        crate::renderer::atmosphere_gpu::HARDWARE_VISIBILITY,
+                        format!(
+                            "{}{}",
+                            crate::shadows::SHADOW_CASTER_MASK_WGSL,
+                            crate::renderer::atmosphere_gpu::HARDWARE_VISIBILITY
+                        ),
                     )
                 } else {
-                    ("", "")
+                    ("", String::new())
                 };
                 format!(
                     "{enable}{}{head}{visibility}{}",

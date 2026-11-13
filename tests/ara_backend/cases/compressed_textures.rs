@@ -213,6 +213,7 @@ fn variance_seen(
             }),
             sky_map: None,
             skins: None,
+            casts: None,
             colour_lut: None,
             ids: None,
         },
