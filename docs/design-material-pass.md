@@ -33,7 +33,9 @@ The receiver is what the sun, GI and light-visibility passes and shading read in
 - **Interpolated normal (12 bits):** within 8.1e-4 rad (0.047 degrees). Today shading's GI and ES lookups still bin by the decoded normal; the GI pass will read this one, so a cell boundary within 0.047 degrees of a normal can flip which cell it reads.
 - **Repaired edges:** 2 pixels in the case are moved by the repair. The record carries shading's barycentric point there and the near-edge mark, so a reader that needs the sun path's point repairs those hits itself (`MATERIAL_TRACE_RECEIVER` is the sun path's `primary_penumbra_receiver`, body for body). The writer does not run the repair: its ray-query code made the pass 0.56 ms (Showcase) and 0.74 ms (Glint) slower on the M5 for a handful of pixels. The sun pass already carries that code.
 
-Order in an interactive port frame: trace (raw hit; near-edge pixels queued) → `primary_repair_interactive` (repaired hit record) → material pass → shading. On the port the sun's rays are inside the trace (visibility) stage, before the material pass. Getting the desktop's order (material before sun) needs #94's sun pass ported, as a pass after the material pass reading words 1 and 2; it isn't built.
+Order in an interactive port frame: trace (raw hit; near-edge pixels queued) → `primary_repair_interactive` (repaired hit record) → material pass → shading. **The port keeps the camera ray and the sun's rays together in the trace kernel,** which has the hit in hand, so a separate sun kernel would buy nothing there by itself. The record feeds GI, the lights and shading. The desktop runs visibility → material → sun → GI → light visibility → shading (#98).
+
+**Misses:** the writer runs only on hits, after the seam. Camera misses and the region-exterior fast-clear blocks leave the record as the previous frame wrote it. Today's readers check the hit image first, so this is harmless. Before any reader drops its hit read, the writer must store an explicit miss sentinel on every miss.
 
 ### What shading still reads after `surface` (the audit)
 
