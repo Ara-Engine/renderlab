@@ -230,7 +230,10 @@ override VD_MIP_POINT:bool=true;
 // receiver crosses a band: the 2x step that slid along long far shadows. Only while TR1
 // jitters (vd.size.z > 0) and has VD_HBAND_AFTER frames of history (vd.size.w): a cut's first
 // frames keep the plain bands, since the dither shows as stipple until TR1 averages it. 0: off.
-override VD_HBAND:f32=0.25;
+// Off by default for now (2026-11-14): on Glint's flight view the dither widens a dotted line of
+// light (empty map texels along a caster's shared triangle edge) into beads. Screens and the
+// later flip: RENDERLAB_VD=VD_HBAND=0.25.
+override VD_HBAND:f32=0.0;
 override VD_HBAND_AFTER:f32=2.0;
 fn vd_hband_on()->bool {return VD_HBAND>0.0 && vd.size.z>0.0 && vd.size.w>=VD_HBAND_AFTER;}
 // Screens: 1 writes lit before any work (dispatch and page work only), 2 after the receiver's
