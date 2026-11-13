@@ -25,6 +25,8 @@ pub(crate) mod program_lists;
 // U-RTVIS: the reflection pass's rl_trace (docs/design-reflection-pass.md).
 #[path = "reflection_pass.rs"]
 pub(crate) mod reflection_pass;
+#[path = "gi_receiver_pass.rs"]
+pub(crate) mod gi_receiver_pass;
 // The Mac thread's reflection_hits after rl_trace (docs/design-reflection-pass.md).
 #[path = "reflection_hits_gpu.rs"]
 mod reflection_hits_gpu;
@@ -676,6 +678,8 @@ pub(super) struct ShadeSwitches {
     pub software: bool,
     pub deferred: bool,
     pub diag: bool,
+    /// The GI receiver pass's prepared SH (gi_receiver_pass.rs, RENDERLAB_GI_PASS).
+    pub gi: bool,
 }
 impl ShadeSwitches {
     fn of(device: &wgpu::Device) -> Self {
@@ -684,6 +688,7 @@ impl ShadeSwitches {
             software: !device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
             deferred: reflection_pass::deferred(device),
             diag: crate::program::rl_deferred_diag(),
+            gi: gi_receiver_pass::on(),
         }
     }
 }
@@ -713,6 +718,9 @@ pub(super) fn shade_layout_entries(
     } else {
         // M7-R1: Soft shading traces reflection rays on the shared TLAS.
         entries.push(scene(2));
+    }
+    if switches.gi {
+        entries.push(gi_receiver_pass::entry());
     }
     // U-RTVIS: the reflection history (program::with_reflection_history).
     entries.push(uniform(
@@ -846,6 +854,7 @@ pub(super) struct Targets {
     pub rl_history: RlHistoryTargets,
     /// U-RTVIS: the reflection pass's L, H, R and D while RENDERLAB_RL_PASS=1.
     pub rl_pass: Option<reflection_pass::PassTargets>,
+    pub gi_receiver: Option<gi_receiver_pass::Targets>,
 }
 /// Per pixel two halves of four r32uint layers, and the frame record (written by
 /// `prepare_reconstruction`; zero, so never read, without reconstruction).
@@ -2460,6 +2469,7 @@ impl Renderer {
                 rl_history,
                 rl_pass: reflection_pass::on(&self.device)
                     .then(|| self.rl_pass_targets(size)),
+                gi_receiver: gi_receiver_pass::on().then(|| self.gi_receiver_targets(size)),
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
                     "primary hard receiver epsilon",
@@ -2581,6 +2591,7 @@ impl Renderer {
                     (RL_HISTORY, R::TextureView(&t.rl_history.history.view)),
                     (RL_PHASE, t.rl_history.phase.value.as_entire_binding()),
                 ];
+                if let Some(gi) = &t.gi_receiver { entries.push((gi_receiver_pass::BINDING, gi.values.value.as_entire_binding())); }
                 // U-RTVIS: the reflection pass's lobe output.
                 if let Some(pass) = &t.rl_pass {
                     entries.push((reflection_pass::LIST, pass.list.value.as_entire_binding()));
@@ -3436,9 +3447,10 @@ impl Renderer {
                         meshes.len() - 1
                     })
             });
-            for model in &d.instances.state.models {
+            let state = &d.instances.state;
+            for (i, model) in state.models.iter().enumerate() {
                 if let Some(mesh) = mesh {
-                    traced.push((slot, *model, mesh));
+                    traced.push((slot, *model, mesh, state.casts_shadows(i)));
                 }
                 slot += 1;
             }
@@ -3460,7 +3472,9 @@ impl Renderer {
         let records = |bases: &[[u32; 2]]| {
             let rows: Vec<_> = traced
                 .iter()
-                .map(|&(slot, model, mesh)| (slot, model, &*meshes[mesh], bases[mesh]))
+                .map(|&(slot, model, mesh, casts)| {
+                    (slot, model, &*meshes[mesh], bases[mesh], casts)
+                })
                 .collect();
             let mut words = crate::reflection_software::instance_words(&rows);
             // Records of singular models stay reserved (and untraced).

@@ -866,6 +866,7 @@ fn ara_frame(
                 instances: None,
                 sky_map: None,
                 skins: None,
+                casts: None,
                 colour_lut: None,
                 ids: None,
                 objects: &objects,

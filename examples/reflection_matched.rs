@@ -1073,6 +1073,7 @@ impl Traced {
         let instances = placed
             .iter()
             .map(|p| reference::Instance {
+                casts_shadows: true,
                 mesh: self.mesh_index[&p.mesh],
                 material: self.material_index[&p.material],
                 transform: moved
@@ -1083,6 +1084,7 @@ impl Traced {
             .chain(
                 self.emitter
                     .map(|(mesh, material, transform)| reference::Instance {
+                        casts_shadows: true,
                         mesh,
                         material,
                         transform,

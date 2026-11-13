@@ -55,10 +55,11 @@ fn shader() -> String {
     let api = include_str!("../shaders/program_api.wgsl");
     let input =
         &api[api.find("struct SurfaceInput {").unwrap()..api.find("// One light's").unwrap()];
-    let mut source = format!(
+    // The reference tracer's shadow ray needs its cull mask; scene.wgsl lends only functions.
+    let mut source = crate::shadows::with_shadow_caster_mask(&format!(
         "{reference}\n{input}\n{}\n",
         include_str!("../shaders/reflection_probe.wgsl")
-    );
+    ));
     // DC1: this frozen reflection experiment has no decal scene. Supply only the
     // surface value type and material helpers, with identity decal inputs.
     let decals = include_str!("../shaders/decals.wgsl");
@@ -103,6 +104,9 @@ fn shader() -> String {
     }
     // The standard program's `view_data` returns the API's view-mode record.
     source.push_str(api.lines().find(|l| l.starts_with("struct ViewData")).unwrap());
+    source.push('\n');
+    // Its material-pass mapping (`material_out`, `material_in`) names the API's record.
+    source.push_str(api.lines().find(|l| l.starts_with("struct MaterialRecord")).unwrap());
     source.push('\n');
     // RL#50: the shading terms' constant gates, which the API's light helpers read.
     for line in api.lines().filter(|l| {
@@ -310,7 +314,7 @@ impl Probe {
                 &blases[i.mesh],
                 row_transform(i.transform),
                 slot as u32,
-                0xff,
+                if i.casts_shadows { 0x03 } else { 0x02 },
             ));
         }
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -924,11 +928,13 @@ fn identity_fixture() -> (Scene, View) {
         ],
         instances: vec![
             Instance {
+                casts_shadows: true,
                 mesh: 0,
                 material: 0,
                 transform: Mat4::IDENTITY,
             },
             Instance {
+                casts_shadows: true,
                 mesh: 1,
                 material: 1,
                 transform: Mat4::IDENTITY,

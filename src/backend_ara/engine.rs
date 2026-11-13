@@ -136,6 +136,10 @@ impl Residency for Kept {
     fn set_instance(_: &mut (), _: usize, _: Mat4) -> Result<(), Error> {
         Ok(())
     }
+    /// The frames read `Batch::casts` when they are rebuilt.
+    fn set_instance_casts_shadows(_: &mut (), _: usize, _: bool) -> Result<(), Error> {
+        Ok(())
+    }
 }
 
 /// The scene and its frames on ara-gpu, on a device the caller owns (Ara's own, so a
@@ -213,6 +217,8 @@ struct Placed<'a> {
     mesh: u64,
     /// Every transform it is placed at.
     placements: &'a [Mat4],
+    /// Whether each placement blocks light (`Batch::casts`, `set_casts_shadows`).
+    casts: &'a [bool],
     /// A skinned mesh's pose before this one, and its pose revision.
     skin: Option<Skin<'a>>,
 }
@@ -490,7 +496,7 @@ impl Engine {
                     "normal-mapped draw requires tangent stream",
                 ));
             }
-            let placed = |transform, placements| Placed {
+            let placed = |transform, placements, casts| Placed {
                 vertices,
                 indices,
                 tangents: tangents.as_ref(),
@@ -498,6 +504,7 @@ impl Engine {
                 transform,
                 mesh: *key,
                 placements,
+                casts,
                 skin,
             };
             if material.transparency.is_some() {
@@ -505,10 +512,13 @@ impl Engine {
                     batch
                         .models
                         .iter()
-                        .map(|model| placed(*model, std::slice::from_ref(model))),
+                        .zip(&batch.casts)
+                        .map(|(model, casts)| {
+                            placed(*model, std::slice::from_ref(model), std::slice::from_ref(casts))
+                        }),
                 );
             } else if let Some(first) = batch.models.first() {
-                opaque.push(placed(*first, &batch.models[..]));
+                opaque.push(placed(*first, &batch.models[..], &batch.casts[..]));
             }
         }
         Ok([opaque, transparent])
@@ -754,6 +764,15 @@ impl Engine {
     }
     pub fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error> {
         self.state.set_transform(object, transform)
+    }
+    /// Whether an object blocks light (default true), as the wgpu engine's `set_casts_shadows`.
+    /// Stored on its batch (`Batch::casts`); this layer's shadow casters do not read it yet
+    /// (instance masks, the atlas and the clipmap follow in the port).
+    pub fn set_casts_shadows(&mut self, object: ObjectId, casts: bool) -> Result<(), Error> {
+        self.state.set_casts_shadows(object, casts)
+    }
+    pub fn casts_shadows(&self, object: ObjectId) -> Result<bool, Error> {
+        self.state.casts_shadows(object)
     }
     pub fn set_decals(&mut self, decals: &[Decal]) -> Result<(), Error> {
         if !decals.is_empty() {
@@ -1033,6 +1052,7 @@ impl Engine {
         let keys: Vec<u64> = opaque.iter().map(|p| p.mesh).collect();
         let material_keys: Vec<u64> = opaque.iter().map(|p| p.material.key).collect();
         let placements: Vec<&[Mat4]> = opaque.iter().map(|p| p.placements).collect();
+        let casts: Vec<&[bool]> = opaque.iter().map(|p| p.casts).collect();
         let skins: Vec<Option<Skin<'_>>> = opaque.iter().map(|p| p.skin).collect();
         // The view's ids: the tag tables in the frame's placement order, every opaque
         // placement's entry and then every transparent one's (`prepare_view_ids`).
@@ -1150,6 +1170,7 @@ impl Engine {
             instances: Some(&placements),
             sky_map,
             skins: Some(&skins),
+            casts: Some(&casts),
             colour_lut: look.colour_lut.as_ref(),
             ids: id_entries
                 .as_ref()

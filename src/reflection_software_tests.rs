@@ -668,12 +668,13 @@ fn the_primary_shading_layout_has_no_clashing_bindings() {
         },
     ];
     for visibility in visibilities {
-        for bits in 0..16u32 {
+        for bits in 0..32u32 {
             let switches = ShadeSwitches {
                 pass: bits & 1 != 0,
                 software: bits & 2 != 0,
                 deferred: bits & 4 != 0,
                 diag: bits & 8 != 0,
+                gi: bits & 16 != 0,
             };
             let mut seen = std::collections::HashSet::new();
             for entry in shade_layout_entries(visibility, switches) {
@@ -839,4 +840,168 @@ fn light_bound_composes_and_validates() {
         }
     }
     assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 2 * 3);
+}
+
+/// RENDERLAB_MATERIAL_PASS: the standard program's material pass (`Write`) and the
+/// record-reading shading (`Read`) compose on every traced head, tiles and list, keep the
+/// program's text in its range and validate; toon declares no record mapping and keeps its
+/// single kernel.
+#[test]
+fn material_pass_variants_compose_and_validate() {
+    use crate::program::{MaterialRole, Stage, compose, compose_list, material_variant};
+    let toon = include_str!("../shaders/programs/toon.wgsl");
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let mut validated = 0;
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            let full = |program: &str| {
+                let parameters = crate::program::declares_parameters(program);
+                if list {
+                    compose_list(head, program, Stage::Traced, parameters)
+                } else {
+                    compose(head, program, Stage::Traced, parameters)
+                }
+            };
+            assert!(material_variant(full(toon), toon, MaterialRole::Write).is_none());
+            for role in [MaterialRole::Write, MaterialRole::Read] {
+                let edited =
+                    material_variant(full(crate::STANDARD_PROGRAM), crate::STANDARD_PROGRAM, role)
+                        .expect("the standard program declares the record mapping");
+                let source = &edited.source;
+                assert_eq!(&source[edited.program.clone()], crate::STANDARD_PROGRAM);
+                match role {
+                    MaterialRole::Write => assert!(source.contains("rl_material_store(pixel,")),
+                    MaterialRole::Read => assert!(source.contains("material_in(rl_material_load(pixel)")),
+                }
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                validated += 1;
+            }
+        }
+    }
+    assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 2);
+}
+
+/// The measurement probes (`RENDERLAB_MATERIAL_PROBE`) compose and validate on every head,
+/// tiles and lists, each on its own role.
+#[test]
+fn material_pass_probes_compose_and_validate() {
+    use crate::program::{
+        MaterialProbe, MaterialRole, Stage, compose, compose_list, material_variant_with,
+    };
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let probes = [
+        (
+            MaterialRole::Write,
+            MaterialProbe::Empty,
+            "if size.x<0x7fffffffu { return; }",
+        ),
+        (
+            MaterialRole::Write,
+            MaterialProbe::Decode,
+            "rl_material_probe_input(surface_input)",
+        ),
+        (
+            MaterialRole::Write,
+            MaterialProbe::NoStore,
+            "rl_material_probe_store(pixel,",
+        ),
+        (
+            MaterialRole::Read,
+            MaterialProbe::LoadPlus,
+            "rl_material_probe_record(rl_probe)",
+        ),
+        (
+            MaterialRole::Read,
+            MaterialProbe::ReadLean,
+            "let surface_input=(SurfaceInput(",
+        ),
+        (
+            MaterialRole::Read,
+            MaterialProbe::ReadPos,
+            "rl_material_probe_position(surface_input,receiver_world)",
+        ),
+    ];
+    let program = crate::STANDARD_PROGRAM;
+    let parameters = crate::program::declares_parameters(program);
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            for (role, probe, marker) in probes {
+                let full = if list {
+                    compose_list(head, program, Stage::Traced, parameters)
+                } else {
+                    compose(head, program, Stage::Traced, parameters)
+                };
+                let edited = material_variant_with(full, program, role, None, Some(probe))
+                    .expect("standard maps the record");
+                let source = &edited.source;
+                assert!(source.contains(marker), "{probe:?}");
+                assert_eq!(&source[edited.program.clone()], program);
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|e| panic!("{probe:?}: {}", e.emit_to_string(source)));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{probe:?}: {}", e.emit_to_string(source)));
+            }
+        }
+    }
+}
+
+/// Ara's emissive program is the standard program with a `glow` field added to `Surface`
+/// (crates/ara-renderlab/src/scene.rs `emissive_source`, these same three edits). It must keep
+/// composing and validating, alone and as both material-pass variants: a positional `Surface`
+/// constructor in the standard program broke it once.
+#[test]
+fn ara_emissive_edit_of_the_standard_program_still_composes() {
+    use crate::program::{MaterialRole, Stage, compose, material_variant};
+    let standard = crate::STANDARD_PROGRAM;
+    for edit in ["alpha:f32 };", "decal_mr.x,alpha);", "    return exposed;"] {
+        assert_eq!(standard.matches(edit).count(), 1, "Ara's edit point {edit}");
+    }
+    let emissive = format!(
+        "struct Parameters {{ glow:vec3<f32> }};\nconst DEFAULT_PARAMETERS:Parameters = Parameters(vec3<f32>(0.0));\n{}",
+        standard
+            .replace("alpha:f32 };", "alpha:f32, glow:vec3<f32> };")
+            .replace("decal_mr.x,alpha);", "decal_mr.x,alpha,params.glow);")
+            .replace(
+                "    return exposed;",
+                "    return min(exposed+exposed_product(s.glow,vec3<f32>(1.0)),vec3<f32>(65504.0));",
+            )
+            // Its glow through the material record's emission.
+            .replace(
+                "s.n,s.base,s.alpha,s.metal,s.rough,vec3<f32>(0.0),",
+                "s.n,s.base,s.alpha,s.metal,s.rough,s.glow,",
+            )
+            .replace("    s.alpha=m.alpha;\n    return s;", "    s.alpha=m.alpha;\n    s.glow=m.emission;\n    return s;")
+    );
+    assert!(emissive.contains("s.glow=m.emission;") && emissive.contains("s.rough,s.glow,"));
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    for head in &rt {
+        let composed = || compose(head, &emissive, Stage::Traced, true);
+        let mut sources = vec![composed().source];
+        for role in [MaterialRole::Write, MaterialRole::Read] {
+            sources.push(material_variant(composed(), &emissive, role).unwrap().source);
+        }
+        for source in &sources {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        }
+    }
 }

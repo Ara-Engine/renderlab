@@ -141,6 +141,7 @@ fn deferred_outputs_reproduce_the_inline_traced_colour() -> Result<()> {
                 }),
                 sky_map: None,
                 skins: None,
+                casts: None,
                 colour_lut: None,
                 ids: None,
             },

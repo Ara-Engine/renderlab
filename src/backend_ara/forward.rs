@@ -292,6 +292,11 @@ pub struct ForwardScene<'a> {
     /// renderer `Draw` over its `Instances`). A frame holds `TRACED_DRAWS` draws and
     /// any number of placements. `None` draws each object once at its `transform`.
     pub instances: Option<&'a [&'a [crate::Mat4]]>,
+    /// Per object, whether each of its placements (`instances`' order) blocks light
+    /// (`set_casts_shadows`): a non-caster is left out of shadow rays (its acceleration
+    /// instance lacks `SHADOW_CASTER_MASK`) and of the shadow plan. `None`: every placement
+    /// casts.
+    pub casts: Option<&'a [&'a [bool]]>,
     /// A prepared environment map that lights the scene in place of the uniform
     /// environment (`Sky::Map`), kept on the GPU while frames go on naming its key.
     /// The atmosphere's procedural environment must be off.
@@ -542,6 +547,9 @@ struct Deferred {
     scene: [u32; 4],
     /// That rectangle widened to whole trace tiles, as the region record holds it.
     region_rect: [u32; 4],
+    /// RENDERLAB_MATERIAL_PASS: the material record (program.rs MATERIAL_RECORD_BINDINGS), an
+    /// rgba32uint and an rg32uint image of the frame's size; None while the pass is off.
+    material: Option<[Texture; 2]>,
     epsilon: Texture,
     frame: StorageBuffer,
     region: StorageBuffer,
@@ -844,6 +852,12 @@ fn provided<'a>(
         (0, 13) | (0, 7) => deferred.map(|d| &d.hit),
         (0, 20) | (0, 21) => deferred.map(|d| &d.tiles),
         (0, 23) => deferred.map(|d| &d.epsilon),
+        (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[0] => {
+            deferred?.material.as_ref().map(|m| &m[0])
+        }
+        (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[1] => {
+            deferred?.material.as_ref().map(|m| &m[1])
+        }
         (0, 3) | (0, 16) => traced.map(|t| &t.world),
         (0, 4) | (0, 17) => traced.map(|t| &t.normal),
         (0, 5) | (0, 6) => traced.map(|t| &t.visibility),
@@ -1435,6 +1449,18 @@ fn frame(
             None => std::slice::from_ref(&scene.objects[index].transform),
         }
     };
+    ensure!(
+        scene.casts.is_none_or(|casts| {
+            casts.len() == scene.objects.len()
+                && casts
+                    .iter()
+                    .enumerate()
+                    .all(|(index, list)| list.len() == placed(index).len())
+        }),
+        "shadow casting is given per placement, one list per object"
+    );
+    // Whether placement `k` of object `index` blocks light (`ForwardScene::casts`).
+    let casts = |index: usize, k: usize| scene.casts.is_none_or(|lists| lists[index][k]);
     // Each object's previous pose, where it is skinned.
     let skin = |index: usize| scene.skins.and_then(|s| s.get(index).copied().flatten());
     ensure!(
@@ -1611,8 +1637,21 @@ fn frame(
     }
     .lean()
         && crate::program::lean_on();
+    // RENDERLAB_MATERIAL_PASS (program.rs material_pass_on): programs with the record mapping
+    // shade from the material record, which a material pass writes first.
+    let material_on = deferred_path && crate::program::material_pass_on();
+    let reading = |source: &str, list: bool| -> Result<Option<shader::Program>> {
+        if material_on {
+            primary_shade::hardware_soft_material(source, list, crate::program::MaterialRole::Read)
+        } else {
+            Ok(None)
+        }
+    };
     let program = if deferred_path {
-        primary_shade::hardware_soft_part(material_source, primary_shade::ALL_TERMS, lean)?
+        match reading(material_source, false)? {
+            Some(program) => program,
+            None => primary_shade::hardware_soft_part(material_source, primary_shade::ALL_TERMS, lean)?,
+        }
     } else {
         standard_program(scene.sun_shadows.is_some())?
     };
@@ -1620,7 +1659,24 @@ fn frame(
     let list_programs = if deferred_path && sources.len() > 1 {
         sources
             .iter()
-            .map(|source| primary_shade::hardware_soft_list_part(source, primary_shade::ALL_TERMS, lean))
+            .map(|source| match reading(source, true)? {
+                Some(program) => Ok(program),
+                None => primary_shade::hardware_soft_list_part(source, primary_shade::ALL_TERMS, lean),
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        Vec::new()
+    };
+    // The material pass: per slot (one for a single-program frame), the program's record
+    // writer, or None where the program keeps its single kernel.
+    let material_programs = if material_on {
+        let list = sources.len() > 1;
+        let frame_sources: &[&str] = if list { &sources } else { &sources[..1] };
+        frame_sources
+            .iter()
+            .map(|source| {
+                primary_shade::hardware_soft_material(source, list, crate::program::MaterialRole::Write)
+            })
             .collect::<Result<Vec<_>>>()?
     } else {
         Vec::new()
@@ -1655,14 +1711,16 @@ fn frame(
             Format::Rgba16Float,
         )?)
     };
-    let (mut bounds, mut skin_bounds) = (Vec::new(), Vec::new());
+    // Per placement, its world bounds and whether it blocks light (the shadow plan's casters).
+    let (mut bounds, mut skin_bounds, mut casters) = (Vec::new(), Vec::new(), Vec::new());
     for (index, object) in scene.objects.iter().enumerate() {
         let local =
             crate::visibility::Aabb::from_positions(object.vertices.iter().map(|v| v.position))
                 .context("empty mesh")?;
-        for transform in placed(index) {
+        for (k, transform) in placed(index).iter().enumerate() {
             let world = shadow_gpu::world_bounds(local, *transform)?;
             bounds.push(world);
+            casters.push(casts(index, k));
             if skin(index).is_some() {
                 skin_bounds.push(world);
             }
@@ -1760,6 +1818,7 @@ fn frame(
                 size,
                 &scene.lighting.lights,
                 &bounds,
+                &casters,
             )?;
             frame.prepare_hardware_bias(&records)?;
             left.shadow_bases = frame.bases().to_vec();
@@ -2182,13 +2241,20 @@ fn frame(
                 };
                 // `hardware_shadow_gpu`: one instance per placement, in draw then
                 // instance order, named by its place in that order.
-                for transform in placed(index) {
+                // Every ray sees bit 0x02; shadow rays cull by `SHADOW_CASTER_MASK`, which a
+                // placement that casts no shadow lacks.
+                for (k, transform) in placed(index).iter().enumerate() {
                     let m = transform.to_cols_array_2d();
+                    let caster = if casts(index, k) {
+                        crate::shadows::SHADOW_CASTER_MASK as u8
+                    } else {
+                        0
+                    };
                     instances.push(AccelerationInstance {
                         geometry: place.of(resident, &transient).blas,
                         transform: std::array::from_fn(|i| m[i % 4][i / 4]),
                         custom_index: instances.len() as u32,
-                        mask: 255,
+                        mask: 0x02 | caster,
                     });
                 }
                 geometry.push(place);
@@ -2705,6 +2771,14 @@ fn frame(
             hit: Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
             scene: rect,
             region_rect: region,
+            material: if material_on {
+                Some([
+                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
+                    Texture::new(gpu, size, Format::Rg32Uint, true, false)?,
+                ])
+            } else {
+                None
+            },
             tiles: Texture::new(gpu, trace_groups, Format::R32Uint, true, false)?,
             epsilon: Texture::new(gpu, size, Format::R32Float, true, false)?,
             frame,
@@ -3620,6 +3694,32 @@ fn frame(
         }
         part_records.push((*name, slots));
     }
+    // RENDERLAB_MATERIAL_PASS: per slot, the material pass's kernel and packet (bound as that
+    // slot's shading is), or None where the program keeps its single kernel.
+    let mut material_records = Vec::new();
+    for (slot, program) in material_programs.iter().enumerate() {
+        let Some(program) = program else {
+            material_records.push(None);
+            continue;
+        };
+        let values = program
+            .inputs()
+            .iter()
+            .map(|spec| {
+                Ok((
+                    spec.key,
+                    match (&program_lists, spec.key.group, spec.key.binding) {
+                        (Some(lists), 0, 38) => Input::Buffer(&lists.slots[slot].2),
+                        (Some(lists), 0, 39) => Input::Buffer(&lists.entries),
+                        _ => shared.input(spec, None)?,
+                    },
+                ))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let packet = HeapBindings::for_program(gpu, program, &values)?;
+        packet.import(&mut graph);
+        material_records.push(Some((Kernel::from_program(gpu, cache, program)?, packet)));
+    }
     if let Some(deferred) = &deferred {
         // `encode_primary_visibility`, `encode_primary_fresh`, the cache's passes
         // (`GiState::encode`), then `encode_primary_shading`.
@@ -3685,6 +3785,19 @@ fn frame(
                 lists
                     .bins
                     .record(&mut graph, &mut rec, &list_packets[0], &lists.dispatch)?;
+                // The material pass writes each opted-in slot's record before any slot shades.
+                for (slot, record) in material_records.iter().enumerate() {
+                    if let Some((kernel, packet)) = record {
+                        kernel.record_indirect_labelled(
+                            &mut graph,
+                            &mut rec,
+                            packet,
+                            &lists.arguments,
+                            slot as u64 * 16,
+                            "ara::PrimaryMaterialList".into(),
+                        )?;
+                    }
+                }
                 for (slot, ((_, kernel, _), packet)) in
                     lists.slots.iter().zip(&list_packets[1..]).enumerate()
                 {
@@ -3704,12 +3817,26 @@ fn frame(
                 .filter(|_| std::ptr::eq(kernel, &deferred.fresh))
             {
                 Some(queue) => kernel.record_indirect(&mut graph, &mut rec, packet, queue, 0)?,
-                None => kernel.record(
-                    &mut graph,
-                    &mut rec,
-                    packet,
-                    [groups[0] * threads[0], groups[1] * threads[1], 1],
-                )?,
+                None => {
+                    // The material pass writes the record before the single program shades.
+                    if let (true, Some(Some((material, record)))) =
+                        (std::ptr::eq(kernel, &deferred.shade), material_records.first())
+                    {
+                        material.record_labelled(
+                            &mut graph,
+                            &mut rec,
+                            record,
+                            [groups[0] * threads[0], groups[1] * threads[1], 1],
+                            "ara::PrimaryMaterialTiles".into(),
+                        )?;
+                    }
+                    kernel.record(
+                        &mut graph,
+                        &mut rec,
+                        packet,
+                        [groups[0] * threads[0], groups[1] * threads[1], 1],
+                    )?
+                }
             }
         }
     }
@@ -4802,6 +4929,7 @@ fn frame(
             buffer.retire(gpu)?;
         }
         post_images.extend([deferred.hit, deferred.tiles, deferred.epsilon]);
+        post_images.extend(deferred.material.into_iter().flatten());
     }
     if let Some(traced) = traced {
         traced.scene.retire(gpu)?;

@@ -40,7 +40,7 @@ fn rl_local_rays_visibility(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 
         let distance=length(delta);
         let tmax=distance-max(1e-4*distance,1e-3);
         if !(tmax>receiver.epsilon) { lit+=1.0; continue; }
-        rayQueryInitialize(&lc_query,LC_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT,255u,receiver.epsilon,tmax,origin,delta/distance));
+        rayQueryInitialize(&lc_query,LC_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK,receiver.epsilon,tmax,origin,delta/distance));
         while rayQueryProceed(&lc_query) {}
         lit+=select(0.0,1.0,rayQueryGetCommittedIntersection(&lc_query).kind==0u);
     }

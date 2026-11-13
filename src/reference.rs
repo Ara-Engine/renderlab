@@ -59,6 +59,8 @@ impl Default for Material {
 
 #[derive(Clone, Copy, Debug)]
 pub struct Instance {
+    /// Whether it blocks light (the engine's `set_casts_shadows`): shadow rays skip it if not.
+    pub casts_shadows: bool,
     pub mesh: usize,
     pub material: usize,
     pub transform: Mat4,
@@ -551,7 +553,7 @@ fn render_repeats(
             &blases[i.mesh],
             row_transform(i.transform),
             slot as u32,
-            0xff,
+            if i.casts_shadows { 0x03 } else { 0x02 },
         ));
     }
     let mut encoder = device.create_command_encoder(&Default::default());
@@ -675,12 +677,14 @@ fn render_repeats(
     let shader = SHADER;
     #[cfg(test)]
     let shader = diagnostic_shader.as_deref().unwrap_or(shader);
+    // The shadow ray's cull mask: this module has no shaders/scene.wgsl.
+    let shader = crate::shadows::with_shadow_caster_mask(shader);
     let make_pipeline = || {
         let module = crate::pipeline_compilation::create_engine_shader_module(
             device,
             wgpu::ShaderModuleDescriptor {
                 label: Some("reference path tracer"),
-                source: wgpu::ShaderSource::Wgsl(shader.into()),
+                source: wgpu::ShaderSource::Wgsl(shader.as_str().into()),
             },
         );
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

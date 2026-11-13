@@ -832,6 +832,9 @@ impl World {
                     .iter()
                     .position(|w| w.is_some_and(|(k, b)| k == key && b == bits));
                 match hit {
+                    // The merged world has no per-placement shadow bit: a covered placement
+                    // that casts no shadow keeps every placement on its own record.
+                    Some(_) if !d.instances.state.casts_shadows(ii) => return None,
                     Some(at) => {
                         wanted[at] = None;
                         drawn[at] = (di, ii);
@@ -2887,12 +2890,13 @@ impl Renderer {
         let p = self.gi.packed.as_mut().unwrap();
         let mut records = vec![];
         // Per record, instance words 24-26 (G2): its material identity + 1, or for the merged
-        // world zero and its placement map's offset and length.
+        // world zero and its placement map's offset and length; word 27, 1 if it casts no
+        // shadow (light visibility passes through it, bounce rays still hit it).
         let mut identities = vec![];
         if !p.covered.is_empty() {
             let w = &self.gi.world.as_ref().unwrap().blas;
             records.push((Mat4::IDENTITY, &**w, *p.offsets.last().unwrap(), 0));
-            identities.push([0, p.map.0, p.map.1]);
+            identities.push([0, p.map.0, p.map.1, 0]);
         }
         let mut at = 0;
         for (di, ((d, blas), entry)) in draws.iter().zip(&blases).zip(&p.entry).enumerate() {
@@ -2909,14 +2913,19 @@ impl Renderer {
                     p.offsets[e],
                     blas.near_base(model, &p.near[e]),
                 ));
-                identities.push([draw_identity(ids, di, ii), 0, 0]);
+                identities.push([
+                    draw_identity(ids, di, ii),
+                    0,
+                    0,
+                    u32::from(!d.instances.state.casts_shadows(ii)),
+                ]);
             }
         }
         self.gi.stats.near_instances = records.iter().filter(|r| r.3 != 0).count() as u32;
         let mut head = gi_bvh::instance_words(&records)?;
         for (i, words) in identities.iter().enumerate() {
             let r = gi_bvh::HEADER_WORDS + i * gi_bvh::INSTANCE_WORDS + 24;
-            head[r..r + 3].copy_from_slice(words);
+            head[r..r + 4].copy_from_slice(words);
         }
         // U-RTVIS: the top level over the records (rebuilt only when they change).
         crate::instance_bvh::place(
