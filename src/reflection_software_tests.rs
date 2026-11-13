@@ -30,6 +30,19 @@ fn software_reflection_composition() {
         );
         // Both paths read the global bands (ReflectionSettings).
         assert!(source.contains("let bands=primary_frame.reflection;"));
+        // The traversal's measurement switches, when set: workgroup stacks sliced by the
+        // entry's lane, and the fused box test.
+        if crate::program::rs_stack_workgroup() {
+            assert!(source.contains("var<workgroup> rs_stack:array<u32,1024>;"));
+            assert!(source.contains("var<workgroup> rs_top:array<u32,1024>;"));
+            assert!(source.contains("lane:u32) {\n    rs_lane=lane;\n"));
+            assert!(!source.contains("(*stack)") && !source.contains("var nodes:"));
+        }
+        if crate::program::rs_box_fma() {
+            assert!(source.contains("let a=fma(lo,inv,-oi);let b=fma(hi,inv,-oi);"));
+            assert!(source.contains("let world_oi=origin*world_inv;"));
+            assert!(!source.contains("rs_box(origin,world_inv,"));
+        }
         let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         let info = naga::valid::Validator::new(

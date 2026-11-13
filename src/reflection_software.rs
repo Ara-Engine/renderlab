@@ -335,6 +335,180 @@ mod tests {
         assert_eq!((b.nodes, b.triangles), (again.nodes, again.triangles));
     }
 
+    /// A grid of `n` x `n` quads, gently bent so no box is perfectly flat everywhere.
+    fn grid(n: u32) -> (Vec<[f32; 3]>, Vec<u32>) {
+        let mut positions = vec![];
+        let mut indices = vec![];
+        for y in 0..=n {
+            for x in 0..=n {
+                let z = ((x * 7 + y * 3) % 5) as f32 * 0.01;
+                positions.push([x as f32, y as f32, z]);
+            }
+        }
+        for y in 0..n {
+            for x in 0..n {
+                let (i, w) = (y * (n + 1) + x, n + 1);
+                indices.extend([i, i + 1, i + w + 1, i, i + w + 1, i + w]);
+            }
+        }
+        (positions, indices)
+    }
+
+    /// The tree's depth below `child` (a leaf is 0).
+    fn depth(b: &Blas, child: u32) -> usize {
+        if child & LEAF != 0 {
+            return 0;
+        }
+        let n = child as usize * NODE_WORDS;
+        1 + depth(b, b.nodes[n + 12]).max(depth(b, b.nodes[n + 13]))
+    }
+
+    /// The traversal stack (RS_STACK = 32 in shaders/reflections_software.wgsl) holds at
+    /// most depth + 1 children: it keeps one sibling per level. The median split keeps the
+    /// depth at ceil(log2(triangles / 4)), so 32 holds every mesh under about 2^33
+    /// triangles; half a million stay at 17.
+    #[test]
+    fn reflection_bvh_depth_fits_the_traversal_stack() {
+        let (positions, indices) = grid(512);
+        let triangles = indices.len() / 3;
+        let b = Blas::build(&positions, &indices).unwrap();
+        let d = depth(&b, b.root);
+        let balanced = (triangles.div_ceil(LEAF_TRIANGLES) as f64).log2().ceil() as usize;
+        assert!(
+            d <= balanced,
+            "depth {d} for {triangles} triangles (balanced {balanced})"
+        );
+        assert!(d < 32, "depth {d} overflows the 32-entry stack");
+    }
+
+    /// The closest hit under the shader's own box arithmetic: slabs as (lo - o) * inv, or
+    /// with `fma` (RENDERLAB_RS_BOX=fma) as fma(lo, inv, -o * inv), near child first.
+    fn closest_shader(b: &Blas, o: glam::Vec3, d: glam::Vec3, fma: bool) -> Option<(u32, u32)> {
+        let v = |w: &[u32], i: usize| -> glam::Vec3 {
+            glam::Vec3::from_array(std::array::from_fn(|k| f32::from_bits(w[i + k])))
+        };
+        let inv = d.map(|c| {
+            1.0 / if c.abs() < 1e-30 {
+                1e-30f32.copysign(c)
+            } else {
+                c
+            }
+        });
+        let oi = o * inv;
+        let slab = |lo: glam::Vec3, hi: glam::Vec3, tmax: f32| -> f32 {
+            let (a, z) = if fma {
+                (
+                    glam::Vec3::new(
+                        lo.x.mul_add(inv.x, -oi.x),
+                        lo.y.mul_add(inv.y, -oi.y),
+                        lo.z.mul_add(inv.z, -oi.z),
+                    ),
+                    glam::Vec3::new(
+                        hi.x.mul_add(inv.x, -oi.x),
+                        hi.y.mul_add(inv.y, -oi.y),
+                        hi.z.mul_add(inv.z, -oi.z),
+                    ),
+                )
+            } else {
+                ((lo - o) * inv, (hi - o) * inv)
+            };
+            let near = a.min(z).max_element().max(0.0);
+            let far = a.max(z).min_element().min(tmax);
+            if near <= far { near } else { f32::MAX }
+        };
+        let mut best: Option<(u32, f32)> = None;
+        let mut stack = vec![b.root];
+        while let Some(mut child) = stack.pop() {
+            loop {
+                let tmax = best.map_or(f32::MAX, |h| h.1);
+                if child & LEAF != 0 {
+                    let first = ((child & !LEAF) >> 3) as usize;
+                    for k in 0..(child & 7) as usize {
+                        let x = (first + k) * TRIANGLE_WORDS;
+                        let (a, e1, e2) = (
+                            v(&b.triangles, x),
+                            v(&b.triangles, x + 3),
+                            v(&b.triangles, x + 6),
+                        );
+                        let p = d.cross(e2);
+                        let det = e1.dot(p);
+                        if det.abs() < 1e-30 {
+                            continue;
+                        }
+                        let s = o - a;
+                        let u = s.dot(p) / det;
+                        let q = s.cross(e1);
+                        let w = d.dot(q) / det;
+                        let t = e2.dot(q) / det;
+                        if u >= 0.0
+                            && w >= 0.0
+                            && u + w <= 1.0
+                            && t > 0.0
+                            && t < best.map_or(f32::MAX, |h| h.1)
+                        {
+                            best = Some((b.triangles[x + 9], t));
+                        }
+                    }
+                    break;
+                }
+                let n = child as usize * NODE_WORDS;
+                let t0 = slab(v(&b.nodes, n), v(&b.nodes, n + 3), tmax);
+                let t1 = slab(v(&b.nodes, n + 6), v(&b.nodes, n + 9), tmax);
+                let (c0, c1) = (b.nodes[n + 12], b.nodes[n + 13]);
+                match (t0 <= tmax, t1 <= tmax) {
+                    (true, true) => {
+                        let near_first = t0 <= t1;
+                        stack.push(if near_first { c1 } else { c0 });
+                        child = if near_first { c0 } else { c1 };
+                    }
+                    (true, false) => child = c0,
+                    (false, true) => child = c1,
+                    (false, false) => break,
+                }
+            }
+        }
+        best.map(|(prim, t)| (prim, t.to_bits()))
+    }
+
+    /// RENDERLAB_RS_BOX=fma changes only the rounding of the slab distances. Over rays at
+    /// every angle, grazing ones included, the closest hit (primitive and t's bits) is the
+    /// same as with the subtract-and-multiply form.
+    #[test]
+    fn fma_box_test_finds_the_same_closest_hits() {
+        let (positions, indices) = grid(48);
+        let b = Blas::build(&positions, &indices).unwrap();
+        let mut state = 0x9e3779b97f4a7c15u64;
+        let mut next = || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32
+        };
+        let (mut rays, mut hits, mut differ) = (0, 0, 0);
+        for _ in 0..200_000 {
+            let target = glam::Vec3::new(next() * 48.0, next() * 48.0, 0.02);
+            // Elevations from grazing (a few thousandths) to steep.
+            let elevation = 0.002 + next().powi(3) * 1.5;
+            let azimuth = next() * std::f32::consts::TAU;
+            let back = glam::Vec3::new(
+                azimuth.cos() * elevation.cos(),
+                azimuth.sin() * elevation.cos(),
+                elevation.sin(),
+            );
+            let o = target + back * (1.0 + next() * 40.0);
+            let d = target - o;
+            let (plain, fused) = (
+                closest_shader(&b, o, d, false),
+                closest_shader(&b, o, d, true),
+            );
+            rays += 1;
+            hits += usize::from(plain.is_some());
+            differ += usize::from(plain != fused);
+        }
+        println!("RS_BOX=fma: {differ} of {rays} rays' closest hits differ ({hits} hit)");
+        assert_eq!(differ, 0, "{differ} of {rays} rays' closest hits differ");
+    }
+
     /// Instance records hold the inverse rows and a world box enclosing the transformed mesh.
     #[test]
     fn reflection_instance_records() {

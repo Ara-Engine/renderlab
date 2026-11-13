@@ -190,7 +190,7 @@ pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
     } else {
         composed
     };
-    with_history_block(composed)
+    with_rs_stack(with_history_block(composed))
 }
 fn with_history_block(mut composed: Composed) -> Composed {
     if !rl_history_on() {
@@ -428,11 +428,154 @@ const RS_DIVIDE: (&str, &str) = (
                     let t=dot(e2,q)*inv_det;
 ",
 );
+/// `RENDERLAB_RS_BOX=fma` (measurement, off by default): the software traversal's box test
+/// takes the origin premultiplied by the inverse direction once per ray (and per instance), so
+/// each slab plane is one fused multiply-add, `fma(lo, inv, -o * inv)`, instead of a subtract
+/// and a multiply. The same planes up to rounding.
+const RS_BOX: [(&str, &str); 6] = [
+    (
+        "fn rs_box(o:vec3<f32>,inv:vec3<f32>,lo:vec3<f32>,hi:vec3<f32>,tmin:f32,tmax:f32)->f32 {\n    let a=(lo-o)*inv;let b=(hi-o)*inv;\n",
+        "fn rs_box(oi:vec3<f32>,inv:vec3<f32>,lo:vec3<f32>,hi:vec3<f32>,tmin:f32,tmax:f32)->f32 {\n    let a=fma(lo,inv,-oi);let b=fma(hi,inv,-oi);\n",
+    ),
+    (
+        "rs_box(origin,world_inv,b0.xyz,",
+        "rs_box(origin*world_inv,world_inv,b0.xyz,",
+    ),
+    (
+        "    let inv=rs_inverse(d);\n",
+        "    let inv=rs_inverse(d);let oi=o*inv;\n",
+    ),
+    ("rs_box(o,inv,n0.xyz,", "rs_box(oi,inv,n0.xyz,"),
+    (
+        "rs_box(o,inv,vec3<f32>(n1.zw,n2.x),",
+        "rs_box(oi,inv,vec3<f32>(n1.zw,n2.x),",
+    ),
+    (
+        "    let world_inv=rs_inverse(direction);\n",
+        "    let world_inv=rs_inverse(direction);let world_oi=origin*world_inv;\n",
+    ),
+];
+/// The TLAS loop's two box tests under `RS_BOX`, after `world_oi` exists.
+const RS_BOX_TOP: (&str, &str) = ("rs_box(origin,world_inv,", "rs_box(world_oi,world_inv,");
+pub(crate) fn rs_box_fma() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RS_BOX").is_ok_and(|v| v == "fma"))
+}
+/// `RENDERLAB_RS_STACK=workgroup` (measurement, off by default): the software traversal's BLAS
+/// and TLAS stacks live in per-invocation slices of workgroup arrays instead of private arrays
+/// indexed at runtime (which NVIDIA keeps in local memory). Same lengths (RS_STACK,
+/// RS_TOP_STACK), so the same traversal. Only modules whose every compute entry has a `lane`
+/// builtin take it (`with_rs_stack`); RS_LANES covers the largest group. A raster entry in the
+/// same module must not reach the traversal (a workgroup variable there fails validation).
+pub(crate) fn rs_stack_workgroup() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RS_STACK").is_ok_and(|v| v == "workgroup"))
+}
+const RS_LANES: u32 = 32;
+const RS_STACK_EDITS: [(&str, &str); 8] = [
+    (
+        "best_i:ptr<function,u32>,stack:ptr<function,array<u32,RS_STACK>>)->bool {",
+        "best_i:ptr<function,u32>)->bool {",
+    ),
+    (
+        "    (*stack)[0]=tail.x;\n",
+        "    rs_stack[rs_lane*RS_STACK]=tail.x;\n",
+    ),
+    (
+        "        var child=(*stack)[sp];\n",
+        "        var child=rs_stack[rs_lane*RS_STACK+sp];\n",
+    ),
+    (
+        "{(*stack)[sp]=select(c0,c1,near_first);",
+        "{rs_stack[rs_lane*RS_STACK+sp]=select(c0,c1,near_first);",
+    ),
+    ("    var stack:array<u32,RS_STACK>;\n", ""),
+    (
+        "    var nodes:array<u32,RS_TOP_STACK>;\n    nodes[0]=head.z;\n",
+        "    rs_top[rs_lane*RS_TOP_STACK]=head.z;\n",
+    ),
+    (
+        "        let item=nodes[sp];\n",
+        "        let item=rs_top[rs_lane*RS_TOP_STACK+sp];\n",
+    ),
+    (
+        "const RS_TOP_STACK:u32=32u;\n",
+        "const RS_TOP_STACK:u32=32u;\n// RENDERLAB_RS_STACK=workgroup: each invocation's stacks, sliced by rs_lane.\nvar<workgroup> rs_stack:array<u32,RS_STACK_SLOTS>;\nvar<workgroup> rs_top:array<u32,RS_TOP_STACK_SLOTS>;\nvar<private> rs_lane:u32;\n",
+    ),
+];
+/// The TLAS pushes and the instance calls under `RS_STACK`, each appearing more than once.
+const RS_STACK_MANY: [(&str, &str); 3] = [
+    (
+        "nodes[sp]=select(",
+        "rs_top[rs_lane*RS_TOP_STACK+sp]=select(",
+    ),
+    (",&best,&best_i,&stack)", ",&best,&best_i)"),
+    (
+        "@builtin(local_invocation_index) lane:u32) {\n",
+        "@builtin(local_invocation_index) lane:u32) {\n    rs_lane=lane;\n",
+    ),
+];
+/// `composed` with RS_STACK's workgroup stacks, when the switch is on and every compute entry
+/// of the module knows its lane. Idempotent: compose_list applies it again after appending its
+/// own entry.
+fn with_rs_stack(mut composed: Composed) -> Composed {
+    let source = &composed.source;
+    if !rs_stack_workgroup() || !source.contains("fn rs_trace(") {
+        return composed;
+    }
+    let entries = source.matches("@compute").count();
+    let laned = source
+        .matches("@builtin(local_invocation_index) lane:u32) {\n")
+        .count();
+    if entries == 0 || entries != laned {
+        return composed;
+    }
+    let (head, rest) = source.split_at(composed.program.start);
+    let (program, tail) = rest.split_at(composed.program.len());
+    let mut head = head.to_owned();
+    if !head.contains("var<workgroup> rs_stack:") {
+        for (from, to) in RS_STACK_EDITS {
+            assert_eq!(
+                head.matches(from).count(),
+                1,
+                "RENDERLAB_RS_STACK seam {from}"
+            );
+            head = head.replacen(from, to, 1);
+        }
+        for (from, to) in &RS_STACK_MANY[..2] {
+            assert!(head.contains(from), "RENDERLAB_RS_STACK seam {from}");
+            head = head.replace(from, to);
+        }
+        head = head
+            .replace("RS_STACK_SLOTS", &(32 * RS_LANES).to_string())
+            .replace("RS_TOP_STACK_SLOTS", &(32 * RS_LANES).to_string());
+    }
+    let (from, to) = RS_STACK_MANY[2];
+    let tail = tail.replace(to, from).replace(from, to);
+    let start = head.len();
+    let source = format!("{head}{program}{tail}");
+    let end = start + program.len();
+    composed.source = source;
+    composed.program = start..end;
+    composed
+}
 fn software_reflection_api() -> String {
     let mut api = format!("{SOFTWARE_REFLECTION_API}{REFLECTION_API}");
     if std::env::var("RENDERLAB_RS_DIVIDE").is_ok_and(|v| v == "defer") {
         assert_eq!(api.matches(RS_DIVIDE.0).count(), 1, "RENDERLAB_RS_DIVIDE seam");
         api = api.replacen(RS_DIVIDE.0, RS_DIVIDE.1, 1);
+    }
+    if rs_box_fma() {
+        for (from, to) in RS_BOX {
+            assert_eq!(api.matches(from).count(), 1, "RENDERLAB_RS_BOX seam {from}");
+            api = api.replacen(from, to, 1);
+        }
+        assert_eq!(
+            api.matches(RS_BOX_TOP.0).count(),
+            2,
+            "RENDERLAB_RS_BOX seam"
+        );
+        api = api.replace(RS_BOX_TOP.0, RS_BOX_TOP.1);
     }
     assert!(
         api.contains(SOFTWARE_REFLECTION_QUERY),
@@ -729,7 +872,7 @@ pub(crate) struct Composed {
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
-    compose_stage(head, program, stage, parameters, false)
+    with_rs_stack(compose_stage(head, program, stage, parameters, false))
 }
 /// `compose`, or with `hits` the hit-shading module (`compose_hits`).
 fn compose_stage(
@@ -1026,10 +1169,10 @@ pub(crate) fn compose_list(head: &str, program: &str, stage: Stage, parameters: 
     let edited = engine.replacen(LIST_HIT_PARAMETERS_SEAM, LIST_HIT_PARAMETERS, 1);
     let shift = edited.len() - engine.len();
     source = format!("{edited}{rest}{TRACED_LIST_ENTRY}");
-    Composed {
+    with_rs_stack(Composed {
         source,
         program: range.start + shift..range.end + shift,
-    }
+    })
 }
 // ---- end of MP1 per-program dispatch ----
 
