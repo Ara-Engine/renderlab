@@ -15,11 +15,14 @@ const DISTANCE: u32 = 59;
 /// The deferred composite's trace (rl_trace_pixels): its counters and per-pixel slot ranges.
 const STATS: u32 = 60;
 const RANGES: u32 = 61;
-/// With the composite, R holds every glossy pixel's strata: this many slots a row, and two
-/// slots a pixel (records the same). A frame asking for more scales every pixel's strata to fit
-/// (rl_trace_count, rl_trace_pixels), at least one each: no pixel loses its reflection.
+/// With the composite, R holds every glossy pixel's strata (this many slots a row) and H one
+/// record a slot: the room. It starts at ROOM_START and grows to the content (the count pass's
+/// requested total, read back a frame or two late) up to ROOM_PER_PIXEL a pixel; a frame asking
+/// for more than the room scales every pixel's strata to fit (rl_trace_count, rl_trace_pixels),
+/// at least one each, so no pixel loses its reflection while the room grows.
 const SAMPLE_ROW: u32 = 2048;
-const SLOTS_PER_PIXEL: u64 = 2;
+const ROOM_START: u64 = 1 << 18;
+const ROOM_PER_PIXEL: u64 = 4;
 pub(super) const HITS: u32 = 64;
 pub(super) const SAMPLES: u32 = 65;
 /// H: the count and three dispatch arguments, then 48-byte records.
@@ -122,6 +125,15 @@ pub(in crate::renderer) struct PassTargets {
     pub ranges: Depth,
     pub stats: Buffer,
     pub composite: Buffer,
+    /// The composite's room (R's slots and H's records) and the counters' readback ring.
+    pub room: u64,
+    pub readback: Vec<Readback>,
+}
+/// One counters readback: copied on one frame, mapped on the next, read when the map lands.
+pub(in crate::renderer) struct Readback {
+    buffer: wgpu::Buffer,
+    /// 0 idle, 1 copied (map next frame), 2 mapping, 3 mapped.
+    state: std::sync::Arc<std::sync::atomic::AtomicU32>,
 }
 
 /// `rl_trace` and `rl_hit_args`, compiled from a head's standard-program traced module.
@@ -168,18 +180,17 @@ impl Renderer {
             }
         };
         let slots = [size.width.div_ceil(2), size.height.div_ceil(2)];
-        // The composite traces every glossy pixel's set: R and H sized for that, not one a quad.
+        // The composite traces every glossy pixel's set into a room sized to the content (it
+        // starts small and grows); the quad trace keeps one slot and record a quad.
         let composite = crate::program::rl_deferred();
-        let full = SLOTS_PER_PIXEL * u64::from(size.width) * u64::from(size.height);
+        let room = ROOM_START.min(ROOM_PER_PIXEL * u64::from(size.width) * u64::from(size.height));
         let samples = if composite {
-            [SAMPLE_ROW, (full as u32).div_ceil(SAMPLE_ROW)]
+            [SAMPLE_ROW, (room as u32).div_ceil(SAMPLE_ROW)]
         } else {
             slots
         };
-        // H: one record a pixel (48 B each, about 99 MB at 1080p); the room is the smaller of
-        // the two, so frames averaging more than one stratum a pixel are scaled to fit.
         let records = if composite {
-            u64::from(size.width) * u64::from(size.height)
+            room
         } else {
             u64::from(slots[0]) * u64::from(slots[1])
         };
@@ -217,6 +228,18 @@ impl Renderer {
                 16,
                 wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             ),
+            room,
+            readback: (0..if composite { 3 } else { 0 })
+                .map(|_| Readback {
+                    buffer: self.device.create_buffer(&wgpu::BufferDescriptor {
+                        label: Some("reflection trace counters readback"),
+                        size: 16,
+                        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                        mapped_at_creation: false,
+                    }),
+                    state: Default::default(),
+                })
+                .collect(),
         }
     }
 
@@ -335,6 +358,11 @@ impl Renderer {
             compute.dispatch_workgroups(groups[0], groups[1], 1);
             compute.set_pipeline(&pipelines.pixels);
             compute.dispatch_workgroups(groups[0], groups[1], 1);
+            compute.set_pipeline(&pipelines.args);
+            compute.dispatch_workgroups(1, 1, 1);
+            drop(compute);
+            self.rl_room_copy(encoder, pass);
+            return;
         } else {
             compute.set_pipeline(&pipelines.trace);
             compute.dispatch_workgroups(
@@ -773,5 +801,94 @@ impl Renderer {
         render.set_pipeline(pipeline);
         render.set_bind_group(0, &group, &[]);
         render.draw(0..3, 0..1);
+    }
+}
+
+// ---- the composite's room sized to the content ----
+impl Renderer {
+    /// Copies this frame's counters into an idle readback buffer, and maps last frame's copy.
+    fn rl_room_copy(&self, encoder: &mut wgpu::CommandEncoder, pass: &PassTargets) {
+        use std::sync::atomic::Ordering::SeqCst;
+        // Last frame's copies are submitted now: start their maps.
+        for r in &pass.readback {
+            if r.state.compare_exchange(1, 2, SeqCst, SeqCst).is_ok() {
+                let state = r.state.clone();
+                r.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                    state.store(if result.is_ok() { 3 } else { 0 }, SeqCst);
+                });
+            }
+        }
+        if let Some(r) = pass.readback.iter().find(|r| r.state.load(SeqCst) == 0) {
+            encoder.copy_buffer_to_buffer(&pass.stats.value, 0, &r.buffer, 0, 16);
+            r.state.store(1, SeqCst);
+        }
+    }
+    /// Grows the composite's room when a read-back frame asked for more than it holds: R and H
+    /// to the next power of two above 1.25 times the request, at most ROOM_PER_PIXEL a pixel; the
+    /// bindings are rebuilt. Called once a frame before encoding.
+    pub(crate) fn rl_room_grow(&mut self) {
+        use std::sync::atomic::Ordering::SeqCst;
+        let _ = self.device.poll(wgpu::PollType::Poll);
+        let Some(pass) = self
+            .view
+            .primary
+            .as_ref()
+            .and_then(|s| s.targets.as_ref())
+            .and_then(|t| t.rl_pass.as_ref())
+        else {
+            return;
+        };
+        let mut requested = 0u64;
+        for r in &pass.readback {
+            if r.state.load(SeqCst) == 3 {
+                if let Ok(data) = r.buffer.slice(..).get_mapped_range() {
+                    requested = requested.max(u64::from(u32::from_ne_bytes(data[8..12].try_into().unwrap())));
+                }
+                r.buffer.unmap();
+                r.state.store(0, SeqCst);
+            }
+        }
+        let size = pass.lobe_b.texture.size();
+        let most = ROOM_PER_PIXEL * u64::from(size.width) * u64::from(size.height);
+        if requested <= pass.room || pass.room >= most {
+            return;
+        }
+        let room = (requested * 5 / 4).next_power_of_two().min(most);
+        let samples = self.rl_room_samples(room);
+        let hits = Buffer::new(
+            self,
+            "reflection hit records",
+            HITS_HEADER + room * RECORD_BYTES,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        );
+        let state = self.view.primary.as_mut().unwrap();
+        let pass = state.targets.as_mut().unwrap().rl_pass.as_mut().unwrap();
+        pass.samples = samples;
+        pass.hits = hits;
+        pass.room = room;
+        state.bindings = None;
+    }
+    fn rl_room_samples(&self, room: u64) -> Depth {
+        let width = SAMPLE_ROW;
+        let height = (room as u32).div_ceil(SAMPLE_ROW);
+        let texture = self.ledger.own(
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("reflection samples"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            }),
+            ResourceKind::Texture,
+        );
+        let view = self.ledger.own(texture.create_view(&Default::default()), ResourceKind::TextureView);
+        Depth {
+            texture,
+            view,
+            _allocation: self.ledger.allocate(AllocationKind::Target, u64::from(width) * u64::from(height) * 8),
+        }
     }
 }

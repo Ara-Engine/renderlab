@@ -3445,8 +3445,10 @@ impl Renderer {
                 if !self.view.outputs.modes.shades() {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
-                // U-RTVIS: the reflection pass's kernels (RENDERLAB_RL_PASS=1; nothing otherwise).
+                // U-RTVIS: the reflection pass's kernels (RENDERLAB_RL_PASS=1; nothing otherwise),
+                // and the composite's room grown to the content.
                 self.ensure_reflection_trace(shading)?;
+                self.rl_room_grow();
                 self.ensure_reflection_hits(shading)?;
                 self.write_reflection_pass_frame();
                 mark(&mut encoder, "shading");
