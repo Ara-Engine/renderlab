@@ -181,6 +181,9 @@ fn rl_pixel_count(p:vec2<u32>)->u32 {
             textureStore(rl_samples,at,vec4<f32>(rl_sky(d,cone_alpha),1.0));
             continue;
         }
+        // A hit before its H append (the Mac's S4a hit reuse replaces this line under
+        // RENDERLAB_RL_HIT_REUSE; keep it here, once, through S2).
+        // ---- rl trace hit reuse seam ----
         let index=atomicAdd(&rl_hits.count,1u);
         // No record: the slot stays unwritten (a = 0) and out of the pixel's mean, never black.
         if index>=(arrayLength(&rl_hits.records)/3u) {atomicAdd(&rl_trace_stats.dropped,1u);continue;}

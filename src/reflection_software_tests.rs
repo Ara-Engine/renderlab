@@ -435,3 +435,18 @@ fn glass_reflection_module_stays_inline() {
     assert!(source.contains("fn reflection_report("));
     assert!(!source.contains("rl_deferred_store"));
 }
+
+/// The S4a hit reuse seam in `rl_trace_pixels` (the Mac's composition replaces it under
+/// RENDERLAB_RL_HIT_REUSE): once, inside the strata loop, right before the H append.
+#[test]
+fn trace_hit_reuse_seam_stays_before_the_h_append() {
+    let trace = include_str!("../shaders/reflections_trace.wgsl");
+    let seam = "        // ---- rl trace hit reuse seam ----\n        let index=atomicAdd(&rl_hits.count,1u);";
+    assert_eq!(
+        trace
+            .matches("// ---- rl trace hit reuse seam ----")
+            .count(),
+        1
+    );
+    assert_eq!(trace.matches(seam).count(), 1);
+}
