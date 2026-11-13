@@ -1152,6 +1152,7 @@ fn compose_stage(
             source.push_str(traced_hit_helpers());
         }
     }
+    let mut deferred = false;
     if hits {
         // The stage's entry as written (its decode helpers are the hits' too; its own entry
         // point goes unused), then the hit entry.
@@ -1161,19 +1162,21 @@ fn compose_stage(
         // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
         source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
-        if rl_deferred_for(head) && declares(program, "const", "RL_DEFERRED") {
-            return deferred_variant(Composed {
-                source,
-                program: program_range,
-            });
-        }
+        deferred = rl_deferred_for(head) && declares(program, "const", "RL_DEFERRED");
     } else {
         source.push_str(entry);
     }
+    // Every module takes the GI pass's splice, deferred ones included: the GI receiver kernel
+    // (gi_receiver_pass.rs) relies on the definitions it appends.
     source = crate::renderer::primary_ray_gpu::gi_receiver_pass::shade_source(source, matches!(stage, Stage::Traced | Stage::TracedStreamed) && indirect_calls, specular);
-    Composed {
+    let composed = Composed {
         source,
         program: program_range,
+    };
+    if deferred {
+        deferred_variant(composed)
+    } else {
+        composed
     }
 }
 
