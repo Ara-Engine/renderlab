@@ -674,13 +674,14 @@ fn the_primary_shading_layout_has_no_clashing_bindings() {
         },
     ];
     for visibility in visibilities {
-        for bits in 0..32u32 {
+        for bits in 0..64u32 {
             let switches = ShadeSwitches {
                 pass: bits & 1 != 0,
                 software: bits & 2 != 0,
                 deferred: bits & 4 != 0,
                 diag: bits & 8 != 0,
                 gi: bits & 16 != 0,
+                lvis: bits & 32 != 0,
             };
             let mut seen = std::collections::HashSet::new();
             for entry in shade_layout_entries(visibility, switches) {
@@ -690,6 +691,7 @@ fn the_primary_shading_layout_has_no_clashing_bindings() {
                     entry.binding
                 );
             }
+            assert_eq!(seen.contains(&73), switches.lvis);
         }
     }
 }

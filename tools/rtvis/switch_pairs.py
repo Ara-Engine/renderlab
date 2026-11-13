@@ -16,6 +16,7 @@ SWITCHES = {
     "gi": {"RENDERLAB_GI_PASS": "1"},
     "material": {"RENDERLAB_MATERIAL_PASS": "1"},
     "sun": {"RENDERLAB_SUN_PASS": "1"},
+    "lvis": {"RENDERLAB_LIGHT_VIS_PASS": "1"},
     "rl": {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "1"},
     "rl-diag": {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "diag"},
     "rl-all": {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "diag",

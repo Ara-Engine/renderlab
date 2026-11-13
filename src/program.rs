@@ -1169,10 +1169,11 @@ fn compose_stage(
     // Every module takes the GI pass's splice, deferred ones included: the GI receiver kernel
     // (gi_receiver_pass.rs) relies on the definitions it appends.
     source = crate::renderer::primary_ray_gpu::gi_receiver_pass::shade_source(source, matches!(stage, Stage::Traced | Stage::TracedStreamed) && indirect_calls, specular);
-    let composed = Composed {
-        source,
-        program: program_range,
-    };
+    // Light visibility (light_vis_pass.rs) and then the deferred variant, for every module.
+    let composed = crate::renderer::primary_ray_gpu::light_vis_pass::apply(
+        Composed { source, program: program_range },
+        matches!(stage, Stage::Traced | Stage::TracedStreamed),
+    );
     if deferred {
         deferred_variant(composed)
     } else {
