@@ -377,3 +377,50 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
     // The soft RT head and both non-RT heads trace reflections; the hard RT head does not.
     assert!(validated >= 3, "{validated} traced heads validated");
 }
+
+/// RENDERLAB_MATERIAL_PASS: the standard program's material pass (`Write`) and the
+/// record-reading shading (`Read`) compose on every traced head, tiles and list, keep the
+/// program's text in its range and validate; toon declares no record mapping and keeps its
+/// single kernel.
+#[test]
+fn material_pass_variants_compose_and_validate() {
+    use crate::program::{MaterialRole, Stage, compose, compose_list, material_variant};
+    let toon = include_str!("../shaders/programs/toon.wgsl");
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let mut validated = 0;
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            let full = |program: &str| {
+                let parameters = crate::program::declares_parameters(program);
+                if list {
+                    compose_list(head, program, Stage::Traced, parameters)
+                } else {
+                    compose(head, program, Stage::Traced, parameters)
+                }
+            };
+            assert!(material_variant(full(toon), toon, MaterialRole::Write).is_none());
+            for role in [MaterialRole::Write, MaterialRole::Read] {
+                let edited =
+                    material_variant(full(crate::STANDARD_PROGRAM), crate::STANDARD_PROGRAM, role)
+                        .expect("the standard program declares the record mapping");
+                let source = &edited.source;
+                assert_eq!(&source[edited.program.clone()], crate::STANDARD_PROGRAM);
+                match role {
+                    MaterialRole::Write => assert!(source.contains("rl_material_store(pixel,")),
+                    MaterialRole::Read => assert!(source.contains("material_in(rl_material_load(pixel)")),
+                }
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                validated += 1;
+            }
+        }
+    }
+    assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 2);
+}

@@ -124,3 +124,32 @@ fn list_program_uncached(material: &str, terms: u32) -> Result<Program> {
     )?
     .checked())
 }
+/// RENDERLAB_MATERIAL_PASS (program.rs `material_variant`): the hardware soft head's tiles or
+/// list module of `material` as the material pass (`Write`) or as record-reading shading
+/// (`Read`), or None for a program without the record mapping (it keeps its single kernel).
+pub(crate) fn hardware_soft_material(
+    material: &str,
+    list: bool,
+    role: crate::program::MaterialRole,
+) -> Result<Option<Program>> {
+    static KEPT: Memo<[u8; 32], Option<Program>> = Memo::new();
+    KEPT.get(memo::digest(&format!("{list}:{role:?}:{material}")), || {
+        let [_, head] = crate::renderer::primary_ray_gpu::shading_heads(include_str!(
+            "../../shaders/scene.wgsl"
+        ))?;
+        let parameters = crate::program::declares_parameters(material);
+        let composed = if list {
+            crate::program::compose_list(&head, material, crate::program::Stage::Traced, parameters)
+        } else {
+            crate::program::compose(&head, material, crate::program::Stage::Traced, parameters)
+        };
+        let pass = if list {
+            Pass::PrimaryShadeList
+        } else {
+            Pass::PrimaryShadeTiles
+        };
+        crate::program::material_variant(composed, material, role)
+            .map(|c| Ok(Program::new(pass, c.source)?.checked()))
+            .transpose()
+    })
+}
