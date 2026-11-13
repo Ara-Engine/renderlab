@@ -3577,15 +3577,16 @@ impl Renderer {
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
-                if !self.view.outputs.modes.shades() {
-                    self.encode_shade_detail(&mut encoder, shading, &mut mark);
-                }
-                // U-RTVIS: the reflection pass's kernels (RENDERLAB_RL_PASS=1; nothing otherwise).
+                // Visibility feeds both the optional detail probes and final shading.
                 if primary_ray_gpu::light_vis_pass::on() {
                     self.ensure_light_vis(shading)?;
                     mark(&mut encoder, "light_visibility");
                     self.encode_light_vis(&mut encoder, shading);
                 }
+                if !self.view.outputs.modes.shades() {
+                    self.encode_shade_detail(&mut encoder, shading, &mut mark);
+                }
+                // U-RTVIS: the reflection pass's kernels (RENDERLAB_RL_PASS=1; nothing otherwise).
                 self.ensure_reflection_trace(shading)?;
                 self.ensure_reflection_hits(shading)?;
                 self.write_reflection_pass_frame();
