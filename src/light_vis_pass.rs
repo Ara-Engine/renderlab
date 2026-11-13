@@ -13,7 +13,18 @@ const LOCAL: &str = "    if lights[s.index].kind.w!=0u { return rl_local_shadow(
 const PREPARE: &str = "    rl_lights_prepare(surface_input.world);";
 pub(crate) fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_LIGHT_VIS_PASS").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| {
+        let requested=std::env::var("RENDERLAB_LIGHT_VIS_PASS").is_ok_and(|v|v=="1");
+        // The bound needs the material's unshadowed contribution and running radiance.
+        // Until t3/material-pass publishes base/metal/rough/normal at bindings 75/78,
+        // leave visibility inline whenever the bound is set. That record is the seam
+        // for evaluating the shared bound before tracing here, without a second BRDF.
+        if requested && std::env::var_os("RENDERLAB_LIGHT_BOUND").is_some() {
+            eprintln!("light_vis_pass bypassed: RENDERLAB_LIGHT_BOUND is set; visibility stays inline until material-record integration (75/78)");
+            return false;
+        }
+        requested
+    })
 }
 pub(super) fn layout_entry() -> wgpu::BindGroupLayoutEntry {
     buffer(
