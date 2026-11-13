@@ -549,8 +549,8 @@ struct Deferred {
     /// That rectangle widened to whole trace tiles, as the region record holds it.
     region_rect: [u32; 4],
     /// RENDERLAB_MATERIAL_PASS: the material record (program.rs MATERIAL_RECORD_BINDINGS), a
-    /// pair of rgba32uint images of the frame's size; None while the pass is off.
-    material: Option<[Texture; 2]>,
+    /// words 0, 1 and 2 as rgba32uint images of the frame's size; None while the pass is off.
+    material: Option<[Texture; 3]>,
     epsilon: Texture,
     frame: StorageBuffer,
     region: StorageBuffer,
@@ -858,6 +858,9 @@ fn provided<'a>(
         }
         (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[1] => {
             deferred?.material.as_ref().map(|m| &m[1])
+        }
+        (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[2] => {
+            deferred?.material.as_ref().map(|m| &m[2])
         }
         (0, 3) | (0, 16) => traced.map(|t| &t.world),
         (0, 4) | (0, 17) => traced.map(|t| &t.normal),
@@ -1403,6 +1406,25 @@ fn parameter_layout(source: &str) -> Result<Option<crate::program::ParameterLayo
     Ok(layout)
 }
 
+/// RENDERLAB_MATERIAL_PASS=1: one log line whenever a frame's split changes, saying how many
+/// program slots shade from the record and how many keep the single kernel (a program without
+/// `material_out` / `material_in`: the material pass writes only its receiver). `readers` is
+/// whether each slot has a record-reading shading module.
+fn log_material_slots(readers: &[bool]) {
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+    let record = readers.iter().filter(|r| **r).count();
+    let single = readers.len() - record;
+    let split = ((record as u64) << 32) | single as u64;
+    if LAST.swap(split, std::sync::atomic::Ordering::Relaxed) != split {
+        eprintln!(
+            "material pass: {record} program slot(s) shade from the record, {single} keep the single kernel (receiver only)"
+        );
+    }
+}
+/// RENDERLAB_GI_PASS=1 (src/gi_receiver_pass.rs): the GI lookup pass is wired for wgpu only.
+/// Composition would make the port's shading read its binding 68, which nothing here allocates
+/// or writes, so the port refuses the switch at `Engine::new` and at every frame.
+pub(crate) const GI_PASS_REFUSAL: &str = "RENDERLAB_GI_PASS=1: the GI lookup pass is not wired on the ara-gpu port yet (its binding 68 has no target or dispatch here); unset it";
 /// One frame after `history`, over what the sequence keeps on the GPU; returns its
 /// images and what it hands to the next frame.
 fn frame(
@@ -1413,6 +1435,7 @@ fn frame(
     cache: &ShaderCache,
     scene: &ForwardScene<'_>,
 ) -> Result<(ForwardImages, Carried)> {
+    ensure!(!crate::renderer::primary_ray_gpu::gi_receiver_pass::on(), GI_PASS_REFUSAL);
     let Kept {
         gi,
         tr1,
@@ -1682,6 +1705,18 @@ fn frame(
     } else {
         Vec::new()
     };
+    if material_on {
+        let list = sources.len() > 1;
+        let frame_sources: &[&str] = if list { &sources } else { &sources[..1] };
+        let readers = frame_sources
+            .iter()
+            .map(|source| {
+                primary_shade::hardware_soft_material(source, list, crate::program::MaterialRole::Read)
+                    .map(|reader| reader.is_some())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        log_material_slots(&readers);
+    }
     // The pass log's shading parts (src/shade_detail.rs): each part's tiled program, or its
     // list programs in slot order.
     let shade_parts = if deferred_path && crate::renderer::shade_detail::wanted() {
@@ -2774,6 +2809,7 @@ fn frame(
             region_rect: region,
             material: if material_on {
                 Some([
+                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
                     Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
                     Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
                 ])

@@ -187,6 +187,17 @@ def state(owned=()):
     return dict(utc=utc(), available_mbytes=mb, games=games, gpu_processes=gpu, builds=builds, gpu=smi.stdout.strip())
 
 
+def top_processes(n=5):
+    """The n largest processes by working set (MiB), for floor-trip logs."""
+    out = subprocess.run(["powershell", "-NoProfile", "-Command",
+        f"Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First {n} Name,Id,@{{n='MB';e={{[math]::Round($_.WorkingSet64/1MB)}}}} | ConvertTo-Json -Compress"],
+        capture_output=True, text=True, creationflags=FLAGS, timeout=20).stdout
+    try:
+        return json.loads(out)
+    except Exception:
+        return out.strip()
+
+
 def timing_lease_running():
     """Another lease holds the GPU, or another tool marks a build slot with a timing lease's label."""
     if LOCK.exists():
@@ -249,6 +260,11 @@ def main():
         if not take_timing_hold(a.label):
             print("DEFERRED: the GPU or another timing lease is busy; a timing lease holds the build slots only once it can run", flush=True)
             return 3
+    elif TIMING_HOLD.exists():
+        # A timing lease that took the hold is draining builds and owns the next GPU turn (root, 2026-11-13:
+        # an ordinary lease took the lock inside a waiting timing hold and the timing lease lost its turn).
+        print("DEFERRED: a timing lease holds timing-hold and runs next", flush=True)
+        return 3
     if a.contended_screen:
         a.runtime_memory_mbytes = 3072
         a.record_resources = True
@@ -334,72 +350,86 @@ def main():
         env.pop("VK_LOADER_LAYERS_DISABLE", None)
         if a.manifest:
             env["RENDERLAB_PRIMARY_MANIFEST"] = str(a.manifest.resolve())
-        samples, resources, stop, failure = [], [], threading.Event(), []
-        gpu_state = {"start": gpu_clocks()}
-        print("gpu state at start:", gpu_state["start"], flush=True)
-        with log.open("w", encoding="utf-8") as f:
-            child = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=f, stderr=subprocess.STDOUT, creationflags=FLAGS)
-            def terminate_owned_tree():
-                if child.poll() is None:
-                    subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"], stdout=subprocess.DEVNULL,
-                                   stderr=subprocess.DEVNULL, creationflags=FLAGS, timeout=10)
-            def monitor():
-                while not stop.wait(2):
-                    try:
-                        s = state((child.pid,))
-                        samples.append(s)
-                        if s["gpu_processes"] or s["available_mbytes"] < a.runtime_memory_mbytes or (a.no_build_contention and s["builds"]):
-                            failure.append(f"contention or available memory below {a.runtime_memory_mbytes:g} MiB")
+        # A lease the machine floor stopped while its own process stayed small (< 2 GiB) was pushed under by
+        # others' overlap, not its own size: log the largest processes, wait 60 s and run it once more
+        # (coordinator, 2026-11-13). The retry appends to the same log.
+        retried = []
+        for attempt in range(2):
+            samples, resources, stop, failure, trip = [], [], threading.Event(), [], {}
+            gpu_state = {"start": gpu_clocks()}
+            print("gpu state at start:", gpu_state["start"], flush=True)
+            with log.open("w" if attempt == 0 else "a", encoding="utf-8") as f:
+                child = subprocess.Popen(cmd, cwd=ROOT, env=env, stdout=f, stderr=subprocess.STDOUT, creationflags=FLAGS)
+                def terminate_owned_tree():
+                    if child.poll() is None:
+                        subprocess.run(["taskkill", "/PID", str(child.pid), "/T", "/F"], stdout=subprocess.DEVNULL,
+                                       stderr=subprocess.DEVNULL, creationflags=FLAGS, timeout=10)
+                def monitor():
+                    while not stop.wait(2):
+                        try:
+                            s = state((child.pid,))
+                            samples.append(s)
+                            if s["gpu_processes"] or s["available_mbytes"] < a.runtime_memory_mbytes or (a.no_build_contention and s["builds"]):
+                                failure.append(f"contention or available memory below {a.runtime_memory_mbytes:g} MiB")
+                                terminate_owned_tree()
+                                return
+                        except Exception as e:
+                            failure.append(str(e))
                             terminate_owned_tree()
                             return
-                    except Exception as e:
-                        failure.append(str(e))
-                        terminate_owned_tree()
-                        return
-            thread = threading.Thread(target=monitor)
-            thread.start()
-            def resource_monitor():
-                while not stop.is_set():
-                    try:
-                        sample = resource_sample(); resources.append(sample)
-                        if sample["available_mbytes"] < a.runtime_memory_mbytes:
-                            failure.append("resource sampler: available memory below runtime floor")
-                            terminate_owned_tree(); return
-                    except Exception as e:
-                        failure.append(str(e)); terminate_owned_tree(); return
-                    stop.wait(.1)
-            resource_thread = threading.Thread(target=resource_monitor) if a.record_resources else None
-            if resource_thread: resource_thread.start()
-            def memory_watchdog():
-                while not stop.is_set():
-                    try:
-                        free, largest, pid = memory_watch_sample(child.pid)
-                        if largest > WATCH_CHILD_MBYTES or free < WATCH_FREE_MBYTES:
-                            failure.append(f"memory watchdog: process {pid} at {largest:.0f} MiB (limit {WATCH_CHILD_MBYTES:g}), "
-                                           f"machine available {free:.0f} MiB (floor {WATCH_FREE_MBYTES:g})")
-                            print("MEMORY WATCHDOG:", failure[-1], flush=True)
-                            terminate_owned_tree(); return
-                    except Exception as e:
-                        failure.append(f"memory watchdog error: {e}")
-                    stop.wait(1)
-            watchdog_thread = threading.Thread(target=memory_watchdog)
-            watchdog_thread.start()
-            try:
-                child.wait(timeout=max(1, a.minutes * 60 - (time.monotonic() - start) - 90))
-            except subprocess.TimeoutExpired:
-                failure.append("bounded lease deadline")
-                terminate_owned_tree()
-                child.wait()
-            finally:
-                stop.set()
-                thread.join()
-                watchdog_thread.join()
-                if resource_thread: resource_thread.join()
-        gpu_state["end"] = gpu_clocks()
-        print("gpu state at end:", gpu_state["end"], flush=True)
+                thread = threading.Thread(target=monitor)
+                thread.start()
+                def resource_monitor():
+                    while not stop.is_set():
+                        try:
+                            sample = resource_sample(); resources.append(sample)
+                            if sample["available_mbytes"] < a.runtime_memory_mbytes:
+                                failure.append("resource sampler: available memory below runtime floor")
+                                terminate_owned_tree(); return
+                        except Exception as e:
+                            failure.append(str(e)); terminate_owned_tree(); return
+                        stop.wait(.1)
+                resource_thread = threading.Thread(target=resource_monitor) if a.record_resources else None
+                if resource_thread: resource_thread.start()
+                def memory_watchdog():
+                    while not stop.is_set():
+                        try:
+                            free, largest, pid = memory_watch_sample(child.pid)
+                            if largest > WATCH_CHILD_MBYTES or free < WATCH_FREE_MBYTES:
+                                if free < WATCH_FREE_MBYTES and largest <= WATCH_CHILD_MBYTES:
+                                    trip.update(own=largest, free=free)
+                                failure.append(f"memory watchdog: process {pid} at {largest:.0f} MiB (limit {WATCH_CHILD_MBYTES:g}), "
+                                               f"machine available {free:.0f} MiB (floor {WATCH_FREE_MBYTES:g})")
+                                print("MEMORY WATCHDOG:", failure[-1], flush=True)
+                                terminate_owned_tree(); return
+                        except Exception as e:
+                            failure.append(f"memory watchdog error: {e}")
+                        stop.wait(1)
+                watchdog_thread = threading.Thread(target=memory_watchdog)
+                watchdog_thread.start()
+                try:
+                    child.wait(timeout=max(1, a.minutes * 60 - (time.monotonic() - start) - 90))
+                except subprocess.TimeoutExpired:
+                    failure.append("bounded lease deadline")
+                    terminate_owned_tree()
+                    child.wait()
+                finally:
+                    stop.set()
+                    thread.join()
+                    watchdog_thread.join()
+                    if resource_thread: resource_thread.join()
+            gpu_state["end"] = gpu_clocks()
+            print("gpu state at end:", gpu_state["end"], flush=True)
+            if attempt == 0 and trip and trip.get("own", 1e9) < 2048 and child.returncode != 0:
+                top = top_processes()
+                print("MEMORY FLOOR TRIP with own process small; top processes:", top, "; retrying once in 60 s", flush=True)
+                retried.append(dict(utc=utc(), failures=failure, trip=trip, top=top))
+                time.sleep(60)
+                continue
+            break
         binary = Path(cmd[0])
         record = dict(command=cmd, start=owner["utc"], end=utc(), seconds=time.monotonic() - start, gpu_state=gpu_state,
-                      exit=child.returncode, failures=failure, samples=samples,
+                      exit=child.returncode, failures=failure, samples=samples, retried=retried,
                       manifest=json.loads(a.manifest.read_text()) if a.manifest else None,
                       runtime_memory_floor_mbytes=a.runtime_memory_mbytes,
                       reject_build_contention=a.no_build_contention,

@@ -871,7 +871,17 @@ fn material_pass_variants_compose_and_validate() {
                     compose(head, program, Stage::Traced, parameters)
                 }
             };
-            assert!(material_variant(full(toon), toon, MaterialRole::Write).is_none());
+            // A program without the mapping: a receiver-only writer, no reader.
+            assert!(material_variant(full(toon), toon, MaterialRole::Read).is_none());
+            let receiver_only = material_variant(full(toon), toon, MaterialRole::Write)
+                .expect("every program gets a receiver writer");
+            assert!(receiver_only.source.contains("255u),surface_input,rl_mr_near_edge("));
+            assert_eq!(&receiver_only.source[receiver_only.program.clone()], toon);
+            let module = naga::front::wgsl::parse_str(&receiver_only.source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&receiver_only.source)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&receiver_only.source)));
             for role in [MaterialRole::Write, MaterialRole::Read] {
                 let edited =
                     material_variant(full(crate::STANDARD_PROGRAM), crate::STANDARD_PROGRAM, role)
@@ -880,7 +890,13 @@ fn material_pass_variants_compose_and_validate() {
                 assert_eq!(&source[edited.program.clone()], crate::STANDARD_PROGRAM);
                 match role {
                     MaterialRole::Write => assert!(source.contains("rl_material_store(pixel,")),
-                    MaterialRole::Read => assert!(source.contains("material_in(rl_material_load(pixel)")),
+                    MaterialRole::Read => {
+                        assert!(source.contains("material_in(rl_material_load(pixel)"));
+                        // The receiver's shade takes the record's normal and MQ2 hint.
+                        assert!(source.contains("rl_material_use=true;"));
+                        assert!(source.contains("rl_material_view_hint)"));
+                        assert!(source.contains("if rl_material_use {n=rl_material_n;}"));
+                    }
                 }
                 let module = naga::front::wgsl::parse_str(source)
                     .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
@@ -895,6 +911,79 @@ fn material_pass_variants_compose_and_validate() {
         }
     }
     assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 2);
+}
+
+/// The material pass's receiver is the sun path's, body for body: words 1 and 2 then give a
+/// sun pass reading the record exactly the receiver it builds today.
+#[test]
+fn material_trace_receiver_matches_the_sun_path() {
+    let body = |source: &str, signature: &str| -> String {
+        let start = source.find(signature).unwrap_or_else(|| panic!("{signature}"));
+        let open = start + source[start..].find('{').unwrap();
+        let mut depth = 0;
+        for (i, c) in source[open..].char_indices() {
+            depth += match c {
+                '{' => 1,
+                '}' => -1,
+                _ => 0,
+            };
+            if depth == 0 {
+                return source[open..open + i + 1].to_owned();
+            }
+        }
+        panic!("{signature} unclosed")
+    };
+    assert_eq!(
+        body(crate::program::MATERIAL_TRACE_RECEIVER, "fn rl_mr_trace_receiver_of("),
+        body(include_str!("../shaders/primary_penumbra.wgsl"), "fn primary_penumbra_receiver(")
+    );
+}
+
+/// Every `RENDERLAB_MATERIAL_DEBUG` view composes and validates on every head, tiles and lists.
+#[test]
+fn material_pass_debug_views_compose_and_validate() {
+    use crate::program::{MaterialRole, Stage, compose, compose_list, material_debug_field, material_variant_with};
+    let program = crate::STANDARD_PROGRAM;
+    let parameters = crate::program::declares_parameters(program);
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            for name in ["base", "normal", "roughness", "metallic", "receiver"] {
+                let full = if list {
+                    compose_list(head, program, Stage::Traced, parameters)
+                } else {
+                    compose(head, program, Stage::Traced, parameters)
+                };
+                let field = material_debug_field(name);
+                let edited = material_variant_with(full, program, MaterialRole::Read, field, None).expect("standard maps the record");
+                if name == "receiver" {
+                    // A program without the mapping gets the receiver check's reader too.
+                    let toon = include_str!("../shaders/programs/toon.wgsl");
+                    let toon_full = if list {
+                        compose_list(head, toon, Stage::Traced, crate::program::declares_parameters(toon))
+                    } else {
+                        compose(head, toon, Stage::Traced, crate::program::declares_parameters(toon))
+                    };
+                    let checked = material_variant_with(toon_full, toon, MaterialRole::Read, field, None)
+                        .expect("the receiver check covers unmapped programs");
+                    assert!(checked.source.contains("const RL_MATERIAL_UNMAPPED:bool=true;"));
+                    let module = naga::front::wgsl::parse_str(&checked.source)
+                        .unwrap_or_else(|e| panic!("toon receiver: {}", e.emit_to_string(&checked.source)));
+                    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                        .validate(&module)
+                        .unwrap_or_else(|e| panic!("toon receiver: {}", e.emit_to_string(&checked.source)));
+                }
+                let source = &edited.source;
+                assert_eq!(&source[edited.program.clone()], program);
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+                naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                    .validate(&module)
+                    .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            }
+        }
+    }
 }
 
 /// The measurement probes (`RENDERLAB_MATERIAL_PROBE`) compose and validate on every head,
