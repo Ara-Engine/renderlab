@@ -1166,3 +1166,12 @@ Next step if it matters: a Metal GPU capture of one film draw (occupancy, regist
 
 ## Memory: Ara's Outpost non-RT player peaks at 5.8-5.9 GiB private memory (2026-11-13, coordinator)
 On the RTX PC (31 GB) one Outpost non-RT player process peaks at 5.8-5.9 GiB of private memory; it repeatedly stopped the integration thread's pricing rows against the runner's 8 GiB machine floor. That is a large CPU-side footprint for one scene. Belongs beside the VRAM budget (memory-budget-vs-unreal): split it by owner (Ara's scene and cook data, Renderlab's CPU-side scene copies, staging and readback buffers, the wgpu-core tracker) before choosing what to shrink. Owner: unassigned; root to size it with the integration thread.
+
+## game_scene port test: a knife-edge pixel on the glass pane (Mac GPU thread, 2026-11-13; unexplained)
+
+`game_scene_cases::the_game_scene_builds_and_renders_through_the_engine_calls` compares the scene with the hero's own program against one program for every draw. Pixel (350, 162), the glass pane's top-right corner, can differ between the two by one f16 step in blue (0.25756836 against 0.2578125). Three conditions have flipped it:
+- RL#80's refraction fix (the jittered projection), even with the test run alone;
+- an unrelated change that renders nothing differently (RL#86, read-write storage images), but only in the full parallel suite, never alone;
+- neither, on main: it passes both alone and in the full suite.
+
+Unexplained, possibly load- or order-dependent upstream of the pane. The test's hero check counts pixels on the pane's projected box as able to show the hero (the pane reflects and refracts it), so the flip no longer fails it.
