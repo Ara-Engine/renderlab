@@ -217,6 +217,8 @@ struct Placed<'a> {
     mesh: u64,
     /// Every transform it is placed at.
     placements: &'a [Mat4],
+    /// Whether each placement blocks light (`Batch::casts`, `set_casts_shadows`).
+    casts: &'a [bool],
     /// A skinned mesh's pose before this one, and its pose revision.
     skin: Option<Skin<'a>>,
 }
@@ -494,7 +496,7 @@ impl Engine {
                     "normal-mapped draw requires tangent stream",
                 ));
             }
-            let placed = |transform, placements| Placed {
+            let placed = |transform, placements, casts| Placed {
                 vertices,
                 indices,
                 tangents: tangents.as_ref(),
@@ -502,6 +504,7 @@ impl Engine {
                 transform,
                 mesh: *key,
                 placements,
+                casts,
                 skin,
             };
             if material.transparency.is_some() {
@@ -509,10 +512,13 @@ impl Engine {
                     batch
                         .models
                         .iter()
-                        .map(|model| placed(*model, std::slice::from_ref(model))),
+                        .zip(&batch.casts)
+                        .map(|(model, casts)| {
+                            placed(*model, std::slice::from_ref(model), std::slice::from_ref(casts))
+                        }),
                 );
             } else if let Some(first) = batch.models.first() {
-                opaque.push(placed(*first, &batch.models[..]));
+                opaque.push(placed(*first, &batch.models[..], &batch.casts[..]));
             }
         }
         Ok([opaque, transparent])
@@ -1046,6 +1052,7 @@ impl Engine {
         let keys: Vec<u64> = opaque.iter().map(|p| p.mesh).collect();
         let material_keys: Vec<u64> = opaque.iter().map(|p| p.material.key).collect();
         let placements: Vec<&[Mat4]> = opaque.iter().map(|p| p.placements).collect();
+        let casts: Vec<&[bool]> = opaque.iter().map(|p| p.casts).collect();
         let skins: Vec<Option<Skin<'_>>> = opaque.iter().map(|p| p.skin).collect();
         // The view's ids: the tag tables in the frame's placement order, every opaque
         // placement's entry and then every transparent one's (`prepare_view_ids`).
@@ -1163,6 +1170,7 @@ impl Engine {
             instances: Some(&placements),
             sky_map,
             skins: Some(&skins),
+            casts: Some(&casts),
             colour_lut: look.colour_lut.as_ref(),
             ids: id_entries
                 .as_ref()
