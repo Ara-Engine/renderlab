@@ -568,6 +568,11 @@ PLANS["s1time"] = (
     + [(f"t-nonrt-toon-{tag}-{k}", ["--path", "nonrt", "--fox", FOX, *STD, "--diag", "floor=0.2", "--frames", "60"], env)
        for k in (1, 2) for tag, env in (("on", PASS_ON), ("own", PASS_ON | OWN))]
 )
+# s1time as two --timing leases under 5 minutes: round 1 with the own-program rows, then round 2.
+PLANS["s1time1"] = [x for x in PLANS["s1time"] if x[0].endswith("-1")]
+PLANS["s1time2"] = [x for x in PLANS["s1time"] if x[0].endswith("-2")]
+PLANS["s1time1"] = [x for x in PLANS["s1time1"] if "toon" not in x[0]] + [x for x in PLANS["s1time"] if "toon" in x[0]]
+PLANS["s1time2"] = [x for x in PLANS["s1time2"] if "toon" not in x[0]]
 PLANS["s1pics"] = (
     [(f"p-nonrt-{name}-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "40", "--every", "1"],
       PASS_ON if v == "1" else {})
