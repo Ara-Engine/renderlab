@@ -671,7 +671,9 @@ impl Renderer {
         let module = self.ledger.own(
             self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("reflection composite"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/reflections_composite.wgsl").into()),
+                source: wgpu::ShaderSource::Wgsl(
+                    crate::program::rl_pass_switches(include_str!("../shaders/reflections_composite.wgsl").to_owned()).into(),
+                ),
             }),
             ResourceKind::ShaderModule,
         );

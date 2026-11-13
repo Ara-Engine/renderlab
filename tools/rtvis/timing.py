@@ -487,6 +487,20 @@ PLANS["rtbisect"] = [
      COMP(v) | ({"RENDERLAB_RL_HIT": hit} if hit else {}))
     for name, hit in BISECT for v in ("1", "0")
 ]
+# specks: RT, the pass forced on against off, under the pass's own switches (program.rs
+# rl_pass_switches; `black` above only blackened inline hits). The lamp cap at frames 0 and 13 of
+# the flight, and root's row: night lanterns' moving gold sphere, every frame of 34.
+SPECK_SWITCHES = (("plain", ""), ("missblack", "missblack"), ("lone", "lone"), ("hitblack", "hitblack"))
+PLANS["specks"] = (
+    [(f"s-rt-cap-off", ["--path", "rt", "--fox", FOX, *STD, "--frames", "14", "--every", "13"], {})]
+    + [(f"s-rt-cap-{name}", ["--path", "rt", "--fox", FOX, *STD, "--frames", "14", "--every", "13"],
+        COMP("1") | ({"RENDERLAB_RL_HIT": hit} if hit else {}))
+       for name, hit in SPECK_SWITCHES]
+    + [(f"s-rt-night-off", ["--path", "rt", "--fox", FOX, *STD, "--night-lanterns", "--frames", "34", "--every", "1"], {})]
+    + [(f"s-rt-night-{name}", ["--path", "rt", "--fox", FOX, *STD, "--night-lanterns", "--frames", "34", "--every", "1"],
+        COMP("1") | ({"RENDERLAB_RL_HIT": hit} if hit else {}))
+       for name, hit in SPECK_SWITCHES]
+)
 # comp5: the non-RT default (no switches) against RENDERLAB_RL_PASS=0 (main's path): bytes and
 # the probe (60 frames, flight and lanterns), pictures moving, with planner cuts (cut=1) and a
 # respawn under a still camera (hold=cut; the event at frame 24), and RT unset vs off (identity).
