@@ -246,7 +246,7 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
     ensure!(edges > 0, "no pixel reached an edge the repair moves");
     ensure!(
         worst[0] == 0.0,
-        "the trace point, slot, thin or a side moved ({})",
+        "the trace point, slot, thin or a side moved, or a moved point lacks the near-edge mark ({})",
         worst[0]
     );
     ensure!(worst[1] == 0.0, "the epsilon moved ({})", worst[1]);
