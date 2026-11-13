@@ -124,6 +124,7 @@ fn reflection_hits_drop_local_shadows_from_rough_lobes_only() -> Result<()> {
                 programs: None,
                 sky_map: None,
                 skins: None,
+                casts: None,
                 colour_lut: None,
                 ids: None,
             },

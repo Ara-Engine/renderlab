@@ -292,6 +292,11 @@ pub struct ForwardScene<'a> {
     /// renderer `Draw` over its `Instances`). A frame holds `TRACED_DRAWS` draws and
     /// any number of placements. `None` draws each object once at its `transform`.
     pub instances: Option<&'a [&'a [crate::Mat4]]>,
+    /// Per object, whether each of its placements (`instances`' order) blocks light
+    /// (`set_casts_shadows`): a non-caster is left out of shadow rays (its acceleration
+    /// instance lacks `SHADOW_CASTER_MASK`) and of the shadow plan. `None`: every placement
+    /// casts.
+    pub casts: Option<&'a [&'a [bool]]>,
     /// A prepared environment map that lights the scene in place of the uniform
     /// environment (`Sky::Map`), kept on the GPU while frames go on naming its key.
     /// The atmosphere's procedural environment must be off.
@@ -1434,6 +1439,18 @@ fn frame(
             None => std::slice::from_ref(&scene.objects[index].transform),
         }
     };
+    ensure!(
+        scene.casts.is_none_or(|casts| {
+            casts.len() == scene.objects.len()
+                && casts
+                    .iter()
+                    .enumerate()
+                    .all(|(index, list)| list.len() == placed(index).len())
+        }),
+        "shadow casting is given per placement, one list per object"
+    );
+    // Whether placement `k` of object `index` blocks light (`ForwardScene::casts`).
+    let casts = |index: usize, k: usize| scene.casts.is_none_or(|lists| lists[index][k]);
     // Each object's previous pose, where it is skinned.
     let skin = |index: usize| scene.skins.and_then(|s| s.get(index).copied().flatten());
     ensure!(
@@ -1654,14 +1671,16 @@ fn frame(
             Format::Rgba16Float,
         )?)
     };
-    let (mut bounds, mut skin_bounds) = (Vec::new(), Vec::new());
+    // Per placement, its world bounds and whether it blocks light (the shadow plan's casters).
+    let (mut bounds, mut skin_bounds, mut casters) = (Vec::new(), Vec::new(), Vec::new());
     for (index, object) in scene.objects.iter().enumerate() {
         let local =
             crate::visibility::Aabb::from_positions(object.vertices.iter().map(|v| v.position))
                 .context("empty mesh")?;
-        for transform in placed(index) {
+        for (k, transform) in placed(index).iter().enumerate() {
             let world = shadow_gpu::world_bounds(local, *transform)?;
             bounds.push(world);
+            casters.push(casts(index, k));
             if skin(index).is_some() {
                 skin_bounds.push(world);
             }
@@ -1759,6 +1778,7 @@ fn frame(
                 size,
                 &scene.lighting.lights,
                 &bounds,
+                &casters,
             )?;
             frame.prepare_hardware_bias(&records)?;
             left.shadow_bases = frame.bases().to_vec();
@@ -2181,13 +2201,20 @@ fn frame(
                 };
                 // `hardware_shadow_gpu`: one instance per placement, in draw then
                 // instance order, named by its place in that order.
-                for transform in placed(index) {
+                // Every ray sees bit 0x02; shadow rays cull by `SHADOW_CASTER_MASK`, which a
+                // placement that casts no shadow lacks.
+                for (k, transform) in placed(index).iter().enumerate() {
                     let m = transform.to_cols_array_2d();
+                    let caster = if casts(index, k) {
+                        crate::shadows::SHADOW_CASTER_MASK as u8
+                    } else {
+                        0
+                    };
                     instances.push(AccelerationInstance {
                         geometry: place.of(resident, &transient).blas,
                         transform: std::array::from_fn(|i| m[i % 4][i / 4]),
                         custom_index: instances.len() as u32,
-                        mask: 255,
+                        mask: 0x02 | caster,
                     });
                 }
                 geometry.push(place);

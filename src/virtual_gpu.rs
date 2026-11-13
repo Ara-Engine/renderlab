@@ -422,11 +422,15 @@ impl Renderer {
             vec![]
         };
         let mut shadow_frame = if self.view.shadows.enabled(view_mode) {
+            let casts: Vec<bool> = (0..instances.state.models.len())
+                .map(|slot| instances.state.casts_shadows(slot))
+                .collect();
             Some(self.view.shadows.plan(
                 camera,
                 [color.width(), color.height()],
                 &self.lighting.source_lights,
                 &placement_bounds,
+                &casts,
             )?)
         } else {
             None

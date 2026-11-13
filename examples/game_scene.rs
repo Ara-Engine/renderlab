@@ -43,6 +43,8 @@
 //! both render from one engine and each frame records both hashes, so a run of `a` or `b`
 //! alone checks that each view matches a single-view engine; `ai` is `a` with a second view
 //! created and never rendered. `--cut-b FRAME` jumps view b's camera and cuts it there.
+//! `--diag casts=toggle` (U-FIXED, `Engine::set_casts_shadows`): the crates stop casting shadows
+//! at frame 12 and cast again from frame 24, on the flight's moving camera.
 //! `--diag forest=1` (U-RTVIS, docs/rtvis.md) swaps the flat ground for a 200 m rolling
 //! terrain (16 tiles) under trees and bushes of cutout cards and walks the field walk's camera
 //! through it: Outpost's layered ground and foliage, for the RT visibility pass's cost.
@@ -358,6 +360,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     | "field"
                     | "forest"
                     | "fox"
+                    | "casts"
             )
         });
     // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
@@ -379,6 +382,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let two_foxes = scene_key("fox", "2");
     let hold_cut = scene_key("hold", "cut");
     let hold = scene_key("hold", "1") || pose_only || hold_cut;
+    // `casts=toggle`: the crates' shadow casting off at frame 12, on again at frame 24.
+    let casts_toggle = scene_key("casts", "toggle");
     // U-SPECK (docs/speck.md): `field=1` scatters 300 small bright boxes and a pale slab over
     // an empty quarter of the ground and walks the camera 4 m across it while turning 12
     // degrees, whatever `--frames` is: the cell mosaic Ara's Outpost showed on flat ground.
@@ -733,17 +738,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         boxed(at(-5.5, 1.5, 0.0), Vec3::new(0.3, 3.0, 6.0)),
     )?;
     // A stack of crates.
+    let mut crates = vec![];
     for (x, y, z, turn) in [
         (4.0, 0.5, 1.0, 0.1),
         (5.1, 0.5, 1.3, -0.25),
         (4.5, 1.5, 1.1, 0.4),
         (4.2, 0.5, 2.3, 0.0),
     ] {
-        engine.spawn(
+        crates.push(engine.spawn(
             cube,
             wood,
             Mat4::from_translation(at(x, y, z)) * Mat4::from_rotation_y(turn),
-        )?;
+        )?);
     }
     engine.spawn(sphere, gold, boxed(at(1.8, 1.0, 3.2), Vec3::splat(1.0)))?;
     if args.glass {
@@ -1065,6 +1071,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if glow_steps && frame == EVENT_FRAME {
             let dim = [6_000.0, 4_000.0, 1_800.0].map(|v| v * lamp_scale);
             engine.set_material_parameters(bulb, &[("glow", Value::Vec3(dim))])?;
+        }
+        if casts_toggle && (frame == 12 || frame == 24) {
+            for &object in &crates {
+                engine.set_casts_shadows(object, frame == 24)?;
+            }
         }
         let spin = if pose_only { 0.0 } else { t };
         engine.set_transform(

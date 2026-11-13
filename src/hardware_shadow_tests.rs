@@ -589,3 +589,68 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
         r.test_drain("analytical hardware MSAA complete");
     }
 }
+
+/// Every shadow ray culls with the named `SHADOW_CASTER_MASK` (src/shadows.rs, declared in
+/// shaders/scene.wgsl), so a placement that casts no shadow is invisible to it: each ray query
+/// that stops at its first hit, and the fresh-visibility kernel, whose flags are a variable.
+/// Camera, reflection and bounce rays keep 0xFF.
+#[test]
+fn every_shadow_ray_query_culls_with_the_shadow_mask() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut sources: Vec<(String, String)> = std::fs::read_dir(root.join("shaders"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "wgsl"))
+        .map(|p| {
+            (
+                p.display().to_string(),
+                std::fs::read_to_string(&p).unwrap(),
+            )
+        })
+        .collect();
+    for file in ["src/program.rs", "src/atmosphere_gpu.rs"] {
+        sources.push((
+            file.into(),
+            std::fs::read_to_string(root.join(file)).unwrap(),
+        ));
+    }
+    let mut shadow_rays = 0;
+    for (file, text) in &sources {
+        for (at, _) in text.match_indices("RayDesc(") {
+            let call = &text[at..at + text[at..].find(')').unwrap()];
+            let shadow =
+                call.contains("TERMINATE_ON_FIRST_HIT") || file.ends_with("fresh_shadows.wgsl");
+            let mask = call.split(',').nth(1).unwrap().trim();
+            if shadow {
+                shadow_rays += 1;
+                assert_eq!(
+                    mask, "SHADOW_CASTER_MASK",
+                    "{file}: a shadow ray must cull with the shadow mask: {call}"
+                );
+            } else {
+                assert_eq!(
+                    mask, "255u",
+                    "{file}: only shadow rays cull non-casters: {call}"
+                );
+            }
+        }
+    }
+    // fresh_shadows, hardware_shadows, local_light_ray, reflections (and its program template),
+    // gi_rays_hardware, the atmosphere and the reference tracer.
+    assert_eq!(shadow_rays, 8);
+    // Modules without scene.wgsl take the declaration after their directives.
+    assert_eq!(
+        crate::shadows::with_shadow_caster_mask("enable wgpu_ray_query;\nfn f() {}\n"),
+        "enable wgpu_ray_query;\nconst SHADOW_CASTER_MASK:u32=1u;\nfn f() {}\n"
+    );
+    // One value: scene.wgsl's declaration is the CPU constant's.
+    let scene = std::fs::read_to_string(root.join("shaders/scene.wgsl")).unwrap();
+    assert!(scene.contains(crate::shadows::SHADOW_CASTER_MASK_WGSL.trim_end()));
+    assert_eq!(
+        crate::shadows::SHADOW_CASTER_MASK_WGSL,
+        format!(
+            "const SHADOW_CASTER_MASK:u32={}u;\n",
+            crate::shadows::SHADOW_CASTER_MASK
+        )
+    );
+}
