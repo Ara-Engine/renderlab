@@ -3236,6 +3236,9 @@ impl Renderer {
                 .as_ref()
                 .map_or(0, |h| h.scene_generation());
             let mut primary = UploadBytes::default();
+            // U-RTVIS: the reflection composite's room grows to the content before this frame's
+            // bindings are built (a growth drops them; prepare_primary rebuilds them).
+            self.rl_room_grow();
             let result = self.prepare_primary(draws, camera, soft, scene_generation, &mut primary);
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
@@ -3445,10 +3448,8 @@ impl Renderer {
                 if !self.view.outputs.modes.shades() {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
-                // U-RTVIS: the reflection pass's kernels (RENDERLAB_RL_PASS=1; nothing otherwise),
-                // and the composite's room grown to the content.
+                // U-RTVIS: the reflection pass's kernels (RENDERLAB_RL_PASS=1; nothing otherwise).
                 self.ensure_reflection_trace(shading)?;
-                self.rl_room_grow();
                 self.ensure_reflection_hits(shading)?;
                 self.write_reflection_pass_frame();
                 mark(&mut encoder, "shading");

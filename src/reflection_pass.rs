@@ -825,7 +825,8 @@ impl Renderer {
     }
     /// Grows the composite's room when a read-back frame asked for more than it holds: R and H
     /// to the next power of two above 1.25 times the request, at most ROOM_PER_PIXEL a pixel; the
-    /// bindings are rebuilt. Called once a frame before encoding.
+    /// frame's bindings are dropped, so it runs once a frame before `prepare_primary` builds them
+    /// (the trace and hit groups belong to them; the composite's group is made each frame).
     pub(crate) fn rl_room_grow(&mut self) {
         use std::sync::atomic::Ordering::SeqCst;
         let _ = self.device.poll(wgpu::PollType::Poll);
