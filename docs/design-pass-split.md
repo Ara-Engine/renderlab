@@ -46,30 +46,29 @@ Units running tonight (2026-11-13), each behind a switch, default off:
 A program with its own `shade` keeps today's single kernel as the fallback: it runs in its own
 MP1 list, writes HDR directly, and sets a record flag so P2 and P3 skip its pixels.
 
-## 2. The material record (the Mac's `t3/material-pass`, shared by port and wgpu)
+## 2. The material record (`RENDERLAB_MATERIAL_PASS`, shared by port and wgpu)
 
-The seam exists: the Mac's branch `t3/material-pass`, switch `RENDERLAB_MATERIAL_PASS=1`
-(default off). A material entry runs the decode and the program's `surface` once a pixel and
+The seam is on main behind `RENDERLAB_MATERIAL_PASS=1` (default off). A material entry runs the decode and the program's `surface` once a pixel and
 writes the record; the shading entry rebuilds `Surface` from it. Programs opt in through a
 declared mapping (the standard program does); the others keep the single kernel. It is also the
 seam a material graph plugs into later.
 
-24 bytes a pixel in group 0, bindings 75 and 78: 50 MB at 1080p, 199 MB at 4K.
+48 bytes a pixel: three rgba32uint words in group 0, bindings 75, 78 and 74. That is 100 MB at 1080p and 398 MB at 4K, on top of the 16-byte hit image, which it does not retire. docs/design-material-pass.md has the exact layout, its precision, and the cost split.
 
-| Word | Field | Encoding |
-|------|-------|----------|
-| rgba32uint .x | shading normal | octahedral, 2 x 16 bits |
-| rgba32uint .y | base colour + coverage | rgb8 + u8 |
-| rgba32uint .z | metallic, roughness + flags / slot / model | 2 x u8 + u16 |
-| rgba32uint .w | emission | rgb9e5 |
-| rg32uint .x | geometric normal | octahedral, 2 x 16 bits |
-| rg32uint .y | MQ2 view share, lobe alpha | 2 x u8 (16 bits spare) |
+| Word | Fields |
+|------|--------|
+| 0 (75) | shading normal (octahedral 2 x 16); base colour (3 x unorm16); coverage, metallic (2 x unorm8); emission (rgb9e5) |
+| 1 (78) | the receiver's geometric normal (octahedral 2 x 16); lighting model (8 bits, 255 = own `shade`), MQ2 lobe alpha, roughness (unorm16, rounded up); MQ2 view share and TR1 view hint; slot, `thin`, source-front and lit-front bits |
+| 2 (74) | the receiver's trace point (3 x f32, as the sun path builds it, after the edge repair); its epsilon (an f32 exponent); the interpolated vertex normal (octahedral 2 x 12) |
 
-The flags carry double-sided/front, thin, the transmission/IOR class, normal-mapped and the
-lighting model, so later passes can skip pixels whose program keeps its own `shade`.
+The material pass is the decode-once pass. Words 1 and 2 are the receiver that the sun, GI and light-visibility passes and shading read instead of decoding the hit. The standard program's per-light specular filter still fetches vertex attributes in shading; that is what the standard path keeps (docs/design-material-pass.md).
 
-Position is not stored. It comes from the hit record's distance along the camera ray (traced
-primaries), or from depth (raster or the visibility buffer).
+### On the ara-gpu port
+
+- `RENDERLAB_MATERIAL_PASS`: wired. The port logs how many program slots take the record path and how many keep the single kernel.
+- `RENDERLAB_RL_PASS` / `RENDERLAB_RL_DEFERRED`: the reflection pass is wgpu-only. The port stays inline whatever the switches, and `diag` frames wait for their read-back.
+- `RENDERLAB_GI_PASS`: refused at `Engine::new` until the lookup pass's binding 68 is wired here.
+- `RENDERLAB_SUN_PASS`: only the wgpu renderer and wgpu TR1 read it. On the port it does nothing, because the sun stays in the visibility stage; expect no split there.
 
 ## 3. Where things go
 
