@@ -17,9 +17,10 @@ pub(crate) fn on() -> bool {
     *ON.get_or_init(|| {
         let requested=std::env::var("RENDERLAB_LIGHT_VIS_PASS").is_ok_and(|v|v=="1");
         // The bound needs the material's unshadowed contribution and running radiance.
-        // Until t3/material-pass publishes base/metal/rough/normal at bindings 75/78,
-        // leave visibility inline whenever the bound is set. That record is the seam
-        // for evaluating the shared bound before tracing here, without a second BRDF.
+        // The canonical 24-byte material record is in program.rs at bindings 75/78.
+        // Until its wgpu producer/read bindings are wired, leave visibility inline
+        // whenever the bound is set. Reuse that record and decoder, not a new geometry
+        // record; retain the exact receiver reconstruction from the entry helpers.
         if requested && std::env::var_os("RENDERLAB_LIGHT_BOUND").is_some() {
             eprintln!("light_vis_pass bypassed: RENDERLAB_LIGHT_BOUND is set; visibility stays inline until material-record integration (75/78)");
             return false;
@@ -84,6 +85,12 @@ fn entry_enabled(mut source: String, enabled: bool) -> String {
         + begin;
     let mut pixel =
         reconstruction[begin..end].replace("fn primary_shade_pixel(", "fn rl_lvis_pixel(");
+    // This helper is not the camera entry. Keep the deferred entry's exact seam unique.
+    pixel = pixel.replacen(
+        "let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);",
+        "let pixel=vec2<i32>(id);\n    let record=textureLoad(primary_hit,pixel,0);",
+        1,
+    );
     pixel=pixel.replace("if record.x==0u {textureStore(primary_hdr,pixel,primary_miss(id,size,primary_frame.clear));return;}","if record.x==0u {return;}");
     pixel.push_str("    rl_lvis_store(surface_input);\n}\n");
     source.push_str(&pixel);
@@ -178,14 +185,19 @@ mod tests {
                     let c = if on() { c } else { apply_enabled(c, true) };
                     assert_eq!(&c.source[c.program.clone()], source);
                     let source = c.source;
-                    let module = naga::front::wgsl::parse_str(&source)
-                        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-                    naga::valid::Validator::new(
-                        naga::valid::ValidationFlags::all(),
-                        naga::valid::Capabilities::all(),
-                    )
-                    .validate(&module)
-                    .unwrap();
+                    let deferred = source
+                        .contains("rl_specular")
+                        .then(|| program::deferred_variant(&source));
+                    for source in std::iter::once(source.as_str()).chain(deferred.as_deref()) {
+                        let module = naga::front::wgsl::parse_str(source)
+                            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                        naga::valid::Validator::new(
+                            naga::valid::ValidationFlags::all(),
+                            naga::valid::Capabilities::all(),
+                        )
+                        .validate(&module)
+                        .unwrap();
+                    }
                 }
             }
         }
