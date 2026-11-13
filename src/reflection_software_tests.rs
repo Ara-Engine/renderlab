@@ -36,6 +36,11 @@ fn software_reflection_composition() {
             assert!(source.contains("let world_oi=origin*world_inv;"));
             assert!(!source.contains("rs_box(origin,world_inv,"));
         }
+        if crate::reflection_software::bvh4() {
+            assert!(source.contains("const RS_STACK:u32=48u;") && source.contains("RS_EMPTY"));
+            assert!(source.contains("(*best_i==i && t==(*best).t && w2.y<(*best).record.y)"));
+            assert!(!source.contains("near_first"));
+        }
         if crate::program::rs_count_on() {
             assert!(source.contains("@binding(69) var<storage,read_write> rs_counts:"));
             assert!(source.contains("fn rs_trace_walk(") && source.contains("rs_c_inst+=1u;"));
