@@ -79,11 +79,54 @@ pub struct ForwardObject<'a> {
     pub material: crate::MaterialDescriptor<'a>,
 }
 
-/// One texture slot: the asset the wgpu renderer would take through
-/// `try_upload_texture`, with every mip level, and its `TextureBinding` sampler.
+/// A block-compressed texture as the frames upload it: what the wgpu renderer makes of a
+/// `CompressedTexture` in `try_upload_compressed_texture`.
+#[derive(Clone, Debug)]
+pub struct BlockTexture {
+    pub format: crate::asset::BlockFormat,
+    /// The base level's width and height: multiples of 4.
+    pub size: [u32; 2],
+    /// Array layers, each with every level's blocks down to 1x1. One layer; a BC5 normal
+    /// map has two, the map and its variance layer (`normal_variance_bc`), which the
+    /// shading programs read as layer 1.
+    pub layers: Vec<Vec<Vec<u8>>>,
+}
+impl BlockTexture {
+    /// The upload for `data`, which the caller has validated
+    /// (`CompressedTexture::validate`). A BC5 map gains its variance layer here, once.
+    pub fn new(data: crate::asset::CompressedTexture) -> Self {
+        let variance = (data.format == crate::asset::BlockFormat::Bc5)
+            .then(|| crate::normal_variance_bc::variance_layer(&data));
+        Self {
+            format: data.format,
+            size: [data.width, data.height],
+            layers: std::iter::once(data.mips).chain(variance).collect(),
+        }
+    }
+}
+/// A texture slot's levels: RGBA8 texels, or block-compressed levels as shipped.
+#[derive(Clone, Copy)]
+pub enum TextureSource<'a> {
+    /// The asset the wgpu renderer would take through `try_upload_texture`.
+    Texels(&'a crate::asset::Texture),
+    /// Needs a device that samples BC (`DeviceInfo::texture_compression_bc`).
+    Blocks(&'a BlockTexture),
+}
+impl<'a> From<&'a crate::asset::Texture> for TextureSource<'a> {
+    fn from(texels: &'a crate::asset::Texture) -> Self {
+        Self::Texels(texels)
+    }
+}
+impl<'a> From<&'a BlockTexture> for TextureSource<'a> {
+    fn from(blocks: &'a BlockTexture) -> Self {
+        Self::Blocks(blocks)
+    }
+}
+/// One texture slot: every mip level of the texture (`TextureSource`) and its
+/// `TextureBinding` sampler.
 #[derive(Clone, Copy)]
 pub struct ObjectTexture<'a> {
-    pub data: &'a crate::asset::Texture,
+    pub data: TextureSource<'a>,
     pub sampler: crate::asset::Sampler,
     /// Its identity to the frames, which keep it on the GPU for as long as the frames of
     /// a sequence keep naming it (`Frames`); an identity must always name the same
@@ -104,8 +147,9 @@ pub struct Skin<'a> {
 /// (`try_upload_mesh_with_tangents`), which it refuses to draw one without the other.
 #[derive(Clone, Copy)]
 pub struct NormalMap<'a> {
-    /// `TextureRole::NormalLinear`. The variance and slope-moment roles are not
-    /// assembled.
+    /// `TextureRole::NormalLinear`, or a BC5 block texture, whose Z the shading programs
+    /// rebuild and whose variance layer they read. The variance and slope-moment texel
+    /// roles are not assembled.
     pub texture: ObjectTexture<'a>,
     /// One frame per vertex of the object's mesh.
     pub tangents: &'a crate::asset::TangentStream,
@@ -1556,8 +1600,18 @@ fn frame(
             .map_err(|e| anyhow::anyhow!("object {index}'s parameters: {e}"))?;
         }
     }
+    // Lean shading (program::FrameInputs): the port projects no decals; media follow the
+    // atmosphere's flags.
+    let lean = crate::program::FrameInputs {
+        decals: false,
+        media: scene.atmosphere.aerial_perspective
+            || scene.atmosphere.height_fog.is_some()
+            || scene.atmosphere.volumetric_fog.is_some(),
+    }
+    .lean()
+        && crate::program::lean_on();
     let program = if deferred_path {
-        primary_shade::hardware_soft_program(material_source)?
+        primary_shade::hardware_soft_part(material_source, primary_shade::ALL_TERMS, lean)?
     } else {
         standard_program(scene.sun_shadows.is_some())?
     };
@@ -1565,7 +1619,7 @@ fn frame(
     let list_programs = if deferred_path && sources.len() > 1 {
         sources
             .iter()
-            .map(|source| primary_shade::hardware_soft_list_program(source))
+            .map(|source| primary_shade::hardware_soft_list_part(source, primary_shade::ALL_TERMS, lean))
             .collect::<Result<Vec<_>>>()?
     } else {
         Vec::new()
@@ -1579,10 +1633,10 @@ fn frame(
                 let programs = if sources.len() > 1 {
                     sources
                         .iter()
-                        .map(|source| primary_shade::hardware_soft_list_part(source, terms))
+                        .map(|source| primary_shade::hardware_soft_list_part(source, terms, lean))
                         .collect::<Result<Vec<_>>>()?
                 } else {
-                    vec![primary_shade::hardware_soft_part(material_source, terms)?]
+                    vec![primary_shade::hardware_soft_part(material_source, terms, lean)?]
                 };
                 Ok((name, programs))
             })
@@ -2898,10 +2952,24 @@ fn frame(
             geometry.import(&mut graph);
             geometries.push(geometry);
         }
-        // `MaterialDescriptor::bytes` reads `normal_mapped` off its own texture binding,
-        // which names a wgpu texture and stays empty here.
+        // `MaterialDescriptor::bytes` reads `normal_mapped` and the variance code off its
+        // own texture binding, which names a wgpu texture and stays empty here. As there:
+        // 1 is a normal map; 2 a BC5 one, whose Z the programs rebuild
+        // (`rl_normal_texel`) and whose variance is its second layer (variance code 1).
         let mut record = object.material.bytes();
-        record[36..40].copy_from_slice(&u32::from(normal_map(index).is_some()).to_ne_bytes());
+        let bc5 = normal_map(index).is_some_and(|map| {
+            matches!(map.texture.data, TextureSource::Blocks(blocks)
+                if blocks.format == crate::asset::BlockFormat::Bc5)
+        });
+        let normal_mapped = match normal_map(index) {
+            None => 0u32,
+            Some(_) if bc5 => 2,
+            Some(_) => 1,
+        };
+        record[36..40].copy_from_slice(&normal_mapped.to_ne_bytes());
+        if bc5 {
+            record[40..44].copy_from_slice(&1u32.to_ne_bytes());
+        }
         let material = StorageBuffer::new(gpu, &record)?;
         graph.import(Resource::Buffer(material.buffer), Access::HostWrite);
         materials.push(material);
@@ -3010,22 +3078,53 @@ fn frame(
             .enumerate()
             {
                 let Some(texture) = texture else { continue };
-                let first = texture
-                    .data
-                    .mips
-                    .first()
-                    .context("texture without a level")?;
-                ensure!(
-                    texture.data.role == role,
-                    "texture slot holds a {:?} texture",
-                    texture.data.role
-                );
+                // What the slot uploads: base size, levels, GPU format and array layers.
+                let (extent, levels, format, layers) = match texture.data {
+                    TextureSource::Texels(data) => {
+                        let first = data.mips.first().context("texture without a level")?;
+                        ensure!(
+                            data.role == role,
+                            "texture slot holds a {:?} texture",
+                            data.role
+                        );
+                        ([first.width, first.height], data.mips.len(), format, 1)
+                    }
+                    TextureSource::Blocks(blocks) => {
+                        use crate::asset::BlockFormat as B;
+                        let levels = blocks.layers.first().map_or(0, Vec::len);
+                        ensure!(
+                            blocks.format.role() == role,
+                            "texture slot holds a {:?} texture",
+                            blocks.format
+                        );
+                        ensure!(
+                            levels > 0
+                                && blocks.layers.iter().all(|layer| layer.len() == levels)
+                                && (blocks.layers.len() == 1
+                                    || dimension == ViewDimension::D2Array),
+                            "a block texture's layers hold the same levels, and only the \
+                             normal slot is an array"
+                        );
+                        ensure!(
+                            gpu.info().texture_compression_bc,
+                            "the device does not sample block-compressed textures"
+                        );
+                        let format = match blocks.format {
+                            B::Bc7Srgb => Format::Bc7Srgb,
+                            B::Bc7Linear => Format::Bc7,
+                            B::Bc5 => Format::Bc5,
+                        };
+                        (blocks.size, levels, format, blocks.layers.len() as u32)
+                    }
+                };
                 let named = texture.key.map(|key| (key, slot));
                 let image = match named.and_then(|named| kept_textures.get(&named)) {
                     Some(kept) => {
                         ensure!(
-                            kept.size == [first.width, first.height]
-                                && kept.shape.mip_levels == texture.data.mips.len() as u32,
+                            kept.size == extent
+                                && kept.shape.mip_levels == levels as u32
+                                && kept.format == format
+                                && kept.shape.layers == layers,
                             "texture identity {:?} named another texture before",
                             texture.key
                         );
@@ -3038,25 +3137,58 @@ fn frame(
                     None => {
                         let image = Texture::sampled_mips(
                             gpu,
-                            [first.width, first.height],
-                            texture.data.mips.len() as u32,
+                            extent,
+                            levels as u32,
+                            layers,
                             format,
                             dimension,
                         )?;
-                        for (level, mip) in texture.data.mips.iter().enumerate() {
-                            ensure!(
-                                mip.rgba8.len() == mip.width as usize * mip.height as usize * 4,
-                                "texture level {level} is not tightly packed RGBA8"
-                            );
-                            staging.push(transfer::upload_mip(
-                                gpu,
-                                &mut graph,
-                                &mut rec,
-                                image.image,
-                                level as u32,
-                                [mip.width, mip.height],
-                                &mip.rgba8,
-                            )?);
+                        match texture.data {
+                            TextureSource::Texels(data) => {
+                                for (level, mip) in data.mips.iter().enumerate() {
+                                    ensure!(
+                                        mip.rgba8.len()
+                                            == mip.width as usize * mip.height as usize * 4,
+                                        "texture level {level} is not tightly packed RGBA8"
+                                    );
+                                    staging.push(transfer::upload_mip(
+                                        gpu,
+                                        &mut graph,
+                                        &mut rec,
+                                        image.image,
+                                        level as u32,
+                                        0,
+                                        [mip.width, mip.height],
+                                        &mip.rgba8,
+                                    )?);
+                                }
+                            }
+                            // Blocks go up as shipped: each level's true texel extent,
+                            // whole 4x4 blocks of bytes (one block under 4x4 texels).
+                            TextureSource::Blocks(blocks) => {
+                                for (layer, chain) in blocks.layers.iter().enumerate() {
+                                    for (level, bytes) in chain.iter().enumerate() {
+                                        let size = extent.map(|n| (n >> level).max(1));
+                                        ensure!(
+                                            bytes.len() as u64
+                                                == crate::asset::BlockFormat::level_bytes(
+                                                    size[0], size[1]
+                                                ),
+                                            "texture level {level} is not whole 4x4 blocks"
+                                        );
+                                        staging.push(transfer::upload_mip(
+                                            gpu,
+                                            &mut graph,
+                                            &mut rec,
+                                            image.image,
+                                            level as u32,
+                                            layer as u32,
+                                            size,
+                                            bytes,
+                                        )?);
+                                    }
+                                }
+                            }
                         }
                         match named {
                             Some(named) => {
@@ -3068,11 +3200,7 @@ fn frame(
                         image
                     }
                 };
-                let sampler = sampler_desc(
-                    texture.sampler,
-                    textures.anisotropy_clamp,
-                    texture.data.mips.len(),
-                )?;
+                let sampler = sampler_desc(texture.sampler, textures.anisotropy_clamp, levels)?;
                 slots[slot] = Some((image, sampler));
             }
             object_textures.push(slots);

@@ -228,7 +228,12 @@ const RL_DEFERRED:bool=true;
             "        let light=light_sample(i,input);",
         ),
         (
-            "        let visibility=light_visibility(input,light);
+            "        // Its unshadowed contribution, for the engine's display bound (light_visibility_within);
+        // unused, and so compiled away, while the bound is off.
+        var unshadowed=brdf(n,v,light.direction,base,metal,rough);
+        if SPECULAR_AA {unshadowed=specular_brdf(input,light.direction,base,metal,rough);}
+        if !rl_term(RL_TERM_BRDF) {unshadowed=vec3<f32>(1.0/PI);}
+        let visibility=light_visibility_within(input,light,exposed_product(light.intensity*light_transmission(light,input),unshadowed*light.attenuation),exposed);
         // An unlit sample adds an exact zero (exposed_product keeps zeros), so it skips the
         // panes' transmission lookup and the BRDF.
         if visibility==0.0 { continue; }
