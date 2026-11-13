@@ -26,7 +26,7 @@ lookups run at the whole kernel's register count and occupancy.
 | # | Pass | Dispatch | Reads | Writes |
 |---|------|----------|-------|--------|
 | P1 | **Material** (per program, MP1 lists at 32 lanes) | covered pixels | hit record, mesh attributes, material parameters and textures, decals | material record (group 0, bindings 75 and 78); S1's glossy-list entry; emission |
-| P2 | **GI receiver lookup** | indirect over covered pixels, small register footprint | position (hit record + camera ray), the vertex normal for the cell bin, cache tables | prepared SH (binding 68, 48 B/px), evaluated by shading about the shading normal |
+| P2 | **GI receiver lookup** | indirect over covered pixels, small register footprint | geometry only: the hit record and camera ray (position, the vertex normal for the cell bin), cache tables | prepared SH, sky L2 + bounce L1, 48 B/px (binding 68); shading evaluates it at its shading normal |
 | P3a | **Local-light visibility** | coherent screen tiles | position, light clusters, the local atlas or ray query | unorm8 visibility, 16 slots a pixel (binding 73) |
 | P3b | **RT sun visibility**, split from the fused camera visibility | covered pixels | position, TLAS | sun visibility (binding 74) |
 | P3 | **Lights** (the standard model) | coherent screen tiles | record, P2's SH, P3a/P3b's visibility, light clusters | HDR (direct + indirect diffuse + untraced specular + emission, through fog); binding 62 (reflectance x fog transmittance, w) |
@@ -38,7 +38,7 @@ Units running tonight (2026-11-13), each behind a switch, default off:
 | Unit | Pass | Switch | Output |
 |------|------|--------|--------|
 | the Mac (`t3/material-pass`) | P1 material record | `RENDERLAB_MATERIAL_PASS=1` | bindings 75, 78 |
-| U-GIPASS | P2 GI receiver lookup | `RENDERLAB_GI_PASS` | binding 68, prepared SH, 48 B/px |
+| U-GIPASS | P2 GI receiver lookup | `RENDERLAB_GI_PASS` | binding 68, prepared SH (sky L2 + bounce L1), 48 B/px |
 | U-LVIS | P3a local-light visibility | `RENDERLAB_LIGHT_VIS_PASS` | binding 73, unorm8 x 16 slots |
 | U-SUNRT | P3b RT sun visibility | `RENDERLAB_SUN_PASS` | binding 74 |
 | U-RTVIS | P4 reflections (S1) | `RENDERLAB_RL_PASS`, `RENDERLAB_RL_DEFERRED` (non-RT default on the list head) | glossy list 56, room counters 69, receiver epsilon 79 |
@@ -79,7 +79,8 @@ primaries), or from depth (raster or the visibility buffer).
 | Emission | P1 (in the record); P3 adds it |
 | MQ2 view share, lobe alpha, S1's list entry | P1 |
 | GI cache lookup (diffuse) | P2 (prepared SH) |
-| ES1 blocked sky specular, environment specular for the untraced band | P2 (the same cell reads as the lookup, which is why they move together) |
+| ES1 sky visibility | From P2's prepared sky L2. `es_prepare` (`shaders/environment_lobes.wgsl`) already takes it from the same blended lookup (`gi_rx_sky`) about the receiver's vertex normal, so it needs no record and no further cell reads. |
+| Environment specular for the untraced band (the RLE2 lobe table along the reflection direction, times ES1's visibility) | The shading kernel, then P3 with the lights once the record lands: it needs the shading normal and roughness, which P2 does not have. |
 | Lights: cluster walk, standard model (Lambert + GGX from the record) | P3 |
 | Local shadows (atlas, ray query) | P3a |
 | Sun: RT ray query | P3b; non-RT VSM stays in P3 until it is split too |
@@ -105,9 +106,10 @@ programs.
 ## 5. Migration order, one measurable step a night
 
 1. **The reflection pass (S1).** Already being built; it is the first piece.
-2. **The GI receiver lookup (P2; U-GIPASS tonight).** It writes prepared SH that shading
-   evaluates about its own shading normal, so it does not wait for the material record. The
-   RTX supports GI lookup over lights as the second split:
+2. **The material pass and the GI lookup, in parallel (both tonight).** They are independent:
+   the GI lookup (P2, U-GIPASS) reads geometry only and writes prepared SH that shading evaluates
+   at its own shading normal, so it never waits for the record. By RTX cost, the GI lookup is
+   the one to land first; the RTX supports it over lights as the second split:
    - GI lookups cost 0.65 / 0.94 ms on Showcase (RT / non-RT) and 2.08 / 3.87 ms on Glint goal;
    - lights with shadows cost 0.40 / 0.96 ms on Showcase;
    - on the M5 the lookup is 2.09 / 2.43 ms, 84-86 % dependent loads and latency-bound at the
@@ -115,14 +117,15 @@ programs.
      warps.
    - Measure: the lookup pass's ms against the kernel's drop, both paths, Showcase, Glint goal
      and the quarry.
-3. **The material pass and record (P1; the Mac's `t3/material-pass`).** The rest of today's
-   kernel rebuilds `Surface` from the record instead of running `surface`. Measure: the record's
-   write cost and P1's compile seconds.
-4. **Visibility, then lights (P3a U-LVIS and P3b U-SUNRT tonight; P3 after the record).**
+   - The material pass (P1, the Mac's `t3/material-pass`): the rest of today's kernel rebuilds
+     `Surface` from the record instead of running `surface`. Measure: the record's write cost
+     and P1's compile seconds.
+3. **Lights and shadows (P3a U-LVIS and P3b U-SUNRT tonight, independent of the program; P3
+   after the record).**
    - M5 1.88 / 1.84 ms, of which shadows are 0.95 / 1.27. Per-tile coherence shapes ray-query
      divergence (the lanterns finding), and the light bound applies per tile.
    - Measure: the pass against the remaining kernel, and the lanterns scene.
-5. **Named engine inputs:** whatever is left in the per-program kernel moves to P1 or P2 (M5
+4. **The remaining engine inputs:** whatever is left in the per-program kernel moves to P1 or P2 (M5
    1.0 / 2.1 ms). Entry, decode and material remain, at most 0.8 ms on the M5.
 
 ## 6. What each step closes off for programmability
@@ -130,10 +133,10 @@ programs.
 | Step | What it closes off (the own-`shade` fallback stays open) |
 |------|----------------------------------------------------------|
 | 1. Reflections | Traced reflections use a GGX lobe from the record's alpha and normal; a program's custom non-GGX lobe shape is not traced. |
-| 2. GI lookup | Indirect diffuse arrives as a prepared L1 SH per pixel. A program can still evaluate it in any direction (back-lighting, wrap, thin transmission), but only at L1 accuracy, and no longer queries the cache itself. |
-| 3. Material record | A program passes `shade` only the record's fields: no anisotropy, clearcoat, sheen, subsurface or custom per-pixel values. Each needs record growth or the fallback. Programs without a declared mapping keep the single kernel. |
-| 4. Visibility, then lights | Local and sun visibility become per-pixel slots computed before shading (16 local slots), so a program cannot cast its own visibility queries. Lights then shade with the standard model. Wrap lighting, toon banding, retro-reflection and custom light response need the fallback until a material graph exists. |
-| 5. Engine inputs | Decals and fog become fixed engine stages, not program-visible hooks. |
+| 2a. GI lookup | Indirect diffuse arrives as a prepared L1 SH per pixel. A program can still evaluate it in any direction (back-lighting, wrap, thin transmission), but only at L1 accuracy, and no longer queries the cache itself. |
+| 2b. Material record | A program passes `shade` only the record's fields: no anisotropy, clearcoat, sheen, subsurface or custom per-pixel values. Each needs record growth or the fallback. Programs without a declared mapping keep the single kernel. |
+| 3. Visibility, then lights | Local and sun visibility become per-pixel slots computed before shading (16 local slots), so a program cannot cast its own visibility queries. Lights then shade with the standard model. Wrap lighting, toon banding, retro-reflection and custom light response need the fallback until a material graph exists. |
+| 4. Engine inputs | Decals and fog become fixed engine stages, not program-visible hooks. |
 
 Mixed frames run both kinds: standard-model pixels through P1-P4, fallback pixels in their own
 list.
