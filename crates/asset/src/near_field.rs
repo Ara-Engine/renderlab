@@ -170,7 +170,7 @@ fn octahedral(d: [f32; 3]) -> [f32; 2] {
 /// LEAF_TRIANGLES per leaf. Child bounds are quantized outward so both fused and unfused
 /// f32 decodes enclose them (R0c's record layout and `Bvh::validate`).
 pub fn build_bvh(positions: &[[f32; 3]], indices: &[u32]) -> Result<Bvh> {
-    build(positions, indices, false)
+    build(positions, indices, false).map(|(bvh, _)| bvh)
 }
 
 /// Software rays' deepest traversal: shaders/gi_rays_software.wgsl keeps a 48-entry stack, and
@@ -182,11 +182,17 @@ pub const MAX_SAH_DEPTH: usize = 15;
 /// deeper than MAX_SAH_DEPTH node levels falls back to the median build. Cooked packages keep
 /// `build_bvh` (their bytes are cache keys); runtime builds use this (M7-GC1, docs/m7-gc1.md).
 pub fn build_bvh_sah(positions: &[[f32; 3]], indices: &[u32]) -> Result<Bvh> {
-    let bvh = build(positions, indices, true)?;
-    if depth(&bvh, bvh.levels[0].root) > MAX_SAH_DEPTH {
-        return build_bvh(positions, indices);
+    build_bvh_sah_order(positions, indices).map(|(bvh, _)| bvh)
+}
+/// `build_bvh_sah` (the same `Bvh`, word for word) and, per triangle of `bvh.indices` in its
+/// order, the source triangle it copies (its index in `indices` / 3): what a hit record names
+/// (the reflection traversal's drawn primitive, src/reflection_software.rs).
+pub fn build_bvh_sah_order(positions: &[[f32; 3]], indices: &[u32]) -> Result<(Bvh, Vec<u32>)> {
+    let built = build(positions, indices, true)?;
+    if depth(&built.0, built.0.levels[0].root) > MAX_SAH_DEPTH {
+        return build(positions, indices, false);
     }
-    Ok(bvh)
+    Ok(built)
 }
 /// Node levels below `child` (0 for a leaf).
 fn depth(bvh: &Bvh, child: u32) -> usize {
@@ -203,7 +209,7 @@ fn depth(bvh: &Bvh, child: u32) -> usize {
         .unwrap_or(0)
 }
 
-fn build(positions: &[[f32; 3]], indices: &[u32], sah: bool) -> Result<Bvh> {
+fn build(positions: &[[f32; 3]], indices: &[u32], sah: bool) -> Result<(Bvh, Vec<u32>)> {
     if indices.is_empty() || !indices.len().is_multiple_of(3) {
         return Err(Error("BVH geometry needs a nonempty triangle list"));
     }
@@ -240,8 +246,10 @@ fn build(positions: &[[f32; 3]], indices: &[u32], sah: bool) -> Result<Bvh> {
             positions: positions.iter().map(|p| [p[0], p[1], p[2], 0.0]).collect(),
             ..Default::default()
         },
+        order: Vec::with_capacity(indices.len() / 3),
     };
     let root = builder.subtree(triangles);
+    let order = builder.order;
     let mut bvh = builder.bvh;
     let leaves = bvh.leaves.len() as u32;
     bvh.level_leaves = (0..leaves).collect();
@@ -258,7 +266,7 @@ fn build(positions: &[[f32; 3]], indices: &[u32], sah: bool) -> Result<Bvh> {
     bvh.validate(cluster_bvh::Limits {
         max_bytes: usize::MAX,
     })?;
-    Ok(bvh)
+    Ok((bvh, order))
 }
 
 struct Builder<'a> {
@@ -268,6 +276,8 @@ struct Builder<'a> {
     /// Per triangle, its bounds: present for SAH builds (`build_bvh_sah`), empty for median.
     boxes: &'a [([f32; 3], [f32; 3])],
     bvh: Bvh,
+    /// The source triangle of each triangle `bvh.indices` holds, in that order.
+    order: Vec<u32>,
 }
 /// Bins per axis of the SAH split.
 const SAH_BINS: usize = 16;
@@ -383,6 +393,7 @@ impl Builder<'_> {
             self.bvh
                 .indices
                 .extend_from_slice(&self.indices[t * 3..t * 3 + 3]);
+            self.order.push(t as u32);
         }
         let id = self.bvh.leaves.len() as u32;
         self.bvh.leaves.push(Leaf {

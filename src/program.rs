@@ -634,8 +634,90 @@ const RS_COUNT_WRAPPER: (&str, &str) = (
     "// R1's ray-query seams on the software path.\n",
     "// RENDERLAB_RS_COUNT=1: total `v` into the carried (lo, hi) pair at word i.\nfn rs_add(i:u32,v:u32) {\n    if v==0u {return;}\n    let old=atomicAdd(&rs_counts[i],v);\n    if old+v<old {atomicAdd(&rs_counts[i+1u],1u);}\n}\n// The walk, counted: one ray's counts into the frame's totals as it returns.\nfn rs_trace(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32,any_hit:bool)->RsHit {\n    rs_c_blas=0u;rs_c_tris=0u;rs_c_tlas=0u;rs_c_inst=0u;rs_c_empty=0u;rs_c_grazed=0u;rs_c_empty_blas=0u;\n    let hit=rs_trace_walk(origin,direction,tmin,tmax,any_hit);\n    let base=select(0u,10u,any_hit);\n    rs_add(base,1u);rs_add(base+2u,rs_c_blas);rs_add(base+4u,rs_c_tris);rs_add(base+6u,rs_c_tlas);rs_add(base+8u,rs_c_inst);\n    if !any_hit {\n        rs_add(20u,rs_c_empty);rs_add(22u,rs_c_grazed);rs_add(24u,rs_c_empty_blas);\n        atomicAdd(&rs_counts[28u+rs_half_octave(rs_c_blas+rs_c_tlas)],1u);\n        atomicAdd(&rs_counts[52u+min(rs_c_inst,63u)],1u);\n    }\n    return hit;\n}\n// R1's ray-query seams on the software path.\n",
 );
+/// `RENDERLAB_RS_BVH=4` (src/reflection_software.rs `bvh4`): the BLAS walk over GI's quantized
+/// BVH4 nodes. A node's four boxes decode as gi_rays_software.wgsl decodes them (origin + step x
+/// byte; the build rounds them outward for either rounding); the nearest box the ray enters is
+/// visited next and the others are pushed far to near. Leaves hold up to eight triangles (a
+/// four-bit count). The stack grows to 48: SAH builds stay within 15 node levels
+/// (renderlab_asset::near_field::MAX_SAH_DEPTH) and a level pushes at most three. Applied before
+/// the counting seams, which find the same node line; RS_BOX and RS_STACK edit the BVH2 walk only.
+const RS_BVH4: [(&str, &str); 3] = [
+    (
+        "const RS_STACK:u32=32u;\n",
+        "const RS_STACK:u32=48u;\nconst RS_EMPTY:u32=0xffffffffu;\n",
+    ),
+    (
+        "                let start=(child&~RS_LEAF)>>3u;\n                for(var k=0u;k<(child&7u);k+=1u) {\n",
+        "                let start=(child&~RS_LEAF)>>4u;\n                for(var k=0u;k<(child&15u);k+=1u) {\n",
+    ),
+    (
+        "            // Visit the nearer child next and push the farther one.
+            // Words 0-5 child 0 lo/hi, 6-11 child 1 lo/hi, 12-13 the tagged children.
+            let n=nodes+child*4u;
+            let n0=rs_q(n);let n1=rs_q(n+1u);let n2=rs_q(n+2u);let n3=rl_geometry[n+3u];
+            let lim=rs_limit(*best,*best_i,i);
+            let t0=rs_box(o,inv,n0.xyz,vec3<f32>(n0.w,n1.xy),tmin,lim);
+            let t1=rs_box(o,inv,vec3<f32>(n1.zw,n2.x),n2.yzw,tmin,lim);
+            let c0=n3.x;let c1=n3.y;
+            let h0=t0<=lim;let h1=t1<=lim;
+            if h0 && h1 {
+                let near_first=t0<=t1;
+                if sp<RS_STACK {(*stack)[sp]=select(c0,c1,near_first);sp+=1u;}
+                child=select(c1,c0,near_first);
+            } else if h0 {
+                child=c0;
+            } else if h1 {
+                child=c1;
+            } else {
+                break;
+            }
+",
+        "            // BVH4 (RENDERLAB_RS_BVH=4). Words 0-2 origin, 3-5 step, 6-9 the tagged children,
+            // 10-12 their lower bytes and 13-15 their upper bytes, an axis a word.
+            let n=nodes+child*4u;
+            let w0=rl_geometry[n];let w1=rl_geometry[n+1u];let w2=rl_geometry[n+2u];let w3=rl_geometry[n+3u];
+            let base=bitcast<vec3<f32>>(w0.xyz);let step=vec3<f32>(bitcast<f32>(w0.w),bitcast<vec2<f32>>(w1.xy));
+            let lim=rs_limit(*best,*best_i,i);
+            // (entry distance bits, child) per entered child; a miss stays (max, RS_EMPTY).
+            // Distances are nonnegative, so their bits order like the floats.
+            var a0=vec2<u32>(0xffffffffu,RS_EMPTY);var a1=a0;var a2=a0;var a3=a0;
+            for(var s=0u;s<4u;s+=1u) {
+                let c=select(select(select(w2.y,w2.x,s==2u),w1.w,s==1u),w1.z,s==0u);
+                if c==RS_EMPTY {continue;}
+                let shift=8u*s;
+                let lq=vec3<f32>(vec3<u32>(w2.z>>shift,w2.w>>shift,w3.x>>shift)&vec3<u32>(0xffu));
+                let hq=vec3<f32>(vec3<u32>(w3.y>>shift,w3.z>>shift,w3.w>>shift)&vec3<u32>(0xffu));
+                let t=rs_box(o,inv,base+step*lq,base+step*hq,tmin,lim);
+                if t>lim {continue;}
+                let e=vec2<u32>(bitcast<u32>(t),c);
+                if s==0u {a0=e;} else if s==1u {a1=e;} else if s==2u {a2=e;} else {a3=e;}
+            }
+            // Ascending by distance (a five-comparator network).
+            if a1.x<a0.x {let x=a0;a0=a1;a1=x;}
+            if a3.x<a2.x {let x=a2;a2=a3;a3=x;}
+            if a2.x<a0.x {let x=a0;a0=a2;a2=x;}
+            if a3.x<a1.x {let x=a1;a1=a3;a3=x;}
+            if a2.x<a1.x {let x=a1;a1=a2;a2=x;}
+            if a0.y==RS_EMPTY {break;}
+            if a3.y!=RS_EMPTY && sp<RS_STACK {(*stack)[sp]=a3.y;sp+=1u;}
+            if a2.y!=RS_EMPTY && sp<RS_STACK {(*stack)[sp]=a2.y;sp+=1u;}
+            if a1.y!=RS_EMPTY && sp<RS_STACK {(*stack)[sp]=a1.y;sp+=1u;}
+            child=a0.y;
+",
+    ),
+];
 fn software_reflection_api() -> String {
     let mut api = format!("{SOFTWARE_REFLECTION_API}{REFLECTION_API}");
+    if crate::reflection_software::bvh4() {
+        assert!(
+            !rs_box_fma() && !rs_stack_workgroup(),
+            "RENDERLAB_RS_BVH=4 does not combine with RENDERLAB_RS_BOX or RENDERLAB_RS_STACK"
+        );
+        for (from, to) in RS_BVH4 {
+            assert_eq!(api.matches(from).count(), 1, "RENDERLAB_RS_BVH seam {from}");
+            api = api.replacen(from, to, 1);
+        }
+    }
     if rs_count_on() {
         for (from, to) in RS_COUNT_EDITS {
             assert_eq!(

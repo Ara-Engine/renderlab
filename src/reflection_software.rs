@@ -2,7 +2,8 @@
 //! (docs/m7-r1n.md; shaders/reflections_software.wgsl traverses it).
 //!
 //! Each uploaded mesh of a non-RT visibility-buffer renderer gets a BVH2 over its drawn
-//! triangles, built once at upload and never refit. Leaves keep each triangle's primitive
+//! triangles (or, under `RENDERLAB_RS_BVH=4`, GI's binned-SAH BVH4, `bvh4`), built once at
+//! upload and never refit. Leaves keep each triangle's primitive
 //! index in the mesh's own index buffer and its corners in index order, so a hit is the same
 //! `(placement + 1, primitive, barycentrics)` record a hardware ray query returns and R1's
 //! hit reconstruction (`rl_hit_input`) shades it unchanged. Each frame packs the meshes and
@@ -23,8 +24,21 @@ const NODE_WORDS: usize = 16;
 /// pad words. P-NRT: every node, triangle and instance record starts on a 16-byte boundary,
 /// so the WGSL traversal reads them as whole vec4 words.
 const TRIANGLE_WORDS: usize = 12;
-/// A child ID's leaf tag: `LEAF | first_triangle << 3 | count`.
+/// A child ID's leaf tag: `LEAF | first_triangle << 3 | count` (BVH4: `<< 4`, up to eight).
 const LEAF: u32 = 0x8000_0000;
+/// A BVH4 node's absent child (renderlab_asset::cluster_bvh::EMPTY; WGSL RS_EMPTY).
+const EMPTY: u32 = u32::MAX;
+
+/// `RENDERLAB_RS_BVH=4` (candidate, off by default; TLAS step 2): every mesh's reflection BLAS is
+/// GI's binned-SAH BVH4 (`renderlab_asset::near_field::build_bvh_sah_order`, docs/m7-gc1.md):
+/// 16-word quantized nodes (origin, step, four tagged children, the children's lower and upper
+/// bytes an axis a word, as src/gi_bvh.rs packs them), leaves of up to eight of today's triangle
+/// records. Each triangle's record and test are unchanged, so a hit's (primitive, barycentrics,
+/// t) are; only equal-distance hits may resolve in another order. Unset: the median BVH2.
+pub(crate) fn bvh4() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RS_BVH").is_ok_and(|v| v == "4"))
+}
 /// Words before the instance records; WGSL RS_HEADER_WORDS must match. Word 0 is the count,
 /// words 1 and 2 the top level's base word and root (src/instance_bvh.rs).
 pub(crate) const HEADER_WORDS: usize = 8;
@@ -46,12 +60,20 @@ pub(crate) struct Blas {
 }
 
 impl Blas {
-    /// Median-split BVH2 over `indices` (a triangle list into `positions`). Deterministic:
-    /// ties on the split axis break by triangle index. None for an empty list.
+    /// Median-split BVH2 over `indices` (a triangle list into `positions`), or the BVH4 under
+    /// `RENDERLAB_RS_BVH=4` (`bvh4`). Deterministic: ties on the split axis break by triangle
+    /// index. None for an empty list.
     pub(crate) fn build(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
         let count = indices.len() / 3;
         if count == 0 || count >= (1 << 28) {
             return None;
+        }
+        // The BVH4 leaf tag keeps four bits for the count, 27 for the first triangle.
+        if bvh4() {
+            if count >= 1 << 27 {
+                return None;
+            }
+            return Self::build4(positions, indices);
         }
         let corner = |t: usize, k: usize| positions[indices[t * 3 + k] as usize];
         let centroids: Vec<[f32; 3]> = (0..count)
@@ -68,19 +90,50 @@ impl Blas {
         };
         let mut order: Vec<u32> = (0..count as u32).collect();
         let (root, lo, hi) = builder.subtree(&mut order);
-        let hull = if crate::instance_bvh::tlas().tight {
-            let points: Vec<[f32; 3]> = indices.iter().map(|&i| positions[i as usize]).collect();
-            crate::instance_bvh::hull(&points)
-        } else {
-            vec![]
-        };
         Some(Self {
             nodes: builder.nodes,
             triangles: builder.triangles,
             root,
             lo,
             hi,
-            hull,
+            hull: hull(positions, indices),
+        })
+    }
+    /// The `RENDERLAB_RS_BVH=4` build: GI's SAH BVH4 topology with each leaf triangle written as
+    /// today's record, in the leaf order the builder returns. None where the asset builder
+    /// rejects the list (an index or position out of range).
+    fn build4(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
+        let (bvh, order) =
+            crate::asset::near_field::build_bvh_sah_order(positions, indices).ok()?;
+        let mut triangles = Vec::with_capacity(order.len() * TRIANGLE_WORDS);
+        for &t in &order {
+            triangle_record(positions, indices, t, &mut triangles);
+        }
+        // Leaves copy their triangles' indices contiguously in leaf order: leaf L's first
+        // triangle is its index span's offset / 3.
+        let child = |c: u32| -> u32 {
+            if c == EMPTY || c & LEAF == 0 {
+                return c;
+            }
+            let span = bvh.leaves[(c & !LEAF) as usize].indices;
+            LEAF | (span.offset / 3) << 4 | span.count / 3
+        };
+        let lane = |bytes: [u8; 4]| u32::from_le_bytes(bytes);
+        let mut nodes = Vec::with_capacity(bvh.nodes.len() * NODE_WORDS);
+        for n in &bvh.nodes {
+            nodes.extend(n.origin.iter().chain(&n.step).map(|v| v.to_bits()));
+            nodes.extend(n.children.map(child));
+            nodes.extend(n.lower.map(lane));
+            nodes.extend(n.upper.map(lane));
+        }
+        let (lo, hi) = bounds(indices.iter().map(|&i| positions[i as usize]));
+        Some(Self {
+            nodes,
+            triangles,
+            root: child(bvh.levels[0].root),
+            lo,
+            hi,
+            hull: hull(positions, indices),
         })
     }
     fn words(&self) -> usize {
@@ -136,18 +189,31 @@ impl Builder<'_> {
         let first = (self.triangles.len() / TRIANGLE_WORDS) as u32;
         let mut points = Vec::with_capacity(order.len() * 3);
         for &t in order {
-            let [a, b, c] =
-                std::array::from_fn(|k| self.positions[self.indices[t as usize * 3 + k] as usize]);
-            let e1: [f32; 3] = std::array::from_fn(|i| b[i] - a[i]);
-            let e2: [f32; 3] = std::array::from_fn(|i| c[i] - a[i]);
-            self.triangles
-                .extend([a, e1, e2].iter().flatten().map(|v| v.to_bits()));
-            self.triangles.extend([t, 0, 0]);
-            points.extend([a, b, c]);
+            triangle_record(self.positions, self.indices, t, &mut self.triangles);
+            points
+                .extend((0..3).map(|k| self.positions[self.indices[t as usize * 3 + k] as usize]));
         }
         let (lo, hi) = bounds(points.into_iter());
         (LEAF | first << 3 | order.len() as u32, lo, hi)
     }
+}
+
+/// Triangle `t`'s record: corner a, edges b - a and c - a (index order), its primitive index,
+/// two pad words.
+fn triangle_record(positions: &[[f32; 3]], indices: &[u32], t: u32, out: &mut Vec<u32>) {
+    let [a, b, c] = std::array::from_fn(|k| positions[indices[t as usize * 3 + k] as usize]);
+    let e1: [f32; 3] = std::array::from_fn(|i| b[i] - a[i]);
+    let e2: [f32; 3] = std::array::from_fn(|i| c[i] - a[i]);
+    out.extend([a, e1, e2].iter().flatten().map(|v| v.to_bits()));
+    out.extend([t, 0, 0]);
+}
+/// `RENDERLAB_TLAS=tight`: the object boxes a mesh's instances' world boxes are made from.
+fn hull(positions: &[[f32; 3]], indices: &[u32]) -> Vec<crate::instance_bvh::Bounds> {
+    if !crate::instance_bvh::tlas().tight {
+        return vec![];
+    }
+    let points: Vec<[f32; 3]> = indices.iter().map(|&i| positions[i as usize]).collect();
+    crate::instance_bvh::hull(&points)
 }
 
 fn bounds(points: impl Iterator<Item = [f32; 3]>) -> ([f32; 3], [f32; 3]) {
@@ -254,6 +320,9 @@ fn world_bounds(model: &Mat4, boxes: &[crate::instance_bvh::Bounds]) -> ([f32; 3
     (lo.map(|v| v - margin), hi.map(|v| v + margin))
 }
 
+#[cfg(test)]
+#[path = "reflection_bvh4_tests.rs"]
+mod bvh4_tests;
 #[cfg(test)]
 #[path = "reflection_tlas_tests.rs"]
 mod tlas_tests;
