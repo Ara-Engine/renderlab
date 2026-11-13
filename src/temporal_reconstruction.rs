@@ -2715,7 +2715,7 @@ mod tests {
                 );
                 assert_eq!(
                     source
-                        .matches("tr1_view_hint(surface_output,surface_input,id,size)")
+                        .matches("tr1_view_hint(surface_output,surface_input,view_ray)")
                         .count(),
                     usize::from(traced)
                 );
