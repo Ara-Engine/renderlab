@@ -10,6 +10,7 @@ pub(super) struct Pipeline {
 }
 const API: &str = include_str!("../shaders/light_vis_pass.wgsl");
 const LOCAL: &str = "    if lights[s.index].kind.w!=0u { return rl_local_shadow(";
+const PASS_PROGRAM: &str = "struct Surface { unused:f32 }; fn surface(input:SurfaceInput)->Surface {return Surface(0.0);} fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {return vec3<f32>(0.0);}";
 const PREPARE: &str = "    rl_lights_prepare(surface_input.world);";
 pub(crate) fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -94,8 +95,7 @@ impl Renderer {
             return Ok(());
         }
         // Engine-only entry: no user surface, BRDF, textures, GI or reflection work.
-        let source = "struct Surface { unused:f32 }; fn surface(input:SurfaceInput)->Surface {return Surface(0.0);} fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {return vec3<f32>(0.0);}";
-        let composed = program::compose(head, source, Stage::Traced, false);
+        let composed = program::compose(head, PASS_PROGRAM, Stage::Traced, false);
         let abi = self.program_abi();
         let scopes = OperationScopes::new(&self.device);
         let module = super::super::program_gpu::module(&abi, "local light visibility", &composed);
@@ -165,16 +165,18 @@ mod tests {
                 .1,
         ] {
             for head in heads {
-                let c = program::compose(&head, crate::STANDARD_PROGRAM, Stage::Traced, false);
-                let source = entry_enabled(compose_enabled(c.source, true), true);
-                let module = naga::front::wgsl::parse_str(&source)
-                    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
-                naga::valid::Validator::new(
-                    naga::valid::ValidationFlags::all(),
-                    naga::valid::Capabilities::all(),
-                )
-                .validate(&module)
-                .unwrap();
+                for source in [crate::STANDARD_PROGRAM, PASS_PROGRAM] {
+                    let c = program::compose(&head, source, Stage::Traced, false);
+                    let source = entry_enabled(compose_enabled(c.source, true), true);
+                    let module = naga::front::wgsl::parse_str(&source)
+                        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+                    naga::valid::Validator::new(
+                        naga::valid::ValidationFlags::all(),
+                        naga::valid::Capabilities::all(),
+                    )
+                    .validate(&module)
+                    .unwrap();
+                }
             }
         }
     }
