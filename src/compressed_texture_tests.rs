@@ -439,4 +439,56 @@ fn gpu_compressed_textures_match_their_decode() {
     let worst = x.iter().zip(&y).map(|(p, q)| p.abs_diff(*q)).max().unwrap();
     assert!(worst <= 2, "BC5 normals differ by {worst} codes");
     assert_ne!(x.iter().filter(|&&v| v != 0).count(), 0);
+
+    // The lazy variance layer (src/normal_variance_lazy.rs): no installed program reads normal
+    // variance, so the map has one layer and its material reads variance code 0.
+    let crate::material::TextureStorage::Full(full) = &a.0.storage else {
+        unreachable!()
+    };
+    assert_eq!(full.layers, 1);
+    assert!(!a.0.variance_layer());
+    let mut m = material(
+        &mut r,
+        &MaterialDescriptor {
+            normal_texture: Some(TextureBinding {
+                texture: &a,
+                sampler: nearest,
+            }),
+            double_sided: true,
+            ..Default::default()
+        },
+    );
+    let mut normals = |r: &mut Renderer, m: &Material| {
+        pixels(
+            r,
+            &color,
+            &cam,
+            &mut [Draw::new(&mesh, &mut inst).with_material(m)],
+            ViewMode::Normal,
+        )
+    };
+    let before = normals(&mut r, &m);
+    // A program that reads it: the map gets the eager path's layer 1, byte for byte.
+    let reads = format!(
+        "{}\nfn reads_variance(input:SurfaceInput) -> f32 {{ return material_normal_variance(input); }}\n",
+        include_str!("../shaders/programs/standard.wgsl")
+    );
+    let _reader = r
+        .try_create_program(&crate::ProgramDescriptor {
+            label: "reads normal variance",
+            source: &reads,
+        })
+        .unwrap();
+    assert!(r.ensure_variance_layers().unwrap());
+    assert!(a.0.variance_layer());
+    let upgraded = &full.variance.get().unwrap()._texture;
+    let layer = r.read_back_blocks(upgraded, 1).unwrap();
+    assert_eq!(
+        layer.mips,
+        crate::normal_variance_bc::variance_layer(&blocks)
+    );
+    assert_eq!(r.read_back_blocks(upgraded, 0).unwrap().mips, blocks.mips);
+    // The standard program reads no variance: its frame is the same over the two-layer map.
+    r.refresh_material(&mut m);
+    assert_eq!(normals(&mut r, &m), before);
 }
