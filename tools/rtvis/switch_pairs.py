@@ -1,6 +1,7 @@
 """Pass switches in pairs. The engine reads each pass switch once per process, so one test process
-cannot compose two settings; this runs the composition tests once per switch and once per pair
-(and once with none), and optionally one game_scene frame per pair on both paths.
+cannot compose two settings; this runs the composition tests once with none, once per switch, per
+pair, per triple and with every switch at once, and optionally one game_scene frame per set on both
+paths. SWITCH_PAIRS_SETS=a,b,... runs only the named sets.
 
     python switch_pairs.py TESTS_EXE                       # composition tests only (CPU)
     python switch_pairs.py TESTS_EXE GAME_SCENE_EXE OUTDIR  # plus one frame per pair and path
@@ -16,6 +17,7 @@ SWITCHES = {
     "gi": {"RENDERLAB_GI_PASS": "1"},
     "material": {"RENDERLAB_MATERIAL_PASS": "1"},
     "sun": {"RENDERLAB_SUN_PASS": "1"},
+    "sun-zone": {"RENDERLAB_SUN_ZONE_STOP": "1"},
     "lvis": {"RENDERLAB_LIGHT_VIS_PASS": "1"},
     "rl": {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "1"},
     "rl-diag": {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "diag"},
@@ -34,13 +36,18 @@ TESTS = [
 
 
 def sets():
+    """No switches, each switch, every pair, every triple and every switch at once. The
+    reflection settings (rl, rl-diag, rl-all) are one switch's values, so a set takes at most one."""
     yield "none", {}
-    for name, env in SWITCHES.items():
-        yield name, env
-    for a, b in itertools.combinations(SWITCHES, 2):
-        if a.startswith("rl") and b.startswith("rl"):
-            continue  # the reflection variants are one switch's settings, not a pair
-        yield f"{a}+{b}", {**SWITCHES[a], **SWITCHES[b]}
+    for n in (1, 2, 3):
+        for names in itertools.combinations(SWITCHES, n):
+            if sum(x.startswith("rl") for x in names) > 1:
+                continue
+            yield "+".join(names), {k: v for x in names for k, v in SWITCHES[x].items()}
+    others = [x for x in SWITCHES if not x.startswith("rl")]
+    yield "all-but-rl", {k: v for x in others for k, v in SWITCHES[x].items()}
+    for rl in [x for x in SWITCHES if x.startswith("rl")]:
+        yield f"all+{rl}", {k: v for x in [*others, rl] for k, v in SWITCHES[x].items()}
 
 
 def main():
@@ -50,7 +57,10 @@ def main():
     base = {k: v for k, v in os.environ.items()
             if not any(k in env for env in SWITCHES.values())}
     failed = 0
+    exact = os.environ.get("SWITCH_PAIRS_SETS")
     for name, env in sets():
+        if exact and name not in exact.split(","):
+            continue
         r = subprocess.run([tests, *TESTS], env={**base, **env}, capture_output=True, text=True)
         summary = [line for line in r.stdout.splitlines() if line.startswith("test result")]
         ok = r.returncode == 0

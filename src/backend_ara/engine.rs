@@ -236,7 +236,11 @@ fn fault(error: anyhow::Error) -> Error {
 
 impl Engine {
     /// An empty scene compiling through `cache`, with `settings`.
+    /// Refuses RENDERLAB_GI_PASS=1 (`forward::GI_PASS_REFUSAL`).
     pub fn new(cache: ShaderCache, settings: Settings) -> Result<Self, Error> {
+        if crate::renderer::primary_ray_gpu::gi_receiver_pass::on() {
+            return Err(Error::InvalidInput(super::forward::GI_PASS_REFUSAL));
+        }
         let standard = Arc::new(Program::new("standard", crate::STANDARD_PROGRAM)?);
         let mut engine = Self {
             cache,
