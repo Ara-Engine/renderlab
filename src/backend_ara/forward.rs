@@ -4165,6 +4165,21 @@ fn frame(
         }
         None => false,
     };
+    // RENDERLAB_GI_KEYS=PATH[,FRAME]: the key log of that frame (program.rs gi_keys).
+    let gi_keys_read = match (crate::program::gi_keys(), buffers.get(&key(0, 81))) {
+        (Some((path, frame)), Some(log)) if history.count + 1 == *frame => Some((
+            path,
+            transfer::readback_buffer(
+                gpu,
+                &mut graph,
+                &mut rec,
+                log.buffer,
+                0,
+                (crate::program::GI_KEYS_WORDS * 4) as u64,
+            )?,
+        )),
+        _ => None,
+    };
     let probe_read = match &probe {
         Some(probe) => Some(transfer::readback_buffer(
             gpu,
@@ -4615,7 +4630,8 @@ fn frame(
             || outgoing_read.is_some()
             || raw_read.is_some()
             || history_read.is_some()
-            || probe_read.is_some();
+            || probe_read.is_some()
+            || gi_keys_read.is_some();
         gpu.begin_deferred_completion_on_current_queue()?;
         let submission = gpu.submit(rec.finish(), &[]);
         in_flight.push_back(gpu.end_deferred_completion()?);
@@ -4632,6 +4648,10 @@ fn frame(
         gpu.wait(point)?;
         report_shade_counts(gpu, shade_counts, counts_recorded.then_some(point))?;
         times.gpu = submitted.elapsed();
+    }
+    if let Some((path, log)) = gi_keys_read {
+        std::fs::write(path, gpu.read(log)?).context("RENDERLAB_GI_KEYS")?;
+        eprintln!("gi_keys frame={} written to {path}", history.count + 1);
     }
     let finishing = std::time::Instant::now();
     let mut images = ForwardImages {

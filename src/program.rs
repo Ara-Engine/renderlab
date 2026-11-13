@@ -165,6 +165,62 @@ fn shade_cuts(source: String, late: bool) -> String {
     });
     shade_cuts_named(source, late, list)
 }
+/// `RENDERLAB_GI_KEYS=PATH[,FRAME]` (measurement only, off by default; the Ara port binds it):
+/// each pixel the shading entry shades logs the GI hash-find keys its own lookups search
+/// (`gi_hot_find`'s `key.x`) into `rl_gi_keys` (group 0 binding 81): per pixel of a
+/// `GI_KEYS_SIZE` image, 16 words, the pixel's find count and then its first 15 keys. The port
+/// writes frame FRAME's buffer (default 30) to PATH, raw little-endian u32, for counting the
+/// distinct cells a shading tile reads. Lookups outside the entry (reflection hits in their own
+/// kernels) are not logged; run with reflections ablated to leave inline hits out too.
+pub(crate) fn gi_keys() -> Option<&'static (String, u64)> {
+    static KEYS: std::sync::OnceLock<Option<(String, u64)>> = std::sync::OnceLock::new();
+    KEYS.get_or_init(|| {
+        let value = std::env::var("RENDERLAB_GI_KEYS").ok()?;
+        let (path, frame) = value.split_once(',').unwrap_or((&value, "30"));
+        Some((path.to_owned(), frame.parse().unwrap_or(30)))
+    })
+    .as_ref()
+}
+/// The logged image's size; pixels outside it are not logged.
+pub(crate) const GI_KEYS_SIZE: [u32; 2] = [1280, 720];
+/// The log's u32 words.
+pub(crate) const GI_KEYS_WORDS: usize = (GI_KEYS_SIZE[0] * GI_KEYS_SIZE[1] * 16) as usize;
+/// `source` with the GI key log (`gi_keys`): the log and the find's call before the program
+/// (`late` false), the entry's start after it (`late` true). Unchanged off, or where the module
+/// has no shading entry.
+fn with_gi_keys(mut source: String, late: bool) -> String {
+    if gi_keys().is_none() {
+        return source;
+    }
+    const FIND: &str = "fn gi_hot_find(key:vec2<u32>) -> GiHot {\n";
+    const START: &str =
+        "    let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);\n";
+    if late {
+        let Some(entry) = source.find(SHADE_CUT_ENTRY) else {
+            return source;
+        };
+        if !source.contains("fn rl_gk_log(") || source[entry..].matches(START).count() != 1 {
+            return source;
+        }
+        let at = entry + source[entry..].find(START).expect("counted") + START.len();
+        source.insert_str(at, "    rl_gk_begin(id);\n");
+        return source;
+    }
+    if source.matches(FIND).count() != 1 {
+        return source;
+    }
+    let [w, h] = GI_KEYS_SIZE;
+    source = source.replacen(FIND, &format!("{FIND}    rl_gk_log(key.x);\n"), 1);
+    source.push_str(&format!(
+        "// RENDERLAB_GI_KEYS (program.rs gi_keys).\n\
+@group(0) @binding(81) var<storage,read_write> rl_gi_keys:array<u32,{GI_KEYS_WORDS}>;\n\
+var<private> rl_gk_at:u32=0xffffffffu;\n\
+var<private> rl_gk_n:u32;\n\
+fn rl_gk_begin(pixel:vec2<u32>) {{\n    rl_gk_n=0u;\n    rl_gk_at=select(0xffffffffu,(pixel.y*{w}u+pixel.x)*16u,all(pixel<vec2<u32>({w}u,{h}u)));\n    if rl_gk_at!=0xffffffffu {{rl_gi_keys[rl_gk_at]=0u;}}\n}}\n\
+fn rl_gk_log(key:u32) {{\n    if rl_gk_at==0xffffffffu {{return;}}\n    rl_gk_n+=1u;\n    rl_gi_keys[rl_gk_at]=rl_gk_n;\n    if rl_gk_n<16u {{rl_gi_keys[rl_gk_at+rl_gk_n]=key;}}\n}}\n"
+    ));
+    source
+}
 /// One `RENDERLAB_SHADE_CUT` cut: its name, the heads it may sit at (first match wins), its
 /// early return, whether that goes before the head, and whether the head follows the program
 /// (`late`: MQ2's hint and the entry). Entry exits look only inside `primary_shade_pixel`:
@@ -1033,7 +1089,7 @@ fn compose_stage(
     // Every cut's function precedes the program, so its range is taken after them.
     source = shade_cuts(source, false);
     if traces {
-        source = with_shade_counts(source, false);
+        source = with_gi_keys(with_shade_counts(source, false), false);
     }
     let start = source.len();
     source.push_str(program);
@@ -1065,7 +1121,7 @@ fn compose_stage(
         source.push_str(entry);
     }
     Composed {
-        source: with_shade_counts(shade_cuts(source, true), true),
+        source: with_gi_keys(with_shade_counts(shade_cuts(source, true), true), true),
         program: program_range,
     }
 }
