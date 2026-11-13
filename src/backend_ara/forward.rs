@@ -1698,6 +1698,7 @@ fn frame(
                 scene.objects.iter().all(|o| o.material.double_sided),
                 "hardware shadows currently require opaque double-sided materials"
             );
+            // Every object casts until the port maps `Batch::casts` here.
             let mut frame = shadow_gpu::plan_frame(
                 &shadows,
                 &history.shadow_bases,
@@ -1705,6 +1706,7 @@ fn frame(
                 size,
                 &scene.lighting.lights,
                 &bounds,
+                &vec![true; bounds.len()],
             )?;
             frame.prepare_hardware_bias(&records)?;
             left.shadow_bases = frame.bases().to_vec();

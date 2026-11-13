@@ -590,10 +590,10 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
     }
 }
 
-/// Every shadow ray culls with the shadow mask (`hardware_shadow_gpu::MASK_SHADOW`), so a
-/// placement that casts no shadow is invisible to it: each ray query that stops at its first
-/// hit, and the fresh-visibility kernel, whose flags are a variable. Camera, reflection and
-/// bounce rays keep 0xFF.
+/// Every shadow ray culls with the named `SHADOW_CASTER_MASK` (src/shadows.rs, declared in
+/// shaders/scene.wgsl), so a placement that casts no shadow is invisible to it: each ray query
+/// that stops at its first hit, and the fresh-visibility kernel, whose flags are a variable.
+/// Camera, reflection and bounce rays keep 0xFF.
 #[test]
 fn every_shadow_ray_query_culls_with_the_shadow_mask() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -624,7 +624,7 @@ fn every_shadow_ray_query_culls_with_the_shadow_mask() {
             if shadow {
                 shadow_rays += 1;
                 assert_eq!(
-                    mask, "1u",
+                    mask, "SHADOW_CASTER_MASK",
                     "{file}: a shadow ray must cull with the shadow mask: {call}"
                 );
             } else {
@@ -638,4 +638,19 @@ fn every_shadow_ray_query_culls_with_the_shadow_mask() {
     // fresh_shadows, hardware_shadows, local_light_ray, reflections (and its program template),
     // gi_rays_hardware, the atmosphere and the reference tracer.
     assert_eq!(shadow_rays, 8);
+    // Modules without scene.wgsl take the declaration after their directives.
+    assert_eq!(
+        crate::shadows::with_shadow_caster_mask("enable wgpu_ray_query;\nfn f() {}\n"),
+        "enable wgpu_ray_query;\nconst SHADOW_CASTER_MASK:u32=1u;\nfn f() {}\n"
+    );
+    // One value: scene.wgsl's declaration is the CPU constant's.
+    let scene = std::fs::read_to_string(root.join("shaders/scene.wgsl")).unwrap();
+    assert!(scene.contains(crate::shadows::SHADOW_CASTER_MASK_WGSL.trim_end()));
+    assert_eq!(
+        crate::shadows::SHADOW_CASTER_MASK_WGSL,
+        format!(
+            "const SHADOW_CASTER_MASK:u32={}u;\n",
+            crate::shadows::SHADOW_CASTER_MASK
+        )
+    );
 }

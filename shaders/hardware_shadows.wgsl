@@ -27,7 +27,7 @@ fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 {
     }
     if tmax<=tmin { return 1.0; }
     var query:ray_query;
-    rayQueryInitialize(&query,hardware_scene,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT,1u,tmin,tmax,origin,l));
+    rayQueryInitialize(&query,hardware_scene,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK,tmin,tmax,origin,l));
     while rayQueryProceed(&query) {}
     return select(0.0,1.0,rayQueryGetCommittedIntersection(&query).kind==0u);
 }

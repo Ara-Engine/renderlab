@@ -37,7 +37,7 @@ const FLAG_VOLUMETRIC: u32 = 16;
 pub(crate) const HARDWARE_VISIBILITY: &str = "@group(0) @binding(20) var at_scene:acceleration_structure;
 fn at_sun_visible(p:vec3<f32>) -> f32 {
     var query:ray_query;
-    rayQueryInitialize(&query,at_scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,1u,0.02,1e5,p,atmosphere.sun.xyz));
+    rayQueryInitialize(&query,at_scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK,0.02,1e5,p,atmosphere.sun.xyz));
     while rayQueryProceed(&query) {}
     return select(0.0,1.0,rayQueryGetCommittedIntersection(&query).kind==0u);
 }
@@ -53,9 +53,13 @@ fn kernel_source(hardware: bool) -> String {
             ""
         },
         if hardware {
-            HARDWARE_VISIBILITY
+            // The shadow ray's cull mask: this module has no shaders/scene.wgsl.
+            format!(
+                "{}{HARDWARE_VISIBILITY}",
+                crate::shadows::SHADOW_CASTER_MASK_WGSL
+            )
         } else {
-            MAP_VISIBILITY
+            MAP_VISIBILITY.to_owned()
         },
     )
 }

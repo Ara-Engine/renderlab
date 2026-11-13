@@ -55,10 +55,11 @@ fn shader() -> String {
     let api = include_str!("../shaders/program_api.wgsl");
     let input =
         &api[api.find("struct SurfaceInput {").unwrap()..api.find("// One light's").unwrap()];
-    let mut source = format!(
+    // The reference tracer's shadow ray needs its cull mask; scene.wgsl lends only functions.
+    let mut source = crate::shadows::with_shadow_caster_mask(&format!(
         "{reference}\n{input}\n{}\n",
         include_str!("../shaders/reflection_probe.wgsl")
-    );
+    ));
     // DC1: this frozen reflection experiment has no decal scene. Supply only the
     // surface value type and material helpers, with identity decal inputs.
     let decals = include_str!("../shaders/decals.wgsl");

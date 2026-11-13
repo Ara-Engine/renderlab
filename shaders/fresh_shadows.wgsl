@@ -76,7 +76,7 @@ fn fresh_estimate(receiver:Receiver, pixel:vec2<u32>, width:u32, lane:u32) -> u3
                 // Epsilon is strictly positive: any committed hit blocks this ray.
                 // Neither a closest distance nor a dynamic first-hit flag is needed.
                 let flags=RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT;
-                rayQueryInitialize(&query,fresh_scene,RayDesc(flags,1u,tmin,tmax,ray_origin,direction));
+                rayQueryInitialize(&query,fresh_scene,RayDesc(flags,SHADOW_CASTER_MASK,tmin,tmax,ray_origin,direction));
                 while rayQueryProceed(&query) {}
                 blocked=rayQueryGetCommittedIntersection(&query).kind!=0u;
             }

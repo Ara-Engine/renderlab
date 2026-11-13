@@ -325,8 +325,7 @@ impl ShadowState {
     pub fn enabled(&self, mode: ViewMode) -> bool {
         mode == ViewMode::Lit && self.settings.enabled()
     }
-    /// `bounds` and `casts` are per placement; a placement that casts no shadow
-    /// (`Instances::set_casts_shadows`) is left out of every view's casters.
+    /// `bounds` and `casts` are per placement (`plan_frame`).
     pub fn plan(
         &self,
         camera: &Camera,
@@ -335,27 +334,23 @@ impl ShadowState {
         bounds: &[Bounds],
         casts: &[bool],
     ) -> Result<ShadowFrame, Error> {
-        let mut frame = plan_frame(
+        plan_frame(
             &self.settings,
             &self.bases,
             camera,
             viewport,
             lights,
             bounds,
-        )?;
-        if casts.contains(&false) {
-            for view in &mut frame.views {
-                view.caster_indices.retain(|&i| casts[i]);
-            }
-        }
-        Ok(frame)
+            casts,
+        )
     }
 }
 
 /// The CPU half of a shadow frame: views for every requested light, their packed
 /// records and each light's view range. `previous` holds the last frame's light
 /// orientations (empty on a first frame). The wgpu renderer and the ara-gpu backend
-/// both plan through this.
+/// both plan through this. `bounds` and `casts` are per placement: a placement that casts no
+/// shadow (`Instances::set_casts_shadows`) is left out of every view's casters.
 pub(crate) fn plan_frame(
     settings: &crate::Shadows,
     previous: &[Option<glam::DMat4>],
@@ -363,6 +358,7 @@ pub(crate) fn plan_frame(
     viewport: [u32; 2],
     lights: &[Light],
     bounds: &[Bounds],
+    casts: &[bool],
 ) -> Result<ShadowFrame, Error> {
     let mut views = vec![];
     let mut light_ranges = vec![[0, 0]; lights.len()];
@@ -457,6 +453,11 @@ pub(crate) fn plan_frame(
                 records[offset..offset + 4].copy_from_slice(&near.to_ne_bytes());
                 records[offset + 4..offset + 8].copy_from_slice(&far.to_ne_bytes());
             }
+        }
+    }
+    if casts.contains(&false) {
+        for view in &mut views {
+            view.caster_indices.retain(|&i| casts[i]);
         }
     }
     Ok(ShadowFrame {

@@ -29,7 +29,7 @@ fn gi_visible(origin:vec3<f32>, direction:vec3<f32>) -> bool {
 // Visibility within tmax (a light's distance): any hit blocks it.
 fn gi_visible_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32) -> bool {
     var query:ray_query<vertex_return>;
-    rayQueryInitialize(&query,gi_scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,1u,0.0,tmax,origin,direction));
+    rayQueryInitialize(&query,gi_scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK,0.0,tmax,origin,direction));
     while rayQueryProceed(&query) {}
     return rayQueryGetCommittedIntersection(&query).kind==0u;
 }

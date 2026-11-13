@@ -677,12 +677,14 @@ fn render_repeats(
     let shader = SHADER;
     #[cfg(test)]
     let shader = diagnostic_shader.as_deref().unwrap_or(shader);
+    // The shadow ray's cull mask: this module has no shaders/scene.wgsl.
+    let shader = crate::shadows::with_shadow_caster_mask(shader);
     let make_pipeline = || {
         let module = crate::pipeline_compilation::create_engine_shader_module(
             device,
             wgpu::ShaderModuleDescriptor {
                 label: Some("reference path tracer"),
-                source: wgpu::ShaderSource::Wgsl(shader.into()),
+                source: wgpu::ShaderSource::Wgsl(shader.as_str().into()),
             },
         );
         device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
