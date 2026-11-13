@@ -4,6 +4,8 @@ use crate::asset::{Filter, Mip, MipmapFilter, Sampler, TextureRole, Wrap};
 pub(super) mod prepared;
 #[path = "material_response_tests.rs"]
 mod response;
+#[path = "compressed_texture_tests.rs"]
+mod compressed;
 
 const SRGB: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 fn material_renderer(samples: SampleCount) -> Renderer {
