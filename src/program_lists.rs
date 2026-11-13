@@ -11,14 +11,42 @@ use crate::pipeline_compilation::PipelineDevice;
 
 /// Programs one frame can shade: the binning mask is one u32 per tile.
 pub(crate) const MAX_FRAME_PROGRAMS: usize = 32;
-/// Mixed-program binning and list entries retain their own 4x4 shading tiles.
-const LIST_TILE: [u32; 2] = [4, 4];
+// Mixed-program binning and list entries use their own list tiles (program.rs list_tile:
+// 4x4, or 8x4 under RENDERLAB_LIST_TILE).
 /// WGSL `RlList`: slot, list base, capacity, flags, then the slot of each of the
 /// `TRACED_DRAWS` batches.
 const INFO_BYTES: u64 = 16 + 4 * TRACED_DRAWS as u64;
 /// Standalone binning shares the composed shading draw-table ABI.
 pub(crate) fn bin_source() -> String {
-    bin_source_for(crate::program::list_entries_per_group())
+    let source = bin_source_for(crate::program::list_entries_per_group());
+    if crate::program::list_tile() == [8, 4] {
+        bin_source_tile8(&source)
+    } else {
+        source
+    }
+}
+/// `source` (a `bin_source_for` result) binning 8x4 list tiles (`program::list_tile`): one
+/// 8x4 workgroup a tile.
+pub(crate) fn bin_source_tile8(source: &str) -> String {
+    let mut source = source.to_owned();
+    for (find, replace) in [
+        (
+            "@compute @workgroup_size(4,4) fn program_bins(",
+            "@compute @workgroup_size(8,4) fn program_bins(",
+        ),
+        (
+            "let shaded=(region.zw-region.xy)/vec2<u32>(4u);",
+            "let shaded=(region.zw-region.xy)/vec2<u32>(8u,4u);",
+        ),
+        (
+            "let id=region.xy+group.xy*4u+local.xy;",
+            "let id=region.xy+group.xy*vec2<u32>(8u,4u)+local.xy;",
+        ),
+    ] {
+        assert_eq!(source.matches(find).count(), 1, "bins tile 8x4: {find}");
+        source = source.replacen(find, replace, 1);
+    }
+    source
 }
 /// `bin_source` for list shading of `per` entries per workgroup: a list of n entries
 /// dispatches ceil(n / per) workgroups.
@@ -189,8 +217,8 @@ pub(crate) fn frame_slots(programs: impl IntoIterator<Item = u64>) -> (Vec<u64>,
 /// Words of one slot list for a `width` x `height` image: its length, then room for
 /// every 4x4 shading tile of the trace-tile-widened region and every 16x16 clear block.
 fn capacity([width, height]: [u32; 2]) -> u32 {
-    1 + (width + TRACE_TILE[0]).div_ceil(LIST_TILE[0])
-        * (height + TRACE_TILE[1]).div_ceil(LIST_TILE[1])
+    let tile = crate::program::list_tile();
+    1 + (width + TRACE_TILE[0]).div_ceil(tile[0]) * (height + TRACE_TILE[1]).div_ceil(tile[1])
         + width.div_ceil(CLEAR_TILE[0]) * height.div_ceil(CLEAR_TILE[1])
 }
 
@@ -455,7 +483,7 @@ impl Renderer {
         });
         pass.set_pipeline(state.bins.as_ref().unwrap());
         pass.set_bind_group(0, &*lists.bins.as_ref().unwrap().0, &[]);
-        let [x, y] = state.region_groups(LIST_TILE);
+        let [x, y] = state.region_groups(crate::program::list_tile());
         let [bx, by] = [0, 1].map(|i| [size.width, size.height][i].div_ceil(CLEAR_TILE[i]));
         pass.dispatch_workgroups(x.max(bx), y + by, 1);
         pass.set_bind_group(1, &*g.arrays, &[]);
@@ -491,7 +519,8 @@ mod tests {
         for size in [[1920u32, 1080], [1, 1], [961, 641], [3840, 2160]] {
             // The widest region: the image widened to whole trace tiles.
             let region = [0, 1].map(|i| size[i].div_ceil(TRACE_TILE[i]) * TRACE_TILE[i]);
-            let tiles = region[0] / LIST_TILE[0] * (region[1] / LIST_TILE[1]);
+            let tile = crate::program::list_tile();
+            let tiles = region[0] / tile[0] * (region[1] / tile[1]);
             let blocks = size[0].div_ceil(CLEAR_TILE[0]) * size[1].div_ceil(CLEAR_TILE[1]);
             assert!(capacity(size) > tiles + blocks, "{size:?}");
         }
@@ -513,10 +542,11 @@ mod tests {
             .validate(&module)
             .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
         };
-        // RENDERLAB_LIST_LANES 16, 32 and 64.
+        // RENDERLAB_LIST_LANES 16, 32 and 64, and RENDERLAB_LIST_TILE=8x4.
         for per in [1, 2, 4] {
             validate(&format!("bins {per}"), &bin_source_for(per));
         }
+        validate("bins 8x4", &bin_source_tile8(&bin_source_for(1)));
         let prelude = include_str!("../shaders/scene.wgsl");
         let heads = shading_heads(prelude).unwrap();
         for (label, program) in [
@@ -532,8 +562,7 @@ mod tests {
                     let list = crate::program::compose_list(head, program, stage, parameters);
                     assert_eq!(&list.source[list.program.clone()], program);
                     validate(&format!("{label} {i} {stage:?}"), &list.source);
-                    let entry =
-                        crate::program::list_entry(crate::program::list_entries_per_group());
+                    let entry = crate::program::list_entry_now();
                     // The other widths than the environment's (RENDERLAB_LIST_LANES).
                     for per in [1, 2, 4]
                         .into_iter()
@@ -547,6 +576,12 @@ mod tests {
                             &format!("{label} {i} {stage:?} {per} entries a group"),
                             &wide,
                         );
+                    }
+                    let tile8 = crate::program::list_entry_tile8();
+                    if entry != tile8 {
+                        let wide = list.source.replacen(&entry, &tile8, 1);
+                        assert_ne!(wide, list.source);
+                        validate(&format!("{label} {i} {stage:?} 8x4 tile"), &wide);
                     }
                     let single = crate::program::compose(head, program, stage, parameters).source;
                     assert!(list.source.contains("fn primary_shade_list("));

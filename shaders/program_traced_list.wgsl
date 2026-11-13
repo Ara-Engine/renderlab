@@ -14,6 +14,11 @@ const RL_LIST_CLEAR=0x40000000u;
 const RL_LIST_MISSES=0x80000000u;
 // Workgroups per dispatch row; program_bins.wgsl BINS_ROW must match.
 const RL_LIST_ROW=65535u;
+// The list tile in pixels (program.rs list_tile; program_bins.wgsl bins the same tiles).
+const RL_LIST_TILE=vec2<u32>(4u,4u);
+// The absolute pixel of lane `local` in list tile `tile`, including the region's origin: every
+// mapping from a list entry back to its pixels goes through here.
+fn rl_list_pixel(tile:vec2<u32>,local:vec2<u32>)->vec2<u32> { return primary_region.xy+tile*RL_LIST_TILE+local; }
 
 // The frame slot (program) of draw `batch`.
 fn rl_slot_of(batch:u32)->u32 { return rl_list.programs[batch>>2u][batch&3u]; }
@@ -35,7 +40,7 @@ fn rl_slot_of(batch:u32)->u32 { return rl_list.programs[batch>>2u][batch&3u]; }
         }
         return;
     }
-    let id=region.xy+tile*4u+local.xy;
+    let id=rl_list_pixel(tile,local.xy);
     if any(id>=size) {return;}
     let misses=(entry&RL_LIST_MISSES)!=0u;
     if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x==0u {

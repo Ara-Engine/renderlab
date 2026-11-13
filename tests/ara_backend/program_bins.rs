@@ -7,6 +7,14 @@ pub const CLEAR: u32 = 0x4000_0000;
 pub const MISSES: u32 = 0x8000_0000;
 const DISPATCH_ROW: u32 = 65_535;
 
+/// The list tile (`RENDERLAB_LIST_TILE`, program.rs list_tile): 4x4 unless 8x4.
+fn list_tile() -> [u32; 2] {
+    match std::env::var("RENDERLAB_LIST_TILE").as_deref() {
+        Ok("8x4") => [8, 4],
+        _ => [4, 4],
+    }
+}
+
 /// Per-program semantic results; entry order within each GPU list is unspecified.
 #[derive(Debug, PartialEq, Eq)]
 pub struct Expected {
@@ -93,7 +101,8 @@ pub fn reference(fixture: &Fixture) -> Expected {
     );
     assert!(fixture.coverage_extent[0] >= width.div_ceil(8));
     assert!(fixture.coverage_extent[1] >= height.div_ceil(4));
-    let shaded = [(x1 - x0) / 4, (y1 - y0) / 4];
+    let [tw, th] = list_tile();
+    let shaded = [(x1 - x0) / tw, (y1 - y0) / th];
     let clear = [width.div_ceil(16), height.div_ceil(16)];
     assert!(fixture.groups[0] >= shaded[0].max(clear[0]));
     assert!(fixture.groups[1] >= shaded[1] + clear[1]);
@@ -108,10 +117,10 @@ pub fn reference(fixture: &Fixture) -> Expected {
     let mut sets = vec![BTreeSet::new(); fixture.slots as usize];
     for tile_y in 0..shaded[1] {
         for tile_x in 0..shaded[0] {
-            let start = [x0 + tile_x * 4, y0 + tile_y * 4];
+            let start = [x0 + tile_x * tw, y0 + tile_y * th];
             let mut programs = BTreeSet::new();
-            for y in start[1]..(start[1] + 4).min(height) {
-                for x in start[0]..(start[0] + 4).min(width) {
+            for y in start[1]..(start[1] + th).min(height) {
+                for x in start[0]..(start[0] + tw).min(width) {
                     let trace_cell = ((y / 4) * fixture.coverage_extent[0] + x / 8) as usize;
                     let placement = fixture.hit[(y * width + x) as usize][0];
                     let program = if fixture.coverage[trace_cell] == 0 || placement == 0 {
@@ -172,7 +181,12 @@ pub fn fixture() -> Fixture {
     let extent = [23, 19];
     let coverage_extent = [3, 5];
     let coverage = vec![1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 0, 1, 1, 1];
-    let region = [8, 4, 28, 24];
+    // Widened to whole list tiles, as production widens it to whole 8x4 trace tiles.
+    let region = if list_tile()[0] == 8 {
+        [8, 4, 32, 24]
+    } else {
+        [8, 4, 28, 24]
+    };
     let placements = vec![
         0x8000_0003,
         0x4000_0011,

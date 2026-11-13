@@ -3422,8 +3422,11 @@ fn frame(
                     slots: count,
                     capacity,
                     groups: [
-                        (r[2] - r[0]).div_ceil(4).max(size[0].div_ceil(16)),
-                        (r[3] - r[1]).div_ceil(4) + size[1].div_ceil(16),
+                        (r[2] - r[0])
+                            .div_ceil(crate::program::list_tile()[0])
+                            .max(size[0].div_ceil(16)),
+                        (r[3] - r[1]).div_ceil(crate::program::list_tile()[1])
+                            + size[1].div_ceil(16),
                         1,
                     ],
                 },

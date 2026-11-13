@@ -1150,6 +1150,8 @@ const TRACED_LIST_ENTRY: &str = include_str!("../shaders/program_traced_list.wgs
 pub(crate) fn list_entries_per_group() -> u32 {
     static PER: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *PER.get_or_init(|| match std::env::var("RENDERLAB_LIST_LANES").as_deref() {
+        // An 8x4 tile already fills 32 lanes with one entry.
+        _ if list_tile() == [8, 4] => 1,
         Err(_) | Ok("16") => 1,
         Ok("32") => 2,
         Ok("64") => 4,
@@ -1158,6 +1160,52 @@ pub(crate) fn list_entries_per_group() -> u32 {
             1
         }
     })
+}
+/// `RENDERLAB_LIST_TILE=8x4` (measurement, off by default): mixed frames bin and shade 8x4
+/// list tiles, one 32-lane group per entry, so a group's lanes are adjacent pixels instead of
+/// `RENDERLAB_LIST_LANES`' two unrelated 4x4 tiles. The default is 4x4.
+pub(crate) fn list_tile() -> [u32; 2] {
+    static TILE: std::sync::OnceLock<[u32; 2]> = std::sync::OnceLock::new();
+    *TILE.get_or_init(|| match std::env::var("RENDERLAB_LIST_TILE").as_deref() {
+        Ok("8x4") => [8, 4],
+        Err(_) | Ok("4x4") => [4, 4],
+        Ok(other) => {
+            eprintln!("RENDERLAB_LIST_TILE: `{other}` is not 4x4 or 8x4; using 4x4");
+            [4, 4]
+        }
+    })
+}
+/// The list entry for this process's tile and group width (`list_tile`,
+/// `list_entries_per_group`).
+pub(crate) fn list_entry_now() -> String {
+    if list_tile() == [8, 4] {
+        list_entry_tile8()
+    } else {
+        list_entry(list_entries_per_group())
+    }
+}
+/// The list entry on 8x4 tiles: one 32-lane group per entry. A clear block's 16 columns take
+/// lanes 0-15; the others return.
+pub(crate) fn list_entry_tile8() -> String {
+    let mut source = TRACED_LIST_ENTRY.to_owned();
+    for (find, replace) in [
+        (
+            "@compute @workgroup_size(4,4) fn primary_shade_list(",
+            "@compute @workgroup_size(8,4) fn primary_shade_list(",
+        ),
+        (
+            "const RL_LIST_TILE=vec2<u32>(4u,4u);",
+            "const RL_LIST_TILE=vec2<u32>(8u,4u);",
+        ),
+        (
+            "        let base=tile*PRIMARY_CLEAR_TILE+vec2<u32>(lane,0u);\n",
+            "        if lane>=PRIMARY_CLEAR_TILE {return;}\n        let base=tile*PRIMARY_CLEAR_TILE+vec2<u32>(lane,0u);\n",
+        ),
+    ] {
+        assert_eq!(source.matches(find).count(), 1, "list tile 8x4: {find}");
+        source = source.replacen(find, replace, 1);
+    }
+    source
 }
 /// The list entry with `per` list entries per workgroup (`list_entries_per_group`).
 pub(crate) fn list_entry(per: u32) -> String {
@@ -1208,7 +1256,7 @@ pub(crate) fn compose_list(head: &str, program: &str, stage: Stage, parameters: 
     let (engine, rest) = source.split_at(range.start);
     let edited = engine.replacen(LIST_HIT_PARAMETERS_SEAM, LIST_HIT_PARAMETERS, 1);
     let shift = edited.len() - engine.len();
-    source = format!("{edited}{rest}{}", list_entry(list_entries_per_group()));
+    source = format!("{edited}{rest}{}", list_entry_now());
     Composed {
         source,
         program: range.start + shift..range.end + shift,
