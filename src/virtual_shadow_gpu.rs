@@ -323,6 +323,8 @@ pub struct VirtualShadowStats {
     pub nearest_receiver: Option<f32>,
     pub receivers: u32,
     pub unplaced_receivers: u32,
+    /// The nearest of the unplaced receivers (metres from the eye): the reach this frame.
+    pub nearest_unplaced: Option<f32>,
 }
 
 struct Pipelines {
@@ -1876,6 +1878,7 @@ impl Renderer {
             state.stats.nearest_receiver = (word(0) != 0).then(|| f32::from_bits(!word(0)));
             state.stats.receivers = word(1);
             state.stats.unplaced_receivers = word(2);
+            state.stats.nearest_unplaced = (word(3) != 0).then(|| f32::from_bits(!word(3)));
             if epoch == state.epoch {
                 state.seen = state.stats.nearest_receiver.map(|d| (f64::from(d), at));
             }

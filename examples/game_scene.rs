@@ -1255,7 +1255,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::json!({
                     "levels": v.levels, "finest_level": v.finest_level, "skipped_levels": v.skipped_levels,
                     "nearest_receiver": v.nearest_receiver, "receivers": v.receivers,
-                    "unplaced_receivers": v.unplaced_receivers,
+                    "unplaced_receivers": v.unplaced_receivers, "nearest_unplaced": v.nearest_unplaced,
                 })
             },
         }));

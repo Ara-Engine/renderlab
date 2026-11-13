@@ -86,9 +86,9 @@ override VD_BAND_FROM:u32=0u;
 @group(0) @binding(14) var vsm_level_out:texture_storage_2d<r32uint,write>;
 // The receivers the mark pass saw (virtual_shadow_gpu.rs reads it back a frame or two late):
 // 0, the nearest one's distance from the eye as !bits (0: none); 1, their count; 2, those no
-// level's window holds (shaded without the map).
+// level's window holds (shaded without the map); 3, the nearest of those as !bits.
 @group(0) @binding(52) var<storage,read_write> vsm_reach:array<atomic<u32>,4>;
-var<workgroup> vd_reach:array<atomic<u32>,3>;
+var<workgroup> vd_reach:array<atomic<u32>,4>;
 // The ladder's index for absolute level k: the coarsest level not coarser than k (0 when every
 // level is). The ladder is consecutive except far out, where a span of more than
 // VSM_MAX_LEVELS octaves skips some (info.y holds each level's absolute level).
@@ -141,9 +141,10 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
         let world=textureLoad(vsm_world,vec2<i32>(id.xy),0).xyz;
         let plain=vd_select(world,0.0);
         level=vd_select(world,vd_band_jitter(id.xy));
-        atomicMax(&vd_reach[0],~bitcast<u32>(length(world-vsm.eye.xyz)));
+        let distance=~bitcast<u32>(length(world-vsm.eye.xyz));
+        atomicMax(&vd_reach[0],distance);
         atomicAdd(&vd_reach[1],1u);
-        if level==VSM_NONE {atomicAdd(&vd_reach[2],1u);}
+        if level==VSM_NONE {atomicAdd(&vd_reach[2],1u);atomicMax(&vd_reach[3],distance);}
         if plain!=VSM_NONE {
             let p=vsm_light(world);
             let pages=vsm.counts.y;
@@ -179,7 +180,7 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
         let seen=atomicLoad(&vd_reach[1]);
         if seen!=0u {atomicAdd(&vsm_reach[1],seen);}
         let none=atomicLoad(&vd_reach[2]);
-        if none!=0u {atomicAdd(&vsm_reach[2],none);}
+        if none!=0u {atomicAdd(&vsm_reach[2],none);atomicMax(&vsm_reach[3],atomicLoad(&vd_reach[3]));}
     }
 }
 

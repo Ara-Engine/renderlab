@@ -417,9 +417,9 @@ fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error>
 
 /// With `RENDERLAB_VSM_LOG=<file>` set, appends one JSON line of the non-RT sun clipmap's ladder
 /// and reach after each frame the engine renders: its levels, finest absolute level, octaves
-/// skipped far out, and the Disk mark pass's nearest receiver (metres), receivers and receivers
-/// no level's window held (shaded without the map), from a frame or two earlier. Measurement
-/// only; no readback of its own.
+/// skipped far out, and the Disk mark pass's nearest receiver (metres), receivers, receivers no
+/// level's window held (shaded without the map) and the nearest of those (the reach), from a
+/// frame or two earlier. Measurement only; no readback of its own.
 pub(crate) fn log_clipmap(r: &Renderer) {
     use std::io::Write;
     let Some(path) = std::env::var_os("RENDERLAB_VSM_LOG") else {
@@ -427,13 +427,14 @@ pub(crate) fn log_clipmap(r: &Renderer) {
     };
     let v = r.virtual_shadow_stats();
     let line = format!(
-        "{{\"levels\":{},\"finest_level\":{},\"skipped_levels\":{},\"nearest_receiver\":{},\"receivers\":{},\"unplaced_receivers\":{}}}\n",
+        "{{\"levels\":{},\"finest_level\":{},\"skipped_levels\":{},\"nearest_receiver\":{},\"receivers\":{},\"unplaced_receivers\":{},\"nearest_unplaced\":{}}}\n",
         v.levels,
         v.finest_level,
         v.skipped_levels,
         v.nearest_receiver.map_or("null".into(), |d| d.to_string()),
         v.receivers,
         v.unplaced_receivers,
+        v.nearest_unplaced.map_or("null".into(), |d| d.to_string()),
     );
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)
