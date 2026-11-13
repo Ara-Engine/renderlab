@@ -37,11 +37,12 @@ fn material_pass_compile_seconds() -> Result<()> {
     Ok(())
 }
 
-/// The record's receiver (words 1 and 2) against each pixel's own decode, through
-/// `RENDERLAB_MATERIAL_DEBUG=receiver` (program.rs `material_debug`): the trace point, slot,
-/// `thin`, both sides and the epsilon come back bit for bit; the geometric normal within its
-/// octahedral 2 x 16 bits and the interpolated vertex normal within 2 x 12. A floor, a wall
-/// with tilted vertex normals, and a far wall whose epsilon is above the 1e-5 floor. Runs with
+/// The record's receiver (words 1 and 2) against the sun path's receiver for a fresh camera
+/// ray (its edge repair included), through `RENDERLAB_MATERIAL_DEBUG=receiver` (program.rs
+/// `material_debug`): the trace point, slot, `thin`, both sides and the epsilon come back bit
+/// for bit, at repaired edges too; the geometric normal within its octahedral 2 x 16 bits and
+/// the interpolated vertex normal (against this pixel's decode) within 2 x 12. A floor, a wall
+/// folded along a crease the middle column's rays land on, and a far wall whose epsilon is above the 1e-5 floor. Runs with
 /// `RENDERLAB_MATERIAL_PASS=1 RENDERLAB_MATERIAL_DEBUG=receiver` (read once per process);
 /// without them it says so and passes.
 #[test]
@@ -57,7 +58,8 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
         );
         return Ok(());
     }
-    const SIZE: [u32; 2] = [160, 120];
+    // Odd width: the middle column's camera ray lies in the plane x = 0, the crease's.
+    const SIZE: [u32; 2] = [161, 121];
     let path = root("material-receiver");
     let mut gpu = GpuDevice::new(&[], path.join("device"))?;
     let cache = ShaderCache::new(path.join("shaders"))?;
@@ -77,15 +79,23 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
         [up; 4],
     );
     let toward = |x: f32, z: f32| Vec3::new(x, -1., z).normalize().to_array();
-    let wall = quad(
-        [[-1.5, 2., 0.], [1.5, 2., 0.], [1.5, 2., 2.], [-1.5, 2., 2.]],
-        [
-            toward(-0.4, -0.2),
-            toward(0.4, -0.2),
-            toward(0.3, 0.5),
-            toward(-0.3, 0.5),
-        ],
-    );
+    // A wall folded along x = 0 (a concave crease, where the edge repair acts; both faces
+    // share the edge's vertices), with tilted vertex normals.
+    let crease: Vec<Vertex> = [
+        ([0., 2.6, 0.], toward(0., -0.2)),
+        ([0., 2.6, 2.], toward(0., 0.5)),
+        ([-1.5, 2., 0.], toward(0.6, -0.2)),
+        ([-1.5, 2., 2.], toward(0.5, 0.4)),
+        ([1.5, 2., 0.], toward(-0.6, -0.2)),
+        ([1.5, 2., 2.], toward(-0.5, 0.4)),
+    ]
+    .map(|(position, normal)| Vertex {
+        position,
+        normal,
+        uv: [0.; 2],
+        color: [1.; 4],
+    })
+    .to_vec();
     let far = quad(
         [
             [-40., 60., 0.],
@@ -95,9 +105,16 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
         ],
         [[0., -1., 0.]; 4],
     );
-    let objects = [&floor, &wall, &far].map(|vertices| ForwardObject {
+    let quad_indices: &[u32] = &[0, 1, 2, 0, 2, 3];
+    let crease_indices: &[u32] = &[2, 0, 1, 2, 1, 3, 0, 4, 5, 0, 5, 1];
+    let objects = [
+        (&floor, quad_indices),
+        (&crease, crease_indices),
+        (&far, quad_indices),
+    ]
+    .map(|(vertices, indices)| ForwardObject {
         vertices,
-        indices: &[0, 1, 2, 0, 2, 3],
+        indices,
         transform: Mat4::IDENTITY,
         material: MaterialDescriptor {
             base_color: [0.7, 0.7, 0.7, 1.],
@@ -154,7 +171,7 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
         },
     )?;
     // Hits write minus (1e-6 plus) the vertex normal's angle in w; misses write alpha 0 or 1.
-    let (mut worst, mut hits) = ([0f32; 4], 0);
+    let (mut worst, mut hits, mut edges) = ([0f32; 4], 0, 0);
     for pixel in images.hdr.as_chunks::<8>().0 {
         let value = |c: usize| {
             f16::from_bits(u16::from_le_bytes([pixel[2 * c], pixel[2 * c + 1]])).to_f32()
@@ -163,12 +180,19 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
             continue;
         }
         hits += 1;
+        // z is negative (minus 1e-6) at repaired edges, where the record's point is the
+        // repair's rather than shading's barycentric one.
+        edges += usize::from(value(2) < 0.0);
         for (c, worst) in worst.iter_mut().enumerate() {
-            *worst = worst.max(if c == 3 { -value(c) - 1e-6 } else { value(c) });
+            *worst = worst.max(if c >= 2 && value(c) < 0.0 {
+                -value(c) - 1e-6
+            } else {
+                value(c)
+            });
         }
     }
     println!(
-        "record receiver: {hits} hits; trace point {:e}, epsilon {:e}, geometric normal {:.2e} rad, vertex normal {:.2e} rad ({:.3} deg)",
+        "record receiver: {hits} hits, {edges} at repaired edges; trace point {:e}, epsilon {:e}, geometric normal {:.2e} rad, vertex normal {:.2e} rad ({:.3} deg)",
         worst[0],
         worst[1],
         worst[2],
@@ -179,6 +203,7 @@ fn the_record_rebuilds_the_receiver() -> Result<()> {
         hits > (SIZE[0] * SIZE[1] / 2) as usize,
         "too few hits ({hits})"
     );
+    ensure!(edges > 0, "no pixel reached a repaired edge");
     ensure!(
         worst[0] == 0.0,
         "the trace point, slot, thin or a side moved ({})",

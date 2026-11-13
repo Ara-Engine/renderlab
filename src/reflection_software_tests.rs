@@ -524,6 +524,32 @@ fn material_pass_variants_compose_and_validate() {
     assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 2);
 }
 
+/// The material pass's receiver is the sun path's, body for body: words 1 and 2 then give a
+/// sun pass reading the record exactly the receiver it builds today.
+#[test]
+fn material_trace_receiver_matches_the_sun_path() {
+    let body = |source: &str, signature: &str| -> String {
+        let start = source.find(signature).unwrap_or_else(|| panic!("{signature}"));
+        let open = start + source[start..].find('{').unwrap();
+        let mut depth = 0;
+        for (i, c) in source[open..].char_indices() {
+            depth += match c {
+                '{' => 1,
+                '}' => -1,
+                _ => 0,
+            };
+            if depth == 0 {
+                return source[open..open + i + 1].to_owned();
+            }
+        }
+        panic!("{signature} unclosed")
+    };
+    assert_eq!(
+        body(crate::program::MATERIAL_TRACE_RECEIVER, "fn rl_mr_trace_receiver_of("),
+        body(include_str!("../shaders/primary_penumbra.wgsl"), "fn primary_penumbra_receiver(")
+    );
+}
+
 /// Every `RENDERLAB_MATERIAL_DEBUG` view composes and validates on every head, tiles and lists.
 #[test]
 fn material_pass_debug_views_compose_and_validate() {
