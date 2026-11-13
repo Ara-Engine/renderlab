@@ -1077,6 +1077,15 @@ fn traced_frame_agrees_with_the_mesh_pass_over_misses_sky_and_post() -> Result<(
         };
         let (traced, traced_display) = frame(Primary::Traced)?;
         let (raster, raster_display) = frame(Primary::Raster)?;
+        // RENDERLAB_MATERIAL_PASS=1: the material record (program.rs MATERIAL_PACKING) is
+        // lossy at about one f16 step (unorm16 base colour, octahedral unorm16 normals), which
+        // moves a few percent of the pixels by that step; the count then takes only larger
+        // differences. Off, any difference counts.
+        let step = if std::env::var("RENDERLAB_MATERIAL_PASS").as_deref() == Ok("1") {
+            1.0 / 1024.0
+        } else {
+            0.0
+        };
         let (mut worst, mut differing) = (0f32, 0);
         for (a, b) in raster
             .as_chunks::<4>()
@@ -1088,7 +1097,7 @@ fn traced_frame_agrees_with_the_mesh_pass_over_misses_sky_and_post() -> Result<(
                 .map(|c| (a[c] - b[c]).abs() / a[c].abs().max(b[c].abs()).max(1e-3))
                 .fold(0f32, f32::max);
             worst = worst.max(pixel);
-            differing += usize::from(pixel > 0.);
+            differing += usize::from(pixel > step);
         }
         // The frame's corners are misses in both families.
         ensure!(

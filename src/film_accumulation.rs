@@ -109,7 +109,11 @@ pub(crate) fn shading_head(soft_head: &str) -> Result<String, Error> {
 /// composition, with every store of its entry routed through `film_store`. The program's
 /// byte range, which diagnostics map lines through, is unchanged.
 pub(crate) fn compose_shading(head: &str, source: &str, parameters: bool) -> Composed {
-    let mut composed = program::compose(head, source, Stage::Traced, parameters);
+    film_shading(program::compose(head, source, Stage::Traced, parameters))
+}
+/// `composed` (a traced composition on a `shading_head`) with its entry's stores routed
+/// through `film_store`: the entry is split off at the program's end.
+pub(crate) fn film_shading(mut composed: Composed) -> Composed {
     let mut entry = composed.source.split_off(composed.program.end);
     for edit in FILM_ENTRY_SEAMS {
         // The entry is engine text after the program, so these always apply.
