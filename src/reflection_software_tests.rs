@@ -549,3 +549,25 @@ fn deferred_untraced_output_only_with_diag() {
         );
     }
 }
+
+/// The reflection pass's shading-layout entries take binding numbers the primary shading
+/// layout's other entries do not (60 is the resolve's phase uniform; a clash failed device
+/// layout creation on the non-RT default, which naga cannot see).
+#[test]
+fn reflection_pass_shading_bindings_are_their_own() {
+    use crate::renderer::primary_ray_gpu::reflection_pass::shade_entries;
+    let taken = crate::renderer::primary_ray_gpu::shading_layout_bindings();
+    let mut seen = std::collections::HashSet::new();
+    for entry in shade_entries() {
+        assert!(
+            !taken.contains(&entry.binding),
+            "binding {} is taken",
+            entry.binding
+        );
+        assert!(
+            seen.insert(entry.binding),
+            "binding {} twice",
+            entry.binding
+        );
+    }
+}

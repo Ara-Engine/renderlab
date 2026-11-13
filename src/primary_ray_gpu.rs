@@ -774,6 +774,17 @@ pub(super) struct RlHistoryTargets {
 const RL_HISTORY_FRAME: u32 = 55;
 const RL_HISTORY: u32 = 54;
 const RL_PHASE: u32 = 60;
+/// The primary shading layout's bindings besides the reflection pass's own (its shade entries
+/// above, `reflection_pass::shade_entries`): the camera, frame, hit, HDR, tiles, region,
+/// visibility and scene, the reflection history and phase, the software reflection geometry,
+/// the Mac thread's H and R, and RL#79's outputs. Tests check the pass's numbers stay clear.
+#[cfg(test)]
+pub(crate) fn shading_layout_bindings() -> Vec<u32> {
+    let mut taken = vec![0, 2, 6, 7, 10, 18, 21, 22, 23, RL_HISTORY, RL_HISTORY_FRAME, RL_PHASE];
+    taken.extend([SOFTWARE_REFLECTIONS, 62, 63]);
+    taken.extend(reflection_hits::shade_entries().map(|e| e.binding));
+    taken
+}
 /// Two halves of four, rl_resolve's sample and seen-history layers (8-15), the halves' hit
 /// distances (16, 17), the sample's (18) and the a-trous filter's two buffers (19-22).
 const RL_HISTORY_LAYERS: u32 = 23;
@@ -2546,7 +2557,7 @@ impl Renderer {
                     entries.push((reflection_pass::LOBE_A, R::TextureView(&pass.lobe_a.view)));
                     entries.push((reflection_pass::LOBE_B, R::TextureView(&pass.lobe_b.view)));
                     entries.push((reflection_pass::PASS_FRAME, pass.frame.value.as_entire_binding()));
-                    entries.push((reflection_pass::STATS, pass.stats.value.as_entire_binding()));
+                    entries.push((reflection_pass::ROOM_STATS, pass.stats.value.as_entire_binding()));
                     // The Mac thread's reflection_hits reads H and writes R.
                     entries.push((super::reflection_hits::HITS, pass.hits.value.as_entire_binding()));
                     entries.push((super::reflection_hits::SAMPLES, R::TextureView(&pass.samples.view)));

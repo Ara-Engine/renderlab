@@ -12,13 +12,14 @@
 // width otherwise, unused here), z 1 while the pass runs, w 1 with the deferred composite
 // (shading leaves glossy reflections to it).
 @group(0) @binding(58) var<uniform> rl_pass_frame:vec4<u32>;
-// The trace counters (reflection_pass.rs STATS), cleared each frame before shading: word 2 sums
+// The trace counters (reflection_pass.rs STATS; bound at ROOM_STATS here, since the primary
+// shading layout holds the resolve's phase at 60), cleared each frame before shading: word 2 sums
 // every glossy receiver's requested strata, so the room grows to the content; word 6 counts the
 // receivers that did not fit (inline that frame). Words 4 and 5 are the Mac thread's S4a.
 // Measurement runs (RL_ROOM_HISTOGRAM, src/program.rs) add: 7 and 8, the strata and receivers
 // whose traced fraction is under 5 %; 9 and 10, those whose traced fraction x reflectance weight
 // is under 0.005.
-@group(0) @binding(60) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;
+@group(0) @binding(69) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;
 const RL_ROOM_HISTOGRAM:bool=false;
 const RL_PASS:bool=true;
 fn rl_composite()->bool { return rl_pass_frame.w!=0u; }
