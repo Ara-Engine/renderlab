@@ -342,13 +342,25 @@ fn gpu_r1n_mirror_identity() {
     );
 }
 
+/// The standard program's deferred traced module on `head`: `compose` already makes it while
+/// RENDERLAB_RL_DEFERRED=1, so `deferred_variant` applies only when the switch is off.
+fn deferred_standard(head: &str) -> crate::program::Composed {
+    use crate::program::{Stage, compose, deferred_variant};
+    let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
+    if crate::program::rl_deferred() {
+        composed
+    } else {
+        deferred_variant(composed)
+    }
+}
+
 /// Deferred reflections (`program::deferred_variant`): the standard program declares
 /// `RL_DEFERRED`, the toon program does not, and the standard program's traced module with
 /// the deferred inputs validates on the RT and both non-RT shading heads. It clears both
 /// outputs where the entry starts and writes them after `shade`, through the fog.
 #[test]
 fn deferred_reflection_modules_validate_on_every_traced_head() {
-    use crate::program::{Stage, compose, deferred_variant};
+    use crate::program::{Stage, compose};
     let toon = include_str!("../shaders/programs/toon.wgsl");
     assert!(!toon.contains("RL_DEFERRED"));
     let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
@@ -360,8 +372,7 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
             continue;
         }
         validated += 1;
-        let source =
-            deferred_variant(compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false)).source;
+        let source = deferred_standard(head).source;
         assert!(
             source.contains("rl_deferred_clear(pixel);")
                 && source.contains("rl_deferred_store(pixel,input.world);")
@@ -385,16 +396,10 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
 /// and every RENDERLAB_RL_DEFERRED=1 run failed to create its shading module).
 #[test]
 fn deferred_temporal_shading_keeps_the_program_range_and_validates() {
-    use crate::program::{Stage, compose, deferred_variant};
     use crate::renderer::primary_ray_gpu::film_accumulation;
     let soft = &crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap()[1];
     let head = film_accumulation::shading_head(soft).unwrap();
-    let composed = deferred_variant(compose(
-        &head,
-        crate::STANDARD_PROGRAM,
-        Stage::Traced,
-        false,
-    ));
+    let composed = deferred_standard(&head);
     assert_eq!(
         &composed.source[composed.program.clone()],
         crate::STANDARD_PROGRAM
