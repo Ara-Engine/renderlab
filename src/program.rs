@@ -708,15 +708,15 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
     }
 }
 /// `RENDERLAB_LIGHT_BOUND=black|sum` (off by default; a bounded picture change, not exact):
-/// a local shadowed light whose unshadowed contribution c, added to the contributions already
-/// skipped at this receiver, stays under `RENDERLAB_LIGHT_BOUND_CODES` display codes (default
-/// 0.5) skips its shadow ray. The bound goes through Ara's display transform: the Filmic
-/// (Narkowicz ACES fit) curve and sRGB. `black` uses the curve's steepest slope (order-free:
-/// valid whatever the receiver's final value); `sum` uses a pow-free upper bound of the slope at
-/// or above the light loop's running sum (the final value is never lower; order-dependent). A
-/// skipped light adds the c computed for the test, the value the loop adds at visibility 1
-/// (`RENDERLAB_LIGHT_BOUND_SKIP=unshadowed`, default), or nothing (`drop`): either way its
-/// error is at most its c. Applies to the standard program's light loop.
+/// the engine's `light_visibility_within(input, light, unshadowed, sum)` (program_api.wgsl)
+/// skips a local shadowed light's shadow ray while its unshadowed exposed contribution, added
+/// to those already skipped at this receiver, stays under `RENDERLAB_LIGHT_BOUND_CODES` display
+/// codes (default 0.5). The bound goes through Ara's display transform: the Filmic (Narkowicz
+/// ACES fit) curve and sRGB. `black` uses the curve's steepest slope (order-free); `sum` a
+/// pow-free upper bound of the slope at or above the receiver's running sum (order-dependent).
+/// A skipped light counts as unshadowed (`RENDERLAB_LIGHT_BOUND_SKIP=unshadowed`, default) or
+/// dark (`drop`): either way its error is at most its contribution. Traced stages only; never
+/// at reflection hits. A program that calls `light_visibility` is never bounded.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct LightBound {
     /// The `sum` mode (else `black`).
@@ -746,63 +746,68 @@ pub(crate) fn light_bound() -> Option<LightBound> {
         Some(LightBound { sum, codes, drop })
     })
 }
-/// The standard program's light loop, where the bound goes (shaders/programs/standard.wgsl).
-const LB_LOOP: &str = "    var exposed=min(diffuse+specular,vec3<f32>(65504.0));\n    for(var i=0u;i<light_count();i+=1u) {\n";
-const LB_VISIBILITY: &str = "        let visibility=light_visibility(input,light);\n";
-/// `composed` with the light bound (`light_bound`); unchanged where the module has no
-/// standard light loop.
+/// The program API's stub of the bound (shaders/program_api.wgsl), which `with_light_bound`
+/// replaces on traced stages.
+const LB_STUB: [&str; 2] = [
+    "// ---- light bound (program.rs with_light_bound replaces this block on traced stages) ----\n",
+    "// ---- end of light bound ----\n",
+];
+/// Where each receiver's skipped total starts over (shaders/light_cluster_api.wgsl).
+const LB_RESET: &str = "fn rl_lights_prepare(world:vec3<f32>) {\n";
+/// `composed` with the engine's light bound (`light_bound`) behind `light_visibility_within`:
+/// the API's stub replaced, the skipped total reset per receiver in `rl_lights_prepare`, and
+/// off while a reflection hit is shaded. Unchanged without the stub or the reset.
 pub(crate) fn with_light_bound(mut composed: Composed, bound: LightBound) -> Composed {
-    let program = &composed.source[composed.program.clone()];
-    if program.matches(LB_LOOP).count() != 1 || program.matches(LB_VISIBILITY).count() != 1 {
+    let source = &composed.source;
+    let (Some(begin), Some(reset)) = (source.find(LB_STUB[0]), source.find(LB_RESET)) else {
         return composed;
-    }
-    let edited = program
-        .replacen(
-            LB_LOOP,
-            &LB_LOOP.replacen("    for(", "    rl_lb_skipped=vec3<f32>(0.0);\n    for(", 1),
-            1,
-        )
-        .replacen(
-            LB_VISIBILITY,
-            "        // RENDERLAB_LIGHT_BOUND (program.rs light_bound): a light whose contribution keeps the\n        // skipped total under the display bound skips its shadow test. Unshadowed, it adds the\n        // contribution computed for the test: the value the loop adds at visibility 1.\n        var rl_lb_r=brdf(n,v,light.direction,base,metal,rough);\n        if SPECULAR_AA {rl_lb_r=specular_brdf(input,light.direction,base,metal,rough);}\n        if !rl_term(RL_TERM_BRDF) {rl_lb_r=vec3<f32>(1.0/PI);}\n        let rl_lb_c=exposed_product(light.intensity*light_transmission(light,input),rl_lb_r*light.attenuation);\n        if rl_lb_skip(light,rl_lb_c,exposed) {\n            if !RL_LB_DROP { exposed=min(exposed+rl_lb_c,vec3<f32>(65504.0)); }\n            continue;\n        }\n        let visibility=light_visibility(input,light);\n",
-            1,
-        );
+    };
+    let end = source[begin..].find(LB_STUB[1]).expect("the light bound stub ends") + begin + LB_STUB[1].len();
+    assert!(end <= composed.program.start && reset < composed.program.start, "the light bound precedes the program");
     // With RENDERLAB_SHADE_COUNT's counters composed in (measurement builds), words 14 and 15
     // count the local shadowed lights tested and those whose shadow ray was skipped.
-    let counted = composed.source.contains("fn rl_shade_count()");
-    let api = format!(
-        "// RENDERLAB_LIGHT_BOUND (program.rs light_bound).\n\
+    let counted = source.contains("fn rl_shade_count()");
+    // Reflection hits always trace: their running sum is the hit's, not the pixel's.
+    let hits = if source.contains("var<private> rl_reflection_hit:bool;") {
+        "    if rl_reflection_hit { return false; }\n"
+    } else {
+        ""
+    };
+    let real = format!(
+        "// ---- light bound (program.rs light_bound) ----\n\
 const RL_LB_SUM:bool={sum};\n\
 const RL_LB_CODES:f32={codes:?};\n\
-const RL_LB_DROP:bool={drop};\n\
-// The Filmic curve's (Narkowicz) display slope peaks at 6.3796 codes/255 per unit at x=0.0087\n\
-// and only falls above it.\n\
+const RL_LB_SKIPPED:f32={skipped:?};\n\
+// The Filmic curve's (Narkowicz) display slope peaks at 6.38 codes/255 per unit at x=0.0087\n\
+// and only falls above it; the bounds below carry a 1% margin.\n\
 const RL_LB_PEAK:f32=6.443;\n\
+// The contributions skipped at this receiver (reset by rl_lights_prepare).\n\
 var<private> rl_lb_skipped:vec3<f32>;\n\
-// d(sRGB(filmic(x)))/dx, the steepest it gets at or above x.\n\
+// An upper bound of d(sRGB(filmic(x)))/dx at or above x, per channel, without pow: the peak\n\
+// below 0.0087, else min(peak, 0.2888/x, 0.1082/x^2, 0.7648/x^3), fitted with a 1% margin\n\
+// (never under the slope; at most 1.6x over it). Looser only skips less.\n\
 fn rl_lb_slope(x:vec3<f32>) -> vec3<f32> {{\n    let r=1.0/max(x,vec3<f32>(0.0087));\n    return min(min(vec3<f32>(RL_LB_PEAK),0.2888*r),min(0.1082*r*r,0.7648*r*r*r));\n}}\n\
-fn rl_lb_skip(light:LightSample, c:vec3<f32>, sum:vec3<f32>) -> bool {{\n    if lights[light.index].kind.w==0u {{ return false; }}\n{tested}    let total=rl_lb_skipped+c;\n    var slope=vec3<f32>(RL_LB_PEAK);\n    if RL_LB_SUM {{ slope=rl_lb_slope(sum); }}\n    if all(total*slope<vec3<f32>(RL_LB_CODES/255.0)) {{ rl_lb_skipped=total;{skipped_count} return true; }}\n    return false;\n}}\n",
+fn rl_lb_skip(s:LightSample, c:vec3<f32>, sum:vec3<f32>) -> bool {{\n{hits}    if lights[s.index].kind.w==0u {{ return false; }}\n{tested}    let total=rl_lb_skipped+c;\n    var slope=vec3<f32>(RL_LB_PEAK);\n    if RL_LB_SUM {{ slope=rl_lb_slope(sum); }}\n    if all(total*slope<vec3<f32>(RL_LB_CODES/255.0)) {{ rl_lb_skipped=total;{skipped_count} return true; }}\n    return false;\n}}\n\
+// ---- end of light bound ----\n",
         sum = bound.sum,
-        tested = if counted {
-            "    atomicAdd(&rl_shade_counts[14],1u);\n"
-        } else {
-            ""
-        },
-        skipped_count = if counted {
-            " atomicAdd(&rl_shade_counts[15],1u);"
-        } else {
-            ""
-        },
         codes = bound.codes,
-        drop = bound.drop,
+        skipped = if bound.drop { 0.0f32 } else { 1.0f32 },
+        tested = if counted { "    atomicAdd(&rl_shade_counts[14],1u);\n" } else { "" },
+        skipped_count = if counted { " atomicAdd(&rl_shade_counts[15],1u);" } else { "" },
     );
-    let start = composed.program.start;
-    composed.source = format!(
-        "{}{edited}{}{api}",
-        &composed.source[..start],
-        &composed.source[composed.program.end..]
-    );
-    composed.program = start..start + edited.len();
+    let mut source = composed.source.clone();
+    // The reset goes in after the block (it follows it in the source, or comes first).
+    let reset_line = "    rl_lb_skipped=vec3<f32>(0.0);\n";
+    if reset > begin {
+        source.insert_str(reset + LB_RESET.len(), reset_line);
+        source.replace_range(begin..end, &real);
+    } else {
+        source.replace_range(begin..end, &real);
+        source.insert_str(reset + LB_RESET.len(), reset_line);
+    }
+    let shift = source.len() - composed.source.len();
+    composed.program = composed.program.start + shift..composed.program.end + shift;
+    composed.source = source;
     composed
 }
 /// `compose`, or with `hits` the hit-shading module (`compose_hits`).
