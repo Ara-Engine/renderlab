@@ -7,8 +7,8 @@
 // hit's record for reflection_hits). The composite then sums each entry's slots. Every kernel
 // sizes itself from the list's length, so a view with little to reflect costs little.
 // L: its length, then three vec4<u32> an entry (reflections_lobe.wgsl documents the layout).
-struct RlListEntries { count:u32, header:array<u32,3>, entries:array<vec4<u32>> };
-@group(0) @binding(56) var<storage,read> rl_list:RlListEntries;
+struct RlGlossyEntries { count:u32, header:array<u32,3>, entries:array<vec4<u32>> };
+@group(0) @binding(56) var<storage,read> rl_glossy:RlGlossyEntries;
 @group(0) @binding(58) var<uniform> rl_pass_frame:vec4<u32>;
 // The list's indirect arguments (rl_list_args): rl_trace_pixels' dispatch (x, y, z), then the
 // composite's draw (vertex count, instance count, first vertex, first instance).
@@ -33,7 +33,7 @@ struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u3
 // The receivers' ray epsilon per pixel (reflection_pass.rs RECEIVER_EPSILON).
 @group(0) @binding(79) var rl_receiver_epsilon:texture_2d<f32>;
 // The list's length (shading's appends; never past its capacity).
-fn rl_list_length()->u32 { return min(rl_list.count,rl_pass_frame.z); }
+fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
 
 // The trace's and the composite's indirect arguments from the list's length.
 @compute @workgroup_size(1) fn rl_list_args(@builtin(local_invocation_index) lane:u32) {
@@ -56,7 +56,7 @@ fn rl_list_length()->u32 { return min(rl_list.count,rl_pass_frame.z); }
 @compute @workgroup_size(64) fn rl_trace_pixels(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let entry=(group.x+group.y*RL_LIST_ROW)*RL_LIST_GROUP+lane;
     if entry>=rl_list_length() {return;}
-    let a=rl_list.entries[entry*3u];let b=rl_list.entries[entry*3u+1u];let c=rl_list.entries[entry*3u+2u];
+    let a=rl_glossy.entries[entry*3u];let b=rl_glossy.entries[entry*3u+1u];let c=rl_glossy.entries[entry*3u+2u];
     let p=vec2<u32>(c.x&0xffffu,c.x>>16u);
     let first=c.y;
     let count=(b.w>>16u)&31u;

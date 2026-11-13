@@ -500,14 +500,77 @@ fn the_reflection_pass_belongs_to_the_marked_renderer() {
         false,
     ));
     assert!(!off.source.contains("rl_composite") && !off.source.contains("RL_DEFERRED_PROGRAM"));
-    let module = naga::front::wgsl::parse_str(&on.source)
-        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on.source)));
-    naga::valid::Validator::new(
-        naga::valid::ValidationFlags::all(),
-        naga::valid::Capabilities::all(),
-    )
-    .validate(&module)
-    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&on.source)));
+    // Mixed-program frames shade with MP1's list modules, whose program list (binding 38) once
+    // shared the glossy list's names: both compositions must validate.
+    let list = with_reflection_history(crate::program::compose_list(
+        &marked,
+        crate::STANDARD_PROGRAM,
+        Stage::Traced,
+        false,
+    ));
+    assert!(list.source.contains("rl_room_reserve(count,traced,lobe.weight)"));
+    for source in [&on.source, &list.source] {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    }
+}
+
+/// Every module the list head builds validates under this process's switches: each path's heads,
+/// marked and not, the standard and toon programs, single-program and MP1 list shading, traced and
+/// streamed, through `with_reflection_history`; the hit modules (single and list); the trace
+/// module. The switches are read once per process, so run it once per set: unset, and
+/// RENDERLAB_RL_DEFERRED=diag with RENDERLAB_RL_HIT_OWN_PROGRAM=1 (and the stub branch's
+/// RENDERLAB_RL_INLINE_STUB=1). Cheap: catches name clashes before a GPU lease does.
+#[test]
+fn every_list_head_module_validates() {
+    use crate::program::{
+        PASS_HEAD_MARK, Stage, compose, compose_hits, compose_list, declares_parameters,
+        rl_trace_source, with_reflection_history,
+    };
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let heads: Vec<String> = rt
+        .iter()
+        .chain(&non_rt)
+        .flat_map(|head| [head.clone(), format!("{head}{PASS_HEAD_MARK}")])
+        .collect();
+    let validate = |label: &str, source: &str| {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
+    };
+    for (h, head) in heads.iter().enumerate() {
+        validate(&format!("head {h} trace"), &rl_trace_source(head));
+        for (name, program) in [
+            ("standard", crate::STANDARD_PROGRAM),
+            ("toon", include_str!("../shaders/programs/toon.wgsl")),
+        ] {
+            let parameters = declares_parameters(program);
+            for stage in [Stage::Traced, Stage::TracedStreamed] {
+                let single = with_reflection_history(compose(head, program, stage, parameters));
+                let list = with_reflection_history(compose_list(head, program, stage, parameters));
+                for (kind, composed) in [("single", single), ("list", list)] {
+                    assert_eq!(&composed.source[composed.program.clone()], program);
+                    validate(&format!("head {h} {name} {stage:?} {kind}"), &composed.source);
+                }
+                for lists in [false, true] {
+                    let hits = compose_hits(head, program, stage, parameters, lists);
+                    validate(&format!("head {h} {name} {stage:?} hits lists={lists}"), &hits.source);
+                }
+            }
+        }
+    }
 }
 
 /// The regression the per-renderer default guards: a non-RT engine's renderer runs the pass and
