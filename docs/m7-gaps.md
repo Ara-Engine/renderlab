@@ -1153,7 +1153,7 @@ Tiles only qualify where GI barely varies, and there the pre-pass costs about wh
 - Unexplained: with tiles on, the temporal resolve read about 0.7 ms higher (0.54 -> 1.27 ms on Showcase).
 - The remaining idea: a slimmer record, reading fewer coefficients per lookup than an update writes. Price it from the RTX Showcase split before building.
 
-## Local-shadow budget: a held visibility history for camera receivers (Mac GPU thread, 2026-11-13; opt-in)
+## Local-shadow budget: a held visibility history for camera receivers (Mac GPU thread, 2026-11-13; parked behind its switch)
 
 `RENDERLAB_LOCAL_SHADOW_BUDGET=1` (off by default until the RTX and Ara A/B decides; shaders/local_light_history.wgsl). Every Ara sample's local lights are hard spots (source radius 0, one ray per light per pixel), so fewer disk rays save nothing. The saving has to come from tracing no ray at all where nothing can change a shadow. Each camera receiver keeps up to four ray-shadowed lights' visibility, reprojected through the previous unjittered camera like U-FIXED's sun history:
 - **Held:** a fully lit or fully shadowed history of at least 16 agreeing samples traces no ray. It is re-checked one frame in 32, staggered per 8x8 block and light.
@@ -1180,3 +1180,15 @@ Still tracing on Outpost:
 - the yard the player robot can shadow;
 - the pulsing cache lights, whose relit spheres restart every frame. Their visibility does not change with intensity, but the restart rule keeps them;
 - shadow edges and the re-check blocks.
+
+**Parked after the RTX gate (root, 2026-11-13).** The switch is RT-only: non-RT local shadows are maps, so it composes nothing there, and the frames are identical. On the RTX, game_scene at night (27 soft lanterns, a case the M5's hard-spot samples never exercised) slowed down. RT shading went 36.59 -> 44.26 ms with the budget, and to 39.06 ms with the bookkeeping alone. Likely causes, not yet separated on the RTX:
+- **Dynamic stores into private vectors.** `rl_local_cached[slot]` and the found/next texels are written at runtime slot indices. Through naga on NVIDIA such stores can silently do nothing (the earlier "WGSL dynamic vector stores" loss). The history would then never record a hold, and every pixel keeps tracing.
+- **Local memory.** The same indexed vectors may be lowered to local memory, costing every lit pixel.
+- **Three inlined ray-query sites** (soft probe, point-source probe, budget). Lanes on different paths in one warp serialize their traversals.
+- **The slot limit.** More than four soft lights per pixel leave the rest tracing the budget.
+
+If unparked:
+- Use one trace site with a per-case first index and count.
+- Use select chains or constant indices instead of indexed private vectors.
+- Verify on the RTX with the `hold` paint mode that holds appear.
+- Rerun game_scene without `--night-lanterns`, off/on/overhead, to separate the soft-light paths from the bookkeeping.

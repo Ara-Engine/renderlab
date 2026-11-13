@@ -145,10 +145,10 @@ const RESTART_BUDGET_STUB: &str = "fn rl_local_budget(world:vec3<f32>) {}\n";
 const HISTORY: &str = include_str!("../shaders/local_light_history.wgsl");
 const HISTORY_STUB: &str = "fn rl_local_history_prepare(world:vec3<f32>) {}\nfn rl_local_history_store(pixel:vec2<i32>) {}\n";
 const VISIBILITY_STUB: &str = "fn rl_local_visibility(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 { return rl_local_rays_visibility(light,receiver,l); }\n";
-/// Opt-in with `RENDERLAB_LOCAL_SHADOW_BUDGET=1`, until the RTX and Ara A/B decides: camera
-/// receivers keep their soft local lights' visibility from frame to frame and trace one
-/// probe ray per light where nothing moving can change it (HISTORY). Off, every receiver
-/// traces its budget each frame.
+/// Opt-in with `RENDERLAB_LOCAL_SHADOW_BUDGET=1`, parked (docs/m7-gaps.md): camera receivers
+/// keep their ray-shadowed local lights' visibility from frame to frame and hold it without
+/// rays where nothing moving can change it (HISTORY). RT only: non-RT local shadows are maps,
+/// which compose no history. Off, every receiver traces its budget each frame.
 pub(crate) fn local_shadow_budget() -> bool {
     budget_mode().is_some()
 }
