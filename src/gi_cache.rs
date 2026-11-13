@@ -390,8 +390,10 @@ pub struct IndirectSettings {
     /// Gathers a cell made for a gather's hit gets (GI_SECONDARY, GI_TERTIARY; U-RTVIS). Pixel
     /// cells keep `gathers`. A hit cell feeds other cells' bounce, not the picture directly, and
     /// its own gathers request further cells: at `gathers` (3) a cut's queue fanned out to about
-    /// 330k gathers on Outpost's second view and drained only by frame 119. 0 (the default
-    /// until measured) gives them `gathers`, as before; `RENDERLAB_GI=hit_gathers=1` the cap.
+    /// 330k gathers on Outpost's second view and drained only by frame 119. The default is 1
+    /// (2026-11-13, RTX on Ara: Outpost's backlog empty at frame 95 instead of 113, 12% off the
+    /// post-cut frames; settled pictures equal on Outpost and Glint, within 0.03 and 0.22 of 255).
+    /// 0 gives them `gathers`, as before (`RENDERLAB_GI=hit_gathers=0` for the A/B).
     pub hit_gathers: u32,
     /// After a camera cut (U-RTVIS), for CUT_GATHER_FRAMES frames: gathers capped at about this
     /// many milliseconds a frame (GATHERS_PER_MS_*), the cells pixels read first. 0 (the default
@@ -473,7 +475,7 @@ impl Default for IndirectSettings {
             // it halves frame 16's distance from the settled frame on RT, for a quarter more
             // gathers over the flight, and non-RT's first eight frames are slightly worse.
             gather_pixels_first: false,
-            hit_gathers: 0,
+            hit_gathers: 1,
             cut_gather_ms: 0.0,
             parent_standin: false,
             // Off: at 2 the path tracer's walking hero is 1.5-1.9 codes closer underneath at one

@@ -32,7 +32,9 @@
 //! the field or forest walk there by turning it 150 degrees in place. `hold=1` keeps
 //! the camera at its first pose while the lights, the hero and the objects animate;
 //! `hold=pose` (U-FIXED) also keeps the objects and the hero's placement still while the
-//! Fox plays its walk in place, so the skinned mesh is the only mover.
+//! Fox plays its walk in place, so the skinned mesh is the only mover. `fox=2` (U-FIXED,
+//! with `--fox`) adds a second Fox walking the same circle half a turn behind: two skinned
+//! characters, as on Ara's Showcase.
 //! `--views a|b|ab|ai` (docs/design-views.md) picks which of two views render each tick: `a`
 //! is the fly path, `b` a second camera across the scene, still unless `--b-orbit`. With `ab`
 //! both render from one engine and each frame records both hashes, so a run of `a` or `b`
@@ -110,6 +112,12 @@ struct Args {
     volumetric_fog: Option<bool>,
     post: bool,
     glass: bool,
+    /// `--glass-crowd N`: N more panes of the glass draw, overlapping on screen (one draw of
+    /// many overlapping instances, as Ara Outpost's foliage and fences). A frame-time gate case.
+    glass_crowd: u32,
+    /// `--crowd-films`: the crowd's panes are films (IOR 1, no thickness: plain blended
+    /// coverage, as Outpost's fences, foliage and windows), one draw of their own.
+    crowd_films: bool,
     particles: bool,
     local_shadows: bool,
     reflections: bool,
@@ -152,6 +160,8 @@ impl Args {
             volumetric_fog: None,
             post: true,
             glass: true,
+            glass_crowd: 0,
+            crowd_films: false,
             particles: true,
             local_shadows: true,
             reflections: true,
@@ -222,6 +232,8 @@ impl Args {
                 "--no-temporal" => a.temporal = false,
                 "--no-post" => a.post = false,
                 "--no-glass" => a.glass = false,
+                "--glass-crowd" => a.glass_crowd = value()?.parse()?,
+                "--crowd-films" => a.crowd_films = true,
                 "--no-particles" => a.particles = false,
                 "--no-local-shadows" => a.local_shadows = false,
                 "--no-reflections" => a.reflections = false,
@@ -342,6 +354,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     | "bulb"
                     | "field"
                     | "forest"
+                    | "fox"
             )
         });
     // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
@@ -360,6 +373,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let (glow_steps, cuts) = (scene_key("glow", "step"), scene_key("cut", "1"));
     let pose_only = scene_key("hold", "pose");
+    let two_foxes = scene_key("fox", "2");
     let hold = scene_key("hold", "1") || pose_only;
     // U-SPECK (docs/speck.md): `field=1` scatters 300 small bright boxes and a pale slab over
     // an empty quarter of the ground and walks the camera 4 m across it while turning 12
@@ -737,6 +751,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 * Mat4::from_rotation_y(0.8)
                 * Mat4::from_scale(Vec3::new(2.2, 1.6, 0.04)),
         )?;
+        let crowd = if args.crowd_films {
+            engine.create_material(&MaterialDesc {
+                base_color: [0.35, 0.45, 0.3, 1.0],
+                roughness: 0.6,
+                transparency: Some(Transparency {
+                    opacity: 0.3,
+                    ior: 1.0,
+                    thickness: 0.0,
+                }),
+                ..Default::default()
+            })?
+        } else {
+            glass
+        };
+        // Panes stepping back and sideways from the first, so each overlaps the ones before.
+        for k in 1..=args.glass_crowd {
+            let t = k as f32 * 0.07;
+            engine.spawn(
+                cube,
+                crowd,
+                Mat4::from_translation(at(5.4 - t, 0.8 + 0.3 * (t * 3.0).sin(), 3.6 - t))
+                    * Mat4::from_rotation_y(0.8)
+                    * Mat4::from_scale(Vec3::new(2.2, 1.6, 0.04)),
+            )?;
+        }
     }
     // Bushes: three crossed cutout cards each.
     for (x, z) in [(-4.0, -2.2), (3.6, -3.8), (6.2, -0.6)] {
@@ -789,6 +828,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // A mirror-polished chrome sphere: traced mirror reflections on RT (M7-R1).
     engine.spawn(sphere, chrome, boxed(at(-1.2, 0.8, 5.6), Vec3::splat(0.8)))?;
     let spinner = engine.spawn(cube, paint, Mat4::from_translation(at(-2.5, 0.6, 3.0)))?;
+    let mut second_hero = match &args.fox {
+        Some(source) if two_foxes => Some(Hero::fox(
+            &mut engine,
+            source,
+            &args.out,
+            toon_program,
+            &hero_style,
+        )?),
+        _ => None,
+    };
     let mut hero = match &args.fox {
         Some(source) => Hero::fox(&mut engine, source, &args.out, toon_program, &hero_style)?,
         None => Hero::Spheres([
@@ -1003,6 +1052,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let ground = at(3.0 * walk.sin(), 0.0, -1.0 + 3.0 * walk.cos());
         let heading = walk.cos().atan2(-walk.sin());
         let focus = hero.update(&mut engine, ground, heading, t)?;
+        if let Some(second) = &mut second_hero {
+            let behind = walk + std::f32::consts::PI;
+            let ground = at(3.0 * behind.sin(), 0.0, -1.0 + 3.0 * behind.cos());
+            second.update(&mut engine, ground, behind.cos().atan2(-behind.sin()), t + 0.4)?;
+        }
         engine.set_lights(&diag.lights(lanterns(t, frame)))?;
         if glow_steps && frame == EVENT_FRAME {
             let dim = [6_000.0, 4_000.0, 1_800.0].map(|v| v * lamp_scale);

@@ -233,7 +233,9 @@ fn rl_split(mut source: String) -> String {
 /// `local` leaves shadowed local lights unshadowed, `sun` skips the hit's sun shadow ray,
 /// `nolights` gives every light zero incidence, `black` skips the hit's `surface` and `shade`,
 /// `strata=N` caps a glossy pixel's strata at N (RL_GLOSSY_MAX, 16).
-/// They change the picture; unset, nothing changes.
+/// Two act on every pixel, camera receivers included, to split lights and shadows between
+/// primary pixels and reflection hits: `alllights` (every light zero incidence) and
+/// `allshadows` (every light fully visible). They change the picture; unset, nothing changes.
 fn rl_hit_switches(source: String) -> String {
     static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let list = LIST.get_or_init(|| std::env::var("RENDERLAB_RL_HIT").unwrap_or_default());
@@ -257,6 +259,14 @@ fn rl_hit_switches(source: String) -> String {
             "nolights" => (
                 "    return LightSample(index,l,attenuation,",
                 "    return LightSample(index,l,select(attenuation,0.0,rl_reflection_hit),",
+            ),
+            "alllights" => (
+                "    return LightSample(index,l,attenuation,",
+                "    return LightSample(index,l,0.0,",
+            ),
+            "allshadows" => (
+                "fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {",
+                "fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 { return 1.0; }\nfn rl_unused_visibility(input:SurfaceInput, s:LightSample) -> f32 {",
             ),
             "black" => (
                 "                let hs=surface(h.input);\n                radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n",
@@ -306,7 +316,7 @@ fn reflection_api(head: &str, program: &str, stage: Stage, hits: bool) -> (Strin
     (api, true)
 }
 /// The glossy strata's full-count weight as shaders/reflections.wgsl declares it.
-const FULL_STRATA: &str = "const RL_FULL_STRATA:f32=0.25;";
+const FULL_STRATA: &str = "const RL_FULL_STRATA:f32=0.5;";
 /// `RENDERLAB_RL_FULL_STRATA` overrides the reflectance weight from which a glossy lobe traces
 /// all its strata (shaders/reflections.wgsl `RL_FULL_STRATA`); 0 traces every lobe's full
 /// count, as before the weight. Read once per process; for comparisons, not a setting.
@@ -812,6 +822,9 @@ fn compose_stage(
         // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
         source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
+        if rl_deferred() && declares(program, "const", "RL_DEFERRED") {
+            source = deferred_variant(&source);
+        }
     } else {
         source.push_str(entry);
     }
@@ -819,6 +832,46 @@ fn compose_stage(
         source,
         program: program_range,
     }
+}
+
+// ---- Deferred reflections (the program side; U-RTVIS's composite reads them) ----
+/// Whether traced shading writes the deferred reflection composite's inputs:
+/// `RENDERLAB_RL_DEFERRED=1`, off by default. Read once per process.
+pub(crate) fn rl_deferred() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_DEFERRED").is_ok_and(|v| v == "1"))
+}
+/// The program API's report, which deferred modules replace with `DEFERRED_REPORT`.
+const DEFERRED_REPORT_STUB: &str =
+    "fn reflection_report(reflectance:vec3<f32>, untraced:vec3<f32>) {}";
+const DEFERRED_API: &str = include_str!("../shaders/reflections_deferred.wgsl");
+/// The traced entry's pixel, where a deferred module first clears its outputs.
+const DEFERRED_CLEAR_SEAM: &str =
+    "let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);";
+/// A traced shading module (`compose` output) of a program that declares `const
+/// RL_DEFERRED`, made to write the deferred composite's inputs: the report keeps the
+/// program's reflectance and untraced specular, and the entry writes them through the pixel's
+/// fog and aerial perspective, with the traced fraction (binding 62: reflectance rgb and w;
+/// 63: untraced specular). Every pixel the entry visits starts cleared, so misses and culled
+/// faces leave zero.
+pub(crate) fn deferred_variant(composed: &str) -> String {
+    for seam in [DEFERRED_REPORT_STUB, DEFERRED_CLEAR_SEAM, VIEW_STORE_SEAM] {
+        assert_eq!(composed.matches(seam).count(), 1, "deferred seam {seam}");
+    }
+    let mut source = composed
+        .replacen(DEFERRED_REPORT_STUB, "", 1)
+        .replacen(
+            DEFERRED_CLEAR_SEAM,
+            &format!("{DEFERRED_CLEAR_SEAM}\n    rl_deferred_clear(pixel);"),
+            1,
+        )
+        .replacen(
+            VIEW_STORE_SEAM,
+            &format!("{VIEW_STORE_SEAM}\n    rl_deferred_store(pixel,input.world);"),
+            1,
+        );
+    source.push_str(DEFERRED_API);
+    source
 }
 
 // ---- View modes (docs/design-id-output.md) ----
@@ -1017,6 +1070,17 @@ pub(crate) fn uses_indirect(program: &str) -> bool {
 /// input: SurfaceInput) -> vec3<f32>` (docs/m7-tp1.md).
 pub(crate) fn declares_transmittance(program: &str) -> bool {
     declares(program, "fn", "transmittance")
+}
+/// Whether `program` declares `const FILMS`: for a transparent material with an index of
+/// refraction of one and no thickness (a film: Ara's glTF BLEND), its `transmittance` is
+/// exactly `1 - coverage` in every channel and its `shade` is already scaled by coverage, so
+/// the engine draws such materials with hardware blending over what is behind them instead
+/// of reading a copy of it (docs/api.md). Programs without it keep the copy path.
+pub(crate) fn declares_films(program: &str) -> bool {
+    static COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // `RENDERLAB_FILMS=copy` draws films on the copy path, as before (A/B).
+    let copy = *COPY.get_or_init(|| std::env::var("RENDERLAB_FILMS").is_ok_and(|v| v == "copy"));
+    !copy && declares(program, "const", "FILMS") && declares_transmittance(program)
 }
 // TP2: the forward glass pass supplies the declared lobe to R1 separately.
 pub(crate) fn declares_reflection(program: &str) -> bool {

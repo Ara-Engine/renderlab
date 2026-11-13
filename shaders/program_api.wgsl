@@ -178,6 +178,11 @@ fn transparent_coverage(material:Material, alpha:f32) -> f32 {
 
 // Overflow-safe exposure of an unexposed radiance.
 fn expose(radiance:vec3<f32>) -> vec3<f32> { return exposed_product(radiance,vec3<f32>(1.0)); }
+// Deferred reflections (docs/api.md): a program that declares `const RL_DEFERRED` reports from
+// `shade` the reflectance it multiplies `specular_incident` by and the untraced specular it
+// mixes it with. The engine keeps them where it composites traced reflections after shading
+// (RENDERLAB_RL_DEFERRED); anywhere else the report does nothing.
+fn reflection_report(reflectance:vec3<f32>, untraced:vec3<f32>) {}
 
 // The HDR store contract: finite, nonnegative and at most 65504. NaN and negatives
 // become 0; the identity on valid values.

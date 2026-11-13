@@ -114,7 +114,7 @@ const RL_LUMA:vec3<f32>=vec3<f32>(0.2126,0.7152,0.0722);
 // no pixel switches between traced and untraced as the view or the scene moves. On Glint's
 // start view (a stone deck in the glossy band) shading falls from 25 to 12 ms with 98% of
 // the pixels unchanged (U-SKIP). RENDERLAB_RL_FULL_STRATA overrides it (src/program.rs).
-const RL_FULL_STRATA:f32=0.25;
+const RL_FULL_STRATA:f32=0.5;
 
 var<private> rl_specular:vec4<f32>;
 // Shading a reflection hit: light visibility traces its own shadow ray (rl_hit_shadow),
