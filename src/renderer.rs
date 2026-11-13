@@ -3473,7 +3473,7 @@ impl Renderer {
         // The timeline moves out while marks are encoded, so they never borrow `self`.
         let mut marks = self.pass_timeline.take();
         if let Some(t) = &mut marks {
-            t.begin();
+            t.begin(&self.device);
         }
         let mut mark = |encoder: &mut wgpu::CommandEncoder, name: &'static str| {
             if let Some(t) = &mut marks {
