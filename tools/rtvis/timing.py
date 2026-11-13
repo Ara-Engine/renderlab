@@ -573,6 +573,21 @@ PLANS["s1time1"] = [x for x in PLANS["s1time"] if x[0].endswith("-1")]
 PLANS["s1time2"] = [x for x in PLANS["s1time"] if x[0].endswith("-2")]
 PLANS["s1time1"] = [x for x in PLANS["s1time1"] if "toon" not in x[0]] + [x for x in PLANS["s1time"] if "toon" in x[0]]
 PLANS["s1time2"] = [x for x in PLANS["s1time2"] if "toon" not in x[0]]
+# Seven 4-row --timing leases (each process takes about 30 s; the runner bounds a timing lease at
+# about 210 s): one per path and clip, on/off/on/off, then the own-program rows.
+for _path in ("nonrt", "rt"):
+    for _clip, _ in S1_CLIPS:
+        PLANS[f"s1t-{_path}-{_clip}"] = [x for k in (1, 2) for tag in ("on", "off")
+                                        for x in PLANS["s1time"] if x[0] == f"t-{_path}-{_clip}-{tag}-{k}"]
+PLANS["s1t-toon"] = [x for x in PLANS["s1time"] if "toon" in x[0]]
+# Trimmed S1 timing (root, 2026-11-13): only rows where the pass works (the standard program's
+# lobes; night lanterns under the standard program), three --timing leases of at most 6 rows.
+NIGHT_STD = [*STD, "--night-lanterns"]
+_row = lambda path, name, extra, tag, env, k: (f"t-{path}-{name}-{tag}-{k}", ["--path", path, "--fox", FOX, *extra, "--frames", "60"], env)
+PLANS["s1a"] = ([_row("nonrt", "few", STD, tag, env, k) for k in (1, 2) for tag, env in (("on", PASS_ON), ("off", {}))]
+                + [_row("nonrt", "toon", [*STD, "--diag", "floor=0.2"], tag, env, 1) for tag, env in (("on", PASS_ON), ("own", PASS_ON | OWN))])
+PLANS["s1b"] = [_row("rt", "few", STD, tag, env, k) for k in (1, 2) for tag, env in (("on", PASS_ON), ("off", {}))]
+PLANS["s1c"] = [_row(path, "nightstd", NIGHT_STD, tag, env, 1) for path in ("nonrt", "rt") for tag, env in (("on", PASS_ON), ("off", {}))]
 PLANS["s1pics"] = (
     [(f"p-nonrt-{name}-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "40", "--every", "1"],
       PASS_ON if v == "1" else {})
@@ -643,7 +658,11 @@ def fly(game, out, extra, env, frames=120):
     # Later flags win in game_scene's parser: `extra` may override the path, size and frames.
     args = [game, "--path", "rt", "--size", "1920x1080", "--frames", str(frames), "--every", "1000",
             *extra, "--out", str(out), "--pipeline-cache", str(WORK / "cache")]
-    extra_env = {"RENDERLAB_PASS_LOG": str(log), "RENDERLAB_PASS_LOG_DETAIL": "1"}
+    # The shading detail profile replays the shading dispatch once per term every frame, which
+    # inflates frame times; opt in with RTVIS_DETAIL=1 for a term breakdown, never for timing.
+    extra_env = {"RENDERLAB_PASS_LOG": str(log)}
+    if env.get("RTVIS_DETAIL") == "1":
+        extra_env["RENDERLAB_PASS_LOG_DETAIL"] = "1"
     if env.get("RTVIS_GI_LOG") == "1":
         (out / "gi.jsonl").unlink(missing_ok=True)
         extra_env["RENDERLAB_GI_LOG"] = str(out / "gi.jsonl")
