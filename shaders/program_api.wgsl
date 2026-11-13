@@ -71,6 +71,16 @@ struct SurfaceInput {
 // light's position in the renderer's lighting vector.
 struct LightSample { index:u32, direction:vec3<f32>, attenuation:f32, intensity:vec3<f32> };
 
+// The material record (RENDERLAB_MATERIAL_PASS, docs/design-material-pass.md): what a program's
+// material evaluation hands the shading that follows, written once per pixel. A program opts
+// in by declaring `fn material_out(s:Surface, input:SurfaceInput) -> MaterialRecord` and its
+// inverse `fn material_in(m:MaterialRecord, input:SurfaceInput) -> Surface`; programs that
+// do not keep evaluating `surface` inside their shading kernel. `normal` is the shading
+// normal (unit), `base` linear base colour, `alpha` coverage, `emission` emitted radiance
+// (unexposed, as the program's own glow), `view_share`/`view_alpha` MQ2's view dependence, `model` the lighting
+// model (0: the standard metallic-roughness model).
+struct MaterialRecord { normal:vec3<f32>, base:vec3<f32>, alpha:f32, metallic:f32, roughness:f32, emission:vec3<f32>, view_share:f32, view_alpha:f32, model:u32 };
+
 // The lights that can reach this receiver (LC1, docs/m7-lc1.md): its camera cluster's
 // lights in lighting-vector order, every directional and unlimited-range light included.
 // Point and spot lights beyond their range contribute exactly zero, so the loop's sum is
