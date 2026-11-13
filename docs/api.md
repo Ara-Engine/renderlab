@@ -260,6 +260,8 @@ The standard program requests them for every material. The example's program sho
 
 R1 records three constraints. The hook is GGX-shaped, so a non-GGX style gives its nearest GGX lobe or weight 0. Hits read the open environment, not the GI cache. A program that declares the hook but not the input, or the reverse, traces nothing.
 
+**Deferred reflections.** A program that declares `const RL_DEFERRED` promises that its `shade` is linear in `specular_incident` about its untraced estimate (it mixes `traced.rgb * reflectance` in by `traced.w`), and calls `reflection_report(reflectance, untraced)` from `shade` with the RGB reflectance and the untraced specular it mixes. The engine may then shade such a program once with the untraced estimate and add `w * (reflectance * traced - untraced)` after shading, through the pixel's fog. With `RENDERLAB_RL_DEFERRED=1` traced shading writes these per pixel (group 0: 62 the reflectance and w, 63 the untraced specular; both through the fog's transmittance) while still tracing inline, until that composite lands. Programs that do not declare it keep tracing inside `shade`. The standard program declares it.
+
 Reflections move across their surfaces when the view turns, so TR1's surface history would trail them. A program says how much of its output does so with a second optional hook (MQ2, [m7-mq2.md](m7-mq2.md)), on both paths:
 
 ```wgsl

@@ -194,6 +194,15 @@ fn pre_tp1_standard() -> String {
     // Undo RL#47's visibility-first light loop (pane transmission sampled only for lit
     // samples): the frozen program samples the tinted light and multiplies visibility in.
     for (from, to) in [
+        // The deferred reflections' declaration and report (RL_DEFERRED).
+        (
+            "// RL_DEFERRED: `shade` is linear in `specular_incident` about its untraced estimate, mixing
+// `traced x reflectance` in by the traced fraction, and reports both (reflection_report).
+const RL_DEFERRED:bool=true;
+",
+            "",
+        ),
+        ("    reflection_report(reflectance,specular);\n", ""),
         (
             "        let light=light_sample_untinted(i,input);",
             "        let light=light_sample(i,input);",

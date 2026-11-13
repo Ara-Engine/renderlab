@@ -733,6 +733,10 @@ pub(super) struct Targets {
     /// U-RTVIS: the held budget's per-pixel history (R32Uint, ping-ponged by the
     /// reconstruction's parity) and its frame record; traced primaries only.
     pub held: Option<HeldTargets>,
+    /// Deferred reflections (`program::deferred_variant`, `RENDERLAB_RL_DEFERRED=1`): each
+    /// glossy pixel's reflectance with its traced fraction, and its untraced specular,
+    /// written by shading at bindings 62 and 63 for the composite after it.
+    pub deferred: Option<[Depth; 2]>,
 }
 pub(super) struct HeldTargets {
     pub history: [Depth; 2],
@@ -1149,6 +1153,10 @@ impl PrimaryState {
                 .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             {
                 entries.push(read(SOFTWARE_REFLECTIONS, 16));
+            }
+            // Deferred reflections' outputs (`Targets::deferred`).
+            if crate::program::rl_deferred() {
+                entries.extend([image(62, F::Rgba16Float), image(63, F::Rgba16Float)]);
             }
             entries
         });
@@ -2279,6 +2287,10 @@ impl Renderer {
                     wgpu::TextureFormat::R32Float,
                 ),
                 tiles: target("primary tile coverage", tiles, wgpu::TextureFormat::R32Uint),
+                deferred: crate::program::rl_deferred().then(|| {
+                    ["deferred reflectance", "deferred untraced specular"]
+                        .map(|label| target(label, size, wgpu::TextureFormat::Rgba16Float))
+                }),
             };
             let state = self.view.primary.as_mut().unwrap();
             if let Some(old) = state.targets.replace(next) {
@@ -2390,6 +2402,11 @@ impl Renderer {
                 // M7-R1n: software reflection geometry on non-RT renderers.
                 if let Some(geometry) = &reflection_geometry {
                     entries.push((SOFTWARE_REFLECTIONS, geometry.as_entire_binding()));
+                }
+                // Deferred reflections' outputs (`Targets::deferred`).
+                if let Some([reflectance, untraced]) = &t.deferred {
+                    entries.push((62, R::TextureView(&reflectance.view)));
+                    entries.push((63, R::TextureView(&untraced.view)));
                 }
                 // MP1: the same group plus the slot table and tile lists.
                 let list = lists.map(|l| {
