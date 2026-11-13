@@ -152,6 +152,8 @@ pub fn reference(fixture: &Fixture) -> Expected {
     // List entries per shading workgroup (RENDERLAB_LIST_LANES / 16, program.rs
     // list_entries_per_group, default 32 lanes): a list of n entries dispatches ceil(n / per) groups.
     let per = match std::env::var("RENDERLAB_LIST_LANES").as_deref() {
+        // An 8x4 tile fills 32 lanes with one entry (program.rs list_entries_per_group).
+        _ if list_tile() == [8, 4] => 1,
         Ok("16") => 1,
         Ok("64") => 4,
         _ => 2,
