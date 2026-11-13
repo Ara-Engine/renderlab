@@ -8,6 +8,7 @@ fn gi_priority_ticket(limit:u32) -> bool {
         if result.exchanged { return true; }
         used=result.old_value;
     }
+    return false;
 }
 fn gi_priority_claim_admit(band:u32) -> bool {
     let cap=gi_word(33u);
