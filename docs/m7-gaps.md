@@ -1169,9 +1169,9 @@ On the RTX PC (31 GB) one Outpost non-RT player process peaks at 5.8-5.9 GiB of 
 
 ## game_scene port test: a knife-edge pixel on the glass pane (Mac GPU thread, 2026-11-13; unexplained)
 
-`game_scene_cases::the_game_scene_builds_and_renders_through_the_engine_calls` compares the scene with the hero's own program against one program for every draw. Pixel (350, 162), the glass pane's top-right corner, can differ between the two by one f16 step in blue (0.25756836 against 0.2578125). Three conditions have flipped it:
-- RL#80's refraction fix (the jittered projection), even with the test run alone;
-- an unrelated change that renders nothing differently (RL#86, read-write storage images), but only in the full parallel suite, never alone;
-- neither, on main: it passes both alone and in the full suite.
+`game_scene_cases::the_game_scene_builds_and_renders_through_the_engine_calls` compares the scene with the hero's own program against one program for every draw. Pixel (350, 162), the glass pane's top-right corner, can differ between the two by one f16 step in blue (0.25756836 against 0.2578125). On main it passes, alone and in the full suite. Three conditions have flipped it:
+- RL#80's refraction fix (the jittered projection), with the test run alone;
+- the same fix in the full parallel suite;
+- an unrelated change that renders nothing differently (RL#86, read-write storage images), in the full parallel suite only; run alone it passes.
 
 Unexplained, possibly load- or order-dependent upstream of the pane. The test's hero check counts pixels on the pane's projected box as able to show the hero (the pane reflects and refracts it), so the flip no longer fails it.
