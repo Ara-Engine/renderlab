@@ -278,10 +278,13 @@ pub(crate) fn lighting(
             travel: sun.travel,
             lux: sun.illuminance,
         });
-        // Cascade ends for the raster shadow maps the paths still build for coverage;
-        // traced and Virtual visibility are not bounded by them (the shipping split set).
+        // Cascade ends (the shipping split set). The last end is every sun lookup's coverage
+        // limit: traced rays, the Virtual/Disk lookups and the raster maps all shade a
+        // receiver farther from the camera as fully lit (fresh_estimate's FRESH_SKIP). The
+        // 1 km cascade carries game-scale sun shadows (Glint's pylons on its clouds, at
+        // 40-150 m, were unshadowed under a 40 m end); the near three keep their texels.
         requests.push(ShadowRequest::Directional {
-            split_ends: vec![4.0, 12.0, 40.0],
+            split_ends: sun_splits(),
         });
         requests.extend(lights.iter().map(|_| ShadowRequest::None));
     }
@@ -299,6 +302,15 @@ pub(crate) fn lighting(
         },
         shadows,
     ))
+}
+
+/// The sun's cascade ends: the shipping set, or `RENDERLAB_SUN_SPLITS=A,B,...` (measurement:
+/// metres, increasing; e.g. `4,12,40` for the set before the 1 km cascade).
+fn sun_splits() -> Vec<f32> {
+    std::env::var("RENDERLAB_SUN_SPLITS")
+        .ok()
+        .and_then(|v| v.split(',').map(|s| s.trim().parse().ok()).collect())
+        .unwrap_or_else(|| vec![4.0, 12.0, 40.0, 1000.0])
 }
 
 /// The renderer's atmosphere for a sky choice and the frame's media settings. Only
@@ -401,6 +413,36 @@ fn indirect_measured(mut s: IndirectSettings) -> Result<IndirectSettings, Error>
         }
     }
     Ok(s)
+}
+
+/// With `RENDERLAB_VSM_LOG=<file>` set, appends one JSON line of the non-RT sun clipmap's ladder
+/// and reach after each frame the engine renders: its levels, finest absolute level, octaves
+/// skipped far out, and the Disk mark pass's nearest receiver (metres), receivers, receivers no
+/// level's window held (shaded without the map) and the nearest of those (the reach), from a
+/// frame or two earlier. Measurement only; no readback of its own.
+pub(crate) fn log_clipmap(r: &Renderer) {
+    use std::io::Write;
+    let Some(path) = std::env::var_os("RENDERLAB_VSM_LOG") else {
+        return;
+    };
+    let v = r.virtual_shadow_stats();
+    let line = format!(
+        "{{\"levels\":{},\"finest_level\":{},\"skipped_levels\":{},\"nearest_receiver\":{},\"receivers\":{},\"unplaced_receivers\":{},\"nearest_unplaced\":{}}}\n",
+        v.levels,
+        v.finest_level,
+        v.skipped_levels,
+        v.nearest_receiver.map_or("null".into(), |d| d.to_string()),
+        v.receivers,
+        v.unplaced_receivers,
+        v.nearest_unplaced.map_or("null".into(), |d| d.to_string()),
+    );
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
 }
 
 /// With `RENDERLAB_GI_LOG=<file>` set, appends one JSON line of the GI cache's counters after

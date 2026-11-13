@@ -223,15 +223,59 @@ pub(crate) fn rl_resolve_pass_on() -> bool {
 const REFLECTION_LOBE: &str = include_str!("../shaders/reflections_lobe.wgsl");
 const RL_PASS_STUBS: [&str; 2] = ["// ---- rl pass stubs ----\n", "// ---- end of rl pass stubs ----\n"];
 const REFLECTION_TRACE: &str = include_str!("../shaders/reflections_trace.wgsl");
-pub(crate) fn rl_pass_on() -> bool {
+/// `RENDERLAB_RL_PASS` / `RENDERLAB_RL_DEFERRED`: "1" forces a switch on (RT included, for A/B),
+/// "0" forces it off; unset follows the path's default. Read once per process.
+fn env_switch(name: &str) -> Option<bool> {
+    match std::env::var(name).as_deref() {
+        Ok("1") => Some(true),
+        Ok("0") => Some(false),
+        _ => None,
+    }
+}
+pub(crate) fn rl_pass_env() -> Option<bool> {
+    static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_switch("RENDERLAB_RL_PASS"))
+}
+pub(crate) fn rl_deferred_env() -> Option<bool> {
+    static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        if rl_deferred_diag() {
+            Some(true)
+        } else {
+            env_switch("RENDERLAB_RL_DEFERRED")
+        }
+    })
+}
+/// `RENDERLAB_RL_DEFERRED=diag`: deferred reflections on, plus the untraced specular output
+/// (binding 63: the program's untraced specular, and the inline traced luminance in alpha) that
+/// identity tests read (the port's RL#79 fixture). The composite never reads it, so without
+/// `diag` no module declares or writes it and no backend allocates it.
+pub(crate) fn rl_deferred_diag() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_PASS").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_DEFERRED").as_deref() == Ok("diag"))
+}
+/// The mark a renderer whose device runs the compacted reflection pass by default (the non-RT
+/// path where the adapter holds it, once reflection_pass.rs `NON_RT_DEFAULT` is on; off for now,
+/// see `default_on`) appends to its own traced
+/// shading heads. Composition reads it from the head, so the default belongs to that renderer:
+/// heads composed elsewhere (the Ara port, tests) carry no mark and keep the inline path.
+pub(crate) const PASS_HEAD_MARK: &str =
+    "\n// renderlab: this renderer runs the compacted reflection pass and its deferred composite\n";
+/// Whether a module composed on `source` (a head, or a module composed on one) runs the pass:
+/// RENDERLAB_RL_PASS when set, otherwise its renderer's mark.
+pub(crate) fn rl_pass_for(source: &str) -> bool {
+    rl_pass_env().unwrap_or(source.contains(PASS_HEAD_MARK))
+}
+/// Whether reporting programs composed on `source` hand their glossy reflections to the deferred
+/// composite: RENDERLAB_RL_DEFERRED when set, otherwise its renderer's mark.
+pub(crate) fn rl_deferred_for(source: &str) -> bool {
+    rl_deferred_env().unwrap_or(source.contains(PASS_HEAD_MARK))
 }
 /// `rl_trace`'s module on a traced shading `head`: the standard program's traced composition
 /// (the reflection block's helpers, with its stubs) and the trace entries.
 pub(crate) fn rl_trace_source(head: &str) -> String {
     let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
-    format!("{}\n{REFLECTION_TRACE}", composed.source)
+    rl_pass_switches(format!("{}\n{REFLECTION_TRACE}", composed.source))
 }
 /// `composed` with the block between `markers` replaced by `text`, moving the program's range.
 fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Composed {
@@ -247,14 +291,92 @@ fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Comp
     composed
 }
 /// `composed` with the reflection history and the reflection pass's lobe in place of their
-/// stubs, each while its switch is on (wgpu primary shading modules only).
+/// stubs, each while its switch is on (wgpu primary shading modules only). Unset, the module's
+/// text is the default's (reflections.wgsl as composed).
 pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
-    let composed = if rl_pass_on() {
-        replace_block(composed, RL_PASS_STUBS, REFLECTION_LOBE)
+    let composed = if rl_pass_for(&composed.source) {
+        pass_block(composed)
+    } else {
+        composed
+    };
+    let composed = if inline_stub() {
+        without_inline_strata(composed)
     } else {
         composed
     };
     with_history_block(composed)
+}
+/// Measurement only (`RENDERLAB_RL_INLINE_STUB=1`, branch t3/rtvis-stub): the primary shading
+/// modules lose the inline strata loop (its ray casts and hit shading), so receivers the pass does
+/// not take (mirrors, floored, overflow) reflect nothing. The picture is wrong; the shading
+/// kernel's time is the upper bound of moving every traced receiver into the pass.
+fn inline_stub() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_INLINE_STUB").is_ok_and(|v| v == "1"))
+}
+/// `composed` with reflections.wgsl's strata loop removed from the engine text before the program.
+fn without_inline_strata(composed: Composed) -> Composed {
+    const BEGIN: &str = "    for(var attempt=0u;attempt<2u;attempt+=1u) {\n";
+    const END: &str = "    rl_reflection_hit=false;\n";
+    let Composed { source, program } = composed;
+    let (engine, rest) = source.split_at(program.start);
+    let Some(begin) = engine.find(BEGIN) else {
+        return Composed { source, program };
+    };
+    let end = begin + engine[begin..].find(END).expect("inline stub seam");
+    let engine = format!("{}{}", &engine[..begin], &engine[end..]);
+    let start = engine.len();
+    Composed {
+        source: format!("{engine}{rest}"),
+        program: start..start + program.len(),
+    }
+}
+/// reflections.wgsl's lobe store, and its replacement under the pass: a reporting program's
+/// glossy receiver that fits the room (`rl_room_reserve`) appends its lobe to the glossy-pixel
+/// list and leaves its estimate to the composite (rgb 0, the traced fraction kept); every other
+/// program, and a receiver that does not fit, keeps the inline path (no entry, no zero).
+const PASS_GATE: [&str; 2] = [
+    "    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}\n",
+    "    if RL_PASS && !mirror && RL_DEFERRED_PROGRAM && rl_composite_floor(traced,count) && rl_room_reserve(count,traced,lobe.weight) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;\n    }\n",
+];
+const DEFERRED_PROGRAM_FLAG: [&str; 2] = [
+    "const RL_DEFERRED_PROGRAM:bool=false;",
+    "const RL_DEFERRED_PROGRAM:bool=true;",
+];
+/// `composed` with the reflection pass's lobe block (shaders/reflections_lobe.wgsl) and gate,
+/// whatever the process switches: `RL_DEFERRED_PROGRAM` is on for a deferred_variant module.
+/// A module without the reflection block is returned as it is.
+pub(crate) fn pass_block(composed: Composed) -> Composed {
+    if !composed.source.contains(RL_PASS_STUBS[0]) {
+        return composed;
+    }
+    let deferred = composed.source.contains(DEFERRED_ENTRY_MARK);
+    let mut lobe = if deferred {
+        REFLECTION_LOBE.replacen(DEFERRED_PROGRAM_FLAG[0], DEFERRED_PROGRAM_FLAG[1], 1)
+    } else {
+        REFLECTION_LOBE.to_owned()
+    };
+    // Measurement runs count the room's low-weight receivers (reflections_lobe.wgsl).
+    if ["RENDERLAB_RL_PROBE", "RENDERLAB_RL_ROOM_LOG"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        lobe = lobe.replacen(
+            "const RL_ROOM_HISTOGRAM:bool=false;",
+            "const RL_ROOM_HISTOGRAM:bool=true;",
+            1,
+        );
+    }
+    let composed = replace_block(composed, RL_PASS_STUBS, &lobe);
+    let Composed { source, program } = composed;
+    let (engine, rest) = source.split_at(program.start);
+    assert_eq!(engine.matches(PASS_GATE[0]).count(), 1, "reflection pass gate seam");
+    let engine = engine.replacen(PASS_GATE[0], PASS_GATE[1], 1);
+    let start = engine.len();
+    Composed {
+        source: format!("{engine}{rest}"),
+        program: start..start + program.len(),
+    }
 }
 fn with_history_block(mut composed: Composed) -> Composed {
     if !rl_history_on() {
@@ -351,6 +473,41 @@ fn rl_hit_switches(source: String) -> String {
     }
     source
 }
+/// The pass's own modules under the same list (measurement only, RT speck bisect): `missblack`
+/// stores black for `rl_trace_pixels`' misses instead of the sky, `hitblack` stores black for
+/// `reflection_hits`' hits, `lone` makes the composite apply the lone-stratum bound whenever two
+/// strata are valid. Each applies where its seam is (trace, hits, composite); unset, nothing changes.
+pub(crate) fn rl_pass_switches(source: String) -> String {
+    static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let list = LIST.get_or_init(|| std::env::var("RENDERLAB_RL_HIT").unwrap_or_default());
+    let mut source = source;
+    for switch in list.split(',').map(str::trim) {
+        let Some((_, from, to)) = RL_PASS_SEAMS.iter().find(|(name, ..)| *name == switch) else {
+            continue;
+        };
+        assert!(source.matches(from).count() <= 1, "RENDERLAB_RL_HIT pass seam {switch}");
+        source = source.replacen(from, to, 1);
+    }
+    source
+}
+/// `rl_pass_switches`' seams: switch, text, replacement.
+pub(crate) const RL_PASS_SEAMS: [(&str, &str, &str); 3] = [
+    (
+        "missblack",
+        "textureStore(rl_samples,at,vec4<f32>(rl_sky(d,cone_alpha),1.0));",
+        "textureStore(rl_samples,at,vec4<f32>(0.0,0.0,0.0,1.0));",
+    ),
+    (
+        "hitblack",
+        "    let radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);\n    textureStore(rl_hit_samples_out",
+        "    let radiance=vec3<f32>(0.0);\n    textureStore(rl_hit_samples_out",
+    ),
+    (
+        "lone",
+        "if lone>0.0 && valid>1u && f32(count)>=rl_composite_frame.y {",
+        "if lone>0.0 && valid>1u {",
+    ),
+];
 
 /// The reflection API text for `program` on `head` at `stage`, and whether it traces: empty
 /// for programs that name neither hook nor input, so their modules are unchanged.
@@ -1004,30 +1161,36 @@ fn compose_stage(
         // M7-R1: the lobe is traced between the receiver's `surface` and `shade`.
         assert_eq!(entry.matches(REFLECTION_ENTRY_SEAM).count(), 1);
         source.push_str(&entry.replacen(REFLECTION_ENTRY_SEAM, REFLECTION_ENTRY, 1));
-        if rl_deferred() && declares(program, "const", "RL_DEFERRED") {
-            source = deferred_variant(&source);
+        if rl_deferred_for(head) && declares(program, "const", "RL_DEFERRED") {
+            return deferred_variant(Composed {
+                source,
+                program: program_range,
+            });
         }
     } else {
         source.push_str(entry);
     }
     source = crate::renderer::primary_ray_gpu::gi_receiver_pass::shade_source(source, matches!(stage, Stage::Traced | Stage::TracedStreamed) && indirect_calls, specular);
-    Composed {
-        source,
-        program: program_range,
-    }
+    crate::renderer::primary_ray_gpu::light_vis_pass::apply(
+        Composed { source, program: program_range },
+        matches!(stage, Stage::Traced | Stage::TracedStreamed),
+    )
 }
 
 // ---- Deferred reflections (the program side; U-RTVIS's composite reads them) ----
-/// Whether traced shading writes the deferred reflection composite's inputs:
-/// `RENDERLAB_RL_DEFERRED=1`, off by default. Read once per process.
+/// Whether `RENDERLAB_RL_DEFERRED` forces the deferred variant on (1 or diag), whatever the
+/// renderer's default. The Mac thread's port test reads it.
+#[allow(dead_code)]
 pub(crate) fn rl_deferred() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_DEFERRED").is_ok_and(|v| v == "1"))
+    rl_deferred_env() == Some(true)
 }
 /// The program API's report, which deferred modules replace with `DEFERRED_REPORT`.
 const DEFERRED_REPORT_STUB: &str =
     "fn reflection_report(reflectance:vec3<f32>, untraced:vec3<f32>) {}";
 const DEFERRED_API: &str = include_str!("../shaders/reflections_deferred.wgsl");
+/// What a deferred_variant module's entry gains after its pixel: its outputs cleared. Its
+/// presence marks the module as deferred (`pass_block`).
+const DEFERRED_ENTRY_MARK: &str = "\n    rl_deferred_clear(pixel);";
 /// The traced entry's pixel, where a deferred module first clears its outputs.
 const DEFERRED_CLEAR_SEAM: &str =
     "let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);";
@@ -1036,16 +1199,26 @@ const DEFERRED_CLEAR_SEAM: &str =
 /// program's reflectance and untraced specular, and the entry writes them through the pixel's
 /// fog and aerial perspective, with the traced fraction (binding 62: reflectance rgb and w;
 /// 63: untraced specular). Every pixel the entry visits starts cleared, so misses and culled
-/// faces leave zero.
-pub(crate) fn deferred_variant(composed: &str) -> String {
-    for seam in [DEFERRED_REPORT_STUB, DEFERRED_CLEAR_SEAM, VIEW_STORE_SEAM] {
-        assert_eq!(composed.matches(seam).count(), 1, "deferred seam {seam}");
+/// faces leave zero; under the pass the composite takes this program's glossy lobes
+/// (`pass_block`). The engine text before the program and the entry after it are edited apart,
+/// so the program's range follows the edits (temporal shading splits the module at the
+/// program's end).
+pub(crate) fn deferred_variant(composed: Composed) -> Composed {
+    let Composed { source, program } = composed;
+    let (engine, rest) = source.split_at(program.start);
+    let (text, entry) = rest.split_at(program.len());
+    for (part, seam) in [
+        (engine, DEFERRED_REPORT_STUB),
+        (entry, DEFERRED_CLEAR_SEAM),
+        (entry, VIEW_STORE_SEAM),
+    ] {
+        assert_eq!(part.matches(seam).count(), 1, "deferred seam {seam}");
     }
-    let mut source = composed
-        .replacen(DEFERRED_REPORT_STUB, "", 1)
+    let engine = engine.replacen(DEFERRED_REPORT_STUB, "", 1);
+    let entry = entry
         .replacen(
             DEFERRED_CLEAR_SEAM,
-            &format!("{DEFERRED_CLEAR_SEAM}\n    rl_deferred_clear(pixel);"),
+            &format!("{DEFERRED_CLEAR_SEAM}{DEFERRED_ENTRY_MARK}"),
             1,
         )
         .replacen(
@@ -1053,8 +1226,31 @@ pub(crate) fn deferred_variant(composed: &str) -> String {
             &format!("{VIEW_STORE_SEAM}\n    rl_deferred_store(pixel,input.world);"),
             1,
         );
-    source.push_str(DEFERRED_API);
-    source
+    let start = engine.len();
+    Composed {
+        source: format!("{engine}{text}{entry}{}", deferred_api()),
+        program: start..start + text.len(),
+    }
+}
+/// DEFERRED_API as composed: with `RENDERLAB_RL_DEFERRED=diag` whole, otherwise without the
+/// untraced output (binding 63's declaration and both of its stores).
+fn deferred_api() -> String {
+    if rl_deferred_diag() {
+        return DEFERRED_API.to_owned();
+    }
+    let mut api = DEFERRED_API.to_owned();
+    for line in [
+        "@group(0) @binding(63) var rl_deferred_untraced:texture_storage_2d<rgba16float,write>;\n",
+        "    textureStore(rl_deferred_untraced,pixel,vec4<f32>(0.0));\n",
+        "    textureStore(rl_deferred_untraced,pixel,vec4<f32>(rl_reported[1]*t,dot(rl_specular.rgb,RL_LUMA)));\n",
+    ] {
+        assert_eq!(api.matches(line).count(), 1, "deferred API line {line}");
+        api = api.replacen(line, "", 1);
+    }
+    // The reflectance only where the composite reads it (glossy receivers), never cleared.
+    let full = "const RL_DEFERRED_FULL:bool=true;";
+    assert_eq!(api.matches(full).count(), 1, "deferred API full switch");
+    api.replacen(full, "const RL_DEFERRED_FULL:bool=false;", 1)
 }
 
 // ---- View modes (docs/design-id-output.md) ----
@@ -1135,9 +1331,41 @@ pub(crate) fn compose_hits(
             "reflection_hits seam"
         );
         composed.source = composed.source.replacen(HITS_MINE, HITS_MINE_LIST, 1);
+        // Inline's fallback (LIST_HIT_PARAMETERS) unless RENDERLAB_RL_HIT_OWN_PROGRAM=1: the
+        // receiver's program shades every hit of its pixels, with the hit's own parameter block
+        // only when the hit is that program's draw, so the composite draws inline's picture.
+        if !hit_own_program() {
+            for (seam, fallback) in HITS_RECEIVER_PROGRAM {
+                assert_eq!(composed.source.matches(seam).count(), 1, "reflection_hits seam {seam}");
+                composed.source = composed.source.replacen(seam, fallback, 1);
+            }
+        }
     }
+    // The hit entry follows the program, so the range stays.
+    composed.source = rl_pass_switches(composed.source);
     composed
 }
+/// `RENDERLAB_RL_HIT_OWN_PROGRAM=1` (measurement, off by default): in a mixed-program frame each
+/// hit is shaded by its own draw's program, with its own parameters. More correct than inline's
+/// fallback (an emitter's reflection glows), but a visible change (docs/m7-gaps.md, Programs).
+pub(crate) fn hit_own_program() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HIT_OWN_PROGRAM").is_ok_and(|v| v == "1"))
+}
+/// shaders/reflection_hits.wgsl's seams for inline's fallback in mixed frames: a record belongs to
+/// the module of its receiver's program (the primary hit at the record's pixel), and the hit's
+/// parameter block is used only when the hit's draw is that program's.
+const HITS_RECEIVER_PROGRAM: [(&str, &str); 2] = [
+    (
+        "    if !rl_hits_mine(a.w-1u) {return;}\n",
+        "    let rl_receiver=textureLoad(primary_hit,vec2<i32>(vec2<u32>(a.x&0xffffu,a.x>>16u)),0).x;\n    if rl_receiver==0u || !rl_hits_mine(rl_receiver-1u) {return;}\n",
+    ),
+    // The hit entry's own line (4 spaces), not the inline loop's (16), which the module also holds.
+    (
+        "\n    rl_load_parameters(h.batch);\n    let hs=surface(h.input);",
+        "\n    rl_load_parameters(select(primary_placements[rl_receiver-1u]&0x1fffffffu,h.batch,rl_list.programs[h.batch>>2u][h.batch&3u]==rl_list.slot));\n    let hs=surface(h.input);",
+    ),
+];
 /// shaders/reflection_hits.wgsl's per-program filter, and its mixed-frame replacement: the
 /// hit's draw's frame slot against this dispatch's (program_traced_list.wgsl RlList, at
 /// binding 38 with a dynamic offset per slot).
@@ -1314,8 +1542,27 @@ pub(crate) fn declares_reflection(program: &str) -> bool {
 }
 // TP2 traces a separately rasterized glass lobe. Opaque hits still run their own
 // program, even when that program never asks for reflections of its own.
-pub(crate) fn glass_hit_program(program: &str) -> String {
-    let mut source = program.to_owned();
+/// Glass hits never report to the deferred reflection composite (their module keeps no camera
+/// entry, and its glossy lobes stay inline), so under RENDERLAB_RL_DEFERRED=1 the program's
+/// `RL_DEFERRED` opt-in is renamed away and `compose` leaves the module undeferred. Unset, the
+/// program's text is unchanged.
+pub(crate) fn glass_hit_program(program: &str, deferred: bool) -> String {
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut source = String::with_capacity(program.len());
+    let mut rest = program;
+    while let Some(at) = rest.find("RL_DEFERRED").filter(|_| deferred) {
+        let end = at + "RL_DEFERRED".len();
+        let whole = (at == 0 || !ident(rest.as_bytes()[at - 1]))
+            && rest.as_bytes().get(end).is_none_or(|&b| !ident(b));
+        source.push_str(&rest[..at]);
+        source.push_str(if whole {
+            "RL_GLASS_UNDEFERRED"
+        } else {
+            "RL_DEFERRED"
+        });
+        rest = &rest[end..];
+    }
+    source.push_str(rest);
     if !declares(program, "fn", "reflection_lobe") {
         source.push_str("\nfn reflection_lobe(s:Surface,input:SurfaceInput)->SpecularLobe {return SpecularLobe(input.geometric,0.0,0.0);}\n");
     }
@@ -1912,7 +2159,7 @@ fn material_debug() -> Option<&'static str> {
         _ => None,
     })
 }
-/// The record's group 0 bindings: an rgba32uint and an rg32uint image of the frame's size.
+/// The record's group 0 bindings: two rgba32uint images of the frame's size.
 pub(crate) const MATERIAL_RECORD_BINDINGS: [u32; 2] = [75, 78];
 /// Which side of the record a module is: the material pass writes it, shading reads it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -1922,15 +2169,19 @@ pub(crate) enum MaterialRole {
 }
 /// The entry's own evaluation of the program's surface, which the variants replace.
 const MATERIAL_SEAM: &str = "    let surface_output=surface(surface_input);\n";
-/// The record's packing, shared by both roles (24 bytes a pixel):
-/// - word 0 (rgba32uint): x the shading normal (octahedral, 2 x unorm16); y the base colour
-///   (3 x unorm10); z coverage, metallic and MQ2's view share (3 x unorm8, the top byte spare);
-///   w the emission times this frame's exposure (rgb9e5: unexposed emitters such as
-///   Glint's 40,000-nit glow pass its 65,408 ceiling);
-/// - word 1 (rg32uint): x the receiver's geometric normal (octahedral); y the lighting model
-///   (low 8 bits), MQ2's lobe alpha (unorm8 at bit 8) and the roughness (unorm16 at bit 16:
-///   glossy reflections move visibly with 8 bits near zero). Model 255 marks a pixel whose
-///   program keeps its own `shade`.
+/// The record's packing, shared by both roles (32 bytes a pixel):
+/// - word 0 (rgba32uint): x the shading normal (octahedral, 2 x unorm16); y the base colour's
+///   red and green and z's low half its blue (3 x unorm16: 10 bits moved every pixel of a
+///   flat floor by an f16 step, and turned a texture's decode difference of a hair into a
+///   whole step); z's high half coverage and metallic (2 x unorm8); w the emission times this
+///   frame's exposure (rgb9e5: unexposed emitters such as Glint's 40,000-nit glow pass its
+///   65,408 ceiling);
+/// - word 1 (rgba32uint): x the receiver's geometric normal (octahedral); y the lighting model
+///   (low 8 bits), MQ2's lobe alpha (unorm8 at bit 8) and the roughness (unorm16 at bit 16,
+///   rounded up so the decoded value is never below the evaluated one: a roughness authored at
+///   a threshold such as `LocalShadows::unshadowed_hits_from` stays on its side); z MQ2's view
+///   share (unorm16, high half spare); w spare. Model 255 marks a pixel whose program keeps
+///   its own `shade`.
 const MATERIAL_PACKING: &str = r#"// RENDERLAB_MATERIAL_PASS (program.rs material_pass_on): the material record's packing.
 fn rl_mr_oct(n:vec3<f32>)->u32 {
     let a=n/max(abs(n.x)+abs(n.y)+abs(n.z),1e-30);
@@ -1945,12 +2196,28 @@ fn rl_mr_oct_decode(u:u32)->vec3<f32> {
     n=vec3<f32>(n.x+select(t,-t,n.x>=0.0),n.y+select(t,-t,n.y>=0.0),n.z);
     return normalize(n);
 }
-fn rl_mr_unorm10(c:vec3<f32>)->u32 {
-    let q=vec3<u32>(round(clamp(c,vec3<f32>(0.0),vec3<f32>(1.0))*1023.0));
-    return q.x|(q.y<<10u)|(q.z<<20u);
+fn rl_mr_unorm16(v:f32)->u32 { return u32(round(clamp(v,0.0,1.0)*65535.0)); }
+// Decoding multiplies by the constant's reciprocal, in both modules alike, so the upward
+// rounding below checks itself against the decode the reader will run.
+fn rl_mr_unorm16_decode(q:u32)->f32 { return f32(q&65535u)*(1.0/65535.0); }
+fn rl_mr_unorm16_up(v:f32)->u32 {
+    let c=clamp(v,0.0,1.0);
+    var q=u32(ceil(c*65535.0));
+    if rl_mr_unorm16_decode(q)<c { q=min(q+1u,65535u); }
+    return q;
 }
-fn rl_mr_unorm10_decode(u:u32)->vec3<f32> {
-    return vec3<f32>(f32(u&1023u),f32((u>>10u)&1023u),f32((u>>20u)&1023u))/1023.0;
+struct RlMaterialWords { a:vec4<u32>, b:vec4<u32> };
+fn rl_mr_pack(m:MaterialRecord,input:SurfaceInput)->RlMaterialWords {
+    let model=(m.model&255u)|(u32(round(clamp(m.view_alpha,0.0,1.0)*255.0))<<8u)|(rl_mr_unorm16_up(m.roughness)<<16u);
+    let scalars=pack4x8unorm(vec4<f32>(0.0,0.0,m.alpha,m.metallic))&0xffff0000u;
+    return RlMaterialWords(
+        vec4<u32>(rl_mr_oct(m.normal),rl_mr_unorm16(m.base.x)|(rl_mr_unorm16(m.base.y)<<16u),rl_mr_unorm16(m.base.z)|scalars,rl_mr_rgb9e5(m.emission*lighting.exposure)),
+        vec4<u32>(rl_mr_oct(input.geometric),model,rl_mr_unorm16(m.view_share),0u));
+}
+fn rl_mr_unpack(a:vec4<u32>,b:vec4<u32>)->MaterialRecord {
+    let scalars=unpack4x8unorm(a.z);
+    let base=vec3<f32>(rl_mr_unorm16_decode(a.y),rl_mr_unorm16_decode(a.y>>16u),rl_mr_unorm16_decode(a.z));
+    return MaterialRecord(rl_mr_oct_decode(a.x),base,scalars.z,scalars.w,rl_mr_unorm16_decode(b.y>>16u),rl_mr_rgb9e5_decode(a.w)/lighting.exposure,rl_mr_unorm16_decode(b.z),f32((b.y>>8u)&255u)/255.0,b.y&255u);
 }
 // Shared-exponent rgb9e5 (as the D3D/Vulkan format), for emission.
 fn rl_mr_rgb9e5(c:vec3<f32>)->u32 {
@@ -1970,22 +2237,18 @@ fn rl_mr_rgb9e5_decode(u:u32)->vec3<f32> {
 "#;
 /// The writing side: the images and the store.
 const MATERIAL_WRITE: &str = r#"@group(0) @binding(75) var rl_material0:texture_storage_2d<rgba32uint,write>;
-@group(0) @binding(78) var rl_material1:texture_storage_2d<rg32uint,write>;
+@group(0) @binding(78) var rl_material1:texture_storage_2d<rgba32uint,write>;
 fn rl_material_store(pixel:vec2<i32>,m:MaterialRecord,input:SurfaceInput) {
-    let scalars=pack4x8unorm(vec4<f32>(m.alpha,m.metallic,m.view_share,0.0));
-    textureStore(rl_material0,pixel,vec4<u32>(rl_mr_oct(m.normal),rl_mr_unorm10(m.base),scalars,rl_mr_rgb9e5(m.emission*lighting.exposure)));
-    let model=(m.model&255u)|(u32(round(clamp(m.view_alpha,0.0,1.0)*255.0))<<8u)|(u32(round(clamp(m.roughness,0.0,1.0)*65535.0))<<16u);
-    textureStore(rl_material1,pixel,vec4<u32>(rl_mr_oct(input.geometric),model,0u,0u));
+    let w=rl_mr_pack(m,input);
+    textureStore(rl_material0,pixel,w.a);
+    textureStore(rl_material1,pixel,w.b);
 }
 "#;
 /// The reading side: the images and the load.
 const MATERIAL_READ: &str = r#"@group(0) @binding(75) var rl_material0:texture_2d<u32>;
 @group(0) @binding(78) var rl_material1:texture_2d<u32>;
 fn rl_material_load(pixel:vec2<i32>)->MaterialRecord {
-    let a=textureLoad(rl_material0,pixel,0);
-    let b=textureLoad(rl_material1,pixel,0);
-    let scalars=unpack4x8unorm(a.z);
-    return MaterialRecord(rl_mr_oct_decode(a.x),rl_mr_unorm10_decode(a.y),scalars.x,scalars.y,f32(b.y>>16u)/65535.0,rl_mr_rgb9e5_decode(a.w)/lighting.exposure,scalars.z,f32((b.y>>8u)&255u)/255.0,b.y&255u);
+    return rl_mr_unpack(textureLoad(rl_material0,pixel,0),textureLoad(rl_material1,pixel,0));
 }
 "#;
 /// The material pass's (`Write`) or the record-reading shading's (`Read`) variant of a traced
@@ -2125,11 +2388,9 @@ const MATERIAL_PROBE_LEAN: [(&str, &str); 3] = [
 ];
 /// `nostore`: `rl_material_store`'s packing, stored only on a hash it never takes.
 const MATERIAL_PROBE_STORE: &str = r#"fn rl_material_probe_store(pixel:vec2<i32>,m:MaterialRecord,input:SurfaceInput) {
-    let scalars=pack4x8unorm(vec4<f32>(m.alpha,m.metallic,m.view_share,0.0));
-    let a=vec4<u32>(rl_mr_oct(m.normal),rl_mr_unorm10(m.base),scalars,rl_mr_rgb9e5(m.emission*lighting.exposure));
-    let model=(m.model&255u)|(u32(round(clamp(m.view_alpha,0.0,1.0)*255.0))<<8u)|(u32(round(clamp(m.roughness,0.0,1.0)*65535.0))<<16u);
-    let b=vec2<u32>(rl_mr_oct(input.geometric),model);
-    if (a.x^(a.y*3u)^(a.z*5u)^(a.w*7u)^(b.x*11u)^(b.y*13u))==0x9e3779b9u { textureStore(rl_material0,pixel,a); textureStore(rl_material1,pixel,vec4<u32>(b,0u,0u)); }
+    let w=rl_mr_pack(m,input);
+    let h=w.a^(w.b*vec4<u32>(3u,5u,7u,11u));
+    if (h.x^h.y^h.z^h.w)==0x9e3779b9u { textureStore(rl_material0,pixel,w.a); textureStore(rl_material1,pixel,w.b); }
 }
 "#;
 // ---- end of material pass ----
