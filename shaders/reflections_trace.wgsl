@@ -101,6 +101,8 @@ struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u3
 @group(0) @binding(60) var<storage,read_write> rl_trace_stats:RlTraceStats;
 // Per pixel: its first slot and its slot count (0: no traced reflection).
 @group(0) @binding(61) var rl_ranges:texture_storage_2d<rg32uint,write>;
+// The receivers' ray epsilon per pixel (reflection_pass.rs RECEIVER_EPSILON).
+@group(0) @binding(79) var rl_receiver_epsilon:texture_2d<f32>;
 var<workgroup> rl_group_slots:atomic<u32>;
 var<workgroup> rl_group_first:u32;
 // A pixel's strata count from L this frame (0: no traced reflection).
@@ -168,7 +170,8 @@ fn rl_pixel_count(p:vec2<u32>)->u32 {
     let basis=rl_basis(n);
     let local_v=vec3<f32>(dot(v,basis[0]),dot(v,basis[1]),dot(v,basis[2]));
     let width=samples.x;
-    let epsilon=max(1e-4*length(origin),1e-5);
+    // The receiver's own epsilon (its triangle's, as the inline loop's tmin).
+    let epsilon=textureLoad(rl_receiver_epsilon,vec2<i32>(p),0).x;
     for(var k=0u;k<count;k+=1u) {
         let slot=first+k;
         let at=vec2<i32>(vec2<u32>(slot%width,slot/width));

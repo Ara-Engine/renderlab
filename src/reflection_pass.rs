@@ -15,6 +15,9 @@ const DISTANCE: u32 = 59;
 /// The deferred composite's trace (rl_trace_pixels): its counters and per-pixel slot ranges.
 const STATS: u32 = 60;
 const RANGES: u32 = 61;
+/// The receivers' own ray epsilon (the primary trace's or visibility resolve's per-pixel
+/// `receiver.epsilon`): the compacted trace starts its rays there, as the inline loop does.
+const RECEIVER_EPSILON: u32 = 79;
 /// With the composite, R holds every glossy pixel's strata (this many slots a row) and H one
 /// record a slot: the room. It starts at a slot a screen pixel, so a view's first frames are not
 /// scaled unless it asks for more (2,073,600 slots at 1080p: 16 strata over 6 % of the screen),
@@ -87,6 +90,7 @@ impl TraceAbi {
             image(SAMPLES, F::Rgba16Float),
             buffer(STATS, wgpu::BufferBindingType::Storage { read_only: false }, 16),
             image(RANGES, F::Rg32Uint),
+            texture(RECEIVER_EPSILON, wgpu::TextureSampleType::Float { filterable: false }),
         ];
         entries.push(if ray_query {
             scene(2)
@@ -250,6 +254,7 @@ impl Renderer {
         abi: &TraceAbi,
         pass: &PassTargets,
         frame: wgpu::BindingResource<'_>,
+        epsilon: &wgpu::TextureView,
         scene: (u32, wgpu::BindingResource<'_>),
     ) -> Owned<wgpu::BindGroup> {
         use wgpu::BindingResource as R;
@@ -263,6 +268,7 @@ impl Renderer {
             (SAMPLES, R::TextureView(&pass.samples.view)),
             (STATS, pass.stats.value.as_entire_binding()),
             (RANGES, R::TextureView(&pass.ranges.view)),
+            (RECEIVER_EPSILON, R::TextureView(epsilon)),
             scene,
         ];
         let entries: Vec<_> = entries

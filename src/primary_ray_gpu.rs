@@ -2692,7 +2692,13 @@ impl Renderer {
                         Some(g) => (SOFTWARE_REFLECTIONS, g.as_entire_binding()),
                         None => reflection_scene.clone(),
                     };
-                    self.rl_trace_group(abi, pass, frame.as_entire_binding(), geometry)
+                    self.rl_trace_group(
+                        abi,
+                        pass,
+                        frame.as_entire_binding(),
+                        &t.epsilon.view,
+                        geometry,
+                    )
                 }),
                 rl_resolve: state
                     .rl_resolve
