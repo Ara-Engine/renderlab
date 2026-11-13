@@ -836,7 +836,6 @@ impl Renderer {
     /// (the trace and hit groups belong to them; the composite's group is made each frame).
     pub(crate) fn rl_room_grow(&mut self) {
         use std::sync::atomic::Ordering::SeqCst;
-        let _ = self.device.poll(wgpu::PollType::Poll);
         let Some(pass) = self
             .view
             .primary
@@ -846,6 +845,8 @@ impl Renderer {
         else {
             return;
         };
+        // Only with the pass: the default path's frame is unchanged.
+        let _ = self.device.poll(wgpu::PollType::Poll);
         let mut requested = 0u64;
         for r in &pass.readback {
             if r.state.load(SeqCst) == 3 {

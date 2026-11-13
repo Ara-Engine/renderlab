@@ -86,9 +86,16 @@ fn large_buffers(adapter: &wgpu::Limits) -> wgpu::Limits {
         // more storage textures than the 5 the paths ask for. Take what the adapter allows, capped
         // (the RTX allows far more); visibility_limits and traced_limits still raise to their own
         // floors where an adapter reports less.
-        max_storage_textures_per_shader_stage: adapter.max_storage_textures_per_shader_stage.min(16),
-        max_storage_buffers_per_shader_stage: adapter.max_storage_buffers_per_shader_stage.min(24),
-        ..Default::default()
+        // Only with the composite: the default device keeps the default limits.
+        ..if crate::program::rl_deferred() {
+            wgpu::Limits {
+                max_storage_textures_per_shader_stage: adapter.max_storage_textures_per_shader_stage.min(16),
+                max_storage_buffers_per_shader_stage: adapter.max_storage_buffers_per_shader_stage.min(24),
+                ..Default::default()
+            }
+        } else {
+            Default::default()
+        }
     }
 }
 fn non_rt_limits(adapter: &wgpu::Limits) -> wgpu::Limits {

@@ -13,6 +13,11 @@
 @group(0) @binding(58) var<uniform> rl_pass_frame:vec4<u32>;
 const RL_PASS:bool=true;
 fn rl_composite()->bool { return rl_pass_frame.w!=0u; }
+// Whether this module's program reports its reflectance for the deferred composite (it declares
+// `const RL_DEFERRED`; src/program.rs `pass_block` sets it for deferred_variant modules). Under
+// the composite only such programs leave their glossy lobes to the pass; every other program
+// keeps its inline estimate.
+const RL_DEFERRED_PROGRAM:bool=false;
 // The frame's tag, exact in f16.
 fn rl_pass_tag()->u32 { return rl_pass_frame.x%2048u; }
 fn rl_lobe_store(pixel:vec2<u32>,origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:vec3<f32>,alpha:f32,width:f32,spread:f32,count:u32) {

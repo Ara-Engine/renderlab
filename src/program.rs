@@ -188,14 +188,50 @@ fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Comp
     composed
 }
 /// `composed` with the reflection history and the reflection pass's lobe in place of their
-/// stubs, each while its switch is on (wgpu primary shading modules only).
+/// stubs, each while its switch is on (wgpu primary shading modules only). Unset, the module's
+/// text is the default's (reflections.wgsl as composed).
 pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
     let composed = if rl_pass_on() {
-        replace_block(composed, RL_PASS_STUBS, REFLECTION_LOBE)
+        pass_block(composed)
     } else {
         composed
     };
     with_history_block(composed)
+}
+/// reflections.wgsl's lobe store, and its replacement under the pass: with the deferred
+/// composite a reporting program's glossy receiver leaves its estimate to the composite (rgb 0,
+/// the traced fraction kept); every other program keeps the inline path (no lobe, no zero).
+const PASS_GATE: [&str; 2] = [
+    "    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}\n",
+    "    if RL_PASS && !mirror && (RL_DEFERRED_PROGRAM || !rl_composite()) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        if rl_composite() {rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;}\n    }\n",
+];
+const DEFERRED_PROGRAM_FLAG: [&str; 2] = [
+    "const RL_DEFERRED_PROGRAM:bool=false;",
+    "const RL_DEFERRED_PROGRAM:bool=true;",
+];
+/// `composed` with the reflection pass's lobe block (shaders/reflections_lobe.wgsl) and gate,
+/// whatever the process switches: `RL_DEFERRED_PROGRAM` is on for a deferred_variant module.
+/// A module without the reflection block is returned as it is.
+pub(crate) fn pass_block(composed: Composed) -> Composed {
+    if !composed.source.contains(RL_PASS_STUBS[0]) {
+        return composed;
+    }
+    let deferred = composed.source.contains(DEFERRED_ENTRY_MARK);
+    let lobe = if deferred {
+        REFLECTION_LOBE.replacen(DEFERRED_PROGRAM_FLAG[0], DEFERRED_PROGRAM_FLAG[1], 1)
+    } else {
+        REFLECTION_LOBE.to_owned()
+    };
+    let composed = replace_block(composed, RL_PASS_STUBS, &lobe);
+    let Composed { source, program } = composed;
+    let (engine, rest) = source.split_at(program.start);
+    assert_eq!(engine.matches(PASS_GATE[0]).count(), 1, "reflection pass gate seam");
+    let engine = engine.replacen(PASS_GATE[0], PASS_GATE[1], 1);
+    let start = engine.len();
+    Composed {
+        source: format!("{engine}{rest}"),
+        program: start..start + program.len(),
+    }
 }
 fn with_history_block(mut composed: Composed) -> Composed {
     if !rl_history_on() {
@@ -860,11 +896,9 @@ pub(crate) fn rl_deferred() -> bool {
 const DEFERRED_REPORT_STUB: &str =
     "fn reflection_report(reflectance:vec3<f32>, untraced:vec3<f32>) {}";
 const DEFERRED_API: &str = include_str!("../shaders/reflections_deferred.wgsl");
-/// The reflection block's flag that this module's program reports (shaders/reflections.wgsl).
-const DEFERRED_PROGRAM_FLAG: [&str; 2] = [
-    "const RL_DEFERRED_PROGRAM:bool=false;",
-    "const RL_DEFERRED_PROGRAM:bool=true;",
-];
+/// What a deferred_variant module's entry gains after its pixel: its outputs cleared. Its
+/// presence marks the module as deferred (`pass_block`).
+const DEFERRED_ENTRY_MARK: &str = "\n    rl_deferred_clear(pixel);";
 /// The traced entry's pixel, where a deferred module first clears its outputs.
 const DEFERRED_CLEAR_SEAM: &str =
     "let pixel=vec2<i32>(id);let record=textureLoad(primary_hit,pixel,0);";
@@ -873,31 +907,26 @@ const DEFERRED_CLEAR_SEAM: &str =
 /// program's reflectance and untraced specular, and the entry writes them through the pixel's
 /// fog and aerial perspective, with the traced fraction (binding 62: reflectance rgb and w;
 /// 63: untraced specular). Every pixel the entry visits starts cleared, so misses and culled
-/// faces leave zero, and the reflection block's `RL_DEFERRED_PROGRAM` turns on (the composite
-/// takes this program's glossy lobes). The engine text before the program and the entry after it
-/// are edited apart, so the program's range follows the edits (temporal shading splits the
-/// module at the program's end).
+/// faces leave zero; under the pass the composite takes this program's glossy lobes
+/// (`pass_block`). The engine text before the program and the entry after it are edited apart,
+/// so the program's range follows the edits (temporal shading splits the module at the
+/// program's end).
 pub(crate) fn deferred_variant(composed: Composed) -> Composed {
     let Composed { source, program } = composed;
     let (engine, rest) = source.split_at(program.start);
     let (text, entry) = rest.split_at(program.len());
     for (part, seam) in [
         (engine, DEFERRED_REPORT_STUB),
-        (engine, DEFERRED_PROGRAM_FLAG[0]),
         (entry, DEFERRED_CLEAR_SEAM),
         (entry, VIEW_STORE_SEAM),
     ] {
         assert_eq!(part.matches(seam).count(), 1, "deferred seam {seam}");
     }
-    let engine = engine.replacen(DEFERRED_REPORT_STUB, "", 1).replacen(
-        DEFERRED_PROGRAM_FLAG[0],
-        DEFERRED_PROGRAM_FLAG[1],
-        1,
-    );
+    let engine = engine.replacen(DEFERRED_REPORT_STUB, "", 1);
     let entry = entry
         .replacen(
             DEFERRED_CLEAR_SEAM,
-            &format!("{DEFERRED_CLEAR_SEAM}\n    rl_deferred_clear(pixel);"),
+            &format!("{DEFERRED_CLEAR_SEAM}{DEFERRED_ENTRY_MARK}"),
             1,
         )
         .replacen(
@@ -1127,13 +1156,14 @@ pub(crate) fn declares_reflection(program: &str) -> bool {
 // TP2 traces a separately rasterized glass lobe. Opaque hits still run their own
 // program, even when that program never asks for reflections of its own.
 /// Glass hits never report to the deferred reflection composite (their module keeps no camera
-/// entry, and its glossy lobes stay inline), so the program's `RL_DEFERRED` opt-in is renamed
-/// away: `compose` then leaves the module undeferred under RENDERLAB_RL_DEFERRED=1.
+/// entry, and its glossy lobes stay inline), so under RENDERLAB_RL_DEFERRED=1 the program's
+/// `RL_DEFERRED` opt-in is renamed away and `compose` leaves the module undeferred. Unset, the
+/// program's text is unchanged.
 pub(crate) fn glass_hit_program(program: &str) -> String {
     let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
     let mut source = String::with_capacity(program.len());
     let mut rest = program;
-    while let Some(at) = rest.find("RL_DEFERRED") {
+    while let Some(at) = rest.find("RL_DEFERRED").filter(|_| rl_deferred()) {
         let end = at + "RL_DEFERRED".len();
         let whole = (at == 0 || !ident(rest.as_bytes()[at - 1]))
             && rest.as_bytes().get(end).is_none_or(|&b| !ident(b));
