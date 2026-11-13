@@ -532,6 +532,9 @@ struct Pane {
     program: usize,
     /// The pixels its bounds project to, [x0, y0, x1, y1): what per-pixel shading visits.
     rect: [u32; 4],
+    /// A film (index of refraction one, no thickness): blended in hardware when its program
+    /// declares films (`Panes::films`), in one seeded pass with the films next to it.
+    film: bool,
 }
 /// What a traced frame's transparent panes add: `encode_transparency`'s targets,
 /// records and pipelines.
@@ -540,6 +543,9 @@ struct Panes {
     seed: Seed,
     /// Each distinct pane program composed for the glass pass, with its pipeline.
     programs: Vec<(Program, Glass)>,
+    /// The same programs' film pipelines (`transparency_glass::film_program`), for programs
+    /// that declare films.
+    films: Vec<Option<(Program, Glass)>>,
     /// Per-pixel pane shading (`PanePixels`), in place of the glass raster unless
     /// `RENDERLAB_ARA_PANES=raster`.
     pixels: Option<PanePixels>,
@@ -3746,13 +3752,25 @@ fn frame(
                     slot,
                     program,
                     rect: pane_rect(pane_bounds(object)?, &scene.camera, size),
+                    film: object
+                        .material
+                        .transparency
+                        .is_some_and(|t| t.ior <= 1.0 && t.thickness == 0.0),
                 });
             }
             let mut programs = Vec::new();
+            let mut films = Vec::new();
             for source in &sources {
                 let program = transparency_glass::traced_program(source)?;
                 let glass = Glass::new(gpu, cache, &program)?;
                 programs.push((program, glass));
+                films.push(match transparency_glass::film_program(source)? {
+                    Some(program) => {
+                        let glass = Glass::film(gpu, cache, &program)?;
+                        Some((program, glass))
+                    }
+                    None => None,
+                });
             }
             let per_pixel = std::env::var("RENDERLAB_ARA_PANES").map_or(true, |v| v != "raster");
             let pixels = if per_pixel {
@@ -3785,6 +3803,7 @@ fn frame(
                 hit_depth: Kernel::new(gpu, cache, Pass::TransparencyHitDepth)?,
                 seed: Seed::new(gpu, cache)?,
                 programs,
+                films,
                 pixels,
                 target: MsaaColor::new(gpu, size)?,
                 camera,
@@ -3836,20 +3855,36 @@ fn frame(
         t.hit_depth
             .record(&mut graph, &mut rec, &packet, [size[0], size[1], 1])?;
         pane_packets.push(packet);
+        // Films whose program declares them blend in hardware: a run of consecutive films takes
+        // one copy and one seed, each film blends into the seeded samples, and one resolve.
+        let film = |at: usize| {
+            t.panes
+                .get(at)
+                .is_some_and(|p| p.film && t.films[p.program].is_some())
+        };
+        if std::env::var_os("TMP_FILMS").is_some() {
+            let runs: Vec<String> = t.panes.iter().enumerate().map(|(i, p)| format!("{}{}:{}", if film(i) {"F"} else {"g"}, p.program, (p.rect[2].saturating_sub(p.rect[0]))*(p.rect[3].saturating_sub(p.rect[1])))).collect();
+            eprintln!("TMP films {}", runs.join(" "));
+        }
+        let mut film_packets: Vec<(usize, HeapBindings)> = Vec::new();
         for (at, pane) in t.panes.iter().enumerate() {
-            graph.node(
-                &mut rec,
-                &[
-                    (Resource::Image(output.image), Access::CopySource),
-                    (Resource::Image(pane.behind.image), Access::CopyDestination),
-                ],
-            )?;
-            rec.push(Command::BeginPass("ara::CopyImage".into()));
-            rec.push(Command::CopyImage {
-                source: output.image,
-                destination: pane.behind.image,
-            });
-            rec.push(Command::EndPass);
+            let is_film = film(at);
+            let opens = !is_film || at == 0 || !film(at - 1);
+            if opens {
+                graph.node(
+                    &mut rec,
+                    &[
+                        (Resource::Image(output.image), Access::CopySource),
+                        (Resource::Image(pane.behind.image), Access::CopyDestination),
+                    ],
+                )?;
+                rec.push(Command::BeginPass("ara::CopyImage".into()));
+                rec.push(Command::CopyImage {
+                    source: output.image,
+                    destination: pane.behind.image,
+                });
+                rec.push(Command::EndPass);
+            }
             // The glass entry's inputs, shared by the per-pixel passes.
             let glass_input = |spec: &shader::ShaderInput| -> Result<Input<'_>> {
                 Ok(match (spec.kind, spec.key.group, spec.key.binding) {
@@ -3870,6 +3905,42 @@ fn frame(
                     _ => shared.input(spec, Some((&pane.geometry, &pane.material)))?,
                 })
             };
+            if is_film {
+                if opens {
+                    let seed = HeapBindings::new(
+                        gpu,
+                        Pass::TransparencySeed,
+                        &[(key(0, 31), Input::Image(&pane.behind))],
+                    )?;
+                    seed.import(&mut graph);
+                    t.seed.record(&mut graph, &mut rec, &seed, &t.target)?;
+                    pane_packets.push(seed);
+                }
+                let (program, _) = t.films[pane.program].as_ref().expect("a film's pipeline");
+                let values = program
+                    .inputs()
+                    .iter()
+                    .map(|spec| Ok((spec.key, glass_input(spec)?)))
+                    .collect::<Result<Vec<_>>>()?;
+                let packet = HeapBindings::for_program(gpu, program, &values)?;
+                packet.import(&mut graph);
+                film_packets.push((at, packet));
+                if !film(at + 1) {
+                    // The run, far to near, in one render pass; then one resolve.
+                    let films: Vec<_> = film_packets
+                        .iter()
+                        .map(|(at, packet)| {
+                            let pane = &t.panes[*at];
+                            let glass = &t.films[pane.program].as_ref().expect("a film's pipeline").1;
+                            (glass, packet, &pane.geometry)
+                        })
+                        .collect();
+                    transparency_glass::record_films(&mut graph, &mut rec, &films, &t.target)?;
+                    t.target.resolve_to(&mut graph, &mut rec, &output)?;
+                    pane_packets.extend(film_packets.drain(..).map(|(_, packet)| packet));
+                }
+                continue;
+            }
             if let Some(pixels) = &t.pixels {
                 // Per pixel: the triangle under each coverage sample, then one shading
                 // dispatch over the pane's rectangle into the output (see PanePixels).

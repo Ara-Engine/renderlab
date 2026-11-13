@@ -166,6 +166,25 @@ pub(crate) fn glass_source(head: &str, rt: bool, program: &str, parameters: bool
         source
     }
 }
+/// A film's glass module: `glass` (from `glass_source`, for a program that declares films,
+/// `crate::program::declares_films`) with `fs_transparent` ending in what hardware blending
+/// adds over the colour behind it, instead of reading that colour: the surface's fogged light
+/// less the fog its transmittance lets through, with alpha `1 - transmittance`, so
+/// `src + (1 - alpha) * behind` is the copy path's `light + transmittance * (behind - fog)`.
+/// The blend state is premultiplied alpha (`src * 1 + dst * (1 - src.a)`).
+pub(crate) fn film_source(glass: &str) -> String {
+    let behind = "    let behind=tp_behind(input.world,refraction_normal,geometric,pixel,depth,transparent_ior(material));\n";
+    let composite = "    return vec4<f32>(rl_finite(atmosphere_surface(rl_finite(lit),input.world)+passed*max(behind-fog,vec3<f32>(0.0))),1.0);\n";
+    let film = "    return vec4<f32>(rl_finite(atmosphere_surface(rl_finite(lit),input.world)-passed*fog),1.0-passed.x);\n";
+    assert_eq!(glass.matches(behind).count(), 1, "film seam: the colour behind");
+    assert_eq!(glass.matches(composite).count(), 1, "film seam: the composite");
+    let out = glass.replacen(behind, "", 1).replacen(composite, film, 1);
+    if std::env::var_os("TMP_FILM_NORAY").is_some() {
+        let out = replace_function(&out, "hard_shadow", "fn hard_shadow(light:Light, receiver:Receiver, l:vec3<f32>) -> f32 { return 1.0; }");
+        return replace_function(&out, "light_visibility", "fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 { return 1.0; }");
+    }
+    out
+}
 /// The particle simulation and draw modules, after `prelude` for its environment helpers
 /// and AT1's camera fog and aerial perspective.
 fn particle_sources(prelude: &str) -> [String; 2] {

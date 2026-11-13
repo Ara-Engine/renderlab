@@ -836,6 +836,17 @@ pub(crate) fn uses_indirect(program: &str) -> bool {
 pub(crate) fn declares_transmittance(program: &str) -> bool {
     declares(program, "fn", "transmittance")
 }
+/// Whether `program` declares `const FILMS`: for a transparent material with an index of
+/// refraction of one and no thickness (a film: Ara's glTF BLEND), its `transmittance` is
+/// exactly `1 - coverage` in every channel and its `shade` is already scaled by coverage, so
+/// the engine draws such materials with hardware blending over what is behind them instead
+/// of reading a copy of it (docs/api.md). Programs without it keep the copy path.
+pub(crate) fn declares_films(program: &str) -> bool {
+    static COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    // `RENDERLAB_FILMS=copy` draws films on the copy path, as before (A/B).
+    let copy = *COPY.get_or_init(|| std::env::var("RENDERLAB_FILMS").is_ok_and(|v| v == "copy"));
+    !copy && declares(program, "const", "FILMS") && declares_transmittance(program)
+}
 // TP2: the forward glass pass supplies the declared lobe to R1 separately.
 pub(crate) fn declares_reflection(program: &str) -> bool {
     declares(program, "fn", "reflection_lobe") && tokens(program).contains(&"specular_incident")
