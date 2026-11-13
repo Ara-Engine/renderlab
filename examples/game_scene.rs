@@ -1120,6 +1120,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>())
         .transpose()?;
     let drain = std::env::var("RENDERLAB_SCENE_DRAIN").is_ok_and(|v| v == "1");
+    // U-FIXED measurement only: RENDERLAB_SCENE_EVENT_FRAMES=a,b,c cuts at each listed frame
+    // (`cut=turn` alternates between the turned view and the walk's own), and
+    // RENDERLAB_SCENE_COUNTERS=<file> writes one JSON line per frame of cumulative pipeline,
+    // resource and acceleration-structure counters.
+    let events: Vec<u32> = match std::env::var("RENDERLAB_SCENE_EVENT_FRAMES") {
+        Ok(list) => list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>()?,
+        Err(_) => vec![event_frame],
+    };
+    let mut counters = std::env::var_os("RENDERLAB_SCENE_COUNTERS")
+        .map(std::fs::File::create)
+        .transpose()?;
     for frame in 0..args.frames {
         let t = if args.still { 0.0 } else { frame as f32 / FPS };
         let sun_update = Instant::now();
@@ -1157,7 +1168,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         // Fly path: a slow orbit that descends and closes in on the hero.
         let cut = (cuts || hold_cut) && frame >= event_frame;
-        if (cuts || cut_turn || hold_cut) && frame == event_frame {
+        if (cuts || cut_turn || hold_cut) && events.contains(&frame) {
             engine.cut_view(view);
             // `hold=cut`: the held pose moves to the cut's pose and holds there.
             if hold_cut {
@@ -1189,7 +1200,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 engine.cut_view(view);
             }
             let eye = anchor + FIELD_EYE + 4.0 * along * FIELD_WALK;
-            let turn = if cut_turn && frame >= event_frame { 150.0 } else { 0.0 };
+            let passed = events.iter().filter(|&&e| frame >= e).count();
+            let turn = if cut_turn && passed % 2 == 1 { 150.0 } else { 0.0 };
             let look = Mat4::from_rotation_y((12.0 * along + turn).to_radians())
                 .transform_vector3(FIELD_WALK);
             (eye, eye + 10.0 * look - Vec3::new(0.0, 2.2, 0.0))
@@ -1259,6 +1271,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             engine.poll()?;
         }
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
+        if let Some(file) = counters.as_mut() {
+            use std::io::Write;
+            let r = engine.renderer();
+            let st = r.stats();
+            let kinds: Vec<u64> = st.ownership.persistent.iter().map(|c| c.created).collect();
+            let hw = r.hardware_shadow_stats();
+            writeln!(file, "{}", serde_json::json!({
+                "frame": frame, "pipelines_created": st.pipelines.created, "created_by_kind": kinds,
+                "shadow_creations": st.ownership.shadow_creations, "target_creations": st.ownership.target_creations,
+                "lut_creations": st.ownership.lut_creations, "material_creations": st.ownership.material_creations,
+                "texture_creations": st.ownership.texture_creations, "light_creations": st.ownership.light_creations,
+                "blas_builds": hw.map(|h| h.blas_builds), "blas_updates": hw.map(|h| h.blas_updates),
+                "tlas_builds": hw.map(|h| h.tlas_builds), "pending_builds": hw.map(|h| h.pending_builds),
+                "as_bytes": hw.map(|h| h.estimated_as_bytes),
+                "visible_instances": report.scene.visible_instances,
+                "submitted_instances": report.scene.submitted_instances,
+            }))?;
+        }
         let written = keep_frames.as_ref().map_or(frame % args.every == 0 || frame + 1 == args.frames, |keep| keep.contains(&frame));
         let mut image_hash = None;
         let mut hdr_hash = None;
