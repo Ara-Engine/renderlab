@@ -1,26 +1,49 @@
-//! Measurement: `RENDERLAB_MEMORY_REPORT=PATH[,FRAME]` writes the device allocator's report at
-//! rendered frame FRAME (default 40), once per process: every live allocation grouped by its
-//! resource label (largest first), the allocated and reserved totals, and the memory blocks, so
-//! block slack (reserved minus allocated) shows beside the owners. Unset, nothing runs.
+//! Measurement: `RENDERLAB_MEMORY_REPORT=PATH[,FRAME,...]` writes the device allocator's report
+//! before the work of each listed frame (FRAME frames already rendered; default 40; 0 is the
+//! loaded scene before any frame), to PATH with `-FRAME` before its extension: every live
+//! allocation grouped by its resource label (largest first), the allocated and reserved
+//! totals and the memory blocks, so block slack (reserved minus allocated) shows beside the
+//! owners. Unset, nothing runs.
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Mutex;
 
-static WRITTEN: AtomicBool = AtomicBool::new(false);
+static WRITTEN: Mutex<Vec<u64>> = Mutex::new(Vec::new());
 
-/// Called once per rendered frame with the renderer's frame count.
-pub(crate) fn maybe_write(device: &wgpu::Device, frame: u64) {
+/// Called at the start of every frame with the frames rendered so far.
+pub(crate) fn maybe_write(device: &wgpu::Device, frames: u64) {
     let Some(value) = std::env::var_os("RENDERLAB_MEMORY_REPORT") else {
         return;
     };
     let value = value.to_string_lossy().into_owned();
-    let (path, at) = match value.rsplit_once(',').map(|(p, n)| (p, n.parse::<u64>())) {
-        Some((path, Ok(n))) => (path.to_owned(), n),
-        _ => (value.clone(), 40),
-    };
-    if frame != at || WRITTEN.swap(true, Ordering::Relaxed) {
+    let mut parts = value.split(',');
+    let path = parts.next().unwrap_or_default().to_owned();
+    let mut at: Vec<u64> = parts.filter_map(|n| n.trim().parse().ok()).collect();
+    if at.is_empty() {
+        at.push(40);
+    }
+    if !at.contains(&frames) {
         return;
     }
-    let _ = std::fs::write(&path, report_json(device, frame));
+    {
+        let mut written = WRITTEN
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if written.contains(&frames) {
+            return;
+        }
+        written.push(frames);
+    }
+    let file = std::path::Path::new(&path);
+    let stem = file
+        .file_stem()
+        .map_or("memory".into(), |s| s.to_string_lossy());
+    let ext = file
+        .extension()
+        .map_or("json".into(), |s| s.to_string_lossy());
+    let _ = std::fs::write(
+        file.with_file_name(format!("{stem}-{frames}.{ext}")),
+        report_json(device, frames),
+    );
 }
 
 fn report_json(device: &wgpu::Device, frame: u64) -> String {
