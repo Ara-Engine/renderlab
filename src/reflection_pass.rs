@@ -591,7 +591,7 @@ impl Renderer {
         let per = |n: u32| if pixels > 0 { f64::from(n) / f64::from(pixels) } else { 0.0 };
         let overflow_pixels = word(6);
         let json = format!(
-            "{{\"frame\":{PROBE_FRAME},\"glossy_pixels\":{pixels},\"strata_requested\":{requested},\"slots\":{slots},\"records\":{count},\"records_dropped\":{dropped},\"overflow_pixels\":{overflow_pixels},\"overflow_strata\":{},\"traced_under_5pc\":{{\"strata\":{},\"pixels\":{}}},\"contribution_under_0005\":{{\"strata\":{},\"pixels\":{}}},\"strata_per_glossy_pixel\":{:.3},\"records_per_glossy_pixel\":{:.3}}}\n",
+            "{{\"frame\":{PROBE_FRAME},\"glossy_pixels\":{pixels},\"strata_requested\":{requested},\"slots\":{slots},\"records\":{count},\"records_dropped\":{dropped},\"overflow_pixels\":{overflow_pixels},\"overflow_strata\":{},\"floored_inline\":{{\"strata\":{},\"pixels\":{}}},\"contribution_under_0005\":{{\"strata\":{},\"pixels\":{}}},\"strata_per_glossy_pixel\":{:.3},\"records_per_glossy_pixel\":{:.3}}}\n",
             requested.saturating_sub(slots),
             word(7),
             word(8),
@@ -829,7 +829,7 @@ impl Renderer {
                             allocator.1
                         );
                         let line = format!(
-                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"traced_under_5pc\":[{},{}],\"contribution_under_0005\":[{},{}]{memory}}}\n",
+                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}]{memory}}}\n",
                             r.frame.load(SeqCst),
                             word(2),
                             word(1),

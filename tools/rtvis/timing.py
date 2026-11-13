@@ -533,6 +533,9 @@ PLANS["comp6b"] = (
     [x for x in PLANS["comp5"] if x[0].startswith("q-") or "fix" in x[0]]
     + [(f"t-nonrt-{name}-{tag}-{k}", ["--path", "nonrt", "--fox", FOX, *extra, "--frames", "60"], env)
        for k in (1, 2) for name, extra in (("zero", []), ("few", STD)) for tag, env in (("default", {}), ("off", OFF))]
+    # The own-program switch's cost: the toon hero in a 0.2 glossy floor (a mixed frame).
+    + [(f"t-nonrt-toon-{tag}-{k}", ["--path", "nonrt", "--fox", FOX, *STD, "--diag", "floor=0.2", "--frames", "60"], env)
+       for k in (1, 2) for tag, env in (("default", {}), ("own", OWN))]
 )
 # The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
 # flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,

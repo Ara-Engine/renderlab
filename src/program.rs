@@ -247,7 +247,7 @@ pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
 /// program, and a receiver that does not fit, keeps the inline path (no entry, no zero).
 const PASS_GATE: [&str; 2] = [
     "    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}\n",
-    "    if RL_PASS && !mirror && RL_DEFERRED_PROGRAM && traced>=RL_COMPOSITE_FLOOR && rl_room_reserve(count,traced,lobe.weight) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;\n    }\n",
+    "    if RL_PASS && !mirror && RL_DEFERRED_PROGRAM && rl_composite_floor(traced,count) && rl_room_reserve(count,traced,lobe.weight) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;\n    }\n",
 ];
 const DEFERRED_PROGRAM_FLAG: [&str; 2] = [
     "const RL_DEFERRED_PROGRAM:bool=false;",

@@ -19,16 +19,21 @@ struct RlList { count:atomic<u32>, header:array<u32,3>, entries:array<vec4<u32>>
 // shading layout holds the resolve's phase at 60), cleared each frame before shading: word 2 sums
 // every glossy receiver's requested strata, so the room grows to the content; word 6 counts the
 // receivers that did not fit (inline that frame). Words 4 and 5 are the Mac thread's S4a.
-// Measurement runs (RL_ROOM_HISTOGRAM, src/program.rs) add: 7 and 8, the strata and receivers whose
-// traced fraction is under 5 %; 9 and 10, those whose traced fraction x reflectance weight is
-// under 0.005.
+// Measurement runs (RL_ROOM_HISTOGRAM, src/program.rs) add: 7 and 8, the strata and receivers the
+// floor keeps inline (traced fraction under RL_COMPOSITE_FLOOR, 5 %); 9 and 10, the listed ones
+// whose traced fraction x reflectance weight is under 0.005.
 @group(0) @binding(69) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;
 const RL_ROOM_HISTOGRAM:bool=false;
 const RL_PASS:bool=true;
 // A receiver whose traced fraction is under this keeps today's inline estimate (no reservation, no
-// entry, no composite): it renders exactly as the default without the pass, and near-cutoff bands
-// (Glint's navy) stay out of the room.
+// entry, no composite): it renders as the default without the pass, and near-cutoff bands stay out
+// of the room.
 const RL_COMPOSITE_FLOOR:f32=0.05;
+fn rl_composite_floor(traced:f32,count:u32)->bool {
+    if traced>=RL_COMPOSITE_FLOOR {return true;}
+    if RL_ROOM_HISTOGRAM {atomicAdd(&rl_room_stats[7],count);atomicAdd(&rl_room_stats[8],1u);}
+    return false;
+}
 // Whether this module's program reports its reflectance for the deferred composite (it declares
 // `const RL_DEFERRED`; src/program.rs `pass_block` sets it for deferred_variant modules). Only
 // such programs leave their glossy lobes to the pass; every other program keeps its inline
@@ -40,10 +45,7 @@ var<private> rl_room_first:u32;
 // not fit keeps its inline estimate this frame (no list entry), so no frame is ever scaled. Which
 // receivers overflow on such a frame follows the GPU's order; both estimators have the same mean.
 fn rl_room_reserve(count:u32,traced:f32,weight:f32)->bool {
-    if RL_ROOM_HISTOGRAM {
-        if traced<0.05 {atomicAdd(&rl_room_stats[7],count);atomicAdd(&rl_room_stats[8],1u);}
-        if traced*weight<0.005 {atomicAdd(&rl_room_stats[9],count);atomicAdd(&rl_room_stats[10],1u);}
-    }
+    if RL_ROOM_HISTOGRAM && traced*weight<0.005 {atomicAdd(&rl_room_stats[9],count);atomicAdd(&rl_room_stats[10],1u);}
     let first=atomicAdd(&rl_room_stats[2],count);
     if first+count<=rl_pass_frame.y {rl_room_first=first;return true;}
     atomicAdd(&rl_room_stats[6],1u);
