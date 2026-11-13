@@ -453,6 +453,8 @@ PLANS["comptime"] = [
     (f"t-{path}-{name}-comp{v}-{k}", ["--path", path, *extra, "--frames", "60"], COMP(v))
     for k in (1, 2) for path in ("nonrt", "rt") for name, extra in COMP_CLIPS for v in ("1", "0")
 ]
+# One lease, one reference run: the composite's probe, pictures and timing in a single call.
+PLANS["comp4"] = PLANS["compprobe"] + PLANS["comppics"] + PLANS["comptime"]
 # The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
 # flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,
 # paint 0.35), moving and still; `compare.py` crops the reflected edges, binary against binary.
