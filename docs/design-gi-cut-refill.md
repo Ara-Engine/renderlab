@@ -188,3 +188,56 @@ There is no default frame-40 queue flush. New secondary requests can first grow 
 later a shrinking queue can cross a slot-period boundary and admit more cells per frame.
 The cliff then comes when the queue drains. Timelines must join pass samples by renderer
 frame ID: the optional pass log can omit in-flight frames and complete them out of order.
+
+### Measured fixture limits (RTX 4070 SUPER, 1920 x 1080)
+
+Two interleaved visits per configuration and path, 400 still frames before the cut; the
+next 40 frames have complete GPU timestamp coverage joined by renderer frame ID. Timing
+used isolated `--timing` leases, no PNG/counter readbacks, and an explicit per-frame drain
+to retain every timestamp. These are drained GPU service times, not normal pipelined wall
+throughput. Pictures/counters were separate ordinary leases. Binary base: main `91b4527b`
+plus this experiment and the example measurement controls (build `772198af`).
+
+`settings` is `RENDERLAB_GI=cut_gather_ms=3;parent_standin=1`; `bounded` sets only
+`RENDERLAB_GI_BOUNDED_REFILL=1`. Default leaves both unset. Values pool the two visits.
+
+| Path / fixture | Configuration | Worst frame ms | p95 frame ms | Worst gather ms |
+|---|---|---:|---:|---:|
+| nonrt / cut | default | 14.22 | 12.61 | 3.73 |
+| nonrt / cut | settings | 13.40 | 8.81 | 0.59 |
+| nonrt / cut | bounded | 10.97 | 9.89 | 0.62 |
+| nonrt / forest | default | 122.14 | 57.77 | 43.14 |
+| nonrt / forest | settings | 150.17 | 33.55 | 6.34 |
+| nonrt / forest | bounded | 82.77 | 31.86 | 3.91 |
+| rt / cut | default | 11.13 | 7.63 | 0.87 |
+| rt / cut | settings | 11.07 | 6.85 | 0.46 |
+| rt / cut | bounded | 11.13 | 7.82 | 0.85 |
+| rt / forest | default | 146.40 | 15.75 | 2.48 |
+| rt / forest | settings | 143.56 | 14.15 | 1.65 |
+| rt / forest | bounded | 171.20 | 15.78 | 1.97 |
+
+The full-frame twice-steady target is **not met** on forest. Its first-view atmosphere
+and cell creation spikes remain, including on hardware where bounded changes no GI code.
+The gather ceiling does not bound these other passes. On software, the forest queue still
+has roughly 299,000 cells at +70 with bounded, versus 5 with default; the ceiling spreads
+work rather than eliminating it.
+
+Inspected software forest images show dark cell-shaped patches on the red pillar with
+bounded immediately after the cut. Whole-frame mean error can improve while those patches
+get worse, so a mean-only settling score does not certify this picture. This remains an
+experiment, default off. Actual Outpost results and pictures decide any later default.
+
+Whole-image RGB mean absolute error against the default run's late 32-frame mean,
+first offset with eight consecutive frames at or below two display codes:
+
+| Path / fixture | Default | Existing settings | Bounded |
+|---|---:|---:|---:|
+| nonrt / cut | 0 | 0 | 0 |
+| nonrt / forest | 6 | 15 | 2 |
+| rt / cut | 0 | 0 | 0 |
+| rt / forest | 9 | 9 | 9 |
+
+This is a **mean-error metric**, not a maximum-pixel threshold: no row meets an
+every-pixel-within-two-codes threshold through +70. For software forest at +70,
+bounded has 174,220 pixels over two codes and 18,814 over eight, versus default's
+38,717 and 7,755. The inspected pillar patches prevent a picture-pass claim.
