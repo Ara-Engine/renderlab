@@ -79,12 +79,15 @@ impl ProgramBins {
                 && args.len >= u64::from(dispatch.slots) * 16,
             "bin output buffer too short"
         );
+        // The kernel divides the extent by its workgroup, which is one list tile
+        // (program.rs list_tile: 4x4, or 8x4 under RENDERLAB_LIST_TILE).
+        let tile = crate::program::list_tile();
         let extent = [
             dispatch.groups[0]
-                .checked_mul(4)
+                .checked_mul(tile[0])
                 .context("bin dispatch width overflow")?,
             dispatch.groups[1]
-                .checked_mul(4)
+                .checked_mul(tile[1])
                 .context("bin dispatch height overflow")?,
             1,
         ];
