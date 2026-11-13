@@ -238,11 +238,11 @@ def lease(label, minutes, command):
     quarry = ["--quarry-lease"] if label.startswith("q-") else []
     while True:
         wait_ready(r, label)
-        # Islam's game comes first (P-RELIT brief): no GPU work while one runs. Report, don't wait.
+        # Headless GPU work may run while Islam plays (AGENTS.md, 2026-11-12); its timings are
+        # contended. The lease opens no windows and sends no input.
         games = [g["Name"] for g in r.state()["games"]]
         if games:
-            print("no lease: a game is running:", games, flush=True)
-            return 4
+            print("contended: a game is running:", games, flush=True)
         env = os.environ | {"N8_OWNER": OWNER, "N8_OUT": str(WORK / "lease")}
         code = sp.run(["py", "-3", "-B", str(REPO / "scripts/n8-run.py"), "--label", label, "--minutes", str(minutes),
                        *quarry, "--", *command], cwd=REPO, env=env).returncode
