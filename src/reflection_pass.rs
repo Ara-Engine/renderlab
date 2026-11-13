@@ -864,7 +864,7 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&pass.ranges.view) },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&pass.samples.view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&deferred[0].view) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&deferred.0.view) },
                 wgpu::BindGroupEntry { binding: 3, resource: pass.composite.value.as_entire_binding() },
             ],
         });

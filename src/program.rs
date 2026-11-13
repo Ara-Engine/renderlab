@@ -373,7 +373,21 @@ pub(crate) fn rl_pass_env() -> Option<bool> {
 }
 pub(crate) fn rl_deferred_env() -> Option<bool> {
     static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| env_switch("RENDERLAB_RL_DEFERRED"))
+    *ON.get_or_init(|| {
+        if rl_deferred_diag() {
+            Some(true)
+        } else {
+            env_switch("RENDERLAB_RL_DEFERRED")
+        }
+    })
+}
+/// `RENDERLAB_RL_DEFERRED=diag`: deferred reflections on, plus the untraced specular output
+/// (binding 63: the program's untraced specular, and the inline traced luminance in alpha) that
+/// identity tests read (the port's RL#79 fixture). The composite never reads it, so without
+/// `diag` no module declares or writes it and no backend allocates it.
+pub(crate) fn rl_deferred_diag() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_DEFERRED").as_deref() == Ok("diag"))
 }
 /// The mark a renderer whose device runs the compacted reflection pass by default (the non-RT
 /// path where the adapter holds it; reflection_pass.rs `default_on`) appends to its own traced
@@ -1217,9 +1231,26 @@ pub(crate) fn deferred_variant(composed: Composed) -> Composed {
         );
     let start = engine.len();
     Composed {
-        source: format!("{engine}{text}{entry}{DEFERRED_API}"),
+        source: format!("{engine}{text}{entry}{}", deferred_api()),
         program: start..start + text.len(),
     }
+}
+/// DEFERRED_API as composed: with `RENDERLAB_RL_DEFERRED=diag` whole, otherwise without the
+/// untraced output (binding 63's declaration and both of its stores).
+fn deferred_api() -> String {
+    if rl_deferred_diag() {
+        return DEFERRED_API.to_owned();
+    }
+    let mut api = DEFERRED_API.to_owned();
+    for line in [
+        "@group(0) @binding(63) var rl_deferred_untraced:texture_storage_2d<rgba16float,write>;\n",
+        "    textureStore(rl_deferred_untraced,pixel,vec4<f32>(0.0));\n",
+        "    textureStore(rl_deferred_untraced,pixel,vec4<f32>(rl_reported[1]*t,dot(rl_specular.rgb,RL_LUMA)));\n",
+    ] {
+        assert_eq!(api.matches(line).count(), 1, "deferred API line {line}");
+        api = api.replacen(line, "", 1);
+    }
+    api
 }
 
 // ---- View modes (docs/design-id-output.md) ----

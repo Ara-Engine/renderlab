@@ -754,9 +754,10 @@ pub(super) struct Targets {
     /// reconstruction's parity) and its frame record; traced primaries only.
     pub held: Option<HeldTargets>,
     /// Deferred reflections (`program::deferred_variant`, `RENDERLAB_RL_DEFERRED=1`): each
-    /// glossy pixel's reflectance with its traced fraction, and its untraced specular,
-    /// written by shading at bindings 62 and 63 for the composite after it.
-    pub deferred: Option<[Depth; 2]>,
+    /// glossy pixel's reflectance with its traced fraction (binding 62, which the composite
+    /// after shading reads), and with `RENDERLAB_RL_DEFERRED=diag` its untraced specular
+    /// (binding 63, for identity tests only).
+    pub deferred: Option<(Depth, Option<Depth>)>,
     /// U-RTVIS: the reflection history (shaders/reflections_history.wgsl), both paths.
     pub rl_history: RlHistoryTargets,
     /// U-RTVIS: the reflection pass's L, H, R and D while RENDERLAB_RL_PASS=1.
@@ -1231,7 +1232,11 @@ impl PrimaryState {
             }
             // Deferred reflections' outputs (`Targets::deferred`).
             if reflection_pass::deferred(device) {
-                entries.extend([image(62, F::Rgba16Float), image(63, F::Rgba16Float)]);
+                entries.push(image(62, F::Rgba16Float));
+                // The untraced output only for identity tests (RENDERLAB_RL_DEFERRED=diag).
+                if crate::program::rl_deferred_diag() {
+                    entries.push(image(63, F::Rgba16Float));
+                }
             }
             // S4a: TR1's record and both history sides, and the hit stage's counter
             // (hit_reuse_gpu.rs).
@@ -2437,8 +2442,12 @@ impl Renderer {
                 ),
                 tiles: target("primary tile coverage", tiles, wgpu::TextureFormat::R32Uint),
                 deferred: reflection_pass::deferred(&self.device).then(|| {
-                    ["deferred reflectance", "deferred untraced specular"]
-                        .map(|label| target(label, size, wgpu::TextureFormat::Rgba16Float))
+                    let deferred = |label| target(label, size, wgpu::TextureFormat::Rgba16Float);
+                    (
+                        deferred("deferred reflectance"),
+                        crate::program::rl_deferred_diag()
+                            .then(|| deferred("deferred untraced specular")),
+                    )
                 }),
             };
             let state = self.view.primary.as_mut().unwrap();
@@ -2571,9 +2580,11 @@ impl Renderer {
                     entries.push((SOFTWARE_REFLECTIONS, geometry.as_entire_binding()));
                 }
                 // Deferred reflections' outputs (`Targets::deferred`).
-                if let Some([reflectance, untraced]) = &t.deferred {
+                if let Some((reflectance, untraced)) = &t.deferred {
                     entries.push((62, R::TextureView(&reflectance.view)));
-                    entries.push((63, R::TextureView(&untraced.view)));
+                    if let Some(untraced) = untraced {
+                        entries.push((63, R::TextureView(&untraced.view)));
+                    }
                 }
                 entries.extend(reuse.iter().cloned());
                 // MP1: the same group plus the slot table and tile lists.
