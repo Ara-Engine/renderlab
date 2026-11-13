@@ -187,9 +187,25 @@ def state(owned=()):
     return dict(utc=utc(), available_mbytes=mb, games=games, gpu_processes=gpu, builds=builds, gpu=smi.stdout.strip())
 
 
+def timing_lease_running():
+    """Another lease holds the GPU, or another tool marks a build slot with a timing lease's label."""
+    if LOCK.exists():
+        return True
+    for slot in BUILD_SLOTS:
+        try:
+            if "timing" in json.loads((slot / "owner.json").read_text()).get("label", ""):
+                return True
+        except Exception:
+            pass
+    return False
+
+
 def take_timing_hold(label):
     """Take TIMING_HOLD (atomic mkdir), then wait at most 10 minutes for the running builds' slots
-    to clear. Released at exit. False if another timing lease holds it."""
+    to clear. Released at exit. False (the caller defers) if another timing lease holds it or the GPU
+    is busy: a waiting timing lease must not hold every build slot while another lease runs."""
+    if timing_lease_running():
+        return False
     try:
         TIMING_HOLD.mkdir()
     except FileExistsError:
@@ -231,7 +247,7 @@ def main():
             p.error("a timing lease is at most 5 minutes")
         a.no_build_contention = True
         if not take_timing_hold(a.label):
-            print("DEFERRED: another timing lease holds the build slots", flush=True)
+            print("DEFERRED: the GPU or another timing lease is busy; a timing lease holds the build slots only once it can run", flush=True)
             return 3
     if a.contended_screen:
         a.runtime_memory_mbytes = 3072
