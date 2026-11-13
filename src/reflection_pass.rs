@@ -16,6 +16,9 @@ pub(super) const PASS_FRAME: u32 = 58;
 const DISTANCE: u32 = 59;
 /// The deferred composite's trace (rl_trace_pixels): its counters and per-pixel slot ranges.
 pub(super) const STATS: u32 = 60;
+/// The same counters in the primary shading layout, where 60 is the resolve's phase uniform
+/// (primary_ray_gpu.rs RL_PHASE): the room reservations (`rl_room_reserve`).
+pub(super) const ROOM_STATS: u32 = 69;
 /// The counters: the trace's four words, the Mac thread's S4a (4, 5), the receivers that did not
 /// fit the room (6), and measurement runs' low-weight strata and receivers (7-10).
 const STATS_BYTES: u64 = 64;
@@ -96,7 +99,7 @@ pub(super) fn shade_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
         write(LOBE_A, F::Rgba32Float),
         write(LOBE_B, F::Rgba32Uint),
         uniform(PASS_FRAME, 16),
-        buffer(STATS, wgpu::BufferBindingType::Storage { read_only: false }, STATS_BYTES),
+        buffer(ROOM_STATS, wgpu::BufferBindingType::Storage { read_only: false }, STATS_BYTES),
     ]
 }
 

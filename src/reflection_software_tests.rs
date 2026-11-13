@@ -487,7 +487,10 @@ fn the_reflection_pass_belongs_to_the_marked_renderer() {
         Stage::Traced,
         false,
     ));
-    assert!(on.source.contains("rl_room_reserve(count,traced,lobe.weight)"));
+    assert!(
+        on.source
+            .contains("rl_room_reserve(count,traced,lobe.weight)")
+    );
     assert!(on.source.contains("const RL_DEFERRED_PROGRAM:bool=true;"));
     assert_eq!(&on.source[on.program.clone()], crate::STANDARD_PROGRAM);
     let off = with_reflection_history(compose(
@@ -530,6 +533,43 @@ fn an_engine_default_leaves_other_compositions_inline() {
         assert!(!source.contains("rl_deferred_store"));
     }
     drop(engine);
+}
+
+/// Binding 63 (the untraced specular, for identity tests) exists only with
+/// RENDERLAB_RL_DEFERRED=diag: without it the deferred module neither declares nor writes it,
+/// and the reflectance (62) the composite reads stays.
+#[test]
+fn deferred_untraced_output_only_with_diag() {
+    for head in crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap() {
+        let source = deferred_standard(&head).source;
+        assert!(source.contains("@group(0) @binding(62) var rl_deferred_reflectance"));
+        assert_eq!(
+            source.contains("rl_deferred_untraced"),
+            crate::program::rl_deferred_diag()
+        );
+    }
+}
+
+/// The reflection pass's shading-layout entries take binding numbers the primary shading
+/// layout's other entries do not (60 is the resolve's phase uniform; a clash failed device
+/// layout creation on the non-RT default, which naga cannot see).
+#[test]
+fn reflection_pass_shading_bindings_are_their_own() {
+    use crate::renderer::primary_ray_gpu::reflection_pass::shade_entries;
+    let taken = crate::renderer::primary_ray_gpu::shading_layout_bindings();
+    let mut seen = std::collections::HashSet::new();
+    for entry in shade_entries() {
+        assert!(
+            !taken.contains(&entry.binding),
+            "binding {} is taken",
+            entry.binding
+        );
+        assert!(
+            seen.insert(entry.binding),
+            "binding {} twice",
+            entry.binding
+        );
+    }
 }
 
 /// RENDERLAB_RL_HIT_REUSE (S4a): with the switch, every traced module that names the cache-hit
@@ -620,20 +660,5 @@ fn hit_reuse_reaches_the_trace_kernel_and_skips_film_and_glass() {
     assert!(!glass.contains("rl_hit_reuse") && !glass.contains("rl_cache_hit_inner"));
     if reuse.is_some() {
         validate(&film.source);
-    }
-}
-
-/// Binding 63 (the untraced specular, for identity tests) exists only with
-/// RENDERLAB_RL_DEFERRED=diag: without it the deferred module neither declares nor writes it,
-/// and the reflectance (62) the composite reads stays.
-#[test]
-fn deferred_untraced_output_only_with_diag() {
-    for head in crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap() {
-        let source = deferred_standard(&head).source;
-        assert!(source.contains("@group(0) @binding(62) var rl_deferred_reflectance"));
-        assert_eq!(
-            source.contains("rl_deferred_untraced"),
-            crate::program::rl_deferred_diag()
-        );
     }
 }
