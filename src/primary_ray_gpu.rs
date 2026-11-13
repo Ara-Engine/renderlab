@@ -866,11 +866,14 @@ pub(super) struct HeldTargets {
 /// Group-0 bindings for one hit/HDR/fresh/TLAS combination.
 struct Bindings {
     /// Hit records, HDR, fresh targets, TLAS and list-buffer generations, then M7-R1n's
-    /// software reflection geometry generation.
+    /// software reflection geometry generation, then U-RTVIS's composite room (its growth
+    /// rebuilds the groups that hold R, H and the glossy-pixel list without restarting TR1,
+    /// whose restart key reads only the first three).
     key: (
         wgpu::Texture,
         wgpu::Texture,
         Option<wgpu::Texture>,
+        u64,
         u64,
         u64,
         u64,
@@ -2484,6 +2487,7 @@ impl Renderer {
             scene_generation,
             lists.map_or(0, |l| l.generation),
             state.reflections.as_ref().map_or(0, |r| r.generation),
+            t.rl_pass.as_ref().map_or(0, |p| p.room),
         );
         if state.bindings.as_ref().is_none_or(|b| b.key != key) {
             let reconstruction_changed = state

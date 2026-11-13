@@ -785,10 +785,12 @@ impl Renderer {
             r.state.store(1, SeqCst);
         }
     }
-    /// Grows the composite's room when a read-back frame asked for more than it holds: R and H
-    /// to the next power of two above 1.25 times the request, at most ROOM_PER_PIXEL a pixel; the
-    /// frame's bindings are dropped, so it runs once a frame before `prepare_primary` builds them
-    /// (the trace and hit groups belong to them; the composite's group is made each frame).
+    /// Grows the composite's room when a read-back frame asked for more than it holds: R, H and
+    /// the list to the next power of two above 1.25 times the request, at most ROOM_PER_PIXEL a
+    /// pixel. The room is part of the frame bindings' key, so `prepare_primary`, which runs
+    /// after this each frame, rebuilds the groups that hold them (the composite's group is made
+    /// each frame) without dropping the bindings: dropping them restarted TR1 on every pixel,
+    /// and every growth frame showed the composite's raw per-frame grain.
     pub(crate) fn rl_room_grow(&mut self) {
         use std::sync::atomic::Ordering::SeqCst;
         let Some(pass) = self
@@ -866,7 +868,6 @@ impl Renderer {
         pass.hits = hits;
         pass.list = list;
         pass.room = room;
-        state.bindings = None;
     }
     fn rl_room_samples(&self, room: u64) -> Depth {
         let width = SAMPLE_ROW;
