@@ -47,8 +47,9 @@
 //! terrain (16 tiles) under trees and bushes of cutout cards and walks the field walk's camera
 //! through it: Outpost's layered ground and foliage, for the RT visibility pass's cost.
 //! `forest=bare` is the same terrain and walk without the foliage.
-//! `--diag far=1` (U-FIXED) holds a camera 40 m up over a 2.4 km ground with three columns at
-//! 100, 200 and 800 m whose sun shadows cross the view (the sun's coverage, Ara #185 item 33).
+//! `--diag far=1` (U-FIXED) holds a camera 40 m up over a 2.4 km ground with columns at 80,
+//! 200, 300 and 800 m whose sun shadows cross the view (the sun's coverage, Ara #185 item 33);
+//! `far=move` slides that camera sideways 0.25 m a frame (far shadows in motion).
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -395,10 +396,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `forest=bare`: the same terrain and walk without the trees and bushes.
     let bare = scene_key("forest", "bare");
     let forest = scene_key("forest", "1") || bare;
-    // `far=1` (U-FIXED, the sun's coverage, Ara #185 item 33): a 2.4 km ground and three
-    // columns at 100, 200 and 800 m north of a camera 40 m up with a 2 km far plane, whose
-    // shadows cross the view: sun shadows at game-scale distances, on both paths.
-    let far = scene_key("far", "1");
+    // `far=1` (U-FIXED, the sun's coverage, Ara #185 item 33): a 2.4 km ground and columns
+    // at 80, 200, 300 and 800 m north of a camera 40 m up with a 2 km far plane, whose shadows
+    // cross the view: sun shadows at game-scale distances, on both paths. `far=move` slides the
+    // camera east 0.25 m a frame.
+    let far_move = scene_key("far", "move");
+    let far = scene_key("far", "1") || far_move;
     let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
@@ -723,7 +726,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     if far {
         let column = material(&mut engine, [0.7, 0.7, 0.72], 0.0, 0.8)?;
-        for d in [100.0f32, 200.0, 800.0] {
+        for d in [80.0f32, 200.0, 300.0, 800.0] {
             let (width, height) = (d / 25.0, d / 8.0);
             engine.spawn(
                 cube,
@@ -1134,9 +1137,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             (eye, target)
         };
         let (eye, target, far_plane) = if far {
+            let slide = Vec3::new(if far_move { 0.25 * frame as f32 } else { 0.0 }, 0.0, 0.0);
             (
-                anchor + Vec3::new(0.0, 40.0, 0.0),
-                anchor + Vec3::new(0.0, 0.0, -400.0),
+                anchor + slide + Vec3::new(0.0, 40.0, 0.0),
+                anchor + slide + Vec3::new(0.0, 0.0, -400.0),
                 2000.0,
             )
         } else {
