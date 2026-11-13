@@ -9,7 +9,7 @@ use renderlab::{
 };
 #[path = "../../../support/ara_game_scene.rs"]
 mod scene;
-use scene::{GLOW, Options, STOPS, animate, build, eye, hero, look, settings};
+use scene::{GLOW, Options, STOPS, animate, build, eye, glass_pane, hero, look, settings};
 
 const SIZE: [u32; 2] = [480, 270];
 
@@ -157,6 +157,30 @@ fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
             (centre[0] - at[0]).hypot(centre[1] - at[1]) < 1.5 * r * scale + 2.
         })
     };
+    // The glass pane reflects and refracts the hero (a grazing face's refraction lands far
+    // across the frame), so a pixel on the pane, its projected box grown by two pixels, can
+    // show the hero too.
+    let pane = glass_pane();
+    let (low, high) = (0..8).fold(
+        ([f32::INFINITY; 2], [f32::NEG_INFINITY; 2]),
+        |(low, high), k| {
+            let corner = Vec3::new(
+                if k & 1 == 0 { -0.5 } else { 0.5 },
+                if k & 2 == 0 { -0.5 } else { 0.5 },
+                if k & 4 == 0 { -0.5 } else { 0.5 },
+            );
+            let ([x, y], _) = project(pane.transform_point3(corner));
+            (
+                [low[0].min(x), low[1].min(y)],
+                [high[0].max(x), high[1].max(y)],
+            )
+        },
+    );
+    let on_pane = |i: usize| {
+        let x = (i as u32 % SIZE[0]) as f32 + 0.5;
+        let y = (i as u32 / SIZE[0]) as f32 + 0.5;
+        x >= low[0] - 2. && x <= high[0] + 2. && y >= low[1] - 2. && y <= high[1] + 2.
+    };
     let bulb_spheres = [
         (Vec3::new(0., 3.55, -3.), 0.12),
         (Vec3::new(3.22, 3.2, 2.78), 0.1),
@@ -184,7 +208,7 @@ fn the_game_scene_builds_and_renders_through_the_engine_calls() -> Result<()> {
         if own != one {
             heroes += 1;
             ensure!(
-                near(&spheres, i),
+                near(&spheres, i) || on_pane(i),
                 "the hero's program changed ({x}, {y}), away from the hero: {own:?} against {one:?}"
             );
         }
