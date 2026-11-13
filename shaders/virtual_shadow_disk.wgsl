@@ -152,12 +152,14 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
             let p=vsm_light(world);
             let pages=vsm.counts.y;
             let reach=vd_slope()*max(vsm.depth.w-p.z,0.0);
+            // The lookup's height-band dither may take a band's top from the next coarser level.
+            let keep=1.0-select(0.0,VD_HBAND,vd_hband_on());
             for(var l=plain;l<vsm.counts.x;l+=1u) {
                 let texel=vsm_texel(l);
                 var r=min(reach,f32(VD_R)*texel)+2.0*texel;
                 if l+1u==vsm.counts.x {
                     var cell=texel;
-                    for(var m=0u;m<VD_MIPS && f32(VD_R)*cell<reach;m+=1u) {cell*=2.0;}
+                    for(var m=0u;m<VD_MIPS && f32(VD_R)*cell*keep<reach;m+=1u) {cell*=2.0;}
                     r=max(r,(f32(VD_R)+1.0)*cell);
                 }
                 let page=f32(VSM_PAGE)*texel;
@@ -170,7 +172,7 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
                         vsm_requests[(l*pages+y)*pages+x]=1u;
                     }
                 }
-                if l>=level && f32(VD_R)*texel>=reach {break;}
+                if l>=level && f32(VD_R)*texel*keep>=reach {break;}
             }
         }
     }
@@ -222,6 +224,18 @@ override VD_PEEL2:bool=true;
 // texel, as a coarser level rasterized at its centres would hold); false: the cell is its
 // highest texel, which widens every occluder by up to a cell.
 override VD_MIP_POINT:bool=true;
+// Height-band dither: each level's band (and each max-mip band above the coarsest level) hands
+// its top VD_HBAND fraction to the next coarser one with a probability rising across it, per
+// pixel and TR1 frame, so TR1 averages the two texel sizes where an occluder's height above the
+// receiver crosses a band: the 2x step that slid along long far shadows. Only while TR1
+// jitters (vd.size.z > 0) and has VD_HBAND_AFTER frames of history (vd.size.w): a cut's first
+// frames keep the plain bands, since the dither shows as stipple until TR1 averages it. 0: off.
+// Off by default for now (2026-11-14): on Glint's flight view the dither widens a dotted line of
+// light (empty map texels along a caster's shared triangle edge) into beads. Screens and the
+// later flip: RENDERLAB_VD=VD_HBAND=0.25.
+override VD_HBAND:f32=0.0;
+override VD_HBAND_AFTER:f32=2.0;
+fn vd_hband_on()->bool {return VD_HBAND>0.0 && vd.size.z>0.0 && vd.size.w>=VD_HBAND_AFTER;}
 // Screens: 1 writes lit before any work (dispatch and page work only), 2 after the receiver's
 // setup, 3 skips the map windows.
 override VD_SKIP:u32=0u;
@@ -294,6 +308,8 @@ struct VdPixel {
     // The disk in direction space (light xy per unit of height): its centre and radius, and
     // the largest slope of its directions from the map's axis.
     centre:vec2<f32>,radius:f32,slope:f32,
+    // Each band's top as a fraction of its plain top (VD_HBAND's dither; 1: plain).
+    band:f32,
 };
 var<private> vd_px:VdPixel;
 // The blocked directions so far.
@@ -318,6 +334,12 @@ fn vd_prepare(id:vec2<u32>) {
     if layer==VSM_NONE {return;}
     let l=-light.travel_outer.xyz;
     vd_px.valid=true;
+    vd_px.band=1.0;
+    if vd_hband_on() {
+        // Interleaved gradient noise stepped by the golden ratio each TR1 frame.
+        let ign=fract(52.9829189*fract(dot(vec2<f32>(id),vec2<f32>(0.06711056,0.00583715))));
+        vd_px.band=1.0-VD_HBAND*fract(ign+0.61803398875*vd.size.z);
+    }
     vd_px.thin=normal.w<0.0;
     vd_px.level=textureLoad(vsm_level_in,p,0).x;
     vd_px.world=world.xyz;
@@ -464,7 +486,7 @@ fn vd_map() {
     for(var level=vd_px.level;level<=last;level+=1u) {
         if lo>=ceiling {break;}
         let texel=vsm_texel(level);
-        let hi=vd_band(level);
+        let hi=vd_band(level)*vd_px.band;
         let origin=vsm.levels[level].origin.xy;
         let x=(p.xy-origin)/texel;
         let r=min(slope*min(ceiling,hi)/texel,f32(VD_R));
@@ -491,7 +513,7 @@ fn vd_map() {
     for(var mip=1u;mip<=VD_MIPS;mip+=1u) {
         if lo>=ceiling {break;}
         let cell=texel*f32(1u<<mip);
-        let hi=select(f32(VD_R)*cell/slope,3.4e38,mip==VD_MIPS);
+        let hi=select(f32(VD_R)*cell/slope*vd_px.band,3.4e38,mip==VD_MIPS);
         let s=side>>mip;
         let x=(p.xy-origin)/cell;
         let r=min(slope*min(ceiling,hi)/cell,f32(VD_R));

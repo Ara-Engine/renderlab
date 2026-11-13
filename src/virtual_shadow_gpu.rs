@@ -611,6 +611,8 @@ const DISK_RADIUS: u32 = 3;
 /// WGSL `VdFrame`: the world-to-clip matrix, the image size, the 65 y-rank masks and the 64
 /// sample positions.
 const DISK_FRAME_BYTES: u64 = 80 + 33 * 16 + 32 * 16;
+/// `VdFrame::size.w` (after the 64-byte clip matrix and size.xyz).
+const DISK_HISTORY_OFFSET: u64 = 76;
 /// The disk lookup's 64 sample directions (tools/n-vsm1/pattern.py): sample s has the s-th
 /// smallest x in the disk, and this is its y rank. Both coordinates sit at the 64 quantiles of
 /// the disk's marginal distribution (`disk_quantile`). No sample lies outside the disk, and the
@@ -1697,11 +1699,11 @@ impl Renderer {
     /// Frames without TR1, Map and Hybrid keep one batch. P-RELIT: they also take TR1's
     /// restart zones, where a receiver evaluates the restart count instead.
     pub(super) fn prepare_virtual_sampling(&mut self) {
-        let Some((rays, restart_rays, zones)) = self
+        let Some((rays, restart_rays, zones, history)) = self
             .view
             .reconstruction_state
             .as_ref()
-            .map(|r| (r.plan.shadow_rays, r.plan.restart_rays, r.zones))
+            .map(|r| (r.plan.shadow_rays, r.plan.restart_rays, r.zones, r.plan.history_frames))
             .filter(|_| self.view.reconstruction_frame.is_some())
         else {
             return;
@@ -1709,6 +1711,15 @@ impl Renderer {
         let Some(state) = self.view.virtual_shadows.as_ref() else {
             return;
         };
+        // U-FIXED: `VdFrame::size.w`, TR1's frames of history; the Disk lookup's height-band
+        // dither waits for `VD_HBAND_AFTER` of them, so a cut's first frames show no stipple.
+        if state.settings.lookup == VirtualLookup::Disk
+            && let Some(r) = state.resources.as_ref()
+        {
+            self.queue
+                .write_buffer(&r.disk_frame, DISK_HISTORY_OFFSET, &(history as f32).to_ne_bytes());
+            self.uploads.shadows += 4;
+        }
         if !matches!(
             state.settings.lookup,
             VirtualLookup::Exact | VirtualLookup::Surface
