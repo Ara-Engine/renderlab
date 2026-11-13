@@ -137,9 +137,12 @@ fn rl_hit_reuse(record:vec4<u32>,d:vec3<f32>,footprint:f32)->vec4<f32> {
     if RL_REUSE_MODE==1u || RL_REUSE_MODE==2u {return vec4<f32>(vec3<f32>(1.0/lighting.exposure),1.0);}
     return vec4<f32>(exposed/lighting.exposure,1.0);
 }
+// Whether the last rl_cache_hit call reused the hit (the hit kernel counts it).
+var<private> rl_reused:bool;
 // The cache-hit hook, reuse first (RL_REUSE_MODE's measurement forms short-circuit it).
 fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> {
     let reused=rl_hit_reuse(record,d,cone);
+    rl_reused=reused.w>0.0;
     if RL_REUSE_MODE==2u {return vec4<f32>(vec3<f32>(1.0/lighting.exposure),1.0);}
     if RL_REUSE_MODE==3u {return vec4<f32>(0.0,0.0,0.0,1.0);}
     if reused.w>0.0 {return reused;}

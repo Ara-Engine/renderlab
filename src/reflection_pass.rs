@@ -632,7 +632,13 @@ impl Renderer {
         let (pixels, slots, requested, dropped) = (word(0), word(1), word(2), word(3));
         // S4a: hits reused before the H append, beside the records appended (`count`).
         let reused = crate::program::hit_reuse()
-            .map(|_| format!(",\"reused\":{},\"appended\":{count}", word(4)))
+            .map(|_| {
+                format!(
+                    ",\"reused\":{},\"appended\":{count},\"hit_reused\":{}",
+                    word(4),
+                    word(5)
+                )
+            })
             .unwrap_or_default();
         if crate::program::rl_deferred() {
             // The strata counter: trace slots (strata) and hit records per glossy pixel.

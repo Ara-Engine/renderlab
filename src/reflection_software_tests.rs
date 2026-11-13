@@ -478,6 +478,11 @@ fn hit_reuse_composes_on_every_traced_module() {
         assert_eq!(source.matches("fn rl_cache_hit(").count(), 1);
         assert_eq!(source.matches("fn rl_cache_hit_inner(").count(), 1);
         assert_eq!(source.matches("fn tr1_relit(").count(), 1);
+        // Only the hit module counts its reused hits (binding 78).
+        assert_eq!(
+            source.contains("atomicAdd(&rl_hit_stats[5],1u);"),
+            source.contains("fn reflection_hits(")
+        );
         let module = naga::front::wgsl::parse_str(source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
         naga::valid::Validator::new(

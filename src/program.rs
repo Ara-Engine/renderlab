@@ -1217,6 +1217,24 @@ pub(crate) fn compose_hits(
         );
         composed.source = composed.source.replacen(HITS_MINE, HITS_MINE_LIST, 1);
     }
+    if hit_reuse().is_some() {
+        // S4a at the hit stage: count the hits the hook reused (word 5 of the trace counters,
+        // after U-RTVIS's four and the trace stage's `reused`). Both edits follow the program.
+        const CACHED: &str = "        textureStore(rl_hit_samples_out,at_slot,vec4<f32>(rl_finite(expose(cached.rgb)),1.0));\n";
+        assert_eq!(
+            composed.source.matches(CACHED).count(),
+            1,
+            "hit reuse: the hit count seam"
+        );
+        composed.source = composed.source.replacen(
+            CACHED,
+            &format!("{CACHED}        if rl_reused {{atomicAdd(&rl_hit_stats[5],1u);}}\n"),
+            1,
+        );
+        composed.source.push_str(
+            "@group(0) @binding(78) var<storage,read_write> rl_hit_stats:array<atomic<u32>,8>;\n",
+        );
+    }
     composed
 }
 /// shaders/reflection_hits.wgsl's per-program filter, and its mixed-frame replacement: the

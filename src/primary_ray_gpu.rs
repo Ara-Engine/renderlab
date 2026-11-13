@@ -1224,8 +1224,10 @@ impl PrimaryState {
             if crate::program::rl_deferred() {
                 entries.extend([image(62, F::Rgba16Float), image(63, F::Rgba16Float)]);
             }
-            // S4a: TR1's record and both history sides (hit_reuse_gpu.rs).
+            // S4a: TR1's record and both history sides, and the hit stage's counter
+            // (hit_reuse_gpu.rs).
             entries.extend(hit_reuse_gpu::layout_entries());
+            entries.extend(hit_reuse_gpu::hit_stats_entry());
             entries
         });
         let shade_bindings = shade_entries
@@ -2545,6 +2547,7 @@ impl Renderer {
                     // The Mac thread's reflection_hits reads H and writes R.
                     entries.push((super::reflection_hits::HITS, pass.hits.value.as_entire_binding()));
                     entries.push((super::reflection_hits::SAMPLES, R::TextureView(&pass.samples.view)));
+                    entries.extend(hit_reuse_gpu::hit_stats_binding(&pass.stats.value));
                 }
                 if matches!(shading, Shading::Hard) {
                     entries.push((23, R::TextureView(&t.epsilon.view)));
