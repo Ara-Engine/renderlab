@@ -77,7 +77,7 @@ fn rl_cast(origin:vec3<f32>,d:vec3<f32>,tmin:f32)->RlCast {
 // history of at most RL_HISTORY_CAP x count strata; one that moved over a pixel since the
 // previous frame keeps at most that / RL_HISTORY_MOVING (its reflection moves with the
 // parallax). src/program.rs RENDERLAB_RL_HISTORY_TUNE sets them for measurement.
-const RL_HISTORY_STRATA:u32=1u;
+const RL_HISTORY_STRATA:u32=4u;
 // Rough lobes (perceptual roughness RL_HISTORY_ROUGH and up) trace RL_HISTORY_ROUGH_STRATA strata a
 // frame instead: their reflection is noisier per stratum.
 const RL_HISTORY_ROUGH_STRATA:u32=4u;

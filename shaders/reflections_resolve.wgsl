@@ -100,7 +100,7 @@ const RL_ATROUS_SIGMA:f32=4.0;
 const RL_ATROUS_DEPTH:f32=0.04;
 const RL_ATROUS_SMOOTH:f32=0.1;
 // The share of the lobe's screen footprint the a-trous span may reach.
-const RL_ATROUS_FOOTPRINT:f32=1.0;
+const RL_ATROUS_FOOTPRINT:f32=0.03;
 fn rl_atrous_tap(i:i32)->f32 { return select(select(3.0/8.0,1.0/4.0,abs(i)==1),1.0/16.0,abs(i)==2); }
 fn rl_atrous(p:vec2<i32>,step:i32,src:i32,dst:i32) {
     let size=vec2<i32>(textureDimensions(rl_history));

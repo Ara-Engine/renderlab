@@ -108,14 +108,14 @@ const RL_SPLIT: [(&str, &str); 4] = [
 ];
 /// U-RTVIS reflection history (shaders/reflections_history.wgsl): the wgpu renderer's primary
 /// shading modules bind it (group 0, bindings 54 and 55), so only they replace the stubs.
-/// Off by default: under a still camera its held glossy picture is slightly grainier than
-/// main's (docs/rtvis.md). `RENDERLAB_RL_HISTORY=1` composes it; it then reads history only
-/// while the camera holds still (temporal_reconstruction.rs), so moving frames trace as without it.
+/// On by default, with the resolve pass (`rl_resolve_pass_on`): glossy receivers trace four
+/// strata a frame into the history and rl_resolve (docs/rtvis.md). `RENDERLAB_RL_HISTORY=0`
+/// keeps the stubs: every glossy receiver traces its full set every frame.
 const REFLECTION_HISTORY: &str = include_str!("../shaders/reflections_history.wgsl");
 const RL_HISTORY_STUBS: [&str; 2] = ["// ---- rl history stubs ----\n", "// ---- end of rl history stubs ----\n"];
 pub(crate) fn rl_history_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY").map_or(true, |v| v != "0"))
 }
 /// U-RTVIS measurement: `RENDERLAB_RL_HISTORY_TUNE=strata=S,cap=C,moving=M,sigma=K` replaces
 /// reflections.wgsl's RL_HISTORY_STRATA, _CAP, _MOVING and _SIGMA.
@@ -145,11 +145,12 @@ pub(crate) fn rl_resolve_on() -> bool {
     *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE").is_ok_and(|v| v == "1"))
         || rl_resolve_pass_on()
 }
-/// U-RTVIS: `RENDERLAB_RL_RESOLVE_PASS=1` (with the history on) shows rl_resolve's output, a pass
-/// after shading (shaders/reflections_resolve.wgsl), and reads history under motion too.
+/// U-RTVIS: with the history on, the frame's shading shows rl_resolve's output (a pre-pass, the
+/// resolve, then the shading pass; shaders/reflections_resolve.wgsl) and reads history under
+/// motion too. On by default; `RENDERLAB_RL_RESOLVE_PASS=0` keeps the history to still frames.
 pub(crate) fn rl_resolve_pass_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE_PASS").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE_PASS").map_or(true, |v| v != "0"))
 }
 /// U-RTVIS reflection pass (src/reflection_pass.rs): `RENDERLAB_RL_PASS=1` writes glossy
 /// receivers' lobes from primary shading (shaders/reflections_lobe.wgsl, group 0 bindings 56-58)
