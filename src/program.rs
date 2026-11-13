@@ -2466,7 +2466,8 @@ pub(crate) fn material_variant_with(
     // Ray-traced heads get the trace module's edge repair, so the record carries the sun
     // path's receiver; the others (no camera rays) store the trace point's receiver.
     let repairs = composed.source.contains("enable wgpu_ray_query_vertex_return;")
-        && composed.source.contains("var<storage,read> primary_indices:");
+        && composed.source.contains("var<storage,read> primary_indices:")
+        && !(role == MaterialRole::Write && probe == Some(MaterialProbe::PlainReceiver));
     if repairs {
         composed.source.push_str(material_trace_helpers());
         // The soft head's own rays need no `ray_query`; the repair's probes do. The
@@ -2532,7 +2533,8 @@ fn material_reader_edits(mut composed: Composed, entry: usize) -> Option<Compose
 /// kernel does and also loads and unpacks the record; `readlean` shades as usual but with
 /// the hit's vertex attributes (uv, colour, normal, tangent, their derivatives, decals)
 /// constant, so only the position side of the decode is left; `readpos` returns after
-/// that position side (world point, footprint, geometric normal, shadow receiver). Each keeps its work live by comparing a
+/// that position side (world point, footprint, geometric normal, shadow receiver). The
+/// writer's `plainreceiver` stores shading's own receiver, without the edge repair's code. Each keeps its work live by comparing a
 /// hash of its result with a value it never takes; the pictures are wrong by design.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MaterialProbe {
@@ -2542,6 +2544,7 @@ pub(crate) enum MaterialProbe {
     LoadPlus,
     ReadLean,
     ReadPos,
+    PlainReceiver,
 }
 fn material_probe() -> Option<MaterialProbe> {
     static PROBE: std::sync::OnceLock<Option<MaterialProbe>> = std::sync::OnceLock::new();
@@ -2553,6 +2556,7 @@ fn material_probe() -> Option<MaterialProbe> {
             "loadplus" => Some(MaterialProbe::LoadPlus),
         "readlean" => Some(MaterialProbe::ReadLean),
         "readpos" => Some(MaterialProbe::ReadPos),
+        "plainreceiver" => Some(MaterialProbe::PlainReceiver),
             _ => None,
         },
     )
