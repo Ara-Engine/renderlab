@@ -367,6 +367,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
                 // LC1 at the hit: its own cluster where that walk is exact (the same sum).
                 rl_hit_lights_prepare(h.input.world);
                 rl_load_parameters(h.batch);
+                // ---- rl inline hit reuse seam ----
                 let hs=surface(h.input);
                 radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);
                 shaded=true;

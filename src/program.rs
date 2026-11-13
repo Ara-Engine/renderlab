@@ -1126,8 +1126,26 @@ pub(crate) fn declares_reflection(program: &str) -> bool {
 }
 // TP2 traces a separately rasterized glass lobe. Opaque hits still run their own
 // program, even when that program never asks for reflections of its own.
+/// Glass hits never report to the deferred reflection composite (their module keeps no camera
+/// entry, and its glossy lobes stay inline), so the program's `RL_DEFERRED` opt-in is renamed
+/// away: `compose` then leaves the module undeferred under RENDERLAB_RL_DEFERRED=1.
 pub(crate) fn glass_hit_program(program: &str) -> String {
-    let mut source = program.to_owned();
+    let ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut source = String::with_capacity(program.len());
+    let mut rest = program;
+    while let Some(at) = rest.find("RL_DEFERRED") {
+        let end = at + "RL_DEFERRED".len();
+        let whole = (at == 0 || !ident(rest.as_bytes()[at - 1]))
+            && rest.as_bytes().get(end).is_none_or(|&b| !ident(b));
+        source.push_str(&rest[..at]);
+        source.push_str(if whole {
+            "RL_GLASS_UNDEFERRED"
+        } else {
+            "RL_DEFERRED"
+        });
+        rest = &rest[end..];
+    }
+    source.push_str(rest);
     if !declares(program, "fn", "reflection_lobe") {
         source.push_str("\nfn reflection_lobe(s:Surface,input:SurfaceInput)->SpecularLobe {return SpecularLobe(input.geometric,0.0,0.0);}\n");
     }
