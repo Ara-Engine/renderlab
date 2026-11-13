@@ -129,6 +129,60 @@ fn bc7_texture(side: u32, srgb: bool, seed: u64) -> (CompressedTexture, asset::T
         },
     )
 }
+/// A `side` x `side` BC7 texture of random blocks (every mode but the reserved eighth: each
+/// block's first byte is nonzero) and its RGBA8 decode by `texture2ddecoder`, the decoder Ara's
+/// bridge uploads RGBA8 from today (ara-runtime-render `decode_texture`).
+fn bc7_random(side: u32, seed: u64) -> (CompressedTexture, asset::Texture) {
+    let mut bits = Bits(seed);
+    let (mut levels, mut mips) = (vec![], vec![]);
+    let mut w = side;
+    loop {
+        let blocks = w.div_ceil(4);
+        let data: Vec<u8> = (0..blocks * blocks * 16)
+            .map(|i| {
+                let byte = (bits.next() & 255) as u8;
+                if i % 16 == 0 { byte.max(1) } else { byte }
+            })
+            .collect();
+        let mut pixels = vec![0u32; (blocks * 4 * blocks * 4) as usize];
+        texture2ddecoder::decode_bc7(
+            &data,
+            (blocks * 4) as usize,
+            (blocks * 4) as usize,
+            &mut pixels,
+        )
+        .unwrap();
+        let rgba8 = (0..w)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .flat_map(|(x, y)| {
+                let [b, g, r, a] = pixels[(y * blocks * 4 + x) as usize].to_le_bytes();
+                [r, g, b, a]
+            })
+            .collect();
+        levels.push(data);
+        mips.push(Mip {
+            width: w,
+            height: w,
+            rgba8,
+        });
+        if w == 1 {
+            break;
+        }
+        w /= 2;
+    }
+    (
+        CompressedTexture {
+            format: BlockFormat::Bc7Srgb,
+            width: side,
+            height: side,
+            mips: levels,
+        },
+        asset::Texture {
+            role: TextureRole::BaseColorSrgb,
+            mips,
+        },
+    )
+}
 /// A BC5 normal map and its RGBA8 counterpart with Z rebuilt per texel on the CPU (as Ara's
 /// bridge rebuilds it), quantized to 8 bits.
 fn bc5_texture(side: u32, seed: u64) -> (CompressedTexture, asset::Texture) {
@@ -317,6 +371,43 @@ fn gpu_compressed_textures_match_their_decode() {
             };
             let (x, y) = (shot(&mut r, &a), shot(&mut r, &b));
             assert_eq!(x, y, "BC7 srgb={srgb} sampler={sampler:?}");
+        }
+    }
+    // Random blocks of every mode against the bridge's decoder (texture2ddecoder): the GPU's
+    // BC7 decode and the RGBA8 Ara uploads today are the same texels.
+    for seed in [17, 19] {
+        let (blocks, decoded) = bc7_random(32, seed);
+        let a = compressed(&mut r, &blocks);
+        let b = texture(&mut r, &decoded);
+        for (sampler, model) in [
+            (nearest, Mat4::IDENTITY),
+            (trilinear, Mat4::from_scale(Vec3::splat(0.06))),
+        ] {
+            inst.set(0, model).unwrap();
+            let mut shot = |r: &mut Renderer, t: &Texture| {
+                let m = material(
+                    r,
+                    &MaterialDescriptor {
+                        base_color_texture: Some(TextureBinding {
+                            texture: t,
+                            sampler,
+                        }),
+                        ..Default::default()
+                    },
+                );
+                pixels(
+                    r,
+                    &color,
+                    &cam,
+                    &mut [Draw::new(&mesh, &mut inst).with_material(&m)],
+                    ViewMode::BaseColor,
+                )
+            };
+            let (x, y) = (shot(&mut r, &a), shot(&mut r, &b));
+            assert_eq!(
+                x, y,
+                "texture2ddecoder vs GPU BC7, seed {seed} sampler {sampler:?}"
+            );
         }
     }
     // BC5 normals against the CPU-rebuilt RGBA8 map.
