@@ -327,13 +327,7 @@ pub fn build<S: Scene>(scene: &mut S, options: Options) -> Result<Built, Error> 
     }
     scene.spawn(sphere, gold, boxed(at(1.8, 1., 3.2), Vec3::ONE))?;
     if options.glass {
-        scene.spawn(
-            cube,
-            glass,
-            Mat4::from_translation(at(5.4, 0.8, 3.6))
-                * Mat4::from_rotation_y(0.8)
-                * Mat4::from_scale(at(2.2, 1.6, 0.04)),
-        )?;
+        scene.spawn(cube, glass, glass_pane())?;
     }
     for (x, z) in [(-4., -2.2), (3.6, -3.8), (6.2, -0.6)] {
         for k in 0..3 {
@@ -465,6 +459,12 @@ pub fn build<S: Scene>(scene: &mut S, options: Options) -> Result<Built, Error> 
     })
 }
 
+/// The glass pane's placement: the unit cube (±0.5) as a 2.2 x 1.6 x 0.04 m slab.
+pub fn glass_pane() -> Mat4 {
+    Mat4::from_translation(Vec3::new(5.4, 0.8, 3.6))
+        * Mat4::from_rotation_y(0.8)
+        * Mat4::from_scale(Vec3::new(2.2, 1.6, 0.04))
+}
 /// The hero's body and head at time `t`: world centre and radius.
 pub fn hero(t: f32) -> [(Vec3, f32); 2] {
     let walk = 0.35 * t;
