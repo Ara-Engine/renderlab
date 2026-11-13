@@ -2201,8 +2201,123 @@ impl Renderer {
             self.uploads.write_calls += 1;
         }
         Texture(Arc::new(crate::material::TextureInner {
+            block: None,
             renderer: self.identity.clone(),
             role: data.role,
+            storage: crate::material::TextureStorage::Full(Box::new(
+                crate::material::FullTexture {
+                    _texture: texture,
+                    view,
+                    _allocation: self.ledger.allocate(AllocationKind::Texture, bytes),
+                },
+            )),
+        }))
+    }
+    /// A block-compressed texture (`asset::CompressedTexture`): its levels as shipped, fully
+    /// resident, in the format's role. Needs `Features::TEXTURE_COMPRESSION_BC` on the device
+    /// (`compressed_textures`); without it the host uploads RGBA8 (`try_upload_texture`).
+    pub fn try_upload_compressed_texture(
+        &mut self,
+        data: &asset::CompressedTexture,
+    ) -> Result<Option<Texture>, Error> {
+        self.check_fault()?;
+        if !self.compressed_textures() {
+            return Err(Error::InvalidInput(
+                "compressed textures need TEXTURE_COMPRESSION_BC; upload RGBA8 instead",
+            ));
+        }
+        let started = Instant::now();
+        let bytes = data
+            .validate(self.device.limits().max_texture_dimension_2d)
+            .map_err(|e| Error::InvalidInput(e.0))?;
+        if bytes > self.limits.max_texture_bytes {
+            return Err(Error::InvalidInput("texture exceeds max_texture_bytes"));
+        }
+        let preparation = started.elapsed();
+        let poll = self.collect()?;
+        if self.occupied() >= FLIGHTS - 1 {
+            self.busy_uploads += 1;
+            return Ok(None);
+        }
+        let slot = self.free_slot().unwrap();
+        let started = Instant::now();
+        let scopes = OperationScopes::new(&self.device);
+        let texture = self.create_compressed_texture(data, bytes);
+        if let Some(error) = scopes.finish() {
+            return Err(self.fail(error.to_string()));
+        }
+        self.submit_upload(slot);
+        self.upload_cpu = CpuFrame {
+            preparation,
+            poll,
+            upload: started.elapsed(),
+            ..Default::default()
+        };
+        self.check_fault()?;
+        Ok(Some(texture))
+    }
+    /// Whether the device samples BC7 and BC5 (`try_upload_compressed_texture`).
+    pub fn compressed_textures(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+    }
+    fn create_compressed_texture(
+        &mut self,
+        data: &asset::CompressedTexture,
+        bytes: u64,
+    ) -> Texture {
+        let role = data.format.role();
+        let texture = self.ledger.own(
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("immutable material texture, block-compressed"),
+                size: wgpu::Extent3d {
+                    width: data.width,
+                    height: data.height,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: data.mips.len() as u32,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: texture_residency::block_texture_format(data.format),
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            }),
+            ResourceKind::Texture,
+        );
+        let view = self.ledger.own(
+            texture.create_view(&texture_residency::texture_view_descriptor(role)),
+            ResourceKind::TextureView,
+        );
+        let block = asset::BlockFormat::BLOCK;
+        for (level, blocks) in data.mips.iter().enumerate() {
+            let (w, h) = data.level_size(level as u32);
+            // Copies cover the level's physical size: whole blocks, also under 4x4 texels.
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    mip_level: level as u32,
+                    ..texture.as_image_copy()
+                },
+                blocks,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(asset::BlockFormat::row_bytes(w)),
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width: w.div_ceil(block) * block,
+                    height: h.div_ceil(block) * block,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.uploads.textures += blocks.len() as u64;
+            self.uploads.texture_writes += 1;
+            self.uploads.write_calls += 1;
+        }
+        Texture(Arc::new(crate::material::TextureInner {
+            block: Some(data.format),
+            renderer: self.identity.clone(),
+            role,
             storage: crate::material::TextureStorage::Full(Box::new(
                 crate::material::FullTexture {
                     _texture: texture,

@@ -77,6 +77,9 @@ pub(crate) struct TextureInner {
     pub renderer: Arc<()>,
     pub role: TextureRole,
     pub storage: TextureStorage,
+    /// The block format of a compressed upload (`Renderer::try_upload_compressed_texture`);
+    /// None for texel uploads. BC5 normal maps hold X and Y only.
+    pub block: Option<renderlab_asset::BlockFormat>,
 }
 pub(crate) enum TextureStorage {
     /// Every level, immutable after upload.

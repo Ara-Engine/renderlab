@@ -278,6 +278,7 @@ impl Renderer {
         let id = self.residency.next_id;
         self.residency.next_id += 1;
         let texture = Texture(Arc::new(TextureInner {
+            block: None,
             renderer: self.identity.clone(),
             role: data.role,
             storage: TextureStorage::Streamed(id),
@@ -807,6 +808,14 @@ pub(crate) fn texture_format(role: asset::TextureRole) -> wgpu::TextureFormat {
 }
 
 /// Normal maps use array views even for one layer, keeping one sampling ABI for all roles.
+/// The GPU format of a block-compressed texture (`asset::CompressedTexture`).
+pub(crate) fn block_texture_format(format: asset::BlockFormat) -> wgpu::TextureFormat {
+    match format {
+        asset::BlockFormat::Bc7Srgb => wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+        asset::BlockFormat::Bc7Linear => wgpu::TextureFormat::Bc7RgbaUnorm,
+        asset::BlockFormat::Bc5 => wgpu::TextureFormat::Bc5RgUnorm,
+    }
+}
 pub(crate) fn texture_view_descriptor(
     role: asset::TextureRole,
 ) -> wgpu::TextureViewDescriptor<'static> {
