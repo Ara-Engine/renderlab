@@ -150,11 +150,11 @@ pub fn reference(fixture: &Fixture) -> Expected {
     let counts: Vec<_> = sets.iter().map(|entries| entries.len() as u32).collect();
     assert!(counts.iter().all(|&count| count < capacity));
     // List entries per shading workgroup (RENDERLAB_LIST_LANES / 16, program.rs
-    // list_entries_per_group): a list of n entries dispatches ceil(n / per) groups.
+    // list_entries_per_group, default 32 lanes): a list of n entries dispatches ceil(n / per) groups.
     let per = match std::env::var("RENDERLAB_LIST_LANES").as_deref() {
-        Ok("32") => 2,
+        Ok("16") => 1,
         Ok("64") => 4,
-        _ => 1,
+        _ => 2,
     };
     let args = counts
         .iter()

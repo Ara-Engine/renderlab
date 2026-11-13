@@ -342,7 +342,11 @@ fn validate_image(
         | Format::Rgb10A2
         | Format::R32Float
         | Format::R16Float
-        | Format::Rg16Float => SampleType::Float,
+        | Format::Rg16Float
+        // Block-compressed material textures: unorm blocks, sampled as float.
+        | Format::Bc7
+        | Format::Bc7Srgb
+        | Format::Bc5 => SampleType::Float,
     };
     ensure!(actual == sample, "image {name} has the wrong sample type");
     Ok(())

@@ -1142,22 +1142,22 @@ const HITS_MINE_LIST: &str = "struct RlList { slot:u32, base:u32, capacity:u32, 
 // ---- MP1 per-program dispatch (docs/m7-mp1.md) ----
 /// The tile-list shading entry of mixed-program frames (`primary_shade_list`).
 const TRACED_LIST_ENTRY: &str = include_str!("../shaders/program_traced_list.wgsl");
-/// `RENDERLAB_LIST_LANES`: lanes per list-shading workgroup, 16 (one 4x4 list entry, the
-/// default), 32 or 64 (two or four entries, one per z slice). Warps and SIMD groups are 32
-/// wide and never span workgroups, so 16 leaves half of every one idle. Each entry is still
-/// shaded by exactly one slice, so the picture does not depend on it. The binning kernel's
-/// indirect arguments follow (`program_lists::bin_source`).
+/// `RENDERLAB_LIST_LANES`: lanes per list-shading workgroup, 16 (one 4x4 list entry), 32 (two,
+/// the default since M8-LIST-LANES-32) or 64 (four entries, one per z slice). Warps and SIMD
+/// groups are 32 wide and never span workgroups, so 16 leaves half of every one idle. Each entry
+/// is still shaded by exactly one slice, so the picture does not depend on it. The binning
+/// kernel's indirect arguments follow (`program_lists::bin_source`).
 pub(crate) fn list_entries_per_group() -> u32 {
     static PER: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *PER.get_or_init(|| match std::env::var("RENDERLAB_LIST_LANES").as_deref() {
         // An 8x4 tile already fills 32 lanes with one entry.
         _ if list_tile() == [8, 4] => 1,
-        Err(_) | Ok("16") => 1,
-        Ok("32") => 2,
+        Ok("16") => 1,
+        Err(_) | Ok("32") => 2,
         Ok("64") => 4,
         Ok(other) => {
-            eprintln!("RENDERLAB_LIST_LANES: `{other}` is not 16, 32 or 64; using 16");
-            1
+            eprintln!("RENDERLAB_LIST_LANES: `{other}` is not 16, 32 or 64; using 32");
+            2
         }
     })
 }
