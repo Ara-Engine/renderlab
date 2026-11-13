@@ -415,6 +415,13 @@ PLANS["identmain"] = [
     for path in ("nonrt", "rt")
     for name, extra in (("flight", ["--fox", FOX, "--frames", "48"]), ("night", ["--fox", FOX, "--night-lanterns", "--frames", "30"]))
 ]
+# Where a cut's frame time goes (pass log detail and the GI log): the game cut and the forest
+# turn, both paths, twice (`timing.py gi OUT`).
+PLANS["cutsplit"] = [
+    (f"{name}-{path}-{k}", ["--path", path, *extra, "--frames", "40"], {"RTVIS_GI_LOG": "1"})
+    for k in (1, 2) for path in ("nonrt", "rt")
+    for name, extra in (("game", ["--diag", "cut=1"]), ("forest", ["--diag", "forest=1", "--diag", "cut=turn", *LOW]))
+]
 PLANS["refillpics"] = [
     (f"p-{name}-refill{v}", extra + ["--frames", "40", "--every", "1"], REFILL(v))
     for name, extra in REFILL_CLIPS
