@@ -626,3 +626,34 @@ fn mixed_frame_hits_follow_inline_fallback_by_default() {
     let single = compose_hits(soft, crate::STANDARD_PROGRAM, Stage::Traced, false, false).source;
     assert!(!single.contains("rl_receiver"));
 }
+
+/// Measurement only: with RENDERLAB_RL_INLINE_STUB=1 the primary shading modules lose the inline
+/// strata loop (no inline ray casts or hit shading) and still validate on every traced head.
+#[test]
+fn inline_stub_modules_validate() {
+    use crate::program::{Stage, compose, with_reflection_history};
+    if std::env::var("RENDERLAB_RL_INLINE_STUB").as_deref() != Ok("1") {
+        return;
+    }
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    for head in rt.iter().chain(&non_rt) {
+        let marked = format!("{head}{}", crate::program::PASS_HEAD_MARK);
+        let source = with_reflection_history(compose(
+            &marked,
+            crate::STANDARD_PROGRAM,
+            Stage::Traced,
+            false,
+        ))
+        .source;
+        assert!(!source.contains("for(var attempt=0u;attempt<2u;attempt+=1u) {"));
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    }
+}

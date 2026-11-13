@@ -239,7 +239,37 @@ pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
     } else {
         composed
     };
+    let composed = if inline_stub() {
+        without_inline_strata(composed)
+    } else {
+        composed
+    };
     with_history_block(composed)
+}
+/// Measurement only (`RENDERLAB_RL_INLINE_STUB=1`, branch t3/rtvis-stub): the primary shading
+/// modules lose the inline strata loop (its ray casts and hit shading), so receivers the pass does
+/// not take (mirrors, floored, overflow) reflect nothing. The picture is wrong; the shading
+/// kernel's time is the upper bound of moving every traced receiver into the pass.
+fn inline_stub() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_INLINE_STUB").is_ok_and(|v| v == "1"))
+}
+/// `composed` with reflections.wgsl's strata loop removed from the engine text before the program.
+fn without_inline_strata(composed: Composed) -> Composed {
+    const BEGIN: &str = "    for(var attempt=0u;attempt<2u;attempt+=1u) {\n";
+    const END: &str = "    rl_reflection_hit=false;\n";
+    let Composed { source, program } = composed;
+    let (engine, rest) = source.split_at(program.start);
+    let Some(begin) = engine.find(BEGIN) else {
+        return Composed { source, program };
+    };
+    let end = begin + engine[begin..].find(END).expect("inline stub seam");
+    let engine = format!("{}{}", &engine[..begin], &engine[end..]);
+    let start = engine.len();
+    Composed {
+        source: format!("{engine}{rest}"),
+        program: start..start + program.len(),
+    }
 }
 /// reflections.wgsl's lobe store, and its replacement under the pass: a reporting program's
 /// glossy receiver that fits the room (`rl_room_reserve`) appends its lobe to the glossy-pixel
