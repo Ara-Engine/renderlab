@@ -300,6 +300,25 @@ fn the_ray_budget_ranks_fades_and_honours_each_lights_choice() {
     assert_eq!(words[2], 3);
 }
 
+/// The physical atlas covers its tiles only: two full-size tiles in a row take two by one,
+/// a third wraps onto the next row, and the size never exceeds the logical square.
+#[test]
+fn local_shadow_atlas_fits_its_tiles() {
+    let mut tiles = vec![None; 4];
+    assert_eq!(lc::fitted_extent(&tiles, 1024), [1, 1]);
+    for (slot, expected) in [(0, [1024, 1024]), (1, [2048, 1024]), (2, [4096, 1024])] {
+        tiles[slot] = lc::allocate_tile(&tiles, 1024, 1024);
+        assert_eq!(lc::fitted_extent(&tiles, 1024), expected, "after slot {slot}");
+    }
+    let mut all = vec![None; lc::MAX_SLOTS as usize];
+    for i in 0..all.len() {
+        all[i] = lc::allocate_tile(&all, 1001, 1001);
+    }
+    let [w, h] = lc::fitted_extent(&all, 1001);
+    assert!(w <= lc::atlas_extent(1001) && h <= lc::atlas_extent(1001));
+    assert!(all.iter().flatten().all(|t| t.x + t.size <= w && t.y + t.size <= h));
+}
+
 #[test]
 fn local_shadow_tiles_stay_disjoint_and_fades_release_before_reuse() {
     for maximum in [1, 2, 7, 768, 1001, 1024] {
