@@ -55,10 +55,11 @@ GPU, never from a CPU copy of a material constant:
   the radius around the centroid that holds the triangles above 1% of the peak radiance, the
   area-weighted mean normal and its spread, and the principal-axis ratio of the emitting area.
 - **When it runs:** on the first frame a candidate is placed, and again whenever the material's
-  parameters, a bound texture's revision, the program's source or the mesh change. A program
-  whose `emission` reads a time-dependent engine input (found by the same token scan that finds
-  `declares_parameters`) re-reduces every 8 frames. (I) The time inputs the program API exposes
-  are to be confirmed at implementation; if none exist, every change is a CPU-visible revision.
+  parameters, a bound texture's revision, the program's source or the mesh change. Programs get
+  no time input (`program_api.wgsl`: a program may declare `struct Parameters`, read as
+  `params`, and declares no bindings), so time-varying emission is always a material-parameter
+  revision through `Engine::set_material_parameters`, which the CPU sees. The re-reduction keys
+  on those revisions; there is no periodic path.
 - **An emissive program with no texture** runs the same reduction; its result is uniform over
   the mesh, so the dispatch is tiny. No special case.
 - The results are read back asynchronously (double-buffered, 1-2 frames). Until a proxy's
@@ -112,6 +113,10 @@ surfaces are dark to cell shading); the authored light is its light. An author t
 - removes the authored light (or sets its intensity to 0), for "the glass is the light": the
   proxy's power then comes from the glass's emission.
 
+What the author sees when a claim happens: the glass's own emission leaves the GI gather, so its
+glow no longer bounces; the claiming light provides that light instead. That is intended, and it
+matters to whoever balances the two intensities (the Content thread for Atelier).
+
 No program and no per-material flag. Atelier stays at 25 shadowed lights either way; which one
 it should be, and the energy balance, is the Content thread's call. The fitting blocking the
 authored light is `set_casts_shadows`' fix, not this note's.
@@ -127,7 +132,10 @@ paths, **geometry inside a proxy's sphere does not shadow that proxy**:
   is clipped out of its own map.
 - Over the atlas limit (below), the software visibility rays use the same tmax rule.
 
-This needs no casts-shadows bit and no offset tuning. Its cost: an occluder that is inside the
+This needs no casts-shadows bit and no offset tuning. It is independent of
+`Engine::set_casts_shadows`: that per-object choice still decides whether the fitting shadows the
+authored lights (and every other light); the sphere rule only keeps a proxy's own glass out of
+the proxy's shadow. Its cost: an occluder that is inside the
 sphere and outside the glass (a fitting's arm) does not shadow the proxy. That is recorded,
 small, and the same at every distance.
 
@@ -166,8 +174,9 @@ light (LC2), and reflection hits light it through their own cluster walk.
 - The candidate set is built on the CPU from what the frame already knows: placements whose
   program declares `emission` (the composition's token scan). An empty set encodes no reduction
   pass and adds nothing to the light list.
-- A candidate is reduced only when it is placed or changes (or every 8 frames for time-varying
-  emission), never per frame. A candidate that fails the bound adds no light record.
+- A candidate is reduced only when it is placed or changes (a material-parameter, texture,
+  program or mesh revision),
+  never per frame. A candidate that fails the bound adds no light record.
 - The cell-shading exclusion is composed into the cell module only while at least one proxy or
   claim is active. Without one, every composed module is byte-identical to today's.
 - Tests: a scene with no `emission` program records no reduction pass in the pass log, keeps
