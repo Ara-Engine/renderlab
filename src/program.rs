@@ -467,7 +467,7 @@ pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
 /// receiver that does not fit, keeps the inline path (no lobe, no zero).
 const PASS_GATE: [&str; 2] = [
     "    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}\n",
-    "    if RL_PASS && !mirror && (RL_DEFERRED_PROGRAM || !rl_composite()) && (!rl_composite() || rl_room_reserve(count)) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        if rl_composite() {rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;}\n    }\n",
+    "    if RL_PASS && !mirror && (RL_DEFERRED_PROGRAM || !rl_composite()) && (!rl_composite() || rl_room_reserve(count,traced,lobe.weight)) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        if rl_composite() {rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;}\n    }\n",
 ];
 const DEFERRED_PROGRAM_FLAG: [&str; 2] = [
     "const RL_DEFERRED_PROGRAM:bool=false;",
@@ -481,11 +481,22 @@ pub(crate) fn pass_block(composed: Composed) -> Composed {
         return composed;
     }
     let deferred = composed.source.contains(DEFERRED_ENTRY_MARK);
-    let lobe = if deferred {
+    let mut lobe = if deferred {
         REFLECTION_LOBE.replacen(DEFERRED_PROGRAM_FLAG[0], DEFERRED_PROGRAM_FLAG[1], 1)
     } else {
         REFLECTION_LOBE.to_owned()
     };
+    // Measurement runs count the room's low-weight receivers (reflections_lobe.wgsl).
+    if ["RENDERLAB_RL_PROBE", "RENDERLAB_RL_ROOM_LOG"]
+        .iter()
+        .any(|name| std::env::var_os(name).is_some())
+    {
+        lobe = lobe.replacen(
+            "const RL_ROOM_HISTOGRAM:bool=false;",
+            "const RL_ROOM_HISTOGRAM:bool=true;",
+            1,
+        );
+    }
     let composed = replace_block(composed, RL_PASS_STUBS, &lobe);
     let Composed { source, program } = composed;
     let (engine, rest) = source.split_at(program.start);

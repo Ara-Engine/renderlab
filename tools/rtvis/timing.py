@@ -501,6 +501,12 @@ PLANS["comp5"] = (
        for v in ("1", "0")]
     + [(f"p-rt-ident-comp{v}", ["--path", "rt", "--fox", FOX, *STD, "--frames", "30", "--every", "1"],
         {} if v == "1" else OFF) for v in ("1", "0")]
+    # Forced overflow (RENDERLAB_RL_ROOM=fixed:16384, no growth): a mixed composite/inline estimate
+    # every frame, with each frame's overflow count logged, against inline.
+    + [(f"p-nonrt-fix{name}-comp{v}", ["--path", "nonrt", "--fox", FOX, *STD, *extra, "--frames", "40", "--every", "1"],
+        {"RENDERLAB_RL_ROOM": "fixed:16384", "RENDERLAB_RL_ROOM_LOG": str(PROBE_DIR / f"comp5-fix{name}.jsonl")}
+        if v == "1" else OFF)
+       for name, extra in (("flight", []), ("night", ["--night-lanterns"])) for v in ("1", "0")]
 )
 # The glossy strata slope (RL_RAYS_PER_ROUGHNESS 48, 32, 24: one binary each, same plans): the
 # flight over a 0.2 floor (`--diag floor=0.2`, grazing ground) and the default flight (gold 0.25,

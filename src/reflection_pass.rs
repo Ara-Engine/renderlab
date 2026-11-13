@@ -16,6 +16,9 @@ pub(super) const PASS_FRAME: u32 = 58;
 const DISTANCE: u32 = 59;
 /// The deferred composite's trace (rl_trace_pixels): its counters and per-pixel slot ranges.
 pub(super) const STATS: u32 = 60;
+/// The counters: the trace's four words, the Mac thread's S4a (4, 5), the receivers that did not
+/// fit the room (6), and measurement runs' low-weight strata and receivers (7-10).
+const STATS_BYTES: u64 = 64;
 const RANGES: u32 = 61;
 /// The receivers' own ray epsilon (the primary trace's or visibility resolve's per-pixel
 /// `receiver.epsilon`): the compacted trace starts its rays there, as the inline loop does.
@@ -29,6 +32,21 @@ const RECEIVER_EPSILON: u32 = 79;
 const SAMPLE_ROW: u32 = 2048;
 const ROOM_START: u64 = 1 << 18;
 const ROOM_PER_PIXEL: u64 = 4;
+/// Measurement: `RENDERLAB_RL_ROOM=fixed:N` pins the room at N slots and never grows it, so
+/// glossy receivers past it take the inline estimate every frame (a mixed-estimate row).
+fn room_fixed() -> Option<u64> {
+    static FIXED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    *FIXED.get_or_init(|| {
+        let value = std::env::var("RENDERLAB_RL_ROOM").ok()?;
+        value.strip_prefix("fixed:")?.parse().ok().filter(|&n: &u64| n > 0)
+    })
+}
+/// Measurement: `RENDERLAB_RL_ROOM_LOG=PATH` appends each read-back frame's counters (requested
+/// strata, slots, receivers that did not fit, the room) to PATH, one JSON line a frame.
+fn room_log() -> Option<&'static str> {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var("RENDERLAB_RL_ROOM_LOG").ok()).as_deref()
+}
 pub(super) const HITS: u32 = 64;
 pub(super) const SAMPLES: u32 = 65;
 /// H: the count and three dispatch arguments, then 48-byte records.
@@ -78,7 +96,7 @@ pub(super) fn shade_entries() -> [wgpu::BindGroupLayoutEntry; 4] {
         write(LOBE_A, F::Rgba32Float),
         write(LOBE_B, F::Rgba32Uint),
         uniform(PASS_FRAME, 16),
-        buffer(STATS, wgpu::BufferBindingType::Storage { read_only: false }, 16),
+        buffer(STATS, wgpu::BufferBindingType::Storage { read_only: false }, STATS_BYTES),
     ]
 }
 
@@ -111,12 +129,8 @@ impl TraceAbi {
                 HITS_HEADER + RECORD_BYTES,
             ),
             image(SAMPLES, F::Rgba16Float),
-            // S4a's `reused` follows the four counters (20 bytes in the shader).
-            buffer(
-                STATS,
-                wgpu::BufferBindingType::Storage { read_only: false },
-                if crate::program::hit_reuse().is_some() { 32 } else { 16 },
-            ),
+            // The counters, S4a's `reused` at word 4 among them.
+            buffer(STATS, wgpu::BufferBindingType::Storage { read_only: false }, STATS_BYTES),
             image(RANGES, F::R32Uint),
             texture(RECEIVER_EPSILON, wgpu::TextureSampleType::Float { filterable: false }),
         ];
@@ -169,6 +183,8 @@ pub(in crate::renderer) struct Readback {
     buffer: wgpu::Buffer,
     /// 0 idle, 1 copied (map next frame), 2 mapping, 3 mapped.
     state: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    /// The frame whose counters it holds (RENDERLAB_RL_ROOM_LOG).
+    frame: std::sync::atomic::AtomicU64,
 }
 
 /// `rl_trace` and `rl_hit_args`, compiled from a head's standard-program traced module.
@@ -217,7 +233,9 @@ impl Renderer {
         // The composite traces every glossy pixel's set into a room sized to the content (it
         // starts small and grows); the quad trace keeps one slot and record a quad.
         let composite = deferred(&self.device);
-        let room = ROOM_START.min(ROOM_PER_PIXEL * u64::from(size.width) * u64::from(size.height));
+        let room = room_fixed()
+            .unwrap_or(ROOM_START)
+            .min(ROOM_PER_PIXEL * u64::from(size.width) * u64::from(size.height));
         let samples = if composite {
             [SAMPLE_ROW, (room as u32).div_ceil(SAMPLE_ROW)]
         } else {
@@ -259,7 +277,7 @@ impl Renderer {
             stats: Buffer::new(
                 self,
                 "reflection trace counters",
-                32,
+                STATS_BYTES,
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
             ),
             composite: Buffer::new(
@@ -273,11 +291,12 @@ impl Renderer {
                 .map(|_| Readback {
                     buffer: self.device.create_buffer(&wgpu::BufferDescriptor {
                         label: Some("reflection trace counters readback"),
-                        size: 16,
+                        size: STATS_BYTES,
                         usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                         mapped_at_creation: false,
                     }),
                     state: Default::default(),
+                    frame: Default::default(),
                 })
                 .collect(),
         }
@@ -437,7 +456,7 @@ impl Renderer {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
         self.queue.write_buffer(&pass.frame.value, 0, &bytes);
         // The counters start each frame at zero before shading reserves into them.
-        self.queue.write_buffer(&pass.stats.value, 0, &[0; 16]);
+        self.queue.write_buffer(&pass.stats.value, 0, &[0; STATS_BYTES as usize]);
         if composite != 0 {
             // The lone-stratum bound and the strata it needs (reflections.wgsl RL_GLOSSY_RAYS).
             let lone = self.view.reflections.frame_words()[2];
@@ -622,9 +641,9 @@ impl Renderer {
                 mapped_at_creation: false,
             });
             encoder.copy_buffer_to_buffer(&pass.hits.value, 0, &staging, 0, HITS_HEADER);
-            // The composite's trace counters (glossy pixels, slots, pixels without room), then
-            // S4a's reused hits.
-            encoder.copy_buffer_to_buffer(&pass.stats.value, 0, &staging, 16, 32);
+            // The composite's trace counters (glossy pixels, slots, pixels without room; S4a's
+            // reused hits at words 4 and 5).
+            encoder.copy_buffer_to_buffer(&pass.stats.value, 0, &staging, 16, STATS_BYTES);
             let composite = deferred(&self.device);
             let extent = wgpu::Extent3d { width: w, height: h, depth_or_array_layers: 1 };
             // With the composite R is a slot list, not a quad image: only the counters are read.
@@ -677,11 +696,17 @@ impl Renderer {
             })
             .unwrap_or_default();
         if deferred(&self.device) {
-            // The strata counter: trace slots (strata) and hit records per glossy pixel.
+            // The strata counter: trace slots (strata) and hit records per glossy pixel; the
+            // receivers that did not fit the room (inline this frame) and their strata.
             let per = |n: u32| if pixels > 0 { f64::from(n) / f64::from(pixels) } else { 0.0 };
+            let overflow_pixels = word(6);
             let json = format!(
-                "{{\"frame\":{PROBE_FRAME},\"glossy_pixels\":{pixels},\"strata_requested\":{requested},\"slots\":{slots},\"records\":{count},\"records_dropped\":{dropped},\"scaled\":{},\"strata_per_glossy_pixel\":{:.3},\"records_per_glossy_pixel\":{:.3}{reused}}}\n",
-                requested > slots,
+                "{{\"frame\":{PROBE_FRAME},\"glossy_pixels\":{pixels},\"strata_requested\":{requested},\"slots\":{slots},\"records\":{count},\"records_dropped\":{dropped},\"overflow_pixels\":{overflow_pixels},\"overflow_strata\":{},\"traced_under_5pc\":{{\"strata\":{},\"pixels\":{}}},\"contribution_under_0005\":{{\"strata\":{},\"pixels\":{}}},\"strata_per_glossy_pixel\":{:.3},\"records_per_glossy_pixel\":{:.3}{reused}}}\n",
+                requested.saturating_sub(slots),
+                word(7),
+                word(8),
+                word(9),
+                word(10),
                 per(slots),
                 per(count)
             );
@@ -877,7 +902,8 @@ impl Renderer {
             }
         }
         if let Some(r) = pass.readback.iter().find(|r| r.state.load(SeqCst) == 0) {
-            encoder.copy_buffer_to_buffer(&pass.stats.value, 0, &r.buffer, 0, 16);
+            encoder.copy_buffer_to_buffer(&pass.stats.value, 0, &r.buffer, 0, STATS_BYTES);
+            r.frame.store(self.frames, SeqCst);
             r.state.store(1, SeqCst);
         }
     }
@@ -902,7 +928,26 @@ impl Renderer {
         for r in &pass.readback {
             if r.state.load(SeqCst) == 3 {
                 if let Ok(data) = r.buffer.slice(..).get_mapped_range() {
-                    requested = requested.max(u64::from(u32::from_ne_bytes(data[8..12].try_into().unwrap())));
+                    let word = |i: usize| u32::from_ne_bytes(data[4 * i..4 * i + 4].try_into().unwrap());
+                    requested = requested.max(u64::from(word(2)));
+                    if let Some(path) = room_log() {
+                        use std::io::Write;
+                        let line = format!(
+                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"traced_under_5pc\":[{},{}],\"contribution_under_0005\":[{},{}]}}\n",
+                            r.frame.load(SeqCst),
+                            word(2),
+                            word(1),
+                            word(6),
+                            pass.room,
+                            word(7),
+                            word(8),
+                            word(9),
+                            word(10)
+                        );
+                        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                            let _ = file.write_all(line.as_bytes());
+                        }
+                    }
                 }
                 r.buffer.unmap();
                 r.state.store(0, SeqCst);
@@ -910,7 +955,7 @@ impl Renderer {
         }
         let size = pass.lobe_b.texture.size();
         let most = ROOM_PER_PIXEL * u64::from(size.width) * u64::from(size.height);
-        if requested <= pass.room || pass.room >= most {
+        if requested <= pass.room || pass.room >= most || room_fixed().is_some() {
             return;
         }
         let room = (requested * 5 / 4).next_power_of_two().min(most);
