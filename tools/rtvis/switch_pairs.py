@@ -14,8 +14,10 @@ import subprocess
 import sys
 
 SWITCHES = {
+    "prewarm": {"RENDERLAB_PREWARM_PIPELINES": "1"},
     "gi": {"RENDERLAB_GI_PASS": "1"},
     "material": {"RENDERLAB_MATERIAL_PASS": "1"},
+    "material-tail": {"RENDERLAB_MATERIAL_PASS": "tail"},
     "sun": {"RENDERLAB_SUN_PASS": "1"},
     "sun-zone": {"RENDERLAB_SUN_ZONE_STOP": "1"},
     "lvis": {"RENDERLAB_LIGHT_VIS_PASS": "1"},
@@ -32,6 +34,8 @@ TESTS = [
     "pass_switch_seams_hold",
     "the_primary_shading_layout_has_no_clashing_bindings",
     "receiver_and_shading_validate_both_paths",
+    "material_tail_composes_native_visibility_paths",
+    "material_mode_boundary",
 ]
 
 
@@ -41,13 +45,14 @@ def sets():
     yield "none", {}
     for n in (1, 2, 3):
         for names in itertools.combinations(SWITCHES, n):
-            if sum(x.startswith("rl") for x in names) > 1:
+            if sum(x.startswith("rl") for x in names) > 1 or sum(x.startswith("material") for x in names) > 1:
                 continue
             yield "+".join(names), {k: v for x in names for k, v in SWITCHES[x].items()}
-    others = [x for x in SWITCHES if not x.startswith("rl")]
+    others = [x for x in SWITCHES if not x.startswith("rl") and x != "material-tail"]
     yield "all-but-rl", {k: v for x in others for k, v in SWITCHES[x].items()}
     for rl in [x for x in SWITCHES if x.startswith("rl")]:
         yield f"all+{rl}", {k: v for x in [*others, rl] for k, v in SWITCHES[x].items()}
+        yield f"all-tail+{rl}", {k: v for x in [*[x for x in others if x != "material"], "material-tail", rl] for k, v in SWITCHES[x].items()}
 
 
 def main():

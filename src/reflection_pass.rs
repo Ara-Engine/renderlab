@@ -24,9 +24,6 @@ pub(super) const ROOM_STATS: u32 = 69;
 /// The counters: the trace's four words, the Mac thread's S4a (4, 5), the receivers that did not
 /// fit the room (6), and measurement runs' low-weight strata and receivers (7-10).
 const STATS_BYTES: u64 = 64;
-/// The receivers' own ray epsilon (the primary trace's or visibility resolve's per-pixel
-/// `receiver.epsilon`): the compacted trace starts its rays there, as the inline loop does.
-const RECEIVER_EPSILON: u32 = 79;
 /// With the composite, R holds every glossy pixel's strata (this many slots a row) and H one
 /// record a slot: the room. It starts at ROOM_START slots and grows to the content (the frame's
 /// requested strata, summed at shading, read back a frame or two late) up to ROOM_PER_PIXEL a
@@ -102,8 +99,9 @@ pub(super) fn shade_entries() -> [wgpu::BindGroupLayoutEntry; 3] {
 }
 
 /// The trace's group 0 and pipeline layout: the frame uniform, the shared TLAS (RT) or the
-/// software reflection geometry (non-RT), L, the pass uniform, H, R, the counters and the
-/// receivers' epsilon; groups 1 and 3 are the traced geometry tables and the lighting.
+/// software reflection geometry (non-RT), L (each entry carries its receiver's epsilon), the
+/// pass uniform, H, R and the counters; groups 1 and 3 are the traced geometry tables and the
+/// lighting.
 /// `rl_list_args` alone also binds group 2, the list's indirect arguments (`args_layout`): the
 /// trace's indirect dispatch reads that buffer, so no other dispatch may bind it read-write.
 #[derive(Clone)]
@@ -130,7 +128,6 @@ impl TraceAbi {
             buffer(HITS, write, HITS_HEADER + RECORD_BYTES),
             image(SAMPLES, F::Rgba16Float),
             buffer(STATS, write, 16),
-            texture(RECEIVER_EPSILON, wgpu::TextureSampleType::Float { filterable: false }),
         ];
         entries.push(if ray_query {
             scene(2)
@@ -273,7 +270,14 @@ impl Renderer {
             self,
             "reflection glossy-pixel list",
             LIST_HEADER + room * LIST_ENTRY_BYTES,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                // The glossy-list dump's copy (usage only, while it is set).
+                | if super::reflection_list_dump::enabled() {
+                    wgpu::BufferUsages::COPY_SRC
+                } else {
+                    wgpu::BufferUsages::empty()
+                },
         )
     }
 
@@ -283,7 +287,6 @@ impl Renderer {
         abi: &TraceAbi,
         pass: &PassTargets,
         frame: wgpu::BindingResource<'_>,
-        epsilon: &wgpu::TextureView,
         scene: (u32, wgpu::BindingResource<'_>),
     ) -> Owned<wgpu::BindGroup> {
         use wgpu::BindingResource as R;
@@ -294,7 +297,6 @@ impl Renderer {
             (HITS, pass.hits.value.as_entire_binding()),
             (SAMPLES, R::TextureView(&pass.samples.view)),
             (STATS, pass.stats.value.as_entire_binding()),
-            (RECEIVER_EPSILON, R::TextureView(epsilon)),
             scene,
         ];
         let entries: Vec<_> = entries
@@ -408,6 +410,7 @@ impl Renderer {
         compute.set_pipeline(&pipelines.args);
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
+        super::reflection_list_dump::maybe_dump(self, encoder, pass);
         self.rl_probe(encoder, pass);
         self.rl_room_copy(encoder, pass);
     }

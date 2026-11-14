@@ -5,9 +5,54 @@ pub(crate) const BINDING: u32 = 68;
 const BYTES: u64 = 48;
 const SOURCE: &str = include_str!("../shaders/gi_receiver_pass.wgsl");
 const ENTRY_SEAM: &str = "// ---- GI receiver compute entry ----";
+/// Defaults are approved separately for each path after game-scene picture and memory checks.
+pub(crate) const RT_DEFAULT: bool = false;
+pub(crate) const NON_RT_DEFAULT: bool = false;
+const HEAD_MARK: &str = "\n// renderlab: this renderer prepares GI receivers before shading\n";
+fn env_switch(value: Option<&str>) -> Option<bool> {
+    match value {
+        Some("1") => Some(true),
+        Some("0") => Some(false),
+        _ => None,
+    }
+}
+fn requested() -> Option<bool> {
+    static ON: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| env_switch(std::env::var("RENDERLAB_GI_PASS").ok().as_deref()))
+}
+/// Explicit opt-in only. The port uses this for its existing refusal and never adopts
+/// the wgpu renderer's path defaults.
 pub(crate) fn on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_PASS").is_ok_and(|s| s == "1"))
+    requested() == Some(true)
+}
+fn path_default(hardware: bool) -> bool {
+    if hardware { RT_DEFAULT } else { NON_RT_DEFAULT }
+}
+fn default_on(device: &wgpu::Device) -> bool {
+    path_default(
+        device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
+    )
+}
+pub(super) fn enabled(device: &wgpu::Device) -> bool {
+    requested().unwrap_or_else(|| default_on(device))
+}
+fn default_head_for(head: &mut String, default: bool, override_on: Option<bool>) {
+    if default && override_on != Some(false) {
+        head.push_str(HEAD_MARK);
+    }
+}
+/// Carry this renderer's default through every program composed on its shading heads.
+/// Unmarked heads (including the port) retain inline lookup unless explicitly enabled.
+pub(crate) fn default_head(head: &mut String, device: &wgpu::Device) {
+    default_head_for(head, default_on(device), requested());
+}
+fn source_enabled(source: &str, override_on: Option<bool>) -> bool {
+    override_on.unwrap_or_else(|| source.contains(HEAD_MARK))
+}
+pub(crate) fn for_source(source: &str) -> bool {
+    source_enabled(source, requested())
 }
 pub(crate) fn entry() -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -32,7 +77,8 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     composed
 }
 pub(crate) fn shade_source(source: String, eligible: bool, specular: bool) -> String {
-    shade_source_for(source, eligible, specular, on())
+    let enabled = for_source(&source);
+    shade_source_for(source, eligible, specular, enabled)
 }
 fn shade_source_for(mut source: String, eligible: bool, specular: bool, enabled: bool) -> String {
     if !enabled || !eligible {
@@ -75,7 +121,7 @@ impl Renderer {
         }
     }
     pub(crate) fn ensure_gi_receiver_pass(&mut self, shading: Shading) -> Result<(), Error> {
-        if !on() {
+        if !enabled(&self.device) {
             return Ok(());
         }
         let Some(state) = self.view.primary.as_ref() else {
@@ -157,7 +203,7 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         shading: Shading,
     ) {
-        if !on() {
+        if !enabled(&self.device) {
             return;
         }
         let state = self.view.primary.as_ref().unwrap();
@@ -188,6 +234,29 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn path_defaults_and_overrides_agree_with_composition() {
+        for default in [false, true] {
+            for (value, expected) in [
+                (None, default),
+                (Some(""), default),
+                (Some("0"), false),
+                (Some("1"), true),
+                (Some("other"), default),
+            ] {
+                let requested = env_switch(value);
+                let mut head = "unmodified head".to_owned();
+                default_head_for(&mut head, default, requested);
+                assert_eq!(source_enabled(&head, requested), expected);
+                assert_eq!(requested.unwrap_or(default), expected);
+                if !default || requested == Some(false) {
+                    assert_eq!(head, "unmodified head");
+                }
+            }
+        }
+        // A renderer's default mark never enables an unrelated, unmarked backend head.
+        assert!(!source_enabled("port head", None));
+    }
     #[test]
     fn disabled_composition_is_byte_identical() {
         for eligible in [false, true] {

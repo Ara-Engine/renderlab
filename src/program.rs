@@ -337,7 +337,7 @@ fn without_inline_strata(composed: Composed) -> Composed {
 /// program, and a receiver that does not fit, keeps the inline path (no entry, no zero).
 const PASS_GATE: [&str; 2] = [
     "    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}\n",
-    "    if RL_PASS && !mirror && RL_DEFERRED_PROGRAM && rl_composite_floor(traced,count) && rl_room_reserve(count,traced,lobe.weight) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);\n        rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;\n    }\n",
+    "    if RL_PASS && !mirror && RL_DEFERRED_PROGRAM && rl_composite_floor(traced,count) && rl_any_stratum(count,radial,rotation,basis,local_v,v,alpha,side) && rl_room_reserve(count,traced,lobe.weight) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count,receiver.epsilon);\n        rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;\n    }\n",
 ];
 const DEFERRED_PROGRAM_FLAG: [&str; 2] = [
     "const RL_DEFERRED_PROGRAM:bool=false;",
@@ -494,7 +494,7 @@ pub(crate) fn rl_pass_switches(source: String) -> String {
 pub(crate) const RL_PASS_SEAMS: [(&str, &str, &str); 3] = [
     (
         "missblack",
-        "textureStore(rl_samples,at,vec4<f32>(rl_sky(d,cone_alpha),1.0));",
+        "textureStore(rl_samples,at,rl_f16_nearest(vec4<f32>(rl_sky(d,cone_alpha),1.0)));",
         "textureStore(rl_samples,at,vec4<f32>(0.0,0.0,0.0,1.0));",
     ),
     (
@@ -2755,6 +2755,32 @@ fn rl_receiver_store(p:vec2<i32>,trace:PrimaryTrace,receiver:Receiver) {{
         wgsl_function(MATERIAL_PACKING, "rl_mr_receiver_words"),
         line("const RL_MR_MISS_WORD1"),
     )
+}
+/// The local-light visibility pass's per-pixel helper (`light_vis_pass`, `rl_lvis_pixel`) built
+/// from the material record's receiver layers instead of decoding the hit: the receiver, the
+/// world point and the pixel are all the pass reads (`light_sample_untinted`,
+/// `light_visibility`). Pixels whose word 1 holds the miss sentinel are skipped. Word 1's slot
+/// is the receiver's batch (`primary_receiver`: `primary_placements[placement]&0x1fffffff`), so
+/// it indexes the materials directly. None when the module has no `rl_lvis_pixel` (the pass is
+/// off).
+pub(crate) fn light_vis_from_record(mut source: String) -> Option<String> {
+    let start = source.find("fn rl_lvis_pixel(")?;
+    const END: &str = "    rl_lvis_store(surface_input);\n}\n";
+    let end = start + source[start..].find(END)? + END.len();
+    source.replace_range(
+        start..end,
+        "fn rl_lvis_pixel(id:vec2<u32>,size:vec2<u32>) {\n\
+         \x20   let pixel=vec2<i32>(id);\n\
+         \x20   let b=textureLoad(rl_material,pixel,0,0);\n\
+         \x20   if rl_mr_miss(b) { return; }\n\
+         \x20   let material=primary_materials[b.w&0x0fffffffu].value;\n\
+         \x20   rl_lvis_store(rl_material_input(pixel,id,size,material));\n\
+         }\n",
+    );
+    source.push_str(MATERIAL_PACKING);
+    source.push_str(MATERIAL_READ);
+    source.push_str(MATERIAL_NO_DECODE);
+    Some(source)
 }
 /// The `nodecode` probe's entry edits: the `SurfaceInput` from the record, and the entry's
 /// later reads of the decoded point and side from it, so the vertex fetch is dead code.

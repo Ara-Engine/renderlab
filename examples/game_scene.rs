@@ -1113,6 +1113,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ])?;
 
     fs::create_dir_all(&args.out)?;
+    let pipeline_preparation = if std::env::var("RENDERLAB_PREWARM_PIPELINES").is_ok_and(|v| v == "1") {
+        let p = engine.prepare_pipelines()?;
+        Some(serde_json::json!({"ms": p.cpu.as_secs_f64() * 1e3,
+            "render": p.render_pipelines, "compute": p.compute_pipelines,
+            "added_buffer_bytes": p.added_buffer_bytes, "added_texture_bytes": p.added_texture_bytes}))
+    } else { None };
     let ready = start.elapsed();
     let mut frames = Vec::new();
     let mut last_camera = None;
@@ -1127,7 +1133,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>())
         .transpose()?;
     let drain = std::env::var("RENDERLAB_SCENE_DRAIN").is_ok_and(|v| v == "1");
+    // U-FIXED measurement only: RENDERLAB_SCENE_EVENT_FRAMES=a,b,c cuts at each listed frame
+    // (`cut=turn` alternates between the turned view and the walk's own), and
+    // RENDERLAB_SCENE_COUNTERS=<file> writes one JSON line per frame of cumulative pipeline,
+    // resource and acceleration-structure counters.
+    let events: Vec<u32> = match std::env::var("RENDERLAB_SCENE_EVENT_FRAMES") {
+        Ok(list) => list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>()?,
+        Err(_) => vec![event_frame],
+    };
+    // Clear only GI, far before the measured cut, without dropping view pipelines.
+    let gi_resets: Vec<u32> = std::env::var("RENDERLAB_SCENE_GI_RESET_FRAMES").ok()
+        .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>())
+        .transpose()?.unwrap_or_default();
+    let mut queue_diagnostic=std::env::var_os("RENDERLAB_GI_QUEUE_DIAG").map(std::fs::File::create).transpose()?;
+    let queue_frames:Vec<u32>=std::env::var("RENDERLAB_SCENE_QUEUE_FRAMES").unwrap_or_else(|_|"443,462,512,641".into())
+        .split(',').map(str::parse::<u32>).collect::<Result<_,_>>()?;
+    let mut counters = std::env::var_os("RENDERLAB_SCENE_COUNTERS")
+        .map(std::fs::File::create)
+        .transpose()?;
     for frame in 0..args.frames {
+        if gi_resets.contains(&frame) { engine.renderer_mut().reset_indirect(); }
         let t = if args.still { 0.0 } else { frame as f32 / FPS };
         let sun_update = Instant::now();
         let hour = sun_hour(frame);
@@ -1164,7 +1189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         // Fly path: a slow orbit that descends and closes in on the hero.
         let cut = (cuts || hold_cut) && frame >= event_frame;
-        if (cuts || cut_turn || hold_cut) && frame == event_frame {
+        if (cuts || cut_turn || hold_cut) && events.contains(&frame) {
             engine.cut_view(view);
             // `hold=cut`: the held pose moves to the cut's pose and holds there.
             if hold_cut {
@@ -1196,7 +1221,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 engine.cut_view(view);
             }
             let eye = anchor + FIELD_EYE + 4.0 * along * FIELD_WALK;
-            let turn = if cut_turn && frame >= event_frame { 150.0 } else { 0.0 };
+            let passed = events.iter().filter(|&&e| frame >= e).count();
+            let turn = if cut_turn && passed % 2 == 1 { 150.0 } else { 0.0 };
             let look = Mat4::from_rotation_y((12.0 * along + turn).to_radians())
                 .transform_vector3(FIELD_WALK);
             (eye, eye + 10.0 * look - Vec3::new(0.0, 2.2, 0.0))
@@ -1252,7 +1278,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let camera = if args.views == "b" { camera_b } else { camera };
         let begin = Instant::now();
         engine.tick(1.0 / FPS)?;
+        let queue_sample=queue_diagnostic.is_some() && queue_frames.contains(&frame);
+        if queue_sample {engine.renderer_mut().begin_indirect_queue_probe()?;}
         let report = engine.render_view(view, &camera)?;
+        if queue_sample {
+            use std::io::Write;
+            let q=engine.renderer_mut().indirect_queue_probe()?;
+            writeln!(queue_diagnostic.as_mut().unwrap(),"{}",serde_json::json!({"frame":frame,"phase":"incoming_after_probe","visible_never_gathered":q[0],"visible_with_raw_data":q[1],"off_screen":q[2],"ineligible":q[3],"duplicates":q[4],"entries":q[5],"visible_filtered_only":q[6]}))?;
+        }
         // `--views ab`: the second view renders in the same tick, after the first.
         let second_hash = match second {
             Some(second) => {
@@ -1273,6 +1306,24 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             engine.poll()?;
         }
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
+        if let Some(file) = counters.as_mut() {
+            use std::io::Write;
+            let r = engine.renderer();
+            let st = r.stats();
+            let kinds: Vec<u64> = st.ownership.persistent.iter().map(|c| c.created).collect();
+            let hw = r.hardware_shadow_stats();
+            writeln!(file, "{}", serde_json::json!({
+                "frame": frame, "pipelines_created": st.pipelines.created, "created_by_kind": kinds,
+                "shadow_creations": st.ownership.shadow_creations, "target_creations": st.ownership.target_creations,
+                "lut_creations": st.ownership.lut_creations, "material_creations": st.ownership.material_creations,
+                "texture_creations": st.ownership.texture_creations, "light_creations": st.ownership.light_creations,
+                "blas_builds": hw.map(|h| h.blas_builds), "blas_updates": hw.map(|h| h.blas_updates),
+                "tlas_builds": hw.map(|h| h.tlas_builds), "pending_builds": hw.map(|h| h.pending_builds),
+                "as_bytes": hw.map(|h| h.estimated_as_bytes),
+                "visible_instances": report.scene.visible_instances,
+                "submitted_instances": report.scene.submitted_instances,
+            }))?;
+        }
         let written = keep_frames.as_ref().map_or(frame % args.every == 0 || frame + 1 == args.frames, |keep| keep.contains(&frame));
         let mut image_hash = None;
         let mut hdr_hash = None;
@@ -1417,7 +1468,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "night_lanterns": args.night_lanterns, "local_lights": diag.lights(lanterns(0.0, 0)).len(),
         "diag": args.diag, "lamp_head": post_lamp.to_array(),
         "local_shadow_count":engine.settings().local_shadows.count,
-        "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
+        "quarry": args.quarry, "pipeline_preparation": pipeline_preparation,
+        "startup_to_scene_ready_seconds": ready.as_secs_f64(),
         "startup_to_first_image_seconds": first_image_seconds,
         "startup_stages_seconds": {"adapter":adapter_seconds,"engine":engine_seconds-adapter_seconds,
             "programs":programs_seconds-engine_seconds,"scene":ready.as_secs_f64()-programs_seconds},

@@ -5,6 +5,8 @@ pub(crate) mod atmosphere_gpu;
 mod environment_gpu;
 #[path = "light_cluster_gpu.rs"]
 mod light_cluster_gpu;
+#[path = "pipeline_prewarm.rs"]
+mod pipeline_prewarm;
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
 // DC1: one storage binding beside lighting; no separate render pass.
@@ -773,6 +775,7 @@ impl Renderer {
         hardware: Option<HardwareShadowOptions>,
         wgsl: &str,
     ) -> Result<Self, Error> {
+        crate::material_mode::Mode::validate(&device.limits())?;
         device.check_custom_prelude(wgsl);
         if !device.features().contains(crate::RECEIVER_FEATURES) {
             return Err(Error::InvalidInput(
@@ -1405,7 +1408,7 @@ impl Renderer {
             .transpose()
             .map_err(rejected)?;
         // Traced modules are part of the same transaction while they are selected.
-        let primary_sources = self
+        let mut primary_sources = self
             .pipeline
             .primary
             .as_ref()
@@ -1414,12 +1417,17 @@ impl Renderer {
                     return primary_ray_gpu::non_rt_sources(wgsl);
                 }
                 Ok::<_, Error>((
-                    primary_ray_gpu::shader_sources(wgsl)?,
+                    primary_ray_gpu::wgpu_shader_sources(wgsl)?,
                     primary_ray_gpu::shading_heads(wgsl)?,
                 ))
             })
             .transpose()
             .map_err(rejected)?;
+        if let Some((_, heads)) = &mut primary_sources {
+            for head in heads {
+                primary_ray_gpu::gi_receiver_pass::default_head(head, &self.device);
+            }
+        }
         // A temporal kernel already in use recompiles in the transaction, so a rejected
         // prelude keeps it; otherwise the first temporal frame compiles it.
         let film_source = primary_sources
@@ -2640,6 +2648,9 @@ impl Renderer {
         if let Some(order) = order {
             transparency_gpu::restore(draws, &order);
         }
+        if let Ok(Some(report)) = &result {
+            self.device.log_pipeline_frame(self, report);
+        }
         result
     }
     fn render_view(
@@ -3254,7 +3265,7 @@ impl Renderer {
         }
         if traced && !temporal {
             self.ensure_shade_detail(&programs, streaming, usize::from(soft))?;
-            if !streaming && !crate::program::material_pass_on() {
+            if !streaming && !crate::material_mode::Mode::full() {
                 self.prepare_lean(&programs, programs.len() > 1, usize::from(soft));
             }
         }
@@ -3539,7 +3550,7 @@ impl Renderer {
             } else {
                 primary_ray_gpu::Shading::Hard
             };
-            let material = crate::program::material_pass_on() && !temporal;
+            let material = crate::material_mode::Mode::full() && !temporal;
             if material {
                 self.ensure_material_pass(shading)?;
             }
@@ -3619,6 +3630,7 @@ impl Renderer {
                         self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
                     }
                 }
+                self.encode_material_tail_check(&mut encoder);
                 if split {
                     // RENDERLAB_PASS_LOG_DETAIL: from the end of the early commands to the
                     // first late pass, the GPU waits for the CPU's GI and post preparation.

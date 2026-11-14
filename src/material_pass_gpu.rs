@@ -22,7 +22,7 @@ fn composition(
 
 /// The record's layout entry (program.rs `MATERIAL_RECORD_BINDING`): one 2D array, written by
 /// the material pass, read by record-reading shading.
-pub(super) fn entries(write: bool) -> [wgpu::BindGroupLayoutEntry; 1] {
+pub(in crate::renderer) fn entries(write: bool) -> [wgpu::BindGroupLayoutEntry; 1] {
     [entry(
         program::MATERIAL_RECORD_BINDING,
         if write {
@@ -96,7 +96,7 @@ impl Layouts {
 }
 impl Renderer {
     pub(crate) fn ensure_material_pass(&mut self, shading: Shading) -> Result<(), Error> {
-        if !program::material_pass_on() || self.view.soft_mode == SoftShadows::Temporal {
+        if !crate::material_mode::Mode::full() || self.view.soft_mode == SoftShadows::Temporal {
             return Ok(());
         }
         let state = self.view.primary.as_ref().unwrap();
@@ -217,7 +217,7 @@ impl Renderer {
         stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         write: bool,
     ) -> bool {
-        if !program::material_pass_on() || self.view.soft_mode == SoftShadows::Temporal {
+        if !crate::material_mode::Mode::full() || self.view.soft_mode == SoftShadows::Temporal {
             return false;
         }
         let state = self.view.primary.as_ref().unwrap();
@@ -344,11 +344,20 @@ mod tests {
                                     })
                                     .unwrap()
                                     .1;
-                                let naga::TypeInner::Image { class, .. } =
-                                    module.types[global.ty].inner
+                                let naga::TypeInner::Image {
+                                    class,
+                                    dim,
+                                    arrayed,
+                                } = module.types[global.ty].inner
                                 else {
                                     panic!("record is an image")
                                 };
+                                // One 2D array, receiver first (program.rs MATERIAL_RECORD_BINDING).
+                                assert_eq!(
+                                    (dim, arrayed),
+                                    (naga::ImageDimension::D2, true),
+                                    "the record is a 2D array"
+                                );
                                 match (layout.ty, class) {
                                     (
                                         wgpu::BindingType::StorageTexture {

@@ -32,8 +32,6 @@ const RL_LIST_ROW:u32=65535u;
 // this declaration's exact text, so it stays on one line.)
 struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32> };
 @group(0) @binding(60) var<storage,read_write> rl_trace_stats:RlTraceStats;
-// The receivers' ray epsilon per pixel (reflection_pass.rs RECEIVER_EPSILON).
-@group(0) @binding(79) var rl_receiver_epsilon:texture_2d<f32>;
 // The list's length (shading's appends; never past its capacity).
 fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
 
@@ -82,8 +80,8 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
     let basis=rl_basis(n);
     let local_v=vec3<f32>(dot(v,basis[0]),dot(v,basis[1]),dot(v,basis[2]));
     let width=samples.x;
-    // The receiver's own epsilon (its triangle's, as the inline loop's tmin).
-    let epsilon=textureLoad(rl_receiver_epsilon,vec2<i32>(p),0).x;
+    // The receiver's own epsilon (its triangle's, the inline loop's tmin), from its entry.
+    let epsilon=bitcast<f32>(c.z);
     for(var k=0u;k<count;k+=1u) {
         let slot=first+k;
         let at=vec2<i32>(vec2<u32>(slot%width,slot/width));
@@ -93,7 +91,7 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
         if dot(d,side)<=0.0 {continue;}
         let traced=rl_cast(origin,d,epsilon);
         if traced.record.x==0u {
-            textureStore(rl_samples,at,vec4<f32>(rl_sky(d,cone_alpha),1.0));
+            textureStore(rl_samples,at,rl_f16_nearest(vec4<f32>(rl_sky(d,cone_alpha),1.0)));
             continue;
         }
         // A hit before its H append (the Mac's S4a hit reuse replaces this line under

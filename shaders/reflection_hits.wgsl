@@ -51,7 +51,7 @@ fn rl_hits_distance(record:vec4<u32>,origin:vec3<f32>)->f32 {
     let t=rl_hits_distance(record,origin);
     let cached=rl_cache_hit(record,origin,d,t,cone.x+cone.y*t,sqrt(alpha));
     if cached.w>0.0 {
-        textureStore(rl_hit_samples_out,at_slot,vec4<f32>(rl_finite(expose(cached.rgb)),1.0));
+        textureStore(rl_hit_samples_out,at_slot,rl_f16_nearest(vec4<f32>(rl_finite(expose(cached.rgb)),1.0)));
         return;
     }
     // The inline loop's per-hit state (rl_reflection_prepare): this hit's share of its
@@ -69,5 +69,5 @@ fn rl_hits_distance(record:vec4<u32>,origin:vec3<f32>)->f32 {
     rl_load_parameters(h.batch);
     let hs=surface(h.input);
     let radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);
-    textureStore(rl_hit_samples_out,at_slot,vec4<f32>(radiance,1.0));
+    textureStore(rl_hit_samples_out,at_slot,rl_f16_nearest(vec4<f32>(radiance,1.0)));
 }

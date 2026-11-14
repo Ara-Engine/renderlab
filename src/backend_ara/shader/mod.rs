@@ -82,6 +82,8 @@ pub enum Pass {
     PrimaryShadeTiles,
     /// Original mixed-program deferred shading of listed primary tiles.
     PrimaryShadeList,
+    /// The local-light visibility pass over the covered tiles (src/backend_ara/light_vis.rs).
+    LightVisibility,
     /// A program's reflection hits: one bin of H (src/reflection_hits.rs).
     ReflectionHits,
     /// Original software raster of projected cluster triangles into packed visibility.
@@ -271,6 +273,9 @@ impl Pass {
                 .expect("original traced composition remains valid")
                 .into()
             }
+            Self::LightVisibility => crate::backend_ara::light_vis::source(crate::program::material_pass_on())
+                .expect("the light visibility pass composes")
+                .into(),
             Self::ReflectionHits => crate::backend_ara::primary_shade::hits_source(include_str!(
                 "../shaders/traced_material.wgsl"
             ))
@@ -494,14 +499,7 @@ impl Pass {
             }
             Self::Tone => TONE.into(),
             Self::Display => include_str!("../shaders/display.wgsl").into(),
-            Self::IdResolve => {
-                let source = include_str!("../../../shaders/id_output.wgsl");
-                source
-                    .split_once("// ---- Handoff:")
-                    .expect("the id output has a handoff part")
-                    .0
-                    .into()
-            }
+            Self::IdResolve => crate::renderer::id_output::id_source().into(),
             Self::IdPack => include_str!("../shaders/id_pack.wgsl").into(),
             Self::ViewHistogram => include_str!("../shaders/view_histogram.wgsl").into(),
             _ => POST.into(),
@@ -564,6 +562,7 @@ impl Pass {
                 | Self::PrimaryRayProbe
                 | Self::PrimaryShadeTiles
                 | Self::PrimaryShadeList
+                | Self::LightVisibility
                 | Self::ReflectionHits
                 | Self::HandleArrayProbe
                 | Self::BufferArrayProbe
@@ -677,6 +676,7 @@ impl Pass {
             Self::PrimaryInteractive(entry) => entry.name(),
             Self::PrimaryRayProbe => "primary_probe",
             Self::PrimaryShadeTiles => "primary_shade_tiles",
+            Self::LightVisibility => "light_vis_tiles",
             Self::PrimaryShadeList => "primary_shade_list",
             Self::ReflectionHits => "reflection_hits",
             Self::PrimaryCheck => "primary_check_interactive",
