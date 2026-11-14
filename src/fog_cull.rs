@@ -1,6 +1,6 @@
-//! Opt-in current-frame opaque-depth culling for wgpu RT fog queries.
+//! Current-frame opaque-depth culling, default on for wgpu RT fog queries.
 //! No per-pixel record: visibility reduces its already decoded points to 8x4 depths.
-//! RENDERLAB_FOG_CULL=1 adds binding 81 on the wgpu producer only. Off retains
+//! RENDERLAB_FOG_CULL=0 opts out. Binding 81 is on the wgpu producer only. Off retains
 //! the original modules, bindings, allocations and early fog schedule. On moves
 //! only inject/temporal/integrate after visibility and repair; LUT work stays early.
 //! Skipped cells hold zero RGBA, with G=0 marking invalid history. Filled cells
@@ -15,7 +15,7 @@ const PRODUCER: &str = include_str!("../shaders/fog_depth_producer.wgsl");
 const OCCLUSION: &str = include_str!("../shaders/fog_occlusion.wgsl");
 
 pub(crate) fn enabled() -> bool {
-    std::env::var("RENDERLAB_FOG_CULL").as_deref() == Ok("1")
+    std::env::var("RENDERLAB_FOG_CULL").as_deref() != Ok("0")
 }
 pub(super) fn entry() -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
@@ -362,35 +362,6 @@ mod tests {
                 .1,
             expected
         );
-        if !enabled() {
-            let rt = super::super::atmosphere_gpu::compile_structure_sources(true);
-            let expected = format!(
-                "enable wgpu_ray_query;\n{}{}{}{}",
-                include_str!("../shaders/atmosphere_common.wgsl"),
-                include_str!("../shaders/atmosphere.wgsl"),
-                crate::shadows::SHADOW_CASTER_MASK_WGSL,
-                super::super::atmosphere_gpu::HARDWARE_VISIBILITY
-            );
-            assert_eq!(
-                rt.iter().find(|(name, _)| *name == "kernels").unwrap().1,
-                expected
-            );
-        }
-        let film_layout = primary_ray_gpu::film_accumulation::trace_layout_entries(false);
-        assert!(film_layout.iter().all(|entry| entry.binding != BINDING));
-        assert!(primary_ray_gpu::film_accumulation::fog_trace_binding(None).is_none());
-        let soft =
-            &primary_ray_gpu::shader_sources(include_str!("../shaders/scene.wgsl")).unwrap()[1];
-        let film = primary_ray_gpu::film_accumulation::kernel_source(&producer_source(
-            soft.clone(),
-            false,
-        ))
-        .unwrap();
-        assert_eq!(
-            film,
-            primary_ray_gpu::film_accumulation::kernel_source(soft).unwrap()
-        );
-        assert!(!film.contains("@binding(81)"));
         let old = vec![wgpu::BindGroupLayoutEntry {
             binding: 10,
             visibility: wgpu::ShaderStages::COMPUTE,

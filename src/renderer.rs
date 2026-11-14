@@ -3653,7 +3653,7 @@ impl Renderer {
                     }
                 }
                 self.encode_material_tail_check(&mut encoder);
-                // Only FOG_CULL=1 moves fog from its original early position.
+                // RT fog culling runs after current visibility; FOG_CULL=0 keeps the early path.
                 self.encode_fog_culled(&mut encoder, &mut mark);
                 if split {
                     // RENDERLAB_PASS_LOG_DETAIL: from the end of the early commands to the
