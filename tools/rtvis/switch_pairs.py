@@ -14,6 +14,7 @@ import subprocess
 import sys
 
 SWITCHES = {
+    "prewarm": {"RENDERLAB_PREWARM_PIPELINES": "1"},
     "gi": {"RENDERLAB_GI_PASS": "1"},
     "material": {"RENDERLAB_MATERIAL_PASS": "1"},
     "material-tail": {"RENDERLAB_MATERIAL_PASS": "tail"},

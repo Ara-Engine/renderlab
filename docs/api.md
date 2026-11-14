@@ -435,6 +435,25 @@ remains `None`. Cache I/O failures fall back to compilation. Driver and adapter 
 use a different file, and wgpu keys compiled pipelines by shader and pipeline state.
 Shader edits still validate; rejected edits retain the last working pipelines.
 
+Load-time preparation (wgpu engine, experimental): call
+`engine.prepare_pipelines()?` after loading a level's materials and settings.
+It builds every loaded transparent material's glass, film and pane variants,
+including materials with no visible object, plus their RT reflection pipelines
+and the local-shadow atlas clear. It submits no frame and advances no history or
+particles. The returned `PipelinePreparation` reports CPU duration, pipeline
+counts and additional owned buffer/texture bytes; driver pipeline memory is not
+included. Repeat after loading another level or replacing programs. This covers
+the variants identified by the forest repeated-cut census, rather than every
+possible future settings change or driver first-use work. The default-off
+`RENDERLAB_PREWARM_PIPELINES=1` automatically prepares before the engine's first
+frame. `game_scene` explicitly prepares before its scene-ready timestamp and
+records the report in `run.json`. See [the inventory](pipeline-prewarm.md).
+
+`RENDERLAB_PIPELINE_LOG=<file.jsonl>` appends native compilation events and
+frame-end resource/AS build counters through the wgpu renderer, including a host
+such as Ara using `Engine::render_view`. It adds CPU diagnostic I/O but no GPU
+readback, and leaves the public startup timing queue intact.
+
 `RENDERLAB_STARTUP_PROFILE=1` records CPU module/pipeline compilation in the example's
 `run.json`, alongside scene-ready and first-image readback times and complete RGBA8
 hashes. `--reload-probe` applies a visible program edit, attempts invalid WGSL, then

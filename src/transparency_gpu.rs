@@ -270,6 +270,7 @@ pub(super) struct TransparencyState {
     next_emitter: u64,
     gpu: Option<Gpu>,
     glass: Vec<GlassPipelines>,
+    reflection_pipelines: Vec<reflection::ReflectionPipeline>,
     /// Film draws' instance ids far to near (`far_to_near`), every multi-instance film draw's
     /// at its own offset, rewritten each frame; grown, never shrunk. With its size in bytes.
     film_order: Option<(Owned<wgpu::Buffer>, u64)>,
@@ -1287,6 +1288,10 @@ impl Renderer {
         let gpu = self.transparency.gpu.as_ref().unwrap();
         let layout = &gpu.glass_layouts[usize::from(rt)];
         let make_with = |module: &wgpu::ShaderModule, tangent: bool, lobe: bool, blend: bool| {
+            let label = format!(
+                "TP1 transparent program={} rt={rt} key={key:02x?} tangent={tangent} lobe={lobe} film={blend}",
+                slot.label,
+            );
             let targets = if lobe {
                 vec![
                     Some(wgpu::TextureFormat::Rgba32Float.into()),
@@ -1303,7 +1308,7 @@ impl Renderer {
             self.ledger.own(
                 self.device
                     .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("TP1 transparent"),
+                        label: Some(&label),
                         layout: Some(layout),
                         vertex: wgpu::VertexState {
                             module,
@@ -1380,6 +1385,114 @@ impl Renderer {
             films,
             pane: None,
         })
+    }
+
+    /// The same lazy builders used by drawing, also callable before any draw is visible.
+    pub(super) fn tp_prepare_programs(
+        &mut self, programs: &[u64], rt: bool, traced: bool,
+    ) -> Result<bool, Error> {
+        for &program in programs {
+            let key = self.tp_glass_key(program, rt);
+            if self
+                .transparency
+                .glass
+                .iter()
+                .any(|g| g.program == program && g.key == key)
+            {
+                continue;
+            }
+            let source = self.tp_glass_source(program, rt);
+            let pipelines = match self.tp_glass_pipelines(program, rt, &source, key) {
+                Err(Error::Fault(Fault(message))) => return Err(self.fail(message)),
+                other => other?,
+            };
+            self.transparency.glass.retain(|g| g.program != program);
+            self.transparency.glass.push(pipelines);
+        }
+        // Per-pixel panes: the id raster and shading of each program, once its glass set exists.
+        let pixel_panes = self.tp_pane_pixels()
+            && traced
+            && self.device.features().contains(wgpu::Features::PRIMITIVE_INDEX);
+        if pixel_panes {
+            for at in 0..self.transparency.glass.len() {
+                if self.transparency.glass[at].pane.is_some() {
+                    continue;
+                }
+                let program = self.transparency.glass[at].program;
+                let source = self.tp_glass_source(program, rt);
+                let pane = match self.tp_pane_pipelines(program, rt, &source) {
+                    Err(Error::Fault(Fault(message))) => return Err(self.fail(message)),
+                    other => other?,
+                };
+                self.transparency.glass[at].pane = Some(pane);
+            }
+        }
+        Ok(pixel_panes)
+    }
+
+    pub(super) fn tp_prepare_hit_depth(&mut self, traced: bool) {
+        if traced && self.transparency.gpu.as_ref().unwrap().hit_depth.is_none() {
+            let primary = self.view.primary.as_ref().unwrap();
+            let bindings = self.tp_layout(
+                "TP1 hit depth",
+                &[
+                    entry(30, COMPUTE, uniform(false, FRAME_BYTES)),
+                    entry(50, COMPUTE, texture(wgpu::TextureSampleType::Uint)),
+                    entry(51, COMPUTE, texture(wgpu::TextureSampleType::Uint)),
+                    entry(
+                        52,
+                        COMPUTE,
+                        wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: wgpu::TextureFormat::R32Float,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                        },
+                    ),
+                ],
+            );
+            let layout =
+                self.tp_pipeline_layout("TP1 hit depth", &[&bindings, primary.array_layout()]);
+            let module = self.tp_module("TP1 hit depth", &hit_depth_source());
+            let pipeline = self.tp_compute("TP1 hit depth", &layout, &module, "tp_depth_hits");
+            self.transparency.gpu.as_mut().unwrap().hit_depth = Some((bindings, pipeline));
+        }
+    }
+
+    pub(super) fn prewarm_transparency(&mut self, materials: &[&Material]) -> Result<(), Error> {
+        let mut programs: Vec<_> = materials.iter()
+            .filter(|m| m.transparency.is_some())
+            .map(|m| m.program.id()).collect();
+        programs.sort_unstable();
+        programs.dedup();
+        self.transparency.glass.retain(|p| programs.contains(&p.program));
+        let mut opaque: Vec<_> = materials.iter()
+            .filter(|m| m.transparency.is_none()).map(|m| m.program.id()).collect();
+        if opaque.is_empty() { opaque.push(self.standard.id()); }
+        self.transparency.reflection_pipelines.retain(|p| opaque.contains(&p.program));
+        if programs.is_empty() && self.transparency.emitters.is_empty() {
+            return Ok(());
+        }
+        self.tp_check_limits()?;
+        if self.transparency.gpu.is_none() {
+            self.transparency.gpu = Some(self.tp_gpu());
+        }
+        let rt = self.hardware_shadows.is_some();
+        let traced = self.primary_mode != PrimaryVisibility::Raster;
+        self.tp_prepare_hit_depth(traced);
+        self.tp_prepare_programs(&programs, rt, traced)?;
+        if rt && traced && programs.iter().any(|&p| self.program_slot(p).traits.declares_reflection) {
+            opaque.sort_unstable();
+            opaque.dedup();
+            for program in opaque {
+                let slot = self.program_slot(program);
+                let key = reflection::key(&self.source_digest, &slot.digest, slot.layout.is_some());
+                if self.transparency.reflection_pipelines.iter().any(|p| p.key == key) { continue; }
+                let built = self.tp_reflection_pipeline(program)?;
+                self.transparency.reflection_pipelines.retain(|p| p.program != program);
+                self.transparency.reflection_pipelines.push(built);
+            }
+        }
+        Ok(())
     }
 
     /// Creates a particle emitter. It simulates and draws in every lit frame until the
@@ -1724,31 +1837,7 @@ impl Renderer {
             let pipelines = self.tp_particle_pipelines();
             self.transparency.gpu.as_mut().unwrap().particles = Some(pipelines);
         }
-        if traced && self.transparency.gpu.as_ref().unwrap().hit_depth.is_none() {
-            let primary = self.view.primary.as_ref().unwrap();
-            let bindings = self.tp_layout(
-                "TP1 hit depth",
-                &[
-                    entry(30, COMPUTE, uniform(false, FRAME_BYTES)),
-                    entry(50, COMPUTE, texture(wgpu::TextureSampleType::Uint)),
-                    entry(51, COMPUTE, texture(wgpu::TextureSampleType::Uint)),
-                    entry(
-                        52,
-                        COMPUTE,
-                        wgpu::BindingType::StorageTexture {
-                            access: wgpu::StorageTextureAccess::WriteOnly,
-                            format: wgpu::TextureFormat::R32Float,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                        },
-                    ),
-                ],
-            );
-            let layout =
-                self.tp_pipeline_layout("TP1 hit depth", &[&bindings, primary.array_layout()]);
-            let module = self.tp_module("TP1 hit depth", &hit_depth_source());
-            let pipeline = self.tp_compute("TP1 hit depth", &layout, &module, "tp_depth_hits");
-            self.transparency.gpu.as_mut().unwrap().hit_depth = Some((bindings, pipeline));
-        }
+        self.tp_prepare_hit_depth(traced);
         // Transparent programs' pipelines, by program and sun-visibility path.
         let rt = self
             .hardware_shadows
@@ -1803,42 +1892,7 @@ impl Renderer {
             .collect();
         programs.sort_unstable();
         programs.dedup();
-        for program in programs {
-            let key = self.tp_glass_key(program, rt);
-            if self
-                .transparency
-                .glass
-                .iter()
-                .any(|g| g.program == program && g.key == key)
-            {
-                continue;
-            }
-            let source = self.tp_glass_source(program, rt);
-            let pipelines = match self.tp_glass_pipelines(program, rt, &source, key) {
-                Err(Error::Fault(Fault(message))) => return Err(self.fail(message)),
-                other => other?,
-            };
-            self.transparency.glass.retain(|g| g.program != program);
-            self.transparency.glass.push(pipelines);
-        }
-        // Per-pixel panes: the id raster and shading of each program, once its glass set exists.
-        let pixel_panes = self.tp_pane_pixels()
-            && traced
-            && self.device.features().contains(wgpu::Features::PRIMITIVE_INDEX);
-        if pixel_panes {
-            for at in 0..self.transparency.glass.len() {
-                if self.transparency.glass[at].pane.is_some() {
-                    continue;
-                }
-                let program = self.transparency.glass[at].program;
-                let source = self.tp_glass_source(program, rt);
-                let pane = match self.tp_pane_pipelines(program, rt, &source) {
-                    Err(Error::Fault(Fault(message))) => return Err(self.fail(message)),
-                    other => other?,
-                };
-                self.transparency.glass[at].pane = Some(pane);
-            }
-        }
+        let pixel_panes = self.tp_prepare_programs(&programs, rt, traced)?;
         // ---- CPU: the frame block, the sun map fit and the draw order ----
         let camera = self.transparency.camera.unwrap();
         let matrix = camera.matrix(size.width, size.height);
