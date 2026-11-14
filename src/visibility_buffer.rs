@@ -1428,6 +1428,16 @@ impl Renderer {
         stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         stages: Option<&wgpu::QuerySet>,
     ) {
+        self.encode_visibility_logged(encoder, soft, stamps, stages, &mut |_, _| {});
+    }
+    pub(super) fn encode_visibility_logged(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        soft: bool,
+        stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        stages: Option<&wgpu::QuerySet>,
+        mark: &mut impl FnMut(&mut wgpu::CommandEncoder, &'static str),
+    ) {
         let v = self.view.visibility_buffer.as_ref().unwrap();
         let arrays = self
             .view
@@ -1447,6 +1457,7 @@ impl Renderer {
             end_of_pass_write_index: None,
         });
         for i in 0..2 {
+            mark(encoder, ["visibility.cull1", "visibility.cull2"][i]);
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("N1c LOD cut and cluster cull"),
@@ -1469,6 +1480,7 @@ impl Renderer {
                 pass.set_pipeline(&v.finish);
                 pass.dispatch_workgroups(1, 1, 1);
             }
+            mark(encoder, ["visibility.sw1", "visibility.sw2"][i]);
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("N1c software raster"),
@@ -1480,6 +1492,7 @@ impl Renderer {
                 pass.set_bind_group(2, &v.data_group, &[]);
                 pass.dispatch_workgroups_indirect(&v.args[i].value, 0);
             }
+            mark(encoder, ["visibility.hw1", "visibility.hw2"][i]);
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("N1c hardware raster"),
@@ -1506,8 +1519,10 @@ impl Renderer {
                 pass.set_bind_group(2, &v.data_group, &[]);
                 pass.draw_indirect(&v.args[i].value, 16);
             }
+            mark(encoder, ["visibility.hzb1", "visibility.hzb2"][i]);
             v.pyramid(encoder, i, stage(i as u32 * 4 + 3));
         }
+        mark(encoder, "visibility.resolve");
         let resolve_stamps = stamps
             .map(|s| wgpu::ComputePassTimestampWrites {
                 query_set: s.query_set,
