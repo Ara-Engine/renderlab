@@ -3,6 +3,22 @@ use super::*;
 use std::sync::OnceLock;
 pub(super) const HEADER_LIMIT: usize = 32;
 pub(super) const DEFAULT_CELLS: u32 = 12_288;
+pub(super) const FIRST_FLOOR: u32 = DEFAULT_CELLS - DEFAULT_CELLS / 5;
+/// A soft gather target from the previous frame's measured cost, never a time ceiling.
+pub(super) fn gather_target() -> f64 {
+    static TARGET: OnceLock<f64> = OnceLock::new();
+    *TARGET.get_or_init(|| {
+        let target: f64 = std::env::var("RENDERLAB_GI_GATHER_MS")
+            .unwrap_or_else(|_| "3".into())
+            .parse()
+            .expect("GI soft gather target");
+        assert!(
+            target.is_finite() && target > 0.0 && target <= f64::from(f32::MAX),
+            "GI soft gather target must fit a positive finite f32"
+        );
+        target
+    })
+}
 
 /// Measurement only: replay the clean run's per-frame budgets during blocking captures,
 /// so PNG encoding/downclocking cannot change the time controller's picture workload.
@@ -10,7 +26,7 @@ pub(super) fn measurement_header(header: &mut [u32; HEADER_WORDS as usize]) {
     use std::io::Write;
     use std::sync::atomic::{AtomicUsize, Ordering};
     static FRAME: AtomicUsize = AtomicUsize::new(0);
-    static REPLAY: OnceLock<Option<Vec<[u32; 2]>>> = OnceLock::new();
+    static REPLAY: OnceLock<Option<Vec<Vec<u32>>>> = OnceLock::new();
     static TRACE: OnceLock<Option<std::sync::Mutex<std::fs::File>>> = OnceLock::new();
     let frame = FRAME.fetch_add(1, Ordering::Relaxed);
     let replay = REPLAY.get_or_init(|| {
@@ -24,17 +40,21 @@ pub(super) fn measurement_header(header: &mut [u32; HEADER_WORDS as usize]) {
                         .split(',')
                         .map(|s| s.parse().expect("GI replay integer"))
                         .collect();
-                    assert_eq!(row.len(), 3, "GI replay frame,claims,gathers");
+                    assert!(
+                        matches!(row.len(), 3 | 9),
+                        "GI replay frame,claims,gathers[,first,costs,target,refresh,raw]"
+                    );
                     assert_eq!(row[0] as usize, index, "GI replay frame order");
-                    [row[1], row[2]]
+                    row[1..].to_vec()
                 })
                 .collect()
         })
     });
     if let Some(rows) = replay {
-        let [claims, gathers] = *rows
+        let row = rows
             .get(frame)
             .expect("GI budget replay ended before the capture");
+        let (claims, gathers) = (row[0], row[1]);
         assert!(
             gathers >= 64 && (claims == 0 || claims >= 64),
             "GI replay budget"
@@ -42,6 +62,11 @@ pub(super) fn measurement_header(header: &mut [u32; HEADER_WORDS as usize]) {
         header[20] = gathers;
         header[32] = gathers;
         header[33] = claims;
+        if row.len() == 8 {
+            for (&index, &value) in [35, 36, 37, 38, 40, 41].iter().zip(&row[2..]) {
+                header[index] = value;
+            }
+        }
     }
     let trace = TRACE.get_or_init(|| {
         std::env::var_os("RENDERLAB_GI_REFILL_TRACE").map(|path| {
@@ -51,9 +76,15 @@ pub(super) fn measurement_header(header: &mut [u32; HEADER_WORDS as usize]) {
     if let Some(file) = trace {
         writeln!(
             file.lock().unwrap(),
-            "{frame},{},{}",
+            "{frame},{},{},{},{},{},{},{},{}",
             header[33],
-            header[32]
+            header[32],
+            header[35],
+            header[36],
+            header[37],
+            header[38],
+            header[40],
+            header[41]
         )
         .expect("GI budget trace write");
     }
@@ -61,6 +92,8 @@ pub(super) fn measurement_header(header: &mut [u32; HEADER_WORDS as usize]) {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Mode {
+    /// Measurement control: the shipped 12k HOT ordering, without the soft gather target.
+    Legacy,
     Today,
     Hold(u32),
     Fixed(u32),
@@ -73,11 +106,20 @@ pub(super) fn on() -> bool {
 pub(super) fn mode() -> Mode {
     static MODE: OnceLock<Mode> = OnceLock::new();
     *MODE.get_or_init(|| {
-        let Ok(value) = std::env::var("RENDERLAB_GI_REFILL_BUDGET") else { return Mode::Fixed(DEFAULT_CELLS); };
-        if value == "today" {
+        let Ok(value) = std::env::var("RENDERLAB_GI_REFILL_BUDGET") else {
+            return Mode::Fixed(DEFAULT_CELLS);
+        };
+        if value == "legacy" {
+            Mode::Legacy
+        } else if value == "today" {
             Mode::Today
         } else if value == "hold" {
-            Mode::Hold(std::env::var("RENDERLAB_GI_REFILL_HOLD").unwrap_or_else(|_| "8".into()).parse().expect("GI refill hold frames"))
+            Mode::Hold(
+                std::env::var("RENDERLAB_GI_REFILL_HOLD")
+                    .unwrap_or_else(|_| "8".into())
+                    .parse()
+                    .expect("GI refill hold frames"),
+            )
         } else if value == "ms" {
             let ms: f64 = std::env::var("RENDERLAB_GI_REFILL_MS")
                 .unwrap_or_else(|_| "3".into())
@@ -91,7 +133,7 @@ pub(super) fn mode() -> Mode {
         } else {
             let cells = value
                 .parse()
-                .expect("GI refill budget: today, hold, ms or a cell count");
+                .expect("GI refill budget: legacy, today, hold, ms or a cell count");
             assert!(cells >= 64, "GI refill cell budget must be at least 64");
             Mode::Fixed(cells)
         }
@@ -103,6 +145,10 @@ pub(super) fn source(mut source: String, enabled: bool) -> String {
         return source;
     }
     let edits = [
+        (
+            "const GI_KEEP:u32=GI_SPLIT|GI_SHADE|GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_RETRY|GI_GATHER_MASK;",
+            "const GI_KEEP:u32=GI_SPLIT|GI_SHADE|GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_RETRY|GI_GATHER_MASK|2048u;",
+        ),
         (
             "@compute @workgroup_size(64) fn gi_claim(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {",
             "fn gi_priority_claim_body(id:vec3<u32>,groups:vec3<u32>,visible:bool) {",
@@ -134,12 +180,26 @@ pub(super) fn source(mut source: String, enabled: bool) -> String {
         source = source.replacen(before, after, 1);
     }
     // Share the unchanged ray/reduction body with the compacted queue entry point.
-    let start = source.find("        for(var j=0u;j<listed;j+=1u) {\n").expect("gather list seam")
+    let start = source
+        .find("        for(var j=0u;j<listed;j+=1u) {\n")
+        .expect("gather list seam")
         + "        for(var j=0u;j<listed;j+=1u) {\n".len();
-    let end = start + source[start..].find("\n        }\n    }\n}").expect("gather body end");
-    let body = source[start..end].replacen("        let slot=gi_wg_list[j];", "        let requests=(gi_frame.bounce.z&GI_RELIGHT_REQUESTS)!=0u;", 1);
-    source.replace_range(start..end, "        gi_priority_gather_cell(workgroupUniformLoad(&gi_wg_list[j]),lane);");
-    source.push_str(&format!("\nfn gi_priority_gather_cell(slot:u32,lane:u32) {{\n{body}\n}}\n"));
+    let end = start
+        + source[start..]
+            .find("\n        }\n    }\n}")
+            .expect("gather body end");
+    let body = source[start..end].replacen(
+        "        let slot=gi_wg_list[j];",
+        "        let requests=(gi_frame.bounce.z&GI_RELIGHT_REQUESTS)!=0u;",
+        1,
+    );
+    source.replace_range(
+        start..end,
+        "        gi_priority_gather_cell(workgroupUniformLoad(&gi_wg_list[j]),lane);",
+    );
+    source.push_str(&format!(
+        "\nfn gi_priority_gather_cell(slot:u32,lane:u32) {{\n{body}\n}}\n"
+    ));
     source.push_str(include_str!("../shaders/gi_refill_priority.wgsl"));
     source.push_str(include_str!("../shaders/gi_refill_compact.wgsl"));
     source
@@ -149,7 +209,8 @@ pub(super) struct Pipelines {
     pub compact: Owned<wgpu::ComputePipeline>,
     pub select: Owned<wgpu::ComputePipeline>,
     pub defer: Owned<wgpu::ComputePipeline>,
-    pub gather_compacted: Owned<wgpu::ComputePipeline>,
+    pub gather_first: Owned<wgpu::ComputePipeline>,
+    pub gather_refresh: Owned<wgpu::ComputePipeline>,
     pub hold: Owned<wgpu::ComputePipeline>,
     pub gather_clamp: Owned<wgpu::ComputePipeline>,
     pub claim_reset: Owned<wgpu::ComputePipeline>,
@@ -163,7 +224,8 @@ impl Pipelines {
             compact: compute("gi_priority_compact"),
             select: compute("gi_priority_select"),
             defer: compute("gi_priority_defer"),
-            gather_compacted: compute("gi_priority_gather_compacted"),
+            gather_first: compute("gi_priority_gather_first"),
+            gather_refresh: compute("gi_priority_gather_refresh"),
             hold: compute("gi_priority_hold_queue"),
             gather_clamp: compute("gi_priority_gather_clamp"),
             claim_reset: compute("gi_priority_claim_reset"),
@@ -182,6 +244,11 @@ pub(super) struct Controller {
     claim_ms: f64,
     gather_ms: f64,
     last: u64,
+    first_cost: f64,
+    refresh_cost: f64,
+    first_limit: u32,
+    refresh_limit: u32,
+    last_split: u64,
 }
 impl Default for Controller {
     fn default() -> Self {
@@ -191,10 +258,60 @@ impl Default for Controller {
             claim_ms: 0.001,
             gather_ms: 0.001,
             last: 0,
+            first_cost: 0.0005,
+            refresh_cost: 0.0005,
+            first_limit: DEFAULT_CELLS,
+            refresh_limit: DEFAULT_CELLS,
+            last_split: 0,
         }
     }
 }
 impl Controller {
+    /// A soft gather target from the previous frame's measured cost. The GPU raises
+    /// first fill's floor to this frame's inflow before allowing refresh to use the rest.
+    pub fn observe_split(
+        &mut self,
+        frame: u64,
+        target: f64,
+        first: u32,
+        refresh: u32,
+        first_ms: f64,
+        refresh_ms: f64,
+    ) {
+        if frame <= self.last_split {
+            return;
+        }
+        self.last_split = frame;
+        for (count, ms, cost, limit, floor) in [
+            (
+                first,
+                first_ms,
+                &mut self.first_cost,
+                &mut self.first_limit,
+                FIRST_FLOOR,
+            ),
+            (
+                refresh,
+                refresh_ms,
+                &mut self.refresh_cost,
+                &mut self.refresh_limit,
+                0,
+            ),
+        ] {
+            if count < 64 || !ms.is_finite() || ms <= 0.0 {
+                continue;
+            }
+            let measured = ms / f64::from(count);
+            *cost = measured.max(*cost * 0.9 + measured * 0.1);
+            let wanted = (target * 0.8 / *cost)
+                .floor()
+                .clamp(f64::from(floor), f64::from(GATHER_CELLS)) as u32;
+            *limit = wanted.clamp(
+                (*limit - *limit / 4).max(floor),
+                *limit + (*limit / 8).max(1),
+            );
+        }
+    }
     pub fn observe(
         &mut self,
         frame: u64,
@@ -226,30 +343,69 @@ impl Controller {
             let wanted = (target * 0.8 * share / *estimate)
                 .floor()
                 .clamp(3000.0, f64::from(GATHER_CELLS)) as u32;
-            *budget = wanted.clamp((*budget - *budget / 4).max(3000), *budget + (*budget / 8).max(1));
+            *budget = wanted.clamp(
+                (*budget - *budget / 4).max(3000),
+                *budget + (*budget / 8).max(1),
+            );
         }
     }
     pub fn header(&self, header: &mut [u32; HEADER_WORDS as usize], mode: Mode) {
         let (claims, gathers) = match mode {
+            Mode::Legacy => (DEFAULT_CELLS, DEFAULT_CELLS),
             Mode::Today | Mode::Hold(_) => (header[22], GATHER_CELLS),
             Mode::Fixed(cells) => (cells, cells),
             Mode::Milliseconds(_) => (self.claims, self.gathers),
         };
-        if matches!(mode, Mode::Hold(_)) { header[31] = 1; }
+        if matches!(mode, Mode::Hold(_)) {
+            header[31] = 1;
+        }
         header[20] = gathers;
         header[22] = 0; // Ordered resolve admission replaces the old hash-period claim gate.
         header[32] = gathers;
         header[33] = claims;
         header[34] = 1;
+        header[35] = self.first_limit.max(FIRST_FLOOR);
+        header[36] = (self.first_cost as f32).to_bits();
+        header[37] = (self.refresh_cost as f32).to_bits();
+        header[38] = (gather_target() as f32).to_bits();
+        header[40] = self.refresh_limit;
+        header[41] = u32::from(mode != Mode::Legacy);
         header[28] = header[28].max(1); // Gather hits keep the previous stamp; only pixels mark this frame.
     }
 }
 
-pub(super) fn compact_available(cap: u32) -> bool { cap <= (RAY_ITEMS - 8) / 3 }
+pub(super) fn compact_available(cap: u32, slots: u32) -> bool {
+    u64::from(slots) + 2 * u64::from(cap) + 16 <= u64::from(RAY_ITEMS)
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn soft_gather_feedback_keeps_the_first_fill_floor_and_bounds_growth() {
+        let mut c = Controller::default();
+        c.observe_split(2, 3.0, 12_000, 12_000, 120.0, 120.0);
+        assert_eq!(c.first_limit, FIRST_FLOOR);
+        assert_eq!(c.refresh_limit, DEFAULT_CELLS - DEFAULT_CELLS / 4);
+        let old = (c.first_limit, c.refresh_limit, c.first_cost, c.refresh_cost);
+        c.observe_split(1, 3.0, 12_000, 12_000, 0.001, 0.001);
+        assert_eq!(
+            (c.first_limit, c.refresh_limit, c.first_cost, c.refresh_cost),
+            old
+        );
+        let mut header = [0; HEADER_WORDS as usize];
+        c.header(&mut header, Mode::Fixed(DEFAULT_CELLS));
+        assert_eq!(header[33], DEFAULT_CELLS);
+        assert!(header[35] >= FIRST_FLOOR);
+        assert_eq!(header[41], 1);
+        c.header(&mut header, Mode::Legacy);
+        assert_eq!(
+            (header[32], header[33], header[41]),
+            (DEFAULT_CELLS, DEFAULT_CELLS, 0)
+        );
+        assert!(compact_available(DEFAULT_CELLS, 1 << 20));
+        assert!(!compact_available(u32::MAX, u32::MAX));
+    }
     #[test]
     fn delayed_feedback_cuts_cost_spikes_and_ignores_old_samples() {
         let mut c = Controller::default();

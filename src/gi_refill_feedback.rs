@@ -1,4 +1,4 @@
-//! Small nonblocking GPU-time feedback ring for the opt-in refill time target.
+//! Nonblocking feedback for a soft gather target from the previous frame's measured cost.
 use super::*;
 use std::sync::OnceLock;
 
@@ -48,10 +48,10 @@ impl State {
                     ),
                     readback: buffer(
                         "GI refill feedback",
-                        40,
+                        104,
                         wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     ),
-                    _allocation: ledger.allocate(AllocationKind::Light, 296),
+                    _allocation: ledger.allocate(AllocationKind::Light, 360),
                     done: None,
                     frame: 0,
                 }
@@ -72,41 +72,110 @@ impl State {
                 continue;
             };
             if result.is_ok() {
-                let data = sample.readback.slice(..40).get_mapped_range().map(|view| {
+                let data = sample.readback.slice(..104).get_mapped_range().map(|view| {
                     let ticks: Vec<u64> = view[..32]
                         .chunks_exact(8)
                         .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
                         .collect();
-                    let claims = u32::from_ne_bytes(view[32..36].try_into().unwrap());
-                    let gathers = u32::from_ne_bytes(view[36..40].try_into().unwrap());
-                    (ticks, claims, gathers)
+                    let counts: Vec<u32> = view[32..]
+                        .chunks_exact(4)
+                        .map(|b| u32::from_ne_bytes(b.try_into().unwrap()))
+                        .collect();
+                    (ticks, counts)
                 });
                 sample.readback.unmap();
-                if let Ok((ticks, claims, gathers)) = data {
+                if let Ok((ticks, counts)) = data {
                     ready.push((
                         sample.frame,
-                        claims,
-                        gathers,
+                        counts,
                         ticks[3].saturating_sub(ticks[2]) as f64 * self.period,
                         ticks[1].saturating_sub(ticks[0]) as f64 * self.period,
+                        ticks[2].saturating_sub(ticks[1]) as f64 * self.period,
                     ));
                 }
             }
             sample.done = None;
         }
         ready.sort_by_key(|r| r.0);
-        for (frame, claims, gathers, claim_ms, gather_ms) in ready {
-            self.controller
-                .observe(frame, target, claims, gathers, claim_ms, gather_ms);
+        for (frame, c, claim_ms, first_ms, refresh_ms) in ready {
+            let (claims, gathers, first) = (c[0], c[1], c[2]);
+            self.controller.observe(
+                frame,
+                target,
+                claims,
+                gathers,
+                claim_ms,
+                first_ms + refresh_ms,
+            );
+            self.controller.observe_split(
+                frame,
+                priority::gather_target(),
+                first,
+                gathers.saturating_sub(first),
+                first_ms,
+                refresh_ms,
+            );
+            if let Some(path) = std::env::var_os("RENDERLAB_GI_REFILL_LOG") {
+                use std::io::Write;
+                let line = format!(
+                    "{{\"frame\":{frame},\"cache_frame\":{},\"created\":{claims},\"gathers\":{gathers},\"first_gathers\":{first},\"refresh_gathers\":{},\"gather_rays\":{},\"visible_never_gathered\":{},\"visible_with_raw_data\":{},\"off_screen\":{},\"first_selected\":{},\"refresh_selected\":{},\"background_selected\":{},\"first_inflow\":{},\"visible_filtered_only\":{},\"estimated_floor_overrun\":{},\"first_ms\":{first_ms},\"refresh_ms\":{refresh_ms},\"claim_update_ms\":{claim_ms},\"soft_gather_target_ms\":{},\"actual_first_overrun\":{},\"soft_gather_target_active\":{}}}\n",
+                    c[13],
+                    gathers.saturating_sub(first),
+                    c[12],
+                    c[14],
+                    c[15],
+                    c[16],
+                    c[6],
+                    c[7],
+                    c[8],
+                    c[9],
+                    c[10],
+                    c[11],
+                    priority::gather_target(),
+                    first_ms > priority::gather_target(),
+                    c[17] != 0
+                );
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .append(true)
+                    .create(true)
+                    .open(path)
+                {
+                    let _ = file.write_all(line.as_bytes());
+                }
+            }
         }
     }
     pub fn begin(&mut self, encoder: &mut wgpu::CommandEncoder) {
-        self.frame += 1;
         self.active = self.samples.iter().position(|s| s.done.is_none());
         if let Some(i) = self.active {
             self.samples[i].frame = self.frame;
         }
         self.mark(encoder, 0);
+    }
+    pub fn set_frame(&mut self, frame: u64) {
+        self.frame = frame;
+    }
+    pub fn after_first(&self, encoder: &mut wgpu::CommandEncoder, work: &wgpu::Buffer) {
+        self.mark(encoder, 1);
+        if let Some(i) = self.active {
+            encoder.copy_buffer_to_buffer(work, 33 * 4, &self.samples[i].readback, 40, 4);
+        }
+    }
+    pub fn after_gathers(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        work: &wgpu::Buffer,
+        arena: u32,
+    ) {
+        self.mark(encoder, 2);
+        if let Some(i) = self.active {
+            let readback = &self.samples[i].readback;
+            encoder.copy_buffer_to_buffer(work, 33 * 4, readback, 36, 4);
+            encoder.copy_buffer_to_buffer(work, 34 * 4, readback, 80, 4);
+            encoder.copy_buffer_to_buffer(work, u64::from(arena) * 4, readback, 44, 24);
+            encoder.copy_buffer_to_buffer(work, u64::from(arena + 7) * 4, readback, 68, 12);
+            encoder.copy_buffer_to_buffer(work, u64::from(arena + 10) * 4, readback, 88, 12);
+        }
     }
     pub fn mark(&self, encoder: &mut wgpu::CommandEncoder, index: u32) {
         let Some(i) = self.active else { return };
@@ -119,17 +188,23 @@ impl State {
             }),
         });
     }
-    pub fn finish(&mut self, encoder: &mut wgpu::CommandEncoder, work: &wgpu::Buffer) {
+    pub fn finish(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        work: &wgpu::Buffer,
+        table: &wgpu::Buffer,
+    ) {
         self.mark(encoder, 3);
         let Some(i) = self.active.take() else { return };
         let sample = &mut self.samples[i];
         encoder.resolve_query_set(&sample.queries, 0..4, &sample.resolve, 0);
         encoder.copy_buffer_to_buffer(&sample.resolve, 0, &sample.readback, 0, 32);
         encoder.copy_buffer_to_buffer(work, 7 * 4, &sample.readback, 32, 4);
-        encoder.copy_buffer_to_buffer(work, 33 * 4, &sample.readback, 36, 4);
+        encoder.copy_buffer_to_buffer(table, 3 * 4, &sample.readback, 84, 4);
+        encoder.copy_buffer_to_buffer(table, 41 * 4, &sample.readback, 100, 4);
         let done = Arc::new(OnceLock::new());
         let callback = done.clone();
-        encoder.map_buffer_on_submit(&sample.readback, wgpu::MapMode::Read, 0..40, move |r| {
+        encoder.map_buffer_on_submit(&sample.readback, wgpu::MapMode::Read, 0..104, move |r| {
             let _ = callback.set(r);
         });
         sample.done = Some(done);

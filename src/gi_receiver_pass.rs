@@ -5,6 +5,8 @@ pub(crate) const BINDING: u32 = 68;
 const BYTES: u64 = 48;
 const SOURCE: &str = include_str!("../shaders/gi_receiver_pass.wgsl");
 const ENTRY_SEAM: &str = "// ---- GI receiver compute entry ----";
+#[path = "gi_lookup_probe.rs"]
+mod lookup_probe;
 /// Defaults are approved separately for each path after game-scene picture and memory checks.
 pub(crate) const RT_DEFAULT: bool = false;
 pub(crate) const NON_RT_DEFAULT: bool = false;
@@ -74,6 +76,7 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     composed
         .source
         .push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
+    composed.source = lookup_probe::source(composed.source, lookup_probe::on());
     composed
 }
 pub(crate) fn shade_source(source: String, eligible: bool, specular: bool) -> String {
@@ -108,7 +111,12 @@ impl Renderer {
                 self,
                 "GI prepared receiver",
                 u64::from(size.width) * u64::from(size.height) * BYTES,
-                wgpu::BufferUsages::STORAGE,
+                wgpu::BufferUsages::STORAGE
+                    | if lookup_probe::on() {
+                        wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST
+                    } else {
+                        wgpu::BufferUsages::empty()
+                    },
             ),
             args: Buffer::new(
                 self,
@@ -213,6 +221,9 @@ impl Renderer {
         let Some(pipeline) = &target.pipelines[shading as usize] else {
             return;
         };
+        if lookup_probe::on() {
+            encoder.clear_buffer(&target.values.value, 0, None);
+        }
         let bindings = state.bindings.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

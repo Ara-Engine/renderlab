@@ -3035,15 +3035,18 @@ impl Renderer {
         // empties the table, so no cell keeps bounce light from another program's frames.
         let bounce = run && self.gi.settings.bounce && self.ensure_gi_shade(software)?;
         if run && software && priority::on() {
-            if let priority::Mode::Milliseconds(target) = priority::mode() {
-                if self.gi.refill_feedback.is_none() {
-                    if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
-                        return Err(Error::InvalidInput("GI refill time target requires timestamp queries"));
-                    }
-                    self.gi.refill_feedback = Some(refill_feedback::State::new(&self.device,&self.queue,&self.ledger));
+            if self.gi.refill_feedback.is_none() {
+                if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+                    return Err(Error::InvalidInput("GI soft gather target requires timestamp queries"));
                 }
-                self.gi.refill_feedback.as_mut().unwrap().collect(target);
+                self.gi.refill_feedback = Some(refill_feedback::State::new(&self.device,&self.queue,&self.ledger));
             }
+            let target = match priority::mode() { priority::Mode::Milliseconds(ms) => ms, _ => priority::gather_target() };
+            let feedback = self.gi.refill_feedback.as_mut().unwrap();
+            feedback.collect(target);
+            feedback.set_frame(self.frames + 1);
+        } else {
+            self.gi.refill_feedback = None;
         }
         let r = self.gi.resources.as_ref().unwrap();
         let config = PlanConfig {
@@ -3071,7 +3074,10 @@ impl Renderer {
             let controller = self.gi.refill_feedback.as_ref().map_or(&fallback,|f|&f.controller);
             controller.header(&mut begun.header, priority::mode());
             priority::measurement_header(&mut begun.header);
-            self.gi.priority_compact = priority::compact_available(begun.header[32]);
+            self.gi.priority_compact = priority::compact_available(begun.header[32], r.slots);
+            if !self.gi.priority_compact {
+                return Err(Error::InvalidInput("GI ordered first-fill lists exceed the existing ray arena"));
+            }
             self.gi.priority_hold = matches!(priority::mode(), priority::Mode::Hold(n) if self.gi.planner.since_cut < n);
         }
         let raw: Vec<u8> = begun.header.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -3464,6 +3470,9 @@ impl GiState {
         let b = 6 + 2 * CLAIM_ROUNDS;
         mark(encoder, "gi_gather");
         if let Some(feedback) = &mut self.refill_feedback { feedback.begin(encoder); }
+        if p.priority.is_some() {
+            encoder.clear_buffer(&r.work,u64::from(layout.items)*4,Some(16*4));
+        }
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
             if let Some(priority) = &p.priority {
@@ -3472,24 +3481,32 @@ impl GiState {
                 } else if self.priority_compact {
                     // Reuse claim scratch and the ray arena, before setup writes ray items.
                     encoder.clear_buffer(&r.work,COUNTER_WORDS*4,Some(u64::from(r.slots)*4));
-                    encoder.clear_buffer(&r.work,u64::from(layout.items)*4,Some(8*4));
                     main_pass(encoder,"indirect gather candidates",&priority.compact,u32::MAX,grid);
                     main_pass(encoder,"indirect gather selection",&priority.select,u32::MAX,plan.bounce.then_some([1,1]));
                     main_pass(encoder,"indirect gather deferral",&priority.defer,u32::MAX,grid);
-                    main_pass(encoder,"indirect cache gather",&priority.gather_compacted,b,grid);
+                    main_pass(encoder,"indirect first-fill gather",&priority.gather_first,b,grid);
+                    if let Some(feedback) = &self.refill_feedback { feedback.after_first(encoder,&r.work); }
+                    main_pass(encoder,"indirect refresh gather",&priority.gather_refresh,PROFILE_STAMPS/2,grid);
                 } else {
                     main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
                 }
                 let legacy_grid = if self.priority_hold || self.priority_compact { None } else {grid};
                 main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,legacy_grid.map(|_|[1,1]));
-                main_pass(encoder,"indirect visible gather",&priority.gather_later,PROFILE_STAMPS/2,legacy_grid);
+                if !self.priority_compact {
+                    main_pass(encoder,"indirect visible gather",&priority.gather_later,PROFILE_STAMPS/2,legacy_grid);
+                }
                 main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,legacy_grid.map(|_|[1,1]));
                 main_pass(encoder,"indirect background gather",&priority.gather_background,PROFILE_STAMPS/2+1,legacy_grid);
             } else {
                 main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
             }
         }
-        if let Some(feedback) = &self.refill_feedback { feedback.mark(encoder,1); feedback.mark(encoder,2); }
+        if let Some(feedback) = &self.refill_feedback {
+            if !(plan.bounce || profiling) || !self.priority_compact || self.priority_hold {
+                feedback.after_first(encoder,&r.work);
+            }
+            feedback.after_gathers(encoder,&r.work,layout.items);
+        }
         mark(encoder, "gi_claim");
         if p.priority.is_some() { encoder.clear_buffer(&r.work,47*4,Some(4)); }
         if traced || profiling {
@@ -3529,7 +3546,7 @@ impl GiState {
             let finish = cells.filter(|_| traced);
             main_pass(encoder, "indirect cache finish", &p.finish, s + 3, finish);
         }
-        if let Some(feedback) = &mut self.refill_feedback { feedback.finish(encoder,&r.work); }
+        if let Some(feedback) = &mut self.refill_feedback { feedback.finish(encoder,&r.work,&r.table); }
         mark(encoder, "gi_integrate");
         if plan.integrate || profiling {
             let groups = cells.filter(|_| plan.integrate);

@@ -15,10 +15,16 @@ fn gi_priority_claim_admit(band:u32) -> bool {
     return gi_priority_ticket(select(cap,gi_priority_visible_limit(cap),band>=GI_BAND_PIXEL));
 }
 var<private> gi_priority_phase:u32;
+const GI_PRIORITY_PENDING_VISIBLE:u32=2048u;
+fn gi_priority_raw_bounce(slot:u32) -> u32 {
+    if gi_filter_on(GI_FILTER_BOUNCE) { return gi_raw[gi_raw_at(slot,GI_HOT_BOUNCE)]; }
+    return gi_table[gi_hot(slot)+GI_HOT_BOUNCE];
+}
 fn gi_priority_class(slot:u32) -> u32 {
     if gi_table[gi_cold(slot)+GI_C_SEEN]!=gi_word(GI_H_FRAME) { return 2u; }
     // A gathered zero has the nonzero GI_BOUNCE_NONE sentinel; zero means no value yet.
-    return select(1u,0u,gi_table[gi_hot(slot)+GI_HOT_BOUNCE]==0u);
+    let bounce=select(gi_table[gi_hot(slot)+GI_HOT_BOUNCE],gi_priority_raw_bounce(slot),gi_word(41u)!=0u);
+    return select(1u,0u,bounce==0u);
 }
 fn gi_priority_gather_admit() -> bool {
     let cap=gi_word(32u);

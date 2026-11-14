@@ -1,5 +1,49 @@
 # Ordered GI refill
 
+## RAW first-fill follow-up
+
+`RENDERLAB_GI_BOUNDED_REFILL=1` remains the only production enable, default off.
+It keeps the 12,288-cell claim ceiling and adds **a soft gather target from the
+previous frame's measured cost**, initially 3 ms. This is not a guaranteed ceiling.
+First fill and refresh use separate compacted dispatches with unchanged whole-cell
+rays, weights and SH reduction. RT remains unchanged.
+
+Visible first fill uses RAW bounce scale/sentinel with filtering enabled. Filtered
+neighbour light no longer makes a RAW-empty cell refresh. A negative-zero sentinel
+is gathered black. With filtering disabled, HOT is the source. Parent stand-in mode
+copies RAW from its parent; the comparison keeps that setting off.
+
+First fill starts at a 12,288-cell quota. Its floor is at least 9,831 (the previous
+visible reservation), raised on the GPU to this frame's on-screen first-fill inflow.
+Refresh consumes the estimated time remaining after first fill. Conservative measured
+costs and bounded quota growth come from four nonblocking 104-byte readbacks. A floor
+overrun is logged rather than starving visible cells. There is no update-time budget.
+
+One existing cold-state bit tracks pending visibility. The compact pass counts a new
+visible RAW-empty cell once and clears the bit when it leaves the screen or gains RAW
+data. New slots clear it. The candidate lists reuse the ray arena: one first-fill list
+large enough for every slot, then two capped refresh lists. Tables that cannot fit
+those lists in the existing arena reject the opt-in setting rather than dropping work.
+There is no extra persistent per-cell or per-pixel buffer.
+
+Measurement controls:
+
+- `RENDERLAB_GI_REFILL_BUDGET=legacy` retains the shipped 12k HOT ordering without
+  the soft gather target, for a same-binary diagnostic control.
+- `RENDERLAB_GI_GATHER_MS` changes the soft gather target; absent means 3 ms.
+- `RENDERLAB_GI_REFILL_LOG=<jsonl>` records actual renderer frame IDs, RAW pending
+  classes, inflow, admissions, rays, separate first/refresh costs and overruns.
+- `RENDERLAB_GI_REFILL_TRACE=<csv>` and `RENDERLAB_GI_REFILL_REPLAY=<csv>` include
+  the quotas and cost estimates, so picture readback does not change the workload.
+- `RENDERLAB_GI_PASS=1 RENDERLAB_GI_LOOKUP_DIAG=<jsonl>` enables receiver-walk flags
+  in the unused record byte. `RENDERLAB_SCENE_LOOKUP_FRAMES` selects blocking readbacks
+  in game_scene. It counts all geometry receivers, including non-GI programs, and is
+  an ordinary diagnostic, not a timing or picture gate. No new binding is used.
+
+The historical 12k measurements and mechanics below predate this follow-up.
+
+## Original ordered 12k policy
+
 Enable with `RENDERLAB_GI_BOUNDED_REFILL=1`. It is default off and selects an ordered,
 hard 12,288-cell ceiling for both creation and gathering on the software path. Hardware
 RT is unchanged. This replaces #108's 3,000-cell/hash-admission experiment under the

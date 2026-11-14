@@ -1139,6 +1139,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>())
         .transpose()?.unwrap_or_default();
     let mut queue_diagnostic=std::env::var_os("RENDERLAB_GI_QUEUE_DIAG").map(std::fs::File::create).transpose()?;
+    let mut lookup_diagnostic=std::env::var_os("RENDERLAB_GI_LOOKUP_DIAG").map(std::fs::File::create).transpose()?;
+    let lookup_frames:Vec<u32>=std::env::var("RENDERLAB_SCENE_LOOKUP_FRAMES").unwrap_or_else(|_|"462,466,512,562".into())
+        .split(',').map(str::parse).collect::<Result<_,_>>()?;
     let queue_frames:Vec<u32>=std::env::var("RENDERLAB_SCENE_QUEUE_FRAMES").unwrap_or_else(|_|"443,462,512,641".into())
         .split(',').map(str::parse::<u32>).collect::<Result<_,_>>()?;
     let mut counters = std::env::var_os("RENDERLAB_SCENE_COUNTERS")
@@ -1271,6 +1274,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             use std::io::Write;
             let q=engine.renderer_mut().indirect_queue_probe()?;
             writeln!(queue_diagnostic.as_mut().unwrap(),"{}",serde_json::json!({"frame":frame,"phase":"incoming_after_probe","visible_never_gathered":q[0],"visible_with_raw_data":q[1],"off_screen":q[2],"ineligible":q[3],"duplicates":q[4],"entries":q[5],"visible_filtered_only":q[6]}))?;
+        }
+        if lookup_diagnostic.is_some() && lookup_frames.contains(&frame) {
+            use std::io::Write;
+            let q=engine.renderer_mut().indirect_receiver_lookup_counts()?;
+            writeln!(lookup_diagnostic.as_mut().unwrap(),"{}",serde_json::json!({"frame":frame,"renderer_frame":report.frame.0,"receivers":q[0],"coarser_fill":q[1],"refinement":q[2],"incomplete_hot_bounce":q[3],"fallback_walk":q[4],"invalid_cache":q[5]}))?;
         }
         // `--views ab`: the second view renders in the same tick, after the first.
         let second_hash = match second {
