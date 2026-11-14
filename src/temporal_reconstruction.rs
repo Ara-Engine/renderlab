@@ -2633,6 +2633,16 @@ mod tests {
     }
 
     #[test]
+    fn coverage_off_keeps_original_resolve_module() {
+        assert!(coverage_mode().is_none(), "run this identity control with both coverage switches unset");
+        let prelude=include_str!("../shaders/scene.wgsl");
+        let [head,_]=non_rt_heads(prelude).unwrap();
+        let original=format!("{head}\n{}\n{RESOLVE}\n{}",
+            include_str!("../shaders/object_motion.wgsl"),zones_source("tr1.zones"));
+        assert_eq!(resolve_source(prelude).unwrap(),original);
+    }
+
+    #[test]
     fn reconstruction_modules_validate_without_ray_queries() {
         let prelude = include_str!("../shaders/scene.wgsl");
         let resolve = resolve_source(prelude).unwrap();

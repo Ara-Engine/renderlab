@@ -82,5 +82,11 @@ unrelated mover; preserving young cumulative priors and unchanged-pair counts
 addresses it. The focused regression reads coverage words directly: main's
 global motion box can change the unchanged line's colour too (0.2036 HDR delta
 in the control), so unchanged RGB is not a valid assertion for coverage alone.
-That correction's final GPU regression and actual Glint still/motion/cut crops
-remain pending. Fewer changing pixels alone do not certify absence of ghosting.
+The corrected focused GPU regression passes both paths (15.89-second ordinary
+lease): all 492 sampled unchanged pairs retain identical coverage across the
+unrelated mover. Both motion/cut sheets were inspected. The cut frame matches
+off exactly; the young-prior fix reduces the mover's former 293-pixel/>0.01 HDR
+difference to zero pixels (maximum 0.00733). Six pixels differ by up to 0.02051
+on the frame after the cut. Picking and resolve switch-off module byte identity
+also pass. Actual Glint still/motion/cut crops remain pending; these synthetic
+results do not certify absence of ghosting in game scenes.
