@@ -1194,6 +1194,8 @@ pub(crate) fn rl_deferred() -> bool {
 /// The program API's report, which deferred modules replace with `DEFERRED_REPORT`.
 const DEFERRED_REPORT_STUB: &str =
     "fn reflection_report(reflectance:vec3<f32>, untraced:vec3<f32>) {}";
+const REFLECTION_ENVIRONMENT_STUB: &str =
+    "fn reflection_needs_environment() -> bool { return true; }";
 const DEFERRED_API: &str = include_str!("../shaders/reflections_deferred.wgsl");
 /// What a deferred_variant module's entry gains after its pixel: its outputs cleared. Its
 /// presence marks the module as deferred (`pass_block`).
@@ -1221,7 +1223,19 @@ pub(crate) fn deferred_variant(composed: Composed) -> Composed {
     ] {
         assert_eq!(part.matches(seam).count(), 1, "deferred seam {seam}");
     }
-    let engine = engine.replacen(DEFERRED_REPORT_STUB, "", 1);
+    let mut engine = engine.replacen(DEFERRED_REPORT_STUB, "", 1);
+    // Keep the untraced diagnostic and a one-day rollback switch. Only a fully replaced
+    // environment estimate is skipped; faded, rejected and fallback receivers still need it.
+    if !rl_deferred_diag()
+        && std::env::var("RENDERLAB_RL_LAZY_ENV").as_deref() != Ok("0")
+    {
+        assert_eq!(engine.matches(REFLECTION_ENVIRONMENT_STUB).count(), 1);
+        engine = engine.replacen(
+            REFLECTION_ENVIRONMENT_STUB,
+            "fn reflection_needs_environment() -> bool { return !(rl_specular.w==1.0); }",
+            1,
+        );
+    }
     let entry = entry
         .replacen(
             DEFERRED_CLEAR_SEAM,

@@ -25,28 +25,28 @@ pub(crate) mod temporal_reconstruction;
 #[path = "program_lists.rs"]
 pub(crate) mod program_lists;
 // U-RTVIS: the reflection pass's rl_trace (docs/design-reflection-pass.md).
-#[path = "reflection_pass.rs"]
-pub(crate) mod reflection_pass;
 #[path = "reflection_geometry_dump.rs"]
 mod reflection_geometry_dump;
+#[path = "reflection_pass.rs"]
+pub(crate) mod reflection_pass;
 // U-RTVIS: the same frame's glossy-pixel list, for the replay of real reflection rays.
-#[path = "reflection_list_dump.rs"]
-mod reflection_list_dump;
 #[path = "gi_receiver_pass.rs"]
 pub(crate) mod gi_receiver_pass;
+#[path = "reflection_list_dump.rs"]
+mod reflection_list_dump;
 // The Mac thread's reflection_hits after rl_trace (docs/design-reflection-pass.md).
-#[path = "reflection_hits_gpu.rs"]
-mod reflection_hits_gpu;
 #[path = "light_vis_pass.rs"]
 pub(crate) mod light_vis_pass;
+#[path = "reflection_hits_gpu.rs"]
+mod reflection_hits_gpu;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 // Lean shading's background-compiled pipelines (program::lean_variant).
 #[path = "lean_gpu.rs"]
 mod lean_gpu;
-#[path = "material_receiver_gpu.rs"]
-pub(super) mod material_receiver_gpu;
 #[path = "material_pass_gpu.rs"]
 pub(super) mod material_pass_gpu;
+#[path = "material_receiver_gpu.rs"]
+pub(super) mod material_receiver_gpu;
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
 /// `scene_pixels` rectangle, the sampling words, the reflection bands
@@ -155,7 +155,16 @@ pub(super) fn wgpu_shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
     let [hard, soft] = shader_sources(wgsl)?;
     let mode = crate::material_mode::Mode::current();
     let probe = material_receiver_gpu::normal_probe();
-    Ok([material_receiver_gpu::trace(hard, mode, probe)?, material_receiver_gpu::trace(soft, mode, probe)?])
+    Ok([
+        fog_cull::producer_source(
+            material_receiver_gpu::trace(hard, mode, probe)?,
+            fog_cull::enabled(),
+        ),
+        fog_cull::producer_source(
+            material_receiver_gpu::trace(soft, mode, probe)?,
+            fog_cull::enabled(),
+        ),
+    ])
 }
 
 /// The check pipeline shares the actual geometry arithmetic, including test rays,
@@ -869,6 +878,7 @@ pub(super) struct ResidencyGpu {
 }
 pub(super) struct Targets {
     light_vis: Option<Buffer>,
+    pub fog_depth: Option<fog_cull::Depth>,
     /// Placement + 1 (zero is a miss), primitive, f32 barycentrics. Traced frames write
     /// them, with their receivers or Interactive counts, only in tiles whose `tiles`
     /// flag is set.
@@ -1181,7 +1191,7 @@ impl PrimaryState {
         )
     }
     /// `lighting` is the group-3 layout shared with raster shading.
-    pub fn new(device: &PipelineDevice, ledger: &Ledger, lighting: &wgpu::BindGroupLayout) -> Self {
+    pub fn new(device: &PipelineDevice, ledger: &Ledger, lighting: &wgpu::BindGroupLayout, fog: bool) -> Self {
         use wgpu::TextureFormat as F;
         let group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
             let entries: Vec<_> = entries
@@ -1204,7 +1214,10 @@ impl PrimaryState {
         };
         let producer_group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
             let mut entries = entries.to_vec();
-            if crate::material_mode::Mode::tail() { entries.extend(material_pass_gpu::entries(true)); }
+            if crate::material_mode::Mode::tail() {
+                entries.extend(material_pass_gpu::entries(true));
+            }
+            fog_cull::extend_entries(&mut entries, fog);
             group(label, &entries)
         };
         let frame = uniform(10, FRAME_BYTES as u64);
@@ -1241,7 +1254,10 @@ impl PrimaryState {
                 16,
             ),
         ];
-        if crate::material_mode::Mode::tail() { interactive_entries.extend(material_pass_gpu::entries(true)); }
+        if crate::material_mode::Mode::tail() {
+            interactive_entries.extend(material_pass_gpu::entries(true));
+        }
+        fog_cull::extend_entries(&mut interactive_entries, fog);
         let interactive_bindings = group(
             "primary Interactive trace and visibility",
             &interactive_entries,
@@ -1417,7 +1433,16 @@ impl PrimaryState {
             )
         };
         Self {
-            material_layouts: crate::material_mode::Mode::full().then(|| material_pass_gpu::Layouts::new(device, ledger, &material_write_entries, &array_bindings, [&material_bindings, &streamed_bindings], lighting)),
+            material_layouts: crate::material_mode::Mode::full().then(|| {
+                material_pass_gpu::Layouts::new(
+                    device,
+                    ledger,
+                    &material_write_entries,
+                    &array_bindings,
+                    [&material_bindings, &streamed_bindings],
+                    lighting,
+                )
+            }),
             #[cfg(test)]
             test_split_interactive_timestamps: false,
             #[cfg(test)]
@@ -1496,6 +1521,7 @@ impl PrimaryState {
                 &array_bindings,
                 &material_bindings,
                 lighting,
+                fog,
             ),
             reconstruction: Self::reconstruction_layout(device, ledger, &array_bindings),
             repair_layout: layout(
@@ -2530,13 +2556,31 @@ impl Renderer {
             };
             let next = Targets {
                 // One array: the receiver's layers (words 1 and 2), then word 0.
-                material: crate::material_mode::Mode::current().layers().map(|layers| target("material record", wgpu::Extent3d { depth_or_array_layers: layers, ..size }, wgpu::TextureFormat::Rgba32Uint)),
-                light_vis: light_vis_pass::on().then(|| Buffer::new(
-                    self, "local light visibility",
-                    (u64::from(size.width) * u64::from(size.height) * light_vis_pass::PIXEL_BYTES)
-                        .min(u64::from(self.device.limits().max_storage_buffer_binding_size)),
-                    wgpu::BufferUsages::STORAGE,
-                )),
+                material: crate::material_mode::Mode::current()
+                    .layers()
+                    .map(|layers| {
+                        target(
+                            "material record",
+                            wgpu::Extent3d {
+                                depth_or_array_layers: layers,
+                                ..size
+                            },
+                            wgpu::TextureFormat::Rgba32Uint,
+                        )
+                    }),
+                light_vis: light_vis_pass::on().then(|| {
+                    Buffer::new(
+                        self,
+                        "local light visibility",
+                        (u64::from(size.width)
+                            * u64::from(size.height)
+                            * light_vis_pass::PIXEL_BYTES)
+                            .min(u64::from(
+                                self.device.limits().max_storage_buffer_binding_size,
+                            )),
+                        wgpu::BufferUsages::STORAGE,
+                    )
+                }),
                 repairs,
                 repair_args,
                 retries,
@@ -2548,6 +2592,7 @@ impl Renderer {
                     .then(|| self.rl_pass_targets(size)),
                 gi_receiver: gi_receiver_pass::enabled(&self.device)
                     .then(|| self.gi_receiver_targets(size)),
+                fog_depth: (fog_cull::enabled() && self.hardware_shadows.is_some()).then(|| fog_cull::Depth::new(self, size)),
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
                     "primary hard receiver epsilon",
@@ -2618,7 +2663,13 @@ impl Renderer {
             let producer_group = |layout: &wgpu::BindGroupLayout, entries: &[(u32, R<'_>)]| {
                 let mut entries = entries.to_vec();
                 if crate::material_mode::Mode::tail() {
-                    entries.push((crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&t.material.as_ref().unwrap().view)));
+                    entries.push((
+                        crate::program::MATERIAL_RECORD_BINDING,
+                        R::TextureView(&t.material.as_ref().unwrap().view),
+                    ));
+                }
+                if let Some(depth) = &t.fog_depth {
+                    entries.push((fog_cull::BINDING, depth.buffer.value.as_entire_binding()));
                 }
                 group(layout, &entries)
             };
