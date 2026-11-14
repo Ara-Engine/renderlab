@@ -73,9 +73,10 @@ to one of those changes. The initial time-targeted row was faster but shrank to 
 
 ## Second-arrival fixture and compact selection
 
-`RENDERLAB_SCENE_EVENT_FRAMES=400,460,520` alternates the forest turn. Judge refill
-worst/p95 on frames 520?559; report 400?439 separately because first arrival creates
-pipelines (including atmosphere). Timing runs drain submissions and capture no PNGs.
+`RENDERLAB_SCENE_EVENT_FRAMES=400,460,520` alternates the forest turn. Frames 520?559
+are a warm revisit, so they must not rank refill policies. Retain 400?439 separately as
+true first-arrival evidence with pipeline creation (including atmosphere). Timing runs
+drain submissions and capture no PNGs.
 
 Priority selection screens the incoming queue once in a small compute entry, then chooses
 visible/zero-bounce, visible/other and background counts. A small deferral entry rebuilds
@@ -106,3 +107,10 @@ then measures B at 442. `RENDERLAB_SCENE_EVENT_FRAMES=0,21,442` selects those vi
 This uses the existing reset API, does not recreate pipelines, and performs no reset at
 the measured cut. A no-reset control verifies the residency issue; created-cell counts
 at +0?+5 are compared with a true first arrival at 442 before ranking any policy.
+
+On the true first-arrival portion of the compacted experiment (`7d42d462`, RTX 4070
+SUPER, 1080p forest turn, two clean interleaved visits), the adaptive 3,000-cell-floor
+row's maximum complete gather block was 2.078 / 1.880 ms. The previous three-scan
+variant's block cost 6.7?7.7 ms even after its ceiling fell to 64 cells. These workloads
+have different admission ceilings; this demonstrates removal of the old screening
+floor, not a certified whole-frame or picture win.
