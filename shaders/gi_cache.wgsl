@@ -642,16 +642,16 @@ const GI_H_FILL_CELLS:u32=48u;
 const GI_FILL_FORCED:u32=32u;
 fn gi_fill_bin(base:u32) -> u32 {
     let band=gi_miss_band(base);
-    var class=select(5u,4u,band==GI_BAND_SECONDARY);
+    var order=select(5u,4u,band==GI_BAND_SECONDARY);
     if band>=GI_BAND_PIXEL {
         let def=atomicLoad(&gi_work[base]);
         let a=(def>>8u)>>1u;
         let c=vec3<u32>(atomicLoad(&gi_work[base+1u]),atomicLoad(&gi_work[base+2u]),atomicLoad(&gi_work[base+3u]));
         let lattice=(c[(a+1u)%3u]&1u)|((c[(a+2u)%3u]&1u)<<1u);
-        class=(0x1320u>>(lattice*4u))&3u; // lattice 0,1,2,3 -> rank 0,2,3,1
+        order=(0x1320u>>(lattice*4u))&3u; // lattice 0,1,2,3 -> rank 0,2,3,1
     }
     let spread=gi_mix(gi_miss_key(base).x^(gi_word(GI_H_FRAME)*0x9e3779b9u))>>27u;
-    return class*32u+spread;
+    return order*32u+spread;
 }
 // The chosen misses per bin (pixels' misses at most once each: gi_miss_chosen).
 @compute @workgroup_size(64) fn gi_fill_count(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
@@ -1919,8 +1919,8 @@ fn gi_fill_rank(slot:u32, period:u32) -> u32 {
     let a=(gi_table[cold+GI_C_DEF]>>8u)>>1u;
     let c=vec3<u32>(gi_table[cold+GI_C_CELL],gi_table[cold+GI_C_CELL+1u],gi_table[cold+GI_C_CELL+2u]);
     let lattice=(c[(a+1u)%3u]&1u)|((c[(a+2u)%3u]&1u)<<1u);
-    let class=(0x1320u>>(lattice*4u))&3u;
-    return (class*period+gi_mix(slot)%period)/4u;
+    let order=(0x1320u>>(lattice*4u))&3u;
+    return (order*period+gi_mix(slot)%period)/4u;
 }
 fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
     let frame=gi_word(GI_H_FRAME);
