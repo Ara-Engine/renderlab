@@ -583,3 +583,16 @@ struct TpBillboard {
            +textureLoad(tp_resolve_color,pixel,2)+textureLoad(tp_resolve_color,pixel,3))*0.25;
 }
 // ---- end TP_AA_RESOLVE ----
+
+// ---- TP_LOBE_DISPATCH ----
+// Occlusion samples count only lobes that survived the exact traced-roughness cutoff.
+// Query results stay on the GPU; no lobes means a zero-work indirect dispatch.
+@group(0) @binding(56) var<storage,read> tp_lobe_samples:array<u32>;
+@group(0) @binding(57) var<storage,read_write> tp_lobe_args:array<u32>;
+@compute @workgroup_size(1) fn tp_lobe_dispatch() {
+    let live=(tp_lobe_samples[0]|tp_lobe_samples[1])!=0u;
+    tp_lobe_args[0]=select(0u,(u32(tp.size.x)+7u)/8u,live);
+    tp_lobe_args[1]=select(0u,(u32(tp.size.y)+7u)/8u,live);
+    tp_lobe_args[2]=select(0u,1u,live);
+}
+// ---- end TP_LOBE_DISPATCH ----
