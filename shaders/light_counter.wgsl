@@ -20,6 +20,24 @@ var<private> lc_distance_bin:u32;
 var<private> lc_normal_bin:u32;
 var<private> lc_shadow_slots:u32;
 var<private> lc_cached:bool;
+var<private> lc_remaining:f32;
+var<private> lc_skip:bool;
+var<private> lc_invalid:bool;
+// Diagnostic simulation: 6.443 global display slope, E=0.5 shared by locals.
+// Charge the smooth window even when it still traces; only w=0 skips a ray.
+fn lc_cutoff(s:LightSample,c:vec3<f32>) {
+    if !lc_primary || lights[s.index].kind.x==0u {return;}
+    let valid=all(c>=vec3<f32>(0.0)) && all(c<=vec3<f32>(3.402823e38));
+    let b=255.0*6.443*max(max(c.x,c.y),c.z)*(1.0+0.000001);
+    let finite=valid && b<=3.402823e38;
+    var skip=false;
+    if finite && lc_remaining>0.0 {
+        let w=smoothstep(lc_remaining*0.5,lc_remaining,b);
+        skip=b<=lc_remaining*0.5;
+        lc_remaining=max(lc_remaining-b*(1.0-w),0.0);
+    }
+    if s.index==lc_counter.header.y {lc_skip=skip;lc_invalid=!finite;}
+}
 fn lc_capture(input:SurfaceInput,n:vec3<f32>,s:LightSample) {
     if !lc_primary {return;}
     let capable=lights[s.index].kind.w!=0u;
@@ -86,6 +104,10 @@ fn lc_accumulate(stage:u32,codes:f32,upper:f32) {
     atomicAdd(&lc_counter.bins[base+25u],lc_rays*under1);
     atomicAdd(&lc_counter.bins[base+26u],traced*under1);
     atomicMax(&lc_counter.bins[base+27u],bitcast<u32>(upper));
+    atomicAdd(&lc_counter.bins[base+92u],lc_seen*u32(lc_skip));
+    atomicAdd(&lc_counter.bins[base+93u],lc_rays*u32(lc_skip));
+    atomicAdd(&lc_counter.bins[base+94u],lc_rays*u32(codes<0.5));
+    atomicAdd(&lc_counter.bins[base+95u],lc_seen*u32(lc_invalid));
     atomicAdd(&lc_counter.bins[base+28u],lc_seen*under_half);
     atomicAdd(&lc_counter.bins[base+29u],lc_rays*under_half);
     atomicAdd(&lc_counter.bins[base+30u],traced*under_half);
@@ -128,6 +150,7 @@ fn lc_commit(full:vec3<f32>,without:vec3<f32>,input:SurfaceInput) {
 }
 fn lc_primary_shade(s:Surface,input:SurfaceInput)->vec3<f32> {
     lc_primary=lc_counter.header.x!=0u;
+    lc_remaining=0.5;
     let full=shade(s,input);
     if lc_primary {lc_commit(full,lc_without_rgb,input);}
     return full;

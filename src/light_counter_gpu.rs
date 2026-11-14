@@ -116,6 +116,13 @@ fn variant(mut composed: program::Composed, enabled: bool, lvis: bool) -> progra
         &format!("\nif lc_primary && light.index!=lc_counter.header.y {{{mirror}{mirror_u}}}\n"),
     );
     code.replace_range(loop_range, &light_loop);
+    // Simulate the proposed receiver-wide budget only at the real caller seam,
+    // after its existing range/facing gates. It never changes visibility.
+    if id == 0 {
+        code=code.replace("let visibility=light_visibility_within(input,light,", "lc_cutoff(light,exposed_product(light.intensity*light_transmission(light,input),unshadowed*light.attenuation));\nlet visibility=light_visibility_within(input,light,");
+    } else if id == 1 {
+        code=code.replace("let attenuation=light.attenuation*light_visibility(input,light);", "lc_cutoff(light,exposed_product(light.intensity,brdf(n,v,light.direction,base,metal,rough)*light.attenuation));\nlet attenuation=light.attenuation*light_visibility(input,light);");
+    }
     code.insert_str(
         at,
         "var lc_without=exposed;var lc_unshadowed_sum=exposed;\n",
@@ -287,7 +294,7 @@ impl Renderer {
                 let upper=f32::from_bits(words[at+27]);let upper=if upper.is_finite(){upper.to_string()}else{"null".into()};
                 let histogram=|offset:usize,bins:usize|{(0..bins).map(|i|{let a=at+offset+i*4;format!("[{},{},{},{}]",words[a],words[a+1],words[a+2],words[a+3])}).collect::<Vec<_>>().join(",")};
                 let distance=histogram(34,7);let normal=histogram(62,6);let violations=words[at+86];
-                let extra=[(87,"eligibility_mismatch_pixels"),(88,"unjoined_producer_ray_initializations"),(89,"packed_values"),(90,"packing_word_owner_pixels"),(91,"range_mismatch_pixels")].iter().map(|(i,name)|format!("\"{name}\":{}",words[at+i])).collect::<Vec<_>>().join(",");
+                let extra=[(87,"eligibility_mismatch_pixels"),(88,"unjoined_producer_ray_initializations"),(89,"packed_values"),(90,"packing_word_owner_pixels"),(91,"range_mismatch_pixels"),(92,"smooth_budget_skip_pixels"),(93,"smooth_budget_skip_ray_initializations"),(94,"actual_shadowed_under_half_code_ray_initializations"),(95,"smooth_budget_invalid_endpoint_pixels")].iter().map(|(i,name)|format!("\"{name}\":{}",words[at+i])).collect::<Vec<_>>().join(",");
                 rows.push(format!("{{\"program\":\"{label}\",\"light_index\":{light},\"stage\":\"{stage_label}\",{fields},{extra},\"max_display_codes\":{max},\"max_unshadowed_codes\":{upper},\"distance_range_histogram\":[{distance}],\"ndotl_histogram\":[{normal}],\"bound_violations\":{violations}}}"));
             }}}
             let globals=(1..=n as usize).map(|light|{
