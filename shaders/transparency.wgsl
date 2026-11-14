@@ -594,5 +594,17 @@ struct TpBillboard {
     tp_lobe_args[0]=select(0u,(u32(tp.size.x)+7u)/8u,live);
     tp_lobe_args[1]=select(0u,(u32(tp.size.y)+7u)/8u,live);
     tp_lobe_args[2]=select(0u,1u,live);
+    tp_lobe_args[3]=select((u32(tp.size.x)+7u)/8u,0u,live);
+    tp_lobe_args[4]=select((u32(tp.size.y)+7u)/8u,0u,live);
+    tp_lobe_args[5]=select(1u,0u,live);
 }
 // ---- end TP_LOBE_DISPATCH ----
+
+// ---- TP_LOBE_CLEAR ----
+// All rejected lobes produce exactly zero in the ordinary reflection kernel.
+@group(0) @binding(58) var tp_empty_reflection:texture_storage_2d<rgba16float,write>;
+@compute @workgroup_size(8,8) fn tp_lobe_clear(@builtin(global_invocation_id) id:vec3<u32>) {
+    if any(id.xy>=textureDimensions(tp_empty_reflection)) { return; }
+    textureStore(tp_empty_reflection,id.xy,vec4<f32>(0.0));
+}
+// ---- end TP_LOBE_CLEAR ----

@@ -248,6 +248,7 @@ pub(super) fn compile_structure_sources(
         ("aa-seed", section("TP_AA_SEED").to_owned()),
         ("aa-resolve", section("TP_AA_RESOLVE").to_owned()),
         ("lobe-dispatch", format!("{}{}", section("TP_FRAME"), section("TP_LOBE_DISPATCH"))),
+        ("lobe-clear", section("TP_LOBE_CLEAR").to_owned()),
         ("transmission", transmission_shadow::draw_source(prelude)),
     ];
     if rt {
@@ -323,6 +324,8 @@ struct Gpu {
     lobe_args: Owned<wgpu::Buffer>,
     lobe_dispatch: Owned<wgpu::ComputePipeline>,
     lobe_dispatch_group: Owned<wgpu::BindGroup>,
+    lobe_clear_bindings: Owned<wgpu::BindGroupLayout>,
+    lobe_clear: Owned<wgpu::ComputePipeline>,
 }
 struct ParticlePipelines {
     prelude: [u8; 32],
@@ -869,8 +872,6 @@ impl Renderer {
                 ),
                 entry(37, FRAGMENT, uniform(true, 16)),
                 entry(38, FRAGMENT, texture(UNFILTERED)),
-                entry(55, FRAGMENT, texture(UNFILTERED)),
-                entry(56, FRAGMENT, texture(UNFILTERED)),
             ];
             if rt {
                 e.push(entry(
@@ -1150,7 +1151,7 @@ impl Renderer {
             mapped_at_creation: false,
         }), ResourceKind::Buffer);
         let lobe_args = self.ledger.own(self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("TP reflection indirect dispatch"), size: 12,
+            label: Some("TP reflection indirect dispatch"), size: 24,
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
             mapped_at_creation: false,
         }), ResourceKind::Buffer);
@@ -1170,8 +1171,19 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 57, resource: lobe_args.as_entire_binding() },
             ],
         }), ResourceKind::BindGroup);
+        let lobe_clear_bindings = self.tp_layout("TP zero reflection", &[
+            entry(58, COMPUTE, wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: wgpu::TextureFormat::Rgba16Float,
+                view_dimension: wgpu::TextureViewDimension::D2,
+            }),
+        ]);
+        let clear_layout = self.tp_pipeline_layout("TP zero reflection", &[&lobe_clear_bindings]);
+        let clear_module = self.tp_module("TP zero reflection", section("TP_LOBE_CLEAR"));
+        let lobe_clear = self.tp_compute("TP zero reflection", &clear_layout, &clear_module, "tp_lobe_clear");
         Gpu {
             lobe_queries, lobe_counts, lobe_args, lobe_dispatch, lobe_dispatch_group,
+            lobe_clear_bindings, lobe_clear,
             aa_resolve_bindings,
             aa_resolve,
             aa_bindings,
@@ -1316,11 +1328,6 @@ impl Renderer {
             "if lobe.weight<=0.0 {discard;}\nif tp.forward.w>=0.0 && sqrt(clamp(unpack2x16float(pack2x16float(vec2<f32>(lobe.alpha,0.0))).x,0.0,1.0))>=tp.forward.w {discard;}",
         );
         let source = format!("{source}\n{query}");
-        let source = if rt && slot.traits.declares_reflection {
-            let source = replace_function(&source, "specular_incident",
-                "fn specular_incident(input:SurfaceInput)->vec4<f32> { let pixel=vec2<i32>(input.pixel); if tp.misc.w==0.0 || textureLoad(tp_live_lobe,pixel,0).w==0.0 {return vec4<f32>(0.0);} if tp.forward.w>=0.0 && sqrt(clamp(textureLoad(tp_live_normal,pixel,0).w,0.0,1.0))>=tp.forward.w {return vec4<f32>(0.0);} return textureLoad(tp_reflected,pixel,0); }");
-            format!("{source}\n@group(0) @binding(55) var tp_live_lobe:texture_2d<f32>;\n@group(0) @binding(56) var tp_live_normal:texture_2d<f32>;\n")
-        } else { source };
         #[cfg(test)]
         let source = {
             let mut source = source;
@@ -2425,18 +2432,6 @@ impl Renderer {
             },
             frame_entry(&gpu.frame),
             wgpu::BindGroupEntry {
-                binding: 55,
-                resource: wgpu::BindingResource::TextureView(
-                    self.view.transparency_reflections.as_ref().filter(|_| reflect)
-                        .map_or(&targets.color.view, |r| &r.position.view)),
-            },
-            wgpu::BindGroupEntry {
-                binding: 56,
-                resource: wgpu::BindingResource::TextureView(
-                    self.view.transparency_reflections.as_ref().filter(|_| reflect)
-                        .map_or(&targets.color.view, |r| &r.normal.view)),
-            },
-            wgpu::BindGroupEntry {
                 binding: 31,
                 resource: wgpu::BindingResource::TextureView(&targets.color.view),
             },
@@ -2486,16 +2481,6 @@ impl Renderer {
                 label: Some("TP1 transparent group 0"),
                 layout: &gpu.glass_bindings[usize::from(rt)],
                 entries: &glass_entries,
-            })
-        });
-        let lobe_group = (!transparent.is_empty()).then(|| {
-            let mut entries = glass_entries.clone();
-            for entry in entries.iter_mut().filter(|e| e.binding == 55 || e.binding == 56) {
-                entry.resource = wgpu::BindingResource::TextureView(&targets.color.view);
-            }
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("TP lobe inputs"),
-                layout: &gpu.glass_bindings[usize::from(rt)], entries: &entries,
             })
         });
         // TP2: reflection hits use the existing opaque geometry, materials and R1 shader.
@@ -2548,6 +2533,15 @@ impl Renderer {
                         resource: reflection.program_slots.as_entire_binding(),
                     },
                 ],
+            })
+        });
+        let reflection_clear_group = reflect.then(|| {
+            let reflection = self.view.transparency_reflections.as_ref().unwrap();
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("TP zero reflection"), layout: &gpu.lobe_clear_bindings,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 58, resource: wgpu::BindingResource::TextureView(&reflection.radiance.view),
+                }],
             })
         });
         let draw_groups: Vec<wgpu::BindGroup> = self
@@ -2891,7 +2885,7 @@ impl Renderer {
                             pass.set_pipeline(&pipelines[usize::from(draw.mesh.tangent.is_some())]);
                             pass.set_bind_group(
                                 0,
-                                lobe_group.as_ref().unwrap(),
+                                glass_group.as_ref().unwrap(),
                                 &[(i as u64 * SLOT) as u32],
                             );
                             pass.set_bind_group(1, &*draw.instances.bind, &[]);
@@ -2943,6 +2937,11 @@ impl Renderer {
                         .unwrap()
                         .shading_groups()
                         .unwrap();
+                    if bounded {
+                        pass.set_pipeline(&gpu.lobe_clear);
+                        pass.set_bind_group(0, reflection_clear_group.as_ref().unwrap(), &[]);
+                        pass.dispatch_workgroups_indirect(&gpu.lobe_args, 12);
+                    }
                     pass.set_pipeline(&reflection.pipeline);
                     pass.set_bind_group(0, group, &[]);
                     pass.set_bind_group(1, arrays, &[]);
