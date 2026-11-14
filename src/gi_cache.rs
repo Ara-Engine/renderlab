@@ -1993,6 +1993,7 @@ impl Renderer {
                     .retired
                     .push((self.submissions, Retired::Groups(old)));
             }
+            self.gi.queue_probe = None;
             self.gi.generation += 1;
             // LC2: a larger light bitset creates an empty table, including after a long
             // idle view. Reset its normal empty-cache state before any idle shortcut.
