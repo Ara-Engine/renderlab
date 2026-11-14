@@ -52,7 +52,7 @@ a frame's two snapshots pair up:
   its listed entries, 48 bytes each, in the layout `rl_trace_pixels` reads
   (shaders/reflections_trace.wgsl; the JSON spells it out).
 - `<stem>.glossy-epsilon.bin`: each listed entry's receiver epsilon (the
-  trace's tmin, `rl_receiver_epsilon` at its pixel) as f32 bits.
+  trace's tmin, the entry's word 2 z) as f32 bits.
 - `<stem>.glossy.json`, written last: path (`rt` or `nonrt`), frame, view,
   generation (the software geometry's, 0 with ray hardware), the trace's
   direction seed `primary_frame.sided.y` as written that frame, the room, the
@@ -60,8 +60,8 @@ a frame's two snapshots pair up:
   entries beyond the capacity stayed inline and are not listed.
 
 The directions follow from these exactly: `rl_trace_pixels` derives each
-stratum from the entry, its pixel and the seed. It is one buffer copy and one
-texture copy, mapped on submission, with no wait. While the switch is set, L
-and the frame targets gain `COPY_SRC`, a usage flag only. Without the switch,
+stratum from the entry, its pixel and the seed. It is one buffer copy, mapped
+on submission, with no wait. While the switch is set, L gains `COPY_SRC`, a
+usage flag only. Without the switch,
 nothing is copied and no usage changes. With ray hardware there is no geometry
 snapshot: the driver builds that path's acceleration structures.

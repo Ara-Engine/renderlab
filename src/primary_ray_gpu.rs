@@ -2395,7 +2395,7 @@ impl Renderer {
                         format,
                         usage: wgpu::TextureUsages::STORAGE_BINDING
                             | wgpu::TextureUsages::TEXTURE_BINDING
-                            | if cfg!(test) || reflection_list_dump::enabled() {
+                            | if cfg!(test) {
                                 wgpu::TextureUsages::COPY_SRC
                             } else {
                                 wgpu::TextureUsages::empty()
@@ -2865,7 +2865,6 @@ impl Renderer {
                         abi,
                         pass,
                         frame.as_entire_binding(),
-                        &t.epsilon.view,
                         geometry,
                     )
                 }),
