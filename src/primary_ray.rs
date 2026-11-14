@@ -49,7 +49,11 @@ pub const VISIBILITY_RASTER_FEATURES: wgpu::Features =
 /// No acceleration-structure limits are raised. Check these against the adapter limits
 /// before requesting a device; devices below them keep the portable raster path.
 pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
+    visibility_limits_with_fog(limits, false)
+}
+fn visibility_limits_with_fog(limits: wgpu::Limits, fog: bool) -> wgpu::Limits {
     let storage = 13
+        + u32::from(fog)
         + u32::from(crate::program::cache_hits_rough().is_some())
         + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
     wgpu::Limits {
@@ -77,7 +81,7 @@ pub const TRACED_FEATURES: wgpu::Features =
 /// three textures and three samplers (wgpu counts samplers in both limits). The Interactive trace also binds two
 /// views of the TLAS: camera rays with hit-vertex return and shadow rays without.
 pub fn traced_limits(limits: wgpu::Limits) -> wgpu::Limits {
-    let limits = visibility_limits(limits);
+    let limits = visibility_limits_with_fog(limits, crate::renderer::fog_cull::enabled());
     wgpu::Limits {
         max_acceleration_structures_per_shader_stage: limits
             .max_acceleration_structures_per_shader_stage
@@ -182,9 +186,11 @@ mod tests {
             + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
         assert_eq!(limits.max_storage_buffers_per_shader_stage, storage);
         assert_eq!(limits.max_sampled_textures_per_shader_stage, 24);
+        // Fog writes one additional buffer on the RT producer only. The non-RT
+        // visibility request above must retain its original limit.
         assert_eq!(
             traced_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage,
-            storage
+            storage + u32::from(crate::renderer::fog_cull::enabled())
         );
         let higher = wgpu::Limits {
             max_storage_buffers_per_shader_stage: 16,
@@ -209,5 +215,22 @@ mod tests {
             12 * TRACED_DRAWS
         );
         assert_eq!(limits.max_acceleration_structures_per_shader_stage, 2);
+    }
+}
+
+#[cfg(test)]
+mod fog_limit_tests {
+    #[test]
+    fn fog_cull_device_request_rejects_thirteen_and_accepts_fourteen() {
+        let off = super::visibility_limits_with_fog(wgpu::Limits::default(), false);
+        let on = super::visibility_limits_with_fog(wgpu::Limits::default(), true);
+        assert_eq!(
+            on.max_storage_buffers_per_shader_stage,
+            off.max_storage_buffers_per_shader_stage + 1
+        );
+        assert!(!on.check_limits(&off));
+        let mut sufficient = off;
+        sufficient.max_storage_buffers_per_shader_stage += 1;
+        assert!(on.check_limits(&sufficient));
     }
 }
