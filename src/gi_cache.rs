@@ -3034,7 +3034,7 @@ impl Renderer {
         // Bounce (G2): the setting is on and this frame's program reflects light. A change
         // empties the table, so no cell keeps bounce light from another program's frames.
         let bounce = run && self.gi.settings.bounce && self.ensure_gi_shade(software)?;
-        if run && software && priority::on() {
+        if bounce && software && priority::on() {
             if self.gi.refill_feedback.is_none() {
                 if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
                     return Err(Error::InvalidInput("GI soft gather target requires timestamp queries"));

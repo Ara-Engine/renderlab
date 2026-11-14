@@ -74,7 +74,7 @@ impl Renderer {
         self.queue.submit([encoder.finish()]);
         let slice = readback.slice(..);
         slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device.poll(WAIT).map_err(Error::Poll)?;
+        self.device.poll(wgpu::PollType::wait_indefinitely()).map_err(Error::Poll)?;
         let data = slice
             .get_mapped_range()
             .map_err(|_| Error::InvalidInput("GI lookup diagnostic map"))?;
