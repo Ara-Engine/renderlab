@@ -53,7 +53,7 @@ pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
         + u32::from(crate::program::cache_hits_rough().is_some())
         + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
     wgpu::Limits {
-        max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(5),
+        max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(if crate::material_mode::Mode::current() == crate::material_mode::Mode::Off { 5 } else { 6 }),
         max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(storage),
         max_sampled_textures_per_shader_stage: limits.max_sampled_textures_per_shader_stage.max(24),
         max_binding_array_elements_per_shader_stage: limits

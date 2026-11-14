@@ -869,7 +869,7 @@ impl VisibilityBuffer {
         );
         let resolve_layout = layout(
             &r.device,
-            &[
+            &[&[
                 buffer_entry(0, true, false, S::COMPUTE),
                 buffer_entry(10, true, false, S::COMPUTE),
                 buffer_entry(30, false, false, S::COMPUTE),
@@ -881,7 +881,7 @@ impl VisibilityBuffer {
                 image(17, F::Rgba32Float),
                 image(20, F::R32Uint),
                 image(23, F::R32Float),
-            ],
+            ][..], &if crate::material_mode::Mode::tail() { super::primary_ray_gpu::material_pass_gpu::entries(true).to_vec() } else { Vec::new() }].concat(),
         );
         let pipeline_layout = |groups: &[Option<&wgpu::BindGroupLayout>]| {
             r.device
@@ -980,7 +980,7 @@ impl VisibilityBuffer {
         let hzb_source = include_str!("../shaders/visibility_buffer_hzb.wgsl");
         let base = compute(hzb_source, "base", &[Some(&hzb_layout)], &[]);
         let reduce = compute(hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
-        let resolve_source = resolve_source(&r.source)?;
+        let resolve_source = super::primary_ray_gpu::material_receiver_gpu::resolve(resolve_source(&r.source)?, crate::material_mode::Mode::current())?;
         let resolve = [0.0, 1.0].map(|v| {
             compute(
                 &resolve_source,
@@ -1070,7 +1070,7 @@ impl VisibilityBuffer {
         let resolve_group = bind(
             &r.device,
             &resolve_layout,
-            &[
+            &[&[
                 (0, r.uniform.as_entire_binding()),
                 (10, state.frame_buffer().as_entire_binding()),
                 (30, repair_scan.value.as_entire_binding()),
@@ -1082,7 +1082,7 @@ impl VisibilityBuffer {
                 (17, R::TextureView(&fresh.normal.view)),
                 (20, R::TextureView(&t.tiles.view)),
                 (23, R::TextureView(&t.epsilon.view)),
-            ],
+            ][..], &if crate::material_mode::Mode::tail() { vec![(crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&t.material.as_ref().unwrap().view))] } else { Vec::new() }].concat(),
         );
         Ok(Self {
             size,
