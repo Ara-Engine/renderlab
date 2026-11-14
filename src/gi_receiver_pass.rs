@@ -45,7 +45,7 @@ fn default_head_for(head: &mut String, default: bool, override_on: Option<bool>)
 }
 /// Carry this renderer's default through every program composed on its shading heads.
 /// Unmarked heads (including the port) retain inline lookup unless explicitly enabled.
-pub(super) fn default_head(head: &mut String, device: &wgpu::Device) {
+pub(crate) fn default_head(head: &mut String, device: &wgpu::Device) {
     default_head_for(head, default_on(device), requested());
 }
 fn source_enabled(source: &str, override_on: Option<bool>) -> bool {
