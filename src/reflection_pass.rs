@@ -332,7 +332,14 @@ impl Renderer {
         let source = if self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
             source
         } else {
-            source.replace("const RL_RAY_LANES:u32=1u;", "const RL_RAY_LANES:u32=32u;")
+            // Four strata is the shipping glossy cap. Larger groups can be
+            // screened without rebuilding; all choices preserve the ray set.
+            let lanes = std::env::var("RENDERLAB_SW_REFLECTION_LANES")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|lanes| matches!(lanes, 1 | 2 | 4 | 8 | 16 | 32))
+                .unwrap_or(4);
+            source.replace("const RL_RAY_LANES:u32=1u;", &format!("const RL_RAY_LANES:u32={lanes}u;"))
         };
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
