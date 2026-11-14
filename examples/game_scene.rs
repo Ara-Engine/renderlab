@@ -50,6 +50,10 @@
 //! through it: Outpost's layered ground and foliage, for the RT visibility pass's cost.
 //! `forest=bare` is the same terrain and walk without the foliage. `--diag floor=R` gives the
 //! flat ground perceptual roughness R (0.95 otherwise): a glossy floor for the reflection strata.
+//! `--diag cut=outpost --size 1920x1080` selects the separate Outpost-like forest fixture:
+//! hold400, then the original120-frame clip's slow motion, with the(-20,0,15)m/140-degree
+//! cut at frame460 and25 constant local lights around the two arrivals. Existing clips stay
+//! unchanged. RENDERLAB_SCENE_EVENT_FRAME may move this cut (the hold ends60 frames earlier).
 //! `--diag program=standard` puts the scene's `game` materials on the standard program, which
 //! reports its reflectance to the deferred reflection composite (RENDERLAB_RL_DEFERRED=1).
 //! `--diag far=1` (U-FIXED) holds a camera 40 m up over a 2.4 km ground with columns at 80,
@@ -73,6 +77,8 @@ mod environment_controls;
 mod gradient_sky;
 #[path = "../support/limits.rs"]
 mod policy;
+#[path = "game_scene_outpost_cut.rs"]
+mod outpost_cut;
 
 use diag::Diag;
 use renderlab::{asset, engine::*};
@@ -406,9 +412,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `cut=turn` (U-RTVIS, the GI cut refill): the field or forest walk turns 150 degrees in
     // place at the event frame, with `cut_view`, onto ground and trees it has not seen.
     let cut_turn = scene_key("cut", "turn");
+    let outpost = scene_key("cut", "outpost");
     // `forest=bare`: the same terrain and walk without the trees and bushes.
     let bare = scene_key("forest", "bare");
-    let forest = scene_key("forest", "1") || bare;
+    let forest = scene_key("forest", "1") || bare || outpost;
     let floor = scene_keys
         .iter()
         .find(|(k, _)| k == "floor")
@@ -642,7 +649,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, floor)?;
             if forest {
-                for tile in terrain_tiles(FOREST_SIZE, 400, 4) {
+                for tile in terrain_tiles(FOREST_SIZE, 400, 4, outpost) {
                     let tile = engine.create_mesh(&mesh(&tile))?;
                     engine.spawn(tile, ground, Mat4::IDENTITY)?;
                 }
@@ -716,8 +723,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         let mut spot = |clearing: f32| loop {
             let (x, z) = (FOREST_SIZE * (next() - 0.5), FOREST_SIZE * (next() - 0.5));
-            if forest_clear(x, z) >= clearing {
-                return (Vec3::new(x, forest_height(x, z), z), next());
+            let clear = forest_clear(x, z).min(if outpost { outpost_cut::clear(x, z) } else { 1.0 });
+            if clear >= clearing {
+                let height = forest_height(x, z) * if outpost { outpost_cut::clear(x, z) } else { 1.0 };
+                return (Vec3::new(x, height, z), next());
             }
         };
         // Trees: a trunk and four crossed canopy cards from 3 m up.
@@ -993,7 +1002,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Keep the courtyard's point/spot/fire sources; night mode adds 24 LC3 lanterns.
     // The facade shadows every contributing RT local, or up to 128 cached map lights.
     // Source radii retain soft penumbrae on both paths.
+    let outpost_lights = outpost.then(|| outpost_cut::lights(anchor, |x, z| {
+        forest_height(x, z) * outpost_cut::clear(x, z)
+    }));
     let lanterns = |t: f32, frame: u32| {
+        if let Some(lights) = &outpost_lights { return lights.clone(); }
         let ft = if steady_fire { 0.0 } else { t };
         // P-RELIT: the fire switched off or on at the event frame.
         let lit = if frame < EVENT_FRAME {
@@ -1121,7 +1134,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Measurement-only controls: hold the unchanged scene before a late cut, and read back
     // only post-cut/reference frames without changing the frames the engine renders.
     let event_frame = std::env::var("RENDERLAB_SCENE_EVENT_FRAME")
-        .map_or(Ok(EVENT_FRAME), |v| v.parse::<u32>())?;
+        .map_or(Ok(if outpost { outpost_cut::CUT_FRAME } else { EVENT_FRAME }), |v| v.parse::<u32>())?;
     let keep_frames = std::env::var("RENDERLAB_SCENE_KEEP_FRAMES").ok()
         .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>())
         .transpose()?;
@@ -1134,6 +1147,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(list) => list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>()?,
         Err(_) => vec![event_frame],
     };
+    if outpost && events != [event_frame] {
+        return Err("cut=outpost needs one event; use RENDERLAB_SCENE_EVENT_FRAME to move it".into());
+    }
     // Clear only GI, far before the measured cut, without dropping view pipelines.
     let gi_resets: Vec<u32> = std::env::var("RENDERLAB_SCENE_GI_RESET_FRAMES").ok()
         .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>())
@@ -1146,7 +1162,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .transpose()?;
     for frame in 0..args.frames {
         if gi_resets.contains(&frame) { engine.renderer_mut().reset_indirect(); }
-        let t = if args.still { 0.0 } else { frame as f32 / FPS };
+        let t = if args.still || outpost { 0.0 } else { frame as f32 / FPS };
         let sun_update = Instant::now();
         let hour = sun_hour(frame);
         if args.sun_speed != 0.0 && frame >= args.sun_after {
@@ -1182,7 +1198,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         )?;
         // Fly path: a slow orbit that descends and closes in on the hero.
         let cut = (cuts || hold_cut) && frame >= event_frame;
-        if (cuts || cut_turn || hold_cut) && events.contains(&frame) {
+        if (cuts || cut_turn || hold_cut || outpost) && events.contains(&frame) {
             engine.cut_view(view);
             // `hold=cut`: the held pose moves to the cut's pose and holds there.
             if hold_cut {
@@ -1198,7 +1214,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 radius * orbit.cos(),
             );
         let target = focus.lerp(anchor + Vec3::Y, 0.5);
-        let (eye, target) = if hold {
+        let (eye, target) = if outpost {
+            let pose = outpost_cut::pose(frame, event_frame);
+            (anchor + pose.eye, anchor + pose.eye + pose.forward)
+        } else if hold {
             *held_pose.get_or_insert((eye, target))
         } else if field || forest {
             // `--still` stays at the walk's start; `cut=every` jumps about the walk.
@@ -1238,7 +1257,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 2000.0,
             )
         } else {
-            (eye, target, 500.0)
+            (eye, target, if outpost { 4000.0 } else { 500.0 })
         };
         let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, far_plane)?;
         // View b: across the scene, still at its first pose unless `--b-orbit`, a third of
@@ -1452,6 +1471,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "settings": format!("{:?}", engine.settings()), "objects": engine.object_count(),
         "fox": args.fox, "hour": args.hour,
         "night_lanterns": args.night_lanterns, "local_lights": diag.lights(lanterns(0.0, 0)).len(),
+        "outpost_cut_fixture": outpost.then(|| serde_json::json!({
+            "cut_frame":event_frame,"hold_frames":event_frame.saturating_sub(outpost_cut::LEAD_FRAMES),
+            "lead_frames":outpost_cut::LEAD_FRAMES,"jump":[-20,0,15],"yaw_degrees":140,
+            "clip_move":[4,0,-4],"clip_yaw_degrees":12,"clip_steps":119,
+            "vertical_fov_degrees":55,"near":0.05,"far":4000,
+            "default_gi_cell_pixels":renderlab::IndirectSettings::default().cell_pixels,
+            "lights":25,"scene_frozen":true,"forest_size":FOREST_SIZE,
+        })),
         "diag": args.diag, "lamp_head": post_lamp.to_array(),
         "local_shadow_count":engine.settings().local_shadows.count,
         "quarry": args.quarry, "pipeline_preparation": pipeline_preparation,
@@ -1745,12 +1772,15 @@ fn forest_height(x: f32, z: f32) -> f32 {
     (hills + 4.0) * forest_clear(x, z)
 }
 /// `forest_height` over a `size` metre square of `cells` by `cells` quads.
-fn terrain_geometry(size: f32, cells: u32) -> Geometry {
+fn terrain_geometry(size: f32, cells: u32, outpost: bool) -> Geometry {
     let mut g = plane_geometry(size, cells);
     let step = size / cells as f32;
     for v in &mut g.vertices {
         let [x, _, z] = v.position;
-        let h = |dx: f32, dz: f32| forest_height(x + dx, z + dz);
+        let h = |dx: f32, dz: f32| {
+            let height = forest_height(x + dx, z + dz);
+            if outpost { height * outpost_cut::clear(x + dx, z + dz) } else { height }
+        };
         v.position[1] = h(0.0, 0.0);
         let normal = Vec3::new(
             h(-step, 0.0) - h(step, 0.0),
@@ -1764,8 +1794,8 @@ fn terrain_geometry(size: f32, cells: u32) -> Geometry {
 /// `terrain_geometry` cut into `tiles` by `tiles` meshes of the same vertices, as an engine
 /// streams terrain in chunks (and so the non-RT Virtual sun map's 32-bit placement and
 /// primitive packing fits the forest).
-fn terrain_tiles(size: f32, cells: u32, tiles: u32) -> Vec<Geometry> {
-    let full = terrain_geometry(size, cells);
+fn terrain_tiles(size: f32, cells: u32, tiles: u32, outpost: bool) -> Vec<Geometry> {
+    let full = terrain_geometry(size, cells, outpost);
     let (row, n) = (cells + 1, cells / tiles);
     let mut out = Vec::new();
     for tz in 0..tiles {
