@@ -494,14 +494,7 @@ impl Pass {
             }
             Self::Tone => TONE.into(),
             Self::Display => include_str!("../shaders/display.wgsl").into(),
-            Self::IdResolve => {
-                let source = include_str!("../../../shaders/id_output.wgsl");
-                source
-                    .split_once("// ---- Handoff:")
-                    .expect("the id output has a handoff part")
-                    .0
-                    .into()
-            }
+            Self::IdResolve => crate::renderer::id_output::id_source().into(),
             Self::IdPack => include_str!("../shaders/id_pack.wgsl").into(),
             Self::ViewHistogram => include_str!("../shaders/view_histogram.wgsl").into(),
             _ => POST.into(),

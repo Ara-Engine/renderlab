@@ -60,7 +60,9 @@ target remains **rgba32uint**. Only its existing packed word changes:
   exactly representable; a fractional spatial prior is quantized once per step.
 
 Coverage decoding is through `tr1_second` and the picking pass's `id_settle`;
-both use the shared decoder under either switch. The third-surface carry copies
+both use the shared decoder under either switch. The Apple port's IdResolve
+also calls the shared ID source instead of including the unmodified shader;
+its TR1 resolve already uses the shared resolve composer. The third-surface carry copies
 the word and tag without interpreting them. The image is never sampled as a
 float target. Colour fields, material/shading APIs and programmable shading are
 unchanged. Switch off composes the original resolve source unchanged.
@@ -110,5 +112,27 @@ Moving game_scene pictures (1280x720, 34 frames, base `177ef27f`, CYCLE vs off):
 | Non-RT night lanterns | 48 | 75 | 80 |
 
 Worst crops were inspected: differences are sparse foliage/silhouette pixels;
-these checks do not replace Glint's moving-edge/reference gate. No performance
-claim yet; the three-mode held/moving timing is pending.
+these checks do not replace Glint's moving-edge/reference gate. Timing costs
+follow below; no speedup or final game-quality claim is made.
+
+## Cost
+
+One 75.57-second `--timing` lease, two interleaved rounds in reversed mode order,
+RTX 4070 SUPER, release, 1280x720 game_scene flight. Each cell is the mean of two
+round medians, in milliseconds; mode order is off / UNORM / cycle. Moving uses
+81 samples per visit (pass frame IDs 40..120); held uses 37 (300..336), after
+coverage has settled. Base `bc8b7c3d`; later port routing and docs do not change
+the measured wgpu source. End clocks 2820 / 10501 MHz, P0; runner exit 0,
+no reported failures. No per-frame PNGs (`--every 1000`).
+
+| Path / clip | TR1 ms: off / UNORM / cycle | Full GPU span ms: off / UNORM / cycle |
+|---|---|---|
+| RT held | 0.2488 / 0.2489 / 0.2514 | 3.1585 / 3.1549 / 3.1559 |
+| RT moving | 0.4429 / 0.4434 / 0.4465 | 11.2379 / 11.2768 / 11.3193 |
+| Non-RT held | 0.2468 / 0.2468 / 0.2494 | 4.4539 / 4.4452 / 4.4554 |
+| Non-RT moving | 0.4444 / 0.4454 / 0.4475 | 19.2645 / 19.2364 / 19.2558 |
+
+Cycle adds 0.0026–0.0036 ms to TR1. RT moving full span increases by 0.0814 ms
+(0.72%); other full-span deltas are small or change sign between rounds. This
+is a cost measurement, not a speedup claim. Actual Glint picture gates remain
+pending; default stays off.

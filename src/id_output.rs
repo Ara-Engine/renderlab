@@ -20,7 +20,7 @@ use std::sync::{Arc, OnceLock};
 const SHADER: &str = include_str!("../shaders/id_output.wgsl");
 const HANDOFF_MARK: &str = "// ---- Handoff:";
 /// The ID pass module: the shader up to its handoff section.
-pub(super) fn id_source() -> String {
+pub(crate) fn id_source() -> String {
     id_source_with_coverage(super::temporal_reconstruction::coverage_mode().is_some())
 }
 fn id_source_with_coverage(precise: bool) -> String {
