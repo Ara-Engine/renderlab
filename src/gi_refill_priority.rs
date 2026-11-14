@@ -250,6 +250,69 @@ pub(super) fn compact_available(cap: u32) -> bool { cap <= (RAY_ITEMS - 8) / 3 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// CPU replay of the selector on an oversized arrival, not a tiny scene that never
+    /// reaches the cap. Child processes exercise the real once-per-process switch.
+    #[test]
+    fn oversized_cut_defers_the_ordered_backlog_then_drains() {
+        const CHILD: &str = "RENDERLAB_TEST_GI_DEFERRAL_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            for enabled in ["0", "1"] {
+                let output = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "renderer::gi_cache::priority::tests::oversized_cut_defers_the_ordered_backlog_then_drains", "--nocapture"])
+                    .env(CHILD, "1")
+                    .env("RENDERLAB_GI_BOUNDED_REFILL", enabled)
+                    .env_remove("RENDERLAB_GI_REFILL_BUDGET")
+                    .env_remove("RENDERLAB_GI_REFILL_REPLAY")
+                    .env_remove("RENDERLAB_GI_REFILL_TRACE")
+                    .output().unwrap();
+                assert!(output.status.success(), "switch {enabled}: {}{}",
+                    String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            }
+            return;
+        }
+        let original = kernel_source_base(true, 64);
+        let actual = kernel_source(true, 64);
+        if !on() {
+            assert_eq!(actual, original);
+            return;
+        }
+        assert_eq!(mode(), Mode::Fixed(12_288));
+        assert!(actual.contains("fn gi_priority_select()"));
+        let controller = Controller::default();
+        // Visible without bounce / visible with bounce / background. Every group
+        // starts above its reservation, so the first frame must really defer work.
+        let mut queued = [24_576u32, 12_288, 6_144];
+        let arrival: u32 = queued.iter().sum();
+        assert!(arrival > DEFAULT_CELLS);
+        let mut total_gathered = 0;
+        let mut claims_left = arrival;
+        for frame in 0..4 {
+            let mut header = [0; HEADER_WORDS as usize];
+            controller.header(&mut header, mode());
+            assert_eq!((header[32], header[33]), (12_288, 12_288));
+            let cap = header[32];
+            let visible = cap - cap / 5;
+            let first = queued[0].min(visible);
+            let refresh = queued[1].min(visible - first);
+            let background = queued[2].min(cap - first - refresh);
+            let gathered = first + refresh + background;
+            for (left, count) in queued.iter_mut().zip([first, refresh, background]) {
+                *left -= count;
+            }
+            total_gathered += gathered;
+            claims_left -= claims_left.min(header[33]);
+            assert!(gathered <= DEFAULT_CELLS);
+            assert_eq!(total_gathered + queued.iter().sum::<u32>(), arrival);
+            if frame == 0 {
+                assert_eq!(gathered, 12_288);
+                assert_eq!(queued.iter().sum::<u32>(), 30_720);
+                assert_eq!(claims_left, 30_720);
+            }
+        }
+        assert_eq!(queued, [0; 3]);
+        assert_eq!(claims_left, 0);
+        assert_eq!(total_gathered, arrival);
+    }
     #[test]
     fn delayed_feedback_cuts_cost_spikes_and_ignores_old_samples() {
         let mut c = Controller::default();
