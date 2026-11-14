@@ -185,6 +185,19 @@ pub(super) fn atmosphere_source(mut source: String, on: bool) -> String {
         "    textureStore(at_scatter_out,vec3<i32>(id),value);",
         "    if at_fog_cull_enabled() {value.g=select(0.0,1.0,complete);}\n    textureStore(at_scatter_out,vec3<i32>(id),value);",
     );
+    if std::env::var("RENDERLAB_FOG_OVERHAUL").as_deref() != Ok("0") {
+        // Occlusion writes this flag in the preceding pass. It is stable for
+        // this entire dispatch; repeated atomic loads inhibit loop hoisting.
+        let (range, _) = entries(&source)
+            .into_iter()
+            .find(|(_, name)| name == "at_fog_temporal")
+            .unwrap();
+        let body = source[range.clone()].replace("at_fog_cull_enabled()", "cull_active");
+        let guard = "    if any(id>=grid) { return; }";
+        assert_eq!(body.matches(guard).count(), 1);
+        let body = body.replacen(guard, &format!("{guard}\n    let cull_active=at_fog_cull_enabled();"), 1);
+        source.replace_range(range, &body);
+    }
     source + OCCLUSION
 }
 
