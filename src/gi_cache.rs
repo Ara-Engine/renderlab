@@ -36,7 +36,7 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
     (light_cold_offset(directions) + lights.div_ceil(32).max(1)).next_multiple_of(4)
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
-pub(crate) const COUNTER_WORDS: u64 = 48;
+pub(crate) const COUNTER_WORDS: u64 = 256;
 const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
@@ -63,6 +63,18 @@ pub(crate) const GATHER_GROUPS: u32 = 4096;
 /// blotches for the first 8-16+ frames (Ara's Showcase). P-DEFECT gave them the hardware
 /// budget (P-GI and P-GATHER made software gathers cheaper since G2b; docs/p-defect.md).
 const GATHER_CELLS: u32 = 32768;
+/// First fill (gicut, `RENDERLAB_GI_FIRST_FILL=0` turns it off): the most cells a frame creates
+/// (shaders/gi_cache.wgsl gi_fill_bin; the lattice class that covers every receiver is always
+/// created), and software rays' gather budget. Outpost non-RT after a cut: 0.4 us a new cell's
+/// sky rays and 1.3 us a gather, so 16k cells and 8k gathers stay near 15 ms over the frame's
+/// steady cost; hardware rays: 11 ns and 0.12 us.
+const FILL_CELLS_HARDWARE: u32 = 65536;
+const FILL_CELLS_SOFTWARE: u32 = 16384;
+const GATHER_CELLS_SOFTWARE: u32 = 8192;
+fn first_fill_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIRST_FILL").map_or(true, |v| v != "0"))
+}
 /// `cut_gather_ms` (U-RTVIS): gathers per millisecond of GPU time, software rays (Outpost non-RT
 /// after a cut: about 0.95 ms per 1,000, ara-integration perf/table-outpost-view2.md) and
 /// hardware rays (assumed four times faster until measured), and the frames after a cut it holds.
@@ -724,6 +736,8 @@ struct Pipelines {
     finish: Owned<wgpu::ComputePipeline>,
     integrate: Owned<wgpu::ComputePipeline>,
     gather: Owned<wgpu::ComputePipeline>,
+    fill_count: Owned<wgpu::ComputePipeline>,
+    fill_select: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
     filter: Owned<wgpu::ComputePipeline>,
 }
@@ -1168,8 +1182,11 @@ impl Planner {
         // U-RTVIS: a cut's gathers held to a time budget, the cells pixels read first.
         let cut_window = s.cut_gather_ms > 0.0 && self.since_cut < CUT_GATHER_FRAMES;
         let per_ms = if software { GATHERS_PER_MS_SOFTWARE } else { GATHERS_PER_MS_HARDWARE };
+        // First fill caps a frame's new cells unless claims are set explicitly.
+        let fill = first_fill_on() && s.claim_cells == u32::MAX;
         header[20] = match s.gather_cells {
             _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
+            0 if fill && software => GATHER_CELLS_SOFTWARE,
             0 => GATHER_CELLS,
             u32::MAX => 0,
             cells => cells,
@@ -1204,6 +1221,16 @@ impl Planner {
         header[27] = spread.to_bits();
         header[29] = s.mover_hit_levels;
         // The most cells pixels read in a frame: the view's pixels over a cell's.
+        header[48] = match (fill, software) {
+            (false, _) => 0,
+            (true, true) => FILL_CELLS_SOFTWARE,
+            (true, false) => FILL_CELLS_HARDWARE,
+        };
+        // The pixel cells' gather rotation counts from the last cut or clear.
+        header[49] = match since_clear.min(self.since_cut) {
+            u32::MAX => self.frame,
+            n => n,
+        };
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {
@@ -2820,6 +2847,8 @@ impl Renderer {
                 },
                 main,
             ),
+            fill_count: compute("gi_fill_count", main),
+            fill_select: compute("gi_fill_select", main),
             light: compute("gi_light", main),
             filter: compute("gi_filter", main),
         };
@@ -3673,6 +3702,9 @@ impl GiState {
         mark(encoder, "gi_claim");
         if p.priority.is_some() { encoder.clear_buffer(&r.work,47*4,Some(4)); }
         if traced || profiling {
+            // First fill's admission order, before the rounds (no-ops without its cap).
+            main_pass(encoder, "indirect fill count", &p.fill_count, u32::MAX, traced.then_some([CLAIM_GROUPS, 1]));
+            main_pass(encoder, "indirect fill select", &p.fill_select, u32::MAX, traced.then_some([1, 1]));
             for k in 0..CLAIM_ROUNDS {
                 let grid = traced.then_some([CLAIM_GROUPS, 1]);
                 if let Some(priority) = &p.priority {
