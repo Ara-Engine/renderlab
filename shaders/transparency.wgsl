@@ -17,6 +17,7 @@ struct TpFrame {
     shadow:mat4x4<f32>,
     // xyz eye; w exposure.
     eye:vec4<f32>,
+    // xyz view forward; native transparency uses w for its reflection cutoff (-1: full dispatch).
     forward:vec4<f32>,
     right:vec4<f32>,
     up:vec4<f32>,
@@ -586,7 +587,7 @@ struct TpBillboard {
 
 // ---- TP_LOBE_DISPATCH ----
 // Occlusion samples count only lobes that survived the exact traced-roughness cutoff.
-// Query results stay on the GPU; no lobes means a zero-work indirect dispatch.
+// Query results stay on the GPU; no eligible lobes selects the zero-result clear.
 @group(0) @binding(56) var<storage,read> tp_lobe_samples:array<u32>;
 @group(0) @binding(57) var<storage,read_write> tp_lobe_args:array<u32>;
 @compute @workgroup_size(1) fn tp_lobe_dispatch() {
