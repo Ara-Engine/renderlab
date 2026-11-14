@@ -966,7 +966,7 @@ impl Renderer {
         let slot = self.program_slot(id);
         let parameters = program::declares_parameters(&slot.source);
         let sources = [0, 1]
-            .map(|i| program::with_reflection_history(program::compose(&heads[i], &slot.source, Stage::TracedStreamed, parameters)));
+            .map(|i| shading_floor_probe::compose(program::with_reflection_history(program::compose(&heads[i], &slot.source, Stage::TracedStreamed, parameters))));
         let abi = self.program_abi();
         let scopes = OperationScopes::new(&self.device);
         // Modules are cheap (naga); only the pipeline this frame shades with compiles.
@@ -1096,8 +1096,8 @@ impl Renderer {
         for slot in &self.programs {
             let parameters = program::declares_parameters(&slot.source);
             let sources = [
-                program::with_reflection_history(program::compose(&heads[0], &slot.source, Stage::Traced, parameters)),
-                program::with_reflection_history(program::compose(&heads[1], &slot.source, Stage::Traced, parameters)),
+                shading_floor_probe::compose(program::with_reflection_history(program::compose(&heads[0], &slot.source, Stage::Traced, parameters))),
+                shading_floor_probe::compose(program::with_reflection_history(program::compose(&heads[1], &slot.source, Stage::Traced, parameters))),
                 film_accumulation::compose_shading(&temporal, &slot.source, parameters),
             ];
             let scopes = OperationScopes::new(&self.device);
