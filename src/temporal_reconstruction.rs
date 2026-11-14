@@ -665,19 +665,23 @@ fn trace_source_with(soft_kernels: &str, listing: bool) -> Result<String, Error>
         // resolve will restart it (tr1_zone_rays); its count is normalised by its own rays.
         // U-RTVIS: below the budget, a receiver whose first sampling.y directions agree
         // stops there (COLD_PROBE_STOP).
+        let source = source
+            .replace(
+                loop_seam,
+                "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u)",
+            )
+            .replacen(
+                ROTATION_SEAM.1,
+                &format!("{COLD_PROBE_STOP}\n        {}", ROTATION_SEAM.1),
+                1,
+            )
+            .replace("256u/FRESH_DIRECTIONS", "256u/tr1_rays");
+        let source = match sun_tile_probes() {
+            0 => source,
+            probes => with_sun_tile(source, probes)?,
+        };
         return Ok(format!(
-            "{}\nvar<private> tr1_rays:u32=8u;\n{}",
-            source
-                .replace(
-                    loop_seam,
-                    "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u)",
-                )
-                .replacen(
-                    ROTATION_SEAM.1,
-                    &format!("{COLD_PROBE_STOP}\n        {}", ROTATION_SEAM.1),
-                    1,
-                )
-                .replace("256u/FRESH_DIRECTIONS", "256u/tr1_rays"),
+            "{source}\nvar<private> tr1_rays:u32=8u;\n{}",
             zones_source("primary_frame.zones")
         ));
     }
@@ -715,6 +719,59 @@ fn trace_source_with(soft_kernels: &str, listing: bool) -> Result<String, Error>
     ))
 }
 const PENUMBRA_TRACE: &str = include_str!("../shaders/primary_penumbra.wgsl");
+/// SUNRT (2026-11-14) tile vote, shaders/primary_sun_tile.wgsl: each 8x4 Interactive trace
+/// tile traces `probes` directions of every receiver's budget first, and a tile whose probes
+/// all agree keeps them (0 or 256); any other tile resumes main's budget, in main's order.
+/// `RENDERLAB_SUN_TILE_PROBES=0` turns it off (main's module exactly); 1..=7 sets the probes.
+pub(crate) fn sun_tile_probes() -> u32 {
+    static PROBES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *PROBES.get_or_init(|| {
+        let value = std::env::var("RENDERLAB_SUN_TILE_PROBES").ok();
+        match value.as_deref().map(str::parse::<u32>) {
+            None => 4,
+            Some(Ok(n)) if n < 8 => n,
+            Some(_) => {
+                eprintln!("RENDERLAB_SUN_TILE_PROBES={value:?} ignored: expected 0 to 7");
+                4
+            }
+        }
+    })
+}
+const SUN_TILE: &str = include_str!("../shaders/primary_sun_tile.wgsl");
+/// The tile vote's edits to a budgeted trace module: the estimator's pause and resume around
+/// the budget loop, and each Interactive entry's vote before its uncovered-tile return.
+fn with_sun_tile(source: String, probes: u32) -> Result<String, Error> {
+    let header =
+        "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u) {\n";
+    let votes = [
+        (
+            "    if !inside || covered==0u {return;}\n",
+            "    tr1_tile_vote_trace(trace,id.xy,size.x);\n",
+        ),
+        (
+            "    if !in_bounds || covered==0u {return;}\n",
+            "    tr1_tile_vote(trace.record.x!=0u,receiver,id.xy,size.x);\n",
+        ),
+    ];
+    if source.matches(header).count() != 1
+        || votes.iter().any(|(seam, _)| source.matches(seam).count() != 1)
+    {
+        return Err(Error::InvalidInput(
+            "the sun tile vote requires the budget loop and both Interactive entries' returns",
+        ));
+    }
+    let mut source = source.replacen(
+        header,
+        "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);\n    if tr1_tile_state==3u {tr1_tile_state=0u;tr1_rays=TR1_TILE_PROBES;return tr1_tile_count;}\n    var tr1_first=lane;\n    if tr1_tile_state==2u {tr1_tile_state=0u;tr1_first=TR1_TILE_PROBES;visible=tr1_tile_count;}\n    for(var j=tr1_first;j<tr1_rays;j+=1u) {\n        if j==TR1_TILE_PROBES && tr1_tile_state==1u {tr1_tile_state=2u;break;}\n",
+        1,
+    );
+    for (seam, vote) in votes {
+        source = source.replacen(seam, &format!("{vote}{seam}"), 1);
+    }
+    Ok(format!(
+        "{source}\nconst TR1_TILE_PROBES:u32={probes}u;\n{SUN_TILE}"
+    ))
+}
 /// U-RTVIS (docs/rtvis.md): on frames whose probe count (sampling.y) is below the budget
 /// (sampling.x), a receiver stops after the probes when they all agree, and its count is
 /// normalised by the probes alone (0 or 256). Others continue to the whole budget, in
@@ -2687,13 +2744,18 @@ mod tests {
         // Main's module when listing is off; P-RTS's seams when it is on.
         let off = trace_source_with(&kernels[1], false).unwrap();
         // P-RELIT: each receiver traces and normalises by its own count.
-        assert!(off.contains(
-            "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u)"
-        ));
+        // SUNRT: with the tile vote on, the loop starts at the resume point and pauses first.
+        let (start, pause) = if sun_tile_probes() == 0 {
+            ("lane", String::new())
+        } else {
+            ("tr1_first", "        if j==TR1_TILE_PROBES && tr1_tile_state==1u {tr1_tile_state=2u;break;}\n".to_owned())
+        };
+        assert!(off.contains("tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);"));
+        assert!(off.contains(&format!("for(var j={start};j<tr1_rays;j+=1u)")));
         assert!(off.contains("256u/tr1_rays") && !off.contains("256u/FRESH_DIRECTIONS"));
-        // U-RTVIS: the probe stop is the budget loop's first statement.
+        // U-RTVIS: the probe stop is the budget loop's first statement (after SUNRT's pause).
         assert!(off.contains(&format!(
-            "j<tr1_rays;j+=1u) {{\n        {COLD_PROBE_STOP}\n        {}",
+            "j<tr1_rays;j+=1u) {{\n{pause}        {COLD_PROBE_STOP}\n        {}",
             ROTATION_SEAM.1
         )));
         assert!(!off.contains("primary_penumbra_trace"));

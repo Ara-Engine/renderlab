@@ -44,6 +44,10 @@ fn at_sun_visible(p:vec3<f32>) -> f32 {
 ";
 const MAP_VISIBILITY: &str = include_str!("../shaders/atmosphere_shadow_map.wgsl");
 
+fn overhaul_enabled() -> bool {
+    std::env::var("RENDERLAB_FOG_OVERHAUL").as_deref() != Ok("0")
+}
+
 fn kernel_source(hardware: bool) -> String {
     let kernels = fog_cull::atmosphere_source(KERNELS.to_owned(), hardware && fog_cull::enabled());
     format!(
@@ -245,6 +249,8 @@ pub(super) struct AtmosphereGpu {
     sky: Option<Owned<wgpu::RenderPipeline>>,
     /// The medium the transmittance and multiple-scattering LUTs hold.
     luts: Option<AtmosphereMedium>,
+    /// Exact sky inputs; consumers apply the current illuminance and exposure.
+    sky_key: Option<(AtmosphereMedium, Vec3, f32)>,
     published: Option<Vec<u8>>,
     #[cfg(test)]
     test_fog_quality: Option<(u32, u32)>,
@@ -334,6 +340,7 @@ impl AtmosphereGpu {
             procedural: None,
             sky: None,
             luts: None,
+            sky_key: None,
             published: None,
             #[cfg(test)]
             test_fog_quality: None,
@@ -1097,9 +1104,9 @@ impl Renderer {
     /// The atmosphere kernels for this frame, after the TLAS build and before shading: the
     /// fixed LUTs when the medium changed, the sky view and its mean, the aerial
     /// perspective, then volumetric fog.
-    /// The atmosphere's passes. `mark` names their parts for RENDERLAB_PASS_LOG_DETAIL
-    /// (`atmosphere.aerial`, `.inject`, `.temporal`, `.integrate`; the sky LUTs and environment
-    /// stay in `atmosphere`).
+    /// Flat fog/volume labels keep their costs in ordinary pass logs. Enabling
+    /// global detail would additionally replay the shading kernel seven times.
+    /// The sky LUTs and environment stay in `atmosphere`.
     pub(super) fn encode_atmosphere(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -1112,6 +1119,8 @@ impl Renderer {
         // Virtual's resources exist after prepare_virtual, and its pages have been
         // encoded before this call. Raster depth and the TLAS are ready here too.
         self.atmosphere_volume_groups(true, scene);
+        let sun = self.atmosphere_sun().map_or(Vec3::Y, |s| s.0);
+        let altitude = self.atmosphere.published.as_ref().map_or(0.0, |b| f32::from_ne_bytes(b[140..144].try_into().unwrap()));
         let (a, av) = (&mut self.atmosphere, &mut self.view.atmosphere);
         let medium = a.settings.medium;
         let stale = a.luts != Some(medium);
@@ -1130,12 +1139,16 @@ impl Renderer {
             pass.set_bind_group(0, &*k.fixed[1], &[]);
             pass.dispatch_workgroups(MULTISCATTER, MULTISCATTER, 1);
         }
-        pass.set_pipeline(&k.skyview);
-        pass.set_bind_group(0, &*k.fixed[2], &[]);
-        pass.dispatch_workgroups(SKYVIEW[0].div_ceil(8), SKYVIEW[1].div_ceil(8), 1);
-        pass.set_pipeline(&k.ambient);
-        pass.set_bind_group(0, &*k.fixed[3], &[]);
-        pass.dispatch_workgroups(1, 1, 1);
+        let sky_key = (medium, sun, altitude);
+        if !overhaul_enabled() || a.sky_key != Some(sky_key) {
+            pass.set_pipeline(&k.skyview);
+            pass.set_bind_group(0, &*k.fixed[2], &[]);
+            pass.dispatch_workgroups(SKYVIEW[0].div_ceil(8), SKYVIEW[1].div_ceil(8), 1);
+            pass.set_pipeline(&k.ambient);
+            pass.set_bind_group(0, &*k.fixed[3], &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+            a.sky_key = Some(sky_key);
+        }
         if let Some(p) = a.procedural.as_mut().filter(|p| !p.written) {
             pass.set_pipeline(&k.specular);
             for (level, group) in p.groups[..ENVIRONMENT_LEVELS as usize].iter().enumerate() {
@@ -1167,7 +1180,7 @@ impl Renderer {
         let plane = [v.grid[0].div_ceil(8), v.grid[1].div_ceil(8), 1];
         part(
             encoder,
-            "atmosphere.aerial",
+            "sky_aerial",
             &k.aerial,
             v.aerial.as_ref().unwrap(),
             plane,
@@ -1219,7 +1232,7 @@ impl Renderer {
             .occlusion
             .as_ref()
             .unwrap();
-        mark(encoder, "atmosphere.occlusion");
+        mark(encoder, "fog_occlusion");
         self.view.atmosphere.volume.cull.as_mut().unwrap().encode(
             &self.device,
             &self.ledger,
@@ -1234,6 +1247,8 @@ impl Renderer {
             encoder,
             self.frames + 1,
         );
+        // Close fog's timing scope before a possible split-submit CPU wait.
+        mark(encoder, "after_fog");
     }
 
     fn encode_fog_volume(
@@ -1271,12 +1286,12 @@ impl Renderer {
             } else {
                 &k.inject
             };
-            part(encoder, "atmosphere.inject", injection, &inject[i], cells);
+            part(encoder, "fog_inject", injection, &inject[i], cells);
             let temporal = &v.temporal.as_ref().unwrap()[i];
-            part(encoder, "atmosphere.temporal", &k.temporal, temporal, cells);
+            part(encoder, "fog_temporal", &k.temporal, temporal, cells);
             part(
                 encoder,
-                "atmosphere.integrate",
+                "fog_integrate",
                 &k.integrate,
                 &integrate[i],
                 plane,
