@@ -149,13 +149,14 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     let f0=vec3<f32>(0.04)*(1.0-metal)+base*metal;
     // Sky diffuse is the engine's incident irradiance at this receiver: occluded by the
     // world radiance cache when it runs, the open environment otherwise.
-    let diffuse=exposed_product(indirect_irradiance(input,n),base*((1.0-metal)/PI));
+    var diffuse=vec3<f32>(0.0);
+    if rl_term(RL_TERM_INDIRECT) { diffuse=exposed_product(indirect_irradiance(input,n),base*((1.0-metal)/PI)); }
     // Sky specular likewise: the occluded prefiltered radiance about the reflection, then
     // each dominant lobe the engine separates (only where it can occlude them) evaluated
     // against this BRDF in place of its share of that radiance.
     let reflectance=f0*ab.x+vec3<f32>(ab.y);
     var specular=vec3<f32>(0.0);
-    if reflection_needs_environment() {
+    if reflection_needs_environment() && rl_term(RL_TERM_ENVIRONMENT) {
         let reflected=reflect(-v,n);
         let radiance=indirect_radiance(input,reflected,rough);
         specular=exposed_product(radiance,reflectance);
