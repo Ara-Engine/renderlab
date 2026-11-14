@@ -27,6 +27,8 @@ pub(crate) mod program_lists;
 // U-RTVIS: the reflection pass's rl_trace (docs/design-reflection-pass.md).
 #[path = "reflection_pass.rs"]
 pub(crate) mod reflection_pass;
+#[path = "reflection_geometry_dump.rs"]
+mod reflection_geometry_dump;
 #[path = "gi_receiver_pass.rs"]
 pub(crate) mod gi_receiver_pass;
 // The Mac thread's reflection_hits after rl_trace (docs/design-reflection-pass.md).
@@ -3614,31 +3616,32 @@ impl Renderer {
                     .unwrap()
                     .records = words;
             }
-            return;
+        } else {
+            let refs: Vec<_> = meshes.iter().map(|m| &**m).collect();
+            let mut packed = crate::reflection_software::pack(&refs, traced.len());
+            let words = records(&packed.bases);
+            packed.words[..words.len()].copy_from_slice(&words);
+            let buffer = Buffer::new(
+                self,
+                "software reflection geometry",
+                (packed.words.len() * 4) as u64,
+                wgpu::BufferUsages::STORAGE,
+            );
+            let bytes: Vec<u8> = packed.words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+            self.queue.write_buffer(&buffer.value, 0, &bytes);
+            uploads.geometry += (packed.words.len() * 4) as u64;
+            uploads.write_calls += 1;
+            let state = self.view.primary.as_mut().unwrap();
+            let generation = state.reflections.as_ref().map_or(0, |r| r.generation) + 1;
+            state.reflections = Some(SoftwareReflections {
+                buffer,
+                meshes,
+                bases: packed.bases,
+                records: words,
+                generation,
+            });
         }
-        let refs: Vec<_> = meshes.iter().map(|m| &**m).collect();
-        let mut packed = crate::reflection_software::pack(&refs, traced.len());
-        let words = records(&packed.bases);
-        packed.words[..words.len()].copy_from_slice(&words);
-        let buffer = Buffer::new(
-            self,
-            "software reflection geometry",
-            (packed.words.len() * 4) as u64,
-            wgpu::BufferUsages::STORAGE,
-        );
-        let bytes: Vec<u8> = packed.words.iter().flat_map(|w| w.to_ne_bytes()).collect();
-        self.queue.write_buffer(&buffer.value, 0, &bytes);
-        uploads.geometry += (packed.words.len() * 4) as u64;
-        uploads.write_calls += 1;
-        let state = self.view.primary.as_mut().unwrap();
-        let generation = state.reflections.as_ref().map_or(0, |r| r.generation) + 1;
-        state.reflections = Some(SoftwareReflections {
-            buffer,
-            meshes,
-            bases: packed.bases,
-            records: words,
-            generation,
-        });
+        reflection_geometry_dump::maybe_dump(self, draws, traced.len());
     }
 }
 // ---- end of M7-R1n software reflections ----
