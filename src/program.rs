@@ -117,8 +117,17 @@ const LEAN_EDITS: [(&str, &str); 2] = [
 ];
 /// `composed` (a traced shading module) for frames whose `FrameInputs::lean` holds: each lean
 /// edit applied where its function is composed, the program's range moved past them.
-pub(crate) fn lean_variant(mut composed: Composed) -> Composed {
-    for (head, early) in LEAN_EDITS {
+pub(crate) fn lean_variant(composed: Composed) -> Composed {
+    lean_edits(composed, &LEAN_EDITS)
+}
+/// Measurement only (`RENDERLAB_DECAL_PROBE=1`): every primary shading module compiles the
+/// decal code out, as if no frame ever projected a decal. Wrong wherever decals project.
+fn decal_probe() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_DECAL_PROBE").is_ok_and(|v| v == "1"))
+}
+fn lean_edits(mut composed: Composed, edits: &[(&str, &str)]) -> Composed {
+    for &(head, early) in edits {
         if composed.source.matches(head).count() != 1 {
             continue;
         }
@@ -294,6 +303,11 @@ fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Comp
 /// stubs, each while its switch is on (wgpu primary shading modules only). Unset, the module's
 /// text is the default's (reflections.wgsl as composed).
 pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
+    let composed = if decal_probe() {
+        lean_edits(composed, &LEAN_EDITS[..1])
+    } else {
+        composed
+    };
     let composed = if rl_pass_for(&composed.source) {
         pass_block(composed)
     } else {
