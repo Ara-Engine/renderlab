@@ -15,6 +15,7 @@ pub(super) fn rect(bounds: &crate::visibility::Aabb, model: Mat4, view: Mat4, si
     // Clip the convex box's edges just in front of the eye, well before the camera's
     // near plane. Its projected vertices bound every visible point in the box.
     const EYE: f32 = 1e-5;
+    if corners.iter().all(|p| p.w < EYE) { return [0; 4]; }
     let mut lo = Vec2::splat(f32::INFINITY);
     let mut hi = Vec2::splat(f32::NEG_INFINITY);
     let mut add = |p: Vec4| {
@@ -36,7 +37,7 @@ pub(super) fn rect(bounds: &crate::visibility::Aabb, model: Mat4, view: Mat4, si
             }
         }
     }
-    if !lo.is_finite() || !hi.is_finite() { return [0; 4]; }
+    if !lo.is_finite() || !hi.is_finite() { return full; }
     [
         (lo.x - 2.0).floor().clamp(0.0, size[0] as f32) as u32,
         (lo.y - 2.0).floor().clamp(0.0, size[1] as f32) as u32,

@@ -247,6 +247,7 @@ pub(super) fn compile_structure_sources(
         ),
         ("aa-seed", section("TP_AA_SEED").to_owned()),
         ("aa-resolve", section("TP_AA_RESOLVE").to_owned()),
+        ("lobe-dispatch", format!("{}{}", section("TP_FRAME"), section("TP_LOBE_DISPATCH"))),
         ("transmission", transmission_shadow::draw_source(prelude)),
     ];
     if rt {
@@ -1308,7 +1309,7 @@ impl Renderer {
         let source = if rt && slot.traits.declares_reflection {
             let source = source.replace(
                 "if lobe.weight<=0.0 {discard;}",
-                "if lobe.weight<=0.0 {discard;}\nif tp.forward.w>=0.0 && sqrt(clamp(lobe.alpha,0.0,1.0))>=tp.forward.w {discard;}",
+                "if lobe.weight<=0.0 {discard;}\nif tp.forward.w>=0.0 && sqrt(clamp(unpack2x16float(pack2x16float(vec2<f32>(lobe.alpha,0.0))).x,0.0,1.0))>=tp.forward.w {discard;}",
             );
             let source = replace_function(&source, "specular_incident",
                 "fn specular_incident(input:SurfaceInput)->vec4<f32> { if tp.misc.w==0.0 || textureLoad(tp_live_lobe,vec2<i32>(input.pixel),0).w==0.0 {return vec4<f32>(0.0);} return textureLoad(tp_reflected,vec2<i32>(input.pixel),0); }");
