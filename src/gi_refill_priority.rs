@@ -193,6 +193,11 @@ pub(super) fn source(mut source: String, enabled: bool) -> String {
         "        let requests=(gi_frame.bounce.z&GI_RELIGHT_REQUESTS)!=0u;",
         1,
     );
+    // A completed gather may leave the queue permanently. Clear its pending-visible
+    // bit now, so a later invalidation/revisit is counted as new first-fill inflow.
+    let before = "state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY)";
+    assert_eq!(body.matches(before).count(), 1);
+    let body = body.replacen(before, "state&~(GI_GATHER_MASK|GI_BQUEUED|GI_RETRY|2048u)", 1);
     source.replace_range(
         start..end,
         "        gi_priority_gather_cell(workgroupUniformLoad(&gi_wg_list[j]),lane);",
