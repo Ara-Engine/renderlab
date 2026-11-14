@@ -29,6 +29,7 @@ mod instances;
 mod light_cluster;
 mod lighting;
 mod material;
+mod material_mode;
 mod mesh;
 mod normal;
 // Entity-ID output's device-free half (docs/design-id-output.md).
@@ -37,20 +38,28 @@ mod observe;
 mod pane_pixels;
 mod pass_timeline;
 mod memory_report;
+mod normal_variance_bc;
 // PP1 public camera/display settings; implementation stays in the tone stage.
 mod post;
 mod primary_ray;
 // PC1: shared pipeline caching and startup instrumentation.
 pub mod pipeline_compilation;
+mod pipeline_log;
 mod program;
 pub mod program_watch;
+mod readback_ring;
 mod receiver_adjacency;
 /// M7 reference path tracer (measurement tooling for the GI and reflection gates).
 pub mod reference;
 mod reflection_software;
 mod reflections;
 mod renderer;
+#[cfg(not(target_vendor = "apple"))]
 #[path = "program_vulkan.rs"]
+pub mod shader_compiler;
+// wgpu has no Vulkan backend on Apple targets: the same API, with no development device.
+#[cfg(target_vendor = "apple")]
+#[path = "program_vulkan_apple.rs"]
 pub mod shader_compiler;
 mod shadow_plan;
 mod shadows;

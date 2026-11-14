@@ -31,6 +31,7 @@ use visibility_buffer::{ClusterInstances, cluster_data_group, data_entry};
 mod sunvis_s4;
 #[path = "virtual_shadow_cache.rs"]
 mod surface_cache;
+use crate::readback_ring::ReadbackRing;
 use surface_cache::SurfaceCache;
 // VF1: a read-only fog accessor; cache internals and page work stay owned here.
 #[path = "atmosphere_shadow.rs"]
@@ -40,6 +41,8 @@ pub(super) mod atmosphere_shadow;
 pub(super) const MAX_LEVELS: usize = 8;
 const MAX_RECTS: usize = 16;
 const PAGE: u32 = 128;
+/// The Disk mark pass's receiver counters (WGSL `vsm_reach`): four words.
+const REACH_BYTES: u64 = 16;
 /// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen light-space and sixteen
 /// screen rectangles, the TRACED_DRAWS per-batch horizon offsets and (first record, recorded) pairs,
 /// N8e's uvec4, P-NSQ's sampling uvec4 (`SAMPLING_OFFSET`) and TR1's restart zones
@@ -312,6 +315,16 @@ pub struct VirtualShadowStats {
     /// frame ran it.
     pub occluder_gather_ready: bool,
     pub occluder_gather_frame: bool,
+    /// Octaves the ladder skips far out because its span exceeded `MAX_LEVELS` (`ladder`).
+    pub skipped_levels: u32,
+    /// Disk lookup, from a mark pass a frame or two earlier (`reach`): the nearest receiver's
+    /// distance from the eye, the receivers seen, and those no level's window held (shaded
+    /// without the map).
+    pub nearest_receiver: Option<f32>,
+    pub receivers: u32,
+    pub unplaced_receivers: u32,
+    /// The nearest of the unplaced receivers (metres from the eye): the reach this frame.
+    pub nearest_unplaced: Option<f32>,
 }
 
 struct Pipelines {
@@ -417,7 +430,8 @@ const MAX_PIECES: u64 = 2 * crate::TRACED_DRAWS as u64;
 /// lists and the cluster data bindings. Rebuilt when the draw list changes.
 struct Casters {
     /// Each draw's index buffer and placement count.
-    key: Vec<(usize, usize)>,
+    /// Per draw: its mesh, its placement count and its non-casting bits.
+    key: Vec<(usize, usize, Vec<u64>)>,
     /// Bumped on every rebuild, so bind groups over these buffers follow.
     generation: u64,
     instances: ClusterInstances,
@@ -454,6 +468,9 @@ struct Resources {
     queue_dispatch: Owned<wgpu::Buffer>,
     /// N-VSM1: the disk lookup's WGSL `VdFrame` (`DISK_FRAME_BYTES`).
     disk_frame: Owned<wgpu::Buffer>,
+    /// The Disk mark pass's receiver counters (WGSL `vsm_reach`), cleared on every page-work
+    /// frame and copied into `VirtualState::reach`.
+    reach: Owned<wgpu::Buffer>,
     /// The hardware raster's attachment, which only sizes its raster area.
     _area: Owned<wgpu::Texture>,
     area: Owned<wgpu::TextureView>,
@@ -505,14 +522,16 @@ struct Cache {
     light: Option<[u32; 3]>,
     /// The sun direction the map was rasterized for (N8e `sun_hysteresis`).
     toward: Option<glam::DVec3>,
-    finest: Option<i32>,
-    levels: usize,
+    /// Absolute level per ladder index (`ladder`).
+    ladder: Vec<i32>,
     /// Window minimum page per level, in absolute light-space page units.
     origins: [Option<[i64; 2]>; MAX_LEVELS],
     epochs: [u32; MAX_LEVELS],
     /// Grow-only caster height range along the light, which the depth encoding uses.
     heights: Option<[f64; 2]>,
     models: Vec<[u32; 16]>,
+    /// Per placement, whether it casts (`Instances::set_casts_shadows`).
+    casts: Vec<bool>,
     bounds: Vec<crate::shadow_plan::Bounds>,
     /// Skinned poses per placement (`skinning::placement_poses`).
     poses: Vec<crate::renderer::skinning::PlacementPose>,
@@ -529,6 +548,17 @@ pub(super) struct VirtualState {
     casters: Option<Casters>,
     retired_casters: Vec<(u64, Casters)>,
     levels: usize,
+    /// The Disk mark pass's receiver counters (`Resources::reach`), read back a frame or two
+    /// late (recorded while encoding, which borrows the renderer shared), tagged with the eye
+    /// and the view epoch of their frame.
+    reach: std::sync::Mutex<ReadbackRing<(glam::DVec3, u32)>>,
+    /// The nearest receiver's distance in the current view epoch and the eye it was measured
+    /// from (None after a cut until its own mark pass is read back).
+    seen: Option<(f64, glam::DVec3)>,
+    /// This frame's eye, for the counters' tag.
+    eye: glam::DVec3,
+    /// Camera cuts so far (`cut`): readbacks from an earlier view are ignored.
+    epoch: u32,
     /// Page requests depend only on the camera, the sun, the casters and the cache
     /// windows. A frame identical in all of them finds nothing stale, so it skips the
     /// request, compaction and raster passes and only runs the lookup.
@@ -581,6 +611,8 @@ const DISK_RADIUS: u32 = 3;
 /// WGSL `VdFrame`: the world-to-clip matrix, the image size, the 65 y-rank masks and the 64
 /// sample positions.
 const DISK_FRAME_BYTES: u64 = 80 + 33 * 16 + 32 * 16;
+/// `VdFrame::size.w` (after the 64-byte clip matrix and size.xyz).
+const DISK_HISTORY_OFFSET: u64 = 76;
 /// The disk lookup's 64 sample directions (tools/n-vsm1/pattern.py): sample s has the s-th
 /// smallest x in the disk, and this is its y rank. Both coordinates sit at the 64 quantiles of
 /// the disk's marginal distribution (`disk_quantile`). No sample lies outside the disk, and the
@@ -814,6 +846,44 @@ fn texture(binding: u32, v: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
     }
 }
 
+/// The clipmap's absolute levels, finest first (level k's texel is `finest_texel * 2^k`):
+/// every level from `finest` to `coarsest` while they fit in `MAX_LEVELS`; past that, the
+/// steps far out grow to 4x (then 8x), the coarsest end first, so the near levels keep the 2x
+/// ladder and the last level is still `coarsest`. A `coarsest` under `finest` gives `finest`.
+fn ladder(finest: i32, coarsest: i32) -> Vec<i32> {
+    let span = (coarsest - finest + 1).max(1) as usize;
+    let count = span.min(MAX_LEVELS);
+    let mut steps = vec![1; count - 1];
+    for k in 0..span - count {
+        let n = steps.len();
+        steps[n - 1 - k % n] += 1;
+    }
+    std::iter::once(finest)
+        .chain(steps.iter().scan(finest, |level, step| {
+            *level += step;
+            Some(*level)
+        }))
+        .collect()
+}
+
+/// Measurement only: `RENDERLAB_VSM_LADDER=old` keeps the ladder before the reach fix (from the
+/// nearest caster's level, at most `MAX_LEVELS` consecutive levels, cut short far out) for A/Bs
+/// in one binary.
+fn old_ladder() -> bool {
+    static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OLD.get_or_init(|| std::env::var("RENDERLAB_VSM_LADDER").is_ok_and(|v| v == "old"))
+}
+
+#[cfg(test)]
+#[test]
+fn ladder_skips_far_octaves_only_past_max_levels() {
+    assert_eq!(ladder(-1, 5), (-1..=5).collect::<Vec<_>>());
+    assert_eq!(ladder(0, 7), (0..=7).collect::<Vec<_>>());
+    assert_eq!(ladder(0, 12), [0, 1, 2, 4, 6, 8, 10, 12]);
+    assert_eq!(ladder(0, 20), [0, 2, 5, 8, 11, 14, 17, 20]);
+    assert_eq!(ladder(3, 1), [3]);
+}
+
 /// N8e rolling refresh: the block of trace tiles (a x b) that shares one lookup per frame.
 fn refresh_block(refresh: u32) -> [u32; 2] {
     match refresh {
@@ -863,6 +933,15 @@ fn addressed_triangles(mesh: &Mesh) -> u64 {
 }
 
 impl VirtualState {
+    /// After the frame's submission: maps the receiver counters it copied.
+    pub(super) fn submitted(&mut self) {
+        self.reach.get_mut().unwrap().submitted();
+    }
+    /// A camera cut: the nearest receiver seen so far belonged to the old view.
+    pub(super) fn cut(&mut self) {
+        self.epoch = self.epoch.wrapping_add(1);
+        self.seen = None;
+    }
     pub fn new(
         device: &PipelineDevice,
         ledger: &Ledger,
@@ -897,6 +976,17 @@ impl VirtualState {
                     sampled(8, uint, D::D2),
                     sampled(9, float, D::D2),
                     written(14),
+                    // The Disk mark pass: TR1's frame (its level dither) and its receiver counters.
+                    layout_entry(
+                        50,
+                        S::COMPUTE,
+                        wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new(DISK_FRAME_BYTES),
+                        },
+                    ),
+                    storage(52, false, S::COMPUTE),
                 ],
             ),
             compact: group(
@@ -1303,6 +1393,15 @@ impl VirtualState {
             casters: None,
             retired_casters: vec![],
             levels: 0,
+            reach: std::sync::Mutex::new(ReadbackRing::new(
+                device,
+                "N-VSM1 receiver counter readback",
+                REACH_BYTES,
+                3,
+            )),
+            seen: None,
+            eye: glam::DVec3::ZERO,
+            epoch: 0,
             key: vec![],
             page_work: true,
             history_frames: 0,
@@ -1518,7 +1617,8 @@ impl VirtualState {
             + u64::from(side) * u64::from(side) * 2
             + u64::from(size[0]) * u64::from(size[1]) * 4
             + slots * 12
-            + 16;
+            + 16
+            + REACH_BYTES;
         self.resources = Some(Resources {
             levels,
             pages,
@@ -1537,6 +1637,11 @@ impl VirtualState {
             queue: buffer("N8k hybrid queue", queue_bytes, B::STORAGE | B::COPY_SRC),
             queue_dispatch: buffer("N8k hybrid queue dispatch", 16, B::STORAGE | B::INDIRECT),
             disk_frame: buffer("N-VSM1 disk frame", DISK_FRAME_BYTES, B::UNIFORM),
+            reach: buffer(
+                "N-VSM1 receiver counters",
+                REACH_BYTES,
+                B::STORAGE | B::COPY_SRC,
+            ),
             _area: area,
             area: area_view,
             _level: level,
@@ -1594,11 +1699,11 @@ impl Renderer {
     /// Frames without TR1, Map and Hybrid keep one batch. P-RELIT: they also take TR1's
     /// restart zones, where a receiver evaluates the restart count instead.
     pub(super) fn prepare_virtual_sampling(&mut self) {
-        let Some((rays, restart_rays, zones)) = self
+        let Some((rays, restart_rays, zones, history)) = self
             .view
             .reconstruction_state
             .as_ref()
-            .map(|r| (r.plan.shadow_rays, r.plan.restart_rays, r.zones))
+            .map(|r| (r.plan.shadow_rays, r.plan.restart_rays, r.zones, r.plan.history_frames))
             .filter(|_| self.view.reconstruction_frame.is_some())
         else {
             return;
@@ -1606,6 +1711,15 @@ impl Renderer {
         let Some(state) = self.view.virtual_shadows.as_ref() else {
             return;
         };
+        // U-FIXED: `VdFrame::size.w`, TR1's frames of history; the Disk lookup's height-band
+        // dither waits for `VD_HBAND_AFTER` of them, so a cut's first frames show no stipple.
+        if state.settings.lookup == VirtualLookup::Disk
+            && let Some(r) = state.resources.as_ref()
+        {
+            self.queue
+                .write_buffer(&r.disk_frame, DISK_HISTORY_OFFSET, &(history as f32).to_ne_bytes());
+            self.uploads.shadows += 4;
+        }
         if !matches!(
             state.settings.lookup,
             VirtualLookup::Exact | VirtualLookup::Surface
@@ -1654,9 +1768,15 @@ impl Renderer {
 
     /// The draw list's caster clusters, rebuilt when its meshes or placement counts change.
     fn ensure_virtual_casters(&mut self, draws: &[PreparedDraw<'_>]) -> Result<(), Error> {
-        let key: Vec<(usize, usize)> = draws
+        let key: Vec<(usize, usize, Vec<u64>)> = draws
             .iter()
-            .map(|d| (Arc::as_ptr(&d.mesh.index) as usize, d.instances.len()))
+            .map(|d| {
+                (
+                    Arc::as_ptr(&d.mesh.index) as usize,
+                    d.instances.len(),
+                    d.instances.state.non_casting().to_vec(),
+                )
+            })
             .collect();
         let state = self.view.virtual_shadows.as_ref().unwrap();
         if state.casters.as_ref().is_some_and(|c| c.key == key) {
@@ -1738,6 +1858,18 @@ impl Renderer {
                 "SoftShadows::Virtual shadows lights[0], which must be directional",
             ));
         };
+        // The sun request's coverage end as a distance from the eye: its last split end (a
+        // camera-forward depth) at the image corners.
+        let coverage = match self.view.shadows.settings.requests.first() {
+            Some(crate::ShadowRequest::Directional { split_ends }) => {
+                split_ends.last().map(|&end| {
+                    let tan_y = (f64::from(camera.fov_y()) * 0.5).tan();
+                    let tan_x = tan_y * f64::from(size.width) / f64::from(size.height);
+                    f64::from(end) * (1.0 + tan_x * tan_x + tan_y * tan_y).sqrt()
+                })
+            }
+            _ => None,
+        };
         let primary = self.view.primary.as_ref().unwrap();
         if self.view.virtual_shadows.is_none() {
             let mut state = VirtualState::new(
@@ -1759,6 +1891,18 @@ impl Renderer {
             .map_or(0.0, |frame| (frame % 4096 + 1) as f32);
         let state = self.view.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
+        // The newest mark-pass counters mapped since the last frame (the ladder's finest level
+        // follows the nearest receiver when the nearest caster cannot place it).
+        if let Some(((at, epoch), words)) = state.reach.get_mut().unwrap().collect().pop() {
+            let word = |i: usize| u32::from_ne_bytes(words[i * 4..i * 4 + 4].try_into().unwrap());
+            state.stats.nearest_receiver = (word(0) != 0).then(|| f32::from_bits(!word(0)));
+            state.stats.receivers = word(1);
+            state.stats.unplaced_receivers = word(2);
+            state.stats.nearest_unplaced = (word(3) != 0).then(|| f32::from_bits(!word(3)));
+            if epoch == state.epoch {
+                state.seen = state.stats.nearest_receiver.map(|d| (f64::from(d), at));
+            }
+        }
         // N8n: the surface cache exists only while it is the lookup (wgpu keeps the table alive
         // for frames in flight).
         if s.lookup != VirtualLookup::Surface {
@@ -1823,10 +1967,13 @@ impl Renderer {
         // Placements in traced order: draw order, then instance slot.
         let mut models = vec![];
         let mut bounds = vec![];
+        let mut casts = vec![];
         for draw in draws {
-            for &model in &draw.instances.state.models {
+            let state = &draw.instances.state;
+            for (slot, &model) in state.models.iter().enumerate() {
                 models.push(model.to_cols_array().map(f32::to_bits));
                 bounds.push(shadow_gpu::world_bounds(draw.mesh.bounds, model)?);
+                casts.push(state.casts_shadows(slot));
             }
         }
         let placements = models.len();
@@ -1844,7 +1991,8 @@ impl Renderer {
         };
         let (mut zlo, mut zhi) = (f64::INFINITY, f64::NEG_INFINITY);
         let (mut near, mut far) = (f64::INFINITY, 0.0f64);
-        for b in &bounds {
+        // Only casters set the map's height range and the ladder's span.
+        for b in bounds.iter().zip(&casts).filter(|(_, c)| **c).map(|(b, _)| b) {
             for c in corners(b) {
                 let z = c.dot(l);
                 zlo = zlo.min(z);
@@ -1854,7 +2002,7 @@ impl Renderer {
             let nearest = eye.clamp(b.min.as_dvec3(), b.max.as_dvec3());
             near = near.min((nearest - eye).length());
         }
-        if bounds.is_empty() {
+        if !casts.contains(&true) {
             (zlo, zhi, near, far) = (0.0, 1.0, 1.0, 1.0);
         }
         let mut invalidated = [false; MAX_LEVELS];
@@ -1886,11 +2034,39 @@ impl Renderer {
                 - f64::from(s.texels_per_pixel_log2))
             .floor() as i32
         };
-        let finest = level_of(near.max(f64::from(camera.near())));
-        let levels = ((level_of(far) - finest + 2).clamp(1, MAX_LEVELS as i32)) as usize;
-        if cache.finest != Some(finest) || cache.levels != levels {
-            cache.finest = Some(finest);
-            cache.levels = levels;
+        // The ladder runs from the nearest caster's level to one past the farthest's. A span
+        // of more than MAX_LEVELS octaves (a caster at the lens, or the eye inside a caster's
+        // box, which puts `near` at the camera's near plane) instead stops at the sun request's
+        // coverage end and starts one level under the nearest receiver the mark pass saw, then
+        // skips octaves far out (`ladder`): the nearest receivers keep their texel, and the
+        // coarsest window still reaches the coverage end.
+        let mut finest = level_of(near.max(f64::from(camera.near())));
+        let mut coarsest = level_of(far) + 1;
+        if old_ladder() {
+            coarsest = coarsest.min(finest + MAX_LEVELS as i32 - 1);
+        } else if coarsest - finest + 1 > MAX_LEVELS as i32 {
+            if let Some(end) = coverage {
+                coarsest = coarsest.min(level_of(end) + 1);
+            }
+            // The nearest receiver last seen in this view, less the eye's travel since (a fast
+            // approach), one level under. Before one is seen (a cut, a first frame): the box
+            // level, raised so no step is over 4x. The ladder reaches the coverage end either
+            // way; the finest level only trades the near texel against the far steps.
+            let seen = state
+                .seen
+                .map(|(d, at)| (d - (eye - at).length()).max(f64::from(camera.near())));
+            finest = match seen {
+                Some(d) => finest.max(level_of(d) - 1),
+                None => finest.max(coarsest - 2 * (MAX_LEVELS as i32 - 1)),
+            }
+            .min(coarsest);
+        }
+        state.eye = eye;
+        let rungs = ladder(finest, coarsest);
+        let levels = rungs.len();
+        state.stats.skipped_levels = (coarsest - finest + 1).max(1) as u32 - levels as u32;
+        if cache.ladder != rungs {
+            cache.ladder = rungs.clone();
             invalidated = [true; MAX_LEVELS];
             ladder_changed = true;
         }
@@ -1925,7 +2101,9 @@ impl Renderer {
             // only a new pose deforms (per placement, in placement order, collected once:
             // P-NRT's O(placements^2) find).
             for (p, model) in models.iter().enumerate() {
+                // A changed casting flag is a caster appearing or leaving in place.
                 if *model != cache.models[p]
+                    || casts[p] != cache.casts[p]
                     || crate::renderer::skinning::deformed(&cache.poses, &poses, p)
                 {
                     let [a0, a1] = rect(&cache.bounds[p]);
@@ -1943,13 +2121,14 @@ impl Renderer {
             }
         }
         cache.models = models;
+        cache.casts = casts;
         cache.bounds = bounds;
         cache.poses = poses;
         let pages = i64::from(s.pages);
         let eye_light = glam::DVec2::new(eye.dot(u), eye.dot(v));
         let mut level_bytes = [0u8; MAX_LEVELS * 32];
-        for i in 0..levels {
-            let texel = f64::from(s.finest_texel) * 2f64.powi(finest + i as i32);
+        for (i, &rung) in rungs.iter().enumerate() {
+            let texel = f64::from(s.finest_texel) * 2f64.powi(rung);
             let page = texel * f64::from(PAGE);
             let centre = [eye_light.x, eye_light.y].map(|x| (x / page).floor() as i64);
             let keep = cache.origins[i].filter(|o| {
@@ -1975,15 +2154,10 @@ impl Renderer {
             {
                 entry[k * 4..k * 4 + 4].copy_from_slice(&value.to_ne_bytes());
             }
-            for (k, value) in [cache.epochs[i], (finest + i as i32) as u32, 0, 0]
-                .iter()
-                .enumerate()
-            {
+            for (k, value) in [cache.epochs[i], rung as u32, 0, 0].iter().enumerate() {
                 entry[16 + k * 4..20 + k * 4].copy_from_slice(&value.to_ne_bytes());
             }
         }
-        // Absolute level of index 0, which vsm_select reads from levels[0].info.y.
-        level_bytes[20..24].copy_from_slice(&finest.to_ne_bytes());
         let casters = state.casters.as_ref().unwrap();
         let primitive_bits = casters.primitive_bits;
         let cluster_count = casters.instances.count;
@@ -2285,14 +2459,13 @@ impl Renderer {
         state.levels = levels;
         state.stats = VirtualShadowStats {
             levels: levels as u32,
-            finest_level: finest,
+            finest_level: rungs[0],
             invalidated_levels: invalidated[..levels].iter().filter(|&&b| b).count() as u32,
             moved_rects: rects.len() as u32,
             clusters: cluster_count,
-            bytes: state.stats.bytes,
             page_work: true,
-            occluder_gather_ready: state.stats.occluder_gather_ready,
             occluder_gather_frame: false,
+            ..state.stats
         };
         let created = state.ensure_resources(
             &self.device,
@@ -2460,10 +2633,9 @@ impl Renderer {
         key.extend([
             u64::from(size.width),
             u64::from(size.height),
-            finest as u64,
-            levels as u64,
             casters.generation,
         ]);
+        key.extend(rungs.iter().map(|&rung| rung as u64));
         key.extend(light_bits.map(u64::from));
         // The disk sets the march radius, so page requests depend on it too.
         key.push(slope.to_bits());
@@ -2630,6 +2802,8 @@ impl Renderer {
                         texture(8, &tiles),
                         texture(9, &fresh.world.view),
                         texture(14, &r.level_view),
+                        buffer(50, &r.disk_frame),
+                        buffer(52, &r.reach),
                     ],
                 ),
                 compact: group(
@@ -3050,6 +3224,7 @@ impl Renderer {
             .virtual_geometry()
             .unwrap();
         encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
+        encoder.clear_buffer(&r.reach, 0, None);
         encoder.clear_buffer(&r.render, 0, Some(slots * 4));
         encoder.clear_buffer(&casters.work, 0, Some(MAX_LEVELS as u64 * ARGS_BYTES));
         encoder.clear_buffer(&r.cull_args, 0, None);
@@ -3083,6 +3258,14 @@ impl Renderer {
             pass.dispatch_workgroups_indirect(&r.cull_args, 0);
             pass.set_pipeline(&p.finish);
             pass.dispatch_workgroups(1, 1, 1);
+        }
+        if state.settings.lookup == VirtualLookup::Disk {
+            let tag = (state.eye, state.epoch);
+            state
+                .reach
+                .lock()
+                .unwrap()
+                .record(encoder, &r.reach, 0, tag);
         }
         mark(encoder, "sun_shadow.raster");
         for layer in 0..2 {

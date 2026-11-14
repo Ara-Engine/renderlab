@@ -77,6 +77,20 @@ pub(crate) struct TextureInner {
     pub renderer: Arc<()>,
     pub role: TextureRole,
     pub storage: TextureStorage,
+    /// The block format of a compressed upload (`Renderer::try_upload_compressed_texture`);
+    /// None for texel uploads. BC5 normal maps hold X and Y only.
+    pub block: Option<renderlab_asset::BlockFormat>,
+}
+impl TextureInner {
+    /// Whether this is a BC5 normal map with its variance layer (layer 1): uploaded while a
+    /// program read normal variance, or given it since (`Renderer::ensure_variance_layers`).
+    pub(crate) fn variance_layer(&self) -> bool {
+        self.block == Some(renderlab_asset::BlockFormat::Bc5)
+            && match &self.storage {
+                TextureStorage::Full(full) => full.layers == 2 || full.variance.get().is_some(),
+                TextureStorage::Streamed(_) => false,
+            }
+    }
 }
 pub(crate) enum TextureStorage {
     /// Every level, immutable after upload.
@@ -86,6 +100,17 @@ pub(crate) enum TextureStorage {
     Streamed(u64),
 }
 pub(crate) struct FullTexture {
+    pub _texture: Owned<wgpu::Texture>,
+    pub view: Owned<wgpu::TextureView>,
+    pub _allocation: Allocation,
+    /// Array layers as uploaded: 2 for a BC5 normal map with its variance layer.
+    pub layers: u32,
+    /// A one-layer BC5 normal map's two-layer replacement, made once a program reads normal
+    /// variance (`Renderer::ensure_variance_layers`); new bindings use it.
+    pub variance: std::sync::OnceLock<VarianceTexture>,
+}
+/// `FullTexture::variance`: the same levels plus the variance layer.
+pub(crate) struct VarianceTexture {
     pub _texture: Owned<wgpu::Texture>,
     pub view: Owned<wgpu::TextureView>,
     pub _allocation: Allocation,
@@ -212,12 +237,24 @@ impl MaterialDescriptor<'_> {
         bytes[24..28].copy_from_slice(&u32::from(self.double_sided).to_ne_bytes());
         bytes[28..32].copy_from_slice(&u32::from(self.thin).to_ne_bytes());
         bytes[32..36].copy_from_slice(&self.normal_scale.to_ne_bytes());
-        bytes[36..40].copy_from_slice(&u32::from(self.normal_texture.is_some()).to_ne_bytes());
+        // 1: a normal map; 2: a BC5 one, whose Z the shading programs rebuild
+        // (program_api.wgsl rl_normal_texel).
+        let normal_mapped = self.normal_texture.map_or(0u32, |t| {
+            if t.texture.0.block == Some(renderlab_asset::BlockFormat::Bc5) {
+                2
+            } else {
+                1
+            }
+        });
+        bytes[36..40].copy_from_slice(&normal_mapped.to_ne_bytes());
         let variance = self
             .normal_texture
             .map_or(0u32, |t| match t.texture.0.role {
                 TextureRole::NormalVarianceLinear => 1,
                 TextureRole::NormalSlopeMoments => 2,
+                // BC5 maps carry their variance in layer 1 (rl_normal_texel's alpha), once
+                // they have it (`TextureInner::variance_layer`).
+                _ if t.texture.0.variance_layer() => 1,
                 _ => 0,
             });
         bytes[40..44].copy_from_slice(&variance.to_ne_bytes());

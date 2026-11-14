@@ -24,7 +24,7 @@ fn linear(byte: u8) -> f32 {
 
 /// A floor facing the camera from `distance`, its uv running 0 to `repeats` across it,
 /// under a sun and a uniform sky. Returns the HDR as RGB triples.
-fn floor(
+pub(super) fn floor(
     gpu: &mut GpuDevice,
     cache: &ShaderCache,
     primary: Primary,
@@ -39,7 +39,7 @@ fn floor(
 }
 /// [`floor`] as the next frame of `sequence`, or on its own.
 #[allow(clippy::too_many_arguments)]
-fn floor_in(
+pub(super) fn floor_in(
     gpu: &mut GpuDevice,
     cache: &ShaderCache,
     sequence: Option<&mut Frames>,
@@ -114,6 +114,7 @@ fn floor_in(
         programs: None,
         sky_map: None,
         skins: None,
+        casts: None,
         colour_lut: None,
         ids: None,
     };
@@ -135,7 +136,11 @@ fn floor_in(
 }
 
 /// The largest relative difference between two frames over the pixels `inside` keeps.
-fn apart(a: &[[f32; 3]], b: &[[f32; 3]], inside: impl Fn(u32, u32) -> bool) -> (f32, usize) {
+pub(super) fn apart(
+    a: &[[f32; 3]],
+    b: &[[f32; 3]],
+    inside: impl Fn(u32, u32) -> bool,
+) -> (f32, usize) {
     let (mut worst, mut pixels) = (0f32, 0);
     for y in 0..SIZE[1] {
         for x in 0..SIZE[0] {
@@ -197,12 +202,12 @@ fn a_textured_floor_is_quadrant_by_quadrant_the_untextured_floor_of_that_texel()
     };
     let textures = ObjectTextures {
         base_color: Some(ObjectTexture {
-            data: &base,
+            data: (&base).into(),
             sampler: nearest,
             key: None,
         }),
         metallic_roughness: Some(ObjectTexture {
-            data: &surface,
+            data: (&surface).into(),
             sampler: nearest,
             key: None,
         }),
@@ -290,7 +295,7 @@ fn a_mip_chain_shows_the_level_the_pixel_footprint_selects() -> Result<()> {
     };
     let textures = ObjectTextures {
         base_color: Some(ObjectTexture {
-            data: &chain,
+            data: (&chain).into(),
             sampler: Sampler {
                 wrap_u: Wrap::Repeat,
                 wrap_v: Wrap::Repeat,
@@ -412,12 +417,12 @@ fn named_textures_stay_on_the_gpu_and_draw_what_they_name() -> Result<()> {
         )
     };
     for (index, kept) in [true, true, true, false, true].into_iter().enumerate() {
-        let a = frame(&mut named, kept.then(|| slot(&base, Some(7))))?;
-        let b = frame(&mut unnamed, kept.then(|| slot(&base, None)))?;
+        let a = frame(&mut named, kept.then(|| slot((&base).into(), Some(7))))?;
+        let b = frame(&mut unnamed, kept.then(|| slot((&base).into(), None)))?;
         ensure!(a == b, "frame {index}: the named texture drew other bytes");
     }
     ensure!(
-        frame(&mut named, Some(slot(&other, Some(7)))).is_err(),
+        frame(&mut named, Some(slot((&other).into(), Some(7)))).is_err(),
         "an identity naming another texture was accepted"
     );
     named.retire(&mut gpu)?;

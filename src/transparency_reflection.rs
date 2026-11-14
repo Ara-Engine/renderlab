@@ -8,9 +8,17 @@ pub(in crate::renderer) struct GlassReflections {
     pub geometric: Depth,
     pub radiance: Depth,
     pub program_slots: Owned<wgpu::Buffer>,
-    pub layout: Owned<wgpu::BindGroupLayout>,
-    pub pipeline: Owned<wgpu::ComputePipeline>,
+    pub layout: Arc<Owned<wgpu::BindGroupLayout>>,
+    pub pipeline: Arc<Owned<wgpu::ComputePipeline>>,
     pub key: [u8; 32],
+}
+/// Pipeline state is independent of a view's lobe target size.
+#[derive(Clone)]
+pub(super) struct ReflectionPipeline {
+    pub program: u64,
+    pub key: [u8; 32],
+    layout: Arc<Owned<wgpu::BindGroupLayout>>,
+    pipeline: Arc<Owned<wgpu::ComputePipeline>>,
 }
 // P-SHC: the glass hit shader depends on the first opaque program. Compile that
 // dependent pipeline in the same reload transaction, retaining its existing targets.
@@ -32,7 +40,8 @@ pub(super) fn key(head: &[u8; 32], program: &[u8; 32], parameters: bool) -> [u8;
 /// (`transparent_reflection_head`), with the glass lobe read from the lobe pass's targets
 /// instead of a camera hit. The wgpu renderer and the ara-gpu backend both compile it.
 pub(crate) fn source(head: &str, program: &str, parameters: bool) -> String {
-    let program = crate::program::glass_hit_program(program);
+    let deferred = crate::program::rl_deferred_for(head);
+    let program = crate::program::glass_hit_program(program, deferred);
     let mut s = crate::program::compose(head, &program, crate::program::Stage::Traced, parameters)
         .source
         .replace("\r\n", "\n");
@@ -87,7 +96,7 @@ impl Renderer {
         self.view
             .transparency_reflections
             .as_ref()
-            .map(|r| &*r.pipeline)
+            .map(|r| &**r.pipeline)
     }
 
     pub(crate) fn tp_reload_recipe(
@@ -122,9 +131,9 @@ impl Renderer {
             .view
             .transparency_reflections
             .as_mut()
-            .filter(|r| *r.pipeline == *previous)
+            .filter(|r| **r.pipeline == *previous)
         {
-            reflections.pipeline = pipeline;
+            reflections.pipeline = Arc::new(pipeline);
             reflections.key = key;
         }
     }
@@ -138,8 +147,6 @@ impl Renderer {
         }
         let primary = self.view.primary.as_ref().unwrap();
         let program = self.program_slot(primary.program);
-        let head = primary_ray_gpu::transparent_reflection_head(&self.source)?;
-        let source = source(&head, &program.source, program.layout.is_some());
         let key = key(&self.source_digest, &program.digest, program.layout.is_some());
         let program_slots = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -178,6 +185,27 @@ impl Renderer {
             wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
             8,
         );
+        let prepared = match self.transparency.reflection_pipelines.iter().find(|p| p.key == key) {
+            Some(prepared) => prepared.clone(),
+            None => self.tp_reflection_pipeline(primary.program)?,
+        };
+        Ok(GlassReflections {
+            position,
+            normal,
+            geometric,
+            radiance,
+            program_slots,
+            layout: prepared.layout,
+            pipeline: prepared.pipeline,
+            key,
+        })
+    }
+    pub(super) fn tp_reflection_pipeline(&self, program_id: u64) -> Result<ReflectionPipeline, Error> {
+        let primary = self.view.primary.as_ref().unwrap();
+        let program = self.program_slot(program_id);
+        let head = primary_ray_gpu::transparent_reflection_head(&self.source)?;
+        let source = source(&head, &program.source, program.layout.is_some());
+        let key = key(&self.source_digest, &program.digest, program.layout.is_some());
         let layout = self.tp_layout(
             "TP2 glass reflection",
             &[
@@ -189,7 +217,7 @@ impl Renderer {
                         vertex_return: false,
                     },
                 ),
-                entry(10, COMPUTE, uniform(false, primary.frame_buffer().size())),
+                entry(10, COMPUTE, uniform(false, primary_ray_gpu::FRAME_BYTES as u64)),
                 entry(
                     18,
                     COMPUTE,
@@ -233,15 +261,10 @@ impl Renderer {
             &module,
             "tp_reflect",
         );
-        Ok(GlassReflections {
-            position,
-            normal,
-            geometric,
-            radiance,
-            program_slots,
-            layout,
-            pipeline,
-            key,
+        Ok(ReflectionPipeline {
+            program: program_id, key,
+            layout: Arc::new(layout), pipeline: Arc::new(pipeline),
         })
     }
+
 }

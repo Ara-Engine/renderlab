@@ -17,6 +17,8 @@ pub(super) mod film_accumulation;
 use film_accumulation::{FilmLayouts, FilmState};
 #[path = "shadow_visibility_filter.rs"]
 mod shadow_visibility_filter;
+#[path = "sun_vis_pass.rs"]
+pub(super) mod sun_vis_pass;
 #[path = "temporal_reconstruction.rs"]
 pub(crate) mod temporal_reconstruction;
 // MP1: per-program deferred shading of mixed-program frames.
@@ -25,10 +27,23 @@ pub(crate) mod program_lists;
 // U-RTVIS: the reflection pass's rl_trace (docs/design-reflection-pass.md).
 #[path = "reflection_pass.rs"]
 pub(crate) mod reflection_pass;
+#[path = "reflection_geometry_dump.rs"]
+mod reflection_geometry_dump;
+#[path = "gi_receiver_pass.rs"]
+pub(crate) mod gi_receiver_pass;
 // The Mac thread's reflection_hits after rl_trace (docs/design-reflection-pass.md).
 #[path = "reflection_hits_gpu.rs"]
 mod reflection_hits_gpu;
+#[path = "light_vis_pass.rs"]
+pub(crate) mod light_vis_pass;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
+// Lean shading's background-compiled pipelines (program::lean_variant).
+#[path = "lean_gpu.rs"]
+mod lean_gpu;
+#[path = "material_receiver_gpu.rs"]
+pub(super) mod material_receiver_gpu;
+#[path = "material_pass_gpu.rs"]
+pub(super) mod material_pass_gpu;
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
 /// `scene_pixels` rectangle, the sampling words, the reflection bands
@@ -130,6 +145,14 @@ pub(crate) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
         format!("{hard}\n{trace}"),
         format!("{soft}\n{trace}\n{queue}\n{interactive}"),
     ])
+}
+
+/// Native producer edits are separate from the raw modules consumed by the port.
+pub(super) fn wgpu_shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
+    let [hard, soft] = shader_sources(wgsl)?;
+    let mode = crate::material_mode::Mode::current();
+    let probe = material_receiver_gpu::normal_probe();
+    Ok([material_receiver_gpu::trace(hard, mode, probe)?, material_receiver_gpu::trace(soft, mode, probe)?])
 }
 
 /// The check pipeline shares the actual geometry arithmetic, including test rays,
@@ -409,6 +432,9 @@ impl super::view::ViewState {
         if let Some(state) = &mut self.reconstruction_state {
             state.plan.cut = true;
         }
+        if let Some(state) = &mut self.virtual_shadows {
+            state.cut();
+        }
     }
 }
 impl Renderer {
@@ -506,6 +532,8 @@ impl Renderer {
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
+                    slot.pipelines.lean = Default::default();
+                    slot.pipelines.material = Default::default();
                 }
                 self.primary_sources = None;
                 let submissions = self.submissions;
@@ -533,11 +561,23 @@ impl Renderer {
                 let state = self.view.primary.as_ref().ok_or(Error::InvalidInput(
                     "traced primary visibility requires a hardware-shadow renderer at 1x with TRACED_FEATURES and traced_limits",
                 ))?;
-                let (sources, heads) = if self.hardware_shadows.is_some() {
-                    (shader_sources(&self.source)?, shading_heads(&self.source)?)
+                let (sources, mut heads) = if self.hardware_shadows.is_some() {
+                    (wgpu_shader_sources(&self.source)?, shading_heads(&self.source)?)
                 } else {
                     non_rt_sources(&self.source)?
                 };
+                // U-RTVIS: this renderer's default reflection pass, carried by its own heads (unset
+                // and forced-off renderers keep main's text).
+                if reflection_pass::default_on(&self.device)
+                    && crate::program::rl_pass_env() != Some(false)
+                {
+                    for head in &mut heads {
+                        head.push_str(crate::program::PASS_HEAD_MARK);
+                    }
+                }
+                for head in &mut heads {
+                    gi_receiver_pass::default_head(head, &self.device);
+                }
                 let scopes = OperationScopes::new(&self.device);
                 let pipelines = state.compile(&self.device, &self.ledger, &sources);
                 if let Some(error) = scopes.finish() {
@@ -558,6 +598,8 @@ impl Renderer {
                     slot.pipelines.temporal = None;
                     slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
+                    slot.pipelines.lean = Default::default();
+                    slot.pipelines.material = Default::default();
                 }
                 self.pipeline.primary = Some(pipelines);
                 self.primary_sources = Some((sources, heads));
@@ -654,6 +696,105 @@ const TRACE_SCENE: u32 = 19;
 /// (`program::SOFTWARE_REFLECTION_GEOMETRY`).
 const SOFTWARE_REFLECTIONS: u32 = 36;
 /// The shared TLAS: binding 2 for shadow rays, `TRACE_SCENE` for camera rays.
+/// What the primary shading layout depends on beyond its visibility input: the reflection pass,
+/// the software reflection geometry (non-RT), the deferred composite and its diagnostic output.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct ShadeSwitches {
+    pub pass: bool,
+    pub software: bool,
+    pub deferred: bool,
+    pub diag: bool,
+    /// The GI receiver pass's prepared SH (gi_receiver_pass.rs, RENDERLAB_GI_PASS).
+    pub gi: bool,
+    pub lvis: bool,
+    /// Sampled material record; writers use their separate storage layout.
+    pub material: bool,
+}
+impl ShadeSwitches {
+    fn of(device: &wgpu::Device) -> Self {
+        ShadeSwitches {
+            pass: reflection_pass::on(device),
+            software: !device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
+            deferred: reflection_pass::deferred(device),
+            diag: crate::program::rl_deferred_diag(),
+            gi: gi_receiver_pass::enabled(device),
+            lvis: light_vis_pass::on(),
+            material: crate::material_mode::Mode::full(),
+        }
+    }
+}
+/// The primary shading layout's entries for a `visibility` input (binding 2's TLAS for the hard
+/// head, 6's visibility texture for the soft one) under `switches`. Pure, so tests check every
+/// combination for clashing bindings without a device.
+pub(super) fn shade_layout_entries(
+    visibility: wgpu::BindGroupLayoutEntry,
+    switches: ShadeSwitches,
+) -> Vec<wgpu::BindGroupLayoutEntry> {
+    use wgpu::TextureFormat as F;
+    let uint = wgpu::TextureSampleType::Uint;
+    let mut entries = vec![
+        uniform(0, 80),
+        texture(7, uint),
+        uniform(10, FRAME_BYTES as u64),
+        image(18, F::Rgba16Float),
+        texture(21, uint),
+        read(22, 16),
+        visibility,
+    ];
+    if visibility.binding == 2 {
+        entries.push(texture(
+            23,
+            wgpu::TextureSampleType::Float { filterable: false },
+        ));
+    } else {
+        // M7-R1: Soft shading traces reflection rays on the shared TLAS.
+        entries.push(scene(2));
+    }
+    if switches.gi {
+        entries.push(gi_receiver_pass::entry());
+    }
+    if switches.lvis {
+        entries.push(light_vis_pass::layout_entry());
+    }
+    // U-RTVIS: the reflection history (program::with_reflection_history).
+    entries.push(uniform(
+        RL_HISTORY_FRAME,
+        temporal_reconstruction::RL_HISTORY_BYTES as u64,
+    ));
+    entries.push(entry(
+        RL_HISTORY,
+        wgpu::BindingType::StorageTexture {
+            access: wgpu::StorageTextureAccess::ReadWrite,
+            format: F::R32Uint,
+            view_dimension: wgpu::TextureViewDimension::D2Array,
+        },
+    ));
+    // U-RTVIS: the reflection resolve's shading phase (reflections_history.wgsl).
+    entries.push(uniform(RL_PHASE, 16));
+    // U-RTVIS: the reflection pass's lobe output (reflection_pass.rs).
+    if switches.pass {
+        entries.extend(reflection_pass::shade_entries());
+        // The Mac thread's reflection_hits: H and R (reflection_hits_gpu.rs).
+        entries.extend(super::reflection_hits::shade_entries());
+    }
+    // M7-R1n: non-RT shading traces them in software (reflection_software.rs), read
+    // as vec4 words (P-NRT), so a binding holds at least one.
+    if switches.software {
+        entries.push(read(SOFTWARE_REFLECTIONS, 16));
+    }
+    // Deferred reflections' outputs (`Targets::deferred`).
+    if switches.deferred {
+        entries.push(image(62, F::Rgba16Float));
+        // The untraced output only for identity tests (RENDERLAB_RL_DEFERRED=diag).
+        if switches.diag {
+            entries.push(image(63, F::Rgba16Float));
+        }
+    }
+    if switches.material {
+        entries.extend(material_pass_gpu::entries(false));
+    }
+    entries
+}
 fn scene(binding: u32) -> wgpu::BindGroupLayoutEntry {
     entry(
         binding,
@@ -724,10 +865,13 @@ pub(super) struct ResidencyGpu {
     pub ids: Vec<Option<u64>>,
 }
 pub(super) struct Targets {
+    light_vis: Option<Buffer>,
     /// Placement + 1 (zero is a miss), primitive, f32 barycentrics. Traced frames write
     /// them, with their receivers or Interactive counts, only in tiles whose `tiles`
     /// flag is set.
     pub hit: Depth,
+    /// Material record textures, retained and retired with the hit image.
+    pub material: Option<Depth>,
     /// Exact hard-receiver epsilon, computed from the returned hit vertices.
     pub epsilon: Depth,
     /// One flag per `TRACE_TILE` pixels: nonzero when a camera ray in the tile hit.
@@ -742,13 +886,15 @@ pub(super) struct Targets {
     /// reconstruction's parity) and its frame record; traced primaries only.
     pub held: Option<HeldTargets>,
     /// Deferred reflections (`program::deferred_variant`, `RENDERLAB_RL_DEFERRED=1`): each
-    /// glossy pixel's reflectance with its traced fraction, and its untraced specular,
-    /// written by shading at bindings 62 and 63 for the composite after it.
-    pub deferred: Option<[Depth; 2]>,
+    /// glossy pixel's reflectance with its traced fraction (binding 62, which the composite
+    /// after shading reads), and with `RENDERLAB_RL_DEFERRED=diag` its untraced specular
+    /// (binding 63, for identity tests only).
+    pub deferred: Option<(Depth, Option<Depth>)>,
     /// U-RTVIS: the reflection history (shaders/reflections_history.wgsl), both paths.
     pub rl_history: RlHistoryTargets,
     /// U-RTVIS: the reflection pass's L, H, R and D while RENDERLAB_RL_PASS=1.
     pub rl_pass: Option<reflection_pass::PassTargets>,
+    pub gi_receiver: Option<gi_receiver_pass::Targets>,
 }
 /// Per pixel two halves of four r32uint layers, and the frame record (written by
 /// `prepare_reconstruction`; zero, so never read, without reconstruction).
@@ -774,11 +920,14 @@ pub(super) struct HeldTargets {
 /// Group-0 bindings for one hit/HDR/fresh/TLAS combination.
 struct Bindings {
     /// Hit records, HDR, fresh targets, TLAS and list-buffer generations, then M7-R1n's
-    /// software reflection geometry generation.
+    /// software reflection geometry generation, then U-RTVIS's composite room (its growth
+    /// rebuilds the groups that hold R, H and the glossy-pixel list without restarting TR1,
+    /// whose restart key reads only the first three).
     key: (
         wgpu::Texture,
         wgpu::Texture,
         Option<wgpu::Texture>,
+        u64,
         u64,
         u64,
         u64,
@@ -797,6 +946,7 @@ struct Bindings {
     /// P-RTS: penumbra list and trace.
     penumbra: Option<[Owned<wgpu::BindGroup>; 2]>,
     shade: [Option<Owned<wgpu::BindGroup>>; 2],
+    material_write: [[Option<Owned<wgpu::BindGroup>>; 2]; 2],
     /// MP1: `shade` plus the program list bindings, while list buffers exist.
     list: [Option<Owned<wgpu::BindGroup>>; 2],
     /// U-RTVIS: rl_trace's group 0 while RENDERLAB_RL_PASS=1.
@@ -868,6 +1018,7 @@ pub(crate) enum Shading {
 }
 
 pub(super) struct PrimaryState {
+    light_vis: [Option<light_vis_pass::Pipeline>; 2],
     #[cfg(test)]
     pub test_split_interactive_timestamps: bool,
     #[cfg(test)]
@@ -877,6 +1028,7 @@ pub(super) struct PrimaryState {
     pub test_film_materialize: bool,
     trace_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     shade_bindings: [Owned<wgpu::BindGroupLayout>; 2],
+    material_layouts: Option<material_pass_gpu::Layouts>,
     /// U-RTVIS: rl_trace's layouts while RENDERLAB_RL_PASS=1, and its kernels per `Shading`.
     rl_trace: Option<reflection_pass::TraceAbi>,
     rl_pipelines: [Option<reflection_pass::TracePipelines>; 2],
@@ -951,6 +1103,8 @@ pub(super) struct PrimaryState {
     /// This frame streams textures: it shades with the program's streamed pipelines,
     /// whose helpers record residency requests, and binds the residency state.
     pub requests: bool,
+    /// The lean pipeline compiling in the background and those that failed (lean_gpu.rs).
+    lean: lean_gpu::LeanState,
     retired: Vec<(u64, Retired)>,
 }
 
@@ -1045,6 +1199,11 @@ impl PrimaryState {
                 ResourceKind::BindGroupLayout,
             )
         };
+        let producer_group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
+            let mut entries = entries.to_vec();
+            if crate::material_mode::Mode::tail() { entries.extend(material_pass_gpu::entries(true)); }
+            group(label, &entries)
+        };
         let frame = uniform(10, FRAME_BYTES as u64);
         let camera = uniform(0, 80);
         let trace = [
@@ -1059,9 +1218,9 @@ impl PrimaryState {
                 image(20, F::R32Uint),
             ];
             entries.extend_from_slice(extra);
-            group("primary trace", &entries)
+            producer_group("primary trace", &entries)
         });
-        let interactive_entries = [
+        let mut interactive_entries = vec![
             scene(TRACE_SCENE),
             scene(2),
             frame,
@@ -1079,6 +1238,7 @@ impl PrimaryState {
                 16,
             ),
         ];
+        if crate::material_mode::Mode::tail() { interactive_entries.extend(material_pass_gpu::entries(true)); }
         let interactive_bindings = group(
             "primary Interactive trace and visibility",
             &interactive_entries,
@@ -1112,7 +1272,7 @@ impl PrimaryState {
                 image(52, F::R32Uint),
             ],
         );
-        let repair_bindings = group(
+        let repair_bindings = producer_group(
             "primary deferred edge repair",
             &[
                 scene(TRACE_SCENE),
@@ -1165,60 +1325,15 @@ impl PrimaryState {
                 ),
             ],
         );
-        let shade_entries = [scene(2), texture(6, uint)].map(|visibility| {
-            let mut entries = vec![
-                camera,
-                texture(7, uint),
-                frame,
-                image(18, F::Rgba16Float),
-                texture(21, uint),
-                read(22, 16),
+        let switches = ShadeSwitches::of(device);
+        let material_write_entries = [scene(2), texture(6, uint)].map(|visibility| {
+            shade_layout_entries(
                 visibility,
-            ];
-            if visibility.binding == 2 {
-                entries.push(texture(
-                    23,
-                    wgpu::TextureSampleType::Float { filterable: false },
-                ));
-            } else {
-                // M7-R1: Soft shading traces reflection rays on the shared TLAS.
-                entries.push(scene(2));
-            }
-            // U-RTVIS: the reflection history (program::with_reflection_history).
-            entries.push(uniform(
-                RL_HISTORY_FRAME,
-                temporal_reconstruction::RL_HISTORY_BYTES as u64,
-            ));
-            entries.push(entry(
-                RL_HISTORY,
-                wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::ReadWrite,
-                    format: F::R32Uint,
-                    view_dimension: wgpu::TextureViewDimension::D2Array,
-                },
-            ));
-            // U-RTVIS: the reflection resolve's shading phase (reflections_history.wgsl).
-            entries.push(uniform(RL_PHASE, 16));
-            // U-RTVIS: the reflection pass's lobe output (reflection_pass.rs).
-            if reflection_pass::on() {
-                entries.extend(reflection_pass::shade_entries());
-                // The Mac thread's reflection_hits: H and R (reflection_hits_gpu.rs).
-                entries.extend(super::reflection_hits::shade_entries());
-            }
-            // M7-R1n: non-RT shading traces them in software (reflection_software.rs), read
-            // as vec4 words (P-NRT), so a binding holds at least one.
-            if !device
-                .features()
-                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
-            {
-                entries.push(read(SOFTWARE_REFLECTIONS, 16));
-            }
-            // Deferred reflections' outputs (`Targets::deferred`).
-            if crate::program::rl_deferred() {
-                entries.extend([image(62, F::Rgba16Float), image(63, F::Rgba16Float)]);
-            }
-            entries
+                ShadeSwitches { material: false, ..switches },
+            )
         });
+        let shade_entries = [scene(2), texture(6, uint)]
+            .map(|visibility| shade_layout_entries(visibility, switches));
         let shade_bindings = shade_entries
             .each_ref()
             .map(|e| group("primary shading", e));
@@ -1299,6 +1414,7 @@ impl PrimaryState {
             )
         };
         Self {
+            material_layouts: crate::material_mode::Mode::full().then(|| material_pass_gpu::Layouts::new(device, ledger, &material_write_entries, &array_bindings, [&material_bindings, &streamed_bindings], lighting)),
             #[cfg(test)]
             test_split_interactive_timestamps: false,
             #[cfg(test)]
@@ -1413,8 +1529,9 @@ impl PrimaryState {
             fresh_bindings,
             trace_bindings: trace,
             shade_bindings,
-            rl_trace: reflection_pass::on()
+            rl_trace: reflection_pass::on(device)
                 .then(|| reflection_pass::TraceAbi::new(device, ledger, &array_bindings, lighting)),
+            light_vis: [None, None],
             rl_pipelines: [None, None],
             rl_resolve: crate::program::rl_resolve_pass_on()
                 .then(|| reflection_pass::ResolveKit::new(device, ledger)),
@@ -1427,6 +1544,7 @@ impl PrimaryState {
             absent: None,
             program: 0,
             programs: vec![],
+            lean: Default::default(),
             lists: None,
             bins: None,
             targets: None,
@@ -1456,7 +1574,9 @@ impl PrimaryState {
             test_film_materialize: self.test_film_materialize,
             trace_bindings: self.trace_bindings.clone(),
             shade_bindings: self.shade_bindings.clone(),
+            material_layouts: self.material_layouts.clone(),
             rl_trace: self.rl_trace.clone(),
+            light_vis: self.light_vis.clone(),
             rl_pipelines: self.rl_pipelines.clone(),
             rl_resolve: self.rl_resolve.clone(),
             fresh_bindings: self.fresh_bindings.clone(),
@@ -1492,6 +1612,7 @@ impl PrimaryState {
             absent: None,
             program: 0,
             programs: vec![],
+            lean: Default::default(),
             lists: None,
             targets: None,
             geometry: None,
@@ -2280,12 +2401,19 @@ impl Renderer {
                     }),
                     ResourceKind::Texture,
                 );
+                // A layered target (the material record) is viewed as a 2D array explicitly,
+                // as its layouts declare it, rather than by wgpu's default for layers.
                 let view = self.ledger.own(
-                    texture.create_view(&Default::default()),
+                    texture.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: (size.depth_or_array_layers > 1)
+                            .then_some(wgpu::TextureViewDimension::D2Array),
+                        ..Default::default()
+                    }),
                     ResourceKind::TextureView,
                 );
                 let bytes = u64::from(size.width)
                     * u64::from(size.height)
+                    * u64::from(size.depth_or_array_layers)
                     * u64::from(format.block_copy_size(None).unwrap());
                 Depth {
                     texture,
@@ -2398,6 +2526,14 @@ impl Renderer {
                 }
             };
             let next = Targets {
+                // One array: the receiver's layers (words 1 and 2), then word 0.
+                material: crate::material_mode::Mode::current().layers().map(|layers| target("material record", wgpu::Extent3d { depth_or_array_layers: layers, ..size }, wgpu::TextureFormat::Rgba32Uint)),
+                light_vis: light_vis_pass::on().then(|| Buffer::new(
+                    self, "local light visibility",
+                    (u64::from(size.width) * u64::from(size.height) * light_vis_pass::PIXEL_BYTES)
+                        .min(u64::from(self.device.limits().max_storage_buffer_binding_size)),
+                    wgpu::BufferUsages::STORAGE,
+                )),
                 repairs,
                 repair_args,
                 retries,
@@ -2405,7 +2541,10 @@ impl Renderer {
                 defer_edges,
                 held,
                 rl_history,
-                rl_pass: reflection_pass::on().then(|| self.rl_pass_targets(size)),
+                rl_pass: reflection_pass::on(&self.device)
+                    .then(|| self.rl_pass_targets(size)),
+                gi_receiver: gi_receiver_pass::enabled(&self.device)
+                    .then(|| self.gi_receiver_targets(size)),
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
                     "primary hard receiver epsilon",
@@ -2413,9 +2552,13 @@ impl Renderer {
                     wgpu::TextureFormat::R32Float,
                 ),
                 tiles: target("primary tile coverage", tiles, wgpu::TextureFormat::R32Uint),
-                deferred: crate::program::rl_deferred().then(|| {
-                    ["deferred reflectance", "deferred untraced specular"]
-                        .map(|label| target(label, size, wgpu::TextureFormat::Rgba16Float))
+                deferred: reflection_pass::deferred(&self.device).then(|| {
+                    let deferred = |label| target(label, size, wgpu::TextureFormat::Rgba16Float);
+                    (
+                        deferred("deferred reflectance"),
+                        crate::program::rl_deferred_diag()
+                            .then(|| deferred("deferred untraced specular")),
+                    )
                 }),
             };
             let state = self.view.primary.as_mut().unwrap();
@@ -2438,6 +2581,7 @@ impl Renderer {
             scene_generation,
             lists.map_or(0, |l| l.generation),
             state.reflections.as_ref().map_or(0, |r| r.generation),
+            t.rl_pass.as_ref().map_or(0, |p| p.room),
         );
         if state.bindings.as_ref().is_none_or(|b| b.key != key) {
             let reconstruction_changed = state
@@ -2468,6 +2612,13 @@ impl Renderer {
                     ResourceKind::BindGroup,
                 )
             };
+            let producer_group = |layout: &wgpu::BindGroupLayout, entries: &[(u32, R<'_>)]| {
+                let mut entries = entries.to_vec();
+                if crate::material_mode::Mode::tail() {
+                    entries.push((crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&t.material.as_ref().unwrap().view)));
+                }
+                group(layout, &entries)
+            };
             let camera = (0, self.uniform.as_entire_binding());
             let scene = (
                 2,
@@ -2478,7 +2629,7 @@ impl Renderer {
             let hit = R::TextureView(&t.hit.view);
             let tiles = R::TextureView(&t.tiles.view);
             let trace = [
-                Some(group(
+                Some(producer_group(
                     &state.trace_bindings[0],
                     &[
                         trace_scene.clone(),
@@ -2489,7 +2640,7 @@ impl Renderer {
                     ],
                 )),
                 fresh.map(|f| {
-                    group(
+                    producer_group(
                         &state.trace_bindings[1],
                         &[
                             camera.clone(),
@@ -2509,7 +2660,7 @@ impl Renderer {
                 .then(|| &*state.reflections.as_ref().unwrap().buffer.value);
             let shade = |shading: Shading,
                          visibility: (u32, R<'_>)|
-             -> [Option<Owned<wgpu::BindGroup>>; 2] {
+             -> [Option<Owned<wgpu::BindGroup>>; 4] {
                 let mut entries = vec![
                     camera.clone(),
                     (7, hit.clone()),
@@ -2522,11 +2673,12 @@ impl Renderer {
                     (RL_HISTORY, R::TextureView(&t.rl_history.history.view)),
                     (RL_PHASE, t.rl_history.phase.value.as_entire_binding()),
                 ];
+                if let Some(gi) = &t.gi_receiver { entries.push((gi_receiver_pass::BINDING, gi.values.value.as_entire_binding())); }
                 // U-RTVIS: the reflection pass's lobe output.
                 if let Some(pass) = &t.rl_pass {
-                    entries.push((reflection_pass::LOBE_A, R::TextureView(&pass.lobe_a.view)));
-                    entries.push((reflection_pass::LOBE_B, R::TextureView(&pass.lobe_b.view)));
+                    entries.push((reflection_pass::LIST, pass.list.value.as_entire_binding()));
                     entries.push((reflection_pass::PASS_FRAME, pass.frame.value.as_entire_binding()));
+                    entries.push((reflection_pass::ROOM_STATS, pass.stats.value.as_entire_binding()));
                     // The Mac thread's reflection_hits reads H and writes R.
                     entries.push((super::reflection_hits::HITS, pass.hits.value.as_entire_binding()));
                     entries.push((super::reflection_hits::SAMPLES, R::TextureView(&pass.samples.view)));
@@ -2541,10 +2693,18 @@ impl Renderer {
                 if let Some(geometry) = &reflection_geometry {
                     entries.push((SOFTWARE_REFLECTIONS, geometry.as_entire_binding()));
                 }
+                if let Some(buffer) = &t.light_vis {
+                    entries.push((light_vis_pass::BINDING, buffer.value.as_entire_binding()));
+                }
                 // Deferred reflections' outputs (`Targets::deferred`).
-                if let Some([reflectance, untraced]) = &t.deferred {
+                if let Some((reflectance, untraced)) = &t.deferred {
                     entries.push((62, R::TextureView(&reflectance.view)));
-                    entries.push((63, R::TextureView(&untraced.view)));
+                    if let Some(untraced) = untraced {
+                        entries.push((63, R::TextureView(&untraced.view)));
+                    }
+                }
+                if let Some(record) = t.material.as_ref().filter(|_| crate::material_mode::Mode::full()) {
+                    entries.push((crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&record.view)));
                 }
                 // MP1: the same group plus the slot table and tile lists.
                 let list = lists.map(|l| {
@@ -2552,22 +2712,28 @@ impl Renderer {
                     entries.extend(l.shade_entries());
                     group(state.list_shade_layout(shading), &entries)
                 });
-                [
-                    Some(group(&state.shade_bindings[shading as usize], &entries)),
-                    list,
-                ]
+                let writes = state.material_layouts.as_ref().map(|l| {
+                    let single = group(&l.groups[shading as usize], &entries);
+                    let list = lists.map(|lists| {
+                        let mut entries = entries.clone(); entries.extend(lists.shade_entries());
+                        group(&l.lists.shade[shading as usize], &entries)
+                    });
+                    (single,list)
+                });
+                [Some(group(&state.shade_bindings[shading as usize], &entries)),list,writes.as_ref().map(|w| w.0.clone()),writes.and_then(|w| w.1)]
             };
-            let [shade, list] = match fresh {
+            let [shade, list, material_tiles, material_lists] = match fresh {
                 Some(f) => {
-                    let [s, l] = shade(Shading::Soft, (6, R::TextureView(&f.visibility.view)));
-                    [[None, s], [None, l]]
+                    let [s, l, w, wl] = shade(Shading::Soft, (6, R::TextureView(&f.visibility.view)));
+                    [[None, s], [None, l], [None,w], [None,wl]]
                 }
                 None => {
-                    let [s, l] = shade(Shading::Hard, scene.clone());
-                    [[s, None], [l, None]]
+                    let [s, l, w, wl] = shade(Shading::Hard, scene.clone());
+                    [[s, None], [l, None], [w,None], [wl,None]]
                 }
             };
             let next = Bindings {
+                material_write: [material_tiles, material_lists],
                 trace,
                 fresh: fresh.map(|f| {
                     group(
@@ -2583,7 +2749,7 @@ impl Renderer {
                     )
                 }),
                 interactive: fresh.map(|f| {
-                    group(
+                    producer_group(
                         &state.interactive_bindings,
                         &[
                             trace_scene.clone(),
@@ -2599,7 +2765,7 @@ impl Renderer {
                 }),
                 held: fresh.zip(t.held.as_ref()).map(|(f, h)| {
                     [0, 1].map(|k| {
-                        group(
+                        producer_group(
                             &state.held_bindings,
                             &[
                                 trace_scene.clone(),
@@ -2637,7 +2803,7 @@ impl Renderer {
                     })
                 }),
                 repair: fresh.map(|f| {
-                    group(
+                    producer_group(
                         &state.repair_bindings,
                         &[
                             trace_scene.clone(),
@@ -2692,7 +2858,13 @@ impl Renderer {
                         Some(g) => (SOFTWARE_REFLECTIONS, g.as_entire_binding()),
                         None => reflection_scene.clone(),
                     };
-                    self.rl_trace_group(abi, pass, frame.as_entire_binding(), geometry)
+                    self.rl_trace_group(
+                        abi,
+                        pass,
+                        frame.as_entire_binding(),
+                        &t.epsilon.view,
+                        geometry,
+                    )
                 }),
                 rl_resolve: state
                     .rl_resolve
@@ -2790,7 +2962,7 @@ impl Renderer {
     /// Visibility-buffer RT frames' Interactive sun: `primary_vb_sun` on reconstructed frames
     /// (TR1's budget, rotation, cold and held stops, history `parity`), else the 8-direction
     /// fresh prefix. Both read the receivers the buffer's resolve wrote.
-    fn encode_vb_sun(
+    pub(in crate::renderer) fn encode_vb_sun(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
@@ -3149,7 +3321,8 @@ impl Renderer {
             for (t, &margin) in m._textures.iter().zip(&m.margins) {
                 match t.0.storage {
                     TextureStorage::Full(_) => {
-                        key.push((Arc::as_ptr(&t.0) as usize, 0));
+                        // A BC5 map's variance layer replaces its view (normal_variance_lazy).
+                        key.push((Arc::as_ptr(&t.0) as usize, u64::from(t.0.variance_layer())));
                         words.push(0);
                         ids.push(None);
                     }
@@ -3269,6 +3442,7 @@ impl Renderer {
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         let state = self.view.primary.as_ref().unwrap();
+        if self.encode_material_shading(encoder, shading, timestamp_writes.clone(), false) { return; }
         if state.mixed() {
             self.encode_program_lists(encoder, shading, timestamp_writes);
             return;
@@ -3279,7 +3453,10 @@ impl Renderer {
         } else {
             &program.pipelines.traced
         };
-        let pipeline = set[shading as usize].as_ref().unwrap();
+        // The lean module once it landed; until then the full one, the same picture.
+        let pipeline = self
+            .lean_pipeline(state.program, false, shading as usize)
+            .unwrap_or_else(|| set[shading as usize].as_ref().unwrap());
         self.encode_primary_shade(encoder, pipeline, SHADE_TILE, shading, timestamp_writes);
     }
     /// The shading pass: `pipeline` over the scene region by `tile`, plus clear blocks
@@ -3366,9 +3543,10 @@ impl Renderer {
                         meshes.len() - 1
                     })
             });
-            for model in &d.instances.state.models {
+            let state = &d.instances.state;
+            for (i, model) in state.models.iter().enumerate() {
                 if let Some(mesh) = mesh {
-                    traced.push((slot, *model, mesh));
+                    traced.push((slot, *model, mesh, state.casts_shadows(i)));
                 }
                 slot += 1;
             }
@@ -3390,7 +3568,9 @@ impl Renderer {
         let records = |bases: &[[u32; 2]]| {
             let rows: Vec<_> = traced
                 .iter()
-                .map(|&(slot, model, mesh)| (slot, model, &*meshes[mesh], bases[mesh]))
+                .map(|&(slot, model, mesh, casts)| {
+                    (slot, model, &*meshes[mesh], bases[mesh], casts)
+                })
                 .collect();
             let mut words = crate::reflection_software::instance_words(&rows);
             // Records of singular models stay reserved (and untraced).
@@ -3436,31 +3616,32 @@ impl Renderer {
                     .unwrap()
                     .records = words;
             }
-            return;
+        } else {
+            let refs: Vec<_> = meshes.iter().map(|m| &**m).collect();
+            let mut packed = crate::reflection_software::pack(&refs, traced.len());
+            let words = records(&packed.bases);
+            packed.words[..words.len()].copy_from_slice(&words);
+            let buffer = Buffer::new(
+                self,
+                "software reflection geometry",
+                (packed.words.len() * 4) as u64,
+                wgpu::BufferUsages::STORAGE,
+            );
+            let bytes: Vec<u8> = packed.words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+            self.queue.write_buffer(&buffer.value, 0, &bytes);
+            uploads.geometry += (packed.words.len() * 4) as u64;
+            uploads.write_calls += 1;
+            let state = self.view.primary.as_mut().unwrap();
+            let generation = state.reflections.as_ref().map_or(0, |r| r.generation) + 1;
+            state.reflections = Some(SoftwareReflections {
+                buffer,
+                meshes,
+                bases: packed.bases,
+                records: words,
+                generation,
+            });
         }
-        let refs: Vec<_> = meshes.iter().map(|m| &**m).collect();
-        let mut packed = crate::reflection_software::pack(&refs, traced.len());
-        let words = records(&packed.bases);
-        packed.words[..words.len()].copy_from_slice(&words);
-        let buffer = Buffer::new(
-            self,
-            "software reflection geometry",
-            (packed.words.len() * 4) as u64,
-            wgpu::BufferUsages::STORAGE,
-        );
-        let bytes: Vec<u8> = packed.words.iter().flat_map(|w| w.to_ne_bytes()).collect();
-        self.queue.write_buffer(&buffer.value, 0, &bytes);
-        uploads.geometry += (packed.words.len() * 4) as u64;
-        uploads.write_calls += 1;
-        let state = self.view.primary.as_mut().unwrap();
-        let generation = state.reflections.as_ref().map_or(0, |r| r.generation) + 1;
-        state.reflections = Some(SoftwareReflections {
-            buffer,
-            meshes,
-            bases: packed.bases,
-            records: words,
-            generation,
-        });
+        reflection_geometry_dump::maybe_dump(self, draws, traced.len());
     }
 }
 // ---- end of M7-R1n software reflections ----

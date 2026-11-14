@@ -214,6 +214,28 @@ fn pre_tp1_standard() -> String {
     // Undo RL#47's visibility-first light loop (pane transmission sampled only for lit
     // samples): the frozen program samples the tinted light and multiplies visibility in.
     for (from, to) in [
+        // The material pass's record mapping (RENDERLAB_MATERIAL_PASS), which came later.
+        (
+            "// The material record's mapping (RENDERLAB_MATERIAL_PASS): the surface out, and back in for
+// shading, so the material pass evaluates `surface` once per pixel.
+fn material_out(s:Surface, input:SurfaceInput) -> MaterialRecord {
+    return MaterialRecord(s.n,s.base,s.alpha,s.metal,s.rough,vec3<f32>(0.0),0.0,0.0,0u);
+}
+// By field, so a program built from this one with more Surface fields (Ara's emissive
+// program adds `glow`) still compiles; those fields stay zero.
+fn material_in(m:MaterialRecord, input:SurfaceInput) -> Surface {
+    var s:Surface;
+    s.n=m.normal;
+    s.base=m.base;
+    s.metal=m.metallic;
+    s.rough=m.roughness;
+    s.alpha=m.alpha;
+    return s;
+}
+
+",
+            "",
+        ),
         // The deferred reflections' declaration and report (RL_DEFERRED).
         (
             "// RL_DEFERRED: `shade` is linear in `specular_incident.rgb` at fixed w, mixing
@@ -228,7 +250,12 @@ const RL_DEFERRED:bool=true;
             "        let light=light_sample(i,input);",
         ),
         (
-            "        let visibility=light_visibility(input,light);
+            "        // Its unshadowed contribution, for the engine's display bound (light_visibility_within);
+        // unused, and so compiled away, while the bound is off.
+        var unshadowed=brdf(n,v,light.direction,base,metal,rough);
+        if SPECULAR_AA {unshadowed=specular_brdf(input,light.direction,base,metal,rough);}
+        if !rl_term(RL_TERM_BRDF) {unshadowed=vec3<f32>(1.0/PI);}
+        let visibility=light_visibility_within(input,light,exposed_product(light.intensity*light_transmission(light,input),unshadowed*light.attenuation),exposed);
         // An unlit sample adds an exact zero (exposed_product keeps zeros), so it skips the
         // panes' transmission lookup and the BRDF.
         if visibility==0.0 { continue; }

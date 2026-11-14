@@ -838,7 +838,7 @@ fn ara_frame(
     let mut slots = vec![forward::ObjectTextures::default(); objects.len()];
     if level.textures {
         slots[floor_index(fixture)?].base_color = Some(forward::ObjectTexture {
-            data: &checker,
+            data: (&checker).into(),
             sampler: renderlab::asset::Sampler::default(),
             key: None,
         });
@@ -847,7 +847,7 @@ fn ara_frame(
     if level.normal_map {
         slots[floor_index(fixture)?].normal = Some(forward::NormalMap {
             texture: forward::ObjectTexture {
-                data: &studs,
+                data: (&studs).into(),
                 sampler: renderlab::asset::Sampler::default(),
                 key: None,
             },
@@ -866,6 +866,7 @@ fn ara_frame(
                 instances: None,
                 sky_map: None,
                 skins: None,
+                casts: None,
                 colour_lut: None,
                 ids: None,
                 objects: &objects,

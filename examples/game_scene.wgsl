@@ -26,6 +26,20 @@ fn surface(input:SurfaceInput) -> Surface {
     return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x);
 }
 
+// The optional material record maps the resolved surface, as the standard program does.
+// Glow and reflection weight remain program parameters, read by shade/reflection_lobe.
+fn material_out(s:Surface, input:SurfaceInput) -> MaterialRecord {
+    return MaterialRecord(s.n,s.base,1.0,s.metal,s.rough,vec3<f32>(0.0),0.0,0.0,0u);
+}
+fn material_in(m:MaterialRecord, input:SurfaceInput) -> Surface {
+    var s:Surface;
+    s.n=m.normal;
+    s.base=m.base;
+    s.metal=m.metallic;
+    s.rough=m.roughness;
+    return s;
+}
+
 // The GGX lobe the engine traces on RT traced frames (roughness below 0.5); weight 0
 // asks for no rays. Non-RT frames and rough surfaces keep the untraced estimate.
 fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {
@@ -105,6 +119,10 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     var exposed=min(diffuse+specular,vec3<f32>(65504.0));
     for(var i=0u;i<light_count();i+=1u) {
         let light=light_sample(i,input);
+        // The resolved material normal includes normal maps and decals. Keep thin
+        // and two-sided receivers; the hero's tinted back-face lighting is separate.
+        if light.attenuation==0.0 || (input.material.thin==0u && input.material.double_sided==0u
+            && dot(n,light.direction)<=0.0) { continue; }
         let attenuation=light.attenuation*light_visibility(input,light);
         let response=brdf(n,v,light.direction,base,metal,rough);
         exposed=min(exposed+exposed_product(light.intensity,response*attenuation),vec3<f32>(65504.0));

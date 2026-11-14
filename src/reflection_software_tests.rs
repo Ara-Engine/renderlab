@@ -342,13 +342,25 @@ fn gpu_r1n_mirror_identity() {
     );
 }
 
+/// The standard program's deferred traced module on `head`: `compose` already makes it while
+/// RENDERLAB_RL_DEFERRED=1, so `deferred_variant` applies only when the switch is off.
+fn deferred_standard(head: &str) -> crate::program::Composed {
+    use crate::program::{Stage, compose, deferred_variant};
+    let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
+    if crate::program::rl_deferred_for(head) {
+        composed
+    } else {
+        deferred_variant(composed)
+    }
+}
+
 /// Deferred reflections (`program::deferred_variant`): the standard program declares
 /// `RL_DEFERRED`, the toon program does not, and the standard program's traced module with
 /// the deferred inputs validates on the RT and both non-RT shading heads. It clears both
 /// outputs where the entry starts and writes them after `shade`, through the fog.
 #[test]
 fn deferred_reflection_modules_validate_on_every_traced_head() {
-    use crate::program::{Stage, compose, deferred_variant};
+    use crate::program::{Stage, compose};
     let toon = include_str!("../shaders/programs/toon.wgsl");
     assert!(!toon.contains("RL_DEFERRED"));
     let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
@@ -360,11 +372,394 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
             continue;
         }
         validated += 1;
-        let source = deferred_variant(&composed);
+        let source = deferred_standard(head).source;
         assert!(
             source.contains("rl_deferred_clear(pixel);")
                 && source.contains("rl_deferred_store(pixel,input.world);")
         );
+        // Under the pass (`pass_block`) the composite takes this program's glossy lobes; a
+        // program that does not report keeps its inline estimate. Without the switches the
+        // module keeps reflections.wgsl's own lobe store and names nothing of the composite, so
+        // the default's text is main's.
+        let passed = crate::program::pass_block(deferred_standard(head)).source;
+        assert!(passed.contains("const RL_DEFERRED_PROGRAM:bool=true;"));
+        assert!(passed.contains(
+            "rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);"
+        ));
+        if !crate::program::rl_deferred_for(head) && !crate::program::rl_pass_for(head) {
+            let plain = crate::program::pass_block(compose(
+                head,
+                crate::STANDARD_PROGRAM,
+                Stage::Traced,
+                false,
+            ));
+            assert!(
+                plain
+                    .source
+                    .contains("const RL_DEFERRED_PROGRAM:bool=false;")
+            );
+            assert!(composed.contains("    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}\n"));
+            assert!(
+                !composed.contains("rl_composite") && !composed.contains("RL_DEFERRED_PROGRAM")
+            );
+        }
+        for source in [&source, &passed] {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        }
+    }
+    // The soft RT head and both non-RT heads trace reflections; the hard RT head does not.
+    assert!(validated >= 3, "{validated} traced heads validated");
+}
+
+/// Deferred reflections under temporal shading: `deferred_variant` drops the program API's
+/// report stub, before the program, so the program's range moves with it; temporal shading
+/// splits the entry off at the program's end (a stale range cut the next block's first line,
+/// and every RENDERLAB_RL_DEFERRED=1 run failed to create its shading module).
+#[test]
+fn deferred_temporal_shading_keeps_the_program_range_and_validates() {
+    use crate::renderer::primary_ray_gpu::film_accumulation;
+    let soft = &crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap()[1];
+    let head = film_accumulation::shading_head(soft).unwrap();
+    let composed = deferred_standard(&head);
+    assert_eq!(
+        &composed.source[composed.program.clone()],
+        crate::STANDARD_PROGRAM
+    );
+    let source = film_accumulation::film_shading(composed).source;
+    let module = naga::front::wgsl::parse_str(&source)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+}
+
+/// Glass hits keep their reflections inline: their module (TP2's `tp_reflect`) drops the camera
+/// entry, so it never takes the deferred variant, whatever RENDERLAB_RL_DEFERRED says.
+#[test]
+fn glass_reflection_module_stays_inline() {
+    use crate::renderer::transparency_gpu::reflection;
+    let head = crate::renderer::primary_ray_gpu::transparent_reflection_head(SOURCE).unwrap();
+    let source = reflection::source(&head, crate::STANDARD_PROGRAM, false);
+    assert!(!source.contains("RL_DEFERRED_PROGRAM") && !source.contains("rl_composite"));
+    assert!(source.contains("fn reflection_report("));
+    assert!(!source.contains("rl_deferred_store"));
+}
+
+/// The S4a hit reuse seam in `rl_trace_pixels` (the Mac's composition replaces it under
+/// RENDERLAB_RL_HIT_REUSE): once, inside the strata loop, right before the H append.
+#[test]
+fn trace_hit_reuse_seam_stays_before_the_h_append() {
+    let trace = include_str!("../shaders/reflections_trace.wgsl");
+    let seam = "        // ---- rl trace hit reuse seam ----\n        let index=atomicAdd(&rl_hits.count,1u);";
+    assert_eq!(
+        trace
+            .matches("// ---- rl trace hit reuse seam ----")
+            .count(),
+        1
+    );
+    assert_eq!(trace.matches(seam).count(), 1);
+}
+
+/// The non-RT default belongs to the renderer whose device runs the pass: its heads carry
+/// `PASS_HEAD_MARK`, and only modules composed on them take the pass and the composite (with
+/// inline overflow). Heads composed elsewhere (the Ara port, tests) keep the inline path.
+#[test]
+fn the_reflection_pass_belongs_to_the_marked_renderer() {
+    use crate::program::{PASS_HEAD_MARK, Stage, compose, with_reflection_history};
+    if crate::program::rl_pass_env().is_some() || crate::program::rl_deferred_env().is_some() {
+        return;
+    }
+    let (_, heads) = non_rt_sources(SOURCE).unwrap();
+    let marked = format!("{}{PASS_HEAD_MARK}", heads[1]);
+    let on = with_reflection_history(compose(
+        &marked,
+        crate::STANDARD_PROGRAM,
+        Stage::Traced,
+        false,
+    ));
+    assert!(
+        on.source
+            .contains("rl_room_reserve(count,traced,lobe.weight)")
+    );
+    assert!(on.source.contains("const RL_DEFERRED_PROGRAM:bool=true;"));
+    assert_eq!(&on.source[on.program.clone()], crate::STANDARD_PROGRAM);
+    let off = with_reflection_history(compose(
+        &heads[1],
+        crate::STANDARD_PROGRAM,
+        Stage::Traced,
+        false,
+    ));
+    assert!(!off.source.contains("rl_composite") && !off.source.contains("RL_DEFERRED_PROGRAM"));
+    // Mixed-program frames shade with MP1's list modules, whose program list (binding 38) once
+    // shared the glossy list's names: both compositions must validate.
+    let list = with_reflection_history(crate::program::compose_list(
+        &marked,
+        crate::STANDARD_PROGRAM,
+        Stage::Traced,
+        false,
+    ));
+    assert!(list.source.contains("rl_room_reserve(count,traced,lobe.weight)"));
+    for source in [&on.source, &list.source] {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    }
+}
+
+/// Every module the engine builds validates under this process's switches: each path's heads,
+/// marked and not, the standard and toon programs, single-program and MP1 list shading, traced and
+/// streamed, through `with_reflection_history`; the hit modules (single and list); the trace
+/// module; the GI receiver kernel while its pass runs. The switches are read once per process,
+/// so tools/rtvis/switch_pairs.py runs it once per pair of pass switches. Cheap: catches name
+/// clashes and missing definitions before a GPU lease does.
+#[test]
+fn every_list_head_module_validates() {
+    use crate::program::{
+        PASS_HEAD_MARK, Stage, compose, compose_hits, compose_list, declares_parameters,
+        rl_trace_source, with_reflection_history,
+    };
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let heads: Vec<String> = rt
+        .iter()
+        .chain(&non_rt)
+        .flat_map(|head| [head.clone(), format!("{head}{PASS_HEAD_MARK}")])
+        .collect();
+    let validate = |label: &str, source: &str| {
+        let module = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
+    };
+    for (h, head) in heads.iter().enumerate() {
+        validate(&format!("head {h} trace"), &rl_trace_source(head));
+        // The GI receiver kernel, built only while its pass runs (RENDERLAB_GI_PASS=1): the
+        // deferred variant once dropped the definitions it relies on.
+        if crate::renderer::primary_ray_gpu::gi_receiver_pass::for_source(head) {
+            let kernel = crate::renderer::primary_ray_gpu::gi_receiver_pass::kernel_module(head);
+            validate(&format!("head {h} GI receiver"), &kernel.source);
+        }
+        for (name, program) in [
+            ("standard", crate::STANDARD_PROGRAM),
+            ("toon", include_str!("../shaders/programs/toon.wgsl")),
+        ] {
+            let parameters = declares_parameters(program);
+            for stage in [Stage::Traced, Stage::TracedStreamed] {
+                let single = with_reflection_history(compose(head, program, stage, parameters));
+                let list = with_reflection_history(compose_list(head, program, stage, parameters));
+                for (kind, composed) in [("single", single), ("list", list)] {
+                    assert_eq!(&composed.source[composed.program.clone()], program);
+                    validate(&format!("head {h} {name} {stage:?} {kind}"), &composed.source);
+                }
+                for lists in [false, true] {
+                    let hits = compose_hits(head, program, stage, parameters, lists);
+                    validate(&format!("head {h} {name} {stage:?} hits lists={lists}"), &hits.source);
+                }
+            }
+        }
+    }
+}
+
+/// The speck bisect's pass switches (`RENDERLAB_RL_HIT=missblack|hitblack|lone`) each find their
+/// seam exactly once in the module they edit, and the edited modules still validate.
+#[test]
+fn pass_switch_seams_hold() {
+    use crate::program::{RL_PASS_SEAMS, Stage, compose_hits, rl_trace_source};
+    let head = &crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap()[0];
+    let modules = [
+        rl_trace_source(head),
+        compose_hits(head, crate::STANDARD_PROGRAM, Stage::Traced, false, false).source,
+        include_str!("../shaders/reflections_composite.wgsl").to_owned(),
+    ];
+    for ((name, from, to), module) in RL_PASS_SEAMS.iter().zip(&modules) {
+        // Under the switch the seam is already replaced; either way exactly one of the two.
+        let seen = module.matches(from).count() + module.matches(to).count();
+        assert_eq!(seen, 1, "{name}");
+        let edited = module.replacen(from, to, 1);
+        let parsed = naga::front::wgsl::parse_str(&edited)
+            .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&edited)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&parsed)
+        .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(&edited)));
+    }
+}
+
+/// The regression the per-renderer default guards: a non-RT engine's renderer runs the pass and
+/// marks only its own heads, so heads composed after it exists (the Ara port's, a test's) keep the
+/// inline path whatever the order of tests or engines in the process.
+#[test]
+fn an_engine_default_leaves_other_compositions_inline() {
+    use crate::program::{Stage, compose, with_reflection_history};
+    if crate::program::rl_pass_env().is_some() || crate::program::rl_deferred_env().is_some() {
+        return;
+    }
+    let engine = crate::engine::Engine::new(
+        crate::engine::test_adapter(),
+        crate::engine::EngineDescriptor::default(),
+    )
+    .unwrap();
+    let (_, heads) = non_rt_sources(SOURCE).unwrap();
+    for head in &heads {
+        let source =
+            with_reflection_history(compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false))
+                .source;
+        assert!(!source.contains("rl_composite") && !source.contains("RL_DEFERRED_PROGRAM"));
+        assert!(!source.contains("rl_deferred_store"));
+    }
+    drop(engine);
+}
+
+/// Binding 63 (the untraced specular, for identity tests) exists only with
+/// RENDERLAB_RL_DEFERRED=diag: without it the deferred module neither declares nor writes it,
+/// and the reflectance (62) the composite reads stays.
+#[test]
+fn deferred_untraced_output_only_with_diag() {
+    for head in crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap() {
+        let source = deferred_standard(&head).source;
+        assert!(source.contains("@group(0) @binding(62) var rl_deferred_reflectance"));
+        assert_eq!(
+            source.contains("rl_deferred_untraced"),
+            crate::program::rl_deferred_diag()
+        );
+    }
+}
+
+/// The primary shading layout, with the pass on or off, deferred or not, diagnostic or not, on
+/// both visibility inputs and both paths' geometry: no binding number twice. (The pass's room
+/// counters once took 60, the resolve's phase, and every pass-on start failed to create the
+/// layout; naga cannot see a layout clash.)
+#[test]
+fn the_primary_shading_layout_has_no_clashing_bindings() {
+    use crate::renderer::primary_ray_gpu::{ShadeSwitches, shade_layout_entries};
+    let visibilities = [
+        wgpu::BindGroupLayoutEntry {
+            binding: 2,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::AccelerationStructure {
+                vertex_return: false,
+            },
+            count: None,
+        },
+        wgpu::BindGroupLayoutEntry {
+            binding: 6,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2,
+                multisampled: false,
+            },
+            count: None,
+        },
+    ];
+    for visibility in visibilities {
+        for bits in 0..128u32 {
+            let switches = ShadeSwitches {
+                pass: bits & 1 != 0,
+                software: bits & 2 != 0,
+                deferred: bits & 4 != 0,
+                diag: bits & 8 != 0,
+                gi: bits & 16 != 0,
+                lvis: bits & 32 != 0,
+                material: bits & 64 != 0,
+            };
+            let mut seen = std::collections::HashSet::new();
+            for entry in shade_layout_entries(visibility, switches) {
+                assert!(
+                    seen.insert(entry.binding),
+                    "binding {} twice under {switches:?}",
+                    entry.binding
+                );
+            }
+            assert_eq!(seen.contains(&73), switches.lvis);
+            assert_eq!(
+                seen.contains(&crate::program::MATERIAL_RECORD_BINDING),
+                switches.material,
+            );
+            if switches.material {
+                let base = shade_layout_entries(
+                    visibility,
+                    ShadeSwitches { material: false, ..switches },
+                );
+                let reader = shade_layout_entries(visibility, switches);
+                assert_eq!(&reader[..base.len()], &base);
+                assert_eq!(reader.len(), base.len() + 1);
+            }
+        }
+    }
+}
+
+/// The deferred composite's point shader (one point a glossy-pixel list entry) validates.
+#[test]
+fn reflection_composite_validates() {
+    let source = include_str!("../shaders/reflections_composite.wgsl");
+    let module = naga::front::wgsl::parse_str(source)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+    naga::valid::Validator::new(
+        naga::valid::ValidationFlags::all(),
+        naga::valid::Capabilities::all(),
+    )
+    .validate(&module)
+    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+}
+
+/// Mixed-program frames: by default a reflection hit is shaded by its receiver's program, with the
+/// hit's parameters only when the hit is that program's draw (inline's MP1 fallback), so the
+/// composite draws the inline picture; RENDERLAB_RL_HIT_OWN_PROGRAM=1 shades each hit with its own
+/// program instead.
+#[test]
+fn mixed_frame_hits_follow_inline_fallback_by_default() {
+    use crate::program::{Stage, compose_hits};
+    let soft = &crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap()[1];
+    let source = compose_hits(soft, crate::STANDARD_PROGRAM, Stage::Traced, false, true).source;
+    let fallback = source.contains("if rl_receiver==0u || !rl_hits_mine(rl_receiver-1u) {return;}")
+        && source.contains("rl_load_parameters(select(primary_placements[rl_receiver-1u]");
+    assert_eq!(fallback, !crate::program::hit_own_program());
+    let single = compose_hits(soft, crate::STANDARD_PROGRAM, Stage::Traced, false, false).source;
+    assert!(!single.contains("rl_receiver"));
+}
+
+/// Measurement only: with RENDERLAB_RL_INLINE_STUB=1 the primary shading modules lose the inline
+/// strata loop (no inline ray casts or hit shading) and still validate on every traced head.
+#[test]
+fn inline_stub_modules_validate() {
+    use crate::program::{Stage, compose, with_reflection_history};
+    if std::env::var("RENDERLAB_RL_INLINE_STUB").as_deref() != Ok("1") {
+        return;
+    }
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    for head in rt.iter().chain(&non_rt) {
+        let marked = format!("{head}{}", crate::program::PASS_HEAD_MARK);
+        let source = with_reflection_history(compose(
+            &marked,
+            crate::STANDARD_PROGRAM,
+            Stage::Traced,
+            false,
+        ))
+        .source;
+        assert!(!source.contains("for(var attempt=0u;attempt<2u;attempt+=1u) {"));
         let module = naga::front::wgsl::parse_str(&source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         naga::valid::Validator::new(
@@ -374,6 +769,355 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
         .validate(&module)
         .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
     }
-    // The soft RT head and both non-RT heads trace reflections; the hard RT head does not.
-    assert!(validated >= 3, "{validated} traced heads validated");
+}
+
+/// Lean shading (`program::lean_variant`): on every traced shading head the lean module is the
+/// full one plus the two early returns (decals, atmosphere), keeps the
+/// program's range on the program's text, and validates.
+#[test]
+fn lean_modules_differ_only_by_their_early_returns() {
+    use crate::program::{Stage, compose, compose_list, lean_variant};
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            // As the wgpu worker (lean_gpu.rs) and the full pipelines compose them.
+            let compose = |head: &str| {
+                crate::program::with_reflection_history(if list {
+                    compose_list(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
+                } else {
+                    compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false)
+                })
+            };
+            let full = compose(head);
+            let lean = lean_variant(compose(head));
+            assert_eq!(&lean.source[lean.program.clone()], crate::STANDARD_PROGRAM);
+            let returns = [
+                "    if true { return input; }\n",
+                "    if true { return c; }\n",
+            ];
+            let mut stripped = lean.source.clone();
+            for early in returns {
+                assert_eq!(stripped.matches(early).count(), 1, "{early}");
+                stripped = stripped.replacen(early, "", 1);
+            }
+            assert_eq!(stripped, full.source);
+            let module = naga::front::wgsl::parse_str(&lean.source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&lean.source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&lean.source)));
+        }
+    }
+}
+
+/// RENDERLAB_LIGHT_BOUND: the engine's bound behind `light_visibility_within` composes into
+/// every traced module (tiles and list, RT and non-RT heads) in both modes, adding or dropping
+/// skipped lights. The program's text is untouched (the standard program calls
+/// `light_visibility_within`; toon keeps `light_visibility`, so it is never bounded), each
+/// receiver's skipped total resets in `rl_lights_prepare`, reflection hits never skip, and the
+/// modules validate.
+#[test]
+fn light_bound_composes_and_validates() {
+    use crate::program::{LightBound, Stage, compose, compose_list, declares_parameters, with_light_bound};
+    let toon = include_str!("../shaders/programs/toon.wgsl");
+    assert!(crate::STANDARD_PROGRAM.contains("light_visibility_within("));
+    assert!(!toon.contains("light_visibility_within("));
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let mut validated = 0;
+    for head in rt.iter().chain(&non_rt) {
+        for program in [crate::STANDARD_PROGRAM, toon] {
+            let parameters = declares_parameters(program);
+            for list in [false, true] {
+                for (sum, drop) in [(false, false), (true, false), (true, true)] {
+                    let full = if list {
+                        compose_list(head, program, Stage::Traced, parameters)
+                    } else {
+                        compose(head, program, Stage::Traced, parameters)
+                    };
+                    let bound = LightBound { sum, codes: 0.25, drop };
+                    let edited = with_light_bound(full, bound);
+                    let source = &edited.source;
+                    assert_eq!(&source[edited.program.clone()], program);
+                    assert!(source.contains("rl_lb_skipped=total;"), "the bound replaced its stub");
+                    assert!(source.contains("fn rl_lights_prepare(world:vec3<f32>) {\n    rl_lb_skipped=vec3<f32>(0.0);\n"));
+                    if source.contains("var<private> rl_reflection_hit:bool;") {
+                        assert!(source.contains("    if rl_reflection_hit { return false; }\n"));
+                    }
+                    let module = naga::front::wgsl::parse_str(source)
+                        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                    naga::valid::Validator::new(
+                        naga::valid::ValidationFlags::all(),
+                        naga::valid::Capabilities::all(),
+                    )
+                    .validate(&module)
+                    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                    validated += 1;
+                }
+            }
+        }
+    }
+    assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 2 * 3);
+}
+
+/// RENDERLAB_MATERIAL_PASS: the standard program's material pass (`Write`) and the
+/// record-reading shading (`Read`) compose on every traced head, tiles and list, keep the
+/// program's text in its range and validate; toon declares no record mapping and keeps its
+/// single kernel.
+#[test]
+fn material_pass_variants_compose_and_validate() {
+    use crate::program::{MaterialRole, Stage, compose, compose_list, material_variant};
+    let toon = include_str!("../shaders/programs/toon.wgsl");
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let mut validated = 0;
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            let full = |program: &str| {
+                let parameters = crate::program::declares_parameters(program);
+                if list {
+                    compose_list(head, program, Stage::Traced, parameters)
+                } else {
+                    compose(head, program, Stage::Traced, parameters)
+                }
+            };
+            // A program without the mapping: a receiver-only writer, no reader.
+            assert!(material_variant(full(toon), toon, MaterialRole::Read).is_none());
+            let receiver_only = material_variant(full(toon), toon, MaterialRole::Write)
+                .expect("every program gets a receiver writer");
+            assert!(receiver_only.source.contains("255u),surface_input,rl_mr_near_edge("));
+            assert_eq!(&receiver_only.source[receiver_only.program.clone()], toon);
+            let module = naga::front::wgsl::parse_str(&receiver_only.source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&receiver_only.source)));
+            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&receiver_only.source)));
+            for role in [MaterialRole::Write, MaterialRole::Read] {
+                let edited =
+                    material_variant(full(crate::STANDARD_PROGRAM), crate::STANDARD_PROGRAM, role)
+                        .expect("the standard program declares the record mapping");
+                let source = &edited.source;
+                assert_eq!(&source[edited.program.clone()], crate::STANDARD_PROGRAM);
+                match role {
+                    MaterialRole::Write => assert!(source.contains("rl_material_store(pixel,")),
+                    MaterialRole::Read => {
+                        assert!(source.contains("material_in(rl_material_load(pixel)"));
+                        // The receiver's shade takes the record's normal and MQ2 hint.
+                        assert!(source.contains("rl_material_use=true;"));
+                        assert!(source.contains("rl_material_view_hint)"));
+                        assert!(source.contains("if rl_material_use {n=rl_material_n;}"));
+                    }
+                }
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+                validated += 1;
+            }
+        }
+    }
+    assert_eq!(validated, (rt.len() + non_rt.len()) * 2 * 2);
+}
+
+/// The material pass's receiver is the sun path's, body for body: words 1 and 2 then give a
+/// sun pass reading the record exactly the receiver it builds today.
+#[test]
+fn material_trace_receiver_matches_the_sun_path() {
+    let body = |source: &str, signature: &str| -> String {
+        let start = source.find(signature).unwrap_or_else(|| panic!("{signature}"));
+        let open = start + source[start..].find('{').unwrap();
+        let mut depth = 0;
+        for (i, c) in source[open..].char_indices() {
+            depth += match c {
+                '{' => 1,
+                '}' => -1,
+                _ => 0,
+            };
+            if depth == 0 {
+                return source[open..open + i + 1].to_owned();
+            }
+        }
+        panic!("{signature} unclosed")
+    };
+    assert_eq!(
+        body(crate::program::MATERIAL_TRACE_RECEIVER, "fn rl_mr_trace_receiver_of("),
+        body(include_str!("../shaders/primary_penumbra.wgsl"), "fn primary_penumbra_receiver(")
+    );
+}
+
+/// Every `RENDERLAB_MATERIAL_DEBUG` view composes and validates on every head, tiles and lists.
+#[test]
+fn material_pass_debug_views_compose_and_validate() {
+    use crate::program::{MaterialRole, Stage, compose, compose_list, material_debug_field, material_variant_with};
+    let program = crate::STANDARD_PROGRAM;
+    let parameters = crate::program::declares_parameters(program);
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            for name in ["base", "normal", "roughness", "metallic", "receiver"] {
+                let full = if list {
+                    compose_list(head, program, Stage::Traced, parameters)
+                } else {
+                    compose(head, program, Stage::Traced, parameters)
+                };
+                let field = material_debug_field(name);
+                let edited = material_variant_with(full, program, MaterialRole::Read, field, None).expect("standard maps the record");
+                if name == "receiver" {
+                    // A program without the mapping gets the receiver check's reader too.
+                    let toon = include_str!("../shaders/programs/toon.wgsl");
+                    let toon_full = if list {
+                        compose_list(head, toon, Stage::Traced, crate::program::declares_parameters(toon))
+                    } else {
+                        compose(head, toon, Stage::Traced, crate::program::declares_parameters(toon))
+                    };
+                    let checked = material_variant_with(toon_full, toon, MaterialRole::Read, field, None)
+                        .expect("the receiver check covers unmapped programs");
+                    assert!(checked.source.contains("const RL_MATERIAL_UNMAPPED:bool=true;"));
+                    let module = naga::front::wgsl::parse_str(&checked.source)
+                        .unwrap_or_else(|e| panic!("toon receiver: {}", e.emit_to_string(&checked.source)));
+                    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                        .validate(&module)
+                        .unwrap_or_else(|e| panic!("toon receiver: {}", e.emit_to_string(&checked.source)));
+                }
+                let source = &edited.source;
+                assert_eq!(&source[edited.program.clone()], program);
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+                naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                    .validate(&module)
+                    .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+            }
+        }
+    }
+}
+
+/// The measurement probes (`RENDERLAB_MATERIAL_PROBE`) compose and validate on every head,
+/// tiles and lists, each on its own role.
+#[test]
+fn material_pass_probes_compose_and_validate() {
+    use crate::program::{
+        MaterialProbe, MaterialRole, Stage, compose, compose_list, material_variant_with,
+    };
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    let (_, non_rt) = non_rt_sources(SOURCE).unwrap();
+    let probes = [
+        (
+            MaterialRole::Write,
+            MaterialProbe::Empty,
+            "if size.x<0x7fffffffu { return; }",
+        ),
+        (
+            MaterialRole::Write,
+            MaterialProbe::Decode,
+            "rl_material_probe_input(surface_input)",
+        ),
+        (
+            MaterialRole::Write,
+            MaterialProbe::NoStore,
+            "rl_material_probe_store(pixel,",
+        ),
+        (
+            MaterialRole::Read,
+            MaterialProbe::LoadPlus,
+            "rl_material_probe_record(rl_probe)",
+        ),
+        (
+            MaterialRole::Read,
+            MaterialProbe::ReadLean,
+            "let surface_input=(SurfaceInput(",
+        ),
+        (
+            MaterialRole::Read,
+            MaterialProbe::NoDecode,
+            "let surface_input=rl_material_input(pixel,id,size,material);",
+        ),
+        (
+            MaterialRole::Read,
+            MaterialProbe::ReadPos,
+            "rl_material_probe_position(surface_input,receiver_world)",
+        ),
+    ];
+    let program = crate::STANDARD_PROGRAM;
+    let parameters = crate::program::declares_parameters(program);
+    for head in rt.iter().chain(&non_rt) {
+        for list in [false, true] {
+            for (role, probe, marker) in probes {
+                let full = if list {
+                    compose_list(head, program, Stage::Traced, parameters)
+                } else {
+                    compose(head, program, Stage::Traced, parameters)
+                };
+                let edited = material_variant_with(full, program, role, None, Some(probe))
+                    .expect("standard maps the record");
+                let source = &edited.source;
+                assert!(source.contains(marker), "{probe:?}");
+                assert_eq!(&source[edited.program.clone()], program);
+                let module = naga::front::wgsl::parse_str(source)
+                    .unwrap_or_else(|e| panic!("{probe:?}: {}", e.emit_to_string(source)));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{probe:?}: {}", e.emit_to_string(source)));
+            }
+        }
+    }
+}
+
+/// Ara's emissive program is the standard program with a `glow` field added to `Surface`
+/// (crates/ara-renderlab/src/scene.rs `emissive_source`, these same three edits). It must keep
+/// composing and validating, alone and as both material-pass variants: a positional `Surface`
+/// constructor in the standard program broke it once.
+#[test]
+fn ara_emissive_edit_of_the_standard_program_still_composes() {
+    use crate::program::{MaterialRole, Stage, compose, material_variant};
+    let standard = crate::STANDARD_PROGRAM;
+    for edit in ["alpha:f32 };", "decal_mr.x,alpha);", "    return exposed;"] {
+        assert_eq!(standard.matches(edit).count(), 1, "Ara's edit point {edit}");
+    }
+    let emissive = format!(
+        "struct Parameters {{ glow:vec3<f32> }};\nconst DEFAULT_PARAMETERS:Parameters = Parameters(vec3<f32>(0.0));\n{}",
+        standard
+            .replace("alpha:f32 };", "alpha:f32, glow:vec3<f32> };")
+            .replace("decal_mr.x,alpha);", "decal_mr.x,alpha,params.glow);")
+            .replace(
+                "    return exposed;",
+                "    return min(exposed+exposed_product(s.glow,vec3<f32>(1.0)),vec3<f32>(65504.0));",
+            )
+            // Its glow through the material record's emission.
+            .replace(
+                "s.n,s.base,s.alpha,s.metal,s.rough,vec3<f32>(0.0),",
+                "s.n,s.base,s.alpha,s.metal,s.rough,s.glow,",
+            )
+            .replace("    s.alpha=m.alpha;\n    return s;", "    s.alpha=m.alpha;\n    s.glow=m.emission;\n    return s;")
+    );
+    assert!(emissive.contains("s.glow=m.emission;") && emissive.contains("s.rough,s.glow,"));
+    let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
+    for head in &rt {
+        let composed = || compose(head, &emissive, Stage::Traced, true);
+        let mut sources = vec![composed().source];
+        for role in [MaterialRole::Write, MaterialRole::Read] {
+            sources.push(material_variant(composed(), &emissive, role).unwrap().source);
+        }
+        for source in &sources {
+            let module = naga::front::wgsl::parse_str(source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        }
+    }
 }

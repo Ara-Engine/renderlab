@@ -3,14 +3,22 @@
 //! With `RENDERLAB_PASS_LOG=<file>` set when the renderer is created (and timestamp
 //! queries available), every frame writes a timestamp at the start of each named stage
 //! and one at its end, and the renderer appends one JSON line per completed frame:
-//! `{"frame":n,"span":ms,"passes":{"skinning":ms,...}}`. A stage lasts from its mark to
+//! `{"frame":n,"renderer_frame":n,"dropped":false,"out_of_order":false,
+//! "span":ms,"passes":{"skinning":ms,...}}`. A stage lasts from its mark to
 //! the next mark; marks are empty compute passes, so they need only TIMESTAMP_QUERY.
 //! Stages that the GPU overlaps share their boundary, so the stage times always sum to the
 //! span. Embedders need no change: harnesses read the file (tools/showcase/showcase.py).
 //! Without the variable nothing is created and every call returns at once.
 //! `RENDERLAB_PASS_LOG_DETAIL` also keeps a stage's parts (names with a dot, such as
 //! `sun_shadow.raster`); without it those marks are skipped, so the part's time stays in
-//! the stage before it.
+//! the stage before it. The reflection pass's stages (`ALWAYS`) are kept either way: every
+//! reflection table reads them from the default log.
+//! The readback pool grows to the in-flight high-water mark instead of dropping samples
+//! or waiting for the GPU, including captures longer than 600 frames. Completion can be
+//! out of order: each entry flags a nonconsecutive emission, and consumers join by
+//! `renderer_frame` (`frame` remains its compatibility alias), never by line position.
+//! Failed readbacks and frames without timestamps emit `dropped:true` with a reason,
+//! rather than fabricated timings. Polling is still needed to collect final readbacks.
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
@@ -18,24 +26,86 @@ use std::sync::{Arc, OnceLock};
 /// QUERY_RESOLVE_BUFFER_ALIGNMENT (256 bytes): 64 marks are 512.
 const MARKS: u32 = 64;
 const _: () = assert!((MARKS as u64 * 8) % wgpu::QUERY_RESOLVE_BUFFER_ALIGNMENT == 0);
-/// Frames in flight before a frame goes untimed rather than waiting.
-const RING: usize = 4;
+/// Dotted stages the default log keeps: the compacted reflection pass's trace, hit shading and
+/// composite after `shading` (U-RTVIS; zero-length while the pass is off).
+const ALWAYS: [&str; 3] = [
+    "reflection.trace",
+    "reflection.hits",
+    "reflection.composite",
+];
+/// Initial readback pool; later frames grow it only when every entry is in flight.
+const INITIAL_FRAMES: usize = 4;
 
 struct Frame {
+    queries: wgpu::QuerySet,
+    resolve: wgpu::Buffer,
     readback: wgpu::Buffer,
     names: Vec<&'static str>,
     mapped: Option<Arc<OnceLock<Result<(), wgpu::BufferAsyncError>>>>,
     frame: u64,
 }
 
+impl Frame {
+    fn new(device: &wgpu::Device) -> Self {
+        let bytes = u64::from(MARKS) * 8;
+        Self {
+            queries: device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("pass timeline"),
+                ty: wgpu::QueryType::Timestamp,
+                count: MARKS,
+            }),
+            resolve: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pass timeline resolve"),
+                size: bytes,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            }),
+            readback: device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("pass timeline readback"),
+                size: bytes,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }),
+            names: vec![],
+            mapped: None,
+            frame: 0,
+        }
+    }
+}
+
+fn available_frame(
+    len: usize,
+    next: usize,
+    mut available: impl FnMut(usize) -> bool,
+) -> Option<usize> {
+    (0..len)
+        .map(|offset| (next + offset) % len)
+        .find(|&i| available(i))
+}
+
+/// Keeps the old frame key while making gaps, reordered completions and failures explicit.
+fn write_record(
+    log: &mut impl Write,
+    last_emitted: &mut u64,
+    frame: u64,
+    payload: &str,
+) -> std::io::Result<()> {
+    let out_of_order = frame != last_emitted.saturating_add(1);
+    writeln!(
+        log,
+        "{{\"frame\":{frame},\"renderer_frame\":{frame},\"out_of_order\":{out_of_order},{payload}}}"
+    )?;
+    *last_emitted = frame;
+    Ok(())
+}
+
 pub(crate) struct PassTimeline {
-    queries: wgpu::QuerySet,
-    resolve: wgpu::Buffer,
     frames: Vec<Frame>,
-    /// The ring entry this frame's marks go to; None when every entry is still in flight.
+    /// The pool entry receiving this frame's marks; None outside frame encoding.
     current: Option<usize>,
     next: usize,
     frame: u64,
+    last_emitted: u64,
     period: f64,
     /// Whether dotted part names are marked (`RENDERLAB_PASS_LOG_DETAIL`).
     detail: bool,
@@ -50,55 +120,35 @@ impl PassTimeline {
             return None;
         }
         let log = std::fs::File::create(path).ok()?;
-        let bytes = u64::from(MARKS) * 8;
-        let frames = (0..RING)
-            .map(|_| Frame {
-                readback: device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("pass timeline readback"),
-                    size: bytes,
-                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-                    mapped_at_creation: false,
-                }),
-                names: vec![],
-                mapped: None,
-                frame: 0,
-            })
-            .collect();
+        let frames = (0..INITIAL_FRAMES).map(|_| Frame::new(device)).collect();
         Some(Self {
-            queries: device.create_query_set(&wgpu::QuerySetDescriptor {
-                label: Some("pass timeline"),
-                ty: wgpu::QueryType::Timestamp,
-                count: MARKS * RING as u32,
-            }),
-            resolve: device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("pass timeline resolve"),
-                size: bytes * RING as u64,
-                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
-                mapped_at_creation: false,
-            }),
             frames,
             current: None,
             next: 0,
             frame: 0,
+            last_emitted: 0,
             period: f64::from(queue.get_timestamp_period()),
             detail: std::env::var_os("RENDERLAB_PASS_LOG_DETAIL").is_some(),
             log: std::io::BufWriter::new(log),
         })
     }
 
-    /// Starts a frame's marks, in the next free ring entry.
-    pub(crate) fn begin(&mut self) {
+    /// Reuses a free entry or grows the pool, without skipping a frame or waiting.
+    pub(crate) fn begin(&mut self, device: &wgpu::Device) {
         self.frame += 1;
-        let i = self.next;
-        let entry = &mut self.frames[i];
-        self.current = entry.mapped.is_none().then(|| {
-            entry.names.clear();
-            entry.frame = self.frame;
+        let i = available_frame(self.frames.len(), self.next, |i| {
+            self.frames[i].mapped.is_none()
+        })
+        .unwrap_or_else(|| {
+            let i = self.frames.len();
+            self.frames.push(Frame::new(device));
             i
         });
-        if self.current.is_some() {
-            self.next = (i + 1) % RING;
-        }
+        let entry = &mut self.frames[i];
+        entry.names.clear();
+        entry.frame = self.frame;
+        self.current = Some(i);
+        self.next = (i + 1) % self.frames.len();
     }
 
     /// Whether dotted part names are marked (`RENDERLAB_PASS_LOG_DETAIL`).
@@ -109,19 +159,19 @@ impl PassTimeline {
     /// Starts stage `name` at this point of `encoder`'s work.
     pub(crate) fn mark(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         let Some(i) = self.current else { return };
-        if name.contains('.') && !self.detail {
+        if name.contains('.') && !self.detail && !ALWAYS.contains(&name) {
             return;
         }
         let entry = &mut self.frames[i];
         if entry.names.len() + 1 >= MARKS as usize {
             return;
         }
-        let index = i as u32 * MARKS + entry.names.len() as u32;
+        let index = entry.names.len() as u32;
         entry.names.push(name);
         encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(name),
             timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
-                query_set: &self.queries,
+                query_set: &entry.queries,
                 beginning_of_pass_write_index: Some(index),
                 end_of_pass_write_index: None,
             }),
@@ -132,16 +182,21 @@ impl PassTimeline {
     pub(crate) fn finish(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let Some(i) = self.current else { return };
         if self.frames[i].names.is_empty() {
+            let _ = write_record(
+                &mut self.log,
+                &mut self.last_emitted,
+                self.frames[i].frame,
+                "\"dropped\":true,\"reason\":\"no_timestamps\"",
+            );
+            let _ = self.log.flush();
             self.current = None;
             return;
         }
         self.mark(encoder, "");
         let entry = &self.frames[i];
-        let first = i as u32 * MARKS;
         let count = entry.names.len() as u32;
-        let offset = u64::from(first) * 8;
-        encoder.resolve_query_set(&self.queries, first..first + count, &self.resolve, offset);
-        encoder.copy_buffer_to_buffer(&self.resolve, offset, &entry.readback, 0, u64::from(count) * 8);
+        encoder.resolve_query_set(&entry.queries, 0..count, &entry.resolve, 0);
+        encoder.copy_buffer_to_buffer(&entry.resolve, 0, &entry.readback, 0, u64::from(count) * 8);
     }
 
     /// After the frame's final submission: maps its stamps.
@@ -151,9 +206,12 @@ impl PassTimeline {
         let done = Arc::new(OnceLock::new());
         let callback = done.clone();
         let bytes = entry.names.len() as u64 * 8;
-        entry.readback.slice(..bytes).map_async(wgpu::MapMode::Read, move |r| {
-            let _ = callback.set(r);
-        });
+        entry
+            .readback
+            .slice(..bytes)
+            .map_async(wgpu::MapMode::Read, move |r| {
+                let _ = callback.set(r);
+            });
         entry.mapped = Some(done);
     }
 
@@ -164,15 +222,22 @@ impl PassTimeline {
                 continue;
             };
             let bytes = entry.names.len() as u64 * 8;
-            let stamps: Option<Vec<u64>> = result.is_ok().then(|| {
-                let words = entry.readback.slice(..bytes).get_mapped_range().map(|view| {
-                    view.chunks_exact(8)
-                        .map(|c| u64::from_ne_bytes(c.try_into().unwrap()))
-                        .collect()
-                });
-                entry.readback.unmap();
-                words.ok()
-            }).flatten();
+            let stamps: Option<Vec<u64>> = result
+                .is_ok()
+                .then(|| {
+                    let words = entry
+                        .readback
+                        .slice(..bytes)
+                        .get_mapped_range()
+                        .map(|view| {
+                            view.chunks_exact(8)
+                                .map(|c| u64::from_ne_bytes(c.try_into().unwrap()))
+                                .collect()
+                        });
+                    entry.readback.unmap();
+                    words.ok()
+                })
+                .flatten();
             if let Some(stamps) = stamps {
                 let ms = |a: u64, b: u64| b.saturating_sub(a) as f64 * self.period * 1e-6;
                 // Repeated stage names in one frame add up.
@@ -189,15 +254,107 @@ impl PassTimeline {
                     .map(|(n, t)| format!("\"{n}\":{t:.4}"))
                     .collect();
                 let span = ms(stamps[0], *stamps.last().unwrap());
-                let _ = writeln!(
-                    self.log,
-                    "{{\"frame\":{},\"span\":{span:.4},\"passes\":{{{}}}}}",
+                let _ = write_record(
+                    &mut self.log,
+                    &mut self.last_emitted,
                     entry.frame,
-                    body.join(",")
+                    &format!(
+                        "\"dropped\":false,\"span\":{span:.4},\"passes\":{{{}}}",
+                        body.join(",")
+                    ),
                 );
-                let _ = self.log.flush();
+            } else {
+                let _ = write_record(
+                    &mut self.log,
+                    &mut self.last_emitted,
+                    entry.frame,
+                    "\"dropped\":true,\"reason\":\"readback_failed\"",
+                );
             }
+            let _ = self.log.flush();
             entry.mapped = None;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn out_of_order_completion_reuses_free_entries_without_overwriting_pending_frames() {
+        let mut free = vec![false; INITIAL_FRAMES];
+        assert_eq!(available_frame(free.len(), 0, |i| free[i]), None);
+        // The old ring checked only entry 0 and dropped the frame even though 2 was free.
+        free[2] = true;
+        assert_eq!(available_frame(free.len(), 0, |i| free[i]), Some(2));
+        assert_eq!(available_frame(free.len(), 3, |i| free[i]), Some(2));
+        free[2] = false;
+        // Saturation asks the caller to allocate; the same policy works past four entries.
+        free.push(true);
+        assert_eq!(available_frame(free.len(), 3, |i| free[i]), Some(4));
+    }
+
+    #[test]
+    fn capture_records_keep_all_600_frame_ids_and_flag_reordered_completions() {
+        let mut log = Vec::new();
+        let mut last = 0;
+        let mut frames: Vec<u64> = (1..=600).collect();
+        frames.swap(199, 200);
+        for frame in frames {
+            write_record(
+                &mut log,
+                &mut last,
+                frame,
+                "\"dropped\":false,\"span\":1.25,\"passes\":{\"shading\":1.25}",
+            )
+            .unwrap();
+        }
+        let records: Vec<serde_json::Value> = std::str::from_utf8(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 600);
+        let mut ids: Vec<u64> = records
+            .iter()
+            .map(|r| {
+                assert_eq!(r["frame"], r["renderer_frame"]);
+                assert_eq!(r["dropped"], false);
+                r["renderer_frame"].as_u64().unwrap()
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=600).collect::<Vec<_>>());
+        assert_eq!(records[198]["out_of_order"], false);
+        assert_eq!(records[199]["out_of_order"], true); // 201 after 199
+        assert_eq!(records[200]["out_of_order"], true); // 200 after 201
+        assert_eq!(records[201]["out_of_order"], true); // 202 after 200
+        assert_eq!(records[202]["out_of_order"], false);
+    }
+
+    #[test]
+    fn dropped_records_preserve_frame_identity_without_inventing_timings() {
+        let mut log = Vec::new();
+        let mut last = 0;
+        for (frame, reason) in [(1, "no_timestamps"), (2, "readback_failed")] {
+            write_record(
+                &mut log,
+                &mut last,
+                frame,
+                &format!("\"dropped\":true,\"reason\":\"{reason}\""),
+            )
+            .unwrap();
+        }
+        for (i, line) in std::str::from_utf8(&log).unwrap().lines().enumerate() {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(record["renderer_frame"], i + 1);
+            assert_eq!(record["frame"], record["renderer_frame"]);
+            assert_eq!(record["dropped"], true);
+            assert_eq!(record["out_of_order"], false);
+            assert_eq!(record["reason"], ["no_timestamps", "readback_failed"][i]);
+            assert!(record.get("span").is_none());
+            assert!(record.get("passes").is_none());
         }
     }
 }

@@ -278,6 +278,7 @@ impl Renderer {
         let id = self.residency.next_id;
         self.residency.next_id += 1;
         let texture = Texture(Arc::new(TextureInner {
+            block: None,
             renderer: self.identity.clone(),
             role: data.role,
             storage: TextureStorage::Streamed(id),
@@ -422,7 +423,7 @@ impl Renderer {
     /// The texture's current view: its own, or its resident levels.
     pub(crate) fn texture_view<'a>(&'a self, texture: &'a Texture) -> &'a wgpu::TextureView {
         match &texture.0.storage {
-            TextureStorage::Full(full) => &full.view,
+            TextureStorage::Full(full) => full.variance.get().map_or(&full.view, |v| &v.view),
             TextureStorage::Streamed(id) => &self.residency.entry(*id).resident.view,
         }
     }
@@ -714,6 +715,7 @@ impl Renderer {
                 readback.get_or_insert_with(|| self.residency_buffer());
             let mut encoder = self.device.create_command_encoder(&Default::default());
             self.encode_request_clear(&mut encoder);
+            self.encode_material_shading(&mut encoder, shading, None, true);
             self.encode_primary_shading(&mut encoder, shading, None);
             self.encode_hdr_present(&mut encoder, view, None);
             let state = self
@@ -807,6 +809,14 @@ pub(crate) fn texture_format(role: asset::TextureRole) -> wgpu::TextureFormat {
 }
 
 /// Normal maps use array views even for one layer, keeping one sampling ABI for all roles.
+/// The GPU format of a block-compressed texture (`asset::CompressedTexture`).
+pub(crate) fn block_texture_format(format: asset::BlockFormat) -> wgpu::TextureFormat {
+    match format {
+        asset::BlockFormat::Bc7Srgb => wgpu::TextureFormat::Bc7RgbaUnormSrgb,
+        asset::BlockFormat::Bc7Linear => wgpu::TextureFormat::Bc7RgbaUnorm,
+        asset::BlockFormat::Bc5 => wgpu::TextureFormat::Bc5RgUnorm,
+    }
+}
 pub(crate) fn texture_view_descriptor(
     role: asset::TextureRole,
 ) -> wgpu::TextureViewDescriptor<'static> {

@@ -473,7 +473,9 @@ fn words(values: impl IntoIterator<Item = u32>) -> Vec<u8> {
 }
 /// Every draw's clusters once per placement, in traced placement order (16 words each,
 /// visibility_buffer.wgsl's `Cluster`), and the draws' LOD groups (8 words each), uploaded.
-/// N1c's primaries and N8c's shadow page raster both cull this table.
+/// N1c's primaries and N8c's shadow page raster both cull this table. Word 13 (`pad0`) is 1
+/// for a placement that casts no shadow (`Instances::set_casts_shadows`): the shadow raster
+/// skips it, the primaries ignore it.
 pub(super) struct ClusterInstances {
     pub count: u32,
     pub clusters: Arc<Buffer>,
@@ -484,7 +486,7 @@ pub(super) struct ClusterInstances {
 #[derive(Default)]
 pub(super) struct ClusterInstanceCache(std::sync::Mutex<Option<CachedClusterInstances>>);
 struct CachedClusterInstances {
-    key: Vec<(std::sync::Weak<Owned<wgpu::Buffer>>, usize)>,
+    key: Vec<(std::sync::Weak<Owned<wgpu::Buffer>>, usize, Vec<u64>)>,
     count: u32,
     clusters: std::sync::Weak<Buffer>,
     groups: std::sync::Weak<Buffer>,
@@ -494,11 +496,17 @@ impl ClusterInstances {
         let mut cache = r.cluster_instances.0.lock().unwrap();
         if let Some(cached) = cache.as_ref()
             && cached.key.len() == draws.len()
-            && cached.key.iter().zip(draws).all(|((data, count), d)| {
-                d.mesh.clusters.as_ref().is_some_and(|c| {
-                    std::ptr::eq(data.as_ptr(), Arc::as_ptr(&c.data)) && *count == d.instances.len()
+            && cached
+                .key
+                .iter()
+                .zip(draws)
+                .all(|((data, count, non_casting), d)| {
+                    d.mesh.clusters.as_ref().is_some_and(|c| {
+                        std::ptr::eq(data.as_ptr(), Arc::as_ptr(&c.data))
+                            && *count == d.instances.len()
+                            && non_casting == d.instances.state.non_casting()
+                    })
                 })
-            })
             && let (Some(clusters), Some(groups)) =
                 (cached.clusters.upgrade(), cached.groups.upgrade())
         {
@@ -520,7 +528,8 @@ impl ClusterInstances {
                 groups.extend(g.map(f32::to_bits));
                 groups.extend([0; 3]);
             }
-            for _ in 0..d.instances.len() {
+            for slot in 0..d.instances.len() {
+                let no_shadow = u32::from(!d.instances.state.casts_shadows(slot));
                 for c in &mesh.clusters {
                     let bounds = if d.mesh.skin.is_some() {
                         d.mesh.bounds
@@ -542,7 +551,7 @@ impl ClusterInstances {
                         c.primitives,
                         c.counts,
                         placement,
-                        0,
+                        no_shadow,
                         0,
                         0,
                     ]);
@@ -588,6 +597,7 @@ impl ClusterInstances {
                     (
                         Arc::downgrade(&d.mesh.clusters.as_ref().unwrap().data),
                         d.instances.len(),
+                        d.instances.state.non_casting().to_vec(),
                     )
                 })
                 .collect(),
@@ -616,7 +626,7 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
         return uploads;
     };
     if cache.key.len() != draws.len()
-        || !cache.key.iter().zip(draws).all(|((data, count), d)| {
+        || !cache.key.iter().zip(draws).all(|((data, count, _), d)| {
             d.mesh.clusters.as_ref().is_some_and(|c| {
                 std::ptr::eq(data.as_ptr(), Arc::as_ptr(&c.data)) && *count == d.instances.len()
             })
@@ -634,6 +644,8 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
             let b = d.mesh.bounds;
             let mut data = Vec::with_capacity(mesh.clusters.len() * d.instances.len() * 16);
             for instance in 0..d.instances.len() {
+                // The whole record again, with its casts-no-shadow word (`ClusterInstances`).
+                let no_shadow = u32::from(!d.instances.state.casts_shadows(instance));
                 for c in &mesh.clusters {
                     data.extend(b.min.map(f32::to_bits));
                     data.push(c.vertices);
@@ -649,7 +661,7 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
                         c.primitives,
                         c.counts,
                         placement + instance as u32,
-                        0,
+                        no_shadow,
                         0,
                         0,
                     ]);
@@ -857,7 +869,7 @@ impl VisibilityBuffer {
         );
         let resolve_layout = layout(
             &r.device,
-            &[
+            &[&[
                 buffer_entry(0, true, false, S::COMPUTE),
                 buffer_entry(10, true, false, S::COMPUTE),
                 buffer_entry(30, false, false, S::COMPUTE),
@@ -869,7 +881,7 @@ impl VisibilityBuffer {
                 image(17, F::Rgba32Float),
                 image(20, F::R32Uint),
                 image(23, F::R32Float),
-            ],
+            ][..], &if crate::material_mode::Mode::tail() { super::primary_ray_gpu::material_pass_gpu::entries(true).to_vec() } else { Vec::new() }].concat(),
         );
         let pipeline_layout = |groups: &[Option<&wgpu::BindGroupLayout>]| {
             r.device
@@ -968,7 +980,7 @@ impl VisibilityBuffer {
         let hzb_source = include_str!("../shaders/visibility_buffer_hzb.wgsl");
         let base = compute(hzb_source, "base", &[Some(&hzb_layout)], &[]);
         let reduce = compute(hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
-        let resolve_source = resolve_source(&r.source)?;
+        let resolve_source = super::primary_ray_gpu::material_receiver_gpu::resolve(resolve_source(&r.source)?, crate::material_mode::Mode::current())?;
         let resolve = [0.0, 1.0].map(|v| {
             compute(
                 &resolve_source,
@@ -1058,7 +1070,7 @@ impl VisibilityBuffer {
         let resolve_group = bind(
             &r.device,
             &resolve_layout,
-            &[
+            &[&[
                 (0, r.uniform.as_entire_binding()),
                 (10, state.frame_buffer().as_entire_binding()),
                 (30, repair_scan.value.as_entire_binding()),
@@ -1070,7 +1082,7 @@ impl VisibilityBuffer {
                 (17, R::TextureView(&fresh.normal.view)),
                 (20, R::TextureView(&t.tiles.view)),
                 (23, R::TextureView(&t.epsilon.view)),
-            ],
+            ][..], &if crate::material_mode::Mode::tail() { vec![(crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&t.material.as_ref().unwrap().view))] } else { Vec::new() }].concat(),
         );
         Ok(Self {
             size,

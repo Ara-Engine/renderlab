@@ -30,7 +30,7 @@ const LEAF: u32 = 0x8000_0000;
 pub(crate) const HEADER_WORDS: usize = 8;
 /// One instance record; WGSL RS_INSTANCE_WORDS must match. Words 0-11 world-to-object rows,
 /// 12-14 world lo, 15-17 world hi, 18 node base word, 19 triangle base word, 20 root child,
-/// 21 placement slot.
+/// 21 placement slot, 22 1 if it casts no shadow (any-hit rays skip it).
 pub(crate) const INSTANCE_WORDS: usize = 24;
 
 /// One mesh's software reflection geometry, in object space.
@@ -42,7 +42,33 @@ pub(crate) struct Blas {
     hi: [f32; 3],
 }
 
+/// CPU-only diagnostic description of the exact uploaded triangle tree.
+pub(crate) struct GeometryInfo {
+    pub nodes: usize,
+    pub triangles: usize,
+    pub root: u32,
+    pub depth: usize,
+    pub bounds: [[f32; 3]; 2],
+}
+
 impl Blas {
+    pub(crate) fn geometry_info(&self) -> GeometryInfo {
+        fn depth(nodes: &[u32], child: u32) -> usize {
+            if child & LEAF != 0 {
+                return 0;
+            }
+            let at = child as usize * NODE_WORDS;
+            1 + depth(nodes, nodes[at + 12]).max(depth(nodes, nodes[at + 13]))
+        }
+        GeometryInfo {
+            nodes: self.nodes.len() / NODE_WORDS,
+            triangles: self.triangles.len() / TRIANGLE_WORDS,
+            root: self.root,
+            depth: depth(&self.nodes, self.root),
+            bounds: [self.lo, self.hi],
+        }
+    }
+
     /// Median-split BVH2 over `indices` (a triangle list into `positions`). Deterministic:
     /// ties on the split axis break by triangle index. None for an empty list.
     pub(crate) fn build(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
@@ -183,26 +209,32 @@ pub(crate) fn pack(meshes: &[&Blas], instances: usize) -> Packed {
     Packed { bases, words }
 }
 
-/// The header and instance records: per traced instance its placement slot, model, mesh and
-/// that mesh's bases from `pack`. Singular models are skipped (they draw nothing).
-pub(crate) fn instance_words(records: &[(u32, Mat4, &Blas, [u32; 2])]) -> Vec<u32> {
+/// The shared packing/export inclusion check, returning the inverse used by the record.
+pub(crate) fn instance_inverse(model: &Mat4) -> Option<Mat4> {
+    if model.determinant() == 0.0 {
+        return None;
+    }
+    let inverse = model.inverse();
+    inverse.is_finite().then_some(inverse)
+}
+
+/// The header and instance records: per traced instance its placement slot, model, mesh,
+/// that mesh's bases from `pack`, and whether it casts shadows. Singular models are skipped
+/// (they draw nothing).
+pub(crate) fn instance_words(records: &[(u32, Mat4, &Blas, [u32; 2], bool)]) -> Vec<u32> {
     let mut out = vec![0u32; HEADER_WORDS];
     let mut count = 0u32;
-    for &(slot, model, blas, [nodes, triangles]) in records {
-        if model.determinant() == 0.0 {
+    for &(slot, model, blas, [nodes, triangles], casts) in records {
+        let Some(inverse) = instance_inverse(&model) else {
             continue;
-        }
-        let inverse = model.inverse();
-        if !inverse.is_finite() {
-            continue;
-        }
+        };
         let rows = inverse.transpose();
         for r in 0..3 {
             out.extend(rows.col(r).to_array().map(f32::to_bits));
         }
         let (lo, hi) = world_bounds(&model, blas.lo, blas.hi);
         out.extend(lo.iter().chain(&hi).map(|v| v.to_bits()));
-        out.extend([nodes, triangles, blas.root, slot, 0, 0]);
+        out.extend([nodes, triangles, blas.root, slot, u32::from(!casts), 0]);
         count += 1;
     }
     out[0] = count;
@@ -346,8 +378,8 @@ mod tests {
         );
         let packed = pack(&[&b], 1);
         let words = instance_words(&[
-            (5, model, &b, packed.bases[0]),
-            (6, Mat4::ZERO, &b, packed.bases[0]),
+            (5, model, &b, packed.bases[0], true),
+            (6, Mat4::ZERO, &b, packed.bases[0], true),
         ]);
         assert_eq!(words.len(), HEADER_WORDS + INSTANCE_WORDS);
         assert_eq!(words[0], 1);

@@ -70,49 +70,96 @@ fn vd_slope()->f32 {return max(vsm.params.z,1e-4);}
 // within the page around the receiver's.
 const VD_MIPS:u32=5u;
 
+// Level dither: with TR1 jittering (vd.size.z > 0), a receiver within VD_BAND of a level change
+// takes the coarser level with a probability rising across the band, per pixel and frame, and
+// TR1 averages the two levels where the 2x step was a line. The band is that fraction of an
+// octave below a footprint boundary, and that fraction of the half window inside a window edge.
+// Changes from level i to i + 1 for i below VD_BAND_FROM keep the plain choice; 0 turns it off.
+// Off by default (rl1, 2026-11-13): the far-tail seam is the occluder height-band step in
+// vd_map, not a receiver level change, so this left it unchanged while adding short dashed
+// edges where a band crossed a shadow edge. Screens: RENDERLAB_VD=VD_BAND=0.125.
+override VD_BAND:f32=0.0;
+override VD_BAND_FROM:u32=0u;
+
 // ---- Page requests ----
 @group(0) @binding(1) var<storage,read_write> vsm_requests:array<u32>;
 @group(0) @binding(7) var vsm_hit:texture_2d<u32>;
 @group(0) @binding(8) var vsm_tiles:texture_2d<u32>;
 @group(0) @binding(9) var vsm_world:texture_2d<f32>;
 @group(0) @binding(14) var vsm_level_out:texture_storage_2d<r32uint,write>;
+// The receivers the mark pass saw (virtual_shadow_gpu.rs reads it back a frame or two late):
+// 0, the nearest one's distance from the eye as !bits (0: none); 1, their count; 2, those no
+// level's window holds (shaded without the map); 3, the nearest of those as !bits.
+@group(0) @binding(52) var<storage,read_write> vsm_reach:array<atomic<u32>,4>;
+var<workgroup> vd_reach:array<atomic<u32>,4>;
+// The ladder's index for absolute level k: the coarsest level not coarser than k (0 when every
+// level is). The ladder is consecutive except far out, where a span of more than
+// VSM_MAX_LEVELS octaves skips some (info.y holds each level's absolute level).
+fn vd_first(k:f32)->u32 {
+    var first=0u;
+    for(var i=1u;i<vsm.counts.x;i+=1u) {
+        if f32(bitcast<i32>(vsm.levels[i].info.y))<=k {first=i;}
+    }
+    return first;
+}
+// Whether the change from level i to the next may dither.
+fn vd_dithers(i:u32)->bool {return i>=VD_BAND_FROM && i+1u<vsm.counts.x;}
 // The finest level at about params.w texels per pixel whose window holds the receiver's
-// lookup window; coarser levels are the fallback near window edges.
-fn vd_select(world:vec3<f32>)->u32 {
+// lookup window; coarser levels are the fallback near window edges. `jitter` in [0, 1) moves
+// the receivers in a level change's band to the coarser side (0: the plain choice).
+fn vd_select(world:vec3<f32>,jitter:f32)->u32 {
     let p=vsm_light(world);
     let footprint=length(world-vsm.eye.xyz)*vsm.eye.w;
-    let k=floor(log2(max(footprint,1e-9)/vsm.params.y)-vsm.params.w);
-    let first=u32(clamp(k-f32(bitcast<i32>(vsm.levels[0].info.y)),0.0,f32(vsm.counts.x-1u)));
+    let x=log2(max(footprint,1e-9)/vsm.params.y)-vsm.params.w;
+    var first=vd_first(floor(x));
+    if vd_dithers(first) {first=vd_first(floor(x+VD_BAND*jitter));}
+    let half=0.5*f32(vsm.counts.y*VSM_PAGE);
     for(var i=first;i<vsm.counts.x;i+=1u) {
-        let r=(f32(VD_R)+2.0)*vsm_texel(i);
+        var r=(f32(VD_R)+2.0)*vsm_texel(i);
+        if vd_dithers(i) {r+=VD_BAND*jitter*half*vsm_texel(i);}
         let lo=vsm.levels[i].origin.xy;let hi=lo+vec2<f32>(vsm_extent(i));
         if all(p.xy-vec2<f32>(r)>=lo) && all(p.xy+vec2<f32>(r)<hi) {return i;}
     }
     return VSM_NONE;
 }
+// The level dither's jitter in [0, 1): interleaved gradient noise, stepped by the golden ratio
+// each TR1 frame. 0 without TR1 (vd.size.z == 0) or with VD_BAND == 0.
+fn vd_band_jitter(id:vec2<u32>)->f32 {
+    if VD_BAND<=0.0 || vd.size.z<=0.0 {return 0.0;}
+    let ign=fract(52.9829189*fract(dot(vec2<f32>(id),vec2<f32>(0.06711056,0.00583715))));
+    return fract(ign+0.61803398875*vd.size.z);
+}
 // Each receiver requests, from its level up, the pages its lookup window can touch: the reach
 // of the highest caster or VD_R texels, whichever is smaller, plus two texels. It stops at the
 // level whose band holds the highest caster. The coarsest level also serves the max-mip bands:
-// whole cells of the mip whose band holds the highest caster.
-@compute @workgroup_size(8,4) fn vd_mark(@builtin(global_invocation_id) id:vec3<u32>) {
+// whole cells of the mip whose band holds the highest caster. A dithered receiver requests
+// from its plain level, so both sides of its band stay cached.
+@compute @workgroup_size(8,4) fn vd_mark(@builtin(global_invocation_id) id:vec3<u32>,@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     let size=textureDimensions(vsm_world);
-    if any(id.xy>=size) {return;}
-    // Uncovered tiles never had hit records written; read their flag first.
-    if textureLoad(vsm_tiles,id.xy/VSM_TRACE_TILE,0).x==0u {return;}
+    // A workgroup is one trace tile; an uncovered one never had hit records written.
+    if textureLoad(vsm_tiles,group.xy,0).x==0u {return;}
+    let inside=all(id.xy<size);
     var level=VSM_NONE;
-    if textureLoad(vsm_hit,vec2<i32>(id.xy),0).x!=0u {
+    if inside && textureLoad(vsm_hit,vec2<i32>(id.xy),0).x!=0u {
         let world=textureLoad(vsm_world,vec2<i32>(id.xy),0).xyz;
-        level=vd_select(world);
-        if level!=VSM_NONE {
+        let plain=vd_select(world,0.0);
+        level=vd_select(world,vd_band_jitter(id.xy));
+        let distance=~bitcast<u32>(length(world-vsm.eye.xyz));
+        atomicMax(&vd_reach[0],distance);
+        atomicAdd(&vd_reach[1],1u);
+        if level==VSM_NONE {atomicAdd(&vd_reach[2],1u);atomicMax(&vd_reach[3],distance);}
+        if plain!=VSM_NONE {
             let p=vsm_light(world);
             let pages=vsm.counts.y;
             let reach=vd_slope()*max(vsm.depth.w-p.z,0.0);
-            for(var l=level;l<vsm.counts.x;l+=1u) {
+            // The lookup's height-band dither may take a band's top from the next coarser level.
+            let keep=1.0-select(0.0,VD_HBAND,vd_hband_on());
+            for(var l=plain;l<vsm.counts.x;l+=1u) {
                 let texel=vsm_texel(l);
                 var r=min(reach,f32(VD_R)*texel)+2.0*texel;
                 if l+1u==vsm.counts.x {
                     var cell=texel;
-                    for(var m=0u;m<VD_MIPS && f32(VD_R)*cell<reach;m+=1u) {cell*=2.0;}
+                    for(var m=0u;m<VD_MIPS && f32(VD_R)*cell*keep<reach;m+=1u) {cell*=2.0;}
                     r=max(r,(f32(VD_R)+1.0)*cell);
                 }
                 let page=f32(VSM_PAGE)*texel;
@@ -125,12 +172,21 @@ fn vd_select(world:vec3<f32>)->u32 {
                         vsm_requests[(l*pages+y)*pages+x]=1u;
                     }
                 }
-                if f32(VD_R)*texel>=reach {break;}
+                if l>=level && f32(VD_R)*texel*keep>=reach {break;}
             }
         }
     }
     // The lookup reads this level: one rounding of vd_select for both passes.
-    textureStore(vsm_level_out,vec2<i32>(id.xy),vec4<u32>(level));
+    if inside {textureStore(vsm_level_out,vec2<i32>(id.xy),vec4<u32>(level));}
+    workgroupBarrier();
+    if li==0u {
+        let nearest=atomicLoad(&vd_reach[0]);
+        if nearest!=0u {atomicMax(&vsm_reach[0],nearest);}
+        let seen=atomicLoad(&vd_reach[1]);
+        if seen!=0u {atomicAdd(&vsm_reach[1],seen);}
+        let none=atomicLoad(&vd_reach[2]);
+        if none!=0u {atomicAdd(&vsm_reach[2],none);atomicMax(&vsm_reach[3],atomicLoad(&vd_reach[3]));}
+    }
 }
 
 // ---- Lookup ----
@@ -168,6 +224,18 @@ override VD_PEEL2:bool=true;
 // texel, as a coarser level rasterized at its centres would hold); false: the cell is its
 // highest texel, which widens every occluder by up to a cell.
 override VD_MIP_POINT:bool=true;
+// Height-band dither: each level's band (and each max-mip band above the coarsest level) hands
+// its top VD_HBAND fraction to the next coarser one with a probability rising across it, per
+// pixel and TR1 frame, so TR1 averages the two texel sizes where an occluder's height above the
+// receiver crosses a band: the 2x step that slid along long far shadows. Only while TR1
+// jitters (vd.size.z > 0) and has VD_HBAND_AFTER frames of history (vd.size.w): a cut's first
+// frames keep the plain bands, since the dither shows as stipple until TR1 averages it. 0: off.
+// Off by default for now (2026-11-14): on Glint's flight view the dither widens a dotted line of
+// light (empty map texels along a caster's shared triangle edge) into beads. Screens and the
+// later flip: RENDERLAB_VD=VD_HBAND=0.25.
+override VD_HBAND:f32=0.0;
+override VD_HBAND_AFTER:f32=2.0;
+fn vd_hband_on()->bool {return VD_HBAND>0.0 && vd.size.z>0.0 && vd.size.w>=VD_HBAND_AFTER;}
 // Screens: 1 writes lit before any work (dispatch and page work only), 2 after the receiver's
 // setup, 3 skips the map windows.
 override VD_SKIP:u32=0u;
@@ -240,6 +308,8 @@ struct VdPixel {
     // The disk in direction space (light xy per unit of height): its centre and radius, and
     // the largest slope of its directions from the map's axis.
     centre:vec2<f32>,radius:f32,slope:f32,
+    // Each band's top as a fraction of its plain top (VD_HBAND's dither; 1: plain).
+    band:f32,
 };
 var<private> vd_px:VdPixel;
 // The blocked directions so far.
@@ -264,6 +334,12 @@ fn vd_prepare(id:vec2<u32>) {
     if layer==VSM_NONE {return;}
     let l=-light.travel_outer.xyz;
     vd_px.valid=true;
+    vd_px.band=1.0;
+    if vd_hband_on() {
+        // Interleaved gradient noise stepped by the golden ratio each TR1 frame.
+        let ign=fract(52.9829189*fract(dot(vec2<f32>(id),vec2<f32>(0.06711056,0.00583715))));
+        vd_px.band=1.0-VD_HBAND*fract(ign+0.61803398875*vd.size.z);
+    }
     vd_px.thin=normal.w<0.0;
     vd_px.level=textureLoad(vsm_level_in,p,0).x;
     vd_px.world=world.xyz;
@@ -410,7 +486,7 @@ fn vd_map() {
     for(var level=vd_px.level;level<=last;level+=1u) {
         if lo>=ceiling {break;}
         let texel=vsm_texel(level);
-        let hi=vd_band(level);
+        let hi=vd_band(level)*vd_px.band;
         let origin=vsm.levels[level].origin.xy;
         let x=(p.xy-origin)/texel;
         let r=min(slope*min(ceiling,hi)/texel,f32(VD_R));
@@ -437,7 +513,7 @@ fn vd_map() {
     for(var mip=1u;mip<=VD_MIPS;mip+=1u) {
         if lo>=ceiling {break;}
         let cell=texel*f32(1u<<mip);
-        let hi=select(f32(VD_R)*cell/slope,3.4e38,mip==VD_MIPS);
+        let hi=select(f32(VD_R)*cell/slope*vd_px.band,3.4e38,mip==VD_MIPS);
         let s=side>>mip;
         let x=(p.xy-origin)/cell;
         let r=min(slope*min(ceiling,hi)/cell,f32(VD_R));

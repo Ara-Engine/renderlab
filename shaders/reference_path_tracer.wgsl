@@ -223,7 +223,7 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Hit {
 }
 fn occluded(origin:vec3<f32>, direction:vec3<f32>)->bool {
     var query:ray_query;
-    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,255u,0.0,1e30,origin,direction));
+    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK,0.0,1e30,origin,direction));
     while rayQueryProceed(&query) {}
     return rayQueryGetCommittedIntersection(&query).kind!=0u;
 }

@@ -43,10 +43,21 @@
 //! both render from one engine and each frame records both hashes, so a run of `a` or `b`
 //! alone checks that each view matches a single-view engine; `ai` is `a` with a second view
 //! created and never rendered. `--cut-b FRAME` jumps view b's camera and cuts it there.
+//! `--diag casts=toggle` (U-FIXED, `Engine::set_casts_shadows`): the crates stop casting shadows
+//! at frame 12 and cast again from frame 24, on the flight's moving camera.
 //! `--diag forest=1` (U-RTVIS, docs/rtvis.md) swaps the flat ground for a 200 m rolling
 //! terrain (16 tiles) under trees and bushes of cutout cards and walks the field walk's camera
 //! through it: Outpost's layered ground and foliage, for the RT visibility pass's cost.
-//! `forest=bare` is the same terrain and walk without the foliage.
+//! `forest=bare` is the same terrain and walk without the foliage. `--diag floor=R` gives the
+//! flat ground perceptual roughness R (0.95 otherwise): a glossy floor for the reflection strata.
+//! `--diag program=standard` puts the scene's `game` materials on the standard program, which
+//! reports its reflectance to the deferred reflection composite (RENDERLAB_RL_DEFERRED=1).
+//! `--diag far=1` (U-FIXED) holds a camera 40 m up over a 2.4 km ground with columns at 80,
+//! 200, 300 and 800 m whose sun shadows cross the view (the sun's coverage, Ara #185 item 33);
+//! `far=move` slides that camera sideways 0.25 m a frame (far shadows in motion).
+//! `far=low` puts the camera 1.7 m up with a body-sized box 0.3 m beside it and columns at 50,
+//! 200 and 1000 m (the clipmap's reach from a caster at the lens); `far=box` puts the same eye
+//! inside a diagonal wall's bounds instead. `lowmove` and `boxmove` slide them with the caster.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -358,6 +369,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     | "field"
                     | "forest"
                     | "fox"
+                    | "floor"
+                    | "program"
+                    | "far"
+                    | "casts"
             )
         });
     // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
@@ -379,6 +394,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let two_foxes = scene_key("fox", "2");
     let hold_cut = scene_key("hold", "cut");
     let hold = scene_key("hold", "1") || pose_only || hold_cut;
+    // `casts=toggle`: the crates' shadow casting off at frame 12, on again at frame 24.
+    let casts_toggle = scene_key("casts", "toggle");
     // U-SPECK (docs/speck.md): `field=1` scatters 300 small bright boxes and a pale slab over
     // an empty quarter of the ground and walks the camera 4 m across it while turning 12
     // degrees, whatever `--frames` is: the cell mosaic Ara's Outpost showed on flat ground.
@@ -392,6 +409,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `forest=bare`: the same terrain and walk without the trees and bushes.
     let bare = scene_key("forest", "bare");
     let forest = scene_key("forest", "1") || bare;
+    let floor = scene_keys
+        .iter()
+        .find(|(k, _)| k == "floor")
+        .map_or(0.95, |(_, v)| {
+            v.parse::<f32>().expect("--diag floor=<roughness>")
+        });
+    // `far=1` (U-FIXED, the sun's coverage, Ara #185 item 33): a 2.4 km ground and columns
+    // at 80, 200, 300 and 800 m north of a camera 40 m up with a 2 km far plane, whose shadows
+    // cross the view: sun shadows at game-scale distances, on both paths. `far=move` slides the
+    // camera east 0.25 m a frame. `far=low`/`lowmove`: the camera 1.7 m up, 8 m south of the
+    // arch, with a body-sized box 0.3 m east of the eye (out of view) moving with it, and
+    // columns at 50, 200 and 1000 m. `far=box`/`boxmove`: the same eye 1.4 m from a 6 m wall
+    // turned 45 degrees behind its left, whose bounds hold the eye (out of view too).
+    let far_low = scene_key("far", "low") || scene_key("far", "lowmove");
+    let far_box = scene_key("far", "box") || scene_key("far", "boxmove");
+    let far_move = ["move", "lowmove", "boxmove"]
+        .iter()
+        .any(|v| scene_key("far", v));
+    let far = scene_key("far", "1") || far_move || far_low || far_box;
     let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
@@ -495,6 +531,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     let game_program = game_program.as_deref().unwrap_or(GAME_PROGRAM);
     let program = engine.create_program("game", game_program)?;
+    let standard = scene_keys.iter().any(|(k, v)| k == "program" && v == "standard");
     let toon_program = engine.create_program("toon", TOON_PROGRAM)?;
     let programs_seconds = start.elapsed().as_secs_f64();
     let material = |engine: &mut Engine, color: [f32; 3], metallic: f32, roughness: f32| {
@@ -502,7 +539,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             base_color: [color[0], color[1], color[2], 1.0],
             metallic,
             roughness,
-            program: Some(program),
+            program: (!standard).then_some(program),
             ..Default::default()
         })
     };
@@ -603,14 +640,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec3::new(0.0, 0.6, -0.15)
         }
         None => {
-            let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, 0.95)?;
+            let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, floor)?;
             if forest {
                 for tile in terrain_tiles(FOREST_SIZE, 400, 4) {
                     let tile = engine.create_mesh(&mesh(&tile))?;
                     engine.spawn(tile, ground, Mat4::IDENTITY)?;
                 }
             } else {
-                let plane = engine.create_mesh(&mesh(&plane_geometry(60.0, 8)))?;
+                let size = if far { 2400.0 } else { 60.0 };
+                let plane = engine.create_mesh(&mesh(&plane_geometry(size, 8)))?;
                 engine.spawn(plane, ground, Mat4::IDENTITY)?;
             }
             // The physical atmosphere is the default sky (AT1); `--sky uniform` swaps in a
@@ -713,6 +751,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
     }
+    // `far=low`/`box`: the caster beside the eye at a slide of `x` metres east.
+    let far_caster = |x: f32| {
+        if far_box {
+            Mat4::from_translation(at(x - 1.0, 1.5, 9.0))
+                * Mat4::from_rotation_y(-PI / 4.0)
+                * Mat4::from_scale(Vec3::new(6.0, 3.0, 0.1))
+        } else {
+            boxed(at(x + 0.5, 0.9, 8.0), Vec3::new(0.4, 1.8, 0.3))
+        }
+    };
+    let mut far_body = None;
+    if far {
+        let column = material(&mut engine, [0.7, 0.7, 0.72], 0.0, 0.8)?;
+        let distances: &[f32] = if far_low || far_box {
+            &[50.0, 200.0, 1000.0]
+        } else {
+            &[80.0, 200.0, 300.0, 800.0]
+        };
+        for &d in distances {
+            let (width, height) = (d / 25.0, d / 8.0);
+            engine.spawn(
+                cube,
+                column,
+                boxed(at(-0.15 * d, 0.5 * height, -d), Vec3::new(width, height, width)),
+            )?;
+        }
+        if far_low || far_box {
+            far_body = Some(engine.spawn(cube, column, far_caster(0.0))?);
+        }
+    }
     // The arch: two pillars and a lintel.
     for x in [-2.2, 2.2] {
         engine.spawn(
@@ -733,17 +801,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         boxed(at(-5.5, 1.5, 0.0), Vec3::new(0.3, 3.0, 6.0)),
     )?;
     // A stack of crates.
+    let mut crates = vec![];
     for (x, y, z, turn) in [
         (4.0, 0.5, 1.0, 0.1),
         (5.1, 0.5, 1.3, -0.25),
         (4.5, 1.5, 1.1, 0.4),
         (4.2, 0.5, 2.3, 0.0),
     ] {
-        engine.spawn(
+        crates.push(engine.spawn(
             cube,
             wood,
             Mat4::from_translation(at(x, y, z)) * Mat4::from_rotation_y(turn),
-        )?;
+        )?);
     }
     engine.spawn(sphere, gold, boxed(at(1.8, 1.0, 3.2), Vec3::splat(1.0)))?;
     if args.glass {
@@ -1037,13 +1106,46 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ])?;
 
     fs::create_dir_all(&args.out)?;
+    let pipeline_preparation = if std::env::var("RENDERLAB_PREWARM_PIPELINES").is_ok_and(|v| v == "1") {
+        let p = engine.prepare_pipelines()?;
+        Some(serde_json::json!({"ms": p.cpu.as_secs_f64() * 1e3,
+            "render": p.render_pipelines, "compute": p.compute_pipelines,
+            "added_buffer_bytes": p.added_buffer_bytes, "added_texture_bytes": p.added_texture_bytes}))
+    } else { None };
     let ready = start.elapsed();
     let mut frames = Vec::new();
     let mut last_camera = None;
     let mut last_camera_b = None;
     let mut first_image_seconds = None;
     let mut reload = None;
+    // Measurement-only controls: hold the unchanged scene before a late cut, and read back
+    // only post-cut/reference frames without changing the frames the engine renders.
+    let event_frame = std::env::var("RENDERLAB_SCENE_EVENT_FRAME")
+        .map_or(Ok(EVENT_FRAME), |v| v.parse::<u32>())?;
+    let keep_frames = std::env::var("RENDERLAB_SCENE_KEEP_FRAMES").ok()
+        .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>())
+        .transpose()?;
+    let drain = std::env::var("RENDERLAB_SCENE_DRAIN").is_ok_and(|v| v == "1");
+    // U-FIXED measurement only: RENDERLAB_SCENE_EVENT_FRAMES=a,b,c cuts at each listed frame
+    // (`cut=turn` alternates between the turned view and the walk's own), and
+    // RENDERLAB_SCENE_COUNTERS=<file> writes one JSON line per frame of cumulative pipeline,
+    // resource and acceleration-structure counters.
+    let events: Vec<u32> = match std::env::var("RENDERLAB_SCENE_EVENT_FRAMES") {
+        Ok(list) => list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>()?,
+        Err(_) => vec![event_frame],
+    };
+    // Clear only GI, far before the measured cut, without dropping view pipelines.
+    let gi_resets: Vec<u32> = std::env::var("RENDERLAB_SCENE_GI_RESET_FRAMES").ok()
+        .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>())
+        .transpose()?.unwrap_or_default();
+    let mut queue_diagnostic=std::env::var_os("RENDERLAB_GI_QUEUE_DIAG").map(std::fs::File::create).transpose()?;
+    let queue_frames:Vec<u32>=std::env::var("RENDERLAB_SCENE_QUEUE_FRAMES").unwrap_or_else(|_|"443,462,512,641".into())
+        .split(',').map(str::parse::<u32>).collect::<Result<_,_>>()?;
+    let mut counters = std::env::var_os("RENDERLAB_SCENE_COUNTERS")
+        .map(std::fs::File::create)
+        .transpose()?;
     for frame in 0..args.frames {
+        if gi_resets.contains(&frame) { engine.renderer_mut().reset_indirect(); }
         let t = if args.still { 0.0 } else { frame as f32 / FPS };
         let sun_update = Instant::now();
         let hour = sun_hour(frame);
@@ -1062,9 +1164,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             second.update(&mut engine, ground, behind.cos().atan2(-behind.sin()), t + 0.4)?;
         }
         engine.set_lights(&diag.lights(lanterns(t, frame)))?;
-        if glow_steps && frame == EVENT_FRAME {
+        if glow_steps && frame == event_frame {
             let dim = [6_000.0, 4_000.0, 1_800.0].map(|v| v * lamp_scale);
             engine.set_material_parameters(bulb, &[("glow", Value::Vec3(dim))])?;
+        }
+        if casts_toggle && (frame == 12 || frame == 24) {
+            for &object in &crates {
+                engine.set_casts_shadows(object, frame == 24)?;
+            }
         }
         let spin = if pose_only { 0.0 } else { t };
         engine.set_transform(
@@ -1074,8 +1181,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 * Mat4::from_rotation_x(0.6 * spin),
         )?;
         // Fly path: a slow orbit that descends and closes in on the hero.
-        let cut = (cuts || hold_cut) && frame >= EVENT_FRAME;
-        if (cuts || cut_turn || hold_cut) && frame == EVENT_FRAME {
+        let cut = (cuts || hold_cut) && frame >= event_frame;
+        if (cuts || cut_turn || hold_cut) && events.contains(&frame) {
             engine.cut_view(view);
             // `hold=cut`: the held pose moves to the cut's pose and holds there.
             if hold_cut {
@@ -1107,14 +1214,33 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 engine.cut_view(view);
             }
             let eye = anchor + FIELD_EYE + 4.0 * along * FIELD_WALK;
-            let turn = if cut_turn && frame >= EVENT_FRAME { 150.0 } else { 0.0 };
+            let passed = events.iter().filter(|&&e| frame >= e).count();
+            let turn = if cut_turn && passed % 2 == 1 { 150.0 } else { 0.0 };
             let look = Mat4::from_rotation_y((12.0 * along + turn).to_radians())
                 .transform_vector3(FIELD_WALK);
             (eye, eye + 10.0 * look - Vec3::new(0.0, 2.2, 0.0))
         } else {
             (eye, target)
         };
-        let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, 500.0)?;
+        let (eye, target, far_plane) = if far {
+            let slide = Vec3::new(if far_move { 0.25 * frame as f32 } else { 0.0 }, 0.0, 0.0);
+            if let Some(body) = far_body {
+                engine.set_transform(body, far_caster(slide.x))?;
+            }
+            let eye = if far_body.is_some() {
+                Vec3::new(0.0, 1.7, 8.0)
+            } else {
+                Vec3::new(0.0, 40.0, 0.0)
+            };
+            (
+                anchor + slide + eye,
+                anchor + slide + Vec3::new(0.0, 0.0, -400.0),
+                2000.0,
+            )
+        } else {
+            (eye, target, 500.0)
+        };
+        let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, far_plane)?;
         // View b: across the scene, still at its first pose unless `--b-orbit`, a third of
         // the way round from `--cut-b` on.
         let b_cut = args.cut_b.is_some_and(|f| frame >= f);
@@ -1138,12 +1264,19 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let camera = if args.views == "b" { camera_b } else { camera };
         let begin = Instant::now();
         engine.tick(1.0 / FPS)?;
+        let queue_sample=queue_diagnostic.is_some() && queue_frames.contains(&frame);
+        if queue_sample {engine.renderer_mut().begin_indirect_queue_probe()?;}
         let report = engine.render_view(view, &camera)?;
+        if queue_sample {
+            use std::io::Write;
+            let q=engine.renderer_mut().indirect_queue_probe()?;
+            writeln!(queue_diagnostic.as_mut().unwrap(),"{}",serde_json::json!({"frame":frame,"phase":"incoming_after_probe","visible_never_gathered":q[0],"visible_with_raw_data":q[1],"off_screen":q[2],"ineligible":q[3],"duplicates":q[4],"entries":q[5],"visible_filtered_only":q[6]}))?;
+        }
         // `--views ab`: the second view renders in the same tick, after the first.
         let second_hash = match second {
             Some(second) => {
                 engine.render_view(second, &camera_b)?;
-                let written = frame % args.every == 0 || frame + 1 == args.frames;
+                let written = keep_frames.as_ref().map_or(frame % args.every == 0 || frame + 1 == args.frames, |keep| keep.contains(&frame));
                 written
                     .then(|| -> Result<_, Box<dyn std::error::Error>> {
                         let image = engine.capture_view(second)?;
@@ -1154,8 +1287,30 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             None => None,
         };
+        if drain {
+            engine.device().poll(wgpu::PollType::wait_indefinitely())?;
+            engine.poll()?;
+        }
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
-        let written = frame % args.every == 0 || frame + 1 == args.frames;
+        if let Some(file) = counters.as_mut() {
+            use std::io::Write;
+            let r = engine.renderer();
+            let st = r.stats();
+            let kinds: Vec<u64> = st.ownership.persistent.iter().map(|c| c.created).collect();
+            let hw = r.hardware_shadow_stats();
+            writeln!(file, "{}", serde_json::json!({
+                "frame": frame, "pipelines_created": st.pipelines.created, "created_by_kind": kinds,
+                "shadow_creations": st.ownership.shadow_creations, "target_creations": st.ownership.target_creations,
+                "lut_creations": st.ownership.lut_creations, "material_creations": st.ownership.material_creations,
+                "texture_creations": st.ownership.texture_creations, "light_creations": st.ownership.light_creations,
+                "blas_builds": hw.map(|h| h.blas_builds), "blas_updates": hw.map(|h| h.blas_updates),
+                "tlas_builds": hw.map(|h| h.tlas_builds), "pending_builds": hw.map(|h| h.pending_builds),
+                "as_bytes": hw.map(|h| h.estimated_as_bytes),
+                "visible_instances": report.scene.visible_instances,
+                "submitted_instances": report.scene.submitted_instances,
+            }))?;
+        }
+        let written = keep_frames.as_ref().map_or(frame % args.every == 0 || frame + 1 == args.frames, |keep| keep.contains(&frame));
         let mut image_hash = None;
         let mut hdr_hash = None;
         if written {
@@ -1173,6 +1328,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             write_png(&args.out.join(format!("frame-{frame:03}.png")), &image)?;
         }
+        // The non-RT sun clipmap's ladder and its reach (receiver counts lag a frame or two).
+        let v = engine.renderer().virtual_shadow_stats();
+        let clipmap = serde_json::json!({
+            "levels": v.levels, "finest_level": v.finest_level, "skipped_levels": v.skipped_levels,
+            "nearest_receiver": v.nearest_receiver, "receivers": v.receivers,
+            "unplaced_receivers": v.unplaced_receivers, "nearest_unplaced": v.nearest_unplaced,
+        });
         frames.push(serde_json::json!({
             "frame": frame, "renderer_frame": report.frame.0, "cpu_render_ms": cpu_ms,
             "sun_hour": hour, "cpu_sun_update_ms": sun_update_ms,
@@ -1180,6 +1342,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "draws": report.scene.draws, "triangles": report.scene.triangles, "written": written,
             "rgba8_sha256": image_hash, "t": t, "eye": eye.to_array(), "target": target.to_array(),
             "hdr_sha256": hdr_hash, "view": &args.views[..1], "b_rgba8_sha256": second_hash,
+            "clipmap": clipmap,
         }));
         last_camera = Some(camera);
         last_camera_b = Some(camera_b);
@@ -1291,7 +1454,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "night_lanterns": args.night_lanterns, "local_lights": diag.lights(lanterns(0.0, 0)).len(),
         "diag": args.diag, "lamp_head": post_lamp.to_array(),
         "local_shadow_count":engine.settings().local_shadows.count,
-        "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
+        "quarry": args.quarry, "pipeline_preparation": pipeline_preparation,
+        "startup_to_scene_ready_seconds": ready.as_secs_f64(),
         "startup_to_first_image_seconds": first_image_seconds,
         "startup_stages_seconds": {"adapter":adapter_seconds,"engine":engine_seconds-adapter_seconds,
             "programs":programs_seconds-engine_seconds,"scene":ready.as_secs_f64()-programs_seconds},

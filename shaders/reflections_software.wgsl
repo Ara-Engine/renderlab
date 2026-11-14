@@ -42,8 +42,11 @@ fn rs_limit(best:RsHit,best_i:u32,i:u32)->f32 {
 // blocker.
 fn rs_instance(i:u32,origin:vec3<f32>,direction:vec3<f32>,world_inv:vec3<f32>,tmin:f32,any_hit:bool,
     best:ptr<function,RsHit>,best_i:ptr<function,u32>,stack:ptr<function,array<u32,RS_STACK>>)->bool {
-    // Record words 0-11 rows, 12-17 world lo/hi, 18 nodes, 19 triangles, 20 root, 21 slot.
+    // Record words 0-11 rows, 12-17 world lo/hi, 18 nodes, 19 triangles, 20 root, 21 slot,
+    // 22 casts no shadow: any-hit (shadow) rays pass through it.
     let r=(RS_HEADER_WORDS+i*RS_INSTANCE_WORDS)>>2u;
+    let tail=rl_geometry[r+5u];
+    if any_hit && tail.z!=0u {return false;}
     let b0=rs_q(r+3u);let b1=rl_geometry[r+4u];
     let bound=rs_limit(*best,*best_i,i);
     if rs_box(origin,world_inv,b0.xyz,vec3<f32>(b0.w,bitcast<vec2<f32>>(b1.xy)),tmin,bound)>bound {return false;}
@@ -52,7 +55,7 @@ fn rs_instance(i:u32,origin:vec3<f32>,direction:vec3<f32>,world_inv:vec3<f32>,tm
     let o=vec3<f32>(dot(r0,vec4<f32>(origin,1.0)),dot(r1,vec4<f32>(origin,1.0)),dot(r2,vec4<f32>(origin,1.0)));
     let d=vec3<f32>(dot(r0.xyz,direction),dot(r1.xyz,direction),dot(r2.xyz,direction));
     let inv=rs_inverse(d);
-    let nodes=b1.z>>2u;let triangles=b1.w>>2u;let tail=rl_geometry[r+5u];let slot=tail.y;
+    let nodes=b1.z>>2u;let triangles=b1.w>>2u;let slot=tail.y;
     (*stack)[0]=tail.x;
     var sp=1u;
     while sp>0u {

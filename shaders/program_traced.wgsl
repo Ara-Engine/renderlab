@@ -38,7 +38,11 @@ fn sample_metallic_roughness_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>
 fn sample_normal_layer_grad(input:SurfaceInput, uv:vec2<f32>, dx:vec2<f32>, dy:vec2<f32>, layer:i32) -> vec4<f32> {
     if !rl_term(RL_TERM_TEXTURES) { return vec4<f32>(0.5,0.5,1.0,0.0); }
     let i=input.receiver.slot;
-    return textureSampleGrad(primary_normal_map[i],primary_normal_sampler[i],uv,layer,dx,dy);
+    let s=textureSampleGrad(primary_normal_map[i],primary_normal_sampler[i],uv,layer,dx,dy);
+    if input.material.normal_mapped!=2u || layer!=0 { return s; }
+    // A BC5 map has its variance layer only once a program reads it (normal_variance 1).
+    if input.material.normal_variance!=1u { return rl_normal_texel(s,0.0); }
+    return rl_normal_texel(s,textureSampleGrad(primary_normal_map[i],primary_normal_sampler[i],uv,1,dx,dy).r);
 }
 // The DFG table has one level, so this equals the raster sample.
 fn environment_dfg(n_dot_v:f32, roughness:f32) -> vec2<f32> {

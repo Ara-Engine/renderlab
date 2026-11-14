@@ -12,7 +12,10 @@
 //! [`Renderer`] stays available through [`Engine::renderer_mut`] as the expert API: its
 //! tuning surface changes as features are measured, while this module stays stable
 //! (docs/api.md lists what is frozen).
+#[cfg(test)]
+mod casts_shadows_tests;
 mod device;
+mod prewarm;
 pub(crate) mod ids;
 mod scene;
 mod view;
@@ -24,6 +27,7 @@ pub(crate) mod settings;
 pub(crate) mod state;
 
 pub use device::{Capabilities, ExperimentalRayQuery, RenderPath};
+pub use prewarm::PipelinePreparation;
 pub use ids::{
     EmitterId, EnvironmentId, Id, MaterialId, MeshId, ObjectId, ProgramId, TextureId, kind,
 };
@@ -229,6 +233,13 @@ impl Residency for Handles {
     fn set_instance(instances: &mut Instances, slot: usize, transform: Mat4) -> Result<(), Error> {
         instances.set(slot, transform)
     }
+    fn set_instance_casts_shadows(
+        instances: &mut Instances,
+        slot: usize,
+        casts: bool,
+    ) -> Result<(), Error> {
+        instances.set_casts_shadows(slot, casts)
+    }
 }
 
 /// The renderer, its device, the scene's resources and objects, and the frame settings.
@@ -247,6 +258,7 @@ pub struct Engine {
     /// The views, and the renderer's empty view the next `create_view` takes (its first).
     views: Vec<view::ViewEntry>,
     spare: Option<ViewId>,
+    prewarm_pending: bool,
 }
 
 /// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
@@ -308,6 +320,7 @@ impl Engine {
                 "HardwareRt needs the ExperimentalRayQuery acknowledgment",
             ));
         }
+        crate::material_mode::Mode::validate(&adapter.limits())?;
         if !Capabilities::query(adapter).supports(path) {
             return Err(Error::InvalidInput(
                 "adapter lacks this render path's features or limits",
@@ -373,6 +386,7 @@ impl Engine {
             ids: Default::default(),
             views: Vec::new(),
             spare: Some(renderer_first_view),
+            prewarm_pending: std::env::var("RENDERLAB_PREWARM_PIPELINES").is_ok_and(|v| v == "1"),
         };
         settings::apply(&mut engine.renderer, &engine.state.settings)?;
         // Ticks are explicit from the start: the first frame runs the first tick's work.
@@ -455,6 +469,22 @@ impl Engine {
         self.state.remove_mesh(mesh).map(drop)
     }
 
+    /// Uploads a block-compressed texture as shipped (`renderlab_asset::CompressedTexture`:
+    /// BC7 colour or data, BC5 normals), fully resident. Errors on a device without
+    /// `compressed_textures`; upload RGBA8 (`create_texture`) there.
+    pub fn create_compressed_texture(
+        &mut self,
+        data: renderlab_asset::CompressedTexture,
+    ) -> Result<TextureId, Error> {
+        let texture = self.admit("texture upload admission timed out", |r| {
+            r.try_upload_compressed_texture(&data)
+        })?;
+        Ok(self.state.textures.insert(texture))
+    }
+    /// Whether this device samples BC7 and BC5, so `create_compressed_texture` works.
+    pub fn compressed_textures(&self) -> bool {
+        self.renderer.compressed_textures()
+    }
     /// Uploads a prepared texture (every mip level; see `renderlab_asset::Texture`).
     pub fn create_texture(&mut self, data: TextureData) -> Result<TextureId, Error> {
         let data = Arc::new(data);
@@ -475,7 +505,19 @@ impl Engine {
         let program = self
             .renderer
             .try_create_program(&ProgramDescriptor { label, source })?;
-        Ok(self.state.programs.insert(program))
+        let id = self.state.programs.insert(program);
+        self.refresh_variance()?;
+        Ok(id)
+    }
+    /// After a program arrives or changes: when one reads normal variance, the BC5 normal maps
+    /// get their variance layers and every material binds them (src/normal_variance_lazy.rs).
+    fn refresh_variance(&mut self) -> Result<(), Error> {
+        if self.renderer.ensure_variance_layers()? {
+            for entry in self.state.materials.values_mut() {
+                self.renderer.refresh_material(&mut entry.material);
+            }
+        }
+        Ok(())
     }
     /// Replaces a program's source transactionally: on rejection its last working
     /// pipelines keep rendering and the diagnostic names program lines. Materials keep
@@ -494,7 +536,12 @@ impl Engine {
                 compile: Duration::ZERO,
             })?
             .clone();
-        self.renderer.reload_program(&handle, source)
+        let report = self.renderer.reload_program(&handle, source)?;
+        self.refresh_variance().map_err(|e| ReloadError::Rejected {
+            diagnostic: e.to_string(),
+            compile: Duration::ZERO,
+        })?;
+        Ok(report)
     }
     /// The built-in photoreal program (shaders/programs/standard.wgsl), which materials
     /// without a program use.
@@ -750,6 +797,15 @@ impl Engine {
         self.state
             .spawn(mesh, material, transform, self.limits.max_instances)
     }
+    /// Whether an object blocks light (default true). A non-casting object is drawn, reflected,
+    /// bounced and shaded as before and still receives shadows, but no shadow test on either
+    /// path sees it: the shade or glass around a lamp's light, for example.
+    pub fn set_casts_shadows(&mut self, object: ObjectId, casts: bool) -> Result<(), Error> {
+        self.state.set_casts_shadows(object, casts)
+    }
+    pub fn casts_shadows(&self, object: ObjectId) -> Result<bool, Error> {
+        self.state.casts_shadows(object)
+    }
     /// Moves an object: a transform write on the next frame, no reallocation.
     pub fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error> {
         self.state.set_transform(object, transform)
@@ -914,14 +970,21 @@ impl Engine {
         camera: &Camera,
         mode: ViewMode,
     ) -> Result<FrameReport, Error> {
+        if self.prewarm_pending {
+            self.prepare_pipelines()?;
+        }
         let ids: Vec<_> = self.state.batches.ids().collect();
         for id in ids {
             let batch = self.state.batches.get(id)?;
             if batch.instances.is_none() {
                 let models = batch.models.clone();
-                let instances = self.admit("instance upload admission timed out", |r| {
+                let casts = batch.casts.clone();
+                let mut instances = self.admit("instance upload admission timed out", |r| {
                     r.try_upload_instances(&models)
                 })?;
+                for (slot, _) in casts.iter().enumerate().filter(|(_, c)| !**c) {
+                    instances.set_casts_shadows(slot, false)?;
+                }
                 self.state.batches.get_mut(id)?.instances = Some(instances);
             }
         }
@@ -948,6 +1011,7 @@ impl Engine {
         loop {
             if let Some(report) = renderer.try_render_view(color, camera, &mut draws, mode)? {
                 settings::log_indirect(renderer)?;
+                settings::log_clipmap(renderer);
                 return Ok(report);
             }
             if Instant::now() > deadline {

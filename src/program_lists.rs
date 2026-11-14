@@ -18,10 +18,28 @@ const LIST_TILE: [u32; 2] = [4, 4];
 const INFO_BYTES: u64 = 16 + 4 * TRACED_DRAWS as u64;
 /// Standalone binning shares the composed shading draw-table ABI.
 pub(crate) fn bin_source() -> String {
-    format!(
-        "const PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{}",
-        include_str!("../shaders/program_bins.wgsl")
-    )
+    bin_source_for(crate::program::list_entries_per_group())
+}
+/// `bin_source` for list shading of `per` entries per workgroup: a list of n entries
+/// dispatches ceil(n / per) workgroups.
+pub(crate) fn bin_source_for(per: u32) -> String {
+    let source = include_str!("../shaders/program_bins.wgsl");
+    const ARGS: &str = "    atomicMax(&bins_args[slot*4u],min(at+1u,BINS_ROW));\n    atomicMax(&bins_args[slot*4u+1u],at/BINS_ROW+1u);\n";
+    assert_eq!(
+        source.matches(ARGS).count(),
+        1,
+        "the binning kernel's dispatch arguments"
+    );
+    let source = if per == 1 {
+        source.to_owned()
+    } else {
+        source.replacen(
+            ARGS,
+            &format!("    atomicMax(&bins_args[slot*4u],min(at/{per}u+1u,BINS_ROW));\n    atomicMax(&bins_args[slot*4u+1u],(at/{per}u)/BINS_ROW+1u);\n"),
+            1,
+        )
+    };
+    format!("const PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{source}")
 }
 
 /// Indirect arguments per slot: x, y, z and a pad word.
@@ -33,9 +51,9 @@ pub(super) struct ListLayouts {
     bins: Owned<wgpu::BindGroupLayout>,
     bins_layout: Owned<wgpu::PipelineLayout>,
     /// The shading group 0 plus the list bindings, indexed by `Shading`.
-    shade: [Owned<wgpu::BindGroupLayout>; 2],
-    layouts: [Owned<wgpu::PipelineLayout>; 2],
-    streamed_layouts: [Owned<wgpu::PipelineLayout>; 2],
+    pub(super) shade: [Owned<wgpu::BindGroupLayout>; 2],
+    pub(super) layouts: [Owned<wgpu::PipelineLayout>; 2],
+    pub(super) streamed_layouts: [Owned<wgpu::PipelineLayout>; 2],
 }
 impl ListLayouts {
     /// `shade` holds the single-program shading group's entries per `Shading`; the other
@@ -123,15 +141,15 @@ impl ListLayouts {
 pub(super) struct ProgramLists {
     /// Allocated slots (a power of two) and tiles per slot list.
     slots: u32,
-    capacity: u32,
+    pub(super) capacity: u32,
     /// Dynamic-offset stride of `info`.
-    stride: u32,
+    pub(super) stride: u32,
     info: Buffer,
-    entries: Buffer,
-    args: Buffer,
+    pub(super) entries: Buffer,
+    pub(super) args: Buffer,
     written: Vec<u8>,
     /// The binning group and what it binds: hit records and geometry generations.
-    bins: Option<(Owned<wgpu::BindGroup>, (wgpu::Texture, u64))>,
+    pub(super) bins: Option<(Owned<wgpu::BindGroup>, (wgpu::Texture, u64))>,
     pub generation: u64,
 }
 impl ProgramLists {
@@ -398,10 +416,15 @@ impl Renderer {
     ) {
         let state = self.view.primary.as_ref().unwrap();
         self.encode_program_lists_with(encoder, shading, timestamp_writes, |k| {
-            let list = &self.program_slot(state.programs[k]).pipelines.list;
-            list[usize::from(state.requests)][shading as usize]
-                .as_ref()
-                .unwrap()
+            let id = state.programs[k];
+            let list = &self.program_slot(id).pipelines.list;
+            // Each program's lean list once it landed; until then its full one.
+            self.lean_pipeline(id, true, shading as usize)
+                .unwrap_or_else(|| {
+                    list[usize::from(state.requests)][shading as usize]
+                        .as_ref()
+                        .unwrap()
+                })
         });
     }
     /// `encode_program_lists` with the pipeline of the frame's `k`th program from `pipeline`
@@ -490,7 +513,10 @@ mod tests {
             .validate(&module)
             .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
         };
-        validate("bins", &bin_source());
+        // RENDERLAB_LIST_LANES 16, 32 and 64.
+        for per in [1, 2, 4] {
+            validate(&format!("bins {per}"), &bin_source_for(per));
+        }
         let prelude = include_str!("../shaders/scene.wgsl");
         let heads = shading_heads(prelude).unwrap();
         for (label, program) in [
@@ -506,6 +532,22 @@ mod tests {
                     let list = crate::program::compose_list(head, program, stage, parameters);
                     assert_eq!(&list.source[list.program.clone()], program);
                     validate(&format!("{label} {i} {stage:?}"), &list.source);
+                    let entry =
+                        crate::program::list_entry(crate::program::list_entries_per_group());
+                    // The other widths than the environment's (RENDERLAB_LIST_LANES).
+                    for per in [1, 2, 4]
+                        .into_iter()
+                        .filter(|&per| per != crate::program::list_entries_per_group())
+                    {
+                        let wide =
+                            list.source
+                                .replacen(&entry, &crate::program::list_entry(per), 1);
+                        assert_ne!(wide, list.source);
+                        validate(
+                            &format!("{label} {i} {stage:?} {per} entries a group"),
+                            &wide,
+                        );
+                    }
                     let single = crate::program::compose(head, program, stage, parameters).source;
                     assert!(list.source.contains("fn primary_shade_list("));
                     assert!(!single.contains("primary_shade_list"));

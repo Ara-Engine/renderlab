@@ -92,6 +92,8 @@ pub(crate) struct ProgramPipelines {
     pub fresh: Option<[Owned<wgpu::RenderPipeline>; 2]>,
     /// By `Shading`.
     pub traced: [Option<Owned<wgpu::ComputePipeline>>; 2],
+    /// Tiles/list, resident/streamed, Hard/Soft; writer and reader.
+    pub material: [[[Option<[Owned<wgpu::ComputePipeline>; 2]>; 2]; 2]; 2],
     /// The reflection pass's hit shading (`program::compose_hits`), single-program then
     /// mixed-program (on MP1's list ABI), by `Shading`: built by the first frame with
     /// `RENDERLAB_RL_PASS=1` that shades with it (primary_ray_gpu reflection_hits_gpu.rs),
@@ -106,6 +108,10 @@ pub(crate) struct ProgramPipelines {
     /// streaming, then by `Shading` (`Renderer::ensure_lists`). Built by the first mixed
     /// frame that needs one.
     pub list: [[Option<Owned<wgpu::ComputePipeline>>; 2]; 2],
+    /// Lean shading (`program::lean_variant`) of frames without decals or media, tiles
+    /// then list, by `Shading`: compiled in the background by the first lean frame that
+    /// shades with it (primary_ray_gpu lean_gpu.rs), dropped with `traced`.
+    pub lean: [[Option<Owned<wgpu::ComputePipeline>>; 2]; 2],
 }
 impl ProgramPipelines {
     /// Tests: swaps probe shading pipelines in for both traced sets (both built).

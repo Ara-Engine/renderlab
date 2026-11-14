@@ -1,0 +1,15 @@
+# wgpu material-record ordering
+
+The backend uses the shared `program::material_variant` writer and reader, with no packing code of its own. The record is one `rgba32uint` 2D array at binding 75 (48 bytes per pixel, three layers, receiver first; docs/design-material-pass.md). The image (`program::MATERIAL_RECORD_LAYERS` layers), the writer's storage entry and the reader's sampled entry (`material_pass_gpu::entries`, `D2Array`) use `program::MATERIAL_RECORD_BINDING`. Receiver-only writers publish model 255 for programs without a mapping; their reader pipeline retains the original composed shading source instead of unwrapping an absent shared reader.
+
+With `RENDERLAB_MATERIAL_PASS=1`, non-film primary frames run camera visibility, material records, receiver sun visibility, GI, local-light visibility, and final shading in that order. RT Interactive frames use the existing separate camera and visibility-buffer sun kernels, including reconstruction's sun estimator when TR1 is active. The material writer is in the early submission, ahead of the late GI/cache preparation. Scene-wide acceleration structures, light clusters, caster maps and atmosphere preparation can precede camera visibility; they do not consume per-pixel receivers.
+
+The record is produced for later receiver passes even when the final output is a view mode. Streaming clears request counters before the writer and reruns the writer when residency changes. Temporal-film accumulation retains its existing fused pipeline. Programs without `material_out`/`material_in` retain their own shading kernels.
+
+The receiver record and shading's reduced reads are supplied by the shared implementation. Geometry-only sun, GI and local-light visibility still use their current receiver/hit inputs; switching them to the record is separate work. Camera visibility still publishes their legacy fresh receivers and can become hit-only at that cutover. Every reader must retain its hit check until the shared writer publishes a miss sentinel, including the fast clear blocks.
+
+Word 0 is read directly by primary shading's mapped-program reader (tiles, lists and streamed variants), including its material debug/probe variants. It contains the shading normal and material fields. The standalone sun, GI receiver, local-light visibility, reflection trace/hit/composite passes do not directly read word 0 in this wiring. An unmapped program's monolithic shading fallback does not read it either. The reflection passes consume lobes prepared by shading rather than the material image directly.
+
+Opting into this ordering assumes `surface` and `material_out` resolve material inputs independently of this frame's later sun/GI/light-visibility results; the game and standard mappings meet that constraint. Their lighting remains in `shade`.
+
+Switch off retains the existing visibility/sun dispatch branch and shader compositions. The new early-order path is default off. Previous #98 timing measurements describe the earlier late writer placement; they must not be treated as timings of this new schedule.

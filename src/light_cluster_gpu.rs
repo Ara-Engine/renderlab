@@ -19,9 +19,52 @@ pub(super) struct Atlas {
     resolution: u32,
     slots: u32,
     cube_layers: bool,
-    clear: Option<Owned<wgpu::RenderPipeline>>,
+    /// The texture's width and height (`lc::fitted_extent`): the tiles' bounding box.
+    extent: [u32; 2],
+    clear: Option<Arc<Owned<wgpu::RenderPipeline>>>,
     _allocation: Allocation,
 }
+/// Atlas extent and light selection do not affect this pipeline's descriptor.
+fn clear_pipeline(device: &PipelineDevice, ledger: &Ledger) -> Owned<wgpu::RenderPipeline> {
+    let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("LC3 tile clear"),
+        source: wgpu::ShaderSource::Wgsl(
+            include_str!("../shaders/local_light_clear.wgsl").into(),
+        ),
+    });
+    ledger.own(
+        device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("LC3 tile clear"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vertex"),
+                buffers: &[],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fragment"),
+                targets: &[],
+                compilation_options: Default::default(),
+            }),
+            primitive: Default::default(),
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: wgpu::TextureFormat::Depth32Float,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::Always),
+                stencil: Default::default(),
+                bias: Default::default(),
+            }),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        }),
+        ResourceKind::RenderPipeline,
+    )
+
+}
+
 impl Atlas {
     /// `slots` 0 is the 1x1 placeholder bound while no frame needs maps.
     fn new(
@@ -31,21 +74,20 @@ impl Atlas {
         resolution: u32,
         slots: u32,
         cube_layers: bool,
+        extent: [u32; 2],
+        prepared_clear: Option<Arc<Owned<wgpu::RenderPipeline>>>,
     ) -> Self {
         let (size, layers) = if slots == 0 {
-            (1, 1)
+            ([1, 1], 1)
         } else {
-            (
-                lc::atlas_extent(resolution),
-                if cube_layers { 6 } else { 1 },
-            )
+            (extent, if cube_layers { 6 } else { 1 })
         };
         let texture = ledger.own(
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("LC1 local shadow maps"),
                 size: wgpu::Extent3d {
-                    width: size,
-                    height: size,
+                    width: size[0],
+                    height: size[1],
                     depth_or_array_layers: layers,
                 },
                 mip_level_count: 1,
@@ -108,45 +150,10 @@ impl Atlas {
             }
             uniforms = Some(buffer);
         }
-        let bytes = u64::from(layers) * 4 * u64::from(size).pow(2)
+        let bytes = u64::from(layers) * 4 * u64::from(size[0]) * u64::from(size[1])
             + uniforms.as_ref().map_or(0, |u| u.size());
         let clear = (slots > 0).then(|| {
-            let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("LC3 tile clear"),
-                source: wgpu::ShaderSource::Wgsl(
-                    include_str!("../shaders/local_light_clear.wgsl").into(),
-                ),
-            });
-            ledger.own(
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("LC3 tile clear"),
-                    layout: None,
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some("vertex"),
-                        buffers: &[],
-                        compilation_options: Default::default(),
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some("fragment"),
-                        targets: &[],
-                        compilation_options: Default::default(),
-                    }),
-                    primitive: Default::default(),
-                    depth_stencil: Some(wgpu::DepthStencilState {
-                        format: wgpu::TextureFormat::Depth32Float,
-                        depth_write_enabled: Some(true),
-                        depth_compare: Some(wgpu::CompareFunction::Always),
-                        stencil: Default::default(),
-                        bias: Default::default(),
-                    }),
-                    multisample: Default::default(),
-                    multiview_mask: None,
-                    cache: None,
-                }),
-                ResourceKind::RenderPipeline,
-            )
+            prepared_clear.unwrap_or_else(|| Arc::new(clear_pipeline(device, ledger)))
         });
         Self {
             _texture: texture,
@@ -158,6 +165,7 @@ impl Atlas {
             resolution,
             slots,
             cube_layers,
+            extent: size,
             clear,
             _allocation: ledger.allocate(AllocationKind::Shadow, bytes),
         }
@@ -334,6 +342,7 @@ impl LightClusters {
 pub(super) struct LocalMaps {
     /// Bound at group 3 binding 25; `generation` changes with it.
     pub atlas: Atlas,
+    prepared_clear: Option<Arc<Owned<wgpu::RenderPipeline>>>,
     retired: Vec<(u64, Atlas)>,
     pub generation: u64,
     /// Each slot's map content (light placement, settings and casters), None to redraw.
@@ -347,7 +356,8 @@ pub(super) struct LocalMaps {
 impl LocalMaps {
     pub fn new(device: &PipelineDevice, ledger: &Ledger) -> Self {
         Self {
-            atlas: Atlas::new(device, ledger, None, 1, 0, false),
+            atlas: Atlas::new(device, ledger, None, 1, 0, false, [1, 1], None),
+            prepared_clear: None,
             retired: vec![],
             generation: 0,
             keys: vec![],
@@ -355,6 +365,12 @@ impl LocalMaps {
             strengths: vec![],
             tiles: vec![],
             tick: 0,
+        }
+    }
+    pub(super) fn prewarm_clear(&mut self, device: &PipelineDevice, ledger: &Ledger) {
+        if self.prepared_clear.is_none() {
+            self.prepared_clear = Some(self.atlas.clear.clone()
+                .unwrap_or_else(|| Arc::new(clear_pipeline(device, ledger))));
         }
     }
     pub fn collect(&mut self, completed: u64) {
@@ -585,9 +601,14 @@ impl Renderer {
                 .iter()
                 .flatten()
                 .any(|&i| lc::cube(&lights[i as usize]));
+            // The tiles' bounding box: a new tile beyond it grows the texture (every map is
+            // drawn again, at the same places); otherwise the texture keeps its size.
+            let extent = lc::fitted_extent(&shared.tiles, state.settings.resolution);
             if shared.atlas.slots != count
                 || shared.atlas.resolution != state.settings.resolution
                 || shared.atlas.cube_layers != cube_layers
+                || shared.atlas.extent[0] < extent[0]
+                || shared.atlas.extent[1] < extent[1]
             {
                 let next = Atlas::new(
                     &self.device,
@@ -596,6 +617,8 @@ impl Renderer {
                     state.settings.resolution,
                     count,
                     cube_layers,
+                    extent,
+                    shared.prepared_clear.clone(),
                 );
                 let old = std::mem::replace(&mut shared.atlas, next);
                 shared.retired.push((self.submissions, old));
@@ -604,9 +627,15 @@ impl Renderer {
             }
             // Hash each caster once, then include only intersecting casters in a map's
             // key. A distant moving object no longer invalidates the entire atlas.
+            // A placement that casts no shadow is never a candidate: toggling it changes the
+            // casters, and so the key, of every map it reaches.
             let mut candidates = vec![];
             for (d, draw) in draws.iter().enumerate() {
-                for (i, model) in draw.instances.state.models.iter().enumerate() {
+                let state = &draw.instances.state;
+                for (i, model) in state.models.iter().enumerate() {
+                    if !state.casts_shadows(i) {
+                        continue;
+                    }
                     let Ok(bounds) = shadow_gpu::world_bounds(draw.mesh.bounds, *model) else {
                         continue;
                     };
@@ -722,7 +751,8 @@ impl Renderer {
             vec![1.0; stats.shadowed.len()]
         };
         stats.atlas_bytes = if maps {
-            6 * 4 * u64::from(lc::atlas_extent(shared.atlas.resolution)).pow(2)
+            let layers = if shared.atlas.cube_layers { 6 } else { 1 };
+            layers * 4 * u64::from(shared.atlas.extent[0]) * u64::from(shared.atlas.extent[1])
         } else {
             0
         };

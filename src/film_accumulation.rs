@@ -67,7 +67,7 @@ const FILM_ENTRY_SEAMS: [(&str, &str); 6] = [
         "{film_store(pixel,vec3<f32>(0.0),record.x,film_view_distance(ta.position,tb.position,tc.position,w,hit.placement));return;}",
     ),
     (
-        "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,id,size)));",
+        "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,view_ray)));",
         "film_store(pixel,atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),record.x,film_view_distance(ta.position,tb.position,tc.position,w,hit.placement));",
     ),
 ];
@@ -109,7 +109,11 @@ pub(crate) fn shading_head(soft_head: &str) -> Result<String, Error> {
 /// composition, with every store of its entry routed through `film_store`. The program's
 /// byte range, which diagnostics map lines through, is unchanged.
 pub(crate) fn compose_shading(head: &str, source: &str, parameters: bool) -> Composed {
-    let mut composed = program::compose(head, source, Stage::Traced, parameters);
+    film_shading(program::compose(head, source, Stage::Traced, parameters))
+}
+/// `composed` (a traced composition on a `shading_head`) with its entry's stores routed
+/// through `film_store`: the entry is split off at the program's end.
+pub(crate) fn film_shading(mut composed: Composed) -> Composed {
     let mut entry = composed.source.split_off(composed.program.end);
     for edit in FILM_ENTRY_SEAMS {
         // The entry is engine text after the program, so these always apply.
@@ -200,6 +204,7 @@ impl FilmLayouts {
             image(30, F::R32Uint),
         ];
         trace.extend(film);
+        if crate::material_mode::Mode::tail() { trace.extend(super::material_pass_gpu::entries(true)); }
         let mut shade = vec![
             uniform(0, 80),
             texture(7, uint),
@@ -525,6 +530,7 @@ impl Renderer {
                 (30, R::TextureView(&film.tiles[written].view)),
             ];
             trace.extend(film_entries.clone());
+            if crate::material_mode::Mode::tail() { trace.push((crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&t.material.as_ref().unwrap().view))); }
             let mut shade = vec![
                 (0, self.uniform.as_entire_binding()),
                 (7, R::TextureView(&t.hit.view)),

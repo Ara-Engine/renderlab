@@ -5,6 +5,8 @@ pub(crate) mod atmosphere_gpu;
 mod environment_gpu;
 #[path = "light_cluster_gpu.rs"]
 mod light_cluster_gpu;
+#[path = "pipeline_prewarm.rs"]
+mod pipeline_prewarm;
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
 // DC1: one storage binding beside lighting; no separate render pass.
@@ -34,6 +36,8 @@ pub use primary_ray_gpu::temporal_reconstruction::{
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
 #[path = "mesh_lod.rs"]
 mod mesh_lod;
+#[path = "normal_variance_lazy.rs"]
+mod normal_variance_lazy;
 #[path = "virtual_shadow_gpu.rs"]
 mod virtual_shadow_gpu;
 #[path = "visibility_buffer.rs"]
@@ -667,6 +671,8 @@ pub struct Renderer {
     peak_flights: usize,
     busy_uploads: u64,
     busy_frames: u64,
+    /// One-layer BC5 normal maps still without their variance layer (normal_variance_lazy).
+    variance_pending: Vec<std::sync::Weak<crate::material::TextureInner>>,
     upload_cpu: CpuFrame,
     /// Streamed textures' resident levels and requests (`texture_residency.rs`).
     residency: texture_residency::Residency,
@@ -769,6 +775,7 @@ impl Renderer {
         hardware: Option<HardwareShadowOptions>,
         wgsl: &str,
     ) -> Result<Self, Error> {
+        crate::material_mode::Mode::validate(&device.limits())?;
         device.check_custom_prelude(wgsl);
         if !device.features().contains(crate::RECEIVER_FEATURES) {
             return Err(Error::InvalidInput(
@@ -1200,6 +1207,7 @@ impl Renderer {
             peak_flights: 0,
             busy_uploads: 0,
             busy_frames: 0,
+            variance_pending: Vec::new(),
             upload_cpu: CpuFrame::default(),
             residency: Default::default(),
         };
@@ -1400,7 +1408,7 @@ impl Renderer {
             .transpose()
             .map_err(rejected)?;
         // Traced modules are part of the same transaction while they are selected.
-        let primary_sources = self
+        let mut primary_sources = self
             .pipeline
             .primary
             .as_ref()
@@ -1409,12 +1417,17 @@ impl Renderer {
                     return primary_ray_gpu::non_rt_sources(wgsl);
                 }
                 Ok::<_, Error>((
-                    primary_ray_gpu::shader_sources(wgsl)?,
+                    primary_ray_gpu::wgpu_shader_sources(wgsl)?,
                     primary_ray_gpu::shading_heads(wgsl)?,
                 ))
             })
             .transpose()
             .map_err(rejected)?;
+        if let Some((_, heads)) = &mut primary_sources {
+            for head in heads {
+                primary_ray_gpu::gi_receiver_pass::default_head(head, &self.device);
+            }
+        }
         // A temporal kernel already in use recompiles in the transaction, so a rejected
         // prelude keeps it; otherwise the first temporal frame compiles it.
         let film_source = primary_sources
@@ -2201,6 +2214,7 @@ impl Renderer {
             self.uploads.write_calls += 1;
         }
         Texture(Arc::new(crate::material::TextureInner {
+            block: None,
             renderer: self.identity.clone(),
             role: data.role,
             storage: crate::material::TextureStorage::Full(Box::new(
@@ -2208,9 +2222,158 @@ impl Renderer {
                     _texture: texture,
                     view,
                     _allocation: self.ledger.allocate(AllocationKind::Texture, bytes),
+                    layers: data.role.layers(),
+                    variance: std::sync::OnceLock::new(),
                 },
             )),
         }))
+    }
+    /// A block-compressed texture (`asset::CompressedTexture`): its levels as shipped, fully
+    /// resident, in the format's role. Needs `Features::TEXTURE_COMPRESSION_BC` on the device
+    /// (`compressed_textures`); without it the host uploads RGBA8 (`try_upload_texture`).
+    pub fn try_upload_compressed_texture(
+        &mut self,
+        data: &asset::CompressedTexture,
+    ) -> Result<Option<Texture>, Error> {
+        self.check_fault()?;
+        if !self.compressed_textures() {
+            return Err(Error::InvalidInput(
+                "compressed textures need TEXTURE_COMPRESSION_BC; upload RGBA8 instead",
+            ));
+        }
+        let started = Instant::now();
+        let bytes = data
+            .validate(self.device.limits().max_texture_dimension_2d)
+            .map_err(|e| Error::InvalidInput(e.0))?;
+        if bytes > self.limits.max_texture_bytes {
+            return Err(Error::InvalidInput("texture exceeds max_texture_bytes"));
+        }
+        let preparation = started.elapsed();
+        let poll = self.collect()?;
+        if self.occupied() >= FLIGHTS - 1 {
+            self.busy_uploads += 1;
+            return Ok(None);
+        }
+        let slot = self.free_slot().unwrap();
+        let started = Instant::now();
+        let scopes = OperationScopes::new(&self.device);
+        let texture = self.create_compressed_texture(data, bytes);
+        if let Some(error) = scopes.finish() {
+            return Err(self.fail(error.to_string()));
+        }
+        self.submit_upload(slot);
+        self.upload_cpu = CpuFrame {
+            preparation,
+            poll,
+            upload: started.elapsed(),
+            ..Default::default()
+        };
+        self.check_fault()?;
+        Ok(Some(texture))
+    }
+    /// Whether the device samples BC7 and BC5 (`try_upload_compressed_texture`).
+    pub fn compressed_textures(&self) -> bool {
+        self.device
+            .features()
+            .contains(wgpu::Features::TEXTURE_COMPRESSION_BC)
+    }
+    fn create_compressed_texture(
+        &mut self,
+        data: &asset::CompressedTexture,
+        bytes: u64,
+    ) -> Texture {
+        // A BC5 normal map adds its variance layer (src/normal_variance_bc.rs) only while an
+        // installed program reads it; otherwise it waits (normal_variance_lazy).
+        let bc5 = data.format == asset::BlockFormat::Bc5;
+        let variance = (bc5 && self.variance_read())
+            .then(|| crate::normal_variance_bc::variance_layer(data));
+        let layers: Vec<&Vec<Vec<u8>>> = std::iter::once(&data.mips).chain(&variance).collect();
+        let (texture, view, uploaded) = self.block_texture(data, &layers);
+        debug_assert_eq!(uploaded, bytes * layers.len() as u64);
+        let texture = Texture(Arc::new(crate::material::TextureInner {
+            block: Some(data.format),
+            renderer: self.identity.clone(),
+            role: data.format.role(),
+            storage: crate::material::TextureStorage::Full(Box::new(
+                crate::material::FullTexture {
+                    _texture: texture,
+                    view,
+                    _allocation: self.ledger.allocate(AllocationKind::Texture, uploaded),
+                    layers: layers.len() as u32,
+                    variance: std::sync::OnceLock::new(),
+                },
+            )),
+        }));
+        if bc5 && variance.is_none() {
+            self.variance_pending.push(Arc::downgrade(&texture.0));
+        }
+        texture
+    }
+    /// A block texture of `data`'s format and extent with one array layer per entry of
+    /// `layers` (each every level's blocks), written; and its bytes.
+    fn block_texture(
+        &mut self,
+        data: &asset::CompressedTexture,
+        layers: &[&Vec<Vec<u8>>],
+    ) -> (Owned<wgpu::Texture>, Owned<wgpu::TextureView>, u64) {
+        let texture = self.ledger.own(
+            self.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("immutable material texture, block-compressed"),
+                size: wgpu::Extent3d {
+                    width: data.width,
+                    height: data.height,
+                    depth_or_array_layers: layers.len() as u32,
+                },
+                mip_level_count: data.mips.len() as u32,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: texture_residency::block_texture_format(data.format),
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            }),
+            ResourceKind::Texture,
+        );
+        let view = self.ledger.own(
+            texture.create_view(&texture_residency::texture_view_descriptor(data.format.role())),
+            ResourceKind::TextureView,
+        );
+        let block = asset::BlockFormat::BLOCK;
+        let mut bytes = 0;
+        for (layer, levels) in layers.iter().enumerate() {
+            for (level, blocks) in levels.iter().enumerate() {
+                let (w, h) = data.level_size(level as u32);
+                // Copies cover the level's physical size: whole blocks, also under 4x4 texels.
+                self.queue.write_texture(
+                    wgpu::TexelCopyTextureInfo {
+                        mip_level: level as u32,
+                        origin: wgpu::Origin3d {
+                            x: 0,
+                            y: 0,
+                            z: layer as u32,
+                        },
+                        ..texture.as_image_copy()
+                    },
+                    blocks,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(asset::BlockFormat::row_bytes(w)),
+                        rows_per_image: None,
+                    },
+                    wgpu::Extent3d {
+                        width: w.div_ceil(block) * block,
+                        height: h.div_ceil(block) * block,
+                        depth_or_array_layers: 1,
+                    },
+                );
+                bytes += blocks.len() as u64;
+                self.uploads.textures += blocks.len() as u64;
+                self.uploads.texture_writes += 1;
+                self.uploads.write_calls += 1;
+            }
+        }
+        (texture, view, bytes)
     }
     pub fn try_create_material(
         &mut self,
@@ -2485,6 +2648,9 @@ impl Renderer {
         if let Some(order) = order {
             transparency_gpu::restore(draws, &order);
         }
+        if let Ok(Some(report)) = &result {
+            self.device.log_pipeline_frame(self, report);
+        }
         result
     }
     fn render_view(
@@ -2632,14 +2798,18 @@ impl Renderer {
         let shadow_start = Instant::now();
         let mut shadow_frame = if self.view.shadows.enabled(view_mode) {
             let mut bounds = Vec::new();
+            let mut casts = Vec::new();
             for draw in draws.iter() {
-                bounds.extend_from_slice(&draw.instances.state.world_bounds(draw.mesh.bounds)?);
+                let state = &draw.instances.state;
+                bounds.extend_from_slice(&state.world_bounds(draw.mesh.bounds)?);
+                casts.extend((0..state.models.len()).map(|slot| state.casts_shadows(slot)));
             }
             Some(self.view.shadows.plan(
                 camera,
                 [color.width(), color.height()],
                 &self.lighting.source_lights,
                 &bounds,
+                &casts,
             )?)
         } else {
             None
@@ -3098,6 +3268,9 @@ impl Renderer {
         }
         if traced && !temporal {
             self.ensure_shade_detail(&programs, streaming, usize::from(soft))?;
+            if !streaming && !crate::material_mode::Mode::full() {
+                self.prepare_lean(&programs, programs.len() > 1, usize::from(soft));
+            }
         }
         // Feedback growth is spread over frames; raster and temporal frames need theirs now.
         if streaming {
@@ -3239,6 +3412,9 @@ impl Renderer {
                 .as_ref()
                 .map_or(0, |h| h.scene_generation());
             let mut primary = UploadBytes::default();
+            // U-RTVIS: the reflection composite's room grows to the content before this frame's
+            // bindings are built (a growth drops them; prepare_primary rebuilds them).
+            self.rl_room_grow();
             let result = self.prepare_primary(draws, camera, soft, scene_generation, &mut primary);
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
@@ -3274,7 +3450,7 @@ impl Renderer {
             }
         }
         // P-NRT3: lit traced frames submit their first half (skinning, clusters, shadows,
-        // atmosphere, visibility and sun visibility) before the GI cache and post are prepared
+        // atmosphere, visibility, optional materials and sun visibility) before GI/post preparation
         // and the second half is encoded, so the GPU starts while the CPU still works. Every
         // queue write of the late preparation and encoding lands before the second submit and
         // touches only buffers the first half does not read (GI cache, post, transparency), and
@@ -3311,7 +3487,7 @@ impl Renderer {
         // The timeline moves out while marks are encoded, so they never borrow `self`.
         let mut marks = self.pass_timeline.take();
         if let Some(t) = &mut marks {
-            t.begin();
+            t.begin(&self.device);
         }
         let mut mark = |encoder: &mut wgpu::CommandEncoder, name: &'static str| {
             if let Some(t) = &mut marks {
@@ -3372,17 +3548,65 @@ impl Renderer {
                         end_of_pass_write_index: Some(slot as u32 * 10 + first + 1),
                     })
             };
+            let shading = if soft {
+                primary_ray_gpu::Shading::Soft
+            } else {
+                primary_ray_gpu::Shading::Hard
+            };
+            let material = crate::material_mode::Mode::full() && !temporal;
+            if material {
+                self.ensure_material_pass(shading)?;
+            }
             let p = self.pipeline.primary.as_ref().unwrap();
             mark(&mut encoder, "visibility");
             if temporal {
                 self.encode_film(&mut encoder, stamps(6), stamps(0));
             } else {
-                if interactive
+                if material {
+                    // Publish hits without sun work so every receiver pass can consume
+                    // the material record after this one decode. The switch-off branch
+                    // below retains its existing fused visibility/sun kernels.
+                    if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
+                        self.encode_visibility_buffer(&mut encoder, soft, stamps(6));
+                    } else {
+                        self.encode_primary_visibility(&mut encoder, soft, stamps(6));
+                    }
+                    if streaming {
+                        self.encode_request_clear(&mut encoder);
+                    }
+                    mark(&mut encoder, "material");
+                    self.encode_material_shading(&mut encoder, shading, None, true);
+                    if interactive {
+                        mark(&mut encoder, "sun_shadow");
+                        if reconstructed && self.view.reconstruction.rotate_directions {
+                            self.encode_vb_sun(&mut encoder, stamps(8));
+                        } else {
+                            self.encode_primary_fresh_tile(
+                                &mut encoder,
+                                &p.fresh_eight,
+                                [8, 4],
+                                stamps(8),
+                            );
+                        }
+                    } else if soft && self.view.soft_mode == crate::SoftShadows::Virtual {
+                        mark(&mut encoder, "sun_shadow");
+                        self.encode_virtual(&mut encoder, stamps(8), &mut mark);
+                        mark(&mut encoder, "atmosphere");
+                        self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
+                    } else if soft {
+                        mark(&mut encoder, "sun_shadow");
+                        self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
+                    }
+                } else if interactive
                     && reconstructed
                     && p.reconstruction.as_ref().is_some_and(|r| r.trace.is_some())
                     && self.view.reconstruction.rotate_directions
                 {
-                    self.encode_reconstruction_interactive(&mut encoder, stamps(6), &mut mark);
+                    if primary_ray_gpu::sun_vis_pass::enabled() {
+                        self.encode_sun_split(&mut encoder, stamps(6), stamps(8), &mut mark);
+                    } else {
+                        self.encode_reconstruction_interactive(&mut encoder, stamps(6), &mut mark);
+                    }
                 } else if interactive {
                     let tile = primary_ray_gpu::TRACE_TILE;
                     self.encode_primary_interactive(&mut encoder, &p.interactive, tile, stamps(6));
@@ -3409,6 +3633,7 @@ impl Renderer {
                         self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
                     }
                 }
+                self.encode_material_tail_check(&mut encoder);
                 if split {
                     // RENDERLAB_PASS_LOG_DETAIL: from the end of the early commands to the
                     // first late pass, the GPU waits for the CPU's GI and post preparation.
@@ -3425,12 +3650,7 @@ impl Renderer {
                     early_submit = submitted_at.elapsed();
                     self.prepare_cache_and_post(draws, camera, color, true, true)?;
                 }
-                let shading = if soft {
-                    primary_ray_gpu::Shading::Soft
-                } else {
-                    primary_ray_gpu::Shading::Hard
-                };
-                if streaming {
+                if streaming && !material {
                     self.encode_request_clear(&mut encoder);
                 }
                 let shade = self
@@ -3445,6 +3665,15 @@ impl Renderer {
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
+                self.ensure_gi_receiver_pass(shading)?;
+                mark(&mut encoder, "gi_receiver");
+                self.encode_gi_receiver_pass(&mut encoder, shading);
+                // Visibility feeds both the optional detail probes and final shading.
+                if primary_ray_gpu::light_vis_pass::on() {
+                    self.ensure_light_vis(shading)?;
+                    mark(&mut encoder, "light_visibility");
+                    self.encode_light_vis(&mut encoder, shading);
+                }
                 if !self.view.outputs.modes.shades() {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
@@ -3473,6 +3702,9 @@ impl Renderer {
                     self.encode_reflection_trace(&mut encoder, shading);
                     mark(&mut encoder, "reflection.hits");
                     self.encode_reflection_hits(&mut encoder, shading);
+                    // U-RTVIS: the deferred composite (RENDERLAB_RL_DEFERRED=1 with the pass).
+                    mark(&mut encoder, "reflection.composite");
+                    self.encode_reflection_composite(&mut encoder, shading);
                 }
             }
             if reconstructed {
@@ -3734,6 +3966,9 @@ impl Renderer {
         // `queue.submit` for an older one shows here with the older one counted.
         let alive = self.occupied();
         let index = self.queue.submit([commands]);
+        if let Some(virtual_shadows) = self.view.virtual_shadows.as_mut() {
+            virtual_shadows.submitted();
+        }
         if let Some(mut t) = marks {
             t.submitted();
             self.pass_timeline = Some(t);

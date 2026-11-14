@@ -42,24 +42,32 @@ pub(crate) fn source(material: &str, list: bool) -> Result<String> {
 /// local-light shadow rays. It needs a ray-query device. Compiled natively on Metal
 /// with the standard program; not yet executed against a reference.
 pub fn hardware_soft_program(material: &str) -> Result<Program> {
-    hardware_soft_part(material, ALL_TERMS)
+    hardware_soft_part(material, ALL_TERMS, false)
 }
 /// `hardware_soft_program` keeping only the `terms` shading terms: the pass log's detail
-/// parts (src/shade_detail.rs).
-pub(crate) fn hardware_soft_part(material: &str, terms: u32) -> Result<Program> {
+/// parts (src/shade_detail.rs). `lean`: the module for frames whose `program::FrameInputs`
+/// are lean (`program::lean_variant`).
+pub(crate) fn hardware_soft_part(material: &str, terms: u32, lean: bool) -> Result<Program> {
     static KEPT: Memo<[u8; 32], Program> = Memo::new();
-    KEPT.get(memo::digest(&format!("{terms}:{material}")), || {
-        hardware_soft_program_uncached(material, terms)
+    KEPT.get(memo::digest(&format!("{terms}:{lean}:{material}")), || {
+        hardware_soft_program_uncached(material, terms, lean)
     })
 }
+/// Measurement: the uncomposed-then-compiled standard traced module, full or lean, and its
+/// composed text's length (tests/ara_backend lean_shading). Bypasses the memo.
+pub fn lean_probe(material: &str, lean: bool) -> Result<(Program, usize)> {
+    let program = hardware_soft_program_uncached(material, ALL_TERMS, lean)?;
+    let len = program.source().len();
+    Ok((program, len))
+}
 /// Every shading term (`RL_SHADE_TERMS` as shaders/program_api.wgsl declares it).
-const ALL_TERMS: u32 = u32::MAX;
-fn hardware_soft_program_uncached(material: &str, terms: u32) -> Result<Program> {
+pub(crate) const ALL_TERMS: u32 = u32::MAX;
+fn hardware_soft_program_uncached(material: &str, terms: u32, lean: bool) -> Result<Program> {
     let [_, head] =
         crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
     let parameters = crate::program::declares_parameters(material);
-    let source =
-        crate::program::compose(&head, material, crate::program::Stage::Traced, parameters).source;
+    let composed = crate::program::compose(&head, material, crate::program::Stage::Traced, parameters);
+    let source = if lean { crate::program::lean_variant(composed) } else { composed }.source;
     Ok(Program::new(Pass::PrimaryShadeTiles, with_terms(source, terms))?.checked())
 }
 /// `source` unchanged with every term, else through `shade_detail::without_terms`.
@@ -96,31 +104,76 @@ pub(crate) fn hits_source(material: &str) -> Result<String> {
 /// several programs, shading the tiles the binning pass listed for its slot
 /// (`program::compose_list`, as `ProgramPipelines::list` compiles it).
 pub fn hardware_soft_list_program(material: &str) -> Result<Program> {
-    hardware_soft_list_part(material, ALL_TERMS)
+    hardware_soft_list_part(material, ALL_TERMS, false)
 }
-/// `hardware_soft_list_program` keeping only the `terms` shading terms.
-pub(crate) fn hardware_soft_list_part(material: &str, terms: u32) -> Result<Program> {
+/// `hardware_soft_list_program` keeping only the `terms` shading terms; `lean` as for
+/// `hardware_soft_part`.
+pub(crate) fn hardware_soft_list_part(material: &str, terms: u32, lean: bool) -> Result<Program> {
     static KEPT: Memo<[u8; 32], Program> = Memo::new();
-    KEPT.get(memo::digest(&format!("{terms}:{material}")), || {
-        list_program_uncached(material, terms)
+    KEPT.get(memo::digest(&format!("{terms}:{lean}:{material}")), || {
+        list_program_uncached(material, terms, lean)
     })
 }
-fn list_program_uncached(material: &str, terms: u32) -> Result<Program> {
+fn list_program_uncached(material: &str, terms: u32, lean: bool) -> Result<Program> {
     let [_, head] =
         crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
     let parameters = crate::program::declares_parameters(material);
     Ok(Program::new(
         Pass::PrimaryShadeList,
         with_terms(
-            crate::program::compose_list(
-                &head,
-                material,
-                crate::program::Stage::Traced,
-                parameters,
-            )
-            .source,
+            {
+                let composed = crate::program::compose_list(
+                    &head,
+                    material,
+                    crate::program::Stage::Traced,
+                    parameters,
+                );
+                if lean { crate::program::lean_variant(composed) } else { composed }.source
+            },
             terms,
         ),
     )?
     .checked())
+}
+/// RENDERLAB_MATERIAL_PASS (program.rs `material_variant`): the hardware soft head's tiles or
+/// list module of `material` as the material pass (`Write`) or as record-reading shading
+/// (`Read`), or None for a program without the record mapping (it keeps its single kernel).
+pub(crate) fn hardware_soft_material(
+    material: &str,
+    list: bool,
+    role: crate::program::MaterialRole,
+) -> Result<Option<Program>> {
+    static KEPT: Memo<[u8; 32], Option<Program>> = Memo::new();
+    KEPT.get(memo::digest(&format!("{list}:{role:?}:{material}")), || {
+        let [_, head] = crate::renderer::primary_ray_gpu::shading_heads(include_str!(
+            "../../shaders/scene.wgsl"
+        ))?;
+        let parameters = crate::program::declares_parameters(material);
+        let composed = if list {
+            crate::program::compose_list(&head, material, crate::program::Stage::Traced, parameters)
+        } else {
+            crate::program::compose(&head, material, crate::program::Stage::Traced, parameters)
+        };
+        let pass = if list {
+            Pass::PrimaryShadeList
+        } else {
+            Pass::PrimaryShadeTiles
+        };
+        // The variant carries the trace's edge repair, which the port runs without
+        // hit-vertex return (primary_trace.rs `portable_trace`).
+        crate::program::material_variant(composed, material, role)
+            .map(|c| {
+                let source = super::primary_trace::without_vertex_return(&c.source);
+                Ok(Program::new(pass, source)?.checked())
+            })
+            .transpose()
+    })
+}
+/// The material pass's record writer for `material` (`hardware_soft_material`, `Write`).
+pub fn hardware_soft_material_writer(material: &str, list: bool) -> Result<Option<Program>> {
+    hardware_soft_material(material, list, crate::program::MaterialRole::Write)
+}
+/// The record-reading shading for `material` (`hardware_soft_material`, `Read`).
+pub fn hardware_soft_material_reader(material: &str, list: bool) -> Result<Option<Program>> {
+    hardware_soft_material(material, list, crate::program::MaterialRole::Read)
 }

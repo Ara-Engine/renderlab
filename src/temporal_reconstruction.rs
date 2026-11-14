@@ -405,26 +405,47 @@ impl Default for ReconstructionShadowBudget {
         }
     }
 }
+/// A sun ray-count knob's value: a power of two in 8..=256, or None. A set but invalid value
+/// warns once (the knob read is cached), so an ignored setting is never silent.
+fn knob_rays(name: &str, value: Option<&str>) -> Option<u32> {
+    let value = value?;
+    let rays = value
+        .parse::<u32>()
+        .ok()
+        .filter(|n| (8..=256).contains(n) && n.is_power_of_two());
+    if rays.is_none() {
+        eprintln!("{name}={value} ignored: expected a power of two from 8 to 256");
+    }
+    rays
+}
+#[cfg(test)]
+#[test]
+fn sun_ray_knobs_accept_powers_of_two_from_8_to_256_only() {
+    assert_eq!(knob_rays("RENDERLAB_SUN_COLD_RAYS", None), None);
+    for (value, rays) in [("8", Some(8)), ("32", Some(32)), ("256", Some(256))] {
+        assert_eq!(knob_rays("RENDERLAB_SUN_COLD_RAYS", Some(value)), rays);
+    }
+    for value in ["4", "48", "512", "0", "-8", "x", ""] {
+        assert_eq!(knob_rays("RENDERLAB_SUN_COLD_RAYS", Some(value)), None, "{value}");
+    }
+}
 impl ReconstructionShadowBudget {
     /// U-FIXED measurement knobs for A/B runs without a rebuild (the integration thread on
     /// Ara): `RENDERLAB_SUN_MOVING_RAYS=N` replaces `active_rays` (moving and young history)
     /// and `RENDERLAB_SUN_RESTART_RAYS=N` replaces `reset_rays` (restarts, including the
-    /// receivers in a moving caster's swept shadow). N is a power of two in 8..=256; other
-    /// values are ignored.
+    /// receivers in a moving caster's swept shadow). U-RTVIS: `RENDERLAB_SUN_COLD_RAYS=N`
+    /// replaces `cold_rays` (new targets and camera cuts, where no receiver has history). N is
+    /// a power of two in 8..=256; any other value is ignored with one warning on stderr.
     pub(crate) fn with_env_knobs(self) -> Self {
-        static KNOBS: std::sync::OnceLock<(Option<u32>, Option<u32>)> = std::sync::OnceLock::new();
-        let (moving, restart) = *KNOBS.get_or_init(|| {
-            let knob = |name| {
-                std::env::var(name)
-                    .ok()
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .filter(|n| (8..=256).contains(n) && n.is_power_of_two())
-            };
-            (knob("RENDERLAB_SUN_MOVING_RAYS"), knob("RENDERLAB_SUN_RESTART_RAYS"))
+        static KNOBS: std::sync::OnceLock<[Option<u32>; 3]> = std::sync::OnceLock::new();
+        let [moving, restart, cold] = *KNOBS.get_or_init(|| {
+            ["RENDERLAB_SUN_MOVING_RAYS", "RENDERLAB_SUN_RESTART_RAYS", "RENDERLAB_SUN_COLD_RAYS"]
+                .map(|name| knob_rays(name, std::env::var(name).ok().as_deref()))
         });
         Self {
             active_rays: moving.unwrap_or(self.active_rays),
             reset_rays: restart.unwrap_or(self.reset_rays),
+            cold_rays: cold.unwrap_or(self.cold_rays),
             ..self
         }
     }
@@ -747,6 +768,10 @@ pub(crate) fn zones_source(record: &str) -> String {
     include_str!("../shaders/temporal_zones.wgsl").replace("ZONES", record)
 }
 pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
+    resolve_source_with_coverage(wgsl, coverage_mode())
+}
+
+fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
     let mode = ["tr1-mask", "tr1-raw", "tr1-window"]
         .into_iter()
@@ -755,6 +780,9 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         Some(mode) => mask_resolve(mode),
         None => RESOLVE.to_owned(),
     };
+    if let Some(cycle) = coverage {
+        resolve = coverage_resolve(&resolve, cycle);
+    }
     if let Ok(k) = std::env::var("RENDERLAB_P_SPLIT_FRESH_CLAMP") {
         resolve = fresh_clamp_resolve(
             &resolve,
@@ -768,6 +796,55 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         include_str!("../shaders/object_motion.wgsl"),
         zones_source("tr1.zones")
     ))
+}
+
+pub(in crate::renderer) fn coverage_mode() -> Option<bool> {
+    if std::env::var("RENDERLAB_TR1_COVERAGE_CYCLE").is_ok_and(|v| v == "1") {
+        Some(true)
+    } else if std::env::var("RENDERLAB_TR1_COVERAGE_UNORM").is_ok_and(|v| v == "1") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Coverage experiments only. Off, the resolve module is unchanged. Both encodings fit
+/// the existing integer second-layer word; colour and effective colour weight stay f16.
+/// Apply once to the unmodified resolve body, before composing the complete module.
+pub(in crate::renderer) fn coverage_resolve(source: &str, cycle: bool) -> String {
+    let replace = |source: String, old: &str, new: &str| {
+        assert_eq!(source.matches(old).count(), 1, "TR1 coverage seam: {old}");
+        source.replace(old, new)
+    };
+    let mut source = replace(
+        source.to_owned(),
+        "let cw=unpack2x16float(l.w);",
+        "let cw=tr1_unpack_coverage(l.x,l.w);",
+    );
+    source = replace(
+        source,
+        "pack2x16float(vec2<f32>(first_coverage,coverage_weight))",
+        if cycle {
+            "tr1_pack_coverage(first_coverage,coverage_weight,counted)"
+        } else {
+            "tr1_pack_coverage(first_coverage,coverage_weight,false)"
+        },
+    );
+    if cycle {
+        source = replace(
+            source,
+            "    var front=theirs.xyz;var back=mine.xyz;",
+            "    let settled=tr1_cycle_coverage(p,s,u,occluder_is_s,c,coverage,coverage_weight);\n    coverage=settled.x;coverage_weight=settled.y;let counted=settled.z>0.0;\n    var front=theirs.xyz;var back=mine.xyz;",
+        );
+        source = replace(
+            source,
+            "|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s),pack2x16float(theirs.xy)",
+            "|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s)|select(0u,TR1_COVERAGE_COUNT,counted),pack2x16float(theirs.xy)",
+        );
+        source.push_str(include_str!("../shaders/temporal_coverage_cycle.wgsl"));
+    }
+    source.push_str(include_str!("../shaders/temporal_coverage_pack.wgsl"));
+    source
 }
 
 /// Measurement only (P-SPLIT crack flashes): a continued history's fresh sample is clamped to
@@ -1087,6 +1164,9 @@ pub(crate) struct Planner {
     pub cut: bool,
     /// The last prepared frame restarted every pixel.
     pub reset: bool,
+    /// U-FIXED: frames of history behind the last prepared frame: 0 on a restart, then
+    /// counting up. The Disk lookup holds its height-band dither until history exists.
+    pub history_frames: u32,
     held_frames: u32,
     /// U-FIXED: the sun's turn (radians) summed since the last restart; the sun visibility
     /// history's turn step counts it.
@@ -1109,6 +1189,7 @@ impl Planner {
             previous: None,
             cut: false,
             reset: true,
+            history_frames: 0,
             held_frames: 0,
             sun_turned: 0.0,
             shadow_rays: 8,
@@ -1229,6 +1310,11 @@ impl Planner {
                 self.reset
             );
         }
+        self.history_frames = if self.reset {
+            0
+        } else {
+            self.history_frames.saturating_add(1)
+        };
         self.sun_turned = if self.reset {
             0.0
         } else {
@@ -1605,6 +1691,14 @@ impl ReconstructionState {
     pub(in crate::renderer) fn test_history(&self) -> &wgpu::Texture {
         &self.colour[self.plan.parity].texture
     }
+    #[cfg(test)]
+    pub(in crate::renderer) fn test_samples(&self) -> &wgpu::Texture {
+        &self.sample.texture
+    }
+    #[cfg(test)]
+    pub(in crate::renderer) fn test_layers(&self) -> &wgpu::Texture {
+        &self.layer[self.plan.parity].texture
+    }
     /// Histories at the output size; the copy of the frame's samples at the internal size
     /// (equal at native resolution).
     fn new(r: &Renderer, size: wgpu::Extent3d, output: wgpu::Extent3d) -> Self {
@@ -1851,9 +1945,11 @@ impl Renderer {
         // which a visibility-buffer frame compiled before did not build.
         let traced =
             self.hardware_shadows.is_some() && self.primary_mode == PrimaryVisibility::Traced;
-        // U-FIXED: visibility-buffer RT frames trace their sun with `primary_vb_sun`.
+        // Visibility-buffer RT frames and SUN_PASS's split traced frames share the
+        // same reconstructed sun estimator over exact published receivers.
         let vb = self.hardware_shadows.is_some()
-            && self.primary_mode == PrimaryVisibility::VisibilityBuffer;
+            && (self.primary_mode == PrimaryVisibility::VisibilityBuffer
+                || (traced && (super::sun_vis_pass::enabled() || crate::material_mode::Mode::full())));
         if self
             .pipeline
             .primary
@@ -1873,7 +1969,7 @@ impl Renderer {
             None
         };
         let vb_sun = if vb {
-            Some(vb_sun_source(soft)?)
+            Some(super::sun_vis_pass::schedule_source(vb_sun_source(soft)?))
         } else {
             None
         };
@@ -2322,6 +2418,7 @@ mod tests {
             ..inputs(&[fire(0.91)], 5)
         });
         assert!(plan.reset);
+        assert_eq!(plan.history_frames, 0);
         assert_eq!(
             (plan.shadow_rays, plan.restart_rays),
             (budget.reset_rays, 0)
@@ -2331,12 +2428,14 @@ mod tests {
             ..inputs(&[fire(0.9)], 6)
         });
         assert!(spheres(&after)[0].1 < 1.6, "{:?}", spheres(&after));
+        assert_eq!(plan.history_frames, 1);
         plan.cut = true;
         let cut = plan.prepare(PlanInputs {
             key: [8; 32],
             ..inputs(&[fire(0.9)], 7)
         });
         assert_eq!(plan.shadow_rays, budget.cold_rays);
+        assert_eq!(plan.history_frames, 0);
         // U-RTVIS: the cut probes the moving count first (sampling.y), with no P-RTS cone.
         assert_eq!(plan.probe_rays, budget.active_rays);
         let word =
@@ -2560,10 +2659,26 @@ mod tests {
     }
 
     #[test]
+    fn coverage_off_keeps_original_resolve_module() {
+        let prelude=include_str!("../shaders/scene.wgsl");
+        let [head,_]=non_rt_heads(prelude).unwrap();
+        let original=format!("{head}\n{}\n{RESOLVE}\n{}",
+            include_str!("../shaders/object_motion.wgsl"),zones_source("tr1.zones"));
+        assert_eq!(resolve_source_with_coverage(prelude, None).unwrap(),original);
+    }
+
+    #[test]
     fn reconstruction_modules_validate_without_ray_queries() {
         let prelude = include_str!("../shaders/scene.wgsl");
         let resolve = resolve_source(prelude).unwrap();
         assert!(!resolve.contains("ray_query") && !resolve.contains("rayQuery"));
+        if let Some(cycle) = coverage_mode() {
+            assert_eq!(resolve.matches("fn tr1_unpack_coverage(").count(), 1);
+            assert_eq!(
+                resolve.matches("fn tr1_cycle_coverage(").count(),
+                usize::from(cycle)
+            );
+        }
         let kernels = shader_sources(prelude).unwrap();
         // Main's module when listing is off; P-RTS's seams when it is on.
         let off = trace_source_with(&kernels[1], false).unwrap();
@@ -2620,8 +2735,14 @@ mod tests {
             1
         );
         // The measurement-only mask modes (mask_resolve) must stay valid as TR1 changes.
-        let masks = ["tr1-mask", "tr1-raw", "tr1-window"]
-            .map(|m| resolve.replace(RESOLVE, &mask_resolve(m)));
+        let unmodified = resolve_source_with_coverage(prelude, None).unwrap();
+        let masks = ["tr1-mask", "tr1-raw", "tr1-window"].map(|m| {
+            let mut body = mask_resolve(m);
+            if let Some(cycle) = coverage_mode() {
+                body = coverage_resolve(&body, cycle);
+            }
+            unmodified.replace(RESOLVE, &body)
+        });
         // U-FIXED: the visibility-buffer sun asks and records once more, on the budget's estimate.
         let vb_sun = vb_sun_source(&kernels[1]).unwrap();
         assert_eq!(vb_sun.matches("primary_sun(receiver,slot,id.xy,size.x)").count(), 1);
@@ -2631,6 +2752,11 @@ mod tests {
             .into_iter()
             .chain(masks)
             .chain([fresh_clamp_resolve(&resolve_clone, 0.5)])
+            // Compose each coverage variant from its original body, as the engine
+            // does. `resolve` may already contain the ambient switch's transform.
+            .chain([false, true].map(|cycle| {
+                resolve_source_with_coverage(prelude, Some(cycle)).unwrap()
+            }))
         {
             let module = naga::front::wgsl::parse_str(&source).unwrap();
             naga::valid::Validator::new(
@@ -2715,7 +2841,7 @@ mod tests {
                 );
                 assert_eq!(
                     source
-                        .matches("tr1_view_hint(surface_output,surface_input,id,size)")
+                        .matches("tr1_view_hint(surface_output,surface_input,view_ray)")
                         .count(),
                     usize::from(traced)
                 );
