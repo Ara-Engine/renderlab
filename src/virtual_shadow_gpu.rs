@@ -887,8 +887,13 @@ fn forward_windows() -> Option<(f64, usize)> {
     *FORWARD.get_or_init(|| {
         let value = std::env::var("RENDERLAB_VSM_FORWARD").ok()?;
         let mut parts = value.split(',');
-        let f = parts.next()?.trim().parse::<f64>().ok().filter(|f| *f > 0.0)?;
-        let n = parts.next().map_or(MAX_LEVELS, |n| n.trim().parse().expect("RENDERLAB_VSM_FORWARD=f,n"));
+        let f = parts.next().and_then(|f| f.trim().parse::<f64>().ok()).filter(|f| *f > 0.0);
+        let n = parts.next().map_or(Some(MAX_LEVELS), |n| n.trim().parse().ok());
+        // A measurement switch: a bad value warns and leaves the windows centred, never panics.
+        let (Some(f), Some(n)) = (f, n) else {
+            eprintln!("renderlab: RENDERLAB_VSM_FORWARD={value:?} is not f[,n] (f > 0); forward windows off");
+            return None;
+        };
         Some((f.min(1.0), n))
     })
 }
@@ -905,7 +910,8 @@ fn forward_sector(previous: Option<u8>, dir: glam::DVec2) -> Option<u8> {
     }
     let angle = dir.y.atan2(dir.x);
     if let Some(p) = previous {
-        let off = (angle - f64::from(p) * STEP + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+        let off = (angle - f64::from(p) * STEP + std::f64::consts::PI)
+            .rem_euclid(std::f64::consts::TAU)
             - std::f64::consts::PI;
         if off.abs() <= 0.5 * STEP + 0.1 {
             return Some(p);
