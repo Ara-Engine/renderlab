@@ -12,12 +12,6 @@
 //! registration, no shared projection (P0's W8 and C7, docs/m7-p0-claims.md).
 use crate::Mat4;
 
-/// Roll back software mirrors to inline shading while retaining the glossy pass.
-pub(crate) fn pass_mirrors_enabled() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_SW_REFLECTION_MIRRORS").map_or(true, |v| v != "0"))
-}
-
 /// Temporary rollback for the software reflection overhaul; shared by packing and WGSL.
 pub(crate) fn bvh4_enabled() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();

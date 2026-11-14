@@ -1,6 +1,6 @@
 // U-RTVIS reflection pass, shading side (docs/design-reflection-pass.md). Replaces the stubs in
 // reflections.wgsl in the wgpu primary shading modules while the pass runs (src/program.rs
-// pass_block). A reporting program's glossy receiver (also mirrors on software) that fits the room appends its
+// pass_block). A reporting program's glossy receiver that fits the composite's room appends its
 // lobe to the frame's glossy-pixel list, which rl_trace_pixels (shaders/reflections_trace.wgsl)
 // and the composite walk; every other receiver keeps its inline estimate.
 // The list: its length (a 16-byte header, cleared each frame), then three vec4<u32> an entry
@@ -8,8 +8,7 @@
 //   0: the ray origin (f32 bits) | pack2x16float(cone width at the origin, spread per metre
 //      before the stratum's sub-cone);
 //   1: octahedral lobe normal, view direction, geometric side | GGX alpha as f16 (bits 0-15) and
-//      the strata count, at most 31 (bits 16-20). Software mirrors set bit 21 and
-//      store their exact f32 reflected direction in the first three words instead;
+//      the strata count, at most 31 (bits 16-20);
 //   2: the pixel (x | y << 16) | its first slot in R and H's room | the receiver's epsilon (f32
 //      bits: the inline loop's tmin, which the trace starts its rays at) | 0.
 struct RlGlossy { count:atomic<u32>, header:array<u32,3>, entries:array<vec4<u32>> };
@@ -27,7 +26,6 @@ struct RlGlossy { count:atomic<u32>, header:array<u32,3>, entries:array<vec4<u32
 @group(0) @binding(69) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;
 const RL_ROOM_HISTOGRAM:bool=false;
 const RL_PASS:bool=true;
-const RL_PASS_MIRRORS:bool=false;
 // A receiver whose traced fraction is under this keeps today's inline estimate (no reservation, no
 // entry, no composite): it renders as the default without the pass, and near-cutoff bands stay out
 // of the room.
@@ -39,9 +37,6 @@ const RL_COMPOSITE_FLOOR:f32=0.05;
 // stratum, would have added nothing for a traced share shading had already zeroed (the frame-18
 // pulse on low-strata glossy receivers).
 fn rl_any_stratum(count:u32,radial:f32,rotation:f32,basis:mat3x3<f32>,local_v:vec3<f32>,v:vec3<f32>,alpha:f32,side:vec3<f32>)->bool {
-    if RL_PASS_MIRRORS && sqrt(alpha)<RL_MIRROR {
-        return dot(reflect(-v,basis[2]),side)>0.0;
-    }
     for(var k=0u;k<count;k+=1u) {
         let u=vec2<f32>((f32(k)+radial)/f32(count),fract(rotation+f32(k)*0.6180339887));
         let d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
@@ -78,10 +73,7 @@ fn rl_lobe_store(pixel:vec2<u32>,origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:v
     if entry>=rl_pass_frame.z {return;}
     let at=entry*3u;
     rl_glossy.entries[at]=vec4<u32>(bitcast<vec3<u32>>(origin),pack2x16float(vec2<f32>(width,spread)));
-    let mirror=RL_PASS_MIRRORS && sqrt(alpha)<RL_MIRROR;
-    let word=(pack2x16float(vec2<f32>(alpha,0.0))&0xffffu)|(min(count,31u)<<16u)|(select(0u,1u,mirror)<<21u);
-    var directions=vec3<u32>(rl_oct_encode(n),rl_oct_encode(v),rl_oct_encode(side));
-    if mirror {directions=bitcast<vec3<u32>>(reflect(-v,n));}
-    rl_glossy.entries[at+1u]=vec4<u32>(directions,word);
+    let word=(pack2x16float(vec2<f32>(alpha,0.0))&0xffffu)|(min(count,31u)<<16u);
+    rl_glossy.entries[at+1u]=vec4<u32>(rl_oct_encode(n),rl_oct_encode(v),rl_oct_encode(side),word);
     rl_glossy.entries[at+2u]=vec4<u32>(pixel.x|(pixel.y<<16u),rl_room_first,bitcast<u32>(epsilon),0u);
 }
