@@ -7,6 +7,8 @@
 use super::*;
 use crate::atmosphere::{Atmosphere, AtmosphereMedium};
 use crate::pipeline_compilation::PipelineDevice;
+#[path = "fog_sun_raster.rs"]
+mod sun_raster;
 
 const COMMON: &str = include_str!("../shaders/atmosphere_common.wgsl");
 const KERNELS: &str = include_str!("../shaders/atmosphere.wgsl");
@@ -57,7 +59,9 @@ fn kernel_source(hardware: bool) -> String {
         } else {
             ""
         },
-        if hardware {
+        if hardware && sun_raster::enabled() {
+            include_str!("../shaders/fog_sun_lookup.wgsl").to_owned()
+        } else if hardware {
             // The shadow ray's cull mask: this module has no shaders/scene.wgsl.
             format!(
                 "{}{HARDWARE_VISIBILITY}",
@@ -251,6 +255,7 @@ pub(super) struct AtmosphereGpu {
     luts: Option<AtmosphereMedium>,
     /// Exact sky inputs; consumers apply the current illuminance and exposure.
     sky_key: Option<(AtmosphereMedium, Vec3, f32)>,
+    fog_sun: Option<sun_raster::FogSun>,
     published: Option<Vec<u8>>,
     #[cfg(test)]
     test_fog_quality: Option<(u32, u32)>,
@@ -341,6 +346,7 @@ impl AtmosphereGpu {
             sky: None,
             luts: None,
             sky_key: None,
+            fog_sun: None,
             published: None,
             #[cfg(test)]
             test_fog_quality: None,
@@ -1061,7 +1067,11 @@ impl Renderer {
         if injection && v.inject.as_ref().is_none_or(|(_, old)| *old != key) {
             let groups = [0, 1].map(|_| {
                 let mut entries = vec![uniform.clone(), view(15, &raw.view)];
-                if let Some(tlas) = tlas {
+                if tlas.is_some() && sun_raster::enabled() {
+                    let map = a.fog_sun.as_ref().unwrap();
+                    entries.push(view(24, &map.sample));
+                    entries.push(wgpu::BindGroupEntry { binding: 25, resource: map.uniform.as_entire_binding() });
+                } else if let Some(tlas) = tlas {
                     entries.push(wgpu::BindGroupEntry {
                         binding: 20,
                         resource: wgpu::BindingResource::AccelerationStructure(tlas),

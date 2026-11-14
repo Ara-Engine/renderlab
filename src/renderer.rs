@@ -3316,6 +3316,7 @@ impl Renderer {
             ));
             // AT1: the camera volume and uniform the lighting group binds.
             self.prepare_atmosphere(camera, [color.width(), color.height()], &mut uploads)?;
+            self.prepare_fog_sun_map(draws, camera, &mut uploads)?;
             // TP2: publish the coloured sun map before binding the frame's lighting.
             self.prepare_transmission(transparent)?;
             self.upload_lighting(camera.view().inverse().w_axis.truncate(), &mut uploads);
@@ -3535,6 +3536,9 @@ impl Renderer {
             let shadow_start = Instant::now();
             self.encode_shadows(&mut encoder, frame, shadow_draws, slot, timed);
             cpu.shadow_encode = shadow_start.elapsed();
+        }
+        if lit {
+            self.encode_fog_sun_map(&mut encoder, draws, &mut mark);
         }
         // AT1: LUTs, aerial perspective and froxels, after the TLAS build, before shading.
         if lit {
