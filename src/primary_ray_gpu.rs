@@ -29,6 +29,9 @@ pub(crate) mod program_lists;
 pub(crate) mod reflection_pass;
 #[path = "reflection_geometry_dump.rs"]
 mod reflection_geometry_dump;
+// U-RTVIS: the same frame's glossy-pixel list, for the replay of real reflection rays.
+#[path = "reflection_list_dump.rs"]
+mod reflection_list_dump;
 #[path = "gi_receiver_pass.rs"]
 pub(crate) mod gi_receiver_pass;
 // The Mac thread's reflection_hits after rl_trace (docs/design-reflection-pass.md).
@@ -2392,7 +2395,7 @@ impl Renderer {
                         format,
                         usage: wgpu::TextureUsages::STORAGE_BINDING
                             | wgpu::TextureUsages::TEXTURE_BINDING
-                            | if cfg!(test) {
+                            | if cfg!(test) || reflection_list_dump::enabled() {
                                 wgpu::TextureUsages::COPY_SRC
                             } else {
                                 wgpu::TextureUsages::empty()
