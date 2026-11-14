@@ -5,6 +5,8 @@ pub(crate) mod atmosphere_gpu;
 mod environment_gpu;
 #[path = "light_cluster_gpu.rs"]
 mod light_cluster_gpu;
+#[path = "pipeline_prewarm.rs"]
+mod pipeline_prewarm;
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
 // DC1: one storage binding beside lighting; no separate render pass.
