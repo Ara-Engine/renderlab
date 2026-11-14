@@ -51,6 +51,8 @@ impl ModuleCache {
 mod api_tests;
 #[path = "program_reload.rs"]
 mod program_reload;
+#[path = "shading_floor_probe.rs"]
+mod shading_floor_probe;
 #[cfg(test)]
 #[path = "toon_tests.rs"]
 mod toon_tests;
@@ -442,7 +444,7 @@ pub(super) fn compile_program(
         .traced
         .into_iter()
         .flatten()
-        .map(|head| program::with_reflection_history(program::compose(head, source, Stage::Traced, parameters)))
+        .map(|head| shading_floor_probe::compose(program::with_reflection_history(program::compose(head, source, Stage::Traced, parameters))))
         .collect();
     // The temporal module follows the Soft one; naga checks it in the same transaction.
     if let Some(heads) = preludes.traced {
@@ -1026,7 +1028,7 @@ impl Renderer {
             .iter()
             .map(|&id| {
                 let source = &self.program_slot(id).source;
-                program::with_reflection_history(program::compose_list(head, source, stage, program::declares_parameters(source)))
+                shading_floor_probe::compose(program::with_reflection_history(program::compose_list(head, source, stage, program::declares_parameters(source))))
             })
             .collect();
         let abi = self.program_abi();
