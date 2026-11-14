@@ -62,10 +62,8 @@ const RECORD_BYTES: u64 = 48;
 /// R and the deferred outputs.
 pub(crate) const STORAGE_BUFFERS: u32 = 2;
 pub(crate) const STORAGE_TEXTURES: u32 = 12;
-/// Whether the non-RT path runs the pass by default. Off on both paths while S1's timing and
-/// pictures are pending (root, 2026-11-13); `RENDERLAB_RL_PASS=1 RENDERLAB_RL_DEFERRED=1` runs it.
-/// Turning it on is this one line.
-pub(crate) const NON_RT_DEFAULT: bool = false;
+/// Software reflections use the separate pass; `RENDERLAB_RL_PASS=0` restores inline tracing.
+pub(crate) const NON_RT_DEFAULT: bool = true;
 /// Whether the ray-hardware path runs the pass and the deferred composite by default (with
 /// inline's hit shading, not own-program hits): on, since the P201 rows (never a loss alone,
 /// ahead of the GI pass alone with it). `RENDERLAB_RL_PASS=0` keeps inline reflections.

@@ -419,14 +419,18 @@ mod tests {
             let n = child as usize * NODE_WORDS;
             for c in 0..if b.wide { 4 } else { 2 } {
                 let id = b.nodes[n + if b.wide { 6 + c } else { 12 + c }];
-                if id == u32::MAX { continue; }
+                if id == u32::MAX {
+                    continue;
+                }
                 let (lo, hi) = if b.wide {
                     let origin = v(&b.nodes, n);
                     let step = v(&b.nodes, n + 3);
-                    let decode = |base: usize| std::array::from_fn(|axis| {
-                        let q = (b.nodes[n + base + axis] >> (c * 8)) & 255;
-                        q as f32 * step[axis] + origin[axis]
-                    });
+                    let decode = |base: usize| {
+                        std::array::from_fn(|axis| {
+                            let q = (b.nodes[n + base + axis] >> (c * 8)) & 255;
+                            q as f32 * step[axis] + origin[axis]
+                        })
+                    };
                     (decode(10), decode(13))
                 } else {
                     (v(&b.nodes, n + c * 6), v(&b.nodes, n + c * 6 + 3))
