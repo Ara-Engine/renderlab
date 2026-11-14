@@ -3,7 +3,8 @@
 //! With `RENDERLAB_PASS_LOG=<file>` set when the renderer is created (and timestamp
 //! queries available), every frame writes a timestamp at the start of each named stage
 //! and one at its end, and the renderer appends one JSON line per completed frame:
-//! `{"frame":n,"span":ms,"passes":{"skinning":ms,...}}`. A stage lasts from its mark to
+//! `{"frame":n,"renderer_frame":n,"dropped":false,"out_of_order":false,
+//! "span":ms,"passes":{"skinning":ms,...}}`. A stage lasts from its mark to
 //! the next mark; marks are empty compute passes, so they need only TIMESTAMP_QUERY.
 //! Stages that the GPU overlaps share their boundary, so the stage times always sum to the
 //! span. Embedders need no change: harnesses read the file (tools/showcase/showcase.py).
@@ -13,8 +14,11 @@
 //! the stage before it. The reflection pass's stages (`ALWAYS`) are kept either way: every
 //! reflection table reads them from the default log.
 //! The readback pool grows to the in-flight high-water mark instead of dropping samples
-//! or waiting for the GPU. Completion can be out of order: consumers join by `frame`,
-//! never by line position. Polling is still needed to collect the final readbacks.
+//! or waiting for the GPU, including captures longer than 600 frames. Completion can be
+//! out of order: each entry flags a nonconsecutive emission, and consumers join by
+//! `renderer_frame` (`frame` remains its compatibility alias), never by line position.
+//! Failed readbacks and frames without timestamps emit `dropped:true` with a reason,
+//! rather than fabricated timings. Polling is still needed to collect final readbacks.
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
@@ -79,12 +83,29 @@ fn available_frame(
         .find(|&i| available(i))
 }
 
+/// Keeps the old frame key while making gaps, reordered completions and failures explicit.
+fn write_record(
+    log: &mut impl Write,
+    last_emitted: &mut u64,
+    frame: u64,
+    payload: &str,
+) -> std::io::Result<()> {
+    let out_of_order = frame != last_emitted.saturating_add(1);
+    writeln!(
+        log,
+        "{{\"frame\":{frame},\"renderer_frame\":{frame},\"out_of_order\":{out_of_order},{payload}}}"
+    )?;
+    *last_emitted = frame;
+    Ok(())
+}
+
 pub(crate) struct PassTimeline {
     frames: Vec<Frame>,
     /// The pool entry receiving this frame's marks; None outside frame encoding.
     current: Option<usize>,
     next: usize,
     frame: u64,
+    last_emitted: u64,
     period: f64,
     /// Whether dotted part names are marked (`RENDERLAB_PASS_LOG_DETAIL`).
     detail: bool,
@@ -105,6 +126,7 @@ impl PassTimeline {
             current: None,
             next: 0,
             frame: 0,
+            last_emitted: 0,
             period: f64::from(queue.get_timestamp_period()),
             detail: std::env::var_os("RENDERLAB_PASS_LOG_DETAIL").is_some(),
             log: std::io::BufWriter::new(log),
@@ -160,6 +182,13 @@ impl PassTimeline {
     pub(crate) fn finish(&mut self, encoder: &mut wgpu::CommandEncoder) {
         let Some(i) = self.current else { return };
         if self.frames[i].names.is_empty() {
+            let _ = write_record(
+                &mut self.log,
+                &mut self.last_emitted,
+                self.frames[i].frame,
+                "\"dropped\":true,\"reason\":\"no_timestamps\"",
+            );
+            let _ = self.log.flush();
             self.current = None;
             return;
         }
@@ -225,14 +254,24 @@ impl PassTimeline {
                     .map(|(n, t)| format!("\"{n}\":{t:.4}"))
                     .collect();
                 let span = ms(stamps[0], *stamps.last().unwrap());
-                let _ = writeln!(
-                    self.log,
-                    "{{\"frame\":{},\"span\":{span:.4},\"passes\":{{{}}}}}",
+                let _ = write_record(
+                    &mut self.log,
+                    &mut self.last_emitted,
                     entry.frame,
-                    body.join(",")
+                    &format!(
+                        "\"dropped\":false,\"span\":{span:.4},\"passes\":{{{}}}",
+                        body.join(",")
+                    ),
                 );
-                let _ = self.log.flush();
+            } else {
+                let _ = write_record(
+                    &mut self.log,
+                    &mut self.last_emitted,
+                    entry.frame,
+                    "\"dropped\":true,\"reason\":\"readback_failed\"",
+                );
             }
+            let _ = self.log.flush();
             entry.mapped = None;
         }
     }
@@ -254,5 +293,68 @@ mod tests {
         // Saturation asks the caller to allocate; the same policy works past four entries.
         free.push(true);
         assert_eq!(available_frame(free.len(), 3, |i| free[i]), Some(4));
+    }
+
+    #[test]
+    fn capture_records_keep_all_600_frame_ids_and_flag_reordered_completions() {
+        let mut log = Vec::new();
+        let mut last = 0;
+        let mut frames: Vec<u64> = (1..=600).collect();
+        frames.swap(199, 200);
+        for frame in frames {
+            write_record(
+                &mut log,
+                &mut last,
+                frame,
+                "\"dropped\":false,\"span\":1.25,\"passes\":{\"shading\":1.25}",
+            )
+            .unwrap();
+        }
+        let records: Vec<serde_json::Value> = std::str::from_utf8(&log)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(records.len(), 600);
+        let mut ids: Vec<u64> = records
+            .iter()
+            .map(|r| {
+                assert_eq!(r["frame"], r["renderer_frame"]);
+                assert_eq!(r["dropped"], false);
+                r["renderer_frame"].as_u64().unwrap()
+            })
+            .collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (1..=600).collect::<Vec<_>>());
+        assert_eq!(records[198]["out_of_order"], false);
+        assert_eq!(records[199]["out_of_order"], true); // 201 after 199
+        assert_eq!(records[200]["out_of_order"], true); // 200 after 201
+        assert_eq!(records[201]["out_of_order"], true); // 202 after 200
+        assert_eq!(records[202]["out_of_order"], false);
+    }
+
+    #[test]
+    fn dropped_records_preserve_frame_identity_without_inventing_timings() {
+        let mut log = Vec::new();
+        let mut last = 0;
+        for (frame, reason) in [(1, "no_timestamps"), (2, "readback_failed")] {
+            write_record(
+                &mut log,
+                &mut last,
+                frame,
+                &format!("\"dropped\":true,\"reason\":\"{reason}\""),
+            )
+            .unwrap();
+        }
+        for (i, line) in std::str::from_utf8(&log).unwrap().lines().enumerate() {
+            let record: serde_json::Value = serde_json::from_str(line).unwrap();
+            assert_eq!(record["renderer_frame"], i + 1);
+            assert_eq!(record["frame"], record["renderer_frame"]);
+            assert_eq!(record["dropped"], true);
+            assert_eq!(record["out_of_order"], false);
+            assert_eq!(record["reason"], ["no_timestamps", "readback_failed"][i]);
+            assert!(record.get("span").is_none());
+            assert!(record.get("passes").is_none());
+        }
     }
 }
