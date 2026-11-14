@@ -90,7 +90,11 @@ fn entry_enabled(mut source: String, enabled: bool) -> String {
         return source;
     }
     // Set only after surface/reflection work has finished; secondary hits never read it.
-    source = source.replacen(PREPARE, &format!("{PREPARE}\n    rl_lvis_ready=true;"), 1);
+    // Measurement only: produce the usual cache, but shade with inline shadows.
+    // The producer helper is reconstructed separately below and keeps ready=false.
+    let ready = !std::env::var("RENDERLAB_LIGHT_VIS_PRESENCE_ONLY")
+        .is_ok_and(|value| value == "1");
+    source = source.replacen(PREPARE, &format!("{PREPARE}\n    rl_lvis_ready={ready};"), 1);
     let reconstruction = include_str!("../shaders/program_traced_entry.wgsl");
     let begin = reconstruction.find("fn primary_shade_pixel(").unwrap();
     let end = reconstruction[begin..]
