@@ -20,11 +20,6 @@ impl Renderer {
         if prepared.is_ok()
             && self.hardware_shadows.is_none()
             && self.local_shadows().count > 0
-            && self.lighting.source_lights.iter().any(|light| {
-                matches!(light,
-                Light::Point { cast_shadows, .. } | Light::Spot { cast_shadows, .. }
-                if *cast_shadows != Some(false))
-            })
         {
             self.local_maps.prewarm_clear(&self.device, &self.ledger);
         }
