@@ -70,3 +70,27 @@ The CAS retry loop is a plausible contention source; the replacement also moves 
 admission before bucket walks, so any combined improvement must not be attributed solely
 to one of those changes. The initial time-targeted row was faster but shrank to roughly
 64 claims and 250 gathers; that does not establish an acceptable picture.
+
+## Second-arrival fixture and compact selection
+
+`RENDERLAB_SCENE_EVENT_FRAMES=400,460,520` alternates the forest turn. Judge refill
+worst/p95 on frames 520?559; report 400?439 separately because first arrival creates
+pipelines (including atmosphere). Timing runs drain submissions and capture no PNGs.
+
+Priority selection screens the incoming queue once in a small compute entry, then chooses
+visible/zero-bounce, visible/other and background counts. A small deferral entry rebuilds
+the waiting queue; the ray-heavy entry visits only admitted cells. Per-slot claim scratch
+deduplicates incoming entries. Three capped candidate lists reuse the existing ray-item
+arena before sky setup, adding no persistent GPU allocation. Budgets too large for that
+arena retain the previous three-scan implementation. Individual gather rays, reduction
+order and cell writes are shared verbatim by both implementations.
+
+The time controller now floors both ceilings at 3,000 cells, lowers each by at most 25%
+per feedback sample, and raises it by at most 12.5%. A target below the floor's cost can
+be missed; the floor protects progress and must be judged in pictures.
+
+`RENDERLAB_GI_REFILL_BUDGET=hold` enables parent stand-ins and defers all bounce gathers
+for `RENDERLAB_GI_REFILL_HOLD` frames after a cut (default eight). Claims and sky work
+continue; startup without a cut is unchanged. Waiting cells retain their previous values,
+or use the existing parent fallback when available. This does not guarantee a filled or
+accurate picture: the +1/+5/+20/+70 comparisons decide that.

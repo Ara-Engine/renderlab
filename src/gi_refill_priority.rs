@@ -60,6 +60,7 @@ pub(super) fn measurement_header(header: &mut [u32; HEADER_WORDS as usize]) {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) enum Mode {
     Today,
+    Hold(u32),
     Fixed(u32),
     Milliseconds(f64),
 }
@@ -73,6 +74,8 @@ pub(super) fn mode() -> Mode {
         let value = std::env::var("RENDERLAB_GI_REFILL_BUDGET").unwrap_or_else(|_| "today".into());
         if value == "today" {
             Mode::Today
+        } else if value == "hold" {
+            Mode::Hold(std::env::var("RENDERLAB_GI_REFILL_HOLD").unwrap_or_else(|_| "8".into()).parse().expect("GI refill hold frames"))
         } else if value == "ms" {
             let ms: f64 = std::env::var("RENDERLAB_GI_REFILL_MS")
                 .unwrap_or_else(|_| "3".into())
@@ -86,7 +89,7 @@ pub(super) fn mode() -> Mode {
         } else {
             let cells = value
                 .parse()
-                .expect("GI refill budget: today, ms or a cell count");
+                .expect("GI refill budget: today, hold, ms or a cell count");
             assert!(cells >= 64, "GI refill cell budget must be at least 64");
             Mode::Fixed(cells)
         }
@@ -128,11 +131,24 @@ pub(super) fn source(mut source: String, enabled: bool) -> String {
         assert_eq!(source.matches(before).count(), 1, "priority seam: {before}");
         source = source.replacen(before, after, 1);
     }
+    // Share the unchanged ray/reduction body with the compacted queue entry point.
+    let start = source.find("        for(var j=0u;j<listed;j+=1u) {\n").expect("gather list seam")
+        + "        for(var j=0u;j<listed;j+=1u) {\n".len();
+    let end = start + source[start..].find("\n        }\n    }\n}").expect("gather body end");
+    let body = source[start..end].replacen("        let slot=gi_wg_list[j];", "        let requests=(gi_frame.bounce.z&GI_RELIGHT_REQUESTS)!=0u;", 1);
+    source.replace_range(start..end, "        gi_priority_gather_cell(workgroupUniformLoad(&gi_wg_list[j]),lane);");
+    source.push_str(&format!("\nfn gi_priority_gather_cell(slot:u32,lane:u32) {{\n{body}\n}}\n"));
     source.push_str(include_str!("../shaders/gi_refill_priority.wgsl"));
+    source.push_str(include_str!("../shaders/gi_refill_compact.wgsl"));
     source
 }
 
 pub(super) struct Pipelines {
+    pub compact: Owned<wgpu::ComputePipeline>,
+    pub select: Owned<wgpu::ComputePipeline>,
+    pub defer: Owned<wgpu::ComputePipeline>,
+    pub gather_compacted: Owned<wgpu::ComputePipeline>,
+    pub hold: Owned<wgpu::ComputePipeline>,
     pub gather_clamp: Owned<wgpu::ComputePipeline>,
     pub claim_reset: Owned<wgpu::ComputePipeline>,
     pub claim_background: Owned<wgpu::ComputePipeline>,
@@ -142,6 +158,11 @@ pub(super) struct Pipelines {
 impl Pipelines {
     pub fn new(mut compute: impl FnMut(&str) -> Owned<wgpu::ComputePipeline>) -> Self {
         Self {
+            compact: compute("gi_priority_compact"),
+            select: compute("gi_priority_select"),
+            defer: compute("gi_priority_defer"),
+            gather_compacted: compute("gi_priority_gather_compacted"),
+            hold: compute("gi_priority_hold_queue"),
             gather_clamp: compute("gi_priority_gather_clamp"),
             claim_reset: compute("gi_priority_claim_reset"),
             claim_background: compute("gi_priority_claim_background"),
@@ -151,8 +172,8 @@ impl Pipelines {
     }
 }
 
-/// Delayed feedback is a time target, not a GPU preemption deadline. Drops are immediate;
-/// increases are limited, and 20% headroom covers ordinary frame-to-frame cost variation.
+/// Delayed feedback is a time target, not a GPU preemption deadline. Each update drops
+/// at most 25% or grows 12.5%, with a 3000-cell floor and 20% target headroom.
 pub(super) struct Controller {
     pub claims: u32,
     pub gathers: u32,
@@ -163,8 +184,8 @@ pub(super) struct Controller {
 impl Default for Controller {
     fn default() -> Self {
         Self {
-            claims: 1200,
-            gathers: 1800,
+            claims: 3000,
+            gathers: 3000,
             claim_ms: 0.001,
             gather_ms: 0.001,
             last: 0,
@@ -202,16 +223,17 @@ impl Controller {
             *estimate = cost.max(*estimate * 0.9 + cost * 0.1);
             let wanted = (target * 0.8 * share / *estimate)
                 .floor()
-                .clamp(64.0, f64::from(GATHER_CELLS)) as u32;
-            *budget = wanted.min((*budget + (*budget / 8).max(1)).max(64));
+                .clamp(3000.0, f64::from(GATHER_CELLS)) as u32;
+            *budget = wanted.clamp((*budget - *budget / 4).max(3000), *budget + (*budget / 8).max(1));
         }
     }
     pub fn header(&self, header: &mut [u32; HEADER_WORDS as usize], mode: Mode) {
         let (claims, gathers) = match mode {
-            Mode::Today => (header[22], GATHER_CELLS),
+            Mode::Today | Mode::Hold(_) => (header[22], GATHER_CELLS),
             Mode::Fixed(cells) => (cells, cells),
             Mode::Milliseconds(_) => (self.claims, self.gathers),
         };
+        if matches!(mode, Mode::Hold(_)) { header[31] = 1; }
         header[20] = gathers;
         header[22] = 0; // Ordered resolve admission replaces the old hash-period claim gate.
         header[32] = gathers;
@@ -221,6 +243,8 @@ impl Controller {
     }
 }
 
+pub(super) fn compact_available(cap: u32) -> bool { cap <= (RAY_ITEMS - 8) / 3 }
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -228,9 +252,13 @@ mod tests {
     fn delayed_feedback_cuts_cost_spikes_and_ignores_old_samples() {
         let mut c = Controller::default();
         c.observe(2, 3.0, 1200, 1800, 12.0, 18.0);
-        assert_eq!((c.claims, c.gathers), (96, 144));
+        assert_eq!((c.claims, c.gathers), (3000, 3000));
         c.observe(1, 3.0, 1200, 1800, 0.01, 0.01);
-        assert_eq!((c.claims, c.gathers), (96, 144));
+        assert_eq!((c.claims, c.gathers), (3000, 3000));
+        c.claims = 12000;
+        c.gathers = 12000;
+        c.observe(3, 3.0, 12000, 12000, 120.0, 120.0);
+        assert_eq!((c.claims, c.gathers), (9000, 9000));
         let mut h = [0; HEADER_WORDS as usize];
         c.header(&mut h, Mode::Fixed(8192));
         assert_eq!((h[32], h[33]), (8192, 8192));

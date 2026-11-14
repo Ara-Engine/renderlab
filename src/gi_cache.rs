@@ -1565,6 +1565,8 @@ pub(super) struct GiState {
     plan: Option<Plan>,
     profile: Option<Profile>,
     refill_feedback: Option<refill_feedback::State>,
+    priority_compact: bool,
+    priority_hold: bool,
     groups: Option<Groups>,
     retired: Vec<(u64, Retired)>,
     stats: IndirectStats,
@@ -1615,6 +1617,8 @@ impl GiState {
             planner: Planner::default(),
             profile: None,
             refill_feedback: None,
+            priority_compact: false,
+            priority_hold: false,
             groups: None,
             retired: vec![],
             stats: IndirectStats::default(),
@@ -3061,11 +3065,15 @@ impl Renderer {
         // a moving view beside a still one still relights and gathers.
         let tick = !self.explicit_ticks || self.gi_tick != self.tick;
         let mut begun = self.gi.planner.begin(&config, run, bounce, tick);
+        self.gi.priority_compact = false;
+        self.gi.priority_hold = false;
         if software && priority::on() {
             let fallback = priority::Controller::default();
             let controller = self.gi.refill_feedback.as_ref().map_or(&fallback,|f|&f.controller);
             controller.header(&mut begun.header, priority::mode());
             priority::measurement_header(&mut begun.header);
+            self.gi.priority_compact = priority::compact_available(begun.header[32]);
+            self.gi.priority_hold = matches!(priority::mode(), priority::Mode::Hold(n) if self.gi.planner.since_cut < n);
         }
         let raw: Vec<u8> = begun.header.iter().flat_map(|w| w.to_le_bytes()).collect();
         self.queue.write_buffer(&r.table, 0, &raw);
@@ -3456,12 +3464,27 @@ impl GiState {
         if let Some(feedback) = &mut self.refill_feedback { feedback.begin(encoder); }
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
-            main_pass(encoder, "indirect cache gather", &p.gather, b, grid);
             if let Some(priority) = &p.priority {
-                main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,plan.bounce.then_some([1,1]));
-                main_pass(encoder,"indirect visible gather",&priority.gather_later,PROFILE_STAMPS/2,grid);
-                main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,plan.bounce.then_some([1,1]));
-                main_pass(encoder,"indirect background gather",&priority.gather_background,PROFILE_STAMPS/2+1,grid);
+                if self.priority_hold {
+                    main_pass(encoder,"indirect gather hold",&priority.hold,b,grid);
+                } else if self.priority_compact {
+                    // Reuse claim scratch and the ray arena, before setup writes ray items.
+                    encoder.clear_buffer(&r.work,COUNTER_WORDS*4,Some(u64::from(r.slots)*4));
+                    encoder.clear_buffer(&r.work,u64::from(layout.items)*4,Some(8*4));
+                    main_pass(encoder,"indirect gather candidates",&priority.compact,u32::MAX,grid);
+                    main_pass(encoder,"indirect gather selection",&priority.select,u32::MAX,plan.bounce.then_some([1,1]));
+                    main_pass(encoder,"indirect gather deferral",&priority.defer,u32::MAX,grid);
+                    main_pass(encoder,"indirect cache gather",&priority.gather_compacted,b,grid);
+                } else {
+                    main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
+                }
+                let legacy_grid = if self.priority_hold || self.priority_compact { None } else {grid};
+                main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,legacy_grid.map(|_|[1,1]));
+                main_pass(encoder,"indirect visible gather",&priority.gather_later,PROFILE_STAMPS/2,legacy_grid);
+                main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,legacy_grid.map(|_|[1,1]));
+                main_pass(encoder,"indirect background gather",&priority.gather_background,PROFILE_STAMPS/2+1,legacy_grid);
+            } else {
+                main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
             }
         }
         if let Some(feedback) = &self.refill_feedback { feedback.mark(encoder,1); feedback.mark(encoder,2); }
