@@ -10,6 +10,9 @@
 //! A child of primary_ray_gpu (its targets, layouts and bindings).
 use super::*;
 
+#[path = "reflection_pass_cache.rs"]
+mod sw_cache;
+
 /// Group-0 bindings (U-RTVIS 54-63; the Mac's reflection_hits reads H and R at 64 and 65).
 /// L, the glossy-pixel list: a 16-byte header (its length), then LIST_ENTRY_BYTES an entry.
 pub(super) const LIST: u32 = 56;
@@ -113,6 +116,7 @@ pub(super) struct TraceAbi {
     layout: Owned<wgpu::PipelineLayout>,
     args_group: Owned<wgpu::BindGroupLayout>,
     args_layout: Owned<wgpu::PipelineLayout>,
+    cache_group: Option<Owned<wgpu::BindGroupLayout>>,
 }
 impl TraceAbi {
     pub fn new(
@@ -144,10 +148,11 @@ impl TraceAbi {
             }),
             ResourceKind::BindGroupLayout,
         );
+        let cache_group = sw_cache::layout(device, ledger);
         let layout = ledger.own(
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("reflection trace ABI"),
-                bind_group_layouts: &[Some(&group), Some(arrays), None, Some(lighting)],
+                bind_group_layouts: &[Some(&group), Some(arrays), cache_group.as_ref().map(|g| &**g), Some(lighting)],
                 immediate_size: 0,
             }),
             ResourceKind::PipelineLayout,
@@ -167,7 +172,7 @@ impl TraceAbi {
             }),
             ResourceKind::PipelineLayout,
         );
-        Self { group, layout, args_group, args_layout }
+        Self { group, layout, args_group, args_layout, cache_group }
     }
 }
 
@@ -341,6 +346,7 @@ impl Renderer {
                 .unwrap_or(4);
             source.replace("const RL_RAY_LANES:u32=1u;", &format!("const RL_RAY_LANES:u32={lanes}u;"))
         };
+        let source = sw_cache::source(source, &self.device);
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
@@ -415,11 +421,15 @@ impl Renderer {
         compute.set_pipeline(&pipelines.list_args);
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
+        let cache = abi.cache_group.as_ref().map(|layout| self.rl_outgoing_group(layout));
         let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reflection trace"),
             timestamp_writes: None,
         });
         bind(&mut compute);
+        if let Some(cache) = cache.as_ref() {
+            compute.set_bind_group(2, &**cache, &[]);
+        }
         compute.set_pipeline(&pipelines.pixels);
         compute.dispatch_workgroups_indirect(&pass.list_args.value, 0);
         compute.set_pipeline(&pipelines.args);
