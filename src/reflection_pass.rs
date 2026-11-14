@@ -1,7 +1,8 @@
-//! U-RTVIS reflection pass and deferred composite (docs/design-reflection-pass.md), on by default on
-//! the non-RT path (RENDERLAB_RL_PASS=0 forces it off, =1 with RENDERLAB_RL_DEFERRED=1 forces it on
-//! RT too). Primary shading appends each reporting program's glossy receiver that fits the room to
-//! the frame's glossy-pixel list (L, shaders/reflections_lobe.wgsl); `rl_trace_pixels` traces each
+//! U-RTVIS reflection pass and deferred composite (docs/design-reflection-pass.md), on by default
+//! with ray hardware (`RT_DEFAULT`) and, once `NON_RT_DEFAULT` is on, without it
+//! (RENDERLAB_RL_PASS=0 forces it off, =1 with RENDERLAB_RL_DEFERRED=1 forces it on). Primary
+//! shading appends each reporting program's glossy receiver that fits the room to the frame's
+//! glossy-pixel list (L, shaders/reflections_lobe.wgsl); `rl_trace_pixels` traces each
 //! entry's strata into R (misses' sky) and H (hits, shaded by the Mac thread's
 //! `reflection_hits`), and the composite adds w x reflectance x their mean before TR1. Every stage
 //! after shading is sized from the list's length (indirect), so a view with little to reflect
@@ -65,13 +66,17 @@ pub(crate) const STORAGE_TEXTURES: u32 = 12;
 /// pictures are pending (root, 2026-11-13); `RENDERLAB_RL_PASS=1 RENDERLAB_RL_DEFERRED=1` runs it.
 /// Turning it on is this one line.
 pub(crate) const NON_RT_DEFAULT: bool = false;
-/// Whether this device's renderer runs the pass and the composite by default: the non-RT path
-/// (no ray queries; its reflections trace in software) on a device whose limits hold them, while
-/// `NON_RT_DEFAULT` is on.
+/// Whether the ray-hardware path runs the pass and the deferred composite by default (with
+/// inline's hit shading, not own-program hits): on, since the P201 rows (never a loss alone,
+/// ahead of the GI pass alone with it). `RENDERLAB_RL_PASS=0` keeps inline reflections.
+pub(crate) const RT_DEFAULT: bool = true;
+/// Whether this device's renderer runs the pass and the composite by default: its path's
+/// constant (`RT_DEFAULT` with ray queries, else `NON_RT_DEFAULT`), on a device whose limits
+/// hold them.
 pub(crate) fn default_on(device: &wgpu::Device) -> bool {
     let limits = device.limits();
-    NON_RT_DEFAULT
-        && !device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+    let ray_query = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+    (if ray_query { RT_DEFAULT } else { NON_RT_DEFAULT })
         && limits.max_storage_buffers_per_shader_stage
             >= crate::visibility_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage
                 + STORAGE_BUFFERS

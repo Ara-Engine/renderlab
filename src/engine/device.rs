@@ -121,9 +121,12 @@ fn pass_limits(limits: wgpu::Limits, adapter: &wgpu::Limits) -> wgpu::Limits {
     }
 }
 fn rt_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
-    // RT keeps the inline loop; RENDERLAB_RL_PASS=1 asks for the pass's bindings too (A/B).
+    // The pass's bindings where it runs: by default (reflection_pass.rs `RT_DEFAULT`) or with
+    // RENDERLAB_RL_PASS=1; RENDERLAB_RL_PASS=0 keeps the inline loop and the path's own limits.
     let limits = rt_path_limits(adapter);
-    if crate::program::rl_pass_env() == Some(true) {
+    let wanted = crate::program::rl_pass_env()
+        .unwrap_or(crate::renderer::primary_ray_gpu::reflection_pass::RT_DEFAULT);
+    if wanted {
         return pass_limits(limits, adapter);
     }
     limits
