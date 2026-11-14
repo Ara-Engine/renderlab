@@ -5,18 +5,6 @@ pub(crate) const BINDING: u32 = 68;
 const BYTES: u64 = 48;
 const SOURCE: &str = include_str!("../shaders/gi_receiver_pass.wgsl");
 const ENTRY_SEAM: &str = "// ---- GI receiver compute entry ----";
-/// The kernel's workgroup, as written in gi_receiver_pass.wgsl.
-const WRITTEN_TILE: &str = "@workgroup_size(8,4)";
-/// Pixels per workgroup. A GI cell spans about four pixels (`cell_pixels`), so a 16x16 group
-/// keeps the pixels that read the same cells' records on one SM and its L1.
-/// `RENDERLAB_GI_RX_TILE=8` keeps the written 8x4.
-fn tile() -> [u32; 2] {
-    static TILE: std::sync::OnceLock<[u32; 2]> = std::sync::OnceLock::new();
-    *TILE.get_or_init(|| match std::env::var("RENDERLAB_GI_RX_TILE").as_deref() {
-        Ok("8") => [8, 4],
-        _ => [16, 16],
-    })
-}
 /// Defaults are approved separately for each path after game-scene picture and memory checks.
 /// Both on: without ray hardware the inline lookup ran at the whole shading kernel's register
 /// count, and moving it out also retires the GI sun lookups booked to `sun_shadow`.
@@ -86,14 +74,9 @@ pub(crate) fn entry() -> wgpu::BindGroupLayoutEntry {
 /// `shade_source` appends) and the kernel half of gi_receiver_pass.wgsl.
 pub(crate) fn kernel_module(head: &str) -> program::Composed {
     let mut composed = program::compose(head, program::STANDARD_PROGRAM, Stage::Traced, false);
-    let [x, y] = tile();
-    composed.source.push_str(
-        &SOURCE
-            .split_once(ENTRY_SEAM)
-            .unwrap()
-            .1
-            .replacen(WRITTEN_TILE, &format!("@workgroup_size({x},{y})"), 1),
-    );
+    composed
+        .source
+        .push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
     // Measurement only (`RENDERLAB_GI_RX_PROBE=nolookup`): no cache lookup, so the pass costs
     // its decode and the record's stores alone. Shading then sees no GI value.
     if std::env::var("RENDERLAB_GI_RX_PROBE").as_deref() == Ok("nolookup") {
@@ -157,7 +140,7 @@ impl Renderer {
         let Some(target) = state.targets.as_ref().and_then(|t| t.gi_receiver.as_ref()) else {
             return Ok(());
         };
-        let [x, y] = state.region_groups(tile());
+        let [x, y] = state.region_groups([8, 4]);
         self.queue.write_buffer(
             &target.args.value,
             0,
