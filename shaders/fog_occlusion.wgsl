@@ -37,8 +37,8 @@ fn at_fog_cell_hidden(id:vec3<u32>)->bool {
     at_fog_bounds.first_hidden[id.x+id.y*grid.x]=first;
     if first<AT_FROXEL_SLICES {atomicAdd(&at_fog_bounds.skipped,AT_FROXEL_SLICES-first);}
 }
-// Check every contributing tap explicitly; interpolating a validity mask could round
-// to one with a tiny invalid weight. Never import an unfilled cell through history.
+// Reference control: check every positive mathematical weight explicitly. The
+// default uses the actual filtered validity channel with its colour sample.
 fn at_fog_history_filled(uv:vec3<f32>,grid:vec3<u32>)->bool {
     let p=clamp(uv*vec3<f32>(grid)-vec3<f32>(0.5),vec3<f32>(0.0),vec3<f32>(grid)-vec3<f32>(1.0));
     let base=vec3<i32>(floor(p));let fraction=fract(p);

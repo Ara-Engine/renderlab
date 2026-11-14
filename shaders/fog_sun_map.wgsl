@@ -1,7 +1,7 @@
 // Current-frame directional depth, independent of camera visibility. Snap the
 // world-space footprint to texels so camera translation cannot swim the shafts.
 @group(0) @binding(23) var<storage,read_write> at_fog_sun_depth:array<f32>;
-const AT_FOG_MAP_SIZE:u32=512u;
+const AT_FOG_MAP_SIZE:u32=128u;
 fn at_fog_basis() -> mat3x3<f32> {
     let sun=atmosphere.sun.xyz;
     let axis=select(vec3<f32>(0.0,1.0,0.0),vec3<f32>(1.0,0.0,0.0),abs(sun.y)>0.95);

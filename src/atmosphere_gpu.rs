@@ -191,7 +191,7 @@ impl Volume {
                 )
             }),
             sun_depth: (volumetric && fog_map_enabled()).then(|| {
-                let bytes = 512 * 512 * 4;
+                let bytes = 128 * 128 * 4;
                 (ledger.own(device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("current-frame fog sun depth"),
                     size: bytes,
@@ -262,6 +262,7 @@ pub(super) struct AtmosphereGpu {
     sky: Option<Owned<wgpu::RenderPipeline>>,
     /// The medium the transmittance and multiple-scattering LUTs hold.
     luts: Option<AtmosphereMedium>,
+    /// Exact sky inputs; exposed radiance is applied by consumers.
     sky_key: Option<(AtmosphereMedium, Vec3, f32)>,
     published: Option<Vec<u8>>,
     #[cfg(test)]
@@ -1201,7 +1202,7 @@ impl Renderer {
         let plane = [v.grid[0].div_ceil(8), v.grid[1].div_ceil(8), 1];
         part(
             encoder,
-            "atmosphere.aerial",
+            "sky_aerial",
             &k.aerial,
             v.aerial.as_ref().unwrap(),
             plane,
@@ -1253,7 +1254,7 @@ impl Renderer {
             .occlusion
             .as_ref()
             .unwrap();
-        mark(encoder, "atmosphere.occlusion");
+        mark(encoder, "fog_occlusion");
         self.view.atmosphere.volume.cull.as_mut().unwrap().encode(
             &self.device,
             &self.ledger,
@@ -1299,7 +1300,7 @@ impl Renderer {
             pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
         };
         if let (Some(pipeline), Some(group)) = (&k.sun_map, &v.sun_group) {
-            part(encoder, "atmosphere.sun-map", pipeline, group, [64, 64, 1]);
+            part(encoder, "fog_sun_map", pipeline, group, [16, 16, 1]);
         }
         if let (Some((inject, _)), Some(integrate)) = (&v.inject, &v.integrate) {
             let i = (av.frame % 2) as usize;
@@ -1308,12 +1309,12 @@ impl Renderer {
             } else {
                 &k.inject
             };
-            part(encoder, "atmosphere.inject", injection, &inject[i], cells);
+            part(encoder, "fog_inject", injection, &inject[i], cells);
             let temporal = &v.temporal.as_ref().unwrap()[i];
-            part(encoder, "atmosphere.temporal", &k.temporal, temporal, cells);
+            part(encoder, "fog_temporal", &k.temporal, temporal, cells);
             part(
                 encoder,
-                "atmosphere.integrate",
+                "fog_integrate",
                 &k.integrate,
                 &integrate[i],
                 plane,

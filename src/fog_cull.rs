@@ -167,18 +167,36 @@ pub(super) fn atmosphere_source(mut source: String, on: bool) -> String {
         "                let sample=textureLoad(at_scatter,cell,0).r;",
         "                let neighbor=textureLoad(at_scatter,cell,0);\n                if at_fog_cull_enabled() && neighbor.g==0.0 {complete=false;continue;}\n                let sample=neighbor.r;",
     );
-    edit(
-        &mut source,
-        "at_fog_temporal",
-        "if all(previous>=border) && all(previous<=vec3<f32>(1.0)-border) {",
-        "if all(previous>=border) && all(previous<=vec3<f32>(1.0)-border) && (!at_fog_cull_enabled() || at_fog_history_filled(previous,grid)) {",
-    );
-    edit(
-        &mut source,
-        "at_fog_temporal",
-        "mix(value.r,old,weight),0.0,0.0,extinction",
-        "mix(value.r,old,weight),value.g,0.0,extinction",
-    );
+    if std::env::var("RENDERLAB_FOG_OVERHAUL").as_deref() != Ok("0") {
+        // Test the validity of the actual filtered sample. A tap whose weight
+        // rounds to zero in the sampler contributes neither validity nor colour.
+        // Reuse this fetch instead of loading all eight taps a second time.
+        edit(
+            &mut source,
+            "at_fog_temporal",
+            "                let history=textureSampleLevel(at_history,atmosphere_sampler,previous,0.0);",
+            "                let history=textureSampleLevel(at_history,atmosphere_sampler,previous,0.0);\n                if !at_fog_cull_enabled() || history.g==1.0 {",
+        );
+        edit(
+            &mut source,
+            "at_fog_temporal",
+            "                value=vec4<f32>(mix(value.r,old,weight),0.0,0.0,extinction);",
+            "                value=vec4<f32>(mix(value.r,old,weight),value.g,0.0,extinction);\n                }",
+        );
+    } else {
+        edit(
+            &mut source,
+            "at_fog_temporal",
+            "if all(previous>=border) && all(previous<=vec3<f32>(1.0)-border) {",
+            "if all(previous>=border) && all(previous<=vec3<f32>(1.0)-border) && (!at_fog_cull_enabled() || at_fog_history_filled(previous,grid)) {",
+        );
+        edit(
+            &mut source,
+            "at_fog_temporal",
+            "mix(value.r,old,weight),0.0,0.0,extinction",
+            "mix(value.r,old,weight),value.g,0.0,extinction",
+        );
+    }
     edit(
         &mut source,
         "at_fog_temporal",
