@@ -1121,6 +1121,10 @@ fn compose_stage(
     let mut source = format!(
         "{head}\n{COMMON_API}{transmission}{lights}{DECAL_API}{SPECULAR_API}{api}{indirect}{reflection}{atmosphere}{binding}{view_api}// ---- program ----\n"
     );
+    // Scratch: the frame's own module keeps only RL_SCRATCH_TERMS (decimal); detail off.
+    if let Some(t) = std::env::var("RL_SCRATCH_TERMS").ok().and_then(|v| v.parse::<u32>().ok()) {
+        source = source.replacen("const RL_SHADE_TERMS:u32=0xffffffffu;", &format!("const RL_SHADE_TERMS:u32={t}u;"), 1);
+    }
     if traces {
         // M7-R1: hits trace their own light visibility.
         assert_eq!(source.matches(REFLECTION_VISIBILITY_SEAM).count(), 1);

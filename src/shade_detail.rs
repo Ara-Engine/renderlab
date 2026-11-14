@@ -14,14 +14,26 @@ use crate::program::{self, Stage};
 /// The line of shaders/program_api.wgsl that each part's module rewrites.
 const ALL_TERMS: &str = "const RL_SHADE_TERMS:u32=0xffffffffu;";
 /// Each part's pass-log name and the RL_TERM_* bits it keeps.
-pub(crate) const PARTS: [(&str, u32); 7] = [
+pub(crate) const PARTS: [(&str, u32); 19] = [
+    ("shading.light_sample_zeroed", !65536),
+    ("shading.without_light_sample", !2048),
+    ("shading.without_light_contrib", !(128 | 256)),
+    ("shading.without_gi_blend", !4096),
+    ("shading.without_gi_refine", !8192),
+    ("shading.without_gi_fill", !16384),
+    ("shading.gi_one_level", !(4096 | 8192 | 16384)),
+    ("shading.without_gi_lookup", !64),
+    ("shading.without_sun", !128),
+    ("shading.without_local_lights", !256),
+    ("shading.without_sun_shadow", !512),
+    ("shading.without_local_shadows", !1024),
     ("shading.without_lights", !1),
     ("shading.without_shadows", !2),
     ("shading.without_transmission", !4),
     ("shading.without_reflections", !8),
     ("shading.without_textures", !16),
     ("shading.without_brdf", !32),
-    ("shading.base", 0),
+    ("shading.base", 32768),
 ];
 
 /// The parts' pipelines for one frame's traced shading: by part, then by the frame's

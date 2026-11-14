@@ -157,7 +157,7 @@ fn gi_sample_refined(world:vec3<f32>, level:u32, bin:u32) -> f32 {
     for(var step=0u;step<3u;step+=1u) {
         let s=gi_sample(world,sample_level,bin);
         if step==0u {
-            if GI_REFINE==0u || !gi_sampled_split || level==0u {return s;}
+            if GI_REFINE==0u || !rl_term(RL_TERM_GI_REFINE) || !gi_sampled_split || level==0u {return s;}
             if GI_KEEP_LEVEL { gi_keep_level(); first=s; }
             sample_level=level-1u;
         } else if step==1u {
@@ -215,7 +215,7 @@ fn gi_prepare(input:SurfaceInput) {
     gi_rx_valid=false;
     for(var i=0u;i<9u;i+=1u) { gi_rx_sky[i]=vec3<f32>(0.0); }
     for(var i=0u;i<4u;i+=1u) { gi_rx_bounce[i]=vec3<f32>(0.0); }
-    if gi_word(GI_H_ENABLED)==0u { return; }
+    if gi_word(GI_H_ENABLED)==0u || !rl_term(RL_TERM_GI) { return; }
     let world=input.receiver.world;
     // The bin comes from the interpolated vertex normal, as gi_probe requests it.
     let source=gi_bin_source(gi_viewed_normal(world,input.receiver.geometric),input.normal);
@@ -226,7 +226,8 @@ fn gi_prepare(input:SurfaceInput) {
     // Two levels around a switch (level blend), each normalized by its own weights.
     var total=0.0;
     for(var j=0u;j<2u;j+=1u) {
-        let w=select(1.0-pick.t,pick.t,j==1u);
+        var w=select(1.0-pick.t,pick.t,j==1u);
+        if !rl_term(RL_TERM_GI_BLEND) { w=select(select(1.0,0.0,j==1u),select(0.0,1.0,j==1u),pick.t>0.5); }
         if w<=0.0 || (j==1u && pick.hi==pick.lo) { continue; }
         let level=select(pick.lo,pick.hi,j==1u);
         let s=gi_sample_refined(world,level,bin);
@@ -243,7 +244,7 @@ fn gi_prepare(input:SurfaceInput) {
         // A full term is normalized over its own corners; bounce full implies sky full.
         let sky_full=s>=0.999 || last;
         let bounce_full=bw>=0.999 || last;
-        if bounce_full {
+        if bounce_full || !rl_term(RL_TERM_GI_FILL) {
             gi_rx_add(w/s,gi_share(w,bw));
             continue;
         }

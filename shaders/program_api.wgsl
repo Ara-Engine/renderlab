@@ -26,6 +26,20 @@ const RL_TERM_TEXTURES:u32=16u;
 // The light loop's BRDF evaluation (shaders/programs/standard.wgsl): without it each
 // light's response is a constant Lambert lobe.
 const RL_TERM_BRDF:u32=32u;
+// Scratch measurement terms.
+const RL_TERM_GI:u32=64u;
+const RL_TERM_SUN:u32=128u;
+const RL_TERM_LOCAL:u32=256u;
+const RL_TERM_SUN_SHADOW:u32=512u;
+const RL_TERM_LOCAL_SHADOW:u32=1024u;
+const RL_TERM_LIGHT_SAMPLE:u32=2048u;
+const RL_TERM_GI_BLEND:u32=4096u;
+const RL_TERM_GI_REFINE:u32=8192u;
+const RL_TERM_GI_FILL:u32=16384u;
+// Off: the standard program paints its cluster's light count (0 black, 1 red, 2 green, 3 blue, more white).
+const RL_TERM_NO_COUNT_VIEW:u32=32768u;
+// Off: the full sample arithmetic runs, then attenuation is multiplied by an opaque zero.
+const RL_TERM_LIGHT_NONZERO:u32=65536u;
 fn rl_term(term:u32) -> bool { return (RL_SHADE_TERMS&term)!=0u; }
 
 // Everything a program may read about its receiver. Raster frames fill it from
@@ -101,6 +115,8 @@ fn light_sample(i:u32, input:SurfaceInput) -> LightSample {
 // only where the light arrives, as the standard program does.
 fn light_sample_untinted(i:u32, input:SurfaceInput) -> LightSample {
     let index=rl_light_index(i);
+    // Walk only: the list entry is read, then the light is skipped (never taken: no index is all ones).
+    if !rl_term(RL_TERM_LIGHT_SAMPLE) { return LightSample(index,vec3<f32>(0.0,0.0,1.0),select(0.0,1.0,index==0xffffffffu),vec3<f32>(0.0)); }
     let light=lights[index];
     var l=-light.travel_outer.xyz;
     var attenuation=1.0;
@@ -123,6 +139,8 @@ fn light_sample_untinted(i:u32, input:SurfaceInput) -> LightSample {
             attenuation*=cone*cone;
         }
     }
+    if !rl_term(RL_TERM_LIGHT_NONZERO) { attenuation*=select(0.0,1.0,index==0xffffffffu); }
+    if (light.kind.x==0u && !rl_term(RL_TERM_SUN)) || (light.kind.x!=0u && !rl_term(RL_TERM_LOCAL)) { attenuation=0.0; }
     return LightSample(index,l,attenuation,light.rgb_inner.xyz);
 }
 // TP2: the share of `s`'s light the transparent panes between it and the receiver pass:
@@ -145,7 +163,9 @@ fn light_transmission(s:LightSample, input:SurfaceInput) -> vec3<f32> {
 // incidence and need no visibility work. This assumes no BRDF or receiver hemisphere.
 fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {
     if s.attenuation==0.0 || !rl_term(RL_TERM_SHADOWS) { return 1.0; }
+    if lights[s.index].kind.w!=0u && !rl_term(RL_TERM_LOCAL_SHADOW) { return 1.0; }
     if lights[s.index].kind.w!=0u { return rl_local_shadow(lights[s.index],input.receiver,s.direction); }
+    if !rl_term(RL_TERM_SUN_SHADOW) { return 1.0; }
     return hard_shadow(lights[s.index],input.receiver,s.direction);
 }
 // `light_visibility`, unless the engine's display bound (RENDERLAB_LIGHT_BOUND,

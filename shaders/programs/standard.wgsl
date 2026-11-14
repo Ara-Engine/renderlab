@@ -201,5 +201,6 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     }
     // A plain blended film's light, blended by coverage (above).
     if film { exposed*=s.alpha; }
+    if !rl_term(RL_TERM_NO_COUNT_VIEW) { let c=light_count(); var k=vec3<f32>(2.0); if c==0u {k=vec3<f32>(0.0);} if c==1u {k=vec3<f32>(2.0,0.0,0.0);} if c==2u {k=vec3<f32>(0.0,2.0,0.0);} if c==3u {k=vec3<f32>(0.0,0.0,2.0);} return k; }
     return exposed;
 }
