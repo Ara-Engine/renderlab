@@ -1,5 +1,5 @@
 //! U-RTVIS reflection pass and deferred composite (docs/design-reflection-pass.md), on by default
-//! with ray hardware (`RT_DEFAULT`) and, once `NON_RT_DEFAULT` is on, without it
+//! with and without ray hardware (`RT_DEFAULT` and `NON_RT_DEFAULT`)
 //! (RENDERLAB_RL_PASS=0 forces it off, =1 with RENDERLAB_RL_DEFERRED=1 forces it on). Primary
 //! shading appends each reporting program's glossy receiver that fits the room to the frame's
 //! glossy-pixel list (L, shaders/reflections_lobe.wgsl); `rl_trace_pixels` traces each
@@ -9,6 +9,9 @@
 //! costs little.
 //! A child of primary_ray_gpu (its targets, layouts and bindings).
 use super::*;
+
+#[path = "reflection_pass_cache.rs"]
+mod sw_cache;
 
 /// Group-0 bindings (U-RTVIS 54-63; the Mac's reflection_hits reads H and R at 64 and 65).
 /// L, the glossy-pixel list: a 16-byte header (its length), then LIST_ENTRY_BYTES an entry.
@@ -62,10 +65,8 @@ const RECORD_BYTES: u64 = 48;
 /// R and the deferred outputs.
 pub(crate) const STORAGE_BUFFERS: u32 = 2;
 pub(crate) const STORAGE_TEXTURES: u32 = 12;
-/// Whether the non-RT path runs the pass by default. Off on both paths while S1's timing and
-/// pictures are pending (root, 2026-11-13); `RENDERLAB_RL_PASS=1 RENDERLAB_RL_DEFERRED=1` runs it.
-/// Turning it on is this one line.
-pub(crate) const NON_RT_DEFAULT: bool = false;
+/// Software reflections use the separate pass; `RENDERLAB_RL_PASS=0` restores inline tracing.
+pub(crate) const NON_RT_DEFAULT: bool = true;
 /// Whether the ray-hardware path runs the pass and the deferred composite by default (with
 /// inline's hit shading, not own-program hits): on, since the P201 rows (never a loss alone,
 /// ahead of the GI pass alone with it). `RENDERLAB_RL_PASS=0` keeps inline reflections.
@@ -115,6 +116,7 @@ pub(super) struct TraceAbi {
     layout: Owned<wgpu::PipelineLayout>,
     args_group: Owned<wgpu::BindGroupLayout>,
     args_layout: Owned<wgpu::PipelineLayout>,
+    cache_group: Option<Owned<wgpu::BindGroupLayout>>,
 }
 impl TraceAbi {
     pub fn new(
@@ -146,10 +148,11 @@ impl TraceAbi {
             }),
             ResourceKind::BindGroupLayout,
         );
+        let cache_group = sw_cache::layout(device, ledger);
         let layout = ledger.own(
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("reflection trace ABI"),
-                bind_group_layouts: &[Some(&group), Some(arrays), None, Some(lighting)],
+                bind_group_layouts: &[Some(&group), Some(arrays), cache_group.as_ref().map(|g| &**g), Some(lighting)],
                 immediate_size: 0,
             }),
             ResourceKind::PipelineLayout,
@@ -169,7 +172,7 @@ impl TraceAbi {
             }),
             ResourceKind::PipelineLayout,
         );
-        Self { group, layout, args_group, args_layout }
+        Self { group, layout, args_group, args_layout, cache_group }
     }
 }
 
@@ -331,6 +334,19 @@ impl Renderer {
         }
         let head = &self.primary_sources.as_ref().unwrap().1[shading as usize];
         let source = crate::program::rl_trace_source(head);
+        let source = if self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+            source
+        } else {
+            // Four strata is the shipping glossy cap. Larger groups can be
+            // screened without rebuilding; all choices preserve the ray set.
+            let lanes = std::env::var("RENDERLAB_SW_REFLECTION_LANES")
+                .ok()
+                .and_then(|value| value.parse::<u32>().ok())
+                .filter(|lanes| matches!(lanes, 1 | 2 | 4 | 8 | 16 | 32))
+                .unwrap_or(4);
+            source.replace("const RL_RAY_LANES:u32=1u;", &format!("const RL_RAY_LANES:u32={lanes}u;"))
+        };
+        let source = sw_cache::source(source, &self.device);
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
@@ -405,11 +421,15 @@ impl Renderer {
         compute.set_pipeline(&pipelines.list_args);
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
+        let cache = abi.cache_group.as_ref().map(|layout| self.rl_outgoing_group(layout));
         let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reflection trace"),
             timestamp_writes: None,
         });
         bind(&mut compute);
+        if let Some(cache) = cache.as_ref() {
+            compute.set_bind_group(2, &**cache, &[]);
+        }
         compute.set_pipeline(&pipelines.pixels);
         compute.dispatch_workgroups_indirect(&pass.list_args.value, 0);
         compute.set_pipeline(&pipelines.args);
