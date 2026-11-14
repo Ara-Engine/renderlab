@@ -527,6 +527,9 @@ struct Cache {
     /// Window minimum page per level, in absolute light-space page units.
     origins: [Option<[i64; 2]>; MAX_LEVELS],
     epochs: [u32; MAX_LEVELS],
+    /// U-FIXED forward windows (`forward_windows`): the sector of the view's light-space
+    /// direction the shifted levels' windows sit toward; None while unshifted.
+    forward: Option<u8>,
     /// Grow-only caster height range along the light, which the depth encoding uses.
     heights: Option<[f64; 2]>,
     models: Vec<[u32; 16]>,
@@ -872,6 +875,67 @@ fn ladder(finest: i32, coarsest: i32) -> Vec<i32> {
 fn old_ladder() -> bool {
     static OLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OLD.get_or_init(|| std::env::var("RENDERLAB_VSM_LADDER").is_ok_and(|v| v == "old"))
+}
+
+/// Measurement only, default off: `RENDERLAB_VSM_FORWARD=f[,n]` shifts the windows of the
+/// finest `n` levels (all when omitted) ahead of the eye along the view's direction in light
+/// space, by `f` of a half window. Eye-centred windows spend half their texels behind the camera,
+/// so receivers toward the far end of a level's distance band fell back a level or two (P197:
+/// Glint's goal rim 1.5-2.5 octaves coarser than its footprint, a 3-6 px staircase).
+fn forward_windows() -> Option<(f64, usize)> {
+    static FORWARD: std::sync::OnceLock<Option<(f64, usize)>> = std::sync::OnceLock::new();
+    *FORWARD.get_or_init(|| {
+        let value = std::env::var("RENDERLAB_VSM_FORWARD").ok()?;
+        let mut parts = value.split(',');
+        let f = parts.next().and_then(|f| f.trim().parse::<f64>().ok()).filter(|f| *f > 0.0);
+        let n = parts.next().map_or(Some(MAX_LEVELS), |n| n.trim().parse().ok());
+        // A measurement switch: a bad value warns and leaves the windows centred, never panics.
+        let (Some(f), Some(n)) = (f, n) else {
+            eprintln!("renderlab: RENDERLAB_VSM_FORWARD={value:?} is not f[,n] (f > 0); forward windows off");
+            return None;
+        };
+        Some((f.min(1.0), n))
+    })
+}
+
+/// The shift's direction as one of 8 sectors (45 degrees) of the view's light-space direction
+/// `dir` (the forward vector's u and v components): a window moves, and its level re-rasterizes,
+/// only when the view leaves its sector by a margin, so small turns re-render nothing. None
+/// when the view looks nearly along the sun (no direction to shift toward).
+fn forward_sector(previous: Option<u8>, dir: glam::DVec2) -> Option<u8> {
+    const STEP: f64 = std::f64::consts::FRAC_PI_4;
+    let length = dir.length();
+    if length < if previous.is_some() { 0.25 } else { 0.35 } {
+        return None;
+    }
+    let angle = dir.y.atan2(dir.x);
+    if let Some(p) = previous {
+        let off = (angle - f64::from(p) * STEP + std::f64::consts::PI)
+            .rem_euclid(std::f64::consts::TAU)
+            - std::f64::consts::PI;
+        if off.abs() <= 0.5 * STEP + 0.1 {
+            return Some(p);
+        }
+    }
+    Some((angle / STEP).round().rem_euclid(8.0) as u8)
+}
+
+#[cfg(test)]
+#[test]
+fn forward_sector_holds_small_turns() {
+    let at = |deg: f64| glam::DVec2::new(deg.to_radians().cos(), deg.to_radians().sin());
+    assert_eq!(forward_sector(None, at(10.0)), Some(0));
+    // Within the sector and its margin: no move.
+    assert_eq!(forward_sector(Some(0), at(27.0)), Some(0));
+    assert_eq!(forward_sector(Some(0), at(-27.0)), Some(0));
+    // A 90 degree pan crosses two sectors.
+    assert_eq!(forward_sector(Some(0), at(30.0)), Some(1));
+    assert_eq!(forward_sector(Some(1), at(90.0)), Some(2));
+    assert_eq!(forward_sector(Some(7), at(-30.0)), Some(7));
+    // Looking along the sun: no shift, with hysteresis on the way back.
+    assert_eq!(forward_sector(Some(2), at(90.0) * 0.3), Some(2));
+    assert_eq!(forward_sector(None, at(90.0) * 0.3), None);
+    assert_eq!(forward_sector(Some(2), at(90.0) * 0.2), None);
 }
 
 #[cfg(test)]
@@ -2126,11 +2190,26 @@ impl Renderer {
         cache.poses = poses;
         let pages = i64::from(s.pages);
         let eye_light = glam::DVec2::new(eye.dot(u), eye.dot(v));
+        // U-FIXED forward windows: the finest levels' windows sit ahead of the eye, in whole
+        // pages toward the view's sector (`forward_sector`).
+        let forward = forward_windows();
+        let ahead = -camera.view().inverse().z_axis.truncate().as_dvec3();
+        cache.forward = forward
+            .and_then(|_| forward_sector(cache.forward, glam::DVec2::new(ahead.dot(u), ahead.dot(v))));
         let mut level_bytes = [0u8; MAX_LEVELS * 32];
         for (i, &rung) in rungs.iter().enumerate() {
             let texel = f64::from(s.finest_texel) * 2f64.powi(rung);
             let page = texel * f64::from(PAGE);
+            let shift = match (forward, cache.forward) {
+                (Some((f, n)), Some(sector)) if i < n => {
+                    let a = f64::from(sector) * std::f64::consts::FRAC_PI_4;
+                    let half = 0.5 * pages as f64 * f;
+                    [(half * a.cos()).round() as i64, (half * a.sin()).round() as i64]
+                }
+                _ => [0, 0],
+            };
             let centre = [eye_light.x, eye_light.y].map(|x| (x / page).floor() as i64);
+            let centre = [centre[0] + shift[0], centre[1] + shift[1]];
             let keep = cache.origins[i].filter(|o| {
                 !invalidated[i] && (0..2).all(|a| (centre[a] - (o[a] + pages / 2)).abs() <= 1)
             });

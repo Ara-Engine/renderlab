@@ -58,6 +58,7 @@
 //! `far=low` puts the camera 1.7 m up with a body-sized box 0.3 m beside it and columns at 50,
 //! 200 and 1000 m (the clipmap's reach from a caster at the lens); `far=box` puts the same eye
 //! inside a diagonal wall's bounds instead. `lowmove` and `boxmove` slide them with the caster.
+//! `--diag pan=1` (U-FIXED) holds the first pose and turns it 90 degrees over frames 30-89.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -373,6 +374,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     | "program"
                     | "far"
                     | "casts"
+                    | "pan"
             )
         });
     // U-SPECK (docs/speck.md): `bulb=off` leaves out the two lamp bulbs' spheres, `bulb=dark`
@@ -429,6 +431,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .any(|v| scene_key("far", v));
     let far = scene_key("far", "1") || far_move || far_low || far_box;
     let mut held_pose = None;
+    // `pan=1` (U-FIXED, forward shadow windows): the first pose held, then turned 90 degrees
+    // about the vertical over frames 30-89, a steady pan (the shadow windows' re-rasterization
+    // on turns).
+    let pan = scene_key("pan", "1");
+    let mut pan_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
     // A soft source must clear its own fixture, or every receiver sees it partly blocked: a
@@ -1239,6 +1246,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             )
         } else {
             (eye, target, 500.0)
+        };
+        let (eye, target) = if pan {
+            let (e, t) = *pan_pose.get_or_insert((eye, target));
+            let turn = (90.0 * ((frame as f32 - 30.0) / 60.0).clamp(0.0, 1.0)).to_radians();
+            (e, e + Mat4::from_rotation_y(turn).transform_vector3(t - e))
+        } else {
+            (eye, target)
         };
         let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, far_plane)?;
         // View b: across the scene, still at its first pose unless `--b-orbit`, a third of
