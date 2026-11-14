@@ -136,3 +136,9 @@ Cycle adds 0.0026–0.0036 ms to TR1. RT moving full span increases by 0.0814 ms
 (0.72%); other full-span deltas are small or change sign between rounds. This
 is a cost measurement, not a speedup claim. Actual Glint picture gates remain
 pending; default stays off.
+
+The full Linux lib suite also passes in separate processes with coverage off,
+UNORM alone, cycle alone and both switches set: 302 passed, zero failed in each.
+Validation composes each variant from the original resolve body through the
+engine's constructor, including the diagnostic mask bodies; it never applies
+the coverage transform again to an already-composed engine module.
