@@ -405,26 +405,47 @@ impl Default for ReconstructionShadowBudget {
         }
     }
 }
+/// A sun ray-count knob's value: a power of two in 8..=256, or None. A set but invalid value
+/// warns once (the knob read is cached), so an ignored setting is never silent.
+fn knob_rays(name: &str, value: Option<&str>) -> Option<u32> {
+    let value = value?;
+    let rays = value
+        .parse::<u32>()
+        .ok()
+        .filter(|n| (8..=256).contains(n) && n.is_power_of_two());
+    if rays.is_none() {
+        eprintln!("{name}={value} ignored: expected a power of two from 8 to 256");
+    }
+    rays
+}
+#[cfg(test)]
+#[test]
+fn sun_ray_knobs_accept_powers_of_two_from_8_to_256_only() {
+    assert_eq!(knob_rays("RENDERLAB_SUN_COLD_RAYS", None), None);
+    for (value, rays) in [("8", Some(8)), ("32", Some(32)), ("256", Some(256))] {
+        assert_eq!(knob_rays("RENDERLAB_SUN_COLD_RAYS", Some(value)), rays);
+    }
+    for value in ["4", "48", "512", "0", "-8", "x", ""] {
+        assert_eq!(knob_rays("RENDERLAB_SUN_COLD_RAYS", Some(value)), None, "{value}");
+    }
+}
 impl ReconstructionShadowBudget {
     /// U-FIXED measurement knobs for A/B runs without a rebuild (the integration thread on
     /// Ara): `RENDERLAB_SUN_MOVING_RAYS=N` replaces `active_rays` (moving and young history)
     /// and `RENDERLAB_SUN_RESTART_RAYS=N` replaces `reset_rays` (restarts, including the
-    /// receivers in a moving caster's swept shadow). N is a power of two in 8..=256; other
-    /// values are ignored.
+    /// receivers in a moving caster's swept shadow). U-RTVIS: `RENDERLAB_SUN_COLD_RAYS=N`
+    /// replaces `cold_rays` (new targets and camera cuts, where no receiver has history). N is
+    /// a power of two in 8..=256; any other value is ignored with one warning on stderr.
     pub(crate) fn with_env_knobs(self) -> Self {
-        static KNOBS: std::sync::OnceLock<(Option<u32>, Option<u32>)> = std::sync::OnceLock::new();
-        let (moving, restart) = *KNOBS.get_or_init(|| {
-            let knob = |name| {
-                std::env::var(name)
-                    .ok()
-                    .and_then(|v| v.parse::<u32>().ok())
-                    .filter(|n| (8..=256).contains(n) && n.is_power_of_two())
-            };
-            (knob("RENDERLAB_SUN_MOVING_RAYS"), knob("RENDERLAB_SUN_RESTART_RAYS"))
+        static KNOBS: std::sync::OnceLock<[Option<u32>; 3]> = std::sync::OnceLock::new();
+        let [moving, restart, cold] = *KNOBS.get_or_init(|| {
+            ["RENDERLAB_SUN_MOVING_RAYS", "RENDERLAB_SUN_RESTART_RAYS", "RENDERLAB_SUN_COLD_RAYS"]
+                .map(|name| knob_rays(name, std::env::var(name).ok().as_deref()))
         });
         Self {
             active_rays: moving.unwrap_or(self.active_rays),
             reset_rays: restart.unwrap_or(self.reset_rays),
+            cold_rays: cold.unwrap_or(self.cold_rays),
             ..self
         }
     }
