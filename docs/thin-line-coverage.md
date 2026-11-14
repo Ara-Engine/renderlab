@@ -90,3 +90,25 @@ difference to zero pixels (maximum 0.00733). Six pixels differ by up to 0.02051
 on the frame after the cut. Picking and resolve switch-off module byte identity
 also pass. Actual Glint still/motion/cut crops remain pending; these synthetic
 results do not certify absence of ghosting in game scenes.
+
+Current-main gate on the branch merged with main `bc8b7c3d`: 30/30 flight PNG
+hashes match the exact release main `177ef27f` binary on each path (reference
+SHA256 `9d800c82aee267538fbcb4d213c3073246ba4c91c9123fdd1cfdcb9c97504012`).
+The ordinary lease took 51.31 seconds, exit 0. CYCLE with material, GI, sun,
+sun-zone-stop, light visibility and deferred reflections enabled starts/draws
+four frames on both paths, exit 0; material writer/reader startup logs confirm
+the material pass ran. Linux lib on the merged head: 302 passed, zero failed,
+181 ignored.
+
+Moving game_scene pictures (1280x720, 34 frames, base `177ef27f`, CYCLE vs off):
+
+| Path / clip | Maximum pixels >8 codes | Maximum code difference | Maximum frame-change difference pixels >8 |
+|---|---:|---:|---:|
+| RT flight | 33 | 67 | 60 |
+| RT night lanterns | 48 | 75 | 78 |
+| Non-RT flight | 35 | 67 | 58 |
+| Non-RT night lanterns | 48 | 75 | 80 |
+
+Worst crops were inspected: differences are sparse foliage/silhouette pixels;
+these checks do not replace Glint's moving-edge/reference gate. No performance
+claim yet; the three-mode held/moving timing is pending.
