@@ -211,6 +211,18 @@ def timing_lease_running():
     return False
 
 
+def foreign_engines():
+    """Other engines' players or editors (Unity comparison players `uc.exe`, `UnrealEditor*`) that would
+    share the GPU with a timing lease (coordinator, 2026-11-14: a hung HDRP player doubled a reference bar)."""
+    out = subprocess.run(["tasklist", "/fo", "csv", "/nh"], capture_output=True, text=True, creationflags=FLAGS).stdout
+    hits = []
+    for row in out.splitlines():
+        cols = row.strip('"').split('","')
+        if len(cols) > 1 and (cols[0].lower() == "uc.exe" or cols[0].lower().startswith("unrealeditor")):
+            hits.append(f"{cols[0]} pid {cols[1]}")
+    return hits
+
+
 def take_timing_hold(label):
     """Take TIMING_HOLD (atomic mkdir), then wait at most 10 minutes for the running builds' slots
     to clear. Released at exit. False (the caller defers) if another timing lease holds it or the GPU
@@ -257,6 +269,10 @@ def main():
         if a.minutes > 5:
             p.error("a timing lease is at most 5 minutes")
         a.no_build_contention = True
+        engines = foreign_engines()
+        if engines:
+            print("DEFERRED: another engine's player or editor is running beside a timing lease:", ", ".join(engines), flush=True)
+            return 3
         if not take_timing_hold(a.label):
             print("DEFERRED: the GPU or another timing lease is busy; a timing lease holds the build slots only once it can run", flush=True)
             return 3
