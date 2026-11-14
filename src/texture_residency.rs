@@ -715,6 +715,7 @@ impl Renderer {
                 readback.get_or_insert_with(|| self.residency_buffer());
             let mut encoder = self.device.create_command_encoder(&Default::default());
             self.encode_request_clear(&mut encoder);
+            self.encode_material_shading(&mut encoder, shading, None, true);
             self.encode_primary_shading(&mut encoder, shading, None);
             self.encode_hdr_present(&mut encoder, view, None);
             let state = self

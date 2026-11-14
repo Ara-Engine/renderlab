@@ -26,6 +26,20 @@ fn surface(input:SurfaceInput) -> Surface {
     return Surface(n,decal_base.rgb,decal_mr.y,decal_mr.x);
 }
 
+// The optional material record maps the resolved surface, as the standard program does.
+// Glow and reflection weight remain program parameters, read by shade/reflection_lobe.
+fn material_out(s:Surface, input:SurfaceInput) -> MaterialRecord {
+    return MaterialRecord(s.n,s.base,1.0,s.metal,s.rough,vec3<f32>(0.0),0.0,0.0,0u);
+}
+fn material_in(m:MaterialRecord, input:SurfaceInput) -> Surface {
+    var s:Surface;
+    s.n=m.normal;
+    s.base=m.base;
+    s.metal=m.metallic;
+    s.rough=m.roughness;
+    return s;
+}
+
 // The GGX lobe the engine traces on RT traced frames (roughness below 0.5); weight 0
 // asks for no rays. Non-RT frames and rough surfaces keep the untraced estimate.
 fn reflection_lobe(s:Surface, input:SurfaceInput) -> SpecularLobe {

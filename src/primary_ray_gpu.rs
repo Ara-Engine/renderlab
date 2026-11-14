@@ -38,6 +38,8 @@ use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 // Lean shading's background-compiled pipelines (program::lean_variant).
 #[path = "lean_gpu.rs"]
 mod lean_gpu;
+#[path = "material_pass_gpu.rs"]
+mod material_pass_gpu;
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
 /// `scene_pixels` rectangle, the sampling words, the reflection bands
@@ -519,6 +521,7 @@ impl Renderer {
                     slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
                     slot.pipelines.lean = Default::default();
+                    slot.pipelines.material = Default::default();
                 }
                 self.primary_sources = None;
                 let submissions = self.submissions;
@@ -581,6 +584,7 @@ impl Renderer {
                     slot.pipelines.streamed = Default::default();
                     slot.pipelines.list = Default::default();
                     slot.pipelines.lean = Default::default();
+                    slot.pipelines.material = Default::default();
                 }
                 self.pipeline.primary = Some(pipelines);
                 self.primary_sources = Some((sources, heads));
@@ -845,6 +849,8 @@ pub(super) struct Targets {
     /// them, with their receivers or Interactive counts, only in tiles whose `tiles`
     /// flag is set.
     pub hit: Depth,
+    /// Material record textures, retained and retired with the hit image.
+    pub material: Option<[Depth; crate::program::MATERIAL_RECORD_BINDINGS.len()]>,
     /// Exact hard-receiver epsilon, computed from the returned hit vertices.
     pub epsilon: Depth,
     /// One flag per `TRACE_TILE` pixels: nonzero when a camera ray in the tile hit.
@@ -919,6 +925,7 @@ struct Bindings {
     /// P-RTS: penumbra list and trace.
     penumbra: Option<[Owned<wgpu::BindGroup>; 2]>,
     shade: [Option<Owned<wgpu::BindGroup>>; 2],
+    material_write: [[Option<Owned<wgpu::BindGroup>>; 2]; 2],
     /// MP1: `shade` plus the program list bindings, while list buffers exist.
     list: [Option<Owned<wgpu::BindGroup>>; 2],
     /// U-RTVIS: rl_trace's group 0 while RENDERLAB_RL_PASS=1.
@@ -1000,6 +1007,7 @@ pub(super) struct PrimaryState {
     pub test_film_materialize: bool,
     trace_bindings: [Owned<wgpu::BindGroupLayout>; 2],
     shade_bindings: [Owned<wgpu::BindGroupLayout>; 2],
+    material_layouts: Option<material_pass_gpu::Layouts>,
     /// U-RTVIS: rl_trace's layouts while RENDERLAB_RL_PASS=1, and its kernels per `Shading`.
     rl_trace: Option<reflection_pass::TraceAbi>,
     rl_pipelines: [Option<reflection_pass::TracePipelines>; 2],
@@ -1293,6 +1301,11 @@ impl PrimaryState {
         let shade_entries = [scene(2), texture(6, uint)].map(|visibility| {
             shade_layout_entries(visibility, ShadeSwitches::of(device))
         });
+        let material_write_entries = shade_entries.clone();
+        let shade_entries = shade_entries.map(|mut entries| {
+            if crate::program::material_pass_on() { entries.extend(material_pass_gpu::entries(false)); }
+            entries
+        });
         let shade_bindings = shade_entries
             .each_ref()
             .map(|e| group("primary shading", e));
@@ -1373,6 +1386,7 @@ impl PrimaryState {
             )
         };
         Self {
+            material_layouts: crate::program::material_pass_on().then(|| material_pass_gpu::Layouts::new(device, ledger, &material_write_entries, &array_bindings, [&material_bindings, &streamed_bindings], lighting)),
             #[cfg(test)]
             test_split_interactive_timestamps: false,
             #[cfg(test)]
@@ -1532,6 +1546,7 @@ impl PrimaryState {
             test_film_materialize: self.test_film_materialize,
             trace_bindings: self.trace_bindings.clone(),
             shade_bindings: self.shade_bindings.clone(),
+            material_layouts: self.material_layouts.clone(),
             rl_trace: self.rl_trace.clone(),
             light_vis: self.light_vis.clone(),
             rl_pipelines: self.rl_pipelines.clone(),
@@ -2476,6 +2491,7 @@ impl Renderer {
                 }
             };
             let next = Targets {
+                material: crate::program::material_pass_on().then(|| crate::program::MATERIAL_RECORD_BINDINGS.map(|_| target("material record", size, wgpu::TextureFormat::Rgba32Uint))),
                 light_vis: light_vis_pass::on().then(|| Buffer::new(
                     self, "local light visibility",
                     (u64::from(size.width) * u64::from(size.height) * light_vis_pass::PIXEL_BYTES)
@@ -2600,7 +2616,7 @@ impl Renderer {
                 .then(|| &*state.reflections.as_ref().unwrap().buffer.value);
             let shade = |shading: Shading,
                          visibility: (u32, R<'_>)|
-             -> [Option<Owned<wgpu::BindGroup>>; 2] {
+             -> [Option<Owned<wgpu::BindGroup>>; 4] {
                 let mut entries = vec![
                     camera.clone(),
                     (7, hit.clone()),
@@ -2643,28 +2659,37 @@ impl Renderer {
                         entries.push((63, R::TextureView(&untraced.view)));
                     }
                 }
+                if let Some(images) = &t.material {
+                    entries.extend(crate::program::MATERIAL_RECORD_BINDINGS.into_iter().zip(images).map(|(b,t)| (b,R::TextureView(&t.view))));
+                }
                 // MP1: the same group plus the slot table and tile lists.
                 let list = lists.map(|l| {
                     let mut entries = entries.clone();
                     entries.extend(l.shade_entries());
                     group(state.list_shade_layout(shading), &entries)
                 });
-                [
-                    Some(group(&state.shade_bindings[shading as usize], &entries)),
-                    list,
-                ]
+                let writes = state.material_layouts.as_ref().map(|l| {
+                    let single = group(&l.groups[shading as usize], &entries);
+                    let list = lists.map(|lists| {
+                        let mut entries = entries.clone(); entries.extend(lists.shade_entries());
+                        group(&l.lists.shade[shading as usize], &entries)
+                    });
+                    (single,list)
+                });
+                [Some(group(&state.shade_bindings[shading as usize], &entries)),list,writes.as_ref().map(|w| w.0.clone()),writes.and_then(|w| w.1)]
             };
-            let [shade, list] = match fresh {
+            let [shade, list, material_tiles, material_lists] = match fresh {
                 Some(f) => {
-                    let [s, l] = shade(Shading::Soft, (6, R::TextureView(&f.visibility.view)));
-                    [[None, s], [None, l]]
+                    let [s, l, w, wl] = shade(Shading::Soft, (6, R::TextureView(&f.visibility.view)));
+                    [[None, s], [None, l], [None,w], [None,wl]]
                 }
                 None => {
-                    let [s, l] = shade(Shading::Hard, scene.clone());
-                    [[s, None], [l, None]]
+                    let [s, l, w, wl] = shade(Shading::Hard, scene.clone());
+                    [[s, None], [l, None], [w,None], [wl,None]]
                 }
             };
             let next = Bindings {
+                material_write: [material_tiles, material_lists],
                 trace,
                 fresh: fresh.map(|f| {
                     group(
@@ -2893,7 +2918,7 @@ impl Renderer {
     /// Visibility-buffer RT frames' Interactive sun: `primary_vb_sun` on reconstructed frames
     /// (TR1's budget, rotation, cold and held stops, history `parity`), else the 8-direction
     /// fresh prefix. Both read the receivers the buffer's resolve wrote.
-    fn encode_vb_sun(
+    pub(in crate::renderer) fn encode_vb_sun(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
@@ -3373,6 +3398,7 @@ impl Renderer {
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         let state = self.view.primary.as_ref().unwrap();
+        if self.encode_material_shading(encoder, shading, timestamp_writes.clone(), false) { return; }
         if state.mixed() {
             self.encode_program_lists(encoder, shading, timestamp_writes);
             return;
