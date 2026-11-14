@@ -9,8 +9,8 @@
 | `1` | Separate receiver pass |
 
 Other values also follow the path default. The environment is read once per process.
-`RT_DEFAULT` and `NON_RT_DEFAULT` in `src/gi_receiver_pass.rs` are both false.
-They can be changed independently after the game-scene picture and memory checks.
+`RT_DEFAULT` and `NON_RT_DEFAULT` in `src/gi_receiver_pass.rs` are both true (RT since #129,
+non-RT since the shading overhaul). They can be changed independently.
 The path uses the device's ray-query feature, as the reflection pass does.
 
 Only enabled renderers allocate the prepared-irradiance buffer and dispatch arguments.
