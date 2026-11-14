@@ -1,14 +1,13 @@
 // Ordered dispatches reserve 80% for pixels; the background can use unused visible tickets.
 fn gi_priority_visible_limit(cap:u32) -> u32 { return cap-cap/5u; }
 fn gi_priority_ticket(limit:u32) -> bool {
-    var used=atomicLoad(&gi_work[47u]);
-    loop {
-        if used>=limit { return false; }
-        let result=atomicCompareExchangeWeak(&gi_work[47u],used,used+1u);
-        if result.exchanged { return true; }
-        used=result.old_value;
-    }
-    return false;
+    return atomicAdd(&gi_work[47u],1u)<limit;
+}
+@compute @workgroup_size(1) fn gi_priority_gather_clamp() {
+    atomicMin(&gi_work[47u],gi_priority_visible_limit(gi_word(32u)));
+}
+@compute @workgroup_size(1) fn gi_priority_claim_reset() {
+    atomicStore(&gi_work[47u],atomicLoad(&gi_work[GI_W_CREATED]));
 }
 fn gi_priority_claim_admit(band:u32) -> bool {
     let cap=gi_word(33u);

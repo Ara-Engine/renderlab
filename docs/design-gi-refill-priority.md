@@ -28,8 +28,11 @@ request-again behavior; a cell ceiling does not by itself guarantee fast image c
 Gather classes are snapshotted into the existing per-slot claim scratch before the first
 stage changes any bounce value, then cleared before claim rounds. This prevents a cell that
 just gained its first value being gathered again in the next visible stage. Counter 47 uses
-saturating compare/exchange, so rejected candidates do not consume later stages' tickets;
-it resets between gather and claim admission. No new per-cell allocation is needed.
+one atomic add per candidate. Tiny phase-boundary kernels clamp the gather ticket to the
+actual admitted visible count and reset claim tickets from the actual created count before
+each round. Denied claims skip bucket walks. A global compare/exchange loop was rejected:
+it serialized admission and made the first fixed-budget timing rows much slower than default.
+No new per-cell allocation is needed.
 
 The `ms` mode targets `RENDERLAB_GI_REFILL_MS` (3 ms by default) across gather and claim/setup/
 sky-trace/finish work, initially split 60%/40%. Four nonblocking 40-byte readbacks provide

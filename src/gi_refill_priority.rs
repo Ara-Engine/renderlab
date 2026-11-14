@@ -104,12 +104,12 @@ pub(super) fn source(mut source: String, enabled: bool) -> String {
         ),
         (
             "for(var i=id.x;i<count;i+=groups.x*64u) { gi_claim_miss(i); }",
-            "for(var i=id.x;i<count;i+=groups.x*64u) { let base=gi_frame.offsets.y+i*GI_MISS_WORDS; if (gi_miss_band(base)>=GI_BAND_PIXEL)==visible { gi_claim_miss(i); } }",
+            "for(var i=id.x;i<count;i+=groups.x*64u) { let base=gi_frame.offsets.y+i*GI_MISS_WORDS; if atomicLoad(&gi_work[base+5u])!=GI_CREATED && (gi_miss_band(base)>=GI_BAND_PIXEL)==visible { gi_claim_miss(i); } }",
         ),
         ("let period=gi_claim_period();", "let period=1u;"),
         (
-            "    atomicStore(&gi_work[base+5u],GI_CREATED);\n    let key=gi_miss_key(base);",
-            "    atomicStore(&gi_work[base+5u],GI_CREATED);\n    if !gi_priority_claim_admit(gi_miss_band(base)) { atomicAdd(&gi_work[GI_W_CLAIM_DEFERRED],1u); return; }\n    let key=gi_miss_key(base);",
+            "    let key=gi_miss_key(base);\n    let mask=gi_word(GI_H_MASK);",
+            "    if !gi_priority_claim_admit(gi_miss_band(base)) { atomicStore(&gi_work[base+5u],GI_CREATED); atomicAdd(&gi_work[GI_W_CLAIM_DEFERRED],1u); return; }\n    let key=gi_miss_key(base);\n    let mask=gi_word(GI_H_MASK);",
         ),
         (
             "@compute @workgroup_size(64) fn gi_gather_batched(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) lane:u32) {",
@@ -133,6 +133,8 @@ pub(super) fn source(mut source: String, enabled: bool) -> String {
 }
 
 pub(super) struct Pipelines {
+    pub gather_clamp: Owned<wgpu::ComputePipeline>,
+    pub claim_reset: Owned<wgpu::ComputePipeline>,
     pub claim_background: Owned<wgpu::ComputePipeline>,
     pub gather_later: Owned<wgpu::ComputePipeline>,
     pub gather_background: Owned<wgpu::ComputePipeline>,
@@ -140,6 +142,8 @@ pub(super) struct Pipelines {
 impl Pipelines {
     pub fn new(mut compute: impl FnMut(&str) -> Owned<wgpu::ComputePipeline>) -> Self {
         Self {
+            gather_clamp: compute("gi_priority_gather_clamp"),
+            claim_reset: compute("gi_priority_claim_reset"),
             claim_background: compute("gi_priority_claim_background"),
             gather_later: compute("gi_priority_gather_later"),
             gather_background: compute("gi_priority_gather_background"),

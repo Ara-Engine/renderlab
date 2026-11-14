@@ -3423,7 +3423,7 @@ impl GiState {
                          groups: Option<[u32; 2]>| {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(label),
-                timestamp_writes: stamps(stamp),
+                timestamp_writes: if stamp == u32::MAX { None } else { stamps(stamp) },
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &*g.main, &[]);
@@ -3458,7 +3458,9 @@ impl GiState {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
             main_pass(encoder, "indirect cache gather", &p.gather, b, grid);
             if let Some(priority) = &p.priority {
+                main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,plan.bounce.then_some([1,1]));
                 main_pass(encoder,"indirect visible gather",&priority.gather_later,PROFILE_STAMPS/2,grid);
+                main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,plan.bounce.then_some([1,1]));
                 main_pass(encoder,"indirect background gather",&priority.gather_background,PROFILE_STAMPS/2+1,grid);
             }
         }
@@ -3468,6 +3470,9 @@ impl GiState {
         if traced || profiling {
             for k in 0..CLAIM_ROUNDS {
                 let grid = traced.then_some([CLAIM_GROUPS, 1]);
+                if let Some(priority) = &p.priority {
+                    main_pass(encoder,"indirect claim ticket reset",&priority.claim_reset,u32::MAX,traced.then_some([1,1]));
+                }
                 main_pass(encoder, "indirect cache claim", &p.claim, 1 + 2 * k, grid);
                 let last = k + 1 == CLAIM_ROUNDS && p.priority.is_none();
                 let resolve = if last { &p.resolve_last } else { &p.resolve };
@@ -3477,6 +3482,7 @@ impl GiState {
                 for k in 0..CLAIM_ROUNDS {
                     let grid = traced.then_some([CLAIM_GROUPS,1]);
                     let stamp = PROFILE_STAMPS/2+2+2*k;
+                    main_pass(encoder,"indirect claim ticket reset",&priority.claim_reset,u32::MAX,traced.then_some([1,1]));
                     main_pass(encoder,"indirect background claim",&priority.claim_background,stamp,grid);
                     let resolve = if k+1==CLAIM_ROUNDS {&p.resolve_last} else {&p.resolve};
                     main_pass(encoder,"indirect background resolve",resolve,stamp+1,grid);
