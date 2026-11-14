@@ -243,6 +243,7 @@ pub(super) fn compile_structure_sources(
             format!("{}{}", section("TP_FRAME"), section("TP_SHADOW")),
         ),
         ("aa-seed", section("TP_AA_SEED").to_owned()),
+        ("aa-resolve", section("TP_AA_RESOLVE").to_owned()),
         ("transmission", transmission_shadow::draw_source(prelude)),
     ];
     if rt {
@@ -311,6 +312,8 @@ struct Gpu {
     // TP2: seed the multisampled glass attachment with its exact background.
     aa_bindings: Owned<wgpu::BindGroupLayout>,
     aa_seed: Owned<wgpu::RenderPipeline>,
+    aa_resolve_bindings: Owned<wgpu::BindGroupLayout>,
+    aa_resolve: Owned<wgpu::RenderPipeline>,
 }
 struct ParticlePipelines {
     prelude: [u8; 32],
@@ -1084,7 +1087,49 @@ impl Renderer {
                 }),
             ResourceKind::RenderPipeline,
         );
+        let aa_resolve_bindings = self.tp_layout(
+            "TP bounded AA resolve",
+            &[entry(
+                31,
+                FRAGMENT,
+                wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: true,
+                },
+            )],
+        );
+        let resolve_layout =
+            self.tp_pipeline_layout("TP bounded AA resolve", &[&aa_resolve_bindings]);
+        let resolve_module = self.tp_module("TP bounded AA resolve", section("TP_AA_RESOLVE"));
+        let aa_resolve = self.ledger.own(
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("TP bounded AA resolve"),
+                    layout: Some(&resolve_layout),
+                    vertex: wgpu::VertexState {
+                        module: &resolve_module,
+                        entry_point: Some("tp_resolve_vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &resolve_module,
+                        entry_point: Some("tp_resolve_fs"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::TextureFormat::Rgba16Float.into())],
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                }),
+            ResourceKind::RenderPipeline,
+        );
         Gpu {
+            aa_resolve_bindings,
+            aa_resolve,
             aa_bindings,
             aa_seed,
             frame,
@@ -1711,6 +1756,10 @@ impl Renderer {
         traced: bool,
         mut timeline: Option<&mut crate::pass_timeline::PassTimeline>,
     ) -> Result<(), Error> {
+        static FULL_VIEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let bounded = !*FULL_VIEW.get_or_init(|| {
+            std::env::var("RENDERLAB_TRANSPARENCY_FULL_VIEW").is_ok_and(|v| v == "1")
+        });
         let mut measurement = measurement::Measure::begin(self.frames, self.view_key.0);
         macro_rules! part {
             ($name:literal) => {
@@ -1790,7 +1839,8 @@ impl Renderer {
                     sample_count: 4,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Rgba16Float,
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                        | wgpu::TextureUsages::TEXTURE_BINDING,
                     view_formats: &[],
                 }),
                 ResourceKind::Texture,
@@ -2558,6 +2608,14 @@ impl Renderer {
                 resource: wgpu::BindingResource::TextureView(&targets.color.view),
             }],
         });
+        let resolve_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("TP bounded AA resolve"),
+            layout: &gpu.aa_resolve_bindings,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 31,
+                resource: wgpu::BindingResource::TextureView(&targets.aa.view),
+            }],
+        });
         // The colour behind a draw is the HDR target as the draws before it left it. After the
         // first full copy, only what those draws wrote can differ, so later draws copy just that
         // region (`dirty`, the union of their conservative screen rectangles; the whole view for
@@ -2578,10 +2636,10 @@ impl Renderer {
             .map(|draw| {
                 let state = &draw.instances.state;
                 state
-                    .models
+                    .ids
                     .iter()
-                    .map(|model| {
-                        panes::rect(&draw.mesh.bounds, *model, matrix, [size.width, size.height])
+                    .map(|&id| {
+                        panes::rect(&draw.mesh.bounds, state.models[id as usize], matrix, [size.width, size.height])
                     })
                     .reduce(union)
                     .unwrap_or([0, 0, 0, 0])
@@ -2638,6 +2696,15 @@ impl Renderer {
         let mut dirty: Option<[u32; 4]> = None;
         let mut index = 0;
         while index < items.len() {
+            // Keep the receiver set and its cached sun map stable as the camera moves;
+            // cull empty draw rectangles only after fitting the map and sorting items.
+            if bounded && let Item::Draw(i) = items[index].1 {
+                let r = draw_rects[i];
+                if r[2] <= r[0] || r[3] <= r[1] {
+                    index += 1;
+                    continue;
+                }
+            }
             let glass = matches!(items[index].1, Item::Draw(_));
             let aa = glass && glass_samples() == 4;
             if glass {
@@ -2933,13 +3000,41 @@ impl Renderer {
                         encoder.copy_texture_to_texture(from, to, extent);
                     }
                 }
+                // Seed and resolve only the pixels this run can write. Four-sample
+                // coverage, shading coordinates and back-to-front order stay unchanged.
+                let resolve_rect = match items[first].1 {
+                    Item::Draw(i) if bounded && aa => {
+                        if films[i] {
+                            (first..items.len())
+                                .take_while(|&k| film_at(k))
+                                .filter_map(|k| match items[k].1 {
+                                    Item::Draw(j) => Some(draw_rects[j]),
+                                    Item::Emitter(_) => None,
+                                })
+                                .reduce(union)
+                                .unwrap_or(view_rect)
+                        } else if spans.len() == 1 {
+                            draw_rects[i]
+                        } else {
+                            spans[s].1
+                        }
+                    }
+                    _ => view_rect,
+                };
+                let bounded_aa = aa && resolve_rect != view_rect;
+                if bounded_aa
+                    && (resolve_rect[2] <= resolve_rect[0] || resolve_rect[3] <= resolve_rect[1])
+                {
+                    index = first + 1;
+                    continue;
+                }
                 part!("transparency.raster_seed_glass_resolve");
                 if let Some(m) = &mut measurement {
                     m.counts.raster_passes += 1;
                     if aa {
                         m.counts.msaa_passes += 1;
-                        m.counts.seed_pixels += u64::from(size.width) * u64::from(size.height);
-                        m.counts.resolve_pixels += u64::from(size.width) * u64::from(size.height);
+                        m.counts.seed_pixels += measurement::area(resolve_rect);
+                        m.counts.resolve_pixels += measurement::area(resolve_rect);
                     }
                 }
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2947,14 +3042,14 @@ impl Renderer {
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                         view: if aa { &targets.aa.view } else { hdr_view },
                         depth_slice: None,
-                        resolve_target: aa.then_some(hdr_view),
+                        resolve_target: (aa && !bounded_aa).then_some(hdr_view),
                         ops: wgpu::Operations {
-                            load: if aa {
+                            load: if aa && !bounded_aa {
                                 wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
                             } else {
                                 wgpu::LoadOp::Load
                             },
-                            store: if aa {
+                            store: if aa && !bounded_aa {
                                 wgpu::StoreOp::Discard
                             } else {
                                 wgpu::StoreOp::Store
@@ -2963,6 +3058,14 @@ impl Renderer {
                     })],
                     ..Default::default()
                 });
+                if bounded_aa {
+                    pass.set_scissor_rect(
+                        resolve_rect[0],
+                        resolve_rect[1],
+                        resolve_rect[2] - resolve_rect[0],
+                        resolve_rect[3] - resolve_rect[1],
+                    );
+                }
                 if aa {
                     pass.set_pipeline(&gpu.aa_seed);
                     pass.set_bind_group(0, &aa_group, &[]);
@@ -3042,6 +3145,31 @@ impl Renderer {
                     {
                         break;
                     }
+                }
+                drop(pass);
+                if bounded_aa {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("TP bounded AA resolve"),
+                        color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                            view: hdr_view,
+                            depth_slice: None,
+                            resolve_target: None,
+                            ops: wgpu::Operations {
+                                load: wgpu::LoadOp::Load,
+                                store: wgpu::StoreOp::Store,
+                            },
+                        })],
+                        ..Default::default()
+                    });
+                    pass.set_pipeline(&gpu.aa_resolve);
+                    pass.set_bind_group(0, &resolve_group, &[]);
+                    pass.set_scissor_rect(
+                        resolve_rect[0],
+                        resolve_rect[1],
+                        resolve_rect[2] - resolve_rect[0],
+                        resolve_rect[3] - resolve_rect[1],
+                    );
+                    pass.draw(0..3, 0..1);
                 }
             }
         }

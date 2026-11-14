@@ -569,3 +569,17 @@ struct TpBillboard {
     return vec4<f32>(clamp(fogged,vec3<f32>(0.0),vec3<f32>(65504.0)),alpha);
 }
 // ---- end TP_PARTICLES_DRAW ----
+
+// ---- TP_AA_RESOLVE ----
+// The same four coverage samples as the hardware resolve, only where glass wrote.
+@group(0) @binding(31) var tp_resolve_color:texture_multisampled_2d<f32>;
+@vertex fn tp_resolve_vs(@builtin(vertex_index) id:u32)->@builtin(position) vec4<f32> {
+    let p=array<vec2<f32>,3>(vec2<f32>(-1.0,-1.0),vec2<f32>(3.0,-1.0),vec2<f32>(-1.0,3.0));
+    return vec4<f32>(p[id],0.0,1.0);
+}
+@fragment fn tp_resolve_fs(@builtin(position) p:vec4<f32>)->@location(0) vec4<f32> {
+    let pixel=vec2<i32>(p.xy);
+    return (textureLoad(tp_resolve_color,pixel,0)+textureLoad(tp_resolve_color,pixel,1)
+           +textureLoad(tp_resolve_color,pixel,2)+textureLoad(tp_resolve_color,pixel,3))*0.25;
+}
+// ---- end TP_AA_RESOLVE ----
