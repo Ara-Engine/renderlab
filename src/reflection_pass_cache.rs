@@ -1,6 +1,6 @@
-//! Software-pass hit termination using the existing outgoing GI cache.
-//! Enabled above roughness 0.35; `RENDERLAB_SW_REFLECTION_CACHE=0` disables it.
-//! A positive value changes the threshold. Cells contain view-independent outgoing radiance,
+//! Optional software-pass hit termination using the existing outgoing GI cache.
+//! `RENDERLAB_SW_REFLECTION_CACHE=0.35` enables it above that roughness; unset or
+//! zero disables this local cache path. Cells contain view-independent outgoing radiance,
 //! so custom programs that require view-dependent hit shading should leave it off.
 use super::*;
 
@@ -18,8 +18,8 @@ fn roughness(device: &wgpu::Device) -> Option<f32> {
     static ROUGHNESS: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
     *ROUGHNESS.get_or_init(|| {
         std::env::var("RENDERLAB_SW_REFLECTION_CACHE")
-            .unwrap_or_else(|_| "0.35".to_owned())
-            .parse::<f32>().ok()
+            .ok()
+            .and_then(|value| value.parse::<f32>().ok())
             .filter(|&value| value > 0.0 && value <= 1.0)
     })
 }
