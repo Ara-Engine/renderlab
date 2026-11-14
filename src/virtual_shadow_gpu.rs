@@ -45,8 +45,11 @@ const PAGE: u32 = 128;
 /// the page work) the sparse pool's header words 4..11 (`POOL_*`).
 const REACH_BYTES: u64 = 48;
 
-// Sparse clipmap (U-CLIPMAP, default on with the Disk lookup; `RENDERLAB_VSM_SPARSE=0` keeps the
-// dense windows). Each level is a 32x32-page window over absolute light-space pages, addressed
+// Sparse clipmap (U-CLIPMAP, opt-in with the Disk lookup: `RENDERLAB_VSM_SPARSE=1`; the dense
+// windows are the default). It gives receivers the level their footprint wants, about 450 MiB
+// less memory on Outpost and a shorter stall after a camera cut, but its steady lookup costs
+// 3.5 ms on Outpost against the dense windows' 1.9, because pixels now walk the finest band
+// instead of falling back to coarse levels. It becomes the default once that cost is gone. Each level is a 32x32-page window over absolute light-space pages, addressed
 // toroidally through a page table (shaders/virtual_shadow.wgsl `vsm_vpage`), so a window
 // following the eye keeps every page it still covers and is wide enough that receivers read
 // the level their footprint wants. Only pages receivers request this frame are resident: they
@@ -62,10 +65,10 @@ const POOL_FREE: u64 = 16;
 const PAGE_MIP_WORDS: u64 = 5461;
 /// The pool's largest size: one layer of 1024 pages is the 128 MiB storage binding.
 const POOL_MAX: u32 = 1024;
-/// Whether the sparse clipmap is on (`RENDERLAB_VSM_SPARSE=0` turns it off).
+/// Whether the sparse clipmap is on (`RENDERLAB_VSM_SPARSE=1` turns it on; off by default).
 fn sparse_switch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE").map_or(true, |v| v.trim() != "0"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE").is_ok_and(|v| v.trim() == "1"))
 }
 /// The pool's first size in pages and the per-frame raster budget in pages:
 /// `RENDERLAB_VSM_POOL=pages[,budget]` (measurement), defaults 384 and 64. Outpost requests
