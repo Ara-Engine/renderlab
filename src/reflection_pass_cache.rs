@@ -1,4 +1,7 @@
 //! Optional software-pass hit termination using the existing outgoing GI cache.
+//! `RENDERLAB_SW_REFLECTION_CACHE=0.35` enables it above that roughness; unset or
+//! zero disables this local cache path. Cells contain view-independent outgoing radiance,
+//! so custom programs that require view-dependent hit shading should leave it off.
 use super::*;
 
 fn roughness(device: &wgpu::Device) -> Option<f32> {

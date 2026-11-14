@@ -1,5 +1,5 @@
 //! M7-R1n: the geometry software reflection rays trace on the non-RT path
-//! (docs/m7-r1n.md; shaders/reflections_software.wgsl traverses it).
+//! (docs/m7-r1n.md; shaders/reflections_software*.wgsl traverse it).
 //!
 //! Each uploaded mesh of a non-RT visibility-buffer renderer gets a SAH BVH4 over its drawn
 //! triangles, built once at upload and never refit. Leaves keep each triangle's primitive
@@ -21,7 +21,7 @@ pub(crate) fn bvh4_enabled() -> bool {
 /// Largest mesh that gets software reflection geometry (about 64 bytes a triangle): larger meshes
 /// are not hit by non-RT reflection rays (docs/m7-r1n.md, gaps).
 pub(crate) const MAX_TRIANGLES: usize = 1 << 19;
-/// Triangles per leaf at most; the WGSL leaf tag holds the count in three bits.
+/// Legacy BVH2 leaf size; its tag holds the count in three bits.
 const LEAF_TRIANGLES: usize = 4;
 /// Words per node: quantized BVH4, or two float child boxes and IDs for the rollback BVH2.
 const NODE_WORDS: usize = 16;

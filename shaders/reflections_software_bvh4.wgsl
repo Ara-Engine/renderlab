@@ -33,9 +33,8 @@ fn rs_box(o:vec3<f32>,inv:vec3<f32>,lo:vec3<f32>,hi:vec3<f32>,tmin:f32,tmax:f32)
     return select(3.4028235e38,near,near<=far);
 }
 struct RsHit {t:f32,record:vec4<u32>};
-// U-RTVIS: the bound instance i tests hits against: best.t in index order (the flat loop's), one
-// ulp above it for an instance below the best hit's, whose equal-distance hit the ascending flat
-// loop would have kept (src/instance_bvh.rs).
+// Keep equal-distance candidates eligible within this instance (lower original
+// primitive wins) and in lower-index instances (the original flat-loop order).
 fn rs_limit(best:RsHit,best_i:u32,i:u32)->f32 {
     return select(best.t,bitcast<f32>(bitcast<u32>(best.t)+1u),best.record.x!=0u && i<=best_i);
 }
@@ -131,7 +130,7 @@ fn rs_instance(i:u32,origin:vec3<f32>,direction:vec3<f32>,world_inv:vec3<f32>,tm
 const RS_TOP_STACK:u32=32u;
 // The closest hit in (tmin, tmax), or with `any_hit` the first found; record.x = 0 is a miss.
 // Through the top-level BVH over the instances' world boxes (src/instance_bvh.rs: header word
-// 1 its base, 2 its root, nodes in the BLAS node layout), or the flat list without one.
+// 1 its base, 2 its root, binary float-box nodes), or the flat list without one.
 fn rs_trace(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32,any_hit:bool)->RsHit {
     var best=RsHit(tmax,vec4<u32>(0u));
     var best_i=0xffffffffu;

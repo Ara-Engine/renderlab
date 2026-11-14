@@ -1,5 +1,5 @@
 //! U-RTVIS reflection pass and deferred composite (docs/design-reflection-pass.md), on by default
-//! with ray hardware (`RT_DEFAULT`) and, once `NON_RT_DEFAULT` is on, without it
+//! with and without ray hardware (`RT_DEFAULT` and `NON_RT_DEFAULT`)
 //! (RENDERLAB_RL_PASS=0 forces it off, =1 with RENDERLAB_RL_DEFERRED=1 forces it on). Primary
 //! shading appends each reporting program's glossy receiver that fits the room to the frame's
 //! glossy-pixel list (L, shaders/reflections_lobe.wgsl); `rl_trace_pixels` traces each
