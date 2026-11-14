@@ -71,8 +71,10 @@ const GATHER_CELLS: u32 = 32768;
 const FILL_CELLS_HARDWARE: u32 = 65536;
 const FILL_CELLS_SOFTWARE: u32 = 16384;
 const GATHER_CELLS_SOFTWARE: u32 = 8192;
-/// Frames after a cut or clear whose pixels also request their parent cells (first fill).
+/// Frames after a cut or clear whose pixels also request their parent cells and whose claims
+/// are capped (first fill), and over which software gathers return to the full budget.
 const FILL_PARENT_FRAMES: u32 = 32;
+const FILL_GATHER_FRAMES: u32 = 64;
 fn first_fill_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIRST_FILL").map_or(true, |v| v != "0"))
@@ -1184,11 +1186,17 @@ impl Planner {
         // U-RTVIS: a cut's gathers held to a time budget, the cells pixels read first.
         let cut_window = s.cut_gather_ms > 0.0 && self.since_cut < CUT_GATHER_FRAMES;
         let per_ms = if software { GATHERS_PER_MS_SOFTWARE } else { GATHERS_PER_MS_HARDWARE };
-        // First fill caps a frame's new cells unless claims are set explicitly.
-        let fill = first_fill_on() && s.claim_cells == u32::MAX;
+        // First fill caps a frame's new cells for FILL_PARENT_FRAMES after a cut or clear
+        // (unless claims are set explicitly), and software rays' gathers start at
+        // GATHER_CELLS_SOFTWARE, back to GATHER_CELLS over FILL_GATHER_FRAMES. Steady frames
+        // keep main's uncapped claims and full gather budget.
+        let since_fill = since_clear.min(self.since_cut);
+        let fill = first_fill_on() && s.claim_cells == u32::MAX && since_fill < FILL_PARENT_FRAMES;
+        let fill_gathers = first_fill_on() && software && since_fill < FILL_GATHER_FRAMES;
         header[20] = match s.gather_cells {
             _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
-            0 if fill && software => GATHER_CELLS_SOFTWARE,
+            0 if fill_gathers => GATHER_CELLS_SOFTWARE
+                + (GATHER_CELLS - GATHER_CELLS_SOFTWARE) * since_fill / FILL_GATHER_FRAMES,
             0 => GATHER_CELLS,
             u32::MAX => 0,
             cells => cells,
@@ -1231,12 +1239,11 @@ impl Planner {
         // The pixel cells' gather rotation counts from the last cut or clear, and for
         // FILL_PARENT_FRAMES after it pixels also request their parent cells, which the capped
         // claim admits first (shaders/gi_cache.wgsl gi_fill_bin).
-        let since_fill = since_clear.min(self.since_cut);
         header[49] = match since_fill {
             u32::MAX => self.frame,
             n => n,
         };
-        header[50] = u32::from(fill && since_fill < FILL_PARENT_FRAMES);
+        header[50] = u32::from(fill);
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {

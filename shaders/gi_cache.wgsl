@@ -147,7 +147,8 @@ const GI_W_FULL_PIXEL:u32=46u;
 // Ray item capacity, a multiple of 32 (src/gi_cache.rs RAY_ITEMS).
 const GI_RAY_ITEMS:u32=2097152u;
 // First fill (gi_fill_count): this frame's chosen misses per admission bin, then 1 + the
-// first bin a capped claim leaves for a later frame (0: every miss is admitted).
+// first bin a capped claim leaves for a later frame (0: every miss is admitted), for pixels'
+// bins and (the next word) gathers'.
 const GI_W_FILL_HIST:u32=48u;
 const GI_FILL_BINS:u32=112u;
 const GI_W_FILL_CUT:u32=240u;
@@ -693,24 +694,38 @@ fn gi_fill_bin(base:u32) -> u32 {
         atomicAdd(&gi_work[GI_W_FILL_HIST+gi_fill_bin(base)],1u);
     }
 }
-// The first bin past the cap, as 1 + bin. The parents' bins always pass, or class 0's
-// without parents.
+// The first bin past the cap, as 1 + bin, for pixels' bins (GI_W_FILL_CUT) and gathers'
+// (GI_W_FILL_CUT + 1). The parents' bins always pass, or class 0's without parents. Gathers'
+// cells keep a quarter of the cap whatever pixels want: a gather whose hit cells are never
+// created retries every frame and leaves its bounce short.
+const GI_FILL_GATHER_BINS:u32=5u*GI_FILL_SPREAD;
 @compute @workgroup_size(1) fn gi_fill_select() {
     let cap=gi_word(GI_H_FILL_CELLS);
     if cap==0u { return; }
+    var wanted=0u;
+    for(var b=GI_FILL_GATHER_BINS;b<GI_FILL_BINS;b+=1u) { wanted+=atomicLoad(&gi_work[GI_W_FILL_HIST+b]); }
+    let pixel_cap=cap-min(wanted,cap/4u);
     var total=0u;
     var forced=2u*GI_FILL_SPREAD;
-    for(var b=0u;b<GI_FILL_BINS;b+=1u) {
-        total+=atomicLoad(&gi_work[GI_W_FILL_HIST+b]);
-        if b+1u==GI_FILL_SPREAD && total!=0u { forced=GI_FILL_SPREAD; }
-        if b>=forced && total>cap { atomicStore(&gi_work[GI_W_FILL_CUT],b+1u); return; }
+    for(var b=0u;b<GI_FILL_GATHER_BINS;b+=1u) {
+        let next=total+atomicLoad(&gi_work[GI_W_FILL_HIST+b]);
+        if b+1u==GI_FILL_SPREAD && next!=0u { forced=GI_FILL_SPREAD; }
+        if b>=forced && next>pixel_cap { atomicStore(&gi_work[GI_W_FILL_CUT],b+1u); break; }
+        total=next;
+    }
+    let gather_cap=cap-min(total,cap);
+    var gathers=0u;
+    for(var b=GI_FILL_GATHER_BINS;b<GI_FILL_BINS;b+=1u) {
+        gathers+=atomicLoad(&gi_work[GI_W_FILL_HIST+b]);
+        if gathers>gather_cap { atomicStore(&gi_work[GI_W_FILL_CUT+1u],b+1u); return; }
     }
 }
 fn gi_claim_miss(index:u32) {
     let base=gi_frame.offsets.y+index*GI_MISS_WORDS;
     if atomicLoad(&gi_work[base+5u])==GI_CREATED { return; }
-    let fill_cut=atomicLoad(&gi_work[GI_W_FILL_CUT]);
-    if fill_cut!=0u && gi_fill_bin(base)+1u>=fill_cut {
+    let fill_bin=gi_fill_bin(base);
+    let fill_cut=atomicLoad(&gi_work[GI_W_FILL_CUT+select(0u,1u,fill_bin>=GI_FILL_GATHER_BINS)]);
+    if fill_cut!=0u && fill_bin+1u>=fill_cut {
         atomicStore(&gi_work[base+5u],GI_CREATED);
         atomicAdd(&gi_work[GI_W_CLAIM_DEFERRED],1u);
         return;
