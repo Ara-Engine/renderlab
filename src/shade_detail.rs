@@ -90,11 +90,13 @@ impl Renderer {
             .map(|&id| {
                 let source = &self.program_slot(id).source;
                 let parameters = program::declares_parameters(source);
-                if list {
+                // As the frame's own modules are built (program_gpu.rs): with the reflection
+                // pass's list block in place of the inline trace where the pass runs.
+                program::with_reflection_history(if list {
                     program::compose_list(&heads[shading], source, stage, parameters)
                 } else {
                     program::compose(&heads[shading], source, stage, parameters)
-                }
+                })
             })
             .collect();
         if self.shade_detail.as_ref().is_some_and(|d| {
