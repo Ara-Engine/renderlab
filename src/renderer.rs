@@ -3562,6 +3562,7 @@ impl Renderer {
                     }
                     mark(&mut encoder, "material");
                     self.encode_material_shading(&mut encoder, shading, None, true);
+                    self.encode_material_reader_stats(&mut encoder);
                     if interactive {
                         mark(&mut encoder, "sun_shadow");
                         if reconstructed && self.view.reconstruction.rotate_directions {

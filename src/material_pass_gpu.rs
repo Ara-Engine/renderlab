@@ -32,6 +32,23 @@ const READER_CONTROL: &str = "    let rl_control_record=rl_material_load(pixel);
         surface_output=material_in(rl_control_record,surface_input);\n\
     }\n";
 
+const CONTROL_STATS: &str = r#"
+@group(0) @binding(0) var hit:texture_2d<u32>;
+@group(0) @binding(1) var record:texture_2d<u32>;
+@group(0) @binding(2) var<storage,read_write> counts:array<atomic<u32>,4>;
+@compute @workgroup_size(8,4) fn count_pixels(@builtin(global_invocation_id) id:vec3<u32>) {
+    if any(id.xy>=textureDimensions(hit)) {return;}
+    atomicAdd(&counts[3],1u);
+    let p=vec2<i32>(id.xy);
+    if textureLoad(hit,p,0).x==0u {return;}
+    atomicAdd(&counts[2],1u);
+    let word=textureLoad(record,p,0).y;
+    if (word&255u)==255u {return;}
+    atomicAdd(&counts[1],1u);
+    if (word>>16u)<=3277u {atomicAdd(&counts[0],1u);}
+}
+"#;
+
 fn composition_control(
     head: &str,
     source: &str,
@@ -51,7 +68,9 @@ fn composition_control(
     if control && role == MaterialRole::Read {
         let entry = composed.source.find("fn primary_shade_pixel(")?;
         let at = entry + composed.source[entry..].find(READER_SEAM)?;
-        composed.source.replace_range(at..at + READER_SEAM.len(), READER_CONTROL);
+        composed
+            .source
+            .replace_range(at..at + READER_SEAM.len(), READER_CONTROL);
     }
     Some(composed)
 }
@@ -122,6 +141,98 @@ impl Layouts {
     }
 }
 impl Renderer {
+    /// Diagnostic only: count once at the requested renderer frame, then print
+    /// after the ordinary device poll completes its asynchronous map. No wait.
+    pub(in crate::renderer) fn encode_material_reader_stats(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        let requested = std::env::var("RENDERLAB_MATERIAL_READER_STATS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok());
+        if requested != Some(self.frames) {
+            return;
+        }
+        let Some(targets) = self.view.primary.as_ref().and_then(|s| s.targets.as_ref()) else {
+            return;
+        };
+        let Some(words) = targets.material.as_ref() else {
+            return;
+        };
+        let module = self
+            .device
+            .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("material reader statistics"),
+                source: wgpu::ShaderSource::Wgsl(CONTROL_STATS.into()),
+            });
+        let pipeline = self
+            .device
+            .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("material reader statistics"),
+                layout: None,
+                module: &module,
+                entry_point: Some("count_pixels"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+        let counts = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("material reader counts"),
+            size: 16,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let readback = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("material reader counts readback"),
+            size: 16,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("material reader statistics"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&targets.hit.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&words[1].view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: counts.as_entire_binding(),
+                },
+            ],
+        });
+        encoder.clear_buffer(&counts, 0, None);
+        let size = targets.hit.texture.size();
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("material reader statistics"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(4), 1);
+        }
+        encoder.copy_buffer_to_buffer(&counts, 0, &readback, 0, 16);
+        let mapped = readback.clone();
+        let frame = self.frames;
+        let view = self.view_key.0;
+        encoder.map_buffer_on_submit(&readback, wgpu::MapMode::Read, .., move |result| {
+            if result.is_ok() {
+                if let Ok(bytes) = mapped.slice(..).get_mapped_range() {
+                    let n: Vec<_> = bytes.chunks_exact(4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).collect();
+                    eprintln!("material_reader_stats frame={frame} view={view} low={} mapped={} hits={} total={} low_frame_share={:.8} low_mapped_share={:.8}", n[0], n[1], n[2], n[3], f64::from(n[0])/f64::from(n[3].max(1)), f64::from(n[0])/f64::from(n[1].max(1)));
+                }
+            } else { eprintln!("material_reader_stats frame={frame} map_failed"); }
+            mapped.unmap();
+        });
+    }
+
     pub(crate) fn ensure_material_pass(&mut self, shading: Shading) -> Result<(), Error> {
         if !program::material_pass_on() || self.view.soft_mode == SoftShadows::Temporal {
             return Ok(());
@@ -336,6 +447,13 @@ mod tests {
 
     #[test]
     fn record_layout_matches_both_path_compositions() {
+        let stats = naga::front::wgsl::parse_str(CONTROL_STATS).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&stats)
+        .unwrap();
         let scene = include_str!("../shaders/scene.wgsl");
         let rt = shading_heads(scene).unwrap();
         let nonrt = non_rt_sources(scene).unwrap().1;
@@ -350,11 +468,17 @@ mod tests {
                             (MaterialRole::Write, true, false),
                             (MaterialRole::Read, false, false),
                             (MaterialRole::Read, false, true),
-                        ]
-                        {
-                            let source = composition_control(head, program_source, stage, list, role, control)
-                                .unwrap()
-                                .source;
+                        ] {
+                            let source = composition_control(
+                                head,
+                                program_source,
+                                stage,
+                                list,
+                                role,
+                                control,
+                            )
+                            .unwrap()
+                            .source;
                             if control {
                                 assert!(source.contains(READER_CONTROL));
                             }
