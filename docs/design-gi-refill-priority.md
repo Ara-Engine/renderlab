@@ -114,3 +114,19 @@ row's maximum complete gather block was 2.078 / 1.880 ms. The previous three-sca
 variant's block cost 6.7?7.7 ms even after its ceiling fell to 64 cells. These workloads
 have different admission ceilings; this demonstrates removal of the old screening
 floor, not a certified whole-frame or picture win.
+
+Coldness control (`918c38fd`, ordinary diagnostic lease, non-RT 1080p forest):
+
+| B arrival at 442 | Created cells at +0 through +5 | Maximum late atmosphere block |
+|---|---:|---:|
+| True first arrival | 391,846 | 76.520 ms |
+| Early B, retain GI across A hold | 53,622 | 0.295 ms |
+| Early B, reset only GI at A entry | 391,847 | 0.277 ms |
+
+The reset fixture matches true first-arrival creation within one cell. All three report
+zero new engine pipeline objects at the measured cut; the atmosphere timings expose a
+first-use cost beyond that counter. Blocking counters make these diagnostic timings,
+not policy performance rankings. The corrected timing matrix uses the reset fixture.
+Excess GPU time is measured against the paired default's steady B median over explicitly
+bounded 40- and 140-frame windows; an active tail beyond the window is censored rather
+than presented as a complete settled total.
