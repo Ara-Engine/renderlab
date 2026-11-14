@@ -2,7 +2,7 @@
 use super::super::program_gpu::{probe_block, probe_function_body as body};
 use super::*;
 pub(crate) const BINDING: u32 = 80;
-const FIELDS: usize = 20;
+const FIELDS: usize = 24;
 const WORDS: usize = 4 + 4 * 32 * 2 * FIELDS;
 const BYTES: u64 = WORDS as u64 * 4;
 const START: u64 = 40;
@@ -184,7 +184,7 @@ impl Renderer {
             if result.is_err(){return;}
             let Ok(data)=mapped.get_mapped_range(..)else{return};
             let words:Vec<u32>=data.chunks_exact(4).map(|b|u32::from_ne_bytes(b.try_into().unwrap())).collect();
-            let names=["geometry_pixels","evaluated_pixels","range_cone_zero","source_nonfacing","view_nonfacing_after_source","facing_pass","thin_two_sided_disagreement","light_visibility_calls","ray_initializations","traced_under_1_code","traced_at_least_1_code","visibility_called_without_query_pixels","source_nonfacing_traced","view_nonfacing_traced","view_nonfacing_any","thin_two_sided_evaluated","reserved","evaluated_under_1_code","evaluated_at_least_1_code","max_codes_bits"];
+            let names=["geometry_pixels","evaluated_pixels","range_cone_zero","source_nonfacing","view_nonfacing_after_source","facing_pass","thin_two_sided_disagreement","light_visibility_calls","ray_initializations","traced_under_1_code","traced_at_least_1_code","visibility_called_without_query_pixels","source_nonfacing_traced","view_nonfacing_traced","view_nonfacing_any","thin_two_sided_evaluated","ray_initializations_under_1_code","evaluated_under_1_code","evaluated_at_least_1_code","max_codes_bits","source_nonfacing_ray_initializations","view_nonfacing_ray_initializations","thin_two_sided_disagreement_ray_initializations","thin_two_sided_disagreement_ray_initializations_at_least_1_code"];
             let mut rows=Vec::new();
             for (program,label) in ["standard","game","toon","other"].iter().enumerate(){for light in 1..=n as usize{
                 let at=4+(program*32+light)*2*FIELDS;

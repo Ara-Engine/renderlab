@@ -37,7 +37,7 @@ fn lc_commit(full:vec3<f32>,without:vec3<f32>,input:SurfaceInput) {
     let delta=abs(lc_display(atmosphere_surface(rl_finite(full),input.world))-lc_display(atmosphere_surface(rl_finite(without),input.world)))*255.0;
     let codes=max(max(delta.x,delta.y),delta.z);
     let visible=u32(codes>=1.0);let traced=u32(lc_rays>0u);
-    let base=((LC_COUNTER_PROGRAM*32u+lc_counter.header.y)*2u)*20u;
+    let base=((LC_COUNTER_PROGRAM*32u+lc_counter.header.y)*2u)*24u;
     atomicAdd(&lc_counter.bins[base],1u);
     atomicAdd(&lc_counter.bins[base+1u],lc_seen);
     atomicAdd(&lc_counter.bins[base+2u],lc_range);
@@ -54,9 +54,14 @@ fn lc_commit(full:vec3<f32>,without:vec3<f32>,input:SurfaceInput) {
     atomicAdd(&lc_counter.bins[base+13u],traced*lc_view);
     atomicAdd(&lc_counter.bins[base+14u],lc_view_any);
     atomicAdd(&lc_counter.bins[base+15u],lc_protected*lc_seen);
+    atomicAdd(&lc_counter.bins[base+16u],lc_rays*(1u-visible));
     atomicAdd(&lc_counter.bins[base+17u],lc_seen*(1u-visible));
     atomicAdd(&lc_counter.bins[base+18u],lc_seen*visible);
     atomicMax(&lc_counter.bins[base+19u],bitcast<u32>(codes));
+    atomicAdd(&lc_counter.bins[base+20u],lc_rays*lc_source);
+    atomicAdd(&lc_counter.bins[base+21u],lc_rays*lc_view);
+    atomicAdd(&lc_counter.bins[base+22u],lc_rays*lc_disagree);
+    atomicAdd(&lc_counter.bins[base+23u],lc_rays*lc_disagree*visible);
 }
 fn lc_primary_shade(s:Surface,input:SurfaceInput)->vec3<f32> {
     lc_primary=lc_counter.header.x!=0u;
