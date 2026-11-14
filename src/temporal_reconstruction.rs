@@ -680,6 +680,7 @@ fn trace_source_with(soft_kernels: &str, listing: bool) -> Result<String, Error>
             0 => source,
             probes => with_sun_tile(source, probes)?,
         };
+        let source = with_sunrt_diag(source);
         return Ok(format!(
             "{source}\nvar<private> tr1_rays:u32=8u;\n{}",
             zones_source("primary_frame.zones")
@@ -738,6 +739,38 @@ pub(crate) fn sun_tile_probes() -> u32 {
     })
 }
 const SUN_TILE: &str = include_str!("../shaders/primary_sun_tile.wgsl");
+/// Measurement only: `RENDERLAB_SUNRT_DIAG` is a comma list that splits the fused visibility +
+/// sun pass's cost. `nosun` traces no sun rays (every receiver lit), `probes` short-cuts every
+/// tile after its tile-vote probes, `norepair` lists no near-edge pixel for the repair pass.
+/// Pictures are wrong under each; unset in every shipping run.
+fn with_sunrt_diag(source: String) -> String {
+    static FLAGS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let flags = FLAGS.get_or_init(|| std::env::var("RENDERLAB_SUNRT_DIAG").unwrap_or_default());
+    let mut source = source;
+    for flag in flags.split(',') {
+        let (seam, with) = match flag {
+            "nosun" => (
+                "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);",
+                "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);if tr1_rays!=0u {return tr1_rays;}",
+            ),
+            "probes" => (
+                "if tr1_tile_state==2u && (votes==1u || votes==2u) {tr1_tile_state=3u;}",
+                "if tr1_tile_state==2u {tr1_tile_state=3u;}",
+            ),
+            "norepair" => (
+                "near_edge=primary_near_edge(trace,receiver.epsilon);",
+                "near_edge=false;",
+            ),
+            _ => continue,
+        };
+        if source.matches(seam).count() != 1 {
+            eprintln!("RENDERLAB_SUNRT_DIAG={flag} ignored: seam not found once");
+            continue;
+        }
+        source = source.replacen(seam, with, 1);
+    }
+    source
+}
 /// The tile vote's edits to a budgeted trace module: the estimator's pause and resume around
 /// the budget loop, and each Interactive entry's vote before its uncovered-tile return.
 fn with_sun_tile(source: String, probes: u32) -> Result<String, Error> {
