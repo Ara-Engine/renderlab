@@ -134,5 +134,7 @@ impl Renderer {
         };
         mark(encoder, "atmosphere.shadow_map");
         self.encode_shadow_state(encoder, &map.state, frame, casters, None);
+        // Close map upkeep before the sky LUTs; their cost belongs to atmosphere.
+        mark(encoder, "atmosphere");
     }
 }
