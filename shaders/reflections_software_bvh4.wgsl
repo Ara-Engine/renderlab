@@ -1,8 +1,8 @@
 // ---- M7-R1n software reflection rays (non-RT path), composed by src/program.rs ----
 // R1's reflection trace (shaders/reflections.wgsl) with its two ray queries replaced by a
 // software traversal of `rl_geometry`, which the non-RT shading head declares at group 0
-// binding 36 (src/reflection_software.rs packs it). Per-mesh BVH2s over the drawn triangles
-// behind a flat instance list: each ray is its own work item, traversed from the top, and
+// binding 36 (src/reflection_software.rs packs it). Per-mesh SAH BVH4s over drawn triangles
+// behind an instance BVH: each ray is its own work item, traversed from the top, and
 // writes only its own pixel's value; no cells, hit registration or shared projection (P0's
 // W8/C7, docs/m7-p0-claims.md). Both faces block, as the hardware query's opaque rays.
 // A hit is the hardware record (placement + 1, primitive, barycentrics), so `rl_hit_input`
@@ -37,7 +37,7 @@ struct RsHit {t:f32,record:vec4<u32>};
 // ulp above it for an instance below the best hit's, whose equal-distance hit the ascending flat
 // loop would have kept (src/instance_bvh.rs).
 fn rs_limit(best:RsHit,best_i:u32,i:u32)->f32 {
-    return select(best.t,bitcast<f32>(bitcast<u32>(best.t)+1u),best.record.x!=0u && i<best_i);
+    return select(best.t,bitcast<f32>(bitcast<u32>(best.t)+1u),best.record.x!=0u && i<=best_i);
 }
 // One instance's part of rs_trace, updating best and best_i. True when an any-hit ray found a
 // blocker.

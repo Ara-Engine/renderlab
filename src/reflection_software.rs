@@ -1,7 +1,7 @@
 //! M7-R1n: the geometry software reflection rays trace on the non-RT path
 //! (docs/m7-r1n.md; shaders/reflections_software.wgsl traverses it).
 //!
-//! Each uploaded mesh of a non-RT visibility-buffer renderer gets a BVH2 over its drawn
+//! Each uploaded mesh of a non-RT visibility-buffer renderer gets a SAH BVH4 over its drawn
 //! triangles, built once at upload and never refit. Leaves keep each triangle's primitive
 //! index in the mesh's own index buffer and its corners in index order, so a hit is the same
 //! `(placement + 1, primitive, barycentrics)` record a hardware ray query returns and R1's
@@ -23,7 +23,7 @@ pub(crate) fn bvh4_enabled() -> bool {
 pub(crate) const MAX_TRIANGLES: usize = 1 << 19;
 /// Triangles per leaf at most; the WGSL leaf tag holds the count in three bits.
 const LEAF_TRIANGLES: usize = 4;
-/// Words per node: child 0 bounds (lo, hi), child 1 bounds, then the two tagged child IDs.
+/// Words per node: quantized BVH4, or two float child boxes and IDs for the rollback BVH2.
 const NODE_WORDS: usize = 16;
 /// Words per triangle: corner a, edges b - a and c - a, the drawn primitive index, then two
 /// pad words. P-NRT: every node, triangle and instance record starts on a 16-byte boundary,
