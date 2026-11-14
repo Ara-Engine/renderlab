@@ -6,8 +6,11 @@ const BYTES: u64 = 48;
 const SOURCE: &str = include_str!("../shaders/gi_receiver_pass.wgsl");
 const ENTRY_SEAM: &str = "// ---- GI receiver compute entry ----";
 /// Defaults are approved separately for each path after game-scene picture and memory checks.
+/// Both on: without ray hardware the inline lookup ran at the whole shading kernel's register
+/// count, and moving it out also retires the GI sun lookups booked to `sun_shadow`.
+/// `RENDERLAB_GI_PASS=0` restores the inline lookup on either path.
 pub(crate) const RT_DEFAULT: bool = true;
-pub(crate) const NON_RT_DEFAULT: bool = false;
+pub(crate) const NON_RT_DEFAULT: bool = true;
 const HEAD_MARK: &str = "\n// renderlab: this renderer prepares GI receivers before shading\n";
 fn env_switch(value: Option<&str>) -> Option<bool> {
     match value {
