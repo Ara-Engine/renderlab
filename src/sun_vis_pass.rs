@@ -18,11 +18,12 @@ fn zone_stop() -> bool {
 /// The existing held test already rejects moved receivers, swept caster shadows,
 /// sun turns and non-unanimous history. Keep its eight fresh probes in those zones.
 pub(super) fn schedule_source(source: String) -> String {
-    if zone_stop() {
+    let source = if zone_stop() {
         with_zone_stop(source)
     } else {
         source
-    }
+    };
+    receiver_decode_probe::sun(source)
 }
 
 fn with_zone_stop(source: String) -> String {

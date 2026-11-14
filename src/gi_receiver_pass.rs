@@ -29,6 +29,7 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     composed
         .source
         .push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
+    composed.source = receiver_decode_probe::gi(composed.source);
     composed
 }
 pub(crate) fn shade_source(source: String, eligible: bool, specular: bool) -> String {

@@ -34,6 +34,8 @@ pub(crate) mod gi_receiver_pass;
 mod reflection_hits_gpu;
 #[path = "light_vis_pass.rs"]
 pub(crate) mod light_vis_pass;
+#[path = "receiver_decode_probe.rs"]
+pub(super) mod receiver_decode_probe;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 // Lean shading's background-compiled pipelines (program::lean_variant).
 #[path = "lean_gpu.rs"]
