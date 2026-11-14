@@ -264,3 +264,64 @@ fn an_empty_scene_renders_on_both_paths() {
         engine.capture_view(view).unwrap();
     }
 }
+
+/// What `Engine::render_view_then` records rides in the frame's own submission: a copy of the
+/// output made there is the output, and the frame is the same one `render_view` draws.
+#[test]
+fn a_frame_hook_copy_in_the_frames_submission_matches_the_output() {
+    let (mut engine, _) = engine(false);
+    let view = engine.create_view(&desc()).unwrap();
+    let output = engine.view_output(view).unwrap().clone();
+    let device = engine.device().clone();
+    let size = output.size();
+    let copy = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("hook copy"),
+        size,
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: output.format(),
+        usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+        view_formats: &[],
+    });
+    let row = (size.width * 4).next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("hook readback"),
+        size: u64::from(row * size.height),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let (target, readback) = (copy.clone(), buffer.clone());
+    let camera = cameras(0.0)[0];
+    engine
+        .render_view_then(view, &camera, move |encoder, output| {
+            encoder.copy_texture_to_texture(output.as_image_copy(), target.as_image_copy(), size);
+            encoder.copy_texture_to_buffer(
+                target.as_image_copy(),
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &readback,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(row),
+                        rows_per_image: None,
+                    },
+                },
+                size,
+            );
+        })
+        .unwrap();
+    let reference = engine.capture_view(view).unwrap();
+    let mapped = std::sync::Arc::new(std::sync::OnceLock::new());
+    let done = mapped.clone();
+    buffer.map_async(wgpu::MapMode::Read, .., move |r| {
+        let _ = done.set(r);
+    });
+    device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+    mapped.get().unwrap().as_ref().unwrap();
+    let data = buffer.slice(..).get_mapped_range().unwrap();
+    let mut copied = Vec::new();
+    for y in 0..size.height as usize {
+        copied.extend_from_slice(&data[y * row as usize..][..size.width as usize * 4]);
+    }
+    assert_eq!(copied, reference.rgba8, "the copy made in the frame is the frame's output");
+}

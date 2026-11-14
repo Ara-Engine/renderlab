@@ -108,6 +108,10 @@ const VERTEX_ATTRIBUTES: [wgpu::VertexAttribute; 4] =
 const TANGENT_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![5 => Float32x4];
 const MODEL_ATTRIBUTES: [wgpu::VertexAttribute; 1] = wgpu::vertex_attr_array![4 => Uint32];
 
+/// Commands a caller adds to a frame's last command encoder: given the encoder and the frame's
+/// output texture, after the last write to it.
+pub(crate) type FrameHook =
+    Box<dyn FnOnce(&mut wgpu::CommandEncoder, &wgpu::Texture) + Send + Sync>;
 type MapResult = Arc<OnceLock<Result<(), wgpu::BufferAsyncError>>>;
 /// Records `next` as the state last set in one pass slot. True when the pass must be told.
 /// Identity, not equality: every compared object outlives the pass that references it.
@@ -669,6 +673,9 @@ pub struct Renderer {
     completed_submission: u64,
     frames: u64,
     peak_flights: usize,
+    /// Recorded into the next frame's last command encoder, after everything written to its
+    /// output (`Engine::render_view_then`).
+    pub(crate) frame_hook: Option<FrameHook>,
     busy_uploads: u64,
     busy_frames: u64,
     /// One-layer BC5 normal maps still without their variance layer (normal_variance_lazy).
@@ -1205,6 +1212,7 @@ impl Renderer {
             completed_submission: 0,
             frames: 0,
             peak_flights: 0,
+            frame_hook: None,
             busy_uploads: 0,
             busy_frames: 0,
             variance_pending: Vec::new(),
@@ -3953,6 +3961,10 @@ impl Renderer {
         encoder.on_submitted_work_done(move || {
             let _ = callback.set(());
         });
+        // A caller's commands that ride in this frame's submission (a copy of the output).
+        if let Some(hook) = self.frame_hook.take() {
+            hook(&mut encoder, color);
+        }
         let finish_start = Instant::now();
         let commands = encoder.finish();
         let finish = finish_start.elapsed();

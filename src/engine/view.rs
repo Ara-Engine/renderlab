@@ -126,6 +126,22 @@ impl Engine {
         let output = self.views[self.view_index(view)?].output.clone();
         self.render_view_to(view, &output, camera)
     }
+    /// [`Self::render_view`] with `then` recorded into the frame's last command encoder after
+    /// its final write to the view's output: the encoder and the output texture. The commands go
+    /// out in the frame's own submission, so a copy of the output costs no submit of its own
+    /// (a handoff to a presenter, a readback). `then` runs once, inside this call, and not at all
+    /// if the frame is refused.
+    pub fn render_view_then(
+        &mut self,
+        view: ViewId,
+        camera: &Camera,
+        then: impl FnOnce(&mut wgpu::CommandEncoder, &wgpu::Texture) + Send + Sync + 'static,
+    ) -> Result<FrameReport, Error> {
+        self.renderer.frame_hook = Some(Box::new(then));
+        let report = self.render_view(view, camera);
+        self.renderer.frame_hook = None;
+        report
+    }
     /// Renders `view` from `camera` into `color`: a single-sample 2D render attachment in
     /// the engine's output format, such as a surface texture (then call `present`). The
     /// view's targets follow `color`'s size and the camera's aspect follows it.
