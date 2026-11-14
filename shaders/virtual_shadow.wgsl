@@ -1333,31 +1333,68 @@ var<workgroup> vsm_wg_mip_b:array<f32,1024>;
         s/=2u;
     }
 }
-// ---- Outline bits (the Disk lookup's VD_EDGES) ----
-// Per texel of each page drawn this frame, 4 bits: which in-page neighbours (-x, +x, -y, +y)
-// are empty or of another placement; 0 for an empty texel. Word index = the top word's index
-// / 8 in either layout. Sides across a page edge stay 0: the lookup reads those neighbours.
+// ---- Outline lines (the Disk lookup's VD_EDGES) ----
+// Per texel of each page drawn this frame, 16 bits (two texels a word, word = the top word's
+// index / 2 in either layout): bit 15 set on an outline texel, one whose in-page neighbour
+// (-x, +x, -y, +y) is empty or of another placement and whose stored triangle has an edge
+// facing such a neighbour within a texel of the centre; bits 0-6 that edge's outward normal
+// angle (128 steps), bits 7-11 the centre's signed distance from it (texels, -1..1 in 32
+// steps). The lookup clips the texel's column by that line at the texel's height, with no
+// triangle read per pixel. Sides across a page edge count as inside (a page drawn later would
+// leave them stale), so a texel outlined only there keeps its square.
 @group(0) @binding(57) var<storage,read_write> vsm_outline_out:array<u32>;
-// The page whose (0, 0) texel is word i0 of the top layer, rows `stride` words apart.
-fn vsm_outline_page(i0:u32,stride:u32,li:u32) {
+// The outline line word of one texel: `i` its top word, `cell` its window texel and `level`.
+fn vsm_outline_line(i:u32,stride:u32,local:vec2<u32>,cell:vec2<u32>,level:u32)->u32 {
     let bits=vsm.misc.x;
-    let row=VSM_PAGE/8u;
+    let id=vsm_top_words[i].x;
+    if id==0u {return 0u;}
+    let own=id>>bits;
+    var outside=0u;
+    if local.x>0u {let o=vsm_top_words[i-1u].x; if o==0u || o>>bits!=own {outside|=1u;}}
+    if local.x<VSM_PAGE-1u {let o=vsm_top_words[i+1u].x; if o==0u || o>>bits!=own {outside|=2u;}}
+    if local.y>0u {let o=vsm_top_words[i-stride].x; if o==0u || o>>bits!=own {outside|=4u;}}
+    if local.y<VSM_PAGE-1u {let o=vsm_top_words[i+stride].x; if o==0u || o>>bits!=own {outside|=8u;}}
+    if outside==0u {return 0u;}
+    let placement=own-1u;
+    let batch=primary_placements[placement]&0x1fffffffu;
+    let v=vsm_triangle(batch,id&((1u<<bits)-1u));
+    let m=models[placement];
+    let t0=vsm_light((m*vec4<f32>(v[0],1.0)).xyz).xy;
+    let t1=vsm_light((m*vec4<f32>(v[1],1.0)).xyz).xy;
+    let t2=vsm_light((m*vec4<f32>(v[2],1.0)).xyz).xy;
+    let texel=vsm_texel(level);
+    let centre=vsm.levels[level].origin.xy+(vec2<f32>(cell)+vec2<f32>(0.5))*texel;
+    // The outward edge facing an outside neighbour nearest the centre.
+    var best=1.0;var normal=vec2<f32>(0.0);
+    for(var e=0u;e<3u;e+=1u) {
+        let a=select(select(t2,t1,e==1u),t0,e==0u);
+        let b=select(select(t0,t2,e==1u),t1,e==0u);
+        let c=select(select(t1,t0,e==1u),t2,e==0u);
+        var n=vec2<f32>(b.y-a.y,a.x-b.x);
+        let len=length(n);
+        if len<=1e-9 {continue;}
+        n/=len;
+        if dot(n,c-a)>0.0 {n=-n;}
+        let k=select(select(2u,3u,n.y>0.0),select(0u,1u,n.x>0.0),abs(n.x)>=abs(n.y));
+        if ((outside>>k)&1u)==0u {continue;}
+        let rho=dot(n,centre-a)/texel;
+        if abs(rho)<abs(best) {best=rho;normal=n;}
+    }
+    if abs(best)>=1.0 {return 0u;}
+    let angle=u32(round((atan2(normal.y,normal.x)+3.14159265)/6.28318531*128.0))&127u;
+    let offset=u32(clamp(round((best+1.0)*16.0),0.0,31.0));
+    return 0x8000u|(offset<<7u)|angle;
+}
+// The page whose (0, 0) texel is word i0 of the top layer, rows `stride` words apart, at window
+// texel `corner` of `level`.
+fn vsm_outline_page(i0:u32,stride:u32,corner:vec2<u32>,level:u32,li:u32) {
+    let row=VSM_PAGE/2u;
     for(var w=li;w<VSM_PAGE*row;w+=256u) {
-        let y=w/row;let x0=(w%row)*8u;
-        var word=0u;
-        for(var k=0u;k<8u;k+=1u) {
-            let x=x0+k;let i=i0+y*stride+x;
-            let id=vsm_top_words[i].x;
-            if id==0u {continue;}
-            let own=id>>bits;
-            var nibble=0u;
-            if x>0u {let o=vsm_top_words[i-1u].x; if o==0u || o>>bits!=own {nibble|=1u;}}
-            if x<VSM_PAGE-1u {let o=vsm_top_words[i+1u].x; if o==0u || o>>bits!=own {nibble|=2u;}}
-            if y>0u {let o=vsm_top_words[i-stride].x; if o==0u || o>>bits!=own {nibble|=4u;}}
-            if y<VSM_PAGE-1u {let o=vsm_top_words[i+stride].x; if o==0u || o>>bits!=own {nibble|=8u;}}
-            word|=nibble<<(4u*k);
-        }
-        vsm_outline_out[(i0+y*stride+x0)>>3u]=word;
+        let y=w/row;let x0=(w%row)*2u;
+        let i=i0+y*stride+x0;
+        let lo=vsm_outline_line(i,stride,vec2<u32>(x0,y),corner+vec2<u32>(x0,y),level);
+        let hi=vsm_outline_line(i+1u,stride,vec2<u32>(x0+1u,y),corner+vec2<u32>(x0+1u,y),level);
+        vsm_outline_out[i>>1u]=lo|(hi<<16u);
     }
 }
 // Dense: one workgroup per page slot, those drawn this frame.
@@ -1367,12 +1404,15 @@ fn vsm_outline_page(i0:u32,stride:u32,li:u32) {
     let pages=vsm.counts.y;let per=pages*pages;
     let level=slot/per;let local=slot%per;
     let side=pages*VSM_PAGE;
-    vsm_outline_page((level*side+(local/pages)*VSM_PAGE)*side+(local%pages)*VSM_PAGE,side,li);
+    let corner=vec2<u32>(local%pages,local/pages)*VSM_PAGE;
+    vsm_outline_page((level*side+corner.y)*side+corner.x,side,corner,level,li);
 }
 // Sparse: one workgroup per page drawn this frame (an indirect dispatch over the pool's list).
 @compute @workgroup_size(256) fn vsm_outline_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
-    let slot=vsm_pages[vsm_section(2u)+vsm_rendered(group.x)];
-    vsm_outline_page(slot*VSM_PAGE*VSM_PAGE,VSM_PAGE,li);
+    let v=vsm_rendered(group.x);
+    let n=vsm.counts.y;let level=v/(n*n);
+    let slot=vsm_pages[vsm_section(2u)+v];
+    vsm_outline_page(slot*VSM_PAGE*VSM_PAGE,VSM_PAGE,vsm_entry_page(level,v)*VSM_PAGE,level,li);
 }
 // Whether no top-layer texel centre a ray can sample within `radius` of `centre` (light xy)
 // at clip `level` is above `lower`: the max over at most 2x2 cells of the mip whose cells
