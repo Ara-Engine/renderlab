@@ -85,8 +85,8 @@ impl Blas {
         }
     }
 
-    /// Median-split BVH2 over `indices` (a triangle list into `positions`). Deterministic:
-    /// ties on the split axis break by triangle index. None for an empty list.
+    /// SAH BVH4 over drawn triangles, or median BVH2 with the rollback switch.
+    /// Both retain source primitive IDs and winding. None for an empty list.
     pub(crate) fn build(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
         if bvh4_enabled() {
             return Self::build_sah4(positions, indices);
@@ -380,8 +380,8 @@ mod tests {
         let mut stack = vec![b.root];
         while let Some(child) = stack.pop() {
             if child & LEAF != 0 {
-                let first = ((child & !LEAF) >> 3) as usize;
-                for k in 0..(child & 7) as usize {
+                let first = ((child & !LEAF) >> if b.wide { 4 } else { 3 }) as usize;
+                for k in 0..(child & if b.wide { 15 } else { 7 }) as usize {
                     let x = (first + k) * TRIANGLE_WORDS;
                     let (a, e1, e2) = (
                         v(&b.triangles, x),
@@ -409,7 +409,7 @@ mod tests {
                         && w >= 0.0
                         && u + w <= 1.0
                         && t > 0.0
-                        && best.is_none_or(|h| t < h.3)
+                        && best.is_none_or(|h| t < h.3 || (t == h.3 && b.triangles[x + 9] < h.0))
                     {
                         best = Some((b.triangles[x + 9], u, w, t));
                     }
@@ -417,8 +417,20 @@ mod tests {
                 continue;
             }
             let n = child as usize * NODE_WORDS;
-            for c in 0..2 {
-                let (lo, hi) = (v(&b.nodes, n + c * 6), v(&b.nodes, n + c * 6 + 3));
+            for c in 0..if b.wide { 4 } else { 2 } {
+                let id = b.nodes[n + if b.wide { 6 + c } else { 12 + c }];
+                if id == u32::MAX { continue; }
+                let (lo, hi) = if b.wide {
+                    let origin = v(&b.nodes, n);
+                    let step = v(&b.nodes, n + 3);
+                    let decode = |base: usize| std::array::from_fn(|axis| {
+                        let q = (b.nodes[n + base + axis] >> (c * 8)) & 255;
+                        q as f32 * step[axis] + origin[axis]
+                    });
+                    (decode(10), decode(13))
+                } else {
+                    (v(&b.nodes, n + c * 6), v(&b.nodes, n + c * 6 + 3))
+                };
                 let (mut near, mut far) = (0.0f32, f32::INFINITY);
                 for i in 0..3 {
                     let (a, z) = ((lo[i] - o[i]) / d[i], (hi[i] - o[i]) / d[i]);
@@ -426,7 +438,7 @@ mod tests {
                     far = far.min(a.max(z));
                 }
                 if near <= far {
-                    stack.push(b.nodes[n + 12 + c]);
+                    stack.push(id);
                 }
             }
         }
