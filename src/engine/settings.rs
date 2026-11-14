@@ -427,7 +427,7 @@ pub(crate) fn log_clipmap(r: &Renderer) {
     };
     let v = r.virtual_shadow_stats();
     let line = format!(
-        "{{\"levels\":{},\"finest_level\":{},\"skipped_levels\":{},\"nearest_receiver\":{},\"receivers\":{},\"unplaced_receivers\":{},\"nearest_unplaced\":{}}}\n",
+        "{{\"levels\":{},\"finest_level\":{},\"skipped_levels\":{},\"nearest_receiver\":{},\"receivers\":{},\"unplaced_receivers\":{},\"nearest_unplaced\":{},\"bytes\":{},\"pool_pages\":{},\"free_pages\":{},\"requested_pages\":{},\"rendered_pages\":{},\"failed_pages\":{}}}\n",
         v.levels,
         v.finest_level,
         v.skipped_levels,
@@ -435,6 +435,12 @@ pub(crate) fn log_clipmap(r: &Renderer) {
         v.receivers,
         v.unplaced_receivers,
         v.nearest_unplaced.map_or("null".into(), |d| d.to_string()),
+        v.bytes,
+        v.pool_pages,
+        v.free_pages,
+        v.requested_pages,
+        v.rendered_pages,
+        v.failed_pages,
     );
     if let Ok(mut file) = std::fs::OpenOptions::new()
         .create(true)

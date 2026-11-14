@@ -97,6 +97,33 @@ fn vsm_light(world:vec3<f32>)->vec3<f32> {
 }
 fn vsm_texel(level:u32)->f32 {return vsm.levels[level].origin.z;}
 fn vsm_extent(level:u32)->f32 {return f32(vsm.counts.y*VSM_PAGE)*vsm_texel(level);}
+// Sparse clipmap (misc.w bit 9, virtual_shadow_gpu.rs `sparse`): the map words live in a pool of
+// 128x128-texel physical pages, and each level's window is a toroidal page table over absolute
+// light-space pages (levels[l].info.zw: the window's first absolute page, wrapping), so a window
+// that follows the eye keeps every page it still covers. Dense (bit clear): info.zw is zero and
+// the formulas below reduce to the window-relative layout.
+fn vsm_sparse()->bool {return (vsm.misc.w&0x200u)!=0u;}
+// The page-table index of window-relative page `page` of `level` (per-page arrays: requests,
+// render flags and the state sections).
+fn vsm_vpage(level:u32,page:vec2<u32>)->u32 {
+    let n=vsm.counts.y;let o=vsm.levels[level].info.zw;
+    return (level*n+((page.y+o.y)&(n-1u)))*n+((page.x+o.x)&(n-1u));
+}
+// The absolute page a table entry holds (16 bits a coordinate).
+fn vsm_tag(level:u32,page:vec2<u32>)->u32 {
+    let a=page+vsm.levels[level].info.zw;
+    return (a.y<<16u)|(a.x&0xffffu);
+}
+// The page state buffer's sections, each VSM_MAX_LEVELS * pages^2 words: 0 the level epoch a
+// page was rasterized for, 1 its tag, 2 its physical page (VSM_NONE: not resident), 3 the
+// page-work frame it was last requested in.
+fn vsm_section(k:u32)->u32 {return k*VSM_MAX_LEVELS*vsm.counts.y*vsm.counts.y;}
+// In-page max-mips of a physical page: mips 1..7 concatenated, 5461 words.
+const VSM_PAGE_MIPS:u32=5461u;
+fn vsm_page_mip(slot:u32,mip:u32,local:vec2<u32>)->u32 {
+    let s=VSM_PAGE>>mip;
+    return slot*VSM_PAGE_MIPS+(VSM_PAGE*VSM_PAGE-4u*s*s)/3u+local.y*s+local.x;
+}
 // The light-space height a level's march can serve with its Â±1-page neighbourhood marked:
 // the disk's drift over it stays within one page.
 fn vsm_cap(level:u32)->f32 {return f32(VSM_PAGE-4u)*vsm_texel(level)/max(vsm.params.z,1e-3);}
@@ -208,6 +235,90 @@ fn vsm_moved(level:u32,page:vec2<u32>)->bool {
     }
 }
 
+// ---- Sparse page pool (vsm_sparse) ----
+// Header words (virtual_shadow_gpu.rs `POOL_*`): 0..2 the clear/mip dispatch over this frame's
+// rasterized pages (x their count; y, z one), 4 the free pages, 5 pages flagged this frame
+// (the budget's counter), 6 + parity allocation failures of a frame (6 + frame parity this
+// frame's, the other last frame's), 8 the page-work frame, 9 the per-frame raster budget,
+// 10 the pool's pages, 11 pages requested this frame. The free stack follows at
+// VSM_POOL_FREE, then the list of this frame's rasterized table entries.
+const VSM_POOL_FREE:u32=16u;
+@group(0) @binding(53) var<storage,read_write> vsm_pool:array<atomic<u32>>;
+// Pages not requested for this many page-work frames return to the pool (at once while the
+// last frame ran out of pages).
+const VSM_KEEP_FRAMES:u32=90u;
+fn vsm_pool_frame()->u32 {return atomicLoad(&vsm_pool[8]);}
+// The window-relative page a table entry of `level` stands for now (vsm_vpage's inverse).
+fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
+    let n=vsm.counts.y;let local=v%(n*n);
+    let t=vec2<u32>(local%n,local/n);
+    return (t+vec2<u32>(n)-(vsm.levels[level].info.zw&vec2<u32>(n-1u)))&vec2<u32>(n-1u);
+}
+// Frees every resident page that is stale (another level epoch or absolute page: the window
+// moved past it, the sun or heights rebased) or moved casters touched while it is not
+// requested, and every unrequested page past VSM_KEEP_FRAMES. One thread per table entry.
+@compute @workgroup_size(64) fn vsm_release(@builtin(global_invocation_id) id:vec3<u32>) {
+    let n=vsm.counts.y;let v=id.x;let level=v/(n*n);
+    if level>=vsm.counts.x {return;}
+    let table=vsm_section(2u);
+    let slot=vsm_state[table+v];
+    if slot==VSM_NONE {return;}
+    let page=vsm_entry_page(level,v);
+    let current=vsm_state[v]==vsm.levels[level].info.x && vsm_state[vsm_section(1u)+v]==vsm_tag(level,page);
+    let frame=vsm_pool_frame();
+    let requested=vsm_requests[v]!=0u;
+    let pressure=atomicLoad(&vsm_pool[6u+((frame+1u)&1u)])!=0u;
+    let old=frame-vsm_state[vsm_section(3u)+v]>VSM_KEEP_FRAMES;
+    if current && (requested || (!pressure && !old && !vsm_moved(level,page))) {return;}
+    vsm_state[table+v]=VSM_NONE;
+    vsm_state[v]=0u;
+    let i=atomicAdd(&vsm_pool[4],1u);
+    atomicStore(&vsm_pool[VSM_POOL_FREE+i],slot);
+}
+// One level (vsm_pass.level; dispatched coarsest first, so the budget serves coarse levels
+// before fine ones): each requested page without a resident current copy, or one that moved
+// casters touched, takes a physical page and is flagged for this frame's raster while the
+// budget lasts. Past it a new page stays missing (the lookup takes a coarser level there) and a
+// moved one keeps its old depths for a frame, then is rasterized again.
+@compute @workgroup_size(64) fn vsm_allocate(@builtin(global_invocation_id) id:vec3<u32>) {
+    let n=vsm.counts.y;let level=vsm_pass.level;
+    if id.x>=n*n || level>=vsm.counts.x {return;}
+    let page=vec2<u32>(id.x%n,id.x/n);
+    let v=vsm_vpage(level,page);
+    if vsm_requests[v]==0u {return;}
+    let frame=vsm_pool_frame();
+    atomicAdd(&vsm_pool[11],1u);
+    vsm_state[vsm_section(3u)+v]=frame;
+    let table=vsm_section(2u);
+    var slot=vsm_state[table+v];
+    let moved=slot!=VSM_NONE && vsm_moved(level,page);
+    if slot!=VSM_NONE && !moved {return;}
+    if atomicAdd(&vsm_pool[5],1u)>=atomicLoad(&vsm_pool[9]) {
+        // Rasterized again next frame (vsm_release frees it).
+        if moved {vsm_state[v]=0u;}
+        return;
+    }
+    if slot==VSM_NONE {
+        let free=atomicSub(&vsm_pool[4],1u);
+        if bitcast<i32>(free)<=0 {
+            atomicAdd(&vsm_pool[4],1u);
+            atomicAdd(&vsm_pool[6u+(frame&1u)],1u);
+            return;
+        }
+        slot=atomicLoad(&vsm_pool[VSM_POOL_FREE+free-1u]);
+        vsm_state[table+v]=slot;
+    }
+    vsm_state[v]=vsm.levels[level].info.x;
+    vsm_state[vsm_section(1u)+v]=vsm_tag(level,page);
+    vsm_render[v]=1u;
+    let k=atomicAdd(&vsm_pool[0],1u);
+    atomicStore(&vsm_pool[VSM_POOL_FREE+atomicLoad(&vsm_pool[10])+k],v);
+    let groups=max((vsm.counts.z+63u)/64u,1u);
+    atomicMax(&vsm_cull_args[0],min(groups,65535u));
+    atomicMax(&vsm_cull_args[1],(groups+65534u)/65535u);
+    atomicMax(&vsm_cull_args[2],1u);
+}
+
 // ---- Page raster (N8c): a per-level cluster cut, culled to this frame's stale pages ----
 // Casters are the meshes' visibility-buffer clusters (visibility_buffer.rs): original
 // geometry, or a clusterLOD hierarchy whose cut at level k keeps every cluster whose
@@ -284,7 +395,7 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
         var stale=false;
         for(var y=p0.y;y<=p1.y && !stale;y+=1u) {
             for(var x=p0.x;x<=p1.x;x+=1u) {
-                if vsm_render[(level*pages+y)*pages+x]!=0u {stale=true;break;}
+                if vsm_render[vsm_vpage(level,vec2<u32>(x,y))]!=0u {stale=true;break;}
             }
         }
         if !stale {continue;}
@@ -292,7 +403,14 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
         let n=vsm.counts.z;
         if max(extent.x,extent.y)>VSM_SW_EXTENT {
             let slot=atomicAdd(&vsm_work.args[level].hw_instances,1u);
-            vsm_work.lists[(2u*level+1u)*n+slot]=index;
+            // The hardware raster areas (vsm_area_tiles) the cluster's pages overlap, in the
+            // top four bits.
+            let tiles=vsm_area_tiles();let per=pages/tiles;
+            var mask=0u;
+            for(var ty=p0.y/per;ty<=p1.y/per;ty+=1u) {
+                for(var tx=p0.x/per;tx<=p1.x/per;tx+=1u) {mask|=1u<<(ty*tiles+tx);}
+            }
+            vsm_work.lists[(2u*level+1u)*n+slot]=index|(mask<<28u);
         } else {
             let slot=atomicAdd(&vsm_work.args[level].sw_count,1u);
             vsm_work.lists[2u*level*n+slot]=index;
@@ -307,6 +425,24 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
     vsm_work.args[level].hw_vertices=384u;
     vsm_work.args[level].hw_first=0u;
     vsm_work.args[level].hw_first_instance=0u;
+}
+// The hardware raster's attachment holds at most 16 pages a side; a wider window is drawn as
+// tiles x tiles areas (2 a side at 32 pages).
+fn vsm_area()->u32 {return min(vsm.counts.y,16u)*VSM_PAGE;}
+fn vsm_area_tiles()->u32 {return vsm.counts.y*VSM_PAGE/vsm_area();}
+// Read-only views of the page state (vsm_section) and of the pool's lists.
+@group(0) @binding(54) var<storage,read> vsm_pool_in:array<u32>;
+@group(0) @binding(55) var<storage,read> vsm_pages:array<u32>;
+// The table entry of this frame's k-th rasterized page.
+fn vsm_rendered(k:u32)->u32 {return vsm_pool_in[VSM_POOL_FREE+vsm_pool_in[10]+k];}
+// Sparse: zeroes both layers of each page rasterized this frame, one workgroup per page
+// (an indirect dispatch over the pool's list).
+@compute @workgroup_size(256) fn vsm_clear_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let slot=vsm_pages[vsm_section(2u)+vsm_rendered(group.x)];
+    for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
+        atomicStore(&vsm_top_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
+        atomicStore(&vsm_peel_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
+    }
 }
 // Zeroes both layers of every page flagged for this frame: one workgroup per page slot.
 @compute @workgroup_size(256) fn vsm_clear(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
@@ -327,9 +463,13 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
 fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     let pages=vsm.counts.y;
     let page=t/VSM_PAGE;
-    if vsm_render[(level*pages+page.y)*pages+page.x]==0u {return;}
+    let v=vsm_vpage(level,page);
+    if vsm_render[v]==0u {return;}
     let side=pages*VSM_PAGE;
-    let i=(level*side+t.y)*side+t.x;
+    var i=(level*side+t.y)*side+t.x;
+    if vsm_sparse() {
+        i=vsm_pages[vsm_section(2u)+v]*VSM_PAGE*VSM_PAGE+(t.y%VSM_PAGE)*VSM_PAGE+t.x%VSM_PAGE;
+    }
     let value=(u64(bitcast<u32>(clamp(height,0.0,1.0)))<<32u)|u64(id);
     if VSM_PEEL_PASS {
         // Only one triangle of a watertight surface covers a texel centre, so this is the
@@ -403,23 +543,30 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
 struct VsmHw {@builtin(position) position:vec4<f32>,@location(0) @interpolate(flat) id:u32,@location(1) height:f32};
 @vertex fn vs_vsm_cluster(@builtin(vertex_index) vertex:u32,@builtin(instance_index) instance:u32)->VsmHw {
     let level=vsm_pass.level;
-    let index=vsm_work_in[VSM_LISTS+(2u*level+1u)*vsm.counts.z+instance];
-    let c=vsm_clusters[index];let local=vertex/3u;
+    // vsm_pass.pad0: this draw's raster area (tile) of the window; the cull marks the areas
+    // each cluster can write (its entry's top four bits).
+    let tile=vsm_pass.pad0;
+    let entry=vsm_work_in[VSM_LISTS+(2u*level+1u)*vsm.counts.z+instance];
     var out:VsmHw;
     out.position=vec4<f32>(0.0,0.0,0.0,1.0);
+    if ((entry>>28u)&(1u<<tile))==0u {return out;}
+    let c=vsm_clusters[entry&0x0fffffffu];let local=vertex/3u;
     if local<(c.counts&255u) {
         let batch=primary_placements[c.placement]&0x1fffffffu;
         let t=vsm_cluster_data[batch].data[c.triangles+local];
         let s=vsm_cluster_vertex(c,batch,(t>>(8u*(vertex%3u)))&255u,level);
-        let side=f32(vsm.counts.y*VSM_PAGE);
-        out.position=vec4<f32>(s.x/side*2.0-1.0,1.0-s.y/side*2.0,0.5,1.0);
+        let area=f32(vsm_area());
+        let o=vec2<f32>(vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles()))*area;
+        out.position=vec4<f32>((s.x-o.x)/area*2.0-1.0,1.0-(s.y-o.y)/area*2.0,0.5,1.0);
         out.height=s.z;
         out.id=vsm_cluster_id(c,batch,local);
     }
     return out;
 }
 @fragment fn fs_vsm_cluster(input:VsmHw) {
-    vsm_write(vsm_pass.level,vec2<u32>(input.position.xy),input.height,input.id);
+    let tile=vsm_pass.pad0;
+    let o=vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles())*vsm_area();
+    vsm_write(vsm_pass.level,vec2<u32>(input.position.xy)+o,input.height,input.id);
 }
 
 // ---- Lookup: exact 1-ring, then the map march beyond `near` ----
@@ -1141,6 +1288,50 @@ fn vsm_mip_base(level:u32,mip:u32)->u32 {
         }
     }
     vsm_mips_out[vsm_mip_base(level,mip)+id.y*s+id.x]=h;
+}
+// Sparse: each page rasterized this frame gets its in-page mips (vsm_page_mip), and its page
+// maximum goes after the pool's mips at the table entry (vd_mip_max above page size). One
+// workgroup per page, an indirect dispatch over the pool's list.
+var<workgroup> vsm_wg_mip_a:array<f32,1024>;
+var<workgroup> vsm_wg_mip_b:array<f32,1024>;
+@compute @workgroup_size(256) fn vsm_mip_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let v=vsm_rendered(group.x);
+    let slot=vsm_pages[vsm_section(2u)+v];
+    let base=slot*VSM_PAGE*VSM_PAGE;
+    // Mips 1 and 2: each mip-2 cell from its four mip-1 cells, each from four texels.
+    for(var k=li;k<1024u;k+=256u) {
+        let m2=vec2<u32>(k%32u,k/32u);
+        var h2=0.0;
+        for(var q=0u;q<4u;q+=1u) {
+            let m1=m2*2u+vec2<u32>(q&1u,q>>1u);
+            let i=base+m1.y*2u*VSM_PAGE+m1.x*2u;
+            let h=max(max(bitcast<f32>(vsm_top_words[i].y),bitcast<f32>(vsm_top_words[i+1u].y)),max(bitcast<f32>(vsm_top_words[i+VSM_PAGE].y),bitcast<f32>(vsm_top_words[i+VSM_PAGE+1u].y)));
+            vsm_mips_out[vsm_page_mip(slot,1u,m1)]=h;
+            h2=max(h2,h);
+        }
+        vsm_wg_mip_a[k]=h2;
+        vsm_mips_out[vsm_page_mip(slot,2u,m2)]=h2;
+    }
+    workgroupBarrier();
+    // Mips 3..7 alternate between the two arrays (a holds even mips, b odd ones).
+    var s=16u;
+    for(var mip=3u;mip<=7u;mip+=1u) {
+        for(var k=li;k<s*s;k+=256u) {
+            let c=vec2<u32>(k%s,k/s)*2u;let w=2u*s;
+            var h=0.0;
+            if (mip&1u)==1u {
+                h=max(max(vsm_wg_mip_a[c.y*w+c.x],vsm_wg_mip_a[c.y*w+c.x+1u]),max(vsm_wg_mip_a[(c.y+1u)*w+c.x],vsm_wg_mip_a[(c.y+1u)*w+c.x+1u]));
+                vsm_wg_mip_b[k]=h;
+            } else {
+                h=max(max(vsm_wg_mip_b[c.y*w+c.x],vsm_wg_mip_b[c.y*w+c.x+1u]),max(vsm_wg_mip_b[(c.y+1u)*w+c.x],vsm_wg_mip_b[(c.y+1u)*w+c.x+1u]));
+                vsm_wg_mip_a[k]=h;
+            }
+            vsm_mips_out[vsm_page_mip(slot,mip,vec2<u32>(k%s,k/s))]=h;
+            if mip==7u {vsm_mips_out[vsm_pool_in[10]*VSM_PAGE_MIPS+v]=h;}
+        }
+        workgroupBarrier();
+        s/=2u;
+    }
 }
 // Whether no top-layer texel centre a ray can sample within `radius` of `centre` (light xy)
 // at clip `level` is above `lower`: the max over at most 2x2 cells of the mip whose cells
