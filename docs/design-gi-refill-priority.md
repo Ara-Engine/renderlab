@@ -10,7 +10,7 @@ The measured 12k candidate below used the earlier experiment spelling
 `RENDERLAB_GI_REFILL_PRIORITY=1;RENDERLAB_GI_REFILL_BUDGET=12288`, with the old bounded
 mode disabled. The single-switch implementation selects exactly that policy and module.
 
-Default off: `RENDERLAB_GI_REFILL_PRIORITY=1`. This follows the bounded-refill experiment;
+The production switch is default off. This follows the bounded-refill experiment;
 it changes admission, not an admitted cell's sky directions, bounce rays or SH reduction.
 The receiver record and the 48-byte GI pixel output are unchanged.
 
