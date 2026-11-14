@@ -9,6 +9,11 @@ pub(super) fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
     *ENABLED.get_or_init(|| std::env::var("RENDERLAB_FOG_SUN_RASTER").as_deref() != Ok("0"))
 }
+// Timing control: exercise the update path on warm frames, even with static casters.
+fn force_refresh() -> bool {
+    static REFRESH: OnceLock<bool> = OnceLock::new();
+    *REFRESH.get_or_init(|| std::env::var("RENDERLAB_FOG_SUN_REFRESH").as_deref() == Ok("1"))
+}
 
 #[derive(PartialEq)]
 struct CasterKey {
@@ -121,7 +126,7 @@ impl FogSun {
         let inside = (eye_xy - self.centers[1]).abs().max_element() + distance < self.radii[1]
             && eye_z - distance > self.depth[0] && eye_z + distance < self.depth[1];
         let near_inside = (eye_xy - self.centers[0]).abs().max_element() + distance.min(32.0) < self.radii[0];
-        if self.key.as_ref() == Some(&key) && inside && near_inside { return Ok(()); }
+        if !force_refresh() && self.key.as_ref() == Some(&key) && inside && near_inside { return Ok(()); }
         self.radii = [distance.min(32.0).max(1.0) * 1.25, distance.max(1.0) * 1.25];
         self.centers = self.radii.map(|r| (eye_xy / (r / 8.0)).round() * (r / 8.0));
         self.depth = [eye_z - self.radii[1], eye_z + self.radii[1]];
