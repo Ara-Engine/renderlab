@@ -17,6 +17,7 @@ struct TpFrame {
     shadow:mat4x4<f32>,
     // xyz eye; w exposure.
     eye:vec4<f32>,
+    // xyz view forward; native transparency uses w for its reflection cutoff (-1: full dispatch).
     forward:vec4<f32>,
     right:vec4<f32>,
     up:vec4<f32>,
@@ -569,3 +570,42 @@ struct TpBillboard {
     return vec4<f32>(clamp(fogged,vec3<f32>(0.0),vec3<f32>(65504.0)),alpha);
 }
 // ---- end TP_PARTICLES_DRAW ----
+
+// ---- TP_AA_RESOLVE ----
+// The same four coverage samples as the hardware resolve, only where glass wrote.
+@group(0) @binding(31) var tp_resolve_color:texture_multisampled_2d<f32>;
+@vertex fn tp_resolve_vs(@builtin(vertex_index) id:u32)->@builtin(position) vec4<f32> {
+    let p=array<vec2<f32>,3>(vec2<f32>(-1.0,-1.0),vec2<f32>(3.0,-1.0),vec2<f32>(-1.0,3.0));
+    return vec4<f32>(p[id],0.0,1.0);
+}
+@fragment fn tp_resolve_fs(@builtin(position) p:vec4<f32>)->@location(0) vec4<f32> {
+    let pixel=vec2<i32>(p.xy);
+    return (textureLoad(tp_resolve_color,pixel,0)+textureLoad(tp_resolve_color,pixel,1)
+           +textureLoad(tp_resolve_color,pixel,2)+textureLoad(tp_resolve_color,pixel,3))*0.25;
+}
+// ---- end TP_AA_RESOLVE ----
+
+// ---- TP_LOBE_DISPATCH ----
+// Occlusion samples count only lobes that survived the exact traced-roughness cutoff.
+// Query results stay on the GPU; no eligible lobes selects the zero-result clear.
+@group(0) @binding(56) var<storage,read> tp_lobe_samples:array<u32>;
+@group(0) @binding(57) var<storage,read_write> tp_lobe_args:array<u32>;
+@compute @workgroup_size(1) fn tp_lobe_dispatch() {
+    let live=(tp_lobe_samples[0]|tp_lobe_samples[1])!=0u;
+    tp_lobe_args[0]=select(0u,(u32(tp.size.x)+7u)/8u,live);
+    tp_lobe_args[1]=select(0u,(u32(tp.size.y)+7u)/8u,live);
+    tp_lobe_args[2]=select(0u,1u,live);
+    tp_lobe_args[3]=select((u32(tp.size.x)+7u)/8u,0u,live);
+    tp_lobe_args[4]=select((u32(tp.size.y)+7u)/8u,0u,live);
+    tp_lobe_args[5]=select(1u,0u,live);
+}
+// ---- end TP_LOBE_DISPATCH ----
+
+// ---- TP_LOBE_CLEAR ----
+// All rejected lobes produce exactly zero in the ordinary reflection kernel.
+@group(0) @binding(58) var tp_empty_reflection:texture_storage_2d<rgba16float,write>;
+@compute @workgroup_size(8,8) fn tp_lobe_clear(@builtin(global_invocation_id) id:vec3<u32>) {
+    if any(id.xy>=textureDimensions(tp_empty_reflection)) { return; }
+    textureStore(tp_empty_reflection,id.xy,vec4<f32>(0.0));
+}
+// ---- end TP_LOBE_CLEAR ----

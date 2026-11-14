@@ -3638,8 +3638,9 @@ impl Renderer {
                 crate::reflection_software::HEADER_WORDS,
                 crate::reflection_software::INSTANCE_WORDS,
                 traced.len(),
-                &previous,
+                &previous[..previous.len().saturating_sub(if crate::reflection_software::bvh4_enabled() {8} else {0})],
             );
+            crate::reflection_software::finish_scene_bounds(&mut words);
             words
         };
         if same {
