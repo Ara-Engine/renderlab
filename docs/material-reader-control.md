@@ -28,3 +28,17 @@ The focused naga/layout test covers the ordinary writer, ordinary reader and
 controlled reader on both paths, tiles/lists and resident/streamed stages, for
 standard and game mappings. Timing must compare whole interleaved pairs and
 report the complete frame, including the material writer and local-light pass.
+
+## Archived picture result
+
+RTX 4070 SUPER, Vulkan release build fbf3e3c5, procedural `game_scene` with Fox,
+frames 0-29 on each path; material on, other optional passes off. The ordinary
+picture lease exited 0 in 93.27 s, with no validation or panic text. Control off
+was SHA-exact to the existing material-on reference on all 60 flight frames.
+With control on, compared with material off, total pixel-frame counts over
+2 / 8 display codes and the maximum were: flight RT 34 / 1 / 14;
+flight non-RT 38 / 4 / 16; night RT 27 / 4 / 16; night non-RT 32 / 7 / 29.
+The control does not eliminate every record difference. No Showcase share or
+cost claim follows from these pictures. Material remains off; further mirror
+work is held until material adds a measured gain on top of light visibility.
+The raw counts and crop evidence remain in the unit's ignored measurement files.
