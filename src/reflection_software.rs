@@ -12,6 +12,12 @@
 //! registration, no shared projection (P0's W8 and C7, docs/m7-p0-claims.md).
 use crate::Mat4;
 
+/// Temporary rollback for the software reflection overhaul; shared by packing and WGSL.
+pub(crate) fn bvh4_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_REFLECTION_BVH4").map_or(true, |v| v != "0"))
+}
+
 /// Largest mesh that gets software reflection geometry (about 64 bytes a triangle): larger meshes
 /// are not hit by non-RT reflection rays (docs/m7-r1n.md, gaps).
 pub(crate) const MAX_TRIANGLES: usize = 1 << 19;
@@ -40,6 +46,7 @@ pub(crate) struct Blas {
     root: u32,
     lo: [f32; 3],
     hi: [f32; 3],
+    wide: bool,
 }
 
 /// CPU-only diagnostic description of the exact uploaded triangle tree.
@@ -53,18 +60,27 @@ pub(crate) struct GeometryInfo {
 
 impl Blas {
     pub(crate) fn geometry_info(&self) -> GeometryInfo {
-        fn depth(nodes: &[u32], child: u32) -> usize {
+        fn depth(nodes: &[u32], child: u32, wide: bool) -> usize {
             if child & LEAF != 0 {
                 return 0;
             }
             let at = child as usize * NODE_WORDS;
-            1 + depth(nodes, nodes[at + 12]).max(depth(nodes, nodes[at + 13]))
+            if wide {
+                1 + nodes[at + 6..at + 10]
+                    .iter()
+                    .filter(|&&c| c != u32::MAX)
+                    .map(|&c| depth(nodes, c, true))
+                    .max()
+                    .unwrap_or(0)
+            } else {
+                1 + depth(nodes, nodes[at + 12], false).max(depth(nodes, nodes[at + 13], false))
+            }
         }
         GeometryInfo {
             nodes: self.nodes.len() / NODE_WORDS,
             triangles: self.triangles.len() / TRIANGLE_WORDS,
             root: self.root,
-            depth: depth(&self.nodes, self.root),
+            depth: depth(&self.nodes, self.root, self.wide),
             bounds: [self.lo, self.hi],
         }
     }
@@ -72,6 +88,66 @@ impl Blas {
     /// Median-split BVH2 over `indices` (a triangle list into `positions`). Deterministic:
     /// ties on the split axis break by triangle index. None for an empty list.
     pub(crate) fn build(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
+        if bvh4_enabled() {
+            return Self::build_sah4(positions, indices);
+        }
+        Self::build_median(positions, indices)
+    }
+
+    fn build_sah4(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
+        use crate::asset::cluster_bvh::{EMPTY, LEAF_BIT};
+        // The shared builder limits SAH to 15 BVH4 levels (median fallback beyond
+        // that): at most 1 + 3*15 pending children, fitting WGSL's 48 entries.
+        let bvh = crate::asset::near_field::build_bvh_sah(positions, indices).ok()?;
+        let tag = |child: u32| {
+            if child == EMPTY {
+                return EMPTY;
+            }
+            if child & LEAF_BIT == 0 {
+                return child;
+            }
+            let leaf = &bvh.leaves[(child & !LEAF_BIT) as usize];
+            LEAF | ((leaf.indices.offset / 3) << 4) | (leaf.indices.count / 3)
+        };
+        let mut nodes = Vec::with_capacity(bvh.nodes.len() * NODE_WORDS);
+        for node in &bvh.nodes {
+            nodes.extend(node.origin.map(f32::to_bits));
+            nodes.extend(node.step.map(f32::to_bits));
+            nodes.extend(node.children.map(tag));
+            nodes.extend(node.lower.map(u32::from_le_bytes));
+            nodes.extend(node.upper.map(u32::from_le_bytes));
+        }
+        // Recover every original primitive, including identical index triplets.
+        // Map iteration never controls output: each reordered triplet pops its
+        // next original ID, deterministically, with source winding unchanged.
+        let mut ids = std::collections::HashMap::<[u32; 3], Vec<u32>>::new();
+        for (id, tri) in indices.chunks_exact(3).enumerate().rev() {
+            ids.entry([tri[0], tri[1], tri[2]])
+                .or_default()
+                .push(id as u32);
+        }
+        let mut triangles = Vec::with_capacity(bvh.indices.len() / 3 * TRIANGLE_WORDS);
+        for tri in bvh.indices.chunks_exact(3) {
+            let key = [tri[0], tri[1], tri[2]];
+            let id = ids.get_mut(&key)?.pop()?;
+            let [a, b, c] = key.map(|i| positions[i as usize]);
+            let e1: [f32; 3] = std::array::from_fn(|i| b[i] - a[i]);
+            let e2: [f32; 3] = std::array::from_fn(|i| c[i] - a[i]);
+            triangles.extend([a, e1, e2].iter().flatten().map(|v| v.to_bits()));
+            triangles.extend([id, 0, 0]);
+        }
+        let (lo, hi) = bounds(indices.iter().map(|&i| positions[i as usize]));
+        Some(Self {
+            nodes,
+            triangles,
+            root: tag(bvh.levels[0].root),
+            lo,
+            hi,
+            wide: true,
+        })
+    }
+
+    fn build_median(positions: &[[f32; 3]], indices: &[u32]) -> Option<Self> {
         let count = indices.len() / 3;
         if count == 0 || count >= (1 << 28) {
             return None;
@@ -97,6 +173,7 @@ impl Blas {
             root,
             lo,
             hi,
+            wide: false,
         })
     }
     fn words(&self) -> usize {
@@ -186,7 +263,33 @@ pub(crate) struct Packed {
 }
 /// Words of the header, `instances` records and their top level, before the meshes.
 pub(crate) fn records_words(instances: usize) -> usize {
-    HEADER_WORDS + instances * INSTANCE_WORDS + crate::instance_bvh::reserve(instances)
+    HEADER_WORDS
+        + instances * INSTANCE_WORDS
+        + crate::instance_bvh::reserve(instances)
+        + if bvh4_enabled() { 8 } else { 0 }
+}
+
+/// The scene union follows the TLAS reserve, aligned as two vec4 words. It includes
+/// every packed instance, never camera-visible bounds. Existing instance bounds
+/// already include their transform-rounding margin.
+pub(crate) fn finish_scene_bounds(words: &mut Vec<u32>) {
+    if !bvh4_enabled() {
+        return;
+    }
+    let mut lo = [f32::INFINITY; 3];
+    let mut hi = [f32::NEG_INFINITY; 3];
+    for i in 0..words[0] as usize {
+        let r = HEADER_WORDS + i * INSTANCE_WORDS;
+        for a in 0..3 {
+            lo[a] = lo[a].min(f32::from_bits(words[r + 12 + a]));
+            hi[a] = hi[a].max(f32::from_bits(words[r + 15 + a]));
+        }
+    }
+    words[4] = words.len() as u32;
+    words.extend(lo.map(f32::to_bits));
+    words.push(0);
+    words.extend(hi.map(f32::to_bits));
+    words.push(0);
 }
 /// Packs `meshes` (distinct) behind room for `instances` records and their top level; the
 /// header, records and top level stay zero until `instance_words` fills them.
@@ -223,6 +326,9 @@ pub(crate) fn instance_inverse(model: &Mat4) -> Option<Mat4> {
 /// (they draw nothing).
 pub(crate) fn instance_words(records: &[(u32, Mat4, &Blas, [u32; 2], bool)]) -> Vec<u32> {
     let mut out = vec![0u32; HEADER_WORDS];
+    if bvh4_enabled() {
+        out[4] = (records_words(records.len()) - 8) as u32;
+    }
     let mut count = 0u32;
     for &(slot, model, blas, [nodes, triangles], casts) in records {
         let Some(inverse) = instance_inverse(&model) else {

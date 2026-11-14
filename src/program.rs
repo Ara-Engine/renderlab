@@ -621,7 +621,10 @@ const SOFTWARE_REFLECTION_QUERY: &str = "var query:ray_query;\n";
 /// R1's reflection block traced in software: the same lobe, strata, cone footprints, hit
 /// reconstruction, decals and program shading, with no ray queries.
 fn software_reflection_api() -> String {
-    let mut api = format!("{SOFTWARE_REFLECTION_API}{REFLECTION_API}");
+    let software = if crate::reflection_software::bvh4_enabled() {
+        include_str!("../shaders/reflections_software_bvh4.wgsl")
+    } else { SOFTWARE_REFLECTION_API };
+    let mut api = format!("{software}{REFLECTION_API}");
     assert!(
         api.contains(SOFTWARE_REFLECTION_QUERY),
         "R1 reflection seam moved"
