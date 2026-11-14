@@ -362,6 +362,35 @@ mod tests {
                 .1,
             expected
         );
+        if !enabled() {
+            let rt = super::super::atmosphere_gpu::compile_structure_sources(true);
+            let expected = format!(
+                "enable wgpu_ray_query;\n{}{}{}{}",
+                include_str!("../shaders/atmosphere_common.wgsl"),
+                include_str!("../shaders/atmosphere.wgsl"),
+                crate::shadows::SHADOW_CASTER_MASK_WGSL,
+                super::super::atmosphere_gpu::HARDWARE_VISIBILITY
+            );
+            assert_eq!(
+                rt.iter().find(|(name, _)| *name == "kernels").unwrap().1,
+                expected
+            );
+        }
+        let film_layout = primary_ray_gpu::film_accumulation::trace_layout_entries(false);
+        assert!(film_layout.iter().all(|entry| entry.binding != BINDING));
+        assert!(primary_ray_gpu::film_accumulation::fog_trace_binding(None).is_none());
+        let soft =
+            &primary_ray_gpu::shader_sources(include_str!("../shaders/scene.wgsl")).unwrap()[1];
+        let film = primary_ray_gpu::film_accumulation::kernel_source(&producer_source(
+            soft.clone(),
+            false,
+        ))
+        .unwrap();
+        assert_eq!(
+            film,
+            primary_ray_gpu::film_accumulation::kernel_source(soft).unwrap()
+        );
+        assert!(!film.contains("@binding(81)"));
         let old = vec![wgpu::BindGroupLayoutEntry {
             binding: 10,
             visibility: wgpu::ShaderStages::COMPUTE,

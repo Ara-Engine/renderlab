@@ -162,6 +162,32 @@ pub(super) struct FilmLayouts {
     pub shade: Owned<wgpu::PipelineLayout>,
     pub init: Owned<wgpu::PipelineLayout>,
 }
+// CPU-visible descriptors for the same trace layout used by the film pipeline.
+pub(in crate::renderer) fn trace_layout_entries(fog: bool) -> Vec<wgpu::BindGroupLayoutEntry> {
+    use wgpu::TextureFormat as F;
+    let uint = wgpu::TextureSampleType::Uint;
+    let frame = uniform(10, FRAME_BYTES as u64);
+    let film = [read(24, 16), texture(25, uint)];
+    let mut trace = vec![
+        scene(TRACE_SCENE),
+        scene(2),
+        frame,
+        image(13, F::Rgba32Uint),
+        image(5, F::R32Uint),
+        image(20, F::R32Uint),
+        texture(29, uint),
+        image(30, F::R32Uint),
+    ];
+    trace.extend(film);
+    if crate::material_mode::Mode::tail() { trace.extend(super::material_pass_gpu::entries(true)); }
+    fog_cull::extend_entries(&mut trace, fog);
+    trace
+}
+
+pub(in crate::renderer) fn fog_trace_binding(depth: Option<&wgpu::Buffer>) -> Option<(u32, wgpu::BindingResource<'_>)> {
+    depth.map(|buffer| (fog_cull::BINDING, buffer.as_entire_binding()))
+}
+
 impl FilmLayouts {
     pub fn new(
         device: &wgpu::Device,
@@ -194,19 +220,7 @@ impl FilmLayouts {
         };
         let frame = uniform(10, FRAME_BYTES as u64);
         let film = [read(24, 16), texture(25, uint)];
-        let mut trace = vec![
-            scene(TRACE_SCENE),
-            scene(2),
-            frame,
-            image(13, F::Rgba32Uint),
-            image(5, F::R32Uint),
-            image(20, F::R32Uint),
-            texture(29, uint),
-            image(30, F::R32Uint),
-        ];
-        trace.extend(film);
-        if crate::material_mode::Mode::tail() { trace.extend(super::material_pass_gpu::entries(true)); }
-        fog_cull::extend_entries(&mut trace, fog);
+        let trace = trace_layout_entries(fog);
         let mut shade = vec![
             uniform(0, 80),
             texture(7, uint),
@@ -532,7 +546,7 @@ impl Renderer {
                 (30, R::TextureView(&film.tiles[written].view)),
             ];
             trace.extend(film_entries.clone());
-            if let Some(depth) = &t.fog_depth { trace.push((fog_cull::BINDING, depth.buffer.value.as_entire_binding())); }
+            trace.extend(fog_trace_binding(t.fog_depth.as_ref().map(|depth| &*depth.buffer.value)));
             if crate::material_mode::Mode::tail() { trace.push((crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&t.material.as_ref().unwrap().view))); }
             let mut shade = vec![
                 (0, self.uniform.as_entire_binding()),
