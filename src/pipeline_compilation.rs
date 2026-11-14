@@ -309,6 +309,20 @@ fn shader_module(
     } else {
         wgpu::ShaderRuntimeChecks::unchecked()
     };
+    // Measurement only: RENDERLAB_F16_NEAREST rewrites chosen binary16 stores (src/f16_nearest.rs);
+    // unset, the descriptor passes through untouched.
+    let desc = match &desc.source {
+        wgpu::ShaderSource::Wgsl(source) => {
+            match crate::f16_nearest::rewrite(source, crate::f16_nearest::mode()) {
+                std::borrow::Cow::Owned(rewritten) => wgpu::ShaderModuleDescriptor {
+                    label: desc.label,
+                    source: wgpu::ShaderSource::Wgsl(rewritten.into()),
+                },
+                std::borrow::Cow::Borrowed(_) => desc,
+            }
+        }
+        _ => desc,
+    };
     // SAFETY: unchecked is used only for engine-owned shaders: bounded dispatches,
     // explicit buffer bounds and terminating loops are the engine's responsibility.
     // User-authored compositions always select checked, even in unchecked mode.

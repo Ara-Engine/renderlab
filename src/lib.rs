@@ -15,6 +15,8 @@ pub mod animation;
 pub mod backend_ara;
 // AT1: physical sky, aerial perspective and fog (docs/m7-at1.md).
 mod atmosphere;
+// U-RTVIS measurement: RENDERLAB_F16_NEAREST (binary16 stores rounded to nearest).
+mod f16_nearest;
 /// TP1 alpha-tested (cutout) geometry, cut at load (docs/m7-tp1.md).
 pub mod cutout;
 pub mod engine;
