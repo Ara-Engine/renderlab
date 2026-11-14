@@ -36,6 +36,36 @@ These creations establish lazy CPU preparation. They do **not** establish that
 the observed GPU atmosphere/visibility spikes are compilation of these objects;
 the repeated-cut prewarm experiment must separate creation from driver first use.
 
+## Preparation prototype
+
+`RENDERLAB_PREWARM_PIPELINES=1` enables preparation before the engine's first
+view; the default is off. Games may explicitly call `Engine::prepare_pipelines`
+after loading materials and settings. It enumerates loaded material handles,
+not the camera's visible draws. It uses the ordinary glass/pane builders, a
+size-independent cache of TP2 reflection pipelines for opaque programs, and a
+shared local-atlas clear pipeline. An atlas resize then reuses the clear. Arc
+handles keep reuse out of the ledger's native-creation count. Target allocation
+and scene-dependent bind groups still happen normally when needed.
+
+There is no hidden render, GPU wait, history reset, particle step or change to
+shader source, sample order, budgets, material logic or visibility. The explicit
+API is synchronous and should run during loading; a host can place its engine
+loading on a background worker it owns. It does not spawn compiler jobs or
+change the existing process-wide compilation limit.
+
+The return value reports CPU preparation time, pipeline creation counts and
+additional HAL-owned buffer/texture bytes. Pipeline objects' private driver
+storage is not known from those counters. A scene with existing transparency
+resources reuses them; one without them can allocate the pass's existing fixed
+resources early. Output-sized lobe/history targets are not preallocated. The
+Apple backend is unchanged by this wgpu prototype.
+
+The focused GPU boundary loads a transparent material without spawning an object
+or creating a view, prepares twice, requires the second call to create/allocate
+nothing and verifies that the renderer's frame count did not advance. It caught
+an RT accessor which required a rendered frame; the pipeline ABI now uses the
+same fixed `FRAME_BYTES` constant that allocates that uniform.
+
 ## Logging through a host engine
 
 Set `RENDERLAB_PIPELINE_LOG=<fresh file.jsonl>` before constructing the wgpu
