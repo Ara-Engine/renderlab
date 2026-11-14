@@ -1150,7 +1150,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ms = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
     let (pause_ms, sleep_ms) = (ms("RENDERLAB_SCENE_PAUSE_MS"), ms("RENDERLAB_SCENE_SLEEP_MS"));
     std::thread::sleep(std::time::Duration::from_millis(pause_ms));
+    // RENDERLAB_SCENE_PAUSE_AT=frame:ms pauses once, before that frame (mid-run rest).
+    let pause_at = std::env::var("RENDERLAB_SCENE_PAUSE_AT").ok().and_then(|v| {
+        let (f, ms) = v.split_once(':')?;
+        Some((f.parse::<u32>().ok()?, ms.parse::<u64>().ok()?))
+    });
     for frame in 0..args.frames {
+        if let Some((at, ms)) = pause_at.filter(|(at, _)| *at == frame) {
+            let _ = at;
+            std::thread::sleep(std::time::Duration::from_millis(ms));
+        }
         if gi_resets.contains(&frame) { engine.renderer_mut().reset_indirect(); }
         let t = if args.still { 0.0 } else { frame as f32 / FPS };
         let sun_update = Instant::now();
