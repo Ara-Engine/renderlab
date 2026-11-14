@@ -29,6 +29,7 @@ mod instances;
 mod light_cluster;
 mod lighting;
 mod material;
+mod material_mode;
 mod mesh;
 mod normal;
 // Entity-ID output's device-free half (docs/design-id-output.md).
