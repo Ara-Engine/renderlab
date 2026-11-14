@@ -179,7 +179,7 @@ pub(crate) fn request_device(
         required_features: features | optional,
         required_limits,
         experimental_features,
-        memory_hints: crate::MEMORY_HINTS,
+        memory_hints: memory_hints(),
         ..Default::default()
     };
     // PC1: optional native driver timings use the existing compiler instrumentation.
@@ -203,5 +203,21 @@ mod tests {
         for features in [rt_features(), non_rt_features()] {
             assert!(features.contains(wgpu::Features::FLOAT32_FILTERABLE));
         }
+    }
+}
+
+/// The device's memory hints: `crate::MEMORY_HINTS`, or for measurement only
+/// `RENDERLAB_MEMORY_BLOCKS=performance` or `=MIN,MAX` (MiB, `MemoryHints::Manual` block sizes),
+/// to weigh allocator slack against frame time (U-FIXED, the Outpost memory inventory).
+fn memory_hints() -> wgpu::MemoryHints {
+    match std::env::var("RENDERLAB_MEMORY_BLOCKS").ok().as_deref() {
+        Some("performance") => wgpu::MemoryHints::Performance,
+        Some(v) => match v.split_once(',').and_then(|(a, b)| Some((a.trim().parse::<u64>().ok()?, b.trim().parse::<u64>().ok()?))) {
+            Some((min, max)) if min >= 1 && min <= max => wgpu::MemoryHints::Manual {
+                suballocated_device_memory_block_size: (min << 20)..(max << 20),
+            },
+            _ => panic!("RENDERLAB_MEMORY_BLOCKS: performance or MIN,MAX in MiB"),
+        },
+        None => crate::MEMORY_HINTS,
     }
 }
