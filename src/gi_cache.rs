@@ -21,6 +21,8 @@ mod priority;
 mod refill_feedback;
 #[path = "gi_queue_probe.rs"]
 mod queue_probe;
+#[path = "gi_spin.rs"]
+mod spin;
 
 pub(crate) const HEADER_WORDS: u64 = 64;
 /// Keep the original admission policy: packing storage must not change the chosen
@@ -1637,7 +1639,10 @@ impl GiState {
 /// source and the kernels.
 pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
     let priority = software && priority::on();
-    priority::source(kernel_source_base(software, directions), priority)
+    spin::source(
+        priority::source(kernel_source_base(software, directions), priority),
+        spin::setting(),
+    )
 }
 fn kernel_source_base(software: bool, directions: u32) -> String {
     let enables = if software {
