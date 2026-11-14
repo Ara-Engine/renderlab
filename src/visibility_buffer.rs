@@ -341,6 +341,7 @@ pub(super) struct VisibilityBuffer {
     base: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
     resolve: [wgpu::ComputePipeline; 2],
+    resolve_interior: Option<[wgpu::ComputePipeline; 2]>,
     cull_groups: [wgpu::BindGroup; 2],
     software_groups: [wgpu::BindGroup; 2],
     hardware_groups: [wgpu::BindGroup; 2],
@@ -981,7 +982,8 @@ impl VisibilityBuffer {
         let base = compute(hzb_source, "base", &[Some(&hzb_layout)], &[]);
         let reduce = compute(hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
         let resolve_source = super::primary_ray_gpu::material_receiver_gpu::resolve(resolve_source(&r.source)?, crate::material_mode::Mode::current())?;
-        let resolve = [0.0, 1.0].map(|v| {
+        let split_resolve = std::env::var("RENDERLAB_VIS_SPLIT_RESOLVE").is_ok_and(|v| v == "1");
+        let resolve_pipeline = |v, defer, edge| {
             compute(
                 &resolve_source,
                 "resolve",
@@ -990,9 +992,11 @@ impl VisibilityBuffer {
                     Some(state.array_layout()),
                     Some(&data_layout),
                 ],
-                &[("WRITE_RECEIVERS", v), ("LOD_LIFT", f64::from(r.lod_lift))],
+                &[("WRITE_RECEIVERS", v), ("LOD_LIFT", f64::from(r.lod_lift)), ("DEFER_REPAIR", defer), ("EDGE_ONLY", edge)],
             )
-        });
+        };
+        let resolve = [0.0, 1.0].map(|v| resolve_pipeline(v, 0.0, if split_resolve { 1.0 } else { 0.0 }));
+        let resolve_interior = split_resolve.then(|| [0.0, 1.0].map(|v| resolve_pipeline(v, 1.0, 0.0)));
         let state = r.view.primary.as_ref().unwrap();
         let absent = Buffer::new(r, "N1c absent cluster data", 16, storage);
         let cull_groups = std::array::from_fn(|i| {
@@ -1115,6 +1119,7 @@ impl VisibilityBuffer {
             base,
             reduce,
             resolve,
+            resolve_interior,
             cull_groups,
             software_groups,
             hardware_groups,
@@ -1534,6 +1539,13 @@ impl Renderer {
             label: Some("N1c exact hit resolve"),
             timestamp_writes: resolve_stamps,
         });
+        if let Some(interior) = &v.resolve_interior {
+            pass.set_pipeline(&interior[usize::from(soft)]);
+            pass.set_bind_group(0, &v.resolve_group, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(2, &v.data_group, &[]);
+            pass.dispatch_workgroups(v.size.width.div_ceil(8), v.size.height.div_ceil(4), 1);
+        }
         pass.set_pipeline(&v.resolve[usize::from(soft)]);
         pass.set_bind_group(0, &v.resolve_group, &[]);
         pass.set_bind_group(1, arrays, &[]);

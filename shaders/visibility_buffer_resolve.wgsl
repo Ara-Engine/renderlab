@@ -24,7 +24,6 @@ fn raster_hit(pixel:vec2<u32>,width:u32)->RasterHit {
     let i=pixel.y*width+pixel.x;
     let v=visibility[i];
     if v.y==0u {return hit;}
-    visibility[i]=vec2<u32>(0u);
     let c=visibility_clusters[v.x>>7u];let local=v.x&127u;
     let batch=primary_placements[c.placement]&0x1fffffffu;
     let d=&visibility_data[batch].data;
@@ -53,6 +52,19 @@ fn raster_hit(pixel:vec2<u32>,width:u32)->RasterHit {
 @group(0) @binding(23) var primary_epsilon_output:texture_storage_2d<r32float,write>;
 var<workgroup> covered:atomic<u32>;
 override WRITE_RECEIVERS:bool=true;
+// Separate the common interior reconstruction from the register-heavy fold repair.
+override DEFER_REPAIR:bool=false;
+override EDGE_ONLY:bool=false;
+fn raster_needs_repair(trace:PrimaryTrace)->bool {
+    let slot=trace.record.x-1u;let v=trace.positions;
+    let a=world_position(v[0],slot).xyz;let b=world_position(v[1],slot).xyz;let c=world_position(v[2],slot).xyz;
+    let epsilon=receiver_epsilon(a,b,c);
+    let m=models[slot];let linear=mat3x3<f32>(m[0].xyz,m[1].xyz,m[2].xyz);
+    let ab=linear*(v[1]-v[0]);let ac=linear*(v[2]-v[0]);
+    let margin=min(vec3<f32>(0.25),4.0*epsilon*vec3<f32>(length(ac-ab),length(ac),length(ab))/max(length(cross(ab,ac)),1e-30));
+    let bary=bitcast<vec2<f32>>(trace.record.zw);
+    return !all(vec3<f32>(1.0-bary.x-bary.y,bary)>=margin);
+}
 // Reintersect the pixel-centre ray with the selected source triangle. Rebase beside
 // the facet before the barycentric solve; raster-interpolated world positions and
 // quantized depth are never receiver origins. Preserve receiver_point's FMA order.
@@ -67,7 +79,9 @@ fn raster_trace(pixel:vec2<u32>,size:vec2<u32>,ids:vec2<u32>,v:array<vec3<f32>,3
     let w=primary_edge_dot(direction,q)/determinant;
     let weights=vec3<f32>(1.0-u-w,u,w);
     let point=world_position(receiver_point(v[0],v[1],v[2],weights),slot).xyz;
-    return primary_repair(PrimaryTrace(vec4<u32>(ids,bitcast<vec2<u32>>(weights.yz)),point,v),ray.near,direction);
+    let trace=PrimaryTrace(vec4<u32>(ids,bitcast<vec2<u32>>(weights.yz)),point,v);
+    if DEFER_REPAIR {return trace;}
+    return primary_repair(trace,ray.near,direction);
 }
 @compute @workgroup_size(8,4) fn resolve(@builtin(global_invocation_id) id:vec3<u32>,@builtin(workgroup_id) group:vec3<u32>) {
     let size=textureDimensions(primary_hit_output);
@@ -77,10 +91,17 @@ fn raster_trace(pixel:vec2<u32>,size:vec2<u32>,ids:vec2<u32>,v:array<vec3<f32>,3
     let scene=primary_frame.scene;
     if all(id.xy<size) && all(id.xy>=scene.xy) && all(id.xy<scene.zw) {
         let hit=raster_hit(id.xy,size.x);
-        if hit.ids.x!=0u {trace=raster_trace(id.xy,size,hit.ids,hit.positions);lift=hit.error*LOD_LIFT;atomicOr(&covered,1u);}
+        if hit.ids.x!=0u {
+            trace=raster_trace(id.xy,size,hit.ids,hit.positions);lift=hit.error*LOD_LIFT;atomicOr(&covered,1u);
+            if DEFER_REPAIR && raster_needs_repair(trace) {
+                // Preserve this pixel for the edge pass; coverage already includes it.
+                trace.record=vec4<u32>(0u);
+            } else {visibility[id.y*size.x+id.x]=vec2<u32>(0u);}
+        }
     }
     workgroupBarrier();
-    if all(id.xy==group.xy*PRIMARY_TILE) {textureStore(primary_tile_output,group.xy,vec4<u32>(atomicLoad(&covered)));}
+    if EDGE_ONLY && trace.record.x==0u {return;}
+    if !EDGE_ONLY && all(id.xy==group.xy*PRIMARY_TILE) {textureStore(primary_tile_output,group.xy,vec4<u32>(atomicLoad(&covered)));}
     if atomicLoad(&covered)==0u || any(id.xy>=size) {return;}
     let p=vec2<i32>(id.xy);textureStore(primary_hit_output,p,trace.record);
     if trace.record.x==0u {return;}
