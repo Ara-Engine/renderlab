@@ -344,11 +344,12 @@ mod tests {
                                     })
                                     .unwrap()
                                     .1;
-                                let naga::TypeInner::Image { class, .. } =
+                                let naga::TypeInner::Image { class, arrayed, .. } =
                                     module.types[global.ty].inner
                                 else {
                                     panic!("record is an image")
                                 };
+                                assert!(arrayed, "record view must be D2Array");
                                 match (layout.ty, class) {
                                     (
                                         wgpu::BindingType::StorageTexture {
