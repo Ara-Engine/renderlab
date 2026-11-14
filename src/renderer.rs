@@ -3859,8 +3859,14 @@ impl Renderer {
         // Upscaled frames skip them (docs/m7-gaps.md, Transparency).
         if lit && self.view.upscale.is_none() && !self.view.outputs.modes.data() {
             mark(&mut encoder, "transparency");
-            self.encode_transparency(&mut encoder, draws, transparent, traced)?;
+            drop(mark);
+            self.encode_transparency(&mut encoder, draws, transparent, traced, marks.as_mut())?;
         }
+        let mut mark = |encoder: &mut wgpu::CommandEncoder, name: &'static str| {
+            if let Some(t) = &mut marks {
+                t.mark(encoder, name);
+            }
+        };
         if traced && self.view.outputs.ids.enabled() {
             mark(&mut encoder, "ids");
             self.encode_ids(&mut encoder, draws, transparent, reconstructed);

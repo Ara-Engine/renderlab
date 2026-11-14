@@ -156,6 +156,17 @@ impl PassTimeline {
         self.detail
     }
 
+    /// Available dotted marks, excluding the final timestamp. Diagnostics can preserve
+    /// the frame's remaining stages rather than silently consuming the entire pool.
+    pub(crate) fn detail_marks_remaining(&self) -> usize {
+        if !self.detail {
+            return 0;
+        }
+        self.current.map_or(0, |i| {
+            (MARKS as usize - 1).saturating_sub(self.frames[i].names.len())
+        })
+    }
+
     /// Starts stage `name` at this point of `encoder`'s work.
     pub(crate) fn mark(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         let Some(i) = self.current else { return };

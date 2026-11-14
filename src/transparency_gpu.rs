@@ -28,6 +28,8 @@ pub(crate) mod reflection;
 pub(crate) mod transmission_shadow;
 #[path = "transparency_panes.rs"]
 mod panes;
+#[path = "transparency_measure.rs"]
+mod measurement;
 
 const SHADER: &str = include_str!("../shaders/transparency.wgsl");
 /// Square sun shadow map of the transparent receivers' footprint.
@@ -1707,7 +1709,16 @@ impl Renderer {
         opaque: &[PreparedDraw<'_>],
         transparent: &[Draw<'_>],
         traced: bool,
+        mut timeline: Option<&mut crate::pass_timeline::PassTimeline>,
     ) -> Result<(), Error> {
+        let mut measurement = measurement::Measure::begin(self.frames, self.view_key.0);
+        macro_rules! part {
+            ($name:literal) => {
+                if let Some(m) = &mut measurement {
+                    m.part(encoder, &mut timeline, $name);
+                }
+            };
+        }
         self.transparency
             .emitters
             .retain(|e| e.handle.strong_count() > 0);
@@ -1715,6 +1726,16 @@ impl Renderer {
             .iter()
             .filter(|d| !d.instances.state.ids.is_empty())
             .collect();
+        if let Some(m) = &mut measurement {
+            m.counts.draws = transparent.len() as u64;
+            m.counts.emitters = self.transparency.emitters.len() as u64;
+            m.counts.particle_capacity = self
+                .transparency
+                .emitters
+                .iter()
+                .map(|e| u64::from(e.params.capacity))
+                .sum();
+        }
         if transparent.is_empty() && self.transparency.emitters.is_empty() {
             return Ok(());
         }
@@ -1855,7 +1876,11 @@ impl Renderer {
         if reflect {
             let primary = self.view.primary.as_ref().unwrap();
             let program = self.program_slot(primary.program);
-            let key = reflection::key(&self.source_digest, &program.digest, program.layout.is_some());
+            let key = reflection::key(
+                &self.source_digest,
+                &program.digest,
+                program.layout.is_some(),
+            );
             if self
                 .view
                 .transparency_reflections
@@ -2026,9 +2051,9 @@ impl Renderer {
         for e in &mut self.transparency.emitters {
             let textured = e.sprite.is_some();
             if !self.tick_work {
-                let none = e
-                    .params
-                    .uniform(e.spawned as u32, 0, 0, textured, 0.0, e.clock as f32, 0.0);
+                let none =
+                    e.params
+                        .uniform(e.spawned as u32, 0, 0, textured, 0.0, e.clock as f32, 0.0);
                 self.queue.write_buffer(&e.uniform, 0, &none);
                 continue;
             }
@@ -2042,7 +2067,11 @@ impl Renderer {
                 let dt = window / count as f64;
                 let mut blobs = Vec::with_capacity((count + 1) * EMITTER_BYTES as usize);
                 for i in 0..count {
-                    let burst = if i == 0 { u64::from(e.burst).min(capacity) } else { 0 };
+                    let burst = if i == 0 {
+                        u64::from(e.burst).min(capacity)
+                    } else {
+                        0
+                    };
                     e.clock += dt;
                     e.carry += f64::from(e.params.spawn_rate) * dt;
                     let births = (e.carry.floor() as u64).min(capacity - burst);
@@ -2104,6 +2133,7 @@ impl Renderer {
         // ---- GPU ----
         let hdr = self.view.hdr.as_ref().unwrap();
         let targets = self.view.transparency_targets.as_ref().unwrap();
+        part!("transparency.depth");
         // 1. Opaque view depth.
         {
             let group = if traced {
@@ -2176,6 +2206,7 @@ impl Renderer {
             pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
         }
         // 2. The transparent receivers' sun shadow map, when its inputs changed.
+        part!("transparency.sun_map");
         if render_shadow {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("TP1 sun shadow map"),
@@ -2201,6 +2232,7 @@ impl Renderer {
         }
         // 3. Particles: stepped prewarms first (each substep's uniform copied in, then
         // simulated), then this frame's simulation, lighting and sort.
+        part!("transparency.particles");
         if let Some(p) = &gpu.particles {
             for e in &mut self.transparency.emitters {
                 let Some(blobs) = e.warm_steps.take() else {
@@ -2236,6 +2268,9 @@ impl Renderer {
                     pass.set_bind_group(2, &*gpu.empty, &[]);
                     pass.set_bind_group(3, self.lighting.bind(), &[]);
                     pass.set_pipeline(&p.update);
+                    if let Some(m) = &mut measurement {
+                        m.counts.particle_updates += 1;
+                    }
                     pass.dispatch_workgroups(e.params.capacity.div_ceil(64), 1, 1);
                 }
             }
@@ -2249,11 +2284,16 @@ impl Renderer {
             for e in &self.transparency.emitters {
                 pass.set_bind_group(0, &*e.sim, &[]);
                 pass.set_pipeline(&p.update);
+                if let Some(m) = &mut measurement {
+                    m.counts.particle_updates += 1;
+                    m.counts.particle_sorts += 1;
+                }
                 pass.dispatch_workgroups(e.params.capacity.div_ceil(64), 1, 1);
                 pass.set_pipeline(&p.sort);
                 pass.dispatch_workgroups(1, 1, 1);
             }
         }
+        part!("transparency.setup");
         // Per-frame groups: the TLAS, targets and shadow map they bind change between frames.
         let rt_scene = self
             .hardware_shadows
@@ -2450,7 +2490,8 @@ impl Renderer {
                 }
                 let state = &draw.instances.state;
                 for (model, slot) in state.models.iter().zip(&state.ids) {
-                    let rect = panes::rect(&draw.mesh.bounds, *model, matrix, [size.width, size.height]);
+                    let rect =
+                        panes::rect(&draw.mesh.bounds, *model, matrix, [size.width, size.height]);
                     let at = pane_bytes.len();
                     pane_bytes.extend(panes::record(rect, *slot));
                     pane_bytes.resize(at + panes::RECORD as usize, 0);
@@ -2524,7 +2565,14 @@ impl Renderer {
         // pixel any draw reads, refraction offsets included (audit 2026-11-12, 3.2: a full-frame
         // copy per transparent draw).
         let view_rect = [0, 0, size.width, size.height];
-        let union = |a: [u32; 4], b: [u32; 4]| [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])];
+        let union = |a: [u32; 4], b: [u32; 4]| {
+            [
+                a[0].min(b[0]),
+                a[1].min(b[1]),
+                a[2].max(b[2]),
+                a[3].max(b[3]),
+            ]
+        };
         let draw_rects: Vec<[u32; 4]> = transparent
             .iter()
             .map(|draw| {
@@ -2532,7 +2580,9 @@ impl Renderer {
                 state
                     .models
                     .iter()
-                    .map(|model| panes::rect(&draw.mesh.bounds, *model, matrix, [size.width, size.height]))
+                    .map(|model| {
+                        panes::rect(&draw.mesh.bounds, *model, matrix, [size.width, size.height])
+                    })
                     .reduce(union)
                     .unwrap_or([0, 0, 0, 0])
             })
@@ -2593,7 +2643,11 @@ impl Renderer {
             if glass {
                 let region = if copied { dirty } else { Some(view_rect) };
                 if let Some(r) = region.filter(|r| r[2] > r[0] && r[3] > r[1]) {
-                    let origin = wgpu::Origin3d { x: r[0], y: r[1], z: 0 };
+                    let origin = wgpu::Origin3d {
+                        x: r[0],
+                        y: r[1],
+                        z: 0,
+                    };
                     let mut from = hdr.resolved.texture.as_image_copy();
                     from.origin = origin;
                     let mut to = targets.color.texture.as_image_copy();
@@ -2603,6 +2657,12 @@ impl Renderer {
                         height: r[3] - r[1],
                         depth_or_array_layers: 1,
                     };
+                    part!("transparency.copy");
+                    if let Some(m) = &mut measurement {
+                        m.counts.copies += 1;
+                        m.counts.copied_pixels +=
+                            u64::from(extent.width) * u64::from(extent.height);
+                    }
                     encoder.copy_texture_to_texture(from, to, extent);
                 }
                 copied = true;
@@ -2622,6 +2682,19 @@ impl Renderer {
                     } else {
                         vec![*first]
                     };
+                    part!("transparency.lobe");
+                    if let Some(m) = &mut measurement {
+                        m.counts.lobe_passes += 1;
+                        m.counts.lobe_target_pixels +=
+                            u64::from(size.width) * u64::from(size.height);
+                        let reflective = run.iter().any(|&i| {
+                            let program = transparent[i]
+                                .material
+                                .map_or(default_program, |material| material.program.id());
+                            self.program_slot(program).traits.declares_reflection
+                        });
+                        m.counts.nonreflective_lobe_runs += u64::from(!reflective);
+                    }
                     {
                         let attachments = [
                             &reflection.position.view,
@@ -2684,6 +2757,12 @@ impl Renderer {
                             );
                         }
                     }
+                    part!("transparency.reflection");
+                    if let Some(m) = &mut measurement {
+                        m.counts.reflection_dispatches += 1;
+                        m.counts.reflection_pixels +=
+                            u64::from(size.width) * u64::from(size.height);
+                    }
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("TP2 R1 glass reflection"),
                         timestamp_writes: None,
@@ -2728,7 +2807,11 @@ impl Renderer {
                         continue;
                     }
                     if k > 0 {
-                        let origin = wgpu::Origin3d { x: rect[0], y: rect[1], z: 0 };
+                        let origin = wgpu::Origin3d {
+                            x: rect[0],
+                            y: rect[1],
+                            z: 0,
+                        };
                         let extent = wgpu::Extent3d {
                             width: rect[2] - rect[0],
                             height: rect[3] - rect[1],
@@ -2738,7 +2821,17 @@ impl Renderer {
                         from.origin = origin;
                         let mut to = targets.color.texture.as_image_copy();
                         to.origin = origin;
+                        part!("transparency.copy");
+                        if let Some(m) = &mut measurement {
+                            m.counts.copies += 1;
+                            m.counts.copied_pixels +=
+                                u64::from(extent.width) * u64::from(extent.height);
+                        }
                         encoder.copy_texture_to_texture(from, to, extent);
+                    }
+                    part!("transparency.pane_ids");
+                    if let Some(m) = &mut measurement {
+                        m.counts.pane_ids += 1;
                     }
                     {
                         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2755,7 +2848,11 @@ impl Renderer {
                             ..Default::default()
                         });
                         pass.set_pipeline(&pane.ids[0]);
-                        pass.set_bind_group(0, glass_group.as_ref().unwrap(), &[(i as u64 * SLOT) as u32]);
+                        pass.set_bind_group(
+                            0,
+                            glass_group.as_ref().unwrap(),
+                            &[(i as u64 * SLOT) as u32],
+                        );
                         pass.set_bind_group(1, &*draw.instances.bind, &[]);
                         pass.set_bind_group(2, &*material.bind, &[]);
                         pass.set_bind_group(3, self.lighting.bind(), &[]);
@@ -2763,6 +2860,11 @@ impl Renderer {
                         pass.set_vertex_buffer(1, draw.instances.id_buffer.slice(..));
                         pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
                         pass.draw_indexed(0..draw.mesh.index_count, 0, k as u32..k as u32 + 1);
+                    }
+                    part!("transparency.pane_shade");
+                    if let Some(m) = &mut measurement {
+                        m.counts.pane_shades += 1;
+                        m.counts.pane_rect_pixels += measurement::area(rect);
                     }
                     let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                         label: Some("TP pane shading"),
@@ -2822,7 +2924,22 @@ impl Renderer {
                             height: r[3] - r[1],
                             depth_or_array_layers: 1,
                         };
+                        part!("transparency.copy");
+                        if let Some(m) = &mut measurement {
+                            m.counts.copies += 1;
+                            m.counts.copied_pixels +=
+                                u64::from(extent.width) * u64::from(extent.height);
+                        }
                         encoder.copy_texture_to_texture(from, to, extent);
+                    }
+                }
+                part!("transparency.raster_seed_glass_resolve");
+                if let Some(m) = &mut measurement {
+                    m.counts.raster_passes += 1;
+                    if aa {
+                        m.counts.msaa_passes += 1;
+                        m.counts.seed_pixels += u64::from(size.width) * u64::from(size.height);
+                        m.counts.resolve_pixels += u64::from(size.width) * u64::from(size.height);
                     }
                 }
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2945,6 +3062,9 @@ impl Renderer {
             .map(|e| e.params.capacity)
             .sum();
         stats.frames += 1;
+        if let Some(m) = measurement {
+            m.finish(rt, [size.width, size.height], render_shadow);
+        }
         Ok(())
     }
 }
