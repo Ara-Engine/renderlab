@@ -94,3 +94,15 @@ for `RENDERLAB_GI_REFILL_HOLD` frames after a cut (default eight). Claims and sk
 continue; startup without a cut is unchanged. Waiting cells retain their previous values,
 or use the existing parent fallback when available. This does not guarantee a filled or
 accurate picture: the +1/+5/+20/+70 comparisons decide that.
+
+The 520 revisit is warm-cache evidence only and must not rank refill policies. The
+120-frame eviction age makes slots reusable on a later insertion; it does not delete
+entries, and idle frames stop advancing cache age. An early B visit followed by an A
+hold therefore cannot certify a cold B cache by elapsed frame count alone.
+
+The cold-cache/pipeline-warm fixture visits B at 0?20, switches to A at 21, explicitly
+empties only GI there with `RENDERLAB_SCENE_GI_RESET_FRAMES=21`, holds A through 441,
+then measures B at 442. `RENDERLAB_SCENE_EVENT_FRAMES=0,21,442` selects those views.
+This uses the existing reset API, does not recreate pipelines, and performs no reset at
+the measured cut. A no-reset control verifies the residency issue; created-cell counts
+at +0?+5 are compared with a true first arrival at 442 before ranking any policy.

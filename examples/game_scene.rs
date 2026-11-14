@@ -1128,10 +1128,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Ok(list) => list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>()?,
         Err(_) => vec![event_frame],
     };
+    // Clear only GI, far before the measured cut, without dropping view pipelines.
+    let gi_resets: Vec<u32> = std::env::var("RENDERLAB_SCENE_GI_RESET_FRAMES").ok()
+        .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>())
+        .transpose()?.unwrap_or_default();
     let mut counters = std::env::var_os("RENDERLAB_SCENE_COUNTERS")
         .map(std::fs::File::create)
         .transpose()?;
     for frame in 0..args.frames {
+        if gi_resets.contains(&frame) { engine.renderer_mut().reset_indirect(); }
         let t = if args.still { 0.0 } else { frame as f32 / FPS };
         let sun_update = Instant::now();
         let hour = sun_hour(frame);
