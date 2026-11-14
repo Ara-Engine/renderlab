@@ -6,6 +6,8 @@
 @group(0) @binding(8) var<storage,read_write> visibility:array<atomic<u64>>;
 // Its own group: wgpu forbids binding arrays beside uniform buffers.
 @group(2) @binding(8) var<storage,read> cluster_data:binding_array<U32s,PRIMARY_BATCHES>;
+@group(0) @binding(9) var occlusion_depth:texture_depth_2d;
+override DEPTH_PREPASS:bool=false;
 struct Out {
     @builtin(position) position:vec4<f32>,
     @location(0) @interpolate(flat) payload:u32,
@@ -31,5 +33,11 @@ struct Out {
 @fragment fn fs(input:Out,@builtin(front_facing) front:bool) {
     if input.sides!=0u && front!=(input.sides==1u) {discard;}
     let p=vec2<u32>(input.position.xy);
+    if DEPTH_PREPASS && bitcast<u32>(input.position.z)+1u<bitcast<u32>(textureLoad(occlusion_depth,vec2<i32>(p),0)) {return;}
     atomicMax(&visibility[p.y*image_size().x+p.x],(u64(bitcast<u32>(input.position.z))<<32u)|u64(input.payload));
+}
+
+// No storage side effects: the hardware can perform depth rejection before shading.
+@fragment fn fs_depth(input:Out,@builtin(front_facing) front:bool) {
+    if input.sides!=0u && front!=(input.sides==1u) {discard;}
 }

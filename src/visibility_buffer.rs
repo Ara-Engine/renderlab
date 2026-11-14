@@ -331,6 +331,8 @@ pub(super) struct VisibilityBuffer {
     _absent: Buffer,
     _visibility: Buffer,
     depth: Depth,
+    occlusion_depth: Depth,
+    depth_prepass: Option<wgpu::RenderPipeline>,
     _hzb: Depth,
     _hzb_absent: Depth,
     cull: wgpu::ComputePipeline,
@@ -791,8 +793,10 @@ impl VisibilityBuffer {
             size,
             F::Depth32Float,
             1,
-            U::RENDER_ATTACHMENT,
+            U::RENDER_ATTACHMENT | U::COPY_SRC,
         );
+        let occlusion_depth = target(r, "visibility prepass sampled depth", size, F::Depth32Float, 1, U::COPY_DST | U::TEXTURE_BINDING);
+        let prepass = std::env::var("RENDERLAB_VIS_DEPTH_PREPASS").is_ok_and(|v| v == "1");
         // Level 0 texels cover 2x2 pixels. Power-of-two sizes halve exactly; texels
         // beyond the image stay 0.
         let extent = wgpu::Extent3d {
@@ -856,6 +860,7 @@ impl VisibilityBuffer {
                 buffer_entry(1, false, false, S::VERTEX),
                 buffer_entry(3, false, false, S::VERTEX),
                 buffer_entry(8, false, true, S::FRAGMENT),
+                sampled(9, wgpu::TextureSampleType::Depth),
             ],
         );
         let data_layout = layout(&r.device, &[data_entry(8, S::COMPUTE | S::VERTEX)]);
@@ -943,15 +948,13 @@ impl VisibilityBuffer {
                     stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")).into(),
                 ),
             });
-        let hardware_pipeline = r
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        let hardware_pipeline_layout = pipeline_layout(&[
+            Some(&hardware_layout), Some(state.array_layout()), Some(&data_layout),
+        ]);
+        let hardware_constants = [("DEPTH_PREPASS", if prepass { 1.0 } else { 0.0 })];
+        let mut hardware_descriptor = wgpu::RenderPipelineDescriptor {
                 label: Some("N1c hardware ID raster"),
-                layout: Some(&pipeline_layout(&[
-                    Some(&hardware_layout),
-                    Some(state.array_layout()),
-                    Some(&data_layout),
-                ])),
+                layout: Some(&hardware_pipeline_layout),
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some("vs"),
@@ -961,7 +964,10 @@ impl VisibilityBuffer {
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
                     entry_point: Some("fs"),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &hardware_constants,
+                        ..Default::default()
+                    },
                     targets: &[],
                 }),
                 primitive: Default::default(),
@@ -977,7 +983,11 @@ impl VisibilityBuffer {
                 multisample: Default::default(),
                 multiview_mask: None,
                 cache: None,
-            });
+            };
+        let hardware_pipeline = r.device.create_render_pipeline(&hardware_descriptor);
+        hardware_descriptor.fragment.as_mut().unwrap().entry_point = Some("fs_depth");
+        hardware_descriptor.fragment.as_mut().unwrap().compilation_options = Default::default();
+        let depth_prepass = prepass.then(|| r.device.create_render_pipeline(&hardware_descriptor));
         let hzb_source = include_str!("../shaders/visibility_buffer_hzb.wgsl");
         let base = compute(hzb_source, "base", &[Some(&hzb_layout)], &[]);
         let reduce = compute(hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
@@ -1036,6 +1046,7 @@ impl VisibilityBuffer {
                     (1, clusters.value.as_entire_binding()),
                     (3, lists[i].value.as_entire_binding()),
                     (8, visibility.value.as_entire_binding()),
+                    (9, R::TextureView(&occlusion_depth.view)),
                 ],
             )
         });
@@ -1109,6 +1120,8 @@ impl VisibilityBuffer {
             _absent: absent,
             _visibility: visibility,
             depth,
+            occlusion_depth,
+            depth_prepass,
             _hzb: hzb,
             _hzb_absent: hzb_absent,
             cull,
@@ -1498,6 +1511,29 @@ impl Renderer {
                 pass.dispatch_workgroups_indirect(&v.args[i].value, 0);
             }
             mark(encoder, ["visibility.hw1", "visibility.hw2"][i]);
+            if let Some(pipeline) = &v.depth_prepass {
+                {
+                    let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                        label: Some("visibility depth prepass"),
+                        color_attachments: &[],
+                        depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                            view: &v.depth.view,
+                            depth_ops: Some(wgpu::Operations {
+                                load: if i == 0 { wgpu::LoadOp::Clear(0.0) } else { wgpu::LoadOp::Load },
+                                store: wgpu::StoreOp::Store,
+                            }),
+                            stencil_ops: None,
+                        }),
+                        timestamp_writes: None, occlusion_query_set: None, multiview_mask: None,
+                    });
+                    pass.set_pipeline(pipeline);
+                    pass.set_bind_group(0, &v.hardware_groups[i], &[]);
+                    pass.set_bind_group(1, arrays, &[]);
+                    pass.set_bind_group(2, &v.data_group, &[]);
+                    pass.draw_indirect(&v.args[i].value, 16);
+                }
+                encoder.copy_texture_to_texture(v.depth.texture.as_image_copy(), v.occlusion_depth.texture.as_image_copy(), v.size);
+            }
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("N1c hardware raster"),
@@ -1505,7 +1541,7 @@ impl Renderer {
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &v.depth.view,
                         depth_ops: Some(wgpu::Operations {
-                            load: if i == 0 {
+                            load: if i == 0 && v.depth_prepass.is_none() {
                                 wgpu::LoadOp::Clear(0.0)
                             } else {
                                 wgpu::LoadOp::Load
