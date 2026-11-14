@@ -201,6 +201,15 @@ mod tests {
         for (head, expected) in [(&original[1], on(false)), (&wgpu[1], on(true))] {
             let c = program::compose(head, PASS_PROGRAM, Stage::Traced, false);
             assert_eq!(c.source.contains("fn rl_lvis_lookup("), expected);
+            if program::light_bound().is_some() {
+                assert!(!expected);
+                assert!(c.source.contains("const RL_LB_SUM:bool="));
+            }
+            let module = naga::front::wgsl::parse_str(&c.source).unwrap();
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            ).validate(&module).unwrap();
         }
         if !on(true) {
             assert_eq!(wgpu, original);
