@@ -64,13 +64,15 @@ pub(crate) const GATHER_GROUPS: u32 = 4096;
 /// budget (P-GI and P-GATHER made software gathers cheaper since G2b; docs/p-defect.md).
 const GATHER_CELLS: u32 = 32768;
 /// First fill (gicut, `RENDERLAB_GI_FIRST_FILL=0` turns it off): the most cells a frame creates
-/// (shaders/gi_cache.wgsl gi_fill_bin; the lattice class that covers every receiver is always
-/// created), and software rays' gather budget. Outpost non-RT after a cut: 0.4 us a new cell's
+/// (shaders/gi_cache.wgsl gi_fill_bin; after a cut the pixels' parent cells, which cover every
+/// receiver, are always created), and software rays' gather budget. Outpost non-RT after a cut: 0.4 us a new cell's
 /// sky rays and 1.3 us a gather, so 16k cells and 8k gathers stay near 15 ms over the frame's
 /// steady cost; hardware rays: 11 ns and 0.12 us.
 const FILL_CELLS_HARDWARE: u32 = 65536;
 const FILL_CELLS_SOFTWARE: u32 = 16384;
 const GATHER_CELLS_SOFTWARE: u32 = 8192;
+/// Frames after a cut or clear whose pixels also request their parent cells (first fill).
+const FILL_PARENT_FRAMES: u32 = 32;
 fn first_fill_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIRST_FILL").map_or(true, |v| v != "0"))
@@ -1226,11 +1228,15 @@ impl Planner {
             (true, true) => FILL_CELLS_SOFTWARE,
             (true, false) => FILL_CELLS_HARDWARE,
         };
-        // The pixel cells' gather rotation counts from the last cut or clear.
-        header[49] = match since_clear.min(self.since_cut) {
+        // The pixel cells' gather rotation counts from the last cut or clear, and for
+        // FILL_PARENT_FRAMES after it pixels also request their parent cells, which the capped
+        // claim admits first (shaders/gi_cache.wgsl gi_fill_bin).
+        let since_fill = since_clear.min(self.since_cut);
+        header[49] = match since_fill {
             u32::MAX => self.frame,
             n => n,
         };
+        header[50] = u32::from(fill && since_fill < FILL_PARENT_FRAMES);
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {
