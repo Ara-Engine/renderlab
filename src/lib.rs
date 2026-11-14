@@ -52,7 +52,12 @@ pub mod reference;
 mod reflection_software;
 mod reflections;
 mod renderer;
+#[cfg(not(target_vendor = "apple"))]
 #[path = "program_vulkan.rs"]
+pub mod shader_compiler;
+// wgpu has no Vulkan backend on Apple targets: the same API, with no development device.
+#[cfg(target_vendor = "apple")]
+#[path = "program_vulkan_apple.rs"]
 pub mod shader_compiler;
 mod shadow_plan;
 mod shadows;
