@@ -273,7 +273,14 @@ impl Renderer {
             self,
             "reflection glossy-pixel list",
             LIST_HEADER + room * LIST_ENTRY_BYTES,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_DST
+                // The glossy-list dump's copy (usage only, while it is set).
+                | if super::reflection_list_dump::enabled() {
+                    wgpu::BufferUsages::COPY_SRC
+                } else {
+                    wgpu::BufferUsages::empty()
+                },
         )
     }
 
@@ -408,6 +415,8 @@ impl Renderer {
         compute.set_pipeline(&pipelines.args);
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
+        let epsilon = &state.targets.as_ref().unwrap().epsilon.texture;
+        super::reflection_list_dump::maybe_dump(self, encoder, pass, epsilon);
         self.rl_probe(encoder, pass);
         self.rl_room_copy(encoder, pass);
     }
