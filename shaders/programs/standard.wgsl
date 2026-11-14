@@ -153,21 +153,24 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     // Sky specular likewise: the occluded prefiltered radiance about the reflection, then
     // each dominant lobe the engine separates (only where it can occlude them) evaluated
     // against this BRDF in place of its share of that radiance.
-    let reflected=reflect(-v,n);
-    let radiance=indirect_radiance(input,reflected,rough);
     let reflectance=f0*ab.x+vec3<f32>(ab.y);
-    var specular=exposed_product(radiance,reflectance);
-    if environment_enabled() {
-        specular=environment_product(radiance,reflectance);
-        for(var i=0u;i<environment_lobe_count();i+=1u) {
-            let lobe=environment_lobe(input,i);
-            let w=lobe_weight(lobe.sharpness,rough);
-            if w<=0.0 { continue; }
-            let share=environment_lobe_reflection(input,i,reflected,rough);
-            specular+=w*(environment_product(lobe.illuminance,lobe_specular(n,v,lobe,f0,rough))
-                -environment_product(share,reflectance));
+    var specular=vec3<f32>(0.0);
+    if reflection_needs_environment() {
+        let reflected=reflect(-v,n);
+        let radiance=indirect_radiance(input,reflected,rough);
+        specular=exposed_product(radiance,reflectance);
+        if environment_enabled() {
+            specular=environment_product(radiance,reflectance);
+            for(var i=0u;i<environment_lobe_count();i+=1u) {
+                let lobe=environment_lobe(input,i);
+                let w=lobe_weight(lobe.sharpness,rough);
+                if w<=0.0 { continue; }
+                let share=environment_lobe_reflection(input,i,reflected,rough);
+                specular+=w*(environment_product(lobe.illuminance,lobe_specular(n,v,lobe,f0,rough))
+                    -environment_product(share,reflectance));
+            }
+            specular=max(specular,vec3<f32>(0.0));
         }
-        specular=max(specular,vec3<f32>(0.0));
     }
     // Where the engine traced the lobe (mirror and glossy bands on traced frames), its
     // incident radiance replaces the untraced estimate, faded across the rough cutoff.

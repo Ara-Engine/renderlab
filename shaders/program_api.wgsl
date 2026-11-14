@@ -208,6 +208,8 @@ fn expose(radiance:vec3<f32>) -> vec3<f32> { return exposed_product(radiance,vec
 // mixes it with. The engine keeps them where it composites traced reflections after shading
 // (RENDERLAB_RL_DEFERRED); anywhere else the report does nothing.
 fn reflection_report(reflectance:vec3<f32>, untraced:vec3<f32>) {}
+// Deferred shading can omit the environment estimate once traced radiance replaces it fully.
+fn reflection_needs_environment() -> bool { return true; }
 
 // The HDR store contract: finite, nonnegative and at most 65504. NaN and negatives
 // become 0; the identity on valid values.
