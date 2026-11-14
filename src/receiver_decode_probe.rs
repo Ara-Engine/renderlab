@@ -127,16 +127,28 @@ mod tests {
             primary::non_rt_sources(scene).unwrap().1,
         ] {
             for head in heads {
-                let gi = primary::gi_receiver_pass::kernel_module(&head).source;
-                let lights = primary::light_vis_pass::apply_enabled(
-                    program::compose(
-                        &head,
-                        program::STANDARD_PROGRAM,
-                        program::Stage::Traced,
-                        false,
-                    ),
-                    true,
-                )
+                let mut gi = primary::gi_receiver_pass::kernel_module(&head).source;
+                // The production builder runs with GI_PASS set. Supply its ABI
+                // when this focused test runs in an otherwise disabled process.
+                if !gi.contains("struct GiPrepared") {
+                    gi.push_str(
+                        include_str!("../shaders/gi_receiver_pass.wgsl")
+                            .split_once("// ---- GI receiver compute entry ----")
+                            .unwrap()
+                            .0,
+                    );
+                }
+                let composed = program::compose(
+                    &head,
+                    program::STANDARD_PROGRAM,
+                    program::Stage::Traced,
+                    false,
+                );
+                let lights = if composed.source.contains("fn rl_lvis_pixel(") {
+                    composed
+                } else {
+                    primary::light_vis_pass::apply_enabled(composed, true)
+                }
                 .source;
                 assert_eq!(gi_mode(gi.clone(), Mode::Off), gi);
                 assert_eq!(lights_mode(lights.clone(), Mode::Off), lights);
