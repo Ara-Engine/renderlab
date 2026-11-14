@@ -331,6 +331,8 @@ pub(super) struct VisibilityBuffer {
     _absent: Buffer,
     _visibility: Buffer,
     depth: Depth,
+    hardware_ids: Depth,
+    hardware_merge: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
     _hzb: Depth,
     _hzb_absent: Depth,
     cull: wgpu::ComputePipeline,
@@ -791,8 +793,10 @@ impl VisibilityBuffer {
             size,
             F::Depth32Float,
             1,
-            U::RENDER_ATTACHMENT,
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
         );
+        let attachment = std::env::var("RENDERLAB_VIS_ATTACHMENT").is_ok_and(|v| v == "1");
+        let hardware_ids = target(r, "visibility hardware IDs", size, F::R32Uint, 1, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
         // Level 0 texels cover 2x2 pixels. Power-of-two sizes halve exactly; texels
         // beyond the image stay 0.
         let extent = wgpu::Extent3d {
@@ -960,9 +964,9 @@ impl VisibilityBuffer {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs"),
+                    entry_point: Some(if attachment { "fs_color" } else { "fs" }),
                     compilation_options: Default::default(),
-                    targets: &[],
+                    targets: if attachment { &[Some(wgpu::ColorTargetState { format: F::R32Uint, blend: None, write_mask: wgpu::ColorWrites::ALL })] } else { &[] },
                 }),
                 primitive: Default::default(),
                 // GreaterEqual: equal-depth fragments still reach the 64-bit max, so
@@ -978,6 +982,19 @@ impl VisibilityBuffer {
                 multiview_mask: None,
                 cache: None,
             });
+        let merge_layout = layout(&r.device, &[
+            buffer_entry(0, false, true, S::COMPUTE),
+            sampled(1, wgpu::TextureSampleType::Uint),
+            sampled(2, wgpu::TextureSampleType::Depth),
+        ]);
+        let hardware_merge = attachment.then(|| (
+            compute(include_str!("../shaders/visibility_buffer_merge.wgsl"), "merge", &[Some(&merge_layout)], &[]),
+            bind(&r.device, &merge_layout, &[
+                (0, visibility.value.as_entire_binding()),
+                (1, R::TextureView(&hardware_ids.view)),
+                (2, R::TextureView(&depth.view)),
+            ]),
+        ));
         let hzb_source = include_str!("../shaders/visibility_buffer_hzb.wgsl");
         let base = compute(hzb_source, "base", &[Some(&hzb_layout)], &[]);
         let reduce = compute(hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
@@ -1109,6 +1126,8 @@ impl VisibilityBuffer {
             _absent: absent,
             _visibility: visibility,
             depth,
+            hardware_ids,
+            hardware_merge,
             _hzb: hzb,
             _hzb_absent: hzb_absent,
             cull,
@@ -1276,6 +1295,7 @@ mod tests {
             stage_source(include_str!("../shaders/visibility_buffer_sw.wgsl")),
             stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")),
             include_str!("../shaders/visibility_buffer_hzb.wgsl").to_owned(),
+            include_str!("../shaders/visibility_buffer_merge.wgsl").to_owned(),
             resolve_source(include_str!("../shaders/scene.wgsl")).unwrap(),
         ];
         let (kernels, heads) =
@@ -1501,7 +1521,10 @@ impl Renderer {
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("N1c hardware raster"),
-                    color_attachments: &[],
+                    color_attachments: if v.hardware_merge.is_some() { &[Some(wgpu::RenderPassColorAttachment {
+                        view: &v.hardware_ids.view, depth_slice: None, resolve_target: None,
+                        ops: wgpu::Operations { load: if i == 0 { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load }, store: wgpu::StoreOp::Store },
+                    })] } else { &[] },
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &v.depth.view,
                         depth_ops: Some(wgpu::Operations {
@@ -1525,6 +1548,14 @@ impl Renderer {
                 pass.draw_indirect(&v.args[i].value, 16);
             }
             mark(encoder, ["visibility.hzb1", "visibility.hzb2"][i]);
+            if let Some((pipeline, group)) = &v.hardware_merge {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("merge hardware and software visibility"), timestamp_writes: None,
+                });
+                pass.set_pipeline(pipeline);
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(v.size.width.div_ceil(8), v.size.height.div_ceil(8), 1);
+            }
             v.pyramid(encoder, i, stage(i as u32 * 4 + 3));
         }
         mark(encoder, "visibility.resolve");
