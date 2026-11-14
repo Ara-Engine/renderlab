@@ -217,7 +217,7 @@ impl Renderer {
                         vertex_return: false,
                     },
                 ),
-                entry(10, COMPUTE, uniform(false, primary.frame_buffer().size())),
+                entry(10, COMPUTE, uniform(false, primary_ray_gpu::FRAME_BYTES as u64)),
                 entry(
                     18,
                     COMPUTE,
