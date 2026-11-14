@@ -344,11 +344,20 @@ mod tests {
                                     })
                                     .unwrap()
                                     .1;
-                                let naga::TypeInner::Image { class, .. } =
-                                    module.types[global.ty].inner
+                                let naga::TypeInner::Image {
+                                    class,
+                                    dim,
+                                    arrayed,
+                                } = module.types[global.ty].inner
                                 else {
                                     panic!("record is an image")
                                 };
+                                // One 2D array, receiver first (program.rs MATERIAL_RECORD_BINDING).
+                                assert_eq!(
+                                    (dim, arrayed),
+                                    (naga::ImageDimension::D2, true),
+                                    "the record is a 2D array"
+                                );
                                 match (layout.ty, class) {
                                     (
                                         wgpu::BindingType::StorageTexture {

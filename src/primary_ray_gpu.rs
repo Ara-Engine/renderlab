@@ -2373,8 +2373,14 @@ impl Renderer {
                     }),
                     ResourceKind::Texture,
                 );
+                // A layered target (the material record) is viewed as a 2D array explicitly,
+                // as its layouts declare it, rather than by wgpu's default for layers.
                 let view = self.ledger.own(
-                    texture.create_view(&Default::default()),
+                    texture.create_view(&wgpu::TextureViewDescriptor {
+                        dimension: (size.depth_or_array_layers > 1)
+                            .then_some(wgpu::TextureViewDimension::D2Array),
+                        ..Default::default()
+                    }),
                     ResourceKind::TextureView,
                 );
                 let bytes = u64::from(size.width)
