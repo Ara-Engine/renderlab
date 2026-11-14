@@ -111,7 +111,7 @@ pub(super) fn maybe_dump(
             return;
         };
         let (list, epsilon) = data.split_at(epsilon_at as usize);
-        let snapshot = Snapshot::new(list, |[x, y]| {
+        let snapshot = Snapshot::new(list, header.room as usize, |[x, y]| {
             let at = y as usize * row as usize + x as usize * 4;
             u32::from_ne_bytes(epsilon[at..at + 4].try_into().unwrap())
         });
@@ -152,10 +152,11 @@ struct Snapshot<'a> {
 }
 
 impl<'a> Snapshot<'a> {
-    /// `list`: L's bytes; `epsilon`: the receiver epsilon bits at a pixel.
-    fn new(list: &'a [u8], epsilon: impl Fn([u32; 2]) -> u32) -> Self {
+    /// `list`: L's bytes (at least its header and `capacity` entries); `capacity`: the entries
+    /// the shaders may write (the room, `rl_pass_frame.z`); `epsilon`: the receiver epsilon bits
+    /// at a pixel.
+    fn new(list: &'a [u8], capacity: usize, epsilon: impl Fn([u32; 2]) -> u32) -> Self {
         let appended = u32::from_ne_bytes(list[..4].try_into().unwrap());
-        let capacity = (list.len() - HEADER_BYTES) / ENTRY_BYTES;
         let listed = (appended as usize).min(capacity);
         let entries = &list[HEADER_BYTES..HEADER_BYTES + listed * ENTRY_BYTES];
         let epsilon = entries
@@ -210,14 +211,15 @@ mod tests {
 
     #[test]
     fn snapshot_keeps_listed_entries_and_their_pixels_epsilon() {
-        // Three appended, room for two: the third stayed inline and is not listed.
-        let mut list = vec![0u8; HEADER_BYTES + 2 * ENTRY_BYTES];
+        // Three appended, room for two: the third stayed inline and is not listed. The copy
+        // is padded past the room, as the staging buffer's alignment pads it.
+        let mut list = vec![0u8; HEADER_BYTES + 3 * ENTRY_BYTES + 8];
         list[..4].copy_from_slice(&3u32.to_ne_bytes());
         for (i, pixel) in [(5u32, 7u32), (9, 1)].into_iter().enumerate() {
             let at = HEADER_BYTES + i * ENTRY_BYTES + 32;
             list[at..at + 4].copy_from_slice(&(pixel.0 | pixel.1 << 16).to_ne_bytes());
         }
-        let snapshot = Snapshot::new(&list, |[x, y]| x * 100 + y);
+        let snapshot = Snapshot::new(&list, 2, |[x, y]| x * 100 + y);
         assert_eq!((snapshot.appended, snapshot.capacity), (3, 2));
         assert_eq!(snapshot.entries.len(), 2 * ENTRY_BYTES);
         assert_eq!(snapshot.epsilon, [507, 901]);
