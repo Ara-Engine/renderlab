@@ -2759,8 +2759,10 @@ fn rl_receiver_store(p:vec2<i32>,trace:PrimaryTrace,receiver:Receiver) {{
 /// The local-light visibility pass's per-pixel helper (`light_vis_pass`, `rl_lvis_pixel`) built
 /// from the material record's receiver layers instead of decoding the hit: the receiver, the
 /// world point and the pixel are all the pass reads (`light_sample_untinted`,
-/// `light_visibility`). Pixels whose word 1 holds the miss sentinel are skipped. None when the
-/// module has no `rl_lvis_pixel` (the pass is off).
+/// `light_visibility`). Pixels whose word 1 holds the miss sentinel are skipped. Word 1's slot
+/// is the receiver's batch (`primary_receiver`: `primary_placements[placement]&0x1fffffff`), so
+/// it indexes the materials directly. None when the module has no `rl_lvis_pixel` (the pass is
+/// off).
 pub(crate) fn light_vis_from_record(mut source: String) -> Option<String> {
     let start = source.find("fn rl_lvis_pixel(")?;
     const END: &str = "    rl_lvis_store(surface_input);\n}\n";
@@ -2771,7 +2773,7 @@ pub(crate) fn light_vis_from_record(mut source: String) -> Option<String> {
          \x20   let pixel=vec2<i32>(id);\n\
          \x20   let b=textureLoad(rl_material,pixel,0,0);\n\
          \x20   if rl_mr_miss(b) { return; }\n\
-         \x20   let material=primary_materials[primary_placements[b.w&0x0fffffffu]&0x1fffffffu].value;\n\
+         \x20   let material=primary_materials[b.w&0x0fffffffu].value;\n\
          \x20   rl_lvis_store(rl_material_input(pixel,id,size,material));\n\
          }\n",
     );
