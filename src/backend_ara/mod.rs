@@ -15,6 +15,7 @@ pub mod hzb;
 pub mod image;
 pub mod kernel;
 pub mod light_cluster;
+pub mod light_vis;
 pub mod mesh;
 pub mod particle_billboard;
 pub mod particles;
