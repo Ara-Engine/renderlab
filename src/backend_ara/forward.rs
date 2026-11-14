@@ -402,6 +402,12 @@ pub struct ForwardImages {
     /// player with frames in flight never waits on them; with diag the frame waits for them, as
     /// for any readback.
     pub deferred_reflections: Option<[Vec<u8>; 2]>,
+    /// With `RENDERLAB_MATERIAL_DEBUG=receiver` only (the material record's cases): words 1 and
+    /// 2 of the material record (its layers 0 and 1, rgba32uint, 16 bytes a pixel each), read
+    /// back after the frame,
+    /// so a case can check pixels shading never visits (the miss sentinel on fast-cleared
+    /// tiles) and compare producers.
+    pub material_receiver: Option<[Vec<u8>; 2]>,
 }
 
 /// The post `Settings` record at this output height for the post frame with this
@@ -548,9 +554,10 @@ struct Deferred {
     scene: [u32; 4],
     /// That rectangle widened to whole trace tiles, as the region record holds it.
     region_rect: [u32; 4],
-    /// RENDERLAB_MATERIAL_PASS: the material record (program.rs MATERIAL_RECORD_BINDINGS), a
-    /// words 0, 1 and 2 as rgba32uint images of the frame's size; None while the pass is off.
-    material: Option<[Texture; 3]>,
+    /// RENDERLAB_MATERIAL_PASS: the material record (program.rs `MATERIAL_RECORD_BINDING`), one
+    /// rgba32uint 2D array of the frame's size: the receiver's two layers, and word 0's third
+    /// unless the trace writes the receiver alone (`tracetail`); None while the pass is off.
+    material: Option<Texture>,
     epsilon: Texture,
     frame: StorageBuffer,
     region: StorageBuffer,
@@ -853,15 +860,7 @@ fn provided<'a>(
         (0, 13) | (0, 7) => deferred.map(|d| &d.hit),
         (0, 20) | (0, 21) => deferred.map(|d| &d.tiles),
         (0, 23) => deferred.map(|d| &d.epsilon),
-        (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[0] => {
-            deferred?.material.as_ref().map(|m| &m[0])
-        }
-        (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[1] => {
-            deferred?.material.as_ref().map(|m| &m[1])
-        }
-        (0, b) if b == crate::program::MATERIAL_RECORD_BINDINGS[2] => {
-            deferred?.material.as_ref().map(|m| &m[2])
-        }
+        (0, b) if b == crate::program::MATERIAL_RECORD_BINDING => deferred?.material.as_ref(),
         (0, 3) | (0, 16) => traced.map(|t| &t.world),
         (0, 4) | (0, 17) => traced.map(|t| &t.normal),
         (0, 5) | (0, 6) => traced.map(|t| &t.visibility),
@@ -1425,6 +1424,22 @@ fn log_material_slots(readers: &[bool]) {
 /// Composition would make the port's shading read its binding 68, which nothing here allocates
 /// or writes, so the port refuses the switch at `Engine::new` and at every frame.
 pub(crate) const GI_PASS_REFUSAL: &str = "RENDERLAB_GI_PASS=1: the GI lookup pass is not wired on the ara-gpu port yet (its binding 68 has no target or dispatch here); unset it";
+/// RENDERLAB_LIGHT_VIS_PASS=1 (src/light_vis_pass.rs): the local-light visibility pass is wired
+/// for wgpu only. Composition would make the port's shading read its binding 73, which nothing
+/// here allocates or writes, so the port refuses the switch as it does the GI pass's.
+pub(crate) const LIGHT_VIS_PASS_REFUSAL: &str = "RENDERLAB_LIGHT_VIS_PASS=1: the local-light visibility pass is not wired on the ara-gpu port yet (its binding 73 has no buffer or dispatch here); unset it";
+/// The first pass switch the port refuses (`GI_PASS_REFUSAL`, `LIGHT_VIS_PASS_REFUSAL`), checked
+/// at `Engine::new` and at every frame.
+pub(crate) fn port_refusal() -> Option<&'static str> {
+    use crate::renderer::primary_ray_gpu::{gi_receiver_pass, light_vis_pass};
+    if gi_receiver_pass::on() {
+        Some(GI_PASS_REFUSAL)
+    } else if light_vis_pass::on() {
+        Some(LIGHT_VIS_PASS_REFUSAL)
+    } else {
+        None
+    }
+}
 /// One frame after `history`, over what the sequence keeps on the GPU; returns its
 /// images and what it hands to the next frame.
 fn frame(
@@ -1435,7 +1450,9 @@ fn frame(
     cache: &ShaderCache,
     scene: &ForwardScene<'_>,
 ) -> Result<(ForwardImages, Carried)> {
-    ensure!(!crate::renderer::primary_ray_gpu::gi_receiver_pass::on(), GI_PASS_REFUSAL);
+    if let Some(refusal) = port_refusal() {
+        bail!(refusal);
+    }
     let Kept {
         gi,
         tr1,
@@ -1664,8 +1681,11 @@ fn frame(
     // RENDERLAB_MATERIAL_PASS (program.rs material_pass_on): programs with the record mapping
     // shade from the material record, which a material pass writes first.
     let material_on = deferred_path && crate::program::material_pass_on();
+    // RENDERLAB_MATERIAL_PROBE=tracetail: the trace kernels write the receiver words; the
+    // material pass's writer and reader do not run (the receiver check's reader excepted).
+    let trace_tail = material_on && crate::program::material_trace_tail();
     let reading = |source: &str, list: bool| -> Result<Option<shader::Program>> {
-        if material_on {
+        if material_on && (!trace_tail || crate::program::material_receiver_check()) {
             primary_shade::hardware_soft_material(source, list, crate::program::MaterialRole::Read)
         } else {
             Ok(None)
@@ -1693,7 +1713,7 @@ fn frame(
     };
     // The material pass: per slot (one for a single-program frame), the program's record
     // writer, or None where the program keeps its single kernel.
-    let material_programs = if material_on {
+    let material_programs = if material_on && !trace_tail {
         let list = sources.len() > 1;
         let frame_sources: &[&str] = if list { &sources } else { &sources[..1] };
         frame_sources
@@ -1705,7 +1725,7 @@ fn frame(
     } else {
         Vec::new()
     };
-    if material_on {
+    if material_on && !trace_tail {
         let list = sources.len() > 1;
         let frame_sources: &[&str] = if list { &sources } else { &sources[..1] };
         let readers = frame_sources
@@ -2808,11 +2828,12 @@ fn frame(
             scene: rect,
             region_rect: region,
             material: if material_on {
-                Some([
-                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
-                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
-                    Texture::new(gpu, size, Format::Rgba32Uint, true, false)?,
-                ])
+                let layers = if crate::program::material_trace_tail() {
+                    crate::program::MATERIAL_RECEIVER_LAYERS
+                } else {
+                    crate::program::MATERIAL_RECORD_LAYERS
+                };
+                Some(Texture::array(gpu, size, layers, Format::Rgba32Uint, true, false)?)
             } else {
                 None
             },
@@ -4396,6 +4417,22 @@ fn frame(
         )?),
         None => None,
     };
+    // The material record's words 1 and 2, for its cases (RENDERLAB_MATERIAL_DEBUG=receiver).
+    let material_read = match deferred.as_ref().and_then(|d| d.material.as_ref()) {
+        Some(record) if crate::program::material_receiver_check() => {
+            let layer = u64::from(record.size[0]) * u64::from(record.size[1]) * 16;
+            let layers = if crate::program::material_trace_tail() {
+                crate::program::MATERIAL_RECEIVER_LAYERS
+            } else {
+                crate::program::MATERIAL_RECORD_LAYERS
+            };
+            Some((
+                transfer::readback(gpu, &mut graph, &mut rec, record.image, layer * u64::from(layers))?,
+                layer as usize,
+            ))
+        }
+        _ => None,
+    };
     // Only identity tests read the deferred outputs back: both exist with
     // RENDERLAB_RL_DEFERRED=diag (the untraced output is declared only then).
     let deferred_read = match (inputs.get(&key(0, 62)), inputs.get(&key(0, 63))) {
@@ -4838,7 +4875,8 @@ fn frame(
             || raw_read.is_some()
             || history_read.is_some()
             || probe_read.is_some()
-            || deferred_read.is_some();
+            || deferred_read.is_some()
+            || material_read.is_some();
         gpu.begin_deferred_completion_on_current_queue()?;
         let submission = gpu.submit(rec.finish(), &[]);
         in_flight.push_back(gpu.end_deferred_completion()?);
@@ -4884,6 +4922,14 @@ fn frame(
             .map(|bytes| bytemuck::pod_collect_to_vec(&bytes)),
         deferred_reflections: match deferred_read {
             Some([a, b]) => Some([gpu.read(a)?, gpu.read(b)?]),
+            None => None,
+        },
+        // The array's layers in order: the receiver's (words 1 and 2) first.
+        material_receiver: match material_read {
+            Some((buffer, layer)) => {
+                let bytes = gpu.read(buffer)?;
+                Some([bytes[..layer].to_vec(), bytes[layer..2 * layer].to_vec()])
+            }
             None => None,
         },
         reconstruction_history: history_read
@@ -4967,7 +5013,7 @@ fn frame(
             buffer.retire(gpu)?;
         }
         post_images.extend([deferred.hit, deferred.tiles, deferred.epsilon]);
-        post_images.extend(deferred.material.into_iter().flatten());
+        post_images.extend(deferred.material);
     }
     if let Some(traced) = traced {
         traced.scene.retire(gpu)?;

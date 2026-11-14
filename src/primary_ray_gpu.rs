@@ -692,6 +692,8 @@ pub(super) struct ShadeSwitches {
     /// The GI receiver pass's prepared SH (gi_receiver_pass.rs, RENDERLAB_GI_PASS).
     pub gi: bool,
     pub lvis: bool,
+    /// Sampled material record; writers use their separate storage layout.
+    pub material: bool,
 }
 impl ShadeSwitches {
     fn of(device: &wgpu::Device) -> Self {
@@ -702,6 +704,7 @@ impl ShadeSwitches {
             diag: crate::program::rl_deferred_diag(),
             gi: gi_receiver_pass::on(),
             lvis: light_vis_pass::on(),
+            material: crate::program::material_pass_on(),
         }
     }
 }
@@ -771,6 +774,9 @@ pub(super) fn shade_layout_entries(
         if switches.diag {
             entries.push(image(63, F::Rgba16Float));
         }
+    }
+    if switches.material {
+        entries.extend(material_pass_gpu::entries(false));
     }
     entries
 }
@@ -850,7 +856,7 @@ pub(super) struct Targets {
     /// flag is set.
     pub hit: Depth,
     /// Material record textures, retained and retired with the hit image.
-    pub material: Option<[Depth; crate::program::MATERIAL_RECORD_BINDINGS.len()]>,
+    pub material: Option<Depth>,
     /// Exact hard-receiver epsilon, computed from the returned hit vertices.
     pub epsilon: Depth,
     /// One flag per `TRACE_TILE` pixels: nonzero when a camera ray in the tile hit.
@@ -1298,14 +1304,15 @@ impl PrimaryState {
                 ),
             ],
         );
-        let shade_entries = [scene(2), texture(6, uint)].map(|visibility| {
-            shade_layout_entries(visibility, ShadeSwitches::of(device))
+        let switches = ShadeSwitches::of(device);
+        let material_write_entries = [scene(2), texture(6, uint)].map(|visibility| {
+            shade_layout_entries(
+                visibility,
+                ShadeSwitches { material: false, ..switches },
+            )
         });
-        let material_write_entries = shade_entries.clone();
-        let shade_entries = shade_entries.map(|mut entries| {
-            if crate::program::material_pass_on() { entries.extend(material_pass_gpu::entries(false)); }
-            entries
-        });
+        let shade_entries = [scene(2), texture(6, uint)]
+            .map(|visibility| shade_layout_entries(visibility, switches));
         let shade_bindings = shade_entries
             .each_ref()
             .map(|e| group("primary shading", e));
@@ -2379,6 +2386,7 @@ impl Renderer {
                 );
                 let bytes = u64::from(size.width)
                     * u64::from(size.height)
+                    * u64::from(size.depth_or_array_layers)
                     * u64::from(format.block_copy_size(None).unwrap());
                 Depth {
                     texture,
@@ -2491,7 +2499,8 @@ impl Renderer {
                 }
             };
             let next = Targets {
-                material: crate::program::material_pass_on().then(|| crate::program::MATERIAL_RECORD_BINDINGS.map(|_| target("material record", size, wgpu::TextureFormat::Rgba32Uint))),
+                // One array: the receiver's layers (words 1 and 2), then word 0.
+                material: crate::program::material_pass_on().then(|| target("material record", wgpu::Extent3d { depth_or_array_layers: crate::program::MATERIAL_RECORD_LAYERS, ..size }, wgpu::TextureFormat::Rgba32Uint)),
                 light_vis: light_vis_pass::on().then(|| Buffer::new(
                     self, "local light visibility",
                     (u64::from(size.width) * u64::from(size.height) * light_vis_pass::PIXEL_BYTES)
@@ -2659,8 +2668,8 @@ impl Renderer {
                         entries.push((63, R::TextureView(&untraced.view)));
                     }
                 }
-                if let Some(images) = &t.material {
-                    entries.extend(crate::program::MATERIAL_RECORD_BINDINGS.into_iter().zip(images).map(|(b,t)| (b,R::TextureView(&t.view))));
+                if let Some(record) = &t.material {
+                    entries.push((crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&record.view)));
                 }
                 // MP1: the same group plus the slot table and tile lists.
                 let list = lists.map(|l| {
