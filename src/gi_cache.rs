@@ -21,6 +21,8 @@ mod bounded_refill;
 mod priority;
 #[path = "gi_refill_feedback.rs"]
 mod refill_feedback;
+#[path = "gi_queue_probe.rs"]
+mod queue_probe;
 
 pub(crate) const HEADER_WORDS: u64 = 64;
 /// Keep the original admission policy: packing storage must not change the chosen
@@ -1567,6 +1569,7 @@ pub(super) struct GiState {
     refill_feedback: Option<refill_feedback::State>,
     priority_compact: bool,
     priority_hold: bool,
+    queue_probe: Option<queue_probe::State>,
     groups: Option<Groups>,
     retired: Vec<(u64, Retired)>,
     stats: IndirectStats,
@@ -1619,6 +1622,7 @@ impl GiState {
             refill_feedback: None,
             priority_compact: false,
             priority_hold: false,
+            queue_probe: None,
             groups: None,
             retired: vec![],
             stats: IndirectStats::default(),
@@ -1959,7 +1963,7 @@ impl Renderer {
                     storage | wgpu::BufferUsages::COPY_SRC,
                 ),
                 draws: buffer("indirect cache draw table", draws_bytes, storage),
-                raw: buffer("indirect cache filter sources", raw_bytes, storage),
+                raw: buffer("indirect cache filter sources", raw_bytes, storage | if queue_probe::enabled() {wgpu::BufferUsages::COPY_SRC} else {wgpu::BufferUsages::empty()}),
                 slots,
                 cold_words,
                 directions,
@@ -2316,6 +2320,21 @@ impl Renderer {
             evicted_recent: w[45],
             full_pixel: w[46],
         }))
+    }
+    /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires
+    /// RENDERLAB_GI_QUEUE_DIAG before allocation. Reads roughly table+raw+queue bytes.
+    pub fn begin_indirect_queue_probe(&mut self) -> Result<(),Error> {
+        if !queue_probe::enabled() {return Err(Error::InvalidInput("GI queue diagnostic is unset"));}
+        let r=self.gi.resources.as_ref().ok_or(Error::InvalidInput("GI queue diagnostic needs a cache"))?;
+        if let Some(probe)=self.gi.queue_probe.as_mut() {probe.arm();}
+        else {self.gi.queue_probe=Some(queue_probe::State::new(&self.device,r));}
+        Ok(())
+    }
+    /// First visible, refresh visible, background, ineligible, duplicates, queue entries,
+    /// and visible first-fill cells with filtered neighbour data. Zero raw bounce means
+    /// never gathered; the nonzero negative-zero sentinel means gathered with zero light.
+    pub fn indirect_queue_probe(&mut self) -> Result<[u32;7],Error> {
+        self.gi.queue_probe.as_ref().ok_or(Error::InvalidInput("GI queue probe was not armed"))?.read(&self.device)
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
     pub fn indirect_table(&mut self) -> Result<Option<Vec<u32>>, Error> {
@@ -3456,6 +3475,9 @@ impl GiState {
                 0,
                 traced.then_some(plan.groups),
             );
+        }
+        if let Some(probe)=self.queue_probe.as_mut() {
+            probe.encode(encoder,r,self.planner.tick_queues[0]);
         }
         // Bounce gathers (G2) read last frame's outgoing radiance and may request hit cells
         // for the claim rounds that follow.

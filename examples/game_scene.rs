@@ -1132,6 +1132,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let gi_resets: Vec<u32> = std::env::var("RENDERLAB_SCENE_GI_RESET_FRAMES").ok()
         .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>())
         .transpose()?.unwrap_or_default();
+    let mut queue_diagnostic=std::env::var_os("RENDERLAB_GI_QUEUE_DIAG").map(std::fs::File::create).transpose()?;
+    let queue_frames:Vec<u32>=std::env::var("RENDERLAB_SCENE_QUEUE_FRAMES").unwrap_or_else(|_|"443,462,512,641".into())
+        .split(',').map(str::parse::<u32>).collect::<Result<_,_>>()?;
     let mut counters = std::env::var_os("RENDERLAB_SCENE_COUNTERS")
         .map(std::fs::File::create)
         .transpose()?;
@@ -1255,7 +1258,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let camera = if args.views == "b" { camera_b } else { camera };
         let begin = Instant::now();
         engine.tick(1.0 / FPS)?;
+        let queue_sample=queue_diagnostic.is_some() && queue_frames.contains(&frame);
+        if queue_sample {engine.renderer_mut().begin_indirect_queue_probe()?;}
         let report = engine.render_view(view, &camera)?;
+        if queue_sample {
+            use std::io::Write;
+            let q=engine.renderer_mut().indirect_queue_probe()?;
+            writeln!(queue_diagnostic.as_mut().unwrap(),"{}",serde_json::json!({"frame":frame,"phase":"incoming_after_probe","visible_never_gathered":q[0],"visible_with_raw_data":q[1],"off_screen":q[2],"ineligible":q[3],"duplicates":q[4],"entries":q[5],"visible_filtered_only":q[6]}))?;
+        }
         // `--views ab`: the second view renders in the same tick, after the first.
         let second_hash = match second {
             Some(second) => {
