@@ -136,6 +136,15 @@ fn specular_incident(input:SurfaceInput)->vec4<f32> { return rl_specular; }
 // A unit direction as an octahedral snorm16x2 word, and back: reflection hit records' word 10
 // (docs/design-reflection-pass.md), shared by rl_trace and the Mac's reflection_hits. The round
 // trip is within the snorm16 step, about 1e-4 rad.
+// The nearest binary16 value of each component (ties to even), as f32, for the reflection
+// pass's 16-bit stores (R, the deferred reflectance): the store's own conversion is then exact,
+// whatever rounding the device applies (a truncating one left the pass a code darker than the
+// inline f32 sum). Exact over binary16's normal range; values below it keep the device's rounding.
+fn rl_f16_nearest(v:vec4<f32>)->vec4<f32> {
+    let bits=bitcast<vec4<u32>>(v);
+    let even=(bits>>vec4<u32>(13u))&vec4<u32>(1u);
+    return bitcast<vec4<f32>>((bits+vec4<u32>(0xfffu)+even)&vec4<u32>(0xffffe000u));
+}
 fn rl_oct_encode(d:vec3<f32>)->u32 {
     let p=d.xy/(abs(d.x)+abs(d.y)+abs(d.z));
     let sign=select(vec2<f32>(-1.0),vec2<f32>(1.0),p>=vec2<f32>(0.0));
