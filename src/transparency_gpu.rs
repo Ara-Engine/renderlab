@@ -351,6 +351,7 @@ struct GlassPipelines {
     /// By tangent stream.
     pipelines: [Owned<wgpu::RenderPipeline>; 2],
     lobe: [Owned<wgpu::RenderPipeline>; 2],
+    lobe_query: [Owned<wgpu::RenderPipeline>; 2],
     /// Films (`crate::program::declares_films`): `film_source`'s module blended premultiplied
     /// over the target, by tangent stream; None for programs that do not declare films.
     films: Option<[Owned<wgpu::RenderPipeline>; 2]>,
@@ -869,6 +870,7 @@ impl Renderer {
                 entry(37, FRAGMENT, uniform(true, 16)),
                 entry(38, FRAGMENT, texture(UNFILTERED)),
                 entry(55, FRAGMENT, texture(UNFILTERED)),
+                entry(56, FRAGMENT, texture(UNFILTERED)),
             ];
             if rt {
                 e.push(entry(
@@ -1306,14 +1308,18 @@ impl Renderer {
             &self.source
         };
         let source = glass_source(head, rt, &slot.source, slot.layout.is_some());
+        // The query may conservatively count a lobe hidden by a later film. Its
+        // zero result is exact; the original lobe writes retain last-surface ordering.
+        let query_start = source.rfind("@fragment fn fs_tp_lobe(").unwrap();
+        let query = source[query_start..].replace("fn fs_tp_lobe(", "fn fs_tp_lobe_query(").replace(
+            "if lobe.weight<=0.0 {discard;}",
+            "if lobe.weight<=0.0 {discard;}\nif tp.forward.w>=0.0 && sqrt(clamp(unpack2x16float(pack2x16float(vec2<f32>(lobe.alpha,0.0))).x,0.0,1.0))>=tp.forward.w {discard;}",
+        );
+        let source = format!("{source}\n{query}");
         let source = if rt && slot.traits.declares_reflection {
-            let source = source.replace(
-                "if lobe.weight<=0.0 {discard;}",
-                "if lobe.weight<=0.0 {discard;}\nif tp.forward.w>=0.0 && sqrt(clamp(unpack2x16float(pack2x16float(vec2<f32>(lobe.alpha,0.0))).x,0.0,1.0))>=tp.forward.w {discard;}",
-            );
             let source = replace_function(&source, "specular_incident",
-                "fn specular_incident(input:SurfaceInput)->vec4<f32> { if tp.misc.w==0.0 || textureLoad(tp_live_lobe,vec2<i32>(input.pixel),0).w==0.0 {return vec4<f32>(0.0);} return textureLoad(tp_reflected,vec2<i32>(input.pixel),0); }");
-            format!("{source}\n@group(0) @binding(55) var tp_live_lobe:texture_2d<f32>;\n")
+                "fn specular_incident(input:SurfaceInput)->vec4<f32> { let pixel=vec2<i32>(input.pixel); if tp.misc.w==0.0 || textureLoad(tp_live_lobe,pixel,0).w==0.0 {return vec4<f32>(0.0);} if tp.forward.w>=0.0 && sqrt(clamp(textureLoad(tp_live_normal,pixel,0).w,0.0,1.0))>=tp.forward.w {return vec4<f32>(0.0);} return textureLoad(tp_reflected,pixel,0); }");
+            format!("{source}\n@group(0) @binding(55) var tp_live_lobe:texture_2d<f32>;\n@group(0) @binding(56) var tp_live_normal:texture_2d<f32>;\n")
         } else { source };
         #[cfg(test)]
         let source = {
@@ -1385,12 +1391,12 @@ impl Renderer {
         );
         let gpu = self.transparency.gpu.as_ref().unwrap();
         let layout = &gpu.glass_layouts[usize::from(rt)];
-        let make_with = |module: &wgpu::ShaderModule, tangent: bool, lobe: bool, blend: bool| {
+        let make_with = |module: &wgpu::ShaderModule, tangent: bool, lobe: bool, blend: bool, query: bool| {
             let label = format!(
                 "TP1 transparent program={} rt={rt} key={key:02x?} tangent={tangent} lobe={lobe} film={blend}",
                 slot.label,
             );
-            let targets = if lobe {
+            let mut targets = if lobe {
                 vec![
                     Some(wgpu::TextureFormat::Rgba32Float.into()),
                     Some(wgpu::TextureFormat::Rgba16Float.into()),
@@ -1403,6 +1409,9 @@ impl Renderer {
                     write_mask: wgpu::ColorWrites::ALL,
                 })]
             };
+            if query {
+                for target in targets.iter_mut().flatten() { target.write_mask = wgpu::ColorWrites::empty(); }
+            }
             self.ledger.own(
                 self.device
                     .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1432,7 +1441,7 @@ impl Renderer {
                         },
                         fragment: Some(wgpu::FragmentState {
                             module,
-                            entry_point: Some(if lobe { "fs_tp_lobe" } else { "fs_transparent" }),
+                            entry_point: Some(if query { "fs_tp_lobe_query" } else if lobe { "fs_tp_lobe" } else { "fs_transparent" }),
                             compilation_options: Default::default(),
                             targets: &targets,
                         }),
@@ -1451,9 +1460,10 @@ impl Renderer {
                 ResourceKind::RenderPipeline,
             )
         };
-        let make = |tangent: bool, lobe: bool| make_with(&module, tangent, lobe, false);
+        let make = |tangent: bool, lobe: bool| make_with(&module, tangent, lobe, false, false);
         let pipelines = [false, true].map(|t| make(t, false));
         let lobe = [false, true].map(|t| make(t, true));
+        let lobe_query = [false, true].map(|t| make_with(&module, t, true, false, true));
         let films = crate::program::declares_films(&slot.source).then(|| {
             let label = format!("TP1 films {}", slot.label);
             let films = self.ledger.own(
@@ -1464,7 +1474,7 @@ impl Renderer {
                     }),
                 ResourceKind::ShaderModule,
             );
-            [false, true].map(|t| make_with(&films, t, false, true))
+            [false, true].map(|t| make_with(&films, t, false, true, false))
         });
         if let Some(error) = scopes.finish() {
             return Err(match error {
@@ -1480,6 +1490,7 @@ impl Renderer {
             key,
             pipelines,
             lobe,
+            lobe_query,
             films,
             pane: None,
         })
@@ -2420,6 +2431,12 @@ impl Renderer {
                         .map_or(&targets.color.view, |r| &r.position.view)),
             },
             wgpu::BindGroupEntry {
+                binding: 56,
+                resource: wgpu::BindingResource::TextureView(
+                    self.view.transparency_reflections.as_ref().filter(|_| reflect)
+                        .map_or(&targets.color.view, |r| &r.normal.view)),
+            },
+            wgpu::BindGroupEntry {
                 binding: 31,
                 resource: wgpu::BindingResource::TextureView(&targets.color.view),
             },
@@ -2473,8 +2490,9 @@ impl Renderer {
         });
         let lobe_group = (!transparent.is_empty()).then(|| {
             let mut entries = glass_entries.clone();
-            entries.iter_mut().find(|e| e.binding == 55).unwrap().resource =
-                wgpu::BindingResource::TextureView(&targets.color.view);
+            for entry in entries.iter_mut().filter(|e| e.binding == 55 || e.binding == 56) {
+                entry.resource = wgpu::BindingResource::TextureView(&targets.color.view);
+            }
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TP lobe inputs"),
                 layout: &gpu.glass_bindings[usize::from(rt)], entries: &entries,
@@ -2834,7 +2852,8 @@ impl Renderer {
                         });
                         m.counts.nonreflective_lobe_runs += u64::from(!reflective);
                     }
-                    {
+                    for query in 0..(if bounded { 2 } else { 1 }) {
+                        let query = query == 1;
                         let attachments = [
                             &reflection.position.view,
                             &reflection.normal.view,
@@ -2846,7 +2865,7 @@ impl Renderer {
                                 depth_slice: None,
                                 resolve_target: None,
                                 ops: wgpu::Operations {
-                                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                                    load: if query { wgpu::LoadOp::Load } else { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) },
                                     store: wgpu::StoreOp::Store,
                                 },
                             })
@@ -2854,11 +2873,11 @@ impl Renderer {
                         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                             label: Some("TP2 glass reflection lobe"),
                             color_attachments: &attachments,
-                            occlusion_query_set: bounded.then_some(&gpu.lobe_queries),
+                            occlusion_query_set: query.then_some(&gpu.lobe_queries),
                             ..Default::default()
                         });
                         pass.set_bind_group(3, self.lighting.bind(), &[]);
-                        if bounded { pass.begin_occlusion_query(*first as u32); }
+                        if query { pass.begin_occlusion_query(*first as u32); }
                         for &i in &run {
                             let draw = transparent[i];
                             let program = draw.material.map_or(default_program, |m| m.program.id());
@@ -2868,7 +2887,8 @@ impl Renderer {
                                 .iter()
                                 .find(|g| g.program == program)
                                 .unwrap();
-                            pass.set_pipeline(&set.lobe[usize::from(draw.mesh.tangent.is_some())]);
+                            let pipelines = if query { &set.lobe_query } else { &set.lobe };
+                            pass.set_pipeline(&pipelines[usize::from(draw.mesh.tangent.is_some())]);
                             pass.set_bind_group(
                                 0,
                                 lobe_group.as_ref().unwrap(),
@@ -2897,7 +2917,7 @@ impl Renderer {
                                 0..draw.instances.state.ids.len() as u32,
                             );
                         }
-                        if bounded { pass.end_occlusion_query(); }
+                        if query { pass.end_occlusion_query(); }
                     }
                     if bounded {
                         encoder.resolve_query_set(&gpu.lobe_queries, *first as u32..*first as u32+1, &gpu.lobe_counts, 0);
