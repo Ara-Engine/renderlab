@@ -1247,6 +1247,8 @@ impl Renderer {
             encoder,
             self.frames + 1,
         );
+        // Close fog's timing scope before a possible split-submit CPU wait.
+        mark(encoder, "after_fog");
     }
 
     fn encode_fog_volume(
