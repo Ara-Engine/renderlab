@@ -17,6 +17,9 @@ pub(super) mod film_accumulation;
 use film_accumulation::{FilmLayouts, FilmState};
 #[path = "shadow_visibility_filter.rs"]
 mod shadow_visibility_filter;
+#[cfg(test)]
+#[path = "default_module_text_tests.rs"]
+mod default_module_text_tests;
 #[path = "sun_vis_pass.rs"]
 pub(super) mod sun_vis_pass;
 #[path = "temporal_reconstruction.rs"]
