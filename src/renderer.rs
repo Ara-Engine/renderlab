@@ -3,14 +3,12 @@
 pub(crate) mod atmosphere_gpu;
 #[path = "environment_gpu.rs"]
 mod environment_gpu;
-#[path = "fog_cull.rs"]
-pub(crate) mod fog_cull;
 #[path = "light_cluster_gpu.rs"]
 mod light_cluster_gpu;
-#[path = "lighting_gpu.rs"]
-mod lighting_gpu;
 #[path = "pipeline_prewarm.rs"]
 mod pipeline_prewarm;
+#[path = "lighting_gpu.rs"]
+mod lighting_gpu;
 // DC1: one storage binding beside lighting; no separate render pass.
 #[path = "decal_gpu.rs"]
 mod decal_gpu;
@@ -157,11 +155,7 @@ pub(crate) fn test_record_capture(kind: &str, bytes: &[u8]) {
 fn submit_log(line: impl FnOnce() -> String) {
     static ON: OnceLock<Option<String>> = OnceLock::new();
     let Some(target) = ON
-        .get_or_init(|| {
-            std::env::var("RENDERLAB_SUBMIT_LOG")
-                .ok()
-                .filter(|v| !v.is_empty())
-        })
+        .get_or_init(|| std::env::var("RENDERLAB_SUBMIT_LOG").ok().filter(|v| !v.is_empty()))
         .as_deref()
     else {
         return;
@@ -1015,7 +1009,7 @@ impl Renderer {
                 )
             });
         let primary = (traced || raster_primary)
-            .then(|| PrimaryState::new(&device, &ledger, &lighting.bindings, hardware.is_some() && fog_cull::enabled()));
+            .then(|| PrimaryState::new(&device, &ledger, &lighting.bindings));
         let enabled = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let timing = enabled.then(|| Timing {
             queries: ledger.own(
@@ -3497,22 +3491,6 @@ impl Renderer {
                 t.mark(encoder, name);
             }
         };
-        if let Some(depth) = self
-            .view
-            .primary
-            .as_ref()
-            .and_then(|p| p.targets.as_ref())
-            .and_then(|t| t.fog_depth.as_ref())
-        {
-            mark(&mut encoder, "fog_depth");
-            depth.prepare(
-                &self.queue,
-                &mut encoder,
-                camera.view().inverse().w_axis.truncate(),
-            );
-            self.uploads.view_settings += 32;
-            self.uploads.write_calls += 1;
-        }
         mark(&mut encoder, "skinning");
         if self.tick_work {
             self.encode_skinning(&mut encoder, draws, hardware_build, &mut mark);
@@ -3653,8 +3631,6 @@ impl Renderer {
                     }
                 }
                 self.encode_material_tail_check(&mut encoder);
-                // RT fog culling runs after current visibility; FOG_CULL=0 keeps the early path.
-                self.encode_fog_culled(&mut encoder, &mut mark);
                 if split {
                     // RENDERLAB_PASS_LOG_DETAIL: from the end of the early commands to the
                     // first late pass, the GPU waits for the CPU's GI and post preparation.
