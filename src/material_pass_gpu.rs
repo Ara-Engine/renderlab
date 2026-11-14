@@ -20,16 +20,25 @@ fn composition(
     program::material_variant(program::with_reflection_history(full), source, role)
 }
 
-pub(super) fn entries(
-    write: bool,
-) -> [wgpu::BindGroupLayoutEntry; program::MATERIAL_RECORD_BINDINGS.len()] {
-    program::MATERIAL_RECORD_BINDINGS.map(|binding| {
+/// The record's layout entry (program.rs `MATERIAL_RECORD_BINDING`): one 2D array, written by
+/// the material pass, read by record-reading shading.
+pub(super) fn entries(write: bool) -> [wgpu::BindGroupLayoutEntry; 1] {
+    [entry(
+        program::MATERIAL_RECORD_BINDING,
         if write {
-            image(binding, wgpu::TextureFormat::Rgba32Uint)
+            wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: wgpu::TextureFormat::Rgba32Uint,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+            }
         } else {
-            texture(binding, wgpu::TextureSampleType::Uint)
-        }
-    })
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            }
+        },
+    )]
 }
 
 #[derive(Clone)]
