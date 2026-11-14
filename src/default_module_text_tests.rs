@@ -5,7 +5,7 @@
 //!     RENDERLAB_MODULE_DUMP=<dir> cargo test --lib default_module_text -- --ignored --nocapture
 //!
 //! writes `<path>-<kernel>.wgsl` per kernel and `summary.txt` (bytes, SHA-256 of the text, naga
-//! function count, SPIR-V words per entry point).
+//! function count, SPIR-V words and their SHA-256 per entry point).
 use super::*;
 use sha2::{Digest, Sha256};
 
@@ -61,7 +61,13 @@ fn default_module_text() {
                     }),
                 )
                 .unwrap();
-                words.push(format!("{}={}", entry.name, binary.len()));
+                let bytes: Vec<u8> = binary.iter().flat_map(|w| w.to_le_bytes()).collect();
+                words.push(format!(
+                    "{}={}:{:x}",
+                    entry.name,
+                    binary.len(),
+                    Sha256::digest(&bytes)
+                ));
             }
             let line = format!(
                 "{path}-{kernel}: bytes={} sha256={:x} functions={} spirv_words {}\n",
