@@ -1408,7 +1408,7 @@ impl Renderer {
             .transpose()
             .map_err(rejected)?;
         // Traced modules are part of the same transaction while they are selected.
-        let primary_sources = self
+        let mut primary_sources = self
             .pipeline
             .primary
             .as_ref()
@@ -1423,6 +1423,11 @@ impl Renderer {
             })
             .transpose()
             .map_err(rejected)?;
+        if let Some((_, heads)) = &mut primary_sources {
+            for head in heads {
+                primary_ray_gpu::gi_receiver_pass::default_head(head, &self.device);
+            }
+        }
         // A temporal kernel already in use recompiles in the transaction, so a rejected
         // prelude keeps it; otherwise the first temporal frame compiles it.
         let film_source = primary_sources

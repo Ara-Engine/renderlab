@@ -29,6 +29,20 @@ const RL_PASS:bool=true;
 // entry, no composite): it renders as the default without the pass, and near-cutoff bands stay out
 // of the room.
 const RL_COMPOSITE_FLOOR:f32=0.05;
+// Whether any of the receiver's `count` strata leaves above its geometric side, with the
+// directions inline's loop draws (reflections.wgsl: the frame's radial offset, the pixel's
+// rotation, the same VNDF sample and side test; no rays). A receiver with none is never listed:
+// inline returns it with w = 0 (its untraced estimate), and the composite, averaging no valid
+// stratum, would have added nothing for a traced share shading had already zeroed (the frame-18
+// pulse on low-strata glossy receivers).
+fn rl_any_stratum(count:u32,radial:f32,rotation:f32,basis:mat3x3<f32>,local_v:vec3<f32>,v:vec3<f32>,alpha:f32,side:vec3<f32>)->bool {
+    for(var k=0u;k<count;k+=1u) {
+        let u=vec2<f32>((f32(k)+radial)/f32(count),fract(rotation+f32(k)*0.6180339887));
+        let d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
+        if dot(d,side)>0.0 {return true;}
+    }
+    return false;
+}
 fn rl_composite_floor(traced:f32,count:u32)->bool {
     if traced>=RL_COMPOSITE_FLOOR {return true;}
     if RL_ROOM_HISTOGRAM {atomicAdd(&rl_room_stats[7],count);atomicAdd(&rl_room_stats[8],1u);}
