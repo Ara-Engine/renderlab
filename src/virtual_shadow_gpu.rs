@@ -70,6 +70,21 @@ fn sparse_switch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE").is_ok_and(|v| v.trim() == "1"))
 }
+/// Straight occluder outlines in the Disk lookup (shaders/virtual_shadow_disk.wgsl VD_EDGES):
+/// the page pass that stores each outline texel's edge line runs, its buffer (2 bytes a texel)
+/// exists and the lookup clips by it. `RENDERLAB_VD=VD_EDGES=true|false` overrides the default.
+const EDGES_DEFAULT: bool = false;
+fn edges_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("RENDERLAB_VD")
+            .iter()
+            .flat_map(|list| list.split(','))
+            .filter_map(|item| item.split_once('='))
+            .find(|(name, _)| name.trim() == "VD_EDGES")
+            .map_or(EDGES_DEFAULT, |(_, value)| matches!(value.trim(), "true" | "1"))
+    })
+}
 /// The pool's first size in pages and the per-frame raster budget in pages:
 /// `RENDERLAB_VSM_POOL=pages[,budget]` (measurement), defaults 384 and 64. Outpost requests
 /// about 300 pages, Glint 450, Showcase 550 (the pool grows to fit). A budget of 64 took the
@@ -419,6 +434,8 @@ struct Pipelines {
     allocate: Owned<wgpu::ComputePipeline>,
     clear_sparse: Owned<wgpu::ComputePipeline>,
     mip_sparse: Owned<wgpu::ComputePipeline>,
+    /// The Disk lookup's outline bits per drawn page (vsm_outline_dense, vsm_outline_sparse).
+    outline: [Owned<wgpu::ComputePipeline>; 2],
 }
 struct Layouts {
     mark: Owned<wgpu::BindGroupLayout>,
@@ -517,6 +534,8 @@ struct Resources {
     peel: Owned<wgpu::Buffer>,
     /// Max-mips of the top layer's heights per level (mips 1..log2(side)).
     mips: Owned<wgpu::Buffer>,
+    /// The Disk lookup's outline bits: 4 per texel, word = top word index / 8 (VD_EDGES).
+    outline: Owned<wgpu::Buffer>,
     /// N8k: per texel per level, the top and peel planes (8 bytes) and their planarity
     /// errors (4 bytes); 16 bytes each unless the lookup is `VirtualLookup::Map`.
     planes: Owned<wgpu::Buffer>,
@@ -879,6 +898,10 @@ pub(super) fn disk_source() -> String {
         variant
             .as_deref()
             .unwrap_or(include_str!("../shaders/virtual_shadow_disk.wgsl"))
+    )
+    .replace(
+        "override VD_EDGES:bool=false;",
+        &format!("override VD_EDGES:bool={};", edges_on()),
     );
     for (name, value) in std::env::var("RENDERLAB_VD")
         .iter()
@@ -1165,6 +1188,7 @@ impl VirtualState {
                     storage(36, false, S::COMPUTE),
                     storage(54, true, S::COMPUTE),
                     storage(55, true, S::COMPUTE),
+                    storage(57, false, S::COMPUTE),
                 ],
             ),
             data: group(
@@ -1299,6 +1323,7 @@ impl VirtualState {
                         },
                     ),
                     storage(55, true, S::COMPUTE),
+                    storage(56, true, S::COMPUTE),
                 ],
             ),
         };
@@ -1324,6 +1349,11 @@ impl VirtualState {
         let mip_layout = pipeline_layout(
             "N8c max-mip ABI",
             &[Some(&layouts.mip), None, None, Some(&layouts.pass)],
+        );
+        // The outline lines read the draws' triangles (group 1).
+        let outline_layout = pipeline_layout(
+            "Outline line ABI",
+            &[Some(&layouts.mip), Some(arrays), None, Some(&layouts.pass)],
         );
         let raster_layout = pipeline_layout(
             "N8c page raster ABI",
@@ -1527,6 +1557,10 @@ impl VirtualState {
             allocate: compute("vsm_allocate", &allocate_layout, &[]),
             clear_sparse: compute("vsm_clear_sparse", &clear_layout, &[]),
             mip_sparse: compute("vsm_mip_sparse", &mip_layout, &[]),
+            outline: [
+                compute("vsm_outline_dense", &outline_layout, &[]),
+                compute("vsm_outline_sparse", &outline_layout, &[]),
+            ],
         };
         Self {
             settings: VirtualShadowSettings::default(),
@@ -1788,7 +1822,14 @@ impl VirtualState {
         } else {
             32
         };
+        // The outline lines: two bytes per texel of the top layer, with the edges on.
+        let outline_bytes = if self.settings.lookup == VirtualLookup::Disk && edges_on() {
+            (map_bytes / 4).max(4)
+        } else {
+            4
+        };
         let bytes = 2 * map_bytes
+            + outline_bytes
             + plane_bytes
             + error_bytes
             + minmip_bytes
@@ -1834,6 +1875,7 @@ impl VirtualState {
             top: buffer("N8c clipmap top layer", map_bytes, B::STORAGE),
             peel: buffer("N8c clipmap peel layer", map_bytes, B::STORAGE),
             mips: buffer("N8c clipmap max-mips", mip_bytes.max(4), B::STORAGE),
+            outline: buffer("Disk lookup outline bits", outline_bytes, B::STORAGE),
             planes: buffer("N8k clipmap texel planes", plane_bytes, B::STORAGE),
             errors: buffer("N8k clipmap planarity errors", error_bytes, B::STORAGE),
             minmips: buffer("N8k clipmap min-mips", minmip_bytes, B::STORAGE),
@@ -3151,6 +3193,7 @@ impl Renderer {
                         buffer(36, &r.mips),
                         buffer(54, &r.pool),
                         buffer(55, &r.state),
+                        buffer(57, &r.outline),
                     ],
                 ),
                 pass: group(
@@ -3236,6 +3279,7 @@ impl Renderer {
                         buffer(35, &r.mips),
                         buffer(50, &r.disk_frame),
                         buffer(55, &r.state),
+                        buffer(56, &r.outline),
                     ],
                 ),
                 queued: group(
@@ -3641,6 +3685,19 @@ impl Renderer {
             label: Some("N8c clipmap max-mips"),
             timestamp_writes: None,
         });
+        // The Disk lookup's outline lines of the pages drawn this frame (edges on only).
+        if state.settings.lookup == VirtualLookup::Disk && edges_on() {
+            pass.set_bind_group(0, &*g.mip, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(3, &*g.pass, &[0]);
+            if r.sparse {
+                pass.set_pipeline(&p.outline[1]);
+                pass.dispatch_workgroups_indirect(&r.pool, 0);
+            } else {
+                pass.set_pipeline(&p.outline[0]);
+                pass.dispatch_workgroups(slots as u32, 1, 1);
+            }
+        }
         if r.sparse {
             // In-page mips of the pages rasterized this frame (none when no page was flagged).
             pass.set_pipeline(&p.mip_sparse);
