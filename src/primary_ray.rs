@@ -186,9 +186,11 @@ mod tests {
             + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
         assert_eq!(limits.max_storage_buffers_per_shader_stage, storage);
         assert_eq!(limits.max_sampled_textures_per_shader_stage, 24);
+        // Fog writes one additional buffer on the RT producer only. The non-RT
+        // visibility request above must retain its original limit.
         assert_eq!(
             traced_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage,
-            storage
+            storage + u32::from(crate::renderer::fog_cull::enabled())
         );
         let higher = wgpu::Limits {
             max_storage_buffers_per_shader_stage: 16,

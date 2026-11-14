@@ -5,7 +5,7 @@ struct AtFogBounds {
     enabled:atomic<u32>, skipped:atomic<u32>, zero_density:atomic<u32>, pad:u32,
     first_hidden:array<u32>,
 };
-@group(0) @binding(21) var<storage,read> at_fog_depth:AtFogDepth;
+@group(0) @binding(21) var<storage,read> at_fog_cull_depth:AtFogDepth;
 @group(0) @binding(22) var<storage,read_write> at_fog_bounds:AtFogBounds;
 fn at_fog_cull_enabled()->bool {return atomicLoad(&at_fog_bounds.enabled)!=0u;}
 fn at_fog_cell_hidden(id:vec3<u32>)->bool {
@@ -16,14 +16,14 @@ fn at_fog_cell_hidden(id:vec3<u32>)->bool {
     if any(id.xy>=grid) {return;}
     if all(id.xy==vec2<u32>(0u)) {atomicStore(&at_fog_bounds.enabled,1u);}
     var first=AT_FROXEL_SLICES;
-    if all((at_fog_depth.size.zw+vec2<u32>(7u))/8u==grid) {
+    if all((at_fog_cull_depth.size.zw+vec2<u32>(7u))/8u==grid) {
         var farthest=0u;
         for(var y=-2;y<=2;y+=1) {
             for(var x=-2;x<=2;x+=1) {
                 let tile=vec2<u32>(clamp(vec2<i32>(id.xy)+vec2<i32>(x,y),vec2<i32>(0),vec2<i32>(grid)-vec2<i32>(1)));
                 for(var part=0u;part<2u;part+=1u) {
-                    let row=min(tile.y*2u+part,at_fog_depth.size.y-1u);
-                    let bits=at_fog_depth.halves[tile.x+row*at_fog_depth.size.x];
+                    let row=min(tile.y*2u+part,at_fog_cull_depth.size.y-1u);
+                    let bits=at_fog_cull_depth.halves[tile.x+row*at_fog_cull_depth.size.x];
                     farthest=max(farthest,select(bits,0x7f800000u,bits==0u));
                 }
             }
