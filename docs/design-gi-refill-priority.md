@@ -16,7 +16,7 @@ copies RAW from its parent; the comparison keeps that setting off.
 First fill starts at a 12,288-cell quota. Its floor is at least 9,831 (the previous
 visible reservation), raised on the GPU to this frame's on-screen first-fill inflow.
 Refresh consumes the estimated time remaining after first fill. Conservative measured
-costs and bounded quota growth come from four nonblocking 104-byte readbacks. A floor
+costs and bounded quota growth come from four nonblocking 112-byte readbacks. A floor
 overrun is logged rather than starving visible cells. There is no update-time budget.
 
 One existing cold-state bit tracks pending visibility. The compact pass counts a new

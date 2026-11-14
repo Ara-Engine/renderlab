@@ -3532,6 +3532,9 @@ impl GiState {
             }
         }
         let s = 1 + 2 * CLAIM_ROUNDS;
+        if let Some(feedback) = &self.refill_feedback {
+            feedback.after_claims(encoder,&r.work,layout.items);
+        }
         mark(encoder, "gi_update");
         if plan.scan || profiling {
             let groups = plan.scan.then_some([plan.scan_groups, 1]);

@@ -354,7 +354,8 @@ impl Controller {
             Mode::Legacy => (DEFAULT_CELLS, DEFAULT_CELLS),
             Mode::Today | Mode::Hold(_) => (header[22], GATHER_CELLS),
             Mode::Fixed(cells) => (cells, cells),
-            Mode::Milliseconds(_) => (self.claims, self.gathers),
+            // The follow-up budgets gather work, not update: keep creation at 12k.
+            Mode::Milliseconds(_) => (DEFAULT_CELLS, self.gathers),
         };
         if matches!(mode, Mode::Hold(_)) {
             header[31] = 1;

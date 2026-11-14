@@ -11,8 +11,10 @@ fn gi_priority_ticket(limit:u32) -> bool {
 }
 fn gi_priority_claim_admit(band:u32) -> bool {
     let cap=gi_word(33u);
-    if cap==0u { return true; }
-    return gi_priority_ticket(select(cap,gi_priority_visible_limit(cap),band>=GI_BAND_PIXEL));
+    var admitted=true;
+    if cap!=0u { admitted=gi_priority_ticket(select(cap,gi_priority_visible_limit(cap),band>=GI_BAND_PIXEL)); }
+    if admitted { atomicAdd(&gi_work[gi_priority_arena()+13u],1u); }
+    return admitted;
 }
 var<private> gi_priority_phase:u32;
 const GI_PRIORITY_PENDING_VISIBLE:u32=2048u;

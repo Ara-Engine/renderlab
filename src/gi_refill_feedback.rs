@@ -48,10 +48,10 @@ impl State {
                     ),
                     readback: buffer(
                         "GI refill feedback",
-                        104,
+                        112,
                         wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     ),
-                    _allocation: ledger.allocate(AllocationKind::Light, 360),
+                    _allocation: ledger.allocate(AllocationKind::Light, 368),
                     done: None,
                     frame: 0,
                 }
@@ -72,7 +72,7 @@ impl State {
                 continue;
             };
             if result.is_ok() {
-                let data = sample.readback.slice(..104).get_mapped_range().map(|view| {
+                let data = sample.readback.slice(..112).get_mapped_range().map(|view| {
                     let ticks: Vec<u64> = view[..32]
                         .chunks_exact(8)
                         .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
@@ -118,7 +118,7 @@ impl State {
             if let Some(path) = std::env::var_os("RENDERLAB_GI_REFILL_LOG") {
                 use std::io::Write;
                 let line = format!(
-                    "{{\"frame\":{frame},\"cache_frame\":{},\"created\":{claims},\"gathers\":{gathers},\"first_gathers\":{first},\"refresh_gathers\":{},\"gather_rays\":{},\"visible_never_gathered\":{},\"visible_with_raw_data\":{},\"off_screen\":{},\"first_selected\":{},\"refresh_selected\":{},\"background_selected\":{},\"first_inflow\":{},\"visible_filtered_only\":{},\"estimated_floor_overrun\":{},\"first_ms\":{first_ms},\"refresh_ms\":{refresh_ms},\"claim_update_ms\":{claim_ms},\"soft_gather_target_ms\":{},\"actual_first_overrun\":{},\"soft_gather_target_active\":{}}}\n",
+                    "{{\"frame\":{frame},\"cache_frame\":{},\"created\":{claims},\"gathers\":{gathers},\"first_gathers\":{first},\"refresh_gathers\":{},\"gather_rays\":{},\"visible_never_gathered\":{},\"visible_with_raw_data\":{},\"off_screen\":{},\"first_selected\":{},\"refresh_selected\":{},\"background_selected\":{},\"first_inflow\":{},\"visible_filtered_only\":{},\"estimated_floor_overrun\":{},\"first_ms\":{first_ms},\"refresh_ms\":{refresh_ms},\"claim_update_ms\":{claim_ms},\"soft_gather_target_ms\":{},\"actual_first_overrun\":{},\"soft_gather_target_active\":{},\"admitted_claim_attempts\":{},\"claim_budget\":{}}}\n",
                     c[13],
                     gathers.saturating_sub(first),
                     c[12],
@@ -188,6 +188,22 @@ impl State {
             }),
         });
     }
+    pub fn after_claims(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        work: &wgpu::Buffer,
+        arena: u32,
+    ) {
+        if let Some(i) = self.active {
+            encoder.copy_buffer_to_buffer(
+                work,
+                u64::from(arena + 13) * 4,
+                &self.samples[i].readback,
+                104,
+                4,
+            );
+        }
+    }
     pub fn finish(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -202,9 +218,10 @@ impl State {
         encoder.copy_buffer_to_buffer(work, 7 * 4, &sample.readback, 32, 4);
         encoder.copy_buffer_to_buffer(table, 3 * 4, &sample.readback, 84, 4);
         encoder.copy_buffer_to_buffer(table, 41 * 4, &sample.readback, 100, 4);
+        encoder.copy_buffer_to_buffer(table, 33 * 4, &sample.readback, 108, 4);
         let done = Arc::new(OnceLock::new());
         let callback = done.clone();
-        encoder.map_buffer_on_submit(&sample.readback, wgpu::MapMode::Read, 0..104, move |r| {
+        encoder.map_buffer_on_submit(&sample.readback, wgpu::MapMode::Read, 0..112, move |r| {
             let _ = callback.set(r);
         });
         sample.done = Some(done);
