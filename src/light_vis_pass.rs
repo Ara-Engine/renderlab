@@ -70,7 +70,11 @@ fn compose_enabled(mut source: String, enabled: bool) -> String {
         1,
     );
     // The entry is appended separately, after its reconstruction helpers.
-    source.push_str(API);
+    if std::env::var("RENDERLAB_LIGHT_VIS_FACING").is_ok_and(|value| value == "1") {
+        source.push_str(&API.replace("const RL_LVIS_FACING:bool=false;", "const RL_LVIS_FACING:bool=true;"));
+    } else {
+        source.push_str(API);
+    }
     source
 }
 fn entry_enabled(mut source: String, enabled: bool) -> String {
@@ -173,6 +177,34 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn facing_gate_keeps_the_storage_layout() {
+        for head in [
+            shading_heads(include_str!("../shaders/scene.wgsl")).unwrap()[1].clone(),
+            non_rt_sources(include_str!("../shaders/scene.wgsl")).unwrap().1[1].clone(),
+        ] {
+            let c = program::compose(&head, PASS_PROGRAM, Stage::Traced, false);
+            let c = if on() { c } else { apply_enabled(c, true) };
+            let mut baseline = None;
+            for enabled in [false, true] {
+                let source = c.source.replace(
+                    "const RL_LVIS_FACING:bool=true;",
+                    "const RL_LVIS_FACING:bool=false;",
+                ).replace("const RL_LVIS_FACING:bool=false;", &format!("const RL_LVIS_FACING:bool={enabled};"));
+                let module = naga::front::wgsl::parse_str(&source)
+                    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+                naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+                    .validate(&module).unwrap();
+                let bindings: Vec<_> = module.global_variables.iter()
+                    .filter_map(|(_, v)| v.binding.as_ref().map(|b| (b.group, b.binding)))
+                    .collect();
+                assert_eq!(bindings.iter().filter(|&&b| b == (0, BINDING)).count(), 1);
+                if let Some(ref expected) = baseline { assert_eq!(&bindings, expected); }
+                else { baseline = Some(bindings); }
+            }
+        }
+        assert_eq!(PIXEL_BYTES, 16);
+    }
     #[test]
     fn both_paths_validate_with_cache() {
         for heads in [

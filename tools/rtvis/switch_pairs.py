@@ -21,12 +21,15 @@ SWITCHES = {
     "sun": {"RENDERLAB_SUN_PASS": "1"},
     "sun-zone": {"RENDERLAB_SUN_ZONE_STOP": "1"},
     "lvis": {"RENDERLAB_LIGHT_VIS_PASS": "1"},
+    "lvis-facing": {"RENDERLAB_LIGHT_VIS_PASS": "1", "RENDERLAB_LIGHT_VIS_FACING": "1"},
     "rl": {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "1"},
     "rl-diag": {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "diag"},
     "rl-all": {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "diag",
                "RENDERLAB_RL_HIT_OWN_PROGRAM": "1", "RENDERLAB_RL_HIT": "missblack,hitblack,lone"},
 }
 TESTS = [
+    "both_paths_validate_with_cache",
+    "facing_gate_keeps_the_storage_layout",
     "every_list_head_module_validates",
     "material_pass_variants_compose_and_validate",
     "hit_modules_validate_on_both_heads",
@@ -45,10 +48,10 @@ def sets():
     yield "none", {}
     for n in (1, 2, 3):
         for names in itertools.combinations(SWITCHES, n):
-            if sum(x.startswith("rl") for x in names) > 1 or sum(x.startswith("material") for x in names) > 1:
+            if any(sum(x.startswith(prefix) for x in names) > 1 for prefix in ("rl", "material", "lvis")):
                 continue
             yield "+".join(names), {k: v for x in names for k, v in SWITCHES[x].items()}
-    others = [x for x in SWITCHES if not x.startswith("rl") and x != "material-tail"]
+    others = [x for x in SWITCHES if not x.startswith("rl") and x not in ("material-tail", "lvis")]
     yield "all-but-rl", {k: v for x in others for k, v in SWITCHES[x].items()}
     for rl in [x for x in SWITCHES if x.startswith("rl")]:
         yield f"all+{rl}", {k: v for x in [*others, rl] for k, v in SWITCHES[x].items()}
