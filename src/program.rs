@@ -254,9 +254,9 @@ pub(crate) fn rl_deferred_diag() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_RL_DEFERRED").as_deref() == Ok("diag"))
 }
-/// The mark a renderer whose device runs the compacted reflection pass by default (the non-RT
-/// path where the adapter holds it, once reflection_pass.rs `NON_RT_DEFAULT` is on; off for now,
-/// see `default_on`) appends to its own traced
+/// The mark a renderer whose device runs the compacted reflection pass by default (where the
+/// adapter holds it: with ray hardware, and without it once reflection_pass.rs `NON_RT_DEFAULT`
+/// is on; see `default_on`) appends to its own traced
 /// shading heads. Composition reads it from the head, so the default belongs to that renderer:
 /// heads composed elsewhere (the Ara port, tests) carry no mark and keep the inline path.
 pub(crate) const PASS_HEAD_MARK: &str =
