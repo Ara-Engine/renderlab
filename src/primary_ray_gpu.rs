@@ -2542,7 +2542,7 @@ impl Renderer {
                 rl_pass: reflection_pass::on(&self.device)
                     .then(|| self.rl_pass_targets(size)),
                 gi_receiver: gi_receiver_pass::on().then(|| self.gi_receiver_targets(size)),
-                light_counter: light_counter_gpu::on().then(|| self.light_counter_targets()),
+                light_counter: light_counter_gpu::on().then(|| self.light_counter_targets(size)),
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
                     "primary hard receiver epsilon",
@@ -2672,7 +2672,10 @@ impl Renderer {
                     (RL_PHASE, t.rl_history.phase.value.as_entire_binding()),
                 ];
                 if let Some(gi) = &t.gi_receiver { entries.push((gi_receiver_pass::BINDING, gi.values.value.as_entire_binding())); }
-                if let Some(counter) = &t.light_counter { entries.push((light_counter_gpu::BINDING,counter.values.value.as_entire_binding())); }
+                if let Some(counter) = &t.light_counter {
+                    entries.push((light_counter_gpu::BINDING,counter.values.value.as_entire_binding()));
+                    entries.push((light_counter_gpu::RECORD_BINDING,counter.records.value.as_entire_binding()));
+                }
                 // U-RTVIS: the reflection pass's lobe output.
                 if let Some(pass) = &t.rl_pass {
                     entries.push((reflection_pass::LIST, pass.list.value.as_entire_binding()));

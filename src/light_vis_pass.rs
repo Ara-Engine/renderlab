@@ -41,7 +41,7 @@ pub(super) fn layout_entry() -> wgpu::BindGroupLayoutEntry {
 pub(crate) fn apply(composed: program::Composed, traced: bool) -> program::Composed {
     apply_enabled(composed, traced && on())
 }
-fn apply_enabled(mut composed: program::Composed, enabled: bool) -> program::Composed {
+pub(super) fn apply_enabled(mut composed: program::Composed, enabled: bool) -> program::Composed {
     // Glass hit modules truncate the camera entry and have no cache binding. Their
     // receivers are secondary hits, so keep their visibility inline, like film.
     if !enabled
@@ -113,6 +113,7 @@ impl Renderer {
         }
         // Engine-only entry: no user surface, BRDF, textures, GI or reflection work.
         let composed = program::compose(head, PASS_PROGRAM, Stage::Traced, false);
+        let composed = super::light_counter_gpu::producer(composed);
         let abi = self.program_abi();
         let scopes = OperationScopes::new(&self.device);
         let module = super::super::program_gpu::module(&abi, "local light visibility", &composed);

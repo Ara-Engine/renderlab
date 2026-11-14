@@ -1,6 +1,7 @@
 // Measurement only: independent SSBO, no counter values are written to HDR.
 struct LcCounter { header:vec4<u32>, bins:array<atomic<u32>> };
 @group(0) @binding(80) var<storage,read_write> lc_counter:LcCounter;
+@group(0) @binding(81) var<storage,read_write> lc_pass_records:array<vec4<u32>>;
 var<private> lc_primary:bool;
 var<private> lc_current:bool;
 var<private> lc_seen:u32;
@@ -17,8 +18,15 @@ var<private> lc_without_rgb:vec3<f32>;
 var<private> lc_unshadowed_rgb:vec3<f32>;
 var<private> lc_distance_bin:u32;
 var<private> lc_normal_bin:u32;
+var<private> lc_shadow_slots:u32;
+var<private> lc_cached:bool;
 fn lc_capture(input:SurfaceInput,n:vec3<f32>,s:LightSample) {
-    if !lc_primary || s.index!=lc_counter.header.y {return;}
+    if !lc_primary {return;}
+    let capable=lights[s.index].kind.w!=0u;
+    let slot=lc_shadow_slots;
+    if capable {lc_shadow_slots+=1u;}
+    if s.index!=lc_counter.header.y {return;}
+    lc_cached=capable && slot<16u;
     lc_seen=1u;
     lc_range=u32(s.attenuation==0.0);
     let source=dot(input.geometric,s.direction)>0.0;
@@ -45,16 +53,11 @@ fn lc_display(c:vec3<f32>)->vec3<f32> {
     let t=clamp((x*(2.51*x+0.03))/(x*(2.43*x+0.59)+0.14),vec3<f32>(0.0),vec3<f32>(1.0));
     return select(t*12.92,1.055*pow(t,vec3<f32>(1.0/2.4))-0.055,t>vec3<f32>(0.0031308));
 }
-fn lc_commit(full:vec3<f32>,without:vec3<f32>,input:SurfaceInput) {
-    let delta=abs(lc_display(atmosphere_surface(rl_finite(full),input.world))-lc_display(atmosphere_surface(rl_finite(without),input.world)))*255.0;
-    let codes=max(max(delta.x,delta.y),delta.z);
+fn lc_base(stage:u32)->u32 {return ((LC_COUNTER_PROGRAM*32u+lc_counter.header.y)*4u+stage)*96u;}
+fn lc_accumulate(stage:u32,codes:f32,upper:f32) {
     let visible=u32(codes>=1.0);let traced=u32(lc_rays>0u);
-    // Endpoints visibility=0 and visibility=1 retain every other light, emission,
-    // reflection and GI term. This bounds any possible selected-light shadow result.
-    let upper_delta=abs(lc_display(atmosphere_surface(rl_finite(lc_unshadowed_rgb),input.world))-lc_display(atmosphere_surface(rl_finite(without),input.world)))*255.0;
-    let upper=max(max(upper_delta.x,upper_delta.y),upper_delta.z);
     let under1=u32(upper<1.0);let under_half=u32(upper<0.5);let under_quarter=u32(upper<0.25);
-    let base=((LC_COUNTER_PROGRAM*32u+lc_counter.header.y)*2u)*96u;
+    let base=lc_base(stage);
     atomicAdd(&lc_counter.bins[base],1u);
     atomicAdd(&lc_counter.bins[base+1u],lc_seen);
     atomicAdd(&lc_counter.bins[base+2u],lc_range);
@@ -95,6 +98,32 @@ fn lc_commit(full:vec3<f32>,without:vec3<f32>,input:SurfaceInput) {
         let normal=base+62u+lc_normal_bin*4u;
         atomicAdd(&lc_counter.bins[normal],lc_rays);atomicAdd(&lc_counter.bins[normal+1u],lc_rays*under1);atomicAdd(&lc_counter.bins[normal+2u],lc_rays*under_half);atomicAdd(&lc_counter.bins[normal+3u],lc_rays*under_quarter);
         atomicAdd(&lc_counter.bins[base+86u],u32(upper+0.001<codes));
+    }
+}
+fn lc_commit(full:vec3<f32>,without:vec3<f32>,input:SurfaceInput) {
+    let absent=lc_display(atmosphere_surface(rl_finite(without),input.world));
+    let delta=abs(lc_display(atmosphere_surface(rl_finite(full),input.world))-absent)*255.0;
+    let codes=max(max(delta.x,delta.y),delta.z);
+    // Visibility=0/1 endpoints retain every other lit term. No producer normal is invented.
+    let upper_delta=abs(lc_display(atmosphere_surface(rl_finite(lc_unshadowed_rgb),input.world))-absent)*255.0;
+    let upper=max(max(upper_delta.x,upper_delta.y),upper_delta.z);
+    lc_accumulate(0u,codes,upper);
+    if lc_cached {lc_accumulate(1u,codes,upper);} else {atomicAdd(&lc_counter.bins[lc_base(1u)],1u);}
+    if LC_COUNTER_LVIS {
+        let pixel=input.pixel.y*textureDimensions(primary_hit).x+input.pixel.x;
+        let record=lc_pass_records[pixel];
+        let matched=record.x!=0u && lc_seen!=0u && lc_cached && lc_range==((record.w>>9u)&1u);
+        if (record.x!=0u)!=lc_cached {atomicAdd(&lc_counter.bins[lc_base(0u)+87u],1u);}
+        if record.x!=0u && lc_range!=((record.w>>9u)&1u) {atomicAdd(&lc_counter.bins[lc_base(0u)+91u],1u);}
+        if matched {
+            lc_calls=record.y;lc_rays=record.z;
+            lc_accumulate(2u,codes,upper);
+            atomicAdd(&lc_counter.bins[lc_base(2u)+89u],1u);
+            atomicAdd(&lc_counter.bins[lc_base(2u)+90u],(record.w>>8u)&1u);
+        } else {
+            atomicAdd(&lc_counter.bins[lc_base(2u)],1u);
+            atomicAdd(&lc_counter.bins[lc_base(0u)+88u],record.z);
+        }
     }
 }
 fn lc_primary_shade(s:Surface,input:SurfaceInput)->vec3<f32> {

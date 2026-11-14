@@ -2,8 +2,10 @@
 use super::super::program_gpu::{probe_block, probe_function_body as body};
 use super::*;
 pub(crate) const BINDING: u32 = 80;
+pub(crate) const RECORD_BINDING: u32 = 81;
 const FIELDS: usize = 96;
-const WORDS: usize = 4 + 4 * 32 * 2 * FIELDS;
+const STAGES: usize = 4;
+const WORDS: usize = 4 + 4 * 32 * STAGES * FIELDS;
 const BYTES: u64 = WORDS as u64 * 4;
 const START: u64 = 40;
 const REPEATS: u64 = 8;
@@ -20,6 +22,7 @@ fn lights() -> u32 {
 }
 pub(super) struct Targets {
     pub values: Buffer,
+    pub records: Buffer,
 }
 pub(super) fn entries(
     mut entries: Vec<wgpu::BindGroupLayoutEntry>,
@@ -30,13 +33,18 @@ pub(super) fn entries(
             wgpu::BufferBindingType::Storage { read_only: false },
             BYTES,
         ));
+        entries.push(buffer(
+            RECORD_BINDING,
+            wgpu::BufferBindingType::Storage { read_only: false },
+            16,
+        ));
     }
     entries
 }
 pub(crate) fn compose(composed: program::Composed) -> program::Composed {
-    variant(composed, on())
+    variant(composed, on(), super::light_vis_pass::on())
 }
-fn variant(mut composed: program::Composed, enabled: bool) -> program::Composed {
+fn variant(mut composed: program::Composed, enabled: bool, lvis: bool) -> program::Composed {
     if !enabled {
         return composed;
     }
@@ -146,13 +154,58 @@ fn variant(mut composed: program::Composed, enabled: bool) -> program::Composed 
         "rl_finite(lc_primary_shade(surface_output,surface_input))",
         1,
     );
-    source.push_str(&format!("\nconst LC_COUNTER_PROGRAM:u32={id}u;\n"));
+    source.push_str(&format!(
+        "\nconst LC_COUNTER_PROGRAM:u32={id}u;\nconst LC_COUNTER_LVIS:bool={lvis};\n"
+    ));
     source.push_str(API);
     composed.program = source.find(BEGIN).unwrap() + BEGIN.len()..source.find(END).unwrap();
     composed
 }
+pub(super) fn producer(composed: program::Composed) -> program::Composed {
+    producer_variant(composed, on())
+}
+fn producer_variant(mut composed: program::Composed, enabled: bool) -> program::Composed {
+    if !enabled {
+        return composed;
+    }
+    let marker = "// ---- program ----\n";
+    let before = composed.source.find(marker).unwrap();
+    let source = &mut composed.source;
+    let store = body(source, "rl_lvis_store").unwrap();
+    let code=source[store.clone()]
+        .replace("let visibility=light_visibility(input,sample);", "lc_pass_begin(index);let visibility=light_visibility(input,sample);lc_pass_store(input,sample,slot);")
+        .replace("rl_lvis[base+(slot>>2u)]=packed;", "lc_pass_word();rl_lvis[base+(slot>>2u)]=packed;");
+    source.replace_range(store, &code);
+    let visibility = body(source, "light_visibility").unwrap();
+    source.insert_str(
+        visibility.start,
+        "\nif lc_pass_current {lc_pass_calls+=1u;}\n",
+    );
+    if let Some(ray) = body(source, "rl_local_rays_visibility") {
+        let code = source[ray.clone()].replace(
+            "rayQueryInitialize(",
+            "if lc_pass_current {lc_pass_rays+=1u;}rayQueryInitialize(",
+        );
+        source.replace_range(ray, &code);
+    }
+    let tiles = body(source, "light_vis_tiles").unwrap();
+    let code=source[tiles.clone()].replace(
+        "if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x==0u { return; }",
+        "lc_pass_add(90u,1u);if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x==0u {lc_pass_add(91u,1u);return;}");
+    source.replace_range(tiles, &code);
+    let pixel = body(source, "rl_lvis_pixel").unwrap();
+    let code = source[pixel.clone()].replace(
+        "if record.x==0u {return;}",
+        "if record.x==0u {lc_pass_add(92u,1u);return;}lc_pass_add(93u,1u);",
+    );
+    source.replace_range(pixel, &code);
+    let delta = source.find(marker).unwrap() - before;
+    composed.program = (composed.program.start + delta)..(composed.program.end + delta);
+    source.push_str(include_str!("../shaders/light_counter_producer.wgsl"));
+    composed
+}
 impl Renderer {
-    pub(super) fn light_counter_targets(&self) -> Targets {
+    pub(super) fn light_counter_targets(&self, size: wgpu::Extent3d) -> Targets {
         Targets {
             values: Buffer::new(
                 self,
@@ -162,9 +215,15 @@ impl Renderer {
                     | wgpu::BufferUsages::COPY_DST
                     | wgpu::BufferUsages::COPY_SRC,
             ),
+            records: Buffer::new(
+                self,
+                "per-light producer join",
+                u64::from(size.width) * u64::from(size.height) * 16,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            ),
         }
     }
-    pub(crate) fn prepare_light_counter(&self) {
+    pub(crate) fn prepare_light_counter(&self, encoder: &mut wgpu::CommandEncoder) {
         let Some(target) = self
             .view
             .primary
@@ -184,6 +243,9 @@ impl Renderer {
         let words = [u32::from(active), selected, self.frames as u32, n];
         let bytes: Vec<u8> = words.iter().flat_map(|v| v.to_ne_bytes()).collect();
         self.queue.write_buffer(&target.values.value, 0, &bytes);
+        if active && super::light_vis_pass::on() {
+            encoder.clear_buffer(&target.records.value, 0, None);
+        }
     }
     pub(crate) fn encode_light_counter_readback(&self, encoder: &mut wgpu::CommandEncoder) {
         let Some(path) = std::env::var_os("RENDERLAB_LIGHT_COUNTER") else {
@@ -216,8 +278,8 @@ impl Renderer {
             let words:Vec<u32>=data.chunks_exact(4).map(|b|u32::from_ne_bytes(b.try_into().unwrap())).collect();
             let names=["geometry_pixels","evaluated_pixels","range_cone_zero","source_nonfacing","view_nonfacing_after_source","facing_pass","thin_two_sided_disagreement","light_visibility_calls","ray_initializations","traced_under_1_code","traced_at_least_1_code","visibility_called_without_query_pixels","source_nonfacing_traced","view_nonfacing_traced","view_nonfacing_any","thin_two_sided_evaluated","ray_initializations_under_1_code","evaluated_under_1_code","evaluated_at_least_1_code","max_codes_bits","source_nonfacing_ray_initializations","view_nonfacing_ray_initializations","thin_two_sided_disagreement_ray_initializations","thin_two_sided_disagreement_ray_initializations_at_least_1_code","evaluated_unshadowed_under_1_code","ray_initializations_unshadowed_under_1_code","traced_unshadowed_under_1_code","max_unshadowed_codes_bits","evaluated_unshadowed_under_half_code","ray_initializations_unshadowed_under_half_code","traced_unshadowed_under_half_code","evaluated_unshadowed_under_quarter_code","ray_initializations_unshadowed_under_quarter_code","traced_unshadowed_under_quarter_code"];
             let mut rows=Vec::new();
-            for (program,label) in ["standard","game","toon","other"].iter().enumerate(){for light in 1..=n as usize{
-                let at=4+(program*32+light)*2*FIELDS;
+            for (program,label) in ["standard","game","toon","other"].iter().enumerate(){for light in 1..=n as usize{for (stage,stage_label) in ["inline","inline_cached_population","lvis_producer"].iter().enumerate(){
+                let at=4+((program*32+light)*STAGES+stage)*FIELDS;
                 if words[at]==0{continue;}
                 let fields=names.iter().enumerate().map(|(i,name)|format!("\"{name}\":{}",words[at+i])).collect::<Vec<_>>().join(",");
                 let max=f32::from_bits(words[at+19]);
@@ -225,11 +287,17 @@ impl Renderer {
                 let upper=f32::from_bits(words[at+27]);let upper=if upper.is_finite(){upper.to_string()}else{"null".into()};
                 let histogram=|offset:usize,bins:usize|{(0..bins).map(|i|{let a=at+offset+i*4;format!("[{},{},{},{}]",words[a],words[a+1],words[a+2],words[a+3])}).collect::<Vec<_>>().join(",")};
                 let distance=histogram(34,7);let normal=histogram(62,6);let violations=words[at+86];
-                rows.push(format!("{{\"program\":\"{label}\",\"light_index\":{light},\"stage\":\"inline\",{fields},\"max_display_codes\":{max},\"max_unshadowed_codes\":{upper},\"distance_range_histogram\":[{distance}],\"ndotl_histogram\":[{normal}],\"bound_violations\":{violations}}}"));
-            }}
+                let extra=[(87,"eligibility_mismatch_pixels"),(88,"unjoined_producer_ray_initializations"),(89,"packed_values"),(90,"packing_word_owner_pixels"),(91,"range_mismatch_pixels")].iter().map(|(i,name)|format!("\"{name}\":{}",words[at+i])).collect::<Vec<_>>().join(",");
+                rows.push(format!("{{\"program\":\"{label}\",\"light_index\":{light},\"stage\":\"{stage_label}\",{fields},{extra},\"max_display_codes\":{max},\"max_unshadowed_codes\":{upper},\"distance_range_histogram\":[{distance}],\"ndotl_histogram\":[{normal}],\"bound_violations\":{violations}}}"));
+            }}}
+            let globals=(1..=n as usize).map(|light|{
+                let at=4+((3*32+light)*STAGES+3)*FIELDS;
+                let fields=[(89,"light_visibility_calls"),(90,"scheduled_pixels"),(91,"inactive_tile_pixels"),(92,"hit_miss_pixels"),(93,"valid_receiver_pixels"),(94,"packed_word_stores"),(95,"ray_initializations")].iter().map(|(i,name)|format!("\"{name}\":{}",words[at+i])).collect::<Vec<_>>().join(",");
+                format!("{{\"light_index\":{light},{fields}}}")
+            }).collect::<Vec<_>>().join(",");
             let pose=std::env::var("RENDERLAB_LIGHT_COUNTER_POSE").ok().and_then(|s|s.parse::<u32>().ok()).map_or("null".into(),|v|v.to_string());
             let end=START+u64::from(n)*REPEATS-1;
-            let json=format!("{{\"proxy\":\"pre-TR1 display-code proxy\",\"unshadowed_definition\":\"visibility 1 versus light absent, all other lit terms retained; an endpoint bound over any shadow result\",\"histogram_columns\":[\"actual_rays\",\"unshadowed_lt_1\",\"unshadowed_lt_half\",\"unshadowed_lt_quarter\"],\"distance_range_bins\":[\"0..0.25\",\"0.25..0.5\",\"0.5..0.75\",\"0.75..0.9\",\"0.9..1\",\"1+\",\"unbounded\"],\"ndotl_bins\":[\"negative\",\"0..0.1\",\"0.1..0.25\",\"0.25..0.5\",\"0.5..0.75\",\"0.75..1\"],\"repeats_per_light\":{REPEATS},\"render_frames\":[{START},{end}],\"pose_frame\":{pose},\"source_order\":\"range/cone, unflipped geometric source, then camera-oriented shading view among source pass\",\"facing_is_diagnostic\":true,\"primary_only\":true,\"producer_supported\":false,\"rows\":[{}]}}",rows.join(","));
+            let json=format!("{{\"proxy\":\"pre-TR1 display-code proxy\",\"unshadowed_definition\":\"visibility 1 versus light absent, all other lit terms retained; an endpoint bound over any shadow result\",\"histogram_columns\":[\"actual_rays\",\"unshadowed_lt_1\",\"unshadowed_lt_half\",\"unshadowed_lt_quarter\"],\"distance_range_bins\":[\"0..0.25\",\"0.25..0.5\",\"0.5..0.75\",\"0.75..0.9\",\"0.9..1\",\"1+\",\"unbounded\"],\"ndotl_bins\":[\"negative\",\"0..0.1\",\"0.1..0.25\",\"0.25..0.5\",\"0.5..0.75\",\"0.75..1\"],\"repeats_per_light\":{REPEATS},\"render_frames\":[{START},{end}],\"pose_frame\":{pose},\"source_order\":\"range/cone, unflipped geometric source, then camera-oriented shading view among source pass\",\"facing_is_diagnostic\":true,\"primary_only\":true,\"producer_supported\":true,\"producer_normals\":\"joined to inline resolved normals for the same pixel and first-16 shadow-capable slot\",\"producer_globals\":[{globals}],\"rows\":[{}]}}",rows.join(","));
             let _=std::fs::write(path,json);drop(data);mapped.unmap();
         });
     }
@@ -272,21 +340,53 @@ mod tests {
                             program: original.program.clone(),
                         },
                         false,
+                        false,
                     );
                     assert_eq!(off.source, original.source);
-                    let c = variant(original, true);
-                    let m = naga::front::wgsl::parse_str(&c.source)
-                        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&c.source)));
-                    naga::valid::Validator::new(
-                        naga::valid::ValidationFlags::all(),
-                        naga::valid::Capabilities::all(),
-                    )
-                    .validate(&m)
-                    .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&c.source)));
-                    count += 1;
+                    for lvis in [false, true] {
+                        let original = program::Composed {
+                            source: original.source.clone(),
+                            program: original.program.clone(),
+                        };
+                        let original = super::super::light_vis_pass::apply_enabled(original, lvis);
+                        let c = variant(original, true, lvis);
+                        validate(&c.source);
+                        count += 1;
+                    }
                 }
             }
+            let pass = super::super::light_vis_pass::apply_enabled(
+                program::compose(
+                    &heads[1],
+                    super::super::light_vis_pass::PASS_PROGRAM,
+                    program::Stage::Traced,
+                    false,
+                ),
+                true,
+            );
+            let off = producer_variant(
+                program::Composed {
+                    source: pass.source.clone(),
+                    program: pass.program.clone(),
+                },
+                false,
+            );
+            assert_eq!(off.source, pass.source);
+            let c = producer_variant(pass, true);
+            assert!(c.source.contains("lc_pass_begin(index);"));
+            assert!(c.source.contains("lc_pass_add(93u,1u)"));
+            validate(&c.source);
         }
-        assert_eq!(count, 12);
+        assert_eq!(count, 24);
+    }
+    fn validate(source: &str) {
+        let m = naga::front::wgsl::parse_str(source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&m)
+        .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
     }
 }
