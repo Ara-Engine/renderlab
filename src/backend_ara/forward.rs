@@ -1406,9 +1406,11 @@ fn parameter_layout(source: &str) -> Result<Option<crate::program::ParameterLayo
 }
 
 /// The light visibility kernel's threads: one per pixel of the region (its entry offsets by
-/// `primary_region` and skips pixels outside it and tiles without a hit).
-fn light_vis_threads(region: [u32; 4]) -> [u32; 3] {
-    [region[2] - region[0], region[3] - region[1], 1]
+/// `primary_region` and skips pixels outside it and tiles without a hit), or None for an
+/// empty region (an empty scene: nothing to dispatch).
+fn light_vis_threads(region: [u32; 4]) -> Option<[u32; 3]> {
+    let [x, y] = [region[2].saturating_sub(region[0]), region[3].saturating_sub(region[1])];
+    (x > 0 && y > 0).then_some([x, y, 1])
 }
 /// RENDERLAB_MATERIAL_PASS=1: one log line whenever a frame's split changes, saying how many
 /// program slots shade from the record and how many keep the single kernel (a program without
@@ -3879,12 +3881,14 @@ fn frame(
                         )?;
                     }
                 }
-                if let Some((light_vis, packet)) = &light_vis {
+                if let (Some((light_vis, packet)), Some(threads)) =
+                    (&light_vis, light_vis_threads(deferred.region_rect))
+                {
                     light_vis.record_labelled(
                         &mut graph,
                         &mut rec,
                         packet,
-                        light_vis_threads(deferred.region_rect),
+                        threads,
                         "ara::LightVisibility".into(),
                     )?;
                 }
@@ -3920,14 +3924,16 @@ fn frame(
                             "ara::PrimaryMaterialTiles".into(),
                         )?;
                     }
-                    if let (true, Some((light_vis, packet))) =
-                        (std::ptr::eq(kernel, &deferred.shade), &light_vis)
-                    {
+                    if let (true, Some((light_vis, packet)), Some(threads)) = (
+                        std::ptr::eq(kernel, &deferred.shade),
+                        &light_vis,
+                        light_vis_threads(deferred.region_rect),
+                    ) {
                         light_vis.record_labelled(
                             &mut graph,
                             &mut rec,
                             packet,
-                            light_vis_threads(deferred.region_rect),
+                            threads,
                             "ara::LightVisibility".into(),
                         )?;
                     }
