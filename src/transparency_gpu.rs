@@ -3013,10 +3013,10 @@ impl Renderer {
                                 })
                                 .reduce(union)
                                 .unwrap_or(view_rect)
-                        } else if spans.len() == 1 {
-                            draw_rects[i]
                         } else {
-                            spans[s].1
+                            // Span indices address the submitted ID stream, which may be
+                            // sparse in the model collection. Use its complete bound.
+                            draw_rects[i]
                         }
                     }
                     _ => view_rect,
