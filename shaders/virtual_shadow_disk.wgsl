@@ -457,17 +457,89 @@ fn vd_facing()->bool {
 // Blocks the directions hidden by a column part: a square of half side `half` centred `c`
 // (light xy, metres) from the origin, solid from height `lo` to `hi` above it (metres).
 fn vd_column(c:vec2<f32>,half:f32,lo_in:f32,hi:f32) {
+    vd_mask|=vd_column_mask(c,half,lo_in,hi);
+}
+fn vd_column_mask(c:vec2<f32>,half:f32,lo_in:f32,hi:f32)->vec2<u32> {
     // Below this height its nearest point is outside the cone of the disk.
     let near=max(abs(c)-vec2<f32>(half),vec2<f32>(0.0));
     let lo=max(lo_in,length(near)/vd_px.slope);
-    if lo>=hi {return;}
+    if lo>=hi {return vec2<u32>(0u);}
     // The square at height t covers directions (c -+ half) / t: the bounding rectangle over
     // lo..hi takes each side at the height where it lies farthest out.
     let u=vec2<f32>(1.0/hi,1.0/lo);
     let a=c-vec2<f32>(half);let b=c+vec2<f32>(half);
     let lower=a*select(vec2<f32>(u.y),vec2<f32>(u.x),a>=vec2<f32>(0.0));
     let upper=b*select(vec2<f32>(u.x),vec2<f32>(u.y),b>=vec2<f32>(0.0));
-    vd_mask|=vd_rect((lower-vd_px.centre)/vd_px.radius,(upper-vd_px.centre)/vd_px.radius);
+    return vd_rect((lower-vd_px.centre)/vd_px.radius,(upper-vd_px.centre)/vd_px.radius);
+}
+
+// ---- Straight occluder outlines (U-CLIPMAP edges) ----
+// The map holds whichever triangle covers each texel centre, so a column's square overshoots
+// or falls short of an occluder's outline by up to half a texel: a staircase one texel high.
+// Where a column would add samples without covering the whole disk (a pixel near a shadow
+// edge) and its texel lies on an outline in the map (a 4-neighbour empty or of another
+// placement), the column is widened by half a texel and clipped by the stored triangle's edges
+// that face those neighbours. A straight line from the receiver through a triangle edge is a
+// straight line in direction space, so each edge cuts the disk samples exactly. Off: the
+// texel squares alone.
+override VD_EDGES:bool=true;
+@group(1) @binding(0) var<storage,read> models:array<mat4x4<f32>>;
+@group(1) @binding(2) var<storage,read> primary_vertices:binding_array<VdVec4s,PRIMARY_BATCHES>;
+@group(1) @binding(3) var<storage,read> primary_indices:binding_array<VdU32s,PRIMARY_BATCHES>;
+@group(1) @binding(5) var<storage,read> primary_placements:array<u32>;
+struct VdVec4s {data:array<vec4<f32>>};
+struct VdU32s {data:array<u32>};
+// A corner of the map triangle `id` (placement + 1 << misc.x | primitive), in light space.
+fn vd_corner(placement:u32,batch:u32,index:u32)->vec3<f32> {
+    let v=primary_vertices[batch].data[index*3u].xyz;
+    return vsm_light((models[placement]*vec4<f32>(v,1.0)).xyz);
+}
+// The samples on `inner`'s side of the line through a and b (disk-sample space).
+fn vd_halfplane(a:vec2<f32>,b:vec2<f32>,inner:vec2<f32>)->vec2<u32> {
+    var n=vec2<f32>(b.y-a.y,a.x-b.x);
+    if dot(n,inner-a)<0.0 {n=-n;}
+    let k=dot(n,a);
+    var m=vec2<u32>(0u);
+    for(var i=0u;i<32u;i+=1u) {
+        let s=vd.samples[i];
+        let keep=vec2<f32>(dot(n,s.xy),dot(n,s.zw))>=vec2<f32>(k);
+        let bits=u32(keep.x)|(u32(keep.y)<<1u);
+        if i<16u {m.x|=bits<<(2u*i);} else {m.y|=bits<<(2u*i-32u);}
+    }
+    return m;
+}
+// Disk-sample coordinates of a light-space point seen from the receiver's origin.
+fn vd_project(q:vec3<f32>)->vec2<f32> {
+    let d=q-vd_px.p;
+    return (d.xy/d.z-vd_px.centre)/vd_px.radius;
+}
+// Clips `m` by triangle edge a->b (light space, c the third corner) when its outward normal
+// faces an outside neighbour (`outside` bits: -x, +x, -y, +y).
+fn vd_edge_clip(m:vec2<u32>,a:vec3<f32>,b:vec3<f32>,c:vec3<f32>,outside:u32)->vec2<u32> {
+    var n=vec2<f32>(b.y-a.y,a.x-b.x);
+    if dot(n,c.xy-a.xy)>0.0 {n=-n;}
+    let k=select(select(2u,3u,n.y>0.0),select(0u,1u,n.x>0.0),abs(n.x)>=abs(n.y));
+    if ((outside>>k)&1u)==0u {return m;}
+    return m&vd_halfplane(vd_project(a),vd_project(b),vd_project(c));
+}
+// The column of an outline texel: its square widened by half a texel, clipped by the stored
+// triangle's outward edges. Unchanged where the triangle is not wholly above the origin.
+fn vd_outline(id:u32,c:vec2<f32>,size:f32,lo:f32,hi:f32,outside:u32)->vec2<u32> {
+    let bits=vsm.misc.x;
+    let placement=(id>>bits)-1u;
+    let base=(id&((1u<<bits)-1u))*3u;
+    let batch=primary_placements[placement]&0x1fffffffu;
+    let a=vd_corner(placement,batch,primary_indices[batch].data[base]);
+    let b=vd_corner(placement,batch,primary_indices[batch].data[base+1u]);
+    let d=vd_corner(placement,batch,primary_indices[batch].data[base+2u]);
+    let low=min(a.z,min(b.z,d.z))-vd_px.p.z;
+    let area=(b.x-a.x)*(d.y-a.y)-(b.y-a.y)*(d.x-a.x);
+    if low<=1e-3*size || abs(area)<1e-4*size*size {return vd_column_mask(c,0.5*size,lo,hi);}
+    var m=vd_column_mask(c,size,lo,hi);
+    m=vd_edge_clip(m,a,b,d,outside);
+    m=vd_edge_clip(m,b,d,a,outside);
+    m=vd_edge_clip(m,d,a,b,outside);
+    return m;
 }
 
 // Whether a surface point (light space) is far enough above the receiver's tangent plane to
@@ -514,7 +586,23 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo:f32,hi:f
             if other.x!=0u && other.x>>bits==top.x>>bits {bottom=min(bottom,vsm_height(other)-p.z);}
         }
     }
-    vd_column(c-p.xy,0.5*size,max(max(bottom,lo),1e-6*size),min(t,hi));
+    let clo=max(max(bottom,lo),1e-6*size);let chi=min(t,hi);
+    var m=vd_column_mask(c-p.xy,0.5*size,clo,chi);
+    // Straight outlines: only a column that adds samples without covering the disk, on an
+    // outline texel of the map, pays for its neighbours and triangle.
+    if VD_EDGES && stride==1 && any((m&~vd_mask)!=vec2<u32>(0u)) && any(m!=vec2<u32>(0xffffffffu)) {
+        var outside=0u;
+        for(var k=0u;k<4u;k+=1u) {
+            let n=cell+vec2<i32>(select(select(0,1,k==1u),-1,k==0u),select(select(0,1,k==3u),-1,k==2u));
+            if any(n<vec2<i32>(0)) || any(n>=vec2<i32>(side)) {continue;}
+            let j=vsm_index(n,level);
+            if j==VSM_NONE {continue;}
+            let other=vsm_top_words[j];
+            if other.x==0u || other.x>>bits!=top.x>>bits {outside|=1u<<k;}
+        }
+        if outside!=0u {m=vd_outline(top.x,c-p.xy,size,clo,chi,outside);}
+    }
+    vd_mask|=m;
     // Another placement's surface under the top one: a second sheet, or the solid a sheet lies
     // over. Its own underside is unknown: the least thickness.
     if VD_PEEL2 && peel.x!=0u && !own {
