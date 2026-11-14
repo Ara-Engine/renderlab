@@ -236,10 +236,10 @@ fn fault(error: anyhow::Error) -> Error {
 
 impl Engine {
     /// An empty scene compiling through `cache`, with `settings`.
-    /// Refuses RENDERLAB_GI_PASS=1 (`forward::GI_PASS_REFUSAL`).
+    /// Refuses the pass switches the port has not wired (`forward::port_refusal`).
     pub fn new(cache: ShaderCache, settings: Settings) -> Result<Self, Error> {
-        if crate::renderer::primary_ray_gpu::gi_receiver_pass::on() {
-            return Err(Error::InvalidInput(super::forward::GI_PASS_REFUSAL));
+        if let Some(refusal) = super::forward::port_refusal() {
+            return Err(Error::InvalidInput(refusal));
         }
         let standard = Arc::new(Program::new("standard", crate::STANDARD_PROGRAM)?);
         let mut engine = Self {

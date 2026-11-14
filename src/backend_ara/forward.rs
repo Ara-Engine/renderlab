@@ -1424,6 +1424,22 @@ fn log_material_slots(readers: &[bool]) {
 /// Composition would make the port's shading read its binding 68, which nothing here allocates
 /// or writes, so the port refuses the switch at `Engine::new` and at every frame.
 pub(crate) const GI_PASS_REFUSAL: &str = "RENDERLAB_GI_PASS=1: the GI lookup pass is not wired on the ara-gpu port yet (its binding 68 has no target or dispatch here); unset it";
+/// RENDERLAB_LIGHT_VIS_PASS=1 (src/light_vis_pass.rs): the local-light visibility pass is wired
+/// for wgpu only. Composition would make the port's shading read its binding 73, which nothing
+/// here allocates or writes, so the port refuses the switch as it does the GI pass's.
+pub(crate) const LIGHT_VIS_PASS_REFUSAL: &str = "RENDERLAB_LIGHT_VIS_PASS=1: the local-light visibility pass is not wired on the ara-gpu port yet (its binding 73 has no buffer or dispatch here); unset it";
+/// The first pass switch the port refuses (`GI_PASS_REFUSAL`, `LIGHT_VIS_PASS_REFUSAL`), checked
+/// at `Engine::new` and at every frame.
+pub(crate) fn port_refusal() -> Option<&'static str> {
+    use crate::renderer::primary_ray_gpu::{gi_receiver_pass, light_vis_pass};
+    if gi_receiver_pass::on() {
+        Some(GI_PASS_REFUSAL)
+    } else if light_vis_pass::on(false) {
+        Some(LIGHT_VIS_PASS_REFUSAL)
+    } else {
+        None
+    }
+}
 /// One frame after `history`, over what the sequence keeps on the GPU; returns its
 /// images and what it hands to the next frame.
 fn frame(
@@ -1434,7 +1450,9 @@ fn frame(
     cache: &ShaderCache,
     scene: &ForwardScene<'_>,
 ) -> Result<(ForwardImages, Carried)> {
-    ensure!(!crate::renderer::primary_ray_gpu::gi_receiver_pass::on(), GI_PASS_REFUSAL);
+    if let Some(refusal) = port_refusal() {
+        bail!(refusal);
+    }
     let Kept {
         gi,
         tr1,

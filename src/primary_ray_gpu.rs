@@ -695,6 +695,8 @@ pub(super) struct ShadeSwitches {
     /// The GI receiver pass's prepared SH (gi_receiver_pass.rs, RENDERLAB_GI_PASS).
     pub gi: bool,
     pub lvis: bool,
+    /// Sampled material record; writers use their separate storage layout.
+    pub material: bool,
 }
 impl ShadeSwitches {
     fn of(device: &wgpu::Device) -> Self {
@@ -705,6 +707,7 @@ impl ShadeSwitches {
             diag: crate::program::rl_deferred_diag(),
             gi: gi_receiver_pass::on(),
             lvis: light_vis_pass::on(true),
+            material: crate::program::material_pass_on(),
         }
     }
 }
@@ -774,6 +777,9 @@ pub(super) fn shade_layout_entries(
         if switches.diag {
             entries.push(image(63, F::Rgba16Float));
         }
+    }
+    if switches.material {
+        entries.extend(material_pass_gpu::entries(false));
     }
     entries
 }
@@ -1301,14 +1307,15 @@ impl PrimaryState {
                 ),
             ],
         );
-        let shade_entries = [scene(2), texture(6, uint)].map(|visibility| {
-            shade_layout_entries(visibility, ShadeSwitches::of(device))
+        let switches = ShadeSwitches::of(device);
+        let material_write_entries = [scene(2), texture(6, uint)].map(|visibility| {
+            shade_layout_entries(
+                visibility,
+                ShadeSwitches { material: false, ..switches },
+            )
         });
-        let material_write_entries = shade_entries.clone();
-        let shade_entries = shade_entries.map(|mut entries| {
-            if crate::program::material_pass_on() { entries.extend(material_pass_gpu::entries(false)); }
-            entries
-        });
+        let shade_entries = [scene(2), texture(6, uint)]
+            .map(|visibility| shade_layout_entries(visibility, switches));
         let shade_bindings = shade_entries
             .each_ref()
             .map(|e| group("primary shading", e));
