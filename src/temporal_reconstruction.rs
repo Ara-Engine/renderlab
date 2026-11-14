@@ -755,8 +755,7 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         Some(mode) => mask_resolve(mode),
         None => RESOLVE.to_owned(),
     };
-    let cycle = std::env::var("RENDERLAB_TR1_COVERAGE_CYCLE").is_ok_and(|v| v == "1");
-    if cycle || std::env::var("RENDERLAB_TR1_COVERAGE_UNORM").is_ok_and(|v| v == "1") {
+    if let Some(cycle) = coverage_mode() {
         resolve = coverage_resolve(&resolve, cycle);
     }
     if let Ok(k) = std::env::var("RENDERLAB_P_SPLIT_FRESH_CLAMP") {
@@ -772,6 +771,16 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         include_str!("../shaders/object_motion.wgsl"),
         zones_source("tr1.zones")
     ))
+}
+
+pub(in crate::renderer) fn coverage_mode() -> Option<bool> {
+    if std::env::var("RENDERLAB_TR1_COVERAGE_CYCLE").is_ok_and(|v| v == "1") {
+        Some(true)
+    } else if std::env::var("RENDERLAB_TR1_COVERAGE_UNORM").is_ok_and(|v| v == "1") {
+        Some(false)
+    } else {
+        None
+    }
 }
 
 /// Coverage experiments only. Off, the resolve module is unchanged. Both encodings fit
@@ -1659,6 +1668,10 @@ impl ReconstructionState {
     #[cfg(test)]
     pub(in crate::renderer) fn test_samples(&self) -> &wgpu::Texture {
         &self.sample.texture
+    }
+    #[cfg(test)]
+    pub(in crate::renderer) fn test_layers(&self) -> &wgpu::Texture {
+        &self.layer[self.plan.parity].texture
     }
     /// Histories at the output size; the copy of the frame's samples at the internal size
     /// (equal at native resolution).

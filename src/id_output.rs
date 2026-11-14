@@ -21,13 +21,41 @@ const SHADER: &str = include_str!("../shaders/id_output.wgsl");
 const HANDOFF_MARK: &str = "// ---- Handoff:";
 /// The ID pass module: the shader up to its handoff section.
 pub(super) fn id_source() -> String {
-    SHADER.split_once(HANDOFF_MARK).unwrap().0.to_owned()
+    id_source_with_coverage(super::temporal_reconstruction::coverage_mode().is_some())
+}
+fn id_source_with_coverage(precise: bool) -> String {
+    let source = SHADER.split_once(HANDOFF_MARK).unwrap().0;
+    if !precise {
+        return source.to_owned();
+    }
+    let seam = "let coverage=unpack2x16float(l.w).x;";
+    assert_eq!(source.matches(seam).count(), 1, "TR1 ID coverage decoder");
+    source.replace(seam, "let coverage=tr1_unpack_coverage(l.x,l.w).x;")
+        + include_str!("../shaders/temporal_coverage_pack.wgsl")
 }
 /// The handoff module: the shader's handoff section alone.
 pub(super) fn handoff_source() -> String {
     format!("{HANDOFF_MARK}{}", SHADER.split_once(HANDOFF_MARK).unwrap().1)
 }
 const GLASS_SHADER: &str = include_str!("../shaders/id_glass.wgsl");
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+
+    #[test]
+    fn coverage_decoder_validates_and_off_is_original_module() {
+        assert_eq!(id_source_with_coverage(false), SHADER.split_once(HANDOFF_MARK).unwrap().0);
+        let source = id_source_with_coverage(true);
+        assert!(source.contains("let coverage=tr1_unpack_coverage(l.x,l.w).x;"));
+        for source in [id_source_with_coverage(false), source] {
+            let module = naga::front::wgsl::parse_str(&source).unwrap();
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all(),
+            ).validate(&module).unwrap();
+        }
+    }
+}
 /// Per-draw uniform stride of the glass raster (the device's offset alignment, at most).
 const DRAW_STRIDE: u64 = 256;
 const FRAME_BYTES: u64 = 32;

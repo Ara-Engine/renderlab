@@ -66,7 +66,11 @@ fn gpu_thin_coverage() {
             [0.01, 0.025, 0.08, 1.],
         );
         let mut placements: Vec<_> = (0..3)
-            .map(|_| r.try_upload_instances(&[Mat4::IDENTITY]).unwrap().unwrap())
+            .map(|_| {
+                let placement = r.try_upload_instances(&[Mat4::IDENTITY]).unwrap().unwrap();
+                r.test_drain("thin fixture placement");
+                placement
+            })
             .collect();
         r.test_drain("thin fixture placements");
         let color = target(&r, 160, 96);
@@ -97,10 +101,20 @@ fn gpu_thin_coverage() {
         let mut baseline_peak = 0f32;
         for mode in ["off", "unorm", "cycle"] {
             let raw = include_str!("../shaders/temporal_resolve.wgsl");
-            let resolve = match mode {
+            let mut resolve = match mode {
                 "off" => raw.to_owned(),
                 _ => temporal_reconstruction::coverage_resolve(raw, mode == "cycle"),
             };
+            // Shader-only iteration reuses this binary; the final compiled
+            // candidate still validates the exact embedded production sources.
+            if mode == "cycle" {
+                if let Ok(path) = std::env::var("RENDERLAB_THIN_CYCLE_SOURCE") {
+                    resolve = resolve.replace(
+                        include_str!("../shaders/temporal_coverage_cycle.wgsl"),
+                        &fs::read_to_string(path).unwrap(),
+                    );
+                }
+            }
             let body = format!(
                 "{}\n{resolve}\n{}",
                 include_str!("../shaders/object_motion.wgsl"),
@@ -114,8 +128,9 @@ fn gpu_thin_coverage() {
                 p.set(0, Mat4::IDENTITY).unwrap();
             }
             let mut previous = None::<Vec<f32>>;
+            let mut before_unrelated_mover = None::<Vec<f32>>;
             let mut peaks = vec![0f32; 160 * 96];
-            for frame in 0..440 {
+            for frame in 0..712 {
                 let x = if (408..424).contains(&frame) {
                     (frame - 407) as f32 * 0.004
                 } else if frame >= 424 {
@@ -132,6 +147,9 @@ fn gpu_thin_coverage() {
                         .set(0, Mat4::from_translation(Vec3::new(0.2, 0., 0.)))
                         .unwrap();
                 }
+                if frame == 700 {
+                    placements[1].set(0, Mat4::IDENTITY).unwrap();
+                }
                 draw(&mut r, &mut placements, x);
                 r.test_drain("thin frame");
                 if mode == "off" && frame < 256 {
@@ -143,12 +161,62 @@ fn gpu_thin_coverage() {
                         *mean += decode_f16(u16::from_le_bytes(b.try_into().unwrap())) / 256.;
                     }
                 }
-                if frame >= 400 {
+                if (400..440).contains(&frame) || (694..710).contains(&frame) {
                     let hdr: Vec<_> =
                         read_texture(&r, &r.view.hdr.as_ref().unwrap().resolved.texture)
                             .chunks_exact(2)
                             .map(|b| decode_f16(u16::from_le_bytes(b.try_into().unwrap())))
                             .collect();
+                    if mode == "cycle" && (frame == 699 || frame == 701) {
+                        // The global motion box also clamps colours in main. Test
+                        // geometric coverage directly, without mistaking that for
+                        // invalidation of the unchanged right rail's statistic.
+                        let words = read_texture(
+                            &r,
+                            r.view.reconstruction_state.as_ref().unwrap().test_layers(),
+                        );
+                        let coverage: Vec<_> = words
+                            .chunks_exact(16)
+                            .map(|b| {
+                                let flags = u32::from_le_bytes(b[..4].try_into().unwrap());
+                                if flags == u32::MAX {
+                                    return -1.;
+                                }
+                                let word = u32::from_le_bytes(b[12..16].try_into().unwrap());
+                                let c = if flags & 0x2000000 != 0 {
+                                    decode_f16(word as u16)
+                                        / decode_f16((word >> 16) as u16).max(1.)
+                                } else {
+                                    (word & 0xffff) as f32 / 65535.
+                                };
+                                if flags & 0x1000000 != 0 { c } else { 1. - c }
+                            })
+                            .collect();
+                        if frame == 699 {
+                            before_unrelated_mover = Some(coverage);
+                        } else {
+                            let before = before_unrelated_mover.as_ref().unwrap();
+                            let kept: Vec<_> = coverage
+                                .iter()
+                                .zip(before)
+                                .enumerate()
+                                .filter(|(i, (a, b))| i % 160 >= 92 && **a >= 0. && **b >= 0.)
+                                .collect();
+                            let max_right = kept
+                                .iter()
+                                .map(|(_, (a, b))| (*a - *b).abs())
+                                .fold(0f32, f32::max);
+                            eprintln!(
+                                "THIN_UNRELATED_MOVER {path} pairs={} max_right_coverage_delta={max_right}",
+                                kept.len()
+                            );
+                            assert!(kept.len() > 8, "fixture must retain right-rail pairs");
+                            assert_eq!(
+                                max_right, 0.,
+                                "unrelated mover must preserve settled coverage"
+                            );
+                        }
+                    }
                     if frame < 408 {
                         if let Some(prev) = previous.as_ref() {
                             for (i, (a, b)) in

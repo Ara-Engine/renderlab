@@ -36,14 +36,16 @@ variation. It is a bias fix hypothesis, not proof that Glint's crawl is fixed.
 The UNORM variant retains the existing exponential estimator. The cycle variant
 accumulates a two-surface count until 256 observations, then holds coverage while
 surface colour histories continue updating. On acquiring a held pair it retains
-at most four samples of the old coverage as a prior; a moving history's previous
-age cannot cause immediate settlement. Consequently this is a bounded estimator
+a young cumulative history; an untagged full-age history contributes at most four
+prior samples, so its previous age cannot cause immediate settlement. This is a bounded estimator
 with a small prior, not an exact analytic area integral.
 
 Cycle eligibility requires native resolution, a CPU-still view, no restart,
-no skin/moved receiver or paired placement, no motion-box event, no relevant
+no skin/moved receiver or paired placement, no relevant
 light restart, and both static/event windows at least 256. Motion, cuts and
-events immediately return to the original coverage update. Stable pair identity
+events immediately return to the original coverage update. The global motion
+box still clamps colour; an unrelated mover does not invalidate this pair's
+unchanged geometric coverage. Stable pair identity
 is checked before continuing counts. Third-surface retention preserves its
 existing two-layer limitation and bit-copies the coverage state.
 
@@ -57,17 +59,28 @@ target remains **rgba32uint**. Only its existing packed word changes:
   otherwise unused bit 25 of the layer identity word. Integers through 256 are
   exactly representable; a fractional spatial prior is quantized once per step.
 
-All coverage decoding is through `tr1_second`; the third-surface carry copies
+Coverage decoding is through `tr1_second` and the picking pass's `id_settle`;
+both use the shared decoder under either switch. The third-surface carry copies
 the word and tag without interpreting them. The image is never sampled as a
 float target. Colour fields, material/shading APIs and programmable shading are
 unchanged. Switch off composes the original resolve source unchanged.
 
 ## Validation status
 
-Prototype only. Linux lib: 297 passed, zero failed, 181 ignored. Both variant
-modules pass Naga validation. One guarded Windows release test build passed
-(76 seconds). The small GPU fixture is queued before the Ara candidate.
-The fixture compares held flicker and mean error to a full
-256-jitter raw-sample average, then captures camera motion, a cut and a moving
-placement. Actual Glint still/motion/cut crops decide retention; fewer changing
-pixels alone cannot certify quality or absence of ghosting.
+Prototype only. Linux lib: 301 passed, zero failed, 181 ignored; both resolve
+variants and picking decoder pass Naga. Guarded release builds pass. An initial
+small GPU visit starts/draws all three variants on both paths (25.18 seconds):
+
+| Path | Off / UNORM / cycle peak held HDR luma change | Mean error vs 256 raw samples |
+|---|---|---|
+| Non-RT | 0.0030335 / 0.0029297 / 0 | 0.000141818 / 0.000067360 / 0.000005562 |
+| RT | 0.0030335 / 0.0029297 / 0 | 0.000160756 / 0.000061929 / 0.000003740 |
+
+These are a constant-colour synthetic fixture, not Glint. Its cut frame is
+identical across variants. Inspection exposed a short-prior restart after an
+unrelated mover; preserving young cumulative priors and unchanged-pair counts
+addresses it. The focused regression reads coverage words directly: main's
+global motion box can change the unchanged line's colour too (0.2036 HDR delta
+in the control), so unchanged RGB is not a valid assertion for coverage alone.
+That correction's final GPU regression and actual Glint still/motion/cut crops
+remain pending. Fewer changing pixels alone do not certify absence of ghosting.
