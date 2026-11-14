@@ -56,6 +56,8 @@ def main():
     out = sys.argv[3] if len(sys.argv) > 3 else None
     base = {k: v for k, v in os.environ.items()
             if not any(k in env for env in SWITCHES.values())}
+    # LVIS defaults on in wgpu builds; unnamed sets must still mean explicitly off.
+    base["RENDERLAB_LIGHT_VIS_PASS"] = "0"
     failed = 0
     exact = os.environ.get("SWITCH_PAIRS_SETS")
     for name, env in sets():

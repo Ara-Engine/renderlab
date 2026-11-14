@@ -554,6 +554,9 @@ impl Renderer {
                 } else {
                     non_rt_sources(&self.source)?
                 };
+                // The default belongs to this running wgpu renderer, not to the
+                // compiled crate. Native callers retain unmarked, inline heads.
+                light_vis_pass::wgpu_heads(&mut heads);
                 // U-RTVIS: this renderer's default reflection pass, carried by its own heads (unset
                 // and forced-off renderers keep main's text).
                 if reflection_pass::default_on(&self.device)
@@ -701,7 +704,7 @@ impl ShadeSwitches {
             deferred: reflection_pass::deferred(device),
             diag: crate::program::rl_deferred_diag(),
             gi: gi_receiver_pass::on(),
-            lvis: light_vis_pass::on(),
+            lvis: light_vis_pass::on(true),
         }
     }
 }
@@ -2492,7 +2495,7 @@ impl Renderer {
             };
             let next = Targets {
                 material: crate::program::material_pass_on().then(|| crate::program::MATERIAL_RECORD_BINDINGS.map(|_| target("material record", size, wgpu::TextureFormat::Rgba32Uint))),
-                light_vis: light_vis_pass::on().then(|| Buffer::new(
+                light_vis: light_vis_pass::on(true).then(|| Buffer::new(
                     self, "local light visibility",
                     (u64::from(size.width) * u64::from(size.height) * light_vis_pass::PIXEL_BYTES)
                         .min(u64::from(self.device.limits().max_storage_buffer_binding_size)),

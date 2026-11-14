@@ -1173,6 +1173,7 @@ fn compose_stage(
     let composed = crate::renderer::primary_ray_gpu::light_vis_pass::apply(
         Composed { source, program: program_range },
         matches!(stage, Stage::Traced | Stage::TracedStreamed),
+        head.contains(crate::renderer::primary_ray_gpu::light_vis_pass::DEFAULT_HEAD_MARK),
     );
     if deferred {
         deferred_variant(composed)
