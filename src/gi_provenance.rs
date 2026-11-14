@@ -122,8 +122,8 @@ fn shading_for(mut s: String, eligible: bool, enabled: bool) -> String {
     // first is loaded before next/loop; explicitly restore its slot at return.
     replace(
         &mut s,
-        "{ return first; }",
-        "{ gp_slot=bucket+(gi_start(key)&(GI_BUCKET-1u)); return first; }",
+        "if (first.r0.x&GI_KEY_BITS)==key.x { return first; }",
+        "if (first.r0.x&GI_KEY_BITS)==key.x { gp_slot=bucket+(gi_start(key)&(GI_BUCKET-1u)); return first; }",
     );
     s
 }
