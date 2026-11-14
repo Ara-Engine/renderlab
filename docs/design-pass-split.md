@@ -25,7 +25,7 @@ lookups run at the whole kernel's register count and occupancy.
 
 | # | Pass | Dispatch | Reads | Writes |
 |---|------|----------|-------|--------|
-| P1 | **Material** (per program, MP1 lists at 32 lanes) | covered pixels | hit record, mesh attributes, material parameters and textures, decals | material record (group 0, bindings 75 and 78); S1's glossy-list entry; emission |
+| P1 | **Material** (per program, MP1 lists at 32 lanes) | covered pixels | hit record, mesh attributes, material parameters and textures, decals | material record (group 0 binding 75, one 2D array); S1's glossy-list entry; emission |
 | P2 | **GI receiver lookup** | indirect over covered pixels, small register footprint | geometry only: the hit record and camera ray (position, the vertex normal for the cell bin), cache tables | prepared SH, sky L2 + bounce L1, 48 B/px (binding 68); shading evaluates it at its shading normal |
 | P3a | **Local-light visibility** | coherent screen tiles | position, light clusters, the local atlas or ray query | unorm8 visibility, 16 slots a pixel (binding 73) |
 | P3b | **RT sun visibility**, split from the fused camera visibility | covered pixels | position, TLAS | sun visibility (binding 74) |
@@ -37,7 +37,7 @@ Units running tonight (2026-11-13), each behind a switch, default off:
 
 | Unit | Pass | Switch | Output |
 |------|------|--------|--------|
-| the Mac (`t3/material-pass`) | P1 material record | `RENDERLAB_MATERIAL_PASS=1` | bindings 75, 78 |
+| the Mac (`t3/material-pass`) | P1 material record | `RENDERLAB_MATERIAL_PASS=1` | binding 75 (one 2D array) |
 | U-GIPASS | P2 GI receiver lookup | `RENDERLAB_GI_PASS` | binding 68, prepared SH (sky L2 + bounce L1), 48 B/px |
 | U-LVIS | P3a local-light visibility | `RENDERLAB_LIGHT_VIS_PASS` | binding 73, unorm8 x 16 slots |
 | U-SUNRT | P3b RT sun visibility | `RENDERLAB_SUN_PASS` | binding 74 |
@@ -53,13 +53,13 @@ writes the record; the shading entry rebuilds `Surface` from it. Programs opt in
 declared mapping (the standard program does); the others keep the single kernel. It is also the
 seam a material graph plugs into later.
 
-48 bytes a pixel: three rgba32uint words in group 0, bindings 75, 78 and 74. That is 100 MB at 1080p and 398 MB at 4K, on top of the 16-byte hit image, which it does not retire. docs/design-material-pass.md has the exact layout, its precision, and the cost split.
+48 bytes a pixel: one rgba32uint 2D array at group 0 binding 75, receiver first (layer 0 word 1, layer 1 word 2, layer 2 word 0; a receiver-only producer allocates 2 layers). That is 100 MB at 1080p and 398 MB at 4K, on top of the 16-byte hit image, which it does not retire. docs/design-material-pass.md has the exact layout, its precision, and the cost split.
 
 | Word | Fields |
 |------|--------|
-| 0 (75) | shading normal (octahedral 2 x 16); base colour (3 x unorm16); coverage, metallic (2 x unorm8); emission (rgb9e5) |
-| 1 (78) | the receiver's geometric normal (octahedral 2 x 16); lighting model (8 bits, 255 = own `shade`), MQ2 lobe alpha, roughness (unorm16, rounded up); MQ2 view share and TR1 view hint; slot, near-edge, `thin`, source-front and lit-front bits |
-| 2 (74) | the receiver's trace point (3 x f32, shading's; at near-edge hits a reader that needs the sun path's repaired point repairs it); its epsilon (an f32 exponent); the interpolated vertex normal (octahedral 2 x 12) |
+| 0 (layer 2) | shading normal (octahedral 2 x 16); base colour (3 x unorm16); coverage, metallic (2 x unorm8); emission (rgb9e5) |
+| 1 (layer 0) | the receiver's geometric normal (octahedral 2 x 16); lighting model (8 bits, 255 = own `shade`), MQ2 lobe alpha, roughness (unorm16, rounded up); MQ2 view share and TR1 view hint; slot, near-edge, `thin`, source-front and lit-front bits |
+| 2 (layer 1) | the receiver's trace point (3 x f32, shading's; at near-edge hits a reader that needs the sun path's repaired point repairs it); its epsilon (an f32 exponent); the interpolated vertex normal (octahedral 2 x 12) |
 
 The material pass is the decode-once pass, for every hit whatever its program (model 255 and a receiver-only record without the mapping). Words 1 and 2 are the receiver that the sun, GI and light-visibility passes and shading read instead of decoding the hit. The standard program's per-light specular filter still fetches vertex attributes in shading; that is what the standard path keeps (docs/design-material-pass.md).
 

@@ -33,7 +33,34 @@ pub(crate) fn source() -> Result<String> {
     let head = hard
         .strip_suffix(TRACE)
         .context("original primary trace composition changed")?;
-    Ok(format!("{head}{}", portable_trace()?))
+    let trace = format!("{head}{}", portable_trace()?);
+    if crate::program::material_pass_on() {
+        material_receivers_edits(trace, crate::program::material_trace_tail())
+    } else {
+        Ok(trace)
+    }
+}
+/// RENDERLAB_MATERIAL_PASS=1, the non-interactive trace (`primary_trace_receivers`, whose hits
+/// are repaired already): the miss sentinel on every pixel without a hit, and with `tail` the
+/// receiver words on hits (the point is the repaired one).
+fn material_receivers_edits(trace: String, tail: bool) -> Result<String> {
+    let mut edits: Vec<(&str, &str)> = vec![(
+        "    if !primary_tile_covered(trace.record.x!=0u,id.xy,group.xy) || any(id.xy>=size) {return;}\n    let p=vec2<i32>(id.xy);\n    textureStore(primary_hit_output,p,trace.record);",
+        "    let rl_covered=primary_tile_covered(trace.record.x!=0u,id.xy,group.xy);\n    if all(id.xy<size) && trace.record.x==0u {rl_receiver_miss(vec2<i32>(id.xy));}\n    if !rl_covered || any(id.xy>=size) {return;}\n    let p=vec2<i32>(id.xy);\n    textureStore(primary_hit_output,p,trace.record);",
+    )];
+    if tail {
+        edits.push((
+            "    let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);\n    textureStore(primary_world_output,",
+            "    let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);\n    rl_receiver_store(p,trace,receiver);\n    textureStore(primary_world_output,",
+        ));
+    }
+    let mut trace = trace;
+    for (seam, with) in edits {
+        ensure!(trace.matches(seam).count() == 1, "receivers trace seam changed: {seam}");
+        trace = trace.replacen(seam, with, 1);
+    }
+    trace.push_str(&crate::program::material_trace_writes());
+    Ok(trace)
 }
 const TRACE: &str = include_str!("../../shaders/primary_trace.wgsl");
 
@@ -115,9 +142,53 @@ pub(crate) fn interactive_source(rotated: bool) -> Result<String> {
     let soft = soft
         .replace(TRACE, &portable_trace()?)
         .replace(marker, "override FRESH_DIRECTIONS:u32=8u;");
-    Ok(if rotated {
+    let soft = if rotated {
         crate::renderer::primary_ray_gpu::temporal_reconstruction::trace_source(&soft)?
     } else {
         soft
-    })
+    };
+    if crate::program::material_pass_on() {
+        material_trace_edits(soft, crate::program::material_trace_tail())
+    } else {
+        Ok(soft)
+    }
+}
+/// RENDERLAB_MATERIAL_PASS=1: the interactive kernels write the material record's miss sentinel
+/// on every pixel without a camera hit (the dispatch covers the whole image, the region's
+/// exterior included), and with `tail` (`program::material_trace_tail`) the receiver words on
+/// hits, the repair kernel rewriting them where it moves a hit.
+fn material_trace_edits(soft: String, tail: bool) -> Result<String> {
+    let mut edits: Vec<(&str, String)> = vec![
+        (
+            "    if !inside || covered==0u {return;}\n",
+            "    if inside && trace.record.x==0u {rl_receiver_miss(vec2<i32>(id.xy));}\n    if !inside || covered==0u {return;}\n".to_owned(),
+        ),
+        (
+            "    if !in_bounds || covered==0u {return;}\n",
+            "    if in_bounds && trace.record.x==0u {rl_receiver_miss(vec2<i32>(id.xy));}\n    if !in_bounds || covered==0u {return;}\n".to_owned(),
+        ),
+    ];
+    if tail {
+        edits.extend([
+            (
+                "        let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);\n        visible=fresh_estimate(",
+                "        let receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,p);\n        rl_receiver_store(p,trace,receiver);\n        visible=fresh_estimate(".to_owned(),
+            ),
+            (
+                "trace.record.x,trace.record.y,trace.record.z,trace.record.w);\n        }\n",
+                "trace.record.x,trace.record.y,trace.record.z,trace.record.w);\n        }\n        rl_receiver_store(p,trace,receiver);\n".to_owned(),
+            ),
+            (
+                "    let receiver=primary_receiver(trace.point,trace.positions,slot,p);\n",
+                "    let receiver=primary_receiver(trace.point,trace.positions,slot,p);\n    rl_receiver_store(p,trace,receiver);\n".to_owned(),
+            ),
+        ]);
+    }
+    let mut soft = soft;
+    for (seam, with) in edits {
+        ensure!(soft.matches(seam).count() == 1, "interactive kernel seam changed: {seam}");
+        soft = soft.replacen(seam, &with, 1);
+    }
+    soft.push_str(&crate::program::material_trace_writes());
+    Ok(soft)
 }
