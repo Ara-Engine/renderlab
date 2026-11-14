@@ -26,6 +26,13 @@ const RL_TERM_TEXTURES:u32=16u;
 // The light loop's BRDF evaluation (shaders/programs/standard.wgsl): without it each
 // light's response is a constant Lambert lobe.
 const RL_TERM_BRDF:u32=32u;
+// The untraced environment specular (the prefiltered sky and ES1's lobes) in the standard program.
+const RL_TERM_ENVIRONMENT:u32=64u;
+// The indirect diffuse light (the GI cache's irradiance) in the standard program.
+const RL_TERM_INDIRECT:u32=128u;
+// Aerial perspective and fog on the camera receiver (src/shade_detail.rs opens
+// `atmosphere_surface` with an early return when this bit is off).
+const RL_TERM_ATMOSPHERE:u32=256u;
 fn rl_term(term:u32) -> bool { return (RL_SHADE_TERMS&term)!=0u; }
 
 // Everything a program may read about its receiver. Raster frames fill it from
