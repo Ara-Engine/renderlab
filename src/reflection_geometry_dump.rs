@@ -10,13 +10,34 @@ use std::{
     sync::{Mutex, OnceLock, Weak},
 };
 
-struct Config {
-    directory: PathBuf,
-    frame: u64,
+/// The dump's switch: its directory and frame (the glossy-list dump, reflection_list_dump.rs,
+/// shares both).
+pub(super) struct Config {
+    pub(super) directory: PathBuf,
+    pub(super) frame: u64,
     attempted: Mutex<Vec<Weak<()>>>,
 }
 
-const DISK_FLOOR: u64 = 10 * 1024 * 1024 * 1024;
+/// `RENDERLAB_REFLECTION_GEOMETRY_DUMP` and its frame, read once; None while unset.
+pub(super) fn config() -> Option<&'static Config> {
+    static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
+    CONFIG
+        .get_or_init(|| {
+            std::env::var_os("RENDERLAB_REFLECTION_GEOMETRY_DUMP")
+                .filter(|p| !p.is_empty())
+                .map(|directory| Config {
+                    directory: directory.into(),
+                    frame: std::env::var("RENDERLAB_REFLECTION_GEOMETRY_DUMP_FRAME")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(30),
+                    attempted: Mutex::new(Vec::new()),
+                })
+        })
+        .as_ref()
+}
+
+pub(super) const DISK_FLOOR: u64 = 10 * 1024 * 1024 * 1024;
 
 fn render_identity(renderer: &Renderer) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
@@ -48,7 +69,7 @@ fn existing_ancestor(path: &Path) -> io::Result<PathBuf> {
 }
 
 #[cfg(windows)]
-fn free_space(path: &Path) -> io::Result<u64> {
+pub(super) fn free_space(path: &Path) -> io::Result<u64> {
     use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
@@ -81,7 +102,7 @@ fn free_space(path: &Path) -> io::Result<u64> {
 }
 
 #[cfg(not(windows))]
-fn free_space(path: &Path) -> io::Result<u64> {
+pub(super) fn free_space(path: &Path) -> io::Result<u64> {
     let existing = existing_ancestor(path)?;
     let output = std::process::Command::new("df")
         .args(["-Pk", "--"])
@@ -101,19 +122,7 @@ fn free_space(path: &Path) -> io::Result<u64> {
 
 /// The unset case returns before inspecting draws or repacking any geometry.
 pub(super) fn maybe_dump(renderer: &Renderer, draws: &[PreparedDraw<'_>], reserved: usize) {
-    static CONFIG: OnceLock<Option<Config>> = OnceLock::new();
-    let Some(config) = CONFIG.get_or_init(|| {
-        std::env::var_os("RENDERLAB_REFLECTION_GEOMETRY_DUMP")
-            .filter(|p| !p.is_empty())
-            .map(|directory| Config {
-                directory: directory.into(),
-                frame: std::env::var("RENDERLAB_REFLECTION_GEOMETRY_DUMP_FRAME")
-                    .ok()
-                    .and_then(|v| v.parse().ok())
-                    .unwrap_or(30),
-                attempted: Mutex::new(Vec::new()),
-            })
-    }) else {
+    let Some(config) = config() else {
         return;
     };
     if renderer.frames != config.frame {

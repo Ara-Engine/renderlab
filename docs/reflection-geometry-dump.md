@@ -35,7 +35,33 @@ objects. Those provenance fields are explicitly null, rather than guessed from
 triangle counts. A bridge-side mapping can add that attribution later. The raw
 packing still supplies exact submitted software instance and BLAS counts.
 
-This diagnostic does not contain the GPU glossy-pixel list, actual reflection
-directions, or rays-per-slot counters. A separate frame-matched pass-list probe
-is required for replaying real rays. Keep diagnostic runs out of timing claims;
+The geometry snapshot itself does not contain the GPU glossy-pixel list,
+actual reflection directions, or rays-per-slot counters; the glossy-list
+snapshot below supplies the list. Keep diagnostic runs out of timing claims;
 raw geometry and manifests belong in ignored local output directories.
+
+## Glossy-pixel list snapshot
+
+Where the reflection pass runs (with ray hardware by default once its default
+is on, otherwise `RENDERLAB_RL_PASS=1 RENDERLAB_RL_DEFERRED=1`), the same switch
+and frame also copy that frame's glossy-pixel list L after the trace
+(src/reflection_list_dump.rs). It uses the same directory and the same stem, so
+a frame's two snapshots pair up:
+
+- `<stem>.glossy.bin`: L's 16-byte header (word 0 is the appended length) and
+  its listed entries, 48 bytes each, in the layout `rl_trace_pixels` reads
+  (shaders/reflections_trace.wgsl; the JSON spells it out).
+- `<stem>.glossy-epsilon.bin`: each listed entry's receiver epsilon (the
+  trace's tmin, `rl_receiver_epsilon` at its pixel) as f32 bits.
+- `<stem>.glossy.json`, written last: path (`rt` or `nonrt`), frame, view,
+  generation (the software geometry's, 0 with ray hardware), the trace's
+  direction seed `primary_frame.sided.y` as written that frame, the room, the
+  view size, the appended length, the capacity and the listed count. Appended
+  entries beyond the capacity stayed inline and are not listed.
+
+The directions follow from these exactly: `rl_trace_pixels` derives each
+stratum from the entry, its pixel and the seed. It is one buffer copy and one
+texture copy, mapped on submission, with no wait. While the switch is set, L
+and the frame targets gain `COPY_SRC`, a usage flag only. Without the switch,
+nothing is copied and no usage changes. With ray hardware there is no geometry
+snapshot: the driver builds that path's acceleration structures.
