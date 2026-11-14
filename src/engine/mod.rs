@@ -317,6 +317,7 @@ impl Engine {
                 "HardwareRt needs the ExperimentalRayQuery acknowledgment",
             ));
         }
+        crate::material_mode::Mode::validate(&adapter.limits())?;
         if !Capabilities::query(adapter).supports(path) {
             return Err(Error::InvalidInput(
                 "adapter lacks this render path's features or limits",
