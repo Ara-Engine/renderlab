@@ -33,8 +33,23 @@ fn render_identity(renderer: &Renderer) -> u64 {
     h.finish()
 }
 
+fn existing_ancestor(path: &Path) -> io::Result<PathBuf> {
+    let mut existing = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    while !existing.exists() {
+        if !existing.pop() {
+            return Err(io::Error::other("dump path has no existing ancestor"));
+        }
+    }
+    existing.canonicalize()
+}
+
 #[cfg(windows)]
-fn free_space(_: &Path) -> io::Result<u64> {
+fn free_space(path: &Path) -> io::Result<u64> {
+    use std::os::windows::ffi::OsStrExt;
     #[link(name = "kernel32")]
     unsafe extern "system" {
         fn GetDiskFreeSpaceExW(
@@ -45,10 +60,14 @@ fn free_space(_: &Path) -> io::Result<u64> {
         ) -> i32;
     }
     let mut available = 0;
-    // The unit's output disk is D:, regardless of the checkout's drive.
+    let path: Vec<u16> = existing_ancestor(path)?
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
     let ok = unsafe {
         GetDiskFreeSpaceExW(
-            [68u16, 58, 92, 0].as_ptr(),
+            path.as_ptr(),
             &mut available,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
@@ -63,12 +82,7 @@ fn free_space(_: &Path) -> io::Result<u64> {
 
 #[cfg(not(windows))]
 fn free_space(path: &Path) -> io::Result<u64> {
-    let mut existing = path;
-    while !existing.exists() {
-        existing = existing
-            .parent()
-            .ok_or_else(|| io::Error::other("dump path has no existing ancestor"))?;
-    }
+    let existing = existing_ancestor(path)?;
     let output = std::process::Command::new("df")
         .args(["-Pk", "--"])
         .arg(existing)
@@ -168,7 +182,9 @@ pub(super) fn maybe_dump(renderer: &Renderer, draws: &[PreparedDraw<'_>], reserv
                 "{{\"slot\":{slot},\"model_bits\":{:?},\"casts_shadows\":{},\"included\":{}}}",
                 model.to_cols_array().map(f32::to_bits),
                 draw.instances.state.casts_shadows(i),
-                mesh.is_some() && draw.mesh.skin.is_none() && model.determinant() != 0.0,
+                mesh.is_some()
+                    && draw.mesh.skin.is_none()
+                    && geometry::instance_inverse(model).is_some(),
             ));
             slot += 1;
         }
@@ -277,17 +293,31 @@ mod tests {
     fn snapshot_contains_exact_live_records_and_mesh_words() {
         let mesh = Blas::build(&[[0., 0., 0.], [1., 0., 0.], [0., 1., 0.]], &[0, 1, 2]).unwrap();
         let refs = [&mesh];
-        let packed = geometry::pack(&refs, 2);
+        let near_singular = Mat4::from_scale(glam::Vec3::new(f32::from_bits(1), 1., 1.));
+        assert_ne!(near_singular.determinant(), 0.);
+        assert!(!near_singular.inverse().is_finite());
+        let models = [Mat4::IDENTITY, Mat4::ZERO, near_singular];
+        let sources = serde_json::json!([{
+            "placements": models.map(|model| serde_json::json!({
+                "included": geometry::instance_inverse(&model).is_some(),
+            })),
+        }])
+        .to_string();
+        let packed = geometry::pack(&refs, models.len());
         let mut records = geometry::instance_words(&[
             (7, Mat4::IDENTITY, &mesh, packed.bases[0], false),
             (8, Mat4::ZERO, &mesh, packed.bases[0], true),
+            (9, near_singular, &mesh, packed.bases[0], true),
         ]);
-        records.resize(geometry::HEADER_WORDS + 2 * geometry::INSTANCE_WORDS, 0);
+        records.resize(
+            geometry::HEADER_WORDS + models.len() * geometry::INSTANCE_WORDS,
+            0,
+        );
         crate::instance_bvh::place(
             &mut records,
             geometry::HEADER_WORDS,
             geometry::INSTANCE_WORDS,
-            2,
+            models.len(),
             &[],
         );
         let path = std::env::temp_dir().join(format!(
@@ -298,23 +328,33 @@ mod tests {
                 .unwrap()
                 .as_nanos(),
         ));
+        assert_eq!(
+            existing_ancestor(&path.join("nested")).unwrap(),
+            std::env::temp_dir().canonicalize().unwrap(),
+        );
         write_snapshot(
             &path,
             "sample",
             30,
             0,
             2,
-            2,
+            models.len(),
             &refs,
             &packed.bases,
             &records,
-            "[]",
+            &sources,
         )
         .unwrap();
         let meta: serde_json::Value =
             serde_json::from_slice(&fs::read(path.join("sample.json")).unwrap()).unwrap();
         assert_eq!(meta["written_instances"], 1);
-        assert_eq!(meta["reserved_instances"], 2);
+        assert_eq!(meta["reserved_instances"], 3);
+        let placements = meta["source_draws"][0]["placements"].as_array().unwrap();
+        assert_eq!(
+            placements.iter().filter(|p| p["included"] == true).count(),
+            records[0] as usize
+        );
+        assert_eq!(placements[2]["included"], false);
         assert_eq!(meta["meshes"][0]["triangles"], 1);
         assert_eq!(meta["meshes"][0]["depth"], 0);
         let mut expected = packed.words;

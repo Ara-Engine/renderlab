@@ -209,6 +209,15 @@ pub(crate) fn pack(meshes: &[&Blas], instances: usize) -> Packed {
     Packed { bases, words }
 }
 
+/// The shared packing/export inclusion check, returning the inverse used by the record.
+pub(crate) fn instance_inverse(model: &Mat4) -> Option<Mat4> {
+    if model.determinant() == 0.0 {
+        return None;
+    }
+    let inverse = model.inverse();
+    inverse.is_finite().then_some(inverse)
+}
+
 /// The header and instance records: per traced instance its placement slot, model, mesh,
 /// that mesh's bases from `pack`, and whether it casts shadows. Singular models are skipped
 /// (they draw nothing).
@@ -216,13 +225,9 @@ pub(crate) fn instance_words(records: &[(u32, Mat4, &Blas, [u32; 2], bool)]) -> 
     let mut out = vec![0u32; HEADER_WORDS];
     let mut count = 0u32;
     for &(slot, model, blas, [nodes, triangles], casts) in records {
-        if model.determinant() == 0.0 {
+        let Some(inverse) = instance_inverse(&model) else {
             continue;
-        }
-        let inverse = model.inverse();
-        if !inverse.is_finite() {
-            continue;
-        }
+        };
         let rows = inverse.transpose();
         for r in 0..3 {
             out.extend(rows.col(r).to_array().map(f32::to_bits));

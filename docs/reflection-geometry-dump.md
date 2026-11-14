@@ -10,8 +10,8 @@ separately in the capture gate.
 `RENDERLAB_REFLECTION_GEOMETRY_DUMP_FRAME` selects the renderer's zero-based
 pre-submission frame counter (default 30). Use a settled frame after loading.
 The dump is attempted once per renderer, including on I/O or space failure.
-The Windows path refuses a dump unless D: has the payload estimate plus a
-10 GiB floor free. Other hosts check the destination filesystem. The successful
+The dump is refused unless its destination filesystem has the payload estimate
+plus a 10 GiB floor free, checked at the nearest existing ancestor. The successful
 log prints the actual metadata-plus-payload byte count. I/O failure does not
 reject rendering.
 
@@ -27,8 +27,8 @@ triangle/node count, maximum depth, root and local bounds. Floating-point bounds
 and original placement matrices are stored as u32 bits. Mesh generation IDs are
 stable within a geometry generation; they are not cross-process asset IDs.
 Source draw index ranges, slot order, skinned status and casts flags are also
-recorded. Singular placements remain in the provenance list but are marked
-excluded, matching the native packing.
+recorded. Singular placements and placements whose inverse is non-finite remain
+in the provenance list but are marked excluded, using the native packing's check.
 
 The renderer does not retain bridge asset/batch/terrain/foliage names in these
 objects. Those provenance fields are explicitly null, rather than guessed from
