@@ -192,6 +192,10 @@ mod tests {
             assert_eq!(on(default), requested.unwrap_or(default) && !bound);
         }
         let original = shading_heads(include_str!("../shaders/scene.wgsl")).unwrap();
+        for head in original.iter().chain(heads(include_str!("../shaders/scene.wgsl")).unwrap().iter()) {
+            assert!(!head.contains(DEFAULT_HEAD_MARK));
+        }
+        assert!(!transparent_reflection_head(include_str!("../shaders/scene.wgsl")).unwrap().contains(DEFAULT_HEAD_MARK));
         let mut wgpu = original.clone();
         wgpu_heads(&mut wgpu);
         for (head, expected) in [(&original[1], on(false)), (&wgpu[1], on(true))] {
