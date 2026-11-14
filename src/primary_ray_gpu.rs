@@ -2862,7 +2862,6 @@ impl Renderer {
                         abi,
                         pass,
                         frame.as_entire_binding(),
-                        &t.epsilon.view,
                         geometry,
                     )
                 }),

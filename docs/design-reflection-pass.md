@@ -313,8 +313,9 @@ shaders/reflections_trace.wgsl, and `rl_cast` in reflections.wgsl.
 - **`rl_trace`** (8x8 slots a group) picks a glossy pixel of the quad: frame + hash(slot) mod 4
   first, then the next positions. It takes stratum (frame + hash(pixel)) mod count of today's
   set, with today's VNDF direction, radial and rotation. It casts with `rl_cast` (RT ray query;
-  the software BVH on non-RT), and its `tmin` is 1e-4 x the origin's distance from the world
-  origin, not the receiver's own epsilon.
+  the software BVH on non-RT). Its `tmin` is the receiver's own epsilon, as the inline loop's,
+  carried in the list entry (word 2's z). Until 2026-11-14 it was read from the primary epsilon
+  target, which nothing writes with ray hardware, so that path traced from 0.
   - It clears R and D at every slot, writes a miss's sky into R (a = 1), and writes the hit or
     miss distance into D (binding 59; -1 a miss, -2 no ray).
   - It appends a hit's 48-byte record to H (binding 64) with one atomic per workgroup.

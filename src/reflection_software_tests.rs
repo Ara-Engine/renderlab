@@ -384,7 +384,7 @@ fn deferred_reflection_modules_validate_on_every_traced_head() {
         let passed = crate::program::pass_block(deferred_standard(head)).source;
         assert!(passed.contains("const RL_DEFERRED_PROGRAM:bool=true;"));
         assert!(passed.contains(
-            "rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count);"
+            "rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count,receiver.epsilon);"
         ));
         if !crate::program::rl_deferred_for(head) && !crate::program::rl_pass_for(head) {
             let plain = crate::program::pass_block(compose(
