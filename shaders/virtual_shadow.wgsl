@@ -1333,6 +1333,47 @@ var<workgroup> vsm_wg_mip_b:array<f32,1024>;
         s/=2u;
     }
 }
+// ---- Outline bits (the Disk lookup's VD_EDGES) ----
+// Per texel of each page drawn this frame, 4 bits: which in-page neighbours (-x, +x, -y, +y)
+// are empty or of another placement; 0 for an empty texel. Word index = the top word's index
+// / 8 in either layout. Sides across a page edge stay 0: the lookup reads those neighbours.
+@group(0) @binding(57) var<storage,read_write> vsm_outline_out:array<u32>;
+// The page whose (0, 0) texel is word i0 of the top layer, rows `stride` words apart.
+fn vsm_outline_page(i0:u32,stride:u32,li:u32) {
+    let bits=vsm.misc.x;
+    let row=VSM_PAGE/8u;
+    for(var w=li;w<VSM_PAGE*row;w+=256u) {
+        let y=w/row;let x0=(w%row)*8u;
+        var word=0u;
+        for(var k=0u;k<8u;k+=1u) {
+            let x=x0+k;let i=i0+y*stride+x;
+            let id=vsm_top_words[i].x;
+            if id==0u {continue;}
+            let own=id>>bits;
+            var nibble=0u;
+            if x>0u {let o=vsm_top_words[i-1u].x; if o==0u || o>>bits!=own {nibble|=1u;}}
+            if x<VSM_PAGE-1u {let o=vsm_top_words[i+1u].x; if o==0u || o>>bits!=own {nibble|=2u;}}
+            if y>0u {let o=vsm_top_words[i-stride].x; if o==0u || o>>bits!=own {nibble|=4u;}}
+            if y<VSM_PAGE-1u {let o=vsm_top_words[i+stride].x; if o==0u || o>>bits!=own {nibble|=8u;}}
+            word|=nibble<<(4u*k);
+        }
+        vsm_outline_out[(i0+y*stride+x0)>>3u]=word;
+    }
+}
+// Dense: one workgroup per page slot, those drawn this frame.
+@compute @workgroup_size(256) fn vsm_outline_dense(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let slot=group.x;
+    if vsm_render[slot]==0u {return;}
+    let pages=vsm.counts.y;let per=pages*pages;
+    let level=slot/per;let local=slot%per;
+    let side=pages*VSM_PAGE;
+    vsm_outline_page((level*side+(local/pages)*VSM_PAGE)*side+(local%pages)*VSM_PAGE,side,li);
+}
+// Sparse: one workgroup per page drawn this frame (an indirect dispatch over the pool's list).
+@compute @workgroup_size(256) fn vsm_outline_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let slot=vsm_pages[vsm_section(2u)+vsm_rendered(group.x)];
+    vsm_outline_page(slot*VSM_PAGE*VSM_PAGE,VSM_PAGE,li);
+}
 // Whether no top-layer texel centre a ray can sample within `radius` of `centre` (light xy)
 // at clip `level` is above `lower`: the max over at most 2x2 cells of the mip whose cells
 // span the footprint. Conservative: false at window edges.

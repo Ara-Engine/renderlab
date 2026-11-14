@@ -419,6 +419,8 @@ struct Pipelines {
     allocate: Owned<wgpu::ComputePipeline>,
     clear_sparse: Owned<wgpu::ComputePipeline>,
     mip_sparse: Owned<wgpu::ComputePipeline>,
+    /// The Disk lookup's outline bits per drawn page (vsm_outline_dense, vsm_outline_sparse).
+    outline: [Owned<wgpu::ComputePipeline>; 2],
 }
 struct Layouts {
     mark: Owned<wgpu::BindGroupLayout>,
@@ -517,6 +519,8 @@ struct Resources {
     peel: Owned<wgpu::Buffer>,
     /// Max-mips of the top layer's heights per level (mips 1..log2(side)).
     mips: Owned<wgpu::Buffer>,
+    /// The Disk lookup's outline bits: 4 per texel, word = top word index / 8 (VD_EDGES).
+    outline: Owned<wgpu::Buffer>,
     /// N8k: per texel per level, the top and peel planes (8 bytes) and their planarity
     /// errors (4 bytes); 16 bytes each unless the lookup is `VirtualLookup::Map`.
     planes: Owned<wgpu::Buffer>,
@@ -1165,6 +1169,7 @@ impl VirtualState {
                     storage(36, false, S::COMPUTE),
                     storage(54, true, S::COMPUTE),
                     storage(55, true, S::COMPUTE),
+                    storage(57, false, S::COMPUTE),
                 ],
             ),
             data: group(
@@ -1299,6 +1304,7 @@ impl VirtualState {
                         },
                     ),
                     storage(55, true, S::COMPUTE),
+                    storage(56, true, S::COMPUTE),
                 ],
             ),
         };
@@ -1527,6 +1533,10 @@ impl VirtualState {
             allocate: compute("vsm_allocate", &allocate_layout, &[]),
             clear_sparse: compute("vsm_clear_sparse", &clear_layout, &[]),
             mip_sparse: compute("vsm_mip_sparse", &mip_layout, &[]),
+            outline: [
+                compute("vsm_outline_dense", &mip_layout, &[]),
+                compute("vsm_outline_sparse", &mip_layout, &[]),
+            ],
         };
         Self {
             settings: VirtualShadowSettings::default(),
@@ -1788,7 +1798,14 @@ impl VirtualState {
         } else {
             32
         };
+        // Four bits per texel of the top layer.
+        let outline_bytes = if self.settings.lookup == VirtualLookup::Disk {
+            (map_bytes / 16).max(4)
+        } else {
+            4
+        };
         let bytes = 2 * map_bytes
+            + outline_bytes
             + plane_bytes
             + error_bytes
             + minmip_bytes
@@ -1834,6 +1851,7 @@ impl VirtualState {
             top: buffer("N8c clipmap top layer", map_bytes, B::STORAGE),
             peel: buffer("N8c clipmap peel layer", map_bytes, B::STORAGE),
             mips: buffer("N8c clipmap max-mips", mip_bytes.max(4), B::STORAGE),
+            outline: buffer("Disk lookup outline bits", outline_bytes, B::STORAGE),
             planes: buffer("N8k clipmap texel planes", plane_bytes, B::STORAGE),
             errors: buffer("N8k clipmap planarity errors", error_bytes, B::STORAGE),
             minmips: buffer("N8k clipmap min-mips", minmip_bytes, B::STORAGE),
@@ -3151,6 +3169,7 @@ impl Renderer {
                         buffer(36, &r.mips),
                         buffer(54, &r.pool),
                         buffer(55, &r.state),
+                        buffer(57, &r.outline),
                     ],
                 ),
                 pass: group(
@@ -3236,6 +3255,7 @@ impl Renderer {
                         buffer(35, &r.mips),
                         buffer(50, &r.disk_frame),
                         buffer(55, &r.state),
+                        buffer(56, &r.outline),
                     ],
                 ),
                 queued: group(
@@ -3641,6 +3661,18 @@ impl Renderer {
             label: Some("N8c clipmap max-mips"),
             timestamp_writes: None,
         });
+        // The Disk lookup's outline bits of the pages drawn this frame.
+        if state.settings.lookup == VirtualLookup::Disk {
+            pass.set_bind_group(0, &*g.mip, &[]);
+            pass.set_bind_group(3, &*g.pass, &[0]);
+            if r.sparse {
+                pass.set_pipeline(&p.outline[1]);
+                pass.dispatch_workgroups_indirect(&r.pool, 0);
+            } else {
+                pass.set_pipeline(&p.outline[0]);
+                pass.dispatch_workgroups(slots as u32, 1, 1);
+            }
+        }
         if r.sparse {
             // In-page mips of the pages rasterized this frame (none when no page was flagged).
             pass.set_pipeline(&p.mip_sparse);
