@@ -1,8 +1,8 @@
 //! Coherent local-light visibility before material shading. Child of primary_ray_gpu.
 use super::*;
 use crate::program::{self, Stage};
-pub(super) const BINDING: u32 = 73;
-pub(super) const PIXEL_BYTES: u64 = 16;
+pub(crate) const BINDING: u32 = 73;
+pub(crate) const PIXEL_BYTES: u64 = 16;
 #[derive(Clone)]
 pub(super) struct Pipeline {
     head: String,
@@ -10,7 +10,9 @@ pub(super) struct Pipeline {
 }
 const API: &str = include_str!("../shaders/light_vis_pass.wgsl");
 const LOCAL: &str = "    if lights[s.index].kind.w!=0u { return rl_local_shadow(";
-const PASS_PROGRAM: &str = "struct Surface { unused:f32 }; fn surface(input:SurfaceInput)->Surface {return Surface(0.0);} fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {return vec3<f32>(0.0);}";
+/// The pass's own program: no surface or shading of its own (also composed by the ara-gpu
+/// port, `backend_ara::light_vis`).
+pub(crate) const PASS_PROGRAM: &str = "struct Surface { unused:f32 }; fn surface(input:SurfaceInput)->Surface {return Surface(0.0);} fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {return vec3<f32>(0.0);}";
 const PREPARE: &str = "    rl_lights_prepare(surface_input.world);";
 /// Only the wgpu renderer adds this mark to its own shading heads. The port uses
 /// unmarked heads, so composition receives default=false even in a shared build.

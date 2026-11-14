@@ -2757,6 +2757,30 @@ fn rl_receiver_store(p:vec2<i32>,trace:PrimaryTrace,receiver:Receiver) {{
         line("const RL_MR_MISS_WORD1"),
     )
 }
+/// The local-light visibility pass's per-pixel helper (`light_vis_pass`, `rl_lvis_pixel`) built
+/// from the material record's receiver layers instead of decoding the hit: the receiver, the
+/// world point and the pixel are all the pass reads (`light_sample_untinted`,
+/// `light_visibility`). Pixels whose word 1 holds the miss sentinel are skipped. None when the
+/// module has no `rl_lvis_pixel` (the pass is off).
+pub(crate) fn light_vis_from_record(mut source: String) -> Option<String> {
+    let start = source.find("fn rl_lvis_pixel(")?;
+    const END: &str = "    rl_lvis_store(surface_input);\n}\n";
+    let end = start + source[start..].find(END)? + END.len();
+    source.replace_range(
+        start..end,
+        "fn rl_lvis_pixel(id:vec2<u32>,size:vec2<u32>) {\n\
+         \x20   let pixel=vec2<i32>(id);\n\
+         \x20   let b=textureLoad(rl_material,pixel,0,0);\n\
+         \x20   if rl_mr_miss(b) { return; }\n\
+         \x20   let material=primary_materials[primary_placements[b.w&0x0fffffffu]&0x1fffffffu].value;\n\
+         \x20   rl_lvis_store(rl_material_input(pixel,id,size,material));\n\
+         }\n",
+    );
+    source.push_str(MATERIAL_PACKING);
+    source.push_str(MATERIAL_READ);
+    source.push_str(MATERIAL_NO_DECODE);
+    Some(source)
+}
 /// The `nodecode` probe's entry edits: the `SurfaceInput` from the record, and the entry's
 /// later reads of the decoded point and side from it, so the vertex fetch is dead code.
 fn material_no_decode(mut composed: Composed, entry: usize) -> Option<Composed> {
