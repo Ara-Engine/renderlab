@@ -267,12 +267,16 @@ mod tests {
                     .output().unwrap();
                 assert!(output.status.success(), "switch {enabled}: {}{}",
                     String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
+                    "the child must execute exactly the deferral test");
             }
             return;
         }
         let original = kernel_source_base(true, 64);
         let actual = kernel_source(true, 64);
-        if !on() {
+        let enabled = std::env::var("RENDERLAB_GI_BOUNDED_REFILL").as_deref() == Ok("1");
+        assert_eq!(on(), enabled);
+        if !enabled {
             assert_eq!(actual, original);
             return;
         }
