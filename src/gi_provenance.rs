@@ -51,6 +51,11 @@ fn kernels_for(mut s: String, enabled: bool) -> String {
         return s;
     }
     s.push_str(include_str!("../shaders/gi_provenance_cells.wgsl"));
+    replace(
+        &mut s,
+        "        atomicAdd(&gi_work[GI_W_INVALIDATED],1u);",
+        "        atomicAdd(&gi_work[GI_W_INVALIDATED],1u); gp_invalidate(slot);",
+    );
     // Both reset sites end the old value's generation, including slot reuse.
     s = s.replace(
         "gi_table[gi_hot(slot)+GI_HOT_BOUNCE]=0u;",
