@@ -174,14 +174,8 @@ pub(super) fn atmosphere_source(mut source: String, on: bool) -> String {
         edit(
             &mut source,
             "at_fog_temporal",
-            "                let history=textureSampleLevel(at_history,atmosphere_sampler,previous,0.0);",
-            "                let history=textureSampleLevel(at_history,atmosphere_sampler,previous,0.0);\n                if !at_fog_cull_enabled() || history.g==1.0 {",
-        );
-        edit(
-            &mut source,
-            "at_fog_temporal",
             "                value=vec4<f32>(mix(value.r,old,weight),0.0,0.0,extinction);",
-            "                value=vec4<f32>(mix(value.r,old,weight),value.g,0.0,extinction);\n                }",
+            "                if !at_fog_cull_enabled() || history.g==1.0 {value=vec4<f32>(mix(value.r,old,weight),value.g,0.0,extinction);}",
         );
     } else {
         edit(
