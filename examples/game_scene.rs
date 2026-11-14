@@ -1106,6 +1106,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ])?;
 
     fs::create_dir_all(&args.out)?;
+    let pipeline_preparation = if std::env::var("RENDERLAB_PREWARM_PIPELINES").is_ok_and(|v| v == "1") {
+        let p = engine.prepare_pipelines()?;
+        Some(serde_json::json!({"ms": p.cpu.as_secs_f64() * 1e3,
+            "render": p.render_pipelines, "compute": p.compute_pipelines,
+            "added_buffer_bytes": p.added_buffer_bytes, "added_texture_bytes": p.added_texture_bytes}))
+    } else { None };
     let ready = start.elapsed();
     let mut frames = Vec::new();
     let mut last_camera = None;
@@ -1448,7 +1454,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         "night_lanterns": args.night_lanterns, "local_lights": diag.lights(lanterns(0.0, 0)).len(),
         "diag": args.diag, "lamp_head": post_lamp.to_array(),
         "local_shadow_count":engine.settings().local_shadows.count,
-        "quarry": args.quarry, "startup_to_scene_ready_seconds": ready.as_secs_f64(),
+        "quarry": args.quarry, "pipeline_preparation": pipeline_preparation,
+        "startup_to_scene_ready_seconds": ready.as_secs_f64(),
         "startup_to_first_image_seconds": first_image_seconds,
         "startup_stages_seconds": {"adapter":adapter_seconds,"engine":engine_seconds-adapter_seconds,
             "programs":programs_seconds-engine_seconds,"scene":ready.as_secs_f64()-programs_seconds},

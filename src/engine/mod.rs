@@ -15,6 +15,7 @@
 #[cfg(test)]
 mod casts_shadows_tests;
 mod device;
+mod prewarm;
 pub(crate) mod ids;
 mod scene;
 mod view;
@@ -26,6 +27,7 @@ pub(crate) mod settings;
 pub(crate) mod state;
 
 pub use device::{Capabilities, ExperimentalRayQuery, RenderPath};
+pub use prewarm::PipelinePreparation;
 pub use ids::{
     EmitterId, EnvironmentId, Id, MaterialId, MeshId, ObjectId, ProgramId, TextureId, kind,
 };
@@ -256,6 +258,7 @@ pub struct Engine {
     /// The views, and the renderer's empty view the next `create_view` takes (its first).
     views: Vec<view::ViewEntry>,
     spare: Option<ViewId>,
+    prewarm_pending: bool,
 }
 
 /// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
@@ -383,6 +386,7 @@ impl Engine {
             ids: Default::default(),
             views: Vec::new(),
             spare: Some(renderer_first_view),
+            prewarm_pending: std::env::var("RENDERLAB_PREWARM_PIPELINES").is_ok_and(|v| v == "1"),
         };
         settings::apply(&mut engine.renderer, &engine.state.settings)?;
         // Ticks are explicit from the start: the first frame runs the first tick's work.
@@ -966,6 +970,9 @@ impl Engine {
         camera: &Camera,
         mode: ViewMode,
     ) -> Result<FrameReport, Error> {
+        if self.prewarm_pending {
+            self.prepare_pipelines()?;
+        }
         let ids: Vec<_> = self.state.batches.ids().collect();
         for id in ids {
             let batch = self.state.batches.get(id)?;

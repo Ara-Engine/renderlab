@@ -43,6 +43,7 @@ mod post;
 mod primary_ray;
 // PC1: shared pipeline caching and startup instrumentation.
 pub mod pipeline_compilation;
+mod pipeline_log;
 mod program;
 pub mod program_watch;
 mod readback_ring;

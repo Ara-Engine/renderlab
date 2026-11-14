@@ -35,6 +35,7 @@ struct Compilation {
     profile: bool,
     checked_shaders: std::sync::atomic::AtomicBool,
     timings: Mutex<Vec<CompilationTiming>>,
+    log: Option<crate::pipeline_log::PipelineLog>,
 }
 
 /// Internal device facade: all render paths share one driver cache, including
@@ -102,6 +103,7 @@ impl PipelineDevice {
                 profile,
                 checked_shaders: std::sync::atomic::AtomicBool::new(engine_shader_checks(checked)),
                 timings: Mutex::new(timings),
+                log: crate::pipeline_log::PipelineLog::from_env(),
             }),
         }
     }
@@ -121,8 +123,13 @@ impl PipelineDevice {
     pub fn take_compilation_timings(&self) -> Vec<CompilationTiming> {
         std::mem::take(&mut *self.compilation.timings.lock().unwrap())
     }
+    pub fn log_pipeline_frame(&self, renderer: &crate::Renderer, report: &crate::FrameReport) {
+        if let Some(log) = &self.compilation.log {
+            log.frame(renderer, report);
+        }
+    }
     fn timed<T>(&self, kind: &'static str, label: Option<&str>, compile: impl FnOnce() -> T) -> T {
-        if !self.compilation.profile {
+        if !self.compilation.profile && self.compilation.log.is_none() {
             return compile();
         }
         let start = Instant::now();
@@ -131,6 +138,12 @@ impl PipelineDevice {
         result
     }
     fn record(&self, kind: &'static str, label: Option<&str>, duration: Duration) {
+        if let Some(log) = &self.compilation.log {
+            log.compile(kind, label.unwrap_or(""), duration);
+        }
+        if !self.compilation.profile {
+            return;
+        }
         let timing = CompilationTiming {
             kind,
             label: label.unwrap_or("").into(),
@@ -161,7 +174,7 @@ impl PipelineDevice {
         let result = compile();
         let duration = start.elapsed();
         drop(slot);
-        if self.compilation.profile {
+        if self.compilation.profile || self.compilation.log.is_some() {
             self.record(kind, label, duration);
         }
         if cache.is_some() && cache == self.pipeline_cache() {
