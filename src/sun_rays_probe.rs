@@ -2,7 +2,32 @@
 use super::*;
 
 const WORDS: u32 = 289;
-const FRAME: u64 = 32;
+/// The census frame without `RENDERLAB_SUN_RAYS_PROBE_FRAME`.
+const DEFAULT_FRAME: u64 = 32;
+
+/// The renderer frame (zero-based `frames` before submission) whose sun kernel the census
+/// replaces: `RENDERLAB_SUN_RAYS_PROBE_FRAME`, else `DEFAULT_FRAME`. An unparsable value warns
+/// once and keeps the default.
+fn frame() -> u64 {
+    static FRAME: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *FRAME.get_or_init(|| {
+        frame_from(
+            std::env::var("RENDERLAB_SUN_RAYS_PROBE_FRAME")
+                .ok()
+                .as_deref(),
+        )
+    })
+}
+
+fn frame_from(value: Option<&str>) -> u64 {
+    let Some(value) = value else {
+        return DEFAULT_FRAME;
+    };
+    value.trim().parse().unwrap_or_else(|_| {
+        eprintln!("RENDERLAB_SUN_RAYS_PROBE_FRAME={value:?} is not a frame number; the census stays at frame {DEFAULT_FRAME}");
+        DEFAULT_FRAME
+    })
+}
 
 fn source(soft: &str) -> String {
     let mut source = schedule_source(temporal_reconstruction::vb_sun_source(soft).unwrap());
@@ -31,7 +56,8 @@ pub(super) fn encode(
     let Some(path) = std::env::var_os("RENDERLAB_SUN_RAYS_PROBE") else {
         return false;
     };
-    if renderer.frames != FRAME {
+    let frame = frame();
+    if renderer.frames != frame {
         return false;
     }
     let state = renderer.view.primary.as_ref().unwrap();
@@ -213,7 +239,7 @@ pub(super) fn encode(
                 .join(",")
         };
         let json = format!(
-            "{{\"frame\":{FRAME},\"counters\":[{}],\"ray_histogram\":[{}]}}\n",
+            "{{\"frame\":{frame},\"counters\":[{}],\"ray_histogram\":[{}]}}\n",
             list(&words[..32]),
             list(&words[32..])
         );
@@ -240,5 +266,13 @@ mod tests {
         .unwrap();
         assert!(source.contains("sunprobe_rays+=1u;rayQueryInitialize(&query,fresh_scene,"));
         assert!(source.contains("sunprobe_budget=tr1_rays;"));
+    }
+    #[test]
+    fn census_frame_defaults_to_32_and_takes_a_frame_number() {
+        assert_eq!(frame_from(None), 32);
+        assert_eq!(frame_from(Some("26")), 26);
+        assert_eq!(frame_from(Some(" 0 ")), 0);
+        assert_eq!(frame_from(Some("cut+1")), 32);
+        assert_eq!(frame_from(Some("-1")), 32);
     }
 }

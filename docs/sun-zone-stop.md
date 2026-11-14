@@ -27,10 +27,12 @@ Binding 74 belongs to that record and is untouched here.
 
 ## Actual ray census
 
-The optional `RENDERLAB_SUN_RAYS_PROBE=<json path>` replaces only frame 32's
-split sun kernel with the same estimator plus counters at binding 80. It
-counts actual query initializations, requested/effective budgets and uniform
-visibility, with a 0..256 query histogram. Temporary counter and readback
+The optional `RENDERLAB_SUN_RAYS_PROBE=<json path>` replaces only one frame's
+split sun kernel (`RENDERLAB_SUN_RAYS_PROBE_FRAME`, the renderer's zero-based
+frame counter before submission, default 32; the JSON names the frame) with
+the same estimator plus counters at binding 80. It counts actual query
+initializations, requested/effective budgets and uniform visibility, with a
+0..256 query histogram. Temporary counter and readback
 buffers are 1,156 bytes each; no per-pixel storage is added. The probe is not
 used for performance timings. It requires the split pass (either
 `RENDERLAB_SUN_PASS=1` or this option).
