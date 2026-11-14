@@ -1,6 +1,6 @@
 // U-RTVIS reflection pass, shading side (docs/design-reflection-pass.md). Replaces the stubs in
 // reflections.wgsl in the wgpu primary shading modules while the pass runs (src/program.rs
-// pass_block). A reporting program's glossy receiver that fits the composite's room appends its
+// pass_block). A reporting program's glossy receiver (also mirrors on software) that fits the room appends its
 // lobe to the frame's glossy-pixel list, which rl_trace_pixels (shaders/reflections_trace.wgsl)
 // and the composite walk; every other receiver keeps its inline estimate.
 // The list: its length (a 16-byte header, cleared each frame), then three vec4<u32> an entry

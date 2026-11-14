@@ -1,4 +1,4 @@
-//! Optional software-pass hit termination using the existing outgoing GI cache.
+//! Software-pass hit termination using the existing outgoing GI cache.
 //! Enabled above roughness 0.35; `RENDERLAB_SW_REFLECTION_CACHE=0` disables it.
 //! A positive value changes the threshold. Cells contain view-independent outgoing radiance,
 //! so custom programs that require view-dependent hit shading should leave it off.
