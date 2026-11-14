@@ -7,7 +7,8 @@ const SIZE: u32 = 2048;
 const LEVELS: usize = 2;
 pub(super) fn enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("RENDERLAB_FOG_SUN_RASTER").as_deref() != Ok("0"))
+    // Opt-in prototype: a warm Outpost rebuild measured 4.68 ms (budget ~0.3 ms).
+    *ENABLED.get_or_init(|| std::env::var("RENDERLAB_FOG_SUN_RASTER").as_deref() == Ok("1"))
 }
 // Timing control: exercise the update path on warm frames, even with static casters.
 fn force_refresh() -> bool {
