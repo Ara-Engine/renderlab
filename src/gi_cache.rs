@@ -21,6 +21,8 @@ mod priority;
 mod refill_feedback;
 #[path = "gi_queue_probe.rs"]
 mod queue_probe;
+#[path = "gi_order_probe.rs"]
+pub(crate) mod order_probe;
 
 pub(crate) const HEADER_WORDS: u64 = 64;
 /// Keep the original admission policy: packing storage must not change the chosen
@@ -702,6 +704,7 @@ struct Layouts {
 struct Pipelines {
     software: bool,
     priority: Option<priority::Pipelines>,
+    order: Option<[Owned<wgpu::ComputePipeline>;8]>,
     directions: u32,
     probe: Owned<wgpu::ComputePipeline>,
     claim: Owned<wgpu::ComputePipeline>,
@@ -1552,6 +1555,7 @@ pub(super) struct GiState {
     priority_compact: bool,
     priority_hold: bool,
     queue_probe: Option<queue_probe::State>,
+    pub(super) order_probe: Option<order_probe::State>,
     groups: Option<Groups>,
     retired: Vec<(u64, Retired)>,
     stats: IndirectStats,
@@ -1605,6 +1609,7 @@ impl GiState {
             priority_compact: false,
             priority_hold: false,
             queue_probe: None,
+            order_probe: order_probe::on().then(||order_probe::State::new(device,ledger)),
             groups: None,
             retired: vec![],
             stats: IndirectStats::default(),
@@ -1637,7 +1642,7 @@ impl GiState {
 /// source and the kernels.
 pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
     let priority = software && priority::on();
-    priority::source(kernel_source_base(software, directions), priority)
+    order_probe::source(priority::source(kernel_source_base(software, directions), priority))
 }
 fn kernel_source_base(software: bool, directions: u32) -> String {
     let enables = if software {
@@ -2545,7 +2550,7 @@ impl Renderer {
                 ResourceKind::BindGroupLayout,
             )
         };
-        let common = [
+        let mut common = vec![
             uint_texture(7),
             uint_texture(21),
             storage(30, false),
@@ -2562,6 +2567,7 @@ impl Renderer {
             storage(36, true),
             storage(37, false),
         ];
+        if order_probe::on() {common.push(storage(38,false));}
         let tlas = entry(
             34,
             wgpu::BindingType::AccelerationStructure {
@@ -2670,6 +2676,7 @@ impl Renderer {
         let main = &layouts.pipelines[usize::from(software)];
         let priority = software && priority::on();
         let pipelines = Pipelines {
+            order: order_probe::on().then(||order_probe::ENTRIES.map(|name|compute(name,main))),
             software,
             priority: priority.then(|| priority::Pipelines::new(|name|compute(name, main))),
             directions,
@@ -3205,6 +3212,7 @@ impl Renderer {
         );
         let r = self.gi.resources.as_ref().unwrap();
         self.queue.write_buffer(&r.frame, 0, &finished.frame);
+        if let Some(p)=&self.gi.order_probe {p.prepare(&self.queue,self.frames+1);}
         let Some(plan) = finished.plan else {
             self.gi.stats.idle_frames += 1;
             return Ok(());
@@ -3287,6 +3295,7 @@ impl Renderer {
                 resource: r.raw.as_entire_binding(),
             },
         ];
+        if let Some(p)=&self.gi.order_probe {entries.push(wgpu::BindGroupEntry{binding:38,resource:p.buffer.as_entire_binding()});}
         if software {
             entries.push(wgpu::BindGroupEntry {
                 binding: 35,
@@ -3385,14 +3394,19 @@ impl GiState {
         shade: Option<ShadeGroups<'_>>,
         mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
-        let Some(plan) = self.plan.take() else {
-            return;
+        if self.plan.is_none() && self.order_probe.is_none() {return;}
+        let plan=self.plan.take();
+        let (Some(r),Some(p),Some(g),Some(arrays))=(&self.resources,&self.pipelines,&self.groups,&self.arrays) else{return;};
+        let arrays=&arrays.bind;
+        let order=|encoder:&mut wgpu::CommandEncoder,stage:usize|{
+            if let Some(pipelines)=&p.order {
+                let mut pass=encoder.begin_compute_pass(&wgpu::ComputePassDescriptor{label:Some("GI order fingerprint"),timestamp_writes:None});
+                pass.set_pipeline(&pipelines[stage]);pass.set_bind_group(0,&*g.main,&[]);pass.set_bind_group(1,&**arrays,&[]);pass.set_bind_group(3,lighting,&[]);pass.dispatch_workgroups(256,1,1);
+            }
         };
-        mark(encoder, "gi_probe");
-        let r = self.resources.as_ref().unwrap();
-        let p = self.pipelines.as_ref().unwrap();
-        let g = self.groups.as_ref().unwrap();
-        let arrays = &self.arrays.as_ref().unwrap().bind;
+        order(encoder,0);
+        let Some(plan)=plan else{return;};
+        mark(encoder,"gi_probe");
         let layout = WorkLayout::of(r);
         if plan.clear {
             encoder.clear_buffer(&r.table, HEADER_WORDS * 4, None);
@@ -3456,6 +3470,7 @@ impl GiState {
                 traced.then_some(plan.groups),
             );
         }
+        order(encoder,1);
         if let Some(probe)=self.queue_probe.as_mut() {
             probe.encode(encoder,r,self.planner.tick_queues[0]);
         }
@@ -3490,6 +3505,7 @@ impl GiState {
             }
         }
         if let Some(feedback) = &self.refill_feedback { feedback.mark(encoder,1); feedback.mark(encoder,2); }
+        order(encoder,2);
         mark(encoder, "gi_claim");
         if p.priority.is_some() { encoder.clear_buffer(&r.work,47*4,Some(4)); }
         if traced || profiling {
@@ -3514,6 +3530,7 @@ impl GiState {
                 }
             }
         }
+        order(encoder,3);
         let s = 1 + 2 * CLAIM_ROUNDS;
         mark(encoder, "gi_update");
         if plan.scan || profiling {
@@ -3541,6 +3558,7 @@ impl GiState {
                 groups,
             );
         }
+        order(encoder,4);
         // The cell-space filter (G3), once every value of the frame is written and before cell
         // shading reads them.
         if plan.filter || profiling {
@@ -3553,11 +3571,13 @@ impl GiState {
                 grid,
             );
         }
+        order(encoder,5);
         // Light visibility at the cells to shade, then the program's cell shading (G2).
         mark(encoder, "gi_cell_shading");
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([LIGHT_GROUPS, 1]);
             main_pass(encoder, "indirect cache light", &p.light, b + 1, grid);
+            order(encoder,6);
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("indirect cache cell shading"),
                 timestamp_writes: stamps(b + 2),
@@ -3579,6 +3599,7 @@ impl GiState {
                 }
             }
         }
+        order(encoder,7);
         if let Some(profile) = self.profile.as_ref() {
             if profile.priority && p.priority.is_none() {
                 for i in PROFILE_STAMPS/2..profile.stamps/2 {
