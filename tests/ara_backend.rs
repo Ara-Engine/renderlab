@@ -314,6 +314,8 @@ mod casts_shadows_cases;
 mod sun_range_cases;
 #[path = "ara_backend/cases/gi_pass_refusal.rs"]
 mod gi_pass_refusal_cases;
+#[path = "ara_backend/cases/light_vis.rs"]
+mod light_vis_cases;
 #[path = "ara_backend/cases/primary_shade.rs"]
 mod primary_shade_cases;
 #[path = "ara_backend/primary_shade_reference.rs"]
