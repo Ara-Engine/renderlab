@@ -91,7 +91,7 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
         if dot(d,side)<=0.0 {continue;}
         let traced=rl_cast(origin,d,epsilon);
         if traced.record.x==0u {
-            textureStore(rl_samples,at,vec4<f32>(rl_sky(d,cone_alpha),1.0));
+            textureStore(rl_samples,at,rl_f16_nearest(vec4<f32>(rl_sky(d,cone_alpha),1.0)));
             continue;
         }
         // A hit before its H append (the Mac's S4a hit reuse replaces this line under

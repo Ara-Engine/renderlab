@@ -494,7 +494,7 @@ pub(crate) fn rl_pass_switches(source: String) -> String {
 pub(crate) const RL_PASS_SEAMS: [(&str, &str, &str); 3] = [
     (
         "missblack",
-        "textureStore(rl_samples,at,vec4<f32>(rl_sky(d,cone_alpha),1.0));",
+        "textureStore(rl_samples,at,rl_f16_nearest(vec4<f32>(rl_sky(d,cone_alpha),1.0)));",
         "textureStore(rl_samples,at,vec4<f32>(0.0,0.0,0.0,1.0));",
     ),
     (

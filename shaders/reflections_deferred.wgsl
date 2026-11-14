@@ -27,7 +27,7 @@ fn rl_deferred_clear(pixel:vec2<i32>) {
 fn rl_deferred_store(pixel:vec2<i32>, world:vec3<f32>) {
     if !RL_DEFERRED_FULL && !(rl_specular.w>0.0) {return;}
     let t=atmosphere_surface(vec3<f32>(1.0),world)-atmosphere_surface(vec3<f32>(0.0),world);
-    textureStore(rl_deferred_reflectance,pixel,vec4<f32>(rl_reported[0]*t,rl_specular.w));
+    textureStore(rl_deferred_reflectance,pixel,rl_f16_nearest(vec4<f32>(rl_reported[0]*t,rl_specular.w)));
     textureStore(rl_deferred_untraced,pixel,vec4<f32>(rl_reported[1]*t,dot(rl_specular.rgb,RL_LUMA)));
 }
 // ---- end of deferred reflections ----
