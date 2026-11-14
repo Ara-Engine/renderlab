@@ -1,0 +1,9 @@
+[
+    {
+        "path":  "D:/Coding/renderlab-work/u-sunrt/target",
+        "recursive":  true,
+        "verified_absolute_path":  "D:\\Coding\\renderlab-work\\u-sunrt\\target",
+        "bytes":  1173319065,
+        "reason":  "Cargo target; recursive deletion blocked by automatic approval review"
+    }
+]
