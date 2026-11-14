@@ -345,6 +345,9 @@ impl Renderer {
                 .filter(|lanes| matches!(lanes, 1 | 2 | 4 | 8 | 16 | 32))
                 .unwrap_or(4);
             source.replace("const RL_RAY_LANES:u32=1u;", &format!("const RL_RAY_LANES:u32={lanes}u;"))
+                .replace("const RL_TRACE_MIRRORS:bool=false;", if crate::reflection_software::pass_mirrors_enabled() {
+                    "const RL_TRACE_MIRRORS:bool=true;"
+                } else { "const RL_TRACE_MIRRORS:bool=false;" })
         };
         let source = sw_cache::source(source, &self.device);
         let scopes = OperationScopes::new(&self.device);

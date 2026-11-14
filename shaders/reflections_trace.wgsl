@@ -26,6 +26,7 @@ const RL_HIT_GROUP:u32=64u;
 // Software rays use a lane per stratum so one long traversal does not serialize
 // all of a receiver's rays. Hardware keeps its established receiver-per-lane path.
 const RL_RAY_LANES:u32=1u;
+const RL_TRACE_MIRRORS:bool=false;
 const RL_LIST_GROUP:u32=64u/RL_RAY_LANES;
 const RL_LIST_ROW:u32=65535u;
 // x glossy pixels traced, y slots traced, z strata requested (every glossy receiver's, summed at
@@ -73,9 +74,11 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
     }
     let origin=bitcast<vec3<f32>>(a.xyz);
     let ws=unpack2x16float(a.w);
-    let n=rl_oct_decode(b.x);let v=rl_oct_decode(b.y);let side=rl_oct_decode(b.z);
+    let mirror=RL_TRACE_MIRRORS && (b.w&(1u<<21u))!=0u;
+    var n=vec3<f32>(0.0,0.0,1.0);var v=n;var side=n;
+    if !mirror {n=rl_oct_decode(b.x);v=rl_oct_decode(b.y);side=rl_oct_decode(b.z);}
     let alpha=unpack2x16float(b.w&0xffffu).x;
-    let cone_alpha=alpha*inverseSqrt(f32(count));
+    let cone_alpha=select(alpha*inverseSqrt(f32(count)),0.0,mirror);
     let cone=vec2<f32>(ws.x,ws.y+2.0*cone_alpha);
     // The inline loop's directions: the frame's radial offset and the pixel's rotation.
     let frame=primary_frame.sided.y;
@@ -92,8 +95,11 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
         let at=vec2<i32>(vec2<u32>(slot%width,slot/width));
         textureStore(rl_samples,at,vec4<f32>(0.0));
         let u=vec2<f32>((f32(k)+radial)/f32(count),fract(rotation+f32(k)*0.6180339887));
-        let d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
-        if dot(d,side)<=0.0 {continue;}
+        var d=bitcast<vec3<f32>>(b.xyz);
+        if !mirror {
+            d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
+            if dot(d,side)<=0.0 {continue;}
+        }
         let traced=rl_cast(origin,d,epsilon);
         if traced.record.x==0u {
             textureStore(rl_samples,at,rl_f16_nearest(vec4<f32>(rl_sky(d,cone_alpha),1.0)));

@@ -337,7 +337,7 @@ fn without_inline_strata(composed: Composed) -> Composed {
 /// program, and a receiver that does not fit, keeps the inline path (no entry, no zero).
 const PASS_GATE: [&str; 2] = [
     "    if RL_PASS && !mirror {rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature);}\n",
-    "    if RL_PASS && !mirror && RL_DEFERRED_PROGRAM && rl_composite_floor(traced,count) && rl_any_stratum(count,radial,rotation,basis,local_v,v,alpha,side) && rl_room_reserve(count,traced,lobe.weight) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count,receiver.epsilon);\n        rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;\n    }\n",
+    "    if RL_PASS && (RL_PASS_MIRRORS || !mirror) && RL_DEFERRED_PROGRAM && rl_composite_floor(traced,count) && rl_any_stratum(count,radial,rotation,basis,local_v,v,alpha,side) && rl_room_reserve(count,traced,lobe.weight) {\n        rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count,receiver.epsilon);\n        rl_specular=vec4<f32>(0.0,0.0,0.0,traced);return;\n    }\n",
 ];
 const DEFERRED_PROGRAM_FLAG: [&str; 2] = [
     "const RL_DEFERRED_PROGRAM:bool=false;",
@@ -356,6 +356,11 @@ pub(crate) fn pass_block(composed: Composed) -> Composed {
     } else {
         REFLECTION_LOBE.to_owned()
     };
+    if composed.source.contains(SOFTWARE_REFLECTION_GEOMETRY)
+        && crate::reflection_software::pass_mirrors_enabled()
+    {
+        lobe = lobe.replace("const RL_PASS_MIRRORS:bool=false;", "const RL_PASS_MIRRORS:bool=true;");
+    }
     // Measurement runs count the room's low-weight receivers (reflections_lobe.wgsl).
     if ["RENDERLAB_RL_PROBE", "RENDERLAB_RL_ROOM_LOG"]
         .iter()
