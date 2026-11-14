@@ -5,16 +5,18 @@ struct Size {width:u32,height:u32,pad0:u32,pad1:u32};
 @group(0) @binding(1) var output:texture_storage_2d<r32float,write>;
 @group(0) @binding(2) var source:texture_2d<f32>;
 @group(0) @binding(3) var<uniform> image:Size;
-override HW_ATTACHMENT:bool=false;
-@group(0) @binding(4) var hardware_depth:texture_depth_2d;
+// attachment reader begin
+fn visibility_depth(pixel:vec2<u32>,width:u32)->f32 {
+    return bitcast<f32>(visibility[pixel.y*width+pixel.x].y);
+}
+// attachment reader end
 @compute @workgroup_size(8,8) fn base(@builtin(global_invocation_id) id:vec3<u32>) {
     if any(id.xy>=textureDimensions(output)) {return;}
     var z=1.0;
     for(var i=0u;i<4u;i+=1u) {
         let p=id.xy*2u+vec2<u32>(i&1u,i>>1u);
         var d=0.0;
-        if p.x<image.width && p.y<image.height {d=bitcast<f32>(visibility[p.y*image.width+p.x].y);
-            if HW_ATTACHMENT {d=max(d,textureLoad(hardware_depth,vec2<i32>(p),0));}}
+        if p.x<image.width && p.y<image.height {d=visibility_depth(p,image.width);}
         z=min(z,d);
     }
     textureStore(output,id.xy,vec4<f32>(z));
