@@ -430,3 +430,33 @@ terms:
 The test uses the current frame's exposure, so a cut into a bright scene can't skip a highlight
 on its first frame. A skipped pixel resets its history. It lands as a would-skip counter first,
 then a switch gated on crops of reflected highlights, still and moving.
+
+## Half-precision stores truncate (2026-11-14)
+NVIDIA (Vulkan) and Metal truncate toward zero when a shader stores an f32 into a binary16
+storage texture; Vulkan leaves that rounding to the device. Measured on the Mac port (deferred
+mode): 12,399 of 49,152 reflectance halves moved exactly one step toward zero once rounded first.
+
+- **The pass (#136):** its R samples (trace misses, hit shading) and the deferred reflectance went
+  through such stores, which left the pass about one code darker than the inline loop's f32 sum
+  on about 5% of glossy pixels (signed mean -0.93 code per differing pixel). `rl_f16_nearest`
+  (reflections.wgsl) now rounds each value to the nearest binary16 in f32 before the store, so
+  the store is exact; the signed mean went to -0.06. Any new binary16 store in this pass, and any
+  new half-precision feedback store anywhere (an exponential blend settles about half a step /
+  (1 - weight) low), rounds this way from day one.
+- **Elsewhere, measured and closed (no change):** with the measurement switch
+  `RENDERLAB_F16_NEAREST=fog|all` (branch `t3/f16-nearest-probe`, unmerged), a held game_scene
+  view with the standard program and default volumetric fog, both paths:
+  - the one-shot image chain (the shaded sample `primary_hdr`, TR1's `tr1_output`, the post
+    passes' `output_colour`) is about 0.037 code dark on average, 10.7% of pixels one code low,
+    none more;
+  - the volumetric fog's visibility history (0.9 blend) about 0.002 code on that view;
+  - TR1's colour history and the film accumulation are Rgba32Float, and the GI cache replaces its
+    SH each update without blending, so none of them drift.
+  - Crops: `unit-rtvis/crops/f16-feedback-rt.png` (fog-heavy distance, a penumbra in fog, the
+    darkest region; unset, fog, all, and differences x64).
+  - A fix would move every pixel-identity baseline by one code on 10% of pixels for nothing
+    visible, so the coordinator closed it. It reopens for a new half-precision feedback store
+    with a small blend weight, or for a fog-dominated view (Outpost's distant haze) showing more
+    than 0.1 code with the switch.
+- **Follow-up for the reflection flip (#130) and any pin that re-baselines the default picture:**
+  if the image chain's baseline moves anyway, round the three image-chain stores in the same step.

@@ -6,7 +6,7 @@ const BYTES: u64 = 48;
 const SOURCE: &str = include_str!("../shaders/gi_receiver_pass.wgsl");
 const ENTRY_SEAM: &str = "// ---- GI receiver compute entry ----";
 /// Defaults are approved separately for each path after game-scene picture and memory checks.
-pub(crate) const RT_DEFAULT: bool = false;
+pub(crate) const RT_DEFAULT: bool = true;
 pub(crate) const NON_RT_DEFAULT: bool = false;
 const HEAD_MARK: &str = "\n// renderlab: this renderer prepares GI receivers before shading\n";
 fn env_switch(value: Option<&str>) -> Option<bool> {
