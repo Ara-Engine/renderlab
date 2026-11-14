@@ -20,7 +20,10 @@ pub(super) fn compose(composed: Composed) -> Composed {
 }
 
 fn body(source: &str, name: &str) -> Option<std::ops::Range<usize>> {
-    let at = source.find(&format!("fn {name}("))?;
+    let at = source
+        .match_indices(&format!("fn {name}("))
+        .find(|(at, _)| source[..*at].rsplit('\n').next().unwrap().trim().is_empty())?
+        .0;
     let start = source[at..].find('{')? + at + 1;
     let mut depth = 1;
     for (i, b) in source.as_bytes()[start..].iter().enumerate() {
