@@ -2109,15 +2109,20 @@ impl Renderer {
             state.stats.failed_pages = pool(6) + pool(7);
             state.stats.pool_pages = pool(10);
             state.stats.requested_pages = pool(11);
-            // A frame whose requests did not fit grows the pool by half (every page is
-            // rasterized again once, as after a cut).
+            // A frame whose requests nearly filled the pool and found no free page grows it to
+            // a quarter over those requests (every page is rasterized again once, as after a
+            // cut); fewer requests only wait a frame for unused pages to return.
             let capacity = pool(10);
+            let requested = state.stats.requested_pages;
             if capacity != 0
                 && capacity == state.capacity
                 && state.stats.failed_pages != 0
-                && u64::from(state.stats.requested_pages) * 5 > u64::from(capacity) * 4
+                && u64::from(requested) * 5 > u64::from(capacity) * 4
             {
-                state.capacity = (capacity + capacity / 2).next_multiple_of(64).min(POOL_MAX);
+                state.capacity = (requested + requested / 4)
+                    .next_multiple_of(64)
+                    .max(capacity + 64)
+                    .min(POOL_MAX);
             }
         }
         // N8n: the surface cache exists only while it is the lookup (wgpu keeps the table alive
