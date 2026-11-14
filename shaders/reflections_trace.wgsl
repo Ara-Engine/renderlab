@@ -99,9 +99,6 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
             textureStore(rl_samples,at,rl_f16_nearest(vec4<f32>(rl_sky(d,cone_alpha),1.0)));
             continue;
         }
-        // A hit before its H append (the Mac's S4a hit reuse replaces this line under
-        // RENDERLAB_RL_HIT_REUSE; keep it here, once, through S2).
-        // ---- rl trace hit reuse seam ----
         // Share the lighting cache's outgoing radiance when the cone covers a
         // cell. The hook returns zero confidence for missing cells and smooth
         // lobes; those hits retain the full material and lighting evaluation.
@@ -110,6 +107,9 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
             textureStore(rl_samples,at,rl_f16_nearest(vec4<f32>(rl_finite(expose(cached.rgb)),1.0)));
             continue;
         }
+        // A hit before its H append (the Mac's S4a hit reuse replaces this line under
+        // RENDERLAB_RL_HIT_REUSE; keep it here, once, through S2).
+        // ---- rl trace hit reuse seam ----
         let index=atomicAdd(&rl_hits.count,1u);
         // No record: the slot stays unwritten (a = 0) and out of the pixel's mean, never black.
         if index>=(arrayLength(&rl_hits.records)/3u) {atomicAdd(&rl_trace_stats.dropped,1u);continue;}
