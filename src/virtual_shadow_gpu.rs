@@ -872,8 +872,10 @@ pub(super) fn disk_source() -> String {
     let variant = std::env::var("RENDERLAB_VD_SHADER")
         .ok()
         .map(|path| std::fs::read_to_string(path).unwrap());
+    // The outline refinement reads the draws' triangles (group 1, as the exact lookup).
     let mut source = format!(
-        "const VD_R:u32={DISK_RADIUS}u;\n{}",
+        "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\nconst VD_R:u32={DISK_RADIUS}u;\n{}",
+        crate::TRACED_DRAWS,
         variant
             .as_deref()
             .unwrap_or(include_str!("../shaders/virtual_shadow_disk.wgsl"))
@@ -1390,7 +1392,7 @@ impl VirtualState {
         let map = map_compute("vmap_lookup", &map_layout, &[]);
         let disk_layout = pipeline_layout(
             "N-VSM1 disk visibility ABI",
-            &[Some(&layouts.disk), None, None, Some(lighting)],
+            &[Some(&layouts.disk), Some(arrays), None, Some(lighting)],
         );
         let disk_module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
@@ -3428,6 +3430,7 @@ impl Renderer {
         } else if disk {
             pass.set_pipeline(&p.disk);
             pass.set_bind_group(0, &*g.disk, &[]);
+            pass.set_bind_group(1, arrays, &[]);
         } else {
             pass.set_bind_group(0, &*g.lookup, &[]);
             pass.set_bind_group(1, arrays, &[]);
