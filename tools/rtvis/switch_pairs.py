@@ -19,6 +19,7 @@ SWITCHES = {
     "material": {"RENDERLAB_MATERIAL_PASS": "1"},
     "material-tail": {"RENDERLAB_MATERIAL_PASS": "tail"},
     "sun": {"RENDERLAB_SUN_PASS": "1"},
+    "fog-cull": {"RENDERLAB_FOG_CULL": "1"},
     "sun-zone": {"RENDERLAB_SUN_ZONE_STOP": "1"},
     "lvis": {"RENDERLAB_LIGHT_VIS_PASS": "1"},
     "rl": {"RENDERLAB_RL_PASS": "1", "RENDERLAB_RL_DEFERRED": "1"},
@@ -36,6 +37,10 @@ TESTS = [
     "receiver_and_shading_validate_both_paths",
     "material_tail_composes_native_visibility_paths",
     "material_mode_boundary",
+    "fog_cull_off_keeps_source_and_layout",
+    "fog_cull_producers_and_atmosphere_validate",
+    "fog_cull_device_request_rejects_thirteen_and_accepts_fourteen",
+    "measured_halo_keeps_visible_prefix_and_six_neighbours_filled",
 ]
 
 
