@@ -173,7 +173,7 @@ fn read(r: &Renderer, b: &wgpu::Buffer, size: u64) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 impl Renderer {
-    pub(super) fn dump_gi_provenance(&self) -> Result<(), Error> {
+    pub(crate) fn dump_gi_provenance(&self) -> Result<(), Error> {
         let Some(p) = &self.gi.provenance else {
             return Ok(());
         };
