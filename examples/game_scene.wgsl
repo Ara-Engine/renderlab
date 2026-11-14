@@ -119,6 +119,10 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     var exposed=min(diffuse+specular,vec3<f32>(65504.0));
     for(var i=0u;i<light_count();i+=1u) {
         let light=light_sample(i,input);
+        // The resolved material normal includes normal maps and decals. Keep thin
+        // and two-sided receivers; the hero's tinted back-face lighting is separate.
+        if light.attenuation==0.0 || (input.material.thin==0u && input.material.double_sided==0u
+            && dot(n,light.direction)<=0.0) { continue; }
         let attenuation=light.attenuation*light_visibility(input,light);
         let response=brdf(n,v,light.direction,base,metal,rough);
         exposed=min(exposed+exposed_product(light.intensity,response*attenuation),vec3<f32>(65504.0));
