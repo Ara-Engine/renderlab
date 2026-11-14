@@ -1,7 +1,8 @@
 //! N1c: primary visibility from a clusterLOD cut. Each frame selects one cut of every
 //! mesh's cluster hierarchy at a pixel error bound, culls it against the frustum and a
-//! two-phase HZB, rasterizes small clusters in software and the rest in hardware into one
-//! 64-bit (depth, cluster, triangle) buffer, then reconstructs exact pixel-centre
+//! two-phase HZB, rasterizes small clusters in software and the rest in hardware. The
+//! HZB and resolve combine software depth/IDs with hardware depth/ID attachments, then
+//! reconstruct exact pixel-centre
 //! receivers into the primary hit ABI. Meshes without an attached hierarchy are one
 //! level of original-geometry clusters. No lighting-model decisions, acceleration
 //! structures or ray-query instructions.
@@ -279,12 +280,36 @@ fn primary_repair_range(batch:u32,primitive:u32,edge:u32)->vec3<u32> {
 }";
 /// Share the original ray-free visibility composition across native backends.
 pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
+    compose_resolve(
+        wgsl,
+        include_str!("../shaders/visibility_buffer_resolve.wgsl"),
+    )
+}
+
+// Keep the attachment bindings local to wgpu; native backends use the shared ABI.
+fn attachment_reader(source: &str, reader: &str) -> String {
+    let begin = source.find("// attachment reader begin").unwrap();
+    let end = source.find("// attachment reader end").unwrap() + "// attachment reader end".len();
+    let mut source = source.to_owned();
+    source.replace_range(begin..end, reader);
+    source
+}
+fn attachment_resolve_source(wgsl: &str) -> Result<String, Error> {
+    compose_resolve(
+        wgsl,
+        &attachment_reader(
+            include_str!("../shaders/visibility_buffer_resolve.wgsl"),
+            include_str!("../shaders/visibility_buffer_attachment.wgsl"),
+        ),
+    )
+}
+fn compose_resolve(wgsl: &str, tail: &str) -> Result<String, Error> {
     let head = primary_ray_gpu::non_rt_heads(wgsl)?;
     Ok(format!(
         "{}\n{REPAIR_POLICY}\n{}\n{}",
         head[0],
         repair_source(),
-        include_str!("../shaders/visibility_buffer_resolve.wgsl")
+        tail
     ))
 }
 #[cfg(test)]
@@ -331,6 +356,8 @@ pub(super) struct VisibilityBuffer {
     _absent: Buffer,
     _visibility: Buffer,
     depth: Depth,
+    hardware_ids: Depth,
+    attachment: bool,
     _hzb: Depth,
     _hzb_absent: Depth,
     cull: wgpu::ComputePipeline,
@@ -790,7 +817,16 @@ impl VisibilityBuffer {
             size,
             F::Depth32Float,
             1,
-            U::RENDER_ATTACHMENT,
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
+        );
+        let attachment = std::env::var("RENDERLAB_VIS_ATTACHMENT").map_or(true, |v| v != "0");
+        let hardware_ids = target(
+            r,
+            "visibility hardware IDs",
+            size,
+            F::R32Uint,
+            1,
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
         );
         // Level 0 texels cover 2x2 pixels. Power-of-two sizes halve exactly; texels
         // beyond the image stay 0.
@@ -865,23 +901,34 @@ impl VisibilityBuffer {
                 image(1, F::R32Float),
                 sampled(2, wgpu::TextureSampleType::Float { filterable: false }),
                 buffer_entry(3, true, false, S::COMPUTE),
+                sampled(4, wgpu::TextureSampleType::Depth),
             ],
         );
         let resolve_layout = layout(
             &r.device,
-            &[&[
-                buffer_entry(0, true, false, S::COMPUTE),
-                buffer_entry(10, true, false, S::COMPUTE),
-                buffer_entry(30, false, false, S::COMPUTE),
-                buffer_entry(29, false, true, S::COMPUTE),
-                buffer_entry(31, false, false, S::COMPUTE),
-                buffer_entry(33, false, false, S::COMPUTE),
-                image(13, F::Rgba32Uint),
-                image(16, F::Rgba32Float),
-                image(17, F::Rgba32Float),
-                image(20, F::R32Uint),
-                image(23, F::R32Float),
-            ][..], &if crate::material_mode::Mode::tail() { super::primary_ray_gpu::material_pass_gpu::entries(true).to_vec() } else { Vec::new() }].concat(),
+            &[
+                &[
+                    buffer_entry(0, true, false, S::COMPUTE),
+                    buffer_entry(10, true, false, S::COMPUTE),
+                    buffer_entry(30, false, false, S::COMPUTE),
+                    buffer_entry(29, false, true, S::COMPUTE),
+                    buffer_entry(31, false, false, S::COMPUTE),
+                    buffer_entry(33, false, false, S::COMPUTE),
+                    image(13, F::Rgba32Uint),
+                    image(16, F::Rgba32Float),
+                    image(17, F::Rgba32Float),
+                    image(20, F::R32Uint),
+                    image(23, F::R32Float),
+                    sampled(34, wgpu::TextureSampleType::Uint),
+                    sampled(35, wgpu::TextureSampleType::Depth),
+                ][..],
+                &if crate::material_mode::Mode::tail() {
+                    super::primary_ray_gpu::material_pass_gpu::entries(true).to_vec()
+                } else {
+                    Vec::new()
+                },
+            ]
+            .concat(),
         );
         let pipeline_layout = |groups: &[Option<&wgpu::BindGroupLayout>]| {
             r.device
@@ -959,13 +1006,21 @@ impl VisibilityBuffer {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs"),
+                    entry_point: Some(if attachment { "fs_color" } else { "fs" }),
                     compilation_options: Default::default(),
-                    targets: &[],
+                    targets: if attachment {
+                        &[Some(wgpu::ColorTargetState {
+                            format: F::R32Uint,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })]
+                    } else {
+                        &[]
+                    },
                 }),
                 primitive: Default::default(),
-                // GreaterEqual: equal-depth fragments still reach the 64-bit max, so
-                // ties never depend on the culler's nondeterministic draw order.
+                // Equal-depth hardware attachment hits follow raster order. The atomic
+                // fallback resolves those ties by ID; both readers compare SW/HW ties by ID.
                 depth_stencil: Some(wgpu::DepthStencilState {
                     format: F::Depth32Float,
                     depth_write_enabled: Some(true),
@@ -977,10 +1032,21 @@ impl VisibilityBuffer {
                 multiview_mask: None,
                 cache: None,
             });
-        let hzb_source = include_str!("../shaders/visibility_buffer_hzb.wgsl");
-        let base = compute(hzb_source, "base", &[Some(&hzb_layout)], &[]);
-        let reduce = compute(hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
-        let resolve_source = super::primary_ray_gpu::material_receiver_gpu::resolve(resolve_source(&r.source)?, crate::material_mode::Mode::current())?;
+        let hzb_source = attachment_reader(
+            include_str!("../shaders/visibility_buffer_hzb.wgsl"),
+            include_str!("../shaders/visibility_buffer_attachment_hzb.wgsl"),
+        );
+        let base = compute(
+            &hzb_source,
+            "base",
+            &[Some(&hzb_layout)],
+            &[("HW_ATTACHMENT", if attachment { 1.0 } else { 0.0 })],
+        );
+        let reduce = compute(&hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
+        let resolve_source = super::primary_ray_gpu::material_receiver_gpu::resolve(
+            attachment_resolve_source(&r.source)?,
+            crate::material_mode::Mode::current(),
+        )?;
         let resolve = [0.0, 1.0].map(|v| {
             compute(
                 &resolve_source,
@@ -990,7 +1056,11 @@ impl VisibilityBuffer {
                     Some(state.array_layout()),
                     Some(&data_layout),
                 ],
-                &[("WRITE_RECEIVERS", v), ("LOD_LIFT", f64::from(r.lod_lift))],
+                &[
+                    ("WRITE_RECEIVERS", v),
+                    ("LOD_LIFT", f64::from(r.lod_lift)),
+                    ("HW_ATTACHMENT", if attachment { 1.0 } else { 0.0 }),
+                ],
             )
         });
         let state = r.view.primary.as_ref().unwrap();
@@ -1063,6 +1133,7 @@ impl VisibilityBuffer {
                             }),
                         ),
                         (3, image_size.value.as_entire_binding()),
+                        (4, R::TextureView(&depth.view)),
                     ],
                 )
             })
@@ -1070,19 +1141,32 @@ impl VisibilityBuffer {
         let resolve_group = bind(
             &r.device,
             &resolve_layout,
-            &[&[
-                (0, r.uniform.as_entire_binding()),
-                (10, state.frame_buffer().as_entire_binding()),
-                (30, repair_scan.value.as_entire_binding()),
-                (29, visibility.value.as_entire_binding()),
-                (31, clusters.value.as_entire_binding()),
-                (33, group_buffer.value.as_entire_binding()),
-                (13, R::TextureView(&t.hit.view)),
-                (16, R::TextureView(&fresh.world.view)),
-                (17, R::TextureView(&fresh.normal.view)),
-                (20, R::TextureView(&t.tiles.view)),
-                (23, R::TextureView(&t.epsilon.view)),
-            ][..], &if crate::material_mode::Mode::tail() { vec![(crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&t.material.as_ref().unwrap().view))] } else { Vec::new() }].concat(),
+            &[
+                &[
+                    (0, r.uniform.as_entire_binding()),
+                    (10, state.frame_buffer().as_entire_binding()),
+                    (30, repair_scan.value.as_entire_binding()),
+                    (29, visibility.value.as_entire_binding()),
+                    (31, clusters.value.as_entire_binding()),
+                    (33, group_buffer.value.as_entire_binding()),
+                    (34, R::TextureView(&hardware_ids.view)),
+                    (35, R::TextureView(&depth.view)),
+                    (13, R::TextureView(&t.hit.view)),
+                    (16, R::TextureView(&fresh.world.view)),
+                    (17, R::TextureView(&fresh.normal.view)),
+                    (20, R::TextureView(&t.tiles.view)),
+                    (23, R::TextureView(&t.epsilon.view)),
+                ][..],
+                &if crate::material_mode::Mode::tail() {
+                    vec![(
+                        crate::program::MATERIAL_RECORD_BINDING,
+                        R::TextureView(&t.material.as_ref().unwrap().view),
+                    )]
+                } else {
+                    Vec::new()
+                },
+            ]
+            .concat(),
         );
         Ok(Self {
             size,
@@ -1105,6 +1189,8 @@ impl VisibilityBuffer {
             _absent: absent,
             _visibility: visibility,
             depth,
+            hardware_ids,
+            attachment,
             _hzb: hzb,
             _hzb_absent: hzb_absent,
             cull,
@@ -1272,6 +1358,11 @@ mod tests {
             stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")),
             include_str!("../shaders/visibility_buffer_hzb.wgsl").to_owned(),
             resolve_source(include_str!("../shaders/scene.wgsl")).unwrap(),
+            attachment_resolve_source(include_str!("../shaders/scene.wgsl")).unwrap(),
+            attachment_reader(
+                include_str!("../shaders/visibility_buffer_hzb.wgsl"),
+                include_str!("../shaders/visibility_buffer_attachment_hzb.wgsl"),
+            ),
         ];
         let (kernels, heads) =
             primary_ray_gpu::non_rt_sources(include_str!("../shaders/scene.wgsl")).unwrap();
@@ -1412,21 +1503,24 @@ impl Renderer {
         v.frames += 1;
         Ok(())
     }
-    pub(super) fn encode_visibility_buffer(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        soft: bool,
-        stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
-    ) {
-        self.encode_visibility_stages(encoder, soft, stamps, None);
-    }
     /// `stages` optionally receives STAGE_QUERIES diagnostic timestamps.
+    #[cfg(test)]
     pub(super) fn encode_visibility_stages(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         soft: bool,
         stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         stages: Option<&wgpu::QuerySet>,
+    ) {
+        self.encode_visibility_logged(encoder, soft, stamps, stages, &mut |_, _| {});
+    }
+    pub(super) fn encode_visibility_logged(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        soft: bool,
+        stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
+        stages: Option<&wgpu::QuerySet>,
+        mark: &mut impl FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
         let v = self.view.visibility_buffer.as_ref().unwrap();
         let arrays = self
@@ -1447,6 +1541,7 @@ impl Renderer {
             end_of_pass_write_index: None,
         });
         for i in 0..2 {
+            mark(encoder, ["visibility.cull1", "visibility.cull2"][i]);
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("N1c LOD cut and cluster cull"),
@@ -1469,6 +1564,7 @@ impl Renderer {
                 pass.set_pipeline(&v.finish);
                 pass.dispatch_workgroups(1, 1, 1);
             }
+            mark(encoder, ["visibility.sw1", "visibility.sw2"][i]);
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("N1c software raster"),
@@ -1480,10 +1576,28 @@ impl Renderer {
                 pass.set_bind_group(2, &v.data_group, &[]);
                 pass.dispatch_workgroups_indirect(&v.args[i].value, 0);
             }
+            mark(encoder, ["visibility.hw1", "visibility.hw2"][i]);
             {
+                let color_attachments = [Some(wgpu::RenderPassColorAttachment {
+                    view: &v.hardware_ids.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: if i == 0 {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: wgpu::StoreOp::Store,
+                    },
+                })];
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("N1c hardware raster"),
-                    color_attachments: &[],
+                    color_attachments: if v.attachment {
+                        &color_attachments
+                    } else {
+                        &[]
+                    },
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &v.depth.view,
                         depth_ops: Some(wgpu::Operations {
@@ -1506,8 +1620,10 @@ impl Renderer {
                 pass.set_bind_group(2, &v.data_group, &[]);
                 pass.draw_indirect(&v.args[i].value, 16);
             }
+            mark(encoder, ["visibility.hzb1", "visibility.hzb2"][i]);
             v.pyramid(encoder, i, stage(i as u32 * 4 + 3));
         }
+        mark(encoder, "visibility.resolve");
         let resolve_stamps = stamps
             .map(|s| wgpu::ComputePassTimestampWrites {
                 query_set: s.query_set,
