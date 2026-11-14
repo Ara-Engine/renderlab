@@ -3632,7 +3632,7 @@ impl Renderer {
                 } else if soft && self.view.soft_mode == crate::SoftShadows::Virtual {
                     // Traced receivers, then N8 visibility with no ray queries.
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
-                        self.encode_visibility_buffer(&mut encoder, true, stamps(6));
+                        self.encode_visibility_logged(&mut encoder, true, stamps(6), None, &mut mark);
                     } else {
                         self.encode_primary_visibility(&mut encoder, true, stamps(6));
                     }
