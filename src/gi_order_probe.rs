@@ -129,4 +129,13 @@ mod tests {
             }
         }
     }
+    #[test]
+    fn order_probe_device_request_includes_its_storage_binding() {
+        let limits = crate::visibility_limits(wgpu::Limits::default());
+        let baseline = 13
+            + u32::from(crate::program::cache_hits_rough().is_some())
+            + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS
+                * u32::from(crate::program::rl_pass_env() == Some(true));
+        assert!(limits.max_storage_buffers_per_shader_stage >= baseline + u32::from(on()));
+    }
 }

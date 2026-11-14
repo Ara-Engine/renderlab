@@ -50,6 +50,7 @@ pub const VISIBILITY_RASTER_FEATURES: wgpu::Features =
 /// before requesting a device; devices below them keep the portable raster path.
 pub fn visibility_limits(limits: wgpu::Limits) -> wgpu::Limits {
     let storage = 13
+        + u32::from(crate::renderer::gi_cache::order_probe::on())
         + u32::from(crate::program::cache_hits_rough().is_some())
         + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
     wgpu::Limits {
@@ -178,6 +179,7 @@ mod tests {
         let limits = visibility_limits(wgpu::Limits::default());
         // One more each while RENDERLAB_RL_CACHE_HITS or RENDERLAB_RL_PASS is set.
         let storage = 13
+            + u32::from(crate::renderer::gi_cache::order_probe::on())
             + u32::from(crate::program::cache_hits_rough().is_some())
             + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
         assert_eq!(limits.max_storage_buffers_per_shader_stage, storage);
