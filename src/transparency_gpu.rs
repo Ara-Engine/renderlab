@@ -1287,6 +1287,10 @@ impl Renderer {
         let gpu = self.transparency.gpu.as_ref().unwrap();
         let layout = &gpu.glass_layouts[usize::from(rt)];
         let make_with = |module: &wgpu::ShaderModule, tangent: bool, lobe: bool, blend: bool| {
+            let label = format!(
+                "TP1 transparent program={} rt={rt} key={key:02x?} tangent={tangent} lobe={lobe} film={blend}",
+                slot.label,
+            );
             let targets = if lobe {
                 vec![
                     Some(wgpu::TextureFormat::Rgba32Float.into()),
@@ -1303,7 +1307,7 @@ impl Renderer {
             self.ledger.own(
                 self.device
                     .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("TP1 transparent"),
+                        label: Some(&label),
                         layout: Some(layout),
                         vertex: wgpu::VertexState {
                             module,

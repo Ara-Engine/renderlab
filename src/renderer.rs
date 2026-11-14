@@ -2641,6 +2641,9 @@ impl Renderer {
         if let Some(order) = order {
             transparency_gpu::restore(draws, &order);
         }
+        if let Ok(Some(report)) = &result {
+            self.device.log_pipeline_frame(self, report);
+        }
         result
     }
     fn render_view(
