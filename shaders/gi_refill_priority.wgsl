@@ -9,16 +9,23 @@ fn gi_priority_ticket(limit:u32) -> bool {
 @compute @workgroup_size(1) fn gi_priority_claim_reset() {
     atomicStore(&gi_work[47u],atomicLoad(&gi_work[GI_W_CREATED]));
 }
-fn gi_priority_claim_admit(band:u32) -> bool {
-    let cap=gi_word(33u);
-    if cap==0u { return true; }
-    return gi_priority_ticket(select(cap,gi_priority_visible_limit(cap),band>=GI_BAND_PIXEL));
+// The final chosen key-a is unique in the request set. Two radix digits select
+// an exact prefix of those keys; append order and atomic arrival cannot break ties.
+fn gi_priority_claim_admit(base:u32) -> bool {
+    let kind=select(1u,0u,gi_miss_band(base)>=GI_BAND_PIXEL);
+    let at=gi_priority_arena();
+    return atomicLoad(&gi_work[at+12u+kind])!=0u
+        && gi_miss_key(base).x<=atomicLoad(&gi_work[at+8u+kind]);
 }
 var<private> gi_priority_phase:u32;
+fn gi_priority_raw_bounce(slot:u32) -> u32 {
+    if gi_filter_on(GI_FILTER_BOUNCE) { return gi_raw[gi_raw_at(slot,GI_HOT_BOUNCE)]; }
+    return gi_table[gi_hot(slot)+GI_HOT_BOUNCE];
+}
 fn gi_priority_class(slot:u32) -> u32 {
     if gi_table[gi_cold(slot)+GI_C_SEEN]!=gi_word(GI_H_FRAME) { return 2u; }
     // A gathered zero has the nonzero GI_BOUNCE_NONE sentinel; zero means no value yet.
-    return select(1u,0u,gi_table[gi_hot(slot)+GI_HOT_BOUNCE]==0u);
+    return select(1u,0u,gi_priority_raw_bounce(slot)==0u);
 }
 fn gi_priority_gather_admit() -> bool {
     let cap=gi_word(32u);

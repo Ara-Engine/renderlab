@@ -1,4 +1,4 @@
-//! Experimental ordered claim/gather admission. Unset switches keep the original module.
+//! Deterministic first-fill and refresh admission for software GI. `=0` restores the old scheduler.
 use super::*;
 use std::sync::OnceLock;
 pub(super) const HEADER_LIMIT: usize = 32;
@@ -68,34 +68,10 @@ pub(super) enum Mode {
 }
 pub(super) fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BOUNDED_REFILL").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BOUNDED_REFILL").as_deref() != Ok("0"))
 }
 pub(super) fn mode() -> Mode {
-    static MODE: OnceLock<Mode> = OnceLock::new();
-    *MODE.get_or_init(|| {
-        let Ok(value) = std::env::var("RENDERLAB_GI_REFILL_BUDGET") else { return Mode::Fixed(DEFAULT_CELLS); };
-        if value == "today" {
-            Mode::Today
-        } else if value == "hold" {
-            Mode::Hold(std::env::var("RENDERLAB_GI_REFILL_HOLD").unwrap_or_else(|_| "8".into()).parse().expect("GI refill hold frames"))
-        } else if value == "ms" {
-            let ms: f64 = std::env::var("RENDERLAB_GI_REFILL_MS")
-                .unwrap_or_else(|_| "3".into())
-                .parse()
-                .expect("GI refill milliseconds");
-            assert!(
-                ms.is_finite() && ms > 0.0,
-                "GI refill milliseconds must be positive and finite"
-            );
-            Mode::Milliseconds(ms)
-        } else {
-            let cells = value
-                .parse()
-                .expect("GI refill budget: today, hold, ms or a cell count");
-            assert!(cells >= 64, "GI refill cell budget must be at least 64");
-            Mode::Fixed(cells)
-        }
-    })
+    Mode::Fixed(DEFAULT_CELLS)
 }
 
 pub(super) fn source(mut source: String, enabled: bool) -> String {
@@ -114,7 +90,7 @@ pub(super) fn source(mut source: String, enabled: bool) -> String {
         ("let period=gi_claim_period();", "let period=1u;"),
         (
             "    let key=gi_miss_key(base);\n    let mask=gi_word(GI_H_MASK);",
-            "    if !gi_priority_claim_admit(gi_miss_band(base)) { atomicStore(&gi_work[base+5u],GI_CREATED); atomicAdd(&gi_work[GI_W_CLAIM_DEFERRED],1u); return; }\n    let key=gi_miss_key(base);\n    let mask=gi_word(GI_H_MASK);",
+            "    if !gi_priority_claim_admit(base) { atomicStore(&gi_work[base+5u],GI_CREATED); atomicAdd(&gi_work[GI_W_CLAIM_DEFERRED],1u); return; }\n    let key=gi_miss_key(base);\n    let mask=gi_word(GI_H_MASK);",
         ),
         (
             "@compute @workgroup_size(64) fn gi_gather_batched(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) lane:u32) {",
@@ -153,6 +129,10 @@ pub(super) struct Pipelines {
     pub hold: Owned<wgpu::ComputePipeline>,
     pub gather_clamp: Owned<wgpu::ComputePipeline>,
     pub claim_reset: Owned<wgpu::ComputePipeline>,
+    pub claim_hist_high: Owned<wgpu::ComputePipeline>,
+    pub claim_select_high: Owned<wgpu::ComputePipeline>,
+    pub claim_hist_low: Owned<wgpu::ComputePipeline>,
+    pub claim_select_low: Owned<wgpu::ComputePipeline>,
     pub claim_background: Owned<wgpu::ComputePipeline>,
     pub gather_later: Owned<wgpu::ComputePipeline>,
     pub gather_background: Owned<wgpu::ComputePipeline>,
@@ -167,6 +147,10 @@ impl Pipelines {
             hold: compute("gi_priority_hold_queue"),
             gather_clamp: compute("gi_priority_gather_clamp"),
             claim_reset: compute("gi_priority_claim_reset"),
+            claim_hist_high: compute("gi_priority_claim_hist_high"),
+            claim_select_high: compute("gi_priority_claim_select_high"),
+            claim_hist_low: compute("gi_priority_claim_hist_low"),
+            claim_select_low: compute("gi_priority_claim_select_low"),
             claim_background: compute("gi_priority_claim_background"),
             gather_later: compute("gi_priority_gather_later"),
             gather_background: compute("gi_priority_gather_background"),
@@ -245,7 +229,10 @@ impl Controller {
     }
 }
 
-pub(super) fn compact_available(cap: u32) -> bool { cap <= (RAY_ITEMS - 8) / 3 }
+pub(super) fn compact_available(cap: u32, slots: u32) -> bool {
+    let gather_words = 16 + u64::from(slots) + 2 * u64::from(cap) + 3 * u64::from(slots.div_ceil(64));
+    gather_words.max(16 + 2 * 65536) <= u64::from(RAY_ITEMS)
+}
 
 #[cfg(test)]
 mod tests {
