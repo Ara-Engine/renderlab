@@ -41,8 +41,44 @@ pub(super) mod atmosphere_shadow;
 pub(super) const MAX_LEVELS: usize = 8;
 const MAX_RECTS: usize = 16;
 const PAGE: u32 = 128;
-/// The Disk mark pass's receiver counters (WGSL `vsm_reach`): four words.
-const REACH_BYTES: u64 = 16;
+/// The Disk mark pass's receiver counters (WGSL `vsm_reach`): four words, then (copied after
+/// the page work) the sparse pool's header words 4..11 (`POOL_*`).
+const REACH_BYTES: u64 = 48;
+
+// Sparse clipmap (U-CLIPMAP, default on with the Disk lookup; `RENDERLAB_VSM_SPARSE=0` keeps the
+// dense windows). Each level is a 32x32-page window over absolute light-space pages, addressed
+// toroidally through a page table (shaders/virtual_shadow.wgsl `vsm_vpage`), so a window
+// following the eye keeps every page it still covers and is wide enough that receivers read
+// the level their footprint wants. Only pages receivers request this frame are resident: they
+// take 128x128-texel physical pages (both layers, 256 KiB, plus in-page max-mips) from a pool
+// that grows on demand, at most `pool_settings().1` new pages are rasterized per frame (coarse
+// levels first, the lookup reads a coarser level while a page is missing), and pages nobody
+// requested return to the pool after a while or under pressure.
+/// The sparse windows' side in pages.
+const SPARSE_PAGES: u32 = 32;
+/// WGSL `VSM_POOL_FREE`: header words before the free stack.
+const POOL_FREE: u64 = 16;
+/// WGSL `VSM_PAGE_MIPS`: in-page max-mip words per physical page.
+const PAGE_MIP_WORDS: u64 = 5461;
+/// The pool's largest size: one layer of 1024 pages is the 128 MiB storage binding.
+const POOL_MAX: u32 = 1024;
+/// Whether the sparse clipmap is on (`RENDERLAB_VSM_SPARSE=0` turns it off).
+fn sparse_switch() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE").map_or(true, |v| v.trim() != "0"))
+}
+/// The pool's first size in pages and the per-frame raster budget in pages:
+/// `RENDERLAB_VSM_POOL=pages[,budget]` (measurement), defaults 256 and 192.
+fn pool_settings() -> (u32, u32) {
+    static POOL: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    *POOL.get_or_init(|| {
+        let value = std::env::var("RENDERLAB_VSM_POOL").unwrap_or_default();
+        let mut parts = value.split(',').map(|p| p.trim().parse::<u32>().ok());
+        let pages = parts.next().flatten().unwrap_or(256).clamp(16, POOL_MAX);
+        let budget = parts.next().flatten().unwrap_or(192).max(1);
+        (pages, budget)
+    })
+}
 /// WGSL `VsmFrame`: six vec4s, two uvec4s, eight levels, sixteen light-space and sixteen
 /// screen rectangles, the TRACED_DRAWS per-batch horizon offsets and (first record, recorded) pairs,
 /// N8e's uvec4, P-NSQ's sampling uvec4 (`SAMPLING_OFFSET`) and TR1's restart zones
@@ -64,7 +100,10 @@ const ZONES_OFFSET: u64 = (FRAME_BYTES - ZONES_BYTES) as u64;
 const HORIZON_STRIDE: u64 = 256;
 /// `VsmPass` uniforms (a clip level or a mip index) at the minimum dynamic-offset alignment.
 const PASS_STRIDE: u64 = 256;
-const PASS_ENTRIES: usize = 16;
+/// Entries 0..16 hold an index (a level or a mip) in their first word; entries 16 + 4 level +
+/// tile hold (level, tile) for the hardware raster's areas (WGSL `vsm_area_tiles`).
+const PASS_ENTRIES: usize = 16 + 4 * MAX_LEVELS;
+const PASS_TILES: usize = 16;
 /// Per-level WGSL `VsmArgs`: the software dispatch and the hardware draw.
 const ARGS_BYTES: u64 = 32;
 /// The WGSL `VsmScratch` header (N8m): the persistent lookup's tile queue, three reserved words
@@ -325,6 +364,14 @@ pub struct VirtualShadowStats {
     pub unplaced_receivers: u32,
     /// The nearest of the unplaced receivers (metres from the eye): the reach this frame.
     pub nearest_unplaced: Option<f32>,
+    /// Sparse clipmap (0 when dense), from the same readback: the pool's pages and those free,
+    /// pages requested, pages rasterized (or that wanted to be, past the budget) and pages
+    /// that found no free physical page.
+    pub pool_pages: u32,
+    pub free_pages: u32,
+    pub requested_pages: u32,
+    pub rendered_pages: u32,
+    pub failed_pages: u32,
 }
 
 struct Pipelines {
@@ -361,6 +408,11 @@ struct Pipelines {
     /// N-VSM1 (shaders/virtual_shadow_disk.wgsl): its page requests and its lookup.
     disk_mark: Owned<wgpu::ComputePipeline>,
     disk: Owned<wgpu::ComputePipeline>,
+    /// The sparse pool's passes (vsm_release, vsm_allocate, vsm_clear_sparse, vsm_mip_sparse).
+    release: Owned<wgpu::ComputePipeline>,
+    allocate: Owned<wgpu::ComputePipeline>,
+    clear_sparse: Owned<wgpu::ComputePipeline>,
+    mip_sparse: Owned<wgpu::ComputePipeline>,
 }
 struct Layouts {
     mark: Owned<wgpu::BindGroupLayout>,
@@ -449,6 +501,11 @@ struct Resources {
     levels: usize,
     pages: u32,
     size: [u32; 2],
+    /// Sparse: `top`, `peel` and `mips` are a pool of `capacity` physical pages, `state` holds
+    /// the page table's sections (WGSL `vsm_section`) and `pool` the free stack and lists.
+    sparse: bool,
+    capacity: u32,
+    pool: Owned<wgpu::Buffer>,
     /// Both layers: one 64-bit word per texel per level (normalized height << 32 | id).
     top: Owned<wgpu::Buffer>,
     peel: Owned<wgpu::Buffer>,
@@ -562,6 +619,10 @@ pub(super) struct VirtualState {
     eye: glam::DVec3,
     /// Camera cuts so far (`cut`): readbacks from an earlier view are ignored.
     epoch: u32,
+    /// Sparse: page-work frames so far (the pool's page ages) and the pool size the readbacks
+    /// asked for (grows when a frame's requests did not fit).
+    pool_frame: u32,
+    capacity: u32,
     /// Page requests depend only on the camera, the sun, the casters and the cache
     /// windows. A frame identical in all of them finds nothing stale, so it skips the
     /// request, compaction and raster passes and only runs the lookup.
@@ -1061,6 +1122,7 @@ impl VirtualState {
                     storage(2, false, S::COMPUTE),
                     storage(29, false, S::COMPUTE),
                     storage(37, false, S::COMPUTE),
+                    storage(53, false, S::COMPUTE),
                 ],
             ),
             cull: group(
@@ -1082,6 +1144,8 @@ impl VirtualState {
                     storage(31, false, writes),
                     storage(32, false, writes),
                     storage(33, true, reads),
+                    storage(54, true, S::COMPUTE),
+                    storage(55, true, writes),
                 ],
             ),
             mip: group(
@@ -1091,6 +1155,8 @@ impl VirtualState {
                     storage(16, true, S::COMPUTE),
                     storage(29, false, S::COMPUTE),
                     storage(36, false, S::COMPUTE),
+                    storage(54, true, S::COMPUTE),
+                    storage(55, true, S::COMPUTE),
                 ],
             ),
             data: group(
@@ -1224,6 +1290,7 @@ impl VirtualState {
                             min_binding_size: wgpu::BufferSize::new(DISK_FRAME_BYTES),
                         },
                     ),
+                    storage(55, true, S::COMPUTE),
                 ],
             ),
         };
@@ -1239,6 +1306,10 @@ impl VirtualState {
         };
         let mark_layout = pipeline_layout("N8 page request ABI", &[Some(&layouts.mark)]);
         let compact_layout = pipeline_layout("N8 page cache ABI", &[Some(&layouts.compact)]);
+        let allocate_layout = pipeline_layout(
+            "Sparse page allocation ABI",
+            &[Some(&layouts.compact), None, None, Some(&layouts.pass)],
+        );
         let cull_layout =
             pipeline_layout("N8c caster cull ABI", &[Some(&layouts.cull), Some(arrays)]);
         let clear_layout = pipeline_layout("N8c page clear ABI", &[Some(&layouts.raster)]);
@@ -1444,6 +1515,10 @@ impl VirtualState {
             queued: None,
             disk_mark,
             disk,
+            release: compute("vsm_release", &compact_layout, &[]),
+            allocate: compute("vsm_allocate", &allocate_layout, &[]),
+            clear_sparse: compute("vsm_clear_sparse", &clear_layout, &[]),
+            mip_sparse: compute("vsm_mip_sparse", &mip_layout, &[]),
         };
         Self {
             settings: VirtualShadowSettings::default(),
@@ -1466,6 +1541,8 @@ impl VirtualState {
             seen: None,
             eye: glam::DVec3::ZERO,
             epoch: 0,
+            pool_frame: 0,
+            capacity: pool_settings().0,
             key: vec![],
             page_work: true,
             history_frames: 0,
@@ -1564,17 +1641,34 @@ impl VirtualState {
         levels: usize,
         size: [u32; 2],
         last: u64,
+        sparse: bool,
+        queue: &wgpu::Queue,
     ) -> Result<bool, Error> {
-        let pages = self.settings.pages;
+        let pages = if sparse {
+            SPARSE_PAGES
+        } else {
+            self.settings.pages
+        };
+        let capacity = if sparse { self.capacity } else { 0 };
         if self.resources.as_ref().is_some_and(|r| {
-            r.levels >= levels && r.pages == pages && r.size == size && r.debug_sized == self.debug
+            r.levels >= levels
+                && r.pages == pages
+                && r.size == size
+                && r.debug_sized == self.debug
+                && r.sparse == sparse
+                && r.capacity == capacity
         }) {
             return Ok(false);
         }
         // Grow-only in levels, so the ladder can shift without reallocating.
         let levels = levels.max(self.resources.as_ref().map_or(0, |r| r.levels));
         let side = pages * PAGE;
-        let map_bytes = u64::from(side) * u64::from(side) * levels as u64 * 8;
+        let page_words = u64::from(PAGE * PAGE);
+        let map_bytes = if sparse {
+            u64::from(capacity) * page_words * 8
+        } else {
+            u64::from(side) * u64::from(side) * levels as u64 * 8
+        };
         if map_bytes > device.limits().max_storage_buffer_binding_size {
             return Err(Error::InvalidInput(
                 "SoftShadows::Virtual clipmap layer exceeds the storage binding limit; use fewer pages",
@@ -1588,9 +1682,10 @@ impl VirtualState {
         let area = ledger.own(
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("N8c hardware raster area"),
+                // At most 16 pages a side: wider windows draw in tiles (WGSL `vsm_area`).
                 size: wgpu::Extent3d {
-                    width: side,
-                    height: side,
+                    width: side.min(16 * PAGE),
+                    height: side.min(16 * PAGE),
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -1651,7 +1746,20 @@ impl VirtualState {
             )
         };
         use wgpu::BufferUsages as B;
-        let mip_bytes = (u64::from(side) * u64::from(side) - 1) / 3 * 4 * levels as u64;
+        // Sparse: the table's entries over every possible level (WGSL `vsm_section`).
+        let entries = MAX_LEVELS as u64 * u64::from(pages * pages);
+        let mip_bytes = if sparse {
+            // In-page mips per physical page, then each table entry's page maximum.
+            (u64::from(capacity) * PAGE_MIP_WORDS + entries) * 4
+        } else {
+            (u64::from(side) * u64::from(side) - 1) / 3 * 4 * levels as u64
+        };
+        let state_bytes = if sparse { 4 * entries * 4 } else { slots * 4 };
+        let pool_bytes = if sparse {
+            (POOL_FREE + u64::from(capacity) + entries) * 4
+        } else {
+            POOL_FREE * 4
+        };
         // N8k planes are as large as a layer, and their errors half of one.
         let (plane_bytes, error_bytes) = if self.settings.lookup.map() {
             (map_bytes, map_bytes / 2)
@@ -1678,15 +1786,43 @@ impl VirtualState {
             + minmip_bytes
             + queue_bytes
             + mip_bytes
-            + u64::from(side) * u64::from(side) * 2
+            + u64::from(side.min(16 * PAGE)).pow(2) * 2
             + u64::from(size[0]) * u64::from(size[1]) * 4
-            + slots * 12
+            + slots * 8
+            + state_bytes
+            + pool_bytes
             + 16
             + REACH_BYTES;
+        let pool = buffer(
+            "Sparse clipmap page pool",
+            pool_bytes,
+            B::STORAGE | B::INDIRECT | B::COPY_SRC,
+        );
+        let state = buffer("N8 page epochs", state_bytes, B::STORAGE);
+        if sparse {
+            // Every table entry empty; the free stack holds every physical page.
+            queue.write_buffer(
+                &state,
+                2 * entries * 4,
+                &vec![0xff; entries as usize * 4],
+            );
+            let mut words = vec![0u32; (POOL_FREE + u64::from(capacity)) as usize];
+            words[..4].copy_from_slice(&[0, 1, 1, 0]);
+            words[4] = capacity;
+            words[10] = capacity;
+            for (i, word) in words[POOL_FREE as usize..].iter_mut().enumerate() {
+                *word = i as u32;
+            }
+            let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
+            queue.write_buffer(&pool, 0, &bytes);
+        }
         self.resources = Some(Resources {
             levels,
             pages,
             size,
+            sparse,
+            capacity,
+            pool,
             top: buffer("N8c clipmap top layer", map_bytes, B::STORAGE),
             peel: buffer("N8c clipmap peel layer", map_bytes, B::STORAGE),
             mips: buffer("N8c clipmap max-mips", mip_bytes.max(4), B::STORAGE),
@@ -1714,7 +1850,7 @@ impl VirtualState {
             debug_sized: self.debug,
             frame: buffer("N8 frame", FRAME_BYTES as u64, B::UNIFORM),
             requests: buffer("N8 page requests", slots * 4, B::STORAGE),
-            state: buffer("N8 page epochs", slots * 4, B::STORAGE),
+            state,
             render: buffer("N8c pages rasterized this frame", slots * 4, B::STORAGE),
             cull_args: buffer("N8f caster cull dispatch", 16, B::STORAGE | B::INDIRECT),
             pass: buffer(
@@ -1966,6 +2102,23 @@ impl Renderer {
             if epoch == state.epoch {
                 state.seen = state.stats.nearest_receiver.map(|d| (f64::from(d), at));
             }
+            // The pool's header words 4..11 (WGSL `vsm_pool`); zero when dense.
+            let pool = |i: usize| word(i);
+            state.stats.free_pages = pool(4);
+            state.stats.rendered_pages = pool(5);
+            state.stats.failed_pages = pool(6) + pool(7);
+            state.stats.pool_pages = pool(10);
+            state.stats.requested_pages = pool(11);
+            // A frame whose requests did not fit grows the pool by half (every page is
+            // rasterized again once, as after a cut).
+            let capacity = pool(10);
+            if capacity != 0
+                && capacity == state.capacity
+                && state.stats.failed_pages != 0
+                && u64::from(state.stats.requested_pages) * 5 > u64::from(capacity) * 4
+            {
+                state.capacity = (capacity + capacity / 2).next_multiple_of(64).min(POOL_MAX);
+            }
         }
         // N8n: the surface cache exists only while it is the lookup (wgpu keeps the table alive
         // for frames in flight).
@@ -2188,7 +2341,9 @@ impl Renderer {
         cache.casts = casts;
         cache.bounds = bounds;
         cache.poses = poses;
-        let pages = i64::from(s.pages);
+        // Sparse with the Disk lookup only: the other lookups read the dense layout.
+        let sparse = sparse_switch() && s.lookup == VirtualLookup::Disk;
+        let pages = i64::from(if sparse { SPARSE_PAGES } else { s.pages });
         let eye_light = glam::DVec2::new(eye.dot(u), eye.dot(v));
         // U-FIXED forward windows: the finest levels' windows sit ahead of the eye, in whole
         // pages toward the view's sector (`forward_sector`).
@@ -2210,15 +2365,27 @@ impl Renderer {
             };
             let centre = [eye_light.x, eye_light.y].map(|x| (x / page).floor() as i64);
             let centre = [centre[0] + shift[0], centre[1] + shift[1]];
-            let keep = cache.origins[i].filter(|o| {
-                !invalidated[i] && (0..2).all(|a| (centre[a] - (o[a] + pages / 2)).abs() <= 1)
-            });
-            let origin = keep.unwrap_or([centre[0] - pages / 2, centre[1] - pages / 2]);
-            if keep.is_none() {
-                invalidated[i] = true;
+            let origin = if sparse {
+                // The page table is toroidal over absolute pages: the window follows the eye's
+                // page every frame and keeps the pages it still covers (their tags).
+                let origin = [centre[0] - pages / 2, centre[1] - pages / 2];
                 cache.origins[i] = Some(origin);
-                cache.epochs[i] = cache.epochs[i].wrapping_add(1).max(1);
-            }
+                if invalidated[i] {
+                    cache.epochs[i] = cache.epochs[i].wrapping_add(1).max(1);
+                }
+                origin
+            } else {
+                let keep = cache.origins[i].filter(|o| {
+                    !invalidated[i] && (0..2).all(|a| (centre[a] - (o[a] + pages / 2)).abs() <= 1)
+                });
+                let origin = keep.unwrap_or([centre[0] - pages / 2, centre[1] - pages / 2]);
+                if keep.is_none() {
+                    invalidated[i] = true;
+                    cache.origins[i] = Some(origin);
+                    cache.epochs[i] = cache.epochs[i].wrapping_add(1).max(1);
+                }
+                origin
+            };
             let lo = glam::DVec2::new(origin[0] as f64 * page, origin[1] as f64 * page) - eye_light;
             // The caster cut's error bound at this level (negative: original geometry).
             let caster_error = if s.caster_error_texels < 0.0 {
@@ -2233,7 +2400,16 @@ impl Renderer {
             {
                 entry[k * 4..k * 4 + 4].copy_from_slice(&value.to_ne_bytes());
             }
-            for (k, value) in [cache.epochs[i], rung as u32, 0, 0].iter().enumerate() {
+            // Sparse: the window's first absolute page (wrapping) for the toroidal table.
+            let first = if sparse {
+                [origin[0] as u32, origin[1] as u32]
+            } else {
+                [0, 0]
+            };
+            for (k, value) in [cache.epochs[i], rung as u32, first[0], first[1]]
+                .iter()
+                .enumerate()
+            {
                 entry[16 + k * 4..20 + k * 4].copy_from_slice(&value.to_ne_bytes());
             }
         }
@@ -2265,17 +2441,19 @@ impl Renderer {
         ]);
         for value in [
             levels as u32,
-            s.pages,
+            pages as u32,
             cluster_count,
             rects.len() as u32,
             primitive_bits,
             s.march_samples,
             s.bias_ulps,
-            // N8k: bit 8, the hybrid's queue (virtual_shadow_lookup.wgsl vmap_hybrid).
+            // N8k: bit 8, the hybrid's queue (virtual_shadow_lookup.wgsl vmap_hybrid); bit 9 the
+            // sparse layout (virtual_shadow.wgsl vsm_sparse).
             u32::from(s.ring)
                 | u32::from(s.peel_own) << 1
                 | s.first_block << 2
-                | u32::from(s.lookup == VirtualLookup::Hybrid) << 8,
+                | u32::from(s.lookup == VirtualLookup::Hybrid) << 8
+                | u32::from(sparse) << 9,
         ] {
             frame.extend_from_slice(&value.to_ne_bytes());
         }
@@ -2552,6 +2730,8 @@ impl Renderer {
             levels,
             [size.width, size.height],
             self.submissions,
+            sparse,
+            &self.queue,
         )?;
         let constants = state.constants.clone();
         let rebuild = constants != state.built;
@@ -2806,9 +2986,29 @@ impl Renderer {
         frame.extend_from_slice(&[0; ZONES_BYTES]);
         debug_assert_eq!(frame.len(), FRAME_BYTES);
         let state = self.view.virtual_shadows.as_mut().unwrap();
+        if state.page_work {
+            state.pool_frame = state.pool_frame.wrapping_add(1);
+        }
+        let pool_frame = state.pool_frame;
         let casters = state.casters.as_ref().unwrap();
         let r = state.resources.as_mut().unwrap();
         self.queue.write_buffer(&r.frame, 0, &frame);
+        if r.sparse && state.page_work {
+            // The pool header's per-frame words (WGSL `vsm_pool`): an empty raster list, the
+            // budget's counter, this frame's failure word, and the frame, budget and size.
+            let words = |values: &[u32]| -> Vec<u8> {
+                values.iter().flat_map(|w| w.to_ne_bytes()).collect()
+            };
+            self.queue.write_buffer(&r.pool, 0, &words(&[0, 1, 1, 0]));
+            self.queue.write_buffer(&r.pool, 20, &words(&[0]));
+            self.queue
+                .write_buffer(&r.pool, 24 + 4 * u64::from(pool_frame & 1), &words(&[0]));
+            self.queue.write_buffer(
+                &r.pool,
+                32,
+                &words(&[pool_frame, pool_settings().1, r.capacity, 0]),
+            );
+        }
         if s.lookup == VirtualLookup::Disk {
             // N-VSM1 `VdFrame`: the receivers' own world-to-clip matrix, for the visible-surface
             // samples along the sun's screen direction.
@@ -2827,8 +3027,14 @@ impl Renderer {
         }
         let mut pass = vec![0u8; PASS_ENTRIES * PASS_STRIDE as usize];
         for i in 0..PASS_ENTRIES {
-            pass[i * PASS_STRIDE as usize..i * PASS_STRIDE as usize + 4]
-                .copy_from_slice(&(i as u32).to_ne_bytes());
+            let at = i * PASS_STRIDE as usize;
+            let (index, tile) = if i < PASS_TILES {
+                (i, 0)
+            } else {
+                ((i - PASS_TILES) / 4, (i - PASS_TILES) % 4)
+            };
+            pass[at..at + 4].copy_from_slice(&(index as u32).to_ne_bytes());
+            pass[at + 4..at + 8].copy_from_slice(&(tile as u32).to_ne_bytes());
         }
         self.queue.write_buffer(&r.pass, 0, &pass);
         self.uploads.shadows += (FRAME_BYTES + pass.len()) as u64;
@@ -2894,6 +3100,7 @@ impl Renderer {
                         buffer(2, &r.state),
                         buffer(29, &r.render),
                         buffer(37, &r.cull_args),
+                        buffer(53, &r.pool),
                     ],
                 ),
                 cull: group(
@@ -2917,6 +3124,8 @@ impl Renderer {
                         buffer(31, &r.top),
                         buffer(32, &r.peel),
                         buffer(33, &casters.work),
+                        buffer(54, &r.pool),
+                        buffer(55, &r.state),
                     ],
                 ),
                 mip: group(
@@ -2927,6 +3136,8 @@ impl Renderer {
                         buffer(16, &r.top),
                         buffer(29, &r.render),
                         buffer(36, &r.mips),
+                        buffer(54, &r.pool),
+                        buffer(55, &r.state),
                     ],
                 ),
                 pass: group(
@@ -3011,6 +3222,7 @@ impl Renderer {
                         buffer(19, &r.peel),
                         buffer(35, &r.mips),
                         buffer(50, &r.disk_frame),
+                        buffer(55, &r.state),
                     ],
                 ),
                 queued: group(
@@ -3324,12 +3536,29 @@ impl Renderer {
             });
             pass.set_bind_group(0, &*g.mark, &[]);
             pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(4), 1);
-            pass.set_pipeline(&p.compact);
-            pass.set_bind_group(0, &*g.compact, &[]);
-            pass.dispatch_workgroups(slots.div_ceil(64) as u32, 1, 1);
-            pass.set_pipeline(&p.clear);
-            pass.set_bind_group(0, &*g.raster, &[]);
-            pass.dispatch_workgroups(slots as u32, 1, 1);
+            if r.sparse {
+                // Stale and unused pages back to the pool, then each level's requests take
+                // pages, coarsest first (the raster budget serves coarse levels first), then
+                // the pages flagged this frame are cleared.
+                pass.set_pipeline(&p.release);
+                pass.set_bind_group(0, &*g.compact, &[]);
+                pass.dispatch_workgroups(slots.div_ceil(64) as u32, 1, 1);
+                pass.set_pipeline(&p.allocate);
+                for level in (0..state.levels).rev() {
+                    pass.set_bind_group(3, &*g.pass, &[level as u32 * PASS_STRIDE as u32]);
+                    pass.dispatch_workgroups((r.pages * r.pages).div_ceil(64), 1, 1);
+                }
+                pass.set_pipeline(&p.clear_sparse);
+                pass.set_bind_group(0, &*g.raster, &[]);
+                pass.dispatch_workgroups_indirect(&r.pool, 0);
+            } else {
+                pass.set_pipeline(&p.compact);
+                pass.set_bind_group(0, &*g.compact, &[]);
+                pass.dispatch_workgroups(slots.div_ceil(64) as u32, 1, 1);
+                pass.set_pipeline(&p.clear);
+                pass.set_bind_group(0, &*g.raster, &[]);
+                pass.dispatch_workgroups(slots as u32, 1, 1);
+            }
             pass.set_pipeline(&p.cull);
             pass.set_bind_group(0, &*g.cull, &[]);
             pass.set_bind_group(1, arrays, &[]);
@@ -3339,6 +3568,10 @@ impl Renderer {
             pass.dispatch_workgroups(1, 1, 1);
         }
         if state.settings.lookup == VirtualLookup::Disk {
+            if r.sparse {
+                // The pool's counters ride along with the receiver counters (`REACH_BYTES`).
+                encoder.copy_buffer_to_buffer(&r.pool, 16, &r.reach, 16, 32);
+            }
             let tag = (state.eye, state.epoch);
             state
                 .reach
@@ -3379,15 +3612,29 @@ impl Renderer {
             pass.set_bind_group(0, &*g.raster, &[]);
             pass.set_bind_group(1, arrays, &[]);
             pass.set_bind_group(2, &*casters.data, &[]);
+            // A window wider than the attachment draws once per area (WGSL `vsm_area_tiles`);
+            // each draw's vertices skip the clusters the cull did not mark for its area.
+            let tiles = (r.pages / r.pages.min(16)).pow(2) as usize;
             for level in 0..state.levels {
-                pass.set_bind_group(3, &*g.pass, &[level as u32 * PASS_STRIDE as u32]);
-                pass.draw_indirect(&casters.work, level as u64 * ARGS_BYTES + 16);
+                for tile in 0..tiles {
+                    let entry = PASS_TILES + 4 * level + tile;
+                    pass.set_bind_group(3, &*g.pass, &[entry as u32 * PASS_STRIDE as u32]);
+                    pass.draw_indirect(&casters.work, level as u64 * ARGS_BYTES + 16);
+                }
             }
         }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("N8c clipmap max-mips"),
             timestamp_writes: None,
         });
+        if r.sparse {
+            // In-page mips of the pages rasterized this frame (none when no page was flagged).
+            pass.set_pipeline(&p.mip_sparse);
+            pass.set_bind_group(0, &*g.mip, &[]);
+            pass.set_bind_group(3, &*g.pass, &[0]);
+            pass.dispatch_workgroups_indirect(&r.pool, 0);
+            return;
+        }
         // N8k: the mips' dispatches are zero when no page was flagged (vsm_compact's cull
         // arguments), as camera motion inside the windows changes no top word.
         pass.set_pipeline(&p.mip_dispatch);

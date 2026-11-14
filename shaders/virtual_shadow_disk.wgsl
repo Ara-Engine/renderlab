@@ -64,6 +64,38 @@ fn vsm_word(cell:vec2<i32>,level:u32)->u32 {
     let side=vsm.counts.y*VSM_PAGE;
     return (level*side+u32(cell.y))*side+u32(cell.x);
 }
+// virtual_shadow.wgsl's sparse layout (vsm_sparse, vsm_vpage, vsm_section, vsm_page_mip).
+fn vsm_sparse()->bool {return (vsm.misc.w&0x200u)!=0u;}
+fn vsm_vpage(level:u32,page:vec2<u32>)->u32 {
+    let n=vsm.counts.y;let o=vsm.levels[level].info.zw;
+    return (level*n+((page.y+o.y)&(n-1u)))*n+((page.x+o.x)&(n-1u));
+}
+fn vsm_section(k:u32)->u32 {return k*VSM_MAX_LEVELS*vsm.counts.y*vsm.counts.y;}
+const VSM_PAGE_MIPS:u32=5461u;
+fn vsm_page_mip(slot:u32,mip:u32,local:vec2<u32>)->u32 {
+    let s=VSM_PAGE>>mip;
+    return slot*VSM_PAGE_MIPS+(VSM_PAGE*VSM_PAGE-4u*s*s)/3u+local.y*s+local.x;
+}
+// The page state (sparse: section 2 maps table entries to physical pages).
+@group(0) @binding(55) var<storage,read> vsm_pages:array<u32>;
+// The physical page of window-relative page `page` of `level` (VSM_NONE: not resident).
+fn vsm_resident(level:u32,page:vec2<u32>)->u32 {return vsm_pages[vsm_section(2u)+vsm_vpage(level,page)];}
+// The word of texel `cell` (inside the window) of `level`: VSM_NONE where its page is missing
+// (sparse only), which reads as an empty texel.
+fn vsm_index(cell:vec2<i32>,level:u32)->u32 {
+    if !vsm_sparse() {return vsm_word(cell,level);}
+    let c=vec2<u32>(cell);
+    let slot=vsm_resident(level,c/VSM_PAGE);
+    if slot==VSM_NONE {return VSM_NONE;}
+    return slot*VSM_PAGE*VSM_PAGE+(c.y%VSM_PAGE)*VSM_PAGE+c.x%VSM_PAGE;
+}
+// The normalized top height of mip `mip` (1..7) over the cell holding texel `cell`; a missing
+// page is the highest (conservative).
+fn vsm_mip_at(level:u32,mip:u32,cell:vec2<u32>)->f32 {
+    let slot=vsm_resident(level,cell/VSM_PAGE);
+    if slot==VSM_NONE {return 1.0;}
+    return vsm_mips[vsm_page_mip(slot,mip,(cell%VSM_PAGE)>>vec2<u32>(mip))];
+}
 // The widened disk slope the pages are requested for (disk plus sun hysteresis).
 fn vd_slope()->f32 {return max(vsm.params.z,1e-4);}
 // Max-mip bands above the coarsest level's: their windows reach VD_R << VD_MIPS of its texels,
@@ -169,7 +201,7 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
                 for(var y=a.y;y<=b.y;y+=1u) {
                     for(var x=a.x;x<=b.x;x+=1u) {
                         // Benign race: every writer stores the same value.
-                        vsm_requests[(l*pages+y)*pages+x]=1u;
+                        vsm_requests[vsm_vpage(l,vec2<u32>(x,y))]=1u;
                     }
                 }
                 if l>=level && f32(VD_R)*texel*keep>=reach {break;}
@@ -257,6 +289,25 @@ fn vd_mip_max(level:u32,a:vec2<i32>,b:vec2<i32>)->f32 {
     let side=vsm.counts.y*VSM_PAGE;
     let span=u32(max(b.x-a.x,b.y-a.y))+1u;
     let mip=max(32u-countLeadingZeros(span-1u),1u);
+    if vsm_sparse() {
+        var h=0.0;
+        if mip<=7u {
+            // The four cells holding the corners (cells of mip <= 7 lie inside one page).
+            let ua=vec2<u32>(a);let ub=vec2<u32>(b);
+            h=max(max(vsm_mip_at(level,mip,ua),vsm_mip_at(level,mip,vec2<u32>(ub.x,ua.y))),max(vsm_mip_at(level,mip,vec2<u32>(ua.x,ub.y)),vsm_mip_at(level,mip,ub)));
+        } else {
+            // Above page size: the page maxima (after the pool's mips) of the pages spanned.
+            let pa=vec2<u32>(a)/VSM_PAGE;let pb=min(vec2<u32>(b)/VSM_PAGE,pa+vec2<u32>(3u));
+            let after=arrayLength(&vsm_mips)-VSM_MAX_LEVELS*vsm.counts.y*vsm.counts.y;
+            for(var y=pa.y;y<=pb.y;y+=1u) {
+                for(var x=pa.x;x<=pb.x;x+=1u) {
+                    let p=vec2<u32>(x,y);
+                    if vsm_resident(level,p)==VSM_NONE {h=1.0;} else {h=max(h,vsm_mips[after+vsm_vpage(level,p)]);}
+                }
+            }
+        }
+        return fma(h,vsm.depth.z,vsm.depth.x);
+    }
     let ia=vec2<u32>(a)>>vec2<u32>(mip);let ib=vec2<u32>(b)>>vec2<u32>(mip);
     let s=side>>mip;let base=vsm_mip_base(level,mip);
     let h=max(max(vsm_mips[base+ia.y*s+ia.x],vsm_mips[base+ia.y*s+ib.x]),max(vsm_mips[base+ib.y*s+ia.x],vsm_mips[base+ib.y*s+ib.x]));
@@ -350,6 +401,19 @@ fn vd_prepare(id:vec2<u32>) {
     vd_px.origin=fma(n,vec3<f32>(world.w),world.xyz);
     vd_px.p=vsm_light(vd_px.origin);
     vd_px.point=vsm_light(world.xyz);
+    // Sparse: while the receiver's page is still arriving (the per-frame raster budget after a
+    // cut, or a full pool), the first coarser level that holds it.
+    if vsm_sparse() && vd_px.level!=VSM_NONE {
+        let side=f32(vsm.counts.y*VSM_PAGE);
+        var l=vd_px.level;
+        loop {
+            if l>=vsm.counts.x {l=VSM_NONE;break;}
+            let x=(vd_px.p.xy-vsm.levels[l].origin.xy)/vsm_texel(l);
+            if all(x>=vec2<f32>(0.0)) && all(x<vec2<f32>(side)) && vsm_resident(l,vec2<u32>(x)/VSM_PAGE)!=VSM_NONE {break;}
+            l+=1u;
+        }
+        vd_px.level=l;
+    }
     vd_px.normal=vec3<f32>(dot(n,vsm.u.xyz),dot(n,vsm.v.xyz),dot(n,vsm.l.xyz));
     // The current sun in the map's basis: the map keeps its basis through small sun turns.
     let s=vec3<f32>(dot(l,vsm.u.xyz),dot(l,vsm.v.xyz),dot(l,vsm.l.xyz));
@@ -417,7 +481,8 @@ fn vd_above(q:vec3<f32>,margin:f32)->bool {
 // `c` (light xy): a level's own texel, or the one texel read for a max-mip cell `stride` texels
 // wide. `lo`..`hi` is the band of heights being served, `margin` the near-field bias.
 fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo:f32,hi:f32,margin:f32) {
-    let i=vsm_word(cell,level);
+    let i=vsm_index(cell,level);
+    if i==VSM_NONE {return;}
     let top=vsm_top_words[i];
     if top.x==0u {return;}
     let p=vd_px.p;
@@ -443,7 +508,9 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo:f32,hi:f
         for(var k=0u;k<4u;k+=1u) {
             let n=cell+stride*vec2<i32>(select(select(0,1,k==1u),-1,k==0u),select(select(0,1,k==3u),-1,k==2u));
             if any(n<vec2<i32>(0)) || any(n>=vec2<i32>(side)) {continue;}
-            let other=vsm_top_words[vsm_word(n,level)];
+            let j=vsm_index(n,level);
+            if j==VSM_NONE {continue;}
+            let other=vsm_top_words[j];
             if other.x!=0u && other.x>>bits==top.x>>bits {bottom=min(bottom,vsm_height(other)-p.z);}
         }
     }
@@ -523,7 +590,10 @@ fn vd_map() {
         let step=i32(1u<<mip);
         for(var y=a.y;y<=b.y;y+=1) {
             for(var cx=a.x;cx<=b.x;cx+=1) {
-                let height=fma(vsm_mips[base+u32(y*s+cx)],vsm.depth.z,vsm.depth.x);
+                var stored=0.0;
+                if vsm_sparse() {stored=vsm_mip_at(last,mip,vec2<u32>(vec2<i32>(cx,y)<<vec2<u32>(mip)));}
+                else {stored=vsm_mips[base+u32(y*s+cx)];}
+                let height=fma(stored,vsm.depth.z,vsm.depth.x);
                 let t=height-p.z;
                 if t<=lo {continue;}
                 if VD_MIP_POINT {
