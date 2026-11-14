@@ -747,6 +747,10 @@ pub(crate) fn zones_source(record: &str) -> String {
     include_str!("../shaders/temporal_zones.wgsl").replace("ZONES", record)
 }
 pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
+    resolve_source_with_coverage(wgsl, coverage_mode())
+}
+
+fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
     let mode = ["tr1-mask", "tr1-raw", "tr1-window"]
         .into_iter()
@@ -755,6 +759,9 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         Some(mode) => mask_resolve(mode),
         None => RESOLVE.to_owned(),
     };
+    if let Some(cycle) = coverage {
+        resolve = coverage_resolve(&resolve, cycle);
+    }
     if let Ok(k) = std::env::var("RENDERLAB_P_SPLIT_FRESH_CLAMP") {
         resolve = fresh_clamp_resolve(
             &resolve,
@@ -768,6 +775,55 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
         include_str!("../shaders/object_motion.wgsl"),
         zones_source("tr1.zones")
     ))
+}
+
+pub(in crate::renderer) fn coverage_mode() -> Option<bool> {
+    if std::env::var("RENDERLAB_TR1_COVERAGE_CYCLE").is_ok_and(|v| v == "1") {
+        Some(true)
+    } else if std::env::var("RENDERLAB_TR1_COVERAGE_UNORM").is_ok_and(|v| v == "1") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+/// Coverage experiments only. Off, the resolve module is unchanged. Both encodings fit
+/// the existing integer second-layer word; colour and effective colour weight stay f16.
+/// Apply once to the unmodified resolve body, before composing the complete module.
+pub(in crate::renderer) fn coverage_resolve(source: &str, cycle: bool) -> String {
+    let replace = |source: String, old: &str, new: &str| {
+        assert_eq!(source.matches(old).count(), 1, "TR1 coverage seam: {old}");
+        source.replace(old, new)
+    };
+    let mut source = replace(
+        source.to_owned(),
+        "let cw=unpack2x16float(l.w);",
+        "let cw=tr1_unpack_coverage(l.x,l.w);",
+    );
+    source = replace(
+        source,
+        "pack2x16float(vec2<f32>(first_coverage,coverage_weight))",
+        if cycle {
+            "tr1_pack_coverage(first_coverage,coverage_weight,counted)"
+        } else {
+            "tr1_pack_coverage(first_coverage,coverage_weight,false)"
+        },
+    );
+    if cycle {
+        source = replace(
+            source,
+            "    var front=theirs.xyz;var back=mine.xyz;",
+            "    let settled=tr1_cycle_coverage(p,s,u,occluder_is_s,c,coverage,coverage_weight);\n    coverage=settled.x;coverage_weight=settled.y;let counted=settled.z>0.0;\n    var front=theirs.xyz;var back=mine.xyz;",
+        );
+        source = replace(
+            source,
+            "|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s),pack2x16float(theirs.xy)",
+            "|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s)|select(0u,TR1_COVERAGE_COUNT,counted),pack2x16float(theirs.xy)",
+        );
+        source.push_str(include_str!("../shaders/temporal_coverage_cycle.wgsl"));
+    }
+    source.push_str(include_str!("../shaders/temporal_coverage_pack.wgsl"));
+    source
 }
 
 /// Measurement only (P-SPLIT crack flashes): a continued history's fresh sample is clamped to
@@ -1613,6 +1669,14 @@ impl ReconstructionState {
     #[cfg(test)]
     pub(in crate::renderer) fn test_history(&self) -> &wgpu::Texture {
         &self.colour[self.plan.parity].texture
+    }
+    #[cfg(test)]
+    pub(in crate::renderer) fn test_samples(&self) -> &wgpu::Texture {
+        &self.sample.texture
+    }
+    #[cfg(test)]
+    pub(in crate::renderer) fn test_layers(&self) -> &wgpu::Texture {
+        &self.layer[self.plan.parity].texture
     }
     /// Histories at the output size; the copy of the frame's samples at the internal size
     /// (equal at native resolution).
@@ -2574,10 +2638,26 @@ mod tests {
     }
 
     #[test]
+    fn coverage_off_keeps_original_resolve_module() {
+        let prelude=include_str!("../shaders/scene.wgsl");
+        let [head,_]=non_rt_heads(prelude).unwrap();
+        let original=format!("{head}\n{}\n{RESOLVE}\n{}",
+            include_str!("../shaders/object_motion.wgsl"),zones_source("tr1.zones"));
+        assert_eq!(resolve_source_with_coverage(prelude, None).unwrap(),original);
+    }
+
+    #[test]
     fn reconstruction_modules_validate_without_ray_queries() {
         let prelude = include_str!("../shaders/scene.wgsl");
         let resolve = resolve_source(prelude).unwrap();
         assert!(!resolve.contains("ray_query") && !resolve.contains("rayQuery"));
+        if let Some(cycle) = coverage_mode() {
+            assert_eq!(resolve.matches("fn tr1_unpack_coverage(").count(), 1);
+            assert_eq!(
+                resolve.matches("fn tr1_cycle_coverage(").count(),
+                usize::from(cycle)
+            );
+        }
         let kernels = shader_sources(prelude).unwrap();
         // Main's module when listing is off; P-RTS's seams when it is on.
         let off = trace_source_with(&kernels[1], false).unwrap();
@@ -2634,8 +2714,14 @@ mod tests {
             1
         );
         // The measurement-only mask modes (mask_resolve) must stay valid as TR1 changes.
-        let masks = ["tr1-mask", "tr1-raw", "tr1-window"]
-            .map(|m| resolve.replace(RESOLVE, &mask_resolve(m)));
+        let unmodified = resolve_source_with_coverage(prelude, None).unwrap();
+        let masks = ["tr1-mask", "tr1-raw", "tr1-window"].map(|m| {
+            let mut body = mask_resolve(m);
+            if let Some(cycle) = coverage_mode() {
+                body = coverage_resolve(&body, cycle);
+            }
+            unmodified.replace(RESOLVE, &body)
+        });
         // U-FIXED: the visibility-buffer sun asks and records once more, on the budget's estimate.
         let vb_sun = vb_sun_source(&kernels[1]).unwrap();
         assert_eq!(vb_sun.matches("primary_sun(receiver,slot,id.xy,size.x)").count(), 1);
@@ -2645,6 +2731,11 @@ mod tests {
             .into_iter()
             .chain(masks)
             .chain([fresh_clamp_resolve(&resolve_clone, 0.5)])
+            // Compose each coverage variant from its original body, as the engine
+            // does. `resolve` may already contain the ambient switch's transform.
+            .chain([false, true].map(|cycle| {
+                resolve_source_with_coverage(prelude, Some(cycle)).unwrap()
+            }))
         {
             let module = naga::front::wgsl::parse_str(&source).unwrap();
             naga::valid::Validator::new(

@@ -27,6 +27,8 @@ use super::*;
 mod object_motion_tests;
 #[path = "post_tests.rs"]
 mod post_tests;
+#[path = "temporal_coverage_tests.rs"]
+mod temporal_coverage_tests;
 
 /// A loaded bench scene's draw inputs; placement i + 1 is the scene's mesh i, as the
 /// reference's hit IDs number them.
