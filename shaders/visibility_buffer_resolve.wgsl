@@ -1,6 +1,10 @@
-// (cluster << 7 | triangle, depth bits) per pixel; depth 0 is a miss. Resolve zeroes
-// the hits it reads, so the next frame starts clear without a full-buffer fill: every
-// rasterized pixel lies in the placements' screen rectangle that resolve reads.
+// Hardware attachment hits are combined at the readers, avoiding a full-screen merge.
+override HW_ATTACHMENT:bool=false;
+@group(0) @binding(34) var hardware_ids:texture_2d<u32>;
+@group(0) @binding(35) var hardware_depth:texture_depth_2d;
+// Software (cluster << 7 | triangle, depth bits) per pixel; depth 0 is a miss.
+// Resolve zeroes software hits as it reads them. Hardware attachments are cleared
+// by the first raster pass of each frame.
 @group(0) @binding(29) var<storage,read_write> visibility:array<vec2<u32>>;
 // visibility_buffer.wgsl's Cluster: primitives is the first primitive ID, or with
 // counts bit 16 an offset of per-triangle source primitive IDs in the cluster data.
@@ -22,9 +26,16 @@ struct RasterHit {ids:vec2<u32>,positions:array<vec3<f32>,3>,error:f32};
 fn raster_hit(pixel:vec2<u32>,width:u32)->RasterHit {
     var hit:RasterHit;
     let i=pixel.y*width+pixel.x;
-    let v=visibility[i];
+    let sw=visibility[i];var v=sw;
+    if HW_ATTACHMENT {
+        let z=bitcast<u32>(textureLoad(hardware_depth,vec2<i32>(pixel),0));
+        if z!=0u && z>=v.y {
+            let payload=textureLoad(hardware_ids,vec2<i32>(pixel),0).x;
+            if z>v.y || payload>v.x {v=vec2<u32>(payload,z);}
+        }
+    }
+    if sw.y!=0u {visibility[i]=vec2<u32>(0u);}
     if v.y==0u {return hit;}
-    visibility[i]=vec2<u32>(0u);
     let c=visibility_clusters[v.x>>7u];let local=v.x&127u;
     let batch=primary_placements[c.placement]&0x1fffffffu;
     let d=&visibility_data[batch].data;

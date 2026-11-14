@@ -332,7 +332,7 @@ pub(super) struct VisibilityBuffer {
     _visibility: Buffer,
     depth: Depth,
     hardware_ids: Depth,
-    hardware_merge: Option<(wgpu::ComputePipeline, wgpu::BindGroup)>,
+    attachment: bool,
     _hzb: Depth,
     _hzb_absent: Depth,
     cull: wgpu::ComputePipeline,
@@ -876,6 +876,7 @@ impl VisibilityBuffer {
                 image(1, F::R32Float),
                 sampled(2, wgpu::TextureSampleType::Float { filterable: false }),
                 buffer_entry(3, true, false, S::COMPUTE),
+                sampled(4, wgpu::TextureSampleType::Depth),
             ],
         );
         let resolve_layout = layout(
@@ -893,6 +894,8 @@ impl VisibilityBuffer {
                     image(17, F::Rgba32Float),
                     image(20, F::R32Uint),
                     image(23, F::R32Float),
+                    sampled(34, wgpu::TextureSampleType::Uint),
+                    sampled(35, wgpu::TextureSampleType::Depth),
                 ][..],
                 &if crate::material_mode::Mode::tail() {
                     super::primary_ray_gpu::material_pass_gpu::entries(true).to_vec()
@@ -1004,35 +1007,13 @@ impl VisibilityBuffer {
                 multiview_mask: None,
                 cache: None,
             });
-        let merge_layout = layout(
-            &r.device,
-            &[
-                buffer_entry(0, false, true, S::COMPUTE),
-                sampled(1, wgpu::TextureSampleType::Uint),
-                sampled(2, wgpu::TextureSampleType::Depth),
-            ],
-        );
-        let hardware_merge = attachment.then(|| {
-            (
-                compute(
-                    include_str!("../shaders/visibility_buffer_merge.wgsl"),
-                    "merge",
-                    &[Some(&merge_layout)],
-                    &[],
-                ),
-                bind(
-                    &r.device,
-                    &merge_layout,
-                    &[
-                        (0, visibility.value.as_entire_binding()),
-                        (1, R::TextureView(&hardware_ids.view)),
-                        (2, R::TextureView(&depth.view)),
-                    ],
-                ),
-            )
-        });
         let hzb_source = include_str!("../shaders/visibility_buffer_hzb.wgsl");
-        let base = compute(hzb_source, "base", &[Some(&hzb_layout)], &[]);
+        let base = compute(
+            hzb_source,
+            "base",
+            &[Some(&hzb_layout)],
+            &[("HW_ATTACHMENT", if attachment { 1.0 } else { 0.0 })],
+        );
         let reduce = compute(hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
         let resolve_source = super::primary_ray_gpu::material_receiver_gpu::resolve(
             resolve_source(&r.source)?,
@@ -1047,7 +1028,11 @@ impl VisibilityBuffer {
                     Some(state.array_layout()),
                     Some(&data_layout),
                 ],
-                &[("WRITE_RECEIVERS", v), ("LOD_LIFT", f64::from(r.lod_lift))],
+                &[
+                    ("WRITE_RECEIVERS", v),
+                    ("LOD_LIFT", f64::from(r.lod_lift)),
+                    ("HW_ATTACHMENT", if attachment { 1.0 } else { 0.0 }),
+                ],
             )
         });
         let state = r.view.primary.as_ref().unwrap();
@@ -1120,6 +1105,7 @@ impl VisibilityBuffer {
                             }),
                         ),
                         (3, image_size.value.as_entire_binding()),
+                        (4, R::TextureView(&depth.view)),
                     ],
                 )
             })
@@ -1135,6 +1121,8 @@ impl VisibilityBuffer {
                     (29, visibility.value.as_entire_binding()),
                     (31, clusters.value.as_entire_binding()),
                     (33, group_buffer.value.as_entire_binding()),
+                    (34, R::TextureView(&hardware_ids.view)),
+                    (35, R::TextureView(&depth.view)),
                     (13, R::TextureView(&t.hit.view)),
                     (16, R::TextureView(&fresh.world.view)),
                     (17, R::TextureView(&fresh.normal.view)),
@@ -1174,7 +1162,7 @@ impl VisibilityBuffer {
             _visibility: visibility,
             depth,
             hardware_ids,
-            hardware_merge,
+            attachment,
             _hzb: hzb,
             _hzb_absent: hzb_absent,
             cull,
@@ -1341,7 +1329,6 @@ mod tests {
             stage_source(include_str!("../shaders/visibility_buffer_sw.wgsl")),
             stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")),
             include_str!("../shaders/visibility_buffer_hzb.wgsl").to_owned(),
-            include_str!("../shaders/visibility_buffer_merge.wgsl").to_owned(),
             resolve_source(include_str!("../shaders/scene.wgsl")).unwrap(),
         ];
         let (kernels, heads) =
@@ -1580,7 +1567,7 @@ impl Renderer {
                 })];
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("N1c hardware raster"),
-                    color_attachments: if v.hardware_merge.is_some() {
+                    color_attachments: if v.attachment {
                         &color_attachments
                     } else {
                         &[]
@@ -1608,15 +1595,6 @@ impl Renderer {
                 pass.draw_indirect(&v.args[i].value, 16);
             }
             mark(encoder, ["visibility.hzb1", "visibility.hzb2"][i]);
-            if let Some((pipeline, group)) = &v.hardware_merge {
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("merge hardware and software visibility"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(pipeline);
-                pass.set_bind_group(0, group, &[]);
-                pass.dispatch_workgroups(v.size.width.div_ceil(8), v.size.height.div_ceil(8), 1);
-            }
             v.pyramid(encoder, i, stage(i as u32 * 4 + 3));
         }
         mark(encoder, "visibility.resolve");
