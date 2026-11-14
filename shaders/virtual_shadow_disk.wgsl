@@ -555,9 +555,14 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     // 64 samples to the 0..256 count the shading programs read.
     return 4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
 }
+// U-FIXED measurement (virtual_shadow_gpu.rs disk_slices): slice VD_SLICE of VD_SLICES takes tile
+// rows VD_SLICE, VD_SLICE + VD_SLICES, ...; the defaults are the one dispatch over every row.
+override VD_SLICES:u32=1u;
+override VD_SLICE:u32=0u;
 @compute @workgroup_size(8,4) fn vd_lookup(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>) {
     let size=textureDimensions(vsm_world);
-    let id=group.xy*VSM_TRACE_TILE+local.xy;
-    if any(id>=size) || textureLoad(vsm_tiles,group.xy,0).x==0u {return;}
+    let tile=vec2<u32>(group.x,group.y*VD_SLICES+VD_SLICE);
+    let id=tile*VSM_TRACE_TILE+local.xy;
+    if any(id>=size) || textureLoad(vsm_tiles,tile,0).x==0u {return;}
     textureStore(vsm_output,vec2<i32>(id),vec4<u32>(vd_pixel(id)));
 }

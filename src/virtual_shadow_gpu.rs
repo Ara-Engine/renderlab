@@ -361,6 +361,9 @@ struct Pipelines {
     /// N-VSM1 (shaders/virtual_shadow_disk.wgsl): its page requests and its lookup.
     disk_mark: Owned<wgpu::ComputePipeline>,
     disk: Owned<wgpu::ComputePipeline>,
+    /// U-FIXED measurement (`disk_slices`): the lookup as several shorter dispatches, slice k
+    /// taking tile rows k, k + n, ...; empty unless RENDERLAB_VD_SLICES > 1.
+    disk_slices: Vec<Owned<wgpu::ComputePipeline>>,
 }
 struct Layouts {
     mark: Owned<wgpu::BindGroupLayout>,
@@ -866,6 +869,15 @@ fn ladder(finest: i32, coarsest: i32) -> Vec<i32> {
         .collect()
 }
 
+/// Measurement only: `RENDERLAB_VD_SLICES=n` (2..=16) dispatches the disk lookup as n shorter
+/// dispatches over interleaved tile rows (a long-dispatch scheduling test); unset or 1: one.
+fn disk_slices() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("RENDERLAB_VD_SLICES").ok().and_then(|v| v.parse().ok()).unwrap_or(1).clamp(1, 16)
+    })
+}
+
 /// Measurement only: `RENDERLAB_VSM_LADDER=old` keeps the ladder before the reach fix (from the
 /// nearest caster's level, at most `MAX_LEVELS` consecutive levels, cut short far out) for A/Bs
 /// in one binary.
@@ -1273,6 +1285,29 @@ impl VirtualState {
         };
         let disk_mark = disk_compute("vd_mark", &mark_layout);
         let disk = disk_compute("vd_lookup", &disk_layout);
+        let slices = disk_slices();
+        let disk_slices = if slices > 1 {
+            (0..slices)
+                .map(|k| {
+                    ledger.own(
+                        device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some("vd_lookup slice"),
+                            layout: Some(&disk_layout),
+                            module: &disk_module,
+                            entry_point: Some("vd_lookup"),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants: &[("VD_SLICES", f64::from(slices)), ("VD_SLICE", f64::from(k))],
+                                ..Default::default()
+                            },
+                            cache: None,
+                        }),
+                        ResourceKind::ComputePipeline,
+                    )
+                })
+                .collect()
+        } else {
+            vec![]
+        };
         let record_module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8g walk records"),
@@ -1380,6 +1415,7 @@ impl VirtualState {
             queued: None,
             disk_mark,
             disk,
+            disk_slices,
         };
         Self {
             settings: VirtualShadowSettings::default(),
@@ -3146,7 +3182,14 @@ impl Renderer {
             height.div_ceil(4).div_ceil(b),
         ];
         let tiles = grid[0] * grid[1];
-        if map || disk {
+        if disk && !p.disk_slices.is_empty() {
+            // U-FIXED measurement: the same tiles as several shorter dispatches.
+            let n = p.disk_slices.len() as u32;
+            for pipeline in &p.disk_slices {
+                pass.set_pipeline(pipeline);
+                pass.dispatch_workgroups(grid[0], grid[1].div_ceil(n), 1);
+            }
+        } else if map || disk {
             pass.dispatch_workgroups(grid[0], grid[1], 1);
         } else {
             // Casters-only frames keep the grid's order (vsm_lookup).
