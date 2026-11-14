@@ -38,8 +38,10 @@ use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 // Lean shading's background-compiled pipelines (program::lean_variant).
 #[path = "lean_gpu.rs"]
 mod lean_gpu;
+#[path = "material_receiver_gpu.rs"]
+pub(super) mod material_receiver_gpu;
 #[path = "material_pass_gpu.rs"]
-mod material_pass_gpu;
+pub(super) mod material_pass_gpu;
 
 /// WGSL PrimaryFrame: inverse view-projection, lit clear colour, culling flags, the
 /// `scene_pixels` rectangle, the sampling words, the reflection bands
@@ -141,6 +143,14 @@ pub(crate) fn shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
         format!("{hard}\n{trace}"),
         format!("{soft}\n{trace}\n{queue}\n{interactive}"),
     ])
+}
+
+/// Native producer edits are separate from the raw modules consumed by the port.
+pub(super) fn wgpu_shader_sources(wgsl: &str) -> Result<[String; 2], Error> {
+    let [hard, soft] = shader_sources(wgsl)?;
+    let mode = crate::material_mode::Mode::current();
+    let probe = material_receiver_gpu::normal_probe();
+    Ok([material_receiver_gpu::trace(hard, mode, probe)?, material_receiver_gpu::trace(soft, mode, probe)?])
 }
 
 /// The check pipeline shares the actual geometry arithmetic, including test rays,
@@ -550,7 +560,7 @@ impl Renderer {
                     "traced primary visibility requires a hardware-shadow renderer at 1x with TRACED_FEATURES and traced_limits",
                 ))?;
                 let (sources, mut heads) = if self.hardware_shadows.is_some() {
-                    (shader_sources(&self.source)?, shading_heads(&self.source)?)
+                    (wgpu_shader_sources(&self.source)?, shading_heads(&self.source)?)
                 } else {
                     non_rt_sources(&self.source)?
                 };
@@ -692,6 +702,8 @@ pub(super) struct ShadeSwitches {
     /// The GI receiver pass's prepared SH (gi_receiver_pass.rs, RENDERLAB_GI_PASS).
     pub gi: bool,
     pub lvis: bool,
+    /// Sampled material record; writers use their separate storage layout.
+    pub material: bool,
 }
 impl ShadeSwitches {
     fn of(device: &wgpu::Device) -> Self {
@@ -702,6 +714,7 @@ impl ShadeSwitches {
             diag: crate::program::rl_deferred_diag(),
             gi: gi_receiver_pass::on(),
             lvis: light_vis_pass::on(),
+            material: crate::material_mode::Mode::full(),
         }
     }
 }
@@ -771,6 +784,9 @@ pub(super) fn shade_layout_entries(
         if switches.diag {
             entries.push(image(63, F::Rgba16Float));
         }
+    }
+    if switches.material {
+        entries.extend(material_pass_gpu::entries(false));
     }
     entries
 }
@@ -850,7 +866,7 @@ pub(super) struct Targets {
     /// flag is set.
     pub hit: Depth,
     /// Material record textures, retained and retired with the hit image.
-    pub material: Option<[Depth; crate::program::MATERIAL_RECORD_BINDINGS.len()]>,
+    pub material: Option<Depth>,
     /// Exact hard-receiver epsilon, computed from the returned hit vertices.
     pub epsilon: Depth,
     /// One flag per `TRACE_TILE` pixels: nonzero when a camera ray in the tile hit.
@@ -1178,6 +1194,11 @@ impl PrimaryState {
                 ResourceKind::BindGroupLayout,
             )
         };
+        let producer_group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
+            let mut entries = entries.to_vec();
+            if crate::material_mode::Mode::tail() { entries.extend(material_pass_gpu::entries(true)); }
+            group(label, &entries)
+        };
         let frame = uniform(10, FRAME_BYTES as u64);
         let camera = uniform(0, 80);
         let trace = [
@@ -1192,9 +1213,9 @@ impl PrimaryState {
                 image(20, F::R32Uint),
             ];
             entries.extend_from_slice(extra);
-            group("primary trace", &entries)
+            producer_group("primary trace", &entries)
         });
-        let interactive_entries = [
+        let mut interactive_entries = vec![
             scene(TRACE_SCENE),
             scene(2),
             frame,
@@ -1212,6 +1233,7 @@ impl PrimaryState {
                 16,
             ),
         ];
+        if crate::material_mode::Mode::tail() { interactive_entries.extend(material_pass_gpu::entries(true)); }
         let interactive_bindings = group(
             "primary Interactive trace and visibility",
             &interactive_entries,
@@ -1245,7 +1267,7 @@ impl PrimaryState {
                 image(52, F::R32Uint),
             ],
         );
-        let repair_bindings = group(
+        let repair_bindings = producer_group(
             "primary deferred edge repair",
             &[
                 scene(TRACE_SCENE),
@@ -1298,14 +1320,15 @@ impl PrimaryState {
                 ),
             ],
         );
-        let shade_entries = [scene(2), texture(6, uint)].map(|visibility| {
-            shade_layout_entries(visibility, ShadeSwitches::of(device))
+        let switches = ShadeSwitches::of(device);
+        let material_write_entries = [scene(2), texture(6, uint)].map(|visibility| {
+            shade_layout_entries(
+                visibility,
+                ShadeSwitches { material: false, ..switches },
+            )
         });
-        let material_write_entries = shade_entries.clone();
-        let shade_entries = shade_entries.map(|mut entries| {
-            if crate::program::material_pass_on() { entries.extend(material_pass_gpu::entries(false)); }
-            entries
-        });
+        let shade_entries = [scene(2), texture(6, uint)]
+            .map(|visibility| shade_layout_entries(visibility, switches));
         let shade_bindings = shade_entries
             .each_ref()
             .map(|e| group("primary shading", e));
@@ -1386,7 +1409,7 @@ impl PrimaryState {
             )
         };
         Self {
-            material_layouts: crate::program::material_pass_on().then(|| material_pass_gpu::Layouts::new(device, ledger, &material_write_entries, &array_bindings, [&material_bindings, &streamed_bindings], lighting)),
+            material_layouts: crate::material_mode::Mode::full().then(|| material_pass_gpu::Layouts::new(device, ledger, &material_write_entries, &array_bindings, [&material_bindings, &streamed_bindings], lighting)),
             #[cfg(test)]
             test_split_interactive_timestamps: false,
             #[cfg(test)]
@@ -2379,6 +2402,7 @@ impl Renderer {
                 );
                 let bytes = u64::from(size.width)
                     * u64::from(size.height)
+                    * u64::from(size.depth_or_array_layers)
                     * u64::from(format.block_copy_size(None).unwrap());
                 Depth {
                     texture,
@@ -2491,7 +2515,8 @@ impl Renderer {
                 }
             };
             let next = Targets {
-                material: crate::program::material_pass_on().then(|| crate::program::MATERIAL_RECORD_BINDINGS.map(|_| target("material record", size, wgpu::TextureFormat::Rgba32Uint))),
+                // One array: the receiver's layers (words 1 and 2), then word 0.
+                material: crate::material_mode::Mode::current().layers().map(|layers| target("material record", wgpu::Extent3d { depth_or_array_layers: layers, ..size }, wgpu::TextureFormat::Rgba32Uint)),
                 light_vis: light_vis_pass::on().then(|| Buffer::new(
                     self, "local light visibility",
                     (u64::from(size.width) * u64::from(size.height) * light_vis_pass::PIXEL_BYTES)
@@ -2575,6 +2600,13 @@ impl Renderer {
                     ResourceKind::BindGroup,
                 )
             };
+            let producer_group = |layout: &wgpu::BindGroupLayout, entries: &[(u32, R<'_>)]| {
+                let mut entries = entries.to_vec();
+                if crate::material_mode::Mode::tail() {
+                    entries.push((crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&t.material.as_ref().unwrap().view)));
+                }
+                group(layout, &entries)
+            };
             let camera = (0, self.uniform.as_entire_binding());
             let scene = (
                 2,
@@ -2585,7 +2617,7 @@ impl Renderer {
             let hit = R::TextureView(&t.hit.view);
             let tiles = R::TextureView(&t.tiles.view);
             let trace = [
-                Some(group(
+                Some(producer_group(
                     &state.trace_bindings[0],
                     &[
                         trace_scene.clone(),
@@ -2596,7 +2628,7 @@ impl Renderer {
                     ],
                 )),
                 fresh.map(|f| {
-                    group(
+                    producer_group(
                         &state.trace_bindings[1],
                         &[
                             camera.clone(),
@@ -2659,8 +2691,8 @@ impl Renderer {
                         entries.push((63, R::TextureView(&untraced.view)));
                     }
                 }
-                if let Some(images) = &t.material {
-                    entries.extend(crate::program::MATERIAL_RECORD_BINDINGS.into_iter().zip(images).map(|(b,t)| (b,R::TextureView(&t.view))));
+                if let Some(record) = t.material.as_ref().filter(|_| crate::material_mode::Mode::full()) {
+                    entries.push((crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&record.view)));
                 }
                 // MP1: the same group plus the slot table and tile lists.
                 let list = lists.map(|l| {
@@ -2705,7 +2737,7 @@ impl Renderer {
                     )
                 }),
                 interactive: fresh.map(|f| {
-                    group(
+                    producer_group(
                         &state.interactive_bindings,
                         &[
                             trace_scene.clone(),
@@ -2721,7 +2753,7 @@ impl Renderer {
                 }),
                 held: fresh.zip(t.held.as_ref()).map(|(f, h)| {
                     [0, 1].map(|k| {
-                        group(
+                        producer_group(
                             &state.held_bindings,
                             &[
                                 trace_scene.clone(),
@@ -2759,7 +2791,7 @@ impl Renderer {
                     })
                 }),
                 repair: fresh.map(|f| {
-                    group(
+                    producer_group(
                         &state.repair_bindings,
                         &[
                             trace_scene.clone(),

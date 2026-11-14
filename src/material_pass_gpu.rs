@@ -20,16 +20,25 @@ fn composition(
     program::material_variant(program::with_reflection_history(full), source, role)
 }
 
-pub(super) fn entries(
-    write: bool,
-) -> [wgpu::BindGroupLayoutEntry; program::MATERIAL_RECORD_BINDINGS.len()] {
-    program::MATERIAL_RECORD_BINDINGS.map(|binding| {
+/// The record's layout entry (program.rs `MATERIAL_RECORD_BINDING`): one 2D array, written by
+/// the material pass, read by record-reading shading.
+pub(in crate::renderer) fn entries(write: bool) -> [wgpu::BindGroupLayoutEntry; 1] {
+    [entry(
+        program::MATERIAL_RECORD_BINDING,
         if write {
-            image(binding, wgpu::TextureFormat::Rgba32Uint)
+            wgpu::BindingType::StorageTexture {
+                access: wgpu::StorageTextureAccess::WriteOnly,
+                format: wgpu::TextureFormat::Rgba32Uint,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+            }
         } else {
-            texture(binding, wgpu::TextureSampleType::Uint)
-        }
-    })
+            wgpu::BindingType::Texture {
+                sample_type: wgpu::TextureSampleType::Uint,
+                view_dimension: wgpu::TextureViewDimension::D2Array,
+                multisampled: false,
+            }
+        },
+    )]
 }
 
 #[derive(Clone)]
@@ -87,7 +96,7 @@ impl Layouts {
 }
 impl Renderer {
     pub(crate) fn ensure_material_pass(&mut self, shading: Shading) -> Result<(), Error> {
-        if !program::material_pass_on() || self.view.soft_mode == SoftShadows::Temporal {
+        if !crate::material_mode::Mode::full() || self.view.soft_mode == SoftShadows::Temporal {
             return Ok(());
         }
         let state = self.view.primary.as_ref().unwrap();
@@ -208,7 +217,7 @@ impl Renderer {
         stamps: Option<wgpu::ComputePassTimestampWrites<'_>>,
         write: bool,
     ) -> bool {
-        if !program::material_pass_on() || self.view.soft_mode == SoftShadows::Temporal {
+        if !crate::material_mode::Mode::full() || self.view.soft_mode == SoftShadows::Temporal {
             return false;
         }
         let state = self.view.primary.as_ref().unwrap();
@@ -335,11 +344,12 @@ mod tests {
                                     })
                                     .unwrap()
                                     .1;
-                                let naga::TypeInner::Image { class, .. } =
+                                let naga::TypeInner::Image { class, arrayed, .. } =
                                     module.types[global.ty].inner
                                 else {
                                     panic!("record is an image")
                                 };
+                                assert!(arrayed, "record view must be D2Array");
                                 match (layout.ty, class) {
                                     (
                                         wgpu::BindingType::StorageTexture {

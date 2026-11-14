@@ -1864,7 +1864,7 @@ impl Renderer {
         // same reconstructed sun estimator over exact published receivers.
         let vb = self.hardware_shadows.is_some()
             && (self.primary_mode == PrimaryVisibility::VisibilityBuffer
-                || (traced && (super::sun_vis_pass::enabled() || crate::program::material_pass_on())));
+                || (traced && (super::sun_vis_pass::enabled() || crate::material_mode::Mode::full())));
         if self
             .pipeline
             .primary
