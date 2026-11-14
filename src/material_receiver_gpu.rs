@@ -137,6 +137,7 @@ const CHECK: &str = r#"
 @group(0) @binding(1) var record:texture_2d_array<u32>;
 @group(0) @binding(2) var tiles:texture_2d<u32>;
 @group(0) @binding(3) var<storage,read_write> counts:array<atomic<u32>,8>;
+@group(0) @binding(4) var<storage,read> placements:array<u32>;
 @compute @workgroup_size(8,4) fn check(@builtin(global_invocation_id) id:vec3<u32>) {
     if any(id.xy>=textureDimensions(hit)) {return;}
     let p=vec2<i32>(id.xy);let h=textureLoad(hit,p,0);
@@ -148,7 +149,7 @@ const CHECK: &str = r#"
         if any(a!=vec4<u32>(0u,0u,0u,0xffffffffu)) || any(b!=vec4<u32>(0u)) {atomicAdd(&counts[3],1u);}
     } else {
         atomicAdd(&counts[0],1u);
-        if (a.w&0x0fffffffu)!=h.x-1u {atomicAdd(&counts[4],1u);}
+        if (a.w&0x0fffffffu)!=(placements[h.x-1u]&0x1fffffffu) {atomicAdd(&counts[4],1u);}
         if a.y!=0u || a.z!=0u {atomicAdd(&counts[5],1u);}
         if (a.w&0x10000000u)!=0u {atomicAdd(&counts[6],1u);}
         if any((b.xyz&vec3<u32>(0x7f800000u))==vec3<u32>(0x7f800000u)) {atomicAdd(&counts[7],1u);}
@@ -219,6 +220,10 @@ impl crate::renderer::Renderer {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: counts.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.view.primary.as_ref().unwrap().geometry.as_ref().unwrap()._placements.value.as_entire_binding(),
                 },
             ],
         });
