@@ -1,4 +1,14 @@
-# Ordered software GI refill experiment
+# Ordered GI refill
+
+Enable with `RENDERLAB_GI_BOUNDED_REFILL=1`. It is default off and selects an ordered,
+hard 12,288-cell ceiling for both creation and gathering on the software path. Hardware
+RT is unchanged. This replaces #108's 3,000-cell/hash-admission experiment under the
+same switch; no second enable switch or budget parameter is required. The optional
+`RENDERLAB_GI_REFILL_BUDGET` is a measurement control, not another enable switch.
+
+The measured 12k candidate below used the earlier experiment spelling
+`RENDERLAB_GI_REFILL_PRIORITY=1;RENDERLAB_GI_REFILL_BUDGET=12288`, with the old bounded
+mode disabled. The single-switch implementation selects exactly that policy and module.
 
 Default off: `RENDERLAB_GI_REFILL_PRIORITY=1`. This follows the bounded-refill experiment;
 it changes admission, not an admitted cell's sky directions, bounce rays or SH reduction.

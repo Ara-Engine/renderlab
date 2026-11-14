@@ -1,6 +1,8 @@
 //! Experimental ordered claim/gather admission. Unset switches keep the original module.
 use super::*;
 use std::sync::OnceLock;
+pub(super) const HEADER_LIMIT: usize = 32;
+pub(super) const DEFAULT_CELLS: u32 = 12_288;
 
 /// Measurement only: replay the clean run's per-frame budgets during blocking captures,
 /// so PNG encoding/downclocking cannot change the time controller's picture workload.
@@ -66,12 +68,12 @@ pub(super) enum Mode {
 }
 pub(super) fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_REFILL_PRIORITY").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BOUNDED_REFILL").is_ok_and(|v| v == "1"))
 }
 pub(super) fn mode() -> Mode {
     static MODE: OnceLock<Mode> = OnceLock::new();
     *MODE.get_or_init(|| {
-        let value = std::env::var("RENDERLAB_GI_REFILL_BUDGET").unwrap_or_else(|_| "today".into());
+        let Ok(value) = std::env::var("RENDERLAB_GI_REFILL_BUDGET") else { return Mode::Fixed(DEFAULT_CELLS); };
         if value == "today" {
             Mode::Today
         } else if value == "hold" {
@@ -260,6 +262,8 @@ mod tests {
         c.observe(3, 3.0, 12000, 12000, 120.0, 120.0);
         assert_eq!((c.claims, c.gathers), (9000, 9000));
         let mut h = [0; HEADER_WORDS as usize];
+        c.header(&mut h, Mode::Fixed(DEFAULT_CELLS));
+        assert_eq!((h[32], h[33]), (12288, 12288));
         c.header(&mut h, Mode::Fixed(8192));
         assert_eq!((h[32], h[33]), (8192, 8192));
         c.header(&mut h, Mode::Today);
@@ -267,10 +271,10 @@ mod tests {
     }
     #[test]
     fn ordered_modules_validate_without_changing_disabled_modules() {
-        let original = kernel_source_bounded(true, 64, false);
+        let original = kernel_source_base(true, 64);
         assert_eq!(source(original.clone(), false), original);
         for directions in [64, 128] {
-            let original = kernel_source_bounded(true, directions, false);
+            let original = kernel_source_base(true, directions);
             let module = source(original, true);
             let parsed = naga::front::wgsl::parse_str(&module)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&module)));
