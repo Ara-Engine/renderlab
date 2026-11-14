@@ -225,7 +225,7 @@ const RL_PASS_STUBS: [&str; 2] = ["// ---- rl pass stubs ----\n", "// ---- end o
 const REFLECTION_TRACE: &str = include_str!("../shaders/reflections_trace.wgsl");
 /// `RENDERLAB_RL_PASS` / `RENDERLAB_RL_DEFERRED`: "1" forces a switch on (RT included, for A/B),
 /// "0" forces it off; unset follows the path's default. Read once per process.
-fn env_switch(name: &str) -> Option<bool> {
+pub(crate) fn env_switch(name: &str) -> Option<bool> {
     match std::env::var(name).as_deref() {
         Ok("1") => Some(true),
         Ok("0") => Some(false),

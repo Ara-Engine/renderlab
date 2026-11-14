@@ -17,7 +17,7 @@ const PREPARE: &str = "    rl_lights_prepare(surface_input.world);";
 pub(crate) const DEFAULT_HEAD_MARK: &str = "\n// renderlab: this renderer dispatches local-light visibility by default\n";
 pub(crate) fn on(default: bool) -> bool {
     static REQUESTED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
-    let requested = REQUESTED.get_or_init(|| std::env::var("RENDERLAB_LIGHT_VIS_PASS").ok().map(|v|v=="1"))
+    let requested = REQUESTED.get_or_init(|| program::env_switch("RENDERLAB_LIGHT_VIS_PASS"))
         .unwrap_or(default);
     // The bound needs the material's unshadowed contribution and running radiance.
     // Follow-up: read that contribution from the shared material record once LVIS
@@ -185,7 +185,7 @@ mod tests {
     use super::*;
     #[test]
     fn backend_defaults_stay_separate_in_one_process() {
-        let requested = std::env::var("RENDERLAB_LIGHT_VIS_PASS").ok().map(|v|v=="1");
+        let requested = program::env_switch("RENDERLAB_LIGHT_VIS_PASS");
         let bound = std::env::var_os("RENDERLAB_LIGHT_BOUND").is_some();
         // A port call first must not freeze the wgpu default, or vice versa.
         for default in [false, true, false] {
