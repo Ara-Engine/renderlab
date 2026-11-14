@@ -1144,6 +1144,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut counters = std::env::var_os("RENDERLAB_SCENE_COUNTERS")
         .map(std::fs::File::create)
         .transpose()?;
+    // U-FIXED measurement only: RENDERLAB_SCENE_PAUSE_MS pauses before frame 0, and
+    // RENDERLAB_SCENE_SLEEP_MS sleeps after each frame (outside cpu_render_ms): does a
+    // timing-dependent cost follow wall time or frame work?
+    let ms = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let (pause_ms, sleep_ms) = (ms("RENDERLAB_SCENE_PAUSE_MS"), ms("RENDERLAB_SCENE_SLEEP_MS"));
+    std::thread::sleep(std::time::Duration::from_millis(pause_ms));
     for frame in 0..args.frames {
         if gi_resets.contains(&frame) { engine.renderer_mut().reset_indirect(); }
         let t = if args.still { 0.0 } else { frame as f32 / FPS };
@@ -1292,6 +1298,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             engine.poll()?;
         }
         let cpu_ms = begin.elapsed().as_secs_f64() * 1e3;
+        std::thread::sleep(std::time::Duration::from_millis(sleep_ms));
         if let Some(file) = counters.as_mut() {
             use std::io::Write;
             let r = engine.renderer();
