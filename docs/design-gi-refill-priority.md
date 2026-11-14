@@ -17,8 +17,9 @@ The old default gather budget is an average and can overshoot; `today` retains i
 budget but enforces it. Parent stand-in remains the caller's setting in every mode, so this
 comparison does not silently enable it. Hardware rays keep the original module and plan.
 
-Claims run all visible rounds before background rounds. A resolve ticket bounds actual new
-cells, including retries across rounds. New claims have no bounce of their own. Gathers run
+Claims run all visible rounds before background rounds. Candidate tickets before bucket
+walks bound actual new cells; resetting from the created count accounts for round retries.
+New claims have no bounce of their own. Gathers run
 visible cells without a bounce value, other visible cells, then background. A gathered zero
 uses `GI_BOUNCE_NONE`; it is distinguished from a cell with no value yet. The visible stages
 share 80% of a finite ceiling; background uses the remainder, including unused visible tickets.
