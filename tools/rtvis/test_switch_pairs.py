@@ -6,8 +6,10 @@ from switch_pairs import environment, sets
 class SwitchEnvironments(unittest.TestCase):
     def test_default_really_omits_the_override(self):
         for inherited in ["0", "1", ""]:
-            env = environment({"RENDERLAB_LIGHT_VIS_PASS": inherited}, "none", {})
+            env = environment({"RENDERLAB_LIGHT_VIS_PASS": inherited,
+                               "RENDERLAB_LIGHT_BOUND": "sum"}, "none", {})
             self.assertNotIn("RENDERLAB_LIGHT_VIS_PASS", env)
+            self.assertNotIn("RENDERLAB_LIGHT_BOUND", env)
         self.assertIn(("none", {}), list(sets()))
         self.assertIn(("off", {}), list(sets()))
 

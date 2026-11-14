@@ -59,6 +59,7 @@ def environment(base, name, overrides):
     env = {**base, "RENDERLAB_LIGHT_VIS_PASS": "0", **overrides}
     if name == "none":
         env.pop("RENDERLAB_LIGHT_VIS_PASS", None)
+        env.pop("RENDERLAB_LIGHT_BOUND", None)
     return env
 
 
