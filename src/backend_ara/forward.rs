@@ -396,9 +396,11 @@ pub struct ForwardImages {
     /// MEASUREMENT ONLY: with `RENDERLAB_ARA_PROBE_RESOLVE` set, the resolve's
     /// one-pixel trace (`resolve_probe::describe` reads it).
     pub resolve_probe: Option<Vec<[f32; 4]>>,
-    /// With `RENDERLAB_RL_DEFERRED=1`, until the composite reads them on the GPU: the
-    /// deferred reflections' outputs as RGBA16F (`program::deferred_variant`: reflectance
-    /// and traced fraction; untraced specular and the inline traced luminance).
+    /// With `RENDERLAB_RL_DEFERRED=diag` only (identity tests): the deferred reflections'
+    /// outputs as RGBA16F (`program::deferred_variant`: reflectance and traced fraction;
+    /// untraced specular and the inline traced luminance). Never read back otherwise, so a
+    /// player with frames in flight never waits on them; with diag the frame waits for them, as
+    /// for any readback.
     pub deferred_reflections: Option<[Vec<u8>; 2]>,
 }
 
@@ -4358,8 +4360,10 @@ fn frame(
         )?),
         None => None,
     };
+    // Only identity tests read the deferred outputs back: both exist with
+    // RENDERLAB_RL_DEFERRED=diag (the untraced output is declared only then).
     let deferred_read = match (inputs.get(&key(0, 62)), inputs.get(&key(0, 63))) {
-        (Some(reflectance), Some(untraced)) => Some([
+        (Some(reflectance), Some(untraced)) if crate::program::rl_deferred_diag() => Some([
             transfer::readback(
                 gpu,
                 &mut graph,
@@ -4797,7 +4801,8 @@ fn frame(
             || outgoing_read.is_some()
             || raw_read.is_some()
             || history_read.is_some()
-            || probe_read.is_some();
+            || probe_read.is_some()
+            || deferred_read.is_some();
         gpu.begin_deferred_completion_on_current_queue()?;
         let submission = gpu.submit(rec.finish(), &[]);
         in_flight.push_back(gpu.end_deferred_completion()?);

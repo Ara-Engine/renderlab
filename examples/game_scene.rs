@@ -48,7 +48,16 @@
 //! `--diag forest=1` (U-RTVIS, docs/rtvis.md) swaps the flat ground for a 200 m rolling
 //! terrain (16 tiles) under trees and bushes of cutout cards and walks the field walk's camera
 //! through it: Outpost's layered ground and foliage, for the RT visibility pass's cost.
-//! `forest=bare` is the same terrain and walk without the foliage.
+//! `forest=bare` is the same terrain and walk without the foliage. `--diag floor=R` gives the
+//! flat ground perceptual roughness R (0.95 otherwise): a glossy floor for the reflection strata.
+//! `--diag program=standard` puts the scene's `game` materials on the standard program, which
+//! reports its reflectance to the deferred reflection composite (RENDERLAB_RL_DEFERRED=1).
+//! `--diag far=1` (U-FIXED) holds a camera 40 m up over a 2.4 km ground with columns at 80,
+//! 200, 300 and 800 m whose sun shadows cross the view (the sun's coverage, Ara #185 item 33);
+//! `far=move` slides that camera sideways 0.25 m a frame (far shadows in motion).
+//! `far=low` puts the camera 1.7 m up with a body-sized box 0.3 m beside it and columns at 50,
+//! 200 and 1000 m (the clipmap's reach from a caster at the lens); `far=box` puts the same eye
+//! inside a diagonal wall's bounds instead. `lowmove` and `boxmove` slide them with the caster.
 //!
 //! ```text
 //! cargo run --example game_scene -- --path nonrt --out D:/Coding/renderlab-work/api1/nonrt
@@ -360,6 +369,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     | "field"
                     | "forest"
                     | "fox"
+                    | "floor"
+                    | "program"
+                    | "far"
                     | "casts"
             )
         });
@@ -397,6 +409,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // `forest=bare`: the same terrain and walk without the trees and bushes.
     let bare = scene_key("forest", "bare");
     let forest = scene_key("forest", "1") || bare;
+    let floor = scene_keys
+        .iter()
+        .find(|(k, _)| k == "floor")
+        .map_or(0.95, |(_, v)| {
+            v.parse::<f32>().expect("--diag floor=<roughness>")
+        });
+    // `far=1` (U-FIXED, the sun's coverage, Ara #185 item 33): a 2.4 km ground and columns
+    // at 80, 200, 300 and 800 m north of a camera 40 m up with a 2 km far plane, whose shadows
+    // cross the view: sun shadows at game-scale distances, on both paths. `far=move` slides the
+    // camera east 0.25 m a frame. `far=low`/`lowmove`: the camera 1.7 m up, 8 m south of the
+    // arch, with a body-sized box 0.3 m east of the eye (out of view) moving with it, and
+    // columns at 50, 200 and 1000 m. `far=box`/`boxmove`: the same eye 1.4 m from a 6 m wall
+    // turned 45 degrees behind its left, whose bounds hold the eye (out of view too).
+    let far_low = scene_key("far", "low") || scene_key("far", "lowmove");
+    let far_box = scene_key("far", "box") || scene_key("far", "boxmove");
+    let far_move = ["move", "lowmove", "boxmove"]
+        .iter()
+        .any(|v| scene_key("far", v));
+    let far = scene_key("far", "1") || far_move || far_low || far_box;
     let mut held_pose = None;
     let no_sun = scene_keys.iter().any(|(k, v)| k == "sun" && v == "0");
     let legacy_lamps = scene_keys.iter().any(|(k, v)| k == "lamp" && v == "post");
@@ -500,6 +531,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     let game_program = game_program.as_deref().unwrap_or(GAME_PROGRAM);
     let program = engine.create_program("game", game_program)?;
+    let standard = scene_keys.iter().any(|(k, v)| k == "program" && v == "standard");
     let toon_program = engine.create_program("toon", TOON_PROGRAM)?;
     let programs_seconds = start.elapsed().as_secs_f64();
     let material = |engine: &mut Engine, color: [f32; 3], metallic: f32, roughness: f32| {
@@ -507,7 +539,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             base_color: [color[0], color[1], color[2], 1.0],
             metallic,
             roughness,
-            program: Some(program),
+            program: (!standard).then_some(program),
             ..Default::default()
         })
     };
@@ -608,14 +640,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             Vec3::new(0.0, 0.6, -0.15)
         }
         None => {
-            let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, 0.95)?;
+            let ground = material(&mut engine, [0.34, 0.37, 0.28], 0.0, floor)?;
             if forest {
                 for tile in terrain_tiles(FOREST_SIZE, 400, 4) {
                     let tile = engine.create_mesh(&mesh(&tile))?;
                     engine.spawn(tile, ground, Mat4::IDENTITY)?;
                 }
             } else {
-                let plane = engine.create_mesh(&mesh(&plane_geometry(60.0, 8)))?;
+                let size = if far { 2400.0 } else { 60.0 };
+                let plane = engine.create_mesh(&mesh(&plane_geometry(size, 8)))?;
                 engine.spawn(plane, ground, Mat4::IDENTITY)?;
             }
             // The physical atmosphere is the default sky (AT1); `--sky uniform` swaps in a
@@ -716,6 +749,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     Mat4::from_translation(p) * Mat4::from_rotation_y(r * PI + k as f32 * PI / 3.0),
                 )?;
             }
+        }
+    }
+    // `far=low`/`box`: the caster beside the eye at a slide of `x` metres east.
+    let far_caster = |x: f32| {
+        if far_box {
+            Mat4::from_translation(at(x - 1.0, 1.5, 9.0))
+                * Mat4::from_rotation_y(-PI / 4.0)
+                * Mat4::from_scale(Vec3::new(6.0, 3.0, 0.1))
+        } else {
+            boxed(at(x + 0.5, 0.9, 8.0), Vec3::new(0.4, 1.8, 0.3))
+        }
+    };
+    let mut far_body = None;
+    if far {
+        let column = material(&mut engine, [0.7, 0.7, 0.72], 0.0, 0.8)?;
+        let distances: &[f32] = if far_low || far_box {
+            &[50.0, 200.0, 1000.0]
+        } else {
+            &[80.0, 200.0, 300.0, 800.0]
+        };
+        for &d in distances {
+            let (width, height) = (d / 25.0, d / 8.0);
+            engine.spawn(
+                cube,
+                column,
+                boxed(at(-0.15 * d, 0.5 * height, -d), Vec3::new(width, height, width)),
+            )?;
+        }
+        if far_low || far_box {
+            far_body = Some(engine.spawn(cube, column, far_caster(0.0))?);
         }
     }
     // The arch: two pillars and a lintel.
@@ -1125,7 +1188,25 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         } else {
             (eye, target)
         };
-        let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, 500.0)?;
+        let (eye, target, far_plane) = if far {
+            let slide = Vec3::new(if far_move { 0.25 * frame as f32 } else { 0.0 }, 0.0, 0.0);
+            if let Some(body) = far_body {
+                engine.set_transform(body, far_caster(slide.x))?;
+            }
+            let eye = if far_body.is_some() {
+                Vec3::new(0.0, 1.7, 8.0)
+            } else {
+                Vec3::new(0.0, 40.0, 0.0)
+            };
+            (
+                anchor + slide + eye,
+                anchor + slide + Vec3::new(0.0, 0.0, -400.0),
+                2000.0,
+            )
+        } else {
+            (eye, target, 500.0)
+        };
+        let camera = Camera::look_at(eye, target, Vec3::Y, 55f32.to_radians(), 0.05, far_plane)?;
         // View b: across the scene, still at its first pose unless `--b-orbit`, a third of
         // the way round from `--cut-b` on.
         let b_cut = args.cut_b.is_some_and(|f| frame >= f);
@@ -1184,6 +1265,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             write_png(&args.out.join(format!("frame-{frame:03}.png")), &image)?;
         }
+        // The non-RT sun clipmap's ladder and its reach (receiver counts lag a frame or two).
+        let v = engine.renderer().virtual_shadow_stats();
+        let clipmap = serde_json::json!({
+            "levels": v.levels, "finest_level": v.finest_level, "skipped_levels": v.skipped_levels,
+            "nearest_receiver": v.nearest_receiver, "receivers": v.receivers,
+            "unplaced_receivers": v.unplaced_receivers, "nearest_unplaced": v.nearest_unplaced,
+        });
         frames.push(serde_json::json!({
             "frame": frame, "renderer_frame": report.frame.0, "cpu_render_ms": cpu_ms,
             "sun_hour": hour, "cpu_sun_update_ms": sun_update_ms,
@@ -1191,6 +1279,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "draws": report.scene.draws, "triangles": report.scene.triangles, "written": written,
             "rgba8_sha256": image_hash, "t": t, "eye": eye.to_array(), "target": target.to_array(),
             "hdr_sha256": hdr_hash, "view": &args.views[..1], "b_rgba8_sha256": second_hash,
+            "clipmap": clipmap,
         }));
         last_camera = Some(camera);
         last_camera_b = Some(camera_b);

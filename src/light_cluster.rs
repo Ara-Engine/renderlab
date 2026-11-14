@@ -547,6 +547,29 @@ pub(crate) fn atlas_extent(maximum: u32) -> u32 {
     (maximum * 4).max(16)
 }
 
+/// The physical atlas for `tiles`: tiles keep their places in `atlas_extent`'s logical square
+/// (so their texels, coordinates and filtering are unchanged), and the texture covers only
+/// their bounding box, each side rounded up to a power of two (texel-corner gathers stay
+/// exact) and at most the logical side. `RENDERLAB_LC_ATLAS=full` keeps the whole square.
+pub(crate) fn fitted_extent(tiles: &[Option<Tile>], maximum: u32) -> [u32; 2] {
+    let full = atlas_extent(maximum);
+    static FULL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *FULL.get_or_init(|| std::env::var("RENDERLAB_LC_ATLAS").is_ok_and(|v| v == "full")) {
+        return [full; 2];
+    }
+    let reach = |axis: fn(&Tile) -> u32| {
+        tiles
+            .iter()
+            .flatten()
+            .map(|t| axis(t) + t.size)
+            .max()
+            .unwrap_or(1)
+            .next_power_of_two()
+            .min(full)
+    };
+    [reach(|t| t.x), reach(|t| t.y)]
+}
+
 /// A small aligned square allocator. Existing tiles never move when the camera moves.
 /// Resolution falls back by halves when larger squares cannot fit; no silent eviction.
 pub(crate) fn allocate_tile(existing: &[Option<Tile>], maximum: u32, desired: u32) -> Option<Tile> {

@@ -34,6 +34,8 @@ pub use primary_ray_gpu::temporal_reconstruction::{
 use primary_ray_gpu::{PrimaryPipelines, PrimaryState};
 #[path = "mesh_lod.rs"]
 mod mesh_lod;
+#[path = "normal_variance_lazy.rs"]
+mod normal_variance_lazy;
 #[path = "virtual_shadow_gpu.rs"]
 mod virtual_shadow_gpu;
 #[path = "visibility_buffer.rs"]
@@ -667,6 +669,8 @@ pub struct Renderer {
     peak_flights: usize,
     busy_uploads: u64,
     busy_frames: u64,
+    /// One-layer BC5 normal maps still without their variance layer (normal_variance_lazy).
+    variance_pending: Vec<std::sync::Weak<crate::material::TextureInner>>,
     upload_cpu: CpuFrame,
     /// Streamed textures' resident levels and requests (`texture_residency.rs`).
     residency: texture_residency::Residency,
@@ -1200,6 +1204,7 @@ impl Renderer {
             peak_flights: 0,
             busy_uploads: 0,
             busy_frames: 0,
+            variance_pending: Vec::new(),
             upload_cpu: CpuFrame::default(),
             residency: Default::default(),
         };
@@ -2209,6 +2214,8 @@ impl Renderer {
                     _texture: texture,
                     view,
                     _allocation: self.ledger.allocate(AllocationKind::Texture, bytes),
+                    layers: data.role.layers(),
+                    variance: std::sync::OnceLock::new(),
                 },
             )),
         }))
@@ -2267,17 +2274,40 @@ impl Renderer {
         data: &asset::CompressedTexture,
         bytes: u64,
     ) -> Texture {
-        let role = data.format.role();
-        // BC5 normal maps add their variance layer (src/normal_variance_bc.rs).
-        let layers: Vec<Vec<Vec<u8>>> = if data.format == asset::BlockFormat::Bc5 {
-            vec![
-                data.mips.clone(),
-                crate::normal_variance_bc::variance_layer(data),
-            ]
-        } else {
-            vec![data.mips.clone()]
-        };
-        let bytes = bytes * layers.len() as u64;
+        // A BC5 normal map adds its variance layer (src/normal_variance_bc.rs) only while an
+        // installed program reads it; otherwise it waits (normal_variance_lazy).
+        let bc5 = data.format == asset::BlockFormat::Bc5;
+        let variance = (bc5 && self.variance_read())
+            .then(|| crate::normal_variance_bc::variance_layer(data));
+        let layers: Vec<&Vec<Vec<u8>>> = std::iter::once(&data.mips).chain(&variance).collect();
+        let (texture, view, uploaded) = self.block_texture(data, &layers);
+        debug_assert_eq!(uploaded, bytes * layers.len() as u64);
+        let texture = Texture(Arc::new(crate::material::TextureInner {
+            block: Some(data.format),
+            renderer: self.identity.clone(),
+            role: data.format.role(),
+            storage: crate::material::TextureStorage::Full(Box::new(
+                crate::material::FullTexture {
+                    _texture: texture,
+                    view,
+                    _allocation: self.ledger.allocate(AllocationKind::Texture, uploaded),
+                    layers: layers.len() as u32,
+                    variance: std::sync::OnceLock::new(),
+                },
+            )),
+        }));
+        if bc5 && variance.is_none() {
+            self.variance_pending.push(Arc::downgrade(&texture.0));
+        }
+        texture
+    }
+    /// A block texture of `data`'s format and extent with one array layer per entry of
+    /// `layers` (each every level's blocks), written; and its bytes.
+    fn block_texture(
+        &mut self,
+        data: &asset::CompressedTexture,
+        layers: &[&Vec<Vec<u8>>],
+    ) -> (Owned<wgpu::Texture>, Owned<wgpu::TextureView>, u64) {
         let texture = self.ledger.own(
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("immutable material texture, block-compressed"),
@@ -2290,16 +2320,19 @@ impl Renderer {
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: texture_residency::block_texture_format(data.format),
-                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             }),
             ResourceKind::Texture,
         );
         let view = self.ledger.own(
-            texture.create_view(&texture_residency::texture_view_descriptor(role)),
+            texture.create_view(&texture_residency::texture_view_descriptor(data.format.role())),
             ResourceKind::TextureView,
         );
         let block = asset::BlockFormat::BLOCK;
+        let mut bytes = 0;
         for (layer, levels) in layers.iter().enumerate() {
             for (level, blocks) in levels.iter().enumerate() {
                 let (w, h) = data.level_size(level as u32);
@@ -2326,23 +2359,13 @@ impl Renderer {
                         depth_or_array_layers: 1,
                     },
                 );
+                bytes += blocks.len() as u64;
                 self.uploads.textures += blocks.len() as u64;
                 self.uploads.texture_writes += 1;
                 self.uploads.write_calls += 1;
             }
         }
-        Texture(Arc::new(crate::material::TextureInner {
-            block: Some(data.format),
-            renderer: self.identity.clone(),
-            role,
-            storage: crate::material::TextureStorage::Full(Box::new(
-                crate::material::FullTexture {
-                    _texture: texture,
-                    view,
-                    _allocation: self.ledger.allocate(AllocationKind::Texture, bytes),
-                },
-            )),
-        }))
+        (texture, view, bytes)
     }
     pub fn try_create_material(
         &mut self,
@@ -3375,6 +3398,9 @@ impl Renderer {
                 .as_ref()
                 .map_or(0, |h| h.scene_generation());
             let mut primary = UploadBytes::default();
+            // U-RTVIS: the reflection composite's room grows to the content before this frame's
+            // bindings are built (a growth drops them; prepare_primary rebuilds them).
+            self.rl_room_grow();
             let result = self.prepare_primary(draws, camera, soft, scene_generation, &mut primary);
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
@@ -3588,6 +3614,12 @@ impl Renderer {
                 self.ensure_gi_receiver_pass(shading)?;
                 mark(&mut encoder, "gi_receiver");
                 self.encode_gi_receiver_pass(&mut encoder, shading);
+                // Visibility feeds both the optional detail probes and final shading.
+                if primary_ray_gpu::light_vis_pass::on() {
+                    self.ensure_light_vis(shading)?;
+                    mark(&mut encoder, "light_visibility");
+                    self.encode_light_vis(&mut encoder, shading);
+                }
                 if !self.view.outputs.modes.shades() {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
@@ -3616,6 +3648,9 @@ impl Renderer {
                     self.encode_reflection_trace(&mut encoder, shading);
                     mark(&mut encoder, "reflection.hits");
                     self.encode_reflection_hits(&mut encoder, shading);
+                    // U-RTVIS: the deferred composite (RENDERLAB_RL_DEFERRED=1 with the pass).
+                    mark(&mut encoder, "reflection.composite");
+                    self.encode_reflection_composite(&mut encoder, shading);
                 }
             }
             if reconstructed {
@@ -3877,6 +3912,9 @@ impl Renderer {
         // `queue.submit` for an older one shows here with the older one counted.
         let alive = self.occupied();
         let index = self.queue.submit([commands]);
+        if let Some(virtual_shadows) = self.view.virtual_shadows.as_mut() {
+            virtual_shadows.submitted();
+        }
         if let Some(mut t) = marks {
             t.submitted();
             self.pass_timeline = Some(t);

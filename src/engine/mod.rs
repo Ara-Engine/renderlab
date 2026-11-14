@@ -500,7 +500,19 @@ impl Engine {
         let program = self
             .renderer
             .try_create_program(&ProgramDescriptor { label, source })?;
-        Ok(self.state.programs.insert(program))
+        let id = self.state.programs.insert(program);
+        self.refresh_variance()?;
+        Ok(id)
+    }
+    /// After a program arrives or changes: when one reads normal variance, the BC5 normal maps
+    /// get their variance layers and every material binds them (src/normal_variance_lazy.rs).
+    fn refresh_variance(&mut self) -> Result<(), Error> {
+        if self.renderer.ensure_variance_layers()? {
+            for entry in self.state.materials.values_mut() {
+                self.renderer.refresh_material(&mut entry.material);
+            }
+        }
+        Ok(())
     }
     /// Replaces a program's source transactionally: on rejection its last working
     /// pipelines keep rendering and the diagnostic names program lines. Materials keep
@@ -519,7 +531,12 @@ impl Engine {
                 compile: Duration::ZERO,
             })?
             .clone();
-        self.renderer.reload_program(&handle, source)
+        let report = self.renderer.reload_program(&handle, source)?;
+        self.refresh_variance().map_err(|e| ReloadError::Rejected {
+            diagnostic: e.to_string(),
+            compile: Duration::ZERO,
+        })?;
+        Ok(report)
     }
     /// The built-in photoreal program (shaders/programs/standard.wgsl), which materials
     /// without a program use.
@@ -986,6 +1003,7 @@ impl Engine {
         loop {
             if let Some(report) = renderer.try_render_view(color, camera, &mut draws, mode)? {
                 settings::log_indirect(renderer)?;
+                settings::log_clipmap(renderer);
                 return Ok(report);
             }
             if Instant::now() > deadline {
