@@ -167,36 +167,37 @@ pub(super) fn atmosphere_source(mut source: String, on: bool) -> String {
         "                let sample=textureLoad(at_scatter,cell,0).r;",
         "                let neighbor=textureLoad(at_scatter,cell,0);\n                if at_fog_cull_enabled() && neighbor.g==0.0 {complete=false;continue;}\n                let sample=neighbor.r;",
     );
-    if std::env::var("RENDERLAB_FOG_OVERHAUL").as_deref() != Ok("0") {
-        // Test the validity of the actual filtered sample. A tap whose weight
-        // rounds to zero in the sampler contributes neither validity nor colour.
-        // Reuse this fetch instead of loading all eight taps a second time.
-        edit(
-            &mut source,
-            "at_fog_temporal",
-            "                value=vec4<f32>(mix(value.r,old,weight),0.0,0.0,extinction);",
-            "                if !at_fog_cull_enabled() || history.g==1.0 {value=vec4<f32>(mix(value.r,old,weight),value.g,0.0,extinction);}",
-        );
-    } else {
-        edit(
-            &mut source,
-            "at_fog_temporal",
-            "if all(previous>=border) && all(previous<=vec3<f32>(1.0)-border) {",
-            "if all(previous>=border) && all(previous<=vec3<f32>(1.0)-border) && (!at_fog_cull_enabled() || at_fog_history_filled(previous,grid)) {",
-        );
-        edit(
-            &mut source,
-            "at_fog_temporal",
-            "mix(value.r,old,weight),0.0,0.0,extinction",
-            "mix(value.r,old,weight),value.g,0.0,extinction",
-        );
-    }
+    edit(
+        &mut source,
+        "at_fog_temporal",
+        "if all(previous>=border) && all(previous<=vec3<f32>(1.0)-border) {",
+        "if all(previous>=border) && all(previous<=vec3<f32>(1.0)-border) && (!at_fog_cull_enabled() || at_fog_history_filled(previous,grid)) {",
+    );
+    edit(
+        &mut source,
+        "at_fog_temporal",
+        "mix(value.r,old,weight),0.0,0.0,extinction",
+        "mix(value.r,old,weight),value.g,0.0,extinction",
+    );
     edit(
         &mut source,
         "at_fog_temporal",
         "    textureStore(at_scatter_out,vec3<i32>(id),value);",
         "    if at_fog_cull_enabled() {value.g=select(0.0,1.0,complete);}\n    textureStore(at_scatter_out,vec3<i32>(id),value);",
     );
+    if std::env::var("RENDERLAB_FOG_OVERHAUL").as_deref() != Ok("0") {
+        // Occlusion writes this flag in the preceding pass. It is stable for
+        // this entire dispatch; repeated atomic loads inhibit loop hoisting.
+        let (range, _) = entries(&source)
+            .into_iter()
+            .find(|(_, name)| name == "at_fog_temporal")
+            .unwrap();
+        let body = source[range.clone()].replace("at_fog_cull_enabled()", "cull_active");
+        let guard = "    if any(id>=grid) { return; }";
+        assert_eq!(body.matches(guard).count(), 1);
+        let body = body.replacen(guard, &format!("{guard}\n    let cull_active=at_fog_cull_enabled();"), 1);
+        source.replace_range(range, &body);
+    }
     source + OCCLUSION
 }
 
