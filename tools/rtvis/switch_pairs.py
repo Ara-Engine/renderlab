@@ -1,5 +1,5 @@
 """Pass switches in pairs. The engine reads each pass switch once per process, so one test process
-cannot compose two settings; this runs the real default, the all-off baseline (none), each switch, per
+cannot compose two settings; this runs the real default (none), the all-off baseline (off), each switch, per
 pair, per triple and with every switch at once, and optionally one game_scene frame per set on both
 paths. SWITCH_PAIRS_SETS=a,b,... runs only the named sets.
 
@@ -7,7 +7,7 @@ paths. SWITCH_PAIRS_SETS=a,b,... runs only the named sets.
     python switch_pairs.py TESTS_EXE GAME_SCENE_EXE OUTDIR  # plus one frame per pair and path
 
 TESTS_EXE is the renderlab lib test binary (on the PC, a renamed copy outside target/, run
-outside a lease only for these CPU tests). default omits LIGHT_VIS_PASS; none explicitly sets 0.
+outside a lease only for these CPU tests). none omits LIGHT_VIS_PASS; off explicitly sets 0.
 GPU starts verify both the compile line and the light_visibility pass-log row, so an off run
 cannot silently certify the default. Exit status 1 if any run fails."""
 import itertools
@@ -41,8 +41,8 @@ TESTS = [
 def sets():
     """No switches, each switch, every pair, every triple and every switch at once. The
     reflection settings (rl, rl-diag, rl-all) are one switch's values, so a set takes at most one."""
-    yield "default", {}
     yield "none", {}
+    yield "off", {}
     for n in (1, 2, 3):
         for names in itertools.combinations(SWITCHES, n):
             if sum(x.startswith("rl") for x in names) > 1:
@@ -57,7 +57,7 @@ def sets():
 def environment(base, name, overrides):
     """Keep the real default distinct from the all-off composition baseline."""
     env = {**base, "RENDERLAB_LIGHT_VIS_PASS": "0", **overrides}
-    if name == "default":
+    if name == "none":
         env.pop("RENDERLAB_LIGHT_VIS_PASS", None)
     return env
 
@@ -70,7 +70,12 @@ def main():
             if not any(k in env for env in SWITCHES.values())}
     failed = 0
     exact = os.environ.get("SWITCH_PAIRS_SETS")
-    for name, env in sets():
+    cases = list(sets())
+    if exact:
+        unknown = set(exact.split(",")) - {name for name, _ in cases}
+        if unknown:
+            sys.exit(f"unknown switch sets: {', '.join(sorted(unknown))}")
+    for name, env in cases:
         if exact and name not in exact.split(","):
             continue
         run_env = environment(base, name, env)
