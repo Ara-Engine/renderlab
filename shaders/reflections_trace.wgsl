@@ -14,7 +14,7 @@ struct RlGlossyEntries { count:u32, header:array<u32,3>, entries:array<vec4<u32>
 // composite's draw (vertex count, instance count, first vertex, first instance). Their own group,
 // bound only by rl_list_args: the trace's dispatch reads them as indirect arguments, which may not
 // share a dispatch with a read-write binding of the same buffer.
-@group(2) @binding(0) var<storage,read_write> rl_list_arguments:array<u32,12>;
+@group(2) @binding(0) var<storage,read_write> rl_list_arguments:array<u32,8>;
 // H: count, the three dispatch arguments of reflection_hits (RL_HIT_GROUP-wide groups), then
 // 48-byte records (three vec4<u32>).
 struct RlHits { count:atomic<u32>, args:array<u32,3>, records:array<vec4<u32>> };
@@ -27,8 +27,6 @@ const RL_HIT_GROUP:u32=64u;
 // all of a receiver's rays. Hardware keeps its established receiver-per-lane path.
 const RL_RAY_LANES:u32=1u;
 const RL_TRACE_MIRRORS:bool=false;
-const RL_SPLIT_MIRRORS:bool=false;
-const RL_MIRROR_ONLY:bool=false;
 const RL_LIST_GROUP:u32=64u/RL_RAY_LANES;
 const RL_LIST_ROW:u32=65535u;
 // x glossy pixels traced, y slots traced, z strata requested (every glossy receiver's, summed at
@@ -55,12 +53,6 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
     rl_list_arguments[5]=1u;
     rl_list_arguments[6]=0u;
     rl_list_arguments[7]=0u;
-    if RL_SPLIT_MIRRORS {
-        let mirrors=(entries+63u)/64u;
-        rl_list_arguments[8]=min(mirrors,RL_LIST_ROW);
-        rl_list_arguments[9]=(mirrors+RL_LIST_ROW-1u)/RL_LIST_ROW;
-        rl_list_arguments[10]=1u;
-    }
 }
 
 // One list entry an invocation: its receiver's full strata set (L's count: today's faded set,
@@ -69,8 +61,6 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
     let entry=(group.x+group.y*RL_LIST_ROW)*RL_LIST_GROUP+lane/RL_RAY_LANES;
     if entry>=rl_list_length() {return;}
     let a=rl_glossy.entries[entry*3u];let b=rl_glossy.entries[entry*3u+1u];let c=rl_glossy.entries[entry*3u+2u];
-    let mirror_entry=RL_TRACE_MIRRORS && (b.w&(1u<<21u))!=0u;
-    if RL_SPLIT_MIRRORS && mirror_entry!=RL_MIRROR_ONLY {return;}
     let p=vec2<u32>(c.x&0xffffu,c.x>>16u);
     let first=c.y;
     let count=(b.w>>16u)&31u;
@@ -84,9 +74,7 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
     }
     let origin=bitcast<vec3<f32>>(a.xyz);
     let ws=unpack2x16float(a.w);
-    // Separate software kernels make this a compile-time choice: glossy rays keep
-    // their four lanes and mirrors use one lane without carrying GGX state.
-    let mirror=select(mirror_entry,RL_MIRROR_ONLY,RL_SPLIT_MIRRORS);
+    let mirror=RL_TRACE_MIRRORS && (b.w&(1u<<21u))!=0u;
     var n=vec3<f32>(0.0,0.0,1.0);var v=n;var side=n;
     if !mirror {n=rl_oct_decode(b.x);v=rl_oct_decode(b.y);side=rl_oct_decode(b.z);}
     let alpha=unpack2x16float(b.w&0xffffu).x;

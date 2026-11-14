@@ -19,7 +19,7 @@ pub(super) const LIST: u32 = 56;
 const LIST_HEADER: u64 = 16;
 const LIST_ENTRY_BYTES: u64 = 48;
 pub(super) const PASS_FRAME: u32 = 58;
-/// List arguments: glossy dispatch, composite draw, then software mirror dispatch (48 bytes).
+/// The list's indirect arguments: the trace's dispatch, then the composite's draw (32 bytes).
 /// The trace counters (rl_trace_pixels).
 pub(super) const STATS: u32 = 60;
 /// The same counters in the primary shading layout, where 60 is the resolve's phase uniform
@@ -160,7 +160,7 @@ impl TraceAbi {
         let args_group = ledger.own(
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("reflection list arguments"),
-                entries: &[buffer(0, write, 48)],
+                entries: &[buffer(0, write, 32)],
             }),
             ResourceKind::BindGroupLayout,
         );
@@ -207,7 +207,6 @@ pub(in crate::renderer) struct Readback {
 pub(super) struct TracePipelines {
     list_args: Owned<wgpu::ComputePipeline>,
     pixels: Owned<wgpu::ComputePipeline>,
-    mirrors: Option<Owned<wgpu::ComputePipeline>>,
     args: Owned<wgpu::ComputePipeline>,
     /// The deferred composite: its group layout and additive point pipeline.
     composite: (Owned<wgpu::BindGroupLayout>, Owned<wgpu::RenderPipeline>),
@@ -226,7 +225,7 @@ impl Renderer {
             list_args: Buffer::new(
                 self,
                 "reflection list arguments",
-                48,
+                32,
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
             ),
             frame: Buffer::new(
@@ -351,19 +350,6 @@ impl Renderer {
                 } else { "const RL_TRACE_MIRRORS:bool=false;" })
         };
         let source = sw_cache::source(source, &self.device);
-        let split_mirrors = !self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
-            && crate::reflection_software::pass_mirrors_enabled()
-            && std::env::var("RENDERLAB_SW_REFLECTION_SPLIT").map_or(true, |v| v != "0");
-        let source = if split_mirrors {
-            source.replace("const RL_SPLIT_MIRRORS:bool=false;", "const RL_SPLIT_MIRRORS:bool=true;")
-        } else { source };
-        let mirror_source = split_mirrors.then(|| {
-            let mut source = source.replace("const RL_MIRROR_ONLY:bool=false;", "const RL_MIRROR_ONLY:bool=true;");
-            let start = source.find("const RL_RAY_LANES:u32=").unwrap();
-            let end = start + source[start..].find(';').unwrap() + 1;
-            source.replace_range(start..end, "const RL_RAY_LANES:u32=1u;");
-            source
-        });
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
@@ -372,19 +358,12 @@ impl Renderer {
             }),
             ResourceKind::ShaderModule,
         );
-        let mirror_module = mirror_source.map(|source| self.ledger.own(
-            self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("software mirror trace"),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            }),
-            ResourceKind::ShaderModule,
-        ));
-        let pipeline = |module: &wgpu::ShaderModule, entry, layout: &wgpu::PipelineLayout| {
+        let pipeline = |entry, layout: &wgpu::PipelineLayout| {
             self.ledger.own(
                 self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some("reflection trace"),
                     layout: Some(layout),
-                    module,
+                    module: &module,
                     entry_point: Some(entry),
                     compilation_options: Default::default(),
                     cache: None,
@@ -393,10 +372,9 @@ impl Renderer {
             )
         };
         let pipelines = TracePipelines {
-            list_args: pipeline(&module, "rl_list_args", &abi.args_layout),
-            pixels: pipeline(&module, "rl_trace_pixels", &abi.layout),
-            mirrors: mirror_module.as_ref().map(|m| pipeline(m, "rl_trace_pixels", &abi.layout)),
-            args: pipeline(&module, "rl_hit_args", &abi.layout),
+            list_args: pipeline("rl_list_args", &abi.args_layout),
+            pixels: pipeline("rl_trace_pixels", &abi.layout),
+            args: pipeline("rl_hit_args", &abi.layout),
             composite: self.rl_composite_kit(),
         };
         if let Some(error) = scopes.finish() {
@@ -457,10 +435,6 @@ impl Renderer {
         }
         compute.set_pipeline(&pipelines.pixels);
         compute.dispatch_workgroups_indirect(&pass.list_args.value, 0);
-        if let Some(mirrors) = &pipelines.mirrors {
-            compute.set_pipeline(mirrors);
-            compute.dispatch_workgroups_indirect(&pass.list_args.value, 32);
-        }
         compute.set_pipeline(&pipelines.args);
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
