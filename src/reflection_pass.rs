@@ -410,8 +410,7 @@ impl Renderer {
         compute.set_pipeline(&pipelines.args);
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
-        let epsilon = &state.targets.as_ref().unwrap().epsilon.texture;
-        super::reflection_list_dump::maybe_dump(self, encoder, pass, epsilon);
+        super::reflection_list_dump::maybe_dump(self, encoder, pass);
         self.rl_probe(encoder, pass);
         self.rl_room_copy(encoder, pass);
     }
