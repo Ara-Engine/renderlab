@@ -241,4 +241,26 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
         }
     }
+    #[test]
+    fn diagnostic_lookup_validates_and_flag_off_is_identical() {
+        use crate::program::{self, Stage};
+        use crate::renderer::primary_ray_gpu;
+        let prelude = include_str!("../shaders/scene.wgsl");
+        let hw = primary_ray_gpu::shading_sources(prelude, program::STANDARD_PROGRAM).unwrap();
+        let (_, heads) = primary_ray_gpu::non_rt_sources(prelude).unwrap();
+        let sw = heads
+            .map(|h| program::compose(&h, program::STANDARD_PROGRAM, Stage::Traced, false).source);
+        for source in hw.into_iter().chain(sw) {
+            assert_eq!(shading_for(source.clone(), true, false), source);
+            let source = shading_for(source, true, true);
+            let module = naga::front::wgsl::parse_str(&source)
+                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
+        }
+    }
 }
