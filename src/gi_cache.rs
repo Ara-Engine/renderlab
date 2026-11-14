@@ -21,6 +21,8 @@ mod priority;
 mod refill_feedback;
 #[path = "gi_queue_probe.rs"]
 mod queue_probe;
+#[path = "gi_provenance.rs"]
+pub(crate) mod provenance;
 
 pub(crate) const HEADER_WORDS: u64 = 64;
 /// Keep the original admission policy: packing storage must not change the chosen
@@ -1552,6 +1554,7 @@ pub(super) struct GiState {
     priority_compact: bool,
     priority_hold: bool,
     queue_probe: Option<queue_probe::State>,
+    pub(super) provenance: Option<provenance::State>,
     groups: Option<Groups>,
     retired: Vec<(u64, Retired)>,
     stats: IndirectStats,
@@ -1605,6 +1608,7 @@ impl GiState {
             priority_compact: false,
             priority_hold: false,
             queue_probe: None,
+            provenance: provenance::on().then(||provenance::State::new(device,ledger)),
             groups: None,
             retired: vec![],
             stats: IndirectStats::default(),
@@ -1637,7 +1641,7 @@ impl GiState {
 /// source and the kernels.
 pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
     let priority = software && priority::on();
-    priority::source(kernel_source_base(software, directions), priority)
+    provenance::kernels(priority::source(kernel_source_base(software, directions), priority))
 }
 fn kernel_source_base(software: bool, directions: u32) -> String {
     let enables = if software {
@@ -1942,7 +1946,7 @@ impl Renderer {
                     storage | wgpu::BufferUsages::COPY_SRC,
                 ),
                 draws: buffer("indirect cache draw table", draws_bytes, storage),
-                raw: buffer("indirect cache filter sources", raw_bytes, storage | if queue_probe::enabled() {wgpu::BufferUsages::COPY_SRC} else {wgpu::BufferUsages::empty()}),
+                raw: buffer("indirect cache filter sources", raw_bytes, storage | if queue_probe::enabled() || provenance::on() {wgpu::BufferUsages::COPY_SRC} else {wgpu::BufferUsages::empty()}),
                 slots,
                 cold_words,
                 directions,
@@ -2545,7 +2549,7 @@ impl Renderer {
                 ResourceKind::BindGroupLayout,
             )
         };
-        let common = [
+        let mut common = vec![
             uint_texture(7),
             uint_texture(21),
             storage(30, false),
@@ -2562,6 +2566,7 @@ impl Renderer {
             storage(36, true),
             storage(37, false),
         ];
+        if provenance::on() {common.push(storage(38,false));}
         let tlas = entry(
             34,
             wgpu::BindingType::AccelerationStructure {
@@ -3205,6 +3210,7 @@ impl Renderer {
         );
         let r = self.gi.resources.as_ref().unwrap();
         self.queue.write_buffer(&r.frame, 0, &finished.frame);
+        if let Some(p)=&self.gi.provenance {p.prepare(&self.queue,self.frames+1,r.slots,begun.header[31]);}
         let Some(plan) = finished.plan else {
             self.gi.stats.idle_frames += 1;
             return Ok(());
@@ -3287,6 +3293,7 @@ impl Renderer {
                 resource: r.raw.as_entire_binding(),
             },
         ];
+        if let Some(p)=&self.gi.provenance { entries.push(wgpu::BindGroupEntry {binding:38,resource:p.buffer.as_entire_binding()});}
         if software {
             entries.push(wgpu::BindGroupEntry {
                 binding: 35,

@@ -745,6 +745,7 @@ pub(super) fn shade_layout_entries(
         // M7-R1: Soft shading traces reflection rays on the shared TLAS.
         entries.push(scene(2));
     }
+    if gi_cache::provenance::on() {let mut e=gi_receiver_pass::entry();e.binding=80;entries.push(e);}
     if switches.gi {
         entries.push(gi_receiver_pass::entry());
     }
@@ -2667,6 +2668,7 @@ impl Renderer {
                     (RL_HISTORY, R::TextureView(&t.rl_history.history.view)),
                     (RL_PHASE, t.rl_history.phase.value.as_entire_binding()),
                 ];
+                if let Some(p)=&self.gi.provenance {entries.push((80,p.buffer.as_entire_binding()));}
                 if let Some(gi) = &t.gi_receiver { entries.push((gi_receiver_pass::BINDING, gi.values.value.as_entire_binding())); }
                 // U-RTVIS: the reflection pass's lobe output.
                 if let Some(pass) = &t.rl_pass {

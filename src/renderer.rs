@@ -4001,6 +4001,7 @@ impl Renderer {
             );
         }
         self.frames += 1;
+        self.dump_gi_provenance()?;
         self.view.last_frame = self.frames;
         self.timed_frames += u64::from(timed);
         let frame = FrameId(self.frames);
