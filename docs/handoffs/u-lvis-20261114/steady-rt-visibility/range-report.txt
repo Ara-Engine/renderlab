@@ -1,0 +1,42 @@
+Updated comparison and priority (Root, 2026-11-14): Unreal uses virtual shadow maps for the sun in both measured Lumen configurations. Root reports profile-mode shadow costs: Outpost 2.3-2.9 ms with hardware Lumen / 3.3 ms software; Showcase 1.3 / 1.5-1.7 ms. Those profile-mode milliseconds are about 1.45x steady and are not directly comparable to our plain steady timers. The supported share comparison is Unreal shadows at 21-26% of its Outpost frame versus our sun 2.58/11.86 = 22%. Our sun is a large term of the frame, not an established large term of the Unreal gap; 'largest term of the gap' is withdrawn. Root characterizes Outpost sun as about level and Showcase a little cheaper, subject to the measurement-mode caveat. SUN_PASS=1 remains a diagnostic split with overhead on Outpost, not a proposed default. Order is range result, Ara cutoff ceiling (RT then non-RT, activation first), then tracing/caster/facing work only when free.
+
+RT sun range ablation. Own P202 Renderlab0b3f1698,RTX4070 SUPER,1080p,32lanes,2reversed rounds,Outpost first/Showcase control.
+SUN_PASS=1 BOTH; SUN_ZONE_STOP unset; A default4/12/40/1000m; B SUN_SPLITS=4,12,40.
+Held warm60 and moving clip20..59/40 frames,ID-joined and anchored, no cuts/video readbacks. Means of two per-run medians; spread=max within-state round difference.
+Scene file/hash: {"outpost": {"source": "D:\\Coding\\renderlab-work\\ara-integration\\samples-scratch\\outpost", "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\outpost\\content\\levels\\outpost.scene", "sha256": "f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386"}, "showcase": {"source": "D:\\Coding\\renderlab-work\\ara-integration\\samples-scratch\\showcase", "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\showcase\\content\\levels\\showcase.scene", "sha256": "ac84a12aa4a3dd4c8979140fab169db080b4077e4f83c4fb1fecb33019921165"}}
+Player SHA256: 037e8d98b0d740795f091830c57b8a7c9b5e66b2f23905f5c91412d74bbe7ee8
+Attempt directory: D:\Coding\renderlab-work\u-lvis\steady-rt-visibility\range-attempts\20261114T093118-16888
+
+outpost held
+  visibility_ms: long 0.4601 -> short 0.4480; saved +0.0121 ms; spread 0.0456; paired [0.03225, -0.00814999999999999]
+  sun_ms: long 2.5334 -> short 2.2523; saved +0.2811 ms; spread 0.0092; paired [0.27700000000000014, 0.2851999999999997]
+  visibility_plus_sun_ms: long 2.9727 -> short 2.7008; saved +0.2719 ms; spread 0.0266; paired [0.27649999999999997, 0.2672500000000002]
+  span_ms: long 9.7751 -> short 9.4843; saved +0.2908 ms; spread 0.1024; paired [0.3405499999999986, 0.24115000000000109]
+  tlas_ms: long 0.1480 -> short 0.1480; saved +0.0000 ms; spread 0.0010; paired [0.0010000000000000009, -0.0010000000000000009]
+outpost moving
+  visibility_ms: long 0.4447 -> short 0.4587; saved -0.0141 ms; spread 0.0230; paired [-0.005599999999999994, -0.02250000000000002]
+  sun_ms: long 3.0996 -> short 2.7919; saved +0.3077 ms; spread 0.0030; paired [0.31024999999999947, 0.3051499999999998]
+  visibility_plus_sun_ms: long 3.5948 -> short 3.2955; saved +0.2992 ms; spread 0.0251; paired [0.2989500000000005, 0.2995499999999991]
+  span_ms: long 11.9675 -> short 11.6754; saved +0.2921 ms; spread 0.0286; paired [0.3026, 0.28165000000000084]
+  tlas_ms: long 0.1570 -> short 0.1554; saved +0.0016 ms; spread 0.0087; paired [0.007700000000000012, -0.0045499999999999985]
+showcase held
+  visibility_ms: long 0.2545 -> short 0.2545; saved +0.0000 ms; spread 0.0010; paired [0.0, 0.0]
+  sun_ms: long 0.9187 -> short 0.9321; saved -0.0133 ms; spread 0.0333; paired [-0.026699999999999946, 0.0]
+  visibility_plus_sun_ms: long 1.1845 -> short 1.1873; saved -0.0028 ms; spread 0.0108; paired [-0.0061500000000001, 0.0004999999999999449]
+  span_ms: long 6.4146 -> short 6.4341; saved -0.0195 ms; spread 0.0518; paired [-0.028750000000000497, -0.01019999999999932]
+  tlas_ms: long 0.0717 -> short 0.0717; saved +0.0000 ms; spread 0.0000; paired [0.0, 0.0]
+showcase moving
+  visibility_ms: long 0.3840 -> short 0.4027; saved -0.0187 ms; spread 0.0553; paired [-0.04810000000000003, 0.010749999999999982]
+  sun_ms: long 1.1390 -> short 1.1456; saved -0.0067 ms; spread 0.0098; paired [-0.01639999999999997, 0.003050000000000219]
+  visibility_plus_sun_ms: long 1.5237 -> short 1.5388; saved -0.0151 ms; spread 0.0686; paired [-0.07729999999999992, 0.047150000000000025]
+  span_ms: long 7.7555 -> short 7.8446; saved -0.0891 ms; spread 0.2832; paired [-0.2821000000000007, 0.10394999999999932]
+  tlas_ms: long 0.0717 -> short 0.0717; saved +0.0000 ms; spread 0.0000; paired [0.0, 0.0]
+
+This deliberately removes distant receiver shadow coverage; it is a cost ablation, not a proposed quality/default change. It can change both receiver admission and shadow-ray segment/box geometry, so timing alone cannot say ray count versus cheaper traversal. Warm census awaits U-RTVIS frame selector.
+The old10-Nov quarry shadow0.5-.63ms must not be used for an Outpost ratio. Root later supplied game-scene profile figures; see the updated measurement-mode/share correction below. SUN_PASS diagnostic overhead remains, since BOTH states use it.
+(a) needs frame-selectable SUN_RAYS_PROBE; (d) proposed measurement counter: sun_facing_queries, splitting geometric versus resolved-material facing, thin/two-sided status and query count; current probe has no such field. Geometric facing is diagnostic, not a safe reject gate. No counter written.
+(c) fence/foliage/terrain exclusions, if scheduled, are geometry/traversal ablations: FORCE_OPAQUE rays and alpha-contour mesh cutting mean no per-crossing alpha callback is established.
+
+Lease u-lvis-sun-range-retry2-093115: exit0,112.287s,no watchdog failures.8starts,800/800 selected samples,all joins anchored/offset1. Zero video-frame PNGs/readbacks; mandatory initial/stability CLI stills outside analyzed windows retained. Own P202/player and scene hashes above.
+
+Conclusion: shortening to40m saves Outpost sun0.281ms held /0.308ms moving (about10-11%), full span0.291/0.292ms; Showcase is inside spread. Thus the1km range is not most of Outpost's sun cost. No picture or default recommendation: the short range deliberately removes distant shadows. Camera+receiver+repair is unchanged within spread.

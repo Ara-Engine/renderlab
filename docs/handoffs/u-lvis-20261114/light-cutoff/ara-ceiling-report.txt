@@ -1,0 +1,47 @@
+Ara existing black-bound ceiling. OwnP202,Renderlab0b3f1698,RTX4070 SUPER,1920x1080,32lanes.
+Outpost and Showcase main scenes; no Outpost night variant exists in owned project. Both paths,held/moving,2reversed rounds.
+OFF bound unset;ON LIGHT_BOUND=black,CODES=.5,SKIP=unshadowed. LVIS=0. SUN_PASS/ZONE_STOP unset.
+Activation FIRST: existing STARTUP_PROFILE program_compile log has equal raster_bytes and larger traced_bytes for the same standard-family program on OFF/ON. First pair must pass before accepting timing. Gate JSON retains actual compiler lines.
+Means of two per-run medians. Spread=max(abs(off1-off2),abs(on1-on2)); coordinator go criterion interpreted strictly: GPU-span saving minus that spread >=0.2ms in any complete cell.
+
+rt outpost held f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386
+  shading_ms: 4.0712->3.9665;saving +0.1047;spread 0.0103;excess +0.0944ms;paired [0.10339999999999927, 0.10599999999999943]
+  span_ms: 9.7001->9.7336;saving -0.0335;spread 0.0609;excess -0.0944ms;paired [-0.08699999999999974, 0.019950000000001467]
+rt outpost moving f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386
+  shading_ms: 4.0451->3.9539;saving +0.0912;spread 0.0046;excess +0.0866ms;paired [0.09525000000000006, 0.08709999999999951]
+  span_ms: 11.9826->11.8579;saving +0.1247;spread 0.1142;excess +0.0105ms;paired [0.04144999999999932, 0.20789999999999864]
+rt showcase held ac84a12aa4a3dd4c8979140fab169db080b4077e4f83c4fb1fecb33019921165
+  shading_ms: 3.5330->3.5643;saving -0.0312;spread 0.0333;excess -0.0645ms;paired [-0.015900000000000247, -0.04659999999999975]
+  span_ms: 6.3936->6.3908;saving +0.0028;spread 0.0507;excess -0.0479ms;paired [0.025600000000000733, -0.019999999999999574]
+rt showcase moving ac84a12aa4a3dd4c8979140fab169db080b4077e4f83c4fb1fecb33019921165
+  shading_ms: 3.5272->3.5620;saving -0.0348;spread 0.0103;excess -0.0450ms;paired [-0.03219999999999956, -0.03739999999999988]
+  span_ms: 7.7578->7.5684;saving +0.1894;spread 0.0973;excess +0.0921ms;paired [0.28364999999999974, 0.09520000000000017]
+nonrt outpost held f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386
+  shading_ms: 4.1170->4.1188;saving -0.0018;spread 0.0133;excess -0.0151ms;paired [-0.0020500000000005514, -0.0015499999999999403]
+  span_ms: 8.9920->8.6167;saving +0.3753;spread 0.7327;excess -0.3574ms;paired [0.017400000000000304, 0.7331500000000002]
+nonrt outpost moving f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386
+  shading_ms: 4.1403->4.1408;saving -0.0005;spread 0.0241;excess -0.0246ms;paired [-0.01025000000000098, 0.009200000000000763]
+  span_ms: 12.5914->12.5276;saving +0.0637;spread 0.1152;excess -0.0515ms;paired [0.0015000000000000568, 0.12594999999999956]
+nonrt showcase held ac84a12aa4a3dd4c8979140fab169db080b4077e4f83c4fb1fecb33019921165
+  shading_ms: 4.9114->4.9467;saving -0.0353;spread 0.0958;excess -0.1311ms;paired [-0.09060000000000024, 0.020000000000000462]
+  span_ms: 7.9920->7.5730;saving +0.4191;spread 0.7874;excess -0.3684ms;paired [0.8642500000000002, -0.026099999999999568]
+nonrt showcase moving ac84a12aa4a3dd4c8979140fab169db080b4077e4f83c4fb1fecb33019921165
+  shading_ms: 4.2445->4.2588;saving -0.0144;spread 0.0256;excess -0.0400ms;paired [-0.031299999999999883, 0.0025500000000002743]
+  span_ms: 7.9719->8.0955;saving -0.1236;spread 0.2923;excess -0.4160ms;paired [-0.2749000000000006, 0.02770000000000028]
+
+Complete paths: nonrt,rt
+No completed cell clears the coordinator threshold.
+No smooth implementation decision is taken from incomplete paths. All counts are diagnostic; this is a GPU-span gate, not ray-count success.
+Existing hard bound is an optimistic operational screen, not a strict ray-superset theorem for smooth shared-budget allocation. Existing hard mode bounds modeled Filmic+sRGB, not arbitrary grading/bloom. All pictures remain retained.
+
+
+U-MATWIRE exact-rule budget context (2026-11-14). RT1080p,fixture pose48,build888ce8727f1d44672f8800a7cd9508bdd4c580e6 from14cf68a4. Global L=6.443,E=.5 shared across local lights,full skip B<=remaining/2,transition charge B*(1-w),endpoint inflated1ppm,invalid endpoints fail open. No rendered visibility/HDR change in diagnostic. Source: D:\Coding\renderlab-work\u-matwire\budget-counter-summary.json
+standard flight: fully skipped 8.3432% of actual queries (5707812/68413016); old endpoint proxy 43.7985%; invalid endpoints 0.
+standard night-lanterns: fully skipped 6.4522% of actual queries (13926932/215848316); old endpoint proxy 19.7183%; invalid endpoints 0.
+game flight: fully skipped 28.6008% of actual queries (25395432/88792824); old endpoint proxy 56.0493%; invalid endpoints 0.
+game night-lanterns: fully skipped 26.9282% of actual queries (75594760/280727012); old endpoint proxy 37.2806%; invalid endpoints 0.
+Standard is the relevant shader family for Ara. The conservative global rule reaches only8.3% flight /6.5% night, far below43.8%/19.7% proxy; the large proxy set is not evidence for a large saving under this rule. The difference is consistent with most proxy opportunity lying at lit receivers whose display slope is lower. A per-receiver slope is a separate second design/proof, not a relaxation of this rule. Game-program28.6%/26.9% versus56.0%/37.3% does not transfer to Ara and is not an enabled ordinary game-path bound.
+The Ara ceiling remains the decider, with activation first and GPU span/shading in two reversed rounds. Counters do not forecast milliseconds or authorize a smooth build.
+
+FINAL VERDICT: PARK smooth under the coordinator's stated go/stop rule. Both paths are complete; no scene/view has GPU-span saving >= its paired-state spread +0.2ms. No smooth code/build/PR. Retain both fixture and Ara tables: standard fixture night had RT span saving0.5489ms with27 local lights; that remains a many-lights case, not an Ara default result.
+Leases: RT u-lvis-ara-ceiling-rt-retry-095504 exit0/116.667s; nonRT u-lvis-ara-ceiling-nonrt-100539 exit0/141.852s. Both8freshjobs/800selectedframes,1600total; no watchdog failures. Original RT pair remains activation-only, excluded from these timing rows. No Outpost night variant in owned copy. No video-frame readbacks/PNGs; mandatory CLI bookkeeping stills retained outside measured windows.

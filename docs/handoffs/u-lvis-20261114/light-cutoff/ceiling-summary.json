@@ -1,0 +1,282 @@
+[
+  {
+    "path": "rt",
+    "scene": "flight",
+    "motion": "moving",
+    "rounds": {
+      "off": [
+        {
+          "case": "r1-rt-flight-off",
+          "shading_ms": 6.0242,
+          "span_ms": 22.5638,
+          "samples": 60,
+          "seconds": 8.91139409999596
+        },
+        {
+          "case": "r2-rt-flight-off",
+          "shading_ms": 6.0662,
+          "span_ms": 22.555149999999998,
+          "samples": 60,
+          "seconds": 3.59746050000831
+        }
+      ],
+      "black": [
+        {
+          "case": "r1-rt-flight-black",
+          "shading_ms": 5.95915,
+          "span_ms": 22.4159,
+          "samples": 60,
+          "seconds": 12.317217599993455
+        },
+        {
+          "case": "r2-rt-flight-black",
+          "shading_ms": 5.96175,
+          "span_ms": 22.453249999999997,
+          "samples": 60,
+          "seconds": 3.583379200004856
+        }
+      ]
+    },
+    "metrics": {
+      "shading_ms": {
+        "off": 6.0452,
+        "black": 5.96045,
+        "saving_ms": 0.08475000000000055,
+        "saving_percent": 1.4019387282472133,
+        "max_state_spread_ms": 0.041999999999999815,
+        "paired_savings_ms": [
+          0.06505000000000027,
+          0.10444999999999993
+        ],
+        "paired_delta_spread_ms": 0.03939999999999966,
+        "beats_state_spread": true,
+        "both_rounds_save": true
+      },
+      "span_ms": {
+        "off": 22.559475,
+        "black": 22.434575,
+        "saving_ms": 0.12490000000000023,
+        "saving_percent": 0.5536476358603214,
+        "max_state_spread_ms": 0.03734999999999644,
+        "paired_savings_ms": [
+          0.14789999999999992,
+          0.10190000000000055
+        ],
+        "paired_delta_spread_ms": 0.045999999999999375,
+        "beats_state_spread": true,
+        "both_rounds_save": true
+      }
+    },
+    "ceiling_clears": true
+  },
+  {
+    "path": "rt",
+    "scene": "night",
+    "motion": "moving",
+    "rounds": {
+      "off": [
+        {
+          "case": "r1-rt-night-off",
+          "shading_ms": 14.4558,
+          "span_ms": 31.9099,
+          "samples": 60,
+          "seconds": 4.739481500000693
+        },
+        {
+          "case": "r2-rt-night-off",
+          "shading_ms": 14.4937,
+          "span_ms": 31.992350000000002,
+          "samples": 60,
+          "seconds": 4.587182899995241
+        }
+      ],
+      "black": [
+        {
+          "case": "r1-rt-night-black",
+          "shading_ms": 13.968350000000001,
+          "span_ms": 31.395850000000003,
+          "samples": 60,
+          "seconds": 4.708954600006109
+        },
+        {
+          "case": "r2-rt-night-black",
+          "shading_ms": 13.9397,
+          "span_ms": 31.40865,
+          "samples": 60,
+          "seconds": 4.574497599998722
+        }
+      ]
+    },
+    "metrics": {
+      "shading_ms": {
+        "off": 14.47475,
+        "black": 13.954025000000001,
+        "saving_ms": 0.5207249999999988,
+        "saving_percent": 3.5974714589198347,
+        "max_state_spread_ms": 0.03790000000000049,
+        "paired_savings_ms": [
+          0.48744999999999905,
+          0.5540000000000003
+        ],
+        "paired_delta_spread_ms": 0.06655000000000122,
+        "beats_state_spread": true,
+        "both_rounds_save": true
+      },
+      "span_ms": {
+        "off": 31.951125,
+        "black": 31.402250000000002,
+        "saving_ms": 0.5488749999999989,
+        "saving_percent": 1.7178581348857007,
+        "max_state_spread_ms": 0.08245000000000147,
+        "paired_savings_ms": [
+          0.5140499999999975,
+          0.5837000000000003
+        ],
+        "paired_delta_spread_ms": 0.06965000000000288,
+        "beats_state_spread": true,
+        "both_rounds_save": true
+      }
+    },
+    "ceiling_clears": true
+  },
+  {
+    "path": "nonrt",
+    "scene": "flight",
+    "motion": "moving",
+    "rounds": {
+      "off": [
+        {
+          "case": "r1-nonrt-flight-off",
+          "shading_ms": 6.6084,
+          "span_ms": 37.24905,
+          "samples": 60,
+          "seconds": 8.412269599997671
+        },
+        {
+          "case": "r2-nonrt-flight-off",
+          "shading_ms": 6.5469,
+          "span_ms": 37.28845,
+          "samples": 60,
+          "seconds": 5.152521500000148
+        }
+      ],
+      "black": [
+        {
+          "case": "r1-nonrt-flight-black",
+          "shading_ms": 6.4333,
+          "span_ms": 37.18145,
+          "samples": 60,
+          "seconds": 13.074157600000035
+        },
+        {
+          "case": "r2-nonrt-flight-black",
+          "shading_ms": 6.453799999999999,
+          "span_ms": 37.162,
+          "samples": 60,
+          "seconds": 5.217268099993817
+        }
+      ]
+    },
+    "metrics": {
+      "shading_ms": {
+        "off": 6.57765,
+        "black": 6.44355,
+        "saving_ms": 0.1341000000000001,
+        "saving_percent": 2.038722035985498,
+        "max_state_spread_ms": 0.061499999999999666,
+        "paired_savings_ms": [
+          0.1750999999999996,
+          0.09310000000000063
+        ],
+        "paired_delta_spread_ms": 0.08199999999999896,
+        "beats_state_spread": true,
+        "both_rounds_save": true
+      },
+      "span_ms": {
+        "off": 37.26875,
+        "black": 37.171724999999995,
+        "saving_ms": 0.09702500000000214,
+        "saving_percent": 0.2603387556599085,
+        "max_state_spread_ms": 0.039400000000000546,
+        "paired_savings_ms": [
+          0.06759999999999877,
+          0.1264499999999984
+        ],
+        "paired_delta_spread_ms": 0.058849999999999625,
+        "beats_state_spread": true,
+        "both_rounds_save": true
+      }
+    },
+    "ceiling_clears": true
+  },
+  {
+    "path": "nonrt",
+    "scene": "night",
+    "motion": "moving",
+    "rounds": {
+      "off": [
+        {
+          "case": "r1-nonrt-night-off",
+          "shading_ms": 16.609250000000003,
+          "span_ms": 57.1592,
+          "samples": 60,
+          "seconds": 7.572248199998285
+        },
+        {
+          "case": "r2-nonrt-night-off",
+          "shading_ms": 16.41115,
+          "span_ms": 56.178650000000005,
+          "samples": 60,
+          "seconds": 7.406279500006349
+        }
+      ],
+      "black": [
+        {
+          "case": "r1-nonrt-night-black",
+          "shading_ms": 16.1613,
+          "span_ms": 56.82225,
+          "samples": 60,
+          "seconds": 7.302429899995332
+        },
+        {
+          "case": "r2-nonrt-night-black",
+          "shading_ms": 16.1838,
+          "span_ms": 56.883700000000005,
+          "samples": 60,
+          "seconds": 6.907671800014214
+        }
+      ]
+    },
+    "metrics": {
+      "shading_ms": {
+        "off": 16.5102,
+        "black": 16.17255,
+        "saving_ms": 0.33765,
+        "saving_percent": 2.0450993931024457,
+        "max_state_spread_ms": 0.19810000000000372,
+        "paired_savings_ms": [
+          0.4479500000000023,
+          0.22734999999999772
+        ],
+        "paired_delta_spread_ms": 0.22060000000000457,
+        "beats_state_spread": true,
+        "both_rounds_save": true
+      },
+      "span_ms": {
+        "off": 56.668925,
+        "black": 56.852975,
+        "saving_ms": -0.18404999999999916,
+        "saving_percent": -0.32478117416202823,
+        "max_state_spread_ms": 0.9805499999999938,
+        "paired_savings_ms": [
+          0.33695000000000164,
+          -0.70505
+        ],
+        "paired_delta_spread_ms": 1.0420000000000016,
+        "beats_state_spread": false,
+        "both_rounds_save": false
+      }
+    },
+    "ceiling_clears": false
+  }
+]

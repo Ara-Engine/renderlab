@@ -1,0 +1,39 @@
+Existing hard bound cutoff ceiling: no new renderer code.
+RTX4070 SUPER,release0428d73c,1920x1080,32lanes,corrected fixture with --diag program=standard,moving flight/night,both paths,2reversed rounds.
+OFF bound unset; ON LIGHT_BOUND=black,CODES=.5,SKIP=unshadowed. LVIS=0. Plain pass log,zero PNG/readbacks.
+60 actual renderer-frame samples per run,IDs41..100. Summary = mean of2 per-run medians; spread=max(abs(off1-off2),abs(on1-on2)).
+
+rt flight
+  shading_ms: 6.0452 -> 5.9604 ms; saving +0.0848 (+1.40%); max state spread 0.0420; paired savings [0.0651, 0.1044]; clears=True
+  span_ms: 22.5595 -> 22.4346 ms; saving +0.1249 (+0.55%); max state spread 0.0373; paired savings [0.1479, 0.1019]; clears=True
+  joint shading+span screen clears=True
+rt night
+  shading_ms: 14.4748 -> 13.9540 ms; saving +0.5207 (+3.60%); max state spread 0.0379; paired savings [0.4874, 0.554]; clears=True
+  span_ms: 31.9511 -> 31.4023 ms; saving +0.5489 (+1.72%); max state spread 0.0825; paired savings [0.514, 0.5837]; clears=True
+  joint shading+span screen clears=True
+nonrt flight
+  shading_ms: 6.5777 -> 6.4436 ms; saving +0.1341 (+2.04%); max state spread 0.0615; paired savings [0.1751, 0.0931]; clears=True
+  span_ms: 37.2687 -> 37.1717 ms; saving +0.0970 (+0.26%); max state spread 0.0394; paired savings [0.0676, 0.1264]; clears=True
+  joint shading+span screen clears=True
+nonrt night
+  shading_ms: 16.5102 -> 16.1726 ms; saving +0.3377 (+2.05%); max state spread 0.1981; paired savings [0.448, 0.2273]; clears=True
+  span_ms: 56.6689 -> 56.8530 ms; saving -0.1840 (-0.32%); max state spread 0.9805; paired savings [0.337, -0.705]; clears=False
+  joint shading+span screen clears=False
+
+Caveats: hard/smooth is an optimistic operational screen, not a strict per-light ray superset: smooth B*(1-w) reserves a different remaining shared budget. The coordinator kill rule still applies.
+Scope: ordinary custom game_scene calls light_visibility directly and does not reach the bound. Existing program=standard activates its live within seam on fixture props; toon remains exact. Ara STANDARD_PROGRAM, ara-standard-emissive and ara-terrain-splat retain within, but these fixture results are not measured Ara gains.
+Global slope 6.443: hard initial full budget .5/(255*6.443)=3.043e-4 exposed maximum RGB; smooth full-skip half-window=1.522e-4; both become stricter after previous lights spend the shared receiver budget.
+The .5 code is one shared total bound per receiver, not per light, under the modeled Filmic+sRGB transform. Hard existing mode does not certify arbitrary grade/LUT/bloom. Saved-ray counts alone do not decide this experiment.
+Sun follow-up caveats: our Outpost RT sun costs2.6-3.2ms; no matched Unreal Outpost shadow number exists yet. SUN_PASS diagnostic overhead means it is not a proposed default. FORCE_OPAQUE plus Ara alpha-contour mesh cutting means fence exclusions test geometry/traversal, not per-crossing alpha callbacks.
+
+Lease u-lvis-cutoff-ceiling-091017: exit0 in111.216s,no watchdog failures.16 starts,960/960 selected renderer-frame samples,zero PNGs. Warm clock alignment: graphics2805-2820MHz,memory10501MHz,raw samples and asynchronous frame observations retained in each run. Start was idle P5; analyzed frames41-100 were P0/2805-2820.
+
+Decision: RT flight/night and non-RT flight clear both shading and span against state spread. Non-RT night shading improves but full span is inconclusive/opposite-signed across rounds (.337ms saved then .705ms lost); do not call that a non-RT night gain. No smooth code/build started. Request coordinator interpretation of the retained RT ceiling before implementation; next assigned work is steady sun breakdown.
+
+U-MATWIRE exact-rule budget context (2026-11-14). RT1080p,fixture pose48,build888ce8727f1d44672f8800a7cd9508bdd4c580e6 from14cf68a4. Global L=6.443,E=.5 shared across local lights,full skip B<=remaining/2,transition charge B*(1-w),endpoint inflated1ppm,invalid endpoints fail open. No rendered visibility/HDR change in diagnostic. Source: D:\Coding\renderlab-work\u-matwire\budget-counter-summary.json
+standard flight: fully skipped 8.3432% of actual queries (5707812/68413016); old endpoint proxy 43.7985%; invalid endpoints 0.
+standard night-lanterns: fully skipped 6.4522% of actual queries (13926932/215848316); old endpoint proxy 19.7183%; invalid endpoints 0.
+game flight: fully skipped 28.6008% of actual queries (25395432/88792824); old endpoint proxy 56.0493%; invalid endpoints 0.
+game night-lanterns: fully skipped 26.9282% of actual queries (75594760/280727012); old endpoint proxy 37.2806%; invalid endpoints 0.
+Standard is the relevant shader family for Ara. The conservative global rule reaches only8.3% flight /6.5% night, far below43.8%/19.7% proxy; the large proxy set is not evidence for a large saving under this rule. The difference is consistent with most proxy opportunity lying at lit receivers whose display slope is lower. A per-receiver slope is a separate second design/proof, not a relaxation of this rule. Game-program28.6%/26.9% versus56.0%/37.3% does not transfer to Ara and is not an enabled ordinary game-path bound.
+The Ara ceiling remains the decider, with activation first and GPU span/shading in two reversed rounds. Counters do not forecast milliseconds or authorize a smooth build.

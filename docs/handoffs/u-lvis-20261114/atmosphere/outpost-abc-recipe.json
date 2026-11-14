@@ -1,0 +1,186 @@
+{
+  "branch": "t3/atmosphere-cost",
+  "head": "806701701f2b5fd2913dbcd123227cca509b32cd",
+  "main_base": "177ef27f",
+  "binary": "PC integration bin-Patmo rebuilt against this head; record Ara SHA and exe SHA256",
+  "cwd": "<PC integration owned current-main Outpost project>",
+  "command": [
+    "ara.exe",
+    "capture",
+    "--scene",
+    "levels/outpost.scene",
+    "--camera",
+    "Follow camera",
+    "--path",
+    "<owned-output>/capture.png",
+    "--width",
+    "1920",
+    "--height",
+    "1080",
+    "--ev100",
+    "10",
+    "--video",
+    "120",
+    "--video-move",
+    "4,0,-4",
+    "--video-yaw",
+    "12",
+    "--video-cut-at",
+    "60",
+    "--video-cut-move",
+    "-20,0,15",
+    "--video-cut-yaw",
+    "140",
+    "--stability",
+    "400"
+  ],
+  "base_environment": {
+    "ARA_ALLOW_STALE_COMPANIONS": "1",
+    "ARA_VIDEO_KEEP": "0",
+    "RENDERLAB_LIST_LANES": "32",
+    "RENDERLAB_PASS_LOG_DETAIL": "atmosphere",
+    "RENDERLAB_STARTUP_PROFILE": "1"
+  },
+  "per_case_environment": [
+    "RENDERLAB_PASS_LOG=<output>/passes.jsonl",
+    "ARA_RENDERLAB_CPU_LOG=<output>/cpu.jsonl",
+    "ARA_CRASH_DIR=<owned-output>/crashes"
+  ],
+  "unset_environment": [
+    "RENDERLAB_ATMOSPHERE_TILE",
+    "ARA_SCENE_RENDERER",
+    "RENDERLAB_GI_SPIN",
+    "RENDERLAB_GI_CUT_GATHER_MS",
+    "RENDERLAB_LIGHT_VIS_PASS",
+    "RENDERLAB_LIGHT_BOUND",
+    "RENDERLAB_GI_PASS",
+    "RENDERLAB_RL_PASS",
+    "RENDERLAB_RL_DEFERRED",
+    "RENDERLAB_MATERIAL_PASS",
+    "RENDERLAB_SUN_PASS"
+  ],
+  "paths": {
+    "rt": {
+      "unset": "ARA_RENDERER"
+    },
+    "nonrt": {
+      "ARA_RENDERER": "renderlab-nonrt"
+    }
+  },
+  "variants": {
+    "off": {
+      "RENDERLAB_ATMOSPHERE_PASS": "off"
+    },
+    "A": {
+      "RENDERLAB_ATMOSPHERE_PASS": "coherent"
+    },
+    "B": {
+      "RENDERLAB_ATMOSPHERE_PASS": "map"
+    },
+    "C": {
+      "RENDERLAB_ATMOSPHERE_PASS": "quarter"
+    }
+  },
+  "order": {
+    "round1": [
+      "off",
+      "A",
+      "B",
+      "C"
+    ],
+    "round2": [
+      "C",
+      "B",
+      "A",
+      "off"
+    ]
+  },
+  "lease": "Each --timing lease <5 minutes. A 4.9-minute lease permits only 204 child seconds. Persist each completed case before starting another; budget startup/compile separately. One case per lease is safe; at most two if measured runtime fits, never all eight.",
+  "metrics": [
+    "Atmosphere sum including atmosphere.shadow_map",
+    "atmosphere.inject",
+    "atmosphere.shadow_map",
+    "atmosphere.temporal",
+    "atmosphere.integrate",
+    "cpu.wait separately",
+    "whole GPU span",
+    "CPU render_call_ms, encode, submit, finish, handoff_ms, in_flight_ms"
+  ],
+  "frame_groups": {
+    "moving_first_view": "clip indices20..59",
+    "moving_second_view": "clip indices100..119",
+    "cut": [
+      60,
+      61,
+      62
+    ],
+    "steady": "last60 frames of 400-frame held view if frame mapping retained"
+  },
+  "frame_mapping": "Join pass rows by frame ID, not file order (#109 permits out-of-order completion). Validate 120 clip rows and exact CPU/pass frame mapping; explicitly report missing rows rather than silently shifting the cut frame.",
+  "pictures": "On Ara Outpost: retain full frames and shaft/fog-edge crops at held still, moving pre-cut, cut0, cut1, cut2 and warm second view. A against rays should be identical/noise-level; B/C picture changes require explicit visual comparison. Any pop/unshadowed cut frame fails. Retain PNGs and per-frame max/over2/over8 counts; do not use game_scene fog to certify Outpost.",
+  "clean_followup": "For any promising candidate, repeat off/on with DETAIL unset for full-frame cost; the narrow attribution mode must never contain shading.without_* or shading.base replays. Sample clocks and contention in every timing lease.",
+  "scope": {
+    "A": "Both paths, unchanged rays/samples, 8x4x2 workgroups, no extra GPU bytes.",
+    "B": "RT wgpu only, single1024-square fog-only sun depth map redrawn each frame (~4MiB/view plus record/uniform). Surface rays unchanged. Report raster upkeep plus injection; moving/cut every frame redraws. NonRT stays byte-identical to off. Native backend explicitly refuses map.",
+    "C": "RT only, rotating quarter of whole4x4x4 groups; reuse existing reprojected visibility history, zero extra GPU allocations. Existing cut/sun/caster/medium reset traces every cell; invalid reprojection/density traces fresh. NonRT stays byte-identical to off. Native A/C supported."
+  },
+  "revision": "2026-11-14: reconcile with current Ara main scene and bounded leases",
+  "scene_gate": {
+    "required": "Use Ara main samples/outpost project with content/levels/outpost.scene; capture --scene levels/outpost.scene. Reject old sun2_auth.scene and 4-degree-sun snapshot. Record selected file/hash in every result row.",
+    "record": [
+      "Ara commit",
+      "Renderlab commit",
+      "exe SHA256",
+      "scene content SHA256",
+      "sun elevation",
+      "size",
+      "exposure",
+      "actual environment"
+    ],
+    "reference": {
+      "ara_head": "eb8cc4570db362ad643130ba5ee76ba875129154",
+      "path": "samples/outpost/content/levels/outpost.scene",
+      "sha256": "f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386"
+    }
+  },
+  "integration_environment": "Use integration own verified companion/config paths; do not reuse stale ara-pr169 paths or modify another unit project.",
+  "rt_map_residency": {
+    "existing": "RT atmosphere uses TLAS rays. Virtual-shadow buffers/injection are selected only when hardware_shadows is absent; no maintained RT VSM page set is available for free reuse.",
+    "B": "Dedicated coarse 1024x1024 sun-only fog map covering froxel range, redrawn every admitted frame, including camera motion/cuts. Approximately 4 MiB per view plus uniform/record.",
+    "shared_vsm_row": "Not implemented or timed; maintaining VSM solely for fog would require a separate variant and account for all page rendering/update cost."
+  },
+  "lease_budget": {
+    "n8_minutes": 4.9,
+    "child_deadline_seconds": 204,
+    "planned_work_ceiling_seconds": 180,
+    "measured_prior_case_seconds": [
+      81.1,
+      85.6
+    ],
+    "rule": "Checkpoint every completed case. Default one capture per lease. Only pack a second after measured current-head time plus startup leaves at least 24 seconds before the 204-second deadline. Never queue the entire matrix as one child.",
+    "campaign": "Two interleaved/reversed rounds across bounded leases; all eight cases per path cannot honestly fit one child deadline at observed runtime. Retain both rounds; do not silently shorten warm-up, motion or cut coverage."
+  },
+  "cost_reporting": "Per case/view report medians and cut0/cut1/cut2 separately: injection, atmosphere.shadow_map upkeep, their per-frame sum, complete atmosphere and whole GPU span. Report B upkeep even if injection is faster; do not substitute injection for total B cost. Both numbers unmeasured until integration runs complete.",
+  "C_limit": "Quarter tracing is a candidate, not a promised quarter total cost or identical still result. Reprojection/temporal/integration remain full cost. Full trace on cut/sun/caster/medium reset and invalid history; inspect shaft lag and first cut frames before any default decision.",
+  "current_branch_head": "1b188de41e7a4940ba8427a4f2e220bbee1b8375",
+  "measurement_pin_note": "Recipe head/binary remains frozen80670170 for existing bin-Patmo. Branch has since merged main0d984fee at1b188de4; reusing the old binary is historical evidence, not a new-head gate. Do not rebuild integration binary without coordination.",
+  "scene": {
+    "repository": "Ara-Engine/ara",
+    "ara_main_commit": "eb8cc4570db362ad643130ba5ee76ba875129154",
+    "source_file": "samples/outpost/content/levels/outpost.scene",
+    "capture_scene_argument": "levels/outpost.scene",
+    "project_relative_file": "content/levels/outpost.scene",
+    "sha256": "f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386",
+    "sun_elevation_degrees": 10,
+    "sun_elevation_provenance": "Root/coordinator identification of this exact Ara main scene; do not infer from one Euler component.",
+    "verification": "Verified exact GitHub main blob, not a copied measuring project. Before each run compare the owned measuring project file SHA256 against this blob. If main changes, update both commit and hash before comparing."
+  },
+  "capture_exposure": {
+    "ev100": 10,
+    "source": "Current main outpost.scene PostProcessVolume authored ev100=10. Explicit capture override fixed across all A/B/C/off rows; do not label it an auto-exposure result.",
+    "old_override_removed": 7.8,
+    "scene_environment_exposure": 0.0028,
+    "requirement": "Keep main scene sky/scattering/environment unchanged; verify integration reference captures use the same explicit EV10 before comparisons."
+  },
+  "old_evidence": "The original 1.23/0.30 ms and saved baseline1.2554/.2979 measured the stale 12-Nov Outpost with4-degree sun/different sky. They establish within-scene RT injection behaviour only, not current-main absolute cost or comparative performance."
+}

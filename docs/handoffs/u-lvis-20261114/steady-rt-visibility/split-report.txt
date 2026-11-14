@@ -1,0 +1,38 @@
+Updated comparison and priority (Root, 2026-11-14): Unreal uses virtual shadow maps for the sun in both measured Lumen configurations. Root reports profile-mode shadow costs: Outpost 2.3-2.9 ms with hardware Lumen / 3.3 ms software; Showcase 1.3 / 1.5-1.7 ms. Those profile-mode milliseconds are about 1.45x steady and are not directly comparable to our plain steady timers. The supported share comparison is Unreal shadows at 21-26% of its Outpost frame versus our sun 2.58/11.86 = 22%. Our sun is a large term of the frame, not an established large term of the Unreal gap; 'largest term of the gap' is withdrawn. Root characterizes Outpost sun as about level and Showcase a little cheaper, subject to the measurement-mode caveat. SUN_PASS=1 remains a diagnostic split with overhead on Outpost, not a proposed default. Order is range result, Ara cutoff ceiling (RT then non-RT, activation first), then tracing/caster/facing work only when free.
+
+RT steady visibility split, RTX 4070 SUPER, P202/Renderlab 0b3f1698,1080p,32 lanes.
+Two reversed rounds A/B then B/A. No cuts. A SUN_PASS unset; B=1; SUN_ZONE_STOP unset both.
+Values are means of two per-run medians. Sum is median of per-frame visibility+sun; not sum of separate medians.
+B camera bucket includes receiver publication/repair; splitting changes codegen/dispatch/record cost, so subtraction does not precisely isolate A's internal stages.
+Held samples: 60 warm frames ending 200 CPU rows before exit; moving: clip frames20..59. Joined by frame ID with first-frame anchor.
+
+showcase held: A fused 1.1167, span 6.8385; B camera/receiver/repair 0.2530, sun 0.9234, combined 1.1802 (delta +0.0635), span 7.0932 (delta +0.2547); TLAS A/B 0.0717/0.0717 ms.
+showcase moving: A fused 1.4485, span 8.1229; B camera/receiver/repair 0.3369, sun 1.1423, combined 1.4851 (delta +0.0366), span 7.7796 (delta -0.3433); TLAS A/B 0.0742/0.0742 ms.
+outpost held: A fused 2.7961, span 9.6983; B camera/receiver/repair 0.5030, sun 2.5774, combined 3.1291 (delta +0.3331), span 10.2738 (delta +0.5755); TLAS A/B 0.1485/0.1485 ms.
+outpost moving: A fused 3.4944, span 12.1034; B camera/receiver/repair 0.4623, sun 3.2036, combined 3.7284 (delta +0.2340), span 12.7634 (delta +0.6600); TLAS A/B 0.1570/0.1570 ms.
+
+Identity: {
+  "renderlab_head": "0b3f1698",
+  "ara_head": "2f9eff09",
+  "pin": "P202",
+  "player_sha256": "037e8d98b0d740795f091830c57b8a7c9b5e66b2f23905f5c91412d74bbe7ee8",
+  "scenes": {
+    "outpost": {
+      "source": "D:\\Coding\\renderlab-work\\ara-integration\\samples-scratch\\outpost",
+      "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\outpost\\content\\levels\\outpost.scene",
+      "sha256": "f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386"
+    },
+    "showcase": {
+      "source": "D:\\Coding\\renderlab-work\\ara-integration\\samples-scratch\\showcase",
+      "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\showcase\\content\\levels\\showcase.scene",
+      "sha256": "ac84a12aa4a3dd4c8979140fab169db080b4077e4f83c4fb1fecb33019921165"
+    }
+  }
+}
+
+Lease u-lvis-steady-vis-split-084736-1: timing, exit 0, 118.04 s, no watchdog failures. Eight starts passed; all 800 joined samples present with offset 1 and first-frame anchor confirmed. No cuts or video-frame readbacks/PNGs. Existing capture CLI generated 32 initial/stability bookkeeping PNGs outside selected windows (not removed).
+EV overrides: Showcase 10.17, Outpost 7.8, matching PC integration's pass-log recipe; scene content otherwise unchanged.
+Clock sampler: all eight active-sample medians 2820 MHz, memory 10501 MHz. Outpost active samples all 2820 MHz; Showcase A initial active samples include 1485/2535 MHz during load. No independent reference bars run; one normal-admission timing lease.
+Conclusion: sun is the dominant component (roughly 77-87% of B visibility+sun using separate median estimates), camera/receiver/repair and TLAS are much smaller. The split is not a free decomposition: Outpost combined row adds +0.23 to +0.33 ms, and full span +0.58 to +0.66 ms. Showcase span varies across repeats, so no whole-frame speed claim. Exact attribution of the Unreal gap still needs matching pass boundaries.
+
+Per-round data are in split-summary.json and split-runs/rows.json. No repository sources changed; U-RTVIS files untouched.

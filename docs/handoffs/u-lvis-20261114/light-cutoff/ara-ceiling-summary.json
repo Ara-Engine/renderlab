@@ -1,0 +1,538 @@
+[
+  {
+    "path": "rt",
+    "scene": "outpost",
+    "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\outpost\\content\\levels\\outpost.scene",
+    "scene_sha256": "f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386",
+    "player_sha256": "037e8d98b0d740795f091830c57b8a7c9b5e66b2f23905f5c91412d74bbe7ee8",
+    "motion": "held",
+    "run_dir": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-rt\\20261114T095507-39368",
+    "activation_gate": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-rt\\20261114T095507-39368\\activation-gate.json",
+    "metrics": {
+      "shading_ms": {
+        "off_ms": 4.071174999999999,
+        "black_ms": 3.966475,
+        "saving_ms": 0.10469999999999935,
+        "max_state_spread_ms": 0.010250000000000092,
+        "excess_over_spread_ms": 0.09444999999999926,
+        "paired_savings_ms": [
+          0.10339999999999927,
+          0.10599999999999943
+        ],
+        "clears_spread_by_0_2": false
+      },
+      "span_ms": {
+        "off_ms": 9.7001,
+        "black_ms": 9.733625,
+        "saving_ms": -0.03352499999999914,
+        "max_state_spread_ms": 0.060900000000000176,
+        "excess_over_spread_ms": -0.09442499999999932,
+        "paired_savings_ms": [
+          -0.08699999999999974,
+          0.019950000000001467
+        ],
+        "clears_spread_by_0_2": false
+      }
+    },
+    "rounds": {
+      "A": [
+        {
+          "case": "r1-outpost-A",
+          "coverage": "60/60",
+          "shading_ms": 4.074999999999999,
+          "span_ms": 9.66965
+        },
+        {
+          "case": "r2-outpost-A",
+          "coverage": "60/60",
+          "shading_ms": 4.067349999999999,
+          "span_ms": 9.730550000000001
+        }
+      ],
+      "B": [
+        {
+          "case": "r1-outpost-B",
+          "coverage": "60/60",
+          "shading_ms": 3.9716,
+          "span_ms": 9.75665
+        },
+        {
+          "case": "r2-outpost-B",
+          "coverage": "60/60",
+          "shading_ms": 3.96135,
+          "span_ms": 9.7106
+        }
+      ]
+    },
+    "go_cell": false
+  },
+  {
+    "path": "rt",
+    "scene": "outpost",
+    "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\outpost\\content\\levels\\outpost.scene",
+    "scene_sha256": "f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386",
+    "player_sha256": "037e8d98b0d740795f091830c57b8a7c9b5e66b2f23905f5c91412d74bbe7ee8",
+    "motion": "moving",
+    "run_dir": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-rt\\20261114T095507-39368",
+    "activation_gate": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-rt\\20261114T095507-39368\\activation-gate.json",
+    "metrics": {
+      "shading_ms": {
+        "off_ms": 4.045075,
+        "black_ms": 3.9539,
+        "saving_ms": 0.09117499999999978,
+        "max_state_spread_ms": 0.004550000000000054,
+        "excess_over_spread_ms": 0.08662499999999973,
+        "paired_savings_ms": [
+          0.09525000000000006,
+          0.08709999999999951
+        ],
+        "clears_spread_by_0_2": false
+      },
+      "span_ms": {
+        "off_ms": 11.9826,
+        "black_ms": 11.857925000000002,
+        "saving_ms": 0.12467499999999809,
+        "max_state_spread_ms": 0.1142000000000003,
+        "excess_over_spread_ms": 0.010474999999997792,
+        "paired_savings_ms": [
+          0.04144999999999932,
+          0.20789999999999864
+        ],
+        "clears_spread_by_0_2": false
+      }
+    },
+    "rounds": {
+      "A": [
+        {
+          "case": "r1-outpost-A",
+          "coverage": "40/40",
+          "shading_ms": 4.04735,
+          "span_ms": 11.9255
+        },
+        {
+          "case": "r2-outpost-A",
+          "coverage": "40/40",
+          "shading_ms": 4.0428,
+          "span_ms": 12.0397
+        }
+      ],
+      "B": [
+        {
+          "case": "r1-outpost-B",
+          "coverage": "40/40",
+          "shading_ms": 3.9520999999999997,
+          "span_ms": 11.88405
+        },
+        {
+          "case": "r2-outpost-B",
+          "coverage": "40/40",
+          "shading_ms": 3.9557,
+          "span_ms": 11.831800000000001
+        }
+      ]
+    },
+    "go_cell": false
+  },
+  {
+    "path": "rt",
+    "scene": "showcase",
+    "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\showcase\\content\\levels\\showcase.scene",
+    "scene_sha256": "ac84a12aa4a3dd4c8979140fab169db080b4077e4f83c4fb1fecb33019921165",
+    "player_sha256": "037e8d98b0d740795f091830c57b8a7c9b5e66b2f23905f5c91412d74bbe7ee8",
+    "motion": "held",
+    "run_dir": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-rt\\20261114T095507-39368",
+    "activation_gate": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-rt\\20261114T095507-39368\\activation-gate.json",
+    "metrics": {
+      "shading_ms": {
+        "off_ms": 3.53305,
+        "black_ms": 3.5643,
+        "saving_ms": -0.03125,
+        "max_state_spread_ms": 0.03329999999999966,
+        "excess_over_spread_ms": -0.06454999999999966,
+        "paired_savings_ms": [
+          -0.015900000000000247,
+          -0.04659999999999975
+        ],
+        "clears_spread_by_0_2": false
+      },
+      "span_ms": {
+        "off_ms": 6.3936,
+        "black_ms": 6.3908,
+        "saving_ms": 0.00280000000000058,
+        "max_state_spread_ms": 0.050700000000000855,
+        "excess_over_spread_ms": -0.047900000000000276,
+        "paired_savings_ms": [
+          0.025600000000000733,
+          -0.019999999999999574
+        ],
+        "clears_spread_by_0_2": false
+      }
+    },
+    "rounds": {
+      "A": [
+        {
+          "case": "r1-showcase-A",
+          "coverage": "60/60",
+          "shading_ms": 3.5496999999999996,
+          "span_ms": 6.418950000000001
+        },
+        {
+          "case": "r2-showcase-A",
+          "coverage": "60/60",
+          "shading_ms": 3.5164,
+          "span_ms": 6.36825
+        }
+      ],
+      "B": [
+        {
+          "case": "r1-showcase-B",
+          "coverage": "60/60",
+          "shading_ms": 3.5656,
+          "span_ms": 6.39335
+        },
+        {
+          "case": "r2-showcase-B",
+          "coverage": "60/60",
+          "shading_ms": 3.5629999999999997,
+          "span_ms": 6.388249999999999
+        }
+      ]
+    },
+    "go_cell": false
+  },
+  {
+    "path": "rt",
+    "scene": "showcase",
+    "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\showcase\\content\\levels\\showcase.scene",
+    "scene_sha256": "ac84a12aa4a3dd4c8979140fab169db080b4077e4f83c4fb1fecb33019921165",
+    "player_sha256": "037e8d98b0d740795f091830c57b8a7c9b5e66b2f23905f5c91412d74bbe7ee8",
+    "motion": "moving",
+    "run_dir": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-rt\\20261114T095507-39368",
+    "activation_gate": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-rt\\20261114T095507-39368\\activation-gate.json",
+    "metrics": {
+      "shading_ms": {
+        "off_ms": 3.527175,
+        "black_ms": 3.561975,
+        "saving_ms": -0.03479999999999972,
+        "max_state_spread_ms": 0.010250000000000092,
+        "excess_over_spread_ms": -0.04504999999999981,
+        "paired_savings_ms": [
+          -0.03219999999999956,
+          -0.03739999999999988
+        ],
+        "clears_spread_by_0_2": false
+      },
+      "span_ms": {
+        "off_ms": 7.757825,
+        "black_ms": 7.5684000000000005,
+        "saving_ms": 0.18942499999999995,
+        "max_state_spread_ms": 0.09729999999999972,
+        "excess_over_spread_ms": 0.09212500000000023,
+        "paired_savings_ms": [
+          0.28364999999999974,
+          0.09520000000000017
+        ],
+        "clears_spread_by_0_2": false
+      }
+    },
+    "rounds": {
+      "A": [
+        {
+          "case": "r1-showcase-A",
+          "coverage": "40/40",
+          "shading_ms": 3.5246500000000003,
+          "span_ms": 7.8034
+        },
+        {
+          "case": "r2-showcase-A",
+          "coverage": "40/40",
+          "shading_ms": 3.5297,
+          "span_ms": 7.71225
+        }
+      ],
+      "B": [
+        {
+          "case": "r1-showcase-B",
+          "coverage": "40/40",
+          "shading_ms": 3.55685,
+          "span_ms": 7.51975
+        },
+        {
+          "case": "r2-showcase-B",
+          "coverage": "40/40",
+          "shading_ms": 3.5671,
+          "span_ms": 7.61705
+        }
+      ]
+    },
+    "go_cell": false
+  },
+  {
+    "path": "nonrt",
+    "scene": "outpost",
+    "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\outpost\\content\\levels\\outpost.scene",
+    "scene_sha256": "f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386",
+    "player_sha256": "037e8d98b0d740795f091830c57b8a7c9b5e66b2f23905f5c91412d74bbe7ee8",
+    "motion": "held",
+    "run_dir": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-nonrt\\20261114T100542-25012",
+    "activation_gate": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-nonrt\\20261114T100542-25012\\activation-gate.json",
+    "metrics": {
+      "shading_ms": {
+        "off_ms": 4.116975,
+        "black_ms": 4.118774999999999,
+        "saving_ms": -0.0017999999999993577,
+        "max_state_spread_ms": 0.013349999999999973,
+        "excess_over_spread_ms": -0.01514999999999933,
+        "paired_savings_ms": [
+          -0.0020500000000005514,
+          -0.0015499999999999403
+        ],
+        "clears_spread_by_0_2": false
+      },
+      "span_ms": {
+        "off_ms": 8.992,
+        "black_ms": 8.616724999999999,
+        "saving_ms": 0.375275000000002,
+        "max_state_spread_ms": 0.7326999999999995,
+        "excess_over_spread_ms": -0.35742499999999744,
+        "paired_savings_ms": [
+          0.017400000000000304,
+          0.7331500000000002
+        ],
+        "clears_spread_by_0_2": false
+      }
+    },
+    "rounds": {
+      "A": [
+        {
+          "case": "r1-outpost-A",
+          "coverage": "60/60",
+          "shading_ms": 4.1103,
+          "span_ms": 8.62565
+        },
+        {
+          "case": "r2-outpost-A",
+          "coverage": "60/60",
+          "shading_ms": 4.12365,
+          "span_ms": 9.35835
+        }
+      ],
+      "B": [
+        {
+          "case": "r1-outpost-B",
+          "coverage": "60/60",
+          "shading_ms": 4.11235,
+          "span_ms": 8.60825
+        },
+        {
+          "case": "r2-outpost-B",
+          "coverage": "60/60",
+          "shading_ms": 4.1251999999999995,
+          "span_ms": 8.6252
+        }
+      ]
+    },
+    "go_cell": false
+  },
+  {
+    "path": "nonrt",
+    "scene": "outpost",
+    "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\outpost\\content\\levels\\outpost.scene",
+    "scene_sha256": "f3583f2f9cb02a5fdae641214db4e9e89792f8f3185200708d92a5b760d2e386",
+    "player_sha256": "037e8d98b0d740795f091830c57b8a7c9b5e66b2f23905f5c91412d74bbe7ee8",
+    "motion": "moving",
+    "run_dir": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-nonrt\\20261114T100542-25012",
+    "activation_gate": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-nonrt\\20261114T100542-25012\\activation-gate.json",
+    "metrics": {
+      "shading_ms": {
+        "off_ms": 4.140275,
+        "black_ms": 4.1408000000000005,
+        "saving_ms": -0.0005250000000005528,
+        "max_state_spread_ms": 0.024050000000000793,
+        "excess_over_spread_ms": -0.024575000000001346,
+        "paired_savings_ms": [
+          -0.01025000000000098,
+          0.009200000000000763
+        ],
+        "clears_spread_by_0_2": false
+      },
+      "span_ms": {
+        "off_ms": 12.59135,
+        "black_ms": 12.527625,
+        "saving_ms": 0.06372499999999981,
+        "max_state_spread_ms": 0.11519999999999797,
+        "excess_over_spread_ms": -0.05147499999999816,
+        "paired_savings_ms": [
+          0.0015000000000000568,
+          0.12594999999999956
+        ],
+        "clears_spread_by_0_2": false
+      }
+    },
+    "rounds": {
+      "A": [
+        {
+          "case": "r1-outpost-A",
+          "coverage": "40/40",
+          "shading_ms": 4.1282499999999995,
+          "span_ms": 12.533750000000001
+        },
+        {
+          "case": "r2-outpost-A",
+          "coverage": "40/40",
+          "shading_ms": 4.1523,
+          "span_ms": 12.64895
+        }
+      ],
+      "B": [
+        {
+          "case": "r1-outpost-B",
+          "coverage": "40/40",
+          "shading_ms": 4.1385000000000005,
+          "span_ms": 12.532250000000001
+        },
+        {
+          "case": "r2-outpost-B",
+          "coverage": "40/40",
+          "shading_ms": 4.1431,
+          "span_ms": 12.523
+        }
+      ]
+    },
+    "go_cell": false
+  },
+  {
+    "path": "nonrt",
+    "scene": "showcase",
+    "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\showcase\\content\\levels\\showcase.scene",
+    "scene_sha256": "ac84a12aa4a3dd4c8979140fab169db080b4077e4f83c4fb1fecb33019921165",
+    "player_sha256": "037e8d98b0d740795f091830c57b8a7c9b5e66b2f23905f5c91412d74bbe7ee8",
+    "motion": "held",
+    "run_dir": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-nonrt\\20261114T100542-25012",
+    "activation_gate": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-nonrt\\20261114T100542-25012\\activation-gate.json",
+    "metrics": {
+      "shading_ms": {
+        "off_ms": 4.911375,
+        "black_ms": 4.946675,
+        "saving_ms": -0.03530000000000033,
+        "max_state_spread_ms": 0.09575000000000067,
+        "excess_over_spread_ms": -0.131050000000001,
+        "paired_savings_ms": [
+          -0.09060000000000024,
+          0.020000000000000462
+        ],
+        "clears_spread_by_0_2": false
+      },
+      "span_ms": {
+        "off_ms": 7.99205,
+        "black_ms": 7.572975,
+        "saving_ms": 0.4190750000000003,
+        "max_state_spread_ms": 0.7874499999999998,
+        "excess_over_spread_ms": -0.36837499999999945,
+        "paired_savings_ms": [
+          0.8642500000000002,
+          -0.026099999999999568
+        ],
+        "clears_spread_by_0_2": false
+      }
+    },
+    "rounds": {
+      "A": [
+        {
+          "case": "r1-showcase-A",
+          "coverage": "60/60",
+          "shading_ms": 4.90395,
+          "span_ms": 8.0435
+        },
+        {
+          "case": "r2-showcase-A",
+          "coverage": "60/60",
+          "shading_ms": 4.9188,
+          "span_ms": 7.9406
+        }
+      ],
+      "B": [
+        {
+          "case": "r1-showcase-B",
+          "coverage": "60/60",
+          "shading_ms": 4.99455,
+          "span_ms": 7.17925
+        },
+        {
+          "case": "r2-showcase-B",
+          "coverage": "60/60",
+          "shading_ms": 4.8988,
+          "span_ms": 7.9666999999999994
+        }
+      ]
+    },
+    "go_cell": false
+  },
+  {
+    "path": "nonrt",
+    "scene": "showcase",
+    "scene_file": "D:\\Coding\\renderlab-work\\u-lvis\\steady-rt-visibility\\projects\\showcase\\content\\levels\\showcase.scene",
+    "scene_sha256": "ac84a12aa4a3dd4c8979140fab169db080b4077e4f83c4fb1fecb33019921165",
+    "player_sha256": "037e8d98b0d740795f091830c57b8a7c9b5e66b2f23905f5c91412d74bbe7ee8",
+    "motion": "moving",
+    "run_dir": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-nonrt\\20261114T100542-25012",
+    "activation_gate": "D:\\Coding\\renderlab-work\\u-lvis\\light-cutoff\\ara-ceiling-nonrt\\20261114T100542-25012\\activation-gate.json",
+    "metrics": {
+      "shading_ms": {
+        "off_ms": 4.2444500000000005,
+        "black_ms": 4.258825,
+        "saving_ms": -0.01437499999999936,
+        "max_state_spread_ms": 0.025599999999999845,
+        "excess_over_spread_ms": -0.039974999999999206,
+        "paired_savings_ms": [
+          -0.031299999999999883,
+          0.0025500000000002743
+        ],
+        "clears_spread_by_0_2": false
+      },
+      "span_ms": {
+        "off_ms": 7.971875,
+        "black_ms": 8.095475,
+        "saving_ms": -0.1236000000000006,
+        "max_state_spread_ms": 0.2923499999999999,
+        "excess_over_spread_ms": -0.4159500000000005,
+        "paired_savings_ms": [
+          -0.2749000000000006,
+          0.02770000000000028
+        ],
+        "clears_spread_by_0_2": false
+      }
+    },
+    "rounds": {
+      "A": [
+        {
+          "case": "r1-showcase-A",
+          "coverage": "40/40",
+          "shading_ms": 4.23165,
+          "span_ms": 7.966749999999999
+        },
+        {
+          "case": "r2-showcase-A",
+          "coverage": "40/40",
+          "shading_ms": 4.25725,
+          "span_ms": 7.977
+        }
+      ],
+      "B": [
+        {
+          "case": "r1-showcase-B",
+          "coverage": "40/40",
+          "shading_ms": 4.26295,
+          "span_ms": 8.24165
+        },
+        {
+          "case": "r2-showcase-B",
+          "coverage": "40/40",
+          "shading_ms": 4.2547,
+          "span_ms": 7.9493
+        }
+      ]
+    },
+    "go_cell": false
+  }
+]
