@@ -53,6 +53,7 @@ mod api_tests;
 mod program_reload;
 #[path = "shading_floor_probe.rs"]
 mod shading_floor_probe;
+pub(crate) use shading_floor_probe::{body as probe_function_body, block as probe_block};
 #[cfg(test)]
 #[path = "toon_tests.rs"]
 mod toon_tests;

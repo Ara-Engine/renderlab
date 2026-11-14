@@ -34,6 +34,8 @@ pub(crate) mod gi_receiver_pass;
 mod reflection_hits_gpu;
 #[path = "light_vis_pass.rs"]
 pub(crate) mod light_vis_pass;
+#[path = "light_counter_gpu.rs"]
+pub(crate) mod light_counter_gpu;
 use program_lists::{ListLayouts, MAX_FRAME_PROGRAMS, ProgramLists};
 // Lean shading's background-compiled pipelines (program::lean_variant).
 #[path = "lean_gpu.rs"]
@@ -890,6 +892,7 @@ pub(super) struct Targets {
     /// U-RTVIS: the reflection pass's L, H, R and D while RENDERLAB_RL_PASS=1.
     pub rl_pass: Option<reflection_pass::PassTargets>,
     pub gi_receiver: Option<gi_receiver_pass::Targets>,
+    pub light_counter: Option<light_counter_gpu::Targets>,
 }
 /// Per pixel two halves of four r32uint layers, and the frame record (written by
 /// `prepare_reconstruction`; zero, so never read, without reconstruction).
@@ -1322,13 +1325,13 @@ impl PrimaryState {
         );
         let switches = ShadeSwitches::of(device);
         let material_write_entries = [scene(2), texture(6, uint)].map(|visibility| {
-            shade_layout_entries(
+            light_counter_gpu::entries(shade_layout_entries(
                 visibility,
                 ShadeSwitches { material: false, ..switches },
-            )
+            ))
         });
         let shade_entries = [scene(2), texture(6, uint)]
-            .map(|visibility| shade_layout_entries(visibility, switches));
+            .map(|visibility| light_counter_gpu::entries(shade_layout_entries(visibility, switches)));
         let shade_bindings = shade_entries
             .each_ref()
             .map(|e| group("primary shading", e));
@@ -2539,6 +2542,7 @@ impl Renderer {
                 rl_pass: reflection_pass::on(&self.device)
                     .then(|| self.rl_pass_targets(size)),
                 gi_receiver: gi_receiver_pass::on().then(|| self.gi_receiver_targets(size)),
+                light_counter: light_counter_gpu::on().then(|| self.light_counter_targets()),
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
                     "primary hard receiver epsilon",
@@ -2668,6 +2672,7 @@ impl Renderer {
                     (RL_PHASE, t.rl_history.phase.value.as_entire_binding()),
                 ];
                 if let Some(gi) = &t.gi_receiver { entries.push((gi_receiver_pass::BINDING, gi.values.value.as_entire_binding())); }
+                if let Some(counter) = &t.light_counter { entries.push((light_counter_gpu::BINDING,counter.values.value.as_entire_binding())); }
                 // U-RTVIS: the reflection pass's lobe output.
                 if let Some(pass) = &t.rl_pass {
                     entries.push((reflection_pass::LIST, pass.list.value.as_entire_binding()));

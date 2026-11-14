@@ -18,10 +18,11 @@ const MODES: [&str; 10] = [
 
 pub(super) fn compose(composed: Composed) -> Composed {
     let mode = std::env::var("RENDERLAB_SHADING_FLOOR_PROBE").unwrap_or_default();
-    variant(composed, &mode)
+    let composed = variant(composed, &mode);
+    crate::renderer::primary_ray_gpu::light_counter_gpu::compose(composed)
 }
 
-fn body(source: &str, name: &str) -> Option<std::ops::Range<usize>> {
+pub(crate) fn body(source: &str, name: &str) -> Option<std::ops::Range<usize>> {
     let at = source
         .match_indices(&format!("fn {name}("))
         .find(|(at, _)| source[..*at].rsplit('\n').next().unwrap().trim().is_empty())?
@@ -30,7 +31,7 @@ fn body(source: &str, name: &str) -> Option<std::ops::Range<usize>> {
     Some(block(source, start))
 }
 
-fn block(source: &str, start: usize) -> std::ops::Range<usize> {
+pub(crate) fn block(source: &str, start: usize) -> std::ops::Range<usize> {
     let mut depth = 1;
     for (i, b) in source.as_bytes()[start..].iter().enumerate() {
         match b {

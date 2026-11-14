@@ -3652,6 +3652,7 @@ impl Renderer {
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
+                self.prepare_light_counter();
                 self.ensure_gi_receiver_pass(shading)?;
                 mark(&mut encoder, "gi_receiver");
                 self.encode_gi_receiver_pass(&mut encoder, shading);
@@ -3694,6 +3695,7 @@ impl Renderer {
                     self.encode_reflection_composite(&mut encoder, shading);
                 }
             }
+            self.encode_light_counter_readback(&mut encoder);
             if reconstructed {
                 mark(&mut encoder, "tr1");
                 self.encode_reconstruction(&mut encoder, stamps(4));

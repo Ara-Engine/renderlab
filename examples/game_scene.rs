@@ -1120,10 +1120,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>())
         .transpose()?;
     let drain = std::env::var("RENDERLAB_SCENE_DRAIN").is_ok_and(|v| v == "1");
+    let counter_pose=std::env::var("RENDERLAB_LIGHT_COUNTER_POSE").ok().map(|s|s.parse::<u32>()).transpose()?;
     for frame in 0..args.frames {
-        let t = if args.still { 0.0 } else { frame as f32 / FPS };
+        let scene_frame=counter_pose.unwrap_or(frame);
+        let t = if args.still { 0.0 } else { scene_frame as f32 / FPS };
         let sun_update = Instant::now();
-        let hour = sun_hour(frame);
+        let hour = sun_hour(scene_frame);
         if args.sun_speed != 0.0 && frame >= args.sun_after {
             engine.set_sun(scene_sun(hour))?;
         }
@@ -1138,7 +1140,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let ground = at(3.0 * behind.sin(), 0.0, -1.0 + 3.0 * behind.cos());
             second.update(&mut engine, ground, behind.cos().atan2(-behind.sin()), t + 0.4)?;
         }
-        engine.set_lights(&diag.lights(lanterns(t, frame)))?;
+        engine.set_lights(&diag.lights(lanterns(t, scene_frame)))?;
         if glow_steps && frame == event_frame {
             let dim = [6_000.0, 4_000.0, 1_800.0].map(|v| v * lamp_scale);
             engine.set_material_parameters(bulb, &[("glow", Value::Vec3(dim))])?;
