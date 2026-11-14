@@ -2895,7 +2895,7 @@ fn frame(
     // RENDERLAB_LIGHT_VIS_PASS=1 (src/backend_ara/light_vis.rs): the local-light visibility
     // kernel, before shading; with the material record it reads the receiver layers.
     let light_vis_program = match &deferred {
-        Some(_) if crate::renderer::primary_ray_gpu::light_vis_pass::on() => {
+        Some(_) if crate::renderer::primary_ray_gpu::light_vis_pass::on(false) => {
             let program = super::light_vis::program(crate::program::material_pass_on())?;
             specs.extend(program.inputs().iter().cloned());
             Some(program)

@@ -1,5 +1,5 @@
 """Pass switches in pairs. The engine reads each pass switch once per process, so one test process
-cannot compose two settings; this runs the composition tests once with none, once per switch, per
+cannot compose two settings; this runs the real default (none), the all-off baseline (off), each switch, per
 pair, per triple and with every switch at once, and optionally one game_scene frame per set on both
 paths. SWITCH_PAIRS_SETS=a,b,... runs only the named sets.
 
@@ -7,8 +7,11 @@ paths. SWITCH_PAIRS_SETS=a,b,... runs only the named sets.
     python switch_pairs.py TESTS_EXE GAME_SCENE_EXE OUTDIR  # plus one frame per pair and path
 
 TESTS_EXE is the renderlab lib test binary (on the PC, a renamed copy outside target/, run
-outside a lease only for these CPU tests). Exit status 1 if any run fails."""
+outside a lease only for these CPU tests). none omits LIGHT_VIS_PASS; off explicitly sets 0.
+GPU starts verify both the compile line and the light_visibility pass-log row, so an off run
+cannot silently certify the default. Exit status 1 if any run fails."""
 import itertools
+import json
 import os
 import subprocess
 import sys
@@ -42,6 +45,7 @@ def sets():
     """No switches, each switch, every pair, every triple and every switch at once. The
     reflection settings (rl, rl-diag, rl-all) are one switch's values, so a set takes at most one."""
     yield "none", {}
+    yield "off", {}
     for n in (1, 2, 3):
         for names in itertools.combinations(SWITCHES, n):
             if sum(x.startswith("rl") for x in names) > 1 or sum(x.startswith("material") for x in names) > 1:
@@ -54,6 +58,15 @@ def sets():
         yield f"all-tail+{rl}", {k: v for x in [*[x for x in others if x != "material"], "material-tail", rl] for k, v in SWITCHES[x].items()}
 
 
+def environment(base, name, overrides):
+    """Keep the real default distinct from the all-off composition baseline."""
+    env = {**base, "RENDERLAB_LIGHT_VIS_PASS": "0", **overrides}
+    if name == "none":
+        env.pop("RENDERLAB_LIGHT_VIS_PASS", None)
+        env.pop("RENDERLAB_LIGHT_BOUND", None)
+    return env
+
+
 def main():
     tests = sys.argv[1]
     game = sys.argv[2] if len(sys.argv) > 3 else None
@@ -62,10 +75,16 @@ def main():
             if not any(k in env for env in SWITCHES.values())}
     failed = 0
     exact = os.environ.get("SWITCH_PAIRS_SETS")
-    for name, env in sets():
+    cases = list(sets())
+    if exact:
+        unknown = set(exact.split(",")) - {name for name, _ in cases}
+        if unknown:
+            sys.exit(f"unknown switch sets: {', '.join(sorted(unknown))}")
+    for name, env in cases:
         if exact and name not in exact.split(","):
             continue
-        r = subprocess.run([tests, *TESTS], env={**base, **env}, capture_output=True, text=True)
+        run_env = environment(base, name, env)
+        r = subprocess.run([tests, *TESTS], env=run_env, capture_output=True, text=True)
         summary = [line for line in r.stdout.splitlines() if line.startswith("test result")]
         ok = r.returncode == 0
         failed += not ok
@@ -78,12 +97,39 @@ def main():
             for path in ("nonrt", "rt"):
                 d = os.path.join(out, f"{name}-{path}")
                 os.makedirs(d, exist_ok=True)
+                pass_log = os.path.join(d, "passes.jsonl")
+                if os.path.exists(pass_log):
+                    os.remove(pass_log)
                 g = subprocess.run([game, "--path", path, "--frames", "2", "--out", d],
-                                   env={**base, **env}, capture_output=True, text=True, timeout=300)
+                                   env={**run_env, "RENDERLAB_PASS_LOG": pass_log},
+                                   capture_output=True, text=True, timeout=300)
+                text = g.stdout + g.stderr
                 bad = g.returncode != 0 or any(w in g.stderr for w in ("panicked", "Validation Error", "Error:"))
+                expected = (run_env.get("RENDERLAB_LIGHT_VIS_PASS") != "0"
+                            and "RENDERLAB_LIGHT_BOUND" not in run_env)
+                compiled = "light_vis_compile seconds=" in text
+                try:
+                    with open(pass_log, encoding="utf-8") as f:
+                        frames = [json.loads(line) for line in f]
+                except (OSError, ValueError):
+                    frames = []
+                pass_rows = sum("light_visibility" in f.get("passes", {}) for f in frames)
+                bad |= compiled != expected or bool(pass_rows) != expected
+                with open(os.path.join(d, "run.log"), "w", encoding="utf-8") as f:
+                    f.write(text)
+                with open(os.path.join(d, "switches.json"), "w", encoding="utf-8") as f:
+                    json.dump({"case": name, "path": path,
+                               "switches": {k: v for k, v in run_env.items()
+                                            if any(k in e for e in SWITCHES.values())
+                                            or k == "RENDERLAB_LIGHT_BOUND"},
+                               "lvis_expected": expected, "lvis_compiled": compiled,
+                               "lvis_pass_rows": pass_rows, "exit": g.returncode}, f, indent=2)
                 failed += bad
-                tail = "" if not bad else " " + g.stderr.strip().splitlines()[-1][:300]
-                print(f"frame {name} {path}: {'FAIL' if bad else 'ok'}{tail}")
+                error_lines = g.stderr.strip().splitlines()
+                tail = " " + error_lines[-1][:300] if bad and error_lines else ""
+                setting = repr(run_env["RENDERLAB_LIGHT_VIS_PASS"]) if "RENDERLAB_LIGHT_VIS_PASS" in run_env else "ABSENT"
+                print(f"frame {name} {path}: {'FAIL' if bad else 'ok'} LVIS={setting} "
+                      f"compile={compiled} pass_rows={pass_rows}{tail}")
     print(f"{'all passed' if failed == 0 else f'{failed} failed'}")
     sys.exit(1 if failed else 0)
 

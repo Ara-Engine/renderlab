@@ -1419,6 +1419,10 @@ impl Renderer {
                     primary_ray_gpu::shading_heads(wgsl)?,
                 ))
             })
+            .map(|sources| sources.map(|(trace, mut heads)| {
+                primary_ray_gpu::light_vis_pass::wgpu_heads(&mut heads);
+                (trace, heads)
+            }))
             .transpose()
             .map_err(rejected)?;
         // A temporal kernel already in use recompiles in the transaction, so a rejected
@@ -3656,7 +3660,7 @@ impl Renderer {
                 mark(&mut encoder, "gi_receiver");
                 self.encode_gi_receiver_pass(&mut encoder, shading);
                 // Visibility feeds both the optional detail probes and final shading.
-                if primary_ray_gpu::light_vis_pass::on() {
+                if primary_ray_gpu::light_vis_pass::on(true) {
                     self.ensure_light_vis(shading)?;
                     mark(&mut encoder, "light_visibility");
                     self.encode_light_vis(&mut encoder, shading);

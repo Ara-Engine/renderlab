@@ -14,21 +14,33 @@ const LOCAL: &str = "    if lights[s.index].kind.w!=0u { return rl_local_shadow(
 /// port, `backend_ara::light_vis`).
 pub(crate) const PASS_PROGRAM: &str = "struct Surface { unused:f32 }; fn surface(input:SurfaceInput)->Surface {return Surface(0.0);} fn shade(s:Surface,input:SurfaceInput)->vec3<f32> {return vec3<f32>(0.0);}";
 const PREPARE: &str = "    rl_lights_prepare(surface_input.world);";
-pub(crate) fn on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        let requested=std::env::var("RENDERLAB_LIGHT_VIS_PASS").is_ok_and(|v|v=="1");
-        // The bound needs the material's unshadowed contribution and running radiance.
-        // The canonical 24-byte material record is in program.rs at bindings 75/78.
-        // Until its wgpu producer/read bindings are wired, leave visibility inline
-        // whenever the bound is set. Reuse that record and decoder, not a new geometry
-        // record; retain the exact receiver reconstruction from the entry helpers.
-        if requested && std::env::var_os("RENDERLAB_LIGHT_BOUND").is_some() {
-            eprintln!("light_vis_pass bypassed: RENDERLAB_LIGHT_BOUND is set; visibility stays inline until material-record integration (75/78)");
-            return false;
+/// Only the wgpu renderer adds this mark to its own shading heads. The port uses
+/// unmarked heads, so composition receives default=false even in a shared build.
+pub(crate) const DEFAULT_HEAD_MARK: &str = "\n// renderlab: this renderer dispatches local-light visibility by default\n";
+pub(crate) fn on(default: bool) -> bool {
+    static REQUESTED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    let requested = REQUESTED.get_or_init(|| program::env_switch("RENDERLAB_LIGHT_VIS_PASS"))
+        .unwrap_or(default);
+    // The bound needs the material's unshadowed contribution and running radiance.
+    // Follow-up: read that contribution from the shared material record once LVIS
+    // consumes it; do not introduce a separate surface or geometry record. Until
+    // then, leave visibility inline and retain exact receiver reconstruction.
+    static BOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if requested && *BOUND.get_or_init(|| std::env::var_os("RENDERLAB_LIGHT_BOUND").is_some()) {
+        static LOGGED: std::sync::Once = std::sync::Once::new();
+        LOGGED.call_once(|| eprintln!("light_vis_pass bypassed: RENDERLAB_LIGHT_BOUND is set; visibility stays inline until material-record integration"));
+        return false;
+    }
+    requested
+}
+/// Carry this running renderer's default through shared program composition.
+/// An explicit opt-out leaves the original head byte-for-byte unchanged.
+pub(in crate::renderer) fn wgpu_heads(heads: &mut [String; 2]) {
+    if on(true) {
+        for head in heads {
+            head.push_str(DEFAULT_HEAD_MARK);
         }
-        requested
-    })
+    }
 }
 pub(super) fn layout_entry() -> wgpu::BindGroupLayoutEntry {
     buffer(
@@ -38,8 +50,8 @@ pub(super) fn layout_entry() -> wgpu::BindGroupLayoutEntry {
     )
 }
 /// One composition seam; the disabled branch returns the original module untouched.
-pub(crate) fn apply(composed: program::Composed, traced: bool) -> program::Composed {
-    apply_enabled(composed, traced && on())
+pub(crate) fn apply(composed: program::Composed, traced: bool, default: bool) -> program::Composed {
+    apply_enabled(composed, traced && on(default))
 }
 fn apply_enabled(mut composed: program::Composed, enabled: bool) -> program::Composed {
     // Glass hit modules truncate the camera entry and have no cache binding. Their
@@ -100,7 +112,7 @@ fn entry_enabled(mut source: String, enabled: bool) -> String {
 }
 impl Renderer {
     pub(crate) fn ensure_light_vis(&mut self, shading: Shading) -> Result<(), Error> {
-        if !on() {
+        if !on(true) {
             return Ok(());
         }
         let state = self.view.primary.as_ref().unwrap();
@@ -147,7 +159,7 @@ impl Renderer {
         Ok(())
     }
     pub(crate) fn encode_light_vis(&self, encoder: &mut wgpu::CommandEncoder, shading: Shading) {
-        if !on() {
+        if !on(true) {
             return;
         }
         let state = self.view.primary.as_ref().unwrap();
@@ -174,6 +186,43 @@ impl Renderer {
 mod tests {
     use super::*;
     #[test]
+    fn backend_defaults_stay_separate_in_one_process() {
+        let requested = program::env_switch("RENDERLAB_LIGHT_VIS_PASS");
+        let bound = std::env::var_os("RENDERLAB_LIGHT_BOUND").is_some();
+        // A port call first must not freeze the wgpu default, or vice versa.
+        for default in [false, true, false] {
+            assert_eq!(on(default), requested.unwrap_or(default) && !bound);
+        }
+        let original = shading_heads(include_str!("../shaders/scene.wgsl")).unwrap();
+        for head in original.iter().chain(heads(include_str!("../shaders/scene.wgsl")).unwrap().iter()) {
+            assert!(!head.contains(DEFAULT_HEAD_MARK));
+        }
+        assert!(!transparent_reflection_head(include_str!("../shaders/scene.wgsl")).unwrap().contains(DEFAULT_HEAD_MARK));
+        let mut wgpu = original.clone();
+        wgpu_heads(&mut wgpu);
+        for (head, expected) in [(&original[1], on(false)), (&wgpu[1], on(true))] {
+            let c = program::compose(head, PASS_PROGRAM, Stage::Traced, false);
+            assert_eq!(c.source.contains("fn rl_lvis_lookup("), expected);
+            if program::light_bound().is_some() {
+                assert!(!expected);
+                assert!(c.source.contains("const RL_LB_SUM:bool="));
+            }
+            let module = naga::front::wgsl::parse_str(&c.source).unwrap();
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            ).validate(&module).unwrap();
+        }
+        if !on(true) {
+            assert_eq!(wgpu, original);
+        }
+        #[cfg(feature = "backend-ara")]
+        {
+            let native = crate::backend_ara::primary_shade::hardware_soft_program(crate::STANDARD_PROGRAM).unwrap();
+            assert_eq!(native.inputs().iter().any(|i| i.key.group==0 && i.key.binding==BINDING), on(false));
+        }
+    }
+    #[test]
     fn both_paths_validate_with_cache() {
         for heads in [
             shading_heads(include_str!("../shaders/scene.wgsl")).unwrap(),
@@ -184,7 +233,7 @@ mod tests {
             for head in heads {
                 for source in [crate::STANDARD_PROGRAM, PASS_PROGRAM] {
                     let c = program::compose(&head, source, Stage::Traced, false);
-                    let c = if on() { c } else { apply_enabled(c, true) };
+                    let c = if on(false) { c } else { apply_enabled(c, true) };
                     assert_eq!(&c.source[c.program.clone()], source);
                     let source = c.source;
                     let deferred = (source.contains("rl_specular")
