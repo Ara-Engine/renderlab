@@ -1405,6 +1405,13 @@ fn parameter_layout(source: &str) -> Result<Option<crate::program::ParameterLayo
     Ok(layout)
 }
 
+/// The light visibility kernel's threads: one per pixel of the region (its entry offsets by
+/// `primary_region` and skips pixels outside it and tiles without a hit), or None for an
+/// empty region (an empty scene: nothing to dispatch).
+fn light_vis_threads(region: [u32; 4]) -> Option<[u32; 3]> {
+    let [x, y] = [region[2].saturating_sub(region[0]), region[3].saturating_sub(region[1])];
+    (x > 0 && y > 0).then_some([x, y, 1])
+}
 /// RENDERLAB_MATERIAL_PASS=1: one log line whenever a frame's split changes, saying how many
 /// program slots shade from the record and how many keep the single kernel (a program without
 /// `material_out` / `material_in`: the material pass writes only its receiver). `readers` is
@@ -1424,21 +1431,11 @@ fn log_material_slots(readers: &[bool]) {
 /// Composition would make the port's shading read its binding 68, which nothing here allocates
 /// or writes, so the port refuses the switch at `Engine::new` and at every frame.
 pub(crate) const GI_PASS_REFUSAL: &str = "RENDERLAB_GI_PASS=1: the GI lookup pass is not wired on the ara-gpu port yet (its binding 68 has no target or dispatch here); unset it";
-/// RENDERLAB_LIGHT_VIS_PASS=1 (src/light_vis_pass.rs): the local-light visibility pass is wired
-/// for wgpu only. Composition would make the port's shading read its binding 73, which nothing
-/// here allocates or writes, so the port refuses the switch as it does the GI pass's.
-pub(crate) const LIGHT_VIS_PASS_REFUSAL: &str = "RENDERLAB_LIGHT_VIS_PASS=1: the local-light visibility pass is not wired on the ara-gpu port yet (its binding 73 has no buffer or dispatch here); unset it";
-/// The first pass switch the port refuses (`GI_PASS_REFUSAL`, `LIGHT_VIS_PASS_REFUSAL`), checked
-/// at `Engine::new` and at every frame.
+/// The first pass switch the port refuses (`GI_PASS_REFUSAL`), checked at `Engine::new` and at
+/// every frame. (The local-light visibility pass, refused here before, is wired:
+/// src/backend_ara/light_vis.rs.)
 pub(crate) fn port_refusal() -> Option<&'static str> {
-    use crate::renderer::primary_ray_gpu::{gi_receiver_pass, light_vis_pass};
-    if gi_receiver_pass::on() {
-        Some(GI_PASS_REFUSAL)
-    } else if light_vis_pass::on() {
-        Some(LIGHT_VIS_PASS_REFUSAL)
-    } else {
-        None
-    }
+    crate::renderer::primary_ray_gpu::gi_receiver_pass::on().then_some(GI_PASS_REFUSAL)
 }
 /// One frame after `history`, over what the sequence keeps on the GPU; returns its
 /// images and what it hands to the next frame.
@@ -2895,6 +2892,16 @@ fn frame(
         specs.extend(deferred.trace_program.inputs().iter().cloned());
         specs.extend(deferred.fresh_program.inputs().iter().cloned());
     }
+    // RENDERLAB_LIGHT_VIS_PASS=1 (src/backend_ara/light_vis.rs): the local-light visibility
+    // kernel, before shading; with the material record it reads the receiver layers.
+    let light_vis_program = match &deferred {
+        Some(_) if crate::renderer::primary_ray_gpu::light_vis_pass::on() => {
+            let program = super::light_vis::program(crate::program::material_pass_on())?;
+            specs.extend(program.inputs().iter().cloned());
+            Some(program)
+        }
+        _ => None,
+    };
     let mut buffers = BTreeMap::new();
     let mut inputs = BTreeMap::new();
     // The transmission record and reduced map are what every program reads at (3, 26) and
@@ -2974,8 +2981,21 @@ fn frame(
                 {
                     continue;
                 }
-                let buffer = StorageBuffer::new(gpu, &vec![0; (minimum as usize).max(64)])?;
-                graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+                let light_vis = key(0, crate::renderer::primary_ray_gpu::light_vis_pass::BINDING);
+                let buffer = if deferred.is_some() && spec.key == light_vis {
+                    // The light visibility pass's words (light_vis_pass.rs PIXEL_BYTES a pixel):
+                    // its kernel writes every covered pixel's before shading reads them.
+                    let bytes = u64::from(size[0])
+                        * u64::from(size[1])
+                        * crate::renderer::primary_ray_gpu::light_vis_pass::PIXEL_BYTES;
+                    let buffer = StorageBuffer::device(gpu, bytes)?;
+                    graph.import(Resource::Buffer(buffer.buffer), Access::Storage);
+                    buffer
+                } else {
+                    let buffer = StorageBuffer::new(gpu, &vec![0; (minimum as usize).max(64)])?;
+                    graph.import(Resource::Buffer(buffer.buffer), Access::HostWrite);
+                    buffer
+                };
                 buffers.insert(spec.key, buffer);
             }
             InputKind::Image { dimension, sample }
@@ -3754,6 +3774,19 @@ fn frame(
     }
     // RENDERLAB_MATERIAL_PASS: per slot, the material pass's kernel and packet (bound as that
     // slot's shading is), or None where the program keeps its single kernel.
+    let light_vis = match &light_vis_program {
+        Some(program) => {
+            let values = program
+                .inputs()
+                .iter()
+                .map(|spec| Ok((spec.key, shared.input(spec, None)?)))
+                .collect::<Result<Vec<_>>>()?;
+            let packet = HeapBindings::for_program(gpu, program, &values)?;
+            packet.import(&mut graph);
+            Some((Kernel::from_program(gpu, cache, program)?, packet))
+        }
+        None => None,
+    };
     let mut material_records = Vec::new();
     for (slot, program) in material_programs.iter().enumerate() {
         let Some(program) = program else {
@@ -3856,6 +3889,17 @@ fn frame(
                         )?;
                     }
                 }
+                if let (Some((light_vis, packet)), Some(threads)) =
+                    (&light_vis, light_vis_threads(deferred.region_rect))
+                {
+                    light_vis.record_labelled(
+                        &mut graph,
+                        &mut rec,
+                        packet,
+                        threads,
+                        "ara::LightVisibility".into(),
+                    )?;
+                }
                 for (slot, ((_, kernel, _), packet)) in
                     lists.slots.iter().zip(&list_packets[1..]).enumerate()
                 {
@@ -3886,6 +3930,19 @@ fn frame(
                             record,
                             [groups[0] * threads[0], groups[1] * threads[1], 1],
                             "ara::PrimaryMaterialTiles".into(),
+                        )?;
+                    }
+                    if let (true, Some((light_vis, packet)), Some(threads)) = (
+                        std::ptr::eq(kernel, &deferred.shade),
+                        &light_vis,
+                        light_vis_threads(deferred.region_rect),
+                    ) {
+                        light_vis.record_labelled(
+                            &mut graph,
+                            &mut rec,
+                            packet,
+                            threads,
+                            "ara::LightVisibility".into(),
                         )?;
                     }
                     kernel.record(
