@@ -2,7 +2,7 @@
 use super::super::program_gpu::{probe_block, probe_function_body as body};
 use super::*;
 pub(crate) const BINDING: u32 = 80;
-const FIELDS: usize = 24;
+const FIELDS: usize = 96;
 const WORDS: usize = 4 + 4 * 32 * 2 * FIELDS;
 const BYTES: u64 = WORDS as u64 * 4;
 const START: u64 = 40;
@@ -69,6 +69,27 @@ fn variant(mut composed: program::Composed, enabled: bool) -> program::Composed 
         light_loop =
             light_loop.replace(sample, &format!("{sample}\n lc_capture(input,s.n,light);"));
     }
+    let unshadowed = if id == 2 {
+        "if lc_primary && light.index==lc_counter.header.y {let lc_tint=mix(clamp(params.shadow_tint,vec3<f32>(0.0),vec3<f32>(1.0)),vec3<f32>(1.0),band);lc_unshadowed_sum+=exposed_product(light.intensity,s.base*lc_tint*(light.attenuation/PI));}\n".to_owned()
+    } else {
+        let filtered = if id == 0 {
+            "if SPECULAR_AA {lc_response=specular_brdf(input,light.direction,base,metal,rough);}"
+        } else {
+            ""
+        };
+        format!(
+            "if lc_primary && light.index==lc_counter.header.y {{var lc_response=brdf(n,v,light.direction,base,metal,rough);{filtered}lc_unshadowed_sum=min(lc_unshadowed_sum+exposed_product(light.intensity*light_transmission(light,input),lc_response*light.attenuation),vec3<f32>(65504.0));}}\n"
+        )
+    };
+    if id == 2 {
+        let at = light_loop
+            .find("let visibility=light_visibility(input,light);")
+            .unwrap();
+        light_loop.insert_str(at, &unshadowed);
+    } else {
+        let seam = "lc_capture(input,s.n,light);";
+        light_loop = light_loop.replacen(seam, &format!("{seam}\n{unshadowed}"), 1);
+    }
     let assignment = light_loop
         .find("exposed=min(exposed+")
         .or_else(|| light_loop.find("exposed+="))
@@ -79,22 +100,31 @@ fn variant(mut composed: program::Composed, enabled: bool) -> program::Composed 
         statement
             .replacen("exposed", "lc_without", 1)
             .replacen("exposed+", "lc_without+", 1);
+    let mirror_u = statement
+        .replacen("exposed", "lc_unshadowed_sum", 1)
+        .replacen("exposed+", "lc_unshadowed_sum+", 1);
     light_loop.insert_str(
         end,
-        &format!("\nif lc_primary && light.index!=lc_counter.header.y {{{mirror}}}\n"),
+        &format!("\nif lc_primary && light.index!=lc_counter.header.y {{{mirror}{mirror_u}}}\n"),
     );
     code.replace_range(loop_range, &light_loop);
-    code.insert_str(at, "var lc_without=exposed;\n");
+    code.insert_str(
+        at,
+        "var lc_without=exposed;var lc_unshadowed_sum=exposed;\n",
+    );
     code = code.replace(
         "if film { exposed*=s.alpha; }",
-        "if film { exposed*=s.alpha;lc_without*=s.alpha; }",
+        "if film { exposed*=s.alpha;lc_without*=s.alpha;lc_unshadowed_sum*=s.alpha; }",
     );
     let ret = code.rfind("return ").unwrap();
     let end = code[ret..].find(';').unwrap() + ret;
     let expression = code[ret + 7..end].replace("exposed", "lc_without");
+    let expression_u = code[ret + 7..end].replace("exposed", "lc_unshadowed_sum");
     code.insert_str(
         ret,
-        &format!("if lc_primary {{lc_without_rgb={expression};}}\n"),
+        &format!(
+            "if lc_primary {{lc_without_rgb={expression};lc_unshadowed_rgb={expression_u};}}\n"
+        ),
     );
     source.replace_range(shade, &code);
     let visibility = body(source, "light_visibility").unwrap();
@@ -184,7 +214,7 @@ impl Renderer {
             if result.is_err(){return;}
             let Ok(data)=mapped.get_mapped_range(..)else{return};
             let words:Vec<u32>=data.chunks_exact(4).map(|b|u32::from_ne_bytes(b.try_into().unwrap())).collect();
-            let names=["geometry_pixels","evaluated_pixels","range_cone_zero","source_nonfacing","view_nonfacing_after_source","facing_pass","thin_two_sided_disagreement","light_visibility_calls","ray_initializations","traced_under_1_code","traced_at_least_1_code","visibility_called_without_query_pixels","source_nonfacing_traced","view_nonfacing_traced","view_nonfacing_any","thin_two_sided_evaluated","ray_initializations_under_1_code","evaluated_under_1_code","evaluated_at_least_1_code","max_codes_bits","source_nonfacing_ray_initializations","view_nonfacing_ray_initializations","thin_two_sided_disagreement_ray_initializations","thin_two_sided_disagreement_ray_initializations_at_least_1_code"];
+            let names=["geometry_pixels","evaluated_pixels","range_cone_zero","source_nonfacing","view_nonfacing_after_source","facing_pass","thin_two_sided_disagreement","light_visibility_calls","ray_initializations","traced_under_1_code","traced_at_least_1_code","visibility_called_without_query_pixels","source_nonfacing_traced","view_nonfacing_traced","view_nonfacing_any","thin_two_sided_evaluated","ray_initializations_under_1_code","evaluated_under_1_code","evaluated_at_least_1_code","max_codes_bits","source_nonfacing_ray_initializations","view_nonfacing_ray_initializations","thin_two_sided_disagreement_ray_initializations","thin_two_sided_disagreement_ray_initializations_at_least_1_code","evaluated_unshadowed_under_1_code","ray_initializations_unshadowed_under_1_code","traced_unshadowed_under_1_code","max_unshadowed_codes_bits","evaluated_unshadowed_under_half_code","ray_initializations_unshadowed_under_half_code","traced_unshadowed_under_half_code","evaluated_unshadowed_under_quarter_code","ray_initializations_unshadowed_under_quarter_code","traced_unshadowed_under_quarter_code"];
             let mut rows=Vec::new();
             for (program,label) in ["standard","game","toon","other"].iter().enumerate(){for light in 1..=n as usize{
                 let at=4+(program*32+light)*2*FIELDS;
@@ -192,11 +222,14 @@ impl Renderer {
                 let fields=names.iter().enumerate().map(|(i,name)|format!("\"{name}\":{}",words[at+i])).collect::<Vec<_>>().join(",");
                 let max=f32::from_bits(words[at+19]);
                 let max=if max.is_finite(){max.to_string()}else{"null".into()};
-                rows.push(format!("{{\"program\":\"{label}\",\"light_index\":{light},\"stage\":\"inline\",{fields},\"max_display_codes\":{max}}}"));
+                let upper=f32::from_bits(words[at+27]);let upper=if upper.is_finite(){upper.to_string()}else{"null".into()};
+                let histogram=|offset:usize,bins:usize|{(0..bins).map(|i|{let a=at+offset+i*4;format!("[{},{},{},{}]",words[a],words[a+1],words[a+2],words[a+3])}).collect::<Vec<_>>().join(",")};
+                let distance=histogram(34,7);let normal=histogram(62,6);let violations=words[at+86];
+                rows.push(format!("{{\"program\":\"{label}\",\"light_index\":{light},\"stage\":\"inline\",{fields},\"max_display_codes\":{max},\"max_unshadowed_codes\":{upper},\"distance_range_histogram\":[{distance}],\"ndotl_histogram\":[{normal}],\"bound_violations\":{violations}}}"));
             }}
             let pose=std::env::var("RENDERLAB_LIGHT_COUNTER_POSE").ok().and_then(|s|s.parse::<u32>().ok()).map_or("null".into(),|v|v.to_string());
             let end=START+u64::from(n)*REPEATS-1;
-            let json=format!("{{\"proxy\":\"pre-TR1 display-code proxy\",\"repeats_per_light\":{REPEATS},\"render_frames\":[{START},{end}],\"pose_frame\":{pose},\"source_order\":\"range/cone, unflipped geometric source, then camera-oriented shading view among source pass\",\"facing_is_diagnostic\":true,\"primary_only\":true,\"producer_supported\":false,\"rows\":[{}]}}",rows.join(","));
+            let json=format!("{{\"proxy\":\"pre-TR1 display-code proxy\",\"unshadowed_definition\":\"visibility 1 versus light absent, all other lit terms retained; an endpoint bound over any shadow result\",\"histogram_columns\":[\"actual_rays\",\"unshadowed_lt_1\",\"unshadowed_lt_half\",\"unshadowed_lt_quarter\"],\"distance_range_bins\":[\"0..0.25\",\"0.25..0.5\",\"0.5..0.75\",\"0.75..0.9\",\"0.9..1\",\"1+\",\"unbounded\"],\"ndotl_bins\":[\"negative\",\"0..0.1\",\"0.1..0.25\",\"0.25..0.5\",\"0.5..0.75\",\"0.75..1\"],\"repeats_per_light\":{REPEATS},\"render_frames\":[{START},{end}],\"pose_frame\":{pose},\"source_order\":\"range/cone, unflipped geometric source, then camera-oriented shading view among source pass\",\"facing_is_diagnostic\":true,\"primary_only\":true,\"producer_supported\":false,\"rows\":[{}]}}",rows.join(","));
             let _=std::fs::write(path,json);drop(data);mapped.unmap();
         });
     }
