@@ -1,5 +1,6 @@
 // Current-frame directional depth, independent of camera visibility. Snap the
 // world-space footprint to texels so camera translation cannot swim the shafts.
+// Preserve half-metre near-field sampling; receivers outside 32 m use exact rays.
 @group(0) @binding(23) var<storage,read_write> at_fog_sun_depth:array<f32>;
 const AT_FOG_MAP_SIZE:u32=128u;
 fn at_fog_basis() -> mat3x3<f32> {
@@ -13,7 +14,7 @@ fn at_fog_map_centre(basis:mat3x3<f32>,step:f32) -> vec2<f32> {
 }
 @compute @workgroup_size(8,8) fn at_fog_sun_map(@builtin(global_invocation_id) id:vec3<u32>) {
     let basis=at_fog_basis();
-    let step=2.0*atmosphere.volume.x/f32(AT_FOG_MAP_SIZE-4u);
+    let step=2.0*min(atmosphere.volume.x,32.0)/f32(AT_FOG_MAP_SIZE-4u);
     let xy=at_fog_map_centre(basis,step)+(vec2<f32>(id.xy)+vec2<f32>(0.5)-vec2<f32>(f32(AT_FOG_MAP_SIZE)/2.0))*step;
     let z=dot(atmosphere.eye.xyz,basis[2])+1e5;
     let origin=basis*vec3<f32>(xy,z);
@@ -27,7 +28,7 @@ fn at_fog_map_centre(basis:mat3x3<f32>,step:f32) -> vec2<f32> {
 }
 fn at_sun_visible(p:vec3<f32>) -> f32 {
     let basis=at_fog_basis();
-    let step=2.0*atmosphere.volume.x/f32(AT_FOG_MAP_SIZE-4u);
+    let step=2.0*min(atmosphere.volume.x,32.0)/f32(AT_FOG_MAP_SIZE-4u);
     let xy=vec2<f32>(dot(p,basis[0]),dot(p,basis[1]));
     let uv=(xy-at_fog_map_centre(basis,step))/step+vec2<f32>(f32(AT_FOG_MAP_SIZE)/2.0-0.5);
     let cell=vec2<i32>(floor(uv));
