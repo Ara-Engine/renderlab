@@ -55,3 +55,11 @@ Local evidence remains under `D:/Coding/renderlab-work/u-sunrt`; all PNGs,
 MP4s, JSON summaries and logs stay. Root already deleted the cancelled Ara clone.
 The dump waiter was stopped and never obtained a GPU lease. No Cargo process,
 GPU lease or build lock belongs to this unit.
+
+Close-out cleanup: seven summarized `.render_ids.bin` files were deleted
+(58,060,800 bytes). Recursive deletion of the 1,173,319,065-byte Cargo target was
+blocked by automatic approval review. Its verified exact path is in
+`root-delete-list.json` here and at
+`D:/Coding/renderlab-work/u-sunrt/root-delete-list.json`. Root must remove it;
+no alternate deletion was attempted. The stopped Git Bash waiter and readiness
+script were removed. The shared frozen EXEs stay because tables name them.
