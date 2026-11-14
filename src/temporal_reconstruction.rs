@@ -383,6 +383,10 @@ const RESOLVE: &str = include_str!("../shaders/temporal_resolve.wgsl");
 /// 5.37 to 2.90 ms with no visible change (crops within 28 px over 8 codes of 32/64 after the
 /// first frame, cut included). 8/16 halves it again but grains long soft penumbrae for a few
 /// frames after a cut; the knobs (`with_env_knobs`) A/B both on Ara.
+/// U-RTVIS (2026-11-14): cold 64, down from 256. A camera cut traced 256 rays per penumbra
+/// receiver on its first frame (game_scene visibility 3.42 ms at the cut against 1.7-2.1
+/// steady, Outpost's 41.5 ms cut frame); 64 brings the cut frame to steady cost, within 4 codes
+/// of 256 on the cut frame and the three after it. `RENDERLAB_SUN_COLD_RAYS=256` restores it.
 /// Materials still receive the same visibility value and shading inputs.
 /// P-RTS penumbra listing (`PENUMBRA_LISTING`, off by default; docs/p-rts.md) would trace
 /// the budget only near shadow edges; with it off every receiver traces the budget.
@@ -397,7 +401,7 @@ pub struct ReconstructionShadowBudget {
 impl Default for ReconstructionShadowBudget {
     fn default() -> Self {
         Self {
-            cold_rays: 256,
+            cold_rays: 64,
             reset_rays: 32,
             active_rays: 16,
             held_rays: 8,
