@@ -795,7 +795,14 @@ impl VisibilityBuffer {
             U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
         );
         let attachment = std::env::var("RENDERLAB_VIS_ATTACHMENT").is_ok_and(|v| v == "1");
-        let hardware_ids = target(r, "visibility hardware IDs", size, F::R32Uint, 1, U::RENDER_ATTACHMENT | U::TEXTURE_BINDING);
+        let hardware_ids = target(
+            r,
+            "visibility hardware IDs",
+            size,
+            F::R32Uint,
+            1,
+            U::RENDER_ATTACHMENT | U::TEXTURE_BINDING,
+        );
         // Level 0 texels cover 2x2 pixels. Power-of-two sizes halve exactly; texels
         // beyond the image stay 0.
         let extent = wgpu::Extent3d {
@@ -873,19 +880,27 @@ impl VisibilityBuffer {
         );
         let resolve_layout = layout(
             &r.device,
-            &[&[
-                buffer_entry(0, true, false, S::COMPUTE),
-                buffer_entry(10, true, false, S::COMPUTE),
-                buffer_entry(30, false, false, S::COMPUTE),
-                buffer_entry(29, false, true, S::COMPUTE),
-                buffer_entry(31, false, false, S::COMPUTE),
-                buffer_entry(33, false, false, S::COMPUTE),
-                image(13, F::Rgba32Uint),
-                image(16, F::Rgba32Float),
-                image(17, F::Rgba32Float),
-                image(20, F::R32Uint),
-                image(23, F::R32Float),
-            ][..], &if crate::material_mode::Mode::tail() { super::primary_ray_gpu::material_pass_gpu::entries(true).to_vec() } else { Vec::new() }].concat(),
+            &[
+                &[
+                    buffer_entry(0, true, false, S::COMPUTE),
+                    buffer_entry(10, true, false, S::COMPUTE),
+                    buffer_entry(30, false, false, S::COMPUTE),
+                    buffer_entry(29, false, true, S::COMPUTE),
+                    buffer_entry(31, false, false, S::COMPUTE),
+                    buffer_entry(33, false, false, S::COMPUTE),
+                    image(13, F::Rgba32Uint),
+                    image(16, F::Rgba32Float),
+                    image(17, F::Rgba32Float),
+                    image(20, F::R32Uint),
+                    image(23, F::R32Float),
+                ][..],
+                &if crate::material_mode::Mode::tail() {
+                    super::primary_ray_gpu::material_pass_gpu::entries(true).to_vec()
+                } else {
+                    Vec::new()
+                },
+            ]
+            .concat(),
         );
         let pipeline_layout = |groups: &[Option<&wgpu::BindGroupLayout>]| {
             r.device
@@ -965,7 +980,15 @@ impl VisibilityBuffer {
                     module: &shader,
                     entry_point: Some(if attachment { "fs_color" } else { "fs" }),
                     compilation_options: Default::default(),
-                    targets: if attachment { &[Some(wgpu::ColorTargetState { format: F::R32Uint, blend: None, write_mask: wgpu::ColorWrites::ALL })] } else { &[] },
+                    targets: if attachment {
+                        &[Some(wgpu::ColorTargetState {
+                            format: F::R32Uint,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })]
+                    } else {
+                        &[]
+                    },
                 }),
                 primitive: Default::default(),
                 // GreaterEqual: equal-depth fragments still reach the 64-bit max, so
@@ -981,23 +1004,40 @@ impl VisibilityBuffer {
                 multiview_mask: None,
                 cache: None,
             });
-        let merge_layout = layout(&r.device, &[
-            buffer_entry(0, false, true, S::COMPUTE),
-            sampled(1, wgpu::TextureSampleType::Uint),
-            sampled(2, wgpu::TextureSampleType::Depth),
-        ]);
-        let hardware_merge = attachment.then(|| (
-            compute(include_str!("../shaders/visibility_buffer_merge.wgsl"), "merge", &[Some(&merge_layout)], &[]),
-            bind(&r.device, &merge_layout, &[
-                (0, visibility.value.as_entire_binding()),
-                (1, R::TextureView(&hardware_ids.view)),
-                (2, R::TextureView(&depth.view)),
-            ]),
-        ));
+        let merge_layout = layout(
+            &r.device,
+            &[
+                buffer_entry(0, false, true, S::COMPUTE),
+                sampled(1, wgpu::TextureSampleType::Uint),
+                sampled(2, wgpu::TextureSampleType::Depth),
+            ],
+        );
+        let hardware_merge = attachment.then(|| {
+            (
+                compute(
+                    include_str!("../shaders/visibility_buffer_merge.wgsl"),
+                    "merge",
+                    &[Some(&merge_layout)],
+                    &[],
+                ),
+                bind(
+                    &r.device,
+                    &merge_layout,
+                    &[
+                        (0, visibility.value.as_entire_binding()),
+                        (1, R::TextureView(&hardware_ids.view)),
+                        (2, R::TextureView(&depth.view)),
+                    ],
+                ),
+            )
+        });
         let hzb_source = include_str!("../shaders/visibility_buffer_hzb.wgsl");
         let base = compute(hzb_source, "base", &[Some(&hzb_layout)], &[]);
         let reduce = compute(hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
-        let resolve_source = super::primary_ray_gpu::material_receiver_gpu::resolve(resolve_source(&r.source)?, crate::material_mode::Mode::current())?;
+        let resolve_source = super::primary_ray_gpu::material_receiver_gpu::resolve(
+            resolve_source(&r.source)?,
+            crate::material_mode::Mode::current(),
+        )?;
         let resolve = [0.0, 1.0].map(|v| {
             compute(
                 &resolve_source,
@@ -1087,19 +1127,30 @@ impl VisibilityBuffer {
         let resolve_group = bind(
             &r.device,
             &resolve_layout,
-            &[&[
-                (0, r.uniform.as_entire_binding()),
-                (10, state.frame_buffer().as_entire_binding()),
-                (30, repair_scan.value.as_entire_binding()),
-                (29, visibility.value.as_entire_binding()),
-                (31, clusters.value.as_entire_binding()),
-                (33, group_buffer.value.as_entire_binding()),
-                (13, R::TextureView(&t.hit.view)),
-                (16, R::TextureView(&fresh.world.view)),
-                (17, R::TextureView(&fresh.normal.view)),
-                (20, R::TextureView(&t.tiles.view)),
-                (23, R::TextureView(&t.epsilon.view)),
-            ][..], &if crate::material_mode::Mode::tail() { vec![(crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&t.material.as_ref().unwrap().view))] } else { Vec::new() }].concat(),
+            &[
+                &[
+                    (0, r.uniform.as_entire_binding()),
+                    (10, state.frame_buffer().as_entire_binding()),
+                    (30, repair_scan.value.as_entire_binding()),
+                    (29, visibility.value.as_entire_binding()),
+                    (31, clusters.value.as_entire_binding()),
+                    (33, group_buffer.value.as_entire_binding()),
+                    (13, R::TextureView(&t.hit.view)),
+                    (16, R::TextureView(&fresh.world.view)),
+                    (17, R::TextureView(&fresh.normal.view)),
+                    (20, R::TextureView(&t.tiles.view)),
+                    (23, R::TextureView(&t.epsilon.view)),
+                ][..],
+                &if crate::material_mode::Mode::tail() {
+                    vec![(
+                        crate::program::MATERIAL_RECORD_BINDING,
+                        R::TextureView(&t.material.as_ref().unwrap().view),
+                    )]
+                } else {
+                    Vec::new()
+                },
+            ]
+            .concat(),
         );
         Ok(Self {
             size,
@@ -1514,12 +1565,26 @@ impl Renderer {
             }
             mark(encoder, ["visibility.hw1", "visibility.hw2"][i]);
             {
+                let color_attachments = [Some(wgpu::RenderPassColorAttachment {
+                    view: &v.hardware_ids.view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: if i == 0 {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: wgpu::StoreOp::Store,
+                    },
+                })];
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("N1c hardware raster"),
-                    color_attachments: if v.hardware_merge.is_some() { &[Some(wgpu::RenderPassColorAttachment {
-                        view: &v.hardware_ids.view, depth_slice: None, resolve_target: None,
-                        ops: wgpu::Operations { load: if i == 0 { wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT) } else { wgpu::LoadOp::Load }, store: wgpu::StoreOp::Store },
-                    })] } else { &[] },
+                    color_attachments: if v.hardware_merge.is_some() {
+                        &color_attachments
+                    } else {
+                        &[]
+                    },
                     depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                         view: &v.depth.view,
                         depth_ops: Some(wgpu::Operations {
@@ -1545,7 +1610,8 @@ impl Renderer {
             mark(encoder, ["visibility.hzb1", "visibility.hzb2"][i]);
             if let Some((pipeline, group)) = &v.hardware_merge {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("merge hardware and software visibility"), timestamp_writes: None,
+                    label: Some("merge hardware and software visibility"),
+                    timestamp_writes: None,
                 });
                 pass.set_pipeline(pipeline);
                 pass.set_bind_group(0, group, &[]);
