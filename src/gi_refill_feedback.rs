@@ -117,8 +117,9 @@ impl State {
             );
             if let Some(path) = std::env::var_os("RENDERLAB_GI_REFILL_LOG") {
                 use std::io::Write;
+                let (claim_attempts, claim_budget) = (c[18], c[19]);
                 let line = format!(
-                    "{{\"frame\":{frame},\"cache_frame\":{},\"created\":{claims},\"gathers\":{gathers},\"first_gathers\":{first},\"refresh_gathers\":{},\"gather_rays\":{},\"visible_never_gathered\":{},\"visible_with_raw_data\":{},\"off_screen\":{},\"first_selected\":{},\"refresh_selected\":{},\"background_selected\":{},\"first_inflow\":{},\"visible_filtered_only\":{},\"estimated_floor_overrun\":{},\"first_ms\":{first_ms},\"refresh_ms\":{refresh_ms},\"claim_update_ms\":{claim_ms},\"soft_gather_target_ms\":{},\"actual_first_overrun\":{},\"soft_gather_target_active\":{},\"admitted_claim_attempts\":{},\"claim_budget\":{}}}\n",
+                    "{{\"frame\":{frame},\"cache_frame\":{},\"created\":{claims},\"gathers\":{gathers},\"first_gathers\":{first},\"refresh_gathers\":{},\"gather_rays\":{},\"visible_never_gathered\":{},\"visible_with_raw_data\":{},\"off_screen\":{},\"first_selected\":{},\"refresh_selected\":{},\"background_selected\":{},\"first_inflow\":{},\"visible_filtered_only\":{},\"estimated_floor_overrun\":{},\"first_ms\":{first_ms},\"refresh_ms\":{refresh_ms},\"claim_update_ms\":{claim_ms},\"soft_gather_target_ms\":{},\"actual_first_overrun\":{},\"soft_gather_target_active\":{},\"admitted_claim_attempts\":{claim_attempts},\"claim_budget\":{claim_budget}}}\n",
                     c[13],
                     gathers.saturating_sub(first),
                     c[12],
