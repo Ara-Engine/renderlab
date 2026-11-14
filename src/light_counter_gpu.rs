@@ -189,12 +189,15 @@ impl Renderer {
             for (program,label) in ["standard","game","toon","other"].iter().enumerate(){for light in 1..=n as usize{
                 let at=4+(program*32+light)*2*FIELDS;
                 if words[at]==0{continue;}
-                let mut row=serde_json::Map::new();row.insert("program".into(),serde_json::json!(label));row.insert("light_index".into(),serde_json::json!(light));row.insert("stage".into(),serde_json::json!("inline"));
-                for (i,name)in names.iter().enumerate(){row.insert((*name).into(),serde_json::json!(words[at+i]));}
-                row.insert("max_display_codes".into(),serde_json::json!(f32::from_bits(words[at+19])));rows.push(row);
+                let fields=names.iter().enumerate().map(|(i,name)|format!("\"{name}\":{}",words[at+i])).collect::<Vec<_>>().join(",");
+                let max=f32::from_bits(words[at+19]);
+                let max=if max.is_finite(){max.to_string()}else{"null".into()};
+                rows.push(format!("{{\"program\":\"{label}\",\"light_index\":{light},\"stage\":\"inline\",{fields},\"max_display_codes\":{max}}}"));
             }}
-            let json=serde_json::json!({"proxy":"pre-TR1 display-code proxy","repeats_per_light":REPEATS,"render_frames":[START,START+u64::from(n)*REPEATS-1],"pose_frame":std::env::var("RENDERLAB_LIGHT_COUNTER_POSE").ok(),"source_order":"range/cone, unflipped geometric source, then camera-oriented shading view among source pass","facing_is_diagnostic":true,"primary_only":true,"producer_supported":false,"rows":rows});
-            let _=std::fs::write(path,serde_json::to_string_pretty(&json).unwrap());drop(data);mapped.unmap();
+            let pose=std::env::var("RENDERLAB_LIGHT_COUNTER_POSE").ok().and_then(|s|s.parse::<u32>().ok()).map_or("null".into(),|v|v.to_string());
+            let end=START+u64::from(n)*REPEATS-1;
+            let json=format!("{{\"proxy\":\"pre-TR1 display-code proxy\",\"repeats_per_light\":{REPEATS},\"render_frames\":[{START},{end}],\"pose_frame\":{pose},\"source_order\":\"range/cone, unflipped geometric source, then camera-oriented shading view among source pass\",\"facing_is_diagnostic\":true,\"primary_only\":true,\"producer_supported\":false,\"rows\":[{}]}}",rows.join(","));
+            let _=std::fs::write(path,json);drop(data);mapped.unmap();
         });
     }
 }
