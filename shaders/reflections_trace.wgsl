@@ -23,7 +23,10 @@ struct RlHits { count:atomic<u32>, args:array<u32,3>, records:array<vec4<u32>> }
 const RL_HIT_GROUP:u32=64u;
 // rl_trace_pixels' entries a workgroup, and workgroups a dispatch row (wgpu skips larger
 // dimensions).
-const RL_LIST_GROUP:u32=64u;
+// Software rays use a lane per stratum so one long traversal does not serialize
+// all of a receiver's rays. Hardware keeps its established receiver-per-lane path.
+const RL_RAY_LANES:u32=1u;
+const RL_LIST_GROUP:u32=64u/RL_RAY_LANES;
 const RL_LIST_ROW:u32=65535u;
 // x glossy pixels traced, y slots traced, z strata requested (every glossy receiver's, summed at
 // shading: rl_room_reserve), w hit records dropped for want of room (their strata stay out of the
@@ -54,7 +57,7 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
 // One list entry an invocation: its receiver's full strata set (L's count: today's faded set,
 // directions and cones) into its reserved slots, a miss's sky into R and a hit's record into H.
 @compute @workgroup_size(64) fn rl_trace_pixels(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
-    let entry=(group.x+group.y*RL_LIST_ROW)*RL_LIST_GROUP+lane;
+    let entry=(group.x+group.y*RL_LIST_ROW)*RL_LIST_GROUP+lane/RL_RAY_LANES;
     if entry>=rl_list_length() {return;}
     let a=rl_glossy.entries[entry*3u];let b=rl_glossy.entries[entry*3u+1u];let c=rl_glossy.entries[entry*3u+2u];
     let p=vec2<u32>(c.x&0xffffu,c.x>>16u);
@@ -64,8 +67,10 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
     // A safeguard only: the reservations fit the room.
     let capacity=min(samples.x*samples.y,arrayLength(&rl_hits.records)/3u);
     if count==0u || first+count>capacity {return;}
-    atomicAdd(&rl_trace_stats.pixels,1u);
-    atomicAdd(&rl_trace_stats.slots,count);
+    if lane%RL_RAY_LANES==0u {
+        atomicAdd(&rl_trace_stats.pixels,1u);
+        atomicAdd(&rl_trace_stats.slots,count);
+    }
     let origin=bitcast<vec3<f32>>(a.xyz);
     let ws=unpack2x16float(a.w);
     let n=rl_oct_decode(b.x);let v=rl_oct_decode(b.y);let side=rl_oct_decode(b.z);
@@ -82,7 +87,7 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
     let width=samples.x;
     // The receiver's own epsilon (its triangle's, the inline loop's tmin), from its entry.
     let epsilon=bitcast<f32>(c.z);
-    for(var k=0u;k<count;k+=1u) {
+    for(var k=lane%RL_RAY_LANES;k<count;k+=RL_RAY_LANES) {
         let slot=first+k;
         let at=vec2<i32>(vec2<u32>(slot%width,slot/width));
         textureStore(rl_samples,at,vec4<f32>(0.0));

@@ -331,6 +331,11 @@ impl Renderer {
         }
         let head = &self.primary_sources.as_ref().unwrap().1[shading as usize];
         let source = crate::program::rl_trace_source(head);
+        let source = if self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+            source
+        } else {
+            source.replace("const RL_RAY_LANES:u32=1u;", "const RL_RAY_LANES:u32=32u;")
+        };
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
