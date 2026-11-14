@@ -860,7 +860,11 @@ impl VisibilityBuffer {
                 buffer_entry(1, false, false, S::VERTEX),
                 buffer_entry(3, false, false, S::VERTEX),
                 buffer_entry(8, false, true, S::FRAGMENT),
-                sampled(9, wgpu::TextureSampleType::Depth),
+                {
+                    let mut entry = sampled(9, wgpu::TextureSampleType::Depth);
+                    entry.visibility = S::FRAGMENT;
+                    entry
+                },
             ],
         );
         let data_layout = layout(&r.device, &[data_entry(8, S::COMPUTE | S::VERTEX)]);
