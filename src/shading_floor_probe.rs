@@ -3,7 +3,7 @@
 //! explicitly disable lean shading so its background compiler cannot replace these.
 use crate::program::Composed;
 
-const MODES: [&str; 8] = [
+const MODES: [&str; 10] = [
     "material",
     "sun",
     "locals",
@@ -12,6 +12,8 @@ const MODES: [&str; 8] = [
     "emission",
     "fog",
     "floor",
+    "no-lights",
+    "loop-only",
 ];
 
 pub(super) fn compose(composed: Composed) -> Composed {
@@ -25,6 +27,10 @@ fn body(source: &str, name: &str) -> Option<std::ops::Range<usize>> {
         .find(|(at, _)| source[..*at].rsplit('\n').next().unwrap().trim().is_empty())?
         .0;
     let start = source[at..].find('{')? + at + 1;
+    Some(block(source, start))
+}
+
+fn block(source: &str, start: usize) -> std::ops::Range<usize> {
     let mut depth = 1;
     for (i, b) in source.as_bytes()[start..].iter().enumerate() {
         match b {
@@ -33,10 +39,10 @@ fn body(source: &str, name: &str) -> Option<std::ops::Range<usize>> {
             _ => {}
         }
         if depth == 0 {
-            return Some(start..start + i);
+            return start..start + i;
         }
     }
-    panic!("unterminated probe function {name}")
+    panic!("unterminated probe block")
 }
 
 fn stub(source: &mut String, name: &str, replacement: &str) {
@@ -83,6 +89,24 @@ fn variant(mut composed: Composed, mode: &str) -> Composed {
                 seam,
                 &format!("{seam}\n if lights[rl_light_index(i)].kind.x{compare}0u {{continue;}}"),
             );
+        }
+        "no-lights" => {
+            stub(source, "light_count", "return 0u;");
+        }
+        "loop-only" => {
+            let shade = body(source, "shade").unwrap();
+            let seam = "for(var i=0u;i<light_count();i+=1u) {";
+            let start = source[shade.clone()].find(seam).unwrap() + shade.start + seam.len();
+            let range = block(source, start);
+            source.replace_range(range,"\nlet sample=light_sample_untinted(i,input);\nfloor_loop_witness=floor_mix(floor_loop_witness,sample.index);\nfloor_loop_witness=floor_mix(floor_loop_witness,floor_hash3(sample.direction));\nfloor_loop_witness=floor_mix(floor_loop_witness,bitcast<u32>(sample.attenuation));\nfloor_loop_witness=floor_mix(floor_loop_witness,floor_hash3(sample.intensity));\n");
+            let hint = "tr1_view_hint(surface_output,surface_input,view_ray)";
+            assert!(source.contains(hint), "loop witness output seam");
+            *source = source.replace(
+                hint,
+                &format!("select({hint},0.0,floor_loop_witness==0xdeadbeefu)"),
+            );
+            source.push_str("\nvar<private> floor_loop_witness:u32;\n");
+            source.push_str(HASH);
         }
         "gi" => {
             stub(
@@ -209,6 +233,6 @@ mod tests {
                 }
             }
         }
-        assert_eq!(count, 96);
+        assert_eq!(count, MODES.len() * 12);
     }
 }
