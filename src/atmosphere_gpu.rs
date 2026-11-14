@@ -44,6 +44,10 @@ fn at_sun_visible(p:vec3<f32>) -> f32 {
 ";
 const MAP_VISIBILITY: &str = include_str!("../shaders/atmosphere_shadow_map.wgsl");
 
+fn fog_map_enabled() -> bool {
+    std::env::var("RENDERLAB_FOG_OVERHAUL").as_deref() != Ok("0")
+}
+
 fn kernel_source(hardware: bool) -> String {
     let kernels = fog_cull::atmosphere_source(KERNELS.to_owned(), hardware && fog_cull::enabled());
     format!(
@@ -58,7 +62,7 @@ fn kernel_source(hardware: bool) -> String {
             format!(
                 "{}{HARDWARE_VISIBILITY}",
                 crate::shadows::SHADOW_CASTER_MASK_WGSL
-            )
+            ).replace("fn at_sun_visible(", if fog_map_enabled() { "fn at_sun_ray_visible(" } else { "fn at_sun_visible(" }) + if fog_map_enabled() { include_str!("../shaders/fog_sun_map.wgsl") } else { "" }
         } else {
             MAP_VISIBILITY.to_owned()
         },
@@ -152,6 +156,8 @@ pub(super) struct Volume {
     /// Injection groups, keyed by their read-only shadow resources.
     inject: Option<([Owned<wgpu::BindGroup>; 2], VisibilityKey)>,
     cull: Option<fog_cull::Bounds>,
+    sun_depth: Option<(Owned<wgpu::Buffer>, Allocation)>,
+    sun_group: Option<Owned<wgpu::BindGroup>>,
 }
 impl Volume {
     fn new(device: &PipelineDevice, ledger: &Ledger, grid: [u32; 2], volumetric: bool, fog: bool) -> Self {
@@ -184,6 +190,16 @@ impl Volume {
                     true,
                 )
             }),
+            sun_depth: (volumetric && fog_map_enabled()).then(|| {
+                let bytes = 512 * 512 * 4;
+                (ledger.own(device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("current-frame fog sun depth"),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::STORAGE,
+                    mapped_at_creation: false,
+                }), ResourceKind::Buffer), ledger.allocate(AllocationKind::Lut, bytes))
+            }),
+            sun_group: None,
             aerial: None,
             integrate: None,
             temporal: None,
@@ -203,6 +219,7 @@ struct Kernels {
     inject: Owned<wgpu::ComputePipeline>,
     inject_virtual: Option<Owned<wgpu::ComputePipeline>>,
     occlusion: Option<Owned<wgpu::ComputePipeline>>,
+    sun_map: Option<Owned<wgpu::ComputePipeline>>,
     temporal: Owned<wgpu::ComputePipeline>,
     integrate: Owned<wgpu::ComputePipeline>,
     specular: Owned<wgpu::ComputePipeline>,
@@ -245,6 +262,7 @@ pub(super) struct AtmosphereGpu {
     sky: Option<Owned<wgpu::RenderPipeline>>,
     /// The medium the transmittance and multiple-scattering LUTs hold.
     luts: Option<AtmosphereMedium>,
+    sky_key: Option<(AtmosphereMedium, Vec3, f32)>,
     published: Option<Vec<u8>>,
     #[cfg(test)]
     test_fog_quality: Option<(u32, u32)>,
@@ -334,6 +352,7 @@ impl AtmosphereGpu {
             procedural: None,
             sky: None,
             luts: None,
+            sky_key: None,
             published: None,
             #[cfg(test)]
             test_fog_quality: None,
@@ -834,6 +853,7 @@ impl Renderer {
         );
         let (specular, diffuse) = (k("at_environment_specular"), k("at_environment_diffuse"));
         let temporal = k("at_fog_temporal");
+        let sun_map = (hardware && fog_map_enabled()).then(|| k("at_fog_sun_map"));
         let occlusion = (hardware && fog_cull::enabled()).then(|| k("at_fog_occlusion"));
         let inject_virtual = (!hardware).then(|| {
             let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
@@ -955,6 +975,7 @@ impl Renderer {
             inject,
             inject_virtual,
             occlusion,
+            sun_map,
             temporal,
             integrate,
             specular,
@@ -1052,6 +1073,13 @@ impl Renderer {
             }));
         }
         if injection && v.inject.as_ref().is_none_or(|(_, old)| *old != key) {
+            if let (Some(pipeline), Some(tlas), Some((depth, _))) = (&k.sun_map, tlas, &v.sun_depth) {
+                v.sun_group = Some(group(device, ledger, pipeline, &[
+                    uniform.clone(),
+                    wgpu::BindGroupEntry { binding: 20, resource: wgpu::BindingResource::AccelerationStructure(tlas) },
+                    wgpu::BindGroupEntry { binding: 23, resource: depth.as_entire_binding() },
+                ]));
+            }
             let groups = [0, 1].map(|_| {
                 let mut entries = vec![uniform.clone(), view(15, &raw.view)];
                 if let Some(tlas) = tlas {
@@ -1074,10 +1102,10 @@ impl Renderer {
                     });
                 }
                 if let Some(cull) = &v.cull {
-                    entries.push(wgpu::BindGroupEntry {
-                        binding: 22,
-                        resource: cull.buffer.as_entire_binding(),
-                    });
+                    entries.push(wgpu::BindGroupEntry { binding: 22, resource: cull.buffer.as_entire_binding() });
+                }
+                if k.sun_map.is_some() {
+                    entries.push(wgpu::BindGroupEntry { binding: 23, resource: v.sun_depth.as_ref().unwrap().0.as_entire_binding() });
                 }
                 group(
                     device,
@@ -1112,6 +1140,8 @@ impl Renderer {
         // Virtual's resources exist after prepare_virtual, and its pages have been
         // encoded before this call. Raster depth and the TLAS are ready here too.
         self.atmosphere_volume_groups(true, scene);
+        let sun = self.atmosphere_sun().map_or(Vec3::Y, |s| s.0);
+        let altitude = self.atmosphere.published.as_ref().map_or(0.0, |b| f32::from_ne_bytes(b[140..144].try_into().unwrap()));
         let (a, av) = (&mut self.atmosphere, &mut self.view.atmosphere);
         let medium = a.settings.medium;
         let stale = a.luts != Some(medium);
@@ -1130,12 +1160,16 @@ impl Renderer {
             pass.set_bind_group(0, &*k.fixed[1], &[]);
             pass.dispatch_workgroups(MULTISCATTER, MULTISCATTER, 1);
         }
-        pass.set_pipeline(&k.skyview);
-        pass.set_bind_group(0, &*k.fixed[2], &[]);
-        pass.dispatch_workgroups(SKYVIEW[0].div_ceil(8), SKYVIEW[1].div_ceil(8), 1);
-        pass.set_pipeline(&k.ambient);
-        pass.set_bind_group(0, &*k.fixed[3], &[]);
-        pass.dispatch_workgroups(1, 1, 1);
+        let sky_key = (medium, sun, altitude);
+        if !fog_map_enabled() || a.sky_key != Some(sky_key) {
+            pass.set_pipeline(&k.skyview);
+            pass.set_bind_group(0, &*k.fixed[2], &[]);
+            pass.dispatch_workgroups(SKYVIEW[0].div_ceil(8), SKYVIEW[1].div_ceil(8), 1);
+            pass.set_pipeline(&k.ambient);
+            pass.set_bind_group(0, &*k.fixed[3], &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+            a.sky_key = Some(sky_key);
+        }
         if let Some(p) = a.procedural.as_mut().filter(|p| !p.written) {
             pass.set_pipeline(&k.specular);
             for (level, group) in p.groups[..ENVIRONMENT_LEVELS as usize].iter().enumerate() {
@@ -1264,6 +1298,9 @@ impl Renderer {
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
         };
+        if let (Some(pipeline), Some(group)) = (&k.sun_map, &v.sun_group) {
+            part(encoder, "atmosphere.sun-map", pipeline, group, [64, 64, 1]);
+        }
         if let (Some((inject, _)), Some(integrate)) = (&v.inject, &v.integrate) {
             let i = (av.frame % 2) as usize;
             let injection = if v.inject.as_ref().unwrap().1.virtual_map {
