@@ -511,7 +511,11 @@ fn vd_column_mask(c:vec2<f32>,half:f32,lo_in:f32,hi:f32)->vec2<u32> {
 // that face those neighbours. A straight line from the receiver through a triangle edge is a
 // straight line in direction space, so each edge cuts the disk samples exactly. Off: the
 // texel squares alone.
-override VD_EDGES:bool=true;
+// Off by default (2026-11-14): on Outpost without ray hardware it straightens the tarp's ground
+// shadow but not the stepped band on the tarp itself, for +0.5 ms (Glint +0.17): most partial
+// columns pay four neighbour reads to find they are not on an outline. Next: an outline bit
+// per texel written with the pages. Screens: RENDERLAB_VD=VD_EDGES=true.
+override VD_EDGES:bool=false;
 @group(1) @binding(0) var<storage,read> models:array<mat4x4<f32>>;
 @group(1) @binding(2) var<storage,read> primary_vertices:binding_array<VdVec4s,PRIMARY_BATCHES>;
 @group(1) @binding(3) var<storage,read> primary_indices:binding_array<VdU32s,PRIMARY_BATCHES>;
