@@ -575,6 +575,9 @@ impl Renderer {
                         head.push_str(crate::program::PASS_HEAD_MARK);
                     }
                 }
+                for head in &mut heads {
+                    gi_receiver_pass::default_head(head, &self.device);
+                }
                 let scopes = OperationScopes::new(&self.device);
                 let pipelines = state.compile(&self.device, &self.ledger, &sources);
                 if let Some(error) = scopes.finish() {
@@ -714,7 +717,7 @@ impl ShadeSwitches {
             software: !device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
             deferred: reflection_pass::deferred(device),
             diag: crate::program::rl_deferred_diag(),
-            gi: gi_receiver_pass::on(),
+            gi: gi_receiver_pass::enabled(device),
             lvis: light_vis_pass::on(),
             material: crate::material_mode::Mode::full(),
         }
@@ -2541,7 +2544,8 @@ impl Renderer {
                 rl_history,
                 rl_pass: reflection_pass::on(&self.device)
                     .then(|| self.rl_pass_targets(size)),
-                gi_receiver: gi_receiver_pass::on().then(|| self.gi_receiver_targets(size)),
+                gi_receiver: gi_receiver_pass::enabled(&self.device)
+                    .then(|| self.gi_receiver_targets(size)),
                 light_counter: light_counter_gpu::on().then(|| self.light_counter_targets(size)),
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(

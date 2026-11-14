@@ -232,11 +232,15 @@ impl Renderer {
         };
         let ids_module = module("TP pane ids", ids_source);
         let shade_module = module("TP pane shading", shade_source);
+        let key = self.tp_glass_key(program, rt);
         let ids = [false, true].map(|tangent| {
+            let label = format!(
+                "TP pane ids program={} rt={rt} key={key:02x?} tangent={tangent}", slot.label,
+            );
             self.ledger.own(
                 self.device
                     .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                        label: Some("TP pane ids"),
+                        label: Some(&label),
                         layout: Some(&gpu.glass_layouts[usize::from(rt)]),
                         vertex: wgpu::VertexState {
                             module: &ids_module,
@@ -281,10 +285,11 @@ impl Renderer {
                 ResourceKind::RenderPipeline,
             )
         });
+        let label = format!("TP pane shading program={} rt={rt} key={key:02x?}", slot.label);
         let shade = self.ledger.own(
             self.device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("TP pane shading"),
+                    label: Some(&label),
                     layout: Some(&gpu.pane_layouts[usize::from(rt)]),
                     module: &shade_module,
                     entry_point: Some("tp_pane_shade"),

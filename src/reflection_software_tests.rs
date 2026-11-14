@@ -554,7 +554,7 @@ fn every_list_head_module_validates() {
         validate(&format!("head {h} trace"), &rl_trace_source(head));
         // The GI receiver kernel, built only while its pass runs (RENDERLAB_GI_PASS=1): the
         // deferred variant once dropped the definitions it relies on.
-        if crate::renderer::primary_ray_gpu::gi_receiver_pass::on() {
+        if crate::renderer::primary_ray_gpu::gi_receiver_pass::for_source(head) {
             let kernel = crate::renderer::primary_ray_gpu::gi_receiver_pass::kernel_module(head);
             validate(&format!("head {h} GI receiver"), &kernel.source);
         }

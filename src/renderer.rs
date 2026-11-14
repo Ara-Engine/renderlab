@@ -5,6 +5,8 @@ pub(crate) mod atmosphere_gpu;
 mod environment_gpu;
 #[path = "light_cluster_gpu.rs"]
 mod light_cluster_gpu;
+#[path = "pipeline_prewarm.rs"]
+mod pipeline_prewarm;
 #[path = "lighting_gpu.rs"]
 mod lighting_gpu;
 // DC1: one storage binding beside lighting; no separate render pass.
@@ -1406,7 +1408,7 @@ impl Renderer {
             .transpose()
             .map_err(rejected)?;
         // Traced modules are part of the same transaction while they are selected.
-        let primary_sources = self
+        let mut primary_sources = self
             .pipeline
             .primary
             .as_ref()
@@ -1421,6 +1423,11 @@ impl Renderer {
             })
             .transpose()
             .map_err(rejected)?;
+        if let Some((_, heads)) = &mut primary_sources {
+            for head in heads {
+                primary_ray_gpu::gi_receiver_pass::default_head(head, &self.device);
+            }
+        }
         // A temporal kernel already in use recompiles in the transaction, so a rejected
         // prelude keeps it; otherwise the first temporal frame compiles it.
         let film_source = primary_sources
@@ -2640,6 +2647,9 @@ impl Renderer {
         let result = self.render_view(color, camera, front, transparent, view_mode);
         if let Some(order) = order {
             transparency_gpu::restore(draws, &order);
+        }
+        if let Ok(Some(report)) = &result {
+            self.device.log_pipeline_frame(self, report);
         }
         result
     }
