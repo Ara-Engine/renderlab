@@ -31,8 +31,8 @@ stage changes any bounce value, then cleared before claim rounds. This prevents 
 just gained its first value being gathered again in the next visible stage. Counter 47 uses
 one atomic add per candidate. Tiny phase-boundary kernels clamp the gather ticket to the
 actual admitted visible count and reset claim tickets from the actual created count before
-each round. Denied claims skip bucket walks. A global compare/exchange loop was rejected:
-it serialized admission and made the first fixed-budget timing rows much slower than default.
+each round. Denied claims skip bucket walks. The variant with a global compare/exchange
+retry loop was rejected: its first fixed-budget timing rows were much slower than default.
 No new per-cell allocation is needed.
 
 The `ms` mode targets `RENDERLAB_GI_REFILL_MS` (3 ms by default) across gather and claim/setup/
@@ -51,3 +51,22 @@ sequence. Invalid, short or reordered replay files fail instead of silently chan
 The retained picture gate remains full-image counts over two/eight display codes at +1,
 +5, +20 and +70, plus the first frame below default's +70 over-eight count. Whole-frame
 mean error alone did not expose the bounded experiment's dark pillar patches.
+
+## Rejected admission variant
+
+RTX 4070 SUPER, 1080p forest turn, 400 held frames, one interleaved visit, drained GPU
+service times from a clean timing lease. Binary `2896ecbb` used the global CAS ticket and
+checked claim tickets after bucket selection. These are rejection evidence, not the final
+two-round matrix for the atomic-add replacement.
+
+| Variant | Worst frame ms | p95 frame ms | Worst gather ms |
+|---|---:|---:|---:|
+| Default | 121.52 | 56.63 | 29.18 |
+| Priority / nominal current budget | 120.89 | 108.34 | 85.70 |
+| Priority / 8,192 | 133.74 | 99.32 | 56.04 |
+| Priority / 12,288 | 219.25 | 187.72 | 161.62 |
+
+The CAS retry loop is a plausible contention source; the replacement also moves claim
+admission before bucket walks, so any combined improvement must not be attributed solely
+to one of those changes. The initial time-targeted row was faster but shrank to roughly
+64 claims and 250 gathers; that does not establish an acceptable picture.
