@@ -68,14 +68,17 @@ fn sparse_switch() -> bool {
     *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE").map_or(true, |v| v.trim() != "0"))
 }
 /// The pool's first size in pages and the per-frame raster budget in pages:
-/// `RENDERLAB_VSM_POOL=pages[,budget]` (measurement), defaults 256 and 192.
+/// `RENDERLAB_VSM_POOL=pages[,budget]` (measurement), defaults 384 and 64. Outpost requests
+/// about 300 pages, Glint 450, Showcase 550 (the pool grows to fit). A budget of 64 took the
+/// cut frame's sun pass on Outpost from 45 ms (192) to 31 ms, the rest arriving over about
+/// five frames (the dense clipmap: 38-46 ms, then 28-35 ms).
 fn pool_settings() -> (u32, u32) {
     static POOL: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
     *POOL.get_or_init(|| {
         let value = std::env::var("RENDERLAB_VSM_POOL").unwrap_or_default();
         let mut parts = value.split(',').map(|p| p.trim().parse::<u32>().ok());
-        let pages = parts.next().flatten().unwrap_or(256).clamp(16, POOL_MAX);
-        let budget = parts.next().flatten().unwrap_or(192).max(1);
+        let pages = parts.next().flatten().unwrap_or(384).clamp(16, POOL_MAX);
+        let budget = parts.next().flatten().unwrap_or(64).max(1);
         (pages, budget)
     })
 }
