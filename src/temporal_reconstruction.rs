@@ -750,7 +750,26 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     resolve_source_with_coverage(wgsl, coverage_mode())
 }
 
+// Private P202 measurement: no declaration, binding or allocation when unset.
+pub(crate) fn fog_depth_enabled() -> bool {
+    std::env::var_os("RENDERLAB_FOG_DEPTH_DUMP").is_some_and(|p| !p.is_empty())
+}
+
+fn fog_depth_source(source: String, enabled: bool) -> String {
+    if !enabled {
+        return source;
+    }
+    let seam = "    tr1_self=s.id;";
+    assert_eq!(source.matches(seam).count(), 1);
+    source.replace(seam, &format!("{seam}\n    // Current opaque sample only; no history or silhouette reuse.\n    var fog_depth=bitcast<f32>(0x7f800000u);\n    var certain=tr1_same_grid && s.id!=0u && s.distance>0.0 && s.distance<3.4e38;\n    if certain {{\n        certain=(primary_placements[s.id-1u]&0x20000000u)==0u;\n        for(var i=0;i<9;i+=1) {{certain=certain && tr1_ring(i)==s.id;}}\n    }}\n    if certain {{fog_depth=s.distance;}}\n    rl_fog_depth[id.x+id.y*size.x]=fog_depth;"))
+        + "\n@group(0) @binding(80) var<storage,read_write> rl_fog_depth:array<f32>;\n"
+}
+
 fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<String, Error> {
+    resolve_source_with_depth(wgsl, coverage, fog_depth_enabled())
+}
+
+fn resolve_source_with_depth(wgsl: &str, coverage: Option<bool>, depth: bool) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
     let mode = ["tr1-mask", "tr1-raw", "tr1-window"]
         .into_iter()
@@ -769,6 +788,7 @@ fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<St
                 .map_err(|_| Error::InvalidInput("RENDERLAB_P_SPLIT_FRESH_CLAMP: a number"))?,
         );
     }
+    resolve = fog_depth_source(resolve, depth);
     // MV1 motion-source seam; history/resolve policy belongs to MQ1.
     Ok(format!(
         "{head}\n{}\n{resolve}\n{}",
@@ -912,32 +932,44 @@ fn mask_resolve(mode: &str) -> String {
         + "\nvar<private> tr1_mask_last:f32;\nvar<private> tr1_mask_own:f32;\nvar<private> tr1_mask_history:vec2<f32>;\n"
 }
 
+fn reconstruction_bindings(depth: bool) -> Vec<wgpu::BindGroupLayoutEntry> {
+    use wgpu::TextureFormat as F;
+    let uint = wgpu::TextureSampleType::Uint;
+    let float = wgpu::TextureSampleType::Float { filterable: false };
+    let mut entries = vec![
+        texture(7, uint),
+        uniform(10, super::FRAME_BYTES as u64),
+        texture(21, uint),
+        read(40, FRAME_BUFFER_BYTES as u64),
+        texture(41, float),
+        texture(42, float),
+        texture(43, uint),
+        image(44, F::Rgba32Float),
+        image(45, F::Rg32Uint),
+        image(46, F::Rgba16Float),
+        texture(47, uint),
+        image(48, F::Rgba32Uint),
+    ];
+    if depth {
+        entries.push(buffer(
+            80,
+            wgpu::BufferBindingType::Storage { read_only: false },
+            4,
+        ));
+    }
+    entries
+}
+
 impl PrimaryState {
     pub(super) fn reconstruction_layout(
         device: &PipelineDevice,
         ledger: &Ledger,
         arrays: &wgpu::BindGroupLayout,
     ) -> (Owned<wgpu::BindGroupLayout>, Owned<wgpu::PipelineLayout>) {
-        use wgpu::TextureFormat as F;
-        let uint = wgpu::TextureSampleType::Uint;
-        let float = wgpu::TextureSampleType::Float { filterable: false };
         let bindings = ledger.own(
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("temporal reconstruction"),
-                entries: &[
-                    texture(7, uint),
-                    uniform(10, super::FRAME_BYTES as u64),
-                    texture(21, uint),
-                    read(40, FRAME_BUFFER_BYTES as u64),
-                    texture(41, float),
-                    texture(42, float),
-                    texture(43, uint),
-                    image(44, F::Rgba32Float),
-                    image(45, F::Rg32Uint),
-                    image(46, F::Rgba16Float),
-                    texture(47, uint),
-                    image(48, F::Rgba32Uint),
-                ],
+                entries: &reconstruction_bindings(fog_depth_enabled()),
             }),
             ResourceKind::BindGroupLayout,
         );
@@ -1587,6 +1619,81 @@ impl Planner {
     }
 }
 
+// Only enabled in the private depth-census player. All image readbacks are outside
+// timing windows. The CPU frame words preserve the camera, eye and jitter exactly.
+struct FogDepthDump {
+    pixels: Buffer,
+    prefix: std::path::PathBuf,
+    frame: u64,
+    frame_words: std::sync::Mutex<Vec<u8>>,
+}
+impl FogDepthDump {
+    fn new(r: &Renderer, size: wgpu::Extent3d) -> Option<Self> {
+        if !fog_depth_enabled() {
+            return None;
+        }
+        let frame = std::env::var("RENDERLAB_FOG_DEPTH_FRAME")
+            .expect("FOG_DEPTH_FRAME must accompany FOG_DEPTH_DUMP")
+            .parse::<u64>()
+            .expect("FOG_DEPTH_FRAME must be a positive frame number");
+        assert!(frame > 0);
+        assert!(
+            r.device.limits().max_storage_buffers_per_shader_stage >= 14,
+            "fog depth dump needs at least 14 storage buffers per stage"
+        );
+        Some(Self {
+            pixels: Buffer::new(
+                r,
+                "fog current opaque distance",
+                u64::from(size.width) * u64::from(size.height) * 4,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+            ),
+            prefix: std::env::var_os("RENDERLAB_FOG_DEPTH_DUMP").unwrap().into(),
+            frame,
+            frame_words: std::sync::Mutex::new(Vec::new()),
+        })
+    }
+
+    fn encode(&self, r: &Renderer, encoder: &mut wgpu::CommandEncoder, size: wgpu::Extent3d) {
+        let frame = r.frames + 1;
+        if frame != self.frame {
+            return;
+        }
+        let bytes = u64::from(size.width) * u64::from(size.height) * 4;
+        let readback = r.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("fog depth readback"),
+            size: bytes,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_buffer_to_buffer(&self.pixels.value, 0, &readback, 0, bytes);
+        let mapped = readback.clone();
+        let prefix = format!("{}-view{}", self.prefix.display(), r.view_key.0);
+        let words = self.frame_words.lock().unwrap().clone();
+        let range = r
+            .atmosphere
+            .settings
+            .volumetric_fog
+            .map_or(0.0, |v| v.distance);
+        let limits = r.device.limits().max_storage_buffers_per_shader_stage;
+        encoder.map_buffer_on_submit(&readback, wgpu::MapMode::Read, .., move |result| {
+            let write = || -> Result<(), Box<dyn std::error::Error>> {
+                result?;
+                let data = mapped.slice(..).get_mapped_range()?;
+                std::fs::write(format!("{prefix}.f32"), &data)?;
+                std::fs::write(format!("{prefix}.frame.bin"), &words)?;
+                std::fs::write(format!("{prefix}.json"), format!(
+                    "{{\"frame\":{frame},\"width\":{},\"height\":{},\"fog_distance_m\":{range},\"grid\":[{},{},64],\"format\":\"f32le radial metres; infinity=unknown\",\"storage_buffers_requested\":{limits},\"native_only\":true}}\n",
+                    size.width, size.height, size.width.div_ceil(8), size.height.div_ceil(8)))?;
+                eprintln!("fog_depth_dump frame={frame} bytes={bytes} prefix={prefix}");
+                Ok(())
+            };
+            if let Err(error) = write() { eprintln!("fog_depth_dump FAILED: {error}"); }
+            mapped.unmap();
+        });
+    }
+}
+
 /// Per-pixel history at the HDR size, ping-ponged by frame: exposed mean and weight
 /// (Rgba32Float) and anchors (Rg32Uint), plus the copy of the frame's shaded samples.
 pub(in crate::renderer) struct ReconstructionState {
@@ -1595,6 +1702,7 @@ pub(in crate::renderer) struct ReconstructionState {
     /// Silhouettes' second slot and occluder coverage (Rgba32Uint).
     layer: [Depth; 2],
     sample: Depth,
+    fog_depth: Option<FogDepthDump>,
     /// Fixed frame words; shared placement history is bound with the geometry.
     frame: Buffer,
     /// Resolve groups per written side, keyed by the textures and frame buffers they bind.
@@ -1697,6 +1805,7 @@ impl ReconstructionState {
                 FRAME_BUFFER_BYTES as u64,
                 wgpu::BufferUsages::STORAGE,
             ),
+            fog_depth: FogDepthDump::new(r, output),
             groups: None,
             plan: Planner::new(),
             zones: [0; ZONES_BYTES],
@@ -2150,6 +2259,9 @@ impl Renderer {
         let state = self.view.reconstruction_state.as_ref().unwrap();
         self.queue
             .write_buffer(&state.frame.value, 0, &planned.frame);
+        if let Some(dump) = &state.fog_depth {
+            *dump.frame_words.lock().unwrap() = planned.frame.clone();
+        }
         self.uploads.view_settings += FRAME_BYTES as u64;
         self.uploads.write_calls += 1;
         if let Some(history) = primary.targets.as_ref().map(|t| &t.rl_history) {
@@ -2192,7 +2304,7 @@ impl Renderer {
         let out = self.view.upscale.as_ref().map_or(hdr, |u| &u.hdr);
         [0, 1].map(|written| {
             let read = 1 - written;
-            let entries = [
+            let mut entries: Vec<_> = [
                 (7, R::TextureView(&targets.hit.view)),
                 (10, frame.as_entire_binding()),
                 (21, R::TextureView(&targets.tiles.view)),
@@ -2206,7 +2318,14 @@ impl Renderer {
                 (48, R::TextureView(&state.layer[written].view)),
                 (46, R::TextureView(&out.view)),
             ]
-            .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource });
+            .map(|(binding, resource)| wgpu::BindGroupEntry { binding, resource })
+            .into();
+            if let Some(dump) = &state.fog_depth {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 80,
+                    resource: dump.pixels.value.as_entire_binding(),
+                });
+            }
             self.ledger.own(
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("temporal reconstruction"),
@@ -2248,6 +2367,10 @@ impl Renderer {
         );
         pass.set_bind_group(1, primary.virtual_geometry().unwrap().1, &[]);
         pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
+        drop(pass);
+        if let Some(dump) = &state.fog_depth {
+            dump.encode(self, encoder, size);
+        }
     }
 }
 
@@ -2638,6 +2761,54 @@ mod tests {
     }
 
     #[test]
+    fn fog_depth_off_preserves_composition_and_bindings() {
+        use wgpu::TextureFormat as F;
+        let uint = wgpu::TextureSampleType::Uint;
+        let float = wgpu::TextureSampleType::Float { filterable: false };
+        let original = vec![
+            texture(7, uint),
+            uniform(10, super::super::FRAME_BYTES as u64),
+            texture(21, uint),
+            read(40, FRAME_BUFFER_BYTES as u64),
+            texture(41, float),
+            texture(42, float),
+            texture(43, uint),
+            image(44, F::Rgba32Float),
+            image(45, F::Rg32Uint),
+            image(46, F::Rgba16Float),
+            texture(47, uint),
+            image(48, F::Rgba32Uint),
+        ];
+        assert_eq!(reconstruction_bindings(false), original);
+        let prelude = include_str!("../shaders/scene.wgsl");
+        let [head, _] = non_rt_heads(prelude).unwrap();
+        let compose = |body: &str| {
+            format!(
+                "{head}\n{}\n{body}\n{}",
+                include_str!("../shaders/object_motion.wgsl"),
+                zones_source("tr1.zones")
+            )
+        };
+        assert_eq!(resolve_source_with_depth(prelude, None, false).unwrap(), compose(RESOLVE));
+        assert_eq!(compose(&fog_depth_source(RESOLVE.to_owned(), false)), compose(RESOLVE));
+        let enabled = fog_depth_source(RESOLVE.to_owned(), true);
+        let module = naga::front::wgsl::parse_str(&compose(&enabled)).unwrap();
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap();
+        assert_eq!(reconstruction_bindings(true)[..original.len()], original);
+        assert_eq!(reconstruction_bindings(true).len(), original.len() + 1);
+        assert_eq!(enabled.matches("@binding(80)").count(), 1);
+        assert!(
+            enabled.find("rl_fog_depth[id.x").unwrap()
+                < enabled.find("var kept:Tr1Second").unwrap()
+        );
+    }
+
+    #[test]
     fn coverage_off_keeps_original_resolve_module() {
         let prelude=include_str!("../shaders/scene.wgsl");
         let [head,_]=non_rt_heads(prelude).unwrap();
@@ -2733,9 +2904,10 @@ mod tests {
             .chain([fresh_clamp_resolve(&resolve_clone, 0.5)])
             // Compose each coverage variant from its original body, as the engine
             // does. `resolve` may already contain the ambient switch's transform.
-            .chain([false, true].map(|cycle| {
-                resolve_source_with_coverage(prelude, Some(cycle)).unwrap()
-            }))
+            .chain(
+                [false, true]
+                    .map(|cycle| resolve_source_with_coverage(prelude, Some(cycle)).unwrap()),
+            )
         {
             let module = naga::front::wgsl::parse_str(&source).unwrap();
             naga::valid::Validator::new(

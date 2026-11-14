@@ -155,7 +155,7 @@ pub(crate) fn request_device(
             | wgpu::Features::PIPELINE_CACHE
             | wgpu::Features::PRIMITIVE_INDEX
             | wgpu::Features::TEXTURE_COMPRESSION_BC);
-    let (features, required_limits, experimental_features) = match path {
+    let (features, mut required_limits, experimental_features) = match path {
         RenderPath::HardwareRt => (
             // RENDERLAB_RT_PRIMARY (measurement): the visibility buffer's 64-bit raster atomics.
             if crate::renderer::primary_ray_gpu::rt_primary_switch().is_some() {
@@ -174,6 +174,22 @@ pub(crate) fn request_device(
             wgpu::ExperimentalFeatures::disabled(),
         ),
     };
+    // Measurement-only TR1 distance output adds one buffer to the thirteen-buffer ABI.
+    if crate::renderer::primary_ray_gpu::temporal_reconstruction::fog_depth_enabled() {
+        required_limits.max_storage_buffers_per_shader_stage =
+            required_limits.max_storage_buffers_per_shader_stage.max(14);
+        if required_limits.max_storage_buffers_per_shader_stage
+            > limits.max_storage_buffers_per_shader_stage
+        {
+            return Err(Error::InvalidInput(
+                "fog depth dump requires 14 storage buffers per stage",
+            ));
+        }
+        eprintln!(
+            "fog_depth_limits storage_buffers={}",
+            required_limits.max_storage_buffers_per_shader_stage
+        );
+    }
     let descriptor = wgpu::DeviceDescriptor {
         label: Some("renderlab engine"),
         required_features: features | optional,
