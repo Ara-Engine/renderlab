@@ -33,7 +33,7 @@ pub(crate) fn on(default: bool) -> bool {
 }
 /// Carry this running renderer's default through shared program composition.
 /// An explicit opt-out leaves the original head byte-for-byte unchanged.
-pub(super) fn wgpu_heads(heads: &mut [String; 2]) {
+pub(in crate::renderer) fn wgpu_heads(heads: &mut [String; 2]) {
     if on(true) {
         for head in heads {
             head.push_str(DEFAULT_HEAD_MARK);
