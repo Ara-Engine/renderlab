@@ -45,8 +45,9 @@ fn at_sun_visible(p:vec3<f32>) -> f32 {
 const MAP_VISIBILITY: &str = include_str!("../shaders/atmosphere_shadow_map.wgsl");
 
 fn kernel_source(hardware: bool) -> String {
+    let kernels = fog_cull::atmosphere_source(KERNELS.to_owned(), hardware && fog_cull::enabled());
     format!(
-        "{}{COMMON}{KERNELS}{}",
+        "{}{COMMON}{kernels}{}",
         if hardware {
             "enable wgpu_ray_query;\n"
         } else {
@@ -150,9 +151,10 @@ pub(super) struct Volume {
     temporal: Option<[Owned<wgpu::BindGroup>; 2]>,
     /// Injection groups, keyed by their read-only shadow resources.
     inject: Option<([Owned<wgpu::BindGroup>; 2], VisibilityKey)>,
+    cull: Option<fog_cull::Bounds>,
 }
 impl Volume {
-    fn new(device: &PipelineDevice, ledger: &Ledger, grid: [u32; 2], volumetric: bool) -> Self {
+    fn new(device: &PipelineDevice, ledger: &Ledger, grid: [u32; 2], volumetric: bool, fog: bool) -> Self {
         Self {
             grid,
             camera: lut(
@@ -186,6 +188,8 @@ impl Volume {
             integrate: None,
             temporal: None,
             inject: None,
+            cull: (volumetric && fog)
+                .then(|| fog_cull::Bounds::new(device, ledger, grid)),
         }
     }
 }
@@ -198,6 +202,7 @@ struct Kernels {
     aerial: Owned<wgpu::ComputePipeline>,
     inject: Owned<wgpu::ComputePipeline>,
     inject_virtual: Option<Owned<wgpu::ComputePipeline>>,
+    occlusion: Option<Owned<wgpu::ComputePipeline>>,
     temporal: Owned<wgpu::ComputePipeline>,
     integrate: Owned<wgpu::ComputePipeline>,
     specular: Owned<wgpu::ComputePipeline>,
@@ -263,7 +268,7 @@ impl AtmosphereView {
     /// `generations`: the view's first generation (`ViewId::generations`).
     pub fn new(device: &PipelineDevice, ledger: &Ledger, generations: u64) -> Self {
         Self {
-            volume: Volume::new(device, ledger, [1, 1], false),
+            volume: Volume::new(device, ledger, [1, 1], false, false),
             previous: None,
             history_key: None,
             frame: 0,
@@ -661,11 +666,16 @@ impl Renderer {
         if self.view.atmosphere.volume.grid != grid
             || self.view.atmosphere.volume.scatter.is_some() != volumetric
         {
-            let volume = Volume::new(&self.device, &self.ledger, grid, volumetric);
+            let volume = Volume::new(&self.device, &self.ledger, grid, volumetric, self.hardware_shadows.is_some() && fog_cull::enabled());
             let old = std::mem::replace(&mut self.view.atmosphere.volume, volume);
             self.atmosphere.retired.push((self.submissions, old));
             self.view.atmosphere.generation += 1;
             self.view.atmosphere.previous = None;
+        }
+        if let Some(cull) = &self.view.atmosphere.volume.cull {
+            cull.reset(&self.queue);
+            self.uploads.view_settings += 16;
+            self.uploads.write_calls += 1;
         }
         self.atmosphere_volume_groups(false, 0);
         self.update_procedural_environment(eye);
@@ -824,6 +834,7 @@ impl Renderer {
         );
         let (specular, diffuse) = (k("at_environment_specular"), k("at_environment_diffuse"));
         let temporal = k("at_fog_temporal");
+        let occlusion = (hardware && fog_cull::enabled()).then(|| k("at_fog_occlusion"));
         let inject_virtual = (!hardware).then(|| {
             let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("VF1 Virtual fog sampling"),
@@ -943,6 +954,7 @@ impl Renderer {
             aerial,
             inject,
             inject_virtual,
+            occlusion,
             temporal,
             integrate,
             specular,
@@ -989,18 +1001,20 @@ impl Renderer {
         let raw = v.raw.as_ref().unwrap();
         if v.temporal.is_none() {
             v.temporal = Some([0, 1].map(|i| {
-                group(
-                    device,
-                    ledger,
-                    &k.temporal,
-                    &[
-                        uniform.clone(),
-                        sampler.clone(),
-                        view(5, &scatter[1 - i].view),
-                        view(6, &raw.view),
-                        view(15, &scatter[i].view),
-                    ],
-                )
+                let mut entries = vec![
+                    uniform.clone(),
+                    sampler.clone(),
+                    view(5, &scatter[1 - i].view),
+                    view(6, &raw.view),
+                    view(15, &scatter[i].view),
+                ];
+                if let Some(cull) = &v.cull {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 22,
+                        resource: cull.buffer.as_entire_binding(),
+                    });
+                }
+                group(device, ledger, &k.temporal, &entries)
             }));
         }
         // Aerial perspective alone needs no shadow resources.
@@ -1057,6 +1071,12 @@ impl Renderer {
                     entries.push(wgpu::BindGroupEntry {
                         binding: 22,
                         resource: self.view.shadows.records().as_entire_binding(),
+                    });
+                }
+                if let Some(cull) = &v.cull {
+                    entries.push(wgpu::BindGroupEntry {
+                        binding: 22,
+                        resource: cull.buffer.as_entire_binding(),
                     });
                 }
                 group(
@@ -1145,11 +1165,6 @@ impl Renderer {
             pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
         };
         let plane = [v.grid[0].div_ceil(8), v.grid[1].div_ceil(8), 1];
-        let cells = [
-            v.grid[0].div_ceil(4),
-            v.grid[1].div_ceil(4),
-            FROXEL_SLICES / 4,
-        ];
         part(
             encoder,
             "atmosphere.aerial",
@@ -1157,6 +1172,98 @@ impl Renderer {
             v.aerial.as_ref().unwrap(),
             plane,
         );
+        if !self.fog_cull_active() {
+            self.encode_fog_volume(encoder, mark);
+        }
+    }
+
+    pub(super) fn fog_cull_active(&self) -> bool {
+        self.atmosphere.active
+            && self.view.atmosphere.volume.cull.is_some()
+            && self.primary_mode == PrimaryVisibility::Traced
+            && self.view.soft_mode != SoftShadows::Temporal
+            && self
+                .view
+                .primary
+                .as_ref()
+                .and_then(|p| p.targets.as_ref())
+                .is_some_and(|t| t.fog_depth.is_some())
+    }
+
+    pub(super) fn encode_fog_culled(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
+    ) {
+        if !self.fog_cull_active() {
+            return;
+        }
+        let raw = &self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .targets
+            .as_ref()
+            .unwrap()
+            .fog_depth
+            .as_ref()
+            .unwrap()
+            .buffer
+            .value;
+        let kernel = self
+            .atmosphere
+            .kernels
+            .as_ref()
+            .unwrap()
+            .occlusion
+            .as_ref()
+            .unwrap();
+        mark(encoder, "atmosphere.occlusion");
+        self.view.atmosphere.volume.cull.as_mut().unwrap().encode(
+            &self.device,
+            &self.ledger,
+            encoder,
+            kernel,
+            &self.atmosphere.uniform,
+            raw,
+        );
+        self.encode_fog_volume(encoder, mark);
+        self.view.atmosphere.volume.cull.as_ref().unwrap().probe(
+            &self.device,
+            encoder,
+            self.frames + 1,
+        );
+    }
+
+    fn encode_fog_volume(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
+    ) {
+        let k = self.atmosphere.kernels.as_ref().unwrap();
+        let av = &mut self.view.atmosphere;
+        let v = &av.volume;
+        let plane = [v.grid[0].div_ceil(8), v.grid[1].div_ceil(8), 1];
+        let cells = [
+            v.grid[0].div_ceil(4),
+            v.grid[1].div_ceil(4),
+            FROXEL_SLICES / 4,
+        ];
+        let mut part = |encoder: &mut wgpu::CommandEncoder,
+                        name: &'static str,
+                        pipeline: &wgpu::ComputePipeline,
+                        group: &wgpu::BindGroup,
+                        groups: [u32; 3]| {
+            mark(encoder, name);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some(name),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, group, &[]);
+            pass.dispatch_workgroups(groups[0], groups[1], groups[2]);
+        };
         if let (Some((inject, _)), Some(integrate)) = (&v.inject, &v.integrate) {
             let i = (av.frame % 2) as usize;
             let injection = if v.inject.as_ref().unwrap().1.virtual_map {
