@@ -300,20 +300,36 @@ enum ResolveStage {
     Interior,
     Repair,
 }
+fn patch_visibility_tail(source: &mut String, before: &str, after: &str) -> Result<(), Error> {
+    if source.matches(before).count() != 1 {
+        return Err(Error::InvalidInput(
+            "visibility edge repair requires the unchanged resolve seam",
+        ));
+    }
+    *source = source.replacen(before, after, 1);
+    Ok(())
+}
 fn attachment_resolve_source(wgsl: &str, stage: ResolveStage) -> Result<String, Error> {
     let mut tail = attachment_reader(
         include_str!("../shaders/visibility_buffer_resolve.wgsl"),
         include_str!("../shaders/visibility_buffer_attachment.wgsl"),
     );
     if stage != ResolveStage::Fused {
-        tail = tail.replace(
+        patch_visibility_tail(
+            &mut tail,
             "    return primary_repair(PrimaryTrace(vec4<u32>(ids,bitcast<vec2<u32>>(weights.yz)),point,v),ray.near,direction);",
             "    let trace=PrimaryTrace(vec4<u32>(ids,bitcast<vec2<u32>>(weights.yz)),point,v);\n    if DEFER_REPAIR {return trace;}\n    return primary_repair(trace,ray.near,direction);",
-        );
-        tail = tail.replace(
+        )?;
+        patch_visibility_tail(
+            &mut tail,
             "lift=hit.error*LOD_LIFT;atomicOr(&covered,1u);",
             "lift=hit.error*LOD_LIFT;atomicOr(&covered,1u);\n            if DEFER_REPAIR {\n                let pixel=id.y*size.x+id.x;\n                if raster_needs_repair(trace) {raster_enqueue(pixel);}\n                else if visibility[pixel].y!=0u {visibility[pixel]=vec2<u32>(0u);}\n            }",
-        );
+        )?;
+        patch_visibility_tail(
+            &mut tail,
+            "    workgroupBarrier();\n    if all(id.xy==group.xy*PRIMARY_TILE)",
+            "    workgroupBarrier();\n    if DEFER_REPAIR {raster_flush_queue(all(id.xy==group.xy*PRIMARY_TILE));}\n    if all(id.xy==group.xy*PRIMARY_TILE)",
+        )?;
         tail.push_str(include_str!(
             "../shaders/visibility_buffer_edge_common.wgsl"
         ));
@@ -1399,7 +1415,7 @@ impl<'a> Stamp<'a> {
             })
     }
 }
-/// Diagnostic stage stamps: per pass cull, software, hardware, HZB; then resolve.
+/// Diagnostic stage stamps: per pass cull, software, hardware, HZB; then resolve and repair.
 #[cfg(test)]
 pub(crate) const STAGE_QUERIES: u32 = 20;
 
