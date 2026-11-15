@@ -725,7 +725,7 @@ pub(super) fn cluster_data_group(
                 .as_entire_buffer_binding()
         })
         .chain(std::iter::repeat(absent.as_entire_buffer_binding()))
-        .take(crate::TRACED_DRAWS as usize)
+        .take(crate::primary_ray::bound_slots(&r.device, draws.len()))
         .collect();
     bind(
         &r.device,

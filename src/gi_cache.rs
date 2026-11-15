@@ -3128,18 +3128,20 @@ impl Renderer {
                 self.queue.write_buffer(&table, 0, &words);
             }
             self.ensure_gi_layouts();
+            let slots = crate::primary_ray::bound_slots(&self.device, draws.len());
             fn pad<'a>(
                 buffers: impl Iterator<Item = &'a wgpu::Buffer>,
                 absent: &'a wgpu::Buffer,
+                slots: usize,
             ) -> Vec<wgpu::BufferBinding<'a>> {
                 buffers
                     .chain(std::iter::repeat(absent))
-                    .take(TRACED_DRAWS as usize)
+                    .take(slots)
                     .map(|b| b.as_entire_buffer_binding())
                     .collect()
             }
-            let vertices = pad(draws.iter().map(|d| &**d.mesh.vertex), &absent);
-            let indices = pad(draws.iter().map(|d| &**d.mesh.index), &absent);
+            let vertices = pad(draws.iter().map(|d| &**d.mesh.vertex), &absent, slots);
+            let indices = pad(draws.iter().map(|d| &**d.mesh.index), &absent, slots);
             let bind = self.ledger.own(
                 crate::group_cache::reported(&self.device, &wgpu::BindGroupDescriptor {
                     label: Some("indirect cache geometry"),
