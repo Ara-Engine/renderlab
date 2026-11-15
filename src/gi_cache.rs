@@ -1260,6 +1260,7 @@ impl Planner {
             n => n,
         };
         header[50] = u32::from(fill && since_fill < FILL_PARENT_FRAMES);
+        header[54] = u32::from(fill && since_fill == 0);
         header[53] = if ray_budget { GATHER_RAYS_SOFTWARE } else { 0 };
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
@@ -3633,7 +3634,8 @@ impl GiState {
                 encoder.clear_buffer(&r.work, u64::from(at) * 4, Some(4));
             }
         }
-        encoder.clear_buffer(&r.work, 0, Some(COUNTER_WORDS * 4));
+        // The last counter word (GI_W_FILL_PENDING) carries over to the next frame.
+        encoder.clear_buffer(&r.work, 0, Some((COUNTER_WORDS - 1) * 4));
         // Next frame's gather queue starts empty; this frame's holds last frame's appends.
         if plan.bounce {
             encoder.clear_buffer(&r.work, plan.next_queue_at, Some(4));

@@ -152,6 +152,9 @@ const GI_RAY_ITEMS:u32=2097152u;
 const GI_W_FILL_HIST:u32=48u;
 const GI_FILL_BINS:u32=112u;
 const GI_W_FILL_CUT:u32=240u;
+// Whether the last frame's capped claim left pixels' cells for later (gi_fill_select): kept
+// across frames (src/gi_cache.rs clears the counters before it).
+const GI_W_FILL_PENDING:u32=383u;
 // Gather ray budget (gi_gather_count): this frame's estimated gather rays per admission bin,
 // then 1 + the first bin left for a later frame, for pixels' bins and (the next word) the rest.
 const GI_W_GATHER_HIST:u32=256u;
@@ -454,7 +457,7 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> 
         // the capped claim creates the finer cells over the next frames, the lookup fills
         // their missing weight from these (gi_api.wgsl gi_prepare): a softer picture for a
         // few frames instead of a cell mosaic.
-        if gi_word(GI_H_FILL_PARENTS)!=0u {
+        if gi_fill_parents_wanted() {
             gi_fill_parent=true;
             let top=gi_word(GI_H_LEVELS);
             for(var b=0u;b<6u;b+=1u) {
@@ -671,6 +674,15 @@ fn gi_claim_period() -> u32 {
 // subset each frame.
 const GI_H_FILL_CELLS:u32=48u;
 const GI_H_FILL_PARENTS:u32=50u;
+const GI_H_FILL_FIRST:u32=54u;
+// Pixels request parents on the frame of a cut or clear (GI_H_FILL_FIRST), then only while the
+// claim is still deferring their cells (the last frame's GI_W_FILL_PENDING): once every finer
+// cell exists the parents are not read, and requesting, creating and gathering them was the
+// first fill's extra cost after the cut.
+fn gi_fill_parents_wanted() -> bool {
+    if gi_word(GI_H_FILL_PARENTS)==0u { return false; }
+    return gi_word(GI_H_FILL_FIRST)!=0u || atomicLoad(&gi_work[GI_W_FILL_PENDING])!=0u;
+}
 const GI_FILL_SPREAD:u32=16u;
 // Its lattice class's rank (0..3) for a cell of bin `bin` at `cell`.
 fn gi_fill_class(bin:u32, c:vec3<u32>) -> u32 {
@@ -707,6 +719,7 @@ fn gi_fill_bin(base:u32) -> u32 {
 const GI_FILL_GATHER_BINS:u32=5u*GI_FILL_SPREAD;
 @compute @workgroup_size(1) fn gi_fill_select() {
     let cap=gi_word(GI_H_FILL_CELLS);
+    atomicStore(&gi_work[GI_W_FILL_PENDING],0u);
     if cap==0u { return; }
     var wanted=0u;
     for(var b=GI_FILL_GATHER_BINS;b<GI_FILL_BINS;b+=1u) { wanted+=atomicLoad(&gi_work[GI_W_FILL_HIST+b]); }
@@ -716,7 +729,11 @@ const GI_FILL_GATHER_BINS:u32=5u*GI_FILL_SPREAD;
     for(var b=0u;b<GI_FILL_GATHER_BINS;b+=1u) {
         let next=total+atomicLoad(&gi_work[GI_W_FILL_HIST+b]);
         if b+1u==GI_FILL_SPREAD && next!=0u { forced=GI_FILL_SPREAD; }
-        if b>=forced && next>pixel_cap { atomicStore(&gi_work[GI_W_FILL_CUT],b+1u); break; }
+        if b>=forced && next>pixel_cap {
+            atomicStore(&gi_work[GI_W_FILL_CUT],b+1u);
+            atomicStore(&gi_work[GI_W_FILL_PENDING],1u);
+            break;
+        }
         total=next;
     }
     let gather_cap=cap-min(total,cap);
@@ -1588,7 +1605,9 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
                 gi_queue_shade(slot);
                 // A cell made for a gather's hit takes GI_H_HIT_GATHERS (U-RTVIS: the fan-out).
                 let hit_made=(gi_table[cold+GI_C_STATE]&GI_SECONDARY)!=0u && gi_word(GI_H_HIT_GATHERS)!=0u;
-                if all_known { gi_schedule(slot,select(gi_word(GI_H_GATHERS),gi_word(GI_H_HIT_GATHERS),hit_made)); }
+                // First fill's parent cells only stand in while finer cells are created: one gather.
+                let parent=(gi_table[cold+GI_C_STATE]&GI_FILL_PARENT)!=0u;
+                if all_known { gi_schedule(slot,select(select(gi_word(GI_H_GATHERS),gi_word(GI_H_HIT_GATHERS),hit_made),1u,parent)); }
             }
         }
         // Lane 0 of each cell has read its bits before the next cells clear them.
