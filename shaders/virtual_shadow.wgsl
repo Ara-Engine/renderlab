@@ -213,6 +213,24 @@ fn vsm_moved(level:u32,page:vec2<u32>)->bool {
     }
     return false;
 }
+// The fog map's partial redraw (vsm_render 2: a resident page that only moved casters touched):
+// whether light-space point c of `level` lies in a moved caster's rectangle that reaches the
+// level (vsm_moved), with `pad` of margin.
+fn vsm_point_moved(level:u32,lo:vec2<f32>,hi:vec2<f32>,pad:f32)->bool {
+    for(var i=0u;i<vsm.counts.w;i+=1u) {
+        if f32(level)>vsm.srects[i].x {continue;}
+        let r=vsm.rects[i];
+        if all(lo<=r.zw+vec2<f32>(pad)) && all(hi>=r.xy-vec2<f32>(pad)) {return true;}
+    }
+    return false;
+}
+// Texel t (window texels) of `level` is redrawn: a full page, or within one texel of a moved
+// rectangle on a partial one.
+fn vsm_texel_dirty(level:u32,t:vec2<u32>,flag:u32)->bool {
+    if flag!=2u {return flag!=0u;}
+    let c=vsm.levels[level].origin.xy+(vec2<f32>(t)+vec2<f32>(0.5))*vsm_texel(level);
+    return vsm_point_moved(level,c,c,vsm_texel(level));
+}
 // N8f: the caster cull's indirect dispatch (x, y, z), zeroed by the encoder and set once a
 // page is flagged, so page-work frames that render no page (camera motion) skip the cull.
 @group(0) @binding(37) var<storage,read_write> vsm_cull_args:array<atomic<u32>,4>;
@@ -298,6 +316,19 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     var slot=vsm_state[table+v];
     let moved=slot!=VSM_NONE && vsm_moved(level,page);
     if slot!=VSM_NONE && !moved {return;}
+    // The fog map: a resident page under moved casters redraws their rectangles alone (the
+    // cull keeps the clusters over them, the clear and the writes stay inside), outside the
+    // level claim and the budget: a moving caster costs what lies near it, not its pages.
+    if vsm_one_level() && moved {
+        vsm_render[v]=2u;
+        let k=atomicAdd(&vsm_pool[0],1u);
+        atomicStore(&vsm_pool[VSM_POOL_FREE+atomicLoad(&vsm_pool[10])+k],v);
+        let groups=max((vsm.counts.z+63u)/64u,1u);
+        atomicMax(&vsm_cull_args[0],min(groups,65535u));
+        atomicMax(&vsm_cull_args[1],(groups+65534u)/65535u);
+        atomicMax(&vsm_cull_args[2],1u);
+        return;
+    }
     // The fog map: the first level with a page to draw claims the frame (pool word 12), so a
     // cut redraws its levels one a frame; the others wait like pages past the budget.
     if vsm_one_level() {
@@ -409,7 +440,8 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
         var stale=false;
         for(var y=p0.y;y<=p1.y && !stale;y+=1u) {
             for(var x=p0.x;x<=p1.x;x+=1u) {
-                if vsm_render[vsm_vpage(level,vec2<u32>(x,y))]!=0u {stale=true;break;}
+                let flag=vsm_render[vsm_vpage(level,vec2<u32>(x,y))];
+                if flag==1u || (flag==2u && vsm_point_moved(level,lo,hi,2.0*texel)) {stale=true;break;}
             }
         }
         if !stale {continue;}
@@ -460,8 +492,14 @@ fn vsm_rendered(k:u32)->u32 {return vsm_pool_in[VSM_POOL_FREE+vsm_pool_in[10]+k]
 // Sparse: zeroes both layers of each page rasterized this frame, one workgroup per page
 // (an indirect dispatch over the pool's list).
 @compute @workgroup_size(256) fn vsm_clear_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
-    let slot=vsm_pages[vsm_section(2u)+vsm_rendered(group.x)];
+    let v=vsm_rendered(group.x);
+    let slot=vsm_pages[vsm_section(2u)+v];
+    // A partial page (the fog map's moved casters) clears their rectangles alone.
+    let n=vsm.counts.y;let level=v/(n*n);
+    let flag=vsm_render[v];
+    let corner=vsm_entry_page(level,v)*VSM_PAGE;
     for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
+        if !vsm_texel_dirty(level,corner+vec2<u32>(k%VSM_PAGE,k/VSM_PAGE),flag) {continue;}
         atomicStore(&vsm_top_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
         atomicStore(&vsm_peel_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
     }
@@ -486,7 +524,7 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     let pages=vsm.counts.y;
     let page=t/VSM_PAGE;
     let v=vsm_vpage(level,page);
-    if vsm_render[v]==0u {return;}
+    if !vsm_texel_dirty(level,t,vsm_render[v]) {return;}
     let side=pages*VSM_PAGE;
     var i=(level*side+t.y)*side+t.x;
     if vsm_sparse() {
