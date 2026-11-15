@@ -928,7 +928,7 @@ pub(super) fn disk_source() -> String {
         source.replace_range(equals..end, value);
     }
     // Exact hard edges: the edge pixels' rays traverse the software trace geometry.
-    let rays = "override VD_RAYS:u32=4u;";
+    let rays = "override VD_RAYS:u32=1u;";
     assert_eq!(source.matches(rays).count(), 1, "virtual_shadow_disk.wgsl: VD_RAYS moved");
     source = source.replacen(rays, &format!("override VD_RAYS:u32={}u;", edge_rays()), 1);
     source.push_str(SOFTWARE_GEOMETRY);
@@ -961,7 +961,7 @@ fn edge_rays() -> u32 {
             .ok()
             .and_then(|v| v.trim().parse().ok())
             .filter(|&n: &u32| n == 0 || 64 % n == 0)
-            .unwrap_or(4)
+            .unwrap_or(1)
     })
 }
 
