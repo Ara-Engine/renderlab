@@ -1,8 +1,10 @@
 // The ray-item arena is unused until sky setup. Only capped candidate lists live here;
 // the existing per-slot claim scratch records class/rank and deduplicates queue entries.
+// First fill can serve the entire current inflow, even when it exceeds a refresh cap.
 fn gi_priority_arena() -> u32 { return gi_frame.requests.z; }
 fn gi_priority_list(kind:u32,rank:u32) -> u32 {
-    return gi_priority_arena()+8u+kind*gi_word(32u)+rank;
+    if kind==0u { return gi_priority_arena()+16u+rank; }
+    return gi_priority_arena()+16u+gi_frame.offsets.x+(kind-1u)*gi_word(32u)+rank;
 }
 fn gi_priority_snapshot(slot:u32) -> bool {
     loop {
@@ -17,25 +19,62 @@ fn gi_priority_snapshot(slot:u32) -> bool {
     for(var i=id.x;i<count;i+=groups.x*64u) {
         let slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+i]);
         let state=gi_table[gi_cold(slot)+GI_C_STATE];
+        // Even a temporarily partial/ineligible queued cell must forget that it was
+        // visible when it goes off screen, so its return counts as new inflow.
+        if (state&GI_PRIORITY_PENDING_VISIBLE)!=0u
+            && (gi_table[gi_cold(slot)+GI_C_SEEN]!=gi_word(GI_H_FRAME) || gi_priority_raw_bounce(slot)!=0u) {
+            gi_table[gi_cold(slot)+GI_C_STATE]=state&~GI_PRIORITY_PENDING_VISIBLE;
+        }
         if gi_table[gi_hot(slot)]==0u || (state&GI_BQUEUED)==0u
             || (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))!=GI_TRACED { continue; }
         if !gi_priority_snapshot(slot) { continue; }
         let kind=gi_priority_class(slot);
+        let visible=gi_table[gi_cold(slot)+GI_C_SEEN]==gi_word(GI_H_FRAME);
+        let raw_empty=gi_priority_raw_bounce(slot)==0u;
+        let raw_class=select(select(1u,0u,raw_empty),2u,!visible);
+        atomicAdd(&gi_work[gi_priority_arena()+10u+raw_class],1u);
+        if visible && raw_empty {
+            if (state&GI_PRIORITY_PENDING_VISIBLE)==0u { atomicAdd(&gi_work[gi_priority_arena()+7u],1u); }
+            gi_table[gi_cold(slot)+GI_C_STATE]=state|GI_PRIORITY_PENDING_VISIBLE;
+            if gi_table[gi_hot(slot)+GI_HOT_BOUNCE]!=0u { atomicAdd(&gi_work[gi_priority_arena()+8u],1u); }
+        } else {
+            gi_table[gi_cold(slot)+GI_C_STATE]=state&~GI_PRIORITY_PENDING_VISIBLE;
+        }
         let rank=atomicAdd(&gi_work[gi_priority_arena()+kind],1u);
         atomicStore(&gi_work[GI_W_CLAIMS+slot],(kind<<30u)|(rank+1u));
-        if rank<gi_word(32u) { atomicStore(&gi_work[gi_priority_list(kind,rank)],slot); }
+        if kind==0u || rank<gi_word(32u) { atomicStore(&gi_work[gi_priority_list(kind,rank)],slot); }
     }
 }
 @compute @workgroup_size(1) fn gi_priority_select() {
     let at=gi_priority_arena();let cap=gi_word(32u);
-    let visible=gi_priority_visible_limit(cap);
-    let empty=min(atomicLoad(&gi_work[at]),visible);
-    let later=min(atomicLoad(&gi_work[at+1u]),visible-empty);
-    let background=min(atomicLoad(&gi_work[at+2u]),cap-empty-later);
+    if gi_word(41u)==0u {
+        let visible=gi_priority_visible_limit(cap);
+        let first=min(atomicLoad(&gi_work[at]),visible);
+        let refresh=min(atomicLoad(&gi_work[at+1u]),visible-first);
+        let background=min(atomicLoad(&gi_work[at+2u]),cap-first-refresh);
+        atomicStore(&gi_work[at+3u],first);
+        atomicStore(&gi_work[at+4u],refresh);
+        atomicStore(&gi_work[at+5u],background);
+        atomicStore(&gi_work[at+6u],first+refresh+background);
+        return;
+    }
+    // A soft gather target from the previous frame's measured cost. First fill's floor
+    // serves at least the current on-screen inflow; time overruns never starve that floor.
+    let inflow=atomicLoad(&gi_work[at+7u]);
+    let first_cap=max(gi_word(35u),inflow);
+    let empty=min(atomicLoad(&gi_work[at]),first_cap);
+    let first_ms=f32(empty)*bitcast<f32>(gi_word(36u));
+    let left_ms=max(0.0,bitcast<f32>(gi_word(38u))-first_ms);
+    let timed_cap=u32(min(floor(left_ms/max(bitcast<f32>(gi_word(37u)),1e-9)),f32(cap)));
+    let refresh_cap=min(timed_cap,gi_word(40u));
+    let visible=gi_priority_visible_limit(refresh_cap);
+    let later=min(atomicLoad(&gi_work[at+1u]),visible);
+    let background=min(atomicLoad(&gi_work[at+2u]),refresh_cap-later);
     atomicStore(&gi_work[at+3u],empty);
     atomicStore(&gi_work[at+4u],later);
     atomicStore(&gi_work[at+5u],background);
     atomicStore(&gi_work[at+6u],empty+later+background);
+    atomicStore(&gi_work[at+9u],select(0u,1u,first_ms>bitcast<f32>(gi_word(38u))));
 }
 var<workgroup> gi_priority_appends:atomic<u32>;
 var<workgroup> gi_priority_append_base:u32;
@@ -78,11 +117,13 @@ var<workgroup> gi_priority_append_base:u32;
     }
 }
 var<workgroup> gi_priority_compact_info:vec4<u32>;
-@compute @workgroup_size(64) fn gi_priority_gather_compacted(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+fn gi_priority_gather_compacted(group:vec3<u32>,groups:vec3<u32>,lane:u32,first:bool) {
     let at=gi_priority_arena();
     if lane==0u {gi_priority_compact_info=vec4<u32>(atomicLoad(&gi_work[at+3u]),atomicLoad(&gi_work[at+4u]),atomicLoad(&gi_work[at+5u]),atomicLoad(&gi_work[at+6u]));}
     let info=workgroupUniformLoad(&gi_priority_compact_info);
-    for(var i=group.x;i<info.w;i+=groups.x) {
+    let begin=select(info.x,0u,first);
+    let end=select(info.w,info.x,first);
+    for(var i=begin+group.x;i<end;i+=groups.x) {
         var kind=0u;var ordinal=i;
         if i>=info.x {kind=1u;ordinal=i-info.x;}
         if i>=info.x+info.y {kind=2u;ordinal=i-info.x-info.y;}
@@ -90,6 +131,12 @@ var<workgroup> gi_priority_compact_info:vec4<u32>;
         let slot=workgroupUniformLoad(&gi_wg_n);
         gi_priority_gather_cell(slot,lane);
     }
+}
+@compute @workgroup_size(64) fn gi_priority_gather_first(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    gi_priority_gather_compacted(group,groups,lane,true);
+}
+@compute @workgroup_size(64) fn gi_priority_gather_refresh(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    gi_priority_gather_compacted(group,groups,lane,false);
 }
 // Defer the entire queue without reading cell records or casting any gather rays.
 @compute @workgroup_size(64) fn gi_priority_hold_queue(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
