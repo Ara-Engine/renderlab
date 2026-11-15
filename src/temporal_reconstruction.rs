@@ -855,6 +855,10 @@ fn cold_probes() -> bool {
 /// with that history. Every other receiver traces the frame's budget, in main's order.
 pub(crate) const HELD_PROBES: u32 = 8;
 pub(crate) const HELD_STREAK: u32 = 4;
+/// sunrt-7: jittered frames a receiver's texel must have held one sun class before a still frame
+/// reuses it without a ray. HELD_STREAK's 4 let thin rails and shadow slivers, which the jitter
+/// reaches only on some frames, keep the wrong class (Glint `descent`, up to 50 codes on edges).
+pub(crate) const SUN_REUSE_STREAK: u32 = 32;
 /// The held budget's frame record (HELD_SOURCE `RtvisHeld`): the previous unjittered camera
 /// matrix, the words (enabled, probes, streak, and the sun visibility history's use), the
 /// moving placements' swept bounds with the sun's direction and widened disk tangent, and
@@ -1768,9 +1772,13 @@ impl Planner {
         } else {
             0
         };
-        // sunrt-7 still reuse (primary_sun_tile_held.wgsl tr1_tile_reuse): only where the hint
-        // is on, so a reused class has HELD_STREAK frames of traced agreement behind it.
-        let reuse = u32::from(hint != 0 && unchanged && sun_still_reuse());
+        // sunrt-7 still reuse (primary_sun_tile_held.wgsl tr1_tile_reuse): the streak a reused
+        // class needs, only where the hint is on; 0 is off.
+        let reuse = if hint != 0 && unchanged && sun_still_reuse() {
+            SUN_REUSE_STREAK
+        } else {
+            0
+        };
         for w in [turn_step, hint, reuse, 0] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
@@ -2686,7 +2694,11 @@ mod tests {
         };
         let mut plan = Planner::new();
         assert_eq!(reuse(&plan.prepare(still(0))), 0, "a restart");
-        let on = u32::from(sun_still_reuse() && sun_tile_probes() != 0);
+        let on = if sun_still_reuse() && sun_tile_probes() != 0 {
+            SUN_REUSE_STREAK
+        } else {
+            0
+        };
         assert_eq!(reuse(&plan.prepare(still(1))), on);
         let moved = PlanInputs {
             rigid_motion: true,
