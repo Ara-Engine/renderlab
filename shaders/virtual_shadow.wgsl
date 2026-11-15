@@ -426,6 +426,10 @@ fn vsm_box_redrawn(level:u32,lo:vec2<f32>,hi:vec2<f32>)->bool {
     if any(b<vec2<f32>(0.0)) || any(a>=vec2<f32>(f32(pages))) {return false;}
     let p0=vec2<u32>(max(a,vec2<f32>(0.0)));
     let p1=vec2<u32>(min(b,vec2<f32>(f32(pages-1u))));
+    // A box over many pages (terrain at the fine levels) stays live: its clusters are culled
+    // one by one, and one thread scanning thousands of pages would hold the pass up.
+    let span=p1-p0+vec2<u32>(1u);
+    if span.x*span.y>16u {return true;}
     for(var y=p0.y;y<=p1.y;y+=1u) {
         for(var x=p0.x;x<=p1.x;x+=1u) {
             let flag=vsm_render[vsm_vpage(level,vec2<u32>(x,y))];
