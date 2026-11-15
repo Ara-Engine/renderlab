@@ -3624,12 +3624,6 @@ impl Renderer {
         let tiles = grid[0] * grid[1];
         if map || disk {
             pass.dispatch_workgroups(grid[0], grid[1], 1);
-            if disk && edge_rays() > 0 {
-                // The edge pixels' rays: a thread per list entry (empty ones return at once).
-                let groups = edge_capacity(r.size).div_ceil(64) as u32;
-                pass.set_pipeline(&p.disk_edges);
-                pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
-            }
         } else {
             // Casters-only frames keep the grid's order (vsm_lookup).
             if let (true, Some([count, place])) = (order && !state.casters_only, &p.order) {
@@ -3649,6 +3643,20 @@ impl Renderer {
             }
         }
         drop(pass);
+        if disk && edge_rays() > 0 {
+            // The edge pixels' rays: a thread per list entry (empty ones return at once).
+            mark(encoder, "sun_shadow.edges");
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Disk lookup hard edges"),
+                timestamp_writes: None,
+            });
+            let groups = edge_capacity(r.size).div_ceil(64) as u32;
+            pass.set_pipeline(&p.disk_edges);
+            pass.set_bind_group(0, &*g.disk, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(3, self.lighting.bind(), &[]);
+            pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
+        }
         // Measurement (`RENDERLAB_VD_EDGE_LOG=<file>`): the edge pixels, a line a frame.
         if disk && edge_log().is_some() {
             state.edge_counts.lock().unwrap().record(encoder, &r.edges, 0, ());

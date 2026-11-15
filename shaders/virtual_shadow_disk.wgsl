@@ -524,6 +524,8 @@ override VD_EDGES:bool=false;
 // lacks (meshes over its triangle cap) keeps the map's answer. 0 rays: the map alone.
 override VD_RAYS:u32=4u;
 override VD_EDGE_HARD:f32=1.5;
+// Measurement (`RENDERLAB_VD=VD_EDGE_SHOW=true`): edge pixels drawn fully shadowed.
+override VD_EDGE_SHOW:bool=false;
 // Per placement, whether its mesh is in the trace geometry (one bit each).
 @group(0) @binding(61) var<storage,read> vd_traceable:array<u32>;
 // The edge pixels for vd_edges: a header (count, those left to the map for an untraced caster),
@@ -814,7 +816,7 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     if !vd_px.valid || vd_px.level==VSM_NONE {return;}
     vd_far=vec2<u32>(atomicLoad(&vd_edge_list[at+1u]),atomicLoad(&vd_edge_list[at+2u]));
     vd_cut=bitcast<f32>(atomicLoad(&vd_edge_list[at+3u]));
-    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(vd_edge_rays(id)));
+    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(select(vd_edge_rays(id),0u,VD_EDGE_SHOW)));
 }
 @compute @workgroup_size(8,4) fn vd_lookup(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>) {
     let size=textureDimensions(vsm_world);
