@@ -151,11 +151,11 @@ fn gi_rx_accumulate(at:u32,w:f32) {
         let rid=(base+o)*2u+primary_region.xy;
         if any(rid>=size) || any(rid>=primary_region.zw) {continue;}
         let at=rid.y*size.x+rid.x;
-        let meta=gi_prepared[at].r3;
-        if meta.w!=key {continue;}
+        let rep=gi_prepared[at].r3;
+        if rep.w!=key {continue;}
         // A representative without a cache value, or off this pixel's plane, is no stand-in.
         if bitcast<f32>(gi_prepared[at].r0.x)<0.0 {continue;}
-        let d=bitcast<vec3<f32>>(meta.xyz)-world;
+        let d=bitcast<vec3<f32>>(rep.xyz)-world;
         if abs(dot(n,d))>0.25*length(d)+1e-6 {continue;}
         gi_rx_accumulate(at,w);
         total+=w;
