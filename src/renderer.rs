@@ -179,6 +179,36 @@ fn submit_log(line: impl FnOnce() -> String) {
     }
 }
 
+/// sunrt-3: split traced frames' late commands into three submits (GI; GI receiver to opaque
+/// shading; the rest), so the GPU starts each part while the CPU encodes and submits the next.
+/// wgpu's submit walks every TLAS instance for each TLAS binding a command buffer uses (6,338
+/// on Outpost: a 3 ms late submit), and the GPU idled until that one submit returned. Queue
+/// writes made while encoding a part land before that part's submit; no part reads a buffer a
+/// later part writes. Ray-hardware frames only: without a TLAS the late submit is cheap and
+/// the GPU never waited there. `RENDERLAB_LATE_PARTS=0` keeps one late submit.
+fn late_parts() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_LATE_PARTS").map_or(true, |v| v != "0"))
+}
+
+impl Renderer {
+    /// Submits the commands encoded so far and continues in a fresh encoder; returns the time
+    /// the submit took.
+    fn submit_part(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        label: &'static str,
+    ) -> std::time::Duration {
+        let next = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+        let part = std::mem::replace(encoder, next).finish();
+        let submitted_at = Instant::now();
+        self.queue.submit([part]);
+        submitted_at.elapsed()
+    }
+}
+
 #[cfg(test)]
 impl Renderer {
     /// Reloads the standard program, as edits of its file do.
@@ -3460,6 +3490,10 @@ impl Renderer {
         // both halves run in the same queue order, so the frame's results are unchanged.
         let split = lit && traced && !temporal;
         let mut early_submit = std::time::Duration::ZERO;
+        // RENDERLAB_SUBMIT_LOG: the late window's CPU parts (GI/post preparation, then the
+        // time from the early submit's return to the late submit's return).
+        let mut late_prepare = std::time::Duration::ZERO;
+        let mut late_start: Option<Instant> = None;
         if lit && !split {
             self.prepare_cache_and_post(
                 draws,
@@ -3669,7 +3703,10 @@ impl Renderer {
                     let submitted_at = Instant::now();
                     self.queue.submit([early]);
                     early_submit = submitted_at.elapsed();
+                    let prepare_start = Instant::now();
+                    late_start = Some(prepare_start);
                     self.prepare_cache_and_post(draws, camera, color, true, true)?;
+                    late_prepare = prepare_start.elapsed();
                 }
                 if streaming && !material {
                     self.encode_request_clear(&mut encoder);
@@ -3686,6 +3723,9 @@ impl Renderer {
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
+                if split && self.hardware_shadows.is_some() && late_parts() {
+                    early_submit += self.submit_part(&mut encoder, "mesh frame, late shading");
+                }
                 self.ensure_gi_receiver_pass(shading)?;
                 mark(&mut encoder, "gi_receiver");
                 self.encode_gi_receiver_pass(&mut encoder, shading);
@@ -3719,6 +3759,9 @@ impl Renderer {
                         mark(&mut encoder, "shading");
                     }
                     self.encode_primary_shading(&mut encoder, shading, stamps(0));
+                    if split && self.hardware_shadows.is_some() && late_parts() {
+                        early_submit += self.submit_part(&mut encoder, "mesh frame, late tail");
+                    }
                     mark(&mut encoder, "reflection.trace");
                     self.encode_reflection_trace(&mut encoder, shading);
                     mark(&mut encoder, "reflection.hits");
@@ -4003,12 +4046,19 @@ impl Renderer {
         let submit = submitted_at.elapsed() + early_submit;
         submit_log(|| {
             let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.;
+            let instances = self
+                .hardware_shadows
+                .as_ref()
+                .and_then(|h| h.active_placements())
+                .unwrap_or(0);
             format!(
-                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2}",
+                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2} late_prepare={:.2} late_window={:.2} tlas_instances={instances}",
                 self.submissions + 1,
                 ms(finish),
                 ms(early_submit),
                 ms(submit - early_submit),
+                ms(late_prepare),
+                late_start.map_or(0.0, |t| ms(t.elapsed())),
             )
         });
         self.submissions += 1;
