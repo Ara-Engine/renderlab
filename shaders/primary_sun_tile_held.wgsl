@@ -23,3 +23,6 @@ fn tr1_tile_hint(receiver:Receiver,slot:u32)->u32 {
     return select(4u,2u,cls==2u);
 }
 fn tr1_tile_hint_probes()->u32 {return rtvis_held.sun.y;}
+// sunrt-7: rtvis_held.sun.z is set on frames the planner found unchanged (camera, placements,
+// poses, sun, restart zones): a hinted receiver's history class is still its answer.
+fn tr1_tile_reuse()->bool {return rtvis_held.sun.z!=0u;}

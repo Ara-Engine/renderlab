@@ -745,6 +745,12 @@ pub(crate) fn sun_tile_probes() -> u32 {
         }
     })
 }
+/// sunrt-7: still frames reuse settled sun classes (`RtvisHeld::sun.z`, primary_sun_tile.wgsl);
+/// `RENDERLAB_SUN_STILL_REUSE=0` traces them as before.
+pub(crate) fn sun_still_reuse() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_SUN_STILL_REUSE").map_or(true, |v| v != "0"))
+}
 const SUN_TILE: &str = include_str!("../shaders/primary_sun_tile.wgsl");
 const SUN_TILE_HELD: &str = include_str!("../shaders/primary_sun_tile_held.wgsl");
 /// sunrt-2: probes of a tile whose every receiver's sun history is one stable class
@@ -822,7 +828,7 @@ fn with_sun_tile(source: String, probes: u32) -> Result<String, Error> {
     }
     let mut source = source.replacen(
         header,
-        "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);\n    if tr1_tile_state==3u {tr1_tile_state=0u;tr1_rays=tr1_tile_pause;return tr1_tile_count;}\n    var tr1_first=lane;\n    if tr1_tile_state==2u {tr1_tile_state=0u;tr1_first=tr1_tile_pause;visible=tr1_tile_count;}\n    for(var j=tr1_first;j<tr1_rays;j+=1u) {\n        if j==tr1_tile_pause && tr1_tile_state==1u {tr1_tile_state=2u;break;}\n",
+        "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);\n    if tr1_tile_state==3u {tr1_tile_state=0u;tr1_rays=tr1_tile_pause;return tr1_tile_count;}\n    if tr1_tile_state==4u {tr1_tile_state=0u;tr1_rays=1u;return tr1_tile_count;}\n    var tr1_first=lane;\n    if tr1_tile_state==2u {tr1_tile_state=0u;tr1_first=tr1_tile_pause;visible=tr1_tile_count;}\n    for(var j=tr1_first;j<tr1_rays;j+=1u) {\n        if j==tr1_tile_pause && tr1_tile_state==1u {tr1_tile_state=2u;break;}\n",
         1,
     );
     for (seam, vote) in votes {
@@ -1272,6 +1278,9 @@ pub(crate) struct PlanInputs<'a> {
     pub(crate) skin_bounds: Option<crate::shadow_plan::Bounds>,
     pub(crate) skin_revisions: Vec<u64>,
     pub(crate) rigid_motion: bool,
+    /// sunrt-7: no draw is skinned and none was edited (placements added, removed or moved)
+    /// since this view's last frame.
+    pub(crate) scene_static: bool,
     /// U-RTVIS: the world bounds of every placement that moved or is skinned, at both its
     /// previous and current transforms; no held stop inside their swept sun shadow.
     pub(crate) moving_bounds: Option<crate::shadow_plan::Bounds>,
@@ -1648,12 +1657,15 @@ impl Planner {
             bytes.extend_from_slice(&value.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), FRAME_BYTES);
+        // sunrt-7: nothing that sets a receiver's sun visibility changed since the previous
+        // frame: the unjittered camera, every placement and pose, the sun, and no restart zone.
+        let unchanged = sampling_still && i.scene_static && !zoned && !posed;
         let held = self.held_record(
             (i.moving_bounds, i.directional_disk_angle),
             (previous_matrix, matrix),
             turn,
             &suns,
-            listed,
+            (listed, unchanged),
         );
         let mut rl_history = Vec::with_capacity(RL_HISTORY_BYTES);
         rl_history.extend_from_slice(&matrix_bytes(previous_matrix));
@@ -1692,7 +1704,7 @@ impl Planner {
         (previous_matrix, matrix): (Mat4, Mat4),
         turn: f32,
         suns: &[Vec3],
-        listed: bool,
+        (listed, unchanged): (bool, bool),
     ) -> Vec<u8> {
         let enabled = !self.reset
             && turn == 0.0
@@ -1756,7 +1768,10 @@ impl Planner {
         } else {
             0
         };
-        for w in [turn_step, hint, 0, 0] {
+        // sunrt-7 still reuse (primary_sun_tile_held.wgsl tr1_tile_reuse): only where the hint
+        // is on, so a reused class has HELD_STREAK frames of traced agreement behind it.
+        let reuse = u32::from(hint != 0 && unchanged && sun_still_reuse());
+        for w in [turn_step, hint, reuse, 0] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), HELD_BYTES);
@@ -2232,6 +2247,7 @@ impl Renderer {
         let mut skin_bounds = None;
         let mut skin_revisions = vec![];
         let mut rigid_motion = false;
+        let mut scene_static = true;
         let mut moving_bounds = None;
         for d in draws {
             if let Some(s) = &d.mesh.skin {
@@ -2240,8 +2256,10 @@ impl Renderer {
             // Nothing edited since this view's last frame and no skin: no placement moved, and
             // the scene box is the union of the collection's cached world boxes.
             let state = &d.instances.state;
+            let edited = state.edited_since_submit(self.view_key.0, self.view.last_frame);
+            scene_static &= d.mesh.skin.is_none() && !edited;
             if d.mesh.skin.is_none()
-                && !state.edited_since_submit(self.view_key.0, self.view.last_frame)
+                && !edited
                 && let Ok(boxes) = state.world_bounds(d.mesh.bounds)
             {
                 for &b in boxes.iter() {
@@ -2310,6 +2328,7 @@ impl Renderer {
                 skin_bounds,
                 skin_revisions,
                 rigid_motion,
+                scene_static,
                 moving_bounds,
                 listing,
             });
@@ -2495,6 +2514,7 @@ mod tests {
             skin_bounds: None,
             skin_revisions: vec![],
             rigid_motion: false,
+            scene_static: true,
             moving_bounds: None,
             listing: false,
         }
@@ -2648,6 +2668,38 @@ mod tests {
         plan.cut = true;
         let cut = plan.prepare(inputs(&[sun(0.25)], 3));
         assert_eq!(enabled(&cut), 0);
+    }
+
+    /// sunrt-7: the still reuse word (`RtvisHeld::sun.z`) is on only for a frame that changes
+    /// nothing setting a receiver's sun visibility.
+    #[test]
+    fn still_reuse_needs_an_unchanged_frame() {
+        let sun = [Light::Directional {
+            travel: Vec3::new(0.2, -1.0, 0.3),
+            lux: [1.0; 3],
+        }];
+        let reuse = |p: &Planned| u32::from_ne_bytes(p.held[200..204].try_into().unwrap());
+        let still = |frame| PlanInputs {
+            matrix: Mat4::IDENTITY,
+            eye: Vec3::Y,
+            ..inputs(&sun, frame)
+        };
+        let mut plan = Planner::new();
+        assert_eq!(reuse(&plan.prepare(still(0))), 0, "a restart");
+        let on = u32::from(sun_still_reuse() && sun_tile_probes() != 0);
+        assert_eq!(reuse(&plan.prepare(still(1))), on);
+        let moved = PlanInputs {
+            rigid_motion: true,
+            ..still(2)
+        };
+        assert_eq!(reuse(&plan.prepare(moved)), 0, "a placement moved");
+        let edited = PlanInputs {
+            scene_static: false,
+            ..still(3)
+        };
+        assert_eq!(reuse(&plan.prepare(edited)), 0, "a placement was edited");
+        assert_eq!(reuse(&plan.prepare(still(4))), on);
+        assert_eq!(reuse(&plan.prepare(inputs(&sun, 5))), 0, "the camera moved");
     }
 
     /// P-RELIT: a light switched off restarts everything it lit above the budget, and a zero
