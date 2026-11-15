@@ -150,6 +150,20 @@ pub(super) struct TraceAbi {
     args_group: Owned<wgpu::BindGroupLayout>,
     args_layout: Owned<wgpu::PipelineLayout>,
     cache_group: Option<Owned<wgpu::BindGroupLayout>>,
+    /// The same layouts with an empty group 1 (and, for the arguments, an empty group 3), and
+    /// the empty group they bind: for the kernels that read neither (`lean`).
+    lean_layout: Owned<wgpu::PipelineLayout>,
+    lean_args_layout: Owned<wgpu::PipelineLayout>,
+    empty: Owned<wgpu::BindGroup>,
+}
+/// The trace's kernels that read no traced geometry table (group 1) are built on a layout whose
+/// group 1 is empty, and bind the empty group: wgpu merges every resource of each bound group into
+/// its usage tracking for each dispatch when the command buffer finishes, and group 1 holds the
+/// per-draw arrays (TRACED_DRAWS buffers each). The same kernels and results.
+/// `RENDERLAB_RL_LEAN=0` binds the full group 1.
+fn lean() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_LEAN").map_or(true, |v| v != "0"))
 }
 impl TraceAbi {
     pub fn new(
@@ -206,7 +220,35 @@ impl TraceAbi {
             }),
             ResourceKind::PipelineLayout,
         );
-        Self { group, layout, args_group, args_layout, cache_group }
+        let empty_layout = ledger.own(
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor { label: Some("reflection trace, empty"), entries: &[] }),
+            ResourceKind::BindGroupLayout,
+        );
+        let empty = ledger.own(
+            device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("reflection trace, empty"),
+                layout: &empty_layout,
+                entries: &[],
+            }),
+            ResourceKind::BindGroup,
+        );
+        let lean_layout = ledger.own(
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("reflection trace ABI, lean"),
+                bind_group_layouts: &[Some(&group), Some(&empty_layout), cache_group.as_ref().map(|g| &**g), Some(lighting)],
+                immediate_size: 0,
+            }),
+            ResourceKind::PipelineLayout,
+        );
+        let lean_args_layout = ledger.own(
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("reflection list arguments ABI, lean"),
+                bind_group_layouts: &[Some(&group), Some(&empty_layout), Some(&args_group), Some(&empty_layout)],
+                immediate_size: 0,
+            }),
+            ResourceKind::PipelineLayout,
+        );
+        Self { group, layout, args_group, args_layout, cache_group, lean_layout, lean_args_layout, empty }
     }
 }
 
@@ -245,6 +287,8 @@ pub(super) struct TracePipelines {
     owners: Owned<wgpu::ComputePipeline>,
     pixels: Owned<wgpu::ComputePipeline>,
     args: Owned<wgpu::ComputePipeline>,
+    /// Which of list_args, owners, pixels and args are on the lean layouts (`lean`).
+    lean: [bool; 4],
     /// The deferred composite: its group layout and additive point pipeline.
     composite: (Owned<wgpu::BindGroupLayout>, Owned<wgpu::RenderPipeline>),
 }
@@ -417,11 +461,27 @@ impl Renderer {
                 ResourceKind::ComputePipeline,
             )
         };
+        // A kernel goes on its lean layout when it validates there (it reads no group 1).
+        let kernel = |entry, full: &wgpu::PipelineLayout, lean_layout: &wgpu::PipelineLayout| {
+            if lean() {
+                let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let built = pipeline(entry, lean_layout);
+                if pollster::block_on(scope.pop()).is_none() {
+                    return (built, true);
+                }
+            }
+            (pipeline(entry, full), false)
+        };
+        let (list_args, l0) = kernel("rl_list_args", &abi.args_layout, &abi.lean_args_layout);
+        let (owners, l1) = kernel("rl_slot_owners", &abi.layout, &abi.lean_layout);
+        let (pixels, l2) = kernel("rl_trace_pixels", &abi.layout, &abi.lean_layout);
+        let (args, l3) = kernel("rl_hit_args", &abi.layout, &abi.lean_layout);
         let pipelines = TracePipelines {
-            list_args: pipeline("rl_list_args", &abi.args_layout),
-            owners: pipeline("rl_slot_owners", &abi.layout),
-            pixels: pipeline("rl_trace_pixels", &abi.layout),
-            args: pipeline("rl_hit_args", &abi.layout),
+            list_args,
+            owners,
+            pixels,
+            args,
+            lean: [l0, l1, l2, l3],
             composite: self.rl_composite_kit(),
         };
         if let Some(error) = scopes.finish() {
@@ -472,6 +532,10 @@ impl Renderer {
         });
         bind(&mut compute);
         compute.set_bind_group(2, &args, &[]);
+        if pipelines.lean[0] {
+            compute.set_bind_group(1, &*abi.empty, &[]);
+            compute.set_bind_group(3, &*abi.empty, &[]);
+        }
         compute.set_pipeline(&pipelines.list_args);
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
@@ -484,15 +548,22 @@ impl Renderer {
         if let Some(cache) = cache.as_ref() {
             compute.set_bind_group(2, &**cache, &[]);
         }
+        let group1 = |compute: &mut wgpu::ComputePass<'_>, lean: bool| {
+            compute.set_bind_group(1, if lean { &*abi.empty } else { &*g.arrays }, &[]);
+        };
         if dense {
+            group1(&mut compute, pipelines.lean[1]);
             compute.set_pipeline(&pipelines.owners);
             compute.dispatch_workgroups_indirect(&pass.list_args.value, 32);
+            group1(&mut compute, pipelines.lean[2]);
             compute.set_pipeline(&pipelines.pixels);
             compute.dispatch_workgroups_indirect(&pass.list_args.value, 48);
         } else {
+            group1(&mut compute, pipelines.lean[2]);
             compute.set_pipeline(&pipelines.pixels);
             compute.dispatch_workgroups_indirect(&pass.list_args.value, 0);
         }
+        group1(&mut compute, pipelines.lean[3]);
         compute.set_pipeline(&pipelines.args);
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
