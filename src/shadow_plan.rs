@@ -92,6 +92,13 @@ pub(crate) fn directional(
     )
 }
 
+thread_local! {
+    /// RENDERLAB_SUBMIT_LOG: the last directional plan's parts (bounds validation, the casters'
+    /// light-space extents, the cascade fits), accumulated per frame until read.
+    pub(crate) static PLAN_SPLIT: std::cell::Cell<[std::time::Duration; 3]> =
+        const { std::cell::Cell::new([std::time::Duration::ZERO; 3]) };
+}
+
 pub(crate) fn directional_oriented(
     camera: &Camera,
     viewport: [u32; 2],
@@ -100,7 +107,9 @@ pub(crate) fn directional_oriented(
     resolution: u32,
     casters: &[Bounds],
 ) -> Result<Vec<ShadowView>, Error> {
+    let started = std::time::Instant::now();
     validate_bounds(casters)?;
+    let validated = started.elapsed();
     if resolution < 2 || viewport.contains(&0) || split_ends.is_empty() {
         return Err(Error::InvalidInput(
             "directional shadows need resolution >= 2, a nonempty viewport and splits",
@@ -124,10 +133,13 @@ pub(crate) fn directional_oriented(
         ));
     }
     // Transform once per light, not once per cascade. Full bounds include offscreen casters.
+    let transform_start = std::time::Instant::now();
     let light_bounds: Vec<_> = casters
         .iter()
         .map(|bounds| extents(bounds.corners().map(|p| rotation.transform_point3(p))))
         .collect();
+    let transformed = transform_start.elapsed();
+    let fits_start = std::time::Instant::now();
     let mut views = Vec::with_capacity(split_ends.len());
     let mut near = camera.near();
     for &far in split_ends {
@@ -211,6 +223,14 @@ pub(crate) fn directional_oriented(
         views.push(planned);
         near = far;
     }
+    let fitted = fits_start.elapsed();
+    PLAN_SPLIT.with(|split| {
+        let mut parts = split.get();
+        parts[0] += validated;
+        parts[1] += transformed;
+        parts[2] += fitted;
+        split.set(parts);
+    });
     Ok(views)
 }
 

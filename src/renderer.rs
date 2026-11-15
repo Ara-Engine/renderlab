@@ -4070,7 +4070,7 @@ impl Renderer {
                 .and_then(|h| h.active_placements())
                 .unwrap_or(0);
             format!(
-                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2} late_prepare={:.2} late_window={:.2} tlas_instances={instances} shadow_split={:?} cpu_stages={}",
+                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2} late_prepare={:.2} late_window={:.2} tlas_instances={instances} shadow_split={:?} plan_split={:?} cpu_stages={}",
                 self.submissions + 1,
                 ms(finish),
                 ms(early_submit),
@@ -4078,6 +4078,9 @@ impl Renderer {
                 ms(late_prepare),
                 late_start.map_or(0.0, |t| ms(t.elapsed())),
                 SHADOW_SPLIT.with(|split| split.get().map(|d| (ms(d) * 1000.).round() / 1000.)),
+                crate::shadow_plan::PLAN_SPLIT.with(|split| {
+                    split.replace([Duration::ZERO; 3]).map(|d| (ms(d) * 1000.).round() / 1000.)
+                }),
                 cpu_stages
                     .iter()
                     .zip(cpu_stages.iter().skip(1).map(|(_, t)| *t).chain([finish_start]))
