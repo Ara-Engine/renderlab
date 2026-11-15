@@ -101,20 +101,6 @@ fn light_reuse_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_LIGHT_REUSE").map_or(true, |v| v != "0"))
 }
-/// Level hysteresis in levels (shaders/gi_cache.wgsl gi_probe): `RENDERLAB_GI_LEVEL_HYST=x`,
-/// 0 off.
-fn level_hysteresis() -> f32 {
-    static H: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *H.get_or_init(|| {
-        std::env::var("RENDERLAB_GI_LEVEL_HYST")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .filter(|h: &f32| h.is_finite() && *h >= 0.0 && *h < 1.0)
-            .unwrap_or(LEVEL_HYSTERESIS)
-    })
-}
-/// The default for `level_hysteresis` (on only once its picture holds).
-const LEVEL_HYSTERESIS: f32 = 0.5;
 /// The default for `near_occluded_rays`.
 const NEAR_OCCLUDED_RAYS: u32 = 4;
 fn first_fill_on(software: bool) -> bool {
@@ -1230,7 +1216,6 @@ impl Planner {
         header[15] = s.near_light_rays;
         header[55] = near_occluded_rays();
         header[56] = u32::from(light_reuse_on());
-        header[57] = level_hysteresis().to_bits();
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
