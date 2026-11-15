@@ -28,9 +28,7 @@ pub(super) struct Atlas {
 fn clear_pipeline(device: &PipelineDevice, ledger: &Ledger) -> Owned<wgpu::RenderPipeline> {
     let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("LC3 tile clear"),
-        source: wgpu::ShaderSource::Wgsl(
-            include_str!("../shaders/local_light_clear.wgsl").into(),
-        ),
+        source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/local_light_clear.wgsl").into()),
     });
     ledger.own(
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -62,7 +60,6 @@ fn clear_pipeline(device: &PipelineDevice, ledger: &Ledger) -> Owned<wgpu::Rende
         }),
         ResourceKind::RenderPipeline,
     )
-
 }
 
 impl Atlas {
@@ -152,9 +149,8 @@ impl Atlas {
         }
         let bytes = u64::from(layers) * 4 * u64::from(size[0]) * u64::from(size[1])
             + uniforms.as_ref().map_or(0, |u| u.size());
-        let clear = (slots > 0).then(|| {
-            prepared_clear.unwrap_or_else(|| Arc::new(clear_pipeline(device, ledger)))
-        });
+        let clear = (slots > 0)
+            .then(|| prepared_clear.unwrap_or_else(|| Arc::new(clear_pipeline(device, ledger))));
         Self {
             _texture: texture,
             view,
@@ -369,8 +365,12 @@ impl LocalMaps {
     }
     pub(super) fn prewarm_clear(&mut self, device: &PipelineDevice, ledger: &Ledger) {
         if self.prepared_clear.is_none() {
-            self.prepared_clear = Some(self.atlas.clear.clone()
-                .unwrap_or_else(|| Arc::new(clear_pipeline(device, ledger))));
+            self.prepared_clear = Some(
+                self.atlas
+                    .clear
+                    .clone()
+                    .unwrap_or_else(|| Arc::new(clear_pipeline(device, ledger))),
+            );
         }
     }
     pub fn collect(&mut self, completed: u64) {

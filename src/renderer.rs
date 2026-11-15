@@ -1044,8 +1044,14 @@ impl Renderer {
                     ],
                 )
             });
-        let primary = (traced || raster_primary)
-            .then(|| PrimaryState::new(&device, &ledger, &lighting.bindings, hardware.is_some() && fog_cull::enabled()));
+        let primary = (traced || raster_primary).then(|| {
+            PrimaryState::new(
+                &device,
+                &ledger,
+                &lighting.bindings,
+                hardware.is_some() && fog_cull::enabled(),
+            )
+        });
         let enabled = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
         let timing = enabled.then(|| Timing {
             queries: ledger.own(
@@ -1907,11 +1913,7 @@ impl Renderer {
         });
         self.submissions += 1;
         if let (Some(hardware), Some(acceleration)) = (&mut self.hardware_shadows, &acceleration) {
-            hardware.mesh_submitted(
-                &self.ledger,
-                acceleration.clone(),
-                self.submissions,
-            );
+            hardware.mesh_submitted(&self.ledger, acceleration.clone(), self.submissions);
         }
         self.record_flight(
             slot,
@@ -2321,8 +2323,8 @@ impl Renderer {
         // A BC5 normal map adds its variance layer (src/normal_variance_bc.rs) only while an
         // installed program reads it; otherwise it waits (normal_variance_lazy).
         let bc5 = data.format == asset::BlockFormat::Bc5;
-        let variance = (bc5 && self.variance_read())
-            .then(|| crate::normal_variance_bc::variance_layer(data));
+        let variance =
+            (bc5 && self.variance_read()).then(|| crate::normal_variance_bc::variance_layer(data));
         let layers: Vec<&Vec<Vec<u8>>> = std::iter::once(&data.mips).chain(&variance).collect();
         let (texture, view, uploaded) = self.block_texture(data, &layers);
         debug_assert_eq!(uploaded, bytes * layers.len() as u64);
@@ -2372,7 +2374,9 @@ impl Renderer {
             ResourceKind::Texture,
         );
         let view = self.ledger.own(
-            texture.create_view(&texture_residency::texture_view_descriptor(data.format.role())),
+            texture.create_view(&texture_residency::texture_view_descriptor(
+                data.format.role(),
+            )),
             ResourceKind::TextureView,
         );
         let block = asset::BlockFormat::BLOCK;
@@ -3495,13 +3499,7 @@ impl Renderer {
         let mut late_prepare = std::time::Duration::ZERO;
         let mut late_start: Option<Instant> = None;
         if lit && !split {
-            self.prepare_cache_and_post(
-                draws,
-                camera,
-                color,
-                traced && !temporal,
-                traced,
-            )?;
+            self.prepare_cache_and_post(draws, camera, color, traced && !temporal, traced)?;
         }
         self.check_fault()?;
         let view = self
@@ -3620,7 +3618,13 @@ impl Renderer {
                     // the material record after this one decode. The switch-off branch
                     // below retains its existing fused visibility/sun kernels.
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
-                        self.encode_visibility_logged(&mut encoder, soft, stamps(6), None, &mut mark);
+                        self.encode_visibility_logged(
+                            &mut encoder,
+                            soft,
+                            stamps(6),
+                            None,
+                            &mut mark,
+                        );
                     } else {
                         self.encode_primary_visibility(&mut encoder, soft, stamps(6));
                     }
@@ -3666,7 +3670,13 @@ impl Renderer {
                 } else if soft && self.view.soft_mode == crate::SoftShadows::Virtual {
                     // Traced receivers, then N8 visibility with no ray queries.
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
-                        self.encode_visibility_logged(&mut encoder, true, stamps(6), None, &mut mark);
+                        self.encode_visibility_logged(
+                            &mut encoder,
+                            true,
+                            stamps(6),
+                            None,
+                            &mut mark,
+                        );
                     } else {
                         self.encode_primary_visibility(&mut encoder, true, stamps(6));
                     }
@@ -3677,7 +3687,13 @@ impl Renderer {
                     self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
                 } else {
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
-                        self.encode_visibility_logged(&mut encoder, soft, stamps(6), None, &mut mark);
+                        self.encode_visibility_logged(
+                            &mut encoder,
+                            soft,
+                            stamps(6),
+                            None,
+                            &mut mark,
+                        );
                     } else {
                         self.encode_primary_visibility(&mut encoder, soft, stamps(6));
                     }
@@ -4080,10 +4096,10 @@ impl Renderer {
                     );
                 }
             }
-            self.hardware_shadows.as_mut().unwrap().scene_submitted(
-                &self.ledger,
-                self.submissions,
-            );
+            self.hardware_shadows
+                .as_mut()
+                .unwrap()
+                .scene_submitted(&self.ledger, self.submissions);
         }
         self.frames += 1;
         self.view.last_frame = self.frames;

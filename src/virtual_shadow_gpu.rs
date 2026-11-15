@@ -82,7 +82,9 @@ fn edges_on() -> bool {
             .flat_map(|list| list.split(','))
             .filter_map(|item| item.split_once('='))
             .find(|(name, _)| name.trim() == "VD_EDGES")
-            .map_or(EDGES_DEFAULT, |(_, value)| matches!(value.trim(), "true" | "1"))
+            .map_or(EDGES_DEFAULT, |(_, value)| {
+                matches!(value.trim(), "true" | "1")
+            })
     })
 }
 /// The pool's first size in pages and the per-frame raster budget in pages:
@@ -1850,11 +1852,7 @@ impl VirtualState {
         let state = buffer("N8 page epochs", state_bytes, B::STORAGE);
         if sparse {
             // Every table entry empty; the free stack holds every physical page.
-            queue.write_buffer(
-                &state,
-                2 * entries * 4,
-                &vec![0xff; entries as usize * 4],
-            );
+            queue.write_buffer(&state, 2 * entries * 4, &vec![0xff; entries as usize * 4]);
             let mut words = vec![0u32; (POOL_FREE + u64::from(capacity)) as usize];
             words[..4].copy_from_slice(&[0, 1, 1, 0]);
             words[4] = capacity;
@@ -1953,7 +1951,14 @@ impl Renderer {
             .view
             .reconstruction_state
             .as_ref()
-            .map(|r| (r.plan.shadow_rays, r.plan.restart_rays, r.zones, r.plan.history_frames))
+            .map(|r| {
+                (
+                    r.plan.shadow_rays,
+                    r.plan.restart_rays,
+                    r.zones,
+                    r.plan.history_frames,
+                )
+            })
             .filter(|_| self.view.reconstruction_frame.is_some())
         else {
             return;
@@ -1966,8 +1971,11 @@ impl Renderer {
         if state.settings.lookup == VirtualLookup::Disk
             && let Some(r) = state.resources.as_ref()
         {
-            self.queue
-                .write_buffer(&r.disk_frame, DISK_HISTORY_OFFSET, &(history as f32).to_ne_bytes());
+            self.queue.write_buffer(
+                &r.disk_frame,
+                DISK_HISTORY_OFFSET,
+                &(history as f32).to_ne_bytes(),
+            );
             self.uploads.shadows += 4;
         }
         if !matches!(
@@ -2264,7 +2272,12 @@ impl Renderer {
         let (mut zlo, mut zhi) = (f64::INFINITY, f64::NEG_INFINITY);
         let (mut near, mut far) = (f64::INFINITY, 0.0f64);
         // Only casters set the map's height range and the ladder's span.
-        for b in bounds.iter().zip(&casts).filter(|(_, c)| **c).map(|(b, _)| b) {
+        for b in bounds
+            .iter()
+            .zip(&casts)
+            .filter(|(_, c)| **c)
+            .map(|(b, _)| b)
+        {
             for c in corners(b) {
                 let z = c.dot(l);
                 zlo = zlo.min(z);
@@ -2404,8 +2417,9 @@ impl Renderer {
         // pages toward the view's sector (`forward_sector`).
         let forward = forward_windows();
         let ahead = -camera.view().inverse().z_axis.truncate().as_dvec3();
-        cache.forward = forward
-            .and_then(|_| forward_sector(cache.forward, glam::DVec2::new(ahead.dot(u), ahead.dot(v))));
+        cache.forward = forward.and_then(|_| {
+            forward_sector(cache.forward, glam::DVec2::new(ahead.dot(u), ahead.dot(v)))
+        });
         let mut level_bytes = [0u8; MAX_LEVELS * 32];
         for (i, &rung) in rungs.iter().enumerate() {
             let texel = f64::from(s.finest_texel) * 2f64.powi(rung);
@@ -2414,7 +2428,10 @@ impl Renderer {
                 (Some((f, n)), Some(sector)) if i < n => {
                     let a = f64::from(sector) * std::f64::consts::FRAC_PI_4;
                     let half = 0.5 * pages as f64 * f;
-                    [(half * a.cos()).round() as i64, (half * a.sin()).round() as i64]
+                    [
+                        (half * a.cos()).round() as i64,
+                        (half * a.sin()).round() as i64,
+                    ]
                 }
                 _ => [0, 0],
             };

@@ -55,7 +55,11 @@ pub(crate) fn without_terms(source: &str, terms: u32) -> String {
     if terms & ATMOSPHERE_TERM != 0 || source.matches(ATMOSPHERE_HEAD).count() != 1 {
         return source;
     }
-    source.replacen(ATMOSPHERE_HEAD, &format!("{ATMOSPHERE_HEAD}    if true {{ return c; }}\n"), 1)
+    source.replacen(
+        ATMOSPHERE_HEAD,
+        &format!("{ATMOSPHERE_HEAD}    if true {{ return c; }}\n"),
+        1,
+    )
 }
 
 impl Renderer {

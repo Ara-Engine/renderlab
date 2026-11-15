@@ -227,8 +227,8 @@ fn an_empty_scene_renders_on_both_paths() {
     for path in [RenderPath::NonRt, RenderPath::HardwareRt] {
         let adapter = test_adapter();
         // SAFETY: the test suite's documented experimental-feature acknowledgement.
-        let experimental_ray_query =
-            (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
+        let experimental_ray_query = (path == RenderPath::HardwareRt)
+            .then(|| unsafe { ExperimentalRayQuery::acknowledge() });
         let mut engine = Engine::new(
             &adapter,
             EngineDescriptor {
@@ -249,11 +249,19 @@ fn an_empty_scene_renders_on_both_paths() {
             frame(&mut engine);
         }
         let sky = engine.capture_view(view).unwrap();
-        assert!(sky.rgba8.chunks(4).any(|p| p[..3] != [0, 0, 0]), "{path:?}: an empty scene drew black");
+        assert!(
+            sky.rgba8.chunks(4).any(|p| p[..3] != [0, 0, 0]),
+            "{path:?}: an empty scene drew black"
+        );
         engine.cut_view(view);
         frame(&mut engine);
         let (vertices, indices) = cube([0.0, -0.05, 0.0], [6.0, 0.05, 6.0]);
-        let mesh = engine.create_mesh(&MeshData { vertices: &vertices, indices: &indices }).unwrap();
+        let mesh = engine
+            .create_mesh(&MeshData {
+                vertices: &vertices,
+                indices: &indices,
+            })
+            .unwrap();
         let material = engine.create_material(&MaterialDesc::default()).unwrap();
         let floor = engine.spawn(mesh, material, Mat4::IDENTITY).unwrap();
         frame(&mut engine);

@@ -22,14 +22,14 @@ use crate::transparency::{
 };
 use glam::Vec4;
 
+#[path = "transparency_measure.rs"]
+mod measurement;
+#[path = "transparency_panes.rs"]
+mod panes;
 #[path = "transparency_reflection.rs"]
 pub(crate) mod reflection;
 #[path = "transparency_shadow.rs"]
 pub(crate) mod transmission_shadow;
-#[path = "transparency_panes.rs"]
-mod panes;
-#[path = "transparency_measure.rs"]
-mod measurement;
 
 #[path = "transparency_bounds.rs"]
 mod bounds;
@@ -928,7 +928,12 @@ impl Renderer {
             .collect();
         let pane_bindings: Vec<_> = paths
             .iter()
-            .map(|&rt| self.tp_layout("TP1 pane group 0", &panes::layout_entries(glass_entries(rt))))
+            .map(|&rt| {
+                self.tp_layout(
+                    "TP1 pane group 0",
+                    &panes::layout_entries(glass_entries(rt)),
+                )
+            })
             .collect();
         let pane_layouts: Vec<_> = pane_bindings
             .iter()
@@ -1566,7 +1571,10 @@ impl Renderer {
 
     /// The same lazy builders used by drawing, also callable before any draw is visible.
     pub(super) fn tp_prepare_programs(
-        &mut self, programs: &[u64], rt: bool, traced: bool,
+        &mut self,
+        programs: &[u64],
+        rt: bool,
+        traced: bool,
     ) -> Result<bool, Error> {
         for &program in programs {
             let key = self.tp_glass_key(program, rt);
@@ -1589,7 +1597,10 @@ impl Renderer {
         // Per-pixel panes: the id raster and shading of each program, once its glass set exists.
         let pixel_panes = self.tp_pane_pixels()
             && traced
-            && self.device.features().contains(wgpu::Features::PRIMITIVE_INDEX);
+            && self
+                .device
+                .features()
+                .contains(wgpu::Features::PRIMITIVE_INDEX);
         if pixel_panes {
             for at in 0..self.transparency.glass.len() {
                 if self.transparency.glass[at].pane.is_some() {
@@ -1636,16 +1647,27 @@ impl Renderer {
     }
 
     pub(super) fn prewarm_transparency(&mut self, materials: &[&Material]) -> Result<(), Error> {
-        let mut programs: Vec<_> = materials.iter()
+        let mut programs: Vec<_> = materials
+            .iter()
             .filter(|m| m.transparency.is_some())
-            .map(|m| m.program.id()).collect();
+            .map(|m| m.program.id())
+            .collect();
         programs.sort_unstable();
         programs.dedup();
-        self.transparency.glass.retain(|p| programs.contains(&p.program));
-        let mut opaque: Vec<_> = materials.iter()
-            .filter(|m| m.transparency.is_none()).map(|m| m.program.id()).collect();
-        if opaque.is_empty() { opaque.push(self.standard.id()); }
-        self.transparency.reflection_pipelines.retain(|p| opaque.contains(&p.program));
+        self.transparency
+            .glass
+            .retain(|p| programs.contains(&p.program));
+        let mut opaque: Vec<_> = materials
+            .iter()
+            .filter(|m| m.transparency.is_none())
+            .map(|m| m.program.id())
+            .collect();
+        if opaque.is_empty() {
+            opaque.push(self.standard.id());
+        }
+        self.transparency
+            .reflection_pipelines
+            .retain(|p| opaque.contains(&p.program));
         if programs.is_empty() && self.transparency.emitters.is_empty() {
             return Ok(());
         }
@@ -1657,15 +1679,29 @@ impl Renderer {
         let traced = self.primary_mode != PrimaryVisibility::Raster;
         self.tp_prepare_hit_depth(traced);
         self.tp_prepare_programs(&programs, rt, traced)?;
-        if rt && traced && programs.iter().any(|&p| self.program_slot(p).traits.declares_reflection) {
+        if rt
+            && traced
+            && programs
+                .iter()
+                .any(|&p| self.program_slot(p).traits.declares_reflection)
+        {
             opaque.sort_unstable();
             opaque.dedup();
             for program in opaque {
                 let slot = self.program_slot(program);
                 let key = reflection::key(&self.source_digest, &slot.digest, slot.layout.is_some());
-                if self.transparency.reflection_pipelines.iter().any(|p| p.key == key) { continue; }
+                if self
+                    .transparency
+                    .reflection_pipelines
+                    .iter()
+                    .any(|p| p.key == key)
+                {
+                    continue;
+                }
                 let built = self.tp_reflection_pipeline(program)?;
-                self.transparency.reflection_pipelines.retain(|p| p.program != program);
+                self.transparency
+                    .reflection_pipelines
+                    .retain(|p| p.program != program);
                 self.transparency.reflection_pipelines.push(built);
             }
         }
@@ -2558,7 +2594,8 @@ impl Renderer {
                 mapped_at_creation: false,
             });
             let full = [0u32, 0, size.width, size.height];
-            self.queue.write_buffer(&buffer, 0, &full.map(u32::to_ne_bytes).concat());
+            self.queue
+                .write_buffer(&buffer, 0, &full.map(u32::to_ne_bytes).concat());
             buffer
         });
         // TP2: reflection hits use the existing opaque geometry, materials and R1 shader.
@@ -2976,11 +3013,19 @@ impl Renderer {
                         m.counts.nonreflective_lobe_runs += u64::from(!reflective);
                     }
                     // The run's rectangle: its draws' conservative bounds.
-                    let run_rect = run.iter().map(|&j| draw_rects[j]).reduce(union).unwrap_or([0; 4]);
+                    let run_rect = run
+                        .iter()
+                        .map(|&j| draw_rects[j])
+                        .reduce(union)
+                        .unwrap_or([0; 4]);
                     let rect_mode = bounded && rect_reflect();
                     let direct = rect_mode && measurement::area(run_rect) <= RECT_DIRECT_PIXELS;
                     let queried = bounded && !direct;
-                    let slot = if rect_mode { (*first as u64 + 1) * RECT_SLOT } else { 0 };
+                    let slot = if rect_mode {
+                        (*first as u64 + 1) * RECT_SLOT
+                    } else {
+                        0
+                    };
                     if rect_mode {
                         self.queue.write_buffer(
                             reflect_rects.as_ref().unwrap(),
@@ -3073,7 +3118,11 @@ impl Renderer {
                         let mut pass =
                             encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
                         pass.set_pipeline(&gpu.lobe_dispatch);
-                        pass.set_bind_group(0, lobe_dispatch_group.as_ref().unwrap(), &[slot as u32]);
+                        pass.set_bind_group(
+                            0,
+                            lobe_dispatch_group.as_ref().unwrap(),
+                            &[slot as u32],
+                        );
                         pass.dispatch_workgroups(1, 1, 1);
                     }
                     part!("transparency.reflection");
@@ -3095,7 +3144,11 @@ impl Renderer {
                         .unwrap();
                     if queried {
                         pass.set_pipeline(&gpu.lobe_clear);
-                        pass.set_bind_group(0, reflection_clear_group.as_ref().unwrap(), &[slot as u32]);
+                        pass.set_bind_group(
+                            0,
+                            reflection_clear_group.as_ref().unwrap(),
+                            &[slot as u32],
+                        );
                         pass.dispatch_workgroups_indirect(&gpu.lobe_args, 12);
                     }
                     pass.set_pipeline(&reflection.pipeline);

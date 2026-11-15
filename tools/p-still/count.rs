@@ -14,12 +14,20 @@ impl Counts {
     pub fn start(engine: &mut Engine) -> Option<Self> {
         std::env::var_os("RENDERLAB_P_STILL_COUNT")?;
         engine.renderer_mut().set_indirect_profiling(true);
-        Some(Self { rows: vec![], gi_frames: 0 })
+        Some(Self {
+            rows: vec![],
+            gi_frames: 0,
+        })
     }
 
     /// After a frame's GPU drain: whether the GI cache ran, its counters and pass times,
     /// virtual-shadow page work, the surface cache's queued walks and TR1's shadow budget.
-    pub fn frame(&mut self, engine: &mut Engine, index: usize, state: &str) -> Result<(), renderlab::Error> {
+    pub fn frame(
+        &mut self,
+        engine: &mut Engine,
+        index: usize,
+        state: &str,
+    ) -> Result<(), renderlab::Error> {
         let r = engine.renderer_mut();
         let stats = r.indirect_stats();
         let ran = stats.frames != self.gi_frames;

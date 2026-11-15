@@ -308,7 +308,11 @@ fn local_shadow_atlas_fits_its_tiles() {
     assert_eq!(lc::fitted_extent(&tiles, 1024), [1, 1]);
     for (slot, expected) in [(0, [1024, 1024]), (1, [2048, 1024]), (2, [4096, 1024])] {
         tiles[slot] = lc::allocate_tile(&tiles, 1024, 1024);
-        assert_eq!(lc::fitted_extent(&tiles, 1024), expected, "after slot {slot}");
+        assert_eq!(
+            lc::fitted_extent(&tiles, 1024),
+            expected,
+            "after slot {slot}"
+        );
     }
     let mut all = vec![None; lc::MAX_SLOTS as usize];
     for i in 0..all.len() {
@@ -316,7 +320,11 @@ fn local_shadow_atlas_fits_its_tiles() {
     }
     let [w, h] = lc::fitted_extent(&all, 1001);
     assert!(w <= lc::atlas_extent(1001) && h <= lc::atlas_extent(1001));
-    assert!(all.iter().flatten().all(|t| t.x + t.size <= w && t.y + t.size <= h));
+    assert!(
+        all.iter()
+            .flatten()
+            .all(|t| t.x + t.size <= w && t.y + t.size <= h)
+    );
 }
 
 #[test]

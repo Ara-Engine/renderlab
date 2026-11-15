@@ -43,7 +43,11 @@ fn room_fixed() -> Option<u64> {
     static FIXED: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
     *FIXED.get_or_init(|| {
         let value = std::env::var("RENDERLAB_RL_ROOM").ok()?;
-        value.strip_prefix("fixed:")?.parse().ok().filter(|&n: &u64| n > 0)
+        value
+            .strip_prefix("fixed:")?
+            .parse()
+            .ok()
+            .filter(|&n: &u64| n > 0)
     })
 }
 /// Measurement: `RENDERLAB_RL_ROOM_LOG=PATH` appends each read-back frame's counters (requested
@@ -52,7 +56,8 @@ fn room_fixed() -> Option<u64> {
 /// line a frame: an in-clip creep shows which kind of resource grows.
 fn room_log() -> Option<&'static str> {
     static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
-    PATH.get_or_init(|| std::env::var("RENDERLAB_RL_ROOM_LOG").ok()).as_deref()
+    PATH.get_or_init(|| std::env::var("RENDERLAB_RL_ROOM_LOG").ok())
+        .as_deref()
 }
 pub(super) const HITS: u32 = 64;
 pub(super) const SAMPLES: u32 = 65;
@@ -76,11 +81,16 @@ pub(crate) const RT_DEFAULT: bool = true;
 /// hold them.
 pub(crate) fn default_on(device: &wgpu::Device) -> bool {
     let limits = device.limits();
-    let ray_query = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
-    (if ray_query { RT_DEFAULT } else { NON_RT_DEFAULT })
-        && limits.max_storage_buffers_per_shader_stage
-            >= crate::visibility_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage
-                + STORAGE_BUFFERS
+    let ray_query = device
+        .features()
+        .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+    (if ray_query {
+        RT_DEFAULT
+    } else {
+        NON_RT_DEFAULT
+    }) && limits.max_storage_buffers_per_shader_stage
+        >= crate::visibility_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage
+            + STORAGE_BUFFERS
         && limits.max_storage_textures_per_shader_stage >= STORAGE_TEXTURES
 }
 /// Whether the pass runs on this device's renderer: RENDERLAB_RL_PASS when set, else its default;
@@ -126,7 +136,9 @@ impl TraceAbi {
         lighting: &wgpu::BindGroupLayout,
     ) -> Self {
         use wgpu::TextureFormat as F;
-        let ray_query = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        let ray_query = device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
         let write = wgpu::BufferBindingType::Storage { read_only: false };
         let mut entries = vec![
             uniform(10, FRAME_BYTES as u64),
@@ -134,7 +146,7 @@ impl TraceAbi {
             uniform(PASS_FRAME, 16),
             buffer(HITS, write, HITS_HEADER + RECORD_BYTES),
             image(SAMPLES, F::Rgba16Float),
-            buffer(STATS, write, 16),
+            buffer(STATS, write, STATS_BYTES),
         ];
         entries.push(if ray_query {
             scene(2)
@@ -152,7 +164,12 @@ impl TraceAbi {
         let layout = ledger.own(
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("reflection trace ABI"),
-                bind_group_layouts: &[Some(&group), Some(arrays), cache_group.as_ref().map(|g| &**g), Some(lighting)],
+                bind_group_layouts: &[
+                    Some(&group),
+                    Some(arrays),
+                    cache_group.as_ref().map(|g| &**g),
+                    Some(lighting),
+                ],
                 immediate_size: 0,
             }),
             ResourceKind::PipelineLayout,
@@ -167,12 +184,23 @@ impl TraceAbi {
         let args_layout = ledger.own(
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("reflection list arguments ABI"),
-                bind_group_layouts: &[Some(&group), Some(arrays), Some(&args_group), Some(lighting)],
+                bind_group_layouts: &[
+                    Some(&group),
+                    Some(arrays),
+                    Some(&args_group),
+                    Some(lighting),
+                ],
                 immediate_size: 0,
             }),
             ResourceKind::PipelineLayout,
         );
-        Self { group, layout, args_group, args_layout, cache_group }
+        Self {
+            group,
+            layout,
+            args_group,
+            args_layout,
+            cache_group,
+        }
     }
 }
 
@@ -249,7 +277,9 @@ impl Renderer {
                 self,
                 "reflection trace counters",
                 STATS_BYTES,
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+                wgpu::BufferUsages::STORAGE
+                    | wgpu::BufferUsages::COPY_DST
+                    | wgpu::BufferUsages::COPY_SRC,
             ),
             composite: Buffer::new(
                 self,
@@ -334,7 +364,11 @@ impl Renderer {
         }
         let head = &self.primary_sources.as_ref().unwrap().1[shading as usize];
         let source = crate::program::rl_trace_source(head);
-        let source = if self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY) {
+        let source = if self
+            .device
+            .features()
+            .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+        {
             source
         } else {
             // Four strata is the shipping glossy cap. Larger groups can be
@@ -344,27 +378,32 @@ impl Renderer {
                 .and_then(|value| value.parse::<u32>().ok())
                 .filter(|lanes| matches!(lanes, 1 | 2 | 4 | 8 | 16 | 32))
                 .unwrap_or(4);
-            source.replace("const RL_RAY_LANES:u32=1u;", &format!("const RL_RAY_LANES:u32={lanes}u;"))
+            source.replace(
+                "const RL_RAY_LANES:u32=1u;",
+                &format!("const RL_RAY_LANES:u32={lanes}u;"),
+            )
         };
         let source = sw_cache::source(source, &self.device);
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
-            self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("reflection trace"),
-                source: wgpu::ShaderSource::Wgsl(source.into()),
-            }),
+            self.device
+                .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("reflection trace"),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                }),
             ResourceKind::ShaderModule,
         );
         let pipeline = |entry, layout: &wgpu::PipelineLayout| {
             self.ledger.own(
-                self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("reflection trace"),
-                    layout: Some(layout),
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: Default::default(),
-                    cache: None,
-                }),
+                self.device
+                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some("reflection trace"),
+                        layout: Some(layout),
+                        module: &module,
+                        entry_point: Some(entry),
+                        compilation_options: Default::default(),
+                        cache: None,
+                    }),
                 ResourceKind::ComputePipeline,
             )
         };
@@ -383,7 +422,11 @@ impl Renderer {
 
     /// After the frame's shading: the list's arguments, `rl_trace_pixels` over the list (indirect),
     /// then `rl_hit_args`; nothing while the pass is off.
-    pub(crate) fn encode_reflection_trace(&self, encoder: &mut wgpu::CommandEncoder, shading: Shading) {
+    pub(crate) fn encode_reflection_trace(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        shading: Shading,
+    ) {
         let Some(state) = self.view.primary.as_ref() else {
             return;
         };
@@ -421,7 +464,10 @@ impl Renderer {
         compute.set_pipeline(&pipelines.list_args);
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
-        let cache = abi.cache_group.as_ref().map(|layout| self.rl_outgoing_group(layout));
+        let cache = abi
+            .cache_group
+            .as_ref()
+            .map(|layout| self.rl_outgoing_group(layout));
         let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reflection trace"),
             timestamp_writes: None,
@@ -459,8 +505,10 @@ impl Renderer {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
         self.queue.write_buffer(&pass.frame.value, 0, &bytes);
         // The counters and the list's length start each frame at zero before shading.
-        self.queue.write_buffer(&pass.stats.value, 0, &[0; STATS_BYTES as usize]);
-        self.queue.write_buffer(&pass.list.value, 0, &[0; LIST_HEADER as usize]);
+        self.queue
+            .write_buffer(&pass.stats.value, 0, &[0; STATS_BYTES as usize]);
+        self.queue
+            .write_buffer(&pass.list.value, 0, &[0; LIST_HEADER as usize]);
         // The lone-stratum bound and the strata it needs (reflections.wgsl RL_GLOSSY_RAYS).
         let lone = self.view.reflections.frame_words()[2];
         let words = [lone, 4.0, 0.0, 0.0];
@@ -485,9 +533,14 @@ fn resolve_source() -> String {
             _ => continue,
         };
         let prefix = format!("const {name}:f32=");
-        let at = source.find(&prefix).expect("RENDERLAB_RL_RESOLVE_TUNE seam");
+        let at = source
+            .find(&prefix)
+            .expect("RENDERLAB_RL_RESOLVE_TUNE seam");
         let end = at + source[at..].find(';').unwrap();
-        source.replace_range(at..end, &format!("{prefix}{:?}", value.parse::<f32>().unwrap()));
+        source.replace_range(
+            at..end,
+            &format!("{prefix}{:?}", value.parse::<f32>().unwrap()),
+        );
     }
     source
 }
@@ -514,7 +567,10 @@ impl ResolveKit {
                             view_dimension: wgpu::TextureViewDimension::D2Array,
                         },
                     ),
-                    uniform(RL_HISTORY_FRAME, temporal_reconstruction::RL_HISTORY_BYTES as u64),
+                    uniform(
+                        RL_HISTORY_FRAME,
+                        temporal_reconstruction::RL_HISTORY_BYTES as u64,
+                    ),
                 ],
             }),
             ResourceKind::BindGroupLayout,
@@ -556,7 +612,11 @@ impl ResolveKit {
 }
 
 impl Renderer {
-    pub(super) fn rl_resolve_group(&self, kit: &ResolveKit, history: &RlHistoryTargets) -> Owned<wgpu::BindGroup> {
+    pub(super) fn rl_resolve_group(
+        &self,
+        kit: &ResolveKit,
+        history: &RlHistoryTargets,
+    ) -> Owned<wgpu::BindGroup> {
         self.ledger.own(
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("reflection resolve"),
@@ -628,7 +688,10 @@ impl Renderer {
             });
             encoder.copy_buffer_to_buffer(&pass.hits.value, 0, &staging, 0, HITS_HEADER);
             encoder.copy_buffer_to_buffer(&pass.stats.value, 0, &staging, 16, STATS_BYTES);
-            *probe = Some(Probe { staging, path: path.clone() });
+            *probe = Some(Probe {
+                staging,
+                path: path.clone(),
+            });
             return;
         }
         if self.frames != PROBE_FRAME + 2 {
@@ -651,7 +714,13 @@ impl Renderer {
         let (pixels, slots, requested, dropped) = (word(0), word(1), word(2), word(3));
         // The strata counter: trace slots (strata) and hit records per glossy pixel; the
         // receivers that did not fit the room (inline this frame) and their strata.
-        let per = |n: u32| if pixels > 0 { f64::from(n) / f64::from(pixels) } else { 0.0 };
+        let per = |n: u32| {
+            if pixels > 0 {
+                f64::from(n) / f64::from(pixels)
+            } else {
+                0.0
+            }
+        };
         let overflow_pixels = word(6);
         let json = format!(
             "{{\"frame\":{PROBE_FRAME},\"glossy_pixels\":{pixels},\"strata_requested\":{requested},\"slots\":{slots},\"records\":{count},\"records_dropped\":{dropped},\"overflow_pixels\":{overflow_pixels},\"overflow_strata\":{},\"floored_inline\":{{\"strata\":{},\"pixels\":{}}},\"contribution_under_0005\":{{\"strata\":{},\"pixels\":{}}},\"strata_per_glossy_pixel\":{:.3},\"records_per_glossy_pixel\":{:.3}}}\n",
@@ -674,7 +743,13 @@ impl Renderer {
         let Some(t) = self.view.primary.as_ref().and_then(|s| s.targets.as_ref()) else {
             return;
         };
-        encoder.copy_buffer_to_buffer(&t.rl_history.phases.value, 16 * phase, &t.rl_history.phase.value, 0, 16);
+        encoder.copy_buffer_to_buffer(
+            &t.rl_history.phases.value,
+            16 * phase,
+            &t.rl_history.phase.value,
+            0,
+            16,
+        );
     }
 }
 
@@ -694,94 +769,103 @@ impl Renderer {
             count: None,
         };
         let group = self.ledger.own(
-            self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("reflection composite"),
-                entries: &[
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: both,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(LIST_HEADER + LIST_ENTRY_BYTES),
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("reflection composite"),
+                    entries: &[
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 0,
+                            visibility: both,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Storage { read_only: true },
+                                has_dynamic_offset: false,
+                                min_binding_size: wgpu::BufferSize::new(
+                                    LIST_HEADER + LIST_ENTRY_BYTES,
+                                ),
+                            },
+                            count: None,
                         },
-                        count: None,
-                    },
-                    texture(1, wgpu::ShaderStages::FRAGMENT),
-                    texture(2, both),
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(16),
+                        texture(1, wgpu::ShaderStages::FRAGMENT),
+                        texture(2, both),
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 3,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Buffer {
+                                ty: wgpu::BufferBindingType::Uniform,
+                                has_dynamic_offset: false,
+                                min_binding_size: wgpu::BufferSize::new(16),
+                            },
+                            count: None,
                         },
-                        count: None,
-                    },
-                ],
-            }),
+                    ],
+                }),
             ResourceKind::BindGroupLayout,
         );
         let layout = self.ledger.own(
-            self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("reflection composite ABI"),
-                bind_group_layouts: &[Some(&group)],
-                immediate_size: 0,
-            }),
+            self.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("reflection composite ABI"),
+                    bind_group_layouts: &[Some(&group)],
+                    immediate_size: 0,
+                }),
             ResourceKind::PipelineLayout,
         );
         let module = self.ledger.own(
-            self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("reflection composite"),
-                source: wgpu::ShaderSource::Wgsl(
-                    crate::program::rl_pass_switches(include_str!("../shaders/reflections_composite.wgsl").to_owned()).into(),
-                ),
-            }),
+            self.device
+                .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some("reflection composite"),
+                    source: wgpu::ShaderSource::Wgsl(
+                        crate::program::rl_pass_switches(
+                            include_str!("../shaders/reflections_composite.wgsl").to_owned(),
+                        )
+                        .into(),
+                    ),
+                }),
             ResourceKind::ShaderModule,
         );
         let pipeline = self.ledger.own(
-            self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("reflection composite"),
-                layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &module,
-                    entry_point: Some("rl_composite_vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &module,
-                    entry_point: Some("rl_composite_fs"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format: wgpu::TextureFormat::Rgba16Float,
-                        // Colour adds; alpha (TR1's view hint) stays.
-                        blend: Some(wgpu::BlendState {
-                            color: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::One,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                            alpha: wgpu::BlendComponent {
-                                src_factor: wgpu::BlendFactor::Zero,
-                                dst_factor: wgpu::BlendFactor::One,
-                                operation: wgpu::BlendOperation::Add,
-                            },
-                        }),
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+            self.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("reflection composite"),
+                    layout: Some(&layout),
+                    vertex: wgpu::VertexState {
+                        module: &module,
+                        entry_point: Some("rl_composite_vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &module,
+                        entry_point: Some("rl_composite_fs"),
+                        compilation_options: Default::default(),
+                        targets: &[Some(wgpu::ColorTargetState {
+                            format: wgpu::TextureFormat::Rgba16Float,
+                            // Colour adds; alpha (TR1's view hint) stays.
+                            blend: Some(wgpu::BlendState {
+                                color: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::One,
+                                    dst_factor: wgpu::BlendFactor::One,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                                alpha: wgpu::BlendComponent {
+                                    src_factor: wgpu::BlendFactor::Zero,
+                                    dst_factor: wgpu::BlendFactor::One,
+                                    operation: wgpu::BlendOperation::Add,
+                                },
+                            }),
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })],
+                    }),
+                    // One point a list entry, at its pixel's centre.
+                    primitive: wgpu::PrimitiveState {
+                        topology: wgpu::PrimitiveTopology::PointList,
+                        ..Default::default()
+                    },
+                    depth_stencil: None,
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
                 }),
-                // One point a list entry, at its pixel's centre.
-                primitive: wgpu::PrimitiveState {
-                    topology: wgpu::PrimitiveTopology::PointList,
-                    ..Default::default()
-                },
-                depth_stencil: None,
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            }),
             ResourceKind::RenderPipeline,
         );
         (group, pipeline)
@@ -790,25 +874,48 @@ impl Renderer {
     /// The composite after reflection_hits: each listed glossy pixel's strata mean, times its
     /// reflectance and w, added into the HDR target before TR1 (one point an entry, the draw's
     /// count from the list's arguments).
-    pub(crate) fn encode_reflection_composite(&self, encoder: &mut wgpu::CommandEncoder, shading: Shading) {
+    pub(crate) fn encode_reflection_composite(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        shading: Shading,
+    ) {
         let Some(state) = self.view.primary.as_ref() else {
             return;
         };
-        let (Some(pipelines), Some(t)) = (state.rl_pipelines[shading as usize].as_ref(), state.targets.as_ref()) else {
+        let (Some(pipelines), Some(t)) = (
+            state.rl_pipelines[shading as usize].as_ref(),
+            state.targets.as_ref(),
+        ) else {
             return;
         };
         let (layout, pipeline) = &pipelines.composite;
-        let (Some(pass), Some(deferred), Some(hdr)) = (t.rl_pass.as_ref(), t.deferred.as_ref(), self.view.hdr.as_ref()) else {
+        let (Some(pass), Some(deferred), Some(hdr)) = (
+            t.rl_pass.as_ref(),
+            t.deferred.as_ref(),
+            self.view.hdr.as_ref(),
+        ) else {
             return;
         };
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("reflection composite"),
             layout,
             entries: &[
-                wgpu::BindGroupEntry { binding: 0, resource: pass.list.value.as_entire_binding() },
-                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&pass.samples.view) },
-                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&deferred.0.view) },
-                wgpu::BindGroupEntry { binding: 3, resource: pass.composite.value.as_entire_binding() },
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: pass.list.value.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&pass.samples.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&deferred.0.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: pass.composite.value.as_entire_binding(),
+                },
             ],
         });
         let mut render = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -817,7 +924,10 @@ impl Renderer {
                 view: &hdr.resolved.view,
                 depth_slice: None,
                 resolve_target: None,
-                ops: wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store },
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
             })],
             depth_stencil_attachment: None,
             timestamp_writes: None,
@@ -839,9 +949,11 @@ impl Renderer {
         for r in &pass.readback {
             if r.state.compare_exchange(1, 2, SeqCst, SeqCst).is_ok() {
                 let state = r.state.clone();
-                r.buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
-                    state.store(if result.is_ok() { 3 } else { 0 }, SeqCst);
-                });
+                r.buffer
+                    .slice(..)
+                    .map_async(wgpu::MapMode::Read, move |result| {
+                        state.store(if result.is_ok() { 3 } else { 0 }, SeqCst);
+                    });
             }
         }
         if let Some(r) = pass.readback.iter().find(|r| r.state.load(SeqCst) == 0) {
@@ -873,15 +985,16 @@ impl Renderer {
         for r in &pass.readback {
             if r.state.load(SeqCst) == 3 {
                 if let Ok(data) = r.buffer.slice(..).get_mapped_range() {
-                    let word = |i: usize| u32::from_ne_bytes(data[4 * i..4 * i + 4].try_into().unwrap());
+                    let word =
+                        |i: usize| u32::from_ne_bytes(data[4 * i..4 * i + 4].try_into().unwrap());
                     requested = requested.max(u64::from(word(2)));
                     if let Some(path) = room_log() {
                         use std::io::Write;
                         let hal = self.device.get_internal_counters().hal;
-                        let allocator = self
-                            .device
-                            .generate_allocator_report()
-                            .map_or((0, 0), |a| (a.total_allocated_bytes, a.total_reserved_bytes));
+                        let allocator =
+                            self.device.generate_allocator_report().map_or((0, 0), |a| {
+                                (a.total_allocated_bytes, a.total_reserved_bytes)
+                            });
                         let memory = format!(
                             ",\"buffer_bytes\":{},\"texture_bytes\":{},\"buffers\":{},\"textures\":{},\"bind_groups\":{},\"allocations\":{},\"allocated_bytes\":{},\"reserved_bytes\":{}",
                             hal.buffer_memory.read(),
@@ -894,7 +1007,7 @@ impl Renderer {
                             allocator.1
                         );
                         let line = format!(
-                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}]{memory}}}\n",
+                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}],\"trace\":[{},{},{},{},{},{}]{memory}}}\n",
                             r.frame.load(SeqCst),
                             word(2),
                             word(1),
@@ -903,9 +1016,19 @@ impl Renderer {
                             word(7),
                             word(8),
                             word(9),
-                            word(10)
+                            word(10),
+                            word(4),
+                            word(11),
+                            word(12),
+                            word(13),
+                            word(14),
+                            word(15)
                         );
-                        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                        if let Ok(mut file) = std::fs::OpenOptions::new()
+                            .create(true)
+                            .append(true)
+                            .open(path)
+                        {
                             let _ = file.write_all(line.as_bytes());
                         }
                     }
@@ -924,7 +1047,10 @@ impl Renderer {
             self,
             "reflection hit records",
             HITS_HEADER + room * RECORD_BYTES,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+            wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::INDIRECT
+                | wgpu::BufferUsages::COPY_DST
+                | wgpu::BufferUsages::COPY_SRC,
         );
         let list = self.rl_list(room);
         let state = self.view.primary.as_mut().unwrap();
@@ -940,21 +1066,33 @@ impl Renderer {
         let texture = self.ledger.own(
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("reflection samples"),
-                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                size: wgpu::Extent3d {
+                    width,
+                    height,
+                    depth_or_array_layers: 1,
+                },
                 mip_level_count: 1,
                 sample_count: 1,
                 dimension: wgpu::TextureDimension::D2,
                 format: wgpu::TextureFormat::Rgba16Float,
-                usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
+                usage: wgpu::TextureUsages::STORAGE_BINDING
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 view_formats: &[],
             }),
             ResourceKind::Texture,
         );
-        let view = self.ledger.own(texture.create_view(&Default::default()), ResourceKind::TextureView);
+        let view = self.ledger.own(
+            texture.create_view(&Default::default()),
+            ResourceKind::TextureView,
+        );
         Depth {
             texture,
             view,
-            _allocation: self.ledger.allocate(AllocationKind::Target, u64::from(width) * u64::from(height) * 8),
+            _allocation: self.ledger.allocate(
+                AllocationKind::Target,
+                u64::from(width) * u64::from(height) * 8,
+            ),
         }
     }
 }

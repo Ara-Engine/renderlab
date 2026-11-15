@@ -10,7 +10,9 @@ use anyhow::{Context, Result, ensure};
 /// The pass's kernel, composed on the hardware soft head; `record` reads the receiver layers.
 pub fn program(record: bool) -> Result<Program> {
     static KEPT: Memo<bool, Program> = Memo::new();
-    KEPT.get(record, || Program::new(Pass::LightVisibility, source(record)?))
+    KEPT.get(record, || {
+        Program::new(Pass::LightVisibility, source(record)?)
+    })
 }
 /// The kernel's source: the engine's pass-only program composed with the pass on.
 pub(crate) fn source(record: bool) -> Result<String> {
@@ -27,7 +29,8 @@ pub(crate) fn source(record: bool) -> Result<String> {
         "the light visibility pass is off"
     );
     if record {
-        crate::program::light_vis_from_record(composed.source).context("light visibility seam changed")
+        crate::program::light_vis_from_record(composed.source)
+            .context("light visibility seam changed")
     } else {
         Ok(composed.source)
     }

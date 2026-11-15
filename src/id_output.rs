@@ -10,9 +10,7 @@ use crate::{
     Draw, Error, FrameId,
     engine::ViewId,
     mesh::matrix_bytes,
-    object_ids::{
-        ID_SLOTS, ID_TICKS, IdPixel, IdReadback, IdRect, IdRequest, IdsLost, TagTables,
-    },
+    object_ids::{ID_SLOTS, ID_TICKS, IdPixel, IdReadback, IdRect, IdRequest, IdsLost, TagTables},
     observe::{AllocationKind, Owned, ResourceKind},
 };
 use std::sync::{Arc, OnceLock};
@@ -35,7 +33,10 @@ fn id_source_with_coverage(precise: bool) -> String {
 }
 /// The handoff module: the shader's handoff section alone.
 pub(super) fn handoff_source() -> String {
-    format!("{HANDOFF_MARK}{}", SHADER.split_once(HANDOFF_MARK).unwrap().1)
+    format!(
+        "{HANDOFF_MARK}{}",
+        SHADER.split_once(HANDOFF_MARK).unwrap().1
+    )
 }
 const GLASS_SHADER: &str = include_str!("../shaders/id_glass.wgsl");
 
@@ -45,14 +46,20 @@ mod coverage_tests {
 
     #[test]
     fn coverage_decoder_validates_and_off_is_original_module() {
-        assert_eq!(id_source_with_coverage(false), SHADER.split_once(HANDOFF_MARK).unwrap().0);
+        assert_eq!(
+            id_source_with_coverage(false),
+            SHADER.split_once(HANDOFF_MARK).unwrap().0
+        );
         let source = id_source_with_coverage(true);
         assert!(source.contains("let coverage=tr1_unpack_coverage(l.x,l.w).x;"));
         for source in [id_source_with_coverage(false), source] {
             let module = naga::front::wgsl::parse_str(&source).unwrap();
             naga::valid::Validator::new(
-                naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all(),
-            ).validate(&module).unwrap();
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap();
         }
     }
 }
@@ -95,7 +102,11 @@ struct Gpu {
     pipeline: wgpu::ComputePipeline,
     frame: Owned<wgpu::Buffer>,
     /// One id layer into a caller's Rgba8Unorm target (`write_ids_to`).
-    handoff: Option<(Owned<wgpu::BindGroupLayout>, wgpu::RenderPipeline, Owned<wgpu::Buffer>)>,
+    handoff: Option<(
+        Owned<wgpu::BindGroupLayout>,
+        wgpu::RenderPipeline,
+        Owned<wgpu::Buffer>,
+    )>,
     /// Bound for absent inputs: 1x1 zero textures of each format.
     zero_uint: Depth,
     zero_rg: Depth,
@@ -177,7 +188,8 @@ impl Renderer {
     /// The ID target of the last frame with ids: R32Uint, the output's size, layer 0 the
     /// opaque ids and layer 1 the front ids. None before such a frame.
     pub fn id_texture(&self) -> Option<&wgpu::Texture> {
-        self.view.outputs
+        self.view
+            .outputs
             .ids
             .targets
             .as_ref()
@@ -308,7 +320,17 @@ impl Renderer {
         transparent: &[Draw<'_>],
         reconstructed: bool,
     ) {
-        let hit_size = self.view.primary.as_ref().unwrap().targets.as_ref().unwrap().hit.texture.size();
+        let hit_size = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .targets
+            .as_ref()
+            .unwrap()
+            .hit
+            .texture
+            .size();
         // Reconstructed frames resolve at the output size (upscaled or not); others at the
         // hit record's, which is then the output's.
         let size = match (&self.view.upscale, reconstructed) {
@@ -335,7 +357,10 @@ impl Renderer {
         let mut base = 0;
         for d in draws {
             let models = &d.instances.state.models;
-            let previous = d.instances.state.previous_models(self.view_key.0, self.view.last_frame);
+            let previous = d
+                .instances
+                .state
+                .previous_models(self.view_key.0, self.view.last_frame);
             for (slot, model) in models.iter().enumerate() {
                 let changed = d.mesh.skin.is_some()
                     || model.to_cols_array().map(f32::to_bits)
@@ -351,7 +376,10 @@ impl Renderer {
         let mut entries = tables.opaque.clone();
         entries.resize(placements, [0, 0]);
         entries.extend_from_slice(&tables.transparent);
-        entries.resize(placements + transparent.iter().map(|d| d.instances.len()).sum::<usize>(), [0, 0]);
+        entries.resize(
+            placements + transparent.iter().map(|d| d.instances.len()).sum::<usize>(),
+            [0, 0],
+        );
         if entries.is_empty() {
             entries.push([0, 0]);
         }
@@ -384,17 +412,43 @@ impl Renderer {
         let dirty = std::mem::take(&mut self.view.outputs.ids.tables_dirty);
         let gpu = self.view.outputs.ids.gpu.as_mut().unwrap();
         let (device, queue, ledger) = (&self.device, &self.queue, &self.ledger);
-        upload(device, queue, ledger, &mut gpu.entries, "id entries", words(entries.as_flattened()), dirty);
-        upload(device, queue, ledger, &mut gpu.ranges, "id ranges", words(ranges.as_flattened()), dirty);
+        upload(
+            device,
+            queue,
+            ledger,
+            &mut gpu.entries,
+            "id entries",
+            words(entries.as_flattened()),
+            dirty,
+        );
+        upload(
+            device,
+            queue,
+            ledger,
+            &mut gpu.ranges,
+            "id ranges",
+            words(ranges.as_flattened()),
+            dirty,
+        );
         let moved_changed = moved != self.view.outputs.ids.moved;
-        upload(device, queue, ledger, &mut gpu.moved, "id moved placements", words(&moved), moved_changed);
+        upload(
+            device,
+            queue,
+            ledger,
+            &mut gpu.moved,
+            "id moved placements",
+            words(&moved),
+            moved_changed,
+        );
         self.view.outputs.ids.moved = moved;
         // Glass: only where the transparent pass ran this frame (native lit frames with
         // visible transparent draws, not data modes), which leaves its opaque depth; its
         // target outlives frames that skip it.
         let glass = self.view.upscale.is_none()
             && !self.view.outputs.modes.data()
-            && transparent.iter().any(|d| !d.instances.state.ids.is_empty())
+            && transparent
+                .iter()
+                .any(|d| !d.instances.state.ids.is_empty())
             && self.view.transparency_targets.is_some();
         if glass {
             self.encode_glass(encoder, transparent, size);
@@ -404,12 +458,28 @@ impl Renderer {
             | if previous { PREVIOUS } else { 0 }
             | if glass { GLASS } else { 0 };
         let tile = super::primary_ray_gpu::TRACE_TILE;
-        let frame_words = [size.width, size.height, flags, placements as u32, tile[0], tile[1], 0, 0];
+        let frame_words = [
+            size.width,
+            size.height,
+            flags,
+            placements as u32,
+            tile[0],
+            tile[1],
+            0,
+            0,
+        ];
         let gpu = self.view.outputs.ids.gpu.as_ref().unwrap();
         self.queue.write_buffer(&gpu.frame, 0, &words(&frame_words));
 
         let targets = self.view.outputs.ids.targets.as_ref().unwrap();
-        let primary_targets = self.view.primary.as_ref().unwrap().targets.as_ref().unwrap();
+        let primary_targets = self
+            .view
+            .primary
+            .as_ref()
+            .unwrap()
+            .targets
+            .as_ref()
+            .unwrap();
         let (anchors, layers) = match (reconstructed, &self.view.reconstruction_state) {
             (true, Some(state)) => state.written_slots(),
             _ => (&*gpu.zero_rg.view, &*gpu.zero_rgba.view),
@@ -426,7 +496,13 @@ impl Renderer {
             (
                 7,
                 R::TextureView(match (&self.view.outputs.ids.glass, glass) {
-                    (Some(Glass { target: Some((ids, _)), .. }), true) => &ids.view,
+                    (
+                        Some(Glass {
+                            target: Some((ids, _)),
+                            ..
+                        }),
+                        true,
+                    ) => &ids.view,
                     _ => &gpu.zero_uint.view,
                 }),
             ),
@@ -455,7 +531,13 @@ impl Renderer {
     /// (r = bits 0-7 ... a = bits 24-31). Queued behind that frame; nothing waits.
     pub fn write_ids_to(&mut self, target: &wgpu::Texture, layer: u32) -> Result<(), Error> {
         self.check_fault()?;
-        let targets = self.view.outputs.ids.targets.as_ref().filter(|t| t.frame.is_some());
+        let targets = self
+            .view
+            .outputs
+            .ids
+            .targets
+            .as_ref()
+            .filter(|t| t.frame.is_some());
         let size = targets
             .ok_or(Error::InvalidInput("no frame with ids to write"))?
             .ids
@@ -472,14 +554,24 @@ impl Renderer {
                 "id target must be a single-sample, single-mip 2D Rgba8Unorm texture of the view's size with RENDER_ATTACHMENT | COPY_SRC usage",
             ));
         }
-        if self.view.outputs.ids.gpu.as_ref().unwrap().handoff.is_none() {
+        if self
+            .view
+            .outputs
+            .ids
+            .gpu
+            .as_ref()
+            .unwrap()
+            .handoff
+            .is_none()
+        {
             let handoff = self.id_handoff();
             self.view.outputs.ids.gpu.as_mut().unwrap().handoff = Some(handoff);
         }
         let gpu = self.view.outputs.ids.gpu.as_ref().unwrap();
         let targets = self.view.outputs.ids.targets.as_ref().unwrap();
         let (layout, pipeline, uniform) = gpu.handoff.as_ref().unwrap();
-        self.queue.write_buffer(uniform, 0, &words(&[layer, 0, 0, 0]));
+        self.queue
+            .write_buffer(uniform, 0, &words(&[layer, 0, 0, 0]));
         let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("id handoff"),
             layout,
@@ -520,7 +612,11 @@ impl Renderer {
 
     fn id_handoff(
         &self,
-    ) -> (Owned<wgpu::BindGroupLayout>, wgpu::RenderPipeline, Owned<wgpu::Buffer>) {
+    ) -> (
+        Owned<wgpu::BindGroupLayout>,
+        wgpu::RenderPipeline,
+        Owned<wgpu::Buffer>,
+    ) {
         let layout = self.ledger.own(
             self.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -564,28 +660,28 @@ impl Renderer {
                 source: wgpu::ShaderSource::Wgsl(handoff_source().into()),
             });
         let pipeline = self
-                .device
-                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some("id handoff"),
-                    layout: Some(&pipeline_layout),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some("handoff_vs"),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some("handoff_ids_fs"),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
-                    }),
-                    primitive: Default::default(),
-                    depth_stencil: None,
-                    multisample: Default::default(),
-                    multiview_mask: None,
-                    cache: None,
-                });
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("id handoff"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("handoff_vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("handoff_ids_fs"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
+                }),
+                primitive: Default::default(),
+                depth_stencil: None,
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            });
         let uniform = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("id handoff layer"),
@@ -615,13 +711,27 @@ impl Renderer {
         {
             self.view.outputs.ids.glass = Some(self.id_glass());
         }
-        let resized = self.view.outputs.ids.glass.as_ref().unwrap().target.as_ref().is_none_or(|(t, _)| {
-            t.texture.size().width != size.width || t.texture.size().height != size.height
-        });
+        let resized = self
+            .view
+            .outputs
+            .ids
+            .glass
+            .as_ref()
+            .unwrap()
+            .target
+            .as_ref()
+            .is_none_or(|(t, _)| {
+                t.texture.size().width != size.width || t.texture.size().height != size.height
+            });
         if resized {
             use wgpu::{TextureFormat as F, TextureUsages as U};
             let ids = self.id_target("id glass", size, F::R32Uint, U::RENDER_ATTACHMENT);
-            let depth = self.id_target("id glass depth", size, F::Depth32Float, U::RENDER_ATTACHMENT);
+            let depth = self.id_target(
+                "id glass depth",
+                size,
+                F::Depth32Float,
+                U::RENDER_ATTACHMENT,
+            );
             self.view.outputs.ids.glass.as_mut().unwrap().target = Some((ids, depth));
         }
         // The unjittered camera block, eye and forward, as transparency_gpu.rs computes them.
@@ -632,7 +742,9 @@ impl Renderer {
         let mut view = [0u8; 288];
         view[..64].copy_from_slice(&matrix_bytes(camera.matrix(size.width, size.height)));
         view[64..68].copy_from_slice(&(crate::ViewMode::Lit as u32).to_ne_bytes());
-        let words = [eye.x, eye.y, eye.z, 0.0, forward.x, forward.y, forward.z, 0.0];
+        let words = [
+            eye.x, eye.y, eye.z, 0.0, forward.x, forward.y, forward.z, 0.0,
+        ];
         for (i, v) in words.into_iter().enumerate() {
             view[256 + i * 4..260 + i * 4].copy_from_slice(&v.to_ne_bytes());
         }
@@ -680,7 +792,11 @@ impl Renderer {
                 wgpu::BindGroupEntry {
                     binding: 41,
                     resource: wgpu::BindingResource::TextureView(
-                        self.view.transparency_targets.as_ref().unwrap().opaque_depth(),
+                        self.view
+                            .transparency_targets
+                            .as_ref()
+                            .unwrap()
+                            .opaque_depth(),
                     ),
                 },
                 wgpu::BindGroupEntry {
@@ -908,8 +1024,16 @@ impl Renderer {
                         storage(6),
                         texture(7, uint),
                         texture(8, uint),
-                        written(9, wgpu::TextureFormat::Rgba32Uint, wgpu::TextureViewDimension::D2),
-                        written(10, wgpu::TextureFormat::R32Uint, wgpu::TextureViewDimension::D2Array),
+                        written(
+                            9,
+                            wgpu::TextureFormat::Rgba32Uint,
+                            wgpu::TextureViewDimension::D2,
+                        ),
+                        written(
+                            10,
+                            wgpu::TextureFormat::R32Uint,
+                            wgpu::TextureViewDimension::D2Array,
+                        ),
                         storage(11),
                     ],
                 }),

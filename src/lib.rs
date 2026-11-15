@@ -33,11 +33,11 @@ mod material_mode;
 mod mesh;
 mod normal;
 // Entity-ID output's device-free half (docs/design-id-output.md).
+mod normal_variance_bc;
 mod object_ids;
 mod observe;
 mod pane_pixels;
 mod pass_timeline;
-mod normal_variance_bc;
 // PP1 public camera/display settings; implementation stays in the tone stage.
 mod post;
 mod primary_ray;
@@ -81,8 +81,8 @@ pub use material::{
 };
 pub use mesh::{Camera, Draw, Limits, Mesh, MeshData};
 pub use object_ids::{
-    ID_NONE, ID_SLOTS, ID_TICKS, ID_UNTAGGED, IdLayer, IdPixel, IdReadback, IdRect, IdRequest, IdsLost,
-    KEPT_ID_EVENTS, MAX_ID_RECT, TagTables,
+    ID_NONE, ID_SLOTS, ID_TICKS, ID_UNTAGGED, IdLayer, IdPixel, IdReadback, IdRect, IdRequest,
+    IdsLost, KEPT_ID_EVENTS, MAX_ID_RECT, TagTables,
 };
 pub use observe::*;
 pub use post::{ColourLut, DepthOfField, PostSettings, Tonemapper};

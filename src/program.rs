@@ -130,7 +130,8 @@ pub(crate) fn lean_variant(mut composed: Composed) -> Composed {
         );
         composed.source.insert_str(at, early);
         if at <= composed.program.start {
-            composed.program = composed.program.start + early.len()..composed.program.end + early.len();
+            composed.program =
+                composed.program.start + early.len()..composed.program.end + early.len();
         }
     }
     composed
@@ -176,7 +177,10 @@ const RL_SPLIT: [(&str, &str); 4] = [
 /// the candidate, with the resolve pass (`rl_resolve_pass_on`): glossy receivers trace four strata
 /// a frame into the history and rl_resolve (docs/rtvis.md).
 const REFLECTION_HISTORY: &str = include_str!("../shaders/reflections_history.wgsl");
-const RL_HISTORY_STUBS: [&str; 2] = ["// ---- rl history stubs ----\n", "// ---- end of rl history stubs ----\n"];
+const RL_HISTORY_STUBS: [&str; 2] = [
+    "// ---- rl history stubs ----\n",
+    "// ---- end of rl history stubs ----\n",
+];
 pub(crate) fn rl_history_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HISTORY").is_ok_and(|v| v == "1"))
@@ -190,13 +194,27 @@ fn rl_history_tune(mut source: String) -> String {
         let (name, ty, text) = match key {
             "strata" => ("RL_HISTORY_STRATA", "u32", format!("{value}u")),
             "rough_strata" => ("RL_HISTORY_ROUGH_STRATA", "u32", format!("{value}u")),
-            "cap" => ("RL_HISTORY_CAP", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
-            "moving" => ("RL_HISTORY_MOVING", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
-            "sigma" => ("RL_HISTORY_SIGMA", "f32", format!("{:?}", value.parse::<f32>().unwrap())),
+            "cap" => (
+                "RL_HISTORY_CAP",
+                "f32",
+                format!("{:?}", value.parse::<f32>().unwrap()),
+            ),
+            "moving" => (
+                "RL_HISTORY_MOVING",
+                "f32",
+                format!("{:?}", value.parse::<f32>().unwrap()),
+            ),
+            "sigma" => (
+                "RL_HISTORY_SIGMA",
+                "f32",
+                format!("{:?}", value.parse::<f32>().unwrap()),
+            ),
             _ => continue,
         };
         let prefix = format!("const {name}:{ty}=");
-        let at = source.find(&prefix).expect("RENDERLAB_RL_HISTORY_TUNE seam");
+        let at = source
+            .find(&prefix)
+            .expect("RENDERLAB_RL_HISTORY_TUNE seam");
         let end = at + source[at..].find(';').unwrap();
         source.replace_range(at..end, &format!("{prefix}{text}"));
     }
@@ -206,8 +224,9 @@ fn rl_history_tune(mut source: String) -> String {
 /// spatial resolve (reflections_history.wgsl RL_RESOLVE). Off by default.
 pub(crate) fn rl_resolve_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE").is_ok_and(|v| v == "1"))
-        || rl_resolve_pass_on()
+    *ON.get_or_init(|| {
+        rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE").is_ok_and(|v| v == "1")
+    }) || rl_resolve_pass_on()
 }
 /// U-RTVIS: with the history on, the frame's shading shows rl_resolve's output (a pre-pass, the
 /// resolve, then the shading pass; shaders/reflections_resolve.wgsl) and reads history under
@@ -215,13 +234,18 @@ pub(crate) fn rl_resolve_on() -> bool {
 /// still frames.
 pub(crate) fn rl_resolve_pass_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE_PASS").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| {
+        rl_history_on() && std::env::var("RENDERLAB_RL_RESOLVE_PASS").map_or(true, |v| v != "0")
+    })
 }
 /// U-RTVIS reflection pass (src/reflection_pass.rs): `RENDERLAB_RL_PASS=1` writes glossy
 /// receivers' lobes from primary shading (shaders/reflections_lobe.wgsl, group 0 bindings 56-58)
 /// and runs `rl_trace` after it. Off by default.
 const REFLECTION_LOBE: &str = include_str!("../shaders/reflections_lobe.wgsl");
-const RL_PASS_STUBS: [&str; 2] = ["// ---- rl pass stubs ----\n", "// ---- end of rl pass stubs ----\n"];
+const RL_PASS_STUBS: [&str; 2] = [
+    "// ---- rl pass stubs ----\n",
+    "// ---- end of rl pass stubs ----\n",
+];
 const REFLECTION_TRACE: &str = include_str!("../shaders/reflections_trace.wgsl");
 /// `RENDERLAB_RL_PASS` / `RENDERLAB_RL_DEFERRED`: "1" forces a switch on (RT included, for A/B),
 /// "0" forces it off; unset follows the path's default. Read once per process.
@@ -274,7 +298,8 @@ pub(crate) fn rl_deferred_for(source: &str) -> bool {
 /// `rl_trace`'s module on a traced shading `head`: the standard program's traced composition
 /// (the reflection block's helpers, with its stubs) and the trace entries.
 /// The trace kernel's cache lookup (shaders/reflections_trace.wgsl), which `cache_in_trace` keeps.
-const TRACE_CACHE_CALL: &str = "let cached=rl_cache_hit(traced.record,origin,d,traced.t,cone.x+cone.y*traced.t,sqrt(alpha));";
+const TRACE_CACHE_CALL: &str =
+    "let cached=rl_cache_hit(traced.record,origin,d,traced.t,cone.x+cone.y*traced.t,sqrt(alpha));";
 pub(crate) fn rl_trace_source(head: &str) -> String {
     let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
     let trace = if cache_in_trace() {
@@ -282,7 +307,58 @@ pub(crate) fn rl_trace_source(head: &str) -> String {
     } else {
         REFLECTION_TRACE.replacen(TRACE_CACHE_CALL, "let cached=vec4<f32>(0.0);", 1)
     };
-    rl_pass_switches(format!("{}\n{trace}", composed.source))
+    let source = rl_pass_switches(format!("{}\n{trace}", composed.source));
+    if trace_count() {
+        with_trace_count(source)
+    } else {
+        source
+    }
+}
+/// Measurement only (`RENDERLAB_RL_TRACE_COUNT=1`, read with `RENDERLAB_RL_ROOM_LOG`): the
+/// software trace counts its work into the pass counters' spare words: 4 top-level nodes, 11 rays
+/// that hit, 12 rays that missed (sky), 13 instances whose box the ray entered, 14 BVH4 nodes,
+/// 15 triangles tested. The picture is unchanged; the counting costs time.
+fn trace_count() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_TRACE_COUNT").is_ok_and(|v| v == "1"))
+}
+fn with_trace_count(source: String) -> String {
+    const SEAMS: [(&str, &str); 7] = [
+        (
+            "struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32> };",
+            "struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32>, more:array<atomic<u32>,12> };\nvar<private> rs_count:array<u32,6>;",
+        ),
+        (
+            "    if rs_box(origin,world_inv,b0.xyz,vec3<f32>(b0.w,bitcast<vec2<f32>>(b1.xy)),tmin,bound)>bound {return false;}\n",
+            "    if rs_box(origin,world_inv,b0.xyz,vec3<f32>(b0.w,bitcast<vec2<f32>>(b1.xy)),tmin,bound)>bound {return false;}\n    rs_count[3]+=1u;\n",
+        ),
+        (
+            "            let n=nodes+child*4u;\n",
+            "            let n=nodes+child*4u;rs_count[4]+=1u;\n",
+        ),
+        (
+            "                    let x=triangles+(start+k)*3u;\n",
+            "                    let x=triangles+(start+k)*3u;rs_count[5]+=1u;\n",
+        ),
+        (
+            "        let n=(head.y>>2u)+item*4u;\n",
+            "        let n=(head.y>>2u)+item*4u;rs_count[0]+=1u;\n",
+        ),
+        (
+            "        let traced=rl_cast(origin,d,epsilon);\n",
+            "        let traced=rl_cast(origin,d,epsilon);\n        if traced.record.x==0u {rs_count[2]+=1u;} else {rs_count[1]+=1u;}\n",
+        ),
+        (
+            "    }\n}\n// reflection_hits' indirect arguments",
+            "    }\n    atomicAdd(&rl_trace_stats.more[0],rs_count[0]);\n    for(var w=1u;w<6u;w+=1u) {atomicAdd(&rl_trace_stats.more[6u+w],rs_count[w]);}\n}\n// reflection_hits' indirect arguments",
+        ),
+    ];
+    let mut source = source;
+    for (from, to) in SEAMS {
+        assert_eq!(source.matches(from).count(), 1, "trace count seam {from}");
+        source = source.replacen(from, to, 1);
+    }
+    source
 }
 /// `composed` with the block between `markers` replaced by `text`, moving the program's range.
 fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Composed {
@@ -290,7 +366,10 @@ fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Comp
         return composed;
     };
     let end = composed.source[begin..].find(markers[1]).unwrap() + begin + markers[1].len();
-    assert!(end <= composed.program.start, "reflection stubs precede the program");
+    assert!(
+        end <= composed.program.start,
+        "reflection stubs precede the program"
+    );
     composed.source.replace_range(begin..end, text);
     let shift = text.len() as isize - (end - begin) as isize;
     let moved = |at: usize| (at as isize + shift) as usize;
@@ -377,8 +456,16 @@ pub(crate) fn pass_block(composed: Composed) -> Composed {
     let composed = replace_block(composed, RL_PASS_STUBS, &lobe);
     let Composed { source, program } = composed;
     let (engine, rest) = source.split_at(program.start);
-    assert_eq!(engine.matches(PASS_GATE[0]).count(), 1, "reflection pass gate seam");
-    let gate = if rl_inline() { PASS_GATE[1] } else { PASS_GATE_LISTED };
+    assert_eq!(
+        engine.matches(PASS_GATE[0]).count(),
+        1,
+        "reflection pass gate seam"
+    );
+    let gate = if rl_inline() {
+        PASS_GATE[1]
+    } else {
+        PASS_GATE_LISTED
+    };
     let engine = engine.replacen(PASS_GATE[0], gate, 1);
     let start = engine.len();
     Composed {
@@ -412,12 +499,25 @@ fn with_history_block(mut composed: Composed) -> Composed {
     let Some(begin) = composed.source.find(RL_HISTORY_STUBS[0]) else {
         return composed;
     };
-    let end = composed.source[begin..].find(RL_HISTORY_STUBS[1]).unwrap() + begin + RL_HISTORY_STUBS[1].len();
-    assert!(end <= composed.program.start, "the history stubs precede the program");
+    let end = composed.source[begin..].find(RL_HISTORY_STUBS[1]).unwrap()
+        + begin
+        + RL_HISTORY_STUBS[1].len();
+    assert!(
+        end <= composed.program.start,
+        "the history stubs precede the program"
+    );
     let history = if rl_resolve_pass_on() {
-        REFLECTION_HISTORY.replacen("const RL_RESOLVE_PASS:bool=false;", "const RL_RESOLVE_PASS:bool=true;", 1)
+        REFLECTION_HISTORY.replacen(
+            "const RL_RESOLVE_PASS:bool=false;",
+            "const RL_RESOLVE_PASS:bool=true;",
+            1,
+        )
     } else if rl_resolve_on() {
-        REFLECTION_HISTORY.replacen("const RL_RESOLVE:bool=false;", "const RL_RESOLVE:bool=true;", 1)
+        REFLECTION_HISTORY.replacen(
+            "const RL_RESOLVE:bool=false;",
+            "const RL_RESOLVE:bool=true;",
+            1,
+        )
     } else {
         REFLECTION_HISTORY.to_owned()
     };
@@ -512,7 +612,10 @@ pub(crate) fn rl_pass_switches(source: String) -> String {
         let Some((_, from, to)) = RL_PASS_SEAMS.iter().find(|(name, ..)| *name == switch) else {
             continue;
         };
-        assert!(source.matches(from).count() <= 1, "RENDERLAB_RL_HIT pass seam {switch}");
+        assert!(
+            source.matches(from).count() <= 1,
+            "RENDERLAB_RL_HIT pass seam {switch}"
+        );
         source = source.replacen(from, to, 1);
     }
     source
@@ -593,7 +696,8 @@ fn full_strata_weight() -> Option<f32> {
 pub(crate) const VIEW_API: &str = "struct ViewDependence { alpha:f32, share:f32 };\n";
 const VIEW_HINT: &str = include_str!("../shaders/temporal_view.wgsl");
 /// The traced entry's hint for programs that declare nothing: view-independent.
-const VIEW_STUB: &str = "fn tr1_view_hint(s:Surface,input:SurfaceInput,ray:PrimaryRay)->f32 { return 1.0; }\n";
+const VIEW_STUB: &str =
+    "fn tr1_view_hint(s:Surface,input:SurfaceInput,ray:PrimaryRay)->f32 { return 1.0; }\n";
 // ---- end of MQ2 view dependence ----
 
 // ---- M7-R1n software reflections (docs/m7-r1n.md) ----
@@ -609,7 +713,10 @@ const SOFTWARE_REFLECTION_API: &str = include_str!("../shaders/reflections_softw
 const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 5] = [
     // The resolve's hit distance: the software traversal's own (`rs`, the loop seam below; the
     // cache-terminated hits can read `rs.t` the same way).
-    ("            rl_dist+=hit.t;rl_dist_n+=1.0;\n", "            rl_dist+=rs.t;rl_dist_n+=1.0;\n"),
+    (
+        "            rl_dist+=hit.t;rl_dist_n+=1.0;\n",
+        "            rl_dist+=rs.t;rl_dist_n+=1.0;\n",
+    ),
     (
         "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,tmin,RL_FAR,origin,d));\n    while rayQueryProceed(&query) {}\n    let hit=rayQueryGetCommittedIntersection(&query);\n    if hit.kind==0u {return RlCast(vec4<u32>(0u),-1.0);}\n    return RlCast(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),hit.t);\n",
         "    let hit=rs_trace(origin,d,tmin,RL_FAR,false);\n    return RlCast(hit.record,select(-1.0,hit.t,hit.record.x!=0u));\n",
@@ -643,7 +750,12 @@ fn cache_hits_env() -> Option<Option<f32>> {
     static ROUGH: std::sync::OnceLock<Option<Option<f32>>> = std::sync::OnceLock::new();
     *ROUGH.get_or_init(|| {
         let value = std::env::var("RENDERLAB_RL_CACHE_HITS").ok()?;
-        Some(value.parse::<f32>().ok().filter(|r| (0.0..=1.0).contains(r)))
+        Some(
+            value
+                .parse::<f32>()
+                .ok()
+                .filter(|r| (0.0..=1.0).contains(r)),
+        )
     })
 }
 /// Whether any module may read the cache's outgoing radiance: the lighting group then binds it
@@ -674,7 +786,9 @@ const SOFTWARE_REFLECTION_QUERY: &str = "var query:ray_query;\n";
 fn software_reflection_api() -> String {
     let software = if crate::reflection_software::bvh4_enabled() {
         include_str!("../shaders/reflections_software_bvh4.wgsl")
-    } else { SOFTWARE_REFLECTION_API };
+    } else {
+        SOFTWARE_REFLECTION_API
+    };
     let mut api = format!("{software}{REFLECTION_API}");
     assert!(
         api.contains(SOFTWARE_REFLECTION_QUERY),
@@ -1032,8 +1146,15 @@ pub(crate) fn with_light_bound(mut composed: Composed, bound: LightBound) -> Com
     let (Some(begin), Some(reset)) = (source.find(LB_STUB[0]), source.find(LB_RESET)) else {
         return composed;
     };
-    let end = source[begin..].find(LB_STUB[1]).expect("the light bound stub ends") + begin + LB_STUB[1].len();
-    assert!(end <= composed.program.start && reset < composed.program.start, "the light bound precedes the program");
+    let end = source[begin..]
+        .find(LB_STUB[1])
+        .expect("the light bound stub ends")
+        + begin
+        + LB_STUB[1].len();
+    assert!(
+        end <= composed.program.start && reset < composed.program.start,
+        "the light bound precedes the program"
+    );
     // With RENDERLAB_SHADE_COUNT's counters composed in (measurement builds), words 14 and 15
     // count the local shadowed lights tested and those whose shadow ray was skipped.
     let counted = source.contains("fn rl_shade_count()");
@@ -1062,8 +1183,16 @@ fn rl_lb_skip(s:LightSample, c:vec3<f32>, sum:vec3<f32>) -> bool {{\n{hits}    i
         sum = bound.sum,
         codes = bound.codes,
         skipped = if bound.drop { 0.0f32 } else { 1.0f32 },
-        tested = if counted { "    atomicAdd(&rl_shade_counts[14],1u);\n" } else { "" },
-        skipped_count = if counted { " atomicAdd(&rl_shade_counts[15],1u);" } else { "" },
+        tested = if counted {
+            "    atomicAdd(&rl_shade_counts[14],1u);\n"
+        } else {
+            ""
+        },
+        skipped_count = if counted {
+            " atomicAdd(&rl_shade_counts[15],1u);"
+        } else {
+            ""
+        },
     );
     let mut source = composed.source.clone();
     // The reset goes in after the block (it follows it in the source, or comes first).
@@ -1222,10 +1351,17 @@ fn compose_stage(
     }
     // Every module takes the GI pass's splice, deferred ones included: the GI receiver kernel
     // (gi_receiver_pass.rs) relies on the definitions it appends.
-    source = crate::renderer::primary_ray_gpu::gi_receiver_pass::shade_source(source, matches!(stage, Stage::Traced | Stage::TracedStreamed) && indirect_calls, specular);
+    source = crate::renderer::primary_ray_gpu::gi_receiver_pass::shade_source(
+        source,
+        matches!(stage, Stage::Traced | Stage::TracedStreamed) && indirect_calls,
+        specular,
+    );
     // Light visibility (light_vis_pass.rs) and then the deferred variant, for every module.
     let composed = crate::renderer::primary_ray_gpu::light_vis_pass::apply(
-        Composed { source, program: program_range },
+        Composed {
+            source,
+            program: program_range,
+        },
         matches!(stage, Stage::Traced | Stage::TracedStreamed),
     );
     if deferred {
@@ -1277,9 +1413,7 @@ pub(crate) fn deferred_variant(composed: Composed) -> Composed {
     let mut engine = engine.replacen(DEFERRED_REPORT_STUB, "", 1);
     // Keep the untraced diagnostic and a one-day rollback switch. Only a fully replaced
     // environment estimate is skipped; faded, rejected and fallback receivers still need it.
-    if !rl_deferred_diag()
-        && std::env::var("RENDERLAB_RL_LAZY_ENV").as_deref() != Ok("0")
-    {
+    if !rl_deferred_diag() && std::env::var("RENDERLAB_RL_LAZY_ENV").as_deref() != Ok("0") {
         assert_eq!(engine.matches(REFLECTION_ENVIRONMENT_STUB).count(), 1);
         engine = engine.replacen(
             REFLECTION_ENVIRONMENT_STUB,
@@ -1328,9 +1462,11 @@ fn deferred_api() -> String {
 // ---- View modes (docs/design-id-output.md) ----
 /// The traced entry's lit store, which a view-mode module replaces.
 const VIEW_STORE_SEAM: &str = "textureStore(primary_hdr,pixel,vec4<f32>(atmosphere_surface(rl_finite(shade(surface_output,surface_input)),input.world),tr1_view_hint(surface_output,surface_input,view_ray)));";
-const VIEW_STORE: &str = "textureStore(primary_hdr,pixel,rl_view_store(surface_output,surface_input));";
+const VIEW_STORE: &str =
+    "textureStore(primary_hdr,pixel,rl_view_store(surface_output,surface_input));";
 /// Data modes show misses as zero; the lit miss is kept under another name.
-const VIEW_MISS_SEAM: &str = "fn primary_miss(id:vec2<u32>,size:vec2<u32>,clear:vec4<f32>)->vec4<f32> {";
+const VIEW_MISS_SEAM: &str =
+    "fn primary_miss(id:vec2<u32>,size:vec2<u32>,clear:vec4<f32>)->vec4<f32> {";
 const VIEW_MISS: &str = include_str!("../shaders/program_view.wgsl");
 
 /// A traced or list shading module of `program` (`compose` or `compose_list` output) that
@@ -1366,9 +1502,11 @@ pub(crate) fn view_variant(
     } else {
         "ambient(n)"
     };
-    let mut source = composed
-        .replacen(VIEW_STORE_SEAM, VIEW_STORE, 1)
-        .replacen(VIEW_MISS_SEAM, &VIEW_MISS_SEAM.replace("primary_miss", "rl_lit_miss"), 1);
+    let mut source = composed.replacen(VIEW_STORE_SEAM, VIEW_STORE, 1).replacen(
+        VIEW_MISS_SEAM,
+        &VIEW_MISS_SEAM.replace("primary_miss", "rl_lit_miss"),
+        1,
+    );
     source.push_str(&format!(
         "\nconst RL_VIEW_MODE:u32={}u;\nfn rl_view_data(s:Surface,input:SurfaceInput)->ViewData {{\n    {data}\n}}\nfn rl_view_ambient(n:vec3<f32>,input:SurfaceInput)->vec3<f32> {{ return {ambient}; }}\n{VIEW_MISS}",
         mode as u32
@@ -1408,14 +1546,22 @@ pub(crate) fn compose_hits(
         // only when the hit is that program's draw, so the composite draws inline's picture.
         if !hit_own_program() {
             for (seam, fallback) in HITS_RECEIVER_PROGRAM {
-                assert_eq!(composed.source.matches(seam).count(), 1, "reflection_hits seam {seam}");
+                assert_eq!(
+                    composed.source.matches(seam).count(),
+                    1,
+                    "reflection_hits seam {seam}"
+                );
                 composed.source = composed.source.replacen(seam, fallback, 1);
             }
         }
     }
     // The hit entry follows the program, so the range stays.
     if declares(program, "fn", "view_dependence") {
-        composed.source.push_str(&CACHE_SUITS.replacen("RL_CACHE_SHARE_BOUND", &format!("{:?}", cache_share()), 1));
+        composed.source.push_str(&CACHE_SUITS.replacen(
+            "RL_CACHE_SHARE_BOUND",
+            &format!("{:?}", cache_share()),
+            1,
+        ));
     } else {
         composed.source.push_str(CACHE_SUITS_NEVER);
     }
@@ -1441,7 +1587,8 @@ fn cache_share() -> f32 {
             .unwrap_or(0.6)
     })
 }
-const CACHE_SUITS_NEVER: &str ="\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return false; }\n";
+const CACHE_SUITS_NEVER: &str =
+    "\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return false; }\n";
 /// `RENDERLAB_RL_HIT_OWN_PROGRAM=1` (measurement, off by default): in a mixed-program frame each
 /// hit is shaded by its own draw's program, with its own parameters. More correct than inline's
 /// fallback (an emitter's reflection glows), but a visible change (docs/m7-gaps.md, Programs).
@@ -2337,7 +2484,9 @@ pub(crate) fn material_debug_field(name: &str) -> Option<&'static str> {
         "normal" => Some("vec4<f32>(rl_record.normal*0.5+vec3<f32>(0.5),1.0)"),
         "roughness" => Some("vec4<f32>(vec3<f32>(rl_record.roughness),1.0)"),
         "metallic" => Some("vec4<f32>(vec3<f32>(rl_record.metallic),1.0)"),
-        "receiver" => Some("rl_material_receiver_error(pixel,surface_input,source_front,lit_front)"),
+        "receiver" => {
+            Some("rl_material_receiver_error(pixel,surface_input,source_front,lit_front)")
+        }
         _ => None,
     }
 }
@@ -2589,13 +2738,22 @@ fn material_near_edge(rays: bool) -> String {
         return "fn rl_mr_near_edge(record:vec4<u32>,point:vec3<f32>,positions:array<vec3<f32>,3>,epsilon:f32)->bool { return false; }\n".to_owned();
     }
     let interactive = include_str!("../shaders/primary_interactive.wgsl");
-    let near = interactive.find("fn primary_near_edge(").expect("primary_near_edge");
-    let near_end = near + interactive[near..].find("\n}\n").expect("primary_near_edge's end") + 3;
+    let near = interactive
+        .find("fn primary_near_edge(")
+        .expect("primary_near_edge");
+    let near_end = near
+        + interactive[near..]
+            .find("\n}\n")
+            .expect("primary_near_edge's end")
+        + 3;
     format!(
         "struct RlMaterialTrace {{record:vec4<u32>,point:vec3<f32>,positions:array<vec3<f32>,3>}};\n{}\
          fn rl_mr_near_edge(record:vec4<u32>,point:vec3<f32>,positions:array<vec3<f32>,3>,epsilon:f32)->bool {{ return rl_mr_primary_near_edge(RlMaterialTrace(record,point,positions),epsilon); }}\n",
-        interactive[near..near_end]
-            .replacen("fn primary_near_edge(trace:PrimaryTrace,", "fn rl_mr_primary_near_edge(trace:RlMaterialTrace,", 1)
+        interactive[near..near_end].replacen(
+            "fn primary_near_edge(trace:PrimaryTrace,",
+            "fn rl_mr_primary_near_edge(trace:RlMaterialTrace,",
+            1
+        )
     )
 }
 /// The reading side: the images and the load.
@@ -2696,8 +2854,12 @@ pub(crate) fn material_variant_with(
         MaterialRole::Write => MATERIAL_WRITE,
         MaterialRole::Read => MATERIAL_READ,
     });
-    let rays = composed.source.contains("enable wgpu_ray_query_vertex_return;")
-        && composed.source.contains("var<storage,read> primary_indices:");
+    let rays = composed
+        .source
+        .contains("enable wgpu_ray_query_vertex_return;")
+        && composed
+            .source
+            .contains("var<storage,read> primary_indices:");
     if role == MaterialRole::Write {
         composed.source.push_str(&material_near_edge(rays));
     }
@@ -2710,7 +2872,8 @@ pub(crate) fn material_variant_with(
             probe != Some(MaterialProbe::TraceTail)
         ));
         // Misses report whether word 1 holds the miss sentinel: x 0 if so, 9000 if not; w 3.
-        const MISS: &str = "textureStore(primary_hdr,pixel,primary_miss(id,size,primary_frame.clear));return;}";
+        const MISS: &str =
+            "textureStore(primary_hdr,pixel,primary_miss(id,size,primary_frame.clear));return;}";
         let at = entry + composed.source[entry..].find(MISS)?;
         composed.source.replace_range(
             at..at + MISS.len(),
@@ -2723,7 +2886,8 @@ pub(crate) fn material_variant_with(
             if !composed.source.contains("enable wgpu_ray_query;") {
                 const ENABLE: &str = "enable wgpu_ray_query;\n";
                 composed.source.insert_str(0, ENABLE);
-                composed.program = composed.program.start + ENABLE.len()..composed.program.end + ENABLE.len();
+                composed.program =
+                    composed.program.start + ENABLE.len()..composed.program.end + ENABLE.len();
             }
             composed.source.push_str(MATERIAL_TRACE_RECEIVER);
             composed.source.push_str(MATERIAL_RECEIVER_CHECK);
@@ -2766,16 +2930,29 @@ const MATERIAL_HINT_SEAM: &str = "tr1_view_hint(surface_output,surface_input,vie
 /// None when a seam is missing (the caller then keeps the single kernel).
 fn material_reader_edits(mut composed: Composed, entry: usize) -> Option<Composed> {
     let tail = &composed.source[entry..];
-    if tail.matches(MATERIAL_LIGHTS_SEAM).count() != 1 || tail.matches(MATERIAL_HINT_SEAM).count() != 1 {
+    if tail.matches(MATERIAL_LIGHTS_SEAM).count() != 1
+        || tail.matches(MATERIAL_HINT_SEAM).count() != 1
+    {
         return None;
     }
     let lights = entry + tail.find(MATERIAL_LIGHTS_SEAM).expect("counted");
-    composed.source.insert_str(lights + MATERIAL_LIGHTS_SEAM.len(), "    rl_material_use=true;\n");
-    let hint = entry + composed.source[entry..].find(MATERIAL_HINT_SEAM).expect("counted");
-    composed.source.replace_range(hint..hint + MATERIAL_HINT_SEAM.len(), "rl_material_view_hint");
+    composed.source.insert_str(
+        lights + MATERIAL_LIGHTS_SEAM.len(),
+        "    rl_material_use=true;\n",
+    );
+    let hint = entry
+        + composed.source[entry..]
+            .find(MATERIAL_HINT_SEAM)
+            .expect("counted");
+    composed.source.replace_range(
+        hint..hint + MATERIAL_HINT_SEAM.len(),
+        "rl_material_view_hint",
+    );
     if let Some(at) = composed.source[..composed.program.start].find(MATERIAL_FILTER_NORMAL) {
         let with = "var n:vec3<f32>;if rl_material_use {n=rl_material_n;} else {n=material_normal(input);}let v=unit_normal(input.eye-input.world);";
-        composed.source.replace_range(at..at + MATERIAL_FILTER_NORMAL.len(), with);
+        composed
+            .source
+            .replace_range(at..at + MATERIAL_FILTER_NORMAL.len(), with);
         let shift = with.len() - MATERIAL_FILTER_NORMAL.len();
         composed.program = composed.program.start + shift..composed.program.end + shift;
     }
@@ -2793,8 +2970,14 @@ pub(crate) fn material_receiver_check() -> bool {
 }
 /// A WGSL function's text, from `fn name(` to its closing brace, in `text`.
 fn wgsl_function<'a>(text: &'a str, name: &str) -> &'a str {
-    let start = text.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("fn {name}"));
-    let end = start + text[start..].find("\n}\n").unwrap_or_else(|| panic!("fn {name}'s end")) + 3;
+    let start = text
+        .find(&format!("fn {name}("))
+        .unwrap_or_else(|| panic!("fn {name}"));
+    let end = start
+        + text[start..]
+            .find("\n}\n")
+            .unwrap_or_else(|| panic!("fn {name}'s end"))
+        + 3;
     &text[start..end]
 }
 /// The camera-hit trace kernels' record writes (`backend_ara::primary_trace`, with the pass on):
@@ -2878,9 +3061,14 @@ pub(crate) fn light_vis_from_record(mut source: String) -> Option<String> {
 /// The `nodecode` probe's entry edits: the `SurfaceInput` from the record, and the entry's
 /// later reads of the decoded point and side from it, so the vertex fetch is dead code.
 fn material_no_decode(mut composed: Composed, entry: usize) -> Option<Composed> {
-    let start = entry + composed.source[entry..].find("    let surface_input=decal_prepare(SurfaceInput(")?;
-    let end = start + composed.source[start..].find("decal_none()));\n")? + "decal_none()));\n".len();
-    composed.source.replace_range(start..end, "    let surface_input=rl_material_input(pixel,id,size,material);\n");
+    let start = entry
+        + composed.source[entry..].find("    let surface_input=decal_prepare(SurfaceInput(")?;
+    let end =
+        start + composed.source[start..].find("decal_none()));\n")? + "decal_none()));\n".len();
+    composed.source.replace_range(
+        start..end,
+        "    let surface_input=rl_material_input(pixel,id,size,material);\n",
+    );
     let tail_start = start;
     let tail_end = tail_start + composed.source[tail_start..].find("\n}\n")?;
     let tail = composed.source[tail_start..tail_end]
@@ -2945,10 +3133,10 @@ fn material_probe() -> Option<MaterialProbe> {
             "decode" => Some(MaterialProbe::Decode),
             "nostore" => Some(MaterialProbe::NoStore),
             "loadplus" => Some(MaterialProbe::LoadPlus),
-        "readlean" => Some(MaterialProbe::ReadLean),
-        "readpos" => Some(MaterialProbe::ReadPos),
-        "nodecode" => Some(MaterialProbe::NoDecode),
-        "tracetail" => Some(MaterialProbe::TraceTail),
+            "readlean" => Some(MaterialProbe::ReadLean),
+            "readpos" => Some(MaterialProbe::ReadPos),
+            "nodecode" => Some(MaterialProbe::NoDecode),
+            "tracetail" => Some(MaterialProbe::TraceTail),
             _ => None,
         },
     )
@@ -2975,7 +3163,10 @@ fn rl_material_probe_record(m:MaterialRecord)->u32 {
 "#;
 /// `readlean`: the traced entry's SurfaceInput without the vertex attributes and decals.
 const MATERIAL_PROBE_LEAN: [(&str, &str); 3] = [
-    ("let surface_input=decal_prepare(SurfaceInput(", "let surface_input=(SurfaceInput("),
+    (
+        "let surface_input=decal_prepare(SurfaceInput(",
+        "let surface_input=(SurfaceInput(",
+    ),
     (
         "source_geometric,input.normal,normal_dx,normal_dy,input.tangent,input.handedness,",
         "source_geometric,source_geometric,vec3<f32>(0.0),vec3<f32>(0.0),vec3<f32>(1.0,0.0,0.0),1.0,",

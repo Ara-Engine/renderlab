@@ -73,11 +73,18 @@ pub(super) fn on() -> bool {
 pub(super) fn mode() -> Mode {
     static MODE: OnceLock<Mode> = OnceLock::new();
     *MODE.get_or_init(|| {
-        let Ok(value) = std::env::var("RENDERLAB_GI_REFILL_BUDGET") else { return Mode::Fixed(DEFAULT_CELLS); };
+        let Ok(value) = std::env::var("RENDERLAB_GI_REFILL_BUDGET") else {
+            return Mode::Fixed(DEFAULT_CELLS);
+        };
         if value == "today" {
             Mode::Today
         } else if value == "hold" {
-            Mode::Hold(std::env::var("RENDERLAB_GI_REFILL_HOLD").unwrap_or_else(|_| "8".into()).parse().expect("GI refill hold frames"))
+            Mode::Hold(
+                std::env::var("RENDERLAB_GI_REFILL_HOLD")
+                    .unwrap_or_else(|_| "8".into())
+                    .parse()
+                    .expect("GI refill hold frames"),
+            )
         } else if value == "ms" {
             let ms: f64 = std::env::var("RENDERLAB_GI_REFILL_MS")
                 .unwrap_or_else(|_| "3".into())
@@ -134,12 +141,26 @@ pub(super) fn source(mut source: String, enabled: bool) -> String {
         source = source.replacen(before, after, 1);
     }
     // Share the unchanged ray/reduction body with the compacted queue entry point.
-    let start = source.find("        for(var j=0u;j<listed;j+=1u) {\n").expect("gather list seam")
+    let start = source
+        .find("        for(var j=0u;j<listed;j+=1u) {\n")
+        .expect("gather list seam")
         + "        for(var j=0u;j<listed;j+=1u) {\n".len();
-    let end = start + source[start..].find("\n        }\n    }\n}").expect("gather body end");
-    let body = source[start..end].replacen("        let slot=gi_wg_list[j];", "        let requests=(gi_frame.bounce.z&GI_RELIGHT_REQUESTS)!=0u;", 1);
-    source.replace_range(start..end, "        gi_priority_gather_cell(workgroupUniformLoad(&gi_wg_list[j]),lane);");
-    source.push_str(&format!("\nfn gi_priority_gather_cell(slot:u32,lane:u32) {{\n{body}\n}}\n"));
+    let end = start
+        + source[start..]
+            .find("\n        }\n    }\n}")
+            .expect("gather body end");
+    let body = source[start..end].replacen(
+        "        let slot=gi_wg_list[j];",
+        "        let requests=(gi_frame.bounce.z&GI_RELIGHT_REQUESTS)!=0u;",
+        1,
+    );
+    source.replace_range(
+        start..end,
+        "        gi_priority_gather_cell(workgroupUniformLoad(&gi_wg_list[j]),lane);",
+    );
+    source.push_str(&format!(
+        "\nfn gi_priority_gather_cell(slot:u32,lane:u32) {{\n{body}\n}}\n"
+    ));
     source.push_str(include_str!("../shaders/gi_refill_priority.wgsl"));
     source.push_str(include_str!("../shaders/gi_refill_compact.wgsl"));
     source
@@ -226,7 +247,10 @@ impl Controller {
             let wanted = (target * 0.8 * share / *estimate)
                 .floor()
                 .clamp(3000.0, f64::from(GATHER_CELLS)) as u32;
-            *budget = wanted.clamp((*budget - *budget / 4).max(3000), *budget + (*budget / 8).max(1));
+            *budget = wanted.clamp(
+                (*budget - *budget / 4).max(3000),
+                *budget + (*budget / 8).max(1),
+            );
         }
     }
     pub fn header(&self, header: &mut [u32; HEADER_WORDS as usize], mode: Mode) {
@@ -235,7 +259,9 @@ impl Controller {
             Mode::Fixed(cells) => (cells, cells),
             Mode::Milliseconds(_) => (self.claims, self.gathers),
         };
-        if matches!(mode, Mode::Hold(_)) { header[31] = 1; }
+        if matches!(mode, Mode::Hold(_)) {
+            header[31] = 1;
+        }
         header[20] = gathers;
         header[22] = 0; // Ordered resolve admission replaces the old hash-period claim gate.
         header[32] = gathers;
@@ -245,7 +271,9 @@ impl Controller {
     }
 }
 
-pub(super) fn compact_available(cap: u32) -> bool { cap <= (RAY_ITEMS - 8) / 3 }
+pub(super) fn compact_available(cap: u32) -> bool {
+    cap <= (RAY_ITEMS - 8) / 3
+}
 
 #[cfg(test)]
 mod tests {
@@ -265,10 +293,16 @@ mod tests {
                     .env_remove("RENDERLAB_GI_REFILL_REPLAY")
                     .env_remove("RENDERLAB_GI_REFILL_TRACE")
                     .output().unwrap();
-                assert!(output.status.success(), "switch {enabled}: {}{}",
-                    String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
-                assert!(String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
-                    "the child must execute exactly the deferral test");
+                assert!(
+                    output.status.success(),
+                    "switch {enabled}: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert!(
+                    String::from_utf8_lossy(&output.stdout).contains("1 passed;"),
+                    "the child must execute exactly the deferral test"
+                );
             }
             return;
         }

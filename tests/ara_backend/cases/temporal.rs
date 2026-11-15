@@ -749,7 +749,9 @@ fn interactive_frame_is_the_exact_frame_outside_the_penumbra_and_on_a_cold_start
             continue;
         }
         ensure!(
-            *a > umbra + 1e-3 * contrast && *a < lit - 1e-3 * contrast && (a - b).abs() < 0.5 * contrast,
+            *a > umbra + 1e-3 * contrast
+                && *a < lit - 1e-3 * contrast
+                && (a - b).abs() < 0.5 * contrast,
             "the cold reconstructed frame differs outside the penumbra or by too much: {a} against {b}"
         );
         let codes = f64::from((a - b).abs() / lit * 255.);

@@ -489,7 +489,11 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
         r.indirect_relight_parts(),
     );
     // A log that cannot be written is not a rendering error.
-    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+    {
         let _ = file.write_all(line.as_bytes());
     }
     Ok(())

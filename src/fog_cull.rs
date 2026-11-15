@@ -195,7 +195,11 @@ pub(super) fn atmosphere_source(mut source: String, on: bool) -> String {
         let body = source[range.clone()].replace("at_fog_cull_enabled()", "cull_active");
         let guard = "    if any(id>=grid) { return; }";
         assert_eq!(body.matches(guard).count(), 1);
-        let body = body.replacen(guard, &format!("{guard}\n    let cull_active=at_fog_cull_enabled();"), 1);
+        let body = body.replacen(
+            guard,
+            &format!("{guard}\n    let cull_active=at_fog_cull_enabled();"),
+            1,
+        );
         source.replace_range(range, &body);
     }
     source + OCCLUSION

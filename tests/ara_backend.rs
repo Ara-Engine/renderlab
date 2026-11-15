@@ -257,10 +257,10 @@ mod hzb_cases;
 
 #[path = "ara_backend/cases/program_bins.rs"]
 mod program_bins_cases;
-#[path = "ara_backend/cases/reflection_hit_bins.rs"]
-mod reflection_hit_bins_cases;
 #[path = "ara_backend/program_bins.rs"]
 mod program_bins_reference;
+#[path = "ara_backend/cases/reflection_hit_bins.rs"]
+mod reflection_hit_bins_cases;
 
 #[path = "ara_backend/cases/visibility_cull.rs"]
 mod visibility_cull_cases;
@@ -296,30 +296,30 @@ mod transparency_hit_depth_cases;
 #[path = "ara_backend/transparency_hit_depth_reference.rs"]
 mod transparency_hit_depth_reference;
 
-#[path = "ara_backend/cases/primary_check.rs"]
-mod primary_check_cases;
 #[path = "ara_backend/cases/lean_shading.rs"]
 mod lean_shading_cases;
+#[path = "ara_backend/cases/primary_check.rs"]
+mod primary_check_cases;
 #[path = "ara_backend/primary_check_reference.rs"]
 mod primary_check_reference;
 
 #[path = "ara_backend/cases/handle_arrays.rs"]
 mod handle_array_cases;
 
-#[path = "ara_backend/cases/material_pass.rs"]
-mod material_pass_cases;
 #[path = "ara_backend/cases/casts_shadows.rs"]
 mod casts_shadows_cases;
-#[path = "ara_backend/cases/sun_range.rs"]
-mod sun_range_cases;
 #[path = "ara_backend/cases/gi_pass_refusal.rs"]
 mod gi_pass_refusal_cases;
 #[path = "ara_backend/cases/light_vis.rs"]
 mod light_vis_cases;
+#[path = "ara_backend/cases/material_pass.rs"]
+mod material_pass_cases;
 #[path = "ara_backend/cases/primary_shade.rs"]
 mod primary_shade_cases;
 #[path = "ara_backend/primary_shade_reference.rs"]
 mod primary_shade_reference;
+#[path = "ara_backend/cases/sun_range.rs"]
+mod sun_range_cases;
 
 /// The placement buffer as the renderer uploads it, written here from its description
 /// and not through the crate: the placement words (one zero word when there are none),
@@ -532,7 +532,7 @@ mod engine_empty_cases;
 #[path = "ara_backend/cases/resident_meshes.rs"]
 mod resident_mesh_cases;
 
-#[path = "ara_backend/cases/textures.rs"]
-mod texture_cases;
 #[path = "ara_backend/cases/compressed_textures.rs"]
 mod compressed_texture_cases;
+#[path = "ara_backend/cases/textures.rs"]
+mod texture_cases;

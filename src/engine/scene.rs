@@ -109,7 +109,11 @@ pub trait Scene {
     /// The embedder's ids for an object's primitive ranges `(first, count, id)`. A layer
     /// without an id output (the ara-gpu backend until it ports one) keeps the default,
     /// which accepts and ignores them.
-    fn set_object_ids(&mut self, object: ObjectId, ranges: &[(u32, u32, u32)]) -> Result<(), Error> {
+    fn set_object_ids(
+        &mut self,
+        object: ObjectId,
+        ranges: &[(u32, u32, u32)],
+    ) -> Result<(), Error> {
         let _ = (object, ranges);
         Ok(())
     }
@@ -137,7 +141,9 @@ pub trait Scene {
     /// A layer without an id output keeps the default, which refuses the request.
     fn request_ids(&mut self, view: ViewId, rect: IdRect) -> Result<IdRequest, Error> {
         let _ = (view, rect);
-        Err(Error::InvalidInput("object ids are not implemented on this GPU layer"))
+        Err(Error::InvalidInput(
+            "object ids are not implemented on this GPU layer",
+        ))
     }
     /// Nonblocking progress: completed frames, GPU timings and finished id readbacks. The
     /// default reports nothing.
@@ -201,7 +207,11 @@ impl Scene for Engine {
     fn set_transform(&mut self, object: ObjectId, transform: Mat4) -> Result<(), Error> {
         Engine::set_transform(self, object, transform)
     }
-    fn set_object_ids(&mut self, object: ObjectId, ranges: &[(u32, u32, u32)]) -> Result<(), Error> {
+    fn set_object_ids(
+        &mut self,
+        object: ObjectId,
+        ranges: &[(u32, u32, u32)],
+    ) -> Result<(), Error> {
         Engine::set_object_ids(self, object, ranges)
     }
     fn set_decals(&mut self, decals: &[Decal]) -> Result<(), Error> {

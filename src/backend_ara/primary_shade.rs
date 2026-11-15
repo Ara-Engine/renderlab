@@ -66,8 +66,14 @@ fn hardware_soft_program_uncached(material: &str, terms: u32, lean: bool) -> Res
     let [_, head] =
         crate::renderer::primary_ray_gpu::shading_heads(include_str!("../../shaders/scene.wgsl"))?;
     let parameters = crate::program::declares_parameters(material);
-    let composed = crate::program::compose(&head, material, crate::program::Stage::Traced, parameters);
-    let source = if lean { crate::program::lean_variant(composed) } else { composed }.source;
+    let composed =
+        crate::program::compose(&head, material, crate::program::Stage::Traced, parameters);
+    let source = if lean {
+        crate::program::lean_variant(composed)
+    } else {
+        composed
+    }
+    .source;
     Ok(Program::new(Pass::PrimaryShadeTiles, with_terms(source, terms))?.checked())
 }
 /// `source` unchanged with every term, else through `shade_detail::without_terms`.
@@ -128,7 +134,12 @@ fn list_program_uncached(material: &str, terms: u32, lean: bool) -> Result<Progr
                     crate::program::Stage::Traced,
                     parameters,
                 );
-                if lean { crate::program::lean_variant(composed) } else { composed }.source
+                if lean {
+                    crate::program::lean_variant(composed)
+                } else {
+                    composed
+                }
+                .source
             },
             terms,
         ),

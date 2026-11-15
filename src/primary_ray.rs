@@ -55,10 +55,19 @@ fn visibility_limits_with_fog(limits: wgpu::Limits, fog: bool) -> wgpu::Limits {
     let storage = 13
         + u32::from(fog)
         + u32::from(crate::program::cache_hits_rough().is_some())
-        + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
+        + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS
+            * u32::from(crate::program::rl_pass_env() == Some(true));
     wgpu::Limits {
-        max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(if crate::material_mode::Mode::current() == crate::material_mode::Mode::Off { 5 } else { 6 }),
-        max_storage_buffers_per_shader_stage: limits.max_storage_buffers_per_shader_stage.max(storage),
+        max_storage_textures_per_shader_stage: limits.max_storage_textures_per_shader_stage.max(
+            if crate::material_mode::Mode::current() == crate::material_mode::Mode::Off {
+                5
+            } else {
+                6
+            },
+        ),
+        max_storage_buffers_per_shader_stage: limits
+            .max_storage_buffers_per_shader_stage
+            .max(storage),
         max_sampled_textures_per_shader_stage: limits.max_sampled_textures_per_shader_stage.max(24),
         max_binding_array_elements_per_shader_stage: limits
             .max_binding_array_elements_per_shader_stage
@@ -183,7 +192,8 @@ mod tests {
         // One more each while RENDERLAB_RL_CACHE_HITS or RENDERLAB_RL_PASS is set.
         let storage = 13
             + u32::from(crate::program::cache_hits_rough().is_some())
-            + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS * u32::from(crate::program::rl_pass_env() == Some(true));
+            + crate::renderer::primary_ray_gpu::reflection_pass::STORAGE_BUFFERS
+                * u32::from(crate::program::rl_pass_env() == Some(true));
         assert_eq!(limits.max_storage_buffers_per_shader_stage, storage);
         assert_eq!(limits.max_sampled_textures_per_shader_stage, 24);
         // Fog writes one additional buffer on the RT producer only. The non-RT

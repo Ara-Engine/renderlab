@@ -17,10 +17,10 @@ use crate::gi_bvh::{self, Blas};
 use crate::primary_ray::{TRACED_DRAWS, placement_table};
 #[path = "gi_refill_priority.rs"]
 mod priority;
-#[path = "gi_refill_feedback.rs"]
-mod refill_feedback;
 #[path = "gi_queue_probe.rs"]
 mod queue_probe;
+#[path = "gi_refill_feedback.rs"]
+mod refill_feedback;
 
 pub(crate) const HEADER_WORDS: u64 = 64;
 /// Keep the original admission policy: packing storage must not change the chosen
@@ -1156,7 +1156,11 @@ impl Planner {
         header[31] = u32::from(s.parent_standin);
         // U-RTVIS: a cut's gathers held to a time budget, the cells pixels read first.
         let cut_window = s.cut_gather_ms > 0.0 && self.since_cut < CUT_GATHER_FRAMES;
-        let per_ms = if software { GATHERS_PER_MS_SOFTWARE } else { GATHERS_PER_MS_HARDWARE };
+        let per_ms = if software {
+            GATHERS_PER_MS_SOFTWARE
+        } else {
+            GATHERS_PER_MS_HARDWARE
+        };
         header[20] = match s.gather_cells {
             _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
             0 => GATHER_CELLS,
@@ -1194,7 +1198,9 @@ impl Planner {
         header[29] = s.mover_hit_levels;
         // The most cells pixels read in a frame: the view's pixels over a cell's.
         header[28] = if s.gather_pixels_first || cut_window {
-            ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
+            ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels))
+                .ceil()
+                .max(1.0) as u32
         } else {
             0
         };
@@ -1470,8 +1476,13 @@ impl Planner {
         // A gather cap spreads a cut's gathers over more frames: still frames keep running
         // until a spread of up to 64 slot groups per gather generation can have drained.
         let idle_after = match (bounce, s.gather_cells) {
-            (true, _) if begun.header[priority::HEADER_LIMIT] != 0 => IDLE_AFTER_BOUNCE
-                + c.slots.div_ceil(begun.header[priority::HEADER_LIMIT]).max(64) * (s.gathers + 1),
+            (true, _) if begun.header[priority::HEADER_LIMIT] != 0 => {
+                IDLE_AFTER_BOUNCE
+                    + c.slots
+                        .div_ceil(begun.header[priority::HEADER_LIMIT])
+                        .max(64)
+                        * (s.gathers + 1)
+            }
             (false, _) => IDLE_AFTER,
             (true, u32::MAX) => IDLE_AFTER_BOUNCE,
             (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
@@ -1942,7 +1953,16 @@ impl Renderer {
                     storage | wgpu::BufferUsages::COPY_SRC,
                 ),
                 draws: buffer("indirect cache draw table", draws_bytes, storage),
-                raw: buffer("indirect cache filter sources", raw_bytes, storage | if queue_probe::enabled() {wgpu::BufferUsages::COPY_SRC} else {wgpu::BufferUsages::empty()}),
+                raw: buffer(
+                    "indirect cache filter sources",
+                    raw_bytes,
+                    storage
+                        | if queue_probe::enabled() {
+                            wgpu::BufferUsages::COPY_SRC
+                        } else {
+                            wgpu::BufferUsages::empty()
+                        },
+                ),
                 slots,
                 cold_words,
                 directions,
@@ -2133,7 +2153,12 @@ impl Renderer {
             return;
         }
         let priority = priority::on();
-        let stamps = PROFILE_STAMPS + if priority { 2 * (2 + 2 * CLAIM_ROUNDS) } else { 0 };
+        let stamps = PROFILE_STAMPS
+            + if priority {
+                2 * (2 + 2 * CLAIM_ROUNDS)
+            } else {
+                0
+            };
         let stride = (u64::from(stamps) * 8).div_ceil(PROFILE_STRIDE) * PROFILE_STRIDE;
         let queries = self.ledger.own(
             self.device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -2213,15 +2238,33 @@ impl Renderer {
                 IndirectProfile {
                     probe: pass(0),
                     claim: (0..rounds).map(|k| pass(1 + 2 * k)).sum::<f64>()
-                        + if profile.priority { (0..rounds).map(|k|pass(PROFILE_STAMPS as usize/2+2+2*k)).sum() } else {0.0},
+                        + if profile.priority {
+                            (0..rounds)
+                                .map(|k| pass(PROFILE_STAMPS as usize / 2 + 2 + 2 * k))
+                                .sum()
+                        } else {
+                            0.0
+                        },
                     resolve: (0..rounds).map(|k| pass(2 + 2 * k)).sum::<f64>()
-                        + if profile.priority { (0..rounds).map(|k|pass(PROFILE_STAMPS as usize/2+3+2*k)).sum() } else {0.0},
+                        + if profile.priority {
+                            (0..rounds)
+                                .map(|k| pass(PROFILE_STAMPS as usize / 2 + 3 + 2 * k))
+                                .sum()
+                        } else {
+                            0.0
+                        },
                     scan: pass(1 + 2 * rounds),
                     setup: pass(2 + 2 * rounds),
                     rays: pass(3 + 2 * rounds),
                     finish: pass(4 + 2 * rounds),
                     integrate: pass(5 + 2 * rounds),
-                    gather: pass(6 + 2 * rounds) + if profile.priority {pass(PROFILE_STAMPS as usize/2)+pass(PROFILE_STAMPS as usize/2+1)} else {0.0},
+                    gather: pass(6 + 2 * rounds)
+                        + if profile.priority {
+                            pass(PROFILE_STAMPS as usize / 2)
+                                + pass(PROFILE_STAMPS as usize / 2 + 1)
+                        } else {
+                            0.0
+                        },
                     light: pass(7 + 2 * rounds),
                     shade: pass(8 + 2 * rounds),
                     filter: pass(9 + 2 * rounds),
@@ -2303,18 +2346,31 @@ impl Renderer {
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires
     /// RENDERLAB_GI_QUEUE_DIAG before allocation. Reads roughly table+raw+queue bytes.
-    pub fn begin_indirect_queue_probe(&mut self) -> Result<(),Error> {
-        if !queue_probe::enabled() {return Err(Error::InvalidInput("GI queue diagnostic is unset"));}
-        let r=self.gi.resources.as_ref().ok_or(Error::InvalidInput("GI queue diagnostic needs a cache"))?;
-        if let Some(probe)=self.gi.queue_probe.as_mut() {probe.arm();}
-        else {self.gi.queue_probe=Some(queue_probe::State::new(&self.device,r));}
+    pub fn begin_indirect_queue_probe(&mut self) -> Result<(), Error> {
+        if !queue_probe::enabled() {
+            return Err(Error::InvalidInput("GI queue diagnostic is unset"));
+        }
+        let r = self
+            .gi
+            .resources
+            .as_ref()
+            .ok_or(Error::InvalidInput("GI queue diagnostic needs a cache"))?;
+        if let Some(probe) = self.gi.queue_probe.as_mut() {
+            probe.arm();
+        } else {
+            self.gi.queue_probe = Some(queue_probe::State::new(&self.device, r));
+        }
         Ok(())
     }
     /// First visible, refresh visible, background, ineligible, duplicates, queue entries,
     /// and visible first-fill cells with filtered neighbour data. Zero raw bounce means
     /// never gathered; the nonzero negative-zero sentinel means gathered with zero light.
-    pub fn indirect_queue_probe(&mut self) -> Result<[u32;7],Error> {
-        self.gi.queue_probe.as_ref().ok_or(Error::InvalidInput("GI queue probe was not armed"))?.read(&self.device)
+    pub fn indirect_queue_probe(&mut self) -> Result<[u32; 7], Error> {
+        self.gi
+            .queue_probe
+            .as_ref()
+            .ok_or(Error::InvalidInput("GI queue probe was not armed"))?
+            .read(&self.device)
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
     pub fn indirect_table(&mut self) -> Result<Option<Vec<u32>>, Error> {
@@ -2671,10 +2727,17 @@ impl Renderer {
         let priority = software && priority::on();
         let pipelines = Pipelines {
             software,
-            priority: priority.then(|| priority::Pipelines::new(|name|compute(name, main))),
+            priority: priority.then(|| priority::Pipelines::new(|name| compute(name, main))),
             directions,
             probe: compute("gi_probe", main),
-            claim: compute(if priority { "gi_priority_claim_visible" } else { "gi_claim" }, main),
+            claim: compute(
+                if priority {
+                    "gi_priority_claim_visible"
+                } else {
+                    "gi_claim"
+                },
+                main,
+            ),
             resolve: compute("gi_resolve", main),
             resolve_last: compute("gi_resolve_last", main),
             scan: compute("gi_scan", main),
@@ -2804,10 +2867,8 @@ impl Renderer {
                     .push((self.submissions, Retired::Arrays(old)));
             }
         }
-        let revisions: Vec<(u64, u64)> = draws
-            .iter()
-            .map(|d| d.instances.state.revision())
-            .collect();
+        let revisions: Vec<(u64, u64)> =
+            draws.iter().map(|d| d.instances.state.revision()).collect();
         let a = self.gi.arrays.as_mut().unwrap();
         if a.revisions != revisions {
             // The same bytes the traced shading tables publish, in placement order.
@@ -3037,10 +3098,20 @@ impl Renderer {
         if run && software && priority::on() {
             if let priority::Mode::Milliseconds(target) = priority::mode() {
                 if self.gi.refill_feedback.is_none() {
-                    if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
-                        return Err(Error::InvalidInput("GI refill time target requires timestamp queries"));
+                    if !self
+                        .device
+                        .features()
+                        .contains(wgpu::Features::TIMESTAMP_QUERY)
+                    {
+                        return Err(Error::InvalidInput(
+                            "GI refill time target requires timestamp queries",
+                        ));
                     }
-                    self.gi.refill_feedback = Some(refill_feedback::State::new(&self.device,&self.queue,&self.ledger));
+                    self.gi.refill_feedback = Some(refill_feedback::State::new(
+                        &self.device,
+                        &self.queue,
+                        &self.ledger,
+                    ));
                 }
                 self.gi.refill_feedback.as_mut().unwrap().collect(target);
             }
@@ -3068,7 +3139,11 @@ impl Renderer {
         self.gi.priority_hold = false;
         if software && priority::on() {
             let fallback = priority::Controller::default();
-            let controller = self.gi.refill_feedback.as_ref().map_or(&fallback,|f|&f.controller);
+            let controller = self
+                .gi
+                .refill_feedback
+                .as_ref()
+                .map_or(&fallback, |f| &f.controller);
             controller.header(&mut begun.header, priority::mode());
             priority::measurement_header(&mut begun.header);
             self.gi.priority_compact = priority::compact_available(begun.header[32]);
@@ -3086,8 +3161,7 @@ impl Renderer {
         let rows = draws.iter().enumerate().map(|(b, d)| {
             let n = d.instances.len() as u32;
             let program = d.material.map_or(self.standard.id(), |m| m.program.id());
-            let selector = if mixed && self.program_slot(program).traits.reflects
-            {
+            let selector = if mixed && self.program_slot(program).traits.reflects {
                 cell_selector(program)
             } else {
                 0
@@ -3146,7 +3220,9 @@ impl Renderer {
                 part(&[&self.lighting.decals.hash, &self.lighting.transmission.hash]),
             ];
             self.gi.relight_parts = match &self.gi.key_parts {
-                Some(old) => (0..5).filter(|&i| old[i] != parts[i]).fold(0, |m, i| m | 1 << i),
+                Some(old) => (0..5)
+                    .filter(|&i| old[i] != parts[i])
+                    .fold(0, |m, i| m | 1 << i),
                 None => 0,
             };
             self.gi.key_parts = Some(parts);
@@ -3430,7 +3506,11 @@ impl GiState {
                          groups: Option<[u32; 2]>| {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(label),
-                timestamp_writes: if stamp == u32::MAX { None } else { stamps(stamp) },
+                timestamp_writes: if stamp == u32::MAX {
+                    None
+                } else {
+                    stamps(stamp)
+                },
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &*g.main, &[]);
@@ -3456,47 +3536,112 @@ impl GiState {
                 traced.then_some(plan.groups),
             );
         }
-        if let Some(probe)=self.queue_probe.as_mut() {
-            probe.encode(encoder,r,self.planner.tick_queues[0]);
+        if let Some(probe) = self.queue_probe.as_mut() {
+            probe.encode(encoder, r, self.planner.tick_queues[0]);
         }
         // Bounce gathers (G2) read last frame's outgoing radiance and may request hit cells
         // for the claim rounds that follow.
         let b = 6 + 2 * CLAIM_ROUNDS;
         mark(encoder, "gi_gather");
-        if let Some(feedback) = &mut self.refill_feedback { feedback.begin(encoder); }
+        if let Some(feedback) = &mut self.refill_feedback {
+            feedback.begin(encoder);
+        }
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
             if let Some(priority) = &p.priority {
                 if self.priority_hold {
-                    main_pass(encoder,"indirect gather hold",&priority.hold,b,grid);
+                    main_pass(encoder, "indirect gather hold", &priority.hold, b, grid);
                 } else if self.priority_compact {
                     // Reuse claim scratch and the ray arena, before setup writes ray items.
-                    encoder.clear_buffer(&r.work,COUNTER_WORDS*4,Some(u64::from(r.slots)*4));
-                    encoder.clear_buffer(&r.work,u64::from(layout.items)*4,Some(8*4));
-                    main_pass(encoder,"indirect gather candidates",&priority.compact,u32::MAX,grid);
-                    main_pass(encoder,"indirect gather selection",&priority.select,u32::MAX,plan.bounce.then_some([1,1]));
-                    main_pass(encoder,"indirect gather deferral",&priority.defer,u32::MAX,grid);
-                    main_pass(encoder,"indirect cache gather",&priority.gather_compacted,b,grid);
+                    encoder.clear_buffer(&r.work, COUNTER_WORDS * 4, Some(u64::from(r.slots) * 4));
+                    encoder.clear_buffer(&r.work, u64::from(layout.items) * 4, Some(8 * 4));
+                    main_pass(
+                        encoder,
+                        "indirect gather candidates",
+                        &priority.compact,
+                        u32::MAX,
+                        grid,
+                    );
+                    main_pass(
+                        encoder,
+                        "indirect gather selection",
+                        &priority.select,
+                        u32::MAX,
+                        plan.bounce.then_some([1, 1]),
+                    );
+                    main_pass(
+                        encoder,
+                        "indirect gather deferral",
+                        &priority.defer,
+                        u32::MAX,
+                        grid,
+                    );
+                    main_pass(
+                        encoder,
+                        "indirect cache gather",
+                        &priority.gather_compacted,
+                        b,
+                        grid,
+                    );
                 } else {
-                    main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
+                    main_pass(encoder, "indirect cache gather", &p.gather, b, grid);
                 }
-                let legacy_grid = if self.priority_hold || self.priority_compact { None } else {grid};
-                main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,legacy_grid.map(|_|[1,1]));
-                main_pass(encoder,"indirect visible gather",&priority.gather_later,PROFILE_STAMPS/2,legacy_grid);
-                main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,legacy_grid.map(|_|[1,1]));
-                main_pass(encoder,"indirect background gather",&priority.gather_background,PROFILE_STAMPS/2+1,legacy_grid);
+                let legacy_grid = if self.priority_hold || self.priority_compact {
+                    None
+                } else {
+                    grid
+                };
+                main_pass(
+                    encoder,
+                    "indirect gather ticket clamp",
+                    &priority.gather_clamp,
+                    u32::MAX,
+                    legacy_grid.map(|_| [1, 1]),
+                );
+                main_pass(
+                    encoder,
+                    "indirect visible gather",
+                    &priority.gather_later,
+                    PROFILE_STAMPS / 2,
+                    legacy_grid,
+                );
+                main_pass(
+                    encoder,
+                    "indirect gather ticket clamp",
+                    &priority.gather_clamp,
+                    u32::MAX,
+                    legacy_grid.map(|_| [1, 1]),
+                );
+                main_pass(
+                    encoder,
+                    "indirect background gather",
+                    &priority.gather_background,
+                    PROFILE_STAMPS / 2 + 1,
+                    legacy_grid,
+                );
             } else {
-                main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
+                main_pass(encoder, "indirect cache gather", &p.gather, b, grid);
             }
         }
-        if let Some(feedback) = &self.refill_feedback { feedback.mark(encoder,1); feedback.mark(encoder,2); }
+        if let Some(feedback) = &self.refill_feedback {
+            feedback.mark(encoder, 1);
+            feedback.mark(encoder, 2);
+        }
         mark(encoder, "gi_claim");
-        if p.priority.is_some() { encoder.clear_buffer(&r.work,47*4,Some(4)); }
+        if p.priority.is_some() {
+            encoder.clear_buffer(&r.work, 47 * 4, Some(4));
+        }
         if traced || profiling {
             for k in 0..CLAIM_ROUNDS {
                 let grid = traced.then_some([CLAIM_GROUPS, 1]);
                 if let Some(priority) = &p.priority {
-                    main_pass(encoder,"indirect claim ticket reset",&priority.claim_reset,u32::MAX,traced.then_some([1,1]));
+                    main_pass(
+                        encoder,
+                        "indirect claim ticket reset",
+                        &priority.claim_reset,
+                        u32::MAX,
+                        traced.then_some([1, 1]),
+                    );
                 }
                 main_pass(encoder, "indirect cache claim", &p.claim, 1 + 2 * k, grid);
                 let last = k + 1 == CLAIM_ROUNDS && p.priority.is_none();
@@ -3505,12 +3650,34 @@ impl GiState {
             }
             if let Some(priority) = &p.priority {
                 for k in 0..CLAIM_ROUNDS {
-                    let grid = traced.then_some([CLAIM_GROUPS,1]);
-                    let stamp = PROFILE_STAMPS/2+2+2*k;
-                    main_pass(encoder,"indirect claim ticket reset",&priority.claim_reset,u32::MAX,traced.then_some([1,1]));
-                    main_pass(encoder,"indirect background claim",&priority.claim_background,stamp,grid);
-                    let resolve = if k+1==CLAIM_ROUNDS {&p.resolve_last} else {&p.resolve};
-                    main_pass(encoder,"indirect background resolve",resolve,stamp+1,grid);
+                    let grid = traced.then_some([CLAIM_GROUPS, 1]);
+                    let stamp = PROFILE_STAMPS / 2 + 2 + 2 * k;
+                    main_pass(
+                        encoder,
+                        "indirect claim ticket reset",
+                        &priority.claim_reset,
+                        u32::MAX,
+                        traced.then_some([1, 1]),
+                    );
+                    main_pass(
+                        encoder,
+                        "indirect background claim",
+                        &priority.claim_background,
+                        stamp,
+                        grid,
+                    );
+                    let resolve = if k + 1 == CLAIM_ROUNDS {
+                        &p.resolve_last
+                    } else {
+                        &p.resolve
+                    };
+                    main_pass(
+                        encoder,
+                        "indirect background resolve",
+                        resolve,
+                        stamp + 1,
+                        grid,
+                    );
                 }
             }
         }
@@ -3529,7 +3696,9 @@ impl GiState {
             let finish = cells.filter(|_| traced);
             main_pass(encoder, "indirect cache finish", &p.finish, s + 3, finish);
         }
-        if let Some(feedback) = &mut self.refill_feedback { feedback.finish(encoder,&r.work); }
+        if let Some(feedback) = &mut self.refill_feedback {
+            feedback.finish(encoder, &r.work);
+        }
         mark(encoder, "gi_integrate");
         if plan.integrate || profiling {
             let groups = cells.filter(|_| plan.integrate);
@@ -3581,9 +3750,10 @@ impl GiState {
         }
         if let Some(profile) = self.profile.as_ref() {
             if profile.priority && p.priority.is_none() {
-                for i in PROFILE_STAMPS/2..profile.stamps/2 {
+                for i in PROFILE_STAMPS / 2..profile.stamps / 2 {
                     encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("indirect priority profile (inactive)"), timestamp_writes: stamps(i),
+                        label: Some("indirect priority profile (inactive)"),
+                        timestamp_writes: stamps(i),
                     });
                 }
             }
@@ -3626,7 +3796,10 @@ mod tests {
     #[test]
     fn a_camera_cut_opens_the_refill_window_only_with_cut_refill() {
         let config = |cut_refill: bool| PlanConfig {
-            settings: IndirectSettings { cut_refill, ..IndirectSettings::default() },
+            settings: IndirectSettings {
+                cut_refill,
+                ..IndirectSettings::default()
+            },
             slots: 1 << 20,
             misses: 1 << 16,
             cold_words: 4,
@@ -3649,7 +3822,10 @@ mod tests {
                 let begun = planner.begin(&c, true, true, true);
                 let in_window = cut_refill && frame < CUT_REFILL_FRAMES;
                 let claims = if in_window { CLAIM_CELLS_SOFTWARE } else { 0 };
-                assert_eq!(begun.header[22], claims, "cut_refill {cut_refill}, frame {frame}");
+                assert_eq!(
+                    begun.header[22], claims,
+                    "cut_refill {cut_refill}, frame {frame}"
+                );
                 // No coarse read either way: the footprint is the steady frame's.
                 assert_eq!(begun.header[4], steady.header[4], "frame {frame}");
                 // No phase spread with the refill; off, the cut is no reset either.

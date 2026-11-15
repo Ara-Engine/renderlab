@@ -538,7 +538,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         });
     let game_program = game_program.as_deref().unwrap_or(GAME_PROGRAM);
     let program = engine.create_program("game", game_program)?;
-    let standard = scene_keys.iter().any(|(k, v)| k == "program" && v == "standard");
+    let standard = scene_keys
+        .iter()
+        .any(|(k, v)| k == "program" && v == "standard");
     let toon_program = engine.create_program("toon", TOON_PROGRAM)?;
     let programs_seconds = start.elapsed().as_secs_f64();
     let material = |engine: &mut Engine, color: [f32; 3], metallic: f32, roughness: f32| {
@@ -700,8 +702,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             seed as f32 / u32::MAX as f32
         };
         for _ in 0..300 {
-            let (x, z, size) = (-29.0 + 24.0 * next(), -29.0 + 24.0 * next(), 0.3 + 0.9 * next());
-            let along = (Vec3::new(x, 0.0, z) - FIELD_EYE).dot(FIELD_WALK).clamp(0.0, 4.0);
+            let (x, z, size) = (
+                -29.0 + 24.0 * next(),
+                -29.0 + 24.0 * next(),
+                0.3 + 0.9 * next(),
+            );
+            let along = (Vec3::new(x, 0.0, z) - FIELD_EYE)
+                .dot(FIELD_WALK)
+                .clamp(0.0, 4.0);
             let aside = Vec3::new(x, 0.0, z) - (FIELD_EYE + along * FIELD_WALK);
             if aside.length() - FIELD_EYE.y > 2.5 || aside.length() > 6.0 {
                 engine.spawn(
@@ -781,7 +789,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             engine.spawn(
                 cube,
                 column,
-                boxed(at(-0.15 * d, 0.5 * height, -d), Vec3::new(width, height, width)),
+                boxed(
+                    at(-0.15 * d, 0.5 * height, -d),
+                    Vec3::new(width, height, width),
+                ),
             )?;
         }
         if far_low || far_box {
@@ -1113,12 +1124,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ])?;
 
     fs::create_dir_all(&args.out)?;
-    let pipeline_preparation = if std::env::var("RENDERLAB_PREWARM_PIPELINES").is_ok_and(|v| v == "1") {
+    let pipeline_preparation = if std::env::var("RENDERLAB_PREWARM_PIPELINES")
+        .is_ok_and(|v| v == "1")
+    {
         let p = engine.prepare_pipelines()?;
         Some(serde_json::json!({"ms": p.cpu.as_secs_f64() * 1e3,
             "render": p.render_pipelines, "compute": p.compute_pipelines,
             "added_buffer_bytes": p.added_buffer_bytes, "added_texture_bytes": p.added_texture_bytes}))
-    } else { None };
+    } else {
+        None
+    };
     let ready = start.elapsed();
     let mut frames = Vec::new();
     let mut last_camera = None;
@@ -1129,8 +1144,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // only post-cut/reference frames without changing the frames the engine renders.
     let event_frame = std::env::var("RENDERLAB_SCENE_EVENT_FRAME")
         .map_or(Ok(EVENT_FRAME), |v| v.parse::<u32>())?;
-    let keep_frames = std::env::var("RENDERLAB_SCENE_KEEP_FRAMES").ok()
-        .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<Vec<_>, _>>())
+    let keep_frames = std::env::var("RENDERLAB_SCENE_KEEP_FRAMES")
+        .ok()
+        .map(|list| {
+            list.split(',')
+                .map(str::parse::<u32>)
+                .collect::<Result<Vec<_>, _>>()
+        })
         .transpose()?;
     let drain = std::env::var("RENDERLAB_SCENE_DRAIN").is_ok_and(|v| v == "1");
     // U-FIXED measurement only: RENDERLAB_SCENE_EVENT_FRAMES=a,b,c cuts at each listed frame
@@ -1138,21 +1158,37 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // RENDERLAB_SCENE_COUNTERS=<file> writes one JSON line per frame of cumulative pipeline,
     // resource and acceleration-structure counters.
     let events: Vec<u32> = match std::env::var("RENDERLAB_SCENE_EVENT_FRAMES") {
-        Ok(list) => list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>()?,
+        Ok(list) => list
+            .split(',')
+            .map(str::parse::<u32>)
+            .collect::<Result<_, _>>()?,
         Err(_) => vec![event_frame],
     };
     // Clear only GI, far before the measured cut, without dropping view pipelines.
-    let gi_resets: Vec<u32> = std::env::var("RENDERLAB_SCENE_GI_RESET_FRAMES").ok()
-        .map(|list| list.split(',').map(str::parse::<u32>).collect::<Result<_, _>>())
-        .transpose()?.unwrap_or_default();
-    let mut queue_diagnostic=std::env::var_os("RENDERLAB_GI_QUEUE_DIAG").map(std::fs::File::create).transpose()?;
-    let queue_frames:Vec<u32>=std::env::var("RENDERLAB_SCENE_QUEUE_FRAMES").unwrap_or_else(|_|"443,462,512,641".into())
-        .split(',').map(str::parse::<u32>).collect::<Result<_,_>>()?;
+    let gi_resets: Vec<u32> = std::env::var("RENDERLAB_SCENE_GI_RESET_FRAMES")
+        .ok()
+        .map(|list| {
+            list.split(',')
+                .map(str::parse::<u32>)
+                .collect::<Result<_, _>>()
+        })
+        .transpose()?
+        .unwrap_or_default();
+    let mut queue_diagnostic = std::env::var_os("RENDERLAB_GI_QUEUE_DIAG")
+        .map(std::fs::File::create)
+        .transpose()?;
+    let queue_frames: Vec<u32> = std::env::var("RENDERLAB_SCENE_QUEUE_FRAMES")
+        .unwrap_or_else(|_| "443,462,512,641".into())
+        .split(',')
+        .map(str::parse::<u32>)
+        .collect::<Result<_, _>>()?;
     let mut counters = std::env::var_os("RENDERLAB_SCENE_COUNTERS")
         .map(std::fs::File::create)
         .transpose()?;
     for frame in 0..args.frames {
-        if gi_resets.contains(&frame) { engine.renderer_mut().reset_indirect(); }
+        if gi_resets.contains(&frame) {
+            engine.renderer_mut().reset_indirect();
+        }
         let t = if args.still { 0.0 } else { frame as f32 / FPS };
         let sun_update = Instant::now();
         let hour = sun_hour(frame);
@@ -1168,7 +1204,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         if let Some(second) = &mut second_hero {
             let behind = walk + std::f32::consts::PI;
             let ground = at(3.0 * behind.sin(), 0.0, -1.0 + 3.0 * behind.cos());
-            second.update(&mut engine, ground, behind.cos().atan2(-behind.sin()), t + 0.4)?;
+            second.update(
+                &mut engine,
+                ground,
+                behind.cos().atan2(-behind.sin()),
+                t + 0.4,
+            )?;
         }
         engine.set_lights(&diag.lights(lanterns(t, frame)))?;
         if glow_steps && frame == event_frame {
@@ -1222,7 +1263,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
             let eye = anchor + FIELD_EYE + 4.0 * along * FIELD_WALK;
             let passed = events.iter().filter(|&&e| frame >= e).count();
-            let turn = if cut_turn && passed % 2 == 1 { 150.0 } else { 0.0 };
+            let turn = if cut_turn && passed % 2 == 1 {
+                150.0
+            } else {
+                0.0
+            };
             let look = Mat4::from_rotation_y((12.0 * along + turn).to_radians())
                 .transform_vector3(FIELD_WALK);
             (eye, eye + 10.0 * look - Vec3::new(0.0, 2.2, 0.0))
@@ -1278,19 +1323,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let camera = if args.views == "b" { camera_b } else { camera };
         let begin = Instant::now();
         engine.tick(1.0 / FPS)?;
-        let queue_sample=queue_diagnostic.is_some() && queue_frames.contains(&frame);
-        if queue_sample {engine.renderer_mut().begin_indirect_queue_probe()?;}
+        let queue_sample = queue_diagnostic.is_some() && queue_frames.contains(&frame);
+        if queue_sample {
+            engine.renderer_mut().begin_indirect_queue_probe()?;
+        }
         let report = engine.render_view(view, &camera)?;
         if queue_sample {
             use std::io::Write;
-            let q=engine.renderer_mut().indirect_queue_probe()?;
-            writeln!(queue_diagnostic.as_mut().unwrap(),"{}",serde_json::json!({"frame":frame,"phase":"incoming_after_probe","visible_never_gathered":q[0],"visible_with_raw_data":q[1],"off_screen":q[2],"ineligible":q[3],"duplicates":q[4],"entries":q[5],"visible_filtered_only":q[6]}))?;
+            let q = engine.renderer_mut().indirect_queue_probe()?;
+            writeln!(
+                queue_diagnostic.as_mut().unwrap(),
+                "{}",
+                serde_json::json!({"frame":frame,"phase":"incoming_after_probe","visible_never_gathered":q[0],"visible_with_raw_data":q[1],"off_screen":q[2],"ineligible":q[3],"duplicates":q[4],"entries":q[5],"visible_filtered_only":q[6]})
+            )?;
         }
         // `--views ab`: the second view renders in the same tick, after the first.
         let second_hash = match second {
             Some(second) => {
                 engine.render_view(second, &camera_b)?;
-                let written = keep_frames.as_ref().map_or(frame % args.every == 0 || frame + 1 == args.frames, |keep| keep.contains(&frame));
+                let written = keep_frames.as_ref().map_or(
+                    frame % args.every == 0 || frame + 1 == args.frames,
+                    |keep| keep.contains(&frame),
+                );
                 written
                     .then(|| -> Result<_, Box<dyn std::error::Error>> {
                         let image = engine.capture_view(second)?;
@@ -1312,19 +1366,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let st = r.stats();
             let kinds: Vec<u64> = st.ownership.persistent.iter().map(|c| c.created).collect();
             let hw = r.hardware_shadow_stats();
-            writeln!(file, "{}", serde_json::json!({
-                "frame": frame, "pipelines_created": st.pipelines.created, "created_by_kind": kinds,
-                "shadow_creations": st.ownership.shadow_creations, "target_creations": st.ownership.target_creations,
-                "lut_creations": st.ownership.lut_creations, "material_creations": st.ownership.material_creations,
-                "texture_creations": st.ownership.texture_creations, "light_creations": st.ownership.light_creations,
-                "blas_builds": hw.map(|h| h.blas_builds), "blas_updates": hw.map(|h| h.blas_updates),
-                "tlas_builds": hw.map(|h| h.tlas_builds), "pending_builds": hw.map(|h| h.pending_builds),
-                "as_bytes": hw.map(|h| h.estimated_as_bytes),
-                "visible_instances": report.scene.visible_instances,
-                "submitted_instances": report.scene.submitted_instances,
-            }))?;
+            writeln!(
+                file,
+                "{}",
+                serde_json::json!({
+                    "frame": frame, "pipelines_created": st.pipelines.created, "created_by_kind": kinds,
+                    "shadow_creations": st.ownership.shadow_creations, "target_creations": st.ownership.target_creations,
+                    "lut_creations": st.ownership.lut_creations, "material_creations": st.ownership.material_creations,
+                    "texture_creations": st.ownership.texture_creations, "light_creations": st.ownership.light_creations,
+                    "blas_builds": hw.map(|h| h.blas_builds), "blas_updates": hw.map(|h| h.blas_updates),
+                    "tlas_builds": hw.map(|h| h.tlas_builds), "pending_builds": hw.map(|h| h.pending_builds),
+                    "as_bytes": hw.map(|h| h.estimated_as_bytes),
+                    "visible_instances": report.scene.visible_instances,
+                    "submitted_instances": report.scene.submitted_instances,
+                })
+            )?;
         }
-        let written = keep_frames.as_ref().map_or(frame % args.every == 0 || frame + 1 == args.frames, |keep| keep.contains(&frame));
+        let written = keep_frames.as_ref().map_or(
+            frame % args.every == 0 || frame + 1 == args.frames,
+            |keep| keep.contains(&frame),
+        );
         let mut image_hash = None;
         let mut hdr_hash = None;
         if written {

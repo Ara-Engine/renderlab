@@ -17,10 +17,7 @@ impl Renderer {
         let before = self.stats();
         let scopes = OperationScopes::new(&self.device);
         let prepared = self.prewarm_transparency(materials);
-        if prepared.is_ok()
-            && self.hardware_shadows.is_none()
-            && self.local_shadows().count > 0
-        {
+        if prepared.is_ok() && self.hardware_shadows.is_none() && self.local_shadows().count > 0 {
             self.local_maps.prewarm_clear(&self.device, &self.ledger);
         }
         let error = scopes.finish();

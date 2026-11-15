@@ -508,7 +508,10 @@ fn the_reflection_pass_belongs_to_the_marked_renderer() {
         Stage::Traced,
         false,
     ));
-    assert!(list.source.contains("rl_room_reserve(count,traced,lobe.weight)"));
+    assert!(
+        list.source
+            .contains("rl_room_reserve(count,traced,lobe.weight)")
+    );
     for source in [&on.source, &list.source] {
         let module = naga::front::wgsl::parse_str(source)
             .unwrap_or_else(|e| panic!("{}", e.emit_to_string(source)));
@@ -568,11 +571,17 @@ fn every_list_head_module_validates() {
                 let list = with_reflection_history(compose_list(head, program, stage, parameters));
                 for (kind, composed) in [("single", single), ("list", list)] {
                     assert_eq!(&composed.source[composed.program.clone()], program);
-                    validate(&format!("head {h} {name} {stage:?} {kind}"), &composed.source);
+                    validate(
+                        &format!("head {h} {name} {stage:?} {kind}"),
+                        &composed.source,
+                    );
                 }
                 for lists in [false, true] {
                     let hits = compose_hits(head, program, stage, parameters, lists);
-                    validate(&format!("head {h} {name} {stage:?} hits lists={lists}"), &hits.source);
+                    validate(
+                        &format!("head {h} {name} {stage:?} hits lists={lists}"),
+                        &hits.source,
+                    );
                 }
             }
         }
@@ -700,7 +709,10 @@ fn the_primary_shading_layout_has_no_clashing_bindings() {
             if switches.material {
                 let base = shade_layout_entries(
                     visibility,
-                    ShadeSwitches { material: false, ..switches },
+                    ShadeSwitches {
+                        material: false,
+                        ..switches
+                    },
                 );
                 let reader = shade_layout_entries(visibility, switches);
                 assert_eq!(&reader[..base.len()], &base);
@@ -822,7 +834,9 @@ fn lean_modules_differ_only_by_their_early_returns() {
 /// modules validate.
 #[test]
 fn light_bound_composes_and_validates() {
-    use crate::program::{LightBound, Stage, compose, compose_list, declares_parameters, with_light_bound};
+    use crate::program::{
+        LightBound, Stage, compose, compose_list, declares_parameters, with_light_bound,
+    };
     let toon = include_str!("../shaders/programs/toon.wgsl");
     assert!(crate::STANDARD_PROGRAM.contains("light_visibility_within("));
     assert!(!toon.contains("light_visibility_within("));
@@ -839,11 +853,18 @@ fn light_bound_composes_and_validates() {
                     } else {
                         compose(head, program, Stage::Traced, parameters)
                     };
-                    let bound = LightBound { sum, codes: 0.25, drop };
+                    let bound = LightBound {
+                        sum,
+                        codes: 0.25,
+                        drop,
+                    };
                     let edited = with_light_bound(full, bound);
                     let source = &edited.source;
                     assert_eq!(&source[edited.program.clone()], program);
-                    assert!(source.contains("rl_lb_skipped=total;"), "the bound replaced its stub");
+                    assert!(
+                        source.contains("rl_lb_skipped=total;"),
+                        "the bound replaced its stub"
+                    );
                     assert!(source.contains("fn rl_lights_prepare(world:vec3<f32>) {\n    rl_lb_skipped=vec3<f32>(0.0);\n"));
                     if source.contains("var<private> rl_reflection_hit:bool;") {
                         assert!(source.contains("    if rl_reflection_hit { return false; }\n"));
@@ -889,13 +910,20 @@ fn material_pass_variants_compose_and_validate() {
             assert!(material_variant(full(toon), toon, MaterialRole::Read).is_none());
             let receiver_only = material_variant(full(toon), toon, MaterialRole::Write)
                 .expect("every program gets a receiver writer");
-            assert!(receiver_only.source.contains("255u),surface_input,rl_mr_near_edge("));
+            assert!(
+                receiver_only
+                    .source
+                    .contains("255u),surface_input,rl_mr_near_edge(")
+            );
             assert_eq!(&receiver_only.source[receiver_only.program.clone()], toon);
             let module = naga::front::wgsl::parse_str(&receiver_only.source)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&receiver_only.source)));
-            naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-                .validate(&module)
-                .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&receiver_only.source)));
+            naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::all(),
+            )
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&receiver_only.source)));
             for role in [MaterialRole::Write, MaterialRole::Read] {
                 let edited =
                     material_variant(full(crate::STANDARD_PROGRAM), crate::STANDARD_PROGRAM, role)
@@ -932,7 +960,9 @@ fn material_pass_variants_compose_and_validate() {
 #[test]
 fn material_trace_receiver_matches_the_sun_path() {
     let body = |source: &str, signature: &str| -> String {
-        let start = source.find(signature).unwrap_or_else(|| panic!("{signature}"));
+        let start = source
+            .find(signature)
+            .unwrap_or_else(|| panic!("{signature}"));
         let open = start + source[start..].find('{').unwrap();
         let mut depth = 0;
         for (i, c) in source[open..].char_indices() {
@@ -948,15 +978,23 @@ fn material_trace_receiver_matches_the_sun_path() {
         panic!("{signature} unclosed")
     };
     assert_eq!(
-        body(crate::program::MATERIAL_TRACE_RECEIVER, "fn rl_mr_trace_receiver_of("),
-        body(include_str!("../shaders/primary_penumbra.wgsl"), "fn primary_penumbra_receiver(")
+        body(
+            crate::program::MATERIAL_TRACE_RECEIVER,
+            "fn rl_mr_trace_receiver_of("
+        ),
+        body(
+            include_str!("../shaders/primary_penumbra.wgsl"),
+            "fn primary_penumbra_receiver("
+        )
     );
 }
 
 /// Every `RENDERLAB_MATERIAL_DEBUG` view composes and validates on every head, tiles and lists.
 #[test]
 fn material_pass_debug_views_compose_and_validate() {
-    use crate::program::{MaterialRole, Stage, compose, compose_list, material_debug_field, material_variant_with};
+    use crate::program::{
+        MaterialRole, Stage, compose, compose_list, material_debug_field, material_variant_with,
+    };
     let program = crate::STANDARD_PROGRAM;
     let parameters = crate::program::declares_parameters(program);
     let rt = crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap();
@@ -970,31 +1008,57 @@ fn material_pass_debug_views_compose_and_validate() {
                     compose(head, program, Stage::Traced, parameters)
                 };
                 let field = material_debug_field(name);
-                let edited = material_variant_with(full, program, MaterialRole::Read, field, None).expect("standard maps the record");
+                let edited = material_variant_with(full, program, MaterialRole::Read, field, None)
+                    .expect("standard maps the record");
                 if name == "receiver" {
                     // A program without the mapping gets the receiver check's reader too.
                     let toon = include_str!("../shaders/programs/toon.wgsl");
                     let toon_full = if list {
-                        compose_list(head, toon, Stage::Traced, crate::program::declares_parameters(toon))
+                        compose_list(
+                            head,
+                            toon,
+                            Stage::Traced,
+                            crate::program::declares_parameters(toon),
+                        )
                     } else {
-                        compose(head, toon, Stage::Traced, crate::program::declares_parameters(toon))
+                        compose(
+                            head,
+                            toon,
+                            Stage::Traced,
+                            crate::program::declares_parameters(toon),
+                        )
                     };
-                    let checked = material_variant_with(toon_full, toon, MaterialRole::Read, field, None)
-                        .expect("the receiver check covers unmapped programs");
-                    assert!(checked.source.contains("const RL_MATERIAL_UNMAPPED:bool=true;"));
-                    let module = naga::front::wgsl::parse_str(&checked.source)
-                        .unwrap_or_else(|e| panic!("toon receiver: {}", e.emit_to_string(&checked.source)));
-                    naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-                        .validate(&module)
-                        .unwrap_or_else(|e| panic!("toon receiver: {}", e.emit_to_string(&checked.source)));
+                    let checked =
+                        material_variant_with(toon_full, toon, MaterialRole::Read, field, None)
+                            .expect("the receiver check covers unmapped programs");
+                    assert!(
+                        checked
+                            .source
+                            .contains("const RL_MATERIAL_UNMAPPED:bool=true;")
+                    );
+                    let module =
+                        naga::front::wgsl::parse_str(&checked.source).unwrap_or_else(|e| {
+                            panic!("toon receiver: {}", e.emit_to_string(&checked.source))
+                        });
+                    naga::valid::Validator::new(
+                        naga::valid::ValidationFlags::all(),
+                        naga::valid::Capabilities::all(),
+                    )
+                    .validate(&module)
+                    .unwrap_or_else(|e| {
+                        panic!("toon receiver: {}", e.emit_to_string(&checked.source))
+                    });
                 }
                 let source = &edited.source;
                 assert_eq!(&source[edited.program.clone()], program);
                 let module = naga::front::wgsl::parse_str(source)
                     .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
-                naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
-                    .validate(&module)
-                    .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
+                naga::valid::Validator::new(
+                    naga::valid::ValidationFlags::all(),
+                    naga::valid::Capabilities::all(),
+                )
+                .validate(&module)
+                .unwrap_or_else(|e| panic!("{name}: {}", e.emit_to_string(source)));
             }
         }
     }
@@ -1107,7 +1171,11 @@ fn ara_emissive_edit_of_the_standard_program_still_composes() {
         let composed = || compose(head, &emissive, Stage::Traced, true);
         let mut sources = vec![composed().source];
         for role in [MaterialRole::Write, MaterialRole::Read] {
-            sources.push(material_variant(composed(), &emissive, role).unwrap().source);
+            sources.push(
+                material_variant(composed(), &emissive, role)
+                    .unwrap()
+                    .source,
+            );
         }
         for source in &sources {
             let module = naga::front::wgsl::parse_str(source)

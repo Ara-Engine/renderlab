@@ -1,11 +1,11 @@
 use super::*;
 use crate::asset::{Filter, Mip, MipmapFilter, Sampler, TextureRole, Wrap};
+#[path = "compressed_texture_tests.rs"]
+mod compressed;
 #[path = "../viewer/src/prepared.rs"]
 pub(super) mod prepared;
 #[path = "material_response_tests.rs"]
 mod response;
-#[path = "compressed_texture_tests.rs"]
-mod compressed;
 
 const SRGB: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
 fn material_renderer(samples: SampleCount) -> Renderer {

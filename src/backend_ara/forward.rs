@@ -1409,7 +1409,10 @@ fn parameter_layout(source: &str) -> Result<Option<crate::program::ParameterLayo
 /// `primary_region` and skips pixels outside it and tiles without a hit), or None for an
 /// empty region (an empty scene: nothing to dispatch).
 fn light_vis_threads(region: [u32; 4]) -> Option<[u32; 3]> {
-    let [x, y] = [region[2].saturating_sub(region[0]), region[3].saturating_sub(region[1])];
+    let [x, y] = [
+        region[2].saturating_sub(region[0]),
+        region[3].saturating_sub(region[1]),
+    ];
     (x > 0 && y > 0).then_some([x, y, 1])
 }
 /// RENDERLAB_MATERIAL_PASS=1: one log line whenever a frame's split changes, saying how many
@@ -1691,7 +1694,9 @@ fn frame(
     let program = if deferred_path {
         match reading(material_source, false)? {
             Some(program) => program,
-            None => primary_shade::hardware_soft_part(material_source, primary_shade::ALL_TERMS, lean)?,
+            None => {
+                primary_shade::hardware_soft_part(material_source, primary_shade::ALL_TERMS, lean)?
+            }
         }
     } else {
         standard_program(scene.sun_shadows.is_some())?
@@ -1702,7 +1707,9 @@ fn frame(
             .iter()
             .map(|source| match reading(source, true)? {
                 Some(program) => Ok(program),
-                None => primary_shade::hardware_soft_list_part(source, primary_shade::ALL_TERMS, lean),
+                None => {
+                    primary_shade::hardware_soft_list_part(source, primary_shade::ALL_TERMS, lean)
+                }
             })
             .collect::<Result<Vec<_>>>()?
     } else {
@@ -1716,7 +1723,11 @@ fn frame(
         frame_sources
             .iter()
             .map(|source| {
-                primary_shade::hardware_soft_material(source, list, crate::program::MaterialRole::Write)
+                primary_shade::hardware_soft_material(
+                    source,
+                    list,
+                    crate::program::MaterialRole::Write,
+                )
             })
             .collect::<Result<Vec<_>>>()?
     } else {
@@ -1728,8 +1739,12 @@ fn frame(
         let readers = frame_sources
             .iter()
             .map(|source| {
-                primary_shade::hardware_soft_material(source, list, crate::program::MaterialRole::Read)
-                    .map(|reader| reader.is_some())
+                primary_shade::hardware_soft_material(
+                    source,
+                    list,
+                    crate::program::MaterialRole::Read,
+                )
+                .map(|reader| reader.is_some())
             })
             .collect::<Result<Vec<_>>>()?;
         log_material_slots(&readers);
@@ -1746,7 +1761,11 @@ fn frame(
                         .map(|source| primary_shade::hardware_soft_list_part(source, terms, lean))
                         .collect::<Result<Vec<_>>>()?
                 } else {
-                    vec![primary_shade::hardware_soft_part(material_source, terms, lean)?]
+                    vec![primary_shade::hardware_soft_part(
+                        material_source,
+                        terms,
+                        lean,
+                    )?]
                 };
                 Ok((name, programs))
             })
@@ -2830,7 +2849,14 @@ fn frame(
                 } else {
                     crate::program::MATERIAL_RECORD_LAYERS
                 };
-                Some(Texture::array(gpu, size, layers, Format::Rgba32Uint, true, false)?)
+                Some(Texture::array(
+                    gpu,
+                    size,
+                    layers,
+                    Format::Rgba32Uint,
+                    true,
+                    false,
+                )?)
             } else {
                 None
             },
@@ -3921,9 +3947,10 @@ fn frame(
                 Some(queue) => kernel.record_indirect(&mut graph, &mut rec, packet, queue, 0)?,
                 None => {
                     // The material pass writes the record before the single program shades.
-                    if let (true, Some(Some((material, record)))) =
-                        (std::ptr::eq(kernel, &deferred.shade), material_records.first())
-                    {
+                    if let (true, Some(Some((material, record)))) = (
+                        std::ptr::eq(kernel, &deferred.shade),
+                        material_records.first(),
+                    ) {
                         material.record_labelled(
                             &mut graph,
                             &mut rec,
@@ -4484,7 +4511,13 @@ fn frame(
                 crate::program::MATERIAL_RECORD_LAYERS
             };
             Some((
-                transfer::readback(gpu, &mut graph, &mut rec, record.image, layer * u64::from(layers))?,
+                transfer::readback(
+                    gpu,
+                    &mut graph,
+                    &mut rec,
+                    record.image,
+                    layer * u64::from(layers),
+                )?,
                 layer as usize,
             ))
         }

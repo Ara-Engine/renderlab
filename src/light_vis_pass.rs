@@ -213,10 +213,8 @@ mod tests {
     #[test]
     fn glass_hits_remain_inline() {
         let head = transparent_reflection_head(include_str!("../shaders/scene.wgsl")).unwrap();
-        let program = program::glass_hit_program(
-            crate::STANDARD_PROGRAM,
-            program::rl_deferred_for(&head),
-        );
+        let program =
+            program::glass_hit_program(crate::STANDARD_PROGRAM, program::rl_deferred_for(&head));
         let c = apply_enabled(
             program::compose(&head, &program, Stage::Traced, false),
             true,

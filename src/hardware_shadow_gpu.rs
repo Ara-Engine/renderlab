@@ -460,13 +460,14 @@ impl HardwareState {
         // U-FIXED (audit 3.11): the same meshes and BLAS generations rebuild into the
         // active TLAS object; only moved placements rewrite their instance. Queue order
         // keeps earlier flights' reads before this build, as for the skinned BLASes.
-        let reusable = self.active.as_ref().is_some_and(|active| {
-            active.dynamic == dynamic_scene
-                && active.placements.len() == placements.len()
-                && active.placements.iter().zip(&placements).all(|(a, b)| {
-                    Arc::ptr_eq(&a.mesh, &b.mesh) && Arc::ptr_eq(&a.blas, &b.blas)
-                })
-        });
+        let reusable =
+            self.active.as_ref().is_some_and(|active| {
+                active.dynamic == dynamic_scene
+                    && active.placements.len() == placements.len()
+                    && active.placements.iter().zip(&placements).all(|(a, b)| {
+                        Arc::ptr_eq(&a.mesh, &b.mesh) && Arc::ptr_eq(&a.blas, &b.blas)
+                    })
+            });
         if reusable {
             let active = self.active.as_ref().unwrap();
             let moved: Vec<usize> = (0..placements.len())
