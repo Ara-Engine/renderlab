@@ -673,18 +673,6 @@ fn cache_cone() -> f32 {
             .unwrap_or(1.0)
     })
 }
-/// Coarser levels a cache-terminated hit may climb to when its own level has no shaded cell
-/// (shaders/reflection_cache_hits.wgsl RL_CACHE_CLIMB): 2, or `RENDERLAB_RL_CACHE_CLIMB` (0-4).
-fn cache_climb() -> u32 {
-    static CLIMB: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *CLIMB.get_or_init(|| {
-        std::env::var("RENDERLAB_RL_CACHE_CLIMB")
-            .ok()
-            .and_then(|v| v.parse::<u32>().ok())
-            .filter(|c| *c <= 4)
-            .unwrap_or(2)
-    })
-}
 /// `RENDERLAB_RL_CACHE_TRACE=1` puts the lookup back in the trace kernel, where it cost more
 /// trace time than it saved hit time.
 fn cache_in_trace() -> bool {
@@ -1188,18 +1176,11 @@ fn compose_stage(
         });
         // Hardware and software traces alike (the software seam passes rs_trace's distance).
         reflection.push_str(&match cache_hits_for(head).filter(|_| indirect_calls) {
-            Some(rough) => CACHE_HITS
-                .replace("RL_CACHE_ROUGH_MIN", &format!("{rough:?}"))
-                .replacen(
-                    "const RL_CACHE_CONE:f32=1.0;",
-                    &format!("const RL_CACHE_CONE:f32={:?};", cache_cone()),
-                    1,
-                )
-                .replacen(
-                    "const RL_CACHE_CLIMB:u32=2u;",
-                    &format!("const RL_CACHE_CLIMB:u32={}u;", cache_climb()),
-                    1,
-                ),
+            Some(rough) => CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", &format!("{rough:?}")).replacen(
+                "const RL_CACHE_CONE:f32=1.0;",
+                &format!("const RL_CACHE_CONE:f32={:?};", cache_cone()),
+                1,
+            ),
             None => CACHE_HITS_STUB.to_owned(),
         });
     }
