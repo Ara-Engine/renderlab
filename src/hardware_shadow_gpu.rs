@@ -97,6 +97,20 @@ pub(super) struct HardwareState {
     generation: u64,
     accounting_available: bool,
     pub stats: HardwareShadowStats,
+    /// frame-cpu: the draw list the active TLAS was made from (`draw_keys`); an equal list
+    /// skips rebuilding and comparing every placement.
+    last_keys: Option<(Vec<DrawKey>, bool)>,
+}
+
+/// A draw's identity for the TLAS: its mesh, that mesh's current BLAS generation, the
+/// placements' collection and edit count (`InstanceState::revision`, which also counts
+/// shadow-casting changes), the placement count and whether its material is double-sided
+/// (0 single, 1 double, 2 none: `placements` rejects single-sided casters).
+type DrawKey = (usize, usize, (u64, u64), usize, u8);
+/// frame-cpu: `RENDERLAB_TLAS_KEY=0` rebuilds and compares every placement each frame.
+fn tlas_keys() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_TLAS_KEY").map_or(true, |v| v != "0"))
 }
 
 fn row_transform(model: Mat4) -> [f32; 12] {
@@ -189,6 +203,7 @@ impl HardwareState {
             generation: 0,
             accounting_available: device.generate_allocator_report().is_some(),
             stats: HardwareShadowStats::default(),
+            last_keys: None,
         }
     }
     fn label(&mut self, kind: &str) -> String {
@@ -440,6 +455,38 @@ impl HardwareState {
         casters: bool,
     ) -> Result<bool, Error> {
         let (device, _) = gpu;
+        // frame-cpu: an unchanged draw list keeps the active TLAS's placements. Compaction
+        // still advances per mesh first, so a compacted BLAS changes the key.
+        let keys = if tlas_keys() && self.active.is_some() {
+            let count: usize = draws.iter().map(|d| d.instances.len()).sum();
+            let (scene, scratch) = scene_estimate(count)?;
+            let mut meshes = std::collections::HashSet::new();
+            for draw in draws {
+                if let Some(mesh) = &draw.mesh.acceleration
+                    && meshes.insert(Arc::as_ptr(mesh))
+                {
+                    self.compact_mesh(mesh, gpu, ledger, scene + scratch);
+                }
+            }
+            let keys = Self::draw_keys(draws);
+            if self.last_keys.as_ref() == Some(&(keys.clone(), casters)) {
+                let active = self.active.as_ref().unwrap();
+                if !active.dynamic {
+                    return Ok(false);
+                }
+                let dynamic_scratch = Self::dynamic_scratch(&active.placements)?;
+                self.admit(
+                    ledger,
+                    scratch
+                        .checked_add(dynamic_scratch)
+                        .ok_or(Error::InvalidInput("TLAS estimate overflow"))?,
+                )?;
+                return Ok(true);
+            }
+            Some(keys)
+        } else {
+            None
+        };
         let mut placements =
             Self::placements(draws, device.limits().max_tlas_instance_count, casters)?;
         let (scene, scratch) = scene_estimate(placements.len())?;
@@ -476,6 +523,7 @@ impl HardwareState {
                 })
                 .collect();
             if moved.is_empty() && !dynamic_scene {
+                self.last_keys = Some((keys.unwrap_or_else(|| Self::draw_keys(draws)), casters));
                 return Ok(false);
             }
             let dynamic_scratch = Self::dynamic_scratch(&placements)?;
@@ -497,6 +545,7 @@ impl HardwareState {
                 ));
             }
             active.placements = placements;
+            self.last_keys = Some((keys.unwrap_or_else(|| Self::draw_keys(draws)), casters));
             return Ok(true);
         }
         let (estimate, scratch) = scene_estimate(placements.len())?;
@@ -564,7 +613,24 @@ impl HardwareState {
         if let Some(old) = self.active.replace(next) {
             self.retired.push((submission, old));
         }
+        self.last_keys = Some((keys.unwrap_or_else(|| Self::draw_keys(draws)), casters));
         Ok(true)
+    }
+    /// One key per draw (`DrawKey`), read after this frame's compaction.
+    fn draw_keys(draws: &[Draw<'_>]) -> Vec<DrawKey> {
+        draws
+            .iter()
+            .map(|d| {
+                let mesh = d.mesh.acceleration.as_ref();
+                (
+                    mesh.map_or(0, |m| Arc::as_ptr(m) as usize),
+                    mesh.map_or(0, |m| Arc::as_ptr(&*m.blas.lock().unwrap()) as usize),
+                    d.instances.state.revision(),
+                    d.instances.len(),
+                    d.material.map_or(2, |m| u8::from(m.double_sided)),
+                )
+            })
+            .collect()
     }
     pub fn encode_scene(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.build_acceleration_structures(
