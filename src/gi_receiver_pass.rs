@@ -2,16 +2,7 @@
 use super::*;
 use crate::program::{self, Stage};
 pub(crate) const BINDING: u32 = 68;
-const BYTES: u64 = 64;
-/// Half-rate lookup (gi_receiver_reps, then gi_receiver_blend in gi_receiver_pass.wgsl):
-/// `RENDERLAB_GI_RX_HALF=1` on, `=0` off; the default is `HALF_DEFAULT`.
-const HALF_DEFAULT: bool = false;
-fn half_rate() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| {
-        env_switch(std::env::var("RENDERLAB_GI_RX_HALF").ok().as_deref()).unwrap_or(HALF_DEFAULT)
-    })
-}
+const BYTES: u64 = 48;
 const SOURCE: &str = include_str!("../shaders/gi_receiver_pass.wgsl");
 const ENTRY_SEAM: &str = "// ---- GI receiver compute entry ----";
 /// Defaults are approved separately for each path after game-scene picture and memory checks.
@@ -87,17 +78,11 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     // Measurement only (`RENDERLAB_GI_RX_PROBE=nolookup`): no cache lookup, so the pass costs
     // its decode and the record's stores alone. Shading then sees no GI value. The pattern holds
     // no line break: Ara's checkout on Windows has CRLF line endings, where the earlier pattern
-    // with one never matched (the switch did nothing in the game).
+    // (with one) never matched, so the switch did nothing in the game.
     if std::env::var("RENDERLAB_GI_RX_PROBE").as_deref() == Ok("nolookup") {
-        kernel = kernel.replace("gi_prepare(rx_input);", "");
+        kernel = kernel.replacen("gi_prepare(input);", "", 1);
     }
     composed.source.push_str(&kernel);
-    // `RENDERLAB_GI_RX_BATCH=0`: gi_sample's corner finds one by one (gi_api.wgsl GI_BATCH_FINDS).
-    if std::env::var("RENDERLAB_GI_RX_BATCH").as_deref() == Ok("0") {
-        composed.source = composed
-            .source
-            .replace("const GI_BATCH_FINDS:bool=true;", "const GI_BATCH_FINDS:bool=false;");
-    }
     composed
 }
 pub(crate) fn shade_source(source: String, eligible: bool, specular: bool) -> String {
@@ -121,10 +106,8 @@ fn shade_source_for(mut source: String, eligible: bool, specular: bool, enabled:
 }
 pub(super) struct Targets {
     pub values: Buffer,
-    /// Full-rate dispatch, then the half-rate representatives' (12 bytes each).
     args: Buffer,
-    /// Per shading: the full-rate entry twice, or (half-rate) the representatives and the blend.
-    pipelines: [Option<[Owned<wgpu::ComputePipeline>; 2]>; 2],
+    pipelines: [Option<Owned<wgpu::ComputePipeline>>; 2],
     source_hash: [[u8; 32]; 2],
 }
 impl Renderer {
@@ -139,7 +122,7 @@ impl Renderer {
             args: Buffer::new(
                 self,
                 "GI receiver dispatch",
-                24,
+                12,
                 wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST,
             ),
             pipelines: [None, None],
@@ -157,12 +140,10 @@ impl Renderer {
             return Ok(());
         };
         let [x, y] = state.region_groups([8, 4]);
-        // The representatives: one per 2x2 block of the region.
-        let [hx, hy] = state.region_groups([16, 8]);
         self.queue.write_buffer(
             &target.args.value,
             0,
-            &[x, y, 1u32, hx, hy, 1u32]
+            &[x, y, 1u32]
                 .into_iter()
                 .flat_map(u32::to_ne_bytes)
                 .collect::<Vec<_>>(),
@@ -178,25 +159,18 @@ impl Renderer {
         let scopes = OperationScopes::new(&self.device);
         let module = super::program_gpu::module(&abi, "GI receiver", &composed);
         let start = std::time::Instant::now();
-        let compute = |entry: &str| {
-            self.ledger.own(
-                self.device
-                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some("GI receiver"),
-                        layout: Some(&state.shade_layouts[shading as usize]),
-                        module: &module,
-                        entry_point: Some(entry),
-                        compilation_options: Default::default(),
-                        cache: abi.cache,
-                    }),
-                ResourceKind::ComputePipeline,
-            )
-        };
-        let pipeline = if half_rate() {
-            [compute("gi_receiver_reps"), compute("gi_receiver_blend")]
-        } else {
-            [compute("gi_receiver_pass"), compute("gi_receiver_pass")]
-        };
+        let pipeline = self.ledger.own(
+            self.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some("GI receiver"),
+                    layout: Some(&state.shade_layouts[shading as usize]),
+                    module: &module,
+                    entry_point: Some("gi_receiver_pass"),
+                    compilation_options: Default::default(),
+                    cache: abi.cache,
+                }),
+            ResourceKind::ComputePipeline,
+        );
         eprintln!(
             "gi_receiver_compile_seconds={:.3}",
             start.elapsed().as_secs_f64()
@@ -245,7 +219,7 @@ impl Renderer {
         let Some(target) = state.targets.as_ref().and_then(|t| t.gi_receiver.as_ref()) else {
             return;
         };
-        let Some(pipelines) = &target.pipelines[shading as usize] else {
+        let Some(pipeline) = &target.pipelines[shading as usize] else {
             return;
         };
         let bindings = state.bindings.as_ref().unwrap();
@@ -254,6 +228,7 @@ impl Renderer {
             label: Some("GI receiver"),
             timestamp_writes: None,
         });
+        pass.set_pipeline(pipeline);
         pass.set_bind_group(
             0,
             &**bindings.shade[shading as usize].as_ref().unwrap(),
@@ -262,17 +237,7 @@ impl Renderer {
         pass.set_bind_group(1, &*g.arrays, &[]);
         pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
-        if half_rate() {
-            // The representatives, then every other pixel's blend of them (a separate
-            // dispatch, so the blend reads finished records).
-            pass.set_pipeline(&pipelines[0]);
-            pass.dispatch_workgroups_indirect(&target.args.value, 12);
-            pass.set_pipeline(&pipelines[1]);
-            pass.dispatch_workgroups_indirect(&target.args.value, 0);
-        } else {
-            pass.set_pipeline(&pipelines[0]);
-            pass.dispatch_workgroups_indirect(&target.args.value, 0);
-        }
+        pass.dispatch_workgroups_indirect(&target.args.value, 0);
     }
 }
 #[cfg(test)]
@@ -312,7 +277,7 @@ mod tests {
                 );
             }
         }
-        assert_eq!(BYTES, 64);
+        assert_eq!(BYTES, 48);
     }
     #[test]
     fn receiver_and_shading_validate_both_paths() {
@@ -343,7 +308,7 @@ mod tests {
             assert_eq!(*span, BYTES as u32);
             assert_eq!(
                 members.iter().map(|m| m.offset).collect::<Vec<_>>(),
-                [0, 16, 32, 48]
+                [0, 16, 32]
             );
             naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),

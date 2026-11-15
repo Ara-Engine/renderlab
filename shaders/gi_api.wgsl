@@ -119,61 +119,14 @@ fn gi_sample(world:vec3<f32>, level:u32, bin:u32) -> f32 {
         return gi_hot_add(h,1.0);
     }
     let corners=gi_corners(u,bin);
-    if !GI_BATCH_FINDS {
-        var total=0.0;
-        for(var c=0u;c<4u;c+=1u) {
-            let h=gi_hot_find(gi_key(level,bin,corners.base+gi_corner_offset(bin,c)));
-            let w=gi_corner_weight(corners.f,bin,c);
-            gi_note_split(h,w);
-            total+=gi_hot_add(h,w);
-        }
-        return total;
+    var total=0.0;
+    for(var c=0u;c<4u;c+=1u) {
+        let h=gi_hot_find(gi_key(level,bin,corners.base+gi_corner_offset(bin,c)));
+        let w=gi_corner_weight(corners.f,bin,c);
+        gi_note_split(h,w);
+        total+=gi_hot_add(h,w);
     }
-    // The four corners' finds, batched: their start slots' first words load together, then
-    // the matched records load together (two round trips for the four, where four finds in turn
-    // took up to four). A start slot holding another key walks on (gi_slot_find), as gi_find.
-    let k0=gi_key(level,bin,corners.base+gi_corner_offset(bin,0u));
-    let k1=gi_key(level,bin,corners.base+gi_corner_offset(bin,1u));
-    let k2=gi_key(level,bin,corners.base+gi_corner_offset(bin,2u));
-    let k3=gi_key(level,bin,corners.base+gi_corner_offset(bin,3u));
-    let s0=gi_start_slot(k0);let s1=gi_start_slot(k1);let s2=gi_start_slot(k2);let s3=gi_start_slot(k3);
-    let w0=gi_word(gi_hot(s0));let w1=gi_word(gi_hot(s1));let w2=gi_word(gi_hot(s2));let w3=gi_word(gi_hot(s3));
-    let f0=gi_slot_resolve(k0,s0,w0);let f1=gi_slot_resolve(k1,s1,w1);
-    let f2=gi_slot_resolve(k2,s2,w2);let f3=gi_slot_resolve(k3,s3,w3);
-    let h0=gi_hot_at(f0);let h1=gi_hot_at(f1);let h2=gi_hot_at(f2);let h3=gi_hot_at(f3);
-    let c0=gi_corner_weight(corners.f,bin,0u);let c1=gi_corner_weight(corners.f,bin,1u);
-    let c2=gi_corner_weight(corners.f,bin,2u);let c3=gi_corner_weight(corners.f,bin,3u);
-    gi_note_split(h0,c0);gi_note_split(h1,c1);gi_note_split(h2,c2);gi_note_split(h3,c3);
-    return gi_hot_add(h0,c0)+gi_hot_add(h1,c1)+gi_hot_add(h2,c2)+gi_hot_add(h3,c3);
-}
-// GI_BATCH_FINDS (src/gi_receiver_pass.rs): gi_sample's corner finds batched; false: one by one.
-const GI_BATCH_FINDS:bool=true;
-const GI_NO_SLOT:u32=0xffffffffu;
-// The start slot of `key` in its bucket (gi_find's first probe).
-fn gi_start_slot(key:vec2<u32>) -> u32 {
-    let bucket=(key.x&gi_word(GI_H_MASK))&~(GI_BUCKET-1u);
-    return bucket+(gi_start(key)&(GI_BUCKET-1u));
-}
-// The slot holding `key`, given its start slot and that slot's key word: the start slot when it
-// matches, none when it is empty, else the walk through the bucket (gi_hot_find's order).
-fn gi_slot_resolve(key:vec2<u32>,start:u32,word:u32) -> u32 {
-    if (word&GI_KEY_BITS)==key.x { return start; }
-    if word==0u { return GI_NO_SLOT; }
-    let bucket=start&~(GI_BUCKET-1u);
-    for(var i=1u;i<GI_BUCKET;i+=1u) {
-        let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));
-        let w=gi_word(gi_hot(slot));
-        if (w&GI_KEY_BITS)==key.x { return slot; }
-        if w==0u { break; }
-    }
-    return GI_NO_SLOT;
-}
-// The record at `slot`, or an absent one.
-fn gi_hot_at(slot:u32) -> GiHot {
-    if slot==GI_NO_SLOT {
-        return GiHot(vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u));
-    }
-    return gi_hot_load(slot);
+    return total;
 }
 // The receiver's level sums and bounce weight, kept across a gi_sample that overwrites gi_lv_*
 // (the coarser fill, an empty finer level) for the term that reads the level again after it.
