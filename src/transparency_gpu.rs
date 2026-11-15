@@ -358,7 +358,6 @@ struct GlassPipelines {
     pipelines: [Owned<wgpu::RenderPipeline>; 2],
     lobe: [Owned<wgpu::RenderPipeline>; 2],
     lobe_query: [Owned<wgpu::RenderPipeline>; 2],
-    lobe_live: [Owned<wgpu::RenderPipeline>; 2],
     /// Films (`crate::program::declares_films`): `film_source`'s module blended premultiplied
     /// over the target, by tangent stream; None for programs that do not declare films.
     films: Option<[Owned<wgpu::RenderPipeline>; 2]>,
@@ -1386,14 +1385,7 @@ impl Renderer {
             "if lobe.weight<=0.0 {discard;}",
             "if lobe.weight<=0.0 {discard;}\nif tp.forward.w>=0.0 && sqrt(clamp(unpack2x16float(pack2x16float(vec2<f32>(lobe.alpha,0.0))).x,0.0,1.0))>=tp.forward.w {discard;}",
         );
-        // Rect-mode lobes (`rect_reflect`): a lobe the trace would reject writes the cleared lobe
-        // instead of being discarded, so a nearer film still overwrites a farther one there and
-        // the reflection kernel writes zero for it without tracing.
-        let live = source[query_start..].replace("fn fs_tp_lobe(", "fn fs_tp_lobe_live(").replace(
-            "if lobe.weight<=0.0 {discard;}",
-            "if lobe.weight<=0.0 {discard;}\nif tp.forward.w>=0.0 && sqrt(clamp(unpack2x16float(pack2x16float(vec2<f32>(lobe.alpha,0.0))).x,0.0,1.0))>=tp.forward.w {return TpLobeOutput(vec4<f32>(0.0),vec4<f32>(0.0),vec4<f32>(0.0));}",
-        );
-        let source = format!("{source}\n{query}\n{live}");
+        let source = format!("{source}\n{query}");
         #[cfg(test)]
         let source = {
             let mut source = source;
@@ -1468,8 +1460,7 @@ impl Renderer {
                          tangent: bool,
                          lobe: bool,
                          blend: bool,
-                         query: bool,
-                         masked: bool| {
+                         query: bool| {
             let label = format!(
                 "TP1 transparent program={} rt={rt} key={key:02x?} tangent={tangent} lobe={lobe} film={blend}",
                 slot.label,
@@ -1487,7 +1478,7 @@ impl Renderer {
                     write_mask: wgpu::ColorWrites::ALL,
                 })]
             };
-            if query && masked {
+            if query {
                 for target in targets.iter_mut().flatten() {
                     target.write_mask = wgpu::ColorWrites::empty();
                 }
@@ -1521,10 +1512,8 @@ impl Renderer {
                         },
                         fragment: Some(wgpu::FragmentState {
                             module,
-                            entry_point: Some(if query && masked {
+                            entry_point: Some(if query {
                                 "fs_tp_lobe_query"
-                            } else if query {
-                                "fs_tp_lobe_live"
                             } else if lobe {
                                 "fs_tp_lobe"
                             } else {
@@ -1548,13 +1537,10 @@ impl Renderer {
                 ResourceKind::RenderPipeline,
             )
         };
-        let make = |tangent: bool, lobe: bool| make_with(&module, tangent, lobe, false, false, false);
+        let make = |tangent: bool, lobe: bool| make_with(&module, tangent, lobe, false, false);
         let pipelines = [false, true].map(|t| make(t, false));
         let lobe = [false, true].map(|t| make(t, true));
-        let lobe_query = [false, true].map(|t| make_with(&module, t, true, false, true, true));
-        // The query's fragment (only lobes the trace keeps) writing the lobe targets: rect-mode
-        // glass reflections (`rect_reflect`) draw with it, so a rejected lobe stays cleared.
-        let lobe_live = [false, true].map(|t| make_with(&module, t, true, false, true, false));
+        let lobe_query = [false, true].map(|t| make_with(&module, t, true, false, true));
         let films = crate::program::declares_films(&slot.source).then(|| {
             let label = format!("TP1 films {}", slot.label);
             let films = self.ledger.own(
@@ -1565,7 +1551,7 @@ impl Renderer {
                     }),
                 ResourceKind::ShaderModule,
             );
-            [false, true].map(|t| make_with(&films, t, false, true, false, false))
+            [false, true].map(|t| make_with(&films, t, false, true, false))
         });
         if let Some(error) = scopes.finish() {
             return Err(match error {
@@ -1582,7 +1568,6 @@ impl Renderer {
             pipelines,
             lobe,
             lobe_query,
-            lobe_live,
             films,
             pane: None,
         })
@@ -3013,13 +2998,7 @@ impl Renderer {
                                 .iter()
                                 .find(|g| g.program == program)
                                 .unwrap();
-                            let pipelines = if query {
-                                &set.lobe_query
-                            } else if rect_mode {
-                                &set.lobe_live
-                            } else {
-                                &set.lobe
-                            };
+                            let pipelines = if query { &set.lobe_query } else { &set.lobe };
                             pass.set_pipeline(&pipelines[usize::from(draw.mesh.tangent.is_some())]);
                             pass.set_bind_group(
                                 0,
