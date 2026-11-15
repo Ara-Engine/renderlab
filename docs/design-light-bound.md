@@ -1,6 +1,8 @@
 # Light bound: skipping shadow rays that cannot change a display code
 
-Status: an engine switch, off by default (`RENDERLAB_LIGHT_BOUND`, program.rs `light_bound`), behind the program API's `light_visibility_within`. It is a bounded picture change, not exact, so it goes to Islam as a crop pair before it can become a default.
+Status: on by default in `sum` mode since shade-14 (16 Nov); `RENDERLAB_LIGHT_BOUND=off` turns it off, `black` selects the other mode (program.rs `light_bound`). It sits behind the program API's `light_visibility_within`. It is a bounded picture change, not exact: its crop pairs go to Islam with the change.
+
+shade-14 (RTX 4070 SUPER, 1080p, smoke clip rows 20-59): shading on Outpost with ray hardware 1.77 -> 1.62 ms; Showcase and Glint unchanged within 0.04 ms (both paths). Against the same binary with the bound off, Showcase and Outpost frames (row 40, both paths) differ by at most one display code; Glint's frames vary more than that between two runs of one binary. Of Outpost's 0.34 ms of shadow terms, local-light rays are 0.28 ms; the bound skips about half of that cost.
 
 ## Why
 

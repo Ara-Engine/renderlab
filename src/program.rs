@@ -1111,7 +1111,9 @@ fn with_shade_edits(mut composed: Composed) -> Composed {
     }
     composed
 }
-/// `RENDERLAB_LIGHT_BOUND=black|sum` (off by default; a bounded picture change, not exact):
+/// `RENDERLAB_LIGHT_BOUND=black|sum|off` (`sum` by default since shade-14; a bounded picture
+/// change, not exact: at most one display code on Showcase and Outpost, and -0.15 ms of shading
+/// on Outpost with ray hardware, docs/design-light-bound.md):
 /// the engine's `light_visibility_within(input, light, unshadowed, sum)` (program_api.wgsl)
 /// skips a local shadowed light's shadow ray while its unshadowed exposed contribution, added
 /// to those already skipped at this receiver, stays under `RENDERLAB_LIGHT_BOUND_CODES` display
@@ -1133,11 +1135,12 @@ pub(crate) struct LightBound {
 pub(crate) fn light_bound() -> Option<LightBound> {
     static BOUND: std::sync::OnceLock<Option<LightBound>> = std::sync::OnceLock::new();
     *BOUND.get_or_init(|| {
-        let sum = match std::env::var("RENDERLAB_LIGHT_BOUND").ok()?.as_str() {
-            "black" => false,
-            "sum" => true,
-            other => {
-                eprintln!("RENDERLAB_LIGHT_BOUND: `{other}` is not black or sum; off");
+        let sum = match std::env::var("RENDERLAB_LIGHT_BOUND").as_deref() {
+            Err(_) | Ok("sum") => true,
+            Ok("black") => false,
+            Ok("off" | "0") => return None,
+            Ok(other) => {
+                eprintln!("RENDERLAB_LIGHT_BOUND: `{other}` is not black, sum or off; off");
                 return None;
             }
         };
