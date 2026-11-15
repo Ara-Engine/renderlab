@@ -1080,13 +1080,13 @@ pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool)
         _ => composed,
     }
 }
-/// Measurement only: `RENDERLAB_SHADE_EDITS=<file>` rewrites traced modules at run time, for
-/// variant screens without a build per variant. The file holds blocks separated by lines
-/// `@@@@`, each an old text and its replacement separated by a line `====`; a block applies
-/// to every traced module that contains its old text exactly once.
-fn with_shade_edits(mut composed: Composed) -> Composed {
+/// Measurement only: `RENDERLAB_SHADE_EDITS=<file>` rewrites traced modules and the TR1 resolve
+/// at run time, for variant screens without a build per variant. The file holds blocks
+/// separated by lines `@@@@`, each an old text and its replacement separated by a line `====`;
+/// a block applies to every such module that contains its old text exactly once.
+pub(crate) fn shade_edits() -> &'static [(String, String)] {
     static EDITS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
-    let edits = EDITS.get_or_init(|| {
+    EDITS.get_or_init(|| {
         let Some(text) = std::env::var("RENDERLAB_SHADE_EDITS").ok().and_then(|p| std::fs::read_to_string(p).ok())
         else {
             return Vec::new();
@@ -1096,8 +1096,10 @@ fn with_shade_edits(mut composed: Composed) -> Composed {
             .filter_map(|block| block.split_once("\n====\n"))
             .map(|(old, new)| (old.to_owned(), new.to_owned()))
             .collect()
-    });
-    for (old, new) in edits {
+    })
+}
+fn with_shade_edits(mut composed: Composed) -> Composed {
+    for (old, new) in shade_edits() {
         if composed.source.matches(old.as_str()).count() != 1 {
             continue;
         }

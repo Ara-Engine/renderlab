@@ -938,6 +938,11 @@ fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<St
                 .map_err(|_| Error::InvalidInput("RENDERLAB_P_SPLIT_FRESH_CLAMP: a number"))?,
         );
     }
+    for (old, new) in crate::program::shade_edits() {
+        if resolve.matches(old.as_str()).count() == 1 {
+            resolve = resolve.replacen(old.as_str(), new, 1);
+        }
+    }
     // MV1 motion-source seam; history/resolve policy belongs to MQ1.
     Ok(format!(
         "{head}\n{}\n{resolve}\n{}",
