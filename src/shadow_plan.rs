@@ -134,9 +134,16 @@ pub(crate) fn directional_oriented(
     }
     // Transform once per light, not once per cascade. Full bounds include offscreen casters.
     let transform_start = std::time::Instant::now();
+    // Each caster's light-space extents with its rounding tolerance and world magnitude, which
+    // every cascade's fit reads unchanged (computed once per frame, not once per cascade).
     let light_bounds: Vec<_> = casters
         .iter()
-        .map(|bounds| extents(bounds.corners().map(|p| rotation.transform_point3(p))))
+        .map(|bounds| {
+            let (min, max) = extents(bounds.corners().map(|p| rotation.transform_point3(p)));
+            let tolerance = roundoff(min.abs().max(max.abs()).max_element());
+            let magnitude = f64::from(bounds.min.abs().max(bounds.max.abs()).max_element());
+            (min, max, tolerance, magnitude)
+        })
         .collect();
     let transformed = transform_start.elapsed();
     let fits_start = std::time::Instant::now();
@@ -176,8 +183,7 @@ pub(crate) fn directional_oriented(
         let (mut z_min, mut z_max) = (receiver_min.z, receiver_max.z);
         let mut world_magnitude = center.abs().max_element() + radius;
         let mut caster_indices = Vec::new();
-        for (index, &(min, max)) in light_bounds.iter().enumerate() {
-            let tolerance = roundoff(min.abs().max(max.abs()).max_element());
+        for (index, &(min, max, tolerance, magnitude)) in light_bounds.iter().enumerate() {
             if max.x + tolerance < x - half
                 || min.x - tolerance > x + half
                 || max.y + tolerance < y - half
@@ -191,13 +197,7 @@ pub(crate) fn directional_oriented(
             // Keep the entire assigned AABB in Z, even its unnecessary downstream portion.
             z_min = z_min.min(min.z);
             z_max = z_max.max(max.z);
-            world_magnitude = world_magnitude.max(f64::from(
-                casters[index]
-                    .min
-                    .abs()
-                    .max(casters[index].max.abs())
-                    .max_element(),
-            ));
+            world_magnitude = world_magnitude.max(magnitude);
         }
         // Use world-coordinate magnitudes too: a small light-space Z can be the
         // difference of large world terms, so its value alone underestimates rounding.
