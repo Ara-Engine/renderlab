@@ -101,6 +101,12 @@ fn light_reuse_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_LIGHT_REUSE").map_or(true, |v| v != "0"))
 }
+/// Whether the cell-space filter lists its unique cells and filters them in a second pass
+/// (shaders/gi_cache.wgsl gi_filter_list): `RENDERLAB_GI_FILTER_COMPACT=0` filters inline.
+fn filter_compact_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FILTER_COMPACT").map_or(true, |v| v != "0"))
+}
 /// The default for `near_occluded_rays`.
 const NEAR_OCCLUDED_RAYS: u32 = 4;
 fn first_fill_on(software: bool) -> bool {
@@ -784,6 +790,7 @@ struct Pipelines {
     gather_select: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
     filter: Owned<wgpu::ComputePipeline>,
+    filter_list: Owned<wgpu::ComputePipeline>,
 }
 /// One program's cell shading pipeline (G2), keyed by everything its module and layout
 /// depend on: the program and its source, the prelude, the ray path and the material
@@ -1216,6 +1223,7 @@ impl Planner {
         header[15] = s.near_light_rays;
         header[55] = near_occluded_rays();
         header[56] = u32::from(light_reuse_on());
+        header[58] = u32::from(filter_compact_on());
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
@@ -2912,6 +2920,7 @@ impl Renderer {
             gather_select: compute("gi_gather_select", main),
             light: compute("gi_light", main),
             filter: compute("gi_filter", main),
+            filter_list: compute("gi_filter_list", main),
         };
         if let Some(error) = scopes.finish() {
             return Err(Error::Shader(error.to_string()));
@@ -3832,6 +3841,8 @@ impl GiState {
                 9 + 2 * CLAIM_ROUNDS,
                 grid,
             );
+            // The listed cells (a no-op without GI_H_FILTER_COMPACT: an empty list).
+            main_pass(encoder, "indirect cache filter list", &p.filter_list, u32::MAX, grid);
         }
         // Light visibility at the cells to shade, then the program's cell shading (G2).
         mark(encoder, "gi_cell_shading");

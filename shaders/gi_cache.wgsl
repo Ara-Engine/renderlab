@@ -154,6 +154,9 @@ const GI_FILL_BINS:u32=112u;
 const GI_W_FILL_CUT:u32=240u;
 // Gathers' aimed rays, and those at lights the cell holds occluded (gi_near_gather; GI log).
 const GI_W_AIMED_RAYS:u32=250u;
+// The compacted filter's list length (gi_filter), and whether the filter compacts.
+const GI_W_FILTER_LIST:u32=252u;
+const GI_H_FILTER_COMPACT:u32=58u;
 // Aimed rays per light the gathering cell holds occluded (gi_near_gather; 0: GI_H_NEAR_RAYS).
 const GI_H_NEAR_OCCLUDED:u32=55u;
 // Light visibility reuse (gi_light): a cell's light bits are current until something can change
@@ -2440,6 +2443,18 @@ fn gi_filter_mark() -> u32 { return gi_word(GI_H_FRAME)%0x3fffffffu+1u; }
             // frames' marks differ.
             if atomicExchange(&gi_work[GI_W_CLAIMS+slot],gi_filter_mark())==gi_filter_mark() { continue; }
         }
+        // Compacted (GI_H_FILTER_COMPACT): list the cell, filtered by gi_filter_list with every
+        // lane busy. Inline, few lanes of a wave filter (most items' neighbours are already
+        // marked or need nothing), so a refill frame's 28k shaded cells cost about 1.2 ms.
+        if gi_word(GI_H_FILTER_COMPACT)!=0u {
+            let at=atomicAdd(&gi_work[GI_W_FILTER_LIST],1u);
+            if at<GI_RAY_ITEMS { atomicStore(&gi_work[gi_frame.requests.z+at],slot); continue; }
+        }
         gi_filter_cell(slot);
     }
+}
+// The cells gi_filter listed (in the ray-item arena, free after the trace), each once.
+@compute @workgroup_size(64) fn gi_filter_list(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+    let count=min(atomicLoad(&gi_work[GI_W_FILTER_LIST]),GI_RAY_ITEMS);
+    for(var i=id.x;i<count;i+=groups.x*64u) { gi_filter_cell(atomicLoad(&gi_work[gi_frame.requests.z+i])); }
 }
