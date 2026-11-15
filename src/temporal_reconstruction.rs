@@ -1778,8 +1778,15 @@ impl Planner {
             0
         };
         // sunrt-7 still reuse (primary_sun_tile_held.wgsl tr1_tile_reuse): the streak a reused
-        // class needs, only where the hint is on; 0 is off.
-        let reuse = if hint != 0 && unchanged && sun_still_reuse() {
+        // class needs, only where the hint is on; 0 is off. A cut keeps the history texture, and a
+        // texel whose new class matches the old view's carries its old streak on (rtvis_hold):
+        // only once the history has run SUN_REUSE_STREAK frames since the restart does a streak
+        // that long mean agreement in this view (Glint `descent`: a seam reused lit, 10 codes off).
+        let reuse = if hint != 0
+            && unchanged
+            && self.history_frames >= SUN_REUSE_STREAK
+            && sun_still_reuse()
+        {
             SUN_REUSE_STREAK
         } else {
             0
@@ -2704,19 +2711,24 @@ mod tests {
         } else {
             0
         };
-        assert_eq!(reuse(&plan.prepare(still(1))), on);
+        // Streaks before the restart are not this history's.
+        let n = u64::from(SUN_REUSE_STREAK);
+        for frame in 1..n {
+            assert_eq!(reuse(&plan.prepare(still(frame))), 0, "history frame {frame}");
+        }
+        assert_eq!(reuse(&plan.prepare(still(n))), on);
         let moved = PlanInputs {
             rigid_motion: true,
-            ..still(2)
+            ..still(n + 1)
         };
         assert_eq!(reuse(&plan.prepare(moved)), 0, "a placement moved");
         let edited = PlanInputs {
             scene_static: false,
-            ..still(3)
+            ..still(n + 2)
         };
         assert_eq!(reuse(&plan.prepare(edited)), 0, "a placement was edited");
-        assert_eq!(reuse(&plan.prepare(still(4))), on);
-        assert_eq!(reuse(&plan.prepare(inputs(&sun, 5))), 0, "the camera moved");
+        assert_eq!(reuse(&plan.prepare(still(n + 3))), on);
+        assert_eq!(reuse(&plan.prepare(inputs(&sun, n + 4))), 0, "the camera moved");
     }
 
     /// P-RELIT: a light switched off restarts everything it lit above the budget, and a zero
