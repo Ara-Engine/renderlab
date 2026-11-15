@@ -154,6 +154,8 @@ const GI_FILL_BINS:u32=112u;
 const GI_W_FILL_CUT:u32=240u;
 // Gathers' aimed rays, and those at lights the cell holds occluded (gi_near_gather; GI log).
 const GI_W_AIMED_RAYS:u32=250u;
+// Aimed rays per light the gathering cell holds occluded (gi_near_gather; 0: GI_H_NEAR_RAYS).
+const GI_H_NEAR_OCCLUDED:u32=55u;
 const GI_W_AIMED_OCCLUDED:u32=251u;
 // Whether the last frame's capped claim left pixels' cells for later (gi_fill_select): kept
 // across frames (src/gi_cache.rs clears the counters before it).
@@ -1992,7 +1994,11 @@ fn gi_gather_rays(slot:u32) -> u32 {
     let q=gi_point(cold);
     for(var l=0u;l<lighting.count;l+=1u) {
         let near=gi_near_light(l,q,n);
-        if near.w>0.0 && gi_near_in_range(l,near.w) { rays+=aimed+1u; }
+        if near.w<=0.0 || !gi_near_in_range(l,near.w) { continue; }
+        // As gi_near_gather: fewer aimed rays at a light the cell holds occluded.
+        let seen=(gi_table[cold+GI_C_LIGHTS+(l>>5u)]&(1u<<(l&31u)))!=0u;
+        let fewer=gi_word(GI_H_NEAR_OCCLUDED);
+        rays+=select(aimed,min(fewer,aimed),!seen && fewer!=0u)+1u;
     }
     return rays;
 }

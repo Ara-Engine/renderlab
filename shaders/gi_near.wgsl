@@ -68,13 +68,22 @@ fn gi_near_gather(lane:u32, origin:vec3<f32>, n:vec3<f32>, key:vec2<u32>, band:u
     var missing=0u;
     var changing=0u;
     if aimed==0u { return vec3<u32>(0u); }
-    let per=aimed+1u;
     let turn=select(0.0,f32(key.y>>8u)*(6.283185307179586/16777216.0),(gi_word(GI_H_FLAGS)&GI_F_ROTATE)!=0u);
     // The index of the light's first ray among the cell's aimed rays.
     var first=0u;
     for(var l=0u;l<lighting.count;l+=1u) {
         let near=gi_near_light(l,origin,n);
         if near.w<=0.0 || !gi_near_in_range(l,near.w) { continue; }
+        // A light the cell holds occluded (its visibility bits, gi_light) gets fewer aimed rays,
+        // each weighted for its share of the same log-uniform spread: its near surfaces are
+        // still estimated without bias and still left out of the fixed directions, only more
+        // coarsely. Most of a gather's aimed rays went to such lights (Outpost moving: 61k of
+        // 69k a frame, against 64k fixed-direction rays), and their surroundings the cell does
+        // see are mostly faint. GI_H_NEAR_OCCLUDED 0 keeps every light at GI_H_NEAR_RAYS.
+        let seen=(gi_table[gi_near_cold+GI_C_LIGHTS+(l>>5u)]&(1u<<(l&31u)))!=0u;
+        let fewer=gi_word(GI_H_NEAR_OCCLUDED);
+        let aimed=select(aimed,min(fewer,aimed),!seen && fewer!=0u);
+        let per=aimed+1u;
         let angle_min=min(max(0.25*lights[l].source.x,0.01)/near.w,0.5*GI_NEAR_ANGLE);
         let span=log(GI_NEAR_ANGLE/angle_min);
         let frame=gi_basis(near.xyz);

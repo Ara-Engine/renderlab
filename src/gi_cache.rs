@@ -84,6 +84,19 @@ const FILL_CLAIM_FRAMES: u32 = 64;
 /// Whether first fill runs on this path: on with hardware rays, off with software rays (main's
 /// claims and gathers; its cut refill there still trades the stall for a longer, dearer tail).
 /// `RENDERLAB_GI_FIRST_FILL=1` turns it on for both paths, `=0` off for both.
+/// Aimed rays per light a gathering cell holds occluded (shaders/gi_near.wgsl gi_near_gather):
+/// `RENDERLAB_GI_NEAR_OCCLUDED=N` (16 or 0 gives every light `near_light_rays`, main's).
+fn near_occluded_rays() -> u32 {
+    static RAYS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *RAYS.get_or_init(|| {
+        std::env::var("RENDERLAB_GI_NEAR_OCCLUDED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(NEAR_OCCLUDED_RAYS)
+    })
+}
+/// The default for `near_occluded_rays`.
+const NEAR_OCCLUDED_RAYS: u32 = 4;
 fn first_fill_on(software: bool) -> bool {
     static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     FORCED
@@ -1195,6 +1208,7 @@ impl Planner {
             0
         };
         header[15] = s.near_light_rays;
+        header[55] = near_occluded_rays();
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
