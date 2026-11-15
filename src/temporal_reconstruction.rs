@@ -855,8 +855,8 @@ fn cold_probes() -> bool {
 /// with that history. Every other receiver traces the frame's budget, in main's order.
 pub(crate) const HELD_PROBES: u32 = 8;
 pub(crate) const HELD_STREAK: u32 = 4;
-/// sunrt-7: jittered frames a receiver's texel must have held one sun class before a still frame
-/// reuses it without a ray. HELD_STREAK's 4 let thin rails and shadow slivers, which the jitter
+/// sunrt-7: jittered frames every texel of a receiver's reprojected 3x3 must have held one sun
+/// class before a still frame reuses it without a ray. HELD_STREAK's 4 let thin rails and shadow slivers, which the jitter
 /// reaches only on some frames, keep the wrong class (Glint `descent`, up to 50 codes on edges).
 pub(crate) const SUN_REUSE_STREAK: u32 = 32;
 /// The held budget's frame record (HELD_SOURCE `RtvisHeld`): the previous unjittered camera

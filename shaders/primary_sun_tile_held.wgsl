@@ -5,7 +5,7 @@
 // (rtvis_held.sun.y, set on frames that continue history, is the hinted probe count; 0 is off).
 // A still, unskinned receiver outside every moving caster's swept shadow whose reprojected 3x3
 // history has been one class for HELD_STREAK frames hints that class: 2 lit, 4 shadowed.
-// The hinted receiver's centre streak (frames its reprojected texel has held the class).
+// The hinted receiver's streak: the fewest frames any texel of its reprojected 3x3 has held the class.
 var<private> tr1_hint_streak:u32=0u;
 fn tr1_tile_hint(receiver:Receiver,slot:u32)->u32 {
     tr1_hint_streak=0u;
@@ -17,19 +17,21 @@ fn tr1_tile_hint(receiver:Receiver,slot:u32)->u32 {
     let size=vec2<i32>(textureDimensions(rtvis_history_in));
     let q=vec2<i32>(floor(fma(c.xy/c.w,vec2<f32>(0.5,-0.5),vec2<f32>(0.5))*vec2<f32>(size)));
     if any(q<vec2<i32>(1)) || any(q>=size-vec2<i32>(1)) {return 0u;}
-    let centre=textureLoad(rtvis_history_in,q,0).x;
-    let cls=centre>>8u;
+    let cls=textureLoad(rtvis_history_in,q,0).x>>8u;
     if cls==0u {return 0u;}
+    var streak=255u;
     for(var k=0;k<9;k+=1) {
         let h=textureLoad(rtvis_history_in,q+vec2<i32>(k%3-1,k/3-1),0).x;
         if (h>>8u)!=cls || (h&0xffu)<rtvis_held.words.z {return 0u;}
+        streak=min(streak,h&0xffu);
     }
-    tr1_hint_streak=centre&0xffu;
+    tr1_hint_streak=streak;
     return select(4u,2u,cls==2u);
 }
 fn tr1_tile_hint_probes()->u32 {return rtvis_held.sun.y;}
 // sunrt-7: rtvis_held.sun.z is set on frames the planner found unchanged (camera, placements,
-// poses, sun, restart zones) to the streak a reused class needs: a hinted receiver whose texel has
-// held its class that many jittered frames keeps it. The streak bounds what the jitter has not yet
-// shown: a surface or shadow covering a larger share of the pixel would have broken it.
+// poses, sun, restart zones) to the streak a reused class needs: a hinted receiver whose
+// reprojected 3x3 has held its class that many jittered frames keeps it without a ray. The streak
+// bounds what the jitter has not yet shown: a surface or shadow covering a larger share of the
+// pixel would have broken it.
 fn tr1_tile_reuse()->bool {return rtvis_held.sun.z!=0u && tr1_hint_streak>=rtvis_held.sun.z;}
