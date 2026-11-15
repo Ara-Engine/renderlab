@@ -21,7 +21,13 @@ const SHADER: &str = include_str!("../shaders/id_output.wgsl");
 const HANDOFF_MARK: &str = "// ---- Handoff:";
 /// The ID pass module: the shader up to its handoff section.
 pub(crate) fn id_source() -> String {
-    id_source_with_coverage(super::temporal_reconstruction::coverage_mode().is_some())
+    let coverage = super::temporal_reconstruction::coverage_mode();
+    let source = id_source_with_coverage(coverage.is_some());
+    if super::temporal_reconstruction::layer_bit(coverage) {
+        source
+    } else {
+        source.replace("const ID_LAYER_BIT:bool=true;", "const ID_LAYER_BIT:bool=false;")
+    }
 }
 fn id_source_with_coverage(precise: bool) -> String {
     let source = SHADER.split_once(HANDOFF_MARK).unwrap().0;
