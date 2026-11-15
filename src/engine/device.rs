@@ -117,6 +117,8 @@ fn pass_limits(limits: wgpu::Limits, adapter: &wgpu::Limits) -> wgpu::Limits {
         max_storage_textures_per_shader_stage: limits
             .max_storage_textures_per_shader_stage
             .max(adapter.max_storage_textures_per_shader_stage.min(16)),
+        // The hit pass reads the sun-shadow map in a fifth group (reflection_hit_sun.rs).
+        max_bind_groups: limits.max_bind_groups.max(adapter.max_bind_groups.min(5)),
         ..limits
     }
 }
