@@ -2159,6 +2159,16 @@ impl Renderer {
     pub fn set_indirect(&mut self, settings: IndirectSettings) -> Result<(), Error> {
         self.check_fault()?;
         settings.validate()?;
+        // Switching from a fixed table opts back into scene sizing on the next frame.
+        // Retire the old bindings with their table: submitted frames may still use them.
+        if settings.auto_slots && !self.gi.settings.auto_slots && forced_slots_log2().is_none() {
+            if let Some(old) = self.gi.resources.take() {
+                self.gi.retired.push((self.submissions, Retired::Resources(old)));
+            }
+            if let Some(old) = self.gi.groups.take() {
+                self.gi.retired.push((self.submissions, Retired::Groups(old)));
+            }
+        }
         let slots = match forced_slots_log2() {
             Some(log2) => Some(self.gi_slots(log2)),
             None if settings.auto_slots => self
