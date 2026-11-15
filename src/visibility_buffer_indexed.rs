@@ -1,170 +1,98 @@
-//! Indexed camera raster: one unique provoking corner per triangle carries its ID;
-//! the other two corners share vertices and the hardware post-transform cache.
+//! Compact visible geometry into one indexed draw. The first corner owns each
+//! triangle's flat ID; its other corners share the hardware vertex cache.
 use super::*;
 
-pub(super) fn enabled(r: &Renderer) -> bool {
-    r.hardware_shadows.is_none()
-        && r.device.limits().max_storage_buffers_per_shader_stage >= 14
-        && std::env::var("RENDERLAB_VIS_INDEXED").is_ok_and(|v| v == "1")
+fn enabled(r: &Renderer) -> bool {
+    r.hardware_shadows.is_none() && std::env::var("RENDERLAB_VIS_INDEXED").is_ok_and(|v| v == "1")
 }
-
-pub(super) struct Mesh {
-    vertices: Buffer,
-    pub offsets: Vec<[u32; 2]>,
-    count: u32,
-}
-impl Mesh {
-    pub fn new(r: &Renderer, clusters: &[Cluster], data: &[u32]) -> Option<Self> {
-        if !enabled(r) {
-            return None;
-        }
-        let count: u64 = clusters
-            .iter()
-            .map(|c| u64::from((c.counts >> 8) & 255) + u64::from(c.counts & 255))
-            .sum();
-        if count * 16 > u64::from(r.device.limits().max_storage_buffer_binding_size) {
-            return None;
-        }
-        let mut vertices = Vec::with_capacity(count as usize * 4);
-        let mut offsets = Vec::with_capacity(clusters.len());
-        for (index, c) in clusters.iter().enumerate() {
-            let base = vertices.len() as u32 / 4;
-            let n = (c.counts >> 8) & 255;
-            offsets.push([base, base + n]);
-            for v in 0..n {
-                let p = c.vertices as usize + v as usize * 3;
-                vertices.extend_from_slice(&data[p..p + 3]);
-                vertices.push((index as u32) << 7);
-            }
-            for triangle in 0..(c.counts & 255) {
-                let v = data[c.triangles as usize + triangle as usize] & 255;
-                let p = c.vertices as usize + v as usize * 3;
-                vertices.extend_from_slice(&data[p..p + 3]);
-                vertices.push(((index as u32) << 7) | triangle);
-            }
-        }
-        let buffer = Buffer::new(
-            r,
-            "visibility indexed source vertices",
-            (count * 16).max(16),
-            wgpu::BufferUsages::STORAGE,
-        );
-        if !vertices.is_empty() {
-            r.queue.write_buffer(&buffer.value, 0, &words(vertices));
-        }
-        Some(Self {
-            vertices: buffer,
-            offsets,
-            count: count as u32,
-        })
-    }
-}
-
 pub(super) struct Plan {
-    metadata: Vec<[u32; 8]>,
-    capacity: u32,
+    vertices: u32,
+    indices: u32,
 }
 impl Plan {
     pub fn new(r: &Renderer, draws: &[PreparedDraw<'_>]) -> Option<Self> {
-        if !enabled(r) || draws.is_empty() || draws.iter().any(|d| d.mesh.skin.is_some()) {
+        if !enabled(r) || draws.is_empty() {
             return None;
         }
-        let mut metadata = Vec::new();
-        let (mut indices, mut cluster_base, mut placement) = (0u64, 0u32, 0u32);
+        let mut vertices = 0u64;
+        let mut indices = 0u64;
         for d in draws {
-            let c = d.mesh.clusters.as_ref()?;
-            let mesh = c.indexed.as_ref()?;
-            let capacity = c
+            let mesh = d.mesh.clusters.as_ref()?;
+            vertices += mesh
+                .clusters
+                .iter()
+                .map(|c| u64::from((c.counts >> 8) & 255) + u64::from(c.counts & 255))
+                .sum::<u64>()
+                * d.instances.len() as u64;
+            indices += mesh
                 .clusters
                 .iter()
                 .map(|c| u64::from(c.counts & 255) * 3)
                 .sum::<u64>()
                 * d.instances.len() as u64;
-            // vertex_index encodes the placement and its mesh-local vertex.
-            if u64::from(mesh.count) * d.instances.len() as u64 > u64::from(u32::MAX) {
-                return None;
-            }
-            metadata.push([
-                indices as u32,
-                mesh.count,
-                cluster_base,
-                placement,
-                c.clusters.len() as u32,
-                0,
-                0,
-                0,
-            ]);
-            indices += capacity;
-            if indices * 4 > u64::from(r.device.limits().max_storage_buffer_binding_size)
-                || indices > u64::from(u32::MAX)
-            {
-                return None;
-            }
-            cluster_base += c.clusters.len() as u32 * d.instances.len() as u32;
-            placement += d.instances.len() as u32;
         }
+        // Each phase visits a subset of this table, so its atomic counters cannot wrap.
+        if vertices > u64::from(u32::MAX) || indices > u64::from(u32::MAX) {
+            return None;
+        }
+        let limit = r.device.limits().max_storage_buffer_binding_size;
         Some(Self {
-            metadata,
-            capacity: indices as u32,
+            vertices: vertices.min(limit / 16).max(1) as u32,
+            indices: indices.min(limit / 4).max(1) as u32,
         })
     }
 }
-
 pub(super) struct Raster {
-    pub indices: [Buffer; 2],
+    _vertices: Buffer,
+    pub indices: Buffer,
     pub args: [Buffer; 2],
-    _metadata: Buffer,
-    _params: Vec<Buffer>,
     pub build: wgpu::ComputePipeline,
+    pub finish: wgpu::ComputePipeline,
     pub reset: wgpu::ComputePipeline,
     pub groups: [wgpu::BindGroup; 2],
-    pub draws: Vec<wgpu::BindGroup>,
+    pub empty: wgpu::BindGroup,
+    pub hardware: wgpu::RenderPipeline,
+    pub hardware_groups: [wgpu::BindGroup; 2],
 }
 impl Raster {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         r: &Renderer,
         plan: Plan,
-        draws: &[PreparedDraw<'_>],
         configs: &[Buffer; 2],
         clusters: &Buffer,
         lists: &[Buffer; 2],
         cull_args: &[Buffer; 2],
         visibility: &Buffer,
-        hardware_layout: &wgpu::BindGroupLayout,
+        attachment: bool,
         array_layout: &wgpu::BindGroupLayout,
         data_layout: &wgpu::BindGroupLayout,
     ) -> Self {
-        use wgpu::ShaderStages as S;
+        use wgpu::{ShaderStages as S, TextureFormat as F};
         let storage = wgpu::BufferUsages::STORAGE;
-        let metadata = Buffer::new(
+        // Phases execute in order; attachments retain phase one's result after its
+        // compacted streams are reused by phase two. No host readback or growth stall.
+        let vertices = Buffer::new(
             r,
-            "visibility indexed draw metadata",
-            (plan.metadata.len().max(1) * 32) as u64,
+            "visibility compacted vertices",
+            u64::from(plan.vertices) * 16,
             storage,
         );
-        r.queue.write_buffer(
-            &metadata.value,
-            0,
-            &words(plan.metadata.iter().flatten().copied()),
+        let indices = Buffer::new(
+            r,
+            "visibility compacted indices",
+            u64::from(plan.indices) * 4,
+            storage | wgpu::BufferUsages::INDEX,
         );
-        let indices = std::array::from_fn(|_| {
-            Buffer::new(
-                r,
-                "visibility compacted indices",
-                (u64::from(plan.capacity) * 4).max(4),
-                storage | wgpu::BufferUsages::INDEX,
-            )
-        });
         let args = std::array::from_fn(|_| {
             let b = Buffer::new(
                 r,
-                "visibility indexed indirect draws",
-                (plan.metadata.len().max(1) * 20) as u64,
+                "visibility indexed and fallback draws",
+                48,
                 storage | wgpu::BufferUsages::INDIRECT,
             );
-            let values = plan.metadata.iter().flat_map(|m| [0, 1, m[0], 0, 0]);
-            r.queue.write_buffer(&b.value, 0, &words(values));
+            r.queue
+                .write_buffer(&b.value, 0, &words([0, 1, 0, 0, 0, 0, 0, 0, 384, 0, 0, 0]));
             b
         });
         let build_layout = layout(
@@ -174,11 +102,13 @@ impl Raster {
                 buffer_entry(1, false, false, S::COMPUTE),
                 buffer_entry(3, false, false, S::COMPUTE),
                 buffer_entry(5, false, false, S::COMPUTE),
-                buffer_entry(6, false, false, S::COMPUTE),
                 buffer_entry(7, false, true, S::COMPUTE),
                 buffer_entry(8, false, true, S::COMPUTE),
+                buffer_entry(9, false, true, S::COMPUTE),
             ],
         );
+        let empty_layout = layout(&r.device, &[]);
+        let empty = bind(&r.device, &empty_layout, &[]);
         let shader = r
             .device
             .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
@@ -191,7 +121,7 @@ impl Raster {
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("visibility index compaction"),
-                bind_group_layouts: &[Some(&build_layout), Some(array_layout), Some(data_layout)],
+                bind_group_layouts: &[Some(&build_layout), Some(&empty_layout), Some(data_layout)],
                 immediate_size: 0,
             });
         let pipeline = |entry| {
@@ -206,6 +136,7 @@ impl Raster {
                 })
         };
         let build = pipeline("build_indices");
+        let finish = pipeline("finish_indices");
         let reset = pipeline("reset_indices");
         let groups = std::array::from_fn(|i| {
             bind(
@@ -216,65 +147,99 @@ impl Raster {
                     (1, clusters.value.as_entire_binding()),
                     (3, lists[i].value.as_entire_binding()),
                     (5, cull_args[i].value.as_entire_binding()),
-                    (6, metadata.value.as_entire_binding()),
                     (7, args[i].value.as_entire_binding()),
-                    (8, indices[i].value.as_entire_binding()),
+                    (8, indices.value.as_entire_binding()),
+                    (9, vertices.value.as_entire_binding()),
                 ],
             )
         });
-        let params: Vec<_> = plan
-            .metadata
-            .iter()
-            .map(|m| {
-                let b = Buffer::new(
-                    r,
-                    "visibility indexed mesh parameters",
-                    32,
-                    wgpu::BufferUsages::UNIFORM,
-                );
-                r.queue.write_buffer(&b.value, 0, &words(*m));
-                b
-            })
-            .collect();
-        let groups_draw = draws
-            .iter()
-            .enumerate()
-            .map(|(i, d)| {
-                bind(
-                    &r.device,
-                    hardware_layout,
-                    &[
-                        (0, configs[0].value.as_entire_binding()),
-                        (1, clusters.value.as_entire_binding()),
-                        (3, lists[0].value.as_entire_binding()),
-                        (8, visibility.value.as_entire_binding()),
-                        (
-                            9,
-                            d.mesh
-                                .clusters
-                                .as_ref()
-                                .unwrap()
-                                .indexed
-                                .as_ref()
-                                .unwrap()
-                                .vertices
-                                .value
-                                .as_entire_binding(),
-                        ),
-                        (10, params[i].value.as_entire_binding()),
-                    ],
-                )
-            })
-            .collect();
+        let hardware_layout = layout(
+            &r.device,
+            &[
+                buffer_entry(0, true, false, S::VERTEX | S::FRAGMENT),
+                buffer_entry(1, false, false, S::VERTEX),
+                buffer_entry(8, false, true, S::FRAGMENT),
+                buffer_entry(9, false, false, S::VERTEX),
+            ],
+        );
+        let shader = r
+            .device
+            .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("visibility indexed raster"),
+                source: wgpu::ShaderSource::Wgsl(
+                    stage_source(include_str!("../shaders/visibility_buffer_indexed.wgsl")).into(),
+                ),
+            });
+        let hardware =
+            r.device
+                .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                    label: Some("visibility indexed raster"),
+                    layout: Some(&r.device.create_pipeline_layout(
+                        &wgpu::PipelineLayoutDescriptor {
+                            label: Some("visibility indexed raster"),
+                            bind_group_layouts: &[
+                                Some(&hardware_layout),
+                                Some(array_layout),
+                                Some(data_layout),
+                            ],
+                            immediate_size: 0,
+                        },
+                    )),
+                    vertex: wgpu::VertexState {
+                        module: &shader,
+                        entry_point: Some("vs"),
+                        compilation_options: Default::default(),
+                        buffers: &[],
+                    },
+                    fragment: Some(wgpu::FragmentState {
+                        module: &shader,
+                        entry_point: Some(if attachment { "fs_color" } else { "fs" }),
+                        compilation_options: Default::default(),
+                        targets: if attachment {
+                            &[Some(wgpu::ColorTargetState {
+                                format: F::R32Uint,
+                                blend: None,
+                                write_mask: wgpu::ColorWrites::ALL,
+                            })]
+                        } else {
+                            &[]
+                        },
+                    }),
+                    primitive: Default::default(),
+                    depth_stencil: Some(wgpu::DepthStencilState {
+                        format: F::Depth32Float,
+                        depth_write_enabled: Some(true),
+                        depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                        stencil: Default::default(),
+                        bias: Default::default(),
+                    }),
+                    multisample: Default::default(),
+                    multiview_mask: None,
+                    cache: None,
+                });
+        let hardware_groups = std::array::from_fn(|i| {
+            bind(
+                &r.device,
+                &hardware_layout,
+                &[
+                    (0, configs[i].value.as_entire_binding()),
+                    (1, clusters.value.as_entire_binding()),
+                    (8, visibility.value.as_entire_binding()),
+                    (9, vertices.value.as_entire_binding()),
+                ],
+            )
+        });
         Self {
+            _vertices: vertices,
             indices,
             args,
-            _metadata: metadata,
-            _params: params,
             build,
+            finish,
             reset,
             groups,
-            draws: groups_draw,
+            empty,
+            hardware,
+            hardware_groups,
         }
     }
 }
