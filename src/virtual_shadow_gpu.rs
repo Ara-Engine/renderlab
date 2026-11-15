@@ -82,7 +82,7 @@ pub(crate) fn fog_coarse_on() -> bool {
 }
 /// The fog map's first pool (pages; it grows like the sparse clipmap's) and its per-frame
 /// raster budget, so a cut or a moved sun spreads the redraw over frames.
-const FOG_POOL_START: u32 = 256;
+const FOG_POOL_START: u32 = 128;
 const FOG_BUDGET: u32 = 16;
 /// Whether the sparse clipmap is on (`RENDERLAB_VSM_SPARSE=1` turns it on; off by default).
 fn sparse_switch() -> bool {
@@ -1860,7 +1860,10 @@ impl VirtualState {
         } else {
             4
         };
-        let bytes = 2 * map_bytes
+        // The fog map draws no peel layer.
+        let peel_bytes = if self.fog { 8 } else { map_bytes };
+        let bytes = map_bytes
+            + peel_bytes
             + outline_bytes
             + plane_bytes
             + error_bytes
@@ -1905,7 +1908,7 @@ impl VirtualState {
             capacity,
             pool,
             top: buffer("N8c clipmap top layer", map_bytes, B::STORAGE),
-            peel: buffer("N8c clipmap peel layer", map_bytes, B::STORAGE),
+            peel: buffer("N8c clipmap peel layer", peel_bytes, B::STORAGE),
             mips: buffer("N8c clipmap max-mips", mip_bytes.max(4), B::STORAGE),
             outline: buffer("Disk lookup outline bits", outline_bytes, B::STORAGE),
             planes: buffer("N8k clipmap texel planes", plane_bytes, B::STORAGE),
@@ -2906,7 +2909,7 @@ impl Renderer {
             ..state.stats
         };
         if fog.is_some() && state.resources.is_none() {
-            state.capacity = state.capacity.max(FOG_POOL_START);
+            state.capacity = FOG_POOL_START;
         }
         fogprof::mark(6, &mut prof_t); // FOGPROF
         let created = state.ensure_resources(
@@ -3225,7 +3228,7 @@ impl Renderer {
                 ]),
             );
         }
-        if s.lookup == VirtualLookup::Disk {
+        if s.lookup == VirtualLookup::Disk && !state.fog {
             // N-VSM1 `VdFrame`: the receivers' own world-to-clip matrix, for the visible-surface
             // samples along the sun's screen direction.
             let mut bytes = Vec::with_capacity(DISK_FRAME_BYTES as usize);
@@ -3236,7 +3239,9 @@ impl Renderer {
             {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
-            bytes.extend_from_slice(&disk_pattern());
+            // Constant: built once (its quantiles bisect 128 times 60 steps).
+            static PATTERN: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+            bytes.extend_from_slice(PATTERN.get_or_init(disk_pattern));
             debug_assert_eq!(bytes.len() as u64, DISK_FRAME_BYTES);
             self.queue.write_buffer(&r.disk_frame, 0, &bytes);
             self.uploads.shadows += DISK_FRAME_BYTES;
@@ -3819,7 +3824,8 @@ impl Renderer {
                 .record(encoder, &r.reach, 0, tag);
         }
         mark(encoder, if state.fog { "fog_map.raster" } else { "sun_shadow.raster" });
-        for layer in 0..2 {
+        // The fog reads the top layer alone.
+        for layer in 0..if state.fog { 1 } else { 2 } {
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("N8c software page raster"),
@@ -3880,7 +3886,11 @@ impl Renderer {
             }
         }
         if r.sparse {
-            // In-page mips of the pages rasterized this frame (none when no page was flagged).
+            // In-page mips of the pages rasterized this frame (none when no page was flagged);
+            // the fog reads none.
+            if state.fog {
+                return;
+            }
             pass.set_pipeline(&p.mip_sparse);
             pass.set_bind_group(0, &*g.mip, &[]);
             pass.set_bind_group(3, &*g.pass, &[0]);
