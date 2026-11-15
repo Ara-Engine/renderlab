@@ -323,7 +323,7 @@ fn attachment_resolve_source(wgsl: &str, stage: ResolveStage) -> Result<String, 
         patch_visibility_tail(
             &mut tail,
             "lift=hit.error*LOD_LIFT;atomicOr(&covered,1u);",
-            "lift=hit.error*LOD_LIFT;atomicOr(&covered,1u);\n            if DEFER_REPAIR {\n                let pixel=id.y*size.x+id.x;\n                if raster_needs_repair(trace) {raster_enqueue(pixel);}\n                else if visibility[pixel].y!=0u {visibility[pixel]=vec2<u32>(0u);}\n            }",
+            "lift=hit.error*LOD_LIFT;atomicOr(&covered,1u);\n            if DEFER_REPAIR {\n                let pixel=id.y*size.x+id.x;\n                if raster_needs_repair(trace) {raster_enqueue(pixel);trace.record=vec4<u32>(0u);}\n                else if visibility[pixel].y!=0u {visibility[pixel]=vec2<u32>(0u);}\n            }",
         )?;
         patch_visibility_tail(
             &mut tail,
