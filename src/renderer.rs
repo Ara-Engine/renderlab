@@ -4050,6 +4050,7 @@ impl Renderer {
         if let Some(virtual_shadows) = self.view.virtual_shadows.as_mut() {
             virtual_shadows.submitted();
         }
+        self.gi.submitted();
         if let Some(mut t) = marks {
             t.submitted();
             self.pass_timeline = Some(t);

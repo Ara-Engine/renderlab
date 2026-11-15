@@ -146,8 +146,22 @@ const GI_W_EVICTED_RECENT:u32=45u;
 const GI_W_FULL_PIXEL:u32=46u;
 // Ray item capacity, a multiple of 32 (src/gi_cache.rs RAY_ITEMS).
 const GI_RAY_ITEMS:u32=2097152u;
+// First fill (gi_fill_count): this frame's chosen misses per admission bin, then 1 + the
+// first bin a capped claim leaves for a later frame (0: every miss is admitted), for pixels'
+// bins and (the next word) gathers'.
+const GI_W_FILL_HIST:u32=48u;
+const GI_FILL_BINS:u32=112u;
+const GI_W_FILL_CUT:u32=240u;
+// Whether the last frame's capped claim left pixels' cells for later (gi_fill_select): kept
+// across frames (src/gi_cache.rs clears the counters before it).
+const GI_W_FILL_PENDING:u32=383u;
+// Gather ray budget (gi_gather_count): this frame's estimated gather rays per admission bin,
+// then 1 + the first bin left for a later frame, for pixels' bins and (the next word) the rest.
+const GI_W_GATHER_HIST:u32=256u;
+const GI_GATHER_BINS:u32=96u;
+const GI_W_GATHER_CUT:u32=352u;
 // Per-slot claim words, after the counters (src/gi_cache.rs COUNTER_WORDS).
-const GI_W_CLAIMS:u32=48u;
+const GI_W_CLAIMS:u32=384u;
 // A miss: definition (4 words), request-table entry, claimed slot.
 const GI_MISS_WORDS:u32=6u;
 const GI_UNCLAIMED:u32=0xffffffffu;
@@ -240,6 +254,10 @@ const GI_PARENT_ROUNDS:u32=4u;
 // request the current inserts are (0 pixels, 1 orphans' parents, 2 refinement).
 var<private> gi_stats:bool;
 var<private> gi_cause:u32;
+// First fill (gi_fill_bin): requests made while set are a pixel's parent cells, listed in the
+// fill band (bit 15 of the tile entry's definition word, stripped before the miss list).
+var<private> gi_fill_parent:bool;
+const GI_FILL_PARENT_DEF:u32=0x8000u;
 var<private> gi_n_inserts:u32;
 var<private> gi_n_steps:u32;
 var<private> gi_n_pixel:u32;
@@ -260,7 +278,7 @@ fn gi_local_insert(level:u32, bin:u32, cell:vec3<i32>) {
         if gi_stats { gi_n_steps+=1u; }
         let r=atomicCompareExchangeWeak(&gi_local_key[h],0u,key.x);
         if r.exchanged {
-            gi_local_def[h]=vec4<u32>(level|(bin<<8u),bitcast<vec3<u32>>(cell));
+            gi_local_def[h]=vec4<u32>(level|(bin<<8u)|select(0u,GI_FILL_PARENT_DEF,gi_fill_parent),bitcast<vec3<u32>>(cell));
             gi_local_list[atomicAdd(&gi_local_count,1u)]=h;
             if gi_stats {
                 if gi_cause==0u { gi_n_pixel+=1u; } else if gi_cause==1u { gi_n_parent+=1u; } else { gi_n_refine+=1u; }
@@ -434,6 +452,21 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> 
             gi_request_cells(gi_request_desc(r.world,pick.lo,b));
             if pick.hi!=pick.lo { gi_request_cells(gi_request_desc(r.world,pick.hi,b)); }
         }
+        // First fill: after a cut or clear (GI_H_FILL_PARENTS) every pixel also requests the
+        // next coarser level's cells, which the claim admits before any finer cell. While
+        // the capped claim creates the finer cells over the next frames, the lookup fills
+        // their missing weight from these (gi_api.wgsl gi_prepare): a softer picture for a
+        // few frames instead of a cell mosaic.
+        if gi_fill_parents_wanted() {
+            gi_fill_parent=true;
+            let top=gi_word(GI_H_LEVELS);
+            for(var b=0u;b<6u;b+=1u) {
+                if (bins&(1u<<b))==0u { continue; }
+                if pick.lo+1u<top { gi_request_cells(gi_request_desc(r.world,pick.lo+1u,b)); }
+                if pick.hi!=pick.lo && pick.hi+1u<top { gi_request_cells(gi_request_desc(r.world,pick.hi+1u,b)); }
+            }
+            gi_fill_parent=false;
+        }
     }
     workgroupBarrier();
     // Each unique cell once, in rounds: found cells are marked seen and missing ones are
@@ -451,7 +484,9 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> 
         if to==begin { break; }
         for(var k=begin+lane;k<to;k+=GI_PROBE_LANES) {
             let i=gi_local_list[k];
-            let def=gi_local_def[i];
+            let entry_def=gi_local_def[i];
+            let fill=(entry_def.x&GI_FILL_PARENT_DEF)!=0u;
+            let def=vec4<u32>(entry_def.x&~GI_FILL_PARENT_DEF,entry_def.yzw);
             // Key a is the tile table's own key; finds need nothing else (a request computes
             // key b, which picks one cell among those sharing key a: gi_request_list).
             let key=vec2<u32>(atomicLoad(&gi_local_key[i]),0u);
@@ -479,7 +514,7 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> 
             // cleared table's zero is no request). Any listing order gives the same set.
             let entry=gi_request_entry(key.x);
             if entry.x==0xffffffffu { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); continue; }
-            atomicMax(&gi_work[gi_frame.requests.x+entry.x*GI_REQUEST_WORDS+1u],GI_BAND_PIXEL);
+            atomicMax(&gi_work[gi_frame.requests.x+entry.x*GI_REQUEST_WORDS+1u],select(GI_BAND_PIXEL,GI_BAND_FILL,fill));
             if !gi_request_list(entry.x,gi_key(def.x&0xffu,def.x>>8u,bitcast<vec3<i32>>(def.yzw)).y) { continue; }
             let at=atomicAdd(&gi_work[GI_W_MISSES],1u);
             if at>=capacity { atomicAdd(&gi_work[GI_W_MISS_OVERFLOW],1u); continue; }
@@ -572,6 +607,8 @@ fn gi_request_list(entry:u32, key_b:u32) -> bool {
 // pixels' cells, cells a pixel-made cell's gather requests (made secondary), and cells a
 // secondary cell's gather requests (made tertiary; they request nothing). 0 is no request.
 const GI_BAND_PIXEL:u32=3u;
+// A pixel's parent cell during first fill (gi_probe): a pixel band for everything else.
+const GI_BAND_FILL:u32=4u;
 const GI_BAND_SECONDARY:u32=2u;
 const GI_BAND_TERTIARY:u32=1u;
 // A listed miss's generation band.
@@ -594,7 +631,7 @@ fn gi_miss_chosen(base:u32) -> bool {
 fn gi_miss_claim(base:u32) -> u32 {
     let key=gi_miss_key(base).x;
     let s=countOneBits(gi_word(GI_H_MASK));
-    return (gi_miss_band(base)<<30u)|((key>>s)<<3u)|(key&(GI_BUCKET-1u));
+    return (min(gi_miss_band(base),GI_BAND_PIXEL)<<30u)|((key>>s)<<3u)|(key&(GI_BUCKET-1u));
 }
 
 // ---- claim and resolve: deterministic inserts, in rounds ----
@@ -622,9 +659,100 @@ fn gi_claim_period() -> u32 {
     while p<64u && count>cap*p { p*=2u; }
     return p;
 }
+// ---- first fill: a capped claim in a fixed order ----
+// After a cut every visible cell is missing at once (Outpost: 185k, 45-74 ms of software sky
+// rays on one frame). GI_H_FILL_CELLS caps the cells a frame creates; the rest are listed
+// again next frame, because pixels and gathers still miss them. The order is fixed by each
+// miss alone, never by thread order or timing: pixels' parent cells (GI_BAND_FILL, requested
+// for the frames after a cut or clear: gi_probe), then pixels' cells by their lattice class
+// in the bin's tangent plane (class 0, both tangent coordinates even, then 3, 1, 2), then
+// gathers' secondary cells, then tertiary ones. The parents are always admitted, whatever the
+// cap: the lookup fills a receiver's missing finer corners from them. Without parents (no
+// recent cut) class 0 is always admitted instead: every bilinear quad holds exactly one cell of
+// each class, so every receiver still finds a cell of its own view. A per-frame hash spreads
+// each order over 16 bins, so an order larger than the remaining cap is taken in a different
+// subset each frame.
+const GI_H_FILL_CELLS:u32=48u;
+const GI_H_FILL_PARENTS:u32=50u;
+const GI_H_FILL_FIRST:u32=54u;
+// Pixels request parents on the frame of a cut or clear (GI_H_FILL_FIRST), then only while the
+// claim is still deferring their cells (the last frame's GI_W_FILL_PENDING): once every finer
+// cell exists the parents are not read, and requesting, creating and gathering them was the
+// first fill's extra cost after the cut.
+fn gi_fill_parents_wanted() -> bool {
+    if gi_word(GI_H_FILL_PARENTS)==0u { return false; }
+    return gi_word(GI_H_FILL_FIRST)!=0u || atomicLoad(&gi_work[GI_W_FILL_PENDING])!=0u;
+}
+const GI_FILL_SPREAD:u32=16u;
+// Its lattice class's rank (0..3) for a cell of bin `bin` at `cell`.
+fn gi_fill_class(bin:u32, c:vec3<u32>) -> u32 {
+    let a=bin>>1u;
+    let lattice=(c[(a+1u)%3u]&1u)|((c[(a+2u)%3u]&1u)<<1u);
+    return (0x1320u>>(lattice*4u))&3u; // lattice 0,1,2,3 -> rank 0,2,3,1
+}
+fn gi_fill_bin(base:u32) -> u32 {
+    let band=gi_miss_band(base);
+    var order=select(6u,5u,band==GI_BAND_SECONDARY);
+    if band==GI_BAND_FILL { order=0u; }
+    if band==GI_BAND_PIXEL {
+        let c=vec3<u32>(atomicLoad(&gi_work[base+1u]),atomicLoad(&gi_work[base+2u]),atomicLoad(&gi_work[base+3u]));
+        order=1u+gi_fill_class(atomicLoad(&gi_work[base])>>8u,c);
+    }
+    let spread=gi_mix(gi_miss_key(base).x^(gi_word(GI_H_FRAME)*0x9e3779b9u))>>28u;
+    return order*GI_FILL_SPREAD+spread;
+}
+// The chosen misses per bin (pixels' misses at most once each: gi_miss_chosen).
+@compute @workgroup_size(64) fn gi_fill_count(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+    if gi_word(GI_H_FILL_CELLS)==0u { return; }
+    let count=gi_miss_count();
+    for(var i=id.x;i<count;i+=groups.x*64u) {
+        let base=gi_frame.offsets.y+i*GI_MISS_WORDS;
+        if atomicLoad(&gi_work[base+5u])==GI_CREATED || !gi_miss_chosen(base) { continue; }
+        atomicAdd(&gi_work[GI_W_FILL_HIST+gi_fill_bin(base)],1u);
+    }
+}
+// The first bin past the cap, as 1 + bin, for pixels' bins (GI_W_FILL_CUT) and gathers'
+// (GI_W_FILL_CUT + 1). The parents' bins always pass, or class 0's without parents. Gathers'
+// cells keep half of the cap whatever pixels want: a gather whose hit cells are never created
+// retries every frame and leaves its bounce short, and a backlog of them would all be created
+// on the frame the cap ends.
+const GI_FILL_GATHER_BINS:u32=5u*GI_FILL_SPREAD;
+@compute @workgroup_size(1) fn gi_fill_select() {
+    let cap=gi_word(GI_H_FILL_CELLS);
+    atomicStore(&gi_work[GI_W_FILL_PENDING],0u);
+    if cap==0u { return; }
+    var wanted=0u;
+    for(var b=GI_FILL_GATHER_BINS;b<GI_FILL_BINS;b+=1u) { wanted+=atomicLoad(&gi_work[GI_W_FILL_HIST+b]); }
+    let pixel_cap=cap-min(wanted,cap/2u);
+    var total=0u;
+    var forced=2u*GI_FILL_SPREAD;
+    for(var b=0u;b<GI_FILL_GATHER_BINS;b+=1u) {
+        let next=total+atomicLoad(&gi_work[GI_W_FILL_HIST+b]);
+        if b+1u==GI_FILL_SPREAD && next!=0u { forced=GI_FILL_SPREAD; }
+        if b>=forced && next>pixel_cap {
+            atomicStore(&gi_work[GI_W_FILL_CUT],b+1u);
+            atomicStore(&gi_work[GI_W_FILL_PENDING],1u);
+            break;
+        }
+        total=next;
+    }
+    let gather_cap=cap-min(total,cap);
+    var gathers=0u;
+    for(var b=GI_FILL_GATHER_BINS;b<GI_FILL_BINS;b+=1u) {
+        gathers+=atomicLoad(&gi_work[GI_W_FILL_HIST+b]);
+        if gathers>gather_cap { atomicStore(&gi_work[GI_W_FILL_CUT+1u],b+1u); return; }
+    }
+}
 fn gi_claim_miss(index:u32) {
     let base=gi_frame.offsets.y+index*GI_MISS_WORDS;
     if atomicLoad(&gi_work[base+5u])==GI_CREATED { return; }
+    let fill_bin=gi_fill_bin(base);
+    let fill_cut=atomicLoad(&gi_work[GI_W_FILL_CUT+select(0u,1u,fill_bin>=GI_FILL_GATHER_BINS)]);
+    if fill_cut!=0u && fill_bin+1u>=fill_cut {
+        atomicStore(&gi_work[base+5u],GI_CREATED);
+        atomicAdd(&gi_work[GI_W_CLAIM_DEFERRED],1u);
+        return;
+    }
     // Outside this frame's key phase (GI_H_CLAIM_CELLS): left for a later frame.
     let period=gi_claim_period();
     if period>1u && gi_mix(gi_miss_key(base).x)%period!=gi_word(GI_H_FRAME)%period {
@@ -729,7 +857,7 @@ fn gi_resolve_miss(index:u32) {
     // when a secondary cell's gather requested them (gi_gather).
     let band=gi_miss_band(base);
     let generation=select(select(0u,GI_SECONDARY,band<GI_BAND_PIXEL),GI_SECONDARY|GI_TERTIARY,band<GI_BAND_SECONDARY);
-    gi_table[cold+GI_C_STATE]=GI_QUEUED|generation;
+    gi_table[cold+GI_C_STATE]=GI_QUEUED|generation|select(0u,GI_FILL_PARENT,band==GI_BAND_FILL);
     gi_table[cold+GI_C_SEEN]=gi_word(GI_H_FRAME);
     gi_table[cold+GI_C_DEF]=atomicLoad(&gi_work[base]);
     for(var i=0u;i<3u;i+=1u) { gi_table[cold+GI_C_CELL+i]=atomicLoad(&gi_work[base+1u+i]); }
@@ -1477,7 +1605,9 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
                 gi_queue_shade(slot);
                 // A cell made for a gather's hit takes GI_H_HIT_GATHERS (U-RTVIS: the fan-out).
                 let hit_made=(gi_table[cold+GI_C_STATE]&GI_SECONDARY)!=0u && gi_word(GI_H_HIT_GATHERS)!=0u;
-                if all_known { gi_schedule(slot,select(gi_word(GI_H_GATHERS),gi_word(GI_H_HIT_GATHERS),hit_made)); }
+                // First fill's parent cells only stand in while finer cells are created: one gather.
+                let parent=(gi_table[cold+GI_C_STATE]&GI_FILL_PARENT)!=0u;
+                if all_known { gi_schedule(slot,select(select(gi_word(GI_H_GATHERS),gi_word(GI_H_HIT_GATHERS),hit_made),1u,parent)); }
             }
         }
         // Lane 0 of each cell has read its bits before the next cells clear them.
@@ -1833,6 +1963,98 @@ var<workgroup> gi_wg_rays:atomic<u32>;
 var<workgroup> gi_wg_live:u32;
 var<private> gi_gather_sh:array<vec3<f32>,4>;
 // The gather period P for `count` queued cells (1 without a cap).
+// ---- gather ray budget ----
+// A gather's cost is its rays, and they differ by cell: the fixed directions not open to the
+// sky (under the stride), plus GI_H_NEAR_RAYS + 1 aimed rays for every local light in range
+// above the cell's horizon (gi_near.wgsl). Cells near lamps and the fire cost two to three times
+// the others, and a cut's queue ends with them, so a budget counted in cells left the late
+// refill frames 2-3x dearer than the early ones. With GI_H_GATHER_RAYS set, a frame gathers the
+// queued cells whose estimated rays fit that budget, in a fixed order taken from each cell
+// alone: the parents first fill made, then the cells pixels read by lattice class (as the
+// claim), then the rest, which keep a quarter of the budget; a per-frame hash spreads each
+// order over 16 bins, so an order larger than the budget is taken in a different subset each
+// frame. The first non-empty bin always passes, so the queue always moves.
+const GI_H_GATHER_RAYS:u32=53u;
+const GI_GATHER_SPREAD:u32=16u;
+const GI_GATHER_REST_BINS:u32=5u*GI_GATHER_SPREAD;
+fn gi_gather_rays(slot:u32) -> u32 {
+    let cold=gi_cold(slot);
+    let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
+    let lanes=select(select(0x11111111u,0x55555555u,stride==2u),0xffffffffu,stride==1u);
+    var rays=0u;
+    for(var w=0u;w<GI_DIRECTIONS/32u;w+=1u) { rays+=countOneBits(~gi_table[cold+GI_C_BITS+w]&lanes); }
+    let aimed=gi_word(GI_H_NEAR_RAYS);
+    if aimed==0u { return rays; }
+    let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
+    let q=gi_point(cold);
+    for(var l=0u;l<lighting.count;l+=1u) {
+        let near=gi_near_light(l,q,n);
+        if near.w>0.0 && gi_near_in_range(l,near.w) { rays+=aimed+1u; }
+    }
+    return rays;
+}
+fn gi_gather_bin(slot:u32) -> u32 {
+    let cold=gi_cold(slot);
+    var order=5u;
+    if (gi_table[cold+GI_C_STATE]&GI_FILL_PARENT)!=0u {
+        order=0u;
+    } else if gi_table[cold+GI_C_SEEN]==gi_word(GI_H_FRAME) {
+        let c=vec3<u32>(gi_table[cold+GI_C_CELL],gi_table[cold+GI_C_CELL+1u],gi_table[cold+GI_C_CELL+2u]);
+        order=1u+gi_fill_class(gi_table[cold+GI_C_DEF]>>8u,c);
+    }
+    return order*GI_GATHER_SPREAD+(gi_mix(slot^(gi_word(GI_H_FRAME)*0x9e3779b9u))>>28u);
+}
+fn gi_gather_queued(slot:u32) -> bool {
+    let state=gi_table[gi_cold(slot)+GI_C_STATE];
+    return gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
+}
+// Each queued cell's bin is kept in its claim word (free until the claim rounds after the
+// gathers) and read back once by the gather pass (gi_gather_take), which clears it: gathers
+// stamp the cells they hit as seen, so a bin computed again during the pass could move a cell
+// into an earlier bin than it was counted in.
+@compute @workgroup_size(64) fn gi_gather_count(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+    if gi_word(GI_H_GATHER_RAYS)==0u { return; }
+    let count=min(atomicLoad(&gi_work[gi_frame.bounce.x]),gi_frame.offsets.x);
+    for(var i=id.x;i<count;i+=groups.x*64u) {
+        let slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+i]);
+        if !gi_gather_queued(slot) { continue; }
+        let bin=gi_gather_bin(slot);
+        atomicStore(&gi_work[GI_W_CLAIMS+slot],bin+1u);
+        atomicAdd(&gi_work[GI_W_GATHER_HIST+bin],gi_gather_rays(slot));
+    }
+}
+@compute @workgroup_size(1) fn gi_gather_select() {
+    let budget=gi_word(GI_H_GATHER_RAYS);
+    if budget==0u { return; }
+    var wanted=0u;
+    for(var b=GI_GATHER_REST_BINS;b<GI_GATHER_BINS;b+=1u) { wanted+=atomicLoad(&gi_work[GI_W_GATHER_HIST+b]); }
+    let pixel_budget=budget-min(wanted,budget/4u);
+    var total=0u;
+    for(var b=0u;b<GI_GATHER_REST_BINS;b+=1u) {
+        let next=total+atomicLoad(&gi_work[GI_W_GATHER_HIST+b]);
+        if total!=0u && next>pixel_budget { atomicStore(&gi_work[GI_W_GATHER_CUT],b+1u); break; }
+        total=next;
+    }
+    let rest_budget=budget-min(total,budget);
+    var rest=0u;
+    for(var b=GI_GATHER_REST_BINS;b<GI_GATHER_BINS;b+=1u) {
+        let next=rest+atomicLoad(&gi_work[GI_W_GATHER_HIST+b]);
+        if rest!=0u && next>rest_budget { atomicStore(&gi_work[GI_W_GATHER_CUT+1u],b+1u); return; }
+        rest=next;
+    }
+}
+// Reads and clears the bin gi_gather_count kept for a queue entry; whether the budget admits
+// it. Called once per queue entry by the gather pass, queued or not.
+var<private> gi_ray_admitted:bool;
+fn gi_gather_take(slot:u32) {
+    gi_ray_admitted=true;
+    if gi_word(GI_H_GATHER_RAYS)==0u { return; }
+    let kept=atomicExchange(&gi_work[GI_W_CLAIMS+slot],0u);
+    if kept==0u { gi_ray_admitted=false; return; }
+    let bin=kept-1u;
+    let cut=atomicLoad(&gi_work[GI_W_GATHER_CUT+select(0u,1u,bin>=GI_GATHER_REST_BINS)]);
+    gi_ray_admitted=cut==0u || bin+1u<cut;
+}
 fn gi_gather_period(count:u32) -> u32 {
     let cap=gi_word(GI_H_GATHER_CELLS);
     var p=1u;
@@ -1852,14 +2074,30 @@ fn gi_gather_period(count:u32) -> u32 {
 // frame (the probe's stamp) rotate over the budget alone, at most GI_H_PIXEL_CELLS of them,
 // and the rest share a quarter of it more: a frame gathers at most 1.25 budgets. A fixed rule
 // on the cell's own state; no cell is ranked against another (W2).
+// With first fill on, the cells pixels read rotate from the last cut (GI_H_FILL_TURN), and
+// the parents first fill made (GI_FILL_PARENT) all come in the first half of the rotation,
+// coarse class 0 first: the lookup fills the bounce of finer cells not yet gathered from them,
+// so the first frames after a cut show softer bounce rather than gathered cells beside
+// ungathered ones.
+const GI_H_FILL_TURN:u32=49u;
+const GI_FILL_PARENT:u32=0x8000u;
+fn gi_fill_rank(slot:u32, period:u32) -> u32 {
+    let cold=gi_cold(slot);
+    if (gi_table[cold+GI_C_STATE]&GI_FILL_PARENT)==0u { return slot%period; }
+    let c=vec3<u32>(gi_table[cold+GI_C_CELL],gi_table[cold+GI_C_CELL+1u],gi_table[cold+GI_C_CELL+2u]);
+    return (gi_fill_class(gi_table[cold+GI_C_DEF]>>8u,c)*period+gi_mix(slot)%period)/8u;
+}
 fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
+    if gi_word(GI_H_GATHER_RAYS)!=0u { return gi_ray_admitted; }
     let frame=gi_word(GI_H_FRAME);
     let pixels=gi_word(GI_H_PIXEL_CELLS);
     let cap=gi_word(GI_H_GATHER_CELLS);
     if pixels==0u || cap==0u || period<=1u { return slot%period==frame%period; }
     let seen=min(period,max((min(pixels,count)+cap-1u)/cap,1u));
+    let pixel=gi_table[gi_cold(slot)+GI_C_SEEN]==frame;
+    if pixel && gi_word(GI_H_FILL_CELLS)!=0u { return gi_fill_rank(slot,seen)==gi_word(GI_H_FILL_TURN)%seen; }
     if seen==period { return slot%period==frame%period; }
-    if gi_table[gi_cold(slot)+GI_C_SEEN]==frame { return slot%seen==frame%seen; }
+    if pixel { return slot%seen==frame%seen; }
     let rest=clamp((4u*count+cap-1u)/cap,1u,GI_GATHER_PERIOD_MAX);
     return slot%rest==frame%rest;
 }

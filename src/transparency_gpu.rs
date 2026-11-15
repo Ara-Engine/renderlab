@@ -326,7 +326,7 @@ struct Gpu {
     lobe_counts: Owned<wgpu::Buffer>,
     lobe_args: Owned<wgpu::Buffer>,
     lobe_dispatch: Owned<wgpu::ComputePipeline>,
-    lobe_dispatch_group: Owned<wgpu::BindGroup>,
+    lobe_dispatch_bindings: Owned<wgpu::BindGroupLayout>,
     lobe_clear_bindings: Owned<wgpu::BindGroupLayout>,
     lobe_clear: Owned<wgpu::ComputePipeline>,
 }
@@ -661,6 +661,22 @@ fn entry(
         count: None,
     }
 }
+/// Glass reflections over each glass run's own screen rectangle (transparency_bounds.rs) in one
+/// direct dispatch, instead of an occlusion-query raster pass choosing between a full-view trace
+/// and a full-view clear. Outside the rectangle no lobe of the run was drawn, and inside it the
+/// kernel writes exactly what the full-view dispatch wrote (a rejected lobe's trace returns zero,
+/// as the clear did). `RENDERLAB_TP_RECT_REFLECT=0` keeps the query and the full view.
+fn rect_reflect() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_TP_RECT_REFLECT").map_or(true, |v| v != "0"))
+}
+/// One rectangle a dynamic-offset slot (the uniform offset alignment).
+const RECT_SLOT: u64 = 256;
+/// A glass run whose rectangle holds at most this many pixels traces it directly: its occlusion
+/// query (a second raster pass of the run) would cost more than the kernel launched over a
+/// rectangle with no traced lobe. Larger runs keep the query, so a run whose lobes the trace
+/// rejects (Outpost's tarp) takes only the clear. Both choices write the same values.
+const RECT_DIRECT_PIXELS: u64 = 1 << 17;
 fn uniform(dynamic: bool, size: u64) -> wgpu::BindingType {
     wgpu::BindingType::Buffer {
         ty: wgpu::BufferBindingType::Uniform,
@@ -1172,6 +1188,7 @@ impl Renderer {
                 entry(30, COMPUTE, uniform(false, FRAME_BYTES)),
                 entry(56, COMPUTE, storage(true)),
                 entry(57, COMPUTE, storage(false)),
+                entry(59, COMPUTE, uniform(true, 16)),
             ],
         );
         let dispatch_layout = self.tp_pipeline_layout("TP lobe dispatch", &[&dispatch_bindings]);
@@ -1185,35 +1202,20 @@ impl Renderer {
             &dispatch_module,
             "tp_lobe_dispatch",
         );
-        let lobe_dispatch_group = self.ledger.own(
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("TP lobe dispatch"),
-                layout: &dispatch_bindings,
-                entries: &[
-                    frame_entry(&frame),
-                    wgpu::BindGroupEntry {
-                        binding: 56,
-                        resource: lobe_counts.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 57,
-                        resource: lobe_args.as_entire_binding(),
-                    },
-                ],
-            }),
-            ResourceKind::BindGroup,
-        );
         let lobe_clear_bindings = self.tp_layout(
             "TP zero reflection",
-            &[entry(
-                58,
-                COMPUTE,
-                wgpu::BindingType::StorageTexture {
-                    access: wgpu::StorageTextureAccess::WriteOnly,
-                    format: wgpu::TextureFormat::Rgba16Float,
-                    view_dimension: wgpu::TextureViewDimension::D2,
-                },
-            )],
+            &[
+                entry(
+                    58,
+                    COMPUTE,
+                    wgpu::BindingType::StorageTexture {
+                        access: wgpu::StorageTextureAccess::WriteOnly,
+                        format: wgpu::TextureFormat::Rgba16Float,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                    },
+                ),
+                entry(59, COMPUTE, uniform(true, 16)),
+            ],
         );
         let clear_layout = self.tp_pipeline_layout("TP zero reflection", &[&lobe_clear_bindings]);
         let clear_module = self.tp_module("TP zero reflection", section("TP_LOBE_CLEAR"));
@@ -1228,7 +1230,7 @@ impl Renderer {
             lobe_counts,
             lobe_args,
             lobe_dispatch,
-            lobe_dispatch_group,
+            lobe_dispatch_bindings: dispatch_bindings,
             lobe_clear_bindings,
             lobe_clear,
             aa_resolve_bindings,
@@ -2546,6 +2548,19 @@ impl Renderer {
                 entries: &glass_entries,
             })
         });
+        // The reflection dispatch's rectangles: slot 0 the whole view, slot 1 + i the glass run
+        // that draw i begins (written as the runs are met below).
+        let reflect_rects = reflect.then(|| {
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("TP2 glass reflection rectangles"),
+                size: (transparent.len() as u64 + 1) * RECT_SLOT,
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            let full = [0u32, 0, size.width, size.height];
+            self.queue.write_buffer(&buffer, 0, &full.map(u32::to_ne_bytes).concat());
+            buffer
+        });
         // TP2: reflection hits use the existing opaque geometry, materials and R1 shader.
         let reflection_group = reflect.then(|| {
             let reflection = self.view.transparency_reflections.as_ref().unwrap();
@@ -2595,18 +2610,57 @@ impl Renderer {
                         binding: 38,
                         resource: reflection.program_slots.as_entire_binding(),
                     },
+                    wgpu::BindGroupEntry {
+                        binding: 39,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: reflect_rects.as_ref().unwrap(),
+                            offset: 0,
+                            size: wgpu::BufferSize::new(16),
+                        }),
+                    },
                 ],
             })
         });
+        fn rect_entry(buffer: &wgpu::Buffer) -> wgpu::BindGroupEntry<'_> {
+            wgpu::BindGroupEntry {
+                binding: 59,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer,
+                    offset: 0,
+                    size: wgpu::BufferSize::new(16),
+                }),
+            }
+        }
         let reflection_clear_group = reflect.then(|| {
             let reflection = self.view.transparency_reflections.as_ref().unwrap();
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("TP zero reflection"),
                 layout: &gpu.lobe_clear_bindings,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 58,
-                    resource: wgpu::BindingResource::TextureView(&reflection.radiance.view),
-                }],
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 58,
+                        resource: wgpu::BindingResource::TextureView(&reflection.radiance.view),
+                    },
+                    rect_entry(reflect_rects.as_ref().unwrap()),
+                ],
+            })
+        });
+        let lobe_dispatch_group = reflect.then(|| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("TP lobe dispatch"),
+                layout: &gpu.lobe_dispatch_bindings,
+                entries: &[
+                    frame_entry(&gpu.frame),
+                    wgpu::BindGroupEntry {
+                        binding: 56,
+                        resource: gpu.lobe_counts.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 57,
+                        resource: gpu.lobe_args.as_entire_binding(),
+                    },
+                    rect_entry(reflect_rects.as_ref().unwrap()),
+                ],
             })
         });
         let draw_groups: Vec<wgpu::BindGroup> = self
@@ -2921,7 +2975,20 @@ impl Renderer {
                         });
                         m.counts.nonreflective_lobe_runs += u64::from(!reflective);
                     }
-                    for query in 0..(if bounded { 2 } else { 1 }) {
+                    // The run's rectangle: its draws' conservative bounds.
+                    let run_rect = run.iter().map(|&j| draw_rects[j]).reduce(union).unwrap_or([0; 4]);
+                    let rect_mode = bounded && rect_reflect();
+                    let direct = rect_mode && measurement::area(run_rect) <= RECT_DIRECT_PIXELS;
+                    let queried = bounded && !direct;
+                    let slot = if rect_mode { (*first as u64 + 1) * RECT_SLOT } else { 0 };
+                    if rect_mode {
+                        self.queue.write_buffer(
+                            reflect_rects.as_ref().unwrap(),
+                            slot,
+                            &run_rect.map(u32::to_ne_bytes).concat(),
+                        );
+                    }
+                    for query in 0..(if queried { 2 } else { 1 }) {
                         let query = query == 1;
                         let attachments = [
                             &reflection.position.view,
@@ -2996,7 +3063,7 @@ impl Renderer {
                             pass.end_occlusion_query();
                         }
                     }
-                    if bounded {
+                    if queried {
                         encoder.resolve_query_set(
                             &gpu.lobe_queries,
                             *first as u32..*first as u32 + 1,
@@ -3006,7 +3073,7 @@ impl Renderer {
                         let mut pass =
                             encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
                         pass.set_pipeline(&gpu.lobe_dispatch);
-                        pass.set_bind_group(0, &*gpu.lobe_dispatch_group, &[]);
+                        pass.set_bind_group(0, lobe_dispatch_group.as_ref().unwrap(), &[slot as u32]);
                         pass.dispatch_workgroups(1, 1, 1);
                     }
                     part!("transparency.reflection");
@@ -3026,17 +3093,23 @@ impl Renderer {
                         .unwrap()
                         .shading_groups()
                         .unwrap();
-                    if bounded {
+                    if queried {
                         pass.set_pipeline(&gpu.lobe_clear);
-                        pass.set_bind_group(0, reflection_clear_group.as_ref().unwrap(), &[]);
+                        pass.set_bind_group(0, reflection_clear_group.as_ref().unwrap(), &[slot as u32]);
                         pass.dispatch_workgroups_indirect(&gpu.lobe_args, 12);
                     }
                     pass.set_pipeline(&reflection.pipeline);
-                    pass.set_bind_group(0, group, &[]);
+                    pass.set_bind_group(0, group, &[slot as u32]);
                     pass.set_bind_group(1, arrays, &[]);
                     pass.set_bind_group(2, materials, &[]);
                     pass.set_bind_group(3, self.lighting.bind(), &[]);
-                    if bounded {
+                    if direct {
+                        let width = run_rect[2].saturating_sub(run_rect[0]);
+                        let height = run_rect[3].saturating_sub(run_rect[1]);
+                        if width > 0 && height > 0 {
+                            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+                        }
+                    } else if bounded {
                         pass.dispatch_workgroups_indirect(&gpu.lobe_args, 0);
                     } else {
                         pass.dispatch_workgroups(

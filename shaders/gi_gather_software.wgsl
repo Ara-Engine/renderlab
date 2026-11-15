@@ -29,6 +29,7 @@ var<workgroup> gi_drain_base:u32;
         var mine=0u;
         if lane<width && at<count {
             slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+at]);
+            gi_gather_take(slot);
             let cold=gi_cold(slot);
             let state=gi_table[cold+GI_C_STATE];
             let queued=gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u
