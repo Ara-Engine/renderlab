@@ -310,7 +310,7 @@ fn with_trace_count(source: String) -> String {
             "                    let x=triangles+(start+k)*3u;\n",
             "                    let x=triangles+(start+k)*3u;rs_count[5]+=1u;\n",
         ),
-        ("        let n=(head.y>>2u)+item*4u;\n", "        let n=(head.y>>2u)+item*4u;rs_count[0]+=1u;\n"),
+        ("        let n=(head.y>>2u)+item*RS_TOP_NODE;\n", "        let n=(head.y>>2u)+item*RS_TOP_NODE;rs_count[0]+=1u;\n"),
         (
             "        let traced=rl_cast(origin,d,epsilon);\n",
             "        let before=rs_steps();\n        let traced=rl_cast(origin,d,epsilon);\n        if traced.record.x==0u {rs_count[2]+=1u;} else {rs_count[1]+=1u;}\n        let steps=rs_steps()-before;\n        rs_tail=vec3<u32>(max(rs_tail.x,steps),rs_tail.y+select(0u,1u,steps>256u),rs_tail.z+select(0u,1u,steps>1024u));\n",
@@ -733,7 +733,7 @@ const SOFTWARE_REFLECTION_QUERY: &str = "var query:ray_query;\n";
 /// reconstruction, decals and program shading, with no ray queries.
 fn software_reflection_api() -> String {
     let software = if crate::reflection_software::bvh4_enabled() {
-        let bvh4 = include_str!("../shaders/reflections_software_bvh4.wgsl");
+        let bvh4 = &crate::instance_bvh::shader_text(include_str!("../shaders/reflections_software_bvh4.wgsl"));
         if rs_order_old() { with_old_child_order(bvh4) } else { bvh4.to_owned() }
     } else {
         SOFTWARE_REFLECTION_API.to_owned()
@@ -778,7 +778,10 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
     {
         return text.into();
     }
-    let _ = name;
+    // The software rays' top level (src/instance_bvh.rs) selects its traversal here.
+    if name == "gi_rays_software.wgsl" {
+        return crate::instance_bvh::shader_text(builtin).into();
+    }
     builtin.into()
 }
 fn indirect_api() -> String {
