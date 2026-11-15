@@ -152,8 +152,13 @@ const GI_RAY_ITEMS:u32=2097152u;
 const GI_W_FILL_HIST:u32=48u;
 const GI_FILL_BINS:u32=112u;
 const GI_W_FILL_CUT:u32=240u;
+// Gather ray budget (gi_gather_count): this frame's estimated gather rays per admission bin,
+// then 1 + the first bin left for a later frame, for pixels' bins and (the next word) the rest.
+const GI_W_GATHER_HIST:u32=256u;
+const GI_GATHER_BINS:u32=96u;
+const GI_W_GATHER_CUT:u32=352u;
 // Per-slot claim words, after the counters (src/gi_cache.rs COUNTER_WORDS).
-const GI_W_CLAIMS:u32=256u;
+const GI_W_CLAIMS:u32=384u;
 // A miss: definition (4 words), request-table entry, claimed slot.
 const GI_MISS_WORDS:u32=6u;
 const GI_UNCLAIMED:u32=0xffffffffu;
@@ -1939,22 +1944,87 @@ var<workgroup> gi_wg_rays:atomic<u32>;
 var<workgroup> gi_wg_live:u32;
 var<private> gi_gather_sh:array<vec3<f32>,4>;
 // The gather period P for `count` queued cells (1 without a cap).
-// First fill's refill budget (GI_H_FILL_LEFT, the frames left until the refill should have
-// drained, from 40 after a cut down to 8): the queue spread evenly over those frames, from
-// GI_H_GATHER_CELLS up to the full budget (GI_H_FILL_FULL), never above it. The cut's gathers
-// then cost about the same every frame and finish about when the full budget would, instead
-// of the full budget from the first frame or a fixed lower one that leaves the queue running
-// long after the cut.
-const GI_H_FILL_LEFT:u32=51u;
-const GI_H_FILL_FULL:u32=52u;
-fn gi_gather_cap(count:u32) -> u32 {
-    let cap=gi_word(GI_H_GATHER_CELLS);
-    let left=gi_word(GI_H_FILL_LEFT);
-    if left==0u || cap==0u { return cap; }
-    return clamp((count+left-1u)/left,cap,max(cap,gi_word(GI_H_FILL_FULL)));
+// ---- gather ray budget ----
+// A gather's cost is its rays, and they differ by cell: the fixed directions not open to the
+// sky (under the stride), plus GI_H_NEAR_RAYS + 1 aimed rays for every local light in range
+// above the cell's horizon (gi_near.wgsl). Cells near lamps and the fire cost two to three times
+// the others, and a cut's queue ends with them, so a budget counted in cells left the late
+// refill frames 2-3x dearer than the early ones. With GI_H_GATHER_RAYS set, a frame gathers the
+// queued cells whose estimated rays fit that budget, in a fixed order taken from each cell
+// alone: the parents first fill made, then the cells pixels read by lattice class (as the
+// claim), then the rest, which keep a quarter of the budget; a per-frame hash spreads each
+// order over 16 bins, so an order larger than the budget is taken in a different subset each
+// frame. The first non-empty bin always passes, so the queue always moves.
+const GI_H_GATHER_RAYS:u32=53u;
+const GI_GATHER_SPREAD:u32=16u;
+const GI_GATHER_REST_BINS:u32=5u*GI_GATHER_SPREAD;
+fn gi_gather_rays(slot:u32) -> u32 {
+    let cold=gi_cold(slot);
+    let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
+    let lanes=select(select(0x11111111u,0x55555555u,stride==2u),0xffffffffu,stride==1u);
+    var rays=0u;
+    for(var w=0u;w<GI_DIRECTIONS/32u;w+=1u) { rays+=countOneBits(~gi_table[cold+GI_C_BITS+w]&lanes); }
+    let aimed=gi_word(GI_H_NEAR_RAYS);
+    if aimed==0u { return rays; }
+    let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
+    let q=gi_point(cold);
+    for(var l=0u;l<lighting.count;l+=1u) {
+        let near=gi_near_light(l,q,n);
+        if near.w>0.0 && gi_near_in_range(l,near.w) { rays+=aimed+1u; }
+    }
+    return rays;
+}
+fn gi_gather_bin(slot:u32) -> u32 {
+    let cold=gi_cold(slot);
+    var order=5u;
+    if (gi_table[cold+GI_C_STATE]&GI_FILL_PARENT)!=0u {
+        order=0u;
+    } else if gi_table[cold+GI_C_SEEN]==gi_word(GI_H_FRAME) {
+        let c=vec3<u32>(gi_table[cold+GI_C_CELL],gi_table[cold+GI_C_CELL+1u],gi_table[cold+GI_C_CELL+2u]);
+        order=1u+gi_fill_class(gi_table[cold+GI_C_DEF]>>8u,c);
+    }
+    return order*GI_GATHER_SPREAD+(gi_mix(slot^(gi_word(GI_H_FRAME)*0x9e3779b9u))>>28u);
+}
+fn gi_gather_queued(slot:u32) -> bool {
+    let state=gi_table[gi_cold(slot)+GI_C_STATE];
+    return gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
+}
+@compute @workgroup_size(64) fn gi_gather_count(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+    if gi_word(GI_H_GATHER_RAYS)==0u { return; }
+    let count=min(atomicLoad(&gi_work[gi_frame.bounce.x]),gi_frame.offsets.x);
+    for(var i=id.x;i<count;i+=groups.x*64u) {
+        let slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+i]);
+        if !gi_gather_queued(slot) { continue; }
+        atomicAdd(&gi_work[GI_W_GATHER_HIST+gi_gather_bin(slot)],gi_gather_rays(slot));
+    }
+}
+@compute @workgroup_size(1) fn gi_gather_select() {
+    let budget=gi_word(GI_H_GATHER_RAYS);
+    if budget==0u { return; }
+    var wanted=0u;
+    for(var b=GI_GATHER_REST_BINS;b<GI_GATHER_BINS;b+=1u) { wanted+=atomicLoad(&gi_work[GI_W_GATHER_HIST+b]); }
+    let pixel_budget=budget-min(wanted,budget/4u);
+    var total=0u;
+    for(var b=0u;b<GI_GATHER_REST_BINS;b+=1u) {
+        let next=total+atomicLoad(&gi_work[GI_W_GATHER_HIST+b]);
+        if total!=0u && next>pixel_budget { atomicStore(&gi_work[GI_W_GATHER_CUT],b+1u); break; }
+        total=next;
+    }
+    let rest_budget=budget-min(total,budget);
+    var rest=0u;
+    for(var b=GI_GATHER_REST_BINS;b<GI_GATHER_BINS;b+=1u) {
+        let next=rest+atomicLoad(&gi_work[GI_W_GATHER_HIST+b]);
+        if rest!=0u && next>rest_budget { atomicStore(&gi_work[GI_W_GATHER_CUT+1u],b+1u); return; }
+        rest=next;
+    }
+}
+fn gi_gather_admitted(slot:u32) -> bool {
+    let bin=gi_gather_bin(slot);
+    let cut=atomicLoad(&gi_work[GI_W_GATHER_CUT+select(0u,1u,bin>=GI_GATHER_REST_BINS)]);
+    return cut==0u || bin+1u<cut;
 }
 fn gi_gather_period(count:u32) -> u32 {
-    let cap=gi_gather_cap(count);
+    let cap=gi_word(GI_H_GATHER_CELLS);
     var p=1u;
     if cap==0u { return p; }
     // Pixels first (below) uses the whole budget: the smallest period that fits, not the next
@@ -1986,9 +2056,10 @@ fn gi_fill_rank(slot:u32, period:u32) -> u32 {
     return (gi_fill_class(gi_table[cold+GI_C_DEF]>>8u,c)*period+gi_mix(slot)%period)/8u;
 }
 fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
+    if gi_word(GI_H_GATHER_RAYS)!=0u { return gi_gather_admitted(slot); }
     let frame=gi_word(GI_H_FRAME);
     let pixels=gi_word(GI_H_PIXEL_CELLS);
-    let cap=gi_gather_cap(count);
+    let cap=gi_word(GI_H_GATHER_CELLS);
     if pixels==0u || cap==0u || period<=1u { return slot%period==frame%period; }
     let seen=min(period,max((min(pixels,count)+cap-1u)/cap,1u));
     let pixel=gi_table[gi_cold(slot)+GI_C_SEEN]==frame;

@@ -36,7 +36,7 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
     (light_cold_offset(directions) + lights.div_ceil(32).max(1)).next_multiple_of(4)
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
-pub(crate) const COUNTER_WORDS: u64 = 256;
+pub(crate) const COUNTER_WORDS: u64 = 384;
 const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
@@ -70,16 +70,17 @@ const GATHER_CELLS: u32 = 32768;
 /// steady cost; hardware rays: 11 ns and 0.12 us.
 const FILL_CELLS_HARDWARE: u32 = 65536;
 const FILL_CELLS_SOFTWARE: u32 = 16384;
-const GATHER_CELLS_SOFTWARE: u32 = 8192;
+/// Software rays' gather budget in estimated rays a frame (first fill). Main's steady frames
+/// spend at most about 230k (Outpost in motion; Glint's flight peaks at 33k), a cut's frames a
+/// median of 880k and up to 1.5M: 2^20 never throttles steady frames and drains a cut at about
+/// main's typical rate, without the peaks.
+const GATHER_RAYS_SOFTWARE: u32 = 1 << 20;
 /// Frames after a cut or clear whose pixels also request their parent cells and whose claims
-/// are capped (first fill), and by which software gathers should have drained the refill's
-/// queue (spread evenly over the frames left, never fewer than FILL_GATHER_LAST).
+/// are capped (first fill).
 const FILL_PARENT_FRAMES: u32 = 32;
 /// Frames after a cut or clear whose claims stay capped: past the parents' window, so the
 /// cells deferred until then are not all created on the frame the cap ends.
 const FILL_CLAIM_FRAMES: u32 = 64;
-const FILL_GATHER_FRAMES: u32 = 40;
-const FILL_GATHER_LAST: u32 = 8;
 fn first_fill_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIRST_FILL").map_or(true, |v| v != "0"))
@@ -748,6 +749,8 @@ struct Pipelines {
     gather: Owned<wgpu::ComputePipeline>,
     fill_count: Owned<wgpu::ComputePipeline>,
     fill_select: Owned<wgpu::ComputePipeline>,
+    gather_count: Owned<wgpu::ComputePipeline>,
+    gather_select: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
     filter: Owned<wgpu::ComputePipeline>,
 }
@@ -1193,15 +1196,14 @@ impl Planner {
         let cut_window = s.cut_gather_ms > 0.0 && self.since_cut < CUT_GATHER_FRAMES;
         let per_ms = if software { GATHERS_PER_MS_SOFTWARE } else { GATHERS_PER_MS_HARDWARE };
         // First fill caps a frame's new cells for FILL_CLAIM_FRAMES after a cut or clear
-        // (unless claims are set explicitly), and software rays' gathers follow the queue
-        // between GATHER_CELLS_SOFTWARE and GATHER_CELLS for FILL_GATHER_FRAMES. Steady frames
-        // keep main's uncapped claims and full gather budget.
+        // (unless claims are set explicitly); steady frames keep main's uncapped claims.
+        // Software rays' gathers are held to GATHER_RAYS_SOFTWARE estimated rays a frame
+        // instead of a cell count (shaders/gi_cache.wgsl gi_gather_rays).
         let since_fill = since_clear.min(self.since_cut);
         let fill = first_fill_on() && s.claim_cells == u32::MAX && since_fill < FILL_CLAIM_FRAMES;
-        let fill_gathers = first_fill_on() && software && since_fill < FILL_GATHER_FRAMES;
+        let ray_budget = first_fill_on() && software && s.gather_cells == 0 && !cut_window;
         header[20] = match s.gather_cells {
             _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
-            0 if fill_gathers => GATHER_CELLS_SOFTWARE,
             0 => GATHER_CELLS,
             u32::MAX => 0,
             cells => cells,
@@ -1249,15 +1251,7 @@ impl Planner {
             n => n,
         };
         header[50] = u32::from(fill && since_fill < FILL_PARENT_FRAMES);
-        // The refill's gathers follow the queue: spread over the frames left until
-        // FILL_GATHER_FRAMES after the cut (at least FILL_GATHER_LAST), at least
-        // GATHER_CELLS_SOFTWARE a frame (shaders/gi_cache.wgsl gi_gather_cap).
-        header[51] = if fill_gathers && header[20] == GATHER_CELLS_SOFTWARE {
-            (FILL_GATHER_FRAMES - since_fill).max(FILL_GATHER_LAST)
-        } else {
-            0
-        };
-        header[52] = GATHER_CELLS;
+        header[53] = if ray_budget { GATHER_RAYS_SOFTWARE } else { 0 };
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {
@@ -2876,6 +2870,8 @@ impl Renderer {
             ),
             fill_count: compute("gi_fill_count", main),
             fill_select: compute("gi_fill_select", main),
+            gather_count: compute("gi_gather_count", main),
+            gather_select: compute("gi_gather_select", main),
             light: compute("gi_light", main),
             filter: compute("gi_filter", main),
         };
@@ -3694,6 +3690,9 @@ impl GiState {
         }
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
+            // The gather ray budget's admission (no-ops without it).
+            main_pass(encoder, "indirect gather count", &p.gather_count, u32::MAX, grid);
+            main_pass(encoder, "indirect gather select", &p.gather_select, u32::MAX, grid.map(|_| [1, 1]));
             if let Some(priority) = &p.priority {
                 if self.priority_hold {
                     main_pass(encoder,"indirect gather hold",&priority.hold,b,grid);
