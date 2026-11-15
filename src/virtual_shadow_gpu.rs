@@ -81,9 +81,10 @@ pub(crate) fn fog_coarse_on() -> bool {
     *ON.get_or_init(|| std::env::var("RENDERLAB_FOG_COARSE").map_or(true, |v| v.trim() != "0"))
 }
 /// The fog map's first pool (pages; it grows like the sparse clipmap's) and its per-frame
-/// raster budget, so a cut or a moved sun spreads the redraw over frames.
-const FOG_POOL_START: u32 = 128;
-const FOG_BUDGET: u32 = 16;
+/// raster budget. One level draws a frame (WGSL `vsm_one_level`): a coarse page holds most of
+/// the scene's casters, so a cut or a moved sun spreads the redraw over the levels' frames.
+const FOG_POOL_START: u32 = 256;
+const FOG_BUDGET: u32 = 64;
 /// Whether the sparse clipmap is on (`RENDERLAB_VSM_SPARSE=1` turns it on; off by default).
 fn sparse_switch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2540,52 +2541,35 @@ impl Renderer {
         }
         fogprof::mark(3, &mut prof_t); // FOGPROF
         // The fog map's page requests, from the CPU: level i serves the fog cells whose width is
-        // its texel to the next level's (the radial distance band where `level_of` picks it), and
-        // requests the window pages under that band's slice of the view frustum (its corner, edge
-        // and centre rays at the band's two distances, in light-space xy).
+        // its texel to the next level's (the radial distances where `level_of` picks it). Every
+        // point within distance d1 of the eye lies within d1 of it in light-space xy, so each
+        // level requests the window pages within its band's far distance, in every direction:
+        // turning the camera requests no new page, and moving it only the rims'.
         state.fog_requests.clear();
         if let Some(f) = fog {
             let n = pages as usize;
             state.fog_requests.resize(MAX_LEVELS * n * n, 0);
-            let to_world = camera.view().inverse().as_dmat4();
-            let (right, up, back) = (
-                to_world.x_axis.truncate(),
-                to_world.y_axis.truncate(),
-                to_world.z_axis.truncate(),
-            );
-            let tan_y = (f64::from(camera.fov_y()) * 0.5).tan();
-            let tan_x = tan_y * f64::from(size.width) / f64::from(size.height);
-            let rays: Vec<glam::DVec3> = (0..9)
-                .map(|k| {
-                    let (sx, sy) = (f64::from(k % 3) - 1.0, f64::from(k / 3) - 1.0);
-                    (-back + right * (sx * tan_x) + up * (sy * tan_y)).normalize()
-                })
-                .collect();
-            let distance_of = |rung: i32| {
-                f64::from(s.finest_texel) * 2f64.powi(rung) / (f.tile * footprint)
-            };
+            let distance_of =
+                |rung: i32| f64::from(s.finest_texel) * 2f64.powi(rung) / (f.tile * footprint);
             for (i, &rung) in rungs.iter().enumerate() {
-                let d0 = if i == 0 { 0.0 } else { distance_of(rung) };
                 let d1 = rungs.get(i + 1).map_or(f.range, |&r| distance_of(r)).min(f.range);
-                if d0 >= d1 {
-                    continue;
-                }
                 let page = f64::from(s.finest_texel) * 2f64.powi(rung) * f64::from(PAGE);
-                let (mut lo, mut hi) = (glam::DVec2::INFINITY, glam::DVec2::NEG_INFINITY);
-                for &d in &[d0, d1] {
-                    for ray in &rays {
-                        let p = eye + *ray * d;
-                        let q = glam::DVec2::new(p.dot(u), p.dot(v)) / page;
-                        lo = lo.min(q);
-                        hi = hi.max(q);
-                    }
-                }
+                // Half a page of margin: cells jitter.
+                let radius = d1 / page + 0.5;
+                let centre = eye_light / page;
                 let origin = cache.origins[i].unwrap();
-                // Half a page of margin: cells jitter and reach past the image edges.
-                let first = [(lo.x - 0.5).floor() as i64, (lo.y - 0.5).floor() as i64];
-                let last = [(hi.x + 0.5).floor() as i64, (hi.y + 0.5).floor() as i64];
+                let first = [(centre.x - radius).floor() as i64, (centre.y - radius).floor() as i64];
+                let last = [(centre.x + radius).floor() as i64, (centre.y + radius).floor() as i64];
                 for y in first[1].max(origin[1])..=last[1].min(origin[1] + pages - 1) {
                     for x in first[0].max(origin[0])..=last[0].min(origin[0] + pages - 1) {
+                        // Pages whose nearest point is beyond the radius serve no cell.
+                        let near = glam::DVec2::new(
+                            centre.x.clamp(x as f64, x as f64 + 1.0),
+                            centre.y.clamp(y as f64, y as f64 + 1.0),
+                        );
+                        if near.distance(centre) > radius {
+                            continue;
+                        }
                         // The toroidal table index of absolute page (x, y).
                         let tx = x.rem_euclid(pages) as usize;
                         let ty = y.rem_euclid(pages) as usize;
@@ -2636,7 +2620,8 @@ impl Renderer {
                 | u32::from(s.peel_own) << 1
                 | s.first_block << 2
                 | u32::from(s.lookup == VirtualLookup::Hybrid) << 8
-                | u32::from(sparse) << 9,
+                | u32::from(sparse) << 9
+                | u32::from(fog.is_some()) << 10,
         ] {
             frame.extend_from_slice(&value.to_ne_bytes());
         }
@@ -3114,12 +3099,12 @@ impl Renderer {
         // N8f: moved casters alone (camera, sun basis, receivers and windows kept) still roll.
         let casters_only = !created && !rects.is_empty() && key == state.key;
         state.page_work = created || !rects.is_empty() || key != state.key;
-        // The fog map keeps working while its budget leaves requested pages undrawn (at most
-        // FOG_BUDGET a frame; two frames more for the readback-free allocation to settle).
+        // The fog map keeps working while requested pages may wait undrawn (one level and at
+        // most FOG_BUDGET pages a frame; two frames more for the allocation to settle).
         if state.fog {
             if state.page_work {
                 let requested = state.fog_requests.iter().filter(|&&w| w != 0).count() as u32;
-                state.fog_pending = requested.div_ceil(FOG_BUDGET) + 2;
+                state.fog_pending = state.levels as u32 + requested.div_ceil(FOG_BUDGET) + 2;
             }
             state.page_work |= state.fog_pending > 0;
             state.fog_pending = state.fog_pending.saturating_sub(1);
@@ -3215,6 +3200,8 @@ impl Renderer {
             };
             self.queue.write_buffer(&r.pool, 0, &words(&[0, 1, 1, 0]));
             self.queue.write_buffer(&r.pool, 20, &words(&[0]));
+            // The fog map's level claim (WGSL `vsm_one_level`).
+            self.queue.write_buffer(&r.pool, 48, &words(&[0]));
             self.queue
                 .write_buffer(&r.pool, 24 + 4 * u64::from(pool_frame & 1), &words(&[0]));
             self.queue.write_buffer(

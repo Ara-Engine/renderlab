@@ -103,6 +103,8 @@ fn vsm_extent(level:u32)->f32 {return f32(vsm.counts.y*VSM_PAGE)*vsm_texel(level
 // that follows the eye keeps every page it still covers. Dense (bit clear): info.zw is zero and
 // the formulas below reduce to the window-relative layout.
 fn vsm_sparse()->bool {return (vsm.misc.w&0x200u)!=0u;}
+// The fog map (src/virtual_shadow_gpu.rs `FogMap`): one level draws a frame (vsm_allocate).
+fn vsm_one_level()->bool {return (vsm.misc.w&0x400u)!=0u;}
 // The page-table index of window-relative page `page` of `level` (per-page arrays: requests,
 // render flags and the state sections).
 fn vsm_vpage(level:u32,page:vec2<u32>)->u32 {
@@ -293,6 +295,15 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     var slot=vsm_state[table+v];
     let moved=slot!=VSM_NONE && vsm_moved(level,page);
     if slot!=VSM_NONE && !moved {return;}
+    // The fog map: the first level with a page to draw claims the frame (pool word 12), so a
+    // cut redraws its levels one a frame; the others wait like pages past the budget.
+    if vsm_one_level() {
+        let claim=atomicCompareExchangeWeak(&vsm_pool[12],0u,level+1u);
+        if !claim.exchanged && claim.old_value!=level+1u {
+            if moved {vsm_state[v]=0u;}
+            return;
+        }
+    }
     if atomicAdd(&vsm_pool[5],1u)>=atomicLoad(&vsm_pool[9]) {
         // Rasterized again next frame (vsm_release frees it).
         if moved {vsm_state[v]=0u;}
