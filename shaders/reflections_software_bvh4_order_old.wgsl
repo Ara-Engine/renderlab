@@ -23,7 +23,7 @@
             }
             for(var c=4u;c>0u;c-=1u) {
                 if distances[c-1u]<=lim && ids[c-1u]!=0xffffffffu {
-                    (*stack)[sp]=ids[c-1u];(*entries)[sp]=distances[c-1u];sp+=1u;
+                    (*stack)[sp]=ids[c-1u];sp+=1u;
                 }
             }
             break;
