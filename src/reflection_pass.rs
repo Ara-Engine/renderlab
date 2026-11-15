@@ -29,7 +29,7 @@ pub(super) const STATS: u32 = 60;
 pub(super) const ROOM_STATS: u32 = 69;
 /// The counters: the trace's four words, the Mac thread's S4a (4, 5), the receivers that did not
 /// fit the room (6), and measurement runs' low-weight strata and receivers (7-10).
-const STATS_BYTES: u64 = 192;
+const STATS_BYTES: u64 = 320;
 /// With the composite, R holds every glossy pixel's strata (this many slots a row) and H one
 /// record a slot: the room. It starts at ROOM_START slots and grows to the content (the frame's
 /// requested strata, summed at shading, read back a frame or two late) up to ROOM_PER_PIXEL a
@@ -642,7 +642,7 @@ impl Renderer {
         if self.frames == PROBE_FRAME + 1 && probe.is_none() {
             let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("reflection probe"),
-                size: 256,
+                size: (HITS_HEADER + STATS_BYTES).max(256),
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -898,7 +898,7 @@ impl Renderer {
                     let word = |i: usize| u32::from_ne_bytes(data[4 * i..4 * i + 4].try_into().unwrap());
                     requested = requested.max(u64::from(word(2)));
                     if screen::debug_path().is_some() {
-                        screen::write_counts(r.frame.load(SeqCst), &std::array::from_fn::<_,32,_>(|i| word(16+i)));
+                        screen::write_counts(r.frame.load(SeqCst), &std::array::from_fn::<_,64,_>(|i| word(16+i)));
                     }
                     if let Some(path) = room_log() {
                         use std::io::Write;

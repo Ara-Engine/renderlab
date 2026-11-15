@@ -198,7 +198,7 @@ fn rl_screen_hit(origin:vec3<f32>,direction:vec3<f32>,epsilon:f32,cone:vec2<f32>
 
 // Debug oracle: uses the fallback result already traced by the normal BVH pass.
 // No additional rays. This call is absent from the shipping shader.
-fn rl_screen_reference(record:vec4<u32>,origin:vec3<f32>,direction:vec3<f32>,t:f32) {
+fn rl_screen_reference(record:vec4<u32>,origin:vec3<f32>,direction:vec3<f32>,t:f32,reason:u32) {
     if record.x==0u {rl_screen_count(31u);return;}
     let clip=rl_screen_frame.current*vec4<f32>(origin+direction*t,1.0);
     if clip.w<=0.0 {return;}
@@ -207,5 +207,5 @@ fn rl_screen_reference(record:vec4<u32>,origin:vec3<f32>,direction:vec3<f32>,t:f
     rl_screen_count(18u);
     let pixel=vec2<i32>(uv*vec2<f32>(rl_screen_frame.flags.yz));
     let key=textureLoad(rl_screen_depths,pixel,0).yz;
-    if all(key==record.xy) {rl_screen_count(19u);} else {rl_screen_count(20u);}
+    if all(key==record.xy) {rl_screen_count(19u);rl_screen_count(32u+reason);} else {rl_screen_count(20u);}
 }
