@@ -92,6 +92,12 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
         kernel = kernel.replace("gi_prepare(rx_input);", "");
     }
     composed.source.push_str(&kernel);
+    // `RENDERLAB_GI_RX_BATCH=0`: gi_sample's corner finds one by one (gi_api.wgsl GI_BATCH_FINDS).
+    if std::env::var("RENDERLAB_GI_RX_BATCH").as_deref() == Ok("0") {
+        composed.source = composed
+            .source
+            .replace("const GI_BATCH_FINDS:bool=true;", "const GI_BATCH_FINDS:bool=false;");
+    }
     composed
 }
 pub(crate) fn shade_source(source: String, eligible: bool, specular: bool) -> String {
