@@ -383,12 +383,26 @@ pub(crate) fn pass_block(composed: Composed) -> Composed {
     let Composed { source, program } = composed;
     let (engine, rest) = source.split_at(program.start);
     assert_eq!(engine.matches(PASS_GATE[0]).count(), 1, "reflection pass gate seam");
-    let engine = engine.replacen(PASS_GATE[0], PASS_GATE[1], 1);
+    let gate = if rl_mirror_list() {
+        PASS_GATE[1].replacen("if RL_PASS && !mirror && ", "if RL_PASS && ", 1)
+    } else {
+        PASS_GATE[1].to_owned()
+    };
+    let engine = engine.replacen(PASS_GATE[0], &gate, 1);
     let start = engine.len();
     Composed {
         source: format!("{engine}{rest}"),
         program: start..start + program.len(),
     }
+}
+/// Whether mirror receivers (roughness under reflections.wgsl `RL_MIRROR`) join the glossy list
+/// like glossy ones, as one-stratum entries, so their ray and hit shading run in the trace pass
+/// instead of inside the shading kernel (where they were most of its reflection cost). At that
+/// roughness the trace's lobe sample is the mirror direction. `RENDERLAB_RL_MIRROR_LIST=0`
+/// keeps them inline.
+pub(crate) fn rl_mirror_list() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_MIRROR_LIST").map_or(true, |v| v != "0"))
 }
 fn with_history_block(mut composed: Composed) -> Composed {
     if !rl_history_on() {
