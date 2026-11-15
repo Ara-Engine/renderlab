@@ -14,15 +14,21 @@ use crate::program::{self, Stage};
 /// The line of shaders/program_api.wgsl that each part's module rewrites.
 const ALL_TERMS: &str = "const RL_SHADE_TERMS:u32=0xffffffffu;";
 /// Each part's pass-log name and the RL_TERM_* bits it keeps.
+/// Transmission, textures and the BRDF (bits 4, 16, 32) measured small on the Ara scenes
+/// (2026-11-14) and are left out; their bits still work in `without_terms`.
 pub(crate) const PARTS: [(&str, u32); 7] = [
     ("shading.without_lights", !1),
     ("shading.without_shadows", !2),
-    ("shading.without_transmission", !4),
     ("shading.without_reflections", !8),
-    ("shading.without_textures", !16),
-    ("shading.without_brdf", !32),
+    ("shading.without_environment", !64),
+    ("shading.without_indirect", !128),
+    ("shading.without_atmosphere", !256),
     ("shading.base", 0),
 ];
+/// The early return that leaves out the atmosphere term (RL_TERM_ATMOSPHERE): the colour, as
+/// lean shading returns it without media (program.rs `LEAN_EDITS`).
+const ATMOSPHERE_HEAD: &str = "fn atmosphere_surface(c:vec3<f32>, p:vec3<f32>) -> vec3<f32> {\n";
+const ATMOSPHERE_TERM: u32 = 256;
 
 /// The parts' pipelines for one frame's traced shading: by part, then by the frame's
 /// program (one for a single-program frame, else its list programs in slot order). Kept
@@ -45,7 +51,11 @@ pub(crate) fn wanted() -> bool {
 /// `source` with only the `terms` bits of RL_SHADE_TERMS kept.
 pub(crate) fn without_terms(source: &str, terms: u32) -> String {
     debug_assert_eq!(source.matches(ALL_TERMS).count(), 1);
-    source.replacen(ALL_TERMS, &format!("const RL_SHADE_TERMS:u32={terms}u;"), 1)
+    let source = source.replacen(ALL_TERMS, &format!("const RL_SHADE_TERMS:u32={terms}u;"), 1);
+    if terms & ATMOSPHERE_TERM != 0 || source.matches(ATMOSPHERE_HEAD).count() != 1 {
+        return source;
+    }
+    source.replacen(ATMOSPHERE_HEAD, &format!("{ATMOSPHERE_HEAD}    if true {{ return c; }}\n"), 1)
 }
 
 impl Renderer {
@@ -80,11 +90,13 @@ impl Renderer {
             .map(|&id| {
                 let source = &self.program_slot(id).source;
                 let parameters = program::declares_parameters(source);
-                if list {
+                // As the frame's own modules are built (program_gpu.rs): with the reflection
+                // pass's list block in place of the inline trace where the pass runs.
+                program::with_reflection_history(if list {
                     program::compose_list(&heads[shading], source, stage, parameters)
                 } else {
                     program::compose(&heads[shading], source, stage, parameters)
-                }
+                })
             })
             .collect();
         if self.shade_detail.as_ref().is_some_and(|d| {

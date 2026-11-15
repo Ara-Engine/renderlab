@@ -6,8 +6,11 @@ const BYTES: u64 = 48;
 const SOURCE: &str = include_str!("../shaders/gi_receiver_pass.wgsl");
 const ENTRY_SEAM: &str = "// ---- GI receiver compute entry ----";
 /// Defaults are approved separately for each path after game-scene picture and memory checks.
+/// Both on: without ray hardware the inline lookup ran at the whole shading kernel's register
+/// count, and moving it out also retires the GI sun lookups booked to `sun_shadow`.
+/// `RENDERLAB_GI_PASS=0` restores the inline lookup on either path.
 pub(crate) const RT_DEFAULT: bool = true;
-pub(crate) const NON_RT_DEFAULT: bool = false;
+pub(crate) const NON_RT_DEFAULT: bool = true;
 const HEAD_MARK: &str = "\n// renderlab: this renderer prepares GI receivers before shading\n";
 fn env_switch(value: Option<&str>) -> Option<bool> {
     match value {
@@ -74,6 +77,13 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     composed
         .source
         .push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
+    // Measurement only (`RENDERLAB_GI_RX_PROBE=nolookup`): no cache lookup, so the pass costs
+    // its decode and the record's stores alone. Shading then sees no GI value.
+    if std::env::var("RENDERLAB_GI_RX_PROBE").as_deref() == Ok("nolookup") {
+        composed.source = composed
+            .source
+            .replacen("    gi_prepare(input);\n    let at=", "    let at=", 1);
+    }
     composed
 }
 pub(crate) fn shade_source(source: String, eligible: bool, specular: bool) -> String {

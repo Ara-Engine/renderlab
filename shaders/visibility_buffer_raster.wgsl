@@ -33,3 +33,10 @@ struct Out {
     let p=vec2<u32>(input.position.xy);
     atomicMax(&visibility[p.y*image_size().x+p.x],(u64(bitcast<u32>(input.position.z))<<32u)|u64(input.payload));
 }
+
+// Fixed-function depth and an integer color target resolve hardware fragments before
+// the compute merge combines the winner with software visibility.
+@fragment fn fs_color(input:Out,@builtin(front_facing) front:bool)->@location(0) u32 {
+    if input.sides!=0u && front!=(input.sides==1u) {discard;}
+    return input.payload;
+}

@@ -3586,7 +3586,7 @@ impl Renderer {
                     // the material record after this one decode. The switch-off branch
                     // below retains its existing fused visibility/sun kernels.
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
-                        self.encode_visibility_buffer(&mut encoder, soft, stamps(6));
+                        self.encode_visibility_logged(&mut encoder, soft, stamps(6), None, &mut mark);
                     } else {
                         self.encode_primary_visibility(&mut encoder, soft, stamps(6));
                     }
@@ -3632,7 +3632,7 @@ impl Renderer {
                 } else if soft && self.view.soft_mode == crate::SoftShadows::Virtual {
                     // Traced receivers, then N8 visibility with no ray queries.
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
-                        self.encode_visibility_buffer(&mut encoder, true, stamps(6));
+                        self.encode_visibility_logged(&mut encoder, true, stamps(6), None, &mut mark);
                     } else {
                         self.encode_primary_visibility(&mut encoder, true, stamps(6));
                     }
@@ -3643,7 +3643,7 @@ impl Renderer {
                     self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
                 } else {
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
-                        self.encode_visibility_buffer(&mut encoder, soft, stamps(6));
+                        self.encode_visibility_logged(&mut encoder, soft, stamps(6), None, &mut mark);
                     } else {
                         self.encode_primary_visibility(&mut encoder, soft, stamps(6));
                     }
