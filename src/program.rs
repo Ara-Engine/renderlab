@@ -383,26 +383,32 @@ pub(crate) fn pass_block(composed: Composed) -> Composed {
     let Composed { source, program } = composed;
     let (engine, rest) = source.split_at(program.start);
     assert_eq!(engine.matches(PASS_GATE[0]).count(), 1, "reflection pass gate seam");
-    let gate = if rl_mirror_list() {
-        PASS_GATE[1].replacen("if RL_PASS && !mirror && ", "if RL_PASS && ", 1)
-    } else {
-        PASS_GATE[1].to_owned()
-    };
-    let engine = engine.replacen(PASS_GATE[0], &gate, 1);
+    let gate = if rl_inline() { PASS_GATE[1] } else { PASS_GATE_LISTED };
+    let engine = engine.replacen(PASS_GATE[0], gate, 1);
     let start = engine.len();
     Composed {
         source: format!("{engine}{rest}"),
         program: start..start + program.len(),
     }
 }
-/// Whether mirror receivers (roughness under reflections.wgsl `RL_MIRROR`) join the glossy list
-/// like glossy ones, as one-stratum entries, so their ray and hit shading run in the trace pass
-/// instead of inside the shading kernel (where they were most of its reflection cost). At that
-/// roughness the trace's lobe sample is the mirror direction. `RENDERLAB_RL_MIRROR_LIST=0`
-/// keeps them inline.
-pub(crate) fn rl_mirror_list() -> bool {
+/// The reflection pass's gate without inline tracing: in a reporting program's module every
+/// traced receiver (mirrors and the faintest band included) appends its lobe, and one that finds
+/// no stratum above its side or no room (only while the room grows) keeps the untraced estimate
+/// (w = 0). The inline trace and its hit shading after the gate are then dead code, which the
+/// compiler drops: their registers were most of the shading kernel's reflection cost.
+const PASS_GATE_LISTED: &str = "    if RL_PASS && RL_DEFERRED_PROGRAM {
+        if rl_any_stratum(count,radial,rotation,basis,local_v,v,alpha,side) && rl_room_reserve(count,traced,lobe.weight) {
+            rl_lobe_store(pixel,origin,n,v,side,alpha,width,pixel_angle+curvature,count,receiver.epsilon);
+            rl_specular=vec4<f32>(0.0,0.0,0.0,traced);
+        }
+        return;
+    }
+";
+/// `RENDERLAB_RL_INLINE=1`: the earlier gate, which kept mirrors, receivers under the
+/// composite floor and those without room tracing inside the shading kernel.
+pub(crate) fn rl_inline() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_MIRROR_LIST").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_INLINE").is_ok_and(|v| v == "1"))
 }
 fn with_history_block(mut composed: Composed) -> Composed {
     if !rl_history_on() {
