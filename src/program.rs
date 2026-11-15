@@ -367,6 +367,18 @@ pub(crate) fn pass_block(composed: Composed) -> Composed {
             1,
         );
     }
+    // Measurement only (`RENDERLAB_RL_LIST_PROBE=noatomic`): the list's two shared counters
+    // replaced by per-pixel indices, to time shading without their contention. The list is then
+    // wrong (its length stays zero), so reflections vanish.
+    if std::env::var("RENDERLAB_RL_LIST_PROBE").as_deref() == Ok("noatomic") {
+        for (find, replace) in [
+            ("let first=atomicAdd(&rl_room_stats[2],count);", "let first=0u;"),
+            ("let entry=atomicAdd(&rl_glossy.count,1u);", "let entry=(pixel.x+pixel.y*4096u)%rl_pass_frame.z;"),
+        ] {
+            assert_eq!(lobe.matches(find).count(), 1, "list probe seam");
+            lobe = lobe.replacen(find, replace, 1);
+        }
+    }
     let composed = replace_block(composed, RL_PASS_STUBS, &lobe);
     let Composed { source, program } = composed;
     let (engine, rest) = source.split_at(program.start);
