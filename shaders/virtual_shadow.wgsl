@@ -413,11 +413,14 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
             }
         }
         if !stale {continue;}
-        // The raster samples texel centres: a box around none (a cluster under a texel often
-        // is) writes nothing. A hundredth of a texel covers the transforms' rounding.
-        let first=ceil((lo-origin)/texel-vec2<f32>(0.51));
-        let last=floor((hi-origin)/texel-vec2<f32>(0.49));
-        if any(last<first) {continue;}
+        // The fog map: the raster samples texel centres, so a box around none (a cluster under
+        // a texel often is) writes nothing. A hundredth of a texel covers the transforms'
+        // rounding. (Fog only until the path without ray hardware is measured with it.)
+        if vsm_one_level() {
+            let first=ceil((lo-origin)/texel-vec2<f32>(0.51));
+            let last=floor((hi-origin)/texel-vec2<f32>(0.49));
+            if any(last<first) {continue;}
+        }
         let extent=(hi-lo)/texel;
         let n=vsm.counts.z;
         if max(extent.x,extent.y)>VSM_SW_EXTENT {

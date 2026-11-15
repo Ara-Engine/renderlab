@@ -84,7 +84,7 @@ pub(crate) fn fog_coarse_on() -> bool {
 /// raster budget. One level draws a frame (WGSL `vsm_one_level`): a coarse page holds most of
 /// the scene's casters, so a cut or a moved sun spreads the redraw over the levels' frames.
 const FOG_POOL_START: u32 = 256;
-const FOG_BUDGET: u32 = 64;
+const FOG_BUDGET: u32 = 8;
 /// Whether the sparse clipmap is on (`RENDERLAB_VSM_SPARSE=1` turns it on; off by default).
 fn sparse_switch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1823,7 +1823,10 @@ impl VirtualState {
         use wgpu::BufferUsages as B;
         // Sparse: the table's entries over every possible level (WGSL `vsm_section`).
         let entries = MAX_LEVELS as u64 * u64::from(pages * pages);
-        let mip_bytes = if sparse {
+        let mip_bytes = if self.fog {
+            // The fog map reads no mips (encode_virtual_pages draws none).
+            4
+        } else if sparse {
             // In-page mips per physical page, then each table entry's page maximum.
             (u64::from(capacity) * PAGE_MIP_WORDS + entries) * 4
         } else {
