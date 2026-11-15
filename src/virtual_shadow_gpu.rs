@@ -695,6 +695,8 @@ pub(super) struct VirtualState {
     /// Per placement its world box and cluster instance range (two vec4s, WGSL
     /// `vsm_placement_boxes`) and the fog map's live mask, and their capacity in placements.
     placement_boxes: Option<(Owned<wgpu::Buffer>, Owned<wgpu::Buffer>, usize)>,
+    /// The last `RENDERLAB_FOG_MEM_LOG` line written.
+    fog_mem_line: String,
     /// Page requests depend only on the camera, the sun, the casters and the cache
     /// windows. A frame identical in all of them finds nothing stale, so it skips the
     /// request, compaction and raster passes and only runs the lookup.
@@ -1670,6 +1672,7 @@ impl VirtualState {
             fog_pending: 0,
             fog_placements: vec![],
             placement_boxes: None,
+            fog_mem_line: String::new(),
             key: vec![],
             page_work: true,
             history_frames: 0,
@@ -3630,6 +3633,41 @@ impl Renderer {
             };
             r.groups = Some(groups);
         }
+        // Measurement (`RENDERLAB_FOG_MEM_LOG=<file>`): the fog map's GPU bytes by construction,
+        // a line whenever they change.
+        if let Some(path) = std::env::var_os("RENDERLAB_FOG_MEM_LOG").filter(|_| state.fog) {
+            let casters = state.casters.as_ref().unwrap();
+            let caster_bytes = casters.instances.clusters.value.size()
+                + casters.instances.groups.value.size()
+                + casters.work.size();
+            let boxes = state.placement_boxes.as_ref().map_or(0, |b| b.0.size() + b.1.size());
+            let mut meshes = std::collections::HashSet::new();
+            let cluster_data: u64 = draws
+                .iter()
+                .filter_map(|d| d.mesh.clusters.as_ref())
+                .filter(|c| meshes.insert(Arc::as_ptr(&c.data) as usize))
+                .map(|c| c.data.size())
+                .sum();
+            let line = format!(
+                "{{\"map\":{},\"casters\":{},\"placements\":{},\"cluster_instances\":{},\"mesh_cluster_data\":{},\"pool_pages\":{}}}
+",
+                state.stats.bytes,
+                caster_bytes,
+                boxes,
+                casters.instances.count,
+                cluster_data,
+                state.resources.as_ref().map_or(0, |r| r.capacity),
+            );
+            if state.fog_mem_line != line {
+                use std::io::Write;
+                let _ = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .and_then(|mut f| f.write_all(line.as_bytes()));
+                state.fog_mem_line = line;
+            }
+        }
         Ok(())
     }
 
@@ -3925,9 +3963,21 @@ impl Renderer {
                 pass.set_bind_group(0, &*g.raster, &[]);
                 pass.dispatch_workgroups(slots as u32, 1, 1);
             }
+            if state.fog {
+                // The fog map's cull books under its own mark.
+                drop(pass);
+                mark(encoder, "fog_map.cull");
+                pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("Fog map caster cull"),
+                    timestamp_writes: None,
+                });
+            }
             pass.set_bind_group(0, &*g.cull, &[]);
             pass.set_bind_group(1, arrays, &[]);
-            if state.fog {
+            // Measurement (`RENDERLAB_FOG_CULL=clusters`): the fog map culls every cluster.
+            let by_placement = state.fog
+                && std::env::var("RENDERLAB_FOG_CULL").as_deref() != Ok("clusters");
+            if by_placement {
                 // The placements that can touch this frame's pages, then their clusters alone.
                 let placements = state.cache.models.len().max(1) as u32;
                 pass.set_pipeline(&p.cull_placements);
