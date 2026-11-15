@@ -12,8 +12,6 @@ use super::*;
 
 #[path = "reflection_pass_cache.rs"]
 mod sw_cache;
-#[path = "reflection_screen.rs"]
-mod screen;
 
 /// Group-0 bindings (U-RTVIS 54-63; the Mac's reflection_hits reads H and R at 64 and 65).
 /// L, the glossy-pixel list: a 16-byte header (its length), then LIST_ENTRY_BYTES an entry.
@@ -29,7 +27,7 @@ pub(super) const STATS: u32 = 60;
 pub(super) const ROOM_STATS: u32 = 69;
 /// The counters: the trace's four words, the Mac thread's S4a (4, 5), the receivers that did not
 /// fit the room (6), and measurement runs' low-weight strata and receivers (7-10).
-const STATS_BYTES: u64 = 320;
+const STATS_BYTES: u64 = 64;
 /// With the composite, R holds every glossy pixel's strata (this many slots a row) and H one
 /// record a slot: the room. It starts at ROOM_START slots and grows to the content (the frame's
 /// requested strata, summed at shading, read back a frame or two late) up to ROOM_PER_PIXEL a
@@ -119,7 +117,6 @@ pub(super) struct TraceAbi {
     args_group: Owned<wgpu::BindGroupLayout>,
     args_layout: Owned<wgpu::PipelineLayout>,
     cache_group: Option<Owned<wgpu::BindGroupLayout>>,
-    screen: Option<screen::Abi>,
 }
 impl TraceAbi {
     pub fn new(
@@ -137,7 +134,7 @@ impl TraceAbi {
             uniform(PASS_FRAME, 16),
             buffer(HITS, write, HITS_HEADER + RECORD_BYTES),
             image(SAMPLES, F::Rgba16Float),
-            buffer(STATS, write, if screen::enabled(device) { STATS_BYTES } else { 16 }),
+            buffer(STATS, write, 16),
         ];
         entries.push(if ray_query {
             scene(2)
@@ -152,11 +149,10 @@ impl TraceAbi {
             ResourceKind::BindGroupLayout,
         );
         let cache_group = sw_cache::layout(device, ledger);
-        let screen = screen::enabled(device).then(|| screen::Abi::new(device, ledger, &group, arrays, lighting));
         let layout = ledger.own(
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("reflection trace ABI"),
-                bind_group_layouts: &[Some(&group), Some(arrays), screen.as_ref().map(|s| s.trace()).or_else(|| cache_group.as_ref().map(|g| &**g)), Some(lighting)],
+                bind_group_layouts: &[Some(&group), Some(arrays), cache_group.as_ref().map(|g| &**g), Some(lighting)],
                 immediate_size: 0,
             }),
             ResourceKind::PipelineLayout,
@@ -176,7 +172,7 @@ impl TraceAbi {
             }),
             ResourceKind::PipelineLayout,
         );
-        Self { group, layout, args_group, args_layout, cache_group, screen }
+        Self { group, layout, args_group, args_layout, cache_group }
     }
 }
 
@@ -195,7 +191,6 @@ pub(in crate::renderer) struct PassTargets {
     /// The composite's room (R's slots and H's records) and the counters' readback ring.
     pub room: u64,
     pub readback: Vec<Readback>,
-    screen: Option<screen::Targets>,
 }
 /// One counters readback: copied on one frame, mapped on the next, read when the map lands.
 pub(in crate::renderer) struct Readback {
@@ -215,8 +210,6 @@ pub(super) struct TracePipelines {
     args: Owned<wgpu::ComputePipeline>,
     /// The deferred composite: its group layout and additive point pipeline.
     composite: (Owned<wgpu::BindGroupLayout>, Owned<wgpu::RenderPipeline>),
-    screen: Option<screen::Pipelines>,
-    screen_march: Option<Owned<wgpu::ComputePipeline>>,
 }
 
 impl Renderer {
@@ -228,7 +221,6 @@ impl Renderer {
             .unwrap_or(ROOM_START)
             .min(ROOM_PER_PIXEL * u64::from(size.width) * u64::from(size.height));
         PassTargets {
-            screen: screen::enabled(&self.device).then(|| screen::Targets::new(self, size, room)),
             list: self.rl_list(room),
             list_args: Buffer::new(
                 self,
@@ -355,7 +347,6 @@ impl Renderer {
             source.replace("const RL_RAY_LANES:u32=1u;", &format!("const RL_RAY_LANES:u32={lanes}u;"))
         };
         let source = sw_cache::source(source, &self.device);
-        let source = screen::source(source, &self.device);
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
@@ -364,7 +355,7 @@ impl Renderer {
             }),
             ResourceKind::ShaderModule,
         );
-        let pipeline = |entry: &str, layout: &wgpu::PipelineLayout| {
+        let pipeline = |entry, layout: &wgpu::PipelineLayout| {
             self.ledger.own(
                 self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some("reflection trace"),
@@ -382,8 +373,6 @@ impl Renderer {
             pixels: pipeline("rl_trace_pixels", &abi.layout),
             args: pipeline("rl_hit_args", &abi.layout),
             composite: self.rl_composite_kit(),
-            screen: abi.screen.as_ref().map(|s| s.pipelines(pipeline)),
-            screen_march: abi.screen.as_ref().map(|_| pipeline("rl_screen_pixels", &abi.layout)),
         };
         if let Some(error) = scopes.finish() {
             return Err(Error::Shader(format!("reflection trace: {error}")));
@@ -413,9 +402,6 @@ impl Renderer {
             compute.set_bind_group(1, &*g.arrays, &[]);
             compute.set_bind_group(3, self.lighting.bind(), &[]);
         };
-        if let (Some(s), Some(p), Some(t)) = (&abi.screen, &pipelines.screen, &pass.screen) {
-            self.rl_screen_prepare(encoder, s, p, t, &bind);
-        }
         // The arguments first, in their own pass and group: the trace reads them as indirect
         // arguments. One entry, rebuilt each frame (the buffer outlives room growth).
         let args = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -436,20 +422,12 @@ impl Renderer {
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
         let cache = abi.cache_group.as_ref().map(|layout| self.rl_outgoing_group(layout));
-        let screen_group = abi.screen.as_ref().map(|s| self.rl_screen_group(s, pass.screen.as_ref().unwrap(), &state.targets.as_ref().unwrap().hit.view));
-        if let (Some(march), Some(group)) = (&pipelines.screen_march, &screen_group) {
-            let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {label:Some("reflection screen march"),timestamp_writes:None});
-            bind(&mut compute);compute.set_bind_group(2, group, &[]);compute.set_pipeline(march);
-            compute.dispatch_workgroups_indirect(&pass.list_args.value, 0);
-        }
         let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reflection trace"),
             timestamp_writes: None,
         });
         bind(&mut compute);
-        if let Some(group) = screen_group.as_ref() {
-            compute.set_bind_group(2, group, &[]);
-        } else if let Some(cache) = cache.as_ref() {
+        if let Some(cache) = cache.as_ref() {
             compute.set_bind_group(2, &**cache, &[]);
         }
         compute.set_pipeline(&pipelines.pixels);
@@ -464,7 +442,7 @@ impl Renderer {
 
     /// This frame's pass uniform (the frame counter, the room, the list's capacity, the pass on),
     /// the counters and the list's length cleared before shading, and the composite's uniform.
-    pub(crate) fn write_reflection_pass_frame(&self, camera: Camera) {
+    pub(crate) fn write_reflection_pass_frame(&self) {
         let Some(pass) = self
             .view
             .primary
@@ -474,7 +452,6 @@ impl Renderer {
         else {
             return;
         };
-        if let Some(screen) = &pass.screen { screen.write(self, camera, pass.size); }
         let words = [self.frames as u32, pass.room as u32, pass.room as u32, 1];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
         self.queue.write_buffer(&pass.frame.value, 0, &bytes);
@@ -642,7 +619,7 @@ impl Renderer {
         if self.frames == PROBE_FRAME + 1 && probe.is_none() {
             let staging = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("reflection probe"),
-                size: (HITS_HEADER + STATS_BYTES).max(256),
+                size: 256,
                 usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -847,8 +824,6 @@ impl Renderer {
         render.set_pipeline(pipeline);
         render.set_bind_group(0, &group, &[]);
         render.draw_indirect(&pass.list_args.value, 16);
-        drop(render);
-        self.rl_screen_capture(encoder, shading);
     }
 }
 
@@ -897,9 +872,6 @@ impl Renderer {
                 if let Ok(data) = r.buffer.slice(..).get_mapped_range() {
                     let word = |i: usize| u32::from_ne_bytes(data[4 * i..4 * i + 4].try_into().unwrap());
                     requested = requested.max(u64::from(word(2)));
-                    if screen::debug_path().is_some() {
-                        screen::write_counts(r.frame.load(SeqCst), &std::array::from_fn::<_,64,_>(|i| word(16+i)));
-                    }
                     if let Some(path) = room_log() {
                         use std::io::Write;
                         let hal = self.device.get_internal_counters().hal;
@@ -919,7 +891,7 @@ impl Renderer {
                             allocator.1
                         );
                         let line = format!(
-                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}],\"screen\":[{},{},{},{}]{memory}}}\n",
+                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}]{memory}}}\n",
                             r.frame.load(SeqCst),
                             word(2),
                             word(1),
@@ -928,7 +900,7 @@ impl Renderer {
                             word(7),
                             word(8),
                             word(9),
-                            word(10),word(11),word(12),word(13),word(14)
+                            word(10)
                         );
                         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
                             let _ = file.write_all(line.as_bytes());
@@ -952,14 +924,12 @@ impl Renderer {
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
         );
         let list = self.rl_list(room);
-        let screen_results = pass.screen.as_ref().map(|_| screen::results(self, room));
         let state = self.view.primary.as_mut().unwrap();
         let pass = state.targets.as_mut().unwrap().rl_pass.as_mut().unwrap();
         pass.samples = samples;
         pass.hits = hits;
         pass.list = list;
         pass.room = room;
-        if let Some(results) = screen_results { pass.screen.as_mut().unwrap().results = results; }
     }
     fn rl_room_samples(&self, room: u64) -> Depth {
         let width = SAMPLE_ROW;
