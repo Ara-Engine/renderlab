@@ -565,7 +565,19 @@ pub(crate) fn rl_pass_switches(source: String) -> String {
     source
 }
 /// `rl_pass_switches`' seams: switch, text, replacement.
-pub(crate) const RL_PASS_SEAMS: [(&str, &str, &str); 3] = [
+pub(crate) const RL_PASS_SEAMS: [(&str, &str, &str); 5] = [
+    // Measurement only: the trace without its per-receiver counters, and without its casts
+    // (every ray a miss), to split its time.
+    (
+        "nostats",
+        "        atomicAdd(&rl_trace_stats.pixels,1u);\n        atomicAdd(&rl_trace_stats.slots,count);\n",
+        "",
+    ),
+    (
+        "nocast",
+        "        let traced=rl_cast(origin,d,epsilon);\n",
+        "        let traced=RlCast(vec4<u32>(0u),-1.0);\n",
+    ),
     (
         "missblack",
         "textureStore(rl_samples,at,rl_f16_nearest(vec4<f32>(rl_sky(d,cone_alpha),1.0)));",
