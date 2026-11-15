@@ -61,6 +61,7 @@ fn gi_near_owner(origin:vec3<f32>, n:vec3<f32>, x:vec3<f32>) -> u32 {
 // One lane's share of a cell's aimed rays (ray i of the cell runs on lane i % GI_GATHER_LANES),
 // added to gi_gather_sh. Returns the rays traced, those whose hit cell had no value yet and
 // those whose hit value still changes, as the fixed directions count them.
+var<private> gi_near_cold:u32;
 fn gi_near_gather(lane:u32, origin:vec3<f32>, n:vec3<f32>, key:vec2<u32>, band:u32, tertiary:bool) -> vec3<u32> {
     let aimed=gi_word(GI_H_NEAR_RAYS);
     var rays=0u;
@@ -78,6 +79,7 @@ fn gi_near_gather(lane:u32, origin:vec3<f32>, n:vec3<f32>, key:vec2<u32>, band:u
         let span=log(GI_NEAR_ANGLE/angle_min);
         let frame=gi_basis(near.xyz);
         let reach=GI_NEAR_REACH*near.w;
+        let traced=rays;
         for(var i=first+(lane+GI_GATHER_LANES-first%GI_GATHER_LANES)%GI_GATHER_LANES;i<first+per;i+=GI_GATHER_LANES) {
             let s=i-first;
             // The last ray is the cap's, at the light itself.
@@ -102,6 +104,12 @@ fn gi_near_gather(lane:u32, origin:vec3<f32>, n:vec3<f32>, key:vec2<u32>, band:u
             gi_sh_basis(d);
             let radiance=o.rgb*weight;
             for(var j=0u;j<4u;j+=1u) { gi_gather_sh[j]+=radiance*gi_y[j]; }
+        }
+        // Diagnostics (GI log): aimed rays, and those at a light the cell's own visibility
+        // bits hold occluded.
+        if rays>traced {
+            atomicAdd(&gi_work[GI_W_AIMED_RAYS],rays-traced);
+            if (gi_table[gi_near_cold+GI_C_LIGHTS+(l>>5u)]&(1u<<(l&31u)))==0u { atomicAdd(&gi_work[GI_W_AIMED_OCCLUDED],rays-traced); }
         }
         first+=per;
     }

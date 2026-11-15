@@ -690,6 +690,9 @@ pub struct IndirectCounters {
     /// first bin left for later; 0 none) for pixels' cells and the rest.
     pub gather_estimate: u32,
     pub gather_cuts: [u32; 2],
+    /// Gathers' aimed rays, and those at lights the cell holds occluded.
+    pub aimed_rays: u32,
+    pub aimed_occluded: u32,
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -2487,6 +2490,8 @@ impl Renderer {
             full_pixel: w[46],
             gather_estimate: w[256..352].iter().fold(0u32, |a, &b| a.saturating_add(b)),
             gather_cuts: [w[352], w[353]],
+            aimed_rays: w[250],
+            aimed_occluded: w[251],
         }))
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires

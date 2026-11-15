@@ -462,7 +462,7 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
         return Ok(());
     };
     let line = format!(
-        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"full_pixel\":{},\"table_bytes\":{},\"instances\":{},\"relight_parts\":{},\"slots\":{},\"slot_doublings\":{},\"peak_full\":{},\"gather_estimate\":{},\"gather_cuts\":[{},{}]}}\n",
+        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"full_pixel\":{},\"table_bytes\":{},\"instances\":{},\"relight_parts\":{},\"slots\":{},\"slot_doublings\":{},\"peak_full\":{},\"gather_estimate\":{},\"gather_cuts\":[{},{}],\"aimed_rays\":{},\"aimed_occluded\":{}}}\n",
         c.misses,
         c.miss_overflow,
         c.created,
@@ -493,6 +493,8 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
         c.gather_estimate,
         c.gather_cuts[0],
         c.gather_cuts[1],
+        c.aimed_rays,
+        c.aimed_occluded,
     );
     // A log that cannot be written is not a rendering error.
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
