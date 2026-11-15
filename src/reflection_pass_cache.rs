@@ -64,17 +64,17 @@ impl Renderer {
     pub(super) fn rl_outgoing_group(
         &self,
         layout: &wgpu::BindGroupLayout,
-    ) -> Owned<wgpu::BindGroup> {
-        self.ledger.own(
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+    ) -> wgpu::BindGroup {
+        self.groups.get(
+            &self.device,
+            &wgpu::BindGroupDescriptor {
                 label: Some("software reflection outgoing cache"),
                 layout,
                 entries: &[wgpu::BindGroupEntry {
                     binding: 1,
                     resource: self.gi.shading_outgoing().as_entire_binding(),
                 }],
-            }),
-            ResourceKind::BindGroup,
+            },
         )
     }
 }

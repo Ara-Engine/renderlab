@@ -697,6 +697,10 @@ pub struct Renderer {
     timing: Option<Timing>,
     /// Named stage timings for measurement (`RENDERLAB_PASS_LOG`, src/pass_timeline.rs).
     pass_timeline: Option<crate::pass_timeline::PassTimeline>,
+    /// Bind groups encoding would otherwise create every frame (src/group_cache.rs).
+    pub(crate) groups: crate::group_cache::GroupCache,
+    /// TP2's glass reflection rectangles, reused while the transparent draw count fits.
+    pub(crate) reflect_rects: std::sync::Mutex<Option<wgpu::Buffer>>,
     /// The shading stage's parts for the pass log's detail (src/shade_detail.rs).
     shade_detail: Option<shade_detail::ShadeDetail>,
     timing_status: TimingStatus,
@@ -1219,6 +1223,8 @@ impl Renderer {
             scratch: Vec::new(),
             slots,
             pass_timeline,
+            groups: Default::default(),
+            reflect_rects: Default::default(),
             shade_detail: None,
             timing,
             timing_status: if enabled {
@@ -4069,6 +4075,7 @@ impl Renderer {
             virtual_shadows.submitted();
         }
         self.gi.submitted();
+        self.groups.end_frame();
         if let Some(mut t) = marks {
             t.submitted();
             self.pass_timeline = Some(t);
