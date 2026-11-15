@@ -446,7 +446,6 @@ impl Renderer {
         let fog = self.atmosphere.settings.volumetric_fog?;
         let wanted = self.hardware_shadows.is_some()
             && virtual_shadow_gpu::fog_coarse_on()
-            && std::env::var("RENDERLAB_FOG_DIAG").as_deref() != Ok("nomap") // FOGDIAG
             && self.atmosphere.active
             && soft
             && self.view.soft_mode != SoftShadows::Virtual
@@ -1069,7 +1068,6 @@ impl Renderer {
                 .virtual_shadows
                 .as_ref()
                 .filter(|s| s.fog_map())
-                .filter(|_| std::env::var("RENDERLAB_FOG_DIAG").as_deref() != Ok("noread")) // FOGDIAG
                 .and_then(|s| s.atmosphere_buffers())
         } else {
             (self.primary_mode == PrimaryVisibility::VisibilityBuffer
