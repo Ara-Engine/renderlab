@@ -39,6 +39,9 @@ const ID_UNTAGGED:u32=0xffffffffu;
 const ID_ANY:u32=0xffffffffu;
 // The hysteresis of a moving pixel's choice, in coverage.
 const ID_MARGIN:f32=0.125;
+// Matches TR1_LAYER_BIT: single-surface pixels leave the layer texture unwritten.
+const ID_LAYER_BIT:bool=true;
+const ID_HAS_SECOND:u32=0x80000000u;
 // Frames running a merged object's new id must be seen before a moving pixel takes it (the
 // jitter sequence shows an edge's other side for up to two frames running).
 const ID_STREAK:u32=3u;
@@ -103,7 +106,9 @@ fn id_record(q:vec2<i32>)->vec2<u32> {
 // The settled opaque placement + 1 at output pixel p.
 fn id_settle(p:vec2<u32>,here:vec2<u32>)->u32 {
     if (id_frame.flags&ID_RECONSTRUCTED)==0u {return here.x;}
-    let a=textureLoad(id_anchors,p,0).x&ID_SLOT;
+    let anchor=textureLoad(id_anchors,p,0).x;
+    let a=anchor&ID_SLOT;
+    if ID_LAYER_BIT && (anchor&ID_HAS_SECOND)==0u {return a;}
     let l=textureLoad(id_layers,p,0);
     if l.x==ID_NONE_SLOT {return a;}
     let b=l.x&ID_SLOT;

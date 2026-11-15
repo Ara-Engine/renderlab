@@ -892,6 +892,12 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
     resolve_source_with_coverage(wgsl, coverage_mode())
 }
 
+// Shared with picking: a missing second-layer bit means the layer texture is unwritten.
+pub(in crate::renderer) fn layer_bit(coverage: Option<bool>) -> bool {
+    std::env::var("RENDERLAB_TR1_LEAN").map_or(true, |v| v.trim() != "0")
+        && coverage != Some(true)
+}
+
 fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<String, Error> {
     let [head, _] = non_rt_heads(wgsl)?;
     let mode = ["tr1-mask", "tr1-raw", "tr1-window"]
@@ -912,7 +918,7 @@ fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<St
     // texel of every pixel, so it keeps the layer written everywhere.
     let lean = std::env::var("RENDERLAB_TR1_LEAN").map_or(true, |v| v.trim() != "0");
     for (constant, on) in [
-        ("TR1_LAYER_BIT", lean && coverage != Some(true)),
+        ("TR1_LAYER_BIT", layer_bit(coverage)),
         ("TR1_REUSE_STILL", lean),
     ] {
         // A variant file (RENDERLAB_TR1_SHADER) carries its own constants.
