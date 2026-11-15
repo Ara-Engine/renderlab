@@ -97,6 +97,15 @@ fn tr1_moving(slot:u32)->bool {
 const TR1_ID:u32=0x7fffffu;
 const TR1_NONE:u32=0xffffffffu;
 const TR1_FIRST_OCCLUDES:u32=0x1000000u;
+// Lean resolve (`RENDERLAB_TR1_LEAN=0` sets both false; src/temporal_reconstruction.rs). Both
+// leave every output bit unchanged.
+// Anchor bit 31 marks a pixel that holds a second slot (a silhouette): elsewhere the layer
+// texel is neither written nor read (it would say TR1_NONE), saving 16 bytes a pixel each way.
+const TR1_LAYER_BIT:bool=true;
+const TR1_HAS_SECOND:u32=0x80000000u;
+// A surface neither skinned nor moved has last frame's point and plane equal to this frame's
+// (the same arithmetic on the same vertices and transform): reused, not computed again.
+const TR1_REUSE_STILL:bool=true;
 
 fn tr1_position(batch:u32,index:u32)->vec3<f32> {
     return tr1_vertices[batch].data[tr1_indices[batch].data[index]*3u].xyz;
@@ -233,23 +242,28 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     if tr1_skinned(batch) {pa=tr1_previous_position(batch,i);pb=tr1_previous_position(batch,i+1u);pc=tr1_previous_position(batch,i+2u);}
     // Preserve MQ1/SK1's exact static arithmetic; both moving consumers read the
     // same previous transform in the shared placement table (object_motion.wgsl).
-    var px=world_position(receiver_point(pa,pb,pc,vec3<f32>(1.0-uv.x-uv.y,uv)),slot);
-    var pn=cross(world_position(pb,slot).xyz-world_position(pa,slot).xyz,world_position(pc,slot).xyz-world_position(pa,slot).xyz);
+    let x=world_position(receiver_point(a,b,c,vec3<f32>(1.0-uv.x-uv.y,uv)),slot).xyz;
+    let wa=world_position(a,slot).xyz;
+    let n=cross(world_position(b,slot).xyz-wa,world_position(c,slot).xyz-wa);
+    var px=vec4<f32>(x,1.0);
+    var pn=n;
     let placed=motion_rigid(slot);
+    let skinned=any(a!=pa)||any(b!=pb)||any(c!=pc);
+    if !placed && (skinned || !TR1_REUSE_STILL) {
+        px=world_position(receiver_point(pa,pb,pc,vec3<f32>(1.0-uv.x-uv.y,uv)),slot);
+        pn=cross(world_position(pb,slot).xyz-world_position(pa,slot).xyz,world_position(pc,slot).xyz-world_position(pa,slot).xyz);
+    }
     if placed {
         px=motion_previous_world(receiver_point(pa,pb,pc,vec3<f32>(1.0-uv.x-uv.y,uv)),slot);
         let qa=motion_previous_world(pa,slot).xyz;
         pn=cross(motion_previous_world(pb,slot).xyz-qa,motion_previous_world(pc,slot).xyz-qa);
     }
-    let x=world_position(receiver_point(a,b,c,vec3<f32>(1.0-uv.x-uv.y,uv)),slot).xyz;
-    let wa=world_position(a,slot).xyz;
-    let n=cross(world_position(b,slot).xyz-wa,world_position(c,slot).xyz-wa);
     let view=x-tr1.current_eye.xyz;
     let distance=sqrt(tr1_dot(view,view));
     let facing=tr1_dot(n,view);
     let unit=n*inverseSqrt(max(tr1_dot(n,n),1e-30));
     return Tr1Surface(vec4<f32>(x,1.0),id,u32(facing<=0.0),distance,unit,px,pn*inverseSqrt(max(tr1_dot(pn,pn),1e-30)),
-        placed||any(a!=pa)||any(b!=pb)||any(c!=pc),max(textureLoad(tr1_sample,q,0).w-1.0,0.0));
+        placed||skinned,max(textureLoad(tr1_sample,q,0).w-1.0,0.0));
 }
 
 // Continuous pixel position (pixel centres at + 0.5) of a point (w = 1) or direction (w = 0).
@@ -285,10 +299,12 @@ fn tr1_anchor_point(t:vec2<i32>,distance:f32,size:vec2<f32>)->vec3<f32> {
 
 // The second slot of a previous-frame tap.
 struct Tr1Second { id:u32, side:u32, colour:vec3<f32>, weight:f32, coverage:f32, coverage_weight:f32, first_occludes:bool };
-fn tr1_second(t:vec2<i32>)->Tr1Second {
-    let l=textureLoad(tr1_layer_in,t,0);
+// `anchor` is the tap's anchor word x (TR1_HAS_SECOND says whether its layer was stored).
+fn tr1_second(t:vec2<i32>,anchor:u32)->Tr1Second {
     var s:Tr1Second;
     s.id=TR1_NONE;
+    if TR1_LAYER_BIT && (anchor&TR1_HAS_SECOND)==0u {return s;}
+    let l=textureLoad(tr1_layer_in,t,0);
     if l.x==TR1_NONE {return s;}
     let rg=unpack2x16float(l.y);let bw=unpack2x16float(l.z);let cw=unpack2x16float(l.w);
     return Tr1Second(l.x&TR1_ID,(l.x>>23u)&1u,vec3<f32>(rg,bw.x),bw.y,cw.x,cw.y,(l.x&TR1_FIRST_OCCLUDES)!=0u);
@@ -312,7 +328,7 @@ fn tr1_tap(t:vec2<i32>,s:Tr1Surface,expected:f32,size:vec2<u32>)->vec4<f32> {
         }
         if ok {return textureLoad(tr1_colour_in,t,0);}
     }
-    let second=tr1_second(t);
+    let second=tr1_second(t,a.x);
     if second.id==s.id && !(thin && second.side!=s.side) && second.weight>0.0 {
         return vec4<f32>(second.colour,second.weight);
     }
@@ -468,8 +484,9 @@ fn tr1_coverage(p:vec2<i32>,o:Tr1Surface,u:u32,size:vec2<u32>)->vec3<f32> {
         let d=vec2<i32>(i&1,i>>1u);
         let t=base+d;
         if !tr1_inside(t,size) {continue;}
-        let first=textureLoad(tr1_anchor_in,t,0).x&TR1_ID;
-        let second=tr1_second(t);
+        let ax=textureLoad(tr1_anchor_in,t,0).x;
+        let first=ax&TR1_ID;
+        let second=tr1_second(t,ax);
         var c=-1.0;var n=0.0;
         if first==o.id {
             if second.id==TR1_NONE {c=1.0;n=textureLoad(tr1_colour_in,t,0).w;} else {c=second.coverage;n=second.coverage_weight;}
@@ -595,7 +612,7 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
 fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u),bitcast<u32>(s.distance),0u,0u));
     textureStore(tr1_colour_out,p,film);
-    textureStore(tr1_layer_out,p,vec4<u32>(TR1_NONE,0u,0u,0u));
+    if !TR1_LAYER_BIT {textureStore(tr1_layer_out,p,vec4<u32>(TR1_NONE,0u,0u,0u));}
     textureStore(tr1_output,p,vec4<f32>(film.xyz,1.0));
 }
 
@@ -645,8 +662,9 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     // SK1: a character that left this pixel is not a still silhouette missed by
     // this frame's sample. Retire its retained slot, even outside the current ring.
     if tr1.flags.x==0u && tr1.flags.z!=0u {
-        let first=textureLoad(tr1_anchor_in,p,0).x&TR1_ID;
-        let second=tr1_second(p).id;
+        let ax=textureLoad(tr1_anchor_in,p,0).x;
+        let first=ax&TR1_ID;
+        let second=tr1_second(p,ax).id;
         if first!=0u && first!=tested {tr1_near_skin=tr1_near_skin || tr1_moving(first-1u);}
         if second!=0u && second!=TR1_NONE && second!=tested {tr1_near_skin=tr1_near_skin || tr1_moving(second-1u);}
     }
@@ -657,8 +675,8 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         // the jittered 3x3 shows the other one depends on the jitter, not on the footprint,
         // and at a corner of three surfaces the jitter alternates which other one it shows;
         // replacing the second slot would discard that surface's history and the coverage.
-        let own=tr1_second(p);
         let a=textureLoad(tr1_anchor_in,p,0).xy;
+        let own=tr1_second(p,a.x);
         let first=a.x&TR1_ID;
         // MQ1: a pair with a moved placement is a moving silhouette (below).
         if own.id!=TR1_NONE && !tr1_moved(own.id) && !tr1_moved(first) {
@@ -743,7 +761,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     // Whole coverage shows one layer exactly: mix's arithmetic is not exact at its ends when
     // the layers differ by orders of magnitude (a bright sky behind rock).
     let film=select(select(mix(back,front,coverage),back,coverage<=0.0),front,coverage>=1.0);
-    textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u),bitcast<u32>(s.distance),0u,0u));
+    textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u)|select(0u,TR1_HAS_SECOND,TR1_LAYER_BIT),bitcast<u32>(s.distance),0u,0u));
     textureStore(tr1_colour_out,p,mine);
     let first_coverage=select(1.0-coverage,coverage,occluder_is_s);
     textureStore(tr1_layer_out,p,vec4<u32>((u.id&TR1_ID)|((u.side&1u)<<23u)|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s),pack2x16float(theirs.xy),
