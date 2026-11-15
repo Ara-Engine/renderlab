@@ -154,6 +154,12 @@ pub(crate) fn test_record_capture(kind: &str, bytes: &[u8]) {
 /// were alive. For finding out whether a submit waits on an older frame (a pipelined present).
 /// `1` prints to stderr; any other value is a file the lines are appended to (for a host that
 /// does not forward stderr).
+thread_local! {
+    /// RENDERLAB_SUBMIT_LOG: the frame's shadow preparation in parts (gathering the placements'
+    /// bounds and flags, the sun plan with its hardware bias, the hardware scene).
+    static SHADOW_SPLIT: std::cell::Cell<[Duration; 3]> = const { std::cell::Cell::new([Duration::ZERO; 3]) };
+}
+
 fn submit_log(line: impl FnOnce() -> String) {
     static ON: OnceLock<Option<String>> = OnceLock::new();
     let Some(target) = ON
@@ -2832,6 +2838,7 @@ impl Renderer {
         };
         let camera_bytes = matrix_bytes(matrix);
         let shadow_start = Instant::now();
+        let mut shadow_gather = Duration::ZERO;
         let mut shadow_frame = if self.view.shadows.enabled(view_mode) {
             let mut bounds = Vec::new();
             let mut casts = Vec::new();
@@ -2840,6 +2847,7 @@ impl Renderer {
                 bounds.extend_from_slice(&state.world_bounds(draw.mesh.bounds)?);
                 casts.extend((0..state.models.len()).map(|slot| state.casts_shadows(slot)));
             }
+            shadow_gather = shadow_start.elapsed();
             Some(self.view.shadows.plan(
                 camera,
                 [color.width(), color.height()],
@@ -2860,6 +2868,7 @@ impl Renderer {
         } else {
             Duration::ZERO
         };
+        let shadow_planned = shadow_preparation;
         let acceleration_start = Instant::now();
         // Camera rays and RT volume injection need a TLAS even without surface shadows.
         let hardware_scene = shadow_frame.is_some()
@@ -2889,6 +2898,9 @@ impl Renderer {
         if hardware_scene && self.hardware_shadows.is_some() {
             shadow_preparation += acceleration_start.elapsed();
         }
+        SHADOW_SPLIT.with(|split| {
+            split.set([shadow_gather, shadow_planned.saturating_sub(shadow_gather), acceleration_start.elapsed()])
+        });
         // The frame's program pipeline sets, created now if missing: after every admission
         // check (so a rejected frame creates nothing) and before the frame's uploads.
         let variant = self
@@ -3353,6 +3365,9 @@ impl Renderer {
         cpu.upload += start.elapsed() - cpu.shadow_upload;
         self.uploads.add(uploads);
         let encode_start = Instant::now();
+        // RENDERLAB_SUBMIT_LOG: the CPU instant of every pass-log mark, so the log can split
+        // `encode` by stage (each stage runs from its mark to the next).
+        let mut cpu_stages: Vec<(&'static str, Instant)> = Vec::new();
         // Traced frames resolve visibility without raster depth or MSAA targets.
         if !traced
             && self
@@ -3527,6 +3542,7 @@ impl Renderer {
             t.begin(&self.device);
         }
         let mut mark = |encoder: &mut wgpu::CommandEncoder, name: &'static str| {
+            cpu_stages.push((name, Instant::now()));
             if let Some(t) = &mut marks {
                 t.mark(encoder, name);
             }
@@ -3930,6 +3946,7 @@ impl Renderer {
             self.encode_transparency(&mut encoder, draws, transparent, traced, marks.as_mut())?;
         }
         let mut mark = |encoder: &mut wgpu::CommandEncoder, name: &'static str| {
+            cpu_stages.push((name, Instant::now()));
             if let Some(t) = &mut marks {
                 t.mark(encoder, name);
             }
@@ -4053,13 +4070,23 @@ impl Renderer {
                 .and_then(|h| h.active_placements())
                 .unwrap_or(0);
             format!(
-                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2} late_prepare={:.2} late_window={:.2} tlas_instances={instances}",
+                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2} late_prepare={:.2} late_window={:.2} tlas_instances={instances} shadow_split={:?} plan_split={:?} cpu_stages={}",
                 self.submissions + 1,
                 ms(finish),
                 ms(early_submit),
                 ms(submit - early_submit),
                 ms(late_prepare),
                 late_start.map_or(0.0, |t| ms(t.elapsed())),
+                SHADOW_SPLIT.with(|split| split.get().map(|d| (ms(d) * 1000.).round() / 1000.)),
+                crate::shadow_plan::PLAN_SPLIT.with(|split| {
+                    split.replace([Duration::ZERO; 3]).map(|d| (ms(d) * 1000.).round() / 1000.)
+                }),
+                cpu_stages
+                    .iter()
+                    .zip(cpu_stages.iter().skip(1).map(|(_, t)| *t).chain([finish_start]))
+                    .map(|((name, at), next)| format!("{name}:{:.3}", ms(next.saturating_duration_since(*at))))
+                    .collect::<Vec<_>>()
+                    .join(","),
             )
         });
         self.submissions += 1;
