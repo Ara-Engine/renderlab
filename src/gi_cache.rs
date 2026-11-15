@@ -36,7 +36,7 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
     (light_cold_offset(directions) + lights.div_ceil(32).max(1)).next_multiple_of(4)
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
-pub(crate) const COUNTER_WORDS: u64 = 384;
+pub(crate) const COUNTER_WORDS: u64 = 800;
 const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
@@ -2485,8 +2485,8 @@ impl Renderer {
             evicted: w[44],
             evicted_recent: w[45],
             full_pixel: w[46],
-            gather_estimate: w[256..352].iter().fold(0u32, |a, &b| a.saturating_add(b)),
-            gather_cuts: [w[352], w[353]],
+            gather_estimate: w[384..768].iter().fold(0u32, |a, &b| a.saturating_add(b)),
+            gather_cuts: [w[768], w[769]],
         }))
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires

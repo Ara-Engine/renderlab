@@ -154,14 +154,14 @@ const GI_FILL_BINS:u32=112u;
 const GI_W_FILL_CUT:u32=240u;
 // Whether the last frame's capped claim left pixels' cells for later (gi_fill_select): kept
 // across frames (src/gi_cache.rs clears the counters before it).
-const GI_W_FILL_PENDING:u32=383u;
+const GI_W_FILL_PENDING:u32=799u;
 // Gather ray budget (gi_gather_count): this frame's estimated gather rays per admission bin,
 // then 1 + the first bin left for a later frame, for pixels' bins and (the next word) the rest.
-const GI_W_GATHER_HIST:u32=256u;
-const GI_GATHER_BINS:u32=96u;
-const GI_W_GATHER_CUT:u32=352u;
+const GI_W_GATHER_HIST:u32=384u;
+const GI_GATHER_BINS:u32=384u;
+const GI_W_GATHER_CUT:u32=768u;
 // Per-slot claim words, after the counters (src/gi_cache.rs COUNTER_WORDS).
-const GI_W_CLAIMS:u32=384u;
+const GI_W_CLAIMS:u32=800u;
 // A miss: definition (4 words), request-table entry, claimed slot.
 const GI_MISS_WORDS:u32=6u;
 const GI_UNCLAIMED:u32=0xffffffffu;
@@ -1972,10 +1972,12 @@ var<private> gi_gather_sh:array<vec3<f32>,4>;
 // queued cells whose estimated rays fit that budget, in a fixed order taken from each cell
 // alone: the parents first fill made, then the cells pixels read by lattice class (as the
 // claim), then the rest, which keep a quarter of the budget; a per-frame hash spreads each
-// order over 16 bins, so an order larger than the budget is taken in a different subset each
-// frame. The first non-empty bin always passes, so the queue always moves.
+// order over 64 bins (finer than the claim's: a cut leaves the last view's backlog in the rest,
+// and 16 bins held more than the whole budget each), so an order larger than the budget is
+// taken in a different subset each frame. The first non-empty bin always passes, so the queue
+// always moves; the rest's first bin only when nothing else was admitted.
 const GI_H_GATHER_RAYS:u32=53u;
-const GI_GATHER_SPREAD:u32=16u;
+const GI_GATHER_SPREAD:u32=64u;
 const GI_GATHER_REST_BINS:u32=5u*GI_GATHER_SPREAD;
 fn gi_gather_rays(slot:u32) -> u32 {
     let cold=gi_cold(slot);
@@ -2002,7 +2004,7 @@ fn gi_gather_bin(slot:u32) -> u32 {
         let c=vec3<u32>(gi_table[cold+GI_C_CELL],gi_table[cold+GI_C_CELL+1u],gi_table[cold+GI_C_CELL+2u]);
         order=1u+gi_fill_class(gi_table[cold+GI_C_DEF]>>8u,c);
     }
-    return order*GI_GATHER_SPREAD+(gi_mix(slot^(gi_word(GI_H_FRAME)*0x9e3779b9u))>>28u);
+    return order*GI_GATHER_SPREAD+(gi_mix(slot^(gi_word(GI_H_FRAME)*0x9e3779b9u))>>26u);
 }
 fn gi_gather_queued(slot:u32) -> bool {
     let state=gi_table[gi_cold(slot)+GI_C_STATE];
@@ -2039,7 +2041,7 @@ fn gi_gather_queued(slot:u32) -> bool {
     var rest=0u;
     for(var b=GI_GATHER_REST_BINS;b<GI_GATHER_BINS;b+=1u) {
         let next=rest+atomicLoad(&gi_work[GI_W_GATHER_HIST+b]);
-        if rest!=0u && next>rest_budget { atomicStore(&gi_work[GI_W_GATHER_CUT+1u],b+1u); return; }
+        if (rest!=0u || total!=0u) && next>rest_budget { atomicStore(&gi_work[GI_W_GATHER_CUT+1u],b+1u); return; }
         rest=next;
     }
 }
