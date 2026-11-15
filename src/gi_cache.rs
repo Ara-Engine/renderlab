@@ -1668,6 +1668,78 @@ pub(super) struct GiState {
     /// `auto_slots`: the bucket-full readback and a pending doubling.
     watch: Option<FullWatch>,
     grow: bool,
+    /// `RENDERLAB_GI_PROBE_LOG`: the probe's work counters, read back without waiting.
+    probe_log: Option<ProbeWatch>,
+}
+
+/// Measurement only: `RENDERLAB_GI_PROBE_LOG=PATH` counts the probe's work on every frame
+/// (GI_F_STATS) and appends each frame's counters (work words 16-31: GI_W_P_TILES on) to PATH
+/// as one JSON line, read a frame or two later from a ring of mappable buffers.
+fn probe_log_path() -> Option<&'static str> {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var("RENDERLAB_GI_PROBE_LOG").ok()).as_deref()
+}
+pub(crate) struct ProbeWatch {
+    ring: Vec<(wgpu::Buffer, WatchState)>,
+    frame: u64,
+}
+impl ProbeWatch {
+    const RING: usize = 4;
+    const BYTES: u64 = 64;
+    fn new(device: &wgpu::Device) -> Self {
+        let ring = (0..Self::RING)
+            .map(|_| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("indirect cache probe counters readback"),
+                    size: Self::BYTES,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                (buffer, WatchState::Free)
+            })
+            .collect();
+        Self { ring, frame: 0 }
+    }
+    fn record(&mut self, encoder: &mut wgpu::CommandEncoder, work: &wgpu::Buffer) {
+        if let Some((buffer, state)) = self.ring.iter_mut().find(|(_, s)| matches!(s, WatchState::Free)) {
+            encoder.copy_buffer_to_buffer(work, 16 * 4, buffer, 0, Self::BYTES);
+            *state = WatchState::Recorded;
+        }
+    }
+    fn submitted(&mut self) {
+        for (buffer, state) in &mut self.ring {
+            if matches!(state, WatchState::Recorded) {
+                let done = Arc::new(std::sync::OnceLock::new());
+                let callback = done.clone();
+                buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    let _ = callback.set(r.is_ok());
+                });
+                *state = WatchState::Mapping(done);
+            }
+        }
+    }
+    /// Appends every mapped entry's counters to the log.
+    fn collect(&mut self, path: &str) {
+        use std::io::Write;
+        for (buffer, state) in &mut self.ring {
+            let WatchState::Mapping(done) = state else { continue };
+            let Some(&ok) = done.get() else { continue };
+            if ok {
+                let words: Vec<u32> = buffer
+                    .slice(..)
+                    .get_mapped_range()
+                    .map(|v| v.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect())
+                    .unwrap_or_default();
+                buffer.unmap();
+                self.frame += 1;
+                let line = format!("{{\"seq\":{},\"probe\":{:?}}}\n", self.frame, words);
+                if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                    let _ = file.write_all(line.as_bytes());
+                }
+            }
+            *state = WatchState::Free;
+        }
+    }
 }
 
 /// The `full` counter (work word 4) of recent cache frames, copied after their passes into a
@@ -1803,11 +1875,15 @@ impl GiState {
             mixed_active: false,
             watch: None,
             grow: false,
+            probe_log: None,
         }
     }
     /// After the frame's submission (Renderer::submit_frame): maps the full-bucket readback.
     pub(crate) fn submitted(&mut self) {
         if let Some(watch) = &mut self.watch {
+            watch.submitted();
+        }
+        if let Some(watch) = &mut self.probe_log {
             watch.submitted();
         }
     }
@@ -3253,6 +3329,9 @@ impl Renderer {
         }
         // auto_slots: a full bucket since the last look doubles the table (emptied, so the
         // cache refills as after a cut), up to slots_log2 and the device's binding limit.
+        if let Some(path) = probe_log_path() {
+            self.gi.probe_log.get_or_insert_with(|| ProbeWatch::new(&self.device)).collect(path);
+        }
         if let Some(full) = self.gi.watch.as_mut().and_then(FullWatch::collect) {
             self.gi.stats.peak_full = self.gi.stats.peak_full.max(full);
             self.gi.grow |= full > 0;
@@ -3310,7 +3389,7 @@ impl Renderer {
             raw_slots: r.raw_slots,
             software,
             field: self.environment.selected.is_some(),
-            profiling: self.gi.profile.is_some(),
+            profiling: self.gi.profile.is_some() || probe_log_path().is_some(),
             near_bins: self.gi.near_bins,
             eye: camera.view().inverse().w_axis.truncate(),
             fov_y: camera.fov_y(),
@@ -3879,6 +3958,9 @@ impl GiState {
             profile.written += 1;
         }
         if let (Some(watch), Some(r)) = (self.watch.as_mut(), self.resources.as_ref()) {
+            watch.record(encoder, &r.work);
+        }
+        if let (Some(watch), Some(r)) = (self.probe_log.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
         }
     }
