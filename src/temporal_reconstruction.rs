@@ -917,9 +917,13 @@ fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<St
     // bit unchanged; `RENDERLAB_TR1_LEAN=0` turns it off. The coverage cycle reads the layer
     // texel of every pixel, so it keeps the layer written everywhere.
     let lean = std::env::var("RENDERLAB_TR1_LEAN").map_or(true, |v| v.trim() != "0");
+    // The previous camera ray as a linear function of the tap (temporal_resolve.wgsl
+    // TR1_LINEAR_RAY); `RENDERLAB_TR1_LINEAR_RAY=0` rebuilds it from the inverse matrix per tap.
+    let linear = std::env::var("RENDERLAB_TR1_LINEAR_RAY").map_or(true, |v| v.trim() != "0");
     for (constant, on) in [
         ("TR1_LAYER_BIT", layer_bit(coverage)),
         ("TR1_REUSE_STILL", lean),
+        ("TR1_LINEAR_RAY", linear),
     ] {
         // A variant file (RENDERLAB_TR1_SHADER) carries its own constants.
         if !on && std::env::var_os("RENDERLAB_TR1_SHADER").is_none() {
