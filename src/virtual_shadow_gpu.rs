@@ -2334,11 +2334,33 @@ impl Renderer {
                 (d.instances.state.revision(), pose)
             })
             .collect();
+        // The fog map keeps its placements between frames and recomputes only the draws whose
+        // instances or skin pose changed (an animated character alone moves every frame).
         let reuse = fog.is_some()
             && state.fog
-            && state.fog_placements == fog_placements
+            && state.fog_placements.len() == fog_placements.len()
             && state.cache.heights.is_some()
-            && state.cache.light == Some(light_bits);
+            && state.cache.light == Some(light_bits)
+            && state.cache.models.len() == draws.iter().map(|d| d.instances.len()).sum::<usize>();
+        let mut updates = vec![];
+        if reuse {
+            let mut first = 0;
+            for ((draw, old), new) in draws.iter().zip(&state.fog_placements).zip(&fog_placements) {
+                let instances = &draw.instances.state;
+                if old != new {
+                    for (slot, &model) in instances.models.iter().enumerate() {
+                        updates.push((
+                            first + slot,
+                            model.to_cols_array().map(f32::to_bits),
+                            shadow_gpu::world_bounds(draw.mesh.bounds, model)?,
+                            instances.casts_shadows(slot),
+                            new.1,
+                        ));
+                    }
+                }
+                first += draw.instances.len();
+            }
+        }
         state.fog_placements = fog_placements;
         // Placements in traced order: draw order, then instance slot.
         let mut models = vec![];
@@ -2379,7 +2401,14 @@ impl Renderer {
             near = near.min((nearest - eye).length());
         }
         if reuse {
-            // The cached heights hold (the bounds are unchanged); the fog ladder sets the span.
+            // The cached heights hold unless a changed caster leaves them; the fog ladder sets
+            // the span.
+            for (_, _, b, _, _) in updates.iter().filter(|u| u.3) {
+                for c in corners(b) {
+                    zlo = zlo.min(c.dot(l));
+                    zhi = zhi.max(c.dot(l));
+                }
+            }
             (near, far) = (1.0, 1.0);
         } else if !casts.contains(&true) {
             (zlo, zhi, near, far) = (0.0, 1.0, 1.0, 1.0);
@@ -2493,7 +2522,27 @@ impl Renderer {
         // N8n: placements the rectangles do not describe retire the surface cache's cells.
         let mut surface_flush = false;
         if reuse {
-            // Nothing moved or deformed since the last frame.
+            // The changed draws' placements, in place.
+            for (p, model, b, cast, pose) in updates {
+                let deformed = pose.is_some() && cache.poses.get(p).copied().flatten() != pose;
+                if model != cache.models[p] || cast != cache.casts[p] || deformed {
+                    let [a0, a1] = rect(&cache.bounds[p]);
+                    let [b0, b1] = rect(&b);
+                    rects.push([a0.min(b0), a1.max(b1)]);
+                    reaches.push(reach(&cache.bounds[p]).max(reach(&b)));
+                    let [c0, c1] = screen(&cache.bounds[p]);
+                    let [d0, d1] = screen(&b);
+                    screens.push([c0.min(d0), c1.max(d1)]);
+                    (cache.models[p], cache.casts[p], cache.bounds[p], cache.poses[p]) =
+                        (model, cast, b, pose);
+                }
+            }
+            if rects.len() > MAX_RECTS {
+                invalidated = [true; MAX_LEVELS];
+                rects.clear();
+                reaches.clear();
+                surface_flush = true;
+            }
         } else if cache.models.len() != placements {
             invalidated = [true; MAX_LEVELS];
             surface_flush = true;
