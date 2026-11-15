@@ -445,7 +445,7 @@ impl Renderer {
     pub(super) fn fog_map_wanted(&self, soft: bool) -> Option<virtual_shadow_gpu::FogMap> {
         let fog = self.atmosphere.settings.volumetric_fog?;
         let wanted = self.hardware_shadows.is_some()
-            && virtual_shadow_gpu::fog_coarse_on()
+            && virtual_shadow_gpu::fog_map_on()
             && self.atmosphere.active
             && soft
             && self.view.soft_mode != SoftShadows::Virtual
@@ -878,7 +878,7 @@ impl Renderer {
         let (specular, diffuse) = (k("at_environment_specular"), k("at_environment_diffuse"));
         let temporal = k("at_fog_temporal");
         let occlusion = (hardware && fog_cull::enabled()).then(|| k("at_fog_occlusion"));
-        let inject_virtual = (!hardware || virtual_shadow_gpu::fog_coarse_on()).then(|| {
+        let inject_virtual = (!hardware || virtual_shadow_gpu::fog_map_on()).then(|| {
             let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("VF1 Virtual fog sampling"),
                 source: wgpu::ShaderSource::Wgsl(virtual_kernel_source(hardware).into()),
