@@ -329,9 +329,39 @@ fn gi_start(key:vec2<u32>) -> u32 { return key.x>>28u; }
 // so no key lies past an empty slot in its probe order. A missing key then costs about two
 // loads instead of the whole bucket's eight (Nsight: the bucket walk was the quarry shading
 // pass's largest hotspot, docs/m7-g2b.md). The result is the same.
+// A search past its key's start slot reads the bucket's other seven key words together
+// (gi_find_rest): a crowded bucket (Glint's) then costs one more round trip instead of one per
+// slot. RENDERLAB_GI_BUCKET=0 (src/program.rs gi_shader) walks them one at a time.
+const GI_FIND_WHOLE:bool=true;
+// The slot of `key` among its bucket's slots after the start (GI_BUCKET 8): the seven key words
+// load before any is compared, then the walk's answer is read off them: the first slot in probe
+// order holding the key, or none once an empty slot comes first.
+fn gi_find_rest(key:vec2<u32>, bucket:u32) -> u32 {
+    let start=gi_start(key);
+    let s=vec4<u32>(bucket)+((vec4<u32>(start)+vec4<u32>(1u,2u,3u,4u))&vec4<u32>(GI_BUCKET-1u));
+    let t=vec3<u32>(bucket)+((vec3<u32>(start)+vec3<u32>(5u,6u,7u))&vec3<u32>(GI_BUCKET-1u));
+    let w=vec4<u32>(gi_word(gi_hot(s.x)),gi_word(gi_hot(s.y)),gi_word(gi_hot(s.z)),gi_word(gi_hot(s.w)));
+    let v=vec3<u32>(gi_word(gi_hot(t.x)),gi_word(gi_hot(t.y)),gi_word(gi_hot(t.z)));
+    var slot=0xffffffffu;
+    var open=true;
+    for(var i=0u;i<7u;i+=1u) {
+        let word=select(select(select(select(select(select(v.z,v.y,i==5u),v.x,i==4u),w.w,i==3u),w.z,i==2u),w.y,i==1u),w.x,i==0u);
+        let at=select(select(select(select(select(select(t.z,t.y,i==5u),t.x,i==4u),s.w,i==3u),s.z,i==2u),s.y,i==1u),s.x,i==0u);
+        if open && (word&GI_KEY_BITS)==key.x { slot=at; open=false; }
+        if word==0u { open=false; }
+    }
+    return slot;
+}
 fn gi_find(key:vec2<u32>) -> u32 {
     let mask=gi_word(GI_H_MASK);
     let bucket=(key.x&mask)&~(GI_BUCKET-1u);
+    if GI_FIND_WHOLE && GI_BUCKET==8u {
+        let s0=bucket+(gi_start(key)&(GI_BUCKET-1u));
+        let w0=gi_word(gi_hot(s0));
+        if (w0&GI_KEY_BITS)==key.x { return s0; }
+        if w0==0u { return 0xffffffffu; }
+        return gi_find_rest(key,bucket);
+    }
     for(var i=0u;i<GI_BUCKET;i+=1u) {
         let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));
         let word=gi_word(gi_hot(slot));
@@ -355,6 +385,7 @@ fn gi_find_pair(key:vec2<u32>) -> u32 {
     if w0==0u { return 0xffffffffu; }
     if (w1&GI_KEY_BITS)==key.x { return s1; }
     if w1==0u { return 0xffffffffu; }
+    if GI_FIND_WHOLE && GI_BUCKET==8u { return gi_find_rest(key,bucket); }
     for(var i=2u;i<GI_BUCKET;i+=1u) {
         let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));
         let word=gi_word(gi_hot(slot));
