@@ -3354,6 +3354,7 @@ impl Renderer {
         cpu.upload += start.elapsed() - cpu.shadow_upload;
         self.uploads.add(uploads);
         let encode_start = Instant::now();
+        let mut fogt = std::time::Instant::now(); // FOGPROF
         // Traced frames resolve visibility without raster depth or MSAA targets.
         if !traced
             && self
@@ -3438,6 +3439,7 @@ impl Renderer {
                 return Err(self.fail(error.to_string()));
             }
         }
+        virtual_shadow_gpu::fogsec(0, &mut fogt); // FOGPROF
         if traced {
             self.view.primary.as_mut().unwrap().requests = streaming;
             let scopes = OperationScopes::new(&self.device);
@@ -3494,6 +3496,7 @@ impl Renderer {
                 }
             }
         }
+        virtual_shadow_gpu::fogsec(1, &mut fogt); // FOGPROF
         // P-NRT3: lit traced frames submit their first half (skinning, clusters, shadows,
         // atmosphere, visibility, optional materials and sun visibility) before GI/post preparation
         // and the second half is encoded, so the GPU starts while the CPU still works. Every
@@ -3522,6 +3525,7 @@ impl Renderer {
         let skinned_bounds = visibility_buffer::refresh_skinned_bounds(self, draws);
         uploads.add(skinned_bounds);
         self.uploads.add(skinned_bounds);
+        virtual_shadow_gpu::fogsec(2, &mut fogt); // FOGPROF
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3599,6 +3603,7 @@ impl Renderer {
             mark(&mut encoder, "sun_shadow");
             self.encode_fresh(&mut encoder, draws, slot, timed);
         }
+        virtual_shadow_gpu::fogsec(3, &mut fogt); // FOGPROF
         if traced {
             // Own this handle while VF1 updates its history between the Virtual
             // depth pass and shading; no timestamp borrow crosses that update.
@@ -3791,6 +3796,7 @@ impl Renderer {
                 self.encode_reconstruction(&mut encoder, stamps(4));
             }
         }
+        virtual_shadow_gpu::fogsec(4, &mut fogt); // FOGPROF
         let residency = streaming.then(|| self.encode_residency_readback(&mut encoder, slot));
         let timestamps =
             self.timing
@@ -4041,10 +4047,12 @@ impl Renderer {
         encoder.on_submitted_work_done(move || {
             let _ = callback.set(());
         });
+        virtual_shadow_gpu::fogsec(5, &mut fogt); // FOGPROF
         let finish_start = Instant::now();
         let commands = encoder.finish();
         let finish = finish_start.elapsed();
         self.check_fault()?;
+        virtual_shadow_gpu::fogsec(6, &mut fogt); // FOGPROF
         let encode = encode_start.elapsed() - cpu.shadow_encode - early_submit;
         let submitted_at = Instant::now();
         // The flights still alive when this frame is submitted: a frame that waits inside

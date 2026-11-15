@@ -4261,3 +4261,22 @@ pub(crate) fn fogprof(i: usize, t: std::time::Instant) {
         }
     }
 }
+// FOGPROF: temporary frame CPU sections (RENDERLAB_FOG_SECTIONS=<file>), either mode.
+pub(crate) fn fogsec(i: usize, t: &mut std::time::Instant) {
+    static P: std::sync::Mutex<([f64; 8], u32)> = std::sync::Mutex::new(([0.0; 8], 0));
+    let Some(path) = std::env::var_os("RENDERLAB_FOG_SECTIONS") else { return };
+    let now = std::time::Instant::now();
+    let mut p = P.lock().unwrap();
+    p.0[i] += (now - *t).as_secs_f64() * 1e3;
+    *t = now;
+    if i == 6 {
+        p.1 += 1;
+        if p.1 % 60 == 0 {
+            use std::io::Write;
+            let line = format!("{:?}
+", p.0.map(|v| (v / 60.0 * 1000.0).round() / 1000.0));
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut f| f.write_all(line.as_bytes()));
+            p.0 = [0.0; 8];
+        }
+    }
+}
