@@ -364,6 +364,18 @@ pub(crate) fn stage_source(stage: &str) -> String {
     )
 }
 
+// The native raster keeps its original binding ABI; only wgpu injects the cache.
+fn hardware_source() -> Result<String, Error> {
+    let mut source = stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl"));
+    patch_visibility_tail(
+        &mut source,
+        "        let o=c.vertices+3u*((t>>(8u*(vertex%3u)))&255u);let d=&cluster_data[batch].data;",
+        include_str!("../shaders/visibility_buffer_vertex_cache.wgsl"),
+    )?;
+    source.push_str("\noverride REUSE_VERTICES:bool=false;\n@group(0) @binding(9) var projected:texture_2d<f32>;\n");
+    Ok(source)
+}
+
 /// Counters a pass leaves in its arguments buffer.
 #[cfg(test)]
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -374,6 +386,12 @@ pub(crate) struct PassCounts {
     pub cut_triangles: u32,
     pub software_triangles: u32,
     pub hardware_triangles: u32,
+}
+
+struct VertexReuse {
+    _positions: Depth,
+    project: wgpu::ComputePipeline,
+    groups: [wgpu::BindGroup; 2],
 }
 
 struct EdgeRepair {
@@ -409,6 +427,7 @@ pub(super) struct VisibilityBuffer {
     reset: wgpu::ComputePipeline,
     software: wgpu::ComputePipeline,
     hardware: wgpu::RenderPipeline,
+    vertex_reuse: Option<VertexReuse>,
     base: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
     resolve: [wgpu::ComputePipeline; 2],
@@ -591,6 +610,7 @@ impl ClusterInstances {
         let mut records = vec![];
         let mut groups = vec![];
         let mut placement = 0u32;
+        let mut vertex_base = 0u32;
         for d in draws {
             let mesh = d.mesh.clusters.as_ref().ok_or(Error::InvalidInput(
                 "visibility buffer mesh uploaded without cluster data",
@@ -624,9 +644,10 @@ impl ClusterInstances {
                         c.counts,
                         placement,
                         no_shadow,
-                        0,
+                        vertex_base,
                         0,
                     ]);
+                    vertex_base += (c.counts >> 8) & 255;
                 }
                 placement += 1;
             }
@@ -709,12 +730,13 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
     let Some(buffer) = cache.clusters.upgrade() else {
         return uploads;
     };
-    let (mut record, mut group, mut placement) = (0u64, 0u32, 0u32);
+    let (mut record, mut group, mut placement, mut vertex_base) = (0u64, 0u32, 0u32, 0u32);
     for d in draws {
         let mesh = d.mesh.clusters.as_ref().unwrap();
         if d.mesh.skin.is_some() && !d.instances.is_empty() {
             let b = d.mesh.bounds;
             let mut data = Vec::with_capacity(mesh.clusters.len() * d.instances.len() * 16);
+            let mut at = vertex_base;
             for instance in 0..d.instances.len() {
                 // The whole record again, with its casts-no-shadow word (`ClusterInstances`).
                 let no_shadow = u32::from(!d.instances.state.casts_shadows(instance));
@@ -734,9 +756,10 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
                         c.counts,
                         placement + instance as u32,
                         no_shadow,
-                        0,
+                        at,
                         0,
                     ]);
+                    at += (c.counts >> 8) & 255;
                 }
             }
             let bytes = words(data.into_iter());
@@ -745,6 +768,12 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
             uploads.skinning += bytes.len() as u64;
             uploads.write_calls += 1;
         }
+        vertex_base += mesh
+            .clusters
+            .iter()
+            .map(|c| (c.counts >> 8) & 255)
+            .sum::<u32>()
+            * d.instances.len() as u32;
         record += mesh.clusters.len() as u64 * d.instances.len() as u64;
         group += mesh.groups.len() as u32;
         placement += d.instances.len() as u32;
@@ -915,6 +944,48 @@ impl VisibilityBuffer {
             1,
             U::TEXTURE_BINDING,
         );
+        // Exact local vertices, once per placement, including LOD alternatives. Both
+        // phases share the storage; each only fills vertices of its visible HW list.
+        let vertex_count: u64 = draws
+            .iter()
+            .map(|d| {
+                d.mesh
+                    .clusters
+                    .as_ref()
+                    .unwrap()
+                    .clusters
+                    .iter()
+                    .map(|c| u64::from((c.counts >> 8) & 255))
+                    .sum::<u64>()
+                    * d.instances.len() as u64
+            })
+            .sum();
+        let width = 1024u32;
+        let height = vertex_count.div_ceil(u64::from(width)).max(1);
+        let reuse_vertices = std::env::var("RENDERLAB_VIS_VERTEX_REUSE").is_ok_and(|v| v == "1")
+            && height <= u64::from(r.device.limits().max_texture_dimension_2d);
+        let projected = target(
+            r,
+            "visibility shared clip vertices",
+            wgpu::Extent3d {
+                width: if reuse_vertices { width } else { 1 },
+                height: if reuse_vertices { height as u32 } else { 1 },
+                depth_or_array_layers: 1,
+            },
+            F::Rgba32Float,
+            1,
+            U::STORAGE_BINDING | U::TEXTURE_BINDING,
+        );
+        let projection_layout = layout(
+            &r.device,
+            &[
+                buffer_entry(0, true, false, S::COMPUTE),
+                buffer_entry(1, false, false, S::COMPUTE),
+                buffer_entry(3, false, false, S::COMPUTE),
+                buffer_entry(5, false, false, S::COMPUTE),
+                image(9, F::Rgba32Float),
+            ],
+        );
         let raster_stages = S::VERTEX | S::FRAGMENT;
         let cull_layout = layout(
             &r.device,
@@ -945,6 +1016,10 @@ impl VisibilityBuffer {
                 buffer_entry(1, false, false, S::VERTEX),
                 buffer_entry(3, false, false, S::VERTEX),
                 buffer_entry(8, false, true, S::FRAGMENT),
+                wgpu::BindGroupLayoutEntry {
+                    visibility: S::VERTEX,
+                    ..sampled(9, wgpu::TextureSampleType::Float { filterable: false })
+                },
             ],
         );
         let data_layout = layout(&r.device, &[data_entry(8, S::COMPUTE | S::VERTEX)]);
@@ -1045,9 +1120,7 @@ impl VisibilityBuffer {
             .device
             .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N1c hardware ID raster"),
-                source: wgpu::ShaderSource::Wgsl(
-                    stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")).into(),
-                ),
+                source: wgpu::ShaderSource::Wgsl(hardware_source()?.into()),
             });
         let hardware_pipeline = r
             .device
@@ -1061,7 +1134,10 @@ impl VisibilityBuffer {
                 vertex: wgpu::VertexState {
                     module: &shader,
                     entry_point: Some("vs"),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("REUSE_VERTICES", if reuse_vertices { 1.0 } else { 0.0 })],
+                        ..Default::default()
+                    },
                     buffers: &[],
                 },
                 fragment: Some(wgpu::FragmentState {
@@ -1170,9 +1246,42 @@ impl VisibilityBuffer {
                     (1, clusters.value.as_entire_binding()),
                     (3, lists[i].value.as_entire_binding()),
                     (8, visibility.value.as_entire_binding()),
+                    (9, R::TextureView(&projected.view)),
                 ],
             )
         });
+        let vertex_reuse = if reuse_vertices {
+            let project = compute(
+                &stage_source(include_str!("../shaders/visibility_buffer_project.wgsl")),
+                "project",
+                &[
+                    Some(&projection_layout),
+                    Some(state.array_layout()),
+                    Some(&data_layout),
+                ],
+                &[],
+            );
+            let groups = std::array::from_fn(|i| {
+                bind(
+                    &r.device,
+                    &projection_layout,
+                    &[
+                        (0, configs[i].value.as_entire_binding()),
+                        (1, clusters.value.as_entire_binding()),
+                        (3, lists[i].value.as_entire_binding()),
+                        (5, args[i].value.as_entire_binding()),
+                        (9, R::TextureView(&projected.view)),
+                    ],
+                )
+            });
+            Some(VertexReuse {
+                _positions: projected,
+                project,
+                groups,
+            })
+        } else {
+            None
+        };
         let data_group = cluster_data_group(r, &data_layout, draws, &absent.value);
         let views: Vec<_> = (0..levels)
             .map(|i| {
@@ -1319,6 +1428,7 @@ impl VisibilityBuffer {
             reset,
             software: software_pipeline,
             hardware: hardware_pipeline,
+            vertex_reuse,
             base,
             reduce,
             resolve,
@@ -1705,6 +1815,18 @@ impl Renderer {
                 pass.set_bind_group(1, arrays, &[]);
                 pass.set_bind_group(2, &v.data_group, &[]);
                 pass.dispatch_workgroups_indirect(&v.args[i].value, 0);
+            }
+            if let Some(reuse) = &v.vertex_reuse {
+                mark(encoder, ["visibility.project1", "visibility.project2"][i]);
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("visibility reuse hardware vertices"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&reuse.project);
+                pass.set_bind_group(0, &reuse.groups[i], &[]);
+                pass.set_bind_group(1, arrays, &[]);
+                pass.set_bind_group(2, &v.data_group, &[]);
+                pass.dispatch_workgroups_indirect(&v.rejects.value, 0);
             }
             mark(encoder, ["visibility.hw1", "visibility.hw2"][i]);
             {
