@@ -618,6 +618,13 @@ pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
     } else {
         HELD_SUN.to_owned()
     };
+    // sunrt-2: the tile vote's history hint reads this module's sun history.
+    if let (Some(begin), Some(end)) = (
+        source.find("// tile hint begin\n"),
+        source.find("// tile hint end\n"),
+    ) {
+        source.replace_range(begin..end + "// tile hint end\n".len(), SUN_TILE_HELD);
+    }
     Ok(format!("{source}\n{HELD_SOURCE}\n{sun}"))
 }
 /// U-RTVIS's held stop as the trace entries' `primary_sun`.
@@ -680,6 +687,7 @@ fn trace_source_with(soft_kernels: &str, listing: bool) -> Result<String, Error>
             0 => source,
             probes => with_sun_tile(source, probes)?,
         };
+        let source = with_sunrt_diag(source);
         return Ok(format!(
             "{source}\nvar<private> tr1_rays:u32=8u;\n{}",
             zones_source("primary_frame.zones")
@@ -738,6 +746,58 @@ pub(crate) fn sun_tile_probes() -> u32 {
     })
 }
 const SUN_TILE: &str = include_str!("../shaders/primary_sun_tile.wgsl");
+const SUN_TILE_HELD: &str = include_str!("../shaders/primary_sun_tile_held.wgsl");
+/// sunrt-2: probes of a tile whose every receiver's sun history is one stable class
+/// (shaders/primary_sun_tile_held.wgsl), in the held trace module the game's wgpu path runs.
+/// `RENDERLAB_SUN_TILE_HELD_PROBES=0` turns the hint off (every tile probes
+/// `sun_tile_probes()`); 1..=3 sets it. Written to `RtvisHeld::sun.y` on frames that continue
+/// history.
+pub(crate) fn sun_tile_held_probes() -> u32 {
+    static PROBES: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *PROBES.get_or_init(|| {
+        let value = std::env::var("RENDERLAB_SUN_TILE_HELD_PROBES").ok();
+        match value.as_deref().map(str::parse::<u32>) {
+            None => 1,
+            Some(Ok(n)) if n < 4 => n,
+            Some(_) => {
+                eprintln!("RENDERLAB_SUN_TILE_HELD_PROBES={value:?} ignored: expected 0 to 3");
+                1
+            }
+        }
+    })
+}
+/// Measurement only: `RENDERLAB_SUNRT_DIAG` is a comma list that splits the fused visibility +
+/// sun pass's cost. `nosun` traces no sun rays (every receiver lit), `probes` short-cuts every
+/// tile after its tile-vote probes, `norepair` lists no near-edge pixel for the repair pass.
+/// Pictures are wrong under each; unset in every shipping run.
+fn with_sunrt_diag(source: String) -> String {
+    static FLAGS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let flags = FLAGS.get_or_init(|| std::env::var("RENDERLAB_SUNRT_DIAG").unwrap_or_default());
+    let mut source = source;
+    for flag in flags.split(',') {
+        let (seam, with) = match flag {
+            "nosun" => (
+                "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);",
+                "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);if tr1_rays!=0u {return tr1_rays;}",
+            ),
+            "probes" => (
+                "if tr1_tile_state==2u && (votes==1u || votes==2u) {tr1_tile_state=3u;}",
+                "if tr1_tile_state==2u {tr1_tile_state=3u;}",
+            ),
+            "norepair" => (
+                "near_edge=primary_near_edge(trace,receiver.epsilon);",
+                "near_edge=false;",
+            ),
+            _ => continue,
+        };
+        if source.matches(seam).count() != 1 {
+            eprintln!("RENDERLAB_SUNRT_DIAG={flag} ignored: seam not found once");
+            continue;
+        }
+        source = source.replacen(seam, with, 1);
+    }
+    source
+}
 /// The tile vote's edits to a budgeted trace module: the estimator's pause and resume around
 /// the budget loop, and each Interactive entry's vote before its uncovered-tile return.
 fn with_sun_tile(source: String, probes: u32) -> Result<String, Error> {
@@ -750,7 +810,7 @@ fn with_sun_tile(source: String, probes: u32) -> Result<String, Error> {
         ),
         (
             "    if !in_bounds || covered==0u {return;}\n",
-            "    tr1_tile_vote(trace.record.x!=0u,receiver,id.xy,size.x);\n",
+            "    tr1_tile_vote(trace.record.x!=0u,receiver,max(trace.record.x,1u)-1u,id.xy,size.x);\n",
         ),
     ];
     if source.matches(header).count() != 1
@@ -762,7 +822,7 @@ fn with_sun_tile(source: String, probes: u32) -> Result<String, Error> {
     }
     let mut source = source.replacen(
         header,
-        "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);\n    if tr1_tile_state==3u {tr1_tile_state=0u;tr1_rays=TR1_TILE_PROBES;return tr1_tile_count;}\n    var tr1_first=lane;\n    if tr1_tile_state==2u {tr1_tile_state=0u;tr1_first=TR1_TILE_PROBES;visible=tr1_tile_count;}\n    for(var j=tr1_first;j<tr1_rays;j+=1u) {\n        if j==TR1_TILE_PROBES && tr1_tile_state==1u {tr1_tile_state=2u;break;}\n",
+        "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);\n    if tr1_tile_state==3u {tr1_tile_state=0u;tr1_rays=tr1_tile_pause;return tr1_tile_count;}\n    var tr1_first=lane;\n    if tr1_tile_state==2u {tr1_tile_state=0u;tr1_first=tr1_tile_pause;visible=tr1_tile_count;}\n    for(var j=tr1_first;j<tr1_rays;j+=1u) {\n        if j==tr1_tile_pause && tr1_tile_state==1u {tr1_tile_state=2u;break;}\n",
         1,
     );
     for (seam, vote) in votes {
@@ -1661,7 +1721,15 @@ impl Planner {
         } else {
             0
         };
-        for w in [turn_step, 0, 0, 0] {
+        // sunrt-2: the tile vote's hinted probe count (primary_sun_tile_held.wgsl), on frames
+        // that continue history with one shadowing sun; a turning sun keeps it, as the probes
+        // still vote.
+        let hint = if !self.reset && !listed && suns.len() == 1 && sun_tile_probes() != 0 {
+            sun_tile_held_probes()
+        } else {
+            0
+        };
+        for w in [turn_step, hint, 0, 0] {
             bytes.extend_from_slice(&w.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), HELD_BYTES);
@@ -2748,7 +2816,7 @@ mod tests {
         let (start, pause) = if sun_tile_probes() == 0 {
             ("lane", String::new())
         } else {
-            ("tr1_first", "        if j==TR1_TILE_PROBES && tr1_tile_state==1u {tr1_tile_state=2u;break;}\n".to_owned())
+            ("tr1_first", "        if j==tr1_tile_pause && tr1_tile_state==1u {tr1_tile_state=2u;break;}\n".to_owned())
         };
         assert!(off.contains("tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);"));
         assert!(off.contains(&format!("for(var j={start};j<tr1_rays;j+=1u)")));
@@ -2768,6 +2836,11 @@ mod tests {
             2
         );
         assert_eq!(held.matches("primary_sun_store(p,visible);").count(), 2);
+        // sunrt-2: the held module's tile vote reads the sun history for its hint.
+        assert_eq!(
+            held.matches("if rtvis_held.sun.y==0u {return 0u;}").count(),
+            usize::from(sun_tile_probes() != 0)
+        );
         assert_eq!(
             held.matches("primary_sun_store(vec2<i32>(id.xy),FRESH_SKIP);")
                 .count(),
