@@ -897,10 +897,31 @@ fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<St
     let mode = ["tr1-mask", "tr1-raw", "tr1-window"]
         .into_iter()
         .find(|m| p_still(m));
+    // Measurement only: `RENDERLAB_TR1_SHADER=PATH` reads the resolve body from a file (variant
+    // screens without a build per variant; the same bindings and entry).
+    let resolve_body = std::env::var("RENDERLAB_TR1_SHADER")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_else(|| RESOLVE.to_owned());
     let mut resolve = match mode {
         Some(mode) => mask_resolve(mode),
-        None => RESOLVE.to_owned(),
+        None => resolve_body,
     };
+    // The lean resolve (temporal_resolve.wgsl TR1_LAYER_BIT, TR1_REUSE_STILL) leaves every output
+    // bit unchanged; `RENDERLAB_TR1_LEAN=0` turns it off. The coverage cycle reads the layer
+    // texel of every pixel, so it keeps the layer written everywhere.
+    let lean = std::env::var("RENDERLAB_TR1_LEAN").map_or(true, |v| v.trim() != "0");
+    for (constant, on) in [
+        ("TR1_LAYER_BIT", lean && coverage != Some(true)),
+        ("TR1_REUSE_STILL", lean),
+    ] {
+        // A variant file (RENDERLAB_TR1_SHADER) carries its own constants.
+        if !on && std::env::var_os("RENDERLAB_TR1_SHADER").is_none() {
+            let declaration = format!("const {constant}:bool=true;");
+            assert_eq!(resolve.matches(&declaration).count(), 1, "TR1 lean seam: {declaration}");
+            resolve = resolve.replace(&declaration, &format!("const {constant}:bool=false;"));
+        }
+    }
     if let Some(cycle) = coverage {
         resolve = coverage_resolve(&resolve, cycle);
     }
