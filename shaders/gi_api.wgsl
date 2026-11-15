@@ -13,6 +13,32 @@ fn gi_hot_load(slot:u32) -> GiHot {
     let at=(GI_HEADER+slot*GI_HOT_WORDS)>>2u;
     return GiHot(gi_table[at],gi_table[at+1u],gi_table[at+2u],gi_table[at+3u],gi_table[at+4u],gi_table[at+5u]);
 }
+// A find past its key's first two slots reads the bucket's other six key words together
+// (gi_hot_rest): a crowded bucket then costs one more round trip instead of one per slot.
+// RENDERLAB_GI_BUCKET=0 (src/program.rs) walks them one at a time.
+const GI_BUCKET_WHOLE:bool=true;
+// The rest of `key`'s bucket after its first two slots (GI_BUCKET 8): the six key words load
+// before any is compared, then the walk's answer is read off them: the first slot in probe order
+// holding the key, or none once an empty slot comes first.
+fn gi_hot_rest(key:vec2<u32>, bucket:u32) -> GiHot {
+    let start=gi_start(key);
+    let s=vec4<u32>(bucket)+((vec4<u32>(start)+vec4<u32>(2u,3u,4u,5u))&vec4<u32>(GI_BUCKET-1u));
+    let t=vec2<u32>(bucket)+((vec2<u32>(start)+vec2<u32>(6u,7u))&vec2<u32>(GI_BUCKET-1u));
+    let w=vec4<u32>(gi_word(gi_hot(s.x)),gi_word(gi_hot(s.y)),gi_word(gi_hot(s.z)),gi_word(gi_hot(s.w)));
+    let v=vec2<u32>(gi_word(gi_hot(t.x)),gi_word(gi_hot(t.y)));
+    var slot=0xffffffffu;
+    var open=true;
+    for(var i=0u;i<6u;i+=1u) {
+        let word=select(select(select(select(select(v.y,v.x,i==4u),w.w,i==3u),w.z,i==2u),w.y,i==1u),w.x,i==0u);
+        let at=select(select(select(select(select(t.y,t.x,i==4u),s.w,i==3u),s.z,i==2u),s.y,i==1u),s.x,i==0u);
+        if open && (word&GI_KEY_BITS)==key.x { slot=at; open=false; }
+        if word==0u { open=false; }
+    }
+    if slot==0xffffffffu {
+        return GiHot(vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u));
+    }
+    return gi_hot_load(slot);
+}
 // The record of `key`, with r0.x zero when it is absent, searched in the order gi_find uses.
 // The start record loads before its key is compared, so the usual case (the insert found its
 // own start slot free) costs one memory round trip. The next slot's key word loads with it
@@ -29,6 +55,7 @@ fn gi_hot_find(key:vec2<u32>) -> GiHot {
     if first.r0.x==0u { return none; }
     if (next&GI_KEY_BITS)==key.x { return gi_hot_load(next_slot); }
     if next==0u { return none; }
+    if GI_BUCKET_WHOLE && GI_BUCKET==8u { return gi_hot_rest(key,bucket); }
     for(var i=2u;i<GI_BUCKET;i+=1u) {
         let slot=bucket+((gi_start(key)+i)&(GI_BUCKET-1u));
         let word=gi_word(gi_hot(slot));
