@@ -1650,12 +1650,15 @@ impl Planner {
         // STILL_BATCH frames and little is pending, the cache's passes run on one frame in
         // STILL_BATCH only: the cells involved are made and lit at most STILL_BATCH - 1 frames
         // later. Any motion, a relight, a moved caster or a larger backlog runs every frame.
+        // Once a cache frame of the still view found nothing to do (no missing cell, an empty
+        // gather queue: with pixel-centre keys the jitter makes no cells), none runs until
+        // something changes, as after `idle_after`.
         if still_batch_on()
             && view.idle_frames >= STILL_BATCH
             && flags == 0
             && !busy
-            && self.pending < STILL_BATCH_PENDING
-            && view.idle_frames % STILL_BATCH != 0
+            && (self.pending == 0
+                || self.pending < STILL_BATCH_PENDING && view.idle_frames % STILL_BATCH != 0)
         {
             return Finished { frame, plan: None };
         }
