@@ -661,6 +661,18 @@ fn cache_hits_for(head: &str) -> Option<f32> {
             .then_some(CACHE_HITS_DEFAULT),
     }
 }
+/// The share of the hit's cell its cone must cover to read the cache
+/// (shaders/reflection_cache_hits.wgsl RL_CACHE_CONE): 1, or `RENDERLAB_RL_CACHE_CONE` (0-1).
+fn cache_cone() -> f32 {
+    static CONE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *CONE.get_or_init(|| {
+        std::env::var("RENDERLAB_RL_CACHE_CONE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|c| *c > 0.0 && *c <= 1.0)
+            .unwrap_or(1.0)
+    })
+}
 /// `RENDERLAB_RL_CACHE_TRACE=1` puts the lookup back in the trace kernel, where it cost more
 /// trace time than it saved hit time.
 fn cache_in_trace() -> bool {
@@ -1164,7 +1176,11 @@ fn compose_stage(
         });
         // Hardware and software traces alike (the software seam passes rs_trace's distance).
         reflection.push_str(&match cache_hits_for(head).filter(|_| indirect_calls) {
-            Some(rough) => CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", &format!("{rough:?}")),
+            Some(rough) => CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", &format!("{rough:?}")).replacen(
+                "const RL_CACHE_CONE:f32=1.0;",
+                &format!("const RL_CACHE_CONE:f32={:?};", cache_cone()),
+                1,
+            ),
             None => CACHE_HITS_STUB.to_owned(),
         });
     }

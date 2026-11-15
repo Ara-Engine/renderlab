@@ -13,6 +13,8 @@
 // level's cell), and absent or unshaded cells return w 0 and keep the full shading.
 @group(3) @binding(28) var<storage,read> rl_cache_outgoing:array<vec4<f32>>;
 const RL_CACHE_ROUGH:f32=RL_CACHE_ROUGH_MIN;
+// The share of the hit's cell the cone must cover (1: the whole cell).
+const RL_CACHE_CONE:f32=1.0;
 
 // The cached outgoing radiance (rgb, unexposed) and w 1, or w 0 to shade the hit: a hit
 // `record` a distance `t` along `d` from `origin`, whose ray cone is `cone` metres wide there.
@@ -20,7 +22,7 @@ fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rou
     if rough<RL_CACHE_ROUGH || gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
     let world=fma(d,vec3<f32>(t),origin);
     let base=gi_level(world);
-    if cone<gi_edge(base) { return vec4<f32>(0.0); }
+    if cone<RL_CACHE_CONE*gi_edge(base) { return vec4<f32>(0.0); }
     let last=gi_word(GI_H_LEVELS)-1u;
     let level=min(max(base,u32(ceil(log2(cone/gi_header_f32(GI_H_MIN_EDGE))))),last);
     let hit=primary_decode(record);
