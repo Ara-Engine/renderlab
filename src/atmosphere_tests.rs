@@ -758,3 +758,15 @@ mod at2;
 
 #[path = "atmosphere_vf2_tests.rs"]
 mod vf2;
+
+/// sunrt-6: the ray-hardware fog kernels (fog cull and sun vote included) parse and validate,
+/// barrier uniformity included.
+#[test]
+fn hardware_fog_kernels_validate() {
+    let sources = crate::renderer::atmosphere_gpu::compile_structure_sources(true);
+    let kernels = &sources.iter().find(|(name, _)| *name == "kernels").unwrap().1;
+    if crate::renderer::fog_cull::enabled() && crate::renderer::atmosphere_gpu::fog_vote() {
+        assert!(kernels.contains("at_fog_votes"));
+    }
+    validate(kernels);
+}
