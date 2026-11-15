@@ -148,9 +148,32 @@ fn with_count(source: String) -> String {
         ),
     ];
     let mut source = source;
-    for (from, to) in seams {
+    // `=2` (with RENDERLAB_GI_BUCKET=0, so finds walk): words 11, 14 and 15 count the finds that
+    // found nothing, those that found their key past the second slot, and the misses that read a
+    // whole bucket with no empty slot, in place of blends, second bins and fallback levels.
+    let finds = std::env::var("RENDERLAB_GI_RX_COUNT").as_deref() == Ok("2");
+    for (k, (from, to)) in seams.into_iter().enumerate() {
+        if finds && [6, 9, 10].contains(&k) {
+            continue;
+        }
         assert_eq!(source.matches(from).count(), 1, "GI receiver count seam {from}");
         source = source.replacen(from, &to, 1);
+    }
+    if finds {
+        for (from, to) in [
+            (
+                "    if first.r0.x==0u { return none; }\n",
+                "    if first.r0.x==0u { gi_cn[4]+=1u; return none; }\n",
+            ),
+            ("    if next==0u { return none; }\n", "    if next==0u { gi_cn[4]+=1u; return none; }\n"),
+            (
+                "        if (word&GI_KEY_BITS)==key.x { return gi_hot_load(slot); }\n        if word==0u { break; }\n    }\n    return none;\n",
+                "        if (word&GI_KEY_BITS)==key.x { gi_cn[7]+=1u; return gi_hot_load(slot); }\n        if word==0u { break; }\n        if i==GI_BUCKET-1u { gi_cn[8]+=1u; }\n    }\n    gi_cn[4]+=1u;\n    return none;\n",
+            ),
+        ] {
+            assert_eq!(source.matches(from).count(), 1, "GI receiver find count seam {from}");
+            source = source.replacen(from, to, 1);
+        }
     }
     let words = [4, 5, 7, 8, 11, 12, 13, 14, 15];
     let flush: String = std::iter::once("    gi_prepare(input);\n".to_owned())
