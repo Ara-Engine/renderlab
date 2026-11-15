@@ -570,7 +570,7 @@ fn vd_edge_rays(id:vec2<u32>)->u32 {
     let first=vd_hash(id.x+id.y*u32(vd.size.x))+u32(vd.size.z)*23u;
     var lit=0u;
     for(var k=0u;k<VD_RAYS;k+=1u) {
-        let s=(first+k*(64u/VD_RAYS))&63u;
+        let s=(first+k*(64u/max(VD_RAYS,1u)))&63u;
         let pair=vd.samples[s>>1u];
         let g=select(pair.xy,pair.zw,(s&1u)!=0u);
         let far=select(vd_mask.x>>s,vd_mask.y>>(s-32u),s>=32u)&1u;
@@ -580,7 +580,7 @@ fn vd_edge_rays(id:vec2<u32>)->u32 {
         let reach=vd_ray_reach/max(dot(dir,vsm.l.xyz),0.05)*1.02;
         if !rs_blocked(vd_px.origin,dir,1e-4,reach) {lit+=1u;}
     }
-    return lit*256u/VD_RAYS;
+    return lit*256u/max(VD_RAYS,1u);
 }
 // 16 bits a texel, two a word (word = the top word's index / 2): see vsm_outline_line.
 @group(0) @binding(56) var<storage,read> vsm_outline:array<u32>;
