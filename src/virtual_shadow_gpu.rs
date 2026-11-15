@@ -3179,13 +3179,14 @@ impl Renderer {
         self.queue.write_buffer(&r.pass, 0, &pass);
         self.uploads.shadows += (FRAME_BYTES + pass.len()) as u64;
 
-        // Exact hard edges: per placement, whether its mesh is in the software trace geometry
-        // (meshes over its triangle cap are not, and keep the map's answer).
+        // Exact hard edges: per placement, whether its mesh is in the software trace geometry as
+        // drawn (meshes over its triangle cap are not; a skinned mesh's is its bind pose, never
+        // refit): the others keep the map's answer.
         let mut bits = vec![0u32; draws.iter().map(|d| d.instances.len()).sum::<usize>().div_ceil(32).max(1)];
         let mut placement = 0;
         for d in draws {
             for _ in 0..d.instances.len() {
-                if d.mesh.reflection.is_some() {
+                if d.mesh.reflection.is_some() && d.mesh.skin.is_none() {
                     bits[placement / 32] |= 1 << (placement % 32);
                 }
                 placement += 1;
