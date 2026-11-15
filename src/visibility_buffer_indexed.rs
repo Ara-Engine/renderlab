@@ -3,7 +3,9 @@
 use super::*;
 
 pub(super) fn enabled(r: &Renderer) -> bool {
-    r.hardware_shadows.is_none() && std::env::var("RENDERLAB_VIS_INDEXED").is_ok_and(|v| v == "1")
+    r.hardware_shadows.is_none()
+        && r.device.limits().max_storage_buffers_per_shader_stage >= 14
+        && std::env::var("RENDERLAB_VIS_INDEXED").is_ok_and(|v| v == "1")
 }
 
 pub(super) struct Mesh {
