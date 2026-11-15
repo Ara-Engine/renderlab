@@ -69,9 +69,28 @@ fn kernel_source(hardware: bool) -> String {
     )
 }
 
-fn virtual_kernel_source() -> String {
-    format!("{COMMON}{KERNELS}{}", Renderer::atmosphere_shadow_source())
+/// The fog injection that reads the Virtual clipmap. With ray hardware (the fog map,
+/// `virtual_shadow_gpu::FogMap`) it keeps the fog cull and traces the cells no drawn page covers.
+fn virtual_kernel_source(hardware: bool) -> String {
+    if !hardware {
+        return format!("{COMMON}{KERNELS}{}", Renderer::atmosphere_shadow_source());
+    }
+    let kernels = fog_cull::atmosphere_source(KERNELS.to_owned(), fog_cull::enabled());
+    let pattern = "fn at_sun_visible(";
+    assert_eq!(HARDWARE_VISIBILITY.matches(pattern).count(), 1);
+    let traced = HARDWARE_VISIBILITY.replacen(pattern, "fn at_sun_traced(", 1);
+    format!(
+        "enable wgpu_ray_query;
+{COMMON}{kernels}{}{traced}{}",
+        crate::shadows::SHADOW_CASTER_MASK_WGSL,
+        virtual_shadow_gpu::atmosphere_shadow::atmosphere_source_at(
+            FOG_MAP_BINDING,
+            Some("at_sun_traced(world)"),
+        ),
+    )
 }
+/// The RT fog map's accessor buffers start here (the fog cull holds 21 and 22).
+const FOG_MAP_BINDING: u32 = 24;
 
 fn sky_source() -> String {
     format!("{}{SKY}", crate::atmosphere::api_source())
@@ -80,9 +99,7 @@ fn sky_source() -> String {
 #[cfg(test)]
 pub(super) fn compile_structure_sources(hardware: bool) -> Vec<(&'static str, String)> {
     let mut sources = vec![("kernels", kernel_source(hardware)), ("sky", sky_source())];
-    if !hardware {
-        sources.push(("virtual-injection", virtual_kernel_source()));
-    }
+    sources.push(("virtual-injection", virtual_kernel_source(hardware)));
     sources
 }
 
@@ -422,6 +439,24 @@ fn view(binding: u32, view: &wgpu::TextureView) -> wgpu::BindGroupEntry<'_> {
 }
 
 impl Renderer {
+    /// The RT fog map this frame keeps (`RENDERLAB_FOG_COARSE=0`: none, every cell traces):
+    /// lit frames with volumetric fog, sun shadows and soft receivers' targets, outside
+    /// SoftShadows::Virtual (whose own clipmap the fog reads).
+    pub(super) fn fog_map_wanted(&self, soft: bool) -> Option<virtual_shadow_gpu::FogMap> {
+        let fog = self.atmosphere.settings.volumetric_fog?;
+        let wanted = self.hardware_shadows.is_some()
+            && virtual_shadow_gpu::fog_coarse_on()
+            && self.atmosphere.active
+            && soft
+            && self.view.soft_mode != SoftShadows::Virtual
+            && self.view.shadows.settings.enabled()
+            && self.device.features().contains(crate::VIRTUAL_FEATURES)
+            && matches!(self.lighting.source_lights.first(), Some(Light::Directional { .. }));
+        wanted.then(|| virtual_shadow_gpu::FogMap {
+            range: f64::from(fog.distance),
+            tile: f64::from(FROXEL_TILE),
+        })
+    }
     pub(crate) fn atmosphere_shadow_source() -> String {
         virtual_shadow_gpu::atmosphere_shadow::atmosphere_source()
     }
@@ -842,10 +877,10 @@ impl Renderer {
         let (specular, diffuse) = (k("at_environment_specular"), k("at_environment_diffuse"));
         let temporal = k("at_fog_temporal");
         let occlusion = (hardware && fog_cull::enabled()).then(|| k("at_fog_occlusion"));
-        let inject_virtual = (!hardware).then(|| {
+        let inject_virtual = (!hardware || virtual_shadow_gpu::fog_coarse_on()).then(|| {
             let module = device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("VF1 Virtual fog sampling"),
-                source: wgpu::ShaderSource::Wgsl(virtual_kernel_source().into()),
+                source: wgpu::ShaderSource::Wgsl(virtual_kernel_source(hardware).into()),
             });
             kernel(device, ledger, &module, "at_fog_inject")
         });
@@ -1026,13 +1061,22 @@ impl Renderer {
         }
         // Aerial perspective alone needs no shadow resources.
         let tlas = self.hardware_shadows.as_ref().map(|h| h.scene());
-        let virtual_buffers = (self.hardware_shadows.is_none()
-            && self.primary_mode == PrimaryVisibility::VisibilityBuffer
-            && self.view.soft_mode == SoftShadows::Virtual
-            && self.view.shadows.settings.enabled()
-            && self.view.shadows.settings.directional_disk_angle > 0.0)
-            .then(|| self.view.virtual_shadows.as_ref()?.atmosphere_buffers())
-            .flatten();
+        let virtual_buffers = if tlas.is_some() {
+            // The RT fog map, kept only while prepare_virtual keeps it for the fog.
+            self.view
+                .virtual_shadows
+                .as_ref()
+                .filter(|s| s.fog_map())
+                .and_then(|s| s.atmosphere_buffers())
+        } else {
+            (self.primary_mode == PrimaryVisibility::VisibilityBuffer
+                && self.view.soft_mode == SoftShadows::Virtual
+                && self.view.shadows.settings.enabled()
+                && self.view.shadows.settings.directional_disk_angle > 0.0)
+                .then(|| self.view.virtual_shadows.as_ref()?.atmosphere_buffers())
+                .flatten()
+        };
+        let map_binding = if tlas.is_some() { FOG_MAP_BINDING } else { 21 };
         let key = VisibilityKey {
             virtual_map: virtual_buffers.is_some(),
             // API1b fix: the TLAS's address is not its identity. A new scene generation
@@ -1066,14 +1110,15 @@ impl Renderer {
                         binding: 20,
                         resource: wgpu::BindingResource::AccelerationStructure(tlas),
                     });
-                } else if let Some(buffers) = virtual_buffers {
+                }
+                if let Some(buffers) = virtual_buffers {
                     entries.extend(buffers.into_iter().enumerate().map(|(i, b)| {
                         wgpu::BindGroupEntry {
-                            binding: 21 + i as u32,
+                            binding: map_binding + i as u32,
                             resource: b.as_entire_binding(),
                         }
                     }));
-                } else {
+                } else if tlas.is_none() {
                     entries.push(view(21, self.view.shadows.sample_view()));
                     entries.push(wgpu::BindGroupEntry {
                         binding: 22,

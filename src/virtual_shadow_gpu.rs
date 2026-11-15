@@ -65,6 +65,25 @@ const POOL_FREE: u64 = 16;
 const PAGE_MIP_WORDS: u64 = 5461;
 /// The pool's largest size: one layer of 1024 pages is the 128 MiB storage binding.
 const POOL_MAX: u32 = 1024;
+/// The fog map (with ray hardware): the sparse clipmap kept for the volumetric fog alone, its
+/// levels' texels as wide as the froxels at their distances and its pages requested from the
+/// CPU by the fog volume's frustum. The fog's injection (src/atmosphere_shadow.rs) reads it and
+/// traces a ray only where no page is drawn yet. `RENDERLAB_FOG_COARSE=0` traces every cell.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct FogMap {
+    /// The fog volume's radial range (metres).
+    pub range: f64,
+    /// Pixels per froxel side.
+    pub tile: f64,
+}
+pub(crate) fn fog_coarse_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_FOG_COARSE").map_or(true, |v| v.trim() != "0"))
+}
+/// The fog map's first pool (pages; it grows like the sparse clipmap's) and its per-frame
+/// raster budget, so a cut or a moved sun spreads the redraw over frames.
+const FOG_POOL_START: u32 = 256;
+const FOG_BUDGET: u32 = 16;
 /// Whether the sparse clipmap is on (`RENDERLAB_VSM_SPARSE=1` turns it on; off by default).
 fn sparse_switch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -648,6 +667,9 @@ pub(super) struct VirtualState {
     /// asked for (grows when a frame's requests did not fit).
     pool_frame: u32,
     capacity: u32,
+    /// The fog map (`FogMap`) and this frame's CPU page requests (one word per table entry).
+    fog: bool,
+    fog_requests: Vec<u32>,
     /// Page requests depend only on the camera, the sun, the casters and the cache
     /// windows. A frame identical in all of them finds nothing stale, so it skips the
     /// request, compaction and raster passes and only runs the lookup.
@@ -1585,6 +1607,8 @@ impl VirtualState {
             epoch: 0,
             pool_frame: 0,
             capacity: pool_settings().0,
+            fog: false,
+            fog_requests: vec![],
             key: vec![],
             page_work: true,
             history_frames: 0,
@@ -2096,6 +2120,7 @@ impl Renderer {
         draws: &[PreparedDraw<'_>],
         camera: &Camera,
         size: wgpu::Extent3d,
+        fog: Option<FogMap>,
     ) -> Result<(), Error> {
         if !self.device.features().contains(VIRTUAL_FEATURES) {
             return Err(Error::InvalidInput(
@@ -2301,10 +2326,11 @@ impl Renderer {
         let mut ladder_changed = cache.heights != Some(heights);
         cache.heights = Some(heights);
         let footprint = 2.0 * (f64::from(camera.fov_y()) * 0.5).tan() / f64::from(size.height);
+        // The fog map's texel follows the froxel width, `tile` pixels, not the pixel.
+        let texels_per_pixel_log2 = fog.map_or(f64::from(s.texels_per_pixel_log2), |f| -f.tile.log2());
         let level_of = |d: f64| {
-            ((d.max(1e-6) * footprint / f64::from(s.finest_texel)).log2()
-                - f64::from(s.texels_per_pixel_log2))
-            .floor() as i32
+            ((d.max(1e-6) * footprint / f64::from(s.finest_texel)).log2() - texels_per_pixel_log2)
+                .floor() as i32
         };
         // The ladder runs from the nearest caster's level to one past the farthest's. A span
         // of more than MAX_LEVELS octaves (a caster at the lens, or the eye inside a caster's
@@ -2332,6 +2358,15 @@ impl Renderer {
                 None => finest.max(coarsest - 2 * (MAX_LEVELS as i32 - 1)),
             }
             .min(coarsest);
+        }
+        if let Some(f) = fog {
+            // The fog volume's own span: from a metre out (nearer cells are a few centimetres
+            // wide and their light is the camera's own surroundings) to the fog range, at most
+            // MAX_LEVELS octaves from the far end.
+            coarsest = level_of(f.range) + 1;
+            finest = level_of(near.max(1.0))
+                .max(coarsest - MAX_LEVELS as i32 + 1)
+                .min(coarsest);
         }
         state.eye = eye;
         let rungs = ladder(finest, coarsest);
@@ -2397,7 +2432,7 @@ impl Renderer {
         cache.bounds = bounds;
         cache.poses = poses;
         // Sparse with the Disk lookup only: the other lookups read the dense layout.
-        let sparse = sparse_switch() && s.lookup == VirtualLookup::Disk;
+        let sparse = fog.is_some() || (sparse_switch() && s.lookup == VirtualLookup::Disk);
         let pages = i64::from(if sparse { SPARSE_PAGES } else { s.pages });
         let eye_light = glam::DVec2::new(eye.dot(u), eye.dot(v));
         // U-FIXED forward windows: the finest levels' windows sit ahead of the eye, in whole
@@ -2468,6 +2503,62 @@ impl Renderer {
                 entry[16 + k * 4..20 + k * 4].copy_from_slice(&value.to_ne_bytes());
             }
         }
+        // The fog map's page requests, from the CPU: level i serves the fog cells whose width is
+        // its texel to the next level's (the radial distance band where `level_of` picks it), and
+        // requests the window pages under that band's slice of the view frustum (its corner, edge
+        // and centre rays at the band's two distances, in light-space xy).
+        state.fog_requests.clear();
+        if let Some(f) = fog {
+            let n = pages as usize;
+            state.fog_requests.resize(MAX_LEVELS * n * n, 0);
+            let to_world = camera.view().inverse().as_dmat4();
+            let (right, up, back) = (
+                to_world.x_axis.truncate(),
+                to_world.y_axis.truncate(),
+                to_world.z_axis.truncate(),
+            );
+            let tan_y = (f64::from(camera.fov_y()) * 0.5).tan();
+            let tan_x = tan_y * f64::from(size.width) / f64::from(size.height);
+            let rays: Vec<glam::DVec3> = (0..9)
+                .map(|k| {
+                    let (sx, sy) = (f64::from(k % 3) - 1.0, f64::from(k / 3) - 1.0);
+                    (-back + right * (sx * tan_x) + up * (sy * tan_y)).normalize()
+                })
+                .collect();
+            let distance_of = |rung: i32| {
+                f64::from(s.finest_texel) * 2f64.powi(rung) / (f.tile * footprint)
+            };
+            for (i, &rung) in rungs.iter().enumerate() {
+                let d0 = if i == 0 { 0.0 } else { distance_of(rung) };
+                let d1 = rungs.get(i + 1).map_or(f.range, |&r| distance_of(r)).min(f.range);
+                if d0 >= d1 {
+                    continue;
+                }
+                let page = f64::from(s.finest_texel) * 2f64.powi(rung) * f64::from(PAGE);
+                let (mut lo, mut hi) = (glam::DVec2::INFINITY, glam::DVec2::NEG_INFINITY);
+                for &d in &[d0, d1] {
+                    for ray in &rays {
+                        let p = eye + *ray * d;
+                        let q = glam::DVec2::new(p.dot(u), p.dot(v)) / page;
+                        lo = lo.min(q);
+                        hi = hi.max(q);
+                    }
+                }
+                let origin = cache.origins[i].unwrap();
+                // Half a page of margin: cells jitter and reach past the image edges.
+                let first = [(lo.x - 0.5).floor() as i64, (lo.y - 0.5).floor() as i64];
+                let last = [(hi.x + 0.5).floor() as i64, (hi.y + 0.5).floor() as i64];
+                for y in first[1].max(origin[1])..=last[1].min(origin[1] + pages - 1) {
+                    for x in first[0].max(origin[0])..=last[0].min(origin[0] + pages - 1) {
+                        // The toroidal table index of absolute page (x, y).
+                        let tx = x.rem_euclid(pages) as usize;
+                        let ty = y.rem_euclid(pages) as usize;
+                        state.fog_requests[(i * n + ty) * n + tx] = 1;
+                    }
+                }
+            }
+        }
+        state.fog = fog.is_some();
         let casters = state.casters.as_ref().unwrap();
         let primitive_bits = casters.primitive_bits;
         let cluster_count = casters.instances.count;
@@ -2779,11 +2870,15 @@ impl Renderer {
             occluder_gather_frame: false,
             ..state.stats
         };
+        if fog.is_some() && state.resources.is_none() {
+            state.capacity = state.capacity.max(FOG_POOL_START);
+        }
         let created = state.ensure_resources(
             &self.device,
             &self.ledger,
             levels,
-            [size.width, size.height],
+            // The fog map looks nothing up: no per-pixel storage.
+            if fog.is_some() { [8, 8] } else { [size.width, size.height] },
             self.submissions,
             sparse,
             &self.queue,
@@ -3048,6 +3143,12 @@ impl Renderer {
         let casters = state.casters.as_ref().unwrap();
         let r = state.resources.as_mut().unwrap();
         self.queue.write_buffer(&r.frame, 0, &frame);
+        if state.fog && state.page_work {
+            let slots = state.levels * (r.pages * r.pages) as usize;
+            let bytes: Vec<u8> =
+                state.fog_requests[..slots].iter().flat_map(|w| w.to_ne_bytes()).collect();
+            self.queue.write_buffer(&r.requests, 0, &bytes);
+        }
         if r.sparse && state.page_work {
             // The pool header's per-frame words (WGSL `vsm_pool`): an empty raster list, the
             // budget's counter, this frame's failure word, and the frame, budget and size.
@@ -3061,7 +3162,12 @@ impl Renderer {
             self.queue.write_buffer(
                 &r.pool,
                 32,
-                &words(&[pool_frame, pool_settings().1, r.capacity, 0]),
+                &words(&[
+                    pool_frame,
+                    if state.fog { FOG_BUDGET } else { pool_settings().1 },
+                    r.capacity,
+                    0,
+                ]),
             );
         }
         if s.lookup == VirtualLookup::Disk {
@@ -3347,6 +3453,19 @@ impl Renderer {
     /// into the fresh visibility target. `timestamps` brackets all of it; `mark` names its
     /// parts for the pass log (`sun_shadow.requests`, `.raster`, `.planes`, `.lookup`,
     /// `.queued`; src/pass_timeline.rs).
+    /// The fog map's page upkeep (ray hardware; no lookup): its pages under moved casters, a
+    /// moved sun or new requests, at most `FOG_BUDGET` a frame.
+    pub(super) fn encode_fog_map(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
+    ) {
+        if let Some(state) = self.view.virtual_shadows.as_ref().filter(|s| s.fog && s.page_work) {
+            debug_assert!(state.resources.as_ref().is_some_and(|r| r.sparse));
+            mark(encoder, "fog_map");
+            self.encode_virtual_pages(encoder, None, mark);
+        }
+    }
     pub(super) fn encode_virtual(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -3572,7 +3691,10 @@ impl Renderer {
             .unwrap()
             .virtual_geometry()
             .unwrap();
-        encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
+        // The fog map's requests come from the CPU (prepare_virtual).
+        if !state.fog {
+            encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
+        }
         encoder.clear_buffer(&r.reach, 0, None);
         encoder.clear_buffer(&r.render, 0, Some(slots * 4));
         encoder.clear_buffer(&casters.work, 0, Some(MAX_LEVELS as u64 * ARGS_BYTES));
@@ -3587,13 +3709,15 @@ impl Renderer {
                 }),
             });
             // N-VSM1: the disk lookup requests its own windows' pages.
-            pass.set_pipeline(if state.settings.lookup == VirtualLookup::Disk {
-                &p.disk_mark
-            } else {
-                &p.mark
-            });
-            pass.set_bind_group(0, &*g.mark, &[]);
-            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(4), 1);
+            if !state.fog {
+                pass.set_pipeline(if state.settings.lookup == VirtualLookup::Disk {
+                    &p.disk_mark
+                } else {
+                    &p.mark
+                });
+                pass.set_bind_group(0, &*g.mark, &[]);
+                pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(4), 1);
+            }
             if r.sparse {
                 // Stale and unused pages back to the pool, then each level's requests take
                 // pages, coarsest first (the raster budget serves coarse levels first), then
@@ -3637,7 +3761,7 @@ impl Renderer {
                 .unwrap()
                 .record(encoder, &r.reach, 0, tag);
         }
-        mark(encoder, "sun_shadow.raster");
+        mark(encoder, if state.fog { "fog_map.raster" } else { "sun_shadow.raster" });
         for layer in 0..2 {
             {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {

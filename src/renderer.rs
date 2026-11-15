@@ -3462,7 +3462,16 @@ impl Renderer {
             }
             if soft && self.view.soft_mode == crate::SoftShadows::Virtual {
                 let scopes = OperationScopes::new(&self.device);
-                let result = self.prepare_virtual(draws, camera, color.size());
+                let result = self.prepare_virtual(draws, camera, color.size(), None);
+                if let Some(error) = scopes.finish() {
+                    return Err(self.fail(error.to_string()));
+                }
+                result?;
+            }
+            // With ray hardware the fog's sun shadows read the coarse clipmap levels.
+            if let Some(fog) = self.fog_map_wanted(soft) {
+                let scopes = OperationScopes::new(&self.device);
+                let result = self.prepare_virtual(draws, camera, color.size(), Some(fog));
                 if let Some(error) = scopes.finish() {
                     return Err(self.fail(error.to_string()));
                 }
@@ -3577,6 +3586,7 @@ impl Renderer {
             self.encode_transmission(&mut encoder, transparent);
         }
         if lit && !virtual_frame {
+            self.encode_fog_map(&mut encoder, &mut mark);
             mark(&mut encoder, "atmosphere");
             self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
         }
