@@ -745,6 +745,13 @@ pub(crate) fn sun_tile_probes() -> u32 {
         }
     })
 }
+/// sunrt-6 edge stop (shaders/primary_sun_tile.wgsl): a tile whose receivers each saw unanimous
+/// probes, some all blocked and some all clear, keeps the probes instead of resuming main's
+/// budget. `RENDERLAB_SUN_EDGE_STOP=0` resumes those tiles, as main does.
+pub(crate) fn sun_edge_stop() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_SUN_EDGE_STOP").map_or(true, |v| v != "0"))
+}
 const SUN_TILE: &str = include_str!("../shaders/primary_sun_tile.wgsl");
 const SUN_TILE_HELD: &str = include_str!("../shaders/primary_sun_tile_held.wgsl");
 /// sunrt-2: probes of a tile whose every receiver's sun history is one stable class
@@ -781,7 +788,7 @@ fn with_sunrt_diag(source: String) -> String {
                 "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);if tr1_rays!=0u {return tr1_rays;}",
             ),
             "probes" => (
-                "if tr1_tile_state==2u && (votes==1u || votes==2u) {tr1_tile_state=3u;}",
+                "if tr1_tile_state==2u && (votes==1u || votes==2u || edge) {tr1_tile_state=3u;}",
                 "if tr1_tile_state==2u {tr1_tile_state=3u;}",
             ),
             "norepair" => (
@@ -829,7 +836,8 @@ fn with_sun_tile(source: String, probes: u32) -> Result<String, Error> {
         source = source.replacen(seam, &format!("{vote}{seam}"), 1);
     }
     Ok(format!(
-        "{source}\nconst TR1_TILE_PROBES:u32={probes}u;\n{SUN_TILE}"
+        "{source}\nconst TR1_TILE_PROBES:u32={probes}u;\nconst TR1_TILE_EDGE_STOP:bool={};\n{SUN_TILE}",
+        sun_edge_stop()
     ))
 }
 /// U-RTVIS (docs/rtvis.md): on frames whose probe count (sampling.y) is below the budget
