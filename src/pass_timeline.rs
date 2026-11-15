@@ -19,6 +19,14 @@
 //! `renderer_frame` (`frame` remains its compatibility alias), never by line position.
 //! Failed readbacks and frames without timestamps emit `dropped:true` with a reason,
 //! rather than fabricated timings. Polling is still needed to collect final readbacks.
+//! Each line also carries the CPU time from each stage's mark to the next (`"cpu":{...}`, the
+//! stage's encoding and any preparation the renderer does inline there; repeated names add up)
+//! and `"cpu_head"`, from the frame's `begin` to its first mark. A mark named `cpu:...` is a CPU
+//! point only (no GPU timestamp, no pass): it splits the CPU stages and nothing else.
+//! Measurement only: `RENDERLAB_CPU_SPLIT=1` also finishes and submits the encoder at every mark,
+//! so each stage's own `CommandEncoder::finish` (wgpu's replay of its commands) is timed alone
+//! (`"finish":{...}`, by the stage the commands were recorded in). It changes when queue writes
+//! land against earlier commands, so pictures and GPU times under it are not the default's.
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
@@ -41,6 +49,12 @@ struct Frame {
     resolve: wgpu::Buffer,
     readback: wgpu::Buffer,
     names: Vec<&'static str>,
+    /// Every mark (GPU stages and `cpu:` points) with when it was recorded, and when the frame
+    /// began.
+    cpu: Vec<(&'static str, std::time::Instant)>,
+    begun: Option<std::time::Instant>,
+    /// RENDERLAB_CPU_SPLIT: each split segment's finish time, by stage.
+    finishes: Vec<(&'static str, std::time::Duration)>,
     mapped: Option<Arc<OnceLock<Result<(), wgpu::BufferAsyncError>>>>,
     frame: u64,
 }
@@ -67,6 +81,9 @@ impl Frame {
                 mapped_at_creation: false,
             }),
             names: vec![],
+            cpu: vec![],
+            begun: None,
+            finishes: vec![],
             mapped: None,
             frame: 0,
         }
@@ -110,6 +127,8 @@ pub(crate) struct PassTimeline {
     /// Whether dotted part names are marked (`RENDERLAB_PASS_LOG_DETAIL`).
     detail: bool,
     log: std::io::BufWriter<std::fs::File>,
+    /// RENDERLAB_CPU_SPLIT: the device and queue that finish and submit at each mark.
+    split: Option<(wgpu::Device, wgpu::Queue)>,
 }
 
 impl PassTimeline {
@@ -130,6 +149,8 @@ impl PassTimeline {
             period: f64::from(queue.get_timestamp_period()),
             detail: std::env::var_os("RENDERLAB_PASS_LOG_DETAIL").is_some(),
             log: std::io::BufWriter::new(log),
+            split: (std::env::var("RENDERLAB_CPU_SPLIT").as_deref() == Ok("1"))
+                .then(|| (device.clone(), queue.clone())),
         })
     }
 
@@ -146,6 +167,9 @@ impl PassTimeline {
         });
         let entry = &mut self.frames[i];
         entry.names.clear();
+        entry.cpu.clear();
+        entry.finishes.clear();
+        entry.begun = Some(std::time::Instant::now());
         entry.frame = self.frame;
         self.current = Some(i);
         self.next = (i + 1) % self.frames.len();
@@ -170,6 +194,17 @@ impl PassTimeline {
     /// Starts stage `name` at this point of `encoder`'s work.
     pub(crate) fn mark(&mut self, encoder: &mut wgpu::CommandEncoder, name: &'static str) {
         let Some(i) = self.current else { return };
+        if let (Some((device, queue)), Some(&(stage, _))) = (&self.split, self.frames[i].cpu.last()) {
+            let start = std::time::Instant::now();
+            let next = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("cpu split") });
+            let commands = std::mem::replace(encoder, next).finish();
+            self.frames[i].finishes.push((stage, start.elapsed()));
+            queue.submit([commands]);
+        }
+        if name.starts_with("cpu:") {
+            self.frames[i].cpu.push((name, std::time::Instant::now()));
+            return;
+        }
         if name.contains('.') && !self.detail && !ALWAYS.contains(&name) {
             return;
         }
@@ -179,6 +214,7 @@ impl PassTimeline {
         }
         let index = entry.names.len() as u32;
         entry.names.push(name);
+        entry.cpu.push((name, std::time::Instant::now()));
         encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(name),
             timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
@@ -264,14 +300,39 @@ impl PassTimeline {
                     .iter()
                     .map(|(n, t)| format!("\"{n}\":{t:.4}"))
                     .collect();
+                // CPU time from each mark to the next, by name.
+                let mut cpu: Vec<(&str, f64)> = vec![];
+                for (k, (name, at)) in entry.cpu.iter().enumerate().take(entry.cpu.len().saturating_sub(1)) {
+                    let t = (entry.cpu[k + 1].1 - *at).as_secs_f64() * 1e3;
+                    match cpu.iter_mut().find(|(n, _)| n == name) {
+                        Some((_, total)) => *total += t,
+                        None => cpu.push((name, t)),
+                    }
+                }
+                let cpu: Vec<String> = cpu.iter().map(|(n, t)| format!("\"{n}\":{t:.4}")).collect();
+                let mut finishes: Vec<(&str, f64)> = vec![];
+                for (name, d) in &entry.finishes {
+                    let t = d.as_secs_f64() * 1e3;
+                    match finishes.iter_mut().find(|(n, _)| n == name) {
+                        Some((_, total)) => *total += t,
+                        None => finishes.push((name, t)),
+                    }
+                }
+                let finishes: Vec<String> = finishes.iter().map(|(n, t)| format!("\"{n}\":{t:.4}")).collect();
+                let head = match (entry.begun, entry.cpu.first()) {
+                    (Some(begun), Some(&(_, first))) => (first - begun).as_secs_f64() * 1e3,
+                    _ => 0.0,
+                };
                 let span = ms(stamps[0], *stamps.last().unwrap());
                 let _ = write_record(
                     &mut self.log,
                     &mut self.last_emitted,
                     entry.frame,
                     &format!(
-                        "\"dropped\":false,\"span\":{span:.4},\"passes\":{{{}}}",
-                        body.join(",")
+                        "\"dropped\":false,\"span\":{span:.4},\"passes\":{{{}}},\"cpu_head\":{head:.4},\"cpu\":{{{}}},\"finish\":{{{}}}",
+                        body.join(","),
+                        cpu.join(","),
+                        finishes.join(",")
                     ),
                 );
             } else {
