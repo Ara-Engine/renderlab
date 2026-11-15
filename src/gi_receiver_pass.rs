@@ -99,7 +99,7 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
 /// 14 second-bin lookups, 15 fallback levels sampled. The picture is unchanged.
 fn count() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_RX_COUNT").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_RX_COUNT").is_ok_and(|v| v == "1" || v == "2"))
 }
 fn with_count(source: String) -> String {
     let stats = if source.contains("var<storage,read_write> rl_room_stats") {
