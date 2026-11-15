@@ -893,7 +893,7 @@ pub(crate) fn resolve_source(wgsl: &str) -> Result<String, Error> {
 }
 
 // Shared with picking: a missing second-layer bit means the layer texture is unwritten.
-pub(super) fn layer_bit(coverage: Option<bool>) -> bool {
+pub(in crate::renderer) fn layer_bit(coverage: Option<bool>) -> bool {
     std::env::var("RENDERLAB_TR1_LEAN").map_or(true, |v| v.trim() != "0")
         && coverage != Some(true)
 }
