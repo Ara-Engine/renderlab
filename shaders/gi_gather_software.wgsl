@@ -112,6 +112,7 @@ var<workgroup> gi_drain_base:u32;
             }
             // The aimed rays resolve what is near a light: their hits keep the pixels' level.
             gi_hit_spread=0.0;
+            gi_near_cold=cold;
             let aimed=gi_near_gather(lane,origin,n,c.key,band,tertiary);
             rays+=aimed.x;
             missing+=aimed.y;
