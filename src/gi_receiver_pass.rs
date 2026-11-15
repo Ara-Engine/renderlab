@@ -77,8 +77,8 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     let mut kernel = SOURCE.split_once(ENTRY_SEAM).unwrap().1.to_string();
     // Measurement only (`RENDERLAB_GI_RX_PROBE=nolookup`): no cache lookup, so the pass costs
     // its decode and the record's stores alone. Shading then sees no GI value. The pattern holds
-    // no line break: Ara's checkout on Windows has CRLF line endings, where the earlier pattern
-    // (with one) never matched, so the switch did nothing in the game.
+    // no line break and is applied to the kernel text alone: the earlier two-line pattern on the
+    // composed source did not match in the game, so the switch did nothing there.
     if std::env::var("RENDERLAB_GI_RX_PROBE").as_deref() == Ok("nolookup") {
         kernel = kernel.replacen("gi_prepare(input);", "", 1);
     }
