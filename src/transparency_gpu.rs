@@ -672,6 +672,11 @@ fn rect_reflect() -> bool {
 }
 /// One rectangle a dynamic-offset slot (the uniform offset alignment).
 const RECT_SLOT: u64 = 256;
+/// A glass run whose rectangle holds at most this many pixels traces it directly: its occlusion
+/// query (a second raster pass of the run) would cost more than the kernel launched over a
+/// rectangle with no traced lobe. Larger runs keep the query, so a run whose lobes the trace
+/// rejects (Outpost's tarp) takes only the clear. Both choices write the same values.
+const RECT_DIRECT_PIXELS: u64 = 1 << 17;
 fn uniform(dynamic: bool, size: u64) -> wgpu::BindingType {
     wgpu::BindingType::Buffer {
         ty: wgpu::BufferBindingType::Uniform,
@@ -2973,7 +2978,8 @@ impl Renderer {
                     // The run's rectangle: its draws' conservative bounds.
                     let run_rect = run.iter().map(|&j| draw_rects[j]).reduce(union).unwrap_or([0; 4]);
                     let rect_mode = bounded && rect_reflect();
-                    let queried = bounded;
+                    let direct = rect_mode && measurement::area(run_rect) <= RECT_DIRECT_PIXELS;
+                    let queried = bounded && !direct;
                     let slot = if rect_mode { (*first as u64 + 1) * RECT_SLOT } else { 0 };
                     if rect_mode {
                         self.queue.write_buffer(
@@ -3097,7 +3103,13 @@ impl Renderer {
                     pass.set_bind_group(1, arrays, &[]);
                     pass.set_bind_group(2, materials, &[]);
                     pass.set_bind_group(3, self.lighting.bind(), &[]);
-                    if bounded {
+                    if direct {
+                        let width = run_rect[2].saturating_sub(run_rect[0]);
+                        let height = run_rect[3].saturating_sub(run_rect[1]);
+                        if width > 0 && height > 0 {
+                            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(8), 1);
+                        }
+                    } else if bounded {
                         pass.dispatch_workgroups_indirect(&gpu.lobe_args, 0);
                     } else {
                         pass.dispatch_workgroups(
