@@ -88,11 +88,11 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     // Measurement only (`RENDERLAB_GI_RX_PROBE=firstslot`): every find reads its start record
     // alone, as a find given its slot would; keys past it read as absent (a wrong picture).
     if std::env::var("RENDERLAB_GI_RX_PROBE").as_deref() == Ok("firstslot") {
-        let from = "\n    if (first.r0.x&GI_KEY_BITS)==key.x { return first; }\n    if first.r0.x==0u { return none; }\n";
+        let from = "    if (first.r0.x&GI_KEY_BITS)==key.x { return first; }\n    if first.r0.x==0u { return none; }\n";
         assert_eq!(composed.source.matches(from).count(), 1, "firstslot seam");
         composed.source = composed.source.replacen(
             from,
-            "\n    if (first.r0.x&GI_KEY_BITS)==key.x { return first; }\n    if true { return none; }\n",
+            "    if (first.r0.x&GI_KEY_BITS)==key.x { return first; }\n    if true { return none; }\n",
             1,
         );
     }
@@ -136,8 +136,8 @@ fn with_count(source: String) -> String {
             "    let none=GiHot(vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u));\n    gi_cn[2]+=1u;\n".into(),
         ),
         (
-            "\n    if first.r0.x==0u { return none; }\n",
-            "\n    if first.r0.x==0u { return none; }\n    gi_cn[3]+=1u;\n".into(),
+            "    if first.r0.x==0u { return none; }\n",
+            "    if first.r0.x==0u { return none; }\n    gi_cn[3]+=1u;\n".into(),
         ),
         (
             "        let word=gi_word(gi_hot(slot));\n        if (word&GI_KEY_BITS)==key.x { return gi_hot_load(slot); }",
@@ -173,8 +173,8 @@ fn with_count(source: String) -> String {
     if finds {
         for (from, to) in [
             (
-                "\n    if first.r0.x==0u { return none; }\n",
-                "\n    if first.r0.x==0u { gi_cn[4]+=1u; return none; }\n",
+                "    if first.r0.x==0u { return none; }\n",
+                "    if first.r0.x==0u { gi_cn[4]+=1u; return none; }\n",
             ),
             ("    if next==0u { return none; }\n", "    if next==0u { gi_cn[4]+=1u; return none; }\n"),
             (
