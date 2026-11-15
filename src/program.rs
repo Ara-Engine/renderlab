@@ -550,7 +550,8 @@ fn rl_hit_switches(source: String) -> String {
 /// The pass's own modules under the same list (measurement only, RT speck bisect): `missblack`
 /// stores black for `rl_trace_pixels`' misses instead of the sky, `hitblack` stores black for
 /// `reflection_hits`' hits, `lone` makes the composite apply the lone-stratum bound whenever two
-/// strata are valid. Each applies where its seam is (trace, hits, composite); unset, nothing changes.
+/// strata are valid, `nostats` drops the trace's per-receiver counters and `nocast` makes every
+/// trace ray a miss. Each applies where its seam is (trace, hits, composite); unset, nothing changes.
 pub(crate) fn rl_pass_switches(source: String) -> String {
     static LIST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     let list = LIST.get_or_init(|| std::env::var("RENDERLAB_RL_HIT").unwrap_or_default());
@@ -566,18 +567,6 @@ pub(crate) fn rl_pass_switches(source: String) -> String {
 }
 /// `rl_pass_switches`' seams: switch, text, replacement.
 pub(crate) const RL_PASS_SEAMS: [(&str, &str, &str); 5] = [
-    // Measurement only: the trace without its per-receiver counters, and without its casts
-    // (every ray a miss), to split its time.
-    (
-        "nostats",
-        "        atomicAdd(&rl_trace_stats.pixels,1u);\n        atomicAdd(&rl_trace_stats.slots,count);\n",
-        "",
-    ),
-    (
-        "nocast",
-        "        let traced=rl_cast(origin,d,epsilon);\n",
-        "        let traced=RlCast(vec4<u32>(0u),-1.0);\n",
-    ),
     (
         "missblack",
         "textureStore(rl_samples,at,rl_f16_nearest(vec4<f32>(rl_sky(d,cone_alpha),1.0)));",
@@ -592,6 +581,18 @@ pub(crate) const RL_PASS_SEAMS: [(&str, &str, &str); 5] = [
         "lone",
         "if lone>0.0 && valid>1u && f32(count)>=rl_composite_frame.y {",
         "if lone>0.0 && valid>1u {",
+    ),
+    // The trace without its per-receiver counters, and without its casts (every ray a miss),
+    // to split its time.
+    (
+        "nostats",
+        "        atomicAdd(&rl_trace_stats.pixels,1u);\n        atomicAdd(&rl_trace_stats.slots,count);\n",
+        "        // (nostats)\n",
+    ),
+    (
+        "nocast",
+        "        let traced=rl_cast(origin,d,epsilon);\n",
+        "        let traced=RlCast(vec4<u32>(0u),-1.0);\n",
     ),
 ];
 
