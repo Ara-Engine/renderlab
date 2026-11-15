@@ -1983,10 +1983,10 @@ impl VirtualState {
             frame: buffer("N8 frame", FRAME_BYTES as u64, B::UNIFORM),
             requests: buffer("N8 page requests", slots * 4, B::STORAGE),
             state,
-            // Then the fog map's per-level summary (WGSL `vsm_render_summary`).
+            // Then the fog map's per-level summary (WGSL `vsm_render_block`).
             render: buffer(
                 "N8c pages rasterized this frame",
-                (MAX_LEVELS as u64 * u64::from(pages * pages) + 2 * MAX_LEVELS as u64) * 4,
+                (MAX_LEVELS as u64 * u64::from(pages * pages) + 17 * MAX_LEVELS as u64) * 4,
                 B::STORAGE,
             ),
             cull_args: buffer("N8f caster cull dispatch", 16, B::STORAGE | B::INDIRECT),

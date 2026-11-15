@@ -224,11 +224,16 @@ fn vsm_point_moved(level:u32,lo:vec2<f32>,hi:vec2<f32>,pad:f32)->bool {
     }
     return false;
 }
-// The fog map's per-level summary after the table entries of vsm_render: whether any page of
-// `level` is drawn whole (kind 0) or partially (kind 1) this frame. Set by vsm_allocate (always
-// to 1, so concurrent writes agree); clusters over many pages read it instead of their pages.
-fn vsm_render_summary(level:u32,kind:u32)->u32 {
-    return VSM_MAX_LEVELS*vsm.counts.y*vsm.counts.y+2u*level+kind;
+// The fog map's per-level summary after the table entries of vsm_render: per level 16 words,
+// whether any page of each 4x4th of the window (window-relative `page`) is drawn whole, then
+// one, whether any page is drawn partially. Set by vsm_allocate (always to 1, so concurrent
+// writes agree); clusters over many pages read it instead of their pages.
+fn vsm_render_block(level:u32,page:vec2<u32>)->u32 {
+    let b=page*4u/vsm.counts.y;
+    return VSM_MAX_LEVELS*vsm.counts.y*vsm.counts.y+17u*level+b.y*4u+b.x;
+}
+fn vsm_render_partial(level:u32)->u32 {
+    return VSM_MAX_LEVELS*vsm.counts.y*vsm.counts.y+17u*level+16u;
 }
 // Texel t (window texels) of `level` is redrawn: a full page, or within one texel of a moved
 // rectangle on a partial one.
@@ -329,7 +334,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     // level claim and the budget: a moving caster costs what lies near it, not its pages.
     if vsm_one_level() && moved {
         vsm_render[v]=2u;
-        vsm_render[vsm_render_summary(level,1u)]=1u;
+        vsm_render[vsm_render_partial(level)]=1u;
         let k=atomicAdd(&vsm_pool[0],1u);
         atomicStore(&vsm_pool[VSM_POOL_FREE+atomicLoad(&vsm_pool[10])+k],v);
         let groups=max((vsm.counts.z+63u)/64u,1u);
@@ -365,7 +370,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     vsm_state[v]=vsm.levels[level].info.x;
     vsm_state[vsm_section(1u)+v]=vsm_tag(level,page);
     vsm_render[v]=1u;
-    if vsm_one_level() {vsm_render[vsm_render_summary(level,0u)]=1u;}
+    if vsm_one_level() {vsm_render[vsm_render_block(level,page)]=1u;}
     let k=atomicAdd(&vsm_pool[0],1u);
     atomicStore(&vsm_pool[VSM_POOL_FREE+atomicLoad(&vsm_pool[10])+k],v);
     let groups=max((vsm.counts.z+63u)/64u,1u);
@@ -465,8 +470,13 @@ fn vsm_cull_cluster(index:u32) {
         if vsm_one_level() && span.x*span.y>16u {
             // The fog map: a cluster over many pages reads the level's summary rather than
             // scanning them (writes stay inside the flagged texels either way).
-            stale=vsm_render[vsm_render_summary(level,0u)]!=0u
-                || (vsm_render[vsm_render_summary(level,1u)]!=0u && vsm_point_moved(level,lo,hi,2.0*texel));
+            let b0=p0*4u/pages;let b1=p1*4u/pages;
+            for(var y=b0.y;y<=b1.y && !stale;y+=1u) {
+                for(var x=b0.x;x<=b1.x;x+=1u) {
+                    if vsm_render[vsm_render_block(level,vec2<u32>(x,y)*pages/4u)]!=0u {stale=true;break;}
+                }
+            }
+            stale=stale || (vsm_render[vsm_render_partial(level)]!=0u && vsm_point_moved(level,lo,hi,2.0*texel));
         } else {
             for(var y=p0.y;y<=p1.y && !stale;y+=1u) {
                 for(var x=p0.x;x<=p1.x;x+=1u) {
