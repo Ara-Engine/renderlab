@@ -225,11 +225,20 @@ impl Targets {
                 && p.edits == r.scene_edits
                 && p.lighting == lighting
                 && p.eye.distance(eye) < 1.0
-        }) && !r
+        }) && !(r.view.reconstruction_frame.is_some() && r
             .view
             .reconstruction_state
             .as_ref()
-            .is_some_and(|s| s.plan.reset);
+            .is_some_and(|s| s.plan.reset));
+        if r.frames % 60 == 0 {
+            if let Some(path)=room_log() {
+                use std::io::Write;
+                let checks=state.as_ref().map_or([false;4],|p|[p.frame+1==r.frames,p.edits==r.scene_edits,p.lighting==lighting,p.eye.distance(eye)<1.0]);
+                if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                    let _=writeln!(file,"{{\"frame\":{},\"screen_cpu\":{:?},\"reset\":{},\"reconstructing\":{},\"valid\":{}}}",r.frames,checks,r.view.reconstruction_state.as_ref().is_some_and(|s|s.plan.reset),r.view.reconstruction_frame.is_some(),valid);
+                }
+            }
+        }
         let prev = state.as_ref().map_or(matrix, |p| p.matrix);
         let mut bytes = Vec::with_capacity(256);
         for m in [matrix, prev, prev.inverse()] {
