@@ -1414,11 +1414,11 @@ pub(crate) fn compose_hits(
         }
     }
     // The hit entry follows the program, so the range stays.
-    composed.source.push_str(if declares(program, "fn", "view_dependence") {
-        CACHE_SUITS
+    if declares(program, "fn", "view_dependence") {
+        composed.source.push_str(&CACHE_SUITS.replacen("0.25", &format!("{:?}", cache_share()), 1));
     } else {
-        CACHE_SUITS_NEVER
-    });
+        composed.source.push_str(CACHE_SUITS_NEVER);
+    }
     composed.source = rl_pass_switches(composed.source);
     composed
 }
@@ -1428,7 +1428,18 @@ pub(crate) fn compose_hits(
 /// surface, whose reflection is mostly its specular, keeps the full program; so does every hit
 /// of a program that declares no view dependence.
 const CACHE_SUITS: &str = "\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return view_dependence(s,input).share<0.25; }\n";
-const CACHE_SUITS_NEVER: &str = "\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return false; }\n";
+/// The share bound (0.25), or `RENDERLAB_RL_CACHE_SHARE` (0-1) for measurement.
+fn cache_share() -> f32 {
+    static SHARE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SHARE.get_or_init(|| {
+        std::env::var("RENDERLAB_RL_CACHE_SHARE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|s| (0.0..=1.0).contains(s))
+            .unwrap_or(0.25)
+    })
+}
+const CACHE_SUITS_NEVER: &str ="\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return false; }\n";
 /// `RENDERLAB_RL_HIT_OWN_PROGRAM=1` (measurement, off by default): in a mixed-program frame each
 /// hit is shaded by its own draw's program, with its own parameters. More correct than inline's
 /// fallback (an emitter's reflection glows), but a visible change (docs/m7-gaps.md, Programs).
