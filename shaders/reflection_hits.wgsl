@@ -46,14 +46,6 @@ fn rl_hits_distance(record:vec4<u32>,origin:vec3<f32>)->f32 {
     let at_slot=vec2<i32>(vec2<u32>(slot%width,slot/width));
     // Word 2: stratum (bits 0-7), strata (8-15), the lobe's GGX alpha as f16 (16-31).
     let alpha=unpack2x16float(a.z>>16u).x;
-    // A rough lobe's hit whose cone covers the radiance cache's cell there takes the cell's
-    // outgoing radiance (RENDERLAB_RL_CACHE_HITS, reflection_cache_hits.wgsl), as inline hits do.
-    let t=rl_hits_distance(record,origin);
-    let cached=rl_cache_hit(record,origin,d,t,cone.x+cone.y*t,sqrt(alpha));
-    if cached.w>0.0 {
-        textureStore(rl_hit_samples_out,at_slot,rl_f16_nearest(vec4<f32>(rl_finite(expose(cached.rgb)),1.0)));
-        return;
-    }
     // The inline loop's per-hit state (rl_reflection_prepare): this hit's share of its
     // pixel's strata, its path regularization, and the reflecting lobe's roughness (rough
     // enough lobes light local lights unshadowed at their hits, LocalShadows).
@@ -68,6 +60,18 @@ fn rl_hits_distance(record:vec4<u32>,origin:vec3<f32>)->f32 {
     rl_hit_lights_prepare(h.input.world);
     rl_load_parameters(h.batch);
     let hs=surface(h.input);
+    // A rough lobe's hit whose cone covers the radiance cache's cell there takes the cell's
+    // outgoing radiance (RENDERLAB_RL_CACHE_HITS, reflection_cache_hits.wgsl) when the hit's
+    // own response is diffuse-dominated: the cell holds a Lambertian value, so a glossy, dark or
+    // metallic hit surface (whose reflection is mostly its specular) keeps the full program.
+    if h.visible && rl_cache_suits(hs,h.input) {
+        let t=rl_hits_distance(record,origin);
+        let cached=rl_cache_hit(record,origin,d,t,cone.x+cone.y*t,sqrt(alpha));
+        if cached.w>0.0 {
+            textureStore(rl_hit_samples_out,at_slot,rl_f16_nearest(vec4<f32>(rl_finite(expose(cached.rgb)),1.0)));
+            return;
+        }
+    }
     let radiance=select(vec3<f32>(0.0),rl_finite(shade(hs,h.input)),h.visible);
     textureStore(rl_hit_samples_out,at_slot,rl_f16_nearest(vec4<f32>(radiance,1.0)));
 }
