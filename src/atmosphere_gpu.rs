@@ -44,6 +44,11 @@ fn at_sun_visible(p:vec3<f32>) -> f32 {
 ";
 const MAP_VISIBILITY: &str = include_str!("../shaders/atmosphere_shadow_map.wgsl");
 
+/// Measurement only: whether `RENDERLAB_SUNRT_DIAG` (a comma list) names `flag`.
+fn sunrt_diag(flag: &str) -> bool {
+    std::env::var("RENDERLAB_SUNRT_DIAG").is_ok_and(|v| v.split(',').any(|f| f == flag))
+}
+
 fn overhaul_enabled() -> bool {
     std::env::var("RENDERLAB_FOG_OVERHAUL").as_deref() != Ok("0")
 }
@@ -60,8 +65,13 @@ fn kernel_source(hardware: bool) -> String {
         if hardware {
             // The shadow ray's cull mask: this module has no shaders/scene.wgsl.
             format!(
-                "{}{HARDWARE_VISIBILITY}",
-                crate::shadows::SHADOW_CASTER_MASK_WGSL
+                "{}{}",
+                crate::shadows::SHADOW_CASTER_MASK_WGSL,
+                if sunrt_diag("nofograys") {
+                    HARDWARE_VISIBILITY.replacen("    var query:ray_query;", "    if atmosphere.volume.w>=0.0 {return 1.0;}\n    var query:ray_query;", 1)
+                } else {
+                    HARDWARE_VISIBILITY.to_owned()
+                }
             )
         } else {
             MAP_VISIBILITY.to_owned()
@@ -738,7 +748,7 @@ impl Renderer {
             ..Default::default()
         });
         let volume = s.volumetric_fog.unwrap_or_default();
-        let samples = FROXEL_SHADOW_SAMPLES;
+        let samples = if sunrt_diag("fog1") { 1 } else { FROXEL_SHADOW_SAMPLES };
         #[cfg(test)]
         let samples = a.test_fog_quality.map_or(samples, |q| q.1);
         let matrix = camera.matrix(size[0], size[1]);
