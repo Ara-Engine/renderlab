@@ -294,14 +294,36 @@ fn attachment_reader(source: &str, reader: &str) -> String {
     source.replace_range(begin..end, reader);
     source
 }
-fn attachment_resolve_source(wgsl: &str) -> Result<String, Error> {
-    compose_resolve(
-        wgsl,
-        &attachment_reader(
-            include_str!("../shaders/visibility_buffer_resolve.wgsl"),
-            include_str!("../shaders/visibility_buffer_attachment.wgsl"),
-        ),
-    )
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ResolveStage {
+    Fused,
+    Interior,
+    Repair,
+}
+fn attachment_resolve_source(wgsl: &str, stage: ResolveStage) -> Result<String, Error> {
+    let mut tail = attachment_reader(
+        include_str!("../shaders/visibility_buffer_resolve.wgsl"),
+        include_str!("../shaders/visibility_buffer_attachment.wgsl"),
+    );
+    if stage != ResolveStage::Fused {
+        tail = tail.replace(
+            "    return primary_repair(PrimaryTrace(vec4<u32>(ids,bitcast<vec2<u32>>(weights.yz)),point,v),ray.near,direction);",
+            "    let trace=PrimaryTrace(vec4<u32>(ids,bitcast<vec2<u32>>(weights.yz)),point,v);\n    if DEFER_REPAIR {return trace;}\n    return primary_repair(trace,ray.near,direction);",
+        );
+        tail = tail.replace(
+            "lift=hit.error*LOD_LIFT;atomicOr(&covered,1u);",
+            "lift=hit.error*LOD_LIFT;atomicOr(&covered,1u);\n            if DEFER_REPAIR {\n                let pixel=id.y*size.x+id.x;\n                if raster_needs_repair(trace) {raster_enqueue(pixel);}\n                else if visibility[pixel].y!=0u {visibility[pixel]=vec2<u32>(0u);}\n            }",
+        );
+        tail.push_str(include_str!(
+            "../shaders/visibility_buffer_edge_common.wgsl"
+        ));
+        tail.push_str(if stage == ResolveStage::Interior {
+            include_str!("../shaders/visibility_buffer_edge_queue.wgsl")
+        } else {
+            include_str!("../shaders/visibility_buffer_edge_repair.wgsl")
+        });
+    }
+    compose_resolve(wgsl, &tail)
 }
 fn compose_resolve(wgsl: &str, tail: &str) -> Result<String, Error> {
     let head = primary_ray_gpu::non_rt_heads(wgsl)?;
@@ -338,6 +360,12 @@ pub(crate) struct PassCounts {
     pub hardware_triangles: u32,
 }
 
+struct EdgeRepair {
+    queue: Buffer,
+    pipelines: [wgpu::ComputePipeline; 2],
+    reset: wgpu::ComputePipeline,
+    group: wgpu::BindGroup,
+}
 pub(super) struct VisibilityBuffer {
     size: wgpu::Extent3d,
     lift: f32,
@@ -368,6 +396,7 @@ pub(super) struct VisibilityBuffer {
     base: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
     resolve: [wgpu::ComputePipeline; 2],
+    edge_repair: Option<EdgeRepair>,
     cull_groups: [wgpu::BindGroup; 2],
     software_groups: [wgpu::BindGroup; 2],
     hardware_groups: [wgpu::BindGroup; 2],
@@ -811,6 +840,15 @@ impl VisibilityBuffer {
             ));
         }
         let visibility = Buffer::new(r, "N1c 64-bit depth and cluster IDs", pixels, storage);
+        let sparse_repair = std::env::var("RENDERLAB_VIS_EDGE_QUEUE").is_ok_and(|v| v == "1");
+        let edge_queue = sparse_repair.then(|| {
+            Buffer::new(
+                r,
+                "visibility edge repair queue",
+                16 + pixels / 2,
+                storage | wgpu::BufferUsages::INDIRECT,
+            )
+        });
         let depth = target(
             r,
             "N1c hardware-cluster depth",
@@ -904,32 +942,38 @@ impl VisibilityBuffer {
                 sampled(4, wgpu::TextureSampleType::Depth),
             ],
         );
-        let resolve_layout = layout(
-            &r.device,
+        let mut resolve_entries = [
             &[
-                &[
-                    buffer_entry(0, true, false, S::COMPUTE),
-                    buffer_entry(10, true, false, S::COMPUTE),
-                    buffer_entry(30, false, false, S::COMPUTE),
-                    buffer_entry(29, false, true, S::COMPUTE),
-                    buffer_entry(31, false, false, S::COMPUTE),
-                    buffer_entry(33, false, false, S::COMPUTE),
-                    image(13, F::Rgba32Uint),
-                    image(16, F::Rgba32Float),
-                    image(17, F::Rgba32Float),
-                    image(20, F::R32Uint),
-                    image(23, F::R32Float),
-                    sampled(34, wgpu::TextureSampleType::Uint),
-                    sampled(35, wgpu::TextureSampleType::Depth),
-                ][..],
-                &if crate::material_mode::Mode::tail() {
-                    super::primary_ray_gpu::material_pass_gpu::entries(true).to_vec()
-                } else {
-                    Vec::new()
-                },
-            ]
-            .concat(),
-        );
+                buffer_entry(0, true, false, S::COMPUTE),
+                buffer_entry(10, true, false, S::COMPUTE),
+                buffer_entry(30, false, false, S::COMPUTE),
+                buffer_entry(29, false, true, S::COMPUTE),
+                buffer_entry(31, false, false, S::COMPUTE),
+                buffer_entry(33, false, false, S::COMPUTE),
+                image(13, F::Rgba32Uint),
+                image(16, F::Rgba32Float),
+                image(17, F::Rgba32Float),
+                image(20, F::R32Uint),
+                image(23, F::R32Float),
+                sampled(34, wgpu::TextureSampleType::Uint),
+                sampled(35, wgpu::TextureSampleType::Depth),
+            ][..],
+            &if crate::material_mode::Mode::tail() {
+                super::primary_ray_gpu::material_pass_gpu::entries(true).to_vec()
+            } else {
+                Vec::new()
+            },
+        ]
+        .concat();
+        if sparse_repair {
+            resolve_entries.push(buffer_entry(36, false, true, S::COMPUTE));
+        }
+        let resolve_layout = layout(&r.device, &resolve_entries);
+        let edge_layout = sparse_repair.then(|| {
+            let mut entries = resolve_entries.clone();
+            *entries.last_mut().unwrap() = buffer_entry(36, false, false, S::COMPUTE);
+            layout(&r.device, &entries)
+        });
         let pipeline_layout = |groups: &[Option<&wgpu::BindGroupLayout>]| {
             r.device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1044,7 +1088,14 @@ impl VisibilityBuffer {
         );
         let reduce = compute(&hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
         let resolve_source = super::primary_ray_gpu::material_receiver_gpu::resolve(
-            attachment_resolve_source(&r.source)?,
+            attachment_resolve_source(
+                &r.source,
+                if sparse_repair {
+                    ResolveStage::Interior
+                } else {
+                    ResolveStage::Fused
+                },
+            )?,
             crate::material_mode::Mode::current(),
         )?;
         let resolve = [0.0, 1.0].map(|v| {
@@ -1060,6 +1111,7 @@ impl VisibilityBuffer {
                     ("WRITE_RECEIVERS", v),
                     ("LOD_LIFT", f64::from(r.lod_lift)),
                     ("HW_ATTACHMENT", if attachment { 1.0 } else { 0.0 }),
+                    ("DEFER_REPAIR", if sparse_repair { 1.0 } else { 0.0 }),
                 ],
             )
         });
@@ -1138,36 +1190,89 @@ impl VisibilityBuffer {
                 )
             })
             .collect();
-        let resolve_group = bind(
-            &r.device,
-            &resolve_layout,
+        let mut resolve_resources = [
             &[
+                (0, r.uniform.as_entire_binding()),
+                (10, state.frame_buffer().as_entire_binding()),
+                (30, repair_scan.value.as_entire_binding()),
+                (29, visibility.value.as_entire_binding()),
+                (31, clusters.value.as_entire_binding()),
+                (33, group_buffer.value.as_entire_binding()),
+                (34, R::TextureView(&hardware_ids.view)),
+                (35, R::TextureView(&depth.view)),
+                (13, R::TextureView(&t.hit.view)),
+                (16, R::TextureView(&fresh.world.view)),
+                (17, R::TextureView(&fresh.normal.view)),
+                (20, R::TextureView(&t.tiles.view)),
+                (23, R::TextureView(&t.epsilon.view)),
+            ][..],
+            &if crate::material_mode::Mode::tail() {
+                vec![(
+                    crate::program::MATERIAL_RECORD_BINDING,
+                    R::TextureView(&t.material.as_ref().unwrap().view),
+                )]
+            } else {
+                Vec::new()
+            },
+        ]
+        .concat();
+        if let Some(queue) = &edge_queue {
+            resolve_resources.push((36, queue.value.as_entire_binding()));
+        }
+        let resolve_group = bind(&r.device, &resolve_layout, &resolve_resources);
+        let edge_repair = if let (Some(queue), Some(edge_layout)) = (&edge_queue, &edge_layout) {
+            let group = bind(&r.device, edge_layout, &resolve_resources);
+            let mode = crate::material_mode::Mode::current();
+            let mut source = super::primary_ray_gpu::material_receiver_gpu::resolve(
+                attachment_resolve_source(&r.source, ResolveStage::Repair)?,
+                mode,
+            )?;
+            if mode == crate::material_mode::Mode::Tail {
+                source = source.replace(
+                    "// edge material store",
+                    "rl_receiver_store(p,trace,receiver);",
+                );
+            }
+            let pipelines = [0.0, 1.0].map(|v| {
+                compute(
+                    &source,
+                    "repair_edges",
+                    &[
+                        Some(edge_layout),
+                        Some(state.array_layout()),
+                        Some(&data_layout),
+                    ],
+                    &[
+                        ("WRITE_RECEIVERS", v),
+                        ("LOD_LIFT", f64::from(r.lod_lift)),
+                        ("HW_ATTACHMENT", if attachment { 1.0 } else { 0.0 }),
+                        ("DEFER_REPAIR", 0.0),
+                    ],
+                )
+            });
+            let reset = compute(
+                &resolve_source,
+                "reset_edge_queue",
                 &[
-                    (0, r.uniform.as_entire_binding()),
-                    (10, state.frame_buffer().as_entire_binding()),
-                    (30, repair_scan.value.as_entire_binding()),
-                    (29, visibility.value.as_entire_binding()),
-                    (31, clusters.value.as_entire_binding()),
-                    (33, group_buffer.value.as_entire_binding()),
-                    (34, R::TextureView(&hardware_ids.view)),
-                    (35, R::TextureView(&depth.view)),
-                    (13, R::TextureView(&t.hit.view)),
-                    (16, R::TextureView(&fresh.world.view)),
-                    (17, R::TextureView(&fresh.normal.view)),
-                    (20, R::TextureView(&t.tiles.view)),
-                    (23, R::TextureView(&t.epsilon.view)),
-                ][..],
-                &if crate::material_mode::Mode::tail() {
-                    vec![(
-                        crate::program::MATERIAL_RECORD_BINDING,
-                        R::TextureView(&t.material.as_ref().unwrap().view),
-                    )]
-                } else {
-                    Vec::new()
-                },
-            ]
-            .concat(),
-        );
+                    Some(&resolve_layout),
+                    Some(state.array_layout()),
+                    Some(&data_layout),
+                ],
+                &[],
+            );
+            // Release the resource borrows before moving the queue into the owned state.
+            let _ = queue;
+            Some((pipelines, reset, group))
+        } else {
+            None
+        };
+        drop(resolve_resources);
+        let edge_repair = edge_repair.map(|(pipelines, reset, group)| EdgeRepair {
+            queue: edge_queue.unwrap(),
+            pipelines,
+            reset,
+            group,
+        });
         Ok(Self {
             size,
             lift: r.lod_lift,
@@ -1201,6 +1306,7 @@ impl VisibilityBuffer {
             base,
             reduce,
             resolve,
+            edge_repair,
             cull_groups,
             software_groups,
             hardware_groups,
@@ -1295,7 +1401,7 @@ impl<'a> Stamp<'a> {
 }
 /// Diagnostic stage stamps: per pass cull, software, hardware, HZB; then resolve.
 #[cfg(test)]
-pub(crate) const STAGE_QUERIES: u32 = 18;
+pub(crate) const STAGE_QUERIES: u32 = 20;
 
 #[cfg(test)]
 mod tests {
@@ -1358,7 +1464,15 @@ mod tests {
             stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")),
             include_str!("../shaders/visibility_buffer_hzb.wgsl").to_owned(),
             resolve_source(include_str!("../shaders/scene.wgsl")).unwrap(),
-            attachment_resolve_source(include_str!("../shaders/scene.wgsl")).unwrap(),
+            attachment_resolve_source(include_str!("../shaders/scene.wgsl"), ResolveStage::Fused)
+                .unwrap(),
+            attachment_resolve_source(
+                include_str!("../shaders/scene.wgsl"),
+                ResolveStage::Interior,
+            )
+            .unwrap(),
+            attachment_resolve_source(include_str!("../shaders/scene.wgsl"), ResolveStage::Repair)
+                .unwrap(),
             attachment_reader(
                 include_str!("../shaders/visibility_buffer_hzb.wgsl"),
                 include_str!("../shaders/visibility_buffer_attachment_hzb.wgsl"),
@@ -1624,26 +1738,60 @@ impl Renderer {
             v.pyramid(encoder, i, stage(i as u32 * 4 + 3));
         }
         mark(encoder, "visibility.resolve");
-        let resolve_stamps = stamps
-            .map(|s| wgpu::ComputePassTimestampWrites {
-                query_set: s.query_set,
-                beginning_of_pass_write_index: None,
-                end_of_pass_write_index: s.end_of_pass_write_index,
-            })
-            .or(stage(8).compute());
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("N1c exact hit resolve"),
-            timestamp_writes: resolve_stamps,
+        let end_stamps = stamps.map(|s| wgpu::ComputePassTimestampWrites {
+            query_set: s.query_set,
+            beginning_of_pass_write_index: None,
+            end_of_pass_write_index: s.end_of_pass_write_index,
         });
-        pass.set_pipeline(&v.resolve[usize::from(soft)]);
-        pass.set_bind_group(0, &v.resolve_group, &[]);
-        pass.set_bind_group(1, arrays, &[]);
-        pass.set_bind_group(2, &v.data_group, &[]);
-        pass.dispatch_workgroups(v.size.width.div_ceil(8), v.size.height.div_ceil(4), 1);
-        pass.set_pipeline(&v.reset);
-        for group in &v.cull_groups {
-            pass.set_bind_group(0, group, &[]);
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("N1c exact hit resolve"),
+                timestamp_writes: if v.edge_repair.is_some() {
+                    stage(8).compute()
+                } else {
+                    end_stamps.clone().or(stage(8).compute())
+                },
+            });
+            pass.set_pipeline(&v.resolve[usize::from(soft)]);
+            pass.set_bind_group(0, &v.resolve_group, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(2, &v.data_group, &[]);
+            pass.dispatch_workgroups(v.size.width.div_ceil(8), v.size.height.div_ceil(4), 1);
+            if v.edge_repair.is_none() {
+                pass.set_pipeline(&v.reset);
+                for group in &v.cull_groups {
+                    pass.set_bind_group(0, group, &[]);
+                    pass.dispatch_workgroups(1, 1, 1);
+                }
+            }
+        }
+        if let Some(edge) = &v.edge_repair {
+            mark(encoder, "visibility.repair");
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("visibility sparse edge repair"),
+                timestamp_writes: end_stamps.or(stage(9).compute()),
+            });
+            pass.set_pipeline(&edge.pipelines[usize::from(soft)]);
+            pass.set_bind_group(0, &edge.group, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(2, &v.data_group, &[]);
+            pass.dispatch_workgroups_indirect(&edge.queue.value, 0);
+            // Compute usage scopes are per dispatch: the queue becomes writable only
+            // after the indirect/read-only repair dispatch has finished.
+            pass.set_pipeline(&edge.reset);
+            pass.set_bind_group(0, &v.resolve_group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&v.reset);
+            for group in &v.cull_groups {
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups(1, 1, 1);
+            }
+        } else if stages.is_some() {
+            // Keep the diagnostic query shape fixed when the switch is off.
+            let _pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("visibility edge repair disabled"),
+                timestamp_writes: stage(9).compute(),
+            });
         }
     }
 }

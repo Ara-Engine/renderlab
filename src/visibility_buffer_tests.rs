@@ -280,7 +280,7 @@ fn snapshot(r: &mut Renderer, out: &std::path::Path, label: &str) {
 }
 
 /// Median per-stage GPU milliseconds of the prepared visibility buffer, encoded alone:
-/// per pass cull, software raster, hardware raster and HZB, then resolve. All repeats
+/// per pass cull, software raster, hardware raster and HZB, then resolve and edge repair. All repeats
 /// go in one submission, so the GPU does not idle (and downclock) between them.
 fn stage_profile(r: &mut Renderer, repeats: usize) -> Vec<f64> {
     let n = visibility_buffer::STAGE_QUERIES;
