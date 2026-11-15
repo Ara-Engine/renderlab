@@ -11,8 +11,6 @@ use super::*;
 use crate::pipeline_compilation::PipelineDevice;
 use primary_ray_gpu::Buffer;
 use rayon::prelude::*;
-#[path = "visibility_buffer_indexed.rs"]
-mod indexed;
 
 /// Largest cluster: the software raster's workgroup and 7-bit triangle IDs.
 pub(crate) const MAX_CLUSTER: usize = 128;
@@ -367,7 +365,6 @@ pub(super) struct VisibilityBuffer {
     reset: wgpu::ComputePipeline,
     software: wgpu::ComputePipeline,
     hardware: wgpu::RenderPipeline,
-    indexed: Option<indexed::Raster>,
     base: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
     resolve: [wgpu::ComputePipeline; 2],
@@ -505,7 +502,7 @@ fn words(values: impl IntoIterator<Item = u32>) -> Vec<u8> {
 /// visibility_buffer.wgsl's `Cluster`), and the draws' LOD groups (8 words each), uploaded.
 /// N1c's primaries and N8c's shadow page raster both cull this table. Word 13 (`pad0`) is 1
 /// for a placement that casts no shadow (`Instances::set_casts_shadows`): the shadow raster
-/// skips it, the primaries ignore it. Word 14 is the draw slot for indexed gathering.
+/// skips it, the primaries ignore it.
 pub(super) struct ClusterInstances {
     pub count: u32,
     pub clusters: Arc<Buffer>,
@@ -549,7 +546,7 @@ impl ClusterInstances {
         let mut records = vec![];
         let mut groups = vec![];
         let mut placement = 0u32;
-        for (batch, d) in draws.iter().enumerate() {
+        for d in draws {
             let mesh = d.mesh.clusters.as_ref().ok_or(Error::InvalidInput(
                 "visibility buffer mesh uploaded without cluster data",
             ))?;
@@ -582,7 +579,7 @@ impl ClusterInstances {
                         c.counts,
                         placement,
                         no_shadow,
-                        batch as u32,
+                        0,
                         0,
                     ]);
                 }
@@ -668,7 +665,7 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
         return uploads;
     };
     let (mut record, mut group, mut placement) = (0u64, 0u32, 0u32);
-    for (batch, d) in draws.iter().enumerate() {
+    for d in draws {
         let mesh = d.mesh.clusters.as_ref().unwrap();
         if d.mesh.skin.is_some() && !d.instances.is_empty() {
             let b = d.mesh.bounds;
@@ -692,7 +689,7 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
                         c.counts,
                         placement + instance as u32,
                         no_shadow,
-                        batch as u32,
+                        0,
                         0,
                     ]);
                 }
@@ -1108,20 +1105,6 @@ impl VisibilityBuffer {
                 ],
             )
         });
-        let indexed = indexed::Plan::new(r, draws).map(|plan| {
-            indexed::Raster::new(
-                r,
-                plan,
-                &configs,
-                &clusters,
-                &lists,
-                &args,
-                &visibility,
-                attachment,
-                state.array_layout(),
-                &data_layout,
-            )
-        });
         let data_group = cluster_data_group(r, &data_layout, draws, &absent.value);
         let views: Vec<_> = (0..levels)
             .map(|i| {
@@ -1215,7 +1198,6 @@ impl VisibilityBuffer {
             reset,
             software: software_pipeline,
             hardware: hardware_pipeline,
-            indexed,
             base,
             reduce,
             resolve,
@@ -1594,20 +1576,6 @@ impl Renderer {
                 pass.set_bind_group(2, &v.data_group, &[]);
                 pass.dispatch_workgroups_indirect(&v.args[i].value, 0);
             }
-            if let Some(indexed) = &v.indexed {
-                mark(encoder, ["visibility.indices1", "visibility.indices2"][i]);
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("visibility compact hardware indices"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(&indexed.build);
-                pass.set_bind_group(0, &indexed.groups[i], &[]);
-                pass.set_bind_group(1, &indexed.empty, &[]);
-                pass.set_bind_group(2, &v.data_group, &[]);
-                pass.dispatch_workgroups_indirect(&v.rejects.value, 0);
-                pass.set_pipeline(&indexed.finish);
-                pass.dispatch_workgroups(1, 1, 1);
-            }
             mark(encoder, ["visibility.hw1", "visibility.hw2"][i]);
             {
                 let color_attachments = [Some(wgpu::RenderPassColorAttachment {
@@ -1650,18 +1618,7 @@ impl Renderer {
                 pass.set_bind_group(0, &v.hardware_groups[i], &[]);
                 pass.set_bind_group(1, arrays, &[]);
                 pass.set_bind_group(2, &v.data_group, &[]);
-                if let Some(indexed) = &v.indexed {
-                    pass.draw_indirect(&indexed.args[i].value, 32);
-                    pass.set_pipeline(&indexed.hardware);
-                    pass.set_bind_group(0, &indexed.hardware_groups[i], &[]);
-                    pass.set_index_buffer(
-                        indexed.indices.value.slice(..),
-                        wgpu::IndexFormat::Uint32,
-                    );
-                    pass.draw_indexed_indirect(&indexed.args[i].value, 0);
-                } else {
-                    pass.draw_indirect(&v.args[i].value, 16);
-                }
+                pass.draw_indirect(&v.args[i].value, 16);
             }
             mark(encoder, ["visibility.hzb1", "visibility.hzb2"][i]);
             v.pyramid(encoder, i, stage(i as u32 * 4 + 3));
@@ -1687,14 +1644,6 @@ impl Renderer {
         for group in &v.cull_groups {
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
-        }
-        if let Some(indexed) = &v.indexed {
-            pass.set_pipeline(&indexed.reset);
-            pass.set_bind_group(1, &indexed.empty, &[]);
-            for group in &indexed.groups {
-                pass.set_bind_group(0, group, &[]);
-                pass.dispatch_workgroups(1, 1, 1);
-            }
         }
     }
 }

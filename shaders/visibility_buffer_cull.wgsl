@@ -111,8 +111,6 @@ var<workgroup> wg_bases:array<u32,3>;
     let n=atomicLoad(&args.sw_count);
     args.sw_x=min(n,65535u);args.sw_y=(n+65534u)/65535u;args.sw_z=1u;
     args.hw_vertices=384u;args.hw_first=0u;args.hw_first_instance=0u;
-    let h=atomicLoad(&args.hw_instances);
-    rejects.pad0=min(h,65535u);rejects.pad1=(h+65534u)/65535u;rejects.pad2=1u;
     let r=atomicLoad(&rejects.count);
     let second=config.info.z!=0u;
     if !second {
