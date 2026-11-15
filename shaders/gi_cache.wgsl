@@ -1989,13 +1989,19 @@ fn gi_gather_queued(slot:u32) -> bool {
     let state=gi_table[gi_cold(slot)+GI_C_STATE];
     return gi_table[gi_hot(slot)]!=0u && (state&GI_BQUEUED)!=0u && (state&(GI_TRACED|GI_ORPHAN|GI_PARTIAL))==GI_TRACED;
 }
+// Each queued cell's bin is kept in its claim word (free until the claim rounds after the
+// gathers) and read back once by the gather pass (gi_gather_take), which clears it: gathers
+// stamp the cells they hit as seen, so a bin computed again during the pass could move a cell
+// into an earlier bin than it was counted in.
 @compute @workgroup_size(64) fn gi_gather_count(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     if gi_word(GI_H_GATHER_RAYS)==0u { return; }
     let count=min(atomicLoad(&gi_work[gi_frame.bounce.x]),gi_frame.offsets.x);
     for(var i=id.x;i<count;i+=groups.x*64u) {
         let slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+i]);
         if !gi_gather_queued(slot) { continue; }
-        atomicAdd(&gi_work[GI_W_GATHER_HIST+gi_gather_bin(slot)],gi_gather_rays(slot));
+        let bin=gi_gather_bin(slot);
+        atomicStore(&gi_work[GI_W_CLAIMS+slot],bin+1u);
+        atomicAdd(&gi_work[GI_W_GATHER_HIST+bin],gi_gather_rays(slot));
     }
 }
 @compute @workgroup_size(1) fn gi_gather_select() {
@@ -2018,10 +2024,17 @@ fn gi_gather_queued(slot:u32) -> bool {
         rest=next;
     }
 }
-fn gi_gather_admitted(slot:u32) -> bool {
-    let bin=gi_gather_bin(slot);
+// Reads and clears the bin gi_gather_count kept for a queue entry; whether the budget admits
+// it. Called once per queue entry by the gather pass, queued or not.
+var<private> gi_ray_admitted:bool;
+fn gi_gather_take(slot:u32) {
+    gi_ray_admitted=true;
+    if gi_word(GI_H_GATHER_RAYS)==0u { return; }
+    let kept=atomicExchange(&gi_work[GI_W_CLAIMS+slot],0u);
+    if kept==0u { gi_ray_admitted=false; return; }
+    let bin=kept-1u;
     let cut=atomicLoad(&gi_work[GI_W_GATHER_CUT+select(0u,1u,bin>=GI_GATHER_REST_BINS)]);
-    return cut==0u || bin+1u<cut;
+    gi_ray_admitted=cut==0u || bin+1u<cut;
 }
 fn gi_gather_period(count:u32) -> u32 {
     let cap=gi_word(GI_H_GATHER_CELLS);
@@ -2056,7 +2069,7 @@ fn gi_fill_rank(slot:u32, period:u32) -> u32 {
     return (gi_fill_class(gi_table[cold+GI_C_DEF]>>8u,c)*period+gi_mix(slot)%period)/8u;
 }
 fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
-    if gi_word(GI_H_GATHER_RAYS)!=0u { return gi_gather_admitted(slot); }
+    if gi_word(GI_H_GATHER_RAYS)!=0u { return gi_ray_admitted; }
     let frame=gi_word(GI_H_FRAME);
     let pixels=gi_word(GI_H_PIXEL_CELLS);
     let cap=gi_word(GI_H_GATHER_CELLS);
