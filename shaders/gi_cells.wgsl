@@ -219,21 +219,24 @@ fn gi_header_v3(i:u32) -> vec3<f32> { return vec3<f32>(gi_header_f32(i),gi_heade
 // cell edges and made new cells every frame; this point is one of a fixed few per pixel (one
 // per triangle the sample can land on) and always on the surface (a plane point past a
 // silhouette, off the surface, was a cell nobody else requests). Rays nearly in the plane, or a
-// meeting point far from the hit, keep the hit.
-fn gi_centre_point(pixel:vec2<u32>, world:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>) -> vec3<f32> {
+// meeting point far from the hit, keep the hit. w: 0 when the centre ray meets the triangle
+// itself (the pixel's one fixed point), 1 when the point was clamped or kept.
+fn gi_centre_point(pixel:vec2<u32>, world:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>) -> vec4<f32> {
     let f=gi_header_v3(GI_H_CENTRE_F);
-    if all(f==vec3<f32>(0.0)) { return world; }
+    if all(f==vec3<f32>(0.0)) { return vec4<f32>(world,0.0); }
     let eye=gi_header_v3(GI_H_EYE);
     let d=f+gi_header_v3(GI_H_CENTRE_R)*(f32(pixel.x)+0.5)+gi_header_v3(GI_H_CENTRE_U)*(f32(pixel.y)+0.5);
     let n=cross(b-a,c-a);
     let den=dot(d,n);
     let to=world-eye;
     let ld=length(d);
-    if abs(den)<=1e-3*ld*length(n) { return world; }
+    if abs(den)<=1e-3*ld*length(n) { return vec4<f32>(world,1.0); }
     let t=dot(a-eye,n)/den;
     let hit=length(to)/ld;
-    if !(t>0.5*hit && t<2.0*hit) { return world; }
-    return gi_closest_on_triangle(eye+d*t,a,b,c);
+    if !(t>0.5*hit && t<2.0*hit) { return vec4<f32>(world,1.0); }
+    let p=eye+d*t;
+    let on=gi_closest_on_triangle(p,a,b,c);
+    return vec4<f32>(on,select(0.0,1.0,length(on-p)>1e-5*length(to)));
 }
 // The point of triangle abc closest to p (Ericson, Real-Time Collision Detection 5.1.5).
 fn gi_closest_on_triangle(p:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>) -> vec3<f32> {

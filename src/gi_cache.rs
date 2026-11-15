@@ -1635,6 +1635,11 @@ impl Planner {
             (true, u32::MAX) => IDLE_AFTER_BOUNCE,
             (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
         };
+        // A settled still view (shaders/gi_cache.wgsl GI_SCAN_STILL): only pixels whose centre
+        // ray meets their sampled triangle request cells, so the jitter makes none.
+        if c.centre != [Vec3::ZERO; 3] && view.idle_frames >= STILL_BATCH && flags == 0 && !busy {
+            frame[24..28].copy_from_slice(&(flags | 32).to_le_bytes());
+        }
         if view.idle_frames >= idle_after && flags == 0 && !busy {
             return Finished { frame, plan: None };
         }

@@ -78,6 +78,10 @@ const GI_SCAN_ENVIRONMENT:u32=4u;
 const GI_SCAN_PARTIAL:u32=8u;
 // Lighting, environment or program changed (G2): cells relight (bounce.z says which).
 const GI_SCAN_RELIGHT:u32=16u;
+// Not a scan flag: the view is still and settled (src/gi_cache.rs Planner::finish). Pixels whose
+// centre ray misses their sampled triangle then request no cells: TR1's samples reach new
+// triangles all through a hold (a 256-frame sequence), and their cells were new each time.
+const GI_SCAN_STILL:u32=32u;
 const GI_RELIGHT_ALL:u32=0x80000000u;
 const GI_RELIGHT_REQUESTS:u32=0x20000000u;
 // Work counters: misses, traces, integrations, then statistics.
@@ -211,6 +215,8 @@ struct GiReceiver { world:vec3<f32>, geometric:vec3<f32>, vertex:vec3<f32> };
 // receiver_point on the hit triangle in the placement's frame, its plane normal, and the
 // interpolated vertex normal it passes as SurfaceInput.normal (the pixel's bin source).
 fn gi_receiver(record:vec4<u32>) -> GiReceiver { return gi_receiver_of(record,vec2<u32>(0u),false); }
+// gi_receiver_of's last centre point was clamped or kept (gi_centre_point w).
+var<private> gi_pixel_moved:bool;
 // With `centre`, a pixel's receiver (`pixel` its coordinates) is keyed on its centre ray's point
 // on the hit triangle (gi_centre_point), which the receivers pass looks up too.
 fn gi_receiver_of(record:vec4<u32>, pixel:vec2<u32>, centre:bool) -> GiReceiver {
@@ -229,8 +235,11 @@ fn gi_receiver_of(record:vec4<u32>, pixel:vec2<u32>, centre:bool) -> GiReceiver 
     let nb=unit_normal(basis*unit_normal(vec3<f32>(gi_vertices[batch].data[ib*3u].w,gi_vertices[batch].data[ib*3u+1u].xy)));
     let nc=unit_normal(basis*unit_normal(vec3<f32>(gi_vertices[batch].data[ic*3u].w,gi_vertices[batch].data[ic*3u+1u].xy)));
     var at=world;
+    gi_pixel_moved=false;
     if centre {
-        at=gi_centre_point(pixel,world,world_position(a,placement).xyz,world_position(b,placement).xyz,world_position(c,placement).xyz);
+        let q=gi_centre_point(pixel,world,world_position(a,placement).xyz,world_position(b,placement).xyz,world_position(c,placement).xyz);
+        at=q.xyz;
+        gi_pixel_moved=q.w!=0.0;
     }
     return GiReceiver(at,primary_geometric(a,b,c,placement),na*w.x+nb*w.y+nc*w.z);
 }
@@ -449,6 +458,8 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> 
     var pick=GiLevels(0u,0u,0.0);
     if record.x!=0u {
         let r=gi_receiver_of(record,p,true);
+        // A settled still view: only pixels on their fixed centre point request cells.
+        if !gi_pixel_moved || (gi_frame.counts.z&GI_SCAN_STILL)==0u {
         world=r.world;
         let n=gi_bin_source(gi_viewed_normal(r.world,r.geometric),r.vertex);
         // Both levels around a switch: inside the blend band, and within rounding of
@@ -487,6 +498,7 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> 
                 if pick.hi!=pick.lo && pick.hi+1u<top { gi_request_cells(gi_request_desc(r.world,pick.hi+1u,b)); }
             }
             gi_fill_parent=false;
+        }
         }
     }
     workgroupBarrier();
