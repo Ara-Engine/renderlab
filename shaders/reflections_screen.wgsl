@@ -41,8 +41,9 @@ fn rl_screen_triangle(record:vec4<u32>)->array<vec3<f32>,3> {
     let p=vec2<i32>(id.xy)*2;
     let a=textureLoad(rl_screen_depths,p,0);let b=textureLoad(rl_screen_depths,p+vec2<i32>(1,0),0);
     let c=textureLoad(rl_screen_depths,p+vec2<i32>(0,1),0);let d=textureLoad(rl_screen_depths,p+vec2<i32>(1,1),0);
-    let same=all(a.yz==b.yz)&&all(a.yz==c.yz)&&all(a.yz==d.yz);
-    textureStore(rl_screen_depth_out,vec2<i32>(id.xy),vec4<u32>(max(max(a.x,b.x),max(c.x,d.x)),select(vec2<u32>(0u),a.yz,same),min(min(a.w,b.w),min(c.w,d.w))));
+    let placement=a.y==b.y&&a.y==c.y&&a.y==d.y;
+    let primitive=placement&&a.z==b.z&&a.z==c.z&&a.z==d.z;
+    textureStore(rl_screen_depth_out,vec2<i32>(id.xy),vec4<u32>(max(max(a.x,b.x),max(c.x,d.x)),select(0u,a.y,placement),select(0xffffffffu,a.z,primitive),min(min(a.w,b.w),min(c.w,d.w))));
 }
 @compute @workgroup_size(8,8) fn rl_screen_colour_reduce(@builtin(global_invocation_id) id:vec3<u32>) {
     let size=textureDimensions(rl_screen_colour_out);if any(id.xy>=size) {return;}
@@ -56,7 +57,7 @@ fn rl_screen_colour(pixel:vec2<f32>,key:vec2<u32>,level:u32)->vec4<f32> {
     let size=vec2<i32>(textureDimensions(rl_screen_previous,level));
     if any(p<vec2<i32>(0))||any(p+1>=size) {return vec4<f32>(0.0);}
     for(var y=0;y<2;y+=1) {for(var x=0;x<2;x+=1) {
-        if any(textureLoad(rl_screen_previous,p+vec2<i32>(x,y),i32(level)).yz!=key) {return vec4<f32>(0.0);}
+        if textureLoad(rl_screen_previous,p+vec2<i32>(x,y),i32(level)).y!=key.x {return vec4<f32>(0.0);}
     }}
     let a=textureLoad(rl_screen_colours,p,i32(level));let b=textureLoad(rl_screen_colours,p+vec2<i32>(1,0),i32(level));
     let c=textureLoad(rl_screen_colours,p+vec2<i32>(0,1),i32(level));let d=textureLoad(rl_screen_colours,p+vec2<i32>(1,1),i32(level));
