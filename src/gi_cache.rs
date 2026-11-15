@@ -1031,6 +1031,31 @@ pub(crate) struct PlanConfig {
     pub(crate) eye: Vec3,
     pub(crate) fov_y: f32,
     pub(crate) size: [u32; 2],
+    /// The unjittered camera's pixel-centre rays (`centre_rays`), or zeros: lookups at the
+    /// jittered sample.
+    pub(crate) centre: [Vec3; 3],
+}
+
+/// The unjittered camera's ray through pixel centre (x, y) of a `size` image is
+/// `c[0] + c[1] * x + c[2] * y` (x and y in pixels, centres at half-integers; not normalized).
+/// The cache keys each pixel on where that ray meets the plane of its jittered hit
+/// (shaders/gi_cells.wgsl gi_centre_point), so TR1's sub-pixel jitter does not move a still
+/// view's pixels between cells. Zeros with RENDERLAB_GI_CENTRE=0.
+pub(crate) fn centre_rays(camera: crate::mesh::Camera, size: [u32; 2]) -> [Vec3; 3] {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("RENDERLAB_GI_CENTRE").map_or(true, |v| v != "0")) {
+        return [Vec3::ZERO; 3];
+    }
+    // As Camera::matrix: view-space x = ndc.x / w, y = ndc.y / h, z = -1.
+    let h = 1.0 / (0.5 * camera.fov_y()).tan();
+    let (width, height) = (size[0] as f32, size[1] as f32);
+    let w = h / (width / height);
+    let rotation = glam::Mat3::from_mat4(camera.view().inverse());
+    [
+        rotation * Vec3::new(-1.0 / w, 1.0 / h, -1.0),
+        rotation * Vec3::new(2.0 / (width * w), 0.0, 0.0),
+        rotation * Vec3::new(0.0, -2.0 / (height * h), 0.0),
+    ]
 }
 
 /// The first half of a frame's plan: the table header, and what the second half
@@ -1229,6 +1254,12 @@ impl Planner {
         header[7] = s.evict_frames;
         for (i, v) in eye.to_array().into_iter().enumerate() {
             header[8 + i] = v.to_bits();
+        }
+        // Pixel-centre rays: words 42-47 and 57-59 (shaders/gi_cells.wgsl GI_H_CENTRE_*).
+        for (&at, v) in [42usize, 45, 57].iter().zip(c.centre) {
+            for (i, x) in v.to_array().into_iter().enumerate() {
+                header[at + i] = x.to_bits();
+            }
         }
         header[11] = s.direction_phases;
         header[12] = s.level_blend.to_bits();
@@ -3571,6 +3602,7 @@ impl Renderer {
             eye: camera.view().inverse().w_axis.truncate(),
             fov_y: camera.fov_y(),
             size,
+            centre: centre_rays(*camera, size),
         };
         // The cache's per-tick work runs in the tick's first frame whose plan is not idle, so
         // a moving view beside a still one still relights and gathers.
@@ -4185,6 +4217,7 @@ mod tests {
             eye: Vec3::ZERO,
             fov_y: 1.0,
             size: [1920, 1080],
+            centre: [Vec3::ZERO; 3],
         };
         for cut_refill in [false, true] {
             let c = config(cut_refill);

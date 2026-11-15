@@ -441,7 +441,9 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> 
     var walked=0u;
     var pick=GiLevels(0u,0u,0.0);
     if record.x!=0u {
-        let r=gi_receiver(record);
+        let hit=gi_receiver(record);
+        // The pixel-centre point (gi_centre_point): the receivers pass looks up the same.
+        let r=GiReceiver(gi_centre_point(p,hit.world,hit.geometric),hit.geometric,hit.vertex);
         world=r.world;
         let n=gi_bin_source(gi_viewed_normal(r.world,r.geometric),r.vertex);
         // Both levels around a switch: inside the blend band, and within rounding of

@@ -207,6 +207,31 @@ const GI_KEEP:u32=GI_SPLIT|GI_SHADE|GI_BQUEUED|GI_SECONDARY|GI_TERTIARY|GI_RETRY
 // Each module defines gi_word(i), the table's word i: the kernels index a u32 array,
 // shading a vec4 array (gi_api.wgsl) so records load whole.
 fn gi_header_f32(i:u32) -> f32 { return bitcast<f32>(gi_word(i)); }
+// The unjittered camera's pixel-centre rays (src/gi_cache.rs centre_rays): the ray through
+// pixel centre (x, y) is F + R x + U y. All zero: off.
+const GI_H_CENTRE_F:u32=42u;
+const GI_H_CENTRE_R:u32=45u;
+const GI_H_CENTRE_U:u32=57u;
+fn gi_header_v3(i:u32) -> vec3<f32> { return vec3<f32>(gi_header_f32(i),gi_header_f32(i+1u),gi_header_f32(i+2u)); }
+// The point a pixel's cache requests and lookup use: where its centre ray meets the plane of
+// its jittered hit (`world`, plane normal `geometric`). TR1 moves the sample within the pixel
+// every frame, which moved still pixels across cell edges and made new cells every frame;
+// this point is fixed for a still view on a flat surface and moves little on a curved one.
+// Rays nearly in the plane, or a meeting point far from the hit, keep the hit.
+fn gi_centre_point(pixel:vec2<u32>, world:vec3<f32>, geometric:vec3<f32>) -> vec3<f32> {
+    let f=gi_header_v3(GI_H_CENTRE_F);
+    if all(f==vec3<f32>(0.0)) { return world; }
+    let eye=gi_header_v3(GI_H_EYE);
+    let d=f+gi_header_v3(GI_H_CENTRE_R)*(f32(pixel.x)+0.5)+gi_header_v3(GI_H_CENTRE_U)*(f32(pixel.y)+0.5);
+    let den=dot(d,geometric);
+    let to=world-eye;
+    let ld=length(d);
+    if abs(den)<=1e-3*ld*length(geometric) { return world; }
+    let t=dot(to,geometric)/den;
+    let hit=length(to)/ld;
+    if !(t>0.5*hit && t<2.0*hit) { return world; }
+    return eye+d*t;
+}
 fn gi_hot(slot:u32) -> u32 { return GI_HEADER+slot*GI_HOT_WORDS; }
 fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*GI_HOT_WORDS+slot*max(24u,gi_word(GI_H_COLD_WORDS)); }
 

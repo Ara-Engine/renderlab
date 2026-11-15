@@ -478,6 +478,7 @@ impl Cache {
             eye: scene.camera.view().inverse().w_axis.truncate(),
             fov_y: scene.camera.fov_y(),
             size: scene.size,
+            centre: [glam::Vec3::ZERO; 3],
         };
         // `ensure_gi_shade`: the setting is on and the frame's program reflects light.
         let bounce = self.settings.bounce;
