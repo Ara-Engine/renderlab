@@ -179,6 +179,35 @@ fn submit_log(line: impl FnOnce() -> String) {
     }
 }
 
+/// sunrt-3: split traced frames' late commands into three submits (GI; GI receiver to opaque
+/// shading; the rest), so the GPU starts each part while the CPU encodes and submits the next.
+/// wgpu's submit walks every TLAS instance for each TLAS binding a command buffer uses (6,338
+/// on Outpost: a 3 ms late submit), and the GPU idled until that one submit returned. Queue
+/// writes made while encoding a part land before that part's submit; no part reads a buffer a
+/// later part writes. `RENDERLAB_LATE_PARTS=0` keeps one late submit.
+fn late_parts() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_LATE_PARTS").map_or(true, |v| v != "0"))
+}
+
+impl Renderer {
+    /// Submits the commands encoded so far and continues in a fresh encoder; returns the time
+    /// the submit took.
+    fn submit_part(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        label: &'static str,
+    ) -> std::time::Duration {
+        let next = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) });
+        let part = std::mem::replace(encoder, next).finish();
+        let submitted_at = Instant::now();
+        self.queue.submit([part]);
+        submitted_at.elapsed()
+    }
+}
+
 #[cfg(test)]
 impl Renderer {
     /// Reloads the standard program, as edits of its file do.
@@ -3693,6 +3722,9 @@ impl Renderer {
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
+                if split && late_parts() {
+                    early_submit += self.submit_part(&mut encoder, "mesh frame, late shading");
+                }
                 self.ensure_gi_receiver_pass(shading)?;
                 mark(&mut encoder, "gi_receiver");
                 self.encode_gi_receiver_pass(&mut encoder, shading);
@@ -3726,6 +3758,9 @@ impl Renderer {
                         mark(&mut encoder, "shading");
                     }
                     self.encode_primary_shading(&mut encoder, shading, stamps(0));
+                    if split && late_parts() {
+                        early_submit += self.submit_part(&mut encoder, "mesh frame, late tail");
+                    }
                     mark(&mut encoder, "reflection.trace");
                     self.encode_reflection_trace(&mut encoder, shading);
                     mark(&mut encoder, "reflection.hits");
