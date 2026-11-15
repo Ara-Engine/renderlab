@@ -57,14 +57,15 @@ fn rl_screen_triangle(record:vec4<u32>)->array<vec3<f32>,3> {
 fn rl_screen_colour(pixel:vec2<f32>,key:vec2<u32>,level:u32)->vec4<f32> {
     let at=pixel/exp2(f32(level))-0.5;let p=vec2<i32>(floor(at));let f=fract(at);
     let size=vec2<i32>(textureDimensions(rl_screen_previous,level));
-    if any(p<vec2<i32>(0))||any(p+1>=size) {return rl_screen_reject(11u);}
+    if any(p<vec2<i32>(0))||any(p+1>=size) {return vec4<f32>(0.0);}
     for(var y=0;y<2;y+=1) {for(var x=0;x<2;x+=1) {
-        if textureLoad(rl_screen_previous,p+vec2<i32>(x,y),i32(level)).y!=key.x {return rl_screen_reject(12u);}
+        if textureLoad(rl_screen_previous,p+vec2<i32>(x,y),i32(level)).y!=key.x {return vec4<f32>(0.0);}
     }}
     let a=textureLoad(rl_screen_colours,p,i32(level));let b=textureLoad(rl_screen_colours,p+vec2<i32>(1,0),i32(level));
     let c=textureLoad(rl_screen_colours,p+vec2<i32>(0,1),i32(level));let d=textureLoad(rl_screen_colours,p+vec2<i32>(1,1),i32(level));
     let hint=max(max(a.a,b.a),max(c.a,d.a));
-    if hint>rl_screen_frame.tune.x || hint<1.0 {return rl_screen_reject(13u);}
+    // TR1 alpha is angular view dependence, not a history-confidence value.
+    if hint<1.0 {return vec4<f32>(0.0);}
     return vec4<f32>(mix(mix(a.rgb,b.rgb,f.x),mix(c.rgb,d.rgb,f.x),f.y),1.0);
 }
 fn rl_screen_history(point:vec3<f32>,normal:vec3<f32>,key:vec2<u32>,cone:f32)->vec4<f32> {
@@ -92,10 +93,23 @@ fn rl_screen_history(point:vec3<f32>,normal:vec3<f32>,key:vec2<u32>,cone:f32)->v
     let radius=cone*abs(rl_screen_frame.previous[1].y)*size.y/max(clip.w,1e-5);
     let lod=clamp(log2(max(radius,1.0)),0.0,f32(rl_screen_frame.flags.w-1u));
     let lo=u32(floor(lod));let hi=min(lo+1u,rl_screen_frame.flags.w-1u);
-    let a=rl_screen_colour(pixel,key,lo);if a.a==0.0 {return a;}
-    let b=rl_screen_colour(pixel,key,hi);if b.a==0.0 {return b;}
+    var level=lo;var filtered=vec4<f32>(0.0);
+    // A coarse footprint crossing a silhouette does not invalidate the hit pixel.
+    // Use the widest uncontaminated mip; at an edge the validated texel is exact.
+    loop {
+        filtered=rl_screen_colour(pixel,key,level);
+        if filtered.a>0.0 || level==0u {break;}
+        level-=1u;
+    }
+    if filtered.a==0.0 {
+        filtered=textureLoad(rl_screen_colours,p,0);
+        if filtered.a<1.0 {return rl_screen_reject(6u);}
+    } else if level==lo && hi!=lo {
+        let upper=rl_screen_colour(pixel,key,hi);
+        if upper.a>0.0 {filtered=mix(filtered,upper,fract(lod));}
+    }
     rl_screen_count(23u);
-    let colour=mix(a.rgb,b.rgb,fract(lod))*rl_screen_frame.tune.w;
+    let colour=filtered.rgb*rl_screen_frame.tune.w;
     // Lit primaries include camera fog; reflected hit shading does not. Reject opaque fog.
     let scatter=atmosphere_surface(vec3<f32>(0.0),point);
     let transmission=atmosphere_surface(vec3<f32>(1.0),point)-scatter;
@@ -108,7 +122,8 @@ fn rl_screen_hit(origin:vec3<f32>,direction:vec3<f32>,epsilon:f32,cone:vec2<f32>
     
     let matrix=rl_screen_frame.current;let start=matrix*vec4<f32>(origin+direction*epsilon,1.0);
     let delta=matrix*vec4<f32>(direction,0.0);var distance=rl_screen_frame.tune.z;
-    if delta.w<0.0 {distance=min(distance,(start.w-0.02)/(-delta.w));}
+    let near_plane=rl_screen_frame.previous_eye.w/(1.0-rl_screen_frame.eye.w);
+    if delta.w<0.0 {distance=min(distance,(start.w-near_plane*1.001)/(-delta.w));}
     if start.w<=0.0||distance<=epsilon {return rl_screen_reject(2u);}
     let end=start+delta*distance;let size=vec2<f32>(rl_screen_frame.flags.yz);
     let a=start.xyz/start.w;let b=end.xyz/end.w;
@@ -139,22 +154,58 @@ fn rl_screen_hit(origin:vec3<f32>,direction:vec3<f32>,epsilon:f32,cone:vec2<f32>
         if record.x==0u {return rl_screen_reject(5u);}
         let info=primary_placements[record.x-1u];if (info&(1u<<29u))!=0u {rl_screen_count(27u);return rl_screen_reject(5u);}
         let tri=rl_screen_triangle(record);let e1=tri[1]-tri[0];let e2=tri[2]-tri[0];
-        let h=cross(direction,e2);let det=dot(e1,h);if abs(det)<1e-12 {rl_screen_count(28u);return rl_screen_reject(5u);}
-        let offset=origin-tri[0];let u=dot(offset,h)/det;let cross_offset=cross(offset,e1);
-        let v=dot(direction,cross_offset)/det;let t=dot(e2,cross_offset)/det;
-        if t<=epsilon {rl_screen_count(24u);return rl_screen_reject(5u);}
-        if u<0.0 || v<0.0 || u+v>1.0 {rl_screen_count(25u);return rl_screen_reject(5u);}
-        let point=origin+direction*t;let projection=matrix*vec4<f32>(point,1.0);
-        let hit_pixel=(projection.xy/projection.w*vec2<f32>(0.5,-0.5)+0.5)*size;
-        // Exact triangle refinement must land in the depth cell that bracketed it.
-        if any(vec2<i32>(floor(hit_pixel))!=cell) {rl_screen_count(26u);return rl_screen_reject(5u);}
         let normal=normalize(cross(e1,e2));
-        if (info&(1u<<30u))!=0u && dot(normal,direction)>=0.0 {rl_screen_count(29u);return rl_screen_reject(8u);}
-        if dot(normal,direction)*dot(normal,rl_screen_frame.previous_eye.xyz-point)>=0.0 {rl_screen_count(30u);return rl_screen_reject(8u);}
-        rl_screen_count(16u);
-        let colour=rl_screen_history(point,normal,record.xy,cone.x+cone.y*t);
-        if colour.a>0.0 {rl_screen_count(15u);}
-        return colour;
+        let h=cross(direction,e2);let det=dot(e1,h);
+        var valid=abs(det)>=1e-12;var t=0.0;
+        if valid {
+            let offset=origin-tri[0];let u=dot(offset,h)/det;let cross_offset=cross(offset,e1);
+            let v=dot(direction,cross_offset)/det;t=dot(e2,cross_offset)/det;
+            if t<=epsilon {rl_screen_count(24u);valid=false;}
+            else if u<0.0 || v<0.0 || u+v>1.0 {rl_screen_count(25u);valid=false;}
+        } else {rl_screen_count(28u);}
+        let point=origin+direction*t;
+        if valid {
+            let projection=matrix*vec4<f32>(point,1.0);
+            let hit_pixel=(projection.xy/projection.w*vec2<f32>(0.5,-0.5)+0.5)*size;
+            if any(vec2<i32>(floor(hit_pixel))!=cell) {rl_screen_count(26u);valid=false;}
+        }
+        if valid {
+            if (info&(1u<<30u))!=0u && dot(normal,direction)>=0.0 {rl_screen_count(29u);return rl_screen_reject(8u);}
+            if dot(normal,direction)*dot(normal,rl_screen_frame.previous_eye.xyz-point)>=0.0 {rl_screen_count(30u);return rl_screen_reject(8u);}
+            rl_screen_count(16u);
+            let colour=rl_screen_history(point,normal,record.xy,cone.x+cone.y*t);
+            if colour.a>0.0 {rl_screen_count(15u);}
+            return colour;
+        }
+        // Device depth is reversed and nonlinear in camera distance. Compare in
+        // camera depth, allowing the sampling uncertainty of a grazing pixel.
+        let surface_z=bitcast<f32>(depth.x);
+        let middle_z=mix(a.z,b.z,0.5*(s+exit_s));
+        let coeff_a=rl_screen_frame.eye.w;let coeff_b=rl_screen_frame.previous_eye.w;
+        let surface_distance=coeff_b/max(surface_z-coeff_a,1e-20);
+        let ray_distance=coeff_b/max(middle_z-coeff_a,1e-20);
+        let sample_ndc=vec3<f32>((vec2<f32>(cell)+0.5)/size*vec2<f32>(2.0,-2.0)+vec2<f32>(-1.0,1.0),surface_z);
+        let sample_h=primary_frame.inverse*vec4<f32>(sample_ndc,1.0);
+        let toward=normalize(rl_screen_frame.eye.xyz-sample_h.xyz/sample_h.w);
+        let focal=length(vec3<f32>(matrix[0].y,matrix[1].y,matrix[2].y));
+        let band=max(epsilon*8.0,4.0*surface_distance/(focal*size.y*max(abs(dot(normal,toward)),0.05)));
+        if ray_distance-surface_distance>band {return rl_screen_reject(5u);}
+        s=max(exit_s,s+0.000001);level=min(level+1,max_level);
+
     }
     return rl_screen_reject(4u);
+}
+
+// Debug oracle: uses the fallback result already traced by the normal BVH pass.
+// No additional rays. This call is absent from the shipping shader.
+fn rl_screen_reference(record:vec4<u32>,origin:vec3<f32>,direction:vec3<f32>,t:f32) {
+    if record.x==0u {rl_screen_count(31u);return;}
+    let clip=rl_screen_frame.current*vec4<f32>(origin+direction*t,1.0);
+    if clip.w<=0.0 {return;}
+    let uv=clip.xy/clip.w*vec2<f32>(0.5,-0.5)+0.5;
+    if any(uv<vec2<f32>(0.0)) || any(uv>=vec2<f32>(1.0)) {return;}
+    rl_screen_count(18u);
+    let pixel=vec2<i32>(uv*vec2<f32>(rl_screen_frame.flags.yz));
+    let key=textureLoad(rl_screen_depths,pixel,0).yz;
+    if all(key==record.xy) {rl_screen_count(19u);} else {rl_screen_count(20u);}
 }

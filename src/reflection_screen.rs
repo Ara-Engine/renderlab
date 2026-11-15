@@ -255,8 +255,8 @@ impl Targets {
             bytes.extend_from_slice(&crate::mesh::matrix_bytes(m));
         }
         for v in [
-            eye.extend(0.0),
-            state.as_ref().map_or(eye, |p| p.eye).extend(0.0),
+            eye.extend(camera.near()/(camera.near()-camera.far())),
+            state.as_ref().map_or(eye, |p| p.eye).extend(camera.near()*camera.far()/(camera.far()-camera.near())),
         ] {
             for x in v.to_array() {
                 bytes.extend_from_slice(&x.to_ne_bytes());
@@ -308,6 +308,7 @@ pub(super) fn source(source: String, device: &wgpu::Device) -> String {
         .replace("textureStore(rl_samples,at,vec4<f32>(0.0));","rl_screen_results[slot]=vec4<f32>(0.0);");
     let source=source.replacen(seam,"let screen=rl_screen_results[slot];\n        if screen.a>0.0 {textureStore(rl_samples,at,rl_f16_nearest(screen));continue;}\n        let traced=rl_cast(origin,d,epsilon);",1);
     let (source,counter)=if debug_path().is_some() {
+        let source=source.replace("let traced=rl_cast(origin,d,epsilon);", "let traced=rl_cast(origin,d,epsilon);\n        rl_screen_reference(traced.record,origin,d,traced.t);");
         (source.replace("dropped:atomic<u32> };", "dropped:atomic<u32>, screen_reserved:array<u32,12>, screen_reasons:array<atomic<u32>,32> };"),
         "fn rl_screen_count(reason:u32) {atomicAdd(&rl_trace_stats.screen_reasons[reason],1u);}")
     } else {(source,"fn rl_screen_count(reason:u32) {}")};
