@@ -85,6 +85,17 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
         kernel = kernel.replacen("gi_prepare(input);", "", 1);
     }
     composed.source.push_str(&kernel);
+    // Measurement only (`RENDERLAB_GI_RX_PROBE=firstslot`): every find reads its start record
+    // alone, as a find given its slot would; keys past it read as absent (a wrong picture).
+    if std::env::var("RENDERLAB_GI_RX_PROBE").as_deref() == Ok("firstslot") {
+        let from = "    if (first.r0.x&GI_KEY_BITS)==key.x { return first; }\n    if first.r0.x==0u { return none; }\n";
+        assert_eq!(composed.source.matches(from).count(), 1, "firstslot seam");
+        composed.source = composed.source.replacen(
+            from,
+            "    if (first.r0.x&GI_KEY_BITS)==key.x { return first; }\n    if true { return none; }\n",
+            1,
+        );
+    }
     composed.source = lookup_probe::source(composed.source, lookup_probe::on());
     if count() {
         composed.source = with_count(composed.source);
