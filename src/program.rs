@@ -288,7 +288,9 @@ pub(crate) fn rl_trace_source(head: &str) -> String {
 /// Measurement only (`RENDERLAB_RL_TRACE_COUNT=1`, read with `RENDERLAB_RL_ROOM_LOG`): the
 /// software trace counts its work into the pass counters' spare words: 4 top-level nodes, 11 rays
 /// that hit, 12 rays that missed (sky), 13 instances whose box the ray entered, 14 BVH4 nodes,
-/// 15 triangles tested. The picture is unchanged; the counting costs time.
+/// 15 triangles tested; and its tail: 5 the most steps (top nodes, instances, nodes and
+/// triangles) one ray took, 7 and 8 the rays over 256 and 1024 steps. The picture is unchanged;
+/// the counting costs time.
 fn trace_count() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_RL_TRACE_COUNT").is_ok_and(|v| v == "1"))
@@ -297,7 +299,7 @@ fn with_trace_count(source: String) -> String {
     const SEAMS: [(&str, &str); 7] = [
         (
             "struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32> };",
-            "struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32>, more:array<atomic<u32>,12> };\nvar<private> rs_count:array<u32,6>;",
+            "struct RlTraceStats { pixels:atomic<u32>, slots:atomic<u32>, requested:atomic<u32>, dropped:atomic<u32>, more:array<atomic<u32>,12> };\nvar<private> rs_count:array<u32,6>;\nvar<private> rs_tail:vec3<u32>;\nfn rs_steps()->u32 {return rs_count[0]+rs_count[3]+rs_count[4]+rs_count[5];}",
         ),
         (
             "    if rs_box(origin,world_inv,b0.xyz,vec3<f32>(b0.w,bitcast<vec2<f32>>(b1.xy)),tmin,bound)>bound {return false;}\n",
@@ -311,13 +313,17 @@ fn with_trace_count(source: String) -> String {
         ("        let n=(head.y>>2u)+item*4u;\n", "        let n=(head.y>>2u)+item*4u;rs_count[0]+=1u;\n"),
         (
             "        let traced=rl_cast(origin,d,epsilon);\n",
-            "        let traced=rl_cast(origin,d,epsilon);\n        if traced.record.x==0u {rs_count[2]+=1u;} else {rs_count[1]+=1u;}\n",
+            "        let before=rs_steps();\n        let traced=rl_cast(origin,d,epsilon);\n        if traced.record.x==0u {rs_count[2]+=1u;} else {rs_count[1]+=1u;}\n        let steps=rs_steps()-before;\n        rs_tail=vec3<u32>(max(rs_tail.x,steps),rs_tail.y+select(0u,1u,steps>256u),rs_tail.z+select(0u,1u,steps>1024u));\n",
         ),
         (
             "    }\n}\n// reflection_hits' indirect arguments",
-            "    }\n    atomicAdd(&rl_trace_stats.more[0],rs_count[0]);\n    for(var w=1u;w<6u;w+=1u) {atomicAdd(&rl_trace_stats.more[6u+w],rs_count[w]);}\n}\n// reflection_hits' indirect arguments",
+            "    }\n    atomicAdd(&rl_trace_stats.more[0],rs_count[0]);\n    atomicMax(&rl_trace_stats.more[1],rs_tail.x);atomicAdd(&rl_trace_stats.more[3],rs_tail.y);atomicAdd(&rl_trace_stats.more[4],rs_tail.z);\n    for(var w=1u;w<6u;w+=1u) {atomicAdd(&rl_trace_stats.more[6u+w],rs_count[w]);}\n}\n// reflection_hits' indirect arguments",
         ),
     ];
+    // Ray-hardware modules have no software traversal to count.
+    if !source.contains("            let n=nodes+child*4u;\n") {
+        return source;
+    }
     let mut source = source;
     for (from, to) in SEAMS {
         assert_eq!(source.matches(from).count(), 1, "trace count seam {from}");
@@ -714,8 +720,11 @@ const SOFTWARE_REFLECTION_QUERY: &str = "var query:ray_query;\n";
 /// reconstruction, decals and program shading, with no ray queries.
 fn software_reflection_api() -> String {
     let software = if crate::reflection_software::bvh4_enabled() {
-        include_str!("../shaders/reflections_software_bvh4.wgsl")
-    } else { SOFTWARE_REFLECTION_API };
+        let bvh4 = include_str!("../shaders/reflections_software_bvh4.wgsl");
+        if rs_order_old() { with_old_child_order(bvh4) } else { bvh4.to_owned() }
+    } else {
+        SOFTWARE_REFLECTION_API.to_owned()
+    };
     let mut api = format!("{software}{REFLECTION_API}");
     assert!(
         api.contains(SOFTWARE_REFLECTION_QUERY),
@@ -730,6 +739,21 @@ fn software_reflection_api() -> String {
     api
 }
 // ---- end of M7-R1n software reflections ----
+/// `RENDERLAB_RS_ORDER=0`: the BVH4 traversal orders a node's children with the earlier
+/// insertion sort over dynamically indexed arrays and pops every child from the stack. The
+/// default keeps them in registers and visits the nearest next; both find the same closest hit.
+fn rs_order_old() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("RENDERLAB_RS_ORDER").is_ok_and(|v| v == "0"))
+}
+fn with_old_child_order(bvh4: &str) -> String {
+    const MARKS: [&str; 2] = ["            // ---- rs child order ----\n", "            // ---- end rs child order ----\n"];
+    let old = include_str!("../shaders/reflections_software_bvh4_order_old.wgsl");
+    let old = &old[old.find("            var distances").expect("old child order")..];
+    let begin = bvh4.find(MARKS[0]).expect("rs child order seam");
+    let end = bvh4.find(MARKS[1]).expect("rs child order seam") + MARKS[1].len();
+    format!("{}{old}{}", &bvh4[..begin], &bvh4[end..])
+}
 
 /// A world radiance cache shader's source (`name` under shaders/). Test builds read the
 /// same-named file from RENDERLAB_GI_SHADERS when it exists, so a lease can screen
