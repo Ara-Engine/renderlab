@@ -2122,6 +2122,7 @@ impl Renderer {
         size: wgpu::Extent3d,
         fog: Option<FogMap>,
     ) -> Result<(), Error> {
+        let mut prof_t = std::time::Instant::now(); // FOGPROF
         if !self.device.features().contains(VIRTUAL_FEATURES) {
             return Err(Error::InvalidInput(
                 "SoftShadows::Virtual requires VIRTUAL_FEATURES (64-bit storage max atomics)",
@@ -2158,6 +2159,7 @@ impl Renderer {
             self.view.virtual_shadows = Some(state);
         }
         self.ensure_virtual_casters(draws)?;
+        fogprof::mark(0, &mut prof_t); // FOGPROF
         let rotation = self.virtual_rotation(self.view.virtual_settings);
         // N-VSM1: the disk lookup's receiver jitter follows TR1's frames (`VdFrame::size.z`).
         let disk_jitter = self
@@ -2261,6 +2263,7 @@ impl Renderer {
         state.cache.toward = Some(toward);
         let [u, v, l] = basis(toward);
 
+        fogprof::mark(1, &mut prof_t); // FOGPROF
         // Placements in traced order: draw order, then instance slot.
         let mut models = vec![];
         let mut bounds = vec![];
@@ -2427,6 +2430,7 @@ impl Renderer {
                 surface_flush = true;
             }
         }
+        fogprof::mark(2, &mut prof_t); // FOGPROF
         cache.models = models;
         cache.casts = casts;
         cache.bounds = bounds;
@@ -2503,6 +2507,7 @@ impl Renderer {
                 entry[16 + k * 4..20 + k * 4].copy_from_slice(&value.to_ne_bytes());
             }
         }
+        fogprof::mark(3, &mut prof_t); // FOGPROF
         // The fog map's page requests, from the CPU: level i serves the fog cells whose width is
         // its texel to the next level's (the radial distance band where `level_of` picks it), and
         // requests the window pages under that band's slice of the view frustum (its corner, edge
@@ -2559,6 +2564,7 @@ impl Renderer {
             }
         }
         state.fog = fog.is_some();
+        fogprof::mark(4, &mut prof_t); // FOGPROF
         let casters = state.casters.as_ref().unwrap();
         let primitive_bits = casters.primitive_bits;
         let cluster_count = casters.instances.count;
@@ -2612,6 +2618,7 @@ impl Renderer {
                 }
             }
         }
+        fogprof::mark(5, &mut prof_t); // FOGPROF
         // Ring horizons: (re)built when the draw list's geometry changes.
         // Every addressed triangle, appended LOD triangles included (LOD receivers).
         // N8k, N-VSM1: the map and disk lookups read neither, so they keep none.
@@ -2873,6 +2880,7 @@ impl Renderer {
         if fog.is_some() && state.resources.is_none() {
             state.capacity = state.capacity.max(FOG_POOL_START);
         }
+        fogprof::mark(6, &mut prof_t); // FOGPROF
         let created = state.ensure_resources(
             &self.device,
             &self.ledger,
@@ -3199,6 +3207,7 @@ impl Renderer {
         }
         self.queue.write_buffer(&r.pass, 0, &pass);
         self.uploads.shadows += (FRAME_BYTES + pass.len()) as u64;
+        fogprof::mark(8, &mut prof_t); // FOGPROF
 
         let primary = self.view.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
@@ -3446,6 +3455,7 @@ impl Renderer {
             };
             r.groups = Some(groups);
         }
+        fogprof::mark(9, &mut prof_t); // FOGPROF
         Ok(())
     }
 
@@ -4007,6 +4017,28 @@ mod tests {
                 seen.sort_unstable();
                 seen.dedup();
                 assert_eq!(seen.len() as u32, refresh);
+            }
+        }
+    }
+}
+
+// FOGPROF: temporary CPU sections of prepare_virtual (RENDERLAB_FOG_PROFILE=<file>).
+mod fogprof {
+    static P: std::sync::Mutex<([f64; 10], u32)> = std::sync::Mutex::new(([0.0; 10], 0));
+    pub(super) fn mark(i: usize, t: &mut std::time::Instant) {
+        let Some(path) = std::env::var_os("RENDERLAB_FOG_PROFILE") else { return };
+        let now = std::time::Instant::now();
+        let mut p = P.lock().unwrap();
+        p.0[i] += (now - *t).as_secs_f64() * 1e3;
+        *t = now;
+        if i == 9 {
+            p.1 += 1;
+            if p.1 % 60 == 0 {
+                use std::io::Write;
+                let line = format!("{:?}
+", p.0.map(|v| (v / 60.0 * 1000.0).round() / 1000.0));
+                let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut f| f.write_all(line.as_bytes()));
+                p.0 = [0.0; 10];
             }
         }
     }
