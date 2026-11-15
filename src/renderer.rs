@@ -3579,6 +3579,7 @@ impl Renderer {
         if lit && !virtual_frame {
             mark(&mut encoder, "atmosphere");
             self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
+            mark(&mut encoder, "cpu:after_atmosphere");
         }
         if fresh {
             mark(&mut encoder, "sun_shadow");
@@ -3646,6 +3647,7 @@ impl Renderer {
                         self.encode_virtual(&mut encoder, stamps(8), &mut mark);
                         mark(&mut encoder, "atmosphere");
                         self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
+                        mark(&mut encoder, "cpu:after_atmosphere");
                     } else if soft {
                         mark(&mut encoder, "sun_shadow");
                         self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
@@ -3675,6 +3677,7 @@ impl Renderer {
                     // VF1 samples the freshly generated Virtual depth pages.
                     mark(&mut encoder, "atmosphere");
                     self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
+                    mark(&mut encoder, "cpu:after_atmosphere");
                 } else {
                     if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                         self.encode_visibility_logged(&mut encoder, soft, stamps(6), None, &mut mark);
@@ -3686,14 +3689,17 @@ impl Renderer {
                         self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
                     }
                 }
+                mark(&mut encoder, "cpu:tail_check");
                 self.encode_material_tail_check(&mut encoder);
                 // RT fog culling runs after current visibility; FOG_CULL=0 keeps the early path.
                 self.encode_fog_culled(&mut encoder, &mut mark);
+                mark(&mut encoder, "cpu:after_fog_culled");
                 if split {
                     // RENDERLAB_PASS_LOG_DETAIL: from the end of the early commands to the
                     // first late pass, the GPU waits for the CPU's GI and post preparation.
                     // Without this part that wait lands in the stage marked last (U-RTVIS).
                     mark(&mut encoder, "cpu.wait");
+                    mark(&mut encoder, "cpu:early_submit");
                     let late_encoder =
                         self.device
                             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -3703,6 +3709,7 @@ impl Renderer {
                     let submitted_at = Instant::now();
                     self.queue.submit([early]);
                     early_submit = submitted_at.elapsed();
+                    mark(&mut encoder, "cpu:late_prepare");
                     let prepare_start = Instant::now();
                     late_start = Some(prepare_start);
                     self.prepare_cache_and_post(draws, camera, color, true, true)?;
@@ -3721,11 +3728,14 @@ impl Renderer {
                         materials,
                         lighting: self.lighting.cell_bind(),
                     });
+                mark(&mut encoder, "cpu:gi_encode");
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
                 if split && self.hardware_shadows.is_some() && late_parts() {
+                    mark(&mut encoder, "cpu:submit_part");
                     early_submit += self.submit_part(&mut encoder, "mesh frame, late shading");
                 }
+                mark(&mut encoder, "cpu:gi_receiver_ensure");
                 self.ensure_gi_receiver_pass(shading)?;
                 mark(&mut encoder, "gi_receiver");
                 self.encode_gi_receiver_pass(&mut encoder, shading);
@@ -3738,6 +3748,7 @@ impl Renderer {
                 if !self.view.outputs.modes.shades() {
                     self.encode_shade_detail(&mut encoder, shading, &mut mark);
                 }
+                mark(&mut encoder, "cpu:reflection_ensure");
                 // U-RTVIS: the reflection pass's kernels (RENDERLAB_RL_PASS=1; nothing otherwise).
                 self.ensure_reflection_trace(shading)?;
                 self.ensure_reflection_hits(shading)?;
@@ -3760,6 +3771,7 @@ impl Renderer {
                     }
                     self.encode_primary_shading(&mut encoder, shading, stamps(0));
                     if split && self.hardware_shadows.is_some() && late_parts() {
+                        mark(&mut encoder, "cpu:submit_part");
                         early_submit += self.submit_part(&mut encoder, "mesh frame, late tail");
                     }
                     mark(&mut encoder, "reflection.trace");
