@@ -85,8 +85,115 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
         kernel = kernel.replacen("gi_prepare(input);", "", 1);
     }
     composed.source.push_str(&kernel);
+    // Measurement only (`RENDERLAB_GI_RX_PROBE=firstslot`): every find reads its start record
+    // alone, as a find given its slot would; keys past it read as absent (a wrong picture).
+    if std::env::var("RENDERLAB_GI_RX_PROBE").as_deref() == Ok("firstslot") {
+        let from = "    if (first.r0.x&GI_KEY_BITS)==key.x { return first; }\n    if first.r0.x==0u { return none; }\n";
+        assert_eq!(composed.source.matches(from).count(), 1, "firstslot seam");
+        composed.source = composed.source.replacen(
+            from,
+            "    if (first.r0.x&GI_KEY_BITS)==key.x { return first; }\n    if true { return none; }\n",
+            1,
+        );
+    }
     composed.source = lookup_probe::source(composed.source, lookup_probe::on());
+    if count() {
+        composed.source = with_count(composed.source);
+    }
     composed
+}
+/// Measurement only (`RENDERLAB_GI_RX_COUNT=1`, read with `RENDERLAB_RL_ROOM_LOG`): the kernel
+/// counts its lookup's paths into the reflection pass counters' spare words (logged as
+/// trace = [4, 11, 12, 13, 14, 15] and tail = [5, 7, 8]): 4 receivers prepared, 5 levels sampled
+/// (gi_sample), 7 cell finds, 8 slot reads past a find's first record, 11 level blends (the
+/// second level of a switch), 12 refinements (a split cell's finer level), 13 coarser fills,
+/// 14 second-bin lookups, 15 fallback levels sampled. The picture is unchanged.
+fn count() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_RX_COUNT").is_ok_and(|v| v == "1" || v == "2"))
+}
+fn with_count(source: String) -> String {
+    let stats = if source.contains("var<storage,read_write> rl_room_stats") {
+        String::new()
+    } else {
+        "@group(0) @binding(69) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;\n".to_owned()
+    };
+    let seams: [(&str, String); 11] = [
+        (
+            "fn gi_prepare(input:SurfaceInput) {\n",
+            format!("{stats}var<private> gi_cn:array<u32,9>;\nfn gi_prepare(input:SurfaceInput) {{\n"),
+        ),
+        (
+            "    let world=input.receiver.world;\n    // The bin comes from",
+            "    gi_cn[0]+=1u;\n    let world=input.receiver.world;\n    // The bin comes from".into(),
+        ),
+        (
+            "    gi_lv_bw=0.0;\n    let u=gi_lattice(world,gi_edge(level),bin);\n",
+            "    gi_lv_bw=0.0;\n    gi_cn[1]+=1u;\n    let u=gi_lattice(world,gi_edge(level),bin);\n".into(),
+        ),
+        (
+            "    let none=GiHot(vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u));\n",
+            "    let none=GiHot(vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u),vec4<u32>(0u));\n    gi_cn[2]+=1u;\n".into(),
+        ),
+        (
+            "    if first.r0.x==0u { return none; }\n",
+            "    if first.r0.x==0u { return none; }\n    gi_cn[3]+=1u;\n".into(),
+        ),
+        (
+            "        let word=gi_word(gi_hot(slot));\n        if (word&GI_KEY_BITS)==key.x { return gi_hot_load(slot); }",
+            "        let word=gi_word(gi_hot(slot));\n        gi_cn[3]+=1u;\n        if (word&GI_KEY_BITS)==key.x { return gi_hot_load(slot); }".into(),
+        ),
+        (
+            "        let level=select(pick.lo,pick.hi,j==1u);\n",
+            "        let level=select(pick.lo,pick.hi,j==1u);\n        if j==1u { gi_cn[4]+=1u; }\n".into(),
+        ),
+        ("            sample_level=level-1u;\n", "            gi_cn[5]+=1u;\n            sample_level=level-1u;\n".into()),
+        ("        let c=gi_sample(world,level+1u,bin);\n", "        gi_cn[6]+=1u;\n        let c=gi_sample(world,level+1u,bin);\n".into()),
+        (
+            "    let s2=gi_sample_refined(world,pick.lo,gi_second_bin(source));\n",
+            "    gi_cn[7]+=1u;\n    let s2=gi_sample_refined(world,pick.lo,gi_second_bin(source));\n".into(),
+        ),
+        (
+            "    for(var level=max(pick.lo,pick.hi)+1u;level<levels;level+=1u) {\n        let s=gi_sample(world,level,bin);\n",
+            "    for(var level=max(pick.lo,pick.hi)+1u;level<levels;level+=1u) {\n        gi_cn[8]+=1u;\n        let s=gi_sample(world,level,bin);\n".into(),
+        ),
+    ];
+    let mut source = source;
+    // `=2` (with RENDERLAB_GI_BUCKET=0, so finds walk): words 11, 14 and 15 count the finds that
+    // found nothing, those that found their key past the second slot, and the misses that read a
+    // whole bucket with no empty slot, in place of blends, second bins and fallback levels.
+    let finds = std::env::var("RENDERLAB_GI_RX_COUNT").as_deref() == Ok("2");
+    for (k, (from, to)) in seams.into_iter().enumerate() {
+        if finds && [6, 9, 10].contains(&k) {
+            continue;
+        }
+        assert_eq!(source.matches(from).count(), 1, "GI receiver count seam {from}");
+        source = source.replacen(from, &to, 1);
+    }
+    if finds {
+        for (from, to) in [
+            (
+                "    if first.r0.x==0u { return none; }\n",
+                "    if first.r0.x==0u { gi_cn[4]+=1u; return none; }\n",
+            ),
+            ("    if next==0u { return none; }\n", "    if next==0u { gi_cn[4]+=1u; return none; }\n"),
+            (
+                "        if (word&GI_KEY_BITS)==key.x { return gi_hot_load(slot); }\n        if word==0u { break; }\n    }\n    return none;\n",
+                "        if (word&GI_KEY_BITS)==key.x { gi_cn[7]+=1u; return gi_hot_load(slot); }\n        if word==0u { break; }\n        if i==GI_BUCKET-1u { gi_cn[8]+=1u; }\n    }\n    gi_cn[4]+=1u;\n    return none;\n",
+            ),
+        ] {
+            assert_eq!(source.matches(from).count(), 1, "GI receiver find count seam {from}");
+            source = source.replacen(from, to, 1);
+        }
+    }
+    let words = [4, 5, 7, 8, 11, 12, 13, 14, 15];
+    let flush: String = std::iter::once("    gi_prepare(input);\n".to_owned())
+        .chain(words.iter().enumerate().map(|(k, w)| {
+            format!("    if gi_cn[{k}]!=0u {{ atomicAdd(&rl_room_stats[{w}],gi_cn[{k}]); }}\n")
+        }))
+        .collect();
+    assert_eq!(source.matches("    gi_prepare(input);\n").count(), 1, "GI receiver count flush");
+    source.replacen("    gi_prepare(input);\n", &flush, 1)
 }
 pub(crate) fn shade_source(source: String, eligible: bool, specular: bool) -> String {
     let enabled = for_source(&source);

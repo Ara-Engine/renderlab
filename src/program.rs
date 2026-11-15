@@ -784,13 +784,24 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
     }
     builtin.into()
 }
+/// `RENDERLAB_GI_BUCKET=0`: a cache lookup past its key's first two slots walks the bucket one
+/// key word at a time (gi_api.wgsl GI_BUCKET_WHOLE); the same records either way.
+fn bucket_walk() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BUCKET").is_ok_and(|v| v == "0"))
+}
 fn indirect_api() -> String {
     let mut source = gi_shader("gi_cells.wgsl", INDIRECT_API[0]).into_owned();
     // `RENDERLAB_GI_KEEP=0` samples the receiver's level again for the rest term instead of
     // restoring its kept sums (gi_api.wgsl GI_KEEP_LEVEL); the same picture either way.
     static KEEP: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let keep = *KEEP.get_or_init(|| std::env::var("RENDERLAB_GI_KEEP").map_or(true, |v| v != "0"));
-    let api = gi_shader("gi_api.wgsl", INDIRECT_API[1]);
+    let mut api = gi_shader("gi_api.wgsl", INDIRECT_API[1]);
+    if bucket_walk() {
+        let from = "const GI_BUCKET_WHOLE:bool=true;";
+        assert_eq!(api.matches(from).count(), 1, "RENDERLAB_GI_BUCKET seam");
+        api = api.replacen(from, "const GI_BUCKET_WHOLE:bool=false;", 1).into();
+    }
     if keep {
         source.push_str(&api);
     } else {
