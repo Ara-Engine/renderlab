@@ -84,6 +84,19 @@ const FILL_CLAIM_FRAMES: u32 = 64;
 /// Whether first fill runs on this path: on with hardware rays, off with software rays (main's
 /// claims and gathers; its cut refill there still trades the stall for a longer, dearer tail).
 /// `RENDERLAB_GI_FIRST_FILL=1` turns it on for both paths, `=0` off for both.
+/// Aimed rays per light a gathering cell holds occluded (shaders/gi_near.wgsl gi_near_gather):
+/// `RENDERLAB_GI_NEAR_OCCLUDED=N` (16 or 0 gives every light `near_light_rays`, main's).
+fn near_occluded_rays() -> u32 {
+    static RAYS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *RAYS.get_or_init(|| {
+        std::env::var("RENDERLAB_GI_NEAR_OCCLUDED")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(NEAR_OCCLUDED_RAYS)
+    })
+}
+/// The default for `near_occluded_rays`.
+const NEAR_OCCLUDED_RAYS: u32 = 4;
 fn first_fill_on(software: bool) -> bool {
     static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     FORCED
@@ -690,6 +703,9 @@ pub struct IndirectCounters {
     /// first bin left for later; 0 none) for pixels' cells and the rest.
     pub gather_estimate: u32,
     pub gather_cuts: [u32; 2],
+    /// Gathers' aimed rays, and those at lights the cell holds occluded.
+    pub aimed_rays: u32,
+    pub aimed_occluded: u32,
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -1192,6 +1208,7 @@ impl Planner {
             0
         };
         header[15] = s.near_light_rays;
+        header[55] = near_occluded_rays();
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
@@ -2487,6 +2504,8 @@ impl Renderer {
             full_pixel: w[46],
             gather_estimate: w[256..352].iter().fold(0u32, |a, &b| a.saturating_add(b)),
             gather_cuts: [w[352], w[353]],
+            aimed_rays: w[250],
+            aimed_occluded: w[251],
         }))
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires

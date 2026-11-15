@@ -462,7 +462,7 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
         return Ok(());
     };
     let line = format!(
-        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"full_pixel\":{},\"table_bytes\":{},\"instances\":{},\"relight_parts\":{},\"slots\":{},\"slot_doublings\":{},\"peak_full\":{},\"gather_estimate\":{},\"gather_cuts\":[{},{}]}}\n",
+        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"full_pixel\":{},\"table_bytes\":{},\"instances\":{},\"relight_parts\":{},\"slots\":{},\"slot_doublings\":{},\"peak_full\":{},\"gather_estimate\":{},\"gather_cuts\":[{},{}],\"aimed_rays\":{},\"aimed_occluded\":{}}}\n",
         c.misses,
         c.miss_overflow,
         c.created,
@@ -493,7 +493,22 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
         c.gather_estimate,
         c.gather_cuts[0],
         c.gather_cuts[1],
+        c.aimed_rays,
+        c.aimed_occluded,
     );
+    // `RENDERLAB_GI_PROFILE` also turns on the cache's stage timestamps and logs the latest
+    // profiled frame's stages (milliseconds) in a second line.
+    let mut line = line;
+    if std::env::var_os("RENDERLAB_GI_PROFILE").is_some() {
+        r.set_indirect_profiling(true);
+        if let Some(p) = r.indirect_profile()? {
+            line.push_str(&format!(
+                "{{\"profile\":{{\"probe\":{:.4},\"claim\":{:.4},\"resolve\":{:.4},\"scan\":{:.4},\"setup\":{:.4},\"rays\":{:.4},\"finish\":{:.4},\"integrate\":{:.4},\"gather\":{:.4},\"light\":{:.4},\"shade\":{:.4},\"filter\":{:.4}}}}}
+",
+                p.probe, p.claim, p.resolve, p.scan, p.setup, p.rays, p.finish, p.integrate, p.gather, p.light, p.shade, p.filter
+            ));
+        }
+    }
     // A log that cannot be written is not a rendering error.
     if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
         let _ = file.write_all(line.as_bytes());
