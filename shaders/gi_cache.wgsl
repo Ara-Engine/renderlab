@@ -156,8 +156,6 @@ const GI_W_FILL_CUT:u32=240u;
 const GI_W_AIMED_RAYS:u32=250u;
 // Aimed rays per light the gathering cell holds occluded (gi_near_gather; 0: GI_H_NEAR_RAYS).
 const GI_H_NEAR_OCCLUDED:u32=55u;
-// Secondary cells' gathers make no tertiary cells (src/gi_cache.rs tertiary_on).
-const GI_H_NO_TERTIARY:u32=59u;
 // Light visibility reuse (gi_light): a cell's light bits are current until something can change
 // them. The state bit is not in GI_KEEP, so a re-trace clears it too.
 const GI_H_LIGHT_REUSE:u32=56u;
@@ -2172,9 +2170,7 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             // beyond what pixels see, all below the pixels' band (gi_miss_claim).
             let secondary=(state&GI_SECONDARY)!=0u;
             let tertiary=(state&GI_TERTIARY)!=0u;
-            // GI_H_NO_TERTIARY: a secondary cell's gather requests no cells either; its hits
-            // without a cell read the coarser one there (gi_hit_radiance), third bounce only.
-            let band=select(select(GI_BAND_SECONDARY,GI_BAND_TERTIARY,secondary),0u,!requests || tertiary || (secondary && gi_word(GI_H_NO_TERTIARY)!=0u));
+            let band=select(select(GI_BAND_SECONDARY,GI_BAND_TERTIARY,secondary),0u,!requests || tertiary);
             var missing=0u;
             var changing=0u;
             var rays=0u;
@@ -2257,9 +2253,7 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             if missing==0u && atomicLoad(&gi_wg_changing)==0u { left=0u; }
             var retry=state&GI_RETRY;
             if missing!=0u {
-                // Without tertiary cells a secondary cell's missing hits are never made: no retry.
-                let made=!((state&GI_SECONDARY)!=0u && gi_word(GI_H_NO_TERTIARY)!=0u);
-                if left==0u && retry==0u && made { left=1u; retry=GI_RETRY; }
+                if left==0u && retry==0u { left=1u; retry=GI_RETRY; }
             } else {
                 retry=0u;
             }

@@ -103,14 +103,6 @@ fn light_reuse_on() -> bool {
 }
 /// The default for `near_occluded_rays`.
 const NEAR_OCCLUDED_RAYS: u32 = 4;
-/// Whether secondary cells' gathers make tertiary cells: `RENDERLAB_GI_TERTIARY=1`. Off by
-/// default: they were 30% of the cells a moving Outpost frame made without ray hardware, read
-/// by no pixel and by nothing but secondary cells' gathers, which use the coarser cell there
-/// instead (third-bounce light only).
-fn tertiary_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_TERTIARY").is_ok_and(|v| v == "1"))
-}
 /// The still-view batch (Planner::finish): one cache frame in STILL_BATCH while a still view
 /// has fewer than STILL_BATCH_PENDING misses and queued gathers. `RENDERLAB_GI_STILL_BATCH=0`
 /// runs every frame.
@@ -1259,7 +1251,6 @@ impl Planner {
         header[15] = s.near_light_rays;
         header[55] = near_occluded_rays();
         header[56] = u32::from(light_reuse_on());
-        header[59] = u32::from(!tertiary_on());
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
