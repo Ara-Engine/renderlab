@@ -72,21 +72,6 @@ fn visibility_limits_with_fog(limits: wgpu::Limits, fog: bool) -> wgpu::Limits {
 
 /// Draws one traced frame can bind: descriptor-indexed geometry and material slots.
 pub const TRACED_DRAWS: u32 = 256;
-/// The slots a per-draw binding array binds for `draws` draws: just those (at least one) on a
-/// device with PARTIALLY_BOUND_BINDING_ARRAY, else all TRACED_DRAWS, the rest bound to stand-ins.
-/// Shaders index these arrays only by a placement's own batch, so the slots past the draws are
-/// never read either way; unbound, they cost nothing to track. Every dispatch that binds such a
-/// group merges each of its entries into wgpu's usage tracking when the command buffer finishes.
-/// `RENDERLAB_PARTIAL_ARRAYS=0` binds all TRACED_DRAWS slots on every device.
-pub(crate) fn bound_slots(device: &wgpu::Device, draws: usize) -> usize {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let on = *ON.get_or_init(|| std::env::var("RENDERLAB_PARTIAL_ARRAYS").map_or(true, |v| v != "0"));
-    if on && device.features().contains(wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY) {
-        draws.clamp(1, TRACED_DRAWS as usize)
-    } else {
-        TRACED_DRAWS as usize
-    }
-}
 /// Device features traced visibility needs in addition to hardware ray queries.
 /// Hit-vertex return also marks every acceleration structure such a renderer builds.
 pub const TRACED_FEATURES: wgpu::Features =

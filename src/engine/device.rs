@@ -155,14 +155,11 @@ pub(crate) fn request_device(
     // PRIMITIVE_INDEX: per-pixel pane shading's id raster (src/transparency_panes.rs).
     // TEXTURE_COMPRESSION_BC: block-compressed material textures where the adapter samples
     // them (`Engine::compressed_textures`); hosts upload RGBA8 elsewhere.
-    // PARTIALLY_BOUND_BINDING_ARRAY: per-draw binding arrays bind only the frame's draws
-    // (crate::primary_ray::bound_slots); without it they pad to TRACED_DRAWS as before.
     let optional = adapter.features()
         & (wgpu::Features::TIMESTAMP_QUERY
             | wgpu::Features::PIPELINE_CACHE
             | wgpu::Features::PRIMITIVE_INDEX
-            | wgpu::Features::TEXTURE_COMPRESSION_BC
-            | wgpu::Features::PARTIALLY_BOUND_BINDING_ARRAY);
+            | wgpu::Features::TEXTURE_COMPRESSION_BC);
     let (features, required_limits, experimental_features) = match path {
         RenderPath::HardwareRt => (
             // RENDERLAB_RT_PRIMARY (measurement): the visibility buffer's 64-bit raster atomics.
