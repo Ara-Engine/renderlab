@@ -63,7 +63,7 @@ pub(crate) const GATHER_GROUPS: u32 = 4096;
 /// blotches for the first 8-16+ frames (Ara's Showcase). P-DEFECT gave them the hardware
 /// budget (P-GI and P-GATHER made software gathers cheaper since G2b; docs/p-defect.md).
 const GATHER_CELLS: u32 = 32768;
-/// First fill (gicut, `RENDERLAB_GI_FIRST_FILL=0` turns it off): the most cells a frame creates
+/// First fill (gicut, on with hardware rays; `first_fill_on`): the most cells a frame creates
 /// (shaders/gi_cache.wgsl gi_fill_bin; after a cut the pixels' parent cells, which cover every
 /// receiver, are always created), and software rays' gather budget. Outpost non-RT after a cut: 0.4 us a new cell's
 /// sky rays and 1.3 us a gather, so 16k cells and 8k gathers stay near 15 ms over the frame's
@@ -81,9 +81,14 @@ const FILL_PARENT_FRAMES: u32 = 32;
 /// Frames after a cut or clear whose claims stay capped: past the parents' window, so the
 /// cells deferred until then are not all created on the frame the cap ends.
 const FILL_CLAIM_FRAMES: u32 = 64;
-fn first_fill_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIRST_FILL").map_or(true, |v| v != "0"))
+/// Whether first fill runs on this path: on with hardware rays, off with software rays (main's
+/// claims and gathers; its cut refill there still trades the stall for a longer, dearer tail).
+/// `RENDERLAB_GI_FIRST_FILL=1` turns it on for both paths, `=0` off for both.
+fn first_fill_on(software: bool) -> bool {
+    static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    FORCED
+        .get_or_init(|| std::env::var("RENDERLAB_GI_FIRST_FILL").ok().map(|v| v != "0"))
+        .unwrap_or(!software)
 }
 /// `cut_gather_ms` (U-RTVIS): gathers per millisecond of GPU time, software rays (Outpost non-RT
 /// after a cut: about 0.95 ms per 1,000, ara-integration perf/table-outpost-view2.md) and
@@ -1204,8 +1209,8 @@ impl Planner {
         // Software rays' gathers are held to GATHER_RAYS_SOFTWARE estimated rays a frame
         // instead of a cell count (shaders/gi_cache.wgsl gi_gather_rays).
         let since_fill = since_clear.min(self.since_cut);
-        let fill = first_fill_on() && s.claim_cells == u32::MAX && since_fill < FILL_CLAIM_FRAMES;
-        let ray_budget = first_fill_on() && software && s.gather_cells == 0 && !cut_window;
+        let fill = first_fill_on(software) && s.claim_cells == u32::MAX && since_fill < FILL_CLAIM_FRAMES;
+        let ray_budget = first_fill_on(software) && software && s.gather_cells == 0 && !cut_window;
         header[20] = match s.gather_cells {
             _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
             0 => GATHER_CELLS,
