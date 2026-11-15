@@ -1938,8 +1938,20 @@ var<workgroup> gi_wg_rays:atomic<u32>;
 var<workgroup> gi_wg_live:u32;
 var<private> gi_gather_sh:array<vec3<f32>,4>;
 // The gather period P for `count` queued cells (1 without a cap).
-fn gi_gather_period(count:u32) -> u32 {
+// First fill's refill budget (GI_H_FILL_LEFT, the frames left until the refill should have
+// drained, from 40 after a cut down to 8): the queue spread evenly over those frames, at least
+// GI_H_GATHER_CELLS. The cut's gathers then cost about the same every frame and finish when
+// main's full budget would, instead of main's full budget at once or a fixed lower one that
+// leaves the queue running long after the cut.
+const GI_H_FILL_LEFT:u32=51u;
+fn gi_gather_cap(count:u32) -> u32 {
     let cap=gi_word(GI_H_GATHER_CELLS);
+    let left=gi_word(GI_H_FILL_LEFT);
+    if left==0u || cap==0u { return cap; }
+    return max(cap,(count+left-1u)/left);
+}
+fn gi_gather_period(count:u32) -> u32 {
+    let cap=gi_gather_cap(count);
     var p=1u;
     if cap==0u { return p; }
     // Pixels first (below) uses the whole budget: the smallest period that fits, not the next
@@ -1973,7 +1985,7 @@ fn gi_fill_rank(slot:u32, period:u32) -> u32 {
 fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
     let frame=gi_word(GI_H_FRAME);
     let pixels=gi_word(GI_H_PIXEL_CELLS);
-    let cap=gi_word(GI_H_GATHER_CELLS);
+    let cap=gi_gather_cap(count);
     if pixels==0u || cap==0u || period<=1u { return slot%period==frame%period; }
     let seen=min(period,max((min(pixels,count)+cap-1u)/cap,1u));
     let pixel=gi_table[gi_cold(slot)+GI_C_SEEN]==frame;

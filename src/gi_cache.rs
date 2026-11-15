@@ -72,9 +72,11 @@ const FILL_CELLS_HARDWARE: u32 = 65536;
 const FILL_CELLS_SOFTWARE: u32 = 16384;
 const GATHER_CELLS_SOFTWARE: u32 = 8192;
 /// Frames after a cut or clear whose pixels also request their parent cells and whose claims
-/// are capped (first fill), and over which software gathers return to the full budget.
+/// are capped (first fill), and by which software gathers should have drained the refill's
+/// queue (spread evenly over the frames left, never fewer than FILL_GATHER_LAST).
 const FILL_PARENT_FRAMES: u32 = 32;
-const FILL_GATHER_FRAMES: u32 = 64;
+const FILL_GATHER_FRAMES: u32 = 40;
+const FILL_GATHER_LAST: u32 = 8;
 fn first_fill_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_FIRST_FILL").map_or(true, |v| v != "0"))
@@ -307,7 +309,8 @@ pub struct IndirectSettings {
     /// Memory cut 1 (U-FIXED): the table starts at a size from the scene's triangle count
     /// (`scene_slots_log2`) and doubles, emptied, whenever a frame's claims find a bucket full
     /// (the `full` counter, read back without waiting), up to `slots_log2`. Off: the table is
-    /// 2^`slots_log2` from the start. `RENDERLAB_GI_SLOTS=N` fixes 2^N either way (A/B).
+    /// 2^`slots_log2` from the start (the default: each doubling empties the table, three full
+    /// refills at Glint's load). `RENDERLAB_GI_SLOTS=N` fixes 2^N either way (A/B).
     pub auto_slots: bool,
     /// Fixed-rotation refresh (W2): a cell re-traces when (slot + frame) % period == 0.
     /// 0 disables it; events alone keep sky visibility current.
@@ -468,7 +471,7 @@ impl Default for IndirectSettings {
             min_edge: 1.0 / 512.0,
             levels: 14,
             slots_log2: 20,
-            auto_slots: true,
+            auto_slots: false,
             rotation_period: 0,
             evict_frames: 120,
             force_software: false,
@@ -1195,8 +1198,7 @@ impl Planner {
         let fill_gathers = first_fill_on() && software && since_fill < FILL_GATHER_FRAMES;
         header[20] = match s.gather_cells {
             _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
-            0 if fill_gathers => GATHER_CELLS_SOFTWARE
-                + (GATHER_CELLS - GATHER_CELLS_SOFTWARE) * since_fill / FILL_GATHER_FRAMES,
+            0 if fill_gathers => GATHER_CELLS_SOFTWARE,
             0 => GATHER_CELLS,
             u32::MAX => 0,
             cells => cells,
@@ -1244,6 +1246,14 @@ impl Planner {
             n => n,
         };
         header[50] = u32::from(fill);
+        // The refill's gathers follow the queue: spread over the frames left until
+        // FILL_GATHER_FRAMES after the cut (at least FILL_GATHER_LAST), at least
+        // GATHER_CELLS_SOFTWARE a frame (shaders/gi_cache.wgsl gi_gather_cap).
+        header[51] = if fill_gathers && header[20] == GATHER_CELLS_SOFTWARE {
+            (FILL_GATHER_FRAMES - since_fill).max(FILL_GATHER_LAST)
+        } else {
+            0
+        };
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {
