@@ -128,7 +128,12 @@ fn rs_instance(i:u32,origin:vec3<f32>,direction:vec3<f32>,world_inv:vec3<f32>,tm
     }
     return false;
 }
-const RS_TOP_STACK:u32=32u;
+const RS_TOP_STACK:u32=48u;
+// The top level's layout (src/instance_bvh.rs): a BVH4 of float boxes, axis-major, 32 words
+// (8 vec4 words) a node; RENDERLAB_INSTANCE_BVH_WIDE=0 selects the BVH2 (4 vec4 words).
+const RS_TOP_WIDE:bool=true;
+const RS_TOP_NODE:u32=8u;
+const RS_EMPTY:u32=0xffffffffu;
 // The closest hit in (tmin, tmax), or with `any_hit` the first found; record.x = 0 is a miss.
 // Through the top-level BVH over the instances' world boxes (src/instance_bvh.rs: header word
 // 1 its base, 2 its root, binary float-box nodes), or the flat list without one.
@@ -164,10 +169,30 @@ fn rs_trace(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32,any_hit:bool)
             if rs_instance(item&~RS_LEAF,origin,direction,world_inv,tmin,any_hit,&best,&best_i,&stack) {return best;}
             continue;
         }
-        // Both children's boxes against a bound that keeps equal-distance ties (rs_limit).
-        let n=(head.y>>2u)+item*4u;
-        let n0=rs_q(n);let n1=rs_q(n+1u);let n2=rs_q(n+2u);let n3=rl_geometry[n+3u];
+        // The children's boxes against a bound that keeps equal-distance ties (rs_limit).
+        let n=(head.y>>2u)+item*RS_TOP_NODE;
         let bound=select(best.t,bitcast<f32>(bitcast<u32>(best.t)+1u),best.record.x!=0u);
+        if RS_TOP_WIDE {
+            // All four boxes at once (rs_box's arithmetic a lane), sorted, pushed far to near.
+            let ax=(rs_q(n)-origin.x)*world_inv.x;let bx=(rs_q(n+3u)-origin.x)*world_inv.x;
+            let ay=(rs_q(n+1u)-origin.y)*world_inv.y;let by=(rs_q(n+4u)-origin.y)*world_inv.y;
+            let az=(rs_q(n+2u)-origin.z)*world_inv.z;let bz=(rs_q(n+5u)-origin.z)*world_inv.z;
+            let near=max(max(max(min(ax,bx),min(ay,by)),min(az,bz)),vec4<f32>(tmin));
+            let far=min(min(min(max(ax,bx),max(ay,by)),max(az,bz)),vec4<f32>(bound));
+            var ids=rl_geometry[n+6u];
+            var dist=select(vec4<f32>(3.4028235e38),near,(near<=far)&(ids!=vec4<u32>(RS_EMPTY)));
+            if dist.y<dist.x {dist=dist.yxzw;ids=ids.yxzw;}
+            if dist.w<dist.z {dist=dist.xywz;ids=ids.xywz;}
+            if dist.z<dist.x {dist=dist.zyxw;ids=ids.zyxw;}
+            if dist.w<dist.y {dist=dist.xwzy;ids=ids.xwzy;}
+            if dist.z<dist.y {dist=dist.xzyw;ids=ids.xzyw;}
+            if dist.w<=bound && sp<RS_TOP_STACK {nodes[sp]=ids.w;sp+=1u;}
+            if dist.z<=bound && sp<RS_TOP_STACK {nodes[sp]=ids.z;sp+=1u;}
+            if dist.y<=bound && sp<RS_TOP_STACK {nodes[sp]=ids.y;sp+=1u;}
+            if dist.x<=bound && sp<RS_TOP_STACK {nodes[sp]=ids.x;sp+=1u;}
+            continue;
+        }
+        let n0=rs_q(n);let n1=rs_q(n+1u);let n2=rs_q(n+2u);let n3=rl_geometry[n+3u];
         let t0=rs_box(origin,world_inv,n0.xyz,vec3<f32>(n0.w,n1.xy),tmin,bound);
         let t1=rs_box(origin,world_inv,vec3<f32>(n1.zw,n2.x),n2.yzw,tmin,bound);
         // The nearer child is popped first.

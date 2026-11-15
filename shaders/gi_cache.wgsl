@@ -156,6 +156,10 @@ const GI_W_FILL_CUT:u32=240u;
 const GI_W_AIMED_RAYS:u32=250u;
 // Aimed rays per light the gathering cell holds occluded (gi_near_gather; 0: GI_H_NEAR_RAYS).
 const GI_H_NEAR_OCCLUDED:u32=55u;
+// Light visibility reuse (gi_light): a cell's light bits are current until something can change
+// them. The state bit is not in GI_KEEP, so a re-trace clears it too.
+const GI_H_LIGHT_REUSE:u32=56u;
+const GI_LIGHTS_KNOWN:u32=0x10000u;
 const GI_W_AIMED_OCCLUDED:u32=251u;
 // Whether the last frame's capped claim left pixels' cells for later (gi_fill_select): kept
 // across frames (src/gi_cache.rs clears the counters before it).
@@ -1749,11 +1753,15 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
             let all=(relight&GI_RELIGHT_ALL)!=0u;
             let p=relight&0xffu;
             if all || p==0u || (slot+((relight>>8u)&0xffu))%p==0u {
+                gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
                 gi_queue_shade(slot);
                 gi_schedule(slot,select(1u,gi_word(GI_H_GATHERS),all));
             }
         }
-        if (flags&GI_SCAN_CASTER)!=0u && gi_light_reached(slot) { gi_queue_shade(slot); }
+        if (flags&GI_SCAN_CASTER)!=0u && gi_light_reached(slot) {
+            gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
+            gi_queue_shade(slot);
+        }
     }
     // A changing map re-integrates one fixed slot group a frame (src/gi_cache.rs
     // ENVIRONMENT_PERIOD): a fixed rotation, never a ranking (W2).
@@ -1810,7 +1818,13 @@ fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
     for(var i=id.x;i<count;i+=groups.x*64u) {
         let slot=atomicLoad(&gi_work[gi_frame.bounce.w+i]);
         let cold=gi_cold(slot);
-        gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_SHADE;
+        let state=gi_table[cold+GI_C_STATE];
+        gi_table[cold+GI_C_STATE]=(state&~GI_SHADE)|select(0u,GI_LIGHTS_KNOWN,gi_word(GI_H_LIGHT_REUSE)!=0u);
+        // A cell whose light visibility is known keeps it: nothing that changes it has happened
+        // since (a new or re-traced cell, a relight, a moved caster crossing one of its light
+        // rays: each clears GI_LIGHTS_KNOWN). Most cells shaded in motion are shaded again only
+        // because their own gather finished (Outpost: about 1,600 of 3,600 a frame).
+        if (state&GI_LIGHTS_KNOWN)!=0u && gi_word(GI_H_LIGHT_REUSE)!=0u { continue; }
         let q=gi_point(cold);
         let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
         let edge=gi_edge(gi_table[cold+GI_C_DEF]&0xffu);

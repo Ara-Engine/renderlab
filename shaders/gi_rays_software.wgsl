@@ -165,7 +165,12 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
     }
     return false;
 }
-const GI_TOP_STACK:u32=32u;
+const GI_TOP_STACK:u32=48u;
+// The top level's layout (src/instance_bvh.rs): a BVH4 of float boxes, axis-major, 32 words a
+// node; RENDERLAB_INSTANCE_BVH_WIDE=0 selects the BVH2 (16 words).
+const GI_TOP_WIDE:bool=true;
+const GI_TOP_NODE:u32=32u;
+fn gi_g4(i:u32) -> vec4<f32> { return vec4<f32>(gi_gf(i),gi_gf(i+1u),gi_gf(i+2u),gi_gf(i+3u)); }
 // Closest hit (or, with `any`, the first found) in (tmin, tmax) over every instance: through
 // the top-level BVH over the instances' world boxes (src/instance_bvh.rs, header word 1 its
 // base, 2 its root), or the flat list when there is none (RENDERLAB_INSTANCE_BVH=0).
@@ -191,9 +196,29 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
             if gi_instance(item&~GI_BVH_LEAF,origin,direction,world_inv,tmin,any_hit,&best,&stack) { return best; }
             continue;
         }
-        // Both children's boxes against a bound that keeps equal-distance ties (gi_limit).
-        let n=top+item*16u;
+        // The children's boxes against a bound that keeps equal-distance ties (gi_limit).
+        let n=top+item*GI_TOP_NODE;
         let bound=select(best.t,bitcast<f32>(bitcast<u32>(best.t)+1u),best.hit);
+        if GI_TOP_WIDE {
+            // All four boxes at once (gi_slab_near's arithmetic a lane), sorted, pushed far to near.
+            let ax=(gi_g4(n)-origin.x)*world_inv.x;let bx=(gi_g4(n+12u)-origin.x)*world_inv.x;
+            let ay=(gi_g4(n+4u)-origin.y)*world_inv.y;let by=(gi_g4(n+16u)-origin.y)*world_inv.y;
+            let az=(gi_g4(n+8u)-origin.z)*world_inv.z;let bz=(gi_g4(n+20u)-origin.z)*world_inv.z;
+            let near=max(max(max(min(ax,bx),min(ay,by)),min(az,bz)),vec4<f32>(tmin));
+            let far=min(min(min(max(ax,bx),max(ay,by)),max(az,bz)),vec4<f32>(bound));
+            var ids=vec4<u32>(gi_geometry[n+24u],gi_geometry[n+25u],gi_geometry[n+26u],gi_geometry[n+27u]);
+            var dist=select(vec4<f32>(3.4028235e38),near,(near<=far)&(ids!=vec4<u32>(GI_BVH_EMPTY)));
+            if dist.y<dist.x { dist=dist.yxzw;ids=ids.yxzw; }
+            if dist.w<dist.z { dist=dist.xywz;ids=ids.xywz; }
+            if dist.z<dist.x { dist=dist.zyxw;ids=ids.zyxw; }
+            if dist.w<dist.y { dist=dist.xwzy;ids=ids.xwzy; }
+            if dist.z<dist.y { dist=dist.xzyw;ids=ids.xzyw; }
+            if dist.w<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.w;sp+=1u; }
+            if dist.z<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.z;sp+=1u; }
+            if dist.y<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.y;sp+=1u; }
+            if dist.x<=bound && sp<GI_TOP_STACK { nodes[sp]=ids.x;sp+=1u; }
+            continue;
+        }
         let t0=gi_slab_near(origin,world_inv,gi_gv(n),gi_gv(n+3u),tmin,bound);
         let t1=gi_slab_near(origin,world_inv,gi_gv(n+6u),gi_gv(n+9u),tmin,bound);
         let c0=gi_geometry[n+12u];let c1=gi_geometry[n+13u];
