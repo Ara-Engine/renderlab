@@ -778,6 +778,12 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
     {
         return text.into();
     }
+    // RENDERLAB_GI_BUCKET=0: the cache's table searches walk a bucket one key word at a time.
+    if name == "gi_cells.wgsl" && bucket_walk() {
+        let from = "const GI_FIND_WHOLE:bool=true;";
+        assert_eq!(builtin.matches(from).count(), 1, "RENDERLAB_GI_BUCKET seam");
+        return builtin.replacen(from, "const GI_FIND_WHOLE:bool=false;", 1).into();
+    }
     // The software rays' top level (src/instance_bvh.rs) selects its traversal here.
     if name == "gi_rays_software.wgsl" {
         return crate::instance_bvh::shader_text(builtin).into();
@@ -785,7 +791,8 @@ pub(crate) fn gi_shader(name: &str, builtin: &'static str) -> std::borrow::Cow<'
     builtin.into()
 }
 /// `RENDERLAB_GI_BUCKET=0`: a cache lookup past its key's first two slots walks the bucket one
-/// key word at a time (gi_api.wgsl GI_BUCKET_WHOLE); the same records either way.
+/// key word at a time (gi_api.wgsl GI_BUCKET_WHOLE), and so do the kernels' finds past their
+/// first slots (gi_cells.wgsl GI_FIND_WHOLE); the same records and slots either way.
 fn bucket_walk() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BUCKET").is_ok_and(|v| v == "0"))
