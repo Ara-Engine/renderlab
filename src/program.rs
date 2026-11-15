@@ -273,9 +273,16 @@ pub(crate) fn rl_deferred_for(source: &str) -> bool {
 }
 /// `rl_trace`'s module on a traced shading `head`: the standard program's traced composition
 /// (the reflection block's helpers, with its stubs) and the trace entries.
+/// The trace kernel's cache lookup (shaders/reflections_trace.wgsl), which `cache_in_trace` keeps.
+const TRACE_CACHE_CALL: &str = "let cached=rl_cache_hit(traced.record,origin,d,traced.t,cone.x+cone.y*traced.t,sqrt(alpha));";
 pub(crate) fn rl_trace_source(head: &str) -> String {
     let composed = compose(head, crate::STANDARD_PROGRAM, Stage::Traced, false);
-    rl_pass_switches(format!("{}\n{REFLECTION_TRACE}", composed.source))
+    let trace = if cache_in_trace() {
+        REFLECTION_TRACE.to_owned()
+    } else {
+        REFLECTION_TRACE.replacen(TRACE_CACHE_CALL, "let cached=vec4<f32>(0.0);", 1)
+    };
+    rl_pass_switches(format!("{}\n{trace}", composed.source))
 }
 /// `composed` with the block between `markers` replaced by `text`, moving the program's range.
 fn replace_block(mut composed: Composed, markers: [&str; 2], text: &str) -> Composed {
@@ -622,19 +629,43 @@ const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 5] = [
 ];
 /// Cache-terminated reflection hits (shaders/reflection_cache_hits.wgsl): a rough lobe's hit
 /// whose cone covers the radiance cache's cell there reads the cell's outgoing radiance
-/// instead of shading the hit. Off unless `RENDERLAB_RL_CACHE_HITS` names the minimum
-/// perceptual roughness (0-1); off, every module keeps the stub and its hits shade as before.
+/// instead of shading the hit (whose software sun shadow ray was ~90% of the non-RT hit pass).
+/// On by default without ray hardware, in the hit pass only (`cache_hits_for`,
+/// `cache_in_trace`): lobes under CACHE_HITS_DEFAULT keep the full program, so mirrors keep
+/// full detail. Ray-hardware modules keep the stub unless `RENDERLAB_RL_CACHE_HITS` names a
+/// minimum perceptual roughness (0-1), which then applies on both paths;
+/// `RENDERLAB_RL_CACHE_HITS=off` turns it off everywhere.
 pub(crate) const CACHE_HITS: &str = include_str!("../shaders/reflection_cache_hits.wgsl");
 pub(crate) const CACHE_HITS_STUB: &str = "fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> { return vec4<f32>(0.0); }\n";
-/// The `RENDERLAB_RL_CACHE_HITS` minimum roughness, read once per process.
-pub(crate) fn cache_hits_rough() -> Option<f32> {
-    static ROUGH: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
+const CACHE_HITS_DEFAULT: f32 = 0.25;
+/// `RENDERLAB_RL_CACHE_HITS` when set: its minimum roughness, or none (`off`).
+fn cache_hits_env() -> Option<Option<f32>> {
+    static ROUGH: std::sync::OnceLock<Option<Option<f32>>> = std::sync::OnceLock::new();
     *ROUGH.get_or_init(|| {
-        std::env::var("RENDERLAB_RL_CACHE_HITS")
-            .ok()
-            .and_then(|v| v.parse::<f32>().ok())
-            .filter(|r| (0.0..=1.0).contains(r))
+        let value = std::env::var("RENDERLAB_RL_CACHE_HITS").ok()?;
+        Some(value.parse::<f32>().ok().filter(|r| (0.0..=1.0).contains(r)))
     })
+}
+/// Whether any module may read the cache's outgoing radiance: the lighting group then binds it
+/// (one more storage buffer per stage).
+pub(crate) fn cache_hits_rough() -> Option<f32> {
+    cache_hits_env().unwrap_or(Some(CACHE_HITS_DEFAULT))
+}
+/// The minimum roughness for modules composed on `head`: the switch's value when set, else the
+/// default on non-RT heads (which declare the software reflection geometry), none with rays.
+fn cache_hits_for(head: &str) -> Option<f32> {
+    match cache_hits_env() {
+        Some(set) => set,
+        None => head
+            .contains(SOFTWARE_REFLECTION_GEOMETRY)
+            .then_some(CACHE_HITS_DEFAULT),
+    }
+}
+/// `RENDERLAB_RL_CACHE_TRACE=1` puts the lookup back in the trace kernel, where it cost more
+/// trace time than it saved hit time.
+fn cache_in_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_CACHE_TRACE").is_ok_and(|v| v == "1"))
 }
 /// R1's ray-query declaration line.
 const SOFTWARE_REFLECTION_QUERY: &str = "var query:ray_query;\n";
@@ -1132,7 +1163,7 @@ fn compose_stage(
             _ => "fn rl_indirect_open() {}\n",
         });
         // Hardware and software traces alike (the software seam passes rs_trace's distance).
-        reflection.push_str(&match cache_hits_rough().filter(|_| indirect_calls) {
+        reflection.push_str(&match cache_hits_for(head).filter(|_| indirect_calls) {
             Some(rough) => CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", &format!("{rough:?}")),
             None => CACHE_HITS_STUB.to_owned(),
         });
@@ -1383,9 +1414,34 @@ pub(crate) fn compose_hits(
         }
     }
     // The hit entry follows the program, so the range stays.
+    if declares(program, "fn", "view_dependence") {
+        composed.source.push_str(&CACHE_SUITS.replacen("RL_CACHE_SHARE_BOUND", &format!("{:?}", cache_share()), 1));
+    } else {
+        composed.source.push_str(CACHE_SUITS_NEVER);
+    }
     composed.source = rl_pass_switches(composed.source);
     composed
 }
+/// Whether a reflection hit's own surface may take the cache's Lambertian value
+/// (shaders/reflection_hits.wgsl): its view-dependent share of the response (the program's
+/// `view_dependence`, as TR1's hint uses it) is under the share bound. A glossy, dark or
+/// metallic hit surface, whose reflection is mostly its specular, keeps the full program; so does
+/// every hit of a program that declares no view dependence. At 0.6 the dark glossy figure's hard
+/// near-black reflection in Showcase's copper sphere is gone (max 27 codes on 4 px of the sphere
+/// against 146 on 482 px ungated); 0.25 matched cache-off but kept little of the saving.
+const CACHE_SUITS: &str = "\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return view_dependence(s,input).share<RL_CACHE_SHARE_BOUND; }\n";
+/// The share bound (0.6), or `RENDERLAB_RL_CACHE_SHARE` (0-1).
+fn cache_share() -> f32 {
+    static SHARE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *SHARE.get_or_init(|| {
+        std::env::var("RENDERLAB_RL_CACHE_SHARE")
+            .ok()
+            .and_then(|v| v.parse::<f32>().ok())
+            .filter(|s| (0.0..=1.0).contains(s))
+            .unwrap_or(0.6)
+    })
+}
+const CACHE_SUITS_NEVER: &str ="\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return false; }\n";
 /// `RENDERLAB_RL_HIT_OWN_PROGRAM=1` (measurement, off by default): in a mixed-program frame each
 /// hit is shaded by its own draw's program, with its own parameters. More correct than inline's
 /// fallback (an emitter's reflection glows), but a visible change (docs/m7-gaps.md, Programs).

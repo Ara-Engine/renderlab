@@ -99,6 +99,9 @@ pub(crate) struct ProgramPipelines {
     /// `RENDERLAB_RL_PASS=1` that shades with it (primary_ray_gpu reflection_hits_gpu.rs),
     /// dropped with `traced`.
     pub hits: [[Option<Owned<wgpu::ComputePipeline>>; 2]; 2],
+    /// Whether each `hits` pipeline reads the sun from the sun-shadow map (its group 4,
+    /// reflection_hit_sun.rs); a pipeline is rebuilt when the map comes or goes.
+    pub hits_sun: [[bool; 2]; 2],
     pub temporal: Option<Owned<wgpu::ComputePipeline>>,
     /// Traced shading whose sampling helpers record texture residency requests
     /// (`Renderer::ensure_streamed`), by `Shading`: built only when a frame streams
