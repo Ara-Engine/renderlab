@@ -774,7 +774,8 @@ pub(crate) fn sun_tile_held_probes() -> u32 {
 }
 /// Measurement only: `RENDERLAB_SUNRT_DIAG` is a comma list that splits the fused visibility +
 /// sun pass's cost. `nosun` traces no sun rays (every receiver lit), `probes` short-cuts every
-/// tile after its tile-vote probes, `norepair` lists no near-edge pixel for the repair pass.
+/// tile after its tile-vote probes, `norepair` lists no near-edge pixel for the repair pass,
+/// `reuseshow` shades every still-reused receiver as shadowed (sunrt-7: where reuse applies).
 /// Pictures are wrong under each; unset in every shipping run.
 fn with_sunrt_diag(source: String) -> String {
     static FLAGS: std::sync::OnceLock<String> = std::sync::OnceLock::new();
@@ -793,6 +794,10 @@ fn with_sunrt_diag(source: String) -> String {
             "norepair" => (
                 "near_edge=primary_near_edge(trace,receiver.epsilon);",
                 "near_edge=false;",
+            ),
+            "reuseshow" => (
+                "tr1_tile_count=select(0u,1u,hint==2u);",
+                "tr1_tile_count=0u;",
             ),
             _ => continue,
         };
