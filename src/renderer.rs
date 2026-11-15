@@ -184,7 +184,8 @@ fn submit_log(line: impl FnOnce() -> String) {
 /// wgpu's submit walks every TLAS instance for each TLAS binding a command buffer uses (6,338
 /// on Outpost: a 3 ms late submit), and the GPU idled until that one submit returned. Queue
 /// writes made while encoding a part land before that part's submit; no part reads a buffer a
-/// later part writes. `RENDERLAB_LATE_PARTS=0` keeps one late submit.
+/// later part writes. Ray-hardware frames only: without a TLAS the late submit is cheap and
+/// the GPU never waited there. `RENDERLAB_LATE_PARTS=0` keeps one late submit.
 fn late_parts() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_LATE_PARTS").map_or(true, |v| v != "0"))
@@ -3722,7 +3723,7 @@ impl Renderer {
                     });
                 self.gi
                     .encode(&mut encoder, self.lighting.kernel_bind(), shade, &mut mark);
-                if split && late_parts() {
+                if split && self.hardware_shadows.is_some() && late_parts() {
                     early_submit += self.submit_part(&mut encoder, "mesh frame, late shading");
                 }
                 self.ensure_gi_receiver_pass(shading)?;
@@ -3758,7 +3759,7 @@ impl Renderer {
                         mark(&mut encoder, "shading");
                     }
                     self.encode_primary_shading(&mut encoder, shading, stamps(0));
-                    if split && late_parts() {
+                    if split && self.hardware_shadows.is_some() && late_parts() {
                         early_submit += self.submit_part(&mut encoder, "mesh frame, late tail");
                     }
                     mark(&mut encoder, "reflection.trace");
