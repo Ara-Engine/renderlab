@@ -526,8 +526,11 @@ override VD_RAYS:u32=4u;
 override VD_EDGE_HARD:f32=1.5;
 // Per placement, whether its mesh is in the trace geometry (one bit each).
 @group(0) @binding(61) var<storage,read> vd_traceable:array<u32>;
-// Edge pixels traced, and those left to the map (an untraced caster), this frame.
-@group(0) @binding(62) var<storage,read_write> vd_edge_count:array<atomic<u32>,4>;
+// The edge pixels for vd_edges: a header (count, those left to the map for an untraced caster),
+// then per pixel its packed id, `vd_far` and `vd_cut`. Past its capacity a pixel keeps the map.
+@group(0) @binding(62) var<storage,read_write> vd_edge_list:array<atomic<u32>>;
+const VD_EDGE_HEADER:u32=4u;
+fn vd_edge_capacity()->u32 {return (arrayLength(&vd_edge_list)-VD_EDGE_HEADER)/4u;}
 var<private> vd_far:vec2<u32>;
 var<private> vd_cut:f32;
 // 0: no edge; 1: an edge whose outline casters are all traced; 2: one is not.
@@ -608,7 +611,9 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo:f32,hi:f
     // decide it), whether or not this column reaches the cone itself.
     if VD_RAYS>0u && stride==1 && lo<vd_cut && vd_edge!=2u {
         let wide=max(abs(c-p.xy)-vec2<f32>(1.5*size),vec2<f32>(0.0));
-        if length(wide)<vd_px.slope*min(t,vd_cut) && vd_outline(cell,level,t,lo) {
+        // Above the receiver's tangent plane and its bias, as a column the cone can meet: the
+        // receiver's own ground is no edge.
+        if length(wide)<vd_px.slope*min(t,vd_cut) && t>2.0*margin && vd_above(vec3<f32>(c,height),margin) && vd_outline(cell,level,t,lo) {
             let placement=(top.x>>vsm.misc.x)-1u;
             let traced=((vd_traceable[placement>>5u]>>(placement&31u))&1u)!=0u;
             vd_edge=max(vd_edge,select(2u,1u,traced));
@@ -782,13 +787,34 @@ fn vd_pixel(id:vec2<u32>)->u32 {
         if VD_RAYS>0u {vd_cut=VD_EDGE_HARD*vsm_texel(vd_px.level)/vd_px.radius;}
         vd_map();
     }
+    // An edge pixel keeps the map's answer until vd_edges traces it (its own pass, so the
+    // lookup's kernel carries no traversal).
     if vd_edge==1u {
-        atomicAdd(&vd_edge_count[0],1u);
-        return vd_edge_rays(id);
+        let slot=atomicAdd(&vd_edge_list[0],1u);
+        if slot<vd_edge_capacity() {
+            let at=VD_EDGE_HEADER+4u*slot;
+            atomicStore(&vd_edge_list[at],id.x|(id.y<<16u));
+            atomicStore(&vd_edge_list[at+1u],vd_far.x);
+            atomicStore(&vd_edge_list[at+2u],vd_far.y);
+            atomicStore(&vd_edge_list[at+3u],bitcast<u32>(vd_cut));
+        }
     }
-    if vd_edge==2u {atomicAdd(&vd_edge_count[1],1u);}
+    if vd_edge==2u {atomicAdd(&vd_edge_list[1],1u);}
     // 64 samples to the 0..256 count the shading programs read.
     return 4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
+}
+// The edge pixels' rays (vd_pixel's list), one thread each.
+@compute @workgroup_size(64) fn vd_edges(@builtin(global_invocation_id) gid:vec3<u32>) {
+    let k=gid.x+gid.y*65535u*64u;
+    if k>=min(atomicLoad(&vd_edge_list[0]),vd_edge_capacity()) {return;}
+    let at=VD_EDGE_HEADER+4u*k;
+    let packed=atomicLoad(&vd_edge_list[at]);
+    let id=vec2<u32>(packed&0xffffu,packed>>16u);
+    vd_prepare(id);
+    if !vd_px.valid || vd_px.level==VSM_NONE {return;}
+    vd_far=vec2<u32>(atomicLoad(&vd_edge_list[at+1u]),atomicLoad(&vd_edge_list[at+2u]));
+    vd_cut=bitcast<f32>(atomicLoad(&vd_edge_list[at+3u]));
+    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(vd_edge_rays(id)));
 }
 @compute @workgroup_size(8,4) fn vd_lookup(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>) {
     let size=textureDimensions(vsm_world);

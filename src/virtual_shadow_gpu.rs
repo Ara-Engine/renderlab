@@ -429,6 +429,8 @@ struct Pipelines {
     /// N-VSM1 (shaders/virtual_shadow_disk.wgsl): its page requests and its lookup.
     disk_mark: Owned<wgpu::ComputePipeline>,
     disk: Owned<wgpu::ComputePipeline>,
+    /// The Disk lookup's hard-edge rays (WGSL `vd_edges`).
+    disk_edges: Owned<wgpu::ComputePipeline>,
     /// The sparse pool's passes (vsm_release, vsm_allocate, vsm_clear_sparse, vsm_mip_sparse).
     release: Owned<wgpu::ComputePipeline>,
     allocate: Owned<wgpu::ComputePipeline>,
@@ -934,6 +936,11 @@ pub(super) fn disk_source() -> String {
         "../shaders/reflections_software_bvh4.wgsl"
     )));
     source
+}
+/// The Disk lookup's edge pixel list capacity (WGSL `vd_edge_capacity`): a sixteenth of the
+/// image; past it pixels keep the map.
+fn edge_capacity(size: [u32; 2]) -> u64 {
+    (u64::from(size[0]) * u64::from(size[1]) / 16).max(4096)
 }
 /// `RENDERLAB_VD_EDGE_LOG`: the file the Disk lookup's edge pixel counts go to.
 fn edge_log() -> Option<&'static std::path::Path> {
@@ -1490,6 +1497,7 @@ impl VirtualState {
         };
         let disk_mark = disk_compute("vd_mark", &mark_layout);
         let disk = disk_compute("vd_lookup", &disk_layout);
+        let disk_edges = disk_compute("vd_edges", &disk_layout);
         let record_module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8g walk records"),
@@ -1597,6 +1605,7 @@ impl VirtualState {
             queued: None,
             disk_mark,
             disk,
+            disk_edges,
             release: compute("vsm_release", &compact_layout, &[]),
             allocate: compute("vsm_allocate", &allocate_layout, &[]),
             clear_sparse: compute("vsm_clear_sparse", &clear_layout, &[]),
@@ -1952,7 +1961,7 @@ impl VirtualState {
                 REACH_BYTES,
                 B::STORAGE | B::COPY_SRC,
             ),
-            edges: buffer("Disk lookup edge pixels", 16, B::STORAGE | B::COPY_SRC),
+            edges: buffer("Disk lookup edge pixels", 16 + edge_capacity(size) * 16, B::STORAGE | B::COPY_SRC),
             _area: area,
             area: area_view,
             _level: level,
@@ -2878,21 +2887,25 @@ impl Renderer {
                 .copied()
                 .filter(|(name, _)| name.starts_with(DISK_CONSTANTS))
                 .collect();
-            state.pipelines.disk = self.ledger.own(
-                self.device
-                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some("vd_lookup"),
-                        layout: Some(&state.disk_layout),
-                        module: &state.disk_module,
-                        entry_point: Some("vd_lookup"),
-                        compilation_options: wgpu::PipelineCompilationOptions {
-                            constants: &disk_constants,
-                            ..Default::default()
-                        },
-                        cache: None,
-                    }),
-                ResourceKind::ComputePipeline,
-            );
+            let disk_entry = |entry| {
+                self.ledger.own(
+                    self.device
+                        .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                            label: Some(entry),
+                            layout: Some(&state.disk_layout),
+                            module: &state.disk_module,
+                            entry_point: Some(entry),
+                            compilation_options: wgpu::PipelineCompilationOptions {
+                                constants: &disk_constants,
+                                ..Default::default()
+                            },
+                            cache: None,
+                        }),
+                    ResourceKind::ComputePipeline,
+                )
+            };
+            state.pipelines.disk = disk_entry("vd_lookup");
+            state.pipelines.disk_edges = disk_entry("vd_edges");
             let map = |entry, layout: &wgpu::PipelineLayout| {
                 self.ledger.own(
                     self.device
@@ -3611,6 +3624,12 @@ impl Renderer {
         let tiles = grid[0] * grid[1];
         if map || disk {
             pass.dispatch_workgroups(grid[0], grid[1], 1);
+            if disk && edge_rays() > 0 {
+                // The edge pixels' rays: a thread per list entry (empty ones return at once).
+                let groups = edge_capacity(r.size).div_ceil(64) as u32;
+                pass.set_pipeline(&p.disk_edges);
+                pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
+            }
         } else {
             // Casters-only frames keep the grid's order (vsm_lookup).
             if let (true, Some([count, place])) = (order && !state.casters_only, &p.order) {
