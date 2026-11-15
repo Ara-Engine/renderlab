@@ -219,6 +219,18 @@ pub(super) struct Targets {
     args: Buffer,
     pipelines: [Option<Owned<wgpu::ComputePipeline>>; 2],
     source_hash: [[u8; 32]; 2],
+    /// Whether each pipeline is on the lean layout (`lean`), and the empty group 2 it binds.
+    lean: [bool; 2],
+    empty: Option<Owned<wgpu::BindGroup>>,
+}
+/// The receiver kernel samples no material, so it is built on the shading layout with an empty
+/// group 2 when it validates there, and binds the empty group: every dispatch merges each
+/// resource of its bound groups into wgpu's usage tracking when the command buffer finishes, and
+/// group 2 holds every draw's material buffers, textures and samplers. The same kernel and
+/// results. `RENDERLAB_GI_RX_LEAN=0` binds the materials group.
+fn lean() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_RX_LEAN").map_or(true, |v| v != "0"))
 }
 impl Renderer {
     pub(super) fn gi_receiver_targets(&self, size: wgpu::Extent3d) -> Targets {
@@ -242,6 +254,8 @@ impl Renderer {
             ),
             pipelines: [None, None],
             source_hash: [[0; 32]; 2],
+            lean: [false; 2],
+            empty: None,
         }
     }
     pub(crate) fn ensure_gi_receiver_pass(&mut self, shading: Shading) -> Result<(), Error> {
@@ -274,17 +288,54 @@ impl Renderer {
         let scopes = OperationScopes::new(&self.device);
         let module = super::program_gpu::module(&abi, "GI receiver", &composed);
         let start = std::time::Instant::now();
-        let pipeline = self.ledger.own(
-            self.device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("GI receiver"),
-                    layout: Some(&state.shade_layouts[shading as usize]),
-                    module: &module,
-                    entry_point: Some("gi_receiver_pass"),
-                    compilation_options: Default::default(),
-                    cache: abi.cache,
-                }),
-            ResourceKind::ComputePipeline,
+        let build = |layout: &wgpu::PipelineLayout| {
+            self.ledger.own(
+                self.device
+                    .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                        label: Some("GI receiver"),
+                        layout: Some(layout),
+                        module: &module,
+                        entry_point: Some("gi_receiver_pass"),
+                        compilation_options: Default::default(),
+                        cache: abi.cache,
+                    }),
+                ResourceKind::ComputePipeline,
+            )
+        };
+        let empty_layout = self.ledger.own(
+            self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("GI receiver, empty"),
+                entries: &[],
+            }),
+            ResourceKind::BindGroupLayout,
+        );
+        let mut lean_built = None;
+        if lean() {
+            let lean_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("GI receiver ABI, lean"),
+                bind_group_layouts: &[
+                    Some(&state.shade_bindings[shading as usize]),
+                    Some(&state.array_bindings),
+                    Some(&empty_layout),
+                    Some(&self.lighting.bindings),
+                ],
+                immediate_size: 0,
+            });
+            let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+            let pipeline = build(&lean_layout);
+            if pollster::block_on(scope.pop()).is_none() {
+                lean_built = Some(pipeline);
+            }
+        }
+        let is_lean = lean_built.is_some();
+        let pipeline = lean_built.unwrap_or_else(|| build(&state.shade_layouts[shading as usize]));
+        let empty = self.ledger.own(
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("GI receiver, empty"),
+                layout: &empty_layout,
+                entries: &[],
+            }),
+            ResourceKind::BindGroup,
         );
         eprintln!(
             "gi_receiver_compile_seconds={:.3}",
@@ -320,6 +371,9 @@ impl Renderer {
             .as_mut()
             .unwrap()
             .pipelines[shading as usize] = Some(pipeline);
+        let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
+        target.lean[shading as usize] = is_lean;
+        target.empty = Some(empty);
         Ok(())
     }
     pub(crate) fn encode_gi_receiver_pass(
@@ -353,7 +407,10 @@ impl Renderer {
             &[],
         );
         pass.set_bind_group(1, &*g.arrays, &[]);
-        pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
+        match target.empty.as_ref().filter(|_| target.lean[shading as usize]) {
+            Some(empty) => pass.set_bind_group(2, &**empty, &[]),
+            None => pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]),
+        }
         pass.set_bind_group(3, self.lighting.bind(), &[]);
         pass.dispatch_workgroups_indirect(&target.args.value, 0);
     }

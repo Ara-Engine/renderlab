@@ -44,12 +44,42 @@ fn at_sun_visible(p:vec3<f32>) -> f32 {
 ";
 const MAP_VISIBILITY: &str = include_str!("../shaders/atmosphere_shadow_map.wgsl");
 
+/// Measurement only: whether `RENDERLAB_SUNRT_DIAG` (a comma list) names `flag`.
+fn sunrt_diag(flag: &str) -> bool {
+    std::env::var("RENDERLAB_SUNRT_DIAG").is_ok_and(|v| v.split(',').any(|f| f == flag))
+}
+
 fn overhaul_enabled() -> bool {
     std::env::var("RENDERLAB_FOG_OVERHAUL").as_deref() != Ok("0")
 }
 
+/// sunrt-6: the ray-traced fog injection's sun vote (shaders/atmosphere_fog_vote.wgsl), in place of
+/// `at_fog_inject` on ray-hardware renderers with the fog cull. `RENDERLAB_FOG_VOTE=0` keeps the
+/// original injection.
+const FOG_VOTE: &str = include_str!("../shaders/atmosphere_fog_vote.wgsl");
+pub(crate) fn fog_vote() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_FOG_VOTE").map_or(true, |v| v != "0"))
+}
+/// `kernels` with `at_fog_inject` replaced by the voting injection.
+fn with_fog_vote(kernels: String) -> String {
+    let head = "@compute @workgroup_size(4,4,4) fn at_fog_inject(";
+    let Some(start) = kernels.find(head) else {
+        return kernels;
+    };
+    let end = start + kernels[start..].find("
+}
+").map_or(kernels.len() - start, |e| e + 3);
+    format!("{}{FOG_VOTE}{}", &kernels[..start], &kernels[end..])
+}
+
 fn kernel_source(hardware: bool) -> String {
     let kernels = fog_cull::atmosphere_source(KERNELS.to_owned(), hardware && fog_cull::enabled());
+    let kernels = if hardware && fog_cull::enabled() && fog_vote() {
+        with_fog_vote(kernels)
+    } else {
+        kernels
+    };
     format!(
         "{}{COMMON}{kernels}{}",
         if hardware {
@@ -60,8 +90,13 @@ fn kernel_source(hardware: bool) -> String {
         if hardware {
             // The shadow ray's cull mask: this module has no shaders/scene.wgsl.
             format!(
-                "{}{HARDWARE_VISIBILITY}",
-                crate::shadows::SHADOW_CASTER_MASK_WGSL
+                "{}{}",
+                crate::shadows::SHADOW_CASTER_MASK_WGSL,
+                if sunrt_diag("nofograys") {
+                    HARDWARE_VISIBILITY.replacen("    var query:ray_query;", "    if atmosphere.volume.w>=0.0 {return 1.0;}\n    var query:ray_query;", 1)
+                } else {
+                    HARDWARE_VISIBILITY.to_owned()
+                }
             )
         } else {
             MAP_VISIBILITY.to_owned()
@@ -78,7 +113,7 @@ fn sky_source() -> String {
 }
 
 #[cfg(test)]
-pub(super) fn compile_structure_sources(hardware: bool) -> Vec<(&'static str, String)> {
+pub(crate) fn compile_structure_sources(hardware: bool) -> Vec<(&'static str, String)> {
     let mut sources = vec![("kernels", kernel_source(hardware)), ("sky", sky_source())];
     if !hardware {
         sources.push(("virtual-injection", virtual_kernel_source()));
@@ -738,7 +773,7 @@ impl Renderer {
             ..Default::default()
         });
         let volume = s.volumetric_fog.unwrap_or_default();
-        let samples = FROXEL_SHADOW_SAMPLES;
+        let samples = if sunrt_diag("fog1") { 1 } else { FROXEL_SHADOW_SAMPLES };
         #[cfg(test)]
         let samples = a.test_fog_quality.map_or(samples, |q| q.1);
         let matrix = camera.matrix(size[0], size[1]);

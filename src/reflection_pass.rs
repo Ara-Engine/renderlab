@@ -518,7 +518,7 @@ impl Renderer {
         };
         // The arguments first, in their own pass and group: the trace reads them as indirect
         // arguments. One entry, rebuilt each frame (the buffer outlives room growth).
-        let args = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let args = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("reflection list arguments"),
             layout: &abi.args_group,
             entries: &[wgpu::BindGroupEntry {
@@ -546,7 +546,7 @@ impl Renderer {
         });
         bind(&mut compute);
         if let Some(cache) = cache.as_ref() {
-            compute.set_bind_group(2, &**cache, &[]);
+            compute.set_bind_group(2, cache, &[]);
         }
         let group1 = |compute: &mut wgpu::ComputePass<'_>, lean: bool| {
             compute.set_bind_group(1, if lean { &*abi.empty } else { &*g.arrays }, &[]);
@@ -933,7 +933,7 @@ impl Renderer {
         let (Some(pass), Some(deferred), Some(hdr)) = (t.rl_pass.as_ref(), t.deferred.as_ref(), self.view.hdr.as_ref()) else {
             return;
         };
-        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let group = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("reflection composite"),
             layout,
             entries: &[
