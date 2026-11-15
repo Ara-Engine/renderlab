@@ -588,6 +588,46 @@ mod tests {
         }
     }
 
+    /// A large set's first `place` writes the median tree and asks a worker for the SAH tree;
+    /// a later `place` over the same records swaps the worker's tree in (refit count 0).
+    #[test]
+    fn large_sets_swap_in_the_worker_tree() {
+        if !asynchronous() {
+            return;
+        }
+        let (header, stride, count) = (12, 20, ASYNC_MIN + 300);
+        let mut records = vec![0u32; header + count * stride];
+        records[0] = count as u32;
+        let mut boxes = vec![];
+        for i in 0..count {
+            let r = header + i * stride;
+            let x = (i * 37 % 101) as f32;
+            let z = (i * 53 % 97) as f32;
+            let b = ([x, 0.0, z], [x + 1.0 + (i % 5) as f32, 2.0, z + 1.0]);
+            for k in 0..3 {
+                records[r + 12 + k] = b.0[k].to_bits();
+                records[r + 15 + k] = b.1[k].to_bits();
+            }
+            boxes.push(b);
+        }
+        let base = records.len();
+        let mut words = records.clone();
+        place(&mut words, header, stride, count, &[]);
+        assert_eq!(&words[base..base + build_with(&boxes, false).len()], &build_with(&boxes, false)[..]);
+        let sah = build(&boxes);
+        for _ in 0..500 {
+            let mut next = records.clone();
+            place(&mut next, header, stride, count, &words);
+            words = next;
+            if words[base..base + sah.len()] == sah[..] {
+                assert_eq!(words[3], 0);
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        panic!("the worker tree never arrived");
+    }
+
     /// Measurement (ignored): one build over 10,000 scattered boxes, the forest's scale, timed.
     #[test]
     #[ignore]
@@ -612,6 +652,14 @@ mod tests {
         }
         println!(
             "instance_bvh build, 10,000 boxes: {:.3} ms",
+            start.elapsed().as_secs_f64() * 1e3 / runs as f64
+        );
+        let start = std::time::Instant::now();
+        for _ in 0..runs {
+            std::hint::black_box(build_with(std::hint::black_box(&boxes), false));
+        }
+        println!(
+            "instance_bvh median build (a new large set's frame), 10,000 boxes: {:.3} ms",
             start.elapsed().as_secs_f64() * 1e3 / runs as f64
         );
         let mut nodes = build(&boxes);
