@@ -133,9 +133,12 @@ fn rl_screen_hit(origin:vec3<f32>,direction:vec3<f32>,epsilon:f32,cone:vec2<f32>
     if max(abs(step.x),abs(step.y))<1.0 {return rl_screen_reject(17u);}
     let own=textureLoad(rl_screen_hits,vec2<i32>(receiver),0).xy;
     let max_level=i32(rl_screen_frame.flags.w)-1;var level=min(3,max_level);var s=0.00001;
-    for(var iteration=0u;iteration<40u;iteration+=1u) {
+    var advances=0u;
+    // Descending the hierarchy does not advance the ray. Budget actual cells crossed.
+    for(var iteration=0u;iteration<1024u;iteration+=1u) {
+        if advances>=40u {rl_screen_count(53u);return rl_screen_reject(4u);}
         let position=pixel+step*s;
-        if s>=1.0 {return rl_screen_reject(4u);}
+        if s>=1.0 {rl_screen_count(54u);return rl_screen_reject(4u);}
         if any(position<vec2<f32>(0.0))||any(position>=size) {return rl_screen_reject(3u);}
         let scale=exp2(f32(level));let cell=vec2<i32>(floor(position/scale));
         if any(cell>=vec2<i32>(textureDimensions(rl_screen_depths,level))) {level=max(level-1,0);continue;}
@@ -147,7 +150,7 @@ fn rl_screen_hit(origin:vec3<f32>,direction:vec3<f32>,epsilon:f32,cone:vec2<f32>
         let depth=textureLoad(rl_screen_depths,cell,level);
         let ray_nearest=min(mix(a.z,b.z,s),mix(a.z,b.z,exit_s));
         if depth.x==0u || (depth.y!=0u&&all(depth.yz==own)) || ray_nearest>bitcast<f32>(depth.x)+1e-7 {
-            s=max(exit_s,s+0.000001);level=min(level+1,max_level);continue;
+            s=max(exit_s,s+0.000001);advances+=1u;level=min(level+1,max_level);continue;
         }
         if level>0 {level-=1;continue;}
         let record=textureLoad(rl_screen_hits,cell,0);
@@ -177,23 +180,33 @@ fn rl_screen_hit(origin:vec3<f32>,direction:vec3<f32>,epsilon:f32,cone:vec2<f32>
             if colour.a>0.0 {rl_screen_count(15u);}
             return colour;
         }
-        // Device depth is reversed and nonlinear in camera distance. Compare in
-        // camera depth, allowing the sampling uncertainty of a grazing pixel.
-        let surface_z=bitcast<f32>(depth.x);
-        let middle_z=mix(a.z,b.z,0.5*(s+exit_s));
+        // A sample-centre depth cannot classify a different point on a grazing
+        // plane. Test the ray point against that plane in world space instead.
+        let at=0.5*(s+exit_s);
+        let along=epsilon+distance*at*start.w/max(mix(end.w,start.w,at),1e-20);
+        let ray_point=origin+direction*along;
+        let camera_side=select(-1.0,1.0,dot(normal,rl_screen_frame.eye.xyz-tri[0])>=0.0);
+        let behind=-dot(normal,ray_point-tri[0])*camera_side;
         let coeff_a=rl_screen_frame.eye.w;let coeff_b=rl_screen_frame.previous_eye.w;
-        let surface_distance=coeff_b/max(surface_z-coeff_a,1e-20);
-        let ray_distance=coeff_b/max(middle_z-coeff_a,1e-20);
-        let sample_ndc=vec3<f32>((vec2<f32>(cell)+0.5)/size*vec2<f32>(2.0,-2.0)+vec2<f32>(-1.0,1.0),surface_z);
-        let sample_h=primary_frame.inverse*vec4<f32>(sample_ndc,1.0);
-        let toward=normalize(rl_screen_frame.eye.xyz-sample_h.xyz/sample_h.w);
+        let surface_distance=coeff_b/max(bitcast<f32>(depth.x)-coeff_a,1e-20);
         let focal=length(vec3<f32>(matrix[0].y,matrix[1].y,matrix[2].y));
-        let band=max(epsilon*8.0,4.0*surface_distance/(focal*size.y*max(abs(dot(normal,toward)),0.05)));
-        if ray_distance-surface_distance>band {return rl_screen_reject(5u);}
-        s=max(exit_s,s+0.000001);level=min(level+1,max_level);
+        let band=max(epsilon*8.0,4.0*surface_distance/(focal*size.y));
+        if behind>band {
+            // The raster pixel covers its centre, not necessarily this subpixel
+            // point. Only an actual covering triangle may declare thick occlusion.
+            let camera_ray=ray_point-rl_screen_frame.eye.xyz;
+            let denominator=dot(normal,camera_ray);
+            if abs(denominator)>1e-20 {
+                let q=rl_screen_frame.eye.xyz+camera_ray*(dot(normal,tri[0]-rl_screen_frame.eye.xyz)/denominator)-tri[0];
+                let area=cross(e1,e2);let area2=dot(area,area);
+                let u=dot(cross(q,e2),area)/area2;let v=dot(cross(e1,q),area)/area2;
+                if u>=0.0 && v>=0.0 && u+v<=1.0 {return rl_screen_reject(5u);}
+            }
+        }
+        s=max(exit_s,s+0.000001);advances+=1u;level=min(level+1,max_level);
 
     }
-    return rl_screen_reject(4u);
+    rl_screen_count(52u);return rl_screen_reject(4u);
 }
 
 // Debug oracle: uses the fallback result already traced by the normal BVH pass.
