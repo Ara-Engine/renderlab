@@ -162,20 +162,10 @@ fn light_visibility(input:SurfaceInput, s:LightSample) -> f32 {
 // (0 when skipped lights are dropped). Off, and wherever the bound does not apply (reflection
 // hits, untraced stages), it is exactly `light_visibility`. A program that keeps calling
 // `light_visibility` always traces.
-// The light fade (program.rs `light_fade`, camera receivers of primary shading only): a local
-// shadowed light too faint to change a display code takes visibility RL_LF_SKIPPED without its
-// shadow query, and lights near the threshold blend toward their traced visibility.
 fn light_visibility_within(input:SurfaceInput, s:LightSample, unshadowed:vec3<f32>, sum:vec3<f32>) -> f32 {
     if rl_lb_skip(s,unshadowed,sum) { return RL_LB_SKIPPED; }
-    let fade=rl_lf_weight(s,unshadowed,sum);
-    if fade<=0.0 { return RL_LF_SKIPPED; }
-    if fade>=1.0 { return light_visibility(input,s); }
-    return mix(RL_LF_SKIPPED,light_visibility(input,s),fade);
+    return light_visibility(input,s);
 }
-// ---- light fade (program.rs light_fade replaces this block in primary shading) ----
-const RL_LF_SKIPPED:f32=0.5;
-fn rl_lf_weight(s:LightSample, c:vec3<f32>, sum:vec3<f32>) -> f32 { return 1.0; }
-// ---- end of light fade ----
 // ---- light bound (program.rs with_light_bound replaces this block on traced stages) ----
 const RL_LB_SKIPPED:f32=1.0;
 fn rl_lb_skip(s:LightSample, c:vec3<f32>, sum:vec3<f32>) -> bool { return false; }
