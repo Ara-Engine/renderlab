@@ -430,10 +430,6 @@ struct Pipelines {
     compact: Owned<wgpu::ComputePipeline>,
     clear: Owned<wgpu::ComputePipeline>,
     cull: Owned<wgpu::ComputePipeline>,
-    /// The fog map's placement cull and its per-placement cluster cull (WGSL
-    /// `vsm_cull_placements`, `vsm_cull_live`).
-    cull_placements: Owned<wgpu::ComputePipeline>,
-    cull_live: Owned<wgpu::ComputePipeline>,
     finish: Owned<wgpu::ComputePipeline>,
     mip: Owned<wgpu::ComputePipeline>,
     /// Software and hardware rasters: top layer, then peel layer.
@@ -614,7 +610,6 @@ struct Groups {
     models: wgpu::Buffer,
     horizons: wgpu::Buffer,
     casters: u64,
-    placements: wgpu::Buffer,
     mark: Owned<wgpu::BindGroup>,
     compact: Owned<wgpu::BindGroup>,
     cull: Owned<wgpu::BindGroup>,
@@ -692,9 +687,6 @@ pub(super) struct VirtualState {
     /// they hold, its frames skip the per-placement bounds (no caster moved; the fog ladder needs
     /// no caster distance).
     fog_placements: Vec<((u64, u64), crate::renderer::skinning::PlacementPose)>,
-    /// Per placement its world box and cluster instance range (two vec4s, WGSL
-    /// `vsm_placement_boxes`) and the fog map's live mask, and their capacity in placements.
-    placement_boxes: Option<(Owned<wgpu::Buffer>, Owned<wgpu::Buffer>, usize)>,
     /// The last `RENDERLAB_FOG_MEM_LOG` line written.
     fog_mem_line: String,
     /// Page requests depend only on the camera, the sun, the casters and the cache
@@ -1240,8 +1232,6 @@ impl VirtualState {
                     storage(26, true, S::COMPUTE),
                     storage(27, false, S::COMPUTE),
                     storage(29, false, S::COMPUTE),
-                    storage(58, true, S::COMPUTE),
-                    storage(59, false, S::COMPUTE),
                 ],
             ),
             raster: group(
@@ -1612,8 +1602,6 @@ impl VirtualState {
             compact: compute("vsm_compact", &compact_layout, &[]),
             clear: compute("vsm_clear", &clear_layout, &[]),
             cull: compute("vsm_cull", &cull_layout, &[]),
-            cull_placements: compute("vsm_cull_placements", &cull_layout, &[]),
-            cull_live: compute("vsm_cull_live", &cull_layout, &[]),
             finish: compute("vsm_finish", &cull_layout, &[]),
             mip: compute("vsm_mip", &mip_layout, &[]),
             software: [0.0, 1.0]
@@ -1667,11 +1655,10 @@ impl VirtualState {
             epoch: 0,
             pool_frame: 0,
             capacity: pool_settings().0,
-            fog: false,
+            fog,
             fog_requests: vec![],
             fog_pending: 0,
             fog_placements: vec![],
-            placement_boxes: None,
             fog_mem_line: String::new(),
             key: vec![],
             page_work: true,
@@ -1996,7 +1983,12 @@ impl VirtualState {
             frame: buffer("N8 frame", FRAME_BYTES as u64, B::UNIFORM),
             requests: buffer("N8 page requests", slots * 4, B::STORAGE),
             state,
-            render: buffer("N8c pages rasterized this frame", slots * 4, B::STORAGE),
+            // Then the fog map's per-level summary (WGSL `vsm_render_summary`).
+            render: buffer(
+                "N8c pages rasterized this frame",
+                (MAX_LEVELS as u64 * u64::from(pages * pages) + 2 * MAX_LEVELS as u64) * 4,
+                B::STORAGE,
+            ),
             cull_args: buffer("N8f caster cull dispatch", 16, B::STORAGE | B::INDIRECT),
             pass: buffer(
                 "N8 level and mip uniforms",
@@ -2138,8 +2130,10 @@ impl Renderer {
             let triangles = addressed_triangles(d.mesh).clamp(1, u64::from(u32::MAX)) as u32;
             primitive_bits = primitive_bits.max(32 - triangles.leading_zeros());
         }
+        // The fog map keeps one list per level (WGSL `vsm_list_sw`).
+        let lists = if self.view.virtual_shadows.as_ref().is_some_and(|s| s.fog) { 1 } else { 2 };
         let work_bytes =
-            MAX_LEVELS as u64 * (ARGS_BYTES + 2 * u64::from(instances.count.max(1)) * 4);
+            MAX_LEVELS as u64 * (ARGS_BYTES + lists * u64::from(instances.count.max(1)) * 4);
         let work = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("N8c page raster arguments and cluster lists"),
@@ -2535,57 +2529,6 @@ impl Renderer {
             cache.casts = casts;
             cache.bounds = bounds;
             cache.poses = poses;
-        }
-        // The placement boxes the fog map's pre-cull reads (uploaded when placements change).
-        let count = placements.max(1);
-        let grown = state.placement_boxes.as_ref().is_none_or(|b| b.2 < count);
-        if grown {
-            let buffer = |label, size: u64| {
-                self.ledger.own(
-                    self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some(label),
-                        size,
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }),
-                    ResourceKind::Buffer,
-                )
-            };
-            state.placement_boxes = Some((
-                buffer("Fog map placement boxes", count as u64 * 32),
-                buffer("Fog map live placements", count as u64 * 4),
-                count,
-            ));
-        }
-        if fog.is_some() && (grown || !reuse) {
-            // Each placement's cluster instances, contiguous in draw then slot order
-            // (visibility_buffer.rs ClusterInstances).
-            let ranges = draws.iter().flat_map(|d| {
-                let n = d.mesh.clusters.as_ref().map_or(0, |c| c.clusters.len() as u32);
-                std::iter::repeat_n(n, d.instances.len())
-            });
-            let mut first = 0u32;
-            let words: Vec<u8> = cache
-                .bounds
-                .iter()
-                .zip(ranges)
-                .flat_map(|(b, n)| {
-                    let start = first;
-                    first += n;
-                    [
-                        b.min.x,
-                        b.min.y,
-                        b.min.z,
-                        f32::from_bits(start),
-                        b.max.x,
-                        b.max.y,
-                        b.max.z,
-                        f32::from_bits(n),
-                    ]
-                })
-                .flat_map(f32::to_ne_bytes)
-                .collect();
-            self.queue.write_buffer(&state.placement_boxes.as_ref().unwrap().0, 0, &words);
         }
         // Sparse with the Disk lookup only: the other lookups read the dense layout.
         let sparse = fog.is_some() || (sparse_switch() && s.lookup == VirtualLookup::Disk);
@@ -3399,7 +3342,6 @@ impl Renderer {
                 || &g.models != arrays_models
                 || g.horizons != horizons
                 || g.casters != casters.generation
-                || g.placements != *state.placement_boxes.as_ref().unwrap().0
         }) {
             let view = |t: &wgpu::Texture| t.create_view(&Default::default());
             let hit = view(&targets.hit.texture);
@@ -3422,7 +3364,6 @@ impl Renderer {
                 models: arrays_models.clone(),
                 horizons: horizons.clone(),
                 casters: casters.generation,
-                placements: (*state.placement_boxes.as_ref().unwrap().0).clone(),
                 mark: group(
                     "N8 page requests",
                     &l.mark,
@@ -3458,8 +3399,6 @@ impl Renderer {
                         buffer(26, &casters.instances.groups.value),
                         buffer(27, &casters.work),
                         buffer(29, &r.render),
-                        buffer(58, &state.placement_boxes.as_ref().unwrap().0),
-                        buffer(59, &state.placement_boxes.as_ref().unwrap().1),
                     ],
                 ),
                 raster: group(
@@ -3640,7 +3579,6 @@ impl Renderer {
             let caster_bytes = casters.instances.clusters.value.size()
                 + casters.instances.groups.value.size()
                 + casters.work.size();
-            let boxes = state.placement_boxes.as_ref().map_or(0, |b| b.0.size() + b.1.size());
             let mut meshes = std::collections::HashSet::new();
             let cluster_data: u64 = draws
                 .iter()
@@ -3649,11 +3587,10 @@ impl Renderer {
                 .map(|c| c.data.size())
                 .sum();
             let line = format!(
-                "{{\"map\":{},\"casters\":{},\"placements\":{},\"cluster_instances\":{},\"mesh_cluster_data\":{},\"pool_pages\":{}}}
+                "{{\"map\":{},\"casters\":{},\"cluster_instances\":{},\"mesh_cluster_data\":{},\"pool_pages\":{}}}
 ",
                 state.stats.bytes,
                 caster_bytes,
-                boxes,
                 casters.instances.count,
                 cluster_data,
                 state.resources.as_ref().map_or(0, |r| r.capacity),
@@ -3918,7 +3855,7 @@ impl Renderer {
             encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
         }
         encoder.clear_buffer(&r.reach, 0, None);
-        encoder.clear_buffer(&r.render, 0, Some(slots * 4));
+        encoder.clear_buffer(&r.render, 0, None);
         encoder.clear_buffer(&casters.work, 0, Some(MAX_LEVELS as u64 * ARGS_BYTES));
         encoder.clear_buffer(&r.cull_args, 0, None);
         {
@@ -3974,21 +3911,9 @@ impl Renderer {
             }
             pass.set_bind_group(0, &*g.cull, &[]);
             pass.set_bind_group(1, arrays, &[]);
-            // Measurement (`RENDERLAB_FOG_CULL=clusters`): the fog map culls every cluster.
-            let by_placement = state.fog
-                && std::env::var("RENDERLAB_FOG_CULL").as_deref() != Ok("clusters");
-            if by_placement {
-                // The placements that can touch this frame's pages, then their clusters alone.
-                let placements = state.cache.models.len().max(1) as u32;
-                pass.set_pipeline(&p.cull_placements);
-                pass.dispatch_workgroups(placements.div_ceil(64).min(65535), 1, 1);
-                pass.set_pipeline(&p.cull_live);
-                pass.dispatch_workgroups(placements.min(65535), placements.div_ceil(65535), 1);
-            } else {
-                pass.set_pipeline(&p.cull);
-                // N8f: no stale page (camera motion inside the windows) dispatches no group.
-                pass.dispatch_workgroups_indirect(&r.cull_args, 0);
-            }
+            pass.set_pipeline(&p.cull);
+            // N8f: no stale page (camera motion inside the windows) dispatches no group.
+            pass.dispatch_workgroups_indirect(&r.cull_args, 0);
             pass.set_pipeline(&p.finish);
             pass.dispatch_workgroups(1, 1, 1);
         }

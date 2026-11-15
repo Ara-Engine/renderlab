@@ -224,6 +224,12 @@ fn vsm_point_moved(level:u32,lo:vec2<f32>,hi:vec2<f32>,pad:f32)->bool {
     }
     return false;
 }
+// The fog map's per-level summary after the table entries of vsm_render: whether any page of
+// `level` is drawn whole (kind 0) or partially (kind 1) this frame. Set by vsm_allocate (always
+// to 1, so concurrent writes agree); clusters over many pages read it instead of their pages.
+fn vsm_render_summary(level:u32,kind:u32)->u32 {
+    return VSM_MAX_LEVELS*vsm.counts.y*vsm.counts.y+2u*level+kind;
+}
 // Texel t (window texels) of `level` is redrawn: a full page, or within one texel of a moved
 // rectangle on a partial one.
 fn vsm_texel_dirty(level:u32,t:vec2<u32>,flag:u32)->bool {
@@ -323,6 +329,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     // level claim and the budget: a moving caster costs what lies near it, not its pages.
     if vsm_one_level() && moved {
         vsm_render[v]=2u;
+        vsm_render[vsm_render_summary(level,1u)]=1u;
         let k=atomicAdd(&vsm_pool[0],1u);
         atomicStore(&vsm_pool[VSM_POOL_FREE+atomicLoad(&vsm_pool[10])+k],v);
         let groups=max((vsm.counts.z+63u)/64u,1u);
@@ -358,6 +365,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     vsm_state[v]=vsm.levels[level].info.x;
     vsm_state[vsm_section(1u)+v]=vsm_tag(level,page);
     vsm_render[v]=1u;
+    if vsm_one_level() {vsm_render[vsm_render_summary(level,0u)]=1u;}
     let k=atomicAdd(&vsm_pool[0],1u);
     atomicStore(&vsm_pool[VSM_POOL_FREE+atomicLoad(&vsm_pool[10])+k],v);
     let groups=max((vsm.counts.z+63u)/64u,1u);
@@ -388,6 +396,16 @@ struct VsmWork {args:array<VsmArgs,VSM_MAX_LEVELS>,lists:array<u32>};
 // A read-only view for the raster, which also uses the arguments as its indirect buffer.
 @group(0) @binding(33) var<storage,read> vsm_work_in:array<u32>;
 const VSM_LISTS:u32=8u*VSM_MAX_LEVELS;
+// List entries: per level a software and a hardware list of counts.z slots each; the fog map
+// (vsm_one_level) keeps both in one, software from the front and hardware from the back (a
+// cluster joins at most one of them per level), at half the memory.
+fn vsm_list_sw(level:u32,slot:u32)->u32 {
+    return select(2u*level*vsm.counts.z+slot,level*vsm.counts.z+slot,vsm_one_level());
+}
+fn vsm_list_hw(level:u32,slot:u32)->u32 {
+    let n=vsm.counts.z;
+    return select((2u*level+1u)*n+slot,level*n+n-1u-slot,vsm_one_level());
+}
 @group(0) @binding(31) var<storage,read_write> vsm_top_map:array<atomic<u64>>;
 @group(0) @binding(32) var<storage,read_write> vsm_peel_map:array<atomic<u64>>;
 // Its own group: wgpu forbids binding arrays beside uniform buffers.
@@ -410,62 +428,10 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
     let rows=max(a.x+b.x+c.x,max(a.y+b.y+c.y,a.z+b.z+c.z));
     return s.error*sqrt(columns*rows);
 }
-// The fog map's placement cull: per placement its world box (min, w its first cluster
-// instance's bits; max, w its cluster count's bits: instances are contiguous per placement,
-// src/visibility_buffer.rs) and whether it can touch any page this frame redraws.
-@group(0) @binding(58) var<storage,read> vsm_placement_boxes:array<vec4<f32>>;
-@group(0) @binding(59) var<storage,read_write> vsm_placement_live:array<u32>;
-// Whether light-space box lo..hi of a caster overlaps a page `level` redraws this frame (a
-// partial page: a moved rectangle), one texel of padding.
-fn vsm_box_redrawn(level:u32,lo:vec2<f32>,hi:vec2<f32>)->bool {
-    let pages=vsm.counts.y;
-    let texel=vsm_texel(level);
-    let page=f32(VSM_PAGE)*texel;
-    let origin=vsm.levels[level].origin.xy;
-    let a=floor((lo-vec2<f32>(texel)-origin)/page);
-    let b=floor((hi+vec2<f32>(texel)-origin)/page);
-    if any(b<vec2<f32>(0.0)) || any(a>=vec2<f32>(f32(pages))) {return false;}
-    let p0=vec2<u32>(max(a,vec2<f32>(0.0)));
-    let p1=vec2<u32>(min(b,vec2<f32>(f32(pages-1u))));
-    // A box over many pages (terrain at the fine levels) stays live: its clusters are culled
-    // one by one, and one thread scanning thousands of pages would hold the pass up.
-    let span=p1-p0+vec2<u32>(1u);
-    if span.x*span.y>16u {return true;}
-    for(var y=p0.y;y<=p1.y;y+=1u) {
-        for(var x=p0.x;x<=p1.x;x+=1u) {
-            let flag=vsm_render[vsm_vpage(level,vec2<u32>(x,y))];
-            if flag==1u || (flag==2u && vsm_point_moved(level,lo,hi,2.0*texel)) {return true;}
-        }
-    }
-    return false;
-}
-@compute @workgroup_size(64) fn vsm_cull_placements(@builtin(global_invocation_id) id:vec3<u32>) {
-    if id.x>=arrayLength(&vsm_placement_live) {return;}
-    let a=vsm_placement_boxes[2u*id.x];let b=vsm_placement_boxes[2u*id.x+1u];
-    var lo=vec2<f32>(3.4e38);var hi=vec2<f32>(-3.4e38);
-    for(var i=0u;i<8u;i+=1u) {
-        let q=vsm_light(select(a.xyz,b.xyz,vec3<bool>((i&1u)!=0u,(i&2u)!=0u,(i&4u)!=0u))).xy;
-        lo=min(lo,q);hi=max(hi,q);
-    }
-    var live=0u;
-    for(var level=0u;level<vsm.counts.x && live==0u;level+=1u) {
-        if vsm_box_redrawn(level,lo,hi) {live=1u;}
-    }
-    vsm_placement_live[id.x]=live;
-}
 @compute @workgroup_size(64) fn vsm_cull(@builtin(global_invocation_id) id:vec3<u32>) {
     let index=id.x+id.y*65535u*64u;
     if index>=vsm.counts.z {return;}
     vsm_cull_cluster(index);
-}
-// The fog map's cull: one workgroup per placement; a live one (vsm_cull_placements) culls its
-// own clusters, the others return at once, so the cost follows what lies near redrawn pages.
-@compute @workgroup_size(64) fn vsm_cull_live(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
-    let p=group.x+group.y*65535u;
-    if p>=arrayLength(&vsm_placement_live) || vsm_placement_live[p]==0u {return;}
-    let first=bitcast<u32>(vsm_placement_boxes[2u*p].w);
-    let count=bitcast<u32>(vsm_placement_boxes[2u*p+1u].w);
-    for(var i=li;i<count;i+=64u) {vsm_cull_cluster(first+i);}
 }
 fn vsm_cull_cluster(index:u32) {
     let c=vsm_clusters[index];
@@ -495,10 +461,18 @@ fn vsm_cull_cluster(index:u32) {
         let p0=vec2<u32>(max(a,vec2<f32>(0.0)));
         let p1=vec2<u32>(min(b,vec2<f32>(f32(pages-1u))));
         var stale=false;
-        for(var y=p0.y;y<=p1.y && !stale;y+=1u) {
-            for(var x=p0.x;x<=p1.x;x+=1u) {
-                let flag=vsm_render[vsm_vpage(level,vec2<u32>(x,y))];
-                if flag==1u || (flag==2u && vsm_point_moved(level,lo,hi,2.0*texel)) {stale=true;break;}
+        let span=p1-p0+vec2<u32>(1u);
+        if vsm_one_level() && span.x*span.y>16u {
+            // The fog map: a cluster over many pages reads the level's summary rather than
+            // scanning them (writes stay inside the flagged texels either way).
+            stale=vsm_render[vsm_render_summary(level,0u)]!=0u
+                || (vsm_render[vsm_render_summary(level,1u)]!=0u && vsm_point_moved(level,lo,hi,2.0*texel));
+        } else {
+            for(var y=p0.y;y<=p1.y && !stale;y+=1u) {
+                for(var x=p0.x;x<=p1.x;x+=1u) {
+                    let flag=vsm_render[vsm_vpage(level,vec2<u32>(x,y))];
+                    if flag==1u || (flag==2u && vsm_point_moved(level,lo,hi,2.0*texel)) {stale=true;break;}
+                }
             }
         }
         if !stale {continue;}
@@ -521,10 +495,10 @@ fn vsm_cull_cluster(index:u32) {
             for(var ty=p0.y/per;ty<=p1.y/per;ty+=1u) {
                 for(var tx=p0.x/per;tx<=p1.x/per;tx+=1u) {mask|=1u<<(ty*tiles+tx);}
             }
-            vsm_work.lists[(2u*level+1u)*n+slot]=index|(mask<<28u);
+            vsm_work.lists[vsm_list_hw(level,slot)]=index|(mask<<28u);
         } else {
             let slot=atomicAdd(&vsm_work.args[level].sw_count,1u);
-            vsm_work.lists[2u*level*n+slot]=index;
+            vsm_work.lists[vsm_list_sw(level,slot)]=index;
         }
     }
 }
@@ -623,7 +597,7 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
     let level=vsm_pass.level;
     let slot=group.x+group.y*65535u;
     let n=vsm.counts.z;
-    if li==0u {vsm_wg_cluster=select(VSM_NONE,vsm_work_in[VSM_LISTS+2u*level*n+slot],slot<vsm_work_in[8u*level+3u]);}
+    if li==0u {vsm_wg_cluster=select(VSM_NONE,vsm_work_in[VSM_LISTS+vsm_list_sw(level,slot)],slot<vsm_work_in[8u*level+3u]);}
     let index=workgroupUniformLoad(&vsm_wg_cluster);
     if index==VSM_NONE {return;}
     let c=vsm_clusters[index];
@@ -663,7 +637,7 @@ struct VsmHw {@builtin(position) position:vec4<f32>,@location(0) @interpolate(fl
     // vsm_pass.pad0: this draw's raster area (tile) of the window; the cull marks the areas
     // each cluster can write (its entry's top four bits).
     let tile=vsm_pass.pad0;
-    let entry=vsm_work_in[VSM_LISTS+(2u*level+1u)*vsm.counts.z+instance];
+    let entry=vsm_work_in[VSM_LISTS+vsm_list_hw(level,instance)];
     var out:VsmHw;
     out.position=vec4<f32>(0.0,0.0,0.0,1.0);
     if ((entry>>28u)&(1u<<tile))==0u {return out;}
