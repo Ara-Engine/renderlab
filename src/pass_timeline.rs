@@ -19,6 +19,9 @@
 //! `renderer_frame` (`frame` remains its compatibility alias), never by line position.
 //! Failed readbacks and frames without timestamps emit `dropped:true` with a reason,
 //! rather than fabricated timings. Polling is still needed to collect final readbacks.
+//! Each line also carries the CPU time from each stage's mark to the next (`"cpu":{...}`, the
+//! stage's encoding and any preparation the renderer does inline there; repeated names add up)
+//! and `"cpu_head"`, from the frame's `begin` to its first mark.
 use std::io::Write;
 use std::sync::{Arc, OnceLock};
 
@@ -41,6 +44,9 @@ struct Frame {
     resolve: wgpu::Buffer,
     readback: wgpu::Buffer,
     names: Vec<&'static str>,
+    /// When each mark was recorded, and when the frame began.
+    cpu: Vec<std::time::Instant>,
+    begun: Option<std::time::Instant>,
     mapped: Option<Arc<OnceLock<Result<(), wgpu::BufferAsyncError>>>>,
     frame: u64,
 }
@@ -67,6 +73,8 @@ impl Frame {
                 mapped_at_creation: false,
             }),
             names: vec![],
+            cpu: vec![],
+            begun: None,
             mapped: None,
             frame: 0,
         }
@@ -146,6 +154,8 @@ impl PassTimeline {
         });
         let entry = &mut self.frames[i];
         entry.names.clear();
+        entry.cpu.clear();
+        entry.begun = Some(std::time::Instant::now());
         entry.frame = self.frame;
         self.current = Some(i);
         self.next = (i + 1) % self.frames.len();
@@ -179,6 +189,7 @@ impl PassTimeline {
         }
         let index = entry.names.len() as u32;
         entry.names.push(name);
+        entry.cpu.push(std::time::Instant::now());
         encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some(name),
             timestamp_writes: Some(wgpu::ComputePassTimestampWrites {
@@ -264,14 +275,29 @@ impl PassTimeline {
                     .iter()
                     .map(|(n, t)| format!("\"{n}\":{t:.4}"))
                     .collect();
+                // CPU time from each mark to the next, by name.
+                let mut cpu: Vec<(&str, f64)> = vec![];
+                for (k, name) in entry.names.iter().enumerate().take(entry.cpu.len().saturating_sub(1)) {
+                    let t = (entry.cpu[k + 1] - entry.cpu[k]).as_secs_f64() * 1e3;
+                    match cpu.iter_mut().find(|(n, _)| n == name) {
+                        Some((_, total)) => *total += t,
+                        None => cpu.push((name, t)),
+                    }
+                }
+                let cpu: Vec<String> = cpu.iter().map(|(n, t)| format!("\"{n}\":{t:.4}")).collect();
+                let head = match (entry.begun, entry.cpu.first()) {
+                    (Some(begun), Some(&first)) => (first - begun).as_secs_f64() * 1e3,
+                    _ => 0.0,
+                };
                 let span = ms(stamps[0], *stamps.last().unwrap());
                 let _ = write_record(
                     &mut self.log,
                     &mut self.last_emitted,
                     entry.frame,
                     &format!(
-                        "\"dropped\":false,\"span\":{span:.4},\"passes\":{{{}}}",
-                        body.join(",")
+                        "\"dropped\":false,\"span\":{span:.4},\"passes\":{{{}}},\"cpu_head\":{head:.4},\"cpu\":{{{}}}",
+                        body.join(","),
+                        cpu.join(",")
                     ),
                 );
             } else {
