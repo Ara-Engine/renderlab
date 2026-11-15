@@ -1907,7 +1907,33 @@ impl GiState {
 /// source and the kernels.
 pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
     let priority = software && priority::on();
-    priority::source(kernel_source_base(software, directions), priority)
+    probe_cut(priority::source(kernel_source_base(software, directions), priority))
+}
+/// Measurement only (`RENDERLAB_GI_PROBE_CUT=noinsert|nowalk|nostamp`, comma list): gi_probe
+/// without its pixels' requests, without its walk rounds, or without its seen stamps, to split
+/// its time. The cache's later frames are wrong under any of them.
+fn probe_cut(source: String) -> String {
+    let Ok(list) = std::env::var("RENDERLAB_GI_PROBE_CUT") else {
+        return source;
+    };
+    let mut source = source;
+    for cut in list.split(',') {
+        let (from, to) = match cut {
+            "noinsert" => (
+                "            gi_request_cells(gi_request_desc(r.world,pick.lo,b));\n            if pick.hi!=pick.lo { gi_request_cells(gi_request_desc(r.world,pick.hi,b)); }\n",
+                "",
+            ),
+            "nowalk" => (
+                "        if round+1u<GI_PROBE_ROUNDS && workgroupUniformLoad(&gi_local_any_flag)!=0u {",
+                "        if false && workgroupUniformLoad(&gi_local_any_flag)!=0u {",
+            ),
+            "nostamp" => ("                gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);\n", ""),
+            _ => continue,
+        };
+        assert_eq!(source.matches(from).count(), 1, "RENDERLAB_GI_PROBE_CUT {cut}");
+        source = source.replacen(from, to, 1);
+    }
+    source
 }
 fn kernel_source_base(software: bool, directions: u32) -> String {
     let enables = if software {
