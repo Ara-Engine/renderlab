@@ -681,6 +681,10 @@ pub struct IndirectCounters {
     pub evicted_recent: u32,
     /// Pixels' misses that found no slot, once per claim round (`full` counts every band's).
     pub full_pixel: u32,
+    /// The gather ray budget (first fill): the queue's estimated rays, and the cuts (1 + the
+    /// first bin left for later; 0 none) for pixels' cells and the rest.
+    pub gather_estimate: u32,
+    pub gather_cuts: [u32; 2],
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -2475,6 +2479,8 @@ impl Renderer {
             evicted: w[44],
             evicted_recent: w[45],
             full_pixel: w[46],
+            gather_estimate: w[256..352].iter().fold(0u32, |a, &b| a.saturating_add(b)),
+            gather_cuts: [w[352], w[353]],
         }))
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires
