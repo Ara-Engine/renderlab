@@ -200,7 +200,7 @@ fn rl_screen_hit(origin:vec3<f32>,direction:vec3<f32>,epsilon:f32,cone:vec2<f32>
                 let q=rl_screen_frame.eye.xyz+camera_ray*(dot(normal,tri[0]-rl_screen_frame.eye.xyz)/denominator)-tri[0];
                 let area=cross(e1,e2);let area2=dot(area,area);
                 let u=dot(cross(q,e2),area)/area2;let v=dot(cross(e1,q),area)/area2;
-                if u>=0.0 && v>=0.0 && u+v<=1.0 {return rl_screen_reject(5u);}
+                if u>=0.0 && v>=0.0 && u+v<=1.0 {rl_screen_count(select(51u,50u,record.x==own.x));return rl_screen_reject(5u);}
             }
         }
         s=max(exit_s,s+0.000001);advances+=1u;level=min(level+1,max_level);
@@ -211,7 +211,7 @@ fn rl_screen_hit(origin:vec3<f32>,direction:vec3<f32>,epsilon:f32,cone:vec2<f32>
 
 // Debug oracle: uses the fallback result already traced by the normal BVH pass.
 // No additional rays. This call is absent from the shipping shader.
-fn rl_screen_reference(record:vec4<u32>,origin:vec3<f32>,direction:vec3<f32>,t:f32,reason:u32) {
+fn rl_screen_reference(record:vec4<u32>,origin:vec3<f32>,direction:vec3<f32>,t:f32,reason:u32,receiver:vec2<u32>,rejected:u32) {
     if record.x==0u {rl_screen_count(31u);return;}
     let clip=rl_screen_frame.current*vec4<f32>(origin+direction*t,1.0);
     if clip.w<=0.0 {return;}
@@ -220,5 +220,19 @@ fn rl_screen_reference(record:vec4<u32>,origin:vec3<f32>,direction:vec3<f32>,t:f
     rl_screen_count(18u);
     let pixel=vec2<i32>(uv*vec2<f32>(rl_screen_frame.flags.yz));
     let key=textureLoad(rl_screen_depths,pixel,0).yz;
-    if all(key==record.xy) {rl_screen_count(19u);rl_screen_count(32u+reason);} else {rl_screen_count(20u);}
+    if all(key==record.xy) {
+        rl_screen_count(19u);rl_screen_count(32u+reason);
+        if reason==5u {rl_screen_count(select(59u,58u,rejected==textureLoad(rl_screen_hits,vec2<i32>(receiver),0).x));}
+    } else {rl_screen_count(20u);}
+}
+
+fn rl_screen_receiver_check(origin:vec3<f32>,direction:vec3<f32>,epsilon:f32,pixel:vec2<u32>) {
+    let record=textureLoad(rl_screen_hits,vec2<i32>(pixel),0);let tri=rl_screen_triangle(record);
+    let n=normalize(cross(tri[1]-tri[0],tri[2]-tri[0]));
+    let facing=select(-n,n,dot(n,rl_screen_frame.eye.xyz-tri[0])>=0.0);
+    if dot(facing,direction)< -1e-4 {rl_screen_count(55u);}
+    if abs(dot(n,origin-tri[0]))>max(8.0*epsilon,1e-4) {rl_screen_count(56u);}
+    let clip=rl_screen_frame.current*vec4<f32>(origin,1.0);
+    let projected=(clip.xy/clip.w*vec2<f32>(0.5,-0.5)+0.5)*vec2<f32>(rl_screen_frame.flags.yz);
+    if distance(projected,vec2<f32>(pixel)+0.5)>2.0 {rl_screen_count(57u);}
 }

@@ -307,16 +307,20 @@ pub(super) fn source(source: String, device: &wgpu::Device) -> String {
         .replace("atomicAdd(&rl_trace_stats.pixels,1u);","").replace("atomicAdd(&rl_trace_stats.slots,count);","")
         .replace("textureStore(rl_samples,at,vec4<f32>(0.0));","rl_screen_results[slot]=vec4<f32>(0.0);");
     let march=if debug_path().is_some() {
-        march.replace("rl_screen_results[slot]=rl_screen_hit(origin,d,epsilon,cone,p);", "rl_screen_last_reason=0u;let hit=rl_screen_hit(origin,d,epsilon,cone,p);rl_screen_results[slot]=vec4<f32>(hit.rgb,select(-f32(rl_screen_last_reason),hit.a,hit.a>0.0));")
+        march.replace("rl_screen_results[slot]=rl_screen_hit(origin,d,epsilon,cone,p);", "rl_screen_last_reason=0u;rl_screen_candidate=0u;let hit=rl_screen_hit(origin,d,epsilon,cone,p);rl_screen_results[slot]=select(vec4<f32>(f32(rl_screen_candidate),0.0,0.0,-f32(rl_screen_last_reason)),hit,hit.a>0.0);")
     } else {march};
     let source=source.replacen(seam,"let screen=rl_screen_results[slot];\n        if screen.a>0.0 {textureStore(rl_samples,at,rl_f16_nearest(screen));continue;}\n        let traced=rl_cast(origin,d,epsilon);",1);
     let (source,counter)=if debug_path().is_some() {
-        let source=source.replace("let traced=rl_cast(origin,d,epsilon);", "let traced=rl_cast(origin,d,epsilon);\n        rl_screen_reference(traced.record,origin,d,traced.t,u32(max(-screen.a,0.0)));");
+        let source=source.replace("let traced=rl_cast(origin,d,epsilon);", "let traced=rl_cast(origin,d,epsilon);\n        rl_screen_reference(traced.record,origin,d,traced.t,u32(max(-screen.a,0.0)),p,u32(max(screen.x,0.0)));");
         (source.replace("dropped:atomic<u32> };", "dropped:atomic<u32>, screen_reserved:array<u32,12>, screen_reasons:array<atomic<u32>,64> };"),
-        "var<private> rl_screen_last_reason:u32;\nfn rl_screen_count(reason:u32) {atomicAdd(&rl_trace_stats.screen_reasons[reason],1u);}")
+        "var<private> rl_screen_last_reason:u32;var<private> rl_screen_candidate:u32;\nfn rl_screen_count(reason:u32) {atomicAdd(&rl_trace_stats.screen_reasons[reason],1u);}")
     } else {(source,"fn rl_screen_count(reason:u32) {}")};
     let shader=include_str!("../shaders/reflections_screen.wgsl");
-    let shader=if debug_path().is_some() {shader.replace("rl_screen_count(reason);return", "rl_screen_last_reason=reason;rl_screen_count(reason);return")} else {shader.to_owned()};
+    let shader=if debug_path().is_some() {
+        shader.replace("rl_screen_count(reason);return", "rl_screen_last_reason=reason;rl_screen_count(reason);return")
+        .replace("let own=textureLoad(rl_screen_hits,vec2<i32>(receiver),0).xy;", "rl_screen_receiver_check(origin,direction,epsilon,receiver);let own=textureLoad(rl_screen_hits,vec2<i32>(receiver),0).xy;")
+        .replace("let record=textureLoad(rl_screen_hits,cell,0);", "let record=textureLoad(rl_screen_hits,cell,0);rl_screen_candidate=record.x;")
+    } else {shader.to_owned()};
     format!(
         "{source}\n{march}\n{counter}\n{}\n{}",
         shader,
