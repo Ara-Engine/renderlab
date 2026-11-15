@@ -101,6 +101,12 @@ fn light_reuse_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_LIGHT_REUSE").map_or(true, |v| v != "0"))
 }
+/// C screen: RENDERLAB_GI_GATHER_TMAX caps the software gather's fixed rays at that many metres
+/// (a ray past it adds nothing, as a miss). 0, the default: uncapped.
+fn gather_tmax() -> f32 {
+    static T: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("RENDERLAB_GI_GATHER_TMAX").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0))
+}
 /// The default for `near_occluded_rays`.
 const NEAR_OCCLUDED_RAYS: u32 = 4;
 /// The still-view batch (Planner::finish): one cache frame in STILL_BATCH while a still view
@@ -1251,6 +1257,7 @@ impl Planner {
         header[15] = s.near_light_rays;
         header[55] = near_occluded_rays();
         header[56] = u32::from(light_reuse_on());
+        header[57] = gather_tmax().to_bits();
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
