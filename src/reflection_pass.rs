@@ -891,7 +891,7 @@ impl Renderer {
                             allocator.1
                         );
                         let line = format!(
-                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}]{memory}}}\n",
+                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}],\"light_counts\":[{},{},{},{},{},{}]{memory}}}\n",
                             r.frame.load(SeqCst),
                             word(2),
                             word(1),
@@ -900,7 +900,13 @@ impl Renderer {
                             word(7),
                             word(8),
                             word(9),
-                            word(10)
+                            word(10),
+                            word(11),
+                            word(12),
+                            word(13),
+                            word(14),
+                            word(15),
+                            word(7)
                         );
                         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
                             let _ = file.write_all(line.as_bytes());

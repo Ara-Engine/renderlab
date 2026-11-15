@@ -304,7 +304,49 @@ pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
     } else {
         composed
     };
-    with_history_block(composed)
+    with_light_counts(with_history_block(composed))
+}
+/// Measurement only (`RENDERLAB_LIGHT_COUNT=1`, read with `RENDERLAB_RL_ROOM_LOG`): primary
+/// shading counts, in the reflection pass's counters (reflection_pass.rs logs words 11-15 and 7),
+/// its receivers (11), the lights their loops visit (12), those with incidence that reach the
+/// visibility call (13), those of them under one display code at the receiver's running sum (14,
+/// the light bound's slope), the local shadowed ones among them (15) and those under one code (7).
+fn with_light_counts(mut composed: Composed) -> Composed {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("RENDERLAB_LIGHT_COUNT").is_ok_and(|v| v == "1"))
+        || !composed.source.contains("var<storage,read_write> rl_room_stats")
+    {
+        return composed;
+    }
+    for (head, count) in [
+        ("fn rl_lights_prepare(world:vec3<f32>) {
+", "    atomicAdd(&rl_room_stats[11],1u);
+"),
+        ("fn light_sample_untinted(i:u32, input:SurfaceInput) -> LightSample {
+", "    atomicAdd(&rl_room_stats[12],1u);
+"),
+        (
+            "fn light_visibility_within(input:SurfaceInput, s:LightSample, unshadowed:vec3<f32>, sum:vec3<f32>) -> f32 {
+",
+            "    atomicAdd(&rl_room_stats[13],1u);
+    let rl_lc_r=1.0/max(sum,vec3<f32>(0.0087));
+    let rl_lc_slope=min(min(vec3<f32>(6.443),0.2888*rl_lc_r),min(0.1082*rl_lc_r*rl_lc_r,0.7648*rl_lc_r*rl_lc_r*rl_lc_r));
+    let rl_lc_small=all(unshadowed*rl_lc_slope<vec3<f32>(1.0/255.0));
+    if rl_lc_small {atomicAdd(&rl_room_stats[14],1u);}
+    if lights[s.index].kind.w!=0u {atomicAdd(&rl_room_stats[15],1u); if rl_lc_small {atomicAdd(&rl_room_stats[7],1u);}}
+",
+        ),
+    ] {
+        if composed.source.matches(head).count() != 1 {
+            continue;
+        }
+        let at = composed.source.find(head).unwrap() + head.len();
+        composed.source.insert_str(at, count);
+        if at <= composed.program.start {
+            composed.program = composed.program.start + count.len()..composed.program.end + count.len();
+        }
+    }
+    composed
 }
 /// Measurement only (`RENDERLAB_RL_INLINE_STUB=1`, branch t3/rtvis-stub): the primary shading
 /// modules lose the inline strata loop (its ray casts and hit shading), so receivers the pass does
