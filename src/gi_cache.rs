@@ -760,6 +760,10 @@ struct Layouts {
     main: [Owned<wgpu::BindGroupLayout>; 2],
     arrays: Owned<wgpu::BindGroupLayout>,
     pipelines: [Owned<wgpu::PipelineLayout>; 2],
+    /// Group 1 without the per-draw vertex and index arrays, and the pipeline layouts with it:
+    /// for the kernels that never read those arrays (`lean`).
+    lean_arrays: Owned<wgpu::BindGroupLayout>,
+    lean_pipelines: [Owned<wgpu::PipelineLayout>; 2],
     /// Cell shading's group 0 (G2): the work buffer read-only, the outgoing radiance and
     /// the draw table.
     shade: Owned<wgpu::BindGroupLayout>,
@@ -784,6 +788,18 @@ struct Pipelines {
     gather_select: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
     filter: Owned<wgpu::ComputePipeline>,
+    /// The kernels built on the lean layout (`lean`): their passes bind the lean group 1.
+    lean: Vec<wgpu::ComputePipeline>,
+}
+
+/// The cache's kernels that never read group 1's per-draw vertex and index arrays (all but the
+/// probe and the hit decodes) are built on a group 1 without them and bind it: every dispatch
+/// merges each resource of its bound groups into wgpu's usage tracking when the command buffer
+/// finishes, and those two arrays are TRACED_DRAWS (256) buffers each, padded. The same
+/// kernels, inputs and results. `RENDERLAB_GI_LEAN=0` binds the full group everywhere.
+fn lean() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_LEAN").map_or(true, |v| v != "0"))
 }
 /// One program's cell shading pipeline (G2), keyed by everything its module and layout
 /// depend on: the program and its source, the prelude, the ray path and the material
@@ -795,6 +811,8 @@ struct ShadePipeline {
 /// Group 1: the traced shading ABI's geometry tables, built from the same draws in
 /// TLAS placement order, so hit records decode to the receivers shading sees.
 struct Arrays {
+    /// Group 1 without the vertex and index arrays, for the lean kernels (`lean`).
+    lean: Owned<wgpu::BindGroup>,
     keys: Vec<(wgpu::Buffer, wgpu::Buffer, usize)>,
     models: Owned<wgpu::Buffer>,
     normals: Owned<wgpu::Buffer>,
@@ -2942,6 +2960,20 @@ impl Renderer {
                 &[Some(&main[1]), Some(&arrays), None, Some(lighting)],
             ),
         ];
+        let lean_arrays = group(
+            "indirect cache geometry, lean",
+            &[storage(0, true), storage(1, true), storage(5, true)],
+        );
+        let lean_pipelines = [
+            layout(
+                "indirect cache ABI, hardware, lean",
+                &[Some(&main[0]), Some(&lean_arrays), None, Some(lighting)],
+            ),
+            layout(
+                "indirect cache ABI, software, lean",
+                &[Some(&main[1]), Some(&lean_arrays), None, Some(lighting)],
+            ),
+        ];
         let shade = group(
             "indirect cache cell shading",
             &[storage(31, true), storage(33, false), storage(36, true)],
@@ -2950,6 +2982,8 @@ impl Renderer {
             main,
             arrays,
             pipelines,
+            lean_arrays,
+            lean_pipelines,
             shade,
         });
     }
@@ -2990,37 +3024,50 @@ impl Renderer {
             )
         };
         let main = &layouts.pipelines[usize::from(software)];
-        let priority = software && priority::on();
-        let pipelines = Pipelines {
-            software,
-            priority: priority.then(|| priority::Pipelines::new(|name|compute(name, main))),
-            directions,
-            probe: compute("gi_probe", main),
-            claim: compute(if priority { "gi_priority_claim_visible" } else { "gi_claim" }, main),
-            resolve: compute("gi_resolve", main),
-            resolve_last: compute("gi_resolve_last", main),
-            scan: compute("gi_scan", main),
-            setup: compute("gi_setup", main),
-            rays: compute("gi_rays", main),
-            finish: compute("gi_finish", main),
-            integrate: compute("gi_integrate", main),
-            gather: compute(
-                if priority {
-                    "gi_priority_gather_empty"
-                } else if software {
-                    "gi_gather_batched"
-                } else {
-                    "gi_gather"
-                },
-                main,
-            ),
-            fill_count: compute("gi_fill_count", main),
-            fill_select: compute("gi_fill_select", main),
-            gather_count: compute("gi_gather_count", main),
-            gather_select: compute("gi_gather_select", main),
-            light: compute("gi_light", main),
-            filter: compute("gi_filter", main),
+        let lean_layout = &layouts.lean_pipelines[usize::from(software)];
+        let lean_list = std::cell::RefCell::new(Vec::new());
+        // A kernel goes on the lean layout when it validates there (it reads neither array).
+        let kernel = |entry: &str| {
+            if lean() {
+                let scope = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+                let pipeline = compute(entry, lean_layout);
+                if pollster::block_on(scope.pop()).is_none() {
+                    lean_list.borrow_mut().push((*pipeline).clone());
+                    return pipeline;
+                }
+            }
+            compute(entry, main)
         };
+        let priority = software && priority::on();
+        let mut pipelines = Pipelines {
+            software,
+            priority: priority.then(|| priority::Pipelines::new(|name| kernel(name))),
+            directions,
+            probe: kernel("gi_probe"),
+            claim: kernel(if priority { "gi_priority_claim_visible" } else { "gi_claim" }),
+            resolve: kernel("gi_resolve"),
+            resolve_last: kernel("gi_resolve_last"),
+            scan: kernel("gi_scan"),
+            setup: kernel("gi_setup"),
+            rays: kernel("gi_rays"),
+            finish: kernel("gi_finish"),
+            integrate: kernel("gi_integrate"),
+            gather: kernel(if priority {
+                "gi_priority_gather_empty"
+            } else if software {
+                "gi_gather_batched"
+            } else {
+                "gi_gather"
+            }),
+            fill_count: kernel("gi_fill_count"),
+            fill_select: kernel("gi_fill_select"),
+            gather_count: kernel("gi_gather_count"),
+            gather_select: kernel("gi_gather_select"),
+            light: kernel("gi_light"),
+            filter: kernel("gi_filter"),
+            lean: vec![],
+        };
+        pipelines.lean = lean_list.into_inner();
         if let Some(error) = scopes.finish() {
             return Err(Error::Shader(error.to_string()));
         }
@@ -3114,7 +3161,29 @@ impl Renderer {
             );
             drop(vertices);
             drop(indices);
+            let lean = self.ledger.own(
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("indirect cache geometry, lean"),
+                    layout: &self.gi.layouts.as_ref().unwrap().lean_arrays,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: models.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: normals.as_entire_binding(),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 5,
+                            resource: table.as_entire_binding(),
+                        },
+                    ],
+                }),
+                ResourceKind::BindGroup,
+            );
             let next = Arrays {
+                lean,
                 keys,
                 models,
                 normals,
@@ -3764,6 +3833,7 @@ impl GiState {
         let p = self.pipelines.as_ref().unwrap();
         let g = self.groups.as_ref().unwrap();
         let arrays = &self.arrays.as_ref().unwrap().bind;
+        let lean_arrays = &self.arrays.as_ref().unwrap().lean;
         let layout = WorkLayout::of(r);
         if plan.clear {
             encoder.clear_buffer(&r.table, HEADER_WORDS * 4, None);
@@ -3806,7 +3876,8 @@ impl GiState {
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &*g.main, &[]);
-            pass.set_bind_group(1, &**arrays, &[]);
+            let group: &wgpu::BindGroup = if p.lean.contains(pipeline) { &**lean_arrays } else { &**arrays };
+            pass.set_bind_group(1, group, &[]);
             pass.set_bind_group(3, lighting, &[]);
             if let Some([x, y]) = groups {
                 pass.dispatch_workgroups(x, y, 1);
