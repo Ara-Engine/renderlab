@@ -3021,8 +3021,16 @@ impl Renderer {
             occluder_gather_frame: false,
             ..state.stats
         };
-        if fog.is_some() && state.resources.is_none() {
-            state.capacity = FOG_POOL_START;
+        if fog.is_some() {
+            // The fog map sizes its pool from its own requests (it keeps no other page), with a
+            // quarter over and grow-only, so it needs no readback.
+            let requested = state.fog_requests.iter().filter(|&&w| w != 0).count() as u32;
+            let wanted = (requested + requested / 4).next_multiple_of(64).min(POOL_MAX);
+            state.capacity = if state.resources.is_none() {
+                wanted.max(FOG_POOL_START)
+            } else {
+                state.capacity.max(wanted)
+            };
         }
         let created = state.ensure_resources(
             &self.device,
@@ -3966,7 +3974,9 @@ impl Renderer {
             pass.set_pipeline(&p.finish);
             pass.dispatch_workgroups(1, 1, 1);
         }
-        if state.settings.lookup == VirtualLookup::Disk {
+        // The receiver and pool counters' readback (the fog map has neither receivers nor a
+        // pool it cannot size itself).
+        if state.settings.lookup == VirtualLookup::Disk && !state.fog {
             if r.sparse {
                 // The pool's counters ride along with the receiver counters (`REACH_BYTES`).
                 encoder.copy_buffer_to_buffer(&r.pool, 16, &r.reach, 16, 32);
