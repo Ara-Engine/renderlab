@@ -2796,7 +2796,7 @@ impl Renderer {
                 .iter()
                 .map(|b| b.as_entire_buffer_binding())
                 .chain(std::iter::repeat(absent.as_entire_buffer_binding()))
-                .take(crate::TRACED_DRAWS as usize)
+                .take(crate::primary_ray::bound_slots(&self.device, segments.len()))
                 .collect();
             let record_array = self.ledger.own(
                 self.device.create_bind_group(&wgpu::BindGroupDescriptor {

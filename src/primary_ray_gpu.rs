@@ -631,14 +631,16 @@ impl Renderer {
     }
 }
 
-/// One binding per traced draw slot; unused slots bind stand-ins no placement names.
+/// One binding per bound draw slot (`crate::primary_ray::bound_slots`); unused slots bind
+/// stand-ins no placement names.
 fn padded<'a>(
     buffers: impl Iterator<Item = &'a wgpu::Buffer>,
     absent: &'a wgpu::Buffer,
+    slots: usize,
 ) -> Vec<wgpu::BufferBinding<'a>> {
     buffers
         .chain(std::iter::repeat(absent))
-        .take(TRACED_DRAWS as usize)
+        .take(slots)
         .map(|b| b.as_entire_buffer_binding())
         .collect()
 }
@@ -2279,7 +2281,8 @@ impl Renderer {
             uploads.write_calls += 1;
             let state = self.view.primary.as_ref().unwrap();
             let absent: &wgpu::Buffer = &state.absent.as_ref().unwrap().value;
-            let vertices = padded(draws.iter().map(|d| &**d.mesh.vertex), absent);
+            let slots = crate::primary_ray::bound_slots(&self.device, draws.len());
+            let vertices = padded(draws.iter().map(|d| &**d.mesh.vertex), absent, slots);
             let previous = padded(
                 draws.iter().map(|d| {
                     d.mesh
@@ -2288,13 +2291,15 @@ impl Renderer {
                         .map_or(&**d.mesh.vertex, |s| &**s.previous)
                 }),
                 absent,
+                slots,
             );
-            let indices = padded(draws.iter().map(|d| &**d.mesh.index), absent);
+            let indices = padded(draws.iter().map(|d| &**d.mesh.index), absent, slots);
             let tangents = padded(
                 draws
                     .iter()
                     .map(|d| d.mesh.tangent.as_deref().unwrap_or(absent)),
                 absent,
+                slots,
             );
             let bind = |label, layout, entries: &[(u32, wgpu::BindingResource<'_>)]| {
                 let entries: Vec<_> = entries
@@ -2305,7 +2310,7 @@ impl Renderer {
                     })
                     .collect();
                 self.ledger.own(
-                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    crate::group_cache::reported(&self.device, &wgpu::BindGroupDescriptor {
                         label: Some(label),
                         layout,
                         entries: &entries,
@@ -3368,7 +3373,7 @@ impl Renderer {
             .iter()
             .map(|d| d.material.unwrap_or(default))
             .chain(std::iter::repeat(default))
-            .take(TRACED_DRAWS as usize)
+            .take(crate::primary_ray::bound_slots(&self.device, draws.len()))
             .collect();
         // Whether group 2 binds the residency state or its stand-ins.
         let mut key = vec![(usize::MAX, u64::from(requests))];
@@ -3448,7 +3453,7 @@ impl Renderer {
                 ]);
             }
             Some(self.ledger.own(
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                crate::group_cache::reported(&self.device, &wgpu::BindGroupDescriptor {
                     label: Some("primary draw materials"),
                     layout: if residency.is_some() {
                         &state.streamed_bindings
