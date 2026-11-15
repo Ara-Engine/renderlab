@@ -39,7 +39,8 @@ fn gi_pass_load(input:SurfaceInput,id:vec2<u32>,size:vec2<u32>) {
     input.receiver.world=world_position(receiver_point(a.position,b.position,c.position,w),hit.placement).xyz;
     input.receiver.geometric=primary_geometric(a.position,b.position,c.position,hit.placement);
     // The cache's pixel-centre point, as the probe requests (gi_cells.wgsl gi_centre_point).
-    input.receiver.world=gi_centre_point(id,input.receiver.world,input.receiver.geometric);
+    input.receiver.world=gi_centre_point(id,input.receiver.world,world_position(a.position,hit.placement).xyz,
+        world_position(b.position,hit.placement).xyz,world_position(c.position,hit.placement).xyz);
     input.normal=vertex_output(a).normal*w.x+vertex_output(b).normal*w.y+vertex_output(c).normal*w.z;
     gi_prepare(input);
     let at=id.y*size.x+id.x;

@@ -214,23 +214,46 @@ const GI_H_CENTRE_R:u32=45u;
 const GI_H_CENTRE_U:u32=57u;
 fn gi_header_v3(i:u32) -> vec3<f32> { return vec3<f32>(gi_header_f32(i),gi_header_f32(i+1u),gi_header_f32(i+2u)); }
 // The point a pixel's cache requests and lookup use: where its centre ray meets the plane of
-// its jittered hit (`world`, plane normal `geometric`). TR1 moves the sample within the pixel
-// every frame, which moved still pixels across cell edges and made new cells every frame;
-// this point is fixed for a still view on a flat surface and moves little on a curved one.
-// Rays nearly in the plane, or a meeting point far from the hit, keep the hit.
-fn gi_centre_point(pixel:vec2<u32>, world:vec3<f32>, geometric:vec3<f32>) -> vec3<f32> {
+// its jittered hit's triangle (world-space a, b, c; the hit `world`), clamped onto that
+// triangle. TR1 moves the sample within the pixel every frame, which moved still pixels across
+// cell edges and made new cells every frame; this point is one of a fixed few per pixel (one
+// per triangle the sample can land on) and always on the surface (a plane point past a
+// silhouette, off the surface, was a cell nobody else requests). Rays nearly in the plane, or a
+// meeting point far from the hit, keep the hit.
+fn gi_centre_point(pixel:vec2<u32>, world:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>) -> vec3<f32> {
     let f=gi_header_v3(GI_H_CENTRE_F);
     if all(f==vec3<f32>(0.0)) { return world; }
     let eye=gi_header_v3(GI_H_EYE);
     let d=f+gi_header_v3(GI_H_CENTRE_R)*(f32(pixel.x)+0.5)+gi_header_v3(GI_H_CENTRE_U)*(f32(pixel.y)+0.5);
-    let den=dot(d,geometric);
+    let n=cross(b-a,c-a);
+    let den=dot(d,n);
     let to=world-eye;
     let ld=length(d);
-    if abs(den)<=1e-3*ld*length(geometric) { return world; }
-    let t=dot(to,geometric)/den;
+    if abs(den)<=1e-3*ld*length(n) { return world; }
+    let t=dot(a-eye,n)/den;
     let hit=length(to)/ld;
     if !(t>0.5*hit && t<2.0*hit) { return world; }
-    return eye+d*t;
+    return gi_closest_on_triangle(eye+d*t,a,b,c);
+}
+// The point of triangle abc closest to p (Ericson, Real-Time Collision Detection 5.1.5).
+fn gi_closest_on_triangle(p:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>) -> vec3<f32> {
+    let ab=b-a;let ac=c-a;let ap=p-a;
+    let d1=dot(ab,ap);let d2=dot(ac,ap);
+    if d1<=0.0 && d2<=0.0 { return a; }
+    let bp=p-b;
+    let d3=dot(ab,bp);let d4=dot(ac,bp);
+    if d3>=0.0 && d4<=d3 { return b; }
+    let vc=d1*d4-d3*d2;
+    if vc<=0.0 && d1>=0.0 && d3<=0.0 { return a+ab*(d1/(d1-d3)); }
+    let cp=p-c;
+    let d5=dot(ab,cp);let d6=dot(ac,cp);
+    if d6>=0.0 && d5<=d6 { return c; }
+    let vb=d5*d2-d1*d6;
+    if vb<=0.0 && d2>=0.0 && d6<=0.0 { return a+ac*(d2/(d2-d6)); }
+    let va=d3*d6-d5*d4;
+    if va<=0.0 && d4-d3>=0.0 && d5-d6>=0.0 { return b+(c-b)*((d4-d3)/((d4-d3)+(d5-d6))); }
+    let s=1.0/(va+vb+vc);
+    return a+ab*(vb*s)+ac*(vc*s);
 }
 fn gi_hot(slot:u32) -> u32 { return GI_HEADER+slot*GI_HOT_WORDS; }
 fn gi_cold(slot:u32) -> u32 { return GI_HEADER+(gi_word(GI_H_MASK)+1u)*GI_HOT_WORDS+slot*max(24u,gi_word(GI_H_COLD_WORDS)); }

@@ -210,7 +210,10 @@ struct GiReceiver { world:vec3<f32>, geometric:vec3<f32>, vertex:vec3<f32> };
 // The same receiver the traced shading entry builds (program_traced_entry.wgsl):
 // receiver_point on the hit triangle in the placement's frame, its plane normal, and the
 // interpolated vertex normal it passes as SurfaceInput.normal (the pixel's bin source).
-fn gi_receiver(record:vec4<u32>) -> GiReceiver {
+fn gi_receiver(record:vec4<u32>) -> GiReceiver { return gi_receiver_of(record,vec2<u32>(0u),false); }
+// With `centre`, a pixel's receiver (`pixel` its coordinates) is keyed on its centre ray's point
+// on the hit triangle (gi_centre_point), which the receivers pass looks up too.
+fn gi_receiver_of(record:vec4<u32>, pixel:vec2<u32>, centre:bool) -> GiReceiver {
     let placement=record.x-1u;
     let batch=primary_placements[placement]&0x1fffffffu;
     let i=record.y*3u;
@@ -225,7 +228,11 @@ fn gi_receiver(record:vec4<u32>) -> GiReceiver {
     let na=unit_normal(basis*unit_normal(vec3<f32>(gi_vertices[batch].data[ia*3u].w,gi_vertices[batch].data[ia*3u+1u].xy)));
     let nb=unit_normal(basis*unit_normal(vec3<f32>(gi_vertices[batch].data[ib*3u].w,gi_vertices[batch].data[ib*3u+1u].xy)));
     let nc=unit_normal(basis*unit_normal(vec3<f32>(gi_vertices[batch].data[ic*3u].w,gi_vertices[batch].data[ic*3u+1u].xy)));
-    return GiReceiver(world,primary_geometric(a,b,c,placement),na*w.x+nb*w.y+nc*w.z);
+    var at=world;
+    if centre {
+        at=gi_centre_point(pixel,world,world_position(a,placement).xyz,world_position(b,placement).xyz,world_position(c,placement).xyz);
+    }
+    return GiReceiver(at,primary_geometric(a,b,c,placement),na*w.x+nb*w.y+nc*w.z);
 }
 
 // ---- probe: per-tile unique cells, then one lookup each ----
@@ -441,9 +448,7 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> 
     var walked=0u;
     var pick=GiLevels(0u,0u,0.0);
     if record.x!=0u {
-        let hit=gi_receiver(record);
-        // The pixel-centre point (gi_centre_point): the receivers pass looks up the same.
-        let r=GiReceiver(gi_centre_point(p,hit.world,hit.geometric),hit.geometric,hit.vertex);
+        let r=gi_receiver_of(record,p,true);
         world=r.world;
         let n=gi_bin_source(gi_viewed_normal(r.world,r.geometric),r.vertex);
         // Both levels around a switch: inside the blend band, and within rounding of
