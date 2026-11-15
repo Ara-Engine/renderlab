@@ -44,19 +44,6 @@ pub(crate) fn atmosphere_source_at(first: u32, fallback: Option<&str>) -> String
         access = access.replacen(tail, &format!("    }}
     return {fallback};
 }}"), 1);
-        // Each cell reads its own level (texel nearest under its width; `vsm.params.w` is the
-        // fog map's log2 texels per pixel): an undrawn page there answers with the fallback
-        // rather than a coarser level, whose pages may keep a moving caster's old depth.
-        let walk = "    for(var level=0u;level<vsm.counts.x;level+=1u) {";
-        assert_eq!(access.matches(walk).count(), 1, "accessor level walk changed");
-        access = access.replacen(
-            walk,
-            "    let wanted=distance(world,vsm.eye.xyz)*vsm.eye.w*exp2(-vsm.params.w);
-                 var band=0u;
-                 for(var k=1u;k<vsm.counts.x;k+=1u) { if vsm_texel(k)<=wanted { band=k; } }
-                 for(var level=band;level<=band;level+=1u) {",
-            1,
-        );
     }
     let sparse = access
         .replace(
