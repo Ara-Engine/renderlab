@@ -17,6 +17,18 @@ use crate::program::{self, Stage};
 #[path = "reflection_hit_sun.rs"]
 mod hit_sun;
 
+/// Measurement only (`RENDERLAB_RL_HIT_SUN_COUNT=1`, read with `RENDERLAB_RL_ROOM_LOG`, whose
+/// `floored_inline` pair then holds them): the hits that ask the map for the sun (word 7) and
+/// those it cannot answer, which trace their ray (word 8). The counters are then copied after
+/// the hit pass instead of after the trace (reflection_pass.rs `rl_room_copy`).
+pub(super) fn hit_sun_count() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_HIT_SUN_COUNT").is_ok_and(|v| v == "1"))
+}
+const SUN_COUNT_SEAM: &str = "        let v=rl_hit_sun_map(receiver,l);\n";
+const SUN_COUNT: &str = "        let v=rl_hit_sun_map(receiver,l);\n        atomicAdd(&rl_room_stats[7],1u); if v<0.0 { atomicAdd(&rl_room_stats[8],1u); }\n";
+const SUN_COUNT_BINDING: &str = "\n@group(0) @binding(69) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;\n";
+
 /// H's dispatch arguments, after its count word (rl_hit_args).
 const HIT_ARGS_OFFSET: u64 = 4;
 
@@ -62,6 +74,12 @@ impl Renderer {
                 && let Some(source) = hit_sun::compose(composed.source.clone())
             {
                 composed.source = source;
+                if hit_sun_count() && composed.source.contains(SUN_COUNT_SEAM) {
+                    composed.source = composed.source.replacen(SUN_COUNT_SEAM, SUN_COUNT, 1);
+                    if !composed.source.contains("var<storage,read_write> rl_room_stats") {
+                        composed.source.push_str(SUN_COUNT_BINDING);
+                    }
+                }
                 let groups: [_; 4] = std::array::from_fn(|g| full.get_bind_group_layout(g as u32));
                 let own = hit_sun::layout(&self.device);
                 sun_layout = Some(self.ledger.own(
@@ -208,6 +226,10 @@ impl Renderer {
                 compute.set_bind_group(0, group, &[]);
             }
             compute.dispatch_workgroups_indirect(&pass.hits.value, HIT_ARGS_OFFSET);
+        }
+        drop(compute);
+        if hit_sun_count() {
+            self.rl_room_copy(encoder, pass);
         }
     }
 }

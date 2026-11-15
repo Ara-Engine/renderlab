@@ -437,7 +437,10 @@ impl Renderer {
         drop(compute);
         super::reflection_list_dump::maybe_dump(self, encoder, pass);
         self.rl_probe(encoder, pass);
-        self.rl_room_copy(encoder, pass);
+        // RENDERLAB_RL_HIT_SUN_COUNT copies the counters after the hit pass instead.
+        if !super::reflection_hits_gpu::hit_sun_count() {
+            self.rl_room_copy(encoder, pass);
+        }
     }
 
     /// This frame's pass uniform (the frame counter, the room, the list's capacity, the pass on),
@@ -830,7 +833,7 @@ impl Renderer {
 // ---- the composite's room sized to the content ----
 impl Renderer {
     /// Copies this frame's counters into an idle readback buffer, and maps last frame's copy.
-    fn rl_room_copy(&self, encoder: &mut wgpu::CommandEncoder, pass: &PassTargets) {
+    pub(super) fn rl_room_copy(&self, encoder: &mut wgpu::CommandEncoder, pass: &PassTargets) {
         use std::sync::atomic::Ordering::SeqCst;
         // Last frame's copies are submitted now: start their maps.
         for r in &pass.readback {
