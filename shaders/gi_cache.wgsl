@@ -325,6 +325,16 @@ fn gi_request_desc(world:vec3<f32>, level:u32, bin:u32) -> vec4<u32> {
     return vec4<u32>(level|(bin<<8u)|(flags<<11u),bitcast<vec3<u32>>(base));
 }
 // Adds a descriptor's cells to the tile's set.
+// Whether all four bilinear corners at `level` in `bin` around `world` exist with a value.
+const GI_H_LEVEL_HYST:u32=57u;
+fn gi_level_known(world:vec3<f32>, level:u32, bin:u32) -> bool {
+    let corners=gi_corners(gi_lattice(world,gi_edge(level),bin),bin);
+    for(var c=0u;c<4u;c+=1u) {
+        let slot=gi_find(gi_key(level,bin,corners.base+gi_corner_offset(bin,c)));
+        if slot==0xffffffffu || (gi_word(gi_hot(slot))&GI_VALID)==0u { return false; }
+    }
+    return true;
+}
 fn gi_request_cells(desc:vec4<u32>) {
     let level=desc.x&0xffu;
     let bin=(desc.x>>8u)&7u;
@@ -442,6 +452,7 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> 
         // Both levels around a switch: inside the blend band, and within rounding of
         // the switch itself, where the shading module's ceil may go either way.
         pick=gi_levels(r.world,1e-3);
+        let hyst_bin=gi_bin(n);
         // Bins on either side of a near tie, and both sides of a near-grazing view.
         let a=abs(n);
         bins=1u<<gi_bin(n);
@@ -454,6 +465,19 @@ fn gi_pixel_walk(world:vec3<f32>, level:u32, bin:u32, round:u32, levels:u32) -> 
         let eye=vec3<f32>(gi_header_f32(GI_H_EYE),gi_header_f32(GI_H_EYE+1u),gi_header_f32(GI_H_EYE+2u));
         let toward=eye-r.world;
         if abs(dot(r.geometric,toward))<1e-4*length(toward) { bins|=1u<<gi_bin(-n); }
+        // Level hysteresis: a pixel that has only just come within its level (less than
+        // GI_H_LEVEL_HYST of a level from the coarser one's boundary) keeps reading the coarser
+        // cells when all four of its corners there already have a value, and requests no finer
+        // cells. Shading's lookup fills a level whose corners do not exist from the next coarser
+        // one (gi_api.wgsl gi_prepare), so it reads those same cells; the finer cells are made
+        // once the pixel is further in. A camera moving toward a surface then remakes it at the
+        // finer level later and less often.
+        let hyst=gi_header_f32(GI_H_LEVEL_HYST);
+        if hyst>0.0 && pick.lo==pick.hi && bins==(1u<<hyst_bin) && pick.lo+1u<gi_word(GI_H_LEVELS)
+            && (gi_word(GI_H_FLAGS)&GI_F_TRILINEAR)!=0u && gi_level_real(r.world)>f32(pick.lo)-hyst
+            && gi_level_known(r.world,pick.lo+1u,hyst_bin) {
+            pick=GiLevels(pick.lo+1u,pick.lo+1u,0.0);
+        }
         // Every pixel inserts its own requests. (Skipping pixels whose tile neighbour
         // requests the identical cells is exact but measured only ~5 us faster.)
         for(var b=0u;b<6u;b+=1u) {
