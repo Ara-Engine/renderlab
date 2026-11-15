@@ -552,6 +552,7 @@ fn every_list_head_module_validates() {
     };
     for (h, head) in heads.iter().enumerate() {
         validate(&format!("head {h} trace"), &rl_trace_source(head));
+        validate(&format!("head {h} dense trace"), &super::reflection_pass::with_dense_slots(rl_trace_source(head)));
         // The GI receiver kernel, built only while its pass runs (RENDERLAB_GI_PASS=1): the
         // deferred variant once dropped the definitions it relies on.
         if crate::renderer::primary_ray_gpu::gi_receiver_pass::for_source(head) {
