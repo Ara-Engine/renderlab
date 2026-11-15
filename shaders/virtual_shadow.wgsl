@@ -206,6 +206,9 @@ fn vsm_moved(level:u32,page:vec2<u32>)->bool {
     let lo=vsm.levels[level].origin.xy+vec2<f32>(page)*size;let hi=lo+vec2<f32>(size);
     for(var i=0u;i<vsm.counts.w;i+=1u) {
         let r=vsm.rects[i];
+        // The fog map: no fog cell a coarser level serves lies in this caster's shadow (its
+        // coarsest level rides in the pixel rectangle's x).
+        if vsm_one_level() && f32(level)>vsm.srects[i].x {continue;}
         if all(lo<=r.zw) && all(hi>=r.xy) {return true;}
     }
     return false;

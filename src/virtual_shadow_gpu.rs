@@ -2410,6 +2410,16 @@ impl Renderer {
         }
         // Moved casters invalidate the pages under their old and new light-space bounds.
         let mut rects = vec![];
+        // The fog map: how far from the eye each moved caster's shadow reaches, its bounds and
+        // their column away from the sun down to the lowest caster height. A fog cell farther
+        // out is in no such column, so the levels serving only farther cells keep their pages.
+        let mut reaches = vec![];
+        let reach = |b: &crate::shadow_plan::Bounds| {
+            corners(b).fold(0.0f64, |far, c| {
+                let drop = (c.dot(l) - heights[0]).max(0.0);
+                far.max((c - eye).length()).max((c - l * drop - eye).length())
+            })
+        };
         // N8f: their old and new bounds' pixel rectangles too (whole image when a corner is
         // not in front of the camera): a static camera's pixels outside them keep their receivers.
         let mut screens = vec![];
@@ -2449,6 +2459,9 @@ impl Renderer {
                     let [a0, a1] = rect(&cache.bounds[p]);
                     let [b0, b1] = rect(&bounds[p]);
                     rects.push([a0.min(b0), a1.max(b1)]);
+                    if fog.is_some() {
+                        reaches.push(reach(&cache.bounds[p]).max(reach(&bounds[p])));
+                    }
                     let [c0, c1] = screen(&cache.bounds[p]);
                     let [d0, d1] = screen(&bounds[p]);
                     screens.push([c0.min(d0), c1.max(d1)]);
@@ -2626,7 +2639,26 @@ impl Renderer {
             frame.extend_from_slice(&value.to_ne_bytes());
         }
         frame.extend_from_slice(&level_bytes);
-        for list in [&rects, &screens] {
+        // The fog map uses no pixel rectangles: their slots carry each moved caster's coarsest
+        // level to invalidate (WGSL `vsm_moved`): the last whose cells start within its reach,
+        // and two more for cells a pending finer page leaves to a coarser level.
+        let limits: Vec<[glam::DVec2; 2]> = fog.map_or(vec![], |f| {
+            let start = |i: usize| {
+                if i == 0 {
+                    0.0
+                } else {
+                    f64::from(s.finest_texel) * 2f64.powi(rungs[i]) / (f.tile * footprint)
+                }
+            };
+            reaches
+                .iter()
+                .map(|&far| {
+                    let last = (0..rungs.len()).filter(|&i| start(i) <= far).max().unwrap_or(0);
+                    [glam::DVec2::new((last + 2) as f64, 0.0), glam::DVec2::ZERO]
+                })
+                .collect()
+        });
+        for list in [&rects, if fog.is_some() { &limits } else { &screens }] {
             for i in 0..MAX_RECTS {
                 let [lo, hi] = list.get(i).copied().unwrap_or([glam::DVec2::ZERO; 2]);
                 for value in [lo.x, lo.y, hi.x, hi.y] {
