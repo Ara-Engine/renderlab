@@ -10,6 +10,10 @@
 const RS_LEAF:u32=0x80000000u;
 // Shared binned-SAH builder: <=15 levels, at most 1+3*15 pending children.
 const RS_STACK:u32=48u;
+// Each stacked node keeps the entry distance it was pushed at; one that starts beyond the
+// closest hit found since is dropped when popped, without its node read (a box entered past
+// the hit holds no closer or tied triangle). RENDERLAB_RS_POP=0 (src/program.rs) turns it off.
+const RS_POP_CULL:bool=true;
 // src/reflection_software.rs HEADER_WORDS and INSTANCE_WORDS must match.
 const RS_HEADER_WORDS:u32=8u;
 const RS_INSTANCE_WORDS:u32=24u;
@@ -48,7 +52,8 @@ fn rs_limit(best:RsHit,best_i:u32,i:u32)->f32 {
 // One instance's part of rs_trace, updating best and best_i. True when an any-hit ray found a
 // blocker.
 fn rs_instance(i:u32,origin:vec3<f32>,direction:vec3<f32>,world_inv:vec3<f32>,tmin:f32,any_hit:bool,
-    best:ptr<function,RsHit>,best_i:ptr<function,u32>,stack:ptr<function,array<u32,RS_STACK>>)->bool {
+    best:ptr<function,RsHit>,best_i:ptr<function,u32>,stack:ptr<function,array<u32,RS_STACK>>,
+    entries:ptr<function,array<f32,RS_STACK>>)->bool {
     // Record words 0-11 rows, 12-17 world lo/hi, 18 nodes, 19 triangles, 20 root, 21 slot,
     // 22 casts no shadow: any-hit (shadow) rays pass through it.
     let r=(RS_HEADER_WORDS+i*RS_INSTANCE_WORDS)>>2u;
@@ -64,9 +69,11 @@ fn rs_instance(i:u32,origin:vec3<f32>,direction:vec3<f32>,world_inv:vec3<f32>,tm
     let inv=rs_inverse(d);
     let nodes=b1.z>>2u;let triangles=b1.w>>2u;let slot=tail.y;
     (*stack)[0]=tail.x;
+    (*entries)[0]=tmin;
     var sp=1u;
     while sp>0u {
         sp-=1u;
+        if RS_POP_CULL && (*entries)[sp]>rs_limit(*best,*best_i,i) {continue;}
         var child=(*stack)[sp];
         loop {
             if (child&RS_LEAF)!=0u {
@@ -118,9 +125,9 @@ fn rs_instance(i:u32,origin:vec3<f32>,direction:vec3<f32>,world_inv:vec3<f32>,tm
             if dist.z<dist.x {dist=dist.zyxw;ids=ids.zyxw;}
             if dist.w<dist.y {dist=dist.xwzy;ids=ids.xwzy;}
             if dist.z<dist.y {dist=dist.xzyw;ids=ids.xzyw;}
-            if dist.w<=lim {(*stack)[sp]=ids.w;sp+=1u;}
-            if dist.z<=lim {(*stack)[sp]=ids.z;sp+=1u;}
-            if dist.y<=lim {(*stack)[sp]=ids.y;sp+=1u;}
+            if dist.w<=lim {(*stack)[sp]=ids.w;(*entries)[sp]=dist.w;sp+=1u;}
+            if dist.z<=lim {(*stack)[sp]=ids.z;(*entries)[sp]=dist.z;sp+=1u;}
+            if dist.y<=lim {(*stack)[sp]=ids.y;(*entries)[sp]=dist.y;sp+=1u;}
             if dist.x<=lim {child=ids.x;continue;}
             break;
             // ---- end rs child order ----
@@ -136,6 +143,7 @@ fn rs_trace(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32,any_hit:bool)
     var best=RsHit(tmax,vec4<u32>(0u));
     var best_i=0xffffffffu;
     var stack:array<u32,RS_STACK>;
+    var entries:array<f32,RS_STACK>;
     let world_inv=rs_inverse(direction);
     let head=rl_geometry[0u];
     if head.x==0u {return best;}
@@ -150,18 +158,21 @@ fn rs_trace(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32,any_hit:bool)
     best.t=min(tmax,bitcast<f32>(bitcast<u32>(far)+2u));
     if head.y==0u {
         for(var i=0u;i<head.x;i+=1u) {
-            if rs_instance(i,origin,direction,world_inv,tmin,any_hit,&best,&best_i,&stack) {return best;}
+            if rs_instance(i,origin,direction,world_inv,tmin,any_hit,&best,&best_i,&stack,&entries) {return best;}
         }
         return best;
     }
     var nodes:array<u32,RS_TOP_STACK>;
+    var nears:array<f32,RS_TOP_STACK>;
     nodes[0]=head.z;
+    nears[0]=tmin;
     var sp=1u;
     while sp>0u {
         sp-=1u;
+        if RS_POP_CULL && nears[sp]>select(best.t,bitcast<f32>(bitcast<u32>(best.t)+1u),best.record.x!=0u) {continue;}
         let item=nodes[sp];
         if (item&RS_LEAF)!=0u {
-            if rs_instance(item&~RS_LEAF,origin,direction,world_inv,tmin,any_hit,&best,&best_i,&stack) {return best;}
+            if rs_instance(item&~RS_LEAF,origin,direction,world_inv,tmin,any_hit,&best,&best_i,&stack,&entries) {return best;}
             continue;
         }
         // Both children's boxes against a bound that keeps equal-distance ties (rs_limit).
@@ -172,8 +183,8 @@ fn rs_trace(origin:vec3<f32>,direction:vec3<f32>,tmin:f32,tmax:f32,any_hit:bool)
         let t1=rs_box(origin,world_inv,vec3<f32>(n1.zw,n2.x),n2.yzw,tmin,bound);
         // The nearer child is popped first.
         let near=t0<=t1;
-        if select(t0,t1,near)<=bound && sp<RS_TOP_STACK {nodes[sp]=select(n3.x,n3.y,near);sp+=1u;}
-        if select(t1,t0,near)<=bound && sp<RS_TOP_STACK {nodes[sp]=select(n3.y,n3.x,near);sp+=1u;}
+        if select(t0,t1,near)<=bound && sp<RS_TOP_STACK {nodes[sp]=select(n3.x,n3.y,near);nears[sp]=select(t0,t1,near);sp+=1u;}
+        if select(t1,t0,near)<=bound && sp<RS_TOP_STACK {nodes[sp]=select(n3.y,n3.x,near);nears[sp]=select(t1,t0,near);sp+=1u;}
     }
     return best;
 }

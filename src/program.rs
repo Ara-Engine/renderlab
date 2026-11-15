@@ -734,7 +734,12 @@ const SOFTWARE_REFLECTION_QUERY: &str = "var query:ray_query;\n";
 fn software_reflection_api() -> String {
     let software = if crate::reflection_software::bvh4_enabled() {
         let bvh4 = include_str!("../shaders/reflections_software_bvh4.wgsl");
-        if rs_order_old() { with_old_child_order(bvh4) } else { bvh4.to_owned() }
+        let bvh4 = if rs_order_old() { with_old_child_order(bvh4) } else { bvh4.to_owned() };
+        if rs_pop_cull_off() {
+            bvh4.replacen("const RS_POP_CULL:bool=true;", "const RS_POP_CULL:bool=false;", 1)
+        } else {
+            bvh4
+        }
     } else {
         SOFTWARE_REFLECTION_API.to_owned()
     };
@@ -758,6 +763,12 @@ fn software_reflection_api() -> String {
 fn rs_order_old() -> bool {
     static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *OFF.get_or_init(|| std::env::var("RENDERLAB_RS_ORDER").is_ok_and(|v| v == "0"))
+}
+/// `RENDERLAB_RS_POP=0`: popped BVH nodes are read whatever their entry distance
+/// (shaders/reflections_software_bvh4.wgsl RS_POP_CULL).
+fn rs_pop_cull_off() -> bool {
+    static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("RENDERLAB_RS_POP").is_ok_and(|v| v == "0"))
 }
 fn with_old_child_order(bvh4: &str) -> String {
     const MARKS: [&str; 2] = ["            // ---- rs child order ----\n", "            // ---- end rs child order ----\n"];
