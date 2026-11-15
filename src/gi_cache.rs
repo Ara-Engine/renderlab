@@ -103,6 +103,23 @@ fn light_reuse_on() -> bool {
 }
 /// The default for `near_occluded_rays`.
 const NEAR_OCCLUDED_RAYS: u32 = 4;
+/// Whether secondary cells' gathers make tertiary cells: `RENDERLAB_GI_TERTIARY=1`. Off by
+/// default: they were 30% of the cells a moving Outpost frame made without ray hardware, read
+/// by no pixel and by nothing but secondary cells' gathers, which use the coarser cell there
+/// instead (third-bounce light only).
+fn tertiary_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_TERTIARY").is_ok_and(|v| v == "1"))
+}
+/// The still-view batch (Planner::finish): one cache frame in STILL_BATCH while a still view
+/// has fewer than STILL_BATCH_PENDING misses and queued gathers. `RENDERLAB_GI_STILL_BATCH=0`
+/// runs every frame.
+const STILL_BATCH: u32 = 4;
+const STILL_BATCH_PENDING: u32 = 512;
+fn still_batch_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_STILL_BATCH").map_or(true, |v| v != "0"))
+}
 fn first_fill_on(software: bool) -> bool {
     static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     FORCED
@@ -1100,6 +1117,9 @@ pub(crate) struct Planner {
     environment_phase: u32,
     bounce_last: Option<bool>,
     bounce_busy: u32,
+    /// Misses plus queued gathers of a recent cache frame (still-view batch), u32::MAX
+    /// until one is read back.
+    pub(crate) pending: u32,
     parity: bool,
     /// The gather queues (this frame's, next frame's) the tick's first frame used: later
     /// views of the tick trace into the same next queue.
@@ -1124,6 +1144,7 @@ impl Default for Planner {
             environment_phase: 0,
             bounce_last: None,
             bounce_busy: 0,
+            pending: u32::MAX,
             parity: false,
             tick_queues: [0; 2],
             light_key: None,
@@ -1238,6 +1259,7 @@ impl Planner {
         header[15] = s.near_light_rays;
         header[55] = near_occluded_rays();
         header[56] = u32::from(light_reuse_on());
+        header[59] = u32::from(!tertiary_on());
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
@@ -1594,6 +1616,22 @@ impl Planner {
         if view.idle_frames >= idle_after && flags == 0 && !busy {
             return Finished { frame, plan: None };
         }
+        // The still-view batch: a still view with nothing changing still creates and gathers a
+        // few cells a frame (the temporal jitter moves pixels across cell edges: Glint, about
+        // 50 a frame; none with the jitter off), and at such counts each pass costs the latency
+        // of a few long software rays, not their number. Once the view has been still for
+        // STILL_BATCH frames and little is pending, the cache's passes run on one frame in
+        // STILL_BATCH only: the cells involved are made and lit at most STILL_BATCH - 1 frames
+        // later. Any motion, a relight, a moved caster or a larger backlog runs every frame.
+        if still_batch_on()
+            && view.idle_frames >= STILL_BATCH
+            && flags == 0
+            && !busy
+            && self.pending < STILL_BATCH_PENDING
+            && view.idle_frames % STILL_BATCH != 0
+        {
+            return Finished { frame, plan: None };
+        }
         // With bounce a changing environment relights (flags 16), so frames that are
         // environment-only never run bounce.
         let environment_only = view.view_frames >= IDLE_AFTER && flags == 4;
@@ -1692,6 +1730,8 @@ pub(super) struct GiState {
     grow: bool,
     /// `RENDERLAB_GI_PROBE_LOG`: the probe's work counters, read back without waiting.
     probe_log: Option<ProbeWatch>,
+    /// The still-view batch: misses plus queued gathers of recent cache frames.
+    pending_watch: Option<FullWatch>,
 }
 
 /// Measurement only: `RENDERLAB_GI_PROBE_LOG=PATH` counts the probe's work on every frame
@@ -1769,6 +1809,9 @@ impl ProbeWatch {
 /// small ring of mappable buffers and read once mapped, a frame or two later: no frame waits.
 pub(crate) struct FullWatch {
     ring: Vec<(wgpu::Buffer, WatchState)>,
+    /// The work words copied (summed when read): `full` (word 4) for `auto_slots`; misses
+    /// and next frame's queued gathers (words 0 and 38) for the still-view batch.
+    words: Vec<u64>,
 }
 enum WatchState {
     Free,
@@ -1778,18 +1821,22 @@ enum WatchState {
 impl FullWatch {
     const RING: usize = 3;
     fn new(device: &wgpu::Device) -> Self {
+        Self::of_words(device, &[4])
+    }
+    fn of_words(device: &wgpu::Device, words: &[u64]) -> Self {
+        let size = (4 * words.len() as u64).max(8);
         let ring = (0..Self::RING)
             .map(|_| {
                 let buffer = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("indirect cache full-bucket readback"),
-                    size: 8,
+                    label: Some("indirect cache counter readback"),
+                    size,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
                 (buffer, WatchState::Free)
             })
             .collect();
-        Self { ring }
+        Self { ring, words: words.to_vec() }
     }
     /// After the cache passes: copies this frame's counter into a free entry, if any.
     fn record(&mut self, encoder: &mut wgpu::CommandEncoder, work: &wgpu::Buffer) {
@@ -1798,7 +1845,9 @@ impl FullWatch {
             .iter_mut()
             .find(|(_, s)| matches!(s, WatchState::Free))
         {
-            encoder.copy_buffer_to_buffer(work, 16, buffer, 0, 8);
+            for (i, &w) in self.words.iter().enumerate() {
+                encoder.copy_buffer_to_buffer(work, w * 4, buffer, 4 * i as u64, 4);
+            }
             *state = WatchState::Recorded;
         }
     }
@@ -1824,10 +1873,15 @@ impl FullWatch {
             };
             let Some(&ok) = done.get() else { continue };
             if ok {
+                let n = self.words.len();
                 let full = buffer
                     .slice(..)
                     .get_mapped_range()
-                    .map(|v| u32::from_le_bytes(v[..4].try_into().unwrap()))
+                    .map(|v| {
+                        (0..n).fold(0u32, |a, i| {
+                            a.saturating_add(u32::from_le_bytes(v[4 * i..4 * i + 4].try_into().unwrap()))
+                        })
+                    })
                     .unwrap_or(0);
                 buffer.unmap();
                 largest = Some(largest.unwrap_or(0).max(full));
@@ -1899,11 +1953,15 @@ impl GiState {
             watch: None,
             grow: false,
             probe_log: None,
+            pending_watch: None,
         }
     }
     /// After the frame's submission (Renderer::submit_frame): maps the full-bucket readback.
     pub(crate) fn submitted(&mut self) {
         if let Some(watch) = &mut self.watch {
+            watch.submitted();
+        }
+        if let Some(watch) = &mut self.pending_watch {
             watch.submitted();
         }
         if let Some(watch) = &mut self.probe_log {
@@ -3451,6 +3509,13 @@ impl Renderer {
             let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
             self.gi.probe_log.get_or_insert_with(|| ProbeWatch::new(&self.device)).collect(path, slots);
         }
+        if still_batch_on() {
+            let device = &self.device;
+            let watch = self.gi.pending_watch.get_or_insert_with(|| FullWatch::of_words(device, &[0, 38]));
+            if let Some(pending) = watch.collect() {
+                self.gi.planner.pending = pending;
+            }
+        }
         if let Some(full) = self.gi.watch.as_mut().and_then(FullWatch::collect) {
             self.gi.stats.peak_full = self.gi.stats.peak_full.max(full);
             self.gi.grow |= full > 0;
@@ -4082,6 +4147,9 @@ impl GiState {
             watch.record(encoder, &r.work);
         }
         if let (Some(watch), Some(r)) = (self.probe_log.as_mut(), self.resources.as_ref()) {
+            watch.record(encoder, &r.work);
+        }
+        if let (Some(watch), Some(r)) = (self.pending_watch.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
         }
     }
