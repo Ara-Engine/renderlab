@@ -92,6 +92,68 @@ pub(crate) fn directional(
     )
 }
 
+/// A caster's light-space extents, rounding tolerance and world magnitude (`directional_oriented`).
+type LightBounds = (DVec3, DVec3, f64, f64);
+
+/// The last directional plan's casters, by the bits of its light rotation and of every caster's
+/// bounds: equal inputs give equal extents, so a still light over unchanged casters reuses them.
+struct LightExtents {
+    rotation: [u64; 16],
+    casters: Vec<[u32; 6]>,
+    extents: std::rc::Rc<Vec<LightBounds>>,
+}
+
+thread_local! {
+    static LIGHT_EXTENTS: std::cell::RefCell<Option<LightExtents>> = const { std::cell::RefCell::new(None) };
+}
+
+/// `RENDERLAB_PLAN_CACHE=0` recomputes the casters' light-space extents every plan.
+fn plan_cache() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_PLAN_CACHE").map_or(true, |v| v != "0"))
+}
+
+fn bounds_bits(bounds: &Bounds) -> [u32; 6] {
+    let [a, b, c] = bounds.min.to_array().map(f32::to_bits);
+    let [d, e, f] = bounds.max.to_array().map(f32::to_bits);
+    [a, b, c, d, e, f]
+}
+
+fn light_extents(rotation: DMat4, casters: &[Bounds]) -> std::rc::Rc<Vec<LightBounds>> {
+    let compute = || -> Vec<LightBounds> {
+        casters
+            .iter()
+            .map(|bounds| {
+                let (min, max) = extents(bounds.corners().map(|p| rotation.transform_point3(p)));
+                let tolerance = roundoff(min.abs().max(max.abs()).max_element());
+                let magnitude = f64::from(bounds.min.abs().max(bounds.max.abs()).max_element());
+                (min, max, tolerance, magnitude)
+            })
+            .collect()
+    };
+    if !plan_cache() {
+        return std::rc::Rc::new(compute());
+    }
+    let rotation_bits = rotation.to_cols_array().map(f64::to_bits);
+    LIGHT_EXTENTS.with(|cell| {
+        let mut cached = cell.borrow_mut();
+        if let Some(last) = cached.as_ref()
+            && last.rotation == rotation_bits
+            && last.casters.len() == casters.len()
+            && last.casters.iter().zip(casters).all(|(bits, bounds)| *bits == bounds_bits(bounds))
+        {
+            return last.extents.clone();
+        }
+        let extents = std::rc::Rc::new(compute());
+        *cached = Some(LightExtents {
+            rotation: rotation_bits,
+            casters: casters.iter().map(bounds_bits).collect(),
+            extents: extents.clone(),
+        });
+        extents
+    })
+}
+
 thread_local! {
     /// RENDERLAB_SUBMIT_LOG: the last directional plan's parts (bounds validation, the casters'
     /// light-space extents, the cascade fits), accumulated per frame until read.
@@ -135,16 +197,9 @@ pub(crate) fn directional_oriented(
     // Transform once per light, not once per cascade. Full bounds include offscreen casters.
     let transform_start = std::time::Instant::now();
     // Each caster's light-space extents with its rounding tolerance and world magnitude, which
-    // every cascade's fit reads unchanged (computed once per frame, not once per cascade).
-    let light_bounds: Vec<_> = casters
-        .iter()
-        .map(|bounds| {
-            let (min, max) = extents(bounds.corners().map(|p| rotation.transform_point3(p)));
-            let tolerance = roundoff(min.abs().max(max.abs()).max_element());
-            let magnitude = f64::from(bounds.min.abs().max(bounds.max.abs()).max_element());
-            (min, max, tolerance, magnitude)
-        })
-        .collect();
+    // every cascade's fit reads unchanged (computed once per frame, not once per cascade, and
+    // reused while the light and every caster are bit-identical to the last plan).
+    let light_bounds = light_extents(rotation, casters);
     let transformed = transform_start.elapsed();
     let fits_start = std::time::Instant::now();
     let mut views = Vec::with_capacity(split_ends.len());
