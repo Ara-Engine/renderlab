@@ -3355,7 +3355,7 @@ impl Renderer {
         let encode_start = Instant::now();
         // RENDERLAB_SUBMIT_LOG: the CPU instant of every pass-log mark, so the log can split
         // `encode` by stage (each stage runs from its mark to the next).
-        let mut cpu_stages: Vec<(&'static str, Instant)> = Vec::new();
+        let mut cpu_stages: Vec<(&'static str, Instant)> = vec![("pre.targets", encode_start)];
         // Traced frames resolve visibility without raster depth or MSAA targets.
         if !traced
             && self
@@ -3448,6 +3448,7 @@ impl Renderer {
                 .as_ref()
                 .map_or(0, |h| h.scene_generation());
             let mut primary = UploadBytes::default();
+            cpu_stages.push(("pre.primary", Instant::now()));
             // U-RTVIS: the reflection composite's room grows to the content before this frame's
             // bindings are built (a growth drops them; prepare_primary rebuilds them).
             self.rl_room_grow();
@@ -3460,9 +3461,11 @@ impl Renderer {
             self.uploads.add(primary);
             self.view.primary_uploads.add(primary);
             self.primary_uploads.add(primary);
+            cpu_stages.push(("pre.vb", Instant::now()));
             if self.primary_mode == PrimaryVisibility::VisibilityBuffer {
                 self.prepare_visibility_buffer(draws, camera, color.size())?;
             }
+            cpu_stages.push(("pre.virtual", Instant::now()));
             if soft && self.view.soft_mode == crate::SoftShadows::Virtual {
                 let scopes = OperationScopes::new(&self.device);
                 let result = self.prepare_virtual(draws, camera, color.size());
@@ -3476,6 +3479,7 @@ impl Renderer {
                 let key = self.film_key(&camera_bytes, shadow_frame.as_ref().map(|f| f.records()));
                 self.prepare_film(key);
             }
+            cpu_stages.push(("pre.recon", Instant::now()));
             if let Some(index) = self.view.reconstruction_frame {
                 self.ensure_reconstruction()?;
                 self.prepare_reconstruction(camera, index, draws);
@@ -3497,6 +3501,7 @@ impl Renderer {
         // time from the early submit's return to the late submit's return).
         let mut late_prepare = std::time::Duration::ZERO;
         let mut late_start: Option<Instant> = None;
+        cpu_stages.push(("pre.cache", Instant::now()));
         if lit && !split {
             self.prepare_cache_and_post(
                 draws,
@@ -3510,6 +3515,7 @@ impl Renderer {
         let view = self
             .ledger
             .attachment(color.create_view(&Default::default()));
+        cpu_stages.push(("pre.skinned_bounds", Instant::now()));
         let skinned_bounds = visibility_buffer::refresh_skinned_bounds(self, draws);
         uploads.add(skinned_bounds);
         self.uploads.add(skinned_bounds);
@@ -3524,6 +3530,7 @@ impl Renderer {
             .as_ref()
             .map_or(0, |h| h.scene_generation());
         let timed = self.timing_status == TimingStatus::Enabled;
+        cpu_stages.push(("pre.marks", Instant::now()));
         // The timeline moves out while marks are encoded, so they never borrow `self`.
         let mut marks = self.pass_timeline.take();
         if let Some(t) = &mut marks {
