@@ -1673,8 +1673,9 @@ pub(super) struct GiState {
 }
 
 /// Measurement only: `RENDERLAB_GI_PROBE_LOG=PATH` counts the probe's work on every frame
-/// (GI_F_STATS) and appends each frame's counters (work words 16-31: GI_W_P_TILES on) to PATH
-/// as one JSON line, read a frame or two later from a ring of mappable buffers.
+/// (GI_F_STATS) and appends each frame's work counters (words 0-31; the probe's from
+/// GI_W_P_TILES, 16) and the table's slot count to PATH as one JSON line, read a frame or two
+/// later from a ring of mappable buffers.
 fn probe_log_path() -> Option<&'static str> {
     static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
     PATH.get_or_init(|| std::env::var("RENDERLAB_GI_PROBE_LOG").ok()).as_deref()
@@ -1685,7 +1686,7 @@ pub(crate) struct ProbeWatch {
 }
 impl ProbeWatch {
     const RING: usize = 4;
-    const BYTES: u64 = 64;
+    const BYTES: u64 = 128;
     fn new(device: &wgpu::Device) -> Self {
         let ring = (0..Self::RING)
             .map(|_| {
@@ -1702,7 +1703,7 @@ impl ProbeWatch {
     }
     fn record(&mut self, encoder: &mut wgpu::CommandEncoder, work: &wgpu::Buffer) {
         if let Some((buffer, state)) = self.ring.iter_mut().find(|(_, s)| matches!(s, WatchState::Free)) {
-            encoder.copy_buffer_to_buffer(work, 16 * 4, buffer, 0, Self::BYTES);
+            encoder.copy_buffer_to_buffer(work, 0, buffer, 0, Self::BYTES);
             *state = WatchState::Recorded;
         }
     }
@@ -1719,7 +1720,7 @@ impl ProbeWatch {
         }
     }
     /// Appends every mapped entry's counters to the log.
-    fn collect(&mut self, path: &str) {
+    fn collect(&mut self, path: &str, slots: u32) {
         use std::io::Write;
         for (buffer, state) in &mut self.ring {
             let WatchState::Mapping(done) = state else { continue };
@@ -1732,7 +1733,7 @@ impl ProbeWatch {
                     .unwrap_or_default();
                 buffer.unmap();
                 self.frame += 1;
-                let line = format!("{{\"seq\":{},\"probe\":{:?}}}\n", self.frame, words);
+                let line = format!("{{\"seq\":{},\"slots\":{slots},\"work\":{:?}}}\n", self.frame, words);
                 if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
                     let _ = file.write_all(line.as_bytes());
                 }
@@ -1909,7 +1910,7 @@ pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
     let priority = software && priority::on();
     probe_cut(priority::source(kernel_source_base(software, directions), priority))
 }
-/// Measurement only (`RENDERLAB_GI_PROBE_CUT=noinsert|nowalk|nostamp`, comma list): gi_probe
+/// Measurement only (`RENDERLAB_GI_PROBE_CUT=noinsert|nowalk|nostamp|nofind`, comma list): gi_probe
 /// without its pixels' requests, without its walk rounds, or without its seen stamps, to split
 /// its time. The cache's later frames are wrong under any of them.
 fn probe_cut(source: String) -> String {
@@ -1928,6 +1929,11 @@ fn probe_cut(source: String) -> String {
                 "        if false && workgroupUniformLoad(&gi_local_any_flag)!=0u {",
             ),
             "nostamp" => ("                gi_table[gi_cold(slot)+GI_C_SEEN]=gi_word(GI_H_FRAME);\n", ""),
+            // Rounds that touch no cell: the pixels' inserts, decode and barriers alone.
+            "nofind" => (
+                "            let i=gi_local_list[k];\n            let entry_def=gi_local_def[i];\n",
+                "            let i=gi_local_list[k];\n            if i!=0xffffffffu { continue; }\n            let entry_def=gi_local_def[i];\n",
+            ),
             _ => continue,
         };
         assert_eq!(source.matches(from).count(), 1, "RENDERLAB_GI_PROBE_CUT {cut}");
@@ -3356,7 +3362,8 @@ impl Renderer {
         // auto_slots: a full bucket since the last look doubles the table (emptied, so the
         // cache refills as after a cut), up to slots_log2 and the device's binding limit.
         if let Some(path) = probe_log_path() {
-            self.gi.probe_log.get_or_insert_with(|| ProbeWatch::new(&self.device)).collect(path);
+            let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
+            self.gi.probe_log.get_or_insert_with(|| ProbeWatch::new(&self.device)).collect(path, slots);
         }
         if let Some(full) = self.gi.watch.as_mut().and_then(FullWatch::collect) {
             self.gi.stats.peak_full = self.gi.stats.peak_full.max(full);
