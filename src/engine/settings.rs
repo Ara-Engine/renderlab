@@ -462,7 +462,7 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
         return Ok(());
     };
     let line = format!(
-        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"full_pixel\":{},\"table_bytes\":{},\"instances\":{},\"relight_parts\":{},\"slots\":{},\"slot_doublings\":{},\"peak_full\":{},\"gather_estimate\":{},\"gather_cuts\":[{},{}],\"aimed_rays\":{},\"aimed_occluded\":{}}}\n",
+        "{{\"misses\":{},\"miss_overflow\":{},\"created\":{},\"full\":{},\"lost\":{},\"orphans\":{},\"traces\":{},\"invalidated\":{},\"splits\":{},\"local_overflow\":{},\"shades\":{},\"gathers\":{},\"gather_rays\":{},\"gather_misses\":{},\"gather_requests\":{},\"gather_deferred\":{},\"claim_deferred\":{},\"bounce_queued\":{},\"evicted\":{},\"evicted_recent\":{},\"full_pixel\":{},\"table_bytes\":{},\"instances\":{},\"relight_parts\":{},\"slots\":{},\"slot_doublings\":{},\"peak_full\":{},\"gather_estimate\":{},\"gather_cuts\":[{},{}],\"aimed_rays\":{},\"aimed_occluded\":{},\"created_secondary\":{},\"created_tertiary\":{},\"evicted_secondary\":{}}}\n",
         c.misses,
         c.miss_overflow,
         c.created,
@@ -495,6 +495,9 @@ pub(crate) fn log_indirect(r: &mut Renderer) -> Result<(), Error> {
         c.gather_cuts[1],
         c.aimed_rays,
         c.aimed_occluded,
+        c.created_secondary,
+        c.created_tertiary,
+        c.evicted_secondary,
     );
     // `RENDERLAB_GI_PROFILE` also turns on the cache's stage timestamps and logs the latest
     // profiled frame's stages (milliseconds) in a second line.

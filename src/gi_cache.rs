@@ -712,6 +712,10 @@ pub struct IndirectCounters {
     /// Gathers' aimed rays, and those at lights the cell holds occluded.
     pub aimed_rays: u32,
     pub aimed_occluded: u32,
+    /// Cells created in the secondary and tertiary bands, and live secondary cells evicted.
+    pub created_secondary: u32,
+    pub created_tertiary: u32,
+    pub evicted_secondary: u32,
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -2639,6 +2643,9 @@ impl Renderer {
             gather_cuts: [w[352], w[353]],
             aimed_rays: w[250],
             aimed_occluded: w[251],
+            created_secondary: w[253],
+            created_tertiary: w[254],
+            evicted_secondary: w[255],
         }))
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires

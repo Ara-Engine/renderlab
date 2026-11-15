@@ -161,6 +161,11 @@ const GI_H_NEAR_OCCLUDED:u32=55u;
 const GI_H_LIGHT_REUSE:u32=56u;
 const GI_LIGHTS_KNOWN:u32=0x10000u;
 const GI_W_AIMED_OCCLUDED:u32=251u;
+// Diagnostics (GI log): cells created in the secondary and tertiary bands, and live cells a
+// full bucket gave up that were secondary (made for a gather's hit).
+const GI_W_CREATED_SECONDARY:u32=253u;
+const GI_W_CREATED_TERTIARY:u32=254u;
+const GI_W_EVICTED_SECONDARY:u32=255u;
 // Whether the last frame's capped claim left pixels' cells for later (gi_fill_select): kept
 // across frames (src/gi_cache.rs clears the counters before it).
 const GI_W_FILL_PENDING:u32=383u;
@@ -852,6 +857,7 @@ fn gi_resolve_miss(index:u32) {
         if age<=gi_word(GI_H_EVICT) {
             atomicAdd(&gi_work[GI_W_EVICTED],1u);
             if age<8u { atomicAdd(&gi_work[GI_W_EVICTED_RECENT],1u); }
+            if (gi_table[cold+GI_C_STATE]&GI_SECONDARY)!=0u { atomicAdd(&gi_work[GI_W_EVICTED_SECONDARY],1u); }
         }
     }
     gi_table[gi_hot(slot)]=key.x;
@@ -881,6 +887,8 @@ fn gi_resolve_miss(index:u32) {
     for(var k=GI_C_LIGHTS;k<gi_word(GI_H_COLD_WORDS);k+=1u) { gi_table[cold+k]=0u; }
     gi_queue_trace(slot);
     atomicAdd(&gi_work[GI_W_CREATED],1u);
+    if band==GI_BAND_SECONDARY { atomicAdd(&gi_work[GI_W_CREATED_SECONDARY],1u); }
+    if band<GI_BAND_SECONDARY { atomicAdd(&gi_work[GI_W_CREATED_TERTIARY],1u); }
 }
 // Queue appends stay within the slot-sized queues: a slot is queued at most once per
 // frame (GI_QUEUED), so neither can overflow.
