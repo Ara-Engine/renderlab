@@ -402,6 +402,7 @@ pub(super) struct VisibilityBuffer {
     depth: Depth,
     hardware_ids: Depth,
     attachment: bool,
+    small_raster: bool,
     _hzb: Depth,
     _hzb_absent: Depth,
     cull: wgpu::ComputePipeline,
@@ -1312,6 +1313,7 @@ impl VisibilityBuffer {
             depth,
             hardware_ids,
             attachment,
+            small_raster: std::env::var("RENDERLAB_VIS_SMALL_RASTER").is_ok_and(|v| v == "1"),
             _hzb: hzb,
             _hzb_absent: hzb_absent,
             cull,
@@ -1609,6 +1611,14 @@ impl Renderer {
         }
         let (lod, extent) = (self.lod_pixels, self.software_extent);
         let v = self.view.visibility_buffer.as_mut().unwrap();
+        // The workgroup raster already projects shared vertices once and rejects
+        // zero-coverage triangles before any pixel writes. Keep explicit caller
+        // tuning, and leave near-plane clusters on the hardware clipping path.
+        let extent = if v.small_raster && extent == DEFAULT_SOFTWARE_EXTENT {
+            64.0
+        } else {
+            extent
+        };
         let matrix = camera.matrix(size.width, size.height);
         let eye = camera.view().inverse().w_axis.truncate();
         let scale = size.height as f32 * 0.5 / (camera.fov_y() * 0.5).tan();
