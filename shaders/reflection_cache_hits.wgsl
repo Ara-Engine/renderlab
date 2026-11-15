@@ -15,6 +15,8 @@
 const RL_CACHE_ROUGH:f32=RL_CACHE_ROUGH_MIN;
 // The share of the hit's cell the cone must cover (1: the whole cell).
 const RL_CACHE_CONE:f32=1.0;
+// Coarser levels a hit may climb to when its own has no shaded cell.
+const RL_CACHE_CLIMB:u32=2u;
 
 // The cached outgoing radiance (rgb, unexposed) and w 1, or w 0 to shade the hit: a hit
 // `record` a distance `t` along `d` from `origin`, whose ray cone is `cone` metres wide there.
@@ -31,10 +33,17 @@ fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rou
     let tc=primary_input(hit.batch,hit.ic,hit.placement);
     let geometric=primary_geometric(ta.position,tb.position,tc.position,hit.placement);
     let bin=gi_bin(select(-geometric,geometric,dot(geometric,origin-world)>=0.0));
-    let slot=gi_find_pair(gi_key(level,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(level),bin)))));
-    if slot==0xffffffffu { return vec4<f32>(0.0); }
-    let o=rl_cache_outgoing[slot];
-    if !(o.w>0.0) { return vec4<f32>(0.0); }
-    return vec4<f32>(o.rgb,1.0);
+    // A level with no shaded cell there climbs to coarser ones (up to RL_CACHE_CLIMB), as the
+    // receivers' lookup falls back: hits often land where no camera receiver made a fine cell.
+    for(var k=0u;k<=RL_CACHE_CLIMB;k+=1u) {
+        let at=min(level+k,last);
+        let slot=gi_find_pair(gi_key(at,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(at),bin)))));
+        if slot!=0xffffffffu {
+            let o=rl_cache_outgoing[slot];
+            if o.w>0.0 { return vec4<f32>(o.rgb,1.0); }
+        }
+        if at>=last { break; }
+    }
+    return vec4<f32>(0.0);
 }
 // ---- end of cache-terminated reflection hits ----
