@@ -12,6 +12,8 @@ use super::*;
 
 #[path = "reflection_pass_cache.rs"]
 mod sw_cache;
+#[path = "reflection_screen.rs"]
+mod screen;
 
 /// Group-0 bindings (U-RTVIS 54-63; the Mac's reflection_hits reads H and R at 64 and 65).
 /// L, the glossy-pixel list: a 16-byte header (its length), then LIST_ENTRY_BYTES an entry.
@@ -117,6 +119,7 @@ pub(super) struct TraceAbi {
     args_group: Owned<wgpu::BindGroupLayout>,
     args_layout: Owned<wgpu::PipelineLayout>,
     cache_group: Option<Owned<wgpu::BindGroupLayout>>,
+    screen: Option<screen::Abi>,
 }
 impl TraceAbi {
     pub fn new(
@@ -149,10 +152,11 @@ impl TraceAbi {
             ResourceKind::BindGroupLayout,
         );
         let cache_group = sw_cache::layout(device, ledger);
+        let screen = screen::enabled(device).then(|| screen::Abi::new(device, ledger, &group, arrays, lighting));
         let layout = ledger.own(
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("reflection trace ABI"),
-                bind_group_layouts: &[Some(&group), Some(arrays), cache_group.as_ref().map(|g| &**g), Some(lighting)],
+                bind_group_layouts: &[Some(&group), Some(arrays), screen.as_ref().map(|s| s.trace()).or_else(|| cache_group.as_ref().map(|g| &**g)), Some(lighting)],
                 immediate_size: 0,
             }),
             ResourceKind::PipelineLayout,
@@ -172,7 +176,7 @@ impl TraceAbi {
             }),
             ResourceKind::PipelineLayout,
         );
-        Self { group, layout, args_group, args_layout, cache_group }
+        Self { group, layout, args_group, args_layout, cache_group, screen }
     }
 }
 
@@ -191,6 +195,7 @@ pub(in crate::renderer) struct PassTargets {
     /// The composite's room (R's slots and H's records) and the counters' readback ring.
     pub room: u64,
     pub readback: Vec<Readback>,
+    screen: Option<screen::Targets>,
 }
 /// One counters readback: copied on one frame, mapped on the next, read when the map lands.
 pub(in crate::renderer) struct Readback {
@@ -210,6 +215,7 @@ pub(super) struct TracePipelines {
     args: Owned<wgpu::ComputePipeline>,
     /// The deferred composite: its group layout and additive point pipeline.
     composite: (Owned<wgpu::BindGroupLayout>, Owned<wgpu::RenderPipeline>),
+    screen: Option<screen::Pipelines>,
 }
 
 impl Renderer {
@@ -221,6 +227,7 @@ impl Renderer {
             .unwrap_or(ROOM_START)
             .min(ROOM_PER_PIXEL * u64::from(size.width) * u64::from(size.height));
         PassTargets {
+            screen: screen::enabled(&self.device).then(|| screen::Targets::new(self, size)),
             list: self.rl_list(room),
             list_args: Buffer::new(
                 self,
@@ -347,6 +354,7 @@ impl Renderer {
             source.replace("const RL_RAY_LANES:u32=1u;", &format!("const RL_RAY_LANES:u32={lanes}u;"))
         };
         let source = sw_cache::source(source, &self.device);
+        let source = screen::source(source, &self.device);
         let scopes = OperationScopes::new(&self.device);
         let module = self.ledger.own(
             self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
@@ -373,6 +381,7 @@ impl Renderer {
             pixels: pipeline("rl_trace_pixels", &abi.layout),
             args: pipeline("rl_hit_args", &abi.layout),
             composite: self.rl_composite_kit(),
+            screen: abi.screen.as_ref().map(|s| s.pipelines(pipeline)),
         };
         if let Some(error) = scopes.finish() {
             return Err(Error::Shader(format!("reflection trace: {error}")));
@@ -402,6 +411,9 @@ impl Renderer {
             compute.set_bind_group(1, &*g.arrays, &[]);
             compute.set_bind_group(3, self.lighting.bind(), &[]);
         };
+        if let (Some(s), Some(p), Some(t)) = (&abi.screen, &pipelines.screen, &pass.screen) {
+            self.rl_screen_prepare(encoder, s, p, t, &bind);
+        }
         // The arguments first, in their own pass and group: the trace reads them as indirect
         // arguments. One entry, rebuilt each frame (the buffer outlives room growth).
         let args = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -422,12 +434,15 @@ impl Renderer {
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
         let cache = abi.cache_group.as_ref().map(|layout| self.rl_outgoing_group(layout));
+        let screen_group = abi.screen.as_ref().map(|s| self.rl_screen_group(s, pass.screen.as_ref().unwrap(), &state.targets.as_ref().unwrap().hit.view));
         let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reflection trace"),
             timestamp_writes: None,
         });
         bind(&mut compute);
-        if let Some(cache) = cache.as_ref() {
+        if let Some(group) = screen_group.as_ref() {
+            compute.set_bind_group(2, group, &[]);
+        } else if let Some(cache) = cache.as_ref() {
             compute.set_bind_group(2, &**cache, &[]);
         }
         compute.set_pipeline(&pipelines.pixels);
@@ -442,7 +457,7 @@ impl Renderer {
 
     /// This frame's pass uniform (the frame counter, the room, the list's capacity, the pass on),
     /// the counters and the list's length cleared before shading, and the composite's uniform.
-    pub(crate) fn write_reflection_pass_frame(&self) {
+    pub(crate) fn write_reflection_pass_frame(&self, camera: Camera) {
         let Some(pass) = self
             .view
             .primary
@@ -452,6 +467,7 @@ impl Renderer {
         else {
             return;
         };
+        if let Some(screen) = &pass.screen { screen.write(self, camera, pass.size); }
         let words = [self.frames as u32, pass.room as u32, pass.room as u32, 1];
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_ne_bytes()).collect();
         self.queue.write_buffer(&pass.frame.value, 0, &bytes);
@@ -824,6 +840,8 @@ impl Renderer {
         render.set_pipeline(pipeline);
         render.set_bind_group(0, &group, &[]);
         render.draw_indirect(&pass.list_args.value, 16);
+        drop(render);
+        self.rl_screen_capture(encoder, shading);
     }
 }
 

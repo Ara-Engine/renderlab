@@ -3701,7 +3701,7 @@ impl Renderer {
                 // U-RTVIS: the reflection pass's kernels (RENDERLAB_RL_PASS=1; nothing otherwise).
                 self.ensure_reflection_trace(shading)?;
                 self.ensure_reflection_hits(shading)?;
-                self.write_reflection_pass_frame();
+                self.write_reflection_pass_frame(*camera);
                 mark(&mut encoder, "shading");
                 if self.view.outputs.modes.shades() {
                     self.encode_view_shading(&mut encoder, shading, stamps(0))?;
