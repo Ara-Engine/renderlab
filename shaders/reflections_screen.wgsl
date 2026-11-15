@@ -65,6 +65,14 @@ fn rl_screen_colour(pixel:vec2<f32>,key:vec2<u32>,level:u32)->vec4<f32> {
     return vec4<f32>(mix(mix(a.rgb,b.rgb,f.x),mix(c.rgb,d.rgb,f.x),f.y),1.0);
 }
 fn rl_screen_history(point:vec3<f32>,normal:vec3<f32>,key:vec2<u32>,cone:f32)->vec4<f32> {
+    // Uploads alone do not mean motion (skin palettes are uploaded every frame).
+    // Reject the hit's actual motion and the engine's swept shadow / relighting zones.
+    let slot=key.x-1u;let info=primary_placements[slot];
+    if batch_skinned(primary_batch_info(info&0x1fffffffu)) || rl_screen_caster_shadow(point) || rl_screen_relit(point) {return vec4<f32>(0.0);}
+    let model=models[slot];let old_model=models[arrayLength(&models)/2u+slot];
+    for(var k=0u;k<4u;k+=1u) {
+        if any(bitcast<vec4<u32>>(model[k])!=bitcast<vec4<u32>>(old_model[k])) {return vec4<f32>(0.0);}
+    }
     let clip=rl_screen_frame.previous*vec4<f32>(point,1.0);if clip.w<=0.0 {return vec4<f32>(0.0);}
     let size=vec2<f32>(rl_screen_frame.flags.yz);let ndc=clip.xyz/clip.w;
     let pixel=(ndc.xy*vec2<f32>(0.5,-0.5)+0.5)*size;
@@ -80,7 +88,7 @@ fn rl_screen_history(point:vec3<f32>,normal:vec3<f32>,key:vec2<u32>,cone:f32)->v
     let lo=u32(floor(lod));let hi=min(lo+1u,rl_screen_frame.flags.w-1u);
     let a=rl_screen_colour(pixel,key,lo);let b=rl_screen_colour(pixel,key,hi);
     if a.a==0.0||b.a==0.0 {return vec4<f32>(0.0);}
-    let colour=mix(a.rgb,b.rgb,fract(lod));
+    let colour=mix(a.rgb,b.rgb,fract(lod))*rl_screen_frame.tune.w;
     // Lit primaries include camera fog; reflected hit shading does not. Reject opaque fog.
     let scatter=atmosphere_surface(vec3<f32>(0.0),point);
     let transmission=atmosphere_surface(vec3<f32>(1.0),point)-scatter;

@@ -120,6 +120,7 @@ struct Previous {
     frame: u64,
     edits: u64,
     lighting: u64,
+    exposure: f32,
 }
 pub(super) struct Targets {
     pub(super) results: Buffer,
@@ -209,20 +210,13 @@ impl Targets {
         use std::hash::{Hash, Hasher};
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         r.lighting.pending.records.hash(&mut hasher);
-        for x in r
-            .lighting
-            .pending
-            .environment
-            .into_iter()
-            .chain([r.lighting.pending.exposure])
-        {
+        for x in r.lighting.pending.environment {
             x.to_bits().hash(&mut hasher);
         }
         let lighting = hasher.finish();
         let mut state = self.state.lock().unwrap();
         let valid = state.as_ref().is_some_and(|p| {
             p.frame + 1 == r.frames
-                && p.edits == r.scene_edits
                 && p.lighting == lighting
                 && p.eye.distance(eye) < 1.0
         }) && !(r.view.reconstruction_frame.is_some() && r
@@ -260,7 +254,8 @@ impl Targets {
         ] {
             bytes.extend_from_slice(&x.to_ne_bytes());
         }
-        for x in [1.2f32, 0.2, 128.0, 0.0] {
+        let exposure_ratio=state.as_ref().map_or(1.0,|p|r.lighting.pending.exposure/p.exposure);
+        for x in [1.2f32, 0.2, 128.0, exposure_ratio] {
             bytes.extend_from_slice(&x.to_ne_bytes());
         }
         r.queue.write_buffer(&self.frame.value, 0, &bytes);
@@ -270,6 +265,7 @@ impl Targets {
             frame: r.frames,
             edits: r.scene_edits,
             lighting,
+            exposure:r.lighting.pending.exposure,
         });
     }
 }
@@ -291,8 +287,9 @@ pub(super) fn source(source: String, device: &wgpu::Device) -> String {
     let source=source.replacen(seam,"let screen=rl_screen_results[slot];\n        if screen.a>0.0 {textureStore(rl_samples,at,rl_f16_nearest(screen));continue;}\n        let traced=rl_cast(origin,d,epsilon);",1);
     let source=source.replace("dropped:atomic<u32> };", "dropped:atomic<u32>, screen_pad:array<u32,7>, screen_try:atomic<u32>, screen_candidate:atomic<u32>, screen_hit:atomic<u32>, screen_valid:atomic<u32>, screen_end:u32 };");
     format!(
-        "{source}\n{march}\n{}",
-        include_str!("../shaders/reflections_screen.wgsl")
+        "{source}\n{march}\n{}\n{}",
+        include_str!("../shaders/reflections_screen.wgsl"),
+        include_str!("../shaders/temporal_zones.wgsl").replace("ZONES","primary_frame.zones").replace("tr1_","rl_screen_")
     )
 }
 pub(super) fn results(r:&Renderer,room:u64)->Buffer {
