@@ -1415,7 +1415,7 @@ pub(crate) fn compose_hits(
     }
     // The hit entry follows the program, so the range stays.
     if declares(program, "fn", "view_dependence") {
-        composed.source.push_str(&CACHE_SUITS.replacen("0.25", &format!("{:?}", cache_share()), 1));
+        composed.source.push_str(&CACHE_SUITS.replacen("RL_CACHE_SHARE_BOUND", &format!("{:?}", cache_share()), 1));
     } else {
         composed.source.push_str(CACHE_SUITS_NEVER);
     }
@@ -1424,11 +1424,13 @@ pub(crate) fn compose_hits(
 }
 /// Whether a reflection hit's own surface may take the cache's Lambertian value
 /// (shaders/reflection_hits.wgsl): its view-dependent share of the response (the program's
-/// `view_dependence`, as TR1's hint uses it) is under a quarter. A glossy, dark or metallic hit
-/// surface, whose reflection is mostly its specular, keeps the full program; so does every hit
-/// of a program that declares no view dependence.
-const CACHE_SUITS: &str = "\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return view_dependence(s,input).share<0.25; }\n";
-/// The share bound (0.25), or `RENDERLAB_RL_CACHE_SHARE` (0-1) for measurement.
+/// `view_dependence`, as TR1's hint uses it) is under the share bound. A glossy, dark or
+/// metallic hit surface, whose reflection is mostly its specular, keeps the full program; so does
+/// every hit of a program that declares no view dependence. At 0.6 the dark glossy figure's hard
+/// near-black reflection in Showcase's copper sphere is gone (max 27 codes on 4 px of the sphere
+/// against 146 on 482 px ungated); 0.25 matched cache-off but kept little of the saving.
+const CACHE_SUITS: &str = "\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return view_dependence(s,input).share<RL_CACHE_SHARE_BOUND; }\n";
+/// The share bound (0.6), or `RENDERLAB_RL_CACHE_SHARE` (0-1).
 fn cache_share() -> f32 {
     static SHARE: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
     *SHARE.get_or_init(|| {
@@ -1436,7 +1438,7 @@ fn cache_share() -> f32 {
             .ok()
             .and_then(|v| v.parse::<f32>().ok())
             .filter(|s| (0.0..=1.0).contains(s))
-            .unwrap_or(0.25)
+            .unwrap_or(0.6)
     })
 }
 const CACHE_SUITS_NEVER: &str ="\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return false; }\n";
