@@ -3353,6 +3353,9 @@ impl Renderer {
         cpu.upload += start.elapsed() - cpu.shadow_upload;
         self.uploads.add(uploads);
         let encode_start = Instant::now();
+        // RENDERLAB_SUBMIT_LOG: the CPU instant of every pass-log mark, so the log can split
+        // `encode` by stage (each stage runs from its mark to the next).
+        let mut cpu_stages: Vec<(&'static str, Instant)> = Vec::new();
         // Traced frames resolve visibility without raster depth or MSAA targets.
         if !traced
             && self
@@ -3527,6 +3530,7 @@ impl Renderer {
             t.begin(&self.device);
         }
         let mut mark = |encoder: &mut wgpu::CommandEncoder, name: &'static str| {
+            cpu_stages.push((name, Instant::now()));
             if let Some(t) = &mut marks {
                 t.mark(encoder, name);
             }
@@ -3930,6 +3934,7 @@ impl Renderer {
             self.encode_transparency(&mut encoder, draws, transparent, traced, marks.as_mut())?;
         }
         let mut mark = |encoder: &mut wgpu::CommandEncoder, name: &'static str| {
+            cpu_stages.push((name, Instant::now()));
             if let Some(t) = &mut marks {
                 t.mark(encoder, name);
             }
@@ -4052,13 +4057,19 @@ impl Renderer {
                 .and_then(|h| h.active_placements())
                 .unwrap_or(0);
             format!(
-                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2} late_prepare={:.2} late_window={:.2} tlas_instances={instances}",
+                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2} late_prepare={:.2} late_window={:.2} tlas_instances={instances} cpu_stages={}",
                 self.submissions + 1,
                 ms(finish),
                 ms(early_submit),
                 ms(submit - early_submit),
                 ms(late_prepare),
                 late_start.map_or(0.0, |t| ms(t.elapsed())),
+                cpu_stages
+                    .iter()
+                    .zip(cpu_stages.iter().skip(1).map(|(_, t)| *t).chain([finish_start]))
+                    .map(|((name, at), next)| format!("{name}:{:.3}", ms(next.saturating_duration_since(*at))))
+                    .collect::<Vec<_>>()
+                    .join(","),
             )
         });
         self.submissions += 1;
