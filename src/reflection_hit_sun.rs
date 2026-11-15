@@ -10,8 +10,7 @@ use super::*;
 const ACCESS: &str = include_str!("../shaders/reflection_hit_sun.wgsl");
 /// The hit pass's sun visibility seam (program.rs `REFLECTION_VISIBILITY`).
 const SEAM: &str = "    if rl_reflection_hit {return rl_hit_shadow(lights[s.index],input.receiver,s.direction);}\n";
-const REPLACEMENT: &str =
-    "    if rl_reflection_hit {return rl_hit_sun(lights[s.index],input.receiver,s.direction);}\n";
+const REPLACEMENT: &str = "    if rl_reflection_hit {return rl_hit_sun(lights[s.index],input.receiver,s.direction);}\n";
 /// The group the map binds at in the hit pipelines.
 pub(super) const GROUP: u32 = 4;
 
@@ -41,10 +40,7 @@ pub(super) fn compose(source: String) -> Option<String> {
     if !source.contains(zones) || !definitions.contains("@group(4) @binding(0)") {
         return None;
     }
-    Some(format!(
-        "{}\n{definitions}\n{ACCESS}",
-        source.replacen(SEAM, REPLACEMENT, 1)
-    ))
+    Some(format!("{}\n{definitions}\n{ACCESS}", source.replacen(SEAM, REPLACEMENT, 1)))
 }
 
 /// Group 4's layout: the map's frame, top layer and page state.
@@ -83,10 +79,7 @@ impl Renderer {
     /// built, on a device that allows the fifth group.
     pub(super) fn hit_sun_buffers(&self) -> Option<[&wgpu::Buffer; 3]> {
         if !on()
-            || self
-                .device
-                .features()
-                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
+            || self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
             || self.device.limits().max_bind_groups <= GROUP
         {
             return None;

@@ -15,8 +15,8 @@
 #[cfg(test)]
 mod casts_shadows_tests;
 mod device;
-pub(crate) mod ids;
 mod prewarm;
+pub(crate) mod ids;
 mod scene;
 mod view;
 #[cfg(test)]
@@ -27,10 +27,10 @@ pub(crate) mod settings;
 pub(crate) mod state;
 
 pub use device::{Capabilities, ExperimentalRayQuery, RenderPath};
+pub use prewarm::PipelinePreparation;
 pub use ids::{
     EmitterId, EnvironmentId, Id, MaterialId, MeshId, ObjectId, ProgramId, TextureId, kind,
 };
-pub use prewarm::PipelinePreparation;
 pub use scene::Scene;
 pub use settings::{Background, Exposure, Quality, Settings, Sky, Sun};
 pub use view::{Outputs, ViewDesc, ViewLook};
@@ -1047,11 +1047,7 @@ impl Engine {
     /// the whole object is `&[(0, u32::MAX, id)]`, and an empty list clears them. `ID_NONE`
     /// and `ID_UNTAGGED` are reserved; primitives outside every range read as untagged.
     /// Every view with ids reports them from its next frame.
-    pub fn set_object_ids(
-        &mut self,
-        object: ObjectId,
-        ranges: &[(u32, u32, u32)],
-    ) -> Result<(), Error> {
+    pub fn set_object_ids(&mut self, object: ObjectId, ranges: &[(u32, u32, u32)]) -> Result<(), Error> {
         self.state.transform(object)?;
         self.ids.objects.set(object, ranges)
     }

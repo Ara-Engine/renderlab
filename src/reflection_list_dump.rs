@@ -44,9 +44,7 @@ pub(super) fn maybe_dump(
     match geometry_dump::free_space(&config.directory) {
         Ok(free) if free >= DISK_FLOOR.saturating_add(bytes) => {}
         free => {
-            eprintln!(
-                "reflection_list_dump refused: needs {bytes} plus {DISK_FLOOR} bytes free; available={free:?}"
-            );
+            eprintln!("reflection_list_dump refused: needs {bytes} plus {DISK_FLOOR} bytes free; available={free:?}");
             return;
         }
     }

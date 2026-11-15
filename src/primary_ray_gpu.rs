@@ -574,10 +574,7 @@ impl Renderer {
                     "traced primary visibility requires a hardware-shadow renderer at 1x with TRACED_FEATURES and traced_limits",
                 ))?;
                 let (sources, mut heads) = if self.hardware_shadows.is_some() {
-                    (
-                        wgpu_shader_sources(&self.source)?,
-                        shading_heads(&self.source)?,
-                    )
+                    (wgpu_shader_sources(&self.source)?, shading_heads(&self.source)?)
                 } else {
                     non_rt_sources(&self.source)?
                 };
@@ -729,9 +726,7 @@ impl ShadeSwitches {
     fn of(device: &wgpu::Device) -> Self {
         ShadeSwitches {
             pass: reflection_pass::on(device),
-            software: !device
-                .features()
-                .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
+            software: !device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY),
             deferred: reflection_pass::deferred(device),
             diag: crate::program::rl_deferred_diag(),
             gi: gi_receiver_pass::enabled(device),
@@ -1196,12 +1191,7 @@ impl PrimaryState {
         )
     }
     /// `lighting` is the group-3 layout shared with raster shading.
-    pub fn new(
-        device: &PipelineDevice,
-        ledger: &Ledger,
-        lighting: &wgpu::BindGroupLayout,
-        fog: bool,
-    ) -> Self {
+    pub fn new(device: &PipelineDevice, ledger: &Ledger, lighting: &wgpu::BindGroupLayout, fog: bool) -> Self {
         use wgpu::TextureFormat as F;
         let group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
             let entries: Vec<_> = entries
@@ -1358,10 +1348,7 @@ impl PrimaryState {
         let material_write_entries = [scene(2), texture(6, uint)].map(|visibility| {
             shade_layout_entries(
                 visibility,
-                ShadeSwitches {
-                    material: false,
-                    ..switches
-                },
+                ShadeSwitches { material: false, ..switches },
             )
         });
         let shade_entries = [scene(2), texture(6, uint)]
@@ -2008,14 +1995,7 @@ impl PrimaryState {
         ledger: &Ledger,
         module: &wgpu::ShaderModule,
     ) -> Owned<wgpu::ComputePipeline> {
-        self.entry_on(
-            device,
-            ledger,
-            module,
-            "primary_vb_sun",
-            &[],
-            &self.vb_sun_layout,
-        )
+        self.entry_on(device, ledger, module, "primary_vb_sun", &[], &self.vb_sun_layout)
     }
     fn entry_on(
         &self,
@@ -2542,10 +2522,7 @@ impl Renderer {
                     }),
                     ResourceKind::TextureView,
                 );
-                let bytes = u64::from(size.width)
-                    * u64::from(size.height)
-                    * 4
-                    * u64::from(RL_HISTORY_LAYERS);
+                let bytes = u64::from(size.width) * u64::from(size.height) * 4 * u64::from(RL_HISTORY_LAYERS);
                 RlHistoryTargets {
                     history: Depth {
                         texture,
@@ -2571,10 +2548,7 @@ impl Renderer {
                             32,
                             wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST,
                         );
-                        let words: Vec<u8> = [0u32, 0, 0, 0, 1, 0, 0, 0]
-                            .iter()
-                            .flat_map(|w| w.to_ne_bytes())
-                            .collect();
+                        let words: Vec<u8> = [0u32, 0, 0, 0, 1, 0, 0, 0].iter().flat_map(|w| w.to_ne_bytes()).collect();
                         self.queue.write_buffer(&phases.value, 0, &words);
                         phases
                     },
@@ -2614,11 +2588,11 @@ impl Renderer {
                 defer_edges,
                 held,
                 rl_history,
-                rl_pass: reflection_pass::on(&self.device).then(|| self.rl_pass_targets(size)),
+                rl_pass: reflection_pass::on(&self.device)
+                    .then(|| self.rl_pass_targets(size)),
                 gi_receiver: gi_receiver_pass::enabled(&self.device)
                     .then(|| self.gi_receiver_targets(size)),
-                fog_depth: (fog_cull::enabled() && self.hardware_shadows.is_some())
-                    .then(|| fog_cull::Depth::new(self, size)),
+                fog_depth: (fog_cull::enabled() && self.hardware_shadows.is_some()).then(|| fog_cull::Depth::new(self, size)),
                 hit: target("primary hit records", size, wgpu::TextureFormat::Rgba32Uint),
                 epsilon: target(
                     "primary hard receiver epsilon",
@@ -2749,39 +2723,19 @@ impl Renderer {
                     (21, tiles.clone()),
                     (22, region.as_entire_binding()),
                     visibility,
-                    (
-                        RL_HISTORY_FRAME,
-                        t.rl_history.frame.value.as_entire_binding(),
-                    ),
+                    (RL_HISTORY_FRAME, t.rl_history.frame.value.as_entire_binding()),
                     (RL_HISTORY, R::TextureView(&t.rl_history.history.view)),
                     (RL_PHASE, t.rl_history.phase.value.as_entire_binding()),
                 ];
-                if let Some(gi) = &t.gi_receiver {
-                    entries.push((
-                        gi_receiver_pass::BINDING,
-                        gi.values.value.as_entire_binding(),
-                    ));
-                }
+                if let Some(gi) = &t.gi_receiver { entries.push((gi_receiver_pass::BINDING, gi.values.value.as_entire_binding())); }
                 // U-RTVIS: the reflection pass's lobe output.
                 if let Some(pass) = &t.rl_pass {
                     entries.push((reflection_pass::LIST, pass.list.value.as_entire_binding()));
-                    entries.push((
-                        reflection_pass::PASS_FRAME,
-                        pass.frame.value.as_entire_binding(),
-                    ));
-                    entries.push((
-                        reflection_pass::ROOM_STATS,
-                        pass.stats.value.as_entire_binding(),
-                    ));
+                    entries.push((reflection_pass::PASS_FRAME, pass.frame.value.as_entire_binding()));
+                    entries.push((reflection_pass::ROOM_STATS, pass.stats.value.as_entire_binding()));
                     // The Mac thread's reflection_hits reads H and writes R.
-                    entries.push((
-                        super::reflection_hits::HITS,
-                        pass.hits.value.as_entire_binding(),
-                    ));
-                    entries.push((
-                        super::reflection_hits::SAMPLES,
-                        R::TextureView(&pass.samples.view),
-                    ));
+                    entries.push((super::reflection_hits::HITS, pass.hits.value.as_entire_binding()));
+                    entries.push((super::reflection_hits::SAMPLES, R::TextureView(&pass.samples.view)));
                 }
                 if matches!(shading, Shading::Hard) {
                     entries.push((23, R::TextureView(&t.epsilon.view)));
@@ -2803,15 +2757,8 @@ impl Renderer {
                         entries.push((63, R::TextureView(&untraced.view)));
                     }
                 }
-                if let Some(record) = t
-                    .material
-                    .as_ref()
-                    .filter(|_| crate::material_mode::Mode::full())
-                {
-                    entries.push((
-                        crate::program::MATERIAL_RECORD_BINDING,
-                        R::TextureView(&record.view),
-                    ));
+                if let Some(record) = t.material.as_ref().filter(|_| crate::material_mode::Mode::full()) {
+                    entries.push((crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&record.view)));
                 }
                 // MP1: the same group plus the slot table and tile lists.
                 let list = lists.map(|l| {
@@ -2822,28 +2769,21 @@ impl Renderer {
                 let writes = state.material_layouts.as_ref().map(|l| {
                     let single = group(&l.groups[shading as usize], &entries);
                     let list = lists.map(|lists| {
-                        let mut entries = entries.clone();
-                        entries.extend(lists.shade_entries());
+                        let mut entries = entries.clone(); entries.extend(lists.shade_entries());
                         group(&l.lists.shade[shading as usize], &entries)
                     });
-                    (single, list)
+                    (single,list)
                 });
-                [
-                    Some(group(&state.shade_bindings[shading as usize], &entries)),
-                    list,
-                    writes.as_ref().map(|w| w.0.clone()),
-                    writes.and_then(|w| w.1),
-                ]
+                [Some(group(&state.shade_bindings[shading as usize], &entries)),list,writes.as_ref().map(|w| w.0.clone()),writes.and_then(|w| w.1)]
             };
             let [shade, list, material_tiles, material_lists] = match fresh {
                 Some(f) => {
-                    let [s, l, w, wl] =
-                        shade(Shading::Soft, (6, R::TextureView(&f.visibility.view)));
-                    [[None, s], [None, l], [None, w], [None, wl]]
+                    let [s, l, w, wl] = shade(Shading::Soft, (6, R::TextureView(&f.visibility.view)));
+                    [[None, s], [None, l], [None,w], [None,wl]]
                 }
                 None => {
                     let [s, l, w, wl] = shade(Shading::Hard, scene.clone());
-                    [[s, None], [l, None], [w, None], [wl, None]]
+                    [[s, None], [l, None], [w,None], [wl,None]]
                 }
             };
             let next = Bindings {
@@ -2967,17 +2907,18 @@ impl Renderer {
                 shade,
                 list,
                 // U-RTVIS: rl_trace's group (reflection_pass.rs).
-                rl_trace: state
-                    .rl_trace
-                    .as_ref()
-                    .zip(t.rl_pass.as_ref())
-                    .map(|(abi, pass)| {
-                        let geometry = match &reflection_geometry {
-                            Some(g) => (SOFTWARE_REFLECTIONS, g.as_entire_binding()),
-                            None => reflection_scene.clone(),
-                        };
-                        self.rl_trace_group(abi, pass, frame.as_entire_binding(), geometry)
-                    }),
+                rl_trace: state.rl_trace.as_ref().zip(t.rl_pass.as_ref()).map(|(abi, pass)| {
+                    let geometry = match &reflection_geometry {
+                        Some(g) => (SOFTWARE_REFLECTIONS, g.as_entire_binding()),
+                        None => reflection_scene.clone(),
+                    };
+                    self.rl_trace_group(
+                        abi,
+                        pass,
+                        frame.as_entire_binding(),
+                        geometry,
+                    )
+                }),
                 rl_resolve: state
                     .rl_resolve
                     .as_ref()
@@ -3554,9 +3495,7 @@ impl Renderer {
         timestamp_writes: Option<wgpu::ComputePassTimestampWrites<'_>>,
     ) {
         let state = self.view.primary.as_ref().unwrap();
-        if self.encode_material_shading(encoder, shading, timestamp_writes.clone(), false) {
-            return;
-        }
+        if self.encode_material_shading(encoder, shading, timestamp_writes.clone(), false) { return; }
         if state.mixed() {
             self.encode_program_lists(encoder, shading, timestamp_writes);
             return;
@@ -3699,13 +3638,7 @@ impl Renderer {
                 crate::reflection_software::HEADER_WORDS,
                 crate::reflection_software::INSTANCE_WORDS,
                 traced.len(),
-                &previous[..previous.len().saturating_sub(
-                    if crate::reflection_software::bvh4_enabled() {
-                        8
-                    } else {
-                        0
-                    },
-                )],
+                &previous[..previous.len().saturating_sub(if crate::reflection_software::bvh4_enabled() {8} else {0})],
             );
             crate::reflection_software::finish_scene_bounds(&mut words);
             words

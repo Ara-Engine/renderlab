@@ -178,6 +178,23 @@ fn two_views_differ_from_single_view_engines_only_by_the_shared_gi_cache() {
     assert!(a < 1.0 && b < 1.0, "mean byte difference {a} and {b}");
 }
 
+/// Memory cut 1 through the engine (opt-in `auto_slots`): its settings reach the renderer
+/// through `set_indirect`, which must leave an `auto_slots` table to the first frame, sized to
+/// the scene (three boxes: the 2^16 floor), not allocate the 2^20 cap.
+#[test]
+fn the_engine_sizes_the_gi_table_to_its_scene() {
+    let (mut engine, _) = engine(true);
+    let mut settings = engine.renderer().indirect();
+    settings.auto_slots = true;
+    engine.renderer_mut().set_indirect(settings).unwrap();
+    let view = engine.create_view(&desc()).unwrap();
+    for _ in 0..3 {
+        engine.tick(1.0 / 60.0).unwrap();
+        engine.render_view(view, &cameras(0.0)[0]).unwrap();
+    }
+    assert_eq!(engine.renderer().indirect_stats().slots, 1 << 16);
+}
+
 #[test]
 fn views_are_created_resized_and_removed_independently() {
     let (mut engine, _) = engine(true);
@@ -227,8 +244,8 @@ fn an_empty_scene_renders_on_both_paths() {
     for path in [RenderPath::NonRt, RenderPath::HardwareRt] {
         let adapter = test_adapter();
         // SAFETY: the test suite's documented experimental-feature acknowledgement.
-        let experimental_ray_query = (path == RenderPath::HardwareRt)
-            .then(|| unsafe { ExperimentalRayQuery::acknowledge() });
+        let experimental_ray_query =
+            (path == RenderPath::HardwareRt).then(|| unsafe { ExperimentalRayQuery::acknowledge() });
         let mut engine = Engine::new(
             &adapter,
             EngineDescriptor {
@@ -249,19 +266,11 @@ fn an_empty_scene_renders_on_both_paths() {
             frame(&mut engine);
         }
         let sky = engine.capture_view(view).unwrap();
-        assert!(
-            sky.rgba8.chunks(4).any(|p| p[..3] != [0, 0, 0]),
-            "{path:?}: an empty scene drew black"
-        );
+        assert!(sky.rgba8.chunks(4).any(|p| p[..3] != [0, 0, 0]), "{path:?}: an empty scene drew black");
         engine.cut_view(view);
         frame(&mut engine);
         let (vertices, indices) = cube([0.0, -0.05, 0.0], [6.0, 0.05, 6.0]);
-        let mesh = engine
-            .create_mesh(&MeshData {
-                vertices: &vertices,
-                indices: &indices,
-            })
-            .unwrap();
+        let mesh = engine.create_mesh(&MeshData { vertices: &vertices, indices: &indices }).unwrap();
         let material = engine.create_material(&MaterialDesc::default()).unwrap();
         let floor = engine.spawn(mesh, material, Mat4::IDENTITY).unwrap();
         frame(&mut engine);

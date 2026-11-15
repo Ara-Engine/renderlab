@@ -19,11 +19,7 @@ pub(crate) struct ViewModes {
     /// The frame's mode; `Lit` on every ordinary frame.
     pub mode: ViewMode,
     pipelines: Vec<ViewPipeline>,
-    present: Option<(
-        wgpu::TextureFormat,
-        Owned<wgpu::BindGroupLayout>,
-        wgpu::RenderPipeline,
-    )>,
+    present: Option<(wgpu::TextureFormat, Owned<wgpu::BindGroupLayout>, wgpu::RenderPipeline)>,
 }
 impl Default for ViewModes {
     fn default() -> Self {
@@ -114,8 +110,7 @@ impl Renderer {
         let head = &self.primary_sources.as_ref().unwrap().1[shading];
         let slot = self.program_slot(id);
         let found = self.view.outputs.modes.pipelines.iter().position(|p| {
-            (p.program, p.list, p.streamed, p.shading, p.mode)
-                == (id, list, streamed, shading, mode)
+            (p.program, p.list, p.streamed, p.shading, p.mode) == (id, list, streamed, shading, mode)
                 && p.source == slot.source
                 && p.head == *head
         });
@@ -147,15 +142,9 @@ impl Renderer {
         };
         let primary = self.view.primary.as_ref().unwrap();
         let pipeline = match (list, streamed) {
-            (true, _) => {
-                primary.list_pipeline(&self.device, &self.ledger, &module, shading, streamed, None)
-            }
-            (false, true) => {
-                primary.streamed_pipeline(&self.device, &self.ledger, &module, shading, None)
-            }
-            (false, false) => {
-                primary.shade_pipeline(&self.device, &self.ledger, &module, shading, None)
-            }
+            (true, _) => primary.list_pipeline(&self.device, &self.ledger, &module, shading, streamed, None),
+            (false, true) => primary.streamed_pipeline(&self.device, &self.ledger, &module, shading, None),
+            (false, false) => primary.shade_pipeline(&self.device, &self.ledger, &module, shading, None),
         };
         if let Some(error) = scopes.finish() {
             return Err(Error::Shader(format!(
@@ -176,8 +165,7 @@ impl Renderer {
         // Pipelines of removed programs or old sources are never found again; drop them.
         let modes = &mut self.view.outputs.modes;
         modes.pipelines.retain(|p| {
-            !((p.program, p.list, p.streamed, p.shading, p.mode)
-                == (id, list, streamed, shading, mode))
+            !((p.program, p.list, p.streamed, p.shading, p.mode) == (id, list, streamed, shading, mode))
         });
         modes.pipelines.push(entry);
         Ok(modes.pipelines.len() - 1)
@@ -190,14 +178,7 @@ impl Renderer {
         view: &wgpu::TextureView,
     ) {
         let format = self.format;
-        if self
-            .view
-            .outputs
-            .modes
-            .present
-            .as_ref()
-            .is_none_or(|p| p.0 != format)
-        {
+        if self.view.outputs.modes.present.as_ref().is_none_or(|p| p.0 != format) {
             self.view.outputs.modes.present = Some(self.view_present(format));
         }
         let (_, layout, pipeline) = self.view.outputs.modes.present.as_ref().unwrap();
@@ -231,11 +212,7 @@ impl Renderer {
     fn view_present(
         &self,
         format: wgpu::TextureFormat,
-    ) -> (
-        wgpu::TextureFormat,
-        Owned<wgpu::BindGroupLayout>,
-        wgpu::RenderPipeline,
-    ) {
+    ) -> (wgpu::TextureFormat, Owned<wgpu::BindGroupLayout>, wgpu::RenderPipeline) {
         let layout = self.ledger.own(
             self.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {

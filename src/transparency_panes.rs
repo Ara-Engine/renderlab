@@ -235,8 +235,7 @@ impl Renderer {
         let key = self.tp_glass_key(program, rt);
         let ids = [false, true].map(|tangent| {
             let label = format!(
-                "TP pane ids program={} rt={rt} key={key:02x?} tangent={tangent}",
-                slot.label,
+                "TP pane ids program={} rt={rt} key={key:02x?} tangent={tangent}", slot.label,
             );
             self.ledger.own(
                 self.device
@@ -286,10 +285,7 @@ impl Renderer {
                 ResourceKind::RenderPipeline,
             )
         });
-        let label = format!(
-            "TP pane shading program={} rt={rt} key={key:02x?}",
-            slot.label
-        );
+        let label = format!("TP pane shading program={} rt={rt} key={key:02x?}", slot.label);
         let shade = self.ledger.own(
             self.device
                 .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {

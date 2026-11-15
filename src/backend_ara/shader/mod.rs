@@ -273,11 +273,9 @@ impl Pass {
                 .expect("original traced composition remains valid")
                 .into()
             }
-            Self::LightVisibility => {
-                crate::backend_ara::light_vis::source(crate::program::material_pass_on())
-                    .expect("the light visibility pass composes")
-                    .into()
-            }
+            Self::LightVisibility => crate::backend_ara::light_vis::source(crate::program::material_pass_on())
+                .expect("the light visibility pass composes")
+                .into(),
             Self::ReflectionHits => crate::backend_ara::primary_shade::hits_source(include_str!(
                 "../shaders/traced_material.wgsl"
             ))

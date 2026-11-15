@@ -223,17 +223,7 @@ impl crate::renderer::Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
-                    resource: self
-                        .view
-                        .primary
-                        .as_ref()
-                        .unwrap()
-                        .geometry
-                        .as_ref()
-                        .unwrap()
-                        ._placements
-                        .value
-                        .as_entire_binding(),
+                    resource: self.view.primary.as_ref().unwrap().geometry.as_ref().unwrap()._placements.value.as_entire_binding(),
                 },
             ],
         });

@@ -7,11 +7,7 @@ pub(crate) struct PipelineLog(Mutex<File>);
 impl PipelineLog {
     pub fn from_env() -> Option<Self> {
         let path = std::env::var_os("RENDERLAB_PIPELINE_LOG")?;
-        match std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(path)
-        {
+        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
             Ok(file) => Some(Self(Mutex::new(file))),
             Err(error) => {
                 eprintln!("pipeline_log: {error}");
@@ -23,9 +19,7 @@ impl PipelineLog {
     pub fn compile(&self, kind: &str, label: &str, duration: Duration) {
         self.line(&format!(
             "{{\"event\":\"compile\",\"kind\":{},\"label\":{},\"ms\":{:.6}}}",
-            json_string(kind),
-            json_string(label),
-            duration.as_secs_f64() * 1e3,
+            json_string(kind), json_string(label), duration.as_secs_f64() * 1e3,
         ));
     }
 
@@ -66,9 +60,7 @@ fn json_string(value: &str) -> String {
         match c {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
-            c if c <= '\u{1f}' => {
-                write!(out, "\\u{:04x}", c as u32).unwrap();
-            }
+            c if c <= '\u{1f}' => { write!(out, "\\u{:04x}", c as u32).unwrap(); }
             c => out.push(c),
         }
     }
@@ -83,9 +75,6 @@ mod tests {
     #[test]
     fn program_labels_round_trip_in_pipeline_log() {
         let label = "shader \"glass\"\\rail\n\t\0 / ☀";
-        assert_eq!(
-            serde_json::from_str::<String>(&json_string(label)).unwrap(),
-            label
-        );
+        assert_eq!(serde_json::from_str::<String>(&json_string(label)).unwrap(), label);
     }
 }

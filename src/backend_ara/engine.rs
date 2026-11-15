@@ -512,13 +512,15 @@ impl Engine {
                 skin,
             };
             if material.transparency.is_some() {
-                transparent.extend(batch.models.iter().zip(&batch.casts).map(|(model, casts)| {
-                    placed(
-                        *model,
-                        std::slice::from_ref(model),
-                        std::slice::from_ref(casts),
-                    )
-                }));
+                transparent.extend(
+                    batch
+                        .models
+                        .iter()
+                        .zip(&batch.casts)
+                        .map(|(model, casts)| {
+                            placed(*model, std::slice::from_ref(model), std::slice::from_ref(casts))
+                        }),
+                );
             } else if let Some(first) = batch.models.first() {
                 opaque.push(placed(*first, &batch.models[..], &batch.casts[..]));
             }

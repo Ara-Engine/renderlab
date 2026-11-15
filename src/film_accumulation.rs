@@ -205,9 +205,7 @@ impl FilmLayouts {
             image(30, F::R32Uint),
         ];
         trace.extend(film);
-        if crate::material_mode::Mode::tail() {
-            trace.extend(super::material_pass_gpu::entries(true));
-        }
+        if crate::material_mode::Mode::tail() { trace.extend(super::material_pass_gpu::entries(true)); }
         fog_cull::extend_entries(&mut trace, fog);
         let mut shade = vec![
             uniform(0, 80),
@@ -534,15 +532,8 @@ impl Renderer {
                 (30, R::TextureView(&film.tiles[written].view)),
             ];
             trace.extend(film_entries.clone());
-            if let Some(depth) = &t.fog_depth {
-                trace.push((fog_cull::BINDING, depth.buffer.value.as_entire_binding()));
-            }
-            if crate::material_mode::Mode::tail() {
-                trace.push((
-                    crate::program::MATERIAL_RECORD_BINDING,
-                    R::TextureView(&t.material.as_ref().unwrap().view),
-                ));
-            }
+            if let Some(depth) = &t.fog_depth { trace.push((fog_cull::BINDING, depth.buffer.value.as_entire_binding())); }
+            if crate::material_mode::Mode::tail() { trace.push((crate::program::MATERIAL_RECORD_BINDING, R::TextureView(&t.material.as_ref().unwrap().view))); }
             let mut shade = vec![
                 (0, self.uniform.as_entire_binding()),
                 (7, R::TextureView(&t.hit.view)),

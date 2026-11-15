@@ -151,11 +151,7 @@ impl Renderer {
         }
         let primary = self.view.primary.as_ref().unwrap();
         let program = self.program_slot(primary.program);
-        let key = key(
-            &self.source_digest,
-            &program.digest,
-            program.layout.is_some(),
-        );
+        let key = key(&self.source_digest, &program.digest, program.layout.is_some());
         let program_slots = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("TP2 reflected hit program slots"),
@@ -193,12 +189,7 @@ impl Renderer {
             wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
             8,
         );
-        let prepared = match self
-            .transparency
-            .reflection_pipelines
-            .iter()
-            .find(|p| p.key == key)
-        {
+        let prepared = match self.transparency.reflection_pipelines.iter().find(|p| p.key == key) {
             Some(prepared) => prepared.clone(),
             None => self.tp_reflection_pipeline(primary.program)?,
         };
@@ -213,19 +204,12 @@ impl Renderer {
             key,
         })
     }
-    pub(super) fn tp_reflection_pipeline(
-        &self,
-        program_id: u64,
-    ) -> Result<ReflectionPipeline, Error> {
+    pub(super) fn tp_reflection_pipeline(&self, program_id: u64) -> Result<ReflectionPipeline, Error> {
         let primary = self.view.primary.as_ref().unwrap();
         let program = self.program_slot(program_id);
         let head = primary_ray_gpu::transparent_reflection_head(&self.source)?;
         let source = source(&head, &program.source, program.layout.is_some());
-        let key = key(
-            &self.source_digest,
-            &program.digest,
-            program.layout.is_some(),
-        );
+        let key = key(&self.source_digest, &program.digest, program.layout.is_some());
         let layout = self.tp_layout(
             "TP2 glass reflection",
             &[
@@ -237,11 +221,7 @@ impl Renderer {
                         vertex_return: false,
                     },
                 ),
-                entry(
-                    10,
-                    COMPUTE,
-                    uniform(false, primary_ray_gpu::FRAME_BYTES as u64),
-                ),
+                entry(10, COMPUTE, uniform(false, primary_ray_gpu::FRAME_BYTES as u64)),
                 entry(
                     18,
                     COMPUTE,
@@ -287,10 +267,9 @@ impl Renderer {
             "tp_reflect",
         );
         Ok(ReflectionPipeline {
-            program: program_id,
-            key,
-            layout: Arc::new(layout),
-            pipeline: Arc::new(pipeline),
+            program: program_id, key,
+            layout: Arc::new(layout), pipeline: Arc::new(pipeline),
         })
     }
+
 }

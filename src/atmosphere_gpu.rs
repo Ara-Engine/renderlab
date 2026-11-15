@@ -158,13 +158,7 @@ pub(super) struct Volume {
     cull: Option<fog_cull::Bounds>,
 }
 impl Volume {
-    fn new(
-        device: &PipelineDevice,
-        ledger: &Ledger,
-        grid: [u32; 2],
-        volumetric: bool,
-        fog: bool,
-    ) -> Self {
+    fn new(device: &PipelineDevice, ledger: &Ledger, grid: [u32; 2], volumetric: bool, fog: bool) -> Self {
         Self {
             grid,
             camera: lut(
@@ -198,7 +192,8 @@ impl Volume {
             integrate: None,
             temporal: None,
             inject: None,
-            cull: (volumetric && fog).then(|| fog_cull::Bounds::new(device, ledger, grid)),
+            cull: (volumetric && fog)
+                .then(|| fog_cull::Bounds::new(device, ledger, grid)),
         }
     }
 }
@@ -678,13 +673,7 @@ impl Renderer {
         if self.view.atmosphere.volume.grid != grid
             || self.view.atmosphere.volume.scatter.is_some() != volumetric
         {
-            let volume = Volume::new(
-                &self.device,
-                &self.ledger,
-                grid,
-                volumetric,
-                self.hardware_shadows.is_some() && fog_cull::enabled(),
-            );
+            let volume = Volume::new(&self.device, &self.ledger, grid, volumetric, self.hardware_shadows.is_some() && fog_cull::enabled());
             let old = std::mem::replace(&mut self.view.atmosphere.volume, volume);
             self.atmosphere.retired.push((self.submissions, old));
             self.view.atmosphere.generation += 1;
@@ -1131,11 +1120,7 @@ impl Renderer {
         // encoded before this call. Raster depth and the TLAS are ready here too.
         self.atmosphere_volume_groups(true, scene);
         let sun = self.atmosphere_sun().map_or(Vec3::Y, |s| s.0);
-        let altitude = self
-            .atmosphere
-            .published
-            .as_ref()
-            .map_or(0.0, |b| f32::from_ne_bytes(b[140..144].try_into().unwrap()));
+        let altitude = self.atmosphere.published.as_ref().map_or(0.0, |b| f32::from_ne_bytes(b[140..144].try_into().unwrap()));
         let (a, av) = (&mut self.atmosphere, &mut self.view.atmosphere);
         let medium = a.settings.medium;
         let stale = a.luts != Some(medium);
@@ -1304,7 +1289,13 @@ impl Renderer {
             part(encoder, "fog_inject", injection, &inject[i], cells);
             let temporal = &v.temporal.as_ref().unwrap()[i];
             part(encoder, "fog_temporal", &k.temporal, temporal, cells);
-            part(encoder, "fog_integrate", &k.integrate, &integrate[i], plane);
+            part(
+                encoder,
+                "fog_integrate",
+                &k.integrate,
+                &integrate[i],
+                plane,
+            );
         }
         av.frame = av.frame.wrapping_add(1);
     }

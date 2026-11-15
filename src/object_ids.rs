@@ -156,11 +156,9 @@ impl ObjectIds {
             for object in objects {
                 let ranges = self.ids.get(object).map_or(&[][..], |r| &r[..]);
                 let entry = [tables.ranges.len() as u32, ranges.len() as u32];
-                tables.ranges.extend(
-                    ranges
-                        .iter()
-                        .map(|&(first, count, id)| [first, count, id, 0]),
-                );
+                tables
+                    .ranges
+                    .extend(ranges.iter().map(|&(first, count, id)| [first, count, id, 0]));
                 if transparent {
                     tables.transparent.push(entry);
                 } else {
@@ -259,22 +257,8 @@ mod tests {
     fn rectangles_are_bounded_and_inside_the_view() {
         assert!(IdRect::pixel(9, 9).check(10, 10).is_ok());
         assert!(IdRect::pixel(10, 9).check(10, 10).is_err());
-        assert!(
-            IdRect {
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 1
-            }
-            .check(10, 10)
-            .is_err()
-        );
-        let big = IdRect {
-            x: 0,
-            y: 0,
-            width: MAX_ID_RECT + 1,
-            height: 1,
-        };
+        assert!(IdRect { x: 0, y: 0, width: 0, height: 1 }.check(10, 10).is_err());
+        let big = IdRect { x: 0, y: 0, width: MAX_ID_RECT + 1, height: 1 };
         assert!(big.check(4096, 4096).is_err());
     }
 }

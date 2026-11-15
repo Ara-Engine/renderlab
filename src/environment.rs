@@ -257,11 +257,9 @@ fn cube_bilinear(level: &CubeLevel, d: [f32; 3]) -> [f32; 3] {
     let xy = uv.map(|v| (v + 1.0) * size * 0.5 - 0.5);
     let p = xy.map(|v| v.floor() as i32);
     let t = [xy[0] - xy[0].floor(), xy[1] - xy[1].floor()];
-    let [a, b, c, e] =
-        [[0, 0], [1, 0], [0, 1], [1, 1]].map(|o| tap(level, face, [p[0] + o[0], p[1] + o[1]]));
+    let [a, b, c, e] = [[0, 0], [1, 0], [0, 1], [1, 1]].map(|o| tap(level, face, [p[0] + o[0], p[1] + o[1]]));
     std::array::from_fn(|i| {
-        (a[i] * (1.0 - t[0]) + b[i] * t[0]) * (1.0 - t[1])
-            + (c[i] * (1.0 - t[0]) + e[i] * t[0]) * t[1]
+        (a[i] * (1.0 - t[0]) + b[i] * t[0]) * (1.0 - t[1]) + (c[i] * (1.0 - t[0]) + e[i] * t[0]) * t[1]
     })
 }
 
@@ -285,9 +283,7 @@ mod bank_tests {
         CubeLevel::new(size, texels, Limits::default()).unwrap()
     }
     fn read(bank: &[u8], i: usize) -> [f32; 3] {
-        std::array::from_fn(|c| {
-            f32::from_ne_bytes(bank[i * 16 + c * 4..i * 16 + c * 4 + 4].try_into().unwrap())
-        })
+        std::array::from_fn(|c| f32::from_ne_bytes(bank[i * 16 + c * 4..i * 16 + c * 4 + 4].try_into().unwrap()))
     }
 
     /// Levels at least BANK_SIZE wide keep their mips; a narrower level's bank holds its own
@@ -297,19 +293,8 @@ mod bank_tests {
     #[test]
     fn legacy_chains_bank_their_narrow_levels() {
         let n = 16usize;
-        let linear = level(16, |i| {
-            [
-                (i % n) as f32,
-                ((i % (n * n)) / n) as f32,
-                (i / (n * n)) as f32,
-            ]
-        });
-        let chain = [
-            level(64, |_| [1.0; 3]),
-            level(32, |_| [1.0; 3]),
-            linear,
-            level(8, |_| [3.0, 4.0, 5.0]),
-        ];
+        let linear = level(16, |i| [(i % n) as f32, ((i % (n * n)) / n) as f32, (i / (n * n)) as f32]);
+        let chain = [level(64, |_| [1.0; 3]), level(32, |_| [1.0; 3]), linear, level(8, |_| [3.0, 4.0, 5.0])];
         let (start, banks) = bank_legacy(&chain).unwrap();
         assert_eq!((start, banks.len()), (2, 2));
         let size = BANK_SIZE as usize;
@@ -318,10 +303,7 @@ mod bank_tests {
                 for x in 1..size - 2 {
                     let got = read(&banks[0], face * size * size + y * size + x);
                     let want = [x, y].map(|v| (v as f32 + 0.5) / 2.0 - 0.5);
-                    assert!(
-                        (got[0] - want[0]).abs() < 1e-4 && (got[1] - want[1]).abs() < 1e-4,
-                        "{face} {x} {y}: {got:?}"
-                    );
+                    assert!((got[0] - want[0]).abs() < 1e-4 && (got[1] - want[1]).abs() < 1e-4, "{face} {x} {y}: {got:?}");
                     assert_eq!(got[2], face as f32);
                 }
             }

@@ -60,10 +60,7 @@ pub(super) fn device_with(extra: wgpu::Features) -> Option<(wgpu::Device, wgpu::
         ..wgpu::InstanceDescriptor::new_without_display_handle()
     });
     let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
-    adapter
-        .features()
-        .contains(extra)
-        .then(|| request(&adapter, extra))
+    adapter.features().contains(extra).then(|| request(&adapter, extra))
 }
 /// `RENDERLAB_TEST_PRIMARY=traced` reruns the lit suites on traced primary visibility:
 /// 1x renderers become hardware renderers with it selected; 4x renderers stay raster.

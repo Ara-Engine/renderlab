@@ -56,10 +56,7 @@ fn material_receivers_edits(trace: String, tail: bool) -> Result<String> {
     }
     let mut trace = trace;
     for (seam, with) in edits {
-        ensure!(
-            trace.matches(seam).count() == 1,
-            "receivers trace seam changed: {seam}"
-        );
+        ensure!(trace.matches(seam).count() == 1, "receivers trace seam changed: {seam}");
         trace = trace.replacen(seam, with, 1);
     }
     trace.push_str(&crate::program::material_trace_writes());
@@ -189,10 +186,7 @@ fn material_trace_edits(soft: String, tail: bool) -> Result<String> {
     }
     let mut soft = soft;
     for (seam, with) in edits {
-        ensure!(
-            soft.matches(seam).count() == 1,
-            "interactive kernel seam changed: {seam}"
-        );
+        ensure!(soft.matches(seam).count() == 1, "interactive kernel seam changed: {seam}");
         soft = soft.replacen(seam, &with, 1);
     }
     soft.push_str(&crate::program::material_trace_writes());

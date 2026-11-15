@@ -430,11 +430,7 @@ fn sun_ray_knobs_accept_powers_of_two_from_8_to_256_only() {
         assert_eq!(knob_rays("RENDERLAB_SUN_COLD_RAYS", Some(value)), rays);
     }
     for value in ["4", "48", "512", "0", "-8", "x", ""] {
-        assert_eq!(
-            knob_rays("RENDERLAB_SUN_COLD_RAYS", Some(value)),
-            None,
-            "{value}"
-        );
+        assert_eq!(knob_rays("RENDERLAB_SUN_COLD_RAYS", Some(value)), None, "{value}");
     }
 }
 impl ReconstructionShadowBudget {
@@ -447,12 +443,8 @@ impl ReconstructionShadowBudget {
     pub(crate) fn with_env_knobs(self) -> Self {
         static KNOBS: std::sync::OnceLock<[Option<u32>; 3]> = std::sync::OnceLock::new();
         let [moving, restart, cold] = *KNOBS.get_or_init(|| {
-            [
-                "RENDERLAB_SUN_MOVING_RAYS",
-                "RENDERLAB_SUN_RESTART_RAYS",
-                "RENDERLAB_SUN_COLD_RAYS",
-            ]
-            .map(|name| knob_rays(name, std::env::var(name).ok().as_deref()))
+            ["RENDERLAB_SUN_MOVING_RAYS", "RENDERLAB_SUN_RESTART_RAYS", "RENDERLAB_SUN_COLD_RAYS"]
+                .map(|name| knob_rays(name, std::env::var(name).ok().as_deref()))
         });
         Self {
             active_rays: moving.unwrap_or(self.active_rays),
@@ -809,7 +801,8 @@ fn with_sunrt_diag(source: String) -> String {
 /// The tile vote's edits to a budgeted trace module: the estimator's pause and resume around
 /// the budget loop, and each Interactive entry's vote before its uncovered-tile return.
 fn with_sun_tile(source: String, probes: u32) -> Result<String, Error> {
-    let header = "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u) {\n";
+    let header =
+        "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);for(var j=lane;j<tr1_rays;j+=1u) {\n";
     let votes = [
         (
             "    if !inside || covered==0u {return;}\n",
@@ -821,9 +814,7 @@ fn with_sun_tile(source: String, probes: u32) -> Result<String, Error> {
         ),
     ];
     if source.matches(header).count() != 1
-        || votes
-            .iter()
-            .any(|(seam, _)| source.matches(seam).count() != 1)
+        || votes.iter().any(|(seam, _)| source.matches(seam).count() != 1)
     {
         return Err(Error::InvalidInput(
             "the sun tile vote requires the budget loop and both Interactive entries' returns",
@@ -927,11 +918,7 @@ fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<St
         // A variant file (RENDERLAB_TR1_SHADER) carries its own constants.
         if !on && std::env::var_os("RENDERLAB_TR1_SHADER").is_none() {
             let declaration = format!("const {constant}:bool=true;");
-            assert_eq!(
-                resolve.matches(&declaration).count(),
-                1,
-                "TR1 lean seam: {declaration}"
-            );
+            assert_eq!(resolve.matches(&declaration).count(), 1, "TR1 lean seam: {declaration}");
             resolve = resolve.replace(&declaration, &format!("const {constant}:bool=false;"));
         }
     }
@@ -1666,14 +1653,8 @@ impl Planner {
         rl_history.extend_from_slice(&matrix_bytes(previous_matrix));
         // Read only while the camera holds (TR1's bit-equal `still`, no reset): a moving frame
         // traces every glossy receiver's full set, exactly as without the history.
-        let continues =
-            continued.is_some() && (still || (!self.reset && crate::program::rl_resolve_on()));
-        for w in [
-            u32::from(continues),
-            (i.frame & 1) as u32,
-            i.frame as u32,
-            scale.to_bits(),
-        ] {
+        let continues = continued.is_some() && (still || (!self.reset && crate::program::rl_resolve_on()));
+        for w in [u32::from(continues), (i.frame & 1) as u32, i.frame as u32, scale.to_bits()] {
             rl_history.extend_from_slice(&w.to_ne_bytes());
         }
         self.previous = Some(Previous {
@@ -2118,8 +2099,7 @@ impl Renderer {
         // same reconstructed sun estimator over exact published receivers.
         let vb = self.hardware_shadows.is_some()
             && (self.primary_mode == PrimaryVisibility::VisibilityBuffer
-                || (traced
-                    && (super::sun_vis_pass::enabled() || crate::material_mode::Mode::full())));
+                || (traced && (super::sun_vis_pass::enabled() || crate::material_mode::Mode::full())));
         if self
             .pipeline
             .primary
@@ -2163,14 +2143,12 @@ impl Renderer {
                 _ => self.fail(error.to_string()),
             });
         }
-        self.pipelines.created += 1
-            + u64::from(pipelines.vb_sun.is_some())
-            + pipelines.trace.as_ref().map_or(0, |t| {
-                1 + u64::from(t.repair.is_some())
-                    + u64::from(t.retry.is_some())
-                    + u64::from(t.full.is_some())
-                    + 2 * u64::from(t.penumbra.is_some())
-            });
+        self.pipelines.created += 1 + u64::from(pipelines.vb_sun.is_some()) + pipelines.trace.as_ref().map_or(0, |t| {
+            1 + u64::from(t.repair.is_some())
+                + u64::from(t.retry.is_some())
+                + u64::from(t.full.is_some())
+                + 2 * u64::from(t.penumbra.is_some())
+        });
         self.pipeline.primary.as_mut().unwrap().reconstruction = Some(pipelines);
         Ok(())
     }
@@ -2346,8 +2324,7 @@ impl Renderer {
         self.uploads.view_settings += FRAME_BYTES as u64;
         self.uploads.write_calls += 1;
         if let Some(history) = primary.targets.as_ref().map(|t| &t.rl_history) {
-            self.queue
-                .write_buffer(&history.frame.value, 0, &planned.rl_history);
+            self.queue.write_buffer(&history.frame.value, 0, &planned.rl_history);
             self.uploads.view_settings += RL_HISTORY_BYTES as u64;
             self.uploads.write_calls += 1;
         }
@@ -2833,17 +2810,11 @@ mod tests {
 
     #[test]
     fn coverage_off_keeps_original_resolve_module() {
-        let prelude = include_str!("../shaders/scene.wgsl");
-        let [head, _] = non_rt_heads(prelude).unwrap();
-        let original = format!(
-            "{head}\n{}\n{RESOLVE}\n{}",
-            include_str!("../shaders/object_motion.wgsl"),
-            zones_source("tr1.zones")
-        );
-        assert_eq!(
-            resolve_source_with_coverage(prelude, None).unwrap(),
-            original
-        );
+        let prelude=include_str!("../shaders/scene.wgsl");
+        let [head,_]=non_rt_heads(prelude).unwrap();
+        let original=format!("{head}\n{}\n{RESOLVE}\n{}",
+            include_str!("../shaders/object_motion.wgsl"),zones_source("tr1.zones"));
+        assert_eq!(resolve_source_with_coverage(prelude, None).unwrap(),original);
     }
 
     #[test]
@@ -2866,11 +2837,7 @@ mod tests {
         let (start, pause) = if sun_tile_probes() == 0 {
             ("lane", String::new())
         } else {
-            (
-                "tr1_first",
-                "        if j==tr1_tile_pause && tr1_tile_state==1u {tr1_tile_state=2u;break;}\n"
-                    .to_owned(),
-            )
+            ("tr1_first", "        if j==tr1_tile_pause && tr1_tile_state==1u {tr1_tile_state=2u;break;}\n".to_owned())
         };
         assert!(off.contains("tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);"));
         assert!(off.contains(&format!("for(var j={start};j<tr1_rays;j+=1u)")));
@@ -2938,12 +2905,7 @@ mod tests {
         });
         // U-FIXED: the visibility-buffer sun asks and records once more, on the budget's estimate.
         let vb_sun = vb_sun_source(&kernels[1]).unwrap();
-        assert_eq!(
-            vb_sun
-                .matches("primary_sun(receiver,slot,id.xy,size.x)")
-                .count(),
-            1
-        );
+        assert_eq!(vb_sun.matches("primary_sun(receiver,slot,id.xy,size.x)").count(), 1);
         assert_eq!(vb_sun.matches("primary_sun_store(p,visible);").count(), 3);
         let resolve_clone = resolve.clone();
         for source in [resolve, off, held, trace, PENUMBRA_LIST.to_owned(), vb_sun]
@@ -2952,10 +2914,9 @@ mod tests {
             .chain([fresh_clamp_resolve(&resolve_clone, 0.5)])
             // Compose each coverage variant from its original body, as the engine
             // does. `resolve` may already contain the ambient switch's transform.
-            .chain(
-                [false, true]
-                    .map(|cycle| resolve_source_with_coverage(prelude, Some(cycle)).unwrap()),
-            )
+            .chain([false, true].map(|cycle| {
+                resolve_source_with_coverage(prelude, Some(cycle)).unwrap()
+            }))
         {
             let module = naga::front::wgsl::parse_str(&source).unwrap();
             naga::valid::Validator::new(

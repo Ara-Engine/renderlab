@@ -27,8 +27,7 @@ pub(super) fn hit_sun_count() -> bool {
 }
 const SUN_COUNT_SEAM: &str = "        let v=rl_hit_sun_map(receiver,l);\n";
 const SUN_COUNT: &str = "        let v=rl_hit_sun_map(receiver,l);\n        atomicAdd(&rl_room_stats[7],1u); if v<0.0 { atomicAdd(&rl_room_stats[8],1u); }\n";
-const SUN_COUNT_BINDING: &str =
-    "\n@group(0) @binding(69) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;\n";
+const SUN_COUNT_BINDING: &str = "\n@group(0) @binding(69) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;\n";
 
 /// H's dispatch arguments, after its count word (rl_hit_args).
 const HIT_ARGS_OFFSET: u64 = 4;
@@ -77,32 +76,26 @@ impl Renderer {
                 composed.source = source;
                 if hit_sun_count() && composed.source.contains(SUN_COUNT_SEAM) {
                     composed.source = composed.source.replacen(SUN_COUNT_SEAM, SUN_COUNT, 1);
-                    if !composed
-                        .source
-                        .contains("var<storage,read_write> rl_room_stats")
-                    {
+                    if !composed.source.contains("var<storage,read_write> rl_room_stats") {
                         composed.source.push_str(SUN_COUNT_BINDING);
                     }
                 }
                 let groups: [_; 4] = std::array::from_fn(|g| full.get_bind_group_layout(g as u32));
                 let own = hit_sun::layout(&self.device);
-                sun_layout = Some(
-                    self.ledger.own(
-                        self.device
-                            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                                label: Some("reflection hits with the sun map"),
-                                bind_group_layouts: &[
-                                    Some(&groups[0]),
-                                    Some(&groups[1]),
-                                    Some(&groups[2]),
-                                    Some(&groups[3]),
-                                    Some(&own),
-                                ],
-                                immediate_size: 0,
-                            }),
-                        ResourceKind::PipelineLayout,
-                    ),
-                );
+                sun_layout = Some(self.ledger.own(
+                    self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                        label: Some("reflection hits with the sun map"),
+                        bind_group_layouts: &[
+                            Some(&groups[0]),
+                            Some(&groups[1]),
+                            Some(&groups[2]),
+                            Some(&groups[3]),
+                            Some(&own),
+                        ],
+                        immediate_size: 0,
+                    }),
+                    ResourceKind::PipelineLayout,
+                ));
             }
             let sun = sun_layout.is_some();
             let abi = self.program_abi();
@@ -186,24 +179,21 @@ impl Renderer {
             self.program_slot(id).pipelines.hits_sun[usize::from(mixed)][shading as usize]
         };
         // Each dispatch: its program's pipeline and group 0 with the slot's dynamic offset.
-        let dispatches: Option<Vec<(&wgpu::ComputePipeline, &wgpu::BindGroup, u32, bool)>> =
-            if mixed {
-                let group = bindings.list[shading as usize].as_ref();
-                let stride = state.list_stride();
-                state
-                    .programs
-                    .iter()
-                    .enumerate()
-                    .map(|(k, &id)| {
-                        Some((&**hits(id)?, &**group?, k as u32 * stride?, uses_sun(id)))
-                    })
-                    .collect()
-            } else {
-                let group = bindings.shade[shading as usize].as_ref();
-                hits(state.program).zip(group).map(|(pipeline, group)| {
-                    vec![(&**pipeline, &**group, 0, uses_sun(state.program))]
-                })
-            };
+        let dispatches: Option<Vec<(&wgpu::ComputePipeline, &wgpu::BindGroup, u32, bool)>> = if mixed {
+            let group = bindings.list[shading as usize].as_ref();
+            let stride = state.list_stride();
+            state
+                .programs
+                .iter()
+                .enumerate()
+                .map(|(k, &id)| Some((&**hits(id)?, &**group?, k as u32 * stride?, uses_sun(id))))
+                .collect()
+        } else {
+            let group = bindings.shade[shading as usize].as_ref();
+            hits(state.program)
+                .zip(group)
+                .map(|(pipeline, group)| vec![(&**pipeline, &**group, 0, uses_sun(state.program))])
+        };
         let Some(dispatches) = dispatches else {
             return;
         };

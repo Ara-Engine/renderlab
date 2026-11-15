@@ -17,10 +17,10 @@ use crate::gi_bvh::{self, Blas};
 use crate::primary_ray::{TRACED_DRAWS, placement_table};
 #[path = "gi_refill_priority.rs"]
 mod priority;
-#[path = "gi_queue_probe.rs"]
-mod queue_probe;
 #[path = "gi_refill_feedback.rs"]
 mod refill_feedback;
+#[path = "gi_queue_probe.rs"]
+mod queue_probe;
 
 pub(crate) const HEADER_WORDS: u64 = 64;
 /// Keep the original admission policy: packing storage must not change the chosen
@@ -36,7 +36,7 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
     (light_cold_offset(directions) + lights.div_ceil(32).max(1)).next_multiple_of(4)
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
-pub(crate) const COUNTER_WORDS: u64 = 48;
+pub(crate) const COUNTER_WORDS: u64 = 384;
 const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
@@ -63,6 +63,33 @@ pub(crate) const GATHER_GROUPS: u32 = 4096;
 /// blotches for the first 8-16+ frames (Ara's Showcase). P-DEFECT gave them the hardware
 /// budget (P-GI and P-GATHER made software gathers cheaper since G2b; docs/p-defect.md).
 const GATHER_CELLS: u32 = 32768;
+/// First fill (gicut, on with hardware rays; `first_fill_on`): the most cells a frame creates
+/// (shaders/gi_cache.wgsl gi_fill_bin; after a cut the pixels' parent cells, which cover every
+/// receiver, are always created), and software rays' gather budget. Outpost non-RT after a cut: 0.4 us a new cell's
+/// sky rays and 1.3 us a gather, so 16k cells and 8k gathers stay near 15 ms over the frame's
+/// steady cost; hardware rays: 11 ns and 0.12 us.
+const FILL_CELLS_HARDWARE: u32 = 65536;
+const FILL_CELLS_SOFTWARE: u32 = 16384;
+/// Software rays' gather budget in estimated rays a frame (first fill). Main's steady frames
+/// spend at most about 230k (Outpost in motion; Glint's flight peaks at 33k), a cut's frames a
+/// median of 880k and up to 1.5M: 2^20 never throttles steady frames and drains a cut at about
+/// main's typical rate, without the peaks.
+const GATHER_RAYS_SOFTWARE: u32 = 1 << 20;
+/// Frames after a cut or clear whose pixels also request their parent cells and whose claims
+/// are capped (first fill).
+const FILL_PARENT_FRAMES: u32 = 32;
+/// Frames after a cut or clear whose claims stay capped: past the parents' window, so the
+/// cells deferred until then are not all created on the frame the cap ends.
+const FILL_CLAIM_FRAMES: u32 = 64;
+/// Whether first fill runs on this path: on with hardware rays, off with software rays (main's
+/// claims and gathers; its cut refill there still trades the stall for a longer, dearer tail).
+/// `RENDERLAB_GI_FIRST_FILL=1` turns it on for both paths, `=0` off for both.
+fn first_fill_on(software: bool) -> bool {
+    static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
+    FORCED
+        .get_or_init(|| std::env::var("RENDERLAB_GI_FIRST_FILL").ok().map(|v| v != "0"))
+        .unwrap_or(!software)
+}
 /// `cut_gather_ms` (U-RTVIS): gathers per millisecond of GPU time, software rays (Outpost non-RT
 /// after a cut: about 0.95 ms per 1,000, ara-integration perf/table-outpost-view2.md) and
 /// hardware rays (assumed four times faster until measured), and the frames after a cut it holds.
@@ -286,8 +313,14 @@ pub struct IndirectSettings {
     pub min_edge: f32,
     pub levels: u32,
     /// log2 of the slot count (each slot is 224 bytes in the table, plus 16 of outgoing
-    /// radiance and 4 of claim word).
+    /// radiance and 4 of claim word). With `auto_slots`, the most the table grows to.
     pub slots_log2: u32,
+    /// Memory cut 1 (U-FIXED): the table starts at a size from the scene's triangle count
+    /// (`scene_slots_log2`) and doubles, emptied, whenever a frame's claims find a bucket full
+    /// (the `full` counter, read back without waiting), up to `slots_log2`. Off: the table is
+    /// 2^`slots_log2` from the start (the default: each doubling empties the table, three full
+    /// refills at Glint's load). `RENDERLAB_GI_SLOTS=N` fixes 2^N either way (A/B).
+    pub auto_slots: bool,
     /// Fixed-rotation refresh (W2): a cell re-traces when (slot + frame) % period == 0.
     /// 0 disables it; events alone keep sky visibility current.
     pub rotation_period: u32,
@@ -447,6 +480,7 @@ impl Default for IndirectSettings {
             min_edge: 1.0 / 512.0,
             levels: 14,
             slots_log2: 20,
+            auto_slots: false,
             rotation_period: 0,
             evict_frames: 120,
             force_software: false,
@@ -554,6 +588,11 @@ pub struct IndirectStats {
     pub bounce_bytes: u64,
     /// The cell-space filter's unfiltered sources (G3), in bytes.
     pub filter_bytes: u64,
+    /// The table's slots, the times `auto_slots` doubled it, and the largest per-frame
+    /// bucket-full count read back since the last doubling.
+    pub slots: u32,
+    pub slot_doublings: u32,
+    pub peak_full: u32,
 }
 
 /// GPU microseconds per cache pass of the last profiled frame.
@@ -647,6 +686,10 @@ pub struct IndirectCounters {
     pub evicted_recent: u32,
     /// Pixels' misses that found no slot, once per claim round (`full` counts every band's).
     pub full_pixel: u32,
+    /// The gather ray budget (first fill): the queue's estimated rays, and the cuts (1 + the
+    /// first bin left for later; 0 none) for pixels' cells and the rest.
+    pub gather_estimate: u32,
+    pub gather_cuts: [u32; 2],
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -713,6 +756,10 @@ struct Pipelines {
     finish: Owned<wgpu::ComputePipeline>,
     integrate: Owned<wgpu::ComputePipeline>,
     gather: Owned<wgpu::ComputePipeline>,
+    fill_count: Owned<wgpu::ComputePipeline>,
+    fill_select: Owned<wgpu::ComputePipeline>,
+    gather_count: Owned<wgpu::ComputePipeline>,
+    gather_select: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
     filter: Owned<wgpu::ComputePipeline>,
 }
@@ -1156,11 +1203,14 @@ impl Planner {
         header[31] = u32::from(s.parent_standin);
         // U-RTVIS: a cut's gathers held to a time budget, the cells pixels read first.
         let cut_window = s.cut_gather_ms > 0.0 && self.since_cut < CUT_GATHER_FRAMES;
-        let per_ms = if software {
-            GATHERS_PER_MS_SOFTWARE
-        } else {
-            GATHERS_PER_MS_HARDWARE
-        };
+        let per_ms = if software { GATHERS_PER_MS_SOFTWARE } else { GATHERS_PER_MS_HARDWARE };
+        // First fill caps a frame's new cells for FILL_CLAIM_FRAMES after a cut or clear
+        // (unless claims are set explicitly); steady frames keep main's uncapped claims.
+        // Software rays' gathers are held to GATHER_RAYS_SOFTWARE estimated rays a frame
+        // instead of a cell count (shaders/gi_cache.wgsl gi_gather_rays).
+        let since_fill = since_clear.min(self.since_cut);
+        let fill = first_fill_on(software) && s.claim_cells == u32::MAX && since_fill < FILL_CLAIM_FRAMES;
+        let ray_budget = first_fill_on(software) && software && s.gather_cells == 0 && !cut_window;
         header[20] = match s.gather_cells {
             _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
             0 => GATHER_CELLS,
@@ -1197,10 +1247,23 @@ impl Planner {
         header[27] = spread.to_bits();
         header[29] = s.mover_hit_levels;
         // The most cells pixels read in a frame: the view's pixels over a cell's.
+        header[48] = match (fill, software) {
+            (false, _) => 0,
+            (true, true) => FILL_CELLS_SOFTWARE,
+            (true, false) => FILL_CELLS_HARDWARE,
+        };
+        // The pixel cells' gather rotation counts from the last cut or clear, and for
+        // FILL_PARENT_FRAMES after it pixels also request their parent cells, which the capped
+        // claim admits first (shaders/gi_cache.wgsl gi_fill_bin).
+        header[49] = match since_fill {
+            u32::MAX => self.frame,
+            n => n,
+        };
+        header[50] = u32::from(fill && since_fill < FILL_PARENT_FRAMES);
+        header[54] = u32::from(fill && since_fill == 0);
+        header[53] = if ray_budget { GATHER_RAYS_SOFTWARE } else { 0 };
         header[28] = if s.gather_pixels_first || cut_window {
-            ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels))
-                .ceil()
-                .max(1.0) as u32
+            ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {
             0
         };
@@ -1476,13 +1539,8 @@ impl Planner {
         // A gather cap spreads a cut's gathers over more frames: still frames keep running
         // until a spread of up to 64 slot groups per gather generation can have drained.
         let idle_after = match (bounce, s.gather_cells) {
-            (true, _) if begun.header[priority::HEADER_LIMIT] != 0 => {
-                IDLE_AFTER_BOUNCE
-                    + c.slots
-                        .div_ceil(begun.header[priority::HEADER_LIMIT])
-                        .max(64)
-                        * (s.gathers + 1)
-            }
+            (true, _) if begun.header[priority::HEADER_LIMIT] != 0 => IDLE_AFTER_BOUNCE
+                + c.slots.div_ceil(begun.header[priority::HEADER_LIMIT]).max(64) * (s.gathers + 1),
             (false, _) => IDLE_AFTER,
             (true, u32::MAX) => IDLE_AFTER_BOUNCE,
             (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
@@ -1583,8 +1641,101 @@ pub(super) struct GiState {
     mixed_active: bool,
     /// The CPU history and per-frame plan (shared with the ara-gpu backend).
     planner: Planner,
+    /// `auto_slots`: the bucket-full readback and a pending doubling.
+    watch: Option<FullWatch>,
+    grow: bool,
 }
 
+/// The `full` counter (work word 4) of recent cache frames, copied after their passes into a
+/// small ring of mappable buffers and read once mapped, a frame or two later: no frame waits.
+pub(crate) struct FullWatch {
+    ring: Vec<(wgpu::Buffer, WatchState)>,
+}
+enum WatchState {
+    Free,
+    Recorded,
+    Mapping(Arc<std::sync::OnceLock<bool>>),
+}
+impl FullWatch {
+    const RING: usize = 3;
+    fn new(device: &wgpu::Device) -> Self {
+        let ring = (0..Self::RING)
+            .map(|_| {
+                let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("indirect cache full-bucket readback"),
+                    size: 8,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                (buffer, WatchState::Free)
+            })
+            .collect();
+        Self { ring }
+    }
+    /// After the cache passes: copies this frame's counter into a free entry, if any.
+    fn record(&mut self, encoder: &mut wgpu::CommandEncoder, work: &wgpu::Buffer) {
+        if let Some((buffer, state)) = self
+            .ring
+            .iter_mut()
+            .find(|(_, s)| matches!(s, WatchState::Free))
+        {
+            encoder.copy_buffer_to_buffer(work, 16, buffer, 0, 8);
+            *state = WatchState::Recorded;
+        }
+    }
+    /// After the frame's submission: maps what it recorded.
+    pub(crate) fn submitted(&mut self) {
+        for (buffer, state) in &mut self.ring {
+            if matches!(state, WatchState::Recorded) {
+                let done = Arc::new(std::sync::OnceLock::new());
+                let callback = done.clone();
+                buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                    let _ = callback.set(r.is_ok());
+                });
+                *state = WatchState::Mapping(done);
+            }
+        }
+    }
+    /// The largest count among entries mapped since (after a device poll), if any.
+    fn collect(&mut self) -> Option<u32> {
+        let mut largest = None;
+        for (buffer, state) in &mut self.ring {
+            let WatchState::Mapping(done) = state else {
+                continue;
+            };
+            let Some(&ok) = done.get() else { continue };
+            if ok {
+                let full = buffer
+                    .slice(..)
+                    .get_mapped_range()
+                    .map(|v| u32::from_le_bytes(v[..4].try_into().unwrap()))
+                    .unwrap_or(0);
+                buffer.unmap();
+                largest = Some(largest.unwrap_or(0).max(full));
+            }
+            *state = WatchState::Free;
+        }
+        largest
+    }
+}
+
+/// `auto_slots`' starting size: about a quarter as many slots as the scene's drawn triangles
+/// (instances counted), between 2^16 and `cap`. Showcase (about 380k) starts at 2^17, Outpost
+/// (3.1M) and the quarry (13M) at the cap.
+pub(crate) fn scene_slots_log2(triangles: u64, cap: u32) -> u32 {
+    let log2 = 64 - triangles.max(1).leading_zeros();
+    log2.saturating_sub(2).clamp(16, cap.max(16))
+}
+/// `RENDERLAB_GI_SLOTS=N`: the table fixed at 2^N slots (measurement A/B).
+fn forced_slots_log2() -> Option<u32> {
+    static FORCED: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| {
+        std::env::var("RENDERLAB_GI_SLOTS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .filter(|n| (10..=21).contains(n))
+    })
+}
 impl GiState {
     pub fn new(device: &wgpu::Device, ledger: &Ledger) -> Self {
         let dummy = ledger.own(
@@ -1626,6 +1777,14 @@ impl GiState {
             shade: None,
             mixed: vec![],
             mixed_active: false,
+            watch: None,
+            grow: false,
+        }
+    }
+    /// After the frame's submission (Renderer::submit_frame): maps the full-bucket readback.
+    pub(crate) fn submitted(&mut self) {
+        if let Some(watch) = &mut self.watch {
+            watch.submitted();
         }
     }
     /// The table shading binds (lighting group 3, binding 20).
@@ -1838,19 +1997,34 @@ impl Renderer {
         Ok(true)
     }
     /// Selects world radiance cache settings. Enabling allocates the table (all
-    /// slots empty); a new slot count reallocates it. Takes effect on the next lit
-    /// traced or visibility-buffer frame whose programs call `indirect_irradiance`.
+    /// slots empty); a new slot count reallocates it. With `auto_slots` (and no
+    /// `RENDERLAB_GI_SLOTS`), the first eligible frame sizes it to its scene instead
+    /// (`prepare_gi`), and a table already sized keeps its size, within the new cap. Takes
+    /// effect on the next lit traced or visibility-buffer frame whose programs call
+    /// `indirect_irradiance`.
     pub fn set_indirect(&mut self, settings: IndirectSettings) -> Result<(), Error> {
         self.check_fault()?;
         settings.validate()?;
-        let slots = self.gi_slots(settings.slots_log2);
+        let slots = match forced_slots_log2() {
+            Some(log2) => Some(self.gi_slots(log2)),
+            None if settings.auto_slots => self
+                .gi
+                .resources
+                .as_ref()
+                .map(|r| r.slots.min(self.gi_slots(settings.slots_log2))),
+            None => Some(self.gi_slots(settings.slots_log2)),
+        };
         // The filter's sources are sized by the setting (G3).
-        let raw_slots = if settings.filter != 0 { slots } else { 1 };
-        let reallocate = settings.enabled
-            && self.gi.resources.as_ref().is_none_or(|r| {
-                r.slots != slots || r.raw_slots != raw_slots || r.directions != settings.directions
-            });
-        if reallocate {
+        let raw_slots = |slots| if settings.filter != 0 { slots } else { 1 };
+        let reallocate = slots.filter(|&slots| {
+            settings.enabled
+                && self.gi.resources.as_ref().is_none_or(|r| {
+                    r.slots != slots
+                        || r.raw_slots != raw_slots(slots)
+                        || r.directions != settings.directions
+                })
+        });
+        if let Some(slots) = reallocate {
             let previous = std::mem::replace(&mut self.gi.settings, settings);
             let allocated = self.allocate_gi(slots);
             self.gi.settings = previous;
@@ -1953,16 +2127,7 @@ impl Renderer {
                     storage | wgpu::BufferUsages::COPY_SRC,
                 ),
                 draws: buffer("indirect cache draw table", draws_bytes, storage),
-                raw: buffer(
-                    "indirect cache filter sources",
-                    raw_bytes,
-                    storage
-                        | if queue_probe::enabled() {
-                            wgpu::BufferUsages::COPY_SRC
-                        } else {
-                            wgpu::BufferUsages::empty()
-                        },
-                ),
+                raw: buffer("indirect cache filter sources", raw_bytes, storage | if queue_probe::enabled() {wgpu::BufferUsages::COPY_SRC} else {wgpu::BufferUsages::empty()}),
                 slots,
                 cold_words,
                 directions,
@@ -1977,6 +2142,7 @@ impl Renderer {
                 ],
             };
             self.gi.stats.table_bytes = table_bytes;
+            self.gi.stats.slots = slots;
             self.gi.stats.work_bytes = work_bytes;
             self.gi.stats.bounce_bytes =
                 outgoing_bytes + draws_bytes + (2 * (1 + u64::from(slots)) + u64::from(slots)) * 4;
@@ -2153,12 +2319,7 @@ impl Renderer {
             return;
         }
         let priority = priority::on();
-        let stamps = PROFILE_STAMPS
-            + if priority {
-                2 * (2 + 2 * CLAIM_ROUNDS)
-            } else {
-                0
-            };
+        let stamps = PROFILE_STAMPS + if priority { 2 * (2 + 2 * CLAIM_ROUNDS) } else { 0 };
         let stride = (u64::from(stamps) * 8).div_ceil(PROFILE_STRIDE) * PROFILE_STRIDE;
         let queries = self.ledger.own(
             self.device.create_query_set(&wgpu::QuerySetDescriptor {
@@ -2238,33 +2399,15 @@ impl Renderer {
                 IndirectProfile {
                     probe: pass(0),
                     claim: (0..rounds).map(|k| pass(1 + 2 * k)).sum::<f64>()
-                        + if profile.priority {
-                            (0..rounds)
-                                .map(|k| pass(PROFILE_STAMPS as usize / 2 + 2 + 2 * k))
-                                .sum()
-                        } else {
-                            0.0
-                        },
+                        + if profile.priority { (0..rounds).map(|k|pass(PROFILE_STAMPS as usize/2+2+2*k)).sum() } else {0.0},
                     resolve: (0..rounds).map(|k| pass(2 + 2 * k)).sum::<f64>()
-                        + if profile.priority {
-                            (0..rounds)
-                                .map(|k| pass(PROFILE_STAMPS as usize / 2 + 3 + 2 * k))
-                                .sum()
-                        } else {
-                            0.0
-                        },
+                        + if profile.priority { (0..rounds).map(|k|pass(PROFILE_STAMPS as usize/2+3+2*k)).sum() } else {0.0},
                     scan: pass(1 + 2 * rounds),
                     setup: pass(2 + 2 * rounds),
                     rays: pass(3 + 2 * rounds),
                     finish: pass(4 + 2 * rounds),
                     integrate: pass(5 + 2 * rounds),
-                    gather: pass(6 + 2 * rounds)
-                        + if profile.priority {
-                            pass(PROFILE_STAMPS as usize / 2)
-                                + pass(PROFILE_STAMPS as usize / 2 + 1)
-                        } else {
-                            0.0
-                        },
+                    gather: pass(6 + 2 * rounds) + if profile.priority {pass(PROFILE_STAMPS as usize/2)+pass(PROFILE_STAMPS as usize/2+1)} else {0.0},
                     light: pass(7 + 2 * rounds),
                     shade: pass(8 + 2 * rounds),
                     filter: pass(9 + 2 * rounds),
@@ -2342,35 +2485,24 @@ impl Renderer {
             evicted: w[44],
             evicted_recent: w[45],
             full_pixel: w[46],
+            gather_estimate: w[256..352].iter().fold(0u32, |a, &b| a.saturating_add(b)),
+            gather_cuts: [w[352], w[353]],
         }))
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires
     /// RENDERLAB_GI_QUEUE_DIAG before allocation. Reads roughly table+raw+queue bytes.
-    pub fn begin_indirect_queue_probe(&mut self) -> Result<(), Error> {
-        if !queue_probe::enabled() {
-            return Err(Error::InvalidInput("GI queue diagnostic is unset"));
-        }
-        let r = self
-            .gi
-            .resources
-            .as_ref()
-            .ok_or(Error::InvalidInput("GI queue diagnostic needs a cache"))?;
-        if let Some(probe) = self.gi.queue_probe.as_mut() {
-            probe.arm();
-        } else {
-            self.gi.queue_probe = Some(queue_probe::State::new(&self.device, r));
-        }
+    pub fn begin_indirect_queue_probe(&mut self) -> Result<(),Error> {
+        if !queue_probe::enabled() {return Err(Error::InvalidInput("GI queue diagnostic is unset"));}
+        let r=self.gi.resources.as_ref().ok_or(Error::InvalidInput("GI queue diagnostic needs a cache"))?;
+        if let Some(probe)=self.gi.queue_probe.as_mut() {probe.arm();}
+        else {self.gi.queue_probe=Some(queue_probe::State::new(&self.device,r));}
         Ok(())
     }
     /// First visible, refresh visible, background, ineligible, duplicates, queue entries,
     /// and visible first-fill cells with filtered neighbour data. Zero raw bounce means
     /// never gathered; the nonzero negative-zero sentinel means gathered with zero light.
-    pub fn indirect_queue_probe(&mut self) -> Result<[u32; 7], Error> {
-        self.gi
-            .queue_probe
-            .as_ref()
-            .ok_or(Error::InvalidInput("GI queue probe was not armed"))?
-            .read(&self.device)
+    pub fn indirect_queue_probe(&mut self) -> Result<[u32;7],Error> {
+        self.gi.queue_probe.as_ref().ok_or(Error::InvalidInput("GI queue probe was not armed"))?.read(&self.device)
     }
     /// Blocks until the GPU is idle and copies the whole table (determinism gates).
     pub fn indirect_table(&mut self) -> Result<Option<Vec<u32>>, Error> {
@@ -2727,17 +2859,10 @@ impl Renderer {
         let priority = software && priority::on();
         let pipelines = Pipelines {
             software,
-            priority: priority.then(|| priority::Pipelines::new(|name| compute(name, main))),
+            priority: priority.then(|| priority::Pipelines::new(|name|compute(name, main))),
             directions,
             probe: compute("gi_probe", main),
-            claim: compute(
-                if priority {
-                    "gi_priority_claim_visible"
-                } else {
-                    "gi_claim"
-                },
-                main,
-            ),
+            claim: compute(if priority { "gi_priority_claim_visible" } else { "gi_claim" }, main),
             resolve: compute("gi_resolve", main),
             resolve_last: compute("gi_resolve_last", main),
             scan: compute("gi_scan", main),
@@ -2755,6 +2880,10 @@ impl Renderer {
                 },
                 main,
             ),
+            fill_count: compute("gi_fill_count", main),
+            fill_select: compute("gi_fill_select", main),
+            gather_count: compute("gi_gather_count", main),
+            gather_select: compute("gi_gather_select", main),
             light: compute("gi_light", main),
             filter: compute("gi_filter", main),
         };
@@ -2867,8 +2996,10 @@ impl Renderer {
                     .push((self.submissions, Retired::Arrays(old)));
             }
         }
-        let revisions: Vec<(u64, u64)> =
-            draws.iter().map(|d| d.instances.state.revision()).collect();
+        let revisions: Vec<(u64, u64)> = draws
+            .iter()
+            .map(|d| d.instances.state.revision())
+            .collect();
         let a = self.gi.arrays.as_mut().unwrap();
         if a.revisions != revisions {
             // The same bytes the traced shading tables publish, in placement order.
@@ -3075,7 +3206,41 @@ impl Renderer {
             if !(self.gi.settings.enabled && eligible && self.gi_callers(draws)) {
                 return Ok(());
             }
-            self.allocate_gi(self.gi_slots(self.gi.settings.slots_log2))?;
+            let cap = self.gi.settings.slots_log2;
+            let log2 = match forced_slots_log2() {
+                Some(n) => n,
+                None if self.gi.settings.auto_slots => {
+                    let triangles: u64 = draws
+                        .iter()
+                        .map(|d| {
+                            u64::from(d.indices.len() as u32 / 3) * u64::from(d.slots.len() as u32)
+                        })
+                        .sum();
+                    scene_slots_log2(triangles, cap)
+                }
+                None => cap,
+            };
+            self.allocate_gi(self.gi_slots(log2))?;
+            self.gi.watch = (forced_slots_log2().is_none() && self.gi.settings.auto_slots)
+                .then(|| FullWatch::new(&self.device));
+            self.gi.grow = false;
+        }
+        // auto_slots: a full bucket since the last look doubles the table (emptied, so the
+        // cache refills as after a cut), up to slots_log2 and the device's binding limit.
+        if let Some(full) = self.gi.watch.as_mut().and_then(FullWatch::collect) {
+            self.gi.stats.peak_full = self.gi.stats.peak_full.max(full);
+            self.gi.grow |= full > 0;
+        }
+        if self.gi.grow {
+            self.gi.grow = false;
+            let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
+            let next = self.gi_slots((slots.trailing_zeros() + 1).min(self.gi.settings.slots_log2));
+            if next > slots {
+                self.allocate_gi(next)?;
+                self.gi.stats.slot_doublings += 1;
+                self.gi.stats.peak_full = 0;
+                self.gi.watch = Some(FullWatch::new(&self.device));
+            }
         }
         // LC2: changing light count may outgrow the bitset. Existing in-flight tables
         // retire normally; scheduling and cache lookup are otherwise unchanged.
@@ -3085,7 +3250,8 @@ impl Renderer {
                     < light_cold_words(self.lighting.pending.count, self.gi.settings.directions)
             })
         {
-            self.allocate_gi(self.gi_slots(self.gi.settings.slots_log2))?;
+            let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
+            self.allocate_gi(slots)?;
         }
         let hardware = self.hardware_shadows.is_some() && !self.gi.settings.force_software;
         let run = self.gi.settings.enabled && eligible && self.gi_callers(draws);
@@ -3095,26 +3261,19 @@ impl Renderer {
         // Bounce (G2): the setting is on and this frame's program reflects light. A change
         // empties the table, so no cell keeps bounce light from another program's frames.
         let bounce = run && self.gi.settings.bounce && self.ensure_gi_shade(software)?;
-        if run && software && priority::on() {
-            if let priority::Mode::Milliseconds(target) = priority::mode() {
-                if self.gi.refill_feedback.is_none() {
-                    if !self
-                        .device
-                        .features()
-                        .contains(wgpu::Features::TIMESTAMP_QUERY)
-                    {
-                        return Err(Error::InvalidInput(
-                            "GI refill time target requires timestamp queries",
-                        ));
-                    }
-                    self.gi.refill_feedback = Some(refill_feedback::State::new(
-                        &self.device,
-                        &self.queue,
-                        &self.ledger,
-                    ));
+        if bounce && software && priority::on() {
+            if self.gi.refill_feedback.is_none() {
+                if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+                    return Err(Error::InvalidInput("GI soft gather target requires timestamp queries"));
                 }
-                self.gi.refill_feedback.as_mut().unwrap().collect(target);
+                self.gi.refill_feedback = Some(refill_feedback::State::new(&self.device,&self.queue,&self.ledger));
             }
+            let target = match priority::mode() { priority::Mode::Milliseconds(ms) => ms, _ => priority::gather_target() };
+            let feedback = self.gi.refill_feedback.as_mut().unwrap();
+            feedback.collect(target);
+            feedback.set_frame(self.frames + 1);
+        } else {
+            self.gi.refill_feedback = None;
         }
         let r = self.gi.resources.as_ref().unwrap();
         let config = PlanConfig {
@@ -3139,14 +3298,13 @@ impl Renderer {
         self.gi.priority_hold = false;
         if software && priority::on() {
             let fallback = priority::Controller::default();
-            let controller = self
-                .gi
-                .refill_feedback
-                .as_ref()
-                .map_or(&fallback, |f| &f.controller);
+            let controller = self.gi.refill_feedback.as_ref().map_or(&fallback,|f|&f.controller);
             controller.header(&mut begun.header, priority::mode());
             priority::measurement_header(&mut begun.header);
-            self.gi.priority_compact = priority::compact_available(begun.header[32]);
+            self.gi.priority_compact = priority::compact_available(begun.header[32], r.slots);
+            if !self.gi.priority_compact {
+                return Err(Error::InvalidInput("GI ordered first-fill lists exceed the existing ray arena"));
+            }
             self.gi.priority_hold = matches!(priority::mode(), priority::Mode::Hold(n) if self.gi.planner.since_cut < n);
         }
         let raw: Vec<u8> = begun.header.iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -3161,7 +3319,8 @@ impl Renderer {
         let rows = draws.iter().enumerate().map(|(b, d)| {
             let n = d.instances.len() as u32;
             let program = d.material.map_or(self.standard.id(), |m| m.program.id());
-            let selector = if mixed && self.program_slot(program).traits.reflects {
+            let selector = if mixed && self.program_slot(program).traits.reflects
+            {
                 cell_selector(program)
             } else {
                 0
@@ -3220,9 +3379,7 @@ impl Renderer {
                 part(&[&self.lighting.decals.hash, &self.lighting.transmission.hash]),
             ];
             self.gi.relight_parts = match &self.gi.key_parts {
-                Some(old) => (0..5)
-                    .filter(|&i| old[i] != parts[i])
-                    .fold(0, |m, i| m | 1 << i),
+                Some(old) => (0..5).filter(|&i| old[i] != parts[i]).fold(0, |m, i| m | 1 << i),
                 None => 0,
             };
             self.gi.key_parts = Some(parts);
@@ -3477,7 +3634,8 @@ impl GiState {
                 encoder.clear_buffer(&r.work, u64::from(at) * 4, Some(4));
             }
         }
-        encoder.clear_buffer(&r.work, 0, Some(COUNTER_WORDS * 4));
+        // The last counter word (GI_W_FILL_PENDING) carries over to the next frame.
+        encoder.clear_buffer(&r.work, 0, Some((COUNTER_WORDS - 1) * 4));
         // Next frame's gather queue starts empty; this frame's holds last frame's appends.
         if plan.bounce {
             encoder.clear_buffer(&r.work, plan.next_queue_at, Some(4));
@@ -3506,11 +3664,7 @@ impl GiState {
                          groups: Option<[u32; 2]>| {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some(label),
-                timestamp_writes: if stamp == u32::MAX {
-                    None
-                } else {
-                    stamps(stamp)
-                },
+                timestamp_writes: if stamp == u32::MAX { None } else { stamps(stamp) },
             });
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &*g.main, &[]);
@@ -3536,112 +3690,64 @@ impl GiState {
                 traced.then_some(plan.groups),
             );
         }
-        if let Some(probe) = self.queue_probe.as_mut() {
-            probe.encode(encoder, r, self.planner.tick_queues[0]);
+        if let Some(probe)=self.queue_probe.as_mut() {
+            probe.encode(encoder,r,self.planner.tick_queues[0]);
         }
         // Bounce gathers (G2) read last frame's outgoing radiance and may request hit cells
         // for the claim rounds that follow.
         let b = 6 + 2 * CLAIM_ROUNDS;
         mark(encoder, "gi_gather");
-        if let Some(feedback) = &mut self.refill_feedback {
-            feedback.begin(encoder);
+        if let Some(feedback) = &mut self.refill_feedback { feedback.begin(encoder); }
+        if p.priority.is_some() {
+            encoder.clear_buffer(&r.work,u64::from(layout.items)*4,Some(16*4));
         }
         if plan.bounce || profiling {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
+            // The gather ray budget's admission (no-ops without it).
+            main_pass(encoder, "indirect gather count", &p.gather_count, u32::MAX, grid);
+            main_pass(encoder, "indirect gather select", &p.gather_select, u32::MAX, grid.map(|_| [1, 1]));
             if let Some(priority) = &p.priority {
                 if self.priority_hold {
-                    main_pass(encoder, "indirect gather hold", &priority.hold, b, grid);
+                    main_pass(encoder,"indirect gather hold",&priority.hold,b,grid);
                 } else if self.priority_compact {
                     // Reuse claim scratch and the ray arena, before setup writes ray items.
-                    encoder.clear_buffer(&r.work, COUNTER_WORDS * 4, Some(u64::from(r.slots) * 4));
-                    encoder.clear_buffer(&r.work, u64::from(layout.items) * 4, Some(8 * 4));
-                    main_pass(
-                        encoder,
-                        "indirect gather candidates",
-                        &priority.compact,
-                        u32::MAX,
-                        grid,
-                    );
-                    main_pass(
-                        encoder,
-                        "indirect gather selection",
-                        &priority.select,
-                        u32::MAX,
-                        plan.bounce.then_some([1, 1]),
-                    );
-                    main_pass(
-                        encoder,
-                        "indirect gather deferral",
-                        &priority.defer,
-                        u32::MAX,
-                        grid,
-                    );
-                    main_pass(
-                        encoder,
-                        "indirect cache gather",
-                        &priority.gather_compacted,
-                        b,
-                        grid,
-                    );
+                    encoder.clear_buffer(&r.work,COUNTER_WORDS*4,Some(u64::from(r.slots)*4));
+                    main_pass(encoder,"indirect gather candidates",&priority.compact,u32::MAX,grid);
+                    main_pass(encoder,"indirect gather selection",&priority.select,u32::MAX,plan.bounce.then_some([1,1]));
+                    main_pass(encoder,"indirect gather deferral",&priority.defer,u32::MAX,grid);
+                    main_pass(encoder,"indirect first-fill gather",&priority.gather_first,b,grid);
+                    if let Some(feedback) = &self.refill_feedback { feedback.after_first(encoder,&r.work); }
+                    main_pass(encoder,"indirect refresh gather",&priority.gather_refresh,PROFILE_STAMPS/2,grid);
                 } else {
-                    main_pass(encoder, "indirect cache gather", &p.gather, b, grid);
+                    main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
                 }
-                let legacy_grid = if self.priority_hold || self.priority_compact {
-                    None
-                } else {
-                    grid
-                };
-                main_pass(
-                    encoder,
-                    "indirect gather ticket clamp",
-                    &priority.gather_clamp,
-                    u32::MAX,
-                    legacy_grid.map(|_| [1, 1]),
-                );
-                main_pass(
-                    encoder,
-                    "indirect visible gather",
-                    &priority.gather_later,
-                    PROFILE_STAMPS / 2,
-                    legacy_grid,
-                );
-                main_pass(
-                    encoder,
-                    "indirect gather ticket clamp",
-                    &priority.gather_clamp,
-                    u32::MAX,
-                    legacy_grid.map(|_| [1, 1]),
-                );
-                main_pass(
-                    encoder,
-                    "indirect background gather",
-                    &priority.gather_background,
-                    PROFILE_STAMPS / 2 + 1,
-                    legacy_grid,
-                );
+                let legacy_grid = if self.priority_hold || self.priority_compact { None } else {grid};
+                main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,legacy_grid.map(|_|[1,1]));
+                if !self.priority_compact {
+                    main_pass(encoder,"indirect visible gather",&priority.gather_later,PROFILE_STAMPS/2,legacy_grid);
+                }
+                main_pass(encoder,"indirect gather ticket clamp",&priority.gather_clamp,u32::MAX,legacy_grid.map(|_|[1,1]));
+                main_pass(encoder,"indirect background gather",&priority.gather_background,PROFILE_STAMPS/2+1,legacy_grid);
             } else {
-                main_pass(encoder, "indirect cache gather", &p.gather, b, grid);
+                main_pass(encoder,"indirect cache gather",&p.gather,b,grid);
             }
         }
         if let Some(feedback) = &self.refill_feedback {
-            feedback.mark(encoder, 1);
-            feedback.mark(encoder, 2);
+            if !(plan.bounce || profiling) || !self.priority_compact || self.priority_hold {
+                feedback.after_first(encoder,&r.work);
+            }
+            feedback.after_gathers(encoder,&r.work,layout.items);
         }
         mark(encoder, "gi_claim");
-        if p.priority.is_some() {
-            encoder.clear_buffer(&r.work, 47 * 4, Some(4));
-        }
+        if p.priority.is_some() { encoder.clear_buffer(&r.work,47*4,Some(4)); }
         if traced || profiling {
+            // First fill's admission order, before the rounds (no-ops without its cap).
+            main_pass(encoder, "indirect fill count", &p.fill_count, u32::MAX, traced.then_some([CLAIM_GROUPS, 1]));
+            main_pass(encoder, "indirect fill select", &p.fill_select, u32::MAX, traced.then_some([1, 1]));
             for k in 0..CLAIM_ROUNDS {
                 let grid = traced.then_some([CLAIM_GROUPS, 1]);
                 if let Some(priority) = &p.priority {
-                    main_pass(
-                        encoder,
-                        "indirect claim ticket reset",
-                        &priority.claim_reset,
-                        u32::MAX,
-                        traced.then_some([1, 1]),
-                    );
+                    main_pass(encoder,"indirect claim ticket reset",&priority.claim_reset,u32::MAX,traced.then_some([1,1]));
                 }
                 main_pass(encoder, "indirect cache claim", &p.claim, 1 + 2 * k, grid);
                 let last = k + 1 == CLAIM_ROUNDS && p.priority.is_none();
@@ -3650,38 +3756,19 @@ impl GiState {
             }
             if let Some(priority) = &p.priority {
                 for k in 0..CLAIM_ROUNDS {
-                    let grid = traced.then_some([CLAIM_GROUPS, 1]);
-                    let stamp = PROFILE_STAMPS / 2 + 2 + 2 * k;
-                    main_pass(
-                        encoder,
-                        "indirect claim ticket reset",
-                        &priority.claim_reset,
-                        u32::MAX,
-                        traced.then_some([1, 1]),
-                    );
-                    main_pass(
-                        encoder,
-                        "indirect background claim",
-                        &priority.claim_background,
-                        stamp,
-                        grid,
-                    );
-                    let resolve = if k + 1 == CLAIM_ROUNDS {
-                        &p.resolve_last
-                    } else {
-                        &p.resolve
-                    };
-                    main_pass(
-                        encoder,
-                        "indirect background resolve",
-                        resolve,
-                        stamp + 1,
-                        grid,
-                    );
+                    let grid = traced.then_some([CLAIM_GROUPS,1]);
+                    let stamp = PROFILE_STAMPS/2+2+2*k;
+                    main_pass(encoder,"indirect claim ticket reset",&priority.claim_reset,u32::MAX,traced.then_some([1,1]));
+                    main_pass(encoder,"indirect background claim",&priority.claim_background,stamp,grid);
+                    let resolve = if k+1==CLAIM_ROUNDS {&p.resolve_last} else {&p.resolve};
+                    main_pass(encoder,"indirect background resolve",resolve,stamp+1,grid);
                 }
             }
         }
         let s = 1 + 2 * CLAIM_ROUNDS;
+        if let Some(feedback) = &self.refill_feedback {
+            feedback.after_claims(encoder,&r.work,layout.items);
+        }
         mark(encoder, "gi_update");
         if plan.scan || profiling {
             let groups = plan.scan.then_some([plan.scan_groups, 1]);
@@ -3696,9 +3783,7 @@ impl GiState {
             let finish = cells.filter(|_| traced);
             main_pass(encoder, "indirect cache finish", &p.finish, s + 3, finish);
         }
-        if let Some(feedback) = &mut self.refill_feedback {
-            feedback.finish(encoder, &r.work);
-        }
+        if let Some(feedback) = &mut self.refill_feedback { feedback.finish(encoder,&r.work,&r.table); }
         mark(encoder, "gi_integrate");
         if plan.integrate || profiling {
             let groups = cells.filter(|_| plan.integrate);
@@ -3750,10 +3835,9 @@ impl GiState {
         }
         if let Some(profile) = self.profile.as_ref() {
             if profile.priority && p.priority.is_none() {
-                for i in PROFILE_STAMPS / 2..profile.stamps / 2 {
+                for i in PROFILE_STAMPS/2..profile.stamps/2 {
                     encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("indirect priority profile (inactive)"),
-                        timestamp_writes: stamps(i),
+                        label: Some("indirect priority profile (inactive)"), timestamp_writes: stamps(i),
                     });
                 }
             }
@@ -3767,6 +3851,9 @@ impl GiState {
                 slot * profile.stride,
             );
             profile.written += 1;
+        }
+        if let (Some(watch), Some(r)) = (self.watch.as_mut(), self.resources.as_ref()) {
+            watch.record(encoder, &r.work);
         }
     }
 }
@@ -3796,10 +3883,7 @@ mod tests {
     #[test]
     fn a_camera_cut_opens_the_refill_window_only_with_cut_refill() {
         let config = |cut_refill: bool| PlanConfig {
-            settings: IndirectSettings {
-                cut_refill,
-                ..IndirectSettings::default()
-            },
+            settings: IndirectSettings { cut_refill, ..IndirectSettings::default() },
             slots: 1 << 20,
             misses: 1 << 16,
             cold_words: 4,
@@ -3822,10 +3906,7 @@ mod tests {
                 let begun = planner.begin(&c, true, true, true);
                 let in_window = cut_refill && frame < CUT_REFILL_FRAMES;
                 let claims = if in_window { CLAIM_CELLS_SOFTWARE } else { 0 };
-                assert_eq!(
-                    begun.header[22], claims,
-                    "cut_refill {cut_refill}, frame {frame}"
-                );
+                assert_eq!(begun.header[22], claims, "cut_refill {cut_refill}, frame {frame}");
                 // No coarse read either way: the footprint is the steady frame's.
                 assert_eq!(begun.header[4], steady.header[4], "frame {frame}");
                 // No phase spread with the refill; off, the cut is no reset either.

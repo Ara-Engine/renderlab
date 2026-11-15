@@ -504,14 +504,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             seed as f32 / u32::MAX as f32
         };
         for _ in 0..300 {
-            let (x, z, size) = (
-                -29.0 + 24.0 * next(),
-                -29.0 + 24.0 * next(),
-                0.3 + 0.9 * next(),
-            );
-            let along = (Vec3::new(x, 0.0, z) - FIELD_EYE)
-                .dot(FIELD_WALK)
-                .clamp(0.0, 4.0);
+            let (x, z, size) = (-29.0 + 24.0 * next(), -29.0 + 24.0 * next(), 0.3 + 0.9 * next());
+            let along = (Vec3::new(x, 0.0, z) - FIELD_EYE).dot(FIELD_WALK).clamp(0.0, 4.0);
             let aside = Vec3::new(x, 0.0, z) - (FIELD_EYE + along * FIELD_WALK);
             if aside.length() - FIELD_EYE.y > 2.5 || aside.length() > 6.0 {
                 spawn(

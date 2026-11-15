@@ -61,10 +61,7 @@ fn floor_luminance(hdr: &[u8]) -> f32 {
 }
 
 /// The lamp scene's engine and view, with the box placed (`Some(casts)`) or left out.
-fn lamp(
-    path: &std::path::Path,
-    shade: Option<bool>,
-) -> Result<(Engine, renderlab::engine::ViewId, Option<ObjectId>)> {
+fn lamp(path: &std::path::Path, shade: Option<bool>) -> Result<(Engine, renderlab::engine::ViewId, Option<ObjectId>)> {
     let settings = Settings {
         global_illumination: false,
         temporal_reconstruction: false,
@@ -95,20 +92,10 @@ fn lamp(
         })?;
         Ok(engine.spawn(mesh, material, Mat4::IDENTITY)?)
     };
-    spawn(
-        &mut engine,
-        [0.0, -0.05, 0.0],
-        [6.0, 0.05, 6.0],
-        [0.7, 0.7, 0.7, 1.0],
-    )?;
+    spawn(&mut engine, [0.0, -0.05, 0.0], [6.0, 0.05, 6.0], [0.7, 0.7, 0.7, 1.0])?;
     let shade = match shade {
         Some(casts) => {
-            let shade = spawn(
-                &mut engine,
-                [0.0, 1.0, 0.0],
-                [0.5, 0.5, 0.5],
-                [0.8, 0.8, 0.8, 1.0],
-            )?;
+            let shade = spawn(&mut engine, [0.0, 1.0, 0.0], [0.5, 0.5, 0.5], [0.8, 0.8, 0.8, 1.0])?;
             engine.set_casts_shadows(shade, casts)?;
             Some(shade)
         }
@@ -125,19 +112,8 @@ fn lamp(
 }
 
 /// Four frames of `engine`'s view; the last one's floor luminance.
-fn frames(
-    engine: &mut Engine,
-    gpu: &mut GpuDevice,
-    view: renderlab::engine::ViewId,
-) -> Result<f32> {
-    let camera = Camera::look_at(
-        Vec3::new(0.0, 7.0, 5.0),
-        Vec3::ZERO,
-        Vec3::Y,
-        0.9,
-        0.05,
-        100.0,
-    )?;
+fn frames(engine: &mut Engine, gpu: &mut GpuDevice, view: renderlab::engine::ViewId) -> Result<f32> {
+    let camera = Camera::look_at(Vec3::new(0.0, 7.0, 5.0), Vec3::ZERO, Vec3::Y, 0.9, 0.05, 100.0)?;
     for _ in 0..4 {
         engine.render_view(gpu, view, &camera)?;
     }
@@ -160,14 +136,9 @@ fn a_lamp_in_a_box_that_casts_no_shadow_lights_the_floor() -> Result<()> {
     let open = measure(None)?;
     let blocked = measure(Some(true))?;
     let through = measure(Some(false))?;
-    println!(
-        "casts shadows: floor beside the lamp, open {open:.4}, casting box {blocked:.4}, non-casting box {through:.4}"
-    );
+    println!("casts shadows: floor beside the lamp, open {open:.4}, casting box {blocked:.4}, non-casting box {through:.4}");
     ensure!(open > 0.002, "the open lamp lights the floor ({open})");
-    ensure!(
-        blocked < 0.05 * open,
-        "a casting box blocks the lamp ({blocked} against {open})"
-    );
+    ensure!(blocked < 0.05 * open, "a casting box blocks the lamp ({blocked} against {open})");
     ensure!(
         (through - open).abs() < 0.05 * open,
         "a non-casting box lets the lamp light the floor as if absent ({through} against {open})"
@@ -179,9 +150,6 @@ fn a_lamp_in_a_box_that_casts_no_shadow_lights_the_floor() -> Result<()> {
     let after = frames(&mut engine, &mut gpu, view)?;
     engine.retire(&mut gpu)?;
     println!("casts shadows: toggled mid-run, {before:.4} then {after:.4}");
-    ensure!(
-        before < 0.05 * open && (after - open).abs() < 0.05 * open,
-        "the toggle flips the frame"
-    );
+    ensure!(before < 0.05 * open && (after - open).abs() < 0.05 * open, "the toggle flips the frame");
     Ok(())
 }

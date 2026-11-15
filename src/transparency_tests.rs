@@ -371,12 +371,7 @@ fn film_instances_draw_far_to_near() {
 /// before the draw. Each span carries the rectangle the next one copies as its colour behind.
 #[test]
 fn overlapping_glass_instances_draw_one_over_another() {
-    let (a, b, c, d) = (
-        [0, 0, 10, 10],
-        [20, 0, 30, 10],
-        [5, 5, 15, 15],
-        [40, 0, 50, 10],
-    );
+    let (a, b, c, d) = ([0, 0, 10, 10], [20, 0, 30, 10], [5, 5, 15, 15], [40, 0, 50, 10]);
     assert_eq!(
         instance_spans(&[a, b, c, d]),
         vec![(0..2, [0, 0, 30, 10]), (2..4, [5, 0, 50, 15])]
@@ -414,8 +409,8 @@ fn device(rt: bool) -> (wgpu::Device, wgpu::Queue) {
     let a = adapter.limits();
     // PRIMITIVE_INDEX where the adapter has it: the per-pixel pane tests need it (the engine's
     // device requests it the same way, src/engine/device.rs).
-    let timing =
-        adapter.features() & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::PRIMITIVE_INDEX);
+    let timing = adapter.features()
+        & (wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::PRIMITIVE_INDEX);
     if rt {
         assert_eq!(
             std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref(),
