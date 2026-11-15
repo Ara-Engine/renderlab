@@ -894,10 +894,11 @@ impl Renderer {
                             allocator.1
                         );
                         let line = format!(
-                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}],\"trace\":[{},{},{},{},{},{}],\"tail\":[{},{},{}]{memory}}}\n",
+                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"pixels\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}],\"trace\":[{},{},{},{},{},{}],\"tail\":[{},{},{}]{memory}}}\n",
                             r.frame.load(SeqCst),
                             word(2),
                             word(1),
+                            word(0),
                             word(6),
                             pass.room,
                             word(7),
