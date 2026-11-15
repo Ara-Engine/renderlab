@@ -598,6 +598,10 @@ impl HardwareState {
     }
     /// The active TLAS object's generation, counting one prepared this frame: the key for
     /// bind groups over the scene. Rebuilds into the same object keep it.
+    /// The active TLAS's instance count (measurement logs).
+    pub fn active_placements(&self) -> Option<usize> {
+        self.active.as_ref().map(|a| a.placements.len())
+    }
     pub fn scene_generation(&self) -> u64 {
         self.generation
     }

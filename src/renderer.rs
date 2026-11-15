@@ -3460,6 +3460,10 @@ impl Renderer {
         // both halves run in the same queue order, so the frame's results are unchanged.
         let split = lit && traced && !temporal;
         let mut early_submit = std::time::Duration::ZERO;
+        // RENDERLAB_SUBMIT_LOG: the late window's CPU parts (GI/post preparation, then the
+        // time from the early submit's return to the late submit's return).
+        let mut late_prepare = std::time::Duration::ZERO;
+        let mut late_start: Option<Instant> = None;
         if lit && !split {
             self.prepare_cache_and_post(
                 draws,
@@ -3669,7 +3673,10 @@ impl Renderer {
                     let submitted_at = Instant::now();
                     self.queue.submit([early]);
                     early_submit = submitted_at.elapsed();
+                    let prepare_start = Instant::now();
+                    late_start = Some(prepare_start);
                     self.prepare_cache_and_post(draws, camera, color, true, true)?;
+                    late_prepare = prepare_start.elapsed();
                 }
                 if streaming && !material {
                     self.encode_request_clear(&mut encoder);
@@ -4003,12 +4010,19 @@ impl Renderer {
         let submit = submitted_at.elapsed() + early_submit;
         submit_log(|| {
             let ms = |d: std::time::Duration| d.as_secs_f64() * 1000.;
+            let instances = self
+                .hardware_shadows
+                .as_ref()
+                .and_then(|h| h.active_placements())
+                .unwrap_or(0);
             format!(
-                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2}",
+                "submit_log submission={} flights_alive={alive} finish={:.2} early_submit={:.2} queue_submit={:.2} late_prepare={:.2} late_window={:.2} tlas_instances={instances}",
                 self.submissions + 1,
                 ms(finish),
                 ms(early_submit),
                 ms(submit - early_submit),
+                ms(late_prepare),
+                late_start.map_or(0.0, |t| ms(t.elapsed())),
             )
         });
         self.submissions += 1;
