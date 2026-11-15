@@ -129,12 +129,13 @@ pub(super) struct Targets {
     previous: Depth,
     colour: Depth,
     depth_mips: Vec<wgpu::TextureView>,
+    previous_mips: Vec<wgpu::TextureView>,
     colour_mips: Vec<wgpu::TextureView>,
     state: std::sync::Mutex<Option<Previous>>,
 }
 impl Targets {
     pub(super) fn new(r: &Renderer, size: wgpu::Extent3d, room: u64) -> Self {
-        let mips = 6.min(32 - size.width.min(size.height).leading_zeros());
+        let mips = 32 - size.width.min(size.height).leading_zeros();
         let target = |label, format: wgpu::TextureFormat| {
             let texture = r.ledger.own(
                 r.device.create_texture(&wgpu::TextureDescriptor {
@@ -187,6 +188,7 @@ impl Targets {
                 .collect()
         };
         let depth_mips = views(&depth);
+        let previous_mips = views(&previous);
         let colour_mips = views(&colour);
         Self {
             results: results(r, room),
@@ -200,6 +202,7 @@ impl Targets {
             previous,
             colour,
             depth_mips,
+            previous_mips,
             colour_mips,
             state: Default::default(),
         }
@@ -270,6 +273,12 @@ impl Targets {
     }
 }
 
+impl Targets {
+    fn current(&self,frame:u64)->&Depth {if frame&1==0 {&self.depth} else {&self.previous}}
+    fn history(&self,frame:u64)->&Depth {if frame&1==0 {&self.previous} else {&self.depth}}
+    fn current_mips(&self,frame:u64)->&[wgpu::TextureView] {if frame&1==0 {&self.depth_mips} else {&self.previous_mips}}
+}
+
 pub(super) fn source(source: String, device: &wgpu::Device) -> String {
     if !enabled(device) {
         return source;
@@ -317,7 +326,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: R::TextureView(&t.depth.view),
+                    resource: R::TextureView(&t.current(self.frames).view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 4,
@@ -325,7 +334,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 6,
-                    resource: R::TextureView(&t.previous.view),
+                    resource: R::TextureView(&t.history(self.frames).view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 7,
@@ -370,7 +379,7 @@ impl Renderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 12,
-                    resource: R::TextureView(&t.depth_mips[0]),
+                    resource: R::TextureView(&t.current_mips(self.frames)[0]),
                 },
             ],
         });
@@ -391,11 +400,11 @@ impl Renderer {
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: R::TextureView(&t.depth_mips[i - 1]),
+                        resource: R::TextureView(&t.current_mips(self.frames)[i - 1]),
                     },
                     wgpu::BindGroupEntry {
                         binding: 12,
-                        resource: R::TextureView(&t.depth_mips[i]),
+                        resource: R::TextureView(&t.current_mips(self.frames)[i]),
                     },
                 ],
             });
@@ -434,28 +443,7 @@ impl Renderer {
         let group = state.bindings.as_ref().unwrap().rl_trace.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
         let size = t.depth.texture.size();
-        for i in 0..t.depth_mips.len() as u32 {
-            let extent = wgpu::Extent3d {
-                width: (size.width >> i).max(1),
-                height: (size.height >> i).max(1),
-                depth_or_array_layers: 1,
-            };
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: &t.depth.texture,
-                    mip_level: i,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &t.previous.texture,
-                    mip_level: i,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                extent,
-            );
-        }
+        // Depth alternates between two pyramids: no full-resolution history copy.
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: &self.view.hdr.as_ref().unwrap().resolved.texture,
