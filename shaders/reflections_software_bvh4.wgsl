@@ -32,6 +32,13 @@ fn rs_box(o:vec3<f32>,inv:vec3<f32>,lo:vec3<f32>,hi:vec3<f32>,tmin:f32,tmax:f32)
     let far=min(min(min(max(a.x,b.x),max(a.y,b.y)),max(a.z,b.z)),tmax);
     return select(3.4028235e38,near,near<=far);
 }
+// One quantized BVH4 child's entry distance (rs_box), or a value above `lim` for an empty slot.
+fn rs_child(o:vec3<f32>,inv:vec3<f32>,base:vec3<f32>,step:vec3<f32>,lower:vec3<u32>,upper:vec3<u32>,id:u32,shift:u32,tmin:f32,lim:f32)->f32 {
+    if id==0xffffffffu {return 3.4028235e38;}
+    let lo=vec3<f32>((lower>>vec3<u32>(shift))&vec3<u32>(255u))*step+base;
+    let hi=vec3<f32>((upper>>vec3<u32>(shift))&vec3<u32>(255u))*step+base;
+    return rs_box(o,inv,lo,hi,tmin,lim);
+}
 struct RsHit {t:f32,record:vec4<u32>};
 // Keep equal-distance candidates eligible within this instance (lower original
 // primitive wins) and in lower-index instances (the original flat-loop order).
@@ -96,33 +103,27 @@ fn rs_instance(i:u32,origin:vec3<f32>,direction:vec3<f32>,world_inv:vec3<f32>,tm
             let children=vec4<u32>(rl_geometry[n+1u].zw,rl_geometry[n+2u].xy);
             let lower=vec3<u32>(rl_geometry[n+2u].zw,n3.x);
             let upper=n3.yzw;
-            var distances:array<f32,4>;
-            var ids:array<u32,4>;
-            for(var c=0u;c<4u;c+=1u) {
-                ids[c]=children[c];
-                distances[c]=3.4028235e38;
-                if children[c]!=0xffffffffu {
-                    let lo=vec3<f32>((lower>>vec3<u32>(c*8u))&vec3<u32>(255u))*step+n0.xyz;
-                    let hi=vec3<f32>((upper>>vec3<u32>(c*8u))&vec3<u32>(255u))*step+n0.xyz;
-                    distances[c]=rs_box(o,inv,lo,hi,tmin,lim);
-                }
-            }
-            for(var c=1u;c<4u;c+=1u) {
-                var j=c;
-                loop {
-                    if j==0u {break;}
-                    if distances[j]>=distances[j-1u] {break;}
-                    let t=distances[j];distances[j]=distances[j-1u];distances[j-1u]=t;
-                    let id=ids[j];ids[j]=ids[j-1u];ids[j-1u]=id;
-                    j-=1u;
-                }
-            }
-            for(var c=4u;c>0u;c-=1u) {
-                if distances[c-1u]<=lim && ids[c-1u]!=0xffffffffu {
-                    (*stack)[sp]=ids[c-1u];sp+=1u;
-                }
-            }
+            // ---- rs child order ----
+            // The four children's entry distances in registers (no dynamically indexed arrays),
+            // ordered by a five-exchange network; the nearest is visited next without a stack
+            // round trip and the rest pushed farthest first. The closest hit and its tie rule
+            // (rs_limit, `tied`) do not depend on the visiting order.
+            var dist=vec4<f32>(rs_child(o,inv,n0.xyz,step,lower,upper,children.x,0u,tmin,lim),
+                rs_child(o,inv,n0.xyz,step,lower,upper,children.y,8u,tmin,lim),
+                rs_child(o,inv,n0.xyz,step,lower,upper,children.z,16u,tmin,lim),
+                rs_child(o,inv,n0.xyz,step,lower,upper,children.w,24u,tmin,lim));
+            var ids=children;
+            if dist.y<dist.x {dist=dist.yxzw;ids=ids.yxzw;}
+            if dist.w<dist.z {dist=dist.xywz;ids=ids.xywz;}
+            if dist.z<dist.x {dist=dist.zyxw;ids=ids.zyxw;}
+            if dist.w<dist.y {dist=dist.xwzy;ids=ids.xwzy;}
+            if dist.z<dist.y {dist=dist.xzyw;ids=ids.xzyw;}
+            if dist.w<=lim {(*stack)[sp]=ids.w;sp+=1u;}
+            if dist.z<=lim {(*stack)[sp]=ids.z;sp+=1u;}
+            if dist.y<=lim {(*stack)[sp]=ids.y;sp+=1u;}
+            if dist.x<=lim {child=ids.x;continue;}
             break;
+            // ---- end rs child order ----
         }
     }
     return false;

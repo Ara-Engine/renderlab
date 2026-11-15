@@ -552,6 +552,7 @@ fn every_list_head_module_validates() {
     };
     for (h, head) in heads.iter().enumerate() {
         validate(&format!("head {h} trace"), &rl_trace_source(head));
+        validate(&format!("head {h} dense trace"), &super::reflection_pass::with_dense_slots(rl_trace_source(head)));
         // The GI receiver kernel, built only while its pass runs (RENDERLAB_GI_PASS=1): the
         // deferred variant once dropped the definitions it relies on.
         if crate::renderer::primary_ray_gpu::gi_receiver_pass::for_source(head) {
@@ -585,10 +586,13 @@ fn every_list_head_module_validates() {
 fn pass_switch_seams_hold() {
     use crate::program::{RL_PASS_SEAMS, Stage, compose_hits, rl_trace_source};
     let head = &crate::renderer::primary_ray_gpu::shading_heads(SOURCE).unwrap()[0];
+    let trace = rl_trace_source(head);
     let modules = [
-        rl_trace_source(head),
+        trace.clone(),
         compose_hits(head, crate::STANDARD_PROGRAM, Stage::Traced, false, false).source,
         include_str!("../shaders/reflections_composite.wgsl").to_owned(),
+        trace.clone(),
+        trace,
     ];
     for ((name, from, to), module) in RL_PASS_SEAMS.iter().zip(&modules) {
         // Under the switch the seam is already replaced; either way exactly one of the two.

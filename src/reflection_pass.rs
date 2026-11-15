@@ -19,6 +19,37 @@ pub(super) const LIST: u32 = 56;
 const LIST_HEADER: u64 = 16;
 const LIST_ENTRY_BYTES: u64 = 48;
 pub(super) const PASS_FRAME: u32 = 58;
+/// The slot-dense trace's slot owners (`dense`), a u32 a slot of the room.
+const OWNERS: u32 = 66;
+/// Rays without ray hardware trace one slot (stratum) a lane: `rl_slot_owners` maps each
+/// reserved slot to its list entry and the trace kernel runs over the slots, so a receiver
+/// with fewer strata than lanes leaves none idle (receivers average 1.1-1.6 strata against
+/// RL_RAY_LANES' 4). `RENDERLAB_RL_DENSE=0` restores an entry a lane group. The same rays,
+/// directions and records either way.
+pub(super) fn dense() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_DENSE").map_or(true, |v| v != "0"))
+}
+/// The slot-dense kernel's entry and stratum from its slot, in place of an entry a lane group.
+const DENSE_SEAMS: [(&str, &str); 3] = [
+    (
+        "    let entry=(group.x+group.y*RL_LIST_ROW)*RL_LIST_GROUP+lane/RL_RAY_LANES;\n    if entry>=rl_list_length() {return;}\n",
+        "    let slot=(group.x+group.y*RL_LIST_ROW)*64u+lane;\n    if slot>=arrayLength(&rl_slot_owner) {return;}\n    let owner=rl_slot_owner[slot];\n    if owner==0u {return;}\n    let entry=owner-1u;\n",
+    ),
+    ("    if lane%RL_RAY_LANES==0u {\n", "    if slot==first {\n"),
+    (
+        "    for(var k=lane%RL_RAY_LANES;k<count;k+=RL_RAY_LANES) {\n",
+        "    for(var k=slot-first;k<=slot-first;k+=1u) {\n",
+    ),
+];
+pub(super) fn with_dense_slots(source: String) -> String {
+    let mut source = source;
+    for (from, to) in DENSE_SEAMS {
+        assert_eq!(source.matches(from).count(), 1, "dense trace seam {from}");
+        source = source.replacen(from, to, 1);
+    }
+    source
+}
 /// The list's indirect arguments: the trace's dispatch, then the composite's draw (32 bytes).
 /// The trace counters (rl_trace_pixels).
 pub(super) const STATS: u32 = 60;
@@ -58,6 +89,8 @@ pub(super) const HITS: u32 = 64;
 pub(super) const SAMPLES: u32 = 65;
 /// H: the count and three dispatch arguments, then 48-byte records.
 const HITS_HEADER: u64 = 16;
+/// The list's indirect arguments (reflections_trace.wgsl rl_list_arguments): four 16-byte rows.
+const LIST_ARGS_BYTES: u64 = 64;
 const RECORD_BYTES: u64 = 48;
 
 /// The shading stage's storage buffers and textures the pass and composite need beyond the
@@ -134,7 +167,8 @@ impl TraceAbi {
             uniform(PASS_FRAME, 16),
             buffer(HITS, write, HITS_HEADER + RECORD_BYTES),
             image(SAMPLES, F::Rgba16Float),
-            buffer(STATS, write, 16),
+            buffer(STATS, write, STATS_BYTES),
+            buffer(OWNERS, write, 4),
         ];
         entries.push(if ray_query {
             scene(2)
@@ -160,7 +194,7 @@ impl TraceAbi {
         let args_group = ledger.own(
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("reflection list arguments"),
-                entries: &[buffer(0, write, 32)],
+                entries: &[buffer(0, write, LIST_ARGS_BYTES)],
             }),
             ResourceKind::BindGroupLayout,
         );
@@ -181,6 +215,8 @@ impl TraceAbi {
 pub(in crate::renderer) struct PassTargets {
     pub list: Buffer,
     pub list_args: Buffer,
+    /// The slot-dense trace's slot owners, a u32 a slot of the room.
+    pub owners: Buffer,
     pub frame: Buffer,
     pub hits: Buffer,
     pub samples: Depth,
@@ -206,6 +242,7 @@ pub(in crate::renderer) struct Readback {
 #[derive(Clone)]
 pub(super) struct TracePipelines {
     list_args: Owned<wgpu::ComputePipeline>,
+    owners: Owned<wgpu::ComputePipeline>,
     pixels: Owned<wgpu::ComputePipeline>,
     args: Owned<wgpu::ComputePipeline>,
     /// The deferred composite: its group layout and additive point pipeline.
@@ -225,9 +262,10 @@ impl Renderer {
             list_args: Buffer::new(
                 self,
                 "reflection list arguments",
-                32,
+                LIST_ARGS_BYTES,
                 wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
             ),
+            owners: self.rl_owners(room),
             frame: Buffer::new(
                 self,
                 "reflection pass frame",
@@ -272,6 +310,15 @@ impl Renderer {
                 .collect(),
         }
     }
+    /// The slot-dense trace's owners for a room of `room` slots.
+    fn rl_owners(&self, room: u64) -> Buffer {
+        Buffer::new(
+            self,
+            "reflection slot owners",
+            4 * room,
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        )
+    }
     /// The glossy-pixel list for a room of `room` slots.
     fn rl_list(&self, room: u64) -> Buffer {
         Buffer::new(
@@ -305,6 +352,7 @@ impl Renderer {
             (HITS, pass.hits.value.as_entire_binding()),
             (SAMPLES, R::TextureView(&pass.samples.view)),
             (STATS, pass.stats.value.as_entire_binding()),
+            (OWNERS, pass.owners.value.as_entire_binding()),
             scene,
         ];
         let entries: Vec<_> = entries
@@ -344,7 +392,8 @@ impl Renderer {
                 .and_then(|value| value.parse::<u32>().ok())
                 .filter(|lanes| matches!(lanes, 1 | 2 | 4 | 8 | 16 | 32))
                 .unwrap_or(4);
-            source.replace("const RL_RAY_LANES:u32=1u;", &format!("const RL_RAY_LANES:u32={lanes}u;"))
+            let source = source.replace("const RL_RAY_LANES:u32=1u;", &format!("const RL_RAY_LANES:u32={lanes}u;"));
+            if dense() { with_dense_slots(source) } else { source }
         };
         let source = sw_cache::source(source, &self.device);
         let scopes = OperationScopes::new(&self.device);
@@ -370,6 +419,7 @@ impl Renderer {
         };
         let pipelines = TracePipelines {
             list_args: pipeline("rl_list_args", &abi.args_layout),
+            owners: pipeline("rl_slot_owners", &abi.layout),
             pixels: pipeline("rl_trace_pixels", &abi.layout),
             args: pipeline("rl_hit_args", &abi.layout),
             composite: self.rl_composite_kit(),
@@ -397,6 +447,10 @@ impl Renderer {
         };
         let g = state.geometry.as_ref().unwrap();
         encoder.clear_buffer(&pass.hits.value, 0, Some(HITS_HEADER));
+        let dense = dense() && !self.device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        if dense {
+            encoder.clear_buffer(&pass.owners.value, 0, None);
+        }
         let bind = |compute: &mut wgpu::ComputePass<'_>| {
             compute.set_bind_group(0, &**group, &[]);
             compute.set_bind_group(1, &*g.arrays, &[]);
@@ -430,8 +484,15 @@ impl Renderer {
         if let Some(cache) = cache.as_ref() {
             compute.set_bind_group(2, &**cache, &[]);
         }
-        compute.set_pipeline(&pipelines.pixels);
-        compute.dispatch_workgroups_indirect(&pass.list_args.value, 0);
+        if dense {
+            compute.set_pipeline(&pipelines.owners);
+            compute.dispatch_workgroups_indirect(&pass.list_args.value, 32);
+            compute.set_pipeline(&pipelines.pixels);
+            compute.dispatch_workgroups_indirect(&pass.list_args.value, 48);
+        } else {
+            compute.set_pipeline(&pipelines.pixels);
+            compute.dispatch_workgroups_indirect(&pass.list_args.value, 0);
+        }
         compute.set_pipeline(&pipelines.args);
         compute.dispatch_workgroups(1, 1, 1);
         drop(compute);
@@ -894,16 +955,26 @@ impl Renderer {
                             allocator.1
                         );
                         let line = format!(
-                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}]{memory}}}\n",
+                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"pixels\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}],\"trace\":[{},{},{},{},{},{}],\"tail\":[{},{},{}]{memory}}}\n",
                             r.frame.load(SeqCst),
                             word(2),
                             word(1),
+                            word(0),
                             word(6),
                             pass.room,
                             word(7),
                             word(8),
                             word(9),
-                            word(10)
+                            word(10),
+                            word(4),
+                            word(11),
+                            word(12),
+                            word(13),
+                            word(14),
+                            word(15),
+                            word(5),
+                            word(7),
+                            word(8)
                         );
                         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
                             let _ = file.write_all(line.as_bytes());
@@ -927,8 +998,10 @@ impl Renderer {
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
         );
         let list = self.rl_list(room);
+        let owners = self.rl_owners(room);
         let state = self.view.primary.as_mut().unwrap();
         let pass = state.targets.as_mut().unwrap().rl_pass.as_mut().unwrap();
+        pass.owners = owners;
         pass.samples = samples;
         pass.hits = hits;
         pass.list = list;

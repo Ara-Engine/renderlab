@@ -125,8 +125,76 @@ pub(crate) fn refit(nodes: &mut [u32], boxes: &[Bounds]) {
     }
 }
 
-/// Median-split BVH2 nodes over `boxes` (at least two), root first. Deterministic: centroid
-/// ties on the split axis break by instance index.
+/// `RENDERLAB_INSTANCE_BVH_SAH=0`: split every node at the centroid median of its longest
+/// axis, the earlier build. The default splits where the binned surface-area cost is least,
+/// which keeps large instances (terrain, floors, walls) from widening every box over the small
+/// ones. Either tree finds the same hits; only the boxes a ray visits differ.
+fn median_split() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_INSTANCE_BVH_SAH").is_ok_and(|v| v == "0"))
+}
+
+/// Centroid bins a node's split is chosen among, per axis.
+const BINS: usize = 16;
+
+/// Half a box's surface area.
+fn area((lo, hi): Bounds) -> f32 {
+    let e: [f32; 3] = std::array::from_fn(|a| (hi[a] - lo[a]).max(0.0));
+    e[0] * e[1] + e[1] * e[2] + e[2] * e[0]
+}
+
+/// The least-cost binned split of `order` (SAH: each side's box area times its instance count)
+/// as its axis and the last bin of its left side, given the centroid bounds `lo`..`hi` (in
+/// `centre`'s doubled units); none when every centroid falls in one bin on every axis.
+fn sah_split(
+    boxes: &[Bounds],
+    order: &[u32],
+    centre: impl Fn(u32) -> [f32; 3],
+    (lo, hi): Bounds,
+) -> Option<(usize, usize, f32, f32)> {
+    let empty = ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]);
+    let mut best: Option<(f32, usize, usize)> = None;
+    for axis in 0..3 {
+        let extent = hi[axis] - lo[axis];
+        if !(extent > 0.0) {
+            continue;
+        }
+        let scale = BINS as f32 / extent;
+        let mut count = [0usize; BINS];
+        let mut bounds = [empty; BINS];
+        for &i in order {
+            let b = (((centre(i)[axis] - lo[axis]) * scale) as usize).min(BINS - 1);
+            count[b] += 1;
+            bounds[b] = union([bounds[b], boxes[i as usize]].into_iter());
+        }
+        // Right-side areas and counts for splits after bins 0..BINS-1.
+        let mut right = [(0.0f32, 0usize); BINS];
+        let (mut acc, mut n) = (empty, 0);
+        for b in (1..BINS).rev() {
+            acc = union([acc, bounds[b]].into_iter());
+            n += count[b];
+            right[b - 1] = (area(acc), n);
+        }
+        let (mut acc, mut n) = (empty, 0);
+        for b in 0..BINS - 1 {
+            acc = union([acc, bounds[b]].into_iter());
+            n += count[b];
+            let (right_area, right_n) = right[b];
+            if n == 0 || right_n == 0 {
+                continue;
+            }
+            let cost = area(acc) * n as f32 + right_area * right_n as f32;
+            if best.is_none_or(|(c, ..)| cost < c) {
+                best = Some((cost, axis, b));
+            }
+        }
+    }
+    best.map(|(_, axis, b)| (axis, b, lo[axis], BINS as f32 / (hi[axis] - lo[axis])))
+}
+
+/// BVH2 nodes over `boxes` (at least two), root first, one instance a leaf. Deterministic: the
+/// split depends only on the node's instances (bin ties go to the lower axis and bin; median
+/// ties on the split axis break by instance index).
 pub(crate) fn build(boxes: &[Bounds]) -> Vec<u32> {
     let mut nodes = Vec::with_capacity(reserve(boxes.len()));
     let mut order: Vec<u32> = (0..boxes.len() as u32).collect();
@@ -147,13 +215,28 @@ fn subtree(boxes: &[Bounds], order: &mut [u32], nodes: &mut Vec<u32>) -> (u32, B
         let c = centre(i);
         (c, c)
     }));
-    let axis = (0..3)
-        .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))
-        .unwrap();
-    let mid = order.len() / 2;
-    order.select_nth_unstable_by(mid, |&a, &b| {
-        centre(a)[axis].total_cmp(&centre(b)[axis]).then(a.cmp(&b))
-    });
+    let split = if median_split() { None } else { sah_split(boxes, order, centre, (lo, hi)) };
+    let mid = if let Some((axis, last, base, scale)) = split {
+        let bin = |i: u32| (((centre(i)[axis] - base) * scale) as usize).min(BINS - 1);
+        // Left side first (an in-place partition: O(n) a node).
+        let mut left = 0;
+        for k in 0..order.len() {
+            if bin(order[k]) <= last {
+                order.swap(left, k);
+                left += 1;
+            }
+        }
+        left
+    } else {
+        let axis = (0..3)
+            .max_by(|&a, &b| (hi[a] - lo[a]).total_cmp(&(hi[b] - lo[b])))
+            .unwrap();
+        let mid = order.len() / 2;
+        order.select_nth_unstable_by(mid, |&a, &b| {
+            centre(a)[axis].total_cmp(&centre(b)[axis]).then(a.cmp(&b))
+        });
+        mid
+    };
     let node = nodes.len() / NODE_WORDS;
     nodes.extend([0; NODE_WORDS]);
     let (left, right) = order.split_at_mut(mid);

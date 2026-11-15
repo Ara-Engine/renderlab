@@ -11,10 +11,14 @@ struct RlGlossyEntries { count:u32, header:array<u32,3>, entries:array<vec4<u32>
 @group(0) @binding(56) var<storage,read> rl_glossy:RlGlossyEntries;
 @group(0) @binding(58) var<uniform> rl_pass_frame:vec4<u32>;
 // The list's indirect arguments (rl_list_args): rl_trace_pixels' dispatch (x, y, z), then the
-// composite's draw (vertex count, instance count, first vertex, first instance). Their own group,
-// bound only by rl_list_args: the trace's dispatch reads them as indirect arguments, which may not
-// share a dispatch with a read-write binding of the same buffer.
-@group(2) @binding(0) var<storage,read_write> rl_list_arguments:array<u32,8>;
+// composite's draw (vertex count, instance count, first vertex, first instance), then the
+// slot-dense trace's: rl_slot_owners' dispatch (an entry a lane) and rl_trace_pixels' (a slot a
+// lane). Their own group, bound only by rl_list_args: the trace's dispatch reads them as indirect
+// arguments, which may not share a dispatch with a read-write binding of the same buffer.
+@group(2) @binding(0) var<storage,read_write> rl_list_arguments:array<u32,16>;
+// The slot-dense trace (src/reflection_pass.rs dense()): each reserved slot's list entry + 1
+// (0: no entry; cleared each frame), written by rl_slot_owners.
+@group(0) @binding(66) var<storage,read_write> rl_slot_owner:array<u32>;
 // H: count, the three dispatch arguments of reflection_hits (RL_HIT_GROUP-wide groups), then
 // 48-byte records (three vec4<u32>).
 struct RlHits { count:atomic<u32>, args:array<u32,3>, records:array<vec4<u32>> };
@@ -52,6 +56,27 @@ fn rl_list_length()->u32 { return min(rl_glossy.count,rl_pass_frame.z); }
     rl_list_arguments[5]=1u;
     rl_list_arguments[6]=0u;
     rl_list_arguments[7]=0u;
+    let owners=(entries+63u)/64u;
+    rl_list_arguments[8]=min(owners,RL_LIST_ROW);
+    rl_list_arguments[9]=(owners+RL_LIST_ROW-1u)/RL_LIST_ROW;
+    rl_list_arguments[10]=1u;
+    rl_list_arguments[11]=0u;
+    // Every reserved slot below the room belongs to a listed entry or stays 0 (cleared).
+    let slots=(min(atomicLoad(&rl_trace_stats.requested),rl_pass_frame.y)+63u)/64u;
+    rl_list_arguments[12]=min(slots,RL_LIST_ROW);
+    rl_list_arguments[13]=(slots+RL_LIST_ROW-1u)/RL_LIST_ROW;
+    rl_list_arguments[14]=1u;
+    rl_list_arguments[15]=0u;
+}
+// The slot-dense trace's map: every entry's slots name it.
+@compute @workgroup_size(64) fn rl_slot_owners(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    let entry=(group.x+group.y*RL_LIST_ROW)*64u+lane;
+    if entry>=rl_list_length() {return;}
+    let count=(rl_glossy.entries[entry*3u+1u].w>>16u)&31u;
+    let first=rl_glossy.entries[entry*3u+2u].y;
+    for(var k=0u;k<count;k+=1u) {
+        if first+k<arrayLength(&rl_slot_owner) {rl_slot_owner[first+k]=entry+1u;}
+    }
 }
 
 // One list entry an invocation: its receiver's full strata set (L's count: today's faded set,
