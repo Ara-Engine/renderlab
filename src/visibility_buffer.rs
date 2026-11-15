@@ -11,6 +11,8 @@ use super::*;
 use crate::pipeline_compilation::PipelineDevice;
 use primary_ray_gpu::Buffer;
 use rayon::prelude::*;
+#[path = "visibility_buffer_indexed.rs"]
+mod indexed;
 
 /// Largest cluster: the software raster's workgroup and 7-bit triangle IDs.
 pub(crate) const MAX_CLUSTER: usize = 128;
@@ -51,6 +53,7 @@ pub(crate) struct Cluster {
 /// positions (exact object-space f32 copies), packed u8 local triangles and source
 /// primitive tables.
 pub(crate) struct Clusters {
+    indexed: Option<indexed::Mesh>,
     pub clusters: Vec<Cluster>,
     pub groups: Vec<[f32; 5]>,
     pub data: Arc<Owned<wgpu::Buffer>>,
@@ -217,7 +220,9 @@ impl Renderer {
             let (chunks, _) = staging.slice(..).into_chunks::<4>();
             chunks.write_iter(words.iter().map(|w| w.to_ne_bytes()));
         }
+        let indexed = indexed::Mesh::new(self, &clusters, words);
         Clusters {
+            indexed,
             clusters,
             groups,
             data,
@@ -358,7 +363,6 @@ pub(super) struct VisibilityBuffer {
     depth: Depth,
     hardware_ids: Depth,
     attachment: bool,
-    small_raster: bool,
     _hzb: Depth,
     _hzb_absent: Depth,
     cull: wgpu::ComputePipeline,
@@ -366,6 +370,7 @@ pub(super) struct VisibilityBuffer {
     reset: wgpu::ComputePipeline,
     software: wgpu::ComputePipeline,
     hardware: wgpu::RenderPipeline,
+    indexed: Option<indexed::Raster>,
     base: wgpu::ComputePipeline,
     reduce: wgpu::ComputePipeline,
     resolve: [wgpu::ComputePipeline; 2],
@@ -558,7 +563,7 @@ impl ClusterInstances {
             }
             for slot in 0..d.instances.len() {
                 let no_shadow = u32::from(!d.instances.state.casts_shadows(slot));
-                for c in &mesh.clusters {
+                for (ci, c) in mesh.clusters.iter().enumerate() {
                     let bounds = if d.mesh.skin.is_some() {
                         d.mesh.bounds
                     } else {
@@ -580,8 +585,8 @@ impl ClusterInstances {
                         c.counts,
                         placement,
                         no_shadow,
-                        0,
-                        0,
+                        mesh.indexed.as_ref().map_or(0, |m| m.offsets[ci][0]),
+                        mesh.indexed.as_ref().map_or(0, |m| m.offsets[ci][1]),
                     ]);
                 }
                 placement += 1;
@@ -674,7 +679,7 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
             for instance in 0..d.instances.len() {
                 // The whole record again, with its casts-no-shadow word (`ClusterInstances`).
                 let no_shadow = u32::from(!d.instances.state.casts_shadows(instance));
-                for c in &mesh.clusters {
+                for (ci, c) in mesh.clusters.iter().enumerate() {
                     data.extend(b.min.map(f32::to_bits));
                     data.push(c.vertices);
                     data.extend(b.max.map(f32::to_bits));
@@ -690,8 +695,8 @@ pub(super) fn refresh_skinned_bounds(r: &Renderer, draws: &[PreparedDraw<'_>]) -
                         c.counts,
                         placement + instance as u32,
                         no_shadow,
-                        0,
-                        0,
+                        mesh.indexed.as_ref().map_or(0, |m| m.offsets[ci][0]),
+                        mesh.indexed.as_ref().map_or(0, |m| m.offsets[ci][1]),
                     ]);
                 }
             }
@@ -862,6 +867,7 @@ impl VisibilityBuffer {
             1,
             U::TEXTURE_BINDING,
         );
+        let indexed_plan = indexed::Plan::new(r, draws);
         let raster_stages = S::VERTEX | S::FRAGMENT;
         let cull_layout = layout(
             &r.device,
@@ -894,6 +900,19 @@ impl VisibilityBuffer {
                 buffer_entry(8, false, true, S::FRAGMENT),
             ],
         );
+        let indexed_layout = indexed_plan.as_ref().map(|_| {
+            layout(
+                &r.device,
+                &[
+                    buffer_entry(0, true, false, raster_stages),
+                    buffer_entry(1, false, false, S::VERTEX),
+                    buffer_entry(3, false, false, S::VERTEX),
+                    buffer_entry(8, false, true, S::FRAGMENT),
+                    buffer_entry(9, false, false, S::VERTEX),
+                    buffer_entry(10, true, false, S::VERTEX),
+                ],
+            )
+        });
         let data_layout = layout(&r.device, &[data_entry(8, S::COMPUTE | S::VERTEX)]);
         let hzb_layout = layout(
             &r.device,
@@ -987,7 +1006,12 @@ impl VisibilityBuffer {
             .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N1c hardware ID raster"),
                 source: wgpu::ShaderSource::Wgsl(
-                    stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")).into(),
+                    stage_source(if indexed_plan.is_some() {
+                        include_str!("../shaders/visibility_buffer_indexed.wgsl")
+                    } else {
+                        include_str!("../shaders/visibility_buffer_raster.wgsl")
+                    })
+                    .into(),
                 ),
             });
         let hardware_pipeline = r
@@ -995,7 +1019,7 @@ impl VisibilityBuffer {
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some("N1c hardware ID raster"),
                 layout: Some(&pipeline_layout(&[
-                    Some(&hardware_layout),
+                    Some(indexed_layout.as_ref().unwrap_or(&hardware_layout)),
                     Some(state.array_layout()),
                     Some(&data_layout),
                 ])),
@@ -1106,6 +1130,21 @@ impl VisibilityBuffer {
                 ],
             )
         });
+        let indexed = indexed_plan.map(|plan| {
+            indexed::Raster::new(
+                r,
+                plan,
+                draws,
+                &configs,
+                &clusters,
+                &lists,
+                &args,
+                &visibility,
+                indexed_layout.as_ref().unwrap(),
+                state.array_layout(),
+                &data_layout,
+            )
+        });
         let data_group = cluster_data_group(r, &data_layout, draws, &absent.value);
         let views: Vec<_> = (0..levels)
             .map(|i| {
@@ -1192,7 +1231,6 @@ impl VisibilityBuffer {
             depth,
             hardware_ids,
             attachment,
-            small_raster: std::env::var("RENDERLAB_VIS_SMALL_RASTER").is_ok_and(|v| v == "1"),
             _hzb: hzb,
             _hzb_absent: hzb_absent,
             cull,
@@ -1200,6 +1238,7 @@ impl VisibilityBuffer {
             reset,
             software: software_pipeline,
             hardware: hardware_pipeline,
+            indexed,
             base,
             reduce,
             resolve,
@@ -1481,14 +1520,6 @@ impl Renderer {
         }
         let (lod, extent) = (self.lod_pixels, self.software_extent);
         let v = self.view.visibility_buffer.as_mut().unwrap();
-        // The workgroup raster shares projected vertices and rejects triangles
-        // with no pixel coverage. Preserve explicit caller tuning; near-plane
-        // clusters still use hardware clipping.
-        let extent = if v.small_raster && extent == DEFAULT_SOFTWARE_EXTENT {
-            64.0
-        } else {
-            extent
-        };
         let matrix = camera.matrix(size.width, size.height);
         let eye = camera.view().inverse().w_axis.truncate();
         let scale = size.height as f32 * 0.5 / (camera.fov_y() * 0.5).tan();
@@ -1586,6 +1617,18 @@ impl Renderer {
                 pass.set_bind_group(2, &v.data_group, &[]);
                 pass.dispatch_workgroups_indirect(&v.args[i].value, 0);
             }
+            if let Some(indexed) = &v.indexed {
+                mark(encoder, ["visibility.indices1", "visibility.indices2"][i]);
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("visibility compact hardware indices"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&indexed.build);
+                pass.set_bind_group(0, &indexed.groups[i], &[]);
+                pass.set_bind_group(1, arrays, &[]);
+                pass.set_bind_group(2, &v.data_group, &[]);
+                pass.dispatch_workgroups_indirect(&v.rejects.value, 0);
+            }
             mark(encoder, ["visibility.hw1", "visibility.hw2"][i]);
             {
                 let color_attachments = [Some(wgpu::RenderPassColorAttachment {
@@ -1625,10 +1668,21 @@ impl Renderer {
                     multiview_mask: None,
                 });
                 pass.set_pipeline(&v.hardware);
-                pass.set_bind_group(0, &v.hardware_groups[i], &[]);
                 pass.set_bind_group(1, arrays, &[]);
                 pass.set_bind_group(2, &v.data_group, &[]);
-                pass.draw_indirect(&v.args[i].value, 16);
+                if let Some(indexed) = &v.indexed {
+                    pass.set_index_buffer(
+                        indexed.indices[i].value.slice(..),
+                        wgpu::IndexFormat::Uint32,
+                    );
+                    for (draw, group) in indexed.draws.iter().enumerate() {
+                        pass.set_bind_group(0, group, &[]);
+                        pass.draw_indexed_indirect(&indexed.args[i].value, draw as u64 * 20);
+                    }
+                } else {
+                    pass.set_bind_group(0, &v.hardware_groups[i], &[]);
+                    pass.draw_indirect(&v.args[i].value, 16);
+                }
             }
             mark(encoder, ["visibility.hzb1", "visibility.hzb2"][i]);
             v.pyramid(encoder, i, stage(i as u32 * 4 + 3));
@@ -1654,6 +1708,13 @@ impl Renderer {
         for group in &v.cull_groups {
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(1, 1, 1);
+        }
+        if let Some(indexed) = &v.indexed {
+            pass.set_pipeline(&indexed.reset);
+            for group in &indexed.groups {
+                pass.set_bind_group(0, group, &[]);
+                pass.dispatch_workgroups((indexed.draws.len() as u32).div_ceil(64), 1, 1);
+            }
         }
     }
 }
