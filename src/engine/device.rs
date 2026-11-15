@@ -163,6 +163,10 @@ pub(crate) fn request_device(
             // RENDERLAB_RT_PRIMARY (measurement): the visibility buffer's 64-bit raster atomics.
             if crate::renderer::primary_ray_gpu::rt_primary_switch().is_some() {
                 rt_features() | crate::VISIBILITY_RASTER_FEATURES | crate::VIRTUAL_FEATURES
+            } else if crate::renderer::fog_coarse_on() {
+                // The fog map (`RENDERLAB_FOG_COARSE`) draws the sun clipmap's coarse levels
+                // with the visibility buffer's 64-bit raster atomics, where the adapter has them.
+                rt_features() | (adapter.features() & crate::VIRTUAL_FEATURES)
             } else {
                 rt_features()
             },

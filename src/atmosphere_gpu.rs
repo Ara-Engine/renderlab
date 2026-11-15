@@ -450,7 +450,8 @@ impl Renderer {
             && soft
             && self.view.soft_mode != SoftShadows::Virtual
             && self.view.shadows.settings.enabled()
-            && self.device.features().contains(crate::VIRTUAL_FEATURES)
+            // Its casters draw from the meshes' visibility-buffer clusters.
+            && visibility_buffer::supported(&self.device)
             && matches!(self.lighting.source_lights.first(), Some(Light::Directional { .. }));
         wanted.then(|| virtual_shadow_gpu::FogMap {
             range: f64::from(fog.distance),

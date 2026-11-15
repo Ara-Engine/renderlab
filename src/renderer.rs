@@ -42,6 +42,7 @@ mod mesh_lod;
 mod normal_variance_lazy;
 #[path = "virtual_shadow_gpu.rs"]
 mod virtual_shadow_gpu;
+pub(crate) use virtual_shadow_gpu::fog_coarse_on;
 #[path = "visibility_buffer.rs"]
 pub(crate) mod visibility_buffer;
 pub use mesh_lod::{LodPackage, LodStats, MeshLod};
