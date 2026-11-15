@@ -590,13 +590,17 @@ struct TpBillboard {
 // Query results stay on the GPU; no eligible lobes selects the zero-result clear.
 @group(0) @binding(56) var<storage,read> tp_lobe_samples:array<u32>;
 @group(0) @binding(57) var<storage,read_write> tp_lobe_args:array<u32>;
+// The glass run's pixel rectangle [x0, y0, x1, y1) (src/transparency_gpu.rs `rect_reflect`;
+// the whole view when it is off): both the trace and the clear cover only it.
+@group(0) @binding(59) var<uniform> tp_dispatch_rect:vec4<u32>;
 @compute @workgroup_size(1) fn tp_lobe_dispatch() {
     let live=(tp_lobe_samples[0]|tp_lobe_samples[1])!=0u;
-    tp_lobe_args[0]=select(0u,(u32(tp.size.x)+7u)/8u,live);
-    tp_lobe_args[1]=select(0u,(u32(tp.size.y)+7u)/8u,live);
+    let groups=(tp_dispatch_rect.zw-tp_dispatch_rect.xy+vec2<u32>(7u))/8u;
+    tp_lobe_args[0]=select(0u,groups.x,live);
+    tp_lobe_args[1]=select(0u,groups.y,live);
     tp_lobe_args[2]=select(0u,1u,live);
-    tp_lobe_args[3]=select((u32(tp.size.x)+7u)/8u,0u,live);
-    tp_lobe_args[4]=select((u32(tp.size.y)+7u)/8u,0u,live);
+    tp_lobe_args[3]=select(groups.x,0u,live);
+    tp_lobe_args[4]=select(groups.y,0u,live);
     tp_lobe_args[5]=select(1u,0u,live);
 }
 // ---- end TP_LOBE_DISPATCH ----
@@ -604,8 +608,10 @@ struct TpBillboard {
 // ---- TP_LOBE_CLEAR ----
 // All rejected lobes produce exactly zero in the ordinary reflection kernel.
 @group(0) @binding(58) var tp_empty_reflection:texture_storage_2d<rgba16float,write>;
-@compute @workgroup_size(8,8) fn tp_lobe_clear(@builtin(global_invocation_id) id:vec3<u32>) {
-    if any(id.xy>=textureDimensions(tp_empty_reflection)) { return; }
+@group(0) @binding(59) var<uniform> tp_clear_rect:vec4<u32>;
+@compute @workgroup_size(8,8) fn tp_lobe_clear(@builtin(global_invocation_id) grid:vec3<u32>) {
+    let id=grid.xy+tp_clear_rect.xy;
+    if any(id>=textureDimensions(tp_empty_reflection)) || any(id>=tp_clear_rect.zw) { return; }
     textureStore(tp_empty_reflection,id.xy,vec4<f32>(0.0));
 }
 // ---- end TP_LOBE_CLEAR ----
