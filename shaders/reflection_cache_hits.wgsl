@@ -30,9 +30,24 @@ fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rou
     let geometric=primary_geometric(ta.position,tb.position,tc.position,hit.placement);
     let bin=gi_bin(select(-geometric,geometric,dot(geometric,origin-world)>=0.0));
     let slot=gi_find_pair(gi_key(level,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(level),bin)))));
-    if slot==0xffffffffu { return vec4<f32>(0.0); }
-    let o=rl_cache_outgoing[slot];
-    if !(o.w>0.0) { return vec4<f32>(0.0); }
-    return vec4<f32>(o.rgb,1.0);
+    // Only a settled value (w 1): a cell whose gathers are still pending is marked changing
+    // (0.75, gi_shade_entry.wgsl) and an absent or unshaded one has none.
+    var value=vec4<f32>(0.0);
+    if slot!=0xffffffffu {
+        let o=rl_cache_outgoing[slot];
+        if o.w>=1.0 { value=vec4<f32>(o.rgb,1.0); }
+    }
+    // A skinned or moved placement's cells lag its surface (they belong to where it was), so
+    // its hits always take the full program.
+    let mover=batch_skinned(primary_batch_info(hit.batch)) || rl_cache_moved(hit.placement);
+    // ---- cache count seam ----
+    if mover { return vec4<f32>(0.0); }
+    return value;
+}
+// The placement's model changed since the previous frame (models holds both frames).
+fn rl_cache_moved(slot:u32)->bool {
+    let a=models[slot];let b=models[arrayLength(&models)/2u+slot];
+    return any(bitcast<vec4<u32>>(a[0])!=bitcast<vec4<u32>>(b[0]))||any(bitcast<vec4<u32>>(a[1])!=bitcast<vec4<u32>>(b[1]))
+        ||any(bitcast<vec4<u32>>(a[2])!=bitcast<vec4<u32>>(b[2]))||any(bitcast<vec4<u32>>(a[3])!=bitcast<vec4<u32>>(b[3]));
 }
 // ---- end of cache-terminated reflection hits ----
