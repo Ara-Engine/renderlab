@@ -1,6 +1,19 @@
 //! Screen intersections for software reflections. Uncertain intersections keep the full tree ray.
 use super::*;
 
+/// Debug atomics exist only when this path is set. No allocator reports are collected.
+pub(super) fn debug_path() -> Option<&'static str> {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    PATH.get_or_init(||std::env::var("RENDERLAB_SW_REFLECTION_SCREEN_DEBUG").ok()).as_deref()
+}
+pub(super) fn write_counts(frame:u64,counts:&[u32;32]) {
+    let Some(path)=debug_path() else {return;};
+    use std::io::Write;
+    if let Ok(mut file)=std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _=writeln!(file,"{{\"frame\":{frame},\"reasons\":{counts:?}}}");
+    }
+}
+
 pub(super) fn enabled(device: &wgpu::Device) -> bool {
     !device
         .features()
@@ -294,9 +307,12 @@ pub(super) fn source(source: String, device: &wgpu::Device) -> String {
         .replace("atomicAdd(&rl_trace_stats.pixels,1u);","").replace("atomicAdd(&rl_trace_stats.slots,count);","")
         .replace("textureStore(rl_samples,at,vec4<f32>(0.0));","rl_screen_results[slot]=vec4<f32>(0.0);");
     let source=source.replacen(seam,"let screen=rl_screen_results[slot];\n        if screen.a>0.0 {textureStore(rl_samples,at,rl_f16_nearest(screen));continue;}\n        let traced=rl_cast(origin,d,epsilon);",1);
-    let source=source.replace("dropped:atomic<u32> };", "dropped:atomic<u32>, screen_pad:array<u32,7>, screen_try:atomic<u32>, screen_candidate:atomic<u32>, screen_hit:atomic<u32>, screen_valid:atomic<u32>, screen_end:u32 };");
+    let (source,counter)=if debug_path().is_some() {
+        (source.replace("dropped:atomic<u32> };", "dropped:atomic<u32>, screen_reserved:array<u32,12>, screen_reasons:array<atomic<u32>,32> };"),
+        "fn rl_screen_count(reason:u32) {atomicAdd(&rl_trace_stats.screen_reasons[reason],1u);}")
+    } else {(source,"fn rl_screen_count(reason:u32) {}")};
     format!(
-        "{source}\n{march}\n{}\n{}",
+        "{source}\n{march}\n{counter}\n{}\n{}",
         include_str!("../shaders/reflections_screen.wgsl"),
         include_str!("../shaders/temporal_zones.wgsl").replace("ZONES","primary_frame.zones").replace("tr1_","rl_screen_")
     )
