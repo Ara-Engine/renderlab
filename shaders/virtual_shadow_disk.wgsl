@@ -563,12 +563,13 @@ fn vd_edge_test(margin:f32) {
             let c=origin+(vec2<f32>(cell)+vec2<f32>(0.5))*texel;
             if vd_above(vec3<f32>(c,height),margin) {t=height-vd_px.p.z;}
         }
-        if t>2.0*margin && t<cut {
+        // The walk's own rule (vd_texel): above the receiver's tangent plane and its bias.
+        if t>0.0 && t<cut {
             occluding+=1u;
             top=max(top,t);
             let placement=(word.x>>vsm.misc.x)-1u;
             untraced=untraced || ((vd_traceable[placement>>5u]>>(placement&31u))&1u)==0u;
-        } else if t<=2.0*margin {
+        } else if t<=0.0 {
             open+=1u;
         }
     }
