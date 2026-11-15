@@ -410,8 +410,9 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
     let rows=max(a.x+b.x+c.x,max(a.y+b.y+c.y,a.z+b.z+c.z));
     return s.error*sqrt(columns*rows);
 }
-// The fog map's placement pre-cull: per placement its world box (min, w 1 when skinned; max)
-// and whether it can touch any page this frame redraws (the cluster cull skips the others).
+// The fog map's placement cull: per placement its world box (min, w its first cluster
+// instance's bits; max, w its cluster count's bits: instances are contiguous per placement,
+// src/visibility_buffer.rs) and whether it can touch any page this frame redraws.
 @group(0) @binding(58) var<storage,read> vsm_placement_boxes:array<vec4<f32>>;
 @group(0) @binding(59) var<storage,read_write> vsm_placement_live:array<u32>;
 // Whether light-space box lo..hi of a caster overlaps a page `level` redraws this frame (a
@@ -441,8 +442,6 @@ fn vsm_box_redrawn(level:u32,lo:vec2<f32>,hi:vec2<f32>)->bool {
 @compute @workgroup_size(64) fn vsm_cull_placements(@builtin(global_invocation_id) id:vec3<u32>) {
     if id.x>=arrayLength(&vsm_placement_live) {return;}
     let a=vsm_placement_boxes[2u*id.x];let b=vsm_placement_boxes[2u*id.x+1u];
-    // Skinned clusters deform past the placement box: always culled per cluster.
-    if a.w!=0.0 {vsm_placement_live[id.x]=1u;return;}
     var lo=vec2<f32>(3.4e38);var hi=vec2<f32>(-3.4e38);
     for(var i=0u;i<8u;i+=1u) {
         let q=vsm_light(select(a.xyz,b.xyz,vec3<bool>((i&1u)!=0u,(i&2u)!=0u,(i&4u)!=0u))).xy;
@@ -457,11 +456,21 @@ fn vsm_box_redrawn(level:u32,lo:vec2<f32>,hi:vec2<f32>)->bool {
 @compute @workgroup_size(64) fn vsm_cull(@builtin(global_invocation_id) id:vec3<u32>) {
     let index=id.x+id.y*65535u*64u;
     if index>=vsm.counts.z {return;}
+    vsm_cull_cluster(index);
+}
+// The fog map's cull: one workgroup per placement; a live one (vsm_cull_placements) culls its
+// own clusters, the others return at once, so the cost follows what lies near redrawn pages.
+@compute @workgroup_size(64) fn vsm_cull_live(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let p=group.x+group.y*65535u;
+    if p>=arrayLength(&vsm_placement_live) || vsm_placement_live[p]==0u {return;}
+    let first=bitcast<u32>(vsm_placement_boxes[2u*p].w);
+    let count=bitcast<u32>(vsm_placement_boxes[2u*p+1u].w);
+    for(var i=li;i<count;i+=64u) {vsm_cull_cluster(first+i);}
+}
+fn vsm_cull_cluster(index:u32) {
     let c=vsm_clusters[index];
     // A placement that casts no shadow (pad0, src/visibility_buffer.rs) is never rasterized.
     if c.pad0!=0u {return;}
-    // The fog map: a placement whose box touches no redrawn page has no cluster that does.
-    if vsm_one_level() && vsm_placement_live[c.placement]==0u {return;}
     let m=models[c.placement];
     var lo=vec2<f32>(3.4e38);var hi=vec2<f32>(-3.4e38);
     for(var i=0u;i<8u;i+=1u) {

@@ -37,6 +37,15 @@ pub(crate) fn atmosphere_source_at(first: u32, fallback: Option<&str>) -> String
         access = access.replacen(&pattern, &format!("@binding({to})"), 1);
     }
     if let Some(fallback) = fallback {
+        // The RT fog map's texels are its 32-bit heights (fog_shader_source), 0 empty.
+        for (from, to) in [
+            ("at_shadow_top:array<vec2<u32>>", "at_shadow_top:array<u32>"),
+            ("if word.x==0u { return 1.0; }", "if word==0u { return 1.0; }"),
+            ("bitcast<f32>(word.y)", "bitcast<f32>(word)"),
+        ] {
+            assert_eq!(access.matches(from).count(), 1, "accessor changed: {from}");
+            access = access.replacen(from, to, 1);
+        }
         let tail = "    }
     return 1.0;
 }";
@@ -76,6 +85,16 @@ mod tests {
     /// with its cull and traced fallback) parse and validate.
     #[test]
     fn clipmap_fog_injections_validate() {
+        // The RT fog map's own clipmap module.
+        let source = super::fog_shader_source();
+        let module = naga::front::wgsl::parse_str(&source)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(
+            naga::valid::ValidationFlags::all(),
+            naga::valid::Capabilities::all(),
+        )
+        .validate(&module)
+        .unwrap_or_else(|e| panic!("fog clipmap: {e:?}"));
         for hardware in [false, true] {
             let sources = super::super::super::atmosphere_gpu::compile_structure_sources(hardware);
             let (_, source) = sources.iter().find(|(name, _)| *name == "virtual-injection").unwrap();

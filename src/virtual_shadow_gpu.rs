@@ -430,8 +430,10 @@ struct Pipelines {
     compact: Owned<wgpu::ComputePipeline>,
     clear: Owned<wgpu::ComputePipeline>,
     cull: Owned<wgpu::ComputePipeline>,
-    /// The fog map's placement pre-cull (WGSL `vsm_cull_placements`).
+    /// The fog map's placement cull and its per-placement cluster cull (WGSL
+    /// `vsm_cull_placements`, `vsm_cull_live`).
     cull_placements: Owned<wgpu::ComputePipeline>,
+    cull_live: Owned<wgpu::ComputePipeline>,
     finish: Owned<wgpu::ComputePipeline>,
     mip: Owned<wgpu::ComputePipeline>,
     /// Software and hardware rasters: top layer, then peel layer.
@@ -690,8 +692,8 @@ pub(super) struct VirtualState {
     /// they hold, its frames skip the per-placement bounds (no caster moved; the fog ladder needs
     /// no caster distance).
     fog_placements: Vec<((u64, u64), crate::renderer::skinning::PlacementPose)>,
-    /// Per placement its world box (two vec4s, w of the first 1 when skinned) and the fog map's
-    /// pre-cull mask (WGSL `vsm_cull_placements`), and their capacity in placements.
+    /// Per placement its world box and cluster instance range (two vec4s, WGSL
+    /// `vsm_placement_boxes`) and the fog map's live mask, and their capacity in placements.
     placement_boxes: Option<(Owned<wgpu::Buffer>, Owned<wgpu::Buffer>, usize)>,
     /// Page requests depend only on the camera, the sun, the casters and the cache
     /// windows. A frame identical in all of them finds nothing stale, so it skips the
@@ -872,6 +874,32 @@ pub(super) fn shader_source() -> String {
             .unwrap_or(include_str!("../shaders/virtual_shadow.wgsl")),
         super::primary_ray_gpu::temporal_reconstruction::zones_source("vsm.zones")
     )
+}
+
+/// The fog map's module (`FogMap`): shader_source() with 32-bit map texels, the height bits
+/// alone (0 empty). The fog reads no caster id and draws no peel layer, so its pool is half the
+/// size (atmosphere_shadow.rs reads the same words).
+pub(super) fn fog_shader_source() -> String {
+    let mut source = shader_source();
+    for (from, to, count) in [
+        ("vsm_top_map:array<atomic<u64>>", "vsm_top_map:array<atomic<u32>>", 1),
+        ("vsm_peel_map:array<atomic<u64>>", "vsm_peel_map:array<atomic<u32>>", 1),
+        (",0lu);", ",0u);", 4),
+        (
+            "if u32(atomicLoad(&vsm_top_map[i])&0xfffffffflu)==id {return;}",
+            "if atomicLoad(&vsm_top_map[i])==id {return;}",
+            1,
+        ),
+        (
+            "let value=(u64(bitcast<u32>(clamp(height,0.0,1.0)))<<32u)|u64(id);",
+            "let value=max(bitcast<u32>(clamp(height,0.0,1.0)),1u);",
+            1,
+        ),
+    ] {
+        assert_eq!(source.matches(from).count(), count, "virtual_shadow.wgsl changed: {from}");
+        source = source.replace(from, to);
+    }
+    source
 }
 
 /// The walk-record build module (N8g): the shared draw-slot count, then
@@ -1148,6 +1176,7 @@ impl VirtualState {
         ledger: &Ledger,
         arrays: &wgpu::BindGroupLayout,
         lighting: &wgpu::BindGroupLayout,
+        fog: bool,
     ) -> Self {
         use wgpu::ShaderStages as S;
         use wgpu::TextureSampleType as T;
@@ -1514,7 +1543,9 @@ impl VirtualState {
         let module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8 virtual sun shadows"),
-                source: wgpu::ShaderSource::Wgsl(shader_source().into()),
+                source: wgpu::ShaderSource::Wgsl(
+                    if fog { fog_shader_source() } else { shader_source() }.into(),
+                ),
             }),
             ResourceKind::ShaderModule,
         );
@@ -1580,6 +1611,7 @@ impl VirtualState {
             clear: compute("vsm_clear", &clear_layout, &[]),
             cull: compute("vsm_cull", &cull_layout, &[]),
             cull_placements: compute("vsm_cull_placements", &cull_layout, &[]),
+            cull_live: compute("vsm_cull_live", &cull_layout, &[]),
             finish: compute("vsm_finish", &cull_layout, &[]),
             mip: compute("vsm_mip", &mip_layout, &[]),
             software: [0.0, 1.0]
@@ -1760,7 +1792,8 @@ impl VirtualState {
         let side = pages * PAGE;
         let page_words = u64::from(PAGE * PAGE);
         let map_bytes = if sparse {
-            u64::from(capacity) * page_words * 8
+            // The fog map's texels are 32-bit (fog_shader_source).
+            u64::from(capacity) * page_words * if self.fog { 4 } else { 8 }
         } else {
             u64::from(side) * u64::from(side) * levels as u64 * 8
         };
@@ -2187,6 +2220,7 @@ impl Renderer {
                 &self.ledger,
                 primary.array_layout(),
                 &self.lighting.bindings,
+                fog.is_some(),
             );
             state.settings = self.view.virtual_settings;
             self.pipelines.created += 10;
@@ -2521,12 +2555,30 @@ impl Renderer {
             ));
         }
         if fog.is_some() && (grown || !reuse) {
+            // Each placement's cluster instances, contiguous in draw then slot order
+            // (visibility_buffer.rs ClusterInstances).
+            let ranges = draws.iter().flat_map(|d| {
+                let n = d.mesh.clusters.as_ref().map_or(0, |c| c.clusters.len() as u32);
+                std::iter::repeat_n(n, d.instances.len())
+            });
+            let mut first = 0u32;
             let words: Vec<u8> = cache
                 .bounds
                 .iter()
-                .zip(&cache.poses)
-                .flat_map(|(b, pose)| {
-                    [b.min.x, b.min.y, b.min.z, if pose.is_some() { 1.0 } else { 0.0 }, b.max.x, b.max.y, b.max.z, 0.0]
+                .zip(ranges)
+                .flat_map(|(b, n)| {
+                    let start = first;
+                    first += n;
+                    [
+                        b.min.x,
+                        b.min.y,
+                        b.min.z,
+                        f32::from_bits(start),
+                        b.max.x,
+                        b.max.y,
+                        b.max.z,
+                        f32::from_bits(n),
+                    ]
                 })
                 .flat_map(f32::to_ne_bytes)
                 .collect();
@@ -3876,15 +3928,17 @@ impl Renderer {
             pass.set_bind_group(0, &*g.cull, &[]);
             pass.set_bind_group(1, arrays, &[]);
             if state.fog {
-                // The placements that can touch this frame's pages; the cluster cull skips the
-                // others' clusters.
+                // The placements that can touch this frame's pages, then their clusters alone.
                 let placements = state.cache.models.len().max(1) as u32;
                 pass.set_pipeline(&p.cull_placements);
                 pass.dispatch_workgroups(placements.div_ceil(64).min(65535), 1, 1);
+                pass.set_pipeline(&p.cull_live);
+                pass.dispatch_workgroups(placements.min(65535), placements.div_ceil(65535), 1);
+            } else {
+                pass.set_pipeline(&p.cull);
+                // N8f: no stale page (camera motion inside the windows) dispatches no group.
+                pass.dispatch_workgroups_indirect(&r.cull_args, 0);
             }
-            pass.set_pipeline(&p.cull);
-            // N8f: no stale page (camera motion inside the windows) dispatches no group.
-            pass.dispatch_workgroups_indirect(&r.cull_args, 0);
             pass.set_pipeline(&p.finish);
             pass.dispatch_workgroups(1, 1, 1);
         }
