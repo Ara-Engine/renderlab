@@ -1,6 +1,6 @@
-// (cluster << 7 | triangle, depth bits) per pixel; depth 0 is a miss. Resolve zeroes
-// the hits it reads, so the next frame starts clear without a full-buffer fill: every
-// rasterized pixel lies in the placements' screen rectangle that resolve reads.
+// Software (cluster << 7 | triangle, depth bits) per pixel; depth 0 is a miss.
+// Resolve zeroes software hits as it reads them. Hardware attachments are cleared
+// by the first raster pass of each frame.
 @group(0) @binding(29) var<storage,read_write> visibility:array<vec2<u32>>;
 // visibility_buffer.wgsl's Cluster: primitives is the first primitive ID, or with
 // counts bit 16 an offset of per-triangle source primitive IDs in the cluster data.
@@ -19,12 +19,17 @@ struct RasterHit {ids:vec2<u32>,positions:array<vec3<f32>,3>,error:f32};
 // positions. Cluster triangles keep the index buffer's corner order and exact position
 // bits, so these equal primary_triangle_vertices without its scattered gathers.
 // Primitives at or beyond the mesh's source count are its appended LOD triangles.
+// attachment reader begin
+fn raster_visibility(pixel:vec2<u32>,width:u32)->vec2<u32> {
+    let i=pixel.y*width+pixel.x;let v=visibility[i];
+    if v.y!=0u {visibility[i]=vec2<u32>(0u);}
+    return v;
+}
+// attachment reader end
 fn raster_hit(pixel:vec2<u32>,width:u32)->RasterHit {
     var hit:RasterHit;
-    let i=pixel.y*width+pixel.x;
-    let v=visibility[i];
+    let v=raster_visibility(pixel,width);
     if v.y==0u {return hit;}
-    visibility[i]=vec2<u32>(0u);
     let c=visibility_clusters[v.x>>7u];let local=v.x&127u;
     let batch=primary_placements[c.placement]&0x1fffffffu;
     let d=&visibility_data[batch].data;
