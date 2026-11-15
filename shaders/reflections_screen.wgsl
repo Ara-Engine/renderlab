@@ -87,7 +87,9 @@ fn rl_screen_history(point:vec3<f32>,normal:vec3<f32>,key:vec2<u32>,cone:f32)->v
     return vec4<f32>(max((colour-scatter)/transmission,vec3<f32>(0.0)),1.0);
 }
 fn rl_screen_hit(origin:vec3<f32>,direction:vec3<f32>,epsilon:f32,cone:vec2<f32>,receiver:vec2<u32>)->vec4<f32> {
+    atomicAdd(&rl_trace_stats.screen_try,1u);
     if rl_screen_frame.flags.x==0u {return vec4<f32>(0.0);}
+    atomicAdd(&rl_trace_stats.screen_valid,1u);
     let matrix=rl_screen_frame.current;let start=matrix*vec4<f32>(origin+direction*epsilon,1.0);
     let delta=matrix*vec4<f32>(direction,0.0);var distance=rl_screen_frame.tune.z;
     if delta.w<0.0 {distance=min(distance,(start.w-0.02)/(-delta.w));}
@@ -130,7 +132,10 @@ fn rl_screen_hit(origin:vec3<f32>,direction:vec3<f32>,epsilon:f32,cone:vec2<f32>
         let normal=normalize(cross(e1,e2));
         if (info&(1u<<30u))!=0u && dot(normal,direction)>=0.0 {break;}
         if dot(normal,direction)*dot(normal,rl_screen_frame.previous_eye.xyz-point)>=0.0 {break;}
-        return rl_screen_history(point,normal,record.xy,cone.x+cone.y*t);
+        atomicAdd(&rl_trace_stats.screen_candidate,1u);
+        let colour=rl_screen_history(point,normal,record.xy,cone.x+cone.y*t);
+        if colour.a>0.0 {atomicAdd(&rl_trace_stats.screen_hit,1u);}
+        return colour;
     }
     return vec4<f32>(0.0);
 }

@@ -137,7 +137,7 @@ impl TraceAbi {
             uniform(PASS_FRAME, 16),
             buffer(HITS, write, HITS_HEADER + RECORD_BYTES),
             image(SAMPLES, F::Rgba16Float),
-            buffer(STATS, write, 16),
+            buffer(STATS, write, if screen::enabled(device) { STATS_BYTES } else { 16 }),
         ];
         entries.push(if ray_query {
             scene(2)
@@ -909,7 +909,7 @@ impl Renderer {
                             allocator.1
                         );
                         let line = format!(
-                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}]{memory}}}\n",
+                            "{{\"frame\":{},\"requested\":{},\"slots\":{},\"overflow_pixels\":{},\"room\":{},\"floored_inline\":[{},{}],\"contribution_under_0005\":[{},{}],\"screen\":[{},{},{},{}]{memory}}}\n",
                             r.frame.load(SeqCst),
                             word(2),
                             word(1),
@@ -918,7 +918,7 @@ impl Renderer {
                             word(7),
                             word(8),
                             word(9),
-                            word(10)
+                            word(10),word(11),word(12),word(13),word(14)
                         );
                         if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
                             let _ = file.write_all(line.as_bytes());
