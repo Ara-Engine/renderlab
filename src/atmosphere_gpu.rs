@@ -1164,7 +1164,9 @@ impl Renderer {
         }
         // Virtual's resources exist after prepare_virtual, and its pages have been
         // encoded before this call. Raster depth and the TLAS are ready here too.
+        let t = std::time::Instant::now(); // FOGPROF
         self.atmosphere_volume_groups(true, scene);
+        virtual_shadow_gpu::fogprof(2, t); // FOGPROF
         let sun = self.atmosphere_sun().map_or(Vec3::Y, |s| s.0);
         let altitude = self.atmosphere.published.as_ref().map_or(0.0, |b| f32::from_ne_bytes(b[140..144].try_into().unwrap()));
         let (a, av) = (&mut self.atmosphere, &mut self.view.atmosphere);

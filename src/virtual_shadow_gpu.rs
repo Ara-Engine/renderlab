@@ -4243,3 +4243,21 @@ mod tests {
         }
     }
 }
+
+// FOGPROF: temporary CPU timings (RENDERLAB_FOG_PROFILE=<file>): 0 prepare, 1 encode, 2 fog groups.
+pub(crate) fn fogprof(i: usize, t: std::time::Instant) {
+    static P: std::sync::Mutex<([f64; 4], u32)> = std::sync::Mutex::new(([0.0; 4], 0));
+    let Some(path) = std::env::var_os("RENDERLAB_FOG_PROFILE") else { return };
+    let mut p = P.lock().unwrap();
+    p.0[i] += t.elapsed().as_secs_f64() * 1e3;
+    if i == 0 {
+        p.1 += 1;
+        if p.1 % 60 == 0 {
+            use std::io::Write;
+            let line = format!("{:?}
+", p.0.map(|v| (v / 60.0 * 1000.0).round() / 1000.0));
+            let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut f| f.write_all(line.as_bytes()));
+            p.0 = [0.0; 4];
+        }
+    }
+}

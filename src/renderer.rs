@@ -3472,7 +3472,9 @@ impl Renderer {
             // With ray hardware the fog's sun shadows read the coarse clipmap levels.
             if let Some(fog) = self.fog_map_wanted(soft) {
                 let scopes = OperationScopes::new(&self.device);
+                let t = std::time::Instant::now(); // FOGPROF
                 let result = self.prepare_virtual(draws, camera, color.size(), Some(fog));
+                virtual_shadow_gpu::fogprof(0, t); // FOGPROF
                 if let Some(error) = scopes.finish() {
                     return Err(self.fail(error.to_string()));
                 }
@@ -3587,7 +3589,9 @@ impl Renderer {
             self.encode_transmission(&mut encoder, transparent);
         }
         if lit && !virtual_frame {
+            let t = std::time::Instant::now(); // FOGPROF
             self.encode_fog_map(&mut encoder, &mut mark);
+            virtual_shadow_gpu::fogprof(1, t); // FOGPROF
             mark(&mut encoder, "atmosphere");
             self.encode_atmosphere(&mut encoder, scene_generation, &mut mark);
         }
