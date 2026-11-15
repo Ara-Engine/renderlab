@@ -40,7 +40,6 @@ fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rou
     // A skinned or moved placement's cells lag its surface (they belong to where it was), so
     // its hits always take the full program.
     let mover=batch_skinned(primary_batch_info(hit.batch)) || rl_cache_moved(hit.placement);
-    // ---- cache count seam ----
     if mover { return vec4<f32>(0.0); }
     return value;
 }

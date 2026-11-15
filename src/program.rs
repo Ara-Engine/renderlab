@@ -1420,12 +1420,6 @@ pub(crate) fn compose_hits(
         CACHE_SUITS_NEVER
     });
     composed.source = rl_pass_switches(composed.source);
-    if cache_count() && composed.source.contains(CACHE_COUNT_SEAM) {
-        composed.source = composed.source.replacen(CACHE_COUNT_SEAM, CACHE_COUNT, 1);
-        if !composed.source.contains("var<storage,read_write> rl_room_stats") {
-            composed.source.push_str(CACHE_COUNT_BINDING);
-        }
-    }
     composed
 }
 /// Whether a reflection hit's own surface may take the cache's Lambertian value
@@ -1435,17 +1429,6 @@ pub(crate) fn compose_hits(
 /// of a program that declares no view dependence.
 const CACHE_SUITS: &str = "\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return view_dependence(s,input).share<0.25; }\n";
 const CACHE_SUITS_NEVER: &str = "\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return false; }\n";
-/// Measurement only (`RENDERLAB_RL_CACHE_COUNT=1`, read with `RENDERLAB_RL_ROOM_LOG`, whose
-/// `floored_inline` pair then holds them): reflection hits that reach the cache lookup on a
-/// skinned or moved placement (word 7), and how many of those the cache would have answered
-/// (word 8) before the rule sends them to the full program.
-fn cache_count() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_RL_CACHE_COUNT").is_ok_and(|v| v == "1"))
-}
-const CACHE_COUNT_SEAM: &str = "    // ---- cache count seam ----\n";
-const CACHE_COUNT: &str = "    if mover { atomicAdd(&rl_room_stats[7],1u); if value.w>0.0 { atomicAdd(&rl_room_stats[8],1u); } }\n";
-const CACHE_COUNT_BINDING: &str = "\n@group(0) @binding(69) var<storage,read_write> rl_room_stats:array<atomic<u32>,16>;\n";
 /// `RENDERLAB_RL_HIT_OWN_PROGRAM=1` (measurement, off by default): in a mixed-program frame each
 /// hit is shaded by its own draw's program, with its own parameters. More correct than inline's
 /// fallback (an emitter's reflection glows), but a visible change (docs/m7-gaps.md, Programs).
