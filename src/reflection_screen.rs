@@ -45,6 +45,7 @@ impl Abi {
                 texture(4, T::Uint),
                 texture(6, T::Uint),
                 texture(7, T::Float { filterable: false }),
+                buffer(8, wgpu::BufferBindingType::Storage { read_only: false }, 16),
             ],
         );
         let depth = layout(
@@ -121,6 +122,7 @@ struct Previous {
     lighting: u64,
 }
 pub(super) struct Targets {
+    pub(super) results: Buffer,
     frame: Buffer,
     depth: Depth,
     previous: Depth,
@@ -130,7 +132,7 @@ pub(super) struct Targets {
     state: std::sync::Mutex<Option<Previous>>,
 }
 impl Targets {
-    pub(super) fn new(r: &Renderer, size: wgpu::Extent3d) -> Self {
+    pub(super) fn new(r: &Renderer, size: wgpu::Extent3d, room: u64) -> Self {
         let mips = 6.min(32 - size.width.min(size.height).leading_zeros());
         let target = |label, format: wgpu::TextureFormat| {
             let texture = r.ledger.own(
@@ -186,6 +188,7 @@ impl Targets {
         let depth_mips = views(&depth);
         let colour_mips = views(&colour);
         Self {
+            results: results(r, room),
             frame: Buffer::new(
                 r,
                 "reflection screen frame",
@@ -268,12 +271,23 @@ pub(super) fn source(source: String, device: &wgpu::Device) -> String {
     }
     let seam = "let traced=rl_cast(origin,d,epsilon);";
     assert_eq!(source.matches(seam).count(), 1);
-    let source=source.replacen(seam,"let screen=rl_screen_hit(origin,d,epsilon,cone,p);\n        if screen.a>0.0 {textureStore(rl_samples,at,rl_f16_nearest(screen));continue;}\n        let traced=rl_cast(origin,d,epsilon);",1);
+    // Keep the march out of the BVH kernel's live registers, including fallback rays.
+    let begin=source.find("@compute @workgroup_size(64) fn rl_trace_pixels").unwrap();
+    let mut march=source[begin..source.find("// reflection_hits' indirect").unwrap()].to_owned();
+    march.truncate(march.find(seam).unwrap());
+    march.push_str("rl_screen_results[slot]=rl_screen_hit(origin,d,epsilon,cone,p);\n    }\n}\n");
+    let march=march.replace("fn rl_trace_pixels(","fn rl_screen_pixels(")
+        .replace("atomicAdd(&rl_trace_stats.pixels,1u);","").replace("atomicAdd(&rl_trace_stats.slots,count);","")
+        .replace("textureStore(rl_samples,at,vec4<f32>(0.0));","rl_screen_results[slot]=vec4<f32>(0.0);");
+    let source=source.replacen(seam,"let screen=rl_screen_results[slot];\n        if screen.a>0.0 {textureStore(rl_samples,at,rl_f16_nearest(screen));continue;}\n        let traced=rl_cast(origin,d,epsilon);",1);
     let source=source.replace("dropped:atomic<u32> };", "dropped:atomic<u32>, screen_pad:array<u32,7>, screen_try:atomic<u32>, screen_candidate:atomic<u32>, screen_hit:atomic<u32>, screen_valid:atomic<u32>, screen_end:u32 };");
     format!(
-        "{source}\n{}",
+        "{source}\n{march}\n{}",
         include_str!("../shaders/reflections_screen.wgsl")
     )
+}
+pub(super) fn results(r:&Renderer,room:u64)->Buffer {
+    Buffer::new(r,"reflection screen results",room*16,wgpu::BufferUsages::STORAGE)
 }
 impl Renderer {
     pub(super) fn rl_screen_group(
@@ -311,6 +325,7 @@ impl Renderer {
                     binding: 7,
                     resource: R::TextureView(&t.colour.view),
                 },
+                wgpu::BindGroupEntry {binding:8,resource:t.results.value.as_entire_binding()},
             ],
         })
     }

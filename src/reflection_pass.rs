@@ -216,6 +216,7 @@ pub(super) struct TracePipelines {
     /// The deferred composite: its group layout and additive point pipeline.
     composite: (Owned<wgpu::BindGroupLayout>, Owned<wgpu::RenderPipeline>),
     screen: Option<screen::Pipelines>,
+    screen_march: Option<Owned<wgpu::ComputePipeline>>,
 }
 
 impl Renderer {
@@ -227,7 +228,7 @@ impl Renderer {
             .unwrap_or(ROOM_START)
             .min(ROOM_PER_PIXEL * u64::from(size.width) * u64::from(size.height));
         PassTargets {
-            screen: screen::enabled(&self.device).then(|| screen::Targets::new(self, size)),
+            screen: screen::enabled(&self.device).then(|| screen::Targets::new(self, size, room)),
             list: self.rl_list(room),
             list_args: Buffer::new(
                 self,
@@ -382,6 +383,7 @@ impl Renderer {
             args: pipeline("rl_hit_args", &abi.layout),
             composite: self.rl_composite_kit(),
             screen: abi.screen.as_ref().map(|s| s.pipelines(pipeline)),
+            screen_march: abi.screen.as_ref().map(|_| pipeline("rl_screen_pixels", &abi.layout)),
         };
         if let Some(error) = scopes.finish() {
             return Err(Error::Shader(format!("reflection trace: {error}")));
@@ -435,6 +437,11 @@ impl Renderer {
         drop(compute);
         let cache = abi.cache_group.as_ref().map(|layout| self.rl_outgoing_group(layout));
         let screen_group = abi.screen.as_ref().map(|s| self.rl_screen_group(s, pass.screen.as_ref().unwrap(), &state.targets.as_ref().unwrap().hit.view));
+        if let (Some(march), Some(group)) = (&pipelines.screen_march, &screen_group) {
+            let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {label:Some("reflection screen march"),timestamp_writes:None});
+            bind(&mut compute);compute.set_bind_group(2, group, &[]);compute.set_pipeline(march);
+            compute.dispatch_workgroups_indirect(&pass.list_args.value, 0);
+        }
         let mut compute = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reflection trace"),
             timestamp_writes: None,
@@ -942,12 +949,14 @@ impl Renderer {
             wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
         );
         let list = self.rl_list(room);
+        let screen_results = pass.screen.as_ref().map(|_| screen::results(self, room));
         let state = self.view.primary.as_mut().unwrap();
         let pass = state.targets.as_mut().unwrap().rl_pass.as_mut().unwrap();
         pass.samples = samples;
         pass.hits = hits;
         pass.list = list;
         pass.room = room;
+        if let Some(results) = screen_results { pass.screen.as_mut().unwrap().results = results; }
     }
     fn rl_room_samples(&self, room: u64) -> Depth {
         let width = SAMPLE_ROW;

@@ -10,6 +10,7 @@ struct RlScreenFrame {
 @group(2) @binding(5) var rl_screen_tiles:texture_2d<u32>;
 @group(2) @binding(6) var rl_screen_previous:texture_2d<u32>;
 @group(2) @binding(7) var rl_screen_colours:texture_2d<f32>;
+@group(2) @binding(8) var<storage,read_write> rl_screen_results:array<vec4<f32>>;
 @group(2) @binding(11) var rl_screen_colour_out:texture_storage_2d<rgba16float,write>;
 @group(2) @binding(12) var rl_screen_depth_out:texture_storage_2d<rgba32uint,write>;
 
