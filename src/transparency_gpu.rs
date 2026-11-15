@@ -2326,7 +2326,7 @@ impl Renderer {
                 let primary = self.view.primary.as_ref().unwrap();
                 let t = primary.targets.as_ref().unwrap();
                 let (bindings, _) = gpu.hit_depth.as_ref().unwrap();
-                let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                let group = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
                     label: Some("TP1 hit depth"),
                     layout: bindings,
                     entries: &[
@@ -2542,7 +2542,7 @@ impl Renderer {
             });
         }
         let glass_group = (!transparent.is_empty()).then(|| {
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("TP1 transparent group 0"),
                 layout: &gpu.glass_bindings[usize::from(rt)],
                 entries: &glass_entries,
@@ -2551,12 +2551,17 @@ impl Renderer {
         // The reflection dispatch's rectangles: slot 0 the whole view, slot 1 + i the glass run
         // that draw i begins (written as the runs are met below).
         let reflect_rects = reflect.then(|| {
-            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("TP2 glass reflection rectangles"),
-                size: (transparent.len() as u64 + 1) * RECT_SLOT,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+            let bytes = (transparent.len() as u64 + 1) * RECT_SLOT;
+            let mut kept = self.reflect_rects.lock().unwrap();
+            if kept.as_ref().is_none_or(|b| b.size() != bytes) {
+                *kept = Some(self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("TP2 glass reflection rectangles"),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }));
+            }
+            let buffer = kept.as_ref().unwrap().clone();
             let full = [0u32, 0, size.width, size.height];
             self.queue.write_buffer(&buffer, 0, &full.map(u32::to_ne_bytes).concat());
             buffer
@@ -2564,7 +2569,7 @@ impl Renderer {
         // TP2: reflection hits use the existing opaque geometry, materials and R1 shader.
         let reflection_group = reflect.then(|| {
             let reflection = self.view.transparency_reflections.as_ref().unwrap();
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("TP2 glass reflections"),
                 layout: &reflection.layout,
                 entries: &[
@@ -2633,7 +2638,7 @@ impl Renderer {
         }
         let reflection_clear_group = reflect.then(|| {
             let reflection = self.view.transparency_reflections.as_ref().unwrap();
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("TP zero reflection"),
                 layout: &gpu.lobe_clear_bindings,
                 entries: &[
@@ -2646,7 +2651,7 @@ impl Renderer {
             })
         });
         let lobe_dispatch_group = reflect.then(|| {
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
                 label: Some("TP lobe dispatch"),
                 layout: &gpu.lobe_dispatch_bindings,
                 entries: &[
@@ -2672,7 +2677,7 @@ impl Renderer {
                     .sprite
                     .as_ref()
                     .map_or(&*gpu.white, |t| self.texture_view(t));
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
                     label: Some("TP1 particle draw"),
                     layout: &gpu.draw_bindings,
                     entries: &[
@@ -2790,7 +2795,7 @@ impl Renderer {
                         }),
                     },
                 ]);
-                pane_groups[i] = Some(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                pane_groups[i] = Some(self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
                     label: Some("TP pane group 0"),
                     layout: &gpu.pane_bindings[usize::from(rt)],
                     entries: &entries,
@@ -2799,7 +2804,7 @@ impl Renderer {
         }
         // 4. Back to front. Each transparent draw first copies the colour behind it.
         let hdr_view = &hdr.resolved.view;
-        let aa_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let aa_group = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("TP2 glass AA seed"),
             layout: &gpu.aa_bindings,
             entries: &[wgpu::BindGroupEntry {
@@ -2807,7 +2812,7 @@ impl Renderer {
                 resource: wgpu::BindingResource::TextureView(&targets.color.view),
             }],
         });
-        let resolve_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+        let resolve_group = self.groups.get(&self.device, &wgpu::BindGroupDescriptor {
             label: Some("TP bounded AA resolve"),
             layout: &gpu.aa_resolve_bindings,
             entries: &[wgpu::BindGroupEntry {
