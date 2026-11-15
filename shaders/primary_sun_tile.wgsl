@@ -7,7 +7,10 @@
 // them (0 or 256). Any disagreement, anywhere in the tile, resumes every receiver after its
 // probes, so penumbra tiles trace main's full budget in main's direction order and their
 // estimate is main's exactly.
-// tr1_tile_state: 0 normal, 1 pause at the probes, 2 paused (resume), 3 tile unanimous.
+// Still reuse (sunrt-7): on a frame the CPU found unchanged (tr1_tile_reuse), a receiver whose
+// history hints one class keeps it without a ray, and votes that class for the tile.
+// tr1_tile_state: 0 normal, 1 pause at the probes, 2 paused (resume), 3 tile unanimous,
+// 4 reused (tr1_tile_count 0 shadowed or 1 lit, over one direction).
 var<private> tr1_tile_state:u32=0u;
 var<private> tr1_tile_count:u32=0u;
 var<private> tr1_tile_pause:u32=TR1_TILE_PROBES;
@@ -18,12 +21,17 @@ var<workgroup> tr1_tile_hints:atomic<u32>;
 // 2 every probe clear, 4 anything else. Receivers that skip (outside every cascade) or miss
 // neither hint nor vote.
 fn tr1_tile_vote(hit:bool,receiver:Receiver,slot:u32,pixel:vec2<u32>,width:u32) {
-    if hit {atomicOr(&tr1_tile_hints,max(tr1_tile_hint(receiver,slot),1u));}
+    var hint=0u;
+    if hit {hint=tr1_tile_hint(receiver,slot);atomicOr(&tr1_tile_hints,max(hint,1u));}
     workgroupBarrier();
     let hints=atomicLoad(&tr1_tile_hints);
     tr1_tile_pause=select(TR1_TILE_PROBES,tr1_tile_hint_probes(),hints==2u || hints==4u);
     var vote=0u;
-    if hit {
+    if hit && hint!=0u && tr1_tile_reuse() {
+        tr1_tile_state=4u;
+        tr1_tile_count=select(0u,1u,hint==2u);
+        vote=select(1u,2u,hint==2u);
+    } else if hit {
         tr1_tile_state=1u;
         let v=fresh_estimate(receiver,pixel,width,0u);
         if tr1_tile_state==2u {
@@ -45,4 +53,5 @@ fn tr1_tile_vote_trace(trace:PrimaryTrace,pixel:vec2<u32>,width:u32) {
 // Without a sun-shadow history (the port, legacy modules): no hint, every tile probes TR1_TILE_PROBES.
 fn tr1_tile_hint(receiver:Receiver,slot:u32)->u32 {return 0u;}
 fn tr1_tile_hint_probes()->u32 {return TR1_TILE_PROBES;}
+fn tr1_tile_reuse()->bool {return false;}
 // tile hint end

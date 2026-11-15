@@ -2654,6 +2654,8 @@ fn frame(
                 }),
                 skin_revisions: skin_revisions.clone(),
                 rigid_motion,
+                // The port reads no still reuse (rtvis_held is the wgpu module's).
+                scene_static: false,
                 moving_bounds: None,
                 listing: false,
             });
