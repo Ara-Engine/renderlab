@@ -4271,10 +4271,10 @@ pub(crate) fn fogsec(i: usize, t: &mut std::time::Instant) {
     *t = now;
     if i == 6 {
         p.1 += 1;
-        if p.1 % 60 == 0 {
+        if p.1 % 10 == 0 {
             use std::io::Write;
-            let line = format!("{:?}
-", p.0.map(|v| (v / 60.0 * 1000.0).round() / 1000.0));
+            let line = format!("{} {:?}
+", p.1, p.0.map(|v| (v / 10.0 * 1000.0).round() / 1000.0));
             let _ = std::fs::OpenOptions::new().create(true).append(true).open(path).and_then(|mut f| f.write_all(line.as_bytes()));
             p.0 = [0.0; 8];
         }
