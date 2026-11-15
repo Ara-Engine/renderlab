@@ -530,12 +530,15 @@ override VD_EDGE_SHOW:bool=false;
 // Per placement, whether its mesh is in the trace geometry (one bit each).
 @group(0) @binding(61) var<storage,read> vd_traceable:array<u32>;
 // The edge pixels for vd_edges: a header (count, those left to the map for an untraced caster),
-// then per pixel its packed id (four words, three spare). Past its capacity a pixel keeps the
-// map.
+// then per pixel its packed id and `vd_ray_reach` (four words, two spare). Past its capacity a pixel
+// keeps the map.
 @group(0) @binding(62) var<storage,read_write> vd_edge_list:array<atomic<u32>>;
 const VD_EDGE_HEADER:u32=4u;
 fn vd_edge_capacity()->u32 {return (arrayLength(&vd_edge_list)-VD_EDGE_HEADER)/4u;}
 var<private> vd_cut:f32;
+// The rays' reach: the highest outline column that marked the pixel, two texels over it. The
+// geometry under it is traced; the columns above it are the map's (vd_edges' second walk).
+var<private> vd_ray_reach:f32;
 // vd_edges' second walk: columns below this height add nothing (their part above it does).
 var<private> vd_floor:f32;
 // The samples blocked by columns that are no outline near the cone: full, no edge can matter.
@@ -574,7 +577,7 @@ fn vd_edge_rays(id:vec2<u32>)->u32 {
         if far!=0u {continue;}
         let d=vd_px.centre+vd_px.radius*g;
         let dir=normalize(vsm.u.xyz*d.x+vsm.v.xyz*d.y+vsm.l.xyz);
-        let reach=vd_cut/max(dot(dir,vsm.l.xyz),0.05)*1.02+2.0*vsm_texel(vd_px.level);
+        let reach=vd_ray_reach/max(dot(dir,vsm.l.xyz),0.05)*1.02;
         if !rs_blocked(vd_px.origin,dir,1e-4,reach) {lit+=1u;}
     }
     return lit*256u/VD_RAYS;
@@ -631,6 +634,7 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
             let q=p.xy+vd_px.centre*min(t,vd_cut);
             if vd_outline(cell,level,c,size,q,t,lo) {
                 outline=true;
+                vd_ray_reach=max(vd_ray_reach,t+2.0*size);
                 let placement=(top.x>>vsm.misc.x)-1u;
                 let traced=((vd_traceable[placement>>5u]>>(placement&31u))&1u)!=0u;
                 vd_edge=max(vd_edge,select(2u,1u,traced));
@@ -795,6 +799,7 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     vd_mask=vec2<u32>(0u);
     vd_edge=0u;
     vd_cut=-1.0;
+    vd_ray_reach=0.0;
     vd_floor=0.0;
     vd_core=vec2<u32>(0u);
     if !vd_px.thin && !vd_facing() {return 0u;}
@@ -807,7 +812,10 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     // Inside an umbra of columns that are no outline near the cone, no edge can show.
     if vd_edge==1u && !all(vd_core==vec2<u32>(0xffffffffu)) {
         let slot=atomicAdd(&vd_edge_list[0],1u);
-        if slot<vd_edge_capacity() {atomicStore(&vd_edge_list[VD_EDGE_HEADER+4u*slot],id.x|(id.y<<16u));}
+        if slot<vd_edge_capacity() {
+            atomicStore(&vd_edge_list[VD_EDGE_HEADER+4u*slot],id.x|(id.y<<16u));
+            atomicStore(&vd_edge_list[VD_EDGE_HEADER+4u*slot+1u],bitcast<u32>(vd_ray_reach));
+        }
     }
     if vd_edge==2u {atomicAdd(&vd_edge_list[1],1u);}
     // 64 samples to the 0..256 count the shading programs read.
@@ -823,8 +831,8 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     vd_prepare(id);
     if !vd_px.valid || vd_px.level==VSM_NONE {return;}
     // The columns above the rays' reach: the map walked again from that height up.
-    vd_cut=VD_EDGE_HARD*vsm_texel(vd_px.level)/vd_px.radius;
-    vd_floor=vd_cut;
+    vd_ray_reach=bitcast<f32>(atomicLoad(&vd_edge_list[at+1u]));
+    vd_floor=vd_ray_reach;
     vd_edge=2u;
     vd_core=vec2<u32>(0u);
     vd_mask=vec2<u32>(0u);
