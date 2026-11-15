@@ -1,3 +1,10 @@
 * text=auto eol=lf
 
 *.pfm binary
+
+# Cargo's git checkout (libgit2) follows core.autocrlf and ignores eol=lf, so a dependent
+# build on Windows got these files with CRLF and text patterns that contain a line break
+# silently stopped matching. -text means: never convert, check out exactly what is stored (LF).
+*.wgsl -text
+*.rs -text
+*.toml -text
