@@ -670,6 +670,12 @@ pub(super) struct VirtualState {
     /// The fog map (`FogMap`) and this frame's CPU page requests (one word per table entry).
     fog: bool,
     fog_requests: Vec<u32>,
+    /// The fog map's page-work frames left for budget-deferred pages.
+    fog_pending: u32,
+    /// The fog map's placements as last seen: each draw's instance revision and skin pose. While
+    /// they hold, its frames skip the per-placement bounds (no caster moved; the fog ladder needs
+    /// no caster distance).
+    fog_placements: Vec<((u64, u64), crate::renderer::skinning::PlacementPose)>,
     /// Page requests depend only on the camera, the sun, the casters and the cache
     /// windows. A frame identical in all of them finds nothing stale, so it skips the
     /// request, compaction and raster passes and only runs the lookup.
@@ -1609,6 +1615,8 @@ impl VirtualState {
             capacity: pool_settings().0,
             fog: false,
             fog_requests: vec![],
+            fog_pending: 0,
+            fog_placements: vec![],
             key: vec![],
             page_work: true,
             history_frames: 0,
@@ -2264,11 +2272,24 @@ impl Renderer {
         let [u, v, l] = basis(toward);
 
         fogprof::mark(1, &mut prof_t); // FOGPROF
+        let fog_placements: Vec<_> = draws
+            .iter()
+            .map(|d| {
+                let pose = d.mesh.skin.as_ref().map(|s| (Arc::as_ptr(&d.mesh.vertex) as usize, s.revision));
+                (d.instances.state.revision(), pose)
+            })
+            .collect();
+        let reuse = fog.is_some()
+            && state.fog
+            && state.fog_placements == fog_placements
+            && state.cache.heights.is_some()
+            && state.cache.light == Some(light_bits);
+        state.fog_placements = fog_placements;
         // Placements in traced order: draw order, then instance slot.
         let mut models = vec![];
         let mut bounds = vec![];
         let mut casts = vec![];
-        for draw in draws {
+        for draw in draws.iter().filter(|_| !reuse) {
             let state = &draw.instances.state;
             for (slot, &model) in state.models.iter().enumerate() {
                 models.push(model.to_cols_array().map(f32::to_bits));
@@ -2276,8 +2297,8 @@ impl Renderer {
                 casts.push(state.casts_shadows(slot));
             }
         }
-        let placements = models.len();
-        let poses = crate::renderer::skinning::placement_poses(draws);
+        let placements = if reuse { state.cache.models.len() } else { models.len() };
+        let poses = if reuse { vec![] } else { crate::renderer::skinning::placement_poses(draws) };
         // Light-space xy rectangle of a box, relative to the eye.
         let rect = |b: &crate::shadow_plan::Bounds| {
             let mut lo = glam::DVec2::INFINITY;
@@ -2302,7 +2323,10 @@ impl Renderer {
             let nearest = eye.clamp(b.min.as_dvec3(), b.max.as_dvec3());
             near = near.min((nearest - eye).length());
         }
-        if !casts.contains(&true) {
+        if reuse {
+            // The cached heights hold (the bounds are unchanged); the fog ladder sets the span.
+            (near, far) = (1.0, 1.0);
+        } else if !casts.contains(&true) {
             (zlo, zhi, near, far) = (0.0, 1.0, 1.0, 1.0);
         }
         let mut invalidated = [false; MAX_LEVELS];
@@ -2363,11 +2387,11 @@ impl Renderer {
             .min(coarsest);
         }
         if let Some(f) = fog {
-            // The fog volume's own span: from a metre out (nearer cells are a few centimetres
-            // wide and their light is the camera's own surroundings) to the fog range, at most
-            // MAX_LEVELS octaves from the far end.
+            // The fog volume's own span, fixed while the view's size and the fog range hold (a
+            // new ladder redraws every page): from a metre out (nearer cells are a few
+            // centimetres wide) to the fog range, at most MAX_LEVELS octaves from the far end.
             coarsest = level_of(f.range) + 1;
-            finest = level_of(near.max(1.0))
+            finest = level_of(1.0)
                 .max(coarsest - MAX_LEVELS as i32 + 1)
                 .min(coarsest);
         }
@@ -2403,7 +2427,9 @@ impl Renderer {
         };
         // N8n: placements the rectangles do not describe retire the surface cache's cells.
         let mut surface_flush = false;
-        if cache.models.len() != placements {
+        if reuse {
+            // Nothing moved or deformed since the last frame.
+        } else if cache.models.len() != placements {
             invalidated = [true; MAX_LEVELS];
             surface_flush = true;
         } else {
@@ -2431,10 +2457,12 @@ impl Renderer {
             }
         }
         fogprof::mark(2, &mut prof_t); // FOGPROF
-        cache.models = models;
-        cache.casts = casts;
-        cache.bounds = bounds;
-        cache.poses = poses;
+        if !reuse {
+            cache.models = models;
+            cache.casts = casts;
+            cache.bounds = bounds;
+            cache.poses = poses;
+        }
         // Sparse with the Disk lookup only: the other lookups read the dense layout.
         let sparse = fog.is_some() || (sparse_switch() && s.lookup == VirtualLookup::Disk);
         let pages = i64::from(if sparse { SPARSE_PAGES } else { s.pages });
@@ -3039,14 +3067,23 @@ impl Renderer {
             }
         }
         let casters = state.casters.as_ref().unwrap();
+        fogprof::mark(7, &mut prof_t); // FOGPROF
         // Compare the uploaded view-projection's bits on the CPU: projection jitter,
         // aspect and depth planes can change receivers without changing the view/FOV.
-        let mut key: Vec<u64> = camera
-            .matrix(size.width, size.height)
-            .to_cols_array()
-            .iter()
-            .map(|v| u64::from(v.to_bits()))
-            .collect();
+        // The fog map: its CPU requests instead (camera jitter changes no page).
+        let mut key: Vec<u64> = if state.fog {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            state.fog_requests.hash(&mut h);
+            vec![h.finish()]
+        } else {
+            camera
+                .matrix(size.width, size.height)
+                .to_cols_array()
+                .iter()
+                .map(|v| u64::from(v.to_bits()))
+                .collect()
+        };
         key.extend([
             u64::from(size.width),
             u64::from(size.height),
@@ -3070,10 +3107,20 @@ impl Renderer {
         }
         // P-NSQ: a frame that rotates the directions never keeps counts of other directions
         // (TR1's lattice repeats its centre offset at k = 255 and 0, one matrix for both).
-        key.push(u64::from(rotation));
+        key.push(u64::from(if state.fog { 0 } else { rotation }));
         // N8f: moved casters alone (camera, sun basis, receivers and windows kept) still roll.
         let casters_only = !created && !rects.is_empty() && key == state.key;
         state.page_work = created || !rects.is_empty() || key != state.key;
+        // The fog map keeps working while its budget leaves requested pages undrawn (at most
+        // FOG_BUDGET a frame; two frames more for the readback-free allocation to settle).
+        if state.fog {
+            if state.page_work {
+                let requested = state.fog_requests.iter().filter(|&&w| w != 0).count() as u32;
+                state.fog_pending = requested.div_ceil(FOG_BUDGET) + 2;
+            }
+            state.page_work |= state.fog_pending > 0;
+            state.fog_pending = state.fog_pending.saturating_sub(1);
+        }
         state.stats.page_work = state.page_work;
         state.key = key;
         // N8e rolling refresh: a frame that changes nothing but the sun (inside the map's
