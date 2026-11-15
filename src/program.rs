@@ -304,7 +304,39 @@ pub(crate) fn with_reflection_history(composed: Composed) -> Composed {
     } else {
         composed
     };
-    with_light_counts(with_history_block(composed))
+    with_light_counts(light_fade(with_history_block(composed)))
+}
+/// The light fade's stub (shaders/program_api.wgsl) and its real block. In primary shading a
+/// local shadowed light whose unshadowed contribution at the receiver is under RL_LF_LO display
+/// codes casts no shadow query and counts as half visible, so its error is at most a quarter of a
+/// code; between RL_LF_LO and RL_LF_HI the traced visibility fades in (smoothstep), so no light
+/// switches hard as the view moves. Codes use the light bound's display slope at the receiver's
+/// running exposed sum (docs/design-light-bound.md). On Outpost 99% of the local lights a pixel
+/// shadow-tests add under one code. Reflection hits, cell shading and raster stages keep the
+/// stub (exact). `RENDERLAB_LIGHT_FADE=0` keeps every query.
+const LF_STUB: [&str; 2] = [
+    "// ---- light fade (program.rs light_fade replaces this block in primary shading) ----\n",
+    "// ---- end of light fade ----\n",
+];
+const LF_REAL: &str = "// ---- light fade (program.rs light_fade) ----
+const RL_LF_SKIPPED:f32=0.5;
+const RL_LF_LO:f32=0.5;
+const RL_LF_HI:f32=1.0;
+fn rl_lf_weight(s:LightSample, c:vec3<f32>, sum:vec3<f32>) -> f32 {
+    if lights[s.index].kind.w==0u { return 1.0; }
+    let r=1.0/max(sum,vec3<f32>(0.0087));
+    let slope=min(min(vec3<f32>(6.443),0.2888*r),min(0.1082*r*r,0.7648*r*r*r));
+    let d=c*slope*255.0;
+    return smoothstep(RL_LF_LO,RL_LF_HI,max(max(d.x,d.y),d.z));
+}
+// ---- end of light fade ----
+";
+fn light_fade(composed: Composed) -> Composed {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("RENDERLAB_LIGHT_FADE").map_or(true, |v| v != "0")) {
+        return composed;
+    }
+    replace_block(composed, LF_STUB, LF_REAL)
 }
 /// Measurement only (`RENDERLAB_LIGHT_COUNT=1`, read with `RENDERLAB_RL_ROOM_LOG`): primary
 /// shading counts, in the reflection pass's counters (reflection_pass.rs logs words 11-15 and 7),
