@@ -3090,7 +3090,9 @@ impl Renderer {
             u64::from(self.lod_lift.to_bits()),
         ]);
         for i in 0..levels {
-            let o = state.cache.origins[i].unwrap_or_default();
+            // The fog map's table is addressed by absolute page and its reads check the tags:
+            // a moved window alone needs no page work.
+            let o = state.cache.origins[i].filter(|_| !state.fog).unwrap_or_default();
             key.extend([o[0] as u64, o[1] as u64, u64::from(state.cache.epochs[i])]);
         }
         // P-NSQ: a frame that rotates the directions never keeps counts of other directions
