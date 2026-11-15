@@ -1071,10 +1071,43 @@ pub(crate) struct Composed {
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
     let composed = compose_stage(head, program, stage, parameters, false);
-    match (stage, light_bound()) {
+    let composed = match (stage, light_bound()) {
         (Stage::Traced | Stage::TracedStreamed, Some(bound)) => with_light_bound(composed, bound),
         _ => composed,
+    };
+    match stage {
+        Stage::Traced | Stage::TracedStreamed => with_shade_edits(composed),
+        _ => composed,
     }
+}
+/// Measurement only: `RENDERLAB_SHADE_EDITS=<file>` rewrites traced modules at run time, for
+/// variant screens without a build per variant. The file holds blocks separated by lines
+/// `@@@@`, each an old text and its replacement separated by a line `====`; a block applies
+/// to every traced module that contains its old text exactly once.
+fn with_shade_edits(mut composed: Composed) -> Composed {
+    static EDITS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    let edits = EDITS.get_or_init(|| {
+        let Some(text) = std::env::var("RENDERLAB_SHADE_EDITS").ok().and_then(|p| std::fs::read_to_string(p).ok())
+        else {
+            return Vec::new();
+        };
+        let text = text.replace("\r\n", "\n");
+        text.split("\n@@@@\n")
+            .filter_map(|block| block.split_once("\n====\n"))
+            .map(|(old, new)| (old.to_owned(), new.to_owned()))
+            .collect()
+    });
+    for (old, new) in edits {
+        if composed.source.matches(old.as_str()).count() != 1 {
+            continue;
+        }
+        // Keep the program's byte range on its text.
+        let at = composed.source.find(old.as_str()).unwrap();
+        let shift = |x: usize| if x > at { (x + new.len()).saturating_sub(old.len()).max(at) } else { x };
+        composed.program = shift(composed.program.start)..shift(composed.program.end);
+        composed.source = composed.source.replacen(old.as_str(), new, 1);
+    }
+    composed
 }
 /// `RENDERLAB_LIGHT_BOUND=black|sum` (off by default; a bounded picture change, not exact):
 /// the engine's `light_visibility_within(input, light, unshadowed, sum)` (program_api.wgsl)
