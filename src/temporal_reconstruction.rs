@@ -642,10 +642,16 @@ pub(crate) fn sun_history() -> bool {
 /// U-FIXED: `trace_source_held`'s module plus `primary_vb_sun`, the RT sun traced from the
 /// visibility buffer's receivers with the same budget, rotation and stops.
 pub(crate) fn vb_sun_source(soft_kernels: &str) -> Result<String, Error> {
+    // sunrt-5: the tile vote (and its history hint) before the estimate, as the traced entries.
+    let vote = if sun_tile_probes() == 0 {
+        ""
+    } else {
+        "    tr1_tile_vote(hit,receiver,slot,id.xy,size.x);"
+    };
     Ok(format!(
         "{}\n{}",
         trace_source_held(soft_kernels)?,
-        include_str!("../shaders/primary_vb_sun.wgsl")
+        include_str!("../shaders/primary_vb_sun.wgsl").replacen("    // sunrt tile vote", vote, 1)
     ))
 }
 /// The reconstruction's trace module; `listing` adds P-RTS's probes and penumbra pass,
