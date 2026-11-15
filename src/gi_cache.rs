@@ -3133,7 +3133,7 @@ impl Renderer {
             let vertices = pad(draws.iter().map(|d| &**d.mesh.vertex), &absent, slots);
             let indices = pad(draws.iter().map(|d| &**d.mesh.index), &absent, slots);
             let bind = self.ledger.own(
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                crate::group_cache::reported(&self.device, &wgpu::BindGroupDescriptor {
                     label: Some("indirect cache geometry"),
                     layout: &self.gi.layouts.as_ref().unwrap().arrays,
                     entries: &[

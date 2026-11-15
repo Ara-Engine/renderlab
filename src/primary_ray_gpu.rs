@@ -2305,7 +2305,7 @@ impl Renderer {
                     })
                     .collect();
                 self.ledger.own(
-                    self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    crate::group_cache::reported(&self.device, &wgpu::BindGroupDescriptor {
                         label: Some(label),
                         layout,
                         entries: &entries,
@@ -3448,7 +3448,7 @@ impl Renderer {
                 ]);
             }
             Some(self.ledger.own(
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                crate::group_cache::reported(&self.device, &wgpu::BindGroupDescriptor {
                     label: Some("primary draw materials"),
                     layout: if residency.is_some() {
                         &state.streamed_bindings

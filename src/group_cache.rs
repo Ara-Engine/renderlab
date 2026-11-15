@@ -81,3 +81,34 @@ impl GroupCache {
             .retain(|_, (_, used)| *used + KEEP_FRAMES > frame);
     }
 }
+
+/// Measurement only (`RENDERLAB_GROUP_STATS=PATH`): appends a group's bound buffers and views,
+/// total against distinct (same object; buffers also at the same offset and size), so the
+/// repeats a usage-tracking merge walks can be counted per scene.
+pub(crate) fn report(desc: &wgpu::BindGroupDescriptor<'_>) {
+    static PATH: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let Some(path) = PATH.get_or_init(|| std::env::var("RENDERLAB_GROUP_STATS").ok()) else {
+        return;
+    };
+    let Some(parts) = key(desc) else { return };
+    let buffers: Vec<&Part> = parts.iter().filter(|p| matches!(p, Part::Buffer(..))).collect();
+    let views: Vec<&Part> = parts.iter().filter(|p| matches!(p, Part::View(..))).collect();
+    let distinct = |v: &[&Part]| v.iter().collect::<std::collections::HashSet<_>>().len();
+    let line = format!(
+        "{{\"label\":{:?},\"buffers\":{},\"distinct_buffers\":{},\"views\":{},\"distinct_views\":{}}}\n",
+        desc.label.unwrap_or(""),
+        buffers.len(),
+        distinct(&buffers),
+        views.len(),
+        distinct(&views)
+    );
+    use std::io::Write;
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = file.write_all(line.as_bytes());
+    }
+}
+/// `create_bind_group` with `report` first (measurement sites).
+pub(crate) fn reported(device: &wgpu::Device, desc: &wgpu::BindGroupDescriptor<'_>) -> wgpu::BindGroup {
+    report(desc);
+    device.create_bind_group(desc)
+}
