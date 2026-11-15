@@ -66,12 +66,16 @@ pub(crate) fn source(head: &str, program: &str, parameters: bool) -> String {
 @group(0) @binding(32) var tp_reflection_normal:texture_2d<f32>;
 @group(0) @binding(33) var tp_reflection_geometric:texture_2d<f32>;
 @group(0) @binding(38) var<uniform> rl_glass_programs:array<vec4<u32>,PRIMARY_BATCHES/4>;
+// The dispatch's pixel rectangle [x0, y0, x1, y1): the glass run's conservative screen bounds
+// (transparency_bounds.rs), or the whole view. Outside it no lobe of this run was drawn.
+@group(0) @binding(39) var<uniform> tp_reflect_rect:vec4<u32>;
 fn rl_glass_parameter_batch(batch:u32)->u32 {
     return select(0u,batch,rl_glass_programs[batch>>2u][batch&3u]==0u);
 }
-@compute @workgroup_size(8,8) fn tp_reflect(@builtin(global_invocation_id) id:vec3<u32>) {
+@compute @workgroup_size(8,8) fn tp_reflect(@builtin(global_invocation_id) grid:vec3<u32>) {
+    let id=vec3<u32>(grid.xy+tp_reflect_rect.xy,0u);
     let size=textureDimensions(primary_hdr);
-    if any(id.xy>=size) {return;}
+    if any(id.xy>=size) || any(id.xy>=tp_reflect_rect.zw) {return;}
     let p=textureLoad(tp_reflection_position,vec2<i32>(id.xy),0);
     if p.w==0.0 {textureStore(primary_hdr,id.xy,vec4<f32>(0.0));return;}
     let lobe=textureLoad(tp_reflection_normal,vec2<i32>(id.xy),0);
@@ -235,6 +239,7 @@ impl Renderer {
                     COMPUTE,
                     uniform(false, 4 * u64::from(crate::TRACED_DRAWS)),
                 ),
+                entry(39, COMPUTE, uniform(true, 16)),
             ],
         );
         let pipeline_layout = self.tp_pipeline_layout(
