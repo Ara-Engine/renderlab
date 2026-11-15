@@ -74,16 +74,15 @@ pub(crate) fn entry() -> wgpu::BindGroupLayoutEntry {
 /// `shade_source` appends) and the kernel half of gi_receiver_pass.wgsl.
 pub(crate) fn kernel_module(head: &str) -> program::Composed {
     let mut composed = program::compose(head, program::STANDARD_PROGRAM, Stage::Traced, false);
-    composed
-        .source
-        .push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
+    let mut kernel = SOURCE.split_once(ENTRY_SEAM).unwrap().1.to_string();
     // Measurement only (`RENDERLAB_GI_RX_PROBE=nolookup`): no cache lookup, so the pass costs
-    // its decode and the record's stores alone. Shading then sees no GI value.
+    // its decode and the record's stores alone. Shading then sees no GI value. The pattern holds
+    // no line break: Ara's checkout on Windows has CRLF line endings, where the earlier pattern
+    // (with one) never matched, so the switch did nothing in the game.
     if std::env::var("RENDERLAB_GI_RX_PROBE").as_deref() == Ok("nolookup") {
-        composed.source = composed
-            .source
-            .replacen("    gi_prepare(input);\n    let at=", "    let at=", 1);
+        kernel = kernel.replacen("gi_prepare(input);", "", 1);
     }
+    composed.source.push_str(&kernel);
     composed
 }
 pub(crate) fn shade_source(source: String, eligible: bool, specular: bool) -> String {
