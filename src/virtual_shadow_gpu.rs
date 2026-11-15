@@ -84,7 +84,7 @@ pub(crate) fn fog_coarse_on() -> bool {
 /// raster budget. One level draws a frame (WGSL `vsm_one_level`): a coarse page holds most of
 /// the scene's casters, so a cut or a moved sun spreads the redraw over the levels' frames.
 const FOG_POOL_START: u32 = 256;
-const FOG_BUDGET: u32 = 64;
+const FOG_BUDGET: u32 = 8;
 /// Whether the sparse clipmap is on (`RENDERLAB_VSM_SPARSE=1` turns it on; off by default).
 fn sparse_switch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2617,7 +2617,8 @@ impl Renderer {
             f64::from(s.near),
             f64::from(s.finest_texel),
             slope,
-            f64::from(s.texels_per_pixel_log2),
+            // The fog map's: froxels, not pixels (the fog's level choice reads it).
+            texels_per_pixel_log2,
         ]);
         for value in [
             levels as u32,

@@ -296,6 +296,11 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     vsm_state[vsm_section(3u)+v]=frame;
     let table=vsm_section(2u);
     var slot=vsm_state[table+v];
+    // The fog map draws no page under a caster still moving: its cells trace until it stops.
+    if vsm_one_level() && vsm_moved(level,page) {
+        if slot!=VSM_NONE {vsm_state[v]=0u;}
+        return;
+    }
     let moved=slot!=VSM_NONE && vsm_moved(level,page);
     if slot!=VSM_NONE && !moved {return;}
     // The fog map: the first level with a page to draw claims the frame (pool word 12), so a
