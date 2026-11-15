@@ -95,6 +95,12 @@ fn near_occluded_rays() -> u32 {
             .unwrap_or(NEAR_OCCLUDED_RAYS)
     })
 }
+/// Whether shaded cells keep known light visibility (shaders/gi_cache.wgsl gi_light):
+/// `RENDERLAB_GI_LIGHT_REUSE=0` re-traces every shaded cell's light rays, as before.
+fn light_reuse_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_LIGHT_REUSE").map_or(true, |v| v != "0"))
+}
 /// The default for `near_occluded_rays`.
 const NEAR_OCCLUDED_RAYS: u32 = 4;
 fn first_fill_on(software: bool) -> bool {
@@ -1209,6 +1215,7 @@ impl Planner {
         };
         header[15] = s.near_light_rays;
         header[55] = near_occluded_rays();
+        header[56] = u32::from(light_reuse_on());
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
