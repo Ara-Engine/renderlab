@@ -897,9 +897,15 @@ fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<St
     let mode = ["tr1-mask", "tr1-raw", "tr1-window"]
         .into_iter()
         .find(|m| p_still(m));
+    // Measurement only: `RENDERLAB_TR1_SHADER=PATH` reads the resolve body from a file (variant
+    // screens without a build per variant; the same bindings and entry).
+    let resolve_body = std::env::var("RENDERLAB_TR1_SHADER")
+        .ok()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .unwrap_or_else(|| RESOLVE.to_owned());
     let mut resolve = match mode {
         Some(mode) => mask_resolve(mode),
-        None => RESOLVE.to_owned(),
+        None => resolve_body,
     };
     if let Some(cycle) = coverage {
         resolve = coverage_resolve(&resolve, cycle);
