@@ -49,7 +49,7 @@ pub(super) struct Pipelines {
     reduce: Owned<wgpu::ComputePipeline>,
     colour: Owned<wgpu::ComputePipeline>,
 }
-struct Previous {matrix:glam::Mat4,eye:glam::Vec3,frame:u64,edits:u64,lighting:blake3::Hash}
+struct Previous {matrix:glam::Mat4,eye:glam::Vec3,frame:u64,edits:u64,lighting:u64}
 pub(super) struct Targets {
     frame:Buffer,
     depth:Depth,
@@ -79,9 +79,10 @@ impl Targets {
     }
     pub(super) fn write(&self,r:&Renderer,camera:Camera,size:[u32;2]) {
         let matrix=camera.matrix(size[0],size[1]);let eye=camera.view().inverse().w_axis.truncate();
-        let mut hasher=blake3::Hasher::new();hasher.update(&r.lighting.pending.records);
-        for x in r.lighting.pending.environment.into_iter().chain([r.lighting.pending.exposure]) {hasher.update(&x.to_ne_bytes());}
-        let lighting=hasher.finalize();
+        use std::hash::{Hash, Hasher};
+        let mut hasher=std::collections::hash_map::DefaultHasher::new();r.lighting.pending.records.hash(&mut hasher);
+        for x in r.lighting.pending.environment.into_iter().chain([r.lighting.pending.exposure]) {x.to_bits().hash(&mut hasher);}
+        let lighting=hasher.finish();
         let mut state=self.state.lock().unwrap();
         let valid=state.as_ref().is_some_and(|p|p.frame+1==r.frames && p.edits==r.scene_edits && p.lighting==lighting && p.eye.distance(eye)<1.0)
             && !r.view.reconstruction_state.as_ref().is_some_and(|s|s.plan.reset);

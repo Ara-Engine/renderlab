@@ -363,7 +363,7 @@ impl Renderer {
             }),
             ResourceKind::ShaderModule,
         );
-        let pipeline = |entry, layout: &wgpu::PipelineLayout| {
+        let pipeline = |entry: &str, layout: &wgpu::PipelineLayout| {
             self.ledger.own(
                 self.device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some("reflection trace"),
