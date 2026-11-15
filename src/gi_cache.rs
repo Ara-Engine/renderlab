@@ -75,6 +75,9 @@ const GATHER_CELLS_SOFTWARE: u32 = 8192;
 /// are capped (first fill), and by which software gathers should have drained the refill's
 /// queue (spread evenly over the frames left, never fewer than FILL_GATHER_LAST).
 const FILL_PARENT_FRAMES: u32 = 32;
+/// Frames after a cut or clear whose claims stay capped: past the parents' window, so the
+/// cells deferred until then are not all created on the frame the cap ends.
+const FILL_CLAIM_FRAMES: u32 = 64;
 const FILL_GATHER_FRAMES: u32 = 40;
 const FILL_GATHER_LAST: u32 = 8;
 fn first_fill_on() -> bool {
@@ -1189,12 +1192,12 @@ impl Planner {
         // U-RTVIS: a cut's gathers held to a time budget, the cells pixels read first.
         let cut_window = s.cut_gather_ms > 0.0 && self.since_cut < CUT_GATHER_FRAMES;
         let per_ms = if software { GATHERS_PER_MS_SOFTWARE } else { GATHERS_PER_MS_HARDWARE };
-        // First fill caps a frame's new cells for FILL_PARENT_FRAMES after a cut or clear
-        // (unless claims are set explicitly), and software rays' gathers start at
-        // GATHER_CELLS_SOFTWARE, back to GATHER_CELLS over FILL_GATHER_FRAMES. Steady frames
+        // First fill caps a frame's new cells for FILL_CLAIM_FRAMES after a cut or clear
+        // (unless claims are set explicitly), and software rays' gathers follow the queue
+        // between GATHER_CELLS_SOFTWARE and GATHER_CELLS for FILL_GATHER_FRAMES. Steady frames
         // keep main's uncapped claims and full gather budget.
         let since_fill = since_clear.min(self.since_cut);
-        let fill = first_fill_on() && s.claim_cells == u32::MAX && since_fill < FILL_PARENT_FRAMES;
+        let fill = first_fill_on() && s.claim_cells == u32::MAX && since_fill < FILL_CLAIM_FRAMES;
         let fill_gathers = first_fill_on() && software && since_fill < FILL_GATHER_FRAMES;
         header[20] = match s.gather_cells {
             _ if cut_window => ((s.cut_gather_ms * per_ms) as u32).max(64),
@@ -1245,7 +1248,7 @@ impl Planner {
             u32::MAX => self.frame,
             n => n,
         };
-        header[50] = u32::from(fill);
+        header[50] = u32::from(fill && since_fill < FILL_PARENT_FRAMES);
         // The refill's gathers follow the queue: spread over the frames left until
         // FILL_GATHER_FRAMES after the cut (at least FILL_GATHER_LAST), at least
         // GATHER_CELLS_SOFTWARE a frame (shaders/gi_cache.wgsl gi_gather_cap).
@@ -1254,6 +1257,7 @@ impl Planner {
         } else {
             0
         };
+        header[52] = GATHER_CELLS;
         header[28] = if s.gather_pixels_first || cut_window {
             ((c.size[0] as f32 * c.size[1] as f32) / (s.cell_pixels * s.cell_pixels)).ceil().max(1.0) as u32
         } else {

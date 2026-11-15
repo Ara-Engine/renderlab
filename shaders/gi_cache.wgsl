@@ -696,15 +696,16 @@ fn gi_fill_bin(base:u32) -> u32 {
 }
 // The first bin past the cap, as 1 + bin, for pixels' bins (GI_W_FILL_CUT) and gathers'
 // (GI_W_FILL_CUT + 1). The parents' bins always pass, or class 0's without parents. Gathers'
-// cells keep a quarter of the cap whatever pixels want: a gather whose hit cells are never
-// created retries every frame and leaves its bounce short.
+// cells keep half of the cap whatever pixels want: a gather whose hit cells are never created
+// retries every frame and leaves its bounce short, and a backlog of them would all be created
+// on the frame the cap ends.
 const GI_FILL_GATHER_BINS:u32=5u*GI_FILL_SPREAD;
 @compute @workgroup_size(1) fn gi_fill_select() {
     let cap=gi_word(GI_H_FILL_CELLS);
     if cap==0u { return; }
     var wanted=0u;
     for(var b=GI_FILL_GATHER_BINS;b<GI_FILL_BINS;b+=1u) { wanted+=atomicLoad(&gi_work[GI_W_FILL_HIST+b]); }
-    let pixel_cap=cap-min(wanted,cap/4u);
+    let pixel_cap=cap-min(wanted,cap/2u);
     var total=0u;
     var forced=2u*GI_FILL_SPREAD;
     for(var b=0u;b<GI_FILL_GATHER_BINS;b+=1u) {
@@ -1939,16 +1940,18 @@ var<workgroup> gi_wg_live:u32;
 var<private> gi_gather_sh:array<vec3<f32>,4>;
 // The gather period P for `count` queued cells (1 without a cap).
 // First fill's refill budget (GI_H_FILL_LEFT, the frames left until the refill should have
-// drained, from 40 after a cut down to 8): the queue spread evenly over those frames, at least
-// GI_H_GATHER_CELLS. The cut's gathers then cost about the same every frame and finish when
-// main's full budget would, instead of main's full budget at once or a fixed lower one that
-// leaves the queue running long after the cut.
+// drained, from 40 after a cut down to 8): the queue spread evenly over those frames, from
+// GI_H_GATHER_CELLS up to the full budget (GI_H_FILL_FULL), never above it. The cut's gathers
+// then cost about the same every frame and finish about when the full budget would, instead
+// of the full budget from the first frame or a fixed lower one that leaves the queue running
+// long after the cut.
 const GI_H_FILL_LEFT:u32=51u;
+const GI_H_FILL_FULL:u32=52u;
 fn gi_gather_cap(count:u32) -> u32 {
     let cap=gi_word(GI_H_GATHER_CELLS);
     let left=gi_word(GI_H_FILL_LEFT);
     if left==0u || cap==0u { return cap; }
-    return max(cap,(count+left-1u)/left);
+    return clamp((count+left-1u)/left,cap,max(cap,gi_word(GI_H_FILL_FULL)));
 }
 fn gi_gather_period(count:u32) -> u32 {
     let cap=gi_gather_cap(count);
