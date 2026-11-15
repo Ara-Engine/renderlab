@@ -1414,6 +1414,11 @@ pub(crate) fn compose_hits(
         }
     }
     // The hit entry follows the program, so the range stays.
+    composed.source.push_str(if declares(program, "fn", "view_dependence") {
+        CACHE_SUITS
+    } else {
+        CACHE_SUITS_NEVER
+    });
     composed.source = rl_pass_switches(composed.source);
     if cache_count() && composed.source.contains(CACHE_COUNT_SEAM) {
         composed.source = composed.source.replacen(CACHE_COUNT_SEAM, CACHE_COUNT, 1);
@@ -1423,6 +1428,13 @@ pub(crate) fn compose_hits(
     }
     composed
 }
+/// Whether a reflection hit's own surface may take the cache's Lambertian value
+/// (shaders/reflection_hits.wgsl): its view-dependent share of the response (the program's
+/// `view_dependence`, as TR1's hint uses it) is under a quarter. A glossy, dark or metallic hit
+/// surface, whose reflection is mostly its specular, keeps the full program; so does every hit
+/// of a program that declares no view dependence.
+const CACHE_SUITS: &str = "\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return view_dependence(s,input).share<0.25; }\n";
+const CACHE_SUITS_NEVER: &str = "\nfn rl_cache_suits(s:Surface,input:SurfaceInput)->bool { return false; }\n";
 /// Measurement only (`RENDERLAB_RL_CACHE_COUNT=1`, read with `RENDERLAB_RL_ROOM_LOG`, whose
 /// `floored_inline` pair then holds them): reflection hits that reach the cache lookup on a
 /// skinned or moved placement (word 7), and how many of those the cache would have answered
