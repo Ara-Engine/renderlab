@@ -4239,6 +4239,64 @@ mod tests {
         }
     }
 
+    /// The still-view batch skips cache frames only while nothing changes: a changed light,
+    /// a moved placement or a new skinned pose runs the cache on that frame and the next
+    /// STILL_BATCH - 1 (the batch never delays their light).
+    #[test]
+    fn the_still_batch_runs_every_frame_after_a_change() {
+        let c = PlanConfig {
+            settings: IndirectSettings::default(),
+            slots: 1 << 20,
+            misses: 1 << 16,
+            cold_words: 4,
+            raw_slots: 1 << 20,
+            software: true,
+            field: false,
+            profiling: false,
+            near_bins: 0,
+            eye: Vec3::ZERO,
+            fov_y: 1.0,
+            size: [1920, 1080],
+            centre: [Vec3::ZERO; 3],
+        };
+        let mut planner = Planner::default();
+        planner.pending = 0;
+        let mut view = ViewPlan::default();
+        // One frame's inputs: a placement box, the light digest and the skin revision bytes.
+        let mut run = |planner: &mut Planner, view: &mut ViewPlan, x: f32, light: u8, skin: u8| {
+            let begun = planner.begin(&c, true, true, true);
+            let finished = planner.finish(&c, &begun, true, true, view, FrameInputs {
+                bounds: vec![[x, 0.0, 0.0, x + 1.0, 1.0, 1.0]],
+                poses: vec![],
+                environment: [0; 32],
+                light_key: Some([light; 32]),
+                region: [0, 0, 1920, 1080],
+                still_matrix: [0; 64],
+                still_extent: vec![],
+                // A moved placement changes its draw's revision bytes too.
+                instances: &[x as u8],
+                skin_revisions: vec![skin],
+            });
+            let ran = finished.plan.is_some();
+            if ran {
+                planner.advance(&begun, false);
+            }
+            ran
+        };
+        // Settle: the first frames run, then the batch skips three frames in four.
+        let settled: Vec<bool> = (0..64).map(|_| run(&mut planner, &mut view, 0.0, 0, 0)).collect();
+        assert!(settled[60..].iter().any(|&r| !r), "a settled still view batches: {settled:?}");
+        for (label, x, light, skin) in [("light", 0.0, 1, 0), ("mover", 2.0, 1, 0), ("skin", 2.0, 1, 1)] {
+            for frame in 0..STILL_BATCH {
+                assert!(run(&mut planner, &mut view, x, light, skin), "{label}: frame {frame} after the change ran no cache");
+            }
+            // Settle again before the next change.
+            for _ in 0..64 {
+                run(&mut planner, &mut view, x, light, skin);
+            }
+        }
+    }
+
     fn validate(label: &str, source: &str) {
         let module = naga::front::wgsl::parse_str(source)
             .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
