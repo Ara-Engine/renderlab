@@ -1071,12 +1071,49 @@ pub(crate) struct Composed {
 /// `parameters`, the program, then the generated entry point.
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
     let composed = compose_stage(head, program, stage, parameters, false);
-    match (stage, light_bound()) {
+    let composed = match (stage, light_bound()) {
         (Stage::Traced | Stage::TracedStreamed, Some(bound)) => with_light_bound(composed, bound),
+        _ => composed,
+    };
+    match stage {
+        Stage::Traced | Stage::TracedStreamed => with_shade_edits(composed),
         _ => composed,
     }
 }
-/// `RENDERLAB_LIGHT_BOUND=black|sum` (off by default; a bounded picture change, not exact):
+/// Measurement only: `RENDERLAB_SHADE_EDITS=<file>` rewrites traced modules and the TR1 resolve
+/// at run time, for variant screens without a build per variant. The file holds blocks
+/// separated by lines `@@@@`, each an old text and its replacement separated by a line `====`;
+/// a block applies to every such module that contains its old text exactly once.
+pub(crate) fn shade_edits() -> &'static [(String, String)] {
+    static EDITS: std::sync::OnceLock<Vec<(String, String)>> = std::sync::OnceLock::new();
+    EDITS.get_or_init(|| {
+        let Some(text) = std::env::var("RENDERLAB_SHADE_EDITS").ok().and_then(|p| std::fs::read_to_string(p).ok())
+        else {
+            return Vec::new();
+        };
+        let text = text.replace("\r\n", "\n");
+        text.split("\n@@@@\n")
+            .filter_map(|block| block.split_once("\n====\n"))
+            .map(|(old, new)| (old.to_owned(), new.to_owned()))
+            .collect()
+    })
+}
+fn with_shade_edits(mut composed: Composed) -> Composed {
+    for (old, new) in shade_edits() {
+        if composed.source.matches(old.as_str()).count() != 1 {
+            continue;
+        }
+        // Keep the program's byte range on its text.
+        let at = composed.source.find(old.as_str()).unwrap();
+        let shift = |x: usize| if x > at { (x + new.len()).saturating_sub(old.len()).max(at) } else { x };
+        composed.program = shift(composed.program.start)..shift(composed.program.end);
+        composed.source = composed.source.replacen(old.as_str(), new, 1);
+    }
+    composed
+}
+/// `RENDERLAB_LIGHT_BOUND=black|sum|off` (`sum` by default since shade-14; a bounded picture
+/// change, not exact: at most one display code on Showcase and Outpost, and -0.15 ms of shading
+/// on Outpost with ray hardware, docs/design-light-bound.md):
 /// the engine's `light_visibility_within(input, light, unshadowed, sum)` (program_api.wgsl)
 /// skips a local shadowed light's shadow ray while its unshadowed exposed contribution, added
 /// to those already skipped at this receiver, stays under `RENDERLAB_LIGHT_BOUND_CODES` display
@@ -1098,11 +1135,12 @@ pub(crate) struct LightBound {
 pub(crate) fn light_bound() -> Option<LightBound> {
     static BOUND: std::sync::OnceLock<Option<LightBound>> = std::sync::OnceLock::new();
     *BOUND.get_or_init(|| {
-        let sum = match std::env::var("RENDERLAB_LIGHT_BOUND").ok()?.as_str() {
-            "black" => false,
-            "sum" => true,
-            other => {
-                eprintln!("RENDERLAB_LIGHT_BOUND: `{other}` is not black or sum; off");
+        let sum = match std::env::var("RENDERLAB_LIGHT_BOUND").as_deref() {
+            Err(_) | Ok("sum") => true,
+            Ok("black") => false,
+            Ok("off" | "0") => return None,
+            Ok(other) => {
+                eprintln!("RENDERLAB_LIGHT_BOUND: `{other}` is not black, sum or off; off");
                 return None;
             }
         };

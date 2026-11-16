@@ -23,8 +23,8 @@ pub(crate) fn on() -> bool {
         // Until its wgpu producer/read bindings are wired, leave visibility inline
         // whenever the bound is set. Reuse that record and decoder, not a new geometry
         // record; retain the exact receiver reconstruction from the entry helpers.
-        if requested && std::env::var_os("RENDERLAB_LIGHT_BOUND").is_some() {
-            eprintln!("light_vis_pass bypassed: RENDERLAB_LIGHT_BOUND is set; visibility stays inline until material-record integration (75/78)");
+        if requested && crate::program::light_bound().is_some() {
+            eprintln!("light_vis_pass bypassed: the light bound is on (RENDERLAB_LIGHT_BOUND=off turns it off); visibility stays inline until material-record integration (75/78)");
             return false;
         }
         requested
