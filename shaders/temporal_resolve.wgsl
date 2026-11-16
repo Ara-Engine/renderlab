@@ -295,10 +295,6 @@ var<private> tr1_ray:mat3x3<f32>;
 // The linear ray (`RENDERLAB_TR1_LINEAR_RAY=0` sets it false: the matrix form per tap). The
 // two differ only by rounding, a few plane tests at their threshold.
 const TR1_LINEAR_RAY:bool=true;
-// The flat-history threshold, relative to the inner taps' largest channel (at most a
-// quarter of a percent, under one display code; `RENDERLAB_TR1_FLAT=0` sets 0: never flat).
-// Moving frames, shade-15: 11-30% of Outpost's pixels, 43-57% of Showcase's.
-const TR1_FLAT:f32=0.0025;
 fn tr1_anchor_prepare() {
     if !TR1_LINEAR_RAY {return;}
     let m=tr1.previous_inverse;
@@ -435,12 +431,7 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
         let wx=tr1_catmull_rom(f.x);let wy=tr1_catmull_rom(f.y);
         var sharp=vec3<f32>(0.0);
         var outer=true;
-        // Flat history: Catmull-Rom's result is clamped to the four inner taps' range, so
-        // where their spread is under TR1_FLAT of their level it is within that of the
-        // bilinear mean already taken. Skip its twelve outer taps; keep its window.
-        let spread=hi-lo;
-        let flat=max(max(spread.x,spread.y),spread.z)<TR1_FLAT*max(max(hi.x,hi.y),hi.z);
-        for(var i=0;i<16 && outer && !flat;i+=1) {
+        for(var i=0;i<16 && outer;i+=1) {
             let o=vec2<i32>(i&3,i>>2u)-vec2<i32>(1);
             var c=vec3<f32>(0.0);
             if all(o>=vec2<i32>(0)) && all(o<=vec2<i32>(1)) {
@@ -453,7 +444,7 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
             sharp=fma(c,vec3<f32>(wx[i&3]*wy[i>>2u]),sharp);
         }
         if outer {
-            if !flat {h.colour=clamp(sharp,lo,hi);}
+            h.colour=clamp(sharp,lo,hi);
             h.window=min(tr1.windows.x,tr1.starts.x);
             // P-FLICKER: Catmull-Rom's own blur still varies with f, so its window follows the
             // same rule as bilinear's, with its own budget (0: the fixed window).
