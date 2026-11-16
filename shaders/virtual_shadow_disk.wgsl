@@ -174,12 +174,33 @@ fn vd_first(k:f32)->u32 {
 }
 // Whether the change from level i to the next may dither.
 fn vd_dithers(i:u32)->bool {return i>=VD_BAND_FROM && i+1u<vsm.counts.x;}
-// The finest level at about params.w texels per pixel whose window holds the receiver's
-// lookup window; coarser levels are the fallback near window edges. `jitter` in [0, 1) moves
-// the receivers in a level change's band to the coarser side (0: the plain choice).
-fn vd_select(world:vec3<f32>,jitter:f32)->u32 {
+// ---- Density (docs/design-sun-shadows.md (a)) ----
+// A receiver's footprint is the smallest light-space step from its point to a screen
+// neighbour's (the worst axis at output resolution): a texel no larger never spans two pixels
+// along either screen axis. Under a low sun the ground's step along the sun's azimuth shrinks by
+// sin(elevation), so it asks for finer texels where its shadows stretch; a neighbour across a
+// silhouette steps far and does not decide. With no neighbour on a surface, the distance times
+// the pixel angle.
+fn vd_footprint(id:vec2<u32>,world:vec3<f32>)->f32 {
+    let size=textureDimensions(vsm_world);
+    let p=vsm_light(world).xy;
+    var step=3.4e38;
+    for(var k=0u;k<4u;k+=1u) {
+        let d=vec2<i32>(select(select(0,1,k==1u),-1,k==0u),select(select(0,1,k==3u),-1,k==2u));
+        let n=vec2<i32>(id)+d;
+        if any(n<vec2<i32>(0)) || any(n>=vec2<i32>(size)) || textureLoad(vsm_hit,n,0).x==0u {continue;}
+        step=min(step,length(vsm_light(textureLoad(vsm_world,n,0).xyz).xy-p));
+    }
+    if step>=3.4e38 {return length(world-vsm.eye.xyz)*vsm.eye.w;}
+    return step;
+}
+// The finest level at about params.w texels per footprint whose window holds the receiver's
+// lookup window; coarser levels are the fallback near window edges and below the ladder's finest
+// level. `jitter` in [0, 1) moves the receivers in a level change's band to the coarser side (0:
+// the plain choice). Returns the level and, in bits 8..15, how many levels coarser than the
+// footprint asked it is (the density's shortfall: a softer edge, never a step).
+fn vd_select(world:vec3<f32>,footprint:f32,jitter:f32)->u32 {
     let p=vsm_light(world);
-    let footprint=length(world-vsm.eye.xyz)*vsm.eye.w;
     let x=log2(max(footprint,1e-9)/vsm.params.y)-vsm.params.w;
     var first=vd_first(floor(x));
     if vd_dithers(first) {first=vd_first(floor(x+VD_BAND*jitter));}
@@ -188,10 +209,15 @@ fn vd_select(world:vec3<f32>,jitter:f32)->u32 {
         var r=(f32(VD_R)+2.0)*vsm_texel(i);
         if vd_dithers(i) {r+=VD_BAND*jitter*half*vsm_texel(i);}
         let lo=vsm.levels[i].origin.xy;let hi=lo+vec2<f32>(vsm_extent(i));
-        if all(p.xy-vec2<f32>(r)>=lo) && all(p.xy+vec2<f32>(r)<hi) {return i;}
+        if all(p.xy-vec2<f32>(r)>=lo) && all(p.xy+vec2<f32>(r)<hi) {
+            let short=max(bitcast<i32>(vsm.levels[i].info.y)-i32(floor(x)),0);
+            return i|(u32(min(short,255))<<8u);
+        }
     }
     return VSM_NONE;
 }
+// The level a vd_select word names (VSM_NONE stays).
+fn vd_level_of(word:u32)->u32 {return select(word&0xffu,VSM_NONE,word==VSM_NONE);}
 // The level dither's jitter in [0, 1): interleaved gradient noise, stepped by the golden ratio
 // each TR1 frame. 0 without TR1 (vd.size.z == 0) or with VD_BAND == 0.
 fn vd_band_jitter(id:vec2<u32>)->f32 {
@@ -212,8 +238,9 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
     var level=VSM_NONE;
     if inside && textureLoad(vsm_hit,vec2<i32>(id.xy),0).x!=0u {
         let world=textureLoad(vsm_world,vec2<i32>(id.xy),0).xyz;
-        let plain=vd_select(world,0.0);
-        level=vd_select(world,vd_band_jitter(id.xy));
+        let footprint=vd_footprint(id.xy,world);
+        let plain=vd_level_of(vd_select(world,footprint,0.0));
+        level=vd_select(world,footprint,vd_band_jitter(id.xy));
         let distance=~bitcast<u32>(length(world-vsm.eye.xyz));
         atomicMax(&vd_reach[0],distance);
         atomicAdd(&vd_reach[1],1u);
@@ -224,6 +251,7 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
             let reach=vd_slope()*max(vsm.depth.w-p.z,0.0);
             // The lookup's height-band dither may take a band's top from the next coarser level.
             let keep=1.0-select(0.0,VD_HBAND,vd_hband_on());
+            let chosen=vd_level_of(level);
             for(var l=plain;l<vsm.counts.x;l+=1u) {
                 let texel=vsm_texel(l);
                 var r=min(reach,f32(VD_R)*texel)+2.0*texel;
@@ -242,11 +270,11 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
                         vsm_requests[vsm_vpage(l,vec2<u32>(x,y))]=1u;
                     }
                 }
-                if l>=level && f32(VD_R)*texel*keep>=reach {break;}
+                if l>=chosen && f32(VD_R)*texel*keep>=reach {break;}
             }
         }
     }
-    // The lookup reads this level: one rounding of vd_select for both passes.
+    // The lookup reads this level and its shortfall: one rounding of vd_select for both passes.
     if inside {textureStore(vsm_level_out,vec2<i32>(id.xy),vec4<u32>(level));}
     workgroupBarrier();
     if li==0u {
@@ -432,7 +460,13 @@ fn vd_prepare(id:vec2<u32>) {
         vd_px.band=1.0-VD_HBAND*fract(ign+0.61803398875*vd.size.z);
     }
     vd_px.thin=normal.w<0.0;
-    vd_px.level=textureLoad(vsm_level_in,p,0).x;
+    let selected=textureLoad(vsm_level_in,p,0).x;
+    vd_px.level=vd_level_of(selected);
+    if VD_COUNTS && selected!=VSM_NONE {
+        atomicAdd(&vd_counts[0],1u);
+        let short=(selected>>8u)&0xffu;
+        if short!=0u {atomicAdd(&vd_counts[1],1u);atomicMax(&vd_counts[2],short);}
+    }
     vd_px.world=world.xyz;
     // shadow_origin (scene.wgsl): opaque receivers stay on the viewed side; thin ones move
     // toward the light.
@@ -530,6 +564,8 @@ override VD_EDGES:bool=false;
 // receivers, 1 those whose level is coarser than their footprint asked for, 2 the largest
 // shortfall in levels.
 @group(0) @binding(62) var<storage,read_write> vd_counts:array<atomic<u32>,4>;
+// Measurement (`RENDERLAB_VD=VD_COUNTS=true`): the counters run (per-pixel atomics).
+override VD_COUNTS:bool=false;
 // 16 bits a texel, two a word (word = the top word's index / 2): see vsm_outline_line.
 @group(0) @binding(56) var<storage,read> vsm_outline:array<u32>;
 // The samples whose direction (d, 1) lies on the side `s` of the plane through the receiver's

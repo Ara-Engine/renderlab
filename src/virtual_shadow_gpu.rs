@@ -2400,7 +2400,11 @@ impl Renderer {
         // coverage end and starts one level under the nearest receiver the mark pass saw, then
         // skips octaves far out (`ladder`): the nearest receivers keep their texel, and the
         // coarsest window still reaches the coverage end.
-        let mut finest = level_of(near.max(f64::from(camera.near())));
+        // Density (docs/design-sun-shadows.md (a)): the lookup asks for texels as small as a
+        // receiver's light-space step between pixels, which on ground under a low sun is the
+        // pixel's footprint times sin(elevation); the ladder starts that much finer.
+        let stretch = (1.0 / toward.y.abs().max(1.0 / 16.0)).log2().ceil() as i32;
+        let mut finest = level_of(near.max(f64::from(camera.near()))) - stretch;
         let mut coarsest = level_of(far) + 1;
         if old_ladder() {
             coarsest = coarsest.min(finest + MAX_LEVELS as i32 - 1);
