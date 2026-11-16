@@ -606,8 +606,11 @@ fn vd_above(q:vec3<f32>,margin:f32)->bool {
 // straight edge. The tangent-plane and bias tests keep the receiver's own point, so the offsets
 // cause no acne on any slope.
 const VD_GROUPS=array<u32,4>(0x11111111u,0x22222222u,0x44444444u,0x88888888u);
-fn vd_filtered(d:vec2<f32>,size:f32,lo:f32,hi:f32)->vec2<u32> {
-    let h=0.5*size;
+// Measurement: the filter's width in texels (`RENDERLAB_VD=VD_FILTER=0` reads the plain squares).
+override VD_FILTER:f32=1.0;
+fn vd_filtered(d:vec2<f32>,size_in:f32,lo:f32,hi:f32)->vec2<u32> {
+    let h=0.5*size_in;
+    let size=VD_FILTER*size_in;
     return (vd_column_mask(d-vd_px.offsets[0]*size,h,lo,hi)&vec2<u32>(VD_GROUPS[0]))
         |(vd_column_mask(d-vd_px.offsets[1]*size,h,lo,hi)&vec2<u32>(VD_GROUPS[1]))
         |(vd_column_mask(d-vd_px.offsets[2]*size,h,lo,hi)&vec2<u32>(VD_GROUPS[2]))
