@@ -191,9 +191,11 @@ fn tr1_gather(p:vec2<i32>,id:u32,r:vec2<f32>)->vec4<f32> {
 // (skinned vertices' previous positions, SK1; a moved placement's previous transform, MQ1),
 // whether either moved it, and its program's view dependence (MQ2: the sample's alpha
 // minus 1, shaders/temporal_view.wgsl; 0 when view-independent).
-// `provisional`: the lighting cache's value under its sample changed since the last frame (the
-// view hint's sign, src/program.rs gi_provisional).
-struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, normal:vec3<f32>, previous_point:vec4<f32>, previous_normal:vec3<f32>, moved:bool, view:f32, provisional:bool };
+// `view` is negative (-1) when the lighting cache's value under the sample changed since the
+// last frame (the hint's sign, src/program.rs gi_provisional; tr1_relit): no field of its own,
+// since three surfaces are live in the silhouette path.
+struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, normal:vec3<f32>, previous_point:vec4<f32>, previous_normal:vec3<f32>, moved:bool, view:f32 };
+fn tr1_relit_sample(s:Tr1Surface)->bool {return s.view<0.0;}
 // MV1: MQ1/MQ2 surface classification reads the shared submitted snapshot.
 fn tr1_moved(id:u32)->bool {return id!=0u && id!=TR1_NONE && motion_rigid((id-1u)&TR1_ID);}
 // MQ2: the angle (radians) the reflected view direction turned at a surface since the
@@ -232,7 +234,7 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
         let ray=primary_ray(vec2<u32>(q),textureDimensions(tr1_sample));
         let d=ray.far-ray.near;
         let point=vec4<f32>(d*inverseSqrt(tr1_dot(d,d)),0.0);
-        return Tr1Surface(point,0u,0u,0.0,vec3<f32>(0.0),point,vec3<f32>(0.0),false,0.0,false);
+        return Tr1Surface(point,0u,0u,0.0,vec3<f32>(0.0),point,vec3<f32>(0.0),false,0.0);
     }
     let record=textureLoad(primary_hit,q,0);
     let slot=id-1u;
@@ -266,7 +268,7 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     let unit=n*inverseSqrt(max(tr1_dot(n,n),1e-30));
     let hint=textureLoad(tr1_sample,q,0).w;
     return Tr1Surface(vec4<f32>(x,1.0),id,u32(facing<=0.0),distance,unit,px,pn*inverseSqrt(max(tr1_dot(pn,pn),1e-30)),
-        placed||skinned,max(abs(hint)-1.0,0.0),hint<0.0);
+        placed||skinned,select(max(hint-1.0,0.0),-1.0,hint<0.0));
 }
 
 // Continuous pixel position (pixel centres at + 0.5) of a point (w = 1) or direction (w = 0).
@@ -615,10 +617,10 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
     if s.id==0u && tr1.background.w!=0.0 {return vec4<f32>(quantizeToF16(tr1.background.xyz),tr1.windows.x);}
     var h:Tr1History;
     if tr1.flags.x==0u {h=tr1_history(p,s,size);}
-    // Its lighting changed under it (Tr1Surface.provisional): averaging the old lighting in
+    // Its lighting changed under it (tr1_relit_sample): averaging the old lighting in
     // would keep it for up to the static window (the cache's cell mosaic after a cut on
     // Glint's pillars). It starts again, as a relit receiver does.
-    if s.provisional {h.weight=0.0;}
+    if tr1_relit_sample(s) {h.weight=0.0;}
     if h.weight>0.0 {
         // This frame's sample weight: 1 at native resolution; upscaled, its tent weight.
         var w=tr1_weight(p);
@@ -755,7 +757,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         // The occluder: never the background; between two hits, the nearer.
         occluder_is_s=u.id==0u || (s.id!=0u && s.distance<=u.distance);
     } else {
-        u=Tr1Surface(s.point,kept.id,kept.side,s.distance,s.normal,s.previous_point,s.previous_normal,s.moved,0.0,false);
+        u=Tr1Surface(s.point,kept.id,kept.side,s.distance,s.normal,s.previous_point,s.previous_normal,s.moved,0.0);
         let first=textureLoad(tr1_anchor_in,p,0).x&TR1_ID;
         occluder_is_s=select(!kept.first_occludes,kept.first_occludes,first==s.id);
     }
