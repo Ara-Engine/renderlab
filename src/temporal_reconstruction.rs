@@ -2330,6 +2330,32 @@ impl Renderer {
                     .and_then(|r| r.trace.as_ref())
                     .is_some_and(|t| t.penumbra.is_some())
             });
+        if super::super::change_log::enabled() {
+            let edited = draws
+                .iter()
+                .filter(|d| d.instances.state.edited_since_submit(self.view_key.0, self.view.last_frame))
+                .count();
+            let skinned = draws.iter().filter(|d| d.mesh.skin.is_some()).count();
+            let poses: Vec<u8> = skin_revisions.iter().flat_map(|r| r.to_le_bytes()).collect();
+            let lights = format!("{:?}", self.lighting.source_lights);
+            super::super::change_log::report(
+                self.frames + 1,
+                "reconstruction",
+                &[
+                    ("camera", &matrix_bytes(matrix)),
+                    ("poses", &poses),
+                    ("lights", lights.as_bytes()),
+                    ("exposure", &exposure.to_le_bytes()),
+                    ("key", &key),
+                ],
+                &[
+                    ("rigid_motion", rigid_motion.to_string()),
+                    ("scene_static", scene_static.to_string()),
+                    ("edited_draws", edited.to_string()),
+                    ("skinned_draws", skinned.to_string()),
+                ],
+            );
+        }
         let planned = self
             .view
             .reconstruction_state

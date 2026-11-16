@@ -762,6 +762,30 @@ impl Renderer {
             self.view.atmosphere.history_key = Some(key);
         }
         let bytes = self.atmosphere_uniform(camera, size);
+        if super::change_log::enabled() {
+            let a = &self.atmosphere;
+            let av = &self.view.atmosphere;
+            let sun = format!("{:?}", self.atmosphere_sun());
+            let shadows = format!("{:?}", self.view.shadows.settings);
+            let revisions = [self.environment.generation, self.environment.content_revision, self.scene_edits];
+            let revisions: Vec<u8> = revisions.iter().flat_map(|v| v.to_le_bytes()).collect();
+            super::change_log::report(
+                self.frames + 1,
+                "atmosphere",
+                &[
+                    ("sun", sun.as_bytes()),
+                    ("exposure", &self.lighting.pending.exposure.to_le_bytes()),
+                    ("environment_and_scene_edits", &revisions),
+                    ("shadow_settings", shadows.as_bytes()),
+                    ("uniform_inputs", &bytes[..STILL_UNIFORM_BYTES]),
+                ],
+                &[
+                    ("fog_history", av.previous.is_some().to_string()),
+                    ("procedural_rebuild", a.procedural.as_ref().is_some_and(|p| !p.written).to_string()),
+                    ("luts_stale", (a.luts != Some(a.settings.medium)).to_string()),
+                ],
+            );
+        }
         let av = &mut self.view.atmosphere;
         let mut inputs: Vec<u8> = camera
             .unjittered()

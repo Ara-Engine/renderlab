@@ -3,6 +3,9 @@
 pub(crate) mod atmosphere_gpu;
 #[path = "environment_gpu.rs"]
 mod environment_gpu;
+// Measurement only: RENDERLAB_CHANGE_LOG names what each frame's change tests saw change.
+#[path = "change_log.rs"]
+pub(crate) mod change_log;
 #[path = "fog_cull.rs"]
 pub(crate) mod fog_cull;
 #[path = "light_cluster_gpu.rs"]
@@ -3216,6 +3219,7 @@ impl Renderer {
             .hardware_shadows
             .as_ref()
             .map_or(0, |h| h.scene_generation());
+        let gi_start = Instant::now();
         let result = self.prepare_gi(
             draws,
             camera,
@@ -3227,10 +3231,24 @@ impl Renderer {
             return Err(self.fail(error.to_string()));
         }
         result?;
+        let gi_ms = gi_start.elapsed().as_secs_f64() * 1000.;
+        let post_start = Instant::now();
         let scopes = OperationScopes::new(&self.device);
         self.prepare_post(camera, traced)?;
         if let Some(error) = scopes.finish() {
             return Err(self.fail(error.to_string()));
+        }
+        if change_log::enabled() {
+            change_log::report(
+                self.frames + 1,
+                "late_prepare",
+                &[],
+                &[
+                    ("prepare_gi_ms", format!("{gi_ms:.3}")),
+                    ("prepare_post_ms", format!("{:.3}", post_start.elapsed().as_secs_f64() * 1000.)),
+                    ("uploads", format!("\"{:?}\"", self.uploads)),
+                ],
+            );
         }
         Ok(())
     }
@@ -3576,6 +3594,18 @@ impl Renderer {
         if let Some(frame) = &local_lights {
             mark(&mut encoder, "light_clusters");
             self.encode_light_clusters(&mut encoder, frame, draws);
+        }
+        if change_log::enabled() {
+            change_log::report(
+                self.frames + 1,
+                "frame",
+                &[],
+                &[
+                    ("tlas_build", hardware_build.to_string()),
+                    ("tick_work", self.tick_work.to_string()),
+                    ("draws", draws.len().to_string()),
+                ],
+            );
         }
         if hardware_build {
             mark(&mut encoder, "tlas");

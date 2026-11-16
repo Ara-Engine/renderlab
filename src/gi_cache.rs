@@ -3539,7 +3539,16 @@ impl Renderer {
         let run = self.gi.settings.enabled && eligible && self.gi_callers(draws);
         let software = !hardware;
         let ids = self.gi_draw_ids(draws);
+        let geometry_start = std::time::Instant::now();
         let run = run && (hardware || self.prepare_gi_geometry(draws, &ids)?);
+        if super::change_log::enabled() {
+            super::change_log::report(
+                self.frames + 1,
+                "gi_geometry",
+                &[],
+                &[("prepare_gi_geometry_ms", format!("{:.3}", geometry_start.elapsed().as_secs_f64() * 1000.))],
+            );
+        }
         // Bounce (G2): the setting is on and this frame's program reflects light. A change
         // empties the table, so no cell keeps bounce light from another program's frames.
         let bounce = run && self.gi.settings.bounce && self.ensure_gi_shade(software)?;
@@ -3699,6 +3708,32 @@ impl Renderer {
             if let Some(s) = &d.mesh.skin {
                 skin_revisions.extend(s.revision.to_le_bytes());
             }
+        }
+        if super::change_log::enabled() {
+            let camera_bytes = matrix_bytes(still.0.matrix(size[0], size[1]));
+            let lights = format!("{:?}", self.lighting.source_lights);
+            let settings = format!("{:?}", self.gi.settings);
+            super::change_log::report(
+                self.frames + 1,
+                "gi",
+                &[
+                    ("camera", &camera_bytes),
+                    ("placements", &self.gi.arrays.as_ref().unwrap().revision_bytes),
+                    ("environment", &environment),
+                    ("poses", &skin_revisions),
+                    ("lights", lights.as_bytes()),
+                    ("decals", &self.lighting.decals.hash),
+                    ("transmission", &self.lighting.transmission.hash),
+                    ("settings", settings.as_bytes()),
+                    ("size", &still.1),
+                ],
+                &[
+                    ("bounce", bounce.to_string()),
+                    ("tick", tick.to_string()),
+                    ("idle_frames", self.view.gi.idle_frames.to_string()),
+                    ("view_frames", self.view.gi.view_frames.to_string()),
+                ],
+            );
         }
         let finished = self.gi.planner.finish(
             &config,
