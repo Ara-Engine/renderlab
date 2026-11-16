@@ -1774,6 +1774,8 @@ const GI_SCAN_STALE:u32=64u;
 const GI_W_STALE_CELLS:u32=247u;
 // A stale cell a moved box overlaps (the mover passes through it): read-cell turns.
 const GI_STALE_INSIDE:u32=0x40000u;
+// A cell a lighting change has yet to relight (shaded, then GI_H_GATHERS gathers) on its turn.
+const GI_RELIGHT_WAIT:u32=0x80000u;
 // After the scan, over every slot: the stale cells due this frame are queued for tracing. The
 // turn follows this frame's own count of stale cells (the scan's GI_W_STALE_CELLS) and the
 // budget (GI_H_STALE_READ, cells a frame; 0: every stale cell at once): the power of two that
@@ -1788,7 +1790,7 @@ const GI_H_STALE_READ_TURN:u32=60u;
     if slot>=gi_frame.offsets.x || gi_table[gi_hot(slot)]==0u { return; }
     let cold=gi_cold(slot);
     let state=gi_table[cold+GI_C_STATE];
-    if (state&GI_STALE)==0u || (state&GI_QUEUED)!=0u { return; }
+    if (state&(GI_STALE|GI_RELIGHT_WAIT))==0u || (state&GI_QUEUED)!=0u { return; }
     let budget=gi_word(GI_H_STALE_READ);
     var turn=1u;
     if budget!=0u {
@@ -1799,9 +1801,16 @@ const GI_H_STALE_READ_TURN:u32=60u;
     let read=gi_table[cold+GI_C_SEEN]==now;
     let p=select(max(gi_word(GI_H_STALE_SWEEP),4u*turn),min(turn,max(gi_word(GI_H_STALE_READ_TURN),1u)),read || budget==0u && gi_word(GI_H_STALE_SWEEP)<=1u);
     if (slot+now)%max(p,1u)!=0u { return; }
+    if (state&GI_STALE)==0u {
+        // Only a relight waited: shade it and gather it again, as the scan would have.
+        gi_table[cold+GI_C_STATE]=state&~(GI_RELIGHT_WAIT|GI_LIGHTS_KNOWN);
+        gi_queue_shade(slot);
+        gi_schedule(slot,gi_word(GI_H_GATHERS));
+        return;
+    }
     atomicAdd(&gi_work[GI_W_INVALIDATED],1u);
     gi_count_read(GI_W_INVALIDATED_READ,cold);
-    gi_table[cold+GI_C_STATE]=(state&~(GI_STALE|GI_STALE_INSIDE))|GI_QUEUED;
+    gi_table[cold+GI_C_STATE]=(state&~(GI_STALE|GI_STALE_INSIDE|GI_RELIGHT_WAIT))|GI_QUEUED;
     gi_queue_trace(slot);
 }
 // The frame's moved-caster boxes, for the GI log (written by the scan).
@@ -1863,7 +1872,13 @@ fn gi_count_read(at:u32, cold:u32) {
             let relight=gi_frame.bounce.z;
             let all=(relight&GI_RELIGHT_ALL)!=0u;
             let p=relight&0xffu;
-            if all || p==0u || (slot+((relight>>8u)&0xffu))%p==0u {
+            // Relighting every cell: those a pixel reads this frame now, the rest on stale turns
+            // (gi_stale). Glint's goal changes its lights and queued 633k gathers at once.
+            let wait=all && gi_word(GI_H_STALE_READ)!=0u && gi_table[cold+GI_C_SEEN]!=gi_word(GI_H_FRAME);
+            if wait {
+                atomicAdd(&gi_work[GI_W_STALE_CELLS],1u);
+                gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]|GI_RELIGHT_WAIT;
+            } else if all || p==0u || (slot+((relight>>8u)&0xffu))%p==0u {
                 gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
                 gi_queue_shade(slot);
                 gi_schedule(slot,select(1u,gi_word(GI_H_GATHERS),all));

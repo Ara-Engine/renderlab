@@ -1692,6 +1692,12 @@ impl Planner {
         if tick {
             self.light_key = light_key;
         }
+        // A relight of every cell leaves most of them waiting their stale turns (gi_stale): the
+        // stale pass keeps running for its window.
+        if relight == 1 << 31 && stale_budget() != 0 {
+            self.since_movers = 0;
+            flags |= 64;
+        }
         // Gathers scheduled by a relight run on the frames after it, even where the view is
         // otherwise idle.
         let busy = bounce && self.bounce_busy > 0;
