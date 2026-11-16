@@ -517,15 +517,17 @@ override VD_EDGES:bool=false;
 
 // ---- Exact hard edges (src/virtual_shadow_gpu.rs `hard_edges_on`) ----
 // A texel column's outline is a square, so a hard contact shadow (a tarp on the sand, a crate's
-// foot) shows the texels as stairs. Before its walk, a pixel reads the 3x3 texels of its own
-// level around its cone's point: a mix of texels that occlude it with a narrow cone (above its
-// tangent plane, under the height where the cone is VD_EDGE_HARD texels wide) and texels that
-// do not marks an edge. There the walk keeps every column but those 3x3 under two texels over
+// foot) shows the texels as stairs. Before its walk, a pixel reads the 2x2 texels of its own
+// level whose centres surround its cone's point: a mix of texels that occlude it with a narrow
+// cone (above its tangent plane, under the height where the cone is VD_EDGE_HARD texels wide)
+// and texels that do not marks an edge. (A lit point beyond an outline has the open neighbour
+// toward it among the 2x2; the four squares hold the point half a texel in, so a cone one texel
+// wide stays inside them.) There the walk keeps every column but those 2x2 under two texels over
 // the highest occluding one (`vd_ray_reach`), and each of their stored triangles blocks exactly
 // the disk samples inside the cone it spans from the receiver (`vd_triangle_mask`): the frame's
 // drawn triangles, skinned ones as posed, the whole disk at once.
 override VD_HARD_EDGES:bool=true;
-override VD_EDGE_HARD:f32=1.5;
+override VD_EDGE_HARD:f32=1.0;
 // Measurement (`RENDERLAB_VD=VD_EDGE_SHOW=true`): edge pixels drawn fully shadowed.
 override VD_EDGE_SHOW:bool=false;
 // Edge pixels this frame (`RENDERLAB_VD_EDGE_LOG`).
@@ -561,8 +563,8 @@ fn vd_triangle_mask(id:u32)->vec2<u32> {
     let side=sign(volume);
     return vd_plane(cross(a,b),side)&vd_plane(cross(b,c),side)&vd_plane(cross(c,a),side);
 }
-// Whether the 3x3 texels of the receiver's level around its cone's point mix occluders with a
-// narrow cone and open texels; sets vd_edge, vd_edge_cell and vd_ray_reach.
+// Whether the 2x2 texels of the receiver's level around its cone's point mix occluders with a
+// narrow cone and open texels; sets vd_edge, vd_edge_cell (the 2x2's first) and vd_ray_reach.
 fn vd_edge_test(margin:f32) {
     vd_edge=false;
     vd_ray_reach=-1.0;
@@ -571,10 +573,10 @@ fn vd_edge_test(margin:f32) {
     let cut=VD_EDGE_HARD*texel/vd_px.radius;
     let origin=vsm.levels[level].origin.xy;
     let side=i32(vsm.counts.y*VSM_PAGE);
-    let at=vec2<i32>(floor((vd_px.p.xy-origin)/texel));
+    let at=vec2<i32>(floor((vd_px.p.xy-origin)/texel-vec2<f32>(0.5)));
     var occluding=0u;var open=0u;var top=0.0;
-    for(var k=0u;k<9u;k+=1u) {
-        let cell=at+vec2<i32>(i32(k%3u)-1,i32(k/3u)-1);
+    for(var k=0u;k<4u;k+=1u) {
+        let cell=at+vec2<i32>(i32(k&1u),i32(k>>1u));
         if any(cell<vec2<i32>(0)) || any(cell>=vec2<i32>(side)) {return;}
         let i=vsm_index(cell,level);
         if i==VSM_NONE {return;}
@@ -594,15 +596,15 @@ fn vd_edge_test(margin:f32) {
     vd_edge_cell=at;
     vd_ray_reach=top+2.0*texel;
 }
-// The edge pixel's 3x3 occluders: their triangles' exact masks (a run of one triangle once).
+// The edge pixel's 2x2 occluders: their triangles' exact masks (a run of one triangle once).
 fn vd_edge_triangles(margin:f32)->vec2<u32> {
     let level=vd_px.level;
     let texel=vsm_texel(level);
     let origin=vsm.levels[level].origin.xy;
     var m=vec2<u32>(0u);
     var last=0u;var before=0u;
-    for(var k=0u;k<9u;k+=1u) {
-        let cell=vd_edge_cell+vec2<i32>(i32(k%3u)-1,i32(k/3u)-1);
+    for(var k=0u;k<4u;k+=1u) {
+        let cell=vd_edge_cell+vec2<i32>(i32(k&1u),i32(k>>1u));
         let word=vsm_top_words[vsm_index(cell,level)];
         if word.x==0u || word.x==last || word.x==before {continue;}
         let height=vsm_height(word);
@@ -613,9 +615,10 @@ fn vd_edge_triangles(margin:f32)->vec2<u32> {
     }
     return m;
 }
-// A column the triangles replace: one of the edge pixel's 3x3 at its level, under the reach.
+// A column the triangles replace: one of the edge pixel's 2x2 at its level, under the reach.
 fn vd_replaced(cell:vec2<i32>,level:u32,stride:i32,top:f32)->bool {
-    return stride==1 && level==vd_px.level && all(abs(cell-vd_edge_cell)<=vec2<i32>(1)) && top<=vd_ray_reach;
+    let d=cell-vd_edge_cell;
+    return stride==1 && level==vd_px.level && all(d>=vec2<i32>(0)) && all(d<=vec2<i32>(1)) && top<=vd_ray_reach;
 }
 // 16 bits a texel, two a word (word = the top word's index / 2): see vsm_outline_line.
 @group(0) @binding(56) var<storage,read> vsm_outline:array<u32>;
