@@ -1689,9 +1689,9 @@ fn gi_box_hit(o:vec3<f32>, d:vec3<f32>, lo:vec3<f32>, hi:vec3<f32>) -> bool {
 // less than one direction's cone (64 directions: about 10 degrees across), so its rays would
 // flip at most a bit's worth of a cell's light, while every cell that sees a mover was
 // re-traced each frame it moved: Glint's spinning obstacles in play re-traced 425k cells a
-// frame. Returns whether anything was reached.
+// frame. Returns 0 when nothing was reached, 1 for some directions, 2 for the cube.
 const GI_H_MOVER_REACH:u32=61u;
-fn gi_reach(slot:u32, c:GiCell) -> bool {
+fn gi_reach(slot:u32, c:GiCell) -> u32 {
     let cold=gi_cold(slot);
     let orphan=(gi_table[cold+GI_C_STATE]&GI_ORPHAN)!=0u;
     let q=vec3<f32>(bitcast<f32>(gi_table[cold+GI_C_POINT]),bitcast<f32>(gi_table[cold+GI_C_POINT+1u]),bitcast<f32>(gi_table[cold+GI_C_POINT+2u]));
@@ -1708,7 +1708,7 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
         if all(c.centre+vec3<f32>(0.75*c.edge)>=lo) && all(c.centre-vec3<f32>(0.75*c.edge)<=hi) {
             for(var w=0u;w<GI_MAX_WORDS;w+=1u) { gi_table[cold+GI_C_KNOWN+w]=0u; }
             atomicAdd(&gi_work[GI_W_INVALIDATED_CUBE],1u);
-            return true;
+            return 2u;
         }
         // An orphan has no rays; only a moved cube can give it a query point.
         if orphan { continue; }
@@ -1726,7 +1726,24 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
         any_ray=any_ray || m!=0u;
         gi_table[cold+GI_C_KNOWN+w]=gi_table[cold+GI_C_KNOWN+w]&~m;
     }
-    return any_ray;
+    return select(0u,1u,any_ray);
+}
+// Stale cells (GI_STALE): a mover reached some of the cell's directions (gi_reach cleared their
+// known bits, which accumulate until the cell is re-traced). Movers re-traced every cell in
+// reach every frame they moved (Glint's play: 107k cells a frame, 63k of them read by a pixel).
+// A stale cell is re-traced on its turn: one frame in GI_H_STALE_READ while a pixel reads it this
+// frame, one in GI_H_STALE_SWEEP otherwise (a fixed rotation by slot, W2); a cell whose cube a
+// moved box overlaps (the mover passes through it) every frame. The planner keeps the scan
+// running for the sweep's period after the last mover, so no cell stays stale longer.
+const GI_STALE:u32=0x20000u;
+const GI_H_STALE_READ:u32=62u;
+const GI_H_STALE_SWEEP:u32=63u;
+const GI_SCAN_STALE:u32=64u;
+fn gi_stale_due(slot:u32, cold:u32) -> bool {
+    let now=gi_word(GI_H_FRAME);
+    let read=gi_table[cold+GI_C_SEEN]==now;
+    let p=max(select(gi_word(GI_H_STALE_SWEEP),gi_word(GI_H_STALE_READ),read),1u);
+    return (slot+now)%p==0u;
 }
 // The frame's moved-caster boxes, for the GI log (written by the scan).
 const GI_W_MOVED_BOXES:u32=252u;
@@ -1757,10 +1774,18 @@ fn gi_count_read(at:u32, cold:u32) {
     if (state&GI_QUEUED)!=0u { return; }
     let flags=gi_frame.counts.z;
     var trace=(state&GI_TRACED)==0u || ((flags&GI_SCAN_PARTIAL)!=0u && (state&GI_PARTIAL)!=0u);
-    if !trace && (flags&GI_SCAN_CASTER)!=0u && gi_reach(slot,gi_cell(slot)) {
-        atomicAdd(&gi_work[GI_W_INVALIDATED],1u);
-        gi_count_read(GI_W_INVALIDATED_READ,cold);
-        trace=true;
+    if !trace && (flags&(GI_SCAN_CASTER|GI_SCAN_STALE))!=0u {
+        var reach=0u;
+        if (flags&GI_SCAN_CASTER)!=0u { reach=gi_reach(slot,gi_cell(slot)); }
+        let stale=reach!=0u || (state&GI_STALE)!=0u;
+        if stale && (reach==2u || gi_stale_due(slot,cold)) {
+            atomicAdd(&gi_work[GI_W_INVALIDATED],1u);
+            gi_count_read(GI_W_INVALIDATED_READ,cold);
+            gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_STALE;
+            trace=true;
+        } else if stale {
+            gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]|GI_STALE;
+        }
     }
     if !trace && (flags&GI_SCAN_ROTATION)!=0u && gi_frame.counts.y!=0u && (slot+gi_word(GI_H_FRAME))%gi_frame.counts.y==0u {
         // A fixed-rotation refresh re-probes and re-traces the whole cell.

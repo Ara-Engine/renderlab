@@ -116,6 +116,23 @@ fn mover_reach() -> f32 {
     })
 }
 const MOVER_REACH: f32 = 4.0;
+/// Turns of a stale cell (shaders/gi_cache.wgsl GI_STALE): one frame in `read` while a pixel
+/// reads it, one in `sweep` otherwise. RENDERLAB_GI_STALE=0 re-traces every reached cell at once
+/// (both 1); RENDERLAB_GI_STALE_READ and RENDERLAB_GI_STALE_SWEEP set them.
+fn stale_periods() -> [u32; 2] {
+    static P: std::sync::OnceLock<[u32; 2]> = std::sync::OnceLock::new();
+    *P.get_or_init(|| {
+        if std::env::var("RENDERLAB_GI_STALE").is_ok_and(|v| v == "0") {
+            return [1, 1];
+        }
+        let get = |name: &str, default: u32| {
+            std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default).max(1)
+        };
+        [get("RENDERLAB_GI_STALE_READ", STALE_READ), get("RENDERLAB_GI_STALE_SWEEP", STALE_SWEEP)]
+    })
+}
+const STALE_READ: u32 = 4;
+const STALE_SWEEP: u32 = 16;
 /// More moved casters than the frame record holds: at most `max` unions of neighbours (the
 /// boxes split at the median of their centres along the wider axis, recursively). A single
 /// union of every box spanned a level whose movers are spread through it (Glint's obstacles),
@@ -1191,6 +1208,8 @@ pub(crate) struct ViewPlan {
 /// backend both plan through `begin` and `finish`, then `advance` once the frame's
 /// passes are certain to run.
 pub(crate) struct Planner {
+    /// Ticks since a caster last moved (stale cells' sweep, shaders/gi_cache.wgsl GI_STALE).
+    since_movers: u32,
     bounds: Vec<[f32; 6]>,
     poses: Vec<crate::renderer::skinning::PlacementPose>,
     environment: Option<[u8; 32]>,
@@ -1222,6 +1241,7 @@ pub(crate) struct Planner {
 impl Default for Planner {
     fn default() -> Self {
         Self {
+            since_movers: u32::MAX,
             bounds: vec![],
             poses: vec![],
             environment: None,
@@ -1350,6 +1370,9 @@ impl Planner {
         header[55] = near_occluded_rays();
         header[56] = u32::from(light_reuse_on());
         header[61] = mover_reach().to_bits();
+        let [read, sweep] = stale_periods();
+        header[62] = read;
+        header[63] = sweep;
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
@@ -1509,6 +1532,19 @@ impl Planner {
             self.environment = Some(environment);
         }
         let mut flags = 0u32;
+        // Stale cells left by movers: the scan keeps sweeping them for a full period after the
+        // last one stops.
+        if tick {
+            self.since_movers = if boxes.is_empty() {
+                self.since_movers.saturating_add(1)
+            } else {
+                0
+            };
+        }
+        let [_, sweep] = stale_periods();
+        if sweep > 1 && self.since_movers < sweep {
+            flags |= 64;
+        }
         if !boxes.is_empty() && s.invalidate_casters {
             flags |= 1;
         }
