@@ -269,11 +269,13 @@ pub(super) struct Targets {
     /// new region clears them (`clear_keys`, encoded with the pass) and does not reuse.
     region: [u32; 4],
     clear_keys: bool,
-    /// The final gather (`program::final_gather`): its trace and resolve pipelines per
-    /// `Shading`, on the shading layout (hits sample materials). Its probes, FG_SLOTS per
-    /// FG_TILE tile, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe).
-    gather: [Option<[Owned<wgpu::ComputePipeline>; 2]>; 2],
+    /// The final gather (`program::final_gather`): its trace, adaptive-probe and resolve
+    /// pipelines per `Shading`, on the shading layout (hits sample materials). Its probes,
+    /// FG_SLOTS per FG_TILE tile and one per FG_BLOCK block, follow the pixels' records in
+    /// `values` (gi_receiver_pass.wgsl FgProbe).
+    gather: [Option<[Owned<wgpu::ComputePipeline>; 3]>; 2],
     tiles: [u32; 2],
+    blocks: [u32; 2],
 }
 /// The final gather's probe tile in pixels and probe size in bytes (gi_receiver_pass.wgsl
 /// FG_TILE, FgProbe).
@@ -281,6 +283,8 @@ const FG_TILE: u32 = 16;
 const FG_PROBE_BYTES: u64 = 144;
 /// Probes per tile (gi_receiver_pass.wgsl FG_SLOTS): a second where the tile holds a second plane.
 const FG_SLOTS: u64 = 2;
+/// The adaptive probes' block in pixels (gi_receiver_pass.wgsl FG_BLOCK): one probe each.
+const FG_BLOCK: u32 = 8;
 /// The receiver kernel samples no material, so it is built on the shading layout with an empty
 /// group 2 when it validates there, and binds the empty group: every dispatch merges each
 /// resource of its bound groups into wgpu's usage tracking when the command buffer finishes, and
@@ -298,7 +302,9 @@ impl Renderer {
                 "GI prepared receiver",
                 u64::from(size.width) * u64::from(size.height) * BYTES
                     + if program::final_gather() {
-                        u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE)) * FG_SLOTS * FG_PROBE_BYTES
+                        (u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE)) * FG_SLOTS
+                            + u64::from(size.width.div_ceil(FG_BLOCK)) * u64::from(size.height.div_ceil(FG_BLOCK)))
+                            * FG_PROBE_BYTES
                     } else {
                         0
                     },
@@ -333,6 +339,7 @@ impl Renderer {
             clear_keys: false,
             gather: [None, None],
             tiles: [size.width.div_ceil(FG_TILE), size.height.div_ceil(FG_TILE)],
+            blocks: [size.width.div_ceil(FG_BLOCK), size.height.div_ceil(FG_BLOCK)],
         }
     }
     pub(crate) fn ensure_gi_receiver_pass(&mut self, shading: Shading) -> Result<(), Error> {
@@ -445,7 +452,7 @@ impl Renderer {
         let is_lean = lean_built.is_some();
         if program::final_gather() {
             let layout = &state.shade_layouts[shading as usize];
-            gather = Some([build_entry(layout, "fg_trace"), build_entry(layout, "fg_resolve")]);
+            gather = Some([build_entry(layout, "fg_trace"), build_entry(layout, "fg_adapt"), build_entry(layout, "fg_resolve")]);
         }
         let pipeline = lean_built.unwrap_or_else(|| build(&state.shade_layouts[shading as usize]));
         let mut group = Vec::new();
@@ -539,11 +546,13 @@ impl Renderer {
             None => pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]),
         }
         pass.set_bind_group(3, self.lighting.bind(), &[]);
-        if let Some([trace, resolve]) = target.gather[shading as usize].as_ref() {
+        if let Some([trace, adapt, resolve]) = target.gather[shading as usize].as_ref() {
             // Hits shade with their materials: the full group 2.
             pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
             pass.set_pipeline(trace);
             pass.dispatch_workgroups(target.tiles[0], target.tiles[1], 1);
+            pass.set_pipeline(adapt);
+            pass.dispatch_workgroups(target.blocks[0], target.blocks[1], 1);
             pass.set_pipeline(resolve);
         }
         pass.dispatch_workgroups_indirect(&target.args.value, 0);
