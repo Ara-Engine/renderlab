@@ -141,6 +141,7 @@ impl Engine {
     /// With `@<dir>` instead, the frames are armed while running: once `<dir>/arm` exists (a
     /// label line, then offsets such as `0,1,2,4,8`), the frames that many frames after the
     /// first one that sees it are written as `<label>-<offset>.ppm`, and the file is removed.
+    /// Each written frame gets `<name>.json` with its frame id and exposure stops.
     /// Every line ends with a newline: a file without one is still being written and is read
     /// on a later frame (an empty one was once taken as armed with the default label).
     fn save_listed_frame(&mut self, view: ViewId, frame: u64) -> Result<(), Error> {
@@ -209,9 +210,15 @@ impl Engine {
             bytes.extend(image.rgba8.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]));
             std::fs::write(dir.join(format!("{name}.ppm")), bytes)
         });
+        // The frame's exposure beside it: an embedder's automatic exposure moves it between
+        // runs, so a path-traced reference is displayed at each frame's own stops.
+        let super::Exposure::Manual { stops } = self.views[self.view_index(view)?].desc.look.exposure;
+        if result.as_ref().is_ok_and(|r| r.is_ok()) {
+            let _ = std::fs::write(dir.join(format!("{name}.json")), format!("{{\"frame\":{frame},\"exposure_stops\":{stops}}}\n"));
+        }
         use std::io::Write;
         if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("readback.log")) {
-            let _ = writeln!(log, "{frame} {name} {result:?}");
+            let _ = writeln!(log, "{frame} {name} stops={stops} {result:?}");
         }
         Ok(())
     }

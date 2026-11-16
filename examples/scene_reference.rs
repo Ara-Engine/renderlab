@@ -44,6 +44,32 @@ fn pfm(path: &Path, size: [u32; 2], pixels: &[[f32; 3]]) -> Result<(), Box<dyn s
     fs::write(path, bytes)?;
     Ok(())
 }
+/// Irradiance (lux) on a surface facing `n`, integrated from a radiance cube (each texel's solid
+/// angle: 4 / (size² (1 + u² + v²)^1.5)).
+fn irradiance(level: &asset::environment::CubeLevel, n: [f64; 3]) -> [f64; 3] {
+    use asset::environment::CubeFace;
+    let size = level.size() as usize;
+    let mut e = [0.0; 3];
+    for face in CubeFace::ALL {
+        for (i, texel) in level.face(face).iter().enumerate() {
+            let uv = [2.0 * ((i % size) as f64 + 0.5) / size as f64 - 1.0, 2.0 * ((i / size) as f64 + 0.5) / size as f64 - 1.0];
+            let d = face.direction(uv);
+            let cos = n[0] * d[0] + n[1] * d[1] + n[2] * d[2];
+            if cos > 0.0 {
+                let w = cos * 4.0 / ((size * size) as f64 * (1.0 + uv[0] * uv[0] + uv[1] * uv[1]).powf(1.5));
+                for c in 0..3 {
+                    e[c] += w * f64::from(texel[c]);
+                }
+            }
+        }
+    }
+    e
+}
+/// The irradiance cube's texel at the centre of the face facing `face`.
+fn stored(level: &asset::environment::CubeLevel, face: asset::environment::CubeFace) -> [f64; 3] {
+    let size = level.size() as usize;
+    level.face(face)[(size / 2) * size + size / 2].map(f64::from)
+}
 fn v3(v: &Value) -> [f32; 3] {
     std::array::from_fn(|i| v[i].as_f64().unwrap_or(0.0) as f32)
 }
@@ -51,7 +77,9 @@ fn v3(v: &Value) -> [f32; 3] {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<_> = std::env::args().skip(1).collect();
     let dir = Path::new(args.first().ok_or("scene_reference DIR [SAMPLES]")?);
-    let samples: u32 = args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(16384);
+    // `check` in place of SAMPLES prints the sky check and stops, without a GPU.
+    let check = args.get(1).is_some_and(|s| s == "check");
+    let samples: u32 = if check { 0 } else { args.get(1).map(|s| s.parse()).transpose()?.unwrap_or(16384) };
     if std::env::var("RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK").as_deref() != Ok("I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK") {
         return Err("set RENDERLAB_EXPERIMENTAL_RAY_QUERY_ACK=I_ACCEPT_EXPERIMENTAL_WGPU_UB_RISK".into());
     }
@@ -59,6 +87,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let a = asset::decode(&fs::read(dir.join("scene.rla"))?, asset::Limits::unlimited())?;
     let mut scene = reference::Scene::from_prepared(a);
     let mut gaps = Vec::new();
+    let mut sky_check: Vec<Value> = Vec::new();
     for e in spec["emission"].as_array().into_iter().flatten() {
         let i = e[0].as_u64().unwrap_or(0) as usize;
         if let Some(m) = scene.materials.get_mut(i) {
@@ -78,6 +107,16 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some("map") => {
             let file = spec["sky"]["file"].as_str().ok_or("map sky without its file")?;
             let map = asset::environment::decode(&fs::read(dir.join(file))?, asset::environment::Limits::unbounded())?;
+            // The tracer samples the radiance; engine shading's diffuse reads the irradiance cube.
+            // They must agree (reference.json `sky_check`), or the two light the scene differently.
+            use asset::environment::CubeFace;
+            sky_check = CubeFace::ALL
+                .iter()
+                .map(|&f| {
+                    let n = f.direction([0.0, 0.0]);
+                    json!({"face": format!("{f:?}"), "from_radiance": irradiance(&map.specular_radiance()[0], n), "irradiance_cube": stored(map.diffuse_irradiance(), f)})
+                })
+                .collect();
             scene.environment = Some(reference::Environment {
                 radiance: map.specular_radiance()[0].clone(),
                 yaw: map.metadata().rotation_y_radians + spec["sky"]["rotation_y"].as_f64().unwrap_or(0.0) as f32,
@@ -125,6 +164,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let view = reference::View { open: pose, close: pose, up: Vec3::Y, fov_y: spec["camera"]["fov_y"].as_f64().unwrap_or(1.0) as f32, width: size[0], height: size[1] };
     let stops = spec["exposure_stops"].as_f64().unwrap_or(0.0) as f32;
 
+    if check {
+        println!("{}", serde_json::to_string_pretty(&sky_check)?);
+        return Ok(());
+    }
     let adapter = headless_adapter()?;
     let limits = adapter.limits();
     let limits = renderlab::traced_limits(wgpu::Limits {
@@ -159,7 +202,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "samples": samples, "seconds": seconds, "invalid_pixels": image.invalid_pixels, "size": size,
             "exposure_stops": stops, "display_transform": "AcesFit+sRGB at the engine view's exposure",
             "method": "renderlab::reference: unidirectional path tracing, NEE + MIS, Russian roulette; no reuse or denoising",
-            "not_traced": gaps, "debug_build": cfg!(debug_assertions),
+            "not_traced": gaps, "debug_build": cfg!(debug_assertions), "sky_check": sky_check,
         }))?,
     )?;
     eprintln!("reference {} samples in {seconds:.1} s; not traced: {gaps:?}", samples);
