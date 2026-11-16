@@ -1,7 +1,7 @@
 //! Path-traced reference of a frozen engine frame (`RENDERLAB_SCENE_DUMP`, src/engine/scene_dump.rs):
 //! `scene_reference DIR [SAMPLES]` reads DIR/scene.rla and DIR/scene.json and writes
 //! DIR/reference.png (the engine's exposure and the AcesFit + sRGB display curve), the linear
-//! mean as DIR/reference.pfm, split halves and DIR/reference.json. Plain unidirectional path
+//! mean as DIR/reference.pfm, split halves (PNG and linear PFM) and DIR/reference.json. Plain unidirectional path
 //! tracing (renderlab::reference): sun, sky (uniform, a prepared map, or the procedural
 //! atmosphere's cube as the engine shaded with it) and emissive surfaces. Local lights are
 //! traced as points. Not traced, and listed in reference.json: fog, aerial perspective and
@@ -195,6 +195,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     pfm(&dir.join("reference.pfm"), size, &image.mean)?;
     for (k, half) in image.halves.iter().enumerate() {
         png(&dir.join(format!("reference-half{k}.png")), size, &codes(half, stops))?;
+        // Linear too: a frame at another exposure judges noise against halves shown at its stops.
+        pfm(&dir.join(format!("reference-half{k}.pfm")), size, half)?;
     }
     fs::write(
         dir.join("reference.json"),
