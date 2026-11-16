@@ -115,7 +115,8 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
 /// second level of a switch), 12 refinements (a split cell's finer level), 13 coarser fills,
 /// 14 second-bin lookups, 15 fallback levels sampled. The picture is unchanged.
 /// Receiver reuse: on a frame where the camera is still (TR1's planner) and the lighting cache
-/// runs nothing (`GiState::idle`), a pixel still on last frame's placement in the same normal
+/// has run no work since this view's records were read (`GiState::table_generation`: with two
+/// views, the other view's frame may have run it), a pixel still on last frame's placement in the same normal
 /// bin keeps its prepared record: the same cells of the same table, read a jitter step away. Every other pixel, and every pixel
 /// on frames the cache runs, looks up as before. The keys (one word a pixel, a hash of the
 /// placement and bin, 0 for misses) live in the pass's own group 2, so reuse needs the lean layout.

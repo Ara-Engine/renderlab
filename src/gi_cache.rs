@@ -3895,8 +3895,8 @@ pub(super) struct ShadeGroups<'a> {
 }
 
 impl GiState {
-    /// The cache's work generation (`work_generation`), or None without a cache: lookups read at the
-    /// same generation read the same table.
+    /// The cache's work generation (`work_generation`), or None without a cache: lookups read at
+    /// the same generation read the same table.
     pub(crate) fn table_generation(&self) -> Option<u64> {
         self.resources.is_some().then_some(self.work_generation)
     }
