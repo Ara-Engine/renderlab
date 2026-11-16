@@ -1729,6 +1729,16 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
 }
 // The frame's moved-caster boxes, for the GI log (written by the scan).
 const GI_W_MOVED_BOXES:u32=252u;
+// GI log: cells movers invalidated (re-traced) and reshaded (a light ray crossed), and of each
+// the cells a pixel read this frame and last frame (the probe's seen stamps, before the scan).
+const GI_W_INVALIDATED_READ:u32=241u;
+const GI_W_RESHADED:u32=243u;
+const GI_W_RESHADED_READ:u32=244u;
+fn gi_count_read(at:u32, cold:u32) {
+    let seen=gi_table[cold+GI_C_SEEN];
+    let now=gi_word(GI_H_FRAME);
+    if seen==now { atomicAdd(&gi_work[at],1u); } else if seen+1u==now { atomicAdd(&gi_work[at+1u],1u); }
+}
 @compute @workgroup_size(64) fn gi_scan(@builtin(global_invocation_id) id:vec3<u32>) {
     if id.x==0u { atomicStore(&gi_work[GI_W_MOVED_BOXES],gi_frame.counts.x); }
     // Environment-only frames (requests.w bit 31) visit only this frame's slot group.
@@ -1747,6 +1757,7 @@ const GI_W_MOVED_BOXES:u32=252u;
     var trace=(state&GI_TRACED)==0u || ((flags&GI_SCAN_PARTIAL)!=0u && (state&GI_PARTIAL)!=0u);
     if !trace && (flags&GI_SCAN_CASTER)!=0u && gi_reach(slot,gi_cell(slot)) {
         atomicAdd(&gi_work[GI_W_INVALIDATED],1u);
+        gi_count_read(GI_W_INVALIDATED_READ,cold);
         trace=true;
     }
     if !trace && (flags&GI_SCAN_ROTATION)!=0u && gi_frame.counts.y!=0u && (slot+gi_word(GI_H_FRAME))%gi_frame.counts.y==0u {
@@ -1777,6 +1788,8 @@ const GI_W_MOVED_BOXES:u32=252u;
             }
         }
         if (flags&GI_SCAN_CASTER)!=0u && gi_light_reached(slot) {
+            atomicAdd(&gi_work[GI_W_RESHADED],1u);
+            gi_count_read(GI_W_RESHADED_READ,cold);
             gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_LIGHTS_KNOWN;
             gi_queue_shade(slot);
         }

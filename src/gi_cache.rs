@@ -817,6 +817,10 @@ pub struct IndirectCounters {
     pub evicted_secondary: u32,
     /// Moved-caster boxes the scan tested this frame (after clustering).
     pub moved_boxes: u32,
+    /// Cells movers re-traced, read by a pixel this frame / last frame; cells movers reshaded
+    /// (a light ray crossed), all of them / read this frame / last frame.
+    pub invalidated_read: [u32; 2],
+    pub reshaded: [u32; 3],
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -2791,6 +2795,8 @@ impl Renderer {
             created_tertiary: w[254],
             evicted_secondary: w[255],
             moved_boxes: w[252],
+            invalidated_read: [w[241], w[242]],
+            reshaded: [w[243], w[244], w[245]],
         }))
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires
