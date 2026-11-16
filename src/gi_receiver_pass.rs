@@ -87,6 +87,12 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     if reuse() {
         kernel = with_reuse(&kernel);
     }
+    // Measurement only: RENDERLAB_SHADE_EDITS reaches the kernel half too (program::shade_edits).
+    for (old, new) in program::shade_edits() {
+        if kernel.matches(old.as_str()).count() == 1 {
+            kernel = kernel.replacen(old.as_str(), new, 1);
+        }
+    }
     composed.source.push_str(&kernel);
     // Measurement only (`RENDERLAB_GI_RX_PROBE=firstslot`): every find reads its start record
     // alone, as a find given its slot would; keys past it read as absent (a wrong picture).
