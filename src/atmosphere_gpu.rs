@@ -812,6 +812,9 @@ impl Renderer {
             .flat_map(|v| v.to_ne_bytes())
             .collect();
         inputs.extend_from_slice(&bytes[..STILL_UNIFORM_BYTES]);
+        // A moving caster (placement or pose) changes the fog's shafts: no frame of the run may
+        // have moved one (the history itself is kept across motion, `fog_history_keep`).
+        inputs.extend_from_slice(&self.scene_motion.to_ne_bytes());
         let unchanged = match &av.still {
             Some((previous, frames)) if av.previous.is_some() && *previous == inputs => frames + 1,
             _ => 0,

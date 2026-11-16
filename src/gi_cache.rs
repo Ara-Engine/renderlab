@@ -2220,6 +2220,7 @@ impl Renderer {
                 let mut bvh = b.bvh.clone();
                 crate::asset::near_field::refit_bvh(&mut bvh, positions).map(|()| bvh)
             });
+        let refit_ok = matches!(refit, Some(Ok(_)));
         let bvh = match refit {
             Some(Ok(bvh)) => bvh,
             _ => gi_bvh::build(positions, indices)?,
@@ -2227,6 +2228,19 @@ impl Renderer {
         let mut blas = Blas::new(bvh, 0)?;
         blas.exact = true;
         let build_ms = built.elapsed().as_secs_f64() * 1000.;
+        // Measurement only (change log): why a pose could not patch.
+        let diagnosis = super::change_log::enabled().then(|| {
+            let old = self.gi.meshes.iter().find(|(k, _)| k == key).map(|(_, b)| b);
+            format!(
+                "\"old={} exact={} same_vertices={} same_indices={} packed={} refit={}\"",
+                old.is_some(),
+                old.is_some_and(|b| b.exact),
+                old.is_some_and(|b| b.bvh.positions.len() == positions.len()),
+                old.is_some_and(|b| b.bvh.indices.len() == indices.len()),
+                self.gi.packed.is_some(),
+                refit_ok,
+            )
+        });
         let unpatched = if skin_patch() {
             self.patch_skinned_blas(mesh, blas)?
         } else {
@@ -2238,7 +2252,11 @@ impl Renderer {
                 self.frames + 1,
                 "skinned_geometry",
                 &[],
-                &[("build_ms", format!("{build_ms:.3}")), ("patched", patched.to_string())],
+                &[
+                    ("build_ms", format!("{build_ms:.3}")),
+                    ("patched", patched.to_string()),
+                    ("state", diagnosis.unwrap_or_default()),
+                ],
             );
         }
         if let Some(blas) = unpatched {

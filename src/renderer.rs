@@ -632,6 +632,9 @@ pub struct Renderer {
     local_maps: light_cluster_gpu::LocalMaps,
     /// Frames that uploaded placements, geometry or poses, counted for views' histories.
     scene_edits: u64,
+    /// Frames that moved a placement or a skinned pose (any view's): the still fog's kept volume
+    /// (`atmosphere_gpu`) needs none since its accumulation began.
+    scene_motion: u64,
     explicit_ticks: bool,
     tick_work: bool,
     device: PipelineDevice,
@@ -1170,6 +1173,7 @@ impl Renderer {
             gi_tick: 0,
             local_maps: light_cluster_gpu::LocalMaps::new(&device, &ledger),
             scene_edits: 0,
+            scene_motion: 0,
             explicit_ticks: false,
             tick_work: true,
             device,
@@ -3278,6 +3282,9 @@ impl Renderer {
         // at its next frame (`prepare_atmosphere`). Moved placements and poses keep it
         // (`atmosphere_gpu::fog_history_keep`).
         let motion = uploads.models > 0 || uploads.skinning > 0;
+        if motion {
+            self.scene_motion += 1;
+        }
         if uploads.geometry > 0
             || uploads.instances > 0
             || (motion && !atmosphere_gpu::fog_history_keep())
