@@ -2220,7 +2220,7 @@ impl Renderer {
         if let Some(path) = edge_log() {
             for ((), words) in state.edge_counts.get_mut().unwrap().collect() {
                 let word = |i: usize| u32::from_ne_bytes(words[4 * i..4 * i + 4].try_into().unwrap());
-                let count = format!("{} {} {}", word(0), word(1), word(2));
+                let count = format!("{} {} {} {}", word(0), word(1), word(2), word(3));
                 use std::io::Write;
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
@@ -2420,7 +2420,7 @@ impl Renderer {
                 .seen
                 .map(|(d, at)| (d - (eye - at).length()).max(f64::from(camera.near())));
             finest = match seen {
-                Some(d) => finest.max(level_of(d) - 1),
+                Some(d) => finest.max(level_of(d) - 1 - stretch),
                 None => finest.max(coarsest - 2 * (MAX_LEVELS as i32 - 1)),
             }
             .min(coarsest);

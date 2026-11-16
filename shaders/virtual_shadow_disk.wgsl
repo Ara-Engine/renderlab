@@ -466,6 +466,7 @@ fn vd_prepare(id:vec2<u32>) {
         atomicAdd(&vd_counts[0],1u);
         let short=(selected>>8u)&0xffu;
         if short!=0u {atomicAdd(&vd_counts[1],1u);atomicMax(&vd_counts[2],short);}
+        if short>=2u {atomicAdd(&vd_counts[3],1u);}
     }
     vd_px.world=world.xyz;
     // shadow_origin (scene.wgsl): opaque receivers stay on the viewed side; thin ones move
@@ -562,7 +563,7 @@ override VD_EDGES:bool=false;
 
 // The edge log's counters (`RENDERLAB_VD_EDGE_LOG`, virtual_shadow_gpu.rs `edge_log`): 0 the
 // receivers, 1 those whose level is coarser than their footprint asked for, 2 the largest
-// shortfall in levels.
+// shortfall in levels, 3 those two or more levels short.
 @group(0) @binding(62) var<storage,read_write> vd_counts:array<atomic<u32>,4>;
 // Measurement (`RENDERLAB_VD=VD_COUNTS=true`): the counters run (per-pixel atomics).
 override VD_COUNTS:bool=false;
