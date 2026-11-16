@@ -41,8 +41,11 @@ const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
 const REQUEST_WORDS: u64 = 3;
-/// WGSL GiFrame: region, counts, offsets, requests, bounce, then 256 vec4 box corners.
-const FRAME_BYTES: usize = 80 + 256 * 16;
+/// WGSL GiFrame: region, counts, offsets, requests, bounce, 256 vec4 box corners, then the
+/// boxes' grid: its corner and scale (two vec4) and 512 cells of four mask words.
+const FRAME_BYTES: usize = 80 + 256 * 16 + 32 + 512 * 16;
+/// The grid's first word in the frame record.
+const GRID_WORD: usize = 20 + 256 * 4;
 /// Moved-caster boxes a frame holds; more are clustered (cluster_boxes). Glint's play moves
 /// about 107 placements a frame: at 32, unions spanned the gaps between movers and every cell
 /// inside them was re-probed each frame.
@@ -146,6 +149,49 @@ fn stale_budget() -> u32 {
 const STALE_BUDGET: u32 = 2048;
 /// Longest turn of a read stale cell, in frames.
 const STALE_TURN_MAX: u32 = 32;
+/// Which moved boxes may reach each cell of an 8 x 8 x 8 grid over them (shaders/gi_cache.wgsl
+/// gi_box_mask): each box grown by `reach` of its diagonals. The scan tested every slot against
+/// every box (Glint's play: about a million slots and 107 boxes a frame); with the grid a slot
+/// tests the few boxes near it. None without a reach (every box is tested everywhere).
+struct BoxGrid {
+    lo: [f32; 3],
+    scale: [f32; 3],
+    masks: Vec<[u32; 4]>,
+}
+fn box_grid(boxes: &[[f32; 6]], reach: f32) -> Option<BoxGrid> {
+    if reach <= 0.0 || boxes.is_empty() {
+        return None;
+    }
+    let grown: Vec<[f32; 6]> = boxes
+        .iter()
+        .map(|b| {
+            let diagonal = ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt();
+            let g = reach * diagonal + 1e-2;
+            [b[0] - g, b[1] - g, b[2] - g, b[3] + g, b[4] + g, b[5] + g]
+        })
+        .collect();
+    let mut lo = [f32::INFINITY; 3];
+    let mut hi = [f32::NEG_INFINITY; 3];
+    for g in &grown {
+        for k in 0..3 {
+            lo[k] = lo[k].min(g[k]);
+            hi[k] = hi[k].max(g[k + 3]);
+        }
+    }
+    let scale: [f32; 3] = std::array::from_fn(|k| 8.0 / (hi[k] - lo[k]).max(1e-3));
+    let cell = |v: f32, k: usize| (((v - lo[k]) * scale[k]).floor() as i32).clamp(0, 7) as usize;
+    let mut masks = vec![[0u32; 4]; 512];
+    for (i, g) in grown.iter().enumerate() {
+        for z in cell(g[2], 2)..=cell(g[5], 2) {
+            for y in cell(g[1], 1)..=cell(g[4], 1) {
+                for x in cell(g[0], 0)..=cell(g[3], 0) {
+                    masks[x + 8 * (y + 8 * z)][i / 32] |= 1 << (i % 32);
+                }
+            }
+        }
+    }
+    Some(BoxGrid { lo, scale, masks })
+}
 /// More moved casters than the frame record holds: at most `max` unions of neighbours (the
 /// boxes split at the median of their centres along the wider axis, recursively). A single
 /// union of every box spanned a level whose movers are spread through it (Glint's obstacles),
@@ -1702,6 +1748,18 @@ impl Planner {
             for k in 0..3 {
                 put(20 + i * 8 + k, b[k].to_bits());
                 put(20 + i * 8 + 4 + k, b[k + 3].to_bits());
+            }
+        }
+        if let Some(grid) = box_grid(&boxes, mover_reach()) {
+            for k in 0..3 {
+                put(GRID_WORD + k, grid.lo[k].to_bits());
+                put(GRID_WORD + 4 + k, grid.scale[k].to_bits());
+            }
+            put(GRID_WORD + 3, 1.0f32.to_bits());
+            for (cell, mask) in grid.masks.iter().enumerate() {
+                for (w, &m) in mask.iter().enumerate() {
+                    put(GRID_WORD + 8 + cell * 4 + w, m);
+                }
             }
         }
         let groups = [
