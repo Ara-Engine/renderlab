@@ -90,6 +90,7 @@ fn gi_agreement(h:GiHot) -> f32 {
 // Adds a record's coefficients with weight w to the level sums; returns the weight it added,
 // or 0 for an absent or invalid cell.
 fn gi_hot_add(h:GiHot, w_in:f32) -> f32 {
+    if w_in>0.0 && (h.r0.x&GI_VALID)==0u { gi_rx_provisional=true; }
     if w_in<=0.0 || (h.r0.x&GI_VALID)==0u { return 0.0; }
     let w=w_in*gi_agreement(h);
     if w<=0.0 { return 0.0; }
@@ -224,6 +225,10 @@ fn gi_sky_scale(e:vec3<f32>) -> vec3<f32> {
 var<private> gi_rx_sky:array<vec3<f32>,9>;
 var<private> gi_rx_bounce:array<vec3<f32>,4>;
 var<private> gi_rx_valid:bool;
+// Whether this receiver's lookup gave weight to a cell the cache has not made or lit yet:
+// its value is the lookup's stand-in (renormalized corners, coarser fills) until the cell
+// exists. TR1 keeps no long history of such samples (rl_gi_provisional).
+var<private> gi_rx_provisional:bool;
 // Adds the level sums, the sky's with factor w and the bounce's with factor b.
 fn gi_rx_add(w:f32, b:f32) {
     for(var i=0u;i<9u;i+=1u) { gi_rx_sky[i]+=w*gi_lv_sky[i]; }
@@ -240,6 +245,7 @@ fn gi_share(w:f32, x:f32) -> f32 {
 }
 fn gi_prepare(input:SurfaceInput) {
     gi_rx_valid=false;
+    gi_rx_provisional=false;
     for(var i=0u;i<9u;i+=1u) { gi_rx_sky[i]=vec3<f32>(0.0); }
     for(var i=0u;i<4u;i+=1u) { gi_rx_bounce[i]=vec3<f32>(0.0); }
     if gi_word(GI_H_ENABLED)==0u { return; }

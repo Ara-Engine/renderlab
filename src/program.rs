@@ -653,7 +653,7 @@ fn full_strata_weight() -> Option<f32> {
 pub(crate) const VIEW_API: &str = "struct ViewDependence { alpha:f32, share:f32 };\n";
 const VIEW_HINT: &str = include_str!("../shaders/temporal_view.wgsl");
 /// The traced entry's hint for programs that declare nothing: view-independent.
-const VIEW_STUB: &str = "fn tr1_view_hint(s:Surface,input:SurfaceInput,ray:PrimaryRay)->f32 { return 1.0; }\n";
+const VIEW_STUB: &str = "fn tr1_view_hint(s:Surface,input:SurfaceInput,ray:PrimaryRay)->f32 { return select(1.0,-1.0,rl_gi_provisional()); }\n";
 // ---- end of MQ2 view dependence ----
 
 // ---- M7-R1n software reflections (docs/m7-r1n.md) ----
@@ -1069,6 +1069,15 @@ pub(crate) struct Composed {
 /// One module: `head` (the prelude with its visibility variant and, for traced stages,
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
+/// Provisional GI samples (`rl_gi_provisional`): a receiver whose lookup weighted a cell the
+/// cache has not made or lit yet tells TR1, which keeps no long history of it
+/// (temporal_resolve.wgsl TR1_PROVISIONAL_WINDOW). Without it a still view kept the cache's
+/// cell mosaic from the frames after a cut in its 256-frame history (Glint's pillars, shade-16).
+/// `RENDERLAB_GI_PROVISIONAL=0` marks nothing.
+pub(crate) fn gi_provisional() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_PROVISIONAL").map_or(true, |v| v.trim() != "0"))
+}
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
     let composed = compose_stage(head, program, stage, parameters, false);
     let composed = match (stage, light_bound()) {
@@ -1270,6 +1279,13 @@ fn compose_stage(
         }
         (true, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
         _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
+    });
+    // Whether the receiver's GI is provisional (gi_api.wgsl gi_rx_provisional): the traced
+    // entry hands it to TR1 as the sign of the sample's view hint (temporal_view.wgsl).
+    indirect.push_str(if indirect_calls && gi_provisional() {
+        "fn rl_gi_provisional()->bool { return gi_rx_provisional; }\n"
+    } else {
+        "fn rl_gi_provisional()->bool { return false; }\n"
     });
     // LC1: the light loop's clusters and local shadows, traced where the head binds rays.
     // Cell shading never calls light_visibility; it composes the map variant.

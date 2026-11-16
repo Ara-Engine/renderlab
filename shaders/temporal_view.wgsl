@@ -10,7 +10,11 @@
 // declared lobe's alpha. A view turn of theta radians then slides the view-dependent part by
 // about theta * (hint - 1) pixels of its own image, share-weighted. 1 means view-independent.
 // `ray` is the pixel's camera ray, which the entry computes once (primary_ray).
+// Negative when the receiver's GI was provisional (rl_gi_provisional); TR1 reads the magnitude.
 fn tr1_view_hint(s:Surface,input:SurfaceInput,ray:PrimaryRay)->f32 {
+    return select(1.0,-1.0,rl_gi_provisional())*tr1_view_hint_unsigned(s,input,ray);
+}
+fn tr1_view_hint_unsigned(s:Surface,input:SurfaceInput,ray:PrimaryRay)->f32 {
     let d=view_dependence(s,input);
     let share=clamp(d.share,0.0,1.0);
     if !(share>0.0) {return 1.0;}

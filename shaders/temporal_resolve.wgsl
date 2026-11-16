@@ -191,7 +191,9 @@ fn tr1_gather(p:vec2<i32>,id:u32,r:vec2<f32>)->vec4<f32> {
 // (skinned vertices' previous positions, SK1; a moved placement's previous transform, MQ1),
 // whether either moved it, and its program's view dependence (MQ2: the sample's alpha
 // minus 1, shaders/temporal_view.wgsl; 0 when view-independent).
-struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, normal:vec3<f32>, previous_point:vec4<f32>, previous_normal:vec3<f32>, moved:bool, view:f32 };
+// `provisional`: its sample's GI stood in for cells the cache had not made yet (the view
+// hint's sign, src/program.rs gi_provisional).
+struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, normal:vec3<f32>, previous_point:vec4<f32>, previous_normal:vec3<f32>, moved:bool, view:f32, provisional:bool };
 // MV1: MQ1/MQ2 surface classification reads the shared submitted snapshot.
 fn tr1_moved(id:u32)->bool {return id!=0u && id!=TR1_NONE && motion_rigid((id-1u)&TR1_ID);}
 // MQ2: the angle (radians) the reflected view direction turned at a surface since the
@@ -230,7 +232,7 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
         let ray=primary_ray(vec2<u32>(q),textureDimensions(tr1_sample));
         let d=ray.far-ray.near;
         let point=vec4<f32>(d*inverseSqrt(tr1_dot(d,d)),0.0);
-        return Tr1Surface(point,0u,0u,0.0,vec3<f32>(0.0),point,vec3<f32>(0.0),false,0.0);
+        return Tr1Surface(point,0u,0u,0.0,vec3<f32>(0.0),point,vec3<f32>(0.0),false,0.0,false);
     }
     let record=textureLoad(primary_hit,q,0);
     let slot=id-1u;
@@ -262,8 +264,9 @@ fn tr1_surface(p:vec2<i32>,size:vec2<u32>)->Tr1Surface {
     let distance=sqrt(tr1_dot(view,view));
     let facing=tr1_dot(n,view);
     let unit=n*inverseSqrt(max(tr1_dot(n,n),1e-30));
+    let hint=textureLoad(tr1_sample,q,0).w;
     return Tr1Surface(vec4<f32>(x,1.0),id,u32(facing<=0.0),distance,unit,px,pn*inverseSqrt(max(tr1_dot(pn,pn),1e-30)),
-        placed||skinned,max(textureLoad(tr1_sample,q,0).w-1.0,0.0));
+        placed||skinned,max(abs(hint)-1.0,0.0),hint<0.0);
 }
 
 // Continuous pixel position (pixel centres at + 0.5) of a point (w = 1) or direction (w = 0).
@@ -295,6 +298,8 @@ var<private> tr1_ray:mat3x3<f32>;
 // The linear ray (`RENDERLAB_TR1_LINEAR_RAY=0` sets it false: the matrix form per tap). The
 // two differ only by rounding, a few plane tests at their threshold.
 const TR1_LINEAR_RAY:bool=true;
+// The history window of a provisional sample (Tr1Surface.provisional): 1 keeps none.
+const TR1_PROVISIONAL_WINDOW:f32=1.0;
 fn tr1_anchor_prepare() {
     if !TR1_LINEAR_RAY {return;}
     let m=tr1.previous_inverse;
@@ -466,6 +471,10 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     // MQ1: while placements move, light they change on other surfaces (moving shadows,
     // reflections of moving objects) is held to this frame's 3x3 range.
     if (tr1.flags.y&TR1_BOX)!=0u {h.colour=clamp(h.colour,tr1_box_lo,tr1_box_hi);}
+    // A provisional sample (its GI stood in for cells the cache has not made yet) replaces
+    // the history: averaging it in would keep the stand-in's cell mosaic for up to the static
+    // window once the cells exist.
+    if s.provisional {h.window=min(h.window,TR1_PROVISIONAL_WINDOW);}
     return h;
 }
 
@@ -748,7 +757,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
         // The occluder: never the background; between two hits, the nearer.
         occluder_is_s=u.id==0u || (s.id!=0u && s.distance<=u.distance);
     } else {
-        u=Tr1Surface(s.point,kept.id,kept.side,s.distance,s.normal,s.previous_point,s.previous_normal,s.moved,0.0);
+        u=Tr1Surface(s.point,kept.id,kept.side,s.distance,s.normal,s.previous_point,s.previous_normal,s.moved,0.0,false);
         let first=textureLoad(tr1_anchor_in,p,0).x&TR1_ID;
         occluder_is_s=select(!kept.first_occludes,kept.first_occludes,first==s.id);
     }
