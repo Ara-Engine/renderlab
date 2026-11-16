@@ -292,6 +292,8 @@ pub(super) struct Targets {
     /// Reuse's keys (`reuse`), and whether a lookup has written them and the records.
     keys: Option<Buffer>,
     computed: bool,
+    /// The cache generation (`GiState::table_generation`) the records were last read at.
+    table: Option<u64>,
     /// The shading region the keys were written over; pixels outside it keep stale keys, so a
     /// new region clears them (`clear_keys`, encoded with the pass) and does not reuse.
     region: [u32; 4],
@@ -339,6 +341,7 @@ impl Renderer {
                 )
             }),
             computed: false,
+            table: None,
             region: [0; 4],
             clear_keys: false,
         }
@@ -366,6 +369,7 @@ impl Renderer {
             && target.source_hash[shading as usize] == self.primary_hash;
         let region = state.region;
         let moved = target.region != region;
+        let table = self.gi.table_generation();
         if let Some(keys) = &target.keys {
             // Still: TR1's planner saw this frame's camera equal the last one's (no turn, no
             // rigid motion); the cache idles during smooth camera motion too.
@@ -374,7 +378,7 @@ impl Renderer {
                 .reconstruction_state
                 .as_ref()
                 .is_some_and(|s| s.plan.held_frames() > 0);
-            let reuse = built && !moved && still && target.lean[shading as usize] && target.computed && self.gi.idle();
+            let reuse = built && !moved && still && target.lean[shading as usize] && target.computed && table.is_some() && target.table == table;
             // Word 1: the camera is still, so last frame's record at a pixel on the same key is
             // the same receiver's and the relit check (`CHANGE`) may compare them.
             let compare = built && !moved && still && target.computed;
@@ -383,6 +387,7 @@ impl Renderer {
         }
         let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
         target.computed = true;
+        target.table = table;
         target.clear_keys = moved && target.keys.is_some();
         target.region = region;
         if built {
