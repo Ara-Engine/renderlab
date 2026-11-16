@@ -2656,7 +2656,9 @@ fn frame(
                 rigid_motion,
                 // The port reads no still reuse (rtvis_held is the wgpu module's).
                 scene_static: false,
+                rigid_only: false,
                 moving_bounds: None,
+                moving_boxes: vec![],
                 listing: false,
             });
             // The rotation word (zero with `rotate_directions` off), then the sampling

@@ -167,6 +167,8 @@ pub(super) struct ProgramCache {
     cache: Option<wgpu::PipelineCache>,
     pipelines: u64,
     path: Option<PathBuf>,
+    /// The checksum of the data `path` holds (loaded or last written): unchanged data is not rewritten.
+    on_disk: Option<[u8; 32]>,
     pub modules: Arc<ModuleCache>,
 }
 impl ProgramCache {
@@ -185,6 +187,7 @@ impl ProgramCache {
                 }),
             pipelines: 0,
             path: None,
+            on_disk: None,
             modules: Arc::default(),
         }
     }
@@ -214,7 +217,7 @@ impl ProgramCache {
         self.pipelines += pipelines;
         if let (Some(path), Some(cache)) = (&self.path, &self.cache)
             && pipelines > 0
-            && let Err(error) = crate::pipeline_compilation::write_cache(path, cache)
+            && let Err(error) = crate::pipeline_compilation::write_cache(path, cache, &mut self.on_disk)
         {
             eprintln!("program_pipeline_cache_save_failed={error}");
         }
@@ -623,8 +626,10 @@ impl Renderer {
         };
         let driver = Sha256::digest(format!("{adapter:?}").as_bytes());
         let path = directory.join(format!("wgpu30-{key}-{driver:x}.bin"));
-        let data = crate::pipeline_compilation::read_cache(&path)?;
-        let data = data.as_deref();
+        crate::pipeline_compilation::remove_stale_temporaries(&path);
+        let loaded = crate::pipeline_compilation::read_cache_checked(&path)?;
+        self.program_cache.on_disk = loaded.as_ref().map(|(_, hash)| *hash);
+        let data = loaded.as_ref().map(|(data, _)| data.as_slice());
         // SAFETY: the application-owned file contains only wgpu 30 get_data() output.
         // Its checksum rejects partial/corrupt writes; wgpu validates its own header
         // and driver compatibility, falling back to an empty cache on stale data.
