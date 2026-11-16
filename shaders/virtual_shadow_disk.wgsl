@@ -34,7 +34,7 @@
 const VSM_PAGE:u32=128u;
 const VSM_NONE:u32=0xffffffffu;
 const VSM_MAX_LEVELS:u32=8u;
-const VSM_MAX_RECTS:u32=16u;
+const VSM_MAX_RECTS:u32=48u;
 // primary_rays.wgsl PRIMARY_TILE.
 const VSM_TRACE_TILE=vec2<u32>(8u,4u);
 struct VsmLevel {origin:vec4<f32>,info:vec4<u32>};
@@ -52,12 +52,14 @@ struct VsmFrame {
 // reuse (virtual_shadow_gpu.rs `reuse_on`): x 2 when nothing that sets an answer changed since
 // the last frame, 1 when only the camera and the moving casters did, 0 no reuse; z the history
 // half this frame writes.
+// tops: per moved rectangle (vsm.rects), its casters' highest light-space height (4 a vec4).
 // size: the image size in pixels (xy); z: TR1's frame number plus one on reconstructed frames
 // (the receiver jitter's sequence index), 0 otherwise; w: TR1's frames of history.
 // above: per k in 0..=64 (two a vec4), the mask of the samples whose y rank is at least k.
 // samples: the 64 sample positions in the unit disk (two a vec4), bit s first.
 struct VdFrame {
     clip:mat4x4<f32>,previous:mat4x4<f32>,reuse:vec4<u32>,
+    tops:array<vec4<f32>,VSM_MAX_RECTS/4u>,
     size:vec4<f32>,above:array<vec4<u32>,33>,samples:array<vec4<f32>,32>,
 };
 @group(0) @binding(50) var<uniform> vd:VdFrame;
@@ -950,15 +952,19 @@ override VD_REUSE_REFRESH:u32=16u;
 @group(0) @binding(63) var<storage,read_write> vd_history:array<u32>;
 // Whether a moved caster (vsm.rects) can have changed point `world`'s answer: a column part at
 // height t reaches it only from within slope * t, and a band's columns and their jitter add up
-// to that again; t is at most the highest caster's height over the point. Each mover's own
-// rectangle, so movers far apart keep the receivers between them reusable.
+// to that again; t is at most the rectangle's top over the point, and a rectangle whose top is
+// under the point neither shadows it nor holds it. Each mover's own rectangle, so movers far
+// apart keep the receivers between them reusable; a point on a mover (its surface moved under
+// a still camera) always walks.
 fn vd_near_mover(world:vec3<f32>,id:vec2<u32>)->bool {
     if vsm.counts.w==0u {return false;}
     let p=vsm_light(world);
     let level=textureLoad(vsm_level_in,vec2<i32>(id),0).x;
     let pad=select(2.0*vsm_texel(min(level,vsm.counts.x-1u)),0.0,level==VSM_NONE);
-    let grow=vec2<f32>(2.0*vd_slope()*max(vsm.depth.w-p.z,0.0)+pad);
     for(var i=0u;i<vsm.counts.w;i+=1u) {
+        let top=vd.tops[i>>2u][i&3u];
+        if p.z>top+pad {continue;}
+        let grow=vec2<f32>(2.0*vd_slope()*max(top-p.z,0.0)+pad);
         let r=vsm.rects[i];
         if all(p.xy>=r.xy-grow) && all(p.xy<=r.zw+grow) {return true;}
     }

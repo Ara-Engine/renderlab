@@ -32,7 +32,7 @@
 const VSM_PAGE:u32=128u;
 const VSM_NONE:u32=0xffffffffu;
 const VSM_MAX_LEVELS:u32=8u;
-const VSM_MAX_RECTS:u32=16u;
+const VSM_MAX_RECTS:u32=48u;
 const VSM_MISSING:u32=0xffffffffu;
 // Ring walk bound per fan direction; valence above this is truncated.
 const VSM_FAN_STEPS:u32=24u;

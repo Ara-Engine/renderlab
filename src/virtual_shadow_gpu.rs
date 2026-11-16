@@ -39,7 +39,7 @@ pub(super) mod atmosphere_shadow;
 
 /// Levels a frame can use; also the WGSL `VSM_MAX_LEVELS`.
 pub(super) const MAX_LEVELS: usize = 8;
-const MAX_RECTS: usize = 16;
+const MAX_RECTS: usize = 48;
 const PAGE: u32 = 128;
 /// The Disk mark pass's receiver counters (WGSL `vsm_reach`): four words, then (copied after
 /// the page work) the sparse pool's header words 4..11 (`POOL_*`).
@@ -671,6 +671,10 @@ pub(super) struct VirtualState {
     /// N8f: this rolling frame moved casters only, so the lookup visits every tile and also
     /// looks up the pixels they can reach (`VsmFrame::n8e.w` bit 0).
     casters_only: bool,
+    /// This frame keeps last frame's page requests and receiver levels (WGSL vd_mark does not
+    /// run), and the key that decides it.
+    requests_held: bool,
+    requests_key: Vec<u64>,
     horizons: Option<Horizons>,
     /// Tests: run the `VSM_DEBUG` lookup and keep its per-pixel trace in `debug_buffer`.
     pub debug: bool,
@@ -707,8 +711,8 @@ const DISK_CONSTANTS: &str = "VD_";
 /// occluder heights whose reach is half to all of this many of its texels.
 const DISK_RADIUS: u32 = 3;
 /// WGSL `VdFrame` up to its constant tail: this and the previous frame's world-to-clip
-/// matrices, `reuse`, the image size.
-const DISK_HEAD_BYTES: u64 = 64 + 64 + 16 + 16;
+/// matrices, `reuse`, the moved rectangles' tops, the image size.
+const DISK_HEAD_BYTES: u64 = 64 + 64 + 16 + MAX_RECTS as u64 * 4 + 16;
 /// WGSL `VdFrame`: the head, the 65 y-rank masks and the 64 sample positions.
 const DISK_FRAME_BYTES: u64 = DISK_HEAD_BYTES + 33 * 16 + 32 * 16;
 /// `VdFrame::reuse`.
@@ -937,7 +941,12 @@ pub(super) fn disk_source() -> String {
 /// Merges moved casters' light-space rectangles, and their screen rectangles alike, the pair
 /// whose union adds the least area first, until at most `max` remain: many movers invalidate the
 /// pages around them, not the whole map.
-fn cluster_rects(rects: &mut Vec<[glam::DVec2; 2]>, screens: &mut Vec<[glam::DVec2; 2]>, max: usize) {
+fn cluster_rects(
+    rects: &mut Vec<[glam::DVec2; 2]>,
+    screens: &mut Vec<[glam::DVec2; 2]>,
+    tops: &mut Vec<f64>,
+    max: usize,
+) {
     let area = |r: &[glam::DVec2; 2]| (r[1] - r[0]).max(glam::DVec2::ZERO).element_product();
     let union = |a: &[glam::DVec2; 2], b: &[glam::DVec2; 2]| [a[0].min(b[0]), a[1].max(b[1])];
     while rects.len() > max {
@@ -955,6 +964,8 @@ fn cluster_rects(rects: &mut Vec<[glam::DVec2; 2]>, screens: &mut Vec<[glam::DVe
         rects.swap_remove(j);
         screens[i] = union(&screens[i], &screens[j]);
         screens.swap_remove(j);
+        tops[i] = tops[i].max(tops[j]);
+        tops.swap_remove(j);
     }
 }
 /// Measurement: `RENDERLAB_VSM_LOG=<file>` appends a line a frame: placements, moved casters,
@@ -975,6 +986,12 @@ fn edge_log() -> Option<&'static std::path::Path> {
 fn peel_gap_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_VD_PEEL_GAP").map_or(true, |v| v.trim() != "0"))
+}
+/// The Disk lookup's page requests hold while only TR1's jitter moved the camera
+/// (`requests_held`). `RENDERLAB_VD_REQUESTS_HOLD=0` marks every page-work frame.
+fn requests_hold_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VD_REQUESTS_HOLD").map_or(true, |v| v.trim() != "0"))
 }
 /// Answer reuse (WGSL `vd_lookup`): a pixel whose surface point was on screen last frame, out
 /// of the moving casters' swept shadow, with its own and its 3x3 neighbours' answers one fully
@@ -1678,6 +1695,8 @@ impl VirtualState {
             rolling: false,
             schedule: 0,
             casters_only: false,
+            requests_held: false,
+            requests_key: vec![],
             horizons: None,
             debug: false,
             constants: vec![],
@@ -2493,6 +2512,8 @@ impl Renderer {
         let count_changed = cache.models.len() != placements;
         let mut movers = 0usize;
         let mut areas = [0.0f64; 2];
+        // Each rectangle's highest caster point, light-space height (VdFrame::tops).
+        let mut tops: Vec<f64> = vec![];
         // The other lookups keep the whole-map invalidation for a changed placement count.
         if count_changed && s.lookup != VirtualLookup::Disk {
             invalidated = [true; MAX_LEVELS];
@@ -2526,6 +2547,12 @@ impl Renderer {
                 };
                 rects.push(both(&rect));
                 screens.push(both(&screen));
+                let top = |b: &crate::shadow_plan::Bounds| corners(b).map(|c| c.dot(l)).fold(f64::MIN, f64::max);
+                tops.push(match (old, new) {
+                    (true, true) => top(&cache.bounds[p]).max(top(&bounds[p])),
+                    (true, false) => top(&cache.bounds[p]),
+                    _ => top(&bounds[p]),
+                });
             }
             movers = rects.len();
             if let Some(first) = rects.first() {
@@ -2538,7 +2565,7 @@ impl Renderer {
                 areas[1] = (hi.x - lo.x) * (hi.y - lo.y);
             }
             if rects.len() > MAX_RECTS {
-                cluster_rects(&mut rects, &mut screens, MAX_RECTS);
+                cluster_rects(&mut rects, &mut screens, &mut tops, MAX_RECTS);
             }
         }
         cache.models = models;
@@ -3141,6 +3168,24 @@ impl Renderer {
         // P-NSQ: a frame that rotates the directions never keeps counts of other directions
         // (TR1's lattice repeats its centre offset at k = 255 and 0, one matrix for both).
         key.push(u64::from(rotation));
+        // Page requests hold (WGSL vd_mark): the same key with the camera unjittered and without
+        // the frame's direction rotation. While it holds, the receivers moved by under a pixel
+        // (TR1's jitter), well inside their windows' page margins, so last frame's requests and
+        // receiver levels stand and the mark pass does not run (`RENDERLAB_VD_REQUESTS_HOLD=0`
+        // marks every page-work frame).
+        let mut held_key: Vec<u64> = camera
+            .unjittered()
+            .matrix(size.width, size.height)
+            .to_cols_array()
+            .iter()
+            .map(|v| u64::from(v.to_bits()))
+            .collect();
+        held_key.extend_from_slice(&key[16..key.len() - 1]);
+        state.requests_held = requests_hold_on()
+            && s.lookup == VirtualLookup::Disk
+            && !created
+            && held_key == state.requests_key;
+        state.requests_key = held_key;
         // N8f: moved casters alone (camera, sun basis, receivers and windows kept) still roll.
         let casters_only = !created && !rects.is_empty() && key == state.key;
         state.page_work = created || !rects.is_empty() || key != state.key;
@@ -3250,6 +3295,10 @@ impl Renderer {
             }
             for w in [0, 0, r.disk_parity, 0] {
                 bytes.extend_from_slice(&w.to_ne_bytes());
+            }
+            for i in 0..MAX_RECTS {
+                let top = tops.get(i).map_or(0.0, |&t| t as f32);
+                bytes.extend_from_slice(&top.to_ne_bytes());
             }
             for value in [size.width as f32, size.height as f32, disk_jitter, 0.0] {
                 bytes.extend_from_slice(&value.to_ne_bytes());
@@ -3760,8 +3809,10 @@ impl Renderer {
             .unwrap()
             .virtual_geometry()
             .unwrap();
-        encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
-        encoder.clear_buffer(&r.reach, 0, None);
+        if !state.requests_held {
+            encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
+            encoder.clear_buffer(&r.reach, 0, None);
+        }
         encoder.clear_buffer(&r.render, 0, Some(slots * 4));
         encoder.clear_buffer(&casters.work, 0, Some(MAX_LEVELS as u64 * ARGS_BYTES));
         encoder.clear_buffer(&r.cull_args, 0, None);
@@ -3781,7 +3832,9 @@ impl Renderer {
                 &p.mark
             });
             pass.set_bind_group(0, &*g.mark, &[]);
-            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(4), 1);
+            if !state.requests_held {
+                pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(4), 1);
+            }
             if r.sparse {
                 // Stale and unused pages back to the pool, then each level's requests take
                 // pages, coarsest first (the raster budget serves coarse levels first), then
@@ -3962,7 +4015,7 @@ mod tests {
         );
         assert_eq!(
             FRAME_BYTES,
-            928 + 12 * crate::TRACED_DRAWS as usize + ZONES_BYTES
+            416 + 2 * MAX_RECTS * 16 + 12 * crate::TRACED_DRAWS as usize + ZONES_BYTES
         );
         // P-NSQ: the sampling uvec4 follows N8e's; P-RELIT: TR1's zones are the last member.
         assert_eq!(SAMPLING_OFFSET, (FRAME_BYTES - ZONES_BYTES) as u64 - 16);
@@ -4032,13 +4085,14 @@ mod tests {
     fn many_movers_cluster_into_covering_rectangles() {
         use glam::DVec2;
         let mut rects = vec![];
-        for i in 0..40 {
+        for i in 0..2 * MAX_RECTS as i32 {
             let at = DVec2::new(if i % 2 == 0 { 0.0 } else { 500.0 }, f64::from(i / 2));
             rects.push([at, at + DVec2::splat(0.5)]);
         }
         let original = rects.clone();
         let mut screens = rects.clone();
-        cluster_rects(&mut rects, &mut screens, MAX_RECTS);
+        let mut tops = vec![0.0; rects.len()];
+        cluster_rects(&mut rects, &mut screens, &mut tops, MAX_RECTS);
         assert_eq!((rects.len(), screens.len()), (MAX_RECTS, MAX_RECTS));
         for [a, b] in &original {
             assert!(rects.iter().any(|[c, d]| c.cmple(*a).all() && d.cmpge(*b).all()));
