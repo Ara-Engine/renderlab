@@ -118,7 +118,9 @@ fn mover_reach() -> f32 {
             .unwrap_or(MOVER_REACH)
     })
 }
-const MOVER_REACH: f32 = 4.0;
+/// One diagonal: Glint's play standing still, non-RT, span 14.1 ms at 4 and 10.8 at 1 with the
+/// stale budget and the box grid; live frames at the rings and track showed no difference.
+const MOVER_REACH: f32 = 1.0;
 /// Turns of a stale cell (shaders/gi_cache.wgsl GI_STALE): one frame in `read` while a pixel
 /// reads it, one in `sweep` otherwise. RENDERLAB_GI_STALE=0 re-traces every reached cell at once
 /// (both 1); RENDERLAB_GI_STALE_READ and RENDERLAB_GI_STALE_SWEEP set them.

@@ -1707,9 +1707,8 @@ fn gi_box_hit(o:vec3<f32>, d:vec3<f32>, lo:vec3<f32>, hi:vec3<f32>) -> bool {
 }
 // What moved casters reach in one cell: its cube (the canonical probe: the whole cell
 // is re-probed) or some of its fixed rays (only those directions' slots are re-traced), out to
-// GI_H_MOVER_REACH box diagonals from the box (0: without bound). Farther away a box covers
-// less than one direction's cone (64 directions: about 10 degrees across), so its rays would
-// flip at most a bit's worth of a cell's light, while every cell that sees a mover was
+// GI_H_MOVER_REACH box diagonals from the box (0: without bound; 1 by default). Farther away
+// the box covers a small part of the hemisphere, and its rays flip a few bits of a cell's light, while every cell that sees a mover was
 // re-traced each frame it moved: Glint's spinning obstacles in play re-traced 425k cells a
 // frame. Returns 0 when nothing was reached, 1 for some directions, 2 for the cube.
 const GI_H_MOVER_REACH:u32=61u;
