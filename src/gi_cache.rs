@@ -151,6 +151,43 @@ fn cluster_boxes(mut boxes: Vec<[f32; 6]>, max: usize) -> Vec<[f32; 6]> {
     split(&mut boxes, max, &mut out);
     out
 }
+/// Measurement: with RENDERLAB_GI_MOVED_LOG=<file>, one line per frame with moving casters:
+/// how many placements moved, and the first few (index, swept size, largest corner change).
+fn moved_log(previous: &[[f32; 6]], bounds: &[[f32; 6]], boxes: &[[f32; 6]]) {
+    use std::io::Write;
+    static FILE: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    let Some(file) = FILE.get_or_init(|| {
+        std::env::var_os("RENDERLAB_GI_MOVED_LOG")
+            .map(|p| std::sync::Mutex::new(std::fs::File::create(p).expect("moved log")))
+    }) else {
+        return;
+    };
+    let mut moved = vec![];
+    for i in 0..bounds.len().max(previous.len()) {
+        if previous.get(i) != bounds.get(i) {
+            let delta = match (previous.get(i), bounds.get(i)) {
+                (Some(a), Some(b)) => (0..6).map(|k| (a[k] - b[k]).abs()).fold(0.0f32, f32::max),
+                _ => f32::INFINITY,
+            };
+            moved.push((i, delta));
+        }
+    }
+    let sizes: Vec<String> = boxes
+        .iter()
+        .take(12)
+        .map(|b| format!("{:.2}", ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt()))
+        .collect();
+    let first: Vec<String> = moved.iter().take(12).map(|(i, d)| format!("[{i},{d:.2e}]")).collect();
+    let _ = writeln!(
+        file.lock().unwrap(),
+        "{{\"placements\":{},\"bounds_changed\":{},\"boxes\":{},\"first\":[{}],\"box_diagonals\":[{}]}}",
+        bounds.len(),
+        moved.len(),
+        boxes.len(),
+        first.join(","),
+        sizes.join(",")
+    );
+}
 /// The default for `near_occluded_rays`.
 const NEAR_OCCLUDED_RAYS: u32 = 4;
 /// The still-view batch (Planner::finish): one cache frame in STILL_BATCH while a still view
@@ -1448,6 +1485,7 @@ impl Planner {
                 boxes.push(swept);
             }
         }
+        moved_log(&previous, &bounds, &boxes);
         if tick {
             self.bounds = bounds;
         }
