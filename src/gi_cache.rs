@@ -103,6 +103,12 @@ fn light_reuse_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_LIGHT_REUSE").map_or(true, |v| v != "0"))
 }
+/// Coherent ray order for the visibility rays (shaders/gi_cache.wgsl gi_ray_order);
+/// RENDERLAB_GI_RAY_ORDER=0 traces each cell's directions together.
+fn ray_order_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_RAY_ORDER").map_or(true, |v| v != "0"))
+}
 /// The default for `near_occluded_rays`.
 const NEAR_OCCLUDED_RAYS: u32 = 4;
 /// The still-view batch (Planner::finish): one cache frame in STILL_BATCH while a still view
@@ -1256,6 +1262,7 @@ impl Planner {
         header[15] = s.near_light_rays;
         header[55] = near_occluded_rays();
         header[56] = u32::from(light_reuse_on());
+        header[60] = u32::from(ray_order_on());
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;

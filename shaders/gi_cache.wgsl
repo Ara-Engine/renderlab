@@ -1470,7 +1470,23 @@ fn gi_setup_directions(slot:u32, cell:u32) -> u32 {
 // kept as the bit at the item's index (atomicOr: the same bits in any order).
 @compute @workgroup_size(64) fn gi_rays(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     let count=min(atomicLoad(&gi_work[GI_W_ITEMS]),GI_RAY_ITEMS);
-    for(var i=id.x;i<count;i+=groups.x*64u) { gi_ray(i); }
+    let ordered=gi_word(GI_H_RAY_ORDER)!=0u;
+    for(var i=id.x;i<count;i+=groups.x*64u) { gi_ray(select(i,gi_ray_order(i,count),ordered)); }
+}
+// Ray order (header GI_H_RAY_ORDER): a cell's items are consecutive (one per pending direction),
+// so 32 lanes traced 32 directions of one cell: rays fanning out from one point, which diverge
+// through a software traversal and share few nodes. Within each full block of 32 x
+// GI_RAY_SPREAD items, lane l of a group of 32 takes every GI_RAY_SPREADth item instead: about
+// the same direction from 32 neighbouring new cells (nearly parallel rays from nearby points).
+// A bijection on full blocks; the tail keeps its order. Every item is traced once, as before.
+const GI_H_RAY_ORDER:u32=60u;
+const GI_RAY_SPREAD:u32=64u;
+fn gi_ray_order(i:u32, count:u32) -> u32 {
+    let block=32u*GI_RAY_SPREAD;
+    let base=i-i%block;
+    if base+block>count { return i; }
+    let r=i%block;
+    return base+(r%32u)*GI_RAY_SPREAD+r/32u;
 }
 fn gi_ray(index:u32) {
     let item=atomicLoad(&gi_work[gi_frame.requests.z+index]);
@@ -1841,39 +1857,77 @@ fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
     if light.position_range.w>0.0 && d.w>=light.position_range.w { return false; }
     return light.kind.x!=2u || dot(-d.xyz,light.travel_outer.xyz)>light.travel_outer.w;
 }
-// One thread per queued cell. The dynamically sized bitset holds every light, with no
-// first-N cutoff. Cost: scans every light, traces only those that can illuminate the cell;
-// at most lighting.count rays per shaded cell. GI's existing cell budgets are unchanged.
-@compute @workgroup_size(64) fn gi_light(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
-    let count=min(atomicLoad(&gi_work[GI_W_SHADES]),gi_frame.offsets.x);
-    for(var i=id.x;i<count;i+=groups.x*64u) {
-        let slot=atomicLoad(&gi_work[gi_frame.bounce.w+i]);
-        let cold=gi_cold(slot);
-        let state=gi_table[cold+GI_C_STATE];
-        gi_table[cold+GI_C_STATE]=(state&~GI_SHADE)|select(0u,GI_LIGHTS_KNOWN,gi_word(GI_H_LIGHT_REUSE)!=0u);
-        // A cell whose light visibility is known keeps it: nothing that changes it has happened
-        // since (a new or re-traced cell, a relight, a moved caster crossing one of its light
-        // rays: each clears GI_LIGHTS_KNOWN). Most cells shaded in motion are shaded again only
-        // because their own gather finished (Outpost: about 1,600 of 3,600 a frame).
-        if (state&GI_LIGHTS_KNOWN)!=0u && gi_word(GI_H_LIGHT_REUSE)!=0u { continue; }
-        let q=gi_point(cold);
-        let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
-        let edge=gi_edge(gi_table[cold+GI_C_DEF]&0xffu);
-        let origin=q+n*gi_origin_offset(q,edge);
+// Light visibility of the queued cells, 64 to a workgroup step. The dynamically sized bitset
+// holds every light, with no first-N cutoff; at most lighting.count rays per shaded cell. Each
+// lane lists its cell's rays (the lights that can illuminate it, 32 lights at a time), then the
+// workgroup's 64 lanes trace the list together: most cells keep known visibility, and with one
+// cell to a thread the few that trace ran their rays one after another while the rest idled
+// (software rays on Outpost: about 6,000 rays a frame cost 0.2 ms). The bits do not depend on
+// which lane traces a ray.
+const GI_LIGHT_LIST:u32=2048u;
+var<workgroup> gi_wg_light_list:array<u32,GI_LIGHT_LIST>;
+var<workgroup> gi_wg_light_n:atomic<u32>;
+var<workgroup> gi_wg_light_bits:array<atomic<u32>,64>;
+var<workgroup> gi_wg_light_count:u32;
+@compute @workgroup_size(64) fn gi_light(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    if lane==0u { gi_wg_light_count=min(atomicLoad(&gi_work[GI_W_SHADES]),gi_frame.offsets.x); }
+    let count=workgroupUniformLoad(&gi_wg_light_count);
+    let reuse=gi_word(GI_H_LIGHT_REUSE)!=0u;
+    for(var head=group.x*64u;head<count;head+=groups.x*64u) {
+        let i=head+lane;
+        var slot=0u;
+        var tracing=false;
+        var q=vec3<f32>(0.0);
+        var n=vec3<f32>(0.0);
+        if i<count {
+            slot=atomicLoad(&gi_work[gi_frame.bounce.w+i]);
+            let cold=gi_cold(slot);
+            let state=gi_table[cold+GI_C_STATE];
+            gi_table[cold+GI_C_STATE]=(state&~GI_SHADE)|select(0u,GI_LIGHTS_KNOWN,reuse);
+            // A cell whose light visibility is known keeps it: nothing that changes it has
+            // happened since (a new or re-traced cell, a relight, a moved caster crossing one
+            // of its light rays: each clears GI_LIGHTS_KNOWN). Most cells shaded in motion are
+            // shaded again only because their own gather finished (Outpost: about 1,600 of
+            // 3,600 a frame).
+            tracing=(state&GI_LIGHTS_KNOWN)==0u || !reuse;
+            q=gi_point(cold);
+            n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
+        }
         var traced=0u;
         for(var first=0u;first<lighting.count;first+=32u) {
-            var bits=0u;
-            for(var l=first;l<min(first+32u,lighting.count);l+=1u) {
-                if !gi_light_affects(l,q,n) { continue; }
-                let d=gi_light_direction(l,q);
-                traced+=1u;
-                let open=gi_visible_within(origin,d.xyz,d.w);
-                gi_ray_count(GI_RC_LIGHT);
-                if open { bits|=1u<<(l-first); }
+            if lane==0u { atomicStore(&gi_wg_light_n,0u); }
+            atomicStore(&gi_wg_light_bits[lane],0u);
+            workgroupBarrier();
+            if tracing {
+                for(var l=first;l<min(first+32u,lighting.count);l+=1u) {
+                    if !gi_light_affects(l,q,n) { continue; }
+                    traced+=1u;
+                    let at=atomicAdd(&gi_wg_light_n,1u);
+                    if at<GI_LIGHT_LIST { gi_wg_light_list[at]=(lane<<5u)|(l-first); }
+                }
             }
-            gi_table[cold+GI_C_LIGHTS+(first>>5u)]=bits;
+            workgroupBarrier();
+            let listed=min(atomicLoad(&gi_wg_light_n),GI_LIGHT_LIST);
+            for(var k=lane;k<listed;k+=64u) {
+                let e=gi_wg_light_list[k];
+                let owner=e>>5u;
+                let l=first+(e&31u);
+                let cell=atomicLoad(&gi_work[gi_frame.bounce.w+head+owner]);
+                let cold=gi_cold(cell);
+                let cq=gi_point(cold);
+                let cn=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
+                let o=cq+cn*gi_origin_offset(cq,gi_edge(gi_table[cold+GI_C_DEF]&0xffu));
+                let d=gi_light_direction(l,cq);
+                let open=gi_visible_within(o,d.xyz,d.w);
+                gi_ray_count(GI_RC_LIGHT);
+                if open { atomicOr(&gi_wg_light_bits[owner],1u<<(e&31u)); }
+            }
+            workgroupBarrier();
+            if tracing {
+                gi_table[gi_cold(slot)+GI_C_LIGHTS+(first>>5u)]=atomicLoad(&gi_wg_light_bits[lane]);
+            }
         }
-        atomicAdd(&gi_work[GI_W_LIGHT_RAYS],traced);
+        if traced!=0u { atomicAdd(&gi_work[GI_W_LIGHT_RAYS],traced); }
     }
 }
 // Requests the cell (level, bin, cell) for this frame's claim rounds, as the probe lists a
