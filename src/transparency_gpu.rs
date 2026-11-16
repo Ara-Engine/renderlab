@@ -288,6 +288,33 @@ pub(super) struct TransparencyState {
     shadow_key: Option<[u8; 32]>,
     /// The sun map fit last computed and what it was computed from (`encode_transparency`).
     fit_memo: Option<([u8; 32], Option<ShadowFit>)>,
+    /// Each opaque draw's world bounds when the sun map's key was last made (`sun_map_cull`).
+    caster_bounds: Vec<Option<(Vec3, Vec3)>>,
+}
+
+/// Play loop (sunrt, 2026-11-16): the transparent receivers' sun map keys its casters by their
+/// placement revisions only while they are inside the map's volume, now or when last keyed, so
+/// a caster moving elsewhere (a walking player on Outpost: the map re-rendered every walking
+/// frame, 2.6 ms) does not re-render it. `RENDERLAB_TP_SUN_MAP_CULL=0` re-renders on any change.
+fn sun_map_cull() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_TP_SUN_MAP_CULL").map_or(true, |v| v != "0"))
+}
+
+/// Whether world bounds `(lo, hi)` overlap the sun map's volume under its fit `matrix`.
+pub(crate) fn in_sun_map(matrix: Mat4, (lo, hi): (Vec3, Vec3)) -> bool {
+    let (mut a, mut b) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    for i in 0..8 {
+        let p = Vec3::new(
+            if i & 1 == 0 { lo.x } else { hi.x },
+            if i & 2 == 0 { lo.y } else { hi.y },
+            if i & 4 == 0 { lo.z } else { hi.z },
+        );
+        let q = matrix.transform_point3(p);
+        a = a.min(q);
+        b = b.max(q);
+    }
+    a.x <= 1.0 && b.x >= -1.0 && a.y <= 1.0 && b.y >= -1.0 && a.z <= 1.0 && b.z >= 0.0
 }
 
 struct Gpu {
@@ -2155,6 +2182,29 @@ impl Renderer {
             }
         };
         let shadow = fit.map_or(Mat4::IDENTITY, |f| f.matrix);
+        let casters_key = if sun_map_cull() && fit.is_some() {
+            let mut h = Sha256::new();
+            let mut seen = Vec::with_capacity(opaque.len());
+            for (i, draw) in opaque.iter().enumerate() {
+                h.update((Arc::as_ptr(&draw.mesh.vertex) as usize).to_ne_bytes());
+                let (id, edits) = draw.instances.state.revision();
+                h.update(id.to_ne_bytes());
+                let now = draw.instances.state.world_bounds(draw.mesh.bounds).ok().and_then(|boxes| {
+                    boxes.iter().fold(None, |u: Option<(Vec3, Vec3)>, b| {
+                        Some(u.map_or((b.min, b.max), |(lo, hi)| (lo.min(b.min), hi.max(b.max))))
+                    })
+                });
+                let before = self.transparency.caster_bounds.get(i).copied().flatten();
+                if now.is_none() || [now, before].into_iter().flatten().any(|b| in_sun_map(shadow, b)) {
+                    h.update(edits.to_ne_bytes());
+                }
+                seen.push(now);
+            }
+            self.transparency.caster_bounds = seen;
+            h.finalize().into()
+        } else {
+            casters_key
+        };
         let mut key = Sha256::new();
         key.update(bytes_of(&shadow.to_cols_array()));
         key.update(casters_key);
