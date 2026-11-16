@@ -462,7 +462,8 @@ fn vd_prepare(id:vec2<u32>) {
     vd_px.thin=normal.w<0.0;
     let selected=textureLoad(vsm_level_in,p,0).x;
     vd_px.level=vd_level_of(selected);
-    if VD_COUNTS && selected!=VSM_NONE {
+    if VD_COUNTS && VD_PCSS && selected!=VSM_NONE {atomicAdd(&vd_counts[0],1u);}
+    if VD_COUNTS && !VD_PCSS && selected!=VSM_NONE {
         atomicAdd(&vd_counts[0],1u);
         let short=(selected>>8u)&0xffu;
         if short!=0u {atomicAdd(&vd_counts[1],1u);atomicMax(&vd_counts[2],short);}
@@ -860,6 +861,27 @@ override VD_PCSS:bool=false;
 override VD_PCSS_SEARCH:u32=16u;
 override VD_PCSS_TAPS:u32=32u;
 override VD_PCSS_MIN:f32=1.5;
+// Measurement: 1 draws why each receiver got its answer: 0 the ceiling (no caster above it),
+// 128 the blocker search (no blocker found), else the filter's answer.
+override VD_PCSS_DIAG:u32=0u;
+// Whether page `page` of `level` holds this window's depths: resident (sparse pool) or
+// rasterized at the level's current epoch (dense windows). PCSS reads no other page: a missing
+// page would read as empty, a lit hole (vd_level_for moves coarser instead).
+fn vd_page_ok(level:u32,page:vec2<u32>)->bool {
+    if vsm_sparse() {return vd_slot(level,page)!=VSM_NONE;}
+    return vsm_pages[vsm_vpage(level,page)]==vsm.levels[level].info.x;
+}
+// Whether the pages under the square q +- r of `level` are all valid (r is at most a few
+// texels, so the square spans at most 2x2 pages).
+fn vd_square_ok(level:u32,q:vec2<f32>,r:f32)->bool {
+    let texel=vsm_texel(level);
+    let origin=vsm.levels[level].origin.xy;
+    let side=f32(vsm.counts.y*VSM_PAGE);
+    let a=(q-vec2<f32>(r)-origin)/texel;let b=(q+vec2<f32>(r)-origin)/texel;
+    if any(a<vec2<f32>(0.0)) || any(b>=vec2<f32>(side)) {return false;}
+    let pa=vec2<u32>(a)/VSM_PAGE;let pb=vec2<u32>(b)/VSM_PAGE;
+    return vd_page_ok(level,pa) && vd_page_ok(level,vec2<u32>(pb.x,pa.y)) && vd_page_ok(level,vec2<u32>(pa.x,pb.y)) && vd_page_ok(level,pb);
+}
 // Point tap at level `level`: whether the texel under light-space point q occludes the
 // receiver (above its tangent plane by `margin`), and its height above the receiver.
 fn vd_tap(level:u32,q:vec2<f32>,margin:f32)->vec2<f32> {
@@ -868,6 +890,7 @@ fn vd_tap(level:u32,q:vec2<f32>,margin:f32)->vec2<f32> {
     let side=i32(vsm.counts.y*VSM_PAGE);
     let cell=vec2<i32>(floor((q-origin)/texel));
     if any(cell<vec2<i32>(0)) || any(cell>=vec2<i32>(side)) {return vec2<f32>(0.0);}
+    if VD_COUNTS && !vd_page_ok(level,vec2<u32>(cell)/VSM_PAGE) {atomicAdd(&vd_counts[1],1u);}
     let i=vsm_index(cell,level);
     if i==VSM_NONE {return vec2<f32>(0.0);}
     let word=vsm_top_words[i];
@@ -890,14 +913,14 @@ fn vd_pcf(level:u32,q:vec2<f32>,margin:f32)->f32 {
     let o11=vd_tap(level,b+vec2<f32>(texel),margin).x;
     return mix(mix(o00,o10,f.x),mix(o01,o11,f.x),f.y);
 }
-// The finest level from `from` up whose texel is at least `texel` and whose window holds q.
+// The finest level from `start` up whose texel is at least `texel` and whose valid pages hold
+// the square q +- r (plus the bilinear tap's texel); VSM_NONE when no level does.
 fn vd_level_for(start:u32,texel:f32,q:vec2<f32>,r:f32)->u32 {
     var l=start;
     while l+1u<vsm.counts.x && vsm_texel(l)<texel {l+=1u;}
     loop {
-        let lo=vsm.levels[l].origin.xy;let hi=lo+vec2<f32>(vsm_extent(l));
-        if all(q-vec2<f32>(r)>=lo) && all(q+vec2<f32>(r)<hi) {return l;}
-        if l+1u>=vsm.counts.x {return l;}
+        if vd_square_ok(l,q,r+vsm_texel(l)) {return l;}
+        if l+1u>=vsm.counts.x {return VSM_NONE;}
         l+=1u;
     }
     return l;
@@ -917,11 +940,17 @@ fn vd_pcss(id:vec2<u32>)->f32 {
         let r=min(slope*ceiling/texel,f32(VD_R<<VD_MIPS))+1.0;
         let a=vec2<i32>(floor(x-vec2<f32>(r)));let b=vec2<i32>(floor(x+vec2<f32>(r)));
         if any(a<vec2<i32>(0)) || any(b>=vec2<i32>(side)) {break;}
+        // Dense windows: mips of a page not rasterized this epoch are stale (keep the ceiling).
+        let texel_r=texel*r;
+        if !vsm_sparse() && !vd_square_ok(l,p.xy,texel_r) {break;}
         if vsm_sparse() {vd_cache_pages(l,a,b);}
         ceiling=clamp(vd_mip_max(l,a,b)-p.z,0.0,ceiling);
     }
     let texel0=vsm_texel(vd_px.level);
-    if ceiling<=0.0 {return 1.0;}
+    if ceiling<=0.0 {
+        if VD_COUNTS {atomicAdd(&vd_counts[2],1u);}
+        return select(1.0,0.0,VD_PCSS_DIAG==1u);
+    }
     // Per pixel and frame rotation of the tap disks.
     let seed=vd_hash(id.x+id.y*u32(vd.size.x));
     let turn=fract(f32(seed>>8u)*(1.0/16777216.0)+0.61803398875*vd.size.z)*6.28318531;
@@ -929,6 +958,7 @@ fn vd_pcss(id:vec2<u32>)->f32 {
     let search=max(vd_px.radius*ceiling,VD_PCSS_MIN*texel0);
     let centre_search=p.xy+vd_px.centre*0.5*ceiling;
     let ls=vd_level_for(vd_px.level,0.25*search,centre_search,search);
+    if ls==VSM_NONE {if VD_COUNTS {atomicAdd(&vd_counts[1],1u);} return 1.0;}
     let ms=VD_BIAS*vsm_texel(ls);
     var found=0.0;var depth=0.0;
     for(var k=0u;k<VD_PCSS_SEARCH;k+=1u) {
@@ -937,12 +967,16 @@ fn vd_pcss(id:vec2<u32>)->f32 {
         let t=vd_tap(ls,centre_search+search*r*vec2<f32>(cos(a),sin(a)),ms);
         found+=t.x;depth+=t.x*t.y;
     }
-    if found==0.0 {return 1.0;}
+    if found==0.0 {
+        if VD_COUNTS {atomicAdd(&vd_counts[3],1u);}
+        return select(1.0,0.5,VD_PCSS_DIAG==1u);
+    }
     let blocker=depth/found;
     // The penumbra's radius from the average blocker distance; at least VD_PCSS_MIN texels.
     let radius=max(vd_px.radius*blocker,VD_PCSS_MIN*texel0);
     let centre=p.xy+vd_px.centre*blocker;
     let lf=vd_level_for(vd_px.level,0.5*radius,centre,radius);
+    if lf==VSM_NONE {if VD_COUNTS {atomicAdd(&vd_counts[1],1u);} return 1.0;}
     let mf=VD_BIAS*vsm_texel(lf);
     var occluded=0.0;
     for(var k=0u;k<VD_PCSS_TAPS;k+=1u) {
