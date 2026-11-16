@@ -91,7 +91,9 @@ impl Recorder {
     /// The armed label, if `<dir>/arm` exists (consumed).
     pub(super) fn armed(&self) -> Option<String> {
         let arm = self.dir.join("arm");
-        let text = std::fs::read_to_string(&arm).ok()?;
+        // The label line ends with a newline; without one the file is still being written (an
+        // empty read once dumped spinner-a as "frame"), so it waits for a later frame.
+        let text = std::fs::read_to_string(&arm).ok().filter(|t| t.ends_with('\n'))?;
         let _ = std::fs::remove_file(&arm);
         Some(text.lines().next().unwrap_or("frame").trim().to_owned())
     }

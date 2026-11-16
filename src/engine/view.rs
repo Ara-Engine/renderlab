@@ -141,6 +141,8 @@ impl Engine {
     /// With `@<dir>` instead, the frames are armed while running: once `<dir>/arm` exists (a
     /// label line, then offsets such as `0,1,2,4,8`), the frames that many frames after the
     /// first one that sees it are written as `<label>-<offset>.ppm`, and the file is removed.
+    /// Every line ends with a newline: a file without one is still being written and is read
+    /// on a later frame (an empty one was once taken as armed with the default label).
     fn save_listed_frame(&mut self, view: ViewId, frame: u64) -> Result<(), Error> {
         enum Mode {
             Listed(std::path::PathBuf, Vec<u64>),
@@ -169,7 +171,7 @@ impl Engine {
                 let mut armed = ARMED.lock().unwrap();
                 if armed.is_none() {
                     let arm = dir.join("arm");
-                    if let Ok(text) = std::fs::read_to_string(&arm) {
+                    if let Some(text) = std::fs::read_to_string(&arm).ok().filter(|t| t.ends_with('\n')) {
                         let _ = std::fs::remove_file(&arm);
                         let mut lines = text.lines();
                         let label = lines.next().unwrap_or("armed").trim().to_owned();
