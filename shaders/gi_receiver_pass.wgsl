@@ -75,18 +75,24 @@ fn gi_rx_store_at(at:u32) {
 }
 
 // ---- final gather (RENDERLAB_FINAL_GATHER, src/gi_receiver_pass.rs) ----
-// Pixels no longer read the lighting cache's cells. A screen probe per FG_TILE x FG_TILE tile,
-// on the surface under a covered pixel the frame picks, traces FG_RAYS rays over its
-// hemisphere (hardware rays or the software trace: the module's rl_cast) and shades each hit
-// with the program, the cache read at the hit (so cells reach the screen only through a
-// hemisphere integral) and its own direct light; misses see the sky. The probe keeps the
-// radiance as L2 SH in lux, accumulated over frames while its new point stays on its plane.
-// Each pixel then takes the four probes around it, weighted by position, plane distance and
-// normal, and writes the same record the receivers pass wrote (sky slots absolute:
+// Pixels never read the lighting cache's cells: these kernels contain no cell lookup at the
+// pixel (the cache is read only at ray hits, inside the hit's own shading). Screen probes,
+// FG_SLOTS per FG_TILE x FG_TILE tile on the surfaces under covered pixels the frame picks
+// (slot 1 on a second plane where the tile holds one), each trace FG_RAYS rays over their
+// hemisphere (hardware rays or the software trace: the module's rl_cast) and shade each hit
+// with the program (the cache read at the hit, so cells reach the screen only through a
+// hemisphere integral) and its own direct light; misses see the sky. A probe keeps radiance
+// as L2 SH, accumulated over frames while its new point stays on its plane. Each pixel takes
+// the probes around it on its own plane (position, plane distance and normal weights), the
+// nearest such probe within FG_SEARCH tiles when none is adjacent, and otherwise traces
+// FG_PIXEL_RAYS rays of its own. It writes the record shading reads (sky slots absolute:
 // gi_api.wgsl GI_SKY_ABSOLUTE).
 const FG_TILE:u32=16u;
+const FG_SLOTS:u32=2u;
 const FG_RAYS:u32=16u;
+const FG_PIXEL_RAYS:u32=4u;
 const FG_HISTORY:f32=16.0;
+const FG_SEARCH:i32=2;
 // The radiance SH (27 floats and a pad), the probe point (w: frames of history, 0 when
 // invalid) and normal (w: the tile footprint in metres). Probes live after the pixels'
 // records in gi_prepared, three records a probe (src/gi_receiver_pass.rs sizes it).
@@ -105,7 +111,7 @@ fn fg_store(index:u32,size:vec2<u32>,p:FgProbe) {
     gi_prepared[at+1u]=GiPrepared(bitcast<vec4<u32>>(p.sh[3]),bitcast<vec4<u32>>(p.sh[4]),bitcast<vec4<u32>>(p.sh[5]));
     gi_prepared[at+2u]=GiPrepared(bitcast<vec4<u32>>(p.sh[6]),bitcast<vec4<u32>>(p.point),bitcast<vec4<u32>>(p.normal));
 }
-var<workgroup> fg_lane_sh:array<array<f32,27>,FG_RAYS>;
+var<workgroup> fg_lane_sh:array<array<f32,27>,32>;
 
 fn fg_hash(x:u32)->u32 {
     var h=x*0x9e3779b1u;h^=h>>16u;h*=0x85ebca6bu;h^=h>>13u;h*=0xc2b2ae35u;h^=h>>16u;return h;
@@ -134,10 +140,32 @@ fn fg_surface(id:vec2<u32>,size:vec2<u32>)->FgSurface {
     s.placement=record.x;
     return s;
 }
+// The world size of FG_TILE pixels at a point: the plane tests' scale.
+fn fg_footprint(pixel:vec2<u32>,size:vec2<u32>,world:vec3<f32>)->f32 {
+    let ray=primary_ray(pixel,size);
+    let pixel_angle=length(ray.dx_far-ray.dx_near)/max(length(ray.far-ray.near),1e-30);
+    return f32(FG_TILE)*pixel_angle*length(world-lighting.eye);
+}
+// Whether a point and normal lie on a probe's plane (within a tenth of its footprint, normals
+// within about 25 degrees): the probe's light is the point's.
+fn fg_on_plane(p:FgProbe,world:vec3<f32>,n:vec3<f32>)->f32 {
+    if p.point.w<=0.0 {return 0.0;}
+    let plane=abs(dot(p.normal.xyz,world-p.point.xyz))/max(0.1*p.normal.w,1e-6);
+    let facing=max(dot(p.normal.xyz,n),0.0);
+    return exp(-plane*plane)*facing*facing*facing*facing;
+}
 fn fg_basis(n:vec3<f32>)->mat3x3<f32> {
     let s=select(-1.0,1.0,n.z>=0.0);
     let a=-1.0/(s+n.z);let b=n.x*n.y*a;
     return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
+}
+// Uniform hemisphere direction k of `count` (stratified on a near-square grid), turned by r.
+fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
+    let side=u32(ceil(sqrt(f32(count))));
+    let jitter=vec2<f32>(f32(r&0xffffu),f32(r>>16u))*(1.0/65536.0);
+    let u=fract((vec2<f32>(f32(k%side),f32(k/side))+jitter)/vec2<f32>(f32(side),f32((count+side-1u)/side)));
+    let z=u.x;let rr=sqrt(max(1.0-z*z,0.0));let phi=6.283185307179586*u.y;
+    return fg_basis(n)*vec3<f32>(rr*cos(phi),rr*sin(phi),z);
 }
 // Incoming radiance (unexposed) along d from `origin`.
 fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f32> {
@@ -156,39 +184,52 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     rl_hit_lights_clear();
     return radiance;
 }
-@compute @workgroup_size(16) fn fg_trace(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+@compute @workgroup_size(32) fn fg_trace(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let size=textureDimensions(primary_hit);
     let tiles=(size+vec2<u32>(FG_TILE-1u))/FG_TILE;
-    let index=group.y*tiles.x+group.x;
+    let tile=group.y*tiles.x+group.x;
     let frame=primary_frame.sided.y;
-    // The probe: the first covered pixel of four the frame picks in the tile (all lanes alike).
-    var s:FgSurface;
-    var pixel=vec2<u32>(0u);
+    let slot=lane/FG_RAYS;
+    let ray=lane%FG_RAYS;
+    // Slot 0: the first covered pixel of four the frame picks in the tile. Slot 1: the first of
+    // eight more on another plane than slot 0's (every lane of a slot computes the same).
+    var first:FgSurface;
+    var first_pixel=vec2<u32>(0u);
     for(var k=0u;k<4u;k+=1u) {
-        let h=fg_hash(index*4u+k+frame*0x632be5abu);
+        let h=fg_hash(tile*16u+k+frame*0x632be5abu);
         let q=group.xy*FG_TILE+vec2<u32>(h%FG_TILE,(h>>8u)%FG_TILE);
-        s=fg_surface(q,size);
-        if s.placement!=0u {pixel=q;break;}
+        first=fg_surface(q,size);
+        if first.placement!=0u {first_pixel=q;break;}
+    }
+    var s=first;
+    var pixel=first_pixel;
+    if slot==1u {
+        s=FgSurface();
+        if first.placement!=0u {
+            let scale=0.1*fg_footprint(first_pixel,size,first.world);
+            for(var k=4u;k<12u;k+=1u) {
+                let h=fg_hash(tile*16u+k+frame*0x632be5abu);
+                let q=group.xy*FG_TILE+vec2<u32>(h%FG_TILE,(h>>8u)%FG_TILE);
+                let c=fg_surface(q,size);
+                if c.placement==0u {continue;}
+                if dot(c.normal,first.normal)<0.9 || abs(dot(first.normal,c.world-first.world))>scale {s=c;pixel=q;break;}
+            }
+        }
     }
     let found=s.placement!=0u;
     var radiance=vec3<f32>(0.0);
     var d=vec3<f32>(0.0,0.0,1.0);
     if found {
-        // Stratified uniform hemisphere directions, turned each frame.
-        let r=fg_hash(index^(frame*0x27d4eb2fu));
-        let jitter=vec2<f32>(f32(r&0xffffu),f32(r>>16u))*(1.0/65536.0);
-        let u=fract((vec2<f32>(f32(lane%4u),f32(lane/4u))+jitter)/4.0);
-        let z=u.x;let rr=sqrt(max(1.0-z*z,0.0));let phi=6.283185307179586*u.y;
-        d=fg_basis(s.normal)*vec3<f32>(rr*cos(phi),rr*sin(phi),z);
-        let origin=fma(s.normal,vec3<f32>(s.epsilon),s.world);
-        radiance=fg_radiance(origin,d,s.epsilon,pixel);
+        d=fg_direction(s.normal,ray,FG_RAYS,fg_hash((tile*FG_SLOTS+slot)^(frame*0x27d4eb2fu)));
+        radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon,pixel);
     }
     gi_sh_basis(d);
     for(var i=0u;i<9u;i+=1u) {
         fg_lane_sh[lane][i*3u]=radiance.x*gi_y[i];fg_lane_sh[lane][i*3u+1u]=radiance.y*gi_y[i];fg_lane_sh[lane][i*3u+2u]=radiance.z*gi_y[i];
     }
     workgroupBarrier();
-    if lane!=0u || any(group.xy>=tiles) {return;}
+    if ray!=0u || any(group.xy>=tiles) {return;}
+    let index=tile*FG_SLOTS+slot;
     if !found {
         var none:FgProbe;
         fg_store(index,size,none);
@@ -196,14 +237,11 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     }
     var sh:array<f32,28>;
     for(var l=0u;l<FG_RAYS;l+=1u) {
-        for(var i=0u;i<27u;i+=1u) {sh[i]+=fg_lane_sh[l][i];}
+        for(var i=0u;i<27u;i+=1u) {sh[i]+=fg_lane_sh[slot*FG_RAYS+l][i];}
     }
     // Uniform hemisphere: pdf 1/(2 pi).
     let scale=6.283185307179586/f32(FG_RAYS);
-    // The tile footprint at the probe: FG_TILE pixels of the camera angle at its distance.
-    let ray=primary_ray(pixel,size);
-    let pixel_angle=length(ray.dx_far-ray.dx_near)/max(length(ray.far-ray.near),1e-30);
-    let footprint=f32(FG_TILE)*pixel_angle*length(s.world-lighting.eye);
+    let footprint=fg_footprint(pixel,size,s.world);
     let old=fg_load(index,size);
     var count=1.0;
     if old.point.w>0.0 && dot(old.normal.xyz,s.normal)>0.9 && abs(dot(old.normal.xyz,s.world-old.point.xyz))<0.25*footprint {
@@ -224,34 +262,56 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     let size=textureDimensions(primary_hit);
     let s=fg_surface(id,size);
     if s.placement==0u {return;}
-    let tiles=(size+vec2<u32>(FG_TILE-1u))/FG_TILE;
+    let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
     let f=(vec2<f32>(id)+vec2<f32>(0.5))/f32(FG_TILE)-vec2<f32>(0.5);
     let base=vec2<i32>(floor(f));
     let fr=f-floor(f);
     var sh:array<vec4<f32>,7>;
     var total=0.0;
-    for(var k=0u;k<4u;k+=1u) {
-        let o=vec2<i32>(i32(k&1u),i32(k>>1u));
-        let t=clamp(base+o,vec2<i32>(0),vec2<i32>(tiles)-vec2<i32>(1));
-        let p=fg_load(u32(t.y)*tiles.x+u32(t.x),size);
-        if p.point.w<=0.0 {continue;}
+    // The four surrounding tiles' probes on this pixel's plane, bilinear by tile position.
+    for(var k=0u;k<4u*FG_SLOTS;k+=1u) {
+        let o=vec2<i32>(i32(k&1u),i32((k>>1u)&1u));
+        let t=clamp(base+o,vec2<i32>(0),tiles-vec2<i32>(1));
+        let p=fg_load(u32(t.y*tiles.x+t.x)*FG_SLOTS+k/4u,size);
         let bilinear=select(1.0-fr.x,fr.x,o.x!=0)*select(1.0-fr.y,fr.y,o.y!=0);
-        let plane=abs(dot(p.normal.xyz,s.world-p.point.xyz))/max(0.1*p.normal.w,1e-6);
-        let facing=max(dot(p.normal.xyz,s.normal),0.0);
-        let w=max(bilinear,1e-3)*exp(-plane*plane)*facing*facing*facing*facing;
+        let w=max(bilinear,1e-3)*fg_on_plane(p,s.world,s.normal);
         if w<=1e-6 {continue;}
         for(var v=0u;v<7u;v+=1u) {sh[v]+=w*p.sh[v];}
         total+=w;
     }
     if total<=1e-4 {
-        // No probe on this surface yet: the cache, as before (v1).
-        var input:SurfaceInput;
-        input.receiver.world=s.world;
-        input.receiver.geometric=s.normal;
-        input.normal=s.shading;
-        gi_prepare(input);
-        gi_rx_store_at(id.y*size.x+id.x);
-        return;
+        // None adjacent on this plane: the best one within FG_SEARCH tiles.
+        let own=vec2<i32>(id/FG_TILE);
+        var best=0.0;
+        for(var y=-FG_SEARCH;y<=FG_SEARCH;y+=1) {
+            for(var x=-FG_SEARCH;x<=FG_SEARCH;x+=1) {
+                let t=own+vec2<i32>(x,y);
+                if any(t<vec2<i32>(0)) || any(t>=tiles) {continue;}
+                for(var slot=0u;slot<FG_SLOTS;slot+=1u) {
+                    let p=fg_load(u32(t.y*tiles.x+t.x)*FG_SLOTS+slot,size);
+                    let w=fg_on_plane(p,s.world,s.normal)/f32(1+max(abs(x),abs(y)));
+                    if w>best {best=w;sh=p.sh;}
+                }
+            }
+        }
+        total=select(0.0,1.0,best>0.05);
+    }
+    if total<=1e-4 {
+        // No probe on this plane anywhere near: this pixel traces its own rays.
+        for(var v=0u;v<7u;v+=1u) {sh[v]=vec4<f32>(0.0);}
+        let r=fg_hash((id.y*size.x+id.x)^(primary_frame.sided.y*0x27d4eb2fu));
+        for(var k=0u;k<FG_PIXEL_RAYS;k+=1u) {
+            let d=fg_direction(s.normal,k,FG_PIXEL_RAYS,r);
+            let radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon,id);
+            gi_sh_basis(d);
+            for(var i=0u;i<9u;i+=1u) {
+                let a=i*3u;
+                sh[a/4u][a%4u]+=radiance.x*gi_y[i];
+                sh[(a+1u)/4u][(a+1u)%4u]+=radiance.y*gi_y[i];
+                sh[(a+2u)/4u][(a+2u)%4u]+=radiance.z*gi_y[i];
+            }
+        }
+        total=f32(FG_PIXEL_RAYS)/6.283185307179586;
     }
     let inv=1.0/total;
     for(var i=0u;i<9u;i+=1u) {

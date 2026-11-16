@@ -264,8 +264,8 @@ pub(super) struct Targets {
     region: [u32; 4],
     clear_keys: bool,
     /// The final gather (`program::final_gather`): its trace and resolve pipelines per
-    /// `Shading`, on the shading layout (hits sample materials). Its probes, one per FG_TILE
-    /// tile, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe).
+    /// `Shading`, on the shading layout (hits sample materials). Its probes, FG_SLOTS per
+    /// FG_TILE tile, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe).
     gather: [Option<[Owned<wgpu::ComputePipeline>; 2]>; 2],
     tiles: [u32; 2],
 }
@@ -273,6 +273,8 @@ pub(super) struct Targets {
 /// FG_TILE, FgProbe).
 const FG_TILE: u32 = 16;
 const FG_PROBE_BYTES: u64 = 144;
+/// Probes per tile (gi_receiver_pass.wgsl FG_SLOTS): a second where the tile holds a second plane.
+const FG_SLOTS: u64 = 2;
 /// The receiver kernel samples no material, so it is built on the shading layout with an empty
 /// group 2 when it validates there, and binds the empty group: every dispatch merges each
 /// resource of its bound groups into wgpu's usage tracking when the command buffer finishes, and
@@ -290,7 +292,7 @@ impl Renderer {
                 "GI prepared receiver",
                 u64::from(size.width) * u64::from(size.height) * BYTES
                     + if program::final_gather() {
-                        u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE)) * FG_PROBE_BYTES
+                        u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE)) * FG_SLOTS * FG_PROBE_BYTES
                     } else {
                         0
                     },
