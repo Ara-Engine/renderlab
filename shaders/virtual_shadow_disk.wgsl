@@ -781,20 +781,30 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     if !vd_px.valid || VD_SKIP==2u {return 256u;}
     vd_mask=vec2<u32>(0u);
     if !vd_px.thin && !vd_facing() {return 0u;}
+    let facing=vd_mask;
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {vd_map();}
     // 64 samples to the 0..256 count the shading programs read.
     let answer=4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
-    if VD_CERTAIN && vd_px.level!=VSM_NONE {vd_certainty(answer);}
+    if VD_CERTAIN && vd_px.level!=VSM_NONE {vd_certainty(facing);}
     return answer;
 }
 // Measurement (`RENDERLAB_VD=VD_CERTAIN=true`, with RENDERLAB_VD_EDGE_LOG): whether the map
-// could classify this pixel with certainty. vd_counts 0: receivers; 1: partial answers; 2:
-// fully lit or shadowed but not the same class with the receiver moved two texels of its level
-// along either axis; 3: certain (one class within that margin).
+// could classify this pixel with certainty, by its occluders alone (the samples under the
+// receiver's tangent plane are analytic: no ray needs them). Classes: 0 no occluder sample, 1
+// occluders and the plane cover the disk, 2 partial. vd_counts 0: receivers; 1: partial; 2: one
+// class here but not the same with the receiver moved two texels of its level along either axis;
+// 3: certain (one class within that margin).
 override VD_CERTAIN:bool=false;
-fn vd_certainty(answer:u32) {
+fn vd_class(facing:vec2<u32>)->u32 {
+    let occluders=vd_mask&~facing;
+    if all(occluders==vec2<u32>(0u)) {return 0u;}
+    if all(vd_mask==vec2<u32>(0xffffffffu)) {return 1u;}
+    return 2u;
+}
+fn vd_certainty(facing:vec2<u32>) {
     atomicAdd(&vd_counts[0],1u);
-    if answer!=0u && answer!=256u {atomicAdd(&vd_counts[1],1u);return;}
+    let class=vd_class(facing);
+    if class==2u {atomicAdd(&vd_counts[1],1u);return;}
     let p=vd_px.p;let point=vd_px.point;
     let m=2.0*vsm_texel(vd_px.level);
     var same=true;
@@ -806,9 +816,9 @@ fn vd_certainty(answer:u32) {
         vd_px.p=p+vec3<f32>(d,dz);vd_px.point=point+vec3<f32>(d,dz);
         vd_mask=vec2<u32>(0u);
         if !vd_px.thin {let _f=vd_facing();}
+        let moved=vd_mask;
         vd_map();
-        let a=4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
-        same=(a==0u)==(answer==0u) && (a==0u || a==256u);
+        same=vd_class(moved)==class;
     }
     vd_px.p=p;vd_px.point=point;
     atomicAdd(&vd_counts[select(2u,3u,same)],1u);
