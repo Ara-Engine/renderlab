@@ -803,6 +803,7 @@ fn vd_map() {
         if vsm_sparse() {vd_cache_pages(l,a,b);}
         ceiling=clamp(vd_mip_max(l,a,b)-p.z,0.0,ceiling);
     }
+    if VD_STOP==2u {return;}
     // The bias is the receiver's: a coarser level's texel centres lie on the source surface as
     // exactly as its own level's, and a bias growing with the level would free the occluders of
     // a grazing receiver's whole visible sliver of the disk.
@@ -850,6 +851,7 @@ fn vd_map() {
         }
         if vd_full() {return;}
     }
+    if VD_STOP==3u {return;}
     for(var k=0u;k<=last-vd_px.level;k+=1u) {
         let level=last-k;
         var lo=0.0;
@@ -901,6 +903,8 @@ fn vd_map() {
 // max-mip bands walked, 32 codes each; 6: reused answers drawn shadowed; 7: the reuse mode
 // (0: 0, 1: 128, 2: 256) on every pixel.
 override VD_DIAG:u32=0u;
+// Measurement: the walk stops after the edge test (1), the ceiling (2), the max-mip bands (3).
+override VD_STOP:u32=0u;
 var<private> vd_reads:u32;
 var<private> vd_mreads:u32;
 var<private> vd_lbands:u32;
@@ -942,6 +946,7 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {
         let margin=VD_BIAS*vsm_texel(vd_px.level);
         if VD_HARD_EDGES {vd_edge_test(margin);}
+        if VD_STOP==1u {return 256u;}
         vd_map();
         if vd_edge {
             atomicAdd(&vd_edge_count[0],1u);
