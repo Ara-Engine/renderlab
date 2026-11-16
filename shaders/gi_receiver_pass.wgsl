@@ -1,4 +1,5 @@
-// GI receiver output: 48 bytes/pixel, two f32 scales and 39 snorm8 coefficients.
+// GI receiver output: 48 bytes/pixel, two f32 scales and 39 snorm8 coefficients. A negative
+// sky scale: no value; a negative bounce scale: the sky slots are absolute (gi_rx_absolute).
 // Three vector words retain the original byte layout, with vector loads/stores.
 struct GiPrepared { r0:vec4<u32>, r1:vec4<u32>, r2:vec4<u32> };
 @group(0) @binding(68) var<storage,read_write> gi_prepared:array<GiPrepared>;
@@ -7,6 +8,8 @@ fn gi_pass_load(input:SurfaceInput,id:vec2<u32>,size:vec2<u32>) {
     let a=gi_prepared[at].r0;let b=gi_prepared[at].r1;let c=gi_prepared[at].r2;
     let scales=bitcast<vec2<f32>>(a.xy);
     gi_rx_valid=scales.x>=0.0;
+    gi_rx_absolute=scales.y<0.0;
+    let bounce_scale=max(scales.y,0.0);
     gi_rx_normal=unit_normal(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal));
     gi_rx_sky[0u]=vec3<f32>(unpack4x8snorm(a.z).x,unpack4x8snorm(a.z).y,unpack4x8snorm(a.z).z)*scales.x;
     gi_rx_sky[1u]=vec3<f32>(unpack4x8snorm(a.z).w,unpack4x8snorm(a.w).x,unpack4x8snorm(a.w).y)*scales.x;
@@ -17,10 +20,10 @@ fn gi_pass_load(input:SurfaceInput,id:vec2<u32>,size:vec2<u32>) {
     gi_rx_sky[6u]=vec3<f32>(unpack4x8snorm(b.z).z,unpack4x8snorm(b.z).w,unpack4x8snorm(b.w).x)*scales.x;
     gi_rx_sky[7u]=vec3<f32>(unpack4x8snorm(b.w).y,unpack4x8snorm(b.w).z,unpack4x8snorm(b.w).w)*scales.x;
     gi_rx_sky[8u]=vec3<f32>(unpack4x8snorm(c.x).x,unpack4x8snorm(c.x).y,unpack4x8snorm(c.x).z)*scales.x;
-    gi_rx_bounce[0u]=vec3<f32>(unpack4x8snorm(c.x).w,unpack4x8snorm(c.y).x,unpack4x8snorm(c.y).y)*scales.y;
-    gi_rx_bounce[1u]=vec3<f32>(unpack4x8snorm(c.y).z,unpack4x8snorm(c.y).w,unpack4x8snorm(c.z).x)*scales.y;
-    gi_rx_bounce[2u]=vec3<f32>(unpack4x8snorm(c.z).y,unpack4x8snorm(c.z).z,unpack4x8snorm(c.z).w)*scales.y;
-    gi_rx_bounce[3u]=vec3<f32>(unpack4x8snorm(c.w).x,unpack4x8snorm(c.w).y,unpack4x8snorm(c.w).z)*scales.y;
+    gi_rx_bounce[0u]=vec3<f32>(unpack4x8snorm(c.x).w,unpack4x8snorm(c.y).x,unpack4x8snorm(c.y).y)*bounce_scale;
+    gi_rx_bounce[1u]=vec3<f32>(unpack4x8snorm(c.y).z,unpack4x8snorm(c.y).w,unpack4x8snorm(c.z).x)*bounce_scale;
+    gi_rx_bounce[2u]=vec3<f32>(unpack4x8snorm(c.z).y,unpack4x8snorm(c.z).z,unpack4x8snorm(c.z).w)*bounce_scale;
+    gi_rx_bounce[3u]=vec3<f32>(unpack4x8snorm(c.w).x,unpack4x8snorm(c.w).y,unpack4x8snorm(c.w).z)*bounce_scale;
 }
 // ---- GI receiver compute entry ----
 // The prepared lookup (gi_rx_*) as pixel `at`'s 48-byte record.
@@ -50,7 +53,7 @@ fn gi_rx_store_at(at:u32) {
     let q7=pack4x8snorm(vec4<f32>(gi_rx_bounce[0u].y,gi_rx_bounce[0u].z,gi_rx_bounce[1u].x,gi_rx_bounce[1u].y)/vec4<f32>(bs,bs,bs,bs));
     let q8=pack4x8snorm(vec4<f32>(gi_rx_bounce[1u].z,gi_rx_bounce[2u].x,gi_rx_bounce[2u].y,gi_rx_bounce[2u].z)/vec4<f32>(bs,bs,bs,bs));
     let q9=pack4x8snorm(vec4<f32>(gi_rx_bounce[3u].x,gi_rx_bounce[3u].y,gi_rx_bounce[3u].z,0.0)/vec4<f32>(bs,bs,bs,bs));
-    gi_prepared[at].r0=vec4<u32>(bitcast<vec2<u32>>(vec2<f32>(select(-1.0,sky,gi_rx_valid),bounce)),q0,q1);
+    gi_prepared[at].r0=vec4<u32>(bitcast<vec2<u32>>(vec2<f32>(select(-1.0,sky,gi_rx_valid),select(bounce,-1.0,gi_rx_absolute))),q0,q1);
     gi_prepared[at].r1=vec4<u32>(q2,q3,q4,q5);
     gi_prepared[at].r2=vec4<u32>(q6,q7,q8,q9);
 }
@@ -81,8 +84,9 @@ fn gi_rx_store_at(at:u32) {
 // - fg_trace: screen probes, FG_SLOTS per FG_TILE x FG_TILE tile on the surfaces under covered
 //   pixels the frame picks (slot 1 on a second plane where the tile holds one), each trace
 //   FG_RAYS rays over their hemisphere (hardware rays or the software trace: the module's
-//   rl_cast) and shade each hit with the program (the cache read at the hit, so cells reach the
-//   screen only through a hemisphere integral) and its own direct light; misses see the sky.
+//   rl_cast). A hit whose ray cone covers its cache cell takes the cell's outgoing radiance;
+//   nearer hits shade with the program (the cache read at the hit) and their own direct light.
+//   Cells reach the screen only through a hemisphere integral; misses see the sky.
 // - fg_adapt: adaptive probes (as in Lumen's screen probe gather), one per FG_BLOCK block,
 //   placed only where a covered pixel of the block has no tile probe on its plane, so edges,
 //   thin parts and third planes get light of their own; blocks without such a pixel exit
@@ -92,12 +96,15 @@ fn gi_rx_store_at(at:u32) {
 //   on its plane within FG_SEARCH tiles, else the facing probe of its own tile or block.
 // Probes keep radiance as L2 SH, accumulated over frames while their new point stays on their
 // plane. The resolve writes the record shading reads (sky slots absolute: gi_api.wgsl
-// GI_SKY_ABSOLUTE).
+// gi_rx_absolute).
 const FG_TILE:u32=16u;
 const FG_SLOTS:u32=2u;
 const FG_BLOCK:u32=8u;
 const FG_RAYS:u32=16u;
 const FG_HISTORY:f32=16.0;
+// A probe ray's cone: its share of the hemisphere (2 pi / FG_RAYS sr) as an angle, so its
+// width at distance t is FG_CONE * t (the cache answers hits whose cone covers a cell).
+const FG_CONE:f32=0.6266570686577501;
 const FG_SEARCH:i32=2;
 // A probe's plane reaches this fraction of its footprint along its normal (the Gaussian width).
 const FG_PLANE:f32=0.5;
@@ -190,6 +197,11 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     let inverse=1.0/max(lighting.exposure,1e-30);
     let traced=rl_cast(origin,d,epsilon);
     if traced.record.x==0u {return rl_sky(d,1.0)*inverse;}
+    // A hit whose cone covers its cache cell reads the cell's outgoing radiance (emission and
+    // the cell's reflection of sky, bounce and the lights its visibility ray reached); contacts,
+    // movers and unsettled cells shade with the program and their own direct light.
+    let cached=rl_cache_lookup(traced.record,origin,d,traced.t,FG_CONE*traced.t);
+    if cached.w>0.0 {return rl_finite(cached.rgb);}
     let h=rl_hit_input(traced.record,origin,d,0.0,0.0,pixel);
     if !h.visible {return vec3<f32>(0.0);}
     rl_hit_lights_prepare(h.input.world);
@@ -390,6 +402,7 @@ var<workgroup> fg_pick:u32;
     }
     for(var i=0u;i<4u;i+=1u) {gi_rx_bounce[i]=vec3<f32>(0.0);}
     gi_rx_valid=true;
+    gi_rx_absolute=true;
     gi_rx_normal=s.shading;
     gi_rx_store_at(id.y*size.x+id.x);
 }

@@ -76,6 +76,9 @@ pub(crate) fn entry() -> wgpu::BindGroupLayoutEntry {
 /// `shade_source` appends) and the kernel half of gi_receiver_pass.wgsl.
 pub(crate) fn kernel_module(head: &str) -> program::Composed {
     let mut composed = program::compose(head, program::STANDARD_PROGRAM, Stage::Traced, false);
+    if program::final_gather() {
+        composed.source = program::with_cache_lookup(composed.source);
+    }
     let mut kernel = SOURCE.split_once(ENTRY_SEAM).unwrap().1.to_string();
     // Measurement only (`RENDERLAB_GI_RX_PROBE=nolookup`): no cache lookup, so the pass costs
     // its decode and the record's stores alone. Shading then sees no GI value. The pattern holds
@@ -612,6 +615,8 @@ mod tests {
                 shade_source_for(source, true, true, true)
             };
             source.push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
+            // The final gather's module carries the cache lookup on both paths.
+            let source = program::with_cache_lookup(source);
             let module = naga::front::wgsl::parse_str(&source)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
             let record = module
