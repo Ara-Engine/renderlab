@@ -1684,8 +1684,13 @@ fn gi_box_hit(o:vec3<f32>, d:vec3<f32>, lo:vec3<f32>, hi:vec3<f32>) -> bool {
     return far>=max(near,0.0);
 }
 // What moved casters reach in one cell: its cube (the canonical probe: the whole cell
-// is re-probed) or some of its fixed rays, followed without bound (only those
-// directions' slots are re-traced). Returns whether anything was reached.
+// is re-probed) or some of its fixed rays (only those directions' slots are re-traced), out to
+// GI_H_MOVER_REACH box diagonals from the box (0: without bound). Farther away a box covers
+// less than one direction's cone (64 directions: about 10 degrees across), so its rays would
+// flip at most a bit's worth of a cell's light, while every cell that sees a mover was
+// re-traced each frame it moved: Glint's spinning obstacles in play re-traced 425k cells a
+// frame. Returns whether anything was reached.
+const GI_H_MOVER_REACH:u32=61u;
 fn gi_reach(slot:u32, c:GiCell) -> bool {
     let cold=gi_cold(slot);
     let orphan=(gi_table[cold+GI_C_STATE]&GI_ORPHAN)!=0u;
@@ -1706,6 +1711,8 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
         }
         // An orphan has no rays; only a moved cube can give it a query point.
         if orphan { continue; }
+        let reach=gi_header_f32(GI_H_MOVER_REACH);
+        if reach>0.0 && length(max(max(lo-origin,origin-hi),vec3<f32>(0.0)))>reach*length(hi-lo) { continue; }
         for(var k=0u;k<GI_DIRECTIONS;k+=1u) {
             if gi_box_hit(origin,gi_direction(frame,c.key,k),lo,hi) {
                 reached[k/32u]|=1u<<(k%32u);
@@ -1720,7 +1727,10 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
     }
     return any_ray;
 }
+// The frame's moved-caster boxes, for the GI log (written by the scan).
+const GI_W_MOVED_BOXES:u32=252u;
 @compute @workgroup_size(64) fn gi_scan(@builtin(global_invocation_id) id:vec3<u32>) {
+    if id.x==0u { atomicStore(&gi_work[GI_W_MOVED_BOXES],gi_frame.counts.x); }
     // Environment-only frames (requests.w bit 31) visit only this frame's slot group.
     let group=gi_frame.requests.w;
     let period=group&0xffu;

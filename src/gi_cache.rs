@@ -101,6 +101,56 @@ fn light_reuse_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_LIGHT_REUSE").map_or(true, |v| v != "0"))
 }
+/// Box diagonals around a moved caster within which cells re-trace the directions that cross
+/// it (shaders/gi_cache.wgsl gi_reach); RENDERLAB_GI_MOVER_REACH=0 re-traces at any distance.
+fn mover_reach() -> f32 {
+    static REACH: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *REACH.get_or_init(|| {
+        std::env::var("RENDERLAB_GI_MOVER_REACH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(MOVER_REACH)
+    })
+}
+const MOVER_REACH: f32 = 4.0;
+/// More moved casters than the frame record holds: at most `max` unions of neighbours (the
+/// boxes split at the median of their centres along the wider axis, recursively). A single
+/// union of every box spanned a level whose movers are spread through it (Glint's obstacles),
+/// and re-traced most of the table each frame. RENDERLAB_GI_BOX_CLUSTERS=0 keeps the one union.
+fn cluster_boxes(mut boxes: Vec<[f32; 6]>, max: usize) -> Vec<[f32; 6]> {
+    fn union(set: &[[f32; 6]]) -> [f32; 6] {
+        set.iter().fold(set[0], |u, b| {
+            std::array::from_fn(|k| if k < 3 { u[k].min(b[k]) } else { u[k].max(b[k]) })
+        })
+    }
+    fn split(set: &mut [[f32; 6]], groups: usize, out: &mut Vec<[f32; 6]>) {
+        if groups <= 1 || set.len() <= 1 {
+            out.push(union(set));
+            return;
+        }
+        let centre = |b: &[f32; 6], k: usize| b[k] + b[k + 3];
+        let spread = |k: usize| {
+            let (lo, hi) = set.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), b| {
+                (lo.min(centre(b, k)), hi.max(centre(b, k)))
+            });
+            hi - lo
+        };
+        let axis = (0..3).max_by(|&a, &b| spread(a).total_cmp(&spread(b))).unwrap_or(0);
+        set.sort_by(|a, b| centre(a, axis).total_cmp(&centre(b, axis)));
+        let left = groups / 2;
+        let at = (set.len() * left / groups).clamp(1, set.len() - 1);
+        let (a, b) = set.split_at_mut(at);
+        split(a, left, out);
+        split(b, groups - left, out);
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("RENDERLAB_GI_BOX_CLUSTERS").map_or(true, |v| v != "0")) {
+        return vec![union(&boxes)];
+    }
+    let mut out = Vec::with_capacity(max);
+    split(&mut boxes, max, &mut out);
+    out
+}
 /// The default for `near_occluded_rays`.
 const NEAR_OCCLUDED_RAYS: u32 = 4;
 /// The still-view batch (Planner::finish): one cache frame in STILL_BATCH while a still view
@@ -725,6 +775,8 @@ pub struct IndirectCounters {
     pub created_secondary: u32,
     pub created_tertiary: u32,
     pub evicted_secondary: u32,
+    /// Moved-caster boxes the scan tested this frame (after clustering).
+    pub moved_boxes: u32,
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -1251,6 +1303,7 @@ impl Planner {
         header[15] = s.near_light_rays;
         header[55] = near_occluded_rays();
         header[56] = u32::from(light_reuse_on());
+        header[61] = mover_reach().to_bits();
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
@@ -1399,16 +1452,7 @@ impl Planner {
             self.bounds = bounds;
         }
         if boxes.len() > MAX_BOXES {
-            let all = boxes.iter().fold(boxes[0], |u, b| {
-                std::array::from_fn(|k| {
-                    if k < 3 {
-                        u[k].min(b[k])
-                    } else {
-                        u[k].max(b[k])
-                    }
-                })
-            });
-            boxes = vec![all];
+            boxes = cluster_boxes(boxes, MAX_BOXES);
         }
         // An environment change re-integrates every cell from its bits (no rays):
         // yaw rotates the sky, a new map replaces it. A map's intensity and the constant
@@ -2705,6 +2749,7 @@ impl Renderer {
             created_secondary: w[253],
             created_tertiary: w[254],
             evicted_secondary: w[255],
+            moved_boxes: w[252],
         }))
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires
@@ -4204,6 +4249,30 @@ mod tests {
                 planner.advance(&begun, false);
             }
         }
+    }
+
+    /// More moved boxes than the frame holds become at most that many unions, each box inside
+    /// one, and far-apart movers stay apart.
+    #[test]
+    fn moved_boxes_cluster_by_position() {
+        let boxes: Vec<[f32; 6]> = (0..100)
+            .map(|i| {
+                let x = (i % 10) as f32 * 50.0;
+                let z = (i / 10) as f32 * 50.0;
+                [x, 0.0, z, x + 1.0, 1.0, z + 1.0]
+            })
+            .collect();
+        let clusters = cluster_boxes(boxes.clone(), MAX_BOXES);
+        assert!(clusters.len() <= MAX_BOXES);
+        for b in &boxes {
+            assert!(clusters.iter().any(|c| (0..3).all(|k| c[k] <= b[k] && b[k + 3] <= c[k + 3])));
+        }
+        // No cluster spans the whole 450 m field (the single union did).
+        let largest = clusters
+            .iter()
+            .map(|c| (c[3] - c[0]).max(c[5] - c[2]))
+            .fold(0.0f32, f32::max);
+        assert!(largest < 200.0, "largest cluster {largest} m");
     }
 
     fn validate(label: &str, source: &str) {
