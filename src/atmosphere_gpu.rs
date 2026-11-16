@@ -67,11 +67,26 @@ fn with_fog_vote(kernels: String) -> String {
     let Some(start) = kernels.find(head) else {
         return kernels;
     };
-    let end = start + kernels[start..].find("
-}
-").map_or(kernels.len() - start, |e| e + 3);
+    let end = start + kernels[start..].find("\n}\n").map_or(kernels.len() - start, |e| e + 3);
     format!("{}{FOG_VOTE}{}", &kernels[..start], &kernels[end..])
 }
+
+/// sunrt-7: still fog. After `FOG_REUSE_AFTER` consecutive frames whose fog inputs are unchanged
+/// (`AtmosphereView::still`), a ray-traced fog volume keeps its accumulated scattering: the
+/// occlusion, injection and temporal passes do not run and the integration reads the last
+/// temporal output. The first changed frame resumes from that history.
+/// `RENDERLAB_FOG_STILL_REUSE=0` runs every pass every frame.
+fn fog_still_reuse() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_FOG_STILL_REUSE").map_or(true, |v| v != "0"))
+}
+/// Unchanged frames the temporal pass accumulates before the fog volume is kept: over three
+/// time constants of the default history weight 0.9 (about 10 frames).
+const FOG_REUSE_AFTER: u32 = 32;
+/// Leading uniform bytes that hold everything fog injection reads except the camera matrices,
+/// the reprojection source and the frame counter: medium, sun, illuminance, exposure, eye,
+/// height fog and volume settings (`atmosphere_uniform`'s first 48 floats).
+const STILL_UNIFORM_BYTES: usize = 48 * 4;
 
 fn kernel_source(hardware: bool) -> String {
     let kernels = fog_cull::atmosphere_source(KERNELS.to_owned(), hardware && fog_cull::enabled());
@@ -302,6 +317,10 @@ pub(super) struct AtmosphereView {
     frame: u32,
     /// `Renderer::scene_edits` when this view's fog history was last kept.
     scene_edits: u64,
+    /// sunrt-7: this frame's fog inputs (unjittered camera matrix, grid and the uniform's
+    /// `STILL_UNIFORM_BYTES`) and how many frames in a row they have been unchanged with a
+    /// continuing history.
+    still: Option<(Vec<u8>, u32)>,
     /// Bumped when the camera volume is replaced, so lighting rebinds it.
     pub generation: u64,
 }
@@ -314,6 +333,7 @@ impl AtmosphereView {
             history_key: None,
             frame: 0,
             scene_edits: 0,
+            still: None,
             generation: generations,
         }
     }
@@ -742,6 +762,21 @@ impl Renderer {
             self.view.atmosphere.history_key = Some(key);
         }
         let bytes = self.atmosphere_uniform(camera, size);
+        let av = &mut self.view.atmosphere;
+        let mut inputs: Vec<u8> = camera
+            .unjittered()
+            .matrix(size[0], size[1])
+            .to_cols_array()
+            .iter()
+            .chain(&[f32::from_bits(av.volume.grid[0]), f32::from_bits(av.volume.grid[1])])
+            .flat_map(|v| v.to_ne_bytes())
+            .collect();
+        inputs.extend_from_slice(&bytes[..STILL_UNIFORM_BYTES]);
+        let unchanged = match &av.still {
+            Some((previous, frames)) if av.previous.is_some() && *previous == inputs => frames + 1,
+            _ => 0,
+        };
+        av.still = Some((inputs, unchanged));
         if self.atmosphere.published.as_deref() != Some(&bytes[..]) {
             self.queue.write_buffer(&self.atmosphere.uniform, 0, &bytes);
             uploads.lighting += bytes.len() as u64;
@@ -1238,12 +1273,29 @@ impl Renderer {
                 .is_some_and(|t| t.fog_depth.is_some())
     }
 
+    /// sunrt-7: this frame keeps the ray-traced fog volume (`fog_still_reuse`).
+    fn fog_kept(&self) -> bool {
+        fog_still_reuse()
+            && self.hardware_shadows.is_some()
+            && self
+                .view
+                .atmosphere
+                .still
+                .as_ref()
+                .is_some_and(|(_, frames)| *frames >= FOG_REUSE_AFTER)
+    }
+
     pub(super) fn encode_fog_culled(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
         if !self.fog_cull_active() {
+            return;
+        }
+        if self.fog_kept() {
+            self.encode_fog_volume(encoder, mark);
+            mark(encoder, "after_fog");
             return;
         }
         let raw = &self
@@ -1291,10 +1343,27 @@ impl Renderer {
         encoder: &mut wgpu::CommandEncoder,
         mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
+        let kept = self.fog_kept();
         let k = self.atmosphere.kernels.as_ref().unwrap();
         let av = &mut self.view.atmosphere;
         let v = &av.volume;
         let plane = [v.grid[0].div_ceil(8), v.grid[1].div_ceil(8), 1];
+        if kept {
+            // The last temporal pass ran on the previous parity and its output is the history;
+            // the frame counter holds, so the next changed frame continues from it.
+            if let Some(integrate) = &v.integrate {
+                let i = (av.frame.wrapping_add(1) % 2) as usize;
+                mark(encoder, "fog_integrate");
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("fog_integrate"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&k.integrate);
+                pass.set_bind_group(0, &*integrate[i], &[]);
+                pass.dispatch_workgroups(plane[0], plane[1], plane[2]);
+            }
+            return;
+        }
         let cells = [
             v.grid[0].div_ceil(4),
             v.grid[1].div_ceil(4),
