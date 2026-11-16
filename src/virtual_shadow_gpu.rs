@@ -429,8 +429,6 @@ struct Pipelines {
     /// N-VSM1 (shaders/virtual_shadow_disk.wgsl): its page requests and its lookup.
     disk_mark: Owned<wgpu::ComputePipeline>,
     disk: Owned<wgpu::ComputePipeline>,
-    /// The Disk lookup's hard-edge rays (WGSL `vd_edges`).
-    disk_edges: Owned<wgpu::ComputePipeline>,
     /// The sparse pool's passes (vsm_release, vsm_allocate, vsm_clear_sparse, vsm_mip_sparse).
     release: Owned<wgpu::ComputePipeline>,
     allocate: Owned<wgpu::ComputePipeline>,
@@ -584,8 +582,6 @@ struct Groups {
     models: wgpu::Buffer,
     horizons: wgpu::Buffer,
     casters: u64,
-    geometry: wgpu::Buffer,
-    traced: wgpu::Buffer,
     mark: Owned<wgpu::BindGroup>,
     compact: Owned<wgpu::BindGroup>,
     cull: Owned<wgpu::BindGroup>,
@@ -643,11 +639,8 @@ pub(super) struct VirtualState {
     /// late (recorded while encoding, which borrows the renderer shared), tagged with the eye
     /// and the view epoch of their frame.
     reach: std::sync::Mutex<ReadbackRing<(glam::DVec3, u32)>>,
-    /// Exact hard edges: the edge counts' readback (`RENDERLAB_VD_EDGE_LOG`), the traced
-    /// placements' bits (WGSL `vd_traceable`) and a stand-in for absent trace geometry.
+    /// Exact hard edges: the edge counts' readback (`RENDERLAB_VD_EDGE_LOG`).
     edge_counts: std::sync::Mutex<ReadbackRing<()>>,
-    traceable: Option<(Owned<wgpu::Buffer>, Vec<u32>)>,
-    no_geometry: Owned<wgpu::Buffer>,
     /// The nearest receiver's distance in the current view epoch and the eye it was measured
     /// from (None after a cut until its own mark pass is read back).
     seen: Option<(f64, glam::DVec3)>,
@@ -927,42 +920,22 @@ pub(super) fn disk_source() -> String {
         let end = equals + source[equals..].find(';').unwrap();
         source.replace_range(equals..end, value);
     }
-    // Exact hard edges: the edge pixels' rays traverse the software trace geometry.
-    let rays = "override VD_RAYS:u32=1u;";
-    assert_eq!(source.matches(rays).count(), 1, "virtual_shadow_disk.wgsl: VD_RAYS moved");
-    source = source.replacen(rays, &format!("override VD_RAYS:u32={}u;", edge_rays()), 1);
-    source.push_str(SOFTWARE_GEOMETRY);
-    source.push_str(&crate::instance_bvh::shader_text(include_str!(
-        "../shaders/reflections_software_bvh4.wgsl"
-    )));
-    source
-}
-/// The Disk lookup's edge pixel list capacity (WGSL `vd_edge_capacity`): a sixteenth of the
-/// image; past it pixels keep the map.
-fn edge_capacity(size: [u32; 2]) -> u64 {
-    (u64::from(size[0]) * u64::from(size[1]) / 16).max(4096)
+    // Exact hard edges (`RENDERLAB_VD_HARD_EDGES=0` keeps the map's texels there).
+    let edges = "override VD_HARD_EDGES:bool=true;";
+    assert_eq!(source.matches(edges).count(), 1, "virtual_shadow_disk.wgsl: VD_HARD_EDGES moved");
+    source.replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
 }
 /// `RENDERLAB_VD_EDGE_LOG`: the file the Disk lookup's edge pixel counts go to.
 fn edge_log() -> Option<&'static std::path::Path> {
     static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     PATH.get_or_init(|| std::env::var_os("RENDERLAB_VD_EDGE_LOG").map(Into::into)).as_deref()
 }
-/// The Disk lookup's software trace geometry (src/reflection_software.rs packs it).
-const SOFTWARE_GEOMETRY: &str =
-    "@group(0) @binding(60) var<storage,read> rl_geometry:array<vec4<u32>>;
-";
-/// Rays per hard-edge pixel of the Disk lookup (WGSL `VD_RAYS`): the stairs of a hard contact
-/// shadow's texels traced exactly, as with ray hardware. `RENDERLAB_VD_EDGE_RAYS=0` keeps the
-/// map's texels there.
-fn edge_rays() -> u32 {
-    static RAYS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *RAYS.get_or_init(|| {
-        std::env::var("RENDERLAB_VD_EDGE_RAYS")
-            .ok()
-            .and_then(|v| v.trim().parse().ok())
-            .filter(|&n: &u32| n == 0 || 64 % n == 0)
-            .unwrap_or(1)
-    })
+/// The Disk lookup's exact hard contact edges (WGSL `VD_HARD_EDGES`): at a hard contact shadow's
+/// outline the map's square texels are replaced by the triangles they hold, exactly, as with ray
+/// hardware. `RENDERLAB_VD_HARD_EDGES=0` keeps the texels' stairs.
+fn hard_edges_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VD_HARD_EDGES").map_or(true, |v| v.trim() != "0"))
 }
 
 fn corners(b: &crate::shadow_plan::Bounds) -> impl Iterator<Item = glam::DVec3> + '_ {
@@ -1371,9 +1344,7 @@ impl VirtualState {
                     ),
                     storage(55, true, S::COMPUTE),
                     storage(56, true, S::COMPUTE),
-                    // Exact hard edges: trace geometry, traced placements, edge counts.
-                    storage(60, true, S::COMPUTE),
-                    storage(61, true, S::COMPUTE),
+                    // Exact hard edges: the edge pixel count.
                     storage(62, false, S::COMPUTE),
                 ],
             ),
@@ -1497,7 +1468,6 @@ impl VirtualState {
         };
         let disk_mark = disk_compute("vd_mark", &mark_layout);
         let disk = disk_compute("vd_lookup", &disk_layout);
-        let disk_edges = disk_compute("vd_edges", &disk_layout);
         let record_module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8g walk records"),
@@ -1605,7 +1575,6 @@ impl VirtualState {
             queued: None,
             disk_mark,
             disk,
-            disk_edges,
             release: compute("vsm_release", &compact_layout, &[]),
             allocate: compute("vsm_allocate", &allocate_layout, &[]),
             clear_sparse: compute("vsm_clear_sparse", &clear_layout, &[]),
@@ -1639,16 +1608,6 @@ impl VirtualState {
                 16,
                 3,
             )),
-            traceable: None,
-            no_geometry: ledger.own(
-                device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("Disk lookup absent trace geometry"),
-                    size: 64,
-                    usage: wgpu::BufferUsages::STORAGE,
-                    mapped_at_creation: false,
-                }),
-                ResourceKind::Buffer,
-            ),
             seen: None,
             eye: glam::DVec3::ZERO,
             epoch: 0,
@@ -1961,7 +1920,7 @@ impl VirtualState {
                 REACH_BYTES,
                 B::STORAGE | B::COPY_SRC,
             ),
-            edges: buffer("Disk lookup edge pixels", 16 + edge_capacity(size) * 16, B::STORAGE | B::COPY_SRC),
+            edges: buffer("Disk lookup edge pixels", 16, B::STORAGE | B::COPY_SRC),
             _area: area,
             area: area_view,
             _level: level,
@@ -2211,19 +2170,20 @@ impl Renderer {
             .map_or(0.0, |frame| (frame % 4096 + 1) as f32);
         let state = self.view.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
-        // The newest mark-pass counters mapped since the last frame (the ladder's finest level
-        // follows the nearest receiver when the nearest caster cannot place it).
+        // Measurement: the Disk lookup's edge pixels, a line a frame.
         if let Some(path) = edge_log() {
             for ((), words) in state.edge_counts.get_mut().unwrap().collect() {
-                let word = |i: usize| u32::from_ne_bytes(words[i * 4..i * 4 + 4].try_into().unwrap());
+                let count = u32::from_ne_bytes(words[..4].try_into().unwrap());
                 use std::io::Write;
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(path)
-                    .and_then(|mut f| writeln!(f, "{} {}", word(0), word(1)));
+                    .and_then(|mut f| writeln!(f, "{count}"));
             }
         }
+        // The newest mark-pass counters mapped since the last frame (the ladder's finest level
+        // follows the nearest receiver when the nearest caster cannot place it).
         if let Some(((at, epoch), words)) = state.reach.get_mut().unwrap().collect().pop() {
             let word = |i: usize| u32::from_ne_bytes(words[i * 4..i * 4 + 4].try_into().unwrap());
             state.stats.nearest_receiver = (word(0) != 0).then(|| f32::from_bits(!word(0)));
@@ -2905,7 +2865,6 @@ impl Renderer {
                 )
             };
             state.pipelines.disk = disk_entry("vd_lookup");
-            state.pipelines.disk_edges = disk_entry("vd_edges");
             let map = |entry, layout: &wgpu::PipelineLayout| {
                 self.ledger.own(
                     self.device
@@ -3179,43 +3138,10 @@ impl Renderer {
         self.queue.write_buffer(&r.pass, 0, &pass);
         self.uploads.shadows += (FRAME_BYTES + pass.len()) as u64;
 
-        // Exact hard edges: per placement, whether its mesh is in the software trace geometry as
-        // drawn (meshes over its triangle cap are not; a skinned mesh's is its bind pose, never
-        // refit): the others keep the map's answer.
-        let mut bits = vec![0u32; draws.iter().map(|d| d.instances.len()).sum::<usize>().div_ceil(32).max(1)];
-        let mut placement = 0;
-        for d in draws {
-            for _ in 0..d.instances.len() {
-                if d.mesh.reflection.is_some() && d.mesh.skin.is_none() {
-                    bits[placement / 32] |= 1 << (placement % 32);
-                }
-                placement += 1;
-            }
-        }
-        if state.traceable.as_ref().is_none_or(|(_, old)| *old != bits) {
-            let bytes = (bits.len() * 4) as u64;
-            let buffer = match state.traceable.take().filter(|(b, _)| b.size() >= bytes) {
-                Some((b, _)) => b,
-                None => self.ledger.own(
-                    self.device.create_buffer(&wgpu::BufferDescriptor {
-                        label: Some("Disk lookup traced placements"),
-                        size: bytes.next_power_of_two(),
-                        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-                        mapped_at_creation: false,
-                    }),
-                    ResourceKind::Buffer,
-                ),
-            };
-            let words: Vec<u8> = bits.iter().flat_map(|w| w.to_ne_bytes()).collect();
-            self.queue.write_buffer(&buffer, 0, &words);
-            state.traceable = Some((buffer, bits));
-        }
         let primary = self.view.primary.as_ref().unwrap();
         let targets = primary.targets.as_ref().unwrap();
         let fresh = self.view.fresh.as_ref().unwrap().targets.as_ref().unwrap();
         let (arrays_models, _) = primary.virtual_geometry().unwrap();
-        let geometry = primary.software_geometry().unwrap_or(&state.no_geometry).clone();
-        let traced = (*state.traceable.as_ref().unwrap().0).clone();
         let key = [
             (*targets.hit.texture).clone(),
             (*targets.tiles.texture).clone(),
@@ -3228,8 +3154,6 @@ impl Renderer {
                 || &g.models != arrays_models
                 || g.horizons != horizons
                 || g.casters != casters.generation
-                || g.geometry != geometry
-                || g.traced != traced
         }) {
             let view = |t: &wgpu::Texture| t.create_view(&Default::default());
             let hit = view(&targets.hit.texture);
@@ -3252,8 +3176,6 @@ impl Renderer {
                 models: arrays_models.clone(),
                 horizons: horizons.clone(),
                 casters: casters.generation,
-                geometry: geometry.clone(),
-                traced: traced.clone(),
                 mark: group(
                     "N8 page requests",
                     &l.mark,
@@ -3402,8 +3324,6 @@ impl Renderer {
                         buffer(50, &r.disk_frame),
                         buffer(55, &r.state),
                         buffer(56, &r.outline),
-                        buffer(60, &geometry),
-                        buffer(61, &traced),
                         buffer(62, &r.edges),
                     ],
                 ),
@@ -3644,20 +3564,6 @@ impl Renderer {
             }
         }
         drop(pass);
-        if disk && edge_rays() > 0 {
-            // The edge pixels' rays: a thread per list entry (empty ones return at once).
-            mark(encoder, "sun_shadow.edges");
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("Disk lookup hard edges"),
-                timestamp_writes: None,
-            });
-            let groups = edge_capacity(r.size).div_ceil(64) as u32;
-            pass.set_pipeline(&p.disk_edges);
-            pass.set_bind_group(0, &*g.disk, &[]);
-            pass.set_bind_group(1, arrays, &[]);
-            pass.set_bind_group(3, self.lighting.bind(), &[]);
-            pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
-        }
         // Measurement (`RENDERLAB_VD_EDGE_LOG=<file>`): the edge pixels, a line a frame.
         if disk && edge_log().is_some() {
             state.edge_counts.lock().unwrap().record(encoder, &r.edges, 0, ());
