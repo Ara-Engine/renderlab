@@ -110,6 +110,14 @@ const STILL_BATCH: u32 = 4;
 const STILL_BATCH_PENDING: u32 = 512;
 /// Play loop (sunrt, 2026-11-16): a re-skinned mesh's software geometry is patched in place
 /// (`patch_skinned_blas`); `RENDERLAB_GI_SKIN_PATCH=0` repacks every mesh, as before.
+/// Play loop (sunrt, 2026-11-16): a re-skinned mesh refits its software tree to each pose
+/// (`near_field::refit_bvh`), so the tree keeps its sizes and patches in place; a rebuild cost
+/// 6.4 ms per Showcase character per pose and changed the sizes, forcing full repacks.
+/// `RENDERLAB_GI_SKIN_REFIT=0` rebuilds it each pose, as before.
+fn skin_refit() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_SKIN_REFIT").map_or(true, |v| v != "0"))
+}
 fn skin_patch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_SKIN_PATCH").map_or(true, |v| v != "0"))
@@ -2201,7 +2209,21 @@ impl Renderer {
             return Ok(false);
         }
         let built = std::time::Instant::now();
-        let bvh = gi_bvh::build(positions, indices)?;
+        // A re-skinned mesh keeps its tree and refits it to the pose (`skin_refit`).
+        let key: &wgpu::Buffer = &mesh.vertex;
+        let refit = skin_refit()
+            .then(|| self.gi.meshes.iter().find(|(k, _)| k == key))
+            .flatten()
+            .map(|(_, b)| b)
+            .filter(|b| b.exact && b.bvh.positions.len() == positions.len() && b.bvh.indices.len() == indices.len())
+            .map(|b| {
+                let mut bvh = b.bvh.clone();
+                crate::asset::near_field::refit_bvh(&mut bvh, positions).map(|()| bvh)
+            });
+        let bvh = match refit {
+            Some(Ok(bvh)) => bvh,
+            _ => gi_bvh::build(positions, indices)?,
+        };
         let mut blas = Blas::new(bvh, 0)?;
         blas.exact = true;
         let build_ms = built.elapsed().as_secs_f64() * 1000.;

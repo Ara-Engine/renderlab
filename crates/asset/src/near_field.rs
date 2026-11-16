@@ -430,6 +430,56 @@ impl Builder<'_> {
     }
     fn node(&mut self, children: &[u32]) -> u32 {
         let boxes: Vec<_> = children.iter().map(|&c| self.child_bounds(c)).collect();
+        let node = quantized_node(children, &boxes);
+        let id = self.bvh.nodes.len() as u32;
+        self.bvh.nodes.push(node);
+        id
+    }
+}
+
+/// Refits a `build`/`build_bvh_sah` tree to new positions of the same vertices: the topology,
+/// leaves and indices stay, every node's child boxes are recomputed (nodes are in postorder,
+/// children first) and quantized as the build quantizes them. The same triangles, so the same
+/// hits; only the boxes, and so the traversal cost, follow the new positions (a deforming mesh,
+/// such as a skinned character, refits each pose in place of a rebuild).
+pub fn refit_bvh(bvh: &mut Bvh, positions: &[[f32; 3]]) -> Result<()> {
+    if positions.len() != bvh.positions.len() || positions.iter().flatten().any(|v| !v.is_finite()) {
+        return Err(Error("BVH refit needs finite positions of the same vertices"));
+    }
+    bvh.positions = positions.iter().map(|p| [p[0], p[1], p[2], 0.0]).collect();
+    for n in 0..bvh.nodes.len() {
+        let children: Vec<u32> = bvh.nodes[n].children.iter().copied().filter(|&c| c != EMPTY).collect();
+        let boxes: Vec<_> = children.iter().map(|&c| refit_child_bounds(bvh, positions, c)).collect();
+        bvh.nodes[n] = quantized_node(&children, &boxes);
+    }
+    Ok(())
+}
+fn refit_child_bounds(bvh: &Bvh, positions: &[[f32; 3]], child: u32) -> ([f32; 3], [f32; 3]) {
+    if child & LEAF_BIT != 0 {
+        let leaf = &bvh.leaves[(child & !LEAF_BIT) as usize];
+        let span = leaf.indices.offset as usize..(leaf.indices.offset + leaf.indices.count) as usize;
+        return bounds(bvh.indices[span].iter().map(|&i| positions[i as usize]));
+    }
+    let n = &bvh.nodes[child as usize];
+    let mut lo = [f32::INFINITY; 3];
+    let mut hi = [f32::NEG_INFINITY; 3];
+    for slot in 0..4 {
+        if n.children[slot] == EMPTY {
+            continue;
+        }
+        for (a, b) in [n.child_bounds(slot), n.child_bounds_fused(slot)] {
+            for axis in 0..3 {
+                lo[axis] = lo[axis].min(a[axis] as f32);
+                hi[axis] = hi[axis].max(b[axis] as f32);
+            }
+        }
+    }
+    (lo, hi)
+}
+/// A node over `children` with `boxes`, its child bounds quantized outward so both the fused and
+/// the unfused f32 decode enclose them.
+fn quantized_node(children: &[u32], boxes: &[([f32; 3], [f32; 3])]) -> Node {
+    {
         let (lo, hi) = boxes.iter().fold(
             ([f32::INFINITY; 3], [f32::NEG_INFINITY; 3]),
             |(lo, hi), (a, b)| {
@@ -454,7 +504,7 @@ impl Builder<'_> {
             }
             node.step[axis] = step;
         }
-        for (slot, (&child, (a, b))) in children.iter().zip(&boxes).enumerate() {
+        for (slot, (&child, (a, b))) in children.iter().zip(boxes).enumerate() {
             node.children[slot] = child;
             for axis in 0..3 {
                 let (o, s) = (node.origin[axis], node.step[axis]);
@@ -471,9 +521,7 @@ impl Builder<'_> {
                 node.upper[axis][slot] = high;
             }
         }
-        let id = self.bvh.nodes.len() as u32;
-        self.bvh.nodes.push(node);
-        id
+        node
     }
 }
 fn bounds(points: impl Iterator<Item = [f32; 3]>) -> ([f32; 3], [f32; 3]) {
@@ -631,6 +679,46 @@ impl<'a> Reader<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Refitting to the built positions gives the built tree; refitting to moved positions keeps
+    /// its topology, leaves and indices, and every leaf's vertices stay inside the box its parent
+    /// stores for it, under both decodes.
+    #[test]
+    fn refit_keeps_the_tree_and_encloses_moved_triangles() {
+        let (positions, indices) = grid(24);
+        let built = build_bvh_sah(&positions, &indices).unwrap();
+        let mut same = built.clone();
+        refit_bvh(&mut same, &positions).unwrap();
+        assert_eq!(same, built);
+        let moved: Vec<[f32; 3]> = positions
+            .iter()
+            .enumerate()
+            .map(|(i, p)| [p[0] * 1.7 + (i as f32 * 0.37).sin() * 0.2, (i as f32 * 0.11).cos(), p[2] - 3.0])
+            .collect();
+        let mut refit = built.clone();
+        refit_bvh(&mut refit, &moved).unwrap();
+        assert_eq!((refit.nodes.len(), &refit.leaves, &refit.indices), (built.nodes.len(), &built.leaves, &built.indices));
+        let mut leaves = 0;
+        for node in &refit.nodes {
+            for slot in 0..4 {
+                let child = node.children[slot];
+                if child == EMPTY || child & LEAF_BIT == 0 {
+                    continue;
+                }
+                let leaf = &refit.leaves[(child & !LEAF_BIT) as usize];
+                let span = leaf.indices.offset as usize..(leaf.indices.offset + leaf.indices.count) as usize;
+                for (lo, hi) in [node.child_bounds(slot), node.child_bounds_fused(slot)] {
+                    for &i in &refit.indices[span.clone()] {
+                        let v = moved[i as usize];
+                        assert!((0..3).all(|a| lo[a] <= f64::from(v[a]) && f64::from(v[a]) <= hi[a]));
+                    }
+                }
+                leaves += 1;
+            }
+        }
+        assert_eq!(leaves, refit.leaves.len());
+        assert!(refit_bvh(&mut refit, &moved[1..]).is_err());
+    }
 
     fn grid(n: usize) -> (Vec<[f32; 3]>, Vec<u32>) {
         let mut p = vec![];
