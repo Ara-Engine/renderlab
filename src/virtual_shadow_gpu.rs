@@ -82,6 +82,11 @@ fn sparse_switch() -> bool {
 /// the page pass that stores each outline texel's edge line runs, its buffer (2 bytes a texel)
 /// exists and the lookup clips by it. `RENDERLAB_VD=VD_EDGES=true|false` overrides the default.
 const EDGES_DEFAULT: bool = false;
+/// Measurement: `RENDERLAB_VSM_SW_EXTENT=<texels>` moves the software/hardware raster split (WGSL
+/// `VSM_SW_EXTENT`, default 32): clusters wider than it take the hardware raster.
+fn sw_extent() -> f64 {
+    std::env::var("RENDERLAB_VSM_SW_EXTENT").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(32.0)
+}
 fn edges_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
@@ -1582,7 +1587,7 @@ impl VirtualState {
             mark: compute("vsm_mark", &mark_layout, &[]),
             compact: compute("vsm_compact", &compact_layout, &[]),
             clear: compute("vsm_clear", &clear_layout, &[]),
-            cull: compute("vsm_cull", &cull_layout, &[]),
+            cull: compute("vsm_cull", &cull_layout, &[("VSM_SW_EXTENT", sw_extent())]),
             finish: compute("vsm_finish", &cull_layout, &[]),
             mip: compute("vsm_mip", &mip_layout, &[]),
             software: [0.0, 1.0]
