@@ -846,12 +846,124 @@ fn vd_map() {
     }
 }
 
+// ---- PCSS on the clipmap (`RENDERLAB_VD_LOOKUP=pcss`, virtual_shadow_gpu.rs `pcss_on`) ----
+// The industry lookup, as HDRP ships it, on our map: each level is a plain depth map of its top
+// layer (no peel layer, no columns: anything nearer the sun along its direction shadows). A
+// blocker search over a disk of taps around the receiver gives the average blocker distance; the
+// sun's angular radius turns it into a penumbra; a disk of bilinear percentage-closer taps over
+// max(penumbra radius, VD_PCSS_MIN texels) at the level whose texel is about half that radius
+// filters it, so the answer is a continuous function of the receiver's position. Each texel is
+// compared against the receiver's tangent plane plus VD_BIAS texels of the level read
+// (receiver-plane depth bias), so a wide kernel neither self-shadows nor floats at a contact.
+// Taps are a Vogel disk rotated per pixel and TR1 frame; reconstruction averages them.
+override VD_PCSS:bool=false;
+override VD_PCSS_SEARCH:u32=16u;
+override VD_PCSS_TAPS:u32=32u;
+override VD_PCSS_MIN:f32=1.5;
+// Point tap at level `level`: whether the texel under light-space point q occludes the
+// receiver (above its tangent plane by `margin`), and its height above the receiver.
+fn vd_tap(level:u32,q:vec2<f32>,margin:f32)->vec2<f32> {
+    let texel=vsm_texel(level);
+    let origin=vsm.levels[level].origin.xy;
+    let side=i32(vsm.counts.y*VSM_PAGE);
+    let cell=vec2<i32>(floor((q-origin)/texel));
+    if any(cell<vec2<i32>(0)) || any(cell>=vec2<i32>(side)) {return vec2<f32>(0.0);}
+    let i=vsm_index(cell,level);
+    if i==VSM_NONE {return vec2<f32>(0.0);}
+    let word=vsm_top_words[i];
+    if word.x==0u {return vec2<f32>(0.0);}
+    let height=vsm_height(word);
+    let c=origin+(vec2<f32>(cell)+vec2<f32>(0.5))*texel;
+    if !vd_above(vec3<f32>(c,height),margin) {return vec2<f32>(0.0);}
+    return vec2<f32>(1.0,height-vd_px.p.z);
+}
+// Bilinear percentage-closer tap: the four texels around q, each compared at its own centre.
+fn vd_pcf(level:u32,q:vec2<f32>,margin:f32)->f32 {
+    let texel=vsm_texel(level);
+    let origin=vsm.levels[level].origin.xy;
+    let x=(q-origin)/texel-vec2<f32>(0.5);
+    let f=x-floor(x);
+    let b=origin+(floor(x)+vec2<f32>(0.5))*texel;
+    let o00=vd_tap(level,b,margin).x;
+    let o10=vd_tap(level,b+vec2<f32>(texel,0.0),margin).x;
+    let o01=vd_tap(level,b+vec2<f32>(0.0,texel),margin).x;
+    let o11=vd_tap(level,b+vec2<f32>(texel),margin).x;
+    return mix(mix(o00,o10,f.x),mix(o01,o11,f.x),f.y);
+}
+// The finest level from `from` up whose texel is at least `texel` and whose window holds q.
+fn vd_level_for(start:u32,texel:f32,q:vec2<f32>,r:f32)->u32 {
+    var l=start;
+    while l+1u<vsm.counts.x && vsm_texel(l)<texel {l+=1u;}
+    loop {
+        let lo=vsm.levels[l].origin.xy;let hi=lo+vec2<f32>(vsm_extent(l));
+        if all(q-vec2<f32>(r)>=lo) && all(q+vec2<f32>(r)<hi) {return l;}
+        if l+1u>=vsm.counts.x {return l;}
+        l+=1u;
+    }
+    return l;
+}
+fn vd_pcss(id:vec2<u32>)->f32 {
+    let p=vd_px.p;
+    let slope=vd_px.slope;
+    let last=vsm.counts.x-1u;
+    // The highest caster the sun's cone can meet (vd_map's ceiling).
+    var ceiling=max(vsm.depth.w-p.z,0.0);
+    let side=i32(vsm.counts.y*VSM_PAGE);
+    for(var i=0u;i<2u;i+=1u) {
+        var l=vd_px.level;
+        while l<last && vd_band(l)<ceiling {l+=1u;}
+        let texel=vsm_texel(l);
+        let x=(p.xy-vsm.levels[l].origin.xy)/texel;
+        let r=min(slope*ceiling/texel,f32(VD_R<<VD_MIPS))+1.0;
+        let a=vec2<i32>(floor(x-vec2<f32>(r)));let b=vec2<i32>(floor(x+vec2<f32>(r)));
+        if any(a<vec2<i32>(0)) || any(b>=vec2<i32>(side)) {break;}
+        if vsm_sparse() {vd_cache_pages(l,a,b);}
+        ceiling=clamp(vd_mip_max(l,a,b)-p.z,0.0,ceiling);
+    }
+    let texel0=vsm_texel(vd_px.level);
+    if ceiling<=0.0 {return 1.0;}
+    // Per pixel and frame rotation of the tap disks.
+    let seed=vd_hash(id.x+id.y*u32(vd.size.x));
+    let turn=fract(f32(seed>>8u)*(1.0/16777216.0)+0.61803398875*vd.size.z)*6.28318531;
+    // Blocker search: radius the sun's reach at the ceiling, at a level a quarter of it.
+    let search=max(vd_px.radius*ceiling,VD_PCSS_MIN*texel0);
+    let centre_search=p.xy+vd_px.centre*0.5*ceiling;
+    let ls=vd_level_for(vd_px.level,0.25*search,centre_search,search);
+    let ms=VD_BIAS*vsm_texel(ls);
+    var found=0.0;var depth=0.0;
+    for(var k=0u;k<VD_PCSS_SEARCH;k+=1u) {
+        let r=sqrt((f32(k)+0.5)/f32(VD_PCSS_SEARCH));
+        let a=f32(k)*2.39996323+turn;
+        let t=vd_tap(ls,centre_search+search*r*vec2<f32>(cos(a),sin(a)),ms);
+        found+=t.x;depth+=t.x*t.y;
+    }
+    if found==0.0 {return 1.0;}
+    let blocker=depth/found;
+    // The penumbra's radius from the average blocker distance; at least VD_PCSS_MIN texels.
+    let radius=max(vd_px.radius*blocker,VD_PCSS_MIN*texel0);
+    let centre=p.xy+vd_px.centre*blocker;
+    let lf=vd_level_for(vd_px.level,0.5*radius,centre,radius);
+    let mf=VD_BIAS*vsm_texel(lf);
+    var occluded=0.0;
+    for(var k=0u;k<VD_PCSS_TAPS;k+=1u) {
+        let r=sqrt((f32(k)+0.5)/f32(VD_PCSS_TAPS));
+        let a=f32(k)*2.39996323+turn;
+        occluded+=vd_pcf(lf,centre+radius*r*vec2<f32>(cos(a),sin(a)),mf);
+    }
+    return 1.0-occluded/f32(VD_PCSS_TAPS);
+}
 fn vd_pixel(id:vec2<u32>)->u32 {
     if VD_SKIP==1u {return 256u;}
     vd_prepare(id);
     if !vd_px.valid || VD_SKIP==2u {return 256u;}
     vd_mask=vec2<u32>(0u);
     if !vd_px.thin && !vd_facing() {return 0u;}
+    if VD_PCSS {
+        // The samples under the receiver's tangent plane stay analytic (vd_facing).
+        let plane=1.0-f32(countOneBits(vd_mask.x)+countOneBits(vd_mask.y))/64.0;
+        if vd_px.level==VSM_NONE {return u32(round(256.0*plane));}
+        return u32(round(256.0*plane*vd_pcss(id)));
+    }
     let facing=vd_mask;
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {vd_map();}
     // 64 samples to the 0..256 count the shading programs read.

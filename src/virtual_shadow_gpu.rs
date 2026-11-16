@@ -942,7 +942,16 @@ pub(super) fn disk_source() -> String {
         let end = equals + source[equals..].find(';').unwrap();
         source.replace_range(equals..end, value);
     }
-    source
+    // The lookup (`RENDERLAB_VD_LOOKUP=pcss`: PCSS on the clipmap, WGSL `vd_pcss`).
+    let pcss = "override VD_PCSS:bool=false;";
+    assert_eq!(source.matches(pcss).count(), 1, "virtual_shadow_disk.wgsl: VD_PCSS moved");
+    source.replacen(pcss, &format!("override VD_PCSS:bool={};", pcss_on()), 1)
+}
+/// The Disk lookup's per-pixel answer: `RENDERLAB_VD_LOOKUP=pcss` takes PCSS on the clipmap
+/// (WGSL `vd_pcss`) instead of the disk walk.
+fn pcss_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VD_LOOKUP").is_ok_and(|v| v.trim() == "pcss"))
 }
 /// `RENDERLAB_VD_EDGE_LOG`: the file the Disk lookup's edge pixel counts go to.
 fn edge_log() -> Option<&'static std::path::Path> {
