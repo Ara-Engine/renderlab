@@ -783,9 +783,11 @@ fn vd_map() {
         let b=min(vec2<i32>(floor(x+vec2<f32>(r))),vec2<i32>(s-1));
         let base=vsm_mip_base(last,mip);
         let step=i32(1u<<mip);
+        vd_mbands+=1u;
         for(var y=a.y;y<=b.y;y+=1) {
             for(var cx=a.x;cx<=b.x;cx+=1) {
                 var stored=0.0;
+                vd_mreads+=1u;
                 if vsm_sparse() {stored=vsm_mip_at(last,mip,vec2<u32>(vec2<i32>(cx,y)<<vec2<u32>(mip)));}
                 else {stored=vsm_mips[base+u32(y*s+cx)];}
                 let height=fma(stored,vsm.depth.z,vsm.depth.x);
@@ -824,6 +826,7 @@ fn vd_map() {
         if !skip && vsm_sparse() {vd_cache_pages(level,a,b);}
         if !skip && (b.x-a.x)*(b.y-a.y)>=4 {skip=vd_mip_max(level,a,b)-p.z<=lo;}
         if !skip {
+            vd_lbands+=1u;
             for(var y=a.y;y<=b.y;y+=1) {
                 for(var cx=a.x;cx<=b.x;cx+=1) {
                     vd_texel(vec2<i32>(cx,y),level,1,origin+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*texel,texel,lo,hi,margin);
@@ -837,9 +840,14 @@ fn vd_map() {
 // Measurement (`RENDERLAB_VD=VD_DIAG=1`): the receiver level's texel under the cone point. 0: a
 // near occluder (peel layer, another placement, under the hard cut) under a high top; 64: a high
 // top whose peel is its own underside; 128: a near top; 256 otherwise.
-// 2: the texels the walk read, 2 codes each (0: none, 256: 128 or more).
+// 2: the texels the walk read (vd_texel), 2 codes each (256: 128 or more); 3: the max-mip
+// band cells read, 4 codes each; 4: the level bands walked (not skipped), 32 codes each; 5: the
+// max-mip bands walked, 32 codes each.
 override VD_DIAG:u32=0u;
 var<private> vd_reads:u32;
+var<private> vd_mreads:u32;
+var<private> vd_lbands:u32;
+var<private> vd_mbands:u32;
 fn vd_diag()->u32 {
     let level=vd_px.level;
     let texel=vsm_texel(level);
@@ -873,7 +881,7 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     // The samples under the receiver's tangent plane (vd_facing): an edge pixel keeps them.
     let facing=vd_mask;
     if VD_DIAG==1u && vd_px.level!=VSM_NONE {return vd_diag();}
-    vd_reads=0u;
+    vd_reads=0u;vd_mreads=0u;vd_lbands=0u;vd_mbands=0u;
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {
         let margin=VD_BIAS*vsm_texel(vd_px.level);
         if VD_HARD_EDGES {vd_edge_test(margin);}
@@ -885,6 +893,9 @@ fn vd_pixel(id:vec2<u32>)->u32 {
         }
     }
     if VD_DIAG==2u {return 256u-min(2u*vd_reads,256u);}
+    if VD_DIAG==3u {return 256u-min(4u*vd_mreads,256u);}
+    if VD_DIAG==4u {return 256u-min(32u*vd_lbands,256u);}
+    if VD_DIAG==5u {return 256u-min(32u*vd_mbands,256u);}
     // 64 samples to the 0..256 count the shading programs read.
     return 4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
 }
