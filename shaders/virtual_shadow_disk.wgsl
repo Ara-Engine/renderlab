@@ -407,7 +407,12 @@ var<private> vd_px:VdPixel;
 // The blocked directions so far.
 var<private> vd_mask:vec2<u32>;
 // An edge pixel walks every column: the triangles replace some of those that filled it.
-fn vd_full()->bool {return all(vd_mask==vec2<u32>(0xffffffffu)) && !vd_edge;}
+// A soft edge's listed squares may fill the disk where their triangles would not: only the
+// other columns decide.
+fn vd_full()->bool {
+    let full=vec2<u32>(0xffffffffu);
+    return all(vd_mask==full) && !vd_edge && (!VD_SOFT_EDGES || vd_soft_n==0u || all(vd_soft_rest==full));
+}
 
 fn vd_prepare(id:vec2<u32>) {
     vd_px.valid=false;
@@ -677,6 +682,46 @@ fn vd_replaced(cell:vec2<i32>,level:u32,stride:i32,top:f32)->bool {
     let d=cell-vd_edge_cell;
     return stride==1 && level==vd_px.level && all(d>=vec2<i32>(0)) && all(d<=vec2<i32>(1)) && top<=vd_ray_reach;
 }
+// ---- Soft edges (`RENDERLAB_VD=VD_SOFT_EDGES=false` off) ----
+// A soft shadow's edge shows its band's square texels as stairs a third to a sixth of the
+// penumbra wide (Glint's rails, the pole). A column that covers part of the disk and lies on
+// its caster's outline (a 4-neighbour empty, of another placement or not above the receiver)
+// is listed instead of OR-ed into vd_soft_rest; when the pixel ends in a penumbra, the listed
+// columns are replaced by their triangles' exact cones (vd_word_mask, with edge neighbours) and
+// every other column keeps its square: inner squares abut, so no gap opens. Only penumbra pixels
+// on an outline pay; past VD_SOFT_MAX listed triangles the squares stay.
+override VD_SOFT_EDGES:bool=true;
+const VD_SOFT_MAX:u32=8u;
+var<private> vd_soft_rest:vec2<u32>;
+var<private> vd_soft_ids:array<u32,VD_SOFT_MAX>;
+var<private> vd_soft_n:u32;
+fn vd_soft_column(m:vec2<u32>,id:u32,cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,margin:f32) {
+    if all(m==vec2<u32>(0u)) {return;}
+    if stride!=1 || all(m==vec2<u32>(0xffffffffu)) || vd_soft_n>VD_SOFT_MAX {vd_soft_rest|=m;return;}
+    let side=i32(vsm.counts.y*VSM_PAGE);
+    let bits=vsm.misc.x;
+    var outline=false;
+    for(var k=0u;k<4u && !outline;k+=1u) {
+        let d=vec2<i32>(select(select(0,1,k==1u),-1,k==0u),select(select(0,1,k==3u),-1,k==2u));
+        let n=cell+d;
+        if any(n<vec2<i32>(0)) || any(n>=vec2<i32>(side)) {continue;}
+        let j=vsm_index(n,level);
+        if j==VSM_NONE {continue;}
+        let w=vsm_top_words[j];
+        outline=w.x==0u || w.x>>bits!=id>>bits || !vd_above(vec3<f32>(c+vec2<f32>(d)*size,vsm_height(w)),margin);
+    }
+    if !outline {vd_soft_rest|=m;return;}
+    for(var k=0u;k<min(vd_soft_n,VD_SOFT_MAX);k+=1u) {if vd_soft_ids[k]==id {return;}}
+    if vd_soft_n<VD_SOFT_MAX {vd_soft_ids[vd_soft_n]=id;}
+    vd_soft_n+=1u;
+    // Past the list the squares stay: this column's bits must not be lost.
+    if vd_soft_n>VD_SOFT_MAX {vd_soft_rest|=m;}
+}
+fn vd_soft_triangles()->vec2<u32> {
+    var m=vec2<u32>(0u);
+    for(var k=0u;k<vd_soft_n;k+=1u) {m|=vd_word_mask(vd_soft_ids[k]);}
+    return m;
+}
 // 16 bits a texel, two a word (word = the top word's index / 2): see vsm_outline_line.
 @group(0) @binding(56) var<storage,read> vsm_outline:array<u32>;
 // The samples whose direction (d, 1) lies on the side `s` of the plane through the receiver's
@@ -767,6 +812,7 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     vd_mask|=m;
     // On an edge pixel the columns the triangles do not replace keep their bits.
     if vd_edge && !vd_replaced(cell,level,stride,chi) {vd_far|=m;}
+    if VD_SOFT_EDGES {vd_soft_column(m,top.x,cell,level,stride,c,size,margin);}
     // Another placement's surface under the top one: a second sheet, or the solid a sheet lies
     // over. Its own underside is unknown: the least thickness.
     if VD_PEEL2 && peel.x!=0u && !own {
@@ -776,10 +822,13 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
             let m2=vd_column_mask(c-p.xy,0.5*size,max(max(t2-VD_THICK*size,lo),1e-6*size),min(t2,hi));
             vd_mask|=m2;
             if vd_edge && !vd_replaced(cell,level,stride,min(t2,hi)) {vd_far|=m2;}
+            vd_soft_rest|=m2;
         }
     }
 }
 
+// The ceiling's refinement passes (vd_map); main had 2 (`RENDERLAB_VD=VD_CEILING=2`).
+override VD_CEILING:u32=6u;
 // Off (`RENDERLAB_VD=VD_RING=false`): every band whose max-mip clears its floor reads its whole
 // window (the same answers, more reads).
 override VD_RING:bool=true;
@@ -791,9 +840,12 @@ fn vd_map() {
     let side=i32(vsm.counts.y*VSM_PAGE);
     let last=vsm.counts.x-1u;
     // The highest caster the cone can meet: the max-mip over its footprint at the level whose
-    // band holds the height, refined once from the scene's highest caster.
+    // band holds the height, refined from the scene's highest caster while it still drops by a
+    // tenth (VD_CEILING passes at most): a lit pixel far from tall casters ends near its own
+    // ground, and every band above that is skipped and the receiver's own window shrinks.
     var ceiling=max(vsm.depth.w-p.z,0.0);
-    for(var i=0u;i<2u;i+=1u) {
+    for(var i=0u;i<VD_CEILING;i+=1u) {
+        let before=ceiling;
         var l=vd_px.level;
         while l<last && vd_band(l)<ceiling {l+=1u;}
         let texel=vsm_texel(l);
@@ -803,6 +855,7 @@ fn vd_map() {
         if any(a<vec2<i32>(0)) || any(b>=vec2<i32>(side)) {break;}
         if vsm_sparse() {vd_cache_pages(l,a,b);}
         ceiling=clamp(vd_mip_max(l,a,b)-p.z,0.0,ceiling);
+        if ceiling>0.9*before {break;}
     }
     if VD_STOP==2u {return;}
     // The bias is the receiver's: a coarser level's texel centres lie on the source surface as
@@ -848,6 +901,7 @@ fn vd_map() {
                 let m=vd_column_mask(c-p.xy,0.5*cell,max(max(lo,t-VD_THICK*cell),1e-6*texel_last),min(t,hi));
                 vd_mask|=m;
                 if vd_edge {vd_far|=m;}
+                vd_soft_rest|=m;
             }
         }
         if vd_full() {return;}
@@ -944,15 +998,20 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     let facing=vd_mask;
     if VD_DIAG==1u && vd_px.level!=VSM_NONE {return vd_diag();}
     vd_reads=0u;vd_mreads=0u;vd_lbands=0u;vd_mbands=0u;
+    vd_soft_n=0u;
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {
         let margin=VD_BIAS*vsm_texel(vd_px.level);
         if VD_HARD_EDGES {vd_edge_test(margin);}
+        vd_soft_rest=facing;
         if VD_STOP==1u {return 256u;}
         vd_map();
         if vd_edge {
             atomicAdd(&vd_edge_count[0],1u);
             if VD_EDGE_SHOW {return 0u;}
             vd_mask=facing|vd_far|vd_edge_triangles(margin);
+        } else if VD_SOFT_EDGES && vd_soft_n!=0u && vd_soft_n<=VD_SOFT_MAX {
+            // An outline in the disk: the listed columns' triangles replace their squares.
+            vd_mask=vd_soft_rest|vd_soft_triangles();
         }
     }
     if VD_DIAG==2u {return 256u-min(2u*vd_reads,256u);}
