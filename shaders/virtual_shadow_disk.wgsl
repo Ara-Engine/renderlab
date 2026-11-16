@@ -45,13 +45,22 @@ struct VsmFrame {
     levels:array<VsmLevel,VSM_MAX_LEVELS>,
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
-// clip: this frame's world-to-clip matrix (the receivers' own, jitter included); not read since
-// the visible-surface samples went, kept so the uniform's layout stands.
+// clip, previous: this and the previous frame's world-to-clip matrices (the receivers' own,
+// jitter included).
+// reuse (virtual_shadow_gpu.rs `reuse_on`): x 2 when nothing that sets an answer changed since
+// the last frame, 1 when only the camera and the moving casters did, 0 no reuse; z the history
+// half this frame writes.
+// zone_lo, zone_hi, zone_light: the moving casters' swept shadow (temporal_zones.wgsl
+// tr1_caster_shadow's Tr1Zones rows).
 // size: the image size in pixels (xy); z: TR1's frame number plus one on reconstructed frames
-// (the receiver jitter's sequence index), 0 otherwise.
+// (the receiver jitter's sequence index), 0 otherwise; w: TR1's frames of history.
 // above: per k in 0..=64 (two a vec4), the mask of the samples whose y rank is at least k.
 // samples: the 64 sample positions in the unit disk (two a vec4), bit s first.
-struct VdFrame {clip:mat4x4<f32>,size:vec4<f32>,above:array<vec4<u32>,33>,samples:array<vec4<f32>,32>};
+struct VdFrame {
+    clip:mat4x4<f32>,previous:mat4x4<f32>,reuse:vec4<u32>,
+    zone_lo:vec4<f32>,zone_hi:vec4<f32>,zone_light:vec4<f32>,
+    size:vec4<f32>,above:array<vec4<u32>,33>,samples:array<vec4<f32>,32>,
+};
 @group(0) @binding(50) var<uniform> vd:VdFrame;
 
 fn vsm_light(world:vec3<f32>)->vec3<f32> {
@@ -271,7 +280,8 @@ struct ShadowView {world_to_clip:mat4x4<f32>,coverage_bias:vec4<f32>,camera_dept
 override VD_BIAS:f32=1.0;
 // The peel layer bounds a column from below where it is the top's own placement.
 override VD_PEEL:bool=true;
-// The least thickness of a column, in texels of its level (see vd_map).
+// The least thickness of a column, in texels of its level (see vd_map). The peel layer skips the
+// surfaces this close under the top (virtual_shadow.wgsl VSM_PEEL_GAP, kept equal).
 override VD_THICK:f32=4.0;
 // On reconstructed frames each receiver reads the map from a point of its tangent plane up to
 // this many texels of its level away (per axis, a new point every frame), so TR1 integrates a
@@ -381,6 +391,8 @@ fn vd_hash(input:u32)->u32 {
 // Per-pixel state, set once by vd_prepare.
 struct VdPixel {
     valid:bool,thin:bool,level:u32,
+    // A coarser level stands in while the receiver's page arrives (vd_prepare).
+    stand_in:bool,
     // The receiver's world point and its ray origin.
     world:vec3<f32>,origin:vec3<f32>,
     // Light space: the origin, the receiver's point, and the unit normal of the viewed side.
@@ -390,6 +402,8 @@ struct VdPixel {
     centre:vec2<f32>,radius:f32,slope:f32,
     // Each band's top as a fraction of its plain top (VD_HBAND's dither; 1: plain).
     band:f32,
+    // The receiver jitter's offset this frame in [-1, 1) per axis (0 without it).
+    jitter:vec2<f32>,
 };
 var<private> vd_px:VdPixel;
 // The blocked directions so far.
@@ -399,6 +413,7 @@ fn vd_full()->bool {return all(vd_mask==vec2<u32>(0xffffffffu)) && !vd_edge;}
 
 fn vd_prepare(id:vec2<u32>) {
     vd_px.valid=false;
+    vd_px.stand_in=false;
     let p=vec2<i32>(id);
     let record=textureLoad(vsm_hit,p,0);
     let normal=textureLoad(vsm_normal,p,0);
@@ -422,6 +437,7 @@ fn vd_prepare(id:vec2<u32>) {
         vd_px.band=1.0-VD_HBAND*fract(ign+0.61803398875*vd.size.z);
     }
     vd_px.thin=normal.w<0.0;
+    vd_px.jitter=vec2<f32>(0.0);
     vd_px.level=textureLoad(vsm_level_in,p,0).x;
     vd_px.world=world.xyz;
     // shadow_origin (scene.wgsl): opaque receivers stay on the viewed side; thin ones move
@@ -442,6 +458,7 @@ fn vd_prepare(id:vec2<u32>) {
             if all(x>=vec2<f32>(0.0)) && all(x<vec2<f32>(side)) && vsm_resident(l,vec2<u32>(x)/VSM_PAGE)!=VSM_NONE {break;}
             l+=1u;
         }
+        vd_px.stand_in=l!=vd_px.level;
         vd_px.level=l;
     }
     vd_px.normal=vec3<f32>(dot(n,vsm.u.xyz),dot(n,vsm.v.xyz),dot(n,vsm.l.xyz));
@@ -457,7 +474,8 @@ fn vd_prepare(id:vec2<u32>) {
         let seed=vd_hash(id.x+id.y*u32(vd.size.x));
         let shift=vec2<f32>(f32(seed>>8u),f32(vd_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);
         let r=fract(vec2<f32>(vd.size.z)*vec2<f32>(0.7548776662466927,0.5698402909980532)+shift);
-        let j=(r-vec2<f32>(0.5))*2.0*VD_JITTER*vsm_texel(vd_px.level);
+        vd_px.jitter=(r-vec2<f32>(0.5))*2.0;
+        let j=vd_px.jitter*VD_JITTER*vsm_texel(vd_px.level);
         let slide=vec3<f32>(j,-dot(nl.xy,j)/nl.z);
         vd_px.p+=slide;
         vd_px.point+=slide;
@@ -560,6 +578,28 @@ fn vd_triangle_mask(placement:u32,batch:u32,primitive:u32)->vec2<u32> {
     let side=sign(volume);
     return vd_plane(cross(a,b),side)&vd_plane(cross(b,c),side)&vd_plane(cross(c,a),side);
 }
+// What a texel holds near the receiver: 0 open (no surface above the receiver's tangent plane
+// under `cut`), 1 an occluder with a narrow cone (word `id` at height `t` above the receiver), 2
+// unknown (only a high closed mesh, whose underside hides what lies below it). Under a high top
+// of another surface (a pole over a tarp) the peel layer tells: the tarp's outline under the
+// pole's shadow is an edge like any other.
+struct VdNear {state:u32,id:u32,t:f32};
+fn vd_near(i:u32,c:vec2<f32>,margin:f32,cut:f32)->VdNear {
+    let top=vsm_top_words[i];
+    if top.x==0u {return VdNear(0u,0u,0.0);}
+    let height=vsm_height(top);
+    let t=height-vd_px.p.z;
+    // The walk's own rule (vd_texel): above the receiver's tangent plane and its bias.
+    if t<=0.0 || !vd_above(vec3<f32>(c,height),margin) {return VdNear(0u,0u,0.0);}
+    if t<cut {return VdNear(1u,top.x,t);}
+    let peel=vsm_peel_words[i];
+    if !VD_PEEL2 || peel.x==0u || peel.x>>vsm.misc.x==top.x>>vsm.misc.x {return VdNear(2u,0u,0.0);}
+    let under=vsm_height(peel);
+    let t2=under-vd_px.p.z;
+    if t2<=0.0 || !vd_above(vec3<f32>(c,under),margin) {return VdNear(0u,0u,0.0);}
+    if t2<cut {return VdNear(1u,peel.x,t2);}
+    return VdNear(2u,0u,0.0);
+}
 // Whether the 2x2 texels of the receiver's level around its cone's point mix occluders with a
 // narrow cone and open texels; sets vd_edge, vd_edge_cell (the 2x2's first) and vd_ray_reach.
 fn vd_edge_test(margin:f32) {
@@ -577,16 +617,9 @@ fn vd_edge_test(margin:f32) {
         if any(cell<vec2<i32>(0)) || any(cell>=vec2<i32>(side)) {return;}
         let i=vsm_index(cell,level);
         if i==VSM_NONE {return;}
-        let word=vsm_top_words[i];
-        var t=-1.0;
-        if word.x!=0u {
-            let height=vsm_height(word);
-            let c=origin+(vec2<f32>(cell)+vec2<f32>(0.5))*texel;
-            if vd_above(vec3<f32>(c,height),margin) {t=height-vd_px.p.z;}
-        }
-        // The walk's own rule (vd_texel): above the receiver's tangent plane and its bias.
-        if t>0.0 && t<cut {occluding+=1u;top=max(top,t);}
-        else if t<=0.0 {open+=1u;}
+        let near=vd_near(i,origin+(vec2<f32>(cell)+vec2<f32>(0.5))*texel,margin,cut);
+        if near.state==1u {occluding+=1u;top=max(top,near.t);}
+        else if near.state==0u {open+=1u;}
     }
     if occluding==0u || open==0u {return;}
     vd_edge=true;
@@ -614,20 +647,30 @@ fn vd_word_mask(id:u32)->vec2<u32> {
     }
     return m;
 }
-// The edge pixel's 2x2 occluders: their triangles' exact masks (a run of one triangle once).
+// The edge pixel's 2x2 occluders: their triangles' exact masks (a run of one triangle once),
+// for exactly the columns vd_replaced takes from the walk: a top under the reach, and another
+// placement's peel surface under it.
 fn vd_edge_triangles(margin:f32)->vec2<u32> {
     let level=vd_px.level;
     let texel=vsm_texel(level);
     let origin=vsm.levels[level].origin.xy;
+    let bits=vsm.misc.x;
     var m=vec2<u32>(0u);
     var last=0u;var before=0u;
-    for(var k=0u;k<4u;k+=1u) {
-        let cell=vd_edge_cell+vec2<i32>(i32(k&1u),i32(k>>1u));
-        let word=vsm_top_words[vsm_index(cell,level)];
-        if word.x==0u || word.x==last || word.x==before {continue;}
+    for(var k=0u;k<8u;k+=1u) {
+        let cell=vd_edge_cell+vec2<i32>(i32(k&1u),i32((k>>1u)&1u));
+        let i=vsm_index(cell,level);
+        let top=vsm_top_words[i];
+        if top.x==0u {continue;}
+        var word=top;
+        if k>=4u {
+            word=vsm_peel_words[i];
+            if !VD_PEEL2 || word.x==0u || word.x>>bits==top.x>>bits {continue;}
+        }
+        if word.x==last || word.x==before {continue;}
         let height=vsm_height(word);
         let c=origin+(vec2<f32>(cell)+vec2<f32>(0.5))*texel;
-        if !vd_above(vec3<f32>(c,height),margin) || height-vd_px.p.z>=vd_ray_reach {continue;}
+        if height-vd_px.p.z>=vd_ray_reach || !vd_above(vec3<f32>(c,height),margin) {continue;}
         m|=vd_word_mask(word.x);
         before=last;last=word.x;
     }
@@ -665,12 +708,23 @@ fn vd_above(q:vec3<f32>,margin:f32)->bool {
 // The columns of one map texel, `cell` of `level`, standing for a square of side `size` centred
 // `c` (light xy): a level's own texel, or the one texel read for a max-mip cell `stride` texels
 // wide. `lo`..`hi` is the band of heights being served, `margin` the near-field bias.
+// Band jitter (`RENDERLAB_VD=VD_BAND_JITTER=0` off): the receiver jitter spans a texel of the
+// receiver's level, far less than a high caster's band texel, so TR1 never averaged those
+// columns' stairs (Glint's rails, the pole). A band above the receiver's level reads its columns
+// from the receiver moved by the same unit offset times VD_BAND_JITTER of its own texel (light
+// xy; the tangent-plane tests keep the receiver's point): TR1 averages each stair into a ramp
+// one band texel wide.
+override VD_BAND_JITTER:f32=0.5;
+var<private> vd_shift:vec2<f32>;
+fn vd_band_shift(texel:f32)->vec2<f32> {
+    return vd_px.jitter*VD_BAND_JITTER*max(texel-vsm_texel(vd_px.level),0.0);
+}
 fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,hi:f32,margin:f32) {
     let i=vsm_index(cell,level);
     if i==VSM_NONE {return;}
     let top=vsm_top_words[i];
     if top.x==0u {return;}
-    let p=vd_px.p;
+    let p=vd_px.p+vec3<f32>(vd_shift,0.0);
     let height=vsm_height(top);
     let t=height-p.z;
     let lo=lo_in;
@@ -740,9 +794,13 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     }
 }
 
+// Off (`RENDERLAB_VD=VD_RING=false`): every band whose max-mip clears its floor reads its whole
+// window (the same answers, more reads).
+override VD_RING:bool=true;
 // The map's columns: each level's band of heights, the highest band first (vd_map).
 fn vd_map() {
     vd_pl=VSM_NONE;
+    vd_shift=vec2<f32>(0.0);
     let p=vd_px.p;
     let slope=vd_px.slope;
     let side=i32(vsm.counts.y*VSM_PAGE);
@@ -776,7 +834,9 @@ fn vd_map() {
         if lo>=ceiling {continue;}
         let hi=select(f32(VD_R)*cell/slope*vd_px.band,3.4e38,mip==VD_MIPS);
         let s=side>>mip;
-        let x=(p.xy-origin_last)/cell;
+        vd_shift=vd_band_shift(cell);
+        let ps=p.xy+vd_shift;
+        let x=(ps-origin_last)/cell;
         let r=min(slope*min(ceiling,hi)/cell,f32(VD_R));
         let a=max(vec2<i32>(floor(x-vec2<f32>(r))),vec2<i32>(0));
         let b=min(vec2<i32>(floor(x+vec2<f32>(r))),vec2<i32>(s-1));
@@ -793,13 +853,13 @@ fn vd_map() {
                 if VD_MIP_POINT {
                     let at=vec2<i32>(cx,y)*step+vec2<i32>(step/2);
                     let c=origin_last+(vec2<f32>(at)+vec2<f32>(0.5))*texel_last;
-                    if t*slope<=length(max(abs(c-p.xy)-vec2<f32>(0.5*cell),vec2<f32>(0.0))) {continue;}
+                    if t*slope<=length(max(abs(c-ps)-vec2<f32>(0.5*cell),vec2<f32>(0.0))) {continue;}
                     vd_texel(at,last,step,c,cell,lo,hi,margin);
                     continue;
                 }
                 let c=origin_last+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*cell;
                 if !vd_above(vec3<f32>(c,height),margin) {continue;}
-                let m=vd_column_mask(c-p.xy,0.5*cell,max(max(lo,t-VD_THICK*cell),1e-6*texel_last),min(t,hi));
+                let m=vd_column_mask(c-ps,0.5*cell,max(max(lo,t-VD_THICK*cell),1e-6*texel_last),min(t,hi));
                 vd_mask|=m;
                 if vd_edge {vd_far|=m;}
             }
@@ -814,17 +874,33 @@ fn vd_map() {
         let texel=vsm_texel(level);
         let hi=vd_band(level)*vd_px.band;
         let origin=vsm.levels[level].origin.xy;
-        let x=(p.xy-origin)/texel;
+        vd_shift=vd_band_shift(texel);
+        let x=(p.xy+vd_shift-origin)/texel;
         let r=min(slope*min(ceiling,hi)/texel,f32(VD_R));
         let a=max(vec2<i32>(floor(x-vec2<f32>(r))),vec2<i32>(0));
         let b=min(vec2<i32>(floor(x+vec2<f32>(r))),vec2<i32>(side-1));
         var skip=any(b<a);
         // The window's pages first: the mip test and the texels read them from the cache.
         if !skip && vsm_sparse() {vd_cache_pages(level,a,b);}
-        if !skip && (b.x-a.x)*(b.y-a.y)>=4 {skip=vd_mip_max(level,a,b)-p.z<=lo;}
+        // Every texel but the 2x2 whose centres surround the cone's point is half a texel or
+        // more from it, so it reaches the cone only above half a texel / slope (vd_texel's cone
+        // test): where the window's max-mip stays under that, only the 2x2 are read. That is the
+        // receiver's own band (lo 0) on almost every pixel: its ground, tilted in light space,
+        // keeps the plain mip test from ever skipping it.
+        var ring=true;
+        if !skip && (b.x-a.x)*(b.y-a.y)>=4 {
+            let top=vd_mip_max(level,a,b)-p.z;
+            skip=top<=lo;
+            ring=!VD_RING || top>max(lo,select(0.5,0.0,VD_EDGES)*texel/slope);
+        }
         if !skip {
-            for(var y=a.y;y<=b.y;y+=1) {
-                for(var cx=a.x;cx<=b.x;cx+=1) {
+            var c0=a;var c1=b;
+            if !ring {
+                let at=vec2<i32>(floor(x-vec2<f32>(0.5)));
+                c0=max(at,a);c1=min(at+vec2<i32>(1),b);
+            }
+            for(var y=c0.y;y<=c1.y;y+=1) {
+                for(var cx=c0.x;cx<=c1.x;cx+=1) {
                     vd_texel(vec2<i32>(cx,y),level,1,origin+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*texel,texel,lo,hi,margin);
                 }
                 if vd_full() {return;}
@@ -856,9 +932,95 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     // 64 samples to the 0..256 count the shading programs read.
     return 4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
 }
+// ---- Answer reuse (virtual_shadow_gpu.rs `reuse_on`) ----
+// The sun's answer at a world point does not depend on the camera. Per pixel and frame the
+// history holds the answer (bits 0..8), how many walks in a row gave that same fully lit or
+// fully shadowed answer (bits 9..15; 0 for a partial one or a coarser level's stand-in while a
+// page arrives) and the point's clip w (bits 16..31, f16), in two halves ping-ponged by frame.
+// A pixel whose point was on screen last frame at the same depth, out of the moving casters'
+// swept shadow, whose own and 3x3 neighbours' answers there are one class settled over
+// VD_REUSE_WALKS walks, keeps it without a walk: only penumbrae, edges, disocclusions, the
+// moving casters' shadows and classes the receiver jitter still moves walk. While the camera
+// moves every trace tile still walks one frame in VD_REUSE_REFRESH, so an answer that should change
+// is found within that many frames; on frames where nothing changed none need to.
+override VD_REUSE_WALKS:u32=4u;
+override VD_REUSE_REFRESH:u32=16u;
+@group(0) @binding(63) var<storage,read_write> vd_history:array<u32>;
+// The moving casters' swept shadow (temporal_zones.wgsl tr1_caster_shadow, the same test).
+fn vd_moving_shadow(x:vec3<f32>)->bool {
+    if vd.zone_lo.w==0.0 {return false;}
+    let lo=vd.zone_lo.xyz;let hi=vd.zone_hi.xyz;
+    if vd.zone_hi.w==0.0 {return all(x>=lo) && all(x<=hi);}
+    let reach=length(max(abs(x-lo),abs(x-hi)));
+    let grow=vec3<f32>(reach*vd.zone_light.w);
+    let rcp=vec3<f32>(1.0)/vd.zone_light.xyz;
+    let a=(lo-grow-x)*rcp;let b=(hi+grow-x)*rcp;
+    let t0=min(a,b);let t1=max(a,b);
+    return min(min(t1.x,t1.y),t1.z)>=max(max(max(t0.x,t0.y),t0.z),0.0);
+}
+fn vd_walks(h:u32)->u32 {return (h>>9u)&127u;}
+fn vd_depth(h:u32)->f32 {return unpack2x16float(h>>16u).x;}
+// The settled class of the 3x3 around `at` in the previous half, or VSM_NONE.
+fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
+    let answer=vd_history[base+at.y*size.x+at.x]&0x1ffu;
+    let lo=vec2<u32>(max(vec2<i32>(at)-vec2<i32>(1),vec2<i32>(0)));
+    let hi=min(at+vec2<u32>(1u),size-vec2<u32>(1u));
+    for(var y=lo.y;y<=hi.y;y+=1u) {
+        for(var x=lo.x;x<=hi.x;x+=1u) {
+            let h=vd_history[base+y*size.x+x];
+            if (h&0x1ffu)!=answer || vd_walks(h)<VD_REUSE_WALKS {return VSM_NONE;}
+        }
+    }
+    return answer;
+}
 @compute @workgroup_size(8,4) fn vd_lookup(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>) {
     let size=textureDimensions(vsm_world);
     let id=group.xy*VSM_TRACE_TILE+local.xy;
     if any(id>=size) || textureLoad(vsm_tiles,group.xy,0).x==0u {return;}
-    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(vd_pixel(id)));
+    let pixels=size.x*size.y;
+    let write=vd.reuse.z*pixels+id.y*size.x+id.x;
+    let read=(1u-vd.reuse.z)*pixels;
+    let hit=textureLoad(vsm_hit,vec2<i32>(id),0).x!=0u;
+    let world=textureLoad(vsm_world,vec2<i32>(id),0).xyz;
+    let depth=(vd.clip*vec4<f32>(world,1.0)).w;
+    let depth_bits=pack2x16float(vec2<f32>(select(0.0,depth,hit),0.0))<<16u;
+    // The point's history last frame: its pixel then, when on screen at the same depth.
+    var before=0u;
+    var at=vec2<u32>(VSM_NONE);
+    if vd.reuse.x!=0u && hit {
+        if vd.reuse.x==2u {at=id;}
+        else {
+            let c=vd.previous*vec4<f32>(world,1.0);
+            if c.w>0.0 {
+                let f=(c.xy/c.w*vec2<f32>(0.5,-0.5)+vec2<f32>(0.5))*vec2<f32>(size);
+                if all(f>=vec2<f32>(0.0)) && all(f<vec2<f32>(size)) {
+                    let q=vec2<u32>(f);
+                    let h=vd_history[read+q.y*size.x+q.x];
+                    if abs(vd_depth(h)-c.w)<=0.02*c.w {at=q;}
+                }
+            }
+            if at.x!=VSM_NONE && vd_moving_shadow(world) {at=vec2<u32>(VSM_NONE);}
+        }
+        if at.x!=VSM_NONE {
+            before=vd_history[read+at.y*size.x+at.x];
+            // Per trace tile (one wave): a wave runs as long as its slowest pixel, so a refresh
+            // spread over the pixels of every tile would keep every wave walking.
+            let refresh=vd.reuse.x==1u && (vd_hash(group.x+group.y*0x10000u)+u32(vd.size.z))%VD_REUSE_REFRESH==0u;
+            let kept=select(vd_settled(at,size,read),VSM_NONE,refresh);
+            if kept!=VSM_NONE {
+                textureStore(vsm_output,vec2<i32>(id),vec4<u32>(kept));
+                vd_history[write]=depth_bits|(before&0xffffu);
+                return;
+            }
+        }
+    }
+    let answer=vd_pixel(id);
+    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(answer));
+    // A walk extends the settled count of the same class; a coarser level standing in for an
+    // arriving page never settles.
+    var walks=0u;
+    if (answer==0u || answer==256u) && !vd_px.stand_in {
+        walks=select(1u,min(vd_walks(before)+1u,127u),(before&0x1ffu)==answer && vd_walks(before)!=0u);
+    }
+    vd_history[write]=depth_bits|(walks<<9u)|answer;
 }
