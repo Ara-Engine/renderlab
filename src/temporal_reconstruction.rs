@@ -625,7 +625,30 @@ pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
     ) {
         source.replace_range(begin..end + "// tile hint end\n".len(), SUN_TILE_HELD);
     }
+    // Play gate: receivers a mover can change trace the moving count (rtvis_held.wgsl
+    // `rtvis_motion_rays`, which only the held entries set).
+    let source = source.replace(
+        "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);",
+        "tr1_rays=max(tr1_zone_rays(world,primary_frame.sampling.x),rtvis_motion_rays);",
+    );
     Ok(format!("{source}\n{HELD_SOURCE}\n{sun}"))
+}
+/// At most `slots` boxes covering `boxes`: sorted by centre along the longest axis of their union
+/// and merged in runs of neighbours (Glint's orbs line its course).
+fn merge_boxes(boxes: &[crate::shadow_plan::Bounds], slots: usize) -> Vec<crate::shadow_plan::Bounds> {
+    if boxes.len() <= slots {
+        return boxes.to_vec();
+    }
+    let all = boxes.iter().skip(1).fold(boxes[0], |u, &b| union(Some(u), b));
+    let size = all.max - all.min;
+    let axis = if size.x >= size.y && size.x >= size.z { 0 } else if size.y >= size.z { 1 } else { 2 };
+    let mut sorted = boxes.to_vec();
+    sorted.sort_by(|a, b| (a.min + a.max)[axis].total_cmp(&(b.min + b.max)[axis]));
+    let run = sorted.len().div_ceil(slots);
+    sorted
+        .chunks(run)
+        .map(|c| c.iter().skip(1).fold(c[0], |u, &b| union(Some(u), b)))
+        .collect()
 }
 /// U-RTVIS's held stop as the trace entries' `primary_sun`.
 const HELD_SUN: &str = "fn primary_sun(receiver:Receiver,slot:u32,pixel:vec2<u32>,width:u32)->u32 {rtvis_hold(receiver,slot);return fresh_estimate(receiver,pixel,width,0u);}
@@ -751,13 +774,14 @@ pub(crate) fn rigid_shadow_zones() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_RIGID_SHADOW_ZONES").map_or(true, |v| v != "0"))
 }
-/// Play gate (sunrt, 2026-11-16): a still camera over moving rigid placements (Glint's 11
-/// obstacles in play) put every receiver on the moving sun budget with still reuse off: +1.1 ms
-/// of `visibility` against the clip. With this on (`rigid_shadow_zones`), such a frame keeps the
-/// settled budget, the moving placements' swept sun shadow becomes a restart zone (P-RELIT, as a
-/// posed character's is), reuse stays on outside it, and a receiver seen through a moving
-/// placement's box restarts its streak (rtvis_held.wgsl `rtvis_crossed`).
-/// `RENDERLAB_RIGID_SHADOW_ZONES=0` keeps the whole frame moving.
+/// Play gate (sunrt, 2026-11-16): a still camera over moving rigid placements (Glint's spinning
+/// orbs and obstacles in play) put every receiver on the moving sun budget with still reuse off:
+/// +1.1 ms of `visibility` against the clip. With this on, such a frame keeps the settled budget
+/// and still reuse; only receivers a mover can change trace the moving count (rtvis_held.wgsl
+/// `rtvis_motion_rays`): inside a mover's swept sun shadow, or seen through a mover's box (which holds the
+/// movers themselves; such a receiver also restarts its streak, `rtvis_crossed`). Each mover is
+/// tested against its own box (`MOVER_SLOTS`). `RENDERLAB_RIGID_SHADOW_ZONES=0` keeps the whole
+/// frame moving.
 pub(crate) fn sun_still_reuse() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_SUN_STILL_REUSE").map_or(true, |v| v != "0"))
@@ -879,7 +903,9 @@ pub(crate) const SUN_REUSE_STREAK: u32 = 32;
 /// matrix, the words (enabled, probes, streak, and the sun visibility history's use), the
 /// moving placements' swept bounds with the sun's direction and widened disk tangent, and
 /// this frame's unjittered camera matrix, and the sun visibility history's turn step.
-pub(crate) const HELD_BYTES: usize = 224;
+pub(crate) const HELD_BYTES: usize = 240 + MOVER_SLOTS * 32;
+/// Movers' boxes in the held record (`rigid_shadow_zones`); more are merged along the course.
+const MOVER_SLOTS: usize = 32;
 /// U-FIXED: a turning sun keeps a receiver's sun visibility history until the sun has turned
 /// this fraction of its disk half-angle since that receiver's last budget trace
 /// (primary_sun_history.wgsl, in 16 turn steps of which a history lasts 8).
@@ -1316,6 +1342,8 @@ pub(crate) struct PlanInputs<'a> {
     /// U-RTVIS: the world bounds of every placement that moved or is skinned, at both its
     /// previous and current transforms; no held stop inside their swept sun shadow.
     pub(crate) moving_bounds: Option<crate::shadow_plan::Bounds>,
+    /// Each moving or skinned placement's own box over both transforms (`rigid_shadow_zones`).
+    pub(crate) moving_boxes: Vec<crate::shadow_plan::Bounds>,
     /// P-RTS: the penumbra pass is compiled and edges are deferred.
     pub(crate) listing: bool,
 }
@@ -1615,9 +1643,9 @@ impl Planner {
         } else {
             0
         };
-        // Rigid motion under a still camera (`rigid_shadow_zones`): the moving placements' swept
-        // sun shadow joins the restart zone and the rest of the frame settles. Only with one
-        // shadowed sun and no other shadow request, where the zone is the swept shadow itself.
+        // Rigid motion under a still camera (`rigid_shadow_zones`): the frame settles, and only
+        // receivers a mover can change trace the moving count (`motion_rays`). Only with one
+        // shadowed sun and no other shadow request, the sun the held record's tests use.
         let one_sun = match i
             .lights
             .iter()
@@ -1629,20 +1657,14 @@ impl Planner {
             [Light::Directional { travel, .. }] => Some(-travel.normalize()),
             _ => None,
         };
-        let rigid_zoned = rigid_shadow_zones()
+        let rigid_settled = rigid_shadow_zones()
             && rigid_motion
             && i.rigid_only
             && still
             && turn == 0.0
             && one_sun.is_some()
-            && (shadow_bounds.is_none() || caster_light.is_some());
-        if rigid_zoned && let (Some(m), Some(toward)) = (i.moving_bounds, one_sun) {
-            let margin = Vec3::splat(1e-4) + m.min.abs().max(m.max.abs()) * 1e-5;
-            let swept = crate::shadow_plan::Bounds { min: m.min - margin, max: m.max + margin };
-            shadow_bounds = Some(union(shadow_bounds, swept));
-            caster_light = Some((toward, i.directional_disk_angle));
-        }
-        let sun_still = sampling_still || rigid_zoned;
+            && i.moving_bounds.is_some();
+        let sun_still = sampling_still || rigid_settled;
         self.sun_held_frames = if sun_still {
             self.sun_held_frames.saturating_add(1)
         } else {
@@ -1746,8 +1768,14 @@ impl Planner {
         self.unchanged = unchanged;
         // Still reuse also runs on zoned rigid frames: the hint leaves out receivers that moved
         // or sit in the swept shadow, and `rtvis_crossed` those seen through a moving box.
-        let reuse_frame = unchanged || (rigid_zoned && !posed && relit_spheres.is_empty());
-        let crossed = rigid_zoned.then_some((eye, 8.0 * pixel_angle));
+        let reuse_frame = unchanged || (rigid_settled && !zoned && !posed);
+        // Receivers a mover can change trace the moving count; 0 when that is no larger.
+        let motion_rays = if rigid_settled && i.budget.active_rays > self.shadow_rays {
+            i.budget.active_rays
+        } else {
+            0
+        };
+        let crossed = rigid_settled.then_some((eye, 8.0 * pixel_angle));
         let held = self.held_record(
             (i.moving_bounds, i.directional_disk_angle),
             (previous_matrix, matrix),
@@ -1755,6 +1783,7 @@ impl Planner {
             &suns,
             (listed, reuse_frame),
             crossed,
+            (motion_rays, &i.moving_boxes),
         );
         let mut rl_history = Vec::with_capacity(RL_HISTORY_BYTES);
         rl_history.extend_from_slice(&matrix_bytes(previous_matrix));
@@ -1795,6 +1824,7 @@ impl Planner {
         suns: &[Vec3],
         (listed, unchanged): (bool, bool),
         crossed: Option<(Vec3, f32)>,
+        (motion_rays, movers): (u32, &[crate::shadow_plan::Bounds]),
     ) -> Vec<u8> {
         let enabled = !self.reset
             && turn == 0.0
@@ -1879,6 +1909,25 @@ impl Planner {
         let (eye, grow) = crossed.unwrap_or((Vec3::ZERO, 0.0));
         for v in [eye.x, eye.y, eye.z, grow] {
             bytes.extend_from_slice(&v.to_ne_bytes());
+        }
+        // RtvisHeld.motion (box count, the moving count) and .movers (lo, hi rows): each mover's
+        // own box, so the swept and crossing tests leave out the space between movers.
+        let boxes = if rigid_shadow_zones() {
+            merge_boxes(movers, MOVER_SLOTS)
+        } else {
+            vec![]
+        };
+        for w in [boxes.len() as u32, motion_rays, 0, 0] {
+            bytes.extend_from_slice(&w.to_ne_bytes());
+        }
+        for k in 0..MOVER_SLOTS {
+            let (lo, hi) = boxes.get(k).map_or((Vec3::ZERO, Vec3::ZERO), |b| {
+                let margin = Vec3::splat(1e-4) + b.min.abs().max(b.max.abs()) * 1e-5;
+                (b.min - margin, b.max + margin)
+            });
+            for v in [lo.x, lo.y, lo.z, 0.0, hi.x, hi.y, hi.z, 0.0] {
+                bytes.extend_from_slice(&f32::to_ne_bytes(v));
+            }
         }
         debug_assert_eq!(bytes.len(), HELD_BYTES);
         bytes
@@ -2356,6 +2405,7 @@ impl Renderer {
         let mut scene_static = true;
         let mut rigid_only = true;
         let mut moving_bounds = None;
+        let mut moving_boxes = vec![];
         for d in draws {
             if let Some(s) = &d.mesh.skin {
                 skin_revisions.push(s.revision);
@@ -2384,11 +2434,14 @@ impl Renderer {
                 any_moved |= moved;
                 // U-RTVIS: no held stop in a moving or skinned placement's swept shadow.
                 if moved || d.mesh.skin.is_some() {
+                    let mut own = None;
                     for m in [model, previous_model] {
                         if let Ok(b) = shadow_gpu::world_bounds(d.mesh.bounds, m) {
                             moving_bounds = Some(union(moving_bounds, b));
+                            own = Some(union(own, b));
                         }
                     }
+                    moving_boxes.extend(own);
                 }
                 if let Ok(b) = shadow_gpu::world_bounds(d.mesh.bounds, model) {
                     scene_bounds = Some(union(scene_bounds, b));
@@ -2465,6 +2518,7 @@ impl Renderer {
                 scene_static,
                 rigid_only,
                 moving_bounds,
+                moving_boxes,
                 listing,
             });
         // PrimaryFrame.sampling is private engine state; no material/shading ABI changes.
@@ -2652,6 +2706,7 @@ mod tests {
             scene_static: true,
             rigid_only: true,
             moving_bounds: None,
+            moving_boxes: vec![],
             listing: false,
         }
     }
@@ -2806,8 +2861,8 @@ mod tests {
         assert_eq!(enabled(&cut), 0);
     }
 
-    /// Play gate: rigid motion under a still camera settles the sun budget like a still frame,
-    /// and its swept shadow is a restart zone at the restart count.
+    /// Play gate: rigid motion under a still camera settles the sun budget like a still frame;
+    /// receivers a mover can change get the moving count, with no restart zone.
     #[test]
     fn rigid_motion_under_a_still_camera_settles_the_sun_budget() {
         let sun = [Light::Directional {
@@ -2829,16 +2884,30 @@ mod tests {
             ..inputs(&sun, frame)
         };
         let mut plan = Planner::new();
-        for frame in 0..=u64::from(budget.settle_frames) + 1 {
-            plan.prepare(moving(frame));
+        let mut last = plan.prepare(moving(0));
+        for frame in 1..=u64::from(budget.settle_frames) + 1 {
+            last = plan.prepare(moving(frame));
         }
+        // RtvisHeld.motion.y: the count receivers a mover can change trace (rtvis_motion_rays).
+        let motion = u32::from_ne_bytes(last.held[228..232].try_into().unwrap());
         if rigid_shadow_zones() {
-            assert_eq!((plan.shadow_rays, plan.restart_rays), (budget.held_rays, budget.reset_rays));
+            assert_eq!((plan.shadow_rays, motion, plan.restart_rays), (budget.held_rays, budget.active_rays, 0));
         } else {
-            assert_eq!(plan.shadow_rays, budget.active_rays);
+            assert_eq!((plan.shadow_rays, motion), (budget.active_rays, 0));
         }
         // The lighting cache's own stillness (held_frames) still sees the motion.
         assert_eq!(plan.held_frames(), 0);
+    }
+
+    /// Movers past the held record's slots merge with their neighbours along the course.
+    #[test]
+    fn movers_merge_along_the_course() {
+        let at = |x: f32| crate::shadow_plan::Bounds { min: Vec3::new(x, 0.0, 0.0), max: Vec3::new(x + 1.0, 1.0, 1.0) };
+        let boxes: Vec<_> = [5.0, 0.0, 30.0, 10.0, 20.0].map(at).to_vec();
+        assert_eq!(merge_boxes(&boxes, 8).len(), 5);
+        let merged = merge_boxes(&boxes, 2);
+        assert_eq!(merged.len(), 2);
+        assert_eq!((merged[0].min.x, merged[0].max.x, merged[1].min.x, merged[1].max.x), (0.0, 11.0, 20.0, 31.0));
     }
 
     /// sunrt-7: the still reuse word (`RtvisHeld::sun.z`) is on only for a frame that changes

@@ -6,7 +6,7 @@
 // words: enabled, probes, streak, and (U-FIXED) the sun visibility history's use this frame;
 // current: this frame's unjittered camera matrix (the history's depth codes); sun.x: the
 // sun visibility history's turn step (primary_sun_history.wgsl).
-struct RtvisHeld { previous:mat4x4<f32>, words:vec4<u32>, lo:vec4<f32>, hi:vec4<f32>, light:vec4<f32>, current:mat4x4<f32>, sun:vec4<u32>, eye:vec4<f32> };
+struct RtvisHeld { previous:mat4x4<f32>, words:vec4<u32>, lo:vec4<f32>, hi:vec4<f32>, light:vec4<f32>, current:mat4x4<f32>, sun:vec4<u32>, eye:vec4<f32>, motion:vec4<u32>, movers:array<vec4<f32>,64> };
 @group(0) @binding(50) var<uniform> rtvis_held:RtvisHeld;
 @group(0) @binding(51) var rtvis_history_in:texture_2d<u32>;
 @group(0) @binding(52) var rtvis_history_out:texture_storage_2d<r32uint,write>;
@@ -19,9 +19,7 @@ var<private> rtvis_centre:u32;
 
 // Whether point x may sit in the sun shadow of a placement that moved or is skinned
 // (temporal_zones.wgsl tr1_caster_shadow's test over RtvisHeld's swept bounds).
-fn rtvis_swept(x:vec3<f32>)->bool {
-    if rtvis_held.lo.w==0.0 {return false;}
-    let lo=rtvis_held.lo.xyz;let hi=rtvis_held.hi.xyz;
+fn rtvis_swept_box(x:vec3<f32>,lo:vec3<f32>,hi:vec3<f32>)->bool {
     let reach=length(max(abs(x-lo),abs(x-hi)));
     let grow=vec3<f32>(reach*rtvis_held.light.w);
     let rcp=vec3<f32>(1.0)/rtvis_held.light.xyz;
@@ -29,17 +27,42 @@ fn rtvis_swept(x:vec3<f32>)->bool {
     let t0=min(a,b);let t1=max(a,b);
     return min(min(t1.x,t1.y),t1.z)>=max(max(max(t0.x,t0.y),t0.z),0.0);
 }
+// The movers' union first, then (motion.x boxes) each mover's own box.
+fn rtvis_swept(x:vec3<f32>)->bool {
+    if rtvis_held.lo.w==0.0 || !rtvis_swept_box(x,rtvis_held.lo.xyz,rtvis_held.hi.xyz) {return false;}
+    if rtvis_held.motion.x==0u {return true;}
+    for(var k=0u;k<rtvis_held.motion.x;k+=1u) {
+        if rtvis_swept_box(x,rtvis_held.movers[2u*k].xyz,rtvis_held.movers[2u*k+1u].xyz) {return true;}
+    }
+    return false;
+}
 // Whether the view ray to point x crosses the moving placements' box (grown by eye.w per unit
 // distance for the reprojected 3x3): x may have been hidden by a moving placement, so its
 // history may be another surface's (temporal_reconstruction.rs `rigid_shadow_zones`; eye.w 0 off).
-fn rtvis_crossed(x:vec3<f32>)->bool {
-    if rtvis_held.eye.w==0.0 || rtvis_held.lo.w==0.0 {return false;}
+fn rtvis_crossed_box(x:vec3<f32>,lo:vec3<f32>,hi:vec3<f32>)->bool {
     let d=rtvis_held.eye.xyz-x;
     let grow=vec3<f32>(length(d)*rtvis_held.eye.w+1e-3);
     let rcp=vec3<f32>(1.0)/select(d,vec3<f32>(1e-6),abs(d)<vec3<f32>(1e-6));
-    let a=(rtvis_held.lo.xyz-grow-x)*rcp;let b=(rtvis_held.hi.xyz+grow-x)*rcp;
+    let a=(lo-grow-x)*rcp;let b=(hi+grow-x)*rcp;
     let t0=min(a,b);let t1=max(a,b);
     return min(min(min(t1.x,t1.y),t1.z),1.0)>=max(max(max(t0.x,t0.y),t0.z),0.0);
+}
+fn rtvis_crossed(x:vec3<f32>)->bool {
+    if rtvis_held.eye.w==0.0 || rtvis_held.lo.w==0.0 || !rtvis_crossed_box(x,rtvis_held.lo.xyz,rtvis_held.hi.xyz) {return false;}
+    if rtvis_held.motion.x==0u {return true;}
+    for(var k=0u;k<rtvis_held.motion.x;k+=1u) {
+        if rtvis_crossed_box(x,rtvis_held.movers[2u*k].xyz,rtvis_held.movers[2u*k+1u].xyz) {return true;}
+    }
+    return false;
+}
+// The moving count (motion.y) for a receiver at x that a mover can change this frame (in a
+// mover's swept shadow or seen through a mover's box), else 0. The held entries set it before the
+// estimate (rtvis_hold, the tile hint); the estimate traces at least this many directions
+// (temporal_reconstruction.rs `trace_source_held`). Other entries never set it: they bind no record.
+var<private> rtvis_motion_rays:u32=0u;
+fn rtvis_motion(x:vec3<f32>)->u32 {
+    if rtvis_held.motion.y==0u {return 0u;}
+    return select(0u,rtvis_held.motion.y,rtvis_swept(x) || rtvis_crossed(x));
 }
 // The receiver's placement moved since the previous frame (object_motion.wgsl motion_rigid).
 fn rtvis_moved(slot:u32)->bool {
@@ -50,7 +73,7 @@ fn rtvis_moved(slot:u32)->bool {
 // Sets HELD_STOP for this receiver: a still, unskinned receiver outside every moving
 // caster's swept shadow whose reprojected 3x3 history is one class for HELD_STREAK frames.
 fn rtvis_hold(receiver:Receiver,slot:u32) {
-    tr1_held_probes=0xffffffffu;rtvis_centre=0u;
+    tr1_held_probes=0xffffffffu;rtvis_centre=0u;rtvis_motion_rays=rtvis_motion(receiver.world);
     let batch=primary_placements[slot]&0x1fffffffu;
     if batch_skinned(primary_batch_info(batch)) || rtvis_moved(slot) {return;}
     let c=rtvis_held.previous*vec4<f32>(receiver.world,1.0);
