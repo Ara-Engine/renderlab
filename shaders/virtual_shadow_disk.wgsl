@@ -943,8 +943,8 @@ fn vd_pixel(id:vec2<u32>)->u32 {
 // moving casters' shadows and classes the receiver jitter still moves walk. While the camera
 // moves every trace tile still walks one frame in VD_REUSE_REFRESH, so an answer that should change
 // is found within that many frames; on frames where nothing changed none need to.
-override VD_REUSE_WALKS:u32=8u;
-override VD_REUSE_REFRESH:u32=8u;
+override VD_REUSE_WALKS:u32=4u;
+override VD_REUSE_REFRESH:u32=16u;
 @group(0) @binding(63) var<storage,read_write> vd_history:array<u32>;
 // The moving casters' swept shadow (temporal_zones.wgsl tr1_caster_shadow, the same test).
 fn vd_moving_shadow(x:vec3<f32>)->bool {
