@@ -284,16 +284,40 @@ fn tr1_fetch_position(p:vec2<i32>,s:Tr1Surface,size:vec2<f32>)->vec2<f32> {
     return select(q,r,abs(q-r)<vec2<f32>(1e-3));
 }
 
+// The previous frame's camera ray direction (unnormalised) as a linear function of NDC x, y:
+// columns x, y and the constant. The inverse view-projection's w row has no x or y term for
+// perspective and orthographic projections (it is the projection inverse's), so its near and
+// far points share their w across the image and their difference is linear. Set once per
+// invocation by tr1_anchor_prepare. Under motion every Catmull-Rom tap rebuilds a point; the
+// per-tap matrix form cost 0.2-0.25 ms more at 1080p on an RTX 4070 SUPER (shade-14), more
+// than its arithmetic explains (likely registers: the inverse stayed live through the taps).
+var<private> tr1_ray:mat3x3<f32>;
+// The linear ray (`RENDERLAB_TR1_LINEAR_RAY=0` sets it false: the matrix form per tap). The
+// two differ only by rounding, a few plane tests at their threshold.
+const TR1_LINEAR_RAY:bool=true;
+fn tr1_anchor_prepare() {
+    if !TR1_LINEAR_RAY {return;}
+    let m=tr1.previous_inverse;
+    let near_w=m[2].w+m[3].w;
+    let far_w=m[3].w;
+    let k=1.0/far_w-1.0/near_w;
+    tr1_ray=mat3x3<f32>(m[0].xyz*k,m[1].xyz*k,m[3].xyz/far_w-(m[2].xyz+m[3].xyz)/near_w);
+}
 // A previous-frame tap's latest sample point, rebuilt from its own camera ray (its pixel
 // and the previous frame's sample offset) and its anchor distance.
 fn tr1_anchor_point(t:vec2<i32>,distance:f32,size:vec2<f32>)->vec3<f32> {
     let o=tr1_sample_offset(t,vec2<f32>(tr1.current_eye.w,tr1.jitter.w));
     let ndc=fma((vec2<f32>(t)+vec2<f32>(0.5)+o)/size,vec2<f32>(2.0,-2.0),vec2<f32>(-1.0,1.0));
-    let m=tr1.previous_inverse;
-    let xy=fma(m[0],vec4<f32>(ndc.x),m[1]*ndc.y);
-    let near=xy+m[2]+m[3];
-    let far=xy+m[3];
-    let d=far.xyz/far.w-near.xyz/near.w;
+    var d:vec3<f32>;
+    if TR1_LINEAR_RAY {
+        d=fma(tr1_ray[0],vec3<f32>(ndc.x),fma(tr1_ray[1],vec3<f32>(ndc.y),tr1_ray[2]));
+    } else {
+        let m=tr1.previous_inverse;
+        let xy=fma(m[0],vec4<f32>(ndc.x),m[1]*ndc.y);
+        let near=xy+m[2]+m[3];
+        let far=xy+m[3];
+        d=far.xyz/far.w-near.xyz/near.w;
+    }
     return fma(d,vec3<f32>(distance*inverseSqrt(tr1_dot(d,d))),tr1.previous_eye.xyz);
 }
 
@@ -320,13 +344,15 @@ fn tr1_tap(t:vec2<i32>,s:Tr1Surface,expected:f32,size:vec2<u32>)->vec4<f32> {
     if !tr1_inside(t,size) {return vec4<f32>(0.0);}
     let thin=s.id!=0u && (primary_placements[s.id-1u]&0x20000000u)!=0u;
     let a=textureLoad(tr1_anchor_in,t,0).xy;
+    // Loaded with the anchor, not after its tests, so the two loads overlap.
+    let colour=textureLoad(tr1_colour_in,t,0);
     if (a.x&TR1_ID)==s.id && !(thin && ((a.x>>23u)&1u)!=s.side) {
         var ok=s.id==0u || tr1_still(s);
         if !ok {
             let point=tr1_anchor_point(t,bitcast<f32>(a.y),vec2<f32>(size));
             ok=abs(tr1_dot(s.previous_normal,point-s.previous_point.xyz))<=4.0*tr1.previous_eye.w*expected;
         }
-        if ok {return textureLoad(tr1_colour_in,t,0);}
+        if ok {return colour;}
     }
     let second=tr1_second(t,a.x);
     if second.id==s.id && !(thin && second.side!=s.side) && second.weight>0.0 {
@@ -623,6 +649,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     tr1_same_grid=all(samples==size);
     tr1_ratio=select(vec2<f32>(samples)/vec2<f32>(size),vec2<f32>(1.0),tr1_same_grid);
     tr1_here=vec2<i32>(id.xy);
+    tr1_anchor_prepare();
     // This frame's placements over the 10x10 tile, two loads per invocation at most.
     let corner=vec2<i32>(group.xy*8u)-vec2<i32>(1);
     for(var k=lane;k<100u;k+=64u) {
