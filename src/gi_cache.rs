@@ -2739,13 +2739,14 @@ impl Renderer {
                 .retired
                 .push((self.submissions, Retired::Packed(old)));
         }
-        // New triangles under existing cells: only a mesh whose geometry is replaced changes what
-        // placed cells traced. A new mesh is not placed yet; its placements reach the planner as
-        // new bounds, which re-trace the cells around them like a moved caster. Clearing for every
-        // new mesh emptied the cache whenever an embedder rebuilt a batch (Outpost's play, non-RT:
-        // each walking frame). RENDERLAB_GI_NEW_MESH_CLEAR=1 clears for new meshes too.
+        // A replaced mesh changes what placed cells traced. A new mesh is not placed yet (its
+        // placements reach the planner as new bounds, which re-trace the cells around them), but
+        // the clear stays the default: a full table relit at once (Glint's goal changes its
+        // lights as its new meshes appear) queued 633k gathers that ran into the held frames,
+        // where main's clear left a small table. RENDERLAB_GI_NEW_MESH_CLEAR=0 keeps the table
+        // for new meshes (an embedder that rebuilds batches every frame emptied it each frame).
         static CLEAR_NEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        if replaced || *CLEAR_NEW.get_or_init(|| std::env::var("RENDERLAB_GI_NEW_MESH_CLEAR").is_ok_and(|v| v == "1")) {
+        if replaced || *CLEAR_NEW.get_or_init(|| std::env::var("RENDERLAB_GI_NEW_MESH_CLEAR").map_or(true, |v| v != "0")) {
             self.gi.planner.set_pending_clear(true);
         }
         Ok(())
