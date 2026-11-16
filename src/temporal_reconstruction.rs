@@ -522,8 +522,6 @@ pub(in crate::renderer) struct TraceKernels {
     pub full: Option<Owned<wgpu::ComputePipeline>>,
     /// P-RTS: the penumbra list and its full-budget trace, after the deferred repair.
     pub penumbra: Option<[Owned<wgpu::ComputePipeline>; 2]>,
-    /// sunrt-8: the listed shadow-edge receivers' remaining directions, before the repair.
-    pub sun_list: Option<Owned<wgpu::ComputePipeline>>,
 }
 /// Pipelines of the reconstruction, compiled by its first frame after each prelude.
 pub(in crate::renderer) struct Pipelines {
@@ -625,12 +623,7 @@ pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
         source.find("// tile hint begin\n"),
         source.find("// tile hint end\n"),
     ) {
-        let held = if sun_tile_list() {
-            SUN_TILE_HELD.to_owned()
-        } else {
-            SUN_TILE_HELD.replacen("const TR1_TILE_LIST:bool=true;", "const TR1_TILE_LIST:bool=false;", 1)
-        };
-        source.replace_range(begin..end + "// tile hint end\n".len(), &held);
+        source.replace_range(begin..end + "// tile hint end\n".len(), SUN_TILE_HELD);
     }
     Ok(format!("{source}\n{HELD_SOURCE}\n{sun}"))
 }
@@ -758,13 +751,6 @@ pub(crate) fn sun_still_reuse() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_SUN_STILL_REUSE").map_or(true, |v| v != "0"))
 }
-/// sunrt-8: shadow-edge tiles list the receivers their settled history does not cover, and
-/// `primary_sun_continue` traces their remaining directions densely (primary_sun_tile_held.wgsl).
-/// `RENDERLAB_SUN_TILE_LIST=0` resumes every receiver inside the trace, as before.
-pub(crate) fn sun_tile_list() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_SUN_TILE_LIST").map_or(true, |v| v != "0"))
-}
 const SUN_TILE: &str = include_str!("../shaders/primary_sun_tile.wgsl");
 const SUN_TILE_HELD: &str = include_str!("../shaders/primary_sun_tile_held.wgsl");
 /// sunrt-2: probes of a tile whose every receiver's sun history is one stable class
@@ -835,7 +821,7 @@ fn with_sun_tile(source: String, probes: u32) -> Result<String, Error> {
         ),
         (
             "    if !in_bounds || covered==0u {return;}\n",
-            "    tr1_list_record=trace.record;tr1_tile_vote(trace.record.x!=0u,receiver,max(trace.record.x,1u)-1u,id.xy,size.x);\n",
+            "    tr1_tile_vote(trace.record.x!=0u,receiver,max(trace.record.x,1u)-1u,id.xy,size.x);\n",
         ),
     ];
     if source.matches(header).count() != 1
@@ -1221,8 +1207,6 @@ impl PrimaryState {
                 // The penumbra pass follows the retained two-pass repair only.
                 penumbra: (deferred && !modern && PENUMBRA_LISTING)
                     .then(|| self.penumbra_pipelines(device, ledger, &soft)),
-                sun_list: (deferred && !modern && sun_tile_probes() != 0 && sun_tile_list())
-                    .then(|| self.held_entry(device, ledger, &soft, "primary_sun_continue", &eight)),
             }
         });
         let vb_sun = vb_sun.map(|source| {
@@ -2205,7 +2189,6 @@ impl Renderer {
                 + u64::from(t.retry.is_some())
                 + u64::from(t.full.is_some())
                 + 2 * u64::from(t.penumbra.is_some())
-                + u64::from(t.sun_list.is_some())
         });
         self.pipeline.primary.as_mut().unwrap().reconstruction = Some(pipelines);
         Ok(())
@@ -2960,11 +2943,7 @@ mod tests {
                 .count(),
             2
         );
-        // sunrt-8: and the listed receivers' continuation (primary_sun_tile_held.wgsl).
-        assert_eq!(
-            held.matches("primary_sun_store(p,visible);").count(),
-            2 + usize::from(sun_tile_probes() != 0)
-        );
+        assert_eq!(held.matches("primary_sun_store(p,visible);").count(), 2);
         // sunrt-2: the held module's tile vote reads the sun history for its hint.
         assert_eq!(
             held.matches("if rtvis_held.sun.y==0u {return 0u;}").count(),
@@ -3014,10 +2993,7 @@ mod tests {
         // U-FIXED: the visibility-buffer sun asks and records once more, on the budget's estimate.
         let vb_sun = vb_sun_source(&kernels[1]).unwrap();
         assert_eq!(vb_sun.matches("primary_sun(receiver,slot,id.xy,size.x)").count(), 1);
-        assert_eq!(
-            vb_sun.matches("primary_sun_store(p,visible);").count(),
-            3 + usize::from(sun_tile_probes() != 0)
-        );
+        assert_eq!(vb_sun.matches("primary_sun_store(p,visible);").count(), 3);
         let resolve_clone = resolve.clone();
         for source in [resolve, off, held, trace, PENUMBRA_LIST.to_owned(), vb_sun]
             .into_iter()

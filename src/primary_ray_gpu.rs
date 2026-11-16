@@ -1021,8 +1021,6 @@ pub(super) struct InteractiveKernels<'a> {
     penumbra: Option<[&'a wgpu::ComputePipeline; 2]>,
     /// U-RTVIS: the trace pass's group 0 when it is not `Bindings::interactive`.
     group: Option<&'a wgpu::BindGroup>,
-    /// sunrt-8: the listed shadow-edge receivers' directions, on the trace's groups.
-    sun_list: Option<&'a wgpu::ComputePipeline>,
 }
 
 /// Which traced shading pipeline and bindings a frame uses.
@@ -3070,7 +3068,6 @@ impl Renderer {
             full: p.interactive_full.as_deref(),
             penumbra: None,
             group: None,
-            sun_list: None,
         };
         self.encode_interactive_kernels(
             encoder,
@@ -3117,7 +3114,6 @@ impl Renderer {
                 .and_then(|s| s.bindings.as_ref()?.held.as_ref())
                 .zip(self.view.reconstruction_state.as_ref())
                 .map(|(groups, r)| &*groups[r.plan.parity]),
-            sun_list: t.sun_list.as_deref(),
         };
         self.encode_interactive_kernels(
             encoder,
@@ -3215,19 +3211,6 @@ impl Renderer {
                 .filter(|s| {
                     s.beginning_of_pass_write_index.is_some() || s.end_of_pass_write_index.is_some()
                 });
-            // sunrt-8: listed receivers first; the repair then re-estimates any whose hit it moves.
-            if let Some(list) = kernels.sun_list {
-                mark(encoder, "visibility.sun_list");
-                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                    label: Some("listed shadow-edge sun directions"),
-                    timestamp_writes: None,
-                });
-                pass.set_pipeline(list);
-                pass.set_bind_group(0, group, &[]);
-                pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
-                pass.set_bind_group(3, self.lighting.bind(), &[]);
-                pass.dispatch_workgroups_indirect(&targets.repair_args.value, 0);
-            }
             mark(encoder, "visibility.repair");
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("retained two-pass receiver correction"),

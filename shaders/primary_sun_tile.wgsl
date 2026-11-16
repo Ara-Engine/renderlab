@@ -9,15 +9,11 @@
 // estimate is main's exactly.
 // Still reuse (sunrt-7): on a frame the CPU found unchanged (tr1_tile_reuse), a receiver whose
 // history hints one class keeps it without a ray, and votes that class for the tile.
-// Compaction (sunrt-8, tr1_tile_list): in a tile whose probes disagree, the held module keeps
-// the probes of receivers whose settled history they confirm and lists the rest for a dense pass.
-// tr1_tile_state: 0 normal, 1 pause at the probes, 2 paused (resume), 3 keep the probes (tile
-// unanimous, settled, or listed), 4 reused (tr1_tile_count 0 shadowed or 1 lit, over one direction).
+// tr1_tile_state: 0 normal, 1 pause at the probes, 2 paused (resume), 3 tile unanimous,
+// 4 reused (tr1_tile_count 0 shadowed or 1 lit, over one direction).
 var<private> tr1_tile_state:u32=0u;
 var<private> tr1_tile_count:u32=0u;
 var<private> tr1_tile_pause:u32=TR1_TILE_PROBES;
-// The receiver's hit record, for entries that may list it (zero: never listed).
-var<private> tr1_list_record:vec4<u32>=vec4<u32>(0u);
 var<workgroup> tr1_tile_votes:atomic<u32>;
 var<workgroup> tr1_tile_hints:atomic<u32>;
 // Called once per invocation in uniform control flow, before the entry's estimate. Hints:
@@ -47,12 +43,10 @@ fn tr1_tile_vote(hit:bool,receiver:Receiver,slot:u32,pixel:vec2<u32>,width:u32) 
     workgroupBarrier();
     let votes=atomicLoad(&tr1_tile_votes);
     if tr1_tile_state==2u && (votes==1u || votes==2u) {tr1_tile_state=3u;}
-    tr1_tile_list(hint,pixel,width);
 }
 fn tr1_tile_vote_trace(trace:PrimaryTrace,pixel:vec2<u32>,width:u32) {
     var receiver:Receiver;
     if trace.record.x!=0u {receiver=primary_receiver(trace.point,trace.positions,trace.record.x-1u,vec2<i32>(pixel));}
-    tr1_list_record=trace.record;
     tr1_tile_vote(trace.record.x!=0u,receiver,max(trace.record.x,1u)-1u,pixel,width);
 }
 // tile hint begin
@@ -60,5 +54,4 @@ fn tr1_tile_vote_trace(trace:PrimaryTrace,pixel:vec2<u32>,width:u32) {
 fn tr1_tile_hint(receiver:Receiver,slot:u32)->u32 {return 0u;}
 fn tr1_tile_hint_probes()->u32 {return TR1_TILE_PROBES;}
 fn tr1_tile_reuse()->bool {return false;}
-fn tr1_tile_list(hint:u32,pixel:vec2<u32>,width:u32) {}
 // tile hint end
