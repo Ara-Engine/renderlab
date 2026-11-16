@@ -352,26 +352,6 @@ pub(crate) fn ablated(mut s: Settings) -> Settings {
                 s.volumetric_fog = None;
             }
             "tr1" => s.temporal_reconstruction = false,
-            // A neutral display for judging against path-traced references: the filmic curve
-            // (the reference PNG's AcesFit) and nothing after it (no bloom, grade, LUT,
-            // vignette, grain, motion blur or depth of field).
-            "post" => {
-                s.post = crate::post::PostSettings {
-                    bloom: 0.0,
-                    motion_blur: false,
-                    depth_of_field: None,
-                    tonemapper: crate::post::Tonemapper::Filmic,
-                    white_balance_kelvin: 6500.0,
-                    tint: 0.0,
-                    contrast: 1.0,
-                    saturation: 1.0,
-                    vignette: 0.0,
-                    grain: 0.0,
-                    chromatic_aberration_px: 0.0,
-                    lut_strength: 0.0,
-                    ..s.post
-                }
-            }
             _ => {}
         }
     }
