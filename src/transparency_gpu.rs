@@ -288,6 +288,49 @@ pub(super) struct TransparencyState {
     shadow_key: Option<[u8; 32]>,
     /// The sun map fit last computed and what it was computed from (`encode_transparency`).
     fit_memo: Option<([u8; 32], Option<ShadowFit>)>,
+    /// Each opaque draw's world bounds when the sun map's key was last made (`sun_map_cull`).
+    caster_bounds: Vec<Option<(Vec3, Vec3)>>,
+    /// The sun map's still casters (`sun_map_cache`): each draw (its vertex buffer and placement
+    /// collection) with the edit count it had while still, or `None` once it has moved.
+    caster_still: std::collections::HashMap<(usize, u64), Option<u64>>,
+    /// What the cached still casters' depth was drawn from, once drawn.
+    still_key: Option<[u8; 32]>,
+}
+
+/// Play loop (sunrt, 2026-11-16): the transparent receivers' sun map keeps the depth of its casters
+/// that never moved in a second map. When only casters that have moved changed, a re-render copies
+/// that map and draws just those: a walking player on Outpost re-drew the whole level (2.6 ms) every
+/// frame. Depth keeps the nearest caster whatever the order, so the map is the same.
+/// `RENDERLAB_TP_SUN_MAP_CACHE=0` draws every caster on each re-render.
+fn sun_map_cache() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_TP_SUN_MAP_CACHE").map_or(true, |v| v != "0"))
+}
+
+/// Play loop (sunrt, 2026-11-16): the transparent receivers' sun map keys its casters by their
+/// placement revisions only while they are inside the map's volume, now or when last keyed, so
+/// a caster moving elsewhere does not re-render it, and draws only the casters inside it (a
+/// walking player on Outpost re-renders it every frame: 2.6 ms for all 8,000 instances).
+/// `RENDERLAB_TP_SUN_MAP_CULL=0` re-renders on any change and draws every caster.
+fn sun_map_cull() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_TP_SUN_MAP_CULL").map_or(true, |v| v != "0"))
+}
+
+/// Whether world bounds `(lo, hi)` overlap the sun map's volume under its fit `matrix`.
+pub(crate) fn in_sun_map(matrix: Mat4, (lo, hi): (Vec3, Vec3)) -> bool {
+    let (mut a, mut b) = (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY));
+    for i in 0..8 {
+        let p = Vec3::new(
+            if i & 1 == 0 { lo.x } else { hi.x },
+            if i & 2 == 0 { lo.y } else { hi.y },
+            if i & 4 == 0 { lo.z } else { hi.z },
+        );
+        let q = matrix.transform_point3(p);
+        a = a.min(q);
+        b = b.max(q);
+    }
+    a.x <= 1.0 && b.x >= -1.0 && a.y <= 1.0 && b.y >= -1.0 && a.z <= 1.0 && b.z >= 0.0
 }
 
 struct Gpu {
@@ -296,6 +339,8 @@ struct Gpu {
     sampler: Owned<wgpu::Sampler>,
     compare: Owned<wgpu::Sampler>,
     shadow: Depth,
+    /// The still casters' depth (`sun_map_cache`), copied into `shadow` before moved casters draw.
+    shadow_still: Option<Depth>,
     white: Owned<wgpu::TextureView>,
     _white: Owned<wgpu::Texture>,
     /// Indexed by RT (hardware sun rays) or not.
@@ -824,9 +869,24 @@ impl Renderer {
                 depth_or_array_layers: 1,
             },
             wgpu::TextureFormat::Depth32Float,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
             4,
         );
+        let shadow_still = sun_map_cache().then(|| {
+            self.tp_target(
+                "TP1 sun shadow map, still casters",
+                wgpu::Extent3d {
+                    width: SHADOW_SIZE,
+                    height: SHADOW_SIZE,
+                    depth_or_array_layers: 1,
+                },
+                wgpu::TextureFormat::Depth32Float,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                4,
+            )
+        });
         let white_texture = self.ledger.own(
             self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("TP1 white sprite"),
@@ -1242,6 +1302,7 @@ impl Renderer {
             sampler,
             compare,
             shadow,
+            shadow_still,
             white,
             _white: white_texture,
             glass_bindings,
@@ -2155,11 +2216,64 @@ impl Renderer {
             }
         };
         let shadow = fit.map_or(Mat4::IDENTITY, |f| f.matrix);
+        // Which opaque draws the sun map draws: those inside its volume (`sun_map_cull`); a
+        // draw outside it writes no depth, so leaving it out keeps the map the same.
+        let mut drawn: Option<Vec<bool>> = None;
+        let casters_key = if sun_map_cull() && fit.is_some() {
+            let mut h = Sha256::new();
+            let mut seen = Vec::with_capacity(opaque.len());
+            let mut inside = Vec::with_capacity(opaque.len());
+            for (i, draw) in opaque.iter().enumerate() {
+                h.update((Arc::as_ptr(&draw.mesh.vertex) as usize).to_ne_bytes());
+                let (id, edits) = draw.instances.state.revision();
+                h.update(id.to_ne_bytes());
+                let now = draw.instances.state.world_bounds(draw.mesh.bounds).ok().and_then(|boxes| {
+                    boxes.iter().fold(None, |u: Option<(Vec3, Vec3)>, b| {
+                        Some(u.map_or((b.min, b.max), |(lo, hi)| (lo.min(b.min), hi.max(b.max))))
+                    })
+                });
+                let before = self.transparency.caster_bounds.get(i).copied().flatten();
+                if now.is_none() || [now, before].into_iter().flatten().any(|b| in_sun_map(shadow, b)) {
+                    h.update(edits.to_ne_bytes());
+                }
+                inside.push(now.is_none_or(|b| in_sun_map(shadow, b)));
+                seen.push(now);
+            }
+            self.transparency.caster_bounds = seen;
+            drawn = Some(inside);
+            h.finalize().into()
+        } else {
+            casters_key
+        };
         let mut key = Sha256::new();
         key.update(bytes_of(&shadow.to_cols_array()));
         key.update(casters_key);
         let key: [u8; 32] = key.finalize().into();
         let render_shadow = fit.is_some() && self.transparency.shadow_key != Some(key);
+        // Which casters have moved (`sun_map_cache`), and what the still ones' cached depth is
+        // drawn from: the fit and each still draw's edits, and which draws have moved.
+        let mut moved = vec![false; opaque.len()];
+        let still_key: Option<[u8; 32]> = (sun_map_cache() && render_shadow).then(|| {
+            let mut h = Sha256::new();
+            h.update(bytes_of(&shadow.to_cols_array()));
+            let mut seen = std::collections::HashMap::with_capacity(opaque.len());
+            for (i, draw) in opaque.iter().enumerate() {
+                let (id, edits) = draw.instances.state.revision();
+                let name = (Arc::as_ptr(&draw.mesh.vertex) as usize, id);
+                let state = match self.transparency.caster_still.get(&name) {
+                    Some(Some(e)) if *e != edits => None,
+                    Some(known) => *known,
+                    None => Some(edits),
+                };
+                moved[i] = state.is_none();
+                h.update(name.0.to_ne_bytes());
+                h.update(id.to_ne_bytes());
+                h.update(state.map_or([0xff; 8], u64::to_ne_bytes));
+                seen.insert(name, state);
+            }
+            self.transparency.caster_still = seen;
+            h.finalize().into()
+        });
         let mut bytes = frame_block(&FrameInputs {
             camera,
             size: [size.width, size.height],
@@ -2393,12 +2507,15 @@ impl Renderer {
         }
         // 2. The transparent receivers' sun shadow map, when its inputs changed.
         part!("transparency.sun_map");
-        if render_shadow {
+        let still = still_key.zip(gpu.shadow_still.as_ref());
+        if let Some((still_key, target)) = still
+            && self.transparency.still_key != Some(still_key)
+        {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("TP1 sun shadow map"),
+                label: Some("TP1 sun shadow map, still casters"),
                 color_attachments: &[],
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
-                    view: &gpu.shadow.view,
+                    view: &target.view,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(1.0),
                         store: wgpu::StoreOp::Store,
@@ -2409,7 +2526,51 @@ impl Renderer {
             });
             pass.set_pipeline(&gpu.shadow_pipeline);
             pass.set_bind_group(0, &*gpu.shadow_group, &[]);
-            for draw in opaque {
+            for (i, draw) in opaque.iter().enumerate() {
+                if moved[i] || drawn.as_ref().is_some_and(|d| !d[i]) {
+                    continue;
+                }
+                pass.set_bind_group(1, &*draw.instances.bind, &[]);
+                pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
+                pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..draw.mesh.index_count, 0, 0..draw.instances.len() as u32);
+            }
+        }
+        if let Some((_, target)) = still {
+            encoder.copy_texture_to_texture(
+                target.texture.as_image_copy(),
+                gpu.shadow.texture.as_image_copy(),
+                wgpu::Extent3d {
+                    width: SHADOW_SIZE,
+                    height: SHADOW_SIZE,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        if render_shadow {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("TP1 sun shadow map"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &gpu.shadow.view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: if still.is_some() {
+                            wgpu::LoadOp::Load
+                        } else {
+                            wgpu::LoadOp::Clear(1.0)
+                        },
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(&gpu.shadow_pipeline);
+            pass.set_bind_group(0, &*gpu.shadow_group, &[]);
+            for (i, draw) in opaque.iter().enumerate() {
+                if (still.is_some() && !moved[i]) || drawn.as_ref().is_some_and(|d| !d[i]) {
+                    continue;
+                }
                 pass.set_bind_group(1, &*draw.instances.bind, &[]);
                 pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
                 pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
@@ -3455,6 +3616,9 @@ impl Renderer {
         if render_shadow {
             self.transparency.shadow_key = Some(key);
             self.transparency.stats.shadow_map_renders += 1;
+        }
+        if still_key.is_some() {
+            self.transparency.still_key = still_key;
         }
         let stats = &mut self.transparency.stats;
         stats.transparent_draws = transparent.len() as u32;

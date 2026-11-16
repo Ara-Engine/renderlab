@@ -108,6 +108,20 @@ const NEAR_OCCLUDED_RAYS: u32 = 4;
 /// runs every frame.
 const STILL_BATCH: u32 = 4;
 const STILL_BATCH_PENDING: u32 = 512;
+/// Play loop (sunrt, 2026-11-16): a re-skinned mesh's software geometry is patched in place
+/// (`patch_skinned_blas`); `RENDERLAB_GI_SKIN_PATCH=0` repacks every mesh, as before.
+/// Play loop (sunrt, 2026-11-16): a re-skinned mesh refits its software tree to each pose
+/// (`near_field::refit_bvh`), so the tree keeps its sizes and patches in place; a rebuild cost
+/// 6.4 ms per Showcase character per pose and changed the sizes, forcing full repacks.
+/// `RENDERLAB_GI_SKIN_REFIT=0` rebuilds it each pose, as before.
+fn skin_refit() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_SKIN_REFIT").map_or(true, |v| v != "0"))
+}
+fn skin_patch() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_SKIN_PATCH").map_or(true, |v| v != "0"))
+}
 fn still_batch_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_STILL_BATCH").map_or(true, |v| v != "0"))
@@ -2199,10 +2213,109 @@ impl Renderer {
         {
             return Ok(false);
         }
-        let pending = self.gi.planner.pending_clear();
-        self.set_indirect_geometry(mesh, positions, indices)?;
-        self.gi.planner.set_pending_clear(pending);
+        let built = std::time::Instant::now();
+        // A re-skinned mesh keeps its tree and refits it to the pose (`skin_refit`).
+        let key: &wgpu::Buffer = &mesh.vertex;
+        let refit = skin_refit()
+            .then(|| self.gi.meshes.iter().find(|(k, _)| k == key))
+            .flatten()
+            .map(|(_, b)| b)
+            .filter(|b| b.exact && b.bvh.positions.len() == positions.len() && b.bvh.indices.len() == indices.len())
+            .map(|b| {
+                let mut bvh = b.bvh.clone();
+                crate::asset::near_field::refit_bvh(&mut bvh, positions).map(|()| bvh)
+            });
+        let refit_ok = matches!(refit, Some(Ok(_)));
+        let bvh = match refit {
+            Some(Ok(bvh)) => bvh,
+            _ => gi_bvh::build(positions, indices)?,
+        };
+        let mut blas = Blas::new(bvh, 0)?;
+        blas.exact = true;
+        let build_ms = built.elapsed().as_secs_f64() * 1000.;
+        // Measurement only (change log): why a pose could not patch.
+        let diagnosis = super::change_log::enabled().then(|| {
+            let old = self.gi.meshes.iter().find(|(k, _)| k == key).map(|(_, b)| b);
+            format!(
+                "\"old={} exact={} same_vertices={} same_indices={} packed={} refit={}\"",
+                old.is_some(),
+                old.is_some_and(|b| b.exact),
+                old.is_some_and(|b| b.bvh.positions.len() == positions.len()),
+                old.is_some_and(|b| b.bvh.indices.len() == indices.len()),
+                self.gi.packed.is_some(),
+                refit_ok,
+            )
+        });
+        let unpatched = if skin_patch() {
+            self.patch_skinned_blas(mesh, blas)?
+        } else {
+            Some(blas)
+        };
+        let patched = unpatched.is_none();
+        if super::change_log::enabled() {
+            super::change_log::report(
+                self.frames + 1,
+                "skinned_geometry",
+                &[],
+                &[
+                    ("build_ms", format!("{build_ms:.3}")),
+                    ("patched", patched.to_string()),
+                    ("state", diagnosis.unwrap_or_default()),
+                ],
+            );
+        }
+        if let Some(blas) = unpatched {
+            let pending = self.gi.planner.pending_clear();
+            self.set_indirect_blas(mesh, blas)?;
+            self.gi.planner.set_pending_clear(pending);
+        }
         Ok(true)
+    }
+    /// Play loop (sunrt, 2026-11-16): writes a re-skinned mesh's new software geometry over its
+    /// own words in the packed buffer, when the new tree has the old one's node, leaf, position
+    /// and index counts and neither has near-field masks, and swaps it in as the mesh's geometry.
+    /// Every other packed word is unchanged, and the instance records (bounds, root) are rewritten
+    /// by `prepare_gi_geometry` as on any frame. Hands the geometry back, changing nothing, when
+    /// it is not packed or a size differs: the caller then repacks everything, as before.
+    /// A skinned character otherwise discarded the packed buffer on every pose, so each frame
+    /// repacked and re-uploaded every mesh, the static world included (Showcase: 5.8 ms CPU).
+    fn patch_skinned_blas(&mut self, mesh: &Mesh, blas: Blas) -> Result<Option<Blas>, Error> {
+        let key: &wgpu::Buffer = &mesh.vertex;
+        let Some(index) = self.gi.meshes.iter().position(|(k, _)| k == key) else {
+            return Ok(Some(blas));
+        };
+        let old = &self.gi.meshes[index].1;
+        let same = |a: &Blas, b: &Blas| {
+            a.bvh.nodes.len() == b.bvh.nodes.len()
+                && a.bvh.leaves.len() == b.bvh.leaves.len()
+                && a.bvh.positions.len() == b.bvh.positions.len()
+                && a.bvh.indices.len() == b.bvh.indices.len()
+                && a.near.is_empty()
+                && b.near.is_empty()
+        };
+        let Some(packed) = self.gi.packed.as_ref() else {
+            return Ok(Some(blas));
+        };
+        if !same(old, &blas) || self.gi.world.iter().flat_map(|w| &w.meshes).any(|m| m.as_ref() == Some(key)) {
+            return Ok(Some(blas));
+        }
+        let regions: Vec<u32> = packed
+            .meshes
+            .iter()
+            .zip(&packed.entry)
+            .filter(|(m, _)| *m == key)
+            .filter_map(|(_, e)| e.map(|i| packed.offsets[i][0]))
+            .collect();
+        if regions.is_empty() {
+            return Ok(Some(blas));
+        }
+        let words = gi_bvh::mesh_words(&[&blas], &[[0; 4]], &[vec![]], blas.words());
+        let raw: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        for start in regions {
+            self.queue.write_buffer(&packed.buffer, u64::from(start) * 4, &raw);
+        }
+        self.gi.meshes[index].1 = Arc::new(blas);
+        Ok(None)
     }
     /// Selects world radiance cache settings. Enabling allocates the table (all
     /// slots empty); a new slot count reallocates it. With `auto_slots` (and no
@@ -3332,6 +3445,24 @@ impl Renderer {
         let instances: usize = draws.iter().map(|d| d.instances.len()).sum::<usize>()
             - covered.iter().filter(|&&c| c).count()
             + usize::from(!covered.is_empty());
+        if super::change_log::enabled() {
+            let why = match self.gi.packed.as_ref() {
+                None => "none".to_owned(),
+                Some(p) => format!(
+                    "{}{}{}{}",
+                    if p.meshes != meshes { "meshes " } else { "" },
+                    if p.instances != instances { "instances " } else { "" },
+                    if p.covered != covered { "covered " } else { "" },
+                    if p.ids != ids { "ids" } else { "" }
+                ),
+            };
+            super::change_log::report(
+                self.frames + 1,
+                "gi_pack",
+                &[],
+                &[("repack_because", format!("\"{}\"", why.trim())), ("instances", instances.to_string())],
+            );
+        }
         if self.gi.packed.as_ref().is_none_or(|p| {
             p.meshes != meshes || p.instances != instances || p.covered != covered || p.ids != ids
         }) {
@@ -3544,7 +3675,16 @@ impl Renderer {
         let run = self.gi.settings.enabled && eligible && self.gi_callers(draws);
         let software = !hardware;
         let ids = self.gi_draw_ids(draws);
+        let geometry_start = std::time::Instant::now();
         let run = run && (hardware || self.prepare_gi_geometry(draws, &ids)?);
+        if super::change_log::enabled() {
+            super::change_log::report(
+                self.frames + 1,
+                "gi_geometry",
+                &[],
+                &[("prepare_gi_geometry_ms", format!("{:.3}", geometry_start.elapsed().as_secs_f64() * 1000.))],
+            );
+        }
         // Bounce (G2): the setting is on and this frame's program reflects light. A change
         // empties the table, so no cell keeps bounce light from another program's frames.
         let bounce = run && self.gi.settings.bounce && self.ensure_gi_shade(software)?;
@@ -3704,6 +3844,32 @@ impl Renderer {
             if let Some(s) = &d.mesh.skin {
                 skin_revisions.extend(s.revision.to_le_bytes());
             }
+        }
+        if super::change_log::enabled() {
+            let camera_bytes = matrix_bytes(still.0.matrix(size[0], size[1]));
+            let lights = format!("{:?}", self.lighting.source_lights);
+            let settings = format!("{:?}", self.gi.settings);
+            super::change_log::report(
+                self.frames + 1,
+                "gi",
+                &[
+                    ("camera", &camera_bytes),
+                    ("placements", &self.gi.arrays.as_ref().unwrap().revision_bytes),
+                    ("environment", &environment),
+                    ("poses", &skin_revisions),
+                    ("lights", lights.as_bytes()),
+                    ("decals", &self.lighting.decals.hash),
+                    ("transmission", &self.lighting.transmission.hash),
+                    ("settings", settings.as_bytes()),
+                    ("size", &still.1),
+                ],
+                &[
+                    ("bounce", bounce.to_string()),
+                    ("tick", tick.to_string()),
+                    ("idle_frames", self.view.gi.idle_frames.to_string()),
+                    ("view_frames", self.view.gi.view_frames.to_string()),
+                ],
+            );
         }
         let finished = self.gi.planner.finish(
             &config,
