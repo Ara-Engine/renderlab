@@ -803,8 +803,8 @@ fn vd_class(facing:vec2<u32>)->u32 {
 }
 fn vd_certainty(facing:vec2<u32>) {
     atomicAdd(&vd_counts[0],1u);
-    let class=vd_class(facing);
-    if class==2u {atomicAdd(&vd_counts[1],1u);return;}
+    let kind=vd_class(facing);
+    if kind==2u {atomicAdd(&vd_counts[1],1u);return;}
     let p=vd_px.p;let point=vd_px.point;
     let m=2.0*vsm_texel(vd_px.level);
     var same=true;
@@ -818,7 +818,7 @@ fn vd_certainty(facing:vec2<u32>) {
         if !vd_px.thin {let _f=vd_facing();}
         let moved=vd_mask;
         vd_map();
-        same=vd_class(moved)==class;
+        same=vd_class(moved)==kind;
     }
     vd_px.p=p;vd_px.point=point;
     atomicAdd(&vd_counts[select(2u,3u,same)],1u);
