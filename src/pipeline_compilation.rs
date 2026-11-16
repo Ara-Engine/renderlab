@@ -24,6 +24,11 @@ pub struct CompilationTiming {
 }
 
 pub(crate) const CACHE_BYTES: usize = 64 * 1024 * 1024;
+/// A cache file whose payload is above this is near `CACHE_BYTES`: a driver cache only grows
+/// (every shader edit adds kernels and nothing removes stale ones), so the next start begins a
+/// fresh cache instead of loading it, and that cache keeps only the pipelines its run creates.
+/// One Glint run's own set is about 45 MiB, leaving the fresh cache about 11 MiB to grow.
+pub(crate) const FRESH_BYTES: usize = CACHE_BYTES - CACHE_BYTES / 8;
 
 struct Compilation {
     cache: Option<wgpu::PipelineCache>,
@@ -71,10 +76,7 @@ impl PipelineDevice {
         if let Some(path) = &path {
             remove_stale_temporaries(path);
         }
-        let (bytes, on_disk) = path
-            .as_ref()
-            .and_then(|path| read_cache_checked(path).ok().flatten())
-            .map_or((None, None), |(data, hash)| (Some(data), Some(hash)));
+        let (bytes, on_disk) = path.as_deref().map_or((None, None), load_cache);
         let cache = (disk.is_some() && raw.features().contains(wgpu::Features::PIPELINE_CACHE))
             .then(|| {
                 // SAFETY: only checksummed, size-bounded wgpu get_data output is read.
@@ -355,27 +357,67 @@ pub(crate) fn read_cache_checked(path: &Path) -> std::io::Result<Option<(Vec<u8>
     file.take(CACHE_BYTES as u64 + 33).read_to_end(&mut bytes)?;
     Ok(cache_data(&bytes).map(|data| (data.to_vec(), bytes[..32].try_into().unwrap())))
 }
+/// The start-up read of a cache file: the data to create the cache from and the checksum of
+/// what the file holds (`write_cache`'s `on_disk`). Unreadable files start empty, with a
+/// warning. A file near the bound (`FRESH_BYTES`) also starts empty, logged, with no checksum,
+/// so the first save replaces it with this run's pipelines only.
+pub(crate) fn load_cache(path: &Path) -> (Option<Vec<u8>>, Option<[u8; 32]>) {
+    match read_cache_checked(path) {
+        Ok(Some((data, _))) if data.len() > FRESH_BYTES => {
+            eprintln!(
+                "pipeline_cache_fresh: {} holds {:.1} MiB, near the {} MiB bound; starting a fresh cache \
+                 that keeps only the pipelines this run creates",
+                path.display(),
+                mib(data.len()),
+                CACHE_BYTES >> 20
+            );
+            (None, None)
+        }
+        Ok(loaded) => loaded.map_or((None, None), |(data, hash)| (Some(data), Some(hash))),
+        Err(error) => {
+            eprintln!("pipeline_cache_load_failed: {}: {error}; starting empty", path.display());
+            (None, None)
+        }
+    }
+}
+fn mib(bytes: usize) -> f64 {
+    bytes as f64 / (1 << 20) as f64
+}
 /// Replaces `path` with `cache`'s current data behind a checksum, unless the data is the
 /// same as `on_disk` (the checksum of what `path` holds: loaded or last written), which is
-/// then left alone. Returns whether it wrote. Data over the size bound is not written.
+/// then left alone. Returns whether it wrote. Data over the size bound cannot be written: that
+/// is an error, and `path` is removed so the next start begins a fresh cache.
 pub(crate) fn write_cache(
     path: &Path,
     cache: &wgpu::PipelineCache,
     on_disk: &mut Option<[u8; 32]>,
 ) -> std::io::Result<bool> {
-    match cache.get_data() {
-        Some(data) if data.len() <= CACHE_BYTES => write_cache_bytes(path, &data, on_disk),
-        _ => Ok(false),
-    }
+    cache.get_data().map_or(Ok(false), |data| write_cache_bytes(path, &data, on_disk))
 }
 /// `write_cache`'s file side. Each write goes to its own same-directory temporary file
 /// (`<name>.<pid>-<n>.tmp`) and is renamed over `path`, so engines in one process and other
 /// processes can share a directory: readers see a whole old or a whole new file, and the
 /// last rename wins. The writer holds an exclusive lock on the temporary file until the
 /// rename, and `Temporary` removes it on every error (and on a panic); a killed writer's
-/// file is removed by the next start-up (`remove_stale_temporaries`).
+/// file is removed by the next start-up (`remove_stale_temporaries`). Data over `CACHE_BYTES`
+/// is an error (see `write_cache`).
 pub(crate) fn write_cache_bytes(path: &Path, data: &[u8], on_disk: &mut Option<[u8; 32]>) -> std::io::Result<bool> {
     use std::io::Write;
+    if data.len() > CACHE_BYTES {
+        // The file this run loaded (if `path` still holds it) can no longer take the run's
+        // pipelines: removing it makes the next start a fresh cache. Another writer's newer
+        // file is left alone.
+        let loaded = on_disk.take();
+        let removed = loaded.is_some()
+            && read_cache_checked(path).is_ok_and(|file| file.map(|(_, hash)| hash) == loaded)
+            && std::fs::remove_file(path).is_ok();
+        return Err(std::io::Error::other(format!(
+            "{:.1} MiB of pipelines is over the {} MiB bound and cannot be saved; {}",
+            mib(data.len()),
+            CACHE_BYTES >> 20,
+            if removed { "removed the file, so the next start begins a fresh cache" } else { "the file is left as it is" }
+        )));
+    }
     let hash: [u8; 32] = Sha256::digest(data).into();
     if *on_disk == Some(hash) {
         return Ok(false);
@@ -472,8 +514,9 @@ impl Compilation {
             return false;
         };
         write_cache(path, cache, on_disk).unwrap_or_else(|error| {
-            // Cache I/O is optional acceleration, never a rendering failure.
-            eprintln!("pipeline_cache_save_failed={error}");
+            // Cache I/O is optional acceleration, never a rendering failure, but a cache that
+            // stops saving makes every start compile again: say so.
+            eprintln!("warning: pipeline_cache_save_failed: {}: {error}", path.display());
             false
         })
     }
@@ -524,6 +567,28 @@ mod tests {
         std::fs::create_dir_all(blocked.join("inside")).unwrap();
         assert!(write_cache_bytes(&blocked, b"data", &mut None).is_err());
         assert!(temporaries(&directory).is_empty(), "{:?}", temporaries(&directory));
+        std::fs::remove_dir_all(&directory).unwrap();
+    }
+    #[test]
+    fn a_cache_near_the_bound_starts_fresh_and_one_over_it_cannot_save_silently() {
+        let directory = scratch("bound");
+        let path = directory.join("pc1-test.bin");
+        let near = vec![7u8; FRESH_BYTES + 1];
+        assert!(write_cache_bytes(&path, &near, &mut None).unwrap());
+        // The next start does not load it, and its first save replaces it with its own data.
+        let (data, mut loaded) = load_cache(&path);
+        assert!(data.is_none() && loaded.is_none());
+        assert!(write_cache_bytes(&path, b"this run", &mut loaded).unwrap());
+        assert_eq!(load_cache(&path), (Some(b"this run".to_vec()), loaded));
+        // A run that outgrows the bound gets an error, and the file it loaded is removed.
+        let over = vec![0u8; CACHE_BYTES + 1];
+        let error = write_cache_bytes(&path, &over, &mut loaded).unwrap_err();
+        assert!(error.to_string().contains("next start begins a fresh cache"), "{error}");
+        assert!(!path.exists() && loaded.is_none());
+        // Another writer's newer file is left alone.
+        write_cache_bytes(&path, b"other", &mut None).unwrap();
+        assert!(write_cache_bytes(&path, &over, &mut Some([0; 32])).is_err());
+        assert_eq!(read_cache(&path).unwrap().unwrap(), b"other");
         std::fs::remove_dir_all(&directory).unwrap();
     }
     #[test]

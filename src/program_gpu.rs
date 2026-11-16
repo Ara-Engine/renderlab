@@ -219,7 +219,7 @@ impl ProgramCache {
             && pipelines > 0
             && let Err(error) = crate::pipeline_compilation::write_cache(path, cache, &mut self.on_disk)
         {
-            eprintln!("program_pipeline_cache_save_failed={error}");
+            eprintln!("warning: program_pipeline_cache_save_failed: {}: {error}", path.display());
         }
     }
     pub fn get(&self) -> Option<&wgpu::PipelineCache> {
@@ -612,7 +612,9 @@ pub(super) fn standard_slot(
 impl Renderer {
     /// Enables a persistent cache in an application-owned directory. Configure before
     /// the first lit frame. Files include a checksum, wgpu version and adapter/driver
-    /// identity; damaged or obsolete files start empty. Saving follows each compiled batch.
+    /// identity; damaged or obsolete files start empty, as does a file near the size bound
+    /// (logged; the fresh cache keeps this session's pipelines). Saving follows each compiled
+    /// batch; a save that cannot happen prints a warning.
     pub fn set_program_cache_directory(
         &mut self,
         directory: &Path,
@@ -627,9 +629,9 @@ impl Renderer {
         let driver = Sha256::digest(format!("{adapter:?}").as_bytes());
         let path = directory.join(format!("wgpu30-{key}-{driver:x}.bin"));
         crate::pipeline_compilation::remove_stale_temporaries(&path);
-        let loaded = crate::pipeline_compilation::read_cache_checked(&path)?;
-        self.program_cache.on_disk = loaded.as_ref().map(|(_, hash)| *hash);
-        let data = loaded.as_ref().map(|(data, _)| data.as_slice());
+        let (loaded, on_disk) = crate::pipeline_compilation::load_cache(&path);
+        self.program_cache.on_disk = on_disk;
+        let data = loaded.as_deref();
         // SAFETY: the application-owned file contains only wgpu 30 get_data() output.
         // Its checksum rejects partial/corrupt writes; wgpu validates its own header
         // and driver compatibility, falling back to an empty cache on stale data.
