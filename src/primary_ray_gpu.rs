@@ -1163,6 +1163,11 @@ impl PrimaryState {
     pub(super) fn frame_buffer(&self) -> &wgpu::Buffer {
         &self.frame.as_ref().unwrap().0.value
     }
+    /// The frame's software trace geometry (non-RT; shaders/reflections_software_bvh4.wgsl),
+    /// which the sun-shadow lookup's edge rays read.
+    pub(super) fn software_geometry(&self) -> Option<&wgpu::Buffer> {
+        self.reflections.as_ref().map(|r| &*r.buffer.value)
+    }
     /// The prepared frame's placement-ordered models and geometry tables (N8).
     pub(super) fn virtual_geometry(&self) -> Option<(&wgpu::Buffer, &wgpu::BindGroup)> {
         self.geometry
