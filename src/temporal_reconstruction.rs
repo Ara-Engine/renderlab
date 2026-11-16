@@ -1782,8 +1782,12 @@ impl Planner {
         // texel whose new class matches the old view's carries its old streak on (rtvis_hold):
         // only once the history has run SUN_REUSE_STREAK frames since the restart does a streak
         // that long mean agreement in this view (Glint `descent`: a seam reused lit, 10 codes off).
+        // Measurement only: RENDERLAB_SUNRT_DIAG=movereuse reuses on moving frames too, with no
+        // disocclusion test (wrong pictures; the bound on reusing settled classes while moving).
+        let moving = std::env::var("RENDERLAB_SUNRT_DIAG")
+            .is_ok_and(|v| v.split(',').any(|f| f == "movereuse"));
         let reuse = if hint != 0
-            && unchanged
+            && (unchanged || moving)
             && self.history_frames >= SUN_REUSE_STREAK
             && sun_still_reuse()
         {
