@@ -1069,8 +1069,21 @@ pub(crate) struct Composed {
 /// One module: `head` (the prelude with its visibility variant and, for traced stages,
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
+/// The final gather (`RENDERLAB_FINAL_GATHER=1`, src/gi_receiver_pass.rs): screen probes trace
+/// the scene and pixels integrate them; no pixel reads a lighting-cache cell. Off by default
+/// until its pictures hold.
+pub(crate) fn final_gather() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_FINAL_GATHER").is_ok_and(|v| v.trim() == "1"))
+}
 pub(crate) fn compose(head: &str, program: &str, stage: Stage, parameters: bool) -> Composed {
-    let composed = compose_stage(head, program, stage, parameters, false);
+    let mut composed = compose_stage(head, program, stage, parameters, false);
+    const SKY_RELATIVE: &str = "const GI_SKY_ABSOLUTE:bool=false;";
+    if final_gather() && composed.source.matches(SKY_RELATIVE).count() == 1 {
+        let at = composed.source.find(SKY_RELATIVE).unwrap();
+        debug_assert!(at < composed.program.start);
+        composed.source = composed.source.replacen(SKY_RELATIVE, "const GI_SKY_ABSOLUTE:bool=true; ", 1);
+    }
     let composed = match (stage, light_bound()) {
         (Stage::Traced | Stage::TracedStreamed, Some(bound)) => with_light_bound(composed, bound),
         _ => composed,

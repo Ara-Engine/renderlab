@@ -313,12 +313,20 @@ fn gi_prepare(input:SurfaceInput) {
 }
 // The prepared receiver's occluded sky irradiance about n in lux, or the open environment's
 // where the cache has no value.
+// Whether the prepared sky slots hold absolute incoming radiance (the final gather,
+// gi_receiver_pass.wgsl: everything a probe saw, sky and bounce) instead of the cache's sky
+// in cached units. src/program.rs sets it with RENDERLAB_FINAL_GATHER.
+const GI_SKY_ABSOLUTE:bool=false;
+fn gi_rx_sky_value(e:vec3<f32>) -> vec3<f32> {
+    if GI_SKY_ABSOLUTE { return max(e,vec3<f32>(0.0)); }
+    return gi_sky_scale(max(e,vec3<f32>(0.0)));
+}
 fn gi_rx_sky_irradiance(n:vec3<f32>) -> vec3<f32> {
     if !gi_rx_valid { return gi_open_irradiance(n); }
     gi_sh_basis(n);
     var e=vec3<f32>(0.0);
     for(var i=0u;i<9u;i+=1u) { e+=gi_band_weight(i)*gi_y[i]*gi_rx_sky[i]; }
-    return gi_sky_scale(max(e,vec3<f32>(0.0)));
+    return gi_rx_sky_value(e);
 }
 // The prepared receiver's bounce light in lux about n (G2), or radiance in a GGX lobe of
 // perceptual roughness about a direction; zero without a value.
@@ -360,6 +368,6 @@ fn indirect_irradiance(input:SurfaceInput, n:vec3<f32>) -> vec3<f32> {
     for(var i=0u;i<9u;i+=1u) { sky+=gi_band_weight(i)*gi_y[i]*gi_rx_sky[i]; }
     var bounce=vec3<f32>(0.0);
     for(var i=0u;i<4u;i+=1u) { bounce+=gi_band_weight(i)*gi_y[i]*gi_rx_bounce[i]; }
-    return gi_sky_scale(max(sky,vec3<f32>(0.0)))+max(bounce,vec3<f32>(0.0));
+    return gi_rx_sky_value(sky)+max(bounce,vec3<f32>(0.0));
 }
 // ---- end of the indirect-light inputs ----
