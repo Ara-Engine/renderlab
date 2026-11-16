@@ -1070,7 +1070,7 @@ pub(crate) struct Composed {
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
 /// Relit GI samples (`rl_gi_provisional`): where the lighting cache's value under a pixel moved
-/// by more than 3% since the last frame (src/gi_receiver_pass.rs `CHANGE`, on last frame's
+/// by more than 15% since the last frame (src/gi_receiver_pass.rs `CHANGE`, on last frame's
 /// receiver), TR1 starts the pixel again instead of averaging the old lighting into its
 /// 256-frame history. Without it a still view kept the cache's cell mosaic from the frames
 /// after a cut (Glint's pillars, shade-16). `RENDERLAB_GI_PROVISIONAL=0` marks nothing.

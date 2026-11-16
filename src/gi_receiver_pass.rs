@@ -127,8 +127,11 @@ fn reuse() -> bool {
 }
 /// Last frame's prepared record at a pixel against this lookup (gi_rx_*): their irradiance
 /// (sky and bounce, band 0, in lux) differs by more than GI_RX_CHANGE of the larger, or one has
-/// no value. Records quantize coefficients to 8 bits of their largest: about 1%.
-const CHANGE: &str = "const GI_RX_CHANGE:f32=0.03;
+/// no value. Records quantize coefficients to 8 bits of their largest: about 1%. At 3% the
+/// cache's ordinary still-view updates restarted enough pixels to add visible shimmer on
+/// Glint's edges; 15% catches the stand-in-to-cell jumps (the pillar mosaic) with flicker
+/// back at the check-off level (shade-16).
+const CHANGE: &str = "const GI_RX_CHANGE:f32=0.15;
 fn gi_rx_irradiance(sky:vec3<f32>,bounce:vec3<f32>)->f32 {
     return dot(gi_sky_scale(max(sky,vec3<f32>(0.0)))+max(bounce,vec3<f32>(0.0)),vec3<f32>(1.0));
 }
@@ -160,7 +163,7 @@ fn with_reuse(kernel: &str) -> String {
     let change = std::env::var("RENDERLAB_GI_RX_CHANGE")
         .ok()
         .and_then(|v| v.parse::<f32>().ok())
-        .map_or(CHANGE.to_owned(), |t| CHANGE.replacen("GI_RX_CHANGE:f32=0.03;", &format!("GI_RX_CHANGE:f32={t:?};"), 1));
+        .map_or(CHANGE.to_owned(), |t| CHANGE.replacen("GI_RX_CHANGE:f32=0.15;", &format!("GI_RX_CHANGE:f32={t:?};"), 1));
     let declaration = format!("{declaration}{change}");
     format!("{declaration}{}", kernel.replacen(MISS, missed, 1).replacen(LOOKUP, keyed, 1))
 }
