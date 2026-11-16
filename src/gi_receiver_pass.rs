@@ -132,9 +132,9 @@ fn gi_rx_changed(at:u32)->bool {
     let a=gi_prepared[at].r0;let c=gi_prepared[at].r2;
     let scales=bitcast<vec2<f32>>(a.xy);
     if !(scales.x>=0.0) || !gi_rx_valid {return (scales.x>=0.0)!=gi_rx_valid;}
-    let old=gi_rx_irradiance(unpack4x8snorm(a.z).xyz*scales.x,vec3<f32>(unpack4x8snorm(c.x).w,unpack4x8snorm(c.y).xy)*scales.y);
-    let new=gi_rx_irradiance(gi_rx_sky[0u],gi_rx_bounce[0u]);
-    return abs(new-old)>GI_RX_CHANGE*max(max(new,old),1e-6);
+    let before=gi_rx_irradiance(unpack4x8snorm(a.z).xyz*scales.x,vec3<f32>(unpack4x8snorm(c.x).w,unpack4x8snorm(c.y).xy)*scales.y);
+    let now=gi_rx_irradiance(gi_rx_sky[0u],gi_rx_bounce[0u]);
+    return abs(now-before)>GI_RX_CHANGE*max(max(now,before),1e-6);
 }
 ";
 /// Bytes of the keys buffer ahead of its per-pixel words: the frame's reuse word and padding.
