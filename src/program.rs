@@ -1069,11 +1069,11 @@ pub(crate) struct Composed {
 /// One module: `head` (the prelude with its visibility variant and, for traced stages,
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
-/// Provisional GI samples (`rl_gi_provisional`): a receiver whose lookup weighted a cell the
-/// cache has not made or lit yet tells TR1, which keeps no long history of it
-/// (temporal_resolve.wgsl TR1_PROVISIONAL_WINDOW). Without it a still view kept the cache's
-/// cell mosaic from the frames after a cut in its 256-frame history (Glint's pillars, shade-16).
-/// `RENDERLAB_GI_PROVISIONAL=0` marks nothing.
+/// Relit GI samples (`rl_gi_provisional`): where the lighting cache's value under a pixel moved
+/// by more than 3% since the last frame (src/gi_receiver_pass.rs `CHANGE`, on last frame's
+/// receiver), TR1 starts the pixel again instead of averaging the old lighting into its
+/// 256-frame history. Without it a still view kept the cache's cell mosaic from the frames
+/// after a cut (Glint's pillars, shade-16). `RENDERLAB_GI_PROVISIONAL=0` marks nothing.
 pub(crate) fn gi_provisional() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_PROVISIONAL").map_or(true, |v| v.trim() != "0"))
@@ -1280,7 +1280,7 @@ fn compose_stage(
         (true, false) => "fn rl_indirect_prepare(input:SurfaceInput) { gi_prepare(input); }\n",
         _ => "fn rl_indirect_prepare(input:SurfaceInput) {}\n",
     });
-    // Whether the receiver's GI is provisional (gi_api.wgsl gi_rx_provisional): the traced
+    // Whether the receiver's GI changed under it (gi_api.wgsl gi_rx_provisional): the traced
     // entry hands it to TR1 as the sign of the sample's view hint (temporal_view.wgsl).
     indirect.push_str(if indirect_calls && gi_provisional() {
         "fn rl_gi_provisional()->bool { return gi_rx_provisional; }\n"

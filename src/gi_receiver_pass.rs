@@ -121,6 +121,22 @@ fn reuse() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| lean() && std::env::var("RENDERLAB_GI_RX_REUSE").map_or(true, |v| v != "0"))
 }
+/// Last frame's prepared record at a pixel against this lookup (gi_rx_*): their irradiance
+/// (sky and bounce, band 0, in lux) differs by more than GI_RX_CHANGE of the larger, or one has
+/// no value. Records quantize coefficients to 8 bits of their largest: about 1%.
+const CHANGE: &str = "const GI_RX_CHANGE:f32=0.03;
+fn gi_rx_irradiance(sky:vec3<f32>,bounce:vec3<f32>)->f32 {
+    return dot(gi_sky_scale(max(sky,vec3<f32>(0.0)))+max(bounce,vec3<f32>(0.0)),vec3<f32>(1.0));
+}
+fn gi_rx_changed(at:u32)->bool {
+    let a=gi_prepared[at].r0;let c=gi_prepared[at].r2;
+    let scales=bitcast<vec2<f32>>(a.xy);
+    if !(scales.x>=0.0) || !gi_rx_valid {return (scales.x>=0.0)!=gi_rx_valid;}
+    let old=gi_rx_irradiance(unpack4x8snorm(a.z).xyz*scales.x,vec3<f32>(unpack4x8snorm(c.x).w,unpack4x8snorm(c.y).xy)*scales.y);
+    let new=gi_rx_irradiance(gi_rx_sky[0u],gi_rx_bounce[0u]);
+    return abs(new-old)>GI_RX_CHANGE*max(max(new,old),1e-6);
+}
+";
 /// Bytes of the keys buffer ahead of its per-pixel words: the frame's reuse word and padding.
 const KEYS_HEAD: u64 = 16;
 fn with_reuse(kernel: &str) -> String {
@@ -132,8 +148,11 @@ fn with_reuse(kernel: &str) -> String {
     let missed = "    let at_key=id.y*size.x+id.x;\n    if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x==0u {gi_rx_keys.keys[at_key]=0u;return;}\n    let record=textureLoad(primary_hit,vec2<i32>(id),0);\n    if record.x==0u {gi_rx_keys.keys[at_key]=0u;return;}\n";
     // The key: placement and normal bin, which choose the cells (the triangle changes under
     // the jitter on finely tessellated meshes: Glint, two thirds of its pixels a frame).
-    let keyed = "    let key=((record.x*0x9e3779b1u)^(gi_bin(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal))*0x85ebca6bu))|1u;\n    if gi_rx_keys.reuse!=0u && gi_rx_keys.keys[at_key]==key {return;}\n    gi_rx_keys.keys[at_key]=key;\n    gi_prepare(input);\n";
+    // A pixel on last frame's key whose lookup moved by more than GI_RX_CHANGE from last frame's
+    // record is marked provisional: TR1 starts it again (program.rs gi_provisional).
+    let keyed = "    let key=((record.x*0x9e3779b1u)^(gi_bin(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal))*0x85ebca6bu))|1u;\n    let same=gi_rx_keys.keys[at_key]==key;\n    if gi_rx_keys.reuse!=0u && same {return;}\n    gi_rx_keys.keys[at_key]=key;\n    gi_prepare(input);\n    gi_rx_provisional=same && gi_rx_changed(at_key);\n";
     let declaration = "struct GiRxKeys { reuse:u32, pad0:u32, pad1:u32, pad2:u32, keys:array<u32> };\n@group(2) @binding(0) var<storage,read_write> gi_rx_keys:GiRxKeys;\n";
+    let declaration = format!("{declaration}{CHANGE}");
     format!("{declaration}{}", kernel.replacen(MISS, missed, 1).replacen(LOOKUP, keyed, 1))
 }
 fn count() -> bool {

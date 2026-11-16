@@ -191,8 +191,8 @@ fn tr1_gather(p:vec2<i32>,id:u32,r:vec2<f32>)->vec4<f32> {
 // (skinned vertices' previous positions, SK1; a moved placement's previous transform, MQ1),
 // whether either moved it, and its program's view dependence (MQ2: the sample's alpha
 // minus 1, shaders/temporal_view.wgsl; 0 when view-independent).
-// `provisional`: its sample's GI stood in for cells the cache had not made yet (the view
-// hint's sign, src/program.rs gi_provisional).
+// `provisional`: the lighting cache's value under its sample changed since the last frame (the
+// view hint's sign, src/program.rs gi_provisional).
 struct Tr1Surface { point:vec4<f32>, id:u32, side:u32, distance:f32, normal:vec3<f32>, previous_point:vec4<f32>, previous_normal:vec3<f32>, moved:bool, view:f32, provisional:bool };
 // MV1: MQ1/MQ2 surface classification reads the shared submitted snapshot.
 fn tr1_moved(id:u32)->bool {return id!=0u && id!=TR1_NONE && motion_rigid((id-1u)&TR1_ID);}
@@ -298,15 +298,6 @@ var<private> tr1_ray:mat3x3<f32>;
 // The linear ray (`RENDERLAB_TR1_LINEAR_RAY=0` sets it false: the matrix form per tap). The
 // two differ only by rounding, a few plane tests at their threshold.
 const TR1_LINEAR_RAY:bool=true;
-// Provisional samples (Tr1Surface.provisional) keep a short history, so the jitter still
-// averages, and the first complete sample after them starts the pixel again: the stand-in
-// leaves nothing behind. A first slot holding provisional history stores its weight plus
-// TR1_PROVISIONAL_CODE (windows are at most 65536).
-const TR1_PROVISIONAL_WINDOW:f32=8.0;
-const TR1_PROVISIONAL_CODE:f32=65536.0;
-fn tr1_decode_weight(w:f32)->f32 {return select(w,w-TR1_PROVISIONAL_CODE,w>=TR1_PROVISIONAL_CODE);}
-// Whether a first-slot tap tr1_history accepted held provisional history.
-var<private> tr1_tap_provisional:bool;
 fn tr1_anchor_prepare() {
     if !TR1_LINEAR_RAY {return;}
     let m=tr1.previous_inverse;
@@ -364,10 +355,7 @@ fn tr1_tap(t:vec2<i32>,s:Tr1Surface,expected:f32,size:vec2<u32>)->vec4<f32> {
             let point=tr1_anchor_point(t,bitcast<f32>(a.y),vec2<f32>(size));
             ok=abs(tr1_dot(s.previous_normal,point-s.previous_point.xyz))<=4.0*tr1.previous_eye.w*expected;
         }
-        if ok {
-            tr1_tap_provisional=tr1_tap_provisional || colour.w>=TR1_PROVISIONAL_CODE;
-            return vec4<f32>(colour.xyz,tr1_decode_weight(colour.w));
-        }
+        if ok {return colour;}
     }
     let second=tr1_second(t,a.x);
     if second.id==s.id && !(thin && second.side!=s.side) && second.weight>0.0 {
@@ -388,7 +376,7 @@ fn tr1_catmull_rom(t:f32)->vec4<f32> {
 // bilinear weighted sum of their weights; Catmull-Rom over 4x4 when every tap shows it,
 // limited to the inner taps' range (history only: the undershoot fix, not a current-frame
 // box). `window` is the window the fetch allows.
-struct Tr1History { colour:vec3<f32>, weight:f32, window:f32, provisional:bool };
+struct Tr1History { colour:vec3<f32>, weight:f32, window:f32 };
 // Whether surface s restarts this frame (shaders/temporal_zones.wgsl): a static receiver
 // whose light a moving caster's swept shadow can change (SK1), or any surface point in a
 // changed local light's restart sphere (P-RELIT). It starts again from this frame's samples
@@ -406,7 +394,6 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     let q=tr1_fetch_position(p,s,vec2<f32>(size));
     let base=vec2<i32>(floor(q));
     let f=q-floor(q);
-    tr1_tap_provisional=false;
     var expected=0.0;
     if s.id!=0u {
         let v=s.previous_point.xyz-tr1.previous_eye.xyz;
@@ -482,11 +469,6 @@ fn tr1_history(p:vec2<i32>,s:Tr1Surface,size:vec2<u32>)->Tr1History {
     // MQ1: while placements move, light they change on other surfaces (moving shadows,
     // reflections of moving objects) is held to this frame's 3x3 range.
     if (tr1.flags.y&TR1_BOX)!=0u {h.colour=clamp(h.colour,tr1_box_lo,tr1_box_hi);}
-    // A provisional sample (its GI stood in for cells the cache has not made yet) replaces
-    // the history: averaging it in would keep the stand-in's cell mosaic for up to the static
-    // window once the cells exist.
-    if s.provisional {h.window=min(h.window,TR1_PROVISIONAL_WINDOW);}
-    h.provisional=tr1_tap_provisional;
     return h;
 }
 
@@ -536,9 +518,9 @@ fn tr1_coverage(p:vec2<i32>,o:Tr1Surface,u:u32,size:vec2<u32>)->vec3<f32> {
         let second=tr1_second(t,ax);
         var c=-1.0;var n=0.0;
         if first==o.id {
-            if second.id==TR1_NONE {c=1.0;n=tr1_decode_weight(textureLoad(tr1_colour_in,t,0).w);} else {c=second.coverage;n=second.coverage_weight;}
+            if second.id==TR1_NONE {c=1.0;n=textureLoad(tr1_colour_in,t,0).w;} else {c=second.coverage;n=second.coverage_weight;}
         } else if first==u {
-            if second.id==TR1_NONE {c=0.0;n=tr1_decode_weight(textureLoad(tr1_colour_in,t,0).w);} else if second.id==o.id {c=1.0-second.coverage;n=second.coverage_weight;} else {c=0.0;n=second.coverage_weight;}
+            if second.id==TR1_NONE {c=0.0;n=textureLoad(tr1_colour_in,t,0).w;} else if second.id==o.id {c=1.0-second.coverage;n=second.coverage_weight;} else {c=0.0;n=second.coverage_weight;}
         } else if second.id==o.id {
             c=1.0-second.coverage;n=second.coverage_weight;
         }
@@ -633,8 +615,10 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
     if s.id==0u && tr1.background.w!=0.0 {return vec4<f32>(quantizeToF16(tr1.background.xyz),tr1.windows.x);}
     var h:Tr1History;
     if tr1.flags.x==0u {h=tr1_history(p,s,size);}
-    // The cells the provisional history stood in for exist now: start again from this sample.
-    if h.provisional && !s.provisional {h.weight=0.0;}
+    // Its lighting changed under it (Tr1Surface.provisional): averaging the old lighting in
+    // would keep it for up to the static window (the cache's cell mosaic after a cut on
+    // Glint's pillars). It starts again, as a relit receiver does.
+    if s.provisional {h.weight=0.0;}
     if h.weight>0.0 {
         // This frame's sample weight: 1 at native resolution; upscaled, its tent weight.
         var w=tr1_weight(p);
@@ -660,7 +644,7 @@ fn tr1_continue(p:vec2<i32>,s:Tr1Surface,sample:vec3<f32>,size:vec2<u32>)->vec4<
 
 fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u),bitcast<u32>(s.distance),0u,0u));
-    textureStore(tr1_colour_out,p,vec4<f32>(film.xyz,film.w+select(0.0,TR1_PROVISIONAL_CODE,s.provisional)));
+    textureStore(tr1_colour_out,p,film);
     if !TR1_LAYER_BIT {textureStore(tr1_layer_out,p,vec4<u32>(TR1_NONE,0u,0u,0u));}
     textureStore(tr1_output,p,vec4<f32>(film.xyz,1.0));
 }
@@ -812,7 +796,7 @@ fn tr1_store_single(p:vec2<i32>,s:Tr1Surface,film:vec4<f32>) {
     // the layers differ by orders of magnitude (a bright sky behind rock).
     let film=select(select(mix(back,front,coverage),back,coverage<=0.0),front,coverage>=1.0);
     textureStore(tr1_anchor_out,p,vec4<u32>((s.id&TR1_ID)|((s.side&1u)<<23u)|select(0u,TR1_HAS_SECOND,TR1_LAYER_BIT),bitcast<u32>(s.distance),0u,0u));
-    textureStore(tr1_colour_out,p,vec4<f32>(mine.xyz,mine.w+select(0.0,TR1_PROVISIONAL_CODE,s.provisional)));
+    textureStore(tr1_colour_out,p,mine);
     let first_coverage=select(1.0-coverage,coverage,occluder_is_s);
     textureStore(tr1_layer_out,p,vec4<u32>((u.id&TR1_ID)|((u.side&1u)<<23u)|select(0u,TR1_FIRST_OCCLUDES,occluder_is_s),pack2x16float(theirs.xy),
         pack2x16float(vec2<f32>(theirs.z,theirs.w)),pack2x16float(vec2<f32>(first_coverage,coverage_weight))));
