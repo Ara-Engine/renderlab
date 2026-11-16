@@ -70,7 +70,7 @@ struct GiFrame {
     // whenever the claim rounds run), w the cell shading queue (its count is GI_W_SHADES).
     bounce:vec4<u32>,
     // Swept world bounds of moved placements: lo.xyz then hi.xyz.
-    boxes:array<vec4<f32>,64>,
+    boxes:array<vec4<f32>,256>,
 };
 const GI_SCAN_CASTER:u32=1u;
 const GI_SCAN_ROTATION:u32=2u;

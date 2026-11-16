@@ -41,9 +41,12 @@ const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
 const REQUEST_WORDS: u64 = 3;
-/// WGSL GiFrame: region, counts, offsets, requests, bounce, then 64 vec4 box corners.
-const FRAME_BYTES: usize = 80 + 64 * 16;
-const MAX_BOXES: usize = 32;
+/// WGSL GiFrame: region, counts, offsets, requests, bounce, then 256 vec4 box corners.
+const FRAME_BYTES: usize = 80 + 256 * 16;
+/// Moved-caster boxes a frame holds; more are clustered (cluster_boxes). Glint's play moves
+/// about 107 placements a frame: at 32, unions spanned the gaps between movers and every cell
+/// inside them was re-probed each frame.
+const MAX_BOXES: usize = 128;
 /// Claim and resolve repeat in rounds, so collisions retry within the frame.
 pub(crate) const CLAIM_ROUNDS: u32 = 3;
 /// Ray items per frame (shaders/gi_cache.wgsl GI_RAY_ITEMS): one visibility ray each,
@@ -4300,8 +4303,8 @@ mod tests {
                 [x, 0.0, z, x + 1.0, 1.0, z + 1.0]
             })
             .collect();
-        let clusters = cluster_boxes(boxes.clone(), MAX_BOXES);
-        assert!(clusters.len() <= MAX_BOXES);
+        let clusters = cluster_boxes(boxes.clone(), 32);
+        assert!(clusters.len() <= 32);
         for b in &boxes {
             assert!(clusters.iter().any(|c| (0..3).all(|k| c[k] <= b[k] && b[k + 3] <= c[k + 3])));
         }
