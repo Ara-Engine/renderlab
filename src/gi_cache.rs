@@ -271,11 +271,13 @@ fn moved_log(previous: &[[f32; 6]], bounds: &[[f32; 6]], boxes: &[[f32; 6]]) {
 }
 /// The default for `near_occluded_rays`.
 const NEAR_OCCLUDED_RAYS: u32 = 4;
-/// The still-view batch (Planner::finish): one cache frame in STILL_BATCH while a still view
-/// has fewer than STILL_BATCH_PENDING misses and queued gathers. `RENDERLAB_GI_STILL_BATCH=0`
-/// runs every frame.
+/// The still-view batch (Planner::finish): one cache frame in STILL_BATCH while a view is still,
+/// once STILL_BATCH_SETTLE cache frames have run since the last cut or clear (a cut's backlog
+/// drains first). It decided from a read-back count of pending work before, and the readback's
+/// timing changed which frames ran: the multi-view test failed on some runs.
+/// `RENDERLAB_GI_STILL_BATCH=0` runs every frame.
 const STILL_BATCH: u32 = 4;
-const STILL_BATCH_PENDING: u32 = 512;
+const STILL_BATCH_SETTLE: u32 = 48;
 fn still_batch_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_STILL_BATCH").map_or(true, |v| v != "0"))
@@ -1269,7 +1271,7 @@ pub(crate) struct ViewPlan {
 /// backend both plan through `begin` and `finish`, then `advance` once the frame's
 /// passes are certain to run.
 pub(crate) struct Planner {
-    /// Ticks since a caster last moved (stale cells' sweep, shaders/gi_cache.wgsl GI_STALE).
+    /// Frames since a caster last moved (stale cells' sweep, shaders/gi_cache.wgsl GI_STALE).
     since_movers: u32,
     bounds: Vec<[f32; 6]>,
     poses: Vec<crate::renderer::skinning::PlacementPose>,
@@ -1287,9 +1289,6 @@ pub(crate) struct Planner {
     environment_phase: u32,
     bounce_last: Option<bool>,
     bounce_busy: u32,
-    /// Misses plus queued gathers of a recent cache frame (still-view batch), u32::MAX
-    /// until one is read back.
-    pub(crate) pending: u32,
     /// Last collected frame's stale cells (shaders/gi_cache.wgsl GI_W_STALE_CELLS).
     pub(crate) stale_cells: u32,
     parity: bool,
@@ -1317,7 +1316,6 @@ impl Default for Planner {
             environment_phase: 0,
             bounce_last: None,
             bounce_busy: 0,
-            pending: u32::MAX,
             stale_cells: 0,
             parity: false,
             tick_queues: [0; 2],
@@ -1609,14 +1607,13 @@ impl Planner {
         }
         let mut flags = 0u32;
         // Stale cells left by movers: the scan keeps sweeping them for a full period after the
-        // last one stops.
-        if tick {
-            self.since_movers = if boxes.is_empty() {
-                self.since_movers.saturating_add(1)
-            } else {
-                0
-            };
-        }
+        // last one stops. Counted in frames, not ticks: a capture's held frames do not tick, and
+        // a tick count left the sweep (and the scan) running through every held frame.
+        self.since_movers = if boxes.is_empty() {
+            self.since_movers.saturating_add(1)
+        } else {
+            0
+        };
         let [_, sweep] = self.stale_turns();
         if sweep > 1 && self.since_movers < sweep {
             flags |= 64;
@@ -1826,14 +1823,15 @@ impl Planner {
         // few cells a frame (the temporal jitter moves pixels across cell edges: Glint, about
         // 50 a frame; none with the jitter off), and at such counts each pass costs the latency
         // of a few long software rays, not their number. Once the view has been still for
-        // STILL_BATCH frames and little is pending, the cache's passes run on one frame in
-        // STILL_BATCH only: the cells involved are made and lit at most STILL_BATCH - 1 frames
-        // later. Any motion, a relight, a moved caster or a larger backlog runs every frame.
+        // STILL_BATCH frames and a cut's backlog has had STILL_BATCH_SETTLE frames, the cache's
+        // passes run on one frame in STILL_BATCH only: the cells involved are made and lit at
+        // most STILL_BATCH - 1 frames later. Any motion, a relight or a moved caster runs every
+        // frame.
         if still_batch_on()
             && view.idle_frames >= STILL_BATCH
             && flags == 0
             && !busy
-            && self.pending < STILL_BATCH_PENDING
+            && self.since_cut.min(self.since_clear) >= STILL_BATCH_SETTLE
             && view.idle_frames % STILL_BATCH != 0
         {
             return Finished { frame, plan: None };
@@ -1939,7 +1937,6 @@ pub(super) struct GiState {
     /// `RENDERLAB_GI_PROBE_LOG`: the probe's work counters, read back without waiting.
     probe_log: Option<ProbeWatch>,
     /// The still-view batch: misses plus queued gathers of recent cache frames.
-    pending_watch: Option<FullWatch>,
     stale_watch: Option<FullWatch>,
 }
 
@@ -2163,16 +2160,12 @@ impl GiState {
             watch: None,
             grow: false,
             probe_log: None,
-            pending_watch: None,
             stale_watch: None,
         }
     }
     /// After the frame's submission (Renderer::submit_frame): maps the full-bucket readback.
     pub(crate) fn submitted(&mut self) {
         if let Some(watch) = &mut self.watch {
-            watch.submitted();
-        }
-        if let Some(watch) = &mut self.pending_watch {
             watch.submitted();
         }
         if let Some(watch) = &mut self.stale_watch {
@@ -3748,13 +3741,6 @@ impl Renderer {
                 self.gi.planner.stale_cells = stale;
             }
         }
-        if still_batch_on() {
-            let device = &self.device;
-            let watch = self.gi.pending_watch.get_or_insert_with(|| FullWatch::of_words(device, &[0, 38]));
-            if let Some(pending) = watch.collect() {
-                self.gi.planner.pending = pending;
-            }
-        }
         if let Some(full) = self.gi.watch.as_mut().and_then(FullWatch::collect) {
             self.gi.stats.peak_full = self.gi.stats.peak_full.max(full);
             self.gi.grow |= full > 0;
@@ -4392,9 +4378,6 @@ impl GiState {
             watch.record(encoder, &r.work);
         }
         if let (Some(watch), Some(r)) = (self.probe_log.as_mut(), self.resources.as_ref()) {
-            watch.record(encoder, &r.work);
-        }
-        if let (Some(watch), Some(r)) = (self.pending_watch.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
         }
         if let (Some(watch), Some(r)) = (self.stale_watch.as_mut(), self.resources.as_ref()) {
