@@ -107,11 +107,6 @@ fn light_reuse_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_LIGHT_REUSE").map_or(true, |v| v != "0"))
 }
-/// Whether a placement that jumps reports its two places as two boxes (Planner::finish).
-fn jump_boxes_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_JUMP_BOXES").map_or(true, |v| v != "0"))
-}
 /// Box diagonals around a moved caster within which cells re-trace the directions that cross
 /// it (shaders/gi_cache.wgsl gi_reach); RENDERLAB_GI_MOVER_REACH=0 re-traces at any distance.
 fn mover_reach() -> f32 {
@@ -1595,18 +1590,7 @@ impl Planner {
                         swept[k + 3] = swept[k + 3].max(x[k + 3]);
                     }
                 }
-                // A jump (a view cut, or many ticks between frames) sweeps a box across
-                // everything between the two places, and every cell inside it was re-probed: a
-                // Glint view change re-traced 400-760k cells. Far apart, the two places are boxes
-                // of their own (RENDERLAB_GI_JUMP_BOXES=0 keeps the sweep).
-                let diagonal = |x: &[f32; 6]| ((x[3] - x[0]).powi(2) + (x[4] - x[1]).powi(2) + (x[5] - x[2]).powi(2)).sqrt();
-                match (a, b) {
-                    (Some(a), Some(b)) if jump_boxes_on() && diagonal(&swept) > 2.0 * diagonal(a).max(diagonal(b)) => {
-                        boxes.push(*a);
-                        boxes.push(*b);
-                    }
-                    _ => boxes.push(swept),
-                }
+                boxes.push(swept);
             }
         }
         moved_log(&previous, &bounds, &boxes);
