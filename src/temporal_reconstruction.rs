@@ -625,16 +625,7 @@ pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
     ) {
         source.replace_range(begin..end + "// tile hint end\n".len(), SUN_TILE_HELD);
     }
-    let held = format!("{source}\n{HELD_SOURCE}\n{sun}");
-    // Measurement only: RENDERLAB_SUNRT_DIAG=noswept treats no receiver as in a moving caster's
-    // swept shadow (wrong pictures near moving and skinned casters; the swept test's cost).
-    let seam = "fn rtvis_swept(x:vec3<f32>)->bool {";
-    if std::env::var("RENDERLAB_SUNRT_DIAG").is_ok_and(|v| v.split(',').any(|f| f == "noswept"))
-        && held.matches(seam).count() == 1
-    {
-        return Ok(held.replacen(seam, &format!("{seam}return false;"), 1));
-    }
-    Ok(held)
+    Ok(format!("{source}\n{HELD_SOURCE}\n{sun}"))
 }
 /// U-RTVIS's held stop as the trace entries' `primary_sun`.
 const HELD_SUN: &str = "fn primary_sun(receiver:Receiver,slot:u32,pixel:vec2<u32>,width:u32)->u32 {rtvis_hold(receiver,slot);return fresh_estimate(receiver,pixel,width,0u);}
