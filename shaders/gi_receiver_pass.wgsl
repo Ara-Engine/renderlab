@@ -141,16 +141,20 @@ fn fg_load(index:u32,size:vec2<u32>)->FgProbe {
 // A probe's point and normal alone (the last two words of its third record): the plane tests
 // read these, and the 108 bytes of SH load only once a weight is known (fg_add).
 struct FgPlane { point:vec4<f32>, normal:vec4<f32> };
+// The weighted SH sum fg_add adds to (private, not a pointer argument: naga's SPIR-V writer
+// fails on a pointer to a local struct's member).
+var<private> fg_sum:array<vec4<f32>,7>;
+fn fg_clear() { for(var v=0u;v<7u;v+=1u) {fg_sum[v]=vec4<f32>(0.0);} }
 fn fg_plane(index:u32,size:vec2<u32>)->FgPlane {
     let c=gi_prepared[fg_at(index,size)+2u];
     return FgPlane(bitcast<vec4<f32>>(c.r1),bitcast<vec4<f32>>(c.r2));
 }
-fn fg_add(sh:ptr<function,array<vec4<f32>,7>>,index:u32,size:vec2<u32>,w:f32) {
+fn fg_add(index:u32,size:vec2<u32>,w:f32) {
     let at=fg_at(index,size);
     let a=gi_prepared[at];let b=gi_prepared[at+1u];let c=gi_prepared[at+2u].r0;
-    (*sh)[0]+=w*bitcast<vec4<f32>>(a.r0);(*sh)[1]+=w*bitcast<vec4<f32>>(a.r1);(*sh)[2]+=w*bitcast<vec4<f32>>(a.r2);
-    (*sh)[3]+=w*bitcast<vec4<f32>>(b.r0);(*sh)[4]+=w*bitcast<vec4<f32>>(b.r1);(*sh)[5]+=w*bitcast<vec4<f32>>(b.r2);
-    (*sh)[6]+=w*bitcast<vec4<f32>>(c);
+    fg_sum[0]+=w*bitcast<vec4<f32>>(a.r0);fg_sum[1]+=w*bitcast<vec4<f32>>(a.r1);fg_sum[2]+=w*bitcast<vec4<f32>>(a.r2);
+    fg_sum[3]+=w*bitcast<vec4<f32>>(b.r0);fg_sum[4]+=w*bitcast<vec4<f32>>(b.r1);fg_sum[5]+=w*bitcast<vec4<f32>>(b.r2);
+    fg_sum[6]+=w*bitcast<vec4<f32>>(c);
 }
 fn fg_store(index:u32,size:vec2<u32>,p:FgProbe) {
     let at=fg_at(index,size);
@@ -332,10 +336,10 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
 }
 // The tile probes around a pixel on its plane, bilinear by tile position: weighted SH and the
 // weights' sum.
-// With `sh` false, only the sum of the weights (the adaptive test).
-struct FgGather { sh:array<vec4<f32>,7>, total:f32 };
-fn fg_tiles(id:vec2<u32>,size:vec2<u32>,s:FgSurface,sh:bool)->FgGather {
-    var g:FgGather;
+// Returns the weights' sum and, when `sh`, adds the weighted SH to fg_sum (the adaptive test
+// needs the sum alone).
+fn fg_tiles(id:vec2<u32>,size:vec2<u32>,s:FgSurface,sh:bool)->f32 {
+    var total=0.0;
     let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
     let f=(vec2<f32>(id)+vec2<f32>(0.5))/f32(FG_TILE)-vec2<f32>(0.5);
     let base=vec2<i32>(floor(f));
@@ -347,10 +351,10 @@ fn fg_tiles(id:vec2<u32>,size:vec2<u32>,s:FgSurface,sh:bool)->FgGather {
         let bilinear=select(1.0-fr.x,fr.x,o.x!=0)*select(1.0-fr.y,fr.y,o.y!=0);
         let w=max(bilinear,1e-3)*fg_on_plane(fg_plane(index,size),s.world,s.normal);
         if w<=1e-6 {continue;}
-        if sh {fg_add(&g.sh,index,size,w);}
-        g.total+=w;
+        if sh {fg_add(index,size,w);}
+        total+=w;
     }
-    return g;
+    return total;
 }
 // One thread per tile: both slots' filtered copies. A neighbour weighs its agreement with the
 // probe's plane (fg_on_plane at the probe's point and normal), a Gaussian in tile distance and
@@ -367,9 +371,8 @@ const FG_FILTER_SHORT:f32=4.0;
         if c.point.w<=0.0 {fg_invalidate(fg_filtered(index,size),size);continue;}
         let reach=select(1,2,c.point.w<=FG_FILTER_SHORT);
         let sigma=f32(reach)*0.75;
-        var out:FgProbe;
-        out.point=c.point;out.normal=c.normal;
-        fg_add(&out.sh,index,size,c.point.w);
+        fg_clear();
+        fg_add(index,size,c.point.w);
         var total=c.point.w;
         for(var y=-reach;y<=reach;y+=1) {
             for(var x=-reach;x<=reach;x+=1) {
@@ -381,12 +384,14 @@ const FG_FILTER_SHORT:f32=4.0;
                     let p=fg_plane(at,size);
                     let w=fg_on_plane(p,c.point.xyz,c.normal.xyz)*exp(-f32(x*x+y*y)/(2.0*sigma*sigma))*p.point.w;
                     if w<=1e-4 {continue;}
-                    fg_add(&out.sh,at,size,w);
+                    fg_add(at,size,w);
                     total+=w;
                 }
             }
         }
-        for(var v=0u;v<7u;v+=1u) {out.sh[v]/=total;}
+        var out:FgProbe;
+        out.point=c.point;out.normal=c.normal;
+        for(var v=0u;v<7u;v+=1u) {out.sh[v]=fg_sum[v]/total;}
         fg_store(fg_filtered(index,size),size,out);
     }
 }
@@ -401,7 +406,7 @@ var<workgroup> fg_pick:u32;
     workgroupBarrier();
     let q=group.xy*FG_BLOCK+local.xy;
     let mine=fg_surface_at(q,size,false);
-    if mine.placement!=0u && fg_tiles(q,size,mine,false).total<=1e-4 {
+    if mine.placement!=0u && fg_tiles(q,size,mine,false)<=1e-4 {
         // 17 is odd, so the turned order is a permutation of the 64 lanes.
         atomicMin(&fg_orphan,(((lane*17u+frame*29u)&63u)<<6u)|lane);
     }
@@ -424,8 +429,9 @@ var<workgroup> fg_pick:u32;
     let size=textureDimensions(primary_hit);
     let s=fg_surface(id,size);
     if s.placement==0u {return;}
-    var g=fg_tiles(id,size,s,true);
-    if g.total<=1e-4 {
+    fg_clear();
+    var total=fg_tiles(id,size,s,true);
+    if total<=1e-4 {
         // No tile probe on this plane: the adaptive probes around it, bilinear by block.
         let blocks=vec2<i32>((size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK);
         let f=(vec2<f32>(id)+vec2<f32>(0.5))/f32(FG_BLOCK)-vec2<f32>(0.5);
@@ -438,11 +444,11 @@ var<workgroup> fg_pick:u32;
             let bilinear=select(1.0-fr.x,fr.x,o.x!=0)*select(1.0-fr.y,fr.y,o.y!=0);
             let w=max(bilinear,1e-3)*fg_on_plane(fg_plane(index,size),s.world,s.normal);
             if w<=1e-6 {continue;}
-            fg_add(&g.sh,index,size,w);
-            g.total+=w;
+            fg_add(index,size,w);
+            total+=w;
         }
     }
-    if g.total<=1e-4 {
+    if total<=1e-4 {
         // None around on this plane: the best tile probe on it within FG_SEARCH tiles; failing
         // that, the facing probe of its own tile or block nearest its plane.
         let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
@@ -471,13 +477,13 @@ var<workgroup> fg_pick:u32;
                 if w>best {best=w;chosen=index;}
             }
         }
-        if best>0.0 {fg_add(&g.sh,chosen,size,1.0);}
-        g.total=select(0.0,1.0,best>0.0);
+        if best>0.0 {fg_add(chosen,size,1.0);}
+        total=select(0.0,1.0,best>0.0);
     }
-    let inv=select(0.0,1.0/g.total,g.total>0.0);
+    let inv=select(0.0,1.0/total,total>0.0);
     for(var i=0u;i<9u;i+=1u) {
         let a=i*3u;
-        gi_rx_sky[i]=vec3<f32>(g.sh[a/4u][a%4u],g.sh[(a+1u)/4u][(a+1u)%4u],g.sh[(a+2u)/4u][(a+2u)%4u])*inv;
+        gi_rx_sky[i]=vec3<f32>(fg_sum[a/4u][a%4u],fg_sum[(a+1u)/4u][(a+1u)%4u],fg_sum[(a+2u)/4u][(a+2u)%4u])*inv;
     }
     for(var i=0u;i<4u;i+=1u) {gi_rx_bounce[i]=vec3<f32>(0.0);}
     gi_rx_valid=true;

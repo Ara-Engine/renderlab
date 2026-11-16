@@ -640,12 +640,28 @@ mod tests {
                 members.iter().map(|m| m.offset).collect::<Vec<_>>(),
                 [0, 16, 32]
             );
-            naga::valid::Validator::new(
+            let info = naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
                 naga::valid::Capabilities::all(),
             )
             .validate(&module)
             .unwrap();
+            // Vulkan's backend writes it too (overrides at their defaults, as wgpu does first):
+            // some modules validate and still fail there.
+            let (module, info) =
+                naga::back::pipeline_constants::process_overrides(&module, &info, None, &Default::default())
+                    .unwrap();
+            // The kernels this file owns (the shading entries are checked where they are built).
+            for entry in module.entry_points.iter().filter(|e| e.name.starts_with("fg_") || e.name == "gi_receiver_pass") {
+                let pipeline = naga::back::spv::PipelineOptions {
+                    shader_stage: naga::ShaderStage::Compute,
+                    entry_point: entry.name.clone(),
+                };
+                let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), Some(&pipeline))
+                }));
+                assert!(matches!(written, Ok(Ok(_))), "SPIR-V of {}", entry.name);
+            }
         }
     }
 }
