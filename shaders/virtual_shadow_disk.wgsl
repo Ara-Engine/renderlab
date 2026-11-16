@@ -973,87 +973,47 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
     }
     return answer;
 }
-// The pixels that walk, listed by vd_lookup and walked by vd_walk in full waves: a trace tile
-// with a few walking pixels among reused ones would otherwise keep its whole wave waiting.
-// Entries are the pixel (x | y << 16) and its history last frame; args are the count and
-// vd_walk's dispatch.
-struct VdWalkArgs {count:atomic<u32>,x:u32,y:u32,z:u32};
-@group(0) @binding(64) var<storage,read_write> vd_walk_list:array<vec2<u32>>;
-@group(0) @binding(65) var<storage,read_write> vd_walk_args:VdWalkArgs;
-var<workgroup> vd_wg_count:atomic<u32>;
-var<workgroup> vd_wg_base:u32;
-// The point's clip w this frame, as the history keeps it (bits 16..31; 0 off any surface).
-fn vd_depth_bits(id:vec2<u32>)->u32 {
+@compute @workgroup_size(8,4) fn vd_lookup(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>) {
+    let size=textureDimensions(vsm_world);
+    let id=group.xy*VSM_TRACE_TILE+local.xy;
+    if any(id>=size) || textureLoad(vsm_tiles,group.xy,0).x==0u {return;}
+    let pixels=size.x*size.y;
+    let write=vd.reuse.z*pixels+id.y*size.x+id.x;
+    let read=(1u-vd.reuse.z)*pixels;
     let hit=textureLoad(vsm_hit,vec2<i32>(id),0).x!=0u;
     let world=textureLoad(vsm_world,vec2<i32>(id),0).xyz;
     let depth=(vd.clip*vec4<f32>(world,1.0)).w;
-    return pack2x16float(vec2<f32>(select(0.0,depth,hit),0.0))<<16u;
-}
-@compute @workgroup_size(8,4) fn vd_lookup(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>,@builtin(local_invocation_index) li:u32) {
-    let size=textureDimensions(vsm_world);
-    let id=group.xy*VSM_TRACE_TILE+local.xy;
-    // No early return: the list's slots are claimed past a barrier.
-    var walk=all(id<size) && textureLoad(vsm_tiles,group.xy,0).x!=0u;
+    let depth_bits=pack2x16float(vec2<f32>(select(0.0,depth,hit),0.0))<<16u;
+    // The point's history last frame: its pixel then, when on screen at the same depth.
     var before=0u;
-    if walk {
-        let pixels=size.x*size.y;
-        let write=vd.reuse.z*pixels+id.y*size.x+id.x;
-        let read=(1u-vd.reuse.z)*pixels;
-        let hit=textureLoad(vsm_hit,vec2<i32>(id),0).x!=0u;
-        let world=textureLoad(vsm_world,vec2<i32>(id),0).xyz;
-        // The point's history last frame: its pixel then, when on screen at the same depth.
-        var at=vec2<u32>(VSM_NONE);
-        if vd.reuse.x!=0u && hit {
-            if vd.reuse.x==2u {at=id;}
-            else {
-                let c=vd.previous*vec4<f32>(world,1.0);
-                if c.w>0.0 {
-                    let f=(c.xy/c.w*vec2<f32>(0.5,-0.5)+vec2<f32>(0.5))*vec2<f32>(size);
-                    if all(f>=vec2<f32>(0.0)) && all(f<vec2<f32>(size)) {
-                        let q=vec2<u32>(f);
-                        let h=vd_history[read+q.y*size.x+q.x];
-                        if abs(vd_depth(h)-c.w)<=0.02*c.w {at=q;}
-                    }
+    var at=vec2<u32>(VSM_NONE);
+    if vd.reuse.x!=0u && hit {
+        if vd.reuse.x==2u {at=id;}
+        else {
+            let c=vd.previous*vec4<f32>(world,1.0);
+            if c.w>0.0 {
+                let f=(c.xy/c.w*vec2<f32>(0.5,-0.5)+vec2<f32>(0.5))*vec2<f32>(size);
+                if all(f>=vec2<f32>(0.0)) && all(f<vec2<f32>(size)) {
+                    let q=vec2<u32>(f);
+                    let h=vd_history[read+q.y*size.x+q.x];
+                    if abs(vd_depth(h)-c.w)<=0.02*c.w {at=q;}
                 }
-                if at.x!=VSM_NONE && vd_moving_shadow(world) {at=vec2<u32>(VSM_NONE);}
             }
-            if at.x!=VSM_NONE {
-                before=vd_history[read+at.y*size.x+at.x];
-                // By trace tile, so a refresh keeps whole waves walking for one frame in N.
-                let refresh=vd.reuse.x==1u && (vd_hash(group.x+group.y*0x10000u)+u32(vd.size.z))%VD_REUSE_REFRESH==0u;
-                let kept=select(vd_settled(at,size,read),VSM_NONE,refresh);
-                if kept!=VSM_NONE {
-                    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(kept));
-                    vd_history[write]=vd_depth_bits(id)|(before&0xffffu);
-                    walk=false;
-                }
+            if at.x!=VSM_NONE && vd_moving_shadow(world) {at=vec2<u32>(VSM_NONE);}
+        }
+        if at.x!=VSM_NONE {
+            before=vd_history[read+at.y*size.x+at.x];
+            // Per trace tile (one wave): a wave runs as long as its slowest pixel, so a refresh
+            // spread over the pixels of every tile would keep every wave walking.
+            let refresh=vd.reuse.x==1u && (vd_hash(group.x+group.y*0x10000u)+u32(vd.size.z))%VD_REUSE_REFRESH==0u;
+            let kept=select(vd_settled(at,size,read),VSM_NONE,refresh);
+            if kept!=VSM_NONE {
+                textureStore(vsm_output,vec2<i32>(id),vec4<u32>(kept));
+                vd_history[write]=depth_bits|(before&0xffffu);
+                return;
             }
         }
     }
-    var slot=0u;
-    if walk {slot=atomicAdd(&vd_wg_count,1u);}
-    workgroupBarrier();
-    if li==0u {
-        let n=atomicLoad(&vd_wg_count);
-        if n!=0u {vd_wg_base=atomicAdd(&vd_walk_args.count,n);}
-    }
-    workgroupBarrier();
-    if walk {vd_walk_list[vd_wg_base+slot]=vec2<u32>(id.x|(id.y<<16u),before);}
-}
-// vd_walk's dispatch over the listed pixels, 64 a workgroup (at most 65535 groups a row).
-@compute @workgroup_size(1) fn vd_walk_dispatch() {
-    let groups=(atomicLoad(&vd_walk_args.count)+63u)/64u;
-    vd_walk_args.x=min(groups,65535u);
-    vd_walk_args.y=(groups+65534u)/65535u;
-    vd_walk_args.z=1u;
-}
-@compute @workgroup_size(64) fn vd_walk(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
-    let k=(group.y*65535u+group.x)*64u+li;
-    if k>=atomicLoad(&vd_walk_args.count) {return;}
-    let entry=vd_walk_list[k];
-    let id=vec2<u32>(entry.x&0xffffu,entry.x>>16u);
-    let before=entry.y;
-    let size=textureDimensions(vsm_world);
     let answer=vd_pixel(id);
     textureStore(vsm_output,vec2<i32>(id),vec4<u32>(answer));
     // A walk extends the settled count of the same class; a coarser level standing in for an
@@ -1062,5 +1022,5 @@ fn vd_depth_bits(id:vec2<u32>)->u32 {
     if (answer==0u || answer==256u) && !vd_px.stand_in {
         walks=select(1u,min(vd_walks(before)+1u,127u),(before&0x1ffu)==answer && vd_walks(before)!=0u);
     }
-    vd_history[vd.reuse.z*size.x*size.y+id.y*size.x+id.x]=vd_depth_bits(id)|(walks<<9u)|answer;
+    vd_history[write]=depth_bits|(walks<<9u)|answer;
 }
