@@ -1694,7 +1694,7 @@ pub(super) struct GiState {
     /// Frames that ran cache work, across every view: a view's receivers reuse last frame's
     /// lookups only while this is unchanged since they read the table (another view's frame
     /// may have run the cache work in between).
-    generation: u64,
+    work_generation: u64,
     profile: Option<Profile>,
     refill_feedback: Option<refill_feedback::State>,
     priority_compact: bool,
@@ -1929,7 +1929,7 @@ impl GiState {
             world: None,
             packed: None,
             plan: None,
-            generation: 0,
+            work_generation: 0,
             planner: Planner::default(),
             profile: None,
             refill_feedback: None,
@@ -3734,7 +3734,7 @@ impl Renderer {
             self.gi.stats.bounce_frames += 1;
         }
         self.gi.plan = Some(plan);
-        self.gi.generation += 1;
+        self.gi.work_generation += 1;
         self.prepare_gi_groups(software, scene_generation)?;
         self.gi.stats.frames += 1;
         self.gi.stats.software = software;
@@ -3895,10 +3895,10 @@ pub(super) struct ShadeGroups<'a> {
 }
 
 impl GiState {
-    /// The cache's work generation (`generation`), or None without a cache: lookups read at the
+    /// The cache's work generation (`work_generation`), or None without a cache: lookups read at the
     /// same generation read the same table.
     pub(crate) fn table_generation(&self) -> Option<u64> {
-        self.resources.is_some().then_some(self.generation)
+        self.resources.is_some().then_some(self.work_generation)
     }
     /// The cache passes, after the primaries' hit records and before shading. `lighting`
     /// is lighting's kernel group (the header-only table at binding 20); `shade` the groups
