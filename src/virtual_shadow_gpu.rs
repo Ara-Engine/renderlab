@@ -934,6 +934,13 @@ pub(super) fn disk_source() -> String {
     assert_eq!(source.matches(edges).count(), 1, "virtual_shadow_disk.wgsl: VD_HARD_EDGES moved");
     source.replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
 }
+/// Measurement: `RENDERLAB_VSM_LOG=<file>` appends a line a frame: placements, moved casters,
+/// whether the placement count changed, the uploaded rectangles, invalidated levels, the
+/// rectangles' summed and union areas (m^2) and each level's texel.
+fn vsm_log() -> Option<&'static std::path::Path> {
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os("RENDERLAB_VSM_LOG").map(Into::into)).as_deref()
+}
 /// `RENDERLAB_VD_EDGE_LOG`: the file the Disk lookup's edge pixel counts go to.
 fn edge_log() -> Option<&'static std::path::Path> {
     static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
@@ -2227,13 +2234,13 @@ impl Renderer {
         // Measurement: the Disk lookup's edge pixels, a line a frame.
         if let Some(path) = edge_log() {
             for ((), words) in state.edge_counts.get_mut().unwrap().collect() {
-                let count = u32::from_ne_bytes(words[..4].try_into().unwrap());
+                let word = |i: usize| u32::from_ne_bytes(words[4 * i..4 * i + 4].try_into().unwrap());
                 use std::io::Write;
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(path)
-                    .and_then(|mut f| writeln!(f, "{count}"));
+                    .and_then(|mut f| writeln!(f, "{} {} {} {}", word(0), word(1), word(2), word(3)));
             }
         }
         // The newest mark-pass counters mapped since the last frame (the ladder's finest level
@@ -2460,6 +2467,10 @@ impl Renderer {
         };
         // N8n: placements the rectangles do not describe retire the surface cache's cells.
         let mut surface_flush = false;
+        // Measurement (`RENDERLAB_VSM_LOG`): this frame's movers and their rectangles' areas.
+        let count_changed = cache.models.len() != placements;
+        let mut movers = 0usize;
+        let mut areas = [0.0f64; 2];
         if cache.models.len() != placements {
             invalidated = [true; MAX_LEVELS];
             surface_flush = true;
@@ -2480,6 +2491,16 @@ impl Renderer {
                     let [d0, d1] = screen(&bounds[p]);
                     screens.push([c0.min(d0), c1.max(d1)]);
                 }
+            }
+            movers = rects.len();
+            if let Some(first) = rects.first() {
+                let (mut lo, mut hi) = (first[0], first[1]);
+                for [a, b] in &rects {
+                    areas[0] += (b.x - a.x) * (b.y - a.y);
+                    lo = lo.min(*a);
+                    hi = hi.max(*b);
+                }
+                areas[1] = (hi.x - lo.x) * (hi.y - lo.y);
             }
             if rects.len() > MAX_RECTS {
                 invalidated = [true; MAX_LEVELS];
@@ -2863,6 +2884,26 @@ impl Renderer {
             for value in h.records.get(b).copied().unwrap_or([0, 0]) {
                 frame.extend_from_slice(&value.to_ne_bytes());
             }
+        }
+        if let Some(path) = vsm_log() {
+            let texels: Vec<String> = rungs
+                .iter()
+                .map(|&r| format!("{:.4}", f64::from(s.finest_texel) * 2f64.powi(r)))
+                .collect();
+            let line = format!(
+                "{{\"placements\":{placements},\"movers\":{movers},\"count_changed\":{count_changed},\"rects\":{},\"invalidated\":{},\"levels\":{levels},\"area_sum\":{:.3},\"area_union\":{:.3},\"texels\":[{}]}}",
+                rects.len(),
+                invalidated[..levels].iter().filter(|&&b| b).count(),
+                areas[0],
+                areas[1],
+                texels.join(",")
+            );
+            use std::io::Write;
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .and_then(|mut f| writeln!(f, "{line}"));
         }
         state.levels = levels;
         state.stats = VirtualShadowStats {

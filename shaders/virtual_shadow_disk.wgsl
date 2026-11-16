@@ -548,7 +548,10 @@ override VD_HARD_EDGES:bool=true;
 override VD_EDGE_HARD:f32=1.0;
 // Measurement (`RENDERLAB_VD=VD_EDGE_SHOW=true`): edge pixels drawn fully shadowed.
 override VD_EDGE_SHOW:bool=false;
-// Edge pixels this frame (`RENDERLAB_VD_EDGE_LOG`).
+// This frame's edge pixels, reused answers, pixels the moving casters' zone kept walking and
+// walked pixels (`RENDERLAB_VD_EDGE_LOG`); the last three only with
+// `RENDERLAB_VD=VD_COUNTS=true` (measurement).
+override VD_COUNTS:bool=false;
 @group(0) @binding(62) var<storage,read_write> vd_edge_count:array<atomic<u32>,4>;
 var<private> vd_ray_reach:f32;
 var<private> vd_far:vec2<u32>;
@@ -999,7 +1002,7 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
                     if abs(vd_depth(h)-c.w)<=0.02*c.w {at=q;}
                 }
             }
-            if at.x!=VSM_NONE && vd_moving_shadow(world) {at=vec2<u32>(VSM_NONE);}
+            if at.x!=VSM_NONE && vd_moving_shadow(world) {at=vec2<u32>(VSM_NONE);if VD_COUNTS {atomicAdd(&vd_edge_count[2],1u);}}
         }
         if at.x!=VSM_NONE {
             before=vd_history[read+at.y*size.x+at.x];
@@ -1009,6 +1012,7 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
             let kept=select(vd_settled(at,size,read),VSM_NONE,refresh);
             if kept!=VSM_NONE {
                 textureStore(vsm_output,vec2<i32>(id),vec4<u32>(kept));
+                if VD_COUNTS {atomicAdd(&vd_edge_count[1],1u);}
                 vd_history[write]=depth_bits|(before&0xffffu);
                 return;
             }
@@ -1016,6 +1020,7 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
     }
     let answer=vd_pixel(id);
     textureStore(vsm_output,vec2<i32>(id),vec4<u32>(answer));
+    if VD_COUNTS {atomicAdd(&vd_edge_count[3],1u);}
     // A walk extends the settled count of the same class; a coarser level standing in for an
     // arriving page never settles.
     var walks=0u;
