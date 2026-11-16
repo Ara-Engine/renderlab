@@ -929,10 +929,7 @@ pub(super) fn disk_source() -> String {
         let end = equals + source[equals..].find(';').unwrap();
         source.replace_range(equals..end, value);
     }
-    // Exact hard edges (`RENDERLAB_VD_HARD_EDGES=0` keeps the map's texels there).
-    let edges = "override VD_HARD_EDGES:bool=true;";
-    assert_eq!(source.matches(edges).count(), 1, "virtual_shadow_disk.wgsl: VD_HARD_EDGES moved");
-    source.replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
+    source
 }
 /// `RENDERLAB_VD_EDGE_LOG`: the file the Disk lookup's edge pixel counts go to.
 fn edge_log() -> Option<&'static std::path::Path> {
@@ -959,13 +956,6 @@ fn reuse_on() -> bool {
 }
 /// TR1 history frames before answers are reused: the pages of a cut's new view have arrived.
 const REUSE_AFTER: u32 = 8;
-/// The Disk lookup's exact hard contact edges (WGSL `VD_HARD_EDGES`): at a hard contact shadow's
-/// outline the map's square texels are replaced by the triangles they hold, exactly, as with ray
-/// hardware. `RENDERLAB_VD_HARD_EDGES=0` keeps the texels' stairs.
-fn hard_edges_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_VD_HARD_EDGES").map_or(true, |v| v.trim() != "0"))
-}
 
 fn corners(b: &crate::shadow_plan::Bounds) -> impl Iterator<Item = glam::DVec3> + '_ {
     (0..8).map(move |i| {
@@ -2226,10 +2216,11 @@ impl Renderer {
             .map_or(0.0, |frame| (frame % 4096 + 1) as f32);
         let state = self.view.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
-        // Measurement: the Disk lookup's edge pixels, a line a frame.
+        // Measurement: the Disk lookup's counters (WGSL `vd_counts`), a line a frame.
         if let Some(path) = edge_log() {
             for ((), words) in state.edge_counts.get_mut().unwrap().collect() {
-                let count = u32::from_ne_bytes(words[..4].try_into().unwrap());
+                let word = |i: usize| u32::from_ne_bytes(words[4 * i..4 * i + 4].try_into().unwrap());
+                let count = format!("{} {} {}", word(0), word(1), word(2));
                 use std::io::Write;
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
