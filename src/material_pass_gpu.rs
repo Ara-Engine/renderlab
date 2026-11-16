@@ -263,9 +263,8 @@ impl Renderer {
                 });
                 pass.set_pipeline(state.bins.as_ref().unwrap());
                 pass.set_bind_group(0, &*lists.bins.as_ref().unwrap().0, &[]);
-                let [x, y] = state.region_groups([4, 4]);
-                let [bx, by] = [0, 1].map(|i| [size.width, size.height][i].div_ceil(CLEAR_TILE[i]));
-                pass.dispatch_workgroups(x.max(bx), y + by, 1);
+                let [x, y] = super::program_lists::bins_groups(state, size);
+                pass.dispatch_workgroups(x, y, 1);
             }
         }
         for role in [usize::from(!write)] {
