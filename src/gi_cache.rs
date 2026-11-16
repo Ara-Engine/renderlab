@@ -41,9 +41,15 @@ const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
 const REQUEST_WORDS: u64 = 3;
-/// WGSL GiFrame: region, counts, offsets, requests, bounce, then 64 vec4 box corners.
-const FRAME_BYTES: usize = 80 + 64 * 16;
-const MAX_BOXES: usize = 32;
+/// WGSL GiFrame: region, counts, offsets, requests, bounce, 256 vec4 box corners, then the
+/// boxes' grid: its corner and scale (two vec4) and 512 cells of four mask words.
+const FRAME_BYTES: usize = 80 + 256 * 16 + 32 + 512 * 16;
+/// The grid's first word in the frame record.
+const GRID_WORD: usize = 20 + 256 * 4;
+/// Moved-caster boxes a frame holds; more are clustered (cluster_boxes). Glint's play moves
+/// about 107 placements a frame: at 32, unions spanned the gaps between movers and every cell
+/// inside them was re-probed each frame.
+const MAX_BOXES: usize = 128;
 /// Claim and resolve repeat in rounds, so collisions retry within the frame.
 pub(crate) const CLAIM_ROUNDS: u32 = 3;
 /// Ray items per frame (shaders/gi_cache.wgsl GI_RAY_ITEMS): one visibility ray each,
@@ -101,13 +107,191 @@ fn light_reuse_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_LIGHT_REUSE").map_or(true, |v| v != "0"))
 }
+/// Box diagonals around a moved caster within which cells re-trace the directions that cross
+/// it (shaders/gi_cache.wgsl gi_reach); RENDERLAB_GI_MOVER_REACH=0 re-traces at any distance.
+fn mover_reach() -> f32 {
+    static REACH: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *REACH.get_or_init(|| {
+        std::env::var("RENDERLAB_GI_MOVER_REACH")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(MOVER_REACH)
+    })
+}
+/// One diagonal: Glint's play standing still, non-RT, span 14.1 ms at 4 and 10.8 at 1 with the
+/// stale budget and the box grid; live frames at the rings and track showed no difference.
+const MOVER_REACH: f32 = 1.0;
+/// Turns of a stale cell (shaders/gi_cache.wgsl GI_STALE): one frame in `read` while a pixel
+/// reads it, one in `sweep` otherwise. RENDERLAB_GI_STALE=0 re-traces every reached cell at once
+/// (both 1); RENDERLAB_GI_STALE_READ and RENDERLAB_GI_STALE_SWEEP set them.
+fn stale_periods() -> [u32; 2] {
+    static P: std::sync::OnceLock<[u32; 2]> = std::sync::OnceLock::new();
+    *P.get_or_init(|| {
+        if std::env::var("RENDERLAB_GI_STALE").is_ok_and(|v| v == "0") {
+            return [1, 1];
+        }
+        let get = |name: &str, default: u32| {
+            std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default).max(1)
+        };
+        [get("RENDERLAB_GI_STALE_READ", STALE_READ), get("RENDERLAB_GI_STALE_SWEEP", STALE_SWEEP)]
+    })
+}
+const STALE_READ: u32 = 1;
+const STALE_SWEEP: u32 = 16;
+/// Stale cells re-traced a frame, about (RENDERLAB_GI_STALE_BUDGET; 0: the fixed periods).
+fn stale_budget() -> u32 {
+    static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *B.get_or_init(|| {
+        if std::env::var("RENDERLAB_GI_STALE").is_ok_and(|v| v == "0") {
+            return 0;
+        }
+        std::env::var("RENDERLAB_GI_STALE_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(STALE_BUDGET)
+    })
+}
+const STALE_BUDGET: u32 = 2048;
+/// Longest turn of a read stale cell, in frames.
+const STALE_TURN_MAX: u32 = 32;
+/// Which moved boxes may reach each cell of an 8 x 8 x 8 grid over them (shaders/gi_cache.wgsl
+/// gi_box_mask): each box grown by `reach` of its diagonals. The scan tested every slot against
+/// every box (Glint's play: about a million slots and 107 boxes a frame); with the grid a slot
+/// tests the few boxes near it. None without a reach (every box is tested everywhere).
+struct BoxGrid {
+    lo: [f32; 3],
+    scale: [f32; 3],
+    masks: Vec<[u32; 4]>,
+}
+fn box_grid(boxes: &[[f32; 6]], reach: f32) -> Option<BoxGrid> {
+    if reach <= 0.0 || boxes.is_empty() {
+        return None;
+    }
+    let grown: Vec<[f32; 6]> = boxes
+        .iter()
+        .map(|b| {
+            let diagonal = ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt();
+            let g = reach * diagonal + 1e-2;
+            [b[0] - g, b[1] - g, b[2] - g, b[3] + g, b[4] + g, b[5] + g]
+        })
+        .collect();
+    let mut lo = [f32::INFINITY; 3];
+    let mut hi = [f32::NEG_INFINITY; 3];
+    for g in &grown {
+        for k in 0..3 {
+            lo[k] = lo[k].min(g[k]);
+            hi[k] = hi[k].max(g[k + 3]);
+        }
+    }
+    let scale: [f32; 3] = std::array::from_fn(|k| 8.0 / (hi[k] - lo[k]).max(1e-3));
+    let cell = |v: f32, k: usize| (((v - lo[k]) * scale[k]).floor() as i32).clamp(0, 7) as usize;
+    let mut masks = vec![[0u32; 4]; 512];
+    for (i, g) in grown.iter().enumerate() {
+        for z in cell(g[2], 2)..=cell(g[5], 2) {
+            for y in cell(g[1], 1)..=cell(g[4], 1) {
+                for x in cell(g[0], 0)..=cell(g[3], 0) {
+                    masks[x + 8 * (y + 8 * z)][i / 32] |= 1 << (i % 32);
+                }
+            }
+        }
+    }
+    Some(BoxGrid { lo, scale, masks })
+}
+/// More moved casters than the frame record holds: at most `max` unions of neighbours (the
+/// boxes split at the median of their centres along the wider axis, recursively). A single
+/// union of every box spanned a level whose movers are spread through it (Glint's obstacles),
+/// and re-traced most of the table each frame. RENDERLAB_GI_BOX_CLUSTERS=0 keeps the one union.
+fn cluster_boxes(mut boxes: Vec<[f32; 6]>, max: usize) -> Vec<[f32; 6]> {
+    fn union(set: &[[f32; 6]]) -> [f32; 6] {
+        set.iter().fold(set[0], |u, b| {
+            std::array::from_fn(|k| if k < 3 { u[k].min(b[k]) } else { u[k].max(b[k]) })
+        })
+    }
+    fn split(set: &mut [[f32; 6]], groups: usize, out: &mut Vec<[f32; 6]>) {
+        if groups <= 1 || set.len() <= 1 {
+            out.push(union(set));
+            return;
+        }
+        let centre = |b: &[f32; 6], k: usize| b[k] + b[k + 3];
+        let spread = |k: usize| {
+            let (lo, hi) = set.iter().fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), b| {
+                (lo.min(centre(b, k)), hi.max(centre(b, k)))
+            });
+            hi - lo
+        };
+        let axis = (0..3).max_by(|&a, &b| spread(a).total_cmp(&spread(b))).unwrap_or(0);
+        set.sort_by(|a, b| centre(a, axis).total_cmp(&centre(b, axis)));
+        let left = groups / 2;
+        let at = (set.len() * left / groups).clamp(1, set.len() - 1);
+        let (a, b) = set.split_at_mut(at);
+        split(a, left, out);
+        split(b, groups - left, out);
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("RENDERLAB_GI_BOX_CLUSTERS").map_or(true, |v| v != "0")) {
+        return vec![union(&boxes)];
+    }
+    let mut out = Vec::with_capacity(max);
+    split(&mut boxes, max, &mut out);
+    out
+}
+/// Measurement: with RENDERLAB_GI_MOVED_LOG=<file>, one line per frame with moving casters:
+/// how many placements moved, and the first few (index, swept size, largest corner change).
+fn moved_log(previous: &[[f32; 6]], bounds: &[[f32; 6]], boxes: &[[f32; 6]]) {
+    use std::io::Write;
+    static FILE: std::sync::OnceLock<Option<std::sync::Mutex<std::fs::File>>> = std::sync::OnceLock::new();
+    let Some(file) = FILE.get_or_init(|| {
+        std::env::var_os("RENDERLAB_GI_MOVED_LOG")
+            .map(|p| std::sync::Mutex::new(std::fs::File::create(p).expect("moved log")))
+    }) else {
+        return;
+    };
+    let mut moved = vec![];
+    for i in 0..bounds.len().max(previous.len()) {
+        if previous.get(i) != bounds.get(i) {
+            let delta = match (previous.get(i), bounds.get(i)) {
+                (Some(a), Some(b)) => (0..6).map(|k| (a[k] - b[k]).abs()).fold(0.0f32, f32::max),
+                _ => f32::INFINITY,
+            };
+            moved.push((i, delta));
+        }
+    }
+    let sizes: Vec<String> = boxes
+        .iter()
+        .take(12)
+        .map(|b| format!("{:.2}", ((b[3] - b[0]).powi(2) + (b[4] - b[1]).powi(2) + (b[5] - b[2]).powi(2)).sqrt()))
+        .collect();
+    let first: Vec<String> = moved.iter().take(12).map(|(i, d)| format!("[{i},{d:.2e}]")).collect();
+    let _ = writeln!(
+        file.lock().unwrap(),
+        "{{\"placements\":{},\"bounds_changed\":{},\"boxes\":{},\"first\":[{}],\"box_diagonals\":[{}]}}",
+        bounds.len(),
+        moved.len(),
+        boxes.len(),
+        first.join(","),
+        sizes.join(",")
+    );
+}
 /// The default for `near_occluded_rays`.
 const NEAR_OCCLUDED_RAYS: u32 = 4;
-/// The still-view batch (Planner::finish): one cache frame in STILL_BATCH while a still view
-/// has fewer than STILL_BATCH_PENDING misses and queued gathers. `RENDERLAB_GI_STILL_BATCH=0`
-/// runs every frame.
+/// The still-view batch (Planner::finish): one cache frame in STILL_BATCH while a view is still,
+/// once STILL_BATCH_SETTLE cache frames have run since the last cut or clear (a cut's backlog
+/// drains first). It decided from a read-back count of pending work before, and the readback's
+/// timing changed which frames ran: the multi-view test failed on some runs.
+/// `RENDERLAB_GI_STILL_BATCH=0` runs every frame.
 const STILL_BATCH: u32 = 4;
-const STILL_BATCH_PENDING: u32 = 512;
+const STILL_BATCH_SETTLE: u32 = 48;
+/// Play loop (sunrt, 2026-11-16): a re-skinned mesh's software geometry is patched in place
+/// (`patch_skinned_blas`); `RENDERLAB_GI_SKIN_PATCH=0` repacks every mesh, as before.
+/// Play loop (sunrt, 2026-11-16): a re-skinned mesh refits its software tree to each pose
+/// (`near_field::refit_bvh`), so the tree keeps its sizes and patches in place; a rebuild cost
+/// 6.4 ms per Showcase character per pose and changed the sizes, forcing full repacks.
+/// `RENDERLAB_GI_SKIN_REFIT=0` rebuilds it each pose, as before.
+fn skin_refit() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_SKIN_REFIT").map_or(true, |v| v != "0"))
+}
+fn skin_patch() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_SKIN_PATCH").map_or(true, |v| v != "0"))
+}
 fn still_batch_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_STILL_BATCH").map_or(true, |v| v != "0"))
@@ -725,6 +909,14 @@ pub struct IndirectCounters {
     pub created_secondary: u32,
     pub created_tertiary: u32,
     pub evicted_secondary: u32,
+    /// Moved-caster boxes the scan tested this frame (after clustering).
+    pub moved_boxes: u32,
+    /// Cells movers re-traced, read by a pixel this frame / last frame; cells movers reshaded
+    /// (a light ray crossed), all of them / read this frame / last frame.
+    pub invalidated_read: [u32; 2],
+    /// Of the cells movers re-traced, those whose cube a moved box overlaps (fully re-probed).
+    pub invalidated_cube: u32,
+    pub reshaded: [u32; 3],
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -1093,6 +1285,8 @@ pub(crate) struct ViewPlan {
 /// backend both plan through `begin` and `finish`, then `advance` once the frame's
 /// passes are certain to run.
 pub(crate) struct Planner {
+    /// Frames since a caster last moved (stale cells' sweep, shaders/gi_cache.wgsl GI_STALE).
+    since_movers: u32,
     bounds: Vec<[f32; 6]>,
     poses: Vec<crate::renderer::skinning::PlacementPose>,
     environment: Option<[u8; 32]>,
@@ -1109,9 +1303,8 @@ pub(crate) struct Planner {
     environment_phase: u32,
     bounce_last: Option<bool>,
     bounce_busy: u32,
-    /// Misses plus queued gathers of a recent cache frame (still-view batch), u32::MAX
-    /// until one is read back.
-    pub(crate) pending: u32,
+    /// Last collected frame's stale cells (shaders/gi_cache.wgsl GI_W_STALE_CELLS).
+    pub(crate) stale_cells: u32,
     parity: bool,
     /// The gather queues (this frame's, next frame's) the tick's first frame used: later
     /// views of the tick trace into the same next queue.
@@ -1124,6 +1317,7 @@ pub(crate) struct Planner {
 impl Default for Planner {
     fn default() -> Self {
         Self {
+            since_movers: u32::MAX,
             bounds: vec![],
             poses: vec![],
             environment: None,
@@ -1136,7 +1330,7 @@ impl Default for Planner {
             environment_phase: 0,
             bounce_last: None,
             bounce_busy: 0,
-            pending: u32::MAX,
+            stale_cells: 0,
             parity: false,
             tick_queues: [0; 2],
             light_key: None,
@@ -1180,6 +1374,18 @@ impl Planner {
     /// `bounce`: its bounce passes too. `tick`: the first frame of an engine tick, which
     /// does the cache's per-tick work; later views of the tick only probe, claim and trace
     /// their new cells, and change none of the engine's history.
+    /// Stale cells' turns [read, sweep] (shaders/gi_cache.wgsl GI_STALE): with a budget, the
+    /// power of two that spreads last frame's stale cells to about the budget a frame (1 below
+    /// it), unread ones four times slower; else the fixed periods.
+    fn stale_turns(&self) -> [u32; 2] {
+        let [read, sweep] = stale_periods();
+        let budget = stale_budget();
+        if budget == 0 {
+            return [read, sweep];
+        }
+        let turn = self.stale_cells.div_ceil(budget).max(1).next_power_of_two().min(STALE_TURN_MAX);
+        [read.max(turn), sweep.max(4 * turn)]
+    }
     pub(crate) fn begin(&mut self, c: &PlanConfig, run: bool, bounce: bool, tick: bool) -> Begun {
         if run && tick {
             if self.bounce_last.is_some_and(|b| b != bounce) {
@@ -1251,6 +1457,10 @@ impl Planner {
         header[15] = s.near_light_rays;
         header[55] = near_occluded_rays();
         header[56] = u32::from(light_reuse_on());
+        header[61] = mover_reach().to_bits();
+        let [read, sweep] = self.stale_turns();
+        header[62] = read;
+        header[63] = sweep;
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
@@ -1395,20 +1605,12 @@ impl Planner {
                 boxes.push(swept);
             }
         }
+        moved_log(&previous, &bounds, &boxes);
         if tick {
             self.bounds = bounds;
         }
         if boxes.len() > MAX_BOXES {
-            let all = boxes.iter().fold(boxes[0], |u, b| {
-                std::array::from_fn(|k| {
-                    if k < 3 {
-                        u[k].min(b[k])
-                    } else {
-                        u[k].max(b[k])
-                    }
-                })
-            });
-            boxes = vec![all];
+            boxes = cluster_boxes(boxes, MAX_BOXES);
         }
         // An environment change re-integrates every cell from its bits (no rays):
         // yaw rotates the sky, a new map replaces it. A map's intensity and the constant
@@ -1418,6 +1620,18 @@ impl Planner {
             self.environment = Some(environment);
         }
         let mut flags = 0u32;
+        // Stale cells left by movers: the scan keeps sweeping them for a full period after the
+        // last one stops. Counted in frames, not ticks: a capture's held frames do not tick, and
+        // a tick count left the sweep (and the scan) running through every held frame.
+        self.since_movers = if boxes.is_empty() {
+            self.since_movers.saturating_add(1)
+        } else {
+            0
+        };
+        let [_, sweep] = self.stale_turns();
+        if sweep > 1 && self.since_movers < sweep {
+            flags |= 64;
+        }
         if !boxes.is_empty() && s.invalidate_casters {
             flags |= 1;
         }
@@ -1549,6 +1763,18 @@ impl Planner {
                 put(20 + i * 8 + 4 + k, b[k + 3].to_bits());
             }
         }
+        if let Some(grid) = box_grid(&boxes, mover_reach()) {
+            for k in 0..3 {
+                put(GRID_WORD + k, grid.lo[k].to_bits());
+                put(GRID_WORD + 4 + k, grid.scale[k].to_bits());
+            }
+            put(GRID_WORD + 3, 1.0f32.to_bits());
+            for (cell, mask) in grid.masks.iter().enumerate() {
+                for (w, &m) in mask.iter().enumerate() {
+                    put(GRID_WORD + 8 + cell * 4 + w, m);
+                }
+            }
+        }
         let groups = [
             (region[2] - region[0]).div_ceil(probe_tile()),
             (region[3] - region[1]).div_ceil(probe_tile()),
@@ -1611,14 +1837,15 @@ impl Planner {
         // few cells a frame (the temporal jitter moves pixels across cell edges: Glint, about
         // 50 a frame; none with the jitter off), and at such counts each pass costs the latency
         // of a few long software rays, not their number. Once the view has been still for
-        // STILL_BATCH frames and little is pending, the cache's passes run on one frame in
-        // STILL_BATCH only: the cells involved are made and lit at most STILL_BATCH - 1 frames
-        // later. Any motion, a relight, a moved caster or a larger backlog runs every frame.
+        // STILL_BATCH frames and a cut's backlog has had STILL_BATCH_SETTLE frames, the cache's
+        // passes run on one frame in STILL_BATCH only: the cells involved are made and lit at
+        // most STILL_BATCH - 1 frames later. Any motion, a relight or a moved caster runs every
+        // frame.
         if still_batch_on()
             && view.idle_frames >= STILL_BATCH
             && flags == 0
             && !busy
-            && self.pending < STILL_BATCH_PENDING
+            && self.since_cut.min(self.since_clear) >= STILL_BATCH_SETTLE
             && view.idle_frames % STILL_BATCH != 0
         {
             return Finished { frame, plan: None };
@@ -1726,7 +1953,7 @@ pub(super) struct GiState {
     /// `RENDERLAB_GI_PROBE_LOG`: the probe's work counters, read back without waiting.
     probe_log: Option<ProbeWatch>,
     /// The still-view batch: misses plus queued gathers of recent cache frames.
-    pending_watch: Option<FullWatch>,
+    stale_watch: Option<FullWatch>,
 }
 
 /// Measurement only: `RENDERLAB_GI_PROBE_LOG=PATH` counts the probe's work on every frame
@@ -1949,7 +2176,7 @@ impl GiState {
             watch: None,
             grow: false,
             probe_log: None,
-            pending_watch: None,
+            stale_watch: None,
         }
     }
     /// After the frame's submission (Renderer::submit_frame): maps the full-bucket readback.
@@ -1957,7 +2184,7 @@ impl GiState {
         if let Some(watch) = &mut self.watch {
             watch.submitted();
         }
-        if let Some(watch) = &mut self.pending_watch {
+        if let Some(watch) = &mut self.stale_watch {
             watch.submitted();
         }
         if let Some(watch) = &mut self.probe_log {
@@ -2199,10 +2426,109 @@ impl Renderer {
         {
             return Ok(false);
         }
-        let pending = self.gi.planner.pending_clear();
-        self.set_indirect_geometry(mesh, positions, indices)?;
-        self.gi.planner.set_pending_clear(pending);
+        let built = std::time::Instant::now();
+        // A re-skinned mesh keeps its tree and refits it to the pose (`skin_refit`).
+        let key: &wgpu::Buffer = &mesh.vertex;
+        let refit = skin_refit()
+            .then(|| self.gi.meshes.iter().find(|(k, _)| k == key))
+            .flatten()
+            .map(|(_, b)| b)
+            .filter(|b| b.exact && b.bvh.positions.len() == positions.len() && b.bvh.indices.len() == indices.len())
+            .map(|b| {
+                let mut bvh = b.bvh.clone();
+                crate::asset::near_field::refit_bvh(&mut bvh, positions).map(|()| bvh)
+            });
+        let refit_ok = matches!(refit, Some(Ok(_)));
+        let bvh = match refit {
+            Some(Ok(bvh)) => bvh,
+            _ => gi_bvh::build(positions, indices)?,
+        };
+        let mut blas = Blas::new(bvh, 0)?;
+        blas.exact = true;
+        let build_ms = built.elapsed().as_secs_f64() * 1000.;
+        // Measurement only (change log): why a pose could not patch.
+        let diagnosis = super::change_log::enabled().then(|| {
+            let old = self.gi.meshes.iter().find(|(k, _)| k == key).map(|(_, b)| b);
+            format!(
+                "\"old={} exact={} same_vertices={} same_indices={} packed={} refit={}\"",
+                old.is_some(),
+                old.is_some_and(|b| b.exact),
+                old.is_some_and(|b| b.bvh.positions.len() == positions.len()),
+                old.is_some_and(|b| b.bvh.indices.len() == indices.len()),
+                self.gi.packed.is_some(),
+                refit_ok,
+            )
+        });
+        let unpatched = if skin_patch() {
+            self.patch_skinned_blas(mesh, blas)?
+        } else {
+            Some(blas)
+        };
+        let patched = unpatched.is_none();
+        if super::change_log::enabled() {
+            super::change_log::report(
+                self.frames + 1,
+                "skinned_geometry",
+                &[],
+                &[
+                    ("build_ms", format!("{build_ms:.3}")),
+                    ("patched", patched.to_string()),
+                    ("state", diagnosis.unwrap_or_default()),
+                ],
+            );
+        }
+        if let Some(blas) = unpatched {
+            let pending = self.gi.planner.pending_clear();
+            self.set_indirect_blas(mesh, blas)?;
+            self.gi.planner.set_pending_clear(pending);
+        }
         Ok(true)
+    }
+    /// Play loop (sunrt, 2026-11-16): writes a re-skinned mesh's new software geometry over its
+    /// own words in the packed buffer, when the new tree has the old one's node, leaf, position
+    /// and index counts and neither has near-field masks, and swaps it in as the mesh's geometry.
+    /// Every other packed word is unchanged, and the instance records (bounds, root) are rewritten
+    /// by `prepare_gi_geometry` as on any frame. Hands the geometry back, changing nothing, when
+    /// it is not packed or a size differs: the caller then repacks everything, as before.
+    /// A skinned character otherwise discarded the packed buffer on every pose, so each frame
+    /// repacked and re-uploaded every mesh, the static world included (Showcase: 5.8 ms CPU).
+    fn patch_skinned_blas(&mut self, mesh: &Mesh, blas: Blas) -> Result<Option<Blas>, Error> {
+        let key: &wgpu::Buffer = &mesh.vertex;
+        let Some(index) = self.gi.meshes.iter().position(|(k, _)| k == key) else {
+            return Ok(Some(blas));
+        };
+        let old = &self.gi.meshes[index].1;
+        let same = |a: &Blas, b: &Blas| {
+            a.bvh.nodes.len() == b.bvh.nodes.len()
+                && a.bvh.leaves.len() == b.bvh.leaves.len()
+                && a.bvh.positions.len() == b.bvh.positions.len()
+                && a.bvh.indices.len() == b.bvh.indices.len()
+                && a.near.is_empty()
+                && b.near.is_empty()
+        };
+        let Some(packed) = self.gi.packed.as_ref() else {
+            return Ok(Some(blas));
+        };
+        if !same(old, &blas) || self.gi.world.iter().flat_map(|w| &w.meshes).any(|m| m.as_ref() == Some(key)) {
+            return Ok(Some(blas));
+        }
+        let regions: Vec<u32> = packed
+            .meshes
+            .iter()
+            .zip(&packed.entry)
+            .filter(|(m, _)| *m == key)
+            .filter_map(|(_, e)| e.map(|i| packed.offsets[i][0]))
+            .collect();
+        if regions.is_empty() {
+            return Ok(Some(blas));
+        }
+        let words = gi_bvh::mesh_words(&[&blas], &[[0; 4]], &[vec![]], blas.words());
+        let raw: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        for start in regions {
+            self.queue.write_buffer(&packed.buffer, u64::from(start) * 4, &raw);
+        }
+        self.gi.meshes[index].1 = Arc::new(blas);
+        Ok(None)
     }
     /// Selects world radiance cache settings. Enabling allocates the table (all
     /// slots empty); a new slot count reallocates it. With `auto_slots` (and no
@@ -2503,7 +2829,9 @@ impl Renderer {
             return Err(Error::InvalidInput("mesh belongs to another renderer"));
         }
         let key: wgpu::Buffer = (**mesh.vertex).clone();
+        let before = self.gi.meshes.len();
         self.gi.meshes.retain(|(k, _)| *k != key);
+        let replaced = self.gi.meshes.len() != before;
         // Whatever this mesh traced before, it no longer stands for a field mesh.
         for m in self.gi.world.iter_mut().flat_map(|w| &mut w.meshes) {
             if m.as_ref() == Some(&key) {
@@ -2519,7 +2847,16 @@ impl Renderer {
                 .retired
                 .push((self.submissions, Retired::Packed(old)));
         }
-        self.gi.planner.set_pending_clear(true);
+        // A replaced mesh changes what placed cells traced. A new mesh is not placed yet (its
+        // placements reach the planner as new bounds, which re-trace the cells around them), but
+        // the clear stays the default: a full table relit at once (Glint's goal changes its
+        // lights as its new meshes appear) queued 633k gathers that ran into the held frames,
+        // where main's clear left a small table. RENDERLAB_GI_NEW_MESH_CLEAR=0 keeps the table
+        // for new meshes (an embedder that rebuilds batches every frame emptied it each frame).
+        static CLEAR_NEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if replaced || *CLEAR_NEW.get_or_init(|| std::env::var("RENDERLAB_GI_NEW_MESH_CLEAR").map_or(true, |v| v != "0")) {
+            self.gi.planner.set_pending_clear(true);
+        }
         Ok(())
     }
     /// Per-pass GPU timing of later frames into a readback (`indirect_profile`).
@@ -2710,6 +3047,10 @@ impl Renderer {
             created_secondary: w[253],
             created_tertiary: w[254],
             evicted_secondary: w[255],
+            moved_boxes: w[252],
+            invalidated_read: [w[241], w[242]],
+            invalidated_cube: w[246],
+            reshaded: [w[243], w[244], w[245]],
         }))
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires
@@ -3332,6 +3673,24 @@ impl Renderer {
         let instances: usize = draws.iter().map(|d| d.instances.len()).sum::<usize>()
             - covered.iter().filter(|&&c| c).count()
             + usize::from(!covered.is_empty());
+        if super::change_log::enabled() {
+            let why = match self.gi.packed.as_ref() {
+                None => "none".to_owned(),
+                Some(p) => format!(
+                    "{}{}{}{}",
+                    if p.meshes != meshes { "meshes " } else { "" },
+                    if p.instances != instances { "instances " } else { "" },
+                    if p.covered != covered { "covered " } else { "" },
+                    if p.ids != ids { "ids" } else { "" }
+                ),
+            };
+            super::change_log::report(
+                self.frames + 1,
+                "gi_pack",
+                &[],
+                &[("repack_because", format!("\"{}\"", why.trim())), ("instances", instances.to_string())],
+            );
+        }
         if self.gi.packed.as_ref().is_none_or(|p| {
             p.meshes != meshes || p.instances != instances || p.covered != covered || p.ids != ids
         }) {
@@ -3507,11 +3866,11 @@ impl Renderer {
             let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
             self.gi.probe_log.get_or_insert_with(|| ProbeWatch::new(&self.device)).collect(path, slots);
         }
-        if still_batch_on() {
+        if stale_budget() != 0 {
             let device = &self.device;
-            let watch = self.gi.pending_watch.get_or_insert_with(|| FullWatch::of_words(device, &[0, 38]));
-            if let Some(pending) = watch.collect() {
-                self.gi.planner.pending = pending;
+            let watch = self.gi.stale_watch.get_or_insert_with(|| FullWatch::of_words(device, &[247]));
+            if let Some(stale) = watch.collect() {
+                self.gi.planner.stale_cells = stale;
             }
         }
         if let Some(full) = self.gi.watch.as_mut().and_then(FullWatch::collect) {
@@ -3544,7 +3903,16 @@ impl Renderer {
         let run = self.gi.settings.enabled && eligible && self.gi_callers(draws);
         let software = !hardware;
         let ids = self.gi_draw_ids(draws);
+        let geometry_start = std::time::Instant::now();
         let run = run && (hardware || self.prepare_gi_geometry(draws, &ids)?);
+        if super::change_log::enabled() {
+            super::change_log::report(
+                self.frames + 1,
+                "gi_geometry",
+                &[],
+                &[("prepare_gi_geometry_ms", format!("{:.3}", geometry_start.elapsed().as_secs_f64() * 1000.))],
+            );
+        }
         // Bounce (G2): the setting is on and this frame's program reflects light. A change
         // empties the table, so no cell keeps bounce light from another program's frames.
         let bounce = run && self.gi.settings.bounce && self.ensure_gi_shade(software)?;
@@ -3704,6 +4072,32 @@ impl Renderer {
             if let Some(s) = &d.mesh.skin {
                 skin_revisions.extend(s.revision.to_le_bytes());
             }
+        }
+        if super::change_log::enabled() {
+            let camera_bytes = matrix_bytes(still.0.matrix(size[0], size[1]));
+            let lights = format!("{:?}", self.lighting.source_lights);
+            let settings = format!("{:?}", self.gi.settings);
+            super::change_log::report(
+                self.frames + 1,
+                "gi",
+                &[
+                    ("camera", &camera_bytes),
+                    ("placements", &self.gi.arrays.as_ref().unwrap().revision_bytes),
+                    ("environment", &environment),
+                    ("poses", &skin_revisions),
+                    ("lights", lights.as_bytes()),
+                    ("decals", &self.lighting.decals.hash),
+                    ("transmission", &self.lighting.transmission.hash),
+                    ("settings", settings.as_bytes()),
+                    ("size", &still.1),
+                ],
+                &[
+                    ("bounce", bounce.to_string()),
+                    ("tick", tick.to_string()),
+                    ("idle_frames", self.view.gi.idle_frames.to_string()),
+                    ("view_frames", self.view.gi.view_frames.to_string()),
+                ],
+            );
         }
         let finished = self.gi.planner.finish(
             &config,
@@ -4153,7 +4547,7 @@ impl GiState {
         if let (Some(watch), Some(r)) = (self.probe_log.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
         }
-        if let (Some(watch), Some(r)) = (self.pending_watch.as_mut(), self.resources.as_ref()) {
+        if let (Some(watch), Some(r)) = (self.stale_watch.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
         }
     }
@@ -4215,6 +4609,30 @@ mod tests {
                 planner.advance(&begun, false);
             }
         }
+    }
+
+    /// More moved boxes than the frame holds become at most that many unions, each box inside
+    /// one, and far-apart movers stay apart.
+    #[test]
+    fn moved_boxes_cluster_by_position() {
+        let boxes: Vec<[f32; 6]> = (0..100)
+            .map(|i| {
+                let x = (i % 10) as f32 * 50.0;
+                let z = (i / 10) as f32 * 50.0;
+                [x, 0.0, z, x + 1.0, 1.0, z + 1.0]
+            })
+            .collect();
+        let clusters = cluster_boxes(boxes.clone(), 32);
+        assert!(clusters.len() <= 32);
+        for b in &boxes {
+            assert!(clusters.iter().any(|c| (0..3).all(|k| c[k] <= b[k] && b[k + 3] <= c[k + 3])));
+        }
+        // No cluster spans the whole 450 m field (the single union did).
+        let largest = clusters
+            .iter()
+            .map(|c| (c[3] - c[0]).max(c[5] - c[2]))
+            .fold(0.0f32, f32::max);
+        assert!(largest < 200.0, "largest cluster {largest} m");
     }
 
     fn validate(label: &str, source: &str) {

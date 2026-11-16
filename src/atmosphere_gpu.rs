@@ -49,6 +49,18 @@ fn sunrt_diag(flag: &str) -> bool {
     std::env::var("RENDERLAB_SUNRT_DIAG").is_ok_and(|v| v.split(',').any(|f| f == flag))
 }
 
+/// Play loop (sunrt, 2026-11-16): the fog's history (a lit fraction and a density per froxel,
+/// shaders/atmosphere.wgsl) survives moved placements, skinned poses and exposure changes. A
+/// moving caster's shaft is the temporal pass's job, as for camera motion: it bounds old
+/// visibility by this frame's raw neighbourhood. Neither value depends on exposure. In play,
+/// one animated character (a pose every frame) or the meter (exposure most walking frames)
+/// restarted every view's fog on every frame: double injection samples, no accumulation.
+/// `RENDERLAB_FOG_HISTORY_KEEP=0` restarts it on those, as before.
+pub(crate) fn fog_history_keep() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_FOG_HISTORY_KEEP").map_or(true, |v| v != "0"))
+}
+
 fn overhaul_enabled() -> bool {
     std::env::var("RENDERLAB_FOG_OVERHAUL").as_deref() != Ok("0")
 }
@@ -751,7 +763,11 @@ impl Renderer {
         // changes. Camera motion uses world reprojection; phase is always current.
         let key = HistoryKey {
             sun: self.atmosphere_sun(),
-            exposure: self.lighting.pending.exposure,
+            exposure: if fog_history_keep() {
+                0.0
+            } else {
+                self.lighting.pending.exposure
+            },
             environment: self.environment.generation,
             shadows: self.view.shadows.settings.clone(),
             primary: self.primary_mode,
@@ -762,6 +778,30 @@ impl Renderer {
             self.view.atmosphere.history_key = Some(key);
         }
         let bytes = self.atmosphere_uniform(camera, size);
+        if super::change_log::enabled() {
+            let a = &self.atmosphere;
+            let av = &self.view.atmosphere;
+            let sun = format!("{:?}", self.atmosphere_sun());
+            let shadows = format!("{:?}", self.view.shadows.settings);
+            let revisions = [self.environment.generation, self.environment.content_revision, self.scene_edits];
+            let revisions: Vec<u8> = revisions.iter().flat_map(|v| v.to_le_bytes()).collect();
+            super::change_log::report(
+                self.frames + 1,
+                "atmosphere",
+                &[
+                    ("sun", sun.as_bytes()),
+                    ("exposure", &self.lighting.pending.exposure.to_le_bytes()),
+                    ("environment_and_scene_edits", &revisions),
+                    ("shadow_settings", shadows.as_bytes()),
+                    ("uniform_inputs", &bytes[..STILL_UNIFORM_BYTES]),
+                ],
+                &[
+                    ("fog_history", av.previous.is_some().to_string()),
+                    ("procedural_rebuild", a.procedural.as_ref().is_some_and(|p| !p.written).to_string()),
+                    ("luts_stale", (a.luts != Some(a.settings.medium)).to_string()),
+                ],
+            );
+        }
         let av = &mut self.view.atmosphere;
         let mut inputs: Vec<u8> = camera
             .unjittered()
@@ -772,6 +812,9 @@ impl Renderer {
             .flat_map(|v| v.to_ne_bytes())
             .collect();
         inputs.extend_from_slice(&bytes[..STILL_UNIFORM_BYTES]);
+        // A moving caster (placement or pose) changes the fog's shafts: no frame of the run may
+        // have moved one (the history itself is kept across motion, `fog_history_keep`).
+        inputs.extend_from_slice(&self.scene_motion.to_ne_bytes());
         let unchanged = match &av.still {
             Some((previous, frames)) if av.previous.is_some() && *previous == inputs => frames + 1,
             _ => 0,

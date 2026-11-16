@@ -143,15 +143,29 @@ impl Engine {
         if !frames.contains(&frame) {
             return Ok(());
         }
-        let image = self.capture_view(view)?;
         let _ = std::fs::create_dir_all(dir);
-        // Binary PPM (no image dependency in the library): RGB, alpha dropped.
-        let mut bytes = format!("P6
+        // A failed readback never fails the frame; the attempt and its result are logged.
+        // Slow frames (seconds) can outlast one capture admission: a few attempts.
+        let mut result = self.capture_view(view);
+        for _ in 0..8 {
+            if result.is_ok() {
+                break;
+            }
+            result = self.capture_view(view);
+        }
+        let result = result.map(|image| {
+            // Binary PPM (no image dependency in the library): RGB, alpha dropped.
+            let mut bytes = format!("P6
 {} {}
 255
 ", image.width, image.height).into_bytes();
-        bytes.extend(image.rgba8.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]));
-        let _ = std::fs::write(dir.join(format!("frame-{frame}.ppm")), bytes);
+            bytes.extend(image.rgba8.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]));
+            std::fs::write(dir.join(format!("frame-{frame}.ppm")), bytes)
+        });
+        use std::io::Write;
+        if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("readback.log")) {
+            let _ = writeln!(log, "{frame} {result:?}");
+        }
         Ok(())
     }
     /// Renders `view` from `camera` into `color`: a single-sample 2D render attachment in
