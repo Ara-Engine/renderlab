@@ -87,6 +87,9 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     if reuse() {
         kernel = with_reuse(&kernel);
     }
+    if quarter() {
+        kernel = with_quarter(&kernel);
+    }
     composed.source.push_str(&kernel);
     // Measurement only (`RENDERLAB_GI_RX_PROBE=firstslot`): every find reads its start record
     // alone, as a find given its slot would; keys past it read as absent (a wrong picture).
@@ -154,6 +157,22 @@ fn with_reuse(kernel: &str) -> String {
     let declaration = "struct GiRxKeys { reuse:u32, still:u32, pad1:u32, pad2:u32, keys:array<u32> };\n@group(2) @binding(0) var<storage,read_write> gi_rx_keys:GiRxKeys;\n";
     let declaration = format!("{declaration}{CHANGE}");
     format!("{declaration}{}", kernel.replacen(MISS, missed, 1).replacen(LOOKUP, keyed, 1))
+}
+/// Measurement only (`RENDERLAB_GI_RX_QUARTER=1`): the ceiling of sharing one lookup across a
+/// 2x2 quad: one invocation a quad looks up at its top-left pixel and writes all four records,
+/// with no checks (a wrong picture at edges).
+fn quarter() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_RX_QUARTER").is_ok_and(|v| v == "1"))
+}
+fn with_quarter(kernel: &str) -> String {
+    const ID: &str = "    let id=grid.xy+primary_region.xy;\n";
+    const STORE: &str = "    gi_prepared[at].r0=vec4<u32>(bitcast<vec2<u32>>(vec2<f32>(select(-1.0,sky,gi_rx_valid),bounce)),q0,q1);\n    gi_prepared[at].r1=vec4<u32>(q2,q3,q4,q5);\n    gi_prepared[at].r2=vec4<u32>(q6,q7,q8,q9);\n";
+    assert_eq!(kernel.matches(ID).count(), 1, "quarter id seam");
+    assert_eq!(kernel.matches(STORE).count(), 1, "quarter store seam");
+    kernel
+        .replacen(ID, "    let id=grid.xy*2u+primary_region.xy;\n", 1)
+        .replacen(STORE, "    for(var k=0u;k<4u;k+=1u) {\n        let t=id+vec2<u32>(k&1u,k>>1u);\n        if any(t>=size) || any(t>=primary_region.zw) {continue;}\n        let a=t.y*size.x+t.x;\n        gi_prepared[a].r0=vec4<u32>(bitcast<vec2<u32>>(vec2<f32>(select(-1.0,sky,gi_rx_valid),bounce)),q0,q1);\n        gi_prepared[a].r1=vec4<u32>(q2,q3,q4,q5);\n        gi_prepared[a].r2=vec4<u32>(q6,q7,q8,q9);\n    }\n", 1)
 }
 fn count() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -334,7 +353,7 @@ impl Renderer {
         let Some(target) = state.targets.as_ref().and_then(|t| t.gi_receiver.as_ref()) else {
             return Ok(());
         };
-        let [x, y] = state.region_groups([8, 4]);
+        let [x, y] = state.region_groups(if quarter() { [16, 8] } else { [8, 4] });
         self.queue.write_buffer(
             &target.args.value,
             0,
