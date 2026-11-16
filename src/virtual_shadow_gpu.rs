@@ -2170,19 +2170,20 @@ impl Renderer {
             .map_or(0.0, |frame| (frame % 4096 + 1) as f32);
         let state = self.view.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
-        // The newest mark-pass counters mapped since the last frame (the ladder's finest level
-        // follows the nearest receiver when the nearest caster cannot place it).
+        // Measurement: the Disk lookup's edge pixels, a line a frame.
         if let Some(path) = edge_log() {
             for ((), words) in state.edge_counts.get_mut().unwrap().collect() {
-                let word = |i: usize| u32::from_ne_bytes(words[i * 4..i * 4 + 4].try_into().unwrap());
+                let count = u32::from_ne_bytes(words[..4].try_into().unwrap());
                 use std::io::Write;
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(path)
-                    .and_then(|mut f| writeln!(f, "{} {}", word(0), word(1)));
+                    .and_then(|mut f| writeln!(f, "{count}"));
             }
         }
+        // The newest mark-pass counters mapped since the last frame (the ladder's finest level
+        // follows the nearest receiver when the nearest caster cannot place it).
         if let Some(((at, epoch), words)) = state.reach.get_mut().unwrap().collect().pop() {
             let word = |i: usize| u32::from_ne_bytes(words[i * 4..i * 4 + 4].try_into().unwrap());
             state.stats.nearest_receiver = (word(0) != 0).then(|| f32::from_bits(!word(0)));
