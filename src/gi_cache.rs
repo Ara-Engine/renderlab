@@ -2209,8 +2209,19 @@ impl GiState {
 
 /// The kernel module: built-in prelude, primary ray helpers, cell definitions, one ray
 /// source and the kernels.
-pub(crate) fn kernel_source(software: bool, directions: u32) -> String {
-    let priority = software && priority::on();
+/// The software path's cache entry points beyond the shared ones, for tools that compile the
+/// shipped module: the bounded refill's when it is on at the default table size (its claim
+/// and gather replace `gi_claim` and `gi_gather_batched`), else none.
+pub(crate) fn bounded_refill_entries() -> Option<&'static [&'static str]> {
+    priority::on().then_some(&[
+        "gi_priority_claim_visible", "gi_priority_gather_empty", "gi_priority_claim_background",
+        "gi_priority_claim_reset", "gi_priority_compact", "gi_priority_defer", "gi_priority_gather_background",
+        "gi_priority_gather_clamp", "gi_priority_gather_first", "gi_priority_gather_later",
+        "gi_priority_gather_refresh", "gi_priority_hold_queue", "gi_priority_select",
+    ][..])
+}
+/// `priority`: the bounded refill's module (`priority::applies`).
+pub(crate) fn kernel_source(software: bool, priority: bool, directions: u32) -> String {
     probe_cut(priority::source(kernel_source_base(software, directions), priority))
 }
 /// Measurement only (`RENDERLAB_GI_PROBE_CUT=noinsert|nowalk|nostamp|nofind`, comma list): gi_probe
@@ -2599,6 +2610,10 @@ impl Renderer {
     /// binds the whole table. wgpu's default binding limit, 128 MiB, holds 2^19 slots; the
     /// default 2^20 (224 MiB, GC1) needs a device created with a higher limit, as the quarry
     /// harness's are (docs/m7-gc1.md).
+    /// Whether this path runs the bounded refill (`priority::applies`) at the settings' table cap.
+    fn gi_priority(&self, software: bool) -> bool {
+        priority::applies(software, self.gi_slots(self.gi.settings.slots_log2))
+    }
     fn gi_slots(&self, slots_log2: u32) -> u32 {
         let limits = self.device.limits();
         let fits = limits
@@ -3402,12 +3417,10 @@ impl Renderer {
 
     fn ensure_gi_pipelines(&mut self, software: bool) -> Result<(), Error> {
         let directions = self.gi.settings.directions;
-        if self
-            .gi
-            .pipelines
-            .as_ref()
-            .is_some_and(|p| p.software == software && p.directions == directions)
-        {
+        let priority = self.gi_priority(software);
+        if self.gi.pipelines.as_ref().is_some_and(|p| {
+            p.software == software && p.directions == directions && p.priority.is_some() == priority
+        }) {
             return Ok(());
         }
         self.ensure_gi_layouts();
@@ -3416,7 +3429,7 @@ impl Renderer {
             self.device
                 .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                     label: Some("indirect cache kernels"),
-                    source: wgpu::ShaderSource::Wgsl(kernel_source(software, directions).into()),
+                    source: wgpu::ShaderSource::Wgsl(kernel_source(software, priority, directions).into()),
                 }),
             ResourceKind::ShaderModule,
         );
@@ -3450,7 +3463,6 @@ impl Renderer {
             }
             compute(entry, main)
         };
-        let priority = software && priority::on();
         let mut pipelines = Pipelines {
             software,
             priority: priority.then(|| priority::Pipelines::new(|name| kernel(name))),
@@ -3916,11 +3928,11 @@ impl Renderer {
         // Bounce (G2): the setting is on and this frame's program reflects light. A change
         // empties the table, so no cell keeps bounce light from another program's frames.
         let bounce = run && self.gi.settings.bounce && self.ensure_gi_shade(software)?;
-        if bounce && software && priority::on() {
+        // The bounded refill's soft gather target needs the passes' measured cost; without
+        // timestamp queries it keeps the fixed quota (`priority::Controller::default`).
+        let ordered = self.gi_priority(software);
+        if bounce && ordered && self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
             if self.gi.refill_feedback.is_none() {
-                if !self.device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
-                    return Err(Error::InvalidInput("GI soft gather target requires timestamp queries"));
-                }
                 self.gi.refill_feedback = Some(refill_feedback::State::new(&self.device,&self.queue,&self.ledger));
             }
             let target = match priority::mode() { priority::Mode::Milliseconds(ms) => ms, _ => priority::gather_target() };
@@ -3951,7 +3963,7 @@ impl Renderer {
         let mut begun = self.gi.planner.begin(&config, run, bounce, tick);
         self.gi.priority_compact = false;
         self.gi.priority_hold = false;
-        if software && priority::on() {
+        if ordered {
             let fallback = priority::Controller::default();
             let controller = self.gi.refill_feedback.as_ref().map_or(&fallback,|f|&f.controller);
             controller.header(&mut begun.header, priority::mode());
@@ -4649,8 +4661,9 @@ mod tests {
     #[test]
     fn kernels_validate_on_both_ray_sources() {
         for directions in [64, 128] {
-            validate("hardware kernels", &kernel_source(false, directions));
-            validate("software kernels", &kernel_source(true, directions));
+            validate("hardware kernels", &kernel_source(false, false, directions));
+            validate("software kernels", &kernel_source(true, false, directions));
+            validate("software kernels, bounded refill", &kernel_source(true, true, directions));
         }
     }
 

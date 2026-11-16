@@ -327,16 +327,20 @@ pub(super) fn sources(program_source: &str) -> Result<Vec<Source>, String> {
             "gi_light",
             "gi_filter",
         ];
-        gi_entries.push(if path == "nonrt" {
-            "gi_gather_batched"
-        } else {
-            "gi_gather"
-        });
+        // Non-RT ships the bounded refill (gi_cache::bounded_refill_entries) unless it is off.
+        let ordered = (path == "nonrt").then(gi_cache::bounded_refill_entries).flatten();
+        match ordered {
+            Some(entries) => {
+                gi_entries.retain(|e| *e != "gi_claim");
+                gi_entries.extend_from_slice(entries);
+            }
+            None => gi_entries.push(if path == "nonrt" { "gi_gather_batched" } else { "gi_gather" }),
+        }
         add(
             &mut out,
             path,
             "gi-kernels",
-            gi_cache::kernel_source(path == "nonrt", 64),
+            gi_cache::kernel_source(path == "nonrt", ordered.is_some(), 64),
             true,
             &gi_entries,
         );

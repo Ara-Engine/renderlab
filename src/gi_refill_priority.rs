@@ -99,9 +99,18 @@ pub(super) enum Mode {
     Fixed(u32),
     Milliseconds(f64),
 }
+/// The ordered, bounded refill on the software path: on by default since 2026-11-17 (gicut;
+/// docs/design-gi-refill-priority.md "Default"); `RENDERLAB_GI_BOUNDED_REFILL=0` keeps the
+/// original module. Where it runs is `applies`.
 pub(super) fn on() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BOUNDED_REFILL").is_ok_and(|v| v == "1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_BOUNDED_REFILL").map_or(true, |v| v != "0"))
+}
+/// Whether the bounded refill runs: software rays, the switch on, and a table whose largest
+/// size (`slots`) leaves room in the ray arena for the ordered lists at the controller's
+/// largest quota. The 2^21-slot opt-in (2 px cells) does not, and keeps the original module.
+pub(super) fn applies(software: bool, slots: u32) -> bool {
+    software && on() && compact_available(GATHER_CELLS, slots)
 }
 pub(super) fn mode() -> Mode {
     static MODE: OnceLock<Mode> = OnceLock::new();
@@ -410,7 +419,7 @@ mod tests {
             return;
         }
         let original = kernel_source_base(true, 64);
-        let actual = kernel_source(true, 64);
+        let actual = kernel_source(true, on(), 64);
         let enabled = std::env::var("RENDERLAB_GI_BOUNDED_REFILL").as_deref() == Ok("1");
         assert_eq!(on(), enabled);
         if !enabled {

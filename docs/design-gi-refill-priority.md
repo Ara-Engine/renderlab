@@ -1,8 +1,47 @@
 # Ordered GI refill
 
+## Default (gicut, 2026-11-17)
+
+The bounded refill is on by default on the software path. `RENDERLAB_GI_BOUNDED_REFILL=0`
+keeps the original module. Hardware rays are unchanged. It runs where the table's largest size
+leaves room in the ray arena for the ordered lists at the controller's largest quota
+(`priority::applies`: slots + 2 × 32,768 + 16 ≤ 2^21). The 2^20 default fits; the 2^21 opt-in
+(2 px cells) keeps the original module instead of failing. Without timestamp queries it keeps
+the fixed 12,288-cell quota instead of failing.
+
+Why: under camera motion the original software path capped new-cell work only for the first
+frames after a cut. Every newly seen cell was created and traced in its frame, and gathers ran
+to 32,768 cells, so the cost followed how much the camera uncovered per frame (sunrt's roll
+breakdown: gi_gather + gi_update were nearly all of Glint's non-RT frame while rolling). Engines
+with world-space caches bound this the same way: a fixed update budget a frame, spent where the
+screen needs it first (Lumen's surface and radiance caches, DDGI's probe updates).
+
+Measured, bin-smoke-d3252112 (Renderlab t3/gi-ref d3252112 = main cf5387cf + measurement only),
+Glint non-RT, one run each:
+
+| case | default | bounded |
+|---|---|---|
+| walking, 1920x1080 (drive.py walk): span / gather / update ms | 34.6 / 16.5 / 6.6 | 15.6 / 2.4 / 4.4 |
+| standing, 1920x1080: span ms | 11.7 | 11.4 |
+| rolling the course, 2560x1440 (sunrt bd2): fps / span / gather / update ms | 15.2 / 64.0 / 22.3 / 24.5 | 33.4 / 28.9 / 4.5 / 10.3 |
+
+Picture after a camera cut (sunrt chev3, 118-tick step; pixels more than 40 codes from the
+run's own settled frame at frames 1, 2, 4, 8, 16, 30 after the cut):
+
+| | default | bounded |
+|---|---|---|
+| non-RT | 29759, 22619, 16069, 9418, 2255, 691 | 27439, 8154, 3794, 1916, 751, 372 |
+| RT (switch has no effect there) | 26189, 20728, 14937, 7588, 2334, 490 | 26143, 22770, 16382, 9081, 3176, 931 |
+
+Non-RT settles 3-4x faster from frame 2 to 16: visible cells are claimed and gathered first.
+The spinner bar's cell-sized blocks after the cut are gone by frame 4 instead of persisting
+past frame 8. RT is the same module in both columns; its spread is run-to-run. The RT bar
+still shows blocks at frame 8, a separate item.
+
 ## RAW first-fill follow-up
 
-`RENDERLAB_GI_BOUNDED_REFILL=1` remains the only production enable, default off.
+`RENDERLAB_GI_BOUNDED_REFILL=1` was the only production enable, default off, until the
+default above.
 It keeps the 12,288-cell claim ceiling and adds **a soft gather target from the
 previous frame's measured cost**, initially 3 ms. This is not a guaranteed ceiling.
 First fill and refresh use separate compacted dispatches with unchanged whole-cell
