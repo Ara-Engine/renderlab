@@ -121,24 +121,10 @@ fn mover_reach() -> f32 {
 /// One diagonal: Glint's play standing still, non-RT, span 14.1 ms at 4 and 10.8 at 1 with the
 /// stale budget and the box grid; live frames at the rings and track showed no difference.
 const MOVER_REACH: f32 = 1.0;
-/// Turns of a stale cell (shaders/gi_cache.wgsl GI_STALE): one frame in `read` while a pixel
-/// reads it, one in `sweep` otherwise. RENDERLAB_GI_STALE=0 re-traces every reached cell at once
-/// (both 1); RENDERLAB_GI_STALE_READ and RENDERLAB_GI_STALE_SWEEP set them.
-fn stale_periods() -> [u32; 2] {
-    static P: std::sync::OnceLock<[u32; 2]> = std::sync::OnceLock::new();
-    *P.get_or_init(|| {
-        if std::env::var("RENDERLAB_GI_STALE").is_ok_and(|v| v == "0") {
-            return [1, 1];
-        }
-        let get = |name: &str, default: u32| {
-            std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default).max(1)
-        };
-        [get("RENDERLAB_GI_STALE_READ", STALE_READ), get("RENDERLAB_GI_STALE_SWEEP", STALE_SWEEP)]
-    })
-}
-const STALE_READ: u32 = 1;
+/// The unread stale cells' shortest turn, in frames (shaders/gi_cache.wgsl gi_stale).
 const STALE_SWEEP: u32 = 16;
-/// Stale cells re-traced a frame, about (RENDERLAB_GI_STALE_BUDGET; 0: the fixed periods).
+/// Stale cells re-traced a frame, about (RENDERLAB_GI_STALE_BUDGET); 0 with RENDERLAB_GI_STALE=0
+/// (every stale cell at once).
 fn stale_budget() -> u32 {
     static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *B.get_or_init(|| {
@@ -149,8 +135,9 @@ fn stale_budget() -> u32 {
     })
 }
 const STALE_BUDGET: u32 = 2048;
-/// Longest turn of a read stale cell, in frames.
-const STALE_TURN_MAX: u32 = 32;
+/// Frames the scan keeps sweeping stale cells after the last mover: the longest unread turn
+/// (four times the longest read turn, 32).
+const STALE_WINDOW: u32 = 128;
 /// Which moved boxes may reach each cell of an 8 x 8 x 8 grid over them (shaders/gi_cache.wgsl
 /// gi_box_mask): each box grown by `reach` of its diagonals. The scan tested every slot against
 /// every box (Glint's play: about a million slots and 107 boxes a frame); with the grid a slot
@@ -982,6 +969,7 @@ struct Pipelines {
     resolve: Owned<wgpu::ComputePipeline>,
     resolve_last: Owned<wgpu::ComputePipeline>,
     scan: Owned<wgpu::ComputePipeline>,
+    stale: Owned<wgpu::ComputePipeline>,
     setup: Owned<wgpu::ComputePipeline>,
     rays: Owned<wgpu::ComputePipeline>,
     finish: Owned<wgpu::ComputePipeline>,
@@ -1303,8 +1291,6 @@ pub(crate) struct Planner {
     environment_phase: u32,
     bounce_last: Option<bool>,
     bounce_busy: u32,
-    /// Last collected frame's stale cells (shaders/gi_cache.wgsl GI_W_STALE_CELLS).
-    pub(crate) stale_cells: u32,
     parity: bool,
     /// The gather queues (this frame's, next frame's) the tick's first frame used: later
     /// views of the tick trace into the same next queue.
@@ -1330,7 +1316,6 @@ impl Default for Planner {
             environment_phase: 0,
             bounce_last: None,
             bounce_busy: 0,
-            stale_cells: 0,
             parity: false,
             tick_queues: [0; 2],
             light_key: None,
@@ -1374,18 +1359,6 @@ impl Planner {
     /// `bounce`: its bounce passes too. `tick`: the first frame of an engine tick, which
     /// does the cache's per-tick work; later views of the tick only probe, claim and trace
     /// their new cells, and change none of the engine's history.
-    /// Stale cells' turns [read, sweep] (shaders/gi_cache.wgsl GI_STALE): with a budget, the
-    /// power of two that spreads last frame's stale cells to about the budget a frame (1 below
-    /// it), unread ones four times slower; else the fixed periods.
-    fn stale_turns(&self) -> [u32; 2] {
-        let [read, sweep] = stale_periods();
-        let budget = stale_budget();
-        if budget == 0 {
-            return [read, sweep];
-        }
-        let turn = self.stale_cells.div_ceil(budget).max(1).next_power_of_two().min(STALE_TURN_MAX);
-        [read.max(turn), sweep.max(4 * turn)]
-    }
     pub(crate) fn begin(&mut self, c: &PlanConfig, run: bool, bounce: bool, tick: bool) -> Begun {
         if run && tick {
             if self.bounce_last.is_some_and(|b| b != bounce) {
@@ -1458,9 +1431,10 @@ impl Planner {
         header[55] = near_occluded_rays();
         header[56] = u32::from(light_reuse_on());
         header[61] = mover_reach().to_bits();
-        let [read, sweep] = self.stale_turns();
-        header[62] = read;
-        header[63] = sweep;
+        // Stale cells' budget a frame and the unread sweep's shortest turn (shaders/gi_cache.wgsl
+        // gi_stale); RENDERLAB_GI_STALE=0: 0 and 1, every stale cell at once.
+        header[62] = stale_budget();
+        header[63] = if stale_budget() == 0 { 1 } else { STALE_SWEEP };
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;
@@ -1628,8 +1602,7 @@ impl Planner {
         } else {
             0
         };
-        let [_, sweep] = self.stale_turns();
-        if sweep > 1 && self.since_movers < sweep {
+        if stale_budget() != 0 && self.since_movers < STALE_WINDOW {
             flags |= 64;
         }
         if !boxes.is_empty() && s.invalidate_casters {
@@ -1952,8 +1925,6 @@ pub(super) struct GiState {
     grow: bool,
     /// `RENDERLAB_GI_PROBE_LOG`: the probe's work counters, read back without waiting.
     probe_log: Option<ProbeWatch>,
-    /// The still-view batch: misses plus queued gathers of recent cache frames.
-    stale_watch: Option<FullWatch>,
 }
 
 /// Measurement only: `RENDERLAB_GI_PROBE_LOG=PATH` counts the probe's work on every frame
@@ -2176,15 +2147,11 @@ impl GiState {
             watch: None,
             grow: false,
             probe_log: None,
-            stale_watch: None,
         }
     }
     /// After the frame's submission (Renderer::submit_frame): maps the full-bucket readback.
     pub(crate) fn submitted(&mut self) {
         if let Some(watch) = &mut self.watch {
-            watch.submitted();
-        }
-        if let Some(watch) = &mut self.stale_watch {
             watch.submitted();
         }
         if let Some(watch) = &mut self.probe_log {
@@ -3460,6 +3427,7 @@ impl Renderer {
             resolve: kernel("gi_resolve"),
             resolve_last: kernel("gi_resolve_last"),
             scan: kernel("gi_scan"),
+            stale: kernel("gi_stale"),
             setup: kernel("gi_setup"),
             rays: kernel("gi_rays"),
             finish: kernel("gi_finish"),
@@ -3865,13 +3833,6 @@ impl Renderer {
         if let Some(path) = probe_log_path() {
             let slots = self.gi.resources.as_ref().map_or(0, |r| r.slots);
             self.gi.probe_log.get_or_insert_with(|| ProbeWatch::new(&self.device)).collect(path, slots);
-        }
-        if stale_budget() != 0 {
-            let device = &self.device;
-            let watch = self.gi.stale_watch.get_or_insert_with(|| FullWatch::of_words(device, &[247]));
-            if let Some(stale) = watch.collect() {
-                self.gi.planner.stale_cells = stale;
-            }
         }
         if let Some(full) = self.gi.watch.as_mut().and_then(FullWatch::collect) {
             self.gi.stats.peak_full = self.gi.stats.peak_full.max(full);
@@ -4462,6 +4423,9 @@ impl GiState {
         if plan.scan || profiling {
             let groups = plan.scan.then_some([plan.scan_groups, 1]);
             main_pass(encoder, "indirect cache scan", &p.scan, s, groups);
+            // Stale cells due this frame (shaders/gi_cache.wgsl gi_stale), over every slot.
+            let stale = plan.scan.then_some([r.slots.div_ceil(64), 1]);
+            main_pass(encoder, "indirect cache stale turns", &p.stale, u32::MAX, stale);
         }
         let cells = Some([CELL_GROUPS, 1]);
         if traced || profiling {
@@ -4545,9 +4509,6 @@ impl GiState {
             watch.record(encoder, &r.work);
         }
         if let (Some(watch), Some(r)) = (self.probe_log.as_mut(), self.resources.as_ref()) {
-            watch.record(encoder, &r.work);
-        }
-        if let (Some(watch), Some(r)) = (self.stale_watch.as_mut(), self.resources.as_ref()) {
             watch.record(encoder, &r.work);
         }
     }

@@ -1772,11 +1772,34 @@ const GI_H_STALE_READ:u32=62u;
 const GI_H_STALE_SWEEP:u32=63u;
 const GI_SCAN_STALE:u32=64u;
 const GI_W_STALE_CELLS:u32=247u;
-fn gi_stale_due(slot:u32, cold:u32, inside:bool) -> bool {
+// A stale cell a moved box overlaps (the mover passes through it): read-cell turns.
+const GI_STALE_INSIDE:u32=0x40000u;
+// After the scan, over every slot: the stale cells due this frame are queued for tracing. The
+// turn follows this frame's own count of stale cells (the scan's GI_W_STALE_CELLS) and the
+// budget (GI_H_STALE_READ, cells a frame; 0: every stale cell at once): the power of two that
+// spreads the count to about the budget, at most 32, for read cells and cells under a mover;
+// four times that, at least GI_H_STALE_SWEEP, for the rest. A read-back count of an earlier
+// frame set it before, and the lag then differed from run to run.
+@compute @workgroup_size(64) fn gi_stale(@builtin(global_invocation_id) id:vec3<u32>) {
+    let slot=id.x;
+    if slot>=gi_frame.offsets.x || gi_table[gi_hot(slot)]==0u { return; }
+    let cold=gi_cold(slot);
+    let state=gi_table[cold+GI_C_STATE];
+    if (state&GI_STALE)==0u || (state&GI_QUEUED)!=0u { return; }
+    let budget=gi_word(GI_H_STALE_READ);
+    var turn=1u;
+    if budget!=0u {
+        let t=(atomicLoad(&gi_work[GI_W_STALE_CELLS])+budget-1u)/budget;
+        if t>1u { turn=min(1u<<(32u-countLeadingZeros(t-1u)),32u); }
+    }
     let now=gi_word(GI_H_FRAME);
-    let read=inside || gi_table[cold+GI_C_SEEN]==now;
-    let p=max(select(gi_word(GI_H_STALE_SWEEP),gi_word(GI_H_STALE_READ),read),1u);
-    return (slot+now)%p==0u;
+    let read=(state&GI_STALE_INSIDE)!=0u || gi_table[cold+GI_C_SEEN]==now;
+    let p=select(max(gi_word(GI_H_STALE_SWEEP),4u*turn),turn,read || budget==0u && gi_word(GI_H_STALE_SWEEP)<=1u);
+    if (slot+now)%max(p,1u)!=0u { return; }
+    atomicAdd(&gi_work[GI_W_INVALIDATED],1u);
+    gi_count_read(GI_W_INVALIDATED_READ,cold);
+    gi_table[cold+GI_C_STATE]=(state&~(GI_STALE|GI_STALE_INSIDE))|GI_QUEUED;
+    gi_queue_trace(slot);
 }
 // The frame's moved-caster boxes, for the GI log (written by the scan).
 const GI_W_MOVED_BOXES:u32=252u;
@@ -1810,15 +1833,10 @@ fn gi_count_read(at:u32, cold:u32) {
     if !trace && (flags&(GI_SCAN_CASTER|GI_SCAN_STALE))!=0u {
         var reach=0u;
         if (flags&GI_SCAN_CASTER)!=0u { reach=gi_reach(slot,gi_cell(slot)); }
-        let stale=reach!=0u || (state&GI_STALE)!=0u;
-        if stale { atomicAdd(&gi_work[GI_W_STALE_CELLS],1u); }
-        if stale && gi_stale_due(slot,cold,reach==2u) {
-            atomicAdd(&gi_work[GI_W_INVALIDATED],1u);
-            gi_count_read(GI_W_INVALIDATED_READ,cold);
-            gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_STALE;
-            trace=true;
-        } else if stale {
-            gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]|GI_STALE;
+        // Marked only; gi_stale queues the ones due once the frame's count is known.
+        if reach!=0u || (state&GI_STALE)!=0u {
+            atomicAdd(&gi_work[GI_W_STALE_CELLS],1u);
+            gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]|GI_STALE|select(0u,GI_STALE_INSIDE,reach==2u);
         }
     }
     if !trace && (flags&GI_SCAN_ROTATION)!=0u && gi_frame.counts.y!=0u && (slot+gi_word(GI_H_FRAME))%gi_frame.counts.y==0u {
