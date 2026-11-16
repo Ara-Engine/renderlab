@@ -263,10 +263,9 @@ pub(super) struct Targets {
     /// new region clears them (`clear_keys`, encoded with the pass) and does not reuse.
     region: [u32; 4],
     clear_keys: bool,
-    /// The final gather (`program::final_gather`): one probe per FG_TILE tile of the target
-    /// (gi_receiver_pass.wgsl FgProbe), and its trace and resolve pipelines per `Shading` (on the
-    /// lean layout only).
-    probes: Option<Buffer>,
+    /// The final gather (`program::final_gather`): its trace and resolve pipelines per
+    /// `Shading`, on the shading layout (hits sample materials). Its probes, one per FG_TILE
+    /// tile, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe).
     gather: [Option<[Owned<wgpu::ComputePipeline>; 2]>; 2],
     tiles: [u32; 2],
 }
@@ -289,7 +288,12 @@ impl Renderer {
             values: Buffer::new(
                 self,
                 "GI prepared receiver",
-                u64::from(size.width) * u64::from(size.height) * BYTES,
+                u64::from(size.width) * u64::from(size.height) * BYTES
+                    + if program::final_gather() {
+                        u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE)) * FG_PROBE_BYTES
+                    } else {
+                        0
+                    },
                 wgpu::BufferUsages::STORAGE
                     | if lookup_probe::on() {
                         wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST
@@ -319,10 +323,6 @@ impl Renderer {
             table: None,
             region: [0; 4],
             clear_keys: false,
-            probes: program::final_gather().then(|| {
-                let tiles = u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE));
-                Buffer::new(self, "final gather probes", tiles * FG_PROBE_BYTES, wgpu::BufferUsages::STORAGE)
-            }),
             gather: [None, None],
             tiles: [size.width.div_ceil(FG_TILE), size.height.div_ceil(FG_TILE)],
         }
@@ -404,13 +404,9 @@ impl Renderer {
         };
         let own = state.targets.as_ref().and_then(|t| t.gi_receiver.as_ref());
         let keys = own.and_then(|t| t.keys.as_ref());
-        let probes = own.and_then(|t| t.probes.as_ref());
         let mut group_entries = Vec::new();
         if keys.is_some() {
             group_entries.push(storage(0, KEYS_HEAD + 4));
-        }
-        if probes.is_some() {
-            group_entries.push(storage(1, FG_PROBE_BYTES));
         }
         let empty_layout = self.ledger.own(
             self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -436,19 +432,17 @@ impl Renderer {
             let pipeline = build(&lean_layout);
             if pollster::block_on(scope.pop()).is_none() {
                 lean_built = Some(pipeline);
-                if probes.is_some() {
-                    gather = Some([build_entry(&lean_layout, "fg_trace"), build_entry(&lean_layout, "fg_resolve")]);
-                }
             }
         }
         let is_lean = lean_built.is_some();
+        if program::final_gather() {
+            let layout = &state.shade_layouts[shading as usize];
+            gather = Some([build_entry(layout, "fg_trace"), build_entry(layout, "fg_resolve")]);
+        }
         let pipeline = lean_built.unwrap_or_else(|| build(&state.shade_layouts[shading as usize]));
         let mut group = Vec::new();
         if let Some(k) = keys {
             group.push(wgpu::BindGroupEntry { binding: 0, resource: k.value.as_entire_binding() });
-        }
-        if let Some(p) = probes {
-            group.push(wgpu::BindGroupEntry { binding: 1, resource: p.value.as_entire_binding() });
         }
         let empty = self.ledger.own(
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -537,7 +531,9 @@ impl Renderer {
             None => pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]),
         }
         pass.set_bind_group(3, self.lighting.bind(), &[]);
-        if let Some([trace, resolve]) = target.gather[shading as usize].as_ref().filter(|_| target.lean[shading as usize]) {
+        if let Some([trace, resolve]) = target.gather[shading as usize].as_ref() {
+            // Hits shade with their materials: the full group 2.
+            pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
             pass.set_pipeline(trace);
             pass.dispatch_workgroups(target.tiles[0], target.tiles[1], 1);
             pass.set_pipeline(resolve);

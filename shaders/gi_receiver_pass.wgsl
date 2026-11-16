@@ -88,9 +88,23 @@ const FG_TILE:u32=16u;
 const FG_RAYS:u32=16u;
 const FG_HISTORY:f32=16.0;
 // The radiance SH (27 floats and a pad), the probe point (w: frames of history, 0 when
-// invalid) and normal (w: the tile footprint in metres).
+// invalid) and normal (w: the tile footprint in metres). Probes live after the pixels'
+// records in gi_prepared, three records a probe (src/gi_receiver_pass.rs sizes it).
 struct FgProbe { sh:array<vec4<f32>,7>, point:vec4<f32>, normal:vec4<f32> };
-@group(2) @binding(1) var<storage,read_write> fg_probes:array<FgProbe>;
+fn fg_at(index:u32,size:vec2<u32>)->u32 { return size.x*size.y+3u*index; }
+fn fg_load(index:u32,size:vec2<u32>)->FgProbe {
+    let at=fg_at(index,size);
+    let a=gi_prepared[at];let b=gi_prepared[at+1u];let c=gi_prepared[at+2u];
+    return FgProbe(array<vec4<f32>,7>(bitcast<vec4<f32>>(a.r0),bitcast<vec4<f32>>(a.r1),bitcast<vec4<f32>>(a.r2),
+        bitcast<vec4<f32>>(b.r0),bitcast<vec4<f32>>(b.r1),bitcast<vec4<f32>>(b.r2),bitcast<vec4<f32>>(c.r0)),
+        bitcast<vec4<f32>>(c.r1),bitcast<vec4<f32>>(c.r2));
+}
+fn fg_store(index:u32,size:vec2<u32>,p:FgProbe) {
+    let at=fg_at(index,size);
+    gi_prepared[at]=GiPrepared(bitcast<vec4<u32>>(p.sh[0]),bitcast<vec4<u32>>(p.sh[1]),bitcast<vec4<u32>>(p.sh[2]));
+    gi_prepared[at+1u]=GiPrepared(bitcast<vec4<u32>>(p.sh[3]),bitcast<vec4<u32>>(p.sh[4]),bitcast<vec4<u32>>(p.sh[5]));
+    gi_prepared[at+2u]=GiPrepared(bitcast<vec4<u32>>(p.sh[6]),bitcast<vec4<u32>>(p.point),bitcast<vec4<u32>>(p.normal));
+}
 var<workgroup> fg_lane_sh:array<array<f32,27>,FG_RAYS>;
 
 fn fg_hash(x:u32)->u32 {
@@ -176,7 +190,8 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     workgroupBarrier();
     if lane!=0u || any(group.xy>=tiles) {return;}
     if !found {
-        fg_probes[index].point.w=0.0;
+        var none:FgProbe;
+        fg_store(index,size,none);
         return;
     }
     var sh:array<f32,28>;
@@ -189,7 +204,7 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     let ray=primary_ray(pixel,size);
     let pixel_angle=length(ray.dx_far-ray.dx_near)/max(length(ray.far-ray.near),1e-30);
     let footprint=f32(FG_TILE)*pixel_angle*length(s.world-lighting.eye);
-    let old=fg_probes[index];
+    let old=fg_load(index,size);
     var count=1.0;
     if old.point.w>0.0 && dot(old.normal.xyz,s.normal)>0.9 && abs(dot(old.normal.xyz,s.world-old.point.xyz))<0.25*footprint {
         count=min(old.point.w+1.0,FG_HISTORY);
@@ -202,7 +217,7 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     }
     out.point=vec4<f32>(s.world,count);
     out.normal=vec4<f32>(s.normal,footprint);
-    fg_probes[index]=out;
+    fg_store(index,size,out);
 }
 @compute @workgroup_size(8,4) fn fg_resolve(@builtin(global_invocation_id) grid:vec3<u32>) {
     let id=grid.xy+primary_region.xy;
@@ -218,7 +233,7 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     for(var k=0u;k<4u;k+=1u) {
         let o=vec2<i32>(i32(k&1u),i32(k>>1u));
         let t=clamp(base+o,vec2<i32>(0),vec2<i32>(tiles)-vec2<i32>(1));
-        let p=fg_probes[u32(t.y)*tiles.x+u32(t.x)];
+        let p=fg_load(u32(t.y)*tiles.x+u32(t.x),size);
         if p.point.w<=0.0 {continue;}
         let bilinear=select(1.0-fr.x,fr.x,o.x!=0)*select(1.0-fr.y,fr.y,o.y!=0);
         let plane=abs(dot(p.normal.xyz,s.world-p.point.xyz))/max(0.1*p.normal.w,1e-6);
