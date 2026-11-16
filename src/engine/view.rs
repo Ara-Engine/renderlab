@@ -124,7 +124,35 @@ impl Engine {
     /// Renders `view` from `camera` into the view's own output.
     pub fn render_view(&mut self, view: ViewId, camera: &Camera) -> Result<FrameReport, Error> {
         let output = self.views[self.view_index(view)?].output.clone();
-        self.render_view_to(view, &output, camera)
+        let report = self.render_view_to(view, &output, camera)?;
+        self.save_listed_frame(view, report.frame.0)?;
+        Ok(report)
+    }
+    /// Measurement: with `RENDERLAB_READBACK_FRAMES=<dir>;<frame>,<frame>,...`, the view's output
+    /// after each listed frame (the pass log's frame ids) is read back (blocking) and written to
+    /// `<dir>/frame-<id>.ppm`: live frames of an embedder's own loop, which no capture call sees.
+    fn save_listed_frame(&mut self, view: ViewId, frame: u64) -> Result<(), Error> {
+        static LIST: std::sync::OnceLock<Option<(std::path::PathBuf, Vec<u64>)>> = std::sync::OnceLock::new();
+        let Some((dir, frames)) = LIST.get_or_init(|| {
+            let value = std::env::var("RENDERLAB_READBACK_FRAMES").ok()?;
+            let (dir, list) = value.split_once(';')?;
+            Some((dir.into(), list.split(',').filter_map(|f| f.trim().parse().ok()).collect()))
+        }) else {
+            return Ok(());
+        };
+        if !frames.contains(&frame) {
+            return Ok(());
+        }
+        let image = self.capture_view(view)?;
+        let _ = std::fs::create_dir_all(dir);
+        // Binary PPM (no image dependency in the library): RGB, alpha dropped.
+        let mut bytes = format!("P6
+{} {}
+255
+", image.width, image.height).into_bytes();
+        bytes.extend(image.rgba8.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]));
+        let _ = std::fs::write(dir.join(format!("frame-{frame}.ppm")), bytes);
+        Ok(())
     }
     /// Renders `view` from `camera` into `color`: a single-sample 2D render attachment in
     /// the engine's output format, such as a surface texture (then call `present`). The
