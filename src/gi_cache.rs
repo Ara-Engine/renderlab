@@ -122,12 +122,14 @@ fn mover_reach() -> f32 {
 /// stale budget and the box grid; live frames at the rings and track showed no difference.
 const MOVER_REACH: f32 = 1.0;
 /// Turns of a stale cell (shaders/gi_cache.wgsl GI_STALE): one frame in `read` while a pixel
-/// reads it, one in `sweep` otherwise. RENDERLAB_GI_STALE=0 re-traces every reached cell at once
-/// (both 1); RENDERLAB_GI_STALE_READ and RENDERLAB_GI_STALE_SWEEP set them.
+/// reads it, one in `sweep` otherwise. Off by default (both 1: every reached cell re-traced at
+/// once): stale cells under Glint's spinning bars left trails of dark cells in the floor around
+/// them. RENDERLAB_GI_STALE=1 turns it on; RENDERLAB_GI_STALE_READ and RENDERLAB_GI_STALE_SWEEP
+/// set the turns.
 fn stale_periods() -> [u32; 2] {
     static P: std::sync::OnceLock<[u32; 2]> = std::sync::OnceLock::new();
     *P.get_or_init(|| {
-        if std::env::var("RENDERLAB_GI_STALE").is_ok_and(|v| v == "0") {
+        if !std::env::var("RENDERLAB_GI_STALE").is_ok_and(|v| v == "1") {
             return [1, 1];
         }
         let get = |name: &str, default: u32| {
@@ -142,7 +144,7 @@ const STALE_SWEEP: u32 = 16;
 fn stale_budget() -> u32 {
     static B: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
     *B.get_or_init(|| {
-        if std::env::var("RENDERLAB_GI_STALE").is_ok_and(|v| v == "0") {
+        if !std::env::var("RENDERLAB_GI_STALE").is_ok_and(|v| v == "1") {
             return 0;
         }
         std::env::var("RENDERLAB_GI_STALE_BUDGET").ok().and_then(|v| v.parse().ok()).unwrap_or(STALE_BUDGET)
