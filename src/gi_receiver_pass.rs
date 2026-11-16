@@ -82,7 +82,7 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     // no line break and is applied to the kernel text alone: the earlier two-line pattern on the
     // composed source did not match in the game, so the switch did nothing there.
     if std::env::var("RENDERLAB_GI_RX_PROBE").as_deref() == Ok("nolookup") {
-        kernel = kernel.replacen("gi_prepare(input);", "", 1);
+        kernel = kernel.replace("gi_prepare(p.input);", "");
     }
     composed.source.push_str(&kernel);
     // Measurement only (`RENDERLAB_GI_RX_PROBE=firstslot`): every find reads its start record
@@ -111,6 +111,12 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
 fn count() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_RX_COUNT").is_ok_and(|v| v == "1" || v == "2"))
+}
+/// Quad sharing (gi_receiver_pass.wgsl `gi_receiver_quad`): a 2x2 quad on one placement, bin,
+/// level pair and first-level cell looks up once. `RENDERLAB_GI_RX_QUAD=0` looks up every pixel.
+fn quad() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_RX_QUAD").map_or(true, |v| v.trim() != "0"))
 }
 fn with_count(source: String) -> String {
     let stats = if source.contains("var<storage,read_write> rl_room_stats") {
@@ -187,13 +193,14 @@ fn with_count(source: String) -> String {
         }
     }
     let words = [4, 5, 7, 8, 11, 12, 13, 14, 15];
-    let flush: String = std::iter::once("    gi_prepare(input);\n".to_owned())
+    // Both entries (gi_receiver_pass and gi_receiver_quad) flush after their lookup.
+    let flush: String = std::iter::once("gi_prepare(p.input);\n".to_owned())
         .chain(words.iter().enumerate().map(|(k, w)| {
             format!("    if gi_cn[{k}]!=0u {{ atomicAdd(&rl_room_stats[{w}],gi_cn[{k}]); }}\n")
         }))
         .collect();
-    assert_eq!(source.matches("    gi_prepare(input);\n").count(), 1, "GI receiver count flush");
-    source.replacen("    gi_prepare(input);\n", &flush, 1)
+    assert_eq!(source.matches("gi_prepare(p.input);\n").count(), 2, "GI receiver count flush");
+    source.replace("gi_prepare(p.input);\n", &flush)
 }
 pub(crate) fn shade_source(source: String, eligible: bool, specular: bool) -> String {
     let enabled = for_source(&source);
@@ -295,7 +302,7 @@ impl Renderer {
                         label: Some("GI receiver"),
                         layout: Some(layout),
                         module: &module,
-                        entry_point: Some("gi_receiver_pass"),
+                        entry_point: Some(if quad() { "gi_receiver_quad" } else { "gi_receiver_pass" }),
                         compilation_options: Default::default(),
                         cache: abi.cache,
                     }),
