@@ -45,11 +45,12 @@ const PAGE: u32 = 128;
 /// the page work) the sparse pool's header words 4..11 (`POOL_*`).
 const REACH_BYTES: u64 = 48;
 
-// Sparse clipmap (U-CLIPMAP, opt-in with the Disk lookup: `RENDERLAB_VSM_SPARSE=1`; the dense
-// windows are the default). It gives receivers the level their footprint wants, about 450 MiB
-// less memory on Outpost and a shorter stall after a camera cut, but its steady lookup costs
-// 3.5 ms on Outpost against the dense windows' 1.9, because pixels now walk the finest band
-// instead of falling back to coarse levels. It becomes the default once that cost is gone. Each level is a 32x32-page window over absolute light-space pages, addressed
+// Sparse clipmap (U-CLIPMAP, the default with the Disk lookup; `RENDERLAB_VSM_SPARSE=0` keeps
+// the dense windows). It gives receivers the level their footprint wants (matched density,
+// docs/design-sun-shadows.md (a)), less memory than the dense windows and a shorter stall after a
+// camera cut; it costs more lookup than the dense windows because pixels walk the fine bands
+// instead of falling back to coarse levels (3.5 against 1.9 ms on Outpost, 14 Nov, before the
+// band order). Each level is a SPARSE_PAGES-square window over absolute light-space pages, addressed
 // toroidally through a page table (shaders/virtual_shadow.wgsl `vsm_vpage`), so a window
 // following the eye keeps every page it still covers and is wide enough that receivers read
 // the level their footprint wants. Only pages receivers request this frame are resident: they
@@ -57,18 +58,22 @@ const REACH_BYTES: u64 = 48;
 // that grows on demand, at most `pool_settings().1` new pages are rasterized per frame (coarse
 // levels first, the lookup reads a coarser level while a page is missing), and pages nobody
 // requested return to the pool after a while or under pressure.
-/// The sparse windows' side in pages.
-const SPARSE_PAGES: u32 = 32;
+/// The sparse windows' side in pages: 16384 texels a level, as Unreal's virtual shadow maps, so
+/// a level can hold every receiver whose footprint asks for it (docs/design-sun-shadows.md (a));
+/// only requested pages take physical pages.
+const SPARSE_PAGES: u32 = 128;
 /// WGSL `VSM_POOL_FREE`: header words before the free stack.
 const POOL_FREE: u64 = 16;
 /// WGSL `VSM_PAGE_MIPS`: in-page max-mip words per physical page.
 const PAGE_MIP_WORDS: u64 = 5461;
 /// The pool's largest size: one layer of 1024 pages is the 128 MiB storage binding.
 const POOL_MAX: u32 = 1024;
-/// Whether the sparse clipmap is on (`RENDERLAB_VSM_SPARSE=1` turns it on; off by default).
+/// Whether the sparse clipmap is on (`RENDERLAB_VSM_SPARSE=0` keeps the dense windows). The
+/// dense windows cannot hold matched density: their 16 pages a side leave most receivers to
+/// coarser levels, which showed as stairs.
 fn sparse_switch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE").is_ok_and(|v| v.trim() == "1"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE").map_or(true, |v| v.trim() != "0"))
 }
 /// Straight occluder outlines in the Disk lookup (shaders/virtual_shadow_disk.wgsl VD_EDGES):
 /// the page pass that stores each outline texel's edge line runs, its buffer (2 bytes a texel)
