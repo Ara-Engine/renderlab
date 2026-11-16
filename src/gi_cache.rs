@@ -1906,6 +1906,8 @@ pub(super) struct GiState {
     world: Option<World>,
     packed: Option<Packed>,
     plan: Option<Plan>,
+    /// Whether this frame's `prepare_gi` planned cache work (`encode` takes the plan itself).
+    planned: bool,
     profile: Option<Profile>,
     refill_feedback: Option<refill_feedback::State>,
     priority_compact: bool,
@@ -2141,6 +2143,7 @@ impl GiState {
             world: None,
             packed: None,
             plan: None,
+            planned: false,
             planner: Planner::default(),
             profile: None,
             refill_feedback: None,
@@ -3705,6 +3708,7 @@ impl Renderer {
         scene_generation: u64,
     ) -> Result<(), Error> {
         self.gi.plan = None;
+        self.gi.planned = false;
         if self.gi.resources.is_none() {
             // On by default (G2b): the first eligible frame whose programs call an indirect
             // input allocates the table.
@@ -3970,6 +3974,7 @@ impl Renderer {
             self.gi.stats.bounce_frames += 1;
         }
         self.gi.plan = Some(plan);
+        self.gi.planned = true;
         self.prepare_gi_groups(software, scene_generation)?;
         self.gi.stats.frames += 1;
         self.gi.stats.software = software;
@@ -4130,6 +4135,11 @@ pub(super) struct ShadeGroups<'a> {
 }
 
 impl GiState {
+    /// Whether the cache exists and runs nothing this frame (a still view: its table is the one
+    /// last frame's receivers read). Decided by `prepare_gi`.
+    pub(crate) fn idle(&self) -> bool {
+        self.resources.is_some() && !self.planned
+    }
     /// The cache passes, after the primaries' hit records and before shading. `lighting`
     /// is lighting's kernel group (the header-only table at binding 20); `shade` the groups
     /// cell shading runs the frame's program on (G2). `mark` names the stages for the pass

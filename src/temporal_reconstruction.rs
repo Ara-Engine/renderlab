@@ -1358,6 +1358,11 @@ pub(crate) struct Planner {
     pub probe_rays: u32,
 }
 impl Planner {
+    /// Consecutive prepared frames whose camera matched the previous one bit for bit, with no
+    /// turn and no rigid motion (0: this frame moved or restarted).
+    pub(crate) fn held_frames(&self) -> u32 {
+        self.held_frames
+    }
     pub(crate) fn new() -> Self {
         Self {
             parity: 0,

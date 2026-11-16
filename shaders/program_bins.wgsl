@@ -80,3 +80,97 @@ fn bins_append(slot:u32,entry:u32) {
         }
     }
 }
+
+// The grouped binning (wgpu; `RENDERLAB_BINS_GROUPED=0` dispatches `program_bins` above):
+// the same lists and entries, but one 16x16 group bins 4x4 list tiles (or 256 clear blocks)
+// in workgroup memory and reserves each list's entries with one global atomic. Per-tile
+// appends from about 130,000 groups queued on the lists' few counters: 0.3-0.4 ms at 1080p.
+// Entries within a list come in another order, which the list shading does not depend on.
+// Dispatch: ceil(region / 16) groups, then rows of groups of 16x16 clear blocks
+// (program_lists.rs bins_groups).
+// List entries per shading workgroup (program_lists.rs bin_source_for).
+const BINS_PER:u32=1u;
+// Per list tile of the group: the slots its pixels need.
+var<workgroup> bins_tile_masks:array<atomic<u32>,16>;
+// Per slot: the group's entries, then the next entry index once reserved.
+var<workgroup> bins_counts:array<atomic<u32>,32>;
+var<workgroup> bins_cursor:array<atomic<u32>,32>;
+
+// Reserves `count` entries of `slot`'s list and raises its dispatch arguments over them.
+fn bins_reserve(slot:u32,count:u32)->u32 {
+    let at=atomicAdd(&bins_entries[slot*bins_list.capacity],count);
+    let last=(at+count-1u)/BINS_PER;
+    atomicMax(&bins_args[slot*4u],min(last+1u,BINS_ROW));
+    atomicMax(&bins_args[slot*4u+1u],last/BINS_ROW+1u);
+    atomicStore(&bins_args[slot*4u+2u],1u);
+    return at;
+}
+
+@compute @workgroup_size(16,16) fn program_bins_grouped(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    let region=bins_region;
+    let shaded=(region.zw-region.xy)/vec2<u32>(4u);
+    let rows=(shaded+vec2<u32>(3u))/vec2<u32>(4u);
+    let size=textureDimensions(bins_hit);
+    if lane<32u {atomicStore(&bins_counts[lane],0u);}
+    if lane<16u {atomicStore(&bins_tile_masks[lane],0u);}
+    workgroupBarrier();
+    if group.y>=rows.y {
+        // Clear blocks, one per invocation, all to slot 0.
+        let blocks=(size+vec2<u32>(BINS_CLEAR_TILE-1u))/BINS_CLEAR_TILE;
+        let block=vec2<u32>(group.x,group.y-rows.y)*16u+local.xy;
+        let mine=all(block<blocks);
+        if mine {atomicAdd(&bins_counts[0],1u);}
+        workgroupBarrier();
+        if lane==0u {
+            let n=atomicLoad(&bins_counts[0]);
+            if n>0u {atomicStore(&bins_cursor[0],bins_reserve(0u,n));}
+        }
+        workgroupBarrier();
+        if mine {
+            let at=atomicAdd(&bins_cursor[0],1u);
+            atomicStore(&bins_entries[1u+at],block.x|(block.y<<15u)|BINS_CLEAR|BINS_MISSES);
+        }
+        return;
+    }
+    // This invocation's pixel in list tile `tile` (index `t` in the group).
+    let tile=group.xy*4u+local.xy/4u;
+    let t=(local.y/4u)*4u+local.x/4u;
+    let id=region.xy+tile*4u+local.xy%4u;
+    var bit=0u;
+    if all(tile<shaded) && all(id<size) {
+        bit=1u;
+        // Uncovered trace tiles hold stale hit records: their pixels are misses.
+        if textureLoad(bins_coverage,id/BINS_TRACE_TILE,0).x!=0u {
+            let record=textureLoad(bins_hit,vec2<i32>(id),0);
+            if record.x!=0u {
+                let batch=bins_placements[record.x-1u]&0x1fffffffu;
+                bit=1u<<bins_list.programs[batch>>2u][batch&3u];
+            }
+        }
+    }
+    if bit!=0u {atomicOr(&bins_tile_masks[t],bit);}
+    workgroupBarrier();
+    // One invocation per tile counts its slots; one per slot reserves them; the tiles append.
+    var mask=0u;
+    if lane<16u {mask=atomicLoad(&bins_tile_masks[lane]);}
+    var m=mask;
+    while m!=0u {
+        atomicAdd(&bins_counts[firstTrailingBit(m)],1u);
+        m&=m-1u;
+    }
+    workgroupBarrier();
+    if lane<32u {
+        let n=atomicLoad(&bins_counts[lane]);
+        if n>0u {atomicStore(&bins_cursor[lane],bins_reserve(lane,n));}
+    }
+    workgroupBarrier();
+    let entry_tile=group.xy*4u+vec2<u32>(lane%4u,lane/4u);
+    let entry=entry_tile.x|(entry_tile.y<<15u);
+    m=mask;
+    while m!=0u {
+        let slot=firstTrailingBit(m);
+        let at=atomicAdd(&bins_cursor[slot],1u);
+        atomicStore(&bins_entries[slot*bins_list.capacity+1u+at],entry|select(0u,BINS_MISSES,slot==0u));
+        m&=m-1u;
+    }
+}

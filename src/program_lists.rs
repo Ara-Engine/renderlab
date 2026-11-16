@@ -39,7 +39,25 @@ pub(crate) fn bin_source_for(per: u32) -> String {
             1,
         )
     };
+    let source = source.replacen("const BINS_PER:u32=1u;", &format!("const BINS_PER:u32={per}u;"), 1);
     format!("const PRIMARY_BATCHES:u32={TRACED_DRAWS}u;\n{source}")
+}
+/// Whether wgpu frames bin with `program_bins_grouped` (shaders/program_bins.wgsl):
+/// `RENDERLAB_BINS_GROUPED=0` dispatches the per-tile `program_bins`.
+pub(crate) fn bins_grouped() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_BINS_GROUPED").map_or(true, |v| v.trim() != "0"))
+}
+/// The binning dispatch over an image of `size` for `state`'s region: grouped, 16x16-pixel
+/// groups then groups of 16x16 clear blocks; per tile, 4x4 tiles then single clear blocks.
+pub(in crate::renderer) fn bins_groups(state: &PrimaryState, size: wgpu::Extent3d) -> [u32; 2] {
+    let [bx, by] = [0, 1].map(|i| [size.width, size.height][i].div_ceil(CLEAR_TILE[i]));
+    if bins_grouped() {
+        let [x, y] = state.region_groups([16, 16]);
+        return [x.max(bx.div_ceil(16)), y + by.div_ceil(16)];
+    }
+    let [x, y] = state.region_groups(LIST_TILE);
+    [x.max(bx), y + by]
 }
 
 /// Indirect arguments per slot: x, y, z and a pad word.
@@ -262,7 +280,7 @@ impl Renderer {
                     label: Some("program_bins"),
                     layout: Some(&state.list_layouts.bins_layout),
                     module: &module,
-                    entry_point: Some("program_bins"),
+                    entry_point: Some(if bins_grouped() { "program_bins_grouped" } else { "program_bins" }),
                     compilation_options: Default::default(),
                     cache: None,
                 }),
@@ -455,9 +473,8 @@ impl Renderer {
         });
         pass.set_pipeline(state.bins.as_ref().unwrap());
         pass.set_bind_group(0, &*lists.bins.as_ref().unwrap().0, &[]);
-        let [x, y] = state.region_groups(LIST_TILE);
-        let [bx, by] = [0, 1].map(|i| [size.width, size.height][i].div_ceil(CLEAR_TILE[i]));
-        pass.dispatch_workgroups(x.max(bx), y + by, 1);
+        let [x, y] = bins_groups(state, size);
+        pass.dispatch_workgroups(x, y, 1);
         pass.set_bind_group(1, &*g.arrays, &[]);
         pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
         pass.set_bind_group(3, self.lighting.bind(), &[]);
