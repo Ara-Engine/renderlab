@@ -970,7 +970,7 @@ fn vd_pixel(id:vec2<u32>)->u32 {
 // swept shadow, whose own and 3x3 neighbours' answers there are one class settled over
 // VD_REUSE_WALKS walks, keeps it without a walk: only penumbrae, edges, disocclusions, the
 // moving casters' shadows and classes the receiver jitter still moves walk. While the camera
-// moves every pixel still walks one frame in VD_REUSE_REFRESH, so an answer that should change
+// moves every trace tile still walks one frame in VD_REUSE_REFRESH, so an answer that should change
 // is found within that many frames; on frames where nothing changed none need to.
 override VD_REUSE_WALKS:u32=8u;
 override VD_REUSE_REFRESH:u32=8u;
@@ -1032,7 +1032,9 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
         }
         if at.x!=VSM_NONE {
             before=vd_history[read+at.y*size.x+at.x];
-            let refresh=vd.reuse.x==1u && (vd_hash(id.x+id.y*size.x)+u32(vd.size.z))%VD_REUSE_REFRESH==0u;
+            // Per trace tile (one wave): a wave runs as long as its slowest pixel, so a refresh
+            // spread over the pixels of every tile would keep every wave walking.
+            let refresh=vd.reuse.x==1u && (vd_hash(group.x+group.y*0x10000u)+u32(vd.size.z))%VD_REUSE_REFRESH==0u;
             let kept=select(vd_settled(at,size,read),VSM_NONE,refresh);
             if kept!=VSM_NONE {
                 textureStore(vsm_output,vec2<i32>(id),vec4<u32>(select(kept,0u,VD_DIAG==6u)));
