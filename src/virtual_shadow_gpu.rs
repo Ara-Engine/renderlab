@@ -707,11 +707,11 @@ const DISK_CONSTANTS: &str = "VD_";
 /// occluder heights whose reach is half to all of this many of its texels.
 const DISK_RADIUS: u32 = 3;
 /// WGSL `VdFrame` up to its constant tail: this and the previous frame's world-to-clip
-/// matrices, `reuse`, the moving casters' zone, the image size.
-const DISK_HEAD_BYTES: u64 = 64 + 64 + 16 + 48 + 16;
+/// matrices, `reuse`, the image size.
+const DISK_HEAD_BYTES: u64 = 64 + 64 + 16 + 16;
 /// WGSL `VdFrame`: the head, the 65 y-rank masks and the 64 sample positions.
 const DISK_FRAME_BYTES: u64 = DISK_HEAD_BYTES + 33 * 16 + 32 * 16;
-/// `VdFrame::reuse` and `VdFrame::zone` (Tr1Zones' shadow_lo, shadow_hi, shadow_light).
+/// `VdFrame::reuse`.
 const DISK_REUSE_OFFSET: u64 = 128;
 /// `VdFrame::size.w`.
 const DISK_HISTORY_OFFSET: u64 = DISK_HEAD_BYTES - 4;
@@ -933,6 +933,29 @@ pub(super) fn disk_source() -> String {
     let edges = "override VD_HARD_EDGES:bool=true;";
     assert_eq!(source.matches(edges).count(), 1, "virtual_shadow_disk.wgsl: VD_HARD_EDGES moved");
     source.replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
+}
+/// Merges moved casters' light-space rectangles, and their screen rectangles alike, the pair
+/// whose union adds the least area first, until at most `max` remain: many movers invalidate the
+/// pages around them, not the whole map.
+fn cluster_rects(rects: &mut Vec<[glam::DVec2; 2]>, screens: &mut Vec<[glam::DVec2; 2]>, max: usize) {
+    let area = |r: &[glam::DVec2; 2]| (r[1] - r[0]).max(glam::DVec2::ZERO).element_product();
+    let union = |a: &[glam::DVec2; 2], b: &[glam::DVec2; 2]| [a[0].min(b[0]), a[1].max(b[1])];
+    while rects.len() > max {
+        let mut best = (f64::INFINITY, 0, 1);
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                let grown = area(&union(&rects[i], &rects[j])) - area(&rects[i]) - area(&rects[j]);
+                if grown < best.0 {
+                    best = (grown, i, j);
+                }
+            }
+        }
+        let (_, i, j) = best;
+        rects[i] = union(&rects[i], &rects[j]);
+        rects.swap_remove(j);
+        screens[i] = union(&screens[i], &screens[j]);
+        screens.swap_remove(j);
+    }
 }
 /// Measurement: `RENDERLAB_VSM_LOG=<file>` appends a line a frame: placements, moved casters,
 /// whether the placement count changed, the uploaded rectangles, invalidated levels, the
@@ -2041,9 +2064,9 @@ impl Renderer {
         // U-FIXED: `VdFrame::size.w`, TR1's frames of history; the Disk lookup's height-band
         // dither waits for `VD_HBAND_AFTER` of them, so a cut's first frames show no stipple.
         // `VdFrame::reuse` (WGSL `vd_lookup`): 2 when nothing changed since the last frame, 1
-        // when only the camera and the moving casters' zone did, once the history has run
-        // REUSE_AFTER frames since its restart (a cut keeps the answer history of the old view);
-        // and the zone, the moving casters' swept shadow (Tr1Zones' first three rows).
+        // when only the camera and moving casters did (the lookup tests their rectangles), once
+        // the history has run REUSE_AFTER frames since its restart (a cut keeps the answer
+        // history of the old view).
         if state.settings.lookup == VirtualLookup::Disk
             && let Some(r) = state.resources.as_ref()
         {
@@ -2055,10 +2078,9 @@ impl Renderer {
             };
             // reuse.z (the history half this frame writes) stays as the frame upload set it.
             self.queue.write_buffer(&r.disk_frame, DISK_REUSE_OFFSET, &mode.to_ne_bytes());
-            self.queue.write_buffer(&r.disk_frame, DISK_REUSE_OFFSET + 16, &zones[..48]);
             self.queue
                 .write_buffer(&r.disk_frame, DISK_HISTORY_OFFSET, &(history as f32).to_ne_bytes());
-            self.uploads.shadows += 56;
+            self.uploads.shadows += 8;
         }
         if !matches!(
             state.settings.lookup,
@@ -2466,31 +2488,44 @@ impl Renderer {
             [lo - 2.0, hi + 2.0]
         };
         // N8n: placements the rectangles do not describe retire the surface cache's cells.
-        let mut surface_flush = false;
+        let surface_flush;
         // Measurement (`RENDERLAB_VSM_LOG`): this frame's movers and their rectangles' areas.
         let count_changed = cache.models.len() != placements;
         let mut movers = 0usize;
         let mut areas = [0.0f64; 2];
-        if cache.models.len() != placements {
+        // The other lookups keep the whole-map invalidation for a changed placement count.
+        if count_changed && s.lookup != VirtualLookup::Disk {
             invalidated = [true; MAX_LEVELS];
             surface_flush = true;
         } else {
+            surface_flush = count_changed;
             // SK1: deformation invalidates caster pages even at a fixed model matrix; P-SHOW:
             // only a new pose deforms (per placement, in placement order, collected once:
-            // P-NRT's O(placements^2) find).
-            for (p, model) in models.iter().enumerate() {
-                // A changed casting flag is a caster appearing or leaving in place.
-                if *model != cache.models[p]
+            // P-NRT's O(placements^2) find). A changed placement count compares by index: an
+            // index past either list is a caster appearing or leaving, and a placement that
+            // moved to another index changed its model or bounds there. Placements that cast no
+            // shadow before or now touch no page.
+            let previous = cache.models.len();
+            for p in 0..placements.max(previous) {
+                let (old, new) = (p < previous, p < placements);
+                let casting = (old && cache.casts[p]) || (new && casts[p]);
+                let changed = !(old && new)
+                    || models[p] != cache.models[p]
                     || casts[p] != cache.casts[p]
-                    || crate::renderer::skinning::deformed(&cache.poses, &poses, p)
-                {
-                    let [a0, a1] = rect(&cache.bounds[p]);
-                    let [b0, b1] = rect(&bounds[p]);
-                    rects.push([a0.min(b0), a1.max(b1)]);
-                    let [c0, c1] = screen(&cache.bounds[p]);
-                    let [d0, d1] = screen(&bounds[p]);
-                    screens.push([c0.min(d0), c1.max(d1)]);
+                    || bounds[p].min != cache.bounds[p].min
+                    || bounds[p].max != cache.bounds[p].max
+                    || crate::renderer::skinning::deformed(&cache.poses, &poses, p);
+                if !casting || !changed {
+                    continue;
                 }
+                let both = |f: &dyn Fn(&crate::shadow_plan::Bounds) -> [glam::DVec2; 2]| {
+                    let sides = [old.then(|| f(&cache.bounds[p])), new.then(|| f(&bounds[p]))];
+                    let mut it = sides.into_iter().flatten();
+                    let first = it.next().unwrap();
+                    it.fold(first, |[a, b], [c, d]| [a.min(c), b.max(d)])
+                };
+                rects.push(both(&rect));
+                screens.push(both(&screen));
             }
             movers = rects.len();
             if let Some(first) = rects.first() {
@@ -2503,9 +2538,7 @@ impl Renderer {
                 areas[1] = (hi.x - lo.x) * (hi.y - lo.y);
             }
             if rects.len() > MAX_RECTS {
-                invalidated = [true; MAX_LEVELS];
-                rects.clear();
-                surface_flush = true;
+                cluster_rects(&mut rects, &mut screens, MAX_RECTS);
             }
         }
         cache.models = models;
@@ -3206,8 +3239,8 @@ impl Renderer {
         }
         if s.lookup == VirtualLookup::Disk {
             // N-VSM1 `VdFrame`: the receivers' world-to-clip matrix and the previous frame's,
-            // `reuse` and the zone (zero until prepare_virtual_sampling has TR1's plan), the
-            // image size and TR1's frame.
+            // `reuse` (zero until prepare_virtual_sampling has TR1's plan), the image size and
+            // TR1's frame.
             let clip = camera.matrix(size.width, size.height).to_cols_array();
             let previous = r.disk_clip.replace(clip).unwrap_or(clip);
             r.disk_parity ^= 1;
@@ -3218,7 +3251,6 @@ impl Renderer {
             for w in [0, 0, r.disk_parity, 0] {
                 bytes.extend_from_slice(&w.to_ne_bytes());
             }
-            bytes.extend_from_slice(&[0; 48]);
             for value in [size.width as f32, size.height as f32, disk_jitter, 0.0] {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
@@ -3993,6 +4025,25 @@ mod tests {
         ] {
             assert!(bad.validate().is_err());
         }
+    }
+    /// Many movers cluster into MAX_RECTS rectangles that still cover each mover, and two
+    /// groups far apart stay apart rather than becoming one rectangle over the map.
+    #[test]
+    fn many_movers_cluster_into_covering_rectangles() {
+        use glam::DVec2;
+        let mut rects = vec![];
+        for i in 0..40 {
+            let at = DVec2::new(if i % 2 == 0 { 0.0 } else { 500.0 }, f64::from(i / 2));
+            rects.push([at, at + DVec2::splat(0.5)]);
+        }
+        let original = rects.clone();
+        let mut screens = rects.clone();
+        cluster_rects(&mut rects, &mut screens, MAX_RECTS);
+        assert_eq!((rects.len(), screens.len()), (MAX_RECTS, MAX_RECTS));
+        for [a, b] in &original {
+            assert!(rects.iter().any(|[c, d]| c.cmple(*a).all() && d.cmpge(*b).all()));
+        }
+        assert!(rects.iter().all(|[c, d]| d.x - c.x < 100.0));
     }
     /// N-VSM1: the disk lookup's samples are a rook pattern inside the disk, at the marginal's
     /// quantiles, and the uploaded masks select by y rank.
