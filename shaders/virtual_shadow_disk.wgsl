@@ -530,6 +530,8 @@ override VD_HARD_EDGES:bool=true;
 override VD_EDGE_HARD:f32=1.0;
 // Measurement (`RENDERLAB_VD=VD_EDGE_SHOW=true`): edge pixels drawn fully shadowed.
 override VD_EDGE_SHOW:bool=false;
+// Measurement (`RENDERLAB_VD=VD_EDGE_TEST_ONLY=true`): the edge test runs, its result is dropped.
+override VD_EDGE_TEST_ONLY:bool=false;
 // Edge pixels this frame (`RENDERLAB_VD_EDGE_LOG`).
 @group(0) @binding(62) var<storage,read_write> vd_edge_count:array<atomic<u32>,4>;
 var<private> vd_ray_reach:f32;
@@ -828,6 +830,7 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {
         let margin=VD_BIAS*vsm_texel(vd_px.level);
         if VD_HARD_EDGES {vd_edge_test(margin);}
+        if VD_EDGE_TEST_ONLY && vd_edge {vd_edge=false;atomicAdd(&vd_edge_count[1],1u);}
         vd_map();
         if vd_edge {
             atomicAdd(&vd_edge_count[0],1u);
