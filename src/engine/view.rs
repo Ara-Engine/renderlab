@@ -126,6 +126,13 @@ impl Engine {
         let output = self.views[self.view_index(view)?].output.clone();
         let report = self.render_view_to(view, &output, camera)?;
         self.save_listed_frame(view, report.frame.0)?;
+        if let Some(label) = self.dump.as_ref().and_then(|d| d.armed()) {
+            let at = self.view_index(view)?;
+            let stops = match self.views[at].desc.look.exposure {
+                super::Exposure::Manual { stops } => stops,
+            };
+            self.dump_scene(&label, camera, [output.width(), output.height()], stops)?;
+        }
         Ok(report)
     }
     /// Measurement: with `RENDERLAB_READBACK_FRAMES=<dir>;<frame>,<frame>,...`, the view's output
