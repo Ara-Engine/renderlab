@@ -2716,7 +2716,9 @@ impl Renderer {
             return Err(Error::InvalidInput("mesh belongs to another renderer"));
         }
         let key: wgpu::Buffer = (**mesh.vertex).clone();
+        let before = self.gi.meshes.len();
         self.gi.meshes.retain(|(k, _)| *k != key);
+        let replaced = self.gi.meshes.len() != before;
         // Whatever this mesh traced before, it no longer stands for a field mesh.
         for m in self.gi.world.iter_mut().flat_map(|w| &mut w.meshes) {
             if m.as_ref() == Some(&key) {
@@ -2732,7 +2734,15 @@ impl Renderer {
                 .retired
                 .push((self.submissions, Retired::Packed(old)));
         }
-        self.gi.planner.set_pending_clear(true);
+        // New triangles under existing cells: only a mesh whose geometry is replaced changes what
+        // placed cells traced. A new mesh is not placed yet; its placements reach the planner as
+        // new bounds, which re-trace the cells around them like a moved caster. Clearing for every
+        // new mesh emptied the cache whenever an embedder rebuilt a batch (Outpost's play, non-RT:
+        // each walking frame). RENDERLAB_GI_NEW_MESH_CLEAR=1 clears for new meshes too.
+        static CLEAR_NEW: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if replaced || *CLEAR_NEW.get_or_init(|| std::env::var("RENDERLAB_GI_NEW_MESH_CLEAR").is_ok_and(|v| v == "1")) {
+            self.gi.planner.set_pending_clear(true);
+        }
         Ok(())
     }
     /// Per-pass GPU timing of later frames into a readback (`indirect_profile`).
