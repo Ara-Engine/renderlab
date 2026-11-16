@@ -112,11 +112,10 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
 /// second level of a switch), 12 refinements (a split cell's finer level), 13 coarser fills,
 /// 14 second-bin lookups, 15 fallback levels sampled. The picture is unchanged.
 /// Receiver reuse: on a frame where the camera is still (TR1's planner) and the lighting cache
-/// runs nothing (`GiState::idle`), a pixel whose hit (placement and triangle) is last frame's
-/// keeps its prepared record:
-/// the same cells of the same table, read a jitter step away. Every other pixel, and every pixel
-/// on frames the cache runs, looks up as before. The keys (one word a pixel, a hash of the hit
-/// record, 0 for misses) live in the pass's own group 2, so reuse needs the lean layout.
+/// runs nothing (`GiState::idle`), a pixel still on last frame's placement in the same normal
+/// bin keeps its prepared record: the same cells of the same table, read a jitter step away. Every other pixel, and every pixel
+/// on frames the cache runs, looks up as before. The keys (one word a pixel, a hash of the
+/// placement and bin, 0 for misses) live in the pass's own group 2, so reuse needs the lean layout.
 /// `RENDERLAB_GI_RX_REUSE=0` looks up every pixel every frame.
 fn reuse() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -126,10 +125,16 @@ fn reuse() -> bool {
 const KEYS_HEAD: u64 = 16;
 fn with_reuse(kernel: &str) -> String {
     const MISS: &str = "    if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x==0u {return;}\n    let record=textureLoad(primary_hit,vec2<i32>(id),0);\n    if record.x==0u {return;}\n";
+    const LOOKUP: &str = "    gi_prepare(input);\n";
     assert_eq!(kernel.matches(MISS).count(), 1, "GI receiver reuse seam");
-    let keyed = "    let at_key=id.y*size.x+id.x;\n    var record=vec4<u32>(0u);\n    if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x!=0u {record=textureLoad(primary_hit,vec2<i32>(id),0);}\n    let key=select(0u,((record.x*0x9e3779b1u)^record.y)|1u,record.x!=0u);\n    if gi_rx_keys.reuse!=0u && gi_rx_keys.keys[at_key]==key {return;}\n    gi_rx_keys.keys[at_key]=key;\n    if record.x==0u {return;}\n";
+    assert_eq!(kernel.matches(LOOKUP).count(), 1, "GI receiver reuse lookup seam");
+    // Misses write key 0, so a pixel covered again looks up.
+    let missed = "    let at_key=id.y*size.x+id.x;\n    if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x==0u {gi_rx_keys.keys[at_key]=0u;return;}\n    let record=textureLoad(primary_hit,vec2<i32>(id),0);\n    if record.x==0u {gi_rx_keys.keys[at_key]=0u;return;}\n";
+    // The key: placement and normal bin, which choose the cells (the triangle changes under
+    // the jitter on finely tessellated meshes: Glint, two thirds of its pixels a frame).
+    let keyed = "    let key=((record.x*0x9e3779b1u)^(gi_bin(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal))*0x85ebca6bu))|1u;\n    if gi_rx_keys.reuse!=0u && gi_rx_keys.keys[at_key]==key {return;}\n    gi_rx_keys.keys[at_key]=key;\n    gi_prepare(input);\n";
     let declaration = "struct GiRxKeys { reuse:u32, pad0:u32, pad1:u32, pad2:u32, keys:array<u32> };\n@group(2) @binding(0) var<storage,read_write> gi_rx_keys:GiRxKeys;\n";
-    format!("{declaration}{}", kernel.replacen(MISS, keyed, 1))
+    format!("{declaration}{}", kernel.replacen(MISS, missed, 1).replacen(LOOKUP, keyed, 1))
 }
 fn count() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
