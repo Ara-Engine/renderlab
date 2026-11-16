@@ -747,6 +747,17 @@ pub(crate) fn sun_tile_probes() -> u32 {
 }
 /// sunrt-7: still frames reuse settled sun classes (`RtvisHeld::sun.z`, primary_sun_tile.wgsl);
 /// `RENDERLAB_SUN_STILL_REUSE=0` traces them as before.
+pub(crate) fn rigid_shadow_zones() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_RIGID_SHADOW_ZONES").map_or(true, |v| v != "0"))
+}
+/// Play gate (sunrt, 2026-11-16): a still camera over moving rigid placements (Glint's 11
+/// obstacles in play) put every receiver on the moving sun budget with still reuse off: +1.1 ms
+/// of `visibility` against the clip. With this on (`rigid_shadow_zones`), such a frame keeps the
+/// settled budget, the moving placements' swept sun shadow becomes a restart zone (P-RELIT, as a
+/// posed character's is), reuse stays on outside it, and a receiver seen through a moving
+/// placement's box restarts its streak (rtvis_held.wgsl `rtvis_crossed`).
+/// `RENDERLAB_RIGID_SHADOW_ZONES=0` keeps the whole frame moving.
 pub(crate) fn sun_still_reuse() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_SUN_STILL_REUSE").map_or(true, |v| v != "0"))
@@ -868,7 +879,7 @@ pub(crate) const SUN_REUSE_STREAK: u32 = 32;
 /// matrix, the words (enabled, probes, streak, and the sun visibility history's use), the
 /// moving placements' swept bounds with the sun's direction and widened disk tangent, and
 /// this frame's unjittered camera matrix, and the sun visibility history's turn step.
-pub(crate) const HELD_BYTES: usize = 208;
+pub(crate) const HELD_BYTES: usize = 224;
 /// U-FIXED: a turning sun keeps a receiver's sun visibility history until the sun has turned
 /// this fraction of its disk half-angle since that receiver's last budget trace
 /// (primary_sun_history.wgsl, in 16 turn steps of which a history lasts 8).
@@ -1299,6 +1310,9 @@ pub(crate) struct PlanInputs<'a> {
     /// sunrt-7: no draw is skinned and none was edited (placements added, removed or moved)
     /// since this view's last frame.
     pub(crate) scene_static: bool,
+    /// Every placement edit since this view's last frame moved instances in place (none added,
+    /// removed or edited without moving): rigid motion is all that changed (`rigid_shadow_zones`).
+    pub(crate) rigid_only: bool,
     /// U-RTVIS: the world bounds of every placement that moved or is skinned, at both its
     /// previous and current transforms; no held stop inside their swept sun shadow.
     pub(crate) moving_bounds: Option<crate::shadow_plan::Bounds>,
@@ -1343,6 +1357,9 @@ pub(crate) struct Planner {
     /// counting up. The Disk lookup holds its height-band dither until history exists.
     pub history_frames: u32,
     held_frames: u32,
+    /// Like `held_frames`, also counting still-camera frames whose rigid motion is zoned
+    /// (`rigid_shadow_zones`): the sun ray budget settles on them.
+    sun_held_frames: u32,
     /// sunrt-7's `unchanged`: nothing that sets a receiver's sun visibility changed since the
     /// previous frame. The Disk lookup's answer reuse reads it.
     pub unchanged: bool,
@@ -1377,6 +1394,7 @@ impl Planner {
             reset: true,
             history_frames: 0,
             held_frames: 0,
+            sun_held_frames: 0,
             unchanged: false,
             sun_still: false,
             sun_turned: 0.0,
@@ -1597,6 +1615,39 @@ impl Planner {
         } else {
             0
         };
+        // Rigid motion under a still camera (`rigid_shadow_zones`): the moving placements' swept
+        // sun shadow joins the restart zone and the rest of the frame settles. Only with one
+        // shadowed sun and no other shadow request, where the zone is the swept shadow itself.
+        let one_sun = match i
+            .lights
+            .iter()
+            .zip(i.requests)
+            .filter(|(_, r)| !matches!(r, ShadowRequest::None))
+            .map(|(l, _)| l)
+            .collect::<Vec<_>>()[..]
+        {
+            [Light::Directional { travel, .. }] => Some(-travel.normalize()),
+            _ => None,
+        };
+        let rigid_zoned = rigid_shadow_zones()
+            && rigid_motion
+            && i.rigid_only
+            && still
+            && turn == 0.0
+            && one_sun.is_some()
+            && (shadow_bounds.is_none() || caster_light.is_some());
+        if rigid_zoned && let (Some(m), Some(toward)) = (i.moving_bounds, one_sun) {
+            let margin = Vec3::splat(1e-4) + m.min.abs().max(m.max.abs()) * 1e-5;
+            let swept = crate::shadow_plan::Bounds { min: m.min - margin, max: m.max + margin };
+            shadow_bounds = Some(union(shadow_bounds, swept));
+            caster_light = Some((toward, i.directional_disk_angle));
+        }
+        let sun_still = sampling_still || rigid_zoned;
+        self.sun_held_frames = if sun_still {
+            self.sun_held_frames.saturating_add(1)
+        } else {
+            0
+        };
         // P-RELIT: the restart budget is per pixel. A frame that restarts every pixel takes
         // it frame-wide. A frame that restarts only some (receivers in a moving caster's
         // shadow, or pixels in a changed light's restart sphere) keeps the moving or held
@@ -1606,7 +1657,7 @@ impl Planner {
         // scene 24 ms a frame on the non-RT path (docs/p-relit.md).
         self.shadow_rays = i
             .budget
-            .rays(cold, self.reset, sampling_still, self.held_frames);
+            .rays(cold, self.reset, sun_still, self.sun_held_frames);
         let zoned = shadow_bounds.is_some() || !relit_spheres.is_empty();
         self.restart_rays = if zoned && i.budget.reset_rays > self.shadow_rays {
             i.budget.reset_rays
@@ -1693,12 +1744,17 @@ impl Planner {
         // frame: the unjittered camera, every placement and pose, the sun, and no restart zone.
         let unchanged = sampling_still && i.scene_static && !zoned && !posed;
         self.unchanged = unchanged;
+        // Still reuse also runs on zoned rigid frames: the hint leaves out receivers that moved
+        // or sit in the swept shadow, and `rtvis_crossed` those seen through a moving box.
+        let reuse_frame = unchanged || (rigid_zoned && !posed && relit_spheres.is_empty());
+        let crossed = rigid_zoned.then_some((eye, 8.0 * pixel_angle));
         let held = self.held_record(
             (i.moving_bounds, i.directional_disk_angle),
             (previous_matrix, matrix),
             turn,
             &suns,
-            (listed, unchanged),
+            (listed, reuse_frame),
+            crossed,
         );
         let mut rl_history = Vec::with_capacity(RL_HISTORY_BYTES);
         rl_history.extend_from_slice(&matrix_bytes(previous_matrix));
@@ -1738,6 +1794,7 @@ impl Planner {
         turn: f32,
         suns: &[Vec3],
         (listed, unchanged): (bool, bool),
+        crossed: Option<(Vec3, f32)>,
     ) -> Vec<u8> {
         let enabled = !self.reset
             && turn == 0.0
@@ -1817,6 +1874,11 @@ impl Planner {
         };
         for w in [turn_step, hint, reuse, 0] {
             bytes.extend_from_slice(&w.to_ne_bytes());
+        }
+        // rtvis_crossed: the eye and the box growth per unit distance; w 0 is off.
+        let (eye, grow) = crossed.unwrap_or((Vec3::ZERO, 0.0));
+        for v in [eye.x, eye.y, eye.z, grow] {
+            bytes.extend_from_slice(&v.to_ne_bytes());
         }
         debug_assert_eq!(bytes.len(), HELD_BYTES);
         bytes
@@ -2292,6 +2354,7 @@ impl Renderer {
         let mut skin_revisions = vec![];
         let mut rigid_motion = false;
         let mut scene_static = true;
+        let mut rigid_only = true;
         let mut moving_bounds = None;
         for d in draws {
             if let Some(s) = &d.mesh.skin {
@@ -2311,14 +2374,14 @@ impl Renderer {
                 }
                 continue;
             }
-            for (&model, &previous_model) in d.instances.state.models.iter().zip(
-                d.instances
-                    .state
-                    .previous_models(self.view_key.0, self.view.last_frame),
-            ) {
+            let previous = d.instances.state.previous_models(self.view_key.0, self.view.last_frame);
+            let mut any_moved = false;
+            rigid_only &= !edited || previous.len() == d.instances.state.models.len();
+            for (&model, &previous_model) in d.instances.state.models.iter().zip(previous) {
                 let moved = model.to_cols_array().map(f32::to_bits)
                     != previous_model.to_cols_array().map(f32::to_bits);
                 rigid_motion |= moved;
+                any_moved |= moved;
                 // U-RTVIS: no held stop in a moving or skinned placement's swept shadow.
                 if moved || d.mesh.skin.is_some() {
                     for m in [model, previous_model] {
@@ -2334,6 +2397,7 @@ impl Renderer {
                     }
                 }
             }
+            rigid_only &= !edited || any_moved;
         }
         // P-RTS: with the penumbra pass compiled and edges deferred, every receiver first
         // traces the held count; only listed pixels trace the rest of the budget.
@@ -2399,6 +2463,7 @@ impl Renderer {
                 skin_revisions,
                 rigid_motion,
                 scene_static,
+                rigid_only,
                 moving_bounds,
                 listing,
             });
@@ -2585,6 +2650,7 @@ mod tests {
             skin_revisions: vec![],
             rigid_motion: false,
             scene_static: true,
+            rigid_only: true,
             moving_bounds: None,
             listing: false,
         }
@@ -2740,6 +2806,41 @@ mod tests {
         assert_eq!(enabled(&cut), 0);
     }
 
+    /// Play gate: rigid motion under a still camera settles the sun budget like a still frame,
+    /// and its swept shadow is a restart zone at the restart count.
+    #[test]
+    fn rigid_motion_under_a_still_camera_settles_the_sun_budget() {
+        let sun = [Light::Directional {
+            travel: Vec3::new(0.2, -1.0, 0.3),
+            lux: [1.0; 3],
+        }];
+        let requests = [ShadowRequest::Directional { split_ends: vec![4.0] }];
+        let budget = ReconstructionShadowBudget::default();
+        let moving = |frame| PlanInputs {
+            matrix: Mat4::IDENTITY,
+            eye: Vec3::Y,
+            requests: &requests,
+            rigid_motion: true,
+            scene_static: false,
+            moving_bounds: Some(crate::shadow_plan::Bounds {
+                min: Vec3::splat(-1.0),
+                max: Vec3::splat(1.0),
+            }),
+            ..inputs(&sun, frame)
+        };
+        let mut plan = Planner::new();
+        for frame in 0..=u64::from(budget.settle_frames) + 1 {
+            plan.prepare(moving(frame));
+        }
+        if rigid_shadow_zones() {
+            assert_eq!((plan.shadow_rays, plan.restart_rays), (budget.held_rays, budget.reset_rays));
+        } else {
+            assert_eq!(plan.shadow_rays, budget.active_rays);
+        }
+        // The lighting cache's own stillness (held_frames) still sees the motion.
+        assert_eq!(plan.held_frames(), 0);
+    }
+
     /// sunrt-7: the still reuse word (`RtvisHeld::sun.z`) is on only for a frame that changes
     /// nothing setting a receiver's sun visibility.
     #[test]
@@ -2749,9 +2850,11 @@ mod tests {
             lux: [1.0; 3],
         }];
         let reuse = |p: &Planned| u32::from_ne_bytes(p.held[200..204].try_into().unwrap());
+        let requests = [ShadowRequest::Directional { split_ends: vec![4.0] }];
         let still = |frame| PlanInputs {
             matrix: Mat4::IDENTITY,
             eye: Vec3::Y,
+            requests: &requests,
             ..inputs(&sun, frame)
         };
         let mut plan = Planner::new();
@@ -2767,18 +2870,39 @@ mod tests {
             assert_eq!(reuse(&plan.prepare(still(frame))), 0, "history frame {frame}");
         }
         assert_eq!(reuse(&plan.prepare(still(n))), on);
-        let moved = PlanInputs {
+        // Play gate: a still camera over moving rigid placements keeps reuse outside their swept
+        // shadow, with the crossing guard on (rtvis_crossed: eye.w); without
+        // `rigid_shadow_zones` the whole frame is moving.
+        let moved = plan.prepare(PlanInputs {
             rigid_motion: true,
-            ..still(n + 1)
-        };
-        assert_eq!(reuse(&plan.prepare(moved)), 0, "a placement moved");
-        let edited = PlanInputs {
             scene_static: false,
+            moving_bounds: Some(crate::shadow_plan::Bounds {
+                min: Vec3::splat(-1.0),
+                max: Vec3::splat(1.0),
+            }),
+            ..still(n + 1)
+        });
+        let guard = f32::from_ne_bytes(moved.held[220..224].try_into().unwrap());
+        if rigid_shadow_zones() {
+            assert_eq!((reuse(&moved), guard > 0.0), (on, true), "a placement moved");
+        } else {
+            assert_eq!((reuse(&moved), guard), (0, 0.0), "a placement moved");
+        }
+        let added = PlanInputs {
+            rigid_motion: true,
+            scene_static: false,
+            rigid_only: false,
             ..still(n + 2)
         };
+        assert_eq!(reuse(&plan.prepare(added)), 0, "a placement was added beside a move");
+        let edited = PlanInputs {
+            scene_static: false,
+            rigid_only: true,
+            ..still(n + 3)
+        };
         assert_eq!(reuse(&plan.prepare(edited)), 0, "a placement was edited");
-        assert_eq!(reuse(&plan.prepare(still(n + 3))), on);
-        assert_eq!(reuse(&plan.prepare(inputs(&sun, n + 4))), 0, "the camera moved");
+        assert_eq!(reuse(&plan.prepare(still(n + 4))), on);
+        assert_eq!(reuse(&plan.prepare(inputs(&sun, n + 5))), 0, "the camera moved");
     }
 
     /// P-RELIT: a light switched off restarts everything it lit above the budget, and a zero
