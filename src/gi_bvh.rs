@@ -70,7 +70,7 @@ impl Blas {
             exact: false,
         })
     }
-    fn words(&self) -> usize {
+    pub(crate) fn words(&self) -> usize {
         self.bvh.nodes.len() * NODE_WORDS
             + self.bvh.leaves.len() * LEAF_WORDS
             + self.bvh.positions.len() * POSITION_WORDS
