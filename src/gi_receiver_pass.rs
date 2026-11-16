@@ -150,8 +150,8 @@ fn with_reuse(kernel: &str) -> String {
     // the jitter on finely tessellated meshes: Glint, two thirds of its pixels a frame).
     // A pixel on last frame's key whose lookup moved by more than GI_RX_CHANGE from last frame's
     // record is marked provisional: TR1 starts it again (program.rs gi_provisional).
-    let keyed = "    let key=((record.x*0x9e3779b1u)^(gi_bin(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal))*0x85ebca6bu))|1u;\n    let same=gi_rx_keys.keys[at_key]==key;\n    if gi_rx_keys.reuse!=0u && same {return;}\n    gi_rx_keys.keys[at_key]=key;\n    gi_prepare(input);\n    gi_rx_provisional=same && gi_rx_changed(at_key);\n";
-    let declaration = "struct GiRxKeys { reuse:u32, pad0:u32, pad1:u32, pad2:u32, keys:array<u32> };\n@group(2) @binding(0) var<storage,read_write> gi_rx_keys:GiRxKeys;\n";
+    let keyed = "    let key=((record.x*0x9e3779b1u)^(gi_bin(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal))*0x85ebca6bu))|1u;\n    let same=gi_rx_keys.keys[at_key]==key;\n    if gi_rx_keys.reuse!=0u && same {return;}\n    gi_rx_keys.keys[at_key]=key;\n    gi_prepare(input);\n    gi_rx_provisional=same && gi_rx_keys.still!=0u && gi_rx_changed(at_key);\n";
+    let declaration = "struct GiRxKeys { reuse:u32, still:u32, pad1:u32, pad2:u32, keys:array<u32> };\n@group(2) @binding(0) var<storage,read_write> gi_rx_keys:GiRxKeys;\n";
     let declaration = format!("{declaration}{CHANGE}");
     format!("{declaration}{}", kernel.replacen(MISS, missed, 1).replacen(LOOKUP, keyed, 1))
 }
@@ -356,7 +356,11 @@ impl Renderer {
                 .as_ref()
                 .is_some_and(|s| s.plan.held_frames() > 0);
             let reuse = built && !moved && still && target.lean[shading as usize] && target.computed && self.gi.idle();
-            self.queue.write_buffer(&keys.value, 0, &u32::from(reuse).to_ne_bytes());
+            // Word 1: the camera is still, so last frame's record at a pixel on the same key is
+            // the same receiver's and the relit check (`CHANGE`) may compare them.
+            let compare = built && !moved && still && target.computed;
+            let words = [u32::from(reuse), u32::from(compare)];
+            self.queue.write_buffer(&keys.value, 0, &words.into_iter().flat_map(u32::to_ne_bytes).collect::<Vec<_>>());
         }
         let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
         target.computed = true;
