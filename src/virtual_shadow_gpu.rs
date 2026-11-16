@@ -58,10 +58,13 @@ const REACH_BYTES: u64 = 48;
 // that grows on demand, at most `pool_settings().1` new pages are rasterized per frame (coarse
 // levels first, the lookup reads a coarser level while a page is missing), and pages nobody
 // requested return to the pool after a while or under pressure.
-/// The sparse windows' side in pages: 16384 texels a level, as Unreal's virtual shadow maps, so
+/// The sparse windows' side in pages: 8192 texels a level (Unreal's virtual shadow maps: 16384), so
 /// a level can hold every receiver whose footprint asks for it (docs/design-sun-shadows.md (a));
 /// only requested pages take physical pages.
-const SPARSE_PAGES: u32 = 128;
+const SPARSE_PAGES: u32 = 64;
+/// The hardware raster's area in pages a side (WGSL `vsm_area`): a 64-page window draws as 2x2
+/// areas, the most the cull's four area bits mark.
+const AREA_PAGES: u32 = 32;
 /// WGSL `VSM_POOL_FREE`: header words before the free stack.
 const POOL_FREE: u64 = 16;
 /// WGSL `VSM_PAGE_MIPS`: in-page max-mip words per physical page.
@@ -1780,8 +1783,8 @@ impl VirtualState {
                 label: Some("N8c hardware raster area"),
                 // At most 16 pages a side: wider windows draw in tiles (WGSL `vsm_area`).
                 size: wgpu::Extent3d {
-                    width: side.min(16 * PAGE),
-                    height: side.min(16 * PAGE),
+                    width: side.min(AREA_PAGES * PAGE),
+                    height: side.min(AREA_PAGES * PAGE),
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -1889,7 +1892,7 @@ impl VirtualState {
             + minmip_bytes
             + queue_bytes
             + mip_bytes
-            + u64::from(side.min(16 * PAGE)).pow(2) * 2
+            + u64::from(side.min(AREA_PAGES * PAGE)).pow(2) * 2
             + u64::from(size[0]) * u64::from(size[1]) * 4
             + slots * 8
             + state_bytes
@@ -3789,7 +3792,7 @@ impl Renderer {
             pass.set_bind_group(2, &*casters.data, &[]);
             // A window wider than the attachment draws once per area (WGSL `vsm_area_tiles`);
             // each draw's vertices skip the clusters the cull did not mark for its area.
-            let tiles = (r.pages / r.pages.min(16)).pow(2) as usize;
+            let tiles = (r.pages / r.pages.min(AREA_PAGES)).pow(2) as usize;
             for level in 0..state.levels {
                 for tile in 0..tiles {
                     let entry = PASS_TILES + 4 * level + tile;

@@ -428,9 +428,9 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
     vsm_work.args[level].hw_first=0u;
     vsm_work.args[level].hw_first_instance=0u;
 }
-// The hardware raster's attachment holds at most 16 pages a side; a wider window is drawn as
-// tiles x tiles areas (2 a side at 32 pages).
-fn vsm_area()->u32 {return min(vsm.counts.y,16u)*VSM_PAGE;}
+// The hardware raster's attachment holds at most 32 pages a side (virtual_shadow_gpu.rs
+// AREA_PAGES); a wider window is drawn as tiles x tiles areas (2 a side at 64 pages).
+fn vsm_area()->u32 {return min(vsm.counts.y,32u)*VSM_PAGE;}
 fn vsm_area_tiles()->u32 {return vsm.counts.y*VSM_PAGE/vsm_area();}
 // Read-only views of the page state (vsm_section) and of the pool's lists.
 @group(0) @binding(54) var<storage,read> vsm_pool_in:array<u32>;
