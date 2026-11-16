@@ -429,6 +429,9 @@ struct Pipelines {
     /// N-VSM1 (shaders/virtual_shadow_disk.wgsl): its page requests and its lookup.
     disk_mark: Owned<wgpu::ComputePipeline>,
     disk: Owned<wgpu::ComputePipeline>,
+    /// The Disk lookup's walk over the pixels it listed, and that walk's dispatch.
+    disk_walk: Owned<wgpu::ComputePipeline>,
+    disk_walk_dispatch: Owned<wgpu::ComputePipeline>,
     /// The sparse pool's passes (vsm_release, vsm_allocate, vsm_clear_sparse, vsm_mip_sparse).
     release: Owned<wgpu::ComputePipeline>,
     allocate: Owned<wgpu::ComputePipeline>,
@@ -560,6 +563,10 @@ struct Resources {
     history: Owned<wgpu::Buffer>,
     disk_clip: Option<[f32; 16]>,
     disk_parity: u32,
+    /// The pixels that walk (WGSL `vd_walk_list`) and their count and dispatch
+    /// (`vd_walk_args`).
+    walk_list: Owned<wgpu::Buffer>,
+    walk_args: Owned<wgpu::Buffer>,
     /// The hardware raster's attachment, which only sizes its raster area.
     _area: Owned<wgpu::Texture>,
     area: Owned<wgpu::TextureView>,
@@ -1375,6 +1382,9 @@ impl VirtualState {
                     storage(62, false, S::COMPUTE),
                     // Held views: the per-pixel answer history.
                     storage(63, false, S::COMPUTE),
+                    // The listed pixels that walk, and their count and dispatch.
+                    storage(64, false, S::COMPUTE),
+                    storage(65, false, S::COMPUTE),
                 ],
             ),
         };
@@ -1497,6 +1507,8 @@ impl VirtualState {
         };
         let disk_mark = disk_compute("vd_mark", &mark_layout);
         let disk = disk_compute("vd_lookup", &disk_layout);
+        let disk_walk = disk_compute("vd_walk", &disk_layout);
+        let disk_walk_dispatch = disk_compute("vd_walk_dispatch", &disk_layout);
         let record_module = ledger.own(
             device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some("N8g walk records"),
@@ -1604,6 +1616,8 @@ impl VirtualState {
             queued: None,
             disk_mark,
             disk,
+            disk_walk,
+            disk_walk_dispatch,
             release: compute("vsm_release", &compact_layout, &[]),
             allocate: compute("vsm_allocate", &allocate_layout, &[]),
             clear_sparse: compute("vsm_clear_sparse", &clear_layout, &[]),
@@ -1957,6 +1971,12 @@ impl VirtualState {
             ),
             disk_clip: None,
             disk_parity: 0,
+            walk_list: buffer(
+                "Disk lookup walking pixels",
+                (u64::from(size[0]) * u64::from(size[1]) * 8).max(8),
+                B::STORAGE,
+            ),
+            walk_args: buffer("Disk lookup walk dispatch", 16, B::STORAGE | B::INDIRECT),
             _area: area,
             area: area_view,
             _level: level,
@@ -2920,6 +2940,8 @@ impl Renderer {
                 )
             };
             state.pipelines.disk = disk_entry("vd_lookup");
+            state.pipelines.disk_walk = disk_entry("vd_walk");
+            state.pipelines.disk_walk_dispatch = disk_entry("vd_walk_dispatch");
             let map = |entry, layout: &wgpu::PipelineLayout| {
                 self.ledger.own(
                     self.device
@@ -3388,6 +3410,8 @@ impl Renderer {
                         buffer(56, &r.outline),
                         buffer(62, &r.edges),
                         buffer(63, &r.history),
+                        buffer(64, &r.walk_list),
+                        buffer(65, &r.walk_args),
                     ],
                 ),
                 queued: group(
@@ -3554,6 +3578,7 @@ impl Renderer {
         }
         if disk {
             encoder.clear_buffer(&r.edges, 0, None);
+            encoder.clear_buffer(&r.walk_args, 0, None);
         }
         mark(encoder, "sun_shadow.lookup");
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -3608,7 +3633,14 @@ impl Renderer {
         let tiles = grid[0] * grid[1];
         if map || disk {
             pass.dispatch_workgroups(grid[0], grid[1], 1);
-        } else {
+        }
+        if disk {
+            // The listed pixels walk in full waves.
+            pass.set_pipeline(&p.disk_walk_dispatch);
+            pass.dispatch_workgroups(1, 1, 1);
+            pass.set_pipeline(&p.disk_walk);
+            pass.dispatch_workgroups_indirect(&r.walk_args, 4);
+        } else if !map {
             // Casters-only frames keep the grid's order (vsm_lookup).
             if let (true, Some([count, place])) = (order && !state.casters_only, &p.order) {
                 for pipeline in [count, place] {
