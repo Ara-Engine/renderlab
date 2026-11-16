@@ -49,6 +49,18 @@ fn sunrt_diag(flag: &str) -> bool {
     std::env::var("RENDERLAB_SUNRT_DIAG").is_ok_and(|v| v.split(',').any(|f| f == flag))
 }
 
+/// Play loop (sunrt, 2026-11-16): the fog's history (a lit fraction and a density per froxel,
+/// shaders/atmosphere.wgsl) survives moved placements, skinned poses and exposure changes. A
+/// moving caster's shaft is the temporal pass's job, as for camera motion: it bounds old
+/// visibility by this frame's raw neighbourhood. Neither value depends on exposure. In play,
+/// one animated character (a pose every frame) or the meter (exposure most walking frames)
+/// restarted every view's fog on every frame: double injection samples, no accumulation.
+/// `RENDERLAB_FOG_HISTORY_KEEP=0` restarts it on those, as before.
+pub(crate) fn fog_history_keep() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_FOG_HISTORY_KEEP").map_or(true, |v| v != "0"))
+}
+
 fn overhaul_enabled() -> bool {
     std::env::var("RENDERLAB_FOG_OVERHAUL").as_deref() != Ok("0")
 }
@@ -751,7 +763,11 @@ impl Renderer {
         // changes. Camera motion uses world reprojection; phase is always current.
         let key = HistoryKey {
             sun: self.atmosphere_sun(),
-            exposure: self.lighting.pending.exposure,
+            exposure: if fog_history_keep() {
+                0.0
+            } else {
+                self.lighting.pending.exposure
+            },
             environment: self.environment.generation,
             shadows: self.view.shadows.settings.clone(),
             primary: self.primary_mode,

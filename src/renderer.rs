@@ -3274,12 +3274,13 @@ impl Renderer {
         mut cpu: CpuFrame,
     ) -> Result<Option<FrameReport>, Error> {
         // Both callers have admitted this slot. No camera/mode/lighting staging on busy.
-        // Frames that move placements, geometry or poses: every view's fog history restarts
-        // at its next frame (`prepare_atmosphere`).
+        // Frames that change geometry or the placement set: every view's fog history restarts
+        // at its next frame (`prepare_atmosphere`). Moved placements and poses keep it
+        // (`atmosphere_gpu::fog_history_keep`).
+        let motion = uploads.models > 0 || uploads.skinning > 0;
         if uploads.geometry > 0
-            || uploads.models > 0
             || uploads.instances > 0
-            || uploads.skinning > 0
+            || (motion && !atmosphere_gpu::fog_history_keep())
         {
             self.scene_edits += 1;
         }
