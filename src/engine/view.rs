@@ -138,18 +138,59 @@ impl Engine {
     /// Measurement: with `RENDERLAB_READBACK_FRAMES=<dir>;<frame>,<frame>,...`, the view's output
     /// after each listed frame (the pass log's frame ids) is read back (blocking) and written to
     /// `<dir>/frame-<id>.ppm`: live frames of an embedder's own loop, which no capture call sees.
+    /// With `@<dir>` instead, the frames are armed while running: once `<dir>/arm` exists (a
+    /// label line, then offsets such as `0,1,2,4,8`), the frames that many frames after the
+    /// first one that sees it are written as `<label>-<offset>.ppm`, and the file is removed.
     fn save_listed_frame(&mut self, view: ViewId, frame: u64) -> Result<(), Error> {
-        static LIST: std::sync::OnceLock<Option<(std::path::PathBuf, Vec<u64>)>> = std::sync::OnceLock::new();
-        let Some((dir, frames)) = LIST.get_or_init(|| {
+        enum Mode {
+            Listed(std::path::PathBuf, Vec<u64>),
+            Armed(std::path::PathBuf),
+        }
+        static MODE: std::sync::OnceLock<Option<Mode>> = std::sync::OnceLock::new();
+        static ARMED: std::sync::Mutex<Option<(u64, String, Vec<u64>)>> = std::sync::Mutex::new(None);
+        let Some(mode) = MODE.get_or_init(|| {
             let value = std::env::var("RENDERLAB_READBACK_FRAMES").ok()?;
+            if let Some(dir) = value.strip_prefix('@') {
+                return Some(Mode::Armed(dir.into()));
+            }
             let (dir, list) = value.split_once(';')?;
-            Some((dir.into(), list.split(',').filter_map(|f| f.trim().parse().ok()).collect()))
+            Some(Mode::Listed(dir.into(), list.split(',').filter_map(|f| f.trim().parse().ok()).collect()))
         }) else {
             return Ok(());
         };
-        if !frames.contains(&frame) {
-            return Ok(());
-        }
+        let (dir, name) = match mode {
+            Mode::Listed(dir, frames) => {
+                if !frames.contains(&frame) {
+                    return Ok(());
+                }
+                (dir, format!("frame-{frame}"))
+            }
+            Mode::Armed(dir) => {
+                let mut armed = ARMED.lock().unwrap();
+                if armed.is_none() {
+                    let arm = dir.join("arm");
+                    if let Ok(text) = std::fs::read_to_string(&arm) {
+                        let _ = std::fs::remove_file(&arm);
+                        let mut lines = text.lines();
+                        let label = lines.next().unwrap_or("armed").trim().to_owned();
+                        let offsets = lines.next().unwrap_or("0").split(',').filter_map(|f| f.trim().parse().ok()).collect();
+                        *armed = Some((frame, label, offsets));
+                    }
+                }
+                let Some((first, label, offsets)) = armed.as_mut() else {
+                    return Ok(());
+                };
+                let offset = frame - *first;
+                if offset > offsets.iter().copied().max().unwrap_or(0) {
+                    *armed = None;
+                    return Ok(());
+                }
+                if !offsets.contains(&offset) {
+                    return Ok(());
+                }
+                (dir, format!("{label}-{offset}"))
+            }
+        };
         let _ = std::fs::create_dir_all(dir);
         // A failed readback never fails the frame; the attempt and its result are logged.
         // Slow frames (seconds) can outlast one capture admission: a few attempts.
@@ -162,16 +203,13 @@ impl Engine {
         }
         let result = result.map(|image| {
             // Binary PPM (no image dependency in the library): RGB, alpha dropped.
-            let mut bytes = format!("P6
-{} {}
-255
-", image.width, image.height).into_bytes();
+            let mut bytes = format!("P6\n{} {}\n255\n", image.width, image.height).into_bytes();
             bytes.extend(image.rgba8.chunks_exact(4).flat_map(|p| [p[0], p[1], p[2]]));
-            std::fs::write(dir.join(format!("frame-{frame}.ppm")), bytes)
+            std::fs::write(dir.join(format!("{name}.ppm")), bytes)
         });
         use std::io::Write;
         if let Ok(mut log) = std::fs::OpenOptions::new().create(true).append(true).open(dir.join("readback.log")) {
-            let _ = writeln!(log, "{frame} {result:?}");
+            let _ = writeln!(log, "{frame} {name} {result:?}");
         }
         Ok(())
     }
