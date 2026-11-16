@@ -949,11 +949,13 @@ fn peel_gap_on() -> bool {
 /// Answer reuse (WGSL `vd_lookup`): a pixel whose surface point was on screen last frame, out
 /// of the moving casters' swept shadow, with its own and its 3x3 neighbours' answers one fully
 /// lit or fully shadowed class settled over several walks, keeps the answer without a walk.
-/// The sun's answer at a world point does not depend on the camera. `RENDERLAB_VD_REUSE=0`
-/// walks every pixel.
+/// The sun's answer at a world point does not depend on the camera. Off by default
+/// (`RENDERLAB_VD_REUSE=1` turns it on): TR1's swept zone covers only skinned poses, so a rigid
+/// mover (Glint's spinning bars) left stale shadowed tiles behind it. It returns once its
+/// invalidation is per mover.
 fn reuse_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_VD_REUSE").map_or(true, |v| v.trim() != "0"))
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VD_REUSE").is_ok_and(|v| v.trim() == "1"))
 }
 /// TR1 history frames before answers are reused: the pages of a cut's new view have arrived.
 const REUSE_AFTER: u32 = 8;
