@@ -871,8 +871,8 @@ pub(super) fn shader_source() -> String {
         1,
     )
 }
-/// The caster census's words (WGSL `vsm_census`): two halves of MAX_LEVELS x 131072 bits.
-const CENSUS_BYTES: u64 = 2 * MAX_LEVELS as u64 * 131072 / 8;
+/// The caster census's words (WGSL `vsm_census`): three parts of MAX_LEVELS x 131072 bits.
+const CENSUS_BYTES: u64 = 3 * MAX_LEVELS as u64 * 131072 / 8;
 /// `RENDERLAB_VSM_CENSUS=<file>`: the caster census (WGSL `vsm_census`) goes to this file,
 /// rewritten each frame: per level, placements sent to the raster and those that reached it.
 fn census_log() -> Option<&'static std::path::Path> {
@@ -2286,7 +2286,8 @@ impl Renderer {
                         .filter(|&p| words[base + p as usize / 8] & (1 << (p % 8)) != 0)
                         .collect()
                 };
-                let mut text = String::new();
+                let flagged = bits(2, 0);
+                let mut text = format!("flagged no-shadow {} {:?}\n", flagged.len(), flagged);
                 for level in 0..MAX_LEVELS {
                     let (sent, covered) = (bits(0, level), bits(1, level));
                     let lost: Vec<_> = sent.iter().filter(|p| covered.binary_search(p).is_err()).collect();

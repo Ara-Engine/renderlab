@@ -358,7 +358,8 @@ const VSM_PEEL_GAP:f32=4.0;
 override VSM_HW_THIN:bool=true;
 // Measurement (`RENDERLAB_VSM_CENSUS=<file>`): per level, one bit per placement the cull sent
 // to the raster (first half) and one per placement that covered a texel of a rasterized page
-// (second half), so casters lost before the map show as the difference.
+// (second half), so casters lost before the map show as the difference; the third half's level
+// 0 holds the placements flagged as casting no shadow.
 override VSM_CENSUS:bool=false;
 const VSM_CENSUS_PLACEMENTS:u32=131072u;
 @group(0) @binding(64) var<storage,read_write> vsm_census:array<atomic<u32>>;
@@ -384,7 +385,7 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
     if index>=vsm.counts.z {return;}
     let c=vsm_clusters[index];
     // A placement that casts no shadow (pad0, src/visibility_buffer.rs) is never rasterized.
-    if c.pad0!=0u {return;}
+    if c.pad0!=0u {vsm_census_mark(2u,0u,c.placement);return;}
     let m=models[c.placement];
     var lo=vec2<f32>(3.4e38);var hi=vec2<f32>(-3.4e38);
     for(var i=0u;i<8u;i+=1u) {

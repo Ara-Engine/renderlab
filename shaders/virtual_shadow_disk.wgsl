@@ -954,18 +954,30 @@ fn vd_pcss(id:vec2<u32>)->f32 {
     // Per pixel and frame rotation of the tap disks.
     let seed=vd_hash(id.x+id.y*u32(vd.size.x));
     let turn=fract(f32(seed>>8u)*(1.0/16777216.0)+0.61803398875*vd.size.z)*6.28318531;
-    // Blocker search: radius the sun's reach at the ceiling, at a level a quarter of it.
+    // Blocker search over the sun's cone from the receiver up to the ceiling: a blocker h above
+    // the receiver lies within radius*h of p + centre*h. The map keeps its basis while the sun
+    // turns (sun_hysteresis), so the cone leans by `centre` (up to about twice the sun's
+    // radius): taps cover its footprint, the capsule from p to p + centre*ceiling of half width
+    // radius*ceiling, at a level whose texel is a quarter of that width, and a tap counts only
+    // where its own height puts it inside the cone (a texel of slack).
+    let axis=vd_px.centre*ceiling;
     let search=max(vd_px.radius*ceiling,VD_PCSS_MIN*texel0);
-    let centre_search=p.xy+vd_px.centre*0.5*ceiling;
-    let ls=vd_level_for(vd_px.level,0.25*search,centre_search,search);
+    let centre_search=p.xy+0.5*axis;
+    let ls=vd_level_for(vd_px.level,0.25*search,centre_search,0.5*length(axis)+search);
     if ls==VSM_NONE {if VD_COUNTS {atomicAdd(&vd_counts[1],1u);} return 1.0;}
     let ms=VD_BIAS*vsm_texel(ls);
+    let slack=vsm_texel(ls);
+    let along=fract(f32(seed&0xffu)*(1.0/256.0)+0.75487767*vd.size.z);
     var found=0.0;var depth=0.0;
     for(var k=0u;k<VD_PCSS_SEARCH;k+=1u) {
         let r=sqrt((f32(k)+0.5)/f32(VD_PCSS_SEARCH));
         let a=f32(k)*2.39996323+turn;
-        let t=vd_tap(ls,centre_search+search*r*vec2<f32>(cos(a),sin(a)),ms);
-        found+=t.x;depth+=t.x*t.y;
+        let t=fract(along+f32(k)*0.61803398875);
+        let q=p.xy+axis*t+search*r*vec2<f32>(cos(a),sin(a));
+        let tap=vd_tap(ls,q,ms);
+        if tap.x>0.0 && length(q-p.xy-vd_px.centre*tap.y)<=vd_px.radius*tap.y+slack {
+            found+=1.0;depth+=tap.y;
+        }
     }
     if found==0.0 {
         if VD_COUNTS {atomicAdd(&vd_counts[3],1u);}
