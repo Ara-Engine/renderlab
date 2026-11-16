@@ -87,11 +87,15 @@ fn gi_rx_store_at(at:u32) {
 //   rl_cast). A hit whose ray cone covers its cache cell takes the cell's outgoing radiance;
 //   nearer hits shade with the program (the cache read at the hit) and their own direct light.
 //   Cells reach the screen only through a hemisphere integral; misses see the sky.
+// - fg_filter: each tile probe's filtered copy, the probes around it on its plane weighted by
+//   their frames of history (3x3 tiles, 5x5 while its own history is short, as after a cut):
+//   neighbours' samples count as its own, so the interpolated light shows no probe pattern.
+//   History accumulates on the unfiltered probes.
 // - fg_adapt: adaptive probes (as in Lumen's screen probe gather), one per FG_BLOCK block,
 //   placed only where a covered pixel of the block has no tile probe on its plane, so edges,
 //   thin parts and third planes get light of their own; blocks without such a pixel exit
 //   after the test.
-// - fg_resolve: each pixel takes the tile probes around it on its own plane (position, plane
+// - fg_resolve: each pixel takes the filtered tile probes around it on its own plane (position, plane
 //   distance and normal weights), else the adaptive probes around it, else the nearest probe
 //   on its plane within FG_SEARCH tiles, else the facing probe of its own tile or block.
 // Probes keep radiance as L2 SH, accumulated over frames while their new point stays on their
@@ -110,14 +114,19 @@ const FG_SEARCH:i32=2;
 const FG_PLANE:f32=0.5;
 // The radiance SH (27 floats and a pad), the probe point (w: frames of history, 0 when
 // invalid) and normal (w: the tile footprint in metres). Probes live after the pixels'
-// records in gi_prepared, three records a probe: the tile probes, then one adaptive probe
-// per FG_BLOCK block (src/gi_receiver_pass.rs sizes it).
+// records in gi_prepared, three records a probe: the tile probes, one adaptive probe per
+// FG_BLOCK block, then the tile probes' filtered copies (src/gi_receiver_pass.rs sizes it).
 struct FgProbe { sh:array<vec4<f32>,7>, point:vec4<f32>, normal:vec4<f32> };
 fn fg_at(index:u32,size:vec2<u32>)->u32 { return size.x*size.y+3u*index; }
 fn fg_adaptive(block:vec2<u32>,size:vec2<u32>)->u32 {
     let tiles=(size+vec2<u32>(FG_TILE-1u))/FG_TILE;
     let blocks=(size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK;
     return tiles.x*tiles.y*FG_SLOTS+block.y*blocks.x+block.x;
+}
+fn fg_filtered(index:u32,size:vec2<u32>)->u32 {
+    let tiles=(size+vec2<u32>(FG_TILE-1u))/FG_TILE;
+    let blocks=(size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK;
+    return tiles.x*tiles.y*FG_SLOTS+blocks.x*blocks.y+index;
 }
 fn fg_load(index:u32,size:vec2<u32>)->FgProbe {
     let at=fg_at(index,size);
@@ -304,7 +313,7 @@ fn fg_tiles(id:vec2<u32>,size:vec2<u32>,s:FgSurface)->FgGather {
     for(var k=0u;k<4u*FG_SLOTS;k+=1u) {
         let o=vec2<i32>(i32(k&1u),i32((k>>1u)&1u));
         let t=clamp(base+o,vec2<i32>(0),tiles-vec2<i32>(1));
-        let p=fg_load(u32(t.y*tiles.x+t.x)*FG_SLOTS+k/4u,size);
+        let p=fg_load(fg_filtered(u32(t.y*tiles.x+t.x)*FG_SLOTS+k/4u,size),size);
         let bilinear=select(1.0-fr.x,fr.x,o.x!=0)*select(1.0-fr.y,fr.y,o.y!=0);
         let w=max(bilinear,1e-3)*fg_on_plane(p,s.world,s.normal);
         if w<=1e-6 {continue;}
@@ -312,6 +321,43 @@ fn fg_tiles(id:vec2<u32>,size:vec2<u32>,s:FgSurface)->FgGather {
         g.total+=w;
     }
     return g;
+}
+// One thread per tile: both slots' filtered copies. A neighbour weighs its agreement with the
+// probe's plane (fg_on_plane at the probe's point and normal), a Gaussian in tile distance and
+// its frames of history; the probe itself weighs its own frames.
+const FG_FILTER_SHORT:f32=4.0;
+@compute @workgroup_size(8,4) fn fg_filter(@builtin(global_invocation_id) grid:vec3<u32>) {
+    let size=textureDimensions(primary_hit);
+    let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
+    let own=vec2<i32>(grid.xy);
+    if any(own>=tiles) {return;}
+    for(var slot=0u;slot<FG_SLOTS;slot+=1u) {
+        let index=u32(own.y*tiles.x+own.x)*FG_SLOTS+slot;
+        let c=fg_load(index,size);
+        if c.point.w<=0.0 {fg_invalidate(fg_filtered(index,size),size);continue;}
+        let reach=select(1,2,c.point.w<=FG_FILTER_SHORT);
+        let sigma=f32(reach)*0.75;
+        var out=c;
+        for(var v=0u;v<7u;v+=1u) {out.sh[v]=c.sh[v]*c.point.w;}
+        var total=c.point.w;
+        for(var y=-reach;y<=reach;y+=1) {
+            for(var x=-reach;x<=reach;x+=1) {
+                let t=own+vec2<i32>(x,y);
+                if any(t<vec2<i32>(0)) || any(t>=tiles) {continue;}
+                for(var k=0u;k<FG_SLOTS;k+=1u) {
+                    let at=u32(t.y*tiles.x+t.x)*FG_SLOTS+k;
+                    if at==index {continue;}
+                    let p=fg_load(at,size);
+                    let w=fg_on_plane(p,c.point.xyz,c.normal.xyz)*exp(-f32(x*x+y*y)/(2.0*sigma*sigma))*p.point.w;
+                    if w<=1e-4 {continue;}
+                    for(var v=0u;v<7u;v+=1u) {out.sh[v]+=w*p.sh[v];}
+                    total+=w;
+                }
+            }
+        }
+        for(var v=0u;v<7u;v+=1u) {out.sh[v]/=total;}
+        fg_store(fg_filtered(index,size),size,out);
+    }
 }
 var<workgroup> fg_orphan:atomic<u32>;
 var<workgroup> fg_pick:u32;
@@ -376,7 +422,7 @@ var<workgroup> fg_pick:u32;
                 let t=own+vec2<i32>(x,y);
                 if any(t<vec2<i32>(0)) || any(t>=tiles) {continue;}
                 for(var slot=0u;slot<FG_SLOTS;slot+=1u) {
-                    let p=fg_load(u32(t.y*tiles.x+t.x)*FG_SLOTS+slot,size);
+                    let p=fg_load(fg_filtered(u32(t.y*tiles.x+t.x)*FG_SLOTS+slot,size),size);
                     let w=fg_on_plane(p,s.world,s.normal)/f32(1+max(abs(x),abs(y)));
                     if w>best {best=w;g.sh=p.sh;}
                 }
@@ -385,7 +431,7 @@ var<workgroup> fg_pick:u32;
         if best<=0.05 {
             best=0.0;
             for(var k=0u;k<FG_SLOTS+1u;k+=1u) {
-                let index=select(u32(own.y*tiles.x+own.x)*FG_SLOTS+k,fg_adaptive(id/FG_BLOCK,size),k==FG_SLOTS);
+                let index=select(fg_filtered(u32(own.y*tiles.x+own.x)*FG_SLOTS+k,size),fg_adaptive(id/FG_BLOCK,size),k==FG_SLOTS);
                 let p=fg_load(index,size);
                 if p.point.w<=0.0 {continue;}
                 let facing=dot(p.normal.xyz,s.normal);
