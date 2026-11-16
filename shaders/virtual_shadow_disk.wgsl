@@ -779,6 +779,9 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     }
 }
 
+// Off (`RENDERLAB_VD=VD_RING=false`): every band whose max-mip clears its floor reads its whole
+// window (the same answers, more reads).
+override VD_RING:bool=true;
 // The map's columns: each level's band of heights, the highest band first (vd_map).
 fn vd_map() {
     vd_pl=VSM_NONE;
@@ -862,11 +865,26 @@ fn vd_map() {
         var skip=any(b<a);
         // The window's pages first: the mip test and the texels read them from the cache.
         if !skip && vsm_sparse() {vd_cache_pages(level,a,b);}
-        if !skip && (b.x-a.x)*(b.y-a.y)>=4 {skip=vd_mip_max(level,a,b)-p.z<=lo;}
+        // Every texel but the 2x2 whose centres surround the cone's point is half a texel or
+        // more from it, so it reaches the cone only above half a texel / slope (vd_texel's cone
+        // test): where the window's max-mip stays under that, only the 2x2 are read. That is the
+        // receiver's own band (lo 0) on almost every pixel: its ground, tilted in light space,
+        // keeps the plain mip test from ever skipping it.
+        var ring=true;
+        if !skip && (b.x-a.x)*(b.y-a.y)>=4 {
+            let top=vd_mip_max(level,a,b)-p.z;
+            skip=top<=lo;
+            ring=!VD_RING || top>max(lo,select(0.5,0.0,VD_EDGES)*texel/slope);
+        }
         if !skip {
             vd_lbands+=1u;
-            for(var y=a.y;y<=b.y;y+=1) {
-                for(var cx=a.x;cx<=b.x;cx+=1) {
+            var c0=a;var c1=b;
+            if !ring {
+                let at=vec2<i32>(floor(x-vec2<f32>(0.5)));
+                c0=max(at,a);c1=min(at+vec2<i32>(1),b);
+            }
+            for(var y=c0.y;y<=c1.y;y+=1) {
+                for(var cx=c0.x;cx<=c1.x;cx+=1) {
                     vd_texel(vec2<i32>(cx,y),level,1,origin+(vec2<f32>(f32(cx),f32(y))+vec2<f32>(0.5))*texel,texel,lo,hi,margin);
                 }
                 if vd_full() {return;}
