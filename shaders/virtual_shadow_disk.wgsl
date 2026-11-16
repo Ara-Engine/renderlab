@@ -720,7 +720,6 @@ fn vd_band_shift(texel:f32)->vec2<f32> {
     return vd_px.jitter*VD_BAND_JITTER*max(texel-vsm_texel(vd_px.level),0.0);
 }
 fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,hi:f32,margin:f32) {
-    vd_reads+=1u;
     let i=vsm_index(cell,level);
     if i==VSM_NONE {return;}
     let top=vsm_top_words[i];
@@ -820,7 +819,6 @@ fn vd_map() {
         if vsm_sparse() {vd_cache_pages(l,a,b);}
         ceiling=clamp(vd_mip_max(l,a,b)-p.z,0.0,ceiling);
     }
-    if VD_STOP==2u {return;}
     // The bias is the receiver's: a coarser level's texel centres lie on the source surface as
     // exactly as its own level's, and a bias growing with the level would free the occluders of
     // a grazing receiver's whole visible sliver of the disk.
@@ -844,11 +842,9 @@ fn vd_map() {
         let b=min(vec2<i32>(floor(x+vec2<f32>(r))),vec2<i32>(s-1));
         let base=vsm_mip_base(last,mip);
         let step=i32(1u<<mip);
-        vd_mbands+=1u;
         for(var y=a.y;y<=b.y;y+=1) {
             for(var cx=a.x;cx<=b.x;cx+=1) {
                 var stored=0.0;
-                vd_mreads+=1u;
                 if vsm_sparse() {stored=vsm_mip_at(last,mip,vec2<u32>(vec2<i32>(cx,y)<<vec2<u32>(mip)));}
                 else {stored=vsm_mips[base+u32(y*s+cx)];}
                 let height=fma(stored,vsm.depth.z,vsm.depth.x);
@@ -870,7 +866,6 @@ fn vd_map() {
         }
         if vd_full() {return;}
     }
-    if VD_STOP==3u {return;}
     for(var k=0u;k<=last-vd_px.level;k+=1u) {
         let level=last-k;
         var lo=0.0;
@@ -899,7 +894,6 @@ fn vd_map() {
             ring=!VD_RING || top>max(lo,select(0.5,0.0,VD_EDGES)*texel/slope);
         }
         if !skip {
-            vd_lbands+=1u;
             var c0=a;var c1=b;
             if !ring {
                 let at=vec2<i32>(floor(x-vec2<f32>(0.5)));
@@ -915,42 +909,6 @@ fn vd_map() {
     }
 }
 
-// Measurement (`RENDERLAB_VD=VD_DIAG=1`): the receiver level's texel under the cone point. 0: a
-// near occluder (peel layer, another placement, under the hard cut) under a high top; 64: a high
-// top whose peel is its own underside; 128: a near top; 256 otherwise.
-// 2: the texels the walk read (vd_texel), 2 codes each (256: 128 or more); 3: the max-mip
-// band cells read, 4 codes each; 4: the level bands walked (not skipped), 32 codes each; 5: the
-// max-mip bands walked, 32 codes each; 6: reused answers drawn shadowed; 7: the reuse mode
-// (0: 0, 1: 128, 2: 256) on every pixel.
-override VD_DIAG:u32=0u;
-// Measurement: the walk stops after the edge test (1), the ceiling (2), the max-mip bands (3).
-override VD_STOP:u32=0u;
-var<private> vd_reads:u32;
-var<private> vd_mreads:u32;
-var<private> vd_lbands:u32;
-var<private> vd_mbands:u32;
-fn vd_diag()->u32 {
-    let level=vd_px.level;
-    let texel=vsm_texel(level);
-    let cut=VD_EDGE_HARD*texel/vd_px.radius;
-    let cell=vec2<i32>(floor((vd_px.p.xy-vsm.levels[level].origin.xy)/texel));
-    let side=i32(vsm.counts.y*VSM_PAGE);
-    if any(cell<vec2<i32>(0)) || any(cell>=vec2<i32>(side)) {return 256u;}
-    let i=vsm_index(cell,level);
-    if i==VSM_NONE {return 256u;}
-    let top=vsm_top_words[i];
-    if top.x==0u {return 256u;}
-    let t=vsm_height(top)-vd_px.p.z;
-    if t>0.0 && t<cut {return 128u;}
-    if t<cut {return 256u;}
-    let peel=vsm_peel_words[i];
-    let bits=vsm.misc.x;
-    if peel.x==0u {return 256u;}
-    if peel.x>>bits==top.x>>bits {return 64u;}
-    let t2=vsm_height(peel)-vd_px.p.z;
-    if t2>0.0 && t2<cut {return 0u;}
-    return 256u;
-}
 fn vd_pixel(id:vec2<u32>)->u32 {
     if VD_SKIP==1u {return 256u;}
     vd_prepare(id);
@@ -961,12 +919,9 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     if !vd_px.thin && !vd_facing() {return 0u;}
     // The samples under the receiver's tangent plane (vd_facing): an edge pixel keeps them.
     let facing=vd_mask;
-    if VD_DIAG==1u && vd_px.level!=VSM_NONE {return vd_diag();}
-    vd_reads=0u;vd_mreads=0u;vd_lbands=0u;vd_mbands=0u;
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {
         let margin=VD_BIAS*vsm_texel(vd_px.level);
         if VD_HARD_EDGES {vd_edge_test(margin);}
-        if VD_STOP==1u {return 256u;}
         vd_map();
         if vd_edge {
             atomicAdd(&vd_edge_count[0],1u);
@@ -974,10 +929,6 @@ fn vd_pixel(id:vec2<u32>)->u32 {
             vd_mask=facing|vd_far|vd_edge_triangles(margin);
         }
     }
-    if VD_DIAG==2u {return 256u-min(2u*vd_reads,256u);}
-    if VD_DIAG==3u {return 256u-min(4u*vd_mreads,256u);}
-    if VD_DIAG==4u {return 256u-min(32u*vd_lbands,256u);}
-    if VD_DIAG==5u {return 256u-min(32u*vd_mbands,256u);}
     // 64 samples to the 0..256 count the shading programs read.
     return 4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
 }
@@ -1072,7 +1023,7 @@ fn vd_depth_bits(id:vec2<u32>)->u32 {
                 let refresh=vd.reuse.x==1u && (vd_hash(group.x+group.y*0x10000u)+u32(vd.size.z))%VD_REUSE_REFRESH==0u;
                 let kept=select(vd_settled(at,size,read),VSM_NONE,refresh);
                 if kept!=VSM_NONE {
-                    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(select(kept,0u,VD_DIAG==6u)));
+                    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(kept));
                     vd_history[write]=vd_depth_bits(id)|(before&0xffffu);
                     walk=false;
                 }
@@ -1104,7 +1055,7 @@ fn vd_depth_bits(id:vec2<u32>)->u32 {
     let before=entry.y;
     let size=textureDimensions(vsm_world);
     let answer=vd_pixel(id);
-    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(select(answer,vd.reuse.x*128u,VD_DIAG==7u)));
+    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(answer));
     // A walk extends the settled count of the same class; a coarser level standing in for an
     // arriving page never settles.
     var walks=0u;
