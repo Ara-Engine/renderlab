@@ -898,7 +898,8 @@ fn vd_map() {
 // top whose peel is its own underside; 128: a near top; 256 otherwise.
 // 2: the texels the walk read (vd_texel), 2 codes each (256: 128 or more); 3: the max-mip
 // band cells read, 4 codes each; 4: the level bands walked (not skipped), 32 codes each; 5: the
-// max-mip bands walked, 32 codes each.
+// max-mip bands walked, 32 codes each; 6: reused answers drawn shadowed; 7: the reuse mode
+// (0: 0, 1: 128, 2: 256) on every pixel.
 override VD_DIAG:u32=0u;
 var<private> vd_reads:u32;
 var<private> vd_mreads:u32;
@@ -1029,14 +1030,14 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
             let refresh=vd.reuse.x==1u && (vd_hash(id.x+id.y*size.x)+u32(vd.size.z))%VD_REUSE_REFRESH==0u;
             let kept=select(vd_settled(at,size,read),VSM_NONE,refresh);
             if kept!=VSM_NONE {
-                textureStore(vsm_output,vec2<i32>(id),vec4<u32>(kept));
+                textureStore(vsm_output,vec2<i32>(id),vec4<u32>(select(kept,0u,VD_DIAG==6u)));
                 vd_history[write]=depth_bits|(before&0xffffu);
                 return;
             }
         }
     }
     let answer=vd_pixel(id);
-    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(answer));
+    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(select(answer,vd.reuse.x*128u,VD_DIAG==7u)));
     // A walk extends the settled count of the same class; a coarser level standing in for an
     // arriving page never settles.
     var walks=0u;
