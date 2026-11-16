@@ -1732,16 +1732,19 @@ fn gi_reach(slot:u32, c:GiCell) -> u32 {
 // known bits, which accumulate until the cell is re-traced). Movers re-traced every cell in
 // reach every frame they moved (Glint's play: 107k cells a frame, 63k of them read by a pixel).
 // A stale cell is re-traced on its turn: one frame in GI_H_STALE_READ while a pixel reads it this
-// frame, one in GI_H_STALE_SWEEP otherwise (a fixed rotation by slot, W2); a cell whose cube a
-// moved box overlaps (the mover passes through it) every frame. The planner keeps the scan
-// running for the sweep's period after the last mover, so no cell stays stale longer.
+// frame or a moved box overlaps its cube (the mover passes through it), one in GI_H_STALE_SWEEP
+// otherwise (a fixed rotation by slot, W2). The planner sets the periods from last frame's count
+// of stale cells (GI_W_STALE_CELLS) to hold re-traces near a per-frame budget (1 when few: every
+// frame), and keeps the scan running for the sweep's period after the last mover, so no cell
+// stays stale longer.
 const GI_STALE:u32=0x20000u;
 const GI_H_STALE_READ:u32=62u;
 const GI_H_STALE_SWEEP:u32=63u;
 const GI_SCAN_STALE:u32=64u;
-fn gi_stale_due(slot:u32, cold:u32) -> bool {
+const GI_W_STALE_CELLS:u32=247u;
+fn gi_stale_due(slot:u32, cold:u32, inside:bool) -> bool {
     let now=gi_word(GI_H_FRAME);
-    let read=gi_table[cold+GI_C_SEEN]==now;
+    let read=inside || gi_table[cold+GI_C_SEEN]==now;
     let p=max(select(gi_word(GI_H_STALE_SWEEP),gi_word(GI_H_STALE_READ),read),1u);
     return (slot+now)%p==0u;
 }
@@ -1778,7 +1781,8 @@ fn gi_count_read(at:u32, cold:u32) {
         var reach=0u;
         if (flags&GI_SCAN_CASTER)!=0u { reach=gi_reach(slot,gi_cell(slot)); }
         let stale=reach!=0u || (state&GI_STALE)!=0u;
-        if stale && (reach==2u || gi_stale_due(slot,cold)) {
+        if stale { atomicAdd(&gi_work[GI_W_STALE_CELLS],1u); }
+        if stale && gi_stale_due(slot,cold,reach==2u) {
             atomicAdd(&gi_work[GI_W_INVALIDATED],1u);
             gi_count_read(GI_W_INVALIDATED_READ,cold);
             gi_table[cold+GI_C_STATE]=gi_table[cold+GI_C_STATE]&~GI_STALE;
