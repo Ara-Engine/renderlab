@@ -509,7 +509,11 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
 // Software raster: the cluster's vertices are transformed once into workgroup memory, then
 // one invocation per triangle samples the texel centres it covers. Vertices snap to 8
 // subpixel bits with exact integer edge functions; edges are inclusive (the max makes double
-// coverage harmless) and both windings are kept.
+// coverage harmless) and both windings are kept. A triangle narrower than a texel (its least
+// altitude) may cover no texel centre and its caster would fall between texels (a mast's
+// strut, a wire): it covers every texel its footprint touches instead (conservative: each edge
+// function moved out by half a texel square), at heights clamped to its own range
+// (docs/design-sun-shadows.md (c)). Wider triangles keep exact centre sampling.
 @compute @workgroup_size(128) fn vsm_raster(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     let level=vsm_pass.level;
     let slot=group.x+group.y*65535u;
@@ -530,9 +534,16 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
     if area<0 {let p=b;b=d;d=p;let z=s1;s1=s2;s2=z;}
     let inverse=1.0/f32(abs(area));
     let side=i32(vsm.counts.y*VSM_PAGE);
+    // Thin: twice the area over the longest edge, in subpixels, under one texel (256).
+    let longest=max(max(length(vec2<f32>(b-a)),length(vec2<f32>(d-b))),length(vec2<f32>(a-d)));
+    let thin=f32(abs(area))<256.0*longest;
+    // Half a texel square's reach along each edge's normal, in edge-function units.
+    let pad=select(vec3<i32>(0),128*vec3<i32>(abs(d.x-b.x)+abs(d.y-b.y),abs(a.x-d.x)+abs(a.y-d.y),abs(b.x-a.x)+abs(b.y-a.y)),thin);
+    let zlo=min(min(s0.z,s1.z),s2.z);let zhi=max(max(s0.z,s1.z),s2.z);
     // Texel centres are at 256x+128 subpixels.
-    let lo=max(min(a,min(b,d)),vec2<i32>(0));
-    let hi=min(max(a,max(b,d)),vec2<i32>(side*256-1));
+    let grow=select(0,128,thin);
+    let lo=max(min(a,min(b,d))-vec2<i32>(grow),vec2<i32>(0));
+    let hi=min(max(a,max(b,d))+vec2<i32>(grow),vec2<i32>(side*256-1));
     let first=(lo-vec2<i32>(128)+vec2<i32>(255))>>vec2<u32>(8u);
     let last=(hi-vec2<i32>(128))>>vec2<u32>(8u);
     let id=vsm_cluster_id(c,batch,li);
@@ -540,8 +551,8 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
         for(var x=first.x;x<=last.x;x+=1) {
             let p=vec2<i32>(x*256+128,y*256+128);
             let w0=vsm_edge(b,d,p);let w1=vsm_edge(d,a,p);let w2=vsm_edge(a,b,p);
-            if (w0|w1|w2)<0 {continue;}
-            let z=(f32(w0)*s0.z+f32(w1)*s1.z+f32(w2)*s2.z)*inverse;
+            if ((w0+pad.x)|(w1+pad.y)|(w2+pad.z))<0 {continue;}
+            let z=clamp((f32(w0)*s0.z+f32(w1)*s1.z+f32(w2)*s2.z)*inverse,zlo,zhi);
             vsm_write(level,vec2<u32>(u32(x),u32(y)),z,id);
         }
     }
