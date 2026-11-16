@@ -2474,8 +2474,7 @@ impl Renderer {
                 self,
                 "primary edge dispatch arguments",
                 16,
-                // sunrt-8: also the listed sun receivers' count, copied out as their arguments.
-                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT | wgpu::BufferUsages::COPY_SRC,
+                wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
             );
             let retries = Buffer::new(
                 self,
@@ -3218,9 +3217,6 @@ impl Renderer {
                 });
             // sunrt-8: listed receivers first; the repair then re-estimates any whose hit it moves.
             if let Some(list) = kernels.sun_list {
-                // The list's count and arguments are in the trace group's binding 27, which the
-                // continuation binds too: its indirect arguments go through P-RTS's idle header.
-                encoder.copy_buffer_to_buffer(&targets.repair_args.value, 0, &targets.penumbra.value, 0, 16);
                 mark(encoder, "visibility.sun_list");
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                     label: Some("listed shadow-edge sun directions"),
@@ -3230,7 +3226,7 @@ impl Renderer {
                 pass.set_bind_group(0, group, &[]);
                 pass.set_bind_group(1, &*state.geometry.as_ref().unwrap().arrays, &[]);
                 pass.set_bind_group(3, self.lighting.bind(), &[]);
-                pass.dispatch_workgroups_indirect(&targets.penumbra.value, 0);
+                pass.dispatch_workgroups_indirect(&targets.repair_args.value, 0);
             }
             mark(encoder, "visibility.repair");
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
