@@ -666,6 +666,7 @@ fn vd_above(q:vec3<f32>,margin:f32)->bool {
 // `c` (light xy): a level's own texel, or the one texel read for a max-mip cell `stride` texels
 // wide. `lo`..`hi` is the band of heights being served, `margin` the near-field bias.
 fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,hi:f32,margin:f32) {
+    vd_reads+=1u;
     let i=vsm_index(cell,level);
     if i==VSM_NONE {return;}
     let top=vsm_top_words[i];
@@ -836,7 +837,9 @@ fn vd_map() {
 // Measurement (`RENDERLAB_VD=VD_DIAG=1`): the receiver level's texel under the cone point. 0: a
 // near occluder (peel layer, another placement, under the hard cut) under a high top; 64: a high
 // top whose peel is its own underside; 128: a near top; 256 otherwise.
+// 2: the texels the walk read, 2 codes each (0: none, 256: 128 or more).
 override VD_DIAG:u32=0u;
+var<private> vd_reads:u32;
 fn vd_diag()->u32 {
     let level=vd_px.level;
     let texel=vsm_texel(level);
@@ -869,7 +872,8 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     if !vd_px.thin && !vd_facing() {return 0u;}
     // The samples under the receiver's tangent plane (vd_facing): an edge pixel keeps them.
     let facing=vd_mask;
-    if VD_DIAG!=0u && vd_px.level!=VSM_NONE {return vd_diag();}
+    if VD_DIAG==1u && vd_px.level!=VSM_NONE {return vd_diag();}
+    vd_reads=0u;
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {
         let margin=VD_BIAS*vsm_texel(vd_px.level);
         if VD_HARD_EDGES {vd_edge_test(margin);}
@@ -880,6 +884,7 @@ fn vd_pixel(id:vec2<u32>)->u32 {
             vd_mask=facing|vd_far|vd_edge_triangles(margin);
         }
     }
+    if VD_DIAG==2u {return 256u-min(2u*vd_reads,256u);}
     // 64 samples to the 0..256 count the shading programs read.
     return 4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
 }
@@ -890,6 +895,7 @@ fn vd_pixel(id:vec2<u32>)->u32 {
 // and 3x3 neighbours' answers are one class settled for VD_HELD frames keeps it without a
 // walk: only penumbrae, edges and pixels whose class the receiver jitter still moves walk.
 override VD_HELD:u32=32u;
+override VD_HELD_ALWAYS:bool=false;
 @group(0) @binding(63) var<storage,read_write> vd_history:array<u32>;
 fn vd_settled(id:vec2<u32>,size:vec2<u32>)->u32 {
     let own=vd_history[id.y*size.x+id.x];
@@ -909,7 +915,8 @@ fn vd_settled(id:vec2<u32>,size:vec2<u32>)->u32 {
     let size=textureDimensions(vsm_world);
     let id=group.xy*VSM_TRACE_TILE+local.xy;
     if any(id>=size) || textureLoad(vsm_tiles,group.xy,0).x==0u {return;}
-    if vd.held.x!=0u && VD_HELD!=0u {
+    // Measurement (`RENDERLAB_VD=VD_HELD_ALWAYS=true,VD_HELD=1`): the reuse ceiling while moving.
+    if (vd.held.x!=0u || VD_HELD_ALWAYS) && VD_HELD!=0u {
         let kept=vd_settled(id,size);
         if kept!=VSM_NONE {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(kept));return;}
     }
