@@ -833,6 +833,32 @@ fn vd_map() {
     }
 }
 
+// Measurement (`RENDERLAB_VD=VD_DIAG=1`): the receiver level's texel under the cone point. 0: a
+// near occluder (peel layer, another placement, under the hard cut) under a high top; 64: a high
+// top whose peel is its own underside; 128: a near top; 256 otherwise.
+override VD_DIAG:u32=0u;
+fn vd_diag()->u32 {
+    let level=vd_px.level;
+    let texel=vsm_texel(level);
+    let cut=VD_EDGE_HARD*texel/vd_px.radius;
+    let cell=vec2<i32>(floor((vd_px.p.xy-vsm.levels[level].origin.xy)/texel));
+    let side=i32(vsm.counts.y*VSM_PAGE);
+    if any(cell<vec2<i32>(0)) || any(cell>=vec2<i32>(side)) {return 256u;}
+    let i=vsm_index(cell,level);
+    if i==VSM_NONE {return 256u;}
+    let top=vsm_top_words[i];
+    if top.x==0u {return 256u;}
+    let t=vsm_height(top)-vd_px.p.z;
+    if t>0.0 && t<cut {return 128u;}
+    if t<cut {return 256u;}
+    let peel=vsm_peel_words[i];
+    let bits=vsm.misc.x;
+    if peel.x==0u {return 256u;}
+    if peel.x>>bits==top.x>>bits {return 64u;}
+    let t2=vsm_height(peel)-vd_px.p.z;
+    if t2>0.0 && t2<cut {return 0u;}
+    return 256u;
+}
 fn vd_pixel(id:vec2<u32>)->u32 {
     if VD_SKIP==1u {return 256u;}
     vd_prepare(id);
@@ -843,6 +869,7 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     if !vd_px.thin && !vd_facing() {return 0u;}
     // The samples under the receiver's tangent plane (vd_facing): an edge pixel keeps them.
     let facing=vd_mask;
+    if VD_DIAG!=0u && vd_px.level!=VSM_NONE {return vd_diag();}
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {
         let margin=VD_BIAS*vsm_texel(vd_px.level);
         if VD_HARD_EDGES {vd_edge_test(margin);}
