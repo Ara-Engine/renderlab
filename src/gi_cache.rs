@@ -3422,6 +3422,24 @@ impl Renderer {
         let instances: usize = draws.iter().map(|d| d.instances.len()).sum::<usize>()
             - covered.iter().filter(|&&c| c).count()
             + usize::from(!covered.is_empty());
+        if super::change_log::enabled() {
+            let why = match self.gi.packed.as_ref() {
+                None => "none".to_owned(),
+                Some(p) => format!(
+                    "{}{}{}{}",
+                    if p.meshes != meshes { "meshes " } else { "" },
+                    if p.instances != instances { "instances " } else { "" },
+                    if p.covered != covered { "covered " } else { "" },
+                    if p.ids != ids { "ids" } else { "" }
+                ),
+            };
+            super::change_log::report(
+                self.frames + 1,
+                "gi_pack",
+                &[],
+                &[("repack_because", format!("\"{}\"", why.trim())), ("instances", instances.to_string())],
+            );
+        }
         if self.gi.packed.as_ref().is_none_or(|p| {
             p.meshes != meshes || p.instances != instances || p.covered != covered || p.ids != ids
         }) {
