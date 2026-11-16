@@ -947,6 +947,13 @@ fn resolve_source_with_coverage(wgsl: &str, coverage: Option<bool>) -> Result<St
             resolve = resolve.replace(&declaration, &format!("const {constant}:bool=false;"));
         }
     }
+    // Flat-history Catmull-Rom skip (temporal_resolve.wgsl TR1_FLAT); `RENDERLAB_TR1_FLAT=0`
+    // always takes the outer taps.
+    if std::env::var("RENDERLAB_TR1_FLAT").is_ok_and(|v| v.trim() == "0") {
+        const FLAT: &str = "const TR1_FLAT:f32=0.0025;";
+        assert_eq!(resolve.matches(FLAT).count(), 1, "TR1 flat seam");
+        resolve = resolve.replace(FLAT, "const TR1_FLAT:f32=0.0;");
+    }
     if let Some(cycle) = coverage {
         resolve = coverage_resolve(&resolve, cycle);
     }
