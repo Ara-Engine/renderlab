@@ -8,10 +8,10 @@
 // The hinted receiver's streak: the fewest frames any texel of its reprojected 3x3 has held the class.
 var<private> tr1_hint_streak:u32=0u;
 fn tr1_tile_hint(receiver:Receiver,slot:u32)->u32 {
-    tr1_hint_streak=0u;
+    tr1_hint_streak=0u;rtvis_motion_rays=rtvis_motion(receiver.world);
     if rtvis_held.sun.y==0u {return 0u;}
     let batch=primary_placements[slot]&0x1fffffffu;
-    if batch_skinned(primary_batch_info(batch)) || rtvis_moved(slot) || rtvis_swept(receiver.world) {return 0u;}
+    if batch_skinned(primary_batch_info(batch)) || rtvis_moved(slot) || rtvis_swept(receiver.world) || rtvis_crossed(receiver.world) {return 0u;}
     let c=rtvis_held.previous*vec4<f32>(receiver.world,1.0);
     if c.w<=0.0 {return 0u;}
     let size=vec2<i32>(textureDimensions(rtvis_history_in));

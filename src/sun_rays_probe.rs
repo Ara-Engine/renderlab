@@ -35,7 +35,7 @@ fn source(soft: &str) -> String {
         "fn fresh_estimate(receiver:Receiver, pixel:vec2<u32>, width:u32, lane:u32) -> u32 {";
     assert_eq!(source.matches(header).count(), 1);
     source = source.replacen(header, &format!("{header}\n    sunprobe_receiver=1u;"), 1);
-    let budget = "tr1_rays=tr1_zone_rays(world,primary_frame.sampling.x);";
+    let budget = "tr1_rays=max(tr1_zone_rays(world,primary_frame.sampling.x),rtvis_motion_rays);";
     source = source.replacen(budget, &format!("{budget}sunprobe_budget=tr1_rays;"), 1);
     source = source.replace(
         "rayQueryInitialize(&query,fresh_scene,",
