@@ -45,13 +45,13 @@ struct VsmFrame {
     levels:array<VsmLevel,VSM_MAX_LEVELS>,
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
-// clip: this frame's world-to-clip matrix (the receivers' own, jitter included); not read since
-// the visible-surface samples went, kept so the uniform's layout stands.
+// held.x: 1 on a held view's frame (virtual_shadow_gpu.rs `held_on`: nothing changed since the
+// last frame, TR1's history long enough), 0 otherwise; the rest is unused.
 // size: the image size in pixels (xy); z: TR1's frame number plus one on reconstructed frames
-// (the receiver jitter's sequence index), 0 otherwise.
+// (the receiver jitter's sequence index), 0 otherwise; w: TR1's frames of history.
 // above: per k in 0..=64 (two a vec4), the mask of the samples whose y rank is at least k.
 // samples: the 64 sample positions in the unit disk (two a vec4), bit s first.
-struct VdFrame {clip:mat4x4<f32>,size:vec4<f32>,above:array<vec4<u32>,33>,samples:array<vec4<f32>,32>};
+struct VdFrame {held:vec4<u32>,unused:array<vec4<u32>,3>,size:vec4<f32>,above:array<vec4<u32>,33>,samples:array<vec4<f32>,32>};
 @group(0) @binding(50) var<uniform> vd:VdFrame;
 
 fn vsm_light(world:vec3<f32>)->vec3<f32> {
@@ -883,9 +883,43 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     // 64 samples to the 0..256 count the shading programs read.
     return 4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
 }
+// ---- Held views (virtual_shadow_gpu.rs `held_on`) ----
+// Per pixel: its last answer (bits 0..8) and how many frames in a row it has been that same
+// fully lit or fully shadowed answer (bits 16..31; 0 for a partial one). On a held frame
+// (vd.held.x) nothing that sets an answer changed since the last frame, so a pixel whose own
+// and 3x3 neighbours' answers are one class settled for VD_HELD frames keeps it without a
+// walk: only penumbrae, edges and pixels whose class the receiver jitter still moves walk.
+override VD_HELD:u32=32u;
+@group(0) @binding(63) var<storage,read_write> vd_history:array<u32>;
+fn vd_settled(id:vec2<u32>,size:vec2<u32>)->u32 {
+    let own=vd_history[id.y*size.x+id.x];
+    let answer=own&0x1ffu;
+    if (own>>16u)<VD_HELD {return VSM_NONE;}
+    let lo=vec2<u32>(max(vec2<i32>(id)-vec2<i32>(1),vec2<i32>(0)));
+    let hi=min(id+vec2<u32>(1u),size-vec2<u32>(1u));
+    for(var y=lo.y;y<=hi.y;y+=1u) {
+        for(var x=lo.x;x<=hi.x;x+=1u) {
+            let h=vd_history[y*size.x+x];
+            if (h&0x1ffu)!=answer || (h>>16u)<VD_HELD {return VSM_NONE;}
+        }
+    }
+    return answer;
+}
 @compute @workgroup_size(8,4) fn vd_lookup(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>) {
     let size=textureDimensions(vsm_world);
     let id=group.xy*VSM_TRACE_TILE+local.xy;
     if any(id>=size) || textureLoad(vsm_tiles,group.xy,0).x==0u {return;}
-    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(vd_pixel(id)));
+    if vd.held.x!=0u && VD_HELD!=0u {
+        let kept=vd_settled(id,size);
+        if kept!=VSM_NONE {textureStore(vsm_output,vec2<i32>(id),vec4<u32>(kept));return;}
+    }
+    let answer=vd_pixel(id);
+    textureStore(vsm_output,vec2<i32>(id),vec4<u32>(answer));
+    let at=id.y*size.x+id.x;
+    let before=vd_history[at];
+    var streak=0u;
+    if answer==0u || answer==256u {
+        streak=select(1u,min((before>>16u)+1u,0xffffu),(before&0x1ffu)==answer && (before>>16u)!=0u);
+    }
+    vd_history[at]=(streak<<16u)|answer;
 }

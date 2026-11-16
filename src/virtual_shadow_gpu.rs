@@ -555,6 +555,8 @@ struct Resources {
     reach: Owned<wgpu::Buffer>,
     /// The Disk lookup's edge pixel counts (WGSL `vd_edge_count`).
     edges: Owned<wgpu::Buffer>,
+    /// The Disk lookup's per-pixel answer and its settled streak (WGSL `vd_history`).
+    history: Owned<wgpu::Buffer>,
     /// The hardware raster's attachment, which only sizes its raster area.
     _area: Owned<wgpu::Texture>,
     area: Owned<wgpu::TextureView>,
@@ -930,6 +932,15 @@ fn edge_log() -> Option<&'static std::path::Path> {
     static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     PATH.get_or_init(|| std::env::var_os("RENDERLAB_VD_EDGE_LOG").map(Into::into)).as_deref()
 }
+/// Held views (WGSL `vd_lookup`): on frames TR1's planner finds unchanged, a pixel whose
+/// answer and its 3x3 neighbours' have been the same fully lit or fully shadowed class for
+/// `VD_HELD` frames keeps it without a walk. `RENDERLAB_VD_HELD=0` walks every pixel.
+fn held_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VD_HELD").map_or(true, |v| v.trim() != "0"))
+}
+/// TR1 history frames before a held view may reuse answers (sunrt-7's SUN_REUSE_STREAK).
+const HELD_AFTER: u32 = 32;
 /// The Disk lookup's exact hard contact edges (WGSL `VD_HARD_EDGES`): at a hard contact shadow's
 /// outline the map's square texels are replaced by the triangles they hold, exactly, as with ray
 /// hardware. `RENDERLAB_VD_HARD_EDGES=0` keeps the texels' stairs.
@@ -1346,6 +1357,8 @@ impl VirtualState {
                     storage(56, true, S::COMPUTE),
                     // Exact hard edges: the edge pixel count.
                     storage(62, false, S::COMPUTE),
+                    // Held views: the per-pixel answer history.
+                    storage(63, false, S::COMPUTE),
                 ],
             ),
         };
@@ -1921,6 +1934,11 @@ impl VirtualState {
                 B::STORAGE | B::COPY_SRC,
             ),
             edges: buffer("Disk lookup edge pixels", 16, B::STORAGE | B::COPY_SRC),
+            history: buffer(
+                "Disk lookup answer history",
+                (u64::from(size[0]) * u64::from(size[1]) * 4).max(4),
+                B::STORAGE,
+            ),
             _area: area,
             area: area_view,
             _level: level,
@@ -1982,22 +2000,30 @@ impl Renderer {
             .view
             .reconstruction_state
             .as_ref()
-            .map(|r| (r.plan.shadow_rays, r.plan.restart_rays, r.zones, r.plan.history_frames))
+            .map(|r| {
+                let p = &r.plan;
+                (p.shadow_rays, p.restart_rays, r.zones, (p.history_frames, p.unchanged))
+            })
             .filter(|_| self.view.reconstruction_frame.is_some())
         else {
             return;
         };
+        let (history, unchanged) = history;
         let Some(state) = self.view.virtual_shadows.as_ref() else {
             return;
         };
         // U-FIXED: `VdFrame::size.w`, TR1's frames of history; the Disk lookup's height-band
         // dither waits for `VD_HBAND_AFTER` of them, so a cut's first frames show no stipple.
+        // `VdFrame::held`: nothing changed since the last frame and the history has run
+        // HELD_AFTER frames since its restart (a cut keeps the answer history of the old view).
         if state.settings.lookup == VirtualLookup::Disk
             && let Some(r) = state.resources.as_ref()
         {
+            let held = held_on() && unchanged && history >= HELD_AFTER;
+            self.queue.write_buffer(&r.disk_frame, 0, &u32::from(held).to_ne_bytes());
             self.queue
                 .write_buffer(&r.disk_frame, DISK_HISTORY_OFFSET, &(history as f32).to_ne_bytes());
-            self.uploads.shadows += 4;
+            self.uploads.shadows += 8;
         }
         if !matches!(
             state.settings.lookup,
@@ -3109,14 +3135,10 @@ impl Renderer {
             );
         }
         if s.lookup == VirtualLookup::Disk {
-            // N-VSM1 `VdFrame`: the receivers' own world-to-clip matrix, for the visible-surface
-            // samples along the sun's screen direction.
-            let mut bytes = Vec::with_capacity(DISK_FRAME_BYTES as usize);
-            let clip = camera.matrix(size.width, size.height).to_cols_array();
-            for value in
-                clip.into_iter()
-                    .chain([size.width as f32, size.height as f32, disk_jitter, 0.0])
-            {
+            // N-VSM1 `VdFrame`: `held` (zero until prepare_virtual_sampling has TR1's plan), the
+            // image size and TR1's frame.
+            let mut bytes = vec![0u8; 64];
+            for value in [size.width as f32, size.height as f32, disk_jitter, 0.0] {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
             bytes.extend_from_slice(&disk_pattern());
@@ -3325,6 +3347,7 @@ impl Renderer {
                         buffer(55, &r.state),
                         buffer(56, &r.outline),
                         buffer(62, &r.edges),
+                        buffer(63, &r.history),
                     ],
                 ),
                 queued: group(

@@ -1343,6 +1343,9 @@ pub(crate) struct Planner {
     /// counting up. The Disk lookup holds its height-band dither until history exists.
     pub history_frames: u32,
     held_frames: u32,
+    /// sunrt-7's `unchanged`: nothing that sets a receiver's sun visibility changed since the
+    /// previous frame. The Disk lookup's held view reuse reads it.
+    pub unchanged: bool,
     /// U-FIXED: the sun's turn (radians) summed since the last restart; the sun visibility
     /// history's turn step counts it.
     sun_turned: f32,
@@ -1366,6 +1369,7 @@ impl Planner {
             reset: true,
             history_frames: 0,
             held_frames: 0,
+            unchanged: false,
             sun_turned: 0.0,
             shadow_rays: 8,
             restart_rays: 0,
@@ -1678,6 +1682,7 @@ impl Planner {
         // sunrt-7: nothing that sets a receiver's sun visibility changed since the previous
         // frame: the unjittered camera, every placement and pose, the sun, and no restart zone.
         let unchanged = sampling_still && i.scene_static && !zoned && !posed;
+        self.unchanged = unchanged;
         let held = self.held_record(
             (i.moving_bounds, i.directional_disk_angle),
             (previous_matrix, matrix),
