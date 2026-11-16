@@ -1707,6 +1707,7 @@ fn gi_reach(slot:u32, c:GiCell) -> bool {
         // The cube, grown by a quarter edge for the probe's start points.
         if all(c.centre+vec3<f32>(0.75*c.edge)>=lo) && all(c.centre-vec3<f32>(0.75*c.edge)<=hi) {
             for(var w=0u;w<GI_MAX_WORDS;w+=1u) { gi_table[cold+GI_C_KNOWN+w]=0u; }
+            atomicAdd(&gi_work[GI_W_INVALIDATED_CUBE],1u);
             return true;
         }
         // An orphan has no rays; only a moved cube can give it a query point.
@@ -1733,6 +1734,7 @@ const GI_W_MOVED_BOXES:u32=252u;
 // the cells a pixel read this frame and last frame (the probe's seen stamps, before the scan).
 const GI_W_INVALIDATED_READ:u32=241u;
 const GI_W_RESHADED:u32=243u;
+const GI_W_INVALIDATED_CUBE:u32=246u;
 const GI_W_RESHADED_READ:u32=244u;
 fn gi_count_read(at:u32, cold:u32) {
     let seen=gi_table[cold+GI_C_SEEN];

@@ -820,6 +820,8 @@ pub struct IndirectCounters {
     /// Cells movers re-traced, read by a pixel this frame / last frame; cells movers reshaded
     /// (a light ray crossed), all of them / read this frame / last frame.
     pub invalidated_read: [u32; 2],
+    /// Of the cells movers re-traced, those whose cube a moved box overlaps (fully re-probed).
+    pub invalidated_cube: u32,
     pub reshaded: [u32; 3],
 }
 
@@ -2796,6 +2798,7 @@ impl Renderer {
             evicted_secondary: w[255],
             moved_boxes: w[252],
             invalidated_read: [w[241], w[242]],
+            invalidated_cube: w[246],
             reshaded: [w[243], w[244], w[245]],
         }))
     }
