@@ -625,7 +625,7 @@ pub(crate) fn trace_source_held(soft_kernels: &str) -> Result<String, Error> {
         source.find("// tile hint begin\n"),
         source.find("// tile hint end\n"),
     ) {
-        let held = if sun_tile_list() {
+        let held = if sun_tile_list() && !PENUMBRA_LISTING {
             SUN_TILE_HELD.to_owned()
         } else {
             SUN_TILE_HELD.replacen("const TR1_TILE_LIST:bool=true;", "const TR1_TILE_LIST:bool=false;", 1)
@@ -1221,7 +1221,8 @@ impl PrimaryState {
                 // The penumbra pass follows the retained two-pass repair only.
                 penumbra: (deferred && !modern && PENUMBRA_LISTING)
                     .then(|| self.penumbra_pipelines(device, ledger, &soft)),
-                sun_list: (deferred && !modern && sun_tile_probes() != 0 && sun_tile_list())
+                // Its arguments pass through P-RTS's list header, idle without P-RTS listing.
+                sun_list: (deferred && !modern && !PENUMBRA_LISTING && sun_tile_probes() != 0 && sun_tile_list())
                     .then(|| self.held_entry(device, ledger, &soft, "primary_sun_continue", &eight)),
             }
         });
