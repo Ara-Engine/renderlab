@@ -457,6 +457,18 @@ impl Engine {
         vertices: &[Vertex],
         indices: &[u32],
     ) -> Result<MeshId, Error> {
+        if crate::renderer::change_log::enabled() {
+            crate::renderer::change_log::report(
+                self.renderer.stats().frames + 1,
+                "mesh_created",
+                &[],
+                &[
+                    ("vertices", vertices.len().to_string()),
+                    ("indices", indices.len().to_string()),
+                    ("meshes_live", self.state.meshes.len().to_string()),
+                ],
+            );
+        }
         if self.path == RenderPath::NonRt {
             let positions: Vec<[f32; 3]> = vertices.iter().map(|v| v.position).collect();
             self.renderer

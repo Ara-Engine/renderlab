@@ -116,6 +116,18 @@ fn transparency_word_packs_opacity_and_ior() {
 }
 
 #[test]
+fn sun_map_volume_holds_receivers_and_not_far_casters() {
+    let receivers = [(Vec3::new(-1.0, 2.0, 0.0), Vec3::new(1.0, 3.0, 2.0))];
+    let travel = Vec3::new(0.3, -1.0, 0.2).normalize();
+    let tall = (Vec3::new(-0.5, 0.0, 0.5), Vec3::new(0.5, 30.0, 1.0));
+    let fit = shadow_fit(travel, &receivers, &[tall]).unwrap();
+    assert!(super::in_sun_map(fit.matrix, receivers[0]));
+    // A caster over the receivers, toward the sun, is inside; one far to the side is not.
+    assert!(super::in_sun_map(fit.matrix, tall));
+    assert!(!super::in_sun_map(fit.matrix, (Vec3::new(50.0, 0.0, 50.0), Vec3::new(51.0, 2.0, 51.0))));
+}
+
+#[test]
 fn shadow_fit_maps_receivers_into_the_map() {
     let receivers = [(Vec3::new(-1.0, 2.0, 0.0), Vec3::new(1.0, 3.0, 2.0))];
     let travel = Vec3::new(0.3, 0.2, -1.0).normalize();

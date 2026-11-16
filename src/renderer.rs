@@ -3,6 +3,9 @@
 pub(crate) mod atmosphere_gpu;
 #[path = "environment_gpu.rs"]
 mod environment_gpu;
+// Measurement only: RENDERLAB_CHANGE_LOG names what each frame's change tests saw change.
+#[path = "change_log.rs"]
+pub(crate) mod change_log;
 #[path = "fog_cull.rs"]
 pub(crate) mod fog_cull;
 #[path = "light_cluster_gpu.rs"]
@@ -629,6 +632,9 @@ pub struct Renderer {
     local_maps: light_cluster_gpu::LocalMaps,
     /// Frames that uploaded placements, geometry or poses, counted for views' histories.
     scene_edits: u64,
+    /// Frames that moved a placement or a skinned pose (any view's): the still fog's kept volume
+    /// (`atmosphere_gpu`) needs none since its accumulation began.
+    scene_motion: u64,
     explicit_ticks: bool,
     tick_work: bool,
     device: PipelineDevice,
@@ -1167,6 +1173,7 @@ impl Renderer {
             gi_tick: 0,
             local_maps: light_cluster_gpu::LocalMaps::new(&device, &ledger),
             scene_edits: 0,
+            scene_motion: 0,
             explicit_ticks: false,
             tick_work: true,
             device,
@@ -3216,6 +3223,7 @@ impl Renderer {
             .hardware_shadows
             .as_ref()
             .map_or(0, |h| h.scene_generation());
+        let gi_start = Instant::now();
         let result = self.prepare_gi(
             draws,
             camera,
@@ -3227,10 +3235,24 @@ impl Renderer {
             return Err(self.fail(error.to_string()));
         }
         result?;
+        let gi_ms = gi_start.elapsed().as_secs_f64() * 1000.;
+        let post_start = Instant::now();
         let scopes = OperationScopes::new(&self.device);
         self.prepare_post(camera, traced)?;
         if let Some(error) = scopes.finish() {
             return Err(self.fail(error.to_string()));
+        }
+        if change_log::enabled() {
+            change_log::report(
+                self.frames + 1,
+                "late_prepare",
+                &[],
+                &[
+                    ("prepare_gi_ms", format!("{gi_ms:.3}")),
+                    ("prepare_post_ms", format!("{:.3}", post_start.elapsed().as_secs_f64() * 1000.)),
+                    ("uploads", format!("\"{:?}\"", self.uploads)),
+                ],
+            );
         }
         Ok(())
     }
@@ -3256,12 +3278,16 @@ impl Renderer {
         mut cpu: CpuFrame,
     ) -> Result<Option<FrameReport>, Error> {
         // Both callers have admitted this slot. No camera/mode/lighting staging on busy.
-        // Frames that move placements, geometry or poses: every view's fog history restarts
-        // at its next frame (`prepare_atmosphere`).
+        // Frames that change geometry or the placement set: every view's fog history restarts
+        // at its next frame (`prepare_atmosphere`). Moved placements and poses keep it
+        // (`atmosphere_gpu::fog_history_keep`).
+        let motion = uploads.models > 0 || uploads.skinning > 0;
+        if motion {
+            self.scene_motion += 1;
+        }
         if uploads.geometry > 0
-            || uploads.models > 0
             || uploads.instances > 0
-            || uploads.skinning > 0
+            || (motion && !atmosphere_gpu::fog_history_keep())
         {
             self.scene_edits += 1;
         }
@@ -3576,6 +3602,23 @@ impl Renderer {
         if let Some(frame) = &local_lights {
             mark(&mut encoder, "light_clusters");
             self.encode_light_clusters(&mut encoder, frame, draws);
+        }
+        if change_log::enabled() {
+            change_log::report(
+                self.frames + 1,
+                "frame",
+                &[],
+                &[
+                    ("tlas_build", hardware_build.to_string()),
+                    ("tick_work", self.tick_work.to_string()),
+                    ("draws", draws.len().to_string()),
+                    ("transparent_draws", transparent.len().to_string()),
+                    (
+                        "transparent_instances",
+                        transparent.iter().map(|d| d.instances.len()).sum::<usize>().to_string(),
+                    ),
+                ],
+            );
         }
         if hardware_build {
             mark(&mut encoder, "tlas");

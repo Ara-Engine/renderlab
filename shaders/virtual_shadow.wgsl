@@ -59,7 +59,7 @@ struct VsmFrame {
     // x: primitive bits of the id map, y: march samples per direction, z: bias in ulps of
     // height range, w: bit 0 to walk the receiver's vertex 1-ring (else its own triangle
     // only), bit 1 to peel under the top layer's own placement too (N8b `peel_own`), bits 2-3
-    // the first-step block mode (N8c `first_block`).
+    // the first-step block mode (N8c `first_block`), bit 10 the peel gap (vsm_write).
     misc:vec4<u32>,
     levels:array<VsmLevel,VSM_MAX_LEVELS>,
     // Eye-relative light-space xy rectangles (min.xy, max.xy) of moved casters, and (N8f)
@@ -351,6 +351,8 @@ struct VsmPass {level:u32,pad0:u32,pad1:u32,pad2:u32};
 override VSM_SW_EXTENT:f32=32.0;
 // The peel-layer variant of the raster entry points.
 override VSM_PEEL_PASS:bool=false;
+// The peel gap in texels of the level (misc.w bit 10): virtual_shadow_disk.wgsl VD_THICK.
+const VSM_PEEL_GAP:f32=4.0;
 
 // World-space simplification error of group g under placement's conservative affine
 // scale (visibility_buffer_cull.wgsl's group_error without the projection).
@@ -474,7 +476,13 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     if VSM_PEEL_PASS {
         // Only one triangle of a watertight surface covers a texel centre, so this is the
         // next surface down.
-        if u32(atomicLoad(&vsm_top_map[i])&0xfffffffflu)==id {return;}
+        let top=atomicLoad(&vsm_top_map[i]);
+        if u32(top&0xfffffffflu)==id {return;}
+        // The peel gap (misc.w bit 10, the Disk lookup): its columns are solid VSM_PEEL_GAP
+        // texels under every top (virtual_shadow_disk.wgsl VD_THICK), so a surface within that
+        // adds nothing there, and the peel keeps the next one down: a tarp under a thin closed
+        // pole, which the pole's own underside hid.
+        if (vsm.misc.w&0x400u)!=0u && height>bitcast<f32>(u32(top>>32u))-VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z {return;}
         atomicMax(&vsm_peel_map[i],value);
     } else {
         atomicMax(&vsm_top_map[i],value);
