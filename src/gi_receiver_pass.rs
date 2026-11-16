@@ -111,8 +111,9 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
 /// (gi_sample), 7 cell finds, 8 slot reads past a find's first record, 11 level blends (the
 /// second level of a switch), 12 refinements (a split cell's finer level), 13 coarser fills,
 /// 14 second-bin lookups, 15 fallback levels sampled. The picture is unchanged.
-/// Receiver reuse: on a frame where the lighting cache runs nothing (`GiState::idle`, a still
-/// view), a pixel whose hit (placement and triangle) is last frame's keeps its prepared record:
+/// Receiver reuse: on a frame where the camera is still (TR1's planner) and the lighting cache
+/// runs nothing (`GiState::idle`), a pixel whose hit (placement and triangle) is last frame's
+/// keeps its prepared record:
 /// the same cells of the same table, read a jitter step away. Every other pixel, and every pixel
 /// on frames the cache runs, looks up as before. The keys (one word a pixel, a hash of the hit
 /// record, 0 for misses) live in the pass's own group 2, so reuse needs the lean layout.
@@ -323,7 +324,14 @@ impl Renderer {
         let region = state.region;
         let moved = target.region != region;
         if let Some(keys) = &target.keys {
-            let reuse = built && !moved && target.lean[shading as usize] && target.computed && self.gi.idle();
+            // Still: TR1's planner saw this frame's camera equal the last one's (no turn, no
+            // rigid motion); the cache idles during smooth camera motion too.
+            let still = self
+                .view
+                .reconstruction_state
+                .as_ref()
+                .is_some_and(|s| s.plan.held_frames() > 0);
+            let reuse = built && !moved && still && target.lean[shading as usize] && target.computed && self.gi.idle();
             self.queue.write_buffer(&keys.value, 0, &u32::from(reuse).to_ne_bytes());
         }
         let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
