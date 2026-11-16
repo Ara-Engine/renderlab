@@ -568,6 +568,8 @@ struct Resources {
     reach: Owned<wgpu::Buffer>,
     /// The Disk lookup's edge pixel counts (WGSL `vd_edge_count`).
     edges: Owned<wgpu::Buffer>,
+    /// The caster census (WGSL `vsm_census`, `RENDERLAB_VSM_CENSUS`); one word when off.
+    census: Owned<wgpu::Buffer>,
     /// The Disk lookup's per-pixel answer history, two halves ping-ponged by frame (WGSL
     /// `vd_history`), and the previous frame's world-to-clip matrix and half.
     history: Owned<wgpu::Buffer>,
@@ -659,6 +661,8 @@ pub(super) struct VirtualState {
     reach: std::sync::Mutex<ReadbackRing<(glam::DVec3, u32)>>,
     /// Exact hard edges: the edge counts' readback (`RENDERLAB_VD_EDGE_LOG`).
     edge_counts: std::sync::Mutex<ReadbackRing<()>>,
+    /// The caster census's readback (`RENDERLAB_VSM_CENSUS`).
+    census: Option<std::sync::Mutex<ReadbackRing<()>>>,
     /// The nearest receiver's distance in the current view epoch and the eye it was measured
     /// from (None after a cut until its own mark pass is read back).
     seen: Option<(f64, glam::DVec3)>,
@@ -853,6 +857,27 @@ pub(super) fn shader_source() -> String {
             .unwrap_or(include_str!("../shaders/virtual_shadow.wgsl")),
         super::primary_ray_gpu::temporal_reconstruction::zones_source("vsm.zones")
     )
+    .replacen(
+        "override VSM_CENSUS:bool=false;",
+        &format!("override VSM_CENSUS:bool={};", census_log().is_some()),
+        1,
+    )
+    .replacen(
+        "override VSM_HW_THIN:bool=true;",
+        &format!(
+            "override VSM_HW_THIN:bool={};",
+            std::env::var("RENDERLAB_VSM_HW_THIN").map_or(true, |v| v.trim() != "0")
+        ),
+        1,
+    )
+}
+/// The caster census's words (WGSL `vsm_census`): two halves of MAX_LEVELS x 131072 bits.
+const CENSUS_BYTES: u64 = 2 * MAX_LEVELS as u64 * 131072 / 8;
+/// `RENDERLAB_VSM_CENSUS=<file>`: the caster census (WGSL `vsm_census`) goes to this file,
+/// rewritten each frame: per level, placements sent to the raster and those that reached it.
+fn census_log() -> Option<&'static std::path::Path> {
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os("RENDERLAB_VSM_CENSUS").map(Into::into)).as_deref()
 }
 
 /// The walk-record build module (N8g): the shared draw-slot count, then
@@ -1153,6 +1178,9 @@ impl VirtualState {
     pub(super) fn submitted(&mut self) {
         self.reach.get_mut().unwrap().submitted();
         self.edge_counts.get_mut().unwrap().submitted();
+        if let Some(census) = &mut self.census {
+            census.get_mut().unwrap().submitted();
+        }
     }
     /// A camera cut: the nearest receiver seen so far belonged to the old view.
     pub(super) fn cut(&mut self) {
@@ -1225,6 +1253,7 @@ impl VirtualState {
                     storage(26, true, S::COMPUTE),
                     storage(27, false, S::COMPUTE),
                     storage(29, false, S::COMPUTE),
+                    storage(64, false, S::COMPUTE),
                 ],
             ),
             raster: group(
@@ -1238,6 +1267,7 @@ impl VirtualState {
                     storage(33, true, reads),
                     storage(54, true, S::COMPUTE),
                     storage(55, true, writes),
+                    storage(64, false, writes),
                 ],
             ),
             mip: group(
@@ -1651,6 +1681,9 @@ impl VirtualState {
                 16,
                 3,
             )),
+            census: census_log().map(|_| {
+                std::sync::Mutex::new(ReadbackRing::new(device, "Shadow caster census readback", CENSUS_BYTES, 3))
+            }),
             seen: None,
             eye: glam::DVec3::ZERO,
             epoch: 0,
@@ -1964,6 +1997,11 @@ impl VirtualState {
                 B::STORAGE | B::COPY_SRC,
             ),
             edges: buffer("Disk lookup edge pixels", 16, B::STORAGE | B::COPY_SRC),
+            census: buffer(
+                "Shadow caster census",
+                if census_log().is_some() { CENSUS_BYTES } else { 4 },
+                B::STORAGE | B::COPY_SRC,
+            ),
             history: buffer(
                 "Disk lookup answer history",
                 (u64::from(size[0]) * u64::from(size[1]) * 8).max(8),
@@ -2238,6 +2276,25 @@ impl Renderer {
             .map_or(0.0, |frame| (frame % 4096 + 1) as f32);
         let state = self.view.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
+        // Measurement: the caster census, per level: placements sent to the raster, those that
+        // covered a texel, and the indices of those sent but never covering one.
+        if let (Some(path), Some(census)) = (census_log(), &mut state.census) {
+            if let Some(((), words)) = census.get_mut().unwrap().collect().pop() {
+                let bits = |half: usize, level: usize| -> Vec<u32> {
+                    let base = (half * MAX_LEVELS + level) * 131072 / 8;
+                    (0..131072u32)
+                        .filter(|&p| words[base + p as usize / 8] & (1 << (p % 8)) != 0)
+                        .collect()
+                };
+                let mut text = String::new();
+                for level in 0..MAX_LEVELS {
+                    let (sent, covered) = (bits(0, level), bits(1, level));
+                    let lost: Vec<_> = sent.iter().filter(|p| covered.binary_search(p).is_err()).collect();
+                    text += &format!("level {level} sent {} covered {} lost {} {:?}\n", sent.len(), covered.len(), lost.len(), lost);
+                }
+                let _ = std::fs::write(path, text);
+            }
+        }
         // Measurement: the Disk lookup's counters (WGSL `vd_counts`), a line a frame.
         if let Some(path) = edge_log() {
             for ((), words) in state.edge_counts.get_mut().unwrap().collect() {
@@ -3292,6 +3349,7 @@ impl Renderer {
                         buffer(26, &casters.instances.groups.value),
                         buffer(27, &casters.work),
                         buffer(29, &r.render),
+                        buffer(64, &r.census),
                     ],
                 ),
                 raster: group(
@@ -3306,6 +3364,7 @@ impl Renderer {
                         buffer(33, &casters.work),
                         buffer(54, &r.pool),
                         buffer(55, &r.state),
+                        buffer(64, &r.census),
                     ],
                 ),
                 mip: group(
@@ -3646,6 +3705,10 @@ impl Renderer {
             }
         }
         drop(pass);
+        // Measurement (`RENDERLAB_VSM_CENSUS`): the census so far (never cleared).
+        if let Some(census) = &state.census {
+            census.lock().unwrap().record(encoder, &r.census, 0, ());
+        }
         // Measurement (`RENDERLAB_VD_EDGE_LOG=<file>`): the edge pixels, a line a frame.
         if disk && edge_log().is_some() {
             state.edge_counts.lock().unwrap().record(encoder, &r.edges, 0, ());

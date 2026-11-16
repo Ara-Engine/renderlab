@@ -353,6 +353,20 @@ override VSM_SW_EXTENT:f32=32.0;
 override VSM_PEEL_PASS:bool=false;
 // The peel gap in texels of the level (misc.w bit 10): virtual_shadow_disk.wgsl VD_THICK.
 const VSM_PEEL_GAP:f32=4.0;
+// The hardware raster covers thin triangles conservatively (vs_vsm_cluster); false: centre
+// sampling only (measurement, `RENDERLAB_VSM_HW_THIN=0`).
+override VSM_HW_THIN:bool=true;
+// Measurement (`RENDERLAB_VSM_CENSUS=<file>`): per level, one bit per placement the cull sent
+// to the raster (first half) and one per placement that covered a texel of a rasterized page
+// (second half), so casters lost before the map show as the difference.
+override VSM_CENSUS:bool=false;
+const VSM_CENSUS_PLACEMENTS:u32=131072u;
+@group(0) @binding(64) var<storage,read_write> vsm_census:array<atomic<u32>>;
+fn vsm_census_mark(half:u32,level:u32,placement:u32) {
+    if !VSM_CENSUS || placement>=VSM_CENSUS_PLACEMENTS {return;}
+    let bit=(half*VSM_MAX_LEVELS+level)*VSM_CENSUS_PLACEMENTS+placement;
+    atomicOr(&vsm_census[bit>>5u],1u<<(bit&31u));
+}
 
 // World-space simplification error of group g under placement's conservative affine
 // scale (visibility_buffer_cull.wgsl's group_error without the projection).
@@ -417,6 +431,7 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
             let slot=atomicAdd(&vsm_work.args[level].sw_count,1u);
             vsm_work.lists[2u*level*n+slot]=index;
         }
+        vsm_census_mark(0u,level,c.placement);
     }
 }
 @compute @workgroup_size(8) fn vsm_finish(@builtin(local_invocation_index) level:u32) {
@@ -467,6 +482,7 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     let page=t/VSM_PAGE;
     let v=vsm_vpage(level,page);
     if vsm_render[v]==0u {return;}
+    vsm_census_mark(1u,level,(id>>vsm.misc.x)-1u);
     let side=pages*VSM_PAGE;
     var i=(level*side+t.y)*side+t.x;
     if vsm_sparse() {
@@ -591,7 +607,7 @@ struct VsmHw {
     let l01=length(e1);let l12=length(s2.xy-s1.xy);let l20=length(e2);
     let longest=max(max(l01,l12),l20);
     if longest<=0.0 {return out;}
-    let thin=abs(area)<longest;
+    let thin=VSM_HW_THIN && abs(area)<longest;
     var q:vec2<f32>;
     if !thin {
         if k>=3u {return out;}
