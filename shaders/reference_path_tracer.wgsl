@@ -225,12 +225,9 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Hit {
     return Hit(true,p,n,ng,inst.offsets.z,uv,color,vec2<u32>(h.instance_custom_data+1u,h.primitive_index+1u));
 }
 fn occluded(origin:vec3<f32>, direction:vec3<f32>)->bool {
-    var query:ray_query;
-    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK,0.0,1e30,origin,direction));
-    while rayQueryProceed(&query) {}
-    return rayQueryGetCommittedIntersection(&query).kind!=0u;
+    return occluded_within(origin,direction,1e30);
 }
-// Visibility toward a local light at `tmax`.
+// Whether anything that casts shadows lies along the ray before `tmax` (a local light's distance).
 fn occluded_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32)->bool {
     var query:ray_query;
     rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK,0.0,tmax,origin,direction));
