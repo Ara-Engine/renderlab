@@ -550,13 +550,10 @@ fn vd_corner(placement:u32,batch:u32,index:u32)->vec3<f32> {
     let v=primary_vertices[batch].data[primary_indices[batch].data[index]*3u].xyz;
     return vsm_light((models[placement]*vec4<f32>(v,1.0)).xyz)-vd_px.p;
 }
-// The disk samples whose ray from the receiver meets the triangle of map word `id`: inside the
-// cone of its three corners, one plane through the origin per edge (vd_plane).
-fn vd_triangle_mask(id:u32)->vec2<u32> {
-    let bits=vsm.misc.x;
-    let placement=(id>>bits)-1u;
-    let batch=primary_placements[placement]&0x1fffffffu;
-    let base=(id&((1u<<bits)-1u))*3u;
+// The disk samples whose ray from the receiver meets triangle `primitive` of `placement`: inside
+// the cone of its three corners, one plane through the origin per edge (vd_plane).
+fn vd_triangle_mask(placement:u32,batch:u32,primitive:u32)->vec2<u32> {
+    let base=primitive*3u;
     let a=vd_corner(placement,batch,base);
     let b=vd_corner(placement,batch,base+1u);
     let c=vd_corner(placement,batch,base+2u);
@@ -598,6 +595,27 @@ fn vd_edge_test(margin:f32) {
     vd_edge_cell=at;
     vd_ray_reach=top+2.0*texel;
 }
+// A triangle's neighbour across edge `e` (the index buffer's adjacency suffix,
+// receiver_adjacency.rs; virtual_shadow.wgsl vsm_neighbour), or VSM_NONE.
+fn vd_neighbour(batch:u32,primitive:u32,e:u32)->u32 {
+    let info=primary_placements[arrayLength(&primary_placements)-1u-batch];
+    if (info&0x40000000u)==0u {return VSM_NONE;}
+    return primary_indices[batch].data[((info&0x3fffffffu)+primitive)*3u+e];
+}
+// A map word's triangle and its edge neighbours: an outline's thin triangles may hold no texel
+// centre, but one of their neighbours does.
+fn vd_word_mask(id:u32)->vec2<u32> {
+    let bits=vsm.misc.x;
+    let placement=(id>>bits)-1u;
+    let batch=primary_placements[placement]&0x1fffffffu;
+    let primitive=id&((1u<<bits)-1u);
+    var m=vd_triangle_mask(placement,batch,primitive);
+    for(var e=0u;e<3u;e+=1u) {
+        let n=vd_neighbour(batch,primitive,e);
+        if n!=VSM_NONE {m|=vd_triangle_mask(placement,batch,n);}
+    }
+    return m;
+}
 // The edge pixel's 2x2 occluders: their triangles' exact masks (a run of one triangle once).
 fn vd_edge_triangles(margin:f32)->vec2<u32> {
     let level=vd_px.level;
@@ -612,7 +630,7 @@ fn vd_edge_triangles(margin:f32)->vec2<u32> {
         let height=vsm_height(word);
         let c=origin+(vec2<f32>(cell)+vec2<f32>(0.5))*texel;
         if !vd_above(vec3<f32>(c,height),margin) || height-vd_px.p.z>=vd_ray_reach {continue;}
-        m|=vd_triangle_mask(word.x);
+        m|=vd_word_mask(word.x);
         before=last;last=word.x;
     }
     return m;
