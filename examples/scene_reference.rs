@@ -3,7 +3,7 @@
 //! DIR/reference.png (the engine's exposure and the AcesFit + sRGB display curve), the linear
 //! mean as DIR/reference.pfm, split halves and DIR/reference.json. Plain unidirectional path
 //! tracing (renderlab::reference): sun, sky (uniform or a prepared map) and emissive surfaces.
-//! Not yet traced, and listed in reference.json: local lights, the procedural atmosphere sky
+//! Local lights are traced as points. Not yet traced, and listed in reference.json: the procedural atmosphere sky
 //! (a uniform stand-in is refused), fog and see-through materials (skipped by the dump).
 use renderlab::{Vec3, asset, engine::headless_adapter, reference};
 use serde_json::{Value, json};
@@ -85,8 +85,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
         other => return Err(format!("sky {other:?} is not traceable yet (the procedural atmosphere needs its cube read back)").into()),
     }
-    if spec["lights"].as_array().is_some_and(|l| !l.is_empty()) {
-        gaps.push(format!("{} local lights not traced", spec["lights"].as_array().unwrap().len()));
+    for l in spec["lights"].as_array().into_iter().flatten() {
+        let f = |k: &str| l[k].as_f64().unwrap_or(0.0) as f32;
+        match l["kind"].as_str() {
+            Some("point") | Some("spot") => scene.lights.push(reference::LocalLight {
+                position: Vec3::from_array(v3(&l["position"])),
+                candela: v3(&l["candela"]),
+                range: f("range"),
+                spot: (l["kind"] == "spot").then(|| (Vec3::from_array(v3(&l["travel"])), f("inner").cos(), f("outer").cos())),
+            }),
+            _ => gaps.push("a directional light other than the sun".into()),
+        }
+        if f("radius") > 0.0 {
+            gaps.push(format!("light source radius {} m traced as a point", f("radius")));
+        }
     }
     if spec["skipped_instances"].as_u64().unwrap_or(0) > 0 {
         gaps.push(format!("{} see-through or unrecorded instances skipped", spec["skipped_instances"]));

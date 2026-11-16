@@ -24,7 +24,7 @@ struct Frame {
     size:vec4<u32>,
     // x max path depth (Mitsuba semantics: 1 = emitters only, 2 = direct), y seed, z smith (0 correlated, 1 separable).
     options:vec4<u32>,
-    measurement:vec4<u32>, // x visibility rays per primary; y precise 1-cos(sun radius), bitcast f32
+    measurement:vec4<u32>, // x visibility rays per primary; y precise 1-cos(sun radius), bitcast f32; z local lights
 };
 struct Vertex {a:vec4<f32>, b:vec4<f32>, tangent:vec4<f32>, color:vec4<f32>};
 struct Instance {offsets:vec4<u32>, n0:vec4<f32>, n1:vec4<f32>, n2:vec4<f32>};  // vertex, index, material
@@ -43,6 +43,9 @@ struct Material {base:vec4<f32>, emission:vec4<f32>, params:vec4<f32>, base_map:
 @group(0) @binding(9) var<storage,read> environment_texels:array<vec4<f32>>;
 struct Geometry {world:vec4<f32>, normal:vec4<f32>, ids:vec4<u32>, direct_even:vec4<f32>, direct_odd:vec4<f32>};
 @group(0) @binding(10) var<storage,read_write> geometry:array<Geometry>;
+// Local lights (src/reference.rs LocalLight): position+range, candela+kind, travel+cos outer, cos inner.
+struct LocalLight {position_range:vec4<f32>, candela_kind:vec4<f32>, travel_outer:vec4<f32>, inner:vec4<f32>};
+@group(0) @binding(11) var<storage,read> local_lights:array<LocalLight>;
 
 fn address(i:i32, size:i32, wrap:u32)->i32 {
     if wrap==0u {return clamp(i,0,size-1);}
@@ -224,6 +227,13 @@ fn trace(origin:vec3<f32>, direction:vec3<f32>)->Hit {
 fn occluded(origin:vec3<f32>, direction:vec3<f32>)->bool {
     var query:ray_query;
     rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK,0.0,1e30,origin,direction));
+    while rayQueryProceed(&query) {}
+    return rayQueryGetCommittedIntersection(&query).kind!=0u;
+}
+// Visibility toward a local light at `tmax`.
+fn occluded_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32)->bool {
+    var query:ray_query;
+    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK,0.0,tmax,origin,direction));
     while rayQueryProceed(&query) {}
     return rayQueryGetCommittedIntersection(&query).kind!=0u;
 }
@@ -409,6 +419,30 @@ fn radiance(pixel:vec2<u32>)->vec3<f32> {
                     if depth==1u {sample_direct+=direct;}
                 }
             }
+        }
+        // Next-event estimation: local lights, each a point (the engine's attenuation).
+        for (var i=0u; i<frame.measurement.z; i+=1u) {
+            let light=local_lights[i];
+            let delta=light.position_range.xyz-hit.p;
+            let distance=length(delta);
+            let wi=delta/max(distance,1e-30);
+            let cos_l=dot(hit.n,wi);
+            if cos_l<=0.0 || dot(hit.ng,wi)<=0.0 {continue;}
+            let inverse=1.0/max(distance,0.01);
+            var attenuation=inverse*inverse;
+            if light.position_range.w>0.0 {
+                let ratio=min(distance/light.position_range.w,1.0);
+                let window=max(1.0-ratio*ratio*ratio*ratio,0.0);
+                attenuation*=window*window;
+            }
+            if light.candela_kind.w>1.5 {
+                let cone=clamp((dot(-wi,light.travel_outer.xyz)-light.travel_outer.w)/max(light.inner.x-light.travel_outer.w,1e-4),0.0,1.0);
+                attenuation*=cone*cone;
+            }
+            if attenuation<=0.0 || occluded_within(start,wi,distance*0.999) {continue;}
+            let direct=throughput*bsdf(m,l,hit.n,v,wi)*cos_l*light.candela_kind.rgb*attenuation;
+            total+=direct;
+            if depth==1u {sample_direct+=direct;}
         }
         // Next-event estimation: constant sky, cosine-weighted about the shading normal.
         if frame.sky.w>0.0 || luminance(frame.sky.rgb)>0.0 {
