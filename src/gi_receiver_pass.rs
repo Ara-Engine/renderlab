@@ -84,6 +84,9 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     if std::env::var("RENDERLAB_GI_RX_PROBE").as_deref() == Ok("nolookup") {
         kernel = kernel.replacen("gi_prepare(input);", "", 1);
     }
+    if reuse() {
+        kernel = with_reuse(&kernel);
+    }
     composed.source.push_str(&kernel);
     // Measurement only (`RENDERLAB_GI_RX_PROBE=firstslot`): every find reads its start record
     // alone, as a find given its slot would; keys past it read as absent (a wrong picture).
@@ -108,6 +111,25 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
 /// (gi_sample), 7 cell finds, 8 slot reads past a find's first record, 11 level blends (the
 /// second level of a switch), 12 refinements (a split cell's finer level), 13 coarser fills,
 /// 14 second-bin lookups, 15 fallback levels sampled. The picture is unchanged.
+/// Receiver reuse: on a frame where the lighting cache runs nothing (`GiState::idle`, a still
+/// view), a pixel whose hit (placement and triangle) is last frame's keeps its prepared record:
+/// the same cells of the same table, read a jitter step away. Every other pixel, and every pixel
+/// on frames the cache runs, looks up as before. The keys (one word a pixel, a hash of the hit
+/// record, 0 for misses) live in the pass's own group 2, so reuse needs the lean layout.
+/// `RENDERLAB_GI_RX_REUSE=0` looks up every pixel every frame.
+fn reuse() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| lean() && std::env::var("RENDERLAB_GI_RX_REUSE").map_or(true, |v| v != "0"))
+}
+/// Bytes of the keys buffer ahead of its per-pixel words: the frame's reuse word and padding.
+const KEYS_HEAD: u64 = 16;
+fn with_reuse(kernel: &str) -> String {
+    const MISS: &str = "    if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x==0u {return;}\n    let record=textureLoad(primary_hit,vec2<i32>(id),0);\n    if record.x==0u {return;}\n";
+    assert_eq!(kernel.matches(MISS).count(), 1, "GI receiver reuse seam");
+    let keyed = "    let at_key=id.y*size.x+id.x;\n    var record=vec4<u32>(0u);\n    if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x!=0u {record=textureLoad(primary_hit,vec2<i32>(id),0);}\n    let key=select(0u,((record.x*0x9e3779b1u)^record.y)|1u,record.x!=0u);\n    if gi_rx_keys.reuse!=0u && gi_rx_keys.keys[at_key]==key {return;}\n    gi_rx_keys.keys[at_key]=key;\n    if record.x==0u {return;}\n";
+    let declaration = "struct GiRxKeys { reuse:u32, pad0:u32, pad1:u32, pad2:u32, keys:array<u32> };\n@group(2) @binding(0) var<storage,read_write> gi_rx_keys:GiRxKeys;\n";
+    format!("{declaration}{}", kernel.replacen(MISS, keyed, 1))
+}
 fn count() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_RX_COUNT").is_ok_and(|v| v == "1" || v == "2"))
@@ -219,9 +241,17 @@ pub(super) struct Targets {
     args: Buffer,
     pipelines: [Option<Owned<wgpu::ComputePipeline>>; 2],
     source_hash: [[u8; 32]; 2],
-    /// Whether each pipeline is on the lean layout (`lean`), and the empty group 2 it binds.
+    /// Whether each pipeline is on the lean layout (`lean`), and the group 2 it binds there:
+    /// empty, or the reuse keys (`reuse`).
     lean: [bool; 2],
     empty: Option<Owned<wgpu::BindGroup>>,
+    /// Reuse's keys (`reuse`), and whether a lookup has written them and the records.
+    keys: Option<Buffer>,
+    computed: bool,
+    /// The shading region the keys were written over; pixels outside it keep stale keys, so a
+    /// new region clears them (`clear_keys`, encoded with the pass) and does not reuse.
+    region: [u32; 4],
+    clear_keys: bool,
 }
 /// The receiver kernel samples no material, so it is built on the shading layout with an empty
 /// group 2 when it validates there, and binds the empty group: every dispatch merges each
@@ -256,6 +286,17 @@ impl Renderer {
             source_hash: [[0; 32]; 2],
             lean: [false; 2],
             empty: None,
+            keys: reuse().then(|| {
+                Buffer::new(
+                    self,
+                    "GI receiver reuse keys",
+                    KEYS_HEAD + u64::from(size.width) * u64::from(size.height) * 4,
+                    wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                )
+            }),
+            computed: false,
+            region: [0; 4],
+            clear_keys: false,
         }
     }
     pub(crate) fn ensure_gi_receiver_pass(&mut self, shading: Shading) -> Result<(), Error> {
@@ -277,11 +318,22 @@ impl Renderer {
                 .flat_map(u32::to_ne_bytes)
                 .collect::<Vec<_>>(),
         );
-        if target.pipelines[shading as usize].is_some()
-            && target.source_hash[shading as usize] == self.primary_hash
-        {
+        let built = target.pipelines[shading as usize].is_some()
+            && target.source_hash[shading as usize] == self.primary_hash;
+        let region = state.region;
+        let moved = target.region != region;
+        if let Some(keys) = &target.keys {
+            let reuse = built && !moved && target.lean[shading as usize] && target.computed && self.gi.idle();
+            self.queue.write_buffer(&keys.value, 0, &u32::from(reuse).to_ne_bytes());
+        }
+        let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
+        target.computed = true;
+        target.clear_keys = moved && target.keys.is_some();
+        target.region = region;
+        if built {
             return Ok(());
         }
+        let state = self.view.primary.as_ref().unwrap();
         let head = &self.primary_sources.as_ref().unwrap().1[shading as usize];
         let composed = kernel_module(head);
         let abi = self.program_abi();
@@ -302,10 +354,21 @@ impl Renderer {
                 ResourceKind::ComputePipeline,
             )
         };
+        let keys_entry = [wgpu::BindGroupLayoutEntry {
+            binding: 0,
+            visibility: wgpu::ShaderStages::COMPUTE,
+            ty: wgpu::BindingType::Buffer {
+                ty: wgpu::BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: wgpu::BufferSize::new(KEYS_HEAD + 4),
+            },
+            count: None,
+        }];
+        let keys = state.targets.as_ref().and_then(|t| t.gi_receiver.as_ref()).and_then(|t| t.keys.as_ref());
         let empty_layout = self.ledger.own(
             self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("GI receiver, empty"),
-                entries: &[],
+                label: Some("GI receiver, group 2"),
+                entries: if keys.is_some() { &keys_entry } else { &[] },
             }),
             ResourceKind::BindGroupLayout,
         );
@@ -329,11 +392,12 @@ impl Renderer {
         }
         let is_lean = lean_built.is_some();
         let pipeline = lean_built.unwrap_or_else(|| build(&state.shade_layouts[shading as usize]));
+        let keys_binding = keys.map(|k| [wgpu::BindGroupEntry { binding: 0, resource: k.value.as_entire_binding() }]);
         let empty = self.ledger.own(
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("GI receiver, empty"),
+                label: Some("GI receiver, group 2"),
                 layout: &empty_layout,
-                entries: &[],
+                entries: keys_binding.as_ref().map_or(&[][..], |k| &k[..]),
             }),
             ResourceKind::BindGroup,
         );
@@ -393,6 +457,9 @@ impl Renderer {
         };
         if lookup_probe::on() {
             encoder.clear_buffer(&target.values.value, 0, None);
+        }
+        if let Some(keys) = target.keys.as_ref().filter(|_| target.clear_keys) {
+            encoder.clear_buffer(&keys.value, KEYS_HEAD, None);
         }
         let bindings = state.bindings.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();

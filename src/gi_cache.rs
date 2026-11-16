@@ -3889,6 +3889,11 @@ pub(super) struct ShadeGroups<'a> {
 }
 
 impl GiState {
+    /// Whether the cache exists and runs nothing this frame (a still view: its table is the one
+    /// last frame's receivers read). Decided by `prepare_gi`.
+    pub(crate) fn idle(&self) -> bool {
+        self.resources.is_some() && self.plan.is_none()
+    }
     /// The cache passes, after the primaries' hit records and before shading. `lighting`
     /// is lighting's kernel group (the header-only table at binding 20); `shade` the groups
     /// cell shading runs the frame's program on (G2). `mark` names the stages for the pass
