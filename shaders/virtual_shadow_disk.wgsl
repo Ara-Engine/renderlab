@@ -560,6 +560,28 @@ fn vd_triangle_mask(placement:u32,batch:u32,primitive:u32)->vec2<u32> {
     let side=sign(volume);
     return vd_plane(cross(a,b),side)&vd_plane(cross(b,c),side)&vd_plane(cross(c,a),side);
 }
+// What a texel holds near the receiver: 0 open (no surface above the receiver's tangent plane
+// under `cut`), 1 an occluder with a narrow cone (word `id` at height `t` above the receiver), 2
+// unknown (only a high closed mesh, whose underside hides what lies below it). Under a high top
+// of another surface (a pole over a tarp) the peel layer tells: the tarp's outline under the
+// pole's shadow is an edge like any other.
+struct VdNear {state:u32,id:u32,t:f32};
+fn vd_near(i:u32,c:vec2<f32>,margin:f32,cut:f32)->VdNear {
+    let top=vsm_top_words[i];
+    if top.x==0u {return VdNear(0u,0u,0.0);}
+    let height=vsm_height(top);
+    let t=height-vd_px.p.z;
+    // The walk's own rule (vd_texel): above the receiver's tangent plane and its bias.
+    if t<=0.0 || !vd_above(vec3<f32>(c,height),margin) {return VdNear(0u,0u,0.0);}
+    if t<cut {return VdNear(1u,top.x,t);}
+    let peel=vsm_peel_words[i];
+    if !VD_PEEL2 || peel.x==0u || peel.x>>vsm.misc.x==top.x>>vsm.misc.x {return VdNear(2u,0u,0.0);}
+    let under=vsm_height(peel);
+    let t2=under-vd_px.p.z;
+    if t2<=0.0 || !vd_above(vec3<f32>(c,under),margin) {return VdNear(0u,0u,0.0);}
+    if t2<cut {return VdNear(1u,peel.x,t2);}
+    return VdNear(2u,0u,0.0);
+}
 // Whether the 2x2 texels of the receiver's level around its cone's point mix occluders with a
 // narrow cone and open texels; sets vd_edge, vd_edge_cell (the 2x2's first) and vd_ray_reach.
 fn vd_edge_test(margin:f32) {
@@ -577,16 +599,9 @@ fn vd_edge_test(margin:f32) {
         if any(cell<vec2<i32>(0)) || any(cell>=vec2<i32>(side)) {return;}
         let i=vsm_index(cell,level);
         if i==VSM_NONE {return;}
-        let word=vsm_top_words[i];
-        var t=-1.0;
-        if word.x!=0u {
-            let height=vsm_height(word);
-            let c=origin+(vec2<f32>(cell)+vec2<f32>(0.5))*texel;
-            if vd_above(vec3<f32>(c,height),margin) {t=height-vd_px.p.z;}
-        }
-        // The walk's own rule (vd_texel): above the receiver's tangent plane and its bias.
-        if t>0.0 && t<cut {occluding+=1u;top=max(top,t);}
-        else if t<=0.0 {open+=1u;}
+        let near=vd_near(i,origin+(vec2<f32>(cell)+vec2<f32>(0.5))*texel,margin,cut);
+        if near.state==1u {occluding+=1u;top=max(top,near.t);}
+        else if near.state==0u {open+=1u;}
     }
     if occluding==0u || open==0u {return;}
     vd_edge=true;
@@ -614,20 +629,30 @@ fn vd_word_mask(id:u32)->vec2<u32> {
     }
     return m;
 }
-// The edge pixel's 2x2 occluders: their triangles' exact masks (a run of one triangle once).
+// The edge pixel's 2x2 occluders: their triangles' exact masks (a run of one triangle once),
+// for exactly the columns vd_replaced takes from the walk: a top under the reach, and another
+// placement's peel surface under it.
 fn vd_edge_triangles(margin:f32)->vec2<u32> {
     let level=vd_px.level;
     let texel=vsm_texel(level);
     let origin=vsm.levels[level].origin.xy;
+    let bits=vsm.misc.x;
     var m=vec2<u32>(0u);
     var last=0u;var before=0u;
-    for(var k=0u;k<4u;k+=1u) {
-        let cell=vd_edge_cell+vec2<i32>(i32(k&1u),i32(k>>1u));
-        let word=vsm_top_words[vsm_index(cell,level)];
-        if word.x==0u || word.x==last || word.x==before {continue;}
+    for(var k=0u;k<8u;k+=1u) {
+        let cell=vd_edge_cell+vec2<i32>(i32(k&1u),i32((k>>1u)&1u));
+        let i=vsm_index(cell,level);
+        let top=vsm_top_words[i];
+        if top.x==0u {continue;}
+        var word=top;
+        if k>=4u {
+            word=vsm_peel_words[i];
+            if !VD_PEEL2 || word.x==0u || word.x>>bits==top.x>>bits {continue;}
+        }
+        if word.x==last || word.x==before {continue;}
         let height=vsm_height(word);
         let c=origin+(vec2<f32>(cell)+vec2<f32>(0.5))*texel;
-        if !vd_above(vec3<f32>(c,height),margin) || height-vd_px.p.z>=vd_ray_reach {continue;}
+        if height-vd_px.p.z>=vd_ray_reach || !vd_above(vec3<f32>(c,height),margin) {continue;}
         m|=vd_word_mask(word.x);
         before=last;last=word.x;
     }
