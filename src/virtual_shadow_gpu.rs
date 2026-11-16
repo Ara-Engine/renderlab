@@ -567,6 +567,8 @@ struct Resources {
     /// (`vd_walk_args`).
     walk_list: Owned<wgpu::Buffer>,
     walk_args: Owned<wgpu::Buffer>,
+    /// `vd_walk_args`' dispatch words, copied out for the indirect dispatch.
+    walk_dispatch: Owned<wgpu::Buffer>,
     /// The hardware raster's attachment, which only sizes its raster area.
     _area: Owned<wgpu::Texture>,
     area: Owned<wgpu::TextureView>,
@@ -1976,7 +1978,8 @@ impl VirtualState {
                 (u64::from(size[0]) * u64::from(size[1]) * 8).max(8),
                 B::STORAGE,
             ),
-            walk_args: buffer("Disk lookup walk dispatch", 16, B::STORAGE | B::INDIRECT),
+            walk_args: buffer("Disk lookup walk count", 16, B::STORAGE | B::COPY_SRC),
+            walk_dispatch: buffer("Disk lookup walk dispatch", 12, B::COPY_DST | B::INDIRECT),
             _area: area,
             area: area_view,
             _level: level,
@@ -3592,8 +3595,8 @@ impl Renderer {
                     } else {
                         t.beginning_of_pass_write_index
                     },
-                    // The hybrid's exact pass ends the span instead.
-                    end_of_pass_write_index: if hybrid {
+                    // The hybrid's exact pass and the Disk lookup's walk end the span instead.
+                    end_of_pass_write_index: if hybrid || disk {
                         None
                     } else {
                         t.end_of_pass_write_index
@@ -3635,11 +3638,8 @@ impl Renderer {
             pass.dispatch_workgroups(grid[0], grid[1], 1);
         }
         if disk {
-            // The listed pixels walk in full waves.
             pass.set_pipeline(&p.disk_walk_dispatch);
             pass.dispatch_workgroups(1, 1, 1);
-            pass.set_pipeline(&p.disk_walk);
-            pass.dispatch_workgroups_indirect(&r.walk_args, 4);
         } else if !map {
             // Casters-only frames keep the grid's order (vsm_lookup).
             if let (true, Some([count, place])) = (order && !state.casters_only, &p.order) {
@@ -3659,6 +3659,24 @@ impl Renderer {
             }
         }
         drop(pass);
+        if disk {
+            // The listed pixels walk in full waves. Their dispatch is copied out of the storage
+            // the lookup's group binds: one buffer cannot be both within a dispatch.
+            encoder.copy_buffer_to_buffer(&r.walk_args, 4, &r.walk_dispatch, 0, 12);
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("Disk lookup walk"),
+                timestamp_writes: timestamps.as_ref().map(|t| wgpu::ComputePassTimestampWrites {
+                    query_set: t.query_set,
+                    beginning_of_pass_write_index: None,
+                    end_of_pass_write_index: t.end_of_pass_write_index,
+                }),
+            });
+            pass.set_pipeline(&p.disk_walk);
+            pass.set_bind_group(0, &*g.disk, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(3, self.lighting.bind(), &[]);
+            pass.dispatch_workgroups_indirect(&r.walk_dispatch, 0);
+        }
         // Measurement (`RENDERLAB_VD_EDGE_LOG=<file>`): the edge pixels, a line a frame.
         if disk && edge_log().is_some() {
             state.edge_counts.lock().unwrap().record(encoder, &r.edges, 0, ());
