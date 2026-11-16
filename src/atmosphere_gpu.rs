@@ -560,6 +560,49 @@ impl Renderer {
         Some(s.transmittance(eye.y - s.medium.ground_height, sun))
     }
 
+    /// Measurement (the scene dump, src/engine/scene_dump.rs): the procedural sky as shading
+    /// sees it, read back blocking. Its specular level 0 (cd/m², no sun disk, world axes, WebGPU
+    /// face order: the asset `CubeLevel` layout) and the factor directional lux takes at `eye`.
+    /// None without a written procedural sky.
+    pub(crate) fn procedural_sky_dump(&self, eye: Vec3) -> Option<(u32, Vec<[f32; 3]>, [f32; 3])> {
+        let p = self.atmosphere.procedural.as_ref().filter(|p| p.written)?;
+        let size = ENVIRONMENT_SIZE;
+        let row = size * 16;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("procedural sky dump"),
+            size: u64::from(row) * u64::from(size) * 6,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &p.map.0.specular._texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(row), rows_per_image: Some(size) },
+            },
+            wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 6 },
+        );
+        self.queue.submit([encoder.finish()]);
+        let slice = buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::Wait { submission_index: None, timeout: Some(Duration::from_secs(20)) })
+            .ok()?;
+        let texels = slice
+            .get_mapped_range()
+            .ok()?
+            .chunks_exact(16)
+            .map(|t| std::array::from_fn(|c| f32::from_le_bytes(t[4 * c..4 * c + 4].try_into().unwrap())))
+            .collect();
+        Some((size, texels, self.sun_scale(eye).unwrap_or([1.0; 3])))
+    }
+
     /// Whether the selected environment is a captured map (not the procedural one).
     pub(super) fn captured_environment(&self) -> bool {
         match (&self.environment.selected, &self.atmosphere.procedural) {
@@ -632,8 +675,10 @@ impl Renderer {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::Rgba32Float,
+                    // COPY_SRC: the scene dump reads the sky back (`procedural_sky_dump`).
                     usage: wgpu::TextureUsages::STORAGE_BINDING
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::COPY_SRC,
                     view_formats: &[],
                 }),
                 ResourceKind::Texture,

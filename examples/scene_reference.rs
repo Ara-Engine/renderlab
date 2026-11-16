@@ -2,9 +2,10 @@
 //! `scene_reference DIR [SAMPLES]` reads DIR/scene.rla and DIR/scene.json and writes
 //! DIR/reference.png (the engine's exposure and the AcesFit + sRGB display curve), the linear
 //! mean as DIR/reference.pfm, split halves and DIR/reference.json. Plain unidirectional path
-//! tracing (renderlab::reference): sun, sky (uniform or a prepared map) and emissive surfaces.
-//! Local lights are traced as points. Not yet traced, and listed in reference.json: the procedural atmosphere sky
-//! (a uniform stand-in is refused), fog and see-through materials (skipped by the dump).
+//! tracing (renderlab::reference): sun, sky (uniform, a prepared map, or the procedural
+//! atmosphere's cube as the engine shaded with it) and emissive surfaces. Local lights are
+//! traced as points. Not traced, and listed in reference.json: fog, aerial perspective and
+//! see-through materials (skipped by the dump).
 use renderlab::{Vec3, asset, engine::headless_adapter, reference};
 use serde_json::{Value, json};
 use std::{fs, path::Path, time::Instant};
@@ -83,7 +84,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 intensity: spec["sky"]["intensity"].as_f64().unwrap_or(1.0) as f32,
             });
         }
-        other => return Err(format!("sky {other:?} is not traceable yet (the procedural atmosphere needs its cube read back)").into()),
+        // The procedural atmosphere as shading read it: its specular level 0 in world axes
+        // (raw f32 RGB, WebGPU face order), and the sun already dimmed by its transmittance.
+        Some("cube") => {
+            let file = spec["sky"]["file"].as_str().ok_or("cube sky without its file")?;
+            let size = spec["sky"]["size"].as_u64().ok_or("cube sky without its size")? as u32;
+            let texels = fs::read(dir.join(file))?
+                .chunks_exact(12)
+                .map(|t| std::array::from_fn(|c| f32::from_le_bytes(t[4 * c..4 * c + 4].try_into().unwrap())))
+                .collect();
+            scene.environment = Some(reference::Environment {
+                radiance: asset::environment::CubeLevel::new(size, texels, asset::environment::Limits::unbounded())?,
+                yaw: 0.0,
+                intensity: 1.0,
+            });
+            gaps.push("atmosphere: sky from the engine's 128-texel cube (no aerial perspective or fog between surfaces)".into());
+        }
+        other => return Err(format!("sky {other:?} is not traceable (a dump from before the procedural sky readback)").into()),
     }
     for l in spec["lights"].as_array().into_iter().flatten() {
         let f = |k: &str| l[k].as_f64().unwrap_or(0.0) as f32;

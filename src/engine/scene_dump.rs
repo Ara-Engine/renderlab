@@ -5,7 +5,8 @@
 //! line), the next view rendered writes `<dir>/<label>/scene.rla` (one mesh per mesh and
 //! material pair, placements at their current transforms, materials, textures) and
 //! `<dir>/<label>/scene.json` (camera, output size, exposure, sun, sky, lights, each material's
-//! emission), then removes the file. While dumping, the engine reports no block-compressed
+//! emission), then removes the file. A procedural atmosphere sky is written as the cube shading
+//! reads (`sky.f32`) with the sun as it reaches surfaces. While dumping, the engine reports no block-compressed
 //! texture support, so embedders upload RGBA8 levels the tracer can read.
 use super::*;
 use std::{collections::HashMap, fmt::Write as _, path::PathBuf};
@@ -170,8 +171,19 @@ impl Engine {
         let target = eye - inverse.z_axis.truncate();
         let v3 = |v: Vec3| format!("[{},{},{}]", v.x, v.y, v.z);
         let a3 = |v: [f32; 3]| format!("[{},{},{}]", v[0], v[1], v[2]);
+        // Under the atmosphere the sky is the procedural cube shading reads (written as raw
+        // little-endian f32 RGB, `sky.f32`), and the sun's illuminance is what reaches surfaces:
+        // its top-of-atmosphere value times the atmosphere's transmittance at the eye.
+        let procedural = matches!(self.state.sky, Sky::Atmosphere(_)).then(|| self.renderer.procedural_sky_dump(eye)).flatten();
+        let transmittance = procedural.as_ref().map_or([1.0; 3], |p| p.2);
         let sun = match self.state.sun {
-            Some(s) => format!("{{\"to_light\":{},\"illuminance\":{},\"angular_radius\":{}}}", v3(-s.travel.normalize()), a3(s.illuminance), s.angular_radius),
+            Some(s) => format!(
+                "{{\"to_light\":{},\"illuminance\":{},\"top_of_atmosphere\":{},\"angular_radius\":{}}}",
+                v3(-s.travel.normalize()),
+                a3(std::array::from_fn(|c| s.illuminance[c] * transmittance[c])),
+                a3(s.illuminance),
+                s.angular_radius
+            ),
             None => "null".into(),
         };
         let sky = match self.state.sky {
@@ -184,7 +196,14 @@ impl Engine {
                 });
                 format!("{{\"kind\":\"map\",\"file\":{},\"rotation_y\":{rotation_y},\"intensity\":{intensity}}}", file.map_or("null".into(), |f| format!("\"{f}\"")))
             }
-            Sky::Atmosphere(_) => "{\"kind\":\"atmosphere\"}".into(),
+            Sky::Atmosphere(_) => match &procedural {
+                Some((size, texels, _)) => {
+                    let bytes: Vec<u8> = texels.iter().flatten().flat_map(|v| v.to_le_bytes()).collect();
+                    let _ = std::fs::write(out.join("sky.f32"), bytes);
+                    format!("{{\"kind\":\"cube\",\"file\":\"sky.f32\",\"size\":{size},\"source\":\"atmosphere\"}}")
+                }
+                None => "{\"kind\":\"atmosphere\"}".into(),
+            },
         };
         let mut lights = String::new();
         for l in &self.state.lights {
