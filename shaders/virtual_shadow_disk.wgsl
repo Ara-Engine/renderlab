@@ -586,6 +586,66 @@ fn vd_plane(np:vec3<f32>,s:f32)->vec2<u32> {
     }
     return m;
 }
+// ---- Exact outline edges (docs/design-sun-shadows.md (d)) ----
+// Read as squares, an occluder's outline in a band is a staircase one texel high whose runs grow
+// as the outline nears the grid's axes (Glint's rails: a step every four texels or more), and no
+// box filter narrow enough to stay sharp straightens a long run. So the outline comes from the
+// geometry the texel stores: its triangle's silhouette edges as the light sees them (an edge whose
+// neighbour, by the index buffer's adjacency, is missing or faces away from the light). Each such
+// edge is a plane through the receiver, a straight line across the disk samples (vd_plane); the
+// texel's column is its square grown by half a texel and kept on the triangle's side of every
+// silhouette edge. Only an edge can cut, so coverage inside the outline stays whole, and the
+// half texel reaches the outline where the square fell short. A texel whose triangle has no
+// silhouette edge keeps its filtered square. Every band, every level, the frame's drawn (posed)
+// triangles. Off: `RENDERLAB_VD=VD_EXACT_EDGES=false`.
+override VD_EXACT_EDGES:bool=true;
+struct VdVec4s {data:array<vec4<f32>>};
+struct VdU32s {data:array<u32>};
+@group(1) @binding(0) var<storage,read> models:array<mat4x4<f32>>;
+@group(1) @binding(2) var<storage,read> primary_vertices:binding_array<VdVec4s,PRIMARY_BATCHES>;
+@group(1) @binding(3) var<storage,read> primary_indices:binding_array<VdU32s,PRIMARY_BATCHES>;
+@group(1) @binding(5) var<storage,read> primary_placements:array<u32>;
+// A triangle corner, light space relative to the receiver's origin.
+fn vd_corner(placement:u32,batch:u32,index:u32)->vec3<f32> {
+    let v=primary_vertices[batch].data[primary_indices[batch].data[index]*3u].xyz;
+    return vsm_light((models[placement]*vec4<f32>(v,1.0)).xyz)-vd_px.p;
+}
+// The light-space normal's height of triangle `primitive` (its facing toward the light).
+fn vd_facing_z(placement:u32,batch:u32,primitive:u32)->f32 {
+    let a=vd_corner(placement,batch,primitive*3u);
+    let b=vd_corner(placement,batch,primitive*3u+1u);
+    let c=vd_corner(placement,batch,primitive*3u+2u);
+    return cross(b-a,c-a).z;
+}
+// The disk samples on the inner side of every silhouette edge of map word `id`'s triangle, and
+// whether it has one. Neighbour e lies across the edge opposite corner e (receiver_adjacency.rs).
+struct VdOutline {mask:vec2<u32>,found:bool};
+fn vd_outline(id:u32)->VdOutline {
+    let bits=vsm.misc.x;
+    let placement=(id>>bits)-1u;
+    let batch=primary_placements[placement]&0x1fffffffu;
+    let primitive=id&((1u<<bits)-1u);
+    let info=primary_placements[arrayLength(&primary_placements)-1u-batch];
+    let adjacent=(info&0x40000000u)!=0u;
+    let v=array<vec3<f32>,3>(vd_corner(placement,batch,primitive*3u),vd_corner(placement,batch,primitive*3u+1u),vd_corner(placement,batch,primitive*3u+2u));
+    let facing=cross(v[1]-v[0],v[2]-v[0]).z;
+    var out=VdOutline(vec2<u32>(0xffffffffu),false);
+    for(var e=0u;e<3u;e+=1u) {
+        var silhouette=true;
+        if adjacent {
+            let n=primary_indices[batch].data[((info&0x3fffffffu)+primitive)*3u+e];
+            if n!=0xffffffffu {silhouette=vd_facing_z(placement,batch,n)*facing<=0.0;}
+        }
+        if !silhouette {continue;}
+        let a=v[(e+1u)%3u];let b=v[(e+2u)%3u];
+        let np=cross(a,b);
+        let side=dot(np,v[e]);
+        if side==0.0 {continue;}
+        out.mask&=vd_plane(np,sign(side));
+        out.found=true;
+    }
+    return out;
+}
 // Whether a surface point (light space) is far enough above the receiver's tangent plane to
 // be an occluder: `margin` metres along the normal. A thin receiver's normal is its light-facing
 // one (vd_prepare), so a tilted sheet does not shadow itself.
@@ -661,6 +721,14 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     }
     let clo=max(max(bottom,lo),1e-6*size);let chi=min(t,hi);
     var m=vd_filtered(c-p.xy,size,clo,chi);
+    // An outline texel: its square grown by half a texel, cut by its triangle's silhouette edges.
+    if VD_EXACT_EDGES {
+        let grown=vd_column_mask(c-p.xy,size,clo,chi);
+        if any(grown!=vec2<u32>(0u)) && any(grown!=vec2<u32>(0xffffffffu)) {
+            let outline=vd_outline(top.x);
+            if outline.found {m=grown&outline.mask;}
+        }
+    }
     // Straight outlines: only a column that adds samples without covering the disk reads its
     // texel's line (one word), and only an outline texel's is clipped.
     if VD_EDGES && stride==1 && any((m&~vd_mask)!=vec2<u32>(0u)) && any(m!=vec2<u32>(0xffffffffu)) {
