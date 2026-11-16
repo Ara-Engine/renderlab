@@ -783,7 +783,35 @@ fn vd_pixel(id:vec2<u32>)->u32 {
     if !vd_px.thin && !vd_facing() {return 0u;}
     if vd_px.level!=VSM_NONE && VD_SKIP!=3u {vd_map();}
     // 64 samples to the 0..256 count the shading programs read.
-    return 4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
+    let answer=4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
+    if VD_CERTAIN && vd_px.level!=VSM_NONE {vd_certainty(answer);}
+    return answer;
+}
+// Measurement (`RENDERLAB_VD=VD_CERTAIN=true`, with RENDERLAB_VD_EDGE_LOG): whether the map
+// could classify this pixel with certainty. vd_counts 0: receivers; 1: partial answers; 2:
+// fully lit or shadowed but not the same class with the receiver moved two texels of its level
+// along either axis; 3: certain (one class within that margin).
+override VD_CERTAIN:bool=false;
+fn vd_certainty(answer:u32) {
+    atomicAdd(&vd_counts[0],1u);
+    if answer!=0u && answer!=256u {atomicAdd(&vd_counts[1],1u);return;}
+    let p=vd_px.p;let point=vd_px.point;
+    let m=2.0*vsm_texel(vd_px.level);
+    var same=true;
+    for(var k=0u;k<4u && same;k+=1u) {
+        let d=vec2<f32>(select(select(0.0,m,k==1u),-m,k==0u),select(select(0.0,m,k==3u),-m,k==2u));
+        // Along the receiver's tangent plane, so the moved point stays on its surface.
+        let nl=vd_px.normal;
+        let dz=select(0.0,-dot(nl.xy,d)/nl.z,nl.z>0.2);
+        vd_px.p=p+vec3<f32>(d,dz);vd_px.point=point+vec3<f32>(d,dz);
+        vd_mask=vec2<u32>(0u);
+        if !vd_px.thin {let _f=vd_facing();}
+        vd_map();
+        let a=4u*(64u-countOneBits(vd_mask.x)-countOneBits(vd_mask.y));
+        same=(a==0u)==(answer==0u) && (a==0u || a==256u);
+    }
+    vd_px.p=p;vd_px.point=point;
+    atomicAdd(&vd_counts[select(2u,3u,same)],1u);
 }
 // ---- Answer reuse (virtual_shadow_gpu.rs `reuse_on`) ----
 // The sun's answer at a world point does not depend on the camera. Per pixel and frame the
