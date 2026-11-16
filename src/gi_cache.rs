@@ -121,6 +121,13 @@ fn mover_reach() -> f32 {
 /// One diagonal: Glint's play standing still, non-RT, span 14.1 ms at 4 and 10.8 at 1 with the
 /// stale budget and the box grid; live frames at the rings and track showed no difference.
 const MOVER_REACH: f32 = 1.0;
+/// The longest turn of a stale cell a pixel reads, in frames (shaders/gi_cache.wgsl gi_stale);
+/// RENDERLAB_GI_STALE_READ_TURN sets it.
+fn stale_read_turn() -> u32 {
+    static T: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *T.get_or_init(|| std::env::var("RENDERLAB_GI_STALE_READ_TURN").ok().and_then(|v| v.parse().ok()).unwrap_or(STALE_READ_TURN).max(1))
+}
+const STALE_READ_TURN: u32 = 2;
 /// The unread stale cells' shortest turn, in frames (shaders/gi_cache.wgsl gi_stale).
 const STALE_SWEEP: u32 = 16;
 /// Stale cells re-traced a frame, about (RENDERLAB_GI_STALE_BUDGET); 0 with RENDERLAB_GI_STALE=0
@@ -1435,6 +1442,7 @@ impl Planner {
         // gi_stale); RENDERLAB_GI_STALE=0: 0 and 1, every stale cell at once.
         header[62] = stale_budget();
         header[63] = if stale_budget() == 0 { 1 } else { STALE_SWEEP };
+        header[60] = stale_read_turn();
         // Software rays with cooked near-field masks: their octahedral bins per side (0: none).
         if software {
             header[16] = c.near_bins;

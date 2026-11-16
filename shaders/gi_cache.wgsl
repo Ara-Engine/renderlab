@@ -1777,9 +1777,12 @@ const GI_STALE_INSIDE:u32=0x40000u;
 // After the scan, over every slot: the stale cells due this frame are queued for tracing. The
 // turn follows this frame's own count of stale cells (the scan's GI_W_STALE_CELLS) and the
 // budget (GI_H_STALE_READ, cells a frame; 0: every stale cell at once): the power of two that
-// spreads the count to about the budget, at most 32, for read cells and cells under a mover;
-// four times that, at least GI_H_STALE_SWEEP, for the rest. A read-back count of an earlier
-// frame set it before, and the lag then differed from run to run.
+// spreads the count to about the budget, at most 32; four times that, at least GI_H_STALE_SWEEP,
+// for cells no pixel read this frame. A cell a pixel reads waits at most GI_H_STALE_READ_TURN
+// frames: at Glint's 32-frame turns the floor under a spinning bar kept the bar's occlusion from
+// half a second earlier, a dark trail behind it. A read-back count of an earlier frame set the
+// turn before, and the lag then differed from run to run.
+const GI_H_STALE_READ_TURN:u32=60u;
 @compute @workgroup_size(64) fn gi_stale(@builtin(global_invocation_id) id:vec3<u32>) {
     let slot=id.x;
     if slot>=gi_frame.offsets.x || gi_table[gi_hot(slot)]==0u { return; }
@@ -1793,8 +1796,8 @@ const GI_STALE_INSIDE:u32=0x40000u;
         if t>1u { turn=min(1u<<(32u-countLeadingZeros(t-1u)),32u); }
     }
     let now=gi_word(GI_H_FRAME);
-    let read=(state&GI_STALE_INSIDE)!=0u || gi_table[cold+GI_C_SEEN]==now;
-    let p=select(max(gi_word(GI_H_STALE_SWEEP),4u*turn),turn,read || budget==0u && gi_word(GI_H_STALE_SWEEP)<=1u);
+    let read=gi_table[cold+GI_C_SEEN]==now;
+    let p=select(max(gi_word(GI_H_STALE_SWEEP),4u*turn),min(turn,max(gi_word(GI_H_STALE_READ_TURN),1u)),read || budget==0u && gi_word(GI_H_STALE_SWEEP)<=1u);
     if (slot+now)%max(p,1u)!=0u { return; }
     atomicAdd(&gi_work[GI_W_INVALIDATED],1u);
     gi_count_read(GI_W_INVALIDATED_READ,cold);
