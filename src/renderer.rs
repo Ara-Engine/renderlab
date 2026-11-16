@@ -3605,6 +3605,11 @@ impl Renderer {
                     ("tlas_build", hardware_build.to_string()),
                     ("tick_work", self.tick_work.to_string()),
                     ("draws", draws.len().to_string()),
+                    ("transparent_draws", transparent.len().to_string()),
+                    (
+                        "transparent_instances",
+                        transparent.iter().map(|d| d.instances.len()).sum::<usize>().to_string(),
+                    ),
                 ],
             );
         }
