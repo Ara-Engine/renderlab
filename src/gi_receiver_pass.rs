@@ -156,7 +156,12 @@ fn with_reuse(kernel: &str) -> String {
     // record is marked provisional: TR1 starts it again (program.rs gi_provisional).
     let keyed = "    let key=((record.x*0x9e3779b1u)^(gi_bin(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal))*0x85ebca6bu))|1u;\n    let same=gi_rx_keys.keys[at_key]==key;\n    if gi_rx_keys.reuse!=0u && same {return;}\n    gi_rx_keys.keys[at_key]=key;\n    gi_prepare(input);\n    gi_rx_provisional=same && gi_rx_keys.still!=0u && gi_rx_changed(at_key);\n";
     let declaration = "struct GiRxKeys { reuse:u32, still:u32, pad1:u32, pad2:u32, keys:array<u32> };\n@group(2) @binding(0) var<storage,read_write> gi_rx_keys:GiRxKeys;\n";
-    let declaration = format!("{declaration}{CHANGE}");
+    // `RENDERLAB_GI_RX_CHANGE=<fraction>` replaces the threshold (measurement).
+    let change = std::env::var("RENDERLAB_GI_RX_CHANGE")
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .map_or(CHANGE.to_owned(), |t| CHANGE.replacen("GI_RX_CHANGE:f32=0.03;", &format!("GI_RX_CHANGE:f32={t:?};"), 1));
+    let declaration = format!("{declaration}{change}");
     format!("{declaration}{}", kernel.replacen(MISS, missed, 1).replacen(LOOKUP, keyed, 1))
 }
 /// Measurement only (`RENDERLAB_GI_RX_QUARTER=1`): the ceiling of sharing one lookup across a
