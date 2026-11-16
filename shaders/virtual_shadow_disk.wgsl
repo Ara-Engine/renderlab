@@ -505,9 +505,11 @@ fn vd_prepare(id:vec2<u32>) {
         let shift=vec2<f32>(f32(seed>>8u),f32(vd_hash(seed^0xa511e9b3u)>>8u))*(1.0/16777216.0);
         base=fract(vec2<f32>(vd.size.z)*vec2<f32>(0.7548776662466927,0.5698402909980532)+shift);
     }
-    for(var g=0u;g<4u;g+=1u) {
-        vd_px.offsets[g]=fract(base+vec2<f32>(f32(g&1u),f32(g>>1u))*0.5)-vec2<f32>(0.5);
-    }
+    // Constant indices: a dynamically indexed store into private memory is dropped on NVIDIA.
+    vd_px.offsets[0]=fract(base)-vec2<f32>(0.5);
+    vd_px.offsets[1]=fract(base+vec2<f32>(0.5,0.0))-vec2<f32>(0.5);
+    vd_px.offsets[2]=fract(base+vec2<f32>(0.0,0.5))-vec2<f32>(0.5);
+    vd_px.offsets[3]=fract(base+vec2<f32>(0.5,0.5))-vec2<f32>(0.5);
 }
 
 // A direction (d,1) leaves an opaque receiver's surface only above its tangent plane. Blocks
@@ -605,11 +607,11 @@ fn vd_above(q:vec3<f32>,margin:f32)->bool {
 // cause no acne on any slope.
 const VD_GROUPS=array<u32,4>(0x11111111u,0x22222222u,0x44444444u,0x88888888u);
 fn vd_filtered(d:vec2<f32>,size:f32,lo:f32,hi:f32)->vec2<u32> {
-    var m=vec2<u32>(0u);
-    for(var g=0u;g<4u;g+=1u) {
-        m|=vd_column_mask(d-vd_px.offsets[g]*size,0.5*size,lo,hi)&vec2<u32>(VD_GROUPS[g]);
-    }
-    return m;
+    let h=0.5*size;
+    return (vd_column_mask(d-vd_px.offsets[0]*size,h,lo,hi)&vec2<u32>(VD_GROUPS[0]))
+        |(vd_column_mask(d-vd_px.offsets[1]*size,h,lo,hi)&vec2<u32>(VD_GROUPS[1]))
+        |(vd_column_mask(d-vd_px.offsets[2]*size,h,lo,hi)&vec2<u32>(VD_GROUPS[2]))
+        |(vd_column_mask(d-vd_px.offsets[3]*size,h,lo,hi)&vec2<u32>(VD_GROUPS[3]));
 }
 fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,hi:f32,margin:f32) {
     let i=vsm_index(cell,level);
