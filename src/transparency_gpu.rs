@@ -294,8 +294,9 @@ pub(super) struct TransparencyState {
 
 /// Play loop (sunrt, 2026-11-16): the transparent receivers' sun map keys its casters by their
 /// placement revisions only while they are inside the map's volume, now or when last keyed, so
-/// a caster moving elsewhere (a walking player on Outpost: the map re-rendered every walking
-/// frame, 2.6 ms) does not re-render it. `RENDERLAB_TP_SUN_MAP_CULL=0` re-renders on any change.
+/// a caster moving elsewhere does not re-render it, and draws only the casters inside it (a
+/// walking player on Outpost re-renders it every frame: 2.6 ms for all 8,000 instances).
+/// `RENDERLAB_TP_SUN_MAP_CULL=0` re-renders on any change and draws every caster.
 fn sun_map_cull() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_TP_SUN_MAP_CULL").map_or(true, |v| v != "0"))
@@ -2182,9 +2183,13 @@ impl Renderer {
             }
         };
         let shadow = fit.map_or(Mat4::IDENTITY, |f| f.matrix);
+        // Which opaque draws the sun map draws: those inside its volume (`sun_map_cull`); a
+        // draw outside it writes no depth, so leaving it out keeps the map the same.
+        let mut drawn: Option<Vec<bool>> = None;
         let casters_key = if sun_map_cull() && fit.is_some() {
             let mut h = Sha256::new();
             let mut seen = Vec::with_capacity(opaque.len());
+            let mut inside = Vec::with_capacity(opaque.len());
             for (i, draw) in opaque.iter().enumerate() {
                 h.update((Arc::as_ptr(&draw.mesh.vertex) as usize).to_ne_bytes());
                 let (id, edits) = draw.instances.state.revision();
@@ -2198,9 +2203,11 @@ impl Renderer {
                 if now.is_none() || [now, before].into_iter().flatten().any(|b| in_sun_map(shadow, b)) {
                     h.update(edits.to_ne_bytes());
                 }
+                inside.push(now.is_none_or(|b| in_sun_map(shadow, b)));
                 seen.push(now);
             }
             self.transparency.caster_bounds = seen;
+            drawn = Some(inside);
             h.finalize().into()
         } else {
             casters_key
@@ -2459,7 +2466,10 @@ impl Renderer {
             });
             pass.set_pipeline(&gpu.shadow_pipeline);
             pass.set_bind_group(0, &*gpu.shadow_group, &[]);
-            for draw in opaque {
+            for (i, draw) in opaque.iter().enumerate() {
+                if drawn.as_ref().is_some_and(|d| !d[i]) {
+                    continue;
+                }
                 pass.set_bind_group(1, &*draw.instances.bind, &[]);
                 pass.set_vertex_buffer(0, draw.mesh.vertex.slice(..));
                 pass.set_index_buffer(draw.mesh.index.slice(..), wgpu::IndexFormat::Uint32);
