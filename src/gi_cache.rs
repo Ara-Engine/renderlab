@@ -36,7 +36,9 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
     (light_cold_offset(directions) + lights.div_ceil(32).max(1)).next_multiple_of(4)
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
-pub(crate) const COUNTER_WORDS: u64 = 384;
+pub(crate) const COUNTER_WORDS: u64 = 400;
+/// The counter word kept across frames (shaders/gi_cache.wgsl GI_W_FILL_PENDING).
+const FILL_PENDING_WORD: u64 = 383;
 const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
@@ -725,6 +727,9 @@ pub struct IndirectCounters {
     pub created_secondary: u32,
     pub created_tertiary: u32,
     pub evicted_secondary: u32,
+    /// Profiled frames: per ray class (setup, sky, gather, aimed, light) the rays, software
+    /// traversal nodes and triangle tests (shaders/gi_cache.wgsl GI_W_RAY_STATS).
+    pub ray_stats: [[u32; 3]; 5],
 }
 
 /// What the probe did in one profiled frame (shaders/gi_cache.wgsl GI_W_P_*): tiles with a
@@ -2705,6 +2710,7 @@ impl Renderer {
             created_secondary: w[253],
             created_tertiary: w[254],
             evicted_secondary: w[255],
+            ray_stats: std::array::from_fn(|c| std::array::from_fn(|i| w[384 + 3 * c + i])),
         }))
     }
     /// Arms an incoming-queue snapshot after pixel probing. Measurement only; requires
@@ -3917,8 +3923,13 @@ impl GiState {
                 encoder.clear_buffer(&r.work, u64::from(at) * 4, Some(4));
             }
         }
-        // The last counter word (GI_W_FILL_PENDING) carries over to the next frame.
-        encoder.clear_buffer(&r.work, 0, Some((COUNTER_WORDS - 1) * 4));
+        // GI_W_FILL_PENDING carries over to the next frame.
+        encoder.clear_buffer(&r.work, 0, Some(FILL_PENDING_WORD * 4));
+        encoder.clear_buffer(
+            &r.work,
+            (FILL_PENDING_WORD + 1) * 4,
+            Some((COUNTER_WORDS - FILL_PENDING_WORD - 1) * 4),
+        );
         // Next frame's gather queue starts empty; this frame's holds last frame's appends.
         if plan.bounce {
             encoder.clear_buffer(&r.work, plan.next_queue_at, Some(4));

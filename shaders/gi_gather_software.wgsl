@@ -99,6 +99,7 @@ var<workgroup> gi_drain_base:u32;
                 if k%stride!=0u || (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
                 let d=gi_direction(frame,c.key,k);
                 let h=gi_closest(origin,d,0.0,1e20);
+                gi_ray_count(GI_RC_GATHER);
                 rays+=1u;
                 // A hit in a local light's near region is the aimed rays' (gi_near_gather).
                 if !h.hit || gi_near_owner(origin,n,origin+d*h.t)!=0xffffffffu { continue; }

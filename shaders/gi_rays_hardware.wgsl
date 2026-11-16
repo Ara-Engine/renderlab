@@ -52,3 +52,5 @@ fn gi_hit_receiver(origin:vec3<f32>, d:vec3<f32>, h:GiHit) -> GiReceiver {
     let viewed=select(-r.geometric,r.geometric,dot(r.geometric,-d)>=0.0);
     return GiReceiver(r.world,viewed,gi_bin_source(viewed,r.vertex));
 }
+// Software traversal work (gi_rays_software.wgsl); hardware rays report none.
+var<private> gi_steps:vec2<u32>;

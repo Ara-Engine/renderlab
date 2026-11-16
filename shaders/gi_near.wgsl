@@ -104,6 +104,7 @@ fn gi_near_gather(lane:u32, origin:vec3<f32>, n:vec3<f32>, key:vec2<u32>, band:u
             if dot(d,n)<=0.0 { continue; }
             // The ball ends at the light's distance plus its radius.
             let h=gi_closest(origin,d,0.0,near.w+reach);
+            gi_ray_count(GI_RC_AIMED);
             rays+=1u;
             if !h.hit || gi_near_owner(origin,n,origin+d*h.t)!=l { continue; }
             let o=gi_hit_radiance(origin,d,h,band,tertiary);

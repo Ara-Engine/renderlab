@@ -3432,6 +3432,8 @@ fn gi_basis(n:vec3<f32>) -> mat3x3<f32> {
 }
 // The scene: a ceiling at y = 3 over a cell at the origin, radiance 1 everywhere.
 struct GiHit { hit:bool, t:f32, normal:vec3<f32>, inst:u32, tri:vec3<u32>, bary:vec2<f32> };
+const GI_RC_AIMED:u32=3u;
+fn gi_ray_count(kind:u32) {}
 fn gi_closest(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHit {
     let t=(3.0-origin.y)/max(direction.y,1e-9);
     return GiHit(direction.y>1e-6 && t<=tmax,t,vec3<f32>(0.0,-1.0,0.0),0u,vec3<u32>(0u),vec2<f32>(0.0));

@@ -20,6 +20,9 @@ struct GiHit { hit:bool, t:f32, normal:vec3<f32>, inst:u32, tri:vec3<u32>, bary:
 const GI_BVH_LEAF:u32=0x80000000u;
 const GI_BVH_EMPTY:u32=0xffffffffu;
 const GI_BVH_STACK:u32=48u;
+// Traversal work since the caller last flushed it (gi_ray_count): x nodes visited at both
+// levels, y triangles tested. Profiled frames only read it.
+var<private> gi_steps:vec2<u32>;
 // Instance records follow a 16-word header; src/gi_bvh.rs INSTANCE_WORDS must match.
 const GI_INSTANCE_WORDS:u32=32u;
 fn gi_gf(i:u32) -> f32 { return bitcast<f32>(gi_geometry[i]); }
@@ -87,6 +90,7 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
     var sp=1u;
     while sp>0u {
         sp-=1u;
+        gi_steps.x+=1u;
         let child=(*stack)[sp];
         if (child&GI_BVH_LEAF)!=0u {
             // P-MEM runtime layout: only leaf index offset/count are uploaded.
@@ -109,6 +113,7 @@ fn gi_instance(i:u32, origin:vec3<f32>, direction:vec3<f32>, world_inv:vec3<f32>
                 let a2=gi_gv(positions+ja*3u);
                 let b2=gi_gv(positions+jb*3u);
                 let c2=gi_gv(positions+jc*3u);
+                gi_steps.y+=select(1u,2u,two);
                 let h=gi_triangle(o,d,a,b,c,tmin,gi_limit(*best,i));
                 if h.x>=0.0 {
                     // The source-winding normal through the inverse transpose. r0-r2 are
@@ -191,6 +196,7 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
     var sp=1u;
     while sp>0u {
         sp-=1u;
+        gi_steps.x+=1u;
         let item=nodes[sp];
         if (item&GI_BVH_LEAF)!=0u {
             if gi_instance(item&~GI_BVH_LEAF,origin,direction,world_inv,tmin,any_hit,&best,&stack) { return best; }

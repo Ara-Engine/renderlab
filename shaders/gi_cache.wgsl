@@ -175,7 +175,24 @@ const GI_W_GATHER_HIST:u32=256u;
 const GI_GATHER_BINS:u32=96u;
 const GI_W_GATHER_CUT:u32=352u;
 // Per-slot claim words, after the counters (src/gi_cache.rs COUNTER_WORDS).
-const GI_W_CLAIMS:u32=384u;
+const GI_W_CLAIMS:u32=400u;
+// Ray statistics on profiled frames (GI_F_STATS): per class (GI_RC_*) three words: rays,
+// traversal nodes and triangle tests (software rays; hardware rays count rays only).
+const GI_W_RAY_STATS:u32=384u;
+const GI_RC_SETUP:u32=0u;
+const GI_RC_SKY:u32=1u;
+const GI_RC_GATHER:u32=2u;
+const GI_RC_AIMED:u32=3u;
+const GI_RC_LIGHT:u32=4u;
+fn gi_ray_count(kind:u32) {
+    if (gi_word(GI_H_FLAGS)&GI_F_STATS)!=0u {
+        let at=GI_W_RAY_STATS+3u*kind;
+        atomicAdd(&gi_work[at],1u);
+        if gi_steps.x!=0u { atomicAdd(&gi_work[at+1u],gi_steps.x); }
+        if gi_steps.y!=0u { atomicAdd(&gi_work[at+2u],gi_steps.y); }
+    }
+    gi_steps=vec2<u32>(0u);
+}
 // A miss: definition (4 words), request-table entry, claimed slot.
 const GI_MISS_WORDS:u32=6u;
 const GI_UNCLAIMED:u32=0xffffffffu;
@@ -1069,6 +1086,7 @@ fn gi_probe_line(c:GiCell, j:u32) -> GiLineHits {
     var tmin=0.0;
     for(var i=0u;i<GI_LINE_HITS;i+=1u) {
         let h=gi_closest(start,-nb,tmin,length);
+        gi_ray_count(GI_RC_SETUP);
         if !h.hit { break; }
         let facing=dot(h.normal,nb);
         // Candidates: the first hit when it qualifies, then the next hit facing the bin past
@@ -1126,6 +1144,7 @@ fn gi_probe_inside(r:GiCandidate, edge:f32) -> bool {
         let a=f32(i)*1.5707963267948966;
         let d=select(f*vec3<f32>(0.9848078*cos(a),0.9848078*sin(a),0.17364818),n,i==0u);
         let h=gi_closest(o,d,0.0,1e20);
+        gi_ray_count(GI_RC_SETUP);
         if !h.hit || dot(h.normal,d)<=0.0 { return false; }
         if i==0u && ((r.tri.w&0x80000000u)!=0u || h.t<=edge) { return true; }
     }
@@ -1342,8 +1361,10 @@ const GI_SETUP_CHOSEN:u32=7u;
                     var rank=countOneBits(pending&(bit-1u));
                     for(var v=0u;v<w;v+=1u) { rank+=countOneBits(gi_wg_pending[cell*GI_MAX_WORDS+v]); }
                     atomicStore(&gi_work[gi_frame.requests.z+base+rank],(slot<<7u)|k);
-                } else if gi_visible(origin,gi_direction(frame,c.key,k)) {
-                    atomicOr(&gi_wg_traced[cell*GI_MAX_WORDS+w],bit);
+                } else {
+                    let open=gi_visible(origin,gi_direction(frame,c.key,k));
+                    gi_ray_count(GI_RC_SKY);
+                    if open { atomicOr(&gi_wg_traced[cell*GI_MAX_WORDS+w],bit); }
                 }
             }
         }
@@ -1460,7 +1481,9 @@ fn gi_ray(index:u32) {
     let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
     let q=gi_point(cold);
     let origin=q+n*gi_origin_offset(q,edge);
-    if gi_visible(origin,gi_direction(gi_basis(n),key,item&127u)) {
+    let open=gi_visible(origin,gi_direction(gi_basis(n),key,item&127u));
+    gi_ray_count(GI_RC_SKY);
+    if open {
         let staged=gi_frame.requests.z+GI_RAY_ITEMS;
         atomicOr(&gi_work[staged+index/32u],1u<<(index%32u));
     }
@@ -1844,7 +1867,9 @@ fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
                 if !gi_light_affects(l,q,n) { continue; }
                 let d=gi_light_direction(l,q);
                 traced+=1u;
-                if gi_visible_within(origin,d.xyz,d.w) { bits|=1u<<(l-first); }
+                let open=gi_visible_within(origin,d.xyz,d.w);
+                gi_ray_count(GI_RC_LIGHT);
+                if open { bits|=1u<<(l-first); }
             }
             gi_table[cold+GI_C_LIGHTS+(first>>5u)]=bits;
         }
@@ -2181,6 +2206,7 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
                 if k%stride!=0u || (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
                 let d=gi_direction(frame,c.key,k);
                 let h=gi_closest(origin,d,0.0,1e20);
+                gi_ray_count(GI_RC_GATHER);
                 rays+=1u;
                 // A hit in a local light's near region is the aimed rays' (gi_near_gather).
                 if !h.hit || gi_near_owner(origin,n,origin+d*h.t)!=0xffffffffu { continue; }
