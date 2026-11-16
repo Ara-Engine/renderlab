@@ -1344,8 +1344,11 @@ pub(crate) struct Planner {
     pub history_frames: u32,
     held_frames: u32,
     /// sunrt-7's `unchanged`: nothing that sets a receiver's sun visibility changed since the
-    /// previous frame. The Disk lookup's held view reuse reads it.
+    /// previous frame. The Disk lookup's answer reuse reads it.
     pub unchanged: bool,
+    /// The frame continues the previous one with the suns' directions unchanged (the Disk
+    /// lookup's answer reuse while the camera moves).
+    pub sun_still: bool,
     /// U-FIXED: the sun's turn (radians) summed since the last restart; the sun visibility
     /// history's turn step counts it.
     sun_turned: f32,
@@ -1370,6 +1373,7 @@ impl Planner {
             history_frames: 0,
             held_frames: 0,
             unchanged: false,
+            sun_still: false,
             sun_turned: 0.0,
             shadow_rays: 8,
             restart_rays: 0,
@@ -1470,6 +1474,7 @@ impl Planner {
         // A sun turn caps the window at turn_angle / turn; a turn past turn_angle (any turn
         // when it is zero) restarts every pixel.
         let turn = continued.map_or(0.0, |c| c.3);
+        self.sun_still = continued.is_some() && turn == 0.0;
         let event_window = if turn > 0.0 {
             settings.turn_angle / turn
         } else {
