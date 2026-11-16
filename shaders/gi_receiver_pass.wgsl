@@ -106,6 +106,9 @@ const FG_SLOTS:u32=2u;
 const FG_BLOCK:u32=8u;
 const FG_RAYS:u32=16u;
 const FG_HISTORY:f32=16.0;
+// Half-rate tracing (fg_trace) for probes with at least FG_HALF_MIN frames of history.
+const FG_HALF_RATE:bool=true;
+const FG_HALF_MIN:f32=4.0;
 // A probe ray's cone: its share of the hemisphere (2 pi / FG_RAYS sr) as an angle, so its
 // width at distance t is FG_CONE * t (the cache answers hits whose cone covers a cell).
 const FG_CONE:f32=0.6266570686577501;
@@ -135,6 +138,20 @@ fn fg_load(index:u32,size:vec2<u32>)->FgProbe {
         bitcast<vec4<f32>>(b.r0),bitcast<vec4<f32>>(b.r1),bitcast<vec4<f32>>(b.r2),bitcast<vec4<f32>>(c.r0)),
         bitcast<vec4<f32>>(c.r1),bitcast<vec4<f32>>(c.r2));
 }
+// A probe's point and normal alone (the last two words of its third record): the plane tests
+// read these, and the 108 bytes of SH load only once a weight is known (fg_add).
+struct FgPlane { point:vec4<f32>, normal:vec4<f32> };
+fn fg_plane(index:u32,size:vec2<u32>)->FgPlane {
+    let c=gi_prepared[fg_at(index,size)+2u];
+    return FgPlane(bitcast<vec4<f32>>(c.r1),bitcast<vec4<f32>>(c.r2));
+}
+fn fg_add(sh:ptr<function,array<vec4<f32>,7>>,index:u32,size:vec2<u32>,w:f32) {
+    let at=fg_at(index,size);
+    let a=gi_prepared[at];let b=gi_prepared[at+1u];let c=gi_prepared[at+2u].r0;
+    (*sh)[0]+=w*bitcast<vec4<f32>>(a.r0);(*sh)[1]+=w*bitcast<vec4<f32>>(a.r1);(*sh)[2]+=w*bitcast<vec4<f32>>(a.r2);
+    (*sh)[3]+=w*bitcast<vec4<f32>>(b.r0);(*sh)[4]+=w*bitcast<vec4<f32>>(b.r1);(*sh)[5]+=w*bitcast<vec4<f32>>(b.r2);
+    (*sh)[6]+=w*bitcast<vec4<f32>>(c);
+}
 fn fg_store(index:u32,size:vec2<u32>,p:FgProbe) {
     let at=fg_at(index,size);
     gi_prepared[at]=GiPrepared(bitcast<vec4<u32>>(p.sh[0]),bitcast<vec4<u32>>(p.sh[1]),bitcast<vec4<u32>>(p.sh[2]));
@@ -153,7 +170,9 @@ fn fg_hash(x:u32)->u32 {
 // A covered pixel's receiver for the gather: point, viewed geometric normal, shading normal,
 // trace epsilon and placement + 1 (0: none).
 struct FgSurface { world:vec3<f32>, normal:vec3<f32>, shading:vec3<f32>, epsilon:f32, placement:u32 };
-fn fg_surface(id:vec2<u32>,size:vec2<u32>)->FgSurface {
+fn fg_surface(id:vec2<u32>,size:vec2<u32>)->FgSurface { return fg_surface_at(id,size,true); }
+// fg_surface, without the shading normal (left as the geometric one) unless `shading`.
+fn fg_surface_at(id:vec2<u32>,size:vec2<u32>,shading:bool)->FgSurface {
     var s:FgSurface;
     if any(id>=size) || any(id>=primary_region.zw) || any(id<primary_region.xy) {return s;}
     if textureLoad(primary_tiles,id/PRIMARY_TILE,0).x==0u {return s;}
@@ -167,9 +186,12 @@ fn fg_surface(id:vec2<u32>,size:vec2<u32>)->FgSurface {
     s.world=world_position(receiver_point(a.position,b.position,c.position,w),hit.placement).xyz;
     let g=unit_normal(primary_geometric(a.position,b.position,c.position,hit.placement));
     s.normal=select(-g,g,dot(g,lighting.eye-s.world)>=0.0);
-    let n=vertex_output(a).normal*w.x+vertex_output(b).normal*w.y+vertex_output(c).normal*w.z;
-    s.shading=select(s.normal,unit_normal(n),dot(n,n)>1e-12);
-    if dot(s.shading,s.normal)<0.0 {s.shading=-s.shading;}
+    s.shading=s.normal;
+    if shading {
+        let n=vertex_output(a).normal*w.x+vertex_output(b).normal*w.y+vertex_output(c).normal*w.z;
+        s.shading=select(s.normal,unit_normal(n),dot(n,n)>1e-12);
+        if dot(s.shading,s.normal)<0.0 {s.shading=-s.shading;}
+    }
     s.epsilon=primary_epsilon(array<vec3<f32>,3>(a.position,b.position,c.position),hit.placement);
     s.placement=record.x;
     return s;
@@ -182,7 +204,7 @@ fn fg_footprint(pixel:vec2<u32>,size:vec2<u32>,world:vec3<f32>)->f32 {
 }
 // How far a point and normal lie on a probe's plane (Gaussian in plane distance over
 // FG_PLANE of its footprint, normals as cos^4): 1 on it, 0 off it or for an invalid probe.
-fn fg_on_plane(p:FgProbe,world:vec3<f32>,n:vec3<f32>)->f32 {
+fn fg_on_plane(p:FgPlane,world:vec3<f32>,n:vec3<f32>)->f32 {
     if p.point.w<=0.0 {return 0.0;}
     let plane=abs(dot(p.normal.xyz,world-p.point.xyz))/max(FG_PLANE*p.normal.w,1e-6);
     let facing=max(dot(p.normal.xyz,n),0.0);
@@ -275,7 +297,7 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     for(var k=0u;k<4u;k+=1u) {
         let h=fg_hash(tile*16u+k+frame*0x632be5abu);
         let q=group.xy*FG_TILE+vec2<u32>(h%FG_TILE,(h>>8u)%FG_TILE);
-        first=fg_surface(q,size);
+        first=fg_surface_at(q,size,false);
         if first.placement!=0u {first_pixel=q;break;}
     }
     var s=first;
@@ -283,28 +305,36 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     if slot==1u {
         s=FgSurface();
         if first.placement!=0u {
-            var probe:FgProbe;
+            var probe:FgPlane;
             probe.point=vec4<f32>(first.world,1.0);
             probe.normal=vec4<f32>(first.normal,fg_footprint(first_pixel,size,first.world));
             for(var k=4u;k<12u;k+=1u) {
                 let h=fg_hash(tile*16u+k+frame*0x632be5abu);
                 let q=group.xy*FG_TILE+vec2<u32>(h%FG_TILE,(h>>8u)%FG_TILE);
-                let c=fg_surface(q,size);
+                let c=fg_surface_at(q,size,false);
                 if c.placement!=0u && fg_on_plane(probe,c.world,c.normal)<0.37 {s=c;pixel=q;break;}
             }
         }
     }
     let index=tile*FG_SLOTS+slot;
-    fg_lane(lane,lane%FG_RAYS,s,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
+    // Half rate: on alternate frames, a checkerboard of tiles keeps a probe that has history and
+    // still lies on the plane under its tile (fg_accumulate's test), instead of tracing it.
+    let old=fg_plane(index,size);
+    let keep=FG_HALF_RATE && ((group.x+group.y+frame)&1u)==1u && s.placement!=0u && old.point.w>=FG_HALF_MIN
+        && dot(old.normal.xyz,s.normal)>0.9 && abs(dot(old.normal.xyz,s.world-old.point.xyz))<0.5*FG_PLANE*old.normal.w;
+    var traced=s;
+    if keep {traced.placement=0u;}
+    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
     workgroupBarrier();
-    if lane%FG_RAYS!=0u || any(group.xy>=tiles) {return;}
+    if lane%FG_RAYS!=0u || any(group.xy>=tiles) || keep {return;}
     if s.placement==0u {fg_invalidate(index,size);return;}
     fg_accumulate(index,size,slot*FG_RAYS,s,pixel);
 }
 // The tile probes around a pixel on its plane, bilinear by tile position: weighted SH and the
 // weights' sum.
+// With `sh` false, only the sum of the weights (the adaptive test).
 struct FgGather { sh:array<vec4<f32>,7>, total:f32 };
-fn fg_tiles(id:vec2<u32>,size:vec2<u32>,s:FgSurface)->FgGather {
+fn fg_tiles(id:vec2<u32>,size:vec2<u32>,s:FgSurface,sh:bool)->FgGather {
     var g:FgGather;
     let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
     let f=(vec2<f32>(id)+vec2<f32>(0.5))/f32(FG_TILE)-vec2<f32>(0.5);
@@ -313,11 +343,11 @@ fn fg_tiles(id:vec2<u32>,size:vec2<u32>,s:FgSurface)->FgGather {
     for(var k=0u;k<4u*FG_SLOTS;k+=1u) {
         let o=vec2<i32>(i32(k&1u),i32((k>>1u)&1u));
         let t=clamp(base+o,vec2<i32>(0),tiles-vec2<i32>(1));
-        let p=fg_load(fg_filtered(u32(t.y*tiles.x+t.x)*FG_SLOTS+k/4u,size),size);
+        let index=fg_filtered(u32(t.y*tiles.x+t.x)*FG_SLOTS+k/4u,size);
         let bilinear=select(1.0-fr.x,fr.x,o.x!=0)*select(1.0-fr.y,fr.y,o.y!=0);
-        let w=max(bilinear,1e-3)*fg_on_plane(p,s.world,s.normal);
+        let w=max(bilinear,1e-3)*fg_on_plane(fg_plane(index,size),s.world,s.normal);
         if w<=1e-6 {continue;}
-        for(var v=0u;v<7u;v+=1u) {g.sh[v]+=w*p.sh[v];}
+        if sh {fg_add(&g.sh,index,size,w);}
         g.total+=w;
     }
     return g;
@@ -333,12 +363,13 @@ const FG_FILTER_SHORT:f32=4.0;
     if any(own>=tiles) {return;}
     for(var slot=0u;slot<FG_SLOTS;slot+=1u) {
         let index=u32(own.y*tiles.x+own.x)*FG_SLOTS+slot;
-        let c=fg_load(index,size);
+        let c=fg_plane(index,size);
         if c.point.w<=0.0 {fg_invalidate(fg_filtered(index,size),size);continue;}
         let reach=select(1,2,c.point.w<=FG_FILTER_SHORT);
         let sigma=f32(reach)*0.75;
-        var out=c;
-        for(var v=0u;v<7u;v+=1u) {out.sh[v]=c.sh[v]*c.point.w;}
+        var out:FgProbe;
+        out.point=c.point;out.normal=c.normal;
+        fg_add(&out.sh,index,size,c.point.w);
         var total=c.point.w;
         for(var y=-reach;y<=reach;y+=1) {
             for(var x=-reach;x<=reach;x+=1) {
@@ -347,10 +378,10 @@ const FG_FILTER_SHORT:f32=4.0;
                 for(var k=0u;k<FG_SLOTS;k+=1u) {
                     let at=u32(t.y*tiles.x+t.x)*FG_SLOTS+k;
                     if at==index {continue;}
-                    let p=fg_load(at,size);
+                    let p=fg_plane(at,size);
                     let w=fg_on_plane(p,c.point.xyz,c.normal.xyz)*exp(-f32(x*x+y*y)/(2.0*sigma*sigma))*p.point.w;
                     if w<=1e-4 {continue;}
-                    for(var v=0u;v<7u;v+=1u) {out.sh[v]+=w*p.sh[v];}
+                    fg_add(&out.sh,at,size,w);
                     total+=w;
                 }
             }
@@ -369,8 +400,8 @@ var<workgroup> fg_pick:u32;
     if lane==0u {atomicStore(&fg_orphan,0xffffffffu);}
     workgroupBarrier();
     let q=group.xy*FG_BLOCK+local.xy;
-    let mine=fg_surface(q,size);
-    if mine.placement!=0u && fg_tiles(q,size,mine).total<=1e-4 {
+    let mine=fg_surface_at(q,size,false);
+    if mine.placement!=0u && fg_tiles(q,size,mine,false).total<=1e-4 {
         // 17 is odd, so the turned order is a permutation of the 64 lanes.
         atomicMin(&fg_orphan,(((lane*17u+frame*29u)&63u)<<6u)|lane);
     }
@@ -393,7 +424,7 @@ var<workgroup> fg_pick:u32;
     let size=textureDimensions(primary_hit);
     let s=fg_surface(id,size);
     if s.placement==0u {return;}
-    var g=fg_tiles(id,size,s);
+    var g=fg_tiles(id,size,s,true);
     if g.total<=1e-4 {
         // No tile probe on this plane: the adaptive probes around it, bilinear by block.
         let blocks=vec2<i32>((size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK);
@@ -403,11 +434,11 @@ var<workgroup> fg_pick:u32;
         for(var k=0u;k<4u;k+=1u) {
             let o=vec2<i32>(i32(k&1u),i32(k>>1u));
             let b=clamp(base+o,vec2<i32>(0),blocks-vec2<i32>(1));
-            let p=fg_load(fg_adaptive(vec2<u32>(b),size),size);
+            let index=fg_adaptive(vec2<u32>(b),size);
             let bilinear=select(1.0-fr.x,fr.x,o.x!=0)*select(1.0-fr.y,fr.y,o.y!=0);
-            let w=max(bilinear,1e-3)*fg_on_plane(p,s.world,s.normal);
+            let w=max(bilinear,1e-3)*fg_on_plane(fg_plane(index,size),s.world,s.normal);
             if w<=1e-6 {continue;}
-            for(var v=0u;v<7u;v+=1u) {g.sh[v]+=w*p.sh[v];}
+            fg_add(&g.sh,index,size,w);
             g.total+=w;
         }
     }
@@ -417,14 +448,15 @@ var<workgroup> fg_pick:u32;
         let tiles=vec2<i32>((size+vec2<u32>(FG_TILE-1u))/FG_TILE);
         let own=vec2<i32>(id/FG_TILE);
         var best=0.0;
+        var chosen=0u;
         for(var y=-FG_SEARCH;y<=FG_SEARCH;y+=1) {
             for(var x=-FG_SEARCH;x<=FG_SEARCH;x+=1) {
                 let t=own+vec2<i32>(x,y);
                 if any(t<vec2<i32>(0)) || any(t>=tiles) {continue;}
                 for(var slot=0u;slot<FG_SLOTS;slot+=1u) {
-                    let p=fg_load(fg_filtered(u32(t.y*tiles.x+t.x)*FG_SLOTS+slot,size),size);
-                    let w=fg_on_plane(p,s.world,s.normal)/f32(1+max(abs(x),abs(y)));
-                    if w>best {best=w;g.sh=p.sh;}
+                    let index=fg_filtered(u32(t.y*tiles.x+t.x)*FG_SLOTS+slot,size);
+                    let w=fg_on_plane(fg_plane(index,size),s.world,s.normal)/f32(1+max(abs(x),abs(y)));
+                    if w>best {best=w;chosen=index;}
                 }
             }
         }
@@ -432,13 +464,14 @@ var<workgroup> fg_pick:u32;
             best=0.0;
             for(var k=0u;k<FG_SLOTS+1u;k+=1u) {
                 let index=select(fg_filtered(u32(own.y*tiles.x+own.x)*FG_SLOTS+k,size),fg_adaptive(id/FG_BLOCK,size),k==FG_SLOTS);
-                let p=fg_load(index,size);
+                let p=fg_plane(index,size);
                 if p.point.w<=0.0 {continue;}
                 let facing=dot(p.normal.xyz,s.normal);
                 let w=max(facing,0.0)/(1.0+abs(dot(p.normal.xyz,s.world-p.point.xyz))/max(p.normal.w,1e-6));
-                if w>best {best=w;g.sh=p.sh;}
+                if w>best {best=w;chosen=index;}
             }
         }
+        if best>0.0 {fg_add(&g.sh,chosen,size,1.0);}
         g.total=select(0.0,1.0,best>0.0);
     }
     let inv=select(0.0,1.0/g.total,g.total>0.0);
