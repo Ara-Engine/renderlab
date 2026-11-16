@@ -112,6 +112,10 @@ const FG_HALF_MIN:f32=4.0;
 // A probe ray's cone: its share of the hemisphere (2 pi / FG_RAYS sr) as an angle, so its
 // width at distance t is FG_CONE * t (the cache answers hits whose cone covers a cell).
 const FG_CONE:f32=0.6266570686577501;
+// The sky a probe ray misses into, prefiltered to the ray's cone (GGX alpha of a lobe half as
+// wide as FG_CONE): a sample of the sky in that direction, not the whole hemisphere's blur,
+// which mixed the horizon into the zenith and greyed sky-lit shadow.
+const FG_SKY_ALPHA:f32=0.09817477042468103;
 const FG_SEARCH:i32=2;
 // A probe's plane reaches this fraction of its footprint along its normal (the Gaussian width).
 const FG_PLANE:f32=0.5;
@@ -231,7 +235,7 @@ fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
 fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f32> {
     let inverse=1.0/max(lighting.exposure,1e-30);
     let traced=rl_cast(origin,d,epsilon);
-    if traced.record.x==0u {return rl_sky(d,1.0)*inverse;}
+    if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)*inverse;}
     // A hit whose cone covers its cache cell reads the cell's outgoing radiance (emission and
     // the cell's reflection of sky, bounce and the lights its visibility ray reached); contacts,
     // movers and unsettled cells shade with the program and their own direct light.
