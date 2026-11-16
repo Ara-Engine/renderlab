@@ -280,7 +280,8 @@ struct ShadowView {world_to_clip:mat4x4<f32>,coverage_bias:vec4<f32>,camera_dept
 override VD_BIAS:f32=1.0;
 // The peel layer bounds a column from below where it is the top's own placement.
 override VD_PEEL:bool=true;
-// The least thickness of a column, in texels of its level (see vd_map).
+// The least thickness of a column, in texels of its level (see vd_map). The peel layer skips the
+// surfaces this close under the top (virtual_shadow.wgsl VSM_PEEL_GAP, kept equal).
 override VD_THICK:f32=4.0;
 // On reconstructed frames each receiver reads the map from a point of its tangent plane up to
 // this many texels of its level away (per axis, a new point every frame), so TR1 integrates a

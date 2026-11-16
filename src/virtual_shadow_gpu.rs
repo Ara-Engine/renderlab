@@ -939,6 +939,13 @@ fn edge_log() -> Option<&'static std::path::Path> {
     static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     PATH.get_or_init(|| std::env::var_os("RENDERLAB_VD_EDGE_LOG").map(Into::into)).as_deref()
 }
+/// The Disk lookup's peel gap (virtual_shadow.wgsl `vsm_write`): the peel layer skips the
+/// surfaces within the columns' least thickness under the top, so a thin closed caster (a pole)
+/// no longer hides what lies under it. `RENDERLAB_VD_PEEL_GAP=0` peels the next surface.
+fn peel_gap_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VD_PEEL_GAP").map_or(true, |v| v.trim() != "0"))
+}
 /// Answer reuse (WGSL `vd_lookup`): a pixel whose surface point was on screen last frame, out
 /// of the moving casters' swept shadow, with its own and its 3x3 neighbours' answers one fully
 /// lit or fully shadowed class settled over several walks, keeps the answer without a walk.
@@ -2591,12 +2598,13 @@ impl Renderer {
             s.march_samples,
             s.bias_ulps,
             // N8k: bit 8, the hybrid's queue (virtual_shadow_lookup.wgsl vmap_hybrid); bit 9 the
-            // sparse layout (virtual_shadow.wgsl vsm_sparse).
+            // sparse layout (virtual_shadow.wgsl vsm_sparse); bit 10 the peel gap (vsm_write).
             u32::from(s.ring)
                 | u32::from(s.peel_own) << 1
                 | s.first_block << 2
                 | u32::from(s.lookup == VirtualLookup::Hybrid) << 8
-                | u32::from(sparse) << 9,
+                | u32::from(sparse) << 9
+                | u32::from(s.lookup == VirtualLookup::Disk && peel_gap_on()) << 10,
         ] {
             frame.extend_from_slice(&value.to_ne_bytes());
         }
