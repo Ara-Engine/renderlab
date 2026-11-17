@@ -978,10 +978,64 @@ fn vd_map() {
     }
 }
 
+// ---- Measurement: brute-force reference estimator (`RENDERLAB_VD=VD_BRUTE=true`) ----
+// No bands and no columns: 64 sun-disk directions per pixel and frame (the disk pattern rotated
+// per pixel and frame), each marched from the receiver toward the sun in VD_BRUTE_STEPS height
+// steps up to the scene's highest caster, through the receiver's own level only (the level the
+// pixel already reads). A direction under the receiver's tangent plane is blocked; one is
+// blocked where a texel it crosses has its top above the receiver's tangent plane (VD_BIAS
+// texels) and at or above the ray's height there (a depth comparison). The answer is the share of
+// directions that reach the sun. A texel on a page not current for the window is skipped.
+override VD_BRUTE:bool=false;
+override VD_BRUTE_STEPS:u32=48u;
+fn vd_brute(id:vec2<u32>)->u32 {
+    let level=vd_px.level;
+    let texel=vsm_texel(level);
+    let origin=vsm.levels[level].origin.xy;
+    let side=i32(vsm.counts.y*VSM_PAGE);
+    let p=vd_px.p;
+    let ceiling=max(vsm.depth.w-p.z,0.0);
+    let margin=VD_BIAS*texel;
+    let seed=vd_hash(id.x+id.y*u32(vd.size.x));
+    let turn=fract(f32(seed>>8u)*(1.0/16777216.0)+0.61803398875*vd.size.z)*6.28318531;
+    let cs=vec2<f32>(cos(turn),sin(turn));
+    let dh=ceiling/f32(VD_BRUTE_STEPS);
+    var lit=0u;
+    for(var s=0u;s<64u;s+=1u) {
+        let e=vd.samples[s>>1u];
+        let g0=select(e.xy,e.zw,(s&1u)!=0u);
+        let g=vec2<f32>(g0.x*cs.x-g0.y*cs.y,g0.x*cs.y+g0.y*cs.x);
+        let d=vd_px.centre+vd_px.radius*g;
+        // Under the receiver's tangent plane (an opaque receiver's own surface).
+        if !vd_px.thin && dot(vd_px.normal,vec3<f32>(d,1.0))<=0.0 {continue;}
+        var blocked=false;
+        for(var k=1u;k<=VD_BRUTE_STEPS;k+=1u) {
+            let h=dh*f32(k);
+            let q=p.xy+d*h;
+            let cell=vec2<i32>(floor((q-origin)/texel));
+            if any(cell<vec2<i32>(0)) || any(cell>=vec2<i32>(side)) {break;}
+            if !vd_page_current(level,vec2<u32>(cell)/VSM_PAGE) {continue;}
+            let i=vsm_index(cell,level);
+            if i==VSM_NONE {continue;}
+            let w=vsm_top_words[i];
+            if w.x==0u {continue;}
+            let height=vsm_height(w);
+            if height-p.z<h-dh {continue;}
+            let c=origin+(vec2<f32>(cell)+vec2<f32>(0.5))*texel;
+            if vd_above(vec3<f32>(c,height),margin) {blocked=true;break;}
+        }
+        if !blocked {lit+=1u;}
+    }
+    return 4u*lit;
+}
 fn vd_pixel(id:vec2<u32>)->u32 {
     if VD_SKIP==1u {return 256u;}
     vd_prepare(id);
     if !vd_px.valid || VD_SKIP==2u {return 256u;}
+    if VD_BRUTE {
+        if vd_px.level==VSM_NONE {return 256u;}
+        return vd_brute(id);
+    }
     vd_mask=vec2<u32>(0u);
     vd_edge=false;
     vd_far=vec2<u32>(0u);
