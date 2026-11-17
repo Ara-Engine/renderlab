@@ -1440,6 +1440,8 @@ impl Planner {
             header[47] = accumulate_word("RENDERLAB_GI_ACC_SIGMA", 200);
             // Each ray from a fresh point of the cell's surface (1) or from its query point (0).
             header[51] = accumulate_word("RENDERLAB_GI_ACC_AREA", 1);
+            // Measurement: 0 drops what update rays read at hits (sky and direct light only).
+            header[52] = accumulate_word("RENDERLAB_GI_ACC_HITS", 1);
         }
         // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
         // are uncapped.

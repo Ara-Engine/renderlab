@@ -162,6 +162,8 @@ const GI_H_ACC_BUDGET:u32=46u;
 const GI_H_ACC_SIGMA:u32=47u;
 // Nonzero: each update ray starts from a fresh point of the cell's surface (gi_accumulate).
 const GI_H_ACC_AREA:u32=51u;
+// Measurement: 0 drops what update rays read at hits.
+const GI_H_ACC_HITS:u32=52u;
 // Its hot words (the bounce's, unused while accumulating): the fast mean, the slow mean and the
 // slow second moment of an update's L0 luminance (f32), and the updates blended (u32).
 const GI_HOT_ACC_FAST:u32=17u;

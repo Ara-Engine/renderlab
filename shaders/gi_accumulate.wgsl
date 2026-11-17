@@ -113,7 +113,7 @@ var<workgroup> gi_wg_acc_count:u32;
                 radiance=gi_sky_absolute(gi_sky(d));
             } else {
                 let o=gi_hit_radiance(origin,d,h,band,tertiary);
-                if o.w>GI_HIT_NONE { radiance=o.rgb; }
+                if o.w>GI_HIT_NONE && gi_word(GI_H_ACC_HITS)!=0u { radiance=o.rgb; }
             }
             gi_sh_basis(d);
             let w=6.283185307179586/f32(rays);
