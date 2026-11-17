@@ -2697,7 +2697,10 @@ impl Renderer {
     ) -> Result<Option<FrameReport>, Error> {
         // TP1: transparent draws leave every opaque path for the transparent pass. The
         // split is stable and the caller's order comes back afterwards.
-        let (opaque, order) = transparency_gpu::split(draws);
+        // Measurement: RENDERLAB_TRANSPARENT_OPAQUE=1 keeps them in every opaque path, so panes
+        // block light fully everywhere (the bound against which their transmission is judged).
+        let keep = std::env::var("RENDERLAB_TRANSPARENT_OPAQUE").as_deref() == Ok("1");
+        let (opaque, order) = if keep { (draws.len(), None) } else { transparency_gpu::split(draws) };
         let (front, transparent) = draws.split_at_mut(opaque);
         let result = self.render_view(color, camera, front, transparent, view_mode);
         if let Some(order) = order {
