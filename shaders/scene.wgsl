@@ -356,17 +356,6 @@ fn environment_product(energy:vec3<f32>, response:vec3<f32>) -> vec3<f32> {
 // bright target that one ray in hundreds struck (white pixels). 0 elsewhere: camera
 // receivers evaluate the exact lobe.
 var<private> rl_hit_variance:f32;
-// The perceptual roughness a lobe of roughness `rough` takes here: its own at camera
-// receivers; at a reflection hit, widened by the ray's cone exactly as `brdf` widens its
-// lobes. For the specular terms a program evaluates itself (the environment's prefiltered
-// radiance and its separated sun lobes): without it a chrome hit kept a pinpoint image of
-// the sun that a glossy ray struck once in hundreds (white sparkles in glossy floors).
-// `brdf` applies the widening itself; do not pass it a widened roughness.
-fn hit_roughness(rough:f32)->f32 {
-    if rl_hit_variance<=0.0 {return rough;}
-    let alpha=max(rough*rough,1e-4);
-    return sqrt(sqrt(min(alpha*alpha+rl_hit_variance,1.0)));
-}
 fn brdf(n:vec3<f32>, v:vec3<f32>, l:vec3<f32>, base:vec3<f32>, metal:f32, rough:f32) -> vec3<f32> {
     let nl=max(dot(n,l),0.0);
     let nv=max(dot(n,v),1e-7);

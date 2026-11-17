@@ -67,7 +67,7 @@ fn shader() -> String {
         &decals[decals.find("struct DecalInput {").unwrap()..decals.find("fn dc_texel(").unwrap()],
     );
     source.push_str(&decals[decals.find("fn decal_base_color(").unwrap()..]);
-    for name in ["exposed_product", "brdf", "hit_roughness"] {
+    for name in ["exposed_product", "brdf"] {
         source.push_str(&function(scene, name));
         source.push('\n');
     }

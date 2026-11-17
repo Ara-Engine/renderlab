@@ -116,9 +116,6 @@ const FG_CONE:f32=0.6266570686577501;
 // wide as FG_CONE): a sample of the sky in that direction, not the whole hemisphere's blur,
 // which mixed the horizon into the zenith and greyed sky-lit shadow.
 const FG_SKY_ALPHA:f32=0.09817477042468103;
-// A probe ray's path regularization at its hits (rl_hit_variance, scene.wgsl): GGX alpha^2 of
-// 8 spread^2 for the cone's half-angle spread = FG_CONE / 2, as reflection rays take theirs.
-const FG_HIT_VARIANCE:f32=0.7853981633974483;
 const FG_SEARCH:i32=2;
 // A probe's plane reaches this fraction of its footprint along its normal (the Gaussian width).
 const FG_PLANE:f32=0.5;
@@ -250,10 +247,8 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     rl_load_parameters(h.batch);
     gi_prepare(h.input);
     rl_reflection_hit=true;
-    rl_hit_variance=FG_HIT_VARIANCE;
     let hs=surface(h.input);
     let radiance=rl_finite(shade(hs,h.input))*inverse;
-    rl_hit_variance=0.0;
     rl_reflection_hit=false;
     rl_hit_lights_clear();
     return radiance;

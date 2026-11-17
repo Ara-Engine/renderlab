@@ -143,12 +143,9 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     let base=select(s.base*s.alpha,s.base,film);
     let metal=s.metal;
     let rough=s.rough;
-    // The environment terms' lobe: widened by a reflection hit's cone (hit_roughness), as
-    // `brdf` widens the lights' lobes below.
-    let env_rough=hit_roughness(rough);
     var v=unit_normal(input.eye-input.world);
     if dot(v,v)<0.5 { v=n; }
-    let ab=environment_dfg(dot(n,v),env_rough);
+    let ab=environment_dfg(dot(n,v),rough);
     let f0=vec3<f32>(0.04)*(1.0-metal)+base*metal;
     // Sky diffuse is the engine's incident irradiance at this receiver: occluded by the
     // world radiance cache when it runs, the open environment otherwise.
@@ -161,16 +158,16 @@ fn shade(s:Surface, input:SurfaceInput) -> vec3<f32> {
     var specular=vec3<f32>(0.0);
     if reflection_needs_environment() && rl_term(RL_TERM_ENVIRONMENT) {
         let reflected=reflect(-v,n);
-        let radiance=indirect_radiance(input,reflected,env_rough);
+        let radiance=indirect_radiance(input,reflected,rough);
         specular=exposed_product(radiance,reflectance);
         if environment_enabled() {
             specular=environment_product(radiance,reflectance);
             for(var i=0u;i<environment_lobe_count();i+=1u) {
                 let lobe=environment_lobe(input,i);
-                let w=lobe_weight(lobe.sharpness,env_rough);
+                let w=lobe_weight(lobe.sharpness,rough);
                 if w<=0.0 { continue; }
-                let share=environment_lobe_reflection(input,i,reflected,env_rough);
-                specular+=w*(environment_product(lobe.illuminance,lobe_specular(n,v,lobe,f0,env_rough))
+                let share=environment_lobe_reflection(input,i,reflected,rough);
+                specular+=w*(environment_product(lobe.illuminance,lobe_specular(n,v,lobe,f0,rough))
                     -environment_product(share,reflectance));
             }
             specular=max(specular,vec3<f32>(0.0));
