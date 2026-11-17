@@ -51,6 +51,8 @@ pub use mesh_lod::{LodPackage, LodStats, MeshLod};
 pub use virtual_shadow_gpu::{
     VIRTUAL_FEATURES, VirtualLookup, VirtualShadowSettings, VirtualShadowStats, WalkRecords,
 };
+#[path = "reference_live_gpu.rs"]
+mod reference_live_gpu;
 #[path = "program_gpu.rs"]
 mod program_gpu;
 #[path = "reflection_hits.rs"]
@@ -730,6 +732,11 @@ pub struct Renderer {
     residency: texture_residency::Residency,
     /// M7 world radiance cache (`gi_cache.rs`).
     gi: gi_cache::GiState,
+    /// The live reference's per-draw program ids and see-through flags, kept while one is requested,
+    /// and whether this frame keeps transparent draws traced (reference_live_gpu.rs).
+    live_programs: Vec<u64>,
+    live_transparent: Vec<bool>,
+    live_opaque: bool,
     /// AT1 sky LUTs, kernels and the procedural sky (`atmosphere_gpu.rs`); each view owns
     /// its camera volume and fog histories.
     atmosphere: atmosphere_gpu::AtmosphereGpu,
@@ -1208,6 +1215,9 @@ impl Renderer {
             lod_lift: visibility_buffer::DEFAULT_LOD_LIFT,
             shadow_settings: Default::default(),
             gi,
+            live_programs: Vec::new(),
+            live_transparent: Vec::new(),
+            live_opaque: false,
             reconstruction_shadow_budget: ReconstructionShadowBudget::default(),
             transparency: Default::default(),
             primary_hash: [0; 32],
@@ -2697,9 +2707,10 @@ impl Renderer {
     ) -> Result<Option<FrameReport>, Error> {
         // TP1: transparent draws leave every opaque path for the transparent pass. The
         // split is stable and the caller's order comes back afterwards.
-        // Measurement: RENDERLAB_TRANSPARENT_OPAQUE=1 keeps them in every opaque path, so panes
-        // block light fully everywhere (the bound against which their transmission is judged).
-        let keep = std::env::var("RENDERLAB_TRANSPARENT_OPAQUE").as_deref() == Ok("1");
+        // The live reference's frame keeps them (set_live_opaque_frame). Measurement:
+        // RENDERLAB_TRANSPARENT_OPAQUE=1 keeps them in every frame, so panes block light fully
+        // everywhere (the bound against which their transmission is judged).
+        let keep = self.live_opaque || std::env::var("RENDERLAB_TRANSPARENT_OPAQUE").as_deref() == Ok("1");
         let (opaque, order) = if keep { (draws.len(), None) } else { transparency_gpu::split(draws) };
         let (front, transparent) = draws.split_at_mut(opaque);
         let result = self.render_view(color, camera, front, transparent, view_mode);
@@ -3226,6 +3237,7 @@ impl Renderer {
             .hardware_shadows
             .as_ref()
             .map_or(0, |h| h.scene_generation());
+        self.remember_live_programs(draws);
         let gi_start = Instant::now();
         let result = self.prepare_gi(
             draws,
