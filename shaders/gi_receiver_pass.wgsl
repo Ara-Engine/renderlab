@@ -231,15 +231,23 @@ fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
     let z=u.x;let rr=sqrt(max(1.0-z*z,0.0));let phi=6.283185307179586*u.y;
     return fg_basis(n)*vec3<f32>(rr*cos(phi),rr*sin(phi),z);
 }
+// A probe ray's path regularization at its hits (rl_hit_variance, scene.wgsl `brdf`): GGX
+// alpha^2 of 8 spread^2 for the cone's half-angle spread = FG_CONE / 2, as reflection rays take
+// theirs, so a mirror's sun highlight at a hit is seen through the ray's cone.
+const FG_HIT_VARIANCE:f32=0.7853981633974483;
 // Incoming radiance (unexposed) along d from `origin`.
 fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f32> {
     let inverse=1.0/max(lighting.exposure,1e-30);
     let traced=rl_cast(origin,d,epsilon);
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)*inverse;}
-    // A hit whose cone covers its cache cell reads the cell's outgoing radiance (emission and
-    // the cell's reflection of sky, bounce and the lights its visibility ray reached); contacts,
-    // movers and unsettled cells shade with the program and their own direct light.
-    let cached=rl_cache_lookup(traced.record,origin,d,traced.t,FG_CONE*traced.t);
+    // Every hit reads its cache cell's outgoing radiance (emission and the cell's reflection of
+    // sky, bounce and the lights its visibility ray reached), as screen probes read a surface
+    // cache: the ray stands for a share of the probe's hemisphere, so its footprint is taken as at
+    // least the cell there. Movers and absent or unsettled cells shade with the program. Shading
+    // near hits instead (contacts, thin faces beside other geometry) came out about a tenth darker
+    // than the cells and the reference: dark strips on the ring's sides and along the rail's foot.
+    let at=fma(d,vec3<f32>(traced.t),origin);
+    let cached=rl_cache_lookup(traced.record,origin,d,traced.t,max(FG_CONE*traced.t,gi_edge(gi_level(at))));
     if cached.w>0.0 {return rl_finite(cached.rgb);}
     let h=rl_hit_input(traced.record,origin,d,0.0,0.0,pixel);
     if !h.visible {return vec3<f32>(0.0);}
@@ -247,8 +255,10 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     rl_load_parameters(h.batch);
     gi_prepare(h.input);
     rl_reflection_hit=true;
+    rl_hit_variance=FG_HIT_VARIANCE;
     let hs=surface(h.input);
     let radiance=rl_finite(shade(hs,h.input))*inverse;
+    rl_hit_variance=0.0;
     rl_reflection_hit=false;
     rl_hit_lights_clear();
     return radiance;
