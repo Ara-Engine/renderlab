@@ -2052,7 +2052,10 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
         let o=gi_outgoing[slot];
         if o.w>0.0 {
             let settled=select(GI_HIT_CHANGING,GI_HIT_FINAL,o.w>=1.0);
-            return vec4<f32>(o.rgb,select(GI_HIT_MISSING,settled,l==base || orphan));
+            // A hit on an emitting draw sends its reflected light only: its emission is the
+            // emitter list's (gi_emitters.wgsl), sampled as a light by every gather.
+            let reflected=max(o.rgb-gi_identity_emission(gi_hit_identity(h.inst,h.tri)),vec3<f32>(0.0));
+            return vec4<f32>(reflected,select(GI_HIT_MISSING,settled,l==base || orphan));
         }
         if l==base {
             orphan=(gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)!=0u;
@@ -2294,6 +2297,8 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             rays+=aimed.x;
             missing+=aimed.y;
             changing+=aimed.z;
+            // Emitters as lights, in closed form (gi_emitters.wgsl).
+            rays+=gi_emitter_gather(lane,q,origin,n,c.key);
             if missing!=0u { atomicAdd(&gi_wg_missing,missing); }
             if changing!=0u { atomicAdd(&gi_wg_changing,changing); }
             if rays!=0u { atomicAdd(&gi_wg_rays,rays); }
