@@ -68,6 +68,48 @@ fn gi_acc_select(kind:u32, id:vec3<u32>, groups:vec3<u32>) {
 // rotation drawn per update and jittered per ray, so consecutive updates trace different rays and
 // many updates cover the hemisphere evenly. src/gi_cache.rs acc_local_direction is its twin, and
 // the tests there hold both to that (accumulate_directions_*).
+// A light's incident irradiance at p facing it, before visibility and the cosine:
+// program_api.wgsl light_sample_untinted's arithmetic (inverse square from 1 cm, the range
+// window, the spot cone). Transparent panes do not tint it: the cache traces through them.
+fn gi_light_incidence(l:u32, p:vec3<f32>, to:vec3<f32>, distance:f32) -> vec3<f32> {
+    let light=lights[l];
+    if light.kind.x==0u { return light.rgb_inner.xyz; }
+    let inverse=1.0/max(distance,0.01);
+    var a=inverse*inverse;
+    if light.position_range.w>0.0 {
+        let ratio=min(distance/light.position_range.w,1.0);
+        let window=max(1.0-ratio*ratio*ratio*ratio,0.0);
+        a*=window*window;
+    }
+    if light.kind.x==2u {
+        let cone=clamp((dot(-to,light.travel_outer.xyz)-light.travel_outer.w)/max(light.rgb_inner.w-light.travel_outer.w,1e-4),0.0,1.0);
+        a*=cone*cone;
+    }
+    return light.rgb_inner.xyz*a;
+}
+// An update ray's hit radiance with direct light evaluated at the hit (Lumen's hit lighting):
+// the hit cell's parts (gi_cells.wgsl GiParts) give emission + albedo / pi * (its indirect
+// irradiance about its normal + each light reaching the hit point, one visibility ray each).
+// A cell's outgoing radiance took its lights from one visibility ray at its own query point,
+// so a cell on a shadow's edge sent all or none of the sun to every cell whose rays met it:
+// the hangar's mosaic (docs/design-gi-accumulate.md). While accumulating, a cell's sky SH holds
+// all its indirect incident radiance (absolute), and no bounce words.
+fn gi_acc_hit_lit(slot:u32, p:vec3<f32>, hn:vec3<f32>) -> vec3<f32> {
+    let parts=gi_parts_unpack(gi_outgoing[gi_parts_at(slot)]);
+    let nc=gi_unpack_normal(gi_table[gi_cold(slot)+GI_C_NORMAL]);
+    var e=gi_cell_sky_irradiance(gi_hot(slot),nc);
+    let start=p+hn*gi_origin_offset(p,0.0);
+    for(var l=0u;l<lighting.count;l+=1u) {
+        if !gi_light_affects(l,p,hn) { continue; }
+        let to=gi_light_direction(l,p);
+        atomicAdd(&gi_work[GI_W_ACC_SUN_RAYS],1u);
+        if gi_visible_within(start,to.xyz,to.w) {
+            atomicAdd(&gi_work[GI_W_ACC_SUN_LIT],1u);
+            e+=gi_light_incidence(l,p,to.xyz,to.w)*dot(hn,to.xyz);
+        }
+    }
+    return parts.emission+parts.albedo*e*(1.0/3.141592653589793);
+}
 fn gi_acc_local(slot:u32, frame:u32, lane:u32, rays:u32) -> vec3<f32> {
     let seed=gi_mix(slot^(frame*0x9e3779b9u));
     let turn=f32(seed>>8u)*(6.283185307179586/16777216.0);
@@ -124,7 +166,13 @@ var<workgroup> gi_wg_acc_count:u32;
                 radiance=gi_sky_absolute(gi_sky(d));
             } else {
                 let o=gi_hit_radiance(origin,d,h,band,tertiary);
-                if o.w>GI_HIT_NONE && gi_word(GI_H_ACC_HITS)!=0u { radiance=o.rgb; }
+                if o.w>GI_HIT_NONE && gi_word(GI_H_ACC_HITS)!=0u {
+                    radiance=o.rgb;
+                    if gi_word(GI_H_ACC_DIRECT)!=0u && gi_hit_slot!=0xffffffffu {
+                        let hn=select(-h.normal,h.normal,dot(h.normal,-d)>=0.0);
+                        radiance=gi_acc_hit_lit(gi_hit_slot,origin+d*h.t,hn);
+                    }
+                }
                 // Measurement: what the sun costs evaluated at the hit (one visibility ray per
                 // directional light), counted only (RENDERLAB_GI_ACC_HITSUN).
                 if gi_word(GI_H_ACC_HITSUN)!=0u {

@@ -503,7 +503,8 @@ impl Sizes {
             + 2 * (1 + u64::from(slots))
             + u64::from(slots))
             * 4;
-        let outgoing_bytes = u64::from(slots) * 16;
+        // Per slot its outgoing radiance, then per slot its parts (gi_cells.wgsl GiParts).
+        let outgoing_bytes = u64::from(slots) * 32;
         let draws_bytes = u64::from(TRACED_DRAWS + 1) * 16;
         let raw_slots = if settings.filter != 0 { slots } else { 1 };
         let raw_bytes = u64::from(raw_slots) * RAW_WORDS * 4;
@@ -1470,6 +1471,9 @@ impl Planner {
             // Measurement: 1 traces a visibility ray to each directional light at every update hit
             // (the result only counted), to price evaluating the sun at hits instead of per cell.
             header[39] = accumulate_word("RENDERLAB_GI_ACC_HITSUN", 0);
+            // 1: update-ray hits take direct light at the hit and the hit cell's parts
+            // (gi_acc_hit_lit); 0: the hit cell's outgoing radiance, as gathers read it.
+            header[40] = accumulate_word("RENDERLAB_GI_ACC_DIRECT", 1);
         }
         // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
         // are uncapped.
@@ -4339,7 +4343,8 @@ pub(crate) fn cell_selector(id: u64) -> u32 {
     u32::try_from(id + 1).expect("program ids fit the cell selector")
 }
 const CELL_PLACEMENT_SEAM: &str = "    if p==0xffffffffu { return vec4<f32>(0.0,0.0,0.0,1.0); }\n";
-const CELL_STORE_SEAM: &str = "        gi_shade_out[slot]=gs_shade(slot);\n";
+const CELL_STORE_SEAM: &str =
+    "        gi_shade_out[slot]=gs_shade(slot);\n        gi_shade_out[gi_parts_at(slot)]=gs_parts;\n";
 /// A mixed frame's cell entry for program `id`: it shades only cells whose draw selects
 /// it, writes "reflects nothing" for draws whose program has no cell shading (every
 /// program's dispatch writes the same value), and leaves other programs' cells to theirs.
@@ -4352,7 +4357,7 @@ pub(crate) fn mixed_cell_entry(source: &str, id: u64) -> String {
     );
     source.replacen(CELL_PLACEMENT_SEAM, &check, 1).replacen(
         CELL_STORE_SEAM,
-        "        let value=gs_shade(slot);\n        if value.w>=0.0 {gi_shade_out[slot]=value;}\n",
+        "        let value=gs_shade(slot);\n        if value.w>=0.0 {gi_shade_out[slot]=value;gi_shade_out[gi_parts_at(slot)]=gs_parts;}\n",
         1,
     )
 }

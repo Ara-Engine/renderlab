@@ -166,6 +166,10 @@ const GI_H_ACC_AREA:u32=51u;
 const GI_H_ACC_HITS:u32=52u;
 // Measurement: nonzero traces a sun visibility ray at every update hit (counted only).
 const GI_H_ACC_HITSUN:u32=39u;
+// Nonzero: an update ray's hit reads the hit cell's parts and adds direct light at the hit
+// (gi_acc_hit_lit) instead of the cell's outgoing radiance, whose lights come from one
+// visibility ray per cell.
+const GI_H_ACC_DIRECT:u32=40u;
 // Its hot words (the bounce's, unused while accumulating): the fast mean, the slow mean and the
 // slow second moment of an update's L0 luminance (f32), and the updates blended (u32).
 const GI_HOT_ACC_FAST:u32=17u;
@@ -476,6 +480,21 @@ fn gi_basis(n:vec3<f32>) -> mat3x3<f32> {
     let a=-1.0/(s+n.z);
     let b=n.x*n.y*a;
     return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
+}
+// A cell's parts: what cell shading (gi_shade_entry.wgsl) computes before the lights, so a
+// reader that evaluates direct light at its own hit point can rebuild the cell's radiance for
+// any program: emission + albedo / pi * (indirect irradiance + direct irradiance at the hit).
+// Stored in the outgoing radiance buffer after every slot's radiance, at gi_parts_at(slot),
+// valid where the slot's radiance is (w > 0): emission rgb, and the directional albedo 8 bits a
+// channel in w. Its top byte is 0x3f, so w is always a normal float and survives every f32 load
+// and store unchanged.
+struct GiParts { emission:vec3<f32>, albedo:vec3<f32> };
+fn gi_parts_at(slot:u32) -> u32 { return gi_word(GI_H_MASK)+1u+slot; }
+fn gi_parts_pack(emission:vec3<f32>, albedo:vec3<f32>) -> vec4<f32> {
+    return vec4<f32>(emission,bitcast<f32>(pack4x8unorm(vec4<f32>(albedo,63.0/255.0))));
+}
+fn gi_parts_unpack(v:vec4<f32>) -> GiParts {
+    return GiParts(v.xyz,unpack4x8unorm(bitcast<u32>(v.w)).xyz);
 }
 fn gi_unpack_normal(w:u32) -> vec3<f32> {
     let q=unpack2x16snorm(w);

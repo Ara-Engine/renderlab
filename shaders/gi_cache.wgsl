@@ -2009,6 +2009,9 @@ const GI_HIT_NONE:f32=0.25;
 // the pixels' level). The gather kernels set it: the fixed directions' share of the cone's
 // footprint, and 0 for the rays aimed around a light.
 var<private> gi_hit_spread:f32;
+// The slot whose outgoing radiance gi_hit_radiance returned last (0xffffffff: none), for a
+// reader that rebuilds the hit's radiance from the cell's parts (gi_accumulate.wgsl).
+var<private> gi_hit_slot:u32;
 // The level a gather hit at `world`, a distance t along its ray, reads and requests: the level
 // a pixel there would read, or the coarser one whose cells are gi_hit_spread * t on an edge.
 // A fixed direction stands for a cone 0.36 t wide at the hit (64 directions), so a 4 px cell
@@ -2040,6 +2043,7 @@ fn gi_hit_level(world:vec3<f32>, t:f32) -> u32 {
     return level;
 }
 fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bool) -> vec4<f32> {
+    gi_hit_slot=0xffffffffu;
     let r=gi_hit_receiver(origin,d,h);
     let world=r.world;
     let bin=gi_bin(r.vertex);
@@ -2068,6 +2072,7 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
         }
         let o=gi_outgoing[slot];
         if o.w>0.0 {
+            gi_hit_slot=slot;
             let settled=select(GI_HIT_CHANGING,GI_HIT_FINAL,o.w>=1.0);
             return vec4<f32>(o.rgb,select(GI_HIT_MISSING,settled,l==base || orphan));
         }
