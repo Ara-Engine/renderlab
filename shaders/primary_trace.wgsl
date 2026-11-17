@@ -105,7 +105,7 @@ fn primary_raw_closest(pixel:vec2<u32>,size:vec2<u32>)->PrimaryTrace {
     // the object-space winding normal against the object-space ray, so mirrored
     // instances keep their source sides. Only scenes with such draws pay for it.
     let flags=select(RAY_FLAG_FORCE_OPAQUE,RAY_FLAG_FORCE_NO_OPAQUE,primary_frame.sided.x!=0u);
-    rayQueryInitialize(&query,primary_scene,RayDesc(flags,255u,0.0,distance,ray.near,direction));
+    rayQueryInitialize(&query,primary_scene,RayDesc(flags,VISIBLE_MASK,0.0,distance,ray.near,direction));
     while rayQueryProceed(&query) {
         let candidate=rayQueryGetCandidateIntersection(&query);
         var visible=(primary_placements[candidate.instance_custom_data]&0x40000000u)==0u;
@@ -175,7 +175,7 @@ fn primary_repair(trace:PrimaryTrace,origin:vec3<f32>,direction:vec3<f32>)->Prim
             let probe_direction=direction;let reach=8.0*radius;
 
             if neighbour==0xffffffffu {
-                rayQueryInitialize(&query,primary_scene,RayDesc(RAY_FLAG_FORCE_NO_OPAQUE,255u,0.0,reach,start,probe_direction));
+                rayQueryInitialize(&query,primary_scene,RayDesc(RAY_FLAG_FORCE_NO_OPAQUE,VISIBLE_MASK,0.0,reach,start,probe_direction));
             }
             var direct_pending=true;
             loop {
