@@ -781,6 +781,11 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     }
     let clo=max(max(bottom,lo),1e-6*size);let chi=min(t,hi);
     var m=vd_column_mask(c-p.xy,0.5*size,clo,chi);
+    // The split: a partial column of a band above the receiver's level draws its outline at a
+    // finer texel (vd_split); the band still sets the blur width.
+    if VD_SPLIT && stride==1 && level>vd_px.level && any((m&~vd_mask)!=vec2<u32>(0u)) && any(m!=vec2<u32>(0xffffffffu)) {
+        m=vd_split(c,level,size,clo,chi,m);
+    }
     // Straight outlines: only a column that adds samples without covering the disk reads its
     // texel's line (one word), and only an outline texel's is clipped.
     if VD_EDGES && stride==1 && any((m&~vd_mask)!=vec2<u32>(0u)) && any(m!=vec2<u32>(0xffffffffu)) {
@@ -813,6 +818,54 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
 // Off (`RENDERLAB_VD=VD_RING=false`): every band whose max-mip clears its floor reads its whole
 // window (the same answers, more reads).
 override VD_RING:bool=true;
+// ---- The split (`RENDERLAB_VD=VD_SPLIT=true`) ----
+// A band reads its occluders at a texel 1/3 to 1/6 of their penumbra, which bounds its window,
+// but its outline is then a staircase of that texel: an edge at a shallow angle to the map wobbles
+// by a tenth of the texel, several pixels long. A partial column (it adds samples without filling
+// the disk: a pixel in the occluder's penumbra) is redrawn from the texels inside it at a finer
+// level, the receiver's or VD_SPLIT_LEVELS finer than the band, whichever is coarser: each fine
+// texel whose top is above the column's floor is a sub-column from that floor to its own top. The
+// outline then steps at the fine texel while the band's window, and the blur, stay as they were.
+// A fine page that is not current for its window keeps the coarse column (`RENDERLAB_VD_EDGE_LOG`
+// word 7 counts those).
+override VD_SPLIT:bool=false;
+override VD_SPLIT_LEVELS:u32=2u;
+// Whether page `page` of `level` holds this window's depths (resident, or rasterized at the
+// level's current epoch).
+fn vd_page_current(level:u32,page:vec2<u32>)->bool {
+    if vsm_sparse() {return vd_slot(level,page)!=VSM_NONE;}
+    return vsm_pages[vsm_vpage(level,page)]==vsm.levels[level].info.x;
+}
+fn vd_split(c:vec2<f32>,level:u32,size:f32,clo:f32,chi:f32,coarse:vec2<u32>)->vec2<u32> {
+    let f=max(vd_px.level,level-min(level-vd_px.level,VD_SPLIT_LEVELS));
+    let tf=vsm_texel(f);
+    let n=i32(round(size/tf));
+    let origin=vsm.levels[f].origin.xy;
+    let a=vec2<i32>(round((c-vec2<f32>(0.5*size)-origin)/tf));
+    let side=i32(vsm.counts.y*VSM_PAGE);
+    if any(a<vec2<i32>(0)) || any(a+vec2<i32>(n)>vec2<i32>(side)) {return coarse;}
+    let pa=vec2<u32>(a)/VSM_PAGE;let pb=vec2<u32>(a+vec2<i32>(n-1))/VSM_PAGE;
+    if !vd_page_current(f,pa) || !vd_page_current(f,pb) || !vd_page_current(f,vec2<u32>(pa.x,pb.y)) || !vd_page_current(f,vec2<u32>(pb.x,pa.y)) {
+        if VD_COUNTS {atomicAdd(&vd_edge_count[7],1u);}
+        return coarse;
+    }
+    let p=vd_px.p+vec3<f32>(vd_shift,0.0);
+    var m=vec2<u32>(0u);
+    for(var y=0;y<n;y+=1) {
+        for(var x=0;x<n;x+=1) {
+            let cell=a+vec2<i32>(x,y);
+            let i=vsm_index(cell,f);
+            if i==VSM_NONE {continue;}
+            let w=vsm_top_words[i];
+            if w.x==0u {continue;}
+            let t=vsm_height(w)-p.z;
+            if t<=clo {continue;}
+            let cf=origin+(vec2<f32>(cell)+vec2<f32>(0.5))*tf;
+            m|=vd_column_mask(cf-p.xy,0.5*tf,clo,min(t,chi));
+        }
+    }
+    return m;
+}
 // The map's columns: each level's band of heights, the highest band first (vd_map).
 fn vd_map() {
     vd_pl=VSM_NONE;

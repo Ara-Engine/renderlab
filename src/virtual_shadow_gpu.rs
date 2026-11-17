@@ -213,6 +213,10 @@ const PASS_STRIDE: u64 = 256;
 /// tile hold (level, tile) for the hardware raster's areas (WGSL `vsm_area_tiles`).
 const PASS_ENTRIES: usize = 16 + 4 * MAX_LEVELS;
 const PASS_TILES: usize = 16;
+/// The hardware raster attachment's side in pages (WGSL `vsm_area`): 32, so the sparse windows
+/// (`SPARSE_PAGES`) draw each level once, as the dense ones do, instead of once per 16-page
+/// tile (each tile ran every hardware cluster's vertices again).
+const AREA_PAGES: u32 = 32;
 /// Per-level WGSL `VsmArgs`: the software dispatch and the hardware draw.
 const ARGS_BYTES: u64 = 32;
 /// The WGSL `VsmScratch` header (N8m): the persistent lookup's tile queue, three reserved words
@@ -1985,10 +1989,10 @@ impl VirtualState {
         let area = ledger.own(
             device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("N8c hardware raster area"),
-                // At most 16 pages a side: wider windows draw in tiles (WGSL `vsm_area`).
+                // At most AREA_PAGES pages a side: wider windows draw in tiles (WGSL `vsm_area`).
                 size: wgpu::Extent3d {
-                    width: side.min(16 * PAGE),
-                    height: side.min(16 * PAGE),
+                    width: side.min(AREA_PAGES * PAGE),
+                    height: side.min(AREA_PAGES * PAGE),
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
@@ -2473,7 +2477,7 @@ impl Renderer {
                 let word = |i: usize| u32::from_ne_bytes(words[4 * i..4 * i + 4].try_into().unwrap());
                 let p = &state.stats;
                 let line = format!(
-                    "{} {} {} {} capped {} missing {} stand-in {} pool {} {} {} {} {}",
+                    "{} {} {} {} capped {} missing {} stand-in {} split-kept {} pool {} {} {} {} {}",
                     word(0),
                     word(1),
                     word(2),
@@ -2481,6 +2485,7 @@ impl Renderer {
                     word(4),
                     word(5),
                     word(6),
+                    word(7),
                     p.requested_pages,
                     p.rendered_pages,
                     p.failed_pages,
@@ -4143,7 +4148,7 @@ impl Renderer {
             pass.set_bind_group(2, &*casters.data, &[]);
             // A window wider than the attachment draws once per area (WGSL `vsm_area_tiles`);
             // each draw's vertices skip the clusters the cull did not mark for its area.
-            let tiles = (r.pages / r.pages.min(16)).pow(2) as usize;
+            let tiles = (r.pages / r.pages.min(AREA_PAGES)).pow(2) as usize;
             for level in 0..state.levels {
                 for tile in 0..tiles {
                     let entry = PASS_TILES + 4 * level + tile;
