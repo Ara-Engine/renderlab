@@ -2477,7 +2477,7 @@ impl Renderer {
                 let word = |i: usize| u32::from_ne_bytes(words[4 * i..4 * i + 4].try_into().unwrap());
                 let p = &state.stats;
                 let line = format!(
-                    "{} {} {} {} capped {} missing {} stand-in {} split-kept {} pool {} {} {} {} {}",
+                    "{} {} {} {} capped {} missing {} stand-in {} split {} pool {} {} {} {} {}",
                     word(0),
                     word(1),
                     word(2),

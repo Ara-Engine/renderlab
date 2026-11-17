@@ -827,7 +827,7 @@ override VD_RING:bool=true;
 // texel whose top is above the column's floor is a sub-column from that floor to its own top. The
 // outline then steps at the fine texel while the band's window, and the blur, stay as they were.
 // A fine page that is not current for its window keeps the coarse column (`RENDERLAB_VD_EDGE_LOG`
-// word 7 counts those).
+// word 7 counts the columns redrawn).
 override VD_SPLIT:bool=false;
 override VD_SPLIT_LEVELS:u32=2u;
 // Whether page `page` of `level` holds this window's depths (resident, or rasterized at the
@@ -846,9 +846,9 @@ fn vd_split(c:vec2<f32>,level:u32,size:f32,clo:f32,chi:f32,coarse:vec2<u32>)->ve
     if any(a<vec2<i32>(0)) || any(a+vec2<i32>(n)>vec2<i32>(side)) {return coarse;}
     let pa=vec2<u32>(a)/VSM_PAGE;let pb=vec2<u32>(a+vec2<i32>(n-1))/VSM_PAGE;
     if !vd_page_current(f,pa) || !vd_page_current(f,pb) || !vd_page_current(f,vec2<u32>(pa.x,pb.y)) || !vd_page_current(f,vec2<u32>(pb.x,pa.y)) {
-        if VD_COUNTS {atomicAdd(&vd_edge_count[7],1u);}
         return coarse;
     }
+    if VD_COUNTS {atomicAdd(&vd_edge_count[7],1u);}
     let p=vd_px.p+vec3<f32>(vd_shift,0.0);
     var m=vec2<u32>(0u);
     for(var y=0;y<n;y+=1) {

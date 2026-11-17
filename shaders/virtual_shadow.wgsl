@@ -309,7 +309,10 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     vsm_state[vsm_section(3u)+v]=frame;
     let table=vsm_section(2u);
     var slot=vsm_state[table+v];
-    let moved=slot!=VSM_NONE && vsm_moved(level,page)!=0u;
+    // A resident page that moved casters touched redraws only their rectangle (as the dense
+    // windows' vsm_compact); a new page draws whole.
+    let rect=select(0u,vsm_moved(level,page),slot!=VSM_NONE);
+    let moved=rect!=0u;
     if slot!=VSM_NONE && !moved {return;}
     if atomicAdd(&vsm_pool[5],1u)>=atomicLoad(&vsm_pool[9]) {
         // Rasterized again next frame (vsm_release frees it).
@@ -328,7 +331,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     }
     vsm_state[v]=vsm.levels[level].info.x;
     vsm_state[vsm_section(1u)+v]=vsm_tag(level,page);
-    vsm_render[v]=VSM_DIRTY_FULL;
+    vsm_render[v]=select(VSM_DIRTY_FULL,rect,moved);
     let k=atomicAdd(&vsm_pool[0],1u);
     atomicStore(&vsm_pool[VSM_POOL_FREE+atomicLoad(&vsm_pool[10])+k],v);
     let groups=max((vsm.counts.z+63u)/64u,1u);
@@ -479,8 +482,11 @@ fn vsm_rendered(k:u32)->u32 {return vsm_pool_in[VSM_POOL_FREE+vsm_pool_in[10]+k]
 // Sparse: zeroes both layers of each page rasterized this frame, one workgroup per page
 // (an indirect dispatch over the pool's list).
 @compute @workgroup_size(256) fn vsm_clear_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
-    let slot=vsm_pages[vsm_section(2u)+vsm_rendered(group.x)];
+    let v=vsm_rendered(group.x);
+    let slot=vsm_pages[vsm_section(2u)+v];
+    let w=vsm_render[v];
     for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
+        if !vsm_dirty_has(w,vec2<u32>(k%VSM_PAGE,k/VSM_PAGE)) {continue;}
         atomicStore(&vsm_top_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
         atomicStore(&vsm_peel_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
     }
