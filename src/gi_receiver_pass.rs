@@ -276,7 +276,7 @@ pub(super) struct Targets {
     /// resolve pipelines per `Shading`, on the shading layout (hits sample materials). Its
     /// probes, FG_SLOTS per FG_TILE tile, one per FG_BLOCK block and the tile probes' filtered
     /// copies, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe).
-    gather: [Option<[Owned<wgpu::ComputePipeline>; 4]>; 2],
+    gather: [Option<[Owned<wgpu::ComputePipeline>; 5]>; 2],
     tiles: [u32; 2],
     blocks: [u32; 2],
 }
@@ -458,6 +458,7 @@ impl Renderer {
             gather = Some([
                 build_entry(layout, "fg_trace"),
                 build_entry(layout, "fg_filter"),
+                build_entry(layout, "fg_classify"),
                 build_entry(layout, "fg_adapt"),
                 build_entry(layout, "fg_resolve"),
             ]);
@@ -554,15 +555,17 @@ impl Renderer {
             None => pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]),
         }
         pass.set_bind_group(3, self.lighting.bind(), &[]);
-        if let Some([trace, filter, adapt, resolve]) = target.gather[shading as usize].as_ref() {
+        if let Some([trace, filter, classify, adapt, resolve]) = target.gather[shading as usize].as_ref() {
             // Hits shade with their materials: the full group 2.
             pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
             pass.set_pipeline(trace);
             pass.dispatch_workgroups(target.tiles[0], target.tiles[1], 1);
             pass.set_pipeline(filter);
             pass.dispatch_workgroups(target.tiles[0].div_ceil(8), target.tiles[1].div_ceil(4), 1);
-            pass.set_pipeline(adapt);
+            pass.set_pipeline(classify);
             pass.dispatch_workgroups(target.blocks[0], target.blocks[1], 1);
+            pass.set_pipeline(adapt);
+            pass.dispatch_workgroups(target.blocks[0].div_ceil(2), target.blocks[1], 1);
             pass.set_pipeline(resolve);
         }
         pass.dispatch_workgroups_indirect(&target.args.value, 0);

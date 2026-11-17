@@ -405,13 +405,17 @@ const FG_FILTER_SHORT:f32=4.0;
     }
 }
 var<workgroup> fg_orphan:atomic<u32>;
-var<workgroup> fg_pick:u32;
-// One workgroup per FG_BLOCK block: the pixels without tile probes on their plane vote (in an
-// order the frame turns) for the one the block's adaptive probe goes on; FG_RAYS lanes trace it.
-@compute @workgroup_size(8,8) fn fg_adapt(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+const FG_NONE:u32=0xffffffffu;
+// The adaptive probe's pick for this frame: its pixel's lane in the block (bits 0-5), or
+// FG_NONE, kept in the pad word after the SH (sh[6].w, which no reader takes as a coefficient).
+fn fg_pick_at(index:u32,size:vec2<u32>)->u32 { return gi_prepared[fg_at(index,size)+2u].r0.w; }
+// One workgroup per FG_BLOCK block, with no shading in it: the pixels without tile probes on
+// their plane vote (in an order the frame turns) for the one the block's adaptive probe goes on.
+// A block without one leaves its probe invalid.
+@compute @workgroup_size(8,8) fn fg_classify(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let size=textureDimensions(primary_hit);
     let frame=primary_frame.sided.y;
-    if lane==0u {atomicStore(&fg_orphan,0xffffffffu);}
+    if lane==0u {atomicStore(&fg_orphan,FG_NONE);}
     workgroupBarrier();
     let q=group.xy*FG_BLOCK+local.xy;
     let mine=fg_surface_at(q,size,false);
@@ -420,18 +424,38 @@ var<workgroup> fg_pick:u32;
         atomicMin(&fg_orphan,(((lane*17u+frame*29u)&63u)<<6u)|lane);
     }
     workgroupBarrier();
-    if lane==0u {fg_pick=atomicLoad(&fg_orphan);}
-    let pick=workgroupUniformLoad(&fg_pick);
-    let index=fg_adaptive(group.xy,size);
-    if pick==0xffffffffu {
-        if lane==0u {fg_invalidate(index,size);}
-        return;
+    if lane!=0u {return;}
+    let pick=atomicLoad(&fg_orphan);
+    let at=fg_at(fg_adaptive(group.xy,size),size)+2u;
+    let c=gi_prepared[at];
+    let stored=select(pick&63u,FG_NONE,pick==FG_NONE);
+    gi_prepared[at]=GiPrepared(vec4<u32>(c.r0.xyz,stored),select(c.r1,vec4<u32>(0u),pick==FG_NONE),select(c.r2,vec4<u32>(0u),pick==FG_NONE));
+}
+var<workgroup> fg_pair:array<u32,2>;
+// Two blocks per workgroup of 32 (fg_classify picked their pixels): lanes 16 b .. 16 b + 15
+// trace block b's probe; a pair with no pick exits before any shading.
+@compute @workgroup_size(32) fn fg_adapt(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
+    let size=textureDimensions(primary_hit);
+    let blocks=(size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK;
+    let frame=primary_frame.sided.y;
+    let b=lane/FG_RAYS;
+    let block=vec2<u32>(group.x*2u+b,group.y);
+    let inside=all(block<blocks);
+    let index=fg_adaptive(min(block,blocks-vec2<u32>(1u)),size);
+    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(index,size),inside);}
+    let pair=workgroupUniformLoad(&fg_pair);
+    if pair[0]==FG_NONE && pair[1]==FG_NONE {return;}
+    let pick=pair[b];
+    var s:FgSurface;
+    var pixel=vec2<u32>(0u);
+    if pick!=FG_NONE {
+        pixel=block*FG_BLOCK+vec2<u32>(pick%FG_BLOCK,pick/FG_BLOCK);
+        s=fg_surface_at(pixel,size,false);
     }
-    let pixel=group.xy*FG_BLOCK+vec2<u32>((pick&63u)%FG_BLOCK,(pick&63u)/FG_BLOCK);
-    let s=fg_surface(pixel,size);
-    if lane<FG_RAYS {fg_lane(lane,lane,s,pixel,fg_hash(index^(frame*0x27d4eb2fu)));}
+    fg_lane(lane,lane%FG_RAYS,s,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
     workgroupBarrier();
-    if lane==0u {fg_accumulate(index,size,0u,s,pixel);}
+    if lane%FG_RAYS!=0u || pick==FG_NONE || s.placement==0u {return;}
+    fg_accumulate(index,size,b*FG_RAYS,s,pixel);
 }
 @compute @workgroup_size(8,4) fn fg_resolve(@builtin(global_invocation_id) grid:vec3<u32>) {
     let id=grid.xy+primary_region.xy;
