@@ -213,20 +213,13 @@ fn fg_footprint(pixel:vec2<u32>,size:vec2<u32>,world:vec3<f32>)->f32 {
     let pixel_angle=length(ray.dx_far-ray.dx_near)/max(length(ray.far-ray.near),1e-30);
     return f32(FG_TILE)*pixel_angle*length(world-lighting.eye);
 }
-// How far a point and normal lie on a probe's plane: 1 on it, 0 off it or for an invalid probe.
-// Plane distance: a Gaussian over FG_PLANE of the probe's footprint. Normal: full weight within
-// FG_NORMAL_FULL of the probe's, none past FG_NORMAL_NONE, smooth between. A thin face beside
-// the probe's (a bevel, a ring's side, a rail's base) shares its plane at their edge, so only
-// the normal can reject it; cos^4 still gave a 45 degree face a quarter weight and it took the
-// wrong surface's light. Rejected faces get adaptive probes of their own (fg_classify). The
-// band keeps smooth curved surfaces, whose neighbouring probes differ by a few degrees.
-const FG_NORMAL_FULL:f32=0.95;
-const FG_NORMAL_NONE:f32=0.8;
+// How far a point and normal lie on a probe's plane (Gaussian in plane distance over
+// FG_PLANE of its footprint, normals as cos^4): 1 on it, 0 off it or for an invalid probe.
 fn fg_on_plane(p:FgPlane,world:vec3<f32>,n:vec3<f32>)->f32 {
     if p.point.w<=0.0 {return 0.0;}
     let plane=abs(dot(p.normal.xyz,world-p.point.xyz))/max(FG_PLANE*p.normal.w,1e-6);
-    let facing=smoothstep(FG_NORMAL_NONE,FG_NORMAL_FULL,dot(p.normal.xyz,n));
-    return exp(-plane*plane)*facing;
+    let facing=max(dot(p.normal.xyz,n),0.0);
+    return exp(-plane*plane)*facing*facing*facing*facing;
 }
 fn fg_basis(n:vec3<f32>)->mat3x3<f32> {
     let s=select(-1.0,1.0,n.z>=0.0);
