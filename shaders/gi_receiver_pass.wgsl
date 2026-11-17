@@ -173,7 +173,7 @@ fn fg_invalidate(index:u32,size:vec2<u32>) {
     let at=fg_at(index,size)+2u;
     gi_prepared[at]=GiPrepared(gi_prepared[at].r0,vec4<u32>(0u),vec4<u32>(0u));
 }
-var<workgroup> fg_lane_sh:array<array<f32,27>,64>;
+var<workgroup> fg_lane_sh:array<array<f32,27>,32>;
 
 fn fg_hash(x:u32)->u32 {
     var h=x*0x9e3779b1u;h^=h>>16u;h*=0x85ebca6bu;h^=h>>13u;h*=0xc2b2ae35u;h^=h>>16u;return h;
@@ -404,52 +404,34 @@ const FG_FILTER_SHORT:f32=4.0;
         fg_store(fg_filtered(index,size),size,out);
     }
 }
-var<workgroup> fg_orphan:array<atomic<u32>,4>;
-var<workgroup> fg_pick:array<u32,4>;
-const FG_NONE:u32=0xffffffffu;
-// One workgroup of 64 per FG_TILE tile, for its four FG_BLOCK blocks. Classification: every
-// lane tests its pixel in each block, and the pixels without tile probes on their plane vote
-// (in an order the frame turns) for the one their block's adaptive probe goes on. Tracing:
-// lanes 16 b .. 16 b + 15 trace block b's probe, so up to four probes trace together instead
-// of one group of 64 per block with 48 lanes idle through the program's shading.
+var<workgroup> fg_orphan:atomic<u32>;
+var<workgroup> fg_pick:u32;
+// One workgroup per FG_BLOCK block: the pixels without tile probes on their plane vote (in an
+// order the frame turns) for the one the block's adaptive probe goes on; FG_RAYS lanes trace it.
 @compute @workgroup_size(8,8) fn fg_adapt(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_id) local:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
     let size=textureDimensions(primary_hit);
-    let blocks=(size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK;
     let frame=primary_frame.sided.y;
-    if lane<4u {atomicStore(&fg_orphan[lane],FG_NONE);}
+    if lane==0u {atomicStore(&fg_orphan,0xffffffffu);}
     workgroupBarrier();
-    // 17 is odd, so the turned order is a permutation of the 64 lanes.
-    let key=(((lane*17u+frame*29u)&63u)<<6u)|lane;
-    for(var b=0u;b<4u;b+=1u) {
-        let q=group.xy*FG_TILE+vec2<u32>(b&1u,b>>1u)*FG_BLOCK+local.xy;
-        let mine=fg_surface_at(q,size,false);
-        if mine.placement!=0u && fg_tiles(q,size,mine,false)<=1e-4 {atomicMin(&fg_orphan[b],key);}
+    let q=group.xy*FG_BLOCK+local.xy;
+    let mine=fg_surface_at(q,size,false);
+    if mine.placement!=0u && fg_tiles(q,size,mine,false)<=1e-4 {
+        // 17 is odd, so the turned order is a permutation of the 64 lanes.
+        atomicMin(&fg_orphan,(((lane*17u+frame*29u)&63u)<<6u)|lane);
     }
     workgroupBarrier();
-    if lane<4u {fg_pick[lane]=atomicLoad(&fg_orphan[lane]);}
-    let picks=workgroupUniformLoad(&fg_pick);
-    if picks[0]==FG_NONE && picks[1]==FG_NONE && picks[2]==FG_NONE && picks[3]==FG_NONE {
-        if lane<4u {
-            let block=group.xy*2u+vec2<u32>(lane&1u,lane>>1u);
-            if all(block<blocks) {fg_invalidate(fg_adaptive(block,size),size);}
-        }
+    if lane==0u {fg_pick=atomicLoad(&fg_orphan);}
+    let pick=workgroupUniformLoad(&fg_pick);
+    let index=fg_adaptive(group.xy,size);
+    if pick==0xffffffffu {
+        if lane==0u {fg_invalidate(index,size);}
         return;
     }
-    let b=lane/FG_RAYS;
-    let pick=picks[b];
-    let block=group.xy*2u+vec2<u32>(b&1u,b>>1u);
-    let index=fg_adaptive(block,size);
-    var s:FgSurface;
-    var pixel=vec2<u32>(0u);
-    if pick!=FG_NONE {
-        pixel=block*FG_BLOCK+vec2<u32>((pick&63u)%FG_BLOCK,(pick&63u)/FG_BLOCK);
-        s=fg_surface_at(pixel,size,false);
-    }
-    fg_lane(lane,lane%FG_RAYS,s,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
+    let pixel=group.xy*FG_BLOCK+vec2<u32>((pick&63u)%FG_BLOCK,(pick&63u)/FG_BLOCK);
+    let s=fg_surface(pixel,size);
+    if lane<FG_RAYS {fg_lane(lane,lane,s,pixel,fg_hash(index^(frame*0x27d4eb2fu)));}
     workgroupBarrier();
-    if lane%FG_RAYS!=0u || any(block>=blocks) {return;}
-    if s.placement==0u {fg_invalidate(index,size);return;}
-    fg_accumulate(index,size,b*FG_RAYS,s,pixel);
+    if lane==0u {fg_accumulate(index,size,0u,s,pixel);}
 }
 @compute @workgroup_size(8,4) fn fg_resolve(@builtin(global_invocation_id) grid:vec3<u32>) {
     let id=grid.xy+primary_region.xy;

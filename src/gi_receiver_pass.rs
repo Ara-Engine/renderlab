@@ -278,6 +278,7 @@ pub(super) struct Targets {
     /// copies, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe).
     gather: [Option<[Owned<wgpu::ComputePipeline>; 4]>; 2],
     tiles: [u32; 2],
+    blocks: [u32; 2],
 }
 /// The final gather's probe tile in pixels and probe size in bytes (gi_receiver_pass.wgsl
 /// FG_TILE, FgProbe).
@@ -341,6 +342,7 @@ impl Renderer {
             clear_keys: false,
             gather: [None, None],
             tiles: [size.width.div_ceil(FG_TILE), size.height.div_ceil(FG_TILE)],
+            blocks: [size.width.div_ceil(FG_BLOCK), size.height.div_ceil(FG_BLOCK)],
         }
     }
     pub(crate) fn ensure_gi_receiver_pass(&mut self, shading: Shading) -> Result<(), Error> {
@@ -560,7 +562,7 @@ impl Renderer {
             pass.set_pipeline(filter);
             pass.dispatch_workgroups(target.tiles[0].div_ceil(8), target.tiles[1].div_ceil(4), 1);
             pass.set_pipeline(adapt);
-            pass.dispatch_workgroups(target.tiles[0], target.tiles[1], 1);
+            pass.dispatch_workgroups(target.blocks[0], target.blocks[1], 1);
             pass.set_pipeline(resolve);
         }
         pass.dispatch_workgroups_indirect(&target.args.value, 0);
