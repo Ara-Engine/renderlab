@@ -5,7 +5,8 @@
 //! line), the next view rendered writes `<dir>/<label>/scene.rla` (one mesh per mesh and
 //! material pair, placements at their current transforms, materials, textures) and
 //! `<dir>/<label>/scene.json` (camera, output size, exposure, sun, sky, lights, each material's
-//! emission), then removes the file. A procedural atmosphere sky is written as the cube shading
+//! emission), then removes the file. `RENDERLAB_SCENE_DUMP=<dir>;<frame>,...` also dumps the
+//! listed renderer frames as `frame-<id>`, for frame-locked hosts. A procedural atmosphere sky is written as the cube shading
 //! reads (`sky.f32`) with the sun as it reaches surfaces. While dumping, the engine reports no block-compressed
 //! texture support, so embedders upload RGBA8 levels the tracer can read.
 use super::*;
@@ -38,6 +39,9 @@ struct RecordedMaterial {
 #[derive(Default)]
 pub(super) struct Recorder {
     dir: PathBuf,
+    /// `RENDERLAB_SCENE_DUMP=<dir>;<frame>,<frame>,...`: renderer frames (the pass log's ids)
+    /// that dump as `frame-<id>` without an arm file, for frame-locked hosts such as a replay.
+    frames: Vec<u64>,
     meshes: HashMap<MeshId, Recorded>,
     textures: HashMap<TextureId, Arc<TextureData>>,
     materials: HashMap<MaterialId, RecordedMaterial>,
@@ -46,8 +50,12 @@ pub(super) struct Recorder {
 
 impl Recorder {
     pub(super) fn from_env() -> Option<Self> {
-        let dir = std::env::var_os("RENDERLAB_SCENE_DUMP")?;
-        Some(Self { dir: dir.into(), ..Default::default() })
+        let value = std::env::var("RENDERLAB_SCENE_DUMP").ok()?;
+        let (dir, frames) = match value.split_once(';') {
+            Some((dir, list)) => (dir, list.split(',').filter_map(|f| f.trim().parse().ok()).collect()),
+            None => (value.as_str(), vec![]),
+        };
+        Some(Self { dir: dir.into(), frames, ..Default::default() })
     }
     pub(super) fn mesh(&mut self, id: MeshId, vertices: &[Vertex], indices: &[u32], tangents: Option<&TangentStream>) {
         self.meshes.insert(id, Recorded::Static { vertices: vertices.to_vec(), indices: indices.to_vec(), tangents: tangents.cloned() });
@@ -89,8 +97,12 @@ impl Recorder {
         });
     }
 
-    /// The armed label, if `<dir>/arm` exists (consumed).
-    pub(super) fn armed(&self) -> Option<String> {
+    /// The label renderer frame `frame` dumps under: `frame-<id>` when listed, else the label
+    /// in `<dir>/arm` if it exists (consumed).
+    pub(super) fn armed(&self, frame: u64) -> Option<String> {
+        if self.frames.contains(&frame) {
+            return Some(format!("frame-{frame}"));
+        }
         let arm = self.dir.join("arm");
         // The label line ends with a newline; without one the file is still being written (an
         // empty read once dumped spinner-a as "frame"), so it waits for a later frame.

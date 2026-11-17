@@ -126,7 +126,7 @@ impl Engine {
         let output = self.views[self.view_index(view)?].output.clone();
         let report = self.render_view_to(view, &output, camera)?;
         self.save_listed_frame(view, report.frame.0)?;
-        if let Some(label) = self.dump.as_ref().and_then(|d| d.armed()) {
+        if let Some(label) = self.dump.as_ref().and_then(|d| d.armed(report.frame.0)) {
             let at = self.view_index(view)?;
             let stops = match self.views[at].desc.look.exposure {
                 super::Exposure::Manual { stops } => stops,
