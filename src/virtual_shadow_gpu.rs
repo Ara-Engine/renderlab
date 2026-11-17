@@ -39,7 +39,7 @@ pub(super) mod atmosphere_shadow;
 
 /// Levels a frame can use; also the WGSL `VSM_MAX_LEVELS`.
 pub(super) const MAX_LEVELS: usize = 8;
-const MAX_RECTS: usize = 16;
+const MAX_RECTS: usize = 48;
 const PAGE: u32 = 128;
 /// The Disk mark pass's receiver counters (WGSL `vsm_reach`): four words, then (copied after
 /// the page work) the sparse pool's header words 4..11 (`POOL_*`).
@@ -765,6 +765,10 @@ pub(super) struct VirtualState {
     /// N8f: this rolling frame moved casters only, so the lookup visits every tile and also
     /// looks up the pixels they can reach (`VsmFrame::n8e.w` bit 0).
     casters_only: bool,
+    /// This frame keeps last frame's page requests and receiver levels (WGSL vd_mark does not
+    /// run), and the key that decides it.
+    requests_held: bool,
+    requests_key: Vec<u64>,
     horizons: Option<Horizons>,
     /// Tests: run the `VSM_DEBUG` lookup and keep its per-pixel trace in `debug_buffer`.
     pub debug: bool,
@@ -806,11 +810,11 @@ fn disk_radius() -> u32 {
     std::env::var("RENDERLAB_VD_R").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(DISK_RADIUS)
 }
 /// WGSL `VdFrame` up to its constant tail: this and the previous frame's world-to-clip
-/// matrices, `reuse`, the moving casters' zone, the image size.
-const DISK_HEAD_BYTES: u64 = 64 + 64 + 16 + 48 + 16;
+/// matrices, `reuse`, the moved rectangles' tops, the image size.
+const DISK_HEAD_BYTES: u64 = 64 + 64 + 16 + MAX_RECTS as u64 * 4 + 16;
 /// WGSL `VdFrame`: the head, the 65 y-rank masks and the 64 sample positions.
 const DISK_FRAME_BYTES: u64 = DISK_HEAD_BYTES + 33 * 16 + 32 * 16;
-/// `VdFrame::reuse` and `VdFrame::zone` (Tr1Zones' shadow_lo, shadow_hi, shadow_light).
+/// `VdFrame::reuse`.
 const DISK_REUSE_OFFSET: u64 = 128;
 /// `VdFrame::size.w`.
 const DISK_HISTORY_OFFSET: u64 = DISK_HEAD_BYTES - 4;
@@ -1055,6 +1059,43 @@ pub(super) fn disk_source() -> String {
     assert_eq!(source.matches(edges).count(), 1, "virtual_shadow_disk.wgsl: VD_HARD_EDGES moved");
     source.replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
 }
+/// Merges moved casters' light-space rectangles, and their screen rectangles alike, the pair
+/// whose union adds the least area first, until at most `max` remain: many movers invalidate the
+/// pages around them, not the whole map.
+fn cluster_rects(
+    rects: &mut Vec<[glam::DVec2; 2]>,
+    screens: &mut Vec<[glam::DVec2; 2]>,
+    tops: &mut Vec<f64>,
+    max: usize,
+) {
+    let area = |r: &[glam::DVec2; 2]| (r[1] - r[0]).max(glam::DVec2::ZERO).element_product();
+    let union = |a: &[glam::DVec2; 2], b: &[glam::DVec2; 2]| [a[0].min(b[0]), a[1].max(b[1])];
+    while rects.len() > max {
+        let mut best = (f64::INFINITY, 0, 1);
+        for i in 0..rects.len() {
+            for j in i + 1..rects.len() {
+                let grown = area(&union(&rects[i], &rects[j])) - area(&rects[i]) - area(&rects[j]);
+                if grown < best.0 {
+                    best = (grown, i, j);
+                }
+            }
+        }
+        let (_, i, j) = best;
+        rects[i] = union(&rects[i], &rects[j]);
+        rects.swap_remove(j);
+        screens[i] = union(&screens[i], &screens[j]);
+        screens.swap_remove(j);
+        tops[i] = tops[i].max(tops[j]);
+        tops.swap_remove(j);
+    }
+}
+/// Measurement: `RENDERLAB_VSM_LOG=<file>` appends a line a frame: placements, moved casters,
+/// whether the placement count changed, the uploaded rectangles, invalidated levels, the
+/// rectangles' summed and union areas (m^2) and each level's texel.
+fn vsm_log() -> Option<&'static std::path::Path> {
+    static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os("RENDERLAB_VSM_LOG").map(Into::into)).as_deref()
+}
 /// `RENDERLAB_VD_EDGE_LOG`: the file the Disk lookup's edge pixel counts go to.
 fn edge_log() -> Option<&'static std::path::Path> {
     static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
@@ -1066,6 +1107,12 @@ fn edge_log() -> Option<&'static std::path::Path> {
 fn peel_gap_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_VD_PEEL_GAP").map_or(true, |v| v.trim() != "0"))
+}
+/// The Disk lookup's page requests hold while only TR1's jitter moved the camera
+/// (`requests_held`). `RENDERLAB_VD_REQUESTS_HOLD=0` marks every page-work frame.
+fn requests_hold_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VD_REQUESTS_HOLD").map_or(true, |v| v.trim() != "0"))
 }
 /// Answer reuse (WGSL `vd_lookup`): a pixel whose surface point was on screen last frame, out
 /// of the moving casters' swept shadow, with its own and its 3x3 neighbours' answers one fully
@@ -1785,7 +1832,7 @@ impl VirtualState {
             edge_counts: std::sync::Mutex::new(ReadbackRing::new(
                 device,
                 "Disk lookup edge count readback",
-                16,
+                32,
                 3,
             )),
             census_bounds: vec![],
@@ -1803,6 +1850,8 @@ impl VirtualState {
             rolling: false,
             schedule: 0,
             casters_only: false,
+            requests_held: false,
+            requests_key: vec![],
             horizons: None,
             debug: false,
             constants: vec![],
@@ -2104,7 +2153,7 @@ impl VirtualState {
                 REACH_BYTES,
                 B::STORAGE | B::COPY_SRC,
             ),
-            edges: buffer("Disk lookup edge pixels", 16, B::STORAGE | B::COPY_SRC),
+            edges: buffer("Disk lookup edge pixels", 32, B::STORAGE | B::COPY_SRC),
             census: buffer(
                 "Shadow caster census",
                 if census_log().is_some() { CENSUS_BYTES } else { 4 },
@@ -2194,9 +2243,9 @@ impl Renderer {
         // U-FIXED: `VdFrame::size.w`, TR1's frames of history; the Disk lookup's height-band
         // dither waits for `VD_HBAND_AFTER` of them, so a cut's first frames show no stipple.
         // `VdFrame::reuse` (WGSL `vd_lookup`): 2 when nothing changed since the last frame, 1
-        // when only the camera and the moving casters' zone did, once the history has run
-        // REUSE_AFTER frames since its restart (a cut keeps the answer history of the old view);
-        // and the zone, the moving casters' swept shadow (Tr1Zones' first three rows).
+        // when only the camera and moving casters did (the lookup tests their rectangles), once
+        // the history has run REUSE_AFTER frames since its restart (a cut keeps the answer
+        // history of the old view).
         if state.settings.lookup == VirtualLookup::Disk
             && let Some(r) = state.resources.as_ref()
         {
@@ -2208,10 +2257,9 @@ impl Renderer {
             };
             // reuse.z (the history half this frame writes) stays as the frame upload set it.
             self.queue.write_buffer(&r.disk_frame, DISK_REUSE_OFFSET, &mode.to_ne_bytes());
-            self.queue.write_buffer(&r.disk_frame, DISK_REUSE_OFFSET + 16, &zones[..48]);
             self.queue
                 .write_buffer(&r.disk_frame, DISK_HISTORY_OFFSET, &(history as f32).to_ne_bytes());
-            self.uploads.shadows += 56;
+            self.uploads.shadows += 8;
         }
         if !matches!(
             state.settings.lookup,
@@ -2418,17 +2466,21 @@ impl Renderer {
         // Measurement: the Disk lookup's edge pixels, a line a frame.
         if let Some(path) = edge_log() {
             for ((), words) in state.edge_counts.get_mut().unwrap().collect() {
-                // Edge pixels; with VD_COUNTS capped receivers, missing-page reads and
-                // stand-ins; then the pool's requested, rendered, failed, free and total pages
-                // (the newest pool readback, a frame or two older).
+                // Edge pixels; with VD_COUNTS reused, zone-held and walked pixels, then capped
+                // receivers, missing-page reads and stand-ins; then the pool's requested,
+                // rendered, failed, free and total pages (the newest pool readback, a frame or
+                // two older).
                 let word = |i: usize| u32::from_ne_bytes(words[4 * i..4 * i + 4].try_into().unwrap());
                 let p = &state.stats;
                 let line = format!(
-                    "{} {} {} {} pool {} {} {} {} {}",
+                    "{} {} {} {} capped {} missing {} stand-in {} pool {} {} {} {} {}",
                     word(0),
                     word(1),
                     word(2),
                     word(3),
+                    word(4),
+                    word(5),
+                    word(6),
                     p.requested_pages,
                     p.rendered_pages,
                     p.failed_pages,
@@ -2669,32 +2721,65 @@ impl Renderer {
             [lo - 2.0, hi + 2.0]
         };
         // N8n: placements the rectangles do not describe retire the surface cache's cells.
-        let mut surface_flush = false;
-        if cache.models.len() != placements {
+        let surface_flush;
+        // Measurement (`RENDERLAB_VSM_LOG`): this frame's movers and their rectangles' areas.
+        let count_changed = cache.models.len() != placements;
+        let mut movers = 0usize;
+        let mut areas = [0.0f64; 2];
+        // Each rectangle's highest caster point, light-space height (VdFrame::tops).
+        let mut tops: Vec<f64> = vec![];
+        // The other lookups keep the whole-map invalidation for a changed placement count.
+        if count_changed && s.lookup != VirtualLookup::Disk {
             invalidated = [true; MAX_LEVELS];
             surface_flush = true;
         } else {
+            surface_flush = count_changed;
             // SK1: deformation invalidates caster pages even at a fixed model matrix; P-SHOW:
             // only a new pose deforms (per placement, in placement order, collected once:
-            // P-NRT's O(placements^2) find).
-            for (p, model) in models.iter().enumerate() {
-                // A changed casting flag is a caster appearing or leaving in place.
-                if *model != cache.models[p]
+            // P-NRT's O(placements^2) find). A changed placement count compares by index: an
+            // index past either list is a caster appearing or leaving, and a placement that
+            // moved to another index changed its model or bounds there. Placements that cast no
+            // shadow before or now touch no page.
+            let previous = cache.models.len();
+            for p in 0..placements.max(previous) {
+                let (old, new) = (p < previous, p < placements);
+                let casting = (old && cache.casts[p]) || (new && casts[p]);
+                let changed = !(old && new)
+                    || models[p] != cache.models[p]
                     || casts[p] != cache.casts[p]
-                    || crate::renderer::skinning::deformed(&cache.poses, &poses, p)
-                {
-                    let [a0, a1] = rect(&cache.bounds[p]);
-                    let [b0, b1] = rect(&bounds[p]);
-                    rects.push([a0.min(b0), a1.max(b1)]);
-                    let [c0, c1] = screen(&cache.bounds[p]);
-                    let [d0, d1] = screen(&bounds[p]);
-                    screens.push([c0.min(d0), c1.max(d1)]);
+                    || bounds[p].min != cache.bounds[p].min
+                    || bounds[p].max != cache.bounds[p].max
+                    || crate::renderer::skinning::deformed(&cache.poses, &poses, p);
+                if !casting || !changed {
+                    continue;
                 }
+                let both = |f: &dyn Fn(&crate::shadow_plan::Bounds) -> [glam::DVec2; 2]| {
+                    let sides = [old.then(|| f(&cache.bounds[p])), new.then(|| f(&bounds[p]))];
+                    let mut it = sides.into_iter().flatten();
+                    let first = it.next().unwrap();
+                    it.fold(first, |[a, b], [c, d]| [a.min(c), b.max(d)])
+                };
+                rects.push(both(&rect));
+                screens.push(both(&screen));
+                let top = |b: &crate::shadow_plan::Bounds| corners(b).map(|c| c.dot(l)).fold(f64::MIN, f64::max);
+                tops.push(match (old, new) {
+                    (true, true) => top(&cache.bounds[p]).max(top(&bounds[p])),
+                    (true, false) => top(&cache.bounds[p]),
+                    _ => top(&bounds[p]),
+                });
+            }
+            movers = rects.len();
+            if let Some(first) = rects.first() {
+                let (mut lo, mut hi) = (first[0], first[1]);
+                for [a, b] in &rects {
+                    areas[0] += (b.x - a.x) * (b.y - a.y);
+                    lo = lo.min(*a);
+                    hi = hi.max(*b);
+                }
+                areas[1] = (hi.x - lo.x) * (hi.y - lo.y);
             }
             if rects.len() > MAX_RECTS {
-                invalidated = [true; MAX_LEVELS];
-                rects.clear();
-                surface_flush = true;
+                cluster_rects(&mut rects, &mut screens, &mut tops, MAX_RECTS);
             }
         }
         cache.models = models;
@@ -3084,6 +3169,26 @@ impl Renderer {
                 frame.extend_from_slice(&value.to_ne_bytes());
             }
         }
+        if let Some(path) = vsm_log() {
+            let texels: Vec<String> = rungs
+                .iter()
+                .map(|&r| format!("{:.4}", f64::from(s.finest_texel) * 2f64.powi(r)))
+                .collect();
+            let line = format!(
+                "{{\"placements\":{placements},\"movers\":{movers},\"count_changed\":{count_changed},\"rects\":{},\"invalidated\":{},\"levels\":{levels},\"area_sum\":{:.3},\"area_union\":{:.3},\"texels\":[{}]}}",
+                rects.len(),
+                invalidated[..levels].iter().filter(|&&b| b).count(),
+                areas[0],
+                areas[1],
+                texels.join(",")
+            );
+            use std::io::Write;
+            let _ = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .and_then(|mut f| writeln!(f, "{line}"));
+        }
         state.levels = levels;
         state.stats = VirtualShadowStats {
             levels: levels as u32,
@@ -3287,6 +3392,24 @@ impl Renderer {
         // P-NSQ: a frame that rotates the directions never keeps counts of other directions
         // (TR1's lattice repeats its centre offset at k = 255 and 0, one matrix for both).
         key.push(u64::from(rotation));
+        // Page requests hold (WGSL vd_mark): the same key with the camera unjittered and without
+        // the frame's direction rotation. While it holds, the receivers moved by under a pixel
+        // (TR1's jitter), well inside their windows' page margins, so last frame's requests and
+        // receiver levels stand and the mark pass does not run (`RENDERLAB_VD_REQUESTS_HOLD=0`
+        // marks every page-work frame).
+        let mut held_key: Vec<u64> = camera
+            .unjittered()
+            .matrix(size.width, size.height)
+            .to_cols_array()
+            .iter()
+            .map(|v| u64::from(v.to_bits()))
+            .collect();
+        held_key.extend_from_slice(&key[16..key.len() - 1]);
+        state.requests_held = requests_hold_on()
+            && s.lookup == VirtualLookup::Disk
+            && !created
+            && held_key == state.requests_key;
+        state.requests_key = held_key;
         // N8f: moved casters alone (camera, sun basis, receivers and windows kept) still roll.
         let casters_only = !created && !rects.is_empty() && key == state.key;
         state.page_work = created || !rects.is_empty() || key != state.key;
@@ -3385,8 +3508,8 @@ impl Renderer {
         }
         if s.lookup == VirtualLookup::Disk {
             // N-VSM1 `VdFrame`: the receivers' world-to-clip matrix and the previous frame's,
-            // `reuse` and the zone (zero until prepare_virtual_sampling has TR1's plan), the
-            // image size and TR1's frame.
+            // `reuse` (zero until prepare_virtual_sampling has TR1's plan), the image size and
+            // TR1's frame.
             let clip = camera.matrix(size.width, size.height).to_cols_array();
             let previous = r.disk_clip.replace(clip).unwrap_or(clip);
             r.disk_parity ^= 1;
@@ -3397,7 +3520,10 @@ impl Renderer {
             for w in [0, 0, r.disk_parity, 0] {
                 bytes.extend_from_slice(&w.to_ne_bytes());
             }
-            bytes.extend_from_slice(&[0; 48]);
+            for i in 0..MAX_RECTS {
+                let top = tops.get(i).map_or(0.0, |&t| t as f32);
+                bytes.extend_from_slice(&top.to_ne_bytes());
+            }
             for value in [size.width as f32, size.height as f32, disk_jitter, 0.0] {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
@@ -3913,8 +4039,10 @@ impl Renderer {
             .unwrap()
             .virtual_geometry()
             .unwrap();
-        encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
-        encoder.clear_buffer(&r.reach, 0, None);
+        if !state.requests_held {
+            encoder.clear_buffer(&r.requests, 0, Some(slots * 4));
+            encoder.clear_buffer(&r.reach, 0, None);
+        }
         encoder.clear_buffer(&r.render, 0, Some(slots * 4));
         encoder.clear_buffer(&casters.work, 0, Some(MAX_LEVELS as u64 * ARGS_BYTES));
         encoder.clear_buffer(&r.cull_args, 0, None);
@@ -3934,7 +4062,9 @@ impl Renderer {
                 &p.mark
             });
             pass.set_bind_group(0, &*g.mark, &[]);
-            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(4), 1);
+            if !state.requests_held {
+                pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(4), 1);
+            }
             if r.sparse {
                 // Stale and unused pages back to the pool, then each level's requests take
                 // pages, coarsest first (the raster budget serves coarse levels first), then
@@ -4115,7 +4245,7 @@ mod tests {
         );
         assert_eq!(
             FRAME_BYTES,
-            928 + 12 * crate::TRACED_DRAWS as usize + ZONES_BYTES
+            416 + 2 * MAX_RECTS * 16 + 12 * crate::TRACED_DRAWS as usize + ZONES_BYTES
         );
         // P-NSQ: the sampling uvec4 follows N8e's; P-RELIT: TR1's zones are the last member.
         assert_eq!(SAMPLING_OFFSET, (FRAME_BYTES - ZONES_BYTES) as u64 - 16);
@@ -4178,6 +4308,26 @@ mod tests {
         ] {
             assert!(bad.validate().is_err());
         }
+    }
+    /// Many movers cluster into MAX_RECTS rectangles that still cover each mover, and two
+    /// groups far apart stay apart rather than becoming one rectangle over the map.
+    #[test]
+    fn many_movers_cluster_into_covering_rectangles() {
+        use glam::DVec2;
+        let mut rects = vec![];
+        for i in 0..2 * MAX_RECTS as i32 {
+            let at = DVec2::new(if i % 2 == 0 { 0.0 } else { 500.0 }, f64::from(i / 2));
+            rects.push([at, at + DVec2::splat(0.5)]);
+        }
+        let original = rects.clone();
+        let mut screens = rects.clone();
+        let mut tops = vec![0.0; rects.len()];
+        cluster_rects(&mut rects, &mut screens, &mut tops, MAX_RECTS);
+        assert_eq!((rects.len(), screens.len()), (MAX_RECTS, MAX_RECTS));
+        for [a, b] in &original {
+            assert!(rects.iter().any(|[c, d]| c.cmple(*a).all() && d.cmpge(*b).all()));
+        }
+        assert!(rects.iter().all(|[c, d]| d.x - c.x < 100.0));
     }
     /// N-VSM1: the disk lookup's samples are a rook pattern inside the disk, at the marginal's
     /// quantiles, and the uploaded masks select by y rank.

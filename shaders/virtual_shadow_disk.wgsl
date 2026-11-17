@@ -34,7 +34,7 @@
 const VSM_PAGE:u32=128u;
 const VSM_NONE:u32=0xffffffffu;
 const VSM_MAX_LEVELS:u32=8u;
-const VSM_MAX_RECTS:u32=16u;
+const VSM_MAX_RECTS:u32=48u;
 // primary_rays.wgsl PRIMARY_TILE.
 const VSM_TRACE_TILE=vec2<u32>(8u,4u);
 struct VsmLevel {origin:vec4<f32>,info:vec4<u32>};
@@ -43,6 +43,8 @@ struct VsmFrame {
     u:vec4<f32>,v:vec4<f32>,l:vec4<f32>,eye:vec4<f32>,depth:vec4<f32>,params:vec4<f32>,
     counts:vec4<u32>,misc:vec4<u32>,
     levels:array<VsmLevel,VSM_MAX_LEVELS>,
+    // This frame's moved casters' light-space rectangles (old and new bounds; counts.w of them).
+    rects:array<vec4<f32>,VSM_MAX_RECTS>,
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
 // clip, previous: this and the previous frame's world-to-clip matrices (the receivers' own,
@@ -50,15 +52,14 @@ struct VsmFrame {
 // reuse (virtual_shadow_gpu.rs `reuse_on`): x 2 when nothing that sets an answer changed since
 // the last frame, 1 when only the camera and the moving casters did, 0 no reuse; z the history
 // half this frame writes.
-// zone_lo, zone_hi, zone_light: the moving casters' swept shadow (temporal_zones.wgsl
-// tr1_caster_shadow's Tr1Zones rows).
+// tops: per moved rectangle (vsm.rects), its casters' highest light-space height (4 a vec4).
 // size: the image size in pixels (xy); z: TR1's frame number plus one on reconstructed frames
 // (the receiver jitter's sequence index), 0 otherwise; w: TR1's frames of history.
 // above: per k in 0..=64 (two a vec4), the mask of the samples whose y rank is at least k.
 // samples: the 64 sample positions in the unit disk (two a vec4), bit s first.
 struct VdFrame {
     clip:mat4x4<f32>,previous:mat4x4<f32>,reuse:vec4<u32>,
-    zone_lo:vec4<f32>,zone_hi:vec4<f32>,zone_light:vec4<f32>,
+    tops:array<vec4<f32>,VSM_MAX_RECTS/4u>,
     size:vec4<f32>,above:array<vec4<u32>,33>,samples:array<vec4<f32>,32>,
 };
 @group(0) @binding(50) var<uniform> vd:VdFrame;
@@ -115,15 +116,12 @@ fn vsm_index(cell:vec2<i32>,level:u32)->u32 {
     let c=vec2<u32>(cell);
     let slot=vd_slot(level,c/VSM_PAGE);
     if slot==VSM_NONE {
-        // Measurement: texel reads that found their page missing (`RENDERLAB_VD_EDGE_LOG` word 2).
-        if VD_COUNTS {atomicAdd(&vd_edge_count[2],1u);}
+        // Measurement: texel reads that found their page missing (`RENDERLAB_VD_EDGE_LOG` word 5).
+        if VD_COUNTS {atomicAdd(&vd_edge_count[5],1u);}
         return VSM_NONE;
     }
     return slot*VSM_PAGE*VSM_PAGE+(c.y%VSM_PAGE)*VSM_PAGE+c.x%VSM_PAGE;
 }
-// Measurement (`RENDERLAB_VD=VD_COUNTS=true` with `RENDERLAB_VD_EDGE_LOG`): capped receivers,
-// missing-page reads and stand-ins per frame.
-override VD_COUNTS:bool=false;
 // The normalized top height of mip `mip` (1..7) over the cell holding texel `cell`; a missing
 // page is the highest (conservative).
 // The physical page of window-relative `page` of `level`: from vd_cache_pages' 2x2 when it
@@ -469,12 +467,12 @@ fn vd_prepare(id:vec2<u32>) {
         vd_px.level=l;
     }
     // Measurement: receivers whose level is coarser than their footprint asks for (the window
-    // or a missing page capped it), and stand-ins (`RENDERLAB_VD_EDGE_LOG` words 1 and 3).
+    // or a missing page capped it), and stand-ins (`RENDERLAB_VD_EDGE_LOG` words 4 and 6).
     if VD_COUNTS && vd_px.level!=VSM_NONE {
         let footprint=length(world.xyz-vsm.eye.xyz)*vsm.eye.w;
         let want=vd_first(floor(log2(max(footprint,1e-9)/vsm.params.y)-vsm.params.w));
-        if vd_px.level>want {atomicAdd(&vd_edge_count[1],1u);}
-        if vd_px.stand_in {atomicAdd(&vd_edge_count[3],1u);}
+        if vd_px.level>want {atomicAdd(&vd_edge_count[4],1u);}
+        if vd_px.stand_in {atomicAdd(&vd_edge_count[6],1u);}
     }
     vd_px.normal=vec3<f32>(dot(n,vsm.u.xyz),dot(n,vsm.v.xyz),dot(n,vsm.l.xyz));
     // The current sun in the map's basis: the map keeps its basis through small sun turns.
@@ -563,8 +561,11 @@ override VD_HARD_EDGES:bool=true;
 override VD_EDGE_HARD:f32=1.0;
 // Measurement (`RENDERLAB_VD=VD_EDGE_SHOW=true`): edge pixels drawn fully shadowed.
 override VD_EDGE_SHOW:bool=false;
-// Edge pixels this frame (`RENDERLAB_VD_EDGE_LOG`).
-@group(0) @binding(62) var<storage,read_write> vd_edge_count:array<atomic<u32>,4>;
+// This frame's edge pixels, reused answers, pixels near a moved caster (vd_near_mover) and
+// walked pixels (`RENDERLAB_VD_EDGE_LOG`); the last three only with
+// `RENDERLAB_VD=VD_COUNTS=true` (measurement).
+override VD_COUNTS:bool=false;
+@group(0) @binding(62) var<storage,read_write> vd_edge_count:array<atomic<u32>,8>;
 var<private> vd_ray_reach:f32;
 var<private> vd_far:vec2<u32>;
 var<private> vd_edge_cell:vec2<i32>;
@@ -952,8 +953,8 @@ fn vd_pixel(id:vec2<u32>)->u32 {
 // history holds the answer (bits 0..8), how many walks in a row gave that same fully lit or
 // fully shadowed answer (bits 9..15; 0 for a partial one or a coarser level's stand-in while a
 // page arrives) and the point's clip w (bits 16..31, f16), in two halves ping-ponged by frame.
-// A pixel whose point was on screen last frame at the same depth, out of the moving casters'
-// swept shadow, whose own and 3x3 neighbours' answers there are one class settled over
+// A pixel whose point was on screen last frame at the same depth, out of every moved caster's
+// reach (vd_near_mover), whose own and 3x3 neighbours' answers there are one class settled over
 // VD_REUSE_WALKS walks, keeps it without a walk: only penumbrae, edges, disocclusions, the
 // moving casters' shadows and classes the receiver jitter still moves walk. While the camera
 // moves every trace tile still walks one frame in VD_REUSE_REFRESH, so an answer that should change
@@ -961,17 +962,25 @@ fn vd_pixel(id:vec2<u32>)->u32 {
 override VD_REUSE_WALKS:u32=4u;
 override VD_REUSE_REFRESH:u32=16u;
 @group(0) @binding(63) var<storage,read_write> vd_history:array<u32>;
-// The moving casters' swept shadow (temporal_zones.wgsl tr1_caster_shadow, the same test).
-fn vd_moving_shadow(x:vec3<f32>)->bool {
-    if vd.zone_lo.w==0.0 {return false;}
-    let lo=vd.zone_lo.xyz;let hi=vd.zone_hi.xyz;
-    if vd.zone_hi.w==0.0 {return all(x>=lo) && all(x<=hi);}
-    let reach=length(max(abs(x-lo),abs(x-hi)));
-    let grow=vec3<f32>(reach*vd.zone_light.w);
-    let rcp=vec3<f32>(1.0)/vd.zone_light.xyz;
-    let a=(lo-grow-x)*rcp;let b=(hi+grow-x)*rcp;
-    let t0=min(a,b);let t1=max(a,b);
-    return min(min(t1.x,t1.y),t1.z)>=max(max(max(t0.x,t0.y),t0.z),0.0);
+// Whether a moved caster (vsm.rects) can have changed point `world`'s answer: a column part at
+// height t reaches it only from within slope * t, and a band's columns and their jitter add up
+// to that again; t is at most the rectangle's top over the point, and a rectangle whose top is
+// under the point neither shadows it nor holds it. Each mover's own rectangle, so movers far
+// apart keep the receivers between them reusable; a point on a mover (its surface moved under
+// a still camera) always walks.
+fn vd_near_mover(world:vec3<f32>,id:vec2<u32>)->bool {
+    if vsm.counts.w==0u {return false;}
+    let p=vsm_light(world);
+    let level=textureLoad(vsm_level_in,vec2<i32>(id),0).x;
+    let pad=select(2.0*vsm_texel(min(level,vsm.counts.x-1u)),0.0,level==VSM_NONE);
+    for(var i=0u;i<vsm.counts.w;i+=1u) {
+        let top=vd.tops[i>>2u][i&3u];
+        if p.z>top+pad {continue;}
+        let grow=vec2<f32>(2.0*vd_slope()*max(top-p.z,0.0)+pad);
+        let r=vsm.rects[i];
+        if all(p.xy>=r.xy-grow) && all(p.xy<=r.zw+grow) {return true;}
+    }
+    return false;
 }
 fn vd_walks(h:u32)->u32 {return (h>>9u)&127u;}
 fn vd_depth(h:u32)->f32 {return unpack2x16float(h>>16u).x;}
@@ -1014,7 +1023,7 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
                     if abs(vd_depth(h)-c.w)<=0.02*c.w {at=q;}
                 }
             }
-            if at.x!=VSM_NONE && vd_moving_shadow(world) {at=vec2<u32>(VSM_NONE);}
+            if at.x!=VSM_NONE && vd_near_mover(world,id) {at=vec2<u32>(VSM_NONE);if VD_COUNTS {atomicAdd(&vd_edge_count[2],1u);}}
         }
         if at.x!=VSM_NONE {
             before=vd_history[read+at.y*size.x+at.x];
@@ -1024,6 +1033,7 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
             let kept=select(vd_settled(at,size,read),VSM_NONE,refresh);
             if kept!=VSM_NONE {
                 textureStore(vsm_output,vec2<i32>(id),vec4<u32>(kept));
+                if VD_COUNTS {atomicAdd(&vd_edge_count[1],1u);}
                 vd_history[write]=depth_bits|(before&0xffffu);
                 return;
             }
@@ -1031,6 +1041,7 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
     }
     let answer=vd_pixel(id);
     textureStore(vsm_output,vec2<i32>(id),vec4<u32>(answer));
+    if VD_COUNTS {atomicAdd(&vd_edge_count[3],1u);}
     // A walk extends the settled count of the same class; a coarser level standing in for an
     // arriving page never settles.
     var walks=0u;

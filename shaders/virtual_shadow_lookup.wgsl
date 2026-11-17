@@ -23,7 +23,7 @@
 const VSM_PAGE:u32=128u;
 const VSM_NONE:u32=0xffffffffu;
 const VSM_MAX_LEVELS:u32=8u;
-const VSM_MAX_RECTS:u32=16u;
+const VSM_MAX_RECTS:u32=48u;
 // primary_rays.wgsl PRIMARY_TILE.
 const VSM_TRACE_TILE=vec2<u32>(8u,4u);
 struct VsmLevel {origin:vec4<f32>,info:vec4<u32>};

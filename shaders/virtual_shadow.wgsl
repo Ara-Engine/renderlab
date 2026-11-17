@@ -32,7 +32,7 @@
 const VSM_PAGE:u32=128u;
 const VSM_NONE:u32=0xffffffffu;
 const VSM_MAX_LEVELS:u32=8u;
-const VSM_MAX_RECTS:u32=16u;
+const VSM_MAX_RECTS:u32=48u;
 const VSM_MISSING:u32=0xffffffffu;
 // Ring walk bound per fan direction; valence above this is truncated.
 const VSM_FAN_STEPS:u32=24u;
@@ -195,18 +195,36 @@ fn vsm_covered(id:vec2<u32>)->bool {
 
 // ---- Page cache: stale requested pages are flagged for this frame's raster ----
 @group(0) @binding(2) var<storage,read_write> vsm_state:array<u32>;
-// Per page slot: 1 when the page is cleared and rasterized this frame (zeroed by the
-// encoder on page-work frames).
+// Per page slot, the texels cleared and rasterized this frame (zeroed by the encoder on
+// page-work frames): 0 none; else bit 31 and the page-local texel rectangle, inclusive, 7 bits a
+// bound (x0, y0, x1, y1 from bit 0). A new or stale page is whole; a page only moved casters
+// touched is the union of their rectangles, so a mover re-rasterizes what it covers, not the
+// whole page and everything else in it.
 @group(0) @binding(29) var<storage,read_write> vsm_render:array<u32>;
+const VSM_DIRTY_FULL:u32=0x80000000u|(127u<<14u)|(127u<<21u);
+fn vsm_dirty(lo:vec2<u32>,hi:vec2<u32>)->u32 {return 0x80000000u|lo.x|(lo.y<<7u)|(hi.x<<14u)|(hi.y<<21u);}
+fn vsm_dirty_lo(w:u32)->vec2<u32> {return vec2<u32>(w&127u,(w>>7u)&127u);}
+fn vsm_dirty_hi(w:u32)->vec2<u32> {return vec2<u32>((w>>14u)&127u,(w>>21u)&127u);}
+fn vsm_dirty_has(w:u32,local:vec2<u32>)->bool {return all(local>=vsm_dirty_lo(w)) && all(local<=vsm_dirty_hi(w));}
 
-fn vsm_moved(level:u32,page:vec2<u32>)->bool {
-    let size=f32(VSM_PAGE)*vsm_texel(level);
+// The page-local texels the moved casters' rectangles cover in `page` of `level`, padded by a
+// texel (the rounding between box and raster transforms), as a vsm_render word; 0: none.
+fn vsm_moved(level:u32,page:vec2<u32>)->u32 {
+    let texel=vsm_texel(level);
+    let size=f32(VSM_PAGE)*texel;
     let lo=vsm.levels[level].origin.xy+vec2<f32>(page)*size;let hi=lo+vec2<f32>(size);
+    var a=vec2<i32>(i32(VSM_PAGE));var b=vec2<i32>(-1);
     for(var i=0u;i<vsm.counts.w;i+=1u) {
         let r=vsm.rects[i];
-        if all(lo<=r.zw) && all(hi>=r.xy) {return true;}
+        if all(lo<=r.zw) && all(hi>=r.xy) {
+            // Texel centres (k + 0.5) inside the rectangle, and one more each side.
+            a=min(a,vec2<i32>(ceil((r.xy-lo)/texel-vec2<f32>(0.5)))-vec2<i32>(1));
+            b=max(b,vec2<i32>(floor((r.zw-lo)/texel-vec2<f32>(0.5)))+vec2<i32>(1));
+        }
     }
-    return false;
+    a=max(a,vec2<i32>(0));b=min(b,vec2<i32>(i32(VSM_PAGE)-1));
+    if any(b<a) {return 0u;}
+    return vsm_dirty(vec2<u32>(a),vec2<u32>(b));
 }
 // N8f: the caster cull's indirect dispatch (x, y, z), zeroed by the encoder and set once a
 // page is flagged, so page-work frames that render no page (camera motion) skip the cull.
@@ -220,8 +238,8 @@ fn vsm_moved(level:u32,page:vec2<u32>)->bool {
     let epoch=vsm.levels[level].info.x;
     let moved=vsm_moved(level,page);
     if vsm_requests[id.x]!=0u {
-        if vsm_state[id.x]!=epoch || moved {
-            vsm_render[id.x]=1u;
+        if vsm_state[id.x]!=epoch || moved!=0u {
+            vsm_render[id.x]=select(moved,VSM_DIRTY_FULL,vsm_state[id.x]!=epoch);
             vsm_state[id.x]=epoch;
             // vsm_cull's grid: 64 clusters a group, 65535 groups a row.
             let groups=max((vsm.counts.z+63u)/64u,1u);
@@ -229,7 +247,7 @@ fn vsm_moved(level:u32,page:vec2<u32>)->bool {
             atomicMax(&vsm_cull_args[1],(groups+65534u)/65535u);
             atomicMax(&vsm_cull_args[2],1u);
         }
-    } else if moved {
+    } else if moved!=0u {
         // Not needed now, but its cached depths no longer describe the scene.
         vsm_state[id.x]=0u;
     }
@@ -269,7 +287,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     let requested=vsm_requests[v]!=0u;
     let pressure=atomicLoad(&vsm_pool[6u+((frame+1u)&1u)])!=0u;
     let old=frame-vsm_state[vsm_section(3u)+v]>VSM_KEEP_FRAMES;
-    if current && (requested || (!pressure && !old && !vsm_moved(level,page))) {return;}
+    if current && (requested || (!pressure && !old && vsm_moved(level,page)==0u)) {return;}
     vsm_state[table+v]=VSM_NONE;
     vsm_state[v]=0u;
     let i=atomicAdd(&vsm_pool[4],1u);
@@ -291,7 +309,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     vsm_state[vsm_section(3u)+v]=frame;
     let table=vsm_section(2u);
     var slot=vsm_state[table+v];
-    let moved=slot!=VSM_NONE && vsm_moved(level,page);
+    let moved=slot!=VSM_NONE && vsm_moved(level,page)!=0u;
     if slot!=VSM_NONE && !moved {return;}
     if atomicAdd(&vsm_pool[5],1u)>=atomicLoad(&vsm_pool[9]) {
         // Rasterized again next frame (vsm_release frees it).
@@ -310,7 +328,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     }
     vsm_state[v]=vsm.levels[level].info.x;
     vsm_state[vsm_section(1u)+v]=vsm_tag(level,page);
-    vsm_render[v]=1u;
+    vsm_render[v]=VSM_DIRTY_FULL;
     let k=atomicAdd(&vsm_pool[0],1u);
     atomicStore(&vsm_pool[VSM_POOL_FREE+atomicLoad(&vsm_pool[10])+k],v);
     let groups=max((vsm.counts.z+63u)/64u,1u);
@@ -412,7 +430,12 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
         var stale=false;
         for(var y=p0.y;y<=p1.y && !stale;y+=1u) {
             for(var x=p0.x;x<=p1.x;x+=1u) {
-                if vsm_render[vsm_vpage(level,vec2<u32>(x,y))]!=0u {stale=true;break;}
+                let w=vsm_render[vsm_vpage(level,vec2<u32>(x,y))];
+                if w==0u {continue;}
+                let corner=origin+vec2<f32>(f32(x),f32(y))*page;
+                let d0=corner+vec2<f32>(vsm_dirty_lo(w))*texel;
+                let d1=corner+vec2<f32>(vsm_dirty_hi(w)+vec2<u32>(1u))*texel;
+                if all(lo-vec2<f32>(texel)<=d1) && all(hi+vec2<f32>(texel)>=d0) {stale=true;break;}
             }
         }
         if !stale {continue;}
@@ -465,13 +488,16 @@ fn vsm_rendered(k:u32)->u32 {return vsm_pool_in[VSM_POOL_FREE+vsm_pool_in[10]+k]
 // Zeroes both layers of every page flagged for this frame: one workgroup per page slot.
 @compute @workgroup_size(256) fn vsm_clear(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     let slot=group.x;
-    if vsm_render[slot]==0u {return;}
+    let w=vsm_render[slot];
+    if w==0u {return;}
     let pages=vsm.counts.y;let per=pages*pages;
     let level=slot/per;let local=slot%per;
     let side=pages*VSM_PAGE;
     let corner=vec2<u32>(local%pages,local/pages)*VSM_PAGE;
     for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
-        let t=corner+vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
+        let q=vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
+        if !vsm_dirty_has(w,q) {continue;}
+        let t=corner+q;
         let i=(level*side+t.y)*side+t.x;
         atomicStore(&vsm_top_map[i],0lu);
         atomicStore(&vsm_peel_map[i],0lu);
@@ -482,7 +508,8 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     let pages=vsm.counts.y;
     let page=t/VSM_PAGE;
     let v=vsm_vpage(level,page);
-    if vsm_render[v]==0u {return;}
+    let w=vsm_render[v];
+    if w==0u || !vsm_dirty_has(w,t%VSM_PAGE) {return;}
     vsm_census_mark(1u,level,(id>>vsm.misc.x)-1u);
     let side=pages*VSM_PAGE;
     var i=(level*side+t.y)*side+t.x;
