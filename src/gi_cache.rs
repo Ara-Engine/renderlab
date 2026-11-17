@@ -1467,7 +1467,12 @@ impl Planner {
         }
         header[17] = u32::from(bounce);
         header[18] = layout.shade;
-        header[19] = s.gathers;
+        // Measurement (the second-bounce screen, docs/design-gi-emitters.md's sibling item):
+        // RENDERLAB_GI_GATHERS overrides the gathers an event schedules; RENDERLAB_GI_DEEP_BOUNCE=1
+        // lets tertiary cells request their hit cells too (word 42), so the bounce chain does not
+        // stop at the third generation of cells.
+        header[19] = std::env::var("RENDERLAB_GI_GATHERS").ok().and_then(|v| v.parse().ok()).unwrap_or(s.gathers);
+        header[42] = u32::from(std::env::var("RENDERLAB_GI_DEEP_BOUNCE").is_ok_and(|v| v == "1"));
         header[30] = s.hit_gathers;
         header[31] = u32::from(s.parent_standin);
         // U-RTVIS: a cut's gathers held to a time budget, the cells pixels read first.

@@ -2264,7 +2264,8 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             // tertiary band, and tertiary cells request none: two generations of hit cells
             // beyond what pixels see, all below the pixels' band (gi_miss_claim).
             let secondary=(state&GI_SECONDARY)!=0u;
-            let tertiary=(state&GI_TERTIARY)!=0u;
+            // GI_H_DEEP_BOUNCE (measurement): tertiary cells request too, in the tertiary band.
+            let tertiary=(state&GI_TERTIARY)!=0u && gi_word(GI_H_DEEP_BOUNCE)==0u;
             let band=select(select(GI_BAND_SECONDARY,GI_BAND_TERTIARY,secondary),0u,!requests || tertiary);
             var missing=0u;
             var changing=0u;
