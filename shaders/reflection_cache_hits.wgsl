@@ -17,7 +17,13 @@ const RL_CACHE_ROUGH:f32=RL_CACHE_ROUGH_MIN;
 // The cached outgoing radiance (rgb, unexposed) and w 1, or w 0 to shade the hit: a hit
 // `record` a distance `t` along `d` from `origin`, whose ray cone is `cone` metres wide there.
 fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> {
-    if rough<RL_CACHE_ROUGH || gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
+    if rough<RL_CACHE_ROUGH { return vec4<f32>(0.0); }
+    return rl_cache_lookup(record,origin,d,t,cone);
+}
+// rl_cache_hit for any lobe: the final gather's probe rays (gi_receiver_pass.wgsl) read it
+// too, with their own cones.
+fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
+    if gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
     let world=fma(d,vec3<f32>(t),origin);
     let base=gi_level(world);
     if cone<gi_edge(base) { return vec4<f32>(0.0); }
