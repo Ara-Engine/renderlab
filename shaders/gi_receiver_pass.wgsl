@@ -105,7 +105,13 @@ const FG_TILE:u32=16u;
 const FG_SLOTS:u32=2u;
 const FG_BLOCK:u32=8u;
 const FG_RAYS:u32=16u;
-const FG_HISTORY:f32=16.0;
+// A probe's history (fg_accumulate): up to FG_HISTORY frames while each frame's estimate agrees
+// with it within FG_AGREE of that estimate's own standard error (from its rays' spread); a frame
+// that disagrees (light changed, something moved) keeps FG_HISTORY_SHORT frames at most, so the
+// probe follows the change at once instead of over the full history.
+const FG_HISTORY:f32=64.0;
+const FG_HISTORY_SHORT:f32=2.0;
+const FG_AGREE:f32=3.0;
 // Half-rate tracing (fg_trace) for probes with at least FG_HALF_MIN frames of history.
 const FG_HALF_RATE:bool=true;
 const FG_HALF_MIN:f32=4.0;
@@ -283,8 +289,12 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
 // while the new point stays on the old probe's plane.
 fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>) {
     var sh:array<f32,28>;
+    // The rays' DC luminance terms: their mean is this frame's estimate, their spread its noise.
+    var m1=0.0;var m2=0.0;
     for(var l=0u;l<FG_RAYS;l+=1u) {
         for(var i=0u;i<27u;i+=1u) {sh[i]+=fg_lane_sh[first+l][i];}
+        let y=dot(vec3<f32>(fg_lane_sh[first+l][0],fg_lane_sh[first+l][1],fg_lane_sh[first+l][2]),vec3<f32>(0.2126,0.7152,0.0722));
+        m1+=y;m2+=y*y;
     }
     // Uniform hemisphere: pdf 1/(2 pi).
     let scale=6.283185307179586/f32(FG_RAYS);
@@ -292,7 +302,13 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     let old=fg_load(index,size);
     var count=1.0;
     if old.point.w>0.0 && dot(old.normal.xyz,s.normal)>0.9 && abs(dot(old.normal.xyz,s.world-old.point.xyz))<0.5*FG_PLANE*footprint {
-        count=min(old.point.w+1.0,FG_HISTORY);
+        let n=f32(FG_RAYS);
+        let mean=m1/n;
+        let error=sqrt(max(m2/n-mean*mean,0.0)/n)*6.283185307179586;
+        let fresh=mean*6.283185307179586;
+        let held=dot(old.sh[0].xyz,vec3<f32>(0.2126,0.7152,0.0722));
+        let agrees=abs(fresh-held)<=FG_AGREE*error+0.02*abs(held)+1e-6;
+        count=select(min(old.point.w,FG_HISTORY_SHORT-1.0)+1.0,min(old.point.w+1.0,FG_HISTORY),agrees);
     }
     let blend=1.0/count;
     var out:FgProbe;
