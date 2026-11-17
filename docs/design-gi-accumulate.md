@@ -63,6 +63,24 @@ SIZES=2,1 ROUTES=stand,course PATHS=nort,rt ONE_LEASE=1` (per-row data of the ta
 
 ## Results
 
+**Correction (bin-smoke-6eed732e, 33528917): the mosaic is sampling noise, not per-cell sun visibility.**
+- Direct light evaluated at update hits (RENDERLAB_GI_ACC_DIRECT=1, one visibility ray per light) leaves
+  the mosaic as it was. It costs 2.85M light rays a frame: +32 ms non-RT, +2.7 ms RT.
+- No cell sits behind a surface: RENDERLAB_GI_ACC_SHOW=1 paints every cell pixels read green
+  (its ray origin sees the camera), on both paths. Uniform input shows no mosaic.
+- 16x the samples per cell (updates every frame, 64 rays, history 4096; RT, sky off) clears most of
+  the mosaic on walls and ceiling.
+- The source: update rays reach sunlit surfaces through the clerestory openings, a small, very bright
+  part of a dark hemisphere. Uniform rays find it a few times per hundred updates, and the slowly
+  converging mean holds each cell's error still.
+- The fix belongs in sampling, not storage: rays guided toward a cell's bright directions, or more
+  samples where a cell's estimate is uncertain.
+- What remains is a sharp diagonal patch on the back wall, light through the slit. The live reference
+  has no sun inside the hangar, so the cache's rays through the glass panes (left out of its geometry)
+  probably carry too much light. That is a question of how the cache treats panes.
+
+Earlier reading, superseded above:
+
 **The hangar's mosaic is direct sun carried through cells (bin-smoke-71508d00, outpost-hangar
 non-RT, fog off, tone curve).**
 - Reflections off changes only three crates (mean 0.22 codes; 0.25% of pixels over 8).
