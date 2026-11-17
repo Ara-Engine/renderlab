@@ -3754,6 +3754,8 @@ impl Renderer {
                         self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
                     }
                 }
+                // Measurement (`RENDERLAB_VD_DUMP`): the sun's per-pixel answer, either path.
+                self.dump_sun_visibility(&mut encoder);
                 mark(&mut encoder, "cpu:tail_check");
                 self.encode_material_tail_check(&mut encoder);
                 // RT fog culling runs after current visibility; FOG_CULL=0 keeps the early path.
