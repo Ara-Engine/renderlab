@@ -32,6 +32,113 @@ pub(crate) struct RfRecord {
     pub geometric: [f32; 4],
 }
 
+/// Bytes per queued hit, material record and path (shaders/reference_live*.wgsl).
+pub(crate) const RF_HIT_BYTES: u64 = std::mem::size_of::<RfHit>() as u64;
+pub(crate) const RF_RECORD_BYTES: u64 = std::mem::size_of::<RfRecord>() as u64;
+pub(crate) const RF_PATH_BYTES: u64 = 80;
+/// shaders/reference_live.wgsl `Frame`: eight camera vec4s, four lighting vec4s, two uvec4s.
+pub(crate) const FRAME_BYTES: usize = 14 * 16;
+
+/// Whether a live reference is requested (`RENDERLAB_LIVE_REFERENCE`, src/engine/live_reference.rs):
+/// the renderer then keeps each prepared frame's draw programs.
+pub(crate) fn requested() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("RENDERLAB_LIVE_REFERENCE").is_some())
+}
+
+/// The program-free kernels with the engine's shadow caster mask.
+pub(crate) fn kernel_source() -> String {
+    crate::shadows::with_shadow_caster_mask(include_str!("../shaders/reference_live.wgsl"))
+}
+
+/// What the engine knows of the frame to trace and the renderer does not: the camera, the sun
+/// (dimmed by the atmosphere's transmittance), the sky and the local lights, as
+/// src/engine/scene_dump.rs records them for the dump tracer.
+pub(crate) struct LiveInputs {
+    pub eye: crate::Vec3,
+    pub forward: crate::Vec3,
+    pub right: crate::Vec3,
+    pub up: crate::Vec3,
+    pub tan_half_fov: f32,
+    pub size: [u32; 2],
+    pub sun: Option<crate::reference::Sun>,
+    /// Constant sky radiance when `environment` is none.
+    pub sky: [f32; 3],
+    pub environment: Option<crate::reference::Environment>,
+    pub lights: Vec<crate::reference::LocalLight>,
+    pub samples: u32,
+    /// Path segments (src/reference.rs Settings::max_depth: 1 sees emitters only, 2 is direct).
+    pub max_depth: u32,
+    pub seed: u32,
+    /// Print progress at power-of-two sample counts.
+    pub progress: bool,
+}
+
+/// shaders/reference_live.wgsl `Frame` for `sample`. The sun is packed as src/reference.rs packs
+/// it: a disk of radiance E / (pi h (2 - h)) with h = 1 - cos(r) computed stably, or a delta sun of
+/// illuminance E.
+pub(crate) fn frame_bytes(inputs: &LiveInputs, sample: u32) -> Vec<u8> {
+    let camera = [
+        inputs.eye.extend(inputs.tan_half_fov).to_array(),
+        inputs.forward.extend(0.0).to_array(),
+        inputs.right.extend(0.0).to_array(),
+        inputs.up.extend(0.0).to_array(),
+    ];
+    let mut floats: Vec<[f32; 4]> = Vec::with_capacity(12);
+    floats.extend(camera);
+    floats.extend(camera);
+    let (sun, value) = match inputs.sun {
+        Some(s) => {
+            let d = s.to_light.normalize();
+            let h = (2.0 * (0.5 * f64::from(s.angular_radius)).sin().powi(2)) as f32;
+            let scale = if h == 0.0 { 1.0 } else { (1.0 / (std::f64::consts::PI * f64::from(h) * (2.0 - f64::from(h)))) as f32 };
+            let [r, g, b] = s.illuminance;
+            ([d.x, d.y, d.z, 1.0], [r * scale, g * scale, b * scale, h])
+        }
+        None => ([0.0, 1.0, 0.0, 0.0], [0.0; 4]),
+    };
+    floats.push(sun);
+    floats.push(value);
+    let size = inputs.environment.as_ref().map_or(0.0, |e| e.radiance.size() as f32);
+    floats.push([inputs.sky[0], inputs.sky[1], inputs.sky[2], size]);
+    let (sin, cos, intensity) = inputs.environment.as_ref().map_or((0.0, 1.0, 0.0), |e| {
+        let (sin, cos) = e.yaw.sin_cos();
+        (sin, cos, e.intensity)
+    });
+    floats.push([cos, sin, intensity, 0.0]);
+    let mut bytes: Vec<u8> = floats.iter().flatten().flat_map(|f| f.to_le_bytes()).collect();
+    let words = [inputs.size[0], inputs.size[1], sample, inputs.lights.len() as u32, inputs.max_depth, inputs.seed, 0, 0];
+    bytes.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+    debug_assert_eq!(bytes.len(), FRAME_BYTES);
+    bytes
+}
+
+/// The environment's texels with their sampling CDF (src/reference.rs), or one empty texel.
+pub(crate) fn environment_bytes(inputs: &LiveInputs) -> Vec<u8> {
+    let texels = inputs.environment.as_ref().map_or_else(|| vec![[0.0; 4]], crate::reference::inputs::environment_data);
+    texels.iter().flatten().flat_map(|f| f.to_le_bytes()).collect()
+}
+
+/// The local lights as shaders/reference_live.wgsl `LocalLight` (kind 1 point, 2 spot), or one
+/// empty record.
+pub(crate) fn light_bytes(inputs: &LiveInputs) -> Vec<u8> {
+    let mut floats: Vec<[f32; 4]> = Vec::new();
+    for l in &inputs.lights {
+        let (travel, inner, outer, kind) = match l.spot {
+            Some((travel, inner, outer)) => (travel.normalize(), inner, outer, 2.0),
+            None => (crate::Vec3::ZERO, 1.0, -1.0, 1.0),
+        };
+        floats.push(l.position.extend(l.range).to_array());
+        floats.push([l.candela[0], l.candela[1], l.candela[2], kind]);
+        floats.push(travel.extend(outer).to_array());
+        floats.push([inner, 0.0, 0.0, 0.0]);
+    }
+    if floats.is_empty() {
+        floats.extend([[0.0; 4]; 4]);
+    }
+    floats.iter().flatten().flat_map(|f| f.to_le_bytes()).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -97,5 +204,44 @@ mod tests {
         // The Rust records match the WGSL's sizes: 32 and 80 bytes.
         assert_eq!(std::mem::size_of::<RfHit>(), 32);
         assert_eq!(std::mem::size_of::<RfRecord>(), 80);
+    }
+
+    /// The program-free kernels validate with the shadow caster mask, declare the four entry
+    /// points, and their `Path` and `Frame` sizes are what the host allocates and writes.
+    #[test]
+    fn reference_kernels_validate() {
+        let source = kernel_source();
+        let module = naga::front::wgsl::parse_str(&source).unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all())
+            .validate(&module)
+            .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
+        for name in ["rf_begin", "rf_trace", "rf_shade", "rf_end"] {
+            assert!(module.entry_points.iter().any(|e| e.name == name), "{name}");
+        }
+        let size = |name: &str| {
+            let (handle, _) = module.types.iter().find(|(_, t)| t.name.as_deref() == Some(name)).unwrap();
+            module.types[handle].inner.size(module.to_ctx()) as usize
+        };
+        assert_eq!(size("Path") as u64, RF_PATH_BYTES);
+        assert_eq!(size("Frame"), FRAME_BYTES);
+        let inputs = LiveInputs {
+            eye: crate::Vec3::ZERO,
+            forward: crate::Vec3::Z,
+            right: crate::Vec3::X,
+            up: crate::Vec3::Y,
+            tan_half_fov: 0.5,
+            size: [4, 2],
+            sun: None,
+            sky: [1.0; 3],
+            environment: None,
+            lights: vec![],
+            samples: 2,
+            max_depth: 4,
+            seed: 1,
+            progress: false,
+        };
+        assert_eq!(frame_bytes(&inputs, 0).len(), FRAME_BYTES);
+        assert_eq!(light_bytes(&inputs).len(), 64);
+        assert_eq!(environment_bytes(&inputs).len(), 16);
     }
 }

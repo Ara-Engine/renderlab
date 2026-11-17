@@ -51,6 +51,8 @@ pub use mesh_lod::{LodPackage, LodStats, MeshLod};
 pub use virtual_shadow_gpu::{
     VIRTUAL_FEATURES, VirtualLookup, VirtualShadowSettings, VirtualShadowStats, WalkRecords,
 };
+#[path = "reference_live_gpu.rs"]
+mod reference_live_gpu;
 #[path = "program_gpu.rs"]
 mod program_gpu;
 #[path = "reflection_hits.rs"]
@@ -730,6 +732,8 @@ pub struct Renderer {
     residency: texture_residency::Residency,
     /// M7 world radiance cache (`gi_cache.rs`).
     gi: gi_cache::GiState,
+    /// The live reference's per-draw program ids, kept while one is requested (reference_live_gpu.rs).
+    live_programs: Vec<u64>,
     /// AT1 sky LUTs, kernels and the procedural sky (`atmosphere_gpu.rs`); each view owns
     /// its camera volume and fog histories.
     atmosphere: atmosphere_gpu::AtmosphereGpu,
@@ -1208,6 +1212,7 @@ impl Renderer {
             lod_lift: visibility_buffer::DEFAULT_LOD_LIFT,
             shadow_settings: Default::default(),
             gi,
+            live_programs: Vec::new(),
             reconstruction_shadow_budget: ReconstructionShadowBudget::default(),
             transparency: Default::default(),
             primary_hash: [0; 32],
@@ -3223,6 +3228,7 @@ impl Renderer {
             .hardware_shadows
             .as_ref()
             .map_or(0, |h| h.scene_generation());
+        self.remember_live_programs(draws);
         let gi_start = Instant::now();
         let result = self.prepare_gi(
             draws,
