@@ -253,7 +253,10 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     if !h.visible {return vec3<f32>(0.0);}
     rl_hit_lights_prepare(h.input.world);
     rl_load_parameters(h.batch);
+    // The hit's cells on the side this ray sees, not the camera's.
+    gi_rx_viewer=vec4<f32>(origin,1.0);
     gi_prepare(h.input);
+    gi_rx_viewer=vec4<f32>(0.0);
     rl_reflection_hit=true;
     rl_hit_variance=FG_HIT_VARIANCE;
     let hs=surface(h.input);
