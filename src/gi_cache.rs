@@ -296,6 +296,39 @@ fn still_batch_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_STILL_BATCH").map_or(true, |v| v != "0"))
 }
+/// Accumulation (docs/design-gi-accumulate.md, shaders/gi_accumulate.wgsl), default off:
+/// `RENDERLAB_GI_ACCUMULATE=1`. Its tuning, for measurement: `RENDERLAB_GI_ACC_VISIBLE` and
+/// `RENDERLAB_GI_ACC_OTHER` (update periods in frames, 4 and 64), `RENDERLAB_GI_ACC_RAYS` (rays an
+/// update, 16) and `RENDERLAB_GI_ACC_HISTORY` (updates the slow mean keeps at most, 32).
+pub(crate) fn accumulate_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_ACCUMULATE").is_ok_and(|v| v == "1"))
+}
+/// The twin of shaders/gi_accumulate.wgsl `gi_acc_local` (and gi_cells.wgsl `gi_mix`): ray `lane`
+/// of `rays` in an update of cell `slot` on cache frame `frame`, in the cell's frame (z along its
+/// normal). Only the tests use it; they hold the shader to the same formula.
+#[cfg(test)]
+fn acc_local_direction(slot: u32, frame: u32, lane: u32, rays: u32) -> [f32; 3] {
+    let mix = |x: u32| {
+        let mut h = x;
+        h ^= h >> 16;
+        h = h.wrapping_mul(0x7feb352d);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x846ca68b);
+        h ^= h >> 16;
+        h
+    };
+    let seed = mix(slot ^ frame.wrapping_mul(0x9e3779b9));
+    let turn = (seed >> 8) as f32 * (std::f32::consts::TAU / 16777216.0);
+    let jitter = (mix(seed ^ lane) >> 8) as f32 * (1.0 / 16777216.0);
+    let z = 1.0 - (lane as f32 + jitter) / rays as f32;
+    let r = (1.0 - z * z).max(0.0).sqrt();
+    let phi = lane as f32 * 2.399963229728653 + turn;
+    [r * phi.cos(), r * phi.sin(), z]
+}
+fn accumulate_word(name: &str, default: u32) -> u32 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
 fn first_fill_on(software: bool) -> bool {
     static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     FORCED
@@ -470,7 +503,8 @@ impl Sizes {
             + 2 * (1 + u64::from(slots))
             + u64::from(slots))
             * 4;
-        let outgoing_bytes = u64::from(slots) * 16;
+        // Per slot its outgoing radiance, then per slot its parts (gi_cells.wgsl GiParts).
+        let outgoing_bytes = u64::from(slots) * 32;
         let draws_bytes = u64::from(TRACED_DRAWS + 1) * 16;
         let raw_slots = if settings.filter != 0 { slots } else { 1 };
         let raw_bytes = u64::from(raw_slots) * RAW_WORDS * 4;
@@ -886,6 +920,14 @@ pub struct IndirectCounters {
     /// Gather rays without a value, by cause: no cell at the hit's level (requested), a
     /// cell not shaded yet, and an orphan whose coarser levels had no value either.
     pub gather_absent: u32,
+    /// Accumulation (shaders/gi_accumulate.wgsl): cell updates, their rays, and the updates whose
+    /// disagreement test pulled the history.
+    pub acc_updates: u32,
+    pub acc_rays: u32,
+    pub acc_pulls: u32,
+    /// Sun visibility rays traced at update hits (RENDERLAB_GI_ACC_HITSUN) and those that reached it.
+    pub acc_sun_rays: u32,
+    pub acc_sun_lit: u32,
     pub gather_unshaded: u32,
     pub gather_orphans: u32,
     /// Queued cells a capped gather frame left for the next (`IndirectSettings::gather_cells`).
@@ -989,6 +1031,9 @@ struct Pipelines {
     gather: Owned<wgpu::ComputePipeline>,
     fill_count: Owned<wgpu::ComputePipeline>,
     fill_select: Owned<wgpu::ComputePipeline>,
+    /// Cells without history, visible cells due, the rest: one pass each, in that order.
+    acc_select: [Owned<wgpu::ComputePipeline>; 3],
+    accumulate: Owned<wgpu::ComputePipeline>,
     gather_count: Owned<wgpu::ComputePipeline>,
     gather_select: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
@@ -1406,8 +1451,38 @@ impl Planner {
         header[2] = u32::from(s.lookup == IndirectLookup::Trilinear)
             | (u32::from(field) << 1)
             | (u32::from(s.rotate_directions) << 2)
-            | (u32::from(c.profiling) << 3);
+            | (u32::from(c.profiling) << 3)
+            | (u32::from(accumulate_on()) << 4);
         header[3] = self.frame;
+        if accumulate_on() {
+            header[42] = accumulate_word("RENDERLAB_GI_ACC_VISIBLE", 4);
+            header[43] = accumulate_word("RENDERLAB_GI_ACC_OTHER", 64);
+            header[44] = accumulate_word("RENDERLAB_GI_ACC_RAYS", 16);
+            header[45] = accumulate_word("RENDERLAB_GI_ACC_HISTORY", 32);
+            // The frame's rays (0: no cap), taken by cells without history, then visible cells
+            // due, then the rest (gi_acc_select's three classes).
+            header[46] = accumulate_word("RENDERLAB_GI_ACC_BUDGET", 0);
+            // The disagreement test's band in standard deviations, times 100 (0: no test).
+            header[47] = accumulate_word("RENDERLAB_GI_ACC_SIGMA", 200);
+            // Each ray from a fresh point of the cell's surface (1) or from its query point (0).
+            header[51] = accumulate_word("RENDERLAB_GI_ACC_AREA", 1);
+            // Measurement: 0 drops what update rays read at hits (sky and direct light only).
+            header[52] = accumulate_word("RENDERLAB_GI_ACC_HITS", 1);
+            // Measurement: 1 traces a visibility ray to each directional light at every update hit
+            // (the result only counted), to price evaluating the sun at hits instead of per cell.
+            header[39] = accumulate_word("RENDERLAB_GI_ACC_HITSUN", 0);
+            // Measurement: 1 makes update-ray hits take direct light at the hit and the hit cell's parts
+            // (gi_acc_hit_lit; +32 ms non-RT on the hangar, no change to its mosaic); 0: the hit
+            // cell's outgoing radiance, as gathers read it.
+            header[40] = accumulate_word("RENDERLAB_GI_ACC_DIRECT", 0);
+            // Measurement: 1 makes every update ray of a cell one colour, green when the cell's
+            // ray origin sees the camera's eye and red when it does not, so the picture shows
+            // which cells pixels read from behind a surface.
+            header[41] = accumulate_word("RENDERLAB_GI_ACC_SHOW", 0);
+            // The share of an update's rays drawn toward the cell's own bright directions, in
+            // percent (gi_accumulate.wgsl, guided rays); the rest stay uniform.
+            header[33] = accumulate_word("RENDERLAB_GI_ACC_GUIDE", 0);
+        }
         // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
         // are uncapped.
         let since_clear = if self.pending_clear {
@@ -1830,7 +1905,10 @@ impl Planner {
             (true, u32::MAX) => IDLE_AFTER_BOUNCE,
             (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
         };
-        if view.idle_frames >= idle_after && flags == 0 && !busy {
+        // Accumulation runs its updates every frame (docs/design-gi-accumulate.md): a still view
+        // keeps converging, and its cost is the budget's whatever the camera does. Idling stopped
+        // the updates a few frames into a hold and froze cells at their first, noisy values.
+        if view.idle_frames >= idle_after && flags == 0 && !busy && !accumulate_on() {
             return Finished { frame, plan: None };
         }
         // The still-view batch: a still view with nothing changing still creates and gathers a
@@ -1842,6 +1920,7 @@ impl Planner {
         // most STILL_BATCH - 1 frames later. Any motion, a relight or a moved caster runs every
         // frame.
         if still_batch_on()
+            && !accumulate_on()
             && view.idle_frames >= STILL_BATCH
             && flags == 0
             && !busy
@@ -2296,6 +2375,11 @@ fn kernel_source_base(software: bool, directions: u32) -> String {
     kernels.push_str(&gi_shader(
         "gi_near.wgsl",
         include_str!("../shaders/gi_near.wgsl"),
+    ));
+    kernels.push('\n');
+    kernels.push_str(&gi_shader(
+        "gi_accumulate.wgsl",
+        include_str!("../shaders/gi_accumulate.wgsl"),
     ));
     // Keep the hardware module unchanged, including its original gather entry.
     if software {
@@ -3033,6 +3117,11 @@ impl Renderer {
             light_rays: w[37],
             bounce_queued: w[38],
             gather_absent: w[39],
+            acc_updates: w[210],
+            acc_rays: w[211],
+            acc_pulls: w[212],
+            acc_sun_rays: w[213],
+            acc_sun_lit: w[214],
             gather_unshaded: w[40],
             gather_orphans: w[41],
             gather_deferred: w[42],
@@ -3473,6 +3562,8 @@ impl Renderer {
             }),
             fill_count: kernel("gi_fill_count"),
             fill_select: kernel("gi_fill_select"),
+            acc_select: [kernel("gi_acc_select_fresh"), kernel("gi_acc_select_visible"), kernel("gi_acc_select_other")],
+            accumulate: kernel("gi_accumulate"),
             gather_count: kernel("gi_gather_count"),
             gather_select: kernel("gi_gather_select"),
             light: kernel("gi_light"),
@@ -4260,7 +4351,8 @@ pub(crate) fn cell_selector(id: u64) -> u32 {
     u32::try_from(id + 1).expect("program ids fit the cell selector")
 }
 const CELL_PLACEMENT_SEAM: &str = "    if p==0xffffffffu { return vec4<f32>(0.0,0.0,0.0,1.0); }\n";
-const CELL_STORE_SEAM: &str = "        gi_shade_out[slot]=gs_shade(slot);\n";
+const CELL_STORE_SEAM: &str =
+    "        gi_shade_out[slot]=gs_shade(slot);\n        gi_shade_out[gi_parts_at(slot)]=gs_parts;\n";
 /// A mixed frame's cell entry for program `id`: it shades only cells whose draw selects
 /// it, writes "reflects nothing" for draws whose program has no cell shading (every
 /// program's dispatch writes the same value), and leaves other programs' cells to theirs.
@@ -4273,7 +4365,7 @@ pub(crate) fn mixed_cell_entry(source: &str, id: u64) -> String {
     );
     source.replacen(CELL_PLACEMENT_SEAM, &check, 1).replacen(
         CELL_STORE_SEAM,
-        "        let value=gs_shade(slot);\n        if value.w>=0.0 {gi_shade_out[slot]=value;}\n",
+        "        let value=gs_shade(slot);\n        if value.w>=0.0 {gi_shade_out[slot]=value;gi_shade_out[gi_parts_at(slot)]=gs_parts;}\n",
         1,
     )
 }
@@ -4390,7 +4482,15 @@ impl GiState {
         if p.priority.is_some() {
             encoder.clear_buffer(&r.work,u64::from(layout.items)*4,Some(16*4));
         }
-        if plan.bounce || profiling {
+        // Accumulation: this frame's updates in place of the gathers (no gather events).
+        let accumulate = accumulate_on();
+        if accumulate && plan.bounce {
+            for class in &p.acc_select {
+                main_pass(encoder, "indirect accumulate select", class, u32::MAX, Some([CELL_GROUPS, 1]));
+            }
+            main_pass(encoder, "indirect accumulate", &p.accumulate, b, Some([GATHER_GROUPS, 1]));
+        }
+        if (plan.bounce || profiling) && !accumulate {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
             // The gather ray budget's admission (no-ops without it).
             main_pass(encoder, "indirect gather count", &p.gather_count, u32::MAX, grid);
@@ -4459,7 +4559,7 @@ impl GiState {
             feedback.after_claims(encoder,&r.work,layout.items);
         }
         mark(encoder, "gi_update");
-        if plan.scan || profiling {
+        if (plan.scan || profiling) && !accumulate {
             let groups = plan.scan.then_some([plan.scan_groups, 1]);
             main_pass(encoder, "indirect cache scan", &p.scan, s, groups);
         }
@@ -4474,7 +4574,7 @@ impl GiState {
         }
         if let Some(feedback) = &mut self.refill_feedback { feedback.finish(encoder,&r.work,&r.table); }
         mark(encoder, "gi_integrate");
-        if plan.integrate || profiling {
+        if (plan.integrate || profiling) && !accumulate {
             let groups = cells.filter(|_| plan.integrate);
             main_pass(
                 encoder,
@@ -4486,7 +4586,7 @@ impl GiState {
         }
         // The cell-space filter (G3), once every value of the frame is written and before cell
         // shading reads them.
-        if plan.filter || profiling {
+        if (plan.filter || profiling) && !accumulate {
             let grid = plan.filter.then_some([FILTER_GROUPS, 1]);
             main_pass(
                 encoder,
@@ -4646,6 +4746,49 @@ mod tests {
         .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
     }
 
+    /// Accumulation's updates trace different rays on consecutive updates of a cell: a rotation fixed
+    /// per cell would trace the same rays every update, and no history length could change the value.
+    #[test]
+    fn accumulate_directions_change_between_updates() {
+        for slot in [0u32, 7, 123_456, 1 << 20] {
+            for frame in [0u32, 1, 1000] {
+                for lane in 0..4 {
+                    let a = acc_local_direction(slot, frame, lane, 16);
+                    let b = acc_local_direction(slot, frame + 1, lane, 16);
+                    let dot: f32 = (0..3).map(|i| a[i] * b[i]).sum();
+                    assert!(dot < 0.9999, "slot {slot} frame {frame} lane {lane}: the same ray on consecutive updates");
+                }
+            }
+        }
+    }
+    /// Over many updates a cell's rays cover the hemisphere evenly: equal solid-angle bands (uniform in
+    /// z) by eight azimuth sectors each hold their share within 25% (about three binomial standard
+    /// deviations at 128 a bin); and the shader keeps the formula.
+    #[test]
+    fn accumulate_directions_cover_the_hemisphere() {
+        let mut bins = [[0u32; 8]; 8];
+        let (updates, rays) = (512u32, 16u32);
+        for frame in 0..updates {
+            for lane in 0..rays {
+                let [x, y, z] = acc_local_direction(4242, frame, lane, rays);
+                assert!((0.0..=1.0).contains(&z) && ((x * x + y * y + z * z) - 1.0).abs() < 1e-4);
+                let band = (((1.0 - z) * 8.0) as usize).min(7);
+                let sector = ((y.atan2(x).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU * 8.0) as usize).min(7);
+                bins[band][sector] += 1;
+            }
+        }
+        let mean = (updates * rays) as f32 / 64.0;
+        for (band, row) in bins.iter().enumerate() {
+            for (sector, &n) in row.iter().enumerate() {
+                assert!((n as f32 - mean).abs() < 0.25 * mean, "band {band} sector {sector}: {n} of a mean {mean}");
+            }
+        }
+        let shader = include_str!("../shaders/gi_accumulate.wgsl");
+        for piece in ["let seed=gi_mix(slot^(frame*0x9e3779b9u));", "let jitter=f32(gi_mix(seed^lane)>>8u)*(1.0/16777216.0);",
+                      "let z=1.0-(f32(lane)+jitter)/f32(rays);", "let phi=f32(lane)*2.399963229728653+turn;"] {
+            assert!(shader.contains(piece), "gi_acc_local changed without its twin: {piece}");
+        }
+    }
     #[test]
     fn kernels_validate_on_both_ray_sources() {
         for directions in [64, 128] {

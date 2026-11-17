@@ -1,0 +1,119 @@
+# Accumulating cache cells (gicut, 2026-11-17; in progress, `RENDERLAB_GI_ACCUMULATE=1`, default off)
+
+## Why
+
+Two faults with one cause (main thread, 17 Nov):
+
+- Outpost's hangar is blotchy on both paths where its path-traced reference is smooth. Turning GI
+  off clears it; sampling the glowing strips as lights does not. A cell's value is the sum of one
+  fixed set of 64 directions, and a small bright source (the doorway: sky and the sunlit ground
+  outside) is met by some cells' directions and missed by their neighbours': a fixed mottle.
+- Non-RT walking spends 21 ms of a 28-29 ms frame in the cache (Glint and Outpost): every change
+  re-gathers a cell's 64 rays at once, and a cap on that (the bounded refill) only queues it.
+
+World-space radiance caches with constant cost (Lumen's radiance cache, DDGI) have no refill events:
+a fixed number of cell updates a frame, each with a small rotated set of rays, blended into the
+stored value with a hysteresis that drops when the new sample disagrees with the history.
+
+## The cell
+
+- **One stored quantity:** the cell's incident radiance, sky and bounce together, absolute, as an
+  L2 SH in the words the sky used (scale and 27 halves). Readers are unchanged except that
+  `gi_sky_scale` passes the value through.
+- **Statistics** in the bounce's words, whose scale word stays 0 so no reader adds a bounce: a fast
+  and a slow running mean and the slow second moment of an update's L0 luminance, and the updates
+  blended.
+- The local lights' per-light visibility bits stay: they are exact, not noisy.
+- A new cell's first value is finish's 64-direction sky, made absolute; its first update traces all
+  64 lanes.
+
+## The update (shaders/gi_accumulate.wgsl)
+
+K rays (16 by default) stratified over the hemisphere's solid angle in a rotation drawn per update.
+A miss adds the sky's radiance, a hit the hit cell's outgoing radiance (which carries that cell's
+own incident light, so bounces chain). The update's L2 SH blends into the history with weight
+1 / updates (down to 1 / 32). When the fast mean (weight 1/2) leaves the slow mean's band (twice its
+standard deviation, plus 2%), the history is pulled to the update (weight 1/2) and its count
+restarts. That test stands for every change: lights, sky, movers, cuts; there are no reset rules.
+
+## Schedule (first slice)
+
+Cells without history every frame, visible cells every 4 frames, others every 64, at a phase their
+slot fixes. Scan, integrate, the gathers and the cell filter do not run. The order by priority and a
+budget in rays derived from the cost target come after the picture holds.
+
+## Acceptance: cost while moving
+
+Target: the cache's cost rolling stays within about 1.5x of standing, on both paths, at both sizes.
+The cache's cost is gi_gather + gi_update + gi_integrate, in GPU ms a frame. Today's cache, on
+Glint's play loop (sunrt, bin-smoke-d64a3d6a, `ara-player --game`, the bot rolling the course, vsync,
+high quality, one exclusive lease, 15 s a row; the ball at a median 9.5 m/s):
+
+| path | size | standing | rolling | rolling / standing |
+|---|---|---:|---:|---:|
+| non-RT | 2560x1440 | 5.95 | 42.90 | 7.2x |
+| non-RT | 1920x1080 | 4.30 | 40.26 | 9.4x |
+| RT | 2560x1440 | 2.13 | 7.96 | 3.7x |
+| RT | 1920x1080 | 1.69 | 5.81 | 3.4x |
+
+Today's cost grows with how far the view moves between frames. Accumulation spends a constant ray
+budget instead. Re-measure a candidate with `u-sunrt/roll/breakdown.py <bin> <out> SECS=15
+SIZES=2,1 ROUTES=stand,course PATHS=nort,rt ONE_LEASE=1` (per-row data of the table:
+`u-sunrt/roll/fig2/`).
+
+## Results
+
+**Correction (bin-smoke-6eed732e, 33528917): the mosaic is sampling noise, not per-cell sun visibility.**
+- Direct light evaluated at update hits (RENDERLAB_GI_ACC_DIRECT=1, one visibility ray per light) leaves
+  the mosaic as it was. It costs 2.85M light rays a frame: +32 ms non-RT, +2.7 ms RT.
+- No cell sits behind a surface: RENDERLAB_GI_ACC_SHOW=1 paints every cell pixels read green
+  (its ray origin sees the camera), on both paths. Uniform input shows no mosaic.
+- 16x the samples per cell (updates every frame, 64 rays, history 4096; RT, sky off) clears most of
+  the mosaic on walls and ceiling.
+- The source: update rays reach sunlit surfaces through the clerestory openings, a small, very bright
+  part of a dark hemisphere. Uniform rays find it a few times per hundred updates, and the slowly
+  converging mean holds each cell's error still.
+- The fix belongs in sampling, not storage: rays guided toward a cell's bright directions, or more
+  samples where a cell's estimate is uncertain.
+- What remains is a sharp diagonal patch on the back wall, light through the slit. The live reference
+  has no sun inside the hangar, so the cache's rays through the glass panes (left out of its geometry)
+  probably carry too much light. That is a question of how the cache treats panes.
+
+**Panes (bin-smoke-82e2442d).** Keeping see-through draws in every opaque path
+(RENDERLAB_TRANSPARENT_OPAQUE=1, a measurement) removes the hangar's golden light. Accumulation's
+back wall then matches the live reference: 109 against 108 codes, from 118 against 78. Its
+whole-frame difference falls from 48.5 to 32.9. Glint's views do not move (under 0.1 code). The
+cache's rays had passed the clerestory glass at full strength. The white mosaic that remains is sky
+through the roof strips, which are real openings.
+
+**Guided rays from the cell's L2 SH (bin-smoke-9d384398, RENDERLAB_GI_ACC_GUIDE).** At 50% and 75%,
+the hangar's mosaic is barely finer: 32.99, 33.08 and 34.90 mean against the live reference at 0,
+50 and 75%. The back wall drifts darker: 109, 101 and 99 against 109. Glint improves slightly at
+75% (slider 5.20 -> 4.93, goal 2.18 -> 2.09). An L2 SH cannot hold a thin bright strip, so the
+guide it gives is broad. The next form keeps a finer directional record per cell to guide from:
+64 bins of last radiance, as Lumen's screen probes guide from their octahedral radiance. The guide
+stays at 0 by default.
+
+Earlier reading, superseded above:
+
+**The hangar's mosaic is direct sun carried through cells (bin-smoke-71508d00, outpost-hangar
+non-RT, fog off, tone curve).**
+- Reflections off changes only three crates (mean 0.22 codes; 0.25% of pixels over 8).
+- With the sky off and the sun on, the walls show a golden sun patch with the mosaic. With update
+  rays not reading their hits (RENDERLAB_GI_ACC_HITS=0), the walls go dark and smooth.
+- So the mosaic enters through update rays reading neighbouring cells' outgoing light. That light
+  includes each cell's direct sun from its one on/off visibility ray (gi_light).
+
+The fix is to evaluate direct light at the hit and take only indirect light from cells, as Lumen's
+hit lighting does.
+
+**Cost of one sun visibility ray per update hit (RENDERLAB_GI_ACC_HITSUN=1), same view:**
+
+| path | update pass off/on, ms | sun rays a frame | ns a ray |
+|---|---|---:|---:|
+| non-RT | 23.41 / 31.62 | 905k | ~9 |
+| RT | 3.66 / 4.33 | 919k | ~0.73 |
+
+Only about 4.6% of these hits reach the sun.
+
+(to fill: hangar pair, walk cost against still, after a cut, movers, a lighting change)

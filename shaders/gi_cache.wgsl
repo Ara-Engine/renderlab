@@ -994,6 +994,12 @@ fn gi_origin_offset(q:vec3<f32>, edge:f32) -> f32 {
 // ---- SH of the occluded sky over the fixed directions ----
 // A prepared map's radiance toward d; a constant sky caches unit radiance, and the lookup
 // scales by the current constant, so a constant-sky change needs no re-integration.
+// Sky radiance in the cells' units, made absolute as gi_api.wgsl gi_sky_scale makes it at read
+// time: a map's intensity, or a constant sky's radiance (accumulating cells store it absolute).
+fn gi_sky_absolute(e:vec3<f32>) -> vec3<f32> {
+    if (gi_word(GI_H_FLAGS)&GI_F_FIELD)!=0u { return min(e*lighting.map.z,vec3<f32>(3.4028235e38)); }
+    return min(e*lighting.environment,vec3<f32>(3.4028235e38));
+}
 fn gi_sky(d:vec3<f32>) -> vec3<f32> {
     if lighting.map.w!=0.0 { return environment_radiance(environment_direction(d),GI_ENV_ROUGHNESS); }
     return vec3<f32>(1.0);
@@ -1632,8 +1638,19 @@ fn gi_uniform_count(index:u32, counter:u32) -> u32 {
                 gi_table[cold+GI_C_KNOWN+w]=known;
                 gi_table[cold+GI_C_PENDING+w]=0u;
             }
+            // Accumulating: the first value, sky only from every direction, in absolute radiance;
+            // updates add the bounce from here (shaders/gi_accumulate.wgsl).
+            let accumulate=(gi_word(GI_H_FLAGS)&GI_F_ACCUMULATE)!=0u;
+            if accumulate {
+                for(var i=0u;i<10u;i+=1u) { gi_cell_sh[i]=gi_sky_absolute(gi_cell_sh[i]); }
+            }
             gi_store_sh(slot);
-            if gi_bounce_on() && gi_word(GI_H_PARENT_STANDIN)!=0u { gi_parent_bounce(slot); }
+            if accumulate {
+                let hot=gi_hot(slot);
+                gi_table[hot+GI_HOT_BOUNCE]=0u;
+                for(var w=GI_HOT_ACC_FAST;w<=GI_HOT_ACC_COUNT;w+=1u) { gi_table[hot+w]=0u; }
+            }
+            if gi_bounce_on() && gi_word(GI_H_PARENT_STANDIN)!=0u && !accumulate { gi_parent_bounce(slot); }
             // The item base depends on allocation order: cleared, so the table is deterministic.
             gi_table[cold+GI_C_BASE]=0u;
             gi_table[cold+GI_C_STATE]=select(GI_TRACED|GI_PARTIAL,GI_TRACED,all_known)|(gi_table[cold+GI_C_STATE]&GI_KEEP);
@@ -1992,6 +2009,9 @@ const GI_HIT_NONE:f32=0.25;
 // the pixels' level). The gather kernels set it: the fixed directions' share of the cone's
 // footprint, and 0 for the rays aimed around a light.
 var<private> gi_hit_spread:f32;
+// The slot whose outgoing radiance gi_hit_radiance returned last (0xffffffff: none), for a
+// reader that rebuilds the hit's radiance from the cell's parts (gi_accumulate.wgsl).
+var<private> gi_hit_slot:u32;
 // The level a gather hit at `world`, a distance t along its ray, reads and requests: the level
 // a pixel there would read, or the coarser one whose cells are gi_hit_spread * t on an edge.
 // A fixed direction stands for a cone 0.36 t wide at the hit (64 directions), so a 4 px cell
@@ -2023,6 +2043,7 @@ fn gi_hit_level(world:vec3<f32>, t:f32) -> u32 {
     return level;
 }
 fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bool) -> vec4<f32> {
+    gi_hit_slot=0xffffffffu;
     let r=gi_hit_receiver(origin,d,h);
     let world=r.world;
     let bin=gi_bin(r.vertex);
@@ -2051,6 +2072,7 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
         }
         let o=gi_outgoing[slot];
         if o.w>0.0 {
+            gi_hit_slot=slot;
             let settled=select(GI_HIT_CHANGING,GI_HIT_FINAL,o.w>=1.0);
             return vec4<f32>(o.rgb,select(GI_HIT_MISSING,settled,l==base || orphan));
         }

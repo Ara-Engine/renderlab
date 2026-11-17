@@ -20,7 +20,8 @@
 // sharp lobe that one fixed direction meets head-on (a normal-mapped mirror).
 // Composed only for programs that declare `scatter` or `emission` (src/program.rs
 // Stage::Cell); src/program.rs defines rl_scatter and rl_emission (zero when absent).
-// Writes gi_shade_out[slot] (gi_cache.wgsl gi_outgoing), which the next gathers read.
+// Writes gi_shade_out[slot] (gi_cache.wgsl gi_outgoing), which the next gathers read, and the
+// cell's parts (gi_cells.wgsl GiParts: emission and albedo, no lights) at gi_parts_at(slot).
 @group(0) @binding(31) var<storage,read> gi_shade_work:array<u32>;
 @group(0) @binding(33) var<storage,read_write> gi_shade_out:array<vec4<f32>>;
 @group(0) @binding(36) var<storage,read> gi_shade_draws:array<vec4<u32>>;
@@ -124,8 +125,11 @@ fn gs_surface_input(slot:u32, p:u32, q:vec3<f32>, nc:vec3<f32>, edge:f32) -> Sur
         a.tangent*w.x+b.tangent*w.y+c.tangent*w.z,s*a.handedness,a.uv*w.x+b.uv*w.y+c.uv*w.z,uv[0],uv[1],
         a.color*w.x+b.color*w.y+c.color*w.z,true,eye,vec2<u32>(0u),material,receiver,decal_none());
 }
+// The parts of the cell gs_shade shaded last (zero where it reflects nothing).
+var<private> gs_parts:vec4<f32>;
 // One cell's outgoing radiance: rgb, w 1 (written), or 0 for a cell without a value.
 fn gs_shade(slot:u32) -> vec4<f32> {
+    gs_parts=gi_parts_pack(vec3<f32>(0.0),vec3<f32>(0.0));
     let cold=gi_cold(slot);
     let hot=gi_hot(slot);
     if (gi_word(hot)&GI_VALID)==0u || (gi_word(cold+GI_C_STATE)&GI_ORPHAN)!=0u { return vec4<f32>(0.0); }
@@ -162,7 +166,10 @@ fn gs_shade(slot:u32) -> vec4<f32> {
             incident+=light.intensity*(light.attenuation*max(dot(nc,light.direction),0.0));
         }
     }
-    var out=rl_emission(s,input)+albedo*incident*(1.0/PI);
+    var emission=rl_emission(s,input);
+    emission=min(select(vec3<f32>(0.0),emission,emission>=vec3<f32>(0.0)),vec3<f32>(3.4028235e38));
+    gs_parts=gi_parts_pack(emission,albedo);
+    var out=emission+albedo*incident*(1.0/PI);
     // Finite and nonnegative, as rl_finite but without the HDR store's 16-bit ceiling.
     out=min(select(vec3<f32>(0.0),out,out>=vec3<f32>(0.0)),vec3<f32>(3.4028235e38));
     return vec4<f32>(out,1.0);
@@ -173,6 +180,7 @@ fn gs_shade(slot:u32) -> vec4<f32> {
     for(var i=id.x;i<count;i+=groups.x*64u) {
         let slot=gi_shade_work[queue+i];
         gi_shade_out[slot]=gs_shade(slot);
+        gi_shade_out[gi_parts_at(slot)]=gs_parts;
         // GC1 (shared with G2c's cell shading; the line above is MP1's seam): a value whose
         // cell still has gathers scheduled is marked as changing (w 0.75), so gathers that read
         // it repeat (gi_gather). It depends only on the cell's state, so a mixed frame's

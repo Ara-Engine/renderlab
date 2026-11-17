@@ -145,6 +145,41 @@ const GI_F_FIELD:u32=2u;
 const GI_F_ROTATE:u32=4u;
 // Probe statistics (the work counters from GI_W_P_TILES), kept on profiled frames only.
 const GI_F_STATS:u32=8u;
+// Accumulation (RENDERLAB_GI_ACCUMULATE=1, docs/design-gi-accumulate.md): a cell's SH words hold
+// its whole incident radiance, sky and bounce, absolute (gi_sky_scale passes it through), blended
+// over updates of a few rotated rays (shaders/gi_accumulate.wgsl); the bounce words hold the
+// blend's statistics (GI_HOT_ACC_*) with their scale word 0, so no reader adds a bounce.
+const GI_F_ACCUMULATE:u32=16u;
+// Its header words: the update periods of visible and other cells (frames), the rays of an
+// update, and the history the slow mean keeps at most (updates).
+const GI_H_ACC_VISIBLE:u32=42u;
+const GI_H_ACC_OTHER:u32=43u;
+const GI_H_ACC_RAYS:u32=44u;
+const GI_H_ACC_HISTORY:u32=45u;
+// The frame's ray budget for updates (0: no cap).
+const GI_H_ACC_BUDGET:u32=46u;
+// The disagreement test's band, in hundredths of a standard deviation (0: no test).
+const GI_H_ACC_SIGMA:u32=47u;
+// Nonzero: each update ray starts from a fresh point of the cell's surface (gi_accumulate).
+const GI_H_ACC_AREA:u32=51u;
+// Measurement: 0 drops what update rays read at hits.
+const GI_H_ACC_HITS:u32=52u;
+// Measurement: nonzero traces a sun visibility ray at every update hit (counted only).
+const GI_H_ACC_HITSUN:u32=39u;
+// Nonzero: an update ray's hit reads the hit cell's parts and adds direct light at the hit
+// (gi_acc_hit_lit) instead of the cell's outgoing radiance, whose lights come from one
+// visibility ray per cell.
+const GI_H_ACC_DIRECT:u32=40u;
+// Measurement: nonzero colours every update ray by whether the cell's ray origin sees the camera.
+const GI_H_ACC_SHOW:u32=41u;
+// The share of an update's rays guided by the cell's own estimate, in percent (0: all uniform).
+const GI_H_ACC_GUIDE:u32=33u;
+// Its hot words (the bounce's, unused while accumulating): the fast mean, the slow mean and the
+// slow second moment of an update's L0 luminance (f32), and the updates blended (u32).
+const GI_HOT_ACC_FAST:u32=17u;
+const GI_HOT_ACC_MEAN:u32=18u;
+const GI_HOT_ACC_MOMENT:u32=19u;
+const GI_HOT_ACC_COUNT:u32=20u;
 
 // Table layout after the header: the hot records, then the cold records.
 // Hot record: word 0 is key a (31 bits) with GI_VALID set while the SH is current and
@@ -449,6 +484,21 @@ fn gi_basis(n:vec3<f32>) -> mat3x3<f32> {
     let a=-1.0/(s+n.z);
     let b=n.x*n.y*a;
     return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
+}
+// A cell's parts: what cell shading (gi_shade_entry.wgsl) computes before the lights, so a
+// reader that evaluates direct light at its own hit point can rebuild the cell's radiance for
+// any program: emission + albedo / pi * (indirect irradiance + direct irradiance at the hit).
+// Stored in the outgoing radiance buffer after every slot's radiance, at gi_parts_at(slot),
+// valid where the slot's radiance is (w > 0): emission rgb, and the directional albedo 8 bits a
+// channel in w. Its top byte is 0x3f, so w is always a normal float and survives every f32 load
+// and store unchanged.
+struct GiParts { emission:vec3<f32>, albedo:vec3<f32> };
+fn gi_parts_at(slot:u32) -> u32 { return gi_word(GI_H_MASK)+1u+slot; }
+fn gi_parts_pack(emission:vec3<f32>, albedo:vec3<f32>) -> vec4<f32> {
+    return vec4<f32>(emission,bitcast<f32>(pack4x8unorm(vec4<f32>(albedo,63.0/255.0))));
+}
+fn gi_parts_unpack(v:vec4<f32>) -> GiParts {
+    return GiParts(v.xyz,unpack4x8unorm(bitcast<u32>(v.w)).xyz);
 }
 fn gi_unpack_normal(w:u32) -> vec3<f32> {
     let q=unpack2x16snorm(w);
