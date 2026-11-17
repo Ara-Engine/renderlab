@@ -182,6 +182,7 @@ fn reference_scene(sv: &Sv, moved: &[(usize, Mat4)], specular: f32) -> reference
         textures: vec![],
         environment: None,
         camera_background: None,
+        lights: vec![],
     }
 }
 fn reference_view(sv: &Sv, eye: Vec3, target: Vec3) -> reference::View {
@@ -2458,6 +2459,7 @@ fn quarry_reference(
                 textures: vec![],
                 environment,
                 camera_background: None,
+                lights: vec![],
             }
         }
         ReferenceScene::Full {
