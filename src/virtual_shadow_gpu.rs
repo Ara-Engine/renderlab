@@ -70,6 +70,14 @@ fn sparse_switch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE").is_ok_and(|v| v.trim() == "1"))
 }
+/// Measurement: `RENDERLAB_VSM_FINER=n` gives every receiver, and the ladder, a level n octaves
+/// finer than `texels_per_pixel_log2` asks for (the density test for stepped outlines).
+fn finer() -> f32 {
+    static FINER: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *FINER.get_or_init(|| {
+        std::env::var("RENDERLAB_VSM_FINER").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0.0)
+    })
+}
 /// Straight occluder outlines in the Disk lookup (shaders/virtual_shadow_disk.wgsl VD_EDGES):
 /// the page pass that stores each outline texel's edge line runs, its buffer (2 bytes a texel)
 /// exists and the lookup clips by it. `RENDERLAB_VD=VD_EDGES=true|false` overrides the default.
@@ -2225,7 +2233,8 @@ impl Renderer {
             .reconstruction_frame
             .map_or(0.0, |frame| (frame % 4096 + 1) as f32);
         let state = self.view.virtual_shadows.as_mut().unwrap();
-        let s = state.settings;
+        let mut s = state.settings;
+        s.texels_per_pixel_log2 += finer();
         // Measurement: the Disk lookup's edge pixels, a line a frame.
         if let Some(path) = edge_log() {
             for ((), words) in state.edge_counts.get_mut().unwrap().collect() {
