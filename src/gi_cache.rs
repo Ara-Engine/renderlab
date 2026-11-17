@@ -1471,9 +1471,10 @@ impl Planner {
             // Measurement: 1 traces a visibility ray to each directional light at every update hit
             // (the result only counted), to price evaluating the sun at hits instead of per cell.
             header[39] = accumulate_word("RENDERLAB_GI_ACC_HITSUN", 0);
-            // 1: update-ray hits take direct light at the hit and the hit cell's parts
-            // (gi_acc_hit_lit); 0: the hit cell's outgoing radiance, as gathers read it.
-            header[40] = accumulate_word("RENDERLAB_GI_ACC_DIRECT", 1);
+            // Measurement: 1 makes update-ray hits take direct light at the hit and the hit cell's parts
+            // (gi_acc_hit_lit; +32 ms non-RT on the hangar, no change to its mosaic); 0: the hit
+            // cell's outgoing radiance, as gathers read it.
+            header[40] = accumulate_word("RENDERLAB_GI_ACC_DIRECT", 0);
             // Measurement: 1 makes every update ray of a cell one colour, green when the cell's
             // ray origin sees the camera's eye and red when it does not, so the picture shows
             // which cells pixels read from behind a surface.
