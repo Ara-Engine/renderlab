@@ -48,7 +48,7 @@ impl State {
                     ),
                     readback: buffer(
                         "GI refill feedback",
-                        116,
+                        112,
                         wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     ),
                     _allocation: ledger.allocate(AllocationKind::Light, 368),
@@ -72,7 +72,7 @@ impl State {
                 continue;
             };
             if result.is_ok() {
-                let data = sample.readback.slice(..116).get_mapped_range().map(|view| {
+                let data = sample.readback.slice(..112).get_mapped_range().map(|view| {
                     let ticks: Vec<u64> = view[..32]
                         .chunks_exact(8)
                         .map(|b| u64::from_ne_bytes(b.try_into().unwrap()))
@@ -99,8 +99,6 @@ impl State {
         ready.sort_by_key(|r| r.0);
         for (frame, c, claim_ms, first_ms, refresh_ms) in ready {
             let (claims, gathers, first) = (c[0], c[1], c[2]);
-            // The gather queue at the frame's start (`begin`): the drain target's backlog.
-            self.controller.queued = c.get(20).copied().unwrap_or(0);
             self.controller.observe(
                 frame,
                 target,
@@ -109,10 +107,9 @@ impl State {
                 claim_ms,
                 first_ms + refresh_ms,
             );
-            let split_target = self.controller.target();
             self.controller.observe_split(
                 frame,
-                split_target,
+                priority::gather_target(),
                 first,
                 gathers.saturating_sub(first),
                 first_ms,
@@ -135,8 +132,8 @@ impl State {
                     c[9],
                     c[10],
                     c[11],
-                    self.controller.target(),
-                    first_ms > self.controller.target(),
+                    priority::gather_target(),
+                    first_ms > priority::gather_target(),
                     c[17] != 0
                 );
                 if let Ok(mut file) = std::fs::OpenOptions::new()
@@ -149,12 +146,10 @@ impl State {
             }
         }
     }
-    /// `queue_at`: the byte offset in `work` of this frame's gather queue count.
-    pub fn begin(&mut self, encoder: &mut wgpu::CommandEncoder, work: &wgpu::Buffer, queue_at: u64) {
+    pub fn begin(&mut self, encoder: &mut wgpu::CommandEncoder) {
         self.active = self.samples.iter().position(|s| s.done.is_none());
         if let Some(i) = self.active {
             self.samples[i].frame = self.frame;
-            encoder.copy_buffer_to_buffer(work, queue_at, &self.samples[i].readback, 112, 4);
         }
         self.mark(encoder, 0);
     }
@@ -227,7 +222,7 @@ impl State {
         encoder.copy_buffer_to_buffer(table, 33 * 4, &sample.readback, 108, 4);
         let done = Arc::new(OnceLock::new());
         let callback = done.clone();
-        encoder.map_buffer_on_submit(&sample.readback, wgpu::MapMode::Read, 0..116, move |r| {
+        encoder.map_buffer_on_submit(&sample.readback, wgpu::MapMode::Read, 0..112, move |r| {
             let _ = callback.set(r);
         });
         sample.done = Some(done);
