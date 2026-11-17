@@ -42,6 +42,25 @@ Cells without history every frame, visible cells every 4 frames, others every 64
 slot fixes. Scan, integrate, the gathers and the cell filter do not run. The order by priority and a
 budget in rays derived from the cost target come after the picture holds.
 
+## Acceptance: cost while moving
+
+Target: the cache's cost rolling stays within about 1.5x of standing, on both paths, at both sizes.
+The cache's cost is gi_gather + gi_update + gi_integrate, in GPU ms a frame. Today's cache, on
+Glint's play loop (sunrt, bin-smoke-d64a3d6a, `ara-player --game`, the bot rolling the course, vsync,
+high quality, one exclusive lease, 15 s a row; the ball at a median 9.5 m/s):
+
+| path | size | standing | rolling | rolling / standing |
+|---|---|---:|---:|---:|
+| non-RT | 2560x1440 | 5.95 | 42.90 | 7.2x |
+| non-RT | 1920x1080 | 4.30 | 40.26 | 9.4x |
+| RT | 2560x1440 | 2.13 | 7.96 | 3.7x |
+| RT | 1920x1080 | 1.69 | 5.81 | 3.4x |
+
+Today's cost grows with how far the view moves between frames. Accumulation spends a constant ray
+budget instead. Re-measure a candidate with `u-sunrt/roll/breakdown.py <bin> <out> SECS=15
+SIZES=2,1 ROUTES=stand,course PATHS=nort,rt ONE_LEASE=1` (per-row data of the table:
+`u-sunrt/roll/fig2/`).
+
 ## Results
 
 (to fill: hangar pair, walk cost against still, after a cut, movers, a lighting change)
