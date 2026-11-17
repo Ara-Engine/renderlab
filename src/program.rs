@@ -38,6 +38,8 @@ const INDIRECT_API: [&str; 3] = [
 /// The world radiance cache's cell shading entry (M7 G2): a program's `surface` plus its
 /// optional `scatter`/`emission` at each cell's query point (shaders/gi_shade_entry.wgsl).
 const CELL_ENTRY: &str = include_str!("../shaders/gi_shade_entry.wgsl");
+/// The live reference's material entry (Stage::Reference, docs/design-reference-live.md).
+const REFERENCE_ENTRY: &str = include_str!("../shaders/reference_live_entry.wgsl");
 /// The M7-ES1 inputs that read the receiver's sky visibility for specular. The generated
 /// entry prepares the receiver's one cache lookup before `surface` for every program that
 /// calls an indirect input (`rl_indirect_prepare`: a lookup at each call site cost 0.4 ms of
@@ -1046,6 +1048,10 @@ pub(crate) enum Stage {
     /// The world radiance cache's cell shading (M7 G2): the traced material ABI and the
     /// cache definitions with `CELL_ENTRY`, for programs that `reflects`.
     Cell,
+    /// The live reference's material stage (docs/design-reference-live.md): the traced material
+    /// ABI and the cell stage's API set with `REFERENCE_ENTRY`, which stores each queued path
+    /// hit's material record as the program evaluates it.
+    Reference,
 }
 
 /// The traced API with its `sample_*_grad` helpers, from the base-colour one to the DFG
@@ -1249,7 +1255,7 @@ fn compose_stage(
             if parameters { RASTER_PARAMETERS } else { "" },
             RASTER_ENTRY,
         ),
-        Stage::Traced | Stage::TracedStreamed | Stage::Cell => (
+        Stage::Traced | Stage::TracedStreamed | Stage::Cell | Stage::Reference => (
             if stage == Stage::TracedStreamed {
                 streamed = traced_streamed_api();
                 &streamed
@@ -1264,6 +1270,8 @@ fn compose_stage(
             if stage == Stage::Cell {
                 cell_entry = gi_shader("gi_shade_entry.wgsl", CELL_ENTRY);
                 &*cell_entry
+            } else if stage == Stage::Reference {
+                REFERENCE_ENTRY
             } else {
                 TRACED_ENTRY
             },
@@ -1289,13 +1297,14 @@ fn compose_stage(
     });
     // LC1: the light loop's clusters and local shadows, traced where the head binds rays.
     // Cell shading never calls light_visibility; it composes the map variant.
+    let material_only = matches!(stage, Stage::Cell | Stage::Reference);
     let lights = crate::light_cluster::shading_api(
-        if stage == Stage::Cell { "" } else { head },
+        if material_only { "" } else { head },
         matches!(stage, Stage::Traced | Stage::TracedStreamed),
     );
     // AT1: camera-pixel entries apply the sky and fog (shaders/atmosphere_api.wgsl); cell
     // shading's bounce light carries none.
-    let atmosphere = if stage == Stage::Cell {
+    let atmosphere = if material_only {
         String::new()
     } else {
         crate::atmosphere::api_source()
@@ -1353,11 +1362,14 @@ fn compose_stage(
     if matches!(stage, Stage::Traced | Stage::TracedStreamed) {
         source.push_str(if view { VIEW_HINT } else { VIEW_STUB });
     }
-    if stage == Stage::Cell {
+    if material_only {
         source.push_str(&reflection_wrappers(program));
         if head.contains("primary_decode(") {
             source.push_str(traced_hit_helpers());
         }
+    }
+    if stage == Stage::Reference {
+        source.push_str(&reference_record(program));
     }
     let mut deferred = false;
     if hits {
@@ -1709,6 +1721,18 @@ pub(crate) fn reflects(program: &str) -> bool {
     declares(program, "fn", "scatter") || declares(program, "fn", "emission")
 }
 /// Cell shading's calls into the hooks, zero for an absent one.
+/// The live reference entry's `rf_record`: the program's own material record (`material_out`) when
+/// it declares the record mapping, else the engine's material factors and textures, as the view
+/// modes read a program without `view_data` (`view_variant`), with the normal map and coverage.
+fn reference_record(program: &str) -> String {
+    let body = if declares(program, "fn", "material_out") {
+        "return material_out(s,input);"
+    } else {
+        "let m=input.material;let base=sample_base_color(input);let mr=sample_metallic_roughness(input);\n    return MaterialRecord(material_normal(input),clamp(m.base_color.rgb*input.color.rgb*base.rgb,vec3<f32>(0.0),vec3<f32>(1.0)),transparent_coverage(m,m.base_color.a*base.a*input.color.a),clamp(m.metallic*mr.b,0.0,1.0),clamp(m.roughness*mr.g,0.0,1.0),vec3<f32>(0.0),0.0,0.0,0u);"
+    };
+    format!("fn rf_record(s:Surface,input:SurfaceInput)->MaterialRecord {{\n    {body}\n}}\n")
+}
+
 fn reflection_wrappers(program: &str) -> String {
     let scatter = if declares(program, "fn", "scatter") {
         "return scatter(s,input,wi,wo);"

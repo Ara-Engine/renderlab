@@ -592,7 +592,9 @@ fn gpu_hardware_shadow_msaa_sample_receivers() {
 
 /// Every shadow ray culls with the named `SHADOW_CASTER_MASK` (src/shadows.rs, declared in
 /// shaders/scene.wgsl), so a placement that casts no shadow is invisible to it: each ray query
-/// that stops at its first hit, and the fresh-visibility kernel, whose flags are a variable.
+/// that stops at its first hit, the fresh-visibility kernel, whose flags are a variable, and the
+/// transmitted shadow rays (`fn transmitted_*`), which go on past see-through casters to sum what
+/// they pass and so cannot stop at the first hit (the live reference, shaders/reference_live.wgsl).
 /// Camera, reflection and bounce rays keep 0xFF.
 #[test]
 fn every_shadow_ray_query_culls_with_the_shadow_mask() {
@@ -618,8 +620,15 @@ fn every_shadow_ray_query_culls_with_the_shadow_mask() {
     for (file, text) in &sources {
         for (at, _) in text.match_indices("RayDesc(") {
             let call = &text[at..at + text[at..].find(')').unwrap()];
-            let shadow =
-                call.contains("TERMINATE_ON_FIRST_HIT") || file.ends_with("fresh_shadows.wgsl");
+            // The function the query is in: `fn <name>(`.
+            let function = text[..at]
+                .rfind("fn ")
+                .map(|f| &text[f + 3..])
+                .and_then(|rest| rest.split('(').next())
+                .unwrap_or("");
+            let shadow = call.contains("TERMINATE_ON_FIRST_HIT")
+                || file.ends_with("fresh_shadows.wgsl")
+                || function.starts_with("transmitted_");
             let mask = call.split(',').nth(1).unwrap().trim();
             if shadow {
                 shadow_rays += 1;
@@ -636,8 +645,9 @@ fn every_shadow_ray_query_culls_with_the_shadow_mask() {
         }
     }
     // fresh_shadows, hardware_shadows, local_light_ray, reflections (and its program template),
-    // gi_rays_hardware, the atmosphere and the reference tracer.
-    assert_eq!(shadow_rays, 8);
+    // gi_rays_hardware, the atmosphere, the reference tracer and the live reference's transmitted
+    // shadow ray.
+    assert_eq!(shadow_rays, 9);
     // Modules without scene.wgsl take the declaration after their directives.
     assert_eq!(
         crate::shadows::with_shadow_caster_mask("enable wgpu_ray_query;\nfn f() {}\n"),
