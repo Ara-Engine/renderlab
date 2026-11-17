@@ -136,8 +136,9 @@ var<workgroup> gi_wg_acc_count:u32;
                 let history=f32(max(gi_word(GI_H_ACC_HISTORY),1u));
                 alpha=1.0/min(f32(n)+1.0,history);
                 fast=mix(fast,l,0.5);
-                let spread=2.0*sqrt(max(moment-mean*mean,0.0))+0.02*mean+1e-12;
-                if abs(fast-mean)>spread {
+                let sigmas=f32(gi_word(GI_H_ACC_SIGMA))*0.01;
+                let spread=sigmas*sqrt(max(moment-mean*mean,0.0))+0.02*mean+1e-12;
+                if sigmas>0.0 && abs(fast-mean)>spread {
                     alpha=max(alpha,0.5);
                     n=1u;
                     atomicAdd(&gi_work[GI_W_ACC_PULLS],1u);

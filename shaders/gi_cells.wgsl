@@ -158,6 +158,8 @@ const GI_H_ACC_RAYS:u32=44u;
 const GI_H_ACC_HISTORY:u32=45u;
 // The frame's ray budget for updates (0: no cap).
 const GI_H_ACC_BUDGET:u32=46u;
+// The disagreement test's band, in hundredths of a standard deviation (0: no test).
+const GI_H_ACC_SIGMA:u32=47u;
 // Its hot words (the bounce's, unused while accumulating): the fast mean, the slow mean and the
 // slow second moment of an update's L0 luminance (f32), and the updates blended (u32).
 const GI_HOT_ACC_FAST:u32=17u;

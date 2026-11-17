@@ -1436,6 +1436,8 @@ impl Planner {
             // The frame's rays (0: no cap), taken by cells without history, then visible cells
             // due, then the rest (gi_acc_select's three classes).
             header[46] = accumulate_word("RENDERLAB_GI_ACC_BUDGET", 0);
+            // The disagreement test's band in standard deviations, times 100 (0: no test).
+            header[47] = accumulate_word("RENDERLAB_GI_ACC_SIGMA", 200);
         }
         // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
         // are uncapped.
