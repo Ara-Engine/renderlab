@@ -389,6 +389,41 @@ fn vsm_census_mark(half:u32,level:u32,placement:u32) {
     let bit=(half*VSM_MAX_LEVELS+level)*VSM_CENSUS_PLACEMENTS+placement;
     atomicOr(&vsm_census[bit>>5u],1u<<(bit&31u));
 }
+// Measurement (`RENDERLAB_VD_TRIS=cx,cy,half` with `RENDERLAB_VD_DUMP`): every casting triangle
+// whose light-space box meets the square cx +- half, cy +- half (light xy relative to the eye)
+// into vsm_census: word 0 the count, then ten words a triangle (three light-space vertices,
+// x and y relative to the eye and z absolute, then the placement). One workgroup per cluster.
+override VSM_TRIS_X:f32=0.0;
+override VSM_TRIS_Y:f32=0.0;
+override VSM_TRIS_HALF:f32=0.0;
+const VSM_TRIS_CAP:u32=1500000u;
+@compute @workgroup_size(128) fn vsm_dump_tris(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let index=group.x+group.y*65535u;
+    if index>=vsm.counts.z {return;}
+    let c=vsm_clusters[index];
+    if c.pad0!=0u || li>=(c.counts&255u) {return;}
+    let batch=primary_placements[c.placement]&0x1fffffffu;
+    let d=&vsm_cluster_data[batch].data;
+    let t=(*d)[c.triangles+li];
+    var q:array<vec3<f32>,3>;
+    for(var k=0u;k<3u;k+=1u) {
+        let o=c.vertices+3u*((t>>(8u*k))&255u);
+        let p=vec3<f32>(bitcast<f32>((*d)[o]),bitcast<f32>((*d)[o+1u]),bitcast<f32>((*d)[o+2u]));
+        q[k]=vsm_light((models[c.placement]*vec4<f32>(p,1.0)).xyz);
+    }
+    let lo=min(min(q[0].xy,q[1].xy),q[2].xy);let hi=max(max(q[0].xy,q[1].xy),q[2].xy);
+    let r0=vec2<f32>(VSM_TRIS_X,VSM_TRIS_Y)-vec2<f32>(VSM_TRIS_HALF);let r1=r0+vec2<f32>(2.0*VSM_TRIS_HALF);
+    if any(hi<r0) || any(lo>r1) {return;}
+    let k=atomicAdd(&vsm_census[0],1u);
+    if k>=VSM_TRIS_CAP {return;}
+    let at=16u+k*10u;
+    for(var j=0u;j<3u;j+=1u) {
+        atomicStore(&vsm_census[at+3u*j],bitcast<u32>(q[j].x));
+        atomicStore(&vsm_census[at+3u*j+1u],bitcast<u32>(q[j].y));
+        atomicStore(&vsm_census[at+3u*j+2u],bitcast<u32>(q[j].z));
+    }
+    atomicStore(&vsm_census[at+9u],c.placement);
+}
 
 // World-space simplification error of group g under placement's conservative affine
 // scale (visibility_buffer_cull.wgsl's group_error without the projection).

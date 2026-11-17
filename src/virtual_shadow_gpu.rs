@@ -497,6 +497,8 @@ struct Pipelines {
     /// Software and hardware rasters: top layer, then peel layer.
     software: [Owned<wgpu::ComputePipeline>; 2],
     hardware: [Owned<wgpu::RenderPipeline>; 2],
+    /// Measurement: the triangle dump (`RENDERLAB_VD_TRIS`, WGSL `vsm_dump_tris`).
+    dump_tris: Owned<wgpu::ComputePipeline>,
     lookup: Owned<wgpu::ComputePipeline>,
     horizon: Owned<wgpu::ComputePipeline>,
     /// N8g walk records (shaders/virtual_shadow_records.wgsl).
@@ -953,6 +955,13 @@ pub(super) fn shader_source() -> String {
         1,
     )
     .replacen(
+        "override VSM_TRIS_X:f32=0.0;\noverride VSM_TRIS_Y:f32=0.0;\noverride VSM_TRIS_HALF:f32=0.0;",
+        &tris_spec().map_or(String::new(), |[x, y, h]| {
+            format!("override VSM_TRIS_X:f32={x:?};\noverride VSM_TRIS_Y:f32={y:?};\noverride VSM_TRIS_HALF:f32={h:?};")
+        }),
+        usize::from(tris_spec().is_some()),
+    )
+    .replacen(
         "override VSM_HW_THIN:bool=true;",
         &format!(
             "override VSM_HW_THIN:bool={};",
@@ -969,6 +978,19 @@ fn census_log() -> Option<&'static std::path::Path> {
     static PATH: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
     PATH.get_or_init(|| std::env::var_os("RENDERLAB_VSM_CENSUS").map(Into::into)).as_deref()
 }
+/// Measurement: `RENDERLAB_VD_TRIS=cx,cy,half` (with `RENDERLAB_VD_DUMP`) writes every casting
+/// triangle meeting that light-space square (relative to the eye) on the dump's first frame
+/// (`tris-<frame>.bin`, WGSL `vsm_dump_tris`), through the census buffer.
+fn tris_spec() -> Option<[f32; 3]> {
+    static SPEC: std::sync::OnceLock<Option<[f32; 3]>> = std::sync::OnceLock::new();
+    *SPEC.get_or_init(|| {
+        let v = std::env::var("RENDERLAB_VD_TRIS").ok()?;
+        let n: Vec<f32> = v.split(',').filter_map(|t| t.trim().parse().ok()).collect();
+        (n.len() == 3).then(|| [n[0], n[1], n[2]])
+    })
+}
+/// The triangle dump's capacity (WGSL `VSM_TRIS_CAP`) and buffer bytes.
+const TRIS_BYTES: u64 = 64 + 1_500_000 * 40;
 
 /// The walk-record build module (N8g): the shared draw-slot count, then
 /// shaders/virtual_shadow_records.wgsl.
@@ -1814,6 +1836,7 @@ impl VirtualState {
                 hardware("N8c hardware page casters", 0.0),
                 hardware("N8c hardware page peel", 1.0),
             ],
+            dump_tris: compute("vsm_dump_tris", &raster_layout, &[]),
             lookup: compute("vsm_lookup", &lookup_layout, &[]),
             horizon: compute("vsm_horizon", &horizon_layout, &[]),
             record,
@@ -2182,7 +2205,13 @@ impl VirtualState {
             edges: buffer("Disk lookup edge pixels", 32, B::STORAGE | B::COPY_SRC),
             census: buffer(
                 "Shadow caster census",
-                if census_log().is_some() { CENSUS_BYTES } else { 4 },
+                if census_log().is_some() {
+                    CENSUS_BYTES
+                } else if tris_spec().is_some() {
+                    TRIS_BYTES
+                } else {
+                    4
+                },
                 B::STORAGE | B::COPY_SRC,
             ),
             history: buffer(
@@ -4192,6 +4221,44 @@ impl Renderer {
                     pass.draw_indirect(&casters.work, level as u64 * ARGS_BYTES + 16);
                 }
             }
+        }
+        // Measurement (`RENDERLAB_VD_TRIS`): the casting triangles in a light-space square, once,
+        // on the first page-work frame from the dump's first frame.
+        static TRIS_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        if let (Some(_), Some((dir, first, _))) = (tris_spec(), dump_spec())
+            && self.frames + 1 >= *first
+            && !TRIS_DONE.swap(true, std::sync::atomic::Ordering::Relaxed)
+        {
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("triangle dump"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&p.dump_tris);
+                pass.set_bind_group(0, &*g.raster, &[]);
+                pass.set_bind_group(1, arrays, &[]);
+                pass.set_bind_group(2, &*casters.data, &[]);
+                pass.set_bind_group(3, &*g.pass, &[0]);
+                let n = casters.instances.count.max(1);
+                pass.dispatch_workgroups(n.min(65535), n.div_ceil(65535), 1);
+            }
+            let _ = std::fs::create_dir_all(dir);
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("triangle dump"),
+                size: TRIS_BYTES,
+                usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            encoder.copy_buffer_to_buffer(&r.census, 0, &buffer, 0, TRIS_BYTES);
+            DUMPS.lock().unwrap().push(Dump {
+                path: dir.join(format!("tris-{}.bin", self.frames + 1)),
+                buffer,
+                row: TRIS_BYTES as u32,
+                width_bytes: TRIS_BYTES as u32,
+                height: 1,
+                frame: self.frames + 1,
+                done: None,
+            });
         }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("N8c clipmap max-mips"),
