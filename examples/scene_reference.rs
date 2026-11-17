@@ -194,11 +194,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // later bounces carry.
     let depth: Option<u32> = args.get(2).map(|s| s.parse()).transpose()?;
     let stem = depth.map_or("reference".to_owned(), |d| format!("reference-depth{d}"));
-    // The centre hit's material per pixel (the geometry capture, without its sun visibility rays)
+    // The centre hit's material per pixel (the geometry capture, with the one sun visibility ray it requires)
     // gives the mask of materials the tracer does not shade as the engine does (scene.json
     // `custom_materials`: programs that replace the standard `surface`).
     let custom: Vec<u32> = spec["custom_materials"].as_array().into_iter().flatten().filter_map(Value::as_u64).map(|i| i as u32).collect();
-    let settings = reference::Settings { samples, capture_geometry: depth.is_none(), visibility_samples: 0, ..Default::default() };
+    let settings = reference::Settings { samples, capture_geometry: depth.is_none(), visibility_samples: 1, ..Default::default() };
     let settings = reference::Settings { max_depth: depth.unwrap_or(settings.max_depth), ..settings };
     let image = reference::render(&device, &queue, &scene, &view, &settings)?;
     let seconds = start.elapsed().as_secs_f64();
