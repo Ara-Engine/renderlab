@@ -70,6 +70,94 @@ fn sparse_switch() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_SPARSE").is_ok_and(|v| v.trim() == "1"))
 }
+/// Measurement: `RENDERLAB_VD_DUMP=<dir>;<first>;<count>` writes, for `count` renderer frames
+/// from frame `first`, the sun visibility the lookup produced before reconstruction (one u32 a
+/// pixel, 256 lit) as `<dir>/vis-<frame>-<w>x<h>.bin`, and on the first frame the receivers'
+/// world positions (`world-<frame>-<w>x<h>.bin`, four f32 a pixel) and the clipmap's levels
+/// (`levels-<frame>.txt`: origin x, y, texel per level; then u, v, l).
+fn dump_spec() -> Option<&'static (std::path::PathBuf, u64, u64)> {
+    static SPEC: std::sync::OnceLock<Option<(std::path::PathBuf, u64, u64)>> = std::sync::OnceLock::new();
+    SPEC.get_or_init(|| {
+        let value = std::env::var("RENDERLAB_VD_DUMP").ok()?;
+        let mut parts = value.split(';');
+        let dir = parts.next()?.into();
+        let first = parts.next()?.trim().parse().ok()?;
+        let count = parts.next()?.trim().parse().ok()?;
+        Some((dir, first, count))
+    })
+    .as_ref()
+}
+/// A texture copy in flight for `RENDERLAB_VD_DUMP`.
+struct Dump {
+    path: std::path::PathBuf,
+    buffer: wgpu::Buffer,
+    row: u32,
+    width_bytes: u32,
+    height: u32,
+    frame: u64,
+    done: Option<Arc<std::sync::OnceLock<bool>>>,
+}
+static DUMPS: std::sync::Mutex<Vec<Dump>> = std::sync::Mutex::new(Vec::new());
+/// Copies `texture` for the dump (written once mapped, `dump_poll`).
+fn dump_texture(device: &wgpu::Device, encoder: &mut wgpu::CommandEncoder, texture: &wgpu::Texture, path: std::path::PathBuf, frame: u64) {
+    let bytes = texture.format().block_copy_size(None).unwrap();
+    let width_bytes = texture.width() * bytes;
+    let row = width_bytes.div_ceil(256) * 256;
+    let buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("sun visibility dump"),
+        size: u64::from(row) * u64::from(texture.height()),
+        usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    encoder.copy_texture_to_buffer(
+        texture.as_image_copy(),
+        wgpu::TexelCopyBufferInfo {
+            buffer: &buffer,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(row),
+                rows_per_image: Some(texture.height()),
+            },
+        },
+        texture.size(),
+    );
+    DUMPS.lock().unwrap().push(Dump { path, buffer, row, width_bytes, height: texture.height(), frame, done: None });
+}
+/// Maps the dumps of frames before `frame` (submitted) and writes those already mapped.
+fn dump_poll(frame: u64) {
+    let mut dumps = DUMPS.lock().unwrap();
+    for d in dumps.iter_mut().filter(|d| d.done.is_none() && d.frame < frame) {
+        let done = Arc::new(std::sync::OnceLock::new());
+        let callback = done.clone();
+        d.buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = callback.set(r.is_ok());
+        });
+        d.done = Some(done);
+    }
+    dumps.retain(|d| match d.done.as_ref().and_then(|done| done.get()) {
+        None => true,
+        Some(&ok) => {
+            if let (true, Ok(data)) = (ok, d.buffer.slice(..).get_mapped_range()) {
+                let rows: Vec<u8> = data
+                    .chunks(d.row as usize)
+                    .take(d.height as usize)
+                    .flat_map(|r| &r[..d.width_bytes as usize])
+                    .copied()
+                    .collect();
+                let _ = std::fs::write(&d.path, rows);
+            }
+            false
+        }
+    });
+}
+/// Measurement: `RENDERLAB_VSM_FINER=n` gives every receiver, and the ladder, a level n octaves
+/// finer than `texels_per_pixel_log2` asks for (the density test for stepped outlines).
+fn finer() -> f32 {
+    static FINER: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+    *FINER.get_or_init(|| {
+        std::env::var("RENDERLAB_VSM_FINER").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0.0)
+    })
+}
 /// Straight occluder outlines in the Disk lookup (shaders/virtual_shadow_disk.wgsl VD_EDGES):
 /// the page pass that stores each outline texel's edge line runs, its buffer (2 bytes a texel)
 /// exists and the lookup clips by it. `RENDERLAB_VD=VD_EDGES=true|false` overrides the default.
@@ -1204,6 +1292,29 @@ fn addressed_triangles(mesh: &Mesh) -> u64 {
     }
 }
 
+impl Renderer {
+    /// Measurement (`RENDERLAB_VD_DUMP`): after either path's sun pass, the per-pixel answer
+    /// before reconstruction (`fresh.visibility`), and the receivers' positions on the first frame.
+    pub(super) fn dump_sun_visibility(&self, encoder: &mut wgpu::CommandEncoder) {
+        let Some((dir, first, count)) = dump_spec() else {
+            return;
+        };
+        let frame = self.frames + 1;
+        dump_poll(frame);
+        if !(*first..first + count).contains(&frame) {
+            return;
+        }
+        let Some(fresh) = self.view.fresh.as_ref().and_then(|f| f.targets.as_ref()) else {
+            return;
+        };
+        let _ = std::fs::create_dir_all(dir);
+        let (w, h) = (fresh.visibility.texture.width(), fresh.visibility.texture.height());
+        dump_texture(&self.device, encoder, &fresh.visibility.texture, dir.join(format!("vis-{frame}-{w}x{h}.bin")), frame);
+        if frame == *first {
+            dump_texture(&self.device, encoder, &fresh.world.texture, dir.join(format!("world-{frame}-{w}x{h}.bin")), frame);
+        }
+    }
+}
 impl VirtualState {
     /// After the frame's submission: maps the receiver counters it copied.
     pub(super) fn submitted(&mut self) {
@@ -2615,6 +2726,7 @@ impl Renderer {
         cache.forward = forward
             .and_then(|_| forward_sector(cache.forward, glam::DVec2::new(ahead.dot(u), ahead.dot(v))));
         let mut level_bytes = [0u8; MAX_LEVELS * 32];
+        let mut levels_text = String::new();
         for (i, &rung) in rungs.iter().enumerate() {
             let texel = f64::from(s.finest_texel) * 2f64.powi(rung);
             let page = texel * f64::from(PAGE);
@@ -2650,6 +2762,7 @@ impl Renderer {
                 origin
             };
             let lo = glam::DVec2::new(origin[0] as f64 * page, origin[1] as f64 * page) - eye_light;
+            levels_text += &format!("{} {} {}\n", lo.x, lo.y, texel);
             // The caster cut's error bound at this level (negative: original geometry).
             let caster_error = if s.caster_error_texels < 0.0 {
                 -1.0
@@ -2675,6 +2788,14 @@ impl Renderer {
             {
                 entry[16 + k * 4..20 + k * 4].copy_from_slice(&value.to_ne_bytes());
             }
+        }
+        // Measurement (`RENDERLAB_VD_DUMP`): the levels of the dump's first frame.
+        if let Some((dir, first, _)) = dump_spec()
+            && self.frames + 1 == *first
+        {
+            let _ = std::fs::create_dir_all(dir);
+            levels_text += &format!("eye {} {} {}\nu {} {} {}\nv {} {} {}\nl {} {} {}\n", eye.x, eye.y, eye.z, u.x, u.y, u.z, v.x, v.y, v.z, l.x, l.y, l.z);
+            let _ = std::fs::write(dir.join(format!("levels-{first}.txt")), &levels_text);
         }
         let casters = state.casters.as_ref().unwrap();
         let primitive_bits = casters.primitive_bits;
