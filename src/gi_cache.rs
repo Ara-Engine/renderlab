@@ -900,6 +900,12 @@ pub struct IndirectCounters {
     /// Gather rays without a value, by cause: no cell at the hit's level (requested), a
     /// cell not shaded yet, and an orphan whose coarser levels had no value either.
     pub gather_absent: u32,
+    /// The emitter list (shaders/gi_emitters.wgsl): triangles listed, emitting draws, visibility
+    /// rays the gathers traced toward them, and triangles past EMITTERS_MAX.
+    pub emitters: u32,
+    pub emitter_draws: u32,
+    pub emitter_rays: u32,
+    pub emitters_dropped: u32,
     pub gather_unshaded: u32,
     pub gather_orphans: u32,
     /// Queued cells a capped gather frame left for the next (`IndirectSettings::gather_cells`).
@@ -3058,6 +3064,10 @@ impl Renderer {
             light_rays: w[37],
             bounce_queued: w[38],
             gather_absent: w[39],
+            emitters: w[200],
+            emitter_draws: w[201],
+            emitter_rays: w[202],
+            emitters_dropped: w[203],
             gather_unshaded: w[40],
             gather_orphans: w[41],
             gather_deferred: w[42],
