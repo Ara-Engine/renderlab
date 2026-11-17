@@ -1,5 +1,5 @@
 //! Path-traced reference of a frozen engine frame (`RENDERLAB_SCENE_DUMP`, src/engine/scene_dump.rs):
-//! `scene_reference DIR [SAMPLES]` reads DIR/scene.rla and DIR/scene.json and writes
+//! `scene_reference DIR [SAMPLES [MAX_DEPTH]]` reads DIR/scene.rla and DIR/scene.json and writes
 //! DIR/reference.png (the engine's exposure and the AcesFit + sRGB display curve), the linear
 //! mean as DIR/reference.pfm, split halves (PNG and linear PFM) and DIR/reference.json. Plain unidirectional path
 //! tracing (renderlab::reference): sun, sky (uniform, a prepared map, or the procedural
@@ -189,19 +189,26 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ..Default::default()
     }))?;
     let start = Instant::now();
-    let image = reference::render(&device, &queue, &scene, &view, &reference::Settings { samples, ..Default::default() })?;
+    // MAX_DEPTH (path segments, as `reference::Settings::max_depth`: 2 is direct light, 3 one
+    // bounce) writes `reference-depth<N>.*` beside the full reference, to see how much light the
+    // later bounces carry.
+    let depth: Option<u32> = args.get(2).map(|s| s.parse()).transpose()?;
+    let stem = depth.map_or("reference".to_owned(), |d| format!("reference-depth{d}"));
+    let settings = reference::Settings { samples, ..Default::default() };
+    let settings = reference::Settings { max_depth: depth.unwrap_or(settings.max_depth), ..settings };
+    let image = reference::render(&device, &queue, &scene, &view, &settings)?;
     let seconds = start.elapsed().as_secs_f64();
-    png(&dir.join("reference.png"), size, &codes(&image.mean, stops))?;
-    pfm(&dir.join("reference.pfm"), size, &image.mean)?;
-    for (k, half) in image.halves.iter().enumerate() {
+    png(&dir.join(format!("{stem}.png")), size, &codes(&image.mean, stops))?;
+    pfm(&dir.join(format!("{stem}.pfm")), size, &image.mean)?;
+    for (k, half) in image.halves.iter().enumerate().filter(|_| depth.is_none()) {
         png(&dir.join(format!("reference-half{k}.png")), size, &codes(half, stops))?;
         // Linear too: a frame at another exposure judges noise against halves shown at its stops.
         pfm(&dir.join(format!("reference-half{k}.pfm")), size, half)?;
     }
     fs::write(
-        dir.join("reference.json"),
+        dir.join(format!("{stem}.json")),
         serde_json::to_vec_pretty(&json!({
-            "samples": samples, "seconds": seconds, "invalid_pixels": image.invalid_pixels, "size": size,
+            "samples": samples, "max_depth": settings.max_depth, "seconds": seconds, "invalid_pixels": image.invalid_pixels, "size": size,
             "exposure_stops": stops, "display_transform": "AcesFit+sRGB at the engine view's exposure",
             "method": "renderlab::reference: unidirectional path tracing, NEE + MIS, Russian roulette; no reuse or denoising",
             "not_traced": gaps, "debug_build": cfg!(debug_assertions), "sky_check": sky_check,
