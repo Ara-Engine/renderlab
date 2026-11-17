@@ -188,6 +188,15 @@ var<workgroup> gi_wg_acc_count:u32;
                     }
                 }
             }
+            // Measurement (RENDERLAB_GI_ACC_SHOW): green when the cell's ray origin sees the
+            // camera's eye, red when it does not.
+            if gi_word(GI_H_ACC_SHOW)!=0u {
+                let eye=vec3<f32>(gi_header_f32(GI_H_EYE),gi_header_f32(GI_H_EYE+1u),gi_header_f32(GI_H_EYE+2u));
+                let to=eye-origin;
+                let distance=length(to);
+                let seen=gi_visible_within(origin,to/max(distance,1e-6),distance);
+                radiance=select(vec3<f32>(1000.0,0.0,0.0),vec3<f32>(0.0,1000.0,0.0),seen);
+            }
             gi_sh_basis(d);
             let w=6.283185307179586/f32(rays);
             for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=radiance*(w*gi_y[i]); }

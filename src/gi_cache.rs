@@ -1474,6 +1474,10 @@ impl Planner {
             // 1: update-ray hits take direct light at the hit and the hit cell's parts
             // (gi_acc_hit_lit); 0: the hit cell's outgoing radiance, as gathers read it.
             header[40] = accumulate_word("RENDERLAB_GI_ACC_DIRECT", 1);
+            // Measurement: 1 makes every update ray of a cell one colour, green when the cell's
+            // ray origin sees the camera's eye and red when it does not, so the picture shows
+            // which cells pixels read from behind a surface.
+            header[41] = accumulate_word("RENDERLAB_GI_ACC_SHOW", 0);
         }
         // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
         // are uncapped.

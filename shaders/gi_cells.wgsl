@@ -170,6 +170,8 @@ const GI_H_ACC_HITSUN:u32=39u;
 // (gi_acc_hit_lit) instead of the cell's outgoing radiance, whose lights come from one
 // visibility ray per cell.
 const GI_H_ACC_DIRECT:u32=40u;
+// Measurement: nonzero colours every update ray by whether the cell's ray origin sees the camera.
+const GI_H_ACC_SHOW:u32=41u;
 // Its hot words (the bounce's, unused while accumulating): the fast mean, the slow mean and the
 // slow second moment of an update's L0 luminance (f32), and the updates blended (u32).
 const GI_HOT_ACC_FAST:u32=17u;
