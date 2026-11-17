@@ -1328,6 +1328,27 @@ impl Renderer {
         dump_texture(&self.device, encoder, &fresh.visibility.texture, dir.join(format!("vis-{frame}-{w}x{h}.bin")), frame);
         if frame == *first {
             dump_texture(&self.device, encoder, &fresh.world.texture, dir.join(format!("world-{frame}-{w}x{h}.bin")), frame);
+            dump_texture(&self.device, encoder, &fresh.normal.texture, dir.join(format!("normal-{frame}-{w}x{h}.bin")), frame);
+            // The clipmap's top layer (dense: levels x side x side words of (id, height bits)).
+            if let Some(r) = self.view.virtual_shadows.as_ref().and_then(|s| s.resources.as_ref()) {
+                let bytes = r.top.size();
+                let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("clipmap top layer dump"),
+                    size: bytes,
+                    usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                });
+                encoder.copy_buffer_to_buffer(&r.top, 0, &buffer, 0, bytes);
+                DUMPS.lock().unwrap().push(Dump {
+                    path: dir.join(format!("top-{frame}.bin")),
+                    buffer,
+                    row: bytes as u32,
+                    width_bytes: bytes as u32,
+                    height: 1,
+                    frame,
+                    done: None,
+                });
+            }
         }
     }
 }
@@ -2137,7 +2158,8 @@ impl VirtualState {
             sparse,
             capacity,
             pool,
-            top: buffer("N8c clipmap top layer", map_bytes, B::STORAGE),
+            // COPY_SRC: the dump (`RENDERLAB_VD_DUMP`).
+            top: buffer("N8c clipmap top layer", map_bytes, B::STORAGE | B::COPY_SRC),
             peel: buffer("N8c clipmap peel layer", map_bytes, B::STORAGE),
             mips: buffer("N8c clipmap max-mips", mip_bytes.max(4), B::STORAGE),
             outline: buffer("Disk lookup outline bits", outline_bytes, B::STORAGE),
@@ -2871,6 +2893,20 @@ impl Renderer {
         {
             let _ = std::fs::create_dir_all(dir);
             levels_text += &format!("eye {} {} {}\nu {} {} {}\nv {} {} {}\nl {} {} {}\n", eye.x, eye.y, eye.z, u.x, u.y, u.z, v.x, v.y, v.z, l.x, l.y, l.z);
+            // The sun (toward it), its angular radius, the height encoding (height = stored
+            // f32 x range + low) and the dense layout's side and level count.
+            let sun = -travel.as_dvec3();
+            levels_text += &format!(
+                "sun {} {} {}\ndisk {}\ndepth {} {}\nlayout {} {}\n",
+                sun.x,
+                sun.y,
+                sun.z,
+                disk,
+                heights[0],
+                heights[1] - heights[0],
+                pages * i64::from(PAGE),
+                rungs.len()
+            );
             let _ = std::fs::write(dir.join(format!("levels-{first}.txt")), &levels_text);
         }
         let casters = state.casters.as_ref().unwrap();
