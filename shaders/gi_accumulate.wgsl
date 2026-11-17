@@ -63,11 +63,6 @@ fn gi_acc_select(kind:u32, id:vec3<u32>, groups:vec3<u32>) {
 @compute @workgroup_size(64) fn gi_acc_select_visible(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) { gi_acc_select(1u,id,groups); }
 @compute @workgroup_size(64) fn gi_acc_select_other(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) { gi_acc_select(2u,id,groups); }
 
-// Ray `lane` of `rays` in an update of cell `slot` on cache frame `frame`, in the cell's frame
-// (z along its normal): stratified over the hemisphere's solid angle (uniform in z), turned by a
-// rotation drawn per update and jittered per ray, so consecutive updates trace different rays and
-// many updates cover the hemisphere evenly. src/gi_cache.rs acc_local_direction is its twin, and
-// the tests there hold both to that (accumulate_directions_*).
 // A light's incident irradiance at p facing it, before visibility and the cosine:
 // program_api.wgsl light_sample_untinted's arithmetic (inverse square from 1 cm, the range
 // window, the spot cone). Transparent panes do not tint it: the cache traces through them.
@@ -110,6 +105,11 @@ fn gi_acc_hit_lit(slot:u32, p:vec3<f32>, hn:vec3<f32>) -> vec3<f32> {
     }
     return parts.emission+parts.albedo*e*(1.0/3.141592653589793);
 }
+// Ray `lane` of `rays` in an update of cell `slot` on cache frame `frame`, in the cell's frame
+// (z along its normal): stratified over the hemisphere's solid angle (uniform in z), turned by a
+// rotation drawn per update and jittered per ray, so consecutive updates trace different rays and
+// many updates cover the hemisphere evenly. src/gi_cache.rs acc_local_direction is its twin, and
+// the tests there hold both to that (accumulate_directions_*).
 fn gi_acc_local(slot:u32, frame:u32, lane:u32, rays:u32) -> vec3<f32> {
     let seed=gi_mix(slot^(frame*0x9e3779b9u));
     let turn=f32(seed>>8u)*(6.283185307179586/16777216.0);
@@ -118,6 +118,36 @@ fn gi_acc_local(slot:u32, frame:u32, lane:u32, rays:u32) -> vec3<f32> {
     let r=sqrt(max(1.0-z*z,0.0));
     let phi=f32(lane)*2.399963229728653+turn;
     return vec3<f32>(r*cos(phi),r*sin(phi),z);
+}
+// ---- guided rays (product sampling of the cell's own last estimate, as Lumen's screen probes
+// sample the previous frame's radiance) ----
+// A small bright part of a dark hemisphere (sky through the hangar's roof strips) is met by a
+// few uniform rays per hundred updates, and the slowly converging mean holds each cell's error
+// still: a static mosaic. So a share of each update's rays is drawn in proportion to the cell's
+// stored radiance times the cosine, over 64 bins of equal solid angle (8 bands uniform in z by 8
+// sectors in phi, in the cell's fixed frame); the rest stay uniform, so no direction starves.
+// Every ray is weighted by the balance heuristic over both strategies' fixed counts,
+// 1 / (n_u / 2 pi + n_g p_g(d)), which keeps the estimate unbiased whatever the guide.
+const GI_ACC_BINS:u32=64u;
+var<workgroup> gi_wg_guide:array<f32,64>;
+var<workgroup> gi_wg_guide_total:f32;
+fn gi_acc_bin(local:vec3<f32>) -> u32 {
+    let j=min(u32(max(1.0-local.z,0.0)*8.0),7u);
+    var phi=atan2(local.y,local.x);
+    if phi<0.0 { phi+=6.283185307179586; }
+    let k=min(u32(phi*(8.0/6.283185307179586)),7u);
+    return j*8u+k;
+}
+// A local direction inside bin b at the fractions u (band, sector).
+fn gi_acc_bin_direction(b:u32, u:vec2<f32>) -> vec3<f32> {
+    let z=1.0-(f32(b/8u)+u.x)/8.0;
+    let r=sqrt(max(1.0-z*z,0.0));
+    let phi=(f32(b%8u)+u.y)*(6.283185307179586/8.0);
+    return vec3<f32>(r*cos(phi),r*sin(phi),z);
+}
+// The guided density at local direction `local` (per steradian), from the workgroup's bins.
+fn gi_acc_guide_pdf(local:vec3<f32>) -> f32 {
+    return gi_wg_guide[gi_acc_bin(local)]/(gi_wg_guide_total*(6.283185307179586/f32(GI_ACC_BINS)));
 }
 var<workgroup> gi_wg_acc:array<f32,27u*64u>;
 var<workgroup> gi_wg_acc_count:u32;
@@ -132,6 +162,45 @@ var<workgroup> gi_wg_acc_count:u32;
         let state=gi_table[cold+GI_C_STATE];
         let updates=gi_table[hot+GI_HOT_ACC_COUNT];
         let rays=select(min(max(gi_word(GI_H_ACC_RAYS),1u),64u),64u,updates==0u);
+        // The guide: lane b evaluates the cell's stored radiance times the cosine at bin b's
+        // centre; lane 0 turns the bins into a running sum. A fresh cell has no estimate.
+        let frame0=gi_basis(gi_unpack_normal(gi_table[cold+GI_C_NORMAL]));
+        let share=f32(min(gi_word(GI_H_ACC_GUIDE),100u))*0.01;
+        var value=0.0;
+        if share>0.0 && updates!=0u {
+            let centre=gi_acc_bin_direction(lane,vec2<f32>(0.5));
+            gi_sh_basis(frame0*centre);
+            var l=vec3<f32>(0.0);
+            for(var i=0u;i<9u;i+=1u) { l+=gi_y[i]*vec3<f32>(gi_half(hot,3u*i),gi_half(hot,3u*i+1u),gi_half(hot,3u*i+2u)); }
+            value=max(dot(l,GI_ACC_LUMA),0.0)*centre.z;
+        }
+        gi_wg_guide[lane]=value;
+        workgroupBarrier();
+        if lane==0u {
+            var total=0.0;
+            for(var b=0u;b<GI_ACC_BINS;b+=1u) { total+=gi_wg_guide[b]; gi_wg_guide[b]=total; }
+            gi_wg_guide_total=total;
+        }
+        workgroupBarrier();
+        let total=gi_wg_guide_total;
+        // Guided rays: the last n_g lanes; none without a usable estimate.
+        let guided=select(0u,u32(f32(rays)*share),total>0.0 && total<3.0e38);
+        let plain=rays-guided;
+        // The guided lanes pick a bin by inverting the running sum, before lane 0 turns it back
+        // into per-bin values for the density.
+        var pick=0u;
+        if lane>=plain && lane<rays {
+            let pseed=gi_mix(slot^(gi_word(GI_H_FRAME)*0x9e3779b9u)^0x68bc21ebu);
+            let goal=f32(gi_mix(pseed^lane)>>8u)*(1.0/16777216.0)*total;
+            var lo=0u; var hi=GI_ACC_BINS-1u;
+            while lo<hi { let mid=(lo+hi)/2u; if gi_wg_guide[mid]<goal { lo=mid+1u; } else { hi=mid; } }
+            pick=lo;
+        }
+        workgroupBarrier();
+        if lane==0u {
+            for(var b=GI_ACC_BINS-1u;b>0u;b-=1u) { gi_wg_guide[b]-=gi_wg_guide[b-1u]; }
+        }
+        workgroupBarrier();
         for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
         if lane<rays {
             let c=gi_cell(slot);
@@ -157,8 +226,15 @@ var<workgroup> gi_wg_acc_count:u32;
             let secondary=(state&GI_SECONDARY)!=0u;
             let tertiary=(state&GI_TERTIARY)!=0u;
             let band=select(select(GI_BAND_SECONDARY,GI_BAND_TERTIARY,secondary),0u,!requests || tertiary);
-            // A rotation and a jitter drawn per update: over its updates a cell meets every direction.
-            let d=frame*gi_acc_local(slot,gi_word(GI_H_FRAME),lane,rays);
+            // A rotation and a jitter drawn per update: over its updates a cell meets every
+            // direction. Guided lanes draw a point of their picked bin instead.
+            var local=gi_acc_local(slot,gi_word(GI_H_FRAME),lane,max(plain,1u));
+            if lane>=plain {
+                let h1=gi_mix(seed^(lane*0x27d4eb2fu+7u));
+                let h2=gi_mix(h1^0x165667b1u);
+                local=gi_acc_bin_direction(pick,vec2<f32>(f32(h1>>8u),f32(h2>>8u))*(1.0/16777216.0));
+            }
+            let d=frame*local;
             gi_hit_spread=gi_header_f32(GI_H_HIT_SPREAD);
             let h=gi_closest(origin,d,0.0,1e20);
             var radiance=vec3<f32>(0.0);
@@ -198,7 +274,10 @@ var<workgroup> gi_wg_acc_count:u32;
                 radiance=select(vec3<f32>(1000.0,0.0,0.0),vec3<f32>(0.0,1000.0,0.0),seen);
             }
             gi_sh_basis(d);
-            let w=6.283185307179586/f32(rays);
+            // The balance heuristic over both strategies' counts (uniform alone: 2 pi / rays).
+            var density=f32(plain)/6.283185307179586;
+            if guided>0u { density+=f32(guided)*gi_acc_guide_pdf(local); }
+            let w=1.0/density;
             for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=radiance*(w*gi_y[i]); }
         }
         // The lanes' sums into lane 0 in a fixed tree order.

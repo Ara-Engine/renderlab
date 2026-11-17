@@ -172,6 +172,8 @@ const GI_H_ACC_HITSUN:u32=39u;
 const GI_H_ACC_DIRECT:u32=40u;
 // Measurement: nonzero colours every update ray by whether the cell's ray origin sees the camera.
 const GI_H_ACC_SHOW:u32=41u;
+// The share of an update's rays guided by the cell's own estimate, in percent (0: all uniform).
+const GI_H_ACC_GUIDE:u32=33u;
 // Its hot words (the bounce's, unused while accumulating): the fast mean, the slow mean and the
 // slow second moment of an update's L0 luminance (f32), and the updates blended (u32).
 const GI_HOT_ACC_FAST:u32=17u;

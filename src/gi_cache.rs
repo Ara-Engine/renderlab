@@ -1479,6 +1479,9 @@ impl Planner {
             // ray origin sees the camera's eye and red when it does not, so the picture shows
             // which cells pixels read from behind a surface.
             header[41] = accumulate_word("RENDERLAB_GI_ACC_SHOW", 0);
+            // The share of an update's rays drawn toward the cell's own bright directions, in
+            // percent (gi_accumulate.wgsl, guided rays); the rest stay uniform.
+            header[33] = accumulate_word("RENDERLAB_GI_ACC_GUIDE", 0);
         }
         // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
         // are uncapped.
