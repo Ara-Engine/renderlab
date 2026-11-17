@@ -283,7 +283,7 @@ pub(super) struct Targets {
 /// The final gather's probe tile in pixels and probe size in bytes (gi_receiver_pass.wgsl
 /// FG_TILE, FgProbe).
 const FG_TILE: u32 = 16;
-const FG_PROBE_BYTES: u64 = 144;
+const FG_PROBE_BYTES: u64 = 192;
 /// Probes per tile (gi_receiver_pass.wgsl FG_SLOTS): a second where the tile holds a second plane.
 const FG_SLOTS: u64 = 2;
 /// The adaptive probes' block in pixels (gi_receiver_pass.wgsl FG_BLOCK): one probe each.

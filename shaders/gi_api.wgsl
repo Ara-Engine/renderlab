@@ -224,9 +224,10 @@ fn gi_sky_scale(e:vec3<f32>) -> vec3<f32> {
 var<private> gi_rx_sky:array<vec3<f32>,9>;
 var<private> gi_rx_bounce:array<vec3<f32>,4>;
 var<private> gi_rx_valid:bool;
-// Whether the sky slots hold absolute incoming radiance (a final-gather record,
-// gi_receiver_pass.wgsl: everything a probe saw, sky and bounce) instead of the cache's sky in
-// cached units. It travels with the values: gi_prepare clears it, a record carries its own.
+// Whether the sky slots hold absolute radiance (a final-gather record, gi_receiver_pass.wgsl:
+// the sky its probes' rays missed into; the bounce slots hold what they met) instead of the
+// cache's sky in cached units. It travels with the values: gi_prepare clears it, a record
+// carries its own.
 var<private> gi_rx_absolute:bool;
 // Adds the level sums, the sky's with factor w and the bounce's with factor b.
 fn gi_rx_add(w:f32, b:f32) {
@@ -242,6 +243,15 @@ fn gi_lv_bounce_weight(s:f32) -> f32 {
 fn gi_share(w:f32, x:f32) -> f32 {
     return select(0.0,w/x,x>1e-6);
 }
+// Who sees the receiver gi_prepare looks up: the camera (gi_viewed_normal) unless a traced hit
+// names its ray's origin here (w 1: the final gather's probe rays, gi_receiver_pass.wgsl). The
+// lookup reads the cells of the side its viewer sees; a ray that met the side the camera does
+// not see read the other side's cells and shaded about a tenth dark.
+var<private> gi_rx_viewer:vec4<f32>;
+fn gi_seen_normal(world:vec3<f32>, geometric:vec3<f32>) -> vec3<f32> {
+    if gi_rx_viewer.w<=0.0 { return gi_viewed_normal(world,geometric); }
+    return select(-geometric,geometric,dot(geometric,gi_rx_viewer.xyz-world)>=0.0);
+}
 fn gi_prepare(input:SurfaceInput) {
     gi_rx_valid=false;
     gi_rx_absolute=false;
@@ -250,7 +260,7 @@ fn gi_prepare(input:SurfaceInput) {
     if gi_word(GI_H_ENABLED)==0u { return; }
     let world=input.receiver.world;
     // The bin comes from the interpolated vertex normal, as gi_probe requests it.
-    let source=gi_bin_source(gi_viewed_normal(world,input.receiver.geometric),input.normal);
+    let source=gi_bin_source(gi_seen_normal(world,input.receiver.geometric),input.normal);
     gi_rx_normal=unit_normal(source);
     let bin=gi_bin(source);
     let levels=gi_word(GI_H_LEVELS);
