@@ -91,6 +91,21 @@ pub struct Scene {
     /// Optional camera-only backdrop (secondary rays still see the sky). The matched Unreal
     /// quarry uses a black backdrop with a specified lighting cubemap.
     pub camera_background: Option<[f32; 3]>,
+    /// Point and spot lights, with the engine's attenuation (shaders/program_api.wgsl
+    /// light_sample): candela over distance squared (from 1 cm), a squared quartic window at
+    /// `range`, a squared smoothstep-free cone for spots. Sampled as points (one shadow ray
+    /// each); a source radius is not integrated.
+    pub lights: Vec<LocalLight>,
+}
+
+/// A point light, or a spot light with `spot`: (direction the light travels, cos inner,
+/// cos outer). `range` 0 is unlimited.
+#[derive(Clone, Copy, Debug)]
+pub struct LocalLight {
+    pub position: Vec3,
+    pub candela: [f32; 3],
+    pub range: f32,
+    pub spot: Option<(Vec3, f32, f32)>,
 }
 
 #[derive(Clone, Debug)]
@@ -340,7 +355,7 @@ fn frame_bytes(scene: &Scene, view: &View, settings: &Settings, first: u32, coun
         settings.texture_lod.to_bits(),
         settings.visibility_samples,
         cone_height.to_bits(),
-        0,
+        scene.lights.len() as u32,
         0,
     ] {
         bytes.extend(word.to_le_bytes());
@@ -482,6 +497,24 @@ fn render_repeats(
         wgpu::BufferUsages::empty(),
     );
     let (texels, texture_info, environment) = inputs::upload(device, scene)?;
+    // Four vec4 a light: position and range; candela and kind (1 point, 2 spot); travel and
+    // cos outer; cos inner.
+    let mut light_data: Vec<f32> = scene
+        .lights
+        .iter()
+        .flat_map(|l| {
+            let (travel, inner, outer, kind) = match l.spot {
+                Some((t, inner, outer)) => (t.normalize(), inner, outer, 2.0),
+                None => (Vec3::Y, 1.0, -1.0, 1.0),
+            };
+            [l.position.x, l.position.y, l.position.z, l.range, l.candela[0], l.candela[1], l.candela[2], kind,
+             travel.x, travel.y, travel.z, outer, inner, 0.0, 0.0, 0.0]
+        })
+        .collect();
+    if light_data.is_empty() {
+        light_data = vec![0.0; 16];
+    }
+    let lights = storage(device, "reference lights", &floats(light_data), wgpu::BufferUsages::empty());
     let pixels = u64::from(view.width) * u64::from(view.height);
     let sums_bytes = pixels * 32;
     let sums = device.create_buffer(&wgpu::BufferDescriptor {
@@ -618,6 +651,7 @@ fn render_repeats(
             storage_entry(8, true),
             storage_entry(9, true),
             storage_entry(10, false),
+            storage_entry(11, true),
         ],
     });
     let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -667,6 +701,10 @@ fn render_repeats(
             wgpu::BindGroupEntry {
                 binding: 10,
                 resource: geometry.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: lights.as_entire_binding(),
             },
         ],
     });

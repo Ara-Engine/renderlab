@@ -18,6 +18,7 @@ mod device;
 mod prewarm;
 pub(crate) mod ids;
 mod scene;
+mod scene_dump;
 mod view;
 #[cfg(test)]
 mod view_tests;
@@ -259,6 +260,8 @@ pub struct Engine {
     views: Vec<view::ViewEntry>,
     spare: Option<ViewId>,
     prewarm_pending: bool,
+    /// RENDERLAB_SCENE_DUMP: CPU copies of the scene for path-traced references (scene_dump.rs).
+    dump: Option<scene_dump::Recorder>,
 }
 
 /// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
@@ -387,6 +390,7 @@ impl Engine {
             views: Vec::new(),
             spare: Some(renderer_first_view),
             prewarm_pending: std::env::var("RENDERLAB_PREWARM_PIPELINES").is_ok_and(|v| v == "1"),
+            dump: scene_dump::Recorder::from_env(),
         };
         settings::apply(&mut engine.renderer, &engine.state.settings)?;
         // Ticks are explicit from the start: the first frame runs the first tick's work.
@@ -438,7 +442,11 @@ impl Engine {
         let mesh = self.admit("mesh upload admission timed out", |r| {
             r.try_upload_mesh(data)
         })?;
-        self.insert_mesh(mesh, data.vertices, data.indices)
+        let id = self.insert_mesh(mesh, data.vertices, data.indices)?;
+        if let Some(dump) = &mut self.dump {
+            dump.mesh(id, data.vertices, data.indices, None);
+        }
+        Ok(id)
     }
     /// Uploads geometry with a per-vertex tangent frame, which normal-mapped materials need.
     pub fn create_mesh_with_tangents(
@@ -449,7 +457,11 @@ impl Engine {
         let mesh = self.admit("mesh upload admission timed out", |r| {
             r.try_upload_mesh_with_tangents(data, Some(tangents))
         })?;
-        self.insert_mesh(mesh, data.vertices, data.indices)
+        let id = self.insert_mesh(mesh, data.vertices, data.indices)?;
+        if let Some(dump) = &mut self.dump {
+            dump.mesh(id, data.vertices, data.indices, Some(tangents));
+        }
+        Ok(id)
     }
     fn insert_mesh(
         &mut self,
@@ -495,7 +507,8 @@ impl Engine {
     }
     /// Whether this device samples BC7 and BC5, so `create_compressed_texture` works.
     pub fn compressed_textures(&self) -> bool {
-        self.renderer.compressed_textures()
+        // A scene dump records RGBA8 levels, which the reference tracer reads.
+        self.dump.is_none() && self.renderer.compressed_textures()
     }
     /// Uploads a prepared texture (every mip level; see `renderlab_asset::Texture`).
     pub fn create_texture(&mut self, data: TextureData) -> Result<TextureId, Error> {
@@ -503,7 +516,11 @@ impl Engine {
         let texture = self.admit("texture upload admission timed out", |r| {
             r.try_upload_streamed_texture(data.clone())
         })?;
-        Ok(self.state.textures.insert(texture))
+        let id = self.state.textures.insert(texture);
+        if let Some(dump) = &mut self.dump {
+            dump.texture(id, data);
+        }
+        Ok(id)
     }
     /// Materials keep their own textures alive; this only drops the engine's handle.
     pub fn remove_texture(&mut self, texture: TextureId) -> Result<(), Error> {
@@ -605,10 +622,14 @@ impl Engine {
             stash(&mut self.events, self.renderer.poll()?);
             std::thread::yield_now();
         };
-        Ok(self.state.materials.insert(MaterialEntry {
+        let id = self.state.materials.insert(MaterialEntry {
             material,
             program: program_id,
-        }))
+        });
+        if let Some(dump) = &mut self.dump {
+            dump.material(id, desc);
+        }
+        Ok(id)
     }
     /// Sets named `Parameters` members of a material, keeping its others: a buffer write,
     /// no shader compile.
@@ -638,7 +659,11 @@ impl Engine {
         let map = self.admit("environment upload admission timed out", |r| {
             r.try_upload_environment(data)
         })?;
-        Ok(self.state.environments.insert(map))
+        let id = self.state.environments.insert(map);
+        if let Some(dump) = &mut self.dump {
+            dump.environment(id, data);
+        }
+        Ok(id)
     }
     /// The renderer keeps a selected sky map alive until the sky changes.
     pub fn remove_environment(&mut self, environment: EnvironmentId) -> Result<(), Error> {
@@ -736,11 +761,18 @@ impl Engine {
         let mesh = self.admit("skinned mesh upload admission timed out", |r| {
             r.try_upload_skinned_mesh(primitive, influences, joint_count)
         })?;
-        Ok(self.state.meshes.insert(MeshEntry::Skinned(mesh)))
+        let id = self.state.meshes.insert(MeshEntry::Skinned(mesh));
+        if let Some(dump) = &mut self.dump {
+            dump.skinned(id, primitive, influences);
+        }
+        Ok(id)
     }
     /// Poses a skinned mesh with mesh-local joint matrices, uploaded with the next frame:
     /// `AnimationPose::joint_palette` gives them from a cooked clip (`ClipPlayer`).
     pub fn set_joint_palette(&mut self, mesh: MeshId, palette: &[Mat4]) -> Result<(), Error> {
+        if let Some(dump) = &mut self.dump {
+            dump.palette(mesh, palette);
+        }
         match self.state.meshes.get_mut(mesh)? {
             MeshEntry::Skinned(skinned) => skinned.set_joint_palette(palette),
             MeshEntry::Static(_) => Err(Error::InvalidInput("mesh is not skinned")),
