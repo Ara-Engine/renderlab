@@ -924,6 +924,9 @@ pub struct IndirectCounters {
     pub acc_updates: u32,
     pub acc_rays: u32,
     pub acc_pulls: u32,
+    /// Sun visibility rays traced at update hits (RENDERLAB_GI_ACC_HITSUN) and those that reached it.
+    pub acc_sun_rays: u32,
+    pub acc_sun_lit: u32,
     pub gather_unshaded: u32,
     pub gather_orphans: u32,
     /// Queued cells a capped gather frame left for the next (`IndirectSettings::gather_cells`).
@@ -1464,6 +1467,9 @@ impl Planner {
             header[51] = accumulate_word("RENDERLAB_GI_ACC_AREA", 1);
             // Measurement: 0 drops what update rays read at hits (sky and direct light only).
             header[52] = accumulate_word("RENDERLAB_GI_ACC_HITS", 1);
+            // Measurement: 1 traces a visibility ray to each directional light at every update hit
+            // (the result only counted), to price evaluating the sun at hits instead of per cell.
+            header[39] = accumulate_word("RENDERLAB_GI_ACC_HITSUN", 0);
         }
         // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
         // are uncapped.
@@ -3102,6 +3108,8 @@ impl Renderer {
             acc_updates: w[210],
             acc_rays: w[211],
             acc_pulls: w[212],
+            acc_sun_rays: w[213],
+            acc_sun_lit: w[214],
             gather_unshaded: w[40],
             gather_orphans: w[41],
             gather_deferred: w[42],

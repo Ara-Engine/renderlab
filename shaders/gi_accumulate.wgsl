@@ -22,6 +22,8 @@
 const GI_W_ACC_UPDATES:u32=210u;
 const GI_W_ACC_RAYS:u32=211u;
 const GI_W_ACC_PULLS:u32=212u;
+const GI_W_ACC_SUN_RAYS:u32=213u;
+const GI_W_ACC_SUN_LIT:u32=214u;
 const GI_ACC_LUMA:vec3<f32>=vec3<f32>(0.2126,0.7152,0.0722);
 
 // One class of this frame's updates (0: cells without history, 1: visible cells due, 2: the rest
@@ -123,6 +125,20 @@ var<workgroup> gi_wg_acc_count:u32;
             } else {
                 let o=gi_hit_radiance(origin,d,h,band,tertiary);
                 if o.w>GI_HIT_NONE && gi_word(GI_H_ACC_HITS)!=0u { radiance=o.rgb; }
+                // Measurement: what the sun costs evaluated at the hit (one visibility ray per
+                // directional light), counted only (RENDERLAB_GI_ACC_HITSUN).
+                if gi_word(GI_H_ACC_HITSUN)!=0u {
+                    let p=origin+d*h.t;
+                    let hn=select(-h.normal,h.normal,dot(h.normal,-d)>=0.0);
+                    let start=p+hn*gi_origin_offset(p,0.0);
+                    for(var l=0u;l<lighting.count;l+=1u) {
+                        if lights[l].kind.x!=0u || all(lights[l].rgb_inner.xyz==vec3<f32>(0.0)) { continue; }
+                        let to=gi_light_direction(l,p);
+                        if dot(to.xyz,hn)<=0.0 { continue; }
+                        atomicAdd(&gi_work[GI_W_ACC_SUN_RAYS],1u);
+                        if gi_visible_within(start,to.xyz,1e20) { atomicAdd(&gi_work[GI_W_ACC_SUN_LIT],1u); }
+                    }
+                }
             }
             gi_sh_basis(d);
             let w=6.283185307179586/f32(rays);
