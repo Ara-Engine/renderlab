@@ -19,6 +19,8 @@ const GI_H_EMITTERS:u32=57u;
 const GI_H_EMITTER_COUNT:u32=58u;
 const GI_H_EMITTER_DRAWS:u32=59u;
 const GI_H_EMITTERS_MAX:u32=60u;
+// Measurement: nonzero turns emitter sampling and the hit subtraction off (RENDERLAB_GI_EMITTERS=0).
+const GI_H_EMITTERS_OFF:u32=43u;
 // Per triangle: a corner, its two edges and the radiance, each three f32.
 const GI_EMITTER_WORDS:u32=12u;
 // Per emitting draw after the triangles: its stable id and its radiance.
@@ -84,7 +86,7 @@ fn gi_emitter_vec(at:u32) -> vec3<f32> {
 // The emitted radiance of the draw a material identity + 1 names (gi_hit_identity), or zero.
 fn gi_identity_emission(identity:u32) -> vec3<f32> {
     let n=gi_word(GI_H_EMITTER_DRAWS);
-    if identity==0u || n==0u { return vec3<f32>(0.0); }
+    if identity==0u || n==0u || gi_word(GI_H_EMITTERS_OFF)!=0u { return vec3<f32>(0.0); }
     let id=(identity-1u)>>16u;
     let base=gi_emitter_draws_at();
     for(var k=0u;k<n;k+=1u) {
@@ -138,7 +140,7 @@ fn gi_emitter_sh(q:vec3<f32>, n:vec3<f32>, a:vec3<f32>, b:vec3<f32>, c:vec3<f32>
 // gi_gather_sh. Returns the visibility rays traced.
 fn gi_emitter_gather(lane:u32, q:vec3<f32>, origin:vec3<f32>, n:vec3<f32>, key:vec2<u32>) -> u32 {
     let count=gi_word(GI_H_EMITTER_COUNT);
-    if count==0u { return 0u; }
+    if count==0u || gi_word(GI_H_EMITTERS_OFF)!=0u { return 0u; }
     let base=gi_word(GI_H_EMITTERS);
     var rays=0u;
     for(var e=lane;e<count;e+=GI_GATHER_LANES) {

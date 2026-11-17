@@ -1484,6 +1484,9 @@ impl Planner {
         // its counts (58, 59) are the GPU's, written each frame by gi_emitters_publish.
         header[57] = (HEADER_WORDS + u64::from(c.slots) * (24 + u64::from(c.cold_words))) as u32;
         header[60] = EMITTERS_MAX;
+        // Measurement: RENDERLAB_GI_EMITTERS=0 turns emitter sampling off (and with it the gathers'
+        // subtraction of emission at hits): the cache as before the emitter list.
+        header[43] = u32::from(std::env::var("RENDERLAB_GI_EMITTERS").is_ok_and(|v| v == "0"));
         let [read, sweep] = self.stale_turns();
         header[62] = read;
         header[63] = sweep;
