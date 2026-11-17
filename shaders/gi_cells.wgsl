@@ -145,6 +145,23 @@ const GI_F_FIELD:u32=2u;
 const GI_F_ROTATE:u32=4u;
 // Probe statistics (the work counters from GI_W_P_TILES), kept on profiled frames only.
 const GI_F_STATS:u32=8u;
+// Accumulation (RENDERLAB_GI_ACCUMULATE=1, docs/design-gi-accumulate.md): a cell's SH words hold
+// its whole incident radiance, sky and bounce, absolute (gi_sky_scale passes it through), blended
+// over updates of a few rotated rays (shaders/gi_accumulate.wgsl); the bounce words hold the
+// blend's statistics (GI_HOT_ACC_*) with their scale word 0, so no reader adds a bounce.
+const GI_F_ACCUMULATE:u32=16u;
+// Its header words: the update periods of visible and other cells (frames), the rays of an
+// update, and the history the slow mean keeps at most (updates).
+const GI_H_ACC_VISIBLE:u32=42u;
+const GI_H_ACC_OTHER:u32=43u;
+const GI_H_ACC_RAYS:u32=44u;
+const GI_H_ACC_HISTORY:u32=45u;
+// Its hot words (the bounce's, unused while accumulating): the fast mean, the slow mean and the
+// slow second moment of an update's L0 luminance (f32), and the updates blended (u32).
+const GI_HOT_ACC_FAST:u32=17u;
+const GI_HOT_ACC_MEAN:u32=18u;
+const GI_HOT_ACC_MOMENT:u32=19u;
+const GI_HOT_ACC_COUNT:u32=20u;
 
 // Table layout after the header: the hot records, then the cold records.
 // Hot record: word 0 is key a (31 bits) with GI_VALID set while the SH is current and

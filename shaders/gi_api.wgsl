@@ -212,6 +212,8 @@ fn gi_intensity(e:vec3<f32>) -> vec3<f32> {
 // Cached values in lux: a map's cells hold its radiance (intensity applies here); a
 // constant sky's cells hold unit radiance, scaled here by the current constant.
 fn gi_sky_scale(e:vec3<f32>) -> vec3<f32> {
+    // Accumulating cells hold absolute incident radiance (GI_F_ACCUMULATE).
+    if (gi_word(GI_H_FLAGS)&GI_F_ACCUMULATE)!=0u { return e; }
     if (gi_word(GI_H_FLAGS)&GI_F_FIELD)!=0u { return gi_intensity(e); }
     return min(e*lighting.environment,vec3<f32>(3.4028235e38));
 }

@@ -296,6 +296,17 @@ fn still_batch_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_STILL_BATCH").map_or(true, |v| v != "0"))
 }
+/// Accumulation (docs/design-gi-accumulate.md, shaders/gi_accumulate.wgsl), default off:
+/// `RENDERLAB_GI_ACCUMULATE=1`. Its tuning, for measurement: `RENDERLAB_GI_ACC_VISIBLE` and
+/// `RENDERLAB_GI_ACC_OTHER` (update periods in frames, 4 and 64), `RENDERLAB_GI_ACC_RAYS` (rays an
+/// update, 16) and `RENDERLAB_GI_ACC_HISTORY` (updates the slow mean keeps at most, 32).
+pub(crate) fn accumulate_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_ACCUMULATE").is_ok_and(|v| v == "1"))
+}
+fn accumulate_word(name: &str, default: u32) -> u32 {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
 fn first_fill_on(software: bool) -> bool {
     static FORCED: std::sync::OnceLock<Option<bool>> = std::sync::OnceLock::new();
     FORCED
@@ -989,6 +1000,8 @@ struct Pipelines {
     gather: Owned<wgpu::ComputePipeline>,
     fill_count: Owned<wgpu::ComputePipeline>,
     fill_select: Owned<wgpu::ComputePipeline>,
+    acc_select: Owned<wgpu::ComputePipeline>,
+    accumulate: Owned<wgpu::ComputePipeline>,
     gather_count: Owned<wgpu::ComputePipeline>,
     gather_select: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
@@ -1406,8 +1419,15 @@ impl Planner {
         header[2] = u32::from(s.lookup == IndirectLookup::Trilinear)
             | (u32::from(field) << 1)
             | (u32::from(s.rotate_directions) << 2)
-            | (u32::from(c.profiling) << 3);
+            | (u32::from(c.profiling) << 3)
+            | (u32::from(accumulate_on()) << 4);
         header[3] = self.frame;
+        if accumulate_on() {
+            header[42] = accumulate_word("RENDERLAB_GI_ACC_VISIBLE", 4);
+            header[43] = accumulate_word("RENDERLAB_GI_ACC_OTHER", 64);
+            header[44] = accumulate_word("RENDERLAB_GI_ACC_RAYS", 16);
+            header[45] = accumulate_word("RENDERLAB_GI_ACC_HISTORY", 32);
+        }
         // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
         // are uncapped.
         let since_clear = if self.pending_clear {
@@ -2296,6 +2316,11 @@ fn kernel_source_base(software: bool, directions: u32) -> String {
     kernels.push_str(&gi_shader(
         "gi_near.wgsl",
         include_str!("../shaders/gi_near.wgsl"),
+    ));
+    kernels.push('\n');
+    kernels.push_str(&gi_shader(
+        "gi_accumulate.wgsl",
+        include_str!("../shaders/gi_accumulate.wgsl"),
     ));
     // Keep the hardware module unchanged, including its original gather entry.
     if software {
@@ -3473,6 +3498,8 @@ impl Renderer {
             }),
             fill_count: kernel("gi_fill_count"),
             fill_select: kernel("gi_fill_select"),
+            acc_select: kernel("gi_acc_select"),
+            accumulate: kernel("gi_accumulate"),
             gather_count: kernel("gi_gather_count"),
             gather_select: kernel("gi_gather_select"),
             light: kernel("gi_light"),
@@ -4390,7 +4417,13 @@ impl GiState {
         if p.priority.is_some() {
             encoder.clear_buffer(&r.work,u64::from(layout.items)*4,Some(16*4));
         }
-        if plan.bounce || profiling {
+        // Accumulation: this frame's updates in place of the gathers (no gather events).
+        let accumulate = accumulate_on();
+        if accumulate && plan.bounce {
+            main_pass(encoder, "indirect accumulate select", &p.acc_select, u32::MAX, Some([CELL_GROUPS, 1]));
+            main_pass(encoder, "indirect accumulate", &p.accumulate, b, Some([GATHER_GROUPS, 1]));
+        }
+        if (plan.bounce || profiling) && !accumulate {
             let grid = plan.bounce.then_some([GATHER_GROUPS, 1]);
             // The gather ray budget's admission (no-ops without it).
             main_pass(encoder, "indirect gather count", &p.gather_count, u32::MAX, grid);
@@ -4459,7 +4492,7 @@ impl GiState {
             feedback.after_claims(encoder,&r.work,layout.items);
         }
         mark(encoder, "gi_update");
-        if plan.scan || profiling {
+        if (plan.scan || profiling) && !accumulate {
             let groups = plan.scan.then_some([plan.scan_groups, 1]);
             main_pass(encoder, "indirect cache scan", &p.scan, s, groups);
         }
@@ -4474,7 +4507,7 @@ impl GiState {
         }
         if let Some(feedback) = &mut self.refill_feedback { feedback.finish(encoder,&r.work,&r.table); }
         mark(encoder, "gi_integrate");
-        if plan.integrate || profiling {
+        if (plan.integrate || profiling) && !accumulate {
             let groups = cells.filter(|_| plan.integrate);
             main_pass(
                 encoder,
@@ -4486,7 +4519,7 @@ impl GiState {
         }
         // The cell-space filter (G3), once every value of the frame is written and before cell
         // shading reads them.
-        if plan.filter || profiling {
+        if (plan.filter || profiling) && !accumulate {
             let grid = plan.filter.then_some([FILTER_GROUPS, 1]);
             main_pass(
                 encoder,
