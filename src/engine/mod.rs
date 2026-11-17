@@ -19,6 +19,7 @@ mod prewarm;
 pub(crate) mod ids;
 mod scene;
 mod scene_dump;
+mod live_reference;
 mod view;
 #[cfg(test)]
 mod view_tests;
@@ -262,6 +263,8 @@ pub struct Engine {
     prewarm_pending: bool,
     /// RENDERLAB_SCENE_DUMP: CPU copies of the scene for path-traced references (scene_dump.rs).
     dump: Option<scene_dump::Recorder>,
+    /// Measurement: the live reference (`RENDERLAB_LIVE_REFERENCE`, live_reference.rs).
+    live: Option<live_reference::LiveReference>,
 }
 
 /// Instance policy for Renderlab's bounded engine-owned indirect dispatch arguments.
@@ -391,6 +394,7 @@ impl Engine {
             spare: Some(renderer_first_view),
             prewarm_pending: std::env::var("RENDERLAB_PREWARM_PIPELINES").is_ok_and(|v| v == "1"),
             dump: scene_dump::Recorder::from_env(),
+            live: live_reference::LiveReference::from_env(),
         };
         settings::apply(&mut engine.renderer, &engine.state.settings)?;
         // Ticks are explicit from the start: the first frame runs the first tick's work.
@@ -662,6 +666,9 @@ impl Engine {
         let id = self.state.environments.insert(map);
         if let Some(dump) = &mut self.dump {
             dump.environment(id, data);
+        }
+        if let Some(live) = &mut self.live {
+            live.environment(id, data);
         }
         Ok(id)
     }

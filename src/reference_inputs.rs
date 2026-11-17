@@ -150,7 +150,7 @@ fn solid_angle(size: u32, x: u32, y: u32) -> f64 {
         + area(edge(x), edge(y))
 }
 
-pub(super) fn environment_data(e: &Environment) -> Vec<[f32; 4]> {
+pub(crate) fn environment_data(e: &Environment) -> Vec<[f32; 4]> {
     let n = e.radiance.size();
     let texels = e.radiance.texels();
     let lum = |v: &[f32; 3]| {

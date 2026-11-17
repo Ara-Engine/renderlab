@@ -2,19 +2,31 @@
 //! it shares the registered quarry loader and readback/validation helpers.
 use super::*;
 
-const TRACE: &str = include_str!("../shaders/primary_ray_probe.wgsl");
+const TRACE_SOURCE: &str = include_str!("../shaders/primary_ray_probe.wgsl");
+/// The probe module with the instance masks it culls with (it has no shaders/scene.wgsl),
+/// declared after its directive (a comment line precedes it).
+fn trace() -> String {
+    let directive = "enable wgpu_ray_query;\n";
+    assert_eq!(TRACE_SOURCE.matches(directive).count(), 1);
+    TRACE_SOURCE.replacen(
+        directive,
+        &format!("{directive}{}", crate::shadows::SHADOW_CASTER_MASK_WGSL),
+        1,
+    )
+}
 const RECEIVER: &str = include_str!("../shaders/primary_ray_receiver_probe.wgsl");
 const WIDTH: u32 = 1920;
 const HEIGHT: u32 = 1080;
 
 #[test]
 fn primary_probe_wgsl_compiles_to_spirv() {
-    for source in [TRACE, RECEIVER] {
+    let trace = trace();
+    for source in [trace.as_str(), RECEIVER] {
         let (module, info) = validate_wgsl(source);
         for entry in &module.entry_points {
             for diagnostic in [false, true] {
                 let mut constants = naga::back::PipelineConstants::default();
-                if source == TRACE {
+                if source == trace {
                     constants.insert("WRITE_WORLD".into(), f64::from(diagnostic));
                 }
                 let (resolved, info) = naga::back::pipeline_constants::process_overrides(
@@ -355,7 +367,7 @@ impl Probe {
         });
         let trace_module = r.device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("primary closest hit probe"),
-            source: wgpu::ShaderSource::Wgsl(TRACE.into()),
+            source: wgpu::ShaderSource::Wgsl(trace().into()),
         });
         let mut entries = vec![
             wgpu::BindGroupLayoutEntry {

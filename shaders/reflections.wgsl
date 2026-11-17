@@ -72,7 +72,7 @@ fn rl_lobe_store(pixel:vec2<u32>,origin:vec3<f32>,n:vec3<f32>,v:vec3<f32>,side:v
 struct RlCast {record:vec4<u32>,t:f32};
 fn rl_cast(origin:vec3<f32>,d:vec3<f32>,tmin:f32)->RlCast {
     var query:ray_query;
-    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,tmin,RL_FAR,origin,d));
+    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,VISIBLE_MASK,tmin,RL_FAR,origin,d));
     while rayQueryProceed(&query) {}
     let hit=rayQueryGetCommittedIntersection(&query);
     if hit.kind==0u {return RlCast(vec4<u32>(0u),-1.0);}
@@ -348,7 +348,7 @@ fn rl_reflection_prepare(s:Surface,input:SurfaceInput,batch:u32,pixel:vec2<u32>,
             d=reflect(-v,basis*rl_vndf(local_v,max(alpha,1e-6),u));
         }
         if dot(d,side)<=0.0 {continue;}
-        rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));
+        rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,VISIBLE_MASK,receiver.epsilon,RL_FAR,origin,d));
         while rayQueryProceed(&query) {}
         let hit=rayQueryGetCommittedIntersection(&query);
         // Only a miss looks up the sky: the compiler does not sink a lookup the hit
