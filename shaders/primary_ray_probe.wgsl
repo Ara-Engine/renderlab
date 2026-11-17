@@ -26,7 +26,7 @@ override WRITE_WORLD:bool=false;
     let direction=delta/distance;
     var query:ray_query;
     // Closest hit: deliberately no terminate-on-first-hit flag.
-    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,0.0,distance,near,direction));
+    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE,VISIBLE_MASK,0.0,distance,near,direction));
     while rayQueryProceed(&query) {}
     let hit=rayQueryGetCommittedIntersection(&query);
     var record=vec4<u32>(0u);

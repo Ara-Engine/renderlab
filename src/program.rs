@@ -673,7 +673,7 @@ const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 5] = [
     // cache-terminated hits can read `rs.t` the same way).
     ("            rl_dist+=hit.t;rl_dist_n+=1.0;\n", "            rl_dist+=rs.t;rl_dist_n+=1.0;\n"),
     (
-        "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,tmin,RL_FAR,origin,d));\n    while rayQueryProceed(&query) {}\n    let hit=rayQueryGetCommittedIntersection(&query);\n    if hit.kind==0u {return RlCast(vec4<u32>(0u),-1.0);}\n    return RlCast(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),hit.t);\n",
+        "    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,VISIBLE_MASK,tmin,RL_FAR,origin,d));\n    while rayQueryProceed(&query) {}\n    let hit=rayQueryGetCommittedIntersection(&query);\n    if hit.kind==0u {return RlCast(vec4<u32>(0u),-1.0);}\n    return RlCast(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),hit.t);\n",
         "    let hit=rs_trace(origin,d,tmin,RL_FAR,false);\n    return RlCast(hit.record,select(-1.0,hit.t,hit.record.x!=0u));\n",
     ),
     (
@@ -681,7 +681,7 @@ const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 5] = [
         "    return select(1.0,0.0,rs_blocked(origin,l,receiver.epsilon,tmax));\n",
     ),
     (
-        "        rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,255u,receiver.epsilon,RL_FAR,origin,d));\n        while rayQueryProceed(&query) {}\n        let hit=rayQueryGetCommittedIntersection(&query);\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.kind!=0u {\n            let record=vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics));\n",
+        "        rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_FORCE_OPAQUE,VISIBLE_MASK,receiver.epsilon,RL_FAR,origin,d));\n        while rayQueryProceed(&query) {}\n        let hit=rayQueryGetCommittedIntersection(&query);\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.kind!=0u {\n            let record=vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics));\n",
         "        let rs=rs_trace(origin,d,receiver.epsilon,RL_FAR,false);\n        let hit=rs.record;\n        // Only a miss looks up the sky: the compiler does not sink a lookup the hit\n        // branch overwrites (P-SKY, docs/p-sky.md).\n        var radiance=vec3<f32>(0.0);\n        if hit.x!=0u {\n            let record=hit;\n",
     ),
     (

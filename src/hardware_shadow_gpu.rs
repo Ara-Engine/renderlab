@@ -54,11 +54,11 @@ impl MeshAcceleration {
     }
 }
 
-/// TLAS instance masks. Every placement carries `MASK_VISIBLE`, and those that block light
-/// (`Instances::set_casts_shadows`) also `SHADOW_CASTER_MASK`, which every shadow ray culls
-/// with; camera, reflection and bounce rays cull with 0xFF.
+/// TLAS instance masks. Every placement carries `VISIBLE_MASK`, which camera, reflection and
+/// bounce rays cull with, and those that block light (`Instances::set_casts_shadows`) also
+/// `SHADOW_CASTER_MASK`, which every shadow ray culls with.
 const MASK_SHADOW: u8 = crate::shadows::SHADOW_CASTER_MASK as u8;
-const MASK_VISIBLE: u8 = 0x02;
+const MASK_VISIBLE: u8 = crate::shadows::VISIBLE_MASK as u8;
 
 struct Placement {
     mesh: Arc<MeshAcceleration>,

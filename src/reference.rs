@@ -586,7 +586,9 @@ fn render_repeats(
             &blases[i.mesh],
             row_transform(i.transform),
             slot as u32,
-            if i.casts_shadows { 0x03 } else { 0x02 },
+            (crate::shadows::VISIBLE_MASK
+                    | if i.casts_shadows { crate::shadows::SHADOW_CASTER_MASK } else { 0 })
+                    as u8,
         ));
     }
     let mut encoder = device.create_command_encoder(&Default::default());
