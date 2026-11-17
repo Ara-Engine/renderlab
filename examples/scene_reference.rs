@@ -194,10 +194,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // later bounces carry.
     let depth: Option<u32> = args.get(2).map(|s| s.parse()).transpose()?;
     let stem = depth.map_or("reference".to_owned(), |d| format!("reference-depth{d}"));
-    let settings = reference::Settings { samples, ..Default::default() };
+    // The centre hit's material per pixel (the geometry capture, without its sun visibility rays)
+    // gives the mask of materials the tracer does not shade as the engine does (scene.json
+    // `custom_materials`: programs that replace the standard `surface`).
+    let custom: Vec<u32> = spec["custom_materials"].as_array().into_iter().flatten().filter_map(Value::as_u64).map(|i| i as u32).collect();
+    let settings = reference::Settings { samples, capture_geometry: depth.is_none(), visibility_samples: 0, ..Default::default() };
     let settings = reference::Settings { max_depth: depth.unwrap_or(settings.max_depth), ..settings };
     let image = reference::render(&device, &queue, &scene, &view, &settings)?;
     let seconds = start.elapsed().as_secs_f64();
+    // reference-mask.png: 255 where the reference is judged, 0 where the centre hit's material is
+    // custom (its 80-byte geometry record's ids.z is the material + 1).
+    let mut masked = 0usize;
+    if !image.geometry.is_empty() {
+        let mask: Vec<u8> = image
+            .geometry
+            .chunks_exact(80)
+            .flat_map(|r| {
+                let material = u32::from_le_bytes(r[40..44].try_into().unwrap());
+                let out = material > 0 && custom.contains(&(material - 1));
+                masked += usize::from(out);
+                let v = if out { 0 } else { 255 };
+                [v, v, v, 255]
+            })
+            .collect();
+        png(&dir.join("reference-mask.png"), size, &mask)?;
+    }
+    let masked_fraction = masked as f64 / f64::from(size[0] * size[1]);
     png(&dir.join(format!("{stem}.png")), size, &codes(&image.mean, stops))?;
     pfm(&dir.join(format!("{stem}.pfm")), size, &image.mean)?;
     for (k, half) in image.halves.iter().enumerate().filter(|_| depth.is_none()) {
@@ -211,7 +233,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "samples": samples, "max_depth": settings.max_depth, "seconds": seconds, "invalid_pixels": image.invalid_pixels, "size": size,
             "exposure_stops": stops, "display_transform": "AcesFit+sRGB at the engine view's exposure",
             "method": "renderlab::reference: unidirectional path tracing, NEE + MIS, Russian roulette; no reuse or denoising",
-            "not_traced": gaps, "debug_build": cfg!(debug_assertions), "sky_check": sky_check,
+            "not_traced": gaps, "debug_build": cfg!(debug_assertions), "sky_check": sky_check, "custom_materials": custom, "masked_fraction": masked_fraction,
         }))?,
     )?;
     eprintln!("reference {} samples in {seconds:.1} s; not traced: {gaps:?}", samples);

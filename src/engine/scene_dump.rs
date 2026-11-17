@@ -34,6 +34,28 @@ struct RecordedMaterial {
     double_sided: bool,
     emission: [f32; 3],
     transparent: bool,
+    /// Its program replaces the standard `surface`, which the tracer implements: the reference
+    /// does not shade it as the engine does (Ara's terrain splat), so judges leave its pixels out.
+    custom: bool,
+}
+/// A program's `fn surface` text without whitespace, or None without one.
+fn surface_text(source: &str) -> Option<String> {
+    let start = source.find("fn surface(")?;
+    let open = start + source[start..].find('{')?;
+    let mut depth = 0;
+    for (i, c) in source[open..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(source[start..open + i + 1].split_whitespace().collect());
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 #[derive(Default)]
@@ -46,6 +68,8 @@ pub(super) struct Recorder {
     textures: HashMap<TextureId, Arc<TextureData>>,
     materials: HashMap<MaterialId, RecordedMaterial>,
     environments: HashMap<EnvironmentId, Arc<PreparedEnvironment>>,
+    /// Per program, whether it replaces the standard `surface` (`program`).
+    programs: HashMap<ProgramId, bool>,
 }
 
 impl Recorder {
@@ -74,6 +98,11 @@ impl Recorder {
     pub(super) fn environment(&mut self, id: EnvironmentId, data: &PreparedEnvironment) {
         self.environments.insert(id, Arc::new(data.clone()));
     }
+    /// Whether program `id` shades as the standard program does (its `surface` unchanged).
+    pub(super) fn program(&mut self, id: ProgramId, source: &str) {
+        let custom = surface_text(source) != surface_text(crate::STANDARD_PROGRAM);
+        self.programs.insert(id, custom);
+    }
     pub(super) fn material(&mut self, id: MaterialId, desc: &MaterialDesc<'_>) {
         // Emission: the embedder's emissive program's `glow` (Ara's; the mapped glow's mean is
         // its `bounce`), else none. Standard materials do not emit.
@@ -94,6 +123,7 @@ impl Recorder {
             double_sided: desc.double_sided,
             emission,
             transparent: desc.transparency.is_some(),
+            custom: desc.program.is_some_and(|p| self.programs.get(&p).copied().unwrap_or(true)),
         });
     }
 
@@ -123,6 +153,7 @@ impl Engine {
         let mut material_index: HashMap<MaterialId, u32> = HashMap::new();
         let mut mesh_index: HashMap<(MeshId, MaterialId), u32> = HashMap::new();
         let mut emission = String::new();
+        let mut custom = String::new();
         let mut skipped = 0usize;
         for batch in self.state.batches.values() {
             let (Some(recorded), Some(material)) = (rec.meshes.get(&batch.mesh), rec.materials.get(&batch.material)) else {
@@ -159,6 +190,9 @@ impl Engine {
                     let index = asset.materials.len() as u32 - 1;
                     let e = material.emission;
                     let _ = write!(emission, "{}[{index},{},{},{}]", if emission.is_empty() { "" } else { "," }, e[0], e[1], e[2]);
+                    if material.custom {
+                        let _ = write!(custom, "{}{index}", if custom.is_empty() { "" } else { "," });
+                    }
                     material_index.insert(batch.material, index);
                     index
                 }
@@ -231,7 +265,7 @@ impl Engine {
             let _ = write!(lights, "{}{entry}", if lights.is_empty() { "" } else { "," });
         }
         let json = format!(
-            "{{\"label\":\"{label}\",\"camera\":{{\"eye\":{},\"target\":{},\"fov_y\":{}}},\"size\":[{},{}],\"exposure_stops\":{stops},\"sun\":{sun},\"sky\":{sky},\"lights\":[{lights}],\"emission\":[{emission}],\"skipped_instances\":{skipped},\"path\":\"{:?}\"}}\n",
+            "{{\"label\":\"{label}\",\"camera\":{{\"eye\":{},\"target\":{},\"fov_y\":{}}},\"size\":[{},{}],\"exposure_stops\":{stops},\"sun\":{sun},\"sky\":{sky},\"lights\":[{lights}],\"emission\":[{emission}],\"custom_materials\":[{custom}],\"skipped_instances\":{skipped},\"path\":\"{:?}\"}}\n",
             v3(eye), v3(target), camera.fov_y(), size[0], size[1], self.path);
         std::fs::write(out.join("scene.json"), json).map_err(|_| Error::InvalidInput("scene dump write failed"))?;
         Ok(())

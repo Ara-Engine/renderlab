@@ -535,6 +535,9 @@ impl Engine {
             .renderer
             .try_create_program(&ProgramDescriptor { label, source })?;
         let id = self.state.programs.insert(program);
+        if let Some(dump) = self.dump.as_mut() {
+            dump.program(id, source);
+        }
         self.refresh_variance()?;
         Ok(id)
     }
