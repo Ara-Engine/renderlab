@@ -142,17 +142,16 @@ fn fg_load(index:u32,size:vec2<u32>)->FgProbe {
         bitcast<vec4<f32>>(b.r0),bitcast<vec4<f32>>(b.r1),bitcast<vec4<f32>>(b.r2),bitcast<vec4<f32>>(c.r0)),
         bitcast<vec4<f32>>(c.r1),bitcast<vec4<f32>>(c.r2));
 }
-// A probe's point and normal, and its inverse reach (the third record: its last two words and
-// the pad after the SH): the validity tests read these, and the 108 bytes of SH load only once a
-// weight is known (fg_add).
-struct FgPlane { point:vec4<f32>, normal:vec4<f32>, inv_reach:f32 };
+// A probe's point and normal alone (the last two words of its third record): the plane tests
+// read these, and the 108 bytes of SH load only once a weight is known (fg_add).
+struct FgPlane { point:vec4<f32>, normal:vec4<f32> };
 // The weighted SH sum fg_add adds to (private, not a pointer argument: naga's SPIR-V writer
 // fails on a pointer to a local struct's member).
 var<private> fg_sum:array<vec4<f32>,7>;
 fn fg_clear() { for(var v=0u;v<7u;v+=1u) {fg_sum[v]=vec4<f32>(0.0);} }
 fn fg_plane(index:u32,size:vec2<u32>)->FgPlane {
     let c=gi_prepared[fg_at(index,size)+2u];
-    return FgPlane(bitcast<vec4<f32>>(c.r1),bitcast<vec4<f32>>(c.r2),bitcast<f32>(c.r0.w));
+    return FgPlane(bitcast<vec4<f32>>(c.r1),bitcast<vec4<f32>>(c.r2));
 }
 fn fg_add(index:u32,size:vec2<u32>,w:f32) {
     let at=fg_at(index,size);
@@ -171,8 +170,7 @@ fn fg_invalidate(index:u32,size:vec2<u32>) {
     let at=fg_at(index,size)+2u;
     gi_prepared[at]=GiPrepared(gi_prepared[at].r0,vec4<u32>(0u),vec4<u32>(0u));
 }
-// Per lane: its ray's 27 SH terms, then its inverse hit distance over 2 pi (fg_accumulate).
-var<workgroup> fg_lane_sh:array<array<f32,28>,32>;
+var<workgroup> fg_lane_sh:array<array<f32,27>,32>;
 
 fn fg_hash(x:u32)->u32 {
     var h=x*0x9e3779b1u;h^=h>>16u;h*=0x85ebca6bu;h^=h>>13u;h*=0xc2b2ae35u;h^=h>>16u;return h;
@@ -212,23 +210,13 @@ fn fg_footprint(pixel:vec2<u32>,size:vec2<u32>,world:vec3<f32>)->f32 {
     let pixel_angle=length(ray.dx_far-ray.dx_near)/max(length(ray.far-ray.near),1e-30);
     return f32(FG_TILE)*pixel_angle*length(world-lighting.eye);
 }
-// How far a probe's light holds at a point and normal: 1 on its plane and within its reach, 0
-// off it or for an invalid probe. Plane distance: a Gaussian over FG_PLANE of its footprint;
-// normals as cos^4. Reach (irradiance caching's validity radius, Ward 1988): a Gaussian in the
-// distance along its plane over the harmonic mean of its rays' hit distances, so a probe under
-// an overhang (short hits) lights only its own surroundings and a pixel beside it in the open
-// takes a probe of its own (adaptive), while a probe in the open keeps its full reach. World
-// units, so it holds at any resolution; at least FG_REACH_MIN of the footprint.
-const FG_REACH_MIN:f32=0.25;
+// How far a point and normal lie on a probe's plane (Gaussian in plane distance over
+// FG_PLANE of its footprint, normals as cos^4): 1 on it, 0 off it or for an invalid probe.
 fn fg_on_plane(p:FgPlane,world:vec3<f32>,n:vec3<f32>)->f32 {
     if p.point.w<=0.0 {return 0.0;}
-    let rel=world-p.point.xyz;
-    let along=dot(p.normal.xyz,rel);
-    let plane=abs(along)/max(FG_PLANE*p.normal.w,1e-6);
+    let plane=abs(dot(p.normal.xyz,world-p.point.xyz))/max(FG_PLANE*p.normal.w,1e-6);
     let facing=max(dot(p.normal.xyz,n),0.0);
-    let reach=max(1.0/max(p.inv_reach,1e-6),FG_REACH_MIN*p.normal.w);
-    let apart=length(rel-p.normal.xyz*along)/reach;
-    return exp(-plane*plane-apart*apart)*facing*facing*facing*facing;
+    return exp(-plane*plane)*facing*facing*facing*facing;
 }
 fn fg_basis(n:vec3<f32>)->mat3x3<f32> {
     let s=select(-1.0,1.0,n.z>=0.0);
@@ -243,8 +231,6 @@ fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
     let z=u.x;let rr=sqrt(max(1.0-z*z,0.0));let phi=6.283185307179586*u.y;
     return fg_basis(n)*vec3<f32>(rr*cos(phi),rr*sin(phi),z);
 }
-// The last fg_radiance ray's hit distance (0 for a miss: 1 / t is what the reach takes).
-var<private> fg_inv_t:f32;
 // A probe ray's path regularization at its hits (rl_hit_variance, scene.wgsl `brdf`): GGX
 // alpha^2 of 8 spread^2 for the cone's half-angle spread = FG_CONE / 2, as reflection rays take
 // theirs, so a mirror's sun highlight at a hit is seen through the ray's cone.
@@ -253,13 +239,15 @@ const FG_HIT_VARIANCE:f32=0.7853981633974483;
 fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f32> {
     let inverse=1.0/max(lighting.exposure,1e-30);
     let traced=rl_cast(origin,d,epsilon);
-    fg_inv_t=0.0;
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)*inverse;}
-    fg_inv_t=1.0/max(traced.t,1e-4);
-    // A hit whose cone covers its cache cell reads the cell's outgoing radiance (emission and
-    // the cell's reflection of sky, bounce and the lights its visibility ray reached); contacts,
-    // movers and unsettled cells shade with the program and their own direct light.
-    let cached=rl_cache_lookup(traced.record,origin,d,traced.t,FG_CONE*traced.t);
+    // Every hit reads its cache cell's outgoing radiance (emission and the cell's reflection of
+    // sky, bounce and the lights its visibility ray reached), as screen probes read a surface
+    // cache: the ray stands for a share of the probe's hemisphere, so its footprint is taken as at
+    // least the cell there. Movers and absent or unsettled cells shade with the program. Shading
+    // near hits instead (contacts, thin faces beside other geometry) came out about a tenth darker
+    // than the cells and the reference: dark strips on the ring's sides and along the rail's foot.
+    let at=fma(d,vec3<f32>(traced.t),origin);
+    let cached=rl_cache_lookup(traced.record,origin,d,traced.t,max(FG_CONE*traced.t,gi_edge(gi_level(at))));
     if cached.w>0.0 {return rl_finite(cached.rgb);}
     let h=rl_hit_input(traced.record,origin,d,0.0,0.0,pixel);
     if !h.visible {return vec3<f32>(0.0);}
@@ -280,7 +268,6 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
 fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     var radiance=vec3<f32>(0.0);
     var d=vec3<f32>(0.0,0.0,1.0);
-    fg_inv_t=0.0;
     if s.placement!=0u {
         d=fg_direction(s.normal,ray,FG_RAYS,r);
         radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon,pixel);
@@ -289,15 +276,13 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     for(var i=0u;i<9u;i+=1u) {
         fg_lane_sh[lane][i*3u]=radiance.x*gi_y[i];fg_lane_sh[lane][i*3u+1u]=radiance.y*gi_y[i];fg_lane_sh[lane][i*3u+2u]=radiance.z*gi_y[i];
     }
-    // Over 2 pi: fg_accumulate scales every sum by 2 pi / FG_RAYS, which leaves the mean.
-    fg_lane_sh[lane][27]=fg_inv_t*0.15915494309189535;
 }
 // Folds the FG_RAYS lanes from `first` of fg_lane_sh into probe `index`, now at s: history
 // while the new point stays on the old probe's plane.
 fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>) {
     var sh:array<f32,28>;
     for(var l=0u;l<FG_RAYS;l+=1u) {
-        for(var i=0u;i<28u;i+=1u) {sh[i]+=fg_lane_sh[first+l][i];}
+        for(var i=0u;i<27u;i+=1u) {sh[i]+=fg_lane_sh[first+l][i];}
     }
     // Uniform hemisphere: pdf 1/(2 pi).
     let scale=6.283185307179586/f32(FG_RAYS);
@@ -313,10 +298,6 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
         let fresh=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u])*scale;
         out.sh[v]=select(fresh,mix(old.sh[v],fresh,blend),count>1.0);
     }
-    // The pad after the SH: the mean inverse hit distance (the reach's), blended like the light
-    // where the old one is one (an adaptive probe's pad held this frame's pick: negative).
-    let fresh_inv=sh[27]*scale;
-    out.sh[6].w=select(fresh_inv,mix(old.sh[6].w,fresh_inv,blend),count>1.0 && old.sh[6].w>=0.0);
     out.point=vec4<f32>(s.world,count);
     out.normal=vec4<f32>(s.normal,footprint);
     fg_store(index,size,out);
@@ -430,13 +411,9 @@ const FG_FILTER_SHORT:f32=4.0;
 }
 var<workgroup> fg_orphan:atomic<u32>;
 const FG_NONE:u32=0xffffffffu;
-// The adaptive probe's pick for this frame: its pixel's lane in the block, or FG_NONE. Between
-// fg_classify and fg_adapt it occupies the pad after the SH (sh[6].w, otherwise the inverse
-// reach) as -1 - lane, or -1000 for none: negative, so fg_accumulate never blends it as a reach.
-fn fg_pick_at(index:u32,size:vec2<u32>)->u32 {
-    let v=bitcast<f32>(gi_prepared[fg_at(index,size)+2u].r0.w);
-    return select(FG_NONE,u32(-v-1.0),v<=-0.5 && v>=-64.5);
-}
+// The adaptive probe's pick for this frame: its pixel's lane in the block (bits 0-5), or
+// FG_NONE, kept in the pad word after the SH (sh[6].w, which no reader takes as a coefficient).
+fn fg_pick_at(index:u32,size:vec2<u32>)->u32 { return gi_prepared[fg_at(index,size)+2u].r0.w; }
 // One workgroup per FG_BLOCK block, with no shading in it: the pixels without tile probes on
 // their plane vote (in an order the frame turns) for the one the block's adaptive probe goes on.
 // A block without one leaves its probe invalid.
@@ -456,8 +433,7 @@ fn fg_pick_at(index:u32,size:vec2<u32>)->u32 {
     let pick=atomicLoad(&fg_orphan);
     let at=fg_at(fg_adaptive(group.xy,size),size)+2u;
     let c=gi_prepared[at];
-    // -1 - lane, never a valid (non-negative) inverse reach; -1000 for none.
-    let stored=bitcast<u32>(select(-1.0-f32(pick&63u),-1000.0,pick==FG_NONE));
+    let stored=select(pick&63u,FG_NONE,pick==FG_NONE);
     gi_prepared[at]=GiPrepared(vec4<u32>(c.r0.xyz,stored),select(c.r1,vec4<u32>(0u),pick==FG_NONE),select(c.r2,vec4<u32>(0u),pick==FG_NONE));
 }
 var<workgroup> fg_pair:array<u32,2>;
