@@ -23,19 +23,7 @@ fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rou
 // rl_cache_hit for any lobe: the final gather's probe rays (gi_receiver_pass.wgsl) read it
 // too, with their own cones.
 fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
-    if gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
-    let world=fma(d,vec3<f32>(t),origin);
-    let base=gi_level(world);
-    if cone<gi_edge(base) { return vec4<f32>(0.0); }
-    let last=gi_word(GI_H_LEVELS)-1u;
-    let level=min(max(base,u32(ceil(log2(cone/gi_header_f32(GI_H_MIN_EDGE))))),last);
-    let hit=primary_decode(record);
-    let ta=primary_input(hit.batch,hit.ia,hit.placement);
-    let tb=primary_input(hit.batch,hit.ib,hit.placement);
-    let tc=primary_input(hit.batch,hit.ic,hit.placement);
-    let geometric=primary_geometric(ta.position,tb.position,tc.position,hit.placement);
-    let bin=gi_bin(select(-geometric,geometric,dot(geometric,origin-world)>=0.0));
-    let slot=gi_find_pair(gi_key(level,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(level),bin)))));
+    let slot=rl_cache_slot(record,origin,d,t,cone);
     // Only a settled value (w 1): a cell whose gathers are still pending is marked changing
     // (0.75, gi_shade_entry.wgsl) and an absent or unshaded one has none.
     var value=vec4<f32>(0.0);
@@ -45,9 +33,28 @@ fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)
     }
     // A skinned or moved placement's cells lag its surface (they belong to where it was), so
     // its hits always take the full program.
+    let hit=primary_decode(record);
     let mover=batch_skinned(primary_batch_info(hit.batch)) || rl_cache_moved(hit.placement);
     if mover { return vec4<f32>(0.0); }
     return value;
+}
+// The cache slot a hit `record` reads: its cell at the level the cone `cone` (metres wide at the
+// hit) covers, in the bin of its geometric normal turned toward the ray; 0xffffffff when the cache
+// is off, the cone is narrower than the hit's own level cell, or the cell is absent.
+fn rl_cache_slot(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->u32 {
+    if gi_word(GI_H_ENABLED)==0u { return 0xffffffffu; }
+    let world=fma(d,vec3<f32>(t),origin);
+    let base=gi_level(world);
+    if cone<gi_edge(base) { return 0xffffffffu; }
+    let last=gi_word(GI_H_LEVELS)-1u;
+    let level=min(max(base,u32(ceil(log2(cone/gi_header_f32(GI_H_MIN_EDGE))))),last);
+    let hit=primary_decode(record);
+    let ta=primary_input(hit.batch,hit.ia,hit.placement);
+    let tb=primary_input(hit.batch,hit.ib,hit.placement);
+    let tc=primary_input(hit.batch,hit.ic,hit.placement);
+    let geometric=primary_geometric(ta.position,tb.position,tc.position,hit.placement);
+    let bin=gi_bin(select(-geometric,geometric,dot(geometric,origin-world)>=0.0));
+    return gi_find_pair(gi_key(level,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(level),bin)))));
 }
 // The placement's model changed since the previous frame (models holds both frames).
 fn rl_cache_moved(slot:u32)->bool {
