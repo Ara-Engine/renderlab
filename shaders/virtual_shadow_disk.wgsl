@@ -712,23 +712,15 @@ fn vd_above(q:vec3<f32>,margin:f32)->bool {
 // The columns of one map texel, `cell` of `level`, standing for a square of side `size` centred
 // `c` (light xy): a level's own texel, or the one texel read for a max-mip cell `stride` texels
 // wide. `lo`..`hi` is the band of heights being served, `margin` the near-field bias.
-// Band jitter (`RENDERLAB_VD=VD_BAND_JITTER=0` off): the receiver jitter spans a texel of the
-// receiver's level, far less than a high caster's band texel, so TR1 never averaged those
-// columns' stairs (Glint's rails, the pole). A band above the receiver's level reads its columns
-// from the receiver moved by the same unit offset times VD_BAND_JITTER of its own texel (light
-// xy; the tangent-plane tests keep the receiver's point): TR1 averages each stair into a ramp
-// one band texel wide.
-override VD_BAND_JITTER:f32=0.5;
-var<private> vd_shift:vec2<f32>;
-fn vd_band_shift(texel:f32)->vec2<f32> {
-    return vd_px.jitter*VD_BAND_JITTER*max(texel-vsm_texel(vd_px.level),0.0);
-}
+// Every band reads its columns from the receiver's own point: moving a coarse band's read point
+// by part of its texel (the former band jitter) carried it off occluders thinner than that texel
+// on some frames, which TR1 averaged into lit streaks inside their shadows.
 fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,hi:f32,margin:f32) {
     let i=vsm_index(cell,level);
     if i==VSM_NONE {return;}
     let top=vsm_top_words[i];
     if top.x==0u {return;}
-    let p=vd_px.p+vec3<f32>(vd_shift,0.0);
+    let p=vd_px.p;
     let height=vsm_height(top);
     let t=height-p.z;
     let lo=lo_in;
@@ -804,7 +796,6 @@ override VD_RING:bool=true;
 // The map's columns: each level's band of heights, the highest band first (vd_map).
 fn vd_map() {
     vd_pl=VSM_NONE;
-    vd_shift=vec2<f32>(0.0);
     let p=vd_px.p;
     let slope=vd_px.slope;
     let side=i32(vsm.counts.y*VSM_PAGE);
@@ -838,8 +829,7 @@ fn vd_map() {
         if lo>=ceiling {continue;}
         let hi=select(f32(VD_R)*cell/slope*vd_px.band,3.4e38,mip==VD_MIPS);
         let s=side>>mip;
-        vd_shift=vd_band_shift(cell);
-        let ps=p.xy+vd_shift;
+        let ps=p.xy;
         let x=(ps-origin_last)/cell;
         let r=min(slope*min(ceiling,hi)/cell,f32(VD_R));
         let a=max(vec2<i32>(floor(x-vec2<f32>(r))),vec2<i32>(0));
@@ -878,8 +868,7 @@ fn vd_map() {
         let texel=vsm_texel(level);
         let hi=vd_band(level)*vd_px.band;
         let origin=vsm.levels[level].origin.xy;
-        vd_shift=vd_band_shift(texel);
-        let x=(p.xy+vd_shift-origin)/texel;
+        let x=(p.xy-origin)/texel;
         let r=min(slope*min(ceiling,hi)/texel,f32(VD_R));
         let a=max(vec2<i32>(floor(x-vec2<f32>(r))),vec2<i32>(0));
         let b=min(vec2<i32>(floor(x+vec2<f32>(r))),vec2<i32>(side-1));
