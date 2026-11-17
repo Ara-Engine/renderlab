@@ -859,6 +859,9 @@ fn vd_map() {
 // Taps are a Vogel disk rotated per pixel and TR1 frame; reconstruction averages them.
 override VD_PCSS:bool=false;
 override VD_PCSS_SEARCH:u32=16u;
+// The near search's taps (vd_pcss): a disk of VD_PCSS_NEAR_TEXELS texels of the receiver's level.
+override VD_PCSS_NEAR:u32=8u;
+override VD_PCSS_NEAR_TEXELS:f32=3.0;
 override VD_PCSS_TAPS:u32=32u;
 override VD_PCSS_MIN:f32=1.5;
 // Measurement: 1 draws why each receiver got its answer: 0 the ceiling (no caster above it),
@@ -954,29 +957,40 @@ fn vd_pcss(id:vec2<u32>)->f32 {
     // Per pixel and frame rotation of the tap disks.
     let seed=vd_hash(id.x+id.y*u32(vd.size.x));
     let turn=fract(f32(seed>>8u)*(1.0/16777216.0)+0.61803398875*vd.size.z)*6.28318531;
-    // Blocker search over the sun's cone from the receiver up to the ceiling: a blocker h above
-    // the receiver lies within radius*h of p + centre*h. The map keeps its basis while the sun
-    // turns (sun_hysteresis), so the cone leans by `centre` (up to about twice the sun's
-    // radius): taps cover its footprint, the capsule from p to p + centre*ceiling of half width
-    // radius*ceiling, at a level whose texel is a quarter of that width, and a tap counts only
-    // where its own height puts it inside the cone (a texel of slack).
-    let axis=vd_px.centre*ceiling;
-    let search=max(vd_px.radius*ceiling,VD_PCSS_MIN*texel0);
-    let centre_search=p.xy+0.5*axis;
-    let ls=vd_level_for(vd_px.level,0.25*search,centre_search,0.5*length(axis)+search);
-    if ls==VSM_NONE {if VD_COUNTS {atomicAdd(&vd_counts[1],1u);} return 1.0;}
-    let ms=VD_BIAS*vsm_texel(ls);
-    let slack=vsm_texel(ls);
-    let along=fract(f32(seed&0xffu)*(1.0/256.0)+0.75487767*vd.size.z);
+    // Blocker search, at two scales. Near: a disk of VD_PCSS_NEAR_TEXELS texels of the
+    // receiver's level around it, what stands over the receiver itself (a foot at its contact,
+    // a roof). Far: the sun's cone from the receiver up to the ceiling, which leans by `centre`
+    // while the map keeps its basis through a sun turn (sun_hysteresis): the capsule from p to
+    // p + centre*ceiling of half width radius*ceiling, at a level whose texel is a quarter of
+    // that width. Every tap above the receiver's plane is a blocker (PCSS); the near blockers
+    // decide the average where there are any, since sized for the highest caster the far taps
+    // are too sparse to find a small near one every frame.
+    let near_radius=VD_PCSS_NEAR_TEXELS*texel0;
     var found=0.0;var depth=0.0;
-    for(var k=0u;k<VD_PCSS_SEARCH;k+=1u) {
-        let r=sqrt((f32(k)+0.5)/f32(VD_PCSS_SEARCH));
-        let a=f32(k)*2.39996323+turn;
-        let t=fract(along+f32(k)*0.61803398875);
-        let q=p.xy+axis*t+search*r*vec2<f32>(cos(a),sin(a));
-        let tap=vd_tap(ls,q,ms);
-        if tap.x>0.0 && length(q-p.xy-vd_px.centre*tap.y)<=vd_px.radius*tap.y+slack {
-            found+=1.0;depth+=tap.y;
+    let ln=vd_level_for(vd_px.level,0.0,p.xy,near_radius);
+    if ln!=VSM_NONE {
+        let mn=VD_BIAS*vsm_texel(ln);
+        for(var k=0u;k<VD_PCSS_NEAR;k+=1u) {
+            let r=sqrt((f32(k)+0.5)/f32(VD_PCSS_NEAR));
+            let a=f32(k)*2.39996323+turn;
+            let tap=vd_tap(ln,p.xy+near_radius*r*vec2<f32>(cos(a),sin(a)),mn);
+            found+=tap.x;depth+=tap.x*tap.y;
+        }
+    }
+    if found==0.0 {
+        let axis=vd_px.centre*ceiling;
+        let search=max(vd_px.radius*ceiling,VD_PCSS_MIN*texel0);
+        let centre_search=p.xy+0.5*axis;
+        let ls=vd_level_for(vd_px.level,0.25*search,centre_search,0.5*length(axis)+search);
+        if ls==VSM_NONE {if VD_COUNTS {atomicAdd(&vd_counts[1],1u);} return 1.0;}
+        let ms=VD_BIAS*vsm_texel(ls);
+        let along=fract(f32(seed&0xffu)*(1.0/256.0)+0.75487767*vd.size.z);
+        for(var k=0u;k<VD_PCSS_SEARCH;k+=1u) {
+            let r=sqrt((f32(k)+0.5)/f32(VD_PCSS_SEARCH));
+            let a=f32(k)*2.39996323+turn;
+            let t=fract(along+f32(k)*0.61803398875);
+            let tap=vd_tap(ls,p.xy+axis*t+search*r*vec2<f32>(cos(a),sin(a)),ms);
+            found+=tap.x;depth+=tap.x*tap.y;
         }
     }
     if found==0.0 {
