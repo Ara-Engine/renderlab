@@ -248,7 +248,9 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     // than the cells and the reference: dark strips on the ring's sides and along the rail's foot.
     let at=fma(d,vec3<f32>(traced.t),origin);
     let cached=rl_cache_lookup(traced.record,origin,d,traced.t,max(FG_CONE*traced.t,gi_edge(gi_level(at))));
-    if cached.w>0.0 {return rl_finite(cached.rgb);}
+    // An emitting draw's cell sends its emission too: the probe takes the emitters as lights
+    // (fg_emitters), so a ray that meets one keeps its reflected light only.
+    if cached.w>0.0 {return rl_finite(max(cached.rgb-gi_batch_emission(primary_decode(traced.record).batch),vec3<f32>(0.0)));}
     let h=rl_hit_input(traced.record,origin,d,0.0,0.0,pixel);
     if !h.visible {return vec3<f32>(0.0);}
     rl_hit_lights_prepare(h.input.world);
@@ -278,6 +280,44 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     gi_sh_basis(d);
     for(var i=0u;i<9u;i+=1u) {
         fg_lane_sh[lane][i*3u]=radiance.x*gi_y[i];fg_lane_sh[lane][i*3u+1u]=radiance.y*gi_y[i];fg_lane_sh[lane][i*3u+2u]=radiance.z*gi_y[i];
+    }
+    if s.placement!=0u {fg_emitters(lane,ray,s,r);}
+}
+// Emitters as lights (next-event estimation from the lighting cache's emitter list,
+// gi_emitters.wgsl): this lane's share of them (emitter e on ray e % FG_RAYS) adds each one's
+// exact L0 and L1 terms, the triangle clipped to the probe's hemisphere (gi_emitter_sh) times its
+// radiance, where one ray to a fixed point of it (from the probe's hash) is unblocked. A small
+// lamp then lights every probe that sees it, steadily, instead of the few whose rays happen to
+// meet it. Divided by fg_accumulate's per-ray scale, so the sums come out exact.
+fn fg_emitters(lane:u32,ray:u32,s:FgSurface,r:u32) {
+    let count=gi_word(GI_H_EMITTER_COUNT);
+    if count==0u || gi_word(GI_H_EMITTERS_OFF)!=0u {return;}
+    let inverse_scale=f32(FG_RAYS)*0.15915494309189535;
+    let origin=fma(s.normal,vec3<f32>(s.epsilon),s.world);
+    let base=gi_word(GI_H_EMITTERS);
+    for(var e=ray;e<count;e+=FG_RAYS) {
+        let w=base+e*GI_EMITTER_WORDS;
+        let a=gi_emitter_vec(w);
+        let e1=gi_emitter_vec(w+3u);
+        let e2=gi_emitter_vec(w+6u);
+        let sh=gi_emitter_sh(s.world,s.normal,a,a+e1,a+e2);
+        if sh.x<=2.8e-7 {continue;}
+        let hash=fg_hash(r^(e*0x9e3779b9u));
+        var uv=vec2<f32>(f32(hash&0xffffu),f32(hash>>16u))*(1.0/65536.0);
+        if uv.x+uv.y>1.0 {uv=vec2<f32>(1.0)-uv;}
+        var x=a+e1*uv.x+e2*uv.y;
+        if dot(x-s.world,s.normal)<=0.0 {x=a+(e1+e2)*(1.0/3.0);}
+        let to=x-origin;
+        let dist=length(to);
+        if dist<=1e-6 {continue;}
+        let traced=rl_cast(origin,to/dist,s.epsilon);
+        if traced.record.x!=0u && traced.t<dist*0.999 {continue;}
+        let light=gi_emitter_vec(w+9u)*inverse_scale;
+        for(var k=0u;k<4u;k+=1u) {
+            fg_lane_sh[lane][k*3u]+=light.x*sh[k];
+            fg_lane_sh[lane][k*3u+1u]+=light.y*sh[k];
+            fg_lane_sh[lane][k*3u+2u]+=light.z*sh[k];
+        }
     }
 }
 // Folds the FG_RAYS lanes from `first` of fg_lane_sh into probe `index`, now at s: history

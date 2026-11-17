@@ -74,11 +74,36 @@ pub(crate) fn entry() -> wgpu::BindGroupLayoutEntry {
 /// The GI receiver kernel's module on a traced shading `head`, exactly as the engine compiles
 /// it: the standard program's traced composition (which carries the shading-side definitions
 /// `shade_source` appends) and the kernel half of gi_receiver_pass.wgsl.
+/// The lighting cache's emitter list readers the final gather samples (shaders/gi_emitters.wgsl,
+/// read through gi_word): its constants and the four functions that need no cache binding. The
+/// build and gather kernels in that file bind the cache's own buffers and stay out.
+fn emitter_readers() -> String {
+    const SOURCE: &str = include_str!("../shaders/gi_emitters.wgsl");
+    let function = |name: &str| {
+        let start = SOURCE.find(&format!("fn {name}(")).unwrap();
+        let brace = start + SOURCE[start..].find('{').unwrap();
+        let mut depth = 1;
+        let mut end = brace + 1;
+        while depth != 0 {
+            depth += i32::from(SOURCE.as_bytes()[end] == b'{') - i32::from(SOURCE.as_bytes()[end] == b'}');
+            end += 1;
+        }
+        SOURCE[start..end].to_owned()
+    };
+    let mut out: String = SOURCE.lines().filter(|l| l.starts_with("const GI_")).map(|l| format!("{l}\n")).collect();
+    for name in ["gi_emitter_draws_at", "gi_emitter_vec", "gi_batch_emission", "gi_emitter_sh"] {
+        out.push_str(&function(name));
+        out.push('\n');
+    }
+    out
+}
 pub(crate) fn kernel_module(head: &str) -> program::Composed {
     let mut composed = program::compose(head, program::STANDARD_PROGRAM, Stage::Traced, false);
     if program::final_gather() {
         composed.source = program::with_cache_lookup(composed.source);
     }
+    // The gather's kernels are in the kernel half whether or not it runs.
+    composed.source.push_str(&emitter_readers());
     let mut kernel = SOURCE.split_once(ENTRY_SEAM).unwrap().1.to_string();
     // Measurement only (`RENDERLAB_GI_RX_PROBE=nolookup`): no cache lookup, so the pass costs
     // its decode and the record's stores alone. Shading then sees no GI value. The pattern holds
@@ -625,6 +650,7 @@ mod tests {
                 shade_source_for(source, true, true, true)
             };
             source.push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
+            source.push_str(&emitter_readers());
             // The final gather's module carries the cache lookup on both paths.
             let source = program::with_cache_lookup(source);
             let module = naga::front::wgsl::parse_str(&source)
