@@ -9,6 +9,7 @@
 // program (rf_job.y); the shading kernel (shaders/reference_live.wgsl) reads every record.
 // Must match src/reference_live.rs RfHit and RfRecord.
 struct RfHit { placement:u32, primitive:u32, bary:vec2<f32>, origin:vec3<f32>, flags:u32 };
+// geometric.w: the IOR of a see-through material (0: opaque).
 struct RfRecord { normal_alpha:vec4<f32>, base_metal:vec4<f32>, emission_rough:vec4<f32>, world_model:vec4<f32>, geometric:vec4<f32> };
 // rf_hits[i].flags: the hit is valid (a miss or a finished path stores none).
 const RF_HIT:u32=1u;
@@ -85,7 +86,9 @@ fn rf_surface_input(hit:RfHit)->SurfaceInput {
         let s=surface(input);
         let m=rf_record(s,input);
         let e=rl_emission(s,input);
+        // geometric.w: a see-through material's IOR (TP1: 1 a blended film, above 1 glass), 0 when opaque.
+        let ior=select(0.0,transparent_ior(input.material),transparent_material(input.material));
         rf_records[i]=RfRecord(vec4<f32>(m.normal,m.alpha),vec4<f32>(m.base,m.metallic),vec4<f32>(e,m.roughness),
-            vec4<f32>(input.world,bitcast<f32>(m.model)),vec4<f32>(input.geometric,input.receiver.epsilon));
+            vec4<f32>(input.world,bitcast<f32>(m.model)),vec4<f32>(input.geometric,ior));
     }
 }

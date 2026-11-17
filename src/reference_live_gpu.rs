@@ -40,6 +40,14 @@ impl Renderer {
         }
         let standard = self.standard.id();
         self.live_programs = draws.iter().map(|d| d.material.map_or(standard, |m| m.program.id())).collect();
+        self.live_transparent = draws.iter().map(|d| d.material.is_some_and(|m| m.transparency.is_some())).collect();
+    }
+
+    /// While set, frames keep transparent draws in the traced draw list instead of the transparent pass
+    /// (`try_render_view`): the live reference renders one such frame before it traces, so the TLAS,
+    /// shading groups and per-program materials include see-through surfaces.
+    pub(crate) fn set_live_opaque_frame(&mut self, on: bool) {
+        self.live_opaque = on;
     }
 
     /// Path-traces the last prepared frame's scene from `inputs`' camera (module doc). Needs ray
@@ -76,11 +84,12 @@ impl Renderer {
                 storage(6, true),
                 storage(7, true),
                 storage(8, false),
+                storage(9, true),
             ],
         });
         let kernel_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("live reference kernels"),
-            bind_group_layouts: &[Some(&kernel_layout), Some(primary.array_layout())],
+            bind_group_layouts: &[Some(&kernel_layout), Some(primary.array_layout()), Some(primary.material_layout())],
             immediate_size: 0,
         });
         let kernels = self.device.create_engine_shader_module(wgpu::ShaderModuleDescriptor {
@@ -168,6 +177,12 @@ impl Renderer {
             .iter()
             .flat_map(|id| (programs.binary_search(id).unwrap() as u32).to_le_bytes())
             .collect();
+        let batch_flags: Vec<u8> = self.live_transparent.iter().flat_map(|&t| u32::from(t).to_le_bytes()).collect();
+        let batch_flags = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("live reference draw flags"),
+            contents: &batch_flags,
+            usage: wgpu::BufferUsages::STORAGE,
+        });
         let program_table = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("live reference programs"),
             contents: &program_table,
@@ -199,6 +214,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 6, resource: environment.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 7, resource: lights.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 8, resource: counters.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: batch_flags.as_entire_binding() },
             ],
         });
         let material_groups: Vec<wgpu::BindGroup> = jobs
@@ -229,6 +245,7 @@ impl Renderer {
             pass.set_pipeline(pipeline);
             pass.set_bind_group(0, &kernel_group, &[]);
             pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(2, materials, &[]);
             pass.dispatch_workgroups(groups.min(65535), groups.div_ceil(65535), 1);
         };
         let wait = |device: &wgpu::Device| {

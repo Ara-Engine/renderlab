@@ -732,8 +732,11 @@ pub struct Renderer {
     residency: texture_residency::Residency,
     /// M7 world radiance cache (`gi_cache.rs`).
     gi: gi_cache::GiState,
-    /// The live reference's per-draw program ids, kept while one is requested (reference_live_gpu.rs).
+    /// The live reference's per-draw program ids and see-through flags, kept while one is requested,
+    /// and whether this frame keeps transparent draws traced (reference_live_gpu.rs).
     live_programs: Vec<u64>,
+    live_transparent: Vec<bool>,
+    live_opaque: bool,
     /// AT1 sky LUTs, kernels and the procedural sky (`atmosphere_gpu.rs`); each view owns
     /// its camera volume and fog histories.
     atmosphere: atmosphere_gpu::AtmosphereGpu,
@@ -1213,6 +1216,8 @@ impl Renderer {
             shadow_settings: Default::default(),
             gi,
             live_programs: Vec::new(),
+            live_transparent: Vec::new(),
+            live_opaque: false,
             reconstruction_shadow_budget: ReconstructionShadowBudget::default(),
             transparency: Default::default(),
             primary_hash: [0; 32],
@@ -2702,7 +2707,8 @@ impl Renderer {
     ) -> Result<Option<FrameReport>, Error> {
         // TP1: transparent draws leave every opaque path for the transparent pass. The
         // split is stable and the caller's order comes back afterwards.
-        let (opaque, order) = transparency_gpu::split(draws);
+        // The live reference's frame keeps them (set_live_opaque_frame).
+        let (opaque, order) = if self.live_opaque { (draws.len(), None) } else { transparency_gpu::split(draws) };
         let (front, transparent) = draws.split_at_mut(opaque);
         let result = self.render_view(color, camera, front, transparent, view_mode);
         if let Some(order) = order {

@@ -48,7 +48,9 @@ pub(crate) fn requested() -> bool {
 
 /// The program-free kernels with the engine's shadow caster mask.
 pub(crate) fn kernel_source() -> String {
-    crate::shadows::with_shadow_caster_mask(include_str!("../shaders/reference_live.wgsl"))
+    let source = crate::shadows::with_shadow_caster_mask(include_str!("../shaders/reference_live.wgsl"));
+    let at = source.find("const PI:f32").expect("the kernels declare PI");
+    format!("{}const PRIMARY_BATCHES:u32={}u;\n{}", &source[..at], crate::primary_ray::TRACED_DRAWS, &source[at..])
 }
 
 /// What the engine knows of the frame to trace and the renderer does not: the camera, the sun

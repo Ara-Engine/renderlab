@@ -1,5 +1,6 @@
 enable wgpu_ray_query;
 enable wgpu_ray_query_vertex_return;
+enable wgpu_binding_array;
 // Live reference (docs/design-reference-live.md): the path tracer's program-free kernels. Its
 // estimator is src/reference.rs's (shaders/reference_path_tracer.wgsl), unchanged in its
 // mathematics, split into wavefront stages so every material program can run between them as
@@ -55,8 +56,21 @@ struct LocalLight {position_range:vec4<f32>, candela_kind:vec4<f32>, travel_oute
 @group(0) @binding(7) var<storage,read> local_lights:array<LocalLight>;
 // x: paths still alive after this bounce's shading (the host stops once it reads zero).
 @group(0) @binding(8) var<storage,read_write> counters:array<atomic<u32>,4>;
+// Per draw: bit 0 marks a see-through (transparent) material.
+@group(0) @binding(9) var<storage,read> rf_batches:array<u32>;
 // The engine's placement table (primary_rays.wgsl): bit 30 marks single-sided draws.
 @group(1) @binding(5) var<storage,read> primary_placements:array<u32>;
+// The frame's traced geometry and materials (program_traced.wgsl's group 1 and 2), for the coverage of
+// see-through shadow casters.
+struct RfVec4s { data:array<vec4<f32>> };
+struct RfU32s { data:array<u32> };
+@group(1) @binding(2) var<storage,read> primary_vertices:binding_array<RfVec4s,PRIMARY_BATCHES>;
+@group(1) @binding(3) var<storage,read> primary_indices:binding_array<RfU32s,PRIMARY_BATCHES>;
+struct Material { base_color:vec4<f32>, metallic:f32, roughness:f32, double_sided:u32, thin:u32, normal_scale:f32, normal_mapped:u32, normal_variance:u32, pad:u32 };
+struct RfMaterial { value:Material };
+@group(2) @binding(10) var<storage,read> primary_materials:binding_array<RfMaterial,PRIMARY_BATCHES>;
+@group(2) @binding(11) var primary_base_color:binding_array<texture_2d<f32>,PRIMARY_BATCHES>;
+@group(2) @binding(12) var primary_base_sampler:binding_array<sampler,PRIMARY_BATCHES>;
 
 // ---- src/reference.rs's environment, random numbers, basis and BSDF (reference_path_tracer.wgsl) ----
 fn environment_direction(face:u32, uv:vec2<f32>)->vec3<f32> {
@@ -216,12 +230,53 @@ fn sample_vndf(l:Lobe, v:vec3<f32>, u:vec2<f32>)->vec3<f32> {
 fn power(a:f32, b:f32)->f32 {return a*a/max(a*a+b*b,1e-30);}
 // ---- end of src/reference.rs's functions ----
 
-// Whether anything that casts shadows lies along the ray before `tmax`.
-fn occluded_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32)->bool {
+// A see-through hit's base colour (rgb) and coverage (a), as the standard program resolves them: the
+// material's factor, vertex colour and base-colour texture at level 0, coverage through
+// transparent_coverage (program_api.wgsl): the opacity times the alpha product.
+fn rf_seethrough(batch:u32, primitive:u32, bary:vec2<f32>)->vec4<f32> {
+    let m=primary_materials[batch].value;
+    let i=primitive*3u;
+    let ia=primary_indices[batch].data[i];let ib=primary_indices[batch].data[i+1u];let ic=primary_indices[batch].data[i+2u];
+    let w=vec3<f32>(1.0-bary.x-bary.y,bary);
+    let uv=primary_vertices[batch].data[ia*3u+1u].zw*w.x+primary_vertices[batch].data[ib*3u+1u].zw*w.y+primary_vertices[batch].data[ic*3u+1u].zw*w.z;
+    let color=primary_vertices[batch].data[ia*3u+2u]*w.x+primary_vertices[batch].data[ib*3u+2u]*w.y+primary_vertices[batch].data[ic*3u+2u]*w.z;
+    let sampled=textureSampleLevel(primary_base_color[batch],primary_base_sampler[batch],uv,0.0);
+    let base=clamp(m.base_color.rgb*color.rgb*sampled.rgb,vec3<f32>(0.0),vec3<f32>(1.0));
+    let opacity=select(1.0,unpack2x16float(m.pad).x,m.pad!=0u);
+    let coverage=select(1.0,clamp(opacity*m.base_color.a*sampled.a*color.a,0.0,1.0),m.pad!=0u);
+    return vec4<f32>(base,coverage);
+}
+// Schlick's dielectric Fresnel reflectance at cosine c for index n.
+fn rf_fresnel(n:f32, c:f32)->f32 {
+    let f0=((n-1.0)/(n+1.0))*((n-1.0)/(n+1.0));
+    return f0+(1.0-f0)*pow(1.0-clamp(c,0.0,1.0),5.0);
+}
+// The light that reaches along the ray before `tmax`: zero behind an opaque shadow caster; a see-through
+// caster passes 1 - its coverage, glass (IOR above 1) also its Fresnel transmission tinted by its base colour.
+fn transmitted_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32)->vec3<f32> {
     var query:ray_query<vertex_return>;
-    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_OPAQUE|RAY_FLAG_TERMINATE_ON_FIRST_HIT,SHADOW_CASTER_MASK,0.0,tmax,origin,direction));
-    while rayQueryProceed(&query) {}
-    return rayQueryGetCommittedIntersection(&query).kind!=0u;
+    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_NO_OPAQUE,SHADOW_CASTER_MASK,0.0,tmax,origin,direction));
+    var t=vec3<f32>(1.0);
+    while rayQueryProceed(&query) {
+        let c=rayQueryGetCandidateIntersection(&query);
+        let batch=primary_placements[c.instance_custom_data]&0x1fffffffu;
+        if (rf_batches[batch]&1u)==0u {
+            rayQueryConfirmIntersection(&query);
+            continue;
+        }
+        let s=rf_seethrough(batch,c.primitive_index,c.barycentrics);
+        let m=primary_materials[batch].value;
+        let ior=unpack2x16float(m.pad).y;
+        var share=vec3<f32>(1.0-s.a);
+        if ior>1.0 {
+            let v=getCandidateHitVertexPositions(&query);
+            let ng=normalize(cross(v[1]-v[0],v[2]-v[0])*mat3x3<f32>(c.world_to_object[0],c.world_to_object[1],c.world_to_object[2]));
+            share*=(1.0-rf_fresnel(ior,abs(dot(ng,direction))))*s.rgb;
+        }
+        t*=share;
+    }
+    if rayQueryGetCommittedIntersection(&query).kind!=0u {return vec3<f32>(0.0);}
+    return t;
 }
 fn camera_ray_time(pixel:vec2<f32>, t:f32)->array<vec3<f32>,2> {
     let eye=mix(frame.eye0.xyz,frame.eye1.xyz,t);
@@ -298,6 +353,33 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
     let base=r.base_metal.rgb;
     let metal=r.base_metal.w;
     let roughness=r.emission_rough.w;
+    // A see-through surface (TP1): over its coverage it is the surface below; elsewhere a film (IOR 1)
+    // passes the path straight on, and glass is a thin slab, a Fresnel mirror or a straight
+    // transmission tinted by its base colour (no lateral shift: the slab's thickness is ignored).
+    let ior=r.geometric.w;
+    if ior>0.0 && rand()>=r.normal_alpha.w {
+        var through=true;
+        if ior>1.0 {
+            if rand()<rf_fresnel(ior,abs(dot(n,path.direction))) {
+                through=false;
+                path.direction=reflect(path.direction,select(-n,n,dot(n,path.direction)<0.0));
+                path.origin=offset(p,ng);
+                path.pdf_prev=0.0;
+            } else {
+                path.throughput*=base;
+            }
+        }
+        if through {
+            // The path goes on in its own direction: its BSDF pdf still weighs what it meets next.
+            path.origin=offset(p,-ng);
+        }
+        path.depth+=1u;
+        path.rng=rng_state;
+        let alive=path.depth<=frame.options.x+64u && any(path.throughput>vec3<f32>(0.0));
+        if alive {atomicAdd(&counters[0],1u);} else {path.state=0u;}
+        paths[i]=path;
+        return;
+    }
     // Emitters are found only by hitting them (src/reference.rs): no light sampling, no weight.
     path.total+=path.throughput*r.emission_rough.rgb;
     let v=-path.direction;
@@ -310,8 +392,9 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
         if frame.sun.w>0.0 {
             let wi=sample_sun();
             let cos_l=dot(n,wi);
-            if cos_l>0.0 && dot(ng,wi)>0.0 && !occluded_within(start,wi,1e30) {
-                let f=bsdf(l,n,v,wi);
+            if cos_l>0.0 && dot(ng,wi)>0.0 {
+                let share=transmitted_within(start,wi,1e30);
+                let f=bsdf(l,n,v,wi)*share;
                 if sun_height()==0.0 {
                     path.total+=path.throughput*f*cos_l*frame.sun_value.rgb;
                 } else {
@@ -358,8 +441,9 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
                 let cone=clamp((dot(-wi,light.travel_outer.xyz)-light.travel_outer.w)/max(light.inner.x-light.travel_outer.w,1e-4),0.0,1.0);
                 attenuation*=cone*cone;
             }
-            if attenuation<=0.0 || occluded_within(start,wi,reach) {continue;}
-            path.total+=path.throughput*bsdf(l,n,v,wi)*cos_l*light.candela_kind.rgb*attenuation;
+            if attenuation<=0.0 {continue;}
+            let share=transmitted_within(start,wi,reach);
+            path.total+=path.throughput*bsdf(l,n,v,wi)*share*cos_l*light.candela_kind.rgb*attenuation;
         }
         // Next-event estimation: sky (the environment's importance sampling, or cosine-weighted
         // about the shading normal for a constant sky).
@@ -370,11 +454,12 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
                 wi=basis(n)*vec3<f32>(u*cos(phi),u*sin(phi),sqrt(max(0.0,1.0-u*u)));
             }
             let cos_l=dot(n,wi);
-            if cos_l>0.0 && dot(ng,wi)>0.0 && (frame.sky.w>0.0 || !in_sun(wi)) && !occluded_within(start,wi,1e30) {
+            if cos_l>0.0 && dot(ng,wi)>0.0 && (frame.sky.w>0.0 || !in_sun(wi)) {
+                let share=transmitted_within(start,wi,1e30);
                 var light_pdf=cos_l/PI;
                 if frame.sky.w>0.0 {light_pdf=environment_pdf(wi);}
                 let w=power(light_pdf,bsdf_pdf(l,n,v,wi));
-                path.total+=path.throughput*bsdf(l,n,v,wi)*cos_l*sky_radiance(wi)*w/max(light_pdf,1e-30);
+                path.total+=path.throughput*bsdf(l,n,v,wi)*share*cos_l*sky_radiance(wi)*w/max(light_pdf,1e-30);
             }
         }
         // BSDF sampling for the continuation.

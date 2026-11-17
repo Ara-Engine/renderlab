@@ -138,7 +138,7 @@ impl Engine {
             let stops = match self.views[at].desc.look.exposure {
                 super::Exposure::Manual { stops } => stops,
             };
-            self.trace_live(&label, camera, [output.width(), output.height()], stops)?;
+            self.trace_live(&label, camera, &output, stops)?;
         }
         Ok(report)
     }

@@ -75,7 +75,17 @@ fn ppm(path: &std::path::Path, size: [u32; 2], pixels: &[[f32; 3]], stops: f32) 
 
 impl Engine {
     /// Traces the scene of the frame just rendered for `label` as seen by `camera` (module doc).
-    pub(super) fn trace_live(&mut self, label: &str, camera: &Camera, size: [u32; 2], stops: f32) -> Result<(), Error> {
+    pub(super) fn trace_live(&mut self, label: &str, camera: &Camera, output: &wgpu::Texture, stops: f32) -> Result<(), Error> {
+        if self.live.is_none() {
+            return Ok(());
+        }
+        let size = [output.width(), output.height()];
+        // One more frame of the same view with the transparent draws kept traced, so the TLAS, the
+        // shading groups and the per-program materials include see-through surfaces.
+        self.renderer.set_live_opaque_frame(true);
+        let frame = self.render_selected(output, camera, ViewMode::Lit);
+        self.renderer.set_live_opaque_frame(false);
+        frame?;
         let Some(live) = self.live.as_ref() else { return Ok(()) };
         let out = live.dir.join(label);
         let _ = std::fs::create_dir_all(&out);
@@ -131,7 +141,7 @@ impl Engine {
                 Light::Directional { .. } => not_traced.push("a directional light other than the sun".into()),
             }
         }
-        not_traced.push("see-through materials traced as opaque (their coverage ignored)".into());
+        not_traced.push("see-through surfaces as thin films and thin-slab glass: no refraction offset (thickness ignored)".into());
         not_traced.push("fog and aerial perspective".into());
         let inputs = crate::reference_live::LiveInputs {
             eye,
