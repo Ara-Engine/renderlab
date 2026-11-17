@@ -304,6 +304,28 @@ pub(crate) fn accumulate_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_ACCUMULATE").is_ok_and(|v| v == "1"))
 }
+/// The twin of shaders/gi_accumulate.wgsl `gi_acc_local` (and gi_cells.wgsl `gi_mix`): ray `lane`
+/// of `rays` in an update of cell `slot` on cache frame `frame`, in the cell's frame (z along its
+/// normal). Only the tests use it; they hold the shader to the same formula.
+#[cfg(test)]
+fn acc_local_direction(slot: u32, frame: u32, lane: u32, rays: u32) -> [f32; 3] {
+    let mix = |x: u32| {
+        let mut h = x;
+        h ^= h >> 16;
+        h = h.wrapping_mul(0x7feb352d);
+        h ^= h >> 15;
+        h = h.wrapping_mul(0x846ca68b);
+        h ^= h >> 16;
+        h
+    };
+    let seed = mix(slot ^ frame.wrapping_mul(0x9e3779b9));
+    let turn = (seed >> 8) as f32 * (std::f32::consts::TAU / 16777216.0);
+    let jitter = (mix(seed ^ lane) >> 8) as f32 * (1.0 / 16777216.0);
+    let z = 1.0 - (lane as f32 + jitter) / rays as f32;
+    let r = (1.0 - z * z).max(0.0).sqrt();
+    let phi = lane as f32 * 2.399963229728653 + turn;
+    [r * phi.cos(), r * phi.sin(), z]
+}
 fn accumulate_word(name: &str, default: u32) -> u32 {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
 }
@@ -1865,7 +1887,10 @@ impl Planner {
             (true, u32::MAX) => IDLE_AFTER_BOUNCE,
             (true, _) => IDLE_AFTER_BOUNCE + 64 * (s.gathers + 1),
         };
-        if view.idle_frames >= idle_after && flags == 0 && !busy {
+        // Accumulation runs its updates every frame (docs/design-gi-accumulate.md): a still view
+        // keeps converging, and its cost is the budget's whatever the camera does. Idling stopped
+        // the updates a few frames into a hold and froze cells at their first, noisy values.
+        if view.idle_frames >= idle_after && flags == 0 && !busy && !accumulate_on() {
             return Finished { frame, plan: None };
         }
         // The still-view batch: a still view with nothing changing still creates and gathers a
@@ -1877,6 +1902,7 @@ impl Planner {
         // most STILL_BATCH - 1 frames later. Any motion, a relight or a moved caster runs every
         // frame.
         if still_batch_on()
+            && !accumulate_on()
             && view.idle_frames >= STILL_BATCH
             && flags == 0
             && !busy
@@ -4699,6 +4725,49 @@ mod tests {
         .unwrap_or_else(|e| panic!("{label}: {}", e.emit_to_string(source)));
     }
 
+    /// Accumulation's updates trace different rays on consecutive updates of a cell: a rotation fixed
+    /// per cell would trace the same rays every update, and no history length could change the value.
+    #[test]
+    fn accumulate_directions_change_between_updates() {
+        for slot in [0u32, 7, 123_456, 1 << 20] {
+            for frame in [0u32, 1, 1000] {
+                for lane in 0..4 {
+                    let a = acc_local_direction(slot, frame, lane, 16);
+                    let b = acc_local_direction(slot, frame + 1, lane, 16);
+                    let dot: f32 = (0..3).map(|i| a[i] * b[i]).sum();
+                    assert!(dot < 0.9999, "slot {slot} frame {frame} lane {lane}: the same ray on consecutive updates");
+                }
+            }
+        }
+    }
+    /// Over many updates a cell's rays cover the hemisphere evenly: equal solid-angle bands (uniform in
+    /// z) by eight azimuth sectors each hold their share within 25% (about three binomial standard
+    /// deviations at 128 a bin); and the shader keeps the formula.
+    #[test]
+    fn accumulate_directions_cover_the_hemisphere() {
+        let mut bins = [[0u32; 8]; 8];
+        let (updates, rays) = (512u32, 16u32);
+        for frame in 0..updates {
+            for lane in 0..rays {
+                let [x, y, z] = acc_local_direction(4242, frame, lane, rays);
+                assert!((0.0..=1.0).contains(&z) && ((x * x + y * y + z * z) - 1.0).abs() < 1e-4);
+                let band = (((1.0 - z) * 8.0) as usize).min(7);
+                let sector = ((y.atan2(x).rem_euclid(std::f32::consts::TAU) / std::f32::consts::TAU * 8.0) as usize).min(7);
+                bins[band][sector] += 1;
+            }
+        }
+        let mean = (updates * rays) as f32 / 64.0;
+        for (band, row) in bins.iter().enumerate() {
+            for (sector, &n) in row.iter().enumerate() {
+                assert!((n as f32 - mean).abs() < 0.25 * mean, "band {band} sector {sector}: {n} of a mean {mean}");
+            }
+        }
+        let shader = include_str!("../shaders/gi_accumulate.wgsl");
+        for piece in ["let seed=gi_mix(slot^(frame*0x9e3779b9u));", "let jitter=f32(gi_mix(seed^lane)>>8u)*(1.0/16777216.0);",
+                      "let z=1.0-(f32(lane)+jitter)/f32(rays);", "let phi=f32(lane)*2.399963229728653+turn;"] {
+            assert!(shader.contains(piece), "gi_acc_local changed without its twin: {piece}");
+        }
+    }
     #[test]
     fn kernels_validate_on_both_ray_sources() {
         for directions in [64, 128] {

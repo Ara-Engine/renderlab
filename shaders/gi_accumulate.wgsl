@@ -61,6 +61,20 @@ fn gi_acc_select(kind:u32, id:vec3<u32>, groups:vec3<u32>) {
 @compute @workgroup_size(64) fn gi_acc_select_visible(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) { gi_acc_select(1u,id,groups); }
 @compute @workgroup_size(64) fn gi_acc_select_other(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) { gi_acc_select(2u,id,groups); }
 
+// Ray `lane` of `rays` in an update of cell `slot` on cache frame `frame`, in the cell's frame
+// (z along its normal): stratified over the hemisphere's solid angle (uniform in z), turned by a
+// rotation drawn per update and jittered per ray, so consecutive updates trace different rays and
+// many updates cover the hemisphere evenly. src/gi_cache.rs acc_local_direction is its twin, and
+// the tests there hold both to that (accumulate_directions_*).
+fn gi_acc_local(slot:u32, frame:u32, lane:u32, rays:u32) -> vec3<f32> {
+    let seed=gi_mix(slot^(frame*0x9e3779b9u));
+    let turn=f32(seed>>8u)*(6.283185307179586/16777216.0);
+    let jitter=f32(gi_mix(seed^lane)>>8u)*(1.0/16777216.0);
+    let z=1.0-(f32(lane)+jitter)/f32(rays);
+    let r=sqrt(max(1.0-z*z,0.0));
+    let phi=f32(lane)*2.399963229728653+turn;
+    return vec3<f32>(r*cos(phi),r*sin(phi),z);
+}
 var<workgroup> gi_wg_acc:array<f32,27u*64u>;
 var<workgroup> gi_wg_acc_count:u32;
 @compute @workgroup_size(64) fn gi_accumulate(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
@@ -100,12 +114,7 @@ var<workgroup> gi_wg_acc_count:u32;
             let tertiary=(state&GI_TERTIARY)!=0u;
             let band=select(select(GI_BAND_SECONDARY,GI_BAND_TERTIARY,secondary),0u,!requests || tertiary);
             // A rotation and a jitter drawn per update: over its updates a cell meets every direction.
-            let turn=f32(seed>>8u)*(6.283185307179586/16777216.0);
-            let jitter=f32(gi_mix(seed^lane)>>8u)*(1.0/16777216.0);
-            let z=1.0-(f32(lane)+jitter)/f32(rays);
-            let r=sqrt(max(1.0-z*z,0.0));
-            let phi=f32(lane)*2.399963229728653+turn;
-            let d=frame*vec3<f32>(r*cos(phi),r*sin(phi),z);
+            let d=frame*gi_acc_local(slot,gi_word(GI_H_FRAME),lane,rays);
             gi_hit_spread=gi_header_f32(GI_H_HIT_SPREAD);
             let h=gi_closest(origin,d,0.0,1e20);
             var radiance=vec3<f32>(0.0);
