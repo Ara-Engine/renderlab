@@ -696,7 +696,16 @@ const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 5] = [
 /// minimum perceptual roughness (0-1), which then applies on both paths;
 /// `RENDERLAB_RL_CACHE_HITS=off` turns it off everywhere.
 pub(crate) const CACHE_HITS: &str = include_str!("../shaders/reflection_cache_hits.wgsl");
-pub(crate) const CACHE_HITS_STUB: &str = "fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> { return vec4<f32>(0.0); }\n";
+pub(crate) const CACHE_HITS_STUB: &str = "fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> { return vec4<f32>(0.0); }\nfn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> { return vec4<f32>(0.0); }\n";
+/// The final gather's module (src/gi_receiver_pass.rs) reads the cache at its probe rays' hits
+/// on both paths whenever the lighting group binds the outgoing radiance: the lookup, with no
+/// reflection lobe reaching it (no roughness reaches 2).
+pub(crate) fn with_cache_lookup(source: String) -> String {
+    if cache_hits_rough().is_none() || !source.contains(CACHE_HITS_STUB) {
+        return source;
+    }
+    source.replacen(CACHE_HITS_STUB, &CACHE_HITS.replace("RL_CACHE_ROUGH_MIN", "2.0"), 1)
+}
 const CACHE_HITS_DEFAULT: f32 = 0.25;
 /// `RENDERLAB_RL_CACHE_HITS` when set: its minimum roughness, or none (`off`).
 fn cache_hits_env() -> Option<Option<f32>> {
@@ -1066,6 +1075,13 @@ pub(crate) struct Composed {
     pub program: Range<usize>,
 }
 
+/// The final gather (`RENDERLAB_FINAL_GATHER=1`, src/gi_receiver_pass.rs): screen probes trace
+/// the scene and pixels integrate them; no pixel reads a lighting-cache cell. Off by default
+/// until its pictures hold.
+pub(crate) fn final_gather() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_FINAL_GATHER").is_ok_and(|v| v.trim() == "1"))
+}
 /// One module: `head` (the prelude with its visibility variant and, for traced stages,
 /// the ray helpers), the shared API, the stage API, the parameter binding when
 /// `parameters`, the program, then the generated entry point.
