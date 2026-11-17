@@ -117,7 +117,7 @@ pub struct Environment {
 }
 
 #[path = "reference_inputs.rs"]
-mod inputs;
+pub(crate) mod inputs;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Pose {
@@ -816,10 +816,14 @@ fn render_repeats(
 
 /// Means and split-half standard errors from the even/odd sums (8 floats per pixel).
 fn finish(bytes: &[u8], view: &View, samples: u32) -> Image {
+    finish_sums(bytes, view.width, view.height, samples)
+}
+/// `finish` for a `width` x `height` image (the live reference, src/reference_live_gpu.rs).
+pub(crate) fn finish_sums(bytes: &[u8], width: u32, height: u32, samples: u32) -> Image {
     let value = |i: usize| f32::from_le_bytes(bytes[i * 4..i * 4 + 4].try_into().unwrap());
     let even_n = samples.div_ceil(2) as f32;
     let odd_n = (samples / 2) as f32;
-    let pixels = (view.width * view.height) as usize;
+    let pixels = (width * height) as usize;
     let mut mean = Vec::with_capacity(pixels);
     let mut standard_error = Vec::with_capacity(pixels);
     let mut halves = [Vec::with_capacity(pixels), Vec::with_capacity(pixels)];
@@ -842,8 +846,8 @@ fn finish(bytes: &[u8], view: &View, samples: u32) -> Image {
         }));
     }
     Image {
-        width: view.width,
-        height: view.height,
+        width,
+        height,
         samples,
         mean,
         standard_error,
