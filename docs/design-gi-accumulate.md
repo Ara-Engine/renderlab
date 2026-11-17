@@ -63,4 +63,24 @@ SIZES=2,1 ROUTES=stand,course PATHS=nort,rt ONE_LEASE=1` (per-row data of the ta
 
 ## Results
 
+**The hangar's mosaic is direct sun carried through cells (bin-smoke-71508d00, outpost-hangar
+non-RT, fog off, tone curve).**
+- Reflections off changes only three crates (mean 0.22 codes; 0.25% of pixels over 8).
+- With the sky off and the sun on, the walls show a golden sun patch with the mosaic. With update
+  rays not reading their hits (RENDERLAB_GI_ACC_HITS=0), the walls go dark and smooth.
+- So the mosaic enters through update rays reading neighbouring cells' outgoing light. That light
+  includes each cell's direct sun from its one on/off visibility ray (gi_light).
+
+The fix is to evaluate direct light at the hit and take only indirect light from cells, as Lumen's
+hit lighting does.
+
+**Cost of one sun visibility ray per update hit (RENDERLAB_GI_ACC_HITSUN=1), same view:**
+
+| path | update pass off/on, ms | sun rays a frame | ns a ray |
+|---|---|---:|---:|
+| non-RT | 23.41 / 31.62 | 905k | ~9 |
+| RT | 3.66 / 4.33 | 919k | ~0.73 |
+
+Only about 4.6% of these hits reach the sun.
+
 (to fill: hangar pair, walk cost against still, after a cut, movers, a lighting change)
