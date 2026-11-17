@@ -63,11 +63,13 @@ const PROFILE_STAMPS: u32 = 2 * (10 + 2 * CLAIM_ROUNDS);
 pub(crate) const GATHER_GROUPS: u32 = 4096;
 /// The emitter list (shaders/gi_emitters.wgsl, docs/design-gi-emitters.md): at most this many
 /// emitting triangles a frame (the rest are counted as dropped), 12 words each, then up to
-/// EMITTER_DRAWS_MAX emitting draws (stable id and radiance), in the table after the slots.
+/// EMITTER_DRAWS_MAX emitting draws (stable id, batch and radiance: EMITTER_DRAW_WORDS each),
+/// in the table after the slots.
 /// Its build pass loops over every emitting draw's triangles on a fixed grid.
 pub(crate) const EMITTERS_MAX: u32 = 8192;
 const EMITTER_WORDS: u64 = 12;
 const EMITTER_DRAWS_MAX: u32 = 64;
+const EMITTER_DRAW_WORDS: u64 = 5;
 const EMITTER_GROUPS: u32 = 64;
 /// The default per-frame gather budget (`IndirectSettings::gather_cells` 0), in cells, on both
 /// paths. G2b sized per-path budgets to about 4 ms of a cut frame's gathers (0.13 us a cell with hardware rays and
@@ -469,7 +471,7 @@ impl Sizes {
         let table_bytes = (HEADER_WORDS
             + u64::from(slots) * (24 + u64::from(cold_words))
             + u64::from(EMITTERS_MAX) * EMITTER_WORDS
-            + u64::from(EMITTER_DRAWS_MAX) * 4)
+            + u64::from(EMITTER_DRAWS_MAX) * EMITTER_DRAW_WORDS)
             * 4;
         // Counters, claims, misses, trace and integrate queues, ray items and their
         // staged bits, the request table, then bounce's two gather queues (a count, then

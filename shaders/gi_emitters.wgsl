@@ -23,8 +23,10 @@ const GI_H_EMITTERS_MAX:u32=60u;
 const GI_H_EMITTERS_OFF:u32=43u;
 // Per triangle: a corner, its two edges and the radiance, each three f32.
 const GI_EMITTER_WORDS:u32=12u;
-// Per emitting draw after the triangles: its stable id and its radiance.
+// Per emitting draw after the triangles: its stable id, its batch index and its radiance
+// (src/gi_cache.rs EMITTER_DRAW_WORDS).
 const GI_EMITTER_DRAWS_MAX:u32=64u;
+const GI_EMITTER_DRAW_WORDS:u32=5u;
 const GI_W_EMITTERS:u32=200u;
 const GI_W_EMITTER_DRAWS:u32=201u;
 const GI_W_EMITTER_RAYS:u32=202u;
@@ -51,9 +53,10 @@ fn gi_emitter_vec(at:u32) -> vec3<f32> {
         if id.x==0u {
             let k=atomicAdd(&gi_work[GI_W_EMITTER_DRAWS],1u);
             if k<GI_EMITTER_DRAWS_MAX {
-                let w=gi_emitter_draws_at()+k*4u;
+                let w=gi_emitter_draws_at()+k*GI_EMITTER_DRAW_WORDS;
                 gi_table[w]=d.x;
-                gi_table[w+1u]=bitcast<u32>(e.x);gi_table[w+2u]=bitcast<u32>(e.y);gi_table[w+3u]=bitcast<u32>(e.z);
+                gi_table[w+1u]=b;
+                gi_table[w+2u]=bitcast<u32>(e.x);gi_table[w+3u]=bitcast<u32>(e.y);gi_table[w+4u]=bitcast<u32>(e.z);
             }
         }
         let triangles=batch_triangles(primary_batch_info(b));
@@ -90,7 +93,20 @@ fn gi_identity_emission(identity:u32) -> vec3<f32> {
     let id=(identity-1u)>>16u;
     let base=gi_emitter_draws_at();
     for(var k=0u;k<n;k+=1u) {
-        if gi_word(base+k*4u)==id { return gi_emitter_vec(base+k*4u+1u); }
+        let w=base+k*GI_EMITTER_DRAW_WORDS;
+        if gi_word(w)==id { return gi_emitter_vec(w+2u); }
+    }
+    return vec3<f32>(0.0);
+}
+// The emitted radiance of the draw at batch index `batch` (primary_decode(record).batch), or zero:
+// for readers bound to the table but not to the cache's draws and geometry (the final gather).
+fn gi_batch_emission(batch:u32) -> vec3<f32> {
+    let n=gi_word(GI_H_EMITTER_DRAWS);
+    if n==0u || gi_word(GI_H_EMITTERS_OFF)!=0u { return vec3<f32>(0.0); }
+    let base=gi_emitter_draws_at();
+    for(var k=0u;k<n;k+=1u) {
+        let w=base+k*GI_EMITTER_DRAW_WORDS;
+        if gi_word(w+1u)==batch { return gi_emitter_vec(w+2u); }
     }
     return vec3<f32>(0.0);
 }
