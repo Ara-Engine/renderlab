@@ -79,6 +79,21 @@ SIZES=2,1 ROUTES=stand,course PATHS=nort,rt ONE_LEASE=1` (per-row data of the ta
   has no sun inside the hangar, so the cache's rays through the glass panes (left out of its geometry)
   probably carry too much light. That is a question of how the cache treats panes.
 
+**Panes (bin-smoke-82e2442d).** Keeping see-through draws in every opaque path
+(RENDERLAB_TRANSPARENT_OPAQUE=1, a measurement) removes the hangar's golden light. Accumulation's
+back wall then matches the live reference: 109 against 108 codes, from 118 against 78. Its
+whole-frame difference falls from 48.5 to 32.9. Glint's views do not move (under 0.1 code). The
+cache's rays had passed the clerestory glass at full strength. The white mosaic that remains is sky
+through the roof strips, which are real openings.
+
+**Guided rays from the cell's L2 SH (bin-smoke-9d384398, RENDERLAB_GI_ACC_GUIDE).** At 50% and 75%,
+the hangar's mosaic is barely finer: 32.99, 33.08 and 34.90 mean against the live reference at 0,
+50 and 75%. The back wall drifts darker: 109, 101 and 99 against 109. Glint improves slightly at
+75% (slider 5.20 -> 4.93, goal 2.18 -> 2.09). An L2 SH cannot hold a thin bright strip, so the
+guide it gives is broad. The next form keeps a finer directional record per cell to guide from:
+64 bins of last radiance, as Lumen's screen probes guide from their octahedral radiance. The guide
+stays at 0 by default.
+
 Earlier reading, superseded above:
 
 **The hangar's mosaic is direct sun carried through cells (bin-smoke-71508d00, outpost-hangar
