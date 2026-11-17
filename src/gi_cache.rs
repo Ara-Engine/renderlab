@@ -1199,6 +1199,9 @@ pub(crate) struct Plan {
     /// Bounce (G2) runs this frame: gathers, light visibility and cell shading. The work
     /// offset (in bytes) of next frame's gather queue count, cleared before the passes.
     pub(crate) bounce: bool,
+    /// The work offset (in bytes) of this frame's gather queue count (the refill feedback's
+    /// backlog, `priority::Controller::target`).
+    pub(crate) this_queue_at: u64,
     pub(crate) next_queue_at: u64,
     /// The cell-space filter (G3) runs this frame (bounce on, a filter bit set).
     pub(crate) filter: bool,
@@ -1878,6 +1881,7 @@ impl Planner {
                 clear,
                 environment_only,
                 bounce,
+                this_queue_at: u64::from(queue) * 4,
                 next_queue_at: u64::from(next) * 4,
                 filter: bounce && filter != 0,
             }),
@@ -4398,7 +4402,7 @@ impl GiState {
         // for the claim rounds that follow.
         let b = 6 + 2 * CLAIM_ROUNDS;
         mark(encoder, "gi_gather");
-        if let Some(feedback) = &mut self.refill_feedback { feedback.begin(encoder); }
+        if let Some(feedback) = &mut self.refill_feedback { feedback.begin(encoder, &r.work, plan.this_queue_at); }
         if p.priority.is_some() {
             encoder.clear_buffer(&r.work,u64::from(layout.items)*4,Some(16*4));
         }

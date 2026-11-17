@@ -263,7 +263,15 @@ pub(super) struct Controller {
     first_limit: u32,
     refresh_limit: u32,
     last_split: u64,
+    /// The gather queue's length at the start of the last measured frame (the feedback's
+    /// readback), for the drain target (`target`).
+    pub queued: u32,
 }
+/// The frames a gather backlog is spread over (`Controller::target`): half a second at 60 FPS.
+pub(super) const DRAIN_FRAMES: f64 = 30.0;
+/// The most a frame's gathers aim to take while draining, in ms: below the 14-18 ms the
+/// unbounded refill spent a frame after Glint's camera cuts.
+pub(super) const DRAIN_CEILING_MS: f64 = 12.0;
 impl Default for Controller {
     fn default() -> Self {
         Self {
@@ -277,10 +285,26 @@ impl Default for Controller {
             first_limit: DEFAULT_CELLS,
             refresh_limit: DEFAULT_CELLS,
             last_split: 0,
+            queued: 0,
         }
     }
 }
 impl Controller {
+    /// This frame's soft gather target, in ms: `gather_target` (3 ms by default), or more while a
+    /// backlog waits, enough to gather the queue in DRAIN_FRAMES at the measured cost per cell, up
+    /// to DRAIN_CEILING_MS. A fixed 3 ms never caught up with Glint's replay: each cut queued
+    /// more than its 89 frames could gather, so the cache kept a 3.5 ms floor in every settled
+    /// frame where the unbounded refill had finished in a burst and gone idle (smoke, 17 Nov).
+    /// Bounded per-frame cost and bounded latency together: the backlog drains in about half a
+    /// second, and no frame aims above the ceiling.
+    pub fn target(&self) -> f64 {
+        let base = gather_target();
+        let per = self.first_cost.max(self.refresh_cost);
+        if !(per > 0.0) {
+            return base;
+        }
+        (f64::from(self.queued) * per / DRAIN_FRAMES).clamp(base, DRAIN_CEILING_MS.max(base))
+    }
     /// A soft gather target from the previous frame's measured cost. The GPU raises
     /// first fill's floor to this frame's inflow before allowing refresh to use the rest.
     pub fn observe_split(
@@ -382,7 +406,7 @@ impl Controller {
         header[35] = self.first_limit.max(FIRST_FLOOR);
         header[36] = (self.first_cost as f32).to_bits();
         header[37] = (self.refresh_cost as f32).to_bits();
-        header[38] = (gather_target() as f32).to_bits();
+        header[38] = (self.target() as f32).to_bits();
         header[40] = self.refresh_limit;
         header[41] = u32::from(mode != Mode::Legacy);
         header[28] = header[28].max(1); // Gather hits keep the previous stamp; only pixels mark this frame.
