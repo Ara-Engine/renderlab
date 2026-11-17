@@ -336,7 +336,8 @@ pub(crate) fn atmosphere(sky: Sky, settings: &Settings) -> Atmosphere {
 
 /// Measurement ablations (P-SHOW2, docs/p-show2.md): `RENDERLAB_ABLATE` lists features
 /// to switch off whatever the embedder asks for, comma-separated: `gi`, `reflections`,
-/// `local_shadows`, `media` (aerial perspective, height and volumetric fog), `post`, `tr1`.
+/// `local_shadows`, `media` (aerial perspective, height and volumetric fog), `post`, `tr1`,
+/// `grade` (the filmic tone curve alone, for comparisons with path-traced references).
 /// Lets a harness split a fused pass's cost without changing the embedder.
 pub(crate) fn ablated(mut s: Settings) -> Settings {
     let Ok(list) = std::env::var("RENDERLAB_ABLATE") else {
@@ -532,6 +533,27 @@ pub(crate) fn ablated_look(mut look: ViewLook) -> ViewLook {
         match feature {
             "reflections" => look.reflections = crate::ReflectionSettings::off(),
             "post" => look.post.enabled = false,
+            // The tone curve alone, as path-traced references are displayed (examples/
+            // scene_reference: the filmic AcesFit and sRGB): no bloom, white balance,
+            // contrast, saturation, LUT, vignette, grain, aberration, motion blur or focus.
+            "grade" => {
+                look.post = crate::post::PostSettings {
+                    bloom: 0.0,
+                    motion_blur: false,
+                    depth_of_field: None,
+                    tonemapper: crate::post::Tonemapper::Filmic,
+                    white_balance_kelvin: 6500.0,
+                    tint: 0.0,
+                    contrast: 1.0,
+                    saturation: 1.0,
+                    vignette: 0.0,
+                    grain: 0.0,
+                    chromatic_aberration_px: 0.0,
+                    lut_strength: 0.0,
+                    ..look.post
+                };
+                look.colour_lut = None;
+            }
             _ => {}
         }
     }

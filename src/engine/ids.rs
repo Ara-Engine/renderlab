@@ -82,6 +82,10 @@ impl<K, V> Slots<K, V> {
             kind: PhantomData,
         }
     }
+    /// The live values, in slot order.
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.entries.iter().filter_map(|(_, v)| v.as_ref())
+    }
     pub fn insert(&mut self, value: V) -> Id<K> {
         let index = match self.free.pop() {
             Some(index) => {
