@@ -1438,6 +1438,8 @@ impl Planner {
             header[46] = accumulate_word("RENDERLAB_GI_ACC_BUDGET", 0);
             // The disagreement test's band in standard deviations, times 100 (0: no test).
             header[47] = accumulate_word("RENDERLAB_GI_ACC_SIGMA", 200);
+            // Each ray from a fresh point of the cell's surface (1) or from its query point (0).
+            header[51] = accumulate_word("RENDERLAB_GI_ACC_AREA", 1);
         }
         // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
         // are uncapped.

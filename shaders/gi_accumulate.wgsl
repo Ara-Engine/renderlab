@@ -80,12 +80,26 @@ var<workgroup> gi_wg_acc_count:u32;
             let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
             let q=gi_point(cold);
             let frame=gi_basis(n);
-            let origin=q+n*gi_origin_offset(q,c.edge);
+            let seed=gi_mix(slot^(gi_word(GI_H_FRAME)*0x9e3779b9u));
+            // The cell's area: each ray from a fresh point of its surface, found by a probe along
+            // -n from half an edge above a random point of its footprint, so the value converges on
+            // the cell's area mean. From one query point a cell on fine relief (the hangar's
+            // corrugated walls) kept that point's view: groove or ridge, a fixed per-cell mosaic.
+            var start=q;
+            if gi_word(GI_H_ACC_AREA)!=0u {
+                let h1=gi_mix(seed^(lane*0x85ebca6bu+1u));
+                let h2=gi_mix(h1^0xc2b2ae35u);
+                let a=f32(h1>>8u)*(1.0/16777216.0)-0.5;
+                let b=f32(h2>>8u)*(1.0/16777216.0)-0.5;
+                let above=q+frame[0]*(a*c.edge)+frame[1]*(b*c.edge)+n*(0.5*c.edge);
+                let probe=gi_closest(above,-n,0.0,c.edge);
+                if probe.hit { start=above-n*probe.t; }
+            }
+            let origin=start+n*gi_origin_offset(start,c.edge);
             let secondary=(state&GI_SECONDARY)!=0u;
             let tertiary=(state&GI_TERTIARY)!=0u;
             let band=select(select(GI_BAND_SECONDARY,GI_BAND_TERTIARY,secondary),0u,!requests || tertiary);
             // A rotation and a jitter drawn per update: over its updates a cell meets every direction.
-            let seed=gi_mix(slot^(gi_word(GI_H_FRAME)*0x9e3779b9u));
             let turn=f32(seed>>8u)*(6.283185307179586/16777216.0);
             let jitter=f32(gi_mix(seed^lane)>>8u)*(1.0/16777216.0);
             let z=1.0-(f32(lane)+jitter)/f32(rays);
