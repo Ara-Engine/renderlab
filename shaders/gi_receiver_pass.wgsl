@@ -1,5 +1,6 @@
-// GI receiver output: 48 bytes/pixel, two f32 scales and 39 snorm8 coefficients. A negative
-// sky scale: no value; a negative bounce scale: the sky slots are absolute (gi_rx_absolute).
+// GI receiver output: 48 bytes/pixel, two f32 scales and 39 snorm8 coefficients and a flag
+// byte. A negative sky scale: no value; the flag byte (the last) set: the sky and bounce slots
+// are absolute (gi_rx_absolute: a final-gather record).
 // Three vector words retain the original byte layout, with vector loads/stores.
 struct GiPrepared { r0:vec4<u32>, r1:vec4<u32>, r2:vec4<u32> };
 @group(0) @binding(68) var<storage,read_write> gi_prepared:array<GiPrepared>;
@@ -8,8 +9,8 @@ fn gi_pass_load(input:SurfaceInput,id:vec2<u32>,size:vec2<u32>) {
     let a=gi_prepared[at].r0;let b=gi_prepared[at].r1;let c=gi_prepared[at].r2;
     let scales=bitcast<vec2<f32>>(a.xy);
     gi_rx_valid=scales.x>=0.0;
-    gi_rx_absolute=scales.y<0.0;
-    let bounce_scale=max(scales.y,0.0);
+    gi_rx_absolute=unpack4x8snorm(c.w).w>0.5;
+    let bounce_scale=scales.y;
     gi_rx_normal=unit_normal(gi_bin_source(gi_viewed_normal(input.receiver.world,input.receiver.geometric),input.normal));
     gi_rx_sky[0u]=vec3<f32>(unpack4x8snorm(a.z).x,unpack4x8snorm(a.z).y,unpack4x8snorm(a.z).z)*scales.x;
     gi_rx_sky[1u]=vec3<f32>(unpack4x8snorm(a.z).w,unpack4x8snorm(a.w).x,unpack4x8snorm(a.w).y)*scales.x;
@@ -52,8 +53,8 @@ fn gi_rx_store_at(at:u32) {
     let q6=pack4x8snorm(vec4<f32>(gi_rx_sky[8u].x,gi_rx_sky[8u].y,gi_rx_sky[8u].z,gi_rx_bounce[0u].x)/vec4<f32>(ss,ss,ss,bs));
     let q7=pack4x8snorm(vec4<f32>(gi_rx_bounce[0u].y,gi_rx_bounce[0u].z,gi_rx_bounce[1u].x,gi_rx_bounce[1u].y)/vec4<f32>(bs,bs,bs,bs));
     let q8=pack4x8snorm(vec4<f32>(gi_rx_bounce[1u].z,gi_rx_bounce[2u].x,gi_rx_bounce[2u].y,gi_rx_bounce[2u].z)/vec4<f32>(bs,bs,bs,bs));
-    let q9=pack4x8snorm(vec4<f32>(gi_rx_bounce[3u].x,gi_rx_bounce[3u].y,gi_rx_bounce[3u].z,0.0)/vec4<f32>(bs,bs,bs,bs));
-    gi_prepared[at].r0=vec4<u32>(bitcast<vec2<u32>>(vec2<f32>(select(-1.0,sky,gi_rx_valid),select(bounce,-1.0,gi_rx_absolute))),q0,q1);
+    let q9=pack4x8snorm(vec4<f32>(gi_rx_bounce[3u].x/bs,gi_rx_bounce[3u].y/bs,gi_rx_bounce[3u].z/bs,select(0.0,1.0,gi_rx_absolute)));
+    gi_prepared[at].r0=vec4<u32>(bitcast<vec2<u32>>(vec2<f32>(select(-1.0,sky,gi_rx_valid),bounce)),q0,q1);
     gi_prepared[at].r1=vec4<u32>(q2,q3,q4,q5);
     gi_prepared[at].r2=vec4<u32>(q6,q7,q8,q9);
 }
@@ -119,12 +120,17 @@ const FG_SKY_ALPHA:f32=0.09817477042468103;
 const FG_SEARCH:i32=2;
 // A probe's plane reaches this fraction of its footprint along its normal (the Gaussian width).
 const FG_PLANE:f32=0.5;
-// The radiance SH (27 floats and a pad), the probe point (w: frames of history, 0 when
-// invalid) and normal (w: the tile footprint in metres). Probes live after the pixels'
-// records in gi_prepared, three records a probe: the tile probes, one adaptive probe per
-// FG_BLOCK block, then the tile probes' filtered copies (src/gi_receiver_pass.rs sizes it).
-struct FgProbe { sh:array<vec4<f32>,7>, point:vec4<f32>, normal:vec4<f32> };
-fn fg_at(index:u32,size:vec2<u32>)->u32 { return size.x*size.y+3u*index; }
+// The incoming radiance as the lighting cache splits it, so shading reads a probe as it reads a
+// cell (the sky's visibility for specular, es_prepare, and the bounce lobe of glossy surfaces,
+// gi_rx_bounce_radiance): floats 0-26 the sky the probe's rays missed into (L2), 27 a pad, 28-39
+// everything they met and the emitters (L1). Then the probe point (w: frames of history, 0 when
+// invalid) and normal (w: the tile footprint in metres). Probes live after the pixels' records
+// in gi_prepared, four records a probe: the tile probes, one adaptive probe per FG_BLOCK block,
+// then the tile probes' filtered copies (src/gi_receiver_pass.rs sizes it).
+const FG_SH_VECS:u32=10u;
+const FG_BOUNCE:u32=28u;
+struct FgProbe { sh:array<vec4<f32>,10>, point:vec4<f32>, normal:vec4<f32> };
+fn fg_at(index:u32,size:vec2<u32>)->u32 { return size.x*size.y+4u*index; }
 fn fg_adaptive(block:vec2<u32>,size:vec2<u32>)->u32 {
     let tiles=(size+vec2<u32>(FG_TILE-1u))/FG_TILE;
     let blocks=(size+vec2<u32>(FG_BLOCK-1u))/FG_BLOCK;
@@ -137,40 +143,45 @@ fn fg_filtered(index:u32,size:vec2<u32>)->u32 {
 }
 fn fg_load(index:u32,size:vec2<u32>)->FgProbe {
     let at=fg_at(index,size);
-    let a=gi_prepared[at];let b=gi_prepared[at+1u];let c=gi_prepared[at+2u];
-    return FgProbe(array<vec4<f32>,7>(bitcast<vec4<f32>>(a.r0),bitcast<vec4<f32>>(a.r1),bitcast<vec4<f32>>(a.r2),
-        bitcast<vec4<f32>>(b.r0),bitcast<vec4<f32>>(b.r1),bitcast<vec4<f32>>(b.r2),bitcast<vec4<f32>>(c.r0)),
-        bitcast<vec4<f32>>(c.r1),bitcast<vec4<f32>>(c.r2));
+    let a=gi_prepared[at];let b=gi_prepared[at+1u];let c=gi_prepared[at+2u];let e=gi_prepared[at+3u];
+    return FgProbe(array<vec4<f32>,10>(bitcast<vec4<f32>>(a.r0),bitcast<vec4<f32>>(a.r1),bitcast<vec4<f32>>(a.r2),
+        bitcast<vec4<f32>>(b.r0),bitcast<vec4<f32>>(b.r1),bitcast<vec4<f32>>(b.r2),bitcast<vec4<f32>>(c.r0),
+        bitcast<vec4<f32>>(c.r1),bitcast<vec4<f32>>(c.r2),bitcast<vec4<f32>>(e.r0)),
+        bitcast<vec4<f32>>(e.r1),bitcast<vec4<f32>>(e.r2));
 }
-// A probe's point and normal alone (the last two words of its third record): the plane tests
-// read these, and the 108 bytes of SH load only once a weight is known (fg_add).
+// A probe's point and normal alone (the last two words of its fourth record): the plane tests
+// read these, and the 160 bytes of SH load only once a weight is known (fg_add).
 struct FgPlane { point:vec4<f32>, normal:vec4<f32> };
 // The weighted SH sum fg_add adds to (private, not a pointer argument: naga's SPIR-V writer
 // fails on a pointer to a local struct's member).
-var<private> fg_sum:array<vec4<f32>,7>;
-fn fg_clear() { for(var v=0u;v<7u;v+=1u) {fg_sum[v]=vec4<f32>(0.0);} }
+var<private> fg_sum:array<vec4<f32>,10>;
+fn fg_clear() { for(var v=0u;v<FG_SH_VECS;v+=1u) {fg_sum[v]=vec4<f32>(0.0);} }
 fn fg_plane(index:u32,size:vec2<u32>)->FgPlane {
-    let c=gi_prepared[fg_at(index,size)+2u];
+    let c=gi_prepared[fg_at(index,size)+3u];
     return FgPlane(bitcast<vec4<f32>>(c.r1),bitcast<vec4<f32>>(c.r2));
 }
 fn fg_add(index:u32,size:vec2<u32>,w:f32) {
     let at=fg_at(index,size);
-    let a=gi_prepared[at];let b=gi_prepared[at+1u];let c=gi_prepared[at+2u].r0;
+    let a=gi_prepared[at];let b=gi_prepared[at+1u];let c=gi_prepared[at+2u];let e=gi_prepared[at+3u].r0;
     fg_sum[0]+=w*bitcast<vec4<f32>>(a.r0);fg_sum[1]+=w*bitcast<vec4<f32>>(a.r1);fg_sum[2]+=w*bitcast<vec4<f32>>(a.r2);
     fg_sum[3]+=w*bitcast<vec4<f32>>(b.r0);fg_sum[4]+=w*bitcast<vec4<f32>>(b.r1);fg_sum[5]+=w*bitcast<vec4<f32>>(b.r2);
-    fg_sum[6]+=w*bitcast<vec4<f32>>(c);
+    fg_sum[6]+=w*bitcast<vec4<f32>>(c.r0);fg_sum[7]+=w*bitcast<vec4<f32>>(c.r1);fg_sum[8]+=w*bitcast<vec4<f32>>(c.r2);
+    fg_sum[9]+=w*bitcast<vec4<f32>>(e);
 }
 fn fg_store(index:u32,size:vec2<u32>,p:FgProbe) {
     let at=fg_at(index,size);
     gi_prepared[at]=GiPrepared(bitcast<vec4<u32>>(p.sh[0]),bitcast<vec4<u32>>(p.sh[1]),bitcast<vec4<u32>>(p.sh[2]));
     gi_prepared[at+1u]=GiPrepared(bitcast<vec4<u32>>(p.sh[3]),bitcast<vec4<u32>>(p.sh[4]),bitcast<vec4<u32>>(p.sh[5]));
-    gi_prepared[at+2u]=GiPrepared(bitcast<vec4<u32>>(p.sh[6]),bitcast<vec4<u32>>(p.point),bitcast<vec4<u32>>(p.normal));
+    gi_prepared[at+2u]=GiPrepared(bitcast<vec4<u32>>(p.sh[6]),bitcast<vec4<u32>>(p.sh[7]),bitcast<vec4<u32>>(p.sh[8]));
+    gi_prepared[at+3u]=GiPrepared(bitcast<vec4<u32>>(p.sh[9]),bitcast<vec4<u32>>(p.point),bitcast<vec4<u32>>(p.normal));
 }
 fn fg_invalidate(index:u32,size:vec2<u32>) {
-    let at=fg_at(index,size)+2u;
+    let at=fg_at(index,size)+3u;
     gi_prepared[at]=GiPrepared(gi_prepared[at].r0,vec4<u32>(0u),vec4<u32>(0u));
 }
-var<workgroup> fg_lane_sh:array<array<f32,27>,32>;
+// Per lane: its ray's terms in the probe's layout (sky L2 at 0-26 for a miss, bounce L1 at
+// FG_BOUNCE for a hit).
+var<workgroup> fg_lane_sh:array<array<f32,40>,32>;
 
 fn fg_hash(x:u32)->u32 {
     var h=x*0x9e3779b1u;h^=h>>16u;h*=0x85ebca6bu;h^=h>>13u;h*=0xc2b2ae35u;h^=h>>16u;return h;
@@ -239,6 +250,7 @@ const FG_HIT_VARIANCE:f32=0.7853981633974483;
 fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f32> {
     let inverse=1.0/max(lighting.exposure,1e-30);
     let traced=rl_cast(origin,d,epsilon);
+    fg_hit=traced.record.x!=0u;
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)*inverse;}
     // Every hit reads its cache cell's outgoing radiance (emission and the cell's reflection of
     // sky, bounce and the lights its visibility ray reached), as screen probes read a surface
@@ -266,26 +278,35 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f
     rl_hit_lights_clear();
     return radiance;
 }
-// Traces lane `ray` of a probe at s and stores its SH terms in fg_lane_sh[lane] (zero when
-// the probe has no surface).
+// Whether the last fg_radiance ray met geometry (bounce) or missed into the sky.
+var<private> fg_hit:bool;
+// Traces lane `ray` of a probe at s and stores its SH terms in fg_lane_sh[lane]: a miss's as the
+// sky's L2, a hit's as the bounce's L1 (zero when the probe has no surface).
 fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     var radiance=vec3<f32>(0.0);
     var d=vec3<f32>(0.0,0.0,1.0);
+    fg_hit=false;
     if s.placement!=0u {
         d=fg_direction(s.normal,ray,FG_RAYS,r);
         radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon,pixel);
     }
     gi_sh_basis(d);
+    let sky=select(radiance,vec3<f32>(0.0),fg_hit);
+    let bounce=select(vec3<f32>(0.0),radiance,fg_hit);
+    for(var i=0u;i<40u;i+=1u) {fg_lane_sh[lane][i]=0.0;}
     for(var i=0u;i<9u;i+=1u) {
-        fg_lane_sh[lane][i*3u]=radiance.x*gi_y[i];fg_lane_sh[lane][i*3u+1u]=radiance.y*gi_y[i];fg_lane_sh[lane][i*3u+2u]=radiance.z*gi_y[i];
+        fg_lane_sh[lane][i*3u]=sky.x*gi_y[i];fg_lane_sh[lane][i*3u+1u]=sky.y*gi_y[i];fg_lane_sh[lane][i*3u+2u]=sky.z*gi_y[i];
+    }
+    for(var k=0u;k<4u;k+=1u) {
+        fg_lane_sh[lane][FG_BOUNCE+k*3u]=bounce.x*gi_y[k];fg_lane_sh[lane][FG_BOUNCE+k*3u+1u]=bounce.y*gi_y[k];fg_lane_sh[lane][FG_BOUNCE+k*3u+2u]=bounce.z*gi_y[k];
     }
 }
 // Folds the FG_RAYS lanes from `first` of fg_lane_sh into probe `index`, now at s: history
 // while the new point stays on the old probe's plane.
 fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>) {
-    var sh:array<f32,28>;
+    var sh:array<f32,40>;
     for(var l=0u;l<FG_RAYS;l+=1u) {
-        for(var i=0u;i<27u;i+=1u) {sh[i]+=fg_lane_sh[first+l][i];}
+        for(var i=0u;i<40u;i+=1u) {sh[i]+=fg_lane_sh[first+l][i];}
     }
     // Uniform hemisphere: pdf 1/(2 pi).
     let scale=6.283185307179586/f32(FG_RAYS);
@@ -297,7 +318,7 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     }
     let blend=1.0/count;
     var out:FgProbe;
-    for(var v=0u;v<7u;v+=1u) {
+    for(var v=0u;v<FG_SH_VECS;v+=1u) {
         let fresh=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u])*scale;
         out.sh[v]=select(fresh,mix(old.sh[v],fresh,blend),count>1.0);
     }
@@ -408,7 +429,7 @@ const FG_FILTER_SHORT:f32=4.0;
         }
         var out:FgProbe;
         out.point=c.point;out.normal=c.normal;
-        for(var v=0u;v<7u;v+=1u) {out.sh[v]=fg_sum[v]/total;}
+        for(var v=0u;v<FG_SH_VECS;v+=1u) {out.sh[v]=fg_sum[v]/total;}
         fg_store(fg_filtered(index,size),size,out);
     }
 }
@@ -434,10 +455,12 @@ fn fg_pick_at(index:u32,size:vec2<u32>)->u32 { return gi_prepared[fg_at(index,si
     workgroupBarrier();
     if lane!=0u {return;}
     let pick=atomicLoad(&fg_orphan);
-    let at=fg_at(fg_adaptive(group.xy,size),size)+2u;
+    let index=fg_adaptive(group.xy,size);
+    let at=fg_at(index,size)+2u;
     let c=gi_prepared[at];
     let stored=select(pick&63u,FG_NONE,pick==FG_NONE);
-    gi_prepared[at]=GiPrepared(vec4<u32>(c.r0.xyz,stored),select(c.r1,vec4<u32>(0u),pick==FG_NONE),select(c.r2,vec4<u32>(0u),pick==FG_NONE));
+    gi_prepared[at]=GiPrepared(vec4<u32>(c.r0.xyz,stored),c.r1,c.r2);
+    if pick==FG_NONE {fg_invalidate(index,size);}
 }
 var<workgroup> fg_pair:array<u32,2>;
 // Two blocks per workgroup of 32 (fg_classify picked their pixels): lanes 16 b .. 16 b + 15
@@ -526,7 +549,10 @@ var<workgroup> fg_pair:array<u32,2>;
         let a=i*3u;
         gi_rx_sky[i]=vec3<f32>(fg_sum[a/4u][a%4u],fg_sum[(a+1u)/4u][(a+1u)%4u],fg_sum[(a+2u)/4u][(a+2u)%4u])*inv;
     }
-    for(var i=0u;i<4u;i+=1u) {gi_rx_bounce[i]=vec3<f32>(0.0);}
+    for(var k=0u;k<4u;k+=1u) {
+        let a=FG_BOUNCE+k*3u;
+        gi_rx_bounce[k]=vec3<f32>(fg_sum[a/4u][a%4u],fg_sum[(a+1u)/4u][(a+1u)%4u],fg_sum[(a+2u)/4u][(a+2u)%4u])*inv;
+    }
     gi_rx_valid=true;
     gi_rx_absolute=true;
     gi_rx_normal=s.shading;
