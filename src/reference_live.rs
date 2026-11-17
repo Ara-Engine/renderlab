@@ -66,6 +66,8 @@ pub(crate) struct LiveInputs {
     pub sky: [f32; 3],
     pub environment: Option<crate::reference::Environment>,
     pub lights: Vec<crate::reference::LocalLight>,
+    /// Each light's source radius in metres (0: a point), as `lights`.
+    pub light_radii: Vec<f32>,
     pub samples: u32,
     /// Path segments (src/reference.rs Settings::max_depth: 1 sees emitters only, 2 is direct).
     pub max_depth: u32,
@@ -123,7 +125,8 @@ pub(crate) fn environment_bytes(inputs: &LiveInputs) -> Vec<u8> {
 /// empty record.
 pub(crate) fn light_bytes(inputs: &LiveInputs) -> Vec<u8> {
     let mut floats: Vec<[f32; 4]> = Vec::new();
-    for l in &inputs.lights {
+    for (k, l) in inputs.lights.iter().enumerate() {
+        let radius = inputs.light_radii.get(k).copied().unwrap_or(0.0);
         let (travel, inner, outer, kind) = match l.spot {
             Some((travel, inner, outer)) => (travel.normalize(), inner, outer, 2.0),
             None => (crate::Vec3::ZERO, 1.0, -1.0, 1.0),
@@ -131,7 +134,7 @@ pub(crate) fn light_bytes(inputs: &LiveInputs) -> Vec<u8> {
         floats.push(l.position.extend(l.range).to_array());
         floats.push([l.candela[0], l.candela[1], l.candela[2], kind]);
         floats.push(travel.extend(outer).to_array());
-        floats.push([inner, 0.0, 0.0, 0.0]);
+        floats.push([inner, radius, 0.0, 0.0]);
     }
     if floats.is_empty() {
         floats.extend([[0.0; 4]; 4]);
@@ -235,6 +238,7 @@ mod tests {
             sky: [1.0; 3],
             environment: None,
             lights: vec![],
+            light_radii: vec![],
             samples: 2,
             max_depth: 4,
             seed: 1,

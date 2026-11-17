@@ -117,20 +117,16 @@ impl Engine {
                 None => return Err(Error::InvalidInput("live reference: the procedural sky has not been written yet")),
             },
         };
-        let mut lights = Vec::new();
+        let (mut lights, mut light_radii) = (Vec::new(), Vec::new());
         for l in &self.state.lights {
             match *l {
                 Light::Point { position, candela, range, source_radius, .. } => {
                     lights.push(crate::reference::LocalLight { position, candela, range: range.unwrap_or(0.0), spot: None });
-                    if source_radius > 0.0 {
-                        not_traced.push(format!("light source radius {source_radius} m traced as a point"));
-                    }
+                    light_radii.push(source_radius);
                 }
                 Light::Spot { position, travel, candela, range, inner, outer, source_radius, .. } => {
                     lights.push(crate::reference::LocalLight { position, candela, range: range.unwrap_or(0.0), spot: Some((travel, inner.cos(), outer.cos())) });
-                    if source_radius > 0.0 {
-                        not_traced.push(format!("light source radius {source_radius} m traced as a point"));
-                    }
+                    light_radii.push(source_radius);
                 }
                 Light::Directional { .. } => not_traced.push("a directional light other than the sun".into()),
             }
@@ -148,6 +144,7 @@ impl Engine {
             sky,
             environment,
             lights,
+            light_radii,
             samples: live.samples,
             max_depth: 1024,
             seed: 0x4d37_5530,

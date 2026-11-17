@@ -40,6 +40,7 @@ struct Path { origin:vec3<f32>, pdf_prev:f32, direction:vec3<f32>, sky_pdf_prev:
 // Must match shaders/reference_live_entry.wgsl and src/reference_live.rs.
 struct RfHit { placement:u32, primitive:u32, bary:vec2<f32>, origin:vec3<f32>, flags:u32 };
 struct RfRecord { normal_alpha:vec4<f32>, base_metal:vec4<f32>, emission_rough:vec4<f32>, world_model:vec4<f32>, geometric:vec4<f32> };
+// inner: x cos(inner cone), y source radius (0: a point).
 struct LocalLight {position_range:vec4<f32>, candela_kind:vec4<f32>, travel_outer:vec4<f32>, inner:vec4<f32>};
 
 @group(0) @binding(0) var<uniform> frame:Frame;
@@ -319,16 +320,35 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
                 }
             }
         }
-        // Next-event estimation: local lights, each a point with the engine's attenuation.
+        // Next-event estimation: local lights with the engine's attenuation. A light with a source
+        // radius r is a sphere of uniform radiance I / (pi r^2) (I its candela), sampled uniformly
+        // over the cone it subtends: its weight, the cone's solid angle over pi r^2, tends to the
+        // point light's 1 / d^2 far away. Range window and spot cone are the engine's, at the centre.
         for (var k=0u; k<frame.size.w; k+=1u) {
             let light=local_lights[k];
             let delta=light.position_range.xyz-p;
             let distance=length(delta);
-            let wi=delta/max(distance,1e-30);
+            let radius=light.inner.y;
+            var wi=delta/max(distance,1e-30);
+            var reach=distance*0.999;
+            var attenuation=0.0;
+            if radius>0.0 && distance>radius*1.0001 {
+                let sin_max=radius/distance;
+                let cos_max=sqrt(max(1.0-sin_max*sin_max,0.0));
+                let z=1.0-rand()*(1.0-cos_max);
+                let phi=2.0*PI*rand();
+                let s=sqrt(max(1.0-z*z,0.0));
+                wi=basis(wi)*vec3<f32>(s*cos(phi),s*sin(phi),z);
+                // The sampled ray meets the sphere at the near root of |p + t wi - c| = r.
+                let b=dot(wi,delta);
+                reach=(b-sqrt(max(b*b-(distance*distance-radius*radius),0.0)))*0.999;
+                attenuation=2.0*PI*(1.0-cos_max)/(PI*radius*radius);
+            } else {
+                let inverse=1.0/max(distance,0.01);
+                attenuation=inverse*inverse;
+            }
             let cos_l=dot(n,wi);
             if cos_l<=0.0 || dot(ng,wi)<=0.0 {continue;}
-            let inverse=1.0/max(distance,0.01);
-            var attenuation=inverse*inverse;
             if light.position_range.w>0.0 {
                 let ratio=min(distance/light.position_range.w,1.0);
                 let window=max(1.0-ratio*ratio*ratio*ratio,0.0);
@@ -338,7 +358,7 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
                 let cone=clamp((dot(-wi,light.travel_outer.xyz)-light.travel_outer.w)/max(light.inner.x-light.travel_outer.w,1e-4),0.0,1.0);
                 attenuation*=cone*cone;
             }
-            if attenuation<=0.0 || occluded_within(start,wi,distance*0.999) {continue;}
+            if attenuation<=0.0 || occluded_within(start,wi,reach) {continue;}
             path.total+=path.throughput*bsdf(l,n,v,wi)*cos_l*light.candela_kind.rgb*attenuation;
         }
         // Next-event estimation: sky (the environment's importance sampling, or cosine-weighted
