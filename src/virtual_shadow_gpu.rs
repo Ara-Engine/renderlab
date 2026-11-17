@@ -720,6 +720,11 @@ const DISK_CONSTANTS: &str = "VD_";
 /// The disk lookup's window radius in texels per level (WGSL `VD_R`): a level serves the
 /// occluder heights whose reach is half to all of this many of its texels.
 const DISK_RADIUS: u32 = 3;
+/// Measurement: `RENDERLAB_VD_R=n` replaces DISK_RADIUS, so each band's texel is 1/n to 1/(2n)
+/// of the penumbra it resolves (the band-density test for stepped soft edges).
+fn disk_radius() -> u32 {
+    std::env::var("RENDERLAB_VD_R").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(DISK_RADIUS)
+}
 /// WGSL `VdFrame` up to its constant tail: this and the previous frame's world-to-clip
 /// matrices, `reuse`, the moving casters' zone, the image size.
 const DISK_HEAD_BYTES: u64 = 64 + 64 + 16 + 48 + 16;
@@ -941,8 +946,9 @@ pub(super) fn disk_source() -> String {
         .map(|path| std::fs::read_to_string(path).unwrap());
     // The outline refinement reads the draws' triangles (group 1, as the exact lookup).
     let mut source = format!(
-        "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\nconst VD_R:u32={DISK_RADIUS}u;\n{}",
+        "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\nconst VD_R:u32={}u;\n{}",
         crate::TRACED_DRAWS,
+        disk_radius(),
         variant
             .as_deref()
             .unwrap_or(include_str!("../shaders/virtual_shadow_disk.wgsl"))
