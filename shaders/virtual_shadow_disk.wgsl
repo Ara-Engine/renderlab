@@ -114,9 +114,16 @@ fn vsm_index(cell:vec2<i32>,level:u32)->u32 {
     if !vsm_sparse() {return vsm_word(cell,level);}
     let c=vec2<u32>(cell);
     let slot=vd_slot(level,c/VSM_PAGE);
-    if slot==VSM_NONE {return VSM_NONE;}
+    if slot==VSM_NONE {
+        // Measurement: texel reads that found their page missing (`RENDERLAB_VD_EDGE_LOG` word 2).
+        if VD_COUNTS {atomicAdd(&vd_edge_count[2],1u);}
+        return VSM_NONE;
+    }
     return slot*VSM_PAGE*VSM_PAGE+(c.y%VSM_PAGE)*VSM_PAGE+c.x%VSM_PAGE;
 }
+// Measurement (`RENDERLAB_VD=VD_COUNTS=true` with `RENDERLAB_VD_EDGE_LOG`): capped receivers,
+// missing-page reads and stand-ins per frame.
+override VD_COUNTS:bool=false;
 // The normalized top height of mip `mip` (1..7) over the cell holding texel `cell`; a missing
 // page is the highest (conservative).
 // The physical page of window-relative `page` of `level`: from vd_cache_pages' 2x2 when it
@@ -460,6 +467,14 @@ fn vd_prepare(id:vec2<u32>) {
         }
         vd_px.stand_in=l!=vd_px.level;
         vd_px.level=l;
+    }
+    // Measurement: receivers whose level is coarser than their footprint asks for (the window
+    // or a missing page capped it), and stand-ins (`RENDERLAB_VD_EDGE_LOG` words 1 and 3).
+    if VD_COUNTS && vd_px.level!=VSM_NONE {
+        let footprint=length(world.xyz-vsm.eye.xyz)*vsm.eye.w;
+        let want=vd_first(floor(log2(max(footprint,1e-9)/vsm.params.y)-vsm.params.w));
+        if vd_px.level>want {atomicAdd(&vd_edge_count[1],1u);}
+        if vd_px.stand_in {atomicAdd(&vd_edge_count[3],1u);}
     }
     vd_px.normal=vec3<f32>(dot(n,vsm.u.xyz),dot(n,vsm.v.xyz),dot(n,vsm.l.xyz));
     // The current sun in the map's basis: the map keeps its basis through small sun turns.

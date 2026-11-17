@@ -2418,13 +2418,29 @@ impl Renderer {
         // Measurement: the Disk lookup's edge pixels, a line a frame.
         if let Some(path) = edge_log() {
             for ((), words) in state.edge_counts.get_mut().unwrap().collect() {
-                let count = u32::from_ne_bytes(words[..4].try_into().unwrap());
+                // Edge pixels; with VD_COUNTS capped receivers, missing-page reads and
+                // stand-ins; then the pool's requested, rendered, failed, free and total pages
+                // (the newest pool readback, a frame or two older).
+                let word = |i: usize| u32::from_ne_bytes(words[4 * i..4 * i + 4].try_into().unwrap());
+                let p = &state.stats;
+                let line = format!(
+                    "{} {} {} {} pool {} {} {} {} {}",
+                    word(0),
+                    word(1),
+                    word(2),
+                    word(3),
+                    p.requested_pages,
+                    p.rendered_pages,
+                    p.failed_pages,
+                    p.free_pages,
+                    p.pool_pages
+                );
                 use std::io::Write;
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(path)
-                    .and_then(|mut f| writeln!(f, "{count}"));
+                    .and_then(|mut f| writeln!(f, "{line}"));
             }
         }
         // The newest mark-pass counters mapped since the last frame (the ladder's finest level
