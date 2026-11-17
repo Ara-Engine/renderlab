@@ -353,6 +353,7 @@ pub(crate) fn ablated(mut s: Settings) -> Settings {
                 s.volumetric_fog = None;
             }
             "tr1" => s.temporal_reconstruction = false,
+            // `sun`, `sky` and `lights` are applied with the lighting (Engine::apply_lighting).
             _ => {}
         }
     }
