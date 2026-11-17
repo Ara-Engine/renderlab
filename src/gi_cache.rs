@@ -897,6 +897,11 @@ pub struct IndirectCounters {
     /// Gather rays without a value, by cause: no cell at the hit's level (requested), a
     /// cell not shaded yet, and an orphan whose coarser levels had no value either.
     pub gather_absent: u32,
+    /// Accumulation (shaders/gi_accumulate.wgsl): cell updates, their rays, and the updates whose
+    /// disagreement test pulled the history.
+    pub acc_updates: u32,
+    pub acc_rays: u32,
+    pub acc_pulls: u32,
     pub gather_unshaded: u32,
     pub gather_orphans: u32,
     /// Queued cells a capped gather frame left for the next (`IndirectSettings::gather_cells`).
@@ -1000,7 +1005,8 @@ struct Pipelines {
     gather: Owned<wgpu::ComputePipeline>,
     fill_count: Owned<wgpu::ComputePipeline>,
     fill_select: Owned<wgpu::ComputePipeline>,
-    acc_select: Owned<wgpu::ComputePipeline>,
+    /// Cells without history, visible cells due, the rest: one pass each, in that order.
+    acc_select: [Owned<wgpu::ComputePipeline>; 3],
     accumulate: Owned<wgpu::ComputePipeline>,
     gather_count: Owned<wgpu::ComputePipeline>,
     gather_select: Owned<wgpu::ComputePipeline>,
@@ -1427,6 +1433,9 @@ impl Planner {
             header[43] = accumulate_word("RENDERLAB_GI_ACC_OTHER", 64);
             header[44] = accumulate_word("RENDERLAB_GI_ACC_RAYS", 16);
             header[45] = accumulate_word("RENDERLAB_GI_ACC_HISTORY", 32);
+            // The frame's rays (0: no cap), taken by cells without history, then visible cells
+            // due, then the rest (gi_acc_select's three classes).
+            header[46] = accumulate_word("RENDERLAB_GI_ACC_BUDGET", 0);
         }
         // A cut's first frames read cells one level coarser (COARSE_CUT_FRAMES), unless claims
         // are uncapped.
@@ -3058,6 +3067,9 @@ impl Renderer {
             light_rays: w[37],
             bounce_queued: w[38],
             gather_absent: w[39],
+            acc_updates: w[210],
+            acc_rays: w[211],
+            acc_pulls: w[212],
             gather_unshaded: w[40],
             gather_orphans: w[41],
             gather_deferred: w[42],
@@ -3498,7 +3510,7 @@ impl Renderer {
             }),
             fill_count: kernel("gi_fill_count"),
             fill_select: kernel("gi_fill_select"),
-            acc_select: kernel("gi_acc_select"),
+            acc_select: [kernel("gi_acc_select_fresh"), kernel("gi_acc_select_visible"), kernel("gi_acc_select_other")],
             accumulate: kernel("gi_accumulate"),
             gather_count: kernel("gi_gather_count"),
             gather_select: kernel("gi_gather_select"),
@@ -4420,7 +4432,9 @@ impl GiState {
         // Accumulation: this frame's updates in place of the gathers (no gather events).
         let accumulate = accumulate_on();
         if accumulate && plan.bounce {
-            main_pass(encoder, "indirect accumulate select", &p.acc_select, u32::MAX, Some([CELL_GROUPS, 1]));
+            for class in &p.acc_select {
+                main_pass(encoder, "indirect accumulate select", class, u32::MAX, Some([CELL_GROUPS, 1]));
+            }
             main_pass(encoder, "indirect accumulate", &p.accumulate, b, Some([GATHER_GROUPS, 1]));
         }
         if (plan.bounce || profiling) && !accumulate {

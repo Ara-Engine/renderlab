@@ -24,11 +24,16 @@ const GI_W_ACC_RAYS:u32=211u;
 const GI_W_ACC_PULLS:u32=212u;
 const GI_ACC_LUMA:vec3<f32>=vec3<f32>(0.2126,0.7152,0.0722);
 
-@compute @workgroup_size(64) fn gi_acc_select(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+// One class of this frame's updates (0: cells without history, 1: visible cells due, 2: the rest
+// due), appended while the frame's rays (GI_H_ACC_BUDGET, 0: no cap) last. The classes run as three
+// passes in that order, so a cell without history is never left for a cell that has one.
+fn gi_acc_select(kind:u32, id:vec3<u32>, groups:vec3<u32>) {
     let slots=gi_frame.offsets.x;
     let frame=gi_word(GI_H_FRAME);
     let pv=max(gi_word(GI_H_ACC_VISIBLE),1u);
     let po=max(gi_word(GI_H_ACC_OTHER),1u);
+    let budget=gi_word(GI_H_ACC_BUDGET);
+    let k=min(max(gi_word(GI_H_ACC_RAYS),1u),64u);
     for(var slot=id.x;slot<slots;slot+=groups.x*64u) {
         let hot=gi_hot(slot);
         if (gi_table[hot]&GI_VALID)==0u { continue; }
@@ -37,12 +42,24 @@ const GI_ACC_LUMA:vec3<f32>=vec3<f32>(0.2126,0.7152,0.0722);
         let fresh=gi_table[hot+GI_HOT_ACC_COUNT]==0u;
         let visible=gi_table[cold+GI_C_SEEN]+1u>=frame;
         let phase=gi_mix(slot)+frame;
-        if fresh || (visible && phase%pv==0u) || (!visible && phase%po==0u) {
-            let at=atomicAdd(&gi_work[GI_W_INTEGRATES],1u);
-            if at<slots { atomicStore(&gi_work[gi_frame.offsets.w+at],slot); }
+        var take=false;
+        if kind==0u { take=fresh; }
+        if kind==1u { take=!fresh && visible && phase%pv==0u; }
+        if kind==2u { take=!fresh && !visible && phase%po==0u; }
+        if !take { continue; }
+        let rays=select(k,64u,fresh);
+        if budget!=0u {
+            // GI_W_ACC_RAYS counts the selected rays here; gi_accumulate adds nothing to it.
+            let before=atomicAdd(&gi_work[GI_W_ACC_RAYS],rays);
+            if before>=budget { continue; }
         }
+        let at=atomicAdd(&gi_work[GI_W_INTEGRATES],1u);
+        if at<slots { atomicStore(&gi_work[gi_frame.offsets.w+at],slot); }
     }
 }
+@compute @workgroup_size(64) fn gi_acc_select_fresh(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) { gi_acc_select(0u,id,groups); }
+@compute @workgroup_size(64) fn gi_acc_select_visible(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) { gi_acc_select(1u,id,groups); }
+@compute @workgroup_size(64) fn gi_acc_select_other(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) { gi_acc_select(2u,id,groups); }
 
 var<workgroup> gi_wg_acc:array<f32,27u*64u>;
 var<workgroup> gi_wg_acc_count:u32;
@@ -142,7 +159,7 @@ var<workgroup> gi_wg_acc_count:u32;
             gi_table[hot+GI_HOT_ACC_COUNT]=n;
             gi_queue_shade(slot);
             atomicAdd(&gi_work[GI_W_ACC_UPDATES],1u);
-            atomicAdd(&gi_work[GI_W_ACC_RAYS],rays);
+            if gi_word(GI_H_ACC_BUDGET)==0u { atomicAdd(&gi_work[GI_W_ACC_RAYS],rays); }
         }
         workgroupBarrier();
     }
