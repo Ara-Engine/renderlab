@@ -353,6 +353,21 @@ override VSM_SW_EXTENT:f32=32.0;
 override VSM_PEEL_PASS:bool=false;
 // The peel gap in texels of the level (misc.w bit 10): virtual_shadow_disk.wgsl VD_THICK.
 const VSM_PEEL_GAP:f32=4.0;
+// The hardware raster covers thin triangles conservatively (vs_vsm_cluster); false: centre
+// sampling only (measurement, `RENDERLAB_VSM_HW_THIN=0`).
+override VSM_HW_THIN:bool=true;
+// Measurement (`RENDERLAB_VSM_CENSUS=<file>`): per level, one bit per placement the cull sent
+// to the raster (first half) and one per placement that covered a texel of a rasterized page
+// (second half), so casters lost before the map show as the difference; the third half's level
+// 0 holds the placements flagged as casting no shadow.
+override VSM_CENSUS:bool=false;
+const VSM_CENSUS_PLACEMENTS:u32=131072u;
+@group(0) @binding(64) var<storage,read_write> vsm_census:array<atomic<u32>>;
+fn vsm_census_mark(half:u32,level:u32,placement:u32) {
+    if !VSM_CENSUS || placement>=VSM_CENSUS_PLACEMENTS {return;}
+    let bit=(half*VSM_MAX_LEVELS+level)*VSM_CENSUS_PLACEMENTS+placement;
+    atomicOr(&vsm_census[bit>>5u],1u<<(bit&31u));
+}
 
 // World-space simplification error of group g under placement's conservative affine
 // scale (visibility_buffer_cull.wgsl's group_error without the projection).
@@ -370,7 +385,7 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
     if index>=vsm.counts.z {return;}
     let c=vsm_clusters[index];
     // A placement that casts no shadow (pad0, src/visibility_buffer.rs) is never rasterized.
-    if c.pad0!=0u {return;}
+    if c.pad0!=0u {vsm_census_mark(2u,0u,c.placement);return;}
     let m=models[c.placement];
     var lo=vec2<f32>(3.4e38);var hi=vec2<f32>(-3.4e38);
     for(var i=0u;i<8u;i+=1u) {
@@ -417,6 +432,7 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
             let slot=atomicAdd(&vsm_work.args[level].sw_count,1u);
             vsm_work.lists[2u*level*n+slot]=index;
         }
+        vsm_census_mark(0u,level,c.placement);
     }
 }
 @compute @workgroup_size(8) fn vsm_finish(@builtin(local_invocation_index) level:u32) {
@@ -424,7 +440,7 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
     vsm_work.args[level].sw_x=min(n,65535u);
     vsm_work.args[level].sw_y=select(0u,(n+65534u)/65535u,n!=0u);
     vsm_work.args[level].sw_z=1u;
-    vsm_work.args[level].hw_vertices=384u;
+    vsm_work.args[level].hw_vertices=768u;
     vsm_work.args[level].hw_first=0u;
     vsm_work.args[level].hw_first_instance=0u;
 }
@@ -467,6 +483,7 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     let page=t/VSM_PAGE;
     let v=vsm_vpage(level,page);
     if vsm_render[v]==0u {return;}
+    vsm_census_mark(1u,level,(id>>vsm.misc.x)-1u);
     let side=pages*VSM_PAGE;
     var i=(level*side+t.y)*side+t.x;
     if vsm_sparse() {
@@ -509,7 +526,11 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
 // Software raster: the cluster's vertices are transformed once into workgroup memory, then
 // one invocation per triangle samples the texel centres it covers. Vertices snap to 8
 // subpixel bits with exact integer edge functions; edges are inclusive (the max makes double
-// coverage harmless) and both windings are kept.
+// coverage harmless) and both windings are kept. A triangle narrower than a texel (its least
+// altitude) may cover no texel centre and its caster would fall between texels (a mast's
+// strut, a wire): it covers every texel its footprint touches instead (conservative: each edge
+// function moved out by half a texel square), at heights clamped to its own range
+// (docs/design-sun-shadows.md, thin casters). Wider triangles keep exact centre sampling.
 @compute @workgroup_size(128) fn vsm_raster(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     let level=vsm_pass.level;
     let slot=group.x+group.y*65535u;
@@ -530,9 +551,16 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
     if area<0 {let p=b;b=d;d=p;let z=s1;s1=s2;s2=z;}
     let inverse=1.0/f32(abs(area));
     let side=i32(vsm.counts.y*VSM_PAGE);
+    // Thin: twice the area over the longest edge, in subpixels, under one texel (256).
+    let longest=max(max(length(vec2<f32>(b-a)),length(vec2<f32>(d-b))),length(vec2<f32>(a-d)));
+    let thin=f32(abs(area))<256.0*longest;
+    // Half a texel square's reach along each edge's normal, in edge-function units.
+    let pad=select(vec3<i32>(0),128*vec3<i32>(abs(d.x-b.x)+abs(d.y-b.y),abs(a.x-d.x)+abs(a.y-d.y),abs(b.x-a.x)+abs(b.y-a.y)),thin);
+    let zlo=min(min(s0.z,s1.z),s2.z);let zhi=max(max(s0.z,s1.z),s2.z);
     // Texel centres are at 256x+128 subpixels.
-    let lo=max(min(a,min(b,d)),vec2<i32>(0));
-    let hi=min(max(a,max(b,d)),vec2<i32>(side*256-1));
+    let grow=select(0,128,thin);
+    let lo=max(min(a,min(b,d))-vec2<i32>(grow),vec2<i32>(0));
+    let hi=min(max(a,max(b,d))+vec2<i32>(grow),vec2<i32>(side*256-1));
     let first=(lo-vec2<i32>(128)+vec2<i32>(255))>>vec2<u32>(8u);
     let last=(hi-vec2<i32>(128))>>vec2<u32>(8u);
     let id=vsm_cluster_id(c,batch,li);
@@ -540,15 +568,25 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
         for(var x=first.x;x<=last.x;x+=1) {
             let p=vec2<i32>(x*256+128,y*256+128);
             let w0=vsm_edge(b,d,p);let w1=vsm_edge(d,a,p);let w2=vsm_edge(a,b,p);
-            if (w0|w1|w2)<0 {continue;}
-            let z=(f32(w0)*s0.z+f32(w1)*s1.z+f32(w2)*s2.z)*inverse;
+            if ((w0+pad.x)|(w1+pad.y)|(w2+pad.z))<0 {continue;}
+            let z=clamp((f32(w0)*s0.z+f32(w1)*s1.z+f32(w2)*s2.z)*inverse,zlo,zhi);
             vsm_write(level,vec2<u32>(u32(x),u32(y)),z,id);
         }
     }
 }
-// Hardware raster of large clusters: one instance per cluster, 128 triangle slots; unused
-// slots collapse to a point. The attachment only sizes the raster area.
-struct VsmHw {@builtin(position) position:vec4<f32>,@location(0) @interpolate(flat) id:u32,@location(1) height:f32};
+// Hardware raster of large clusters: one instance per cluster, 128 triangle slots of six
+// vertices (two triangles); unused slots collapse to a point. A triangle wider than a texel
+// draws itself (the second triangle collapses). One narrower than a texel would cover no texel
+// centre (a mast's strut, a rail seen edge-on), so it draws, as the software raster covers it,
+// every texel its footprint touches: the rectangle along its longest edge grown by half a
+// texel square, at heights from its plane clamped to its own range. The attachment only sizes
+// the raster area.
+struct VsmHw {
+    @builtin(position) position:vec4<f32>,@location(0) @interpolate(flat) id:u32,
+    // The triangle's plane in window texels (height at `at`, gradient) and its height range.
+    @location(1) @interpolate(flat) at:vec2<f32>,@location(2) @interpolate(flat) plane:vec3<f32>,
+    @location(3) @interpolate(flat) range:vec2<f32>,
+};
 @vertex fn vs_vsm_cluster(@builtin(vertex_index) vertex:u32,@builtin(instance_index) instance:u32)->VsmHw {
     let level=vsm_pass.level;
     // vsm_pass.pad0: this draw's raster area (tile) of the window; the cull marks the areas
@@ -558,23 +596,55 @@ struct VsmHw {@builtin(position) position:vec4<f32>,@location(0) @interpolate(fl
     var out:VsmHw;
     out.position=vec4<f32>(0.0,0.0,0.0,1.0);
     if ((entry>>28u)&(1u<<tile))==0u {return out;}
-    let c=vsm_clusters[entry&0x0fffffffu];let local=vertex/3u;
-    if local<(c.counts&255u) {
-        let batch=primary_placements[c.placement]&0x1fffffffu;
-        let t=vsm_cluster_data[batch].data[c.triangles+local];
-        let s=vsm_cluster_vertex(c,batch,(t>>(8u*(vertex%3u)))&255u,level);
-        let area=f32(vsm_area());
-        let o=vec2<f32>(vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles()))*area;
-        out.position=vec4<f32>((s.x-o.x)/area*2.0-1.0,1.0-(s.y-o.y)/area*2.0,0.5,1.0);
-        out.height=s.z;
-        out.id=vsm_cluster_id(c,batch,local);
+    let c=vsm_clusters[entry&0x0fffffffu];let local=vertex/6u;let k=vertex%6u;
+    if local>=(c.counts&255u) {return out;}
+    let batch=primary_placements[c.placement]&0x1fffffffu;
+    let t=vsm_cluster_data[batch].data[c.triangles+local];
+    let s0=vsm_cluster_vertex(c,batch,t&255u,level);
+    let s1=vsm_cluster_vertex(c,batch,(t>>8u)&255u,level);
+    let s2=vsm_cluster_vertex(c,batch,(t>>16u)&255u,level);
+    let e1=s1.xy-s0.xy;let e2=s2.xy-s0.xy;
+    let area=e1.x*e2.y-e1.y*e2.x;
+    let l01=length(e1);let l12=length(s2.xy-s1.xy);let l20=length(e2);
+    let longest=max(max(l01,l12),l20);
+    if longest<=0.0 {return out;}
+    let thin=VSM_HW_THIN && abs(area)<longest;
+    var q:vec2<f32>;
+    if !thin {
+        if k>=3u {return out;}
+        q=select(select(s2.xy,s1.xy,k==1u),s0.xy,k==0u);
+    } else {
+        // The longest edge a-b and the opposite vertex d (its projection lies within a-b).
+        var a=s0.xy;var b=s1.xy;var d=s2.xy;
+        if l12>=l01 && l12>=l20 {a=s1.xy;b=s2.xy;d=s0.xy;} else if l20>=l01 {a=s2.xy;b=s0.xy;d=s1.xy;}
+        let e=(b-a)/longest;let n=vec2<f32>(-e.y,e.x);
+        let h=dot(d-a,n);
+        // Half a texel square's reach along e and n.
+        let re=0.5*(abs(e.x)+abs(e.y));let rn=0.5*(abs(n.x)+abs(n.y));
+        // Corners (0,0) (1,0) (1,1) and (0,0) (1,1) (0,1).
+        let far=k==1u || k==2u || k==4u;let high=k==2u || k==4u || k==5u;
+        let along=select(-re,longest+re,far);
+        let across=select(min(h,0.0)-rn,max(h,0.0)+rn,high);
+        q=a+e*along+n*across;
     }
+    let size=f32(vsm_area());
+    let o=vec2<f32>(vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles()))*size;
+    out.position=vec4<f32>((q.x-o.x)/size*2.0-1.0,1.0-(q.y-o.y)/size*2.0,0.5,1.0);
+    // The plane through the three vertices: z = s0.z + gradient . (x - s0.xy).
+    let dz1=s1.z-s0.z;let dz2=s2.z-s0.z;
+    let gradient=select(vec2<f32>(0.0),vec2<f32>(dz1*e2.y-dz2*e1.y,dz2*e1.x-dz1*e2.x)/area,area!=0.0);
+    out.at=s0.xy;
+    out.plane=vec3<f32>(s0.z,gradient);
+    out.range=vec2<f32>(min(min(s0.z,s1.z),s2.z),max(max(s0.z,s1.z),s2.z));
+    out.id=vsm_cluster_id(c,batch,local);
     return out;
 }
 @fragment fn fs_vsm_cluster(input:VsmHw) {
     let tile=vsm_pass.pad0;
     let o=vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles())*vsm_area();
-    vsm_write(vsm_pass.level,vec2<u32>(input.position.xy)+o,input.height,input.id);
+    let x=vec2<u32>(input.position.xy)+o;
+    let z=clamp(input.plane.x+dot(input.plane.yz,vec2<f32>(x)+vec2<f32>(0.5)-input.at),input.range.x,input.range.y);
+    vsm_write(vsm_pass.level,x,z,input.id);
 }
 
 // ---- Lookup: exact 1-ring, then the map march beyond `near` ----
