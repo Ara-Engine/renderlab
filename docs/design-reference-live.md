@@ -9,7 +9,7 @@ parameters. It cannot judge most of Outpost:
   edits the standard surface in nearly every material. The tracer shows the terrain's raw atlas.
   `gicut`'s first rule, which masked out non-standard programs, masked almost everything.
 - **See-through surfaces** are left out of the dump (Outpost: 120 instances in every view, the puddles among them).
-- **Fog** and aerial perspective are not traced.
+- **Fog** and aerial perspective are not traced (the live reference traces the fog: see Fog below).
 - **Local lights** are traced as points, without their radius.
 
 The dump is also about 1.4 GB a view on Outpost.
@@ -62,6 +62,38 @@ Shadow rays use the same TLAS, with the engine's caster mask.
 
 Each step re-traces the affected views at 16384 samples, reruns the judging baseline and updates
 `main-thread/ref/README.md`.
+
+## Fog (step 4)
+
+The renderer's fog settings (`Atmosphere::height_fog`, `volumetric_fog`) are traced as one physical
+medium on every ray: camera, bounce and shadow rays alike.
+
+- **Medium.**
+  - The height fog's extinction, `density * exp(-falloff * (y - base_height))`, everywhere.
+  - Plus the volumetric fog's `extra_density` inside a sphere of its range about the eye. The engine's
+    froxels hold height fog plus that extra over the first `distance` metres of every camera ray.
+  - Extinction is grey. The albedo tints what scatters, and the phase is Henyey-Greenstein with the
+    fog's anisotropy.
+  - Rays that leave the scene meet fog out to the planet's ground or 100 km, as the engine's backdrop
+    fog does. The sky cube holds no fog.
+- **Sampling.**
+  - Free flights are exact, with no majorant: each part's optical depth is inverted in closed form,
+    and the nearer of the two distances is the flight of their sum.
+  - A flight shorter than the segment scatters in `rf_trace`: next-event estimation for the sun,
+    local lights and sky, then a phase sample, with the power heuristic between them as at surfaces.
+  - Shadow rays from surfaces and from the fog take the medium's closed-form transmittance.
+- **Where the reference differs from the engine's model.**
+  - The engine lights its fog with the unshadowed sun plus the sky's mean radiance (height fog) or
+    the shadowed sun (froxels), as single scattering on camera rays only.
+  - The reference scatters any number of times, on every ray. Its sunlight and lamp light also
+    lose what the fog takes on the way to a surface; the engine's surfaces get the sun undimmed by fog.
+  - These are physical effects the engine leaves out, so the judge should see them as engine gaps.
+- **Not traced.**
+  - Aerial perspective: the air's scattering between surfaces is about 1% blue extinction at 300 m.
+    The sky cube already holds the air beyond the scene.
+  - The height fog's start distance, recorded in `not_traced` when it is set.
+
+`reference.json` records the traced medium under `fog`.
 
 ## What it closes off
 

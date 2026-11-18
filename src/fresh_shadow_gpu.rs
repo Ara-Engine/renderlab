@@ -389,7 +389,9 @@ impl FreshState {
 impl Renderer {
     pub(super) fn ensure_fresh_targets(&mut self, size: wgpu::Extent3d) {
         // Traced frames write the same receivers from compute.
+        // COPY_SRC: the sun-visibility dump (virtual_shadow_gpu.rs `RENDERLAB_VD_DUMP`).
         let receiver_usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::COPY_SRC
             | if self.view.primary.is_some() {
                 wgpu::TextureUsages::STORAGE_BINDING
             } else {
@@ -452,7 +454,7 @@ impl Renderer {
             let visibility = target(
                 "fresh visible ray counts",
                 wgpu::TextureFormat::R32Uint,
-                wgpu::TextureUsages::STORAGE_BINDING,
+                wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::COPY_SRC,
             );
             let shade = ledger.own(
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
