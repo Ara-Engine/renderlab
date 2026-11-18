@@ -45,9 +45,29 @@ live reference with the sun on, and match it within a few codes with the sun off
      the ray-hardware sun shadow. The software traversal gets the same rule through the
      instance flag.
 
+## Coverage: two forms, one function (decided 18 Nov)
+
+`transmitted_*` takes which coverage the caller wants:
+
+- **Rays that carry diffuse light** pass `1 - opacity * base_color.a * mean texture alpha`. These are
+  the cache's update and visibility rays, the final gather's probe rays, and a cell's sun visibility.
+  The mean is unbiased over the surface, and it needs no texture fetch in the traversal.
+- **Rays whose answer is seen directly** pass `1 - coverage at the hit`, the texture's alpha at the
+  hit's coordinates, as the live reference does. These are ray-hardware sun shadows on pixels,
+  reflection rays and the camera's see-through pass. A fence's shadow has to show its wires.
+- The reference keeps the exact form.
+
+Glass (`ior > 1`) also passes its Fresnel transmission tinted by its base colour, in both forms.
+
+**Where the mean alpha comes from.** Base textures are uploaded as texels, as block-compressed
+levels or streamed, so the CPU cannot read them in general. Each base texture's smallest level is
+therefore sampled once on the GPU when the texture is uploaded and read back asynchronously.
+`TextureInner` keeps the result. Until it arrives (a frame or two), coverage uses the material
+factors alone.
+
 ## Decisions to make in step 2
 
-- **Coverage from texture alpha.** A chain-link fence is mostly holes. Material factors alone
+- **Coverage from texture alpha (decided above).** A chain-link fence is mostly holes. Material factors alone
   (`opacity * base alpha`) would make it block fully. The options are:
   - (a) carry the base-colour texture into the see-through table and sample its alpha at the
     hit, which needs a texture binding in every consumer's group, and group 3 is at its
