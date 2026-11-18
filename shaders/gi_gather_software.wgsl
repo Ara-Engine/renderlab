@@ -105,6 +105,7 @@ var<workgroup> gi_drain_base:u32;
                 if k%stride!=0u || (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
                 let d=gi_direction(frame,c.key,k);
                 let h=gi_closest(origin,d,0.0,1e20);
+                let through=gi_hit_transmission;
                 rays+=1u;
                 // A hit in a local light's near region is the aimed rays' (gi_near_gather).
                 if !h.hit || gi_near_owner(origin,n,origin+d*h.t)!=0xffffffffu { continue; }
@@ -115,7 +116,7 @@ var<workgroup> gi_drain_base:u32;
                 if o.w<=GI_HIT_NONE { continue; }
                 valued+=1u;
                 gi_sh_basis(d);
-                let radiance=o.rgb*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
+                let radiance=o.rgb*through*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
                 for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=radiance*gi_y[i]; }
             }
             for(var i=0u;i<4u;i+=1u) { gi_gather_fixed[i]=gi_gather_sh[i]; }

@@ -638,8 +638,10 @@ fn every_shadow_ray_query_culls_with_the_shadow_mask() {
                     "{file}: a shadow ray must cull with the shadow mask: {call}"
                 );
             } else {
-                assert_eq!(
-                    mask, "VISIBLE_MASK",
+                // A ray that passes see-through placements by their transmission adds their bit
+                // (shaders/gi_rays_hardware.wgsl gi_closest; docs/design-see-through-occlusion.md).
+                assert!(
+                    mask == "VISIBLE_MASK" || mask == "VISIBLE_MASK|SEE_THROUGH_MASK",
                     "{file}: camera, reflection and bounce rays cull with the visible mask: {call}"
                 );
             }
@@ -653,7 +655,7 @@ fn every_shadow_ray_query_culls_with_the_shadow_mask() {
     // Modules without scene.wgsl take the declaration after their directives.
     assert_eq!(
         crate::shadows::with_shadow_caster_mask("enable wgpu_ray_query;\nfn f() {}\n"),
-        "enable wgpu_ray_query;\nconst SHADOW_CASTER_MASK:u32=1u;\nconst VISIBLE_MASK:u32=2u;\nfn f() {}\n"
+        "enable wgpu_ray_query;\nconst SHADOW_CASTER_MASK:u32=1u;\nconst VISIBLE_MASK:u32=2u;\nconst SEE_THROUGH_MASK:u32=4u;\nfn f() {}\n"
     );
     // One value: scene.wgsl's declaration is the CPU constant's.
     let scene = std::fs::read_to_string(root.join("shaders/scene.wgsl")).unwrap();
@@ -661,9 +663,10 @@ fn every_shadow_ray_query_culls_with_the_shadow_mask() {
     assert_eq!(
         crate::shadows::SHADOW_CASTER_MASK_WGSL,
         format!(
-            "const SHADOW_CASTER_MASK:u32={}u;\nconst VISIBLE_MASK:u32={}u;\n",
+            "const SHADOW_CASTER_MASK:u32={}u;\nconst VISIBLE_MASK:u32={}u;\nconst SEE_THROUGH_MASK:u32={}u;\n",
             crate::shadows::SHADOW_CASTER_MASK,
-            crate::shadows::VISIBLE_MASK
+            crate::shadows::VISIBLE_MASK,
+            crate::shadows::SEE_THROUGH_MASK
         )
     );
 }
