@@ -2119,8 +2119,8 @@ impl Renderer {
         let reflect =
             reflect && std::env::var("RENDERLAB_TP2_PROFILE").map_or(true, |s| s.is_empty());
         if reflect {
-            let primary = self.view.primary.as_ref().unwrap();
-            let program = self.program_slot(primary.program);
+            let primary_program = self.view.primary.as_ref().unwrap().program;
+            let program = self.program_slot(primary_program);
             let key = reflection::key(
                 &self.source_digest,
                 &program.digest,
@@ -2139,7 +2139,7 @@ impl Renderer {
             let mut slots = [0u32; crate::TRACED_DRAWS as usize];
             for (slot, draw) in opaque.iter().enumerate() {
                 let id = draw.material.map_or(self.standard.id(), |m| m.program.id());
-                slots[slot] = u32::from(id != primary.program);
+                slots[slot] = u32::from(id != primary_program);
             }
             let bytes: Vec<u8> = slots.iter().flat_map(|s| s.to_ne_bytes()).collect();
             self.queue.write_buffer(
