@@ -451,15 +451,24 @@ pub(crate) struct Observation {
     pub completion: Completion,
     pub gpu: Option<GpuSample>,
 }
+/// Observations waiting for the embedder's next poll. At most 16 keep their GPU sample; past
+/// that the oldest sample is dropped (`dropped` counts them) but its completion is kept, so an
+/// embedder waiting on a frame always hears that it finished. A scene start completes dozens of
+/// upload submissions between two polls; dropping whole observations lost frame completions and
+/// left Ara waiting its 5 s frame timeout for a frame the GPU had already finished.
 #[derive(Default)]
 pub(crate) struct EventQueue {
     items: VecDeque<Observation>,
+    /// Completions whose observations overflowed, in order, without their samples.
+    overflow: Vec<Completion>,
     pub dropped: u64,
 }
 impl EventQueue {
     pub fn push(&mut self, event: Observation) {
         if self.items.len() == 16 {
-            self.items.pop_front();
+            if let Some(oldest) = self.items.pop_front() {
+                self.overflow.push(oldest.completion);
+            }
             self.dropped += 1;
         }
         self.items.push_back(event);
@@ -470,6 +479,7 @@ impl EventQueue {
             poll_cpu,
             ..Events::default()
         };
+        events.completed.extend(self.overflow.drain(..));
         for event in self.items.drain(..) {
             events.completed.push(event.completion);
             if let Some(gpu) = event.gpu {
