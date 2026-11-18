@@ -79,169 +79,172 @@ impl LightingGpu {
             }),
             ResourceKind::Buffer,
         );
+        // Compute visibility serves fresh visibility and traced deferred shading.
+        let entries = [
+            super::decal_gpu::layout_entry(),
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(48),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        crate::lighting::LIGHT_BYTES as u64,
+                    ),
+                },
+                count: None,
+            },
+            computed(texture_entry(2)),
+            computed(cube_entry(6)),
+            computed(cube_entry(7)),
+            computed(cube_entry(9)),
+            // The environment cubes' bilinear sampler (shaders/scene.wgsl).
+            wgpu::BindGroupLayoutEntry {
+                binding: 11,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            // The selected map's environment lobe table, read by the M7-ES1
+            // inputs (shaders/environment_lobes.wgsl).
+            computed(lobe_entry(10)),
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 5,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(crate::shadows::VIEW_BYTES),
+                },
+                count: None,
+            },
+            // AT1 (shaders/atmosphere_api.wgsl): the atmosphere uniform, the
+            // transmittance LUT (with its fog-ambient row), the sky-view LUT and the
+            // camera volume. No storage buffer: the Virtual lookup uses all 11.
+            wgpu::BindGroupLayoutEntry {
+                binding: 50,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        super::atmosphere_gpu::UNIFORM_BYTES,
+                    ),
+                },
+                count: None,
+            },
+            computed(texture_entry(51)),
+            computed(texture_entry(52)),
+            {
+                let mut entry = computed(texture_entry(53));
+                entry.ty = wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    view_dimension: wgpu::TextureViewDimension::D3,
+                    multisampled: false,
+                };
+                entry
+            },
+            // The world radiance cache table, read by `indirect_irradiance`
+            // (shaders/gi_api.wgsl); only modules whose program calls it use it.
+            wgpu::BindGroupLayoutEntry {
+                binding: 20,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            // LC1 (shaders/light_cluster_api.wgsl): the cluster grid's frame
+            // uniform, its u32 list texture and the pooled local shadow maps. No
+            // storage buffer, so the per-stage storage budget is unchanged.
+            wgpu::BindGroupLayoutEntry {
+                binding: 23,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: wgpu::BufferSize::new(
+                        crate::light_cluster::FRAME_BYTES as u64,
+                    ),
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 24,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Uint,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    multisampled: false,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 25,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    sample_type: wgpu::TextureSampleType::Depth,
+                    view_dimension: wgpu::TextureViewDimension::D2Array,
+                    multisampled: false,
+                },
+                count: None,
+            },
+        ]
+        .into_iter()
+        .chain(super::transparency_gpu::transmission_shadow::binding_entries())
+        // Cache-terminated reflection hits read the cache's outgoing radiance
+        // (shaders/reflection_cache_hits.wgsl), only while the switch is on: off,
+        // the layout and its per-stage storage count are unchanged.
+        .chain(
+            crate::program::cache_hits_rough().map(|_| wgpu::BindGroupLayoutEntry {
+                binding: 28,
+                visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            }),
+        )
+        .collect::<Vec<_>>();
         let bindings = ledger.own(
             device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("lighting group 3"),
-                // Compute visibility serves fresh visibility and traced deferred shading.
-                entries: &[
-                    super::decal_gpu::layout_entry(),
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(48),
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(
-                                crate::lighting::LIGHT_BYTES as u64,
-                            ),
-                        },
-                        count: None,
-                    },
-                    computed(texture_entry(2)),
-                    computed(cube_entry(6)),
-                    computed(cube_entry(7)),
-                    computed(cube_entry(9)),
-                    // The environment cubes' bilinear sampler (shaders/scene.wgsl).
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 11,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    // The selected map's environment lobe table, read by the M7-ES1
-                    // inputs (shaders/environment_lobes.wgsl).
-                    computed(lobe_entry(10)),
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 4,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Depth,
-                            view_dimension: wgpu::TextureViewDimension::D2Array,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 5,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(crate::shadows::VIEW_BYTES),
-                        },
-                        count: None,
-                    },
-                    // AT1 (shaders/atmosphere_api.wgsl): the atmosphere uniform, the
-                    // transmittance LUT (with its fog-ambient row), the sky-view LUT and the
-                    // camera volume. No storage buffer: the Virtual lookup uses all 11.
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 50,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(
-                                super::atmosphere_gpu::UNIFORM_BYTES,
-                            ),
-                        },
-                        count: None,
-                    },
-                    computed(texture_entry(51)),
-                    computed(texture_entry(52)),
-                    {
-                        let mut entry = computed(texture_entry(53));
-                        entry.ty = wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                            view_dimension: wgpu::TextureViewDimension::D3,
-                            multisampled: false,
-                        };
-                        entry
-                    },
-                    // The world radiance cache table, read by `indirect_irradiance`
-                    // (shaders/gi_api.wgsl); only modules whose program calls it use it.
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 20,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    },
-                    // LC1 (shaders/light_cluster_api.wgsl): the cluster grid's frame
-                    // uniform, its u32 list texture and the pooled local shadow maps. No
-                    // storage buffer, so the per-stage storage budget is unchanged.
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 23,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(
-                                crate::light_cluster::FRAME_BYTES as u64,
-                            ),
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 24,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Uint,
-                            view_dimension: wgpu::TextureViewDimension::D2,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 25,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Texture {
-                            sample_type: wgpu::TextureSampleType::Depth,
-                            view_dimension: wgpu::TextureViewDimension::D2Array,
-                            multisampled: false,
-                        },
-                        count: None,
-                    },
-                ]
-                .into_iter()
-                .chain(super::transparency_gpu::transmission_shadow::binding_entries())
-                // Cache-terminated reflection hits read the cache's outgoing radiance
-                // (shaders/reflection_cache_hits.wgsl), only while the switch is on: off,
-                // the layout and its per-stage storage count are unchanged.
-                .chain(
-                    crate::program::cache_hits_rough().map(|_| wgpu::BindGroupLayoutEntry {
-                        binding: 28,
-                        visibility: wgpu::ShaderStages::FRAGMENT | wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
-                    }),
-                )
-                .collect::<Vec<_>>(),
+                entries: &entries,
             }),
             ResourceKind::BindGroupLayout,
         );
+        #[cfg(test)]
+        super::storage_need::record_group(&bindings, &entries);
         let layout = ledger.own(
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("lit mesh ABI"),

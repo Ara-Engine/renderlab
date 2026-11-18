@@ -105,8 +105,11 @@ fn gpu_non_rt_requested_limit_pipelines() {
         );
         r.test_drain("FIX1 portable raster pipelines");
     }
-    let mut r = make(requested, SampleCount::One);
+    let mut r = make(requested.clone(), SampleCount::One);
     assert_eq!(r.primary_visibility(), PrimaryVisibility::VisibilityBuffer);
+    // Still frames hold still: TR1, on by default, jitters every frame's view-projection (its own
+    // pipeline is compiled and run at the end).
+    r.set_reconstruction(Reconstruction::off()).unwrap();
     assert_eq!(r.soft_shadows(), SoftShadows::Virtual);
     light(&mut r);
     let (mesh, mut instances) = geometry(
@@ -145,6 +148,21 @@ fn gpu_non_rt_requested_limit_pipelines() {
         r.test_drain("FIX1 non-RT Virtual pipelines");
         assert!(r.virtual_shadow_stats().page_work);
     }
+    // The request covers every sun-shadow pipeline layout these lookups made, counted from their
+    // groups' entries (src/storage_need.rs) rather than a literal: a layout that outgrows
+    // `visibility_limits` fails here by name.
+    let (label, need) = crate::renderer::storage_need::largest().unwrap();
+    eprintln!("FIX1 heaviest sun-shadow layout {label}: {need} storage buffers per compute stage");
+    assert!(
+        requested.max_storage_buffers_per_shader_stage >= need,
+        "{label} sees {need} storage buffers per compute stage; visibility_limits requests {}          (raise virtual_shadow_gpu.rs STORAGE_BUFFERS)",
+        requested.max_storage_buffers_per_shader_stage
+    );
+    assert_eq!(
+        need,
+        crate::renderer::SUN_SHADOW_STORAGE_BUFFERS,
+        "{label}: STORAGE_BUFFERS should name the heaviest layout's count"
+    );
     // Surface's still fast path must survive, and any projection change must leave it.
     let depth_changed = Camera::look_at(
         Vec3::new(0.2, 1.2, 2.5),
@@ -155,7 +173,7 @@ fn gpu_non_rt_requested_limit_pipelines() {
         80.,
     )
     .unwrap();
-    for (view, page_work) in [
+    for (step, (view, page_work)) in [
         (camera, false),
         (camera.jittered([0.25, -0.25]), true),
         (camera.jittered([0.25, -0.25]), false),
@@ -164,7 +182,10 @@ fn gpu_non_rt_requested_limit_pipelines() {
         (camera, false),
         (depth_changed, true),
         (depth_changed, false),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         render(
             &mut r,
             &color,
@@ -172,7 +193,7 @@ fn gpu_non_rt_requested_limit_pipelines() {
             &mut [Draw::new(&mesh, &mut instances)],
         );
         r.test_drain("FIX1 view-projection reuse");
-        assert_eq!(r.virtual_shadow_stats().page_work, page_work);
+        assert_eq!(r.virtual_shadow_stats().page_work, page_work, "view-projection reuse, step {step}");
     }
     // Compile and run the non-RT reconstruction pipeline too; its jitter invalidates
     // Virtual without the former unconditional rolling reset in renderer.rs.
@@ -191,9 +212,9 @@ fn gpu_non_rt_requested_limit_pipelines() {
 
 /// Showcase's editor-play stall (#192): a cut changed the clip-map ladder while the Disk lookup
 /// held its page requests, a trace tile the last full mark had not covered held a longer
-/// ladder's receiver level, and the lookup's band walk from that level never ended. A held frame
-/// must finish whatever the receiver levels hold, and must re-mark the tiles the last full mark
-/// did not cover.
+/// ladder's receiver level, and the lookup's band walk from that level never ended. Held frames
+/// must finish whatever the receiver levels hold: a level of an older mark is chosen anew, and a
+/// level past the ladder is dropped and counted.
 #[test]
 #[ignore = "owned GPU lease; renders the Disk lookup's held frames"]
 fn gpu_disk_held_requests_survive_stale_levels() {
@@ -208,9 +229,7 @@ fn gpu_disk_held_requests_survive_stale_levels() {
             | crate::VISIBILITY_FEATURES
             | crate::VISIBILITY_RASTER_FEATURES
             | crate::VIRTUAL_FEATURES,
-        // The adapter's own limits, as an engine requests them: the Disk lookup's layout needs
-        // more storage buffers than `visibility_limits` alone asks for.
-        required_limits: crate::visibility_limits(adapter.limits()),
+        required_limits: crate::visibility_limits(wgpu::Limits::default()),
         ..Default::default()
     }))
     .unwrap();
@@ -254,27 +273,43 @@ fn gpu_disk_held_requests_survive_stale_levels() {
         100.,
     )
     .unwrap();
-    let mut frame = |r: &mut Renderer, view: Camera, label: &str| {
-        render(r, &color, &view, &mut [Draw::new(&mesh, &mut instances)]);
+    render(&mut r, &color, &camera, &mut [Draw::new(&mesh, &mut instances)]);
+    r.test_drain("full mark");
+    // Held frames: only TR1's jitter moves the camera, so the mark does not run.
+    let mut step = 0;
+    let mut held_frame = |r: &mut Renderer, label: &str| {
+        step += 1;
+        let jitter = [0.25 * (step % 3) as f32 - 0.25, -0.25];
+        render(r, &color, &camera.jittered(jitter), &mut [Draw::new(&mesh, &mut instances)]);
         r.test_drain(label);
-        r.test_levels()
+        let (_, held, ladder, generation) = r.test_levels();
+        assert!(held, "{label}: only TR1's jitter moved the camera, the requests hold");
+        (ladder, generation)
     };
-    frame(&mut r, camera, "full mark");
-    let (_, held, ladder) = frame(&mut r, camera.jittered([0.25, -0.25]), "held");
-    assert!(held, "only TR1's jitter moved the camera: the requests hold");
-    // Levels past the ladder's end in every pixel, tiles still marked: the lookup must finish.
-    let stale = ladder + 2;
-    r.test_stale_levels(stale, false);
-    let (_, held, _) = frame(&mut r, camera.jittered([-0.25, 0.25]), "held over stale levels");
-    assert!(held);
-    // Tiles the last full mark did not cover: a held frame marks them.
-    r.test_stale_levels(stale, true);
-    let (levels, held, _) = frame(&mut r, camera.jittered([0.25, 0.25]), "held, tiles unmarked");
-    assert!(held);
-    let rewritten = levels.iter().filter(|&&l| l < ladder).count();
-    assert!(
-        rewritten * 2 > levels.len(),
-        "a held frame re-marks the unmarked tiles: {rewritten} of {} levels rewritten",
-        levels.len()
+    let (ladder, generation) = held_frame(&mut r, "held");
+    // This mark's levels past the ladder (no mark rewrites them while held): every held frame
+    // finishes, and the lookup counts what it drops.
+    r.test_stale_levels(generation << 8 | (ladder + 2));
+    for k in 0..4 {
+        held_frame(&mut r, "held over levels past the ladder");
+        if k >= 1 && r.virtual_shadow_stats().stale_levels != 0 {
+            break;
+        }
+    }
+    assert!(r.virtual_shadow_stats().stale_levels != 0, "the lookup counts the levels it drops");
+    // An older mark's levels (the trace tiles a mark did not cover): the lookup chooses them
+    // anew, so once the readbacks of the frames above are in, nothing more is dropped.
+    r.test_stale_levels((generation.wrapping_sub(1) & 0xff_ffff) << 8 | (ladder + 2));
+    for _ in 0..4 {
+        held_frame(&mut r, "held over an older mark's levels");
+    }
+    let settled = r.virtual_shadow_stats().stale_levels;
+    for _ in 0..3 {
+        held_frame(&mut r, "held over an older mark's levels");
+    }
+    assert_eq!(
+        r.virtual_shadow_stats().stale_levels,
+        settled,
+        "an older mark's levels are chosen anew, not dropped"
     );
 }
