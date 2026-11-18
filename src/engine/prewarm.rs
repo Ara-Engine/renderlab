@@ -56,6 +56,77 @@ mod tests {
             assert_eq!(engine.renderer().stats().frames, frames);
         }
     }
+
+    /// Compiles after prepare, per path ([non-RT, RT]), that the test still allows. Lower each
+    /// entry as prepare covers more passes; the goal is [0, 0]. 18 Nov (prepare covers
+    /// transparency only): 66 and 61, mostly GI, fog, reflection and post pipelines built
+    /// on first use.
+    const LATE_BOUND: [u64; 2] = [66, 61];
+
+    /// Prepare's goal: once a scene is prepared, no frame compiles a pipeline, from any view
+    /// of it. Three programs (the standard floor, a second opaque program, glass), then views
+    /// where each is in turn the frame's first program, one with all of them, and a cut back.
+    #[test]
+    #[ignore = "GPU: compiles after prepare, both paths"]
+    fn a_prepared_scene_compiles_nothing_in_its_frames() {
+        use super::super::view_tests::cube;
+        use crate::engine::{Camera, ExperimentalRayQuery, MeshData, ViewDesc};
+        use glam::{Mat4, Vec3};
+        let adapter = super::super::test_adapter();
+        for (slot, path) in [RenderPath::NonRt, RenderPath::HardwareRt].into_iter().enumerate() {
+            let mut engine = Engine::new(
+                &adapter,
+                EngineDescriptor {
+                    path,
+                    // SAFETY: the test suite's documented experimental-feature acknowledgement.
+                    experimental_ray_query: (path == RenderPath::HardwareRt)
+                        .then(|| unsafe { ExperimentalRayQuery::acknowledge() }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let second = engine
+                .create_program("second", &format!("{}\n// second\n", crate::STANDARD_PROGRAM))
+                .unwrap();
+            let spawn = |engine: &mut Engine, c, h, desc: MaterialDesc| {
+                let (vertices, indices) = cube(c, h);
+                let mesh = engine.create_mesh(&MeshData { vertices: &vertices, indices: &indices }).unwrap();
+                let material = engine.create_material(&desc).unwrap();
+                engine.spawn(mesh, material, Mat4::IDENTITY).unwrap();
+            };
+            spawn(&mut engine, [0.0, -0.05, 0.0], [20.0, 0.05, 20.0], MaterialDesc::default());
+            spawn(&mut engine, [-6.0, 1.0, 0.0], [1.0, 1.0, 1.0], MaterialDesc {
+                program: Some(second),
+                base_color: [0.8, 0.3, 0.2, 1.0],
+                ..Default::default()
+            });
+            spawn(&mut engine, [6.0, 1.0, 0.0], [1.0, 1.0, 1.0], MaterialDesc {
+                transparency: Some(crate::Transparency::default()),
+                ..Default::default()
+            });
+            let view = engine.create_view(&ViewDesc::new(160, 96)).unwrap();
+            engine.prepare_pipelines().unwrap();
+            let look = |eye: [f32; 3], at: [f32; 3]| {
+                Camera::look_at(Vec3::from(eye), Vec3::from(at), Vec3::Y, 0.9, 0.05, 200.0).unwrap()
+            };
+            let cameras = [
+                look([0.0, 12.0, 16.0], [0.0, 0.0, 0.0]),   // everything
+                look([0.0, 6.0, 0.5], [0.0, 0.0, 0.0]),     // the floor alone
+                look([-6.0, 1.5, 3.0], [-6.0, 1.0, 0.0]),   // the second program first
+                look([6.0, 1.5, 3.0], [6.0, 1.0, 0.0]),     // glass over the floor
+                look([0.0, 12.0, 16.0], [0.0, 0.0, 0.0]),   // a cut back
+            ];
+            for camera in &cameras {
+                for _ in 0..4 {
+                    engine.tick(1.0 / 60.0).unwrap();
+                    engine.render_view(view, camera).unwrap();
+                }
+            }
+            let late = engine.renderer().compiles_after_prepare();
+            eprintln!("compiles_after_prepare {path:?}: {late} (bound {})", LATE_BOUND[slot]);
+            assert!(late <= LATE_BOUND[slot], "{path:?}: {late} compiles after prepare");
+        }
+    }
 }
 
 impl Engine {

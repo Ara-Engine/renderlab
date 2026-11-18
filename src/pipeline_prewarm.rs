@@ -2,6 +2,14 @@
 use super::*;
 
 impl Renderer {
+    /// Pipelines compiled since the last successful prepare (`Engine::prepare_pipelines`),
+    /// each one a lazy first-use compile a frame waited for; also logged as
+    /// `pipeline_compile_after_prepare` and in the pipeline log's frame events. The goal
+    /// is 0. Never counts before the first prepare.
+    pub fn compiles_after_prepare(&self) -> u64 {
+        self.device.compiles_after_prepare()
+    }
+
     pub(crate) fn prepare_scene_pipelines(
         &mut self,
         materials: &[&Material],
@@ -32,6 +40,7 @@ impl Renderer {
             });
         }
         let after = self.stats();
+        self.device.mark_prepared();
         Ok(crate::engine::PipelinePreparation {
             cpu: start.elapsed(),
             render_pipelines: after.ownership.get(ResourceKind::RenderPipeline).created
