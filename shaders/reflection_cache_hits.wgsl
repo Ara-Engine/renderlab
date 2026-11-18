@@ -51,6 +51,8 @@ fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)
 // the cache's external request list takes it (level | bin << 8, then the lattice cell; x
 // 0xffffffff: none).
 var<private> rl_cache_missed:vec4<u32>;
+// The hit's geometric normal (unnormalized), for the reader's own use of the same triangle.
+var<private> rl_cache_geometric:vec3<f32>;
 fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
     if gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
     let world=fma(d,vec3<f32>(t),origin);
@@ -59,6 +61,7 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
     let tb=primary_input(hit.batch,hit.ib,hit.placement);
     let tc=primary_input(hit.batch,hit.ic,hit.placement);
     let geometric=primary_geometric(ta.position,tb.position,tc.position,hit.placement);
+    rl_cache_geometric=geometric;
     let w=vec3<f32>(1.0-hit.bary.x-hit.bary.y,hit.bary);
     let vertex=vertex_output(ta).normal*w.x+vertex_output(tb).normal*w.y+vertex_output(tc).normal*w.z;
     let bin=gi_bin(gi_bin_source(select(-geometric,geometric,dot(geometric,origin-world)>=0.0),vertex));
