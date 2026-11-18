@@ -131,6 +131,7 @@ fn gi_acc_local(slot:u32, frame:u32, lane:u32, rays:u32) -> vec3<f32> {
 const GI_ACC_BINS:u32=64u;
 var<workgroup> gi_wg_guide:array<f32,64>;
 var<workgroup> gi_wg_guide_total:f32;
+var<workgroup> gi_wg_guide_share:u32;
 fn gi_acc_bin(local:vec3<f32>) -> u32 {
     let j=min(u32(max(1.0-local.z,0.0)*8.0),7u);
     var phi=atan2(local.y,local.x);
@@ -165,42 +166,49 @@ var<workgroup> gi_wg_acc_count:u32;
         // The guide: lane b evaluates the cell's stored radiance times the cosine at bin b's
         // centre; lane 0 turns the bins into a running sum. A fresh cell has no estimate.
         let frame0=gi_basis(gi_unpack_normal(gi_table[cold+GI_C_NORMAL]));
-        let share=f32(min(gi_word(GI_H_ACC_GUIDE),100u))*0.01;
-        var value=0.0;
-        if share>0.0 && updates!=0u {
-            let centre=gi_acc_bin_direction(lane,vec2<f32>(0.5));
-            gi_sh_basis(frame0*centre);
-            var l=vec3<f32>(0.0);
-            for(var i=0u;i<9u;i+=1u) { l+=gi_y[i]*vec3<f32>(gi_half(hot,3u*i),gi_half(hot,3u*i+1u),gi_half(hot,3u*i+2u)); }
-            value=max(dot(l,GI_ACC_LUMA),0.0)*centre.z;
-        }
-        gi_wg_guide[lane]=value;
-        workgroupBarrier();
-        if lane==0u {
-            var total=0.0;
-            for(var b=0u;b<GI_ACC_BINS;b+=1u) { total+=gi_wg_guide[b]; gi_wg_guide[b]=total; }
-            gi_wg_guide_total=total;
-        }
-        workgroupBarrier();
-        let total=gi_wg_guide_total;
-        // Guided rays: the last n_g lanes; none without a usable estimate.
-        let guided=select(0u,u32(f32(rays)*share),total>0.0 && total<3.0e38);
-        let plain=rays-guided;
-        // The guided lanes pick a bin by inverting the running sum, before lane 0 turns it back
-        // into per-bin values for the density.
+        // The share is the header's, the same for every lane: loaded through workgroup memory so
+        // the guide's barriers sit in uniform control flow, and skipped whole when it is 0.
+        if lane==0u { gi_wg_guide_share=bitcast<u32>(f32(min(gi_word(GI_H_ACC_GUIDE),100u))*0.01); }
+        let share=bitcast<f32>(workgroupUniformLoad(&gi_wg_guide_share));
+        var guided=0u;
+        var total=0.0;
         var pick=0u;
-        if lane>=plain && lane<rays {
-            let pseed=gi_mix(slot^(gi_word(GI_H_FRAME)*0x9e3779b9u)^0x68bc21ebu);
-            let goal=f32(gi_mix(pseed^lane)>>8u)*(1.0/16777216.0)*total;
-            var lo=0u; var hi=GI_ACC_BINS-1u;
-            while lo<hi { let mid=(lo+hi)/2u; if gi_wg_guide[mid]<goal { lo=mid+1u; } else { hi=mid; } }
-            pick=lo;
+        if share>0.0 {
+            var value=0.0;
+            if updates!=0u {
+                let centre=gi_acc_bin_direction(lane,vec2<f32>(0.5));
+                gi_sh_basis(frame0*centre);
+                var l=vec3<f32>(0.0);
+                for(var i=0u;i<9u;i+=1u) { l+=gi_y[i]*vec3<f32>(gi_half(hot,3u*i),gi_half(hot,3u*i+1u),gi_half(hot,3u*i+2u)); }
+                value=max(dot(l,GI_ACC_LUMA),0.0)*centre.z;
+            }
+            gi_wg_guide[lane]=value;
+            workgroupBarrier();
+            if lane==0u {
+                var sum=0.0;
+                for(var b=0u;b<GI_ACC_BINS;b+=1u) { sum+=gi_wg_guide[b]; gi_wg_guide[b]=sum; }
+                gi_wg_guide_total=sum;
+            }
+            workgroupBarrier();
+            total=gi_wg_guide_total;
+            // Guided rays: the last n_g lanes; none without a usable estimate.
+            guided=select(0u,u32(f32(rays)*share),total>0.0 && total<3.0e38);
+            // The guided lanes pick a bin by inverting the running sum, before lane 0 turns it
+            // back into per-bin values for the density.
+            if lane>=rays-guided && lane<rays {
+                let pseed=gi_mix(slot^(gi_word(GI_H_FRAME)*0x9e3779b9u)^0x68bc21ebu);
+                let goal=f32(gi_mix(pseed^lane)>>8u)*(1.0/16777216.0)*total;
+                var lo=0u; var hi=GI_ACC_BINS-1u;
+                while lo<hi { let mid=(lo+hi)/2u; if gi_wg_guide[mid]<goal { lo=mid+1u; } else { hi=mid; } }
+                pick=lo;
+            }
+            workgroupBarrier();
+            if lane==0u {
+                for(var b=GI_ACC_BINS-1u;b>0u;b-=1u) { gi_wg_guide[b]-=gi_wg_guide[b-1u]; }
+            }
+            workgroupBarrier();
         }
-        workgroupBarrier();
-        if lane==0u {
-            for(var b=GI_ACC_BINS-1u;b>0u;b-=1u) { gi_wg_guide[b]-=gi_wg_guide[b-1u]; }
-        }
-        workgroupBarrier();
+        let plain=rays-guided;
         for(var i=0u;i<9u;i+=1u) { gi_cell_sh[i]=vec3<f32>(0.0); }
         if lane<rays {
             let c=gi_cell(slot);
