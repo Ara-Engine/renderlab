@@ -9,7 +9,7 @@ fn roughness(device: &wgpu::Device) -> Option<f32> {
         .features()
         .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
         || device.limits().max_storage_buffers_per_shader_stage
-            < crate::visibility_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage
+            < crate::primary_ray::visibility_storage_buffers(false)
                 + STORAGE_BUFFERS
                 + 1
     {

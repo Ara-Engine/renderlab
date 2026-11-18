@@ -78,6 +78,14 @@ fn rl_cast(origin:vec3<f32>,d:vec3<f32>,tmin:f32)->RlCast {
     if hit.kind==0u {return RlCast(vec4<u32>(0u),-1.0);}
     return RlCast(vec4<u32>(hit.instance_custom_data+1u,hit.primitive_index,bitcast<vec2<u32>>(hit.barycentrics)),hit.t);
 }
+// Whether anything that casts shadows lies along d from `origin` between tmin and tmax: an any-hit
+// visibility ray (the final gather's emitter samples). Software heads test it with rs_blocked.
+fn rl_blocked(origin:vec3<f32>,d:vec3<f32>,tmin:f32,tmax:f32)->bool {
+    var query:ray_query;
+    rayQueryInitialize(&query,RL_SCENE,RayDesc(RAY_FLAG_TERMINATE_ON_FIRST_HIT|RAY_FLAG_FORCE_OPAQUE,SHADOW_CASTER_MASK,tmin,tmax,origin,d));
+    while rayQueryProceed(&query) {}
+    return rayQueryGetCommittedIntersection(&query).kind!=0u;
+}
 // A trusted receiver traces RL_HISTORY_STRATA strata of its set a frame (every
 // count/RL_HISTORY_STRATA-th, from an offset turning with the frame) and folds them into a
 // history of at most RL_HISTORY_CAP x count strata; one that moved over a pixel since the
