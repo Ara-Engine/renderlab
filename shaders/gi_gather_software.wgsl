@@ -74,9 +74,11 @@ var<workgroup> gi_drain_base:u32;
             atomicStore(&gi_wg_missing,0u);
             atomicStore(&gi_wg_changing,0u);
             atomicStore(&gi_wg_rays,0u);
+            atomicStore(&gi_wg_hits,0u);
+            atomicStore(&gi_wg_valued,0u);
         }
         workgroupBarrier();
-        for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]=vec3<f32>(0.0); }
+        for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]=vec3<f32>(0.0); gi_gather_fixed[i]=vec3<f32>(0.0); }
         {
             let c=gi_cell(slot);
             let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
@@ -95,6 +97,10 @@ var<workgroup> gi_drain_base:u32;
             let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
             // The fixed directions' hits read cells sized to the ray's cone (gi_hit_radiance).
             gi_hit_spread=gi_header_f32(GI_H_HIT_SPREAD);
+            // Fixed-direction rays that hit (outside lights' near regions), and those whose hit
+            // had a value: the average leaves out the rest (gi_wg_hits, gi_wg_valued).
+            var hits=0u;
+            var valued=0u;
             for(var k=lane;k<GI_DIRECTIONS;k+=GI_GATHER_LANES) {
                 if k%stride!=0u || (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
                 let d=gi_direction(frame,c.key,k);
@@ -102,14 +108,17 @@ var<workgroup> gi_drain_base:u32;
                 rays+=1u;
                 // A hit in a local light's near region is the aimed rays' (gi_near_gather).
                 if !h.hit || gi_near_owner(origin,n,origin+d*h.t)!=0xffffffffu { continue; }
+                hits+=1u;
                 let o=gi_hit_radiance(origin,d,h,band,tertiary);
                 if o.w==GI_HIT_MISSING || o.w==0.0 { missing+=1u; }
                 if o.w==GI_HIT_CHANGING { changing+=1u; }
                 if o.w<=GI_HIT_NONE { continue; }
+                valued+=1u;
                 gi_sh_basis(d);
                 let radiance=o.rgb*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
                 for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=radiance*gi_y[i]; }
             }
+            for(var i=0u;i<4u;i+=1u) { gi_gather_fixed[i]=gi_gather_sh[i]; }
             // The aimed rays resolve what is near a light: their hits keep the pixels' level.
             gi_hit_spread=0.0;
             gi_near_cold=cold;
@@ -122,17 +131,24 @@ var<workgroup> gi_drain_base:u32;
             if missing!=0u { atomicAdd(&gi_wg_missing,missing); }
             if changing!=0u { atomicAdd(&gi_wg_changing,changing); }
             if rays!=0u { atomicAdd(&gi_wg_rays,rays); }
+            if hits!=0u { atomicAdd(&gi_wg_hits,hits); }
+            if valued!=0u { atomicAdd(&gi_wg_valued,valued); }
         }
         // The lanes' sums into lane 0 in a fixed tree order (no atomics on values).
+        // The fixed directions' sums (0-11) and the rest, aimed rays and emitters (12-23).
         for(var i=0u;i<4u;i+=1u) {
-            gi_wg_bounce[(i*3u)*GI_GATHER_LANES+lane]=gi_gather_sh[i].x;
-            gi_wg_bounce[(i*3u+1u)*GI_GATHER_LANES+lane]=gi_gather_sh[i].y;
-            gi_wg_bounce[(i*3u+2u)*GI_GATHER_LANES+lane]=gi_gather_sh[i].z;
+            let rest=gi_gather_sh[i]-gi_gather_fixed[i];
+            gi_wg_bounce[(i*3u)*GI_GATHER_LANES+lane]=gi_gather_fixed[i].x;
+            gi_wg_bounce[(i*3u+1u)*GI_GATHER_LANES+lane]=gi_gather_fixed[i].y;
+            gi_wg_bounce[(i*3u+2u)*GI_GATHER_LANES+lane]=gi_gather_fixed[i].z;
+            gi_wg_bounce[(12u+i*3u)*GI_GATHER_LANES+lane]=rest.x;
+            gi_wg_bounce[(12u+i*3u+1u)*GI_GATHER_LANES+lane]=rest.y;
+            gi_wg_bounce[(12u+i*3u+2u)*GI_GATHER_LANES+lane]=rest.z;
         }
         workgroupBarrier();
         for(var stride=GI_GATHER_LANES/2u;stride>0u;stride/=2u) {
             if lane<stride {
-                for(var j=0u;j<12u;j+=1u) {
+                for(var j=0u;j<24u;j+=1u) {
                     gi_wg_bounce[j*GI_GATHER_LANES+lane]+=gi_wg_bounce[j*GI_GATHER_LANES+lane+stride];
                 }
             }
@@ -143,10 +159,23 @@ var<workgroup> gi_drain_base:u32;
             atomicAdd(&gi_work[GI_W_GATHER_RAYS],atomicLoad(&gi_wg_rays));
             let missing=atomicLoad(&gi_wg_missing);
             if missing!=0u { atomicAdd(&gi_work[GI_W_GATHER_MISSES],missing); }
+            // A fixed-direction ray whose hit had no value yet at any level is left out of the
+            // average (the rejection estimator): counting it as zero light at full weight biased
+            // every such cell's bounce low (Glint's goal view: 4.5% of settled gather rays).
+            // Aimed rays and emitters are their own estimates and are added as they are.
+            let hits=atomicLoad(&gi_wg_hits);
+            let valued=atomicLoad(&gi_wg_valued);
+            let scale=select(1.0,f32(hits)/f32(valued),valued>0u && hits>valued);
+            for(var j=0u;j<12u;j+=1u) {
+                gi_wg_bounce[j*GI_GATHER_LANES]=gi_wg_bounce[j*GI_GATHER_LANES]*scale+gi_wg_bounce[(12u+j)*GI_GATHER_LANES];
+            }
             var m=0.0;
             for(var j=0u;j<12u;j+=1u) { m=max(m,abs(gi_wg_bounce[j*GI_GATHER_LANES])); }
             let hot=gi_hot(slot);
-            if m<=0.0 {
+            if valued==0u && hits>0u {
+                // Every hit was without a value: nothing to average, so the cell keeps its last
+                // bounce (its retry gathers again).
+            } else if m<=0.0 {
                 gi_table[hot+GI_HOT_BOUNCE]=GI_BOUNCE_NONE;
             } else {
                 for(var w=0u;w<6u;w+=1u) {
