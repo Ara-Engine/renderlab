@@ -1916,7 +1916,7 @@ impl VirtualState {
             edge_counts: std::sync::Mutex::new(ReadbackRing::new(
                 device,
                 "Disk lookup edge count readback",
-                32,
+                48,
                 3,
             )),
             census_bounds: vec![],
@@ -2238,7 +2238,7 @@ impl VirtualState {
                 REACH_BYTES,
                 B::STORAGE | B::COPY_SRC,
             ),
-            edges: buffer("Disk lookup edge pixels", 32, B::STORAGE | B::COPY_SRC),
+            edges: buffer("Disk lookup edge pixels", 48, B::STORAGE | B::COPY_SRC),
             census: buffer(
                 "Shadow caster census",
                 if census_log().is_some() {
@@ -2569,7 +2569,7 @@ impl Renderer {
                 let word = |i: usize| u32::from_ne_bytes(words[4 * i..4 * i + 4].try_into().unwrap());
                 let p = &state.stats;
                 let line = format!(
-                    "{} {} {} {} capped {} missing {} stand-in {} split {} pool {} {} {} {} {}",
+                    "{} {} {} {} capped {} missing {} stand-in {} split {} fraction columns {} partial {} acting {} pool {} {} {} {} {}",
                     word(0),
                     word(1),
                     word(2),
@@ -2578,6 +2578,9 @@ impl Renderer {
                     word(5),
                     word(6),
                     word(7),
+                    word(8),
+                    word(9),
+                    word(10),
                     p.requested_pages,
                     p.rendered_pages,
                     p.failed_pages,

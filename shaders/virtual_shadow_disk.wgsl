@@ -565,7 +565,7 @@ override VD_EDGE_SHOW:bool=false;
 // walked pixels (`RENDERLAB_VD_EDGE_LOG`); the last three only with
 // `RENDERLAB_VD=VD_COUNTS=true` (measurement).
 override VD_COUNTS:bool=false;
-@group(0) @binding(62) var<storage,read_write> vd_edge_count:array<atomic<u32>,8>;
+@group(0) @binding(62) var<storage,read_write> vd_edge_count:array<atomic<u32>,12>;
 var<private> vd_ray_reach:f32;
 var<private> vd_far:vec2<u32>;
 var<private> vd_edge_cell:vec2<i32>;
@@ -778,6 +778,10 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     // would block (vd_keep).
     if VD_FRACTION && stride==1 {
         let k=top.y&7u;
+        if VD_COUNTS {
+            atomicAdd(&vd_edge_count[8],1u);
+            if k!=0u {atomicAdd(&vd_edge_count[9],1u);if any(m!=vec2<u32>(0u)) {atomicAdd(&vd_edge_count[10],1u);}}
+        }
         if k!=0u {m&=vd_keep(8u*k,vd_hash(i));}
     }
     // The split: a partial column of a band above the receiver's level draws its outline at a
