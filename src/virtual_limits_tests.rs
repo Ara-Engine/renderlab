@@ -188,3 +188,93 @@ fn gpu_non_rt_requested_limit_pipelines() {
         assert!(r.virtual_shadow_stats().page_work);
     }
 }
+
+/// Showcase's editor-play stall (#192): a cut changed the clip-map ladder while the Disk lookup
+/// held its page requests, a trace tile the last full mark had not covered held a longer
+/// ladder's receiver level, and the lookup's band walk from that level never ended. A held frame
+/// must finish whatever the receiver levels hold, and must re-mark the tiles the last full mark
+/// did not cover.
+#[test]
+#[ignore = "owned GPU lease; renders the Disk lookup's held frames"]
+fn gpu_disk_held_requests_survive_stale_levels() {
+    let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        flags: wgpu::InstanceFlags::debugging(),
+        ..wgpu::InstanceDescriptor::new_without_display_handle()
+    });
+    let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+    let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
+        required_features: crate::RECEIVER_FEATURES
+            | crate::VISIBILITY_FEATURES
+            | crate::VISIBILITY_RASTER_FEATURES
+            | crate::VIRTUAL_FEATURES,
+        // The adapter's own limits, as an engine requests them: the Disk lookup's layout needs
+        // more storage buffers than `visibility_limits` alone asks for.
+        required_limits: crate::visibility_limits(adapter.limits()),
+        ..Default::default()
+    }))
+    .unwrap();
+    let mut r = Renderer::new_with_options(
+        device,
+        queue,
+        wgpu::TextureFormat::Rgba8UnormSrgb,
+        Limits::default(),
+        RendererOptions::default(),
+        SOURCE,
+    )
+    .unwrap();
+    assert_eq!(r.soft_shadows(), SoftShadows::Virtual);
+    light(&mut r);
+    r.set_virtual_shadow_settings(VirtualShadowSettings {
+        pages: 4,
+        lookup: VirtualLookup::Disk,
+        ..Default::default()
+    })
+    .unwrap();
+    let (mesh, mut instances) = geometry(
+        &mut r,
+        &[
+            [-2., 0., -2.],
+            [2., 0., -2.],
+            [2., 0., 2.],
+            [-2., 0., 2.],
+            [-0.4, 0., 0.],
+            [0.4, 0., 0.],
+            [0., 0.8, 0.],
+        ],
+        &[0, 2, 1, 0, 3, 2, 4, 5, 6],
+    );
+    let color = target(&r, 128, 96);
+    let camera = Camera::look_at(
+        Vec3::new(0.2, 1.2, 2.5),
+        Vec3::ZERO,
+        Vec3::Y,
+        45f32.to_radians(),
+        0.01,
+        100.,
+    )
+    .unwrap();
+    let mut frame = |r: &mut Renderer, view: Camera, label: &str| {
+        render(r, &color, &view, &mut [Draw::new(&mesh, &mut instances)]);
+        r.test_drain(label);
+        r.test_levels()
+    };
+    frame(&mut r, camera, "full mark");
+    let (_, held, ladder) = frame(&mut r, camera.jittered([0.25, -0.25]), "held");
+    assert!(held, "only TR1's jitter moved the camera: the requests hold");
+    // Levels past the ladder's end in every pixel, tiles still marked: the lookup must finish.
+    let stale = ladder + 2;
+    r.test_stale_levels(stale, false);
+    let (_, held, _) = frame(&mut r, camera.jittered([-0.25, 0.25]), "held over stale levels");
+    assert!(held);
+    // Tiles the last full mark did not cover: a held frame marks them.
+    r.test_stale_levels(stale, true);
+    let (levels, held, _) = frame(&mut r, camera.jittered([0.25, 0.25]), "held, tiles unmarked");
+    assert!(held);
+    let rewritten = levels.iter().filter(|&&l| l < ladder).count();
+    assert!(
+        rewritten * 2 > levels.len(),
+        "a held frame re-marks the unmarked tiles: {rewritten} of {} levels rewritten",
+        levels.len()
+    );
+}
