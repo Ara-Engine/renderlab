@@ -42,11 +42,12 @@ fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)
 // radiance (rgb, unexposed) of the hit's cell, settled or changing, w 0 when no cell there has a
 // value or the cache is off. The cell is the one a pixel at the hit, seen from the ray's origin,
 // reads: its bin from the interpolated vertex normal on the side the ray sees (gi_bin_source, as
-// gi_prepare picks it). Levels in order: the one the cone covers, then the finer ones down to the
-// hit's own (where pixels on screen made cells: a probe ray from the floor to the tower's side
-// meets those, and found nothing at the cone's level), then the coarser ones. Movers read their
-// cells too: those lag the surface by a frame or so, which a probe's hemisphere integral does not
-// show. With no value it leaves the cone level's cell in rl_cache_missed, as the cache's external
+// gi_prepare picks it). Levels in order: the one the cone covers, then the coarser ones, then the
+// finer ones down to the hit's own, last (where pixels on screen made cells: a probe ray from the
+// floor to the tower's side met only those, and counted as black). Fine cells first carried their
+// cell-to-cell differences into the probes: blotches a probe wide in the tower's shadow. Movers
+// read their cells too: those lag the surface by a frame or so, which a probe's hemisphere
+// integral does not show. With no value it leaves the cone level's cell in rl_cache_missed, as the cache's external
 // request list takes it (level | bin << 8, then the lattice cell).
 var<private> rl_cache_missed:vec4<u32>;
 fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
@@ -63,9 +64,9 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
     let own=gi_level(world);
     let start=rl_cache_level(world,cone);
     let last=gi_word(GI_H_LEVELS)-1u;
-    // k walks start, start-1 .. own, then start+1 .. last.
+    // k walks start .. last, then start-1 .. own.
     for(var k=0u;k<=last-own;k+=1u) {
-        let l=select(start+(k-(start-own)),start-k,k<=start-own);
+        let l=select(start-1u-(k-(last-start+1u)),start+k,k<=last-start);
         let slot=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
         if slot==0xffffffffu { continue; }
         let o=rl_cache_outgoing[slot];
