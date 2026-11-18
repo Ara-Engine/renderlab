@@ -245,17 +245,29 @@ mod tests {
 
 #[cfg(test)]
 mod fog_limit_tests {
+    /// The request is the most any pipeline sees per stage: the visibility path's own stages
+    /// (one more buffer with the fog cull) or the sun shadows' heaviest pipeline (one more with
+    /// the cache-hits switch, in its lighting group). The fog cull's buffer raises it only where
+    /// the visibility path is the larger; a device granting exactly the request runs both.
     #[test]
-    fn fog_cull_device_request_rejects_thirteen_and_accepts_fourteen() {
+    fn fog_cull_device_request_covers_the_fog_buffer() {
+        let sun = crate::renderer::SUN_SHADOW_STORAGE_BUFFERS
+            + u32::from(crate::program::cache_hits_rough().is_some());
         let off = super::visibility_limits_with_fog(wgpu::Limits::default(), false);
         let on = super::visibility_limits_with_fog(wgpu::Limits::default(), true);
+        for (fog, limits) in [(false, &off), (true, &on)] {
+            let visibility = super::visibility_storage_buffers(fog);
+            assert_eq!(limits.max_storage_buffers_per_shader_stage, visibility.max(sun));
+        }
         assert_eq!(
-            on.max_storage_buffers_per_shader_stage,
-            off.max_storage_buffers_per_shader_stage + 1
+            super::visibility_storage_buffers(true),
+            super::visibility_storage_buffers(false) + 1,
+            "the fog cull adds one buffer to the visibility path's stages"
         );
-        assert!(!on.check_limits(&off));
+        // Off's request serves the fog cull exactly when the sun shadows already ask for more.
+        assert_eq!(on.check_limits(&off), super::visibility_storage_buffers(true) <= sun);
         let mut sufficient = off;
-        sufficient.max_storage_buffers_per_shader_stage += 1;
+        sufficient.max_storage_buffers_per_shader_stage = on.max_storage_buffers_per_shader_stage;
         assert!(on.check_limits(&sufficient));
     }
 }
