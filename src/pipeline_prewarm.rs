@@ -24,7 +24,18 @@ impl Renderer {
         let start = Instant::now();
         let before = self.stats();
         let scopes = OperationScopes::new(&self.device);
-        let prepared = self.prewarm_transparency(materials);
+        let prepared = self.prewarm_transparency(materials).and_then(|()| {
+            // The lighting cache's kernels, on the path its frames will trace with.
+            if self.gi.settings.enabled {
+                let software = self.hardware_shadows.is_none() || self.gi.settings.force_software;
+                self.ensure_gi_pipelines(software)?;
+            }
+            // Sky, aerial perspective and fog.
+            if self.atmosphere.settings.active() {
+                self.ensure_atmosphere_kernels()?;
+            }
+            Ok(())
+        });
         if prepared.is_ok()
             && self.hardware_shadows.is_none()
             && self.local_shadows().count > 0

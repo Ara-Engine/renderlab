@@ -3505,7 +3505,9 @@ impl Renderer {
         });
     }
 
-    fn ensure_gi_pipelines(&mut self, software: bool) -> Result<(), Error> {
+    /// The cache's kernels for its tracing path, rebuilt when the path or direction count
+    /// changes. Called each GI frame and by `prepare_scene_pipelines`.
+    pub(super) fn ensure_gi_pipelines(&mut self, software: bool) -> Result<(), Error> {
         let directions = self.gi.settings.directions;
         if self
             .gi

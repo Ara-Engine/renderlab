@@ -972,7 +972,8 @@ impl Renderer {
         bytes
     }
 
-    fn ensure_atmosphere_kernels(&mut self) -> Result<(), Error> {
+    /// Called by lit frames with the atmosphere on and by `prepare_scene_pipelines`.
+    pub(super) fn ensure_atmosphere_kernels(&mut self) -> Result<(), Error> {
         if self.atmosphere.kernels.is_some() {
             return Ok(());
         }
