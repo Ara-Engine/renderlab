@@ -528,6 +528,8 @@ struct Pipelines {
     /// The covered fraction's count into the top words of the drawn texels (vsm_fold_dense,
     /// vsm_fold_sparse; `fraction_on`).
     fold: [Owned<wgpu::ComputePipeline>; 2],
+    /// The covered fraction's silhouette texels from ids (vsm_silhouette_dense, _sparse).
+    silhouette: [Owned<wgpu::ComputePipeline>; 2],
 }
 struct Layouts {
     mark: Owned<wgpu::BindGroupLayout>,
@@ -973,6 +975,11 @@ pub(super) fn shader_source() -> String {
         "override VSM_FRACTION:bool=false;",
         &format!("override VSM_FRACTION:bool={};", fraction_on()),
         1,
+    )
+    .replacen(
+        "override VSM_MSAA:bool=false;",
+        &format!("override VSM_MSAA:bool={};", fraction_mode() == 2),
+        1,
     );
     // Measurement: `RENDERLAB_VSM=NAME=value,...` sets the page module's overrides.
     let mut source: String = source;
@@ -991,12 +998,22 @@ pub(super) fn shader_source() -> String {
     }
     source
 }
-/// The covered fraction (`RENDERLAB_VSM_FRACTION=1`, off by default): the page raster samples
-/// each texel at eight positions and marks the near layer's covered samples in a byte plane
-/// (WGSL `vsm_cover`); the Disk lookup lets a top column block that share of its directions.
+/// The covered fraction (`RENDERLAB_VSM_FRACTION=1`, off by default): the near layer's covered
+/// samples of each silhouette texel go into a byte plane (WGSL `vsm_cover`), and the Disk lookup
+/// lets a partly covered column block that share of its directions, from its covered side. `=1`
+/// takes them from the map's ids after a raster at texel centres (WGSL `vsm_silhouette`); `=msaa`
+/// from a multisampled raster, the comparison.
 fn fraction_on() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_FRACTION").is_ok_and(|v| v.trim() == "1"))
+    fraction_mode() != 0
+}
+/// 0 off, 1 from ids, 2 multisampled (`fraction_on`).
+fn fraction_mode() -> u8 {
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *MODE.get_or_init(|| match std::env::var("RENDERLAB_VSM_FRACTION").as_deref().map(str::trim) {
+        Ok("1") => 1,
+        Ok("msaa") => 2,
+        _ => 0,
+    })
 }
 /// The covered fraction's samples a texel (WGSL `VSM_SAMPLES`): the hardware raster runs on a
 /// multisampled attachment of this count and reads each fragment's sample mask. 8 where the device
@@ -1004,7 +1021,7 @@ fn fraction_on() -> bool {
 fn fraction_samples(device: &wgpu::Device) -> u32 {
     // Measurement: `RENDERLAB_VSM_FRACTION_SAMPLES=4` takes the 4x attachment on any device.
     let forced = std::env::var("RENDERLAB_VSM_FRACTION_SAMPLES").ok().and_then(|v| v.trim().parse().ok());
-    if !fraction_on() {
+    if fraction_mode() != 2 {
         1
     } else if let Some(samples) = forced {
         samples
@@ -1818,7 +1835,8 @@ impl VirtualState {
             ResourceKind::ShaderModule,
         );
         let samples = fraction_samples(device);
-        let samples_constant = ("VSM_SAMPLES", f64::from(samples.max(4)));
+        // The samples a texel: the attachment's when multisampled, else the 8x pattern.
+        let samples_constant = ("VSM_SAMPLES", f64::from(if samples > 1 { samples } else { 8 }));
         let compute = |entry, layout: &wgpu::PipelineLayout, constants: &[(&str, f64)]| {
             let constants: Vec<_> = constants.iter().copied().chain([samples_constant]).collect();
             ledger.own(
@@ -1924,6 +1942,10 @@ impl VirtualState {
             fold: [
                 compute("vsm_fold_dense", &clear_layout, &[]),
                 compute("vsm_fold_sparse", &clear_layout, &[]),
+            ],
+            silhouette: [
+                compute("vsm_silhouette_dense", &raster_layout, &[]),
+                compute("vsm_silhouette_sparse", &raster_layout, &[]),
             ],
         };
         Self {
@@ -4330,7 +4352,21 @@ impl Renderer {
             label: Some("N8c clipmap max-mips"),
             timestamp_writes: None,
         });
-        // The covered fraction's count into the drawn texels' top words (before the mips read them).
+        // The covered fraction: the silhouette texels' samples from ids (unless multisampled), then
+        // the count into the drawn texels' top words (before the mips read them).
+        if fraction_mode() == 1 {
+            pass.set_bind_group(0, &*g.raster, &[]);
+            pass.set_bind_group(1, arrays, &[]);
+            pass.set_bind_group(2, &*casters.data, &[]);
+            pass.set_bind_group(3, &*g.pass, &[0]);
+            if r.sparse {
+                pass.set_pipeline(&p.silhouette[1]);
+                pass.dispatch_workgroups_indirect(&r.pool, 0);
+            } else {
+                pass.set_pipeline(&p.silhouette[0]);
+                pass.dispatch_workgroups(slots as u32, 1, 1);
+            }
+        }
         if fraction_on() {
             pass.set_bind_group(0, &*g.raster, &[]);
             if r.sparse {

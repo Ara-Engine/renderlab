@@ -501,6 +501,131 @@ fn vsm_fold(i:u32) {
     atomicAnd(&vsm_cover[i>>2u],~(255u<<shift));
     atomicOr(&vsm_cover[i>>2u],a<<shift);
 }
+// ---- The covered fraction from ids (RENDERLAB_VSM_FRACTION=1) ----
+// Both layers rasterize at texel centres. Then a texel whose 3x3 neighbourhood disagrees (an
+// occupied texel beside an empty one, another placement, or a height step of VSM_SIL_STEP texels:
+// the only texels an outline can cross) takes its samples' coverage from the triangles that
+// neighbourhood's top words and its own peel word name: the union over them of the samples
+// within the peel gap of the texel's top (the near layer), with the sample positions of
+// vsm_sample. A covered part standing above the centre's surface becomes the texel's top.
+// Interior texels keep their centre's answer (fully covered or empty): the cost follows the
+// outlines' length. A caster covering no texel centre names no id and stays unseen.
+const VSM_SIL_STEP:f32=8.0;
+// The top word of window texel t of `level` whatever this frame drew; VSM_NONE outside the window
+// or on a page that is not resident.
+fn vsm_word_at(level:u32,t:vec2<i32>)->u32 {
+    let side=i32(vsm.counts.y*VSM_PAGE);
+    if any(t<vec2<i32>(0)) || any(t>=vec2<i32>(side)) {return VSM_NONE;}
+    let u=vec2<u32>(t);
+    if vsm_sparse() {
+        let slot=vsm_pages[vsm_section(2u)+vsm_vpage(level,u/VSM_PAGE)];
+        if slot==VSM_NONE {return VSM_NONE;}
+        return slot*VSM_PAGE*VSM_PAGE+(u.y%VSM_PAGE)*VSM_PAGE+u.x%VSM_PAGE;
+    }
+    return (level*u32(side)+u.y)*u32(side)+u.x;
+}
+// The triangle a map id names, in level texels and normalized heights as the raster places it.
+fn vsm_id_triangle(id:u32,level:u32)->array<vec3<f32>,3> {
+    let bits=vsm.misc.x;
+    let placement=(id>>bits)-1u;
+    let batch=primary_placements[placement]&0x1fffffffu;
+    let v=vsm_triangle(batch,id&((1u<<bits)-1u));
+    let m=models[placement];
+    let texel=vsm_texel(level);
+    var out:array<vec3<f32>,3>;
+    for(var k=0u;k<3u;k+=1u) {
+        let q=vsm_light((m*vec4<f32>(v[k],1.0)).xyz);
+        out[k]=vec3<f32>((q.xy-vsm.levels[level].origin.xy)/texel,(q.z-vsm.depth.x)*vsm.depth.y);
+    }
+    return out;
+}
+fn vsm_silhouette(level:u32,t:vec2<u32>,i:u32) {
+    let w=atomicLoad(&vsm_top_map[i]);
+    let id=u32(w&0xfffffffflu);
+    let h=bitcast<f32>(u32(w>>32u));
+    let bits=vsm.misc.x;
+    let step=VSM_SIL_STEP*vsm_texel(level)/vsm.depth.z;
+    var ids:array<u32,10>;var n=0u;var marked=false;
+    for(var k=0u;k<9u;k+=1u) {
+        if k==4u {continue;}
+        let j=vsm_word_at(level,vec2<i32>(t)+vec2<i32>(i32(k%3u)-1,i32(k/3u)-1));
+        if j==VSM_NONE {continue;}
+        let o=atomicLoad(&vsm_top_map[j]);
+        let oid=u32(o&0xfffffffflu);
+        if (oid==0u)!=(id==0u) || (oid>>bits)!=(id>>bits) || abs(bitcast<f32>(u32(o>>32u))-h)>step {marked=true;}
+        var seen=oid==0u;
+        for(var m=0u;m<n;m+=1u) {seen=seen || ids[m]==oid;}
+        if !seen {ids[n]=oid;n+=1u;}
+    }
+    if !marked {return;}
+    let pid=u32(atomicLoad(&vsm_peel_map[i])&0xfffffffflu);
+    for(var e=0u;e<2u;e+=1u) {
+        let c=select(pid,id,e==0u);
+        var seen=c==0u;
+        for(var m=0u;m<n;m+=1u) {seen=seen || ids[m]==c;}
+        if !seen && n<10u {ids[n]=c;n+=1u;}
+    }
+    // Per sample, the highest covering height and its triangle's reach across the samples; per
+    // triangle, the mean height of what it covers (its covered part's height).
+    var sz:array<f32,8>;var sreach:array<f32,8>;
+    for(var s=0u;s<8u;s+=1u) {sz[s]=-1.0;sreach[s]=0.0;}
+    var best=select(-1.0,h,id!=0u);var bid=id;
+    let centre=vec2<f32>(t)+vec2<f32>(0.5);
+    for(var m=0u;m<n;m+=1u) {
+        let tri=vsm_id_triangle(ids[m],level);
+        let a=tri[0].xy;let b=tri[1].xy;let c=tri[2].xy;
+        let area=vsm_cross(a,b,c);
+        if area==0.0 {continue;}
+        let e1=b-a;let e2=c-a;
+        let z=vec3<f32>(tri[0].z,tri[1].z,tri[2].z);
+        let g=vec2<f32>((z.y-z.x)*e2.y-(z.z-z.x)*e1.y,(z.z-z.x)*e1.x-(z.y-z.x)*e2.x)/area;
+        let reach=0.875*(abs(g.x)+abs(g.y));
+        var sum=0.0;var count=0u;
+        for(var s=0u;s<VSM_SAMPLES;s+=1u) {
+            let p=centre+vsm_sample(s);
+            let wb=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p))/area;
+            if any(wb<vec3<f32>(0.0)) {continue;}
+            let zs=dot(wb,z);
+            if zs>sz[s] {sz[s]=zs;sreach[s]=reach;}
+            sum+=zs;count+=1u;
+        }
+        if count!=0u && sum/f32(count)>best {best=sum/f32(count);bid=ids[m];}
+    }
+    if bid!=id {atomicStore(&vsm_top_map[i],(u64(bitcast<u32>(best))<<32u)|u64(bid));}
+    let lowest=best-VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z;
+    var cover=0u;
+    for(var s=0u;s<VSM_SAMPLES;s+=1u) {
+        if sz[s]>=0.0 && sz[s]>=lowest-sreach[s] {cover|=1u<<s;}
+    }
+    if cover!=0u {atomicOr(&vsm_cover[i>>2u],cover<<((i&3u)*8u));}
+}
+// The pass over each drawn page's texels: dense, one workgroup per page slot (its dirty rectangle).
+@compute @workgroup_size(256) fn vsm_silhouette_dense(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let slot=group.x;
+    let w=vsm_render[slot];
+    if w==0u {return;}
+    let pages=vsm.counts.y;let per=pages*pages;
+    let level=slot/per;let local=slot%per;
+    let side=pages*VSM_PAGE;
+    let corner=vec2<u32>(local%pages,local/pages)*VSM_PAGE;
+    for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
+        let q=vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
+        if !vsm_dirty_has(w,q) {continue;}
+        let t=corner+q;
+        vsm_silhouette(level,t,(level*side+t.y)*side+t.x);
+    }
+}
+// Sparse: one workgroup per page drawn this frame.
+@compute @workgroup_size(256) fn vsm_silhouette_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let v=vsm_rendered(group.x);
+    let n=vsm.counts.y;let level=v/(n*n);
+    let slot=vsm_pages[vsm_section(2u)+v];
+    let corner=vsm_entry_page(level,v)*VSM_PAGE;
+    for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
+        let q=vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
+        vsm_silhouette(level,corner+q,slot*VSM_PAGE*VSM_PAGE+k);
+    }
+}
 // The covered side's angles (virtual_shadow_disk.wgsl VD_SIDE_ANGLES).
 const VSM_SIDE_ANGLES:u32=32u;
 // The fold over the texels each page drew this frame: sparse, one workgroup per rasterized page.
@@ -582,6 +707,10 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
 // triangles. vsm_fold then moves the count into the top word, and the Disk lookup lets a top
 // column block that share of the directions it would block.
 override VSM_FRACTION:bool=false;
+// The multisampled raster (RENDERLAB_VSM_FRACTION=msaa): the comparison for the default, which
+// rasterizes at texel centres and takes silhouette texels' samples from the map's ids
+// (vsm_silhouette).
+override VSM_MSAA:bool=false;
 // Samples a texel (virtual_shadow_gpu.rs `fraction_samples`): the hardware raster's attachment
 // count, 8 where the device takes it, else 4, with that count's standard positions.
 override VSM_SAMPLES:u32=8u;
@@ -747,13 +876,13 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
     let side=i32(vsm.counts.y*VSM_PAGE);
     // Texel centres are at 256x+128 subpixels; the covered fraction's samples reach half a
     // texel from them.
-    let grow=select(0,128,VSM_FRACTION && !VSM_FR_SW1X);
+    let grow=select(0,128,VSM_MSAA && !VSM_FR_SW1X);
     let lo=max(min(a,min(b,d))-vec2<i32>(grow),vec2<i32>(0));
     let hi=min(max(a,max(b,d))+vec2<i32>(grow),vec2<i32>(side*256-1));
     let first=(lo-vec2<i32>(128)+vec2<i32>(255))>>vec2<u32>(8u);
     let last=(hi-vec2<i32>(128))>>vec2<u32>(8u);
     let id=vsm_cluster_id(c,batch,li);
-    if VSM_FRACTION && !VSM_FR_SW1X {
+    if VSM_MSAA && !VSM_FR_SW1X {
         for(var y=first.y;y<=last.y;y+=1) {
             for(var x=first.x;x<=last.x;x+=1) {
                 vsm_fraction_texel(level,vec2<u32>(u32(x),u32(y)),s0.xy,s1.xy,s2.xy,vec3<f32>(s0.z,s1.z,s2.z),id);
@@ -810,8 +939,8 @@ struct VsmHw {
     let tile=vsm_pass.pad0;
     let o=vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles())*vsm_area();
     let t=vec2<u32>(input.position.xy)+o;
-    if VSM_FRACTION && VSM_FR_DISCARD {return;}
-    if VSM_FRACTION && !VSM_FR_HW1X {
+    if VSM_MSAA && VSM_FR_DISCARD {return;}
+    if VSM_MSAA && !VSM_FR_HW1X {
         vsm_fraction_hw(vsm_pass.level,t,input.height,input.inside,all(input.weights>=vec3<f32>(0.0)),g,input.id,mask);
         return;
     }
