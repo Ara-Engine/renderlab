@@ -53,6 +53,10 @@ pub(super) struct LightingGpu {
     environment_sampler: Owned<wgpu::Sampler>,
     /// The empty environment lobe table, bound when the selected map has none.
     dummy_lobes: crate::environment::EnvironmentCube,
+    /// Binding 29's stand-in where the cache's external request list is not bound (groups other
+    /// than the shading one, or no cache): its own buffer, as a writable binding may not share
+    /// one with the read-only table and outgoing stand-ins. Four words: no room for an entry.
+    external_stand_in: Owned<wgpu::Buffer>,
     active: Option<LightBuffer>,
     retired: Vec<(u64, LightBuffer)>,
     pub retired_hdr: Vec<(u64, Hdr)>,
@@ -238,6 +242,19 @@ impl LightingGpu {
                         count: None,
                     }),
                 )
+                // The final gather's probe hits append the cells they found without a value to
+                // the cache's external request list (shaders/gi_receiver_pass.wgsl fg_request):
+                // compute only, and only while the gather reads the cache.
+                .chain(external_requests().then_some(wgpu::BindGroupLayoutEntry {
+                    binding: 29,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                }))
                 .collect::<Vec<_>>(),
             }),
             ResourceKind::BindGroupLayout,
@@ -325,6 +342,15 @@ impl LightingGpu {
             ResourceKind::Sampler,
         );
         let dummy_lobes = super::environment_gpu::dummy_lobes(device, queue, ledger);
+        let external_stand_in = ledger.own(
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("final gather external requests stand-in"),
+                size: 16,
+                usage: wgpu::BufferUsages::STORAGE,
+                mapped_at_creation: false,
+            }),
+            ResourceKind::Buffer,
+        );
         let limits = device.limits();
         Self {
             transmission: super::transparency_gpu::transmission_shadow::TransmissionShadow::new(
@@ -344,6 +370,7 @@ impl LightingGpu {
             dummy_environment,
             environment_sampler,
             dummy_lobes,
+            external_stand_in,
             active: None,
             retired: vec![],
             retired_hdr: vec![],
@@ -381,6 +408,11 @@ impl LightingGpu {
         self.retired.retain(|(last, _)| *last > completed);
         self.retired_hdr.retain(|(last, _)| *last > completed);
     }
+}
+/// Whether the lighting group carries binding 29, the final gather's writable view of the cache's
+/// external request list: the gather on and reading the cache at its probe hits.
+fn external_requests() -> bool {
+    crate::program::final_gather() && crate::program::cache_hits_rough().is_some()
 }
 fn computed(mut entry: wgpu::BindGroupLayoutEntry) -> wgpu::BindGroupLayoutEntry {
     entry.visibility |= wgpu::ShaderStages::COMPUTE;
@@ -545,7 +577,7 @@ impl Renderer {
                 }),
                 ResourceKind::Buffer,
             );
-            let group = |label, table: &wgpu::Buffer, outgoing: &wgpu::Buffer| {
+            let group = |label, table: &wgpu::Buffer, outgoing: &wgpu::Buffer, external: &wgpu::Buffer| {
                 self.ledger.own(
                     self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                         label: Some(label),
@@ -690,26 +722,37 @@ impl Renderer {
                                 resource: outgoing.as_entire_binding(),
                             }),
                         )
+                        .chain(external_requests().then_some(wgpu::BindGroupEntry {
+                            binding: 29,
+                            resource: external.as_entire_binding(),
+                        }))
                         .collect::<Vec<_>>(),
                     }),
                     ResourceKind::BindGroup,
                 )
             };
+            // Without cache resources the list is the cache's shared stand-in, which the table
+            // and outgoing bindings may also be.
+            let external = self.gi.external_requests();
+            let external = if std::ptr::eq(external, &*self.gi.dummy) { &*state.external_stand_in } else { external };
             let bind = group(
                 "lighting",
                 self.gi.shading_table(),
                 self.gi.shading_outgoing(),
+                external,
             );
             let kernel = group(
                 "lighting, indirect cache kernels",
                 &self.gi.dummy,
                 &self.gi.dummy,
+                &state.external_stand_in,
             );
             let cell = crate::program::cache_hits_rough().map(|_| {
                 group(
                     "lighting, indirect cache cell shading",
                     self.gi.shading_table(),
                     &self.gi.dummy,
+                    &state.external_stand_in,
                 )
             });
             let next = LightBuffer {

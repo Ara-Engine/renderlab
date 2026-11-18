@@ -252,11 +252,33 @@ fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
 fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     let traced=rl_cast(origin,d,epsilon);
     fg_hit=traced.record.x!=0u;
+    fg_unanswered=false;
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)/max(lighting.exposure,1e-30);}
-    return rl_finite(rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t).rgb);
+    let cell=rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t);
+    fg_unanswered=cell.w==0.0;
+    return rl_finite(cell.rgb);
 }
-// Whether the last fg_radiance ray met geometry (bounce) or missed into the sky.
+// Whether the last fg_radiance ray met geometry (bounce) or missed into the sky, and whether its
+// hit found no cell value (rl_cache_missed names the cell).
 var<private> fg_hit:bool;
+var<private> fg_unanswered:bool;
+// The lighting cache's external request list (gi_cache.wgsl gi_external, GiState::
+// external_requests): a probe hit without a value asks for its cell, which the cache's next frame
+// requests a band below pixels' (src/lighting_gpu.rs binds it while the gather reads the cache).
+// Word 0 the count, 1 the overflow, then four words an entry. One request a probe a frame
+// (fg_asked, one flag per probe of the workgroup): many of a probe's rays meet the same cell.
+@group(3) @binding(29) var<storage,read_write> fg_requests:array<atomic<u32>>;
+const FG_REQUESTS_MAX:u32=16384u;
+var<workgroup> fg_asked:array<atomic<u32>,2>;
+fn fg_request(cell:vec4<u32>) {
+    let i=atomicAdd(&fg_requests[0],1u);
+    if i>=min(FG_REQUESTS_MAX,(arrayLength(&fg_requests)-4u)/4u) {atomicAdd(&fg_requests[1],1u);return;}
+    let at=4u+4u*i;
+    atomicStore(&fg_requests[at],cell.x);
+    atomicStore(&fg_requests[at+1u],cell.y);
+    atomicStore(&fg_requests[at+2u],cell.z);
+    atomicStore(&fg_requests[at+3u],cell.w);
+}
 // Traces lane `ray` of a probe at s and stores its SH terms in fg_lane_sh[lane]: a miss's as the
 // sky's L2, a hit's as the bounce's L1 (zero when the probe has no surface).
 fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
@@ -266,6 +288,7 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     if s.placement!=0u {
         d=fg_direction(s.normal,ray,FG_RAYS,r);
         radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
+        if fg_hit && fg_unanswered && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
     }
     gi_sh_basis(d);
     let sky=select(radiance,vec3<f32>(0.0),fg_hit);
@@ -309,6 +332,8 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     let tile=group.y*tiles.x+group.x;
     let frame=primary_frame.sided.y;
     let slot=lane/FG_RAYS;
+    if lane<2u {atomicStore(&fg_asked[lane],0u);}
+    workgroupBarrier();
     // Slot 0: the first covered pixel of four the frame picks in the tile. Slot 1: the first of
     // eight more off slot 0's plane (every lane of a slot computes the same).
     var first:FgSurface;
@@ -450,7 +475,7 @@ var<workgroup> fg_pair:array<u32,2>;
     let block=vec2<u32>(group.x*2u+b,group.y);
     let inside=all(block<blocks);
     let index=fg_adaptive(min(block,blocks-vec2<u32>(1u)),size);
-    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(index,size),inside);}
+    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(index,size),inside);atomicStore(&fg_asked[b],0u);}
     let pair=workgroupUniformLoad(&fg_pair);
     if pair[0]==FG_NONE && pair[1]==FG_NONE {return;}
     let pick=pair[b];
