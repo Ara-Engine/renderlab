@@ -4575,11 +4575,19 @@ impl GiState {
             encoder.clear_buffer(&r.external, 0, Some(16));
         }
         // Measurement: the same rays through both software structures, each in its own mark.
+        // RENDERLAB_GI_BVH_BENCH_RS_FIRST=1 runs the reflection BVH4's pass first (whichever runs
+        // second finds the cells' records warm).
         if let Some([cache, rs]) = &p.bench {
-            mark(encoder, "gi_bench_cache");
-            main_pass(encoder, "indirect bench: cache geometry", cache, u32::MAX, Some([BVH_BENCH_GROUPS, 1]));
-            mark(encoder, "gi_bench_rs");
-            main_pass(encoder, "indirect bench: reflection BVH4", rs, u32::MAX, Some([BVH_BENCH_GROUPS, 1]));
+            let rs_first = std::env::var("RENDERLAB_GI_BVH_BENCH_RS_FIRST").as_deref() == Ok("1");
+            for second in [false, true] {
+                if second == rs_first {
+                    mark(encoder, "gi_bench_cache");
+                    main_pass(encoder, "indirect bench: cache geometry", cache, u32::MAX, Some([BVH_BENCH_GROUPS, 1]));
+                } else {
+                    mark(encoder, "gi_bench_rs");
+                    main_pass(encoder, "indirect bench: reflection BVH4", rs, u32::MAX, Some([BVH_BENCH_GROUPS, 1]));
+                }
+            }
         }
         // Bounce gathers (G2) read last frame's outgoing radiance and may request hit cells
         // for the claim rounds that follow.
