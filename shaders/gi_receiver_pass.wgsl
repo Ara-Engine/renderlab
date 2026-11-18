@@ -85,9 +85,8 @@ fn gi_rx_store_at(at:u32) {
 // - fg_trace: screen probes, FG_SLOTS per FG_TILE x FG_TILE tile on the surfaces under covered
 //   pixels the frame picks (slot 1 on a second plane where the tile holds one), each trace
 //   FG_RAYS rays over their hemisphere (hardware rays or the software trace: the module's
-//   rl_cast). A hit whose ray cone covers its cache cell takes the cell's outgoing radiance;
-//   nearer hits shade with the program (the cache read at the hit) and their own direct light.
-//   Cells reach the screen only through a hemisphere integral; misses see the sky.
+//   rl_cast). A hit takes its cache cell's outgoing radiance (fg_radiance); cells reach the
+//   screen only through a hemisphere integral. Misses see the sky.
 // - fg_filter: each tile probe's filtered copy, the probes around it on its plane weighted by
 //   their frames of history (3x3 tiles, 5x5 while its own history is short, as after a cut):
 //   neighbours' samples count as its own, so the interpolated light shows no probe pattern.
@@ -248,17 +247,70 @@ fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
 // terrain and Ara's materials have their own programs) with the cell's indirect and direct
 // light. The gather's module holds only the standard program, so shading the hit itself lost
 // all of that: a probe hit on Glint's white surfaces came out without their glow, a tenth dark
-// in sky-lit shadow. rl_cache_cell takes the ray's footprint as at least the cell where it
-// lands and walks to coarser levels past cells without a value; a hit no level answers (or
-// any hit while RENDERLAB_RL_CACHE_HITS=off leaves the stub in) sends nothing.
+// in sky-lit shadow. rl_cache_cell picks the cell (reflection_cache_hits.wgsl); a hit no level
+// answers (or any hit while RENDERLAB_RL_CACHE_HITS=off leaves the stub in) sends nothing.
 fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     let traced=rl_cast(origin,d,epsilon);
     fg_hit=traced.record.x!=0u;
+    fg_unanswered=false;
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)/max(lighting.exposure,1e-30);}
-    return rl_finite(rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t).rgb);
+    let cell=rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t);
+    fg_unanswered=cell.w==0.0;
+    // A ray that meets an emitting draw keeps its cell's reflected light and its emission weighted
+    // against the probe's emitter samples (fg_nee, multiple importance sampling).
+    let hit=primary_decode(traced.record);
+    let emission=gi_batch_emission(hit.batch);
+    if all(emission<=vec3<f32>(0.0)) {return rl_finite(cell.rgb);}
+    let a=primary_input(hit.batch,hit.ia,hit.placement);
+    let b=primary_input(hit.batch,hit.ib,hit.placement);
+    let c=primary_input(hit.batch,hit.ic,hit.placement);
+    let n=unit_normal(primary_geometric(a.position,b.position,c.position,hit.placement));
+    let light=fg_light_pdf(fg_luminance(emission),traced.t,abs(dot(n,d)));
+    let reflected=max(cell.rgb-emission,vec3<f32>(0.0));
+    return rl_finite(reflected+emission*fg_mis(FG_HEMISPHERE_PDF*f32(FG_RAYS),light*f32(FG_NEE)));
 }
-// Whether the last fg_radiance ray met geometry (bounce) or missed into the sky.
+// Probe rays are uniform over the hemisphere: their density in solid angle.
+const FG_HEMISPHERE_PDF:f32=0.15915494309189535;
+fn fg_luminance(c:vec3<f32>)->f32 { return dot(c,vec3<f32>(0.2126,0.7152,0.0722)); }
+// The density (per steradian) with which fg_nee's emitter sampling picks a direction meeting an
+// emitter of luminance `luminance`, `t` away, whose surface makes cosine `cosine` with the ray:
+// the list picks a triangle in proportion to its power (luminance pi area over the total) and a
+// point of it uniformly, so the area cancels. 0 when the list is empty.
+fn fg_light_pdf(luminance:f32,t:f32,cosine:f32)->f32 {
+    let n=gi_word(GI_H_EMITTER_COUNT);
+    if n==0u {return 0.0;}
+    let total=bitcast<f32>(gi_word(gi_emitter_cdf_at()+n-1u));
+    if !(total>0.0) {return 0.0;}
+    return luminance*3.141592653589793*t*t/(total*max(cosine,1e-4));
+}
+// The power heuristic's weight for a sample from the strategy of (count times density) `own`
+// against the other's `other` (Veach 1997).
+fn fg_mis(own:f32,other:f32)->f32 {
+    let a=own*own;
+    return a/max(a+other*other,1e-30);
+}
+// Whether the last fg_radiance ray met geometry (bounce) or missed into the sky, and whether its
+// hit found no cell value (rl_cache_missed names the cell).
 var<private> fg_hit:bool;
+var<private> fg_unanswered:bool;
+// The lighting cache's external request list (gi_cache.wgsl gi_external, GiState::
+// external_requests): a probe hit without a value asks for its cell, which the cache's next frame
+// requests a band below pixels'. The gather's own group 2 binds it (src/gi_receiver_pass.rs; the
+// probes sample no material). Word 0 the count, 1 the overflow, then four words an entry. One
+// request a probe a frame (fg_asked, one flag per probe of the workgroup): many of a probe's rays
+// meet the same cell.
+@group(2) @binding(30) var<storage,read_write> fg_requests:array<atomic<u32>>;
+const FG_REQUESTS_MAX:u32=16384u;
+var<workgroup> fg_asked:array<atomic<u32>,2>;
+fn fg_request(cell:vec4<u32>) {
+    let i=atomicAdd(&fg_requests[0],1u);
+    if i>=min(FG_REQUESTS_MAX,(arrayLength(&fg_requests)-4u)/4u) {atomicAdd(&fg_requests[1],1u);return;}
+    let at=4u+4u*i;
+    atomicStore(&fg_requests[at],cell.x);
+    atomicStore(&fg_requests[at+1u],cell.y);
+    atomicStore(&fg_requests[at+2u],cell.z);
+    atomicStore(&fg_requests[at+3u],cell.w);
+}
 // Traces lane `ray` of a probe at s and stores its SH terms in fg_lane_sh[lane]: a miss's as the
 // sky's L2, a hit's as the bounce's L1 (zero when the probe has no surface).
 fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
@@ -268,6 +320,7 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     if s.placement!=0u {
         d=fg_direction(s.normal,ray,FG_RAYS,r);
         radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
+        if fg_hit && fg_unanswered && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
     }
     gi_sh_basis(d);
     let sky=select(radiance,vec3<f32>(0.0),fg_hit);
@@ -278,6 +331,51 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     }
     for(var k=0u;k<4u;k+=1u) {
         fg_lane_sh[lane][FG_BOUNCE+k*3u]=bounce.x*gi_y[k];fg_lane_sh[lane][FG_BOUNCE+k*3u+1u]=bounce.y*gi_y[k];fg_lane_sh[lane][FG_BOUNCE+k*3u+2u]=bounce.z*gi_y[k];
+    }
+    if s.placement!=0u && ray<FG_NEE {fg_nee(lane,ray,s,r);}
+}
+// Emitters as lights (next-event estimation from the lighting cache's emitter list,
+// gi_emitters.wgsl, the list the cache's own gathers sample), combined with the probe's own rays
+// by multiple importance sampling: lanes 0 .. FG_NEE of a probe each pick one emitter triangle in
+// proportion to its power (gi_emitter_pick, the list's power CDF) and a point of it, and where
+// one ray to it is unblocked add its radiance in that direction weighted by the power heuristic
+// against the probe's 16 hemisphere rays; a hemisphere ray that meets an emitter takes the
+// complementary weight (fg_radiance). Small bright emitters (lamps, Glint's orange rims) then
+// come mostly from the samples, and large dim ones (Glint's glowing white surfaces, nearly all
+// the list's power) mostly from the rays: picked by power alone, a probe's nearby white floor was
+// almost never sampled, and its rare picks' large weights did not survive TR1. Divided by
+// fg_accumulate's per-ray scale, so the sums come out exact.
+const FG_NEE:u32=2u;
+fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
+    let h=fg_hash(r^((ray+1u)*0x9e3779b9u));
+    let pick=gi_emitter_pick(f32(h>>8u)*(1.0/16777216.0));
+    if pick.probability<=0.0 {return;}
+    let w=gi_word(GI_H_EMITTERS)+pick.index*GI_EMITTER_WORDS;
+    let e1=gi_emitter_vec(w+3u);
+    let e2=gi_emitter_vec(w+6u);
+    let g=fg_hash(h);
+    var uv=vec2<f32>(f32(g&0xffffu),f32(g>>16u))*(1.0/65536.0);
+    if uv.x+uv.y>1.0 {uv=vec2<f32>(1.0)-uv;}
+    let origin=fma(s.normal,vec3<f32>(s.epsilon),s.world);
+    let to=gi_emitter_vec(w)+e1*uv.x+e2*uv.y-origin;
+    let dist=length(to);
+    if dist<=1e-6 {return;}
+    let d=to/dist;
+    if dot(d,s.normal)<=0.0 {return;}
+    let side=cross(e1,e2);
+    let area=0.5*length(side);
+    let cosine=abs(dot(side,d))*0.5/max(area,1e-30);
+    if area<=0.0 || cosine<=1e-4 {return;}
+    let density=pick.probability*dist*dist/(area*cosine);
+    let traced=rl_cast(origin,d,s.epsilon);
+    if traced.record.x!=0u && traced.t<dist*0.999 {return;}
+    let weight=fg_mis(density*f32(FG_NEE),FG_HEMISPHERE_PDF*f32(FG_RAYS));
+    let light=gi_emitter_vec(w+9u)*(weight*FG_HEMISPHERE_PDF*f32(FG_RAYS)/(density*f32(FG_NEE)));
+    gi_sh_basis(d);
+    for(var k=0u;k<4u;k+=1u) {
+        fg_lane_sh[lane][FG_BOUNCE+k*3u]+=light.x*gi_y[k];
+        fg_lane_sh[lane][FG_BOUNCE+k*3u+1u]+=light.y*gi_y[k];
+        fg_lane_sh[lane][FG_BOUNCE+k*3u+2u]+=light.z*gi_y[k];
     }
 }
 // Folds the FG_RAYS lanes from `first` of fg_lane_sh into probe `index`, now at s: history
@@ -311,6 +409,8 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     let tile=group.y*tiles.x+group.x;
     let frame=primary_frame.sided.y;
     let slot=lane/FG_RAYS;
+    if lane<2u {atomicStore(&fg_asked[lane],0u);}
+    workgroupBarrier();
     // Slot 0: the first covered pixel of four the frame picks in the tile. Slot 1: the first of
     // eight more off slot 0's plane (every lane of a slot computes the same).
     var first:FgSurface;
@@ -452,7 +552,7 @@ var<workgroup> fg_pair:array<u32,2>;
     let block=vec2<u32>(group.x*2u+b,group.y);
     let inside=all(block<blocks);
     let index=fg_adaptive(min(block,blocks-vec2<u32>(1u)),size);
-    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(index,size),inside);}
+    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(index,size),inside);atomicStore(&fg_asked[b],0u);}
     let pair=workgroupUniformLoad(&fg_pair);
     if pair[0]==FG_NONE && pair[1]==FG_NONE {return;}
     let pick=pair[b];
