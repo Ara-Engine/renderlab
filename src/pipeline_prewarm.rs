@@ -10,6 +10,16 @@ impl Renderer {
         self.device.compiles_after_prepare()
     }
 
+    /// The selected view's own pipelines (its look and render scale applied): post. Called by
+    /// `Engine::prepare_pipelines` for each view before `prepare_scene_pipelines`.
+    pub(crate) fn prepare_view_pipelines(&mut self) -> Result<(), Error> {
+        self.check_fault()?;
+        if self.view.post_settings.enabled {
+            self.post_pipelines()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn prepare_scene_pipelines(
         &mut self,
         materials: &[&Material],

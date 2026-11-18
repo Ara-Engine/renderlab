@@ -59,10 +59,10 @@ mod tests {
 
     /// Compiles after prepare, per path ([non-RT, RT]), that the test still allows. Lower each
     /// entry as prepare covers more passes; the goal is [0, 0]. 18 Nov: 66 and 61 with
-    /// transparency only; 31 and 25 with the lighting-cache and atmosphere kernels. Left:
-    /// the passes bound to a view's state (reflection trace, hits and composite, program
-    /// lists and bins, GI cell shading and receiver, the visibility buffer, post and TR1).
-    const LATE_BOUND: [u64; 2] = [31, 25];
+    /// transparency only; 31 and 25 with the lighting-cache and atmosphere kernels; 23 and 17
+    /// with each view's post pipelines. Left: reflection trace, hits and composite, program
+    /// lists and bins, GI cell shading and receiver, the visibility buffer and TR1.
+    const LATE_BOUND: [u64; 2] = [23, 17];
 
     /// Prepare's goal: once a scene is prepared, no frame compiles a pipeline, from any view
     /// of it. Three programs (the standard floor, a second opaque program, glass), then views
@@ -131,23 +131,39 @@ mod tests {
 }
 
 impl Engine {
-    /// Creates transparent material variants for every loaded material, visible or not,
-    /// and the local-shadow atlas clear. Call after loading materials and settings, and
-    /// again after adding a level or replacing programs. No frame is rendered, histories
-    /// and particles do not advance, and no camera or output-sized target is needed.
+    /// Makes the loaded scene ready to draw: creates the pipelines its frames would otherwise
+    /// compile on first use. So far: every view's post pipelines, transparent material
+    /// variants for every loaded material (visible or not), the lighting cache's and the
+    /// atmosphere's kernels and the local-shadow atlas clear. Call after creating views and
+    /// loading materials and settings, and again after adding a level or replacing programs.
+    /// No frame is rendered, histories and particles do not advance, and no camera or
+    /// output-sized target is needed.
     ///
-    /// This synchronous call covers the scene-dependent variants in the forest cut
-    /// census; it is not a guarantee against driver first-use work or arbitrary future
-    /// settings. The default-off `RENDERLAB_PREWARM_PIPELINES=1` calls it automatically
+    /// Pipelines frames still compile afterwards are counted (`Renderer::compiles_after_prepare`)
+    /// and logged as `pipeline_compile_after_prepare`; the goal is none. Not a guarantee against
+    /// driver first-use work or arbitrary future settings. The default-off `RENDERLAB_PREWARM_PIPELINES=1` calls it automatically
     /// before the engine's first frame. Explicit calls do not need that environment flag.
     pub fn prepare_pipelines(&mut self) -> Result<PipelinePreparation, Error> {
+        use crate::ResourceKind;
+        // Each view's own pipelines first, with its look applied as its frames apply it.
+        let before = self.renderer.stats().ownership;
+        for at in 0..self.views.len() {
+            self.renderer.select_view(self.views[at].id)?;
+            self.apply_look(at)?;
+            self.renderer.prepare_view_pipelines()?;
+        }
+        let after = self.renderer.stats().ownership;
+        let made = |kind| after.get(kind).created - before.get(kind).created;
+        let (view_render, view_compute) = (made(ResourceKind::RenderPipeline), made(ResourceKind::ComputePipeline));
         let materials: Vec<_> = self
             .state
             .materials
             .ids()
             .map(|id| &self.state.materials.get(id).unwrap().material)
             .collect();
-        let report = self.renderer.prepare_scene_pipelines(&materials)?;
+        let mut report = self.renderer.prepare_scene_pipelines(&materials)?;
+        report.render_pipelines += view_render;
+        report.compute_pipelines += view_compute;
         self.prewarm_pending = false;
         eprintln!(
             "pipeline_prepare ms={:.3} render={} compute={} buffer_bytes={} texture_bytes={}",
