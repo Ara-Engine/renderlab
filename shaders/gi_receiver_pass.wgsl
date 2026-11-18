@@ -256,9 +256,38 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)/max(lighting.exposure,1e-30);}
     let cell=rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t);
     fg_unanswered=cell.w==0.0;
-    // The probe samples emitters as lights (fg_nee), so a ray that meets an emitting draw keeps
-    // its cell's reflected light only: each emitter is counted once.
-    return rl_finite(max(cell.rgb-gi_batch_emission(primary_decode(traced.record).batch),vec3<f32>(0.0)));
+    // A ray that meets an emitting draw keeps its cell's reflected light and its emission weighted
+    // against the probe's emitter samples (fg_nee, multiple importance sampling).
+    let hit=primary_decode(traced.record);
+    let emission=gi_batch_emission(hit.batch);
+    if all(emission<=vec3<f32>(0.0)) {return rl_finite(cell.rgb);}
+    let a=primary_input(hit.batch,hit.ia,hit.placement);
+    let b=primary_input(hit.batch,hit.ib,hit.placement);
+    let c=primary_input(hit.batch,hit.ic,hit.placement);
+    let n=unit_normal(primary_geometric(a.position,b.position,c.position,hit.placement));
+    let light=fg_light_pdf(fg_luminance(emission),traced.t,abs(dot(n,d)));
+    let reflected=max(cell.rgb-emission,vec3<f32>(0.0));
+    return rl_finite(reflected+emission*fg_mis(FG_HEMISPHERE_PDF*f32(FG_RAYS),light*f32(FG_NEE)));
+}
+// Probe rays are uniform over the hemisphere: their density in solid angle.
+const FG_HEMISPHERE_PDF:f32=0.15915494309189535;
+fn fg_luminance(c:vec3<f32>)->f32 { return dot(c,vec3<f32>(0.2126,0.7152,0.0722)); }
+// The density (per steradian) with which fg_nee's emitter sampling picks a direction meeting an
+// emitter of luminance `luminance`, `t` away, whose surface makes cosine `cosine` with the ray:
+// the list picks a triangle in proportion to its power (luminance pi area over the total) and a
+// point of it uniformly, so the area cancels. 0 when the list is empty.
+fn fg_light_pdf(luminance:f32,t:f32,cosine:f32)->f32 {
+    let n=gi_word(GI_H_EMITTER_COUNT);
+    if n==0u {return 0.0;}
+    let total=bitcast<f32>(gi_word(gi_emitter_cdf_at()+n-1u));
+    if !(total>0.0) {return 0.0;}
+    return luminance*3.141592653589793*t*t/(total*max(cosine,1e-4));
+}
+// The power heuristic's weight for a sample from the strategy of (count times density) `own`
+// against the other's `other` (Veach 1997).
+fn fg_mis(own:f32,other:f32)->f32 {
+    let a=own*own;
+    return a/max(a+other*other,1e-30);
 }
 // Whether the last fg_radiance ray met geometry (bounce) or missed into the sky, and whether its
 // hit found no cell value (rl_cache_missed names the cell).
@@ -306,40 +335,47 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     if s.placement!=0u && ray<FG_NEE {fg_nee(lane,ray,s,r);}
 }
 // Emitters as lights (next-event estimation from the lighting cache's emitter list,
-// gi_emitters.wgsl, the list the cache's own gathers sample): lanes 0 .. FG_NEE of a probe each
-// pick one emitter triangle in proportion to its power (gi_emitter_pick, the list's power CDF)
-// and add its exact L0 and L1 over the probe's hemisphere (gi_emitter_sh: the triangle clipped to
-// it, as a uniform polygon of its radiance) over the pick's probability, where one ray to a point
-// of it is unblocked. A thin lamp or rim then lights every probe that sees it, instead of the few
-// whose 16 rays happen to meet it; probe rays that meet an emitting draw keep only its reflected
-// light (fg_radiance). Divided by fg_accumulate's per-ray scale, so the sums come out exact.
+// gi_emitters.wgsl, the list the cache's own gathers sample), combined with the probe's own rays
+// by multiple importance sampling: lanes 0 .. FG_NEE of a probe each pick one emitter triangle in
+// proportion to its power (gi_emitter_pick, the list's power CDF) and a point of it, and where
+// one ray to it is unblocked add its radiance in that direction weighted by the power heuristic
+// against the probe's 16 hemisphere rays; a hemisphere ray that meets an emitter takes the
+// complementary weight (fg_radiance). Small bright emitters (lamps, Glint's orange rims) then
+// come mostly from the samples, and large dim ones (Glint's glowing white surfaces, nearly all
+// the list's power) mostly from the rays: picked by power alone, a probe's nearby white floor was
+// almost never sampled, and its rare picks' large weights did not survive TR1. Divided by
+// fg_accumulate's per-ray scale, so the sums come out exact.
 const FG_NEE:u32=2u;
 fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
     let h=fg_hash(r^((ray+1u)*0x9e3779b9u));
     let pick=gi_emitter_pick(f32(h>>8u)*(1.0/16777216.0));
     if pick.probability<=0.0 {return;}
     let w=gi_word(GI_H_EMITTERS)+pick.index*GI_EMITTER_WORDS;
-    let a=gi_emitter_vec(w);
     let e1=gi_emitter_vec(w+3u);
     let e2=gi_emitter_vec(w+6u);
-    let sh=gi_emitter_sh(s.world,s.normal,a,a+e1,a+e2);
-    if sh.x<=2.8e-7 {return;}
     let g=fg_hash(h);
     var uv=vec2<f32>(f32(g&0xffffu),f32(g>>16u))*(1.0/65536.0);
     if uv.x+uv.y>1.0 {uv=vec2<f32>(1.0)-uv;}
-    var x=a+e1*uv.x+e2*uv.y;
-    if dot(x-s.world,s.normal)<=0.0 {x=a+(e1+e2)*(1.0/3.0);}
     let origin=fma(s.normal,vec3<f32>(s.epsilon),s.world);
-    let to=x-origin;
+    let to=gi_emitter_vec(w)+e1*uv.x+e2*uv.y-origin;
     let dist=length(to);
     if dist<=1e-6 {return;}
-    let traced=rl_cast(origin,to/dist,s.epsilon);
+    let d=to/dist;
+    if dot(d,s.normal)<=0.0 {return;}
+    let side=cross(e1,e2);
+    let area=0.5*length(side);
+    let cosine=abs(dot(side,d))*0.5/max(area,1e-30);
+    if area<=0.0 || cosine<=1e-4 {return;}
+    let density=pick.probability*dist*dist/(area*cosine);
+    let traced=rl_cast(origin,d,s.epsilon);
     if traced.record.x!=0u && traced.t<dist*0.999 {return;}
-    let light=gi_emitter_vec(w+9u)*(f32(FG_RAYS)*0.15915494309189535/(f32(FG_NEE)*pick.probability));
+    let weight=fg_mis(density*f32(FG_NEE),FG_HEMISPHERE_PDF*f32(FG_RAYS));
+    let light=gi_emitter_vec(w+9u)*(weight*FG_HEMISPHERE_PDF*f32(FG_RAYS)/(density*f32(FG_NEE)));
+    gi_sh_basis(d);
     for(var k=0u;k<4u;k+=1u) {
-        fg_lane_sh[lane][FG_BOUNCE+k*3u]+=light.x*sh[k];
-        fg_lane_sh[lane][FG_BOUNCE+k*3u+1u]+=light.y*sh[k];
-        fg_lane_sh[lane][FG_BOUNCE+k*3u+2u]+=light.z*sh[k];
+        fg_lane_sh[lane][FG_BOUNCE+k*3u]+=light.x*gi_y[k];
+        fg_lane_sh[lane][FG_BOUNCE+k*3u+1u]+=light.y*gi_y[k];
+        fg_lane_sh[lane][FG_BOUNCE+k*3u+2u]+=light.z*gi_y[k];
     }
 }
 // Folds the FG_RAYS lanes from `first` of fg_lane_sh into probe `index`, now at s: history
