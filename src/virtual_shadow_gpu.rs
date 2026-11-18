@@ -516,6 +516,9 @@ struct Pipelines {
     mip_sparse: Owned<wgpu::ComputePipeline>,
     /// The Disk lookup's outline bits per drawn page (vsm_outline_dense, vsm_outline_sparse).
     outline: [Owned<wgpu::ComputePipeline>; 2],
+    /// The covered fraction's count into the top words of the drawn texels (vsm_fold_dense,
+    /// vsm_fold_sparse; `fraction_on`).
+    fold: [Owned<wgpu::ComputePipeline>; 2],
 }
 struct Layouts {
     mark: Owned<wgpu::BindGroupLayout>,
@@ -635,7 +638,8 @@ struct Resources {
     reach: Owned<wgpu::Buffer>,
     /// The Disk lookup's edge pixel counts (WGSL `vd_edge_count`).
     edges: Owned<wgpu::Buffer>,
-    /// The covered fraction (`fraction_on`): a byte a texel, the top map's index; four bytes
+    /// The covered fraction's raster scratch (`fraction_on`): the near layer's sample bits, a
+    /// byte a texel at the top map's index, which vsm_fold counts into the top words; four bytes
     /// when off.
     cover: Owned<wgpu::Buffer>,
     /// The Disk lookup's per-pixel answer history, two halves ping-ponged by frame (WGSL
@@ -1576,8 +1580,6 @@ impl VirtualState {
                     storage(62, false, S::COMPUTE),
                     // Held views: the per-pixel answer history.
                     storage(63, false, S::COMPUTE),
-                    // The covered fraction's sample bits (`fraction_on`).
-                    storage(66, true, S::COMPUTE),
                 ],
             ),
         };
@@ -1814,6 +1816,10 @@ impl VirtualState {
             outline: [
                 compute("vsm_outline_dense", &outline_layout, &[]),
                 compute("vsm_outline_sparse", &outline_layout, &[]),
+            ],
+            fold: [
+                compute("vsm_fold_dense", &clear_layout, &[]),
+                compute("vsm_fold_sparse", &clear_layout, &[]),
             ],
         };
         Self {
@@ -3697,7 +3703,6 @@ impl Renderer {
                         buffer(56, &r.outline),
                         buffer(62, &r.edges),
                         buffer(63, &r.history),
-                        buffer(66, &r.cover),
                     ],
                 ),
                 queued: group(
@@ -4114,6 +4119,17 @@ impl Renderer {
             label: Some("N8c clipmap max-mips"),
             timestamp_writes: None,
         });
+        // The covered fraction's count into the drawn texels' top words (before the mips read them).
+        if fraction_on() {
+            pass.set_bind_group(0, &*g.raster, &[]);
+            if r.sparse {
+                pass.set_pipeline(&p.fold[1]);
+                pass.dispatch_workgroups_indirect(&r.pool, 0);
+            } else {
+                pass.set_pipeline(&p.fold[0]);
+                pass.dispatch_workgroups(slots as u32, 1, 1);
+            }
+        }
         // The Disk lookup's outline lines of the pages drawn this frame (edges on only).
         if state.settings.lookup == VirtualLookup::Disk && edges_on() {
             pass.set_bind_group(0, &*g.mip, &[]);
