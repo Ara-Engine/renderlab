@@ -301,7 +301,7 @@ impl Engine {
     /// Gives view `at` (selected) its look and render scale, unless it holds them already.
     /// The renderer keeps each view's look with the view, so views with different looks
     /// restart nothing when they alternate.
-    fn apply_look(&mut self, at: usize) -> Result<(), Error> {
+    pub(super) fn apply_look(&mut self, at: usize) -> Result<(), Error> {
         if self.views[at].applied {
             return Ok(());
         }

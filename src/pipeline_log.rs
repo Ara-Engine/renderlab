@@ -25,12 +25,13 @@ impl PipelineLog {
 
     /// A frame-end marker associates preceding compile events with this submission.
     /// The first marker also includes pipelines compiled while loading the engine/scene.
-    pub fn frame(&self, renderer: &Renderer, report: &FrameReport) {
+    /// `late` is the count of pipelines compiled since the last prepare.
+    pub fn frame(&self, renderer: &Renderer, report: &FrameReport, late: u64) {
         let stats = renderer.stats();
         let owned = &stats.ownership;
         let hw = renderer.hardware_shadow_stats();
         self.line(&format!(
-            "{{\"event\":\"frame\",\"frame\":{},\"render_created\":{},\"compute_created\":{},\"shader_created\":{},\"blas_created\":{},\"tlas_created\":{},\"blas_builds\":{},\"blas_updates\":{},\"tlas_builds\":{},\"target_bytes\":{},\"shadow_bytes\":{},\"visible_instances\":{}}}",
+            "{{\"event\":\"frame\",\"frame\":{},\"render_created\":{},\"compute_created\":{},\"shader_created\":{},\"blas_created\":{},\"tlas_created\":{},\"blas_builds\":{},\"blas_updates\":{},\"tlas_builds\":{},\"target_bytes\":{},\"shadow_bytes\":{},\"visible_instances\":{},\"compiles_after_prepare\":{}}}",
             report.frame.0,
             owned.get(ResourceKind::RenderPipeline).created,
             owned.get(ResourceKind::ComputePipeline).created,
@@ -43,6 +44,7 @@ impl PipelineLog {
             owned.target_bytes.live,
             owned.shadow_bytes.live,
             report.scene.visible_instances,
+            late,
         ));
     }
 

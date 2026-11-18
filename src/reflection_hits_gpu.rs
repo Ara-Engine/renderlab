@@ -48,9 +48,24 @@ impl Renderer {
         } else {
             vec![state.program]
         };
+        self.ensure_reflection_hits_for(&ids, mixed, shading)
+    }
+
+    /// The hit pipelines of programs `ids` for `shading`, with the list ABI when `mixed`.
+    /// Frames call it through `ensure_reflection_hits`; prepare with every loaded program.
+    /// Mixed entries need the programs' list pipelines first (`ensure_lists`).
+    pub(crate) fn ensure_reflection_hits_for(
+        &mut self,
+        ids: &[u64],
+        mixed: bool,
+        shading: Shading,
+    ) -> Result<(), Error> {
+        if !reflection_pass::on(&self.device) || self.view.primary.as_ref().is_none_or(|s| s.requests) {
+            return Ok(());
+        }
         let shading = shading as usize;
         let map = self.hit_sun_buffers().is_some();
-        for id in ids {
+        for &id in ids {
             let pipelines = &self.program_slot(id).pipelines;
             if pipelines.hits[usize::from(mixed)][shading].is_some()
                 && pipelines.hits_sun[usize::from(mixed)][shading] == map

@@ -12,14 +12,7 @@ pub(super) struct PostGpu {
     ping: [Depth; 2],
     down: Vec<Depth>,
     up: Vec<Depth>,
-    compute_layout: Owned<wgpu::BindGroupLayout>,
-    kernels: [Owned<wgpu::ComputePipeline>; 5],
-    primary_layout: Option<Owned<wgpu::BindGroupLayout>>,
-    primary_pipeline: Option<Owned<wgpu::ComputePipeline>>,
-    raster_layout: Owned<wgpu::BindGroupLayout>,
-    raster_pipeline: Owned<wgpu::ComputePipeline>,
-    tone_layout: Owned<wgpu::BindGroupLayout>,
-    tone: Owned<wgpu::RenderPipeline>,
+    pipelines: std::sync::Arc<PostPipelines>,
     sampler: Owned<wgpu::Sampler>,
     lut: Depth,
     retired_luts: Vec<(u64, Depth)>,
@@ -30,6 +23,21 @@ pub(super) struct PostGpu {
     serial: u32,
     // Bindings are rebuilt only when input textures or enabled stage topology change.
     groups: Option<Groups>,
+}
+/// Post's layouts and pipelines. They depend on the output format, the MSAA count and, for
+/// the primary surface, the primary state's array layout (`key`), never on the size: every
+/// size's `PostGpu` shares them and the renderer keeps them (`Renderer::post_pipelines`), so
+/// a resize builds targets only and `prepare_scene_pipelines` builds them before a frame.
+pub(super) struct PostPipelines {
+    key: (wgpu::TextureFormat, SampleCount, Option<wgpu::BindGroupLayout>),
+    compute_layout: Owned<wgpu::BindGroupLayout>,
+    kernels: [Owned<wgpu::ComputePipeline>; 5],
+    primary_layout: Option<Owned<wgpu::BindGroupLayout>>,
+    primary_pipeline: Option<Owned<wgpu::ComputePipeline>>,
+    raster_layout: Owned<wgpu::BindGroupLayout>,
+    raster_pipeline: Owned<wgpu::ComputePipeline>,
+    tone_layout: Owned<wgpu::BindGroupLayout>,
+    tone: Owned<wgpu::RenderPipeline>,
 }
 struct Groups {
     key: (wgpu::Texture, Option<wgpu::Texture>, bool, bool, bool),
@@ -224,7 +232,13 @@ impl PostGpu {
     pub(in crate::renderer) fn test_surface(&self) -> &wgpu::Texture {
         &self.aux.texture
     }
-    fn new(r: &Renderer, size: wgpu::Extent3d) -> Result<Self, Error> {
+}
+
+impl PostPipelines {
+    fn key_of(r: &Renderer) -> (wgpu::TextureFormat, SampleCount, Option<wgpu::BindGroupLayout>) {
+        (r.format, r.options.samples, r.view.primary.as_ref().map(|p| p.array_layout().clone()))
+    }
+    fn new(r: &Renderer) -> Result<Self, Error> {
         use wgpu::{TextureFormat as F, TextureSampleType as T};
         let float = T::Float { filterable: false };
         let compute_layout = layout(
@@ -362,6 +376,23 @@ impl PostGpu {
                 }),
             ResourceKind::RenderPipeline,
         );
+        Ok(Self {
+            key: Self::key_of(r),
+            compute_layout,
+            kernels,
+            primary_layout,
+            primary_pipeline,
+            raster_layout,
+            raster_pipeline,
+            tone_layout,
+            tone,
+        })
+    }
+}
+
+impl PostGpu {
+    fn new(r: &Renderer, pipelines: std::sync::Arc<PostPipelines>, size: wgpu::Extent3d) -> Result<Self, Error> {
+        use wgpu::TextureFormat as F;
         let sampler = r.ledger.own(
             r.device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("post linear clamp"),
@@ -426,14 +457,7 @@ impl PostGpu {
             ],
             down,
             up,
-            compute_layout,
-            kernels,
-            primary_layout,
-            primary_pipeline,
-            raster_layout,
-            raster_pipeline,
-            tone_layout,
-            tone,
+            pipelines,
             sampler,
             lut: texture(
                 r,
@@ -567,7 +591,7 @@ impl PostGpu {
             group(
                 r,
                 "post primary surface",
-                self.primary_layout.as_ref().unwrap(),
+                self.pipelines.primary_layout.as_ref().unwrap(),
                 &[
                     (7, R::TextureView(&t.hit.view)),
                     (10, p.frame_buffer().as_entire_binding()),
@@ -580,7 +604,7 @@ impl PostGpu {
             group(
                 r,
                 "post raster surface",
-                &self.raster_layout,
+                &self.pipelines.raster_layout,
                 &[
                     (0, R::TextureView(&r.view.depth.as_ref().unwrap().view)),
                     (1, self.frame.value.as_entire_binding()),
@@ -592,7 +616,7 @@ impl PostGpu {
             group(
                 r,
                 "post filter",
-                &self.compute_layout,
+                &self.pipelines.compute_layout,
                 &[
                     (0, R::TextureView(&a.view)),
                     (1, R::TextureView(&b.view)),
@@ -608,7 +632,7 @@ impl PostGpu {
         let tile = group(
             r,
             "post tile max",
-            &self.compute_layout,
+            &self.pipelines.compute_layout,
             &[
                 (0, R::TextureView(&hdr.view)),
                 (1, R::TextureView(&hdr.view)),
@@ -653,7 +677,7 @@ impl PostGpu {
         let tone = group(
             r,
             "post tone",
-            &self.tone_layout,
+            &self.pipelines.tone_layout,
             &[
                 (0, R::TextureView(&colour.view)),
                 (1, R::TextureView(&bloom.view)),
@@ -745,9 +769,9 @@ impl PostGpu {
                 timestamp_writes: None,
             });
             pass.set_pipeline(if primary {
-                self.primary_pipeline.as_ref().unwrap()
+                self.pipelines.primary_pipeline.as_ref().unwrap()
             } else {
-                &self.raster_pipeline
+                &self.pipelines.raster_pipeline
             });
             pass.set_bind_group(0, &*g.surface, &[]);
             if primary {
@@ -773,7 +797,7 @@ impl PostGpu {
                 label: Some("post filter"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.kernels[k]);
+            pass.set_pipeline(&self.pipelines.kernels[k]);
             pass.set_bind_group(0, group, &[]);
             pass.dispatch_workgroups(size.width.div_ceil(8), size.height.div_ceil(8), 1);
         };
@@ -794,7 +818,7 @@ impl PostGpu {
         }
     }
     pub(super) fn tone<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>) {
-        pass.set_pipeline(&self.tone);
+        pass.set_pipeline(&self.pipelines.tone);
         pass.set_bind_group(0, &*self.groups.as_ref().unwrap().tone, &[]);
     }
 }
@@ -850,22 +874,34 @@ impl Renderer {
             post.previous = None;
         }
     }
+    /// Post's pipelines for the selected view, built the first time their key is seen and
+    /// kept for the renderer's life (a few entries: one per output format, MSAA count and
+    /// primary layout). Called by `prepare_post` and `prepare_scene_pipelines`.
+    pub(super) fn post_pipelines(&mut self) -> Result<std::sync::Arc<PostPipelines>, Error> {
+        let key = PostPipelines::key_of(self);
+        if let Some(p) = self.post_pipelines.iter().find(|p| p.key == key) {
+            return Ok(p.clone());
+        }
+        let p = std::sync::Arc::new(PostPipelines::new(self)?);
+        self.pipelines.created += p.kernels.len() as u64
+            + 2 // raster auxiliary and tone
+            + u64::from(p.primary_pipeline.is_some());
+        self.post_pipelines.push(p.clone());
+        Ok(p)
+    }
     pub(super) fn prepare_post(&mut self, camera: &Camera, primary: bool) -> Result<(), Error> {
         if !self.view.post_settings.enabled {
             return Ok(());
         }
         let size = self.post_hdr().texture.size();
+        let pipelines = self.post_pipelines()?;
         let mut post = match self.view.post.take() {
-            Some(p) if p.size == size && (!primary || p.primary_pipeline.is_some()) => p,
+            Some(p) if p.size == size && std::sync::Arc::ptr_eq(&p.pipelines, &pipelines) => p,
             old => {
                 if let Some(old) = old {
                     self.retired_post.push((self.submissions, old));
                 }
-                let post = PostGpu::new(self, size)?;
-                self.pipelines.created += post.kernels.len() as u64
-                    + 2 // raster auxiliary and tone
-                    + u64::from(post.primary_pipeline.is_some());
-                post
+                PostGpu::new(self, pipelines, size)?
             }
         };
         if post.serial == 0 {
