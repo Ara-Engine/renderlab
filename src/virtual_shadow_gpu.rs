@@ -2027,8 +2027,14 @@ impl VirtualState {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::R32Uint,
+                    // Tests write and read the receiver levels (test_stale_levels, test_levels).
                     usage: wgpu::TextureUsages::STORAGE_BINDING
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | if cfg!(test) {
+                            wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST
+                        } else {
+                            wgpu::TextureUsages::empty()
+                        },
                     view_formats: &[],
                 }),
                 ResourceKind::Texture,
