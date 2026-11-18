@@ -264,10 +264,11 @@ var<private> fg_hit:bool;
 var<private> fg_unanswered:bool;
 // The lighting cache's external request list (gi_cache.wgsl gi_external, GiState::
 // external_requests): a probe hit without a value asks for its cell, which the cache's next frame
-// requests a band below pixels' (src/lighting_gpu.rs binds it while the gather reads the cache).
-// Word 0 the count, 1 the overflow, then four words an entry. One request a probe a frame
-// (fg_asked, one flag per probe of the workgroup): many of a probe's rays meet the same cell.
-@group(3) @binding(29) var<storage,read_write> fg_requests:array<atomic<u32>>;
+// requests a band below pixels'. The gather's own group 2 binds it (src/gi_receiver_pass.rs; the
+// probes sample no material). Word 0 the count, 1 the overflow, then four words an entry. One
+// request a probe a frame (fg_asked, one flag per probe of the workgroup): many of a probe's rays
+// meet the same cell.
+@group(2) @binding(30) var<storage,read_write> fg_requests:array<atomic<u32>>;
 const FG_REQUESTS_MAX:u32=16384u;
 var<workgroup> fg_asked:array<atomic<u32>,2>;
 fn fg_request(cell:vec4<u32>) {

@@ -273,10 +273,18 @@ pub(super) struct Targets {
     region: [u32; 4],
     clear_keys: bool,
     /// The final gather (`program::final_gather`): its trace, filter, adaptive-probe and
-    /// resolve pipelines per `Shading`, on the shading layout (hits sample materials). Its
-    /// probes, FG_SLOTS per FG_TILE tile, one per FG_BLOCK block and the tile probes' filtered
-    /// copies, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe).
+    /// resolve pipelines per `Shading`. Its probes, FG_SLOTS per FG_TILE tile, one per FG_BLOCK
+    /// block and the tile probes' filtered copies, follow the pixels' records in `values`
+    /// (gi_receiver_pass.wgsl FgProbe).
     gather: [Option<[Owned<wgpu::ComputePipeline>; 5]>; 2],
+    /// The gather's group 2: its probes read cache cells and sample no material, so instead of
+    /// the materials group it binds the cache's external request list (binding 30), where hits
+    /// without a cell value ask for their cells. Not in the shared lighting group: one more
+    /// writable buffer there put the reflection hits' pipeline over the per-stage storage limit.
+    gather_group: Option<Owned<wgpu::BindGroupLayout>>,
+    /// Binding 30's stand-in while the cache has no resources (its own stand-in is bound
+    /// read-only in the lighting group): four words, no room for an entry.
+    requests_stand_in: Option<Buffer>,
     tiles: [u32; 2],
     blocks: [u32; 2],
 }
@@ -341,6 +349,9 @@ impl Renderer {
             region: [0; 4],
             clear_keys: false,
             gather: [None, None],
+            gather_group: None,
+            requests_stand_in: program::final_gather()
+                .then(|| Buffer::new(self, "final gather requests stand-in", 16, wgpu::BufferUsages::STORAGE)),
             tiles: [size.width.div_ceil(FG_TILE), size.height.div_ceil(FG_TILE)],
             blocks: [size.width.div_ceil(FG_BLOCK), size.height.div_ceil(FG_BLOCK)],
         }
@@ -435,6 +446,7 @@ impl Renderer {
         );
         let mut lean_built = None;
         let mut gather = None;
+        let mut gather_group = None;
         if lean() {
             let lean_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("GI receiver ABI, lean"),
@@ -454,14 +466,31 @@ impl Renderer {
         }
         let is_lean = lean_built.is_some();
         if program::final_gather() {
-            let layout = &state.shade_layouts[shading as usize];
+            let group = self.ledger.own(
+                self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("final gather, group 2"),
+                    entries: &[storage(30, 16)],
+                }),
+                ResourceKind::BindGroupLayout,
+            );
+            let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("final gather ABI"),
+                bind_group_layouts: &[
+                    Some(&state.shade_bindings[shading as usize]),
+                    Some(&state.array_bindings),
+                    Some(&group),
+                    Some(&self.lighting.bindings),
+                ],
+                immediate_size: 0,
+            });
             gather = Some([
-                build_entry(layout, "fg_trace"),
-                build_entry(layout, "fg_filter"),
-                build_entry(layout, "fg_classify"),
-                build_entry(layout, "fg_adapt"),
-                build_entry(layout, "fg_resolve"),
+                build_entry(&layout, "fg_trace"),
+                build_entry(&layout, "fg_filter"),
+                build_entry(&layout, "fg_classify"),
+                build_entry(&layout, "fg_adapt"),
+                build_entry(&layout, "fg_resolve"),
             ]);
+            gather_group = Some(group);
         }
         let pipeline = lean_built.unwrap_or_else(|| build(&state.shade_layouts[shading as usize]));
         let mut group = Vec::new();
@@ -514,6 +543,9 @@ impl Renderer {
         target.lean[shading as usize] = is_lean;
         target.empty = Some(empty);
         target.gather[shading as usize] = gather;
+        if gather_group.is_some() {
+            target.gather_group = gather_group;
+        }
         Ok(())
     }
     pub(crate) fn encode_gi_receiver_pass(
@@ -555,9 +587,20 @@ impl Renderer {
             None => pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]),
         }
         pass.set_bind_group(3, self.lighting.bind(), &[]);
-        if let Some([trace, filter, classify, adapt, resolve]) = target.gather[shading as usize].as_ref() {
-            // Hits shade with their materials: the full group 2.
-            pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
+        if let (Some([trace, filter, classify, adapt, resolve]), Some(layout), Some(stand_in)) = (
+            target.gather[shading as usize].as_ref(),
+            target.gather_group.as_ref(),
+            target.requests_stand_in.as_ref(),
+        ) {
+            // The cache's list is replaced when its table grows, so the group follows it each frame.
+            let requests = self.gi.external_requests();
+            let requests = if std::ptr::eq(requests, &*self.gi.dummy) { &*stand_in.value } else { requests };
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("final gather, group 2"),
+                layout,
+                entries: &[wgpu::BindGroupEntry { binding: 30, resource: requests.as_entire_binding() }],
+            });
+            pass.set_bind_group(2, &group, &[]);
             pass.set_pipeline(trace);
             pass.dispatch_workgroups(target.tiles[0], target.tiles[1], 1);
             pass.set_pipeline(filter);
