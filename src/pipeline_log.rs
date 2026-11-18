@@ -44,6 +44,37 @@ impl PipelineLog {
             owned.shadow_bytes.live,
             report.scene.visible_instances,
         ));
+        // Measurement: the allocator's totals every frame, and at RENDERLAB_ALLOCATION_REPORT=<frame> every live
+        // allocation grouped by label (bytes and count), to diff two runs of one scene.
+        self.line(&format!(
+            "{{\"event\":\"memory\",\"frame\":{},\"buffer_bytes\":{},\"texture_bytes\":{},\"allocated_bytes\":{},\"reserved_bytes\":{}}}",
+            report.frame.0,
+            stats.hal.buffer_bytes,
+            stats.hal.texture_bytes,
+            stats.allocator.as_ref().map_or(0, |a| a.allocated_bytes),
+            stats.allocator.as_ref().map_or(0, |a| a.reserved_bytes),
+        ));
+        static AT: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        let at = *AT.get_or_init(|| std::env::var("RENDERLAB_ALLOCATION_REPORT").ok().and_then(|v| v.trim().parse().ok()));
+        if at == Some(report.frame.0) {
+            if let Some(allocator) = renderer.device().generate_allocator_report() {
+                let mut by_label: std::collections::BTreeMap<&str, (u64, u64)> = Default::default();
+                for a in &allocator.allocations {
+                    let entry = by_label.entry(a.name.as_str()).or_default();
+                    entry.0 += a.size;
+                    entry.1 += 1;
+                }
+                let items: Vec<String> = by_label
+                    .iter()
+                    .map(|(name, (bytes, count))| format!("[{},{},{}]", json_string(name), bytes, count))
+                    .collect();
+                self.line(&format!(
+                    "{{\"event\":\"allocations\",\"frame\":{},\"labels\":[{}]}}",
+                    report.frame.0,
+                    items.join(",")
+                ));
+            }
+        }
     }
 
     fn line(&self, line: &str) {
