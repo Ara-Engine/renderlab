@@ -451,15 +451,24 @@ pub(crate) struct Observation {
     pub completion: Completion,
     pub gpu: Option<GpuSample>,
 }
+/// Observations waiting for the embedder's next poll. At most 16 keep their GPU sample; past
+/// that the oldest sample is dropped (`dropped` counts them) but its completion is kept, so an
+/// embedder waiting on a frame always hears that it finished. A scene start completes dozens of
+/// upload submissions between two polls; dropping whole observations lost frame completions and
+/// left Ara waiting its 5 s frame timeout for a frame the GPU had already finished.
 #[derive(Default)]
 pub(crate) struct EventQueue {
     items: VecDeque<Observation>,
+    /// Completions whose observations overflowed, in order, without their samples.
+    overflow: Vec<Completion>,
     pub dropped: u64,
 }
 impl EventQueue {
     pub fn push(&mut self, event: Observation) {
         if self.items.len() == 16 {
-            self.items.pop_front();
+            if let Some(oldest) = self.items.pop_front() {
+                self.overflow.push(oldest.completion);
+            }
             self.dropped += 1;
         }
         self.items.push_back(event);
@@ -470,6 +479,7 @@ impl EventQueue {
             poll_cpu,
             ..Events::default()
         };
+        events.completed.extend(self.overflow.drain(..));
         for event in self.items.drain(..) {
             events.completed.push(event.completion);
             if let Some(gpu) = event.gpu {
@@ -491,4 +501,38 @@ pub struct LightingStats {
     pub retained_light_generations: usize,
     pub retained_target_generations: usize,
     pub lut_bytes: u64,
+}
+
+#[cfg(test)]
+mod event_queue_tests {
+    use super::*;
+
+    /// A scene start completes dozens of upload submissions between two polls. The queue keeps
+    /// every completion, a frame's included, in submission order; only the oldest observations'
+    /// GPU samples are dropped and counted. (It dropped whole observations, and Ara waited its 5 s
+    /// frame timeout for a frame the GPU had finished.)
+    #[test]
+    fn an_overflowing_queue_keeps_every_completion() {
+        let now = Instant::now();
+        let completion = |submission: u64, frame: Option<u64>| Completion {
+            submission,
+            frame: frame.map(FrameId),
+            view: None,
+            revision: Revision(0),
+            observed_at: now,
+            submitted_at: now,
+        };
+        let mut queue = EventQueue::default();
+        queue.push(Observation { completion: completion(0, Some(7)), gpu: None });
+        for submission in 1..40 {
+            queue.push(Observation { completion: completion(submission, None), gpu: None });
+        }
+        let events = queue.drain(Duration::ZERO);
+        let order: Vec<u64> = events.completed.iter().map(|c| c.submission).collect();
+        assert_eq!(order, (0..40).collect::<Vec<_>>());
+        assert_eq!(events.completed[0].frame, Some(FrameId(7)));
+        assert_eq!(events.dropped, 24);
+        // Drained: the next poll starts empty.
+        assert!(queue.drain(Duration::ZERO).completed.is_empty());
+    }
 }
