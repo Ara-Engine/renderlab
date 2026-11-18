@@ -106,7 +106,7 @@ const FG_SLOTS:u32=2u;
 const FG_BLOCK:u32=8u;
 const FG_RAYS:u32=16u;
 const FG_HISTORY:f32=16.0;
-// Half-rate tracing (fg_trace) for probes with at least FG_HALF_MIN frames of history.
+// Half-rate tracing (fg_trace and fg_adapt) for probes with at least FG_HALF_MIN frames of history.
 const FG_HALF_RATE:bool=true;
 const FG_HALF_MIN:f32=4.0;
 // A probe ray's cone: its share of the hemisphere (2 pi / FG_RAYS sr) as an angle, so its
@@ -578,9 +578,16 @@ var<workgroup> fg_pair:array<u32,2>;
         pixel=block*FG_BLOCK+vec2<u32>(pick%FG_BLOCK,pick/FG_BLOCK);
         s=fg_surface_at(pixel,size,false);
     }
-    fg_lane(lane,lane%FG_RAYS,s,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
+    // Half rate, as the tile probes (fg_trace): on alternate frames a checkerboard of blocks keeps
+    // a probe that has history and still lies on the plane under its pick, instead of tracing it.
+    let old=fg_plane(index,size);
+    let keep=FG_HALF_RATE && ((block.x+block.y+frame)&1u)==1u && s.placement!=0u && old.point.w>=FG_HALF_MIN
+        && dot(old.normal.xyz,s.normal)>0.9 && abs(dot(old.normal.xyz,s.world-old.point.xyz))<0.5*FG_PLANE*old.normal.w;
+    var traced=s;
+    if keep {traced.placement=0u;}
+    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
     workgroupBarrier();
-    if lane%FG_RAYS!=0u || pick==FG_NONE || s.placement==0u {return;}
+    if lane%FG_RAYS!=0u || pick==FG_NONE || s.placement==0u || keep {return;}
     fg_accumulate(index,size,b*FG_RAYS,s,pixel);
 }
 @compute @workgroup_size(8,4) fn fg_resolve(@builtin(global_invocation_id) grid:vec3<u32>) {
