@@ -149,6 +149,22 @@ impl Engine {
         if atmosphere.height_fog.is_some_and(|f| f.start_distance > 0.0) {
             not_traced.push("the height fog's start distance (fog is traced from the eye)".into());
         }
+        // Measurement (RENDERLAB_ABLATE `sun`, `sky`, `lights`, as Engine::apply_lighting takes them
+        // out of the frame): the reference drops the same sources, so one light term is judged on
+        // both sides. The embedder's state, which this reads, keeps them. (gicut, be6ae308)
+        let ablate = |feature: &str| {
+            std::env::var("RENDERLAB_ABLATE").is_ok_and(|list| list.split(',').any(|f| f.trim() == feature))
+        };
+        let sun = if ablate("sun") { None } else { sun };
+        if ablate("lights") {
+            lights.clear();
+            light_radii.clear();
+        }
+        let (sky, environment) = if ablate("sky") {
+            ([0.0; 3], environment.map(|e| crate::reference::Environment { intensity: 0.0, ..e }))
+        } else {
+            (sky, environment)
+        };
         let inputs = crate::reference_live::LiveInputs {
             eye,
             forward,
