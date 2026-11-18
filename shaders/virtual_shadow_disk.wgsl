@@ -724,23 +724,15 @@ fn vd_above(q:vec3<f32>,margin:f32)->bool {
 // The columns of one map texel, `cell` of `level`, standing for a square of side `size` centred
 // `c` (light xy): a level's own texel, or the one texel read for a max-mip cell `stride` texels
 // wide. `lo`..`hi` is the band of heights being served, `margin` the near-field bias.
-// Band jitter (`RENDERLAB_VD=VD_BAND_JITTER=0` off): the receiver jitter spans a texel of the
-// receiver's level, far less than a high caster's band texel, so TR1 never averaged those
-// columns' stairs (Glint's rails, the pole). A band above the receiver's level reads its columns
-// from the receiver moved by the same unit offset times VD_BAND_JITTER of its own texel (light
-// xy; the tangent-plane tests keep the receiver's point): TR1 averages each stair into a ramp
-// one band texel wide.
-override VD_BAND_JITTER:f32=0.5;
-var<private> vd_shift:vec2<f32>;
-fn vd_band_shift(texel:f32)->vec2<f32> {
-    return vd_px.jitter*VD_BAND_JITTER*max(texel-vsm_texel(vd_px.level),0.0);
-}
+// Every band reads its columns from the receiver's own point: moving a coarse band's read point
+// by part of its texel (the former band jitter) carried it off occluders thinner than that texel
+// on some frames, which TR1 averaged into lit streaks inside their shadows.
 fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,hi:f32,margin:f32) {
     let i=vsm_index(cell,level);
     if i==VSM_NONE {return;}
     let top=vsm_top_words[i];
     if top.x==0u {return;}
-    let p=vd_px.p+vec3<f32>(vd_shift,0.0);
+    let p=vd_px.p;
     let height=vsm_height(top);
     let t=height-p.z;
     let lo=lo_in;
@@ -781,6 +773,12 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     }
     let clo=max(max(bottom,lo),1e-6*size);let chi=min(t,hi);
     var m=vd_column_mask(c-p.xy,0.5*size,clo,chi);
+    // The covered fraction: a level's own texel (not a max-mip cell) whose near layer covers k
+    // of its 8 samples blocks k/8 of the directions its column would block (vd_keep).
+    if VD_FRACTION && stride==1 {
+        let k=countOneBits((vd_cover[i>>2u]>>((i&3u)*8u))&255u);
+        if k>0u && k<8u {m&=vd_keep(8u*k,vd_hash(i));}
+    }
     // The split: a partial column of a band above the receiver's level draws its outline at a
     // finer texel (vd_split); the band still sets the blur width.
     if VD_SPLIT && stride==1 && level>vd_px.level && any((m&~vd_mask)!=vec2<u32>(0u)) && any(m!=vec2<u32>(0xffffffffu)) {
@@ -849,7 +847,7 @@ fn vd_split(c:vec2<f32>,level:u32,size:f32,clo:f32,chi:f32,coarse:vec2<u32>)->ve
         return coarse;
     }
     if VD_COUNTS {atomicAdd(&vd_edge_count[7],1u);}
-    let p=vd_px.p+vec3<f32>(vd_shift,0.0);
+    let p=vd_px.p;
     var m=vec2<u32>(0u);
     for(var y=0;y<n;y+=1) {
         for(var x=0;x<n;x+=1) {
@@ -866,10 +864,33 @@ fn vd_split(c:vec2<f32>,level:u32,size:f32,clo:f32,chi:f32,coarse:vec2<u32>)->ve
     }
     return m;
 }
+// ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow.wgsl vsm_cover) ----
+override VD_FRACTION:bool=false;
+@group(0) @binding(66) var<storage,read> vd_cover:array<u32>;
+// `count` of the 64 disk samples, spread over the disk (an odd stride through the samples' x
+// ranks, offset per texel by `h`): a column keeps blocking only these of the directions it blocks,
+// so the share it blocks is its texel's covered share.
+fn vd_keep(count:u32,h:u32)->vec2<u32> {
+    // Samples j*37 mod 64 for j < count (count = 8k), as constants, rotated by h.
+    var m=vec2<u32>(0xffffffffu);
+    switch count/8u {
+        case 1u {m=vec2<u32>(0x40100409u,0x02008020u);}
+        case 2u {m=vec2<u32>(0x40902449u,0x12048922u);}
+        case 3u {m=vec2<u32>(0x44992649u,0x9224c932u);}
+        case 4u {m=vec2<u32>(0x64d9364du,0x9b26c9b2u);}
+        case 5u {m=vec2<u32>(0x66d9b66du,0xdb36cdbbu);}
+        case 6u {m=vec2<u32>(0x76ddbf6fu,0xdbb6edfbu);}
+        case 7u {m=vec2<u32>(0xf6fdff7fu,0xdfbfeffbu);}
+        default {}
+    }
+    var r=h&63u;
+    if r>=32u {m=m.yx;r-=32u;}
+    if r>0u {m=vec2<u32>((m.x<<r)|(m.y>>(32u-r)),(m.y<<r)|(m.x>>(32u-r)));}
+    return m;
+}
 // The map's columns: each level's band of heights, the highest band first (vd_map).
 fn vd_map() {
     vd_pl=VSM_NONE;
-    vd_shift=vec2<f32>(0.0);
     let p=vd_px.p;
     let slope=vd_px.slope;
     let side=i32(vsm.counts.y*VSM_PAGE);
@@ -903,8 +924,7 @@ fn vd_map() {
         if lo>=ceiling {continue;}
         let hi=select(f32(VD_R)*cell/slope*vd_px.band,3.4e38,mip==VD_MIPS);
         let s=side>>mip;
-        vd_shift=vd_band_shift(cell);
-        let ps=p.xy+vd_shift;
+        let ps=p.xy;
         let x=(ps-origin_last)/cell;
         let r=min(slope*min(ceiling,hi)/cell,f32(VD_R));
         let a=max(vec2<i32>(floor(x-vec2<f32>(r))),vec2<i32>(0));
@@ -943,8 +963,7 @@ fn vd_map() {
         let texel=vsm_texel(level);
         let hi=vd_band(level)*vd_px.band;
         let origin=vsm.levels[level].origin.xy;
-        vd_shift=vd_band_shift(texel);
-        let x=(p.xy+vd_shift-origin)/texel;
+        let x=(p.xy-origin)/texel;
         let r=min(slope*min(ceiling,hi)/texel,f32(VD_R));
         let a=max(vec2<i32>(floor(x-vec2<f32>(r))),vec2<i32>(0));
         let b=min(vec2<i32>(floor(x+vec2<f32>(r))),vec2<i32>(side-1));

@@ -651,6 +651,9 @@ struct Resources {
     edges: Owned<wgpu::Buffer>,
     /// The caster census (WGSL `vsm_census`, `RENDERLAB_VSM_CENSUS`); one word when off.
     census: Owned<wgpu::Buffer>,
+    /// The covered fraction (`fraction_on`): a byte a texel, the top map's index; four bytes
+    /// when off.
+    cover: Owned<wgpu::Buffer>,
     /// The Disk lookup's per-pixel answer history, two halves ping-ponged by frame (WGSL
     /// `vd_history`), and the previous frame's world-to-clip matrix and half.
     history: Owned<wgpu::Buffer>,
@@ -969,6 +972,18 @@ pub(super) fn shader_source() -> String {
         ),
         1,
     )
+    .replacen(
+        "override VSM_FRACTION:bool=false;",
+        &format!("override VSM_FRACTION:bool={};", fraction_on()),
+        1,
+    )
+}
+/// The covered fraction (`RENDERLAB_VSM_FRACTION=1`, off by default): the page raster samples
+/// each texel at eight positions and marks the near layer's covered samples in a byte plane
+/// (WGSL `vsm_cover`); the Disk lookup lets a top column block that share of its directions.
+fn fraction_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_FRACTION").is_ok_and(|v| v.trim() == "1"))
 }
 /// The caster census's words (WGSL `vsm_census`): three parts of MAX_LEVELS x 131072 bits.
 const CENSUS_BYTES: u64 = 3 * MAX_LEVELS as u64 * 131072 / 8;
@@ -1083,7 +1098,13 @@ pub(super) fn disk_source() -> String {
     // Exact hard edges (`RENDERLAB_VD_HARD_EDGES=0` keeps the map's texels there).
     let edges = "override VD_HARD_EDGES:bool=true;";
     assert_eq!(source.matches(edges).count(), 1, "virtual_shadow_disk.wgsl: VD_HARD_EDGES moved");
-    source.replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
+    source
+        .replacen(edges, &format!("override VD_HARD_EDGES:bool={};", hard_edges_on()), 1)
+        .replacen(
+            "override VD_FRACTION:bool=false;",
+            &format!("override VD_FRACTION:bool={};", fraction_on()),
+            1,
+        )
 }
 /// Merges moved casters' light-space rectangles, and their screen rectangles alike, the pair
 /// whose union adds the least area first, until at most `max` remain: many movers invalidate the
@@ -1351,18 +1372,23 @@ impl Renderer {
         if frame == *first {
             dump_texture(&self.device, encoder, &fresh.world.texture, dir.join(format!("world-{frame}-{w}x{h}.bin")), frame);
             dump_texture(&self.device, encoder, &fresh.normal.texture, dir.join(format!("normal-{frame}-{w}x{h}.bin")), frame);
-            // The clipmap's top layer (dense: levels x side x side words of (id, height bits)).
-            if let Some(r) = self.view.virtual_shadows.as_ref().and_then(|s| s.resources.as_ref()) {
-                let bytes = r.top.size();
+            // The clipmap's top layer (dense: levels x side x side words of (id, height bits)),
+            // and with the covered fraction its sample bytes (a byte a texel, the same index).
+            let resources = self.view.virtual_shadows.as_ref().and_then(|s| s.resources.as_ref());
+            let planes = resources.into_iter().flat_map(|r| {
+                [Some((&r.top, "top")), fraction_on().then_some((&r.cover, "cover"))].into_iter().flatten()
+            });
+            for (source, name) in planes {
+                let bytes = source.size();
                 let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("clipmap top layer dump"),
                     size: bytes,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
-                encoder.copy_buffer_to_buffer(&r.top, 0, &buffer, 0, bytes);
+                encoder.copy_buffer_to_buffer(source, 0, &buffer, 0, bytes);
                 DUMPS.lock().unwrap().push(Dump {
-                    path: dir.join(format!("top-{frame}.bin")),
+                    path: dir.join(format!("{name}-{frame}.bin")),
                     buffer,
                     row: bytes as u32,
                     width_bytes: bytes as u32,
@@ -1469,6 +1495,8 @@ impl VirtualState {
                     storage(54, true, S::COMPUTE),
                     storage(55, true, writes),
                     storage(64, false, writes),
+                    // The covered fraction's sample bits (`fraction_on`).
+                    storage(65, false, writes),
                 ],
             ),
             mip: group(
@@ -1620,6 +1648,8 @@ impl VirtualState {
                     storage(62, false, S::COMPUTE),
                     // Held views: the per-pixel answer history.
                     storage(63, false, S::COMPUTE),
+                    // The covered fraction's sample bits (`fraction_on`).
+                    storage(66, true, S::COMPUTE),
                 ],
             ),
         };
@@ -2212,6 +2242,11 @@ impl VirtualState {
                 } else {
                     4
                 },
+                B::STORAGE | B::COPY_SRC,
+            ),
+            cover: buffer(
+                "Clipmap covered samples",
+                if fraction_on() { (map_bytes / 8).next_multiple_of(4) } else { 4 },
                 B::STORAGE | B::COPY_SRC,
             ),
             history: buffer(
@@ -3705,6 +3740,7 @@ impl Renderer {
                         buffer(54, &r.pool),
                         buffer(55, &r.state),
                         buffer(64, &r.census),
+                        buffer(65, &r.cover),
                     ],
                 ),
                 mip: group(
@@ -3806,6 +3842,7 @@ impl Renderer {
                         buffer(56, &r.outline),
                         buffer(62, &r.edges),
                         buffer(63, &r.history),
+                        buffer(66, &r.cover),
                     ],
                 ),
                 queued: group(
