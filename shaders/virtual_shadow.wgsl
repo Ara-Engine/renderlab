@@ -589,6 +589,8 @@ override VSM_SAMPLES:u32=8u;
 // pass's sample bits (VSM_FR_BITS), and the hardware or the software raster on its 1x path
 // (VSM_FR_HW1X, VSM_FR_SW1X).
 override VSM_FR_BITS:bool=true;
+// VSM_FR_DISCARD: the multisampled raster with fragments that do nothing (its coverage cost alone).
+override VSM_FR_DISCARD:bool=false;
 override VSM_FR_HW1X:bool=false;
 override VSM_FR_SW1X:bool=false;
 @group(0) @binding(65) var<storage,read_write> vsm_cover:array<atomic<u32>>;
@@ -808,6 +810,7 @@ struct VsmHw {
     let tile=vsm_pass.pad0;
     let o=vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles())*vsm_area();
     let t=vec2<u32>(input.position.xy)+o;
+    if VSM_FRACTION && VSM_FR_DISCARD {return;}
     if VSM_FRACTION && !VSM_FR_HW1X {
         vsm_fraction_hw(vsm_pass.level,t,input.height,input.inside,all(input.weights>=vec3<f32>(0.0)),g,input.id,mask);
         return;

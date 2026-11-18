@@ -4289,7 +4289,12 @@ impl Renderer {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    // Measurement: `RENDERLAB_VSM_FRACTION_LOAD=1` loads instead of clearing.
+                    load: if std::env::var_os("RENDERLAB_VSM_FRACTION_LOAD").is_some() {
+                        wgpu::LoadOp::Load
+                    } else {
+                        wgpu::LoadOp::Clear(wgpu::Color::BLACK)
+                    },
                     store: wgpu::StoreOp::Discard,
                 },
             })];
