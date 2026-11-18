@@ -806,11 +806,21 @@ override VD_FRACTION:bool=false;
 // ranks, offset per texel by `h`): a column keeps blocking only these of the directions it blocks,
 // so the share it blocks is its texel's covered share.
 fn vd_keep(count:u32,h:u32)->vec2<u32> {
-    var m=vec2<u32>(0u);
-    for(var j=0u;j<count;j+=1u) {
-        let b=(j*37u+h)&63u;
-        if b<32u {m.x|=1u<<b;} else {m.y|=1u<<(b-32u);}
+    // Samples j*37 mod 64 for j < count (count = 8k), as constants, rotated by h.
+    var m=vec2<u32>(0xffffffffu);
+    switch count/8u {
+        case 1u {m=vec2<u32>(0x40100409u,0x02008020u);}
+        case 2u {m=vec2<u32>(0x40902449u,0x12048922u);}
+        case 3u {m=vec2<u32>(0x44992649u,0x9224c932u);}
+        case 4u {m=vec2<u32>(0x64d9364du,0x9b26c9b2u);}
+        case 5u {m=vec2<u32>(0x66d9b66du,0xdb36cdbbu);}
+        case 6u {m=vec2<u32>(0x76ddbf6fu,0xdbb6edfbu);}
+        case 7u {m=vec2<u32>(0xf6fdff7fu,0xdfbfeffbu);}
+        default {}
     }
+    var r=h&63u;
+    if r>=32u {m=m.yx;r-=32u;}
+    if r>0u {m=vec2<u32>((m.x<<r)|(m.y>>(32u-r)),(m.y<<r)|(m.x>>(32u-r)));}
     return m;
 }
 // The map's columns: each level's band of heights, the highest band first (vd_map).
