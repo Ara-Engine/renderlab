@@ -107,6 +107,9 @@ fn gpu_non_rt_requested_limit_pipelines() {
     }
     let mut r = make(requested.clone(), SampleCount::One);
     assert_eq!(r.primary_visibility(), PrimaryVisibility::VisibilityBuffer);
+    // Still frames hold still: TR1, on by default, jitters every frame's view-projection (its own
+    // pipeline is compiled and run at the end).
+    r.set_reconstruction(Reconstruction::off()).unwrap();
     assert_eq!(r.soft_shadows(), SoftShadows::Virtual);
     light(&mut r);
     let (mesh, mut instances) = geometry(
@@ -170,7 +173,7 @@ fn gpu_non_rt_requested_limit_pipelines() {
         80.,
     )
     .unwrap();
-    for (view, page_work) in [
+    for (step, (view, page_work)) in [
         (camera, false),
         (camera.jittered([0.25, -0.25]), true),
         (camera.jittered([0.25, -0.25]), false),
@@ -179,7 +182,10 @@ fn gpu_non_rt_requested_limit_pipelines() {
         (camera, false),
         (depth_changed, true),
         (depth_changed, false),
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         render(
             &mut r,
             &color,
@@ -187,7 +193,7 @@ fn gpu_non_rt_requested_limit_pipelines() {
             &mut [Draw::new(&mesh, &mut instances)],
         );
         r.test_drain("FIX1 view-projection reuse");
-        assert_eq!(r.virtual_shadow_stats().page_work, page_work);
+        assert_eq!(r.virtual_shadow_stats().page_work, page_work, "view-projection reuse, step {step}");
     }
     // Compile and run the non-RT reconstruction pipeline too; its jitter invalidates
     // Virtual without the former unconditional rolling reset in renderer.rs.
