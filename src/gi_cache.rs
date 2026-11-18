@@ -3334,7 +3334,8 @@ impl Renderer {
         let Some(state) = self.view.primary.as_ref() else {
             return Ok(());
         };
-        if !self.gi.settings.enabled || !self.gi.settings.bounce || state.shading_groups().is_none() {
+        // Layouts only: the geometry groups a frame binds need not exist yet.
+        if !self.gi.settings.enabled || !self.gi.settings.bounce {
             return Ok(());
         }
         let streamed = state.requests;

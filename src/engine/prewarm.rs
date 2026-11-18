@@ -61,9 +61,10 @@ mod tests {
     /// entry as prepare covers more passes; the goal is [0, 0]. 18 Nov: 66 and 61 with
     /// transparency only; 31 and 25 with the lighting-cache and atmosphere kernels; 23 and 17
     /// with each view's post pipelines; 9 and 12 with the visibility buffer's and the
-    /// reflection trace's; 4 and 7 with every program's sets, lists, bins and hits. Left:
-    /// GI cell shading, the GI receiver, TR1's resolve and the interactive trace.
-    const LATE_BOUND: [u64; 2] = [4, 7];
+    /// reflection trace's; 4 and 7 with every program's sets, lists, bins and hits; 1 and 1
+    /// with cell shading and the reconstruction. Left: the GI receiver, whose pipelines live
+    /// in its size-dependent targets.
+    const LATE_BOUND: [u64; 2] = [1, 1];
 
     /// Prepare's goal: once a scene is prepared, no frame compiles a pipeline, from any view
     /// of it. Three programs (the standard floor, a second opaque program, glass), then views

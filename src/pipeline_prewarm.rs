@@ -47,6 +47,14 @@ impl Renderer {
                 self.ensure_reflection_trace(shading)?;
                 self.ensure_reflection_hits_for(programs, false, shading)?;
                 self.prepare_gi_shade(programs)?;
+                // Temporal reconstruction, as `render_frame` turns it on for a lit frame.
+                if self.view.reconstruction.enabled
+                    && !self.view.outputs.modes.data()
+                    && self.view.soft_mode != crate::SoftShadows::Temporal
+                    && self.pipeline.primary.is_some()
+                {
+                    self.ensure_reconstruction()?;
+                }
             }
         }
         Ok(())
