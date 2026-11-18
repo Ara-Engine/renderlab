@@ -179,8 +179,11 @@ fn fg_invalidate(index:u32,size:vec2<u32>) {
     gi_prepared[at]=GiPrepared(gi_prepared[at].r0,vec4<u32>(0u),vec4<u32>(0u));
 }
 // Per lane: its ray's terms in the probe's layout (sky L2 at 0-26 for a miss, bounce L1 at
-// FG_BOUNCE for a hit).
+// FG_BOUNCE for a hit, and 1 at FG_ANSWERED, the layout's pad, when the ray counts), and its
+// emitter sample's bounce L1 terms (fg_nee).
 var<workgroup> fg_lane_sh:array<array<f32,40>,32>;
+var<workgroup> fg_nee_sh:array<array<f32,12>,32>;
+const FG_ANSWERED:u32=27u;
 
 fn fg_hash(x:u32)->u32 {
     var h=x*0x9e3779b1u;h^=h>>16u;h*=0x85ebca6bu;h^=h>>13u;h*=0xc2b2ae35u;h^=h>>16u;return h;
@@ -322,10 +325,17 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
         radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
         if fg_hit && fg_unanswered && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
     }
+    // A hit no cache level answers yet is left out of the probe's average (fg_accumulate counts
+    // the answered rays in the pad float FG_ANSWERED): counted as black, it darkened probes after
+    // a cut until the cells it asked for were shaded.
+    let answered=s.placement!=0u && !(fg_hit && fg_unanswered);
+    if !answered {radiance=vec3<f32>(0.0);}
     gi_sh_basis(d);
     let sky=select(radiance,vec3<f32>(0.0),fg_hit);
     let bounce=select(vec3<f32>(0.0),radiance,fg_hit);
     for(var i=0u;i<40u;i+=1u) {fg_lane_sh[lane][i]=0.0;}
+    for(var i=0u;i<12u;i+=1u) {fg_nee_sh[lane][i]=0.0;}
+    fg_lane_sh[lane][FG_ANSWERED]=select(0.0,1.0,answered);
     for(var i=0u;i<9u;i+=1u) {
         fg_lane_sh[lane][i*3u]=sky.x*gi_y[i];fg_lane_sh[lane][i*3u+1u]=sky.y*gi_y[i];fg_lane_sh[lane][i*3u+2u]=sky.z*gi_y[i];
     }
@@ -373,20 +383,26 @@ fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
     let light=gi_emitter_vec(w+9u)*(weight*FG_HEMISPHERE_PDF*f32(FG_RAYS)/(density*f32(FG_NEE)));
     gi_sh_basis(d);
     for(var k=0u;k<4u;k+=1u) {
-        fg_lane_sh[lane][FG_BOUNCE+k*3u]+=light.x*gi_y[k];
-        fg_lane_sh[lane][FG_BOUNCE+k*3u+1u]+=light.y*gi_y[k];
-        fg_lane_sh[lane][FG_BOUNCE+k*3u+2u]+=light.z*gi_y[k];
+        fg_nee_sh[lane][k*3u]+=light.x*gi_y[k];
+        fg_nee_sh[lane][k*3u+1u]+=light.y*gi_y[k];
+        fg_nee_sh[lane][k*3u+2u]+=light.z*gi_y[k];
     }
 }
 // Folds the FG_RAYS lanes from `first` of fg_lane_sh into probe `index`, now at s: history
 // while the new point stays on the old probe's plane.
 fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>) {
     var sh:array<f32,40>;
+    var nee:array<f32,12>;
     for(var l=0u;l<FG_RAYS;l+=1u) {
         for(var i=0u;i<40u;i+=1u) {sh[i]+=fg_lane_sh[first+l][i];}
+        for(var i=0u;i<12u;i+=1u) {nee[i]+=fg_nee_sh[first+l][i];}
     }
-    // Uniform hemisphere: pdf 1/(2 pi).
-    let scale=6.283185307179586/f32(FG_RAYS);
+    // Uniform hemisphere: pdf 1/(2 pi), over the rays with an answer (the others stand for their
+    // average). The emitter samples were divided by the full ray count's scale (fg_nee).
+    let scale=6.283185307179586/max(sh[FG_ANSWERED],1.0);
+    sh[FG_ANSWERED]=0.0;
+    for(var i=0u;i<40u;i+=1u) {sh[i]*=scale;}
+    for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]+=nee[i]*(6.283185307179586/f32(FG_RAYS));}
     let footprint=fg_footprint(pixel,size,s.world);
     let old=fg_load(index,size);
     var count=1.0;
@@ -396,7 +412,7 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     let blend=1.0/count;
     var out:FgProbe;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {
-        let fresh=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u])*scale;
+        let fresh=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u]);
         out.sh[v]=select(fresh,mix(old.sh[v],fresh,blend),count>1.0);
     }
     out.point=vec4<f32>(s.world,count);
