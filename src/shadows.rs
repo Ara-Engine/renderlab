@@ -59,10 +59,10 @@ pub(crate) fn with_shadow_caster_mask(source: &str) -> String {
         &source[at..]
     )
 }
-/// The instance masks' WGSL declarations (`SHADOW_CASTER_MASK`, `VISIBLE_MASK`), as
+/// The instance masks' WGSL declarations (`SHADOW_CASTER_MASK`, `VISIBLE_MASK`, `SEE_THROUGH_MASK`), as
 /// shaders/scene.wgsl has them.
 pub(crate) const SHADOW_CASTER_MASK_WGSL: &str =
-    "const SHADOW_CASTER_MASK:u32=1u;\nconst VISIBLE_MASK:u32=2u;\n";
+    "const SHADOW_CASTER_MASK:u32=1u;\nconst VISIBLE_MASK:u32=2u;\nconst SEE_THROUGH_MASK:u32=4u;\n";
 
 /// Entries correspond exactly to the current `Lighting::lights` vector.
 #[derive(Clone, Debug, PartialEq)]

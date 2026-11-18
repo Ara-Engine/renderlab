@@ -139,23 +139,32 @@ pub(crate) fn shade_source(material: &str, directions: u32) -> Result<String> {
     Ok(composed.replace(line, &format!("const GI_DIRECTIONS:u32={directions}u;")))
 }
 
-/// `gi_cache::kernel_source` for hardware rays, with its one hit-position intrinsic
+/// `gi_cache::kernel_source` for hardware rays, with its committed-hit position intrinsic
 /// replaced by a fetch from the module's own per-draw vertex and index arrays (the
 /// hit's placement names its draw, as `gi_receiver` already resolves it), and the
 /// vertex-return qualifiers dropped. Traversal and everything else are unchanged.
+///
+/// See-through occlusion (docs/design-see-through-occlusion.md) is off here by construction:
+/// the port's scene holds no see-through placements and binds no see-through table, so the
+/// table becomes a private all-zero array (no placements: every query takes its opaque-only
+/// path, and no candidate is ever kept or applied past a hit), and the candidate position
+/// intrinsic, which then never runs, takes the same fetch.
 pub(crate) fn source(directions: u32) -> Result<String> {
     let original = shared::kernel_source(false, directions);
+    let table = "@group(0) @binding(40) var<storage,read> gi_see_through:array<u32>;";
     ensure!(
         original
             .matches("getCommittedHitVertexPositions(&query)")
             .count()
             == 1
-            && original.matches("HitVertexPositions").count() == 1
-            && original.matches("ray_query<vertex_return>").count() == 2
+            && original.matches("getCandidateHitVertexPositions(&query)").count() == 1
+            && original.matches("HitVertexPositions").count() == 2
+            && original.matches("ray_query<vertex_return>").count() == 3
             && original
                 .matches("acceleration_structure<vertex_return>")
                 .count()
-                == 1,
+                == 1
+            && original.matches(table).count() == 1,
         "original radiance cache hit-position seams changed"
     );
     Ok(format!(
@@ -165,6 +174,11 @@ pub(crate) fn source(directions: u32) -> Result<String> {
                 "getCommittedHitVertexPositions(&query)",
                 "gi_hit_vertices(primary_placements[hit.instance_custom_data]&0x1fffffffu,hit.primitive_index)",
             )
+            .replace(
+                "getCandidateHitVertexPositions(&query)",
+                "gi_hit_vertices(primary_placements[c.instance_custom_data]&0x1fffffffu,c.primitive_index)",
+            )
+            .replace(table, "var<private> gi_see_through:array<u32,4>;")
             .replace("ray_query<vertex_return>", "ray_query")
             .replace("acceleration_structure<vertex_return>", "acceleration_structure")
     ))
