@@ -483,8 +483,11 @@ fn vsm_fold(i:u32) {
     var bits=(atomicLoad(&vsm_cover[i>>2u])>>shift)&255u;
     // Eighths of the texel, whatever the sample count.
     let k=countOneBits(bits)*(8u/VSM_SAMPLES);
-    let h=(u32(w>>32u)&~7u)|select(0u,k,k<8u);
-    atomicStore(&vsm_top_map[i],(u64(h)<<32u)|(w&0xfffffffflu));
+    let partial=k>0u && k<8u;
+    let h=(u32(w>>32u)&~7u)|select(0u,k,partial);
+    if h!=u32(w>>32u) {atomicStore(&vsm_top_map[i],(u64(h)<<32u)|(w&0xfffffffflu));}
+    // Only a partly covered texel needs its side (the lookup reads the byte where k is 1-7).
+    if !partial {return;}
     // The covered side for the Disk lookup (virtual_shadow_disk.wgsl vd_side): the angle of the
     // covered samples' centroid from the texel centre, one of VSM_SIDE_ANGLES, replaces the bits.
     var g=vec2<f32>(0.0);
