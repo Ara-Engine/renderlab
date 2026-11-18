@@ -41,6 +41,10 @@ pub(crate) const SHADOW_CASTER_MASK: u32 = 0x01;
 /// and bounce rays (`VISIBLE_MASK` in WGSL, declared beside `SHADOW_CASTER_MASK`). A placement
 /// without it (a see-through surface under a bit of its own) is invisible to those rays.
 pub(crate) const VISIBLE_MASK: u32 = 0x02;
+/// The instance mask bit of a see-through placement (an alpha-blended material): its only bit, so
+/// camera, reflection, bounce and shadow rays never meet it. Rays that pass see-through surfaces
+/// by their transmission add it to their cull mask (docs/design-see-through-occlusion.md).
+pub(crate) const SEE_THROUGH_MASK: u32 = 0x04;
 /// `source` with `SHADOW_CASTER_MASK_WGSL` after its leading `enable` directives (which WGSL
 /// puts before every declaration), for a module without shaders/scene.wgsl.
 pub(crate) fn with_shadow_caster_mask(source: &str) -> String {
