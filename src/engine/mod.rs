@@ -943,12 +943,21 @@ impl Engine {
     /// Publishes the sun, lights, sky and exposure. Everything is validated before the
     /// renderer changes, so a rejected call leaves the previous lighting in place.
     fn apply_lighting(&mut self) -> Result<(), Error> {
-        let (lighting, shadows) = settings::lighting(
-            self.state.sun,
-            &self.state.lights,
-            self.state.sky,
-            self.selected_exposure(),
-        )?;
+        // Measurement (RENDERLAB_ABLATE, settings::ablated): `sun`, `lights` (the local lights)
+        // and `sky` take those light sources out of what the renderer gets, the embedder's state
+        // unchanged, so one source's light can be judged alone (docs/design-gi-emitters.md).
+        let ablate = |feature: &str| {
+            std::env::var("RENDERLAB_ABLATE").is_ok_and(|list| list.split(',').any(|f| f.trim() == feature))
+        };
+        let sun = if ablate("sun") { None } else { self.state.sun };
+        let no_lights: [Light; 0] = [];
+        let lights: &[Light] = if ablate("lights") { &no_lights } else { &self.state.lights };
+        let sky_off = ablate("sky");
+        let lighting_sky = match self.state.sky {
+            Sky::Uniform(_) if sky_off => Sky::Uniform([0.0; 3]),
+            other => other,
+        };
+        let (lighting, shadows) = settings::lighting(sun, lights, lighting_sky, self.selected_exposure())?;
         let atmosphere = settings::atmosphere(self.state.sky, &self.state.settings);
         atmosphere.validate()?;
         let (map, parameters) = match self.state.sky {
@@ -962,7 +971,7 @@ impl Engine {
                 // The atmosphere's procedural environment lights at this intensity; its
                 // drawn sky does not read it.
                 let parameters = EnvironmentParameters {
-                    intensity: sky_light,
+                    intensity: if sky_off { 0.0 } else { sky_light },
                     ..EnvironmentParameters::default()
                 };
                 (None, parameters)
@@ -988,7 +997,7 @@ impl Engine {
                 }
                 let parameters = EnvironmentParameters {
                     rotation_y_radians: rotation_y,
-                    intensity,
+                    intensity: if sky_off { 0.0 } else { intensity },
                 };
                 (Some(self.state.environments.get(map)?), parameters)
             }
