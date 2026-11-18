@@ -831,7 +831,6 @@ override VD_FRACTION:bool=false;
 // offsets from the receiver and the texel centre are the same for every direction), so the
 // column blocks, of the directions it would block, the k/8 furthest along n: the same every frame,
 // and nested between neighbouring texels of one edge (no texture of per-texel subsets).
-override VD_SAMPLES:u32=8u;
 @group(0) @binding(66) var<storage,read> vd_cover:array<u32>;
 // Per angle a of n (VD_SIDE_ANGLES of them) and rank r in 0..=64: the mask of the r sample
 // directions furthest along n (two u32s each; virtual_shadow_gpu.rs `side_table`).
@@ -842,31 +841,6 @@ fn vd_side_mask(a:u32,r:u32)->vec2<u32> {
     let v=vd_sides[i>>1u];
     return select(v.xy,v.zw,(i&1u)==1u);
 }
-// The page raster's sample offsets from a texel centre, in texels (virtual_shadow.wgsl vsm_sample).
-fn vd_raster_sample(k:u32)->vec2<f32> {
-    if VD_SAMPLES==4u {
-        var o=vec2<f32>(2.0,6.0);
-        switch k {
-            case 0u {o=vec2<f32>(-2.0,-6.0);}
-            case 1u {o=vec2<f32>(6.0,-2.0);}
-            case 2u {o=vec2<f32>(-6.0,2.0);}
-            default {}
-        }
-        return o/16.0;
-    }
-    var o=vec2<f32>(7.0,-7.0);
-    switch k {
-        case 0u {o=vec2<f32>(1.0,-3.0);}
-        case 1u {o=vec2<f32>(-1.0,3.0);}
-        case 2u {o=vec2<f32>(5.0,1.0);}
-        case 3u {o=vec2<f32>(-3.0,-5.0);}
-        case 4u {o=vec2<f32>(-5.0,5.0);}
-        case 5u {o=vec2<f32>(-7.0,-1.0);}
-        case 6u {o=vec2<f32>(3.0,7.0);}
-        default {}
-    }
-    return o/16.0;
-}
 // Of the directions in m (a column of texel i whose near layer covers k eighths), the k/8 through
 // its covered side.
 fn vd_side(m:vec2<u32>,i:u32,k:u32)->vec2<u32> {
@@ -874,15 +848,8 @@ fn vd_side(m:vec2<u32>,i:u32,k:u32)->vec2<u32> {
     let t=(k*c+4u)/8u;
     if t==0u {return vec2<u32>(0u);}
     if t>=c {return m;}
-    var bits=(vd_cover[i>>2u]>>((i&3u)*8u))&255u;
-    var g=vec2<f32>(0.0);
-    while bits!=0u {
-        g+=vd_raster_sample(firstTrailingBit(bits));
-        bits&=bits-1u;
-    }
-    // A centroid at the centre (a symmetric cover) gives no side; any fixed one serves.
-    if dot(g,g)<1e-8 {g=vec2<f32>(1.0,0.0);}
-    let a=u32(round(atan2(g.y,g.x)*(f32(VD_SIDE_ANGLES)/6.28318531)+f32(VD_SIDE_ANGLES)))%VD_SIDE_ANGLES;
+    // The side's angle, found once from the covered samples at the page raster (vsm_fold).
+    let a=((vd_cover[i>>2u]>>((i&3u)*8u))&255u)%VD_SIDE_ANGLES;
     // The smallest rank whose directions in m number t (the masks are nested).
     var lo=0u;var hi=64u;
     while lo<hi {

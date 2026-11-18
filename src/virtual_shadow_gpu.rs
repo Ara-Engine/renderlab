@@ -1764,10 +1764,7 @@ impl VirtualState {
                     layout: Some(layout),
                     module: &disk_module,
                     entry_point: Some(entry),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants: &[("VD_SAMPLES", f64::from(fraction_samples(device).max(4)))],
-                        ..Default::default()
-                    },
+                    compilation_options: Default::default(),
                     cache: None,
                 }),
                 ResourceKind::ComputePipeline,

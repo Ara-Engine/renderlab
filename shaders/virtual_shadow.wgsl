@@ -479,11 +479,27 @@ fn vsm_cover_clear(i:u32) {atomicAnd(&vsm_cover[i>>2u],~(255u<<((i&3u)*8u)));}
 fn vsm_fold(i:u32) {
     let w=atomicLoad(&vsm_top_map[i]);
     if (w&0xfffffffflu)==0lu {return;}
+    let shift=(i&3u)*8u;
+    var bits=(atomicLoad(&vsm_cover[i>>2u])>>shift)&255u;
     // Eighths of the texel, whatever the sample count.
-    let k=countOneBits((atomicLoad(&vsm_cover[i>>2u])>>((i&3u)*8u))&255u)*(8u/VSM_SAMPLES);
+    let k=countOneBits(bits)*(8u/VSM_SAMPLES);
     let h=(u32(w>>32u)&~7u)|select(0u,k,k<8u);
     atomicStore(&vsm_top_map[i],(u64(h)<<32u)|(w&0xfffffffflu));
+    // The covered side for the Disk lookup (virtual_shadow_disk.wgsl vd_side): the angle of the
+    // covered samples' centroid from the texel centre, one of VSM_SIDE_ANGLES, replaces the bits.
+    var g=vec2<f32>(0.0);
+    while bits!=0u {
+        g+=vsm_sample(firstTrailingBit(bits));
+        bits&=bits-1u;
+    }
+    // A centroid at the centre (none, all or a symmetric cover) gives no side; any fixed one serves.
+    if dot(g,g)<1e-8 {g=vec2<f32>(1.0,0.0);}
+    let a=u32(round(atan2(g.y,g.x)*(f32(VSM_SIDE_ANGLES)/6.28318531)+f32(VSM_SIDE_ANGLES)))%VSM_SIDE_ANGLES;
+    atomicAnd(&vsm_cover[i>>2u],~(255u<<shift));
+    atomicOr(&vsm_cover[i>>2u],a<<shift);
 }
+// The covered side's angles (virtual_shadow_disk.wgsl VD_SIDE_ANGLES).
+const VSM_SIDE_ANGLES:u32=32u;
 // The fold over the texels each page drew this frame: sparse, one workgroup per rasterized page.
 @compute @workgroup_size(256) fn vsm_fold_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     let slot=vsm_pages[vsm_section(2u)+vsm_rendered(group.x)];
