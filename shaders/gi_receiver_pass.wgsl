@@ -262,7 +262,7 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     // A ray that meets an emitting draw keeps its cell's reflected light and its emission weighted
     // against the probe's emitter samples (fg_nee, multiple importance sampling).
     let hit=primary_decode(traced.record);
-    let emission=gi_batch_emission(hit.batch);
+    let emission=gi_triangle_emission(hit.batch,hit.placement,traced.record.y);
     if all(emission<=vec3<f32>(0.0)) {return rl_finite(cell.rgb);}
     let a=primary_input(hit.batch,hit.ia,hit.placement);
     let b=primary_input(hit.batch,hit.ib,hit.placement);
@@ -305,6 +305,15 @@ var<private> fg_unanswered:bool;
 @group(2) @binding(30) var<storage,read_write> fg_requests:array<atomic<u32>>;
 const FG_REQUESTS_MAX:u32=16384u;
 var<workgroup> fg_asked:array<atomic<u32>,2>;
+// The workgroup's probe rays and emitter shadow rays, added to the external list's spare words 2
+// and 3, which the GI log prints as fg_rays and fg_shadow_rays.
+var<workgroup> fg_rays:array<atomic<u32>,2>;
+fn fg_count_rays(lane:u32) {
+    if lane==0u {
+        atomicAdd(&fg_requests[2u],atomicLoad(&fg_rays[0]));
+        atomicAdd(&fg_requests[3u],atomicLoad(&fg_rays[1]));
+    }
+}
 fn fg_request(cell:vec4<u32>) {
     let i=atomicAdd(&fg_requests[0],1u);
     if i>=min(FG_REQUESTS_MAX,(arrayLength(&fg_requests)-4u)/4u) {atomicAdd(&fg_requests[1],1u);return;}
@@ -323,6 +332,7 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     if s.placement!=0u {
         d=fg_direction(s.normal,ray,FG_RAYS,r);
         radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
+        atomicAdd(&fg_rays[0],1u);
         if fg_hit && fg_unanswered && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
     }
     // A hit no cache level answers yet is left out of the probe's average (fg_accumulate counts
@@ -378,6 +388,7 @@ fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
     if area<=0.0 || cosine<=1e-4 {return;}
     let density=pick.probability*dist*dist/(area*cosine);
     let traced=rl_cast(origin,d,s.epsilon);
+    atomicAdd(&fg_rays[1],1u);
     if traced.record.x!=0u && traced.t<dist*0.999 {return;}
     let weight=fg_mis(density*f32(FG_NEE),FG_HEMISPHERE_PDF*f32(FG_RAYS));
     let light=gi_emitter_vec(w+9u)*(weight*FG_HEMISPHERE_PDF*f32(FG_RAYS)/(density*f32(FG_NEE)));
@@ -425,7 +436,7 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     let tile=group.y*tiles.x+group.x;
     let frame=primary_frame.sided.y;
     let slot=lane/FG_RAYS;
-    if lane<2u {atomicStore(&fg_asked[lane],0u);}
+    if lane<2u {atomicStore(&fg_asked[lane],0u);atomicStore(&fg_rays[lane],0u);}
     workgroupBarrier();
     // Slot 0: the first covered pixel of four the frame picks in the tile. Slot 1: the first of
     // eight more off slot 0's plane (every lane of a slot computes the same).
@@ -463,6 +474,7 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     if keep {traced.placement=0u;}
     fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
     workgroupBarrier();
+    fg_count_rays(lane);
     if lane%FG_RAYS!=0u || any(group.xy>=tiles) || keep {return;}
     if s.placement==0u {fg_invalidate(index,size);return;}
     fg_accumulate(index,size,slot*FG_RAYS,s,pixel);
@@ -568,7 +580,7 @@ var<workgroup> fg_pair:array<u32,2>;
     let block=vec2<u32>(group.x*2u+b,group.y);
     let inside=all(block<blocks);
     let index=fg_adaptive(min(block,blocks-vec2<u32>(1u)),size);
-    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(index,size),inside);atomicStore(&fg_asked[b],0u);}
+    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(index,size),inside);atomicStore(&fg_asked[b],0u);atomicStore(&fg_rays[b],0u);}
     let pair=workgroupUniformLoad(&fg_pair);
     if pair[0]==FG_NONE && pair[1]==FG_NONE {return;}
     let pick=pair[b];
@@ -587,6 +599,7 @@ var<workgroup> fg_pair:array<u32,2>;
     if keep {traced.placement=0u;}
     fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
     workgroupBarrier();
+    fg_count_rays(lane);
     if lane%FG_RAYS!=0u || pick==FG_NONE || s.placement==0u || keep {return;}
     fg_accumulate(index,size,b*FG_RAYS,s,pixel);
 }
