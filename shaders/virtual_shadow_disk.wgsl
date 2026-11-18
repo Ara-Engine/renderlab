@@ -774,10 +774,11 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     let clo=max(max(bottom,lo),1e-6*size);let chi=min(t,hi);
     var m=vd_column_mask(c-p.xy,0.5*size,clo,chi);
     // The covered fraction: a level's own texel (not a max-mip cell) whose near layer covers k
-    // of its 8 samples blocks k/8 of the directions its column would block (vd_keep).
+    // of its 8 samples (the top word's low bits, vsm_fold) blocks k/8 of the directions its column
+    // would block (vd_keep).
     if VD_FRACTION && stride==1 {
-        let k=countOneBits((vd_cover[i>>2u]>>((i&3u)*8u))&255u);
-        if k>0u && k<8u {m&=vd_keep(8u*k,vd_hash(i));}
+        let k=top.y&7u;
+        if k!=0u {m&=vd_keep(8u*k,vd_hash(i));}
     }
     // The split: a partial column of a band above the receiver's level draws its outline at a
     // finer texel (vd_split); the band still sets the blur width.
@@ -866,7 +867,6 @@ fn vd_split(c:vec2<f32>,level:u32,size:f32,clo:f32,chi:f32,coarse:vec2<u32>)->ve
 }
 // ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow.wgsl vsm_cover) ----
 override VD_FRACTION:bool=false;
-@group(0) @binding(66) var<storage,read> vd_cover:array<u32>;
 // `count` of the 64 disk samples, spread over the disk (an odd stride through the samples' x
 // ranks, offset per texel by `h`): a column keeps blocking only these of the directions it blocks,
 // so the share it blocks is its texel's covered share.

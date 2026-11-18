@@ -529,6 +529,38 @@ fn vsm_rendered(k:u32)->u32 {return vsm_pool_in[VSM_POOL_FREE+vsm_pool_in[10]+k]
 }
 // Zeroes texel i's covered-sample byte (four texels share a word).
 fn vsm_cover_clear(i:u32) {atomicAnd(&vsm_cover[i>>2u],~(255u<<((i&3u)*8u)));}
+// After both raster layers: texel i's near-layer sample count goes into its top word's low three
+// height bits (1-7; 0 where it covers none or all eight), so the Disk lookup reads it with the
+// height it loads anyway. The height moves by at most seven of its last bits (under 2^-21 of the
+// depth range), which every other reader of the word ignores.
+fn vsm_fold(i:u32) {
+    let w=atomicLoad(&vsm_top_map[i]);
+    if (w&0xfffffffflu)==0lu {return;}
+    let k=countOneBits((atomicLoad(&vsm_cover[i>>2u])>>((i&3u)*8u))&255u);
+    let h=(u32(w>>32u)&~7u)|select(0u,k,k<8u);
+    atomicStore(&vsm_top_map[i],(u64(h)<<32u)|(w&0xfffffffflu));
+}
+// The fold over the texels each page drew this frame: sparse, one workgroup per rasterized page.
+@compute @workgroup_size(256) fn vsm_fold_sparse(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let slot=vsm_pages[vsm_section(2u)+vsm_rendered(group.x)];
+    for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {vsm_fold(slot*VSM_PAGE*VSM_PAGE+k);}
+}
+// Dense: one workgroup per page slot, the flagged slots' dirty rectangles (as vsm_clear).
+@compute @workgroup_size(256) fn vsm_fold_dense(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
+    let slot=group.x;
+    let w=vsm_render[slot];
+    if w==0u {return;}
+    let pages=vsm.counts.y;let per=pages*pages;
+    let level=slot/per;let local=slot%per;
+    let side=pages*VSM_PAGE;
+    let corner=vec2<u32>(local%pages,local/pages)*VSM_PAGE;
+    for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
+        let q=vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
+        if !vsm_dirty_has(w,q) {continue;}
+        let t=corner+q;
+        vsm_fold((level*side+t.y)*side+t.x);
+    }
+}
 // Zeroes both layers of every page flagged for this frame: one workgroup per page slot.
 @compute @workgroup_size(256) fn vsm_clear(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     let slot=group.x;
@@ -582,9 +614,10 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
 // its centre. The top layer keeps the highest surface over those samples (the nearest covered
 // one where a caster covers part of the texel; where none does, the surface under the samples, as
 // today). The peel pass, which runs after the top one, keeps the peel layer at the centre as
-// today and marks in vsm_cover (a byte a texel at the top map's index) every sample whose covering
-// surface lies within the peel gap of that top: the near layer, the union of its triangles. The
-// Disk lookup lets a top column block that share of the directions it would block.
+// today and marks in vsm_cover (a byte a texel at the top map's index, the raster's scratch) every
+// sample whose covering surface lies within the peel gap of that top: the near layer, the union of
+// its triangles. vsm_fold then moves the count into the top word, and the Disk lookup lets a top
+// column block that share of the directions it would block.
 override VSM_FRACTION:bool=false;
 @group(0) @binding(65) var<storage,read_write> vsm_cover:array<atomic<u32>>;
 // Sample k's offset from the texel centre, in sixteenths of a texel (the D3D 8x pattern).
