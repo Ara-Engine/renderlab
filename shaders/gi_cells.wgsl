@@ -450,6 +450,18 @@ fn gi_basis(n:vec3<f32>) -> mat3x3<f32> {
     let b=n.x*n.y*a;
     return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
 }
+// ---- the emitter list's layout, shared by the cache (gi_emitters.wgsl builds it) and cell shading
+// (gi_shade_entry.wgsl evaluates each listed triangle's emission) ----
+const GI_H_EMITTERS:u32=57u;
+const GI_H_EMITTER_COUNT:u32=58u;
+// Per triangle: a corner, its two edges and its radiance (each three f32), then its batch,
+// placement and triangle index.
+const GI_EMITTER_WORDS:u32=15u;
+// Where cell shading writes listed triangle k's mean emission (vec4, w 1 once evaluated): in the
+// outgoing radiance, after the slots' and the draws' emission probes (the CPU writes that offset,
+// slots + traced draws, into GI_H_EMITTER_MEANS).
+const GI_H_EMITTER_MEANS:u32=34u;
+fn gi_emitter_mean_at(k:u32) -> u32 { return gi_word(GI_H_EMITTER_MEANS)+k; }
 fn gi_unpack_normal(w:u32) -> vec3<f32> {
     let q=unpack2x16snorm(w);
     var n=vec3<f32>(q,1.0-abs(q.x)-abs(q.y));

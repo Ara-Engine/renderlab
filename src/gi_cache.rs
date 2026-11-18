@@ -68,12 +68,13 @@ const PROFILE_STAMPS: u32 = 2 * (10 + 2 * CLAIM_ROUNDS);
 /// others.
 pub(crate) const GATHER_GROUPS: u32 = 4096;
 /// The emitter list (shaders/gi_emitters.wgsl, docs/design-gi-emitters.md): at most this many
-/// emitting triangles a frame (the rest are counted as dropped), 12 words each, then up to
-/// EMITTER_DRAWS_MAX emitting draws (stable id, batch and radiance: EMITTER_DRAW_WORDS each),
+/// emitting triangles a frame (the rest are counted as dropped), 15 words each, then up to
+/// EMITTER_DRAWS_MAX emitting draws (stable id, batch, probe radiance, first listed triangle,
+/// triangle count, first placement: EMITTER_DRAW_WORDS each),
 /// in the table after the slots.
 /// Its build pass loops over every emitting draw's triangles on a fixed grid.
 pub(crate) const EMITTERS_MAX: u32 = 8192;
-const EMITTER_WORDS: u64 = 12;
+const EMITTER_WORDS: u64 = 15;
 const EMITTER_DRAWS_MAX: u32 = 64;
 /// Whether the cache's own gathers sample the emitter list (RENDERLAB_GI_EMITTERS=1; off by
 /// default until it is judged against the live reference).
@@ -81,7 +82,7 @@ fn emitters_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_EMITTERS").is_ok_and(|v| v == "1"))
 }
-const EMITTER_DRAW_WORDS: u64 = 5;
+const EMITTER_DRAW_WORDS: u64 = 8;
 const EMITTER_GROUPS: u32 = 64;
 /// The default per-frame gather budget (`IndirectSettings::gather_cells` 0), in cells, on both
 /// paths. G2b sized per-path budgets to about 4 ms of a cut frame's gathers (0.13 us a cell with hardware rays and
@@ -499,7 +500,9 @@ impl Sizes {
             + u64::from(slots))
             * 4;
         // The slots' outgoing radiance, then each draw's emission (cell shading's probe).
-        let outgoing_bytes = (u64::from(slots) + u64::from(TRACED_DRAWS)) * 16;
+        // Per slot its outgoing radiance, per draw its emission probe, per listed emitter triangle
+        // its mean emission (gi_cells.wgsl gi_emitter_mean_at).
+        let outgoing_bytes = (u64::from(slots) + u64::from(TRACED_DRAWS) + u64::from(EMITTERS_MAX)) * 16;
         let draws_bytes = u64::from(TRACED_DRAWS + 1) * 16;
         let raw_slots = if settings.filter != 0 { slots } else { 1 };
         let raw_bytes = u64::from(raw_slots) * RAW_WORDS * 4;
@@ -931,6 +934,10 @@ pub struct IndirectCounters {
     /// those past the list's capacity.
     pub external_requests: u32,
     pub external_overflow: u32,
+    /// The external list's two reader counters (words 2 and 3): the final gather's rays and
+    /// shadow rays, when it counts them.
+    pub fg_rays: u32,
+    pub fg_shadow_rays: u32,
     /// Cells a full bucket gave up to a miss before their eviction age (U-SPECK,
     /// docs/speck.md), and those of them seen within the last eight frames.
     pub evicted: u32,
@@ -1507,6 +1514,9 @@ impl Planner {
         // The emitter list after the slots (gi_emitters.wgsl GI_H_EMITTERS, GI_H_EMITTERS_MAX);
         // its counts (58, 59) are the GPU's, written each frame by gi_emitters_publish.
         header[57] = (HEADER_WORDS + u64::from(c.slots) * (24 + u64::from(c.cold_words))) as u32;
+        // Where cell shading writes each listed emitter triangle's mean emission in the outgoing
+        // radiance: after the slots' values and the draws' probes (gi_cells.wgsl GI_H_EMITTER_MEANS).
+        header[34] = c.slots + TRACED_DRAWS;
         header[60] = EMITTERS_MAX;
         // The cache's own gathers sample the list (and subtract emission at hits) only with
         // RENDERLAB_GI_EMITTERS=1; readers outside the cache use it either way.
@@ -3129,6 +3139,8 @@ impl Renderer {
             claim_deferred: w[43],
             external_requests: w[220],
             external_overflow: w[221],
+            fg_rays: w[222],
+            fg_shadow_rays: w[223],
             evicted: w[44],
             evicted_recent: w[45],
             full_pixel: w[46],
