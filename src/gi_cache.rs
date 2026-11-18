@@ -1517,9 +1517,11 @@ impl Planner {
         // Where cell shading writes each listed emitter triangle's mean emission in the outgoing
         // radiance: after the slots' values and the draws' probes (gi_cells.wgsl GI_H_EMITTER_MEANS).
         header[34] = c.slots + TRACED_DRAWS;
-        // RENDERLAB_GI_SEE_THROUGH=1: ray-hardware cache rays pass see-through placements by
-        // their transmission (gi_rays_hardware.wgsl); off until judged against the reference.
-        header[35] = u32::from(std::env::var("RENDERLAB_GI_SEE_THROUGH").as_deref() == Ok("1"));
+        // Ray-hardware cache rays pass see-through placements by their transmission
+        // (gi_rays_hardware.wgsl; docs/design-see-through-occlusion.md). RENDERLAB_GI_SEE_THROUGH=0
+        // passes them at full strength, as before. Software rays pass them at full strength
+        // until the cache traces the reflection BVH4.
+        header[35] = u32::from(std::env::var("RENDERLAB_GI_SEE_THROUGH").as_deref() != Ok("0"));
         header[60] = EMITTERS_MAX;
         // The cache's own gathers sample the list (and subtract emission at hits) only with
         // RENDERLAB_GI_EMITTERS=1; readers outside the cache use it either way.
