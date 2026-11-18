@@ -956,6 +956,20 @@ fn fraction_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_VSM_FRACTION").is_ok_and(|v| v.trim() == "1"))
 }
+/// The covered fraction's samples a texel (WGSL `VSM_SAMPLES`): the hardware raster runs on a
+/// multisampled attachment of this count and reads each fragment's sample mask. 8 where the device
+/// takes more than 4 samples (TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES), else 4; 1 when off.
+fn fraction_samples(device: &wgpu::Device) -> u32 {
+    if !fraction_on() {
+        1
+    } else if device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
+        8
+    } else {
+        4
+    }
+}
+/// The multisampled attachment's format: one byte a sample, never written.
+const FRACTION_AREA_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R8Unorm;
 
 /// The walk-record build module (N8g): the shared draw-slot count, then
 /// shaders/virtual_shadow_records.wgsl.
@@ -1746,7 +1760,10 @@ impl VirtualState {
             }),
             ResourceKind::ShaderModule,
         );
+        let samples = fraction_samples(device);
+        let samples_constant = ("VSM_SAMPLES", f64::from(samples.max(4)));
         let compute = |entry, layout: &wgpu::PipelineLayout, constants: &[(&str, f64)]| {
+            let constants: Vec<_> = constants.iter().copied().chain([samples_constant]).collect();
             ledger.own(
                 device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                     label: Some(entry),
@@ -1754,7 +1771,7 @@ impl VirtualState {
                     module: &module,
                     entry_point: Some(entry),
                     compilation_options: wgpu::PipelineCompilationOptions {
-                        constants,
+                        constants: &constants,
                         ..Default::default()
                     },
                     cache: None,
@@ -1763,7 +1780,15 @@ impl VirtualState {
             )
         };
         let hardware = |label, peel: f64| {
-            let constants = [("VSM_PEEL_PASS", peel)];
+            let constants = [("VSM_PEEL_PASS", peel), samples_constant];
+            // The covered fraction: a multisampled colour attachment that is never written, whose
+            // samples give each fragment its mask (FRACTION_AREA_FORMAT); otherwise the depth
+            // attachment only sizes the raster area.
+            let targets = [Some(wgpu::ColorTargetState {
+                format: FRACTION_AREA_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::empty(),
+            })];
             ledger.own(
                 device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                     label: Some(label),
@@ -1781,21 +1806,24 @@ impl VirtualState {
                             constants: &constants,
                             ..Default::default()
                         },
-                        targets: &[],
+                        targets: if samples > 1 { &targets } else { &[] },
                     }),
                     primitive: wgpu::PrimitiveState {
                         cull_mode: None,
                         ..Default::default()
                     },
                     // The 64-bit max decides; the attachment only sizes the raster area.
-                    depth_stencil: Some(wgpu::DepthStencilState {
+                    depth_stencil: (samples == 1).then_some(wgpu::DepthStencilState {
                         format: AREA_FORMAT,
                         depth_write_enabled: Some(false),
                         depth_compare: Some(wgpu::CompareFunction::Always),
                         stencil: Default::default(),
                         bias: Default::default(),
                     }),
-                    multisample: Default::default(),
+                    multisample: wgpu::MultisampleState {
+                        count: samples,
+                        ..Default::default()
+                    },
                     multiview_mask: None,
                     cache: None,
                 }),
@@ -2018,9 +2046,9 @@ impl VirtualState {
                     depth_or_array_layers: 1,
                 },
                 mip_level_count: 1,
-                sample_count: 1,
+                sample_count: fraction_samples(device),
                 dimension: wgpu::TextureDimension::D2,
-                format: AREA_FORMAT,
+                format: if fraction_samples(device) > 1 { FRACTION_AREA_FORMAT } else { AREA_FORMAT },
                 usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
                 view_formats: &[],
             }),
@@ -4189,10 +4217,22 @@ impl Renderer {
                     pass.dispatch_workgroups_indirect(&casters.work, level as u64 * ARGS_BYTES);
                 }
             }
+            // The covered fraction rasterizes on the multisampled colour attachment (never
+            // written), otherwise on the depth one; either only sizes the raster area.
+            let multisampled = fraction_samples(&self.device) > 1;
+            let color = [Some(wgpu::RenderPassColorAttachment {
+                view: &r.area,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                    store: wgpu::StoreOp::Discard,
+                },
+            })];
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("N8c hardware page raster"),
-                color_attachments: &[],
-                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                color_attachments: if multisampled { &color } else { &[] },
+                depth_stencil_attachment: (!multisampled).then_some(wgpu::RenderPassDepthStencilAttachment {
                     view: &r.area,
                     depth_ops: Some(wgpu::Operations {
                         load: wgpu::LoadOp::Clear(0.0),

@@ -447,7 +447,7 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
     vsm_work.args[level].sw_x=min(n,65535u);
     vsm_work.args[level].sw_y=select(0u,(n+65534u)/65535u,n!=0u);
     vsm_work.args[level].sw_z=1u;
-    vsm_work.args[level].hw_vertices=select(384u,768u,VSM_FRACTION);
+    vsm_work.args[level].hw_vertices=384u;
     vsm_work.args[level].hw_first=0u;
     vsm_work.args[level].hw_first_instance=0u;
 }
@@ -479,7 +479,8 @@ fn vsm_cover_clear(i:u32) {atomicAnd(&vsm_cover[i>>2u],~(255u<<((i&3u)*8u)));}
 fn vsm_fold(i:u32) {
     let w=atomicLoad(&vsm_top_map[i]);
     if (w&0xfffffffflu)==0lu {return;}
-    let k=countOneBits((atomicLoad(&vsm_cover[i>>2u])>>((i&3u)*8u))&255u);
+    // Eighths of the texel, whatever the sample count.
+    let k=countOneBits((atomicLoad(&vsm_cover[i>>2u])>>((i&3u)*8u))&255u)*(8u/VSM_SAMPLES);
     let h=(u32(w>>32u)&~7u)|select(0u,k,k<8u);
     atomicStore(&vsm_top_map[i],(u64(h)<<32u)|(w&0xfffffffflu));
 }
@@ -562,9 +563,23 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
 // triangles. vsm_fold then moves the count into the top word, and the Disk lookup lets a top
 // column block that share of the directions it would block.
 override VSM_FRACTION:bool=false;
+// Samples a texel (virtual_shadow_gpu.rs `fraction_samples`): the hardware raster's attachment
+// count, 8 where the device takes it, else 4, with that count's standard positions.
+override VSM_SAMPLES:u32=8u;
 @group(0) @binding(65) var<storage,read_write> vsm_cover:array<atomic<u32>>;
 // Sample k's offset from the texel centre, in sixteenths of a texel (the D3D 8x pattern).
 fn vsm_sample(k:u32)->vec2<f32> {
+    if VSM_SAMPLES==4u {
+        // The standard 4x pattern.
+        var o=vec2<f32>(2.0,6.0);
+        switch k {
+            case 0u {o=vec2<f32>(-2.0,-6.0);}
+            case 1u {o=vec2<f32>(6.0,-2.0);}
+            case 2u {o=vec2<f32>(-6.0,2.0);}
+            default {}
+        }
+        return o/16.0;
+    }
     var o=vec2<f32>(7.0,-7.0);
     switch k {
         case 0u {o=vec2<f32>(1.0,-3.0);}
@@ -589,19 +604,6 @@ fn vsm_texel_index(level:u32,t:vec2<u32>)->u32 {
     return (level*side+t.y)*side+t.x;
 }
 fn vsm_cross(a:vec2<f32>,b:vec2<f32>,p:vec2<f32>)->f32 {return (b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x);}
-// Corner b of a counter-clockwise triangle (a, b, c in texels) once its two edges a-b and b-c
-// move outward by half a texel square's reach along their normals (the square's support
-// 0.5 (|n.x| + |n.y|)): where the moved edges' lines meet.
-fn vsm_dilated_corner(a:vec2<f32>,b:vec2<f32>,c:vec2<f32>)->vec2<f32> {
-    let e0=normalize(b-a);let e1=normalize(c-b);
-    let n0=vec2<f32>(e0.y,-e0.x);let n1=vec2<f32>(e1.y,-e1.x);
-    let c0=dot(n0,b)+0.5*(abs(n0.x)+abs(n0.y));
-    let c1=dot(n1,b)+0.5*(abs(n1.x)+abs(n1.y));
-    let det=n0.x*n1.y-n0.y*n1.x;
-    // Parallel edges (a degenerate corner): no meeting point; a far one makes the slot use its box.
-    if abs(det)<1e-6 {return b+vec2<f32>(1e3);}
-    return vec2<f32>(c0*n1.y-c1*n0.y,n0.x*c1-n1.x*c0)/det;
-}
 // One triangle (vertices a, b, c in level texels, counter-clockwise, normalized heights z) at
 // texel t under VSM_FRACTION. The top pass writes, where any sample of the texel is covered, the
 // triangle's plane at the texel centre clamped to its height range: where the centre is covered
@@ -618,7 +620,7 @@ fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,
     let e1=b-a;let e2=c-a;
     let g=vec2<f32>((z.y-z.x)*e2.y-(z.z-z.x)*e1.y,(z.z-z.x)*e1.x-(z.y-z.x)*e2.x)/area;
     if !VSM_PEEL_PASS {
-        for(var k=0u;k<8u;k+=1u) {
+        for(var k=0u;k<VSM_SAMPLES;k+=1u) {
             let p=centre+vsm_sample(k);
             if min(min(vsm_cross(b,c,p),vsm_cross(c,a,p)),vsm_cross(a,b,p))<0.0 {continue;}
             let zc=clamp(z.x+dot(g,centre-a),min(min(z.x,z.y),z.z),max(max(z.x,z.y),z.z));
@@ -635,11 +637,42 @@ fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,
     // The samples lie within 7/16 of a texel of the centre on each axis.
     let lowest=top-VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z-0.875*(abs(g.x)+abs(g.y));
     var bits=0u;
-    for(var k=0u;k<8u;k+=1u) {
+    for(var k=0u;k<VSM_SAMPLES;k+=1u) {
         let p=centre+vsm_sample(k);
         let w=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p));
         if any(w<vec3<f32>(0.0)) {continue;}
         if dot(w,z)/area>=lowest {bits|=1u<<k;}
+    }
+    if bits!=0u {atomicOr(&vsm_cover[i>>2u],bits<<((i&3u)*8u));}
+}
+// The hardware raster's fragment under VSM_FRACTION: `mask` is the samples of texel t the
+// rasterizer found inside the triangle (a, b, c in texels, heights z), so only the plane is
+// evaluated here. As vsm_fraction_texel: the top pass writes the plane at the texel centre clamped
+// to the triangle's heights; the peel pass writes the centre into the peel layer and marks the
+// covered samples within the peel gap of the top, widened by the triangle's slope.
+fn vsm_fraction_samples(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,z:vec3<f32>,id:u32,mask:u32) {
+    let area=vsm_cross(a,b,c);
+    if area==0.0 || mask==0u {return;}
+    let centre=vec2<f32>(t)+vec2<f32>(0.5);
+    let e1=b-a;let e2=c-a;
+    let g=vec2<f32>((z.y-z.x)*e2.y-(z.z-z.x)*e1.y,(z.z-z.x)*e1.x-(z.y-z.x)*e2.x)/area;
+    let zlo=min(min(z.x,z.y),z.z);let zhi=max(max(z.x,z.y),z.z);
+    if !VSM_PEEL_PASS {
+        vsm_write(level,t,clamp(z.x+dot(g,centre-a),zlo,zhi),id);
+        return;
+    }
+    let wc=vec3<f32>(vsm_cross(b,c,centre),vsm_cross(c,a,centre),vsm_cross(a,b,centre))/area;
+    if all(wc>=vec3<f32>(0.0)) {vsm_write(level,t,dot(wc,z),id);}
+    let i=vsm_texel_index(level,t);
+    if i==VSM_NONE {return;}
+    let top=bitcast<f32>(u32(atomicLoad(&vsm_top_map[i])>>32u));
+    let lowest=top-VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z-0.875*(abs(g.x)+abs(g.y));
+    var bits=0u;
+    var m=mask&((1u<<VSM_SAMPLES)-1u);
+    while m!=0u {
+        let k=firstTrailingBit(m);
+        m&=m-1u;
+        if clamp(z.x+dot(g,centre+vsm_sample(k)-a),zlo,zhi)>=lowest {bits|=1u<<k;}
     }
     if bits!=0u {atomicOr(&vsm_cover[i>>2u],bits<<((i&3u)*8u));}
 }
@@ -728,34 +761,17 @@ struct VsmHw {
     out.position=vec4<f32>(0.0,0.0,0.0,1.0);
     if ((entry>>28u)&(1u<<tile))==0u {return out;}
     if VSM_FRACTION {
-        // Every texel whose square meets the triangle needs a fragment (the fragment tests the
-        // samples): the triangle with each edge moved out by half a texel square's reach along its
-        // normal (three vertices; the slot's other three collapse). Where an acute corner would
-        // reach more than two texels out, the slot draws the box grown by half a texel instead
-        // (two triangles).
-        let c=vsm_clusters[entry&0x0fffffffu];let local=vertex/6u;let k=vertex%6u;
+        // The triangle itself, rasterized at VSM_SAMPLES samples a texel (the attachment's): the
+        // fragment's sample mask is its covered samples. Each vertex carries the whole triangle
+        // (flat) for the fragment's plane.
+        let c=vsm_clusters[entry&0x0fffffffu];let local=vertex/3u;
         if local>=(c.counts&255u) {return out;}
         let batch=primary_placements[c.placement]&0x1fffffffu;
         let t=vsm_cluster_data[batch].data[c.triangles+local];
         let s0=vsm_cluster_vertex(c,batch,t&255u,level);
-        var s1=vsm_cluster_vertex(c,batch,(t>>8u)&255u,level);
-        var s2=vsm_cluster_vertex(c,batch,(t>>16u)&255u,level);
-        let area=vsm_cross(s0.xy,s1.xy,s2.xy);
-        if area==0.0 {return out;}
-        if area<0.0 {let q=s1;s1=s2;s2=q;}
-        let d0=vsm_dilated_corner(s2.xy,s0.xy,s1.xy);
-        let d1=vsm_dilated_corner(s0.xy,s1.xy,s2.xy);
-        let d2=vsm_dilated_corner(s1.xy,s2.xy,s0.xy);
-        let spike=max(max(distance(d0,s0.xy),distance(d1,s1.xy)),distance(d2,s2.xy))>2.0;
-        var q:vec2<f32>;
-        if spike {
-            let lo=min(min(s0.xy,s1.xy),s2.xy)-vec2<f32>(0.5);let hi=max(max(s0.xy,s1.xy),s2.xy)+vec2<f32>(0.5);
-            let far=k==1u || k==2u || k==4u;let high=k==2u || k==4u || k==5u;
-            q=vec2<f32>(select(lo.x,hi.x,far),select(lo.y,hi.y,high));
-        } else {
-            if k>=3u {return out;}
-            q=select(select(d2,d1,k==1u),d0,k==0u);
-        }
+        let s1=vsm_cluster_vertex(c,batch,(t>>8u)&255u,level);
+        let s2=vsm_cluster_vertex(c,batch,(t>>16u)&255u,level);
+        let q=select(select(s2.xy,s1.xy,vertex%3u==1u),s0.xy,vertex%3u==0u);
         let size=f32(vsm_area());
         let o=vec2<f32>(vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles()))*size;
         out.position=vec4<f32>((q.x-o.x)/size*2.0-1.0,1.0-(q.y-o.y)/size*2.0,0.5,1.0);
@@ -776,12 +792,12 @@ struct VsmHw {
     }
     return out;
 }
-@fragment fn fs_vsm_cluster(input:VsmHw) {
+@fragment fn fs_vsm_cluster(input:VsmHw,@builtin(sample_mask) mask:u32) {
     let tile=vsm_pass.pad0;
     let o=vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles())*vsm_area();
     let t=vec2<u32>(input.position.xy)+o;
     if VSM_FRACTION {
-        vsm_fraction_texel(vsm_pass.level,t,input.a.xy,input.a.zw,input.c,input.z,input.id);
+        vsm_fraction_samples(vsm_pass.level,t,input.a.xy,input.a.zw,input.c,input.z,input.id,mask);
         return;
     }
     vsm_write(vsm_pass.level,t,input.height,input.id);
