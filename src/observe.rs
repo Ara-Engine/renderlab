@@ -502,3 +502,37 @@ pub struct LightingStats {
     pub retained_target_generations: usize,
     pub lut_bytes: u64,
 }
+
+#[cfg(test)]
+mod event_queue_tests {
+    use super::*;
+
+    /// A scene start completes dozens of upload submissions between two polls. The queue keeps
+    /// every completion, a frame's included, in submission order; only the oldest observations'
+    /// GPU samples are dropped and counted. (It dropped whole observations, and Ara waited its 5 s
+    /// frame timeout for a frame the GPU had finished.)
+    #[test]
+    fn an_overflowing_queue_keeps_every_completion() {
+        let now = Instant::now();
+        let completion = |submission: u64, frame: Option<u64>| Completion {
+            submission,
+            frame: frame.map(FrameId),
+            view: None,
+            revision: Revision(0),
+            observed_at: now,
+            submitted_at: now,
+        };
+        let mut queue = EventQueue::default();
+        queue.push(Observation { completion: completion(0, Some(7)), gpu: None });
+        for submission in 1..40 {
+            queue.push(Observation { completion: completion(submission, None), gpu: None });
+        }
+        let events = queue.drain(Duration::ZERO);
+        let order: Vec<u64> = events.completed.iter().map(|c| c.submission).collect();
+        assert_eq!(order, (0..40).collect::<Vec<_>>());
+        assert_eq!(events.completed[0].frame, Some(FrameId(7)));
+        assert_eq!(events.dropped, 24);
+        // Drained: the next poll starts empty.
+        assert!(queue.drain(Duration::ZERO).completed.is_empty());
+    }
+}
