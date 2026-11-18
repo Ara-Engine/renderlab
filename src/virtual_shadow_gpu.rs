@@ -948,7 +948,7 @@ pub(super) fn shader_source() -> String {
     #[cfg(not(test))]
     let variant: Option<String> = None;
     // P-RELIT: the restart-zone tests over VsmFrame's copy (vsm_prepare's batches).
-    format!(
+    let source = format!(
         "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}\n{}",
         crate::TRACED_DRAWS,
         variant
@@ -980,7 +980,23 @@ pub(super) fn shader_source() -> String {
         "override VSM_FRACTION:bool=false;",
         &format!("override VSM_FRACTION:bool={};", fraction_on()),
         1,
-    )
+    );
+    // Measurement: `RENDERLAB_VSM=NAME=value,...` sets the page module's overrides.
+    let mut source: String = source;
+    for (name, value) in std::env::var("RENDERLAB_VSM")
+        .iter()
+        .flat_map(|list| list.split(','))
+        .filter_map(|item| item.split_once('='))
+    {
+        let declaration = format!("override {name}:");
+        let Some(at) = source.find(&declaration) else {
+            panic!("RENDERLAB_VSM: no override named {name}");
+        };
+        let equals = at + source[at..].find('=').unwrap() + 1;
+        let end = equals + source[equals..].find(';').unwrap();
+        source.replace_range(equals..end, value);
+    }
+    source
 }
 /// The covered fraction (`RENDERLAB_VSM_FRACTION=1`, off by default): the page raster samples
 /// each texel at eight positions and marks the near layer's covered samples in a byte plane

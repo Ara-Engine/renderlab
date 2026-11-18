@@ -534,6 +534,7 @@ fn vsm_cover_clear(i:u32) {atomicAnd(&vsm_cover[i>>2u],~(255u<<((i&3u)*8u)));}
 // height it loads anyway. The height moves by at most seven of its last bits (under 2^-21 of the
 // depth range), which every other reader of the word ignores.
 fn vsm_fold(i:u32) {
+    if !VSM_FR_FOLD {return;}
     let w=atomicLoad(&vsm_top_map[i]);
     if (w&0xfffffffflu)==0lu {return;}
     let k=countOneBits((atomicLoad(&vsm_cover[i>>2u])>>((i&3u)*8u))&255u);
@@ -619,6 +620,12 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
 // its triangles. vsm_fold then moves the count into the top word, and the Disk lookup lets a top
 // column block that share of the directions it would block.
 override VSM_FRACTION:bool=false;
+// Measurement screens of the fraction's raster cost (`RENDERLAB_VSM=NAME=value`): the software and
+// hardware rasters' sampled path, the peel pass's sample bits, the fold.
+override VSM_FR_SW:bool=true;
+override VSM_FR_HW:bool=true;
+override VSM_FR_BITS:bool=true;
+override VSM_FR_FOLD:bool=true;
 @group(0) @binding(65) var<storage,read_write> vsm_cover:array<atomic<u32>>;
 // Sample k's offset from the texel centre, in sixteenths of a texel (the D3D 8x pattern).
 fn vsm_sample(k:u32)->vec2<f32> {
@@ -690,7 +697,7 @@ fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,
         if any(w<vec3<f32>(0.0)) {continue;}
         if dot(w,z)/area>=top-gap {bits|=1u<<k;}
     }
-    if bits!=0u {atomicOr(&vsm_cover[i>>2u],bits<<((i&3u)*8u));}
+    if VSM_FR_BITS && bits!=0u {atomicOr(&vsm_cover[i>>2u],bits<<((i&3u)*8u));}
 }
 // Placement + 1 and primitive, so the lookup can recognize the receiver's own 1-ring.
 fn vsm_cluster_id(c:VsmCluster,batch:u32,local:u32)->u32 {
@@ -746,13 +753,13 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
     let zlo=min(min(s0.z,s1.z),s2.z);let zhi=max(max(s0.z,s1.z),s2.z);
     // Texel centres are at 256x+128 subpixels.
     // The covered fraction's samples reach half a texel from the centres too.
-    let grow=select(select(0,128,thin),128,VSM_FRACTION);
+    let grow=select(select(0,128,thin),128,VSM_FRACTION && VSM_FR_SW);
     let lo=max(min(a,min(b,d))-vec2<i32>(grow),vec2<i32>(0));
     let hi=min(max(a,max(b,d))+vec2<i32>(grow),vec2<i32>(side*256-1));
     let first=(lo-vec2<i32>(128)+vec2<i32>(255))>>vec2<u32>(8u);
     let last=(hi-vec2<i32>(128))>>vec2<u32>(8u);
     let id=vsm_cluster_id(c,batch,li);
-    if VSM_FRACTION {
+    if VSM_FRACTION && VSM_FR_SW {
         for(var y=first.y;y<=last.y;y+=1) {
             for(var x=first.x;x<=last.x;x+=1) {
                 vsm_fraction_texel(level,vec2<u32>(u32(x),u32(y)),s0.xy,s1.xy,s2.xy,vec3<f32>(s0.z,s1.z,s2.z),id);
@@ -794,7 +801,7 @@ struct VsmHw {
     var out:VsmHw;
     out.position=vec4<f32>(0.0,0.0,0.0,1.0);
     if ((entry>>28u)&(1u<<tile))==0u {return out;}
-    if VSM_FRACTION {
+    if VSM_FRACTION && VSM_FR_HW {
         // Every texel whose square meets the triangle needs a fragment (the fragment tests the
         // samples): the triangle with each edge moved out by half a texel square's reach along its
         // normal (three vertices; the slot's other three collapse). Where an acute corner would
@@ -877,7 +884,7 @@ struct VsmHw {
     let tile=vsm_pass.pad0;
     let o=vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles())*vsm_area();
     let x=vec2<u32>(input.position.xy)+o;
-    if VSM_FRACTION {
+    if VSM_FRACTION && VSM_FR_HW {
         vsm_fraction_texel(vsm_pass.level,x,input.a.xy,input.a.zw,input.c,input.z,input.id);
         return;
     }
