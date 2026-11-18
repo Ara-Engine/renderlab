@@ -1980,6 +1980,9 @@ pub(super) struct GiState {
     priority_compact: bool,
     priority_hold: bool,
     queue_probe: Option<queue_probe::State>,
+    /// Whether a reader outside the cache appends to the external request list
+    /// (`request_external`); until one does, its pass is not encoded.
+    external_readers: bool,
     /// Whether a reader outside the cache reads the emitter list (`request_emitters`).
     emitter_readers: bool,
     groups: Option<Groups>,
@@ -2218,6 +2221,7 @@ impl GiState {
             priority_compact: false,
             priority_hold: false,
             queue_probe: None,
+            external_readers: false,
             emitter_readers: false,
             groups: None,
             retired: vec![],
@@ -2257,6 +2261,11 @@ impl GiState {
         self.resources
             .as_ref()
             .map_or(&*self.dummy, |r| &*r.outgoing)
+    }
+    /// Called by a reader that appends to `external_requests` (the final gather), on every frame
+    /// it does: from the next encode on, the cache turns the list into requests.
+    pub fn request_external(&mut self) {
+        self.external_readers = true;
     }
     /// Called by a reader of the emitter list (the final gather), on every frame it reads it:
     /// from the next encode on, the cache builds the list and its power CDF whenever it gathers.
@@ -4491,7 +4500,7 @@ impl GiState {
         }
         // Last frame's external requests join the probe's, for the same claim rounds; the list
         // then starts empty for this frame's appends (the final gather runs after encode).
-        if traced {
+        if traced && self.external_readers {
             main_pass(encoder, "indirect cache external requests", &p.external, u32::MAX, Some([EXTERNAL_GROUPS, 1]));
             encoder.clear_buffer(&r.external, 0, Some(16));
         }
