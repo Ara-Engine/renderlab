@@ -71,14 +71,47 @@ pub(crate) fn entry() -> wgpu::BindGroupLayoutEntry {
         count: None,
     }
 }
+/// The lighting cache's emitter list readers the final gather samples (shaders/gi_emitters.wgsl,
+/// read through gi_word): its constants, the pick's struct and the functions that need no cache
+/// binding. The build kernels in that file bind the cache's own buffers and stay out.
+fn emitter_readers() -> String {
+    const SOURCE: &str = include_str!("../shaders/gi_emitters.wgsl");
+    let block = |start: usize| {
+        let brace = start + SOURCE[start..].find('{').unwrap();
+        let mut depth = 1;
+        let mut end = brace + 1;
+        while depth != 0 {
+            depth += i32::from(SOURCE.as_bytes()[end] == b'{') - i32::from(SOURCE.as_bytes()[end] == b'}');
+            end += 1;
+        }
+        format!("{}\n", &SOURCE[start..end])
+    };
+    let mut out: String = SOURCE.lines().filter(|l| l.starts_with("const GI_")).map(|l| format!("{l}\n")).collect();
+    out.push_str(&block(SOURCE.find("struct GiEmitterPick").unwrap()));
+    for name in [
+        "gi_emitter_draws_at",
+        "gi_emitter_cdf_at",
+        "gi_emitter_vec",
+        "gi_emitter_power",
+        "gi_emitter_pick",
+        "gi_batch_emission",
+        "gi_triangle_emission",
+    ] {
+        out.push_str(&block(SOURCE.find(&format!("fn {name}(")).unwrap()));
+    }
+    out
+}
 /// The GI receiver kernel's module on a traced shading `head`, exactly as the engine compiles
 /// it: the standard program's traced composition (which carries the shading-side definitions
-/// `shade_source` appends) and the kernel half of gi_receiver_pass.wgsl.
+/// `shade_source` appends), the emitter list's readers and the kernel half of
+/// gi_receiver_pass.wgsl.
 pub(crate) fn kernel_module(head: &str) -> program::Composed {
     let mut composed = program::compose(head, program::STANDARD_PROGRAM, Stage::Traced, false);
     if program::final_gather() {
         composed.source = program::with_cache_lookup(composed.source);
     }
+    // The gather's kernels are in the kernel half whether or not it runs.
+    composed.source.push_str(&emitter_readers());
     let mut kernel = SOURCE.split_once(ENTRY_SEAM).unwrap().1.to_string();
     // Measurement only (`RENDERLAB_GI_RX_PROBE=nolookup`): no cache lookup, so the pass costs
     // its decode and the record's stores alone. Shading then sees no GI value. The pattern holds
@@ -273,17 +306,25 @@ pub(super) struct Targets {
     region: [u32; 4],
     clear_keys: bool,
     /// The final gather (`program::final_gather`): its trace, filter, adaptive-probe and
-    /// resolve pipelines per `Shading`, on the shading layout (hits sample materials). Its
-    /// probes, FG_SLOTS per FG_TILE tile, one per FG_BLOCK block and the tile probes' filtered
-    /// copies, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe).
+    /// resolve pipelines per `Shading`. Its probes, FG_SLOTS per FG_TILE tile, one per FG_BLOCK
+    /// block and the tile probes' filtered copies, follow the pixels' records in `values`
+    /// (gi_receiver_pass.wgsl FgProbe).
     gather: [Option<[Owned<wgpu::ComputePipeline>; 5]>; 2],
+    /// The gather's group 2: its probes read cache cells and sample no material, so instead of
+    /// the materials group it binds the cache's external request list (binding 30), where hits
+    /// without a cell value ask for their cells. Not in the shared lighting group: one more
+    /// writable buffer there put the reflection hits' pipeline over the per-stage storage limit.
+    gather_group: Option<Owned<wgpu::BindGroupLayout>>,
+    /// Binding 30's stand-in while the cache has no resources (its own stand-in is bound
+    /// read-only in the lighting group): four words, no room for an entry.
+    requests_stand_in: Option<Buffer>,
     tiles: [u32; 2],
     blocks: [u32; 2],
 }
 /// The final gather's probe tile in pixels and probe size in bytes (gi_receiver_pass.wgsl
 /// FG_TILE, FgProbe).
 const FG_TILE: u32 = 16;
-const FG_PROBE_BYTES: u64 = 144;
+const FG_PROBE_BYTES: u64 = 192;
 /// Probes per tile (gi_receiver_pass.wgsl FG_SLOTS): a second where the tile holds a second plane.
 const FG_SLOTS: u64 = 2;
 /// The adaptive probes' block in pixels (gi_receiver_pass.wgsl FG_BLOCK): one probe each.
@@ -341,6 +382,9 @@ impl Renderer {
             region: [0; 4],
             clear_keys: false,
             gather: [None, None],
+            gather_group: None,
+            requests_stand_in: program::final_gather()
+                .then(|| Buffer::new(self, "final gather requests stand-in", 16, wgpu::BufferUsages::STORAGE)),
             tiles: [size.width.div_ceil(FG_TILE), size.height.div_ceil(FG_TILE)],
             blocks: [size.width.div_ceil(FG_BLOCK), size.height.div_ceil(FG_BLOCK)],
         }
@@ -356,6 +400,9 @@ impl Renderer {
             return Ok(());
         };
         let [x, y] = state.region_groups([8, 4]);
+        // The gather's probe hits append cells without a value to the cache's external list,
+        // which the cache turns into requests from its next encode on.
+        let gathers = program::final_gather();
         self.queue.write_buffer(
             &target.args.value,
             0,
@@ -379,6 +426,10 @@ impl Renderer {
                 .is_some_and(|s| s.plan.held_frames() > 0);
             let reuse = built && !moved && still && target.lean[shading as usize] && target.computed && table.is_some() && target.table == table;
             self.queue.write_buffer(&keys.value, 0, &u32::from(reuse).to_ne_bytes());
+        }
+        if gathers {
+            self.gi.request_external();
+            self.gi.request_emitters();
         }
         let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
         target.computed = true;
@@ -435,6 +486,7 @@ impl Renderer {
         );
         let mut lean_built = None;
         let mut gather = None;
+        let mut gather_group = None;
         if lean() {
             let lean_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("GI receiver ABI, lean"),
@@ -454,14 +506,31 @@ impl Renderer {
         }
         let is_lean = lean_built.is_some();
         if program::final_gather() {
-            let layout = &state.shade_layouts[shading as usize];
+            let group = self.ledger.own(
+                self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("final gather, group 2"),
+                    entries: &[storage(30, 16)],
+                }),
+                ResourceKind::BindGroupLayout,
+            );
+            let layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("final gather ABI"),
+                bind_group_layouts: &[
+                    Some(&state.shade_bindings[shading as usize]),
+                    Some(&state.array_bindings),
+                    Some(&group),
+                    Some(&self.lighting.bindings),
+                ],
+                immediate_size: 0,
+            });
             gather = Some([
-                build_entry(layout, "fg_trace"),
-                build_entry(layout, "fg_filter"),
-                build_entry(layout, "fg_classify"),
-                build_entry(layout, "fg_adapt"),
-                build_entry(layout, "fg_resolve"),
+                build_entry(&layout, "fg_trace"),
+                build_entry(&layout, "fg_filter"),
+                build_entry(&layout, "fg_classify"),
+                build_entry(&layout, "fg_adapt"),
+                build_entry(&layout, "fg_resolve"),
             ]);
+            gather_group = Some(group);
         }
         let pipeline = lean_built.unwrap_or_else(|| build(&state.shade_layouts[shading as usize]));
         let mut group = Vec::new();
@@ -514,12 +583,18 @@ impl Renderer {
         target.lean[shading as usize] = is_lean;
         target.empty = Some(empty);
         target.gather[shading as usize] = gather;
+        if gather_group.is_some() {
+            target.gather_group = gather_group;
+        }
         Ok(())
     }
+    /// The receiver kernel, or with the final gather its five kernels, each in its own compute
+    /// pass behind a `mark` of its name, so the pass log times them apart.
     pub(crate) fn encode_gi_receiver_pass(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         shading: Shading,
+        mark: &mut dyn FnMut(&mut wgpu::CommandEncoder, &'static str),
     ) {
         if !enabled(&self.device) {
             return;
@@ -539,35 +614,59 @@ impl Renderer {
         }
         let bindings = state.bindings.as_ref().unwrap();
         let g = state.geometry.as_ref().unwrap();
+        let shade = &**bindings.shade[shading as usize].as_ref().unwrap();
+        if let (Some([trace, filter, classify, adapt, resolve]), Some(layout), Some(stand_in)) = (
+            target.gather[shading as usize].as_ref(),
+            target.gather_group.as_ref(),
+            target.requests_stand_in.as_ref(),
+        ) {
+            // The cache's list is replaced when its table grows, so the group follows it each frame.
+            let requests = self.gi.external_requests();
+            let requests = if std::ptr::eq(requests, &*self.gi.dummy) { &*stand_in.value } else { requests };
+            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("final gather, group 2"),
+                layout,
+                entries: &[wgpu::BindGroupEntry { binding: 30, resource: requests.as_entire_binding() }],
+            });
+            // Grids: probe tiles, the filter's 8x4 tiles a group, blocks, two blocks a group,
+            // and the resolve's indirect pixel grid (None).
+            let steps: [(&'static str, &wgpu::ComputePipeline, Option<[u32; 2]>); 5] = [
+                ("fg_trace", trace, Some(target.tiles)),
+                ("fg_filter", filter, Some([target.tiles[0].div_ceil(8), target.tiles[1].div_ceil(4)])),
+                ("fg_classify", classify, Some(target.blocks)),
+                ("fg_adapt", adapt, Some([target.blocks[0].div_ceil(2), target.blocks[1]])),
+                ("fg_resolve", resolve, None),
+            ];
+            for (name, kernel, grid) in steps {
+                mark(encoder, name);
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some(name),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(kernel);
+                pass.set_bind_group(0, shade, &[]);
+                pass.set_bind_group(1, &*g.arrays, &[]);
+                pass.set_bind_group(2, &group, &[]);
+                pass.set_bind_group(3, self.lighting.bind(), &[]);
+                match grid {
+                    Some([x, y]) => pass.dispatch_workgroups(x, y, 1),
+                    None => pass.dispatch_workgroups_indirect(&target.args.value, 0),
+                }
+            }
+            return;
+        }
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("GI receiver"),
             timestamp_writes: None,
         });
         pass.set_pipeline(pipeline);
-        pass.set_bind_group(
-            0,
-            &**bindings.shade[shading as usize].as_ref().unwrap(),
-            &[],
-        );
+        pass.set_bind_group(0, shade, &[]);
         pass.set_bind_group(1, &*g.arrays, &[]);
         match target.empty.as_ref().filter(|_| target.lean[shading as usize]) {
             Some(empty) => pass.set_bind_group(2, &**empty, &[]),
             None => pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]),
         }
         pass.set_bind_group(3, self.lighting.bind(), &[]);
-        if let Some([trace, filter, classify, adapt, resolve]) = target.gather[shading as usize].as_ref() {
-            // Hits shade with their materials: the full group 2.
-            pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
-            pass.set_pipeline(trace);
-            pass.dispatch_workgroups(target.tiles[0], target.tiles[1], 1);
-            pass.set_pipeline(filter);
-            pass.dispatch_workgroups(target.tiles[0].div_ceil(8), target.tiles[1].div_ceil(4), 1);
-            pass.set_pipeline(classify);
-            pass.dispatch_workgroups(target.blocks[0], target.blocks[1], 1);
-            pass.set_pipeline(adapt);
-            pass.dispatch_workgroups(target.blocks[0].div_ceil(2), target.blocks[1], 1);
-            pass.set_pipeline(resolve);
-        }
         pass.dispatch_workgroups_indirect(&target.args.value, 0);
     }
 }
@@ -624,6 +723,7 @@ mod tests {
             } else {
                 shade_source_for(source, true, true, true)
             };
+            source.push_str(&emitter_readers());
             source.push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
             // The final gather's module carries the cache lookup on both paths.
             let source = program::with_cache_lookup(source);

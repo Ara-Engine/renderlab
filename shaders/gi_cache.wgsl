@@ -219,6 +219,20 @@ fn gi_word(i:u32) -> u32 { return gi_table[i]; }
 // (sky scale and halves, bounce scale and halves), written beside the hot record by gi_store_sh
 // and gi_gather while a filter bit is set. One record when the filter is off.
 @group(0) @binding(37) var<storage,read_write> gi_raw:array<u32>;
+// ---- requests from outside the cache ----
+// Readers that cannot write the cache (the final gather's probe rays, bound through
+// GiState::external_requests) append the cells they met without a value: word 0 the count,
+// word 1 the appends past capacity, then from word 4 one entry of 4 words per cell, level |
+// bin << 8 and the cell's lattice coordinates (gi_request_one's arguments). The next frame's
+// gi_external_requests turns each into a request after the probe's, for the same claim rounds;
+// the CPU then clears the count.
+@group(0) @binding(38) var<storage,read_write> gi_external:array<atomic<u32>>;
+const GI_EXTERNAL_CAPACITY:u32=16384u;
+const GI_W_EXTERNAL:u32=220u;
+const GI_W_EXTERNAL_OVERFLOW:u32=221u;
+// The list's words 2 and 3: two counters a reader may add to (the final gather's rays and its
+// shadow rays), carried into the GI log before the clear.
+const GI_W_EXTERNAL_COUNTERS:u32=222u;
 const GI_RAW_WORDS:u32=22u;
 fn gi_raw_at(slot:u32, word:u32) -> u32 { return slot*GI_RAW_WORDS+word-1u; }
 fn gi_filter_on(term:u32) -> bool { return (gi_word(GI_H_FILTER)&term)!=0u; }
@@ -1965,6 +1979,28 @@ fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
 }
 // Requests the cell (level, bin, cell) for this frame's claim rounds, as the probe lists a
 // miss, in a generation band below the pixels' (resolve marks it secondary or tertiary).
+// The external list's cells as requests, a band below pixels' (a probe hit is one bounce from
+// a pixel, as a pixel-made cell's gather is). A cell made since it was listed is skipped; the
+// request table merges repeats.
+@compute @workgroup_size(64) fn gi_external_requests(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+    let count=min(atomicLoad(&gi_external[0]),GI_EXTERNAL_CAPACITY);
+    if id.x==0u {
+        atomicAdd(&gi_work[GI_W_EXTERNAL],count);
+        atomicAdd(&gi_work[GI_W_EXTERNAL_OVERFLOW],atomicLoad(&gi_external[1]));
+        atomicAdd(&gi_work[GI_W_EXTERNAL_COUNTERS],atomicLoad(&gi_external[2]));
+        atomicAdd(&gi_work[GI_W_EXTERNAL_COUNTERS+1u],atomicLoad(&gi_external[3]));
+    }
+    for(var i=id.x;i<count;i+=groups.x*64u) {
+        let at=4u+i*4u;
+        let tag=atomicLoad(&gi_external[at]);
+        let level=tag&0xffu;
+        let bin=(tag>>8u)&0xffu;
+        if level>=gi_word(GI_H_LEVELS) || bin>=6u { continue; }
+        let cell=bitcast<vec3<i32>>(vec3<u32>(atomicLoad(&gi_external[at+1u]),atomicLoad(&gi_external[at+2u]),atomicLoad(&gi_external[at+3u])));
+        if gi_find_pair(gi_key(level,bin,cell))!=0xffffffffu { continue; }
+        gi_request_one(level,bin,cell,GI_BAND_SECONDARY);
+    }
+}
 fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, band:u32) {
     let key=gi_key(level,bin,cell);
     let entry=gi_request_entry(key.x);
@@ -2074,7 +2110,10 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
         if o.w>0.0 {
             gi_hit_slot=slot;
             let settled=select(GI_HIT_CHANGING,GI_HIT_FINAL,o.w>=1.0);
-            return vec4<f32>(o.rgb,select(GI_HIT_MISSING,settled,l==base || orphan));
+            // A hit on an emitting draw sends its reflected light only: its emission is the
+            // emitter list's (gi_emitters.wgsl), sampled as a light by every gather.
+            let reflected=max(o.rgb-gi_identity_emission(gi_hit_identity(h.inst,h.tri)),vec3<f32>(0.0));
+            return vec4<f32>(reflected,select(GI_HIT_MISSING,settled,l==base || orphan));
         }
         if l==base {
             orphan=(gi_table[gi_cold(slot)+GI_C_STATE]&GI_ORPHAN)!=0u;
@@ -2099,13 +2138,18 @@ fn gi_hit_radiance(origin:vec3<f32>, d:vec3<f32>, h:GiHit, band:u32, tertiary:bo
 // ranking: it bounds a cut's gather rays per frame in time rather than in frames.
 const GI_GATHER_LANES:u32=64u;
 const GI_GATHER_PERIOD_MAX:u32=64u;
-var<workgroup> gi_wg_bounce:array<f32,12u*GI_GATHER_LANES>;
+var<workgroup> gi_wg_bounce:array<f32,24u*GI_GATHER_LANES>;
 var<workgroup> gi_wg_missing:atomic<u32>;
 var<workgroup> gi_wg_changing:atomic<u32>;
 var<workgroup> gi_wg_rays:atomic<u32>;
 // Whether this iteration's cell gathers this frame, for the whole workgroup (P-GI).
 var<workgroup> gi_wg_live:u32;
 var<private> gi_gather_sh:array<vec3<f32>,4>;
+// A lane's fixed-direction share of gi_gather_sh, and the workgroup's fixed-direction rays that hit
+// and that found a value (the gathers leave the rest out of the average).
+var<private> gi_gather_fixed:array<vec3<f32>,4>;
+var<workgroup> gi_wg_hits:atomic<u32>;
+var<workgroup> gi_wg_valued:atomic<u32>;
 // The gather period P for `count` queued cells (1 without a cap).
 // ---- gather ray budget ----
 // A gather's cost is its rays, and they differ by cell: the fixed directions not open to the
@@ -2262,6 +2306,8 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             atomicStore(&gi_wg_missing,0u);
             atomicStore(&gi_wg_changing,0u);
             atomicStore(&gi_wg_rays,0u);
+            atomicStore(&gi_wg_hits,0u);
+            atomicStore(&gi_wg_valued,0u);
         }
         let slot=atomicLoad(&gi_work[gi_frame.bounce.x+1u+at]);
         let cold=gi_cold(slot);
@@ -2275,7 +2321,7 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
         // gathered zeros for it (P-GI: a capped cut defers 140-200k cells a frame).
         if lane==0u { gi_wg_live=select(0u,1u,live); }
         if workgroupUniformLoad(&gi_wg_live)!=0u {
-        for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]=vec3<f32>(0.0); }
+        for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]=vec3<f32>(0.0); gi_gather_fixed[i]=vec3<f32>(0.0); }
         if live {
             let c=gi_cell(slot);
             let n=gi_unpack_normal(gi_table[cold+GI_C_NORMAL]);
@@ -2294,6 +2340,10 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             let stride=max(gi_word(GI_H_GATHER_STRIDE),1u);
             // The fixed directions' hits read cells sized to the ray's cone (gi_hit_radiance).
             gi_hit_spread=gi_header_f32(GI_H_HIT_SPREAD);
+            // Fixed-direction rays that hit (outside lights' near regions), and those whose hit
+            // had a value: the average leaves out the rest (gi_wg_hits, gi_wg_valued).
+            var hits=0u;
+            var valued=0u;
             for(var k=lane;k<GI_DIRECTIONS;k+=GI_GATHER_LANES) {
                 if k%stride!=0u || (gi_table[cold+GI_C_BITS+k/32u]&(1u<<(k%32u)))!=0u { continue; }
                 let d=gi_direction(frame,c.key,k);
@@ -2301,14 +2351,17 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
                 rays+=1u;
                 // A hit in a local light's near region is the aimed rays' (gi_near_gather).
                 if !h.hit || gi_near_owner(origin,n,origin+d*h.t)!=0xffffffffu { continue; }
+                hits+=1u;
                 let o=gi_hit_radiance(origin,d,h,band,tertiary);
                 if o.w==GI_HIT_MISSING || o.w==0.0 { missing+=1u; }
                 if o.w==GI_HIT_CHANGING { changing+=1u; }
                 if o.w<=GI_HIT_NONE { continue; }
+                valued+=1u;
                 gi_sh_basis(d);
                 let radiance=o.rgb*(6.283185307179586*f32(stride)/f32(GI_DIRECTIONS));
                 for(var i=0u;i<4u;i+=1u) { gi_gather_sh[i]+=radiance*gi_y[i]; }
             }
+            for(var i=0u;i<4u;i+=1u) { gi_gather_fixed[i]=gi_gather_sh[i]; }
             // The aimed rays resolve what is near a light: their hits keep the pixels' level.
             gi_hit_spread=0.0;
             gi_near_cold=cold;
@@ -2316,20 +2369,29 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             rays+=aimed.x;
             missing+=aimed.y;
             changing+=aimed.z;
+            // Emitters as lights, in closed form (gi_emitters.wgsl).
+            rays+=gi_emitter_gather(lane,q,origin,n,c.key);
             if missing!=0u { atomicAdd(&gi_wg_missing,missing); }
             if changing!=0u { atomicAdd(&gi_wg_changing,changing); }
             if rays!=0u { atomicAdd(&gi_wg_rays,rays); }
+            if hits!=0u { atomicAdd(&gi_wg_hits,hits); }
+            if valued!=0u { atomicAdd(&gi_wg_valued,valued); }
         }
         // The lanes' sums into lane 0 in a fixed tree order (no atomics on values).
+        // The fixed directions' sums (0-11) and the rest, aimed rays and emitters (12-23).
         for(var i=0u;i<4u;i+=1u) {
-            gi_wg_bounce[(i*3u)*GI_GATHER_LANES+lane]=gi_gather_sh[i].x;
-            gi_wg_bounce[(i*3u+1u)*GI_GATHER_LANES+lane]=gi_gather_sh[i].y;
-            gi_wg_bounce[(i*3u+2u)*GI_GATHER_LANES+lane]=gi_gather_sh[i].z;
+            let rest=gi_gather_sh[i]-gi_gather_fixed[i];
+            gi_wg_bounce[(i*3u)*GI_GATHER_LANES+lane]=gi_gather_fixed[i].x;
+            gi_wg_bounce[(i*3u+1u)*GI_GATHER_LANES+lane]=gi_gather_fixed[i].y;
+            gi_wg_bounce[(i*3u+2u)*GI_GATHER_LANES+lane]=gi_gather_fixed[i].z;
+            gi_wg_bounce[(12u+i*3u)*GI_GATHER_LANES+lane]=rest.x;
+            gi_wg_bounce[(12u+i*3u+1u)*GI_GATHER_LANES+lane]=rest.y;
+            gi_wg_bounce[(12u+i*3u+2u)*GI_GATHER_LANES+lane]=rest.z;
         }
         workgroupBarrier();
         for(var stride=GI_GATHER_LANES/2u;stride>0u;stride/=2u) {
             if lane<stride {
-                for(var j=0u;j<12u;j+=1u) {
+                for(var j=0u;j<24u;j+=1u) {
                     gi_wg_bounce[j*GI_GATHER_LANES+lane]+=gi_wg_bounce[j*GI_GATHER_LANES+lane+stride];
                 }
             }
@@ -2340,10 +2402,23 @@ fn gi_gather_now(slot:u32, period:u32, count:u32) -> bool {
             atomicAdd(&gi_work[GI_W_GATHER_RAYS],atomicLoad(&gi_wg_rays));
             let missing=atomicLoad(&gi_wg_missing);
             if missing!=0u { atomicAdd(&gi_work[GI_W_GATHER_MISSES],missing); }
+            // A fixed-direction ray whose hit had no value yet at any level is left out of the
+            // average (the rejection estimator): counting it as zero light at full weight biased
+            // every such cell's bounce low (Glint's goal view: 4.5% of settled gather rays).
+            // Aimed rays and emitters are their own estimates and are added as they are.
+            let hits=atomicLoad(&gi_wg_hits);
+            let valued=atomicLoad(&gi_wg_valued);
+            let scale=select(1.0,f32(hits)/f32(valued),valued>0u && hits>valued);
+            for(var j=0u;j<12u;j+=1u) {
+                gi_wg_bounce[j*GI_GATHER_LANES]=gi_wg_bounce[j*GI_GATHER_LANES]*scale+gi_wg_bounce[(12u+j)*GI_GATHER_LANES];
+            }
             var m=0.0;
             for(var j=0u;j<12u;j+=1u) { m=max(m,abs(gi_wg_bounce[j*GI_GATHER_LANES])); }
             let hot=gi_hot(slot);
-            if m<=0.0 {
+            if valued==0u && hits>0u {
+                // Every hit was without a value: nothing to average, so the cell keeps its last
+                // bounce (its retry gathers again).
+            } else if m<=0.0 {
                 gi_table[hot+GI_HOT_BOUNCE]=GI_BOUNCE_NONE;
             } else {
                 for(var w=0u;w<6u;w+=1u) {

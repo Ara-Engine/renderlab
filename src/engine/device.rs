@@ -100,7 +100,7 @@ fn non_rt_limits(adapter: &wgpu::Limits) -> wgpu::Limits {
 /// unchanged, and the renderer keeps the inline path).
 fn pass_limits(limits: wgpu::Limits, adapter: &wgpu::Limits) -> wgpu::Limits {
     use crate::renderer::primary_ray_gpu::reflection_pass::{STORAGE_BUFFERS, STORAGE_TEXTURES};
-    let buffers = crate::visibility_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage
+    let buffers = crate::primary_ray::visibility_storage_buffers(false)
         + STORAGE_BUFFERS;
     let fits = adapter.max_storage_buffers_per_shader_stage >= buffers
         && adapter.max_storage_textures_per_shader_stage >= STORAGE_TEXTURES;

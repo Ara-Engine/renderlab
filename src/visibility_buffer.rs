@@ -378,6 +378,259 @@ pub(super) struct VisibilityBuffer {
     hit: wgpu::Texture,
     world: wgpu::Texture,
 }
+/// The visibility buffer's bind-group layouts and pipelines. They depend on the prelude, the LOD
+/// lift and the primary state's array layout, never on the draws, so the renderer builds them once
+/// per `key` (`Renderer::visibility_pipelines`) and a VisibilityBuffer rebuilt for new draws or
+/// instance counts compiles nothing.
+#[derive(Clone)]
+pub(super) struct VisibilityPipelines {
+    pub(super) key: ([u8; 32], u32, wgpu::BindGroupLayout),
+    cull_layout: wgpu::BindGroupLayout,
+    software_layout: wgpu::BindGroupLayout,
+    hardware_layout: wgpu::BindGroupLayout,
+    data_layout: wgpu::BindGroupLayout,
+    hzb_layout: wgpu::BindGroupLayout,
+    resolve_layout: wgpu::BindGroupLayout,
+    cull: wgpu::ComputePipeline,
+    finish: wgpu::ComputePipeline,
+    reset: wgpu::ComputePipeline,
+    software_pipeline: wgpu::ComputePipeline,
+    hardware_pipeline: wgpu::RenderPipeline,
+    base: wgpu::ComputePipeline,
+    reduce: wgpu::ComputePipeline,
+    resolve: [wgpu::ComputePipeline; 2],
+}
+impl VisibilityPipelines {
+    /// The cache key for `r`'s current prelude, LOD lift and primary array layout.
+    pub(super) fn key_of(r: &Renderer) -> ([u8; 32], u32, wgpu::BindGroupLayout) {
+        let state = r.view.primary.as_ref().unwrap();
+        (r.source_digest, r.lod_lift.to_bits(), state.array_layout().clone())
+    }
+    pub(super) fn new(r: &Renderer) -> Result<Self, Error> {
+        use wgpu::{ShaderStages as S, TextureFormat as F};
+        let state = r.view.primary.as_ref().unwrap();
+        let attachment = std::env::var("RENDERLAB_VIS_ATTACHMENT").map_or(true, |v| v != "0");
+        let raster_stages = S::VERTEX | S::FRAGMENT;
+        let cull_layout = layout(
+            &r.device,
+            &[
+                buffer_entry(0, true, false, S::COMPUTE),
+                buffer_entry(1, false, false, S::COMPUTE),
+                buffer_entry(2, false, false, S::COMPUTE),
+                buffer_entry(3, false, true, S::COMPUTE),
+                buffer_entry(5, false, true, S::COMPUTE),
+                buffer_entry(6, false, true, S::COMPUTE),
+                sampled(7, wgpu::TextureSampleType::Float { filterable: false }),
+            ],
+        );
+        let software_layout = layout(
+            &r.device,
+            &[
+                buffer_entry(0, true, false, S::COMPUTE),
+                buffer_entry(1, false, false, S::COMPUTE),
+                buffer_entry(3, false, false, S::COMPUTE),
+                buffer_entry(5, false, false, S::COMPUTE),
+                buffer_entry(8, false, true, S::COMPUTE),
+            ],
+        );
+        let hardware_layout = layout(
+            &r.device,
+            &[
+                buffer_entry(0, true, false, raster_stages),
+                buffer_entry(1, false, false, S::VERTEX),
+                buffer_entry(3, false, false, S::VERTEX),
+                buffer_entry(8, false, true, S::FRAGMENT),
+            ],
+        );
+        let data_layout = layout(&r.device, &[data_entry(8, S::COMPUTE | S::VERTEX)]);
+        let hzb_layout = layout(
+            &r.device,
+            &[
+                buffer_entry(0, false, false, S::COMPUTE),
+                image(1, F::R32Float),
+                sampled(2, wgpu::TextureSampleType::Float { filterable: false }),
+                buffer_entry(3, true, false, S::COMPUTE),
+                sampled(4, wgpu::TextureSampleType::Depth),
+            ],
+        );
+        let resolve_layout = layout(
+            &r.device,
+            &[
+                &[
+                    buffer_entry(0, true, false, S::COMPUTE),
+                    buffer_entry(10, true, false, S::COMPUTE),
+                    buffer_entry(30, false, false, S::COMPUTE),
+                    buffer_entry(29, false, true, S::COMPUTE),
+                    buffer_entry(31, false, false, S::COMPUTE),
+                    buffer_entry(33, false, false, S::COMPUTE),
+                    image(13, F::Rgba32Uint),
+                    image(16, F::Rgba32Float),
+                    image(17, F::Rgba32Float),
+                    image(20, F::R32Uint),
+                    image(23, F::R32Float),
+                    sampled(34, wgpu::TextureSampleType::Uint),
+                    sampled(35, wgpu::TextureSampleType::Depth),
+                ][..],
+                &if crate::material_mode::Mode::tail() {
+                    super::primary_ray_gpu::material_pass_gpu::entries(true).to_vec()
+                } else {
+                    Vec::new()
+                },
+            ]
+            .concat(),
+        );
+        let pipeline_layout = |groups: &[Option<&wgpu::BindGroupLayout>]| {
+            r.device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("N1c pipeline"),
+                    bind_group_layouts: groups,
+                    immediate_size: 0,
+                })
+        };
+        let compute = |source: &str,
+                       entry: &str,
+                       groups: &[Option<&wgpu::BindGroupLayout>],
+                       constants: &[(&str, f64)]| {
+            let module = r
+                .device
+                .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                    label: Some(entry),
+                    source: wgpu::ShaderSource::Wgsl(source.into()),
+                });
+            r.device
+                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                    label: Some(entry),
+                    layout: Some(&pipeline_layout(groups)),
+                    module: &module,
+                    entry_point: Some(entry),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants,
+                        ..Default::default()
+                    },
+                    cache: None,
+                })
+        };
+        let cull_source = stage_source(include_str!("../shaders/visibility_buffer_cull.wgsl"));
+        let groups_cull = [Some(&cull_layout), Some(state.array_layout())];
+        let cull = compute(&cull_source, "cull", &groups_cull, &[]);
+        let finish = compute(&cull_source, "finish", &groups_cull, &[]);
+        let reset = compute(
+            &stage_source(include_str!("../shaders/visibility_buffer_reset.wgsl")),
+            "reset",
+            &groups_cull,
+            &[],
+        );
+        let software_pipeline = compute(
+            &stage_source(include_str!("../shaders/visibility_buffer_sw.wgsl")),
+            "raster",
+            &[
+                Some(&software_layout),
+                Some(state.array_layout()),
+                Some(&data_layout),
+            ],
+            &[],
+        );
+        let shader = r
+            .device
+            .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("N1c hardware ID raster"),
+                source: wgpu::ShaderSource::Wgsl(
+                    stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")).into(),
+                ),
+            });
+        let hardware_pipeline = r
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("N1c hardware ID raster"),
+                layout: Some(&pipeline_layout(&[
+                    Some(&hardware_layout),
+                    Some(state.array_layout()),
+                    Some(&data_layout),
+                ])),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some(if attachment { "fs_color" } else { "fs" }),
+                    compilation_options: Default::default(),
+                    targets: if attachment {
+                        &[Some(wgpu::ColorTargetState {
+                            format: F::R32Uint,
+                            blend: None,
+                            write_mask: wgpu::ColorWrites::ALL,
+                        })]
+                    } else {
+                        &[]
+                    },
+                }),
+                primitive: Default::default(),
+                // Equal-depth hardware attachment hits follow raster order. The atomic
+                // fallback resolves those ties by ID; both readers compare SW/HW ties by ID.
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: F::Depth32Float,
+                    depth_write_enabled: Some(true),
+                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                    stencil: Default::default(),
+                    bias: Default::default(),
+                }),
+                multisample: Default::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+        let hzb_source = attachment_reader(
+            include_str!("../shaders/visibility_buffer_hzb.wgsl"),
+            include_str!("../shaders/visibility_buffer_attachment_hzb.wgsl"),
+        );
+        let base = compute(
+            &hzb_source,
+            "base",
+            &[Some(&hzb_layout)],
+            &[("HW_ATTACHMENT", if attachment { 1.0 } else { 0.0 })],
+        );
+        let reduce = compute(&hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
+        let resolve_source = super::primary_ray_gpu::material_receiver_gpu::resolve(
+            attachment_resolve_source(&r.source)?,
+            crate::material_mode::Mode::current(),
+        )?;
+        let resolve = [0.0, 1.0].map(|v| {
+            compute(
+                &resolve_source,
+                "resolve",
+                &[
+                    Some(&resolve_layout),
+                    Some(state.array_layout()),
+                    Some(&data_layout),
+                ],
+                &[
+                    ("WRITE_RECEIVERS", v),
+                    ("LOD_LIFT", f64::from(r.lod_lift)),
+                    ("HW_ATTACHMENT", if attachment { 1.0 } else { 0.0 }),
+                ],
+            )
+        });
+        Ok(Self {
+            key: Self::key_of(r),
+            cull_layout,
+            software_layout,
+            hardware_layout,
+            data_layout,
+            hzb_layout,
+            resolve_layout,
+            cull,
+            finish,
+            reset,
+            software_pipeline,
+            hardware_pipeline,
+            base,
+            reduce,
+            resolve,
+        })
+    }
+}
 fn layout(
     device: &PipelineDevice,
     entries: &[wgpu::BindGroupLayoutEntry],
@@ -734,7 +987,12 @@ pub(super) fn cluster_data_group(
     )
 }
 impl VisibilityBuffer {
-    fn new(r: &Renderer, draws: &[PreparedDraw<'_>], size: wgpu::Extent3d) -> Result<Self, Error> {
+    fn new(
+        r: &Renderer,
+        pipelines: &VisibilityPipelines,
+        draws: &[PreparedDraw<'_>],
+        size: wgpu::Extent3d,
+    ) -> Result<Self, Error> {
         use wgpu::{
             BindingResource as R, ShaderStages as S, TextureFormat as F, TextureUsages as U,
         };
@@ -861,208 +1119,25 @@ impl VisibilityBuffer {
             1,
             U::TEXTURE_BINDING,
         );
-        let raster_stages = S::VERTEX | S::FRAGMENT;
-        let cull_layout = layout(
-            &r.device,
-            &[
-                buffer_entry(0, true, false, S::COMPUTE),
-                buffer_entry(1, false, false, S::COMPUTE),
-                buffer_entry(2, false, false, S::COMPUTE),
-                buffer_entry(3, false, true, S::COMPUTE),
-                buffer_entry(5, false, true, S::COMPUTE),
-                buffer_entry(6, false, true, S::COMPUTE),
-                sampled(7, wgpu::TextureSampleType::Float { filterable: false }),
-            ],
-        );
-        let software_layout = layout(
-            &r.device,
-            &[
-                buffer_entry(0, true, false, S::COMPUTE),
-                buffer_entry(1, false, false, S::COMPUTE),
-                buffer_entry(3, false, false, S::COMPUTE),
-                buffer_entry(5, false, false, S::COMPUTE),
-                buffer_entry(8, false, true, S::COMPUTE),
-            ],
-        );
-        let hardware_layout = layout(
-            &r.device,
-            &[
-                buffer_entry(0, true, false, raster_stages),
-                buffer_entry(1, false, false, S::VERTEX),
-                buffer_entry(3, false, false, S::VERTEX),
-                buffer_entry(8, false, true, S::FRAGMENT),
-            ],
-        );
-        let data_layout = layout(&r.device, &[data_entry(8, S::COMPUTE | S::VERTEX)]);
-        let hzb_layout = layout(
-            &r.device,
-            &[
-                buffer_entry(0, false, false, S::COMPUTE),
-                image(1, F::R32Float),
-                sampled(2, wgpu::TextureSampleType::Float { filterable: false }),
-                buffer_entry(3, true, false, S::COMPUTE),
-                sampled(4, wgpu::TextureSampleType::Depth),
-            ],
-        );
-        let resolve_layout = layout(
-            &r.device,
-            &[
-                &[
-                    buffer_entry(0, true, false, S::COMPUTE),
-                    buffer_entry(10, true, false, S::COMPUTE),
-                    buffer_entry(30, false, false, S::COMPUTE),
-                    buffer_entry(29, false, true, S::COMPUTE),
-                    buffer_entry(31, false, false, S::COMPUTE),
-                    buffer_entry(33, false, false, S::COMPUTE),
-                    image(13, F::Rgba32Uint),
-                    image(16, F::Rgba32Float),
-                    image(17, F::Rgba32Float),
-                    image(20, F::R32Uint),
-                    image(23, F::R32Float),
-                    sampled(34, wgpu::TextureSampleType::Uint),
-                    sampled(35, wgpu::TextureSampleType::Depth),
-                ][..],
-                &if crate::material_mode::Mode::tail() {
-                    super::primary_ray_gpu::material_pass_gpu::entries(true).to_vec()
-                } else {
-                    Vec::new()
-                },
-            ]
-            .concat(),
-        );
-        let pipeline_layout = |groups: &[Option<&wgpu::BindGroupLayout>]| {
-            r.device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("N1c pipeline"),
-                    bind_group_layouts: groups,
-                    immediate_size: 0,
-                })
-        };
-        let compute = |source: &str,
-                       entry: &str,
-                       groups: &[Option<&wgpu::BindGroupLayout>],
-                       constants: &[(&str, f64)]| {
-            let module = r
-                .device
-                .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some(entry),
-                    source: wgpu::ShaderSource::Wgsl(source.into()),
-                });
-            r.device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some(entry),
-                    layout: Some(&pipeline_layout(groups)),
-                    module: &module,
-                    entry_point: Some(entry),
-                    compilation_options: wgpu::PipelineCompilationOptions {
-                        constants,
-                        ..Default::default()
-                    },
-                    cache: None,
-                })
-        };
-        let cull_source = stage_source(include_str!("../shaders/visibility_buffer_cull.wgsl"));
-        let groups_cull = [Some(&cull_layout), Some(state.array_layout())];
-        let cull = compute(&cull_source, "cull", &groups_cull, &[]);
-        let finish = compute(&cull_source, "finish", &groups_cull, &[]);
-        let reset = compute(
-            &stage_source(include_str!("../shaders/visibility_buffer_reset.wgsl")),
-            "reset",
-            &groups_cull,
-            &[],
-        );
-        let software_pipeline = compute(
-            &stage_source(include_str!("../shaders/visibility_buffer_sw.wgsl")),
-            "raster",
-            &[
-                Some(&software_layout),
-                Some(state.array_layout()),
-                Some(&data_layout),
-            ],
-            &[],
-        );
-        let shader = r
-            .device
-            .create_engine_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("N1c hardware ID raster"),
-                source: wgpu::ShaderSource::Wgsl(
-                    stage_source(include_str!("../shaders/visibility_buffer_raster.wgsl")).into(),
-                ),
-            });
-        let hardware_pipeline = r
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("N1c hardware ID raster"),
-                layout: Some(&pipeline_layout(&[
-                    Some(&hardware_layout),
-                    Some(state.array_layout()),
-                    Some(&data_layout),
-                ])),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some(if attachment { "fs_color" } else { "fs" }),
-                    compilation_options: Default::default(),
-                    targets: if attachment {
-                        &[Some(wgpu::ColorTargetState {
-                            format: F::R32Uint,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })]
-                    } else {
-                        &[]
-                    },
-                }),
-                primitive: Default::default(),
-                // Equal-depth hardware attachment hits follow raster order. The atomic
-                // fallback resolves those ties by ID; both readers compare SW/HW ties by ID.
-                depth_stencil: Some(wgpu::DepthStencilState {
-                    format: F::Depth32Float,
-                    depth_write_enabled: Some(true),
-                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
-                    stencil: Default::default(),
-                    bias: Default::default(),
-                }),
-                multisample: Default::default(),
-                multiview_mask: None,
-                cache: None,
-            });
-        let hzb_source = attachment_reader(
-            include_str!("../shaders/visibility_buffer_hzb.wgsl"),
-            include_str!("../shaders/visibility_buffer_attachment_hzb.wgsl"),
-        );
-        let base = compute(
-            &hzb_source,
-            "base",
-            &[Some(&hzb_layout)],
-            &[("HW_ATTACHMENT", if attachment { 1.0 } else { 0.0 })],
-        );
-        let reduce = compute(&hzb_source, "reduce", &[Some(&hzb_layout)], &[]);
-        let resolve_source = super::primary_ray_gpu::material_receiver_gpu::resolve(
-            attachment_resolve_source(&r.source)?,
-            crate::material_mode::Mode::current(),
-        )?;
-        let resolve = [0.0, 1.0].map(|v| {
-            compute(
-                &resolve_source,
-                "resolve",
-                &[
-                    Some(&resolve_layout),
-                    Some(state.array_layout()),
-                    Some(&data_layout),
-                ],
-                &[
-                    ("WRITE_RECEIVERS", v),
-                    ("LOD_LIFT", f64::from(r.lod_lift)),
-                    ("HW_ATTACHMENT", if attachment { 1.0 } else { 0.0 }),
-                ],
-            )
-        });
+        // Layouts and pipelines come from the renderer's cached set (VisibilityPipelines): they do
+        // not depend on the draws, only on the prelude, the LOD lift and the primary array layout.
+        let VisibilityPipelines {
+            cull_layout,
+            software_layout,
+            hardware_layout,
+            data_layout,
+            hzb_layout,
+            resolve_layout,
+            cull,
+            finish,
+            reset,
+            software_pipeline,
+            hardware_pipeline,
+            base,
+            reduce,
+            resolve,
+            ..
+        } = pipelines.clone();
         let state = r.view.primary.as_ref().unwrap();
         let absent = Buffer::new(r, "N1c absent cluster data", 16, storage);
         let cull_groups = std::array::from_fn(|i| {
@@ -1471,7 +1546,14 @@ impl Renderer {
                 || v.world != **world
         }) {
             let scopes = OperationScopes::new(&self.device);
-            let next = VisibilityBuffer::new(self, draws, size)?;
+            if self
+                .visibility_pipelines
+                .as_ref()
+                .is_none_or(|p| p.key != VisibilityPipelines::key_of(self))
+            {
+                self.visibility_pipelines = Some(VisibilityPipelines::new(self)?);
+            }
+            let next = VisibilityBuffer::new(self, self.visibility_pipelines.as_ref().unwrap(), draws, size)?;
             if let Some(error) = scopes.finish() {
                 return Err(self.fail(error.to_string()));
             }

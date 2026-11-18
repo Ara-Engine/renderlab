@@ -54,11 +54,18 @@ impl MeshAcceleration {
     }
 }
 
-/// TLAS instance masks. Every placement carries `MASK_VISIBLE`, and those that block light
-/// (`Instances::set_casts_shadows`) also `SHADOW_CASTER_MASK`, which every shadow ray culls
-/// with; camera, reflection and bounce rays cull with 0xFF.
+/// TLAS instance masks. Every placement carries `VISIBLE_MASK`, which camera, reflection and
+/// bounce rays cull with, and those that block light (`Instances::set_casts_shadows`) also
+/// `SHADOW_CASTER_MASK`, which every shadow ray culls with.
 const MASK_SHADOW: u8 = crate::shadows::SHADOW_CASTER_MASK as u8;
-const MASK_VISIBLE: u8 = 0x02;
+const MASK_VISIBLE: u8 = crate::shadows::VISIBLE_MASK as u8;
+const MASK_SEE_THROUGH: u8 = crate::shadows::SEE_THROUGH_MASK as u8;
+/// The see-through table (`HardwareState::see_through_table`): four header words (the first
+/// see-through placement's index, their count, two spare), then per see-through placement four
+/// words: its base colour's red and green, then blue and coverage (each `pack2x16float`), its
+/// index of refraction (f32 bits) and a spare word.
+pub(crate) const SEE_THROUGH_HEADER_WORDS: usize = 4;
+pub(crate) const SEE_THROUGH_WORDS: usize = 4;
 
 struct Placement {
     mesh: Arc<MeshAcceleration>,
@@ -100,6 +107,8 @@ pub(super) struct HardwareState {
     /// frame-cpu: the draw list the active TLAS was made from (`draw_keys`); an equal list
     /// skips rebuilding and comparing every placement.
     last_keys: Option<(Vec<DrawKey>, bool)>,
+    /// The see-through table (SEE_THROUGH_HEADER_WORDS), written when its words change.
+    see_through: Option<(Owned<wgpu::Buffer>, Vec<u32>)>,
 }
 
 /// A draw's identity for the TLAS: its mesh, that mesh's current BLAS generation, the
@@ -113,6 +122,10 @@ fn tlas_keys() -> bool {
     *ON.get_or_init(|| std::env::var("RENDERLAB_TLAS_KEY").map_or(true, |v| v != "0"))
 }
 
+/// WGSL's `pack2x16float` for values in [0, 3] (`transparency::f16_bits`): `a` low, `b` high.
+fn pack2x16float(a: f32, b: f32) -> u32 {
+    u32::from(crate::transparency::f16_bits(a)) | (u32::from(crate::transparency::f16_bits(b)) << 16)
+}
 fn row_transform(model: Mat4) -> [f32; 12] {
     let m = model.to_cols_array_2d();
     std::array::from_fn(|i| m[i % 4][i / 4])
@@ -204,6 +217,7 @@ impl HardwareState {
             accounting_available: device.generate_allocator_report().is_some(),
             stats: HardwareShadowStats::default(),
             last_keys: None,
+            see_through: None,
         }
     }
     fn label(&mut self, kind: &str) -> String {
@@ -363,13 +377,16 @@ impl HardwareState {
     }
     /// `casters`: the placements also cast hardware shadows, which need double-sided
     /// opaque materials. Traced primary visibility alone culls single-sided back faces.
+    /// The see-through draws' placements follow the opaque ones, under SEE_THROUGH_MASK alone.
     fn placements(
         draws: &[Draw<'_>],
+        see_through: &[Draw<'_>],
         max_instances: u32,
         casters: bool,
     ) -> Result<Vec<Placement>, Error> {
         let count = draws
             .iter()
+            .chain(see_through)
             .try_fold(0usize, |n, d| n.checked_add(d.instances.len()))
             .ok_or(Error::InvalidInput("hardware instance count overflow"))?;
         if count > max_instances as usize || count > 0x1000000 {
@@ -378,11 +395,17 @@ impl HardwareState {
             ));
         }
         let mut placements = Vec::with_capacity(count);
-        for draw in draws {
-            if casters && draw.material.is_some_and(|m| !m.double_sided) {
+        for (i, draw) in draws.iter().chain(see_through).enumerate() {
+            let clear = i >= draws.len();
+            if casters && !clear && draw.material.is_some_and(|m| !m.double_sided) {
                 return Err(Error::InvalidInput(
                     "hardware shadows currently require opaque double-sided materials",
                 ));
+            }
+            // A see-through draw without an acceleration structure is left out (and out of the
+            // see-through table, `write_see_through`): it then passes light as before.
+            if clear && draw.mesh.acceleration.is_none() {
+                continue;
             }
             let mesh = draw.mesh.acceleration.as_ref().ok_or(Error::InvalidInput(
                 "hardware shadow draw has no prepared mesh acceleration",
@@ -403,7 +426,7 @@ impl HardwareState {
                     blas: mesh.blas.lock().unwrap().clone(),
                     mesh: mesh.clone(),
                     model: model.to_cols_array().map(f32::to_bits),
-                    mask: MASK_VISIBLE | shadow,
+                    mask: if clear { MASK_SEE_THROUGH } else { MASK_VISIBLE | shadow },
                 });
             }
         }
@@ -451,24 +474,26 @@ impl HardwareState {
         ledger: &Ledger,
         camera: &wgpu::Buffer,
         draws: &[Draw<'_>],
+        see_through: &[Draw<'_>],
         submission: u64,
         casters: bool,
     ) -> Result<bool, Error> {
         let (device, _) = gpu;
+        self.write_see_through(gpu, ledger, draws, see_through);
         // frame-cpu: an unchanged draw list keeps the active TLAS's placements. Compaction
         // still advances per mesh first, so a compacted BLAS changes the key.
         let keys = if tlas_keys() && self.active.is_some() {
-            let count: usize = draws.iter().map(|d| d.instances.len()).sum();
+            let count: usize = draws.iter().chain(see_through).map(|d| d.instances.len()).sum();
             let (scene, scratch) = scene_estimate(count)?;
             let mut meshes = std::collections::HashSet::new();
-            for draw in draws {
+            for draw in draws.iter().chain(see_through) {
                 if let Some(mesh) = &draw.mesh.acceleration
                     && meshes.insert(Arc::as_ptr(mesh))
                 {
                     self.compact_mesh(mesh, gpu, ledger, scene + scratch);
                 }
             }
-            let keys = Self::draw_keys(draws);
+            let keys = Self::draw_keys(draws, see_through);
             if self.last_keys.as_ref() == Some(&(keys.clone(), casters)) {
                 let active = self.active.as_ref().unwrap();
                 if !active.dynamic {
@@ -488,7 +513,7 @@ impl HardwareState {
             None
         };
         let mut placements =
-            Self::placements(draws, device.limits().max_tlas_instance_count, casters)?;
+            Self::placements(draws, see_through, device.limits().max_tlas_instance_count, casters)?;
         let (scene, scratch) = scene_estimate(placements.len())?;
         // Each mesh once; placements take a compacted BLAS only when one was published.
         let compactions = self.stats.blas_compactions;
@@ -523,7 +548,7 @@ impl HardwareState {
                 })
                 .collect();
             if moved.is_empty() && !dynamic_scene {
-                self.last_keys = Some((keys.unwrap_or_else(|| Self::draw_keys(draws)), casters));
+                self.last_keys = Some((keys.unwrap_or_else(|| Self::draw_keys(draws, see_through)), casters));
                 return Ok(false);
             }
             let dynamic_scratch = Self::dynamic_scratch(&placements)?;
@@ -545,7 +570,7 @@ impl HardwareState {
                 ));
             }
             active.placements = placements;
-            self.last_keys = Some((keys.unwrap_or_else(|| Self::draw_keys(draws)), casters));
+            self.last_keys = Some((keys.unwrap_or_else(|| Self::draw_keys(draws, see_through)), casters));
             return Ok(true);
         }
         let (estimate, scratch) = scene_estimate(placements.len())?;
@@ -613,24 +638,88 @@ impl HardwareState {
         if let Some(old) = self.active.replace(next) {
             self.retired.push((submission, old));
         }
-        self.last_keys = Some((keys.unwrap_or_else(|| Self::draw_keys(draws)), casters));
+        self.last_keys = Some((keys.unwrap_or_else(|| Self::draw_keys(draws, see_through)), casters));
         Ok(true)
     }
-    /// One key per draw (`DrawKey`), read after this frame's compaction.
-    fn draw_keys(draws: &[Draw<'_>]) -> Vec<DrawKey> {
+    /// One key per draw (`DrawKey`), read after this frame's compaction; the see-through draws'
+    /// follow the opaque ones', marked by a material word of 3.
+    fn draw_keys(draws: &[Draw<'_>], see_through: &[Draw<'_>]) -> Vec<DrawKey> {
+        let opaque = draws.len();
         draws
             .iter()
-            .map(|d| {
+            .chain(see_through)
+            .enumerate()
+            .map(|(i, d)| (i >= opaque, d))
+            .map(|(clear, d)| {
                 let mesh = d.mesh.acceleration.as_ref();
                 (
                     mesh.map_or(0, |m| Arc::as_ptr(m) as usize),
                     mesh.map_or(0, |m| Arc::as_ptr(&*m.blas.lock().unwrap()) as usize),
                     d.instances.state.revision(),
                     d.instances.len(),
-                    d.material.map_or(2, |m| u8::from(m.double_sided)),
+                    if clear { 3 } else { d.material.map_or(2, |m| u8::from(m.double_sided)) },
                 )
             })
             .collect()
+    }
+    /// The see-through table's words for this frame's draws (SEE_THROUGH_HEADER_WORDS), uploaded
+    /// when they change. A material's coverage takes its texture's mean alpha once the probe has
+    /// read it back (`Material::see_through_coverage`), so the words change then too.
+    fn write_see_through(
+        &mut self,
+        gpu: (&wgpu::Device, &wgpu::Queue),
+        ledger: &Ledger,
+        draws: &[Draw<'_>],
+        see_through: &[Draw<'_>],
+    ) {
+        let (device, queue) = gpu;
+        let first: usize = draws.iter().map(|d| d.instances.len()).sum();
+        let listed = || see_through.iter().filter(|d| d.mesh.acceleration.is_some());
+        let count: usize = listed().map(|d| d.instances.len()).sum();
+        let mut words = vec![first as u32, count as u32, 0, 0];
+        for draw in listed() {
+            let (rgb, coverage, ior) = draw.material.map_or(([1.0; 3], 1.0, 1.0), |m| {
+                (
+                    [m.base_color[0], m.base_color[1], m.base_color[2]],
+                    m.see_through_coverage().unwrap_or(1.0),
+                    m.transparency.map_or(1.0, |t| t.ior),
+                )
+            });
+            let record = [
+                pack2x16float(rgb[0], rgb[1]),
+                pack2x16float(rgb[2], coverage),
+                f32::to_bits(ior),
+                0,
+            ];
+            for _ in 0..draw.instances.len() {
+                words.extend_from_slice(&record);
+            }
+        }
+        let bytes = (words.len() * 4) as u64;
+        let fits = self.see_through.as_ref().is_some_and(|(b, _)| b.size() >= bytes);
+        if !fits {
+            let buffer = ledger.own(
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("see-through table"),
+                    size: bytes.next_power_of_two().max(256),
+                    usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                }),
+                ResourceKind::Buffer,
+            );
+            self.see_through = Some((buffer, Vec::new()));
+        }
+        let (buffer, last) = self.see_through.as_mut().unwrap();
+        if *last != words {
+            let raw: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+            queue.write_buffer(buffer, 0, &raw);
+            *last = words;
+        }
+    }
+    /// The see-through table (SEE_THROUGH_HEADER_WORDS) for rays that pass see-through
+    /// placements by their transmission; None before the first scene.
+    pub fn see_through_table(&self) -> Option<&wgpu::Buffer> {
+        self.see_through.as_ref().map(|(b, _)| &**b)
     }
     pub fn encode_scene(&self, encoder: &mut wgpu::CommandEncoder) {
         encoder.build_acceleration_structures(

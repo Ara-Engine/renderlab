@@ -8,6 +8,9 @@ mod environment_gpu;
 pub(crate) mod change_log;
 #[path = "fog_cull.rs"]
 pub(crate) mod fog_cull;
+// See-through materials' mean texture alpha, for rays that carry diffuse light.
+#[path = "mean_alpha.rs"]
+mod mean_alpha;
 #[path = "light_cluster_gpu.rs"]
 mod light_cluster_gpu;
 #[path = "lighting_gpu.rs"]
@@ -45,6 +48,10 @@ mod mesh_lod;
 mod normal_variance_lazy;
 #[path = "virtual_shadow_gpu.rs"]
 mod virtual_shadow_gpu;
+pub(crate) use virtual_shadow_gpu::STORAGE_BUFFERS as SUN_SHADOW_STORAGE_BUFFERS;
+#[cfg(test)]
+#[path = "storage_need.rs"]
+pub(crate) mod storage_need;
 #[path = "visibility_buffer.rs"]
 pub(crate) mod visibility_buffer;
 pub use mesh_lod::{LodPackage, LodStats, MeshLod};
@@ -679,6 +686,9 @@ pub struct Renderer {
     source: String,
     /// SHA-256 of `source` and of its hardware-shadow composition, kept for the per-frame keys.
     source_digest: [u8; 32],
+    /// The visibility buffer's layouts and pipelines (`visibility_buffer::VisibilityPipelines`),
+    /// kept across visibility-buffer rebuilds.
+    visibility_pipelines: Option<visibility_buffer::VisibilityPipelines>,
     hardware_digest: Option<[u8; 32]>,
     /// Its hardware-shadow and fresh compositions, where this renderer has those paths.
     hardware_source: Option<String>,
@@ -732,6 +742,8 @@ pub struct Renderer {
     residency: texture_residency::Residency,
     /// M7 world radiance cache (`gi_cache.rs`).
     gi: gi_cache::GiState,
+    /// The see-through materials' mean alpha probe, made with the first see-through material.
+    mean_alpha: Option<mean_alpha::MeanAlpha>,
     /// The live reference's per-draw program ids and see-through flags, kept while one is requested,
     /// and whether this frame keeps transparent draws traced (reference_live_gpu.rs).
     live_programs: Vec<u64>,
@@ -1215,6 +1227,7 @@ impl Renderer {
             lod_lift: visibility_buffer::DEFAULT_LOD_LIFT,
             shadow_settings: Default::default(),
             gi,
+            mean_alpha: None,
             live_programs: Vec::new(),
             live_transparent: Vec::new(),
             live_opaque: false,
@@ -1223,6 +1236,7 @@ impl Renderer {
             primary_hash: [0; 32],
             source: wgsl.to_owned(),
             source_digest: Sha256::digest(wgsl.as_bytes()).into(),
+            visibility_pipelines: None,
             hardware_digest: hardware_source
                 .as_deref()
                 .map(|s| Sha256::digest(s.as_bytes()).into()),
@@ -2537,6 +2551,21 @@ impl Renderer {
             })
         });
         let bind = self.material_group(&uniform, views, &samplers, &parameters.buffer);
+        // A see-through material's mean texture alpha, for rays that carry diffuse light
+        // (docs/design-see-through-occlusion.md): sampled once on the GPU, read back later.
+        let mean_alpha = Arc::new(std::sync::OnceLock::new());
+        if data.transparency.is_some() {
+            if data.base_color_texture.is_some() {
+                let mut probe = self
+                    .mean_alpha
+                    .take()
+                    .unwrap_or_else(|| mean_alpha::MeanAlpha::new(&self.device, &self.ledger));
+                probe.probe(&self.device, &self.queue, self.texture_view(&textures[0]), mean_alpha.clone());
+                self.mean_alpha = Some(probe);
+            } else {
+                let _ = mean_alpha.set(1.0);
+            }
+        }
         self.queue.write_buffer(&uniform, 0, &data.bytes());
         self.uploads.materials += 48;
         self.uploads.write_calls += 1;
@@ -2546,6 +2575,8 @@ impl Renderer {
             double_sided: data.double_sided,
             thin: data.thin,
             transparency: data.transparency,
+            base_color: data.base_color,
+            mean_alpha,
             streamed: textures.iter().any(streamed),
             margins,
             bind,
@@ -2909,6 +2940,7 @@ impl Renderer {
                     &self.ledger,
                     &self.uniform,
                     draws,
+                    transparent,
                     self.submissions,
                     shadow_frame.is_some(),
                 );
@@ -3769,6 +3801,8 @@ impl Renderer {
                         self.encode_primary_fresh(&mut encoder, &p.fresh, stamps(8));
                     }
                 }
+                // Measurement (`RENDERLAB_VD_DUMP`): the sun's per-pixel answer, either path.
+                self.dump_sun_visibility(&mut encoder);
                 mark(&mut encoder, "cpu:tail_check");
                 self.encode_material_tail_check(&mut encoder);
                 // RT fog culling runs after current visibility; FOG_CULL=0 keeps the early path.
@@ -3818,7 +3852,7 @@ impl Renderer {
                 mark(&mut encoder, "cpu:gi_receiver_ensure");
                 self.ensure_gi_receiver_pass(shading)?;
                 mark(&mut encoder, "gi_receiver");
-                self.encode_gi_receiver_pass(&mut encoder, shading);
+                self.encode_gi_receiver_pass(&mut encoder, shading, &mut mark);
                 // Visibility feeds both the optional detail probes and final shading.
                 if primary_ray_gpu::light_vis_pass::on() {
                     self.ensure_light_vis(shading)?;
@@ -4270,6 +4304,9 @@ impl Renderer {
             .poll(wgpu::PollType::Poll)
             .map_err(Error::Poll)?;
         self.check_fault()?;
+        if let Some(probe) = &mut self.mean_alpha {
+            probe.collect();
+        }
         let mut observed = vec![];
         for slot in &mut self.slots {
             let Some(flight) = &slot.flight else {

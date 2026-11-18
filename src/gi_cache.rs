@@ -37,6 +37,12 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
 pub(crate) const COUNTER_WORDS: u64 = 384;
+/// Cells the external request list holds (shaders/gi_cache.wgsl GI_EXTERNAL_CAPACITY).
+const EXTERNAL_CAPACITY: u64 = 16384;
+/// The external request list's bytes: 4 header words, then 4 words per cell.
+const EXTERNAL_BYTES: u64 = (4 + 4 * EXTERNAL_CAPACITY) * 4;
+/// Workgroups of 64 that turn the external list into requests.
+const EXTERNAL_GROUPS: u32 = 64;
 const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
@@ -61,6 +67,23 @@ const PROFILE_STAMPS: u32 = 2 * (10 + 2 * CLAIM_ROUNDS);
 /// Gather workgroups (one cell each) and light workgroups (64 cells), fixed grids like the
 /// others.
 pub(crate) const GATHER_GROUPS: u32 = 4096;
+/// The emitter list (shaders/gi_emitters.wgsl, docs/design-gi-emitters.md): at most this many
+/// emitting triangles a frame (the rest are counted as dropped), 15 words each, then up to
+/// EMITTER_DRAWS_MAX emitting draws (stable id, batch, probe radiance, first listed triangle,
+/// triangle count, first placement: EMITTER_DRAW_WORDS each),
+/// in the table after the slots.
+/// Its build pass loops over every emitting draw's triangles on a fixed grid.
+pub(crate) const EMITTERS_MAX: u32 = 8192;
+const EMITTER_WORDS: u64 = 15;
+const EMITTER_DRAWS_MAX: u32 = 64;
+/// Whether the cache's own gathers sample the emitter list (RENDERLAB_GI_EMITTERS=1; off by
+/// default until it is judged against the live reference).
+fn emitters_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_EMITTERS").is_ok_and(|v| v == "1"))
+}
+const EMITTER_DRAW_WORDS: u64 = 8;
+const EMITTER_GROUPS: u32 = 64;
 /// The default per-frame gather budget (`IndirectSettings::gather_cells` 0), in cells, on both
 /// paths. G2b sized per-path budgets to about 4 ms of a cut frame's gathers (0.13 us a cell with hardware rays and
 /// 0.4 us with software rays on the quarry; docs/m7-g2b.md). Moving frames gather fewer
@@ -490,7 +513,13 @@ impl Sizes {
         let misses = slots.min(1 << 19);
         let directions = settings.directions;
         let cold_words = light_cold_words(lights, directions);
-        let table_bytes = (HEADER_WORDS + u64::from(slots) * (24 + u64::from(cold_words))) * 4;
+        // The slots, then the emitter list (gi_emitters.wgsl): its triangles, then its draws.
+        let table_bytes = (HEADER_WORDS
+            + u64::from(slots) * (24 + u64::from(cold_words))
+            + u64::from(EMITTERS_MAX) * EMITTER_WORDS
+            + u64::from(EMITTER_DRAWS_MAX) * EMITTER_DRAW_WORDS
+            + u64::from(EMITTERS_MAX))
+            * 4;
         // Counters, claims, misses, trace and integrate queues, ray items and their
         // staged bits, the request table, then bounce's two gather queues (a count, then
         // slots) and the cell shading queue (the frame offsets follow this order).
@@ -503,8 +532,11 @@ impl Sizes {
             + 2 * (1 + u64::from(slots))
             + u64::from(slots))
             * 4;
-        // Per slot its outgoing radiance, then per slot its parts (gi_cells.wgsl GiParts).
-        let outgoing_bytes = u64::from(slots) * 32;
+        // Per slot its outgoing radiance, per draw its emission probe, per listed emitter triangle
+        // its mean emission (gi_cells.wgsl gi_emitter_mean_at), then per slot its parts
+        // (gi_cells.wgsl GiParts, gi_parts_at).
+        let outgoing_bytes =
+            (2 * u64::from(slots) + u64::from(TRACED_DRAWS) + u64::from(EMITTERS_MAX)) * 16;
         let draws_bytes = u64::from(TRACED_DRAWS + 1) * 16;
         let raw_slots = if settings.filter != 0 { slots } else { 1 };
         let raw_bytes = u64::from(raw_slots) * RAW_WORDS * 4;
@@ -928,12 +960,26 @@ pub struct IndirectCounters {
     /// Sun visibility rays traced at update hits (RENDERLAB_GI_ACC_HITSUN) and those that reached it.
     pub acc_sun_rays: u32,
     pub acc_sun_lit: u32,
+    /// The emitter list (shaders/gi_emitters.wgsl): triangles listed, emitting draws, visibility
+    /// rays the gathers traced toward them, and triangles past EMITTERS_MAX.
+    pub emitters: u32,
+    pub emitter_draws: u32,
+    pub emitter_rays: u32,
+    pub emitters_dropped: u32,
     pub gather_unshaded: u32,
     pub gather_orphans: u32,
     /// Queued cells a capped gather frame left for the next (`IndirectSettings::gather_cells`).
     pub gather_deferred: u32,
     /// Listed misses a capped claim left for a later frame (`IndirectSettings::claim_cells`).
     pub claim_deferred: u32,
+    /// Cells readers outside the cache listed last frame (the final gather's probe hits), and
+    /// those past the list's capacity.
+    pub external_requests: u32,
+    pub external_overflow: u32,
+    /// The external list's two reader counters (words 2 and 3): the final gather's rays and
+    /// shadow rays, when it counts them.
+    pub fg_rays: u32,
+    pub fg_shadow_rays: u32,
     /// Cells a full bucket gave up to a miss before their eviction age (U-SPECK,
     /// docs/speck.md), and those of them seen within the last eight frames.
     pub evicted: u32,
@@ -994,13 +1040,16 @@ struct Resources {
     /// The cell-space filter's sources (G3): RAW_WORDS per slot while a filter is set, else
     /// one slot's.
     raw: Owned<wgpu::Buffer>,
+    /// Cells readers outside the cache met without a value (the final gather's probe hits),
+    /// requested on the next frame (shaders/gi_cache.wgsl gi_external_requests).
+    external: Owned<wgpu::Buffer>,
     slots: u32,
     cold_words: u32, // LC2: dynamic per-cell light bitset stride.
     directions: u32,
     misses: u32,
     /// Slots the filter sources hold (1 without a filter).
     raw_slots: u32,
-    _allocations: [Allocation; 5],
+    _allocations: [Allocation; 6],
 }
 struct Layouts {
     /// Hardware (TLAS at 34) and software (geometry at 35).
@@ -1020,6 +1069,7 @@ struct Pipelines {
     priority: Option<priority::Pipelines>,
     directions: u32,
     probe: Owned<wgpu::ComputePipeline>,
+    external: Owned<wgpu::ComputePipeline>,
     claim: Owned<wgpu::ComputePipeline>,
     resolve: Owned<wgpu::ComputePipeline>,
     resolve_last: Owned<wgpu::ComputePipeline>,
@@ -1034,6 +1084,9 @@ struct Pipelines {
     /// Cells without history, visible cells due, the rest: one pass each, in that order.
     acc_select: [Owned<wgpu::ComputePipeline>; 3],
     accumulate: Owned<wgpu::ComputePipeline>,
+    emitters_build: Owned<wgpu::ComputePipeline>,
+    emitters_publish: Owned<wgpu::ComputePipeline>,
+    emitters_cdf: Owned<wgpu::ComputePipeline>,
     gather_count: Owned<wgpu::ComputePipeline>,
     gather_select: Owned<wgpu::ComputePipeline>,
     light: Owned<wgpu::ComputePipeline>,
@@ -1456,7 +1509,7 @@ impl Planner {
         header[3] = self.frame;
         if accumulate_on() {
             header[42] = accumulate_word("RENDERLAB_GI_ACC_VISIBLE", 4);
-            header[43] = accumulate_word("RENDERLAB_GI_ACC_OTHER", 64);
+            header[36] = accumulate_word("RENDERLAB_GI_ACC_OTHER", 64);
             header[44] = accumulate_word("RENDERLAB_GI_ACC_RAYS", 16);
             header[45] = accumulate_word("RENDERLAB_GI_ACC_HISTORY", 32);
             // The frame's rays (0: no cap), taken by cells without history, then visible cells
@@ -1533,6 +1586,16 @@ impl Planner {
         header[55] = near_occluded_rays();
         header[56] = u32::from(light_reuse_on());
         header[61] = mover_reach().to_bits();
+        // The emitter list after the slots (gi_emitters.wgsl GI_H_EMITTERS, GI_H_EMITTERS_MAX);
+        // its counts (58, 59) are the GPU's, written each frame by gi_emitters_publish.
+        header[57] = (HEADER_WORDS + u64::from(c.slots) * (24 + u64::from(c.cold_words))) as u32;
+        // Where cell shading writes each listed emitter triangle's mean emission in the outgoing
+        // radiance: after the slots' values and the draws' probes (gi_cells.wgsl GI_H_EMITTER_MEANS).
+        header[34] = c.slots + TRACED_DRAWS;
+        header[60] = EMITTERS_MAX;
+        // The cache's own gathers sample the list (and subtract emission at hits) only with
+        // RENDERLAB_GI_EMITTERS=1; readers outside the cache use it either way.
+        header[43] = u32::from(!emitters_on());
         let [read, sweep] = self.stale_turns();
         header[62] = read;
         header[63] = sweep;
@@ -2006,6 +2069,11 @@ pub(super) struct GiState {
     priority_compact: bool,
     priority_hold: bool,
     queue_probe: Option<queue_probe::State>,
+    /// Whether a reader outside the cache appends to the external request list
+    /// (`request_external`); until one does, its pass is not encoded.
+    external_readers: bool,
+    /// Whether a reader outside the cache reads the emitter list (`request_emitters`).
+    emitter_readers: bool,
     groups: Option<Groups>,
     retired: Vec<(u64, Retired)>,
     stats: IndirectStats,
@@ -2242,6 +2310,8 @@ impl GiState {
             priority_compact: false,
             priority_hold: false,
             queue_probe: None,
+            external_readers: false,
+            emitter_readers: false,
             groups: None,
             retired: vec![],
             stats: IndirectStats::default(),
@@ -2280,6 +2350,25 @@ impl GiState {
         self.resources
             .as_ref()
             .map_or(&*self.dummy, |r| &*r.outgoing)
+    }
+    /// Called by a reader that appends to `external_requests` (the final gather), on every frame
+    /// it does: from the next encode on, the cache turns the list into requests.
+    pub fn request_external(&mut self) {
+        self.external_readers = true;
+    }
+    /// Called by a reader of the emitter list (the final gather), on every frame it reads it:
+    /// from the next encode on, the cache builds the list and its power CDF whenever it gathers.
+    pub fn request_emitters(&mut self) {
+        self.emitter_readers = true;
+    }
+    /// The list readers outside the cache append cells without a value to (shaders/gi_cache.wgsl
+    /// `gi_external`: count, overflow, two spare words, then per cell level | bin << 8 and its
+    /// lattice coordinates); the next frame requests them. The dummy while the cache has no
+    /// resources.
+    pub fn external_requests(&self) -> &wgpu::Buffer {
+        self.resources
+            .as_ref()
+            .map_or(&*self.dummy, |r| &*r.external)
     }
     pub fn collect(&mut self, completed: u64) {
         self.retired.retain(|(last, _)| *last > completed);
@@ -2380,6 +2469,11 @@ fn kernel_source_base(software: bool, directions: u32) -> String {
     kernels.push_str(&gi_shader(
         "gi_accumulate.wgsl",
         include_str!("../shaders/gi_accumulate.wgsl"),
+    ));
+    kernels.push('\n');
+    kernels.push_str(&gi_shader(
+        "gi_emitters.wgsl",
+        include_str!("../shaders/gi_emitters.wgsl"),
     ));
     // Keep the hardware module unchanged, including its original gather entry.
     if software {
@@ -2756,6 +2850,7 @@ impl Renderer {
                 ),
                 draws: buffer("indirect cache draw table", draws_bytes, storage),
                 raw: buffer("indirect cache filter sources", raw_bytes, storage | if queue_probe::enabled() {wgpu::BufferUsages::COPY_SRC} else {wgpu::BufferUsages::empty()}),
+                external: buffer("indirect cache external requests", EXTERNAL_BYTES, storage),
                 slots,
                 cold_words,
                 directions,
@@ -2767,6 +2862,7 @@ impl Renderer {
                     self.ledger.allocate(AllocationKind::Light, outgoing_bytes),
                     self.ledger.allocate(AllocationKind::Light, draws_bytes),
                     self.ledger.allocate(AllocationKind::Light, raw_bytes),
+                    self.ledger.allocate(AllocationKind::Light, EXTERNAL_BYTES),
                 ],
             };
             self.gi.stats.table_bytes = table_bytes;
@@ -3122,10 +3218,18 @@ impl Renderer {
             acc_pulls: w[212],
             acc_sun_rays: w[213],
             acc_sun_lit: w[214],
+            emitters: w[200],
+            emitter_draws: w[201],
+            emitter_rays: w[202],
+            emitters_dropped: w[203],
             gather_unshaded: w[40],
             gather_orphans: w[41],
             gather_deferred: w[42],
             claim_deferred: w[43],
+            external_requests: w[220],
+            external_overflow: w[221],
+            fg_rays: w[222],
+            fg_shadow_rays: w[223],
             evicted: w[44],
             evicted_recent: w[45],
             full_pixel: w[46],
@@ -3402,6 +3506,7 @@ impl Renderer {
             storage(33, false),
             storage(36, true),
             storage(37, false),
+            storage(38, false),
         ];
         let tlas = entry(
             34,
@@ -3545,6 +3650,7 @@ impl Renderer {
             priority: priority.then(|| priority::Pipelines::new(|name| kernel(name))),
             directions,
             probe: kernel("gi_probe"),
+            external: kernel("gi_external_requests"),
             claim: kernel(if priority { "gi_priority_claim_visible" } else { "gi_claim" }),
             resolve: kernel("gi_resolve"),
             resolve_last: kernel("gi_resolve_last"),
@@ -3564,6 +3670,9 @@ impl Renderer {
             fill_select: kernel("gi_fill_select"),
             acc_select: [kernel("gi_acc_select_fresh"), kernel("gi_acc_select_visible"), kernel("gi_acc_select_other")],
             accumulate: kernel("gi_accumulate"),
+            emitters_build: kernel("gi_emitters_build"),
+            emitters_publish: kernel("gi_emitters_publish"),
+            emitters_cdf: kernel("gi_emitters_cdf"),
             gather_count: kernel("gi_gather_count"),
             gather_select: kernel("gi_gather_select"),
             light: kernel("gi_light"),
@@ -4054,7 +4163,10 @@ impl Renderer {
             self.gi.priority_hold = matches!(priority::mode(), priority::Mode::Hold(n) if self.gi.planner.since_cut < n);
         }
         let raw: Vec<u8> = begun.header.iter().flat_map(|w| w.to_le_bytes()).collect();
-        self.queue.write_buffer(&r.table, 0, &raw);
+        // Header words 58 and 59 are the emitter list's counts, written by the GPU
+        // (gi_emitters_publish); they keep last frame's on frames the list is not rebuilt.
+        self.queue.write_buffer(&r.table, 0, &raw[..58 * 4]);
+        self.queue.write_buffer(&r.table, 60 * 4, &raw[60 * 4..]);
         if !run {
             return Ok(());
         }
@@ -4292,6 +4404,10 @@ impl Renderer {
                 binding: 37,
                 resource: r.raw.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 38,
+                resource: r.external.as_entire_binding(),
+            },
         ];
         if software {
             entries.push(wgpu::BindGroupEntry {
@@ -4353,12 +4469,24 @@ pub(crate) fn cell_selector(id: u64) -> u32 {
 const CELL_PLACEMENT_SEAM: &str = "    if p==0xffffffffu { return vec4<f32>(0.0,0.0,0.0,1.0); }\n";
 const CELL_STORE_SEAM: &str =
     "        gi_shade_out[slot]=gs_shade(slot);\n        gi_shade_out[gi_parts_at(slot)]=gs_parts;\n";
+const CELL_EMISSION_SEAM: &str = "fn gs_owns_draw(batch:u32) -> i32 { return 1; }";
 /// A mixed frame's cell entry for program `id`: it shades only cells whose draw selects
 /// it, writes "reflects nothing" for draws whose program has no cell shading (every
 /// program's dispatch writes the same value), and leaves other programs' cells to theirs.
 pub(crate) fn mixed_cell_entry(source: &str, id: u64) -> String {
     assert_eq!(source.matches(CELL_PLACEMENT_SEAM).count(), 1);
     assert_eq!(source.matches(CELL_STORE_SEAM).count(), 1);
+    assert_eq!(source.matches(CELL_EMISSION_SEAM).count(), 1);
+    // The emission probe: its own draws, and zero for draws whose program reflects nothing.
+    let source = source.replacen(
+        CELL_EMISSION_SEAM,
+        &format!(
+            "fn gs_owns_draw(batch:u32) -> i32 {{ let w=gi_shade_draws[batch].w; if w==0u {{ return 0; }} return select(-1,1,w=={}u); }}",
+            cell_selector(id)
+        ),
+        1,
+    );
+    let source = source.as_str();
     let check = format!(
         "{CELL_PLACEMENT_SEAM}    let gs_program=gi_shade_draws[primary_placements[p]&0x1fffffffu].w;\n    if gs_program==0u {{ return vec4<f32>(0.0,0.0,0.0,1.0); }}\n    if gs_program!={}u {{ return vec4<f32>(-1.0); }}\n",
         cell_selector(id)
@@ -4474,10 +4602,23 @@ impl GiState {
         if let Some(probe)=self.queue_probe.as_mut() {
             probe.encode(encoder,r,self.planner.tick_queues[0]);
         }
+        // Last frame's external requests join the probe's, for the same claim rounds; the list
+        // then starts empty for this frame's appends (the final gather runs after encode).
+        if traced && self.external_readers {
+            main_pass(encoder, "indirect cache external requests", &p.external, u32::MAX, Some([EXTERNAL_GROUPS, 1]));
+            encoder.clear_buffer(&r.external, 0, Some(16));
+        }
         // Bounce gathers (G2) read last frame's outgoing radiance and may request hit cells
         // for the claim rounds that follow.
         let b = 6 + 2 * CLAIM_ROUNDS;
         mark(encoder, "gi_gather");
+        // The emitter list for this frame's gathers (gi_emitters.wgsl), from last frame's
+        // per-draw emission probe and this frame's transforms.
+        if plan.bounce && (self.emitter_readers || emitters_on()) {
+            main_pass(encoder, "indirect emitters", &p.emitters_build, u32::MAX, Some([EMITTER_GROUPS, 1]));
+            main_pass(encoder, "indirect emitters publish", &p.emitters_publish, u32::MAX, Some([1, 1]));
+            main_pass(encoder, "indirect emitters power", &p.emitters_cdf, u32::MAX, Some([1, 1]));
+        }
         if let Some(feedback) = &mut self.refill_feedback { feedback.begin(encoder); }
         if p.priority.is_some() {
             encoder.clear_buffer(&r.work,u64::from(layout.items)*4,Some(16*4));

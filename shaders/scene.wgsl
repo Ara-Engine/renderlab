@@ -2,6 +2,7 @@ enable wgpu_per_vertex;
 // The instance mask bit of a placement that blocks light, and every shadow ray's cull mask
 // (src/shadows.rs SHADOW_CASTER_MASK): a placement that casts no shadow lacks it.
 const SHADOW_CASTER_MASK:u32=1u;
+const VISIBLE_MASK:u32=2u;
 struct Camera { view_projection: mat4x4<f32>, view_mode: vec4<u32> };
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(1) @binding(0) var<storage, read> models: array<mat4x4<f32>>;

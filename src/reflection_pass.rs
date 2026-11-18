@@ -112,7 +112,7 @@ pub(crate) fn default_on(device: &wgpu::Device) -> bool {
     let ray_query = device.features().contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
     (if ray_query { RT_DEFAULT } else { NON_RT_DEFAULT })
         && limits.max_storage_buffers_per_shader_stage
-            >= crate::visibility_limits(wgpu::Limits::default()).max_storage_buffers_per_shader_stage
+            >= crate::primary_ray::visibility_storage_buffers(false)
                 + STORAGE_BUFFERS
         && limits.max_storage_textures_per_shader_stage >= STORAGE_TEXTURES
 }

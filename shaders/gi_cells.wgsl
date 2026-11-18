@@ -153,7 +153,7 @@ const GI_F_ACCUMULATE:u32=16u;
 // Its header words: the update periods of visible and other cells (frames), the rays of an
 // update, and the history the slow mean keeps at most (updates).
 const GI_H_ACC_VISIBLE:u32=42u;
-const GI_H_ACC_OTHER:u32=43u;
+const GI_H_ACC_OTHER:u32=36u;
 const GI_H_ACC_RAYS:u32=44u;
 const GI_H_ACC_HISTORY:u32=45u;
 // The frame's ray budget for updates (0: no cap).
@@ -485,15 +485,29 @@ fn gi_basis(n:vec3<f32>) -> mat3x3<f32> {
     let b=n.x*n.y*a;
     return mat3x3<f32>(vec3<f32>(1.0+s*n.x*n.x*a,s*b,-s*n.x),vec3<f32>(b,s+n.y*n.y*a,-n.y),n);
 }
+// ---- the emitter list's layout, shared by the cache (gi_emitters.wgsl builds it) and cell shading
+// (gi_shade_entry.wgsl evaluates each listed triangle's emission) ----
+const GI_H_EMITTERS:u32=57u;
+const GI_H_EMITTER_COUNT:u32=58u;
+// Per triangle: a corner, its two edges and its radiance (each three f32), then its batch,
+// placement and triangle index.
+const GI_EMITTER_WORDS:u32=15u;
+// Where cell shading writes listed triangle k's mean emission (vec4, w 1 once evaluated): in the
+// outgoing radiance, after the slots' and the draws' emission probes (the CPU writes that offset,
+// slots + traced draws, into GI_H_EMITTER_MEANS).
+const GI_H_EMITTER_MEANS:u32=34u;
+fn gi_emitter_mean_at(k:u32) -> u32 { return gi_word(GI_H_EMITTER_MEANS)+k; }
 // A cell's parts: what cell shading (gi_shade_entry.wgsl) computes before the lights, so a
 // reader that evaluates direct light at its own hit point can rebuild the cell's radiance for
 // any program: emission + albedo / pi * (indirect irradiance + direct irradiance at the hit).
-// Stored in the outgoing radiance buffer after every slot's radiance, at gi_parts_at(slot),
+// Stored in the outgoing radiance buffer after the slots' radiance, the draws' emission probes and
+// the listed emitter triangles' means (gi_emitter_mean_at, GI_H_EMITTERS_MAX of them, word 60), at
+// gi_parts_at(slot),
 // valid where the slot's radiance is (w > 0): emission rgb, and the directional albedo 8 bits a
 // channel in w. Its top byte is 0x3f, so w is always a normal float and survives every f32 load
 // and store unchanged.
 struct GiParts { emission:vec3<f32>, albedo:vec3<f32> };
-fn gi_parts_at(slot:u32) -> u32 { return gi_word(GI_H_MASK)+1u+slot; }
+fn gi_parts_at(slot:u32) -> u32 { return gi_word(GI_H_EMITTER_MEANS)+gi_word(60u)+slot; }
 fn gi_parts_pack(emission:vec3<f32>, albedo:vec3<f32>) -> vec4<f32> {
     return vec4<f32>(emission,bitcast<f32>(pack4x8unorm(vec4<f32>(albedo,63.0/255.0))));
 }

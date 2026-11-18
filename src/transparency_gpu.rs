@@ -1962,6 +1962,10 @@ impl Renderer {
         self.transparency
             .emitters
             .retain(|e| e.handle.strong_count() > 0);
+        // Pipelines are prepared for every transparent draw of the frame, visible or culled, so
+        // a draw coming into view compiles nothing mid-play (Glint's glass: its reflection
+        // pipeline compiled 0.9 s on the first frame it was seen). Work runs for visible draws.
+        let scene_transparent: Vec<&Draw<'_>> = transparent.iter().collect();
         let transparent: Vec<&Draw<'_>> = transparent
             .iter()
             .filter(|d| !d.instances.state.ids.is_empty())
@@ -1976,7 +1980,7 @@ impl Renderer {
                 .map(|e| u64::from(e.params.capacity))
                 .sum();
         }
-        if transparent.is_empty() && self.transparency.emitters.is_empty() {
+        if scene_transparent.is_empty() && self.transparency.emitters.is_empty() {
             return Ok(());
         }
         self.tp_check_limits()?;
@@ -2107,7 +2111,7 @@ impl Renderer {
             .is_some_and(|h| h.active_scene().is_some());
         let reflect = rt
             && traced
-            && transparent.iter().any(|draw| {
+            && scene_transparent.iter().any(|draw| {
                 let program = draw.material.map_or(self.standard.id(), |m| m.program.id());
                 self.program_slot(program).traits.declares_reflection
             });
@@ -2115,8 +2119,8 @@ impl Renderer {
         let reflect =
             reflect && std::env::var("RENDERLAB_TP2_PROFILE").map_or(true, |s| s.is_empty());
         if reflect {
-            let primary = self.view.primary.as_ref().unwrap();
-            let program = self.program_slot(primary.program);
+            let primary_program = self.view.primary.as_ref().unwrap().program;
+            let program = self.program_slot(primary_program);
             let key = reflection::key(
                 &self.source_digest,
                 &program.digest,
@@ -2135,7 +2139,7 @@ impl Renderer {
             let mut slots = [0u32; crate::TRACED_DRAWS as usize];
             for (slot, draw) in opaque.iter().enumerate() {
                 let id = draw.material.map_or(self.standard.id(), |m| m.program.id());
-                slots[slot] = u32::from(id != primary.program);
+                slots[slot] = u32::from(id != primary_program);
             }
             let bytes: Vec<u8> = slots.iter().flat_map(|s| s.to_ne_bytes()).collect();
             self.queue.write_buffer(
@@ -2152,13 +2156,17 @@ impl Renderer {
         let default_program = self.standard.id();
         // Sources are composed once per program and frame; pipelines only when they change
         // (a program or prelude reload, or the TLAS appearing).
-        let mut programs: Vec<u64> = transparent
+        let mut programs: Vec<u64> = scene_transparent
             .iter()
             .map(|d| d.material.map_or(default_program, |m| m.program.id()))
             .collect();
         programs.sort_unstable();
         programs.dedup();
         let pixel_panes = self.tp_prepare_programs(&programs, rt, traced)?;
+        // Everything is prepared; with nothing visible and no emitters there is no work.
+        if transparent.is_empty() && self.transparency.emitters.is_empty() {
+            return Ok(());
+        }
         // ---- CPU: the frame block, the sun map fit and the draw order ----
         let camera = self.transparency.camera.unwrap();
         let matrix = camera.matrix(size.width, size.height);

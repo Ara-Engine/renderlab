@@ -36,8 +36,9 @@ pub(crate) struct RfRecord {
 pub(crate) const RF_HIT_BYTES: u64 = std::mem::size_of::<RfHit>() as u64;
 pub(crate) const RF_RECORD_BYTES: u64 = std::mem::size_of::<RfRecord>() as u64;
 pub(crate) const RF_PATH_BYTES: u64 = 80;
-/// shaders/reference_live.wgsl `Frame`: eight camera vec4s, four lighting vec4s, two uvec4s.
-pub(crate) const FRAME_BYTES: usize = 14 * 16;
+/// shaders/reference_live.wgsl `Frame`: eight camera vec4s, four lighting vec4s, two uvec4s and
+/// three fog vec4s.
+pub(crate) const FRAME_BYTES: usize = 17 * 16;
 
 /// Whether a live reference is requested (`RENDERLAB_LIVE_REFERENCE`, src/engine/live_reference.rs):
 /// the renderer then keeps each prepared frame's draw programs.
@@ -76,6 +77,51 @@ pub(crate) struct LiveInputs {
     pub seed: u32,
     /// Print progress at power-of-two sample counts.
     pub progress: bool,
+    /// The participating medium, or none.
+    pub fog: Option<Fog>,
+}
+
+/// The medium the engine's fog settings describe (src/atmosphere.rs), traced as a physical
+/// volume on every ray: the height fog's extinction `density * exp(-falloff * (y - base_height))`
+/// everywhere, plus the volumetric fog's `extra_density` inside a sphere of its range about the
+/// eye (the engine's froxels hold height fog plus the extra over that range of every camera ray).
+/// Extinction is grey, the albedo tints what scatters and the phase is Henyey-Greenstein. Rays that
+/// leave the scene end at the planet's ground or 100 km, as the engine's backdrop fog does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Fog {
+    pub density: f32,
+    pub falloff: f32,
+    pub base_height: f32,
+    pub extra_density: f32,
+    pub extra_radius: f32,
+    pub albedo: [f32; 3],
+    pub anisotropy: f32,
+    pub ground_height: f32,
+    pub ground_radius_km: f32,
+}
+
+impl Fog {
+    /// The medium of `atmosphere`, or none when it has neither height nor volumetric fog. The
+    /// volumetric fog's medium without a height fog takes the default fog's albedo and phase, as
+    /// the engine's uniform does (src/atmosphere_gpu.rs).
+    pub(crate) fn of(atmosphere: &crate::Atmosphere) -> Option<Self> {
+        if atmosphere.height_fog.is_none() && atmosphere.volumetric_fog.is_none() {
+            return None;
+        }
+        let height = atmosphere.height_fog.unwrap_or(crate::HeightFog { density: 0.0, ..Default::default() });
+        let (extra_density, extra_radius) = atmosphere.volumetric_fog.map_or((0.0, 0.0), |v| (v.extra_density, v.distance));
+        Some(Self {
+            density: height.density,
+            falloff: height.falloff,
+            base_height: height.base_height,
+            extra_density,
+            extra_radius,
+            albedo: height.albedo,
+            anisotropy: height.anisotropy,
+            ground_height: atmosphere.medium.ground_height,
+            ground_radius_km: atmosphere.medium.ground_radius_km,
+        })
+    }
 }
 
 /// shaders/reference_live.wgsl `Frame` for `sample`. The sun is packed as src/reference.rs packs
@@ -113,6 +159,16 @@ pub(crate) fn frame_bytes(inputs: &LiveInputs, sample: u32) -> Vec<u8> {
     let mut bytes: Vec<u8> = floats.iter().flatten().flat_map(|f| f.to_le_bytes()).collect();
     let words = [inputs.size[0], inputs.size[1], sample, inputs.lights.len() as u32, inputs.max_depth, inputs.seed, 0, 0];
     bytes.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+    // No fog: zero density and extra, so the medium is empty.
+    let fog = inputs.fog.map_or([[0.0; 4]; 3], |f| {
+        let [r, g, b] = f.albedo;
+        [
+            [f.density, f.falloff, f.base_height, f.extra_density],
+            [r, g, b, f.anisotropy],
+            [f.extra_radius, f.ground_height, f.ground_radius_km, 0.0],
+        ]
+    });
+    bytes.extend(fog.iter().flatten().flat_map(|f| f.to_le_bytes()));
     debug_assert_eq!(bytes.len(), FRAME_BYTES);
     bytes
 }
@@ -245,7 +301,10 @@ mod tests {
             max_depth: 4,
             seed: 1,
             progress: false,
+            fog: Fog::of(&crate::Atmosphere::default()),
         };
+        assert!(inputs.fog.is_some_and(|f| f.density > 0.0 && f.extra_density > 0.0));
+        assert_eq!(Fog::of(&crate::Atmosphere::off()), None);
         assert_eq!(frame_bytes(&inputs, 0).len(), FRAME_BYTES);
         assert_eq!(light_bytes(&inputs).len(), 64);
         assert_eq!(environment_bytes(&inputs).len(), 16);

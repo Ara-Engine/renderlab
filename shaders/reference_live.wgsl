@@ -7,8 +7,10 @@ enable wgpu_binding_array;
 // the engine runs it (Stage::Reference, shaders/reference_live_entry.wgsl):
 //   rf_begin   one camera ray per pixel for sample `frame.size.z` (pixel and shutter jitter);
 //   rf_trace   closest hits on the engine's TLAS with the camera trace's single-sided rule
-//              (primary_trace.wgsl): a hit queues its record, a miss collects the sun and sky
-//              (power-heuristic weights against the previous BSDF sample) and ends the path;
+//              (primary_trace.wgsl), then a free flight through the fog: a flight shorter than
+//              the segment scatters in the fog there (rf_scatter), else a hit queues its record
+//              and a miss collects the sun and sky (power-heuristic weights against the previous
+//              BSDF or phase sample) and ends the path;
 //   (programs) each program stores the material records of its own draws' hits;
 //   rf_shade   the record's emission, next-event estimation for the sun, local lights and sky,
 //              then a BSDF sample of the standard model (Lambert plus GGX, height-correlated
@@ -34,6 +36,13 @@ struct Frame {
     size:vec4<u32>,
     // x max path depth (1 = emitters only, 2 = direct), y seed.
     options:vec4<u32>,
+    // The fog (src/reference_live.rs Fog): height-fog extinction (/m) at its base height, falloff
+    // (/m), base world y (m), and the volumetric fog's extra extinction (/m); 0 and 0: no fog.
+    fog:vec4<f32>,
+    // rgb single-scattering albedo, w Henyey-Greenstein g.
+    fog_albedo:vec4<f32>,
+    // x the extra extinction's radius about the eye (m), y the planet ground's world y (m), z its radius (km).
+    fog_space:vec4<f32>,
 };
 // A path: its ray, throughput, radiance so far and the pdfs of the BSDF sample that produced
 // the ray (0: the camera's), its random state and depth.
@@ -230,6 +239,82 @@ fn sample_vndf(l:Lobe, v:vec3<f32>, u:vec2<f32>)->vec3<f32> {
 fn power(a:f32, b:f32)->f32 {return a*a/max(a*a+b*b,1e-30);}
 // ---- end of src/reference.rs's functions ----
 
+// ---- The fog: the engine's height and volumetric fog as one grey participating medium ----
+fn fog_on()->bool {return frame.fog.x>0.0 || frame.fog.w>0.0;}
+// The height fog's extinction (/m) at world height y; along o + t d it is fog_base(o.y) * exp(-falloff d.y t).
+fn fog_base(y:f32)->f32 {return frame.fog.x*exp(clamp(-frame.fog.y*(y-frame.fog.z),-80.0,80.0));}
+// The ray's interval [x, y] inside the extra extinction's sphere about the eye (empty: y <= x).
+fn fog_sphere(o:vec3<f32>, d:vec3<f32>)->vec2<f32> {
+    if frame.fog.w<=0.0 {return vec2<f32>(0.0);}
+    let q=o-frame.eye0.xyz;
+    let b=dot(q,d);
+    let disc=b*b-(dot(q,q)-frame.fog_space.x*frame.fog_space.x);
+    if disc<=0.0 {return vec2<f32>(0.0);}
+    let r=sqrt(disc);
+    return vec2<f32>(max(-b-r,0.0),max(-b+r,0.0));
+}
+// How far a ray that leaves the scene meets fog: to the planet's ground, or 100 km (the engine's
+// backdrop fog, atmosphere_api.wgsl at_fog_backdrop_distance, from the ray's own altitude).
+fn fog_escape(o:vec3<f32>, d:vec3<f32>)->f32 {
+    let bottom=frame.fog_space.z;
+    let h=max((o.y-frame.fog_space.y)*1e-3,1e-4);
+    let b=(bottom+h)*d.y;
+    let c=h*(2.0*bottom+h);
+    let disc=b*b-c;
+    if b>=0.0 || disc<0.0 {return 1e5;}
+    return min(1000.0*c/(-b+sqrt(disc)),1e5);
+}
+// The fraction of light the fog passes along o + t d over [0, tmax], in closed form.
+fn fog_transmittance(o:vec3<f32>, d:vec3<f32>, tmax:f32)->f32 {
+    if !fog_on() {return 1.0;}
+    var depth=0.0;
+    let base=fog_base(o.y);
+    if base>0.0 {
+        let k=frame.fog.y*d.y;
+        let x=k*tmax;
+        if abs(x)<1e-4 {depth=base*tmax*(1.0-0.5*x);} else {depth=base*(1.0-exp(clamp(-x,-80.0,80.0)))/k;}
+    }
+    let s=fog_sphere(o,d);
+    depth+=frame.fog.w*max(min(s.y,tmax)-s.x,0.0);
+    return exp(-min(depth,1e4));
+}
+// A free-flight distance through the fog from o along d: the nearer of the height fog's and the
+// sphere's own (exact for the sum of the two media), each by inverting its optical depth; 1e30
+// when neither scatters.
+fn fog_flight(o:vec3<f32>, d:vec3<f32>)->f32 {
+    var t=1e30;
+    let base=fog_base(o.y);
+    if base>0.0 {
+        let xi=-log(1.0-rand());
+        let k=frame.fog.y*d.y;
+        let x=xi*k/base;
+        if abs(x)<1e-4 {t=xi/base*(1.0+0.5*x);} else if x<1.0 {t=-log(1.0-x)/k;}
+    }
+    let s=fog_sphere(o,d);
+    if s.y>s.x {
+        let te=s.x-log(1.0-rand())/frame.fog.w;
+        if te<s.y {t=min(t,te);}
+    }
+    return t;
+}
+// Henyey-Greenstein's phase for the cosine c between the travel direction and the scattered one.
+fn hg(g:f32, c:f32)->f32 {
+    let d=1.0+g*g-2.0*g*c;
+    return (1.0-g*g)/(4.0*PI*d*sqrt(d));
+}
+fn sample_hg(g:f32, travel:vec3<f32>)->vec3<f32> {
+    let u=rand();
+    var c=1.0-2.0*u;
+    if abs(g)>=1e-3 {
+        let q=(1.0-g*g)/(1.0-g+2.0*g*u);
+        c=clamp((1.0+g*g-q*q)/(2.0*g),-1.0,1.0);
+    }
+    let s=sqrt(max(1.0-c*c,0.0));
+    let phi=2.0*PI*rand();
+    return basis(travel)*vec3<f32>(s*cos(phi),s*sin(phi),c);
+}
+// ---- end of the fog ----
+
 // A see-through hit's base colour (rgb) and coverage (a), as the standard program resolves them: the
 // material's factor, vertex colour and base-colour texture at level 0, coverage through
 // transparent_coverage (program_api.wgsl): the opacity times the alpha product.
@@ -278,6 +363,110 @@ fn transmitted_within(origin:vec3<f32>, direction:vec3<f32>, tmax:f32)->vec3<f32
     if rayQueryGetCommittedIntersection(&query).kind!=0u {return vec3<f32>(0.0);}
     return t;
 }
+// Local light `light` seen from p, with the engine's attenuation. A light with a source radius r is
+// a sphere of uniform radiance I / (pi r^2) (I its candela), sampled uniformly over the cone it
+// subtends: its weight, the cone's solid angle over pi r^2, tends to the point light's 1 / d^2 far
+// away. Range window and spot cone are the engine's, at the centre. `reach` ends the shadow ray.
+struct LightSample {wi:vec3<f32>, reach:f32, attenuation:f32};
+fn sample_light(light:LocalLight, p:vec3<f32>)->LightSample {
+    let delta=light.position_range.xyz-p;
+    let distance=length(delta);
+    let radius=light.inner.y;
+    var wi=delta/max(distance,1e-30);
+    var reach=distance*0.999;
+    var attenuation=0.0;
+    if radius>0.0 && distance>radius*1.0001 {
+        let sin_max=radius/distance;
+        let cos_max=sqrt(max(1.0-sin_max*sin_max,0.0));
+        let z=1.0-rand()*(1.0-cos_max);
+        let phi=2.0*PI*rand();
+        let s=sqrt(max(1.0-z*z,0.0));
+        wi=basis(wi)*vec3<f32>(s*cos(phi),s*sin(phi),z);
+        // The sampled ray meets the sphere at the near root of |p + t wi - c| = r.
+        let b=dot(wi,delta);
+        reach=(b-sqrt(max(b*b-(distance*distance-radius*radius),0.0)))*0.999;
+        attenuation=2.0*PI*(1.0-cos_max)/(PI*radius*radius);
+    } else {
+        let inverse=1.0/max(distance,0.01);
+        attenuation=inverse*inverse;
+    }
+    if light.position_range.w>0.0 {
+        let ratio=min(distance/light.position_range.w,1.0);
+        let window=max(1.0-ratio*ratio*ratio*ratio,0.0);
+        attenuation*=window*window;
+    }
+    if light.candela_kind.w>1.5 {
+        let cone=clamp((dot(-wi,light.travel_outer.xyz)-light.travel_outer.w)/max(light.inner.x-light.travel_outer.w,1e-4),0.0,1.0);
+        attenuation*=cone*cone;
+    }
+    return LightSample(wi,reach,attenuation);
+}
+// What reaches p from direction wi out of the scene: see-through casters and the fog.
+fn sky_share(p:vec3<f32>, wi:vec3<f32>)->vec3<f32> {
+    return transmitted_within(p,wi,1e30)*fog_transmittance(p,wi,fog_escape(p,wi));
+}
+// A scattering in the fog at p: the albedo's share goes on, next-event estimation collects the
+// sun, local lights and sky through the fog and its see-through casters (power heuristic against
+// the phase sample, as at surfaces), and the phase function samples the continuation.
+fn rf_scatter(path:ptr<function,Path>, p:vec3<f32>) {
+    let travel=(*path).direction;
+    let g=frame.fog_albedo.w;
+    (*path).throughput*=frame.fog_albedo.rgb;
+    var alive=(*path).depth<frame.options.x;
+    if alive {
+        let beta=(*path).throughput;
+        if frame.sun.w>0.0 {
+            let wi=sample_sun();
+            let phase=hg(g,dot(travel,wi));
+            let f=phase*sky_share(p,wi);
+            if sun_height()==0.0 {
+                (*path).total+=beta*f*frame.sun_value.rgb;
+            } else {
+                let light_pdf=sun_pdf();
+                (*path).total+=beta*f*frame.sun_value.rgb*power(light_pdf,phase)/light_pdf;
+            }
+        }
+        for (var k=0u; k<frame.size.w; k+=1u) {
+            let s=sample_light(local_lights[k],p);
+            if s.attenuation<=0.0 {continue;}
+            let share=transmitted_within(p,s.wi,s.reach)*fog_transmittance(p,s.wi,s.reach);
+            (*path).total+=beta*hg(g,dot(travel,s.wi))*share*local_lights[k].candela_kind.rgb*s.attenuation;
+        }
+        if frame.sky.w>0.0 || luminance(frame.sky.rgb)>0.0 {
+            var wi:vec3<f32>;
+            var light_pdf=1.0/(4.0*PI);
+            if frame.sky.w>0.0 {
+                wi=sample_environment();
+                light_pdf=environment_pdf(wi);
+            } else {
+                let z=1.0-2.0*rand();
+                let phi=2.0*PI*rand();
+                let r=sqrt(max(1.0-z*z,0.0));
+                wi=vec3<f32>(r*cos(phi),r*sin(phi),z);
+            }
+            if frame.sky.w>0.0 || !in_sun(wi) {
+                let phase=hg(g,dot(travel,wi));
+                (*path).total+=beta*phase*sky_share(p,wi)*sky_radiance(wi)*power(light_pdf,phase)/max(light_pdf,1e-30);
+            }
+        }
+        // The phase sample: its pdf is the phase, so the throughput keeps its value.
+        let wi=sample_hg(g,travel);
+        (*path).pdf_prev=hg(g,dot(travel,wi));
+        (*path).sky_pdf_prev=select(0.0,1.0/(4.0*PI),luminance(frame.sky.rgb)>0.0);
+        if frame.sky.w>0.0 {(*path).sky_pdf_prev=environment_pdf(wi);}
+        (*path).origin=p;
+        (*path).direction=wi;
+        // Russian roulette after three bounces, as at surfaces.
+        if (*path).depth>=3u {
+            let t=(*path).throughput;
+            let q=min(max(t.r,max(t.g,t.b)),0.95);
+            if rand()>=q {alive=false;} else {(*path).throughput/=q;}
+        }
+    }
+    (*path).depth+=1u;
+    (*path).rng=rng_state;
+    if alive {atomicAdd(&counters[0],1u);} else {(*path).state=0u;}
+}
 fn camera_ray_time(pixel:vec2<f32>, t:f32)->array<vec3<f32>,2> {
     let eye=mix(frame.eye0.xyz,frame.eye1.xyz,t);
     let forward=normalize(mix(frame.forward0.xyz,frame.forward1.xyz,t));
@@ -309,8 +498,9 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
     hits[i].flags=0u;
     var path=paths[i];
     if (path.state&RF_ALIVE)==0u {return;}
+    rng_state=path.rng;
     var query:ray_query<vertex_return>;
-    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_NO_OPAQUE,255u,0.0,1e30,path.origin,path.direction));
+    rayQueryInitialize(&query,scene,RayDesc(RAY_FLAG_FORCE_NO_OPAQUE,VISIBLE_MASK,0.0,1e30,path.origin,path.direction));
     while rayQueryProceed(&query) {
         // primary_trace.wgsl: single-sided draws hide source-back faces, by the object-space
         // winding against the object-space ray.
@@ -323,6 +513,18 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
         if visible {rayQueryConfirmIntersection(&query);}
     }
     let hit=rayQueryGetCommittedIntersection(&query);
+    // The fog: a free flight shorter than the segment (to the hit, or out of the scene) scatters there.
+    if fog_on() {
+        let reach=select(fog_escape(path.origin,path.direction),hit.t,hit.kind!=0u);
+        let t=fog_flight(path.origin,path.direction);
+        if t<reach {
+            rf_scatter(&path,path.origin+t*path.direction);
+            paths[i]=path;
+            return;
+        }
+        path.rng=rng_state;
+        paths[i].rng=rng_state;
+    }
     if hit.kind!=0u {
         hits[i]=RfHit(hit.instance_custom_data,hit.primitive_index,hit.barycentrics,path.origin,RF_HIT);
         return;
@@ -393,8 +595,7 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
             let wi=sample_sun();
             let cos_l=dot(n,wi);
             if cos_l>0.0 && dot(ng,wi)>0.0 {
-                let share=transmitted_within(start,wi,1e30);
-                let f=bsdf(l,n,v,wi)*share;
+                let f=bsdf(l,n,v,wi)*sky_share(start,wi);
                 if sun_height()==0.0 {
                     path.total+=path.throughput*f*cos_l*frame.sun_value.rgb;
                 } else {
@@ -403,47 +604,13 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
                 }
             }
         }
-        // Next-event estimation: local lights with the engine's attenuation. A light with a source
-        // radius r is a sphere of uniform radiance I / (pi r^2) (I its candela), sampled uniformly
-        // over the cone it subtends: its weight, the cone's solid angle over pi r^2, tends to the
-        // point light's 1 / d^2 far away. Range window and spot cone are the engine's, at the centre.
+        // Next-event estimation: local lights with the engine's attenuation (sample_light).
         for (var k=0u; k<frame.size.w; k+=1u) {
-            let light=local_lights[k];
-            let delta=light.position_range.xyz-p;
-            let distance=length(delta);
-            let radius=light.inner.y;
-            var wi=delta/max(distance,1e-30);
-            var reach=distance*0.999;
-            var attenuation=0.0;
-            if radius>0.0 && distance>radius*1.0001 {
-                let sin_max=radius/distance;
-                let cos_max=sqrt(max(1.0-sin_max*sin_max,0.0));
-                let z=1.0-rand()*(1.0-cos_max);
-                let phi=2.0*PI*rand();
-                let s=sqrt(max(1.0-z*z,0.0));
-                wi=basis(wi)*vec3<f32>(s*cos(phi),s*sin(phi),z);
-                // The sampled ray meets the sphere at the near root of |p + t wi - c| = r.
-                let b=dot(wi,delta);
-                reach=(b-sqrt(max(b*b-(distance*distance-radius*radius),0.0)))*0.999;
-                attenuation=2.0*PI*(1.0-cos_max)/(PI*radius*radius);
-            } else {
-                let inverse=1.0/max(distance,0.01);
-                attenuation=inverse*inverse;
-            }
-            let cos_l=dot(n,wi);
-            if cos_l<=0.0 || dot(ng,wi)<=0.0 {continue;}
-            if light.position_range.w>0.0 {
-                let ratio=min(distance/light.position_range.w,1.0);
-                let window=max(1.0-ratio*ratio*ratio*ratio,0.0);
-                attenuation*=window*window;
-            }
-            if light.candela_kind.w>1.5 {
-                let cone=clamp((dot(-wi,light.travel_outer.xyz)-light.travel_outer.w)/max(light.inner.x-light.travel_outer.w,1e-4),0.0,1.0);
-                attenuation*=cone*cone;
-            }
-            if attenuation<=0.0 {continue;}
-            let share=transmitted_within(start,wi,reach);
-            path.total+=path.throughput*bsdf(l,n,v,wi)*share*cos_l*light.candela_kind.rgb*attenuation;
+            let s=sample_light(local_lights[k],p);
+            let cos_l=dot(n,s.wi);
+            if cos_l<=0.0 || dot(ng,s.wi)<=0.0 || s.attenuation<=0.0 {continue;}
+            let share=transmitted_within(start,s.wi,s.reach)*fog_transmittance(start,s.wi,s.reach);
+            path.total+=path.throughput*bsdf(l,n,v,s.wi)*share*cos_l*local_lights[k].candela_kind.rgb*s.attenuation;
         }
         // Next-event estimation: sky (the environment's importance sampling, or cosine-weighted
         // about the shading normal for a constant sky).
@@ -455,7 +622,7 @@ fn pixel_count()->u32 {return frame.size.x*frame.size.y;}
             }
             let cos_l=dot(n,wi);
             if cos_l>0.0 && dot(ng,wi)>0.0 && (frame.sky.w>0.0 || !in_sun(wi)) {
-                let share=transmitted_within(start,wi,1e30);
+                let share=sky_share(start,wi);
                 var light_pdf=cos_l/PI;
                 if frame.sky.w>0.0 {light_pdf=environment_pdf(wi);}
                 let w=power(light_pdf,bsdf_pdf(l,n,v,wi));

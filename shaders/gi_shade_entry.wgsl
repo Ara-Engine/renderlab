@@ -87,9 +87,14 @@ fn gs_gradients(n:vec3<f32>,e1:vec3<f32>,e2:vec3<f32>,uv1:vec2<f32>,uv2:vec2<f32
 // rays) the placement's material is read over its whole texture.
 fn gs_surface_input(slot:u32, p:u32, q:vec3<f32>, nc:vec3<f32>, edge:f32) -> SurfaceInput {
     let cold=gi_cold(slot);
+    return gs_triangle_input(p,gi_word(cold+GI_C_PRIMITIVE),unpack2x16unorm(gi_word(cold+GI_C_BARY)),q,nc,edge);
+}
+// The SurfaceInput at point q (barycentrics `bary`) of triangle `primitive` of placement p,
+// seen from the side of nc, with a footprint of `edge`: cell shading's input for a cell, and
+// the emission probe's for a triangle (gs_draw_emission).
+fn gs_triangle_input(p:u32, primitive:u32, bary:vec2<f32>, q:vec3<f32>, nc:vec3<f32>, edge:f32) -> SurfaceInput {
     let info=primary_placements[p];
     let batch=info&0x1fffffffu;
-    let primitive=gi_word(cold+GI_C_PRIMITIVE);
     let frame=gi_basis(nc);
     let dx=frame[0]*edge;let dy=frame[1]*edge;
     let material=primary_materials[batch].value;
@@ -104,7 +109,6 @@ fn gs_surface_input(slot:u32, p:u32, q:vec3<f32>, nc:vec3<f32>, edge:f32) -> Sur
     let ia=primary_indices[batch].data[i];let ib=primary_indices[batch].data[i+1u];let ic=primary_indices[batch].data[i+2u];
     let ta=gs_input(batch,ia,p);let tb=gs_input(batch,ib,p);let tc=gs_input(batch,ic,p);
     let a=gs_vertex(tangent,batch,ta,ia);let b=gs_vertex(tangent,batch,tb,ib);let c=gs_vertex(tangent,batch,tc,ic);
-    let bary=unpack2x16unorm(gi_word(cold+GI_C_BARY));
     let w=vec3<f32>(1.0-bary.x-bary.y,bary);
     let geometric=primary_geometric(ta.position,tb.position,tc.position,p);
     let m=models[p];let linear=mat3x3<f32>(m[0].xyz,m[1].xyz,m[2].xyz);
@@ -174,7 +178,79 @@ fn gs_shade(slot:u32) -> vec4<f32> {
     out=min(select(vec3<f32>(0.0),out,out>=vec3<f32>(0.0)),vec3<f32>(3.4028235e38));
     return vec4<f32>(out,1.0);
 }
+// ---- emitters (docs/design-gi-emitters.md) ----
+// Each draw's emitted radiance, for the cache's emitter list (gi_cache.wgsl gi_emitters_build):
+// the program's own `emission` at the centroids of three of the draw's triangles (its first
+// placement), the largest, written after the slots' outgoing radiance at slots + draw. Emission
+// is taken as uniform over a draw, as global illumination already takes it (an `emission` hook
+// returns one radiance for the material; Ara's mapped glow gives its mean).
+fn gs_draw_emission(batch:u32) -> vec3<f32> {
+    let d=gi_shade_draws[batch];
+    let triangles=batch_triangles(primary_batch_info(batch));
+    if d.z==0u || triangles==0u { return vec3<f32>(0.0); }
+    let p=d.y;
+    var most=vec3<f32>(0.0);
+    for(var k=0u;k<3u;k+=1u) {
+        let t=(triangles*k)/3u;
+        let i=t*3u;
+        let ia=primary_indices[batch].data[i];let ib=primary_indices[batch].data[i+1u];let ic=primary_indices[batch].data[i+2u];
+        let a=world_position(gs_input(batch,ia,p).position,p).xyz;
+        let b=world_position(gs_input(batch,ib,p).position,p).xyz;
+        let c=world_position(gs_input(batch,ic,p).position,p).xyz;
+        let g=cross(b-a,c-a);
+        if dot(g,g)<=0.0 { continue; }
+        let n=normalize(g);
+        let input=decal_prepare(gs_triangle_input(p,t,vec2<f32>(1.0/3.0),(a+b+c)*(1.0/3.0),n,0.01));
+        rl_load_parameters(input.receiver.slot);
+        let e=rl_emission(surface(input),input);
+        most=max(most,select(vec3<f32>(0.0),e,e>=vec3<f32>(0.0)));
+    }
+    return min(most,vec3<f32>(3.4028235e38));
+}
+// Which draws this program's dispatch probes: 1 its own (every draw in a single-program frame),
+// 0 a draw whose program reflects nothing (written as no emission), -1 another program's
+// (mixed_cell_entry replaces this).
+fn gs_owns_draw(batch:u32) -> i32 { return 1; }
+// Listed emitter triangle k's mean emission (gi_cells.wgsl GI_EMITTER_WORDS: batch, placement and
+// triangle after its geometry): the program's emission at the three points of the degree-2
+// triangle rule, averaged. A draw's probe takes the brightest of three triangles, which is right
+// only to say whether it emits: as an estimate it overstated every dimmer part of the draw.
+fn gs_triangle_emission(k:u32) -> vec3<f32> {
+    let r=gi_word(GI_H_EMITTERS)+k*GI_EMITTER_WORDS;
+    let batch=gi_word(r+12u);let p=gi_word(r+13u);let t=gi_word(r+14u);
+    let i=t*3u;
+    let ia=primary_indices[batch].data[i];let ib=primary_indices[batch].data[i+1u];let ic=primary_indices[batch].data[i+2u];
+    let a=world_position(gs_input(batch,ia,p).position,p).xyz;
+    let b=world_position(gs_input(batch,ib,p).position,p).xyz;
+    let c=world_position(gs_input(batch,ic,p).position,p).xyz;
+    let g=cross(b-a,c-a);
+    if dot(g,g)<=0.0 { return vec3<f32>(0.0); }
+    let n=normalize(g);
+    var sum=vec3<f32>(0.0);
+    for(var j=0u;j<3u;j+=1u) {
+        let bary=select(select(vec2<f32>(1.0/6.0,1.0/6.0),vec2<f32>(2.0/3.0,1.0/6.0),j==1u),vec2<f32>(1.0/6.0,2.0/3.0),j==2u);
+        let q=a*(1.0-bary.x-bary.y)+b*bary.x+c*bary.y;
+        let input=decal_prepare(gs_triangle_input(p,t,bary,q,n,0.01));
+        rl_load_parameters(input.receiver.slot);
+        let e=rl_emission(surface(input),input);
+        sum+=select(vec3<f32>(0.0),e,e>=vec3<f32>(0.0));
+    }
+    return min(sum*(1.0/3.0),vec3<f32>(3.4028235e38));
+}
 @compute @workgroup_size(64) fn gi_shade_cells(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+    // The emission probe, one thread per draw (gs_draw_emission).
+    if id.x<gi_shade_draws[PRIMARY_BATCHES].x {
+        let own=gs_owns_draw(id.x);
+        let at=gi_word(GI_H_MASK)+1u+id.x;
+        if own==1 { gi_shade_out[at]=vec4<f32>(gs_draw_emission(id.x),1.0); }
+        if own==0 { gi_shade_out[at]=vec4<f32>(0.0); }
+    }
+    // Each listed emitter triangle's mean emission, for the list's next build.
+    for(var k=id.x;k<gi_word(GI_H_EMITTER_COUNT);k+=groups.x*64u) {
+        let own=gs_owns_draw(gi_word(gi_word(GI_H_EMITTERS)+k*GI_EMITTER_WORDS+12u));
+        if own==1 { gi_shade_out[gi_emitter_mean_at(k)]=vec4<f32>(gs_triangle_emission(k),1.0); }
+        if own==0 { gi_shade_out[gi_emitter_mean_at(k)]=vec4<f32>(0.0,0.0,0.0,1.0); }
+    }
     let count=min(gi_shade_work[GS_COUNT],gi_word(GI_H_MASK)+1u);
     let queue=gi_word(GI_H_SHADE_QUEUE);
     for(var i=id.x;i<count;i+=groups.x*64u) {

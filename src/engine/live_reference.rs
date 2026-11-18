@@ -119,7 +119,7 @@ impl Engine {
             },
             Sky::Atmosphere(_) => match procedural {
                 Some((n, texels, _)) => {
-                    not_traced.push("atmosphere: sky from the engine's 128-texel cube (no aerial perspective or fog between surfaces)".into());
+                    not_traced.push("atmosphere: sky from the engine's 128-texel cube".into());
                     let level = crate::asset::environment::CubeLevel::new(n, texels, crate::asset::environment::Limits::unbounded())
                         .map_err(|_| Error::InvalidInput("live reference: the procedural sky readback is malformed"))?;
                     ([0.0; 3], Some(crate::reference::Environment { radiance: level, yaw: 0.0, intensity: 1.0 }))
@@ -142,10 +142,16 @@ impl Engine {
             }
         }
         not_traced.push("see-through surfaces as thin films and thin-slab glass: no refraction offset (thickness ignored)".into());
-        not_traced.push("fog and aerial perspective".into());
+        let atmosphere = self.renderer.atmosphere();
+        if atmosphere.aerial_perspective {
+            not_traced.push("aerial perspective: the air between surfaces (about 1% blue extinction at 300 m)".into());
+        }
+        if atmosphere.height_fog.is_some_and(|f| f.start_distance > 0.0) {
+            not_traced.push("the height fog's start distance (fog is traced from the eye)".into());
+        }
         // Measurement (RENDERLAB_ABLATE `sun`, `sky`, `lights`, as Engine::apply_lighting takes them
         // out of the frame): the reference drops the same sources, so one light term is judged on
-        // both sides. The embedder's state, which this reads, keeps them.
+        // both sides. The embedder's state, which this reads, keeps them. (gicut, be6ae308)
         let ablate = |feature: &str| {
             std::env::var("RENDERLAB_ABLATE").is_ok_and(|list| list.split(',').any(|f| f.trim() == feature))
         };
@@ -175,8 +181,11 @@ impl Engine {
             max_depth: 1024,
             seed: 0x4d37_5530,
             progress: true,
+            fog: crate::reference_live::Fog::of(&atmosphere),
         };
         let samples = inputs.samples;
+        // The traced medium, recorded with the picture (null: none).
+        let fog = inputs.fog.map_or("null".to_string(), |f| format!("{{\"density\":{},\"falloff\":{},\"base_height\":{},\"extra_density\":{},\"extra_radius\":{},\"albedo\":[{},{},{}],\"anisotropy\":{}}}", f.density, f.falloff, f.base_height, f.extra_density, f.extra_radius, f.albedo[0], f.albedo[1], f.albedo[2], f.anisotropy));
         let started = std::time::Instant::now();
         let image = self.renderer.trace_live_reference(&inputs)?;
         let seconds = started.elapsed().as_secs_f64();
@@ -187,7 +196,7 @@ impl Engine {
         ppm(&out.join("reference.ppm"), size, &image.mean, stops)?;
         let list = not_traced.iter().map(|g| format!("{g:?}")).collect::<Vec<_>>().join(",");
         let json = format!(
-            "{{\"samples\":{samples},\"seconds\":{seconds},\"invalid_pixels\":{},\"size\":[{},{}],\"exposure_stops\":{stops},\"display_transform\":\"AcesFit+sRGB at the engine view's exposure\",\"method\":\"renderlab::reference_live: the engine's own scene and material programs, unidirectional path tracing, NEE + MIS, Russian roulette; no reuse or denoising\",\"not_traced\":[{list}],\"sky_check\":null,\"masked_fraction\":0,\"camera\":{{\"eye\":[{},{},{}],\"forward\":[{},{},{}],\"fov_y\":{}}},\"path\":\"{:?}\"}}\n",
+            "{{\"samples\":{samples},\"seconds\":{seconds},\"invalid_pixels\":{},\"size\":[{},{}],\"exposure_stops\":{stops},\"display_transform\":\"AcesFit+sRGB at the engine view's exposure\",\"method\":\"renderlab::reference_live: the engine's own scene and material programs, unidirectional path tracing, NEE + MIS, Russian roulette; fog as a physical medium on every ray; no reuse or denoising\",\"fog\":{fog},\"not_traced\":[{list}],\"sky_check\":null,\"masked_fraction\":0,\"camera\":{{\"eye\":[{},{},{}],\"forward\":[{},{},{}],\"fov_y\":{}}},\"path\":\"{:?}\"}}\n",
             image.invalid_pixels, size[0], size[1], eye.x, eye.y, eye.z, forward.x, forward.y, forward.z, camera.fov_y(), self.path
         );
         std::fs::write(out.join("reference.json"), json).map_err(|_| Error::InvalidInput("live reference write failed"))?;

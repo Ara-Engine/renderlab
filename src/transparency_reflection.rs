@@ -142,16 +142,28 @@ impl Renderer {
         }
     }
 
-    pub(super) fn tp_reflections(&self, size: wgpu::Extent3d) -> Result<GlassReflections, Error> {
+    pub(super) fn tp_reflections(&mut self, size: wgpu::Extent3d) -> Result<GlassReflections, Error> {
         let limits = self.device.limits();
         if limits.max_color_attachments < 3 || limits.max_color_attachment_bytes_per_sample < 32 {
             return Err(Error::InvalidInput(
                 "glass reflections require three colour attachments and 32 bytes per sample",
             ));
         }
-        let primary = self.view.primary.as_ref().unwrap();
-        let program = self.program_slot(primary.program);
+        let primary_program = self.view.primary.as_ref().unwrap().program;
+        let program = self.program_slot(primary_program);
         let key = key(&self.source_digest, &program.digest, program.layout.is_some());
+        // The pipeline for this primary program, built once and kept: a frame whose first
+        // opaque draw changes program switches pipelines without compiling (Glint rebuilt it
+        // 16 times in 30 s of play when only the frame's targets kept it).
+        let prepared = match self.transparency.reflection_pipelines.iter().find(|p| p.key == key) {
+            Some(prepared) => prepared.clone(),
+            None => {
+                let built = self.tp_reflection_pipeline(primary_program)?;
+                self.transparency.reflection_pipelines.retain(|p| p.program != primary_program);
+                self.transparency.reflection_pipelines.push(built.clone());
+                built
+            }
+        };
         let program_slots = self.ledger.own(
             self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("TP2 reflected hit program slots"),
@@ -189,10 +201,6 @@ impl Renderer {
             wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
             8,
         );
-        let prepared = match self.transparency.reflection_pipelines.iter().find(|p| p.key == key) {
-            Some(prepared) => prepared.clone(),
-            None => self.tp_reflection_pipeline(primary.program)?,
-        };
         Ok(GlassReflections {
             position,
             normal,
