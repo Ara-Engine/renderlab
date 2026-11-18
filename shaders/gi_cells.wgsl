@@ -154,6 +154,10 @@ const GI_F_ACCUMULATE:u32=16u;
 // update, and the history the slow mean keeps at most (updates).
 const GI_H_ACC_VISIBLE:u32=42u;
 const GI_H_ACC_OTHER:u32=36u;
+// Nonzero: accumulating cells share with their neighbours through the cell-space filter (G3):
+// an update blends into the cell's unfiltered mean (gi_raw), and the filter writes the hot words
+// readers see from the cell and its eight same-plane neighbours.
+const GI_H_ACC_SHARE:u32=37u;
 const GI_H_ACC_RAYS:u32=44u;
 const GI_H_ACC_HISTORY:u32=45u;
 // The frame's ray budget for updates (0: no cap).

@@ -150,6 +150,13 @@ fn gi_acc_bin_direction(b:u32, u:vec2<f32>) -> vec3<f32> {
 fn gi_acc_guide_pdf(local:vec3<f32>) -> f32 {
     return gi_wg_guide[gi_acc_bin(local)]/(gi_wg_guide_total*(6.283185307179586/f32(GI_ACC_BINS)));
 }
+// SH coefficient j of slot's stored value before its scale: the unfiltered source (gi_raw) when
+// accumulation shares, else the hot words (gi_half).
+fn gi_acc_half(slot:u32, j:u32, raw:bool) -> f32 {
+    if !raw { return gi_half(gi_hot(slot),j); }
+    let pair=unpack2x16float(gi_raw[gi_raw_at(slot,2u+(j>>1u))]);
+    return select(pair.x,pair.y,(j&1u)!=0u);
+}
 var<workgroup> gi_wg_acc:array<f32,27u*64u>;
 var<workgroup> gi_wg_acc_count:u32;
 @compute @workgroup_size(64) fn gi_accumulate(@builtin(workgroup_id) group:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>,@builtin(local_invocation_index) lane:u32) {
@@ -245,6 +252,8 @@ var<workgroup> gi_wg_acc_count:u32;
             let d=frame*local;
             gi_hit_spread=gi_header_f32(GI_H_HIT_SPREAD);
             let h=gi_closest(origin,d,0.0,1e20);
+            // What see-through surfaces before the hit (or the sky) pass (gi_rays_hardware.wgsl).
+            let through=gi_hit_transmission;
             var radiance=vec3<f32>(0.0);
             if !h.hit {
                 radiance=gi_sky_absolute(gi_sky(d));
@@ -281,6 +290,7 @@ var<workgroup> gi_wg_acc_count:u32;
                 let seen=gi_visible_within(origin,to/max(distance,1e-6),distance);
                 radiance=select(vec3<f32>(1000.0,0.0,0.0),vec3<f32>(0.0,1000.0,0.0),seen);
             }
+            radiance*=through;
             gi_sh_basis(d);
             // The balance heuristic over both strategies' counts (uniform alone: 2 pi / rays).
             var density=f32(plain)/6.283185307179586;
@@ -302,7 +312,11 @@ var<workgroup> gi_wg_acc_count:u32;
             workgroupBarrier();
         }
         if lane==0u {
-            let scale=bitcast<f32>(gi_table[hot+1u]);
+            // With sharing, the cell's own (unfiltered) mean is in gi_raw: the hot words hold the
+            // filter's neighbourhood mean, and blending into those would blur a little more each
+            // update.
+            let from_raw=gi_word(GI_H_ACC_SHARE)!=0u && gi_filter_on(GI_FILTER_SKY);
+            let scale=select(bitcast<f32>(gi_table[hot+1u]),bitcast<f32>(gi_raw[gi_raw_at(slot,1u)]),from_raw);
             var sample:array<vec3<f32>,9>;
             for(var i=0u;i<9u;i+=1u) {
                 sample[i]=vec3<f32>(gi_wg_acc[(i*3u)*64u],gi_wg_acc[(i*3u+1u)*64u],gi_wg_acc[(i*3u+2u)*64u]);
@@ -331,7 +345,7 @@ var<workgroup> gi_wg_acc_count:u32;
                 n=min(n+1u,u32(history));
             }
             for(var i=0u;i<9u;i+=1u) {
-                let old=vec3<f32>(gi_half(hot,3u*i),gi_half(hot,3u*i+1u),gi_half(hot,3u*i+2u))*scale;
+                let old=vec3<f32>(gi_acc_half(slot,3u*i,from_raw),gi_acc_half(slot,3u*i+1u,from_raw),gi_acc_half(slot,3u*i+2u,from_raw))*scale;
                 gi_cell_sh[i]=mix(old,sample[i],alpha);
             }
             gi_cell_sh[9]=vec3<f32>(0.0);

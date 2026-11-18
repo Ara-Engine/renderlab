@@ -319,6 +319,12 @@ fn still_batch_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_GI_STILL_BATCH").map_or(true, |v| v != "0"))
 }
+/// RENDERLAB_GI_ACC_SHARE (default 1): accumulating cells share with their neighbours through
+/// the cell-space filter (G3); 0: each cell shows its own mean.
+fn acc_share_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("RENDERLAB_GI_ACC_SHARE").map_or(true, |v| v != "0"))
+}
 /// Accumulation (docs/design-gi-accumulate.md, shaders/gi_accumulate.wgsl), default off:
 /// `RENDERLAB_GI_ACCUMULATE=1`. Its tuning, for measurement: `RENDERLAB_GI_ACC_VISIBLE` and
 /// `RENDERLAB_GI_ACC_OTHER` (update periods in frames, 4 and 64), `RENDERLAB_GI_ACC_RAYS` (rays an
@@ -1510,6 +1516,9 @@ impl Planner {
         if accumulate_on() {
             header[42] = accumulate_word("RENDERLAB_GI_ACC_VISIBLE", 4);
             header[36] = accumulate_word("RENDERLAB_GI_ACC_OTHER", 64);
+            // Accumulating cells share with their neighbours through the cell-space filter
+            // (gi_cells.wgsl GI_H_ACC_SHARE); 0 keeps each cell's own mean.
+            header[37] = u32::from(acc_share_on());
             header[44] = accumulate_word("RENDERLAB_GI_ACC_RAYS", 16);
             header[45] = accumulate_word("RENDERLAB_GI_ACC_HISTORY", 32);
             // The frame's rays (0: no cap), taken by cells without history, then visible cells
@@ -1592,6 +1601,9 @@ impl Planner {
         // Where cell shading writes each listed emitter triangle's mean emission in the outgoing
         // radiance: after the slots' values and the draws' probes (gi_cells.wgsl GI_H_EMITTER_MEANS).
         header[34] = c.slots + TRACED_DRAWS;
+        // RENDERLAB_GI_SEE_THROUGH=1: ray-hardware cache rays pass see-through placements by
+        // their transmission (gi_rays_hardware.wgsl); off until judged against the reference.
+        header[35] = u32::from(std::env::var("RENDERLAB_GI_SEE_THROUGH").as_deref() == Ok("1"));
         header[60] = EMITTERS_MAX;
         // The cache's own gathers sample the list (and subtract emission at hits) only with
         // RENDERLAB_GI_EMITTERS=1; readers outside the cache use it either way.
@@ -3521,8 +3533,9 @@ impl Renderer {
             .device
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        // Ray hardware also binds the see-through table at 40 (gi_rays_hardware.wgsl).
         let hardware = if rt {
-            [&common[..], &[tlas]].concat()
+            [&common[..], &[tlas, storage(40, true)]].concat()
         } else {
             software.clone()
         };
@@ -4421,6 +4434,16 @@ impl Renderer {
                     self.hardware_shadows.as_ref().unwrap().scene(),
                 ),
             });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 40,
+                resource: self
+                    .hardware_shadows
+                    .as_ref()
+                    .unwrap()
+                    .see_through_table()
+                    .unwrap_or(&*self.gi.dummy)
+                    .as_entire_binding(),
+            });
         }
         let main = self.ledger.own(
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -4727,7 +4750,7 @@ impl GiState {
         }
         // The cell-space filter (G3), once every value of the frame is written and before cell
         // shading reads them.
-        if (plan.filter || profiling) && !accumulate {
+        if (plan.filter || profiling) && (!accumulate || acc_share_on()) {
             let grid = plan.filter.then_some([FILTER_GROUPS, 1]);
             main_pass(
                 encoder,
