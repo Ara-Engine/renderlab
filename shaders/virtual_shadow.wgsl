@@ -582,6 +582,11 @@ override VSM_FRACTION:bool=false;
 // Samples a texel (virtual_shadow_gpu.rs `fraction_samples`): the hardware raster's attachment
 // count, 8 where the device takes it, else 4, with that count's standard positions.
 override VSM_SAMPLES:u32=8u;
+// Measurement screens of the multisampled raster's cost (`RENDERLAB_VSM=NAME=value`): the peel
+// pass's sample bits (VSM_FR_BITS), and the fragment's own work (VSM_FR_SIMPLE: the 1x writes
+// only, on the same multisampled raster).
+override VSM_FR_BITS:bool=true;
+override VSM_FR_SIMPLE:bool=false;
 @group(0) @binding(65) var<storage,read_write> vsm_cover:array<atomic<u32>>;
 // Sample k's offset from the texel centre, in sixteenths of a texel (the D3D 8x pattern).
 fn vsm_sample(k:u32)->vec2<f32> {
@@ -659,7 +664,7 @@ fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,
         if any(w<vec3<f32>(0.0)) {continue;}
         if dot(w,z)/area>=lowest {bits|=1u<<k;}
     }
-    if bits!=0u {atomicOr(&vsm_cover[i>>2u],bits<<((i&3u)*8u));}
+    if VSM_FR_BITS && bits!=0u {atomicOr(&vsm_cover[i>>2u],bits<<((i&3u)*8u));}
 }
 // The hardware raster's fragment under VSM_FRACTION: `mask` is the samples of texel t the
 // rasterizer found inside the triangle (a, b, c in texels, heights z), so only the plane is
@@ -670,6 +675,11 @@ fn vsm_fraction_samples(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32
     let area=vsm_cross(a,b,c);
     if area==0.0 || mask==0u {return;}
     let centre=vec2<f32>(t)+vec2<f32>(0.5);
+    if VSM_FR_SIMPLE {
+        let w=vec3<f32>(vsm_cross(b,c,centre),vsm_cross(c,a,centre),vsm_cross(a,b,centre))/area;
+        if all(w>=vec3<f32>(0.0)) {vsm_write(level,t,dot(w,z),id);}
+        return;
+    }
     let e1=b-a;let e2=c-a;
     let g=vec2<f32>((z.y-z.x)*e2.y-(z.z-z.x)*e1.y,(z.z-z.x)*e1.x-(z.y-z.x)*e2.x)/area;
     let zlo=min(min(z.x,z.y),z.z);let zhi=max(max(z.x,z.y),z.z);
@@ -693,7 +703,7 @@ fn vsm_fraction_samples(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32
         m&=m-1u;
         if clamp(z.x+dot(g,centre+vsm_sample(k)-a),zlo,zhi)>=lowest {bits|=1u<<k;}
     }
-    if bits!=0u {atomicOr(&vsm_cover[i>>2u],bits<<((i&3u)*8u));}
+    if VSM_FR_BITS && bits!=0u {atomicOr(&vsm_cover[i>>2u],bits<<((i&3u)*8u));}
 }
 // Placement + 1 and primitive, so the lookup can recognize the receiver's own 1-ring.
 fn vsm_cluster_id(c:VsmCluster,batch:u32,local:u32)->u32 {

@@ -961,7 +961,7 @@ pub(super) fn shader_source() -> String {
     #[cfg(not(test))]
     let variant: Option<String> = None;
     // P-RELIT: the restart-zone tests over VsmFrame's copy (vsm_prepare's batches).
-    format!(
+    let source = format!(
         "enable wgpu_binding_array;\nconst PRIMARY_BATCHES:u32={}u;\n{}\n{}",
         crate::TRACED_DRAWS,
         variant
@@ -973,7 +973,23 @@ pub(super) fn shader_source() -> String {
         "override VSM_FRACTION:bool=false;",
         &format!("override VSM_FRACTION:bool={};", fraction_on()),
         1,
-    )
+    );
+    // Measurement: `RENDERLAB_VSM=NAME=value,...` sets the page module's overrides.
+    let mut source: String = source;
+    for (name, value) in std::env::var("RENDERLAB_VSM")
+        .iter()
+        .flat_map(|list| list.split(','))
+        .filter_map(|item| item.split_once('='))
+    {
+        let declaration = format!("override {name}:");
+        let Some(at) = source.find(&declaration) else {
+            panic!("RENDERLAB_VSM: no override named {name}");
+        };
+        let equals = at + source[at..].find('=').unwrap() + 1;
+        let end = equals + source[equals..].find(';').unwrap();
+        source.replace_range(equals..end, value);
+    }
+    source
 }
 /// The covered fraction (`RENDERLAB_VSM_FRACTION=1`, off by default): the page raster samples
 /// each texel at eight positions and marks the near layer's covered samples in a byte plane
@@ -986,8 +1002,12 @@ fn fraction_on() -> bool {
 /// multisampled attachment of this count and reads each fragment's sample mask. 8 where the device
 /// takes more than 4 samples (TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES), else 4; 1 when off.
 fn fraction_samples(device: &wgpu::Device) -> u32 {
+    // Measurement: `RENDERLAB_VSM_FRACTION_SAMPLES=4` takes the 4x attachment on any device.
+    let forced = std::env::var("RENDERLAB_VSM_FRACTION_SAMPLES").ok().and_then(|v| v.trim().parse().ok());
     if !fraction_on() {
         1
+    } else if let Some(samples) = forced {
+        samples
     } else if device.features().contains(wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES) {
         8
     } else {
