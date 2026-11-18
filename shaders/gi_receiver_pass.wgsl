@@ -264,13 +264,9 @@ fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     let hit=primary_decode(traced.record);
     let emission=gi_triangle_emission(hit.batch,hit.placement,traced.record.y);
     if all(emission<=vec3<f32>(0.0)) {return rl_finite(cell.rgb);}
-    let a=primary_input(hit.batch,hit.ia,hit.placement);
-    let b=primary_input(hit.batch,hit.ib,hit.placement);
-    let c=primary_input(hit.batch,hit.ic,hit.placement);
-    let n=unit_normal(primary_geometric(a.position,b.position,c.position,hit.placement));
-    let light=fg_light_pdf(fg_luminance(emission),traced.t,abs(dot(n,d)));
+    let light=fg_light_pdf(fg_luminance(emission),traced.t,abs(dot(unit_normal(rl_cache_geometric),d)));
     let reflected=max(cell.rgb-emission,vec3<f32>(0.0));
-    return rl_finite(reflected+emission*fg_mis(FG_HEMISPHERE_PDF*f32(FG_RAYS),light*f32(FG_NEE)));
+    return rl_finite(reflected+emission*fg_mis(FG_HEMISPHERE_PDF*f32(FG_HEMI),light*f32(FG_NEE)));
 }
 // Probe rays are uniform over the hemisphere: their density in solid angle.
 const FG_HEMISPHERE_PDF:f32=0.15915494309189535;
@@ -329,43 +325,52 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     var radiance=vec3<f32>(0.0);
     var d=vec3<f32>(0.0,0.0,1.0);
     fg_hit=false;
+    var answered=false;
+    for(var i=0u;i<40u;i+=1u) {fg_lane_sh[lane][i]=0.0;}
+    for(var i=0u;i<12u;i+=1u) {fg_nee_sh[lane][i]=0.0;}
     if s.placement!=0u {
-        d=fg_direction(s.normal,ray,FG_RAYS,r);
-        radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
-        atomicAdd(&fg_rays[0],1u);
-        if fg_hit && fg_unanswered && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
+        if ray<FG_NEE {
+            // An emitter sample takes this lane's one ray (fg_nee).
+            fg_nee(lane,ray,s,r);
+        } else {
+            d=fg_direction(s.normal,ray-FG_NEE,FG_HEMI,r);
+            radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
+            atomicAdd(&fg_rays[0],1u);
+            if fg_hit && fg_unanswered && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
+            // A hit no cache level answers yet is left out of the probe's average (fg_accumulate
+            // counts the answered rays in the pad float FG_ANSWERED): counted as black, it
+            // darkened probes after a cut until the cells it asked for were shaded.
+            answered=!(fg_hit && fg_unanswered);
+        }
     }
-    // A hit no cache level answers yet is left out of the probe's average (fg_accumulate counts
-    // the answered rays in the pad float FG_ANSWERED): counted as black, it darkened probes after
-    // a cut until the cells it asked for were shaded.
-    let answered=s.placement!=0u && !(fg_hit && fg_unanswered);
-    if !answered {radiance=vec3<f32>(0.0);}
+    if !answered {return;}
     gi_sh_basis(d);
     let sky=select(radiance,vec3<f32>(0.0),fg_hit);
     let bounce=select(vec3<f32>(0.0),radiance,fg_hit);
-    for(var i=0u;i<40u;i+=1u) {fg_lane_sh[lane][i]=0.0;}
-    for(var i=0u;i<12u;i+=1u) {fg_nee_sh[lane][i]=0.0;}
-    fg_lane_sh[lane][FG_ANSWERED]=select(0.0,1.0,answered);
+    fg_lane_sh[lane][FG_ANSWERED]=1.0;
     for(var i=0u;i<9u;i+=1u) {
         fg_lane_sh[lane][i*3u]=sky.x*gi_y[i];fg_lane_sh[lane][i*3u+1u]=sky.y*gi_y[i];fg_lane_sh[lane][i*3u+2u]=sky.z*gi_y[i];
     }
     for(var k=0u;k<4u;k+=1u) {
         fg_lane_sh[lane][FG_BOUNCE+k*3u]=bounce.x*gi_y[k];fg_lane_sh[lane][FG_BOUNCE+k*3u+1u]=bounce.y*gi_y[k];fg_lane_sh[lane][FG_BOUNCE+k*3u+2u]=bounce.z*gi_y[k];
     }
-    if s.placement!=0u && ray<FG_NEE {fg_nee(lane,ray,s,r);}
 }
 // Emitters as lights (next-event estimation from the lighting cache's emitter list,
 // gi_emitters.wgsl, the list the cache's own gathers sample), combined with the probe's own rays
 // by multiple importance sampling: lanes 0 .. FG_NEE of a probe each pick one emitter triangle in
 // proportion to its power (gi_emitter_pick, the list's power CDF) and a point of it, and where
 // one ray to it is unblocked add its radiance in that direction weighted by the power heuristic
-// against the probe's 16 hemisphere rays; a hemisphere ray that meets an emitter takes the
+// against the probe's FG_HEMI hemisphere rays; a hemisphere ray that meets an emitter takes the
 // complementary weight (fg_radiance). Small bright emitters (lamps, Glint's orange rims) then
 // come mostly from the samples, and large dim ones (Glint's glowing white surfaces, nearly all
 // the list's power) mostly from the rays: picked by power alone, a probe's nearby white floor was
 // almost never sampled, and its rare picks' large weights did not survive TR1. Divided by
-// fg_accumulate's per-ray scale, so the sums come out exact.
+// fg_accumulate's per-ray scale, so the sums come out exact. The samples take FG_NEE of a probe's
+// FG_RAYS lanes, each tracing its one ray alongside the FG_HEMI hemisphere rays: traced after
+// them on the same lanes, they doubled the warp's traversal rounds (fg_trace +0.53 ms without
+// ray hardware on Glint).
 const FG_NEE:u32=2u;
+const FG_HEMI:u32=FG_RAYS-FG_NEE;
 fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
     let h=fg_hash(r^((ray+1u)*0x9e3779b9u));
     let pick=gi_emitter_pick(f32(h>>8u)*(1.0/16777216.0));
@@ -390,8 +395,8 @@ fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
     let traced=rl_cast(origin,d,s.epsilon);
     atomicAdd(&fg_rays[1],1u);
     if traced.record.x!=0u && traced.t<dist*0.999 {return;}
-    let weight=fg_mis(density*f32(FG_NEE),FG_HEMISPHERE_PDF*f32(FG_RAYS));
-    let light=gi_emitter_vec(w+9u)*(weight*FG_HEMISPHERE_PDF*f32(FG_RAYS)/(density*f32(FG_NEE)));
+    let weight=fg_mis(density*f32(FG_NEE),FG_HEMISPHERE_PDF*f32(FG_HEMI));
+    let light=gi_emitter_vec(w+9u)*(weight*FG_HEMISPHERE_PDF*f32(FG_HEMI)/(density*f32(FG_NEE)));
     gi_sh_basis(d);
     for(var k=0u;k<4u;k+=1u) {
         fg_nee_sh[lane][k*3u]+=light.x*gi_y[k];
@@ -413,7 +418,7 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     let scale=6.283185307179586/max(sh[FG_ANSWERED],1.0);
     sh[FG_ANSWERED]=0.0;
     for(var i=0u;i<40u;i+=1u) {sh[i]*=scale;}
-    for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]+=nee[i]*(6.283185307179586/f32(FG_RAYS));}
+    for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]+=nee[i]*(6.283185307179586/f32(FG_HEMI));}
     let footprint=fg_footprint(pixel,size,s.world);
     let old=fg_load(index,size);
     var count=1.0;
