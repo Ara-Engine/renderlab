@@ -783,6 +783,12 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     // would block (vd_keep).
     if VD_FRACTION && stride==1 {
         let k=top.y&7u;
+        // Measurement (VD_COUNTS, the edge log's words 5-7): columns of a level's own texel read,
+        // the partly covered ones, and those the fraction thins (a non-empty mask).
+        if VD_COUNTS {
+            atomicAdd(&vd_edge_count[5],1u);
+            if k!=0u {atomicAdd(&vd_edge_count[6],1u);if any(m!=vec2<u32>(0u)) {atomicAdd(&vd_edge_count[7],1u);}}
+        }
         if k!=0u {m&=vd_keep(8u*k,vd_hash(i));}
     }
     // Straight outlines: only a column that adds samples without covering the disk reads its

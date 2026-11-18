@@ -2511,7 +2511,7 @@ impl Renderer {
                     .create(true)
                     .append(true)
                     .open(path)
-                    .and_then(|mut f| writeln!(f, "{} {} {} {}", word(0), word(1), word(2), word(3)));
+                    .and_then(|mut f| writeln!(f, "{} {} {} {} fraction columns {} partial {} thinned {}", word(0), word(1), word(2), word(3), word(5), word(6), word(7)));
             }
         }
         // The newest mark-pass counters mapped since the last frame (the ladder's finest level
