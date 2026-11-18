@@ -50,8 +50,8 @@ struct VsmFrame {
 // clip, previous: this and the previous frame's world-to-clip matrices (the receivers' own,
 // jitter included).
 // reuse (virtual_shadow_gpu.rs `reuse_on`): x 2 when nothing that sets an answer changed since
-// the last frame, 1 when only the camera and the moving casters did, 0 no reuse; z the history
-// half this frame writes.
+// the last frame, 1 when only the camera and the moving casters did, 0 no reuse; y the mark
+// generation (vd_marked); z the history half this frame writes; w 1 while the page requests hold.
 // tops: per moved rectangle (vsm.rects), its casters' highest light-space height (4 a vec4).
 // size: the image size in pixels (xy); z: TR1's frame number plus one on reconstructed frames
 // (the receiver jitter's sequence index), 0 otherwise; w: TR1's frames of history.
@@ -209,6 +209,12 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
     let size=textureDimensions(vsm_world);
     // A workgroup is one trace tile; an uncovered one never had hit records written.
     if textureLoad(vsm_tiles,group.xy,0).x==0u {return;}
+    // Held requests (vd.reuse.w; virtual_shadow_gpu.rs `requests_held`): a tile marked since the
+    // last full mark (generation vd.reuse.y) keeps its levels and requests. One covered now and
+    // not then marks now: its pixels' levels were written under another ladder, or never, and a
+    // level past the ladder's end walked the lookup's bands for ever (the Showcase stall).
+    let tile=group.y*textureDimensions(vsm_tiles).x+group.x;
+    if vd.reuse.w!=0u && vd_marked[tile]==vd.reuse.y {return;}
     let inside=all(id.xy<size);
     var level=VSM_NONE;
     if inside && textureLoad(vsm_hit,vec2<i32>(id.xy),0).x!=0u {
@@ -257,8 +263,11 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
         if seen!=0u {atomicAdd(&vsm_reach[1],seen);}
         let none=atomicLoad(&vd_reach[2]);
         if none!=0u {atomicAdd(&vsm_reach[2],none);atomicMax(&vsm_reach[3],atomicLoad(&vd_reach[3]));}
+        vd_marked[tile]=vd.reuse.y;
     }
 }
+// Per trace tile, the mark generation that last wrote its pixels' levels (vd_mark).
+@group(0) @binding(67) var<storage,read_write> vd_marked:array<u32>;
 
 // ---- Lookup ----
 @group(0) @binding(10) var vsm_normal:texture_2d<f32>;
@@ -440,6 +449,9 @@ fn vd_prepare(id:vec2<u32>) {
     vd_px.thin=normal.w<0.0;
     vd_px.jitter=vec2<f32>(0.0);
     vd_px.level=textureLoad(vsm_level_in,p,0).x;
+    // A level past the ladder's end (written under a longer one) is no level: the band walk
+    // counts down from the last level to this one.
+    if vd_px.level!=VSM_NONE && vd_px.level>=vsm.counts.x {vd_px.level=VSM_NONE;}
     vd_px.world=world.xyz;
     // shadow_origin (scene.wgsl): opaque receivers stay on the viewed side; thin ones move
     // toward the light.
