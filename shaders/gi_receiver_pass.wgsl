@@ -248,24 +248,14 @@ fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
 // terrain and Ara's materials have their own programs) with the cell's indirect and direct
 // light. The gather's module holds only the standard program, so shading the hit itself lost
 // all of that: a probe hit on Glint's white surfaces came out without their glow, a tenth dark
-// in sky-lit shadow. The ray's footprint is taken as at least the cell where it lands; a cell
-// without a value (absent, not yet shaded) gives way to the coarser levels above it, and a hit
-// no level answers sends nothing. Movers read their cells too: those lag the surface by a frame
-// or so, which a probe's hemisphere integral does not show.
+// in sky-lit shadow. rl_cache_cell takes the ray's footprint as at least the cell where it
+// lands and walks to coarser levels past cells without a value; a hit no level answers (or
+// any hit while RENDERLAB_RL_CACHE_HITS=off leaves the stub in) sends nothing.
 fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     let traced=rl_cast(origin,d,epsilon);
     fg_hit=traced.record.x!=0u;
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)/max(lighting.exposure,1e-30);}
-    let at=fma(d,vec3<f32>(traced.t),origin);
-    let last=gi_word(GI_H_LEVELS)-1u;
-    let covered=u32(ceil(log2(max(FG_CONE*traced.t,1e-6)/gi_header_f32(GI_H_MIN_EDGE))));
-    for(var l=max(gi_level(at),min(covered,last));l<=last;l+=1u) {
-        let slot=rl_cache_slot(traced.record,origin,d,traced.t,gi_edge(l));
-        if slot==0xffffffffu {continue;}
-        let o=rl_cache_outgoing[slot];
-        if o.w>0.0 {return rl_finite(o.rgb);}
-    }
-    return vec3<f32>(0.0);
+    return rl_finite(rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t).rgb);
 }
 // Whether the last fg_radiance ray met geometry (bounce) or missed into the sky.
 var<private> fg_hit:bool;
