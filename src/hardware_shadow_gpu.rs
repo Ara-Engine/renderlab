@@ -16,6 +16,12 @@ pub(crate) struct MeshAcceleration {
     vertex: Arc<Owned<wgpu::Buffer>>,
     index: Arc<Owned<wgpu::Buffer>>,
     _receiver_adjacency: Option<Allocation>,
+    /// The same triangles with non-opaque geometry, made the first time the mesh is drawn
+    /// see-through: a ray that culls with SEE_THROUGH_MASK gets its triangles as candidates to
+    /// pass by their transmission, while every opaque BLAS still commits in hardware.
+    clear: Mutex<Option<Arc<BlasAllocation>>>,
+    /// `size` with non-opaque geometry, for building `clear`.
+    size_clear: wgpu::BlasTriangleGeometrySizeDescriptor,
 }
 /// A TLAS retains the exact BLAS generation it was built against. Compaction may
 /// publish a replacement while earlier submissions still reference the original.
@@ -109,6 +115,8 @@ pub(super) struct HardwareState {
     last_keys: Option<(Vec<DrawKey>, bool)>,
     /// The see-through table (SEE_THROUGH_HEADER_WORDS), written when its words change.
     see_through: Option<(Owned<wgpu::Buffer>, Vec<u32>)>,
+    /// Non-opaque BLASes made this frame, built with the TLAS (`encode_scene`).
+    pending_clear: Mutex<Vec<(Arc<MeshAcceleration>, Arc<BlasAllocation>)>>,
 }
 
 /// A draw's identity for the TLAS: its mesh, that mesh's current BLAS generation, the
@@ -218,6 +226,7 @@ impl HardwareState {
             stats: HardwareShadowStats::default(),
             last_keys: None,
             see_through: None,
+            pending_clear: Mutex::new(Vec::new()),
         }
     }
     fn label(&mut self, kind: &str) -> String {
@@ -296,6 +305,7 @@ impl HardwareState {
             index_count: Some(index_count),
             flags: wgpu::AccelerationStructureGeometryFlags::OPAQUE,
         };
+        let size_for_clear = size.clone();
         let label = self.label("BLAS");
         let blas = ledger.own(
             device.create_blas(
@@ -337,7 +347,45 @@ impl HardwareState {
             index: index.clone(),
             _receiver_adjacency: (adjacency_bytes != 0)
                 .then(|| ledger.allocate(AllocationKind::Shadow, adjacency_bytes)),
+            clear: Mutex::new(None),
+            size_clear: wgpu::BlasTriangleGeometrySizeDescriptor {
+                flags: wgpu::AccelerationStructureGeometryFlags::empty(),
+                ..size_for_clear
+            },
         })
+    }
+    /// `mesh`'s non-opaque BLAS (`MeshAcceleration::clear`), made on first use and queued for
+    /// building with the next TLAS (`encode_scene`). Skinned meshes have none (None).
+    fn clear_blas(&mut self, device: &wgpu::Device, ledger: &Ledger, mesh: &Arc<MeshAcceleration>) -> Option<Arc<BlasAllocation>> {
+        if mesh.dynamic {
+            return None;
+        }
+        let mut slot = mesh.clear.lock().unwrap();
+        if let Some(blas) = &*slot {
+            return Some(blas.clone());
+        }
+        let size = mesh.size_clear.clone();
+        let label = self.label("see-through BLAS");
+        let blas = ledger.own(
+            device.create_blas(
+                &wgpu::CreateBlasDescriptor {
+                    label: Some(&label),
+                    flags: self.flags,
+                    update_mode: wgpu::AccelerationStructureUpdateMode::Build,
+                },
+                wgpu::BlasGeometrySizeDescriptors::Triangles { descriptors: vec![size] },
+            ),
+            ResourceKind::Blas,
+        );
+        let estimate = mesh_estimate(u64::from(mesh.size.index_count.unwrap()) / 3).unwrap().0;
+        let blas = Arc::new(BlasAllocation {
+            blas,
+            _estimated: ledger.allocate(AllocationKind::HardwareAsEstimate, estimate),
+            _observed: self.observed(device, ledger, &label),
+        });
+        *slot = Some(blas.clone());
+        self.pending_clear.lock().unwrap().push((mesh.clone(), blas.clone()));
+        Some(blas)
     }
     pub fn mesh_submitted(
         &mut self,
@@ -404,7 +452,7 @@ impl HardwareState {
             }
             // A see-through draw without an acceleration structure is left out (and out of the
             // see-through table, `write_see_through`): it then passes light as before.
-            if clear && draw.mesh.acceleration.is_none() {
+            if clear && draw.mesh.acceleration.as_ref().is_none_or(|m| m.dynamic) {
                 continue;
             }
             let mesh = draw.mesh.acceleration.as_ref().ok_or(Error::InvalidInput(
@@ -423,7 +471,11 @@ impl HardwareState {
                     0
                 };
                 placements.push(Placement {
-                    blas: mesh.blas.lock().unwrap().clone(),
+                    blas: if clear {
+                        mesh.clear.lock().unwrap().clone().expect("see-through BLAS made before placements")
+                    } else {
+                        mesh.blas.lock().unwrap().clone()
+                    },
                     mesh: mesh.clone(),
                     model: model.to_cols_array().map(f32::to_bits),
                     mask: if clear { MASK_SEE_THROUGH } else { MASK_VISIBLE | shadow },
@@ -480,6 +532,11 @@ impl HardwareState {
     ) -> Result<bool, Error> {
         let (device, _) = gpu;
         self.write_see_through(gpu, ledger, draws, see_through);
+        for draw in see_through {
+            if let Some(mesh) = &draw.mesh.acceleration {
+                self.clear_blas(device, ledger, mesh);
+            }
+        }
         // frame-cpu: an unchanged draw list keeps the active TLAS's placements. Compaction
         // still advances per mesh first, so a compacted BLAS changes the key.
         let keys = if tlas_keys() && self.active.is_some() {
@@ -674,7 +731,7 @@ impl HardwareState {
     ) {
         let (device, queue) = gpu;
         let first: usize = draws.iter().map(|d| d.instances.len()).sum();
-        let listed = || see_through.iter().filter(|d| d.mesh.acceleration.is_some());
+        let listed = || see_through.iter().filter(|d| d.mesh.acceleration.as_ref().is_some_and(|m| !m.dynamic));
         let count: usize = listed().map(|d| d.instances.len()).sum();
         let mut words = vec![first as u32, count as u32, 0, 0];
         for draw in listed() {
@@ -722,8 +779,26 @@ impl HardwareState {
         self.see_through.as_ref().map(|(b, _)| &**b)
     }
     pub fn encode_scene(&self, encoder: &mut wgpu::CommandEncoder) {
+        // This frame's new non-opaque BLASes first, in the same build as the TLAS that uses them.
+        let pending = std::mem::take(&mut *self.pending_clear.lock().unwrap());
+        let entries: Vec<_> = pending
+            .iter()
+            .map(|(mesh, blas)| wgpu::BlasBuildEntry {
+                blas: &blas.blas,
+                geometry: wgpu::BlasGeometries::TriangleGeometries(vec![wgpu::BlasTriangleGeometry {
+                    size: &mesh.size_clear,
+                    vertex_buffer: &mesh.vertex,
+                    first_vertex: 0,
+                    vertex_stride: 48,
+                    index_buffer: Some(&mesh.index),
+                    first_index: Some(0),
+                    transform_buffer: None,
+                    transform_buffer_offset: None,
+                }]),
+            })
+            .collect();
         encoder.build_acceleration_structures(
-            std::iter::empty::<&wgpu::BlasBuildEntry<'_>>(),
+            entries.iter(),
             [&*self.active.as_ref().unwrap().tlas],
         );
     }

@@ -229,7 +229,12 @@ fn gi_traverse(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32, any_hi
     }
     return best;
 }
+// The share of light the last gi_closest's ray kept through see-through surfaces before its hit:
+// always 1 on software rays until their structure carries see-through instances
+// (docs/design-see-through-occlusion.md, step 6).
+var<private> gi_hit_transmission:vec3<f32>;
 fn gi_closest(origin:vec3<f32>, direction:vec3<f32>, tmin:f32, tmax:f32) -> GiHit {
+    gi_hit_transmission=vec3<f32>(1.0);
     return gi_traverse(origin,direction,tmin,tmax,false);
 }
 // Sky visibility along an unbounded ray: any hit blocks it.

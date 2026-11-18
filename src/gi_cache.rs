@@ -1521,6 +1521,11 @@ impl Planner {
         // Where cell shading writes each listed emitter triangle's mean emission in the outgoing
         // radiance: after the slots' values and the draws' probes (gi_cells.wgsl GI_H_EMITTER_MEANS).
         header[34] = c.slots + TRACED_DRAWS;
+        // Ray-hardware cache rays pass see-through placements by their transmission
+        // (gi_rays_hardware.wgsl; docs/design-see-through-occlusion.md). RENDERLAB_GI_SEE_THROUGH=0
+        // passes them at full strength, as before. Software rays pass them at full strength
+        // until the cache traces the reflection BVH4.
+        header[35] = u32::from(std::env::var("RENDERLAB_GI_SEE_THROUGH").as_deref() != Ok("0"));
         header[60] = EMITTERS_MAX;
         // The cache's own gathers sample the list (and subtract emission at hits) only with
         // RENDERLAB_GI_EMITTERS=1; readers outside the cache use it either way.
@@ -3468,8 +3473,9 @@ impl Renderer {
             .device
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
+        // Ray hardware also binds the see-through table at 40 (gi_rays_hardware.wgsl).
         let hardware = if rt {
-            [&common[..], &[tlas]].concat()
+            [&common[..], &[tlas, storage(40, true)]].concat()
         } else {
             software.clone()
         };
@@ -4367,6 +4373,16 @@ impl Renderer {
                 resource: wgpu::BindingResource::AccelerationStructure(
                     self.hardware_shadows.as_ref().unwrap().scene(),
                 ),
+            });
+            entries.push(wgpu::BindGroupEntry {
+                binding: 40,
+                resource: self
+                    .hardware_shadows
+                    .as_ref()
+                    .unwrap()
+                    .see_through_table()
+                    .unwrap_or(&*self.gi.dummy)
+                    .as_entire_binding(),
             });
         }
         let main = self.ledger.own(
