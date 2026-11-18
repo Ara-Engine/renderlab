@@ -85,9 +85,8 @@ fn gi_rx_store_at(at:u32) {
 // - fg_trace: screen probes, FG_SLOTS per FG_TILE x FG_TILE tile on the surfaces under covered
 //   pixels the frame picks (slot 1 on a second plane where the tile holds one), each trace
 //   FG_RAYS rays over their hemisphere (hardware rays or the software trace: the module's
-//   rl_cast). A hit whose ray cone covers its cache cell takes the cell's outgoing radiance;
-//   nearer hits shade with the program (the cache read at the hit) and their own direct light.
-//   Cells reach the screen only through a hemisphere integral; misses see the sky.
+//   rl_cast). A hit takes its cache cell's outgoing radiance (fg_radiance); cells reach the
+//   screen only through a hemisphere integral. Misses see the sky.
 // - fg_filter: each tile probe's filtered copy, the probes around it on its plane weighted by
 //   their frames of history (3x3 tiles, 5x5 while its own history is short, as after a cut):
 //   neighbours' samples count as its own, so the interpolated light shows no probe pattern.
@@ -107,16 +106,20 @@ const FG_SLOTS:u32=2u;
 const FG_BLOCK:u32=8u;
 const FG_RAYS:u32=16u;
 const FG_HISTORY:f32=16.0;
-// Half-rate tracing (fg_trace) for probes with at least FG_HALF_MIN frames of history.
+// Half-rate tracing (fg_trace and fg_adapt) for probes with at least FG_HALF_MIN frames of history.
 const FG_HALF_RATE:bool=true;
 const FG_HALF_MIN:f32=4.0;
 // A probe ray's cone: its share of the hemisphere (2 pi / FG_RAYS sr) as an angle, so its
 // width at distance t is FG_CONE * t (the cache answers hits whose cone covers a cell).
 const FG_CONE:f32=0.6266570686577501;
-// The sky a probe ray misses into, prefiltered to the ray's cone (GGX alpha of a lobe half as
-// wide as FG_CONE): a sample of the sky in that direction, not the whole hemisphere's blur,
-// which mixed the horizon into the zenith and greyed sky-lit shadow.
-const FG_SKY_ALPHA:f32=0.09817477042468103;
+// The sky a probe ray misses into: the map's own radiance in that direction (its base level).
+// The probe's rays and history average it over the hemisphere. A lookup prefiltered to the ray's
+// cone (GGX alpha 0.098) blurred the bright haze below the horizon into the directions above it:
+// with every ray forced to miss, probes integrated 10.3% more than the open sky's irradiance
+// (gi_open_irradiance) on Glint's floor, the sky part of the gather's overshoot in sky-lit shadow.
+// At alpha 0 they integrate it within 0.01%. The whole hemisphere's blur, before that, had mixed
+// the horizon into the zenith and greyed sky-lit shadow.
+const FG_SKY_ALPHA:f32=0.0;
 const FG_SEARCH:i32=2;
 // A probe's plane reaches this fraction of its footprint along its normal (the Gaussian width).
 const FG_PLANE:f32=0.5;
@@ -180,8 +183,11 @@ fn fg_invalidate(index:u32,size:vec2<u32>) {
     gi_prepared[at]=GiPrepared(gi_prepared[at].r0,vec4<u32>(0u),vec4<u32>(0u));
 }
 // Per lane: its ray's terms in the probe's layout (sky L2 at 0-26 for a miss, bounce L1 at
-// FG_BOUNCE for a hit).
+// FG_BOUNCE for a hit, and 1 at FG_ANSWERED, the layout's pad, when the ray counts), and its
+// emitter sample's bounce L1 terms (fg_nee).
 var<workgroup> fg_lane_sh:array<array<f32,40>,32>;
+var<workgroup> fg_nee_sh:array<array<f32,12>,32>;
+const FG_ANSWERED:u32=27u;
 
 fn fg_hash(x:u32)->u32 {
     var h=x*0x9e3779b1u;h^=h>>16u;h*=0x85ebca6bu;h^=h>>13u;h*=0xc2b2ae35u;h^=h>>16u;return h;
@@ -248,31 +254,104 @@ fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
 // terrain and Ara's materials have their own programs) with the cell's indirect and direct
 // light. The gather's module holds only the standard program, so shading the hit itself lost
 // all of that: a probe hit on Glint's white surfaces came out without their glow, a tenth dark
-// in sky-lit shadow. rl_cache_cell takes the ray's footprint as at least the cell where it
-// lands and walks to coarser levels past cells without a value; a hit no level answers (or
-// any hit while RENDERLAB_RL_CACHE_HITS=off leaves the stub in) sends nothing.
+// in sky-lit shadow. rl_cache_cell picks the cell (reflection_cache_hits.wgsl); a hit no level
+// answers (or any hit while RENDERLAB_RL_CACHE_HITS=off leaves the stub in) sends nothing.
 fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     let traced=rl_cast(origin,d,epsilon);
     fg_hit=traced.record.x!=0u;
+    fg_unanswered=false;
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)/max(lighting.exposure,1e-30);}
-    return rl_finite(rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t).rgb);
+    let cell=rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t);
+    fg_unanswered=cell.w==0.0;
+    // A ray that meets an emitting draw keeps its cell's reflected light and its emission weighted
+    // against the probe's emitter samples (fg_nee, multiple importance sampling).
+    let hit=primary_decode(traced.record);
+    let emission=gi_triangle_emission(hit.batch,hit.placement,traced.record.y);
+    if all(emission<=vec3<f32>(0.0)) {return rl_finite(cell.rgb);}
+    let light=fg_light_pdf(fg_luminance(emission),traced.t,abs(dot(unit_normal(rl_cache_geometric),d)));
+    let reflected=max(cell.rgb-emission,vec3<f32>(0.0));
+    return rl_finite(reflected+emission*fg_mis(FG_HEMISPHERE_PDF*f32(FG_HEMI),light*f32(FG_NEE)));
 }
-// Whether the last fg_radiance ray met geometry (bounce) or missed into the sky.
+// Probe rays are uniform over the hemisphere: their density in solid angle.
+const FG_HEMISPHERE_PDF:f32=0.15915494309189535;
+fn fg_luminance(c:vec3<f32>)->f32 { return dot(c,vec3<f32>(0.2126,0.7152,0.0722)); }
+// The density (per steradian) with which fg_nee's emitter sampling picks a direction meeting an
+// emitter of luminance `luminance`, `t` away, whose surface makes cosine `cosine` with the ray:
+// the list picks a triangle in proportion to its power (luminance pi area over the total) and a
+// point of it uniformly, so the area cancels. 0 when the list is empty.
+fn fg_light_pdf(luminance:f32,t:f32,cosine:f32)->f32 {
+    let n=gi_word(GI_H_EMITTER_COUNT);
+    if n==0u {return 0.0;}
+    let total=bitcast<f32>(gi_word(gi_emitter_cdf_at()+n-1u));
+    if !(total>0.0) {return 0.0;}
+    return luminance*3.141592653589793*t*t/(total*max(cosine,1e-4));
+}
+// The power heuristic's weight for a sample from the strategy of (count times density) `own`
+// against the other's `other` (Veach 1997).
+fn fg_mis(own:f32,other:f32)->f32 {
+    let a=own*own;
+    return a/max(a+other*other,1e-30);
+}
+// Whether the last fg_radiance ray met geometry (bounce) or missed into the sky, and whether its
+// hit found no cell value (rl_cache_missed names the cell).
 var<private> fg_hit:bool;
+var<private> fg_unanswered:bool;
+// The lighting cache's external request list (gi_cache.wgsl gi_external, GiState::
+// external_requests): a probe hit without a value asks for its cell, which the cache's next frame
+// requests a band below pixels'. The gather's own group 2 binds it (src/gi_receiver_pass.rs; the
+// probes sample no material). Word 0 the count, 1 the overflow, then four words an entry. One
+// request a probe a frame (fg_asked, one flag per probe of the workgroup): many of a probe's rays
+// meet the same cell.
+@group(2) @binding(30) var<storage,read_write> fg_requests:array<atomic<u32>>;
+const FG_REQUESTS_MAX:u32=16384u;
+var<workgroup> fg_asked:array<atomic<u32>,2>;
+// The workgroup's probe rays and emitter shadow rays, added to the external list's spare words 2
+// and 3, which the GI log prints as fg_rays and fg_shadow_rays.
+var<workgroup> fg_rays:array<atomic<u32>,2>;
+fn fg_count_rays(lane:u32) {
+    if lane==0u {
+        atomicAdd(&fg_requests[2u],atomicLoad(&fg_rays[0]));
+        atomicAdd(&fg_requests[3u],atomicLoad(&fg_rays[1]));
+    }
+}
+fn fg_request(cell:vec4<u32>) {
+    let i=atomicAdd(&fg_requests[0],1u);
+    if i>=min(FG_REQUESTS_MAX,(arrayLength(&fg_requests)-4u)/4u) {atomicAdd(&fg_requests[1],1u);return;}
+    let at=4u+4u*i;
+    atomicStore(&fg_requests[at],cell.x);
+    atomicStore(&fg_requests[at+1u],cell.y);
+    atomicStore(&fg_requests[at+2u],cell.z);
+    atomicStore(&fg_requests[at+3u],cell.w);
+}
 // Traces lane `ray` of a probe at s and stores its SH terms in fg_lane_sh[lane]: a miss's as the
 // sky's L2, a hit's as the bounce's L1 (zero when the probe has no surface).
 fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     var radiance=vec3<f32>(0.0);
     var d=vec3<f32>(0.0,0.0,1.0);
     fg_hit=false;
+    var answered=false;
+    for(var i=0u;i<40u;i+=1u) {fg_lane_sh[lane][i]=0.0;}
+    for(var i=0u;i<12u;i+=1u) {fg_nee_sh[lane][i]=0.0;}
     if s.placement!=0u {
-        d=fg_direction(s.normal,ray,FG_RAYS,r);
-        radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
+        if ray<FG_NEE {
+            // An emitter sample takes this lane's one ray (fg_nee).
+            fg_nee(lane,ray,s,r);
+        } else {
+            d=fg_direction(s.normal,ray-FG_NEE,FG_HEMI,r);
+            radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
+            atomicAdd(&fg_rays[0],1u);
+            if fg_hit && fg_unanswered && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
+            // A hit no cache level answers yet is left out of the probe's average (fg_accumulate
+            // counts the answered rays in the pad float FG_ANSWERED): counted as black, it
+            // darkened probes after a cut until the cells it asked for were shaded.
+            answered=!(fg_hit && fg_unanswered);
+        }
     }
+    if !answered {return;}
     gi_sh_basis(d);
     let sky=select(radiance,vec3<f32>(0.0),fg_hit);
     let bounce=select(vec3<f32>(0.0),radiance,fg_hit);
-    for(var i=0u;i<40u;i+=1u) {fg_lane_sh[lane][i]=0.0;}
+    fg_lane_sh[lane][FG_ANSWERED]=1.0;
     for(var i=0u;i<9u;i+=1u) {
         fg_lane_sh[lane][i*3u]=sky.x*gi_y[i];fg_lane_sh[lane][i*3u+1u]=sky.y*gi_y[i];fg_lane_sh[lane][i*3u+2u]=sky.z*gi_y[i];
     }
@@ -280,15 +359,69 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
         fg_lane_sh[lane][FG_BOUNCE+k*3u]=bounce.x*gi_y[k];fg_lane_sh[lane][FG_BOUNCE+k*3u+1u]=bounce.y*gi_y[k];fg_lane_sh[lane][FG_BOUNCE+k*3u+2u]=bounce.z*gi_y[k];
     }
 }
+// Emitters as lights (next-event estimation from the lighting cache's emitter list,
+// gi_emitters.wgsl, the list the cache's own gathers sample), combined with the probe's own rays
+// by multiple importance sampling: lanes 0 .. FG_NEE of a probe each pick one emitter triangle in
+// proportion to its power (gi_emitter_pick, the list's power CDF) and a point of it, and where
+// one ray to it is unblocked add its radiance in that direction weighted by the power heuristic
+// against the probe's FG_HEMI hemisphere rays; a hemisphere ray that meets an emitter takes the
+// complementary weight (fg_radiance). Small bright emitters (lamps, Glint's orange rims) then
+// come mostly from the samples, and large dim ones (Glint's glowing white surfaces, nearly all
+// the list's power) mostly from the rays: picked by power alone, a probe's nearby white floor was
+// almost never sampled, and its rare picks' large weights did not survive TR1. Divided by
+// fg_accumulate's per-ray scale, so the sums come out exact. The samples take FG_NEE of a probe's
+// FG_RAYS lanes, each tracing its one ray alongside the FG_HEMI hemisphere rays: traced after
+// them on the same lanes, they doubled the warp's traversal rounds (fg_trace +0.53 ms without
+// ray hardware on Glint).
+const FG_NEE:u32=2u;
+const FG_HEMI:u32=FG_RAYS-FG_NEE;
+fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
+    let h=fg_hash(r^((ray+1u)*0x9e3779b9u));
+    let pick=gi_emitter_pick(f32(h>>8u)*(1.0/16777216.0));
+    if pick.probability<=0.0 {return;}
+    let w=gi_word(GI_H_EMITTERS)+pick.index*GI_EMITTER_WORDS;
+    let e1=gi_emitter_vec(w+3u);
+    let e2=gi_emitter_vec(w+6u);
+    let g=fg_hash(h);
+    var uv=vec2<f32>(f32(g&0xffffu),f32(g>>16u))*(1.0/65536.0);
+    if uv.x+uv.y>1.0 {uv=vec2<f32>(1.0)-uv;}
+    let origin=fma(s.normal,vec3<f32>(s.epsilon),s.world);
+    let to=gi_emitter_vec(w)+e1*uv.x+e2*uv.y-origin;
+    let dist=length(to);
+    if dist<=1e-6 {return;}
+    let d=to/dist;
+    if dot(d,s.normal)<=0.0 {return;}
+    let side=cross(e1,e2);
+    let area=0.5*length(side);
+    let cosine=abs(dot(side,d))*0.5/max(area,1e-30);
+    if area<=0.0 || cosine<=1e-4 {return;}
+    let density=pick.probability*dist*dist/(area*cosine);
+    atomicAdd(&fg_rays[1],1u);
+    if rl_blocked(origin,d,s.epsilon,dist*0.999) {return;}
+    let weight=fg_mis(density*f32(FG_NEE),FG_HEMISPHERE_PDF*f32(FG_HEMI));
+    let light=gi_emitter_vec(w+9u)*(weight*FG_HEMISPHERE_PDF*f32(FG_HEMI)/(density*f32(FG_NEE)));
+    gi_sh_basis(d);
+    for(var k=0u;k<4u;k+=1u) {
+        fg_nee_sh[lane][k*3u]+=light.x*gi_y[k];
+        fg_nee_sh[lane][k*3u+1u]+=light.y*gi_y[k];
+        fg_nee_sh[lane][k*3u+2u]+=light.z*gi_y[k];
+    }
+}
 // Folds the FG_RAYS lanes from `first` of fg_lane_sh into probe `index`, now at s: history
 // while the new point stays on the old probe's plane.
 fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>) {
     var sh:array<f32,40>;
+    var nee:array<f32,12>;
     for(var l=0u;l<FG_RAYS;l+=1u) {
         for(var i=0u;i<40u;i+=1u) {sh[i]+=fg_lane_sh[first+l][i];}
+        for(var i=0u;i<12u;i+=1u) {nee[i]+=fg_nee_sh[first+l][i];}
     }
-    // Uniform hemisphere: pdf 1/(2 pi).
-    let scale=6.283185307179586/f32(FG_RAYS);
+    // Uniform hemisphere: pdf 1/(2 pi), over the rays with an answer (the others stand for their
+    // average). The emitter samples were divided by the full ray count's scale (fg_nee).
+    let scale=6.283185307179586/max(sh[FG_ANSWERED],1.0);
+    sh[FG_ANSWERED]=0.0;
+    for(var i=0u;i<40u;i+=1u) {sh[i]*=scale;}
+    for(var i=0u;i<12u;i+=1u) {sh[FG_BOUNCE+i]+=nee[i]*(6.283185307179586/f32(FG_HEMI));}
     let footprint=fg_footprint(pixel,size,s.world);
     let old=fg_load(index,size);
     var count=1.0;
@@ -298,7 +431,7 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     let blend=1.0/count;
     var out:FgProbe;
     for(var v=0u;v<FG_SH_VECS;v+=1u) {
-        let fresh=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u])*scale;
+        let fresh=vec4<f32>(sh[v*4u],sh[v*4u+1u],sh[v*4u+2u],sh[v*4u+3u]);
         out.sh[v]=select(fresh,mix(old.sh[v],fresh,blend),count>1.0);
     }
     out.point=vec4<f32>(s.world,count);
@@ -311,6 +444,8 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     let tile=group.y*tiles.x+group.x;
     let frame=primary_frame.sided.y;
     let slot=lane/FG_RAYS;
+    if lane<2u {atomicStore(&fg_asked[lane],0u);atomicStore(&fg_rays[lane],0u);}
+    workgroupBarrier();
     // Slot 0: the first covered pixel of four the frame picks in the tile. Slot 1: the first of
     // eight more off slot 0's plane (every lane of a slot computes the same).
     var first:FgSurface;
@@ -347,6 +482,7 @@ fn fg_accumulate(index:u32,size:vec2<u32>,first:u32,s:FgSurface,pixel:vec2<u32>)
     if keep {traced.placement=0u;}
     fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
     workgroupBarrier();
+    fg_count_rays(lane);
     if lane%FG_RAYS!=0u || any(group.xy>=tiles) || keep {return;}
     if s.placement==0u {fg_invalidate(index,size);return;}
     fg_accumulate(index,size,slot*FG_RAYS,s,pixel);
@@ -452,7 +588,7 @@ var<workgroup> fg_pair:array<u32,2>;
     let block=vec2<u32>(group.x*2u+b,group.y);
     let inside=all(block<blocks);
     let index=fg_adaptive(min(block,blocks-vec2<u32>(1u)),size);
-    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(index,size),inside);}
+    if lane%FG_RAYS==0u {fg_pair[b]=select(FG_NONE,fg_pick_at(index,size),inside);atomicStore(&fg_asked[b],0u);atomicStore(&fg_rays[b],0u);}
     let pair=workgroupUniformLoad(&fg_pair);
     if pair[0]==FG_NONE && pair[1]==FG_NONE {return;}
     let pick=pair[b];
@@ -462,9 +598,17 @@ var<workgroup> fg_pair:array<u32,2>;
         pixel=block*FG_BLOCK+vec2<u32>(pick%FG_BLOCK,pick/FG_BLOCK);
         s=fg_surface_at(pixel,size,false);
     }
-    fg_lane(lane,lane%FG_RAYS,s,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
+    // Half rate, as the tile probes (fg_trace): on alternate frames a checkerboard of blocks keeps
+    // a probe that has history and still lies on the plane under its pick, instead of tracing it.
+    let old=fg_plane(index,size);
+    let keep=FG_HALF_RATE && ((block.x+block.y+frame)&1u)==1u && s.placement!=0u && old.point.w>=FG_HALF_MIN
+        && dot(old.normal.xyz,s.normal)>0.9 && abs(dot(old.normal.xyz,s.world-old.point.xyz))<0.5*FG_PLANE*old.normal.w;
+    var traced=s;
+    if keep {traced.placement=0u;}
+    fg_lane(lane,lane%FG_RAYS,traced,pixel,fg_hash(index^(frame*0x27d4eb2fu)));
     workgroupBarrier();
-    if lane%FG_RAYS!=0u || pick==FG_NONE || s.placement==0u {return;}
+    fg_count_rays(lane);
+    if lane%FG_RAYS!=0u || pick==FG_NONE || s.placement==0u || keep {return;}
     fg_accumulate(index,size,b*FG_RAYS,s,pixel);
 }
 @compute @workgroup_size(8,4) fn fg_resolve(@builtin(global_invocation_id) grid:vec3<u32>) {

@@ -646,9 +646,10 @@ fn every_shadow_ray_query_culls_with_the_shadow_mask() {
         }
     }
     // fresh_shadows, hardware_shadows, local_light_ray, reflections (and its program template),
-    // gi_rays_hardware, the atmosphere, the reference tracer and the live reference's transmitted
-    // shadow ray.
-    assert_eq!(shadow_rays, 9);
+    // gi_rays_hardware, the atmosphere, the reference tracer, the live reference's transmitted
+    // shadow ray, and reflections' rl_blocked (the final gather's emitter visibility) with its
+    // software seam in program.rs.
+    assert_eq!(shadow_rays, 11);
     // Modules without scene.wgsl take the declaration after their directives.
     assert_eq!(
         crate::shadows::with_shadow_caster_mask("enable wgpu_ray_query;\nfn f() {}\n"),

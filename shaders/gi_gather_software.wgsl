@@ -117,6 +117,8 @@ var<workgroup> gi_drain_base:u32;
             rays+=aimed.x;
             missing+=aimed.y;
             changing+=aimed.z;
+            // Emitters as lights, in closed form (gi_emitters.wgsl).
+            rays+=gi_emitter_gather(lane,q,origin,n,c.key);
             if missing!=0u { atomicAdd(&gi_wg_missing,missing); }
             if changing!=0u { atomicAdd(&gi_wg_changing,changing); }
             if rays!=0u { atomicAdd(&gi_wg_rays,rays); }

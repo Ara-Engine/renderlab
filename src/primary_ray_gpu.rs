@@ -1206,13 +1206,16 @@ impl PrimaryState {
                             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY)
                 })
                 .collect();
-            ledger.own(
+            let layout = ledger.own(
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some(label),
                     entries: &entries,
                 }),
                 ResourceKind::BindGroupLayout,
-            )
+            );
+            #[cfg(test)]
+            super::storage_need::record_group(&layout, &entries);
+            layout
         };
         let producer_group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
             let mut entries = entries.to_vec();

@@ -222,6 +222,11 @@ fn schedule_defaults(source: &str) -> (u32, bool) {
         .unwrap_or(0);
     (groups, source.contains("override VSM_ORDER:bool=true;"))
 }
+/// The most storage buffers any sun-shadow pipeline layout makes visible to the compute stage
+/// (the Disk lookup's: its own group, the draws' geometry arrays and the lighting group), which
+/// `visibility_limits` requests. gpu_non_rt_requested_limit_pipelines sums the layouts' entries
+/// and fails when a layout outgrows it.
+pub(crate) const STORAGE_BUFFERS: u32 = 16;
 /// Trace tiles (WGSL `VSM_TRACE_TILE`, 8x4 pixels) over a `size` image.
 fn trace_tiles(size: [u32; 2]) -> u64 {
     u64::from(size[0].div_ceil(8)) * u64::from(size[1].div_ceil(4))
@@ -446,6 +451,10 @@ pub struct VirtualShadowStats {
     pub invalidated_levels: u32,
     /// Moved-caster rectangles uploaded this frame.
     pub moved_rects: u32,
+    /// Receivers whose level the Disk lookup found past the clip-map ladder and dropped, summed
+    /// since the renderer started (a pass wrote levels the lookup's ladder no longer holds; the
+    /// lookup's band walk once never ended on them). Zero in a correct frame.
+    pub stale_levels: u32,
     /// Caster cluster instances the page raster culls.
     pub clusters: u32,
     pub bytes: u64,
@@ -647,6 +656,9 @@ struct Resources {
     history: Owned<wgpu::Buffer>,
     disk_clip: Option<[f32; 16]>,
     disk_parity: u32,
+    /// The Disk mark's generation: one more on every frame whose requests do not hold
+    /// (`VdFrame::reuse.y`, WGSL `vd_level_word`).
+    mark_generation: u32,
     /// The hardware raster's attachment, which only sizes its raster area.
     _area: Owned<wgpu::Texture>,
     area: Owned<wgpu::TextureView>,
@@ -1093,7 +1105,9 @@ fn peel_gap_on() -> bool {
     *ON.get_or_init(|| std::env::var("RENDERLAB_VD_PEEL_GAP").map_or(true, |v| v.trim() != "0"))
 }
 /// The Disk lookup's page requests hold while only TR1's jitter moved the camera
-/// (`requests_held`). `RENDERLAB_VD_REQUESTS_HOLD=0` marks every page-work frame.
+/// (`requests_held`): the mark pass does not run, and the lookup chooses the level of a receiver
+/// the last mark did not reach itself (WGSL `vd_level_at`). `RENDERLAB_VD_REQUESTS_HOLD=0` marks
+/// every page-work frame.
 fn requests_hold_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_VD_REQUESTS_HOLD").map_or(true, |v| v.trim() != "0"))
@@ -1358,13 +1372,16 @@ impl VirtualState {
         use wgpu::TextureSampleType as T;
         use wgpu::TextureViewDimension as D;
         let group = |label, entries: &[wgpu::BindGroupLayoutEntry]| {
-            ledger.own(
+            let layout = ledger.own(
                 device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some(label),
                     entries,
                 }),
                 ResourceKind::BindGroupLayout,
-            )
+            );
+            #[cfg(test)]
+            super::storage_need::record_group(&layout, entries);
+            layout
         };
         let uint = T::Uint;
         let float = T::Float { filterable: false };
@@ -1584,6 +1601,8 @@ impl VirtualState {
             ),
         };
         let pipeline_layout = |label, groups: &[Option<&wgpu::BindGroupLayout>]| {
+            #[cfg(test)]
+            super::storage_need::record_pipeline(label, groups);
             ledger.own(
                 device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some(label),
@@ -1843,7 +1862,7 @@ impl VirtualState {
             edge_counts: std::sync::Mutex::new(ReadbackRing::new(
                 device,
                 "Disk lookup edge count readback",
-                16,
+                32,
                 3,
             )),
             seen: None,
@@ -2024,8 +2043,14 @@ impl VirtualState {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::R32Uint,
+                    // Tests write and read the receiver levels (test_stale_levels, test_levels).
                     usage: wgpu::TextureUsages::STORAGE_BINDING
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | if cfg!(test) {
+                            wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST
+                        } else {
+                            wgpu::TextureUsages::empty()
+                        },
                     view_formats: &[],
                 }),
                 ResourceKind::Texture,
@@ -2161,7 +2186,7 @@ impl VirtualState {
                 REACH_BYTES,
                 B::STORAGE | B::COPY_SRC,
             ),
-            edges: buffer("Disk lookup edge pixels", 16, B::STORAGE | B::COPY_SRC),
+            edges: buffer("Disk lookup edge pixels", 32, B::STORAGE | B::COPY_SRC),
             cover: buffer(
                 "Clipmap covered samples",
                 if fraction_on() { (map_bytes / 8).next_multiple_of(4) } else { 4 },
@@ -2174,6 +2199,7 @@ impl VirtualState {
             ),
             disk_clip: None,
             disk_parity: 0,
+            mark_generation: 0,
             _area: area,
             area: area_view,
             _level: level,
@@ -2440,10 +2466,18 @@ impl Renderer {
             .map_or(0.0, |frame| (frame % 4096 + 1) as f32);
         let state = self.view.virtual_shadows.as_mut().unwrap();
         let s = state.settings;
-        // Measurement: the Disk lookup's edge pixels, a line a frame.
-        if let Some(path) = edge_log() {
-            for ((), words) in state.edge_counts.get_mut().unwrap().collect() {
-                let word = |i: usize| u32::from_ne_bytes(words[4 * i..4 * i + 4].try_into().unwrap());
+        // The Disk lookup's counters: its edge pixels (a line a frame with the edge log), and the
+        // receivers whose stale level it dropped (`stale_levels`, reported once when they appear).
+        for ((), words) in state.edge_counts.get_mut().unwrap().collect() {
+            let word = |i: usize| u32::from_ne_bytes(words[4 * i..4 * i + 4].try_into().unwrap());
+            if word(4) != 0 && state.stats.stale_levels == 0 {
+                eprintln!(
+                    "renderlab: the Disk lookup dropped {} receivers' levels past the clip-map ladder (stale levels; see VirtualShadowStats::stale_levels)",
+                    word(4)
+                );
+            }
+            state.stats.stale_levels += word(4);
+            if let Some(path) = edge_log() {
                 use std::io::Write;
                 let _ = std::fs::OpenOptions::new()
                     .create(true)
@@ -3455,6 +3489,7 @@ impl Renderer {
             state.pool_frame = state.pool_frame.wrapping_add(1);
         }
         let pool_frame = state.pool_frame;
+        let requests_held = state.requests_held;
         let casters = state.casters.as_ref().unwrap();
         let r = state.resources.as_mut().unwrap();
         self.queue.write_buffer(&r.frame, 0, &frame);
@@ -3481,11 +3516,15 @@ impl Renderer {
             let clip = camera.matrix(size.width, size.height).to_cols_array();
             let previous = r.disk_clip.replace(clip).unwrap_or(clip);
             r.disk_parity ^= 1;
+            // The levels the mark writes carry it; the lookup chooses its own for older ones.
+            if !requests_held {
+                r.mark_generation = r.mark_generation.wrapping_add(1).max(1);
+            }
             let mut bytes = Vec::with_capacity(DISK_FRAME_BYTES as usize);
             for value in clip.into_iter().chain(previous) {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
-            for w in [0, 0, r.disk_parity, 0] {
+            for w in [0, r.mark_generation, r.disk_parity, 0] {
                 bytes.extend_from_slice(&w.to_ne_bytes());
             }
             for i in 0..MAX_RECTS {
@@ -3942,8 +3981,9 @@ impl Renderer {
             }
         }
         drop(pass);
-        // Measurement (`RENDERLAB_VD_EDGE_LOG=<file>`): the edge pixels, a line a frame.
-        if disk && edge_log().is_some() {
+        // The edge pixels (a line a frame with `RENDERLAB_VD_EDGE_LOG=<file>`) and the receivers
+        // whose level the ladder no longer holds (`stale_levels`), every frame.
+        if disk {
             state.edge_counts.lock().unwrap().record(encoder, &r.edges, 0, ());
         }
         if hybrid {
@@ -3969,6 +4009,68 @@ impl Renderer {
             pass.dispatch_workgroups_indirect(&r.queue_dispatch, 0);
         }
         let _ = &state.lookup_layout;
+    }
+
+    /// Tests: writes `word` (WGSL `vd_level_word`: the mark's generation over the level) into
+    /// every receiver's level.
+    #[cfg(test)]
+    pub(super) fn test_stale_levels(&self, word: u32) {
+        let r = self.view.virtual_shadows.as_ref().unwrap().resources.as_ref().unwrap();
+        let [width, height] = r.size;
+        let words: Vec<u8> = std::iter::repeat_n(word.to_ne_bytes(), (width * height) as usize).flatten().collect();
+        self.queue.write_texture(
+            r._level.as_image_copy(),
+            &words,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            r._level.size(),
+        );
+    }
+    /// Tests: the receiver level words after the last frame, whether its page requests held, the
+    /// ladder's length and the mark's generation.
+    #[cfg(test)]
+    pub(super) fn test_levels(&self) -> (Vec<u32>, bool, u32, u32) {
+        let state = self.view.virtual_shadows.as_ref().unwrap();
+        let r = state.resources.as_ref().unwrap();
+        let [width, height] = r.size;
+        let row = (4 * width).div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("receiver level readback"),
+            size: u64::from(row * height),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            r._level.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
+            },
+            r._level.size(),
+        );
+        self.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(20)),
+            })
+            .unwrap();
+        let data = buffer.slice(..).get_mapped_range().unwrap();
+        let levels = data
+            .chunks(row as usize)
+            .flat_map(|line| line[..4 * width as usize].chunks(4))
+            .map(|w| u32::from_ne_bytes(w.try_into().unwrap()))
+            .collect();
+        (levels, state.requests_held, state.levels as u32, r.mark_generation)
     }
 
     /// Tests: the triangles with walk records.
