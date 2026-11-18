@@ -590,6 +590,9 @@ override VSM_SAMPLES:u32=8u;
 // only, on the same multisampled raster).
 override VSM_FR_BITS:bool=true;
 override VSM_FR_SIMPLE:bool=false;
+// VSM_FR_HW1X, VSM_FR_SW1X: the hardware or the software raster on its 1x path.
+override VSM_FR_HW1X:bool=false;
+override VSM_FR_SW1X:bool=false;
 @group(0) @binding(65) var<storage,read_write> vsm_cover:array<atomic<u32>>;
 // Sample k's offset from the texel centre, in sixteenths of a texel (the D3D 8x pattern).
 fn vsm_sample(k:u32)->vec2<f32> {
@@ -752,13 +755,13 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
     let side=i32(vsm.counts.y*VSM_PAGE);
     // Texel centres are at 256x+128 subpixels; the covered fraction's samples reach half a
     // texel from them.
-    let grow=select(0,128,VSM_FRACTION);
+    let grow=select(0,128,VSM_FRACTION && !VSM_FR_SW1X);
     let lo=max(min(a,min(b,d))-vec2<i32>(grow),vec2<i32>(0));
     let hi=min(max(a,max(b,d))+vec2<i32>(grow),vec2<i32>(side*256-1));
     let first=(lo-vec2<i32>(128)+vec2<i32>(255))>>vec2<u32>(8u);
     let last=(hi-vec2<i32>(128))>>vec2<u32>(8u);
     let id=vsm_cluster_id(c,batch,li);
-    if VSM_FRACTION {
+    if VSM_FRACTION && !VSM_FR_SW1X {
         for(var y=first.y;y<=last.y;y+=1) {
             for(var x=first.x;x<=last.x;x+=1) {
                 vsm_fraction_texel(level,vec2<u32>(u32(x),u32(y)),s0.xy,s1.xy,s2.xy,vec3<f32>(s0.z,s1.z,s2.z),id);
@@ -792,7 +795,7 @@ struct VsmHw {
     var out:VsmHw;
     out.position=vec4<f32>(0.0,0.0,0.0,1.0);
     if ((entry>>28u)&(1u<<tile))==0u {return out;}
-    if VSM_FRACTION {
+    if VSM_FRACTION && !VSM_FR_HW1X {
         // The triangle itself, rasterized at VSM_SAMPLES samples a texel (the attachment's): the
         // fragment's sample mask is its covered samples. The first (provoking) vertex carries the
         // whole triangle (flat) for the fragment's plane; the others fetch only themselves.
@@ -830,7 +833,7 @@ struct VsmHw {
     let tile=vsm_pass.pad0;
     let o=vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles())*vsm_area();
     let t=vec2<u32>(input.position.xy)+o;
-    if VSM_FRACTION {
+    if VSM_FRACTION && !VSM_FR_HW1X {
         vsm_fraction_samples(vsm_pass.level,t,input.a.xy,input.a.zw,input.c,input.z,input.id,mask);
         return;
     }
