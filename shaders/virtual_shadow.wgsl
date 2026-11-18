@@ -646,6 +646,19 @@ fn vsm_texel_index(level:u32,t:vec2<u32>)->u32 {
     return (level*side+t.y)*side+t.x;
 }
 fn vsm_cross(a:vec2<f32>,b:vec2<f32>,p:vec2<f32>)->f32 {return (b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x);}
+// Corner b of a counter-clockwise triangle (a, b, c in texels) once its two edges a-b and b-c
+// move outward by half a texel square's reach along their normals (the square's support
+// 0.5 (|n.x| + |n.y|)): where the moved edges' lines meet.
+fn vsm_dilated_corner(a:vec2<f32>,b:vec2<f32>,c:vec2<f32>)->vec2<f32> {
+    let e0=normalize(b-a);let e1=normalize(c-b);
+    let n0=vec2<f32>(e0.y,-e0.x);let n1=vec2<f32>(e1.y,-e1.x);
+    let c0=dot(n0,b)+0.5*(abs(n0.x)+abs(n0.y));
+    let c1=dot(n1,b)+0.5*(abs(n1.x)+abs(n1.y));
+    let det=n0.x*n1.y-n0.y*n1.x;
+    // Parallel edges (a degenerate corner): no meeting point; a far one makes the slot use its box.
+    if abs(det)<1e-6 {return b+vec2<f32>(1e3);}
+    return vec2<f32>(c0*n1.y-c1*n0.y,n0.x*c1-n1.x*c0)/det;
+}
 // One triangle (vertices a, b, c in level texels, counter-clockwise, normalized heights z) at
 // texel t under VSM_FRACTION: the top pass writes its highest covered sample; the peel pass
 // writes its centre into the peel layer as vsm_write does and marks its near-layer samples.
@@ -782,8 +795,11 @@ struct VsmHw {
     out.position=vec4<f32>(0.0,0.0,0.0,1.0);
     if ((entry>>28u)&(1u<<tile))==0u {return out;}
     if VSM_FRACTION {
-        // Six vertices a triangle slot: its box grown by half a texel (two triangles), so every
-        // texel a sample of it can fall in gets a fragment; the fragment tests the samples.
+        // Every texel whose square meets the triangle needs a fragment (the fragment tests the
+        // samples): the triangle with each edge moved out by half a texel square's reach along its
+        // normal (three vertices; the slot's other three collapse). Where an acute corner would
+        // reach more than two texels out, the slot draws the box grown by half a texel instead
+        // (two triangles).
         let c=vsm_clusters[entry&0x0fffffffu];let local=vertex/6u;let k=vertex%6u;
         if local>=(c.counts&255u) {return out;}
         let batch=primary_placements[c.placement]&0x1fffffffu;
@@ -791,10 +807,22 @@ struct VsmHw {
         let s0=vsm_cluster_vertex(c,batch,t&255u,level);
         var s1=vsm_cluster_vertex(c,batch,(t>>8u)&255u,level);
         var s2=vsm_cluster_vertex(c,batch,(t>>16u)&255u,level);
-        if vsm_cross(s0.xy,s1.xy,s2.xy)<0.0 {let q=s1;s1=s2;s2=q;}
-        let lo=min(min(s0.xy,s1.xy),s2.xy)-vec2<f32>(0.5);let hi=max(max(s0.xy,s1.xy),s2.xy)+vec2<f32>(0.5);
-        let far=k==1u || k==2u || k==4u;let high=k==2u || k==4u || k==5u;
-        let q=vec2<f32>(select(lo.x,hi.x,far),select(lo.y,hi.y,high));
+        let area=vsm_cross(s0.xy,s1.xy,s2.xy);
+        if area==0.0 {return out;}
+        if area<0.0 {let q=s1;s1=s2;s2=q;}
+        let d0=vsm_dilated_corner(s2.xy,s0.xy,s1.xy);
+        let d1=vsm_dilated_corner(s0.xy,s1.xy,s2.xy);
+        let d2=vsm_dilated_corner(s1.xy,s2.xy,s0.xy);
+        let spike=max(max(distance(d0,s0.xy),distance(d1,s1.xy)),distance(d2,s2.xy))>2.0;
+        var q:vec2<f32>;
+        if spike {
+            let lo=min(min(s0.xy,s1.xy),s2.xy)-vec2<f32>(0.5);let hi=max(max(s0.xy,s1.xy),s2.xy)+vec2<f32>(0.5);
+            let far=k==1u || k==2u || k==4u;let high=k==2u || k==4u || k==5u;
+            q=vec2<f32>(select(lo.x,hi.x,far),select(lo.y,hi.y,high));
+        } else {
+            if k>=3u {return out;}
+            q=select(select(d2,d1,k==1u),d0,k==0u);
+        }
         let size=f32(vsm_area());
         let o=vec2<f32>(vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles()))*size;
         out.position=vec4<f32>((q.x-o.x)/size*2.0-1.0,1.0-(q.y-o.y)/size*2.0,0.5,1.0);
