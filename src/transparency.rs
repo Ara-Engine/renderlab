@@ -51,7 +51,7 @@ impl Transparency {
     }
 }
 
-fn f16_bits(value: f32) -> u16 {
+pub(crate) fn f16_bits(value: f32) -> u16 {
     // Values here are in [0, 3]: normal halves or zero, round to nearest even.
     if value == 0.0 {
         return 0;

@@ -2929,6 +2929,7 @@ impl Renderer {
                     &self.ledger,
                     &self.uniform,
                     draws,
+                    transparent,
                     self.submissions,
                     shadow_frame.is_some(),
                 );
