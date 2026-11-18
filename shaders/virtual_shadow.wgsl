@@ -669,6 +669,9 @@ fn vsm_fraction_samples(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32
     let lowest=top-VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z-0.875*(abs(g.x)+abs(g.y));
     var bits=0u;
     var m=mask&((1u<<VSM_SAMPLES)-1u);
+    // No sample lies more than 7/16 of a texel from the centre on either axis: where the plane
+    // there, less that reach, clears the floor, every covered sample is near (a texel inside; heights clamp alike).
+    if clamp(z.x+dot(g,centre-a)-0.4375*(abs(g.x)+abs(g.y)),zlo,zhi)>=lowest {bits=m;m=0u;}
     while m!=0u {
         let k=firstTrailingBit(m);
         m&=m-1u;
@@ -762,20 +765,22 @@ struct VsmHw {
     if ((entry>>28u)&(1u<<tile))==0u {return out;}
     if VSM_FRACTION {
         // The triangle itself, rasterized at VSM_SAMPLES samples a texel (the attachment's): the
-        // fragment's sample mask is its covered samples. Each vertex carries the whole triangle
-        // (flat) for the fragment's plane.
+        // fragment's sample mask is its covered samples. The first (provoking) vertex carries the
+        // whole triangle (flat) for the fragment's plane; the others fetch only themselves.
         let c=vsm_clusters[entry&0x0fffffffu];let local=vertex/3u;
         if local>=(c.counts&255u) {return out;}
         let batch=primary_placements[c.placement]&0x1fffffffu;
         let t=vsm_cluster_data[batch].data[c.triangles+local];
-        let s0=vsm_cluster_vertex(c,batch,t&255u,level);
-        let s1=vsm_cluster_vertex(c,batch,(t>>8u)&255u,level);
-        let s2=vsm_cluster_vertex(c,batch,(t>>16u)&255u,level);
-        let q=select(select(s2.xy,s1.xy,vertex%3u==1u),s0.xy,vertex%3u==0u);
+        let corner=vertex%3u;
+        let q=vsm_cluster_vertex(c,batch,(t>>(8u*corner))&255u,level);
         let size=f32(vsm_area());
         let o=vec2<f32>(vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles()))*size;
         out.position=vec4<f32>((q.x-o.x)/size*2.0-1.0,1.0-(q.y-o.y)/size*2.0,0.5,1.0);
-        out.a=vec4<f32>(s0.xy,s1.xy);out.c=s2.xy;out.z=vec3<f32>(s0.z,s1.z,s2.z);
+        if corner==0u {
+            let s1=vsm_cluster_vertex(c,batch,(t>>8u)&255u,level);
+            let s2=vsm_cluster_vertex(c,batch,(t>>16u)&255u,level);
+            out.a=vec4<f32>(q.xy,s1.xy);out.c=s2.xy;out.z=vec3<f32>(q.z,s1.z,s2.z);
+        }
         out.id=vsm_cluster_id(c,batch,local);
         return out;
     }
