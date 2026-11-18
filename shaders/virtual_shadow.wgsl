@@ -553,12 +553,13 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
 }
 // ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow_gpu.rs `fraction_on`) ----
 // The raster samples each texel at the eight positions of the 8x multisample pattern instead of
-// its centre. The top layer keeps the highest surface over those samples (the nearest covered
-// one where a caster covers part of the texel; where none does, the surface under the samples, as
-// today). The peel pass, which runs after the top one, keeps the peel layer at the centre as
-// today and marks in vsm_cover (a byte a texel at the top map's index, the raster's scratch) every
-// sample whose covering surface lies within the peel gap of that top: the near layer, the union of
-// its triangles. vsm_fold then moves the count into the top word, and the Disk lookup lets a top
+// its centre. The top layer keeps the highest surface over those samples, each at its plane's
+// height at the texel centre (a caster covering part of the texel wins over the surface under it;
+// where none does, the surface under the samples, as today). The peel pass, which runs after the
+// top one, keeps the peel layer at the centre as today and marks in vsm_cover (a byte a texel at the
+// top map's index, the raster's scratch) every sample whose covering surface lies within the peel
+// gap of that top (widened by the surface's own slope): the near layer, the union of its
+// triangles. vsm_fold then moves the count into the top word, and the Disk lookup lets a top
 // column block that share of the directions it would block.
 override VSM_FRACTION:bool=false;
 @group(0) @binding(65) var<storage,read_write> vsm_cover:array<atomic<u32>>;
@@ -602,21 +603,28 @@ fn vsm_dilated_corner(a:vec2<f32>,b:vec2<f32>,c:vec2<f32>)->vec2<f32> {
     return vec2<f32>(c0*n1.y-c1*n0.y,n0.x*c1-n1.x*c0)/det;
 }
 // One triangle (vertices a, b, c in level texels, counter-clockwise, normalized heights z) at
-// texel t under VSM_FRACTION: the top pass writes its highest covered sample; the peel pass
-// writes its centre into the peel layer as vsm_write does and marks its near-layer samples.
+// texel t under VSM_FRACTION. The top pass writes, where any sample of the texel is covered, the
+// triangle's plane at the texel centre clamped to its height range: where the centre is covered
+// that is the height the centre-sampled raster stores, so a surface steep in light space (ground
+// under a low sun) does not rise by its height change across the texel and shadow itself. The peel
+// pass writes its centre into the peel layer as vsm_write does and marks its near-layer samples:
+// those within the peel gap of the top, widened by this triangle's own height change across the
+// samples, so a steep surface's lower samples stay in its near layer.
 fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,z:vec3<f32>,id:u32) {
     let area=vsm_cross(a,b,c);
     if area<=0.0 {return;}
     let centre=vec2<f32>(t)+vec2<f32>(0.5);
+    // The plane's gradient, normalized height per texel.
+    let e1=b-a;let e2=c-a;
+    let g=vec2<f32>((z.y-z.x)*e2.y-(z.z-z.x)*e1.y,(z.z-z.x)*e1.x-(z.y-z.x)*e2.x)/area;
     if !VSM_PEEL_PASS {
-        var zmax=-1.0;
         for(var k=0u;k<8u;k+=1u) {
             let p=centre+vsm_sample(k);
-            let w=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p));
-            if any(w<vec3<f32>(0.0)) {continue;}
-            zmax=max(zmax,dot(w,z)/area);
+            if min(min(vsm_cross(b,c,p),vsm_cross(c,a,p)),vsm_cross(a,b,p))<0.0 {continue;}
+            let zc=clamp(z.x+dot(g,centre-a),min(min(z.x,z.y),z.z),max(max(z.x,z.y),z.z));
+            vsm_write(level,t,zc,id);
+            return;
         }
-        if zmax>=0.0 {vsm_write(level,t,zmax,id);}
         return;
     }
     let wc=vec3<f32>(vsm_cross(b,c,centre),vsm_cross(c,a,centre),vsm_cross(a,b,centre));
@@ -624,13 +632,14 @@ fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,
     let i=vsm_texel_index(level,t);
     if i==VSM_NONE {return;}
     let top=bitcast<f32>(u32(atomicLoad(&vsm_top_map[i])>>32u));
-    let gap=VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z;
+    // The samples lie within 7/16 of a texel of the centre on each axis.
+    let lowest=top-VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z-0.875*(abs(g.x)+abs(g.y));
     var bits=0u;
     for(var k=0u;k<8u;k+=1u) {
         let p=centre+vsm_sample(k);
         let w=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p));
         if any(w<vec3<f32>(0.0)) {continue;}
-        if dot(w,z)/area>=top-gap {bits|=1u<<k;}
+        if dot(w,z)/area>=lowest {bits|=1u<<k;}
     }
     if bits!=0u {atomicOr(&vsm_cover[i>>2u],bits<<((i&3u)*8u));}
 }
