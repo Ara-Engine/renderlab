@@ -10,12 +10,31 @@ impl Renderer {
         self.device.compiles_after_prepare()
     }
 
-    /// The selected view's own pipelines (its look and render scale applied): post. Called by
-    /// `Engine::prepare_pipelines` for each view before `prepare_scene_pipelines`.
+    /// The selected view's own pipelines (its look and render scale applied): post and the
+    /// visibility buffer's. Called by `Engine::prepare_pipelines` for each view before
+    /// `prepare_scene_pipelines`.
     pub(crate) fn prepare_view_pipelines(&mut self) -> Result<(), Error> {
         self.check_fault()?;
         if self.view.post_settings.enabled {
             self.post_pipelines()?;
+        }
+        if self.primary_mode == PrimaryVisibility::VisibilityBuffer && self.view.primary.is_some() {
+            self.ensure_visibility_pipelines()?;
+        }
+        // Traced shading's passes, in the shading variant a lit frame of this view picks.
+        let traced = self.primary_mode != PrimaryVisibility::Raster
+            && self.view.primary.is_some()
+            && self.primary_sources.is_some();
+        if traced {
+            let paths = self.frame_paths(ViewMode::Lit, self.view.shadows.enabled(ViewMode::Lit), true);
+            if !paths.temporal {
+                let shading = if paths.soft {
+                    primary_ray_gpu::Shading::Soft
+                } else {
+                    primary_ray_gpu::Shading::Hard
+                };
+                self.ensure_reflection_trace(shading)?;
+            }
         }
         Ok(())
     }

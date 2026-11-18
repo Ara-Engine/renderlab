@@ -60,9 +60,10 @@ mod tests {
     /// Compiles after prepare, per path ([non-RT, RT]), that the test still allows. Lower each
     /// entry as prepare covers more passes; the goal is [0, 0]. 18 Nov: 66 and 61 with
     /// transparency only; 31 and 25 with the lighting-cache and atmosphere kernels; 23 and 17
-    /// with each view's post pipelines. Left: reflection trace, hits and composite, program
-    /// lists and bins, GI cell shading and receiver, the visibility buffer and TR1.
-    const LATE_BOUND: [u64; 2] = [23, 17];
+    /// with each view's post pipelines; 9 and 12 with the visibility buffer's and the
+    /// reflection trace's. Left: per-program pipelines (program lists and bins, reflection
+    /// hits, GI cell shading), the GI receiver, TR1's resolve and the interactive trace.
+    const LATE_BOUND: [u64; 2] = [9, 12];
 
     /// Prepare's goal: once a scene is prepared, no frame compiles a pipeline, from any view
     /// of it. Three programs (the standard floor, a second opaque program, glass), then views
