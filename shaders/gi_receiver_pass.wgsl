@@ -242,41 +242,20 @@ fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
     let z=u.x;let rr=sqrt(max(1.0-z*z,0.0));let phi=6.283185307179586*u.y;
     return fg_basis(n)*vec3<f32>(rr*cos(phi),rr*sin(phi),z);
 }
-// A probe ray's path regularization at its hits (rl_hit_variance, scene.wgsl `brdf`): GGX
-// alpha^2 of 8 spread^2 for the cone's half-angle spread = FG_CONE / 2, as reflection rays take
-// theirs, so a mirror's sun highlight at a hit is seen through the ray's cone.
-const FG_HIT_VARIANCE:f32=0.7853981633974483;
-// Incoming radiance (unexposed) along d from `origin`.
-fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32,pixel:vec2<u32>)->vec3<f32> {
-    let inverse=1.0/max(lighting.exposure,1e-30);
+// Incoming radiance (unexposed) along d from `origin`. A hit reads its lighting-cache cell's
+// outgoing radiance, the only hit path: cell shading ran the hit's own program there, so the
+// value carries that program's emission and albedo (Glint's white surfaces glow; Outpost's
+// terrain and Ara's materials have their own programs) with the cell's indirect and direct
+// light. The gather's module holds only the standard program, so shading the hit itself lost
+// all of that: a probe hit on Glint's white surfaces came out without their glow, a tenth dark
+// in sky-lit shadow. rl_cache_cell takes the ray's footprint as at least the cell where it
+// lands and walks to coarser levels past cells without a value; a hit no level answers (or
+// any hit while RENDERLAB_RL_CACHE_HITS=off leaves the stub in) sends nothing.
+fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     let traced=rl_cast(origin,d,epsilon);
     fg_hit=traced.record.x!=0u;
-    if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)*inverse;}
-    // Every hit reads its cache cell's outgoing radiance (emission and the cell's reflection of
-    // sky, bounce and the lights its visibility ray reached), as screen probes read a surface
-    // cache: the ray stands for a share of the probe's hemisphere, so its footprint is taken as at
-    // least the cell there. Movers and absent or unsettled cells shade with the program. Shading
-    // near hits instead (contacts, thin faces beside other geometry) came out about a tenth darker
-    // than the cells and the reference: dark strips on the ring's sides and along the rail's foot.
-    let at=fma(d,vec3<f32>(traced.t),origin);
-    let cached=rl_cache_lookup(traced.record,origin,d,traced.t,max(FG_CONE*traced.t,gi_edge(gi_level(at))));
-    if cached.w>0.0 {return rl_finite(cached.rgb);}
-    let h=rl_hit_input(traced.record,origin,d,0.0,0.0,pixel);
-    if !h.visible {return vec3<f32>(0.0);}
-    rl_hit_lights_prepare(h.input.world);
-    rl_load_parameters(h.batch);
-    // The hit's cells on the side this ray sees, not the camera's.
-    gi_rx_viewer=vec4<f32>(origin,1.0);
-    gi_prepare(h.input);
-    gi_rx_viewer=vec4<f32>(0.0);
-    rl_reflection_hit=true;
-    rl_hit_variance=FG_HIT_VARIANCE;
-    let hs=surface(h.input);
-    let radiance=rl_finite(shade(hs,h.input))*inverse;
-    rl_hit_variance=0.0;
-    rl_reflection_hit=false;
-    rl_hit_lights_clear();
-    return radiance;
+    if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)/max(lighting.exposure,1e-30);}
+    return rl_finite(rl_cache_cell(traced.record,origin,d,traced.t,FG_CONE*traced.t).rgb);
 }
 // Whether the last fg_radiance ray met geometry (bounce) or missed into the sky.
 var<private> fg_hit:bool;
@@ -288,7 +267,7 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
     fg_hit=false;
     if s.placement!=0u {
         d=fg_direction(s.normal,ray,FG_RAYS,r);
-        radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon,pixel);
+        radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
     }
     gi_sh_basis(d);
     let sky=select(radiance,vec3<f32>(0.0),fg_hit);
