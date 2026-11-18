@@ -651,6 +651,8 @@ struct Resources {
     /// byte a texel at the top map's index, which vsm_fold counts into the top words; four bytes
     /// when off.
     cover: Owned<wgpu::Buffer>,
+    /// The covered fraction's side table (`side_table`, WGSL `vd_sides`), written once.
+    sides: Owned<wgpu::Buffer>,
     /// The Disk lookup's per-pixel answer history, two halves ping-ponged by frame (WGSL
     /// `vd_history`), and the previous frame's world-to-clip matrix and half.
     history: Owned<wgpu::Buffer>,
@@ -841,6 +843,30 @@ fn disk_quantile(u: f64) -> f64 {
         }
     }
     0.5 * (lo + hi)
+}
+/// The covered fraction's side table (WGSL `vd_sides`): for each of `SIDE_ANGLES` directions n
+/// of a texel's covered side, the masks of the r disk samples furthest along n, r in 0..=64
+/// (two u32s each). Sample s sits at the disk quantiles of its x rank s and y rank
+/// `DISK_Y_RANK[s]`, as in `disk_pattern`.
+const SIDE_ANGLES: usize = 32;
+fn side_table() -> Vec<u8> {
+    let quantile = |rank: usize| disk_quantile((rank as f64 + 0.5) / 64.0);
+    let mut bytes = Vec::with_capacity(SIDE_ANGLES * 65 * 8);
+    for a in 0..SIDE_ANGLES {
+        let angle = a as f64 * std::f64::consts::TAU / SIDE_ANGLES as f64;
+        let along = |s: usize| angle.cos() * quantile(s) + angle.sin() * quantile(usize::from(DISK_Y_RANK[s]));
+        let mut order: Vec<usize> = (0..64).collect();
+        order.sort_by(|&x, &y| along(y).total_cmp(&along(x)));
+        let mut mask = 0u64;
+        for r in 0..=64 {
+            if r > 0 {
+                mask |= 1 << order[r - 1];
+            }
+            bytes.extend_from_slice(&(mask as u32).to_ne_bytes());
+            bytes.extend_from_slice(&((mask >> 32) as u32).to_ne_bytes());
+        }
+    }
+    bytes
 }
 /// `VdFrame`'s constant tail: per k in 0..=64 the mask of the samples whose y rank is at least
 /// k (two u32s each, padded to 33 vec4s), then the 64 sample positions.
@@ -1611,6 +1637,17 @@ impl VirtualState {
                     storage(62, false, S::COMPUTE),
                     // Held views: the per-pixel answer history.
                     storage(63, false, S::COMPUTE),
+                    // The covered fraction: the raster's sample bits and the side table.
+                    storage(66, true, S::COMPUTE),
+                    layout_entry(
+                        68,
+                        S::COMPUTE,
+                        wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: wgpu::BufferSize::new((SIDE_ANGLES * 65 * 8) as u64),
+                        },
+                    ),
                 ],
             ),
         };
@@ -1727,7 +1764,10 @@ impl VirtualState {
                     layout: Some(layout),
                     module: &disk_module,
                     entry_point: Some(entry),
-                    compilation_options: Default::default(),
+                    compilation_options: wgpu::PipelineCompilationOptions {
+                        constants: &[("VD_SAMPLES", f64::from(fraction_samples(device).max(4)))],
+                        ..Default::default()
+                    },
                     cache: None,
                 }),
                 ResourceKind::ComputePipeline,
@@ -2220,6 +2260,11 @@ impl VirtualState {
                 if fraction_on() { (map_bytes / 8).next_multiple_of(4) } else { 4 },
                 B::STORAGE | B::COPY_SRC,
             ),
+            sides: {
+                let sides = buffer("Covered fraction side table", (SIDE_ANGLES * 65 * 8) as u64, B::UNIFORM | B::COPY_DST);
+                queue.write_buffer(&sides, 0, &side_table());
+                sides
+            },
             history: buffer(
                 "Disk lookup answer history",
                 (u64::from(size[0]) * u64::from(size[1]) * 8).max(8),
@@ -3770,6 +3815,8 @@ impl Renderer {
                         buffer(56, &r.outline),
                         buffer(62, &r.edges),
                         buffer(63, &r.history),
+                        buffer(66, &r.cover),
+                        buffer(68, &r.sides),
                     ],
                 ),
                 queued: group(

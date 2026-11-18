@@ -779,8 +779,8 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     let clo=max(max(bottom,lo),1e-6*size);let chi=min(t,hi);
     var m=vd_column_mask(c-p.xy,0.5*size,clo,chi);
     // The covered fraction: a level's own texel (not a max-mip cell) whose near layer covers k
-    // of its 8 samples (the top word's low bits, vsm_fold) blocks k/8 of the directions its column
-    // would block (vd_keep).
+    // eighths of its samples (the top word's low bits, vsm_fold) blocks the k/8 of the directions
+    // its column would block that cross its covered side (vd_side).
     if VD_FRACTION && stride==1 {
         let k=top.y&7u;
         // Measurement (VD_COUNTS, the edge log's words 5-7): columns of a level's own texel read,
@@ -789,7 +789,7 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
             atomicAdd(&vd_edge_count[5],1u);
             if k!=0u {atomicAdd(&vd_edge_count[6],1u);if any(m!=vec2<u32>(0u)) {atomicAdd(&vd_edge_count[7],1u);}}
         }
-        if k!=0u {m&=vd_keep(8u*k,vd_hash(i));}
+        if k!=0u {m=vd_side(m,i,k);}
     }
     // Straight outlines: only a column that adds samples without covering the disk reads its
     // texel's line (one word), and only an outline texel's is clipped.
@@ -825,26 +825,72 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
 override VD_RING:bool=true;
 // ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow.wgsl vsm_cover) ----
 override VD_FRACTION:bool=false;
-// `count` of the 64 disk samples, spread over the disk (an odd stride through the samples' x
-// ranks, offset per texel by `h`): a column keeps blocking only these of the directions it blocks,
-// so the share it blocks is its texel's covered share.
-fn vd_keep(count:u32,h:u32)->vec2<u32> {
-    // Samples j*37 mod 64 for j < count (count = 8k), as constants, rotated by h.
-    var m=vec2<u32>(0xffffffffu);
-    switch count/8u {
-        case 1u {m=vec2<u32>(0x40100409u,0x02008020u);}
-        case 2u {m=vec2<u32>(0x40902449u,0x12048922u);}
-        case 3u {m=vec2<u32>(0x44992649u,0x9224c932u);}
-        case 4u {m=vec2<u32>(0x64d9364du,0x9b26c9b2u);}
-        case 5u {m=vec2<u32>(0x66d9b66du,0xdb36cdbbu);}
-        case 6u {m=vec2<u32>(0x76ddbf6fu,0xdbb6edfbu);}
-        case 7u {m=vec2<u32>(0xf6fdff7fu,0xdfbfeffbu);}
+// The covered side (VD_FRACTION): a texel whose near layer covers k of its samples (vd_cover, the
+// page raster's sample bits) has its covered part on the side of those samples' centroid, n. A
+// ray through the texel crosses it further along n the larger n . s of its disk sample s is (the
+// offsets from the receiver and the texel centre are the same for every direction), so the
+// column blocks, of the directions it would block, the k/8 furthest along n: the same every frame,
+// and nested between neighbouring texels of one edge (no texture of per-texel subsets).
+override VD_SAMPLES:u32=8u;
+@group(0) @binding(66) var<storage,read> vd_cover:array<u32>;
+// Per angle a of n (VD_SIDE_ANGLES of them) and rank r in 0..=64: the mask of the r sample
+// directions furthest along n (two u32s each; virtual_shadow_gpu.rs `side_table`).
+const VD_SIDE_ANGLES:u32=32u;
+@group(0) @binding(68) var<uniform> vd_sides:array<vec4<u32>,1040>;
+fn vd_side_mask(a:u32,r:u32)->vec2<u32> {
+    let i=a*65u+r;
+    let v=vd_sides[i>>1u];
+    return select(v.xy,v.zw,(i&1u)==1u);
+}
+// The page raster's sample offsets from a texel centre, in texels (virtual_shadow.wgsl vsm_sample).
+fn vd_raster_sample(k:u32)->vec2<f32> {
+    if VD_SAMPLES==4u {
+        var o=vec2<f32>(2.0,6.0);
+        switch k {
+            case 0u {o=vec2<f32>(-2.0,-6.0);}
+            case 1u {o=vec2<f32>(6.0,-2.0);}
+            case 2u {o=vec2<f32>(-6.0,2.0);}
+            default {}
+        }
+        return o/16.0;
+    }
+    var o=vec2<f32>(7.0,-7.0);
+    switch k {
+        case 0u {o=vec2<f32>(1.0,-3.0);}
+        case 1u {o=vec2<f32>(-1.0,3.0);}
+        case 2u {o=vec2<f32>(5.0,1.0);}
+        case 3u {o=vec2<f32>(-3.0,-5.0);}
+        case 4u {o=vec2<f32>(-5.0,5.0);}
+        case 5u {o=vec2<f32>(-7.0,-1.0);}
+        case 6u {o=vec2<f32>(3.0,7.0);}
         default {}
     }
-    var r=h&63u;
-    if r>=32u {m=m.yx;r-=32u;}
-    if r>0u {m=vec2<u32>((m.x<<r)|(m.y>>(32u-r)),(m.y<<r)|(m.x>>(32u-r)));}
-    return m;
+    return o/16.0;
+}
+// Of the directions in m (a column of texel i whose near layer covers k eighths), the k/8 through
+// its covered side.
+fn vd_side(m:vec2<u32>,i:u32,k:u32)->vec2<u32> {
+    let c=countOneBits(m.x)+countOneBits(m.y);
+    let t=(k*c+4u)/8u;
+    if t==0u {return vec2<u32>(0u);}
+    if t>=c {return m;}
+    var bits=(vd_cover[i>>2u]>>((i&3u)*8u))&255u;
+    var g=vec2<f32>(0.0);
+    while bits!=0u {
+        g+=vd_raster_sample(firstTrailingBit(bits));
+        bits&=bits-1u;
+    }
+    // A centroid at the centre (a symmetric cover) gives no side; any fixed one serves.
+    if dot(g,g)<1e-8 {g=vec2<f32>(1.0,0.0);}
+    let a=u32(round(atan2(g.y,g.x)*(f32(VD_SIDE_ANGLES)/6.28318531)+f32(VD_SIDE_ANGLES)))%VD_SIDE_ANGLES;
+    // The smallest rank whose directions in m number t (the masks are nested).
+    var lo=0u;var hi=64u;
+    while lo<hi {
+        let mid=(lo+hi)/2u;
+        let kept=m&vd_side_mask(a,mid);
+        if countOneBits(kept.x)+countOneBits(kept.y)>=t {hi=mid;} else {lo=mid+1u;}
+    }
+    return m&vd_side_mask(a,lo);
 }
 // The map's columns: each level's band of heights, the highest band first (vd_map).
 fn vd_map() {
