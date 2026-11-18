@@ -42,12 +42,15 @@ fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)
 // radiance (rgb, unexposed) of the hit's cell, settled or changing, w 0 when no cell there has a
 // value or the cache is off. The cell is the one a pixel at the hit, seen from the ray's origin,
 // reads: its bin from the interpolated vertex normal on the side the ray sees (gi_bin_source, as
-// gi_prepare picks it). Levels in order: the one the cone covers, then the coarser ones, then the
-// finer ones down to the hit's own, last (where pixels on screen made cells: a probe ray from the
-// floor to the tower's side met only those, and counted as black). Fine cells first carried their
-// cell-to-cell differences into the probes: blotches a probe wide in the tower's shadow. Movers
-// read their cells too: those lag the surface by a frame or so, which a probe's hemisphere
-// integral does not show. With no value it leaves the cell to request in rl_cache_missed, as
+// gi_prepare picks it). Levels in order: the one the cone covers, then the finer ones down to the
+// hit's own (where pixels on screen made cells: a probe ray from the floor to the tower's side met
+// only those). Never coarser than the cone: a coarser cell spans whatever lies within its edge on
+// the same side, and around thin geometry that includes light from the other side. Glint's course
+// underglow lit the top of the spinner's pad through the +Y cells that held both the thin pad
+// and the surfaces beneath it (79/130/204 there with the underglow alone, against the reference's
+// 0.8/1.2/1.6). A hit no level answers is left out of the probe's average (gi_receiver_pass.wgsl
+// fg_lane). Movers read their cells too: those lag the surface by a frame or so, which a probe's
+// hemisphere integral does not show. With no value it leaves the cell to request in rl_cache_missed, as
 // the cache's external request list takes it (level | bin << 8, then the lattice cell; x
 // 0xffffffff: none).
 var<private> rl_cache_missed:vec4<u32>;
@@ -67,12 +70,10 @@ fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->
     let bin=gi_bin(gi_bin_source(select(-geometric,geometric,dot(geometric,origin-world)>=0.0),vertex));
     let own=gi_level(world);
     let start=rl_cache_level(world,cone);
-    let last=gi_word(GI_H_LEVELS)-1u;
-    // k walks start .. last, then start-1 .. own.
     var at_start=0xffffffffu;
     var at_own=0xffffffffu;
-    for(var k=0u;k<=last-own;k+=1u) {
-        let l=select(start-1u-(k-(last-start+1u)),start+k,k<=last-start);
+    for(var k=0u;k<=start-own;k+=1u) {
+        let l=start-k;
         let slot=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
         if l==start { at_start=slot; }
         if l==own { at_own=slot; }
