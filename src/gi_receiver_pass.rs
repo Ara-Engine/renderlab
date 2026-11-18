@@ -367,6 +367,9 @@ impl Renderer {
             return Ok(());
         };
         let [x, y] = state.region_groups([8, 4]);
+        // The gather's probe hits append cells without a value to the cache's external list,
+        // which the cache turns into requests from its next encode on.
+        let gathers = program::final_gather();
         self.queue.write_buffer(
             &target.args.value,
             0,
@@ -390,6 +393,9 @@ impl Renderer {
                 .is_some_and(|s| s.plan.held_frames() > 0);
             let reuse = built && !moved && still && target.lean[shading as usize] && target.computed && table.is_some() && target.table == table;
             self.queue.write_buffer(&keys.value, 0, &u32::from(reuse).to_ne_bytes());
+        }
+        if gathers {
+            self.gi.request_external();
         }
         let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
         target.computed = true;
