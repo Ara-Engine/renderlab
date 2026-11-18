@@ -392,9 +392,8 @@ fn fg_nee(lane:u32,ray:u32,s:FgSurface,r:u32) {
     let cosine=abs(dot(side,d))*0.5/max(area,1e-30);
     if area<=0.0 || cosine<=1e-4 {return;}
     let density=pick.probability*dist*dist/(area*cosine);
-    let traced=rl_cast(origin,d,s.epsilon);
     atomicAdd(&fg_rays[1],1u);
-    if traced.record.x!=0u && traced.t<dist*0.999 {return;}
+    if rl_blocked(origin,d,s.epsilon,dist*0.999) {return;}
     let weight=fg_mis(density*f32(FG_NEE),FG_HEMISPHERE_PDF*f32(FG_HEMI));
     let light=gi_emitter_vec(w+9u)*(weight*FG_HEMISPHERE_PDF*f32(FG_HEMI)/(density*f32(FG_NEE)));
     gi_sh_basis(d);
