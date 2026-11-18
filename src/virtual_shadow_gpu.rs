@@ -150,14 +150,6 @@ fn dump_poll(frame: u64) {
         }
     });
 }
-/// Measurement: `RENDERLAB_VSM_FINER=n` gives every receiver, and the ladder, a level n octaves
-/// finer than `texels_per_pixel_log2` asks for (the density test for stepped outlines).
-fn finer() -> f32 {
-    static FINER: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
-    *FINER.get_or_init(|| {
-        std::env::var("RENDERLAB_VSM_FINER").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0.0)
-    })
-}
 /// Straight occluder outlines in the Disk lookup (shaders/virtual_shadow_disk.wgsl VD_EDGES):
 /// the page pass that stores each outline texel's edge line runs, its buffer (2 bytes a texel)
 /// exists and the lookup clips by it. `RENDERLAB_VD=VD_EDGES=true|false` overrides the default.
@@ -1313,18 +1305,23 @@ impl Renderer {
         if frame == *first {
             dump_texture(&self.device, encoder, &fresh.world.texture, dir.join(format!("world-{frame}-{w}x{h}.bin")), frame);
             dump_texture(&self.device, encoder, &fresh.normal.texture, dir.join(format!("normal-{frame}-{w}x{h}.bin")), frame);
-            // The clipmap's top layer (dense: levels x side x side words of (id, height bits)).
-            if let Some(r) = self.view.virtual_shadows.as_ref().and_then(|s| s.resources.as_ref()) {
-                let bytes = r.top.size();
+            // The clipmap's top layer (dense: levels x side x side words of (id, height bits)),
+            // and with the covered fraction its sample bytes (a byte a texel, the same index).
+            let resources = self.view.virtual_shadows.as_ref().and_then(|s| s.resources.as_ref());
+            let planes = resources.into_iter().flat_map(|r| {
+                [Some((&r.top, "top")), fraction_on().then_some((&r.cover, "cover"))].into_iter().flatten()
+            });
+            for (source, name) in planes {
+                let bytes = source.size();
                 let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                     label: Some("clipmap top layer dump"),
                     size: bytes,
                     usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
                     mapped_at_creation: false,
                 });
-                encoder.copy_buffer_to_buffer(&r.top, 0, &buffer, 0, bytes);
+                encoder.copy_buffer_to_buffer(source, 0, &buffer, 0, bytes);
                 DUMPS.lock().unwrap().push(Dump {
-                    path: dir.join(format!("top-{frame}.bin")),
+                    path: dir.join(format!("{name}-{frame}.bin")),
                     buffer,
                     row: bytes as u32,
                     width_bytes: bytes as u32,
@@ -2162,7 +2159,7 @@ impl VirtualState {
             cover: buffer(
                 "Clipmap covered samples",
                 if fraction_on() { (map_bytes / 8).next_multiple_of(4) } else { 4 },
-                B::STORAGE,
+                B::STORAGE | B::COPY_SRC,
             ),
             history: buffer(
                 "Disk lookup answer history",
