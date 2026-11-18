@@ -643,6 +643,11 @@ struct Resources {
     history: Owned<wgpu::Buffer>,
     disk_clip: Option<[f32; 16]>,
     disk_parity: u32,
+    /// The Disk mark's generation: one more on every frame whose requests do not hold
+    /// (`VdFrame::reuse.y`, WGSL `vd_marked`).
+    mark_generation: u32,
+    /// Per trace tile, the generation that last marked it (WGSL `vd_marked`).
+    marked: Owned<wgpu::Buffer>,
     /// The hardware raster's attachment, which only sizes its raster area.
     _area: Owned<wgpu::Texture>,
     area: Owned<wgpu::TextureView>,
@@ -1089,7 +1094,9 @@ fn peel_gap_on() -> bool {
     *ON.get_or_init(|| std::env::var("RENDERLAB_VD_PEEL_GAP").map_or(true, |v| v.trim() != "0"))
 }
 /// The Disk lookup's page requests hold while only TR1's jitter moved the camera
-/// (`requests_held`). `RENDERLAB_VD_REQUESTS_HOLD=0` marks every page-work frame.
+/// (`requests_held`): the mark pass then writes only the trace tiles the last full mark did not
+/// cover (their receivers' levels are another ladder's, or none). `RENDERLAB_VD_REQUESTS_HOLD=0`
+/// marks every page-work frame.
 fn requests_hold_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("RENDERLAB_VD_REQUESTS_HOLD").map_or(true, |v| v.trim() != "0"))
@@ -1389,6 +1396,8 @@ impl VirtualState {
                         },
                     ),
                     storage(52, false, S::COMPUTE),
+                    // The tiles' mark generations (held requests).
+                    storage(67, false, S::COMPUTE),
                 ],
             ),
             compact: group(
@@ -2018,8 +2027,14 @@ impl VirtualState {
                     sample_count: 1,
                     dimension: wgpu::TextureDimension::D2,
                     format: wgpu::TextureFormat::R32Uint,
+                    // Tests write and read the receiver levels (test_stale_levels, test_levels).
                     usage: wgpu::TextureUsages::STORAGE_BINDING
-                        | wgpu::TextureUsages::TEXTURE_BINDING,
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | if cfg!(test) {
+                            wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST
+                        } else {
+                            wgpu::TextureUsages::empty()
+                        },
                     view_formats: &[],
                 }),
                 ResourceKind::Texture,
@@ -2168,6 +2183,8 @@ impl VirtualState {
             ),
             disk_clip: None,
             disk_parity: 0,
+            mark_generation: 0,
+            marked: buffer("Disk mark generations", trace_tiles(size) * 4, B::STORAGE),
             _area: area,
             area: area_view,
             _level: level,
@@ -3449,6 +3466,7 @@ impl Renderer {
             state.pool_frame = state.pool_frame.wrapping_add(1);
         }
         let pool_frame = state.pool_frame;
+        let requests_held = state.requests_held;
         let casters = state.casters.as_ref().unwrap();
         let r = state.resources.as_mut().unwrap();
         self.queue.write_buffer(&r.frame, 0, &frame);
@@ -3475,11 +3493,15 @@ impl Renderer {
             let clip = camera.matrix(size.width, size.height).to_cols_array();
             let previous = r.disk_clip.replace(clip).unwrap_or(clip);
             r.disk_parity ^= 1;
+            // A held frame marks only the trace tiles the last full mark did not (WGSL vd_mark).
+            if !requests_held {
+                r.mark_generation = r.mark_generation.wrapping_add(1).max(1);
+            }
             let mut bytes = Vec::with_capacity(DISK_FRAME_BYTES as usize);
             for value in clip.into_iter().chain(previous) {
                 bytes.extend_from_slice(&value.to_ne_bytes());
             }
-            for w in [0, 0, r.disk_parity, 0] {
+            for w in [0, r.mark_generation, r.disk_parity, u32::from(requests_held)] {
                 bytes.extend_from_slice(&w.to_ne_bytes());
             }
             for i in 0..MAX_RECTS {
@@ -3558,6 +3580,7 @@ impl Renderer {
                         texture(14, &r.level_view),
                         buffer(50, &r.disk_frame),
                         buffer(52, &r.reach),
+                        buffer(67, &r.marked),
                     ],
                 ),
                 compact: group(
@@ -3966,6 +3989,72 @@ impl Renderer {
         let _ = &state.lookup_layout;
     }
 
+    /// Tests: writes `level` into every receiver level (a longer ladder's, as a cut leaves in the
+    /// trace tiles its marks did not cover) and, with `unmark`, forgets which tiles the last full
+    /// mark covered.
+    #[cfg(test)]
+    pub(super) fn test_stale_levels(&self, level: u32, unmark: bool) {
+        let r = self.view.virtual_shadows.as_ref().unwrap().resources.as_ref().unwrap();
+        let [width, height] = r.size;
+        let words: Vec<u8> = std::iter::repeat_n(level.to_ne_bytes(), (width * height) as usize).flatten().collect();
+        self.queue.write_texture(
+            r._level.as_image_copy(),
+            &words,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4 * width),
+                rows_per_image: Some(height),
+            },
+            r._level.size(),
+        );
+        if unmark {
+            self.queue.write_buffer(&r.marked, 0, &vec![0; r.marked.size() as usize]);
+        }
+    }
+    /// Tests: the receiver levels after the last frame, whether its page requests held, and the
+    /// ladder's length.
+    #[cfg(test)]
+    pub(super) fn test_levels(&self) -> (Vec<u32>, bool, u32) {
+        let state = self.view.virtual_shadows.as_ref().unwrap();
+        let r = state.resources.as_ref().unwrap();
+        let [width, height] = r.size;
+        let row = (4 * width).div_ceil(256) * 256;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("receiver level readback"),
+            size: u64::from(row * height),
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&Default::default());
+        encoder.copy_texture_to_buffer(
+            r._level.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: Some(height),
+                },
+            },
+            r._level.size(),
+        );
+        self.queue.submit([encoder.finish()]);
+        buffer.slice(..).map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::Wait {
+                submission_index: None,
+                timeout: Some(std::time::Duration::from_secs(20)),
+            })
+            .unwrap();
+        let data = buffer.slice(..).get_mapped_range().unwrap();
+        let levels = data
+            .chunks(row as usize)
+            .flat_map(|line| line[..4 * width as usize].chunks(4))
+            .map(|w| u32::from_ne_bytes(w.try_into().unwrap()))
+            .collect();
+        (levels, state.requests_held, state.levels as u32)
+    }
+
     /// Tests: the triangles with walk records.
     #[cfg(test)]
     pub(super) fn test_walk_records(&self) -> Option<u64> {
@@ -4020,9 +4109,8 @@ impl Renderer {
                 &p.mark
             });
             pass.set_bind_group(0, &*g.mark, &[]);
-            if !state.requests_held {
-                pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(4), 1);
-            }
+            // Held, the Disk mark returns at once in the tiles the last full mark covered.
+            pass.dispatch_workgroups(width.div_ceil(8), height.div_ceil(4), 1);
             if r.sparse {
                 // Stale and unused pages back to the pool, then each level's requests take
                 // pages, coarsest first (the raster budget serves coarse levels first), then
