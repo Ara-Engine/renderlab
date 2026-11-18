@@ -3575,6 +3575,21 @@ impl Renderer {
 /// distinct drawn mesh's BVH once, behind the frame's instance records. Repacked when the
 /// drawn meshes or the number of traced instances change; transform edits rewrite only the
 /// records.
+impl Renderer {
+    /// The reflection pass's software geometry (non-RT) and its repack count, when packed.
+    pub(super) fn reflection_geometry(&self) -> Option<(&wgpu::Buffer, u64)> {
+        let r = self.view.primary.as_ref()?.reflections.as_ref()?;
+        Some((&r.buffer.value, r.generation))
+    }
+    /// That geometry's bytes (0: none), for the GI log's memory line.
+    pub fn reflection_geometry_bytes(&self) -> u64 {
+        self.reflection_geometry().map_or(0, |(b, _)| b.size())
+    }
+    /// The indirect cache's own software geometry's bytes (0: none).
+    pub fn indirect_geometry_bytes(&self) -> u64 {
+        self.gi.packed_bytes()
+    }
+}
 pub(super) struct SoftwareReflections {
     buffer: Buffer,
     meshes: Vec<Arc<crate::reflection_software::Blas>>,

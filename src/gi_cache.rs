@@ -938,6 +938,10 @@ pub struct IndirectCounters {
     /// shadow rays, when it counts them.
     pub fg_rays: u32,
     pub fg_shadow_rays: u32,
+    /// Measurement (RENDERLAB_GI_BVH_BENCH): the bench rays' hits through the cache's geometry
+    /// and through the reflection BVH4.
+    pub bench_cache_hits: u32,
+    pub bench_rs_hits: u32,
     /// Cells a full bucket gave up to a miss before their eviction age (U-SPECK,
     /// docs/speck.md), and those of them seen within the last eight frames.
     pub evicted: u32,
@@ -1027,6 +1031,8 @@ struct Pipelines {
     priority: Option<priority::Pipelines>,
     directions: u32,
     probe: Owned<wgpu::ComputePipeline>,
+    /// Measurement (RENDERLAB_GI_BVH_BENCH): the bench's two kernels, cache then reflection BVH.
+    bench: Option<[Owned<wgpu::ComputePipeline>; 2]>,
     external: Owned<wgpu::ComputePipeline>,
     claim: Owned<wgpu::ComputePipeline>,
     resolve: Owned<wgpu::ComputePipeline>,
@@ -2261,6 +2267,10 @@ impl GiState {
             watch.submitted();
         }
     }
+    /// The software geometry's bytes (0: none packed).
+    pub(crate) fn packed_bytes(&self) -> u64 {
+        self.packed.as_ref().map_or(0, |p| p.bytes)
+    }
     /// The table shading binds (lighting group 3, binding 20).
     pub fn shading_table(&self) -> &wgpu::Buffer {
         self.resources.as_ref().map_or(&*self.dummy, |r| &*r.table)
@@ -2333,6 +2343,30 @@ fn probe_cut(source: String) -> String {
     }
     source
 }
+/// Measurement: RENDERLAB_GI_BVH_BENCH=<rays> traces that many cache rays a frame through both
+/// software structures (shaders/gi_bvh_bench.wgsl), non-RT only; 0 or unset: off.
+pub(crate) fn bvh_bench() -> u32 {
+    static RAYS: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *RAYS.get_or_init(|| {
+        std::env::var("RENDERLAB_GI_BVH_BENCH").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+    })
+}
+/// Workgroups of 64 the bench dispatches (each lane walks its rays in turn).
+const BVH_BENCH_GROUPS: u32 = 1024;
+/// The reflection pass's BVH4 trace up to the end of `rs_trace`, for the bench.
+fn bvh_bench_source() -> String {
+    let bvh4 = crate::instance_bvh::shader_text(include_str!("../shaders/reflections_software_bvh4.wgsl"));
+    let start = bvh4.find("fn rs_trace(").expect("rs_trace in the BVH4 trace");
+    let end = start + bvh4[start..].find("\n}\n").expect("rs_trace's end") + 3;
+    let line = "const GI_BENCH_RAYS:u32=1048576u;";
+    let bench = include_str!("../shaders/gi_bvh_bench.wgsl");
+    assert_eq!(bench.matches(line).count(), 1);
+    format!(
+        "{}\n{}",
+        bench.replace(line, &format!("const GI_BENCH_RAYS:u32={}u;", bvh_bench())),
+        &bvh4[..end]
+    )
+}
 fn kernel_source_base(software: bool, directions: u32) -> String {
     let enables = if software {
         "enable wgpu_binding_array;\n"
@@ -2391,6 +2425,10 @@ fn kernel_source_base(software: bool, directions: u32) -> String {
         "gi_emitters.wgsl",
         include_str!("../shaders/gi_emitters.wgsl"),
     ));
+    if software && bvh_bench() != 0 {
+        kernels.push('\n');
+        kernels.push_str(&bvh_bench_source());
+    }
     // Keep the hardware module unchanged, including its original gather entry.
     if software {
         kernels.push('\n');
@@ -3141,6 +3179,8 @@ impl Renderer {
             external_overflow: w[221],
             fg_rays: w[222],
             fg_shadow_rays: w[223],
+            bench_cache_hits: w[224],
+            bench_rs_hits: w[225],
             evicted: w[44],
             evicted_recent: w[45],
             full_pixel: w[46],
@@ -3427,7 +3467,11 @@ impl Renderer {
         );
         // Software rays bind their geometry at 35 on every device; the TLAS entry at 34
         // exists only where ray queries do.
-        let software = [&common[..], &[storage(35, true)]].concat();
+        let software = if bvh_bench() != 0 {
+            [&common[..], &[storage(35, true), storage(39, true)]].concat()
+        } else {
+            [&common[..], &[storage(35, true)]].concat()
+        };
         let rt = self
             .device
             .features()
@@ -3561,6 +3605,7 @@ impl Renderer {
             priority: priority.then(|| priority::Pipelines::new(|name| kernel(name))),
             directions,
             probe: kernel("gi_probe"),
+            bench: (software && bvh_bench() != 0).then(|| [kernel("gi_bench_cache"), kernel("gi_bench_rs")]),
             external: kernel("gi_external_requests"),
             claim: kernel(if priority { "gi_priority_claim_visible" } else { "gi_claim" }),
             resolve: kernel("gi_resolve"),
@@ -4267,10 +4312,12 @@ impl Renderer {
         } else {
             scene_generation
         };
+        // The bench binds the reflection geometry too: a repack rebinds.
+        let bench = if software && bvh_bench() != 0 { self.reflection_geometry().map_or(0, |(_, g)| g) } else { 0 };
         let key = (
             (*targets.hit.texture).clone(),
             (*targets.tiles.texture).clone(),
-            rays ^ (self.gi.generation << 40),
+            rays ^ (self.gi.generation << 40) ^ (bench << 52),
             software,
         );
         if self.gi.groups.as_ref().is_some_and(|g| g.key == key) {
@@ -4323,6 +4370,15 @@ impl Renderer {
                 binding: 35,
                 resource: self.gi.packed.as_ref().unwrap().buffer.as_entire_binding(),
             });
+            if bvh_bench() != 0 {
+                entries.push(wgpu::BindGroupEntry {
+                    binding: 39,
+                    resource: self
+                        .reflection_geometry()
+                        .map_or(&*self.gi.dummy, |(b, _)| b)
+                        .as_entire_binding(),
+                });
+            }
         } else {
             entries.push(wgpu::BindGroupEntry {
                 binding: 34,
@@ -4515,6 +4571,13 @@ impl GiState {
         if traced && self.external_readers {
             main_pass(encoder, "indirect cache external requests", &p.external, u32::MAX, Some([EXTERNAL_GROUPS, 1]));
             encoder.clear_buffer(&r.external, 0, Some(16));
+        }
+        // Measurement: the same rays through both software structures, each in its own mark.
+        if let Some([cache, rs]) = &p.bench {
+            mark(encoder, "gi_bench_cache");
+            main_pass(encoder, "indirect bench: cache geometry", cache, u32::MAX, Some([BVH_BENCH_GROUPS, 1]));
+            mark(encoder, "gi_bench_rs");
+            main_pass(encoder, "indirect bench: reflection BVH4", rs, u32::MAX, Some([BVH_BENCH_GROUPS, 1]));
         }
         // Bounce gathers (G2) read last frame's outgoing radiance and may request hit cells
         // for the claim rounds that follow.
