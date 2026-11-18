@@ -37,6 +37,12 @@ fn light_cold_words(lights: u32, directions: u32) -> u32 {
 }
 /// Work counters, then the per-slot claim words (shaders/gi_cache.wgsl GI_W_CLAIMS).
 pub(crate) const COUNTER_WORDS: u64 = 384;
+/// Cells the external request list holds (shaders/gi_cache.wgsl GI_EXTERNAL_CAPACITY).
+const EXTERNAL_CAPACITY: u64 = 16384;
+/// The external request list's bytes: 4 header words, then 4 words per cell.
+const EXTERNAL_BYTES: u64 = (4 + 4 * EXTERNAL_CAPACITY) * 4;
+/// Workgroups of 64 that turn the external list into requests.
+const EXTERNAL_GROUPS: u32 = 64;
 const MISS_WORDS: u64 = 6;
 /// Words per request-table entry: key a, generation band, the chosen key b (shaders/gi_cache.wgsl
 /// GI_REQUEST_WORDS).
@@ -892,6 +898,10 @@ pub struct IndirectCounters {
     pub gather_deferred: u32,
     /// Listed misses a capped claim left for a later frame (`IndirectSettings::claim_cells`).
     pub claim_deferred: u32,
+    /// Cells readers outside the cache listed last frame (the final gather's probe hits), and
+    /// those past the list's capacity.
+    pub external_requests: u32,
+    pub external_overflow: u32,
     /// Cells a full bucket gave up to a miss before their eviction age (U-SPECK,
     /// docs/speck.md), and those of them seen within the last eight frames.
     pub evicted: u32,
@@ -952,13 +962,16 @@ struct Resources {
     /// The cell-space filter's sources (G3): RAW_WORDS per slot while a filter is set, else
     /// one slot's.
     raw: Owned<wgpu::Buffer>,
+    /// Cells readers outside the cache met without a value (the final gather's probe hits),
+    /// requested on the next frame (shaders/gi_cache.wgsl gi_external_requests).
+    external: Owned<wgpu::Buffer>,
     slots: u32,
     cold_words: u32, // LC2: dynamic per-cell light bitset stride.
     directions: u32,
     misses: u32,
     /// Slots the filter sources hold (1 without a filter).
     raw_slots: u32,
-    _allocations: [Allocation; 5],
+    _allocations: [Allocation; 6],
 }
 struct Layouts {
     /// Hardware (TLAS at 34) and software (geometry at 35).
@@ -978,6 +991,7 @@ struct Pipelines {
     priority: Option<priority::Pipelines>,
     directions: u32,
     probe: Owned<wgpu::ComputePipeline>,
+    external: Owned<wgpu::ComputePipeline>,
     claim: Owned<wgpu::ComputePipeline>,
     resolve: Owned<wgpu::ComputePipeline>,
     resolve_last: Owned<wgpu::ComputePipeline>,
@@ -2202,6 +2216,15 @@ impl GiState {
             .as_ref()
             .map_or(&*self.dummy, |r| &*r.outgoing)
     }
+    /// The list readers outside the cache append cells without a value to (shaders/gi_cache.wgsl
+    /// `gi_external`: count, overflow, two spare words, then per cell level | bin << 8 and its
+    /// lattice coordinates); the next frame requests them. The dummy while the cache has no
+    /// resources.
+    pub fn external_requests(&self) -> &wgpu::Buffer {
+        self.resources
+            .as_ref()
+            .map_or(&*self.dummy, |r| &*r.external)
+    }
     pub fn collect(&mut self, completed: u64) {
         self.retired.retain(|(last, _)| *last > completed);
     }
@@ -2672,6 +2695,7 @@ impl Renderer {
                 ),
                 draws: buffer("indirect cache draw table", draws_bytes, storage),
                 raw: buffer("indirect cache filter sources", raw_bytes, storage | if queue_probe::enabled() {wgpu::BufferUsages::COPY_SRC} else {wgpu::BufferUsages::empty()}),
+                external: buffer("indirect cache external requests", EXTERNAL_BYTES, storage),
                 slots,
                 cold_words,
                 directions,
@@ -2683,6 +2707,7 @@ impl Renderer {
                     self.ledger.allocate(AllocationKind::Light, outgoing_bytes),
                     self.ledger.allocate(AllocationKind::Light, draws_bytes),
                     self.ledger.allocate(AllocationKind::Light, raw_bytes),
+                    self.ledger.allocate(AllocationKind::Light, EXTERNAL_BYTES),
                 ],
             };
             self.gi.stats.table_bytes = table_bytes;
@@ -3037,6 +3062,8 @@ impl Renderer {
             gather_orphans: w[41],
             gather_deferred: w[42],
             claim_deferred: w[43],
+            external_requests: w[220],
+            external_overflow: w[221],
             evicted: w[44],
             evicted_recent: w[45],
             full_pixel: w[46],
@@ -3313,6 +3340,7 @@ impl Renderer {
             storage(33, false),
             storage(36, true),
             storage(37, false),
+            storage(38, false),
         ];
         let tlas = entry(
             34,
@@ -3456,6 +3484,7 @@ impl Renderer {
             priority: priority.then(|| priority::Pipelines::new(|name| kernel(name))),
             directions,
             probe: kernel("gi_probe"),
+            external: kernel("gi_external_requests"),
             claim: kernel(if priority { "gi_priority_claim_visible" } else { "gi_claim" }),
             resolve: kernel("gi_resolve"),
             resolve_last: kernel("gi_resolve_last"),
@@ -4201,6 +4230,10 @@ impl Renderer {
                 binding: 37,
                 resource: r.raw.as_entire_binding(),
             },
+            wgpu::BindGroupEntry {
+                binding: 38,
+                resource: r.external.as_entire_binding(),
+            },
         ];
         if software {
             entries.push(wgpu::BindGroupEntry {
@@ -4381,6 +4414,12 @@ impl GiState {
         }
         if let Some(probe)=self.queue_probe.as_mut() {
             probe.encode(encoder,r,self.planner.tick_queues[0]);
+        }
+        // Last frame's external requests join the probe's, for the same claim rounds; the list
+        // then starts empty for this frame's appends (the final gather runs after encode).
+        if traced {
+            main_pass(encoder, "indirect cache external requests", &p.external, u32::MAX, Some([EXTERNAL_GROUPS, 1]));
+            encoder.clear_buffer(&r.external, 0, Some(16));
         }
         // Bounce gathers (G2) read last frame's outgoing radiance and may request hit cells
         // for the claim rounds that follow.
