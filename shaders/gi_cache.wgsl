@@ -219,6 +219,17 @@ fn gi_word(i:u32) -> u32 { return gi_table[i]; }
 // (sky scale and halves, bounce scale and halves), written beside the hot record by gi_store_sh
 // and gi_gather while a filter bit is set. One record when the filter is off.
 @group(0) @binding(37) var<storage,read_write> gi_raw:array<u32>;
+// ---- requests from outside the cache ----
+// Readers that cannot write the cache (the final gather's probe rays, bound through
+// GiState::external_requests) append the cells they met without a value: word 0 the count,
+// word 1 the appends past capacity, then from word 4 one entry of 4 words per cell, level |
+// bin << 8 and the cell's lattice coordinates (gi_request_one's arguments). The next frame's
+// gi_external_requests turns each into a request after the probe's, for the same claim rounds;
+// the CPU then clears the count.
+@group(0) @binding(38) var<storage,read_write> gi_external:array<atomic<u32>>;
+const GI_EXTERNAL_CAPACITY:u32=16384u;
+const GI_W_EXTERNAL:u32=220u;
+const GI_W_EXTERNAL_OVERFLOW:u32=221u;
 const GI_RAW_WORDS:u32=22u;
 fn gi_raw_at(slot:u32, word:u32) -> u32 { return slot*GI_RAW_WORDS+word-1u; }
 fn gi_filter_on(term:u32) -> bool { return (gi_word(GI_H_FILTER)&term)!=0u; }
@@ -1948,6 +1959,26 @@ fn gi_light_affects(index:u32,q:vec3<f32>,n:vec3<f32>) -> bool {
 }
 // Requests the cell (level, bin, cell) for this frame's claim rounds, as the probe lists a
 // miss, in a generation band below the pixels' (resolve marks it secondary or tertiary).
+// The external list's cells as requests, a band below pixels' (a probe hit is one bounce from
+// a pixel, as a pixel-made cell's gather is). A cell made since it was listed is skipped; the
+// request table merges repeats.
+@compute @workgroup_size(64) fn gi_external_requests(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
+    let count=min(atomicLoad(&gi_external[0]),GI_EXTERNAL_CAPACITY);
+    if id.x==0u {
+        atomicAdd(&gi_work[GI_W_EXTERNAL],count);
+        atomicAdd(&gi_work[GI_W_EXTERNAL_OVERFLOW],atomicLoad(&gi_external[1]));
+    }
+    for(var i=id.x;i<count;i+=groups.x*64u) {
+        let at=4u+i*4u;
+        let tag=atomicLoad(&gi_external[at]);
+        let level=tag&0xffu;
+        let bin=(tag>>8u)&0xffu;
+        if level>=gi_word(GI_H_LEVELS) || bin>=6u { continue; }
+        let cell=bitcast<vec3<i32>>(vec3<u32>(atomicLoad(&gi_external[at+1u]),atomicLoad(&gi_external[at+2u]),atomicLoad(&gi_external[at+3u])));
+        if gi_find_pair(gi_key(level,bin,cell))!=0xffffffffu { continue; }
+        gi_request_one(level,bin,cell,GI_BAND_SECONDARY);
+    }
+}
 fn gi_request_one(level:u32, bin:u32, cell:vec3<i32>, band:u32) {
     let key=gi_key(level,bin,cell);
     let entry=gi_request_entry(key.x);
