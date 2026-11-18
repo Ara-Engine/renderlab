@@ -256,8 +256,8 @@ fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
 // all of that: a probe hit on Glint's white surfaces came out without their glow, a tenth dark
 // in sky-lit shadow. rl_cache_cell picks the cell (reflection_cache_hits.wgsl); a hit no level
 // answers (or any hit while RENDERLAB_RL_CACHE_HITS=off leaves the stub in) sends nothing.
-fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
-    let traced=rl_cast(origin,d,epsilon);
+fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,tmin:f32)->vec3<f32> {
+    let traced=rl_cast(origin,d,tmin);
     fg_hit=traced.record.x!=0u;
     fg_unanswered=false;
     if traced.record.x==0u {return rl_sky(d,FG_SKY_ALPHA)/max(lighting.exposure,1e-30);}
@@ -338,7 +338,7 @@ fn fg_lane(lane:u32,ray:u32,s:FgSurface,pixel:vec2<u32>,r:u32) {
             fg_nee(lane,ray,s,r);
         } else {
             d=fg_direction(s.normal,ray-FG_NEE,FG_HEMI,r);
-            radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,s.epsilon);
+            radiance=fg_radiance(fma(s.normal,vec3<f32>(s.epsilon),s.world),d,fg_near_start(s,pixel));
             atomicAdd(&fg_rays[0],1u);
             if fg_hit && fg_unanswered && rl_cache_missed.x!=0xffffffffu && atomicExchange(&fg_asked[lane/FG_RAYS],1u)==0u {fg_request(rl_cache_missed);}
             // A hit no cache level answers yet is left out of the probe's average (fg_accumulate
@@ -676,8 +676,41 @@ var<workgroup> fg_pair:array<u32,2>;
         let a=FG_BOUNCE+k*3u;
         gi_rx_bounce[k]=vec3<f32>(fg_sum[a/4u][a%4u],fg_sum[(a+1u)/4u][(a+1u)%4u],fg_sum[(a+2u)/4u][(a+2u)%4u])*inv;
     }
+    let near=fg_near_visibility(s,id,size);
+    for(var i=0u;i<9u;i+=1u) {gi_rx_sky[i]*=near;}
+    for(var k=0u;k<4u;k+=1u) {gi_rx_bounce[k]*=near;}
     gi_rx_valid=true;
     gi_rx_absolute=true;
     gi_rx_normal=s.shading;
     gi_rx_store_at(id.y*size.x+id.x);
+}
+// Near field (prototype, off while FG_NEAR_RAYS is 0): each pixel's own short-range occlusion,
+// which 16 px probes cannot resolve (the dark band where Glint's spinner disk meets its rim came
+// out softened and about 8 codes light). Occluders within FG_NEAR_REACH probe footprints of a
+// point belong to the pixel: FG_NEAR_RAYS cosine-distributed any-hit rays that far, a new set each
+// frame (TR1 averages them), scale its probe light by the share that get through. The probes'
+// rays start that far out (fg_near_start), so an occluder is counted by one of the two, not both.
+const FG_NEAR_RAYS:u32=0u;
+const FG_NEAR_REACH:f32=1.0;
+// Where a probe ray starts: past the near field its probe's pixels take themselves, or at the
+// trace epsilon without a near field.
+fn fg_near_start(s:FgSurface,pixel:vec2<u32>)->f32 {
+    if FG_NEAR_RAYS==0u {return s.epsilon;}
+    return max(s.epsilon,FG_NEAR_REACH*fg_footprint(pixel,textureDimensions(primary_hit),s.world));
+}
+// The share of a pixel's cosine-weighted hemisphere that nothing occludes within the near field.
+fn fg_near_visibility(s:FgSurface,id:vec2<u32>,size:vec2<u32>)->f32 {
+    if FG_NEAR_RAYS==0u {return 1.0;}
+    let reach=fg_near_start(s,id);
+    let origin=fma(s.normal,vec3<f32>(s.epsilon),s.world);
+    let r=fg_hash(id.x*73856093u^id.y*19349663u^primary_frame.sided.y*83492791u);
+    var open=0.0;
+    for(var k=0u;k<FG_NEAR_RAYS;k+=1u) {
+        let h=fg_hash(r+k*0x9e3779b9u);
+        let u=vec2<f32>(f32(h&0xffffu),f32(h>>16u))*(1.0/65536.0);
+        let z=sqrt(u.x);let rr=sqrt(max(1.0-u.x,0.0));let phi=6.283185307179586*u.y;
+        let d=fg_basis(s.normal)*vec3<f32>(rr*cos(phi),rr*sin(phi),z);
+        if !rl_blocked(origin,d,s.epsilon,reach) {open+=1.0;}
+    }
+    return open/f32(FG_NEAR_RAYS);
 }
