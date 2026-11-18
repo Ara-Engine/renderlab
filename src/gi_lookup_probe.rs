@@ -109,6 +109,7 @@ mod tests {
             } else {
                 shade_source_for(composed.source, true, true, true)
             };
+            module.push_str(&super::super::emitter_readers());
             module.push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
             assert_eq!(source(module.clone(), false), module);
             let module = source(module, true);

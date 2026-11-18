@@ -698,7 +698,7 @@ const SOFTWARE_REFLECTION_SEAMS: [(&str, &str); 5] = [
 /// minimum perceptual roughness (0-1), which then applies on both paths;
 /// `RENDERLAB_RL_CACHE_HITS=off` turns it off everywhere.
 pub(crate) const CACHE_HITS: &str = include_str!("../shaders/reflection_cache_hits.wgsl");
-pub(crate) const CACHE_HITS_STUB: &str = "fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> { return vec4<f32>(0.0); }\nfn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> { return vec4<f32>(0.0); }\nfn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> { return vec4<f32>(0.0); }\n";
+pub(crate) const CACHE_HITS_STUB: &str = "fn rl_cache_hit(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32,rough:f32)->vec4<f32> { return vec4<f32>(0.0); }\nfn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> { return vec4<f32>(0.0); }\nvar<private> rl_cache_missed:vec4<u32>;\nfn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> { return vec4<f32>(0.0); }\n";
 /// The final gather's module (src/gi_receiver_pass.rs) reads the cache at its probe rays' hits
 /// on both paths whenever the lighting group binds the outgoing radiance: the lookup, with no
 /// reflection lobe reaching it (no roughness reaches 2).
