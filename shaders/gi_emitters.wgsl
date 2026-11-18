@@ -19,7 +19,8 @@ const GI_H_EMITTERS:u32=57u;
 const GI_H_EMITTER_COUNT:u32=58u;
 const GI_H_EMITTER_DRAWS:u32=59u;
 const GI_H_EMITTERS_MAX:u32=60u;
-// Measurement: nonzero turns emitter sampling and the hit subtraction off (RENDERLAB_GI_EMITTERS=0).
+// Nonzero: the cache's own gathers neither sample the list nor subtract emission at hits
+// (default; RENDERLAB_GI_EMITTERS=1 turns them on). Readers outside the cache are unaffected.
 const GI_H_EMITTERS_OFF:u32=43u;
 // Per triangle: a corner, its two edges and the radiance, each three f32.
 const GI_EMITTER_WORDS:u32=12u;
@@ -33,18 +34,24 @@ const GI_W_EMITTER_RAYS:u32=202u;
 const GI_W_EMITTERS_DROPPED:u32=203u;
 
 fn gi_emitter_draws_at() -> u32 { return gi_word(GI_H_EMITTERS)+gi_word(GI_H_EMITTERS_MAX)*GI_EMITTER_WORDS; }
+// After the draws: per listed triangle, the running sum of the triangles' power up to and
+// including it (f32), for readers that pick emitters in proportion to power (gi_emitter_pick).
+fn gi_emitter_cdf_at() -> u32 { return gi_emitter_draws_at()+GI_EMITTER_DRAWS_MAX*GI_EMITTER_DRAW_WORDS; }
 fn gi_emitter_vec(at:u32) -> vec3<f32> {
     return vec3<f32>(bitcast<f32>(gi_word(at)),bitcast<f32>(gi_word(at+1u)),bitcast<f32>(gi_word(at+2u)));
 }
 
 // One thread per (placement, triangle) of the emitting draws, every frame the cache gathers: the
-// list follows moving emitters and draw changes in the frame they happen.
+// list follows moving emitters and draw changes in the frame they happen. Each draw's triangles
+// take the places after the previous emitting draws' (a running base every thread computes the
+// same), so the order does not depend on thread timing.
 @compute @workgroup_size(64) fn gi_emitters_build(@builtin(global_invocation_id) id:vec3<u32>,@builtin(num_workgroups) groups:vec3<u32>) {
     let at=gi_word(GI_H_EMITTERS);
     let most=gi_word(GI_H_EMITTERS_MAX);
     let stride=groups.x*64u;
     let slots=gi_word(GI_H_MASK)+1u;
     let draws=gi_draws[PRIMARY_BATCHES].x;
+    var listed=0u;
     for(var b=0u;b<draws;b+=1u) {
         // Cell shading's probe of the draw's emission (written after the slots' radiance).
         let e=gi_outgoing[slots+b].rgb;
@@ -68,24 +75,72 @@ fn gi_emitter_vec(at:u32) -> vec3<f32> {
             let a=world_position(gi_vertices[b].data[ia*3u].xyz,p).xyz;
             let e1=world_position(gi_vertices[b].data[ib*3u].xyz,p).xyz-a;
             let e2=world_position(gi_vertices[b].data[ic*3u].xyz,p).xyz-a;
-            let g=cross(e1,e2);
-            if !(dot(g,g)>0.0) { continue; }
-            let k=atomicAdd(&gi_work[GI_W_EMITTERS],1u);
-            if k>=most { atomicAdd(&gi_work[GI_W_EMITTERS_DROPPED],1u); continue; }
+            // A degenerate triangle stays listed: its solid angle and power are zero.
+            let k=listed+i;
+            if k>=most { continue; }
             let r=at+k*GI_EMITTER_WORDS;
             gi_table[r]=bitcast<u32>(a.x);gi_table[r+1u]=bitcast<u32>(a.y);gi_table[r+2u]=bitcast<u32>(a.z);
             gi_table[r+3u]=bitcast<u32>(e1.x);gi_table[r+4u]=bitcast<u32>(e1.y);gi_table[r+5u]=bitcast<u32>(e1.z);
             gi_table[r+6u]=bitcast<u32>(e2.x);gi_table[r+7u]=bitcast<u32>(e2.y);gi_table[r+8u]=bitcast<u32>(e2.z);
             gi_table[r+9u]=bitcast<u32>(e.x);gi_table[r+10u]=bitcast<u32>(e.y);gi_table[r+11u]=bitcast<u32>(e.z);
         }
+        listed+=total;
+    }
+    if id.x==0u {
+        atomicStore(&gi_work[GI_W_EMITTERS],min(listed,most));
+        atomicStore(&gi_work[GI_W_EMITTERS_DROPPED],listed-min(listed,most));
     }
 }
-// The counts into the header for this frame's readers (the CPU's header write zeroes them).
+// The counts into the header for this frame's readers (the CPU's header write leaves these two
+// words alone, so they hold on frames the cache does not rebuild the list).
 @compute @workgroup_size(1) fn gi_emitters_publish() {
     gi_table[GI_H_EMITTER_COUNT]=min(atomicLoad(&gi_work[GI_W_EMITTERS]),gi_word(GI_H_EMITTERS_MAX));
     gi_table[GI_H_EMITTER_DRAWS]=min(atomicLoad(&gi_work[GI_W_EMITTER_DRAWS]),GI_EMITTER_DRAWS_MAX);
 }
 
+// Listed triangle k's emitted power (W): its radiance's luminance times pi times its area.
+fn gi_emitter_power(k:u32) -> f32 {
+    let r=gi_word(GI_H_EMITTERS)+k*GI_EMITTER_WORDS;
+    let area=0.5*length(cross(gi_emitter_vec(r+3u),gi_emitter_vec(r+6u)));
+    return max(dot(gi_emitter_vec(r+9u),vec3<f32>(0.2126,0.7152,0.0722)),0.0)*3.141592653589793*area;
+}
+const GI_EMITTER_CDF_LANES:u32=64u;
+var<workgroup> gi_wg_emitter_sums:array<f32,64>;
+// The power CDF (gi_emitter_cdf_at): 64 lanes each sum a contiguous chunk, lane 0 turns the
+// chunk sums into offsets, and each lane writes its chunk's running sums. One workgroup.
+@compute @workgroup_size(64) fn gi_emitters_cdf(@builtin(local_invocation_index) lane:u32) {
+    let n=gi_word(GI_H_EMITTER_COUNT);
+    let chunk=(n+GI_EMITTER_CDF_LANES-1u)/GI_EMITTER_CDF_LANES;
+    let first=min(lane*chunk,n);
+    let last=min(first+chunk,n);
+    var sum=0.0;
+    for(var k=first;k<last;k+=1u) { sum+=gi_emitter_power(k); }
+    gi_wg_emitter_sums[lane]=sum;
+    workgroupBarrier();
+    if lane==0u {
+        var run=0.0;
+        for(var i=0u;i<GI_EMITTER_CDF_LANES;i+=1u) { let s=gi_wg_emitter_sums[i]; gi_wg_emitter_sums[i]=run; run+=s; }
+    }
+    workgroupBarrier();
+    var run=gi_wg_emitter_sums[lane];
+    let at=gi_emitter_cdf_at();
+    for(var k=first;k<last;k+=1u) { run+=gi_emitter_power(k); gi_table[at+k]=bitcast<u32>(run); }
+}
+// An emitter picked in proportion to power by u in [0, 1): its index and the probability it was
+// picked with (its power over the total), or probability 0 when nothing emits.
+struct GiEmitterPick { index:u32, probability:f32 };
+fn gi_emitter_pick(u:f32) -> GiEmitterPick {
+    let n=gi_word(GI_H_EMITTER_COUNT);
+    if n==0u { return GiEmitterPick(0u,0.0); }
+    let at=gi_emitter_cdf_at();
+    let total=bitcast<f32>(gi_word(at+n-1u));
+    if !(total>0.0) { return GiEmitterPick(0u,0.0); }
+    let goal=u*total;
+    var lo=0u; var hi=n-1u;
+    while lo<hi { let mid=(lo+hi)/2u; if bitcast<f32>(gi_word(at+mid))<=goal { lo=mid+1u; } else { hi=mid; } }
+    let below=select(0.0,bitcast<f32>(gi_word(at+lo-1u)),lo>0u);
+    return GiEmitterPick(lo,(bitcast<f32>(gi_word(at+lo))-below)/total);
+}
 // The emitted radiance of the draw a material identity + 1 names (gi_hit_identity), or zero.
 fn gi_identity_emission(identity:u32) -> vec3<f32> {
     let n=gi_word(GI_H_EMITTER_DRAWS);
@@ -102,7 +157,7 @@ fn gi_identity_emission(identity:u32) -> vec3<f32> {
 // for readers bound to the table but not to the cache's draws and geometry (the final gather).
 fn gi_batch_emission(batch:u32) -> vec3<f32> {
     let n=gi_word(GI_H_EMITTER_DRAWS);
-    if n==0u || gi_word(GI_H_EMITTERS_OFF)!=0u { return vec3<f32>(0.0); }
+    if n==0u { return vec3<f32>(0.0); }
     let base=gi_emitter_draws_at();
     for(var k=0u;k<n;k+=1u) {
         let w=base+k*GI_EMITTER_DRAW_WORDS;

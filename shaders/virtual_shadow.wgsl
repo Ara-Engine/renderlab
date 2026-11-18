@@ -32,7 +32,7 @@
 const VSM_PAGE:u32=128u;
 const VSM_NONE:u32=0xffffffffu;
 const VSM_MAX_LEVELS:u32=8u;
-const VSM_MAX_RECTS:u32=16u;
+const VSM_MAX_RECTS:u32=48u;
 const VSM_MISSING:u32=0xffffffffu;
 // Ring walk bound per fan direction; valence above this is truncated.
 const VSM_FAN_STEPS:u32=24u;
@@ -195,18 +195,36 @@ fn vsm_covered(id:vec2<u32>)->bool {
 
 // ---- Page cache: stale requested pages are flagged for this frame's raster ----
 @group(0) @binding(2) var<storage,read_write> vsm_state:array<u32>;
-// Per page slot: 1 when the page is cleared and rasterized this frame (zeroed by the
-// encoder on page-work frames).
+// Per page slot, the texels cleared and rasterized this frame (zeroed by the encoder on
+// page-work frames): 0 none; else bit 31 and the page-local texel rectangle, inclusive, 7 bits a
+// bound (x0, y0, x1, y1 from bit 0). A new or stale page is whole; a page only moved casters
+// touched is the union of their rectangles, so a mover re-rasterizes what it covers, not the
+// whole page and everything else in it.
 @group(0) @binding(29) var<storage,read_write> vsm_render:array<u32>;
+const VSM_DIRTY_FULL:u32=0x80000000u|(127u<<14u)|(127u<<21u);
+fn vsm_dirty(lo:vec2<u32>,hi:vec2<u32>)->u32 {return 0x80000000u|lo.x|(lo.y<<7u)|(hi.x<<14u)|(hi.y<<21u);}
+fn vsm_dirty_lo(w:u32)->vec2<u32> {return vec2<u32>(w&127u,(w>>7u)&127u);}
+fn vsm_dirty_hi(w:u32)->vec2<u32> {return vec2<u32>((w>>14u)&127u,(w>>21u)&127u);}
+fn vsm_dirty_has(w:u32,local:vec2<u32>)->bool {return all(local>=vsm_dirty_lo(w)) && all(local<=vsm_dirty_hi(w));}
 
-fn vsm_moved(level:u32,page:vec2<u32>)->bool {
-    let size=f32(VSM_PAGE)*vsm_texel(level);
+// The page-local texels the moved casters' rectangles cover in `page` of `level`, padded by a
+// texel (the rounding between box and raster transforms), as a vsm_render word; 0: none.
+fn vsm_moved(level:u32,page:vec2<u32>)->u32 {
+    let texel=vsm_texel(level);
+    let size=f32(VSM_PAGE)*texel;
     let lo=vsm.levels[level].origin.xy+vec2<f32>(page)*size;let hi=lo+vec2<f32>(size);
+    var a=vec2<i32>(i32(VSM_PAGE));var b=vec2<i32>(-1);
     for(var i=0u;i<vsm.counts.w;i+=1u) {
         let r=vsm.rects[i];
-        if all(lo<=r.zw) && all(hi>=r.xy) {return true;}
+        if all(lo<=r.zw) && all(hi>=r.xy) {
+            // Texel centres (k + 0.5) inside the rectangle, and one more each side.
+            a=min(a,vec2<i32>(ceil((r.xy-lo)/texel-vec2<f32>(0.5)))-vec2<i32>(1));
+            b=max(b,vec2<i32>(floor((r.zw-lo)/texel-vec2<f32>(0.5)))+vec2<i32>(1));
+        }
     }
-    return false;
+    a=max(a,vec2<i32>(0));b=min(b,vec2<i32>(i32(VSM_PAGE)-1));
+    if any(b<a) {return 0u;}
+    return vsm_dirty(vec2<u32>(a),vec2<u32>(b));
 }
 // N8f: the caster cull's indirect dispatch (x, y, z), zeroed by the encoder and set once a
 // page is flagged, so page-work frames that render no page (camera motion) skip the cull.
@@ -220,8 +238,8 @@ fn vsm_moved(level:u32,page:vec2<u32>)->bool {
     let epoch=vsm.levels[level].info.x;
     let moved=vsm_moved(level,page);
     if vsm_requests[id.x]!=0u {
-        if vsm_state[id.x]!=epoch || moved {
-            vsm_render[id.x]=1u;
+        if vsm_state[id.x]!=epoch || moved!=0u {
+            vsm_render[id.x]=select(moved,VSM_DIRTY_FULL,vsm_state[id.x]!=epoch);
             vsm_state[id.x]=epoch;
             // vsm_cull's grid: 64 clusters a group, 65535 groups a row.
             let groups=max((vsm.counts.z+63u)/64u,1u);
@@ -229,7 +247,7 @@ fn vsm_moved(level:u32,page:vec2<u32>)->bool {
             atomicMax(&vsm_cull_args[1],(groups+65534u)/65535u);
             atomicMax(&vsm_cull_args[2],1u);
         }
-    } else if moved {
+    } else if moved!=0u {
         // Not needed now, but its cached depths no longer describe the scene.
         vsm_state[id.x]=0u;
     }
@@ -269,7 +287,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     let requested=vsm_requests[v]!=0u;
     let pressure=atomicLoad(&vsm_pool[6u+((frame+1u)&1u)])!=0u;
     let old=frame-vsm_state[vsm_section(3u)+v]>VSM_KEEP_FRAMES;
-    if current && (requested || (!pressure && !old && !vsm_moved(level,page))) {return;}
+    if current && (requested || (!pressure && !old && vsm_moved(level,page)==0u)) {return;}
     vsm_state[table+v]=VSM_NONE;
     vsm_state[v]=0u;
     let i=atomicAdd(&vsm_pool[4],1u);
@@ -291,7 +309,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     vsm_state[vsm_section(3u)+v]=frame;
     let table=vsm_section(2u);
     var slot=vsm_state[table+v];
-    let moved=slot!=VSM_NONE && vsm_moved(level,page);
+    let moved=slot!=VSM_NONE && vsm_moved(level,page)!=0u;
     if slot!=VSM_NONE && !moved {return;}
     if atomicAdd(&vsm_pool[5],1u)>=atomicLoad(&vsm_pool[9]) {
         // Rasterized again next frame (vsm_release frees it).
@@ -310,7 +328,7 @@ fn vsm_entry_page(level:u32,v:u32)->vec2<u32> {
     }
     vsm_state[v]=vsm.levels[level].info.x;
     vsm_state[vsm_section(1u)+v]=vsm_tag(level,page);
-    vsm_render[v]=1u;
+    vsm_render[v]=VSM_DIRTY_FULL;
     let k=atomicAdd(&vsm_pool[0],1u);
     atomicStore(&vsm_pool[VSM_POOL_FREE+atomicLoad(&vsm_pool[10])+k],v);
     let groups=max((vsm.counts.z+63u)/64u,1u);
@@ -397,7 +415,12 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
         var stale=false;
         for(var y=p0.y;y<=p1.y && !stale;y+=1u) {
             for(var x=p0.x;x<=p1.x;x+=1u) {
-                if vsm_render[vsm_vpage(level,vec2<u32>(x,y))]!=0u {stale=true;break;}
+                let w=vsm_render[vsm_vpage(level,vec2<u32>(x,y))];
+                if w==0u {continue;}
+                let corner=origin+vec2<f32>(f32(x),f32(y))*page;
+                let d0=corner+vec2<f32>(vsm_dirty_lo(w))*texel;
+                let d1=corner+vec2<f32>(vsm_dirty_hi(w)+vec2<u32>(1u))*texel;
+                if all(lo-vec2<f32>(texel)<=d1) && all(hi+vec2<f32>(texel)>=d0) {stale=true;break;}
             }
         }
         if !stale {continue;}
@@ -424,7 +447,7 @@ fn vsm_group_error(g:u32,placement:u32)->f32 {
     vsm_work.args[level].sw_x=min(n,65535u);
     vsm_work.args[level].sw_y=select(0u,(n+65534u)/65535u,n!=0u);
     vsm_work.args[level].sw_z=1u;
-    vsm_work.args[level].hw_vertices=384u;
+    vsm_work.args[level].hw_vertices=select(384u,768u,VSM_FRACTION);
     vsm_work.args[level].hw_first=0u;
     vsm_work.args[level].hw_first_instance=0u;
 }
@@ -444,21 +467,28 @@ fn vsm_rendered(k:u32)->u32 {return vsm_pool_in[VSM_POOL_FREE+vsm_pool_in[10]+k]
     for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
         atomicStore(&vsm_top_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
         atomicStore(&vsm_peel_map[slot*VSM_PAGE*VSM_PAGE+k],0lu);
+        if VSM_FRACTION {vsm_cover_clear(slot*VSM_PAGE*VSM_PAGE+k);}
     }
 }
+// Zeroes texel i's covered-sample byte (four texels share a word).
+fn vsm_cover_clear(i:u32) {atomicAnd(&vsm_cover[i>>2u],~(255u<<((i&3u)*8u)));}
 // Zeroes both layers of every page flagged for this frame: one workgroup per page slot.
 @compute @workgroup_size(256) fn vsm_clear(@builtin(workgroup_id) group:vec3<u32>,@builtin(local_invocation_index) li:u32) {
     let slot=group.x;
-    if vsm_render[slot]==0u {return;}
+    let w=vsm_render[slot];
+    if w==0u {return;}
     let pages=vsm.counts.y;let per=pages*pages;
     let level=slot/per;let local=slot%per;
     let side=pages*VSM_PAGE;
     let corner=vec2<u32>(local%pages,local/pages)*VSM_PAGE;
     for(var k=li;k<VSM_PAGE*VSM_PAGE;k+=256u) {
-        let t=corner+vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
+        let q=vec2<u32>(k%VSM_PAGE,k/VSM_PAGE);
+        if !vsm_dirty_has(w,q) {continue;}
+        let t=corner+q;
         let i=(level*side+t.y)*side+t.x;
         atomicStore(&vsm_top_map[i],0lu);
         atomicStore(&vsm_peel_map[i],0lu);
+        if VSM_FRACTION {vsm_cover_clear(i);}
     }
 }
 // The map word of one caster fragment at texel t of `level` (normalized height in [0,1]).
@@ -466,7 +496,8 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     let pages=vsm.counts.y;
     let page=t/VSM_PAGE;
     let v=vsm_vpage(level,page);
-    if vsm_render[v]==0u {return;}
+    let w=vsm_render[v];
+    if w==0u || !vsm_dirty_has(w,t%VSM_PAGE) {return;}
     let side=pages*VSM_PAGE;
     var i=(level*side+t.y)*side+t.x;
     if vsm_sparse() {
@@ -487,6 +518,75 @@ fn vsm_write(level:u32,t:vec2<u32>,height:f32,id:u32) {
     } else {
         atomicMax(&vsm_top_map[i],value);
     }
+}
+// ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow_gpu.rs `fraction_on`) ----
+// The raster samples each texel at the eight positions of the 8x multisample pattern instead of
+// its centre. The top layer keeps the highest surface over those samples (the nearest covered
+// one where a caster covers part of the texel; where none does, the surface under the samples, as
+// today). The peel pass, which runs after the top one, keeps the peel layer at the centre as
+// today and marks in vsm_cover (a byte a texel at the top map's index) every sample whose covering
+// surface lies within the peel gap of that top: the near layer, the union of its triangles. The
+// Disk lookup lets a top column block that share of the directions it would block.
+override VSM_FRACTION:bool=false;
+@group(0) @binding(65) var<storage,read_write> vsm_cover:array<atomic<u32>>;
+// Sample k's offset from the texel centre, in sixteenths of a texel (the D3D 8x pattern).
+fn vsm_sample(k:u32)->vec2<f32> {
+    var o=vec2<f32>(7.0,-7.0);
+    switch k {
+        case 0u {o=vec2<f32>(1.0,-3.0);}
+        case 1u {o=vec2<f32>(-1.0,3.0);}
+        case 2u {o=vec2<f32>(5.0,1.0);}
+        case 3u {o=vec2<f32>(-3.0,-5.0);}
+        case 4u {o=vec2<f32>(-5.0,5.0);}
+        case 5u {o=vec2<f32>(-7.0,-1.0);}
+        case 6u {o=vec2<f32>(3.0,7.0);}
+        default {}
+    }
+    return o/16.0;
+}
+// The top map's index of texel t of `level`, or VSM_NONE where this frame does not draw it.
+fn vsm_texel_index(level:u32,t:vec2<u32>)->u32 {
+    let pages=vsm.counts.y;
+    let v=vsm_vpage(level,t/VSM_PAGE);
+    let w=vsm_render[v];
+    if w==0u || !vsm_dirty_has(w,t%VSM_PAGE) {return VSM_NONE;}
+    if vsm_sparse() {return vsm_pages[vsm_section(2u)+v]*VSM_PAGE*VSM_PAGE+(t.y%VSM_PAGE)*VSM_PAGE+t.x%VSM_PAGE;}
+    let side=pages*VSM_PAGE;
+    return (level*side+t.y)*side+t.x;
+}
+fn vsm_cross(a:vec2<f32>,b:vec2<f32>,p:vec2<f32>)->f32 {return (b.x-a.x)*(p.y-a.y)-(b.y-a.y)*(p.x-a.x);}
+// One triangle (vertices a, b, c in level texels, counter-clockwise, normalized heights z) at
+// texel t under VSM_FRACTION: the top pass writes its highest covered sample; the peel pass
+// writes its centre into the peel layer as vsm_write does and marks its near-layer samples.
+fn vsm_fraction_texel(level:u32,t:vec2<u32>,a:vec2<f32>,b:vec2<f32>,c:vec2<f32>,z:vec3<f32>,id:u32) {
+    let area=vsm_cross(a,b,c);
+    if area<=0.0 {return;}
+    let centre=vec2<f32>(t)+vec2<f32>(0.5);
+    if !VSM_PEEL_PASS {
+        var zmax=-1.0;
+        for(var k=0u;k<8u;k+=1u) {
+            let p=centre+vsm_sample(k);
+            let w=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p));
+            if any(w<vec3<f32>(0.0)) {continue;}
+            zmax=max(zmax,dot(w,z)/area);
+        }
+        if zmax>=0.0 {vsm_write(level,t,zmax,id);}
+        return;
+    }
+    let wc=vec3<f32>(vsm_cross(b,c,centre),vsm_cross(c,a,centre),vsm_cross(a,b,centre));
+    if all(wc>=vec3<f32>(0.0)) {vsm_write(level,t,dot(wc,z)/area,id);}
+    let i=vsm_texel_index(level,t);
+    if i==VSM_NONE {return;}
+    let top=bitcast<f32>(u32(atomicLoad(&vsm_top_map[i])>>32u));
+    let gap=VSM_PEEL_GAP*vsm_texel(level)/vsm.depth.z;
+    var bits=0u;
+    for(var k=0u;k<8u;k+=1u) {
+        let p=centre+vsm_sample(k);
+        let w=vec3<f32>(vsm_cross(b,c,p),vsm_cross(c,a,p),vsm_cross(a,b,p));
+        if any(w<vec3<f32>(0.0)) {continue;}
+        if dot(w,z)/area>=top-gap {bits|=1u<<k;}
+    }
+    if bits!=0u {atomicOr(&vsm_cover[i>>2u],bits<<((i&3u)*8u));}
 }
 // Placement + 1 and primitive, so the lookup can recognize the receiver's own 1-ring.
 fn vsm_cluster_id(c:VsmCluster,batch:u32,local:u32)->u32 {
@@ -530,12 +630,22 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
     if area<0 {let p=b;b=d;d=p;let z=s1;s1=s2;s2=z;}
     let inverse=1.0/f32(abs(area));
     let side=i32(vsm.counts.y*VSM_PAGE);
-    // Texel centres are at 256x+128 subpixels.
-    let lo=max(min(a,min(b,d)),vec2<i32>(0));
-    let hi=min(max(a,max(b,d)),vec2<i32>(side*256-1));
+    // Texel centres are at 256x+128 subpixels; the covered fraction's samples reach half a
+    // texel from them.
+    let grow=select(0,128,VSM_FRACTION);
+    let lo=max(min(a,min(b,d))-vec2<i32>(grow),vec2<i32>(0));
+    let hi=min(max(a,max(b,d))+vec2<i32>(grow),vec2<i32>(side*256-1));
     let first=(lo-vec2<i32>(128)+vec2<i32>(255))>>vec2<u32>(8u);
     let last=(hi-vec2<i32>(128))>>vec2<u32>(8u);
     let id=vsm_cluster_id(c,batch,li);
+    if VSM_FRACTION {
+        for(var y=first.y;y<=last.y;y+=1) {
+            for(var x=first.x;x<=last.x;x+=1) {
+                vsm_fraction_texel(level,vec2<u32>(u32(x),u32(y)),s0.xy,s1.xy,s2.xy,vec3<f32>(s0.z,s1.z,s2.z),id);
+            }
+        }
+        return;
+    }
     for(var y=first.y;y<=last.y;y+=1) {
         for(var x=first.x;x<=last.x;x+=1) {
             let p=vec2<i32>(x*256+128,y*256+128);
@@ -548,7 +658,11 @@ fn vsm_edge(a:vec2<i32>,b:vec2<i32>,p:vec2<i32>)->i32 {return (b.x-a.x)*(p.y-a.y
 }
 // Hardware raster of large clusters: one instance per cluster, 128 triangle slots; unused
 // slots collapse to a point. The attachment only sizes the raster area.
-struct VsmHw {@builtin(position) position:vec4<f32>,@location(0) @interpolate(flat) id:u32,@location(1) height:f32};
+struct VsmHw {
+    @builtin(position) position:vec4<f32>,@location(0) @interpolate(flat) id:u32,@location(1) height:f32,
+    // VSM_FRACTION: the triangle in window texels (counter-clockwise) and its heights.
+    @location(2) @interpolate(flat) a:vec4<f32>,@location(3) @interpolate(flat) c:vec2<f32>,@location(4) @interpolate(flat) z:vec3<f32>,
+};
 @vertex fn vs_vsm_cluster(@builtin(vertex_index) vertex:u32,@builtin(instance_index) instance:u32)->VsmHw {
     let level=vsm_pass.level;
     // vsm_pass.pad0: this draw's raster area (tile) of the window; the cull marks the areas
@@ -558,6 +672,27 @@ struct VsmHw {@builtin(position) position:vec4<f32>,@location(0) @interpolate(fl
     var out:VsmHw;
     out.position=vec4<f32>(0.0,0.0,0.0,1.0);
     if ((entry>>28u)&(1u<<tile))==0u {return out;}
+    if VSM_FRACTION {
+        // Six vertices a triangle slot: its box grown by half a texel (two triangles), so every
+        // texel a sample of it can fall in gets a fragment; the fragment tests the samples.
+        let c=vsm_clusters[entry&0x0fffffffu];let local=vertex/6u;let k=vertex%6u;
+        if local>=(c.counts&255u) {return out;}
+        let batch=primary_placements[c.placement]&0x1fffffffu;
+        let t=vsm_cluster_data[batch].data[c.triangles+local];
+        let s0=vsm_cluster_vertex(c,batch,t&255u,level);
+        var s1=vsm_cluster_vertex(c,batch,(t>>8u)&255u,level);
+        var s2=vsm_cluster_vertex(c,batch,(t>>16u)&255u,level);
+        if vsm_cross(s0.xy,s1.xy,s2.xy)<0.0 {let q=s1;s1=s2;s2=q;}
+        let lo=min(min(s0.xy,s1.xy),s2.xy)-vec2<f32>(0.5);let hi=max(max(s0.xy,s1.xy),s2.xy)+vec2<f32>(0.5);
+        let far=k==1u || k==2u || k==4u;let high=k==2u || k==4u || k==5u;
+        let q=vec2<f32>(select(lo.x,hi.x,far),select(lo.y,hi.y,high));
+        let size=f32(vsm_area());
+        let o=vec2<f32>(vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles()))*size;
+        out.position=vec4<f32>((q.x-o.x)/size*2.0-1.0,1.0-(q.y-o.y)/size*2.0,0.5,1.0);
+        out.a=vec4<f32>(s0.xy,s1.xy);out.c=s2.xy;out.z=vec3<f32>(s0.z,s1.z,s2.z);
+        out.id=vsm_cluster_id(c,batch,local);
+        return out;
+    }
     let c=vsm_clusters[entry&0x0fffffffu];let local=vertex/3u;
     if local<(c.counts&255u) {
         let batch=primary_placements[c.placement]&0x1fffffffu;
@@ -574,7 +709,12 @@ struct VsmHw {@builtin(position) position:vec4<f32>,@location(0) @interpolate(fl
 @fragment fn fs_vsm_cluster(input:VsmHw) {
     let tile=vsm_pass.pad0;
     let o=vec2<u32>(tile%vsm_area_tiles(),tile/vsm_area_tiles())*vsm_area();
-    vsm_write(vsm_pass.level,vec2<u32>(input.position.xy)+o,input.height,input.id);
+    let t=vec2<u32>(input.position.xy)+o;
+    if VSM_FRACTION {
+        vsm_fraction_texel(vsm_pass.level,t,input.a.xy,input.a.zw,input.c,input.z,input.id);
+        return;
+    }
+    vsm_write(vsm_pass.level,t,input.height,input.id);
 }
 
 // ---- Lookup: exact 1-ring, then the map march beyond `near` ----

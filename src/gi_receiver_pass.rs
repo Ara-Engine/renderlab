@@ -76,6 +76,9 @@ pub(crate) fn entry() -> wgpu::BindGroupLayoutEntry {
 /// `shade_source` appends) and the kernel half of gi_receiver_pass.wgsl.
 pub(crate) fn kernel_module(head: &str) -> program::Composed {
     let mut composed = program::compose(head, program::STANDARD_PROGRAM, Stage::Traced, false);
+    if program::final_gather() {
+        composed.source = program::with_cache_lookup(composed.source);
+    }
     let mut kernel = SOURCE.split_once(ENTRY_SEAM).unwrap().1.to_string();
     // Measurement only (`RENDERLAB_GI_RX_PROBE=nolookup`): no cache lookup, so the pass costs
     // its decode and the record's stores alone. Shading then sees no GI value. The pattern holds
@@ -86,6 +89,12 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
     }
     if reuse() {
         kernel = with_reuse(&kernel);
+    }
+    // Measurement only: RENDERLAB_SHADE_EDITS reaches the kernel half too (program::shade_edits).
+    for (old, new) in program::shade_edits() {
+        if kernel.matches(old.as_str()).count() == 1 {
+            kernel = kernel.replacen(old.as_str(), new, 1);
+        }
     }
     composed.source.push_str(&kernel);
     // Measurement only (`RENDERLAB_GI_RX_PROBE=firstslot`): every find reads its start record
@@ -120,7 +129,9 @@ pub(crate) fn kernel_module(head: &str) -> program::Composed {
 /// `RENDERLAB_GI_RX_REUSE=0` looks up every pixel every frame.
 fn reuse() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| lean() && std::env::var("RENDERLAB_GI_RX_REUSE").map_or(true, |v| v != "0"))
+    *ON.get_or_init(|| {
+        lean() && !program::final_gather() && std::env::var("RENDERLAB_GI_RX_REUSE").map_or(true, |v| v != "0")
+    })
 }
 /// Bytes of the keys buffer ahead of its per-pixel words: the frame's reuse word and padding.
 const KEYS_HEAD: u64 = 16;
@@ -261,7 +272,22 @@ pub(super) struct Targets {
     /// new region clears them (`clear_keys`, encoded with the pass) and does not reuse.
     region: [u32; 4],
     clear_keys: bool,
+    /// The final gather (`program::final_gather`): its trace, filter, adaptive-probe and
+    /// resolve pipelines per `Shading`, on the shading layout (hits sample materials). Its
+    /// probes, FG_SLOTS per FG_TILE tile, one per FG_BLOCK block and the tile probes' filtered
+    /// copies, follow the pixels' records in `values` (gi_receiver_pass.wgsl FgProbe).
+    gather: [Option<[Owned<wgpu::ComputePipeline>; 5]>; 2],
+    tiles: [u32; 2],
+    blocks: [u32; 2],
 }
+/// The final gather's probe tile in pixels and probe size in bytes (gi_receiver_pass.wgsl
+/// FG_TILE, FgProbe).
+const FG_TILE: u32 = 16;
+const FG_PROBE_BYTES: u64 = 192;
+/// Probes per tile (gi_receiver_pass.wgsl FG_SLOTS): a second where the tile holds a second plane.
+const FG_SLOTS: u64 = 2;
+/// The adaptive probes' block in pixels (gi_receiver_pass.wgsl FG_BLOCK): one probe each.
+const FG_BLOCK: u32 = 8;
 /// The receiver kernel samples no material, so it is built on the shading layout with an empty
 /// group 2 when it validates there, and binds the empty group: every dispatch merges each
 /// resource of its bound groups into wgpu's usage tracking when the command buffer finishes, and
@@ -277,7 +303,14 @@ impl Renderer {
             values: Buffer::new(
                 self,
                 "GI prepared receiver",
-                u64::from(size.width) * u64::from(size.height) * BYTES,
+                u64::from(size.width) * u64::from(size.height) * BYTES
+                    + if program::final_gather() {
+                        (u64::from(size.width.div_ceil(FG_TILE)) * u64::from(size.height.div_ceil(FG_TILE)) * FG_SLOTS * 2
+                            + u64::from(size.width.div_ceil(FG_BLOCK)) * u64::from(size.height.div_ceil(FG_BLOCK)))
+                            * FG_PROBE_BYTES
+                    } else {
+                        0
+                    },
                 wgpu::BufferUsages::STORAGE
                     | if lookup_probe::on() {
                         wgpu::BufferUsages::COPY_SRC | wgpu::BufferUsages::COPY_DST
@@ -307,6 +340,9 @@ impl Renderer {
             table: None,
             region: [0; 4],
             clear_keys: false,
+            gather: [None, None],
+            tiles: [size.width.div_ceil(FG_TILE), size.height.div_ceil(FG_TILE)],
+            blocks: [size.width.div_ceil(FG_BLOCK), size.height.div_ceil(FG_BLOCK)],
         }
     }
     pub(crate) fn ensure_gi_receiver_pass(&mut self, shading: Shading) -> Result<(), Error> {
@@ -359,39 +395,46 @@ impl Renderer {
         let scopes = OperationScopes::new(&self.device);
         let module = super::program_gpu::module(&abi, "GI receiver", &composed);
         let start = std::time::Instant::now();
-        let build = |layout: &wgpu::PipelineLayout| {
+        let build_entry = |layout: &wgpu::PipelineLayout, entry: &str| {
             self.ledger.own(
                 self.device
                     .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                        label: Some("GI receiver"),
+                        label: Some(entry),
                         layout: Some(layout),
                         module: &module,
-                        entry_point: Some("gi_receiver_pass"),
+                        entry_point: Some(entry),
                         compilation_options: Default::default(),
                         cache: abi.cache,
                     }),
                 ResourceKind::ComputePipeline,
             )
         };
-        let keys_entry = [wgpu::BindGroupLayoutEntry {
-            binding: 0,
+        let build = |layout: &wgpu::PipelineLayout| build_entry(layout, "gi_receiver_pass");
+        let storage = |binding: u32, least: u64| wgpu::BindGroupLayoutEntry {
+            binding,
             visibility: wgpu::ShaderStages::COMPUTE,
             ty: wgpu::BindingType::Buffer {
                 ty: wgpu::BufferBindingType::Storage { read_only: false },
                 has_dynamic_offset: false,
-                min_binding_size: wgpu::BufferSize::new(KEYS_HEAD + 4),
+                min_binding_size: wgpu::BufferSize::new(least),
             },
             count: None,
-        }];
-        let keys = state.targets.as_ref().and_then(|t| t.gi_receiver.as_ref()).and_then(|t| t.keys.as_ref());
+        };
+        let own = state.targets.as_ref().and_then(|t| t.gi_receiver.as_ref());
+        let keys = own.and_then(|t| t.keys.as_ref());
+        let mut group_entries = Vec::new();
+        if keys.is_some() {
+            group_entries.push(storage(0, KEYS_HEAD + 4));
+        }
         let empty_layout = self.ledger.own(
             self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("GI receiver, group 2"),
-                entries: if keys.is_some() { &keys_entry } else { &[] },
+                entries: &group_entries,
             }),
             ResourceKind::BindGroupLayout,
         );
         let mut lean_built = None;
+        let mut gather = None;
         if lean() {
             let lean_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("GI receiver ABI, lean"),
@@ -410,13 +453,26 @@ impl Renderer {
             }
         }
         let is_lean = lean_built.is_some();
+        if program::final_gather() {
+            let layout = &state.shade_layouts[shading as usize];
+            gather = Some([
+                build_entry(layout, "fg_trace"),
+                build_entry(layout, "fg_filter"),
+                build_entry(layout, "fg_classify"),
+                build_entry(layout, "fg_adapt"),
+                build_entry(layout, "fg_resolve"),
+            ]);
+        }
         let pipeline = lean_built.unwrap_or_else(|| build(&state.shade_layouts[shading as usize]));
-        let keys_binding = keys.map(|k| [wgpu::BindGroupEntry { binding: 0, resource: k.value.as_entire_binding() }]);
+        let mut group = Vec::new();
+        if let Some(k) = keys {
+            group.push(wgpu::BindGroupEntry { binding: 0, resource: k.value.as_entire_binding() });
+        }
         let empty = self.ledger.own(
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("GI receiver, group 2"),
                 layout: &empty_layout,
-                entries: keys_binding.as_ref().map_or(&[][..], |k| &k[..]),
+                entries: &group,
             }),
             ResourceKind::BindGroup,
         );
@@ -457,6 +513,7 @@ impl Renderer {
         let target = self.view.primary.as_mut().unwrap().targets.as_mut().unwrap().gi_receiver.as_mut().unwrap();
         target.lean[shading as usize] = is_lean;
         target.empty = Some(empty);
+        target.gather[shading as usize] = gather;
         Ok(())
     }
     pub(crate) fn encode_gi_receiver_pass(
@@ -498,6 +555,19 @@ impl Renderer {
             None => pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]),
         }
         pass.set_bind_group(3, self.lighting.bind(), &[]);
+        if let Some([trace, filter, classify, adapt, resolve]) = target.gather[shading as usize].as_ref() {
+            // Hits shade with their materials: the full group 2.
+            pass.set_bind_group(2, &**g.materials.as_ref().unwrap(), &[]);
+            pass.set_pipeline(trace);
+            pass.dispatch_workgroups(target.tiles[0], target.tiles[1], 1);
+            pass.set_pipeline(filter);
+            pass.dispatch_workgroups(target.tiles[0].div_ceil(8), target.tiles[1].div_ceil(4), 1);
+            pass.set_pipeline(classify);
+            pass.dispatch_workgroups(target.blocks[0], target.blocks[1], 1);
+            pass.set_pipeline(adapt);
+            pass.dispatch_workgroups(target.blocks[0].div_ceil(2), target.blocks[1], 1);
+            pass.set_pipeline(resolve);
+        }
         pass.dispatch_workgroups_indirect(&target.args.value, 0);
     }
 }
@@ -555,6 +625,8 @@ mod tests {
                 shade_source_for(source, true, true, true)
             };
             source.push_str(SOURCE.split_once(ENTRY_SEAM).unwrap().1);
+            // The final gather's module carries the cache lookup on both paths.
+            let source = program::with_cache_lookup(source);
             let module = naga::front::wgsl::parse_str(&source)
                 .unwrap_or_else(|e| panic!("{}", e.emit_to_string(&source)));
             let record = module
@@ -571,12 +643,28 @@ mod tests {
                 members.iter().map(|m| m.offset).collect::<Vec<_>>(),
                 [0, 16, 32]
             );
-            naga::valid::Validator::new(
+            let info = naga::valid::Validator::new(
                 naga::valid::ValidationFlags::all(),
                 naga::valid::Capabilities::all(),
             )
             .validate(&module)
             .unwrap();
+            // Vulkan's backend writes it too (overrides at their defaults, as wgpu does first):
+            // some modules validate and still fail there.
+            let (module, info) =
+                naga::back::pipeline_constants::process_overrides(&module, &info, None, &Default::default())
+                    .unwrap();
+            // The kernels this file owns (the shading entries are checked where they are built).
+            for entry in module.entry_points.iter().filter(|e| e.name.starts_with("fg_") || e.name == "gi_receiver_pass") {
+                let pipeline = naga::back::spv::PipelineOptions {
+                    shader_stage: naga::ShaderStage::Compute,
+                    entry_point: entry.name.clone(),
+                };
+                let written = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    naga::back::spv::write_vec(&module, &info, &naga::back::spv::Options::default(), Some(&pipeline))
+                }));
+                assert!(matches!(written, Ok(Ok(_))), "SPIR-V of {}", entry.name);
+            }
         }
     }
 }

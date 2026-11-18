@@ -224,6 +224,11 @@ fn gi_sky_scale(e:vec3<f32>) -> vec3<f32> {
 var<private> gi_rx_sky:array<vec3<f32>,9>;
 var<private> gi_rx_bounce:array<vec3<f32>,4>;
 var<private> gi_rx_valid:bool;
+// Whether the sky slots hold absolute radiance (a final-gather record, gi_receiver_pass.wgsl:
+// the sky its probes' rays missed into; the bounce slots hold what they met) instead of the
+// cache's sky in cached units. It travels with the values: gi_prepare clears it, a record
+// carries its own.
+var<private> gi_rx_absolute:bool;
 // Adds the level sums, the sky's with factor w and the bounce's with factor b.
 fn gi_rx_add(w:f32, b:f32) {
     for(var i=0u;i<9u;i+=1u) { gi_rx_sky[i]+=w*gi_lv_sky[i]; }
@@ -240,6 +245,7 @@ fn gi_share(w:f32, x:f32) -> f32 {
 }
 fn gi_prepare(input:SurfaceInput) {
     gi_rx_valid=false;
+    gi_rx_absolute=false;
     for(var i=0u;i<9u;i+=1u) { gi_rx_sky[i]=vec3<f32>(0.0); }
     for(var i=0u;i<4u;i+=1u) { gi_rx_bounce[i]=vec3<f32>(0.0); }
     if gi_word(GI_H_ENABLED)==0u { return; }
@@ -313,12 +319,16 @@ fn gi_prepare(input:SurfaceInput) {
 }
 // The prepared receiver's occluded sky irradiance about n in lux, or the open environment's
 // where the cache has no value.
+fn gi_rx_sky_value(e:vec3<f32>) -> vec3<f32> {
+    if gi_rx_absolute { return max(e,vec3<f32>(0.0)); }
+    return gi_sky_scale(max(e,vec3<f32>(0.0)));
+}
 fn gi_rx_sky_irradiance(n:vec3<f32>) -> vec3<f32> {
     if !gi_rx_valid { return gi_open_irradiance(n); }
     gi_sh_basis(n);
     var e=vec3<f32>(0.0);
     for(var i=0u;i<9u;i+=1u) { e+=gi_band_weight(i)*gi_y[i]*gi_rx_sky[i]; }
-    return gi_sky_scale(max(e,vec3<f32>(0.0)));
+    return gi_rx_sky_value(e);
 }
 // The prepared receiver's bounce light in lux about n (G2), or radiance in a GGX lobe of
 // perceptual roughness about a direction; zero without a value.
@@ -360,6 +370,6 @@ fn indirect_irradiance(input:SurfaceInput, n:vec3<f32>) -> vec3<f32> {
     for(var i=0u;i<9u;i+=1u) { sky+=gi_band_weight(i)*gi_y[i]*gi_rx_sky[i]; }
     var bounce=vec3<f32>(0.0);
     for(var i=0u;i<4u;i+=1u) { bounce+=gi_band_weight(i)*gi_y[i]*gi_rx_bounce[i]; }
-    return gi_sky_scale(max(sky,vec3<f32>(0.0)))+max(bounce,vec3<f32>(0.0));
+    return gi_rx_sky_value(sky)+max(bounce,vec3<f32>(0.0));
 }
 // ---- end of the indirect-light inputs ----

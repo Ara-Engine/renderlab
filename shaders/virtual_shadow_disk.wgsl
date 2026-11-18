@@ -34,7 +34,7 @@
 const VSM_PAGE:u32=128u;
 const VSM_NONE:u32=0xffffffffu;
 const VSM_MAX_LEVELS:u32=8u;
-const VSM_MAX_RECTS:u32=16u;
+const VSM_MAX_RECTS:u32=48u;
 // primary_rays.wgsl PRIMARY_TILE.
 const VSM_TRACE_TILE=vec2<u32>(8u,4u);
 struct VsmLevel {origin:vec4<f32>,info:vec4<u32>};
@@ -43,6 +43,8 @@ struct VsmFrame {
     u:vec4<f32>,v:vec4<f32>,l:vec4<f32>,eye:vec4<f32>,depth:vec4<f32>,params:vec4<f32>,
     counts:vec4<u32>,misc:vec4<u32>,
     levels:array<VsmLevel,VSM_MAX_LEVELS>,
+    // This frame's moved casters' light-space rectangles (old and new bounds; counts.w of them).
+    rects:array<vec4<f32>,VSM_MAX_RECTS>,
 };
 @group(0) @binding(0) var<uniform> vsm:VsmFrame;
 // clip, previous: this and the previous frame's world-to-clip matrices (the receivers' own,
@@ -50,15 +52,14 @@ struct VsmFrame {
 // reuse (virtual_shadow_gpu.rs `reuse_on`): x 2 when nothing that sets an answer changed since
 // the last frame, 1 when only the camera and the moving casters did, 0 no reuse; z the history
 // half this frame writes.
-// zone_lo, zone_hi, zone_light: the moving casters' swept shadow (temporal_zones.wgsl
-// tr1_caster_shadow's Tr1Zones rows).
+// tops: per moved rectangle (vsm.rects), its casters' highest light-space height (4 a vec4).
 // size: the image size in pixels (xy); z: TR1's frame number plus one on reconstructed frames
 // (the receiver jitter's sequence index), 0 otherwise; w: TR1's frames of history.
 // above: per k in 0..=64 (two a vec4), the mask of the samples whose y rank is at least k.
 // samples: the 64 sample positions in the unit disk (two a vec4), bit s first.
 struct VdFrame {
     clip:mat4x4<f32>,previous:mat4x4<f32>,reuse:vec4<u32>,
-    zone_lo:vec4<f32>,zone_hi:vec4<f32>,zone_light:vec4<f32>,
+    tops:array<vec4<f32>,VSM_MAX_RECTS/4u>,
     size:vec4<f32>,above:array<vec4<u32>,33>,samples:array<vec4<f32>,32>,
 };
 @group(0) @binding(50) var<uniform> vd:VdFrame;
@@ -548,7 +549,10 @@ override VD_HARD_EDGES:bool=true;
 override VD_EDGE_HARD:f32=1.0;
 // Measurement (`RENDERLAB_VD=VD_EDGE_SHOW=true`): edge pixels drawn fully shadowed.
 override VD_EDGE_SHOW:bool=false;
-// Edge pixels this frame (`RENDERLAB_VD_EDGE_LOG`).
+// This frame's edge pixels, reused answers, pixels near a moved caster (vd_near_mover) and
+// walked pixels (`RENDERLAB_VD_EDGE_LOG`); the last three only with
+// `RENDERLAB_VD=VD_COUNTS=true` (measurement).
+override VD_COUNTS:bool=false;
 @group(0) @binding(62) var<storage,read_write> vd_edge_count:array<atomic<u32>,4>;
 var<private> vd_ray_reach:f32;
 var<private> vd_far:vec2<u32>;
@@ -708,23 +712,15 @@ fn vd_above(q:vec3<f32>,margin:f32)->bool {
 // The columns of one map texel, `cell` of `level`, standing for a square of side `size` centred
 // `c` (light xy): a level's own texel, or the one texel read for a max-mip cell `stride` texels
 // wide. `lo`..`hi` is the band of heights being served, `margin` the near-field bias.
-// Band jitter (`RENDERLAB_VD=VD_BAND_JITTER=0` off): the receiver jitter spans a texel of the
-// receiver's level, far less than a high caster's band texel, so TR1 never averaged those
-// columns' stairs (Glint's rails, the pole). A band above the receiver's level reads its columns
-// from the receiver moved by the same unit offset times VD_BAND_JITTER of its own texel (light
-// xy; the tangent-plane tests keep the receiver's point): TR1 averages each stair into a ramp
-// one band texel wide.
-override VD_BAND_JITTER:f32=0.5;
-var<private> vd_shift:vec2<f32>;
-fn vd_band_shift(texel:f32)->vec2<f32> {
-    return vd_px.jitter*VD_BAND_JITTER*max(texel-vsm_texel(vd_px.level),0.0);
-}
+// Every band reads its columns from the receiver's own point: moving a coarse band's read point
+// by part of its texel (the former band jitter) carried it off occluders thinner than that texel
+// on some frames, which TR1 averaged into lit streaks inside their shadows.
 fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,hi:f32,margin:f32) {
     let i=vsm_index(cell,level);
     if i==VSM_NONE {return;}
     let top=vsm_top_words[i];
     if top.x==0u {return;}
-    let p=vd_px.p+vec3<f32>(vd_shift,0.0);
+    let p=vd_px.p;
     let height=vsm_height(top);
     let t=height-p.z;
     let lo=lo_in;
@@ -765,6 +761,12 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
     }
     let clo=max(max(bottom,lo),1e-6*size);let chi=min(t,hi);
     var m=vd_column_mask(c-p.xy,0.5*size,clo,chi);
+    // The covered fraction: a level's own texel (not a max-mip cell) whose near layer covers k
+    // of its 8 samples blocks k/8 of the directions its column would block (vd_keep).
+    if VD_FRACTION && stride==1 {
+        let k=countOneBits((vd_cover[i>>2u]>>((i&3u)*8u))&255u);
+        if k>0u && k<8u {m&=vd_keep(8u*k,vd_hash(i));}
+    }
     // Straight outlines: only a column that adds samples without covering the disk reads its
     // texel's line (one word), and only an outline texel's is clipped.
     if VD_EDGES && stride==1 && any((m&~vd_mask)!=vec2<u32>(0u)) && any(m!=vec2<u32>(0xffffffffu)) {
@@ -797,10 +799,33 @@ fn vd_texel(cell:vec2<i32>,level:u32,stride:i32,c:vec2<f32>,size:f32,lo_in:f32,h
 // Off (`RENDERLAB_VD=VD_RING=false`): every band whose max-mip clears its floor reads its whole
 // window (the same answers, more reads).
 override VD_RING:bool=true;
+// ---- Covered fraction (`RENDERLAB_VSM_FRACTION=1`, virtual_shadow.wgsl vsm_cover) ----
+override VD_FRACTION:bool=false;
+@group(0) @binding(66) var<storage,read> vd_cover:array<u32>;
+// `count` of the 64 disk samples, spread over the disk (an odd stride through the samples' x
+// ranks, offset per texel by `h`): a column keeps blocking only these of the directions it blocks,
+// so the share it blocks is its texel's covered share.
+fn vd_keep(count:u32,h:u32)->vec2<u32> {
+    // Samples j*37 mod 64 for j < count (count = 8k), as constants, rotated by h.
+    var m=vec2<u32>(0xffffffffu);
+    switch count/8u {
+        case 1u {m=vec2<u32>(0x40100409u,0x02008020u);}
+        case 2u {m=vec2<u32>(0x40902449u,0x12048922u);}
+        case 3u {m=vec2<u32>(0x44992649u,0x9224c932u);}
+        case 4u {m=vec2<u32>(0x64d9364du,0x9b26c9b2u);}
+        case 5u {m=vec2<u32>(0x66d9b66du,0xdb36cdbbu);}
+        case 6u {m=vec2<u32>(0x76ddbf6fu,0xdbb6edfbu);}
+        case 7u {m=vec2<u32>(0xf6fdff7fu,0xdfbfeffbu);}
+        default {}
+    }
+    var r=h&63u;
+    if r>=32u {m=m.yx;r-=32u;}
+    if r>0u {m=vec2<u32>((m.x<<r)|(m.y>>(32u-r)),(m.y<<r)|(m.x>>(32u-r)));}
+    return m;
+}
 // The map's columns: each level's band of heights, the highest band first (vd_map).
 fn vd_map() {
     vd_pl=VSM_NONE;
-    vd_shift=vec2<f32>(0.0);
     let p=vd_px.p;
     let slope=vd_px.slope;
     let side=i32(vsm.counts.y*VSM_PAGE);
@@ -834,8 +859,7 @@ fn vd_map() {
         if lo>=ceiling {continue;}
         let hi=select(f32(VD_R)*cell/slope*vd_px.band,3.4e38,mip==VD_MIPS);
         let s=side>>mip;
-        vd_shift=vd_band_shift(cell);
-        let ps=p.xy+vd_shift;
+        let ps=p.xy;
         let x=(ps-origin_last)/cell;
         let r=min(slope*min(ceiling,hi)/cell,f32(VD_R));
         let a=max(vec2<i32>(floor(x-vec2<f32>(r))),vec2<i32>(0));
@@ -874,8 +898,7 @@ fn vd_map() {
         let texel=vsm_texel(level);
         let hi=vd_band(level)*vd_px.band;
         let origin=vsm.levels[level].origin.xy;
-        vd_shift=vd_band_shift(texel);
-        let x=(p.xy+vd_shift-origin)/texel;
+        let x=(p.xy-origin)/texel;
         let r=min(slope*min(ceiling,hi)/texel,f32(VD_R));
         let a=max(vec2<i32>(floor(x-vec2<f32>(r))),vec2<i32>(0));
         let b=min(vec2<i32>(floor(x+vec2<f32>(r))),vec2<i32>(side-1));
@@ -937,8 +960,8 @@ fn vd_pixel(id:vec2<u32>)->u32 {
 // history holds the answer (bits 0..8), how many walks in a row gave that same fully lit or
 // fully shadowed answer (bits 9..15; 0 for a partial one or a coarser level's stand-in while a
 // page arrives) and the point's clip w (bits 16..31, f16), in two halves ping-ponged by frame.
-// A pixel whose point was on screen last frame at the same depth, out of the moving casters'
-// swept shadow, whose own and 3x3 neighbours' answers there are one class settled over
+// A pixel whose point was on screen last frame at the same depth, out of every moved caster's
+// reach (vd_near_mover), whose own and 3x3 neighbours' answers there are one class settled over
 // VD_REUSE_WALKS walks, keeps it without a walk: only penumbrae, edges, disocclusions, the
 // moving casters' shadows and classes the receiver jitter still moves walk. While the camera
 // moves every trace tile still walks one frame in VD_REUSE_REFRESH, so an answer that should change
@@ -946,17 +969,25 @@ fn vd_pixel(id:vec2<u32>)->u32 {
 override VD_REUSE_WALKS:u32=4u;
 override VD_REUSE_REFRESH:u32=16u;
 @group(0) @binding(63) var<storage,read_write> vd_history:array<u32>;
-// The moving casters' swept shadow (temporal_zones.wgsl tr1_caster_shadow, the same test).
-fn vd_moving_shadow(x:vec3<f32>)->bool {
-    if vd.zone_lo.w==0.0 {return false;}
-    let lo=vd.zone_lo.xyz;let hi=vd.zone_hi.xyz;
-    if vd.zone_hi.w==0.0 {return all(x>=lo) && all(x<=hi);}
-    let reach=length(max(abs(x-lo),abs(x-hi)));
-    let grow=vec3<f32>(reach*vd.zone_light.w);
-    let rcp=vec3<f32>(1.0)/vd.zone_light.xyz;
-    let a=(lo-grow-x)*rcp;let b=(hi+grow-x)*rcp;
-    let t0=min(a,b);let t1=max(a,b);
-    return min(min(t1.x,t1.y),t1.z)>=max(max(max(t0.x,t0.y),t0.z),0.0);
+// Whether a moved caster (vsm.rects) can have changed point `world`'s answer: a column part at
+// height t reaches it only from within slope * t, and a band's columns and their jitter add up
+// to that again; t is at most the rectangle's top over the point, and a rectangle whose top is
+// under the point neither shadows it nor holds it. Each mover's own rectangle, so movers far
+// apart keep the receivers between them reusable; a point on a mover (its surface moved under
+// a still camera) always walks.
+fn vd_near_mover(world:vec3<f32>,id:vec2<u32>)->bool {
+    if vsm.counts.w==0u {return false;}
+    let p=vsm_light(world);
+    let level=textureLoad(vsm_level_in,vec2<i32>(id),0).x;
+    let pad=select(2.0*vsm_texel(min(level,vsm.counts.x-1u)),0.0,level==VSM_NONE);
+    for(var i=0u;i<vsm.counts.w;i+=1u) {
+        let top=vd.tops[i>>2u][i&3u];
+        if p.z>top+pad {continue;}
+        let grow=vec2<f32>(2.0*vd_slope()*max(top-p.z,0.0)+pad);
+        let r=vsm.rects[i];
+        if all(p.xy>=r.xy-grow) && all(p.xy<=r.zw+grow) {return true;}
+    }
+    return false;
 }
 fn vd_walks(h:u32)->u32 {return (h>>9u)&127u;}
 fn vd_depth(h:u32)->f32 {return unpack2x16float(h>>16u).x;}
@@ -999,7 +1030,7 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
                     if abs(vd_depth(h)-c.w)<=0.02*c.w {at=q;}
                 }
             }
-            if at.x!=VSM_NONE && vd_moving_shadow(world) {at=vec2<u32>(VSM_NONE);}
+            if at.x!=VSM_NONE && vd_near_mover(world,id) {at=vec2<u32>(VSM_NONE);if VD_COUNTS {atomicAdd(&vd_edge_count[2],1u);}}
         }
         if at.x!=VSM_NONE {
             before=vd_history[read+at.y*size.x+at.x];
@@ -1009,6 +1040,7 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
             let kept=select(vd_settled(at,size,read),VSM_NONE,refresh);
             if kept!=VSM_NONE {
                 textureStore(vsm_output,vec2<i32>(id),vec4<u32>(kept));
+                if VD_COUNTS {atomicAdd(&vd_edge_count[1],1u);}
                 vd_history[write]=depth_bits|(before&0xffffu);
                 return;
             }
@@ -1016,6 +1048,7 @@ fn vd_settled(at:vec2<u32>,size:vec2<u32>,base:u32)->u32 {
     }
     let answer=vd_pixel(id);
     textureStore(vsm_output,vec2<i32>(id),vec4<u32>(answer));
+    if VD_COUNTS {atomicAdd(&vd_edge_count[3],1u);}
     // A walk extends the settled count of the same class; a coarser level standing in for an
     // arriving page never settles.
     var walks=0u;
