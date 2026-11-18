@@ -51,7 +51,7 @@ struct VsmFrame {
 // jitter included).
 // reuse (virtual_shadow_gpu.rs `reuse_on`): x 2 when nothing that sets an answer changed since
 // the last frame, 1 when only the camera and the moving casters did, 0 no reuse; y the mark
-// generation (vd_marked); z the history half this frame writes; w 1 while the page requests hold.
+// generation (vd_level_word); z the history half this frame writes.
 // tops: per moved rectangle (vsm.rects), its casters' highest light-space height (4 a vec4).
 // size: the image size in pixels (xy); z: TR1's frame number plus one on reconstructed frames
 // (the receiver jitter's sequence index), 0 otherwise; w: TR1's frames of history.
@@ -209,12 +209,6 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
     let size=textureDimensions(vsm_world);
     // A workgroup is one trace tile; an uncovered one never had hit records written.
     if textureLoad(vsm_tiles,group.xy,0).x==0u {return;}
-    // Held requests (vd.reuse.w; virtual_shadow_gpu.rs `requests_held`): a tile marked since the
-    // last full mark (generation vd.reuse.y) keeps its levels and requests. One covered now and
-    // not then marks now: its pixels' levels were written under another ladder, or never, and a
-    // level past the ladder's end walked the lookup's bands for ever (the Showcase stall).
-    let tile=group.y*textureDimensions(vsm_tiles).x+group.x;
-    if vd.reuse.w!=0u && vd_marked[tile]==vd.reuse.y {return;}
     let inside=all(id.xy<size);
     var level=VSM_NONE;
     if inside && textureLoad(vsm_hit,vec2<i32>(id.xy),0).x!=0u {
@@ -254,7 +248,7 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
         }
     }
     // The lookup reads this level: one rounding of vd_select for both passes.
-    if inside {textureStore(vsm_level_out,vec2<i32>(id.xy),vec4<u32>(level));}
+    if inside {textureStore(vsm_level_out,vec2<i32>(id.xy),vec4<u32>(vd_level_word(level)));}
     workgroupBarrier();
     if li==0u {
         let nearest=atomicLoad(&vd_reach[0]);
@@ -263,11 +257,18 @@ fn vd_band_jitter(id:vec2<u32>)->f32 {
         if seen!=0u {atomicAdd(&vsm_reach[1],seen);}
         let none=atomicLoad(&vd_reach[2]);
         if none!=0u {atomicAdd(&vsm_reach[2],none);atomicMax(&vsm_reach[3],atomicLoad(&vd_reach[3]));}
-        vd_marked[tile]=vd.reuse.y;
     }
 }
-// Per trace tile, the mark generation that last wrote its pixels' levels (vd_mark).
-@group(0) @binding(67) var<storage,read_write> vd_marked:array<u32>;
+// A receiver's level as the mark stores it: the mark's generation (vd.reuse.y, one more on every
+// frame whose page requests do not hold) over the level, 255 for none. While the requests hold
+// the mark does not run, so a trace tile it did not cover at the last one (sky the jitter now
+// covers, or a view cut to under a shorter ladder) holds another generation's word; the lookup
+// chooses those levels itself (vd_level_at).
+fn vd_level_word(level:u32)->u32 {return (vd.reuse.y<<8u)|min(level,255u);}
+fn vd_level_at(word:u32,world:vec3<f32>,id:vec2<u32>)->u32 {
+    if (word>>8u)!=(vd.reuse.y&0xffffffu) {return vd_select(world,vd_band_jitter(id));}
+    return select(word&255u,VSM_NONE,(word&255u)==255u);
+}
 
 // ---- Lookup ----
 @group(0) @binding(10) var vsm_normal:texture_2d<f32>;
@@ -448,10 +449,14 @@ fn vd_prepare(id:vec2<u32>) {
     }
     vd_px.thin=normal.w<0.0;
     vd_px.jitter=vec2<f32>(0.0);
-    vd_px.level=textureLoad(vsm_level_in,p,0).x;
-    // A level past the ladder's end (written under a longer one) is no level: the band walk
-    // counts down from the last level to this one.
-    if vd_px.level!=VSM_NONE && vd_px.level>=vsm.counts.x {vd_px.level=VSM_NONE;}
+    vd_px.level=vd_level_at(textureLoad(vsm_level_in,p,0).x,world.xyz,id);
+    // A level past the ladder's end is no level (the band walk counts down from the last level
+    // to this one; a longer ladder's level once walked it for ever). Counted (word 4,
+    // virtual_shadow_gpu.rs `stale_levels`): with the generations above it never happens.
+    if vd_px.level!=VSM_NONE && vd_px.level>=vsm.counts.x {
+        vd_px.level=VSM_NONE;
+        atomicAdd(&vd_edge_count[4],1u);
+    }
     vd_px.world=world.xyz;
     // shadow_origin (scene.wgsl): opaque receivers stay on the viewed side; thin ones move
     // toward the light.
@@ -565,7 +570,7 @@ override VD_EDGE_SHOW:bool=false;
 // walked pixels (`RENDERLAB_VD_EDGE_LOG`); the last three only with
 // `RENDERLAB_VD=VD_COUNTS=true` (measurement).
 override VD_COUNTS:bool=false;
-@group(0) @binding(62) var<storage,read_write> vd_edge_count:array<atomic<u32>,4>;
+@group(0) @binding(62) var<storage,read_write> vd_edge_count:array<atomic<u32>,8>;
 var<private> vd_ray_reach:f32;
 var<private> vd_far:vec2<u32>;
 var<private> vd_edge_cell:vec2<i32>;
@@ -902,7 +907,8 @@ fn vd_map() {
         }
         if vd_full() {return;}
     }
-    for(var k=0u;k<=last-vd_px.level;k+=1u) {
+    // At most the ladder's length, whatever the receiver's level (vd_prepare keeps it inside).
+    for(var k=0u;k<=min(last-vd_px.level,last);k+=1u) {
         let level=last-k;
         var lo=0.0;
         if level>vd_px.level {lo=vd_band(level-1u)*vd_px.band;}
@@ -990,7 +996,7 @@ override VD_REUSE_REFRESH:u32=16u;
 fn vd_near_mover(world:vec3<f32>,id:vec2<u32>)->bool {
     if vsm.counts.w==0u {return false;}
     let p=vsm_light(world);
-    let level=textureLoad(vsm_level_in,vec2<i32>(id),0).x;
+    let level=vd_level_at(textureLoad(vsm_level_in,vec2<i32>(id),0).x,world,id);
     let pad=select(2.0*vsm_texel(min(level,vsm.counts.x-1u)),0.0,level==VSM_NONE);
     for(var i=0u;i<vsm.counts.w;i+=1u) {
         let top=vd.tops[i>>2u][i&3u];
