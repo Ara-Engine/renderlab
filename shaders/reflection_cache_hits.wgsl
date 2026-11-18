@@ -39,16 +39,31 @@ fn rl_cache_lookup(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)
     return select(vec4<f32>(0.0),vec4<f32>(o.rgb,1.0),o.w>=1.0);
 }
 // The final gather's probe-hit read (gi_receiver_pass.wgsl), its only hit path: the outgoing
-// radiance (rgb, unexposed) of the hit's cell at the level the cone covers (at least the hit's
-// own level), or of the first coarser level whose cell holds a value, settled or changing; w 0
-// when none does or the cache is off. Movers read their cells too: those lag the surface by a
-// frame or so, which a probe's hemisphere integral does not show.
+// radiance (rgb, unexposed) of the hit's cell, settled or changing, w 0 when no cell there has a
+// value or the cache is off. The cell is the one a pixel at the hit, seen from the ray's origin,
+// reads: its bin from the interpolated vertex normal on the side the ray sees (gi_bin_source, as
+// gi_prepare picks it). Levels in order: the one the cone covers, then the finer ones down to the
+// hit's own (where pixels on screen made cells: a probe ray from the floor to the tower's side
+// meets those, and found nothing at the cone's level), then the coarser ones. Movers read their
+// cells too: those lag the surface by a frame or so, which a probe's hemisphere integral does not
+// show.
 fn rl_cache_cell(record:vec4<u32>,origin:vec3<f32>,d:vec3<f32>,t:f32,cone:f32)->vec4<f32> {
     if gi_word(GI_H_ENABLED)==0u { return vec4<f32>(0.0); }
     let world=fma(d,vec3<f32>(t),origin);
-    let bin=rl_cache_bin(record,origin,world);
+    let hit=primary_decode(record);
+    let ta=primary_input(hit.batch,hit.ia,hit.placement);
+    let tb=primary_input(hit.batch,hit.ib,hit.placement);
+    let tc=primary_input(hit.batch,hit.ic,hit.placement);
+    let geometric=primary_geometric(ta.position,tb.position,tc.position,hit.placement);
+    let w=vec3<f32>(1.0-hit.bary.x-hit.bary.y,hit.bary);
+    let vertex=vertex_output(ta).normal*w.x+vertex_output(tb).normal*w.y+vertex_output(tc).normal*w.z;
+    let bin=gi_bin(gi_bin_source(select(-geometric,geometric,dot(geometric,origin-world)>=0.0),vertex));
+    let own=gi_level(world);
+    let start=rl_cache_level(world,cone);
     let last=gi_word(GI_H_LEVELS)-1u;
-    for(var l=rl_cache_level(world,cone);l<=last;l+=1u) {
+    // k walks start, start-1 .. own, then start+1 .. last.
+    for(var k=0u;k<=last-own;k+=1u) {
+        let l=select(start+(k-(start-own)),start-k,k<=start-own);
         let slot=gi_find_pair(gi_key(l,bin,vec3<i32>(floor(gi_lattice(world,gi_edge(l),bin)))));
         if slot==0xffffffffu { continue; }
         let o=rl_cache_outgoing[slot];

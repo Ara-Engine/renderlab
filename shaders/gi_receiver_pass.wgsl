@@ -85,9 +85,8 @@ fn gi_rx_store_at(at:u32) {
 // - fg_trace: screen probes, FG_SLOTS per FG_TILE x FG_TILE tile on the surfaces under covered
 //   pixels the frame picks (slot 1 on a second plane where the tile holds one), each trace
 //   FG_RAYS rays over their hemisphere (hardware rays or the software trace: the module's
-//   rl_cast). A hit whose ray cone covers its cache cell takes the cell's outgoing radiance;
-//   nearer hits shade with the program (the cache read at the hit) and their own direct light.
-//   Cells reach the screen only through a hemisphere integral; misses see the sky.
+//   rl_cast). A hit takes its cache cell's outgoing radiance (fg_radiance); cells reach the
+//   screen only through a hemisphere integral. Misses see the sky.
 // - fg_filter: each tile probe's filtered copy, the probes around it on its plane weighted by
 //   their frames of history (3x3 tiles, 5x5 while its own history is short, as after a cut):
 //   neighbours' samples count as its own, so the interpolated light shows no probe pattern.
@@ -248,9 +247,8 @@ fn fg_direction(n:vec3<f32>,k:u32,count:u32,r:u32)->vec3<f32> {
 // terrain and Ara's materials have their own programs) with the cell's indirect and direct
 // light. The gather's module holds only the standard program, so shading the hit itself lost
 // all of that: a probe hit on Glint's white surfaces came out without their glow, a tenth dark
-// in sky-lit shadow. rl_cache_cell takes the ray's footprint as at least the cell where it
-// lands and walks to coarser levels past cells without a value; a hit no level answers (or
-// any hit while RENDERLAB_RL_CACHE_HITS=off leaves the stub in) sends nothing.
+// in sky-lit shadow. rl_cache_cell picks the cell (reflection_cache_hits.wgsl); a hit no level
+// answers (or any hit while RENDERLAB_RL_CACHE_HITS=off leaves the stub in) sends nothing.
 fn fg_radiance(origin:vec3<f32>,d:vec3<f32>,epsilon:f32)->vec3<f32> {
     let traced=rl_cast(origin,d,epsilon);
     fg_hit=traced.record.x!=0u;
